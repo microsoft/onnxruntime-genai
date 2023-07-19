@@ -59,9 +59,8 @@ inline void AllocateTempBufferForGetGreedySearchTopOne(
 }
 
 class GenerateBase {
-
-#if 0
  public:
+#if 0
   GenerateBase(OpKernelContextInternal& context,
                const SessionState& decoder_session_state,
                concurrency::ThreadPool* thread_pool,
@@ -83,15 +82,15 @@ class GenerateBase {
         topk_func_(topk_func),
         device_copy_func_(device_copy_func) {
   }
+#endif
 
   virtual ~GenerateBase() = default;
 
   // Initialize by validating all the inputs, and allocating the output tensors.
-  virtual OrtStatus* Initialize() = 0;
-#endif
+  virtual void Initialize() = 0;
 
   // Validate inputs.
-//  virtual Status CheckInputs(const OpKernelContextInternal& context) = 0;
+  virtual void CheckInputs(const OpKernelContextInternal& context) = 0;
 
 #if 0
   Status CheckScalarInput(const std::string& name, int index, bool required) const {

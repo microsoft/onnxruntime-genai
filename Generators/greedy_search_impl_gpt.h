@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 #pragma once
+#include "subgraph_gpt.h"
+#include "onnxruntime_cxx_api_2.h"
 
 #if 0
 namespace gpt_details {
@@ -15,15 +17,63 @@ std::pair<Status, std::unique_ptr<GptSubgraph>> CreateGptSubgraphAndUpdateParame
 }  // namespace gpt_details
 #endif
 
+#if 0
+// General API style
+
+template<typename T>
+struct SequenceScores
+{
+  const ISequences* sequences_;
+  gsl::span<T> scores_;
+};
+
+namespace LogitProcessors
+{
+// Library of Logits Processing helpers will be in this library's headers
+template <typename T>
+void MinLength(SequenceScores state, int min_length, int eos_token_id);
+
+template <typename T>
+void RepetitionPenalty(SequenceScores state, float penalty);
+
+template <typename T>
+void TemperatureLogitsProcessor(SequenceScores state, float temperature);
+
+// etc...
+}
+
+template<typename T>
+struct Search {
+  Search(int num_beams); // For greedy, num_beams==1
+
+  int GetLength();
+
+  void SetNextTokens(OrtValue *next_token_scores);
+
+  // Scoring
+  SequenceScores GetSequenceScores();
+
+  // Sampling
+  void DoSampling(ISamplingState<T>* sampling_state);
+
+private:
+
+  Sequences sequences_;
+  int num_heads_;
+  int head_size_;
+};
+
+#endif
+
 // Greedy search implementation for GPT-2 model.
 template <typename T, typename ParametersT>
 class GreedySearchGpt : public GreedySearchBase<T, ParametersT> {
  public:
   GreedySearchGpt(OpKernelContextInternal& context,
                   const SessionState* init_run_decoder_session_state,
-//                  GptSubgraph* init_run_gpt_subgraph,
+                  GptSubgraph* init_run_gpt_subgraph,
                   const SessionState& decoder_session_state,
-//                  GptSubgraph& gpt_subgraph,
+                  GptSubgraph& gpt_subgraph,
 //                  concurrency::ThreadPool* thread_pool,
                   Stream* ort_stream,
                   IConsoleDumper* cuda_dumper,
@@ -45,8 +95,8 @@ class GreedySearchGpt : public GreedySearchBase<T, ParametersT> {
                                          process_logits_func,
                                          device_copy_func),
         init_run_decoder_session_state_(init_run_decoder_session_state),
-//        init_run_gpt_subgraph_(init_run_gpt_subgraph),
-//        gpt_subgraph_(gpt_subgraph),
+        init_run_gpt_subgraph_(init_run_gpt_subgraph),
+        gpt_subgraph_(gpt_subgraph),
         create_inputs_func_(create_inputs_func),
         add_to_feeds_func_(add_to_feeds_func),
         init_greedy_state_func_(init_greedy_state_func),
@@ -94,8 +144,8 @@ class GreedySearchGpt : public GreedySearchBase<T, ParametersT> {
       int past_sequence_length);
 
   const SessionState* init_run_decoder_session_state_ = nullptr;
-//  GptSubgraph* init_run_gpt_subgraph_ = nullptr;
-//  GptSubgraph& gpt_subgraph_;
+  GptSubgraph* init_run_gpt_subgraph_ = nullptr;
+  GptSubgraph& gpt_subgraph_;
 
   // Device specific functions
   GenerationDeviceHelper::CreateGptInputsFunc create_inputs_func_;
@@ -115,20 +165,18 @@ void GreedySearchGpt<T, ParametersT>::CreateInitialFeeds(gsl::span<int32_t>& seq
                                                            OrtValue& expanded_input_ids,
                                                            std::vector<OrtValue*>& feeds,
                                                            IAllocatorUniquePtr<char>& buffer) {
-  this->
 //  const OrtValue* input_ids_value = this->context_.GetInputOrtValue(0);
 //  const Tensor& input_ids = input_ids_value_->Get<Tensor>();
 //  const OrtValue* attn_mask_value = this->context_.GetInputOrtValue(6);
 
-#if 0
   if (init_run_gpt_subgraph_ != nullptr) {
-    return init_run_gpt_subgraph_->CreateInitialFeeds(input_ids_value_,
+    return init_run_gpt_subgraph_->CreateInitialFeeds(this->input_ids_value_,
                                                       this->implicit_inputs_,
                                                       this->parameters_->num_beams,
                                                       this->parameters_->pad_token_id,
                                                       sequence_lengths,
                                                       expanded_input_ids,
-                                                      attn_mask_value,
+                                                      this->attn_mask_value,
                                                       feeds,
                                                       this->create_inputs_func_,
                                                       this->add_to_feeds_func_,
@@ -136,15 +184,14 @@ void GreedySearchGpt<T, ParametersT>::CreateInitialFeeds(gsl::span<int32_t>& seq
                                                       this->ort_stream_,
                                                       this->parameters_->max_length);
   }
-#endif
 
-  return gpt_subgraph_.CreateInitialFeeds(input_ids_value_,
+  return gpt_subgraph_.CreateInitialFeeds(this->input_ids_value_,
                                           this->implicit_inputs_,
                                           this->parameters_->num_beams,
                                           this->parameters_->pad_token_id,
                                           sequence_lengths,
                                           expanded_input_ids,
-                                          attn_mask_value,
+                                          this->attn_mask_value,
                                           feeds,
                                           this->create_inputs_func_,
                                           this->add_to_feeds_func_,
@@ -154,9 +201,9 @@ void GreedySearchGpt<T, ParametersT>::CreateInitialFeeds(gsl::span<int32_t>& seq
 }
 
 template <typename T, typename ParametersT>
-Status GreedySearchGpt<T, ParametersT>::UpdateFeeds(
-    const std::vector<OrtValue>& last_outputs,
-    std::vector<OrtValue>& next_inputs,
+void GreedySearchGpt<T, ParametersT>::UpdateFeeds(
+    const std::vector<OrtValue*>& last_outputs,
+    std::vector<OrtValue*>& next_inputs,
     int current_length,
     OrtValue& position_ids,
     bool increase_position,
@@ -183,9 +230,8 @@ Status GreedySearchGpt<T, ParametersT>::UpdateFeeds(
 }
 
 template <typename T, typename ParametersT>
-Status GreedySearchGpt<T, ParametersT>::Execute(const FeedsFetchesManager* init_run_feeds_fetches_manager,
+void GreedySearchGpt<T, ParametersT>::Execute(const FeedsFetchesManager* init_run_feeds_fetches_manager,
                                                 const FeedsFetchesManager& feeds_fetches_manager) {
-  auto status = Status::OK();
   const ParametersT* parameters = this->parameters_;
 
   // Allocate output tensors.
@@ -193,8 +239,8 @@ Status GreedySearchGpt<T, ParametersT>::Execute(const FeedsFetchesManager* init_
   TensorShape sequences_shape(&sequences_dims[0], sizeof(sequences_dims) / sizeof(sequences_dims[0]));
   Tensor* output_sequences = this->context_.Output(0, sequences_shape);
 
-  std::vector<OrtValue> feeds;
-  std::vector<OrtValue> fetches;
+  std::vector<std::unique_ptr<OrtValue>> feeds;
+  std::vector<std::unique_ptr<OrtValue>> fetches;
 
   GreedySearchState<T> greedy_state;
   greedy_state.Init(this->cpu_allocator_,
@@ -229,11 +275,13 @@ Status GreedySearchGpt<T, ParametersT>::Execute(const FeedsFetchesManager* init_
     for (int layer = 0; layer < gpt_subgraph_.num_layers; layer++) {
       int feed_idx = gpt_subgraph_.GetFirstPastInputIndex() + layer;
       OrtValue& past_tensor_value = feeds[feed_idx];
-      Tensor* past_tensor = past_tensor_value.GetMutable<Tensor>();
+      auto past_tensor_info = past_tensor_value.GetTensorTypeAndShapeInfo();
+      auto past_tensor_shape = past_tensor_info->GetShape();
       OrtValue present_tensor_value;
-      Tensor::InitOrtValue(past_tensor->DataType(), past_tensor->Shape(), past_tensor->MutableData<T>(),
-                           past_tensor->Location(), present_tensor_value);
-      fetches.push_back(present_tensor_value);
+      //      Tensor::InitOrtValue(past_tensor->DataType(), past_tensor->Shape(), past_tensor->MutableData<T>(),
+//                           past_tensor->Location(), present_tensor_value);
+      fetches.push_back(OrtValue::CreateTensor(past_tensor_value.GetTensorMemoryInfo(),
+        past_tensor_value.GetTensorRawData(), past_tensor_info->GetElementCount(), past_tensor_shape.data(), past_tensor_shape.size()));
     }
   }
 
@@ -241,7 +289,7 @@ Status GreedySearchGpt<T, ParametersT>::Execute(const FeedsFetchesManager* init_
                           greedy_state.sequence_lengths,
                           this->ort_stream_);
 
-  gsl::span<const int32_t> input_ids = expanded_input_ids_in_cpu.Get<Tensor>().DataAsSpan<int32_t>();
+  gsl::span<const int32_t> input_ids{ expanded_input_ids_in_cpu.GetTensorData<int32_t>(), expanded_input_ids_in_cpu.GetTensorTypeAndShapeInfo()->GetElementCount()};
   greedy_state.SetSequence(input_ids,
                            static_cast<size_t>(parameters->BatchBeamSize()),
                            parameters->max_length,
@@ -252,14 +300,15 @@ Status GreedySearchGpt<T, ParametersT>::Execute(const FeedsFetchesManager* init_
 #endif
 
   // position ids for all iterations except the first. It uses memory buffer owned by next_positions.
-  OrtValue position_ids;
-  int64_t dims[] = {parameters->BatchBeamSize(), 1};
-  TensorShape shape(&dims[0], 2);
+  TensorShape shape({parameters->BatchBeamSize(), 1});
+  std::unique_ptr<OrtValue> position_ids=OrtValue::CreateTensor<int32_t>(*this->temp_space_allocator_->Info(this->temp_space_allocator_), shape.Size(), shape.GetDims().data(), shape.GetDims().size());
+#if 0
   Tensor::InitOrtValue(DataTypeImpl::GetType<int32_t>(),
                        shape,
                        greedy_state.next_positions.data(),
                        this->temp_space_allocator_->Info(),
                        position_ids);
+#endif
 
   int current_length = parameters->sequence_length;
   int iteration_counter = 0;
@@ -279,7 +328,10 @@ Status GreedySearchGpt<T, ParametersT>::Execute(const FeedsFetchesManager* init_
 #ifdef DEBUG_NODE_INPUTS_OUTPUTS
       const_cast<SessionState*>(this->init_run_decoder_session_state_)->IncrementGraphExecutionCounter();
 #endif
-      status = utils::ExecuteSubgraph(*init_run_decoder_session_state_,
+
+assert(false);
+#if 0
+      utils::ExecuteSubgraph(*init_run_decoder_session_state_,
                                       *init_run_feeds_fetches_manager,
                                       feeds,
                                       fetches,
@@ -288,11 +340,15 @@ Status GreedySearchGpt<T, ParametersT>::Execute(const FeedsFetchesManager* init_
                                       this->context_.GetTerminateFlag(),
                                       this->context_.Logger(),
                                       this->ort_stream_);
+#endif
     } else {
 #ifdef DEBUG_NODE_INPUTS_OUTPUTS
       const_cast<SessionState&>(this->decoder_session_state_).IncrementGraphExecutionCounter();
 #endif
-      status = utils::ExecuteSubgraph(this->decoder_session_state_,
+
+assert(false);
+#if 0
+      utils::ExecuteSubgraph(this->decoder_session_state_,
                                       feeds_fetches_manager,
                                       feeds,
                                       fetches,
@@ -301,19 +357,20 @@ Status GreedySearchGpt<T, ParametersT>::Execute(const FeedsFetchesManager* init_
                                       this->context_.GetTerminateFlag(),
                                       this->context_.Logger(),
                                       this->ort_stream_);
+#endif
     }
 
-    ORT_RETURN_IF_ERROR(status);
+//    ORT_RETURN_IF_ERROR(status);
 
     const OrtValue& logits = fetches[0];
     gsl::span<int32_t> next_tokens;
 
-    ORT_RETURN_IF_ERROR(this->GenerateNextToken(logits,
+    this->GenerateNextToken(logits,
                                                 next_tokens,
                                                 greedy_state,
                                                 sampling_state,
                                                 iteration_counter,
-                                                parameters->eos_token_id));
+                                                parameters->eos_token_id);
 
     // When all batches are finished, stop earlier to avoid wasting computation.
     gsl::span<bool>& eos_meet = greedy_state.eos_meet;
@@ -370,7 +427,8 @@ Status GreedySearchGpt<T, ParametersT>::Execute(const FeedsFetchesManager* init_
   }
 
   // Copy the sequences to output
-  gsl::span<int32_t> output = output_sequences->MutableDataAsSpan<int32_t>();
+//  gsl::span<int32_t> output = output_sequences->MutableDataAsSpan<int32_t>();
+  gsl::span<const int32_t> output{output_sequences.GetTensorData<int32_t>(), output_sequences.GetTensorTypeAndShapeInfo()->GetElementCount()};
   for (int batch_id = 0; batch_id < parameters->batch_size; ++batch_id) {
     auto batch_output = output.subspan(
         static_cast<size_t>(batch_id) * parameters->max_length,
@@ -399,6 +457,4 @@ Status GreedySearchGpt<T, ParametersT>::Execute(const FeedsFetchesManager* init_
     }
   }
 #endif
-
-  return status;
 }

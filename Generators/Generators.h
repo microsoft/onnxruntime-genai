@@ -2,18 +2,32 @@
 // Licensed under the MIT License.
 #pragma once
 
-#include <gsl/gsl>
-#include "span_utils.h"
 #include <algorithm>
-#include <random>
+#include <assert.h>
 #include <functional>
+#include <gsl/gsl>
+#include <memory>
+#include <numeric>
 #include <optional>
+#include <random>
+#include <set>
+#include <unordered_set>
+#include <vector>
+
+#include "span_utils.h"
+#include "SafeInt.hpp"
 #include "onnxruntime_cxx_api_2.h"
 #include "TensorShape.h"
+
 struct Tensor;
 struct Stream;
 struct IConsoleDumper;
 
+struct OpKernelContextInternal {};
+struct SessionState {};
+struct NodeArg {};
+struct Node {};
+struct TensorShapeProto {};
 
 // Macros to disable the copy and/or move ctor and assignment methods
 // These are usually placed in the private: declarations for a class.

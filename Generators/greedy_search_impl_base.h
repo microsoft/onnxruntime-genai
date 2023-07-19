@@ -143,9 +143,6 @@ struct GreedySearchState : public IGreedySearchState<T> {
   BufferUniquePtr staging_for_past_state_reorder_buffer_;
 };
 
-struct OpKernelContextInternal { };
-struct SessionState { };
-
 // Base class of gready search implementation that is common for both GPT-2 and Bart/T5.
 template <typename T, typename ParametersT>
 class GreedySearchBase : public GenerateBase {

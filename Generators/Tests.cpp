@@ -291,8 +291,42 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32() {
   Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_CUDA(session_options, 0));
 #endif
 
+  auto session_init = OrtSession::Create(*ort_env, ORT_TSTR("C:/code/github/generators/Generators/models/tiny-random-gpt2_past_fp32.onnx"), session_options.get());
+  auto session_decode = OrtSession::Create(*ort_env, ORT_TSTR("C:/code/github/generators/Generators/models/tiny-random-gpt2_past_fp32.onnx"), session_options.get());
+
+  // If init, do init:
+  auto ort_outputs = session_init->Run(nullptr, input_names, ort_inputs.data(), ort_inputs.size(), output_names, 1);
+
+#if 0
+  SamplingState sampling_state;
+
+  Search<float> search(1 /*num_beams*/);
+  while (search) {
+    auto ort_outputs = session->Run(nullptr, input_names, ort_inputs.data(), ort_inputs.size(), output_names, 1);
+
+    search.SetNextTokens(ort_outputs[n]);
+
+    auto seq_scores = search.GetSequenceScores();
+    LogitProcessors::MinLength(seq_scores, 20);
+    LogitProcessors::RepetitionPenalty(seq_scores, 1.1f);
+    LogitProcessors::Temperature(seq_scores, 1.0f);
+
+    // or
+    search.ApplyMinLength(20);
+    search.ApplyRepetitionPenalty(1.1f);
+    search.ApplyTemperature(1.0f);
+
+    // Custom processing example:
+    auto sequences=search.GetSequences();
+    // TODO: Easy way to handle batching/beam count on client side here?
+
+    search.Sample(sampling_state);
+  }
+#endif
+
+#if 0
   GreedySearchGpt<float, GreedySearchParameters> impl{
-      *ctx_internal,
+      *session,
       has_init_decoder_ ? init_run_decoder_session_state : nullptr,
       has_init_decoder_ ? init_run_gpt_subgraph_.get() : nullptr,
       *decoder_session_state,
@@ -308,10 +342,7 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32() {
       init_greedy_state_func_ ? init_greedy_state_func_ : GenerationCpuDeviceHelper::InitGreedyState<float>,
       device_copy_func_ ? device_copy_func_ : GenerationCpuDeviceHelper::DeviceCopy<float>,
       update_gpt_feeds_func_ ? update_gpt_feeds_func_ : GenerationCpuDeviceHelper::UpdateGptFeeds<float>};
-
-  auto session = OrtSession::Create(*ort_env, ORT_TSTR("C:/code/github/generators/Generators/models/tiny-random-gpt2_past_fp32.onnx"), session_options.get());
-
-  auto ort_outputs = session->Run(nullptr, input_names, ort_inputs.data(), ort_inputs.size(), output_names, 1);
+#endif
 
   ASSERT_EQ(ort_outputs.size(), 1U);
   const auto& sequences = ort_outputs[0];
