@@ -1102,7 +1102,7 @@ inline std::unique_ptr<OrtValue> OrtValue::CreateTensor(const OrtMemoryInfo& inf
 
 template <typename T>
 inline std::unique_ptr<OrtValue> OrtValue::CreateTensor(OrtAllocator& allocator, const int64_t* shape, size_t shape_len) {
-  return CreateTensor(&allocator, shape, shape_len, Ort::TypeToTensorType<T>::type);
+  return CreateTensor(allocator, shape, shape_len, Ort::TypeToTensorType<T>::type);
 }
 
 inline std::unique_ptr<OrtValue> OrtValue::CreateTensor(OrtAllocator& allocator, const int64_t* shape, size_t shape_len, ONNXTensorElementDataType type) {

@@ -19,6 +19,8 @@
 #include "onnxruntime_cxx_api_2.h"
 #include "TensorShape.h"
 
+using gsl::narrow;
+
 struct Tensor;
 struct Stream;
 struct IConsoleDumper;
@@ -47,6 +49,8 @@ struct TensorShapeProto {};
 #define ORT_DISALLOW_COPY_ASSIGNMENT_AND_MOVE(TypeName) \
   ORT_DISALLOW_COPY_AND_ASSIGNMENT(TypeName);           \
   ORT_DISALLOW_MOVE(TypeName)
+
+#define ORT_ENFORCE(condition, ...) assert(condition)
 
 // TODO: Do we need this class or is IAllocator::MakeUniquePtr sufficient/better
 struct  BufferDeleter {
@@ -81,7 +85,7 @@ gsl::span<T> AllocateBuffer(OrtAllocator* allocator,
                             bool fill = false,
                             T fill_value = T{}) {
   size_t bytes = SafeInt<size_t>(sizeof(T)) * elements;
-  void* data = allocator->Alloc(bytes);
+  void* data = allocator->Alloc(allocator, bytes);
   BufferUniquePtr temp_buffer(data, BufferDeleter(allocator));
   buffer = std::move(temp_buffer);
   T* first = reinterpret_cast<T*>(buffer.get());
@@ -146,7 +150,7 @@ struct IGreedySearchState {
   gsl::span<int32_t> temp_topk_tokens_buffer;  // shape (batch_size, parts_of_vocab), temp buffer for topk stage 1(GPU only)
   gsl::span<T> topk_scores_buffer;             // shape (batch_size), output buffer for topk stage 2 (GPU only)
   gsl::span<int32_t> topk_tokens_buffer;       // shape (batch_size), output buffer for topk stage 2 (GPU only)
-  Tensor staging_for_past_state_reorder;       // Tensor of shape (batch_size * num_beams(1), num_heads, max_length, head_size)
+  std::unique_ptr<OrtValue> staging_for_past_state_reorder;       // Tensor of shape (batch_size * num_beams(1), num_heads, max_length, head_size)
 };
 
 template <typename T>
@@ -257,6 +261,9 @@ struct IGenerationParameters {
 };
 
 struct BeamSearchParameters : public IGenerationParameters {
+
+  int BatchBeamSize() const { return batch_size * num_beams; }
+
 #if 0
   Status Validate() const;
 
@@ -271,9 +278,9 @@ struct BeamSearchParameters : public IGenerationParameters {
 };
 
 struct GreedySearchParameters : public BeamSearchParameters {
-#if 0
   int BatchBeamSize() const { return batch_size; }
 
+#if 0
   void ParseFromAttributes(const OpKernelInfo& info);
 
   void ParseFromInputs(OpKernelContext* context);
@@ -369,3 +376,8 @@ struct OrtDevice {
   // Device index.
   int32_t device_id : 16;
 };
+
+#include "Sequences.h"
+#include "feeds_fetches_manager.h"
+#include "Search.h"
+#include "gpt.h"

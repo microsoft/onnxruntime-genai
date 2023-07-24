@@ -46,20 +46,20 @@ using TopkFunc = std::function<void(
 
 // Create subgraph inputs: input_ids, position_ids and attention_mask (for GPT-2).
 using CreateGptInputsFunc = std::function<void(
-    const Tensor* original_input_ids,
+    const OrtValue* original_input_ids,
     const OrtValue* attn_mask_value,
     int num_beams,
     int pad_token_id,
     gsl::span<int32_t>& sequence_lengths,
     OrtAllocator* allocator,
-    OrtValue& expanded_input_ids,
-    OrtValue& expanded_position_ids,
-    OrtValue& expanded_attention_mask)>;
+    std::unique_ptr<OrtValue>& expanded_input_ids,
+    std::unique_ptr<OrtValue>& expanded_position_ids,
+    std::unique_ptr<OrtValue>& expanded_attention_mask)>;
 
 using AddToFeedsFunc = std::function<void(
     Stream* ort_stream,
-    std::initializer_list<OrtValue> inputs,
-    std::vector<OrtValue>& feeds,
+    std::initializer_list<OrtValue*> inputs,
+    std::vector<std::unique_ptr<OrtValue>>& feeds,
     IAllocatorUniquePtr<char>& buffer,
     OrtAllocator* device_allocator,
     OrtAllocator* host_allocator,
@@ -150,6 +150,26 @@ using CreateEncoderInputsFunc = std::function<void(
     OrtValue& encoder_input_ids,
     OrtValue& encoder_attention_mask,
     OrtValue& decoder_input_ids)>;
+
+void Foo(
+    OrtAllocator* allocator,
+    Stream* stream,
+    const std::vector<OrtValue*>& last_outputs,
+    std::vector<OrtValue*>& next_inputs,
+    int num_present_tensors,
+    gsl::span<const int32_t> beam_next_tokens,
+    gsl::span<const int32_t> beam_indices,
+    gsl::span<const int32_t> beam_indices_gpu,
+    int num_beams,
+    int t5_decoder_first_past_input_idx,
+    int t5_decoder_first_present_output_idx,
+    bool use_sequence_as_input_ids,
+    int current_length,
+    int input_sequence_len,
+    bool past_present_share_buffer,
+    bool need_cache_indir,
+    Sequences& sequences,
+    const IConsoleDumper* dumper);
 
 // Update decoder inputs given decoder outputs of last iteration (for encoder-decoder model like T5).
 template <typename T>

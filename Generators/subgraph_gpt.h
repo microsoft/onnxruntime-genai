@@ -9,23 +9,24 @@
 class GptSubgraph : public Subgraph {
  public:
   GptSubgraph(
+      OrtAllocator* allocator,
       const Node& node_in,
       const std::string& attribute_name,
-      const OrtSession& subgraph_in) : Subgraph(node_in, attribute_name, subgraph_in) {
+      const OrtSession& subgraph_in) : Subgraph(allocator, node_in, attribute_name, subgraph_in) {
     first_past_input_index_ = 3;
     first_present_output_index_ = 1;
   }
 
   // Create inputs for first inference of subgraph.
   void CreateInitialFeeds(
-      const Tensor& input_ids,
+      const OrtValue& input_ids,
       const std::vector<const OrtValue*>& implicit_inputs,
       int num_beams,
       int pad_token_id,
       gsl::span<int32_t>& sequence_lengths,
-      OrtValue& expanded_input_ids,
+      std::unique_ptr<OrtValue>& expanded_input_ids,
       const OrtValue* attn_mask_value,
-      std::vector<OrtValue*>& feeds,
+      std::vector<std::unique_ptr<OrtValue>>& feeds,
       const GenerationDeviceHelper::CreateGptInputsFunc& create_gpt_inputs_func,
       const GenerationDeviceHelper::AddToFeedsFunc& add_to_feeds_func,
       IAllocatorUniquePtr<char>& buffer,

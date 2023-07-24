@@ -23,6 +23,7 @@ class TensorShape {
   TensorShape(std::initializer_list<int64_t> dims) : TensorShape(gsl::make_span(dims.begin(), dims.end())) {}
   TensorShape(const int64_t* dimension_sizes, size_t dimension_count) : TensorShape(gsl::span<const int64_t>(dimension_sizes, dimension_count)) {}
   TensorShape(const std::vector<int64_t>& dims, size_t start, size_t end) : TensorShape(gsl::span<const int64_t>(&dims[start], end - start)) {}
+  TensorShape(const std::vector<int64_t>& dims) : TensorShape(gsl::span<const int64_t>(&dims[0], dims.size())) {}
 
   // Create a TensorShape that points to an existing buffer internally. As no copy is made, 'data' must remain valid for the life of the TensorShape
   static const TensorShape FromExistingBuffer(const std::vector<int64_t>& data) {

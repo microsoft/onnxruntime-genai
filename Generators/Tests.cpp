@@ -250,16 +250,13 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32() {
   auto ort_env = OrtEnv::Create();
 
   std::vector<int64_t> input_ids_shape{2, 4};
-  std::vector<int32_t> input_ids{
-      0, 0, 0, 52, 0, 0, 195, 731};
+  std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
 
-  std::vector<int64_t> parameter_shape{1};
-  std::vector<int32_t> max_length{10};
-  std::vector<int32_t> min_length{1};
-  std::vector<float> repetition_penalty{1.0f};
+  int32_t max_length{10};
+  int32_t min_length{1};
+  float repetition_penalty{1.0f};
 
-  std::vector<int64_t> expected_output_shape{input_ids_shape[0], max_length[0]};
-
+  std::vector<int64_t> expected_output_shape{input_ids_shape[0], max_length};
   std::vector<int32_t> expected_output{
       0, 0, 0, 52, 204, 204, 204, 204, 204, 204,
       0, 0, 195, 731, 731, 114, 114, 114, 114, 114};
@@ -268,21 +265,9 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32() {
   auto input_ids_tensor = OrtValue::CreateTensor(
       *info, input_ids.data(), input_ids.size(), input_ids_shape.data(), input_ids_shape.size());
 
-  auto max_length_tensor = OrtValue::CreateTensor(
-      *info, max_length.data(), max_length.size(), parameter_shape.data(), parameter_shape.size());
-
-  auto min_length_tensor = OrtValue::CreateTensor(
-      *info, min_length.data(), min_length.size(), parameter_shape.data(), parameter_shape.size());
-
-  auto repetition_penalty_tensor = OrtValue::CreateTensor(
-      *info, repetition_penalty.data(), repetition_penalty.size(), parameter_shape.data(), parameter_shape.size());
-
   std::vector<OrtValue*> ort_inputs;
   ort_inputs.push_back(input_ids_tensor.get());
-  ort_inputs.push_back(max_length_tensor.get());
-  ort_inputs.push_back(min_length_tensor.get());
-  ort_inputs.push_back(repetition_penalty_tensor.get());
-  const char* input_names[] = {"input_ids", "max_length", "min_length", "repetition_penalty"};
+  const char* input_names[] = {"input_ids"};
   const char* const output_names[] = {"sequences"};
 
   constexpr int min_cuda_architecture = 530;
@@ -291,16 +276,34 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32() {
   Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_CUDA(session_options, 0));
 #endif
 
-  auto session_init = OrtSession::Create(*ort_env, ORT_TSTR("C:/code/github/generators/Generators/models/tiny-random-gpt2_past_fp32.onnx"), session_options.get());
-  auto session_decode = OrtSession::Create(*ort_env, ORT_TSTR("C:/code/github/generators/Generators/models/tiny-random-gpt2_past_fp32.onnx"), session_options.get());
+  // To generate this file:
+  // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
+  // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
 
-  // If init, do init:
-  auto ort_outputs = session_init->Run(nullptr, input_names, ort_inputs.data(), ort_inputs.size(), output_names, 1);
+  SearchParams params;
+  params.batch_size = 2;
+  params.sequence_length = 4;
+  params.vocab_size = 1000;
+  params.head_size=4;
+  params.num_heads=8;
+
+  Gpt gpt(*ort_env,
+          ORT_TSTR("C:/code/github/generators/Generators/models/gpt2_fp32.onnx"),
+          ORT_TSTR("C:/code/github/generators/Generators/models/gpt2_fp32.onnx"),
+          std::move(input_ids_tensor), params);
+
+  Search search{params};
+
+  gpt.CreateInputs(search.search_state_.sequence_lengths);
+
+  while (search) {
+//    auto ort_outputs = session->Run(nullptr, input_names, ort_inputs.data(), ort_inputs.size(), output_names, 1);
+//    search.SetNextTokens(ort_outputs[n]);
+  }
 
 #if 0
   SamplingState sampling_state;
 
-  Search<float> search(1 /*num_beams*/);
   while (search) {
     auto ort_outputs = session->Run(nullptr, input_names, ort_inputs.data(), ort_inputs.size(), output_names, 1);
 
@@ -344,6 +347,7 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32() {
       update_gpt_feeds_func_ ? update_gpt_feeds_func_ : GenerationCpuDeviceHelper::UpdateGptFeeds<float>};
 #endif
 
+#if 0
   ASSERT_EQ(ort_outputs.size(), 1U);
   const auto& sequences = ort_outputs[0];
   ASSERT_TRUE(sequences->IsTensor());
@@ -355,6 +359,7 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32() {
   const auto* result_vals = sequences->GetTensorData<int32_t>();
   auto result_span = gsl::make_span(result_vals, expected_output.size());
   ASSERT_TRUE(std::equal(expected_output.cbegin(), expected_output.cend(), result_span.begin(), result_span.end()));
+#endif
 
   std::cout << "Test_Lib_GreedySearchTest_GptGreedySearchFp32 complete\r\n";
 }

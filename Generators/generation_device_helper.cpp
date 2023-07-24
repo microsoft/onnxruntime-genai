@@ -38,6 +38,7 @@ void TopK(const OrtValue& input, const int axis, const unsigned k, bool largest,
 
 }
 
+#if 0
 template <typename T>
 void ExpandInputs(const OrtValue& input, int num_beams, OrtAllocator* allocator, OrtValue& expanded) {
   // Input shape (batch_size, sequence_length). The input is required with data type T.
@@ -1086,5 +1087,5 @@ template Status CreateWhisperEncoderInputs<MLFloat16>(
     AllocatorPtr allocator,
     OrtValue& encoder_input_features,
     OrtValue& decoder_input_ids);
-
+#endif
 }  // namespace GenerationCpuDeviceHelper

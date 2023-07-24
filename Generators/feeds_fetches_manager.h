@@ -23,27 +23,27 @@ struct DeviceCopyChecks {
 struct FeedsFetchesInfo {
   FeedsFetchesInfo() = default;
   FeedsFetchesInfo(gsl::span<const std::string> feed_names_in,
-                   gsl::span<const std::string> output_names_in,
-                   const OrtValueNameIdxMap& ort_value_name_idx_map)
+                   gsl::span<const std::string> output_names_in)
+//                   const OrtValueNameIdxMap& ort_value_name_idx_map)
       : feed_names(),
         output_names() {
     feed_names.reserve(feed_names_in.size());
     feed_names.assign(feed_names_in.begin(), feed_names_in.end());
     output_names.reserve(output_names_in.size());
     output_names.assign(output_names_in.begin(), output_names_in.end());
-    SetMLValueIdxs(ort_value_name_idx_map);
+//    SetMLValueIdxs(ort_value_name_idx_map);
   }
 
   FeedsFetchesInfo(gsl::span<const std::string_view> feed_names_in,
-                   gsl::span<const std::string> output_names_in,
-                   const OrtValueNameIdxMap& ort_value_name_idx_map)
+                   gsl::span<const std::string> output_names_in)
+//                   const OrtValueNameIdxMap& ort_value_name_idx_map)
       : feed_names(),
         output_names() {
     feed_names.reserve(feed_names_in.size());
     feed_names.assign(feed_names_in.begin(), feed_names_in.end());
     output_names.reserve(output_names_in.size());
     output_names.assign(output_names_in.begin(), output_names_in.end());
-    SetMLValueIdxs(ort_value_name_idx_map);
+//    SetMLValueIdxs(ort_value_name_idx_map);
   }
 
   static void MapNamesToMLValueIdxs(gsl::span<const std::string> names,
@@ -68,11 +68,11 @@ struct MLValueCopyInfo {
 class FeedsFetchesManager {
  public:
   static void Create(gsl::span<const std::string> feed_names, gsl::span<const std::string> output_names,
-                       const OrtValueNameIdxMap& ort_value_name_idx_map,
+                       /*const OrtValueNameIdxMap& ort_value_name_idx_map,*/
                        std::unique_ptr<FeedsFetchesManager>& feeds_fetches_manager);
 
   static void Create(gsl::span<const std::string_view> feed_names, gsl::span<const std::string> output_names,
-                       const OrtValueNameIdxMap& ort_value_name_idx_map,
+                       /*const OrtValueNameIdxMap& ort_value_name_idx_map,*/
                        std::optional<FeedsFetchesManager>& feeds_fetches_manager);
 
   FeedsFetchesManager(FeedsFetchesInfo&& info);

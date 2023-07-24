@@ -96,7 +96,7 @@ void NoRepeatNGramLogitsProcessor<T>::Process(const ISequences* sequences,
     gsl::span<const int32_t> sequence = sequences->GetSequence(i);
 
     gsl::span<const int32_t> prefix = sequence.subspan(sequence.size() - prefix_length);
-    ORT_ENFORCE(prefix.size() == narrow<size_t>(prefix_length));
+    assert(prefix.size() == narrow<size_t>(prefix_length));
 
     std::unordered_set<int32_t> blocked_word_ids;
     for (int j = 0; j <= static_cast<int>(sequence.size()) - ngram_size_; j++) {

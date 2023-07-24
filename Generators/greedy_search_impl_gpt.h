@@ -130,7 +130,7 @@ class GreedySearchGpt : public GreedySearchBase<T, ParametersT> {
   // Prepare the inputs for first inference of subgraph
   void CreateInitialFeeds(gsl::span<int32_t>& sequence_lengths,
                             OrtValue& expanded_input_ids,
-                            std::vector<OrtValue*>& feeds,
+                            std::vector<std::unique_ptr<OrtValue>>& feeds,
                             IAllocatorUniquePtr<char>& buffer);
 
   // Update the input for next iteration.
@@ -163,7 +163,7 @@ class GreedySearchGpt : public GreedySearchBase<T, ParametersT> {
 template <typename T, typename ParametersT>
 void GreedySearchGpt<T, ParametersT>::CreateInitialFeeds(gsl::span<int32_t>& sequence_lengths,
                                                            OrtValue& expanded_input_ids,
-                                                           std::vector<OrtValue*>& feeds,
+                                                           std::vector<std::unique_ptr<OrtValue>>& feeds,
                                                            IAllocatorUniquePtr<char>& buffer) {
 //  const OrtValue* input_ids_value = this->context_.GetInputOrtValue(0);
 //  const Tensor& input_ids = input_ids_value_->Get<Tensor>();
