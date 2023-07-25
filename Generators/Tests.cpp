@@ -284,21 +284,24 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32() {
   params.batch_size = 2;
   params.sequence_length = 4;
   params.vocab_size = 1000;
-  params.head_size=4;
-  params.num_heads=8;
+  params.head_size = 8;
+  params.num_heads = 4;
 
   Gpt gpt(*ort_env,
           ORT_TSTR("C:/code/github/generators/Generators/models/gpt2_fp32.onnx"),
           ORT_TSTR("C:/code/github/generators/Generators/models/gpt2_fp32.onnx"),
           std::move(input_ids_tensor), params);
 
-  Search search{params};
+  Search search{gpt, params};
 
-  gpt.CreateInputs(search.search_state_.sequence_lengths);
+  while (true) {
+    search.Run();
+//    search.ProcessLogits();
 
-  while (search) {
-//    auto ort_outputs = session->Run(nullptr, input_names, ort_inputs.data(), ort_inputs.size(), output_names, 1);
-//    search.SetNextTokens(ort_outputs[n]);
+    if (!search)
+      break;
+
+    search.PrepareNextStep();
   }
 
 #if 0

@@ -1,8 +1,4 @@
 struct Gpt {
-
-  int num_beams_ = 1;
-  int pad_token_id_=98;
-
   static constexpr size_t c_counts=5;
 
   Gpt(OrtEnv &ort_env, const ORTCHAR_T* init_path, const ORTCHAR_T* decode_path,
@@ -10,6 +6,8 @@ struct Gpt {
 
   void CreateInputs(gsl::span<int32_t> sequence_lengths);
   void CreateInputsInternal(gsl::span<int32_t> sequence_lengths);
+
+  void Run();
 
   SearchParams params_;
 
@@ -27,12 +25,14 @@ struct Gpt {
   std::unique_ptr<OrtValue> attention_mask_, expanded_attention_mask_;
   std::unique_ptr<OrtValue> pasts_[c_counts];
 
-  std::vector<std::string> input_names_;
+  std::vector<std::string> input_name_strings_;
+  std::vector<const char *> input_names_;
   std::vector<OrtValue*> inputs_;
 
   // Outputs
   std::unique_ptr<OrtValue> logits_;
   std::unique_ptr<OrtValue> presents_[c_counts];
-  std::vector<std::string> output_names_;
+  std::vector<std::string> output_name_strings_;
+  std::vector<const char*> output_names_;
   std::vector<OrtValue*> outputs_;
 };
