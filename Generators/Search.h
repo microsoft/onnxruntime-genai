@@ -21,7 +21,6 @@ struct Search {
   void SetSequence(gsl::span<const int32_t> input_ids_in_cpu);
   void Run();
   void ProcessLogits();
-  void PrepareNextStep();
   void Finalize();
 
   explicit operator bool() { return !done_; }
@@ -43,4 +42,5 @@ struct Search {
   BufferUniquePtr staging_for_past_state_reorder_buffer_;
 
   std::unique_ptr<OrtValue> output_sequences_;
+  std::unique_ptr<OrtValue> position_ids_;
 };

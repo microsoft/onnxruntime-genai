@@ -301,7 +301,7 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32() {
     if (!search)
       break;
 
-    search.PrepareNextStep();
+//    search.PrepareNextStep();
   }
 
 #if 0
@@ -330,39 +330,11 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32() {
   }
 #endif
 
-#if 0
-  GreedySearchGpt<float, GreedySearchParameters> impl{
-      *session,
-      has_init_decoder_ ? init_run_decoder_session_state : nullptr,
-      has_init_decoder_ ? init_run_gpt_subgraph_.get() : nullptr,
-      *decoder_session_state,
-      *gpt_subgraph_,
-      thread_pool,
-      ctx->GetComputeStream(),
-      dumper_,
-      parameters,
-      GenerationCpuDeviceHelper::CreateGptInputs,
-      add_to_feeds_func_ ? add_to_feeds_func_ : GenerationCpuDeviceHelper::AddToFeeds,
-      topk_func_ ? topk_func_ : GenerationCpuDeviceHelper::TopK,
-      process_logits_func_ ? process_logits_func_ : GenerationCpuDeviceHelper::GreedySearchProcessLogits<float>,
-      init_greedy_state_func_ ? init_greedy_state_func_ : GenerationCpuDeviceHelper::InitGreedyState<float>,
-      device_copy_func_ ? device_copy_func_ : GenerationCpuDeviceHelper::DeviceCopy<float>,
-      update_gpt_feeds_func_ ? update_gpt_feeds_func_ : GenerationCpuDeviceHelper::UpdateGptFeeds<float>};
-#endif
-
-#if 0
-  ASSERT_EQ(ort_outputs.size(), 1U);
-  const auto& sequences = ort_outputs[0];
-  ASSERT_TRUE(sequences->IsTensor());
-
-  auto result_ts = sequences->GetTensorTypeAndShapeInfo();
-  ASSERT_EQ(ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, result_ts->GetElementType());
-
-  ASSERT_EQ(expected_output_shape, result_ts->GetShape());
-  const auto* result_vals = sequences->GetTensorData<int32_t>();
-  auto result_span = gsl::make_span(result_vals, expected_output.size());
-  ASSERT_TRUE(std::equal(expected_output.cbegin(), expected_output.cend(), result_span.begin(), result_span.end()));
-#endif
+  for (int i = 0; i < search.params_.batch_size; i++) {
+    auto sequence = search.sequences_.GetSequence(i);
+    auto* expected_output_start = &expected_output[i * search.params_.max_length];
+    ASSERT_TRUE(std::equal(expected_output_start, expected_output_start+search.params_.max_length, sequence.begin(), sequence.end()));
+  }
 
   std::cout << "Test_Lib_GreedySearchTest_GptGreedySearchFp32 complete\r\n";
 }

@@ -8,6 +8,7 @@ struct Gpt {
   void CreateInputsInternal(gsl::span<int32_t> sequence_lengths);
 
   void Run();
+  void UpdateInputs(gsl::span<const int32_t> next_tokens, OrtValue* position_ids, int num_beams, int current_length);
 
   SearchParams params_;
 
@@ -23,6 +24,7 @@ struct Gpt {
   std::unique_ptr<OrtValue> input_ids_, expanded_input_ids_;
   std::unique_ptr<OrtValue> position_ids_, expanded_position_ids_;
   std::unique_ptr<OrtValue> attention_mask_, expanded_attention_mask_;
+  std::unique_ptr<OrtValue> empty_past_;
   std::unique_ptr<OrtValue> pasts_[c_counts];
 
   std::vector<std::string> input_name_strings_;
