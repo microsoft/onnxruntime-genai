@@ -100,19 +100,18 @@ void Test_BeamSearchTest_GptBeamSearchFp32() {
 void Test_Lib_BeamSearchTest_GptBeamSearchFp32() {
   auto ort_env = OrtEnv::Create();
 
+  int64_t parameter_shape{1};
+  int32_t max_length{20};
+  int32_t min_length{1};
+  int32_t num_return_sequences{1};
+  float length_penalty{1.0f};
+  float repetition_penalty{1.0f};
+
   std::vector<int64_t> input_ids_shape{3, 12};
   std::vector<int32_t> input_ids{
       0, 0, 0, 0, 0, 52, 195, 731, 321, 301, 734, 620,
       41, 554, 74, 622, 206, 222, 75, 223, 221, 198, 224, 572,
       0, 0, 0, 52, 328, 219, 328, 206, 288, 227, 896, 328};
-
-  int64_t parameter_shape{1};
-  int32_t max_length{20};
-  int32_t min_length{1};
-  int32_t num_beams{4};
-  int32_t num_return_sequences{1};
-  float length_penalty{1.0f};
-  float repetition_penalty{1.0f};
 
   std::vector<int64_t> expected_output_shape{input_ids_shape[0], num_return_sequences, max_length};
   std::vector<int32_t> expected_output{
@@ -124,36 +123,48 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32() {
   auto input_ids_tensor = OrtValue::CreateTensor(
       *info, input_ids.data(), input_ids.size(), input_ids_shape.data(), input_ids_shape.size());
 
-  std::vector<OrtValue*> ort_inputs;
-  ort_inputs.push_back(input_ids_tensor.get());
-  const char* input_names[] = {"input_ids", "max_length", "min_length", "num_beams", "num_return_sequences",
-                               "length_penalty", "repetition_penalty"};
-  const char* const output_names[] = {"sequences"};
-
-  auto session_options = OrtSessionOptions::Create();
-#ifdef USE_CUDA
-  Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_CUDA(session_options, 0));
-#endif
-
   // The ONNX model is generated like the following:
   // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2
   //        --output tiny_gpt2_beamsearch_fp16.onnx --use_gpu --max_length 20
   // (with separate_gpt2_decoder_for_init_run set to False as it is now set to True by default)
-  auto session = OrtSession::Create(*ort_env, ORT_TSTR("C:/code/github/generators/Generators/models/tiny_gpt2_beamsearch.onnx"), session_options.get());
-  auto ort_outputs = session->Run(nullptr, input_names, ort_inputs.data(), ort_inputs.size(),
-                                  output_names, 1);
+  SearchParams params;
+  params.batch_size = static_cast<int>(input_ids_shape[1]);
+  params.sequence_length = 4;  // TODO: Derive from model?
+  params.vocab_size = 1000;    // TODO: Derive from model?
+  params.head_size = 8;        // TODO: Derive from model?
+  params.num_heads = 4;        // TODO: Derive from model?
+  params.num_beams = 4;
 
-  ASSERT_EQ(ort_outputs.size(), 1U);
-  const auto& sequences = ort_outputs[0];
-  ASSERT_TRUE(sequences->IsTensor());
+  Gpt gpt(*ort_env,
+          ORT_TSTR("C:/code/github/generators/Generators/models/gpt2_fp32.onnx"),
+          ORT_TSTR("C:/code/github/generators/Generators/models/gpt2_fp32.onnx"),
+          std::move(input_ids_tensor), params);
 
-  auto result_ts = sequences->GetTensorTypeAndShapeInfo();
-  ASSERT_EQ(ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, result_ts->GetElementType());
+  Search search{gpt, params};
 
-  ASSERT_EQ(expected_output_shape, result_ts->GetShape());
-  const auto* result_vals = sequences->GetTensorData<int32_t>();
-  auto result_span = gsl::make_span(result_vals, expected_output.size());
-  ASSERT_TRUE(std::equal(expected_output.cbegin(), expected_output.cend(), result_span.begin(), result_span.end()));
+  while (!search.IsDone()) {
+    search.RunModel();
+
+    // Scoring
+    Processors::MinLength(search, 1);
+    Processors::RepetitionPenalty(search, 1.0f);
+    // Processors::LengthPenalty(search, 1.0f);
+
+    // Sampling goes here
+
+    // TODO: Are these steps always the same? If so, merge into one function
+    search.NextTokensFromLogits();
+    search.CheckForEOS();
+    search.AppendNextTokensToSequences();
+  }
+
+
+  // Verify outputs match expected outputs
+  for (int i = 0; i < search.params_.batch_size; i++) {
+    auto sequence = search.sequences_.GetSequence(i);
+    auto* expected_output_start = &expected_output[i * search.params_.max_length];
+    ASSERT_TRUE(std::equal(expected_output_start, expected_output_start + search.params_.max_length, sequence.begin(), sequence.end()));
+  }
 
   std::cout << "Test_Lib_BeamSearchTest_GptBeamSearchFp32 complete\r\n";
 }
@@ -229,8 +240,6 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32() {
   std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
 
   int32_t max_length{10};
-  int32_t min_length{1};
-  float repetition_penalty{1.0f};
 
   std::vector<int64_t> expected_output_shape{input_ids_shape[0], max_length};
   std::vector<int32_t> expected_output{
@@ -246,11 +255,11 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32() {
   // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
 
   SearchParams params;
-  params.batch_size = 2;
-  params.sequence_length = 4;
-  params.vocab_size = 1000;
-  params.head_size = 8;
-  params.num_heads = 4;
+  params.batch_size = static_cast<int>(input_ids_shape[1]);
+  params.sequence_length = 4; // TODO: Derive from model?
+  params.vocab_size = 1000; // TODO: Derive from model?
+  params.head_size = 8; // TODO: Derive from model?
+  params.num_heads = 4; // TODO: Derive from model?
 
   Gpt gpt(*ort_env,
           ORT_TSTR("C:/code/github/generators/Generators/models/gpt2_fp32.onnx"),
@@ -263,8 +272,8 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32() {
     search.RunModel();
 
     // Scoring
-    Processors::MinLength(search, 5);
-    Processors::RepetitionPenalty(search, 1.1f);
+    Processors::MinLength(search, 1);
+    Processors::RepetitionPenalty(search, 1.0f);
 
     // Sampling goes here
 
@@ -283,29 +292,3 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32() {
 
   std::cout << "Test_Lib_GreedySearchTest_GptGreedySearchFp32 complete\r\n";
 }
-
-#if 0
-  SamplingState sampling_state;
-
-  while (search) {
-    auto ort_outputs = session->Run(nullptr, input_names, ort_inputs.data(), ort_inputs.size(), output_names, 1);
-
-    search.SetNextTokens(ort_outputs[n]);
-
-    auto seq_scores = search.GetSequenceScores();
-    LogitProcessors::MinLength(seq_scores, 20);
-    LogitProcessors::RepetitionPenalty(seq_scores, 1.1f);
-    LogitProcessors::Temperature(seq_scores, 1.0f);
-
-    // or
-    search.ApplyMinLength(20);
-    search.ApplyRepetitionPenalty(1.1f);
-    search.ApplyTemperature(1.0f);
-
-    // Custom processing example:
-    auto sequences=search.GetSequences();
-    // TODO: Easy way to handle batching/beam count on client side here?
-
-    search.Sample(sampling_state);
-  }
-#endif
