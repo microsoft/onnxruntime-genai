@@ -106,15 +106,15 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32() {
       41, 554, 74, 622, 206, 222, 75, 223, 221, 198, 224, 572,
       0, 0, 0, 52, 328, 219, 328, 206, 288, 227, 896, 328};
 
-  std::vector<int64_t> parameter_shape{1};
-  std::vector<int32_t> max_length{20};
-  std::vector<int32_t> min_length{1};
-  std::vector<int32_t> num_beams{4};
-  std::vector<int32_t> num_return_sequences{1};
-  std::vector<float> length_penalty{1.0f};
-  std::vector<float> repetition_penalty{1.0f};
+  int64_t parameter_shape{1};
+  int32_t max_length{20};
+  int32_t min_length{1};
+  int32_t num_beams{4};
+  int32_t num_return_sequences{1};
+  float length_penalty{1.0f};
+  float repetition_penalty{1.0f};
 
-  std::vector<int64_t> expected_output_shape{input_ids_shape[0], num_return_sequences[0], max_length[0]};
+  std::vector<int64_t> expected_output_shape{input_ids_shape[0], num_return_sequences, max_length};
   std::vector<int32_t> expected_output{
       0, 0, 0, 0, 0, 52, 195, 731, 321, 301, 734, 620, 131, 131, 131, 181, 638, 638, 638, 638,
       41, 554, 74, 622, 206, 222, 75, 223, 221, 198, 224, 572, 292, 292, 292, 292, 292, 292, 292, 292,
@@ -124,32 +124,8 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32() {
   auto input_ids_tensor = OrtValue::CreateTensor(
       *info, input_ids.data(), input_ids.size(), input_ids_shape.data(), input_ids_shape.size());
 
-  auto max_length_tensor = OrtValue::CreateTensor(
-      *info, max_length.data(), max_length.size(), parameter_shape.data(), parameter_shape.size());
-
-  auto min_length_tensor = OrtValue::CreateTensor(
-      *info, min_length.data(), min_length.size(), parameter_shape.data(), parameter_shape.size());
-
-  auto num_beams_tensor = OrtValue::CreateTensor(
-      *info, num_beams.data(), num_beams.size(), parameter_shape.data(), parameter_shape.size());
-
-  auto num_return_sequences_tensor = OrtValue::CreateTensor(
-      *info, num_return_sequences.data(), num_return_sequences.size(), parameter_shape.data(), parameter_shape.size());
-
-  auto length_penalty_tensor = OrtValue::CreateTensor(
-      *info, length_penalty.data(), length_penalty.size(), parameter_shape.data(), parameter_shape.size());
-
-  auto repetition_penalty_tensor = OrtValue::CreateTensor(
-      *info, repetition_penalty.data(), repetition_penalty.size(), parameter_shape.data(), parameter_shape.size());
-
   std::vector<OrtValue*> ort_inputs;
   ort_inputs.push_back(input_ids_tensor.get());
-  ort_inputs.push_back(max_length_tensor.get());
-  ort_inputs.push_back(min_length_tensor.get());
-  ort_inputs.push_back(num_beams_tensor.get());
-  ort_inputs.push_back(num_return_sequences_tensor.get());
-  ort_inputs.push_back(length_penalty_tensor.get());
-  ort_inputs.push_back(repetition_penalty_tensor.get());
   const char* input_names[] = {"input_ids", "max_length", "min_length", "num_beams", "num_return_sequences",
                                "length_penalty", "repetition_penalty"};
   const char* const output_names[] = {"sequences"};
@@ -265,17 +241,6 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32() {
   auto input_ids_tensor = OrtValue::CreateTensor(
       *info, input_ids.data(), input_ids.size(), input_ids_shape.data(), input_ids_shape.size());
 
-  std::vector<OrtValue*> ort_inputs;
-  ort_inputs.push_back(input_ids_tensor.get());
-  const char* input_names[] = {"input_ids"};
-  const char* const output_names[] = {"sequences"};
-
-  constexpr int min_cuda_architecture = 530;
-  auto session_options = OrtSessionOptions::Create();
-#ifdef USE_CUDA
-  Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_CUDA(session_options, 0));
-#endif
-
   // To generate this file:
   // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
   // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
@@ -294,15 +259,30 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32() {
 
   Search search{gpt, params};
 
-  while (true) {
-    search.Run();
-//    search.ProcessLogits();
+  while (!search.IsDone()) {
+    search.RunModel();
 
-    if (!search)
-      break;
+    // Scoring
+    Processors::MinLength(search, 5);
+    Processors::RepetitionPenalty(search, 1.1f);
 
-//    search.PrepareNextStep();
+    // Sampling goes here
+
+    // TODO: Are these steps always the same? If so, merge into one function
+    search.NextTokensFromLogits();
+    search.CheckForEOS();
+    search.AppendNextTokensToSequences();
   }
+
+  // Verify outputs match expected outputs
+  for (int i = 0; i < search.params_.batch_size; i++) {
+    auto sequence = search.sequences_.GetSequence(i);
+    auto* expected_output_start = &expected_output[i * search.params_.max_length];
+    ASSERT_TRUE(std::equal(expected_output_start, expected_output_start+search.params_.max_length, sequence.begin(), sequence.end()));
+  }
+
+  std::cout << "Test_Lib_GreedySearchTest_GptGreedySearchFp32 complete\r\n";
+}
 
 #if 0
   SamplingState sampling_state;
@@ -329,12 +309,3 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32() {
     search.Sample(sampling_state);
   }
 #endif
-
-  for (int i = 0; i < search.params_.batch_size; i++) {
-    auto sequence = search.sequences_.GetSequence(i);
-    auto* expected_output_start = &expected_output[i * search.params_.max_length];
-    ASSERT_TRUE(std::equal(expected_output_start, expected_output_start+search.params_.max_length, sequence.begin(), sequence.end()));
-  }
-
-  std::cout << "Test_Lib_GreedySearchTest_GptGreedySearchFp32 complete\r\n";
-}

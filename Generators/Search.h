@@ -19,18 +19,26 @@ struct Search {
   Search(Gpt &model, SearchParams params);
 
   void SetSequence(gsl::span<const int32_t> input_ids_in_cpu);
-  void Run();
-  void ProcessLogits();
-  void Finalize();
 
-  explicit operator bool() { return !done_; }
+  bool IsDone() const { return done_; }
+  void RunModel();
+  // Extra scoring steps go here
+  
+  //
+  void NextTokensFromLogits();
+  void CheckForEOS();
+  void AppendNextTokensToSequences();
+
+  void Finalize(); // TODO: Not needed? Can directly access
+
+  gsl::span<ScoreType> GetScores(int batch_beam_index);
 
   Gpt& model_;
   SearchParams params_;
   Sequences sequences_;
   bool done_{};
 
-  IGreedySearchState<float> search_state_;
+  IGreedySearchState search_state_;
 
   BufferUniquePtr sequences_space_buffer_;
   BufferUniquePtr sequence_lengths_buffer_;
@@ -44,3 +52,8 @@ struct Search {
   std::unique_ptr<OrtValue> output_sequences_;
   std::unique_ptr<OrtValue> position_ids_;
 };
+
+namespace Processors {
+  void MinLength(Search& search, int min_length);
+  void RepetitionPenalty(Search& search, ScoreType penalty);
+}

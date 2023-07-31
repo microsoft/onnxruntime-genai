@@ -19,6 +19,8 @@
 #include "onnxruntime_cxx_api_2.h"
 #include "TensorShape.h"
 
+using ScoreType = float;
+
 using gsl::narrow;
 
 struct Tensor;
@@ -138,17 +140,16 @@ struct IBeamSearchCpuState {
   gsl::span<float> final_beam_scores;  // shape (batch_size, num_beams)
 };
 
-template <typename T>
 struct IGreedySearchState {
   gsl::span<int32_t> sequences_space;          // shape (2, batch_size, max_length)
   gsl::span<int32_t> sequence_lengths;         // shape (batch_size)
   gsl::span<int32_t> next_positions;           // shape (batch_size, num_beams). Next position value for position_ids.
   gsl::span<bool> eos_meet;                    // shape (batch_size)
-  gsl::span<T> next_token_scores;              // shape (batch_size, vocab_size)
+  gsl::span<ScoreType> next_token_scores;      // shape (batch_size, vocab_size)
   gsl::span<int32_t> next_tokens;              // shape (batch_size)
-  gsl::span<T> temp_topk_scores_buffer;        // shape (batch_size, parts_of_vocab), temp buffer for topk stage 1 (GPU only)
+  gsl::span<ScoreType> temp_topk_scores_buffer;  // shape (batch_size, parts_of_vocab), temp buffer for topk stage 1 (GPU only)
   gsl::span<int32_t> temp_topk_tokens_buffer;  // shape (batch_size, parts_of_vocab), temp buffer for topk stage 1(GPU only)
-  gsl::span<T> topk_scores_buffer;             // shape (batch_size), output buffer for topk stage 2 (GPU only)
+  gsl::span<ScoreType> topk_scores_buffer;       // shape (batch_size), output buffer for topk stage 2 (GPU only)
   gsl::span<int32_t> topk_tokens_buffer;       // shape (batch_size), output buffer for topk stage 2 (GPU only)
   std::unique_ptr<OrtValue> staging_for_past_state_reorder;       // Tensor of shape (batch_size * num_beams(1), num_heads, max_length, head_size)
 };

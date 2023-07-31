@@ -4,8 +4,8 @@ struct Gpt {
   Gpt(OrtEnv &ort_env, const ORTCHAR_T* init_path, const ORTCHAR_T* decode_path,
       std::unique_ptr<OrtValue> &&input_ids, SearchParams params);
 
+  bool first_run_ {true};
   void CreateInputs(gsl::span<int32_t> sequence_lengths);
-  void CreateInputsInternal(gsl::span<int32_t> sequence_lengths);
 
   void Run();
   void UpdateInputs(gsl::span<const int32_t> next_tokens, OrtValue* position_ids, int num_beams, int current_length);

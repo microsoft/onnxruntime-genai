@@ -66,7 +66,7 @@ struct SamplingState : public ISamplingState<T> {
 };
 
 template <typename T>
-struct GreedySearchState : public IGreedySearchState<T> {
+struct GreedySearchState : public IGreedySearchState {
   Sequences sequences;
 
   void Init(OrtAllocator* cpu_allocator,

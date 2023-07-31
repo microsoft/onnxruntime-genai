@@ -82,7 +82,7 @@ class GreedySearchGpt : public GreedySearchBase<T, ParametersT> {
                   const GenerationDeviceHelper::AddToFeedsFunc& add_to_feeds_func,
                   const GenerationDeviceHelper::TopkFunc& topk_func,
                   const GenerationDeviceHelper::GreedySearchProcessLogitsFunc<T>& process_logits_func,
-                  const GenerationDeviceHelper::InitGreedyStateFunc<T>& init_greedy_state_func,
+                  const GenerationDeviceHelper::InitGreedyStateFunc& init_greedy_state_func,
                   const GenerationDeviceHelper::DeviceCopyFunc<float>& device_copy_func,
                   const GenerationDeviceHelper::UpdateGptFeedsFunc<T>& update_feeds_func)
       : GreedySearchBase<T, ParametersT>(context,
@@ -150,7 +150,7 @@ class GreedySearchGpt : public GreedySearchBase<T, ParametersT> {
   // Device specific functions
   GenerationDeviceHelper::CreateGptInputsFunc create_inputs_func_;
   GenerationDeviceHelper::AddToFeedsFunc add_to_feeds_func_;
-  GenerationDeviceHelper::InitGreedyStateFunc<T> init_greedy_state_func_;
+  GenerationDeviceHelper::InitGreedyStateFunc init_greedy_state_func_;
 #ifdef USE_CUDA
   GenerationDeviceHelper::ReorderPastStateFunc reorder_past_state_func_;
 #endif

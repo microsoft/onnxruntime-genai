@@ -79,9 +79,8 @@ using CreateBeamScorer = std::function<std::unique_ptr<IBeamScorer>(
     OrtAllocator*& allocator_cpu,
     Stream* stream)>;
 
-template <typename T>
 using InitGreedyStateFunc = std::function<void(
-    IGreedySearchState<T>* greedy_state,
+    IGreedySearchState* greedy_state,
     gsl::span<int32_t>& sequence_lengths,
     Stream* stream)>;
 
@@ -101,7 +100,7 @@ using ProcessLogitsFunc = std::function<void(
 template <typename T>
 using GreedySearchProcessLogitsFunc = std::function<void(
     const OrtValue& logits,                                 // logits output of subgraph
-    IGreedySearchState<T>* greedy_state,      // state
+    IGreedySearchState* greedy_state,      // state
     ISamplingState<T>* sampling_state,        // sampling buffers
     ISequences* sequences,                    // sequences
     OrtAllocator*& allocator,                                // default allocator
@@ -240,8 +239,7 @@ void InitBeamState(IBeamSearchState<T>* beam_state,
                    int num_beams,
                    Stream* stream);
 
-template <typename T>
-void InitGreedyState(IGreedySearchState<T>* greedy_state,
+void InitGreedyState(IGreedySearchState* greedy_state,
                      gsl::span<int32_t>& sequence_lengths,
                      Stream* ort_stream);
 
@@ -259,7 +257,7 @@ void ProcessLogits(const OrtValue& logits,                                 // lo
 
 template <typename T>
 void GreedySearchProcessLogits(const OrtValue& logits,                                 // logits output of subgraph
-                                 IGreedySearchState<T>* greedy_state,      // state
+                                 IGreedySearchState* greedy_state,      // state
                                  ISamplingState<T>* sampling_state,        // sampling buffers
                                  ISequences* sequences,                    // sequences
                                  OrtAllocator*& allocator,                                // default allocator
