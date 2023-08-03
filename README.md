@@ -46,11 +46,11 @@ Link to below example in code here: https://github.com/RyanUnderhill/generators/
 
 * GPT2 model loading
 * CPU Greedy search
+* CPU Beam search
 * CPU Scoring examples
 
 # Future
 
-* Beam search
 * Make model code stateless, move state into search? This would allow for multiple searches with one model loaded
 * Remove dead code after design change
 * Support more models built-in, T5/Whisper
