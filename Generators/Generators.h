@@ -103,6 +103,30 @@ gsl::span<T> AllocateBuffer(OrtAllocator* allocator,
 template <typename T>
 using IAllocatorUniquePtr = std::unique_ptr<T, std::function<void(T*)>>;
 
+/** Allocate a unique_ptr using allocator_, and return a span to the allocated memory so usage is safe
+@param allocator IAllocator to use for the allocation.
+@param size Allocation size. Number of elements of type TAlloc, or total size if TAlloc is 'void'.
+@param unique_ptr unique_ptr that will control the lifetime of the allocated memory.
+@param fill If true, fill the allocated memory with fill_value.
+@param fill_value Value to use if 'fill' is true.
+@returns A span to provide bounds checked access to the allocated memory.
+*/
+template <typename TAlloc>
+gsl::span<TAlloc> Allocate(OrtAllocator& allocator,
+                           size_t size,
+                           IAllocatorUniquePtr<TAlloc>& unique_ptr,
+                           bool fill = false, TAlloc fill_value = TAlloc{}) {
+  unique_ptr = IAllocatorUniquePtr<TAlloc>(reinterpret_cast<TAlloc*>(allocator.Alloc(&allocator, size * sizeof(TAlloc))), [&allocator](void *p) { allocator.Free(&allocator, p);} );
+  auto span = gsl::make_span(unique_ptr.get(), size);
+
+  if (fill) {
+    // Do't use span.begin() it will cause performance issue and stop compiler to optimize the code
+    std::fill_n(unique_ptr.get(), size, fill_value);
+  }
+
+  return span;
+}
+
 template <typename T>
 struct IBeamSearchState {
   gsl::span<T> next_token_logits;      // shape (batch_size * num_beams, vocab_size)
@@ -130,8 +154,8 @@ struct IBeamSearchState {
 };
 
 struct IBeamSearchCpuState {
-  gsl::span<int32_t> sequence_lengths;  // shape (batch_size, num_beams), initial sequence length
   gsl::span<int32_t> sequences_space;   // shape (2, batch_size, num_beams, max_seq_length)
+  gsl::span<int32_t> sequence_lengths;  // shape (batch_size, num_beams), initial sequence length
 
   // The following are used only by CUDA operator for data copied from device.
   gsl::span<float> topk_scores;        // shape (batch_size, 2*num_beams), scores of topk candidates (K=2*num_beams).
@@ -147,11 +171,7 @@ struct IGreedySearchState {
   gsl::span<bool> eos_meet;                    // shape (batch_size)
   gsl::span<ScoreType> next_token_scores;      // shape (batch_size, vocab_size)
   gsl::span<int32_t> next_tokens;              // shape (batch_size)
-  gsl::span<ScoreType> temp_topk_scores_buffer;  // shape (batch_size, parts_of_vocab), temp buffer for topk stage 1 (GPU only)
-  gsl::span<int32_t> temp_topk_tokens_buffer;  // shape (batch_size, parts_of_vocab), temp buffer for topk stage 1(GPU only)
-  gsl::span<ScoreType> topk_scores_buffer;       // shape (batch_size), output buffer for topk stage 2 (GPU only)
-  gsl::span<int32_t> topk_tokens_buffer;       // shape (batch_size), output buffer for topk stage 2 (GPU only)
-  std::unique_ptr<OrtValue> staging_for_past_state_reorder;       // Tensor of shape (batch_size * num_beams(1), num_heads, max_length, head_size)
+//  std::unique_ptr<OrtValue> staging_for_past_state_reorder;       // Tensor of shape (batch_size * num_beams(1), num_heads, max_length, head_size)
 };
 
 template <typename T>
@@ -194,14 +214,15 @@ struct IBeamScorer {
   virtual ~IBeamScorer() {}
 
   virtual void Process(ISequences& sequences,
-                       gsl::span<const float>& next_scores,
-                       gsl::span<const int32_t>& next_tokens,
-                       gsl::span<const int32_t>& next_indices) = 0;
+                       gsl::span<const float> next_scores,
+                       gsl::span<const int32_t> next_tokens,
+                       gsl::span<const int32_t> next_indices) = 0;
 
   virtual void Finalize(ISequences& sequences,
-                        gsl::span<const float>& final_beam_scores,
-                        Tensor* output_sequences,
-                        Tensor* output_sequence_scores) = 0;
+                        size_t num_return_sequences,
+//                        gsl::span<const float> final_beam_scores,
+                        gsl::span<int32_t> output_sequences,
+                        gsl::span<float> output_sequence_scores) = 0;
 
   virtual bool IsDone() const = 0;                    // GPU version will return false here, as it asynchronously queues up the event
   virtual bool IsDoneLater() const { return false; }  // GPU version waits for the asynchous result to complete here

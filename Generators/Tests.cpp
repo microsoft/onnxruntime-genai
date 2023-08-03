@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <iostream>
 
+#include "beam_search_scorer.h"
 #include "Sequences.h"
 #include "generation_device_helper.h"
 #include "logits_processor.h"
@@ -100,12 +101,8 @@ void Test_BeamSearchTest_GptBeamSearchFp32() {
 void Test_Lib_BeamSearchTest_GptBeamSearchFp32() {
   auto ort_env = OrtEnv::Create();
 
-  int64_t parameter_shape{1};
   int32_t max_length{20};
-  int32_t min_length{1};
-  int32_t num_return_sequences{1};
   float length_penalty{1.0f};
-  float repetition_penalty{1.0f};
 
   std::vector<int64_t> input_ids_shape{3, 12};
   std::vector<int32_t> input_ids{
@@ -113,7 +110,7 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32() {
       41, 554, 74, 622, 206, 222, 75, 223, 221, 198, 224, 572,
       0, 0, 0, 52, 328, 219, 328, 206, 288, 227, 896, 328};
 
-  std::vector<int64_t> expected_output_shape{input_ids_shape[0], num_return_sequences, max_length};
+  std::vector<int64_t> expected_output_shape{input_ids_shape[0], 1, max_length};
   std::vector<int32_t> expected_output{
       0, 0, 0, 0, 0, 52, 195, 731, 321, 301, 734, 620, 131, 131, 131, 181, 638, 638, 638, 638,
       41, 554, 74, 622, 206, 222, 75, 223, 221, 198, 224, 572, 292, 292, 292, 292, 292, 292, 292, 292,
@@ -128,8 +125,9 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32() {
   //        --output tiny_gpt2_beamsearch_fp16.onnx --use_gpu --max_length 20
   // (with separate_gpt2_decoder_for_init_run set to False as it is now set to True by default)
   SearchParams params;
-  params.batch_size = static_cast<int>(input_ids_shape[1]);
-  params.sequence_length = 4;  // TODO: Derive from model?
+  params.batch_size = static_cast<int>(input_ids_shape[0]);
+  params.max_length=max_length;
+  params.sequence_length = static_cast<int>(input_ids_shape[1]);
   params.vocab_size = 1000;    // TODO: Derive from model?
   params.head_size = 8;        // TODO: Derive from model?
   params.num_heads = 4;        // TODO: Derive from model?
@@ -158,10 +156,13 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32() {
     search.AppendNextTokensToSequences();
   }
 
+  std::vector<int32_t> output_sequence(search.params_.batch_size*max_length);
+  search.Finalize(1, output_sequence, {});
 
   // Verify outputs match expected outputs
   for (int i = 0; i < search.params_.batch_size; i++) {
-    auto sequence = search.sequences_.GetSequence(i);
+//    auto sequence = search.sequences_.GetSequence(i);
+    auto sequence = gsl::make_span<int32_t>(output_sequence.data()+max_length*i, max_length);
     auto* expected_output_start = &expected_output[i * search.params_.max_length];
     ASSERT_TRUE(std::equal(expected_output_start, expected_output_start + search.params_.max_length, sequence.begin(), sequence.end()));
   }
@@ -255,8 +256,8 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32() {
   // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
 
   SearchParams params;
-  params.batch_size = static_cast<int>(input_ids_shape[1]);
-  params.sequence_length = 4; // TODO: Derive from model?
+  params.batch_size = static_cast<int>(input_ids_shape[0]);
+  params.sequence_length = static_cast<int>(input_ids_shape[1]);
   params.vocab_size = 1000; // TODO: Derive from model?
   params.head_size = 8; // TODO: Derive from model?
   params.num_heads = 4; // TODO: Derive from model?

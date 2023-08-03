@@ -10,6 +10,8 @@ struct Gpt {
   void Run();
   void UpdateInputs(gsl::span<const int32_t> next_tokens, OrtValue* position_ids, int num_beams, int current_length);
 
+  void PickPastState(OrtAllocator& allocator, size_t index);
+
   SearchParams params_;
 
   bool past_present_share_buffer_ {};
@@ -37,4 +39,7 @@ struct Gpt {
   std::vector<std::string> output_name_strings_;
   std::vector<const char*> output_names_;
   std::vector<OrtValue*> outputs_;
+
+  // Search state
+  gsl::span<int32_t> beam_indices_;
 };

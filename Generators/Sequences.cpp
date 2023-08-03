@@ -24,7 +24,7 @@ void Sequences::InitDevice(gsl::span<int32_t> buffer) {
 }
 
 gsl::span<const int32_t> Sequences::GetSequence(int beam_index) const {
-  gsl::span<const int32_t> buffer = sequences[current_sequences_buffer];
+  gsl::span<const int32_t> buffer = sequences[current_sequences_buffer];\
   return buffer.subspan(SafeInt<size_t>(beam_index) * max_length_, static_cast<gsl::index>(current_length_));
 }
 
@@ -43,8 +43,8 @@ void Sequences::PrintSequences(const IConsoleDumper* dumper) const {
 #endif
 
 void Sequences::AppendNextTokenToSequences(
-    gsl::span<int32_t>& beam_indices,
-    gsl::span<int32_t>& beam_next_tokens) {
+    gsl::span<int32_t> beam_indices,
+    gsl::span<int32_t> beam_next_tokens) {
   gsl::span<const int32_t> input = sequences[current_sequences_buffer];
   gsl::span<int32_t> output = sequences[current_sequences_buffer ^ 1];
 
@@ -66,7 +66,7 @@ void Sequences::AppendNextTokenToSequences(
   current_sequences_buffer ^= 1;
 }
 
-void Sequences::AppendNextTokenToSequences(gsl::span<int32_t>& next_tokens) {
+void Sequences::AppendNextTokenToSequences(gsl::span<int32_t> next_tokens) {
   auto output = sequences[0];
 
   // Append next token to each sequence.

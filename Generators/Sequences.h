@@ -22,11 +22,11 @@ class Sequences : public ISequences {
 
   // Select sequences based on beam indices, then append next token to selected sequences.
   void AppendNextTokenToSequences(
-      gsl::span<int32_t>& beam_indices,
-      gsl::span<int32_t>& beam_next_tokens);
+      gsl::span<int32_t> beam_indices,
+      gsl::span<int32_t> beam_next_tokens);
 
   void AppendNextTokenToSequences(
-      gsl::span<int32_t>& next_tokens);
+      gsl::span<int32_t> next_tokens);
 
   void AfterDeviceAppendedNextToken();
 

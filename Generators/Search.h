@@ -1,4 +1,5 @@
 struct Gpt;
+struct BeamSearchScorer;
 
 struct SearchParams {
   int num_heads{1};
@@ -10,6 +11,9 @@ struct SearchParams {
   int max_length {10};
   int pad_token_id{98};
   int eos_token_id{98};
+
+  float length_penalty{1.0f};
+  bool early_stopping{false};
 
   int BatchBeamSize() const { return num_beams*batch_size; }
 };
@@ -29,7 +33,7 @@ struct Search {
   void CheckForEOS();
   void AppendNextTokensToSequences();
 
-  void Finalize(); // TODO: Not needed? Can directly access
+  void Finalize(size_t num_return_sequences, gsl::span<int32_t> output, gsl::span<float> sequence_scores);
 
   gsl::span<ScoreType> GetScores(int batch_beam_index);
 
@@ -40,6 +44,8 @@ struct Search {
 
   IGreedySearchState search_state_;
 
+  std::unique_ptr<BeamSearchScorer> beam_scorer_;
+  
   BufferUniquePtr sequences_space_buffer_;
   BufferUniquePtr sequence_lengths_buffer_;
   BufferUniquePtr next_token_scores_buffer_;
