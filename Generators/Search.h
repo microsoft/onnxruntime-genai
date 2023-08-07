@@ -1,12 +1,18 @@
-struct Gpt;
+struct Model
+{
+  virtual void CreateInputs(gsl::span<int32_t> sequence_lengths)=0;
+  virtual void UpdateInputs(gsl::span<const int32_t> next_tokens, OrtValue& position_ids, gsl::span<const int32_t> beam_indices, int current_length)=0;
+  virtual OrtValue& GetInputIds() = 0;
+  virtual OrtValue& GetLogits() = 0;
+  virtual void Run() = 0;
+  virtual int GetVocabSize() = 0;
+};
+
 struct BeamSearchScorer;
 
 struct SearchParams {
-  int num_heads{1};
-  int head_size {1};
   int num_beams{1};
   int batch_size {};
-  int vocab_size {};
   int sequence_length {};
   int max_length {10};
   int pad_token_id{98};
@@ -20,7 +26,7 @@ struct SearchParams {
 
 struct Search {
 
-  Search(Gpt &model, SearchParams params);
+  Search(Model &model, SearchParams params);
 
   void SetSequence(gsl::span<const int32_t> input_ids_in_cpu);
 
@@ -37,10 +43,12 @@ struct Search {
 
   gsl::span<ScoreType> GetScores(int batch_beam_index);
 
-  Gpt& model_;
+  Model& model_;
   SearchParams params_;
   Sequences sequences_;
   bool done_{};
+  bool first_run_{true};
+  int vocab_size_{model_.GetVocabSize()};
 
   IGreedySearchState search_state_;
 
@@ -55,7 +63,6 @@ struct Search {
   BufferUniquePtr temp_topk_buffer_;
   BufferUniquePtr staging_for_past_state_reorder_buffer_;
 
-  std::unique_ptr<OrtValue> output_sequences_;
   std::unique_ptr<OrtValue> position_ids_;
 };
 

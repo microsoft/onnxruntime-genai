@@ -19,16 +19,14 @@ void log_softmax(gsl::span<float> values) {
   std::transform(values.begin(), values.end(), values.begin(), [max, log_max](float v) { return v - max - log_max; });
 }
 
-Search::Search(Gpt& model, SearchParams params)
+Search::Search(Model& model, SearchParams params)
     : model_{model}, params_{params} {
   auto allocator = &Ort::Allocator::GetWithDefaultOptions();
   auto cpu_allocator = allocator;
-
   auto batch_beam_size=params.BatchBeamSize();
 
   int64_t sequences_dims[] = {batch_beam_size, params_.max_length};
-  output_sequences_ = OrtValue::CreateTensor<int32_t>(*allocator, sequences_dims, std::size(sequences_dims));
-
+ 
   // below buffers are on cpu
   search_state_.sequences_space = AllocateBuffer<int32_t>(cpu_allocator,
                                                           sequences_space_buffer_,
@@ -43,7 +41,7 @@ Search::Search(Gpt& model, SearchParams params)
   search_state_.next_tokens = AllocateBuffer<int32_t>(cpu_allocator, next_tokens_buffer_, SafeInt<size_t>(batch_beam_size));
 
   // below buffers are on cpu or cuda
-  size_t next_token_size = SafeInt<size_t>(batch_beam_size) * params_.vocab_size;
+  size_t next_token_size = SafeInt<size_t>(batch_beam_size) * model.GetVocabSize();
   search_state_.next_token_scores = AllocateBuffer<ScoreType>(allocator, next_token_scores_buffer_, next_token_size);
   search_state_.next_positions = AllocateBuffer<int32_t>(allocator, next_positions_buffer_, batch_beam_size);
   int64_t position_shape[] = {batch_beam_size, 1};
@@ -52,10 +50,10 @@ Search::Search(Gpt& model, SearchParams params)
   model_.CreateInputs(search_state_.sequence_lengths);
 
   {
-    auto shape = model.expanded_input_ids_->GetTensorTypeAndShapeInfo()->GetShape();
+    auto shape = model.GetInputIds().GetTensorTypeAndShapeInfo()->GetShape();
     size_t shape_elements = std::accumulate(shape.begin(), shape.end(), 1LL, std::multiplies<int64_t>());
 
-    gsl::span<const int32_t> input_ids{model.expanded_input_ids_->GetTensorMutableData<int32_t>(), shape_elements};
+    gsl::span<const int32_t> input_ids{model.GetInputIds().GetTensorMutableData<int32_t>(), shape_elements};
     SetSequence(input_ids);
   }
 
@@ -82,40 +80,41 @@ void Search::SetSequence(gsl::span<const int32_t> input_ids_in_cpu) {
 }
 
 void Search::RunModel() {
-  if(model_.first_run_) {
-    model_.first_run_=false;
-  }
+  if(first_run_)
+    first_run_=false;
   else
   {
     if (params_.num_beams>1) {
-      model_.beam_indices_ = beam_scorer_->GetNextIndicesCPU();
-      model_.UpdateInputs(beam_scorer_->GetNextTokens(), position_ids_.get(), params_.num_beams, sequences_.GetSequenceLength());
+      model_.UpdateInputs(beam_scorer_->GetNextTokens(), *position_ids_, beam_scorer_->GetNextIndicesCPU(), sequences_.GetSequenceLength());
     }
-    else
-      model_.UpdateInputs(search_state_.next_tokens, position_ids_.get(), params_.num_beams, sequences_.GetSequenceLength());
+    else {
+      model_.UpdateInputs(search_state_.next_tokens, *position_ids_, {}, sequences_.GetSequenceLength());
+    }
   }
   model_.Run();
 
   // Logits has shape (batch_size, input_length, vocab_size),
   // where input_length equals to parameters_->sequence_length for first subgraph call, and 1 for the remaining calls.
-  auto logits_shape = model_.logits_->GetTensorTypeAndShapeInfo()->GetShape();
+  auto logits_shape = model_.GetLogits().GetTensorTypeAndShapeInfo()->GetShape();
   assert(logits_shape.size() == 3);
-  const ScoreType* logits_data = model_.logits_->GetTensorMutableData<ScoreType>();
+  const ScoreType* logits_data = model_.GetLogits().GetTensorMutableData<ScoreType>();
 
   auto input_length = logits_shape[1];
+  auto vocab_size = logits_shape[2];
   auto batch_beam_size = params_.BatchBeamSize();
+  assert(vocab_size == vocab_size_);
 
   // Get logits for the last token:
   //    next_token_logits = logits[:, -1, :], and the result shape is (batch_size, vocab_size)
   // When input_length == 1, use logits directly in SoftmaxCPU below so it only need for input_length > 1.
   gsl::span<ScoreType> next_token_scores = search_state_.next_token_scores;
-  const ScoreType* current_logits = logits_data + (input_length - 1) * params_.vocab_size;
+  const ScoreType* current_logits = logits_data + (input_length - 1) * vocab_size;
   for (int i = 0; i < batch_beam_size; i++) {
-    gsl::span<const ScoreType> source(current_logits, params_.vocab_size);
-    gsl::span<ScoreType> target = next_token_scores.subspan(SafeInt<gsl::index>(i) * params_.vocab_size,
-                                                        static_cast<gsl::index>(params_.vocab_size));
+    gsl::span<const ScoreType> source(current_logits, vocab_size);
+    gsl::span<ScoreType> target = next_token_scores.subspan(SafeInt<gsl::index>(i) * vocab_size,
+                                                            static_cast<gsl::index>(vocab_size));
     gsl::copy(source, target);
-    current_logits += input_length * params_.vocab_size;
+    current_logits += input_length * vocab_size;
 
     log_softmax(target);
   }
@@ -144,7 +143,7 @@ void Search::NextTokensFromLogits() {
     int batch_beam_index = 0;
     for (int i = 0; i < params_.batch_size; i++) {
       for (int j = 0; j < params_.num_beams; j++, batch_beam_index++) {
-        for (int k = 0; k < params_.vocab_size; k++, offset++) {
+        for (int k = 0; k < vocab_size_; k++, offset++) {
           search_state_.next_token_scores[offset] += beam_scores[batch_beam_index];
         }
       }
@@ -170,7 +169,7 @@ void Search::NextTokensFromLogits() {
 
     for (int batch_index = 0; batch_index < params_.batch_size; batch_index++) {
       std::priority_queue<ScoreIndex, std::vector<ScoreIndex>, decltype(compare)> queue;
-      auto token_scores_sub = search_state_.next_token_scores.subspan(batch_index * params_.num_beams * params_.vocab_size, params_.num_beams * params_.vocab_size);
+      auto token_scores_sub = search_state_.next_token_scores.subspan(batch_index * params_.num_beams * vocab_size_, params_.num_beams * vocab_size_);
       for (int i = 0; i < token_scores_sub.size(); i++) {
         queue.push({token_scores_sub[i], i});
       }
@@ -180,8 +179,8 @@ void Search::NextTokensFromLogits() {
       auto next_scores_sub = next_scores.subspan(top_k * batch_index, top_k);
       for (unsigned i=0;i<top_k;i++) {
         auto v=queue.top();
-        next_indices_sub[i]=v.index/params_.vocab_size;
-        next_tokens_sub[i]=v.index%params_.vocab_size;
+        next_indices_sub[i] = v.index / vocab_size_;
+        next_tokens_sub[i] = v.index % vocab_size_;
         next_scores_sub[i]=v.score;
         queue.pop();
       }
@@ -196,14 +195,14 @@ void Search::NextTokensFromLogits() {
     for (size_t i = 0; i < params_.batch_size; i++) {
       int32_t best_token = 0;
       ScoreType best_score = next_token_scores[0];
-      for (int32_t token = 1; token < params_.vocab_size; token++) {
+      for (int32_t token = 1; token < vocab_size_; token++) {
         if (next_token_scores[token] > best_score) {
           best_score = next_token_scores[token];
           best_token = token;
         }
       }
       search_state_.next_tokens[i] = best_token;
-      next_token_scores += params_.vocab_size;
+      next_token_scores += vocab_size_;
     }
   }
 }
@@ -272,7 +271,7 @@ void Search::Finalize(size_t num_return_sequences, gsl::span<int32_t> output, gs
 
 gsl::span<ScoreType> Search::GetScores(int batch_beam_index) {
   assert(batch_beam_index >= 0 && batch_beam_index < params_.BatchBeamSize());
-  return search_state_.next_token_scores.subspan(batch_beam_index * params_.vocab_size, params_.vocab_size);
+  return search_state_.next_token_scores.subspan(batch_beam_index * vocab_size_, vocab_size_);
 }
 
 namespace Processors {

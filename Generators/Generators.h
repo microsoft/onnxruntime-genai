@@ -220,7 +220,6 @@ struct IBeamScorer {
 
   virtual void Finalize(ISequences& sequences,
                         size_t num_return_sequences,
-//                        gsl::span<const float> final_beam_scores,
                         gsl::span<int32_t> output_sequences,
                         gsl::span<float> output_sequence_scores) = 0;
 

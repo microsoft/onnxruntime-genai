@@ -1,20 +1,26 @@
-struct Gpt {
+struct Gpt : Model {
+
+  static constexpr size_t c_vocab_size=1000;
+  static constexpr size_t c_num_heads=4;
+  static constexpr size_t c_head_size=8;
   static constexpr size_t c_counts=5;
 
   Gpt(OrtEnv &ort_env, const ORTCHAR_T* init_path, const ORTCHAR_T* decode_path,
       std::unique_ptr<OrtValue> &&input_ids, SearchParams params);
 
-  bool first_run_ {true};
-  void CreateInputs(gsl::span<int32_t> sequence_lengths);
+  void CreateInputs(gsl::span<int32_t> sequence_lengths) override;
+  OrtValue& GetInputIds() override { return *expanded_input_ids_; }
+  OrtValue& GetLogits() override { return *logits_; }
+  int GetVocabSize() override { return c_vocab_size; }
+  void Run() override;
+  void UpdateInputs(gsl::span<const int32_t> next_tokens, OrtValue& position_ids, gsl::span<const int32_t> beam_indices, int current_length) override;
 
-  void Run();
-  void UpdateInputs(gsl::span<const int32_t> next_tokens, OrtValue* position_ids, int num_beams, int current_length);
-
-  void PickPastState(OrtAllocator& allocator, size_t index);
+private:
+  void PickPastState(OrtAllocator& allocator, size_t index, gsl::span<const int32_t> beam_indices);
 
   SearchParams params_;
 
-  bool past_present_share_buffer_ {};
+  bool past_present_share_buffer_ {}; // NYI
 
   std::unique_ptr<OrtValue> initial_input_ids_;
 
@@ -39,7 +45,4 @@ struct Gpt {
   std::vector<std::string> output_name_strings_;
   std::vector<const char*> output_names_;
   std::vector<OrtValue*> outputs_;
-
-  // Search state
-  gsl::span<int32_t> beam_indices_;
 };

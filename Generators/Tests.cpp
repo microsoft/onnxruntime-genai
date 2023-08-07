@@ -110,7 +110,6 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32() {
       41, 554, 74, 622, 206, 222, 75, 223, 221, 198, 224, 572,
       0, 0, 0, 52, 328, 219, 328, 206, 288, 227, 896, 328};
 
-  std::vector<int64_t> expected_output_shape{input_ids_shape[0], 1, max_length};
   std::vector<int32_t> expected_output{
       0, 0, 0, 0, 0, 52, 195, 731, 321, 301, 734, 620, 131, 131, 131, 181, 638, 638, 638, 638,
       41, 554, 74, 622, 206, 222, 75, 223, 221, 198, 224, 572, 292, 292, 292, 292, 292, 292, 292, 292,
@@ -128,9 +127,6 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32() {
   params.batch_size = static_cast<int>(input_ids_shape[0]);
   params.max_length=max_length;
   params.sequence_length = static_cast<int>(input_ids_shape[1]);
-  params.vocab_size = 1000;    // TODO: Derive from model?
-  params.head_size = 8;        // TODO: Derive from model?
-  params.num_heads = 4;        // TODO: Derive from model?
   params.num_beams = 4;
 
   Gpt gpt(*ort_env,
@@ -242,7 +238,6 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32() {
 
   int32_t max_length{10};
 
-  std::vector<int64_t> expected_output_shape{input_ids_shape[0], max_length};
   std::vector<int32_t> expected_output{
       0, 0, 0, 52, 204, 204, 204, 204, 204, 204,
       0, 0, 195, 731, 731, 114, 114, 114, 114, 114};
@@ -258,9 +253,6 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32() {
   SearchParams params;
   params.batch_size = static_cast<int>(input_ids_shape[0]);
   params.sequence_length = static_cast<int>(input_ids_shape[1]);
-  params.vocab_size = 1000; // TODO: Derive from model?
-  params.head_size = 8; // TODO: Derive from model?
-  params.num_heads = 4; // TODO: Derive from model?
 
   Gpt gpt(*ort_env,
           ORT_TSTR("C:/code/github/generators/Generators/models/gpt2_fp32.onnx"),
