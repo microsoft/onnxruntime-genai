@@ -1,13 +1,3 @@
-struct Model
-{
-  virtual void CreateInputs(gsl::span<int32_t> sequence_lengths)=0;
-  virtual void UpdateInputs(gsl::span<const int32_t> next_tokens, OrtValue& position_ids, gsl::span<const int32_t> beam_indices, int current_length)=0;
-  virtual OrtValue& GetInputIds() = 0;
-  virtual OrtValue& GetLogits() = 0;
-  virtual void Run() = 0;
-  virtual int GetVocabSize() = 0;
-};
-
 struct BeamSearchScorer;
 
 struct SearchParams {
@@ -17,53 +7,86 @@ struct SearchParams {
   int max_length {10};
   int pad_token_id{98};
   int eos_token_id{98};
+  int vocab_size {};
 
   float length_penalty{1.0f};
   bool early_stopping{false};
 
   int BatchBeamSize() const { return num_beams*batch_size; }
+
+  const int32_t *input_ids{}; // Array of [sequence_length][batchsize]
+};
+
+struct GreedySearchParams : SearchParams {
+};
+
+struct BeamSearchParams : SearchParams {
 };
 
 struct Search {
 
-  Search(Model &model, SearchParams params);
+  Search(SearchParams params);
 
-  void SetSequence(gsl::span<const int32_t> input_ids_in_cpu);
+  gsl::span<int32_t> GetNextTokens();
+  gsl::span<int32_t> GetNextIndices();
+
+  int GetSequenceLength();
 
   bool IsDone() const { return done_; }
-  void RunModel();
+  void SetLogits(OrtValue& logits);
   // Extra scoring steps go here
   
   //
-  void NextTokensFromLogits();
   void CheckForEOS();
-  void AppendNextTokensToSequences();
-
-  void Finalize(size_t num_return_sequences, gsl::span<int32_t> output, gsl::span<float> sequence_scores);
-
   gsl::span<ScoreType> GetScores(int batch_beam_index);
+  Sequences& GetSequences() { return sequences_; }
 
-  Model& model_;
+  void SetInputSequence();
+
   SearchParams params_;
+
+  gsl::span<int32_t> sequences_space_;  // shape (2, beam_size*batch_size, max_length)
+  BufferUniquePtr sequences_space_buffer_;
+
+  gsl::span<int32_t> sequence_lengths_;  // shape (beam_size*batch_size)
+  BufferUniquePtr sequence_lengths_buffer_;
+
+  gsl::span<bool> eos_meet_;  // shape (beam_size*batch_size)
+  BufferUniquePtr eos_meet_buffer_;
+
+  gsl::span<int32_t> next_tokens_;  // shape (beam_size*batch_size)
+
+  gsl::span<ScoreType> next_token_scores_;  // shape (beam_size*batch_size, vocab_size)
+  BufferUniquePtr next_token_scores_buffer_;
+
   Sequences sequences_;
   bool done_{};
-  bool first_run_{true};
-  int vocab_size_{model_.GetVocabSize()};
+};
 
-  IGreedySearchState search_state_;
+struct GreedySearch : Search {
+  GreedySearch(SearchParams params);
 
-  std::unique_ptr<BeamSearchScorer> beam_scorer_;
-  
-  BufferUniquePtr sequences_space_buffer_;
-  BufferUniquePtr sequence_lengths_buffer_;
-  BufferUniquePtr next_token_scores_buffer_;
+  gsl::span<int32_t> GetNextTokens();
+  void NextTokensFromLogits();
+  void AppendNextTokensToSequences();
+
+private:
   BufferUniquePtr next_tokens_buffer_;
-  BufferUniquePtr next_positions_buffer_;
-  BufferUniquePtr eos_meet_buffer_;
   BufferUniquePtr temp_topk_buffer_;
   BufferUniquePtr staging_for_past_state_reorder_buffer_;
+};
 
-  std::unique_ptr<OrtValue> position_ids_;
+struct BeamSearch : Search {
+  BeamSearch(SearchParams params);
+
+  gsl::span<int32_t> GetNextTokens();
+  gsl::span<int32_t> GetNextIndices();
+  void NextTokensFromLogits();
+  void AppendNextTokensToSequences();
+  void Finalize(size_t num_return_sequences, gsl::span<int32_t> output, gsl::span<float> sequence_scores);
+
+private:
+  std::unique_ptr<BeamSearchScorer> beam_scorer_;
 };
 
 namespace Processors {

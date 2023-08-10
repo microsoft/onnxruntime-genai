@@ -5,17 +5,13 @@
 
 #include "beam_search_scorer.h"
 #include "Sequences.h"
-#include "generation_device_helper.h"
-#include "logits_processor.h"
-#include "greedy_search_impl_base.h"
-#include "feeds_fetches_manager.h"
-#include "greedy_search_impl_gpt.h"
 
 #define ASSERT_EQ(a, b) assert((a) == (b))
 #define ASSERT_TRUE(a) assert(a)
 
+std::unique_ptr<OrtEnv> g_ort_env;
+
 void Test_BeamSearchTest_GptBeamSearchFp32() {
-  auto ort_env = OrtEnv::Create();
 
   std::vector<int64_t> input_ids_shape{3, 12};
   std::vector<int32_t> input_ids{
@@ -73,14 +69,17 @@ void Test_BeamSearchTest_GptBeamSearchFp32() {
 
   auto session_options = OrtSessionOptions::Create();
 #ifdef USE_CUDA
-  Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_CUDA(session_options, 0));
+  OrtCUDAProviderOptions cuda_options;
+//  cuda_options.has_user_compute_stream=true;
+//  cuda_options.user_compute_stream=
+  session_options->AppendExecutionProvider_CUDA(cuda_options);
 #endif
 
   // The ONNX model is generated like the following:
   // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2
   //        --output tiny_gpt2_beamsearch_fp16.onnx --use_gpu --max_length 20
   // (with separate_gpt2_decoder_for_init_run set to False as it is now set to True by default)
-  auto session = OrtSession::Create(*ort_env, ORT_TSTR("C:/code/github/generators/Generators/models/tiny_gpt2_beamsearch.onnx"), session_options.get());
+  auto session = OrtSession::Create(*g_ort_env, ORT_TSTR("C:/code/github/generators/Generators/models/tiny_gpt2_beamsearch.onnx"), session_options.get());
   auto ort_outputs = session->Run(nullptr, input_names, ort_inputs.data(), ort_inputs.size(),
                                   output_names, 1);
 
@@ -99,7 +98,6 @@ void Test_BeamSearchTest_GptBeamSearchFp32() {
 }
 
 void Test_Lib_BeamSearchTest_GptBeamSearchFp32() {
-  auto ort_env = OrtEnv::Create();
 
   int32_t max_length{20};
   float length_penalty{1.0f};
@@ -115,29 +113,39 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32() {
       41, 554, 74, 622, 206, 222, 75, 223, 221, 198, 224, 572, 292, 292, 292, 292, 292, 292, 292, 292,
       0, 0, 0, 52, 328, 219, 328, 206, 288, 227, 896, 328, 328, 669, 669, 669, 669, 669, 669, 669};
 
+#if 0
+#ifdef USE_CUDA
+  OrtCUDAProviderOptions cuda_options;
+  //  cuda_options.has_user_compute_stream=true;
+  //  cuda_options.user_compute_stream=
+  session_options->AppendExecutionProvider_CUDA(cuda_options);
+#endif
+#endif
+
   auto info = OrtMemoryInfo::Create("Cpu", OrtDeviceAllocator, 0, OrtMemTypeDefault);
-  auto input_ids_tensor = OrtValue::CreateTensor(
-      *info, input_ids.data(), input_ids.size(), input_ids_shape.data(), input_ids_shape.size());
 
   // The ONNX model is generated like the following:
   // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2
   //        --output tiny_gpt2_beamsearch_fp16.onnx --use_gpu --max_length 20
   // (with separate_gpt2_decoder_for_init_run set to False as it is now set to True by default)
+
+  Gpt gpt(*g_ort_env,
+          ORT_TSTR("C:/code/github/generators/Generators/models/gpt2_fp32.onnx"));
+
   SearchParams params;
   params.batch_size = static_cast<int>(input_ids_shape[0]);
-  params.max_length=max_length;
   params.sequence_length = static_cast<int>(input_ids_shape[1]);
+  params.input_ids = input_ids.data();
+  params.max_length = max_length;
   params.num_beams = 4;
+  params.vocab_size = gpt.GetVocabSize();
 
-  Gpt gpt(*ort_env,
-          ORT_TSTR("C:/code/github/generators/Generators/models/gpt2_fp32.onnx"),
-          ORT_TSTR("C:/code/github/generators/Generators/models/gpt2_fp32.onnx"),
-          std::move(input_ids_tensor), params);
-
-  Search search{gpt, params};
+  BeamSearch search{params};
+  gpt.CreateInputs(search.sequence_lengths_, params);
 
   while (!search.IsDone()) {
-    search.RunModel();
+    gpt.Run(search.GetNextTokens(), search.GetNextIndices(), search.GetSequenceLength());
+    search.SetLogits(gpt.GetLogits());
 
     // Scoring
     Processors::MinLength(search, 1);
@@ -207,9 +215,6 @@ void Test_GreedySearchTest_GptGreedySearchFp32() {
 
   constexpr int min_cuda_architecture = 530;
   auto session_options = OrtSessionOptions::Create();
-#ifdef USE_CUDA
-  Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_CUDA(session_options, 0));
-#endif
 
   auto session = OrtSession::Create(*ort_env, ORT_TSTR("C:/code/github/generators/Generators/models/tiny_gpt2_greedysearch_with_init_decoder.onnx"), session_options.get());
 
@@ -243,26 +248,26 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32() {
       0, 0, 195, 731, 731, 114, 114, 114, 114, 114};
 
   auto info = OrtMemoryInfo::Create("Cpu", OrtDeviceAllocator, 0, OrtMemTypeDefault);
-  auto input_ids_tensor = OrtValue::CreateTensor(
-      *info, input_ids.data(), input_ids.size(), input_ids_shape.data(), input_ids_shape.size());
 
   // To generate this file:
   // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
   // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
 
+  Gpt gpt(*ort_env,
+          ORT_TSTR("C:/code/github/generators/Generators/models/gpt2_fp32.onnx"));
+
   SearchParams params;
   params.batch_size = static_cast<int>(input_ids_shape[0]);
   params.sequence_length = static_cast<int>(input_ids_shape[1]);
+  params.input_ids = input_ids.data();
+  params.vocab_size = gpt.GetVocabSize();
 
-  Gpt gpt(*ort_env,
-          ORT_TSTR("C:/code/github/generators/Generators/models/gpt2_fp32.onnx"),
-          ORT_TSTR("C:/code/github/generators/Generators/models/gpt2_fp32.onnx"),
-          std::move(input_ids_tensor), params);
-
-  Search search{gpt, params};
+  GreedySearch search{params};
+  gpt.CreateInputs(search.sequence_lengths_, params);
 
   while (!search.IsDone()) {
-    search.RunModel();
+    gpt.Run(search.GetNextTokens(), {}, search.GetSequenceLength());
+    search.SetLogits(gpt.GetLogits());
 
     // Scoring
     Processors::MinLength(search, 1);

@@ -23,23 +23,55 @@ FetchContent_Declare(safeint
 )
 
 FetchContent_MakeAvailable(safeint)
-# add_library(safeint_interface INTERFACE)
-# target_include_directories(safeint_interface INTERFACE ${safeint_SOURCE_DIR})
-# message(${safeint_SOURCE_DIR})
 
-project ("Generators")
+project (Generators LANGUAGES CXX)
+set(USE_CUDA ON)
 
 include_directories(Generators ${CMAKE_SOURCE_DIR}/ort)
 link_directories(Generators ${CMAKE_SOURCE_DIR}/ort)
 
-# Add source to this project's executable.
-add_executable (Generators "Generators.cpp" "Generators.h" "main.cpp" "Tests.cpp" "greedy_search_impl_base.h"  "Sequences.h" "TensorShape.h" "span_utils.h" "generate_impl_base.h" "logits_processor.h" "generation_device_helper.cpp" "generation_device_helper.h" "greedy_search_impl_gpt.h" "feeds_fetches_manager.h" "subgraph_gpt.h" "subgraph_base.h" "logits_processor.cpp" "subgraph_gpt.cpp" "subgraph_base.cpp" "TensorShape.cpp" "feeds_fetches_manager.cpp" "gpt.h" "gpt.cpp" "Sequences.cpp" "Search.h" "Search.cpp" "beam_search_scorer.h" "beam_search_scorer.cpp")
+set(GENERATORS_ROOT ${PROJECT_SOURCE_DIR})
+
+message(STATUS "Adding source files")
+
+file(GLOB generator_srcs CONFIGURE_DEPENDS
+   "${GENERATORS_ROOT}/*.h"
+   "${GENERATORS_ROOT}/*.cpp"
+)
+
+if(USE_CUDA)
+    # Don't let cmake set a default value for CMAKE_CUDA_ARCHITECTURES
+    cmake_policy(SET CMP0104 OLD)
+    enable_language(CUDA)
+    message( STATUS "CMAKE_CUDA_COMPILER_VERSION: ${CMAKE_CUDA_COMPILER_VERSION}")
+
+    file(GLOB generator_cuda_srcs CONFIGURE_DEPENDS
+        "${GENERATORS_ROOT}/*.cu"
+    )
+    list(APPEND generator_srcs ${generator_cuda_srcs})
+endif()
+
+add_executable (Generators ${generator_srcs})
+
+#set_target_properties(Generators PROPERTIES LINKER_LANGUAGE cxx)
 target_link_libraries(Generators PRIVATE "onnxruntime.lib" Microsoft.GSL::GSL)
 target_include_directories(Generators PRIVATE ${safeint_SOURCE_DIR})
+target_include_directories(Generators PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+
+if(USE_CUDA)
+    target_link_libraries(Generators PRIVATE CUDA)
+    add_compile_definitions(USE_CUDA=1)
+
+    # Why is this needed? Without these, the cuda build causes weird errors due to mismatches in these settings
+    add_compile_definitions(_ITERATOR_DEBUG_LEVEL=0)
+    set(CMAKE_CXX_FLAGS_RELEASE "/MT")
+    set(CMAKE_CXX_FLAGS_DEBUG "/MDd")
+ endif()
+
 file(COPY ${CMAKE_SOURCE_DIR}/ort/onnxruntime.dll DESTINATION ${CMAKE_BINARY_DIR})
 
 if (CMAKE_VERSION VERSION_GREATER 3.12)
   set_property(TARGET Generators PROPERTY CXX_STANDARD 20)
 endif()
 
-# TODO: Add tests and install targets if needed.
+set_property (DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT Generators)

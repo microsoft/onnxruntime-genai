@@ -28,21 +28,16 @@ void ExpandInputs(const OrtValue& input, int num_beams, OrtAllocator& allocator,
   }
 }
 
-Gpt::Gpt(OrtEnv& ort_env, const ORTCHAR_T* init_path, const ORTCHAR_T* decode_path,
-         std::unique_ptr<OrtValue>&& input_ids, SearchParams params)
-    : initial_input_ids_{std::move(input_ids)},
-      params_{params} {
+Gpt::Gpt(OrtEnv& ort_env, const ORTCHAR_T* decode_path)
+{
   auto session_options = OrtSessionOptions::Create();
-
-  session_init_ = OrtSession::Create(ort_env, init_path, session_options.get());
   session_decode_ = OrtSession::Create(ort_env, decode_path, session_options.get());
 }
 
-void Gpt::CreateInputs(gsl::span<int32_t> sequence_lengths) {
-  const TensorShape input_ids_shape = initial_input_ids_->GetTensorTypeAndShapeInfo()->GetShape();
-  ORT_ENFORCE(input_ids_shape.NumDimensions() == 2);
-  const int64_t batch_size = input_ids_shape[0];
-  const int64_t sequence_length = input_ids_shape[1];
+void Gpt::CreateInputs(gsl::span<int32_t> sequence_lengths, const SearchParams& params) {
+  params_=params;
+
+  int64_t input_ids_shape[] = { params_.batch_size, params_.sequence_length };
 
   // Allocate position_ids and attention_mask based on shape of input_ids
   auto element_type = Ort::TypeToTensorType<int32_t>::type;
@@ -54,12 +49,13 @@ void Gpt::CreateInputs(gsl::span<int32_t> sequence_lengths) {
   // Current shape is (batch_size, sequence_length)
   // Note that we will expand it to (batch_size * num_beams, sequence_length) later.
   // To avoid cloning input_ids, we use const_cast here since this function does not change its content.
-  input_ids_ = OrtValue::CreateTensor<int32_t>(allocator, input_ids_shape.GetDims().data(), input_ids_shape.GetDims().size());
-  std::copy(initial_input_ids_->GetTensorMutableData<int32_t>(),
-            initial_input_ids_->GetTensorMutableData<int32_t>() + input_ids_shape.Size(),
-            input_ids_->GetTensorMutableData<int32_t>());
+  input_ids_ = OrtValue::CreateTensor<int32_t>(allocator.GetInfo(), const_cast<int32_t*>(params_.input_ids), input_ids_shape[0]*input_ids_shape[1], input_ids_shape, std::size(input_ids_shape));
+  position_ids_ = OrtValue::CreateTensor<int32_t>(allocator, input_ids_shape, std::size(input_ids_shape));
 
-  position_ids_ = OrtValue::CreateTensor<int32_t>(allocator, input_ids_shape.GetDims().data(), input_ids_shape.GetDims().size());
+  int64_t position_shape[] = {params_.batch_size * params_.num_beams, 1};
+  next_positions_ = AllocateBuffer<int32_t>(&allocator, next_positions_buffer_, position_shape[0]);
+  memset(next_positions_.data(), 0, next_positions_.size_bytes());
+  next_positions_tensor_ = OrtValue::CreateTensor<int32_t>(allocator.GetInfo(), next_positions_.data(), next_positions_.size(), position_shape, std::size(position_shape));
 
   void* attn_mask_value = nullptr;  // TODO: Temporary hack until needed
 #if 0
@@ -70,18 +66,18 @@ void Gpt::CreateInputs(gsl::span<int32_t> sequence_lengths) {
                          allocator->Info(), attention_mask);
   } else {
 #endif
-  attention_mask_ = OrtValue::CreateTensor<int32_t>(allocator, input_ids_shape.GetDims().data(), input_ids_shape.GetDims().size());
+  attention_mask_ = OrtValue::CreateTensor<int32_t>(allocator, input_ids_shape, std::size(input_ids_shape));
 
   // Set attention mask to be 0 for pad tokens, and 1 for all other tokens.
   // Set position id to be 0 for pad tokens, and accumulated sum of mask in a batch for other tokens
   int32_t* mask_data = attention_mask_->GetTensorMutableData<int32_t>();
   int32_t* position_data = position_ids_->GetTensorMutableData<int32_t>();
-  const int32_t* word_id = initial_input_ids_->GetTensorMutableData<int32_t>();
+  const int32_t* word_id = params_.input_ids;
   int32_t* mask = mask_data;
   int32_t* position = position_data;
-  for (int i = 0; i < batch_size; i++) {
+  for (int i = 0; i < params_.batch_size; i++) {
     int32_t abs_position = 0;
-    for (int j = 0; j < sequence_length; j++, word_id++, mask++, position++) {
+    for (int j = 0; j < params_.sequence_length; j++, word_id++, mask++, position++) {
       if (*word_id == params_.pad_token_id) {
         if (attn_mask_value == nullptr) {
           *mask = 0;
@@ -205,17 +201,22 @@ void DumpTensors(OrtValue** values, const char** names, size_t count, bool dump_
   }
 }
 
-void Gpt::Run() {
-#if 0
+void Gpt::Run(gsl::span<const int32_t> next_tokens, gsl::span<const int32_t> next_indices, int current_length) {
+  if (first_run_)
+    first_run_ = false;
+  else
+    UpdateInputs(next_tokens, next_indices, current_length);
+
+#if 1
   printf("**Inputs:\r\n");
   DumpTensors(inputs_.data(), input_names_.data(), input_names_.size(), true);
   printf("**Outputs:\r\n");
   DumpTensors(outputs_.data(), output_names_.data(), output_names_.size(), false);
 #endif
-  session_init_->Run(nullptr, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
+  session_decode_->Run(nullptr, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
 }
 
-void Gpt::UpdateInputs(gsl::span<const int32_t> next_tokens, OrtValue& position_ids, gsl::span<const int32_t> beam_indices, int current_length) {
+void Gpt::UpdateInputs(gsl::span<const int32_t> next_tokens, gsl::span<const int32_t> beam_indices, int current_length) {
   auto& allocator = Ort::Allocator::GetWithDefaultOptions();
 
   // The following updates inputs for subgraph
@@ -232,14 +233,13 @@ void Gpt::UpdateInputs(gsl::span<const int32_t> next_tokens, OrtValue& position_
   inputs_[0] = expanded_input_ids_.get();
 
   // Update position IDs
-  inputs_[1] = &position_ids;
+  inputs_[1] = next_positions_tensor_.get();
   {
-    int32_t* position_data = position_ids.GetTensorMutableData<int32_t>();
+    int32_t* position_data = next_positions_.data();
     for (int i = 0; i < batch_beam_size; i++) {
       position_data[i]=current_length-1;
     }
   }
-//  next_inputs[1] = position_ids; Already set
 
   // Update attention mask
   const int32_t* old_mask_data = expanded_attention_mask_->GetTensorMutableData<int32_t>();

@@ -102,7 +102,7 @@ class GreedySearchGpt : public GreedySearchBase<T, ParametersT> {
         init_greedy_state_func_(init_greedy_state_func),
         update_feeds_func_(update_feeds_func) {}
 
-#ifdef USE_CUDA
+#if 0
   Status InitializeCuda(
       const GenerationDeviceHelper::ReorderPastStateFunc& reorder_past_state_func,
       const void* cuda_device_prop,
@@ -388,7 +388,7 @@ assert(false);
     // Increase sequence length after a new token is generated.
     ++current_length;
 
-#ifdef USE_CUDA
+#if 0
     // Reorder past state after first run if the GPT subgraph (the one used after the first iteration)
     // contains DecoderMaskedSelfAttention nodes
     if (iteration_counter == 1 && gpt_subgraph_.has_decoder_masked_attention_) {

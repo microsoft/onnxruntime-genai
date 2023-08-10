@@ -1,31 +1,31 @@
-struct Gpt : Model {
+struct Gpt {
 
   static constexpr size_t c_vocab_size=1000;
   static constexpr size_t c_num_heads=4;
   static constexpr size_t c_head_size=8;
   static constexpr size_t c_counts=5;
 
-  Gpt(OrtEnv &ort_env, const ORTCHAR_T* init_path, const ORTCHAR_T* decode_path,
-      std::unique_ptr<OrtValue> &&input_ids, SearchParams params);
+  Gpt(OrtEnv &ort_env, const ORTCHAR_T* decode_path);
 
-  void CreateInputs(gsl::span<int32_t> sequence_lengths) override;
-  OrtValue& GetInputIds() override { return *expanded_input_ids_; }
-  OrtValue& GetLogits() override { return *logits_; }
-  int GetVocabSize() override { return c_vocab_size; }
-  void Run() override;
-  void UpdateInputs(gsl::span<const int32_t> next_tokens, OrtValue& position_ids, gsl::span<const int32_t> beam_indices, int current_length) override;
+  void CreateInputs(gsl::span<int32_t> sequence_lengths, const SearchParams& params);
+  OrtValue& GetLogits() { return *logits_; }
+  int GetVocabSize() { return c_vocab_size; }
+  void Run(gsl::span<const int32_t> next_tokens, gsl::span<const int32_t> next_indices, int current_length);
 
 private:
+  void UpdateInputs(gsl::span<const int32_t> next_tokens, gsl::span<const int32_t> beam_indices, int current_length);
   void PickPastState(OrtAllocator& allocator, size_t index, gsl::span<const int32_t> beam_indices);
 
   SearchParams params_;
+  bool first_run_{true};
 
   bool past_present_share_buffer_ {}; // NYI
 
-  std::unique_ptr<OrtValue> initial_input_ids_;
+  gsl::span<int32_t> next_positions_;  // shape (batch_size, num_beams). Next position value for position_ids.
+  BufferUniquePtr next_positions_buffer_;
+  std::unique_ptr<OrtValue> next_positions_tensor_; // Tensor of the 'next_position_' buffer
 
   // Sessions
-  std::unique_ptr<OrtSession> session_init_;
   std::unique_ptr<OrtSession> session_decode_;
 
   // Inputs
