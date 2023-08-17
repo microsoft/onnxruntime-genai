@@ -1,9 +1,11 @@
 #include "Generators.h"
+#include "Search_Cuda.h"
 #include "beam_search_scorer.h"
 #include <queue>
 
 namespace Generators {
 
+#if 0
 void softmax(gsl::span<float> values) {
   float max = *std::max_element(values.data(), values.data() + values.size());
   std::transform(values.begin(), values.end(), values.begin(), [max](float v) { return std::exp(v - max); });
@@ -20,62 +22,69 @@ void log_softmax(gsl::span<float> values) {
   float log_max = std::log(sum);
   std::transform(values.begin(), values.end(), values.begin(), [max, log_max](float v) { return v - max - log_max; });
 }
+#endif
 
-Search::Search(SearchParams params)
-    : params_{params} {
-  auto allocator = &Ort::Allocator::GetWithDefaultOptions();
-  auto cpu_allocator = allocator;
+void Launch_SoftMax(int32_t* next_tokens, const ScoreType* next_token_scores, int batch_size, int vocab_size, cudaStream_t stream);
+void Launch_CheckForEOS(int32_t* next_tokens, int next_tokens_count, bool* eos_meet, int eos_token_id, int pad_token_id, bool* done_cpu, cudaStream_t stream);
+
+Search_Cuda::Search_Cuda(SearchParams_Cuda& params)
+    : params_{params},
+      allocator_cpu_{Ort::Allocator::GetWithDefaultOptions()},
+      allocator_cuda_{*params.p_allocator_cuda} {
+
   auto batch_beam_size = params.BatchBeamSize();
 
   int64_t sequences_dims[] = {batch_beam_size, params_.max_length};
 
   // below buffers are on cpu
-  sequences_space_ = AllocateBuffer<int32_t>(cpu_allocator,
+  sequences_space_ = AllocateBuffer<int32_t>(&allocator_cpu_,
                                              sequences_space_buffer_,
                                              SafeInt<size_t>(2) * batch_beam_size * params_.max_length);
   memset(sequences_space_.data(), 0, sequences_space_.size_bytes());
   sequences_.Init(sequences_space_, static_cast<int>(batch_beam_size), params_.sequence_length, params_.max_length);
 
-  sequence_lengths_ = AllocateBuffer<int32_t>(cpu_allocator, sequence_lengths_buffer_, batch_beam_size);
-  eos_meet_ = AllocateBuffer<bool>(cpu_allocator, eos_meet_buffer_, batch_beam_size);
-  memset(eos_meet_.data(), 0, eos_meet_.size_bytes());
+  sequence_lengths_ = AllocateBuffer<int32_t>(&allocator_cpu_, sequence_lengths_buffer_, batch_beam_size);
+  eos_meet_ = AllocateBuffer<bool>(&allocator_cuda_, eos_meet_buffer_, batch_beam_size);
+  cudaMemsetAsync(eos_meet_.data(), 0, eos_meet_.size_bytes(), params_.cuda_stream);
 
   // below buffers are on cpu or cuda
   size_t next_token_size = SafeInt<size_t>(batch_beam_size) * params_.vocab_size;
-  next_token_scores_ = AllocateBuffer<ScoreType>(allocator, next_token_scores_buffer_, next_token_size);
-  memset(next_token_scores_.data(), 0, next_token_scores_.size_bytes());
+  next_token_scores_ = AllocateBuffer<ScoreType>(&allocator_cuda_, next_token_scores_buffer_, next_token_size);
+  cudaMemsetAsync(next_token_scores_.data(), 0, next_token_scores_.size_bytes(), params_.cuda_stream);
+
+  done_cpu_ = CudaMallocHostArray<bool>(1);
 
   SetInputSequence();
 }
 
-GreedySearch::GreedySearch(SearchParams params)
-    : Search(params) {
-  auto allocator = &Ort::Allocator::GetWithDefaultOptions();
-  next_tokens_ = AllocateBuffer<int32_t>(allocator, next_tokens_buffer_, SafeInt<size_t>(params.batch_size));
-  memset(next_tokens_.data(), 0, next_tokens_.size_bytes());
+GreedySearch_Cuda::GreedySearch_Cuda(SearchParams_Cuda& params)
+    : Search_Cuda{params} {
+  next_tokens_ = AllocateBuffer<int32_t>(&allocator_cuda_, next_tokens_buffer_, SafeInt<size_t>(params.batch_size));
+  cudaMemsetAsync(next_tokens_.data(), 0, next_tokens_.size_bytes(), params_.cuda_stream);
+
+  next_tokens_cpu_ = CudaMallocHostArray<int32_t>(next_tokens_.size_bytes());
 }
 
-BeamSearch::BeamSearch(SearchParams params)
-    : Search(params) {
+BeamSearch_Cuda::BeamSearch_Cuda(SearchParams_Cuda& params)
+    : Search_Cuda{params} {
   assert(params_.num_beams > 1);  // If 1, use GreedySearch
-  auto allocator = &Ort::Allocator::GetWithDefaultOptions();
-  beam_scorer_ = std::make_unique<BeamSearchScorer>(params_, *allocator);
+  beam_scorer_ = std::make_unique<BeamSearchScorer>(params_, allocator_cpu_);
 }
 
-void Search::SetInputSequence() {
+void Search_Cuda::SetInputSequence() {
   // The original inputs are not expanded, this expands them in place into the sequences
   gsl::span<int32_t> sequences_0 = sequences_space_;
   for (size_t batch = 0; batch < params_.batch_size; batch++) {
     for (size_t beam = 0; beam < params_.num_beams; beam++) {
       for (int j = 0; j < params_.sequence_length; j++) {
-        sequences_0[SafeInt<gsl::index>(batch*params_.num_beams+beam) * params_.max_length + j] =
+        sequences_0[SafeInt<gsl::index>(batch * params_.num_beams + beam) * params_.max_length + j] =
             static_cast<int32_t>(params_.input_ids[SafeInt<gsl::index>(batch) * params_.sequence_length + j]);
       }
     }
   }
 }
 
-void Search::SetLogits(OrtValue& logits) {
+void Search_Cuda::SetLogits(OrtValue& logits) {
   // Logits has shape (batch_size, input_length, vocab_size),
   // where input_length equals to parameters_->sequence_length for first subgraph call, and 1 for the remaining calls.
   auto logits_shape = logits.GetTensorTypeAndShapeInfo()->GetShape();
@@ -95,10 +104,10 @@ void Search::SetLogits(OrtValue& logits) {
     gsl::span<const ScoreType> source(current_logits, vocab_size);
     gsl::span<ScoreType> target = next_token_scores_.subspan(SafeInt<gsl::index>(i) * vocab_size,
                                                              static_cast<gsl::index>(vocab_size));
-    gsl::copy(source, target);
+    cudaMemcpyAsync(target.data(), source.data(), source.size_bytes(), cudaMemcpyDeviceToDevice, params_.cuda_stream);
     current_logits += input_length * vocab_size;
 
-    log_softmax(target);
+//    log_softmax(target);
   }
 }
 
@@ -114,23 +123,23 @@ void Search::SetLogits(OrtValue& logits) {
 }
 #endif
 
-gsl::span<int32_t> GreedySearch::GetNextTokens() {
+gsl::span<int32_t> GreedySearch_Cuda::GetNextTokens() {
   return next_tokens_;
 }
 
-gsl::span<int32_t> BeamSearch::GetNextTokens() {
+gsl::span<int32_t> BeamSearch_Cuda::GetNextTokens() {
   return beam_scorer_->GetNextTokens();
 }
 
-gsl::span<int32_t> BeamSearch::GetNextIndices() {
+gsl::span<int32_t> BeamSearch_Cuda::GetNextIndices() {
   return beam_scorer_->GetNextIndicesCPU();
 }
 
-int Search::GetSequenceLength() {
+int Search_Cuda::GetSequenceLength() {
   return sequences_.GetSequenceLength();
 }
 
-void BeamSearch::NextTokensFromLogits() {
+void BeamSearch_Cuda::NextTokensFromLogits() {
   auto beam_scores = beam_scorer_->GetNextScores();
   // Add beam score to next token scores. Corresponding python code is like:
   //    next_token_scores = next_token_scores + beam_scores[:, None].expand_as(next_token_scores)
@@ -185,64 +194,32 @@ void BeamSearch::NextTokensFromLogits() {
   next_tokens_ = beam_scorer_->GetNextTokens();
 }
 
-void GreedySearch::NextTokensFromLogits() {
+void GreedySearch_Cuda::NextTokensFromLogits() {
   auto next_token_scores = next_token_scores_.data();
-  // next_tokens = torch.argmax(scores, dim=-1)
-  for (size_t i = 0; i < params_.batch_size; i++) {
-    int32_t best_token = 0;
-    ScoreType best_score = next_token_scores[0];
-    for (int32_t token = 1; token < params_.vocab_size; token++) {
-      if (next_token_scores[token] > best_score) {
-        best_score = next_token_scores[token];
-        best_token = token;
-      }
-    }
-    next_tokens_[i] = best_token;
-    next_token_scores += params_.vocab_size;
-  }
+  Launch_SoftMax(next_tokens_.data(), next_token_scores, params_.batch_size, params_.vocab_size, params_.cuda_stream);
 }
 
-void Search::CheckForEOS() {
-  // Look for EOS tokens, if seen set EOS flag and replace with pad token
-  for (size_t batch_id = 0; batch_id < next_tokens_.size(); ++batch_id) {
-    if (next_tokens_[batch_id] == params_.eos_token_id || eos_meet_[batch_id] == true) {
-      eos_meet_[batch_id] = true;
-      next_tokens_[batch_id] = params_.pad_token_id;
-    }
-  }
-
-  // When all batches are finished, stop earlier to avoid wasting computation.
-  // TODO: Merge this with the above so we don't have to double scan. Just keep track of 'batches left'
-  {
-    size_t batch_id = 0;
-    while (batch_id < eos_meet_.size()) {
-      if (eos_meet_[batch_id] == false) {
-        break;
-      }
-      ++batch_id;
-    }
-    if (batch_id == eos_meet_.size()) {
-      done_ = true;
-      return;
-    }
-  }
+void Search_Cuda::CheckForEOS() {
+  assert(next_tokens_.size()==eos_meet_.size());
+  Launch_CheckForEOS(next_tokens_.data(), next_tokens_.size(), eos_meet_.data(), params_.eos_token_id, params_.pad_token_id, done_cpu_.get(), params_.cuda_stream);
 }
 
-void GreedySearch::AppendNextTokensToSequences() {
-  sequences_.AppendNextTokenToSequences(next_tokens_);
+void GreedySearch_Cuda::AppendNextTokensToSequences() {
+  cudaMemcpy(next_tokens_cpu_.get(), next_tokens_.data(), next_tokens_.size_bytes(), cudaMemcpyDeviceToHost);
+  sequences_.AppendNextTokenToSequences(gsl::span<const int32_t>(next_tokens_cpu_.get(), next_tokens_.size()));
 
   if (sequences_.GetSequenceLength() == params_.max_length)
-    done_ = true;
+    *done_cpu_ = true;
 }
 
-void BeamSearch::AppendNextTokensToSequences() {
+void BeamSearch_Cuda::AppendNextTokensToSequences() {
   sequences_.AppendNextTokenToSequences(beam_scorer_->GetNextIndicesCPU(), beam_scorer_->GetNextTokens());
 
   if (sequences_.GetSequenceLength() == params_.max_length)
-    done_ = true;
+    *done_cpu_ = true;
 }
 
-void BeamSearch::Finalize(size_t num_return_sequences, gsl::span<int32_t> output, gsl::span<float> sequence_scores) {
+void BeamSearch_Cuda::Finalize(size_t num_return_sequences, gsl::span<int32_t> output, gsl::span<float> sequence_scores) {
   beam_scorer_->Finalize(sequences_, num_return_sequences, output, sequence_scores);
 }
 
@@ -264,14 +241,14 @@ void GreedySearch::Finalize(size_t num_return_sequences, gsl::span<int32_t> outp
 }
 #endif
 
-gsl::span<ScoreType> Search::GetScores(int batch_beam_index) {
+gsl::span<ScoreType> Search_Cuda::GetScores(int batch_beam_index) {
   assert(batch_beam_index >= 0 && batch_beam_index < params_.BatchBeamSize());
   return next_token_scores_.subspan(batch_beam_index * params_.vocab_size, params_.vocab_size);
 }
 
-namespace Processors {
+namespace Processors_Cuda {
 
-void MinLength(Search& search, int min_length) {
+void MinLength(Search_Cuda& search, int min_length) {
   if (search.sequences_.GetSequenceLength() >= min_length)
     return;
 
@@ -282,7 +259,7 @@ void MinLength(Search& search, int min_length) {
   }
 }
 
-void RepetitionPenalty(Search& search, ScoreType penalty) {
+void RepetitionPenalty(Search_Cuda& search, ScoreType penalty) {
   const int batch_beam_size = search.params_.BatchBeamSize();
   for (int i = 0; i < batch_beam_size; i++) {
     gsl::span<ScoreType> beam_token_scores = search.GetScores(i);
@@ -306,4 +283,4 @@ void RepetitionPenalty(Search& search, ScoreType penalty) {
 
 }  // namespace Processors
 
-} // namespace Generators
+}  // namespace Generators

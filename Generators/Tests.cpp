@@ -6,6 +6,12 @@
 #include "beam_search_scorer.h"
 #include "Sequences.h"
 
+#if USE_CUDA
+#include <cuda_runtime.h>
+#include "gpt_cuda.h"
+#include "search_cuda.h"
+#endif
+
 #define ASSERT_EQ(a, b) assert((a) == (b))
 #define ASSERT_TRUE(a) assert(a)
 
@@ -129,10 +135,10 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32() {
   //        --output tiny_gpt2_beamsearch_fp16.onnx --use_gpu --max_length 20
   // (with separate_gpt2_decoder_for_init_run set to False as it is now set to True by default)
 
-  Gpt gpt(*g_ort_env,
+  Generators::Gpt gpt(*g_ort_env,
           ORT_TSTR("C:/code/github/generators/Generators/models/gpt2_fp32.onnx"));
 
-  SearchParams params;
+  Generators::SearchParams params;
   params.batch_size = static_cast<int>(input_ids_shape[0]);
   params.sequence_length = static_cast<int>(input_ids_shape[1]);
   params.input_ids = input_ids.data();
@@ -140,7 +146,7 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32() {
   params.num_beams = 4;
   params.vocab_size = gpt.GetVocabSize();
 
-  BeamSearch search{params};
+  Generators::BeamSearch search{params};
   gpt.CreateInputs(search.sequence_lengths_, params);
 
   while (!search.IsDone()) {
@@ -148,8 +154,8 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32() {
     search.SetLogits(gpt.GetLogits());
 
     // Scoring
-    Processors::MinLength(search, 1);
-    Processors::RepetitionPenalty(search, 1.0f);
+    Generators::Processors::MinLength(search, 1);
+    Generators::Processors::RepetitionPenalty(search, 1.0f);
     // Processors::LengthPenalty(search, 1.0f);
 
     // Sampling goes here
@@ -175,7 +181,6 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32() {
 }
 
 void Test_GreedySearchTest_GptGreedySearchFp32() {
-  auto ort_env = OrtEnv::Create();
 
   std::vector<int64_t> input_ids_shape{2, 4};
   std::vector<int32_t> input_ids{
@@ -216,7 +221,7 @@ void Test_GreedySearchTest_GptGreedySearchFp32() {
   constexpr int min_cuda_architecture = 530;
   auto session_options = OrtSessionOptions::Create();
 
-  auto session = OrtSession::Create(*ort_env, ORT_TSTR("C:/code/github/generators/Generators/models/tiny_gpt2_greedysearch_with_init_decoder.onnx"), session_options.get());
+  auto session = OrtSession::Create(*g_ort_env, ORT_TSTR("C:/code/github/generators/Generators/models/tiny_gpt2_greedysearch_with_init_decoder.onnx"), session_options.get());
 
   auto ort_outputs = session->Run(nullptr, input_names, ort_inputs.data(), ort_inputs.size(), output_names, 1);
 
@@ -236,7 +241,6 @@ void Test_GreedySearchTest_GptGreedySearchFp32() {
 }
 
 void Test_Lib_GreedySearchTest_GptGreedySearchFp32() {
-  auto ort_env = OrtEnv::Create();
 
   std::vector<int64_t> input_ids_shape{2, 4};
   std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
@@ -253,16 +257,16 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32() {
   // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
   // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
 
-  Gpt gpt(*ort_env,
+  Generators::Gpt gpt(*g_ort_env,
           ORT_TSTR("C:/code/github/generators/Generators/models/gpt2_fp32.onnx"));
 
-  SearchParams params;
+  Generators::SearchParams params;
   params.batch_size = static_cast<int>(input_ids_shape[0]);
   params.sequence_length = static_cast<int>(input_ids_shape[1]);
   params.input_ids = input_ids.data();
   params.vocab_size = gpt.GetVocabSize();
 
-  GreedySearch search{params};
+  Generators::GreedySearch search{params};
   gpt.CreateInputs(search.sequence_lengths_, params);
 
   while (!search.IsDone()) {
@@ -270,8 +274,8 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32() {
     search.SetLogits(gpt.GetLogits());
 
     // Scoring
-    Processors::MinLength(search, 1);
-    Processors::RepetitionPenalty(search, 1.0f);
+    Generators::Processors::MinLength(search, 1);
+    Generators::Processors::RepetitionPenalty(search, 1.0f);
 
     // Sampling goes here
 
@@ -290,3 +294,63 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32() {
 
   std::cout << "Test_Lib_GreedySearchTest_GptGreedySearchFp32 complete\r\n";
 }
+
+#if USE_CUDA
+void Test_Lib_GreedySearchTest_GptGreedySearchFp32_Cuda() {
+  std::vector<int64_t> input_ids_shape{2, 4};
+  std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
+
+  int32_t max_length{10};
+
+  std::vector<int32_t> expected_output{
+      0, 0, 0, 52, 204, 204, 204, 204, 204, 204,
+      0, 0, 195, 731, 731, 114, 114, 114, 114, 114};
+
+  cudaError_t cuda_status = cudaSetDevice(0);
+  assert(cuda_status == cudaSuccess);
+
+  cudaStream_t cuda_stream;
+  cudaStreamCreate(&cuda_stream);
+
+  // To generate this file:
+  // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
+  // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
+  Generators::Gpt_Cuda gpt(*g_ort_env, ORT_TSTR("C:/code/github/generators/Generators/models/gpt2_fp32.onnx"), cuda_stream);
+
+  Generators::SearchParams_Cuda params;
+  params.batch_size = static_cast<int>(input_ids_shape[0]);
+  params.sequence_length = static_cast<int>(input_ids_shape[1]);
+  params.input_ids = input_ids.data();
+  params.vocab_size = gpt.GetVocabSize();
+  params.p_allocator_cuda = &gpt.GetAllocatorCuda();
+  params.cuda_stream = cuda_stream;
+
+  Generators::GreedySearch_Cuda search{params};
+  gpt.CreateInputs(search.sequence_lengths_, params);
+
+  while (!search.IsDone()) {
+    gpt.Run(search.GetNextTokens(), {}, search.GetSequenceLength());
+    search.SetLogits(gpt.GetLogits());
+
+    // Scoring
+    Generators::Processors_Cuda::MinLength(search, 1);
+
+    // Sampling goes here
+
+    // TODO: Are these steps always the same? If so, merge into one function
+    search.NextTokensFromLogits();
+    search.CheckForEOS();
+    search.AppendNextTokensToSequences();
+  }
+
+  // Verify outputs match expected outputs
+  for (int i = 0; i < search.params_.batch_size; i++) {
+    auto sequence = search.sequences_.GetSequence(i);
+    auto* expected_output_start = &expected_output[i * search.params_.max_length];
+    ASSERT_TRUE(std::equal(expected_output_start, expected_output_start + search.params_.max_length, sequence.begin(), sequence.end()));
+  }
+
+  std::cout << "Test_Lib_GreedySearchTest_GptGreedySearchFp32_Cuda complete\r\n";
+}
+#endif
+

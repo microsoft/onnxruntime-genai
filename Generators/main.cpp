@@ -16,6 +16,8 @@ void Test_GreedySearchTest_GptGreedySearchFp32();
 void Test_BeamSearchTest_GptBeamSearchFp32();
 void Test_Lib_BeamSearchTest_GptBeamSearchFp32();
 
+void Test_Lib_GreedySearchTest_GptGreedySearchFp32_Cuda();
+
 #if USE_CUDA
 void LaunchTest(float* test, cudaStream_t stream);
 #endif
@@ -42,6 +44,10 @@ int main()
 
 	std::cout << "Generators Utility Library" << std::endl;
   try {
+#if USE_CUDA
+    Test_Lib_GreedySearchTest_GptGreedySearchFp32_Cuda();
+#endif
+
     Test_Lib_GreedySearchTest_GptGreedySearchFp32();
     Test_GreedySearchTest_GptGreedySearchFp32();
 

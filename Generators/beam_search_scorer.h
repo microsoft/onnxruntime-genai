@@ -17,6 +17,8 @@
 #include "contrib_ops/cpu/transformers/generation_shared.h"
 #endif
 
+namespace Generators {
+
 struct HypothesisScore {
   gsl::span<const int32_t> hypothesis;
   float score;
@@ -55,7 +57,6 @@ struct BeamSearchScorer : IBeamScorer {
 
   void Finalize(ISequences& sequences,
                 size_t num_return_sequences,
-//                gsl::span<const float> final_beam_scores,
                 gsl::span<int32_t> output_sequences,
                 gsl::span<float> output_sequence_scores) override;
 
@@ -91,3 +92,5 @@ struct BeamSearchScorer : IBeamScorer {
   IAllocatorUniquePtr<BeamHypotheses> beam_hyps_ptr_;
   gsl::span<BeamHypotheses> beam_hyps_;  // Shape is batch_size_
 };
+
+}

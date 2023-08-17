@@ -24,13 +24,13 @@ FetchContent_Declare(safeint
 
 FetchContent_MakeAvailable(safeint)
 
+set(CMAKE_BUILD_TYPE Debug)
+
 project (Generators LANGUAGES CXX)
-set(USE_CUDA ON)
-
-include_directories(Generators ${CMAKE_SOURCE_DIR}/ort)
-link_directories(Generators ${CMAKE_SOURCE_DIR}/ort)
-
 set(GENERATORS_ROOT ${PROJECT_SOURCE_DIR})
+
+set(USE_CUDA 1)
+add_compile_definitions(_DEBUG=1)
 
 message(STATUS "Adding source files")
 
@@ -41,34 +41,40 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
 
 if(USE_CUDA)
     # Don't let cmake set a default value for CMAKE_CUDA_ARCHITECTURES
-    cmake_policy(SET CMP0104 OLD)
+    # cmake_policy(SET CMP0104 OLD)
     enable_language(CUDA)
     message( STATUS "CMAKE_CUDA_COMPILER_VERSION: ${CMAKE_CUDA_COMPILER_VERSION}")
+    # set(CUDA_PROPAGATE_HOST_FLAGS ON)
 
     file(GLOB generator_cuda_srcs CONFIGURE_DEPENDS
         "${GENERATORS_ROOT}/*.cu"
     )
     list(APPEND generator_srcs ${generator_cuda_srcs})
+    add_compile_definitions(USE_CUDA=1)
 endif()
 
 add_executable (Generators ${generator_srcs})
 
-#set_target_properties(Generators PROPERTIES LINKER_LANGUAGE cxx)
+target_link_directories(Generators PRIVATE ${CMAKE_SOURCE_DIR}/ort)
+target_include_directories(Generators PRIVATE ${CMAKE_SOURCE_DIR}/ort)
+
 target_link_libraries(Generators PRIVATE "onnxruntime.lib" Microsoft.GSL::GSL)
 target_include_directories(Generators PRIVATE ${safeint_SOURCE_DIR})
-target_include_directories(Generators PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
 
-if(USE_CUDA)
-    target_link_libraries(Generators PRIVATE CUDA)
-    add_compile_definitions(USE_CUDA=1)
+if(MSVC)
+    target_compile_options(Generators PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/MP>")
+endif()
 
-    # Why is this needed? Without these, the cuda build causes weird errors due to mismatches in these settings
-    add_compile_definitions(_ITERATOR_DEBUG_LEVEL=0)
-    set(CMAKE_CXX_FLAGS_RELEASE "/MT")
-    set(CMAKE_CXX_FLAGS_DEBUG "/MDd")
- endif()
-
-file(COPY ${CMAKE_SOURCE_DIR}/ort/onnxruntime.dll DESTINATION ${CMAKE_BINARY_DIR})
+ # Copy the onnxruntime binaries into the build folder so it's found on launch
+file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/onnxruntime*.dll")
+foreach(DLL_FILE ${onnxruntime_libs})
+    add_custom_command(
+        TARGET Generators POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy
+                ${DLL_FILE}
+                ${CMAKE_BINARY_DIR}/$<CONFIG>/${DLL_FILE_NAME}
+    )
+endforeach()
 
 if (CMAKE_VERSION VERSION_GREATER 3.12)
   set_property(TARGET Generators PROPERTY CXX_STANDARD 20)

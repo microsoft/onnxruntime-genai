@@ -18,8 +18,47 @@
 #include "SafeInt.hpp"
 #include "onnxruntime_cxx_api_2.h"
 #include "TensorShape.h"
+#include "debugging.h"
 
 using ScoreType = float;
+
+#if USE_CUDA
+#include <cuda_runtime.h>
+
+struct CudaDeleter {
+  void operator()(void* p) {
+    cudaFree(p);
+  }
+};
+
+template <typename T>
+using cuda_unique_ptr = std::unique_ptr<T, CudaDeleter>;
+
+template <typename T>
+cuda_unique_ptr<T> CudaMallocArray(size_t count) {
+  T* p;
+  cudaMalloc(&p, sizeof(T) * count);
+  return cuda_unique_ptr<T>{p};
+}
+
+struct CudaHostDeleter {
+  void operator()(void* p) {
+    cudaFreeHost(p);
+  }
+};
+
+template <typename T>
+using cuda_host_unique_ptr = std::unique_ptr<T, CudaHostDeleter>;
+
+template <typename T>
+cuda_host_unique_ptr<T> CudaMallocHostArray(size_t count) {
+  T* p;
+  cudaMallocHost(&p, sizeof(T) * count);
+  return cuda_host_unique_ptr<T>{p};
+}
+
+#endif
+
 
 using gsl::narrow;
 

@@ -19,6 +19,8 @@
 #include "contrib_ops/cpu/transformers/beam_search_scorer.h"
 #endif
 
+namespace Generators {
+
 void BeamHypotheses::Init(float length_penalty, gsl::span<HypothesisScore> beams) {
   beams_ = beams;
   beams_used_ = 0;
@@ -230,4 +232,6 @@ void BeamSearchScorer::Finalize(ISequences& sequences,
 
     beam_hyp.Output(num_return_sequences, max_length_, batch_output, sequence_scores_buffer);
   }
+}
+
 }

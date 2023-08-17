@@ -1,43 +1,23 @@
+#pragma once
 namespace Generators {
 
-struct BeamSearchScorer;
-
-struct SearchParams {
-  int num_beams{1};
-  int batch_size {};
-  int sequence_length {};
-  int max_length {10};
-  int pad_token_id{98};
-  int eos_token_id{98};
-  int vocab_size {};
-
-  float length_penalty{1.0f};
-  bool early_stopping{false};
-
-  int BatchBeamSize() const { return num_beams*batch_size; }
-
-  const int32_t *input_ids{}; // Array of [sequence_length][batchsize]
+struct SearchParams_Cuda : SearchParams {
+  Ort::Allocator *p_allocator_cuda;
+  cudaStream_t cuda_stream;
 };
 
-struct GreedySearchParams : SearchParams {
-};
-
-struct BeamSearchParams : SearchParams {
-};
-
-struct Search {
-
-  Search(SearchParams params);
+struct Search_Cuda {
+  Search_Cuda(SearchParams_Cuda &params);
 
   gsl::span<int32_t> GetNextTokens();
   gsl::span<int32_t> GetNextIndices();
 
   int GetSequenceLength();
 
-  bool IsDone() const { return done_; }
+  bool IsDone() const { cudaStreamSynchronize(params_.cuda_stream); return *done_cpu_; } // TODO: Use an event
   void SetLogits(OrtValue& logits);
   // Extra scoring steps go here
-  
+
   //
   void CheckForEOS();
   gsl::span<ScoreType> GetScores(int batch_beam_index);
@@ -45,7 +25,10 @@ struct Search {
 
   void SetInputSequence();
 
-  SearchParams params_;
+  SearchParams_Cuda params_;
+
+  Ort::Allocator& allocator_cpu_;
+  Ort::Allocator& allocator_cuda_;
 
   gsl::span<int32_t> sequences_space_;  // shape (2, beam_size*batch_size, max_length)
   BufferUniquePtr sequences_space_buffer_;
@@ -61,25 +44,29 @@ struct Search {
   gsl::span<ScoreType> next_token_scores_;  // shape (beam_size*batch_size, vocab_size)
   BufferUniquePtr next_token_scores_buffer_;
 
+  cuda_host_unique_ptr<bool> done_cpu_;
+
   Sequences sequences_;
-  bool done_{};
 };
 
-struct GreedySearch : Search {
-  GreedySearch(SearchParams params);
+struct GreedySearch_Cuda : Search_Cuda {
+  GreedySearch_Cuda(SearchParams_Cuda &params);
 
   gsl::span<int32_t> GetNextTokens();
   void NextTokensFromLogits();
   void AppendNextTokensToSequences();
 
-private:
+ private:
+
+  cuda_host_unique_ptr<int32_t> next_tokens_cpu_;  // shape (beam_size*batch_size)
+
   BufferUniquePtr next_tokens_buffer_;
   BufferUniquePtr temp_topk_buffer_;
   BufferUniquePtr staging_for_past_state_reorder_buffer_;
 };
 
-struct BeamSearch : Search {
-  BeamSearch(SearchParams params);
+struct BeamSearch_Cuda : Search_Cuda {
+  BeamSearch_Cuda(SearchParams_Cuda &params);
 
   gsl::span<int32_t> GetNextTokens();
   gsl::span<int32_t> GetNextIndices();
@@ -87,13 +74,13 @@ struct BeamSearch : Search {
   void AppendNextTokensToSequences();
   void Finalize(size_t num_return_sequences, gsl::span<int32_t> output, gsl::span<float> sequence_scores);
 
-private:
+ private:
   std::unique_ptr<BeamSearchScorer> beam_scorer_;
 };
 
-namespace Processors {
-  void MinLength(Search& search, int min_length);
-  void RepetitionPenalty(Search& search, ScoreType penalty);
-}
+namespace Processors_Cuda {
+void MinLength(Search_Cuda& search, int min_length);
+void RepetitionPenalty(Search_Cuda& search, ScoreType penalty);
+}  // namespace Processors_Cuda
 
-}
+}  // namespace Generators

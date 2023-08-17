@@ -66,7 +66,7 @@ void Sequences::AppendNextTokenToSequences(
   current_sequences_buffer ^= 1;
 }
 
-void Sequences::AppendNextTokenToSequences(gsl::span<int32_t> next_tokens) {
+void Sequences::AppendNextTokenToSequences(gsl::span<const int32_t> next_tokens) {
   auto output = sequences[0];
 
   // Append next token to each sequence.

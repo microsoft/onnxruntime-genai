@@ -26,7 +26,7 @@ class Sequences : public ISequences {
       gsl::span<int32_t> beam_next_tokens);
 
   void AppendNextTokenToSequences(
-      gsl::span<int32_t> next_tokens);
+      gsl::span<const int32_t> next_tokens);
 
   void AfterDeviceAppendedNextToken();
 

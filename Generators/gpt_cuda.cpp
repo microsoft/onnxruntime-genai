@@ -1,10 +1,11 @@
 #include "Generators.h"
+#include <cuda_runtime.h>
+#include "gpt_cuda.h"
 
-namespace Generators
-{
+namespace Generators {
 
 template <typename T>
-static void ExpandInputs(const OrtValue& input, int num_beams, OrtAllocator& allocator, std::unique_ptr<OrtValue>& expanded) {
+static void ExpandInputs(const OrtValue& input, int num_beams, OrtAllocator& allocator, std::unique_ptr<OrtValue>& expanded, cudaStream_t cuda_stream) {
   // Input shape (batch_size, sequence_length). The input is required with data type T.
   // Output shape (batch_size * num_beams, sequence_length)
 
@@ -25,40 +26,51 @@ static void ExpandInputs(const OrtValue& input, int num_beams, OrtAllocator& all
   T* target = expanded_data;
   for (int i = 0; i < batch_size; i++) {
     for (int j = 0; j < num_beams; j++) {
-      memcpy(target, input_data + i * sequence_length, sizeof(T) * SafeInt<size_t>(sequence_length));
+      cudaMemcpyAsync(target, input_data + i * sequence_length, sizeof(T) * SafeInt<size_t>(sequence_length), cudaMemcpyHostToDevice, cuda_stream);
       target += sequence_length;
     }
   }
 }
 
-Gpt::Gpt(OrtEnv& ort_env, const ORTCHAR_T* decode_path)
+Gpt_Cuda::Gpt_Cuda(OrtEnv& ort_env, const ORTCHAR_T* decode_path, cudaStream_t cuda_stream)
+ : cuda_stream_{cuda_stream},
+  allocator_cpu_{Ort::Allocator::GetWithDefaultOptions()}
 {
   auto session_options = OrtSessionOptions::Create();
+  OrtCUDAProviderOptions cuda_options;
+  cuda_options.has_user_compute_stream=true;
+  cuda_options.user_compute_stream=cuda_stream;
+  session_options->AppendExecutionProvider_CUDA(cuda_options);
+
   session_decode_ = OrtSession::Create(ort_env, decode_path, session_options.get());
+
+  memory_info_cuda_ = OrtMemoryInfo::Create("Cuda", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+  allocator_cuda_ = Ort::Allocator::Create(*session_decode_, *memory_info_cuda_);
 }
 
-void Gpt::CreateInputs(gsl::span<int32_t> sequence_lengths, const SearchParams& params) {
-  params_=params;
-
-  int64_t input_ids_shape[] = { params_.batch_size, params_.sequence_length };
+void Gpt_Cuda::CreateInputs(gsl::span<int32_t> sequence_lengths, const SearchParams& params) {
+  params_ = params;
 
   // Allocate position_ids and attention_mask based on shape of input_ids
   auto element_type = Ort::TypeToTensorType<int32_t>::type;
-  auto& allocator = Ort::Allocator::GetWithDefaultOptions();
 
-  const OrtMemoryInfo& location = allocator.GetInfo();
-
-  // Use original input_ids. This requires the input_ids for subgraph is also int32.
   // Current shape is (batch_size, sequence_length)
   // Note that we will expand it to (batch_size * num_beams, sequence_length) later.
   // To avoid cloning input_ids, we use const_cast here since this function does not change its content.
-  input_ids_ = OrtValue::CreateTensor<int32_t>(allocator.GetInfo(), const_cast<int32_t*>(params_.input_ids), input_ids_shape[0]*input_ids_shape[1], input_ids_shape, std::size(input_ids_shape));
-  position_ids_ = OrtValue::CreateTensor<int32_t>(allocator, input_ids_shape, std::size(input_ids_shape));
+  int64_t input_ids_shape[] = {params_.batch_size, params_.sequence_length};
+  input_ids_ = OrtValue::CreateTensor<int32_t>(*allocator_cuda_, input_ids_shape, std::size(input_ids_shape));
+  auto input_ids_count = input_ids_shape[0] * input_ids_shape[1];
+  auto* input_ids_data = input_ids_->GetTensorMutableData<int32_t>();
+
+  // Copy input_ids into gpu memory. This requires the input_ids for subgraph is also int32.
+  cudaMemcpy(input_ids_data, params_.input_ids, input_ids_count*sizeof(int32_t), cudaMemcpyHostToDevice);
+
+  position_ids_ = OrtValue::CreateTensor<int32_t>(*allocator_cuda_, input_ids_shape, std::size(input_ids_shape));
 
   int64_t position_shape[] = {params_.batch_size * params_.num_beams, 1};
-  next_positions_ = AllocateBuffer<int32_t>(&allocator, next_positions_buffer_, position_shape[0]);
-  memset(next_positions_.data(), 0, next_positions_.size_bytes());
-  next_positions_tensor_ = OrtValue::CreateTensor<int32_t>(allocator.GetInfo(), next_positions_.data(), next_positions_.size(), position_shape, std::size(position_shape));
+  next_positions_ = AllocateBuffer<int32_t>(allocator_cuda_.get(), next_positions_buffer_, position_shape[0]);
+  cudaMemset(next_positions_.data(), 0, next_positions_.size_bytes());
+  next_positions_tensor_ = OrtValue::CreateTensor<int32_t>(allocator_cuda_->GetInfo(), next_positions_.data(), next_positions_.size(), position_shape, std::size(position_shape));
 
   void* attn_mask_value = nullptr;  // TODO: Temporary hack until needed
 #if 0
@@ -69,36 +81,16 @@ void Gpt::CreateInputs(gsl::span<int32_t> sequence_lengths, const SearchParams& 
                          allocator->Info(), attention_mask);
   } else {
 #endif
-  attention_mask_ = OrtValue::CreateTensor<int32_t>(allocator, input_ids_shape, std::size(input_ids_shape));
+  attention_mask_ = OrtValue::CreateTensor<int32_t>(*allocator_cuda_, input_ids_shape, std::size(input_ids_shape));
+
+  cuda_unique_ptr<int32_t> sequence_lengths_cuda = CudaMallocArray<int32_t>(sequence_lengths.size());
 
   // Set attention mask to be 0 for pad tokens, and 1 for all other tokens.
   // Set position id to be 0 for pad tokens, and accumulated sum of mask in a batch for other tokens
   int32_t* mask_data = attention_mask_->GetTensorMutableData<int32_t>();
   int32_t* position_data = position_ids_->GetTensorMutableData<int32_t>();
-  const int32_t* word_id = params_.input_ids;
-  int32_t* mask = mask_data;
-  int32_t* position = position_data;
-  for (int i = 0; i < params_.batch_size; i++) {
-    int32_t abs_position = 0;
-    for (int j = 0; j < params_.sequence_length; j++, word_id++, mask++, position++) {
-      if (*word_id == params_.pad_token_id) {
-        if (attn_mask_value == nullptr) {
-          *mask = 0;
-        }
-        *position = 0;
-      } else {
-        if (attn_mask_value == nullptr) {
-          *mask = 1;
-        }
-        *position = abs_position;
-        abs_position++;
-      }
-    }
-
-    for (int k = 0; k < params_.num_beams; k++) {
-      sequence_lengths[SafeInt<gsl::index>(i) * params_.num_beams + k] = abs_position;
-    }
-  }
+  LaunchGpt_InitAttentionMask(attn_mask_value ? nullptr : mask_data, position_data, sequence_lengths_cuda.get(), input_ids_data, params_.batch_size, params_.num_beams, params_.sequence_length, params_.pad_token_id, cuda_stream_);
+  cudaMemcpy(sequence_lengths.data(), sequence_lengths_cuda.get(), sequence_lengths.size_bytes(), cudaMemcpyDeviceToHost);
 
   // Expand (batch_size, sequence_length) to (batch_size * num_beams, sequence_length)
   // TODO(tianleiwu): Try expand outputs after first subgraph call instead. That may get better performance.
@@ -107,9 +99,9 @@ void Gpt::CreateInputs(gsl::span<int32_t> sequence_lengths, const SearchParams& 
     expanded_position_ids_ = std::move(position_ids_);
     expanded_attention_mask_ = std::move(attention_mask_);
   } else {
-    ExpandInputs<int32_t>(*input_ids_, params_.num_beams, allocator, expanded_input_ids_);
-    ExpandInputs<int32_t>(*position_ids_, params_.num_beams, allocator, expanded_position_ids_);
-    ExpandInputs<int32_t>(*attention_mask_, params_.num_beams, allocator, expanded_attention_mask_);
+    ExpandInputs<int32_t>(*input_ids_, params_.num_beams, allocator_cpu_, expanded_input_ids_, cuda_stream_);
+    ExpandInputs<int32_t>(*position_ids_, params_.num_beams, allocator_cpu_, expanded_position_ids_, cuda_stream_);
+    ExpandInputs<int32_t>(*attention_mask_, params_.num_beams, allocator_cpu_, expanded_attention_mask_, cuda_stream_);
   }
 
   for (auto* input : {expanded_input_ids_.get(), expanded_position_ids_.get(), expanded_attention_mask_.get()})
@@ -123,15 +115,15 @@ void Gpt::CreateInputs(gsl::span<int32_t> sequence_lengths, const SearchParams& 
   if (!past_present_share_buffer_) {
     // Initialize empty past state
     int64_t empty_past_shape[] = {2, params_.batch_size * params_.num_beams, c_num_heads, 0, c_head_size};
-    empty_past_ = OrtValue::CreateTensor(allocator, empty_past_shape, std::size(empty_past_shape), past_type);
-    for (int i=0;i<c_counts;i++)
+    empty_past_ = OrtValue::CreateTensor(*allocator_cuda_, empty_past_shape, std::size(empty_past_shape), past_type);
+    for (int i = 0; i < c_counts; i++)
       inputs_.push_back(empty_past_.get());
 
     // Initialize non empty past states
     int64_t past_shape[] = {2, params_.batch_size * params_.num_beams, c_num_heads, input_ids_shape[1], c_head_size};
     // The remaining inputs are past state.
     for (int i = 0; i < c_counts; ++i) {
-      pasts_[i] = OrtValue::CreateTensor(allocator, past_shape, std::size(past_shape), past_type);
+      pasts_[i] = OrtValue::CreateTensor(*allocator_cuda_, past_shape, std::size(past_shape), past_type);
 
       char string[32];
       snprintf(string, std::size(string), "past_%d", i);
@@ -143,14 +135,14 @@ void Gpt::CreateInputs(gsl::span<int32_t> sequence_lengths, const SearchParams& 
 
   {
     int64_t logits_shape[] = {params_.batch_size * params_.num_beams, 1, c_vocab_size};
-    logits_ = OrtValue::CreateTensor(allocator, logits_shape, std::size(logits_shape), past_type);
+    logits_ = OrtValue::CreateTensor(*allocator_cuda_, logits_shape, std::size(logits_shape), past_type);
     outputs_.push_back(logits_.get());
   }
   {
     int64_t present_shape[] = {2, params_.batch_size * params_.num_beams, c_num_heads, input_ids_shape[1], c_head_size};
 
     for (int i = 0; i < c_counts; ++i) {
-      presents_[i] = OrtValue::CreateTensor(allocator, present_shape, std::size(present_shape), past_type);
+      presents_[i] = OrtValue::CreateTensor(*allocator_cuda_, present_shape, std::size(present_shape), past_type);
       outputs_.push_back(presents_[i].get());
 
       char string[32];
@@ -165,14 +157,9 @@ void Gpt::CreateInputs(gsl::span<int32_t> sequence_lengths, const SearchParams& 
     output_names_.push_back(output_name.c_str());
 
   io_binding_decode_ = OrtIoBinding::Create(*session_decode_);
-
-  for (size_t i=0;i<inputs_.size();i++)
-    io_binding_decode_->BindInput(input_names_[i], *inputs_[i]);
-  for ( size_t i=0;i<outputs_.size();i++)
-    io_binding_decode_->BindOutput(output_names_[i], *outputs_[i]);
 }
 
-void Gpt::Run(gsl::span<const int32_t> next_tokens, gsl::span<const int32_t> next_indices, int current_length) {
+void Gpt_Cuda::Run(gsl::span<const int32_t> next_tokens, gsl::span<const int32_t> next_indices, int current_length) {
   if (first_run_)
     first_run_ = false;
   else
@@ -184,47 +171,45 @@ void Gpt::Run(gsl::span<const int32_t> next_tokens, gsl::span<const int32_t> nex
   printf("**Outputs:\r\n");
   DumpTensors(outputs_.data(), output_names_.data(), output_names_.size(), false);
 #endif
-  session_decode_->Run(nullptr, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
+
+  io_binding_decode_->ClearBoundInputs();
+  io_binding_decode_->ClearBoundOutputs();
+  io_binding_decode_->SynchronizeInputs();
+  io_binding_decode_->SynchronizeOutputs();
+
+  for (size_t i = 0; i < inputs_.size(); i++)
+    io_binding_decode_->BindInput(input_names_[i], *inputs_[i]);
+  for (size_t i = 0; i < outputs_.size(); i++)
+    io_binding_decode_->BindOutput(output_names_[i], *outputs_[i]);
+
+//  session_decode_->Run(nullptr, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
+  session_decode_->Run(nullptr, *io_binding_decode_);
 }
 
-void Gpt::UpdateInputs(gsl::span<const int32_t> next_tokens, gsl::span<const int32_t> beam_indices, int current_length) {
-  auto& allocator = Ort::Allocator::GetWithDefaultOptions();
-
+void Gpt_Cuda::UpdateInputs(gsl::span<const int32_t> next_tokens, gsl::span<const int32_t> beam_indices, int current_length) {
   // The following updates inputs for subgraph
 
   // Update input_ids with next tokens.
   int batch_beam_size = static_cast<int>(next_tokens.size());
   int64_t dims[] = {batch_beam_size, 1};
-  std::unique_ptr<OrtValue> input_ids = OrtValue::CreateTensor<int32_t>(allocator, dims, std::size(dims));
+  std::unique_ptr<OrtValue> input_ids = OrtValue::CreateTensor<int32_t>(*allocator_cuda_, dims, std::size(dims));
   int32_t* input_ids_data = input_ids->GetTensorMutableData<int32_t>();
-  for (int i = 0; i < batch_beam_size; i++) {
-    input_ids_data[i] = next_tokens[i];
-  }
-  expanded_input_ids_=std::move(input_ids);
+  cudaMemcpyAsync(input_ids_data, next_tokens.data(), batch_beam_size * sizeof(int32_t), cudaMemcpyDeviceToDevice, cuda_stream_);
+  expanded_input_ids_ = std::move(input_ids);
   inputs_[0] = expanded_input_ids_.get();
 
   // Update position IDs
   inputs_[1] = next_positions_tensor_.get();
-  {
-    int32_t* position_data = next_positions_.data();
-    for (int i = 0; i < batch_beam_size; i++) {
-      position_data[i]=current_length-1;
-    }
-  }
+  LaunchGpt_UpdatePositionIds(next_positions_.data(), batch_beam_size, current_length, cuda_stream_);
 
   // Update attention mask
   const int32_t* old_mask_data = expanded_attention_mask_->GetTensorMutableData<int32_t>();
   int64_t mask_dims[] = {batch_beam_size, current_length};
-  auto attention_mask = OrtValue::CreateTensor<int32_t>(allocator, mask_dims, std::size(mask_dims));
+  auto attention_mask = OrtValue::CreateTensor<int32_t>(*allocator_cuda_, mask_dims, std::size(mask_dims));
   int32_t* mask_data = attention_mask->GetTensorMutableData<int32_t>();
-  for (int i = 0; i < batch_beam_size; i++) {
-    for (int j = 0; j < current_length - 1; j++) {
-      mask_data[i * current_length + j] = old_mask_data[i * (current_length - 1) + j];
-    }
-    mask_data[i * current_length + current_length - 1] = 1;
-  }
-  expanded_attention_mask_=std::move(attention_mask);
-  inputs_[2]=expanded_attention_mask_.get();
+  LaunchGpt_UpdateMask(mask_data, old_mask_data, batch_beam_size, current_length, cuda_stream_);
+  expanded_attention_mask_ = std::move(attention_mask);
+  inputs_[2] = expanded_attention_mask_.get();
 
 #if 0
   if (past_present_share_buffer) {
@@ -240,29 +225,29 @@ void Gpt::UpdateInputs(gsl::span<const int32_t> next_tokens, gsl::span<const int
   if (beam_indices.empty()) {  // Update past state
     // If this is the first iteration it'll have an empty past, swap out the non empty past states for the future
     if (inputs_[3] == empty_past_.get()) {
-      for (size_t i=0;i<c_counts;i++)
+      for (size_t i = 0; i < c_counts; i++)
         inputs_[i + 3] = pasts_[i].get();
     }
 
     for (size_t i = 0; i < c_counts; i++) {
-      pasts_[i]=std::move(presents_[i]);
+      pasts_[i] = std::move(presents_[i]);
       inputs_[i + 3] = pasts_[i].get();
 
-      presents_[i] = OrtValue::CreateTensor<float>(allocator, present_shape, std::size(present_shape));
+      presents_[i] = OrtValue::CreateTensor<float>(*allocator_cuda_, present_shape, std::size(present_shape));
       outputs_[i + 1] = presents_[i].get();
     }
   } else {
     for (size_t i = 0; i < c_counts; i++) {
-      PickPastState(allocator, i, beam_indices);
+      PickPastState(i, beam_indices);
 
-      presents_[i] = OrtValue::CreateTensor<float>(allocator, present_shape, std::size(present_shape));
+      presents_[i] = OrtValue::CreateTensor<float>(*allocator_cuda_, present_shape, std::size(present_shape));
       outputs_[i + 1] = presents_[i].get();
     }
   }
 }
 
 // Copy present state to past state
-void Gpt::PickPastState(OrtAllocator& allocator, size_t index, gsl::span<const int32_t> beam_indices) {
+void Gpt_Cuda::PickPastState(size_t index, gsl::span<const int32_t> beam_indices) {
   const OrtValue& present = *presents_[index];
 
   // shape is (2, batch_beam_size, 12, past_seq_len, 64)
@@ -272,7 +257,7 @@ void Gpt::PickPastState(OrtAllocator& allocator, size_t index, gsl::span<const i
   auto past_key_size = past_shape[1] * past_shape[2] * past_shape[3] * past_shape[4];
 
   // Create a tensor with same shape.
-  auto past = OrtValue::CreateTensor<ScoreType>(allocator, past_shape.data(), past_shape.size());
+  auto past = OrtValue::CreateTensor<ScoreType>(*allocator_cuda_, past_shape.data(), past_shape.size());
 
   gsl::span<ScoreType> past_span = gsl::make_span<ScoreType>(past->GetTensorMutableData<ScoreType>(), past_shape_info->GetElementCount());
   gsl::span<const ScoreType> present_span = gsl::make_span<const ScoreType>(present.GetTensorData<ScoreType>(), past_shape_info->GetElementCount());
