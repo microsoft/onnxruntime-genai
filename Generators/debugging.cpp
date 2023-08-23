@@ -1,5 +1,7 @@
 #include "Generators.h"
+#include "cuda_common.h"
 
+namespace Generators {
 static constexpr size_t c_value_count = 10; // Dump this many values from the start of a tensor
 
 void DumpValues(ONNXTensorElementDataType type, const void* p_values_raw, size_t count) {
@@ -59,7 +61,7 @@ void DumpTensor(OrtValue* value, bool dump_value) {
         default: assert(false); break;
       }
       auto cpu_copy=std::make_unique<uint8_t[]>(element_size*element_count);
-      cudaMemcpy(cpu_copy.get(), value->GetTensorRawData(), element_size*element_count, cudaMemcpyDeviceToHost);
+      CudaCheck() == cudaMemcpy(cpu_copy.get(), value->GetTensorRawData(), element_size * element_count, cudaMemcpyDeviceToHost);
       DumpValues(type, cpu_copy.get(), element_count);
 #else
       printf("Unexpected, using GPU memory but not compiled with CUDA?");
@@ -73,4 +75,46 @@ void DumpTensors(OrtValue** values, const char** names, size_t count, bool dump_
     printf("%s ", names[i]);
     DumpTensor(values[i], dump_values);
   }
+}
+
+void DumpMemory(const char* name, gsl::span<const int32_t> data) {
+  printf("%s  ", name);
+  for (auto v : data) {
+    printf("%d ", v);
+  }
+  printf("\r\n");
+}
+
+void DumpMemory(const char* name, gsl::span<const float> data) {
+  printf("%s  ", name);
+  for (auto v : data) {
+    printf("%f ", v);
+  }
+  printf("\r\n");
+}
+
+#if USE_CUDA
+void DumpCudaMemory(const char* name, gsl::span<const int32_t> data) {
+  printf("%s  ", name);
+  auto cpu_copy = std::make_unique<int32_t[]>(data.size());
+  CudaCheck() == cudaMemcpy(cpu_copy.get(), data.data(), data.size_bytes(), cudaMemcpyDeviceToHost);
+
+  for (size_t i = 0; i < data.size(); i++) {
+    printf("%d ", cpu_copy[i]);
+  }
+  printf("\r\n");
+}
+
+void DumpCudaMemory(const char* name, gsl::span<const float> data) {
+  printf("%s  ", name);
+  auto cpu_copy = std::make_unique<float[]>(data.size());
+  CudaCheck() == cudaMemcpy(cpu_copy.get(), data.data(), data.size_bytes(), cudaMemcpyDeviceToHost);
+
+  for (size_t i = 0; i < data.size(); i++) {
+    printf("%f ", cpu_copy[i]);
+  }
+  printf("\r\n");
+}
+#endif
+
 }

@@ -37,7 +37,8 @@ using cuda_unique_ptr = std::unique_ptr<T, CudaDeleter>;
 template <typename T>
 cuda_unique_ptr<T> CudaMallocArray(size_t count) {
   T* p;
-  cudaMalloc(&p, sizeof(T) * count);
+  cudaMallocManaged(&p, sizeof(T) * count);
+      //  cudaMalloc(&p, sizeof(T) * count);
   return cuda_unique_ptr<T>{p};
 }
 
@@ -56,6 +57,26 @@ cuda_host_unique_ptr<T> CudaMallocHostArray(size_t count) {
   cudaMallocHost(&p, sizeof(T) * count);
   return cuda_host_unique_ptr<T>{p};
 }
+
+struct cuda_event_holder {
+  cuda_event_holder() {
+    cudaEventCreate(&v_);
+  }
+
+  cuda_event_holder(unsigned flags) {
+    cudaEventCreateWithFlags(&v_, flags);
+  }
+
+  ~cuda_event_holder() {
+    if (v_)
+      (void)cudaEventDestroy(v_);
+  }
+
+  operator cudaEvent_t() { return v_; }
+
+private:
+  cudaEvent_t v_{};
+};
 
 #endif
 

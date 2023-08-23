@@ -178,13 +178,14 @@ void Gpt::Run(gsl::span<const int32_t> next_tokens, gsl::span<const int32_t> nex
   else
     UpdateInputs(next_tokens, next_indices, current_length);
 
+  session_decode_->Run(nullptr, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
+
 #if 0
   printf("**Inputs:\r\n");
   DumpTensors(inputs_.data(), input_names_.data(), input_names_.size(), true);
   printf("**Outputs:\r\n");
-  DumpTensors(outputs_.data(), output_names_.data(), output_names_.size(), false);
+  DumpTensors(outputs_.data(), output_names_.data(), output_names_.size(), true);
 #endif
-  session_decode_->Run(nullptr, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
 }
 
 void Gpt::UpdateInputs(gsl::span<const int32_t> next_tokens, gsl::span<const int32_t> beam_indices, int current_length) {

@@ -181,6 +181,12 @@ void BeamSearch::NextTokensFromLogits() {
     }
   }
 
+#if 0
+  DumpMemory("Next Scores", next_scores);
+  DumpMemory("Next Tokens", next_tokens);
+  DumpMemory("Next Indices", next_indices);
+#endif
+
   beam_scorer_->Process(sequences_, next_scores, next_tokens, next_indices);
   next_tokens_ = beam_scorer_->GetNextTokens();
 }

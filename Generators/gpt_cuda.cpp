@@ -99,9 +99,9 @@ void Gpt_Cuda::CreateInputs(gsl::span<int32_t> sequence_lengths, const SearchPar
     expanded_position_ids_ = std::move(position_ids_);
     expanded_attention_mask_ = std::move(attention_mask_);
   } else {
-    ExpandInputs<int32_t>(*input_ids_, params_.num_beams, allocator_cpu_, expanded_input_ids_, cuda_stream_);
-    ExpandInputs<int32_t>(*position_ids_, params_.num_beams, allocator_cpu_, expanded_position_ids_, cuda_stream_);
-    ExpandInputs<int32_t>(*attention_mask_, params_.num_beams, allocator_cpu_, expanded_attention_mask_, cuda_stream_);
+    ExpandInputs<int32_t>(*input_ids_, params_.num_beams, *allocator_cuda_, expanded_input_ids_, cuda_stream_);
+    ExpandInputs<int32_t>(*position_ids_, params_.num_beams, *allocator_cuda_, expanded_position_ids_, cuda_stream_);
+    ExpandInputs<int32_t>(*attention_mask_, params_.num_beams, *allocator_cuda_, expanded_attention_mask_, cuda_stream_);
   }
 
   for (auto* input : {expanded_input_ids_.get(), expanded_position_ids_.get(), expanded_attention_mask_.get()})
@@ -165,13 +165,6 @@ void Gpt_Cuda::Run(gsl::span<const int32_t> next_tokens, gsl::span<const int32_t
   else
     UpdateInputs(next_tokens, next_indices, current_length);
 
-#if 0
-  printf("**Inputs:\r\n");
-  DumpTensors(inputs_.data(), input_names_.data(), input_names_.size(), true);
-  printf("**Outputs:\r\n");
-  DumpTensors(outputs_.data(), output_names_.data(), output_names_.size(), false);
-#endif
-
   io_binding_decode_->ClearBoundInputs();
   io_binding_decode_->ClearBoundOutputs();
   io_binding_decode_->SynchronizeInputs();
@@ -184,6 +177,13 @@ void Gpt_Cuda::Run(gsl::span<const int32_t> next_tokens, gsl::span<const int32_t
 
 //  session_decode_->Run(nullptr, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
   session_decode_->Run(nullptr, *io_binding_decode_);
+
+#if 0
+  printf("**Inputs:\r\n");
+  DumpTensors(inputs_.data(), input_names_.data(), input_names_.size(), true);
+  printf("**Outputs:\r\n");
+  DumpTensors(outputs_.data(), output_names_.data(), output_names_.size(), true);
+#endif
 }
 
 void Gpt_Cuda::UpdateInputs(gsl::span<const int32_t> next_tokens, gsl::span<const int32_t> beam_indices, int current_length) {
@@ -268,8 +268,8 @@ void Gpt_Cuda::PickPastState(size_t index, gsl::span<const int32_t> beam_indices
 
     gsl::span<ScoreType> past_key = past_span.subspan(j * SafeInt<size_t>(block_size_per_beam), block_size_per_beam);
     gsl::span<ScoreType> past_value = past_span.subspan(past_key_size + j * SafeInt<size_t>(block_size_per_beam), block_size_per_beam);
-    gsl::copy(present_key, past_key);
-    gsl::copy(present_value, past_value);
+    cudaMemcpyAsync(past_key.data(), present_key.data(), present_key.size_bytes(), cudaMemcpyDeviceToDevice, cuda_stream_);
+    cudaMemcpyAsync(past_value.data(), present_value.data(), present_value.size_bytes(), cudaMemcpyDeviceToDevice, cuda_stream_);
   }
 
   pasts_[index] = std::move(past);

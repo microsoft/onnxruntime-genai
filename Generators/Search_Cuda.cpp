@@ -1,9 +1,20 @@
 #include "Generators.h"
 #include "Search_Cuda.h"
-#include "beam_search_scorer.h"
+#include "beam_search_scorer_cuda.cuh"
+#include "beam_search_scorer_cuda.h"
+#include "beam_search_topk.h"
+#include "cuda_common.h"
 #include <queue>
 
 namespace Generators {
+
+void OnCudaError(cudaError_t error)
+{
+  printf("Cuda Error: %s\n", cudaGetErrorString(error));
+  assert(false);
+  throw std::exception();
+}
+
 
 #if 0
 void softmax(gsl::span<float> values) {
@@ -26,6 +37,9 @@ void log_softmax(gsl::span<float> values) {
 
 void Launch_SoftMax(int32_t* next_tokens, const ScoreType* next_token_scores, int batch_size, int vocab_size, cudaStream_t stream);
 void Launch_CheckForEOS(int32_t* next_tokens, int next_tokens_count, bool* eos_meet, int eos_token_id, int pad_token_id, bool* done_cpu, cudaStream_t stream);
+void LaunchAddProbsKernel(ScoreType* log_probs, ScoreType* cum_log_probs, const int batch_size, const int num_beams, const int vocab_size, cudaStream_t stream);
+void LaunchRepetitionPenaltyProcessor(const int32_t* sequences, ScoreType* next_token_scores, int batch_size, int num_beams, int vocab_size, int max_sequence_length, int current_sequence_length, ScoreType repetition_penalty, cudaStream_t stream);
+void Launch_log_softmax(ScoreType* values, unsigned count, cudaStream_t stream);
 
 Search_Cuda::Search_Cuda(SearchParams_Cuda& params)
     : params_{params},
@@ -68,7 +82,24 @@ GreedySearch_Cuda::GreedySearch_Cuda(SearchParams_Cuda& params)
 BeamSearch_Cuda::BeamSearch_Cuda(SearchParams_Cuda& params)
     : Search_Cuda{params} {
   assert(params_.num_beams > 1);  // If 1, use GreedySearch
-  beam_scorer_ = std::make_unique<BeamSearchScorer>(params_, allocator_cpu_);
+  auto batch_beam_size = params_.BatchBeamSize();
+  beam_scorer_ = std::make_unique<BeamSearchScorer_Cuda>(params_, allocator_cpu_, allocator_cuda_);
+
+  size_t sequences_size = 2 * params_.BatchBeamSize()* params_.max_length;
+  sequences_gpu_ = CudaMallocHostArray<int32_t>(sequences_size);
+  sequences_.InitDevice(gsl::span<int32_t>{sequences_gpu_.get(), sequences_size});
+  CudaCheck() == cudaMemcpyAsync(sequences_gpu_.get(), sequences_space_.data(), (sequences_size / 2)*sizeof(int32_t), cudaMemcpyHostToDevice, params_.cuda_stream);
+
+  topk_next_tokens_ = CudaMallocArray<int32_t>(2 * batch_beam_size);
+  topk_next_indices_ = CudaMallocArray<int32_t>(2* batch_beam_size);
+  topk_next_scores_ = CudaMallocArray<ScoreType>(2 * batch_beam_size);
+
+  constexpr size_t max_parts_of_vocab = 128;
+  size_t topk_buffer_size = SafeInt<size_t>(batch_beam_size) * (max_parts_of_vocab + 1) * params_.num_beams * 2 * 2;
+  topk_buffer_ = CudaMallocArray<ScoreType>(topk_buffer_size);
+  static_assert(sizeof(ScoreType)==sizeof(int32_t)); // The topk_buffer assumes these match, fix for float16
+
+  cudaMemsetAsync(topk_buffer_.get(), 0, topk_buffer_size*sizeof(ScoreType), params_.cuda_stream);
 }
 
 void Search_Cuda::SetInputSequence() {
@@ -104,10 +135,10 @@ void Search_Cuda::SetLogits(OrtValue& logits) {
     gsl::span<const ScoreType> source(current_logits, vocab_size);
     gsl::span<ScoreType> target = next_token_scores_.subspan(SafeInt<gsl::index>(i) * vocab_size,
                                                              static_cast<gsl::index>(vocab_size));
-    cudaMemcpyAsync(target.data(), source.data(), source.size_bytes(), cudaMemcpyDeviceToDevice, params_.cuda_stream);
+    CudaCheck() == cudaMemcpyAsync(target.data(), source.data(), source.size_bytes(), cudaMemcpyDeviceToDevice, params_.cuda_stream);
     current_logits += input_length * vocab_size;
 
-//    log_softmax(target);
+    Launch_log_softmax(target.data(), target.size(), params_.cuda_stream);
   }
 }
 
@@ -141,54 +172,52 @@ int Search_Cuda::GetSequenceLength() {
 
 void BeamSearch_Cuda::NextTokensFromLogits() {
   auto beam_scores = beam_scorer_->GetNextScores();
+
   // Add beam score to next token scores. Corresponding python code is like:
   //    next_token_scores = next_token_scores + beam_scores[:, None].expand_as(next_token_scores)
-  // TODO(tianleiwu): use thread pool to parallel
-  int offset = 0;
-  int batch_beam_index = 0;
-  for (int i = 0; i < params_.batch_size; i++) {
-    for (int j = 0; j < params_.num_beams; j++, batch_beam_index++) {
-      for (int k = 0; k < params_.vocab_size; k++, offset++) {
-        next_token_scores_[offset] += beam_scores[batch_beam_index];
-      }
-    }
-  }
+  LaunchAddProbsKernel(next_token_scores_.data(), beam_scores.data(),
+                       params_.batch_size, params_.num_beams, params_.vocab_size, params_.cuda_stream);
 
   // TODO: Write output scores?
-  unsigned top_k = 2 * params_.num_beams;
 
-  struct ScoreIndex {
-    float score;
-    int32_t index;
-  };
+  if (params_.num_beams <= 32) {
+    constexpr size_t max_parts_of_vocab = 128;
+    size_t candidate_count = SafeInt<size_t>(params_.BatchBeamSize()) * 2 * params_.num_beams;
+    float* topk_tmp_buffer = topk_buffer_.get();
+    float* topk_scores_1st_stage = topk_tmp_buffer;
+    int32_t* topk_tokens_1st_stage = reinterpret_cast<int32_t*>(topk_scores_1st_stage + candidate_count * max_parts_of_vocab);
+    float* topk_scores_2nd_stage = reinterpret_cast<float*>(topk_tokens_1st_stage + candidate_count * max_parts_of_vocab);
+    int32_t* topk_tokens_2nd_stage = reinterpret_cast<int32_t*>(topk_scores_2nd_stage + candidate_count);
 
-  auto compare = [](const ScoreIndex& left, const ScoreIndex& right) { return left.score < right.score; };
-  auto scores = std::make_unique<ScoreType[]>(top_k * params_.batch_size);
-  auto indices = std::make_unique<int32_t[]>(top_k * params_.batch_size);
-  auto tokens = std::make_unique<int32_t[]>(top_k * params_.batch_size);
-
-  auto next_scores = gsl::make_span<float>(scores.get(), top_k * params_.batch_size);
-  auto next_indices = gsl::make_span<int32_t>(indices.get(), top_k * params_.batch_size);
-  auto next_tokens = gsl::make_span<int32_t>(tokens.get(), top_k * params_.batch_size);
-
-  for (int batch_index = 0; batch_index < params_.batch_size; batch_index++) {
-    std::priority_queue<ScoreIndex, std::vector<ScoreIndex>, decltype(compare)> queue;
-    auto token_scores_sub = next_token_scores_.subspan(batch_index * params_.num_beams * params_.vocab_size, params_.num_beams * params_.vocab_size);
-    for (int i = 0; i < token_scores_sub.size(); i++) {
-      queue.push({token_scores_sub[i], i});
-    }
-
-    auto next_indices_sub = next_indices.subspan(top_k * batch_index, top_k);
-    auto next_tokens_sub = next_tokens.subspan(top_k * batch_index, top_k);
-    auto next_scores_sub = next_scores.subspan(top_k * batch_index, top_k);
-    for (unsigned i = 0; i < top_k; i++) {
-      auto v = queue.top();
-      next_indices_sub[i] = v.index / params_.vocab_size;
-      next_tokens_sub[i] = v.index % params_.vocab_size;
-      next_scores_sub[i] = v.score;
-      queue.pop();
-    }
+    cuda::BeamSearchTopK(next_token_scores_.data(),
+                         params_.batch_size,
+                         params_.num_beams,
+                         params_.vocab_size,
+                         2 * params_.num_beams,
+                         topk_scores_1st_stage,
+                         topk_tokens_1st_stage,
+                         topk_scores_2nd_stage,
+                         topk_tokens_2nd_stage,
+                         topk_next_scores_.get(),
+                         topk_next_tokens_.get(),
+                         topk_next_indices_.get(),
+                         params_.cuda_stream);
   }
+  else
+    assert(false);
+
+  CudaCheck() == cudaStreamSynchronize(params_.cuda_stream);
+
+  size_t size=params_.BatchBeamSize()*2;
+  gsl::span<ScoreType> next_scores{topk_next_scores_.get(), size};
+  gsl::span<int32_t> next_tokens{topk_next_tokens_.get(), size};
+  gsl::span<int32_t> next_indices{topk_next_indices_.get(), size};
+
+#if 0
+  DumpCudaMemory("Next Scores", next_scores);
+  DumpCudaMemory("Next Tokens", next_tokens);
+  DumpCudaMemory("Next Indices", next_indices);
+#endif
 
   beam_scorer_->Process(sequences_, next_scores, next_tokens, next_indices);
   next_tokens_ = beam_scorer_->GetNextTokens();
@@ -205,18 +234,24 @@ void Search_Cuda::CheckForEOS() {
 }
 
 void GreedySearch_Cuda::AppendNextTokensToSequences() {
-  cudaMemcpy(next_tokens_cpu_.get(), next_tokens_.data(), next_tokens_.size_bytes(), cudaMemcpyDeviceToHost);
+  CudaCheck()==cudaMemcpy(next_tokens_cpu_.get(), next_tokens_.data(), next_tokens_.size_bytes(), cudaMemcpyDeviceToHost);
   sequences_.AppendNextTokenToSequences(gsl::span<const int32_t>(next_tokens_cpu_.get(), next_tokens_.size()));
 
   if (sequences_.GetSequenceLength() == params_.max_length)
     *done_cpu_ = true;
 }
 
-void BeamSearch_Cuda::AppendNextTokensToSequences() {
-  sequences_.AppendNextTokenToSequences(beam_scorer_->GetNextIndicesCPU(), beam_scorer_->GetNextTokens());
+bool BeamSearch_Cuda::IsDone() const
+{
+  beam_scorer_->IsDone();
+  return beam_scorer_->IsDoneLater() || sequences_.GetSequenceLength() == params_.max_length;
+}
 
-  if (sequences_.GetSequenceLength() == params_.max_length)
-    *done_cpu_ = true;
+void BeamSearch_Cuda::AppendNextTokensToSequences() {
+  sequences_.AfterDeviceAppendedNextToken();
+  //AppendNextTokenToSequences(beam_scorer_->GetNextIndicesCPU(), beam_scorer_->GetNextTokens());
+  //if (sequences_.GetSequenceLength() == params_.max_length)
+  //  *done_cpu_ = true;
 }
 
 void BeamSearch_Cuda::Finalize(size_t num_return_sequences, gsl::span<int32_t> output, gsl::span<float> sequence_scores) {
@@ -246,6 +281,10 @@ gsl::span<ScoreType> Search_Cuda::GetScores(int batch_beam_index) {
   return next_token_scores_.subspan(batch_beam_index * params_.vocab_size, params_.vocab_size);
 }
 
+gsl::span<ScoreType> Search_Cuda::GetScores() {
+  return next_token_scores_;
+}
+
 namespace Processors_Cuda {
 
 void MinLength(Search_Cuda& search, int min_length) {
@@ -260,25 +299,9 @@ void MinLength(Search_Cuda& search, int min_length) {
 }
 
 void RepetitionPenalty(Search_Cuda& search, ScoreType penalty) {
-  const int batch_beam_size = search.params_.BatchBeamSize();
-  for (int i = 0; i < batch_beam_size; i++) {
-    gsl::span<ScoreType> beam_token_scores = search.GetScores(i);
-    gsl::span<const int32_t> sequence = search.sequences_.GetSequence(i);
-
-    // Find unique word IDs in sequence.
-    std::unordered_set<int32_t> unique_word_ids;
-    for (const auto& word_id : sequence) {
-      unique_word_ids.insert(word_id);
-    }
-
-    for (const int32_t word_id : unique_word_ids) {
-      ScoreType score = beam_token_scores[word_id];
-
-      // If score < 0, then repetition penalty > 1.0 has to multiplied to reduce the previous token probability,
-      // This assumes that scores are either positive (like ctrl) or negative (like GPT-2), but not a mixture.
-      beam_token_scores[word_id] = (score < 0 ? score * penalty : score / penalty);
-    }
-  }
+  LaunchRepetitionPenaltyProcessor(search.GetSequences().GetCurrentDeviceSequences().data(),
+    search.GetScores().data(), search.params_.batch_size, search.params_.num_beams, search.params_.vocab_size, 
+    search.params_.max_length, search.GetSequenceLength(), penalty, search.params_.cuda_stream);
 }
 
 }  // namespace Processors

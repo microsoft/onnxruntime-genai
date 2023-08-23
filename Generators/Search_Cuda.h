@@ -1,6 +1,8 @@
 #pragma once
 namespace Generators {
 
+struct BeamSearchScorer_Cuda;
+
 struct SearchParams_Cuda : SearchParams {
   Ort::Allocator *p_allocator_cuda;
   cudaStream_t cuda_stream;
@@ -21,6 +23,7 @@ struct Search_Cuda {
   //
   void CheckForEOS();
   gsl::span<ScoreType> GetScores(int batch_beam_index);
+  gsl::span<ScoreType> GetScores();
   Sequences& GetSequences() { return sequences_; }
 
   void SetInputSequence();
@@ -70,12 +73,31 @@ struct BeamSearch_Cuda : Search_Cuda {
 
   gsl::span<int32_t> GetNextTokens();
   gsl::span<int32_t> GetNextIndices();
+
   void NextTokensFromLogits();
   void AppendNextTokensToSequences();
   void Finalize(size_t num_return_sequences, gsl::span<int32_t> output, gsl::span<float> sequence_scores);
 
+  bool IsDone() const;
+
  private:
-  std::unique_ptr<BeamSearchScorer> beam_scorer_;
+  std::unique_ptr<BeamSearchScorer_Cuda> beam_scorer_;
+  cuda_host_unique_ptr<int32_t> sequences_gpu_;
+
+  cuda_unique_ptr<int32_t> topk_next_tokens_;
+  cuda_unique_ptr<int32_t> topk_next_indices_;
+  cuda_unique_ptr<ScoreType> topk_next_scores_;
+
+  // temp buffer for topk computation, including:
+  // 1st stage needs:
+  //   temp score: (batch_size * num_beams * parts_vocab, 2 * num_beams)
+  //   temp token: (batch_size * num_beams * parts_vocab, 2 * num_beams)
+  // 2nd stage needs:
+  //   temp score: (batch_size * num_beams, 2 * num_beams)
+  //   temp token: (batch_size * num_beams, 2 * num_beams)
+  // in total, it will be:
+  // 2 * (batch_size * num_beams * (parts_vocab + 1), 2 * num_beams)
+  cuda_unique_ptr<ScoreType> topk_buffer_;
 };
 
 namespace Processors_Cuda {
