@@ -4,6 +4,8 @@
 #include "Generators.h"
 #include "sequences.h"
 
+namespace Generators {
+
 void Sequences::Init(std::span<int32_t> buffer, int batch_beam_size, int sequence_length, int max_length) {
   size_t sequences_size = batch_beam_size * max_length;
   assert(buffer.size() == sequences_size + sequences_size);
@@ -78,4 +80,6 @@ void Sequences::AppendNextTokenToSequences(std::span<const int32_t> next_tokens)
 void Sequences::AfterDeviceAppendedNextToken() {
   ++current_length_;
   current_sequences_buffer ^= 1;
+}
+
 }

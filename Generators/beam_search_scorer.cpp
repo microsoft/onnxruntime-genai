@@ -44,7 +44,7 @@ void BeamHypotheses::Output(
     std::span<float> sequences_scores)  // buffer of shape (num_return_sequences) or empty
 {
   // Copy the top_k beams into the sequences
-  ORT_ENFORCE(top_k <= beams_used_);
+  assert(top_k <= beams_used_);
   for (int index = 0; index < top_k; index++) {
     auto& item = beams_[index];
     std::span<int32_t> target = sequences.subspan(index * max_length, max_length);
@@ -104,13 +104,13 @@ void BeamSearchScorer::Process(Sequences& sequences,
 
   const int sequence_length = sequences.GetSequenceLength();
 
-  ORT_ENFORCE(next_scores.size() == next_tokens.size());
-  ORT_ENFORCE(next_scores.size() == next_indices.size());
+  assert(next_scores.size() == next_tokens.size());
+  assert(next_scores.size() == next_indices.size());
 
   for (size_t batch = 0; batch < batch_size_; batch++) {
     BeamHypotheses& beam_hyp = beam_hyps_[batch];
     if (beam_hyp.done_) {
-      ORT_ENFORCE(beam_hyp.beams_used_ == num_beams_, "Batch can only be done if all beams have been generated");
+      assert(beam_hyp.beams_used_ == num_beams_, "Batch can only be done if all beams have been generated");
 
       // Pad the batch.
       for (size_t j = 0; j < num_beams_; j++) {
@@ -157,8 +157,8 @@ void BeamSearchScorer::Process(Sequences& sequences,
         break;
     }
 
-    ORT_ENFORCE(beam_idx == num_beams_);
-    ORT_ENFORCE(static_cast<size_t>(hypothesis_buffer_used_) <= hypothesis_buffer_.size());
+    assert(beam_idx == num_beams_);
+    assert(static_cast<size_t>(hypothesis_buffer_used_) <= hypothesis_buffer_.size());
 
     //  Check if we are done so that we can save a pad step if all(done)
     if (static_cast<size_t>(beam_hyp.beams_used_) < num_beams_)

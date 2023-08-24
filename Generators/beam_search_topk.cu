@@ -3,8 +3,6 @@
 #include <limits>
 #include "beam_search_topk.h"
 
-#define ORT_ENFORCE(condition, ...) assert(condition)
-
 namespace Generators {
 namespace cuda {
 
@@ -161,7 +159,7 @@ void LaunchBeamSearchOnlineTopKStage2Kernel(
     T* output_values,
     int32_t* output_indices,
     cudaStream_t stream) {
-  ORT_ENFORCE(parts_per_beam <= 128, "Parts per beam should not be greater than 128");
+  assert(parts_per_beam <= 128); // Parts per beam should not be greater than 128
 
   int smem_stage2_size = parts_per_beam * max_k * 2 * sizeof(int32_t);
 
@@ -205,11 +203,9 @@ void TopKLauncherMaxK(
 
   dim3 grid(batch_size * num_beams, voc_parts);
 
-#ifndef USE_ROCM
   cudaFuncSetAttribute(BeamSearchOnlineTopKStage1Kernel<T, max_k, kThreadBlockSize>,
                        cudaFuncAttributePreferredSharedMemoryCarveout,
                        cudaSharedmemCarveoutMaxL1);
-#endif  // !USE_ROCM
 
   BeamSearchOnlineTopKStage1Kernel<T, max_k, kThreadBlockSize>
       <<<grid, kThreadBlockSize, 0, stream>>>(input, K, vocab_size, (vocab_size + voc_parts - 1) / voc_parts, output_values_tmp, output_indices_tmp);
@@ -267,7 +263,7 @@ void LaunchBatchTopKKernel(const T* topk_scores,
                            int32_t num_beams,
                            int32_t k,
                            cudaStream_t stream) {
-  ORT_ENFORCE(k <= 64, "LaunchBatchTopKKernel doesn't support k >= 64");
+  assert(k <= 64); // LaunchBatchTopKKernel doesn't support k >= 64
 
 #define BatchTopKKernelLauncher(K)                                          \
   BatchTopKKernel<T, I, K, 32><<<batch_size, 32, 0, stream>>>(topk_scores,  \
@@ -316,7 +312,7 @@ void BeamSearchTopK(
     int32_t* output_tokens,
     int32_t* output_indices,
     cudaStream_t stream) {
-  ORT_ENFORCE(k <= 64, "BeamSearchTopK doesn't support k > 64");
+  assert(k <= 64); // BeamSearchTopK doesn't support k > 64
 
 #define TopKLauncher(K)                           \
   TopKLauncherMaxK<ScoreType, K>(input,                   \

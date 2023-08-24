@@ -1,4 +1,5 @@
 #include "Generators.h"
+#include "Gpt.h"
 
 namespace Generators
 {
@@ -16,7 +17,7 @@ static void ExpandInputs(const OrtValue& input, int num_beams, OrtAllocator& all
   int64_t dims[] = {batch_size * num_beams, sequence_length};
 
   auto element_type = input_type_info->GetElementType();
-  ORT_ENFORCE(element_type == Ort::TypeToTensorType<T>::type);
+  assert(element_type == Ort::TypeToTensorType<T>::type);
 
   expanded = OrtValue::CreateTensor<T>(allocator, dims, std::size(dims));
 

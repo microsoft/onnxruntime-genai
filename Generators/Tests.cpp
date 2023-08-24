@@ -5,6 +5,7 @@
 
 #include "beam_search_scorer.h"
 #include "Sequences.h"
+#include "gpt.h"
 
 #if USE_CUDA
 #include <cuda_runtime.h>
@@ -415,7 +416,7 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32_Cuda() {
   }
 
   size_t sequence_length=search.params_.batch_size*max_length;
-  auto output_sequence_cuda = CudaMallocArray<int32_t>(sequence_length);
+  auto output_sequence_cuda = Generators::CudaMallocArray<int32_t>(sequence_length);
   auto output_sequence = std::make_unique<int32_t[]>(sequence_length);
 
   search.Finalize(1, std::span<int32_t>(output_sequence_cuda.get(), sequence_length), {});

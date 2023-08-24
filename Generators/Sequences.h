@@ -1,4 +1,5 @@
 #pragma once
+namespace Generators {
 
 // This class keeps track of sequences generated.
 class Sequences {
@@ -44,3 +45,5 @@ class Sequences {
   int max_length_;
   int current_length_;
 };
+
+}

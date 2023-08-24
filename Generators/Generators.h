@@ -16,11 +16,15 @@
 #include "onnxruntime_cxx_api_2.h"
 #include "debugging.h"
 
+#if USE_CUDA
+#include <cuda_runtime.h>
+#endif
+
+namespace Generators {
+
 using ScoreType = float;
 
 #if USE_CUDA
-#include <cuda_runtime.h>
-
 struct CudaDeleter {
   void operator()(void* p) {
     cudaFree(p);
@@ -81,8 +85,6 @@ private:
 };
 
 #endif
-
-#define ORT_ENFORCE(condition, ...) assert(condition)
 
 // TODO: Do we need this class or is IAllocator::MakeUniquePtr sufficient/better
 struct  BufferDeleter {
@@ -155,6 +157,7 @@ std::span<TAlloc> Allocate(OrtAllocator& allocator,
   return span;
 }
 
+}
+
 #include "Sequences.h"
 #include "Search.h"
-#include "gpt.h"
