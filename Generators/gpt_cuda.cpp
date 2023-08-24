@@ -158,6 +158,13 @@ void Gpt_Cuda::CreateInputs(std::span<int32_t> sequence_lengths, const SearchPar
   io_binding_decode_ = OrtIoBinding::Create(*session_decode_);
 }
 
+std::span<const ScoreType> Gpt_Cuda::GetLogits() {
+  auto type_shape = logits_->GetTensorTypeAndShapeInfo();
+  assert(type_shape->GetShape().size() == 3);
+
+  return {logits_->GetTensorData<ScoreType>(), type_shape->GetElementCount()};
+}
+
 void Gpt_Cuda::Run(std::span<const int32_t> next_tokens, std::span<const int32_t> next_indices, int current_length) {
   if (first_run_)
     first_run_ = false;

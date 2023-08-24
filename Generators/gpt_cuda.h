@@ -9,7 +9,7 @@ struct Gpt_Cuda {
   Gpt_Cuda(OrtEnv& ort_env, const ORTCHAR_T* decode_path, cudaStream_t cuda_stream);
 
   void CreateInputs(std::span<int32_t> sequence_lengths, const SearchParams& params);
-  OrtValue& GetLogits() { return *logits_; }
+  std::span<const ScoreType> GetLogits();
   int GetVocabSize() { return c_vocab_size; }
   void Run(std::span<const int32_t> next_tokens, std::span<const int32_t> next_indices, int current_length);
 

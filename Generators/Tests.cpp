@@ -111,7 +111,6 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32() {
   int32_t max_length{20};
   float length_penalty{1.0f};
 
-#if 0
   std::vector<int64_t> input_ids_shape{3, 12};
   std::vector<int32_t> input_ids{
       0, 0, 0, 0, 0, 52, 195, 731, 321, 301, 734, 620,
@@ -122,11 +121,6 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32() {
       0, 0, 0, 0, 0, 52, 195, 731, 321, 301, 734, 620, 131, 131, 131, 181, 638, 638, 638, 638,
       41, 554, 74, 622, 206, 222, 75, 223, 221, 198, 224, 572, 292, 292, 292, 292, 292, 292, 292, 292,
       0, 0, 0, 52, 328, 219, 328, 206, 288, 227, 896, 328, 328, 669, 669, 669, 669, 669, 669, 669};
-#else
-  std::vector<int64_t> input_ids_shape{1, 12};
-  std::vector<int32_t> input_ids{0, 0, 0, 0, 0, 52, 195, 731, 321, 301, 734, 620};
-  std::vector<int32_t> expected_output{0, 0, 0, 0, 0, 52, 195, 731, 321, 301, 734, 620, 131, 131, 131, 181, 638, 638, 638, 638};
-#endif
 
   // The ONNX model is generated like the following:
   // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2
@@ -355,7 +349,6 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32_Cuda() {
   int32_t max_length{20};
   float length_penalty{1.0f};
 
-#if 1
   std::vector<int64_t> input_ids_shape{3, 12};
   std::vector<int32_t> input_ids{
       0, 0, 0, 0, 0, 52, 195, 731, 321, 301, 734, 620,
@@ -366,11 +359,6 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32_Cuda() {
       0, 0, 0, 0, 0, 52, 195, 731, 321, 301, 734, 620, 131, 131, 131, 181, 638, 638, 638, 638,
       41, 554, 74, 622, 206, 222, 75, 223, 221, 198, 224, 572, 292, 292, 292, 292, 292, 292, 292, 292,
       0, 0, 0, 52, 328, 219, 328, 206, 288, 227, 896, 328, 328, 669, 669, 669, 669, 669, 669, 669};
-#else
-  std::vector<int64_t> input_ids_shape{1, 12};
-  std::vector<int32_t> input_ids{0, 0, 0, 0, 0, 52, 195, 731, 321, 301, 734, 620};
-  std::vector<int32_t> expected_output{0, 0, 0, 0, 0, 52, 195, 731, 321, 301, 734, 620, 131, 131, 131, 181, 638, 638, 638, 638};
-#endif
 
   cudaError_t cuda_status = cudaSetDevice(0);
   assert(cuda_status == cudaSuccess);

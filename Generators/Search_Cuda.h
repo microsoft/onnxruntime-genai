@@ -17,7 +17,7 @@ struct Search_Cuda {
   int GetSequenceLength();
 
   bool IsDone() const { cudaStreamSynchronize(params_.cuda_stream); return *done_cpu_; } // TODO: Use an event
-  void SetLogits(OrtValue& logits);
+  void SetLogits(std::span<const ScoreType> logits);
   // Extra scoring steps go here
 
   //

@@ -35,7 +35,7 @@ struct Search {
   int GetSequenceLength();
 
   bool IsDone() const { return done_; }
-  void SetLogits(OrtValue& logits);
+  void SetLogits(std::span<const ScoreType> logits);
   // Extra scoring steps go here
   
   //

@@ -75,27 +75,25 @@ void Search::SetInputSequence() {
   }
 }
 
-void Search::SetLogits(OrtValue& logits) {
+void Search::SetLogits(std::span<const ScoreType> logits) {
   // Logits has shape (batch_size, input_length, vocab_size),
   // where input_length equals to parameters_->sequence_length for first subgraph call, and 1 for the remaining calls.
-  auto logits_shape = logits.GetTensorTypeAndShapeInfo()->GetShape();
-  assert(logits_shape.size() == 3);
-  const ScoreType* logits_data = logits.GetTensorMutableData<ScoreType>();
 
-  auto input_length = logits_shape[1];
-  auto vocab_size = logits_shape[2];
   auto batch_beam_size = params_.BatchBeamSize();
-  assert(vocab_size == params_.vocab_size);
+  auto input_length = logits.size() / (batch_beam_size * params_.vocab_size);
+  assert(logits.size() % (batch_beam_size * params_.vocab_size) == 0);  // Should divide evenly
+
+  assert(input_length == 1);  // When is this not true? RyanHill wants to know
 
   // Get logits for the last token:
   //    next_token_logits = logits[:, -1, :], and the result shape is (batch_size, vocab_size)
   // When input_length == 1, use logits directly in SoftmaxCPU below so it only need for input_length > 1.
-  const ScoreType* current_logits = logits_data + (input_length - 1) * vocab_size;
+  const ScoreType* current_logits = logits.data() + (input_length - 1) * params_.vocab_size;
   for (int i = 0; i < batch_beam_size; i++) {
-    std::span<const ScoreType> source(current_logits, vocab_size);
-    std::span<ScoreType> target = next_token_scores_.subspan(i * vocab_size, vocab_size);
+    std::span<const ScoreType> source(current_logits, params_.vocab_size);
+    std::span<ScoreType> target = next_token_scores_.subspan(i * params_.vocab_size, params_.vocab_size);
     copy(source, target);
-    current_logits += input_length * vocab_size;
+    current_logits += input_length * params_.vocab_size;
 
     log_softmax(target);
   }
@@ -311,4 +309,4 @@ void RepetitionPenalty(Search& search, ScoreType penalty) {
 
 }  // namespace Processors
 
-} // namespace Generators
+}  // namespace Generators

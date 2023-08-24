@@ -173,6 +173,13 @@ void Gpt::CreateInputs(std::span<int32_t> sequence_lengths, const SearchParams& 
     io_binding_decode_->BindOutput(output_names_[i], *outputs_[i]);
 }
 
+std::span<const ScoreType> Gpt::GetLogits() {
+  auto type_shape = logits_->GetTensorTypeAndShapeInfo();
+  assert(type_shape->GetShape().size() == 3);
+
+  return {logits_->GetTensorData<ScoreType>(), type_shape->GetElementCount()};
+}
+
 void Gpt::Run(std::span<const int32_t> next_tokens, std::span<const int32_t> next_indices, int current_length) {
   if (first_run_)
     first_run_ = false;
