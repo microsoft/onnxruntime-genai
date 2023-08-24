@@ -32,7 +32,7 @@ Search::Search(SearchParams params)
   // below buffers are on cpu
   sequences_space_ = AllocateBuffer<int32_t>(cpu_allocator,
                                              sequences_space_buffer_,
-                                             SafeInt<size_t>(2) * batch_beam_size * params_.max_length);
+                                             2 * batch_beam_size * params_.max_length);
   memset(sequences_space_.data(), 0, sequences_space_.size_bytes());
   sequences_.Init(sequences_space_, static_cast<int>(batch_beam_size), params_.sequence_length, params_.max_length);
 
@@ -41,7 +41,7 @@ Search::Search(SearchParams params)
   memset(eos_meet_.data(), 0, eos_meet_.size_bytes());
 
   // below buffers are on cpu or cuda
-  size_t next_token_size = SafeInt<size_t>(batch_beam_size) * params_.vocab_size;
+  size_t next_token_size = batch_beam_size * params_.vocab_size;
   next_token_scores_ = AllocateBuffer<ScoreType>(allocator, next_token_scores_buffer_, next_token_size);
   memset(next_token_scores_.data(), 0, next_token_scores_.size_bytes());
 
@@ -51,7 +51,7 @@ Search::Search(SearchParams params)
 GreedySearch::GreedySearch(SearchParams params)
     : Search(params) {
   auto allocator = &Ort::Allocator::GetWithDefaultOptions();
-  next_tokens_ = AllocateBuffer<int32_t>(allocator, next_tokens_buffer_, SafeInt<size_t>(params.batch_size));
+  next_tokens_ = AllocateBuffer<int32_t>(allocator, next_tokens_buffer_, params.batch_size);
   memset(next_tokens_.data(), 0, next_tokens_.size_bytes());
 }
 

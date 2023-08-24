@@ -5,7 +5,7 @@
 #include "sequences.h"
 
 void Sequences::Init(std::span<int32_t> buffer, int batch_beam_size, int sequence_length, int max_length) {
-  size_t sequences_size = SafeInt<size_t>(batch_beam_size) * max_length;
+  size_t sequences_size = batch_beam_size * max_length;
   assert(buffer.size() == sequences_size + sequences_size);
 
   sequences[0] = buffer.subspan(0, sequences_size);
@@ -50,12 +50,12 @@ void Sequences::AppendNextTokenToSequences(
 
   for (int i = 0; i < batch_beam_size_; i++) {
     int beam_index = beam_indices[i];
-    std::span<const int32_t> source = input.subspan(SafeInt<size_t>(beam_index) * max_length_, current_length_);
-    std::span<int32_t> target = output.subspan(SafeInt<size_t>(i) * max_length_, current_length_);
+    std::span<const int32_t> source = input.subspan(beam_index * max_length_, current_length_);
+    std::span<int32_t> target = output.subspan(i * max_length_, current_length_);
     copy(source, target);
 
     // Append next token to each beam.
-    output[SafeInt<size_t>(i) * max_length_ + current_length_] = beam_next_tokens[i];
+    output[i * max_length_ + current_length_] = beam_next_tokens[i];
   }
 
   ++current_length_;
@@ -69,7 +69,7 @@ void Sequences::AppendNextTokenToSequences(std::span<const int32_t> next_tokens)
 
   // Append next token to each sequence.
   for (int i = 0; i < batch_beam_size_; i++) {
-    output[SafeInt<size_t>(i) * max_length_ + current_length_] = next_tokens[i];
+    output[i * max_length_ + current_length_] = next_tokens[i];
   }
 
   ++current_length_;

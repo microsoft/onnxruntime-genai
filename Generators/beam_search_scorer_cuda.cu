@@ -1,6 +1,6 @@
 #include <cuda_runtime.h>
 #include <assert.h>
-#include <gsl/gsl>
+#include <span>
 #include "beam_search_scorer_cuda.cuh"
 
 namespace Generators

@@ -4,21 +4,6 @@
 #include "Generators.h"
 #include "beam_search_scorer.h"
 
-#if 0
-#include <queue>
-#include <math.h>
-#include "core/common/common.h"
-#include "core/common/narrow.h"
-#include "core/common/safeint.h"
-#include "core/common/span_utils.h"
-#include "core/framework/allocator.h"
-#include "core/framework/tensorprotoutils.h"
-#include "core/framework/utils.h"
-#include "core/providers/cpu/tensor/utils.h"
-#include "core/providers/cpu/rnn/rnn_helpers.h"
-#include "contrib_ops/cpu/transformers/beam_search_scorer.h"
-#endif
-
 namespace Generators {
 
 void BeamHypotheses::Init(float length_penalty, std::span<HypothesisScore> beams) {
@@ -94,7 +79,7 @@ BeamSearchScorer::BeamSearchScorer(const SearchParams& parameters,
   next_beam_indices_ = Allocate<int32_t>(allocator, batch_beam_size, next_beam_indices_ptr_);
 
   // Space to store intermediate sequence with length sequence_length, sequence_length + 1, ..., max_sequence_length.
-  size_t per_beam = (SafeInt<size_t>(max_length_) * (max_length_ + 1) - (parameters.sequence_length - 1) * parameters.sequence_length) / 2;
+  size_t per_beam = (max_length_ * (max_length_ + 1) - (parameters.sequence_length - 1) * parameters.sequence_length) / 2;
   hypothesis_buffer_ = Allocate<int32_t>(allocator, batch_beam_size * per_beam, hypothesis_buffer_ptr_);
 
   memset(next_beam_scores_.data(), 0, next_beam_scores_.size_bytes());

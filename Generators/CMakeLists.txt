@@ -10,6 +10,7 @@ if (POLICY CMP0141)
   set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "$<IF:$<AND:$<C_COMPILER_ID:MSVC>,$<CXX_COMPILER_ID:MSVC>>,$<$<CONFIG:Debug,RelWithDebInfo>:EditAndContinue>,$<$<CONFIG:Debug,RelWithDebInfo>:ProgramDatabase>>")
 endif()
 
+if(false) # We don't use GSL anymore
 FetchContent_Declare(GSL
     GIT_REPOSITORY "https://github.com/microsoft/GSL"
     GIT_TAG "v4.0.0"
@@ -17,6 +18,7 @@ FetchContent_Declare(GSL
 )
 
 FetchContent_MakeAvailable(GSL)
+endif()
 
 FetchContent_Declare(safeint
     GIT_REPOSITORY "https://github.com/dcleblanc/SafeInt"
@@ -59,7 +61,8 @@ add_executable (Generators ${generator_srcs})
 target_link_directories(Generators PRIVATE ${CMAKE_SOURCE_DIR}/ort)
 target_include_directories(Generators PRIVATE ${CMAKE_SOURCE_DIR}/ort)
 
-target_link_libraries(Generators PRIVATE "onnxruntime.lib" Microsoft.GSL::GSL)
+target_link_libraries(Generators PRIVATE "onnxruntime.lib")
+# Microsoft.GSL::GSL
 target_include_directories(Generators PRIVATE ${safeint_SOURCE_DIR})
 
 if(MSVC)

@@ -8,8 +8,6 @@
 #include <span>
 #include <memory>
 #include <numeric>
-#include <optional>
-#include <random>
 #include <set>
 #include <unordered_set>
 #include <vector>
@@ -84,35 +82,6 @@ private:
 
 #endif
 
-struct Tensor;
-struct Stream;
-struct IConsoleDumper;
-
-struct OpKernelContextInternal {};
-struct SessionState {};
-struct NodeArg {};
-struct Node {};
-struct TensorShapeProto {};
-
-// Macros to disable the copy and/or move ctor and assignment methods
-// These are usually placed in the private: declarations for a class.
-
-#define ORT_DISALLOW_COPY(TypeName) TypeName(const TypeName&) = delete
-
-#define ORT_DISALLOW_ASSIGNMENT(TypeName) TypeName& operator=(const TypeName&) = delete
-
-#define ORT_DISALLOW_COPY_AND_ASSIGNMENT(TypeName) \
-  ORT_DISALLOW_COPY(TypeName);                     \
-  ORT_DISALLOW_ASSIGNMENT(TypeName)
-
-#define ORT_DISALLOW_MOVE(TypeName) \
-  TypeName(TypeName&&) = delete;    \
-  TypeName& operator=(TypeName&&) = delete
-
-#define ORT_DISALLOW_COPY_ASSIGNMENT_AND_MOVE(TypeName) \
-  ORT_DISALLOW_COPY_AND_ASSIGNMENT(TypeName);           \
-  ORT_DISALLOW_MOVE(TypeName)
-
 #define ORT_ENFORCE(condition, ...) assert(condition)
 
 // TODO: Do we need this class or is IAllocator::MakeUniquePtr sufficient/better
@@ -139,7 +108,6 @@ struct  BufferDeleter {
 };
 
 using BufferUniquePtr = std::unique_ptr<void, BufferDeleter>;
-using BufferNakedPtr = void*;
 
 template <typename T>
 std::span<T> AllocateBuffer(OrtAllocator* allocator,
