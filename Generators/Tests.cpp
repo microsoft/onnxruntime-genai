@@ -100,7 +100,7 @@ void Test_BeamSearchTest_GptBeamSearchFp32() {
 
   ASSERT_EQ(expected_output_shape, result_ts->GetShape());
   const auto* result_vals = sequences->GetTensorData<int32_t>();
-  auto result_span = gsl::make_span(result_vals, expected_output.size());
+  auto result_span = std::span(result_vals, expected_output.size());
   ASSERT_TRUE(std::equal(expected_output.cbegin(), expected_output.cend(), result_span.begin(), result_span.end()));
   std::cout << "Test_BeamSearchTest_GptBeamSearchFp32 complete\r\n";
 }
@@ -169,7 +169,7 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32() {
   // Verify outputs match expected outputs
   for (int i = 0; i < search.params_.batch_size; i++) {
 //    auto sequence = search.sequences_.GetSequence(i);
-    auto sequence = gsl::make_span<int32_t>(output_sequence.data()+max_length*i, max_length);
+    auto sequence = std::span<int32_t>(output_sequence.data() + max_length * i, max_length);
     auto* expected_output_start = &expected_output[i * search.params_.max_length];
     ASSERT_TRUE(std::equal(expected_output_start, expected_output_start + search.params_.max_length, sequence.begin(), sequence.end()));
   }
@@ -231,7 +231,7 @@ void Test_GreedySearchTest_GptGreedySearchFp32() {
 
   ASSERT_EQ(expected_output_shape, result_ts->GetShape());
   const auto* result_vals = sequences->GetTensorData<int32_t>();
-  auto result_span = gsl::make_span(result_vals, expected_output.size());
+  auto result_span = std::span(result_vals, expected_output.size());
   ASSERT_TRUE(std::equal(expected_output.cbegin(), expected_output.cend(), result_span.begin(), result_span.end()));
 
   std::cout << "Test_GreedySearchTest_GptGreedySearchFp32 complete\r\n";
@@ -418,13 +418,13 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32_Cuda() {
   auto output_sequence_cuda = CudaMallocArray<int32_t>(sequence_length);
   auto output_sequence = std::make_unique<int32_t[]>(sequence_length);
 
-  search.Finalize(1, gsl::span<int32_t>(output_sequence_cuda.get(), sequence_length), {});
+  search.Finalize(1, std::span<int32_t>(output_sequence_cuda.get(), sequence_length), {});
   cudaMemcpyAsync(output_sequence.get(), output_sequence_cuda.get(), sequence_length * sizeof(int32_t), cudaMemcpyDeviceToHost, cuda_stream);
   cudaStreamSynchronize(cuda_stream);
 
   // Verify outputs match expected outputs
   for (int i = 0; i < search.params_.batch_size; i++) {
-    auto sequence = gsl::make_span<int32_t>(output_sequence.get() + max_length * i, max_length);
+    auto sequence = std::span<int32_t>(output_sequence.get() + max_length * i, max_length);
     auto* expected_output_start = &expected_output[i * search.params_.max_length];
     ASSERT_TRUE(std::equal(expected_output_start, expected_output_start + search.params_.max_length, sequence.begin(), sequence.end()));
   }

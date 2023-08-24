@@ -40,39 +40,39 @@ struct BeamScorerState {
   int hypothesis_buffer_used_;  // Offset of available buffer, or length of used buffer.
 };
 
-void LaunchInitializeBeamHypotheses(gsl::span<BeamHypotheses> beam_hyps, float length_penalty, gsl::span<HypothesisScore> beams, int num_beams, cudaStream_t stream);
+void LaunchInitializeBeamHypotheses(std::span<BeamHypotheses> beam_hyps, float length_penalty, std::span<HypothesisScore> beams, int num_beams, cudaStream_t stream);
 
 void LaunchBeamSearchScorer_Process(BeamScorerState& state_cpu,
                                     BeamScorerState& state,
-                                    gsl::span<const int32_t> sequences,
+                                    std::span<const int32_t> sequences,
                                     int sequence_length,
-                                    gsl::span<BeamHypotheses> beam_hyps_,
-                                    gsl::span<float> next_beam_scores_,
-                                    gsl::span<int32_t> next_beam_tokens_,
-                                    gsl::span<int32_t> next_beam_indices_,
-                                    gsl::span<int32_t> hypothesis_buffer_,
-                                    gsl::span<const float> next_scores,
-                                    gsl::span<const int32_t> next_tokens,
-                                    gsl::span<const int32_t> next_indices,
+                                    std::span<BeamHypotheses> beam_hyps_,
+                                    std::span<float> next_beam_scores_,
+                                    std::span<int32_t> next_beam_tokens_,
+                                    std::span<int32_t> next_beam_indices_,
+                                    std::span<int32_t> hypothesis_buffer_,
+                                    std::span<const float> next_scores,
+                                    std::span<const int32_t> next_tokens,
+                                    std::span<const int32_t> next_indices,
                                     cudaStream_t stream);
 
 void LaunchBeamSearchScorer_AppendNextTokenToSequences(BeamScorerState& state_cpu,
                                                        BeamScorerState& state,
-                                                       gsl::span<const int32_t> sequences,
-                                                       gsl::span<int32_t> next_sequences,
+                                                       std::span<const int32_t> sequences,
+                                                       std::span<int32_t> next_sequences,
                                                        int sequence_length,
-                                                       gsl::span<int32_t> next_beam_tokens,
-                                                       gsl::span<int32_t> next_beam_indices,
+                                                       std::span<int32_t> next_beam_tokens,
+                                                       std::span<int32_t> next_beam_indices,
                                                        cudaStream_t stream);
 
 void LaunchBeamSearchScorer_Finalize(int batch_size,
                                      BeamScorerState& state,
-                                     gsl::span<const int32_t> sequences,
+                                     std::span<const int32_t> sequences,
                                      int sequence_length,
-                                     gsl::span<BeamHypotheses> beam_hyps_,
-                                     gsl::span<const float> final_beam_scores,
-                                     gsl::span<int32_t> output,
-                                     gsl::span<float> sequence_scores,
+                                     std::span<BeamHypotheses> beam_hyps_,
+                                     std::span<const float> final_beam_scores,
+                                     std::span<int32_t> output,
+                                     std::span<float> sequence_scores,
                                      cudaStream_t stream);
 
 void LaunchInitScoresKernel(float* beam_scores,

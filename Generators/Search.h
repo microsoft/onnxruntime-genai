@@ -29,8 +29,8 @@ struct Search {
 
   Search(SearchParams params);
 
-  gsl::span<int32_t> GetNextTokens();
-  gsl::span<int32_t> GetNextIndices();
+  std::span<int32_t> GetNextTokens();
+  std::span<int32_t> GetNextIndices();
 
   int GetSequenceLength();
 
@@ -40,25 +40,25 @@ struct Search {
   
   //
   void CheckForEOS();
-  gsl::span<ScoreType> GetScores(int batch_beam_index);
+  std::span<ScoreType> GetScores(int batch_beam_index);
   Sequences& GetSequences() { return sequences_; }
 
   void SetInputSequence();
 
   SearchParams params_;
 
-  gsl::span<int32_t> sequences_space_;  // shape (2, beam_size*batch_size, max_length)
+  std::span<int32_t> sequences_space_;  // shape (2, beam_size*batch_size, max_length)
   BufferUniquePtr sequences_space_buffer_;
 
-  gsl::span<int32_t> sequence_lengths_;  // shape (beam_size*batch_size)
+  std::span<int32_t> sequence_lengths_;  // shape (beam_size*batch_size)
   BufferUniquePtr sequence_lengths_buffer_;
 
-  gsl::span<bool> eos_meet_;  // shape (beam_size*batch_size)
+  std::span<bool> eos_meet_;  // shape (beam_size*batch_size)
   BufferUniquePtr eos_meet_buffer_;
 
-  gsl::span<int32_t> next_tokens_;  // shape (beam_size*batch_size)
+  std::span<int32_t> next_tokens_;  // shape (beam_size*batch_size)
 
-  gsl::span<ScoreType> next_token_scores_;  // shape (beam_size*batch_size, vocab_size)
+  std::span<ScoreType> next_token_scores_;  // shape (beam_size*batch_size, vocab_size)
   BufferUniquePtr next_token_scores_buffer_;
 
   Sequences sequences_;
@@ -68,7 +68,7 @@ struct Search {
 struct GreedySearch : Search {
   GreedySearch(SearchParams params);
 
-  gsl::span<int32_t> GetNextTokens();
+  std::span<int32_t> GetNextTokens();
   void NextTokensFromLogits();
   void AppendNextTokensToSequences();
 
@@ -81,11 +81,11 @@ private:
 struct BeamSearch : Search {
   BeamSearch(SearchParams params);
 
-  gsl::span<int32_t> GetNextTokens();
-  gsl::span<int32_t> GetNextIndices();
+  std::span<int32_t> GetNextTokens();
+  std::span<int32_t> GetNextIndices();
   void NextTokensFromLogits();
   void AppendNextTokensToSequences();
-  void Finalize(size_t num_return_sequences, gsl::span<int32_t> output, gsl::span<float> sequence_scores);
+  void Finalize(size_t num_return_sequences, std::span<int32_t> output, std::span<float> sequence_scores);
 
 private:
   std::unique_ptr<BeamSearchScorer> beam_scorer_;

@@ -8,16 +8,16 @@ struct Gpt_Cuda {
 
   Gpt_Cuda(OrtEnv& ort_env, const ORTCHAR_T* decode_path, cudaStream_t cuda_stream);
 
-  void CreateInputs(gsl::span<int32_t> sequence_lengths, const SearchParams& params);
+  void CreateInputs(std::span<int32_t> sequence_lengths, const SearchParams& params);
   OrtValue& GetLogits() { return *logits_; }
   int GetVocabSize() { return c_vocab_size; }
-  void Run(gsl::span<const int32_t> next_tokens, gsl::span<const int32_t> next_indices, int current_length);
+  void Run(std::span<const int32_t> next_tokens, std::span<const int32_t> next_indices, int current_length);
 
   Ort::Allocator& GetAllocatorCuda() { return *allocator_cuda_; }
 
  private:
-  void UpdateInputs(gsl::span<const int32_t> next_tokens, gsl::span<const int32_t> beam_indices, int current_length);
-  void PickPastState(size_t index, gsl::span<const int32_t> beam_indices);
+  void UpdateInputs(std::span<const int32_t> next_tokens, std::span<const int32_t> beam_indices, int current_length);
+  void PickPastState(size_t index, std::span<const int32_t> beam_indices);
 
   SearchParams params_;
   bool first_run_{true};
@@ -30,7 +30,7 @@ struct Gpt_Cuda {
 
   bool past_present_share_buffer_{};  // NYI
 
-  gsl::span<int32_t> next_positions_;  // shape (batch_size, num_beams). Next position value for position_ids.
+  std::span<int32_t> next_positions_;  // shape (batch_size, num_beams). Next position value for position_ids.
   BufferUniquePtr next_positions_buffer_;
   std::unique_ptr<OrtValue> next_positions_tensor_;  // Tensor of the 'next_position_' buffer
 

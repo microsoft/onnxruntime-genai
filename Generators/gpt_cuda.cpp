@@ -48,7 +48,7 @@ Gpt_Cuda::Gpt_Cuda(OrtEnv& ort_env, const ORTCHAR_T* decode_path, cudaStream_t c
   allocator_cuda_ = Ort::Allocator::Create(*session_decode_, *memory_info_cuda_);
 }
 
-void Gpt_Cuda::CreateInputs(gsl::span<int32_t> sequence_lengths, const SearchParams& params) {
+void Gpt_Cuda::CreateInputs(std::span<int32_t> sequence_lengths, const SearchParams& params) {
   params_ = params;
 
   // Allocate position_ids and attention_mask based on shape of input_ids
@@ -159,7 +159,7 @@ void Gpt_Cuda::CreateInputs(gsl::span<int32_t> sequence_lengths, const SearchPar
   io_binding_decode_ = OrtIoBinding::Create(*session_decode_);
 }
 
-void Gpt_Cuda::Run(gsl::span<const int32_t> next_tokens, gsl::span<const int32_t> next_indices, int current_length) {
+void Gpt_Cuda::Run(std::span<const int32_t> next_tokens, std::span<const int32_t> next_indices, int current_length) {
   if (first_run_)
     first_run_ = false;
   else
@@ -186,7 +186,7 @@ void Gpt_Cuda::Run(gsl::span<const int32_t> next_tokens, gsl::span<const int32_t
 #endif
 }
 
-void Gpt_Cuda::UpdateInputs(gsl::span<const int32_t> next_tokens, gsl::span<const int32_t> beam_indices, int current_length) {
+void Gpt_Cuda::UpdateInputs(std::span<const int32_t> next_tokens, std::span<const int32_t> beam_indices, int current_length) {
   // The following updates inputs for subgraph
 
   // Update input_ids with next tokens.
@@ -247,7 +247,7 @@ void Gpt_Cuda::UpdateInputs(gsl::span<const int32_t> next_tokens, gsl::span<cons
 }
 
 // Copy present state to past state
-void Gpt_Cuda::PickPastState(size_t index, gsl::span<const int32_t> beam_indices) {
+void Gpt_Cuda::PickPastState(size_t index, std::span<const int32_t> beam_indices) {
   const OrtValue& present = *presents_[index];
 
   // shape is (2, batch_beam_size, 12, past_seq_len, 64)
@@ -259,15 +259,15 @@ void Gpt_Cuda::PickPastState(size_t index, gsl::span<const int32_t> beam_indices
   // Create a tensor with same shape.
   auto past = OrtValue::CreateTensor<ScoreType>(*allocator_cuda_, past_shape.data(), past_shape.size());
 
-  gsl::span<ScoreType> past_span = gsl::make_span<ScoreType>(past->GetTensorMutableData<ScoreType>(), past_shape_info->GetElementCount());
-  gsl::span<const ScoreType> present_span = gsl::make_span<const ScoreType>(present.GetTensorData<ScoreType>(), past_shape_info->GetElementCount());
+  std::span<ScoreType> past_span = std::span<ScoreType>(past->GetTensorMutableData<ScoreType>(), past_shape_info->GetElementCount());
+  std::span<const ScoreType> present_span = std::span<const ScoreType>(present.GetTensorData<ScoreType>(), past_shape_info->GetElementCount());
   for (size_t j = 0; j < beam_indices.size(); j++) {
     int32_t beam_index = beam_indices[j];
-    gsl::span<const ScoreType> present_key = present_span.subspan(beam_index * SafeInt<size_t>(block_size_per_beam), block_size_per_beam);
-    gsl::span<const ScoreType> present_value = present_span.subspan(past_key_size + beam_index * SafeInt<size_t>(block_size_per_beam), block_size_per_beam);
+    std::span<const ScoreType> present_key = present_span.subspan(beam_index * SafeInt<size_t>(block_size_per_beam), block_size_per_beam);
+    std::span<const ScoreType> present_value = present_span.subspan(past_key_size + beam_index * SafeInt<size_t>(block_size_per_beam), block_size_per_beam);
 
-    gsl::span<ScoreType> past_key = past_span.subspan(j * SafeInt<size_t>(block_size_per_beam), block_size_per_beam);
-    gsl::span<ScoreType> past_value = past_span.subspan(past_key_size + j * SafeInt<size_t>(block_size_per_beam), block_size_per_beam);
+    std::span<ScoreType> past_key = past_span.subspan(j * SafeInt<size_t>(block_size_per_beam), block_size_per_beam);
+    std::span<ScoreType> past_value = past_span.subspan(past_key_size + j * SafeInt<size_t>(block_size_per_beam), block_size_per_beam);
     cudaMemcpyAsync(past_key.data(), present_key.data(), present_key.size_bytes(), cudaMemcpyDeviceToDevice, cuda_stream_);
     cudaMemcpyAsync(past_value.data(), present_value.data(), present_value.size_bytes(), cudaMemcpyDeviceToDevice, cuda_stream_);
   }

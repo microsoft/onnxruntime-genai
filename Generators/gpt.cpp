@@ -37,7 +37,7 @@ Gpt::Gpt(OrtEnv& ort_env, const ORTCHAR_T* decode_path)
   session_decode_ = OrtSession::Create(ort_env, decode_path, session_options.get());
 }
 
-void Gpt::CreateInputs(gsl::span<int32_t> sequence_lengths, const SearchParams& params) {
+void Gpt::CreateInputs(std::span<int32_t> sequence_lengths, const SearchParams& params) {
   params_=params;
 
   int64_t input_ids_shape[] = { params_.batch_size, params_.sequence_length };
@@ -96,7 +96,7 @@ void Gpt::CreateInputs(gsl::span<int32_t> sequence_lengths, const SearchParams& 
     }
 
     for (int k = 0; k < params_.num_beams; k++) {
-      sequence_lengths[SafeInt<gsl::index>(i) * params_.num_beams + k] = abs_position;
+      sequence_lengths[i * params_.num_beams + k] = abs_position;
     }
   }
 
@@ -172,7 +172,7 @@ void Gpt::CreateInputs(gsl::span<int32_t> sequence_lengths, const SearchParams& 
     io_binding_decode_->BindOutput(output_names_[i], *outputs_[i]);
 }
 
-void Gpt::Run(gsl::span<const int32_t> next_tokens, gsl::span<const int32_t> next_indices, int current_length) {
+void Gpt::Run(std::span<const int32_t> next_tokens, std::span<const int32_t> next_indices, int current_length) {
   if (first_run_)
     first_run_ = false;
   else
@@ -188,7 +188,7 @@ void Gpt::Run(gsl::span<const int32_t> next_tokens, gsl::span<const int32_t> nex
 #endif
 }
 
-void Gpt::UpdateInputs(gsl::span<const int32_t> next_tokens, gsl::span<const int32_t> beam_indices, int current_length) {
+void Gpt::UpdateInputs(std::span<const int32_t> next_tokens, std::span<const int32_t> beam_indices, int current_length) {
   auto& allocator = Ort::Allocator::GetWithDefaultOptions();
 
   // The following updates inputs for subgraph
@@ -263,7 +263,7 @@ void Gpt::UpdateInputs(gsl::span<const int32_t> next_tokens, gsl::span<const int
 }
 
 // Copy present state to past state
-void Gpt::PickPastState(OrtAllocator& allocator, size_t index, gsl::span<const int32_t> beam_indices) {
+void Gpt::PickPastState(OrtAllocator& allocator, size_t index, std::span<const int32_t> beam_indices) {
   const OrtValue& present = *presents_[index];
 
   // shape is (2, batch_beam_size, 12, past_seq_len, 64)
@@ -275,17 +275,17 @@ void Gpt::PickPastState(OrtAllocator& allocator, size_t index, gsl::span<const i
   // Create a tensor with same shape.
   auto past = OrtValue::CreateTensor<ScoreType>(allocator, past_shape.data(), past_shape.size());
 
-  gsl::span<ScoreType> past_span = gsl::make_span<ScoreType>(past->GetTensorMutableData<ScoreType>(), past_shape_info->GetElementCount());
-  gsl::span<const ScoreType> present_span = gsl::make_span<const ScoreType>(present.GetTensorData<ScoreType>(), past_shape_info->GetElementCount());
+  auto past_span = std::span<ScoreType>(past->GetTensorMutableData<ScoreType>(), past_shape_info->GetElementCount());
+  auto present_span = std::span<const ScoreType>(present.GetTensorData<ScoreType>(), past_shape_info->GetElementCount());
   for (size_t j = 0; j < beam_indices.size(); j++) {
     int32_t beam_index = beam_indices[j];
-    gsl::span<const ScoreType> present_key = present_span.subspan(beam_index * SafeInt<size_t>(block_size_per_beam), block_size_per_beam);
-    gsl::span<const ScoreType> present_value = present_span.subspan(past_key_size + beam_index * SafeInt<size_t>(block_size_per_beam), block_size_per_beam);
+    std::span<const ScoreType> present_key = present_span.subspan(beam_index * SafeInt<size_t>(block_size_per_beam), block_size_per_beam);
+    std::span<const ScoreType> present_value = present_span.subspan(past_key_size + beam_index * SafeInt<size_t>(block_size_per_beam), block_size_per_beam);
 
-    gsl::span<ScoreType> past_key = past_span.subspan(j * SafeInt<size_t>(block_size_per_beam), block_size_per_beam);
-    gsl::span<ScoreType> past_value = past_span.subspan(past_key_size + j * SafeInt<size_t>(block_size_per_beam), block_size_per_beam);
-    gsl::copy(present_key, past_key);
-    gsl::copy(present_value, past_value);
+    std::span<ScoreType> past_key = past_span.subspan(j * SafeInt<size_t>(block_size_per_beam), block_size_per_beam);
+    std::span<ScoreType> past_value = past_span.subspan(past_key_size + j * SafeInt<size_t>(block_size_per_beam), block_size_per_beam);
+    copy(present_key, past_key);
+    copy(present_value, past_value);
   }
 
   pasts_[index] = std::move(past);

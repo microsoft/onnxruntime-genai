@@ -77,7 +77,7 @@ void DumpTensors(OrtValue** values, const char** names, size_t count, bool dump_
   }
 }
 
-void DumpMemory(const char* name, gsl::span<const int32_t> data) {
+void DumpMemory(const char* name, std::span<const int32_t> data) {
   printf("%s  ", name);
   for (auto v : data) {
     printf("%d ", v);
@@ -85,7 +85,7 @@ void DumpMemory(const char* name, gsl::span<const int32_t> data) {
   printf("\r\n");
 }
 
-void DumpMemory(const char* name, gsl::span<const float> data) {
+void DumpMemory(const char* name, std::span<const float> data) {
   printf("%s  ", name);
   for (auto v : data) {
     printf("%f ", v);
@@ -94,7 +94,7 @@ void DumpMemory(const char* name, gsl::span<const float> data) {
 }
 
 #if USE_CUDA
-void DumpCudaMemory(const char* name, gsl::span<const int32_t> data) {
+void DumpCudaMemory(const char* name, std::span<const int32_t> data) {
   printf("%s  ", name);
   auto cpu_copy = std::make_unique<int32_t[]>(data.size());
   CudaCheck() == cudaMemcpy(cpu_copy.get(), data.data(), data.size_bytes(), cudaMemcpyDeviceToHost);
@@ -105,7 +105,7 @@ void DumpCudaMemory(const char* name, gsl::span<const int32_t> data) {
   printf("\r\n");
 }
 
-void DumpCudaMemory(const char* name, gsl::span<const float> data) {
+void DumpCudaMemory(const char* name, std::span<const float> data) {
   printf("%s  ", name);
   auto cpu_copy = std::make_unique<float[]>(data.size());
   CudaCheck() == cudaMemcpy(cpu_copy.get(), data.data(), data.size_bytes(), cudaMemcpyDeviceToHost);

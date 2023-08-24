@@ -40,10 +40,10 @@ BeamSearchScorer_Cuda::BeamSearchScorer_Cuda(const SearchParams_Cuda& parameters
   hypothesis_buffer_ = Allocate<int32_t>(allocator_cuda, batch_beam_size * per_beam, hypothesis_buffer_ptr_);
 }
 
-void BeamSearchScorer_Cuda::Process(ISequences& sequences,
-                                   gsl::span<const float> next_scores,
-                                   gsl::span<const int32_t> next_tokens,
-                                   gsl::span<const int32_t> next_indices) {
+void BeamSearchScorer_Cuda::Process(Sequences& sequences,
+                                    std::span<const float> next_scores,
+                                    std::span<const int32_t> next_tokens,
+                                    std::span<const int32_t> next_indices) {
   cuda::LaunchBeamSearchScorer_Process(*state_cpu_,
                                        *state_gpu_,
                                        sequences.GetCurrentDeviceSequences(),
@@ -74,10 +74,10 @@ bool BeamSearchScorer_Cuda::IsDoneLater() const {
   return state_cpu_->not_done_count_ == 0;
 }
 
-void BeamSearchScorer_Cuda::Finalize(ISequences& sequences,
+void BeamSearchScorer_Cuda::Finalize(Sequences& sequences,
                                     size_t num_return_sequences,
-                                    gsl::span<int32_t> output, // Word IDs of each sequence, with shape (batch_size * num_return_sequences, max_sequence_length)
-                                    gsl::span<float> sequence_scores) { // Score of each sequence, with shape (batch_size * num_return_sequences).
+                                     std::span<int32_t> output,           // Word IDs of each sequence, with shape (batch_size * num_return_sequences, max_sequence_length)
+                                     std::span<float> sequence_scores) {  // Score of each sequence, with shape (batch_size * num_return_sequences).
   assert(!output.empty());
   cuda::LaunchBeamSearchScorer_Finalize(state_cpu_->batch_size_, *state_gpu_, sequences.GetCurrentDeviceSequences(), sequences.GetSequenceLength(), beam_hyps_, next_beam_scores_, output, sequence_scores, stream_);
 }
