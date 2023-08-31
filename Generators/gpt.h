@@ -16,7 +16,7 @@ struct Gpt {
 
 private:
   void UpdateInputs(std::span<const int32_t> next_tokens, std::span<const int32_t> beam_indices, int current_length);
- void PickPastState(OrtAllocator& allocator, size_t index, std::span<const int32_t> beam_indices);
+  void PickPastState(OrtAllocator& allocator, size_t index, std::span<const int32_t> beam_indices);
 
   SearchParams params_;
   bool first_run_{true};
@@ -24,7 +24,7 @@ private:
   bool past_present_share_buffer_ {}; // NYI
 
   std::span<int32_t> next_positions_;  // shape (batch_size, num_beams). Next position value for position_ids.
-  BufferUniquePtr next_positions_buffer_;
+  IAllocatorUniquePtr<int32_t> next_positions_buffer_;
   std::unique_ptr<OrtValue> next_positions_tensor_; // Tensor of the 'next_position_' buffer
 
   // Sessions

@@ -1,7 +1,8 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "Generators.h"
+#include "generators.h"
+#include "search.h"
 #include "beam_search_scorer.h"
 
 namespace Generators {
@@ -58,8 +59,7 @@ void BeamHypotheses::Output(
   }
 }
 
-BeamSearchScorer::BeamSearchScorer(const SearchParams& parameters,
-                                   OrtAllocator& allocator)
+BeamSearchScorer::BeamSearchScorer(const SearchParams& parameters)
     : batch_size_{static_cast<size_t>(parameters.batch_size)},
       num_beams_{static_cast<size_t>(parameters.num_beams)},
       max_length_{static_cast<size_t>(parameters.max_length)},
@@ -69,18 +69,19 @@ BeamSearchScorer::BeamSearchScorer(const SearchParams& parameters,
       not_done_count_{parameters.batch_size} {
   size_t batch_beam_size = batch_size_ * num_beams_;
 
-  auto beams = Allocate<HypothesisScore>(allocator, batch_beam_size, hypothesis_scores_ptr_);
-  beam_hyps_ = Allocate<BeamHypotheses>(allocator, batch_size_, beam_hyps_ptr_);
+  std::span<HypothesisScore> beams;
+  hypothesis_scores_ptr_ = AllocateArray<HypothesisScore>(batch_beam_size, &beams);
+  beam_hyps_ptr_ = AllocateArray<BeamHypotheses>(batch_size_, &beam_hyps_);
   for (size_t i = 0; i < batch_size_; i++)
     beam_hyps_[i].Init(parameters.length_penalty, beams.subspan(i * num_beams_, num_beams_));
 
-  next_beam_scores_ = Allocate<float>(allocator, batch_beam_size, next_beam_scores_ptr_);
-  next_beam_tokens_ = Allocate<int32_t>(allocator, batch_beam_size, next_beam_tokens_ptr_);
-  next_beam_indices_ = Allocate<int32_t>(allocator, batch_beam_size, next_beam_indices_ptr_);
+  next_beam_scores_ptr_ = AllocateArray<float>(batch_beam_size, &next_beam_scores_);
+  next_beam_tokens_ptr_ = AllocateArray<int32_t>(batch_beam_size, &next_beam_tokens_);
+  next_beam_indices_ptr_ = AllocateArray<int32_t>(batch_beam_size, &next_beam_indices_);
 
   // Space to store intermediate sequence with length sequence_length, sequence_length + 1, ..., max_sequence_length.
   size_t per_beam = (max_length_ * (max_length_ + 1) - (parameters.sequence_length - 1) * parameters.sequence_length) / 2;
-  hypothesis_buffer_ = Allocate<int32_t>(allocator, batch_beam_size * per_beam, hypothesis_buffer_ptr_);
+  hypothesis_buffer_ptr_ = AllocateArray<int32_t>(batch_beam_size * per_beam, &hypothesis_buffer_);
 
   memset(next_beam_scores_.data(), 0, next_beam_scores_.size_bytes());
 
@@ -110,7 +111,7 @@ void BeamSearchScorer::Process(Sequences& sequences,
   for (size_t batch = 0; batch < batch_size_; batch++) {
     BeamHypotheses& beam_hyp = beam_hyps_[batch];
     if (beam_hyp.done_) {
-      assert(beam_hyp.beams_used_ == num_beams_, "Batch can only be done if all beams have been generated");
+      assert(beam_hyp.beams_used_ == num_beams_);  // Batch can only be done if all beams have been generated
 
       // Pad the batch.
       for (size_t j = 0; j < num_beams_; j++) {
@@ -180,7 +181,6 @@ void BeamSearchScorer::Finalize(Sequences& sequences,
                                 size_t num_return_sequences,
                                 std::span<int32_t> output,
                                 std::span<float> sequence_scores) {
-
   // output is Word IDs of each sequence, with shape (batch_size * num_return_sequences, max_sequence_length).
   // sequence_scores is the optional Score of each sequence, with shape (batch_size * num_return_sequences).
 
@@ -216,4 +216,4 @@ void BeamSearchScorer::Finalize(Sequences& sequences,
   }
 }
 
-}
+}  // namespace Generators

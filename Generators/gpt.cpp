@@ -1,5 +1,6 @@
-#include "Generators.h"
-#include "Gpt.h"
+#include "generators.h"
+#include "search.h"
+#include "gpt.h"
 
 namespace Generators
 {
@@ -53,11 +54,11 @@ void Gpt::CreateInputs(std::span<int32_t> sequence_lengths, const SearchParams& 
   // Current shape is (batch_size, sequence_length)
   // Note that we will expand it to (batch_size * num_beams, sequence_length) later.
   // To avoid cloning input_ids, we use const_cast here since this function does not change its content.
-  input_ids_ = OrtValue::CreateTensor<int32_t>(allocator.GetInfo(), const_cast<int32_t*>(params_.input_ids), input_ids_shape[0]*input_ids_shape[1], input_ids_shape, std::size(input_ids_shape));
+  input_ids_ = OrtValue::CreateTensor<int32_t>(allocator.GetInfo(), const_cast<int32_t*>(params_.input_ids.data()), input_ids_shape[0]*input_ids_shape[1], input_ids_shape, std::size(input_ids_shape));
   position_ids_ = OrtValue::CreateTensor<int32_t>(allocator, input_ids_shape, std::size(input_ids_shape));
 
   int64_t position_shape[] = {params_.batch_size * params_.num_beams, 1};
-  next_positions_ = AllocateBuffer<int32_t>(&allocator, next_positions_buffer_, position_shape[0]);
+  next_positions_ = Allocate<int32_t>(allocator, position_shape[0], next_positions_buffer_);
   memset(next_positions_.data(), 0, next_positions_.size_bytes());
   next_positions_tensor_ = OrtValue::CreateTensor<int32_t>(allocator.GetInfo(), next_positions_.data(), next_positions_.size(), position_shape, std::size(position_shape));
 
@@ -76,7 +77,7 @@ void Gpt::CreateInputs(std::span<int32_t> sequence_lengths, const SearchParams& 
   // Set position id to be 0 for pad tokens, and accumulated sum of mask in a batch for other tokens
   int32_t* mask_data = attention_mask_->GetTensorMutableData<int32_t>();
   int32_t* position_data = position_ids_->GetTensorMutableData<int32_t>();
-  const int32_t* word_id = params_.input_ids;
+  const int32_t* word_id = params_.input_ids.data();
   int32_t* mask = mask_data;
   int32_t* position = position_data;
   for (int i = 0; i < params_.batch_size; i++) {
@@ -186,14 +187,14 @@ void Gpt::Run(std::span<const int32_t> next_tokens, std::span<const int32_t> nex
   else
     UpdateInputs(next_tokens, next_indices, current_length);
 
-  session_decode_->Run(nullptr, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
-
 #if 0
   printf("**Inputs:\r\n");
   DumpTensors(inputs_.data(), input_names_.data(), input_names_.size(), true);
   printf("**Outputs:\r\n");
-  DumpTensors(outputs_.data(), output_names_.data(), output_names_.size(), true);
+  DumpTensors(outputs_.data(), output_names_.data(), output_names_.size(), false);
 #endif
+
+  session_decode_->Run(nullptr, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
 }
 
 void Gpt::UpdateInputs(std::span<const int32_t> next_tokens, std::span<const int32_t> beam_indices, int current_length) {

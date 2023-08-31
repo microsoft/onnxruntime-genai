@@ -31,7 +31,7 @@ struct Gpt_Cuda {
   bool past_present_share_buffer_{};  // NYI
 
   std::span<int32_t> next_positions_;  // shape (batch_size, num_beams). Next position value for position_ids.
-  BufferUniquePtr next_positions_buffer_;
+  IAllocatorUniquePtr<int32_t> next_positions_buffer_;
   std::unique_ptr<OrtValue> next_positions_tensor_;  // Tensor of the 'next_position_' buffer
 
   // Sessions
@@ -57,8 +57,11 @@ struct Gpt_Cuda {
   std::vector<OrtValue*> outputs_;
 };
 
+namespace cuda {
+
 void LaunchGpt_InitAttentionMask(int32_t* mask_data, int32_t* position_data, int32_t* sequence_lengths, const int32_t* input_ids,
                                  int batch_size, int num_beams, int sequence_length, int pad_token_id, cudaStream_t stream);
 void LaunchGpt_UpdatePositionIds(int32_t* positions, int batch_beam_size, int current_length, cudaStream_t stream);
 void LaunchGpt_UpdateMask(int32_t* mask_data, const int32_t* old_mask_data, int batch_beam_size, int current_length, cudaStream_t stream);
+}
 }

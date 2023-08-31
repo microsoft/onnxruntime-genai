@@ -1,4 +1,4 @@
-#include "Generators.h"
+#include "generators.h"
 #include "gpt_cuda.h"
 
 namespace Generators {
@@ -62,12 +62,12 @@ void Gpt_Cuda::CreateInputs(std::span<int32_t> sequence_lengths, const SearchPar
   auto* input_ids_data = input_ids_->GetTensorMutableData<int32_t>();
 
   // Copy input_ids into gpu memory. This requires the input_ids for subgraph is also int32.
-  cudaMemcpy(input_ids_data, params_.input_ids, input_ids_count*sizeof(int32_t), cudaMemcpyHostToDevice);
+  cudaMemcpy(input_ids_data, params_.input_ids.data(), input_ids_count*sizeof(int32_t), cudaMemcpyHostToDevice);
 
   position_ids_ = OrtValue::CreateTensor<int32_t>(*allocator_cuda_, input_ids_shape, std::size(input_ids_shape));
 
   int64_t position_shape[] = {params_.batch_size * params_.num_beams, 1};
-  next_positions_ = AllocateBuffer<int32_t>(allocator_cuda_.get(), next_positions_buffer_, position_shape[0]);
+  next_positions_ = Allocate<int32_t>(*allocator_cuda_, position_shape[0] , next_positions_buffer_);
   cudaMemset(next_positions_.data(), 0, next_positions_.size_bytes());
   next_positions_tensor_ = OrtValue::CreateTensor<int32_t>(allocator_cuda_->GetInfo(), next_positions_.data(), next_positions_.size(), position_shape, std::size(position_shape));
 
@@ -88,7 +88,7 @@ void Gpt_Cuda::CreateInputs(std::span<int32_t> sequence_lengths, const SearchPar
   // Set position id to be 0 for pad tokens, and accumulated sum of mask in a batch for other tokens
   int32_t* mask_data = attention_mask_->GetTensorMutableData<int32_t>();
   int32_t* position_data = position_ids_->GetTensorMutableData<int32_t>();
-  LaunchGpt_InitAttentionMask(attn_mask_value ? nullptr : mask_data, position_data, sequence_lengths_cuda.get(), input_ids_data, params_.batch_size, params_.num_beams, params_.sequence_length, params_.pad_token_id, cuda_stream_);
+  cuda::LaunchGpt_InitAttentionMask(attn_mask_value ? nullptr : mask_data, position_data, sequence_lengths_cuda.get(), input_ids_data, params_.batch_size, params_.num_beams, params_.sequence_length, params_.pad_token_id, cuda_stream_);
   cudaMemcpy(sequence_lengths.data(), sequence_lengths_cuda.get(), sequence_lengths.size_bytes(), cudaMemcpyDeviceToHost);
 
   // Expand (batch_size, sequence_length) to (batch_size * num_beams, sequence_length)
@@ -206,14 +206,14 @@ void Gpt_Cuda::UpdateInputs(std::span<const int32_t> next_tokens, std::span<cons
 
   // Update position IDs
   inputs_[1] = next_positions_tensor_.get();
-  LaunchGpt_UpdatePositionIds(next_positions_.data(), batch_beam_size, current_length, cuda_stream_);
+  cuda::LaunchGpt_UpdatePositionIds(next_positions_.data(), batch_beam_size, current_length, cuda_stream_);
 
   // Update attention mask
   const int32_t* old_mask_data = expanded_attention_mask_->GetTensorMutableData<int32_t>();
   int64_t mask_dims[] = {batch_beam_size, current_length};
   auto attention_mask = OrtValue::CreateTensor<int32_t>(*allocator_cuda_, mask_dims, std::size(mask_dims));
   int32_t* mask_data = attention_mask->GetTensorMutableData<int32_t>();
-  LaunchGpt_UpdateMask(mask_data, old_mask_data, batch_beam_size, current_length, cuda_stream_);
+  cuda::LaunchGpt_UpdateMask(mask_data, old_mask_data, batch_beam_size, current_length, cuda_stream_);
   expanded_attention_mask_ = std::move(attention_mask);
   inputs_[2] = expanded_attention_mask_.get();
 

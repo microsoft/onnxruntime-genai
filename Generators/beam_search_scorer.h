@@ -32,8 +32,7 @@ struct BeamHypotheses {
 };
 
 struct BeamSearchScorer {
-  BeamSearchScorer(const SearchParams& parameters,
-                   OrtAllocator& allocator);
+  BeamSearchScorer(const SearchParams& parameters);
 
   void Process(Sequences& sequences,
                std::span<const float> next_scores,
@@ -60,21 +59,21 @@ struct BeamSearchScorer {
   bool early_stopping_;
   int not_done_count_;  // When zero, every batch entry is done (starts at batch_size_)
 
-  IAllocatorUniquePtr<float> next_beam_scores_ptr_;
+  std::unique_ptr<float[]> next_beam_scores_ptr_;
   std::span<float> next_beam_scores_;
 
-  IAllocatorUniquePtr<int32_t> next_beam_tokens_ptr_;
+  std::unique_ptr<int32_t[]> next_beam_tokens_ptr_;
   std::span<int32_t> next_beam_tokens_;
 
-  IAllocatorUniquePtr<int32_t> next_beam_indices_ptr_;
+  std::unique_ptr<int32_t[]> next_beam_indices_ptr_;
   std::span<int32_t> next_beam_indices_;
 
-  IAllocatorUniquePtr<int32_t> hypothesis_buffer_ptr_;  // Allocated buffer to hold all hypotheses
+  std::unique_ptr<int32_t[]> hypothesis_buffer_ptr_;    // Allocated buffer to hold all hypotheses
   std::span<int32_t> hypothesis_buffer_;                // Span of the allocated buffer
   int hypothesis_buffer_used_{};                        // Offset of available buffer, or length of used buffer.
 
-  IAllocatorUniquePtr<HypothesisScore> hypothesis_scores_ptr_;  // num_beams_ * batch_size_, divided into num_beams_ chunks per BeamHypothesis in beam_hyps_
-  IAllocatorUniquePtr<BeamHypotheses> beam_hyps_ptr_;
+  std::unique_ptr<HypothesisScore[]> hypothesis_scores_ptr_;  // num_beams_ * batch_size_, divided into num_beams_ chunks per BeamHypothesis in beam_hyps_
+  std::unique_ptr<BeamHypotheses[]> beam_hyps_ptr_;
   std::span<BeamHypotheses> beam_hyps_;  // Shape is batch_size_
 };
 

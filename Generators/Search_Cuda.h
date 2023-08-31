@@ -1,10 +1,12 @@
 #pragma once
+#include "sequences_cuda.h"
+
 namespace Generators {
 
 struct BeamSearchScorer_Cuda;
 
 struct SearchParams_Cuda : SearchParams {
-  Ort::Allocator *p_allocator_cuda;
+  Ort::Allocator* p_allocator_cuda;
   cudaStream_t cuda_stream;
 };
 
@@ -24,32 +26,27 @@ struct Search_Cuda {
   void CheckForEOS();
   std::span<ScoreType> GetScores(int batch_beam_index);
   std::span<ScoreType> GetScores();
-  Sequences& GetSequences() { return sequences_; }
-
-  void SetInputSequence();
+  Sequences_Cuda& GetSequences() { return sequences_; }
 
   SearchParams_Cuda params_;
 
-  Ort::Allocator& allocator_cpu_;
-  Ort::Allocator& allocator_cuda_;
-
-  std::span<int32_t> sequences_space_;  // shape (2, beam_size*batch_size, max_length)
-  BufferUniquePtr sequences_space_buffer_;
+//  std::span<int32_t> sequences_current_, sequences_next_; // These are just the sequences_space_buffer chopped into two equal parts
+//  cuda_unique_ptr<int32_t> sequences_gpu_; // shape (2, beam_size*batch_size, max_length)
 
   std::span<int32_t> sequence_lengths_;  // shape (beam_size*batch_size)
-  BufferUniquePtr sequence_lengths_buffer_;
+  std::unique_ptr<int32_t[]> sequence_lengths_buffer_;
 
   std::span<bool> eos_meet_;  // shape (beam_size*batch_size)
-  BufferUniquePtr eos_meet_buffer_;
+  cuda_unique_ptr<bool> eos_meet_buffer_;
 
   std::span<int32_t> next_tokens_;  // shape (beam_size*batch_size)
 
   std::span<ScoreType> next_token_scores_;  // shape (beam_size*batch_size, vocab_size)
-  BufferUniquePtr next_token_scores_buffer_;
+  cuda_unique_ptr<ScoreType> next_token_scores_buffer_;
 
   cuda_host_unique_ptr<bool> done_cpu_;
 
-  Sequences sequences_;
+  Sequences_Cuda sequences_;
 };
 
 struct GreedySearch_Cuda : Search_Cuda {
@@ -61,15 +58,12 @@ struct GreedySearch_Cuda : Search_Cuda {
 
  private:
 
-  cuda_host_unique_ptr<int32_t> next_tokens_cpu_;  // shape (beam_size*batch_size)
-
-  BufferUniquePtr next_tokens_buffer_;
-  BufferUniquePtr temp_topk_buffer_;
-  BufferUniquePtr staging_for_past_state_reorder_buffer_;
+  cuda_unique_ptr<int32_t> next_tokens_buffer_;
 };
 
 struct BeamSearch_Cuda : Search_Cuda {
   BeamSearch_Cuda(SearchParams_Cuda &params);
+  ~BeamSearch_Cuda();
 
   std::span<int32_t> GetNextTokens();
   std::span<int32_t> GetNextIndices();
@@ -82,7 +76,6 @@ struct BeamSearch_Cuda : Search_Cuda {
 
  private:
   std::unique_ptr<BeamSearchScorer_Cuda> beam_scorer_;
-  cuda_host_unique_ptr<int32_t> sequences_gpu_;
 
   cuda_unique_ptr<int32_t> topk_next_tokens_;
   cuda_unique_ptr<int32_t> topk_next_indices_;

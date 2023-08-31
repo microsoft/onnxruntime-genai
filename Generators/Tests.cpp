@@ -1,18 +1,14 @@
-#include "Generators.h"
+#include "generators.h"
 #include "onnxruntime_cxx_api_2.h"
 #include <assert.h>
 #include <iostream>
 
-#include "beam_search_scorer.h"
-#include "Sequences.h"
+#include "search.h"
 #include "gpt.h"
 
 #if USE_CUDA
-#include <cuda_runtime.h>
-#include "gpt_cuda.h"
 #include "search_cuda.h"
-#include "beam_search_scorer_cuda.cuh"
-#include "beam_search_scorer_cuda.h"
+#include "gpt_cuda.h"
 #endif
 
 #define ASSERT_EQ(a, b) assert((a) == (b))
@@ -133,7 +129,7 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32() {
   Generators::SearchParams params;
   params.batch_size = static_cast<int>(input_ids_shape[0]);
   params.sequence_length = static_cast<int>(input_ids_shape[1]);
-  params.input_ids = input_ids.data();
+  params.input_ids = input_ids;
   params.max_length = max_length;
   params.num_beams = 4;
   params.vocab_size = gpt.GetVocabSize();
@@ -255,7 +251,7 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32() {
   Generators::SearchParams params;
   params.batch_size = static_cast<int>(input_ids_shape[0]);
   params.sequence_length = static_cast<int>(input_ids_shape[1]);
-  params.input_ids = input_ids.data();
+  params.input_ids = input_ids;
   params.vocab_size = gpt.GetVocabSize();
 
   Generators::GreedySearch search{params};
@@ -312,7 +308,7 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32_Cuda() {
   Generators::SearchParams_Cuda params;
   params.batch_size = static_cast<int>(input_ids_shape[0]);
   params.sequence_length = static_cast<int>(input_ids_shape[1]);
-  params.input_ids = input_ids.data();
+  params.input_ids = input_ids;
   params.vocab_size = gpt.GetVocabSize();
   params.p_allocator_cuda = &gpt.GetAllocatorCuda();
   params.cuda_stream = cuda_stream;
@@ -337,9 +333,13 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32_Cuda() {
 
   // Verify outputs match expected outputs
   for (int i = 0; i < search.params_.batch_size; i++) {
-    auto sequence = search.sequences_.GetSequence(i);
+    auto sequence_gpu = search.sequences_.GetSequence(i);
+    auto sequence = std::make_unique<int32_t[]>(max_length);
+    cudaMemcpyAsync(sequence.get(), sequence_gpu.data(), max_length * sizeof(int32_t), cudaMemcpyDeviceToHost, cuda_stream);
+    cudaStreamSynchronize(cuda_stream);
+
     auto* expected_output_start = &expected_output[i * search.params_.max_length];
-    ASSERT_TRUE(std::equal(expected_output_start, expected_output_start + search.params_.max_length, sequence.begin(), sequence.end()));
+    ASSERT_TRUE(std::equal(expected_output_start, expected_output_start + search.params_.max_length, sequence.get(), sequence.get()+max_length));
   }
 
   std::cout << "Test_Lib_GreedySearchTest_GptGreedySearchFp32_Cuda complete\r\n";
@@ -377,7 +377,7 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32_Cuda() {
   Generators::SearchParams_Cuda params;
   params.batch_size = static_cast<int>(input_ids_shape[0]);
   params.sequence_length = static_cast<int>(input_ids_shape[1]);
-  params.input_ids = input_ids.data();
+  params.input_ids = input_ids;
   params.max_length = max_length;
   params.num_beams = 4;
   params.vocab_size = gpt.GetVocabSize();
@@ -399,7 +399,6 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32_Cuda() {
 
     // TODO: Are these steps always the same? If so, merge into one function
     search.NextTokensFromLogits();
-//    search.CheckForEOS();
     search.AppendNextTokensToSequences();
   }
 

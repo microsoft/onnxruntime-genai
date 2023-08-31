@@ -1,4 +1,4 @@
-#include "Generators.h"
+#include "generators.h"
 #include "cuda_common.h"
 
 namespace Generators {

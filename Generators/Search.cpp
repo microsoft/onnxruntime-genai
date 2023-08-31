@@ -1,4 +1,5 @@
-#include "Generators.h"
+#include "generators.h"
+#include "search.h"
 #include "beam_search_scorer.h"
 #include <queue>
 
@@ -22,58 +23,33 @@ void log_softmax(std::span<float> values) {
 }
 
 Search::Search(SearchParams params)
-    : params_{params} {
-  auto allocator = &Ort::Allocator::GetWithDefaultOptions();
-  auto cpu_allocator = allocator;
+    : params_{params},
+      sequences_{params.input_ids, params.batch_size, params.num_beams, params_.max_length} {
+
   auto batch_beam_size = params.BatchBeamSize();
 
-  int64_t sequences_dims[] = {batch_beam_size, params_.max_length};
-
-  // below buffers are on cpu
-  sequences_space_ = AllocateBuffer<int32_t>(cpu_allocator,
-                                             sequences_space_buffer_,
-                                             2 * batch_beam_size * params_.max_length);
-  memset(sequences_space_.data(), 0, sequences_space_.size_bytes());
-  sequences_.Init(sequences_space_, static_cast<int>(batch_beam_size), params_.sequence_length, params_.max_length);
-
-  sequence_lengths_ = AllocateBuffer<int32_t>(cpu_allocator, sequence_lengths_buffer_, batch_beam_size);
-  eos_meet_ = AllocateBuffer<bool>(cpu_allocator, eos_meet_buffer_, batch_beam_size);
+  sequence_lengths_buffer_ = AllocateArray<int32_t>(batch_beam_size, &sequence_lengths_);
+  eos_meet_buffer_ = AllocateArray<bool>(batch_beam_size, &eos_meet_);
   memset(eos_meet_.data(), 0, eos_meet_.size_bytes());
 
-  // below buffers are on cpu or cuda
   size_t next_token_size = batch_beam_size * params_.vocab_size;
-  next_token_scores_ = AllocateBuffer<ScoreType>(allocator, next_token_scores_buffer_, next_token_size);
+  next_token_scores_buffer_ = AllocateArray<ScoreType>(next_token_size, &next_token_scores_);
   memset(next_token_scores_.data(), 0, next_token_scores_.size_bytes());
-
-  SetInputSequence();
 }
 
 GreedySearch::GreedySearch(SearchParams params)
     : Search(params) {
-  auto allocator = &Ort::Allocator::GetWithDefaultOptions();
-  next_tokens_ = AllocateBuffer<int32_t>(allocator, next_tokens_buffer_, params.batch_size);
+  next_tokens_buffer_ = AllocateArray<int32_t>(params.batch_size, &next_tokens_);
   memset(next_tokens_.data(), 0, next_tokens_.size_bytes());
 }
 
 BeamSearch::BeamSearch(SearchParams params)
     : Search(params) {
   assert(params_.num_beams > 1);  // If 1, use GreedySearch
-  auto allocator = &Ort::Allocator::GetWithDefaultOptions();
-  beam_scorer_ = std::make_unique<BeamSearchScorer>(params_, *allocator);
+  beam_scorer_ = std::make_unique<BeamSearchScorer>(params_);
 }
 
-void Search::SetInputSequence() {
-  // The original inputs are not expanded, this expands them in place into the sequences
-  std::span<int32_t> sequences_0 = sequences_space_;
-  for (size_t batch = 0; batch < params_.batch_size; batch++) {
-    for (size_t beam = 0; beam < params_.num_beams; beam++) {
-      for (int j = 0; j < params_.sequence_length; j++) {
-        sequences_0[(batch * params_.num_beams + beam) * params_.max_length + j] =
-            static_cast<int32_t>(params_.input_ids[batch * params_.sequence_length + j]);
-      }
-    }
-  }
-}
+BeamSearch::~BeamSearch() = default;
 
 void Search::SetLogits(std::span<const ScoreType> logits) {
   // Logits has shape (batch_size, input_length, vocab_size),

@@ -84,4 +84,5 @@ if (CMAKE_VERSION VERSION_GREATER 3.12)
   set_property(TARGET Generators PROPERTY CXX_STANDARD 20)
 endif()
 
+source_group("Sources" FILES ${generator_srcs})
 set_property (DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT Generators)

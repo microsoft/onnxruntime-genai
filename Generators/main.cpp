@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "Generators.h"
+#include "generators.h"
 #include <iostream>
 #include "onnxruntime_cxx_api_2.h"
 

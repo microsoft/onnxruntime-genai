@@ -1,6 +1,7 @@
 #include <cuda_runtime.h>
 
 namespace Generators {
+namespace cuda {
 
 __global__ void Gpt_InitAttentionMask(int32_t* mask_data, int32_t* position_data, int32_t* sequence_lengths, const int32_t* input_ids,
   int batch_size, int num_beams, int sequence_length, int pad_token_id)
@@ -59,4 +60,5 @@ void LaunchGpt_UpdateMask(int32_t* mask_data, const int32_t* old_mask_data, int 
   Gpt_UpdateMask<<<1, 1, 0, stream>>>(mask_data, old_mask_data, batch_beam_size, current_length);
 }
 
+}
 }

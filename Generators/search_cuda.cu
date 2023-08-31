@@ -1,9 +1,29 @@
 #include <cuda_runtime.h>
 #include <algorithm>
+#include <span>
 
 using ScoreType = float; // TODO: Move to header includable by cuda
 
 namespace Generators {
+namespace cuda {
+
+#if 0
+__global__ void SetInputSequence(int32_t* sequences, const int32_t* input_sequences, int batch_size, int num_beams) {
+  // The original inputs are not expanded, this expands them in place into the sequences
+std::span<int32_t> sequences_0 = sequences_space_;
+for (size_t batch = 0; batch < params_.batch_size; batch++) {
+  for (size_t beam = 0; beam < params_.num_beams; beam++) {
+    for (int j = 0; j < params_.sequence_length; j++) {
+      sequences_0[(batch * params_.num_beams + beam) * params_.max_length + j] =
+          static_cast<int32_t>(params_.input_ids[batch * params_.sequence_length + j]);
+    }
+  }
+}
+
+void LaunchSetInputSequence(std::span<int32_t> sequences) {
+
+}
+#endif
 
 __global__ void SoftMax(int32_t* next_tokens, const ScoreType* next_token_scores, int batch_size, int vocab_size) {
   // next_tokens = torch.argmax(scores, dim=-1)
@@ -124,5 +144,5 @@ void LaunchRepetitionPenaltyProcessor(const int32_t* sequences, ScoreType* next_
   RepetitionPenaltyProcessor<<<gridSize, blockSize, 0, stream>>>(sequences, next_token_scores, max_sequence_length, vocab_size, total_elements, current_sequence_length, repetition_penalty);
 }
 
-
+}
 }
