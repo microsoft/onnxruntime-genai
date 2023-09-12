@@ -30,9 +30,6 @@ struct Search_Cuda {
 
   SearchParams_Cuda params_;
 
-//  std::span<int32_t> sequences_current_, sequences_next_; // These are just the sequences_space_buffer chopped into two equal parts
-//  cuda_unique_ptr<int32_t> sequences_gpu_; // shape (2, beam_size*batch_size, max_length)
-
   std::span<int32_t> sequence_lengths_;  // shape (beam_size*batch_size)
   std::unique_ptr<int32_t[]> sequence_lengths_buffer_;
 

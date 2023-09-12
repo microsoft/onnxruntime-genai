@@ -37,7 +37,7 @@ struct SearchParams {
 
   int BatchBeamSize() const { return num_beams * batch_size; }
 
-  std::span<const int32_t> input_ids;  // Array of [sequence_length][batchsize]
+  std::span<const int32_t> input_ids;  // Array of [batchsize][sequence_length]
 };
 
 }

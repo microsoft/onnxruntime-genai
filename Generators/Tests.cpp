@@ -420,4 +420,3 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32_Cuda() {
   std::cout << "Test_Lib_BeamSearchTest_GptBeamSearchFp32_Cuda complete\r\n";
 }
 #endif
-

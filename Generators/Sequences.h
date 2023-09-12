@@ -20,8 +20,6 @@ struct Sequences {
   // Used by Greedy search:
   void AppendNextTokenToSequences(std::span<const int32_t> next_tokens);
 
-  void AfterDeviceAppendedNextToken();
-
  private:
 
   std::unique_ptr<int32_t[]> sequences_buffer_;

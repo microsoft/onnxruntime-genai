@@ -67,8 +67,4 @@ void Sequences::AppendNextTokenToSequences(std::span<const int32_t> next_tokens)
   ++current_length_;
 }
 
-void Sequences::AfterDeviceAppendedNextToken() {
-  ++current_length_;
-}
-
 }  // namespace Generators
