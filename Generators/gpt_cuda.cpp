@@ -25,7 +25,7 @@ static void ExpandInputs(const OrtValue& input, int num_beams, OrtAllocator& all
   T* target = expanded_data;
   for (int i = 0; i < batch_size; i++) {
     for (int j = 0; j < num_beams; j++) {
-      cudaMemcpyAsync(target, input_data + i * sequence_length, sizeof(T) * SafeInt<size_t>(sequence_length), cudaMemcpyHostToDevice, cuda_stream);
+      cudaMemcpyAsync(target, input_data + i * sequence_length, sizeof(T) * sequence_length, cudaMemcpyHostToDevice, cuda_stream);
       target += sequence_length;
     }
   }
@@ -269,11 +269,11 @@ void Gpt_Cuda::PickPastState(size_t index, std::span<const int32_t> beam_indices
   std::span<const ScoreType> present_span = std::span<const ScoreType>(present.GetTensorData<ScoreType>(), past_shape_info->GetElementCount());
   for (size_t j = 0; j < beam_indices.size(); j++) {
     int32_t beam_index = beam_indices[j];
-    std::span<const ScoreType> present_key = present_span.subspan(beam_index * SafeInt<size_t>(block_size_per_beam), block_size_per_beam);
-    std::span<const ScoreType> present_value = present_span.subspan(past_key_size + beam_index * SafeInt<size_t>(block_size_per_beam), block_size_per_beam);
+    std::span<const ScoreType> present_key = present_span.subspan(beam_index * block_size_per_beam, block_size_per_beam);
+    std::span<const ScoreType> present_value = present_span.subspan(past_key_size + beam_index * block_size_per_beam, block_size_per_beam);
 
-    std::span<ScoreType> past_key = past_span.subspan(j * SafeInt<size_t>(block_size_per_beam), block_size_per_beam);
-    std::span<ScoreType> past_value = past_span.subspan(past_key_size + j * SafeInt<size_t>(block_size_per_beam), block_size_per_beam);
+    std::span<ScoreType> past_key = past_span.subspan(j * block_size_per_beam, block_size_per_beam);
+    std::span<ScoreType> past_value = past_span.subspan(past_key_size + j * block_size_per_beam, block_size_per_beam);
     cudaMemcpyAsync(past_key.data(), present_key.data(), present_key.size_bytes(), cudaMemcpyDeviceToDevice, cuda_stream_);
     cudaMemcpyAsync(past_value.data(), present_value.data(), present_value.size_bytes(), cudaMemcpyDeviceToDevice, cuda_stream_);
   }

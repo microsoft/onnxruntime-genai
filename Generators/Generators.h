@@ -15,7 +15,6 @@
 #include <cuda_runtime.h>
 #endif
 
-#include "SafeInt.hpp"
 #include "onnxruntime_cxx_api_2.h"
 #include "debugging.h"
 #include "smartptrs.h"

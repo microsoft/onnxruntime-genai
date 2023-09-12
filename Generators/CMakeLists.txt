@@ -2,7 +2,7 @@
 # Licensed under the MIT License.
 
 cmake_minimum_required (VERSION 3.11)
-include(FetchContent)
+# include(FetchContent)
 
 # Enable Hot Reload for MSVC compilers if supported.
 if (POLICY CMP0141)
@@ -20,11 +20,13 @@ FetchContent_Declare(GSL
 FetchContent_MakeAvailable(GSL)
 endif()
 
+if(false) # We don't use SafeInt anymore
 FetchContent_Declare(safeint
     GIT_REPOSITORY "https://github.com/dcleblanc/SafeInt"
 )
 
 FetchContent_MakeAvailable(safeint)
+endif()
 
 set(CMAKE_BUILD_TYPE Debug)
 
@@ -63,7 +65,7 @@ target_include_directories(Generators PRIVATE ${CMAKE_SOURCE_DIR}/ort)
 
 target_link_libraries(Generators PRIVATE "onnxruntime.lib")
 # Microsoft.GSL::GSL
-target_include_directories(Generators PRIVATE ${safeint_SOURCE_DIR})
+# target_include_directories(Generators PRIVATE ${safeint_SOURCE_DIR})
 
 if(MSVC)
     target_compile_options(Generators PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/MP>")

@@ -37,7 +37,7 @@ Search_Cuda::Search_Cuda(SearchParams_Cuda& params)
   cudaMemsetAsync(eos_meet_.data(), 0, eos_meet_.size_bytes(), params_.cuda_stream);
 
   // below buffers are on cpu or cuda
-  size_t next_token_size = SafeInt<size_t>(batch_beam_size) * params_.vocab_size;
+  size_t next_token_size = batch_beam_size * params_.vocab_size;
   next_token_scores_buffer_ = CudaMallocArray<ScoreType>(next_token_size, &next_token_scores_);
   cudaMemsetAsync(next_token_scores_.data(), 0, next_token_scores_.size_bytes(), params_.cuda_stream);
 
@@ -62,7 +62,7 @@ BeamSearch_Cuda::BeamSearch_Cuda(SearchParams_Cuda& params)
   topk_next_scores_ = CudaMallocArray<ScoreType>(2 * batch_beam_size);
 
   constexpr size_t max_parts_of_vocab = 128;
-  size_t topk_buffer_size = SafeInt<size_t>(batch_beam_size) * (max_parts_of_vocab + 1) * params_.num_beams * 2 * 2;
+  size_t topk_buffer_size = batch_beam_size * (max_parts_of_vocab + 1) * params_.num_beams * 2 * 2;
   topk_buffer_ = CudaMallocArray<ScoreType>(topk_buffer_size);
   static_assert(sizeof(ScoreType)==sizeof(int32_t)); // The topk_buffer assumes these match, fix for float16
 
@@ -136,7 +136,7 @@ void BeamSearch_Cuda::NextTokensFromLogits() {
 
   if (params_.num_beams <= 32) {
     constexpr size_t max_parts_of_vocab = 128;
-    size_t candidate_count = SafeInt<size_t>(params_.BatchBeamSize()) * 2 * params_.num_beams;
+    size_t candidate_count = params_.BatchBeamSize() * 2 * params_.num_beams;
     float* topk_tmp_buffer = topk_buffer_.get();
     float* topk_scores_1st_stage = topk_tmp_buffer;
     int32_t* topk_tokens_1st_stage = reinterpret_cast<int32_t*>(topk_scores_1st_stage + candidate_count * max_parts_of_vocab);
