@@ -3,7 +3,6 @@
 #include "beam_search_scorer_cuda.cuh"
 #include "beam_search_scorer_cuda.h"
 #include "beam_search_topk.h"
-#include "cuda_common.h"
 #include <queue>
 
 namespace Generators {

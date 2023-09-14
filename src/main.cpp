@@ -3,7 +3,6 @@
 
 #include "generators.h"
 #include <iostream>
-#include "onnxruntime_cxx_api_2.h"
 
 extern std::unique_ptr<OrtEnv> g_ort_env;
 

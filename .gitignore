@@ -1,6 +1,6 @@
-﻿################################################################################
-# This .gitignore file was automatically created by Microsoft(R) Visual Studio.
-################################################################################
+﻿# Files to tell git to ignore
 
-/Generators/.vs
-/Generators/out
+/src/.vs
+/src/ort
+/src/build
+/src/models/files/*.onnx

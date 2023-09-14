@@ -1,15 +1,11 @@
-#include "generators.h"
-#include "onnxruntime_cxx_api_2.h"
-#include <assert.h>
-#include <iostream>
-
-#include "search.h"
-#include "gpt.h"
-
+#include "../generators.h"
+#include "../search.h"
+#include "../models/gpt.h"
 #if USE_CUDA
-#include "search_cuda.h"
-#include "gpt_cuda.h"
+#include "../search_cuda.h"
+#include "../models/gpt_cuda.h"
 #endif
+#include <iostream>
 
 #define ASSERT_EQ(a, b) assert((a) == (b))
 #define ASSERT_TRUE(a) assert(a)

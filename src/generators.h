@@ -13,10 +13,10 @@
 #include <vector>
 #if USE_CUDA
 #include <cuda_runtime.h>
+#include "cuda_common.h"
 #endif
 
-#include "onnxruntime_cxx_api_2.h"
-#include "debugging.h"
+#include "models/onnxruntime_cxx_api_2.h"
 #include "smartptrs.h"
 
 namespace Generators {

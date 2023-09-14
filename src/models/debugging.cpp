@@ -1,5 +1,4 @@
-#include "generators.h"
-#include "cuda_common.h"
+#include "../generators.h"
 
 namespace Generators {
 static constexpr size_t c_value_count = 10; // Dump this many values from the start of a tensor
