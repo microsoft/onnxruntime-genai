@@ -10,7 +10,7 @@ Currently in Onnxruntime to use greedy search/beam search requires embedding the
 
 ## GPT Usage Example
 
-Link to below example in code here: https://github.com/RyanUnderhill/generators/blob/175abd8da6dd13ca0ef28a48c4397d4681c8722a/Generators/Tests.cpp#L264
+Link to below example in code here: https://github.com/RyanUnderhill/generators/blob/0b96f546474bb5cbf7a802f9b017b26cee86ec14/src/tests/tests.cpp#L122
 
     std::vector<int64_t> input_ids_shape{2, 4};
     std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
@@ -18,15 +18,25 @@ Link to below example in code here: https://github.com/RyanUnderhill/generators/
     auto input_ids_tensor = OrtValue::CreateTensor(
             *info, input_ids.data(), input_ids.size(), input_ids_shape.data(), input_ids_shape.size());
      
-    Gpt gpt(*ort_env,
+    Generators::Gpt gpt(*ort_env,
             ORT_TSTR("models/gpt2_fp32.onnx"), // Init
             ORT_TSTR("models/gpt2_fp32.onnx"), // Decode
-            std::move(input_ids_tensor));
+            );
+
+    Generators::SearchParams params;
+    params.batch_size = static_cast<int>(input_ids_shape[0]);
+    params.sequence_length = static_cast<int>(input_ids_shape[1]);
+    params.input_ids = input_ids;
+    params.max_length = max_length;
+    params.num_beams = 4;
+    params.vocab_size = gpt.GetVocabSize();
  
-    Search search{gpt};
+    Generators::BeamSearch search{params};
+    gpt.CreateInputs(search.sequence_lengths_, params);
  
     while (!search.IsDone()) {
-      search.RunModel();
+      gpt.Run(search.GetNextTokens(), search.GetNextIndices(), search.GetSequenceLength());
+      search.SetLogits(gpt.GetLogits());
  
       // Scoring
       Processors::MinLength(search, 5);
@@ -40,21 +50,21 @@ Link to below example in code here: https://github.com/RyanUnderhill/generators/
       search.AppendNextTokensToSequences();
     }
 
-    auto result=search.GetSequence(0);
+    // Access resulting sequences of tokens
+    for(unsigned i=0;i<params.batch_size;i++) {
+      auto result=search.GetSequence(0);
+    }
 
 # Complete
 
-* GPT2 model loading
-* CPU Greedy search
-* CPU Beam search
-* CPU Scoring examples
+* CPU & CUDA GPT2 model loading
+* CPU & CUDA Beam & Greedy Searches
+* CPU & CUDA Scoring examples
 
 # Future
 
 * Make model code stateless, move state into search? This would allow for multiple searches with one model loaded
-* Remove dead code after design change
 * Support more models built-in, T5/Whisper
-* CUDA support
 * Sampling?
 * Tokenizer?
 
