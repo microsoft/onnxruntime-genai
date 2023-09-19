@@ -7,6 +7,9 @@
 #endif
 #include <iostream>
 
+// Our working directory is generators/src/build so one up puts us in the src directory:
+#define MODEL_PATH "../models/files/"
+
 #define ASSERT_EQ(a, b) assert((a) == (b))
 #define ASSERT_TRUE(a) assert(a)
 
@@ -80,7 +83,7 @@ void Test_BeamSearchTest_GptBeamSearchFp32() {
   // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2
   //        --output tiny_gpt2_beamsearch_fp16.onnx --use_gpu --max_length 20
   // (with separate_gpt2_decoder_for_init_run set to False as it is now set to True by default)
-  auto session = OrtSession::Create(*g_ort_env, ORT_TSTR("C:/code/github/generators/Generators/models/tiny_gpt2_beamsearch.onnx"), session_options.get());
+  auto session = OrtSession::Create(*g_ort_env, ORT_TSTR_ON_MACRO(MODEL_PATH "tiny_gpt2_beamsearch.onnx"), session_options.get());
   auto ort_outputs = session->Run(nullptr, input_names, ort_inputs.data(), ort_inputs.size(),
                                   output_names, 1);
 
@@ -120,7 +123,7 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32() {
   // (with separate_gpt2_decoder_for_init_run set to False as it is now set to True by default)
 
   Generators::Gpt gpt(*g_ort_env,
-          ORT_TSTR("C:/code/github/generators/Generators/models/gpt2_fp32.onnx"));
+                      ORT_TSTR_ON_MACRO(MODEL_PATH "gpt2_fp32.onnx"));
 
   Generators::SearchParams params;
   params.batch_size = static_cast<int>(input_ids_shape[0]);
@@ -205,7 +208,7 @@ void Test_GreedySearchTest_GptGreedySearchFp32() {
   constexpr int min_cuda_architecture = 530;
   auto session_options = OrtSessionOptions::Create();
 
-  auto session = OrtSession::Create(*g_ort_env, ORT_TSTR("C:/code/github/generators/Generators/models/tiny_gpt2_greedysearch_with_init_decoder.onnx"), session_options.get());
+  auto session = OrtSession::Create(*g_ort_env, ORT_TSTR_ON_MACRO(MODEL_PATH "tiny_gpt2_greedysearch_with_init_decoder.onnx"), session_options.get());
 
   auto ort_outputs = session->Run(nullptr, input_names, ort_inputs.data(), ort_inputs.size(), output_names, 1);
 
@@ -242,7 +245,7 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32() {
   // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
 
   Generators::Gpt gpt(*g_ort_env,
-          ORT_TSTR("C:/code/github/generators/Generators/models/gpt2_fp32.onnx"));
+                      ORT_TSTR_ON_MACRO(MODEL_PATH "gpt2_fp32.onnx"));
 
   Generators::SearchParams params;
   params.batch_size = static_cast<int>(input_ids_shape[0]);
@@ -299,14 +302,13 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32_Cuda() {
   // To generate this file:
   // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
   // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
-  Generators::Gpt_Cuda gpt(*g_ort_env, ORT_TSTR("C:/code/github/generators/Generators/models/gpt2_fp32.onnx"), cuda_stream);
+  Generators::Gpt_Cuda gpt(*g_ort_env, ORT_TSTR_ON_MACRO(MODEL_PATH "gpt2_fp32.onnx"), cuda_stream);
 
   Generators::SearchParams_Cuda params;
   params.batch_size = static_cast<int>(input_ids_shape[0]);
   params.sequence_length = static_cast<int>(input_ids_shape[1]);
   params.input_ids = input_ids;
   params.vocab_size = gpt.GetVocabSize();
-  params.p_allocator_cuda = &gpt.GetAllocatorCuda();
   params.cuda_stream = cuda_stream;
 
   Generators::GreedySearch_Cuda search{params};
@@ -368,7 +370,7 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32_Cuda() {
   // (with separate_gpt2_decoder_for_init_run set to False as it is now set to True by default)
 
   Generators::Gpt_Cuda gpt(*g_ort_env,
-                      ORT_TSTR("C:/code/github/generators/Generators/models/gpt2_fp32.onnx"), cuda_stream);
+                           ORT_TSTR_ON_MACRO(MODEL_PATH "gpt2_fp32.onnx"), cuda_stream);
 
   Generators::SearchParams_Cuda params;
   params.batch_size = static_cast<int>(input_ids_shape[0]);
@@ -377,7 +379,6 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32_Cuda() {
   params.max_length = max_length;
   params.num_beams = 4;
   params.vocab_size = gpt.GetVocabSize();
-  params.p_allocator_cuda = &gpt.GetAllocatorCuda();
   params.cuda_stream = cuda_stream;
 
   Generators::BeamSearch_Cuda search{params};

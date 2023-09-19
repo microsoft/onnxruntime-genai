@@ -6,7 +6,6 @@ namespace Generators {
 struct BeamSearchScorer_Cuda;
 
 struct SearchParams_Cuda : SearchParams {
-  Ort::Allocator* p_allocator_cuda;
   cudaStream_t cuda_stream;
 };
 

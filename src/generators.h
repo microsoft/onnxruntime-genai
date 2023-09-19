@@ -16,7 +16,6 @@
 #include "cuda_common.h"
 #endif
 
-#include "models/onnxruntime_cxx_api_2.h"
 #include "smartptrs.h"
 
 namespace Generators {

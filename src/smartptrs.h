@@ -74,30 +74,6 @@ struct cuda_event_holder {
 
 #endif
 
-struct AllocatorDeleter {
-  AllocatorDeleter() = default;
-  explicit AllocatorDeleter(OrtAllocator* allocator)
-      : allocator_(allocator) {}
 
-  void operator()(void* p) const {
-    if (allocator_)
-      allocator_->Free(allocator_, p);
-  }
-
- private:
-  OrtAllocator* allocator_{};
-};
-
-template <typename T>
-using IAllocatorUniquePtr = std::unique_ptr<T, AllocatorDeleter>;
-
-template <typename TAlloc>
-std::span<TAlloc> Allocate(OrtAllocator& allocator,
-                           size_t size,
-                           IAllocatorUniquePtr<TAlloc>& unique_ptr) {
-  assert(!unique_ptr.get());  // Ensure pointer is empty, to avoid accidentally passing the wrong pointer and overwriting things
-  unique_ptr = IAllocatorUniquePtr<TAlloc>(reinterpret_cast<TAlloc*>(allocator.Alloc(&allocator, size * sizeof(TAlloc))), AllocatorDeleter(&allocator));
-  return std::span(unique_ptr.get(), size);
-}
 
 }  // namespace Generators

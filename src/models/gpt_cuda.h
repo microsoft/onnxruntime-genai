@@ -1,3 +1,5 @@
+#include "onnxruntime_cxx_api_2.h"
+
 namespace Generators {
 
 struct Gpt_Cuda {
@@ -12,8 +14,6 @@ struct Gpt_Cuda {
   std::span<const ScoreType> GetLogits();
   int GetVocabSize() { return c_vocab_size; }
   void Run(std::span<const int32_t> next_tokens, std::span<const int32_t> next_indices, int current_length);
-
-  Ort::Allocator& GetAllocatorCuda() { return *allocator_cuda_; }
 
  private:
   void UpdateInputs(std::span<const int32_t> next_tokens, std::span<const int32_t> beam_indices, int current_length);
@@ -31,7 +31,7 @@ struct Gpt_Cuda {
   bool past_present_share_buffer_{};  // NYI
 
   std::span<int32_t> next_positions_;  // shape (batch_size, num_beams). Next position value for position_ids.
-  IAllocatorUniquePtr<int32_t> next_positions_buffer_;
+  Ort::IAllocatorUniquePtr<int32_t> next_positions_buffer_;
   std::unique_ptr<OrtValue> next_positions_tensor_;  // Tensor of the 'next_position_' buffer
 
   // Sessions

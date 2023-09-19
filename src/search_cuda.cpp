@@ -20,7 +20,7 @@ void Launch_SoftMax(int32_t* next_tokens, const ScoreType* next_token_scores, in
 void Launch_CheckForEOS(int32_t* next_tokens, int next_tokens_count, bool* eos_meet, int eos_token_id, int pad_token_id, bool* done_cpu, cudaStream_t stream);
 void LaunchAddProbsKernel(ScoreType* log_probs, ScoreType* cum_log_probs, const int batch_size, const int num_beams, const int vocab_size, cudaStream_t stream);
 void LaunchRepetitionPenaltyProcessor(const int32_t* sequences, ScoreType* next_token_scores, int batch_size, int num_beams, int vocab_size, int max_sequence_length, int current_sequence_length, ScoreType repetition_penalty, cudaStream_t stream);
-void Launch_log_softmax(ScoreType* values, unsigned count, cudaStream_t stream);
+void Launch_log_softmax(ScoreType* values, int count, cudaStream_t stream);
 
 }
 
@@ -91,7 +91,7 @@ void Search_Cuda::SetLogits(std::span<const ScoreType> logits) {
     CudaCheck() == cudaMemcpyAsync(target.data(), source.data(), source.size_bytes(), cudaMemcpyDeviceToDevice, params_.cuda_stream);
     current_logits += input_length * params_.vocab_size;
 
-    cuda::Launch_log_softmax(target.data(), target.size(), params_.cuda_stream);
+    cuda::Launch_log_softmax(target.data(), static_cast<int>(target.size()), params_.cuda_stream);
   }
 }
 
@@ -183,7 +183,7 @@ void GreedySearch_Cuda::NextTokensFromLogits() {
 
 void Search_Cuda::CheckForEOS() {
   assert(next_tokens_.size()==eos_meet_.size());
-  cuda::Launch_CheckForEOS(next_tokens_.data(), next_tokens_.size(), eos_meet_.data(), params_.eos_token_id, params_.pad_token_id, done_cpu_.get(), params_.cuda_stream);
+  cuda::Launch_CheckForEOS(next_tokens_.data(), static_cast<int>(next_tokens_.size()), eos_meet_.data(), params_.eos_token_id, params_.pad_token_id, done_cpu_.get(), params_.cuda_stream);
 }
 
 void GreedySearch_Cuda::AppendNextTokensToSequences() {

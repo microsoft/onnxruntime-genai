@@ -1,4 +1,6 @@
 #include "../generators.h"
+#include "onnxruntime_cxx_api_2.h"
+#include "debugging.h"
 
 namespace Generators {
 static constexpr size_t c_value_count = 10; // Dump this many values from the start of a tensor

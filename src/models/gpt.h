@@ -26,7 +26,7 @@ private:
   bool past_present_share_buffer_ {}; // NYI
 
   std::span<int32_t> next_positions_;  // shape (batch_size, num_beams). Next position value for position_ids.
-  IAllocatorUniquePtr<int32_t> next_positions_buffer_;
+  Ort::IAllocatorUniquePtr<int32_t> next_positions_buffer_;
   std::unique_ptr<OrtValue> next_positions_tensor_; // Tensor of the 'next_position_' buffer
 
   // Sessions

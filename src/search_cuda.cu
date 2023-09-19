@@ -45,18 +45,18 @@ void Launch_SoftMax(int32_t* next_tokens, const ScoreType* next_token_scores, in
   SoftMax<<<1, 1, 0, stream>>>(next_tokens, next_token_scores, batch_size, vocab_size);
 }
 
-__global__ void log_softmax(ScoreType* values, unsigned count) {
+__global__ void log_softmax(ScoreType* values, int count) {
   float max = *std::max_element(values, values+count);
 //  std::vector<float> scaled(values.begin(), values.end());
   float sum=0.0f;
-  for (unsigned i=0;i<count;i++)
+  for (int i=0;i<count;i++)
     sum += std::exp(values[i]-max);
 
   float log_max = std::log(sum);
   std::transform(values, values+count, values, [max, log_max](float v) { return v - max - log_max; });
 }
 
-void Launch_log_softmax(ScoreType* values, unsigned count, cudaStream_t stream) {
+void Launch_log_softmax(ScoreType* values, int count, cudaStream_t stream) {
   log_softmax<<<1, 1, 0, stream>>>(values, count);
 }
 

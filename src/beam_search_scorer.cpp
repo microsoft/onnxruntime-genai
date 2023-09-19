@@ -192,7 +192,7 @@ void BeamSearchScorer::Finalize(Sequences& sequences,
     }
 
     for (size_t beam_index = 0; beam_index < num_beams_; beam_index++) {
-      size_t batch_beam_index = batch_index * num_beams_ + beam_index;
+      int batch_beam_index = batch_index * num_beams_ + beam_index;
       float final_score = next_beam_scores_[batch_beam_index];
       auto final_tokens = sequences.GetSequence(batch_beam_index);
       beam_hyp.Add(final_tokens, final_score);
