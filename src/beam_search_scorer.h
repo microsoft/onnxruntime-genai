@@ -51,9 +51,9 @@ struct BeamSearchScorer {
   std::span<int32_t> GetNextIndicesCPU() { return next_beam_indices_; }
 
  private:
-  size_t batch_size_;
-  size_t num_beams_;
-  size_t max_length_;
+  int batch_size_;
+  int num_beams_;
+  int max_length_;
   int pad_token_id_;
   int eos_token_id_;
   bool early_stopping_;

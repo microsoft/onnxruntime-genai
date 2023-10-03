@@ -32,8 +32,11 @@ project (Generators LANGUAGES CXX)
 set(GENERATORS_ROOT ${PROJECT_SOURCE_DIR})
 set(MODELS_ROOT ${PROJECT_SOURCE_DIR}/models)
 set(TESTS_ROOT ${PROJECT_SOURCE_DIR}/tests)
+set(PYBIND_ROOT ${PROJECT_SOURCE_DIR}/pybind)
 
 set(USE_CUDA 1)
+
+add_subdirectory(${PROJECT_SOURCE_DIR}/../extern/pybind11 ${PROJECT_SOURCE_DIR}/build/pybind)
 
 # CUDA Being enabled will make it not a debug build without this option, so all of the C++ headers will complain
 # about a mismatch with the actual debug headers and it'll fail to link. I don't know why this happens, or if this is the best fix.
@@ -56,6 +59,11 @@ file(GLOB model_srcs CONFIGURE_DEPENDS
 file(GLOB test_srcs CONFIGURE_DEPENDS
    "${TESTS_ROOT}/*.h"
    "${TESTS_ROOT}/*.cpp"
+)
+
+file(GLOB pybind_srcs CMAKE_CONFIGURE_DEPENDS
+   "${PYBIND_ROOT}/*.h"
+   "${PYBIND_ROOT}/*.cpp"
 )
 
 if(USE_CUDA)
@@ -89,12 +97,21 @@ add_executable (Tests ${test_srcs})
 target_include_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort)
 target_link_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort)
 target_link_libraries(Tests PRIVATE Generators Models "onnxruntime.lib")
+
+pybind11_add_module(ort_generators ${pybind_srcs})
+target_include_directories(ort_generators PRIVATE ${CMAKE_SOURCE_DIR}/ort)
+target_link_directories(ort_generators PRIVATE ${CMAKE_SOURCE_DIR}/ort)
+target_link_libraries(ort_generators PRIVATE Generators Models "onnxruntime.lib")
+
 # Microsoft.GSL::GSL
 # target_include_directories(Generators PRIVATE ${safeint_SOURCE_DIR})
 
 # Turn on multiple processor build option for Visual C++
 if(MSVC)
+    target_compile_options(Models PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/MP>")
+    target_compile_options(Generators PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/MP>")
     target_compile_options(Tests PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/MP>")
+    target_compile_options(ort_generators PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/MP>")
 endif()
 
  # Copy the onnxruntime binaries into the build folder so it's found on launch
@@ -112,10 +129,13 @@ if (CMAKE_VERSION VERSION_GREATER 3.12)
   set_property(TARGET Generators PROPERTY CXX_STANDARD 20)
   set_property(TARGET Models PROPERTY CXX_STANDARD 20)
   set_property(TARGET Tests PROPERTY CXX_STANDARD 20)
+  set_property(TARGET ort_generators PROPERTY CXX_STANDARD 20)
 endif()
 
+# Have visual studio put all files into one single 'Sources' folder vs the default split of header files into a separate folder
 source_group("Sources" FILES ${generator_srcs})
 source_group("Sources" FILES ${model_srcs})
 source_group("Sources" FILES ${test_srcs})
+source_group("Sources" FILES ${pybind_srcs})
 
 set_property (DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT Tests)

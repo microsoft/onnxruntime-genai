@@ -1,6 +1,8 @@
 #include "../generators.h"
 #include "../search.h"
 #include "gpt.h"
+#include "debugging.h"
+#include <iostream>
 
 namespace Generators
 {
@@ -33,16 +35,27 @@ static void ExpandInputs(const OrtValue& input, int num_beams, OrtAllocator& all
   }
 }
 
-Gpt::Gpt(OrtEnv& ort_env, const ORTCHAR_T* decode_path)
-{
+Gpt::Gpt(OrtEnv& ort_env, const ORTCHAR_T* decode_path) {
+
   auto session_options = OrtSessionOptions::Create();
   session_decode_ = OrtSession::Create(ort_env, decode_path, session_options.get());
+
+  // We could use this to determine the vocabulary size and if the logits has a width of 1
+  auto logits_shape = session_decode_->GetOutputTypeInfo(0)->GetTensorTypeAndShapeInfo().GetShape();
+  assert(logits_shape.size() == 3);
+  model_params_.logits_uses_seq_len = logits_shape[1]==-1;
+  model_params_.vocab_size = static_cast<int>(logits_shape[2]);
+  model_params_.layer_count = static_cast<int>(session_decode_->GetOutputCount())-1;
+
+  auto past_shape = session_decode_->GetInputTypeInfo(3)->GetTensorTypeAndShapeInfo().GetShape();
+  model_params_.head_count = static_cast<int>(past_shape[2]);
+  model_params_.hidden_size = static_cast<int>(past_shape[4]);
 }
 
-void Gpt::CreateInputs(std::span<int32_t> sequence_lengths, const SearchParams& params) {
-  params_=params;
+void Gpt::CreateInputs(std::span<int32_t> sequence_lengths, const SearchParams& search_params) {
+  search_params_ = search_params;
 
-  int64_t input_ids_shape[] = { params_.batch_size, params_.sequence_length };
+  int64_t input_ids_shape[] = {search_params_.batch_size, search_params_.sequence_length};
 
   // Allocate position_ids and attention_mask based on shape of input_ids
   auto element_type = Ort::TypeToTensorType<int32_t>::type;
@@ -54,10 +67,10 @@ void Gpt::CreateInputs(std::span<int32_t> sequence_lengths, const SearchParams& 
   // Current shape is (batch_size, sequence_length)
   // Note that we will expand it to (batch_size * num_beams, sequence_length) later.
   // To avoid cloning input_ids, we use const_cast here since this function does not change its content.
-  input_ids_ = OrtValue::CreateTensor<int32_t>(allocator.GetInfo(), const_cast<int32_t*>(params_.input_ids.data()), input_ids_shape[0]*input_ids_shape[1], input_ids_shape, std::size(input_ids_shape));
+  input_ids_ = OrtValue::CreateTensor<int32_t>(allocator.GetInfo(), const_cast<int32_t*>(search_params_.input_ids.data()), input_ids_shape[0] * input_ids_shape[1], input_ids_shape, std::size(input_ids_shape));
   position_ids_ = OrtValue::CreateTensor<int32_t>(allocator, input_ids_shape, std::size(input_ids_shape));
 
-  int64_t position_shape[] = {params_.batch_size * params_.num_beams, 1};
+  int64_t position_shape[] = {search_params_.batch_size * search_params_.num_beams, 1};
   next_positions_ = Allocate<int32_t>(allocator, position_shape[0], next_positions_buffer_);
   memset(next_positions_.data(), 0, next_positions_.size_bytes());
   next_positions_tensor_ = OrtValue::CreateTensor<int32_t>(allocator.GetInfo(), next_positions_.data(), next_positions_.size(), position_shape, std::size(position_shape));
@@ -77,13 +90,13 @@ void Gpt::CreateInputs(std::span<int32_t> sequence_lengths, const SearchParams& 
   // Set position id to be 0 for pad tokens, and accumulated sum of mask in a batch for other tokens
   int32_t* mask_data = attention_mask_->GetTensorMutableData<int32_t>();
   int32_t* position_data = position_ids_->GetTensorMutableData<int32_t>();
-  const int32_t* word_id = params_.input_ids.data();
+  const int32_t* word_id = search_params_.input_ids.data();
   int32_t* mask = mask_data;
   int32_t* position = position_data;
-  for (int i = 0; i < params_.batch_size; i++) {
+  for (int i = 0; i < search_params_.batch_size; i++) {
     int32_t abs_position = 0;
-    for (int j = 0; j < params_.sequence_length; j++, word_id++, mask++, position++) {
-      if (*word_id == params_.pad_token_id) {
+    for (int j = 0; j < search_params_.sequence_length; j++, word_id++, mask++, position++) {
+      if (*word_id == search_params_.pad_token_id) {
         if (attn_mask_value == nullptr) {
           *mask = 0;
         }
@@ -97,21 +110,21 @@ void Gpt::CreateInputs(std::span<int32_t> sequence_lengths, const SearchParams& 
       }
     }
 
-    for (int k = 0; k < params_.num_beams; k++) {
-      sequence_lengths[i * params_.num_beams + k] = abs_position;
+    for (int k = 0; k < search_params_.num_beams; k++) {
+      sequence_lengths[i * search_params_.num_beams + k] = abs_position;
     }
   }
 
   // Expand (batch_size, sequence_length) to (batch_size * num_beams, sequence_length)
   // TODO(tianleiwu): Try expand outputs after first subgraph call instead. That may get better performance.
-  if (params_.num_beams == 1) {
+  if (search_params_.num_beams == 1) {
     expanded_input_ids_ = std::move(input_ids_);
     expanded_position_ids_ = std::move(position_ids_);
     expanded_attention_mask_ = std::move(attention_mask_);
   } else {
-    ExpandInputs<int32_t>(*input_ids_, params_.num_beams, allocator, expanded_input_ids_);
-    ExpandInputs<int32_t>(*position_ids_, params_.num_beams, allocator, expanded_position_ids_);
-    ExpandInputs<int32_t>(*attention_mask_, params_.num_beams, allocator, expanded_attention_mask_);
+    ExpandInputs<int32_t>(*input_ids_, search_params_.num_beams, allocator, expanded_input_ids_);
+    ExpandInputs<int32_t>(*position_ids_, search_params_.num_beams, allocator, expanded_position_ids_);
+    ExpandInputs<int32_t>(*attention_mask_, search_params_.num_beams, allocator, expanded_attention_mask_);
   }
 
   for (auto* input : {expanded_input_ids_.get(), expanded_position_ids_.get(), expanded_attention_mask_.get()})
@@ -124,16 +137,18 @@ void Gpt::CreateInputs(std::span<int32_t> sequence_lengths, const SearchParams& 
   auto past_type = Ort::TypeToTensorType<ScoreType>::type;
   if (!past_present_share_buffer_) {
     // Initialize empty past state
-    int64_t empty_past_shape[] = {2, params_.batch_size * params_.num_beams, c_num_heads, 0, c_head_size};
+    int64_t empty_past_shape[] = {2, search_params_.batch_size * search_params_.num_beams, model_params_.head_count, 0, model_params_.hidden_size};
     empty_past_ = OrtValue::CreateTensor(allocator, empty_past_shape, std::size(empty_past_shape), past_type);
-    for (int i=0;i<c_counts;i++)
+    for (int i = 0; i < model_params_.layer_count; i++)
       inputs_.push_back(empty_past_.get());
 
     // Initialize non empty past states
-    int64_t past_shape[] = {2, params_.batch_size * params_.num_beams, c_num_heads, input_ids_shape[1], c_head_size};
+    int64_t past_shape[] = {2, search_params_.batch_size * search_params_.num_beams, model_params_.head_count, input_ids_shape[1], model_params_.hidden_size};
+    pasts_.reserve(model_params_.layer_count);
+
     // The remaining inputs are past state.
-    for (int i = 0; i < c_counts; ++i) {
-      pasts_[i] = OrtValue::CreateTensor(allocator, past_shape, std::size(past_shape), past_type);
+    for (int i = 0; i < model_params_.layer_count; ++i) {
+      pasts_.push_back(OrtValue::CreateTensor(allocator, past_shape, std::size(past_shape), past_type));
 
       char string[32];
       snprintf(string, std::size(string), "past_%d", i);
@@ -143,17 +158,20 @@ void Gpt::CreateInputs(std::span<int32_t> sequence_lengths, const SearchParams& 
     assert(false);
   }
 
+  // Allocate space for logits (only works if we know the shape)
   {
-    int64_t logits_shape[] = {params_.batch_size * params_.num_beams, 1, c_vocab_size};
+    int64_t logits_shape[] = {search_params_.batch_size * search_params_.num_beams, model_params_.logits_uses_seq_len ? input_ids_shape[1] : 1, model_params_.vocab_size};
     logits_ = OrtValue::CreateTensor(allocator, logits_shape, std::size(logits_shape), past_type);
     outputs_.push_back(logits_.get());
   }
-  {
-    int64_t present_shape[] = {2, params_.batch_size * params_.num_beams, c_num_heads, input_ids_shape[1], c_head_size};
 
-    for (int i = 0; i < c_counts; ++i) {
-      presents_[i] = OrtValue::CreateTensor(allocator, present_shape, std::size(present_shape), past_type);
-      outputs_.push_back(presents_[i].get());
+  {
+    int64_t present_shape[] = {2, search_params_.batch_size * search_params_.num_beams, model_params_.head_count, input_ids_shape[1], model_params_.hidden_size};
+    outputs_.reserve(model_params_.layer_count);
+
+    for (int i = 0; i < model_params_.layer_count; ++i) {
+      presents_.push_back(OrtValue::CreateTensor(allocator, present_shape, std::size(present_shape), past_type));
+      outputs_.push_back(presents_.back().get());
 
       char string[32];
       snprintf(string, std::size(string), "present_%d", i);
@@ -170,12 +188,13 @@ void Gpt::CreateInputs(std::span<int32_t> sequence_lengths, const SearchParams& 
 
   for (size_t i=0;i<inputs_.size();i++)
     io_binding_decode_->BindInput(input_names_[i], *inputs_[i]);
-  for ( size_t i=0;i<outputs_.size();i++)
+  for (size_t i = 1; i < outputs_.size(); i++)
     io_binding_decode_->BindOutput(output_names_[i], *outputs_[i]);
 }
 
 std::span<const ScoreType> Gpt::GetLogits() {
   auto type_shape = logits_->GetTensorTypeAndShapeInfo();
+  auto shape = type_shape->GetShape();
   assert(type_shape->GetShape().size() == 3);
 
   return {logits_->GetTensorData<ScoreType>(), type_shape->GetElementCount()};
@@ -194,7 +213,14 @@ void Gpt::Run(std::span<const int32_t> next_tokens, std::span<const int32_t> nex
   DumpTensors(outputs_.data(), output_names_.data(), output_names_.size(), false);
 #endif
 
-  session_decode_->Run(nullptr, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
+try {
+    session_decode_->Run(nullptr, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
+//    session_decode_->Run(nullptr, *io_binding_decode_);
+//    logits_ = std::move(io_binding_decode_->GetOutputValues()[0]);
+}
+    catch (const Ort::Exception &e) {
+      std::cout << e.what() << std::endl;
+    }
 }
 
 void Gpt::UpdateInputs(std::span<const int32_t> next_tokens, std::span<const int32_t> beam_indices, int current_length) {
@@ -236,6 +262,14 @@ void Gpt::UpdateInputs(std::span<const int32_t> next_tokens, std::span<const int
   expanded_attention_mask_=std::move(attention_mask);
   inputs_[2]=expanded_attention_mask_.get();
 
+  // Update logits
+  if (model_params_.logits_uses_seq_len)
+  {
+    int64_t logits_shape[] = {search_params_.batch_size * search_params_.num_beams, 1, model_params_.vocab_size};
+    logits_ = OrtValue::CreateTensor(allocator, logits_shape, std::size(logits_shape), Ort::TypeToTensorType<ScoreType>::type);
+    outputs_[0]=logits_.get();
+  }
+
 #if 0
   if (past_present_share_buffer) {
     int32_t* past_seq_len_data = const_cast<int32_t*>(next_inputs.back().Get<Tensor>().Data<int32_t>());
@@ -245,16 +279,16 @@ void Gpt::UpdateInputs(std::span<const int32_t> next_tokens, std::span<const int
 #endif
 
   // feed present_* output to past_* inputs one by one
-  int64_t present_shape[] = {2, batch_beam_size, c_num_heads, current_length, c_head_size};
+  int64_t present_shape[] = {2, batch_beam_size, model_params_.head_count, current_length, model_params_.hidden_size};
 
   if (beam_indices.empty()) {  // Update past state
     // If this is the first iteration it'll have an empty past, swap out the non empty past states for the future
     if (inputs_[3] == empty_past_.get()) {
-      for (size_t i=0;i<c_counts;i++)
+      for (size_t i = 0; i < model_params_.layer_count; i++)
         inputs_[i + 3] = pasts_[i].get();
     }
 
-    for (size_t i = 0; i < c_counts; i++) {
+    for (size_t i = 0; i < model_params_.layer_count; i++) {
       pasts_[i]=std::move(presents_[i]);
       inputs_[i + 3] = pasts_[i].get();
 
@@ -262,7 +296,7 @@ void Gpt::UpdateInputs(std::span<const int32_t> next_tokens, std::span<const int
       outputs_[i + 1] = presents_[i].get();
     }
   } else {
-    for (size_t i = 0; i < c_counts; i++) {
+    for (size_t i = 0; i < model_params_.layer_count; i++) {
       PickPastState(allocator, i, beam_indices);
 
       presents_[i] = OrtValue::CreateTensor<float>(allocator, present_shape, std::size(present_shape));

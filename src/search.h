@@ -8,6 +8,7 @@ struct GreedySearchParams : SearchParams {
 };
 
 struct BeamSearchParams : SearchParams {
+  float length_penalty {};
 };
 
 struct Search {

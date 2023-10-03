@@ -4,23 +4,27 @@ namespace Generators {
 
 struct Gpt {
 
-  static constexpr size_t c_vocab_size=1000;
-  static constexpr size_t c_num_heads=4;
-  static constexpr size_t c_head_size=8;
-  static constexpr size_t c_counts=5;
+  struct ModelParams {
+    int vocab_size{};
+    int head_count{};
+    int hidden_size{};
+    int layer_count{};
+    bool logits_uses_seq_len{};  // Logits shape is [... seq_len, vocab_size ] vs [... 1, vocab_size ]
+  };
 
-  Gpt(OrtEnv &ort_env, const ORTCHAR_T* decode_path);
+  Gpt(OrtEnv& ort_env, const ORTCHAR_T* decode_path);
 
   void CreateInputs(std::span<int32_t> sequence_lengths, const SearchParams& params);
   std::span<const ScoreType> GetLogits();
-  int GetVocabSize() { return c_vocab_size; }
+  int GetVocabSize() const { return model_params_.vocab_size; }
   void Run(std::span<const int32_t> next_tokens, std::span<const int32_t> next_indices, int current_length);
 
 private:
   void UpdateInputs(std::span<const int32_t> next_tokens, std::span<const int32_t> beam_indices, int current_length);
   void PickPastState(OrtAllocator& allocator, size_t index, std::span<const int32_t> beam_indices);
 
-  SearchParams params_;
+  ModelParams model_params_;
+  SearchParams search_params_;
   bool first_run_{true};
 
   bool past_present_share_buffer_ {}; // NYI
@@ -37,7 +41,7 @@ private:
   std::unique_ptr<OrtValue> position_ids_, expanded_position_ids_;
   std::unique_ptr<OrtValue> attention_mask_, expanded_attention_mask_;
   std::unique_ptr<OrtValue> empty_past_;
-  std::unique_ptr<OrtValue> pasts_[c_counts];
+  std::vector<std::unique_ptr<OrtValue>> pasts_;
   std::unique_ptr<OrtIoBinding> io_binding_decode_;
 
   std::vector<std::string> input_name_strings_;
@@ -46,7 +50,7 @@ private:
 
   // Outputs
   std::unique_ptr<OrtValue> logits_;
-  std::unique_ptr<OrtValue> presents_[c_counts];
+  std::vector<std::unique_ptr<OrtValue>> presents_;
   std::vector<std::string> output_name_strings_;
   std::vector<const char*> output_names_;
   std::vector<OrtValue*> outputs_;

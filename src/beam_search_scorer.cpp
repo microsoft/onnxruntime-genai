@@ -60,9 +60,9 @@ void BeamHypotheses::Output(
 }
 
 BeamSearchScorer::BeamSearchScorer(const SearchParams& parameters)
-    : batch_size_{static_cast<size_t>(parameters.batch_size)},
-      num_beams_{static_cast<size_t>(parameters.num_beams)},
-      max_length_{static_cast<size_t>(parameters.max_length)},
+    : batch_size_{parameters.batch_size},
+      num_beams_{parameters.num_beams},
+      max_length_{parameters.max_length},
       pad_token_id_{parameters.pad_token_id},
       eos_token_id_{parameters.eos_token_id},
       early_stopping_{parameters.early_stopping},
@@ -185,13 +185,13 @@ void BeamSearchScorer::Finalize(Sequences& sequences,
   // sequence_scores is the optional Score of each sequence, with shape (batch_size * num_return_sequences).
 
   // Finalize all open beam hypotheses and add to generated hypotheses.
-  for (size_t batch_index = 0; batch_index < batch_size_; batch_index++) {
+  for (int batch_index = 0; batch_index < batch_size_; batch_index++) {
     BeamHypotheses& beam_hyp = beam_hyps_[batch_index];
     if (beam_hyp.done_) {
       continue;
     }
 
-    for (size_t beam_index = 0; beam_index < num_beams_; beam_index++) {
+    for (int beam_index = 0; beam_index < num_beams_; beam_index++) {
       int batch_beam_index = batch_index * num_beams_ + beam_index;
       float final_score = next_beam_scores_[batch_beam_index];
       auto final_tokens = sequences.GetSequence(batch_beam_index);

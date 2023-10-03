@@ -59,7 +59,7 @@ void Search::SetLogits(std::span<const ScoreType> logits) {
   auto input_length = logits.size() / (batch_beam_size * params_.vocab_size);
   assert(logits.size() % (batch_beam_size * params_.vocab_size) == 0);  // Should divide evenly
 
-  assert(input_length == 1);  // When is this not true? RyanHill wants to know
+  // TODO: if input_length==1, use token scores directly
 
   // Get logits for the last token:
   //    next_token_logits = logits[:, -1, :], and the result shape is (batch_size, vocab_size)
