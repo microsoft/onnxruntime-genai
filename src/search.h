@@ -4,13 +4,6 @@ namespace Generators {
 
 struct BeamSearchScorer;
 
-struct GreedySearchParams : SearchParams {
-};
-
-struct BeamSearchParams : SearchParams {
-  float length_penalty {};
-};
-
 struct Search {
   Search(SearchParams params);
 
@@ -24,7 +17,6 @@ struct Search {
   // Extra scoring steps go here
 
   //
-  void CheckForEOS();
   std::span<ScoreType> GetScores(int batch_beam_index);
   Sequences& GetSequences() { return sequences_; }
 
@@ -32,9 +24,6 @@ struct Search {
 
   std::span<int32_t> sequence_lengths_;  // shape (beam_size*batch_size)
   std::unique_ptr<int32_t[]> sequence_lengths_buffer_;
-
-  std::span<bool> eos_meet_;  // shape (beam_size*batch_size)
-  std::unique_ptr<bool[]> eos_meet_buffer_;
 
   std::span<int32_t> next_tokens_;  // shape (beam_size*batch_size)
 
@@ -49,12 +38,18 @@ struct GreedySearch : Search {
   GreedySearch(SearchParams params);
 
   std::span<int32_t> GetNextTokens();
-  void NextTokensFromLogits();
-  void AppendNextTokensToSequences();
+
+  void SelectTop1();
 
  private:
+  void AppendNextTokensToSequences();
+
   std::unique_ptr<int32_t[]> next_tokens_buffer_;
   std::unique_ptr<int32_t[]> temp_topk_buffer_;
+
+  std::span<bool> eos_seen_;  // shape (batch_size)
+  std::unique_ptr<bool[]> eos_seen_buffer_;
+  int not_done_count_{params_.batch_size};  // When zero, every batch entry is done (starts at batch_size_)
 };
 
 struct BeamSearch : Search {
@@ -63,11 +58,14 @@ struct BeamSearch : Search {
 
   std::span<int32_t> GetNextTokens();
   std::span<int32_t> GetNextIndices();
-  void NextTokensFromLogits();
-  void AppendNextTokensToSequences();
+
+  void SelectTopK();
+
   void Finalize(size_t num_return_sequences, std::span<int32_t> output, std::span<float> sequence_scores);
 
  private:
+  void AppendNextTokensToSequences();
+
   std::unique_ptr<BeamSearchScorer> beam_scorer_;
 };
 

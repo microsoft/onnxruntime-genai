@@ -176,12 +176,15 @@ void BeamSearch_Cuda::NextTokensFromLogits() {
   next_tokens_ = beam_scorer_->GetNextTokens();
 }
 
-void GreedySearch_Cuda::NextTokensFromLogits() {
+void GreedySearch_Cuda::SelectTop1() {
   auto next_token_scores = next_token_scores_.data();
   cuda::Launch_SoftMax(next_tokens_.data(), next_token_scores, params_.batch_size, params_.vocab_size, params_.cuda_stream);
+
+  CheckForEOS();
+  AppendNextTokensToSequences();
 }
 
-void Search_Cuda::CheckForEOS() {
+void GreedySearch_Cuda::CheckForEOS() {
   assert(next_tokens_.size()==eos_meet_.size());
   cuda::Launch_CheckForEOS(next_tokens_.data(), static_cast<int>(next_tokens_.size()), eos_meet_.data(), params_.eos_token_id, params_.pad_token_id, done_cpu_.get(), params_.cuda_stream);
 }

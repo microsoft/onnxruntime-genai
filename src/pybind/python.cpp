@@ -3,7 +3,9 @@
 #include <pybind11/numpy.h>
 #include "../generators.h"
 #include "../search.h"
-#include "../models/gpt.h"
+#include "../search_cuda.h"
+#include "../models/gpt_cpu.h"
+#include "../models/gpt_cuda.h"
 #include <iostream>
 
 
@@ -115,7 +117,7 @@ void TestFP16(pybind11::array_t<float16> inputs) {
   std::cout << std::endl;
 }
 
-std::string ToString(const GreedySearchParams& v) {
+std::string ToString(const SearchParams& v) {
   std::ostringstream oss;
   oss << "SearchParams("
          "num_beams="
@@ -124,9 +126,9 @@ std::string ToString(const GreedySearchParams& v) {
   return oss.str();
 }
 
-std::string ToString(const Gpt::ModelParams& v) {
+std::string ToString(const GptModelParams& v) {
   std::ostringstream oss;
-  oss << "Gpt::ModelParams("
+  oss << "GptModelParams("
          "vocab_size="
       << v.vocab_size << ", head_count=" << v.head_count << ", hidden_size=" << v.hidden_size << ", layer_count=" << v.layer_count << ")";
 
@@ -141,7 +143,7 @@ OrtEnv& GetOrtEnv() {
   return *g_ort_env;
 }
 
-struct PyGreedySearchParams : GreedySearchParams {
+struct PySearchParams : SearchParams {
   pybind11::array_t<int32_t> py_input_ids_;
 };
 
@@ -157,45 +159,51 @@ PYBIND11_MODULE(ort_generators, m) {
 
     )pbdoc";
 
-  pybind11::class_<PyGreedySearchParams>(m, "GreedySearchParams")
+  pybind11::class_<PySearchParams>(m, "SearchParams")
       .def(pybind11::init<>())
-      .def_readwrite("num_beams", &PyGreedySearchParams::num_beams)
-      .def_readwrite("batch_size", &PyGreedySearchParams::batch_size)
-      .def_readwrite("sequence_length", &PyGreedySearchParams::sequence_length)
-      .def_readwrite("max_length", &PyGreedySearchParams::max_length)
-      .def_readwrite("pad_token_id", &PyGreedySearchParams::pad_token_id)
-      .def_readwrite("eos_token_id", &PyGreedySearchParams::eos_token_id)
-      .def_readwrite("vocab_size", &PyGreedySearchParams::vocab_size)
-      .def_readwrite("length_penalty", &PyGreedySearchParams::length_penalty)
-      .def_readwrite("early_stopping", &PyGreedySearchParams::early_stopping)
+      .def_readwrite("num_beams", &PySearchParams::num_beams)
+      .def_readwrite("batch_size", &PySearchParams::batch_size)
+      .def_readwrite("sequence_length", &PySearchParams::sequence_length)
+      .def_readwrite("max_length", &PySearchParams::max_length)
+      .def_readwrite("pad_token_id", &PySearchParams::pad_token_id)
+      .def_readwrite("eos_token_id", &PySearchParams::eos_token_id)
+      .def_readwrite("vocab_size", &PySearchParams::vocab_size)
+      .def_readwrite("length_penalty", &PySearchParams::length_penalty)
+      .def_readwrite("early_stopping", &PySearchParams::early_stopping)
       .def_property(
           "input_ids",
-          [](PyGreedySearchParams& s) -> pybind11::array_t<int32_t> { return s.py_input_ids_; },
-          [](PyGreedySearchParams& s, pybind11::array_t<int32_t> v) { s.py_input_ids_=v; s.input_ids = ToSpan(s.py_input_ids_); })
-      .def("__repr__", [](PyGreedySearchParams& s) { return ToString(s); });
+          [](PySearchParams& s) -> pybind11::array_t<int32_t> { return s.py_input_ids_; },
+          [](PySearchParams& s, pybind11::array_t<int32_t> v) { s.py_input_ids_=v; s.input_ids = ToSpan(s.py_input_ids_); })
+      .def("__repr__", [](PySearchParams& s) { return ToString(s); });
 
   pybind11::class_<GreedySearch>(m, "GreedySearch")
-      .def(pybind11::init<const PyGreedySearchParams&>())
+      .def(pybind11::init<const PySearchParams&>())
       .def("SetLogits", [](GreedySearch& s, pybind11::array_t<float> inputs) { s.SetLogits(ToSpan(inputs)); })
       .def("GetSequenceLength", &GreedySearch::GetSequenceLength)
       .def("GetSequenceLengths", [](GreedySearch& s) -> pybind11::array_t<int32_t> { return ToPython(s.sequence_lengths_); })
       .def("GetNextTokens", [](GreedySearch& s) -> pybind11::array_t<int32_t> { return ToPython(s.GetNextTokens()); })
       .def("IsDone", &GreedySearch::IsDone)
-      .def("NextTokensFromLogits", &GreedySearch::NextTokensFromLogits)
-      .def("CheckForEOS", &GreedySearch::CheckForEOS)
-      .def("AppendNextTokensToSequences", &GreedySearch::AppendNextTokensToSequences)
+      .def("SelectTop1", &GreedySearch::SelectTop1)
       .def("GetSequence", [](GreedySearch& s, int index) -> pybind11::array_t<int32_t> { return ToPython(s.sequences_.GetSequence(index)); });
 
+  pybind11::class_<GreedySearch_Cuda>(m, "GreedySearch_Cuda")
+      .def(pybind11::init([](const PySearchParams& v) { SearchParams_Cuda s; static_cast<SearchParams&>(s)=v; return new GreedySearch_Cuda(s); }))
+      .def("SetLogits", [](GreedySearch_Cuda& s, pybind11::array_t<float> inputs) { s.SetLogits(ToSpan(inputs)); })
+      .def("GetSequenceLength", &GreedySearch_Cuda::GetSequenceLength)
+      .def("GetSequenceLengths", [](GreedySearch_Cuda& s) -> pybind11::array_t<int32_t> { return ToPython(s.sequence_lengths_); })
+      .def("GetNextTokens", [](GreedySearch_Cuda& s) -> pybind11::array_t<int32_t> { return ToPython(s.GetNextTokens()); })
+      .def("IsDone", &GreedySearch_Cuda::IsDone)
+      .def("SelectTop1", &GreedySearch_Cuda::SelectTop1)
+      .def("GetSequence", [](GreedySearch_Cuda& s, int index) -> pybind11::array_t<int32_t> { return ToPython(s.sequences_.GetSequence(index)); });
+
   pybind11::class_<BeamSearch>(m, "BeamSearch")
-      .def(pybind11::init<const PyGreedySearchParams&>())
+      .def(pybind11::init<const PySearchParams&>())
       .def("SetLogits", [](BeamSearch& s, pybind11::array_t<float> inputs) { s.SetLogits(ToSpan(inputs)); })
       .def("GetSequenceLength", &BeamSearch::GetSequenceLength)
       .def("GetSequenceLengths", [](BeamSearch& s) -> pybind11::array_t<int32_t> { return ToPython(s.sequence_lengths_); })
       .def("GetNextTokens", [](BeamSearch& s) -> pybind11::array_t<int32_t> { return ToPython(s.GetNextTokens()); })
       .def("IsDone", &BeamSearch::IsDone)
-      .def("NextTokensFromLogits", &BeamSearch::NextTokensFromLogits)
-      .def("CheckForEOS", &BeamSearch::CheckForEOS)
-      .def("AppendNextTokensToSequences", &BeamSearch::AppendNextTokensToSequences)
+      .def("SelectTopK", &BeamSearch::SelectTopK)
       .def("GetSequence", [](BeamSearch& s, int index) -> pybind11::array_t<int32_t> { return ToPython(s.sequences_.GetSequence(index)); });
 
   // If we support models, we need to init the OrtApi
@@ -206,10 +214,17 @@ PYBIND11_MODULE(ort_generators, m) {
 
   pybind11::class_<Gpt>(m, "Gpt")
       .def(pybind11::init([](const std::string& str) { return new Gpt(GetOrtEnv(), ORTCHAR_String(str.c_str())); }))
-      .def("CreateInputs", [](Gpt& s, pybind11::array_t<int32_t> sequence_lengths, const PyGreedySearchParams& params) { s.CreateInputs(ToSpan(sequence_lengths), params); })
+      .def("CreateInputs", [](Gpt& s, pybind11::array_t<int32_t> sequence_lengths, const PySearchParams& params) { s.CreateInputs(ToSpan(sequence_lengths), params); })
       .def("GetVocabSize", &Gpt::GetVocabSize)
       .def("Run", [](Gpt& s, pybind11::array_t<int32_t> next_tokens, pybind11::array_t<int32_t> next_indices, int current_length) { s.Run(ToSpan(next_tokens), ToSpan(next_indices), current_length); })
       .def("GetLogits", [](Gpt& s) -> pybind11::array_t<float> { return ToPython(s.GetLogits()); });
+
+  pybind11::class_<Gpt_Cuda>(m, "Gpt_Cuda")
+      .def(pybind11::init([](const std::string& str) { return new Gpt_Cuda(GetOrtEnv(), ORTCHAR_String(str.c_str()), nullptr); }))
+      .def("CreateInputs", [](Gpt_Cuda& s, pybind11::array_t<int32_t> sequence_lengths, const PySearchParams& params) { s.CreateInputs(ToSpan(sequence_lengths), params); })
+      .def("GetVocabSize", &Gpt_Cuda::GetVocabSize)
+      .def("Run", [](Gpt_Cuda& s, pybind11::array_t<int32_t> next_tokens, pybind11::array_t<int32_t> next_indices, int current_length) { s.Run(ToSpan(next_tokens), ToSpan(next_indices), current_length); })
+      .def("GetLogits", [](Gpt_Cuda& s) -> pybind11::array_t<float> { return ToPython(s.GetLogits()); });
 
 #ifdef VERSION_INFO
   m.attr("__version__") = MACRO_STRINGIFY(VERSION_INFO);

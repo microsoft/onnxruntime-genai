@@ -29,8 +29,6 @@ Search::Search(SearchParams params)
   auto batch_beam_size = params.BatchBeamSize();
 
   sequence_lengths_buffer_ = AllocateArray<int32_t>(batch_beam_size, &sequence_lengths_);
-  eos_meet_buffer_ = AllocateArray<bool>(batch_beam_size, &eos_meet_);
-  memset(eos_meet_.data(), 0, eos_meet_.size_bytes());
 
   size_t next_token_size = batch_beam_size * params_.vocab_size;
   next_token_scores_buffer_ = AllocateArray<ScoreType>(next_token_size, &next_token_scores_);
@@ -41,6 +39,9 @@ GreedySearch::GreedySearch(SearchParams params)
     : Search(params) {
   next_tokens_buffer_ = AllocateArray<int32_t>(params.batch_size, &next_tokens_);
   memset(next_tokens_.data(), 0, next_tokens_.size_bytes());
+
+  eos_seen_buffer_ = AllocateArray<bool>(params.batch_size, &eos_seen_);
+  memset(eos_seen_.data(), 0, eos_seen_.size_bytes());
 }
 
 BeamSearch::BeamSearch(SearchParams params)
@@ -75,18 +76,6 @@ void Search::SetLogits(std::span<const ScoreType> logits) {
   }
 }
 
-#if 0
-    if (do_sampling) {
-      ORT_RETURN_IF_ERROR(SamplingCpuHelper::Sample(allocator,
-                                                    thread_pool,
-                                                    next_token_scores,
-                                                    sampling_state,
-                                                    greedy_state,
-                                                    parameters,
-                                                    dumper));
-}
-#endif
-
 std::span<int32_t> GreedySearch::GetNextTokens() {
   return next_tokens_;
 }
@@ -103,7 +92,7 @@ int Search::GetSequenceLength() {
   return sequences_.GetSequenceLength();
 }
 
-void BeamSearch::NextTokensFromLogits() {
+void BeamSearch::SelectTopK() {
   auto beam_scores = beam_scorer_->GetNextScores();
   // Add beam score to next token scores. Corresponding python code is like:
   //    next_token_scores = next_token_scores + beam_scores[:, None].expand_as(next_token_scores)
@@ -162,12 +151,21 @@ void BeamSearch::NextTokensFromLogits() {
 
   beam_scorer_->Process(sequences_, next_scores, next_tokens, next_indices);
   next_tokens_ = beam_scorer_->GetNextTokens();
+
+  AppendNextTokensToSequences();
 }
 
-void GreedySearch::NextTokensFromLogits() {
+void GreedySearch::SelectTop1() {
   auto next_token_scores = next_token_scores_.data();
   // next_tokens = torch.argmax(scores, dim=-1)
-  for (size_t i = 0; i < params_.batch_size; i++) {
+  for (size_t batch_id = 0; batch_id < params_.batch_size; batch_id++) {
+
+    // If this batch entry has already seen the EOS token, append the pad token
+    if (eos_seen_[batch_id]) {
+      next_tokens_[batch_id] = params_.pad_token_id;
+      continue;
+    }
+
     int32_t best_token = 0;
     ScoreType best_score = next_token_scores[0];
     for (int32_t token = 1; token < params_.vocab_size; token++) {
@@ -176,35 +174,17 @@ void GreedySearch::NextTokensFromLogits() {
         best_token = token;
       }
     }
-    next_tokens_[i] = best_token;
+    next_tokens_[batch_id] = best_token;
     next_token_scores += params_.vocab_size;
-  }
-}
 
-void Search::CheckForEOS() {
-  // Look for EOS tokens, if seen set EOS flag and replace with pad token
-  for (size_t batch_id = 0; batch_id < next_tokens_.size(); ++batch_id) {
-    if (next_tokens_[batch_id] == params_.eos_token_id || eos_meet_[batch_id] == true) {
-      eos_meet_[batch_id] = true;
-      next_tokens_[batch_id] = params_.pad_token_id;
+    if (best_token == params_.eos_token_id) {
+      eos_seen_[batch_id] = true;
+      if (--not_done_count_==0)
+        done_=true;
     }
   }
 
-  // When all batches are finished, stop earlier to avoid wasting computation.
-  // TODO: Merge this with the above so we don't have to double scan. Just keep track of 'batches left'
-  {
-    size_t batch_id = 0;
-    while (batch_id < eos_meet_.size()) {
-      if (eos_meet_[batch_id] == false) {
-        break;
-      }
-      ++batch_id;
-    }
-    if (batch_id == eos_meet_.size()) {
-      done_ = true;
-      return;
-    }
-  }
+  AppendNextTokensToSequences();
 }
 
 void GreedySearch::AppendNextTokensToSequences() {

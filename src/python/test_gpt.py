@@ -1,30 +1,30 @@
 import ort_generators as og
 import numpy as np
-from transformers import GPT2Tokenizer
 
-text = "best hotel in bay area"
+input_tokens=np.array([[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.float32)
 
-# Generate input tokens from the text prompt
-tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
-input_tokens = tokenizer.encode(text, return_tensors='np')
+mparams=og.GptModelParams()
+mparams.vocab_size=1000
+mparams.head_count=4
+mparams.hidden_size=8
+mparams.layer_count=5
+gpt=og.Gpt(mparams, "../models/files/gpt2_fp32.onnx")
 
-gpt=og.Gpt_Cuda("../../python/onnx_models/gpt2.onnx")
-
-params=og.SearchParams()
-params.max_length = 64
+params=og.GreedySearchParams()
+params.max_length = 10
 params.batch_size = input_tokens.shape[0]
 params.sequence_length = input_tokens.shape[1]
 params.input_ids = input_tokens
 params.vocab_size = gpt.GetVocabSize()
-params.eos_token_id = tokenizer.eos_token_id
-params.pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else params.eos_token_id
 
-search=og.GreedySearch_Cuda(params)
+input("Press enter to start")
+search=og.GreedySearch(params)
 gpt.CreateInputs(search.GetSequenceLengths(), params)
 
 print("Inputs:")
+print(mparams)
+print(params)
 print(input_tokens)
-print("Input prompt:", text)
 
 print("Running loop...")
 while not search.IsDone():
@@ -35,12 +35,14 @@ while not search.IsDone():
     # Generators::Processors::MinLength(search, 1)
     # Generators::Processors::RepetitionPenalty(search, 1.0f)
 
+    # Sampling goes here
+
+    # Should NextTokensFromLogits() return an array? Then 'CheckForEOS()' is obvious along with AppendNextTokensToSequences()
     search.NextTokensFromLogits()
     search.CheckForEOS()
     search.AppendNextTokensToSequences()
+    print("Getting next token...")
 
 print("Outputs:")
-output_tokens=search.GetSequence(0)
-print(output_tokens)
-decoded_output=tokenizer.decode(output_tokens)
-print(decoded_output)
+print(search.GetSequence(0))
+print(search.GetSequence(1))

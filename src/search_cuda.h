@@ -6,7 +6,7 @@ namespace Generators {
 struct BeamSearchScorer_Cuda;
 
 struct SearchParams_Cuda : SearchParams {
-  cudaStream_t cuda_stream;
+  cudaStream_t cuda_stream{};
 };
 
 struct Search_Cuda {
@@ -22,7 +22,6 @@ struct Search_Cuda {
   // Extra scoring steps go here
 
   //
-  void CheckForEOS();
   std::span<ScoreType> GetScores(int batch_beam_index);
   std::span<ScoreType> GetScores();
   Sequences_Cuda& GetSequences() { return sequences_; }
@@ -49,10 +48,12 @@ struct GreedySearch_Cuda : Search_Cuda {
   GreedySearch_Cuda(SearchParams_Cuda &params);
 
   std::span<int32_t> GetNextTokens();
-  void NextTokensFromLogits();
-  void AppendNextTokensToSequences();
+
+  void SelectTop1();
 
  private:
+  void CheckForEOS();
+  void AppendNextTokensToSequences();
 
   cuda_unique_ptr<int32_t> next_tokens_buffer_;
 };

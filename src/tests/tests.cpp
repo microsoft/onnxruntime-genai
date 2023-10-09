@@ -1,6 +1,6 @@
 #include "../generators.h"
 #include "../search.h"
-#include "../models/gpt.h"
+#include "../models/gpt_cpu.h"
 #if USE_CUDA
 #include "../search_cuda.h"
 #include "../models/gpt_cuda.h"
@@ -145,12 +145,7 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32() {
     Generators::Processors::RepetitionPenalty(search, 1.0f);
     // Processors::LengthPenalty(search, 1.0f);
 
-    // Sampling goes here
-
-    // TODO: Are these steps always the same? If so, merge into one function
-    search.NextTokensFromLogits();
-    search.CheckForEOS();
-    search.AppendNextTokensToSequences();
+    search.SelectTopK();
   }
 
   std::vector<int32_t> output_sequence(search.params_.batch_size*max_length);
@@ -261,12 +256,7 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32() {
     Generators::Processors::MinLength(search, 1);
     Generators::Processors::RepetitionPenalty(search, 1.0f);
 
-    // Sampling goes here
-
-    // TODO: Are these steps always the same? If so, merge into one function
-    search.NextTokensFromLogits();
-    search.CheckForEOS();
-    search.AppendNextTokensToSequences();
+    search.SelectTop1();
   }
 
   // Verify outputs match expected outputs
@@ -319,12 +309,7 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32_Cuda() {
     // Scoring
     Generators::Processors_Cuda::MinLength(search, 1);
 
-    // Sampling goes here
-
-    // TODO: Are these steps always the same? If so, merge into one function
-    search.NextTokensFromLogits();
-    search.CheckForEOS();
-    search.AppendNextTokensToSequences();
+    search.SelectTop1();
   }
 
   // Verify outputs match expected outputs

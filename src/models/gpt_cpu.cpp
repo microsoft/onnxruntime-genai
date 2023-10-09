@@ -1,6 +1,6 @@
 #include "../generators.h"
 #include "../search.h"
-#include "gpt.h"
+#include "gpt_cpu.h"
 #include "debugging.h"
 #include <iostream>
 
@@ -36,20 +36,9 @@ static void ExpandInputs(const OrtValue& input, int num_beams, OrtAllocator& all
 }
 
 Gpt::Gpt(OrtEnv& ort_env, const ORTCHAR_T* decode_path) {
-
   auto session_options = OrtSessionOptions::Create();
   session_decode_ = OrtSession::Create(ort_env, decode_path, session_options.get());
-
-  // We could use this to determine the vocabulary size and if the logits has a width of 1
-  auto logits_shape = session_decode_->GetOutputTypeInfo(0)->GetTensorTypeAndShapeInfo().GetShape();
-  assert(logits_shape.size() == 3);
-  model_params_.logits_uses_seq_len = logits_shape[1]==-1;
-  model_params_.vocab_size = static_cast<int>(logits_shape[2]);
-  model_params_.layer_count = static_cast<int>(session_decode_->GetOutputCount())-1;
-
-  auto past_shape = session_decode_->GetInputTypeInfo(3)->GetTensorTypeAndShapeInfo().GetShape();
-  model_params_.head_count = static_cast<int>(past_shape[2]);
-  model_params_.hidden_size = static_cast<int>(past_shape[4]);
+  GetModelParams(model_params_, *session_decode_);
 }
 
 void Gpt::CreateInputs(std::span<int32_t> sequence_lengths, const SearchParams& search_params) {

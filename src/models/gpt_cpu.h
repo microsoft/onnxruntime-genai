@@ -1,16 +1,9 @@
 #include "onnxruntime_cxx_api_2.h"
+#include "gpt_common.h"
 
 namespace Generators {
 
 struct Gpt {
-
-  struct ModelParams {
-    int vocab_size{};
-    int head_count{};
-    int hidden_size{};
-    int layer_count{};
-    bool logits_uses_seq_len{};  // Logits shape is [... seq_len, vocab_size ] vs [... 1, vocab_size ]
-  };
 
   Gpt(OrtEnv& ort_env, const ORTCHAR_T* decode_path);
 
@@ -23,7 +16,7 @@ private:
   void UpdateInputs(std::span<const int32_t> next_tokens, std::span<const int32_t> beam_indices, int current_length);
   void PickPastState(OrtAllocator& allocator, size_t index, std::span<const int32_t> beam_indices);
 
-  ModelParams model_params_;
+  GptModelParams model_params_;
   SearchParams search_params_;
   bool first_run_{true};
 
