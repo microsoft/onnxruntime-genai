@@ -24,7 +24,7 @@ void Launch_log_softmax(ScoreType* values, int count, cudaStream_t stream);
 
 }
 
-Search_Cuda::Search_Cuda(SearchParams_Cuda& params)
+Search_Cuda::Search_Cuda(const SearchParams_Cuda& params)
     : params_{params},
       sequences_{params.input_ids, params.batch_size, params.num_beams, params_.max_length, params_.cuda_stream} {
 
@@ -43,14 +43,14 @@ Search_Cuda::Search_Cuda(SearchParams_Cuda& params)
   done_cpu_ = CudaMallocHostArray<bool>(1);
 }
 
-GreedySearch_Cuda::GreedySearch_Cuda(SearchParams_Cuda& params)
+GreedySearch_Cuda::GreedySearch_Cuda(const SearchParams_Cuda& params)
     : Search_Cuda{params} {
 
   next_tokens_buffer_ = CudaMallocArray<int32_t>(params.batch_size, &next_tokens_);
   cudaMemsetAsync(next_tokens_.data(), 0, next_tokens_.size_bytes(), params_.cuda_stream);
 }
 
-BeamSearch_Cuda::BeamSearch_Cuda(SearchParams_Cuda& params)
+BeamSearch_Cuda::BeamSearch_Cuda(const SearchParams_Cuda& params)
     : Search_Cuda{params} {
   assert(params_.num_beams > 1);  // If 1, use GreedySearch
   auto batch_beam_size = params_.BatchBeamSize();
@@ -79,7 +79,7 @@ void Search_Cuda::SetLogits(std::span<const ScoreType> logits) {
   auto input_length = logits.size() / (batch_beam_size * params_.vocab_size);
   assert(logits.size() % (batch_beam_size * params_.vocab_size) == 0);  // Should divide evenly
 
-  assert(input_length == 1);  // When is this not true? RyanHill wants to know
+  // TODO: if input_length==1, use token scores directly
 
   // Get logits for the last token:
   //    next_token_logits = logits[:, -1, :], and the result shape is (batch_size, vocab_size)
@@ -123,7 +123,7 @@ int Search_Cuda::GetSequenceLength() {
   return sequences_.GetSequenceLength();
 }
 
-void BeamSearch_Cuda::NextTokensFromLogits() {
+void BeamSearch_Cuda::SelectTopK() {
   auto beam_scores = beam_scorer_->GetNextScores();
 
   // Add beam score to next token scores. Corresponding python code is like:
@@ -174,6 +174,8 @@ void BeamSearch_Cuda::NextTokensFromLogits() {
 
   beam_scorer_->Process(sequences_, next_scores, next_tokens, next_indices);
   next_tokens_ = beam_scorer_->GetNextTokens();
+
+  AppendNextTokensToSequences();
 }
 
 void GreedySearch_Cuda::SelectTop1() {

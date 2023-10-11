@@ -46,9 +46,11 @@ template <typename T>
 using cuda_host_unique_ptr = std::unique_ptr<T, CudaHostDeleter>;
 
 template <typename T>
-cuda_host_unique_ptr<T> CudaMallocHostArray(size_t count) {
+cuda_host_unique_ptr<T> CudaMallocHostArray(size_t count, std::span<T>* p_span=nullptr) {
   T* p;
   ::cudaMallocHost(&p, sizeof(T) * count);
+  if (p_span)
+    *p_span = std::span<T>(p, count);
   return cuda_host_unique_ptr<T>{p};
 }
 

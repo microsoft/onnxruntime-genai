@@ -198,6 +198,8 @@ void Gpt_Cuda::Run(std::span<const int32_t> next_tokens, std::span<const int32_t
 }
 
 void Gpt_Cuda::UpdateInputs(std::span<const int32_t> next_tokens, std::span<const int32_t> beam_indices, int current_length) {
+  assert(search_params_.num_beams == 1 || !beam_indices.empty());  // We require beam_indices if we're a beam search
+
   // The following updates inputs for subgraph
 
   // Update input_ids with next tokens.

@@ -76,11 +76,13 @@ if(USE_CUDA)
 
     file(GLOB generator_cuda_srcs CONFIGURE_DEPENDS
         "${GENERATORS_ROOT}/*.cu"
+        "${GENERATORS_ROOT}/*.cuh"
     )
     list(APPEND generator_srcs ${generator_cuda_srcs})
 
     file(GLOB model_cuda_srcs CONFIGURE_DEPENDS
         "${MODELS_ROOT}/*.cu"
+        "${MODELS_ROOT}/*.cuh"
     )
     list(APPEND model_srcs ${model_cuda_srcs})
 

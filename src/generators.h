@@ -8,6 +8,7 @@
 #include <span>
 #include <memory>
 #include <numeric>
+#include <queue>
 #include <set>
 #include <unordered_set>
 #include <vector>

@@ -4,6 +4,6 @@ namespace Generators {
 
 struct Whisper {
 
-}
+};
 
 }

@@ -93,6 +93,11 @@ pybind11::array_t<T> ToPython(std::span<T> v) {
   return pybind11::array_t<T>(v.size(), v.data());
 }
 
+template <typename T>
+pybind11::array_t<T> ToUnownedPython(std::span<T> v) {
+  return pybind11::array_t<T>({v.size()}, {sizeof(T)}, v.data(), pybind11::capsule(v.data(), [](void*){}));
+}
+
 namespace Generators {
 
 void TestFP32(pybind11::array_t<float> inputs) {
@@ -143,9 +148,123 @@ OrtEnv& GetOrtEnv() {
   return *g_ort_env;
 }
 
+template<typename T>
+struct DeviceArray {
+
+  void SetDevice(std::span<T> device) {
+    device_memory_=device;
+    cpu_memory_={};
+  }
+
+  std::span<T> GetGpuArray() {
+    if (device_memory_.empty()) {
+      device_memory_owner_ = CudaMallocArray<T>(cpu_memory_.size(), &device_memory_);
+      cudaMemcpy(device_memory_.data(), cpu_memory_.data(), cpu_memory_.size_bytes(), cudaMemcpyHostToDevice);
+    }
+    return device_memory_;
+  }
+
+  void EnsureCpuArray() {
+    if (!cpu_memory_.empty())
+      return;
+
+    cpu_memory_owner_ = CudaMallocHostArray<T>(device_memory_.size(), &cpu_memory_);
+    cudaMemcpy(cpu_memory_.data(), device_memory_.data(), cpu_memory_.size_bytes(), cudaMemcpyDeviceToHost);
+
+    py_cpu_array_=pybind11::array_t<T>({cpu_memory_.size()}, {sizeof(T)}, cpu_memory_.data(), pybind11::capsule(cpu_memory_.data(), [](void*) {}));
+  }
+
+  std::span<T> device_memory_;
+  cuda_unique_ptr<T> device_memory_owner_;  
+
+  std::span<T> cpu_memory_;
+  cuda_host_unique_ptr<T> cpu_memory_owner_;
+  pybind11::array_t<T> py_cpu_array_;
+};
+
+template <typename T>
+void Declare_DeviceArray(pybind11::module& m, const char* name) {
+  using Type=DeviceArray<T>;
+  pybind11::class_<Type>(m, name)
+      .def("GetArray", [](Type& t) -> pybind11::array_t<T> { t.EnsureCpuArray(); return t.py_cpu_array_; }, pybind11::return_value_policy::reference_internal);
+}
+
 struct PySearchParams : SearchParams {
   pybind11::array_t<int32_t> py_input_ids_;
 };
+
+struct PyGreedySearch_Cuda : GreedySearch_Cuda {
+  PyGreedySearch_Cuda(const SearchParams_Cuda& params) : GreedySearch_Cuda{params} {
+  }
+
+  DeviceArray<int32_t>& GetNextTokens() {
+    py_tokens_.SetDevice(GreedySearch_Cuda::GetNextTokens());
+    return py_tokens_;
+  }
+
+  DeviceArray<int32_t>& GetSequenceLengths() {
+    py_sequencelengths_.SetDevice(sequence_lengths_);
+    return py_sequencelengths_;
+  }
+
+  DeviceArray<int32_t>& GetSequence(int index) {
+    auto data=sequences_.GetSequence(index);
+    py_sequence_.SetDevice(std::span<int32_t>(const_cast<int32_t*>(data.data()), data.size()));
+    return py_sequence_;
+  }
+
+ private:
+  DeviceArray<int32_t> py_tokens_;
+  DeviceArray<int32_t> py_sequence_;
+  DeviceArray<int32_t> py_sequencelengths_;
+};
+
+struct PyBeamSearch_Cuda : BeamSearch_Cuda {
+  PyBeamSearch_Cuda(const SearchParams_Cuda& params) : BeamSearch_Cuda{params} {
+  }
+
+  DeviceArray<int32_t>& GetNextTokens() {
+    py_tokens_.SetDevice(BeamSearch_Cuda::GetNextTokens());
+    return py_tokens_;
+  }
+
+  DeviceArray<int32_t>& GetNextIndices() {
+    py_indices_.SetDevice(BeamSearch_Cuda::GetNextIndices());
+    return py_indices_;
+  }
+
+  DeviceArray<int32_t>& GetSequenceLengths() {
+    py_sequencelengths_.SetDevice(sequence_lengths_);
+    return py_sequencelengths_;
+  }
+
+  DeviceArray<int32_t>& GetSequence(int index) {
+    auto data = sequences_.GetSequence(index);
+    py_sequence_.SetDevice(std::span<int32_t>(const_cast<int32_t*>(data.data()), data.size()));
+    return py_sequence_;
+  }
+
+ private:
+  DeviceArray<int32_t> py_tokens_;
+  DeviceArray<int32_t> py_indices_;
+  DeviceArray<int32_t> py_sequence_;
+  DeviceArray<int32_t> py_sequencelengths_;
+};
+
+struct PyGpt_Cuda : Gpt_Cuda {
+  PyGpt_Cuda(const std::string& str) : Gpt_Cuda{GetOrtEnv(), ORTCHAR_String(str.c_str()), nullptr} {
+  }
+
+  DeviceArray<float>& GetLogits() {
+    auto data = Gpt_Cuda::GetLogits();
+    py_logits_.SetDevice(std::span<float>(const_cast<float*>(data.data()), data.size()));
+    return py_logits_;
+  }
+
+ private:
+  DeviceArray<float> py_logits_;
+};
+
 
 PYBIND11_MODULE(ort_generators, m) {
   m.doc() = R"pbdoc(
@@ -158,6 +277,9 @@ PYBIND11_MODULE(ort_generators, m) {
            :toctree: _generate
 
     )pbdoc";
+
+  Declare_DeviceArray<ScoreType>(m, "DeviceArray_ScoreType");
+  Declare_DeviceArray<int32_t>(m, "DeviceArray_int32");
 
   pybind11::class_<PySearchParams>(m, "SearchParams")
       .def(pybind11::init<>())
@@ -180,31 +302,43 @@ PYBIND11_MODULE(ort_generators, m) {
       .def(pybind11::init<const PySearchParams&>())
       .def("SetLogits", [](GreedySearch& s, pybind11::array_t<float> inputs) { s.SetLogits(ToSpan(inputs)); })
       .def("GetSequenceLength", &GreedySearch::GetSequenceLength)
-      .def("GetSequenceLengths", [](GreedySearch& s) -> pybind11::array_t<int32_t> { return ToPython(s.sequence_lengths_); })
-      .def("GetNextTokens", [](GreedySearch& s) -> pybind11::array_t<int32_t> { return ToPython(s.GetNextTokens()); })
+      .def("GetSequenceLengths", [](GreedySearch& s) -> pybind11::array_t<int32_t> { return ToPython(s.sequence_lengths_); }, pybind11::return_value_policy::reference_internal)
+      .def("GetNextTokens", [](GreedySearch& s) -> pybind11::array_t<int32_t> { return ToPython(s.GetNextTokens()); }, pybind11::return_value_policy::reference_internal)
       .def("IsDone", &GreedySearch::IsDone)
       .def("SelectTop1", &GreedySearch::SelectTop1)
-      .def("GetSequence", [](GreedySearch& s, int index) -> pybind11::array_t<int32_t> { return ToPython(s.sequences_.GetSequence(index)); });
+      .def("GetSequence", [](GreedySearch& s, int index) -> pybind11::array_t<int32_t> { return ToPython(s.sequences_.GetSequence(index)); }, pybind11::return_value_policy::reference_internal);
 
-  pybind11::class_<GreedySearch_Cuda>(m, "GreedySearch_Cuda")
-      .def(pybind11::init([](const PySearchParams& v) { SearchParams_Cuda s; static_cast<SearchParams&>(s)=v; return new GreedySearch_Cuda(s); }))
-      .def("SetLogits", [](GreedySearch_Cuda& s, pybind11::array_t<float> inputs) { s.SetLogits(ToSpan(inputs)); })
-      .def("GetSequenceLength", &GreedySearch_Cuda::GetSequenceLength)
-      .def("GetSequenceLengths", [](GreedySearch_Cuda& s) -> pybind11::array_t<int32_t> { return ToPython(s.sequence_lengths_); })
-      .def("GetNextTokens", [](GreedySearch_Cuda& s) -> pybind11::array_t<int32_t> { return ToPython(s.GetNextTokens()); })
-      .def("IsDone", &GreedySearch_Cuda::IsDone)
-      .def("SelectTop1", &GreedySearch_Cuda::SelectTop1)
-      .def("GetSequence", [](GreedySearch_Cuda& s, int index) -> pybind11::array_t<int32_t> { return ToPython(s.sequences_.GetSequence(index)); });
+  pybind11::class_<PyGreedySearch_Cuda>(m, "GreedySearch_Cuda")
+      .def(pybind11::init([](const PySearchParams& v) { SearchParams_Cuda s; static_cast<SearchParams&>(s)=v; return new PyGreedySearch_Cuda(s); }))
+      .def("SetLogits", [](PyGreedySearch_Cuda& s, DeviceArray<float>& inputs) { s.SetLogits(inputs.GetGpuArray()); })
+      .def("GetSequenceLength", &PyGreedySearch_Cuda::GetSequenceLength)
+      .def("GetSequenceLengths", &PyGreedySearch_Cuda::GetSequenceLengths, pybind11::return_value_policy::reference_internal)
+      .def("GetNextTokens", &PyGreedySearch_Cuda::GetNextTokens, pybind11::return_value_policy::reference_internal)
+      .def("IsDone", &PyGreedySearch_Cuda::IsDone)
+      .def("SelectTop1", &PyGreedySearch_Cuda::SelectTop1)
+      .def("GetSequence", &PyGreedySearch_Cuda::GetSequence, pybind11::return_value_policy::reference_internal);
 
   pybind11::class_<BeamSearch>(m, "BeamSearch")
       .def(pybind11::init<const PySearchParams&>())
       .def("SetLogits", [](BeamSearch& s, pybind11::array_t<float> inputs) { s.SetLogits(ToSpan(inputs)); })
       .def("GetSequenceLength", &BeamSearch::GetSequenceLength)
-      .def("GetSequenceLengths", [](BeamSearch& s) -> pybind11::array_t<int32_t> { return ToPython(s.sequence_lengths_); })
-      .def("GetNextTokens", [](BeamSearch& s) -> pybind11::array_t<int32_t> { return ToPython(s.GetNextTokens()); })
+      .def("GetSequenceLengths", [](BeamSearch& s) -> pybind11::array_t<int32_t> { return ToPython(s.sequence_lengths_); }, pybind11::return_value_policy::reference_internal)
+      .def("GetNextTokens", [](BeamSearch& s) -> pybind11::array_t<int32_t> { return ToPython(s.GetNextTokens()); }, pybind11::return_value_policy::reference_internal)
+      .def("GetNextIndices", [](BeamSearch& s) -> pybind11::array_t<int32_t> { return ToPython(s.GetNextIndices()); }, pybind11::return_value_policy::reference_internal)
       .def("IsDone", &BeamSearch::IsDone)
       .def("SelectTopK", &BeamSearch::SelectTopK)
-      .def("GetSequence", [](BeamSearch& s, int index) -> pybind11::array_t<int32_t> { return ToPython(s.sequences_.GetSequence(index)); });
+      .def("GetSequence", [](BeamSearch& s, int index) -> pybind11::array_t<int32_t> { return ToPython(s.sequences_.GetSequence(index)); }, pybind11::return_value_policy::reference_internal);
+
+  pybind11::class_<PyBeamSearch_Cuda>(m, "BeamSearch_Cuda")
+      .def(pybind11::init([](const PySearchParams& v) { SearchParams_Cuda s; static_cast<SearchParams&>(s)=v; return new PyBeamSearch_Cuda(s); }))
+      .def("SetLogits", [](PyBeamSearch_Cuda& s, DeviceArray<float>& inputs) { s.SetLogits(inputs.GetGpuArray()); })
+      .def("GetSequenceLength", &PyBeamSearch_Cuda::GetSequenceLength)
+      .def("GetSequenceLengths", &PyBeamSearch_Cuda::GetSequenceLengths, pybind11::return_value_policy::reference_internal)
+      .def("GetNextTokens", &PyBeamSearch_Cuda::GetNextTokens, pybind11::return_value_policy::reference_internal)
+      .def("GetNextIndices", &PyBeamSearch_Cuda::GetNextIndices, pybind11::return_value_policy::reference_internal)
+      .def("IsDone", &PyBeamSearch_Cuda::IsDone)
+      .def("SelectTopK", &PyBeamSearch_Cuda::SelectTopK)
+      .def("GetSequence", &PyBeamSearch_Cuda::GetSequence, pybind11::return_value_policy::reference_internal);
 
   // If we support models, we need to init the OrtApi
   Ort::InitApi();
@@ -217,14 +351,15 @@ PYBIND11_MODULE(ort_generators, m) {
       .def("CreateInputs", [](Gpt& s, pybind11::array_t<int32_t> sequence_lengths, const PySearchParams& params) { s.CreateInputs(ToSpan(sequence_lengths), params); })
       .def("GetVocabSize", &Gpt::GetVocabSize)
       .def("Run", [](Gpt& s, pybind11::array_t<int32_t> next_tokens, pybind11::array_t<int32_t> next_indices, int current_length) { s.Run(ToSpan(next_tokens), ToSpan(next_indices), current_length); })
-      .def("GetLogits", [](Gpt& s) -> pybind11::array_t<float> { return ToPython(s.GetLogits()); });
+      .def("GetLogits", [](Gpt& s) -> pybind11::array_t<float> { return ToPython(s.GetLogits()); }, pybind11::return_value_policy::reference_internal);
 
-  pybind11::class_<Gpt_Cuda>(m, "Gpt_Cuda")
-      .def(pybind11::init([](const std::string& str) { return new Gpt_Cuda(GetOrtEnv(), ORTCHAR_String(str.c_str()), nullptr); }))
-      .def("CreateInputs", [](Gpt_Cuda& s, pybind11::array_t<int32_t> sequence_lengths, const PySearchParams& params) { s.CreateInputs(ToSpan(sequence_lengths), params); })
-      .def("GetVocabSize", &Gpt_Cuda::GetVocabSize)
-      .def("Run", [](Gpt_Cuda& s, pybind11::array_t<int32_t> next_tokens, pybind11::array_t<int32_t> next_indices, int current_length) { s.Run(ToSpan(next_tokens), ToSpan(next_indices), current_length); })
-      .def("GetLogits", [](Gpt_Cuda& s) -> pybind11::array_t<float> { return ToPython(s.GetLogits()); });
+  pybind11::class_<PyGpt_Cuda>(m, "Gpt_Cuda")
+      .def(pybind11::init([](const std::string& str) { return new PyGpt_Cuda(str); }))
+      .def("CreateInputs", [](PyGpt_Cuda& s, DeviceArray<int32_t>& sequence_lengths, const PySearchParams& params) { s.CreateInputs(sequence_lengths.GetGpuArray(), params); })
+      .def("GetVocabSize", &PyGpt_Cuda::GetVocabSize)
+      .def("Run", [](PyGpt_Cuda& s, DeviceArray<int32_t>& next_tokens, DeviceArray<int32_t>& next_indices, int current_length) { s.Run(next_tokens.GetGpuArray(), next_indices.GetGpuArray(), current_length); })
+      .def("Run", [](PyGpt_Cuda& s, DeviceArray<int32_t>& next_tokens, int current_length) { s.Run(next_tokens.GetGpuArray(), {}, current_length); })
+      .def("GetLogits", &PyGpt_Cuda::GetLogits, pybind11::return_value_policy::reference_internal);
 
 #ifdef VERSION_INFO
   m.attr("__version__") = MACRO_STRINGIFY(VERSION_INFO);

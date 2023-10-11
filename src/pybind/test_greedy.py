@@ -26,21 +26,19 @@ print("Inputs:")
 print(input_tokens)
 print("Input prompt:", text)
 
-print("Running loop...")
+print("Running greedy search loop...")
 while not search.IsDone():
-    gpt.Run(search.GetNextTokens(), [], search.GetSequenceLength())
+    gpt.Run(search.GetNextTokens(), search.GetSequenceLength())
     search.SetLogits(gpt.GetLogits())
 
     # Scoring
     # Generators::Processors::MinLength(search, 1)
     # Generators::Processors::RepetitionPenalty(search, 1.0f)
 
-    search.NextTokensFromLogits()
-    search.CheckForEOS()
-    search.AppendNextTokensToSequences()
+    search.SelectTop1();
 
 print("Outputs:")
-output_tokens=search.GetSequence(0)
+output_tokens=search.GetSequence(0).GetArray()
 print(output_tokens)
 decoded_output=tokenizer.decode(output_tokens)
 print(decoded_output)

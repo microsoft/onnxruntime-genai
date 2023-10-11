@@ -151,8 +151,7 @@ template <typename T, int max_k>
 void LaunchBeamSearchOnlineTopKStage2Kernel(
     const T* topk_values_tmp,
     const int32_t* topk_indices_tmp,
-    int32_t batch_size,
-    int32_t num_beams,
+    int32_t batch_beam_size,
     int32_t vocab_size,
     int32_t parts_per_beam,
     int32_t K,
@@ -164,18 +163,18 @@ void LaunchBeamSearchOnlineTopKStage2Kernel(
   int smem_stage2_size = parts_per_beam * max_k * 2 * sizeof(int32_t);
 
   if (parts_per_beam <= 32) {
-    BeamSearchOnlineTopKStage2Kernel<T, max_k, 32><<<batch_size * num_beams, 32, smem_stage2_size, stream>>>(
+    BeamSearchOnlineTopKStage2Kernel<T, max_k, 32><<<batch_beam_size, 32, smem_stage2_size, stream>>>(
         topk_values_tmp, topk_indices_tmp, K, vocab_size, parts_per_beam, output_values, output_indices);
     return;
   }
 
   if (parts_per_beam <= 64) {
-    BeamSearchOnlineTopKStage2Kernel<T, max_k, 64><<<batch_size * num_beams, 64, smem_stage2_size, stream>>>(
+    BeamSearchOnlineTopKStage2Kernel<T, max_k, 64><<<batch_beam_size, 64, smem_stage2_size, stream>>>(
         topk_values_tmp, topk_indices_tmp, K, vocab_size, parts_per_beam, output_values, output_indices);
     return;
   }
 
-  BeamSearchOnlineTopKStage2Kernel<T, max_k, 128><<<batch_size * num_beams, 128, smem_stage2_size, stream>>>(
+  BeamSearchOnlineTopKStage2Kernel<T, max_k, 128><<<batch_beam_size, 128, smem_stage2_size, stream>>>(
       topk_values_tmp, topk_indices_tmp, K, vocab_size, parts_per_beam, output_values, output_indices);
   return;
 }
@@ -183,8 +182,7 @@ void LaunchBeamSearchOnlineTopKStage2Kernel(
 template <typename T, int max_k>
 void TopKLauncherMaxK(
     const T* input,
-    int batch_size,
-    int num_beams,
+    int batch_beam_size,
     int vocab_size,
     int K,
     T* output_values,
@@ -195,13 +193,13 @@ void TopKLauncherMaxK(
   constexpr int kThreadBlockSize = (max_k < 16) ? (max_k < 8) ? 256 : 128 : 64;
 
   int voc_parts = 4;
-  if (batch_size * num_beams < 256) {
+  if (batch_beam_size < 256) {
     // volta has 80 SMs, so we aim for three waves
-    voc_parts = (240 + batch_size * num_beams - 1) / (batch_size * num_beams);
+    voc_parts = (240 + batch_beam_size - 1) / batch_beam_size;
     voc_parts = std::min(128, voc_parts);  // we implement up to 128
   }
 
-  dim3 grid(batch_size * num_beams, voc_parts);
+  dim3 grid(batch_beam_size, voc_parts);
 
   cudaFuncSetAttribute(BeamSearchOnlineTopKStage1Kernel<T, max_k, kThreadBlockSize>,
                        cudaFuncAttributePreferredSharedMemoryCarveout,
@@ -213,8 +211,7 @@ void TopKLauncherMaxK(
   LaunchBeamSearchOnlineTopKStage2Kernel<T, max_k>(
       output_values_tmp,
       output_indices_tmp,
-      batch_size,
-      num_beams,
+      batch_beam_size,
       vocab_size,
       voc_parts,
       K,
@@ -315,9 +312,8 @@ void BeamSearchTopK(
   assert(k <= 64); // BeamSearchTopK doesn't support k > 64
 
 #define TopKLauncher(K)                           \
-  TopKLauncherMaxK<ScoreType, K>(input,                   \
-                         batch_size,              \
-                         num_beams,               \
+  TopKLauncherMaxK<ScoreType, K>(input,           \
+                         batch_size * num_beams,  \
                          vocab_size,              \
                          k, tmp_values_2nd_stage, \
                          tmp_indices_2nd_stage,   \

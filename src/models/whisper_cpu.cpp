@@ -1,6 +1,6 @@
 #include "../generators.h"
 #include "../search.h"
-#include "gpt.h"
+#include "whisper_cpu.h"
 
 namespace Generators {
 

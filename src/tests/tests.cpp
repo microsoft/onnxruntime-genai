@@ -129,9 +129,9 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32() {
   params.sequence_length = static_cast<int>(input_ids_shape[1]);
   params.input_ids = input_ids;
   params.max_length = max_length;
-  params.num_beams = 4;
   params.vocab_size = gpt.GetVocabSize();
   params.eos_token_id = params.pad_token_id = 98;
+  params.num_beams = 4;
 
   Generators::BeamSearch search{params};
   gpt.CreateInputs(search.sequence_lengths_, params);
@@ -143,7 +143,6 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32() {
     // Scoring
     Generators::Processors::MinLength(search, 1);
     Generators::Processors::RepetitionPenalty(search, 1.0f);
-    // Processors::LengthPenalty(search, 1.0f);
 
     search.SelectTopK();
   }
@@ -153,7 +152,6 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32() {
 
   // Verify outputs match expected outputs
   for (int i = 0; i < search.params_.batch_size; i++) {
-//    auto sequence = search.sequences_.GetSequence(i);
     auto sequence = std::span<int32_t>(output_sequence.data() + max_length * i, max_length);
     auto* expected_output_start = &expected_output[i * search.params_.max_length];
     ASSERT_TRUE(std::equal(expected_output_start, expected_output_start + search.params_.max_length, sequence.begin(), sequence.end()));
@@ -376,11 +374,7 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32_Cuda() {
     Generators::Processors_Cuda::MinLength(search, 1);
     Generators::Processors_Cuda::RepetitionPenalty(search, 1.0f);
 
-    // Sampling goes here
-
-    // TODO: Are these steps always the same? If so, merge into one function
-    search.NextTokensFromLogits();
-    search.AppendNextTokensToSequences();
+    search.SelectTopK();
   }
 
   size_t sequence_length=search.params_.batch_size*max_length;

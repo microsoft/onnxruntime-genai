@@ -10,7 +10,7 @@ struct SearchParams_Cuda : SearchParams {
 };
 
 struct Search_Cuda {
-  Search_Cuda(SearchParams_Cuda &params);
+  Search_Cuda(const SearchParams_Cuda &params);
 
   std::span<int32_t> GetNextTokens();
   std::span<int32_t> GetNextIndices();
@@ -45,7 +45,7 @@ struct Search_Cuda {
 };
 
 struct GreedySearch_Cuda : Search_Cuda {
-  GreedySearch_Cuda(SearchParams_Cuda &params);
+  GreedySearch_Cuda(const SearchParams_Cuda &params);
 
   std::span<int32_t> GetNextTokens();
 
@@ -59,19 +59,20 @@ struct GreedySearch_Cuda : Search_Cuda {
 };
 
 struct BeamSearch_Cuda : Search_Cuda {
-  BeamSearch_Cuda(SearchParams_Cuda &params);
+  BeamSearch_Cuda(const SearchParams_Cuda &params);
   ~BeamSearch_Cuda();
 
   std::span<int32_t> GetNextTokens();
   std::span<int32_t> GetNextIndices();
 
-  void NextTokensFromLogits();
-  void AppendNextTokensToSequences();
+  void SelectTopK();
   void Finalize(size_t num_return_sequences, std::span<int32_t> output, std::span<float> sequence_scores);
 
   bool IsDone() const;
 
  private:
+  void AppendNextTokensToSequences();
+
   std::unique_ptr<BeamSearchScorer_Cuda> beam_scorer_;
 
   cuda_unique_ptr<int32_t> topk_next_tokens_;
