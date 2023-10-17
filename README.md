@@ -8,7 +8,7 @@ Currently in Onnxruntime to use greedy search/beam search requires embedding the
 * Built in scoring tools like repetition penalties
 * Easy custom scoring
 
-## GPT Usage Example
+## GPT C++ Usage Example
 
 Link to below example in code here: https://github.com/RyanUnderhill/generators/blob/0b96f546474bb5cbf7a802f9b017b26cee86ec14/src/tests/tests.cpp#L122
 
@@ -18,10 +18,7 @@ Link to below example in code here: https://github.com/RyanUnderhill/generators/
     auto input_ids_tensor = OrtValue::CreateTensor(
             *info, input_ids.data(), input_ids.size(), input_ids_shape.data(), input_ids_shape.size());
      
-    Generators::Gpt gpt(*ort_env,
-            ORT_TSTR("models/gpt2_fp32.onnx"), // Init
-            ORT_TSTR("models/gpt2_fp32.onnx"), // Decode
-            );
+    Generators::Gpt gpt(*ort_env, ORT_TSTR("models/gpt2_fp32.onnx"));
 
     Generators::SearchParams params;
     params.batch_size = static_cast<int>(input_ids_shape[0]);
@@ -41,13 +38,8 @@ Link to below example in code here: https://github.com/RyanUnderhill/generators/
       // Scoring
       Processors::MinLength(search, 5);
       Processors::RepetitionPenalty(search, 1.1f);
-      // Custom scoring goes here
  
-      // Sampling goes here
- 
-      search.NextTokensFromLogits();
-      search.CheckForEOS();
-      search.AppendNextTokensToSequences();
+      search.SelectTopK();
     }
 
     // Access resulting sequences of tokens
@@ -55,22 +47,66 @@ Link to below example in code here: https://github.com/RyanUnderhill/generators/
       auto result=search.GetSequence(0);
     }
 
-# Complete
+## GPT Python End to End Example
 
-* CPU & CUDA GPT2 model loading
-* CPU & CUDA Beam & Greedy Searches
-* CPU & CUDA Scoring examples
+    import ort_generators as og
+    import numpy as np
+    from transformers import GPT2Tokenizer
+
+    text = "The best hotel in bay area"
+
+    # Generate input tokens from the text prompt
+    tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
+    input_tokens = tokenizer.encode(text, return_tensors='np')
+
+    gpt=og.Gpt("../../python/onnx_models/gpt2.onnx")
+
+    params=og.SearchParams()
+    params.max_length = 64
+    params.batch_size = input_tokens.shape[0]
+    params.sequence_length = input_tokens.shape[1]
+    params.input_ids = input_tokens
+    params.vocab_size = gpt.GetVocabSize()
+    params.eos_token_id = tokenizer.eos_token_id
+    params.pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else params.eos_token_id
+
+    search=og.GreedySearch(params)
+    gpt.CreateInputs(search.GetSequenceLengths(), params)
+
+    print("Inputs:")
+    print(input_tokens)
+    print("Input prompt:", text)
+
+    print("Running greedy search loop...")
+    while not search.IsDone():
+        gpt.Run(search.GetNextTokens(), search.GetSequenceLength())
+        search.SetLogits(gpt.GetLogits())
+
+    search.SelectTop1();
+
+    print("Output:")
+    output_tokens=search.GetSequence(0).GetArray()
+    decoded_output=tokenizer.decode(output_tokens)
+    print(decoded_output)
+
+# Features
+
+* CPU & CUDA
+* Beam & Greedy Searches
+* GPT2 Model code example
+* C++ static library
+* Python Bindings
 
 # Future
 
 * Make model code stateless, move state into search? This would allow for multiple searches with one model loaded
-* Support more models built-in, T5/Whisper
-* Sampling?
+* Support more models built-in, T5/Whisper/Llama
 * Tokenizer?
 
 # Building
 
-TODO
+## Windows
+## Linux
 
 ## Prerequites
 
