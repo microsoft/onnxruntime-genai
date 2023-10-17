@@ -28,7 +28,7 @@ struct StandardAllocator : OrtAllocator
   {
     version = ORT_API_VERSION;
     OrtAllocator::Alloc = [](OrtAllocator* this_, size_t size) -> void* { return new std::byte[size]; };
-    OrtAllocator::Free = [](OrtAllocator* this_, void *p) { delete p; };
+    OrtAllocator::Free = [](OrtAllocator* this_, void *p) { delete reinterpret_cast<std::byte*>(p); };
   }
 };
 

@@ -29,14 +29,18 @@ FetchContent_MakeAvailable(safeint)
 endif()
 
 project (Generators LANGUAGES CXX)
-set(GENERATORS_ROOT ${PROJECT_SOURCE_DIR})
-set(MODELS_ROOT ${PROJECT_SOURCE_DIR}/models)
-set(TESTS_ROOT ${PROJECT_SOURCE_DIR}/tests)
-set(PYBIND_ROOT ${PROJECT_SOURCE_DIR}/pybind)
+
+set(CMAKE_CXX_STANDARD 20)
+# add_compile_definitions(_DUSE_CXX17=1)
+
+set(GENERATORS_ROOT ${PROJECT_SOURCE_DIR}/src)
+set(MODELS_ROOT ${PROJECT_SOURCE_DIR}/src/models)
+set(TESTS_ROOT ${PROJECT_SOURCE_DIR}/src/tests)
+set(PYBIND_ROOT ${PROJECT_SOURCE_DIR}/src/pybind)
 
 set(USE_CUDA 1)
 
-add_subdirectory(${PROJECT_SOURCE_DIR}/../extern/pybind11 ${PROJECT_SOURCE_DIR}/build/pybind)
+add_subdirectory(${PROJECT_SOURCE_DIR}/extern/pybind11 ${PROJECT_SOURCE_DIR}/build/pybind)
 
 # CUDA Being enabled will make it not a debug build without this option, so all of the C++ headers will complain
 # about a mismatch with the actual debug headers and it'll fail to link. I don't know why this happens, or if this is the best fix.
@@ -95,15 +99,26 @@ target_include_directories(Models PRIVATE ${CMAKE_SOURCE_DIR}/ort)
 add_library (Generators ${generator_srcs})
 target_include_directories(Generators PRIVATE ${CMAKE_SOURCE_DIR}/ort)
 
+if(WIN32)
+  set(ONNXRUNTIME_LIB "onnxruntime.lib")
+  set(ONNXRUNTIME_FILES "onnxruntime*.dll")
+elseif(APPLE)
+  set(ONNXRUNTIME_LIB "libonnxruntime.dylib")
+  # TODO: Figure ONNXRUNTIME_FILES for MacOS
+else()
+  set(ONNXRUNTIME_LIB "libonnxruntime.so")
+  set(ONNXRUNTIME_FILES "libonnxruntime*.so*")
+endif()
+
 add_executable (Tests ${test_srcs})
 target_include_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort)
 target_link_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort)
-target_link_libraries(Tests PRIVATE Generators Models "onnxruntime.lib")
+target_link_libraries(Tests PRIVATE Generators Models ${ONNXRUNTIME_LIB})
 
 pybind11_add_module(ort_generators ${pybind_srcs})
 target_include_directories(ort_generators PRIVATE ${CMAKE_SOURCE_DIR}/ort)
 target_link_directories(ort_generators PRIVATE ${CMAKE_SOURCE_DIR}/ort)
-target_link_libraries(ort_generators PRIVATE Generators Models "onnxruntime.lib")
+target_link_libraries(ort_generators PRIVATE Generators Models ${ONNXRUNTIME_LIB})
 
 # Microsoft.GSL::GSL
 # target_include_directories(Generators PRIVATE ${safeint_SOURCE_DIR})
@@ -117,7 +132,7 @@ if(MSVC)
 endif()
 
  # Copy the onnxruntime binaries into the build folder so it's found on launch
-file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/onnxruntime*.dll")
+file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/${ONNXRUNTIME_FILES}")
 foreach(DLL_FILE ${onnxruntime_libs})
     add_custom_command(
         TARGET Generators POST_BUILD
@@ -126,13 +141,6 @@ foreach(DLL_FILE ${onnxruntime_libs})
                 ${CMAKE_BINARY_DIR}/$<CONFIG>/${DLL_FILE_NAME}
     )
 endforeach()
-
-if (CMAKE_VERSION VERSION_GREATER 3.12)
-  set_property(TARGET Generators PROPERTY CXX_STANDARD 20)
-  set_property(TARGET Models PROPERTY CXX_STANDARD 20)
-  set_property(TARGET Tests PROPERTY CXX_STANDARD 20)
-  set_property(TARGET ort_generators PROPERTY CXX_STANDARD 20)
-endif()
 
 # Have visual studio put all files into one single 'Sources' folder vs the default split of header files into a separate folder
 source_group("Sources" FILES ${generator_srcs})

@@ -2,7 +2,7 @@ import ort_generators as og
 import numpy as np
 from transformers import GPT2Tokenizer
 
-text = "best hotel in bay area"
+text = "The best hotel in bay area"
 
 # Generate input tokens from the text prompt
 tokenizer = GPT2Tokenizer.from_pretrained('gpt2')

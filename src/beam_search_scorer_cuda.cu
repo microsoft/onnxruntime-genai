@@ -1,6 +1,7 @@
 #include <cuda_runtime.h>
 #include <assert.h>
-#include <span>
+#include <algorithm>
+#include "span.h"
 #include "beam_search_scorer_cuda.cuh"
 
 namespace Generators

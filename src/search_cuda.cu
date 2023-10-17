@@ -1,6 +1,6 @@
 #include <cuda_runtime.h>
 #include <algorithm>
-#include <span>
+#include "span.h"
 
 using ScoreType = float; // TODO: Move to header includable by cuda
 

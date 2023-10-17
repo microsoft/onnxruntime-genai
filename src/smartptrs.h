@@ -6,7 +6,7 @@ namespace Generators {
 template <typename T>
 void copy(std::span<const T> source, std::span<T> dest) {
   assert(source.size() == dest.size());
-  copy(source.begin(), source.end(), dest.begin());
+  std::copy(source.begin(), source.end(), dest.begin());
 }
 
 template <typename T>

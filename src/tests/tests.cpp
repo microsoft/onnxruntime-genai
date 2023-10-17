@@ -7,8 +7,8 @@
 #endif
 #include <iostream>
 
-// Our working directory is generators/src/build so one up puts us in the src directory:
-#define MODEL_PATH "../models/files/"
+// Our working directory is generators/build so one up puts us in the src directory:
+#define MODEL_PATH "../src/models/files/"
 
 #define ASSERT_EQ(a, b) assert((a) == (b))
 #define ASSERT_TRUE(a) assert(a)

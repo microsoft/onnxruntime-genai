@@ -1,6 +1,6 @@
 ﻿# Files to tell git to ignore
 
 /src/.vs
-/src/ort
-/src/build
+/ort
+/build
 /src/models/files/*.onnx
