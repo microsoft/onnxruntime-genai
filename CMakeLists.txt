@@ -91,6 +91,8 @@ if(USE_CUDA)
     list(APPEND model_srcs ${model_cuda_srcs})
 
     add_compile_definitions(USE_CUDA=1)
+
+    include_directories("${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}")
 endif()
 
 add_library (Models ${model_srcs})
