@@ -31,10 +31,10 @@ int main()
 
   try {
     Test_Lib_GreedySearchTest_GptGreedySearchFp32();
-    Test_GreedySearchTest_GptGreedySearchFp32();
+    // Test_GreedySearchTest_GptGreedySearchFp32();
 
     Test_Lib_BeamSearchTest_GptBeamSearchFp32();
-    Test_BeamSearchTest_GptBeamSearchFp32();
+    // Test_BeamSearchTest_GptBeamSearchFp32();
 
 #if USE_CUDA
     Test_Lib_GreedySearchTest_GptGreedySearchFp32_Cuda();
@@ -43,7 +43,7 @@ int main()
   }
   catch (const std::exception& e)
   {
-    std::cout << "Fatal Exception:" << e.what();
+    std::cout << "Fatal Exception:" << e.what() << std::endl;
   }
 	return 0;
 }

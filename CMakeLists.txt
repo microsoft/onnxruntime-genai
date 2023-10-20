@@ -31,7 +31,7 @@ endif()
 project (Generators LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
-# add_compile_definitions(_DUSE_CXX17=1)
+add_compile_definitions(USE_CXX17=1)
 
 set(GENERATORS_ROOT ${PROJECT_SOURCE_DIR}/src)
 set(MODELS_ROOT ${PROJECT_SOURCE_DIR}/src/models)

@@ -3,4 +3,6 @@
 /src/.vs
 /ort
 /build
-/src/models/files/*.onnx
+/test_models
+/cache_models
+/*.csv

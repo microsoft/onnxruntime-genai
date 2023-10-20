@@ -28,7 +28,7 @@ struct ORTCHAR_String {
   std::wstring string_;
 };
 #else
-#define ORTchar_String(string) string
+#define ORTCHAR_String(string) string
 #endif
 
 struct float16 {
