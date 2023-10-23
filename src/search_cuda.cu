@@ -53,7 +53,7 @@ __global__ void log_softmax(ScoreType* values, int count) {
     sum += std::exp(values[i]-max);
 
   float log_max = std::log(sum);
-  std::transform(values, values+count, values, [max, log_max](float v) { return v - max - log_max; });
+  // std::transform(values, values+count, values, [max, log_max](float v) { return v - max - log_max; });
 }
 
 void Launch_log_softmax(ScoreType* values, int count, cudaStream_t stream) {

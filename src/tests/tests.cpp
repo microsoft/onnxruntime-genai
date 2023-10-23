@@ -7,8 +7,8 @@
 #endif
 #include <iostream>
 
-// Our working directory is generators/build so one up puts us in the src directory:
-#define MODEL_PATH "../src/models/files/"
+// Our working directory is generators/build so one up puts us in the root directory:
+#define MODEL_PATH "../test_models/"
 
 #define ASSERT_EQ(a, b) assert((a) == (b))
 #define ASSERT_TRUE(a) assert(a)
@@ -122,7 +122,7 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32() {
   //        --output tiny_gpt2_beamsearch_fp16.onnx --use_gpu --max_length 20
   // (with separate_gpt2_decoder_for_init_run set to False as it is now set to True by default)
 
-  Generators::Gpt gpt(*g_ort_env, ORT_TSTR_ON_MACRO(MODEL_PATH "gpt2_fp32.onnx"));
+  Generators::Gpt gpt(*g_ort_env, ORT_TSTR_ON_MACRO(MODEL_PATH "hf-internal-testing/tiny-random-gpt2_past_fp32.onnx"));
 
   Generators::SearchParams params;
   params.batch_size = static_cast<int>(input_ids_shape[0]);
@@ -233,7 +233,7 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32() {
   // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
   // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
 
-  Generators::Gpt gpt(*g_ort_env, ORT_TSTR_ON_MACRO(MODEL_PATH "gpt2_fp32.onnx"));
+  Generators::Gpt gpt(*g_ort_env, ORT_TSTR_ON_MACRO(MODEL_PATH "hf-internal-testing/tiny-random-gpt2_past_fp32.onnx"));
 
   Generators::SearchParams params;
   params.max_length = 10;
@@ -287,7 +287,7 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32_Cuda() {
   // To generate this file:
   // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
   // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
-  Generators::Gpt_Cuda gpt(*g_ort_env, ORT_TSTR_ON_MACRO(MODEL_PATH "gpt2_fp32.onnx"), cuda_stream);
+  Generators::Gpt_Cuda gpt(*g_ort_env, ORT_TSTR_ON_MACRO(MODEL_PATH "hf-internal-testing/tiny-random-gpt2_past_fp32.onnx"), cuda_stream);
 
   Generators::SearchParams_Cuda params;
   params.batch_size = static_cast<int>(input_ids_shape[0]);
@@ -351,7 +351,7 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32_Cuda() {
   // (with separate_gpt2_decoder_for_init_run set to False as it is now set to True by default)
 
   Generators::Gpt_Cuda gpt(*g_ort_env,
-                           ORT_TSTR_ON_MACRO(MODEL_PATH "gpt2_fp32.onnx"), cuda_stream);
+                           ORT_TSTR_ON_MACRO(MODEL_PATH "hf-internal-testing/tiny-random-gpt2_past_fp32.onnx"), cuda_stream);
 
   Generators::SearchParams_Cuda params;
   params.batch_size = static_cast<int>(input_ids_shape[0]);

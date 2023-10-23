@@ -31,7 +31,7 @@ endif()
 project (Generators LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
-# add_compile_definitions(_DUSE_CXX17=1)
+add_compile_definitions(USE_CXX17=1)
 
 set(GENERATORS_ROOT ${PROJECT_SOURCE_DIR}/src)
 set(MODELS_ROOT ${PROJECT_SOURCE_DIR}/src/models)
@@ -91,6 +91,8 @@ if(USE_CUDA)
     list(APPEND model_srcs ${model_cuda_srcs})
 
     add_compile_definitions(USE_CUDA=1)
+
+    include_directories("${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}")
 endif()
 
 add_library (Models ${model_srcs})

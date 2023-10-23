@@ -1,6 +1,6 @@
 #!/bin/bash
 
-mkdir -p src/ort
+mkdir -p ort/
 
-cp ~/onnxruntime/include/onnxruntime/core/session/onnxruntime_c*.h src/ort/
-cp ~/onnxruntime/build/Linux/Release/libonnxruntime*.so* src/ort/
+cp /workspace/kvaishnavi/onnxruntime/include/onnxruntime/core/session/onnxruntime_c*.h ort/
+cp /workspace/kvaishnavi/onnxruntime/build/Linux/Release/libonnxruntime*.so* ort/
