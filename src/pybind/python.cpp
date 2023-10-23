@@ -305,7 +305,9 @@ PYBIND11_MODULE(ort_generators, m) {
       .def("GetSequenceLengths", [](GreedySearch& s) -> pybind11::array_t<int32_t> { return ToPython(s.sequence_lengths_); }, pybind11::return_value_policy::reference_internal)
       .def("GetNextTokens", [](GreedySearch& s) -> pybind11::array_t<int32_t> { return ToPython(s.GetNextTokens()); }, pybind11::return_value_policy::reference_internal)
       .def("IsDone", &GreedySearch::IsDone)
-      .def("SelectTop1", &GreedySearch::SelectTop1)
+      .def("SelectTop", &GreedySearch::SelectTop)
+      .def("SampleTopK", &GreedySearch::SampleTopK)
+      .def("SampleTopP", &GreedySearch::SampleTopP)
       .def("GetSequence", [](GreedySearch& s, int index) -> pybind11::array_t<int32_t> { return ToPython(s.sequences_.GetSequence(index)); }, pybind11::return_value_policy::reference_internal);
 
   pybind11::class_<PyGreedySearch_Cuda>(m, "GreedySearch_Cuda")
@@ -315,7 +317,7 @@ PYBIND11_MODULE(ort_generators, m) {
       .def("GetSequenceLengths", &PyGreedySearch_Cuda::GetSequenceLengths, pybind11::return_value_policy::reference_internal)
       .def("GetNextTokens", &PyGreedySearch_Cuda::GetNextTokens, pybind11::return_value_policy::reference_internal)
       .def("IsDone", &PyGreedySearch_Cuda::IsDone)
-      .def("SelectTop1", &PyGreedySearch_Cuda::SelectTop1)
+      .def("SelectTop", &PyGreedySearch_Cuda::SelectTop)
       .def("GetSequence", &PyGreedySearch_Cuda::GetSequence, pybind11::return_value_policy::reference_internal);
 
   pybind11::class_<BeamSearch>(m, "BeamSearch")
@@ -326,7 +328,7 @@ PYBIND11_MODULE(ort_generators, m) {
       .def("GetNextTokens", [](BeamSearch& s) -> pybind11::array_t<int32_t> { return ToPython(s.GetNextTokens()); }, pybind11::return_value_policy::reference_internal)
       .def("GetNextIndices", [](BeamSearch& s) -> pybind11::array_t<int32_t> { return ToPython(s.GetNextIndices()); }, pybind11::return_value_policy::reference_internal)
       .def("IsDone", &BeamSearch::IsDone)
-      .def("SelectTopK", &BeamSearch::SelectTopK)
+      .def("SelectTop", &BeamSearch::SelectTop)
       .def("GetSequence", [](BeamSearch& s, int index) -> pybind11::array_t<int32_t> { return ToPython(s.sequences_.GetSequence(index)); }, pybind11::return_value_policy::reference_internal);
 
   pybind11::class_<PyBeamSearch_Cuda>(m, "BeamSearch_Cuda")
@@ -337,7 +339,7 @@ PYBIND11_MODULE(ort_generators, m) {
       .def("GetNextTokens", &PyBeamSearch_Cuda::GetNextTokens, pybind11::return_value_policy::reference_internal)
       .def("GetNextIndices", &PyBeamSearch_Cuda::GetNextIndices, pybind11::return_value_policy::reference_internal)
       .def("IsDone", &PyBeamSearch_Cuda::IsDone)
-      .def("SelectTopK", &PyBeamSearch_Cuda::SelectTopK)
+      .def("SelectTop", &PyBeamSearch_Cuda::SelectTop)
       .def("GetSequence", &PyBeamSearch_Cuda::GetSequence, pybind11::return_value_policy::reference_internal);
 
   // If we support models, we need to init the OrtApi

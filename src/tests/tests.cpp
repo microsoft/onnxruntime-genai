@@ -144,7 +144,7 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32() {
     Generators::Processors::MinLength(search, 1);
     Generators::Processors::RepetitionPenalty(search, 1.0f);
 
-    search.SelectTopK();
+    search.SelectTop();
   }
 
   std::vector<int32_t> output_sequence(search.params_.batch_size*max_length);
@@ -254,7 +254,7 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32() {
     Generators::Processors::MinLength(search, 1);
     Generators::Processors::RepetitionPenalty(search, 1.0f);
 
-    search.SelectTop1();
+    search.SelectTop();
   }
 
   // Verify outputs match expected outputs
@@ -307,7 +307,7 @@ void Test_Lib_GreedySearchTest_GptGreedySearchFp32_Cuda() {
     // Scoring
     Generators::Processors_Cuda::MinLength(search, 1);
 
-    search.SelectTop1();
+    search.SelectTop();
   }
 
   // Verify outputs match expected outputs
@@ -374,7 +374,7 @@ void Test_Lib_BeamSearchTest_GptBeamSearchFp32_Cuda() {
     Generators::Processors_Cuda::MinLength(search, 1);
     Generators::Processors_Cuda::RepetitionPenalty(search, 1.0f);
 
-    search.SelectTopK();
+    search.SelectTop();
   }
 
   size_t sequence_length=search.params_.batch_size*max_length;
