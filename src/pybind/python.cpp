@@ -7,6 +7,7 @@
 #include "../models/gpt_cpu.h"
 #include "../models/gpt_cuda.h"
 #include "../models/llama_cpu.h"
+#include "../models/llama_cuda.h"
 #include <iostream>
 
 
@@ -266,6 +267,20 @@ struct PyGpt_Cuda : Gpt_Cuda {
   DeviceArray<float> py_logits_;
 };
 
+struct PyLlama_Cuda : Llama_Cuda {
+  PyLlama_Cuda(const std::string& str) : PyLlama_Cuda{GetOrtEnv(), ORTCHAR_String(str.c_str()), nullptr} {
+  }
+
+  DeviceArray<float>& GetLogits() {
+    auto data = Llama_Cuda::GetLogits();
+    py_logits_.SetDevice(std::span<float>(const_cast<float*>(data.data()), data.size()));
+    return py_logits_;
+  }
+
+ private:
+  DeviceArray<float> py_logits_;
+};
+
 
 PYBIND11_MODULE(ort_generators, m) {
   m.doc() = R"pbdoc(
@@ -370,6 +385,13 @@ PYBIND11_MODULE(ort_generators, m) {
       .def("GetVocabSize", &Llama::GetVocabSize)
       .def("Run", [](Llama& s, pybind11::array_t<int32_t> next_tokens, int current_length) { s.Run(ToSpan(next_tokens), current_length); })
       .def("GetLogits", [](Llama& s) -> pybind11::array_t<float> { return ToPython(s.GetLogits()); }, pybind11::return_value_policy::reference_internal);
+
+  pybind11::class_<PyLlama_Cuda>(m, "Llama_Cuda")
+      .def(pybind11::init([](const std::string& str) { return new PyLlama_Cuda(str); }))
+      .def("CreateInputs", [](Llama& s, DeviceArray<int32_t>& sequence_lengths, const PySearchParams& params) { s.CreateInputs(sequence_lengths.GetGpuArray(), params); })
+      .def("GetVocabSize", &Llama::GetVocabSize)
+      .def("Run", [](Llama& s, DeviceArray<int32_t>& next_tokens, int current_length) { s.Run(next_tokens.GetGpuArray(), current_length); })
+      .def("GetLogits", &PyLlama_Cuda::GetLogits, pybind11::return_value_policy::reference_internal);
 
 #ifdef VERSION_INFO
   m.attr("__version__") = MACRO_STRINGIFY(VERSION_INFO);
