@@ -39,9 +39,13 @@ struct GreedySearch : Search {
 
   std::span<int32_t> GetNextTokens();
 
-  void SelectTop1();
+  void SelectTop();
+  void SampleTopK(int k, float temperature);
+  void SampleTopP(float p, float temperature);
 
  private:
+  bool PadIfAlreadyEOS(size_t batch_id);
+  void SetNextToken(size_t batch_id, int32_t token);
   void AppendNextTokensToSequences();
 
   std::unique_ptr<int32_t[]> next_tokens_buffer_;
@@ -59,7 +63,7 @@ struct BeamSearch : Search {
   std::span<int32_t> GetNextTokens();
   std::span<int32_t> GetNextIndices();
 
-  void SelectTopK();
+  void SelectTop();
 
   void Finalize(size_t num_return_sequences, std::span<int32_t> output, std::span<float> sequence_scores);
 

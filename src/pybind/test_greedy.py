@@ -2,7 +2,7 @@ import ort_generators as og
 import numpy as np
 from transformers import GPT2Tokenizer
 
-text = "The best hotel in bay area"
+text = "The best hotel in bay area is"
 
 # Generate input tokens from the text prompt
 tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
@@ -35,7 +35,7 @@ while not search.IsDone():
     # Generators::Processors::MinLength(search, 1)
     # Generators::Processors::RepetitionPenalty(search, 1.0f)
 
-    search.SelectTop1();
+    search.SelectTop();
 
 print("Outputs:")
 output_tokens=search.GetSequence(0).GetArray()

@@ -3,6 +3,8 @@
 #include "search.h"
 #include "beam_search_scorer.h"
 #include <queue>
+#include <algorithm>
+#include <random>
 
 namespace Generators {
 
@@ -76,7 +78,7 @@ int Search::GetSequenceLength() {
   return sequences_.GetSequenceLength();
 }
 
-void BeamSearch::SelectTopK() {
+void BeamSearch::SelectTop() {
   auto beam_scores = beam_scorer_->GetNextScores();
   // Add beam score to next token scores. Corresponding python code is like:
   //    next_token_scores = next_token_scores + beam_scores[:, None].expand_as(next_token_scores)
@@ -97,9 +99,10 @@ void BeamSearch::SelectTopK() {
   struct ScoreIndex {
     float score;
     int32_t index;
+
+    bool operator<(const ScoreIndex& s) const { return score < s.score; }
   };
 
-  auto compare = [](const ScoreIndex& left, const ScoreIndex& right) { return left.score < right.score; };
   auto scores = std::make_unique<ScoreType[]>(top_k * params_.batch_size);
   auto indices = std::make_unique<int32_t[]>(top_k * params_.batch_size);
   auto tokens = std::make_unique<int32_t[]>(top_k * params_.batch_size);
@@ -109,7 +112,7 @@ void BeamSearch::SelectTopK() {
   auto next_tokens = std::span<int32_t>(tokens.get(), top_k * params_.batch_size);
 
   for (int batch_index = 0; batch_index < params_.batch_size; batch_index++) {
-    std::priority_queue<ScoreIndex, std::vector<ScoreIndex>, decltype(compare)> queue;
+    std::priority_queue<ScoreIndex, std::vector<ScoreIndex>> queue;
     auto token_scores_sub = next_token_scores_.subspan(batch_index * params_.num_beams * params_.vocab_size, params_.num_beams * params_.vocab_size);
     for (int i = 0; i < token_scores_sub.size(); i++) {
       queue.push({token_scores_sub[i], i});
@@ -139,36 +142,110 @@ void BeamSearch::SelectTopK() {
   AppendNextTokensToSequences();
 }
 
-void GreedySearch::SelectTop1() {
-  auto next_token_scores = next_token_scores_.data();
+void GreedySearch::SelectTop() {
   // next_tokens = torch.argmax(scores, dim=-1)
   for (size_t batch_id = 0; batch_id < params_.batch_size; batch_id++) {
-
-    // If this batch entry has already seen the EOS token, append the pad token
-    if (eos_seen_[batch_id]) {
-      next_tokens_[batch_id] = params_.pad_token_id;
+    if (PadIfAlreadyEOS(batch_id))
       continue;
-    }
 
-    int32_t best_token = 0;
-    ScoreType best_score = next_token_scores[0];
-    for (int32_t token = 1; token < params_.vocab_size; token++) {
-      if (next_token_scores[token] > best_score) {
-        best_score = next_token_scores[token];
-        best_token = token;
-      }
-    }
-    next_tokens_[batch_id] = best_token;
-    next_token_scores += params_.vocab_size;
-
-    if (best_token == params_.eos_token_id) {
-      eos_seen_[batch_id] = true;
-      if (--not_done_count_==0)
-        done_=true;
-    }
+    std::span<ScoreType> scores=next_token_scores_.subspan(batch_id*params_.vocab_size, params_.vocab_size);
+    int32_t token = static_cast<int32_t>(std::distance(scores.begin(), std::max_element(scores.begin(), scores.end())));
+    SetNextToken(batch_id, token);
   }
 
   AppendNextTokensToSequences();
+}
+
+void GreedySearch::SampleTopK(int k, float temperature)
+{
+#if 0
+  std::random_device rd;
+  std::mt19937 gen(rd());
+  std::uniform_real_distribution<float> dis(0, k);
+
+  std::vector<int32_t> top_k;
+  top_k.resize(k);
+  for (size_t batch_id = 0; batch_id < params_.batch_size; batch_id++) {
+    std::span<ScoreType> scores = next_token_scores_.subspan(batch_id * params_.vocab_size, params_.vocab_size);
+
+    // Apply temperature and convert log probabilities to probabilities
+    std::vector<float> prob(scores.size());
+    std::transform(scores.begin(), scores.end(), prob.begin(), [temperature](float logp) { return std::exp(logp / temperature); });
+
+    // Find the top K scores
+    std::vector<int> indices(scores.size());
+    std::iota(indices.begin(), indices.end(), 0);
+    std::partial_sort(indices.begin(), indices.begin() + k, indices.end(), [prob](int i, int j) { return prob[i] > prob[j]; });
+
+    // Normalize the top K probabilities
+    float total = std::accumulate(indices.begin(), indices.begin() + k, 0.0f, [prob](float sum, int i) { return sum + prob[i]; });
+    std::transform(indices.begin(), indices.begin() + k, prob.begin(), [total](int i) { return prob[i] / total; });
+
+    // Sample a token from the top K
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::discrete_distribution<> dis(prob.begin(), prob.begin() + k);
+
+    SetNextToken(batch_id, indices[dis(gen)]);
+  }
+#endif
+
+  AppendNextTokensToSequences();
+}
+
+void GreedySearch::SampleTopP(float p, float temperature)
+{
+  std::random_device rd;
+  std::mt19937 gen(rd());
+  std::uniform_real_distribution<float> dis(0, p);
+
+  for (size_t batch_id = 0; batch_id < params_.batch_size; batch_id++) {
+    if (PadIfAlreadyEOS(batch_id))
+      continue;
+
+    std::span<ScoreType> scores = next_token_scores_.subspan(batch_id * params_.vocab_size, params_.vocab_size);
+
+    // Apply temperature and convert log probabilities to probabilities
+    std::vector<float> cumsum(scores.size());
+    std::transform(scores.begin(), scores.end(), cumsum.begin(), [temperature](float logp) { return std::exp(logp / temperature); });
+
+    // Compute cumulative sum
+    std::partial_sum(cumsum.begin(), cumsum.end(), cumsum.begin());
+
+    // Normalize cumulative sum
+    std::transform(cumsum.begin(), cumsum.end(), cumsum.begin(), [total = cumsum.back()](float x) { return x / total; });
+
+    // Sample a probability threshold
+    float threshold = dis(gen);
+
+    // Find the first token where the cumulative probability exceeds the threshold
+    auto it = std::find_if(cumsum.begin(), cumsum.end(), [threshold](float x) { return x > threshold; });
+
+    // Return the index of the sampled token
+    int32_t token=static_cast<int32_t>(std::distance(cumsum.begin(), it));
+    SetNextToken(batch_id, token);
+  }
+
+  AppendNextTokensToSequences();
+}
+
+bool GreedySearch::PadIfAlreadyEOS(size_t batch_id) {
+   // If this batch entry has already seen the EOS token, append the pad token
+  if (!eos_seen_[batch_id])
+    return false;
+
+  next_tokens_[batch_id] = params_.pad_token_id;
+  return true;
+}
+
+
+void GreedySearch::SetNextToken(size_t batch_id, int32_t token) {
+  next_tokens_[batch_id] = token;
+  if (token == params_.eos_token_id) {
+    eos_seen_[batch_id] = true;
+    if (--not_done_count_ == 0)
+      done_ = true;
+  }
 }
 
 void GreedySearch::AppendNextTokensToSequences() {

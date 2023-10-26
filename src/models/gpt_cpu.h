@@ -20,8 +20,6 @@ private:
   SearchParams search_params_;
   bool first_run_{true};
 
-  bool past_present_share_buffer_ {}; // NYI
-
   std::span<int32_t> next_positions_;  // shape (batch_size, num_beams). Next position value for position_ids.
   Ort::IAllocatorUniquePtr<int32_t> next_positions_buffer_;
   std::unique_ptr<OrtValue> next_positions_tensor_; // Tensor of the 'next_position_' buffer
@@ -35,7 +33,6 @@ private:
   std::unique_ptr<OrtValue> attention_mask_, expanded_attention_mask_;
   std::unique_ptr<OrtValue> empty_past_;
   std::vector<std::unique_ptr<OrtValue>> pasts_;
-  std::unique_ptr<OrtIoBinding> io_binding_decode_;
 
   std::vector<std::string> input_name_strings_;
   std::vector<const char *> input_names_;

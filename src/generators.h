@@ -44,4 +44,6 @@ struct SearchParams {
   std::span<const int32_t> input_ids;  // Array of [batchsize][sequence_length]
 };
 
+void top_k_indices(std::span<int32_t> top_k, std::span<const ScoreType> inputs);
+
 }

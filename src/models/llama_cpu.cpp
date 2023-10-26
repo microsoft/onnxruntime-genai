@@ -8,12 +8,32 @@ namespace Generators {
 
 Llama::Llama(OrtEnv& ort_env, const ORTCHAR_T* decode_path) {
   auto session_options = OrtSessionOptions::Create();
-  session_decode_ = OrtSession::Create(ort_env, decode_path, session_options.get());
+  try {
+    session_decode_ = OrtSession::Create(ort_env, decode_path, session_options.get());
+  } catch (const Ort::Exception &e) {
+    std::cout << e.what() << std::endl;
+    throw;
+  }
+
   GetModelParams(model_params_, *session_decode_);
 }
 
 void Llama::CreateInputs(std::span<int32_t> sequence_lengths, const SearchParams& search_params) {
   search_params_ = search_params;
+
+  // Reset the state
+  first_run_ = true;
+  next_positions_buffer_.reset();
+
+  pasts_.clear();
+  input_name_strings_.clear();
+  input_names_.clear();
+  inputs_.clear();
+
+  presents_.clear();
+  output_name_strings_.clear();
+  output_names_.clear();
+  outputs_.clear();
 
   int64_t input_ids_shape[] = {search_params_.batch_size, search_params_.sequence_length};
 
@@ -70,7 +90,7 @@ void Llama::CreateInputs(std::span<int32_t> sequence_lengths, const SearchParams
     }
 
     for (int k = 0; k < search_params_.num_beams; k++) {
-      sequence_lengths[i * search_params_.num_beams + k] = abs_position;
+      sequence_lengths[i * search_params_.num_beams + k] = static_cast<int32_t>(abs_position);
     }
   }
 
