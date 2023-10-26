@@ -268,7 +268,7 @@ struct PyGpt_Cuda : Gpt_Cuda {
 };
 
 struct PyLlama_Cuda : Llama_Cuda {
-  PyLlama_Cuda(const std::string& str) : PyLlama_Cuda{GetOrtEnv(), ORTCHAR_String(str.c_str()), nullptr} {
+  PyLlama_Cuda(const std::string& str) : Llama_Cuda{GetOrtEnv(), ORTCHAR_String(str.c_str()), nullptr} {
   }
 
   DeviceArray<float>& GetLogits() {
@@ -388,9 +388,9 @@ PYBIND11_MODULE(ort_generators, m) {
 
   pybind11::class_<PyLlama_Cuda>(m, "Llama_Cuda")
       .def(pybind11::init([](const std::string& str) { return new PyLlama_Cuda(str); }))
-      .def("CreateInputs", [](Llama& s, DeviceArray<int32_t>& sequence_lengths, const PySearchParams& params) { s.CreateInputs(sequence_lengths.GetGpuArray(), params); })
-      .def("GetVocabSize", &Llama::GetVocabSize)
-      .def("Run", [](Llama& s, DeviceArray<int32_t>& next_tokens, int current_length) { s.Run(next_tokens.GetGpuArray(), current_length); })
+      .def("CreateInputs", [](PyLlama_Cuda& s, DeviceArray<int32_t>& sequence_lengths, const PySearchParams& params) { s.CreateInputs(sequence_lengths.GetGpuArray(), params); })
+      .def("GetVocabSize", &PyLlama_Cuda::GetVocabSize)
+      .def("Run", [](PyLlama_Cuda& s, DeviceArray<int32_t>& next_tokens, int current_length) { s.Run(next_tokens.GetGpuArray(), current_length); })
       .def("GetLogits", &PyLlama_Cuda::GetLogits, pybind11::return_value_policy::reference_internal);
 
 #ifdef VERSION_INFO
