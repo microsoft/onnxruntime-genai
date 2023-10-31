@@ -123,7 +123,7 @@ int Search_Cuda::GetSequenceLength() {
   return sequences_.GetSequenceLength();
 }
 
-void BeamSearch_Cuda::SelectTopK() {
+void BeamSearch_Cuda::SelectTop() {
   auto beam_scores = beam_scorer_->GetNextScores();
 
   // Add beam score to next token scores. Corresponding python code is like:
@@ -178,7 +178,7 @@ void BeamSearch_Cuda::SelectTopK() {
   AppendNextTokensToSequences();
 }
 
-void GreedySearch_Cuda::SelectTop1() {
+void GreedySearch_Cuda::SelectTop() {
   auto next_token_scores = next_token_scores_.data();
   cuda::Launch_SoftMax(next_tokens_.data(), next_token_scores, params_.batch_size, params_.vocab_size, params_.cuda_stream);
 

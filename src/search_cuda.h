@@ -49,7 +49,7 @@ struct GreedySearch_Cuda : Search_Cuda {
 
   std::span<int32_t> GetNextTokens();
 
-  void SelectTop1();
+  void SelectTop();
 
  private:
   void CheckForEOS();
@@ -65,7 +65,7 @@ struct BeamSearch_Cuda : Search_Cuda {
   std::span<int32_t> GetNextTokens();
   std::span<int32_t> GetNextIndices();
 
-  void SelectTopK();
+  void SelectTop();
   void Finalize(size_t num_return_sequences, std::span<int32_t> output, std::span<float> sequence_scores);
 
   bool IsDone() const;
