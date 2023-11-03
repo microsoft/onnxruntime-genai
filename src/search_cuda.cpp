@@ -4,6 +4,7 @@
 #include "beam_search_scorer_cuda.h"
 #include "beam_search_topk.h"
 #include <queue>
+#include <random>
 
 namespace Generators {
 
@@ -22,6 +23,7 @@ void LaunchAddProbsKernel(ScoreType* log_probs, ScoreType* cum_log_probs, const 
 void LaunchRepetitionPenaltyProcessor(const int32_t* sequences, ScoreType* next_token_scores, int batch_size, int num_beams, int vocab_size, int max_sequence_length, int current_sequence_length, ScoreType repetition_penalty, cudaStream_t stream);
 void Launch_log_softmax(ScoreType* values, int count, cudaStream_t stream);
 
+void TopPSampling(int32_t* next_token, ScoreType* scores, int size, float p, float temperature);
 }
 
 Search_Cuda::Search_Cuda(const SearchParams_Cuda& params)
@@ -94,18 +96,6 @@ void Search_Cuda::SetLogits(std::span<const ScoreType> logits) {
     cuda::Launch_log_softmax(target.data(), static_cast<int>(target.size()), params_.cuda_stream);
   }
 }
-
-#if 0
-    if (do_sampling) {
-      ORT_RETURN_IF_ERROR(SamplingCpuHelper::Sample(allocator,
-                                                    thread_pool,
-                                                    next_token_scores,
-                                                    sampling_state,
-                                                    greedy_state,
-                                                    parameters,
-                                                    dumper));
-}
-#endif
 
 std::span<int32_t> GreedySearch_Cuda::GetNextTokens() {
   return next_tokens_;
@@ -181,6 +171,48 @@ void BeamSearch_Cuda::SelectTop() {
 void GreedySearch_Cuda::SelectTop() {
   auto next_token_scores = next_token_scores_.data();
   cuda::Launch_SoftMax(next_tokens_.data(), next_token_scores, params_.batch_size, params_.vocab_size, params_.cuda_stream);
+
+  CheckForEOS();
+  AppendNextTokensToSequences();
+}
+
+// TODO: Find a good way to do this on the GPU
+void SoftMax(std::span<ScoreType> scores, float temperature);
+void TopPSampling(int32_t* d_next_token, ScoreType* d_scores, int size, float threshold, float temperature) {
+  auto scores_buffer = CudaMallocHostArray<ScoreType>(size);
+  std::span<ScoreType> scores{scores_buffer.get(), static_cast<size_t>(size)};
+  cudaMemcpy(scores.data(), d_scores, size * sizeof(ScoreType), cudaMemcpyDeviceToHost);
+
+  SoftMax(scores, temperature);
+
+  // Sort an array of indices into the scores
+  std::vector<int32_t> indices(scores.size());
+  std::iota(indices.begin(), indices.end(), 0);
+  std::sort(indices.begin(), indices.end(), [scores = scores.data()](int32_t i, int32_t j) { return scores[i] > scores[j]; });
+
+  int32_t token = 0;
+  // Find the first token where the cumulative probability exceeds the threshold
+  for (int i = 0; i < scores.size(); i++) {
+    threshold -= scores[indices[i]];
+    if (threshold > 0)
+      continue;
+
+    token = indices[i];
+    break;
+  }
+
+  cudaMemcpy(d_next_token, &token, sizeof(token), cudaMemcpyHostToDevice);
+}
+
+void GreedySearch_Cuda::SampleTopP(float p, float temperature) {
+  std::random_device rd;
+  std::mt19937 gen(rd());
+  std::uniform_real_distribution<float> dis(0, p);
+
+  for (int i = 0; i < params_.batch_size; i++) {
+    std::span<ScoreType> scores = next_token_scores_.subspan(i * params_.vocab_size, params_.vocab_size);
+    TopPSampling(next_tokens_.data() + i, scores.data(), static_cast<int>(scores.size()), dis(gen), temperature);
+  }
 
   CheckForEOS();
   AppendNextTokensToSequences();

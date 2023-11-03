@@ -193,6 +193,19 @@ void GreedySearch::SampleTopK(int k, float temperature)
   AppendNextTokensToSequences();
 }
 
+void SoftMax(std::span<ScoreType> scores, float temperature) {
+  ScoreType max_score = *std::max_element(scores.begin(), scores.end());
+
+  // Subtract max score and scale by temperature
+  std::transform(scores.begin(), scores.end(), scores.begin(), [max_score, temperature](ScoreType score) { return std::expf((score - max_score) / temperature); });
+
+  // Compute sum of exponentials
+  ScoreType exp_sum = std::accumulate(scores.begin(), scores.end(), 0.0f);
+
+  // Divide each score by the sum of exponentials
+  std::transform(scores.begin(), scores.end(), scores.begin(), [exp_sum](ScoreType score) { return score / exp_sum; });
+}
+
 void GreedySearch::SampleTopP(float p, float temperature)
 {
   std::random_device rd;
@@ -205,24 +218,27 @@ void GreedySearch::SampleTopP(float p, float temperature)
 
     std::span<ScoreType> scores = next_token_scores_.subspan(batch_id * params_.vocab_size, params_.vocab_size);
 
-    // Apply temperature and convert log probabilities to probabilities
-    std::vector<float> cumsum(scores.size());
-    std::transform(scores.begin(), scores.end(), cumsum.begin(), [temperature](float logp) { return std::exp(logp / temperature); });
+    SoftMax(scores, temperature);
 
-    // Compute cumulative sum
-    std::partial_sum(cumsum.begin(), cumsum.end(), cumsum.begin());
-
-    // Normalize cumulative sum
-    std::transform(cumsum.begin(), cumsum.end(), cumsum.begin(), [total = cumsum.back()](float x) { return x / total; });
+    // Sort an array of indices into the scores
+    std::vector<int32_t> indices(scores.size());
+    std::iota(indices.begin(), indices.end(), 0);
+    std::sort(indices.begin(), indices.end(), [scores = scores.data()](int32_t i, int32_t j) { return scores[i] > scores[j]; });
 
     // Sample a probability threshold
     float threshold = dis(gen);
 
+    int32_t token=0;
     // Find the first token where the cumulative probability exceeds the threshold
-    auto it = std::find_if(cumsum.begin(), cumsum.end(), [threshold](float x) { return x > threshold; });
+    for (int i = 0; i < scores.size();i++) {
+      threshold -= scores[indices[i]];
+      if (threshold>0)
+        continue;
 
-    // Return the index of the sampled token
-    int32_t token=static_cast<int32_t>(std::distance(cumsum.begin(), it));
+      token=indices[i];
+      break;
+    }
+
     SetNextToken(batch_id, token);
   }
 

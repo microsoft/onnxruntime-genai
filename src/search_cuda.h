@@ -51,7 +51,7 @@ struct GreedySearch_Cuda : Search_Cuda {
 
   void SelectTop();
   void SampleTopK(int k, float t) { assert(false); }
-  void SampleTopP(float p, float t) { assert(false);  }
+  void SampleTopP(float p, float t);
 
  private:
   void CheckForEOS();
