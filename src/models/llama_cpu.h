@@ -3,19 +3,14 @@
 
 namespace Generators {
 
-struct Llama {
+struct Llama_State {
 
-  Llama(OrtEnv& ort_env, const ORTCHAR_T* decode_path);
-
-  void CreateInputs(std::span<int32_t> sequence_lengths, const SearchParams& params);
-  std::span<const ScoreType> GetLogits();
-  int GetVocabSize() const { return model_params_.vocab_size; }
-  void Run(std::span<const int32_t> next_tokens, int current_length);
+  Llama_State(Llama_Model& model, std::span<int32_t> sequence_lengths, const SearchParams& params);
+  std::span<ScoreType> Run(int current_length, std::span<const int32_t> next_tokens);
 
 private:
   void UpdateInputs(std::span<const int32_t> next_tokens, int current_length);
 
-  LlamaModelParams model_params_;
   SearchParams search_params_;
   bool first_run_{true};
 
@@ -23,8 +18,8 @@ private:
   Ort::IAllocatorUniquePtr<int64_t> next_positions_buffer_;
   std::unique_ptr<OrtValue> next_positions_tensor_; // Tensor of the 'next_position_' buffer
 
-  // Sessions
-  std::unique_ptr<OrtSession> session_decode_;
+  // Model
+  Llama_Model* model_;
 
   // Inputs
   std::unique_ptr<OrtValue> input_ids_, expanded_input_ids_;

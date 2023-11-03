@@ -24,6 +24,12 @@
 namespace Generators {
 using ScoreType = float;
 
+enum struct DeviceType {
+  Auto,
+  CPU,
+  CUDA,
+};
+
 struct SearchParams {
   int batch_size{};
   int sequence_length{};

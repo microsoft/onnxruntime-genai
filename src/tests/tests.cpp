@@ -36,23 +36,22 @@ void Test_BeamSearchTest_GptBeamSearchFp32() {
   //        --output tiny_gpt2_beamsearch_fp16.onnx --use_gpu --max_length 20
   // (with separate_gpt2_decoder_for_init_run set to False as it is now set to True by default)
 
-  Generators::Gpt gpt(*g_ort_env, ORT_TSTR_ON_MACRO(MODEL_PATH "hf-internal-testing/tiny-random-gpt2_past_fp32.onnx"));
+  Generators::Gpt_Model model(*g_ort_env, ORT_TSTR_ON_MACRO(MODEL_PATH "hf-internal-testing/tiny-random-gpt2_past_fp32.onnx"));
 
   Generators::SearchParams params;
   params.batch_size = static_cast<int>(input_ids_shape[0]);
   params.sequence_length = static_cast<int>(input_ids_shape[1]);
   params.input_ids = input_ids;
   params.max_length = max_length;
-  params.vocab_size = gpt.GetVocabSize();
+  params.vocab_size = model.GetVocabSize();
   params.eos_token_id = params.pad_token_id = 98;
   params.num_beams = 4;
 
   Generators::BeamSearch search{params};
-  gpt.CreateInputs(search.sequence_lengths_, params);
+  Generators::Gpt_State gpt{model, search.sequence_lengths_, params};
 
   while (!search.IsDone()) {
-    gpt.Run(search.GetNextTokens(), search.GetNextIndices(), search.GetSequenceLength());
-    search.SetLogits(gpt.GetLogits());
+    search.SetLogits(gpt.Run(search.GetSequenceLength(), search.GetNextTokens(), search.GetNextIndices()));
 
     // Scoring
     Generators::Processors::MinLength(search, 1);
@@ -87,22 +86,21 @@ void Test_GreedySearchTest_GptGreedySearchFp32() {
   // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
   // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
 
-  Generators::Gpt gpt(*g_ort_env, ORT_TSTR_ON_MACRO(MODEL_PATH "hf-internal-testing/tiny-random-gpt2_past_fp32.onnx"));
+  Generators::Gpt_Model model(*g_ort_env, ORT_TSTR_ON_MACRO(MODEL_PATH "hf-internal-testing/tiny-random-gpt2_past_fp32.onnx"));
 
   Generators::SearchParams params;
   params.max_length = 10;
   params.batch_size = static_cast<int>(input_ids_shape[0]);
   params.sequence_length = static_cast<int>(input_ids_shape[1]);
   params.input_ids = input_ids;
-  params.vocab_size = gpt.GetVocabSize();
+  params.vocab_size = model.GetVocabSize();
   params.eos_token_id = params.pad_token_id = 98;
 
   Generators::GreedySearch search{params};
-  gpt.CreateInputs(search.sequence_lengths_, params);
+  Generators::Gpt_State gpt{model, search.sequence_lengths_, params};
 
   while (!search.IsDone()) {
-    gpt.Run(search.GetNextTokens(), {}, search.GetSequenceLength());
-    search.SetLogits(gpt.GetLogits());
+    search.SetLogits(gpt.Run(search.GetSequenceLength(), search.GetNextTokens()));
 
     // Scoring
     Generators::Processors::MinLength(search, 1);
@@ -141,22 +139,21 @@ void Test_GreedySearchTest_GptGreedySearchFp32_Cuda() {
   // To generate this file:
   // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
   // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
-  Generators::Gpt_Cuda gpt(*g_ort_env, ORT_TSTR_ON_MACRO(MODEL_PATH "hf-internal-testing/tiny-random-gpt2_past_fp32.onnx"), cuda_stream);
+  Generators::Gpt_Model model{*g_ort_env, ORT_TSTR_ON_MACRO(MODEL_PATH "hf-internal-testing/tiny-random-gpt2_past_fp32.onnx"), cuda_stream};
 
   Generators::SearchParams_Cuda params;
   params.batch_size = static_cast<int>(input_ids_shape[0]);
   params.sequence_length = static_cast<int>(input_ids_shape[1]);
   params.input_ids = input_ids;
-  params.vocab_size = gpt.GetVocabSize();
+  params.vocab_size = model.GetVocabSize();
   params.eos_token_id = params.pad_token_id = 98;
   params.cuda_stream = cuda_stream;
 
   Generators::GreedySearch_Cuda search{params};
-  gpt.CreateInputs(search.sequence_lengths_, params);
+  Generators::Gpt_Cuda gpt{model, search.sequence_lengths_, params};
 
   while (!search.IsDone()) {
-    gpt.Run(search.GetNextTokens(), {}, search.GetSequenceLength());
-    search.SetLogits(gpt.GetLogits());
+    search.SetLogits(gpt.Run(search.GetSequenceLength(), search.GetNextTokens()));
 
     // Scoring
     Generators::Processors_Cuda::MinLength(search, 1);
@@ -204,8 +201,7 @@ void Test_BeamSearchTest_GptBeamSearchFp32_Cuda() {
   //        --output tiny_gpt2_beamsearch_fp16.onnx --use_gpu --max_length 20
   // (with separate_gpt2_decoder_for_init_run set to False as it is now set to True by default)
 
-  Generators::Gpt_Cuda gpt(*g_ort_env,
-                           ORT_TSTR_ON_MACRO(MODEL_PATH "hf-internal-testing/tiny-random-gpt2_past_fp32.onnx"), cuda_stream);
+  Generators::Gpt_Model model(*g_ort_env, ORT_TSTR_ON_MACRO(MODEL_PATH "hf-internal-testing/tiny-random-gpt2_past_fp32.onnx"), cuda_stream);
 
   Generators::SearchParams_Cuda params;
   params.batch_size = static_cast<int>(input_ids_shape[0]);
@@ -213,16 +209,15 @@ void Test_BeamSearchTest_GptBeamSearchFp32_Cuda() {
   params.input_ids = input_ids;
   params.max_length = max_length;
   params.num_beams = 4;
-  params.vocab_size = gpt.GetVocabSize();
+  params.vocab_size = model.GetVocabSize();
   params.eos_token_id = params.pad_token_id = 98;
   params.cuda_stream = cuda_stream;
 
   Generators::BeamSearch_Cuda search{params};
-  gpt.CreateInputs(search.sequence_lengths_, params);
+  Generators::Gpt_Cuda gpt{model, search.sequence_lengths_, params};
 
   while (!search.IsDone()) {
-    gpt.Run(search.GetNextTokens(), search.GetNextIndices(), search.GetSequenceLength());
-    search.SetLogits(gpt.GetLogits());
+    search.SetLogits(gpt.Run(search.GetSequenceLength(), search.GetNextTokens(), search.GetNextIndices()));
 
     // Scoring
     Generators::Processors_Cuda::MinLength(search, 1);

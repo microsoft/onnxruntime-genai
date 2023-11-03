@@ -6,34 +6,9 @@
 
 namespace Generators {
 
-Llama::Llama(OrtEnv& ort_env, const ORTCHAR_T* decode_path) {
-  auto session_options = OrtSessionOptions::Create();
-  try {
-    session_decode_ = OrtSession::Create(ort_env, decode_path, session_options.get());
-  } catch (const Ort::Exception &e) {
-    std::cout << e.what() << std::endl;
-    throw;
-  }
-
-  GetModelParams(model_params_, *session_decode_);
-}
-
-void Llama::CreateInputs(std::span<int32_t> sequence_lengths, const SearchParams& search_params) {
-  search_params_ = search_params;
-
-  // Reset the state
-  first_run_ = true;
-  next_positions_buffer_.reset();
-
-  pasts_.clear();
-  input_name_strings_.clear();
-  input_names_.clear();
-  inputs_.clear();
-
-  presents_.clear();
-  output_name_strings_.clear();
-  output_names_.clear();
-  outputs_.clear();
+Llama_State::Llama_State(Llama_Model& model, std::span<int32_t> sequence_lengths, const SearchParams& search_params)
+ : model_{&model},
+  search_params_{search_params} {
 
   int64_t input_ids_shape[] = {search_params_.batch_size, search_params_.sequence_length};
 
@@ -108,17 +83,17 @@ void Llama::CreateInputs(std::span<int32_t> sequence_lengths, const SearchParams
 
   auto past_type = Ort::TypeToTensorType<ScoreType>::type;
   // Initialize empty past state
-  int64_t empty_past_shape[] = {search_params_.batch_size * search_params_.num_beams, model_params_.head_count, 0, model_params_.hidden_size};
+  int64_t empty_past_shape[] = {search_params_.batch_size * search_params_.num_beams, model_->head_count_, 0, model_->hidden_size_};
   empty_past_ = OrtValue::CreateTensor(allocator, empty_past_shape, std::size(empty_past_shape), past_type);
-  for (int i = 0; i < model_params_.layer_count * 2; i++)
+  for (int i = 0; i < model_->layer_count_ * 2; i++)
     inputs_.push_back(empty_past_.get());
 
   // Initialize non empty past states
-  int64_t past_shape[] = {search_params_.batch_size * search_params_.num_beams, model_params_.head_count, input_ids_shape[1], model_params_.hidden_size};
-  pasts_.resize(model_params_.layer_count * 2);
+  int64_t past_shape[] = {search_params_.batch_size * search_params_.num_beams, model_->head_count_, input_ids_shape[1], model_->hidden_size_};
+  pasts_.resize(model_->layer_count_ * 2);
 
   // The remaining inputs are past state.
-  for (int i = 0; i < model_params_.layer_count; ++i) {
+  for (int i = 0; i < model_->layer_count_; ++i) {
     char string[32];
     snprintf(string, std::size(string), "past_key_values.%d.key", i);
     input_name_strings_.push_back(string);
@@ -129,16 +104,16 @@ void Llama::CreateInputs(std::span<int32_t> sequence_lengths, const SearchParams
 
   // Allocate space for logits (only works if we know the shape)
   {
-    int64_t logits_shape[] = {search_params_.batch_size * search_params_.num_beams, model_params_.logits_uses_seq_len ? input_ids_shape[1] : 1, model_params_.vocab_size};
+    int64_t logits_shape[] = {search_params_.batch_size * search_params_.num_beams, model_->logits_uses_seq_len_ ? input_ids_shape[1] : 1, model_->vocab_size_};
     logits_ = OrtValue::CreateTensor(allocator, logits_shape, std::size(logits_shape), past_type);
     outputs_.push_back(logits_.get());
   }
 
   {
-    int64_t present_shape[] = {search_params_.batch_size * search_params_.num_beams, model_params_.head_count, input_ids_shape[1], model_params_.hidden_size};
-    outputs_.reserve(model_params_.layer_count * 2);
+    int64_t present_shape[] = {search_params_.batch_size * search_params_.num_beams, model_->head_count_, input_ids_shape[1], model_->hidden_size_};
+    outputs_.reserve(model_->layer_count_ * 2);
 
-    for (int i = 0; i < model_params_.layer_count; ++i) {
+    for (int i = 0; i < model_->layer_count_; ++i) {
       presents_.push_back(OrtValue::CreateTensor(allocator, present_shape, std::size(present_shape), past_type));
       outputs_.push_back(presents_.back().get());
       presents_.push_back(OrtValue::CreateTensor(allocator, present_shape, std::size(present_shape), past_type));
@@ -159,15 +134,7 @@ void Llama::CreateInputs(std::span<int32_t> sequence_lengths, const SearchParams
     output_names_.push_back(output_name.c_str());
 }
 
-std::span<const ScoreType> Llama::GetLogits() {
-  auto type_shape = logits_->GetTensorTypeAndShapeInfo();
-  auto shape = type_shape->GetShape();
-  assert(type_shape->GetShape().size() == 3);
-
-  return {logits_->GetTensorData<ScoreType>(), type_shape->GetElementCount()};
-}
-
-void Llama::Run(std::span<const int32_t> next_tokens, int current_length) {
+std::span<ScoreType> Llama_State::Run(int current_length, std::span<const int32_t> next_tokens) {
   if (first_run_)
     first_run_ = false;
   else
@@ -181,14 +148,20 @@ void Llama::Run(std::span<const int32_t> next_tokens, int current_length) {
 #endif
 
   try {
-    session_decode_->Run(nullptr, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
+    model_->session_decoder_->Run(nullptr, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
   }
   catch (const Ort::Exception &e) {
     std::cout << e.what() << std::endl;
   }
+
+  auto type_shape = logits_->GetTensorTypeAndShapeInfo();
+  auto shape = type_shape->GetShape();
+  assert(type_shape->GetShape().size() == 3);
+
+  return {logits_->GetTensorMutableData<ScoreType>(), type_shape->GetElementCount()};
 }
 
-void Llama::UpdateInputs(std::span<const int32_t> next_tokens, int current_length) {
+void Llama_State::UpdateInputs(std::span<const int32_t> next_tokens, int current_length) {
   assert(search_params_.num_beams==1);
   auto& allocator = Ort::Allocator::GetWithDefaultOptions();
 
@@ -229,17 +202,17 @@ void Llama::UpdateInputs(std::span<const int32_t> next_tokens, int current_lengt
   inputs_[2]=expanded_attention_mask_.get();
 
   // Update logits
-  if (model_params_.logits_uses_seq_len)
+  if (model_->logits_uses_seq_len_)
   {
-    int64_t logits_shape[] = {search_params_.batch_size * search_params_.num_beams, 1, model_params_.vocab_size};
+    int64_t logits_shape[] = {search_params_.batch_size * search_params_.num_beams, 1, model_->vocab_size_};
     logits_ = OrtValue::CreateTensor(allocator, logits_shape, std::size(logits_shape), Ort::TypeToTensorType<ScoreType>::type);
     outputs_[0]=logits_.get();
   }
 
   // feed present_* output to past_* inputs one by one
-  int64_t present_shape[] = {batch_beam_size, model_params_.head_count, current_length, model_params_.hidden_size};
+  int64_t present_shape[] = {batch_beam_size, model_->head_count_, current_length, model_->hidden_size_};
 
-  for (size_t i = 0; i < model_params_.layer_count * 2; i++) {
+  for (size_t i = 0; i < model_->layer_count_ * 2; i++) {
     pasts_[i]=std::move(presents_[i]);
     inputs_[i + 3] = pasts_[i].get();
 

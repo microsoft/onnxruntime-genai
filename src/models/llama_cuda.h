@@ -5,17 +5,12 @@ namespace Generators {
 
 struct Llama_Cuda {
 
-  Llama_Cuda(OrtEnv& ort_env, const ORTCHAR_T* decode_path, cudaStream_t cuda_stream);
-
-  void CreateInputs(std::span<int32_t> sequence_lengths, const SearchParams& params);
-  std::span<const ScoreType> GetLogits();
-  int GetVocabSize() const { return model_params_.vocab_size; }
-  void Run(std::span<const int32_t> next_tokens, int current_length);
+  Llama_Cuda(Llama_Model& model, std::span<int32_t> sequence_lengths, const SearchParams& params);
+  std::span<ScoreType> Run(int current_length, std::span<const int32_t> next_tokens);
 
 private:
   void UpdateInputs(std::span<const int32_t> next_tokens, int current_length);
 
-  LlamaModelParams model_params_;
   SearchParams search_params_;
   bool first_run_{true};
 
@@ -23,7 +18,8 @@ private:
   std::unique_ptr<OrtMemoryInfo> memory_info_cuda_;
   std::unique_ptr<Ort::Allocator> allocator_cuda_;
 
-  cudaStream_t cuda_stream_;
+  // Model
+  Llama_Model* model_;
 
   bool past_present_share_buffer_{};  // NYI
 

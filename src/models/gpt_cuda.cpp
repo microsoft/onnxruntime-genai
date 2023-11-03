@@ -31,26 +31,13 @@ static void ExpandInputs(const OrtValue& input, int num_beams, OrtAllocator& all
   }
 }
 
-Gpt_Cuda::Gpt_Cuda(OrtEnv& ort_env, const ORTCHAR_T* decode_path, cudaStream_t cuda_stream)
- : cuda_stream_{cuda_stream},
+Gpt_Cuda::Gpt_Cuda(Gpt_Model& model, std::span<int32_t> sequence_lengths, const SearchParams& search_params)
+ : model_{&model},
+  search_params_{search_params},
   allocator_cpu_{Ort::Allocator::GetWithDefaultOptions()}
 {
-  auto session_options = OrtSessionOptions::Create();
-  OrtCUDAProviderOptions cuda_options;
-  cuda_options.has_user_compute_stream=true;
-  cuda_options.user_compute_stream=cuda_stream;
-  session_options->AppendExecutionProvider_CUDA(cuda_options);
-
-  session_decode_ = OrtSession::Create(ort_env, decode_path, session_options.get());
-
   memory_info_cuda_ = OrtMemoryInfo::Create("Cuda", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-  allocator_cuda_ = Ort::Allocator::Create(*session_decode_, *memory_info_cuda_);
-
-  GetModelParams(model_params_, *session_decode_);
-}
-
-void Gpt_Cuda::CreateInputs(std::span<int32_t> sequence_lengths, const SearchParams& params) {
-  search_params_ = params;
+  allocator_cuda_ = Ort::Allocator::Create(*model_->session_decoder_, *memory_info_cuda_);
 
   // Allocate position_ids and attention_mask based on shape of input_ids
   auto element_type = Ort::TypeToTensorType<int32_t>::type;
@@ -90,7 +77,7 @@ void Gpt_Cuda::CreateInputs(std::span<int32_t> sequence_lengths, const SearchPar
   // Set position id to be 0 for pad tokens, and accumulated sum of mask in a batch for other tokens
   int32_t* mask_data = attention_mask_->GetTensorMutableData<int32_t>();
   int32_t* position_data = position_ids_->GetTensorMutableData<int32_t>();
-  cuda::LaunchGpt_InitAttentionMask(attn_mask_value ? nullptr : mask_data, position_data, sequence_lengths_cuda.get(), input_ids_data, search_params_.batch_size, search_params_.num_beams, search_params_.sequence_length, search_params_.pad_token_id, cuda_stream_);
+  cuda::LaunchGpt_InitAttentionMask(attn_mask_value ? nullptr : mask_data, position_data, sequence_lengths_cuda.get(), input_ids_data, search_params_.batch_size, search_params_.num_beams, search_params_.sequence_length, search_params_.pad_token_id, model_->cuda_stream_);
   cudaMemcpy(sequence_lengths.data(), sequence_lengths_cuda.get(), sequence_lengths.size_bytes(), cudaMemcpyDeviceToHost);
 
   // Expand (batch_size, sequence_length) to (batch_size * num_beams, sequence_length)
@@ -100,9 +87,9 @@ void Gpt_Cuda::CreateInputs(std::span<int32_t> sequence_lengths, const SearchPar
     expanded_position_ids_ = std::move(position_ids_);
     expanded_attention_mask_ = std::move(attention_mask_);
   } else {
-    ExpandInputs<int32_t>(*input_ids_, search_params_.num_beams, *allocator_cuda_, expanded_input_ids_, cuda_stream_);
-    ExpandInputs<int32_t>(*position_ids_, search_params_.num_beams, *allocator_cuda_, expanded_position_ids_, cuda_stream_);
-    ExpandInputs<int32_t>(*attention_mask_, search_params_.num_beams, *allocator_cuda_, expanded_attention_mask_, cuda_stream_);
+    ExpandInputs<int32_t>(*input_ids_, search_params_.num_beams, *allocator_cuda_, expanded_input_ids_, model_->cuda_stream_);
+    ExpandInputs<int32_t>(*position_ids_, search_params_.num_beams, *allocator_cuda_, expanded_position_ids_, model_->cuda_stream_);
+    ExpandInputs<int32_t>(*attention_mask_, search_params_.num_beams, *allocator_cuda_, expanded_attention_mask_, model_->cuda_stream_);
   }
 
   for (auto* input : {expanded_input_ids_.get(), expanded_position_ids_.get(), expanded_attention_mask_.get()})
@@ -115,17 +102,17 @@ void Gpt_Cuda::CreateInputs(std::span<int32_t> sequence_lengths, const SearchPar
   auto past_type = Ort::TypeToTensorType<ScoreType>::type;
   if (!past_present_share_buffer_) {
     // Initialize empty past state
-    int64_t empty_past_shape[] = {2, search_params_.batch_size * search_params_.num_beams, model_params_.head_count, 0, model_params_.hidden_size};
+    int64_t empty_past_shape[] = {2, search_params_.batch_size * search_params_.num_beams, model_->head_count_, 0, model_->hidden_size_};
     empty_past_ = OrtValue::CreateTensor(*allocator_cuda_, empty_past_shape, std::size(empty_past_shape), past_type);
-    for (int i = 0; i < model_params_.layer_count; i++)
+    for (int i = 0; i < model_->layer_count_; i++)
       inputs_.push_back(empty_past_.get());
 
     // Initialize non empty past states
-    int64_t past_shape[] = {2, search_params_.batch_size * search_params_.num_beams, model_params_.head_count, input_ids_shape[1], model_params_.hidden_size};
-    pasts_.reserve(model_params_.layer_count);
+    int64_t past_shape[] = {2, search_params_.batch_size * search_params_.num_beams, model_->head_count_, input_ids_shape[1], model_->hidden_size_};
+    pasts_.reserve(model_->layer_count_);
 
     // The remaining inputs are past state.
-    for (int i = 0; i < model_params_.layer_count; ++i) {
+    for (int i = 0; i < model_->layer_count_; ++i) {
       pasts_.push_back(OrtValue::CreateTensor(*allocator_cuda_, past_shape, std::size(past_shape), past_type));
 
       char string[32];
@@ -137,15 +124,15 @@ void Gpt_Cuda::CreateInputs(std::span<int32_t> sequence_lengths, const SearchPar
   }
 
   {
-    int64_t logits_shape[] = {search_params_.batch_size * search_params_.num_beams, model_params_.logits_uses_seq_len ? input_ids_shape[1] : 1, model_params_.vocab_size};
+    int64_t logits_shape[] = {search_params_.batch_size * search_params_.num_beams, model_->logits_uses_seq_len_ ? input_ids_shape[1] : 1, model_->vocab_size_};
     logits_ = OrtValue::CreateTensor(*allocator_cuda_, logits_shape, std::size(logits_shape), past_type);
     outputs_.push_back(logits_.get());
   }
   {
-    int64_t present_shape[] = {2, search_params_.batch_size * search_params_.num_beams, model_params_.head_count, input_ids_shape[1], model_params_.hidden_size};
-    outputs_.reserve(model_params_.layer_count);
+    int64_t present_shape[] = {2, search_params_.batch_size * search_params_.num_beams, model_->head_count_, input_ids_shape[1], model_->hidden_size_};
+    outputs_.reserve(model_->layer_count_);
 
-    for (int i = 0; i < model_params_.layer_count; ++i) {
+    for (int i = 0; i < model_->layer_count_; ++i) {
       presents_.push_back(OrtValue::CreateTensor(*allocator_cuda_, present_shape, std::size(present_shape), past_type));
       outputs_.push_back(presents_[i].get());
 
@@ -160,17 +147,10 @@ void Gpt_Cuda::CreateInputs(std::span<int32_t> sequence_lengths, const SearchPar
   for (auto& output_name : output_name_strings_)
     output_names_.push_back(output_name.c_str());
 
-  io_binding_decode_ = OrtIoBinding::Create(*session_decode_);
+  io_binding_decode_ = OrtIoBinding::Create(*model_->session_decoder_);
 }
 
-std::span<const ScoreType> Gpt_Cuda::GetLogits() {
-  auto type_shape = logits_->GetTensorTypeAndShapeInfo();
-  assert(type_shape->GetShape().size() == 3);
-
-  return {logits_->GetTensorData<ScoreType>(), type_shape->GetElementCount()};
-}
-
-void Gpt_Cuda::Run(std::span<const int32_t> next_tokens, std::span<const int32_t> next_indices, int current_length) {
+std::span<ScoreType> Gpt_Cuda::Run(int current_length, std::span<const int32_t> next_tokens, std::span<const int32_t> next_indices) {
   if (first_run_)
     first_run_ = false;
   else
@@ -187,7 +167,7 @@ void Gpt_Cuda::Run(std::span<const int32_t> next_tokens, std::span<const int32_t
     io_binding_decode_->BindOutput(output_names_[i], *outputs_[i]);
 
 //  session_decode_->Run(nullptr, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
-  session_decode_->Run(nullptr, *io_binding_decode_);
+  model_->session_decoder_->Run(nullptr, *io_binding_decode_);
 
 #if 0
   printf("**Inputs:\r\n");
@@ -195,6 +175,11 @@ void Gpt_Cuda::Run(std::span<const int32_t> next_tokens, std::span<const int32_t
   printf("**Outputs:\r\n");
   DumpTensors(outputs_.data(), output_names_.data(), output_names_.size(), true);
 #endif
+
+    auto type_shape = logits_->GetTensorTypeAndShapeInfo();
+    assert(type_shape->GetShape().size() == 3);
+
+    return {logits_->GetTensorMutableData<ScoreType>(), type_shape->GetElementCount()};
 }
 
 void Gpt_Cuda::UpdateInputs(std::span<const int32_t> next_tokens, std::span<const int32_t> beam_indices, int current_length) {
@@ -207,26 +192,26 @@ void Gpt_Cuda::UpdateInputs(std::span<const int32_t> next_tokens, std::span<cons
   int64_t dims[] = {batch_beam_size, 1};
   std::unique_ptr<OrtValue> input_ids = OrtValue::CreateTensor<int32_t>(*allocator_cuda_, dims, std::size(dims));
   int32_t* input_ids_data = input_ids->GetTensorMutableData<int32_t>();
-  cudaMemcpyAsync(input_ids_data, next_tokens.data(), batch_beam_size * sizeof(int32_t), cudaMemcpyDeviceToDevice, cuda_stream_);
+  cudaMemcpyAsync(input_ids_data, next_tokens.data(), batch_beam_size * sizeof(int32_t), cudaMemcpyDeviceToDevice, model_->cuda_stream_);
   expanded_input_ids_ = std::move(input_ids);
   inputs_[0] = expanded_input_ids_.get();
 
   // Update position IDs
   inputs_[1] = next_positions_tensor_.get();
-  cuda::LaunchGpt_UpdatePositionIds(next_positions_.data(), batch_beam_size, current_length, cuda_stream_);
+  cuda::LaunchGpt_UpdatePositionIds(next_positions_.data(), batch_beam_size, current_length, model_->cuda_stream_);
 
   // Update attention mask
   const int32_t* old_mask_data = expanded_attention_mask_->GetTensorMutableData<int32_t>();
   int64_t mask_dims[] = {batch_beam_size, current_length};
   auto attention_mask = OrtValue::CreateTensor<int32_t>(*allocator_cuda_, mask_dims, std::size(mask_dims));
   int32_t* mask_data = attention_mask->GetTensorMutableData<int32_t>();
-  cuda::LaunchGpt_UpdateMask(mask_data, old_mask_data, batch_beam_size, current_length, cuda_stream_);
+  cuda::LaunchGpt_UpdateMask(mask_data, old_mask_data, batch_beam_size, current_length, model_->cuda_stream_);
   expanded_attention_mask_ = std::move(attention_mask);
   inputs_[2] = expanded_attention_mask_.get();
 
   // Update logits
-  if (model_params_.logits_uses_seq_len) {
-    int64_t logits_shape[] = {search_params_.batch_size * search_params_.num_beams, 1, model_params_.vocab_size};
+  if (model_->logits_uses_seq_len_) {
+    int64_t logits_shape[] = {search_params_.batch_size * search_params_.num_beams, 1, model_->vocab_size_};
     logits_ = OrtValue::CreateTensor(*allocator_cuda_, logits_shape, std::size(logits_shape), Ort::TypeToTensorType<ScoreType>::type);
     outputs_[0] = logits_.get();
   }
@@ -240,16 +225,16 @@ void Gpt_Cuda::UpdateInputs(std::span<const int32_t> next_tokens, std::span<cons
 #endif
 
   // feed present_* output to past_* inputs one by one
-  int64_t present_shape[] = {2, batch_beam_size, model_params_.head_count, current_length, model_params_.hidden_size};
+  int64_t present_shape[] = {2, batch_beam_size, model_->head_count_, current_length, model_->hidden_size_};
 
   if (beam_indices.empty()) {  // Update past state
     // If this is the first iteration it'll have an empty past, swap out the non empty past states for the future
     if (inputs_[3] == empty_past_.get()) {
-      for (size_t i = 0; i < model_params_.layer_count; i++)
+      for (size_t i = 0; i < model_->layer_count_; i++)
         inputs_[i + 3] = pasts_[i].get();
     }
 
-    for (size_t i = 0; i < model_params_.layer_count; i++) {
+    for (size_t i = 0; i < model_->layer_count_; i++) {
       pasts_[i] = std::move(presents_[i]);
       inputs_[i + 3] = pasts_[i].get();
 
@@ -257,7 +242,7 @@ void Gpt_Cuda::UpdateInputs(std::span<const int32_t> next_tokens, std::span<cons
       outputs_[i + 1] = presents_[i].get();
     }
   } else {
-    for (size_t i = 0; i < model_params_.layer_count; i++) {
+    for (size_t i = 0; i < model_->layer_count_; i++) {
       PickPastState(i, beam_indices);
 
       presents_[i] = OrtValue::CreateTensor<float>(*allocator_cuda_, present_shape, std::size(present_shape));
@@ -288,8 +273,8 @@ void Gpt_Cuda::PickPastState(size_t index, std::span<const int32_t> beam_indices
 
     std::span<ScoreType> past_key = past_span.subspan(j * block_size_per_beam, block_size_per_beam);
     std::span<ScoreType> past_value = past_span.subspan(past_key_size + j * block_size_per_beam, block_size_per_beam);
-    cudaMemcpyAsync(past_key.data(), present_key.data(), present_key.size_bytes(), cudaMemcpyDeviceToDevice, cuda_stream_);
-    cudaMemcpyAsync(past_value.data(), present_value.data(), present_value.size_bytes(), cudaMemcpyDeviceToDevice, cuda_stream_);
+    cudaMemcpyAsync(past_key.data(), present_key.data(), present_key.size_bytes(), cudaMemcpyDeviceToDevice, model_->cuda_stream_);
+    cudaMemcpyAsync(past_value.data(), present_value.data(), present_value.size_bytes(), cudaMemcpyDeviceToDevice, model_->cuda_stream_);
   }
 
   pasts_[index] = std::move(past);

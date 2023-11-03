@@ -3,20 +3,16 @@
 
 namespace Generators {
 
-struct Gpt {
+struct Gpt_State {
 
-  Gpt(OrtEnv& ort_env, const ORTCHAR_T* decode_path);
+  Gpt_State(Gpt_Model& model, std::span<int32_t> sequence_lengths, const SearchParams& params);
 
-  void CreateInputs(std::span<int32_t> sequence_lengths, const SearchParams& params);
-  std::span<const ScoreType> GetLogits();
-  int GetVocabSize() const { return model_params_.vocab_size; }
-  void Run(std::span<const int32_t> next_tokens, std::span<const int32_t> next_indices, int current_length);
+  std::span<ScoreType> Run(int current_length, std::span<const int32_t> next_tokens, std::span<const int32_t> next_indices = {});
 
-private:
+ private:
   void UpdateInputs(std::span<const int32_t> next_tokens, std::span<const int32_t> beam_indices, int current_length);
   void PickPastState(OrtAllocator& allocator, size_t index, std::span<const int32_t> beam_indices);
 
-  GptModelParams model_params_;
   SearchParams search_params_;
   bool first_run_{true};
 
@@ -24,8 +20,8 @@ private:
   Ort::IAllocatorUniquePtr<int32_t> next_positions_buffer_;
   std::unique_ptr<OrtValue> next_positions_tensor_; // Tensor of the 'next_position_' buffer
 
-  // Sessions
-  std::unique_ptr<OrtSession> session_decode_;
+  // Model
+  Gpt_Model* model_;
 
   // Inputs
   std::unique_ptr<OrtValue> input_ids_, expanded_input_ids_;

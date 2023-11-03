@@ -50,6 +50,8 @@ struct GreedySearch_Cuda : Search_Cuda {
   std::span<int32_t> GetNextTokens();
 
   void SelectTop();
+  void SampleTopK(int k, float t) { assert(false); }
+  void SampleTopP(float p, float t) { assert(false);  }
 
  private:
   void CheckForEOS();

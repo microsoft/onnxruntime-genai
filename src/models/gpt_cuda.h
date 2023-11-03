@@ -5,26 +5,20 @@ namespace Generators {
 
 struct Gpt_Cuda {
 
-  Gpt_Cuda(OrtEnv& ort_env, const ORTCHAR_T* decode_path, cudaStream_t cuda_stream);
+  Gpt_Cuda(Gpt_Model& model, std::span<int32_t> sequence_lengths, const SearchParams& search_params);
 
-  void CreateInputs(std::span<int32_t> sequence_lengths, const SearchParams& params);
-  std::span<const ScoreType> GetLogits();
-  int GetVocabSize() { return model_params_.vocab_size; }
-  void Run(std::span<const int32_t> next_tokens, std::span<const int32_t> next_indices, int current_length);
+  std::span<ScoreType> Run(int current_length, std::span<const int32_t> next_tokens, std::span<const int32_t> next_indices = {});
 
  private:
   void UpdateInputs(std::span<const int32_t> next_tokens, std::span<const int32_t> beam_indices, int current_length);
   void PickPastState(size_t index, std::span<const int32_t> beam_indices);
 
-  GptModelParams model_params_;
   SearchParams search_params_;
   bool first_run_{true};
 
   Ort::Allocator& allocator_cpu_;
   std::unique_ptr<OrtMemoryInfo> memory_info_cuda_;
   std::unique_ptr<Ort::Allocator> allocator_cuda_;
-
-  cudaStream_t cuda_stream_;
 
   bool past_present_share_buffer_{};  // NYI
 
@@ -33,7 +27,7 @@ struct Gpt_Cuda {
   std::unique_ptr<OrtValue> next_positions_tensor_;  // Tensor of the 'next_position_' buffer
 
   // Sessions
-  std::unique_ptr<OrtSession> session_decode_;
+  Gpt_Model* model_;
 
   // Inputs
   std::unique_ptr<OrtValue> input_ids_, expanded_input_ids_;

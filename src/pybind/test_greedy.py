@@ -2,25 +2,27 @@ import ort_generators as og
 import numpy as np
 from transformers import GPT2Tokenizer
 
+device_type = og.DeviceType.CPU
+# device_type = og.DeviceType.CUDA
 text = "The best hotel in bay area is"
 
 # Generate input tokens from the text prompt
 tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
 input_tokens = tokenizer.encode(text, return_tensors='np')
 
-gpt=og.Gpt_Cuda("../../python/onnx_models/gpt2.onnx")
+model=og.Gpt_Model("../../python/onnx_models/gpt2.onnx", device_type)
 
 params=og.SearchParams()
 params.max_length = 64
 params.batch_size = input_tokens.shape[0]
 params.sequence_length = input_tokens.shape[1]
 params.input_ids = input_tokens
-params.vocab_size = gpt.GetVocabSize()
+params.vocab_size = model.GetVocabSize()
 params.eos_token_id = tokenizer.eos_token_id
 params.pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else params.eos_token_id
 
-search=og.GreedySearch_Cuda(params)
-gpt.CreateInputs(search.GetSequenceLengths(), params)
+search=og.GreedySearch(params, model.DeviceType)
+state=og.Gpt_State(model, search.GetSequenceLengths(), params)
 
 print("Inputs:")
 print(input_tokens)
@@ -28,8 +30,7 @@ print("Input prompt:", text)
 
 print("Running greedy search loop...")
 while not search.IsDone():
-    gpt.Run(search.GetNextTokens(), search.GetSequenceLength())
-    search.SetLogits(gpt.GetLogits())
+    search.SetLogits(state.Run(search.GetSequenceLength(), search.GetNextTokens()))
 
     # Scoring
     # Generators::Processors::MinLength(search, 1)

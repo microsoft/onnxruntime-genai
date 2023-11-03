@@ -15,7 +15,7 @@ void DumpValues(ONNXTensorElementDataType type, const void* p_values_raw, size_t
     case Ort::TypeToTensorType<int64_t>::type: {
       auto* p_values = reinterpret_cast<const int64_t*>(p_values_raw);
       for (size_t i = 0; i < count; i++) {
-        printf("%ld ", p_values[i]);
+        printf("%Id ", p_values[i]);
       }
       break;
     }

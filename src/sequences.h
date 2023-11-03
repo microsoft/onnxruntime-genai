@@ -7,7 +7,7 @@ struct Sequences {
   Sequences(std::span<const int32_t> input_sequence, int batch_size, int beam_size, int max_length);
 
   // Returns a sequence of word IDs for a given beam index ( beam_index < batch_beam_size).
-  std::span<const int32_t> GetSequence(int batch_beam_index) const;
+  std::span<int32_t> GetSequence(int batch_beam_index);
   std::span<int32_t> GetSequences() { return sequences_; }
 
   // Returns current sequence length.
