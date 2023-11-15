@@ -21,7 +21,12 @@ Llama_Model::Llama_Model(OrtEnv& ort_env, const ORTCHAR_T* decoder_path, cudaStr
   cuda_options.user_compute_stream = cuda_stream;
   session_options->AppendExecutionProvider_CUDA(cuda_options);
 
-  session_decoder_ = OrtSession::Create(ort_env, decoder_path, session_options.get());
+  try {
+    session_decoder_ = OrtSession::Create(ort_env, decoder_path, session_options.get());
+  } catch (const Ort::Exception& e) {
+    std::cout << e.what() << std::endl;
+  }
+
   InitModelParams();
 }
 #endif
