@@ -12,8 +12,6 @@ Users can call a high level `generate()` method, or provide their own customizat
 
 ## GPT C++ Usage Example
 
-Link to below example in code here: https://github.com/RyanUnderhill/generators/blob/0b96f546474bb5cbf7a802f9b017b26cee86ec14/src/tests/tests.cpp#L122
-
     std::vector<int64_t> input_ids_shape{2, 4};
     std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
 
