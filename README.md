@@ -1,10 +1,12 @@
-# Generators
-More easily run generator models using Onnx Runtime
+# ONNX Runtime Generative AI
 
-Currently in Onnxruntime to use greedy search/beam search requires embedding the search inside the model itself through creation of a custom model per search type. This prevents users from being able to easily and dynamically modify the search as it all happens within a single Run() call of the model. This library moves the search outside of the model and lets the user be involved in every iteration of the search.
+Run generative AI models with ONNX Runtime.
 
-* Tools to load models like Gpt/T5/Whisper
-* Search techniques like greedy/beam search to generate better token sequences
+This library provides the generative AI loop for ONNX models run with ONNX Runtime, including logits processing, search and sampling, and KV cache management.
+
+Users can call a high level `generate()` method, or provide their own customizations of the loop.
+
+* Search techniques like greedy/beam search to generate token sequences
 * Built in scoring tools like repetition penalties
 * Easy custom scoring
 
