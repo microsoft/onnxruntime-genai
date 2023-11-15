@@ -1,4 +1,4 @@
-import ort_generators as og
+import onnxruntime_genai as og
 import numpy as np
 from transformers import GPT2Tokenizer
 

@@ -117,10 +117,11 @@ target_include_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort)
 target_link_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort)
 target_link_libraries(Tests PRIVATE Generators Models ${ONNXRUNTIME_LIB})
 
-pybind11_add_module(ort_generators ${pybind_srcs})
-target_include_directories(ort_generators PRIVATE ${CMAKE_SOURCE_DIR}/ort)
-target_link_directories(ort_generators PRIVATE ${CMAKE_SOURCE_DIR}/ort)
-target_link_libraries(ort_generators PRIVATE Generators Models ${ONNXRUNTIME_LIB})
+pybind11_add_module(pybind ${pybind_srcs})
+target_include_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort)
+target_link_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort)
+target_link_libraries(pybind PRIVATE Generators Models ${ONNXRUNTIME_LIB})
+set_target_properties(pybind PROPERTIES OUTPUT_NAME "onnxruntime_genai")
 
 # Microsoft.GSL::GSL
 # target_include_directories(Generators PRIVATE ${safeint_SOURCE_DIR})
@@ -130,7 +131,7 @@ if(MSVC)
     target_compile_options(Models PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/MP>")
     target_compile_options(Generators PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/MP>")
     target_compile_options(Tests PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/MP>")
-    target_compile_options(ort_generators PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/MP>")
+    target_compile_options(pybind PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/MP>")
 endif()
 
  # Copy the onnxruntime binaries into the build folder so it's found on launch

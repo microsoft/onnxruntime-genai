@@ -417,7 +417,7 @@ struct PyLlama_State {
   RoamingArray<float> py_logits_;
 };
 
-PYBIND11_MODULE(ort_generators, m) {
+PYBIND11_MODULE(onnxruntime_genai, m) {
   m.doc() = R"pbdoc(
         Ort Generators library
         ----------------------
