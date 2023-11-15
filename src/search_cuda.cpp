@@ -43,6 +43,7 @@ Search_Cuda::Search_Cuda(const SearchParams_Cuda& params)
   cudaMemsetAsync(next_token_scores_.data(), 0, next_token_scores_.size_bytes(), params_.cuda_stream);
 
   done_cpu_ = CudaMallocHostArray<bool>(1);
+  *done_cpu_ = false;
 }
 
 GreedySearch_Cuda::GreedySearch_Cuda(const SearchParams_Cuda& params)

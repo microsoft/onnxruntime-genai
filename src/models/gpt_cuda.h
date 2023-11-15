@@ -14,6 +14,7 @@ struct Gpt_Cuda {
   template<typename ScoreType> void PickPastState(size_t index, std::span<const int32_t> beam_indices);
   void PickPastState(size_t index, std::span<const int32_t> beam_indices);
 
+  Gpt_Model* model_;
   SearchParams search_params_;
   bool first_run_{true};
 
@@ -26,9 +27,6 @@ struct Gpt_Cuda {
   std::span<int32_t> next_positions_;  // shape (batch_size, num_beams). Next position value for position_ids.
   Ort::IAllocatorUniquePtr<int32_t> next_positions_buffer_;
   std::unique_ptr<OrtValue> next_positions_tensor_;  // Tensor of the 'next_position_' buffer
-
-  // Sessions
-  Gpt_Model* model_;
 
   // Inputs
   std::unique_ptr<OrtValue> input_ids_, expanded_input_ids_;

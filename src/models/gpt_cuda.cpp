@@ -37,10 +37,9 @@ static void ExpandInputs(const OrtValue& input, int num_beams, OrtAllocator& all
 Gpt_Cuda::Gpt_Cuda(Gpt_Model& model, std::span<int32_t> sequence_lengths, const SearchParams& search_params)
  : model_{&model},
   search_params_{search_params},
-  allocator_cpu_{Ort::Allocator::GetWithDefaultOptions()}
-{
-  memory_info_cuda_ = OrtMemoryInfo::Create("Cuda", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-  allocator_cuda_ = Ort::Allocator::Create(*model_->session_decoder_, *memory_info_cuda_);
+  allocator_cpu_{Ort::Allocator::GetWithDefaultOptions()},
+  memory_info_cuda_{OrtMemoryInfo::Create("Cuda", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault)},
+  allocator_cuda_{Ort::Allocator::Create(*model_->session_decoder_, *memory_info_cuda_)} {
 
   // Allocate position_ids and attention_mask based on shape of input_ids
   auto element_type = Ort::TypeToTensorType<int32_t>::type;

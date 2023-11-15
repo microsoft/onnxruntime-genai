@@ -11,15 +11,13 @@ struct Llama_Cuda {
 private:
   void UpdateInputs(std::span<const int32_t> next_tokens, int current_length);
 
+  Llama_Model* model_;
   SearchParams search_params_;
   bool first_run_{true};
 
   Ort::Allocator& allocator_cpu_;
   std::unique_ptr<OrtMemoryInfo> memory_info_cuda_;
   std::unique_ptr<Ort::Allocator> allocator_cuda_;
-
-  // Model
-  Llama_Model* model_;
 
   bool past_present_share_buffer_{};  // NYI
 

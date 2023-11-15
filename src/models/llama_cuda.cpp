@@ -8,22 +8,21 @@
 namespace Generators {
 
 void ConvertFp16ToFp32(OrtAllocator& allocator, cudaStream_t stream, OrtValue& in, std::unique_ptr<OrtValue>& p_out) {
-
   auto shape_info = in.GetTensorTypeAndShapeInfo();
   auto shape = shape_info->GetShape();
-  assert(shape_info->GetElementType()==Ort::TypeToTensorType<Ort::Float16_t>::type);
+  assert(shape_info->GetElementType() == Ort::TypeToTensorType<Ort::Float16_t>::type);
 
-  bool allocate_p_out=p_out==nullptr;
+  bool allocate_p_out = p_out == nullptr;
   if (p_out) {
     auto out_shape_info = p_out->GetTensorTypeAndShapeInfo();
     auto out_shape = out_shape_info->GetShape();
-    allocate_p_out=shape!=out_shape;
+    allocate_p_out = shape != out_shape;
   }
 
   if (allocate_p_out)
     p_out = OrtValue::CreateTensor<float>(allocator, shape.data(), shape.size());
 
-  int count=static_cast<int>(shape_info->GetElementCount());
+  int count = static_cast<int>(shape_info->GetElementCount());
   auto* fp16 = in.GetTensorData<uint16_t>();
   auto* fp32 = p_out->GetTensorMutableData<float>();
 
@@ -32,10 +31,10 @@ void ConvertFp16ToFp32(OrtAllocator& allocator, cudaStream_t stream, OrtValue& i
 
 Llama_Cuda::Llama_Cuda(Llama_Model& model, std::span<int32_t> sequence_lengths, const SearchParams& search_params)
     : model_{&model},
+      search_params_{search_params},
       allocator_cpu_{Ort::Allocator::GetWithDefaultOptions()},
-      search_params_{search_params} {
-  memory_info_cuda_ = OrtMemoryInfo::Create("Cuda", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-  allocator_cuda_ = Ort::Allocator::Create(*model_->session_decoder_, *memory_info_cuda_);
+      memory_info_cuda_{OrtMemoryInfo::Create("Cuda", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault)},
+      allocator_cuda_{Ort::Allocator::Create(*model_->session_decoder_, *memory_info_cuda_)} {
 
   // Allocate position_ids and attention_mask based on shape of input_ids
   auto element_type = Ort::TypeToTensorType<int64_t>::type;
@@ -171,7 +170,7 @@ std::span<ScoreType> Llama_Cuda::Run(int current_length, std::span<const int32_t
   if (model_->score_type_ == Ort::TypeToTensorType<Ort::Float16_t>::type) {
     ConvertFp16ToFp32(*allocator_cuda_, model_->cuda_stream_, *logits_, logits32_);
     return {logits32_->GetTensorMutableData<float>(), type_shape->GetElementCount()};
-   }
+  }
 
   return {logits_->GetTensorMutableData<float>(), type_shape->GetElementCount()};
 }

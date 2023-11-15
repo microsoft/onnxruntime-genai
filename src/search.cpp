@@ -197,7 +197,7 @@ void SoftMax(std::span<ScoreType> scores, float temperature) {
   ScoreType max_score = *std::max_element(scores.begin(), scores.end());
 
   // Subtract max score and scale by temperature
-  std::transform(scores.begin(), scores.end(), scores.begin(), [max_score, temperature](ScoreType score) { return std::expf((score - max_score) / temperature); });
+  std::transform(scores.begin(), scores.end(), scores.begin(), [max_score, temperature](ScoreType score) { return std::exp((score - max_score) / temperature); });
 
   // Compute sum of exponentials
   ScoreType exp_sum = std::accumulate(scores.begin(), scores.end(), 0.0f);
