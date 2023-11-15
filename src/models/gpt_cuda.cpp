@@ -271,14 +271,14 @@ void Gpt_Cuda::PickPastState(size_t index, std::span<const int32_t> beam_indices
   // Create a tensor with same shape.
   auto past = OrtValue::CreateTensor<ScoreType>(*allocator_cuda_, past_shape.data(), past_shape.size());
 
-  std::span<ScoreType> past_span = std::span<ScoreType>(past->GetTensorMutableData<ScoreType>(), past_shape_info->GetElementCount());
-  std::span<const ScoreType> present_span = std::span<const ScoreType>(present.GetTensorData<ScoreType>(), past_shape_info->GetElementCount());
+  auto past_span = std::span<ScoreType>{past->GetTensorMutableData<ScoreType>(), past_shape_info->GetElementCount()};
+  auto present_span = std::span<const ScoreType>{present.GetTensorData<ScoreType>(), past_shape_info->GetElementCount()};
   for (size_t j = 0; j < beam_indices.size(); j++) {
     int32_t beam_index = beam_indices[j];
-    std::span<const ScoreType> present_key = present_span.subspan(beam_index * block_size_per_beam, block_size_per_beam);
-    std::span<const ScoreType> present_value = present_span.subspan(past_key_size + beam_index * block_size_per_beam, block_size_per_beam);
+    auto present_key = present_span.subspan(beam_index * block_size_per_beam, block_size_per_beam);
+    auto present_value = present_span.subspan(past_key_size + beam_index * block_size_per_beam, block_size_per_beam);
 
-    std::span<ScoreType> past_key = past_span.subspan(j * block_size_per_beam, block_size_per_beam);
+    auto past_key = past_span.subspan(j * block_size_per_beam, block_size_per_beam);
     std::span<ScoreType> past_value = past_span.subspan(past_key_size + j * block_size_per_beam, block_size_per_beam);
     cudaMemcpyAsync(past_key.data(), present_key.data(), present_key.size_bytes(), cudaMemcpyDeviceToDevice, model_->cuda_stream_);
     cudaMemcpyAsync(past_value.data(), present_value.data(), present_value.size_bytes(), cudaMemcpyDeviceToDevice, model_->cuda_stream_);
