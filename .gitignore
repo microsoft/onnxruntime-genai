@@ -1,0 +1,8 @@
+﻿# Files to tell git to ignore
+
+/src/.vs
+/ort
+/build
+/test_models
+/cache_models
+/*.csv
