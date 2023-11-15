@@ -269,7 +269,7 @@ void Gpt_Cuda::PickPastState(size_t index, std::span<const int32_t> beam_indices
   auto past_key_size = past_shape[1] * past_shape[2] * past_shape[3] * past_shape[4];
 
   // Create a tensor with same shape.
-  auto past = OrtValue::CreateTensor<ScoreType>(*allocator_cuda_, past_shape.data(), past_shape.size());
+  std::unique_ptr<OrtValue> past = OrtValue::CreateTensor<ScoreType>(*allocator_cuda_, past_shape.data(), past_shape.size());
 
   auto past_span = std::span<ScoreType>{past->GetTensorMutableData<ScoreType>(), past_shape_info->GetElementCount()};
   auto present_span = std::span<const ScoreType>{present.GetTensorData<ScoreType>(), past_shape_info->GetElementCount()};
