@@ -7,12 +7,35 @@
 
 namespace Generators {
 
+void ConvertFp16ToFp32(OrtAllocator& allocator, cudaStream_t stream, OrtValue& in, std::unique_ptr<OrtValue>& p_out) {
+
+  auto shape_info = in.GetTensorTypeAndShapeInfo();
+  auto shape = shape_info->GetShape();
+  assert(shape_info->GetElementType()==Ort::TypeToTensorType<Ort::Float16_t>::type);
+
+  bool allocate_p_out=p_out==nullptr;
+  if (p_out) {
+    auto out_shape_info = p_out->GetTensorTypeAndShapeInfo();
+    auto out_shape = out_shape_info->GetShape();
+    allocate_p_out=shape!=out_shape;
+  }
+
+  if (allocate_p_out)
+    p_out = OrtValue::CreateTensor<float>(allocator, shape.data(), shape.size());
+
+  int count=static_cast<int>(shape_info->GetElementCount());
+  auto* fp16 = in.GetTensorData<uint16_t>();
+  auto* fp32 = p_out->GetTensorMutableData<float>();
+
+  cuda::LaunchFp16ToFp32(fp16, fp32, count, stream);
+}
+
 Llama_Cuda::Llama_Cuda(Llama_Model& model, std::span<int32_t> sequence_lengths, const SearchParams& search_params)
     : model_{&model},
       allocator_cpu_{Ort::Allocator::GetWithDefaultOptions()},
       search_params_{search_params} {
   memory_info_cuda_ = OrtMemoryInfo::Create("Cuda", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-  allocator_cuda_ = Ort::Allocator::Create(*session_decode_, *memory_info_cuda_);
+  allocator_cuda_ = Ort::Allocator::Create(*model_->session_decoder_, *memory_info_cuda_);
 
   // Allocate position_ids and attention_mask based on shape of input_ids
   auto element_type = Ort::TypeToTensorType<int64_t>::type;
@@ -70,10 +93,9 @@ Llama_Cuda::Llama_Cuda(Llama_Model& model, std::span<int32_t> sequence_lengths, 
 
   output_name_strings_.push_back("logits");
 
-  auto past_type = Ort::TypeToTensorType<ScoreType>::type;
   // Initialize empty past state
   int64_t empty_past_shape[] = {search_params_.batch_size * search_params_.num_beams, model_->head_count_, 0, model_->hidden_size_};
-  empty_past_ = OrtValue::CreateTensor(*allocator_cuda_, empty_past_shape, std::size(empty_past_shape), past_type);
+  empty_past_ = OrtValue::CreateTensor(*allocator_cuda_, empty_past_shape, std::size(empty_past_shape), model_->score_type_);
   for (int i = 0; i < model_->layer_count_ * 2; i++)
     inputs_.push_back(empty_past_.get());
 
@@ -94,7 +116,7 @@ Llama_Cuda::Llama_Cuda(Llama_Model& model, std::span<int32_t> sequence_lengths, 
   // Allocate space for logits (only works if we know the shape)
   {
     int64_t logits_shape[] = {search_params_.batch_size * search_params_.num_beams, model_->logits_uses_seq_len_ ? input_ids_shape[1] : 1, model_->vocab_size_};
-    logits_ = OrtValue::CreateTensor(*allocator_cuda_, logits_shape, std::size(logits_shape), past_type);
+    logits_ = OrtValue::CreateTensor(*allocator_cuda_, logits_shape, std::size(logits_shape), model_->score_type_);
     outputs_.push_back(logits_.get());
   }
 
@@ -103,9 +125,9 @@ Llama_Cuda::Llama_Cuda(Llama_Model& model, std::span<int32_t> sequence_lengths, 
     outputs_.reserve(model_->layer_count_ * 2);
 
     for (int i = 0; i < model_->layer_count_; ++i) {
-      presents_.push_back(OrtValue::CreateTensor(*allocator_cuda_, present_shape, std::size(present_shape), past_type));
+      presents_.push_back(OrtValue::CreateTensor(*allocator_cuda_, present_shape, std::size(present_shape), model_->score_type_));
       outputs_.push_back(presents_.back().get());
-      presents_.push_back(OrtValue::CreateTensor(*allocator_cuda_, present_shape, std::size(present_shape), past_type));
+      presents_.push_back(OrtValue::CreateTensor(*allocator_cuda_, present_shape, std::size(present_shape), model_->score_type_));
       outputs_.push_back(presents_.back().get());
 
       char string[32];
@@ -137,7 +159,7 @@ std::span<ScoreType> Llama_Cuda::Run(int current_length, std::span<const int32_t
 #endif
 
   try {
-    session_decode_->Run(nullptr, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
+    model_->session_decoder_->Run(nullptr, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
   } catch (const Ort::Exception& e) {
     std::cout << e.what() << std::endl;
   }
@@ -146,7 +168,12 @@ std::span<ScoreType> Llama_Cuda::Run(int current_length, std::span<const int32_t
   auto shape = type_shape->GetShape();
   assert(type_shape->GetShape().size() == 3);
 
-  return {logits_->GetTensorMutableData<ScoreType>(), type_shape->GetElementCount()};
+  if (model_->score_type_ == Ort::TypeToTensorType<Ort::Float16_t>::type) {
+    ConvertFp16ToFp32(*allocator_cuda_, model_->cuda_stream_, *logits_, logits32_);
+    return {logits32_->GetTensorMutableData<float>(), type_shape->GetElementCount()};
+   }
+
+  return {logits_->GetTensorMutableData<float>(), type_shape->GetElementCount()};
 }
 
 void Llama_Cuda::UpdateInputs(std::span<const int32_t> next_tokens, int current_length) {
@@ -187,7 +214,7 @@ void Llama_Cuda::UpdateInputs(std::span<const int32_t> next_tokens, int current_
   // Update logits
   if (model_->logits_uses_seq_len_) {
     int64_t logits_shape[] = {search_params_.batch_size * search_params_.num_beams, 1, model_->vocab_size_};
-    logits_ = OrtValue::CreateTensor(*allocator_cuda_, logits_shape, std::size(logits_shape), Ort::TypeToTensorType<ScoreType>::type);
+    logits_ = OrtValue::CreateTensor(*allocator_cuda_, logits_shape, std::size(logits_shape), model_->score_type_);
     outputs_[0] = logits_.get();
   }
 
@@ -198,7 +225,7 @@ void Llama_Cuda::UpdateInputs(std::span<const int32_t> next_tokens, int current_
     pasts_[i] = std::move(presents_[i]);
     inputs_[i + 3] = pasts_[i].get();
 
-    presents_[i] = OrtValue::CreateTensor<float>(*allocator_cuda_, present_shape, std::size(present_shape));
+    presents_[i] = OrtValue::CreateTensor(*allocator_cuda_, present_shape, std::size(present_shape), model_->score_type_);
     outputs_[i + 1] = presents_[i].get();
   }
 }

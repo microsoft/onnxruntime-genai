@@ -5,6 +5,18 @@
 namespace Generators {
 static constexpr size_t c_value_count = 10; // Dump this many values from the start of a tensor
 
+const char* TypeToString(ONNXTensorElementDataType type) {
+  switch (type) {
+    case Ort::TypeToTensorType<int64_t>::type: return "int64";
+    case Ort::TypeToTensorType<int32_t>::type: return "int32";
+    case Ort::TypeToTensorType<float>::type: return "float32";
+    case Ort::TypeToTensorType<Ort::Float16_t>::type: return "float16";
+    default:
+      assert(false);
+      return "(please add to list)";
+  }
+}
+
 void DumpValues(ONNXTensorElementDataType type, const void* p_values_raw, size_t count) {
   if (count==0)
     return;
@@ -35,6 +47,14 @@ void DumpValues(ONNXTensorElementDataType type, const void* p_values_raw, size_t
       }
       break;
     }
+
+    case Ort::TypeToTensorType<Ort::Float16_t>::type: {
+      auto* p_values = reinterpret_cast<const Ort::Float16_t*>(p_values_raw);
+      for (size_t i = 0; i < count; i++) {
+        printf("%f ", Float16ToFloat32(p_values[i].value));
+      }
+      break;
+    }
   }
   printf("\r\n");
 }
@@ -46,6 +66,7 @@ void DumpTensor(OrtValue* value, bool dump_value) {
   for (auto dim : shape)
     printf("%d ", int(dim));
   printf("}");
+  printf(" Type: %s", TypeToString(type_info->GetElementType()));
 
   size_t element_count = std::min<size_t>(type_info->GetElementCount(), c_value_count);
   if (!dump_value)
@@ -68,6 +89,7 @@ void DumpTensor(OrtValue* value, bool dump_value) {
         case Ort::TypeToTensorType<int64_t>::type: element_size = sizeof(int64_t); break;
         case Ort::TypeToTensorType<int32_t>::type: element_size = sizeof(int32_t); break;
         case Ort::TypeToTensorType<float>::type: element_size = sizeof(float); break;
+        case Ort::TypeToTensorType<Ort::Float16_t>::type: element_size = sizeof(Ort::Float16_t); break;
         default: assert(false); break;
       }
       auto cpu_copy=std::make_unique<uint8_t[]>(element_size*element_count);
@@ -99,6 +121,14 @@ void DumpMemory(const char* name, std::span<const float> data) {
   printf("%s  ", name);
   for (auto v : data) {
     printf("%f ", v);
+  }
+  printf("\r\n");
+}
+
+void DumpMemory(const char* name, std::span<const Ort::Float16_t> data) {
+  printf("%s  ", name);
+  for (auto v : data) {
+    printf("%f ", Float16ToFloat32(v.value));
   }
   printf("\r\n");
 }

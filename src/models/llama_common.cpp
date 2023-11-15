@@ -28,11 +28,13 @@ Llama_Model::Llama_Model(OrtEnv& ort_env, const ORTCHAR_T* decoder_path, cudaStr
 
 void Llama_Model::InitModelParams() {
   // We could use this to determine the vocabulary size and if the logits has a width of 1
-  auto logits_shape = session_decoder_->GetOutputTypeInfo(0)->GetTensorTypeAndShapeInfo().GetShape();
+  auto& logits_type_info = session_decoder_->GetOutputTypeInfo(0)->GetTensorTypeAndShapeInfo();
+  auto logits_shape = logits_type_info.GetShape();
   assert(logits_shape.size() == 3);
   logits_uses_seq_len_ = logits_shape[1] == -1;
   vocab_size_ = static_cast<int>(logits_shape[2]);
   layer_count_ = (static_cast<int>(session_decoder_->GetOutputCount()) - 1) / 2;
+  score_type_ = logits_type_info.GetElementType();
 
   auto past_shape = session_decoder_->GetInputTypeInfo(3)->GetTensorTypeAndShapeInfo().GetShape();
   head_count_ = static_cast<int>(past_shape[1]);

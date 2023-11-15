@@ -20,6 +20,7 @@ struct Llama_Model {
   int hidden_size_{};
   int layer_count_{};
   bool logits_uses_seq_len_{};  // Logits shape is [... seq_len, vocab_size ] vs [... 1, vocab_size ]
+  ONNXTensorElementDataType score_type_;
 
  private:
   void InitModelParams();

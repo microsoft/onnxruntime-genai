@@ -38,6 +38,7 @@ Gpt_State::Gpt_State(Gpt_Model& model, std::span<int32_t> sequence_lengths, cons
  : model_{&model},
   search_params_{search_params} {
 
+  assert(model.score_type_ == Ort::TypeToTensorType<float>::type);
   int64_t input_ids_shape[] = {search_params_.batch_size, search_params_.sequence_length};
 
   // Allocate position_ids and attention_mask based on shape of input_ids

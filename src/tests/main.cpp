@@ -7,14 +7,12 @@
 
 extern std::unique_ptr<OrtEnv> g_ort_env;
 
-void Test_GreedySearchTest_GptGreedySearchFp32();
-void Test_BeamSearchTest_GptBeamSearchFp32();
+void Test_GreedySearch_Gpt_Fp32();
+void Test_BeamSearch_Gpt_Fp32();
 
 #if USE_CUDA
-void LaunchTest(float* test, cudaStream_t stream);
-
-void Test_GreedySearchTest_GptGreedySearchFp32_Cuda();
-void Test_BeamSearchTest_GptBeamSearchFp32_Cuda();
+void Test_GreedySearch_Gpt_Cuda();
+void Test_BeamSearch_Gpt_Cuda();
 #endif
 
 int main()
@@ -27,12 +25,12 @@ int main()
   std::cout << "done" << std::endl;
 
   try {
-    Test_GreedySearchTest_GptGreedySearchFp32();
-    Test_BeamSearchTest_GptBeamSearchFp32();
+    Test_GreedySearch_Gpt_Fp32();
+    Test_BeamSearch_Gpt_Fp32();
 
 #if USE_CUDA
-    Test_GreedySearchTest_GptGreedySearchFp32_Cuda();
-    Test_BeamSearchTest_GptBeamSearchFp32_Cuda();
+    Test_GreedySearch_Gpt_Cuda();
+    Test_BeamSearch_Gpt_Cuda();
 #endif
   }
   catch (const std::exception& e)

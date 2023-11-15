@@ -15,7 +15,64 @@
 
 std::unique_ptr<OrtEnv> g_ort_env;
 
-void Test_BeamSearchTest_GptBeamSearchFp32() {
+// To generate this file:
+// python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
+// And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
+static const std::pair<const ORTCHAR_T*, const char*> c_tiny_gpt2_model_paths[] = {
+    {ORT_TSTR_ON_MACRO(MODEL_PATH "hf-internal-testing/tiny-random-gpt2_past_fp32.onnx"), "fp32"},
+    {ORT_TSTR_ON_MACRO(MODEL_PATH "hf-internal-testing/tiny-random-gpt2_past_fp16.onnx"), "fp16"},
+};
+
+
+void Test_GreedySearch_Gpt_Fp32() {
+  std::cout << "Test_GreedySearch_Gpt fp32" << std::flush;
+
+  std::vector<int64_t> input_ids_shape{2, 4};
+  std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
+
+  std::vector<int32_t> expected_output{
+      0, 0, 0, 52, 204, 204, 204, 204, 204, 204,
+      0, 0, 195, 731, 731, 114, 114, 114, 114, 114};
+
+  // To generate this file:
+  // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
+  // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
+
+  Generators::Gpt_Model model(*g_ort_env, ORT_TSTR_ON_MACRO(MODEL_PATH "hf-internal-testing/tiny-random-gpt2_past_fp32.onnx"));
+
+  Generators::SearchParams params;
+  params.max_length = 10;
+  params.batch_size = static_cast<int>(input_ids_shape[0]);
+  params.sequence_length = static_cast<int>(input_ids_shape[1]);
+  params.input_ids = input_ids;
+  params.vocab_size = model.GetVocabSize();
+  params.eos_token_id = params.pad_token_id = 98;
+
+  Generators::GreedySearch search{params};
+  Generators::Gpt_State gpt{model, search.sequence_lengths_, params};
+
+  while (!search.IsDone()) {
+    search.SetLogits(gpt.Run(search.GetSequenceLength(), search.GetNextTokens()));
+
+    // Scoring
+    Generators::Processors::MinLength(search, 1);
+    Generators::Processors::RepetitionPenalty(search, 1.0f);
+
+    search.SelectTop();
+  }
+
+  // Verify outputs match expected outputs
+  for (int i = 0; i < search.params_.batch_size; i++) {
+    auto sequence = search.sequences_.GetSequence(i);
+    auto* expected_output_start = &expected_output[i * search.params_.max_length];
+    ASSERT_TRUE(std::equal(expected_output_start, expected_output_start+search.params_.max_length, sequence.begin(), sequence.end()));
+  }
+
+  std::cout << " - complete\r\n";
+}
+
+void Test_BeamSearch_Gpt_Fp32() {
+  std::cout << "Test_BeamSearch_Gpt fp32" << std::flush;
 
   int32_t max_length{20};
   float length_penalty{1.0f};
@@ -60,7 +117,7 @@ void Test_BeamSearchTest_GptBeamSearchFp32() {
     search.SelectTop();
   }
 
-  std::vector<int32_t> output_sequence(search.params_.batch_size*max_length);
+  std::vector<int32_t> output_sequence(search.params_.batch_size * max_length);
   search.Finalize(1, output_sequence, {});
 
   // Verify outputs match expected outputs
@@ -70,57 +127,13 @@ void Test_BeamSearchTest_GptBeamSearchFp32() {
     ASSERT_TRUE(std::equal(expected_output_start, expected_output_start + search.params_.max_length, sequence.begin(), sequence.end()));
   }
 
-  std::cout << "Test_BeamSearchTest_GptBeamSearchFp32 complete\r\n";
-}
-
-void Test_GreedySearchTest_GptGreedySearchFp32() {
-
-  std::vector<int64_t> input_ids_shape{2, 4};
-  std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
-
-  std::vector<int32_t> expected_output{
-      0, 0, 0, 52, 204, 204, 204, 204, 204, 204,
-      0, 0, 195, 731, 731, 114, 114, 114, 114, 114};
-
-  // To generate this file:
-  // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
-  // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
-
-  Generators::Gpt_Model model(*g_ort_env, ORT_TSTR_ON_MACRO(MODEL_PATH "hf-internal-testing/tiny-random-gpt2_past_fp32.onnx"));
-
-  Generators::SearchParams params;
-  params.max_length = 10;
-  params.batch_size = static_cast<int>(input_ids_shape[0]);
-  params.sequence_length = static_cast<int>(input_ids_shape[1]);
-  params.input_ids = input_ids;
-  params.vocab_size = model.GetVocabSize();
-  params.eos_token_id = params.pad_token_id = 98;
-
-  Generators::GreedySearch search{params};
-  Generators::Gpt_State gpt{model, search.sequence_lengths_, params};
-
-  while (!search.IsDone()) {
-    search.SetLogits(gpt.Run(search.GetSequenceLength(), search.GetNextTokens()));
-
-    // Scoring
-    Generators::Processors::MinLength(search, 1);
-    Generators::Processors::RepetitionPenalty(search, 1.0f);
-
-    search.SelectTop();
-  }
-
-  // Verify outputs match expected outputs
-  for (int i = 0; i < search.params_.batch_size; i++) {
-    auto sequence = search.sequences_.GetSequence(i);
-    auto* expected_output_start = &expected_output[i * search.params_.max_length];
-    ASSERT_TRUE(std::equal(expected_output_start, expected_output_start+search.params_.max_length, sequence.begin(), sequence.end()));
-  }
-
-  std::cout << "Test_GreedySearchTest_GptGreedySearchFp32 complete\r\n";
+  std::cout << " - complete\r\n";
 }
 
 #if USE_CUDA
-void Test_GreedySearchTest_GptGreedySearchFp32_Cuda() {
+void Test_GreedySearch_Gpt_Cuda(const ORTCHAR_T *model_path, const char* model_label) {
+  std::cout << "Test_GreedySearch_Gpt_Cuda " << model_label << std::flush;
+
   std::vector<int64_t> input_ids_shape{2, 4};
   std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
 
@@ -136,10 +149,7 @@ void Test_GreedySearchTest_GptGreedySearchFp32_Cuda() {
   cudaStream_t cuda_stream;
   cudaStreamCreate(&cuda_stream);
 
-  // To generate this file:
-  // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
-  // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
-  Generators::Gpt_Model model{*g_ort_env, ORT_TSTR_ON_MACRO(MODEL_PATH "hf-internal-testing/tiny-random-gpt2_past_fp32.onnx"), cuda_stream};
+  Generators::Gpt_Model model{*g_ort_env, model_path, cuda_stream};
 
   Generators::SearchParams_Cuda params;
   params.batch_size = static_cast<int>(input_ids_shape[0]);
@@ -172,10 +182,17 @@ void Test_GreedySearchTest_GptGreedySearchFp32_Cuda() {
     ASSERT_TRUE(std::equal(expected_output_start, expected_output_start + search.params_.max_length, sequence.get(), sequence.get()+max_length));
   }
 
-  std::cout << "Test_GreedySearchTest_GptGreedySearchFp32_Cuda complete\r\n";
+  std::cout << " - complete\r\n";
 }
 
-void Test_BeamSearchTest_GptBeamSearchFp32_Cuda() {
+void Test_GreedySearch_Gpt_Cuda() {
+  for (auto model_path : c_tiny_gpt2_model_paths)
+    Test_GreedySearch_Gpt_Cuda(model_path.first, model_path.second);
+}
+
+void Test_BeamSearch_Gpt_Cuda(const ORTCHAR_T* model_path, const char* model_label) {
+  std::cout << "Test_BeamSearch_Gpt_Cuda " << model_label << std::flush;
+
   int32_t max_length{20};
   float length_penalty{1.0f};
 
@@ -200,8 +217,7 @@ void Test_BeamSearchTest_GptBeamSearchFp32_Cuda() {
   // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2
   //        --output tiny_gpt2_beamsearch_fp16.onnx --use_gpu --max_length 20
   // (with separate_gpt2_decoder_for_init_run set to False as it is now set to True by default)
-
-  Generators::Gpt_Model model(*g_ort_env, ORT_TSTR_ON_MACRO(MODEL_PATH "hf-internal-testing/tiny-random-gpt2_past_fp32.onnx"), cuda_stream);
+  Generators::Gpt_Model model(*g_ort_env, model_path, cuda_stream);
 
   Generators::SearchParams_Cuda params;
   params.batch_size = static_cast<int>(input_ids_shape[0]);
@@ -241,6 +257,12 @@ void Test_BeamSearchTest_GptBeamSearchFp32_Cuda() {
     ASSERT_TRUE(std::equal(expected_output_start, expected_output_start + search.params_.max_length, sequence.begin(), sequence.end()));
   }
 
-  std::cout << "Test_BeamSearchTest_GptBeamSearchFp32_Cuda complete\r\n";
+  std::cout << " - complete\r\n";
 }
+
+void Test_BeamSearch_Gpt_Cuda() {
+  for (auto model_path : c_tiny_gpt2_model_paths)
+    Test_BeamSearch_Gpt_Cuda(model_path.first, model_path.second);
+}
+
 #endif

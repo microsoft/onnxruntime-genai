@@ -11,6 +11,7 @@ struct Gpt_Cuda {
 
  private:
   void UpdateInputs(std::span<const int32_t> next_tokens, std::span<const int32_t> beam_indices, int current_length);
+  template<typename ScoreType> void PickPastState(size_t index, std::span<const int32_t> beam_indices);
   void PickPastState(size_t index, std::span<const int32_t> beam_indices);
 
   SearchParams search_params_;
@@ -43,6 +44,7 @@ struct Gpt_Cuda {
 
   // Outputs
   std::unique_ptr<OrtValue> logits_;
+  std::unique_ptr<OrtValue> logits32_;  // When model output is fp16, this holds the fp32 conversion of them
   std::vector<std::unique_ptr<OrtValue>> presents_;
   std::vector<std::string> output_name_strings_;
   std::vector<const char*> output_names_;
@@ -55,6 +57,5 @@ void LaunchGpt_InitAttentionMask(int32_t* mask_data, int32_t* position_data, int
                                  int batch_size, int num_beams, int sequence_length, int pad_token_id, cudaStream_t stream);
 void LaunchGpt_UpdatePositionIds(int32_t* positions, int batch_beam_size, int current_length, cudaStream_t stream);
 void LaunchGpt_UpdateMask(int32_t* mask_data, const int32_t* old_mask_data, int batch_beam_size, int current_length, cudaStream_t stream);
-
 }
 }

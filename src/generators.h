@@ -24,6 +24,8 @@
 namespace Generators {
 using ScoreType = float;
 
+float Float16ToFloat32(uint16_t v); // v is a IEEE 752-2008 binary16 format, 1 sign bit, 5 bit exponent, 10 bit fraction
+
 enum struct DeviceType {
   Auto,
   CPU,
