@@ -18,7 +18,7 @@ Users can call a high level `generate()` method, or provide their own customizat
     auto input_ids_tensor = OrtValue::CreateTensor(
             *info, input_ids.data(), input_ids.size(), input_ids_shape.data(), input_ids_shape.size());
      
-    Generators::Gpt gpt(*ort_env, ORT_TSTR("models/gpt2_fp32.onnx"));
+    Generators::Gpt_Model model(*ort_env, ORT_TSTR("models/gpt2_fp32.onnx"));
 
     Generators::SearchParams params;
     params.batch_size = static_cast<int>(input_ids_shape[0]);
@@ -26,20 +26,19 @@ Users can call a high level `generate()` method, or provide their own customizat
     params.input_ids = input_ids;
     params.max_length = max_length;
     params.num_beams = 4;
-    params.vocab_size = gpt.GetVocabSize();
+    params.vocab_size = model.GetVocabSize();
  
     Generators::BeamSearch search{params};
-    gpt.CreateInputs(search.sequence_lengths_, params);
+    Generators::Gpt_State state{search.sequence_lengths_, params};
  
     while (!search.IsDone()) {
-      gpt.Run(search.GetNextTokens(), search.GetNextIndices(), search.GetSequenceLength());
-      search.SetLogits(gpt.GetLogits());
+      search.SetLogits(state.Run(search.GetNextTokens(), search.GetNextIndices(), search.GetSequenceLength());
  
       // Scoring
       Processors::MinLength(search, 5);
       Processors::RepetitionPenalty(search, 1.1f);
  
-      search.SelectTopK();
+      search.SelectTop();
     }
 
     // Access resulting sequences of tokens
@@ -49,7 +48,7 @@ Users can call a high level `generate()` method, or provide their own customizat
 
 ## GPT Python End to End Example
 
-    import ort_generators as og
+    import onnxruntime_genai as og
     import numpy as np
     from transformers import GPT2Tokenizer
 
@@ -59,19 +58,19 @@ Users can call a high level `generate()` method, or provide their own customizat
     tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
     input_tokens = tokenizer.encode(text, return_tensors='np')
 
-    gpt=og.Gpt("../../python/onnx_models/gpt2.onnx")
+    model=og.Gpt_Model("../../python/onnx_models/gpt2.onnx", og.DeviceType.CUDA)
 
     params=og.SearchParams()
     params.max_length = 64
     params.batch_size = input_tokens.shape[0]
     params.sequence_length = input_tokens.shape[1]
     params.input_ids = input_tokens
-    params.vocab_size = gpt.GetVocabSize()
+    params.vocab_size = model.GetVocabSize()
     params.eos_token_id = tokenizer.eos_token_id
     params.pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else params.eos_token_id
 
-    search=og.GreedySearch(params)
-    gpt.CreateInputs(search.GetSequenceLengths(), params)
+    search=og.GreedySearch(params, model.DeviceType)
+    state=og.Gpt_State(model, search.GetSequenceLengths(), params)
 
     print("Inputs:")
     print(input_tokens)
@@ -79,10 +78,8 @@ Users can call a high level `generate()` method, or provide their own customizat
 
     print("Running greedy search loop...")
     while not search.IsDone():
-        gpt.Run(search.GetNextTokens(), search.GetSequenceLength())
-        search.SetLogits(gpt.GetLogits())
-
-    search.SelectTop1();
+      search.SetLogits(state.Run(search.GetNextTokens(), search.GetSequenceLength())
+      search.SelectTop();
 
     print("Output:")
     output_tokens=search.GetSequence(0).GetArray()
@@ -91,9 +88,11 @@ Users can call a high level `generate()` method, or provide their own customizat
 
 # Features
 
+* Built in Model Support:
+  * GPT2
+  * Llama2
 * CPU & CUDA
 * Beam & Greedy Searches
-* GPT2 Model code example
 * C++ static library
 * Python Bindings
 
@@ -106,7 +105,35 @@ Users can call a high level `generate()` method, or provide their own customizat
 # Building
 
 ## Windows
+
+* Copy onnxruntime library into the ort/ folder
+  * Can either build Onnxruntime from source in release mode, then copy the files specified in install_ort.bat
+  * Or download a release from https://github.com/microsoft/onnxruntime/releases
+  * Files in ort\ should be:
+    * onnxruntime.dll
+    * onnxruntime.lib
+    * onnxruntime_providers_shared.dll (if using cuda)
+    * onnxruntime_providers_cuda.dll (if using cuda)
+    * onnxruntime_c_api.h
+* Run the build.bat script to generate build files
+* Open build\Generators.sln in visual studio
+
+To run the python scripts, use PYTHONPATH: `set PYTHONPATH=/path/to/onnxruntime-genai/build/Release/`
+
 ## Linux
+
+* Copy onnxruntime library into the ort/ folder
+  * Can either build Onnxruntime from source in release mode, then copy the files specified in install_ort.sh
+  * Or download a release from https://github.com/microsoft/onnxruntime/releases
+  * Files in ort\ should be:
+    * libonnxruntime.so
+    * libonnxruntime.so.(version #)
+    * libonnxruntime_providers_shared.so (if using cuda)
+    * libonnxruntime_providers_cuda.so (if using cuda)
+    * onnxruntime_c_api.h
+* Run the build.sh script to build
+
+To run the python scripts, use PYTHONPATH: `export PYTHONPATH=/path/to/onnxruntime-genai/build/`
 
 ## Prerequites
 
