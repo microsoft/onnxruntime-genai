@@ -35,7 +35,7 @@ int main()
   }
   catch (const std::exception& e)
   {
-    std::cout << "Fatal Exception:" << e.what() << std::endl;
+    std::cout << "Fatal Exception: " << e.what() << std::endl;
   }
 	return 0;
 }

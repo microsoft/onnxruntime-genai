@@ -84,7 +84,8 @@ inline void InitApi() { api = OrtGetApiBase()->GetApi(ORT_API_VERSION); }
  * If <tt>ORT_NO_EXCEPTIONS</tt> is defined, then any error will result in a call to abort()
  */
 struct Exception : std::exception {
-  Exception(std::unique_ptr<OrtStatus> ort_status) : ort_status_{ std::move(ort_status) } { }
+  Exception(const Exception &e);
+  Exception(std::unique_ptr<OrtStatus>&& ort_status) : ort_status_{ std::move(ort_status) } { }
 
   OrtErrorCode GetOrtErrorCode() const;
   const char* what() const noexcept override;

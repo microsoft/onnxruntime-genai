@@ -19,6 +19,7 @@ inline void ThrowOnError(OrtStatus* ort_status) {
 ORT_CXX_API_THROW
 #endif
 
+inline Exception::Exception(const Exception& e) : ort_status_{api->CreateStatus(e.GetOrtErrorCode(), e.what())} {}
 inline OrtErrorCode Exception::GetOrtErrorCode() const { return ort_status_->GetErrorCode(); }
 inline const char* Exception::what() const noexcept { return api->GetErrorMessage(ort_status_.get()); }
 

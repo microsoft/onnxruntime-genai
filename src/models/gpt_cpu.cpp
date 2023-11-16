@@ -162,11 +162,7 @@ std::span<ScoreType> Gpt_State::Run(int current_length, std::span<const int32_t>
     DumpTensors(outputs_.data(), output_names_.data(), output_names_.size(), false);
 #endif
 
-  try {
-    model_->session_decoder_->Run(nullptr, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
-  } catch (const Ort::Exception& e) {
-    std::cout << e.what() << std::endl;
-  }
+  model_->session_decoder_->Run(nullptr, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
 
   auto type_shape = logits_->GetTensorTypeAndShapeInfo();
   auto shape = type_shape->GetShape();
