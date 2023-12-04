@@ -97,7 +97,13 @@ void ParseConfig(const std::filesystem::path& filename, Config& config) {
 
   Root_Element root{config};
   RootObject_Element root_object{root};
-  JSON::Parse(root_object, std::string_view(buffer.data(), buffer.size()));
+  try {
+    JSON::Parse(root_object, std::string_view(buffer.data(), buffer.size()));
+  } catch (const std::exception& message) {
+    std::ostringstream oss;
+    oss << "Error encountered while parsing '" << filename.string() << "' " << message.what();
+    throw std::runtime_error(oss.str());
+  }
 }
 
 }  // namespace Generators

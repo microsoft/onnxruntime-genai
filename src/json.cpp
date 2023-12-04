@@ -26,12 +26,13 @@ struct JSON {
   double Parse_Number();
   std::string Parse_String();
 
-  bool Skip(char c); // If *current_ is 'c' skip over it and return true
+  bool Skip(char c);  // If *current_ is 'c' skip over it and return true
   template <size_t TCount>
-  bool Skip(const char (&sz)[TCount]); // If current_ matches the given string, skip over it and return true
+  bool Skip(const char (&sz)[TCount]);  // If current_ matches the given string, skip over it and return true
   unsigned char GetChar();
 
-  const char* current_;
+  const char* begin_;
+  const char* current_{begin_};
   const char* end_;
 };
 
@@ -39,12 +40,22 @@ void Parse(Element& element, std::string_view document) {
   JSON{element, document};
 }
 
-JSON::JSON(Element& element, std::string_view document) : current_{document.data()}, end_{document.data() + document.size()} {
+JSON::JSON(Element& element, std::string_view document) : begin_{document.data()}, end_{document.data() + document.size()} {
   try {
     Parse_Value(element, {});
   } catch (const std::exception& message) {
-    throw message;
-    //      throw "JSON parsing error: ", message, " at line ", GetLineNumber(), " index ", GetColumnNumber(), "\n"));
+    // Figure out line number of error by counting carriage returns seen from start to error location
+    int line = 1;
+    auto last_cr = begin_;
+    for (auto* p = begin_; p < current_; p++)
+      if (*p == '\r') {
+        line++;
+        last_cr = p;
+      }
+
+    std::ostringstream oss;
+    oss << "JSON Error: " << message.what() << " at line " << line << " index " << static_cast<int>(current_ - last_cr);
+    throw std::runtime_error(oss.str());
   }
 }
 
