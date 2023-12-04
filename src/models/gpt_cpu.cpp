@@ -71,7 +71,7 @@ Gpt_State::Gpt_State(Gpt_Model& model, std::span<int32_t> sequence_lengths, cons
   for (int i = 0; i < search_params_.batch_size; i++) {
     int32_t abs_position = 0;
     for (int j = 0; j < search_params_.sequence_length; j++, word_id++, mask++, position++) {
-      if (*word_id == search_params_.pad_token_id) {
+      if (*word_id == model_->config_.pad_token_id) {
         *mask = 0;
         *position = 0;
       } else {

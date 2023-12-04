@@ -5,7 +5,7 @@
 
 namespace Generators {
 
-BeamSearchScorer_Cuda::BeamSearchScorer_Cuda(const SearchParams_Cuda& parameters)
+BeamSearchScorer_Cuda::BeamSearchScorer_Cuda(const SearchParams& parameters)
     : stream_{parameters.cuda_stream} {
 
   state_cpu_ = CudaMallocHostArray<cuda::BeamScorerState>(1);

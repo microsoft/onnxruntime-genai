@@ -1,5 +1,4 @@
 #include "../generators.h"
-#include "onnxruntime_cxx_api_2.h"
 #include "debugging.h"
 
 namespace Generators {

@@ -55,7 +55,7 @@ Llama_State::Llama_State(Llama_Model& model, std::span<int32_t> sequence_lengths
   for (int i = 0; i < search_params_.batch_size; i++) {
     int64_t abs_position = 0;
     for (int j = 0; j < search_params_.sequence_length; j++, word_id++, mask++, position++) {
-      if (*word_id == search_params_.pad_token_id) {
+      if (*word_id == model.config_.pad_token_id) {
         *mask = 0;
         *position = 0;
       } else {
@@ -135,7 +135,9 @@ Llama_State::Llama_State(Llama_Model& model, std::span<int32_t> sequence_lengths
     output_names_.push_back(output_name.c_str());
 }
 
-std::span<ScoreType> Llama_State::Run(int current_length, std::span<const int32_t> next_tokens) {
+std::span<ScoreType> Llama_State::Run(int current_length, std::span<const int32_t> next_tokens, std::span<const int32_t> next_indices) {
+  assert(next_indices.empty());  // Llama doesn't support beam search
+
   if (first_run_)
     first_run_ = false;
   else

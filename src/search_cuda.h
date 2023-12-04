@@ -5,12 +5,8 @@ namespace Generators {
 
 struct BeamSearchScorer_Cuda;
 
-struct SearchParams_Cuda : SearchParams {
-  cudaStream_t cuda_stream{};
-};
-
 struct Search_Cuda {
-  Search_Cuda(const SearchParams_Cuda &params);
+  Search_Cuda(const SearchParams &params);
 
   std::span<int32_t> GetNextTokens();
   std::span<int32_t> GetNextIndices();
@@ -26,7 +22,7 @@ struct Search_Cuda {
   std::span<ScoreType> GetScores();
   Sequences_Cuda& GetSequences() { return sequences_; }
 
-  SearchParams_Cuda params_;
+  SearchParams params_;
 
   std::span<int32_t> sequence_lengths_;  // shape (beam_size*batch_size)
   std::unique_ptr<int32_t[]> sequence_lengths_buffer_;
@@ -45,7 +41,7 @@ struct Search_Cuda {
 };
 
 struct GreedySearch_Cuda : Search_Cuda {
-  GreedySearch_Cuda(const SearchParams_Cuda &params);
+  GreedySearch_Cuda(const SearchParams& params);
 
   std::span<int32_t> GetNextTokens();
 
@@ -61,7 +57,7 @@ struct GreedySearch_Cuda : Search_Cuda {
 };
 
 struct BeamSearch_Cuda : Search_Cuda {
-  BeamSearch_Cuda(const SearchParams_Cuda &params);
+  BeamSearch_Cuda(const SearchParams& params);
   ~BeamSearch_Cuda();
 
   std::span<int32_t> GetNextTokens();

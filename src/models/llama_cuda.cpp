@@ -77,7 +77,7 @@ Llama_Cuda::Llama_Cuda(Llama_Model& model, std::span<int32_t> sequence_lengths, 
   // Set position id to be 0 for pad tokens, and accumulated sum of mask in a batch for other tokens
   int64_t* mask_data = attention_mask_->GetTensorMutableData<int64_t>();
   int64_t* position_data = position_ids_->GetTensorMutableData<int64_t>();
-  cuda::LaunchGpt_InitAttentionMask(attn_mask_value ? nullptr : mask_data, position_data, sequence_lengths_cuda.get(), input_ids_data, search_params_.batch_size, search_params_.num_beams, search_params_.sequence_length, search_params_.pad_token_id, model_->cuda_stream_);
+  cuda::LaunchGpt_InitAttentionMask(attn_mask_value ? nullptr : mask_data, position_data, sequence_lengths_cuda.get(), input_ids_data, search_params_.batch_size, search_params_.num_beams, search_params_.sequence_length, model_->config_.pad_token_id, model_->cuda_stream_);
   cudaMemcpy(sequence_lengths.data(), sequence_lengths_cuda.get(), sequence_lengths.size_bytes(), cudaMemcpyDeviceToHost);
 
   assert(search_params_.num_beams == 1);
@@ -144,7 +144,9 @@ Llama_Cuda::Llama_Cuda(Llama_Model& model, std::span<int32_t> sequence_lengths, 
     output_names_.push_back(output_name.c_str());
 }
 
-std::span<ScoreType> Llama_Cuda::Run(int current_length, std::span<const int32_t> next_tokens) {
+std::span<ScoreType> Llama_Cuda::Run(int current_length, std::span<const int32_t> next_tokens, std::span<const int32_t> next_indices) {
+  assert(next_indices.empty()); // Llama doesn't support beam search
+
   if (first_run_)
     first_run_ = false;
   else

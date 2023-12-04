@@ -2,6 +2,7 @@ import argparse
 import os
 import subprocess
 import sys
+from transformers import AutoConfig
 
 def check_ort_import():
     try:
@@ -22,16 +23,20 @@ def get_models(args: argparse.Namespace):
         "-m",
         args.model_name,
         "--cache_dir",
-        args.output_folder,
+        args.cache_folder,
         "--output",
         args.output_folder,
         "-o",
         "-p",
-        "fp32",
+        args.precision,
         "-t",
-        "10",
+        "1",
     ])
-    subprocess.run(["mv", "gpt2_parity_results.csv", args.output_folder])
+    # subprocess.run(["mv", "gpt2_parity_results.csv", args.output_folder])
+
+    # Save config file
+    config = AutoConfig.from_pretrained(args.model_name, use_auth_token=True)
+    config.save_pretrained(args.output_folder)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -47,6 +52,20 @@ def main():
         "-o",
         "--output_folder",
         default=os.path.join(".", "test_models"),
+        required=False,
+    )
+
+    parser.add_argument(
+        "-c",
+        "--cache_folder",
+        default=os.path.join(".", "model_cache"),
+        required=False,
+    )
+
+    parser.add_argument(
+        "-p",
+        "--precision",
+        default="fp32",
         required=False,
     )
 

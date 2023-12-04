@@ -1,5 +1,6 @@
 ﻿import onnxruntime_genai as og
 import numpy as np
+import time
 from transformers import LlamaTokenizer
 
 # device_type = og.DeviceType.CPU
@@ -21,30 +22,16 @@ while True:
     input_tokens = tokenizer.encode(text, return_tensors='np')
 
     params=og.SearchParams(model)
-    params.max_length = 128
+    params.max_length = 64
     params.input_ids = input_tokens
 
-    search=og.GreedySearch(params, model.DeviceType)
-    state=model.CreateState(search.GetSequenceLengths(), params)
+    start_time=time.time()
+    output_tokens=model.Generate(params)
+    run_time=time.time()-start_time;
+    print(f"Tokens: {len(output_tokens)} Time: {run_time:.2f} Tokens per second: {len(output_tokens)/run_time:.2f}")
 
     print("Output:")
-
-    print(text, end='', flush=True)
-    while not search.IsDone():
-        search.SetLogits(state.Run(search.GetSequenceLength(), search.GetNextTokens()))
-
-        # search.Apply_MinLength(1)
-        # search.Apply_RepetitionPenalty(1.0)
-
-        search.SampleTopP(0.7, 0.6)
-
-        # Print each token as we compute it, we have to do some work to get newlines & spaces to appear properly:
-        word=tokenizer.convert_ids_to_tokens([search.GetNextTokens().GetArray()[0]])[0]
-        if word=='<0x0A>':
-          word = '\n'
-        if word.startswith('▁'):
-          word = ' ' + word[1:]
-        print(word, end='', flush=True)
+    print(tokenizer.decode(output_tokens))
 
     print()
     print()

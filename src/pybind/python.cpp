@@ -4,10 +4,7 @@
 #include "../generators.h"
 #include "../search.h"
 #include "../search_cuda.h"
-#include "../models/gpt_cpu.h"
-#include "../models/gpt_cuda.h"
-#include "../models/llama_cpu.h"
-#include "../models/llama_cuda.h"
+#include "../models/model.h"
 #include <iostream>
 
 using namespace pybind11::literals;
@@ -107,6 +104,7 @@ std::string ToString(const SearchParams& v) {
   return oss.str();
 }
 
+#if 0
 std::string ToString(const Gpt_Model& v) {
   std::ostringstream oss;
   oss << "Gpt_Model("
@@ -115,6 +113,7 @@ std::string ToString(const Gpt_Model& v) {
 
   return oss.str();
 }
+#endif
 
 std::unique_ptr<OrtEnv> g_ort_env;
 
@@ -176,15 +175,21 @@ void Declare_DeviceArray(pybind11::module& m, const char* name) {
 }
 
 struct PySearchParams : SearchParams {
+  // Turn the python py_input_ids_ into the low level parameters
+  void Prepare() {
+    batch_size = static_cast<int>(py_input_ids_.shape(0));
+    sequence_length = static_cast<int>(py_input_ids_.shape(1));
+    input_ids = ToSpan(py_input_ids_);
+  }
+
   pybind11::array_t<int32_t> py_input_ids_;
 };
 
 struct PyGreedySearch {
-  PyGreedySearch(const PySearchParams& params, DeviceType device_type) {
+  PyGreedySearch(PySearchParams& params, DeviceType device_type) {
+    params.Prepare();
     if (device_type == DeviceType::CUDA) {
-      SearchParams_Cuda params_cuda; // Includes cuda_stream, which defaults to nullptr
-      static_cast<SearchParams&>(params_cuda) = params;
-      cuda_ = std::make_unique<GreedySearch_Cuda>(params_cuda);
+      cuda_ = std::make_unique<GreedySearch_Cuda>(params);
     }
     else
       cpu_ = std::make_unique<GreedySearch>(params);
@@ -265,11 +270,10 @@ struct PyGreedySearch {
 };
 
 struct PyBeamSearch {
-  PyBeamSearch(const PySearchParams& params, DeviceType device_type) {
+  PyBeamSearch(PySearchParams& params, DeviceType device_type) {
+    params.Prepare();
     if (device_type == DeviceType::CUDA) {
-      SearchParams_Cuda params_cuda;  // Includes cuda_stream, which defaults to nullptr
-      static_cast<SearchParams&>(params_cuda) = params;
-      cuda_ = std::make_unique<BeamSearch_Cuda>(params_cuda);
+      cuda_ = std::make_unique<BeamSearch_Cuda>(params);
     } else
       cpu_ = std::make_unique<BeamSearch>(params);
   }
@@ -342,51 +346,28 @@ struct PyBeamSearch {
   RoamingArray<int32_t> py_sequencelengths_;
 };
 
-struct PyGpt_State {
-  PyGpt_State(Gpt_Model& model, RoamingArray<int32_t>& sequence_lengths, const SearchParams& search_params) {
-    if (model.GetDeviceType()==DeviceType::CUDA)
-      cuda_ = std::make_unique<Gpt_Cuda>(model, sequence_lengths.GetGPUArray(), search_params);
+struct PyState {
+  PyState(Model& model, RoamingArray<int32_t>& sequence_lengths, const SearchParams& search_params) {
+    is_cuda_ = model.device_type_ == DeviceType::CUDA;
+
+    if (is_cuda_)
+      state_ = model.CreateState(sequence_lengths.GetGPUArray(), search_params);
     else
-      cpu_ = std::make_unique<Gpt_State>(model, sequence_lengths.GetCPUArray(), search_params);
+      state_ = model.CreateState(sequence_lengths.GetCPUArray(), search_params);
   }
 
-  RoamingArray<float>& Run(int current_length, RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t>& next_indices)
-  {
-    if (cuda_)
-      py_logits_.SetGPU(cuda_->Run(current_length, next_tokens.GetGPUArray(), next_indices.GetGPUArray()));
+  RoamingArray<float>& Run(int current_length, RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t>& next_indices) {
+    if (is_cuda_)
+      py_logits_.SetGPU(state_->Run(current_length, next_tokens.GetGPUArray(), next_indices.GetGPUArray()));
     else
-      py_logits_.SetCPU(cpu_->Run(current_length, next_tokens.GetCPUArray(), next_indices.GetCPUArray()));
+      py_logits_.SetCPU(state_->Run(current_length, next_tokens.GetCPUArray(), next_indices.GetCPUArray()));
 
     return py_logits_;
   }
 
  private:
-  std::unique_ptr<Gpt_State> cpu_;
-  std::unique_ptr<Gpt_Cuda> cuda_;
-  RoamingArray<float> py_logits_;
-};
-
-struct PyLlama_State {
-  PyLlama_State(Llama_Model& model, RoamingArray<int32_t>& sequence_lengths, const SearchParams& search_params) {
-    if (model.GetDeviceType() == DeviceType::CUDA)
-      cuda_ = std::make_unique<Llama_Cuda>(model, sequence_lengths.GetGPUArray(), search_params);
-    else
-      cpu_ = std::make_unique<Llama_State>(model, sequence_lengths.GetCPUArray(), search_params);
-  }
-
-  RoamingArray<float>& Run(int current_length, RoamingArray<int32_t>& next_tokens) {
-    if (cuda_)
-      py_logits_.SetGPU(cuda_->Run(current_length, next_tokens.GetGPUArray()));
-    else
-      py_logits_.SetCPU(cpu_->Run(current_length, next_tokens.GetCPUArray()));
-
-    return py_logits_;
-  }
-
- private:
-  std::unique_ptr<Llama_Cuda> cuda_;
-  std::unique_ptr<Llama_State> cpu_;
-
+  bool is_cuda_ {};
+  std::unique_ptr<State> state_;
   RoamingArray<float> py_logits_;
 };
 
@@ -415,24 +396,29 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .export_values();
 
   pybind11::class_<PySearchParams>(m, "SearchParams")
-      .def(pybind11::init<>())
+      .def(pybind11::init<const Model&>())
+      .def_readonly("pad_token_id", &PySearchParams::pad_token_id)
+      .def_readonly("eos_token_id", &PySearchParams::eos_token_id)
+      .def_readonly("vocab_size", &PySearchParams::vocab_size)
       .def_readwrite("num_beams", &PySearchParams::num_beams)
-      .def_readwrite("batch_size", &PySearchParams::batch_size)
-      .def_readwrite("sequence_length", &PySearchParams::sequence_length)
+//      .def_readwrite("batch_size", &PySearchParams::batch_size)
+//      .def_readwrite("sequence_length", &PySearchParams::sequence_length)
       .def_readwrite("max_length", &PySearchParams::max_length)
-      .def_readwrite("pad_token_id", &PySearchParams::pad_token_id)
-      .def_readwrite("eos_token_id", &PySearchParams::eos_token_id)
-      .def_readwrite("vocab_size", &PySearchParams::vocab_size)
       .def_readwrite("length_penalty", &PySearchParams::length_penalty)
       .def_readwrite("early_stopping", &PySearchParams::early_stopping)
+      .def_readwrite("input_ids", &PySearchParams::py_input_ids_)
+#if 0
       .def_property(
           "input_ids",
           [](PySearchParams& s) -> pybind11::array_t<int32_t> { return s.py_input_ids_; },
-          [](PySearchParams& s, pybind11::array_t<int32_t> v) { s.py_input_ids_=v; s.input_ids = ToSpan(s.py_input_ids_); })
+          [](PySearchParams& s, pybind11::array_t<int32_t> v) {
+             s.py_input_ids_=v; s.input_ids = ToSpan(s.py_input_ids_);
+          })
+#endif
       .def("__repr__", [](PySearchParams& s) { return ToString(s); });
 
   pybind11::class_<PyGreedySearch>(m, "GreedySearch")
-      .def(pybind11::init<const PySearchParams&, DeviceType>())
+      .def(pybind11::init<PySearchParams&, DeviceType>())
       .def("SetLogits", &PyGreedySearch::SetLogits)
       .def("GetSequenceLength", &PyGreedySearch::GetSequenceLength)
       .def("GetSequenceLengths", &PyGreedySearch::GetSequenceLengths, pybind11::return_value_policy::reference_internal)
@@ -444,7 +430,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("GetSequence", &PyGreedySearch::GetSequence, pybind11::return_value_policy::reference_internal);
 
   pybind11::class_<PyBeamSearch>(m, "BeamSearch")
-      .def(pybind11::init<const PySearchParams&, DeviceType>())
+      .def(pybind11::init<PySearchParams&, DeviceType>())
       .def("SetLogits", &PyBeamSearch::SetLogits)
       .def("GetSequenceLength", &PyBeamSearch::GetSequenceLength)
       .def("GetSequenceLengths", &PyBeamSearch::GetSequenceLengths, pybind11::return_value_policy::reference_internal)
@@ -460,35 +446,20 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   m.def("print", &TestFP32, "Test float32");
   m.def("print", &TestFP16, "Test float16");
 
-  pybind11::class_<Gpt_Model>(m, "Gpt_Model")
-      .def(pybind11::init([](const std::string& str, DeviceType device_type) {
-             if (device_type == DeviceType::CUDA)
-               return new Gpt_Model(GetOrtEnv(), ORTCHAR_String(str.c_str()), nullptr);
-             return new Gpt_Model(GetOrtEnv(), ORTCHAR_String(str.c_str()));
+  pybind11::class_<Model>(m, "Model")
+      .def(pybind11::init([](const std::string& config_path, DeviceType device_type) {
+             auto provider_options = GetDefaultProviderOptions(device_type);
+             return new Model(GetOrtEnv(), config_path.c_str(), &provider_options);
            }),
            "str"_a, "device_type"_a = DeviceType::Auto)
-      .def("GetVocabSize", &Gpt_Model::GetVocabSize)
-      .def_property_readonly("DeviceType", [](const Gpt_Model& s) { return s.GetDeviceType(); });
+      .def("Generate", [](Model& model, PySearchParams& search_params) { search_params.Prepare(); return model.Generate(search_params); })
+      .def("CreateState", [](Model& model, RoamingArray<int32_t>& sequence_lengths, const PySearchParams& search_params) { return new PyState(model, sequence_lengths, search_params); })
+      .def_property_readonly("DeviceType", [](const Model& s) { return s.device_type_; });
 
-  pybind11::class_<PyGpt_State>(m, "Gpt_State")
-      .def(pybind11::init<Gpt_Model& , RoamingArray<int32_t>& , const PySearchParams&>())
-      .def("Run", &PyGpt_State::Run, "current_length"_a, "next_tokens"_a, "next_indices"_a = RoamingArray<int32_t>{},
+  pybind11::class_<PyState>(m, "State")
+      .def(pybind11::init<Model&, RoamingArray<int32_t>&, const PySearchParams&>())
+      .def("Run", &PyState::Run, "current_length"_a, "next_tokens"_a, "next_indices"_a = RoamingArray<int32_t>{},
            pybind11::return_value_policy::reference_internal);
-
-  pybind11::class_<Llama_Model>(m, "Llama_Model")
-      .def(pybind11::init([](const std::string& str, DeviceType device_type) {
-             if (device_type == DeviceType::CUDA)
-               return new Llama_Model(GetOrtEnv(), ORTCHAR_String(str.c_str()), nullptr);
-             return new Llama_Model(GetOrtEnv(), ORTCHAR_String(str.c_str()));
-           }),
-           "str"_a, "device_type"_a = DeviceType::Auto)
-      .def("GetVocabSize", &Llama_Model::GetVocabSize)
-      .def_property_readonly("DeviceType", [](const Llama_Model& s) { return s.GetDeviceType(); });
-
-  pybind11::class_<PyLlama_State>(m, "Llama_State")
-      .def(pybind11::init<Llama_Model&, RoamingArray<int32_t>&, const PySearchParams&>())
-      .def("Run", &PyLlama_State::Run,
-          pybind11::return_value_policy::reference_internal);
 
 #ifdef VERSION_INFO
   m.attr("__version__") = MACRO_STRINGIFY(VERSION_INFO);

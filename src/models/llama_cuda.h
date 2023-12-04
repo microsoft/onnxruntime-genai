@@ -1,12 +1,12 @@
-#include "onnxruntime_cxx_api_2.h"
 #include "llama_common.h"
+#include "model.h"
 
 namespace Generators {
 
-struct Llama_Cuda {
+struct Llama_Cuda : State {
 
   Llama_Cuda(Llama_Model& model, std::span<int32_t> sequence_lengths, const SearchParams& params);
-  std::span<ScoreType> Run(int current_length, std::span<const int32_t> next_tokens);
+  std::span<ScoreType> Run(int current_length, std::span<const int32_t> next_tokens, std::span<const int32_t> next_indices) override;
 
 private:
   void UpdateInputs(std::span<const int32_t> next_tokens, int current_length);

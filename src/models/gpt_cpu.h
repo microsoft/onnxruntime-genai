@@ -1,13 +1,12 @@
-#include "onnxruntime_cxx_api_2.h"
 #include "gpt_common.h"
+#include "model.h"
 
 namespace Generators {
 
-struct Gpt_State {
+struct Gpt_State : State {
 
   Gpt_State(Gpt_Model& model, std::span<int32_t> sequence_lengths, const SearchParams& params);
-
-  std::span<ScoreType> Run(int current_length, std::span<const int32_t> next_tokens, std::span<const int32_t> next_indices = {});
+  std::span<ScoreType> Run(int current_length, std::span<const int32_t> next_tokens, std::span<const int32_t> next_indices) override;
 
  private:
   void UpdateInputs(std::span<const int32_t> next_tokens, std::span<const int32_t> beam_indices, int current_length);
