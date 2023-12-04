@@ -36,9 +36,12 @@ enum struct DeviceType {
   CUDA,
 };
 
+struct OrtCPUProviderOptions { }; // Stub so that ProviderOptions isn't empty without cuda
+
 using ProviderOptions=std::variant<
+OrtCPUProviderOptions
 #if USE_CUDA
-OrtCUDAProviderOptions
+,OrtCUDAProviderOptions
 #endif
 >;
 

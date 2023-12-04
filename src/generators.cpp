@@ -56,7 +56,7 @@ SearchParams::SearchParams(const Model& model) :
 
 ProviderOptions GetDefaultProviderOptions(DeviceType device_type) {
   ProviderOptions options;
-
+#if USE_CUDA
   if (device_type == DeviceType::CUDA) {
     cudaStream_t cuda_stream;
     cudaStreamCreate(&cuda_stream);
@@ -66,6 +66,7 @@ ProviderOptions GetDefaultProviderOptions(DeviceType device_type) {
     cuda_options.has_user_compute_stream = true;
     cuda_options.user_compute_stream = cuda_stream;
   }
+#endif
 
   return options;
   }

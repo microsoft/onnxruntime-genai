@@ -2,13 +2,13 @@
 #include "../search.h"
 #if USE_CUDA
 #include "../search_cuda.h"
+#include "gpt_cuda.h"
+#include "llama_cuda.h"
 #endif
 #include "model.h"
 #include "gpt_common.h"
 #include "gpt_cpu.h"
-#include "gpt_cuda.h"
 #include "llama_cpu.h"
-#include "llama_cuda.h"
 
 namespace Generators {
 
@@ -37,15 +37,19 @@ Model::~Model() = default;
 
 std::unique_ptr<State> Model::CreateState(std::span<int32_t> sequence_lengths, const SearchParams& params) {
   if (impl_llama_) {
+#if USE_CUDA
     if (device_type_ == DeviceType::CUDA)
       return std::make_unique<Llama_Cuda>(*impl_llama_, sequence_lengths, params);
     else
+#endif
       return std::make_unique<Llama_State>(*impl_llama_, sequence_lengths, params);
 
   } else {
+#if USE_CUDA
     if (device_type_ == DeviceType::CUDA)
       return std::make_unique<Gpt_Cuda>(*impl_, sequence_lengths, params);
     else
+#endif
       return std::make_unique<Gpt_State>(*impl_, sequence_lengths, params);
   }
 }
