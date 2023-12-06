@@ -61,8 +61,7 @@ ProviderOptions GetDefaultProviderOptions(DeviceType device_type) {
     cudaStream_t cuda_stream;
     cudaStreamCreate(&cuda_stream);
 
-    Generators::ProviderOptions provider_options;
-    auto& cuda_options = provider_options.emplace<OrtCUDAProviderOptions>();
+    auto& cuda_options = options.emplace<OrtCUDAProviderOptions>();
     cuda_options.has_user_compute_stream = true;
     cuda_options.user_compute_stream = cuda_stream;
   }
