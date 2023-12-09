@@ -9,7 +9,7 @@ device_type = og.DeviceType.CUDA
 tokenizer = LlamaTokenizer.from_pretrained('meta-llama/Llama-2-7b-hf')
 
 print("Loading model...")
-#model=og.Llama_Model("../../test_models/llama2-7b-fp32-cpu/Llama-2-7b-hf_decoder_merged_model_fp32_opt.onnx", device_type)
+#model=og.Model("../../test_models/llama2-7b-fp32-cpu", device_type)
 #model=og.Llama_Model("../../test_models/llama2-7b-fp16-gpu/rank_0_Llama-2-7b-hf_decoder_merged_model_fp16.onnx", device_type)
 #model=og.Llama_Model("../../test_models/llama2-7b-int4-gpu/rank_0_Llama-2-7b-hf_decoder_merged_model_int4.onnx", device_type)
 model=og.Model("../../test_models/llama2-7b-chat-int4-gpu", device_type)
@@ -24,7 +24,7 @@ while True:
     params.max_length = 128
     params.input_ids = input_tokens
 
-    search=og.GreedySearch(params, model.DeviceType)
+    search=params.CreateSearch()
     state=model.CreateState(search.GetSequenceLengths(), params)
 
     print("Output:")

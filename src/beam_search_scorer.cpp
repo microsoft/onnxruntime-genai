@@ -179,8 +179,8 @@ void BeamSearchScorer::Process(Sequences& sequences,
 
 void BeamSearchScorer::Finalize(Sequences& sequences,
                                 size_t num_return_sequences,
-                                std::span<int32_t> output,
-                                std::span<float> sequence_scores) {
+                                cpu_span<int32_t> output,
+                                cpu_span<float> sequence_scores) {
   // output is Word IDs of each sequence, with shape (batch_size * num_return_sequences, max_sequence_length).
   // sequence_scores is the optional Score of each sequence, with shape (batch_size * num_return_sequences).
 

@@ -5,9 +5,9 @@ namespace Generators {
 
 struct Gpt_Cuda : State {
 
-  Gpt_Cuda(Gpt_Model& model, std::span<int32_t> sequence_lengths, const SearchParams& search_params);
+  Gpt_Cuda(Gpt_Model& model, RoamingArray<int32_t> sequence_lengths, const SearchParams& search_params);
 
-  std::span<ScoreType> Run(int current_length, std::span<const int32_t> next_tokens, std::span<const int32_t> next_indices) override;
+  RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) override;
 
  private:
   void UpdateInputs(std::span<const int32_t> next_tokens, std::span<const int32_t> beam_indices, int current_length);

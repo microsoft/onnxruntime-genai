@@ -46,24 +46,24 @@ void Test_GreedySearch_Gpt_Fp32() {
   params.sequence_length = static_cast<int>(input_ids_shape[1]);
   params.input_ids = input_ids;
 
-  Generators::GreedySearch search{params};
-  auto state=model.CreateState(search.sequence_lengths_, params);
+  auto search=params.CreateSearch();
+  auto state=model.CreateState(search->GetSequenceLengths(), params);
 
-  while (!search.IsDone()) {
-    search.SetLogits(state->Run(search.GetSequenceLength(), search.GetNextTokens()));
+  while (!search->IsDone()) {
+    search->SetLogits(state->Run(search->GetSequenceLength(), search->GetNextTokens()));
 
     // Scoring
-    Generators::Processors::MinLength(search, 1);
-    Generators::Processors::RepetitionPenalty(search, 1.0f);
+//    Generators::Processors::MinLength(search, 1);
+//    Generators::Processors::RepetitionPenalty(search, 1.0f);
 
-    search.SelectTop();
+    search->SelectTop();
   }
 
   // Verify outputs match expected outputs
-  for (int i = 0; i < search.params_.batch_size; i++) {
-    auto sequence = search.sequences_.GetSequence(i);
-    auto* expected_output_start = &expected_output[i * search.params_.max_length];
-    ASSERT_TRUE(std::equal(expected_output_start, expected_output_start + search.params_.max_length, sequence.begin(), sequence.end()));
+  for (int i = 0; i < params.batch_size; i++) {
+    auto sequence = search->GetSequence(i).GetCPU();
+    auto* expected_output_start = &expected_output[i * params.max_length];
+    ASSERT_TRUE(std::equal(expected_output_start, expected_output_start + params.max_length, sequence.begin(), sequence.end()));
   }
 
   std::cout << " - complete\r\n";
@@ -98,7 +98,7 @@ void Test_BeamSearch_Gpt_Fp32() {
   params.length_penalty = 1.0f;
   params.num_beams = 4;
 
-  Generators::BeamSearch search{params};
+  Generators::BeamSearch_Cpu search{params};
   auto state=model.CreateState(search.sequence_lengths_, params);
 
   while (!search.IsDone()) {
@@ -112,7 +112,7 @@ void Test_BeamSearch_Gpt_Fp32() {
   }
 
   std::vector<int32_t> output_sequence(search.params_.batch_size * search.params_.max_length);
-  search.Finalize(1, output_sequence, {});
+  search.Finalize(1, Generators::cpu_span<int32_t>{output_sequence}, {});
 
   // Verify outputs match expected outputs
   for (int i = 0; i < search.params_.batch_size; i++) {
@@ -144,27 +144,25 @@ void Test_GreedySearch_Gpt_Cuda(const char *model_path, const char* model_label)
   params.max_length=10;
   params.input_ids = input_ids;
 
-  Generators::GreedySearch_Cuda search{params};
-  auto state=model.CreateState(search.sequence_lengths_, params);
+  auto search = params.CreateSearch();
+  auto state=model.CreateState(search->GetSequenceLengths(), params);
 
-  while (!search.IsDone()) {
-    search.SetLogits(state->Run(search.GetSequenceLength(), search.GetNextTokens()));
+  while (!search->IsDone()) {
+    search->SetLogits(state->Run(search->GetSequenceLength(), search->GetNextTokens()));
 
     // Scoring
-    Generators::Processors_Cuda::MinLength(search, 1);
+//    Generators::Processors_Cuda::MinLength(search, 1);
 
-    search.SelectTop();
+    search->SelectTop();
   }
 
   // Verify outputs match expected outputs
-  for (int i = 0; i < search.params_.batch_size; i++) {
-    auto sequence_gpu = search.sequences_.GetSequence(i);
-    auto sequence = std::make_unique<int32_t[]>(params.max_length);
-    cudaMemcpyAsync(sequence.get(), sequence_gpu.data(), params.max_length * sizeof(int32_t), cudaMemcpyDeviceToHost, params.cuda_stream);
-    cudaStreamSynchronize(params.cuda_stream);
+  for (int i = 0; i < params.batch_size; i++) {
+    auto sequence_gpu = search->GetSequence(i);
+    auto sequence = sequence_gpu.GetCPU();
 
-    auto* expected_output_start = &expected_output[i * search.params_.max_length];
-    ASSERT_TRUE(std::equal(expected_output_start, expected_output_start + search.params_.max_length, sequence.get(), sequence.get() + params.max_length));
+    auto* expected_output_start = &expected_output[i * params.max_length];
+    ASSERT_TRUE(std::equal(expected_output_start, expected_output_start + params.max_length, sequence.begin(), sequence.end()));
   }
 
   std::cout << " - complete\r\n";
@@ -205,32 +203,32 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
   params.num_beams = 4;
   params.length_penalty = 1.0f;
 
-  Generators::BeamSearch_Cuda search{params};
-  auto state=model.CreateState(search.sequence_lengths_, params);
+  auto search=params.CreateSearch();
+  auto state=model.CreateState(search->GetSequenceLengths(), params);
 
-  while (!search.IsDone()) {
-    search.SetLogits(state->Run(search.GetSequenceLength(), search.GetNextTokens(), search.GetNextIndices()));
+  while (!search->IsDone()) {
+    search->SetLogits(state->Run(search->GetSequenceLength(), search->GetNextTokens(), search->GetNextIndices()));
 
     // Scoring
-    Generators::Processors_Cuda::MinLength(search, 1);
-    Generators::Processors_Cuda::RepetitionPenalty(search, 1.0f);
+//    Generators::Processors_Cuda::MinLength(search, 1);
+//    Generators::Processors_Cuda::RepetitionPenalty(search, 1.0f);
 
-    search.SelectTop();
+    search->SelectTop();
   }
 
-  size_t sequence_length=search.params_.batch_size*params.max_length;
+  size_t sequence_length=params.batch_size*params.max_length;
   auto output_sequence_cuda = Generators::CudaMallocArray<int32_t>(sequence_length);
-  auto output_sequence = std::make_unique<int32_t[]>(sequence_length);
+  auto output_sequence_cpu = std::make_unique<int32_t[]>(sequence_length);
 
-  search.Finalize(1, std::span<int32_t>(output_sequence_cuda.get(), sequence_length), {});
-  cudaMemcpyAsync(output_sequence.get(), output_sequence_cuda.get(), sequence_length * sizeof(int32_t), cudaMemcpyDeviceToHost, params.cuda_stream);
+  search->Finalize(1, Generators::gpu_span<int32_t>(output_sequence_cuda.get(), sequence_length), {});
+  cudaMemcpyAsync(output_sequence_cpu.get(), output_sequence_cuda.get(), sequence_length * sizeof(int32_t), cudaMemcpyDeviceToHost, params.cuda_stream);
   cudaStreamSynchronize(params.cuda_stream);
 
   // Verify outputs match expected outputs
-  for (int i = 0; i < search.params_.batch_size; i++) {
-    auto sequence = std::span<int32_t>(output_sequence.get() + params.max_length * i, params.max_length);
-    auto* expected_output_start = &expected_output[i * search.params_.max_length];
-    ASSERT_TRUE(std::equal(expected_output_start, expected_output_start + search.params_.max_length, sequence.begin(), sequence.end()));
+  for (int i = 0; i < params.batch_size; i++) {
+    auto sequence = std::span<int32_t>(output_sequence_cpu.get() + params.max_length * i, params.max_length);
+    auto* expected_output_start = &expected_output[i * params.max_length];
+    ASSERT_TRUE(std::equal(expected_output_start, expected_output_start + params.max_length, sequence.begin(), sequence.end()));
   }
 
   std::cout << " - complete\r\n";

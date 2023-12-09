@@ -20,16 +20,16 @@ Sequences_Cuda::Sequences_Cuda(std::span<const int32_t> input_sequences, int bat
 
   if (beam_size == 1) {
     sequences_buffer_ = CudaMallocArray<int32_t>(sequences_size);
-    sequences_ = std::span<int32_t>(sequences_buffer_.get(), sequences_size);
+    sequences_ = gpu_span<int32_t>(sequences_buffer_.get(), sequences_size);
   } else {
     sequences_buffer_ = CudaMallocArray<int32_t>(2 * sequences_size);
-    sequences_ = std::span<int32_t>(sequences_buffer_.get(), sequences_size);
-    sequences_next_ = std::span<int32_t>(sequences_buffer_.get() + sequences_size, sequences_size);
+    sequences_ = gpu_span<int32_t>(sequences_buffer_.get(), sequences_size);
+    sequences_next_ = gpu_span<int32_t>(sequences_buffer_.get() + sequences_size, sequences_size);
   }
 
   // TODO: input_sequences will be in cuda memory in the future, for now make a temp copy
 
-  std::span<int32_t> input_sequences_gpu;
+  gpu_span<int32_t> input_sequences_gpu;
   auto input_sequences_temp = CudaMallocArray<int32_t>(input_sequences.size(), &input_sequences_gpu);
   cudaMemcpyAsync(input_sequences_gpu.data(), input_sequences.data(), input_sequences.size_bytes(), cudaMemcpyHostToDevice, stream);
 
@@ -37,8 +37,9 @@ Sequences_Cuda::Sequences_Cuda(std::span<const int32_t> input_sequences, int bat
   cudaStreamSynchronize(stream); // Until we remove the todo above, wait for this to complete as input_sequences_gpu is on the stack
 }
 
-std::span<int32_t> Sequences_Cuda::GetSequence(int batch_beam_index) {
-  return sequences_.subspan(batch_beam_index * max_length_, current_length_);
+RoamingArray<int32_t> Sequences_Cuda::GetSequence(int batch_beam_index) {
+  auto span=sequences_.subspan(batch_beam_index * max_length_, current_length_);
+  return gpu_span<int32_t>{ span.data(), span.size() };
 }
 
 int Sequences_Cuda::GetSequenceLength() const {

@@ -1,8 +1,10 @@
 #include <cuda_runtime.h>
+#include <cub/cub.cuh>
 #include <algorithm>
-#include "span.h"
+#include "generators.h"
+#include "search_cuda.cuh"
 
-using ScoreType = float; // TODO: Move to header includable by cuda
+using ScoreType = float;  // TODO: Move to header includable by cuda
 
 namespace Generators {
 namespace cuda {
@@ -25,32 +27,41 @@ void LaunchSetInputSequence(std::span<int32_t> sequences) {
 }
 #endif
 
-__global__ void SoftMax(int32_t* next_tokens, const ScoreType* next_token_scores, int batch_size, int vocab_size) {
-  // next_tokens = torch.argmax(scores, dim=-1)
-  for (size_t i = 0; i < batch_size; i++) {
-    int32_t best_token = 0;
-    ScoreType best_score = next_token_scores[0];
-    for (int32_t token = 1; token < vocab_size; token++) {
-      if (next_token_scores[token] > best_score) {
-        best_score = next_token_scores[token];
-        best_token = token;
-      }
-    }
-    next_tokens[i] = best_token;
-    next_token_scores += vocab_size;
-  }
+__global__ void ArgMax(cub::KeyValuePair<int, float>* argmaxen, int32_t* next_tokens, int batch_size) {
+  int batch_index = threadIdx.x;
+  next_tokens[batch_index] = argmaxen[batch_index].key;
 }
 
-void Launch_SoftMax(int32_t* next_tokens, const ScoreType* next_token_scores, int batch_size, int vocab_size, cudaStream_t stream) {
-  SoftMax<<<1, 1, 0, stream>>>(next_tokens, next_token_scores, batch_size, vocab_size);
+struct ArgMaxDataImpl : ArgMaxData {
+  cuda_unique_ptr<uint8_t> temp_storage_;
+  size_t temp_storage_element_size_{};  // Size per batch, temp_storage_ is this size * batch_size
+
+  gpu_span<cub::KeyValuePair<int, float>> argmaxen_;
+  cuda_unique_ptr<cub::KeyValuePair<int, float>> argmaxen_owner_;
+};
+
+void Launch_ArgMax(std::unique_ptr<ArgMaxData>& p_data, int32_t* next_tokens, const ScoreType* next_token_scores, int batch_size, int vocab_size, cudaStream_t stream) {
+  if (!p_data)
+    p_data = std::make_unique<ArgMaxDataImpl>();
+  auto& data = static_cast<ArgMaxDataImpl&>(*p_data);
+
+  if (!data.temp_storage_) {
+    data.argmaxen_owner_ = CudaMallocArray<cub::KeyValuePair<int, float>>(batch_size, &data.argmaxen_);
+    CudaCheck() == cub::DeviceReduce::ArgMax(data.temp_storage_.get(), data.temp_storage_element_size_, next_token_scores, &data.argmaxen_[0], vocab_size, stream);
+    data.temp_storage_ = CudaMallocArray<uint8_t>(data.temp_storage_element_size_ * batch_size);
+  }
+
+  for (int batch_index = 0; batch_index < batch_size; batch_index++)
+    CudaCheck() == cub::DeviceReduce::ArgMax(data.temp_storage_.get() + data.temp_storage_element_size_ * batch_index, data.temp_storage_element_size_, next_token_scores + batch_index * vocab_size, &data.argmaxen_[batch_index], vocab_size, stream);
+  ArgMax<<<1, batch_size, 0, stream>>>(data.argmaxen_.data(), next_tokens, batch_size);
 }
 
 __global__ void log_softmax(ScoreType* values, int count) {
-  float max = *std::max_element(values, values+count);
-//  std::vector<float> scaled(values.begin(), values.end());
-  float sum=0.0f;
-  for (int i=0;i<count;i++)
-    sum += std::exp(values[i]-max);
+  float max = *std::max_element(values, values + count);
+  //  std::vector<float> scaled(values.begin(), values.end());
+  float sum = 0.0f;
+  for (int i = 0; i < count; i++)
+    sum += std::exp(values[i] - max);
 
   float log_max = std::log(sum);
   // std::transform(values, values+count, values, [max, log_max](float v) { return v - max - log_max; });
@@ -60,7 +71,7 @@ void Launch_log_softmax(ScoreType* values, int count, cudaStream_t stream) {
   log_softmax<<<1, 1, 0, stream>>>(values, count);
 }
 
-__global__ void CheckForEOS(int32_t* next_tokens, int next_tokens_count, bool* eos_meet, int eos_token_id, int pad_token_id, bool *done_cpu) {
+__global__ void CheckForEOS(int32_t* next_tokens, int next_tokens_count, bool* eos_meet, int eos_token_id, int pad_token_id, bool* done_cpu) {
   // Look for EOS tokens, if seen set EOS flag and replace with pad token
   for (size_t batch_id = 0; batch_id < next_tokens_count; ++batch_id) {
     if (next_tokens[batch_id] == eos_token_id || eos_meet[batch_id] == true) {
@@ -86,7 +97,7 @@ __global__ void CheckForEOS(int32_t* next_tokens, int next_tokens_count, bool* e
   }
 }
 
-void Launch_CheckForEOS(int32_t* next_tokens, int next_tokens_count, bool* eos_meet, int eos_token_id, int pad_token_id, bool *done_cpu, cudaStream_t stream) {
+void Launch_CheckForEOS(int32_t* next_tokens, int next_tokens_count, bool* eos_meet, int eos_token_id, int pad_token_id, bool* done_cpu, cudaStream_t stream) {
   CheckForEOS<<<1, 1, 0, stream>>>(next_tokens, next_tokens_count, eos_meet, eos_token_id, pad_token_id, done_cpu);
 }
 
@@ -136,7 +147,6 @@ __global__ void RepetitionPenaltyProcessor(const int32_t* sequences, ScoreType* 
 }
 
 void LaunchRepetitionPenaltyProcessor(const int32_t* sequences, ScoreType* next_token_scores, int batch_size, int num_beams, int vocab_size, int max_sequence_length, int current_sequence_length, ScoreType repetition_penalty, cudaStream_t stream) {
-
   int total_elements = batch_size * num_beams * vocab_size;
   constexpr int blockSize = 256;
   const int gridSize = (total_elements + blockSize - 1) / blockSize;
@@ -144,5 +154,5 @@ void LaunchRepetitionPenaltyProcessor(const int32_t* sequences, ScoreType* next_
   RepetitionPenaltyProcessor<<<gridSize, blockSize, 0, stream>>>(sequences, next_token_scores, max_sequence_length, vocab_size, total_elements, current_sequence_length, repetition_penalty);
 }
 
-}
-}
+}  // namespace cuda
+}  // namespace Generators

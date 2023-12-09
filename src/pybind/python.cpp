@@ -125,78 +125,24 @@ OrtEnv& GetOrtEnv() {
   return *g_ort_env;
 }
 
-#if USE_CUDA
 // A roaming array is one that can be in CPU or GPU memory, and will copy the memory as needed to be used from anywhere
 template <typename T>
-struct RoamingArray {
-  void SetCPU(std::span<T> cpu) {
-    cpu_memory_ = cpu;
-    device_memory_ = {};
-  }
+struct PyRoamingArray : RoamingArray<T> {
 
-  void SetGPU(std::span<T> device) {
-    device_memory_ = device;
-    cpu_memory_ = {};
-  }
-
-  std::span<T> GetCPUArray() {
-    if (cpu_memory_.empty() && !device_memory_.empty()) {
-      cpu_memory_owner_ = CudaMallocHostArray<T>(device_memory_.size(), &cpu_memory_);
-      cudaMemcpy(cpu_memory_.data(), device_memory_.data(), cpu_memory_.size_bytes(), cudaMemcpyDeviceToHost);
-    }
-
-    return cpu_memory_;
-  }
-
-  pybind11::array_t<T> GetNumpyArray() {
-    GetCPUArray();
-    py_cpu_array_ = pybind11::array_t<T>({cpu_memory_.size()}, {sizeof(T)}, cpu_memory_.data(), pybind11::capsule(cpu_memory_.data(), [](void*) {}));
+  pybind11::array_t<T> GetNumpy() {
+    auto v=this->GetCPU();
+    py_cpu_array_ = pybind11::array_t<T>({v.size()}, {sizeof(T)}, v.data(), pybind11::capsule(v.data(), [](void*) {}));
     return py_cpu_array_;
   }
 
-  std::span<T> GetGPUArray() {
-    if (device_memory_.empty() && !cpu_memory_.empty()) {
-      device_memory_owner_ = CudaMallocArray<T>(cpu_memory_.size(), &device_memory_);
-      cudaMemcpy(device_memory_.data(), cpu_memory_.data(), cpu_memory_.size_bytes(), cudaMemcpyHostToDevice);
-    }
-    return device_memory_;
-  }
-
-  std::span<T> device_memory_;
-  cuda_unique_ptr<T> device_memory_owner_;
-
-  std::span<T> cpu_memory_;
-  cuda_host_unique_ptr<T> cpu_memory_owner_;
   pybind11::array_t<T> py_cpu_array_;
 };
-#else
-// A roaming array is one that can be in CPU or GPU memory, and will copy the memory as needed to be used from anywhere
-template <typename T>
-struct RoamingArray {
-  void SetCPU(std::span<T> cpu) {
-    cpu_memory_ = cpu;
-  }
-
-  std::span<T> GetCPUArray() {
-    return cpu_memory_;
-  }
-
-  pybind11::array_t<T> GetNumpyArray() {
-    GetCPUArray();
-    py_cpu_array_ = pybind11::array_t<T>({cpu_memory_.size()}, {sizeof(T)}, cpu_memory_.data(), pybind11::capsule(cpu_memory_.data(), [](void*) {}));
-    return py_cpu_array_;
-  }
-
-  std::span<T> cpu_memory_;
-  pybind11::array_t<T> py_cpu_array_;
-};
-#endif
 
 template <typename T>
 void Declare_DeviceArray(pybind11::module& m, const char* name) {
-  using Type = RoamingArray<T>;
+  using Type = PyRoamingArray<T>;
   pybind11::class_<Type>(m, name)
-      .def("GetArray", [](Type& t) -> pybind11::array_t<T> { return t.GetNumpyArray(); }, pybind11::return_value_policy::reference_internal);
+      .def("GetArray", [](Type& t) -> pybind11::array_t<T> { return t.GetNumpy(); }, pybind11::return_value_policy::reference_internal);
 }
 
 struct PySearchParams : SearchParams {
@@ -210,317 +156,78 @@ struct PySearchParams : SearchParams {
   pybind11::array_t<int32_t> py_input_ids_;
 };
 
-#if USE_CUDA
-struct PyGreedySearch {
-  PyGreedySearch(PySearchParams& params, DeviceType device_type) {
+struct PySearch {
+  PySearch(PySearchParams& params) {
     params.Prepare();
-    if (device_type == DeviceType::CUDA) {
-      cuda_ = std::make_unique<GreedySearch_Cuda>(params);
-    }
-    else
-      cpu_ = std::make_unique<GreedySearch>(params);
+    search_=params.CreateSearch();
   }
 
-  void SetLogits(RoamingArray<float>& inputs) {
-    if (cuda_)
-      cuda_->SetLogits(inputs.GetGPUArray());
-    else
-      cpu_->SetLogits(inputs.GetCPUArray());
+  void SetLogits(PyRoamingArray<float>& inputs) {
+    search_->SetLogits(inputs);
   }
 
   int GetSequenceLength() const {
-     if (cuda_)
-      return cuda_->GetSequenceLength();
-     return cpu_->GetSequenceLength();
+    return search_->GetSequenceLength();
   }
 
-  RoamingArray<int32_t>& GetNextTokens() {
-    if(cuda_)
-      py_tokens_.SetGPU(cuda_->GetNextTokens());
-    else
-      py_tokens_.SetCPU(cpu_->GetNextTokens());
+  PyRoamingArray<int32_t>& GetNextTokens() {
+    py_tokens_.Assign(search_->GetNextTokens());
     return py_tokens_;
   }
 
-  RoamingArray<int32_t>& GetSequenceLengths() {
-    if(cuda_)
-      py_sequencelengths_.SetGPU(cuda_->sequence_lengths_);
-    else
-      py_sequencelengths_.SetCPU(cpu_->sequence_lengths_);
-
-    return py_sequencelengths_;
-  }
-
-  RoamingArray<int32_t>& GetSequence(int index) {
-    if (cuda_)
-      py_sequence_.SetGPU(cuda_->sequences_.GetSequence(index));
-    else
-      py_sequence_.SetCPU(cpu_->sequences_.GetSequence(index));
-    return py_sequence_;
-  }
-
-  bool IsDone() const {
-    if (cuda_)
-      return cuda_->IsDone();
-    return cpu_->IsDone();
-  }
-
-  void SelectTop() {
-    if(cuda_)
-      cuda_->SelectTop();
-    else
-      cpu_->SelectTop();
-  }
-
-  void SampleTopK(int k, float t) {
-    if (cuda_)
-      cuda_->SampleTopK(k, t);
-    else
-      cpu_->SampleTopK(k, t);
-  }
-
-  void SampleTopP(float p, float t) {
-    if(cuda_)
-      cuda_->SampleTopP(p, t);
-    else
-      cpu_->SampleTopP(p, t);
-  }
-
- private:
-  std::unique_ptr<GreedySearch> cpu_;
-  std::unique_ptr<GreedySearch_Cuda> cuda_;
-
-  RoamingArray<int32_t> py_tokens_;
-  RoamingArray<int32_t> py_sequence_;
-  RoamingArray<int32_t> py_sequencelengths_;
-};
-#else
-struct PyGreedySearch {
-  PyGreedySearch(PySearchParams& params, DeviceType device_type) {
-    params.Prepare();
-    cpu_ = std::make_unique<GreedySearch>(params);
-  }
-
-  void SetLogits(RoamingArray<float>& inputs) {
-    cpu_->SetLogits(inputs.GetCPUArray());
-  }
-
-  int GetSequenceLength() const {
-    return cpu_->GetSequenceLength();
-  }
-
-  RoamingArray<int32_t>& GetNextTokens() {
-    py_tokens_.SetCPU(cpu_->GetNextTokens());
-    return py_tokens_;
-  }
-
-  RoamingArray<int32_t>& GetSequenceLengths() {
-    py_sequencelengths_.SetCPU(cpu_->sequence_lengths_);
-    return py_sequencelengths_;
-  }
-
-  RoamingArray<int32_t>& GetSequence(int index) {
-    py_sequence_.SetCPU(cpu_->sequences_.GetSequence(index));
-    return py_sequence_;
-  }
-
-  bool IsDone() const {
-    return cpu_->IsDone();
-  }
-
-  void SelectTop() {
-    cpu_->SelectTop();
-  }
-
-  void SampleTopK(int k, float t) {
-    cpu_->SampleTopK(k, t);
-  }
-
-  void SampleTopP(float p, float t) {
-    cpu_->SampleTopP(p, t);
-  }
-
- private:
-  std::unique_ptr<GreedySearch> cpu_;
-
-  RoamingArray<int32_t> py_tokens_;
-  RoamingArray<int32_t> py_sequence_;
-  RoamingArray<int32_t> py_sequencelengths_;
-};
-#endif
-
-#if USE_CUDA
-struct PyBeamSearch {
-  PyBeamSearch(PySearchParams& params, DeviceType device_type) {
-    params.Prepare();
-    if (device_type == DeviceType::CUDA) {
-      cuda_ = std::make_unique<BeamSearch_Cuda>(params);
-    } else
-      cpu_ = std::make_unique<BeamSearch>(params);
-  }
-
-  void SetLogits(RoamingArray<float>& inputs) {
-    if (cuda_)
-      cuda_->SetLogits(inputs.GetGPUArray());
-    else
-      cpu_->SetLogits(inputs.GetCPUArray());
-  }
-
-  RoamingArray<int32_t>& GetNextTokens() {
-    if (cuda_)
-      py_tokens_.SetGPU(cuda_->GetNextTokens());
-    else
-      py_tokens_.SetCPU(cpu_->GetNextTokens());
-    return py_tokens_;
-  }
-
-  RoamingArray<int32_t>& GetNextIndices() {
-    if(cuda_)
-      py_indices_.SetGPU(cuda_->GetNextIndices());
-    else
-      py_indices_.SetCPU(cpu_->GetNextIndices());
+  PyRoamingArray<int32_t>& GetNextIndices() {
+    py_indices_.Assign(search_->GetNextIndices());
     return py_indices_;
   }
 
-  RoamingArray<int32_t>& GetSequenceLengths() {
-    if(cuda_)
-      py_sequencelengths_.SetGPU(cuda_->sequence_lengths_);
-    else
-      py_sequencelengths_.SetCPU(cpu_->sequence_lengths_);
+  PyRoamingArray<int32_t>& GetSequenceLengths() {
+    py_sequencelengths_.Assign(search_->GetSequenceLengths());
     return py_sequencelengths_;
   }
 
-  RoamingArray<int32_t>& GetSequence(int index) {
-    if (cuda_)
-      py_sequence_.SetGPU(cuda_->sequences_.GetSequence(index));
-    else
-      py_sequence_.SetCPU(cpu_->sequences_.GetSequence(index));
+  PyRoamingArray<int32_t>& GetSequence(int index) {
+    py_sequence_.Assign(search_->GetSequence(index));
     return py_sequence_;
   }
 
-  int GetSequenceLength() const {
-    if (cuda_)
-      return cuda_->GetSequenceLength();
-    return cpu_->GetSequenceLength();
-  }
-
   bool IsDone() const {
-    if (cuda_)
-      return cuda_->IsDone();
-    return cpu_->IsDone();
+    return search_->IsDone();
   }
 
   void SelectTop() {
-    if (cuda_)
-      cuda_->SelectTop();
-    else
-      cpu_->SelectTop();
+    search_->SelectTop();
+  }
+
+  void SampleTopK(int k, float t) {
+    search_->SampleTopK(k, t);
+  }
+
+  void SampleTopP(float p, float t) {
+    search_->SampleTopP(p, t);
   }
 
  private:
-  std::unique_ptr<BeamSearch_Cuda> cuda_;
-  std::unique_ptr<BeamSearch> cpu_;
-
-  RoamingArray<int32_t> py_tokens_;
-  RoamingArray<int32_t> py_indices_;
-  RoamingArray<int32_t> py_sequence_;
-  RoamingArray<int32_t> py_sequencelengths_;
+  std::unique_ptr<Search> search_;
+  PyRoamingArray<int32_t> py_tokens_;
+  PyRoamingArray<int32_t> py_indices_;
+  PyRoamingArray<int32_t> py_sequence_;
+  PyRoamingArray<int32_t> py_sequencelengths_;
 };
-#else
-struct PyBeamSearch {
-  PyBeamSearch(PySearchParams& params, DeviceType device_type) {
-    params.Prepare();
-    cpu_ = std::make_unique<BeamSearch>(params);
-  }
 
-  void SetLogits(RoamingArray<float>& inputs) {
-    cpu_->SetLogits(inputs.GetCPUArray());
-  }
-
-  RoamingArray<int32_t>& GetNextTokens() {
-    py_tokens_.SetCPU(cpu_->GetNextTokens());
-    return py_tokens_;
-  }
-
-  RoamingArray<int32_t>& GetNextIndices() {
-    py_indices_.SetCPU(cpu_->GetNextIndices());
-    return py_indices_;
-  }
-
-  RoamingArray<int32_t>& GetSequenceLengths() {
-    py_sequencelengths_.SetCPU(cpu_->sequence_lengths_);
-    return py_sequencelengths_;
-  }
-
-  RoamingArray<int32_t>& GetSequence(int index) {
-    py_sequence_.SetCPU(cpu_->sequences_.GetSequence(index));
-    return py_sequence_;
-  }
-
-  int GetSequenceLength() const {
-    return cpu_->GetSequenceLength();
-  }
-
-  bool IsDone() const {
-    return cpu_->IsDone();
-  }
-
-  void SelectTop() {
-    cpu_->SelectTop();
-  }
-
- private:
-  std::unique_ptr<BeamSearch> cpu_;
-
-  RoamingArray<int32_t> py_tokens_;
-  RoamingArray<int32_t> py_indices_;
-  RoamingArray<int32_t> py_sequence_;
-  RoamingArray<int32_t> py_sequencelengths_;
-};
-#endif
-
-#if USE_CUDA
 struct PyState {
-  PyState(Model& model, RoamingArray<int32_t>& sequence_lengths, const SearchParams& search_params) {
-    is_cuda_ = model.device_type_ == DeviceType::CUDA;
-
-    if (is_cuda_)
-      state_ = model.CreateState(sequence_lengths.GetGPUArray(), search_params);
-    else
-      state_ = model.CreateState(sequence_lengths.GetCPUArray(), search_params);
+  PyState(Model& model, PyRoamingArray<int32_t>& sequence_lengths, const SearchParams& search_params) {
+    state_ = model.CreateState(sequence_lengths, search_params);
   }
 
-  RoamingArray<float>& Run(int current_length, RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t>& next_indices) {
-    if (is_cuda_)
-      py_logits_.SetGPU(state_->Run(current_length, next_tokens.GetGPUArray(), next_indices.GetGPUArray()));
-    else
-      py_logits_.SetCPU(state_->Run(current_length, next_tokens.GetCPUArray(), next_indices.GetCPUArray()));
-
-    return py_logits_;
-  }
-
- private:
-  bool is_cuda_ {};
-  std::unique_ptr<State> state_;
-  RoamingArray<float> py_logits_;
-};
-#else
-struct PyState {
-  PyState(Model& model, RoamingArray<int32_t>& sequence_lengths, const SearchParams& search_params) {
-    state_ = model.CreateState(sequence_lengths.GetCPUArray(), search_params);
-  }
-
-  RoamingArray<float>& Run(int current_length, RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t>& next_indices) {
-    py_logits_.SetCPU(state_->Run(current_length, next_tokens.GetCPUArray(), next_indices.GetCPUArray()));
-
+  PyRoamingArray<float>& Run(int current_length, PyRoamingArray<int32_t>& next_tokens, PyRoamingArray<int32_t>& next_indices) {
+    py_logits_.Assign(state_->Run(current_length, next_tokens, next_indices));
     return py_logits_;
   }
 
  private:
   std::unique_ptr<State> state_;
-  RoamingArray<float> py_logits_;
+  PyRoamingArray<float> py_logits_;
 };
-#endif
 
 PYBIND11_MODULE(onnxruntime_genai, m) {
   m.doc() = R"pbdoc(
@@ -548,6 +255,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   pybind11::class_<PySearchParams>(m, "SearchParams")
       .def(pybind11::init<const Model&>())
+      .def("CreateSearch", [](PySearchParams& v) { return new PySearch(v); })
       .def_readonly("pad_token_id", &PySearchParams::pad_token_id)
       .def_readonly("eos_token_id", &PySearchParams::eos_token_id)
       .def_readonly("vocab_size", &PySearchParams::vocab_size)
@@ -568,28 +276,17 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 #endif
       .def("__repr__", [](PySearchParams& s) { return ToString(s); });
 
-  pybind11::class_<PyGreedySearch>(m, "GreedySearch")
-      .def(pybind11::init<PySearchParams&, DeviceType>())
-      .def("SetLogits", &PyGreedySearch::SetLogits)
-      .def("GetSequenceLength", &PyGreedySearch::GetSequenceLength)
-      .def("GetSequenceLengths", &PyGreedySearch::GetSequenceLengths, pybind11::return_value_policy::reference_internal)
-      .def("GetNextTokens", &PyGreedySearch::GetNextTokens, pybind11::return_value_policy::reference_internal)
-      .def("IsDone", &PyGreedySearch::IsDone)
-      .def("SelectTop", &PyGreedySearch::SelectTop)
-      .def("SampleTopK", &PyGreedySearch::SampleTopK)
-      .def("SampleTopP", &PyGreedySearch::SampleTopP)
-      .def("GetSequence", &PyGreedySearch::GetSequence, pybind11::return_value_policy::reference_internal);
-
-  pybind11::class_<PyBeamSearch>(m, "BeamSearch")
-      .def(pybind11::init<PySearchParams&, DeviceType>())
-      .def("SetLogits", &PyBeamSearch::SetLogits)
-      .def("GetSequenceLength", &PyBeamSearch::GetSequenceLength)
-      .def("GetSequenceLengths", &PyBeamSearch::GetSequenceLengths, pybind11::return_value_policy::reference_internal)
-      .def("GetNextTokens", &PyBeamSearch::GetNextTokens, pybind11::return_value_policy::reference_internal)
-      .def("GetNextIndices", &PyBeamSearch::GetNextIndices, pybind11::return_value_policy::reference_internal)
-      .def("IsDone", &PyBeamSearch::IsDone)
-      .def("SelectTop", &PyBeamSearch::SelectTop)
-      .def("GetSequence", &PyBeamSearch::GetSequence, pybind11::return_value_policy::reference_internal);
+  pybind11::class_<PySearch>(m, "Search")
+      .def("SetLogits", &PySearch::SetLogits)
+      .def("GetSequenceLength", &PySearch::GetSequenceLength)
+      .def("GetSequenceLengths", &PySearch::GetSequenceLengths, pybind11::return_value_policy::reference_internal)
+      .def("GetNextTokens", &PySearch::GetNextTokens, pybind11::return_value_policy::reference_internal)
+      .def("GetNextIndices", &PySearch::GetNextIndices, pybind11::return_value_policy::reference_internal)
+      .def("IsDone", &PySearch::IsDone)
+      .def("SelectTop", &PySearch::SelectTop)
+      .def("SampleTopK", &PySearch::SampleTopK)
+      .def("SampleTopP", &PySearch::SampleTopP)
+      .def("GetSequence", &PySearch::GetSequence, pybind11::return_value_policy::reference_internal);
 
   // If we support models, we need to init the OrtApi
   Ort::InitApi();
@@ -604,12 +301,12 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
            }),
            "str"_a, "device_type"_a = DeviceType::Auto)
       .def("Generate", [](Model& model, PySearchParams& search_params) { search_params.Prepare(); return model.Generate(search_params); })
-      .def("CreateState", [](Model& model, RoamingArray<int32_t>& sequence_lengths, const PySearchParams& search_params) { return new PyState(model, sequence_lengths, search_params); })
+      .def("CreateState", [](Model& model, PyRoamingArray<int32_t>& sequence_lengths, const PySearchParams& search_params) { return new PyState(model, sequence_lengths, search_params); })
       .def_property_readonly("DeviceType", [](const Model& s) { return s.device_type_; });
 
   pybind11::class_<PyState>(m, "State")
-      .def(pybind11::init<Model&, RoamingArray<int32_t>&, const PySearchParams&>())
-      .def("Run", &PyState::Run, "current_length"_a, "next_tokens"_a, "next_indices"_a = RoamingArray<int32_t>{},
+      .def(pybind11::init<Model&, PyRoamingArray<int32_t>&, const PySearchParams&>())
+      .def("Run", &PyState::Run, "current_length"_a, "next_tokens"_a, "next_indices"_a = PyRoamingArray<int32_t>{},
            pybind11::return_value_policy::reference_internal);
 
 #ifdef VERSION_INFO

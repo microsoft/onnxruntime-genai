@@ -5,7 +5,7 @@ namespace Generators {
 struct Gpt_Model {
   Gpt_Model(OrtEnv& ort_env, Config& config, OrtSessionOptions& session_options);
 #ifdef USE_CUDA
-  cudaStream_t cuda_stream_{};
+  cudaStream_t cuda_stream_{}; // TODO: This should be per state/search, not in the model at all
 #endif
 
   DeviceType GetDeviceType() const { return device_type_; }

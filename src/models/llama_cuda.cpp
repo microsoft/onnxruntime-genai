@@ -29,7 +29,7 @@ void ConvertFp16ToFp32(OrtAllocator& allocator, cudaStream_t stream, OrtValue& i
   cuda::LaunchFp16ToFp32(fp16, fp32, count, stream);
 }
 
-Llama_Cuda::Llama_Cuda(Llama_Model& model, std::span<int32_t> sequence_lengths, const SearchParams& search_params)
+Llama_Cuda::Llama_Cuda(Llama_Model& model, RoamingArray<int32_t> sequence_lengths, const SearchParams& search_params)
     : model_{&model},
       search_params_{search_params},
       allocator_cpu_{Ort::Allocator::GetWithDefaultOptions()},
@@ -71,14 +71,12 @@ Llama_Cuda::Llama_Cuda(Llama_Model& model, std::span<int32_t> sequence_lengths, 
   void* attn_mask_value = nullptr;
   attention_mask_ = OrtValue::CreateTensor<int64_t>(*allocator_cuda_, input_ids_shape, std::size(input_ids_shape));
 
-  cuda_unique_ptr<int32_t> sequence_lengths_cuda = CudaMallocArray<int32_t>(sequence_lengths.size());
-
   // Set attention mask to be 0 for pad tokens, and 1 for all other tokens.
   // Set position id to be 0 for pad tokens, and accumulated sum of mask in a batch for other tokens
   int64_t* mask_data = attention_mask_->GetTensorMutableData<int64_t>();
   int64_t* position_data = position_ids_->GetTensorMutableData<int64_t>();
-  cuda::LaunchGpt_InitAttentionMask(attn_mask_value ? nullptr : mask_data, position_data, sequence_lengths_cuda.get(), input_ids_data, search_params_.batch_size, search_params_.num_beams, search_params_.sequence_length, model_->config_.pad_token_id, model_->cuda_stream_);
-  cudaMemcpy(sequence_lengths.data(), sequence_lengths_cuda.get(), sequence_lengths.size_bytes(), cudaMemcpyDeviceToHost);
+  cuda::LaunchGpt_InitAttentionMask(attn_mask_value ? nullptr : mask_data, position_data, sequence_lengths.GetGPU().data(), input_ids_data, search_params_.batch_size, search_params_.num_beams, search_params_.sequence_length, model_->config_.pad_token_id, model_->cuda_stream_);
+  sequence_lengths.FlushGPUChanges();
 
   assert(search_params_.num_beams == 1);
   expanded_input_ids_ = std::move(input_ids_);
@@ -144,7 +142,9 @@ Llama_Cuda::Llama_Cuda(Llama_Model& model, std::span<int32_t> sequence_lengths, 
     output_names_.push_back(output_name.c_str());
 }
 
-std::span<ScoreType> Llama_Cuda::Run(int current_length, std::span<const int32_t> next_tokens, std::span<const int32_t> next_indices) {
+RoamingArray<float> Llama_Cuda::Run(int current_length, RoamingArray<int32_t> next_tokens_unk, RoamingArray<int32_t> next_indices_unk) {
+  gpu_span<int32_t> next_tokens=next_tokens_unk;
+  gpu_span<int32_t> next_indices = next_indices_unk;
   assert(next_indices.empty()); // Llama doesn't support beam search
 
   if (first_run_)
@@ -167,10 +167,10 @@ std::span<ScoreType> Llama_Cuda::Run(int current_length, std::span<const int32_t
 
   if (model_->score_type_ == Ort::TypeToTensorType<Ort::Float16_t>::type) {
     ConvertFp16ToFp32(*allocator_cuda_, model_->cuda_stream_, *logits_, logits32_);
-    return {logits32_->GetTensorMutableData<float>(), type_shape->GetElementCount()};
+    return gpu_span<float>{logits32_->GetTensorMutableData<float>(), type_shape->GetElementCount()};
   }
 
-  return {logits_->GetTensorMutableData<float>(), type_shape->GetElementCount()};
+  return gpu_span<float>{logits_->GetTensorMutableData<float>(), type_shape->GetElementCount()};
 }
 
 void Llama_Cuda::UpdateInputs(std::span<const int32_t> next_tokens, int current_length) {

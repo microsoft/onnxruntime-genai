@@ -4,6 +4,8 @@
 #include "generators.h"
 #include "sequences.h"
 #include "models/model.h"
+#include "search.h"
+#include "search_cuda.h"
 
 namespace Generators {
 
@@ -47,7 +49,8 @@ SearchParams::SearchParams(const Model& model) :
   vocab_size{ model.config_.vocab_size },
   max_length{ model.config_.max_length },
   length_penalty{ model.config_.length_penalty },
-  early_stopping{ model.config_.early_stopping }
+  early_stopping{ model.config_.early_stopping },
+  device_type{ model.device_type_ }
 #if USE_CUDA
   ,cuda_stream{model.cuda_stream_}
 #endif
@@ -70,5 +73,18 @@ ProviderOptions GetDefaultProviderOptions(DeviceType device_type) {
   return options;
   }
 
+std::unique_ptr<Search> SearchParams::CreateSearch() const {
+#if USE_CUDA
+  if (device_type == DeviceType::CUDA) {
+    if (num_beams>1)
+      return std::make_unique<BeamSearch_Cuda>(*this);
+    return std::make_unique<GreedySearch_Cuda>(*this);
+  }
+#endif
+
+  if (num_beams>1)
+    return std::make_unique<BeamSearch_Cpu>(*this);
+  return std::make_unique<GreedySearch_Cpu>(*this);
+}
 
 }

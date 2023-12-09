@@ -14,23 +14,12 @@ void OnCudaError(cudaError_t error) {
   throw std::exception();
 }
 
-namespace cuda {
-
-void Launch_SoftMax(int32_t* next_tokens, const ScoreType* next_token_scores, int batch_size, int vocab_size, cudaStream_t stream);
-void Launch_CheckForEOS(int32_t* next_tokens, int next_tokens_count, bool* eos_meet, int eos_token_id, int pad_token_id, bool* done_cpu, cudaStream_t stream);
-void LaunchAddProbsKernel(ScoreType* log_probs, ScoreType* cum_log_probs, const int batch_size, const int num_beams, const int vocab_size, cudaStream_t stream);
-void LaunchRepetitionPenaltyProcessor(const int32_t* sequences, ScoreType* next_token_scores, int batch_size, int num_beams, int vocab_size, int max_sequence_length, int current_sequence_length, ScoreType repetition_penalty, cudaStream_t stream);
-void Launch_log_softmax(ScoreType* values, int count, cudaStream_t stream);
-
-void TopPSampling(int32_t* next_token, ScoreType* scores, int size, float p, float temperature);
-}  // namespace cuda
-
 Search_Cuda::Search_Cuda(const SearchParams& params)
     : params_{params},
       sequences_{params.input_ids, params.batch_size, params.num_beams, params_.max_length, params_.cuda_stream} {
   auto batch_beam_size = params.BatchBeamSize();
   sequence_lengths_buffer_ = std::make_unique<int32_t[]>(batch_beam_size);
-  sequence_lengths_ = std::span<int32_t>(sequence_lengths_buffer_.get(), batch_beam_size);
+  sequence_lengths_ = cpu_span<int32_t>(sequence_lengths_buffer_.get(), batch_beam_size);
 
   eos_meet_buffer_ = CudaMallocArray<bool>(batch_beam_size, &eos_meet_);
   cudaMemsetAsync(eos_meet_.data(), 0, eos_meet_.size_bytes(), params_.cuda_stream);
@@ -70,7 +59,8 @@ BeamSearch_Cuda::BeamSearch_Cuda(const SearchParams& params)
 
 BeamSearch_Cuda::~BeamSearch_Cuda() = default;
 
-void Search_Cuda::SetLogits(std::span<const ScoreType> logits) {
+void Search_Cuda::SetLogits(RoamingArray<float> logits_unk) {
+  gpu_span<float> logits=logits_unk;
   // Logits has shape (batch_size, input_length, vocab_size),
   // where input_length equals to parameters_->sequence_length for first subgraph call, and 1 for the remaining calls.
   // RyanHill: Does it really? The output of gpt2 is always a input_length of 1, regardless of input sequence length
@@ -95,19 +85,19 @@ void Search_Cuda::SetLogits(std::span<const ScoreType> logits) {
   }
 }
 
-std::span<int32_t> GreedySearch_Cuda::GetNextTokens() {
+RoamingArray<int32_t> GreedySearch_Cuda::GetNextTokens() {
   return next_tokens_;
 }
 
-std::span<int32_t> BeamSearch_Cuda::GetNextTokens() {
+RoamingArray<int32_t> BeamSearch_Cuda::GetNextTokens() {
   return beam_scorer_->GetNextTokens();
 }
 
-std::span<int32_t> BeamSearch_Cuda::GetNextIndices() {
+RoamingArray<int32_t> BeamSearch_Cuda::GetNextIndices() {
   return beam_scorer_->GetNextIndicesCPU();
 }
 
-int Search_Cuda::GetSequenceLength() {
+int Search_Cuda::GetSequenceLength() const {
   return sequences_.GetSequenceLength();
 }
 
@@ -167,7 +157,7 @@ void BeamSearch_Cuda::SelectTop() {
 
 void GreedySearch_Cuda::SelectTop() {
   auto next_token_scores = next_token_scores_.data();
-  cuda::Launch_SoftMax(next_tokens_.data(), next_token_scores, params_.batch_size, params_.vocab_size, params_.cuda_stream);
+  cuda::Launch_ArgMax(argmaxdata_, next_tokens_.data(), next_token_scores, params_.batch_size, params_.vocab_size, params_.cuda_stream);
 
   CheckForEOS();
   AppendNextTokensToSequences();
@@ -236,8 +226,8 @@ void BeamSearch_Cuda::AppendNextTokensToSequences() {
   sequences_.AfterDeviceAppendedNextToken();
 }
 
-void BeamSearch_Cuda::Finalize(size_t num_return_sequences, std::span<int32_t> output, std::span<float> sequence_scores) {
-  beam_scorer_->Finalize(sequences_, num_return_sequences, output, sequence_scores);
+void BeamSearch_Cuda::Finalize(size_t num_return_sequences, RoamingArray<int32_t> output, RoamingArray<float> sequence_scores) {
+  beam_scorer_->Finalize(sequences_, num_return_sequences, output.GetGPU(), sequence_scores.GetGPU());
 }
 
 #if 0

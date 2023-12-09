@@ -6,12 +6,13 @@
 
 namespace Generators {
 
-Llama_State::Llama_State(Llama_Model& model, std::span<int32_t> sequence_lengths, const SearchParams& search_params)
+Llama_State::Llama_State(Llama_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const SearchParams& search_params)
  : model_{&model},
   search_params_{search_params} {
 
   assert(model.score_type_ == Ort::TypeToTensorType<float>::type);
   int64_t input_ids_shape[] = {search_params_.batch_size, search_params_.sequence_length};
+  cpu_span<int32_t> sequence_lengths=sequence_lengths_unk;
 
   // Allocate position_ids and attention_mask based on shape of input_ids
   auto element_type = Ort::TypeToTensorType<int64_t>::type;
@@ -135,7 +136,9 @@ Llama_State::Llama_State(Llama_Model& model, std::span<int32_t> sequence_lengths
     output_names_.push_back(output_name.c_str());
 }
 
-std::span<ScoreType> Llama_State::Run(int current_length, std::span<const int32_t> next_tokens, std::span<const int32_t> next_indices) {
+RoamingArray<float> Llama_State::Run(int current_length, RoamingArray<int32_t> next_tokens_unk, RoamingArray<int32_t> next_indices_unk) {
+  cpu_span<int32_t> next_tokens=next_tokens_unk;
+  cpu_span<int32_t> next_indices=next_indices_unk;
   assert(next_indices.empty());  // Llama doesn't support beam search
 
   if (first_run_)
@@ -156,7 +159,7 @@ std::span<ScoreType> Llama_State::Run(int current_length, std::span<const int32_
   auto shape = type_shape->GetShape();
   assert(type_shape->GetShape().size() == 3);
 
-  return {logits_->GetTensorMutableData<ScoreType>(), type_shape->GetElementCount()};
+  return cpu_span<float>{logits_->GetTensorMutableData<ScoreType>(), type_shape->GetElementCount()};
 }
 
 void Llama_State::UpdateInputs(std::span<const int32_t> next_tokens, int current_length) {

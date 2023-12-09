@@ -16,6 +16,8 @@ struct Root_Element : JSON::Element {
       config_.model_type = value;
     else if (name == "ogai_model_decoder")
       config_.model_decoder = value;
+    else if (name == "ogai_model_encoder_decoder_init")
+      config_.model_encoder_decoder_init = value;
   }
 
   void OnNumber(std::string_view name, double value) override {

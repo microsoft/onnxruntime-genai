@@ -35,7 +35,7 @@ Model::Model(OrtEnv& ort_env, const char* config_path, const ProviderOptions* pr
 
 Model::~Model() = default;
 
-std::unique_ptr<State> Model::CreateState(std::span<int32_t> sequence_lengths, const SearchParams& params) {
+std::unique_ptr<State> Model::CreateState(RoamingArray<int32_t> sequence_lengths, const SearchParams& params) {
   if (impl_llama_) {
 #if USE_CUDA
     if (device_type_ == DeviceType::CUDA)
@@ -54,74 +54,27 @@ std::unique_ptr<State> Model::CreateState(std::span<int32_t> sequence_lengths, c
   }
 }
 
-#if USE_CUDA
-std::vector<int32_t> CudaSpanToVector(std::span<int32_t> span) {
-  std::vector<int32_t> v(span.size());
-  cudaMemcpy(v.data(), span.data(), span.size_bytes(), cudaMemcpyDeviceToHost);
-  return v;
-}
-#endif
-
-std::vector<int32_t> SpanToVector(std::span<int32_t> span) {
-  return std::vector<int32_t>(span.begin(), span.end());
-}
-
 std::vector<int32_t> Model::Generate(const SearchParams& params) {
-#if USE_CUDA
-  if (device_type_ == DeviceType::CUDA) {
-    if (params.num_beams == 1) {
-      Generators::GreedySearch_Cuda search{params};
-      auto state = CreateState(search.sequence_lengths_, params);
+  auto search = params.CreateSearch();
+  auto state = CreateState(search->GetSequenceLengths(), params);
 
-      while (!search.IsDone()) {
-        search.SetLogits(state->Run(search.GetSequenceLength(), search.GetNextTokens()));
+  while (!search->IsDone()) {
+    search->SetLogits(state->Run(search->GetSequenceLength(), search->GetNextTokens()));
 
-        if (config_.top_p < 1.0f) {
-          search.SampleTopP(config_.top_p, config_.temperature);
-        } else if (config_.top_k > 1) {
-          search.SampleTopK(config_.top_k, config_.temperature);
-        } else
-          search.SelectTop();
-      }
-      return CudaSpanToVector(search.GetSequences().GetSequence(0));
-    } else {
-      Generators::BeamSearch_Cuda search{params};
-      auto state = CreateState(search.sequence_lengths_, params);
-
-      while (!search.IsDone()) {
-        search.SetLogits(state->Run(search.GetSequenceLength(), search.GetNextTokens()));
-        search.SelectTop();
-      }
-      return CudaSpanToVector(search.GetSequences().GetSequence(0));
-    }
+    if (config_.top_p < 1.0f) {
+      search->SampleTopP(config_.top_p, config_.temperature);
+    } else if (config_.top_k > 1) {
+      search->SampleTopK(config_.top_k, config_.temperature);
+    } else
+      search->SelectTop();
   }
-#endif
 
-  if (params.num_beams == 1) {
-    Generators::GreedySearch search{params};
-    auto state = CreateState(search.sequence_lengths_, params);
+  auto results = search->GetSequence(0);
+  auto results_cpu = results.GetCPU();
 
-    while (!search.IsDone()) {
-      search.SetLogits(state->Run(search.GetSequenceLength(), search.GetNextTokens()));
-
-      if (config_.top_p < 1.0f) {
-        search.SampleTopP(config_.top_p, config_.temperature);
-      } else if (config_.top_k > 1) {
-        search.SampleTopK(config_.top_k, config_.temperature);
-      } else
-        search.SelectTop();
-    }
-    return SpanToVector(search.GetSequences().GetSequence(0));
-  } else {
-    Generators::BeamSearch search{params};
-    auto state = CreateState(search.sequence_lengths_, params);
-
-    while (!search.IsDone()) {
-      search.SetLogits(state->Run(search.GetSequenceLength(), search.GetNextTokens()));
-      search.SelectTop();
-    }
-    return SpanToVector(search.GetSequences().GetSequence(0));
-  }
+  std::vector<int32_t> v;
+  v.assign(results_cpu.begin(), results_cpu.end());
+  return v;
 }
 
 }  // namespace Generators

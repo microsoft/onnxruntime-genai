@@ -70,11 +70,12 @@ struct Config {
   int pad_token_id{}; // The id of the padding token.
   int eos_token_id{}; // The id of the end-of-stream token.
   int bos_token_id{}; // The id of the beginning-of-stream token.
-  int decoder_start_token_id {}; //  If an encoder-decoder model starts decoding with a different token than bos, the id of that token.
+  int decoder_start_token_id {}; // If an encoder-decoder model starts decoding with a different token than bos, the id of that token.
   int sep_token_id{}; // The id of the separation token.
 
   // Model Class Attributes
   std::string model_decoder;
+  std::string model_encoder_decoder_init;
   std::string model_type;
   int vocab_size{};
   int hidden_size {};
@@ -85,10 +86,30 @@ struct Config {
   int n_layer {12}; // GPT version of num_hidden_layers?
 };
 
+struct Search {
+  virtual RoamingArray<int32_t> GetNextTokens() = 0;
+  virtual RoamingArray<int32_t> GetNextIndices() { assert(false); return {}; }
+  virtual RoamingArray<int32_t> GetSequenceLengths() = 0;
+  virtual int GetSequenceLength() const=0;
+  virtual RoamingArray<int32_t> GetSequence(int index) = 0;
+
+  virtual void SetLogits(RoamingArray<float> logits)=0;
+  virtual bool IsDone() const=0;
+
+  // TODO: Beam Search only, this should be removed and made automatic
+  virtual void Finalize(size_t num_return_sequences, RoamingArray<int32_t> output, RoamingArray<float> sequence_scores) { assert(false); }
+
+  virtual void SelectTop()=0;
+  virtual void SampleTopP(float p, float temperature) { assert(false); }
+  virtual void SampleTopK(int k, float temperature) { assert(false); }
+};
+
 struct SearchParams
 {
   SearchParams()=default;
   SearchParams(const Model& model);
+
+  std::unique_ptr<Search> CreateSearch() const;
 
   // Values copied from config
   int pad_token_id{};
@@ -103,9 +124,34 @@ struct SearchParams
   int num_beams{1};
   int BatchBeamSize() const { return num_beams * batch_size; }
 
-  std::span<const int32_t> input_ids;  // Array of [batchsize][sequence_length]
+  DeviceType device_type{DeviceType::CPU};
 #if USE_CUDA
   cudaStream_t cuda_stream{};
+#endif
+
+    std::span<const int32_t> input_ids;  // Array of [batchsize][sequence_length]
+
+#if 0
+  struct Bert {
+    std::span<const int32_t> input_ids;  // Array of [batchsize][sequence_length]
+  };
+
+  struct Gpt {
+    using Gpt=Bert;
+  };
+
+  struct T5 {
+    std::span<const int32_t> encoder_input_ids;  // Array of [batchsize][sequence_length]
+    std::span<const int32_t> decoder_input_ids;  // Array of [batchsize][sequence_length]  
+  };
+  using Bart=T5;
+
+  struct Whisper {
+    std::unique_ptr<OrtValue> input_features;  // [batch_size, number_of_mels, something that is 3000] Whisper
+    std::span<int32_t> decoder_input_ids;
+  };
+
+  std::variant<Bert, T5, Whisper> inputs;
 #endif
 };
 

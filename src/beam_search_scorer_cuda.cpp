@@ -22,7 +22,7 @@ BeamSearchScorer_Cuda::BeamSearchScorer_Cuda(const SearchParams& parameters)
 
   size_t batch_beam_size = state_cpu_->batch_size_ * state_cpu_->num_beams_;
 
-  std::span<cuda::HypothesisScore> beams;
+  gpu_span<cuda::HypothesisScore> beams;
   hypothesis_scores_ptr_ = CudaMallocArray<cuda::HypothesisScore>(batch_beam_size, &beams);
   beam_hyps_ptr_ = CudaMallocArray<cuda::BeamHypotheses>(state_cpu_->batch_size_, &beam_hyps_);
 
@@ -32,7 +32,7 @@ BeamSearchScorer_Cuda::BeamSearchScorer_Cuda(const SearchParams& parameters)
   next_beam_tokens_ptr_ = CudaMallocArray<int32_t>(batch_beam_size, &next_beam_tokens_);
   next_beam_indices_ptr_ = CudaMallocArray<int32_t>(batch_beam_size, &next_beam_indices_);
   next_beam_indices_cpu_ptr_ = std::make_unique<int32_t[]>(batch_beam_size);
-  next_beam_indices_cpu_ = std::span(next_beam_indices_cpu_ptr_.get(), batch_beam_size);
+  next_beam_indices_cpu_ = cpu_span<int32_t>(next_beam_indices_cpu_ptr_.get(), batch_beam_size);
 
   cuda::LaunchInitScoresKernel(next_beam_scores_.data(), parameters.batch_size, parameters.num_beams, stream_);
 

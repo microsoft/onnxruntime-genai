@@ -5,8 +5,8 @@ namespace Generators {
 
 struct Llama_State : State {
 
-  Llama_State(Llama_Model& model, std::span<int32_t> sequence_lengths, const SearchParams& params);
-  std::span<ScoreType> Run(int current_length, std::span<const int32_t> next_tokens, std::span<const int32_t> next_indices) override;
+  Llama_State(Llama_Model& model, RoamingArray<int32_t> sequence_lengths, const SearchParams& params);
+  RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) override;
 
 private:
   void UpdateInputs(std::span<const int32_t> next_tokens, int current_length);

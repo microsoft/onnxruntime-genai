@@ -34,13 +34,12 @@ static void ExpandInputs(const OrtValue& input, int num_beams, OrtAllocator& all
   }
 }
 
-Gpt_Cuda::Gpt_Cuda(Gpt_Model& model, std::span<int32_t> sequence_lengths, const SearchParams& search_params)
- : model_{&model},
-  search_params_{search_params},
-  allocator_cpu_{Ort::Allocator::GetWithDefaultOptions()},
-  memory_info_cuda_{OrtMemoryInfo::Create("Cuda", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault)},
-  allocator_cuda_{Ort::Allocator::Create(*model_->session_decoder_, *memory_info_cuda_)} {
-
+Gpt_Cuda::Gpt_Cuda(Gpt_Model& model, RoamingArray<int32_t> sequence_lengths, const SearchParams& search_params)
+    : model_{&model},
+      search_params_{search_params},
+      allocator_cpu_{Ort::Allocator::GetWithDefaultOptions()},
+      memory_info_cuda_{OrtMemoryInfo::Create("Cuda", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault)},
+      allocator_cuda_{Ort::Allocator::Create(*model_->session_decoder_, *memory_info_cuda_)} {
   // Allocate position_ids and attention_mask based on shape of input_ids
   auto element_type = Ort::TypeToTensorType<int32_t>::type;
 
@@ -53,12 +52,12 @@ Gpt_Cuda::Gpt_Cuda(Gpt_Model& model, std::span<int32_t> sequence_lengths, const 
   auto* input_ids_data = input_ids_->GetTensorMutableData<int32_t>();
 
   // Copy input_ids into gpu memory. This requires the input_ids for subgraph is also int32.
-  cudaMemcpy(input_ids_data, search_params_.input_ids.data(), input_ids_count*sizeof(int32_t), cudaMemcpyHostToDevice);
+  cudaMemcpy(input_ids_data, search_params_.input_ids.data(), input_ids_count * sizeof(int32_t), cudaMemcpyHostToDevice);
 
   position_ids_ = OrtValue::CreateTensor<int32_t>(*allocator_cuda_, input_ids_shape, std::size(input_ids_shape));
 
   int64_t position_shape[] = {search_params_.batch_size * search_params_.num_beams, 1};
-  next_positions_ = Allocate<int32_t>(*allocator_cuda_, position_shape[0] , next_positions_buffer_);
+  next_positions_ = Allocate<int32_t>(*allocator_cuda_, position_shape[0], next_positions_buffer_);
   cudaMemset(next_positions_.data(), 0, next_positions_.size_bytes());
   next_positions_tensor_ = OrtValue::CreateTensor<int32_t>(allocator_cuda_->GetInfo(), next_positions_.data(), next_positions_.size(), position_shape, std::size(position_shape));
 
@@ -73,14 +72,12 @@ Gpt_Cuda::Gpt_Cuda(Gpt_Model& model, std::span<int32_t> sequence_lengths, const 
 #endif
   attention_mask_ = OrtValue::CreateTensor<int32_t>(*allocator_cuda_, input_ids_shape, std::size(input_ids_shape));
 
-  cuda_unique_ptr<int32_t> sequence_lengths_cuda = CudaMallocArray<int32_t>(sequence_lengths.size());
-
   // Set attention mask to be 0 for pad tokens, and 1 for all other tokens.
   // Set position id to be 0 for pad tokens, and accumulated sum of mask in a batch for other tokens
   int32_t* mask_data = attention_mask_->GetTensorMutableData<int32_t>();
   int32_t* position_data = position_ids_->GetTensorMutableData<int32_t>();
-  cuda::LaunchGpt_InitAttentionMask(attn_mask_value ? nullptr : mask_data, position_data, sequence_lengths_cuda.get(), input_ids_data, search_params_.batch_size, search_params_.num_beams, search_params_.sequence_length, search_params_.pad_token_id, model_->cuda_stream_);
-  cudaMemcpy(sequence_lengths.data(), sequence_lengths_cuda.get(), sequence_lengths.size_bytes(), cudaMemcpyDeviceToHost);
+  cuda::LaunchGpt_InitAttentionMask(attn_mask_value ? nullptr : mask_data, position_data, sequence_lengths.GetGPU().data(), input_ids_data, search_params_.batch_size, search_params_.num_beams, search_params_.sequence_length, search_params_.pad_token_id, model_->cuda_stream_);
+  sequence_lengths.FlushGPUChanges();
 
   // Expand (batch_size, sequence_length) to (batch_size * num_beams, sequence_length)
   // TODO(tianleiwu): Try expand outputs after first subgraph call instead. That may get better performance.
@@ -151,7 +148,10 @@ Gpt_Cuda::Gpt_Cuda(Gpt_Model& model, std::span<int32_t> sequence_lengths, const 
   io_binding_decode_ = OrtIoBinding::Create(*model_->session_decoder_);
 }
 
-std::span<ScoreType> Gpt_Cuda::Run(int current_length, std::span<const int32_t> next_tokens, std::span<const int32_t> next_indices) {
+RoamingArray<float> Gpt_Cuda::Run(int current_length, RoamingArray<int32_t> next_tokens_unk, RoamingArray<int32_t> next_indices_unk) {
+  gpu_span<int32_t> next_tokens = next_tokens_unk;
+  cpu_span<int32_t> next_indices = next_indices_unk;
+
   if (first_run_)
     first_run_ = false;
   else
@@ -177,15 +177,15 @@ std::span<ScoreType> Gpt_Cuda::Run(int current_length, std::span<const int32_t> 
   //  session_decode_->Run(nullptr, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
   model_->session_decoder_->Run(nullptr, *io_binding_decode_);
 
-    auto type_shape = logits_->GetTensorTypeAndShapeInfo();
-    assert(type_shape->GetShape().size() == 3);
+  auto type_shape = logits_->GetTensorTypeAndShapeInfo();
+  assert(type_shape->GetShape().size() == 3);
 
   if (model_->score_type_ == Ort::TypeToTensorType<Ort::Float16_t>::type) {
     ConvertFp16ToFp32(*allocator_cuda_, model_->cuda_stream_, *logits_, logits32_);
-    return {logits32_->GetTensorMutableData<float>(), type_shape->GetElementCount()};
-    }
+    return gpu_span<float>{logits32_->GetTensorMutableData<float>(), type_shape->GetElementCount()};
+  }
 
-   return {logits_->GetTensorMutableData<float>(), type_shape->GetElementCount()};
+  return gpu_span<float>{logits_->GetTensorMutableData<float>(), type_shape->GetElementCount()};
 }
 
 void Gpt_Cuda::UpdateInputs(std::span<const int32_t> next_tokens, std::span<const int32_t> beam_indices, int current_length) {
@@ -258,7 +258,7 @@ void Gpt_Cuda::UpdateInputs(std::span<const int32_t> next_tokens, std::span<cons
 }
 
 // Copy present state to past state
-template<typename ScoreType>
+template <typename ScoreType>
 void Gpt_Cuda::PickPastState(size_t index, std::span<const int32_t> beam_indices) {
   const OrtValue& present = *presents_[index];
 
@@ -289,10 +289,10 @@ void Gpt_Cuda::PickPastState(size_t index, std::span<const int32_t> beam_indices
 }
 
 void Gpt_Cuda::PickPastState(size_t index, std::span<const int32_t> beam_indices) {
-  if (model_->score_type_==Ort::TypeToTensorType<float>::type)
+  if (model_->score_type_ == Ort::TypeToTensorType<float>::type)
     PickPastState<float>(index, beam_indices);
   else
     PickPastState<Ort::Float16_t>(index, beam_indices);
 }
 
-}
+}  // namespace Generators

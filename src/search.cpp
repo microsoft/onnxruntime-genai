@@ -8,7 +8,7 @@
 
 namespace Generators {
 
-Search::Search(SearchParams params)
+Search_Cpu::Search_Cpu(SearchParams params)
     : params_{params},
       sequences_{params.input_ids, params.batch_size, params.num_beams, params_.max_length} {
 
@@ -21,8 +21,8 @@ Search::Search(SearchParams params)
   memset(next_token_scores_.data(), 0, next_token_scores_.size_bytes());
 }
 
-GreedySearch::GreedySearch(SearchParams params)
-    : Search(params) {
+GreedySearch_Cpu::GreedySearch_Cpu(SearchParams params)
+    : Search_Cpu(params) {
   next_tokens_buffer_ = AllocateArray<int32_t>(params.batch_size, &next_tokens_);
   memset(next_tokens_.data(), 0, next_tokens_.size_bytes());
 
@@ -30,15 +30,16 @@ GreedySearch::GreedySearch(SearchParams params)
   memset(eos_seen_.data(), 0, eos_seen_.size_bytes());
 }
 
-BeamSearch::BeamSearch(SearchParams params)
-    : Search(params) {
+BeamSearch_Cpu::BeamSearch_Cpu(SearchParams params)
+    : Search_Cpu(params) {
   assert(params_.num_beams > 1);  // If 1, use GreedySearch
   beam_scorer_ = std::make_unique<BeamSearchScorer>(params_);
 }
 
-BeamSearch::~BeamSearch() = default;
+BeamSearch_Cpu::~BeamSearch_Cpu() = default;
 
-void Search::SetLogits(std::span<const ScoreType> logits) {
+void Search_Cpu::SetLogits(RoamingArray<float> logits_unk) {
+  cpu_span<float> logits=logits_unk;
   // Logits has shape (batch_size, input_length, vocab_size),
   // where input_length equals to parameters_->sequence_length for first subgraph call, and 1 for the remaining calls.
 
@@ -62,23 +63,23 @@ void Search::SetLogits(std::span<const ScoreType> logits) {
   }
 }
 
-std::span<int32_t> GreedySearch::GetNextTokens() {
+RoamingArray<int32_t> GreedySearch_Cpu::GetNextTokens() {
   return next_tokens_;
 }
 
-std::span<int32_t> BeamSearch::GetNextTokens() {
+RoamingArray<int32_t> BeamSearch_Cpu::GetNextTokens() {
   return beam_scorer_->GetNextTokens();
 }
 
-std::span<int32_t> BeamSearch::GetNextIndices() {
+RoamingArray<int32_t> BeamSearch_Cpu::GetNextIndices() {
   return beam_scorer_->GetNextIndicesCPU();
 }
 
-int Search::GetSequenceLength() {
+int Search_Cpu::GetSequenceLength() const {
   return sequences_.GetSequenceLength();
 }
 
-void BeamSearch::SelectTop() {
+void BeamSearch_Cpu::SelectTop() {
   auto beam_scores = beam_scorer_->GetNextScores();
   // Add beam score to next token scores. Corresponding python code is like:
   //    next_token_scores = next_token_scores + beam_scores[:, None].expand_as(next_token_scores)
@@ -142,7 +143,7 @@ void BeamSearch::SelectTop() {
   AppendNextTokensToSequences();
 }
 
-void GreedySearch::SelectTop() {
+void GreedySearch_Cpu::SelectTop() {
   // next_tokens = torch.argmax(scores, dim=-1)
   for (size_t batch_id = 0; batch_id < params_.batch_size; batch_id++) {
     if (PadIfAlreadyEOS(batch_id))
@@ -156,8 +157,7 @@ void GreedySearch::SelectTop() {
   AppendNextTokensToSequences();
 }
 
-void GreedySearch::SampleTopK(int k, float temperature)
-{
+void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
 #if 0
   std::random_device rd;
   std::mt19937 gen(rd());
@@ -206,8 +206,7 @@ void SoftMax(std::span<ScoreType> scores, float temperature) {
   std::transform(scores.begin(), scores.end(), scores.begin(), [exp_sum](ScoreType score) { return score / exp_sum; });
 }
 
-void GreedySearch::SampleTopP(float p, float temperature)
-{
+void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
   std::random_device rd;
   std::mt19937 gen(rd());
   std::uniform_real_distribution<float> dis(0, p);
@@ -245,7 +244,7 @@ void GreedySearch::SampleTopP(float p, float temperature)
   AppendNextTokensToSequences();
 }
 
-bool GreedySearch::PadIfAlreadyEOS(size_t batch_id) {
+bool GreedySearch_Cpu::PadIfAlreadyEOS(size_t batch_id) {
    // If this batch entry has already seen the EOS token, append the pad token
   if (!eos_seen_[batch_id])
     return false;
@@ -255,7 +254,7 @@ bool GreedySearch::PadIfAlreadyEOS(size_t batch_id) {
 }
 
 
-void GreedySearch::SetNextToken(size_t batch_id, int32_t token) {
+void GreedySearch_Cpu::SetNextToken(size_t batch_id, int32_t token) {
   next_tokens_[batch_id] = token;
   if (token == params_.eos_token_id) {
     eos_seen_[batch_id] = true;
@@ -264,50 +263,32 @@ void GreedySearch::SetNextToken(size_t batch_id, int32_t token) {
   }
 }
 
-void GreedySearch::AppendNextTokensToSequences() {
+void GreedySearch_Cpu::AppendNextTokensToSequences() {
   sequences_.AppendNextTokenToSequences(next_tokens_);
 
   if (sequences_.GetSequenceLength() == params_.max_length)
     done_ = true;
 }
 
-void BeamSearch::AppendNextTokensToSequences() {
+void BeamSearch_Cpu::AppendNextTokensToSequences() {
   sequences_.AppendNextTokenToSequences(beam_scorer_->GetNextIndicesCPU(), beam_scorer_->GetNextTokens());
 
   if (sequences_.GetSequenceLength() == params_.max_length)
     done_ = true;
 }
 
-void BeamSearch::Finalize(size_t num_return_sequences, std::span<int32_t> output, std::span<float> sequence_scores) {
+void BeamSearch_Cpu::Finalize(size_t num_return_sequences, RoamingArray<int32_t> output, RoamingArray<float> sequence_scores) {
   beam_scorer_->Finalize(sequences_, num_return_sequences, output, sequence_scores);
 }
 
-#if 0
-// Not needed, for greedy can just grab the output sequence directly?
-void GreedySearch::Finalize(size_t num_return_sequences, std::span<int32_t> output, std::span<float> sequence_scores) {
-  auto shape=output_sequences_->GetTensorTypeAndShapeInfo()->GetShape();
-  size_t shape_count = std::accumulate(shape.begin(), shape.end(), 1LL, std::multiplies<int64_t>());
-
-  // Copy the sequences to output
-  std::span<int32_t> output{ output_sequences_->GetTensorMutableData<int32_t>(), shape_count};
-  for (int batch_id = 0; batch_id < params_.batch_size; ++batch_id) {
-    auto batch_output = output.subspan(
-        static_cast<size_t>(batch_id) * params_.max_length,
-        params_.max_length);
-    std::span<const int32_t> sequence_source = sequences_.GetSequence(batch_id);
-    std::copy(sequence_source, batch_output);
-  }
-}
-#endif
-
-std::span<ScoreType> Search::GetScores(int batch_beam_index) {
+std::span<ScoreType> Search_Cpu::GetScores(int batch_beam_index) {
   assert(batch_beam_index >= 0 && batch_beam_index < params_.BatchBeamSize());
   return next_token_scores_.subspan(batch_beam_index * params_.vocab_size, params_.vocab_size);
 }
 
 namespace Processors {
 
-void MinLength(Search& search, int min_length) {
+void MinLength(Search_Cpu& search, int min_length) {
   if (search.sequences_.GetSequenceLength() >= min_length)
     return;
 
@@ -318,7 +299,7 @@ void MinLength(Search& search, int min_length) {
   }
 }
 
-void RepetitionPenalty(Search& search, ScoreType penalty) {
+void RepetitionPenalty(Search_Cpu& search, ScoreType penalty) {
   const int batch_beam_size = search.params_.BatchBeamSize();
   for (int i = 0; i < batch_beam_size; i++) {
     std::span<ScoreType> beam_token_scores = search.GetScores(i);

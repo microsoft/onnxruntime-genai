@@ -41,14 +41,14 @@ struct BeamSearchScorer {
 
   void Finalize(Sequences& sequences,
                 size_t num_return_sequences,
-                std::span<int32_t> output_sequences,
-                std::span<float> output_sequence_scores);
+                cpu_span<int32_t> output_sequences,
+                cpu_span<float> output_sequence_scores);
 
   bool IsDone() const { return not_done_count_ == 0; }
 
-  std::span<float> GetNextScores() { return next_beam_scores_; }
-  std::span<int32_t> GetNextTokens() { return next_beam_tokens_; }
-  std::span<int32_t> GetNextIndicesCPU() { return next_beam_indices_; }
+  cpu_span<float> GetNextScores() { return next_beam_scores_; }
+  cpu_span<int32_t> GetNextTokens() { return next_beam_tokens_; }
+  cpu_span<int32_t> GetNextIndicesCPU() { return next_beam_indices_; }
 
  private:
   int batch_size_;
@@ -60,13 +60,13 @@ struct BeamSearchScorer {
   int not_done_count_;  // When zero, every batch entry is done (starts at batch_size_)
 
   std::unique_ptr<float[]> next_beam_scores_ptr_;
-  std::span<float> next_beam_scores_;
+  cpu_span<float> next_beam_scores_;
 
   std::unique_ptr<int32_t[]> next_beam_tokens_ptr_;
-  std::span<int32_t> next_beam_tokens_;
+  cpu_span<int32_t> next_beam_tokens_;
 
   std::unique_ptr<int32_t[]> next_beam_indices_ptr_;
-  std::span<int32_t> next_beam_indices_;
+  cpu_span<int32_t> next_beam_indices_;
 
   std::unique_ptr<int32_t[]> hypothesis_buffer_ptr_;    // Allocated buffer to hold all hypotheses
   std::span<int32_t> hypothesis_buffer_;                // Span of the allocated buffer

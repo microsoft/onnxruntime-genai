@@ -1,20 +1,20 @@
 #pragma once
 #include "sequences_cuda.h"
+#include "search_cuda.cuh"
 
 namespace Generators {
 
 struct BeamSearchScorer_Cuda;
 
-struct Search_Cuda {
+struct Search_Cuda : Search {
   Search_Cuda(const SearchParams &params);
 
-  std::span<int32_t> GetNextTokens();
-  std::span<int32_t> GetNextIndices();
-
-  int GetSequenceLength();
+  int GetSequenceLength() const override;
+  RoamingArray<int32_t> GetSequenceLengths() override { return sequence_lengths_; }
+  RoamingArray<int32_t> GetSequence(int index) override { return sequences_.GetSequence(index); }
 
   bool IsDone() const { cudaStreamSynchronize(params_.cuda_stream); return *done_cpu_; } // TODO: Use an event
-  void SetLogits(std::span<const ScoreType> logits);
+  void SetLogits(RoamingArray<ScoreType> logits);
   // Extra scoring steps go here
 
   //
@@ -24,15 +24,15 @@ struct Search_Cuda {
 
   SearchParams params_;
 
-  std::span<int32_t> sequence_lengths_;  // shape (beam_size*batch_size)
+  cpu_span<int32_t> sequence_lengths_;  // shape (beam_size*batch_size)
   std::unique_ptr<int32_t[]> sequence_lengths_buffer_;
 
-  std::span<bool> eos_meet_;  // shape (beam_size*batch_size)
+  gpu_span<bool> eos_meet_;  // shape (beam_size*batch_size)
   cuda_unique_ptr<bool> eos_meet_buffer_;
 
-  std::span<int32_t> next_tokens_;  // shape (beam_size*batch_size)
+  gpu_span<int32_t> next_tokens_;  // shape (beam_size*batch_size)
 
-  std::span<ScoreType> next_token_scores_;  // shape (beam_size*batch_size, vocab_size)
+  gpu_span<ScoreType> next_token_scores_;  // shape (beam_size*batch_size, vocab_size)
   cuda_unique_ptr<ScoreType> next_token_scores_buffer_;
 
   cuda_host_unique_ptr<bool> done_cpu_;
@@ -43,28 +43,29 @@ struct Search_Cuda {
 struct GreedySearch_Cuda : Search_Cuda {
   GreedySearch_Cuda(const SearchParams& params);
 
-  std::span<int32_t> GetNextTokens();
+  RoamingArray<int32_t> GetNextTokens() override;
 
-  void SelectTop();
-  void SampleTopK(int k, float t) { assert(false); }
-  void SampleTopP(float p, float t);
+  void SelectTop() override;
+  void SampleTopK(int k, float t) override { assert(false); }
+  void SampleTopP(float p, float t) override;
 
  private:
   void CheckForEOS();
   void AppendNextTokensToSequences();
 
   cuda_unique_ptr<int32_t> next_tokens_buffer_;
+  std::unique_ptr<cuda::ArgMaxData> argmaxdata_;
 };
 
 struct BeamSearch_Cuda : Search_Cuda {
   BeamSearch_Cuda(const SearchParams& params);
   ~BeamSearch_Cuda();
 
-  std::span<int32_t> GetNextTokens();
-  std::span<int32_t> GetNextIndices();
+  RoamingArray<int32_t> GetNextTokens() override;
+  RoamingArray<int32_t> GetNextIndices() override;
 
-  void SelectTop();
-  void Finalize(size_t num_return_sequences, std::span<int32_t> output, std::span<float> sequence_scores);
+  void SelectTop() override;
+  void Finalize(size_t num_return_sequences, RoamingArray<int32_t> output, RoamingArray<float> sequence_scores) override;
 
   bool IsDone() const;
 

@@ -2,7 +2,7 @@
 //
 // Just implement the JSON::Element structure per JSON element you're interested in (note it's per element,
 // so a JSON tree structure requires a tree of JSON::Element objects)
-// Then call JSON::Parse passing it the root JSON element object, and a string_view of the JSON data
+// Then call JSON::Parse with the root JSON element object, and a string_view of the JSON data
 //
 // For the elements inside of an array, the names will be empty strings
 // The root element also has no names.

@@ -6,7 +6,7 @@ struct Gpt_Model;
 struct Llama_Model;
 
 struct State {
-  virtual std::span<float> Run(int current_length, std::span<const int32_t> next_tokens, std::span<const int32_t> next_indices = {}) = 0;
+  virtual RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices = {}) = 0;
 };
 
 struct Model {
@@ -16,7 +16,7 @@ struct Model {
 
   std::vector<int32_t> Generate(const SearchParams &params);
 
-  std::unique_ptr<State> CreateState(std::span<int32_t> sequence_lengths, const SearchParams& params);
+  std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths, const SearchParams& params);
 
   Config config_;
 #if USE_CUDA
