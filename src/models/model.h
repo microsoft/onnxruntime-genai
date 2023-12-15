@@ -19,9 +19,7 @@ struct Model {
   std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths, const SearchParams& params);
 
   Config config_;
-#if USE_CUDA
   cudaStream_t cuda_stream_;
-#endif
   DeviceType device_type_{DeviceType::CPU};
 
   std::unique_ptr<Gpt_Model> impl_;

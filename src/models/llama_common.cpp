@@ -26,6 +26,11 @@ void Llama_Model::InitModelParams() {
   auto past_shape = session_decoder_->GetInputTypeInfo(3)->GetTensorTypeAndShapeInfo().GetShape();
   head_count_ = static_cast<int>(past_shape[1]);
   hidden_size_ = static_cast<int>(past_shape[3]);
+
+  assert(config_.vocab_size == vocab_size_);
+  assert(config_.num_hidden_layers == layer_count_);
+  assert(config_.num_attention_heads == head_count_);
+  assert(config_.hidden_size == hidden_size_);
 }
 
 }  // namespace Generators

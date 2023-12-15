@@ -28,10 +28,9 @@ void Gpt_Model::InitModelParams() {
   hidden_size_ = static_cast<int>(past_shape[4]);
 
   assert(config_.vocab_size==vocab_size_);
-  assert(config_.n_layer==layer_count_);
-  assert(config_.n_head==head_count_);
-//  assert(config_.*==hidden_size_); // TODO: What is the config equivalent of hidden_size?
-
+  assert(config_.num_hidden_layers==layer_count_);
+  assert(config_.num_attention_heads==head_count_);
+  assert(config_.hidden_size==hidden_size_);
 }
 
 }  // namespace Generators

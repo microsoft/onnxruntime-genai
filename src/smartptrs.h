@@ -157,15 +157,29 @@ struct RoamingArray {
 // A roaming array is one that can be in CPU or GPU memory, and will copy the memory as needed to be used from anywhere
 template <typename T>
 struct RoamingArray {
-  void SetCPU(std::span<T> cpu) {
+
+  RoamingArray() = default;
+  RoamingArray(const RoamingArray& v) { Assign(v); }
+
+  RoamingArray(cpu_span<T> v) {
+    SetCPU(v);
+  }
+
+  operator cpu_span<T>() { return GetCPU(); }
+
+  void SetCPU(cpu_span<T> cpu) {
     cpu_ = cpu;
   }
 
-  std::span<T> GetCPU() {
+  cpu_span<T> GetCPU() {
     return cpu_;
   }
-
-  std::span<T> cpu_;
+ 
+ void Assign(const RoamingArray<T>& v) {
+    cpu_ = v.cpu_;
+  }
+ 
+  cpu_span<T> cpu_;
 };
 #endif
 

@@ -3,6 +3,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <assert.h>
 #include <cmath>
 #include <cstring>
@@ -29,6 +30,10 @@
 namespace Generators {
 struct Model;
 using ScoreType = float;
+
+#ifndef USE_CUDA
+using cudaStream_t=void*;
+#endif
 
 enum struct DeviceType {
   Auto,
@@ -79,11 +84,11 @@ struct Config {
   std::string model_type;
   int vocab_size{};
   int hidden_size {};
-  int n_embed{768};  // GPT version of hidden_size?
+//  int n_embed{768};  // GPT version of hidden_size?
   int num_attention_heads{};
-  int n_head{12}; // GPT version of num_attention_heads?
+//  int n_head{12}; // GPT version of num_attention_heads?
   int num_hidden_layers {};
-  int n_layer {12}; // GPT version of num_hidden_layers?
+//  int n_layer {12}; // GPT version of num_hidden_layers?
 };
 
 struct Search {

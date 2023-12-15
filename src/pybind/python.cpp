@@ -14,25 +14,6 @@ using namespace pybind11::literals;
 #define STRINGIFY(x) #x
 #define MACRO_STRINGIFY(x) STRINGIFY(x)
 
-#ifdef _WIN32
-#include <Windows.h>
-
-struct ORTCHAR_String {
-  ORTCHAR_String(const char* utf8) {
-    int wide_length = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, NULL, 0);
-    string_.resize(wide_length);
-    MultiByteToWideChar(CP_UTF8, 0, utf8, -1, &string_[0], wide_length);
-  }
-
-  operator const ORTCHAR_T*() const { return string_.c_str(); }
-
- private:
-  std::wstring string_;
-};
-#else
-#define ORTCHAR_String(string) string
-#endif
-
 struct float16 {
   uint16_t v_;
   float AsFloat32() const { return Generators::Float16ToFloat32(v_); }
@@ -260,8 +241,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_readonly("eos_token_id", &PySearchParams::eos_token_id)
       .def_readonly("vocab_size", &PySearchParams::vocab_size)
       .def_readwrite("num_beams", &PySearchParams::num_beams)
-//      .def_readwrite("batch_size", &PySearchParams::batch_size)
-//      .def_readwrite("sequence_length", &PySearchParams::sequence_length)
       .def_readwrite("max_length", &PySearchParams::max_length)
       .def_readwrite("length_penalty", &PySearchParams::length_penalty)
       .def_readwrite("early_stopping", &PySearchParams::early_stopping)

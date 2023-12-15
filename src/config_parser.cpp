@@ -54,18 +54,12 @@ struct Root_Element : JSON::Element {
     // Model Class Attributes
     else if (name == "vocab_size")
       config_.vocab_size = static_cast<int>(value);
-    else if (name == "hidden_size")
+    else if (name == "hidden_size" || name == "n_embed")
       config_.hidden_size = static_cast<int>(value);
-    else if (name == "n_embed")
-      config_.n_embed = static_cast<int>(value);
-    else if (name == "num_attention_heads" || name == "num_heads")
+    else if (name == "num_attention_heads" || name == "num_heads" || name == "n_head")
       config_.num_attention_heads = static_cast<int>(value);
-    else if (name == "n_head")
-      config_.n_head = static_cast<int>(value);
-    else if (name == "num_hidden_layers" || name == "num_layers")
+    else if (name == "num_hidden_layers" || name == "num_layers" || name == "n_layer")
       config_.num_hidden_layers = static_cast<int>(value);
-    else if (name == "n_layer")
-      config_.n_layer = static_cast<int>(value);
   }
 
   void OnBool(std::string_view name, bool value) override {

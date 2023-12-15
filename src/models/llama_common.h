@@ -4,9 +4,7 @@ namespace Generators {
 
 struct Llama_Model {
   Llama_Model(OrtEnv& ort_env, Config& config, OrtSessionOptions& session_options);
-#ifdef USE_CUDA
   cudaStream_t cuda_stream_{};
-#endif
 
   DeviceType GetDeviceType() const { return device_type_; }
 

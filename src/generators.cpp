@@ -5,7 +5,9 @@
 #include "sequences.h"
 #include "models/model.h"
 #include "search.h"
+#if USE_CUDA
 #include "search_cuda.h"
+#endif
 
 namespace Generators {
 

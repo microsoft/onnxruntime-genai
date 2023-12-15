@@ -128,15 +128,9 @@ target_link_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort)
 target_link_libraries(pybind PRIVATE Generators Models ${ONNXRUNTIME_LIB})
 set_target_properties(pybind PROPERTIES OUTPUT_NAME "onnxruntime_genai")
 
-# Microsoft.GSL::GSL
-# target_include_directories(Generators PRIVATE ${safeint_SOURCE_DIR})
-
-# Turn on multiple processor build option for Visual C++
+# Visual C++ - /MP Multiple process build, /WX Warnings as errors
 if(MSVC)
-    target_compile_options(Models PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/MP>")
-    target_compile_options(Generators PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/MP>")
-    target_compile_options(Tests PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/MP>")
-    target_compile_options(pybind PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/MP>")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /MP /w15038 /WX")
 endif()
 
  # Copy the onnxruntime binaries into the build folder so it's found on launch

@@ -635,7 +635,7 @@ struct OrtValue
    * \param shape_len The number of tensor shape dimensions.
    */
   template <typename T>
-  static std::unique_ptr<OrtValue> CreateTensor(const OrtMemoryInfo& info, T* p_data, size_t p_data_element_count, const int64_t* shape, size_t shape_len);
+  static std::unique_ptr<OrtValue> CreateTensor(const OrtMemoryInfo& info, std::span<T> p_data, std::span<const int64_t> shape);
 
   /** \brief Creates a tensor with a user supplied buffer. Wraps OrtApi::CreateTensorWithDataAsOrtValue.
    * \param info Memory description of where the p_data buffer resides (CPU vs GPU etc).
@@ -645,7 +645,7 @@ struct OrtValue
    * \param shape_len The number of tensor shape dimensions.
    * \param type The data type.
    */
-  static std::unique_ptr<OrtValue> CreateTensor(const OrtMemoryInfo& info, void* p_data, size_t p_data_byte_count, const int64_t* shape, size_t shape_len,
+  static std::unique_ptr<OrtValue> CreateTensor(const OrtMemoryInfo& info, void* p_data, size_t p_data_byte_count, std::span<const int64_t> shape,
     ONNXTensorElementDataType type);
 
   /** \brief Creates a tensor using a supplied OrtAllocator. Wraps OrtApi::CreateTensorAsOrtValue.
@@ -655,7 +655,7 @@ struct OrtValue
    * \param shape_len The number of tensor shape dimensions.
    */
   template <typename T>
-  static std::unique_ptr<OrtValue> CreateTensor(OrtAllocator& allocator, const int64_t* shape, size_t shape_len);
+  static std::unique_ptr<OrtValue> CreateTensor(OrtAllocator& allocator, std::span<const int64_t> shape);
 
   /** \brief Creates a tensor using a supplied OrtAllocator. Wraps OrtApi::CreateTensorAsOrtValue.
    * \param allocator The allocator to use.
@@ -663,7 +663,7 @@ struct OrtValue
    * \param shape_len The number of tensor shape dimensions.
    * \param type The data type.
    */
-  static std::unique_ptr<OrtValue> CreateTensor(OrtAllocator& allocator, const int64_t* shape, size_t shape_len, ONNXTensorElementDataType type);
+  static std::unique_ptr<OrtValue> CreateTensor(OrtAllocator& allocator, std::span<const int64_t> shape, ONNXTensorElementDataType type);
 
   static std::unique_ptr<OrtValue> CreateMap(OrtValue& keys, OrtValue& values);      ///< Wraps OrtApi::CreateValue
   static std::unique_ptr<OrtValue> CreateSequence(const OrtValue* const* values, size_t count);  ///< Wraps OrtApi::CreateValue

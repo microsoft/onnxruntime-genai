@@ -1090,25 +1090,25 @@ inline void OrtValue::FillSparseTensorBlockSparse(const OrtMemoryInfo& data_mem_
 #endif  // !defined(DISABLE_SPARSE_TENSORS)
 
 template <typename T>
-inline std::unique_ptr<OrtValue> OrtValue::CreateTensor(const OrtMemoryInfo& info, T* p_data, size_t p_data_element_count, const int64_t* shape, size_t shape_len) {
-  return CreateTensor(info, p_data, p_data_element_count * sizeof(T), shape, shape_len, Ort::TypeToTensorType<T>::type);
+inline std::unique_ptr<OrtValue> OrtValue::CreateTensor(const OrtMemoryInfo& info, std::span<T> p_data, std::span<const int64_t> shape) {
+  return CreateTensor(info, p_data.data(), p_data.size_bytes(), shape, Ort::TypeToTensorType<T>::type);
 }
 
-inline std::unique_ptr<OrtValue> OrtValue::CreateTensor(const OrtMemoryInfo& info, void* p_data, size_t p_data_byte_count, const int64_t* shape, size_t shape_len,
+inline std::unique_ptr<OrtValue> OrtValue::CreateTensor(const OrtMemoryInfo& info, void* p_data, size_t p_data_byte_count, std::span<const int64_t> shape,
                                  ONNXTensorElementDataType type) {
   OrtValue* out;
-  Ort::ThrowOnError(Ort::api->CreateTensorWithDataAsOrtValue(&info, p_data, p_data_byte_count, shape, shape_len, type, &out));
+  Ort::ThrowOnError(Ort::api->CreateTensorWithDataAsOrtValue(&info, p_data, p_data_byte_count, shape.data(), shape.size(), type, &out));
   return std::unique_ptr<OrtValue>{out};
 }
 
 template <typename T>
-inline std::unique_ptr<OrtValue> OrtValue::CreateTensor(OrtAllocator& allocator, const int64_t* shape, size_t shape_len) {
-  return CreateTensor(allocator, shape, shape_len, Ort::TypeToTensorType<T>::type);
+inline std::unique_ptr<OrtValue> OrtValue::CreateTensor(OrtAllocator& allocator, std::span<const int64_t> shape) {
+  return CreateTensor(allocator, shape, Ort::TypeToTensorType<T>::type);
 }
 
-inline std::unique_ptr<OrtValue> OrtValue::CreateTensor(OrtAllocator& allocator, const int64_t* shape, size_t shape_len, ONNXTensorElementDataType type) {
+inline std::unique_ptr<OrtValue> OrtValue::CreateTensor(OrtAllocator& allocator, std::span<const int64_t> shape, ONNXTensorElementDataType type) {
   OrtValue* out;
-  Ort::ThrowOnError(Ort::api->CreateTensorAsOrtValue(&allocator, shape, shape_len, type, &out));
+  Ort::ThrowOnError(Ort::api->CreateTensorAsOrtValue(&allocator, shape.data(), shape.size(), type, &out));
   return std::unique_ptr<OrtValue>{out};
 }
 
