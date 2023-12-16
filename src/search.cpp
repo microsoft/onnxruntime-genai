@@ -8,10 +8,9 @@
 
 namespace Generators {
 
-Search_Cpu::Search_Cpu(SearchParams params)
+Search_Cpu::Search_Cpu(const SearchParams& params)
     : params_{params},
       sequences_{params.input_ids, params.batch_size, params.num_beams, params_.max_length} {
-
   auto batch_beam_size = params.BatchBeamSize();
 
   sequence_lengths_buffer_ = AllocateArray<int32_t>(batch_beam_size, &sequence_lengths_);
@@ -21,7 +20,7 @@ Search_Cpu::Search_Cpu(SearchParams params)
   memset(next_token_scores_.data(), 0, next_token_scores_.size_bytes());
 }
 
-GreedySearch_Cpu::GreedySearch_Cpu(SearchParams params)
+GreedySearch_Cpu::GreedySearch_Cpu(const SearchParams& params)
     : Search_Cpu(params) {
   next_tokens_buffer_ = AllocateArray<int32_t>(params.batch_size, &next_tokens_);
   memset(next_tokens_.data(), 0, next_tokens_.size_bytes());
@@ -30,7 +29,7 @@ GreedySearch_Cpu::GreedySearch_Cpu(SearchParams params)
   memset(eos_seen_.data(), 0, eos_seen_.size_bytes());
 }
 
-BeamSearch_Cpu::BeamSearch_Cpu(SearchParams params)
+BeamSearch_Cpu::BeamSearch_Cpu(const SearchParams& params)
     : Search_Cpu(params) {
   assert(params_.num_beams > 1);  // If 1, use GreedySearch
   beam_scorer_ = std::make_unique<BeamSearchScorer>(params_);
@@ -39,7 +38,7 @@ BeamSearch_Cpu::BeamSearch_Cpu(SearchParams params)
 BeamSearch_Cpu::~BeamSearch_Cpu() = default;
 
 void Search_Cpu::SetLogits(RoamingArray<float> logits_unk) {
-  cpu_span<float> logits=logits_unk;
+  cpu_span<float> logits = logits_unk;
   // Logits has shape (batch_size, input_length, vocab_size),
   // where input_length equals to parameters_->sequence_length for first subgraph call, and 1 for the remaining calls.
 
@@ -149,7 +148,7 @@ void GreedySearch_Cpu::SelectTop() {
     if (PadIfAlreadyEOS(batch_id))
       continue;
 
-    std::span<ScoreType> scores=next_token_scores_.subspan(batch_id*params_.vocab_size, params_.vocab_size);
+    std::span<ScoreType> scores = next_token_scores_.subspan(batch_id * params_.vocab_size, params_.vocab_size);
     int32_t token = static_cast<int32_t>(std::distance(scores.begin(), std::max_element(scores.begin(), scores.end())));
     SetNextToken(batch_id, token);
   }
@@ -227,14 +226,14 @@ void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
     // Sample a probability threshold
     float threshold = dis(gen);
 
-    int32_t token=0;
+    int32_t token = 0;
     // Find the first token where the cumulative probability exceeds the threshold
-    for (int i = 0; i < scores.size();i++) {
+    for (int i = 0; i < scores.size(); i++) {
       threshold -= scores[indices[i]];
-      if (threshold>0)
+      if (threshold > 0)
         continue;
 
-      token=indices[i];
+      token = indices[i];
       break;
     }
 
@@ -245,14 +244,13 @@ void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
 }
 
 bool GreedySearch_Cpu::PadIfAlreadyEOS(size_t batch_id) {
-   // If this batch entry has already seen the EOS token, append the pad token
+  // If this batch entry has already seen the EOS token, append the pad token
   if (!eos_seen_[batch_id])
     return false;
 
   next_tokens_[batch_id] = params_.pad_token_id;
   return true;
 }
-
 
 void GreedySearch_Cpu::SetNextToken(size_t batch_id, int32_t token) {
   next_tokens_[batch_id] = token;

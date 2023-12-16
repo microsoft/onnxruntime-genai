@@ -12,7 +12,7 @@ struct Gpt_Cuda : State {
  private:
   void UpdateInputs(std::span<const int32_t> next_tokens, std::span<const int32_t> beam_indices, int current_length);
 
-  SearchParams search_params_;
+  const SearchParams& search_params_;
   bool first_run_{true};
 
   Gpt_Model* model_;

@@ -1,13 +1,13 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
+#include <iostream>
 #include "../generators.h"
 #include "../search.h"
 #if USE_CUDA
 #include "../search_cuda.h"
 #endif
 #include "../models/model.h"
-#include <iostream>
 
 using namespace pybind11::literals;
 
@@ -129,12 +129,27 @@ void Declare_DeviceArray(pybind11::module& m, const char* name) {
 struct PySearchParams : SearchParams {
   // Turn the python py_input_ids_ into the low level parameters
   void Prepare() {
-    batch_size = static_cast<int>(py_input_ids_.shape(0));
-    sequence_length = static_cast<int>(py_input_ids_.shape(1));
-    input_ids = ToSpan(py_input_ids_);
+    // TODO: This will switch to using the variant vs being ifs
+    if (py_input_ids_.size()!=0) {
+      batch_size = static_cast<int>(py_input_ids_.shape(0));
+      sequence_length = static_cast<int>(py_input_ids_.shape(1));
+      input_ids = ToSpan(py_input_ids_);
+    }
+
+    if (py_whisper_input_features_.size()!=0) {
+      SearchParams::Whisper& whisper = inputs.emplace<SearchParams::Whisper>();
+      std::span<const int64_t> shape(py_whisper_input_features_.shape(), py_whisper_input_features_.ndim());
+      whisper.input_features = OrtValue::CreateTensor<float>(Ort::Allocator::GetWithDefaultOptions().GetInfo(), ToSpan(py_whisper_input_features_), shape);
+      whisper.decoder_input_ids = ToSpan(py_whisper_decoder_input_ids_);
+      batch_size = 1;
+      sequence_length = static_cast<int>(py_whisper_decoder_input_ids_.shape(1));
+      input_ids = ToSpan(py_whisper_decoder_input_ids_);
+    }
   }
 
   pybind11::array_t<int32_t> py_input_ids_;
+  pybind11::array_t<float> py_whisper_input_features_;
+  pybind11::array_t<int32_t> py_whisper_decoder_input_ids_;
 };
 
 struct PySearch {
@@ -245,6 +260,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_readwrite("length_penalty", &PySearchParams::length_penalty)
       .def_readwrite("early_stopping", &PySearchParams::early_stopping)
       .def_readwrite("input_ids", &PySearchParams::py_input_ids_)
+      .def_readwrite("whisper_input_features", &PySearchParams::py_whisper_input_features_)
+      .def_readwrite("whisper_decoder_input_ids", &PySearchParams::py_whisper_decoder_input_ids_)
 #if 0
       .def_property(
           "input_ids",

@@ -13,7 +13,7 @@ private:
   void UpdateInputs(std::span<const int32_t> next_tokens, std::span<const int32_t> beam_indices, int current_length);
 
   Llama_Model* model_;
-  SearchParams search_params_;
+  const SearchParams& search_params_;
   bool first_run_{true};
 
   Ort::Allocator& allocator_cpu_;

@@ -2,14 +2,13 @@
 #include "../search.h"
 #include "llama_cpu.h"
 #include "debugging.h"
-#include <iostream>
 
 namespace Generators {
 
 Llama_State::Llama_State(Llama_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const SearchParams& search_params)
     : model_{&model}, 
       search_params_{search_params},
-      kv_cache_{search_params, model.config_, allocator_cpu_, model.cuda_stream_, model.score_type_} {
+      kv_cache_{search_params, model.config_, allocator_cpu_, model.cuda_stream_, model.score_type_, model.past_names_, model.present_names_} {
 
   assert(model.score_type_ == Ort::TypeToTensorType<float>::type);
   int64_t input_ids_shape[] = {search_params_.batch_size, search_params_.sequence_length};

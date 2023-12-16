@@ -4,6 +4,7 @@ namespace Generators {
 
 struct Gpt_Model;
 struct Llama_Model;
+struct Whisper_Model;
 
 struct State {
   virtual RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices = {}) = 0;
@@ -24,6 +25,7 @@ struct Model {
 
   std::unique_ptr<Gpt_Model> impl_;
   std::unique_ptr<Llama_Model> impl_llama_;
+  std::unique_ptr<Whisper_Model> impl_whisper_;
 };
 
 }

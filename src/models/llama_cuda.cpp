@@ -2,8 +2,6 @@
 #include "../search.h"
 #include "llama_cuda.h"
 #include "debugging.h"
-#include <iostream>
-#include <numeric>
 
 namespace Generators {
 
@@ -35,7 +33,7 @@ Llama_Cuda::Llama_Cuda(Llama_Model& model, RoamingArray<int32_t> sequence_length
       allocator_cpu_{Ort::Allocator::GetWithDefaultOptions()},
       memory_info_cuda_{OrtMemoryInfo::Create("Cuda", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault)},
       allocator_cuda_{Ort::Allocator::Create(*model_->session_decoder_, *memory_info_cuda_)},
-      kv_cache_{search_params, model.config_, *allocator_cuda_, model.cuda_stream_, model.score_type_} {
+      kv_cache_{search_params, model.config_, *allocator_cuda_, model.cuda_stream_, model.score_type_, model.past_names_, model.present_names_} {
 
   // Allocate position_ids and attention_mask based on shape of input_ids
   auto element_type = Ort::TypeToTensorType<int64_t>::type;

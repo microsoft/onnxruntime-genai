@@ -45,18 +45,20 @@ Config::Config(const std::filesystem::path& path) : config_path{path} {
   ParseConfig(path / "config.json", *this);
 }
 
-SearchParams::SearchParams(const Model& model) :
-  pad_token_id{ model.config_.pad_token_id },
-  eos_token_id{ model.config_.eos_token_id },
-  vocab_size{ model.config_.vocab_size },
-  max_length{ model.config_.max_length },
-  length_penalty{ model.config_.length_penalty },
-  early_stopping{ model.config_.early_stopping },
-  device_type{ model.device_type_ }
+SearchParams::SearchParams(const Model& model)
+    : pad_token_id{model.config_.pad_token_id},
+      eos_token_id{model.config_.eos_token_id},
+      vocab_size{model.config_.vocab_size},
+      max_length{model.config_.max_length},
+      length_penalty{model.config_.length_penalty},
+      early_stopping{model.config_.early_stopping},
+      num_beams{model.config_.num_beams},
+      device_type{model.device_type_}
 #if USE_CUDA
-  ,cuda_stream{model.cuda_stream_}
+      ,
+      cuda_stream{model.cuda_stream_}
 #endif
- {
+{
 }
 
 ProviderOptions GetDefaultProviderOptions(DeviceType device_type) {
@@ -73,20 +75,20 @@ ProviderOptions GetDefaultProviderOptions(DeviceType device_type) {
 #endif
 
   return options;
-  }
+}
 
 std::unique_ptr<Search> SearchParams::CreateSearch() const {
 #if USE_CUDA
   if (device_type == DeviceType::CUDA) {
-    if (num_beams>1)
+    if (num_beams > 1)
       return std::make_unique<BeamSearch_Cuda>(*this);
     return std::make_unique<GreedySearch_Cuda>(*this);
   }
 #endif
 
-  if (num_beams>1)
+  if (num_beams > 1)
     return std::make_unique<BeamSearch_Cpu>(*this);
   return std::make_unique<GreedySearch_Cpu>(*this);
 }
 
-}
+}  // namespace Generators

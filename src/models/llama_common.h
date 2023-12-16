@@ -19,6 +19,9 @@ struct Llama_Model {
   bool logits_uses_seq_len_{};  // Logits shape is [... seq_len, vocab_size ] vs [... 1, vocab_size ]
   ONNXTensorElementDataType score_type_;
 
+  std::array<const char*, 2> past_names_{"past_key_values.%d.key", "past_key_values.%d.value"};
+  std::array<const char*, 2> present_names_{"present.%d.key", "present.%d.value"};
+
  private:
   void InitModelParams();
 

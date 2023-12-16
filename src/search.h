@@ -5,7 +5,7 @@ namespace Generators {
 struct BeamSearchScorer;
 
 struct Search_Cpu : Search {
-  Search_Cpu(SearchParams params);
+  Search_Cpu(const SearchParams& params);
 
   int GetSequenceLength() const override;
   RoamingArray<int32_t> GetSequenceLengths() override { return sequence_lengths_; }
@@ -19,7 +19,7 @@ struct Search_Cpu : Search {
   std::span<ScoreType> GetScores(int batch_beam_index);
   Sequences& GetSequences() { return sequences_; }
 
-  SearchParams params_;
+  const SearchParams& params_;
 
   cpu_span<int32_t> sequence_lengths_;  // shape (beam_size*batch_size)
   std::unique_ptr<int32_t[]> sequence_lengths_buffer_;
@@ -34,7 +34,7 @@ struct Search_Cpu : Search {
 };
 
 struct GreedySearch_Cpu : Search_Cpu {
-  GreedySearch_Cpu(SearchParams params);
+  GreedySearch_Cpu(const SearchParams& params);
 
   RoamingArray<int32_t> GetNextTokens() override;
 
@@ -56,7 +56,7 @@ struct GreedySearch_Cpu : Search_Cpu {
 };
 
 struct BeamSearch_Cpu : Search_Cpu {
-  BeamSearch_Cpu(SearchParams params);
+  BeamSearch_Cpu(const SearchParams& params);
   ~BeamSearch_Cpu();
 
   RoamingArray<int32_t> GetNextTokens() override;

@@ -27,18 +27,19 @@ inputs = {
     "decoder_input_ids": np.array([forced_decoder_ids], dtype=np.int32)
 }
 
-# device_type = og.DeviceType.CPU
-device_type = og.DeviceType.CUDA
+device_type = og.DeviceType.CPU
+# device_type = og.DeviceType.CUDA
 
 print("Loading model...")
 model=og.Model("../../test_models/whisper-tiny", device_type)
 print("Model loaded")
 
 params=og.SearchParams(model)
-params.max_length = inputs.max_length
-params.length_penalty = inputs.length_penalty
-params.whisper.input_features=inputs.input_features
-params.whisper.decoder_input_ids=inputs.decoder_input_ids
+params.num_beams = 1 # inputs["num_beams"]
+params.max_length = inputs["max_length"]
+params.length_penalty = inputs["length_penalty"]
+params.whisper_input_features=inputs["input_features"]
+params.whisper_decoder_input_ids=inputs["decoder_input_ids"]
 
 search=params.CreateSearch()
 state=model.CreateState(search.GetSequenceLengths(), params)
@@ -46,16 +47,21 @@ state=model.CreateState(search.GetSequenceLengths(), params)
 print("Processing")
 
 while not search.IsDone():
-    search.SetLogits(state.Run(search.GetSequenceLength(), search.GetNextTokens(), search.GetNextIndices()))
-    search.Apply_Repetition_Penalty(input.repetition_penalty)
-    time_stampe=state.GetTimeStamps()
-    do_stuff_with_time_stamps()
+    logits=state.Run(search.GetSequenceLength(), search.GetNextTokens()) # , search.GetNextIndices()) Can't use GetNextIndices with num_beams=1
+    # Note, if using beam search the logic below only affects the first beam entry
+    logits.GetArray()[931]=-999 # Force ignore ♪ token
+    logits.GetArray()[50257]=-999 # Force ignore EOS token
+    search.SetLogits(logits)
+
+    # search.Apply_Repetition_Penalty(input.repetition_penalty)
+    # time_stampe=state.Whisper().GetTimeStamps() ? Hypothetical
+    # do_stuff_with_time_stamps()
     search.SelectTop()
 
-pt_transcription = processor.batch_decode(pt_outputs, skip_special_tokens=True)
-ort_expected_transcription = (
-    " Mr. Quilter is the apostle of the middle classes, and we are glad to welcome his gospel."
-)
+ort_expected_transcription = (" Mr. Quilter is the apostle of the middle classes, and we are glad to welcome his gospel.")
 
-og_transcription = processor.batch_decode(search.GetSequence(0).GetCPU(), skip_special_tokens=True)
+print(search.GetSequence(0).GetArray())
+og_transcription = processor.decode(search.GetSequence(0).GetArray(), skip_special_tokens=True)
 print(og_transcription)
+print("Expected transcription:")
+print(ort_expected_transcription)

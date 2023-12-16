@@ -2,37 +2,38 @@
 #include "../search.h"
 #include "gpt_cpu.h"
 #include "debugging.h"
-#include <iostream>
 
 namespace Generators {
 
 template <typename T>
-static void ExpandInputs(const OrtValue& input, int num_beams, OrtAllocator& allocator, std::unique_ptr<OrtValue>& expanded) {
+void ExpandInputs(const OrtValue& input, int num_beams, OrtAllocator& allocator, std::unique_ptr<OrtValue>& expanded) {
   // Input shape (batch_size, sequence_length). The input is required with data type T.
   // Output shape (batch_size * num_beams, sequence_length)
 
   auto input_type_info = input.GetTensorTypeAndShapeInfo();
   auto input_shape = input_type_info->GetShape();
   const int64_t batch_size = input_shape[0];
-  const int64_t sequence_length = input_shape[1];
+  const int64_t data_size = input_type_info->GetElementCount()/batch_size;
 
-  int64_t dims[] = {batch_size * num_beams, sequence_length};
+  input_shape[0]*=num_beams;
 
   auto element_type = input_type_info->GetElementType();
   assert(element_type == Ort::TypeToTensorType<T>::type);
 
-  expanded = OrtValue::CreateTensor<T>(allocator, dims);
+  expanded = OrtValue::CreateTensor<T>(allocator, input_shape);
 
   const T* input_data = input.GetTensorData<T>();
   T* expanded_data = expanded->GetTensorMutableData<T>();
   T* target = expanded_data;
   for (int i = 0; i < batch_size; i++) {
     for (int j = 0; j < num_beams; j++) {
-      memcpy(target, input_data + i * sequence_length, sizeof(T) * sequence_length);
-      target += sequence_length;
+      memcpy(target, input_data + i * data_size, sizeof(T) * data_size);
+      target += data_size;
     }
   }
 }
+
+template void ExpandInputs<float>(const OrtValue& input, int num_beams, OrtAllocator& allocator, std::unique_ptr<OrtValue>& expanded);
 
 Gpt_State::Gpt_State(Gpt_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const SearchParams& search_params)
     : search_params_{search_params},

@@ -9,6 +9,7 @@
 #include "gpt_common.h"
 #include "gpt_cpu.h"
 #include "llama_cpu.h"
+#include "whisper_cpu.h"
 
 namespace Generators {
 
@@ -25,11 +26,13 @@ Model::Model(OrtEnv& ort_env, const char* config_path, const ProviderOptions* pr
 #endif
   }
 
-  if (config_.model_type == "gpt2") {
+  if (config_.model_type == "gpt2")
     impl_ = std::make_unique<Gpt_Model>(ort_env, config_, *session_options);
-  } else if (config_.model_type == "llama") {
+  else if (config_.model_type == "llama")
     impl_llama_ = std::make_unique<Llama_Model>(ort_env, config_, *session_options);
-  } else
+  else if (config_.model_type == "whisper")
+    impl_whisper_ = std::make_unique<Whisper_Model>(ort_env, config_, *session_options);
+  else
     throw std::runtime_error("Unsupported model_type in config.json: " + config_.model_type);
 }
 
@@ -44,6 +47,14 @@ std::unique_ptr<State> Model::CreateState(RoamingArray<int32_t> sequence_lengths
 #endif
       return std::make_unique<Llama_State>(*impl_llama_, sequence_lengths, params);
 
+  } else if(impl_whisper_) {
+#if 0
+//#if USE_CUDA
+    if (device_type_ == DeviceType::CUDA)
+      return std::make_unique<Whisper_Cuda>(*impl_whisper_, sequence_lengths, params);
+    else
+#endif
+      return std::make_unique<Whisper_State>(*impl_whisper_, sequence_lengths, params);
   } else {
 #if USE_CUDA
     if (device_type_ == DeviceType::CUDA)

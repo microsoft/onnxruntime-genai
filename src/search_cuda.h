@@ -7,13 +7,16 @@ namespace Generators {
 struct BeamSearchScorer_Cuda;
 
 struct Search_Cuda : Search {
-  Search_Cuda(const SearchParams &params);
+  Search_Cuda(const SearchParams& params);
 
   int GetSequenceLength() const override;
   RoamingArray<int32_t> GetSequenceLengths() override { return sequence_lengths_; }
   RoamingArray<int32_t> GetSequence(int index) override { return sequences_.GetSequence(index); }
 
-  bool IsDone() const { cudaStreamSynchronize(params_.cuda_stream); return *done_cpu_; } // TODO: Use an event
+  bool IsDone() const {
+    cudaStreamSynchronize(params_.cuda_stream);
+    return *done_cpu_;
+  }  // TODO: Use an event
   void SetLogits(RoamingArray<ScoreType> logits);
   // Extra scoring steps go here
 
@@ -22,7 +25,7 @@ struct Search_Cuda : Search {
   std::span<ScoreType> GetScores();
   Sequences_Cuda& GetSequences() { return sequences_; }
 
-  SearchParams params_;
+  const SearchParams& params_;
 
   cpu_span<int32_t> sequence_lengths_;  // shape (beam_size*batch_size)
   std::unique_ptr<int32_t[]> sequence_lengths_buffer_;

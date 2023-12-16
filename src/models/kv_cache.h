@@ -29,16 +29,16 @@ struct KV_Cache_Combined {
 };
 
 struct KV_Cache {
-  KV_Cache(const SearchParams& search_params, const Config& config, Ort::Allocator& allocator, cudaStream_t cuda_stream, ONNXTensorElementDataType score_type);
+  KV_Cache(const SearchParams& search_params, const Config& config, Ort::Allocator& allocator, cudaStream_t cuda_stream, ONNXTensorElementDataType score_type,
+           std::span<const char*> past_names, std::span<const char*> present_names, std::span<const char*> past_cross_names = {}, std::span<const char*> present_cross_names = {});
   void Update(std::span<const int32_t> beam_indices, int current_length);
   template <typename ScoreType>
   void PickPastState(std::span<const int32_t> beam_indices, int index);
   void PickPastState(std::span<const int32_t> beam_indices, int index);
 
-  const char* past_key_name_{"past_key_values.%d.key"};
-  const char* past_value_name_{"past_key_values.%d.value"};
-  const char* present_key_name_{"present.%d.key"};
-  const char* present_value_name_{"present.%d.value"};
+  std::span<const char*> past_names_; // past key name/past value name
+  std::span<const char*> present_names_; // present key name/present value name
+  std::span<const char*> past_cross_names_, present_cross_names_;
 
   Ort::Allocator& allocator_;
   cudaStream_t cuda_stream_;
@@ -47,11 +47,12 @@ struct KV_Cache {
   int layer_count_;
   bool is_cuda_;
 
-  std::array<int64_t, 4> shape_;
+  std::array<int64_t, 4> shape_, cross_shape_;
 
   std::unique_ptr<OrtValue> empty_past_;
-  std::vector<std::unique_ptr<OrtValue>> pasts_, presents_;
+  std::vector<std::unique_ptr<OrtValue>> pasts_, presents_, crosses_;
   std::vector<std::string> input_name_strings_, output_name_strings_;
+  std::vector<std::string> input_cross_name_strings_, output_cross_name_strings_;
 };
 
 } // namespace Generators

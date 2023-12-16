@@ -89,32 +89,51 @@ void KV_Cache_Combined::PickPastState(std::span<const int32_t> beam_indices, int
     PickPastState<Ort::Float16_t>(beam_indices, index);
 }
 
-KV_Cache::KV_Cache(const SearchParams& search_params, const Config& config, Ort::Allocator& allocator, cudaStream_t cuda_stream, ONNXTensorElementDataType score_type)
-    : allocator_{allocator},
+KV_Cache::KV_Cache(const SearchParams& search_params, const Config& config, Ort::Allocator& allocator, cudaStream_t cuda_stream, ONNXTensorElementDataType score_type,
+                   std::span<const char*> past_names, std::span<const char*> present_names, std::span<const char*> past_cross_names, std::span<const char*> present_cross_names)
+    : past_names_{past_names},
+      present_names_{present_names},
+      past_cross_names_{past_cross_names},
+      present_cross_names_{present_cross_names},
+      allocator_{allocator},
       cuda_stream_{cuda_stream},
       score_type_{score_type},
       layer_count_{config.num_hidden_layers},
       is_cuda_{allocator_.GetInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU},
       shape_{search_params.batch_size * search_params.num_beams, config.num_attention_heads, 0, config.hidden_size},
+      cross_shape_{search_params.batch_size * search_params.num_beams, config.num_attention_heads, 1500, config.hidden_size},
       empty_past_{OrtValue::CreateTensor(allocator, shape_, score_type_)} {
   pasts_.resize(layer_count_ * 2);
   presents_.reserve(layer_count_ * 2);
 
   shape_[2] = search_params.sequence_length;
+
   for (int i = 0; i < layer_count_; ++i) {
     presents_.push_back(OrtValue::CreateTensor(allocator, shape_, score_type_));
     presents_.push_back(OrtValue::CreateTensor(allocator, shape_, score_type_));
 
     char string[32];
-    snprintf(string, std::size(string), past_key_name_, i);
-    input_name_strings_.push_back(string);
-    snprintf(string, std::size(string), past_value_name_, i);
-    input_name_strings_.push_back(string);
+    for(auto *name : past_names_) {
+      snprintf(string, std::size(string), name, i);
+      input_name_strings_.push_back(string);
+    }
+    for (auto* name : present_names_) {
+      snprintf(string, std::size(string), name, i);
+      output_name_strings_.push_back(string);
+    }
+    if (!past_cross_names_.empty()) {
+      crosses_.push_back(OrtValue::CreateTensor(allocator, cross_shape_, score_type_));
+      crosses_.push_back(OrtValue::CreateTensor(allocator, cross_shape_, score_type_));
 
-    snprintf(string, std::size(string), present_key_name_, i);
-    output_name_strings_.push_back(string);
-    snprintf(string, std::size(string), present_value_name_, i);
-    output_name_strings_.push_back(string);
+      for (auto* name : past_cross_names_) {
+        snprintf(string, std::size(string), name, i);
+        input_cross_name_strings_.push_back(string);
+      }
+      for (auto* name : present_cross_names_) {
+        snprintf(string, std::size(string), name, i);
+        output_cross_name_strings_.push_back(string);
+      }
+    }
   }
 }
 
