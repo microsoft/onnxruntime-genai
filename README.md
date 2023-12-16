@@ -12,33 +12,28 @@ Users can call a high level `generate()` method, or provide their own customizat
 
 ## GPT C++ Usage Example
 
-    std::vector<int64_t> input_ids_shape{2, 4};
     std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
-
-    auto input_ids_tensor = OrtValue::CreateTensor(
-            *info, input_ids.data(), input_ids.size(), input_ids_shape.data(), input_ids_shape.size());
      
-    Generators::Gpt_Model model(*ort_env, ORT_TSTR("models/gpt2_fp32.onnx"));
+    Generators::Model model(*ort_env, "models/gpt2_fp32.onnx");
 
-    Generators::SearchParams params;
-    params.batch_size = static_cast<int>(input_ids_shape[0]);
-    params.sequence_length = static_cast<int>(input_ids_shape[1]);
+    Generators::SearchParams params{model};
+    params.batch_size = 2;
+    params.sequence_length = 4;
     params.input_ids = input_ids;
     params.max_length = max_length;
     params.num_beams = 4;
-    params.vocab_size = model.GetVocabSize();
  
-    Generators::BeamSearch search{params};
-    Generators::Gpt_State state{search.sequence_lengths_, params};
+    auto search = params.CreateSearch();
+    auto state = model.CreateState{search->GetSequenceLengths(), params};
  
-    while (!search.IsDone()) {
-      search.SetLogits(state.Run(search.GetNextTokens(), search.GetNextIndices(), search.GetSequenceLength());
+    while (!search->IsDone()) {
+      search->SetLogits(state->Run(search.GetNextTokens(), search.GetNextIndices(), search.GetSequenceLength());
  
       // Scoring
-      Processors::MinLength(search, 5);
-      Processors::RepetitionPenalty(search, 1.1f);
+      search->Apply_MinLength(5);
+      search->Apply_RepetitionPenalty(1.1f);
  
-      search.SelectTop();
+      search->SelectTop();
     }
 
     // Access resulting sequences of tokens
@@ -58,19 +53,14 @@ Users can call a high level `generate()` method, or provide their own customizat
     tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
     input_tokens = tokenizer.encode(text, return_tensors='np')
 
-    model=og.Gpt_Model("../../python/onnx_models/gpt2.onnx", og.DeviceType.CUDA)
+    model=og.Model("../../python/onnx_models", og.DeviceType.CUDA)
 
-    params=og.SearchParams()
+    params=og.SearchParams(model)
     params.max_length = 64
-    params.batch_size = input_tokens.shape[0]
-    params.sequence_length = input_tokens.shape[1]
     params.input_ids = input_tokens
-    params.vocab_size = model.GetVocabSize()
-    params.eos_token_id = tokenizer.eos_token_id
-    params.pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else params.eos_token_id
 
-    search=og.GreedySearch(params, model.DeviceType)
-    state=og.Gpt_State(model, search.GetSequenceLengths(), params)
+    search=params.CreateSearch()
+    state=model.CreateState(model, search.GetSequenceLengths(), params)
 
     print("Inputs:")
     print(input_tokens)
