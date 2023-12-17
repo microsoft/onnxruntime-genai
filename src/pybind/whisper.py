@@ -35,7 +35,7 @@ model=og.Model("../../test_models/whisper-tiny", device_type)
 print("Model loaded")
 
 params=og.SearchParams(model)
-params.num_beams = 1 # inputs["num_beams"]
+params.num_beams = inputs["num_beams"]
 params.max_length = inputs["max_length"]
 params.length_penalty = inputs["length_penalty"]
 params.whisper_input_features=inputs["input_features"]
@@ -47,10 +47,9 @@ state=model.CreateState(search.GetSequenceLengths(), params)
 print("Processing")
 
 while not search.IsDone():
-    logits=state.Run(search.GetSequenceLength(), search.GetNextTokens()) # , search.GetNextIndices()) Can't use GetNextIndices with num_beams=1
+    logits=state.Run(search.GetSequenceLength(), search.GetNextTokens(), search.GetNextIndices())
     # Note, if using beam search the logic below only affects the first beam entry
-    logits.GetArray()[931]=-999 # Force ignore ♪ token
-    logits.GetArray()[50257]=-999 # Force ignore EOS token
+    # logits.GetArray()[50257]=-999 # Force ignore EOS token
     search.SetLogits(logits)
 
     # search.Apply_Repetition_Penalty(input.repetition_penalty)
@@ -60,7 +59,6 @@ while not search.IsDone():
 
 ort_expected_transcription = (" Mr. Quilter is the apostle of the middle classes, and we are glad to welcome his gospel.")
 
-print(search.GetSequence(0).GetArray())
 og_transcription = processor.decode(search.GetSequence(0).GetArray(), skip_special_tokens=True)
 print(og_transcription)
 print("Expected transcription:")

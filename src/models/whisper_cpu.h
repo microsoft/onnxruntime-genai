@@ -46,10 +46,8 @@ struct Whisper_State : State {
   Ort::Allocator& allocator_cpu_{Ort::Allocator::GetWithDefaultOptions()};
   KV_Cache kv_cache_;
 
-//  std::span<int64_t> next_positions_;  // shape (batch_size, num_beams). Next position value for position_ids.
-//  Ort::IAllocatorUniquePtr<int64_t> next_positions_buffer_;
-//  std::unique_ptr<OrtValue> next_positions_tensor_;  // Tensor of the 'next_position_' buffer
-//  std::unique_ptr<OrtValue> encoder_input_ids_, expanded_encoder_input_ids_;
+  std::array<int64_t, 2> decoder_input_ids_shape_;
+  std::array<int64_t, 3> logits_shape_;
 
   // Inputs
   std::unique_ptr<OrtValue> decoder_input_ids_, expanded_decoder_input_ids_;
