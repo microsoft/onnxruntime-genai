@@ -5,9 +5,6 @@
 
 namespace Generators {
 
-template <typename T>
-void ExpandInputs(const OrtValue& input, int num_beams, OrtAllocator& allocator, std::unique_ptr<OrtValue>& expanded);
-
 Whisper_Model::Whisper_Model(OrtEnv& ort_env, Config& config, OrtSessionOptions& session_options)
     : config_{config} {
   session_decoder_ = OrtSession::Create(ort_env, (config.config_path / config.model_decoder).c_str(), &session_options);
@@ -43,7 +40,6 @@ Whisper_State::Whisper_State(Whisper_Model& model, RoamingArray<int32_t> sequenc
       kv_cache_{search_params, model.config_, allocator_cpu_, model.cuda_stream_, model.score_type_, model.past_names_, model.present_names_, model.past_cross_names_, model.present_cross_names_} {
   // CPU only supports float
   assert(model.score_type_ == Ort::TypeToTensorType<float>::type);
-  cpu_span<int32_t> sequence_lengths = sequence_lengths_unk;
 
   std::unique_ptr<OrtValue> encoder_input_ids, expanded_encoder_input_ids;
 
@@ -58,15 +54,11 @@ Whisper_State::Whisper_State(Whisper_Model& model, RoamingArray<int32_t> sequenc
 
   auto& inputs = const_cast<SearchParams::Whisper&>(std::get<SearchParams::Whisper>(search_params.inputs));
 
-  if (search_params_.num_beams == 1) {
-    expanded_encoder_input_ids = std::move(inputs.input_features);
-    expanded_decoder_input_ids_ = std::move(decoder_input_ids_);
-  } else {
-    ExpandInputs<float>(*inputs.input_features, search_params_.num_beams, allocator_cpu_, expanded_encoder_input_ids);
-    ExpandInputs<int32_t>(*decoder_input_ids_, search_params_.num_beams, allocator_cpu_, expanded_decoder_input_ids_);
-    decoder_input_ids_shape_[0] *= search_params_.num_beams;
-  }
+  expanded_encoder_input_ids = ExpandInputs(inputs.input_features, search_params_.num_beams, allocator_cpu_, DeviceType::CPU, nullptr);
+  expanded_decoder_input_ids_ = ExpandInputs(decoder_input_ids_, search_params_.num_beams, allocator_cpu_, DeviceType::CPU, nullptr);
+  decoder_input_ids_shape_[0] *= search_params_.num_beams;
 
+  cpu_span<int32_t> sequence_lengths = sequence_lengths_unk;
   for (int i = 0; i < decoder_input_ids_shape_[0]; i++) {
     sequence_lengths[i] = static_cast<int32_t>(search_params_.sequence_length);
   }

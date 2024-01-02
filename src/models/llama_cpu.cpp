@@ -59,10 +59,9 @@ Llama_State::Llama_State(Llama_Model& model, RoamingArray<int32_t> sequence_leng
     }
   }
 
-  assert(search_params_.num_beams == 1);
-  expanded_input_ids_ = std::move(input_ids_);
-  expanded_position_ids_ = std::move(position_ids_);
-  expanded_attention_mask_ = std::move(attention_mask_);
+  expanded_input_ids_ = ExpandInputs(input_ids_, search_params_.num_beams, allocator_cpu_, DeviceType::CPU, nullptr);
+  expanded_position_ids_ = ExpandInputs(position_ids_, search_params_.num_beams, allocator_cpu_, DeviceType::CPU, nullptr);
+  expanded_attention_mask_ = ExpandInputs(attention_mask_, search_params_.num_beams, allocator_cpu_, DeviceType::CPU, nullptr);
 
   for (auto* input : {expanded_input_ids_.get(), expanded_position_ids_.get(), expanded_attention_mask_.get()})
     inputs_.push_back(input);

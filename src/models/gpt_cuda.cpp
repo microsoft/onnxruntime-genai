@@ -6,34 +6,6 @@ namespace Generators {
 
 void ConvertFp16ToFp32(OrtAllocator& allocator, cudaStream_t stream, OrtValue& in, std::unique_ptr<OrtValue>& p_out);
 
-template <typename T>
-static void ExpandInputs(const OrtValue& input, int num_beams, OrtAllocator& allocator, std::unique_ptr<OrtValue>& expanded, cudaStream_t cuda_stream) {
-  // Input shape (batch_size, sequence_length). The input is required with data type T.
-  // Output shape (batch_size * num_beams, sequence_length)
-
-  auto input_type_info = input.GetTensorTypeAndShapeInfo();
-  auto input_shape = input_type_info->GetShape();
-  const int64_t batch_size = input_shape[0];
-  const int64_t sequence_length = input_shape[1];
-
-  int64_t dims[] = {batch_size * num_beams, sequence_length};
-
-  auto element_type = input_type_info->GetElementType();
-  assert(element_type == Ort::TypeToTensorType<T>::type);
-
-  expanded = OrtValue::CreateTensor<T>(allocator, dims);
-
-  const T* input_data = input.GetTensorData<T>();
-  T* expanded_data = expanded->GetTensorMutableData<T>();
-  T* target = expanded_data;
-  for (int i = 0; i < batch_size; i++) {
-    for (int j = 0; j < num_beams; j++) {
-      cudaMemcpyAsync(target, input_data + i * sequence_length, sizeof(T) * sequence_length, cudaMemcpyHostToDevice, cuda_stream);
-      target += sequence_length;
-    }
-  }
-}
-
 Gpt_Cuda::Gpt_Cuda(Gpt_Model& model, RoamingArray<int32_t> sequence_lengths, const SearchParams& search_params)
     : search_params_{search_params}, 
       model_{&model},
@@ -72,16 +44,9 @@ Gpt_Cuda::Gpt_Cuda(Gpt_Model& model, RoamingArray<int32_t> sequence_lengths, con
   sequence_lengths.FlushGPUChanges();
 
   // Expand (batch_size, sequence_length) to (batch_size * num_beams, sequence_length)
-  // TODO(tianleiwu): Try expand outputs after first subgraph call instead. That may get better performance.
-  if (search_params_.num_beams == 1) {
-    expanded_input_ids_ = std::move(input_ids_);
-    expanded_position_ids_ = std::move(position_ids_);
-    expanded_attention_mask_ = std::move(attention_mask_);
-  } else {
-    ExpandInputs<int32_t>(*input_ids_, search_params_.num_beams, *allocator_cuda_, expanded_input_ids_, model_->cuda_stream_);
-    ExpandInputs<int32_t>(*position_ids_, search_params_.num_beams, *allocator_cuda_, expanded_position_ids_, model_->cuda_stream_);
-    ExpandInputs<int32_t>(*attention_mask_, search_params_.num_beams, *allocator_cuda_, expanded_attention_mask_, model_->cuda_stream_);
-  }
+  expanded_input_ids_ = ExpandInputs(input_ids_, search_params_.num_beams, *allocator_cuda_, DeviceType::CUDA, model_->cuda_stream_);
+  expanded_position_ids_ = ExpandInputs(position_ids_, search_params_.num_beams, *allocator_cuda_, DeviceType::CUDA, model_->cuda_stream_);
+  expanded_attention_mask_ = ExpandInputs(attention_mask_, search_params_.num_beams, *allocator_cuda_, DeviceType::CUDA, model_->cuda_stream_);
 
   for (auto* input : {expanded_input_ids_.get(), expanded_position_ids_.get(), expanded_attention_mask_.get()})
     inputs_.push_back(input);

@@ -77,10 +77,9 @@ Llama_Cuda::Llama_Cuda(Llama_Model& model, RoamingArray<int32_t> sequence_length
   cuda::LaunchGpt_InitAttentionMask(attn_mask_value ? nullptr : mask_data, position_data, sequence_lengths.GetGPU().data(), input_ids_data, search_params_.batch_size, search_params_.num_beams, search_params_.sequence_length, model_->config_.pad_token_id, model_->cuda_stream_);
   sequence_lengths.FlushGPUChanges();
 
-  assert(search_params_.num_beams == 1);
-  expanded_input_ids_ = std::move(input_ids_);
-  expanded_position_ids_ = std::move(position_ids_);
-  expanded_attention_mask_ = std::move(attention_mask_);
+  expanded_input_ids_ = ExpandInputs(input_ids_, search_params_.num_beams, *allocator_cuda_, DeviceType::CUDA, model_->cuda_stream_);
+  expanded_position_ids_ = ExpandInputs(position_ids_, search_params_.num_beams, *allocator_cuda_, DeviceType::CUDA, model_->cuda_stream_);
+  expanded_attention_mask_ = ExpandInputs(attention_mask_, search_params_.num_beams, *allocator_cuda_, DeviceType::CUDA, model_->cuda_stream_);
 
   for (auto* input : {expanded_input_ids_.get(), expanded_position_ids_.get(), expanded_attention_mask_.get()})
     inputs_.push_back(input);

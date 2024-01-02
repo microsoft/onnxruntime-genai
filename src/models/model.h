@@ -6,6 +6,8 @@ struct Gpt_Model;
 struct Llama_Model;
 struct Whisper_Model;
 
+std::unique_ptr<OrtValue> ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams, OrtAllocator& allocator, DeviceType device_type, cudaStream_t cuda_stream);
+
 struct State {
   virtual RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices = {}) = 0;
 };
