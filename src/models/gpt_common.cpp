@@ -1,14 +1,15 @@
 #include "../generators.h"
 #include "../search.h"
+#include "model.h"
 #include "gpt_common.h"
 #include "debugging.h"
 #include <iostream>
 
 namespace Generators {
 
-Gpt_Model::Gpt_Model(OrtEnv& ort_env, Config& config, OrtSessionOptions& session_options)
-    : config_{config} {
-  session_decoder_ = OrtSession::Create(ort_env, (config.config_path / config.model_decoder).c_str(), &session_options);
+Gpt_Model::Gpt_Model(Model& model, OrtEnv& ort_env, OrtSessionOptions& session_options)
+    : model_{model} {
+  session_decoder_ = OrtSession::Create(ort_env, (model_.config_.config_path / model_.config_.model_decoder).c_str(), &session_options);
   InitModelParams();
 }
 
@@ -27,10 +28,10 @@ void Gpt_Model::InitModelParams() {
   head_count_ = static_cast<int>(past_shape[2]);
   hidden_size_ = static_cast<int>(past_shape[4]);
 
-  assert(config_.vocab_size==vocab_size_);
-  assert(config_.num_hidden_layers==layer_count_);
-  assert(config_.num_attention_heads==head_count_);
-  assert(config_.hidden_size==hidden_size_);
+  assert(model_.config_.vocab_size==vocab_size_);
+  assert(model_.config_.num_hidden_layers == layer_count_);
+  assert(model_.config_.num_attention_heads == head_count_);
+  assert(model_.config_.hidden_size == hidden_size_);
 }
 
 }  // namespace Generators

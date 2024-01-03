@@ -3,7 +3,7 @@
 namespace Generators {
 
 struct Llama_Model {
-  Llama_Model(OrtEnv& ort_env, Config& config, OrtSessionOptions& session_options);
+  Llama_Model(Model& model, OrtEnv& ort_env, Config& config, OrtSessionOptions& session_options);
   cudaStream_t cuda_stream_{};
 
   DeviceType GetDeviceType() const { return device_type_; }
@@ -11,6 +11,7 @@ struct Llama_Model {
   std::unique_ptr<OrtSession> session_decoder_;
 
   // Model parameters:
+  Model& model_;
   Config& config_;
   int vocab_size_{};
   int head_count_{};

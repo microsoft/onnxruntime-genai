@@ -4,17 +4,13 @@
 
 namespace Generators {
 
-void ConvertFp16ToFp32(OrtAllocator& allocator, cudaStream_t stream, OrtValue& in, std::unique_ptr<OrtValue>& p_out);
-
 Gpt_Cuda::Gpt_Cuda(Gpt_Model& model, RoamingArray<int32_t> sequence_lengths, const SearchParams& search_params)
     : search_params_{search_params}, 
       model_{&model},
-      allocator_cpu_{Ort::Allocator::GetWithDefaultOptions()},
       memory_info_cuda_{OrtMemoryInfo::Create("Cuda", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault)},
       allocator_cuda_{Ort::Allocator::Create(*model_->session_decoder_, *memory_info_cuda_)},
-      kv_cache_{search_params, model.config_, *allocator_cuda_, model.cuda_stream_, model.score_type_} {
-  // Allocate position_ids and attention_mask based on shape of input_ids
-  auto element_type = Ort::TypeToTensorType<int32_t>::type;
+      kv_cache_{search_params, model.model_.config_, *allocator_cuda_, model.model_.cuda_stream_, model.score_type_},
+      position_ids_{model.model_, search_params, *allocator_cuda_, sequence_lengths} {
 
   // Current shape is (batch_size, sequence_length)
   // Note that we will expand it to (batch_size * num_beams, sequence_length) later.
@@ -27,28 +23,10 @@ Gpt_Cuda::Gpt_Cuda(Gpt_Model& model, RoamingArray<int32_t> sequence_lengths, con
   // Copy input_ids into gpu memory. This requires the input_ids for subgraph is also int32.
   cudaMemcpy(input_ids_data, search_params_.input_ids.data(), input_ids_count * sizeof(int32_t), cudaMemcpyHostToDevice);
 
-  position_ids_ = OrtValue::CreateTensor<int32_t>(*allocator_cuda_, input_ids_shape);
-
-  int64_t position_shape[] = {search_params_.batch_size * search_params_.num_beams, 1};
-  next_positions_ = Allocate<int32_t>(*allocator_cuda_, position_shape[0], next_positions_buffer_);
-  cudaMemset(next_positions_.data(), 0, next_positions_.size_bytes());
-  next_positions_tensor_ = OrtValue::CreateTensor<int32_t>(allocator_cuda_->GetInfo(), next_positions_, position_shape);
-
-  attention_mask_ = OrtValue::CreateTensor<int32_t>(*allocator_cuda_, input_ids_shape);
-
-  // Set attention mask to be 0 for pad tokens, and 1 for all other tokens.
-  // Set position id to be 0 for pad tokens, and accumulated sum of mask in a batch for other tokens
-  int32_t* mask_data = attention_mask_->GetTensorMutableData<int32_t>();
-  int32_t* position_data = position_ids_->GetTensorMutableData<int32_t>();
-  cuda::LaunchGpt_InitAttentionMask(mask_data, position_data, sequence_lengths.GetGPU().data(), input_ids_data, search_params_.batch_size, search_params_.num_beams, search_params_.sequence_length, search_params_.pad_token_id, model_->cuda_stream_);
-  sequence_lengths.FlushGPUChanges();
-
   // Expand (batch_size, sequence_length) to (batch_size * num_beams, sequence_length)
-  expanded_input_ids_ = ExpandInputs(input_ids_, search_params_.num_beams, *allocator_cuda_, DeviceType::CUDA, model_->cuda_stream_);
-  expanded_position_ids_ = ExpandInputs(position_ids_, search_params_.num_beams, *allocator_cuda_, DeviceType::CUDA, model_->cuda_stream_);
-  expanded_attention_mask_ = ExpandInputs(attention_mask_, search_params_.num_beams, *allocator_cuda_, DeviceType::CUDA, model_->cuda_stream_);
+  input_ids_ = ExpandInputs(input_ids_, search_params_.num_beams, *allocator_cuda_, model_->model_.device_type_, model_->model_.cuda_stream_);
 
-  for (auto* input : {expanded_input_ids_.get(), expanded_position_ids_.get(), expanded_attention_mask_.get()})
+  for (auto* input : {input_ids_.get(), position_ids_.position_ids_.get(), position_ids_.attention_mask_.get()})
     inputs_.push_back(input);
   for (auto* name : {"input_ids", "position_ids", "attention_mask"})
     input_names_.push_back(name);
@@ -92,39 +70,28 @@ RoamingArray<float> Gpt_Cuda::Run(int current_length, RoamingArray<int32_t> next
   assert(type_shape->GetShape().size() == 3);
 
   if (model_->score_type_ == Ort::TypeToTensorType<Ort::Float16_t>::type) {
-    ConvertFp16ToFp32(*allocator_cuda_, model_->cuda_stream_, *logits_, logits32_);
+    ConvertFp16ToFp32(*allocator_cuda_, model_->model_.cuda_stream_, *logits_, logits32_);
     return gpu_span<float>{logits32_->GetTensorMutableData<float>(), type_shape->GetElementCount()};
   }
 
   return gpu_span<float>{logits_->GetTensorMutableData<float>(), type_shape->GetElementCount()};
 }
 
-void Gpt_Cuda::UpdateInputs(std::span<const int32_t> next_tokens, std::span<const int32_t> beam_indices, int current_length) {
+void Gpt_Cuda::UpdateInputs(gpu_span<const int32_t> next_tokens, std::span<const int32_t> beam_indices, int current_length) {
   assert(search_params_.num_beams == 1 || !beam_indices.empty());  // We require beam_indices if we're a beam search
-
-  // The following updates inputs for subgraph
 
   // Update input_ids with next tokens.
   int batch_beam_size = static_cast<int>(next_tokens.size());
   int64_t dims[] = {batch_beam_size, 1};
   std::unique_ptr<OrtValue> input_ids = OrtValue::CreateTensor<int32_t>(*allocator_cuda_, dims);
-  int32_t* input_ids_data = input_ids->GetTensorMutableData<int32_t>();
-  cudaMemcpyAsync(input_ids_data, next_tokens.data(), batch_beam_size * sizeof(int32_t), cudaMemcpyDeviceToDevice, model_->cuda_stream_);
-  expanded_input_ids_ = std::move(input_ids);
-  inputs_[0] = expanded_input_ids_.get();
+  auto* input_ids_data = input_ids->GetTensorMutableData<int32_t>();
+  cudaMemcpyAsync(input_ids_data, next_tokens.data(), batch_beam_size * sizeof(int32_t), cudaMemcpyDeviceToDevice, model_->model_.cuda_stream_);
+  input_ids_ = std::move(input_ids);
+  inputs_[0] = input_ids_.get();
 
-  // Update position IDs
-  inputs_[1] = next_positions_tensor_.get();
-  cuda::LaunchGpt_UpdatePositionIds(next_positions_.data(), batch_beam_size, current_length, model_->cuda_stream_);
-
-  // Update attention mask
-  const int32_t* old_mask_data = expanded_attention_mask_->GetTensorMutableData<int32_t>();
-  int64_t mask_dims[] = {batch_beam_size, current_length};
-  auto attention_mask = OrtValue::CreateTensor<int32_t>(*allocator_cuda_, mask_dims);
-  int32_t* mask_data = attention_mask->GetTensorMutableData<int32_t>();
-  cuda::LaunchGpt_UpdateMask(mask_data, old_mask_data, batch_beam_size, current_length, model_->cuda_stream_);
-  expanded_attention_mask_ = std::move(attention_mask);
-  inputs_[2] = expanded_attention_mask_.get();
+  position_ids_.Update(current_length);
+  inputs_[1] = position_ids_.position_ids_.get();
+  inputs_[2] = position_ids_.attention_mask_.get();
 
   // Update logits
   if (model_->logits_uses_seq_len_) {

@@ -7,6 +7,7 @@ struct Llama_Model;
 struct Whisper_Model;
 
 std::unique_ptr<OrtValue> ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams, OrtAllocator& allocator, DeviceType device_type, cudaStream_t cuda_stream);
+void ConvertFp16ToFp32(OrtAllocator& allocator, cudaStream_t stream, OrtValue& in, std::unique_ptr<OrtValue>& p_out);
 
 struct State {
   virtual RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices = {}) = 0;
@@ -24,6 +25,7 @@ struct Model {
   Config config_;
   cudaStream_t cuda_stream_;
   DeviceType device_type_{DeviceType::CPU};
+  Ort::Allocator& allocator_cpu_{Ort::Allocator::GetWithDefaultOptions()};
 
   std::unique_ptr<Gpt_Model> impl_;
   std::unique_ptr<Llama_Model> impl_llama_;

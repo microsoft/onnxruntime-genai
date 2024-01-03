@@ -6,8 +6,9 @@
 
 namespace Generators {
 
-Llama_Model::Llama_Model(OrtEnv& ort_env, Config& config, OrtSessionOptions& session_options)
-    : config_{config} {
+Llama_Model::Llama_Model(Model& model, OrtEnv& ort_env, Config& config, OrtSessionOptions& session_options)
+    : model_{model},
+      config_{config} {
   session_decoder_ = OrtSession::Create(ort_env, (config.config_path / config.model_decoder).c_str(), &session_options);
   InitModelParams();
 }

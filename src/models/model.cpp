@@ -27,9 +27,9 @@ Model::Model(OrtEnv& ort_env, const char* config_path, const ProviderOptions* pr
   }
 
   if (config_.model_type == "gpt2")
-    impl_ = std::make_unique<Gpt_Model>(ort_env, config_, *session_options);
+    impl_ = std::make_unique<Gpt_Model>(*this, ort_env, *session_options);
   else if (config_.model_type == "llama")
-    impl_llama_ = std::make_unique<Llama_Model>(ort_env, config_, *session_options);
+    impl_llama_ = std::make_unique<Llama_Model>(*this, ort_env, config_, *session_options);
   else if (config_.model_type == "whisper")
     impl_whisper_ = std::make_unique<Whisper_Model>(ort_env, config_, *session_options);
   else
@@ -86,6 +86,88 @@ std::vector<int32_t> Model::Generate(const SearchParams& params) {
   std::vector<int32_t> v;
   v.assign(results_cpu.begin(), results_cpu.end());
   return v;
+}
+
+size_t GetOrtTypeSize(ONNXTensorElementDataType type) {
+  switch (type) {
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+      return sizeof(float);
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+      return sizeof(Ort::Float16_t);
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16:
+      return sizeof(Ort::BFloat16_t);
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
+      return sizeof(double);
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
+      return sizeof(int8_t);
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
+      return sizeof(uint8_t);
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16:
+      return sizeof(int16_t);
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16:
+      return sizeof(uint16_t);
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
+      return sizeof(int32_t);
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32:
+      return sizeof(uint32_t);
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
+      return sizeof(int64_t);
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64:
+      return sizeof(uint64_t);
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:
+      return sizeof(bool);
+    default:
+      throw std::runtime_error("Unsupported ONNXTensorElementDataType in GetTypeSize");
+  }
+}
+
+std::unique_ptr<OrtValue> ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams, OrtAllocator& allocator, DeviceType device_type, cudaStream_t cuda_stream) {
+  // Input shape (batch_size, sequence_length). The input is required with data type T.
+  // Output shape (batch_size * num_beams, sequence_length)
+
+  // If we're on CUDA, we still want to do the copy to move the data over to CUDA memory where we will read from it later
+  if (num_beams == 1 && device_type==DeviceType::CPU)
+    return std::move(input);
+
+  auto input_type_info = input->GetTensorTypeAndShapeInfo();
+  auto element_type = input_type_info->GetElementType();
+  auto element_size = GetOrtTypeSize(element_type);
+  auto input_shape = input_type_info->GetShape();
+  const int64_t batch_size = input_shape[0];
+  const int64_t data_size_bytes = input_type_info->GetElementCount() * element_size / batch_size;
+
+  input_shape[0] *= num_beams;
+
+  auto expanded = OrtValue::CreateTensor(allocator, input_shape, element_type);
+
+  auto input_data = reinterpret_cast<const uint8_t*>(input->GetTensorRawData());
+  auto expanded_data = reinterpret_cast<uint8_t*>(expanded->GetTensorMutableRawData());
+  auto target = expanded_data;
+
+  switch (device_type) {
+    case DeviceType::CPU:
+      for (int i = 0; i < batch_size; i++) {
+        for (int j = 0; j < num_beams; j++) {
+          memcpy(target, input_data + i * data_size_bytes, data_size_bytes);
+          target += data_size_bytes;
+        }
+      }
+      break;
+
+#if USE_CUDA
+    case DeviceType::CUDA:
+      for (int i = 0; i < batch_size; i++) {
+        for (int j = 0; j < num_beams; j++) {
+          cudaMemcpyAsync(target, input_data + i * data_size_bytes, data_size_bytes, cudaMemcpyHostToDevice, cuda_stream);
+          target += data_size_bytes;
+        }
+      }
+      break;
+#endif
+    default:
+      throw std::runtime_error("ExpandInputs - Unsupported device type");
+  }
+  return expanded;
 }
 
 }  // namespace Generators

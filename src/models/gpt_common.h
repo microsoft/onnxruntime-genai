@@ -3,15 +3,12 @@
 namespace Generators {
 
 struct Gpt_Model {
-  Gpt_Model(OrtEnv& ort_env, Config& config, OrtSessionOptions& session_options);
-  cudaStream_t cuda_stream_{}; // TODO: This should be per state/search, not in the model at all
-
-  DeviceType GetDeviceType() const { return device_type_; }
+  Gpt_Model(Model& model, OrtEnv& ort_env, OrtSessionOptions& session_options);
 
   std::unique_ptr<OrtSession> session_decoder_;
 
   // Model parameters:
-  Config& config_;
+  Model& model_;
   int vocab_size_{};
   int head_count_{};
   int hidden_size_{};
@@ -21,8 +18,6 @@ struct Gpt_Model {
 
  private:
   void InitModelParams();
-
-  DeviceType device_type_;
 };
 
 }

@@ -1,6 +1,7 @@
 #include "llama_common.h"
 #include "model.h"
 #include "kv_cache.h"
+#include "position_ids.h"
 
 namespace Generators {
 
@@ -20,15 +21,10 @@ private:
   std::unique_ptr<OrtMemoryInfo> memory_info_cuda_;
   std::unique_ptr<Ort::Allocator> allocator_cuda_;
   KV_Cache kv_cache_;
-
-  std::span<int64_t> next_positions_;  // shape (batch_size, num_beams). Next position value for position_ids.
-  Ort::IAllocatorUniquePtr<int64_t> next_positions_buffer_;
-  std::unique_ptr<OrtValue> next_positions_tensor_; // Tensor of the 'next_position_' buffer
+  PositionIDs<int64_t> position_ids_;
 
   // Inputs
-  std::unique_ptr<OrtValue> input_ids_, expanded_input_ids_;
-  std::unique_ptr<OrtValue> position_ids_, expanded_position_ids_;
-  std::unique_ptr<OrtValue> attention_mask_, expanded_attention_mask_;
+  std::unique_ptr<OrtValue> input_ids_;
 
   std::vector<const char *> input_names_;
   std::vector<OrtValue*> inputs_;
