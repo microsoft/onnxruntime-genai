@@ -95,6 +95,8 @@ struct RoamingArray {
   RoamingArray()=default;
   RoamingArray(const RoamingArray& v) { Assign(v); }
 
+  bool empty() const { return cpu_.empty() && device_.empty(); }
+
   RoamingArray(cpu_span<T> v) {
     SetCPU(v);
   }
@@ -164,6 +166,8 @@ struct RoamingArray {
   RoamingArray(cpu_span<T> v) {
     SetCPU(v);
   }
+
+  bool empty() const { return cpu_.empty(); }
 
   operator cpu_span<T>() { return GetCPU(); }
 

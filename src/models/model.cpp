@@ -2,14 +2,11 @@
 #include "../search.h"
 #if USE_CUDA
 #include "../search_cuda.h"
-#include "gpt_cuda.h"
-#include "llama_cuda.h"
 #endif
 #include "model.h"
-#include "gpt_common.h"
-#include "gpt_cpu.h"
-#include "llama_cpu.h"
-#include "whisper_cpu.h"
+#include "gpt.h"
+#include "llama.h"
+#include "whisper.h"
 
 namespace Generators {
 
@@ -27,11 +24,11 @@ Model::Model(OrtEnv& ort_env, const char* config_path, const ProviderOptions* pr
   }
 
   if (config_.model_type == "gpt2")
-    impl_ = std::make_unique<Gpt_Model>(*this, ort_env, *session_options);
+    arch_ = std::make_unique<Gpt_Model>(*this, ort_env, *session_options);
   else if (config_.model_type == "llama")
-    impl_llama_ = std::make_unique<Llama_Model>(*this, ort_env, config_, *session_options);
+    arch_ = std::make_unique<Llama_Model>(*this, ort_env, *session_options);
   else if (config_.model_type == "whisper")
-    impl_whisper_ = std::make_unique<Whisper_Model>(ort_env, config_, *session_options);
+    arch_ = std::make_unique<Whisper_Model>(*this, ort_env, *session_options);
   else
     throw std::runtime_error("Unsupported model_type in config.json: " + config_.model_type);
 }
@@ -39,30 +36,7 @@ Model::Model(OrtEnv& ort_env, const char* config_path, const ProviderOptions* pr
 Model::~Model() = default;
 
 std::unique_ptr<State> Model::CreateState(RoamingArray<int32_t> sequence_lengths, const SearchParams& params) {
-  if (impl_llama_) {
-#if USE_CUDA
-    if (device_type_ == DeviceType::CUDA)
-      return std::make_unique<Llama_Cuda>(*impl_llama_, sequence_lengths, params);
-    else
-#endif
-      return std::make_unique<Llama_State>(*impl_llama_, sequence_lengths, params);
-
-  } else if(impl_whisper_) {
-#if 0
-//#if USE_CUDA
-    if (device_type_ == DeviceType::CUDA)
-      return std::make_unique<Whisper_Cuda>(*impl_whisper_, sequence_lengths, params);
-    else
-#endif
-      return std::make_unique<Whisper_State>(*impl_whisper_, sequence_lengths, params);
-  } else {
-#if USE_CUDA
-    if (device_type_ == DeviceType::CUDA)
-      return std::make_unique<Gpt_Cuda>(*impl_, sequence_lengths, params);
-    else
-#endif
-      return std::make_unique<Gpt_State>(*impl_, sequence_lengths, params);
-  }
+  return arch_->CreateState(sequence_lengths, params);
 }
 
 std::vector<int32_t> Model::Generate(const SearchParams& params) {
@@ -87,6 +61,30 @@ std::vector<int32_t> Model::Generate(const SearchParams& params) {
   v.assign(results_cpu.begin(), results_cpu.end());
   return v;
 }
+
+#if USE_CUDA
+void ConvertFp16ToFp32(OrtAllocator& allocator, cudaStream_t stream, OrtValue& in, std::unique_ptr<OrtValue>& p_out) {
+  auto shape_info = in.GetTensorTypeAndShapeInfo();
+  auto shape = shape_info->GetShape();
+  assert(shape_info->GetElementType() == Ort::TypeToTensorType<Ort::Float16_t>::type);
+
+  bool allocate_p_out = p_out == nullptr;
+  if (p_out) {
+    auto out_shape_info = p_out->GetTensorTypeAndShapeInfo();
+    auto out_shape = out_shape_info->GetShape();
+    allocate_p_out = shape != out_shape;
+  }
+
+  if (allocate_p_out)
+    p_out = OrtValue::CreateTensor<float>(allocator, shape);
+
+  int count = static_cast<int>(shape_info->GetElementCount());
+  auto* fp16 = in.GetTensorData<uint16_t>();
+  auto* fp32 = p_out->GetTensorMutableData<float>();
+
+  cuda::LaunchFp16ToFp32(fp16, fp32, count, stream);
+}
+#endif
 
 size_t GetOrtTypeSize(ONNXTensorElementDataType type) {
   switch (type) {

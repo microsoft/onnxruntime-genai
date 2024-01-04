@@ -1,10 +1,9 @@
 #include "../generators.h"
 #include "../search.h"
 #include "../models/model.h"
-#include "../models/gpt_cpu.h"
+#include "../models/gpt.h"
 #if USE_CUDA
 #include "../search_cuda.h"
-#include "../models/gpt_cuda.h"
 #endif
 #include <iostream>
 
