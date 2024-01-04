@@ -17,12 +17,12 @@ struct Search_Cuda : Search {
     cudaStreamSynchronize(params_.cuda_stream);
     return *done_cpu_;
   }  // TODO: Use an event
-  void SetLogits(RoamingArray<ScoreType> logits);
+  void SetLogits(RoamingArray<float> logits);
   // Extra scoring steps go here
 
   //
-  std::span<ScoreType> GetScores(int batch_beam_index);
-  std::span<ScoreType> GetScores();
+  std::span<float> GetScores(int batch_beam_index);
+  std::span<float> GetScores();
   Sequences_Cuda& GetSequences() { return sequences_; }
 
   const SearchParams& params_;
@@ -35,8 +35,8 @@ struct Search_Cuda : Search {
 
   gpu_span<int32_t> next_tokens_;  // shape (beam_size*batch_size)
 
-  gpu_span<ScoreType> next_token_scores_;  // shape (beam_size*batch_size, vocab_size)
-  cuda_unique_ptr<ScoreType> next_token_scores_buffer_;
+  gpu_span<float> next_token_scores_;  // shape (beam_size*batch_size, vocab_size)
+  cuda_unique_ptr<float> next_token_scores_buffer_;
 
   cuda_host_unique_ptr<bool> done_cpu_;
 
@@ -79,7 +79,7 @@ struct BeamSearch_Cuda : Search_Cuda {
 
   cuda_unique_ptr<int32_t> topk_next_tokens_;
   cuda_unique_ptr<int32_t> topk_next_indices_;
-  cuda_unique_ptr<ScoreType> topk_next_scores_;
+  cuda_unique_ptr<float> topk_next_scores_;
 
   // temp buffer for topk computation, including:
   // 1st stage needs:
@@ -90,12 +90,12 @@ struct BeamSearch_Cuda : Search_Cuda {
   //   temp token: (batch_size * num_beams, 2 * num_beams)
   // in total, it will be:
   // 2 * (batch_size * num_beams * (parts_vocab + 1), 2 * num_beams)
-  cuda_unique_ptr<ScoreType> topk_buffer_;
+  cuda_unique_ptr<float> topk_buffer_;
 };
 
 namespace Processors_Cuda {
 void MinLength(Search_Cuda& search, int min_length);
-void RepetitionPenalty(Search_Cuda& search, ScoreType penalty);
+void RepetitionPenalty(Search_Cuda& search, float penalty);
 }  // namespace Processors_Cuda
 
 }  // namespace Generators

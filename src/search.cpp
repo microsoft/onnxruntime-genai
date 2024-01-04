@@ -16,7 +16,7 @@ Search_Cpu::Search_Cpu(const SearchParams& params)
   sequence_lengths_buffer_ = AllocateArray<int32_t>(batch_beam_size, &sequence_lengths_);
 
   size_t next_token_size = batch_beam_size * params_.vocab_size;
-  next_token_scores_buffer_ = AllocateArray<ScoreType>(next_token_size, &next_token_scores_);
+  next_token_scores_buffer_ = AllocateArray<float>(next_token_size, &next_token_scores_);
   memset(next_token_scores_.data(), 0, next_token_scores_.size_bytes());
 }
 
@@ -51,10 +51,10 @@ void Search_Cpu::SetLogits(RoamingArray<float> logits_unk) {
   // Get logits for the last token:
   //    next_token_logits = logits[:, -1, :], and the result shape is (batch_size, vocab_size)
   // When input_length == 1, use logits directly in SoftmaxCPU below so it only need for input_length > 1.
-  const ScoreType* current_logits = logits.data() + (input_length - 1) * params_.vocab_size;
+  const float* current_logits = logits.data() + (input_length - 1) * params_.vocab_size;
   for (int i = 0; i < batch_beam_size; i++) {
-    std::span<const ScoreType> source(current_logits, params_.vocab_size);
-    std::span<ScoreType> target = next_token_scores_.subspan(i * params_.vocab_size, params_.vocab_size);
+    std::span<const float> source(current_logits, params_.vocab_size);
+    std::span<float> target = next_token_scores_.subspan(i * params_.vocab_size, params_.vocab_size);
     copy(source, target);
     current_logits += input_length * params_.vocab_size;
 
@@ -103,7 +103,7 @@ void BeamSearch_Cpu::SelectTop() {
     bool operator<(const ScoreIndex& s) const { return score < s.score; }
   };
 
-  auto scores = std::make_unique<ScoreType[]>(top_k * params_.batch_size);
+  auto scores = std::make_unique<float[]>(top_k * params_.batch_size);
   auto indices = std::make_unique<int32_t[]>(top_k * params_.batch_size);
   auto tokens = std::make_unique<int32_t[]>(top_k * params_.batch_size);
 
@@ -148,7 +148,7 @@ void GreedySearch_Cpu::SelectTop() {
     if (PadIfAlreadyEOS(batch_id))
       continue;
 
-    std::span<ScoreType> scores = next_token_scores_.subspan(batch_id * params_.vocab_size, params_.vocab_size);
+    std::span<float> scores = next_token_scores_.subspan(batch_id * params_.vocab_size, params_.vocab_size);
     int32_t token = static_cast<int32_t>(std::distance(scores.begin(), std::max_element(scores.begin(), scores.end())));
     SetNextToken(batch_id, token);
   }
@@ -192,17 +192,17 @@ void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
   AppendNextTokensToSequences();
 }
 
-void SoftMax(std::span<ScoreType> scores, float temperature) {
-  ScoreType max_score = *std::max_element(scores.begin(), scores.end());
+void SoftMax(std::span<float> scores, float temperature) {
+  float max_score = *std::max_element(scores.begin(), scores.end());
 
   // Subtract max score and scale by temperature
-  std::transform(scores.begin(), scores.end(), scores.begin(), [max_score, temperature](ScoreType score) { return std::exp((score - max_score) / temperature); });
+  std::transform(scores.begin(), scores.end(), scores.begin(), [max_score, temperature](float score) { return std::exp((score - max_score) / temperature); });
 
   // Compute sum of exponentials
-  ScoreType exp_sum = std::accumulate(scores.begin(), scores.end(), 0.0f);
+  float exp_sum = std::accumulate(scores.begin(), scores.end(), 0.0f);
 
   // Divide each score by the sum of exponentials
-  std::transform(scores.begin(), scores.end(), scores.begin(), [exp_sum](ScoreType score) { return score / exp_sum; });
+  std::transform(scores.begin(), scores.end(), scores.begin(), [exp_sum](float score) { return score / exp_sum; });
 }
 
 void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
@@ -214,7 +214,7 @@ void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
     if (PadIfAlreadyEOS(batch_id))
       continue;
 
-    std::span<ScoreType> scores = next_token_scores_.subspan(batch_id * params_.vocab_size, params_.vocab_size);
+    std::span<float> scores = next_token_scores_.subspan(batch_id * params_.vocab_size, params_.vocab_size);
 
     SoftMax(scores, temperature);
 
@@ -279,7 +279,7 @@ void BeamSearch_Cpu::Finalize(size_t num_return_sequences, RoamingArray<int32_t>
   beam_scorer_->Finalize(sequences_, num_return_sequences, output, sequence_scores);
 }
 
-std::span<ScoreType> Search_Cpu::GetScores(int batch_beam_index) {
+std::span<float> Search_Cpu::GetScores(int batch_beam_index) {
   assert(batch_beam_index >= 0 && batch_beam_index < params_.BatchBeamSize());
   return next_token_scores_.subspan(batch_beam_index * params_.vocab_size, params_.vocab_size);
 }
@@ -292,15 +292,15 @@ void MinLength(Search_Cpu& search, int min_length) {
 
   const int batch_beam_size = search.params_.BatchBeamSize();
   for (int i = 0; i < batch_beam_size; i++) {
-    std::span<ScoreType> beam_token_scores = search.GetScores(i);
-    beam_token_scores[search.params_.eos_token_id] = std::numeric_limits<ScoreType>::lowest();
+    std::span<float> beam_token_scores = search.GetScores(i);
+    beam_token_scores[search.params_.eos_token_id] = std::numeric_limits<float>::lowest();
   }
 }
 
-void RepetitionPenalty(Search_Cpu& search, ScoreType penalty) {
+void RepetitionPenalty(Search_Cpu& search, float penalty) {
   const int batch_beam_size = search.params_.BatchBeamSize();
   for (int i = 0; i < batch_beam_size; i++) {
-    std::span<ScoreType> beam_token_scores = search.GetScores(i);
+    std::span<float> beam_token_scores = search.GetScores(i);
     std::span<const int32_t> sequence = search.sequences_.GetSequence(i);
 
     // Find unique word IDs in sequence.
@@ -310,7 +310,7 @@ void RepetitionPenalty(Search_Cpu& search, ScoreType penalty) {
     }
 
     for (const int32_t word_id : unique_word_ids) {
-      ScoreType score = beam_token_scores[word_id];
+      float score = beam_token_scores[word_id];
 
       // If score < 0, then repetition penalty > 1.0 has to multiplied to reduce the previous token probability,
       // This assumes that scores are either positive (like ctrl) or negative (like GPT-2), but not a mixture.

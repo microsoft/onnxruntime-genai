@@ -296,23 +296,23 @@ template void LaunchBatchTopKKernel(const float* topk_scores,
                                     cudaStream_t stream);
 
 void BeamSearchTopK(
-    const ScoreType* input,
+    const float* input,
     int32_t batch_size,
     int32_t num_beams,
     int32_t vocab_size,
     int32_t k,
-    ScoreType* tmp_values_1st_stage,
+    float* tmp_values_1st_stage,
     int32_t* tmp_indices_1st_stage,
-    ScoreType* tmp_values_2nd_stage,
+    float* tmp_values_2nd_stage,
     int32_t* tmp_indices_2nd_stage,
-    ScoreType* output_values,
+    float* output_values,
     int32_t* output_tokens,
     int32_t* output_indices,
     cudaStream_t stream) {
   assert(k <= 64); // BeamSearchTopK doesn't support k > 64
 
 #define TopKLauncher(K)                           \
-  TopKLauncherMaxK<ScoreType, K>(input,           \
+  TopKLauncherMaxK<float, K>(input,           \
                          batch_size * num_beams,  \
                          vocab_size,              \
                          k, tmp_values_2nd_stage, \

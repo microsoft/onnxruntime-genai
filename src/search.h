@@ -16,7 +16,7 @@ struct Search_Cpu : Search {
   // Extra scoring steps go here
 
   //
-  std::span<ScoreType> GetScores(int batch_beam_index);
+  std::span<float> GetScores(int batch_beam_index);
   Sequences& GetSequences() { return sequences_; }
 
   const SearchParams& params_;
@@ -26,8 +26,8 @@ struct Search_Cpu : Search {
 
   cpu_span<int32_t> next_tokens_;  // shape (beam_size*batch_size)
 
-  std::span<ScoreType> next_token_scores_;  // shape (beam_size*batch_size, vocab_size)
-  std::unique_ptr<ScoreType[]> next_token_scores_buffer_;
+  std::span<float> next_token_scores_;  // shape (beam_size*batch_size, vocab_size)
+  std::unique_ptr<float[]> next_token_scores_buffer_;
 
   Sequences sequences_;
   bool done_{};
@@ -74,7 +74,7 @@ struct BeamSearch_Cpu : Search_Cpu {
 
 namespace Processors {
 void MinLength(Search_Cpu& search, int min_length);
-void RepetitionPenalty(Search_Cpu& search, ScoreType penalty);
+void RepetitionPenalty(Search_Cpu& search, float penalty);
 }  // namespace Processors
 
 }  // namespace Generators

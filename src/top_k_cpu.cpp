@@ -1,12 +1,12 @@
 #include "generators.h"
 namespace Generators {
 
-void top_k_indices(std::span<int32_t> top_k, std::span<const ScoreType> inputs) {
+void top_k_indices(std::span<int32_t> top_k, std::span<const float> inputs) {
   int32_t k = static_cast<int32_t>(top_k.size());
   assert(k <= inputs.size());  // Use a smaller top_k span if k is larger than inputs
 
   // Min heap to store pairs of (element, index)
-  std::priority_queue<std::pair<ScoreType, int32_t>, std::vector<std::pair<ScoreType, int32_t>>, std::greater<>> pq;
+  std::priority_queue<std::pair<float, int32_t>, std::vector<std::pair<float, int32_t>>, std::greater<>> pq;
 
   // Add first k elements into the heap
   for (int32_t i = 0; i < k; i++) {

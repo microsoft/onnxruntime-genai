@@ -26,7 +26,7 @@ Search_Cuda::Search_Cuda(const SearchParams& params)
 
   // below buffers are on cpu or cuda
   size_t next_token_size = batch_beam_size * params_.vocab_size;
-  next_token_scores_buffer_ = CudaMallocArray<ScoreType>(next_token_size, &next_token_scores_);
+  next_token_scores_buffer_ = CudaMallocArray<float>(next_token_size, &next_token_scores_);
   cudaMemsetAsync(next_token_scores_.data(), 0, next_token_scores_.size_bytes(), params_.cuda_stream);
 
   done_cpu_ = CudaMallocHostArray<bool>(1);
@@ -47,14 +47,14 @@ BeamSearch_Cuda::BeamSearch_Cuda(const SearchParams& params)
 
   topk_next_tokens_ = CudaMallocArray<int32_t>(2 * batch_beam_size);
   topk_next_indices_ = CudaMallocArray<int32_t>(2 * batch_beam_size);
-  topk_next_scores_ = CudaMallocArray<ScoreType>(2 * batch_beam_size);
+  topk_next_scores_ = CudaMallocArray<float>(2 * batch_beam_size);
 
   constexpr size_t max_parts_of_vocab = 128;
   size_t topk_buffer_size = batch_beam_size * (max_parts_of_vocab + 1) * params_.num_beams * 2 * 2;
-  topk_buffer_ = CudaMallocArray<ScoreType>(topk_buffer_size);
-  static_assert(sizeof(ScoreType) == sizeof(int32_t));  // The topk_buffer assumes these match, fix for float16
+  topk_buffer_ = CudaMallocArray<float>(topk_buffer_size);
+  static_assert(sizeof(float) == sizeof(int32_t));  // The topk_buffer assumes these match, fix for float16
 
-  cudaMemsetAsync(topk_buffer_.get(), 0, topk_buffer_size * sizeof(ScoreType), params_.cuda_stream);
+  cudaMemsetAsync(topk_buffer_.get(), 0, topk_buffer_size * sizeof(float), params_.cuda_stream);
 }
 
 BeamSearch_Cuda::~BeamSearch_Cuda() = default;
@@ -74,10 +74,10 @@ void Search_Cuda::SetLogits(RoamingArray<float> logits_unk) {
   // Get logits for the last token:
   //    next_token_logits = logits[:, -1, :], and the result shape is (batch_size, vocab_size)
   // When input_length == 1, use logits directly in SoftmaxCPU below so it only need for input_length > 1.
-  const ScoreType* current_logits = logits.data() + (input_length - 1) * params_.vocab_size;
+  const float* current_logits = logits.data() + (input_length - 1) * params_.vocab_size;
   for (int i = 0; i < batch_beam_size; i++) {
-    std::span<const ScoreType> source(current_logits, params_.vocab_size);
-    std::span<ScoreType> target = next_token_scores_.subspan(i * params_.vocab_size, params_.vocab_size);
+    std::span<const float> source(current_logits, params_.vocab_size);
+    std::span<float> target = next_token_scores_.subspan(i * params_.vocab_size, params_.vocab_size);
     CudaCheck() == cudaMemcpyAsync(target.data(), source.data(), source.size_bytes(), cudaMemcpyDeviceToDevice, params_.cuda_stream);
     current_logits += input_length * params_.vocab_size;
 
@@ -139,7 +139,7 @@ void BeamSearch_Cuda::SelectTop() {
   CudaCheck() == cudaStreamSynchronize(params_.cuda_stream);
 
   size_t size = params_.BatchBeamSize() * 2;
-  std::span<ScoreType> next_scores{topk_next_scores_.get(), size};
+  std::span<float> next_scores{topk_next_scores_.get(), size};
   std::span<int32_t> next_tokens{topk_next_tokens_.get(), size};
   std::span<int32_t> next_indices{topk_next_indices_.get(), size};
 
@@ -164,11 +164,11 @@ void GreedySearch_Cuda::SelectTop() {
 }
 
 // TODO: Find a good way to do this on the GPU
-void SoftMax(std::span<ScoreType> scores, float temperature);
-void TopPSampling(int32_t* d_next_token, ScoreType* d_scores, int size, float threshold, float temperature) {
-  auto scores_buffer = CudaMallocHostArray<ScoreType>(size);
-  std::span<ScoreType> scores{scores_buffer.get(), static_cast<size_t>(size)};
-  cudaMemcpy(scores.data(), d_scores, size * sizeof(ScoreType), cudaMemcpyDeviceToHost);
+void SoftMax(std::span<float> scores, float temperature);
+void TopPSampling(int32_t* d_next_token, float* d_scores, int size, float threshold, float temperature) {
+  auto scores_buffer = CudaMallocHostArray<float>(size);
+  std::span<float> scores{scores_buffer.get(), static_cast<size_t>(size)};
+  cudaMemcpy(scores.data(), d_scores, size * sizeof(float), cudaMemcpyDeviceToHost);
 
   SoftMax(scores, temperature);
 
@@ -197,7 +197,7 @@ void GreedySearch_Cuda::SampleTopP(float p, float temperature) {
   std::uniform_real_distribution<float> dis(0, p);
 
   for (int i = 0; i < params_.batch_size; i++) {
-    std::span<ScoreType> scores = next_token_scores_.subspan(i * params_.vocab_size, params_.vocab_size);
+    std::span<float> scores = next_token_scores_.subspan(i * params_.vocab_size, params_.vocab_size);
     TopPSampling(next_tokens_.data() + i, scores.data(), static_cast<int>(scores.size()), dis(gen), temperature);
   }
 
@@ -248,12 +248,12 @@ void GreedySearch::Finalize(size_t num_return_sequences, std::span<int32_t> outp
 }
 #endif
 
-std::span<ScoreType> Search_Cuda::GetScores(int batch_beam_index) {
+std::span<float> Search_Cuda::GetScores(int batch_beam_index) {
   assert(batch_beam_index >= 0 && batch_beam_index < params_.BatchBeamSize());
   return next_token_scores_.subspan(batch_beam_index * params_.vocab_size, params_.vocab_size);
 }
 
-std::span<ScoreType> Search_Cuda::GetScores() {
+std::span<float> Search_Cuda::GetScores() {
   return next_token_scores_;
 }
 
@@ -265,12 +265,12 @@ void MinLength(Search_Cuda& search, int min_length) {
 
   const int batch_beam_size = search.params_.BatchBeamSize();
   for (int i = 0; i < batch_beam_size; i++) {
-    std::span<ScoreType> beam_token_scores = search.GetScores(i);
-    beam_token_scores[search.params_.eos_token_id] = std::numeric_limits<ScoreType>::lowest();
+    std::span<float> beam_token_scores = search.GetScores(i);
+    beam_token_scores[search.params_.eos_token_id] = std::numeric_limits<float>::lowest();
   }
 }
 
-void RepetitionPenalty(Search_Cuda& search, ScoreType penalty) {
+void RepetitionPenalty(Search_Cuda& search, float penalty) {
   cuda::LaunchRepetitionPenaltyProcessor(search.sequences_.GetSequences().data(),
                                          search.GetScores().data(), search.params_.batch_size, search.params_.num_beams, search.params_.vocab_size,
                                          search.params_.max_length, search.GetSequenceLength(), penalty, search.params_.cuda_stream);

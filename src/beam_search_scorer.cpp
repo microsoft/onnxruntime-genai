@@ -96,7 +96,7 @@ BeamSearchScorer::BeamSearchScorer(const SearchParams& parameters)
 }
 
 void BeamSearchScorer::Process(Sequences& sequences,
-                               std::span<const ScoreType> next_scores,
+                               std::span<const float> next_scores,
                                std::span<const int32_t> next_tokens,
                                std::span<const int32_t> next_indices) {
   // Sequences shape is (batch_size * num_beams, total_sequence_length)

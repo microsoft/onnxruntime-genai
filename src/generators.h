@@ -29,7 +29,6 @@
 
 namespace Generators {
 struct Model;
-using ScoreType = float;
 
 #ifndef USE_CUDA
 using cudaStream_t = void*;
@@ -166,6 +165,6 @@ struct SearchParams {
 
 float Float16ToFloat32(uint16_t v);  // v is a IEEE 752-2008 binary16 format, 1 sign bit, 5 bit exponent, 10 bit fraction
 void ParseConfig(const std::filesystem::path& filename, Config& params);
-void top_k_indices(std::span<int32_t> top_k, std::span<const ScoreType> inputs);
+void top_k_indices(std::span<int32_t> top_k, std::span<const float> inputs);
 
 }  // namespace Generators

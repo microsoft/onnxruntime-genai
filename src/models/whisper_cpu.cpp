@@ -137,7 +137,7 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
   auto shape = type_shape->GetShape();
   assert(type_shape->GetShape().size() == 3);
 
-  return cpu_span<float>{logits_->GetTensorMutableData<ScoreType>(), type_shape->GetElementCount()};
+  return cpu_span<float>{logits_->GetTensorMutableData<float>(), type_shape->GetElementCount()};
 }
 
 void Whisper_State::UpdateInputs(std::span<const int32_t> next_tokens, std::span<const int32_t> beam_indices, int current_length) {

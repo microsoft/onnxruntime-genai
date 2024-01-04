@@ -64,7 +64,7 @@ RoamingArray<float> Llama_State::Run(int current_length, RoamingArray<int32_t> n
   auto shape = type_shape->GetShape();
   assert(type_shape->GetShape().size() == 3);
 
-  return cpu_span<float>{logits_->GetTensorMutableData<ScoreType>(), type_shape->GetElementCount()};
+  return cpu_span<float>{logits_->GetTensorMutableData<float>(), type_shape->GetElementCount()};
 }
 
 void Llama_State::UpdateInputs(std::span<const int32_t> next_tokens, std::span<const int32_t> beam_indices, int current_length) {
@@ -89,7 +89,7 @@ void Llama_State::UpdateInputs(std::span<const int32_t> next_tokens, std::span<c
   // Update logits
   if (model_->logits_uses_seq_len_) {
     int64_t logits_shape[] = {search_params_.batch_size * search_params_.num_beams, 1, model_->vocab_size_};
-    logits_ = OrtValue::CreateTensor(model_->model_.allocator_cpu_, logits_shape, Ort::TypeToTensorType<ScoreType>::type);
+    logits_ = OrtValue::CreateTensor(model_->model_.allocator_cpu_, logits_shape, model_->score_type_);
     outputs_[0] = logits_.get();
   }
 

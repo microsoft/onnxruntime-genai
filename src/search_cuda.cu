@@ -4,8 +4,6 @@
 #include "generators.h"
 #include "search_cuda.cuh"
 
-using ScoreType = float;  // TODO: Move to header includable by cuda
-
 namespace Generators {
 namespace cuda {
 
@@ -40,7 +38,7 @@ struct ArgMaxDataImpl : ArgMaxData {
   cuda_unique_ptr<cub::KeyValuePair<int, float>> argmaxen_owner_;
 };
 
-void Launch_ArgMax(std::unique_ptr<ArgMaxData>& p_data, int32_t* next_tokens, const ScoreType* next_token_scores, int batch_size, int vocab_size, cudaStream_t stream) {
+void Launch_ArgMax(std::unique_ptr<ArgMaxData>& p_data, int32_t* next_tokens, const float* next_token_scores, int batch_size, int vocab_size, cudaStream_t stream) {
   if (!p_data)
     p_data = std::make_unique<ArgMaxDataImpl>();
   auto& data = static_cast<ArgMaxDataImpl&>(*p_data);
@@ -56,7 +54,7 @@ void Launch_ArgMax(std::unique_ptr<ArgMaxData>& p_data, int32_t* next_tokens, co
   ArgMax<<<1, batch_size, 0, stream>>>(data.argmaxen_.data(), next_tokens, batch_size);
 }
 
-__global__ void log_softmax(ScoreType* values, int count) {
+__global__ void log_softmax(float* values, int count) {
   float max = *std::max_element(values, values + count);
   //  std::vector<float> scaled(values.begin(), values.end());
   float sum = 0.0f;
@@ -67,7 +65,7 @@ __global__ void log_softmax(ScoreType* values, int count) {
   // std::transform(values, values+count, values, [max, log_max](float v) { return v - max - log_max; });
 }
 
-void Launch_log_softmax(ScoreType* values, int count, cudaStream_t stream) {
+void Launch_log_softmax(float* values, int count, cudaStream_t stream) {
   log_softmax<<<1, 1, 0, stream>>>(values, count);
 }
 
@@ -101,8 +99,8 @@ void Launch_CheckForEOS(int32_t* next_tokens, int next_tokens_count, bool* eos_m
   CheckForEOS<<<1, 1, 0, stream>>>(next_tokens, next_tokens_count, eos_meet, eos_token_id, pad_token_id, done_cpu);
 }
 
-__global__ void AddProbsKernel(ScoreType* log_probs,
-                               ScoreType* cum_log_probs,
+__global__ void AddProbsKernel(float* log_probs,
+                               float* cum_log_probs,
                                const int vocab_size,
                                const int total_elements) {
   int index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -112,8 +110,8 @@ __global__ void AddProbsKernel(ScoreType* log_probs,
     log_probs[index] += cum_log_probs[batch_beam_index];
 }
 
-void LaunchAddProbsKernel(ScoreType* log_probs,
-                          ScoreType* cum_log_probs,
+void LaunchAddProbsKernel(float* log_probs,
+                          float* cum_log_probs,
                           const int batch_size,
                           const int num_beams,
                           const int vocab_size,
@@ -124,7 +122,7 @@ void LaunchAddProbsKernel(ScoreType* log_probs,
   AddProbsKernel<<<gridSize, blockSize, 0, stream>>>(log_probs, cum_log_probs, vocab_size, total_elements);
 }
 
-__global__ void RepetitionPenaltyProcessor(const int32_t* sequences, ScoreType* next_token_scores, int max_sequence_length, int vocab_size, int total_elements, int current_sequence_length, ScoreType repetition_penalty) {
+__global__ void RepetitionPenaltyProcessor(const int32_t* sequences, float* next_token_scores, int max_sequence_length, int vocab_size, int total_elements, int current_sequence_length, float repetition_penalty) {
   int index = blockIdx.x * blockDim.x + threadIdx.x;
   if (index >= total_elements)
     return;
@@ -141,12 +139,12 @@ __global__ void RepetitionPenaltyProcessor(const int32_t* sequences, ScoreType* 
     }
   }
   if (found) {
-    ScoreType score = next_token_scores[index];
+    float score = next_token_scores[index];
     next_token_scores[index] = score < 0 ? score * repetition_penalty : score / repetition_penalty;
   }
 }
 
-void LaunchRepetitionPenaltyProcessor(const int32_t* sequences, ScoreType* next_token_scores, int batch_size, int num_beams, int vocab_size, int max_sequence_length, int current_sequence_length, ScoreType repetition_penalty, cudaStream_t stream) {
+void LaunchRepetitionPenaltyProcessor(const int32_t* sequences, float* next_token_scores, int batch_size, int num_beams, int vocab_size, int max_sequence_length, int current_sequence_length, float repetition_penalty, cudaStream_t stream) {
   int total_elements = batch_size * num_beams * vocab_size;
   constexpr int blockSize = 256;
   const int gridSize = (total_elements + blockSize - 1) / blockSize;

@@ -240,7 +240,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   // So that python users can catch OrtExceptions specifically
   pybind11::register_exception<Ort::Exception>(m, "OrtException");
 
-  Declare_DeviceArray<ScoreType>(m, "DeviceArray_ScoreType");
+  Declare_DeviceArray<float>(m, "DeviceArray_float");
   Declare_DeviceArray<int32_t>(m, "DeviceArray_int32");
 
   pybind11::enum_<DeviceType>(m, "DeviceType")
