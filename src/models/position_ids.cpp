@@ -13,9 +13,8 @@ void LaunchGpt_UpdateMask(int64_t* mask_data, const int64_t* old_mask_data, int 
 }  // namespace cuda
 
 template<typename T>
-PositionIDs<T>::PositionIDs(Model& model, const SearchParams& search_params, Ort::Allocator& allocator, RoamingArray<int32_t>& sequence_lengths_unk)
-    : model_{model},
-      allocator_{allocator} {
+PositionIDs<T>::PositionIDs(Model& model, const SearchParams& search_params, RoamingArray<int32_t>& sequence_lengths_unk)
+    : model_{model} {
   cpu_span<int32_t> sequence_lengths = sequence_lengths_unk;
   std::array<int64_t, 2> shape{search_params.batch_size, search_params.sequence_length};  // Only batch_size initially, as we haven't expanded over the beams yet
   position_ids_ = OrtValue::CreateTensor<T>(model.allocator_cpu_, shape);
@@ -46,8 +45,8 @@ PositionIDs<T>::PositionIDs(Model& model, const SearchParams& search_params, Ort
     }
   }
 
-  position_ids_ = ExpandInputs(position_ids_, search_params.num_beams, allocator_, model.device_type_, model.cuda_stream_);
-  attention_mask_ = ExpandInputs(attention_mask_, search_params.num_beams, allocator_, model.device_type_, model.cuda_stream_);
+  position_ids_ = ExpandInputs(position_ids_, search_params.num_beams, *model.allocator_device_, model.device_type_, model.cuda_stream_);
+  attention_mask_ = ExpandInputs(attention_mask_, search_params.num_beams, *model.allocator_device_, model.device_type_, model.cuda_stream_);
   shape[0] *= search_params.num_beams;
   position_ids_shape_ = shape;
   attention_mask_shape_ = shape;
@@ -58,7 +57,7 @@ void PositionIDs<T>::Update(int current_length) {
   // Reallocate position_ids for the 2nd and onward shape
   if (position_ids_shape_[1] != 1) {
     position_ids_shape_[1] = 1;
-    position_ids_ = OrtValue::CreateTensor<T>(allocator_, position_ids_shape_);
+    position_ids_ = OrtValue::CreateTensor<T>(*model_.allocator_device_, position_ids_shape_);
   }
 
   switch (model_.device_type_) {
@@ -84,7 +83,7 @@ void PositionIDs<T>::Update(int current_length) {
     attention_mask_shape_[1] = current_length;
 
     const auto* old_data = attention_mask_->GetTensorData<T>();
-    auto attention_mask = OrtValue::CreateTensor<T>(allocator_, attention_mask_shape_);
+    auto attention_mask = OrtValue::CreateTensor<T>(*model_.allocator_device_, attention_mask_shape_);
     auto* data = attention_mask->GetTensorMutableData<T>();
 
     switch (model_.device_type_) {

@@ -4,7 +4,7 @@ namespace Generators {
 
 struct KV_Cache_Combined {
 
-  KV_Cache_Combined(const SearchParams& search_params, const Config& config, Ort::Allocator& allocator, cudaStream_t cuda_stream, ONNXTensorElementDataType score_type);
+  KV_Cache_Combined(Model& model, const SearchParams& search_params);
   void Update(std::span<const int32_t> beam_indices, int current_length);
   template <typename ScoreType>
   void PickPastState(std::span<const int32_t> beam_indices, int index);
@@ -14,12 +14,8 @@ struct KV_Cache_Combined {
   const char *past_name_{"past_%d"};
   const char *present_name_{"present_%d"};
 
-  Ort::Allocator& allocator_;
-  cudaStream_t cuda_stream_;
-
-  ONNXTensorElementDataType score_type_;
+  Model& model_;
   int layer_count_;
-  bool is_cuda_;
 
   std::array<int64_t, 5> shape_;
 
@@ -29,23 +25,18 @@ struct KV_Cache_Combined {
 };
 
 struct KV_Cache {
-  KV_Cache(const SearchParams& search_params, const Config& config, Ort::Allocator& allocator, cudaStream_t cuda_stream, ONNXTensorElementDataType score_type,
-           std::span<const char*> past_names, std::span<const char*> present_names, std::span<const char*> past_cross_names = {}, std::span<const char*> present_cross_names = {});
+  KV_Cache(Model& model, const SearchParams& search_params, std::span<const char*> past_names, std::span<const char*> present_names, std::span<const char*> past_cross_names = {}, std::span<const char*> present_cross_names = {});
   void Update(std::span<const int32_t> beam_indices, int current_length);
   template <typename ScoreType>
   void PickPastState(std::span<const int32_t> beam_indices, int index);
   void PickPastState(std::span<const int32_t> beam_indices, int index);
 
-  std::span<const char*> past_names_; // past key name/past value name
-  std::span<const char*> present_names_; // present key name/present value name
-  std::span<const char*> past_cross_names_, present_cross_names_;
-
-  Ort::Allocator& allocator_;
-  cudaStream_t cuda_stream_;
-
-  ONNXTensorElementDataType score_type_;
+  Model& model_;
   int layer_count_;
-  bool is_cuda_;
+
+  std::span<const char*> past_names_;     // past key name/past value name
+  std::span<const char*> present_names_;  // present key name/present value name
+  std::span<const char*> past_cross_names_, present_cross_names_;
 
   std::array<int64_t, 4> shape_, cross_shape_;
 

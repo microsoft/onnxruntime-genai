@@ -293,7 +293,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   pybind11::class_<Model>(m, "Model")
       .def(pybind11::init([](const std::string& config_path, DeviceType device_type) {
              auto provider_options = GetDefaultProviderOptions(device_type);
-             return new Model(GetOrtEnv(), config_path.c_str(), &provider_options);
+             return CreateModel(GetOrtEnv(), config_path.c_str(), &provider_options);
            }),
            "str"_a, "device_type"_a = DeviceType::Auto)
       .def("Generate", [](Model& model, PySearchParams& search_params) { search_params.Prepare(); return model.Generate(search_params); })

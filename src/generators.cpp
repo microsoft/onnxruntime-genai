@@ -46,13 +46,13 @@ Config::Config(const std::filesystem::path& path) : config_path{path} {
 }
 
 SearchParams::SearchParams(const Model& model)
-    : pad_token_id{model.config_.pad_token_id},
-      eos_token_id{model.config_.eos_token_id},
-      vocab_size{model.config_.vocab_size},
-      max_length{model.config_.max_length},
-      length_penalty{model.config_.length_penalty},
-      early_stopping{model.config_.early_stopping},
-      num_beams{model.config_.num_beams},
+    : pad_token_id{model.config_->pad_token_id},
+      eos_token_id{model.config_->eos_token_id},
+      vocab_size{model.config_->vocab_size},
+      max_length{model.config_->max_length},
+      length_penalty{model.config_->length_penalty},
+      early_stopping{model.config_->early_stopping},
+      num_beams{model.config_->num_beams},
       device_type{model.device_type_}
 #if USE_CUDA
       ,

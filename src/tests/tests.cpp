@@ -37,23 +37,23 @@ void Test_GreedySearch_Gpt_Fp32() {
   // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
   // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
 
-  Generators::Model model{*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32"};
+  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
-  Generators::SearchParams params{model};
+  Generators::SearchParams params{*model};
   params.max_length = 10;
   params.batch_size = static_cast<int>(input_ids_shape[0]);
   params.sequence_length = static_cast<int>(input_ids_shape[1]);
   params.input_ids = input_ids;
 
-  auto search=params.CreateSearch();
-  auto state=model.CreateState(search->GetSequenceLengths(), params);
+  auto search = params.CreateSearch();
+  auto state = model->CreateState(search->GetSequenceLengths(), params);
 
   while (!search->IsDone()) {
     search->SetLogits(state->Run(search->GetSequenceLength(), search->GetNextTokens()));
 
     // Scoring
-//    Generators::Processors::MinLength(search, 1);
-//    Generators::Processors::RepetitionPenalty(search, 1.0f);
+    //    Generators::Processors::MinLength(search, 1);
+    //    Generators::Processors::RepetitionPenalty(search, 1.0f);
 
     search->SelectTop();
   }
@@ -87,9 +87,9 @@ void Test_BeamSearch_Gpt_Fp32() {
   //        --output tiny_gpt2_beamsearch_fp16.onnx --use_gpu --max_length 20
   // (with separate_gpt2_decoder_for_init_run set to False as it is now set to True by default)
 
-  Generators::Model model{*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32"};
+  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
-  Generators::SearchParams params{model};
+  Generators::SearchParams params{*model};
   params.batch_size = static_cast<int>(input_ids_shape[0]);
   params.sequence_length = static_cast<int>(input_ids_shape[1]);
   params.input_ids = input_ids;
@@ -98,7 +98,7 @@ void Test_BeamSearch_Gpt_Fp32() {
   params.num_beams = 4;
 
   Generators::BeamSearch_Cpu search{params};
-  auto state=model.CreateState(search.sequence_lengths_, params);
+  auto state = model->CreateState(search.sequence_lengths_, params);
 
   while (!search.IsDone()) {
     search.SetLogits(state->Run(search.GetSequenceLength(), search.GetNextTokens(), search.GetNextIndices()));
@@ -124,7 +124,7 @@ void Test_BeamSearch_Gpt_Fp32() {
 }
 
 #if USE_CUDA
-void Test_GreedySearch_Gpt_Cuda(const char *model_path, const char* model_label) {
+void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label) {
   std::cout << "Test_GreedySearch_Gpt_Cuda " << model_label << std::flush;
 
   std::vector<int64_t> input_ids_shape{2, 4};
@@ -134,23 +134,23 @@ void Test_GreedySearch_Gpt_Cuda(const char *model_path, const char* model_label)
       0, 0, 0, 52, 204, 204, 204, 204, 204, 204,
       0, 0, 195, 731, 731, 114, 114, 114, 114, 114};
 
-  auto provider_options=Generators::GetDefaultProviderOptions(Generators::DeviceType::CUDA);
-  Generators::Model model{*g_ort_env, model_path, &provider_options};
+  auto provider_options = Generators::GetDefaultProviderOptions(Generators::DeviceType::CUDA);
+  auto model = Generators::CreateModel(*g_ort_env, model_path, &provider_options);
 
-  Generators::SearchParams params{model};
+  Generators::SearchParams params{*model};
   params.batch_size = static_cast<int>(input_ids_shape[0]);
   params.sequence_length = static_cast<int>(input_ids_shape[1]);
-  params.max_length=10;
+  params.max_length = 10;
   params.input_ids = input_ids;
 
   auto search = params.CreateSearch();
-  auto state=model.CreateState(search->GetSequenceLengths(), params);
+  auto state = model->CreateState(search->GetSequenceLengths(), params);
 
   while (!search->IsDone()) {
     search->SetLogits(state->Run(search->GetSequenceLength(), search->GetNextTokens()));
 
     // Scoring
-//    Generators::Processors_Cuda::MinLength(search, 1);
+    //    Generators::Processors_Cuda::MinLength(search, 1);
 
     search->SelectTop();
   }
@@ -192,9 +192,9 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
   // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2
   //        --output tiny_gpt2_beamsearch_fp16.onnx --use_gpu --max_length 20
   // (with separate_gpt2_decoder_for_init_run set to False as it is now set to True by default)
-  Generators::Model model{*g_ort_env, model_path, &provider_options};
+  auto model = Generators::CreateModel(*g_ort_env, model_path, &provider_options);
 
-  Generators::SearchParams params{model};
+  Generators::SearchParams params{*model};
   params.batch_size = static_cast<int>(input_ids_shape[0]);
   params.sequence_length = static_cast<int>(input_ids_shape[1]);
   params.input_ids = input_ids;
@@ -202,20 +202,20 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
   params.num_beams = 4;
   params.length_penalty = 1.0f;
 
-  auto search=params.CreateSearch();
-  auto state=model.CreateState(search->GetSequenceLengths(), params);
+  auto search = params.CreateSearch();
+  auto state = model->CreateState(search->GetSequenceLengths(), params);
 
   while (!search->IsDone()) {
     search->SetLogits(state->Run(search->GetSequenceLength(), search->GetNextTokens(), search->GetNextIndices()));
 
     // Scoring
-//    Generators::Processors_Cuda::MinLength(search, 1);
-//    Generators::Processors_Cuda::RepetitionPenalty(search, 1.0f);
+    //    Generators::Processors_Cuda::MinLength(search, 1);
+    //    Generators::Processors_Cuda::RepetitionPenalty(search, 1.0f);
 
     search->SelectTop();
   }
 
-  size_t sequence_length=params.batch_size*params.max_length;
+  size_t sequence_length = params.batch_size * params.max_length;
   auto output_sequence_cuda = Generators::CudaMallocArray<int32_t>(sequence_length);
   auto output_sequence_cpu = std::make_unique<int32_t[]>(sequence_length);
 

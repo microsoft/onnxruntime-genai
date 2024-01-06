@@ -10,33 +10,31 @@
 
 namespace Generators {
 
-Model::Model(OrtEnv& ort_env, const char* config_path, const ProviderOptions* provider_options) : config_{config_path} {
-  auto session_options = OrtSessionOptions::Create();
+Model::Model(std::unique_ptr<Config> config, OrtEnv& ort_env, const ProviderOptions* provider_options) : config_{std::move(config)} {
+  session_options_ = OrtSessionOptions::Create();
 
   if (provider_options) {
 #if USE_CUDA
     if (auto* options = std::get_if<OrtCUDAProviderOptions>(provider_options)) {
       cuda_stream_ = reinterpret_cast<cudaStream_t>(options->user_compute_stream);
-      session_options->AppendExecutionProvider_CUDA(*options);
+      session_options_->AppendExecutionProvider_CUDA(*options);
       device_type_ = DeviceType::CUDA;
     }
 #endif
   }
-
-  if (config_.model_type == "gpt2")
-    arch_ = std::make_unique<Gpt_Model>(*this, ort_env, *session_options);
-  else if (config_.model_type == "llama")
-    arch_ = std::make_unique<Llama_Model>(*this, ort_env, *session_options);
-  else if (config_.model_type == "whisper")
-    arch_ = std::make_unique<Whisper_Model>(*this, ort_env, *session_options);
-  else
-    throw std::runtime_error("Unsupported model_type in config.json: " + config_.model_type);
 }
 
 Model::~Model() = default;
 
-std::unique_ptr<State> Model::CreateState(RoamingArray<int32_t> sequence_lengths, const SearchParams& params) {
-  return arch_->CreateState(sequence_lengths, params);
+void Model::InitDeviceAllocator(OrtSession& session) {
+  allocator_device_ = &allocator_cpu_;
+#if USE_CUDA
+  if (device_type_ == DeviceType::CUDA) {
+    memory_info_cuda_ = OrtMemoryInfo::Create("Cuda", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+    allocator_cuda_ = Ort::Allocator::Create(session, *memory_info_cuda_);
+    allocator_device_ = allocator_cuda_.get();
+  }
+#endif
 }
 
 std::vector<int32_t> Model::Generate(const SearchParams& params) {
@@ -46,10 +44,10 @@ std::vector<int32_t> Model::Generate(const SearchParams& params) {
   while (!search->IsDone()) {
     search->SetLogits(state->Run(search->GetSequenceLength(), search->GetNextTokens()));
 
-    if (config_.top_p < 1.0f) {
-      search->SampleTopP(config_.top_p, config_.temperature);
-    } else if (config_.top_k > 1) {
-      search->SampleTopK(config_.top_k, config_.temperature);
+    if (config_->top_p < 1.0f) {
+      search->SampleTopP(config_->top_p, config_->temperature);
+    } else if (config_->top_k > 1) {
+      search->SampleTopK(config_->top_k, config_->temperature);
     } else
       search->SelectTop();
   }
@@ -63,7 +61,16 @@ std::vector<int32_t> Model::Generate(const SearchParams& params) {
 }
 
 std::unique_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const ProviderOptions* provider_options) {
-  return std::make_unique<Model>(ort_env, config_path, provider_options);
+  auto config = std::make_unique<Config>(config_path);
+
+  if (config->model_type == "gpt2")
+    return std::make_unique<Gpt_Model>(std::move(config), ort_env, provider_options);
+  else if (config->model_type == "llama")
+    return std::make_unique<Llama_Model>(std::move(config), ort_env, provider_options);
+  else if (config->model_type == "whisper")
+    return std::make_unique<Whisper_Model>(std::move(config), ort_env, provider_options);
+
+  throw std::runtime_error("Unsupported model_type in config.json: " + config->model_type);
 }
 
 #if USE_CUDA
