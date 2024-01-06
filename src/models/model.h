@@ -34,6 +34,8 @@ struct Model {
   std::unique_ptr<Arch> arch_;
 };
 
+std::unique_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const ProviderOptions* provider_options = nullptr);
+
 #if USE_CUDA
 namespace cuda {
 

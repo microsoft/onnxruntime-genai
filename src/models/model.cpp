@@ -62,6 +62,10 @@ std::vector<int32_t> Model::Generate(const SearchParams& params) {
   return v;
 }
 
+std::unique_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const ProviderOptions* provider_options) {
+  return std::make_unique<Model>(ort_env, config_path, provider_options);
+}
+
 #if USE_CUDA
 void ConvertFp16ToFp32(OrtAllocator& allocator, cudaStream_t stream, OrtValue& in, std::unique_ptr<OrtValue>& p_out) {
   auto shape_info = in.GetTensorTypeAndShapeInfo();

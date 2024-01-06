@@ -1,5 +1,7 @@
 #pragma once
 #include "model.h"
+#include "input_ids.h"
+#include "logits.h"
 #include "kv_cache.h"
 #include "position_ids.h"
 
@@ -43,23 +45,12 @@ struct Gpt_State : State {
 
   Gpt_Model* model_;
 
+  InputIDs input_ids_;
+  Logits logits_;
   KV_Cache_Combined kv_cache_;
   PositionIDs<int32_t> position_ids_;
 
-  std::array<int64_t, 2> input_ids_shape_;
-  std::array<int64_t, 3> logits_shape_;
-
-  // Inputs
-  std::unique_ptr<OrtValue> input_ids_;
-
-  std::vector<const char*> input_names_;
-  std::vector<OrtValue*> inputs_;
-
-  // Outputs
-  std::unique_ptr<OrtValue> logits_;
-  std::unique_ptr<OrtValue> logits32_;  // When model output is fp16, this holds the fp32 conversion of them
-
-  std::vector<const char*> output_names_;
-  std::vector<OrtValue*> outputs_;
+  std::vector<const char*> input_names_, output_names_;
+  std::vector<OrtValue*> inputs_, outputs_;
 };
 }

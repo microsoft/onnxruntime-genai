@@ -52,20 +52,12 @@ void Gpt_Model::InitModelParams() {
 Gpt_State::Gpt_State(Gpt_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const SearchParams& search_params)
     : search_params_{search_params},
       model_{&model},
+      input_ids_ {model.model_, search_params, *model.allocator_device_},
+      logits_{search_params, model.model_.device_type_, *model.allocator_device_, model.model_.cuda_stream_, model.score_type_, model.logits_uses_seq_len_},
       kv_cache_{search_params, model.model_.config_, *model.allocator_device_, model.model_.cuda_stream_, model.score_type_},
       position_ids_{model.model_, search_params, *model.allocator_device_, sequence_lengths_unk} {
 
-  // To avoid cloning input_ids, we use const_cast here since this function does not change its content.
-  input_ids_shape_ = {search_params_.batch_size, search_params_.sequence_length};
-  input_ids_ = OrtValue::CreateTensor<int32_t>(model.model_.allocator_cpu_.GetInfo(), std::span<int32_t>(const_cast<int32_t*>(search_params_.input_ids.data()), input_ids_shape_[0] * input_ids_shape_[1]), input_ids_shape_);
-  input_ids_ = ExpandInputs(input_ids_, search_params_.num_beams, *model.allocator_device_, model_->model_.device_type_, model_->model_.cuda_stream_);
-  input_ids_shape_[0] *= search_params_.num_beams;
-
-  // Allocate space for logits
-  logits_shape_ = {search_params_.batch_size * search_params_.num_beams, model_->logits_uses_seq_len_ ? input_ids_shape_[1] : 1, model_->vocab_size_};
-  logits_ = OrtValue::CreateTensor(*model.allocator_device_, logits_shape_, model_->score_type_);
-
-  inputs_.push_back(input_ids_.get());
+  inputs_.push_back(input_ids_.input_ids_.get());
   input_names_.push_back("input_ids");
   inputs_.push_back(position_ids_.position_ids_.get());
   input_names_.push_back("position_ids");
@@ -73,7 +65,7 @@ Gpt_State::Gpt_State(Gpt_Model& model, RoamingArray<int32_t> sequence_lengths_un
   input_names_.push_back("attention_mask");
 
   output_names_.push_back("logits");
-  outputs_.push_back(logits_.get());
+  outputs_.push_back(logits_.logits_.get());
 
   for (int i = 0; i < model_->layer_count_; i++) {
     inputs_.push_back(kv_cache_.empty_past_.get());
@@ -97,51 +89,21 @@ RoamingArray<float> Gpt_State::Run(int current_length, RoamingArray<int32_t> nex
 #endif
 
   model_->session_decoder_->Run(nullptr, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
-
-  auto type_shape = logits_->GetTensorTypeAndShapeInfo();
-
-#if USE_CUDA
-  if (model_->model_.device_type_ == DeviceType::CUDA) {
-    if (model_->score_type_ == Ort::TypeToTensorType<Ort::Float16_t>::type) {
-      ConvertFp16ToFp32(*model_->allocator_cuda_, model_->model_.cuda_stream_, *logits_, logits32_);
-      return gpu_span<float>{logits32_->GetTensorMutableData<float>(), type_shape->GetElementCount()};
-    }
-    return gpu_span<float>{logits_->GetTensorMutableData<float>(), type_shape->GetElementCount()};
-  }
-#endif
-
-  return cpu_span<float>{logits_->GetTensorMutableData<float>(), type_shape->GetElementCount()};
+  return logits_.Get();
 }
 
 void Gpt_State::UpdateInputs(RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> beam_indices, int current_length) {
   assert(search_params_.num_beams == 1 || !beam_indices.empty());  // We require beam_indices if we're a beam search
 
-  // Resize input_ids shape once if it doesn't match the decoder shape
-  if (input_ids_shape_[1] != 1) {
-    input_ids_shape_[1] = 1;
-    input_ids_ = OrtValue::CreateTensor<int32_t>(*model_->allocator_device_, input_ids_shape_);
-    inputs_[0] = input_ids_.get();
-  }
-
-  // Update input_ids with next tokens
-  auto* input_ids_data = input_ids_->GetTensorMutableData<int32_t>();
-#if USE_CUDA
-  if (model_->model_.device_type_ == DeviceType::CUDA)
-    cudaMemcpyAsync(input_ids_data, next_tokens.GetGPU().data(), input_ids_shape_[0] * sizeof(int32_t), cudaMemcpyDeviceToDevice, model_->model_.cuda_stream_);
-  else
-#endif
-    memcpy(input_ids_data, next_tokens.GetCPU().data(), input_ids_shape_[0] * sizeof(int32_t));
+  input_ids_.Update(next_tokens);
+  inputs_[0] = input_ids_.input_ids_.get();
 
   position_ids_.Update(current_length);
   inputs_[1] = position_ids_.position_ids_.get();
   inputs_[2] = position_ids_.attention_mask_.get();
 
-  // Resize the logits shape once if it doesn't match the decoder shape
-  if (logits_shape_[1] != 1) {
-    logits_shape_[1] = 1;
-    logits_ = OrtValue::CreateTensor(*model_->allocator_device_, logits_shape_, model_->score_type_);
-    outputs_[0] = logits_.get();
-  }
+  logits_.Update();
+  outputs_[0]=logits_.logits_.get();
 
   kv_cache_.Update(beam_indices.GetCPU(), current_length);
   for (size_t i = 0; i < model_->layer_count_; i++) {

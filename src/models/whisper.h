@@ -1,4 +1,6 @@
 #include "model.h"
+#include "input_ids.h"
+#include "logits.h"
 #include "kv_cache.h"
 
 namespace Generators {
@@ -46,23 +48,12 @@ struct Whisper_State : State {
   const SearchParams& search_params_;
   bool first_run_{true};
 
+  InputIDs decoder_input_ids_;
+  Logits logits_;
   KV_Cache kv_cache_;
-
-  std::array<int64_t, 2> decoder_input_ids_shape_;
-  std::array<int64_t, 3> logits_shape_;
-
-  // Inputs
-  std::unique_ptr<OrtValue> decoder_input_ids_;
-  std::vector<std::string> input_name_strings_;
-  std::vector<const char*> input_names_;
-  std::vector<OrtValue*> inputs_;
-
-  // Outputs
   std::unique_ptr<OrtValue> encoder_hidden_states_;
-  std::unique_ptr<OrtValue> logits_;
-  std::unique_ptr<OrtValue> logits32_;  // When model output is fp16, this holds the fp32 conversion of them
 
-  std::vector<const char*> output_names_;
-  std::vector<OrtValue*> outputs_;
+  std::vector<const char*> input_names_, output_names_;
+  std::vector<OrtValue*> inputs_, outputs_;
 };
 }

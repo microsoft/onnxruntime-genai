@@ -51,41 +51,27 @@ void Whisper_Model::InitModelParams() {
 Whisper_State::Whisper_State(Whisper_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const SearchParams& search_params)
     : model_{&model},
       search_params_{search_params},
+      decoder_input_ids_{model.model_, search_params, *model.allocator_device_},
+      logits_{search_params, model.model_.device_type_, *model.allocator_device_, model.model_.cuda_stream_, model.score_type_, model.logits_uses_seq_len_},
       kv_cache_{search_params, model.model_.config_, *model.allocator_device_, model.model_.cuda_stream_, model.score_type_, model.past_names_, model.present_names_, model.past_cross_names_, model.present_cross_names_} {
-
-  // Use original input_ids. This requires the input_ids for subgraph is also int32.
-  // Current shape is (batch_size, sequence_length)
-  // Note that we will expand it to (batch_size * num_beams, sequence_length) later.
-  decoder_input_ids_shape_ = {search_params_.batch_size, search_params_.sequence_length};
-  decoder_input_ids_ = OrtValue::CreateTensor<int32_t>(model_->model_.allocator_cpu_, decoder_input_ids_shape_);
-  auto* p_data = decoder_input_ids_->GetTensorMutableData<int32_t>();
-  for (auto v : search_params_.input_ids)
-    *p_data++ = v;
 
   auto& inputs = const_cast<SearchParams::Whisper&>(std::get<SearchParams::Whisper>(search_params.inputs));
 
   auto encoder_input_ids = ExpandInputs(inputs.input_features, search_params_.num_beams, *model_->allocator_device_, model_->model_.device_type_, model_->model_.cuda_stream_);
-  decoder_input_ids_ = ExpandInputs(decoder_input_ids_, search_params_.num_beams, *model_->allocator_device_, model_->model_.device_type_, model_->model_.cuda_stream_);
-  decoder_input_ids_shape_[0] *= search_params_.num_beams;
+  encoder_hidden_states_ = OrtValue::CreateTensor<float>(*model_->allocator_device_, std::array<int64_t, 3>{decoder_input_ids_.input_ids_shape_[0], 1500, 384});
 
-  cpu_span<int32_t> sequence_lengths = sequence_lengths_unk;
-  for (int i = 0; i < decoder_input_ids_shape_[0]; i++) {
+  auto sequence_lengths = sequence_lengths_unk.GetCPU();
+  for (int i = 0; i < decoder_input_ids_.input_ids_shape_[0]; i++) {
     sequence_lengths[i] = static_cast<int32_t>(search_params_.sequence_length);
   }
 
   input_names_.push_back("encoder_input_ids");
   inputs_.push_back(encoder_input_ids.get());
   input_names_.push_back("decoder_input_ids");
-  inputs_.push_back(decoder_input_ids_.get());
+  inputs_.push_back(decoder_input_ids_.input_ids_.get());
 
-  // Allocate space for logits
-  logits_shape_ = {decoder_input_ids_shape_[0], decoder_input_ids_shape_[1], model_->vocab_size_};
-  logits_ = OrtValue::CreateTensor(*model_->allocator_device_, logits_shape_, model_->score_type_);
   output_names_.push_back("logits");
-  outputs_.push_back(logits_.get());
-
-  encoder_hidden_states_ = OrtValue::CreateTensor<float>(*model_->allocator_device_, std::array<int64_t, 3>{decoder_input_ids_shape_[0], 1500, 384});
-
+  outputs_.push_back(logits_.logits_.get());
   output_names_.push_back("encoder_hidden_states");
   outputs_.push_back(encoder_hidden_states_.get());
 
@@ -141,45 +127,15 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
 
     model_->session_decoder_->Run(nullptr, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
   }
-  auto type_shape = logits_->GetTensorTypeAndShapeInfo();
-
-#if USE_CUDA
-  if (model_->model_.device_type_ == DeviceType::CUDA) {
-    if (model_->score_type_ == Ort::TypeToTensorType<Ort::Float16_t>::type) {
-      ConvertFp16ToFp32(*model_->allocator_cuda_, model_->model_.cuda_stream_, *logits_, logits32_);
-      return gpu_span<float>{logits32_->GetTensorMutableData<float>(), type_shape->GetElementCount()};
-    }
-    return gpu_span<float>{logits_->GetTensorMutableData<float>(), type_shape->GetElementCount()};
-  }
-#endif
-
-  return cpu_span<float>{logits_->GetTensorMutableData<float>(), type_shape->GetElementCount()};
+  return logits_.Get();
 }
 
 void Whisper_State::UpdateInputs(RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> beam_indices, int current_length) {
-  // Resize input_ids shape once if it doesn't match the decoder shape
-  if (decoder_input_ids_shape_[1] != 1) {
-    decoder_input_ids_shape_[1] = 1;
-    decoder_input_ids_ = OrtValue::CreateTensor<int32_t>(*model_->allocator_device_, decoder_input_ids_shape_);
-    inputs_[0] = decoder_input_ids_.get();
-  }
+  decoder_input_ids_.Update(next_tokens);
+  inputs_[0] = decoder_input_ids_.input_ids_.get();
 
-  // Update input_ids with next tokens
-  auto* input_ids_data = decoder_input_ids_->GetTensorMutableData<int32_t>();
-#if USE_CUDA
-  if (model_->model_.device_type_ == DeviceType::CUDA)
-    cudaMemcpyAsync(input_ids_data, next_tokens.GetGPU().data(), decoder_input_ids_shape_[0] * sizeof(int32_t), cudaMemcpyDeviceToDevice, model_->model_.cuda_stream_);
-  else
-#endif
-    memcpy(input_ids_data, next_tokens.GetCPU().data(), decoder_input_ids_shape_[0] * sizeof(int32_t));
-
-
-  // Resize the logits shape once if it doesn't match the decoder shape
-  if (logits_shape_[1] != 1) {
-    logits_shape_[1] = 1;
-    logits_ = OrtValue::CreateTensor(*model_->allocator_device_, logits_shape_, model_->score_type_);
-    outputs_[0] = logits_.get();
-  }
+  logits_.Update();
+  outputs_[0]=logits_.logits_.get();
 
   kv_cache_.Update(beam_indices.GetCPU(), current_length);
   for (size_t i = 0; i < model_->layer_count_ * 2; i++) {
