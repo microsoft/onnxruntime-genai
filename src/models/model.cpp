@@ -10,6 +10,27 @@
 
 namespace Generators {
 
+State::State(const SearchParams& search_params) : search_params_{search_params} {
+}
+
+void State::Run(OrtSession& session) {
+#if 0
+    printf("**Inputs:\r\n");
+    DumpTensors(inputs_.data(), input_names_.data(), input_names_.size(), true);
+    printf("**Outputs:\r\n");
+    DumpTensors(outputs_.data(), output_names_.data(), output_names_.size(), false);
+#endif
+
+  session.Run(nullptr, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
+}
+
+void State::ClearIO() {
+  input_names_.clear();
+  output_names_.clear();
+  inputs_.clear();
+  outputs_.clear();
+}
+
 Model::Model(std::unique_ptr<Config> config, OrtEnv& ort_env, const ProviderOptions* provider_options) : config_{std::move(config)} {
   session_options_ = OrtSessionOptions::Create();
 
@@ -35,6 +56,18 @@ void Model::InitDeviceAllocator(OrtSession& session) {
     allocator_device_ = allocator_cuda_.get();
   }
 #endif
+}
+
+void Model::ValidateLogits(OrtTypeInfo& info) {
+  auto& logits_tensor_info = info.GetTensorTypeAndShapeInfo();
+  auto logits_shape = logits_tensor_info.GetShape();
+  assert(logits_shape.size() == 3);
+  logits_uses_seq_len_ = logits_shape[1] == -1;
+  score_type_ = logits_tensor_info.GetElementType();
+
+  auto vocab_size = static_cast<int>(logits_shape[2]);
+  Unreferenced(vocab_size);
+  assert(config_->vocab_size == vocab_size);
 }
 
 std::vector<int32_t> Model::Generate(const SearchParams& params) {
@@ -135,7 +168,7 @@ std::unique_ptr<OrtValue> ExpandInputs(std::unique_ptr<OrtValue>& input, int num
   // Output shape (batch_size * num_beams, sequence_length)
 
   // If we're on CUDA, we still want to do the copy to move the data over to CUDA memory where we will read from it later
-  if (num_beams == 1 && device_type==DeviceType::CPU)
+  if (num_beams == 1 && device_type == DeviceType::CPU)
     return std::move(input);
 
   auto input_type_info = input->GetTensorTypeAndShapeInfo();

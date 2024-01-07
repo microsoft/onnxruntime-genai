@@ -21,7 +21,6 @@ struct Llama_Model : Model {
   void InitModelParams();
 };
 
-
 struct Llama_State : State {
   Llama_State(Llama_Model& model, RoamingArray<int32_t> sequence_lengths, const SearchParams& params);
   RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) override;
@@ -30,16 +29,12 @@ struct Llama_State : State {
   void UpdateInputs(RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices, int current_length);
 
   Llama_Model& model_;
-  const SearchParams& search_params_;
   bool first_run_{true};
 
-  InputIDs<int64_t> input_ids_{model_, search_params_};
-  Logits logits_{model_, search_params_};
-  KV_Cache kv_cache_{model_, search_params_, model_.past_names_, model_.present_names_};
+  InputIDs<int64_t> input_ids_{model_, *this};
+  Logits logits_{model_, *this};
+  KV_Cache kv_cache_{model_, *this, model_.past_names_, model_.present_names_};
   PositionIDs<int64_t> position_ids_;
-
-  std::vector<const char*> input_names_, output_names_;
-  std::vector<OrtValue*> inputs_, outputs_;
 };
 
-}
+}  // namespace Generators

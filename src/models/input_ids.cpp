@@ -5,34 +5,44 @@
 namespace Generators {
 
 template<typename T>
-InputIDs<T>::InputIDs(Model& model, const SearchParams& search_params)
-    : model_{model} {
-  input_ids_shape_ = {search_params.batch_size, search_params.sequence_length};
+InputIDs<T>::InputIDs(Model& model, State& state)
+    : model_{model},
+      state_{state} {
+  shape_ = {state_.search_params_.batch_size, state_.search_params_.sequence_length};
 
   // If 64-bit, convert from 32-bit to 64-bit
   if constexpr (std::is_same_v<T, int64_t>) {
-    input_ids_ = OrtValue::CreateTensor<int64_t>(model.allocator_cpu_, input_ids_shape_);
-    auto* p_data = input_ids_->GetTensorMutableData<T>();
-    for (auto v : search_params.input_ids)
+    value_ = OrtValue::CreateTensor<int64_t>(model.allocator_cpu_, shape_);
+    auto* p_data = value_->GetTensorMutableData<T>();
+    for (auto v : state_.search_params_.input_ids)
       *p_data++ = v;
   } else {
     static_assert(std::is_same_v<T, int32_t>);
-    input_ids_ = OrtValue::CreateTensor<T>(model.allocator_cpu_.GetInfo(), std::span<T>(const_cast<T*>(search_params.input_ids.data()), input_ids_shape_[0] * input_ids_shape_[1]), input_ids_shape_);
+    value_ = OrtValue::CreateTensor<T>(model.allocator_cpu_.GetInfo(), std::span<T>(const_cast<T*>(state_.search_params_.input_ids.data()), shape_[0] * shape_[1]), shape_);
   }
 
-  input_ids_ = ExpandInputs(input_ids_, search_params.num_beams, *model.allocator_device_, model.device_type_, model.cuda_stream_);
-  input_ids_shape_[0] *= search_params.num_beams;
+  value_ = ExpandInputs(value_, state_.search_params_.num_beams, *model.allocator_device_, model.device_type_, model.cuda_stream_);
+  shape_[0] *= state_.search_params_.num_beams;
+}
+
+template <typename T>
+void InputIDs<T>::Add() {
+  input_index_ = state_.inputs_.size();
+
+  state_.inputs_.push_back(value_.get());
+  state_.input_names_.push_back(name_);
 }
 
 template<typename T>
 void InputIDs<T>::Update(RoamingArray<int32_t> next_tokens_unk) {
   // Resize input_ids shape once if it doesn't match the decoder shape
-  if (input_ids_shape_[1] != 1) {
-    input_ids_shape_[1] = 1;
-    input_ids_ = OrtValue::CreateTensor<T>(*model_.allocator_device_, input_ids_shape_);
+  if (shape_[1] != 1) {
+    shape_[1] = 1;
+    value_ = OrtValue::CreateTensor<T>(*model_.allocator_device_, shape_);
+    state_.inputs_[input_index_] = value_.get();
   }
 
-  auto* data = input_ids_->GetTensorMutableData<T>();
+  auto* data = value_->GetTensorMutableData<T>();
   // Update input_ids with next tokens, converting from 32-bit to 64-bit
   if constexpr (std::is_same_v<T, int64_t>) {
 #if USE_CUDA
@@ -43,17 +53,17 @@ void InputIDs<T>::Update(RoamingArray<int32_t> next_tokens_unk) {
 #endif
     {
       auto next_tokens = next_tokens_unk.GetCPU();
-      for (int i = 0; i < input_ids_shape_[0]; i++)
+      for (int i = 0; i < shape_[0]; i++)
         data[i] = next_tokens[i];
     }
   } else {
     static_assert(std::is_same_v<T, int32_t>);
 #if USE_CUDA
     if (model_.device_type_ == DeviceType::CUDA)
-      cudaMemcpyAsync(data, next_tokens_unk.GetGPU().data(), input_ids_shape_[0] * sizeof(T), cudaMemcpyDeviceToDevice, model_.cuda_stream_);
+      cudaMemcpyAsync(data, next_tokens_unk.GetGPU().data(), shape_[0] * sizeof(T), cudaMemcpyDeviceToDevice, model_.cuda_stream_);
     else
 #endif
-      memcpy(data, next_tokens_unk.GetCPU().data(), input_ids_shape_[0] * sizeof(T));
+      memcpy(data, next_tokens_unk.GetCPU().data(), shape_[0] * sizeof(T));
   }
 }
 

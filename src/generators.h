@@ -92,6 +92,8 @@ struct Config {
 };
 
 struct Search {
+  virtual ~Search() = default;
+
   virtual RoamingArray<int32_t> GetNextTokens() = 0;
   virtual RoamingArray<int32_t> GetNextIndices() {
     throw std::runtime_error("GetNextIndices() can only be called for beam search, num_beams must be >1");

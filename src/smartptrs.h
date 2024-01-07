@@ -3,6 +3,9 @@
 
 namespace Generators {
 
+template<typename... T>
+void Unreferenced(const T&...) { }
+
 namespace Location {
 struct CPU {};
 struct GPU {};

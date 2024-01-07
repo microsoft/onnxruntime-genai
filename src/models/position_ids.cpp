@@ -13,10 +13,11 @@ void LaunchGpt_UpdateMask(int64_t* mask_data, const int64_t* old_mask_data, int 
 }  // namespace cuda
 
 template<typename T>
-PositionIDs<T>::PositionIDs(Model& model, const SearchParams& search_params, RoamingArray<int32_t>& sequence_lengths_unk)
-    : model_{model} {
+PositionIDs<T>::PositionIDs(Model& model, State& state, RoamingArray<int32_t>& sequence_lengths_unk)
+    : model_{model},
+      state_{state} {
   cpu_span<int32_t> sequence_lengths = sequence_lengths_unk;
-  std::array<int64_t, 2> shape{search_params.batch_size, search_params.sequence_length};  // Only batch_size initially, as we haven't expanded over the beams yet
+  std::array<int64_t, 2> shape{state_.search_params_.batch_size, state_.search_params_.sequence_length};  // Only batch_size initially, as we haven't expanded over the beams yet
   position_ids_ = OrtValue::CreateTensor<T>(model.allocator_cpu_, shape);
   attention_mask_ = OrtValue::CreateTensor<T>(model.allocator_cpu_, shape);
 
@@ -24,13 +25,13 @@ PositionIDs<T>::PositionIDs(Model& model, const SearchParams& search_params, Roa
   // Set position id to be 0 for pad tokens, and accumulated sum of mask in a batch for other tokens
   auto* mask_data = attention_mask_->GetTensorMutableData<T>();
   auto* position_data = position_ids_->GetTensorMutableData<T>();
-  const auto* word_id = search_params.input_ids.data();
+  const auto* word_id = state_.search_params_.input_ids.data();
   auto* mask = mask_data;
   auto* position = position_data;
   for (int i = 0; i < shape[0]; i++) {
     T abs_position = 0;
     for (int j = 0; j < shape[1]; j++, word_id++, mask++, position++) {
-      if (*word_id == search_params.pad_token_id) {
+      if (*word_id == state_.search_params_.pad_token_id) {
         *mask = 0;
         *position = 0;
       } else {
@@ -40,16 +41,26 @@ PositionIDs<T>::PositionIDs(Model& model, const SearchParams& search_params, Roa
       }
     }
 
-    for (int k = 0; k < search_params.num_beams; k++) {
-      sequence_lengths[i * search_params.num_beams + k] = static_cast<int32_t>(abs_position);
+    for (int k = 0; k < state_.search_params_.num_beams; k++) {
+      sequence_lengths[i * state_.search_params_.num_beams + k] = static_cast<int32_t>(abs_position);
     }
   }
 
-  position_ids_ = ExpandInputs(position_ids_, search_params.num_beams, *model.allocator_device_, model.device_type_, model.cuda_stream_);
-  attention_mask_ = ExpandInputs(attention_mask_, search_params.num_beams, *model.allocator_device_, model.device_type_, model.cuda_stream_);
-  shape[0] *= search_params.num_beams;
+  position_ids_ = ExpandInputs(position_ids_, state_.search_params_.num_beams, *model.allocator_device_, model.device_type_, model.cuda_stream_);
+  attention_mask_ = ExpandInputs(attention_mask_, state_.search_params_.num_beams, *model.allocator_device_, model.device_type_, model.cuda_stream_);
+  shape[0] *= state_.search_params_.num_beams;
   position_ids_shape_ = shape;
   attention_mask_shape_ = shape;
+}
+
+template <typename T>
+void PositionIDs<T>::Add() {
+  input_index_ = state_.inputs_.size();
+
+  state_.inputs_.push_back(position_ids_.get());
+  state_.input_names_.push_back("position_ids");
+  state_.inputs_.push_back(attention_mask_.get());
+  state_.input_names_.push_back("attention_mask");
 }
 
 template<typename T>
@@ -58,6 +69,7 @@ void PositionIDs<T>::Update(int current_length) {
   if (position_ids_shape_[1] != 1) {
     position_ids_shape_[1] = 1;
     position_ids_ = OrtValue::CreateTensor<T>(*model_.allocator_device_, position_ids_shape_);
+    state_.inputs_[input_index_] = position_ids_.get();
   }
 
   switch (model_.device_type_) {
@@ -104,6 +116,7 @@ void PositionIDs<T>::Update(int current_length) {
         throw std::runtime_error("PositionIDs::Update - Unsupported device type");
     }
     attention_mask_ = std::move(attention_mask);
+    state_.inputs_[input_index_+1] = attention_mask_.get();
   }
 }
 

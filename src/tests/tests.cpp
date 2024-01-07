@@ -10,9 +10,6 @@
 // Our working directory is generators/build so one up puts us in the root directory:
 #define MODEL_PATH "../test_models/"
 
-#define ASSERT_EQ(a, b) assert((a) == (b))
-#define ASSERT_TRUE(a) assert(a)
-
 std::unique_ptr<OrtEnv> g_ort_env;
 
 // To generate this file:
@@ -62,7 +59,8 @@ void Test_GreedySearch_Gpt_Fp32() {
   for (int i = 0; i < params.batch_size; i++) {
     auto sequence = search->GetSequence(i).GetCPU();
     auto* expected_output_start = &expected_output[i * params.max_length];
-    ASSERT_TRUE(std::equal(expected_output_start, expected_output_start + params.max_length, sequence.begin(), sequence.end()));
+    if(!std::equal(expected_output_start, expected_output_start + params.max_length, sequence.begin(), sequence.end()))
+      throw std::runtime_error("Test Results Mismatch");
   }
 
   std::cout << " - complete\r\n";
@@ -117,7 +115,8 @@ void Test_BeamSearch_Gpt_Fp32() {
   for (int i = 0; i < search.params_.batch_size; i++) {
     auto sequence = std::span<int32_t>(output_sequence.data() + search.params_.max_length * i, search.params_.max_length);
     auto* expected_output_start = &expected_output[i * search.params_.max_length];
-    ASSERT_TRUE(std::equal(expected_output_start, expected_output_start + search.params_.max_length, sequence.begin(), sequence.end()));
+    if(!std::equal(expected_output_start, expected_output_start + search.params_.max_length, sequence.begin(), sequence.end()))
+      throw std::runtime_error("Test Results Mismatch");
   }
 
   std::cout << " - complete\r\n";
@@ -161,7 +160,8 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
     auto sequence = sequence_gpu.GetCPU();
 
     auto* expected_output_start = &expected_output[i * params.max_length];
-    ASSERT_TRUE(std::equal(expected_output_start, expected_output_start + params.max_length, sequence.begin(), sequence.end()));
+    if(!std::equal(expected_output_start, expected_output_start + params.max_length, sequence.begin(), sequence.end()))
+      throw std::runtime_error("Test Results Mismatch");
   }
 
   std::cout << " - complete\r\n";
@@ -227,7 +227,8 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
   for (int i = 0; i < params.batch_size; i++) {
     auto sequence = std::span<int32_t>(output_sequence_cpu.get() + params.max_length * i, params.max_length);
     auto* expected_output_start = &expected_output[i * params.max_length];
-    ASSERT_TRUE(std::equal(expected_output_start, expected_output_start + params.max_length, sequence.begin(), sequence.end()));
+    if(!std::equal(expected_output_start, expected_output_start + params.max_length, sequence.begin(), sequence.end()))
+      throw std::runtime_error("Test Results Mismatch");
   }
 
   std::cout << " - complete\r\n";

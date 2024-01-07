@@ -26,15 +26,11 @@ struct Gpt_State : State {
   void UpdateInputs(RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> beam_indices, int current_length);
 
   Gpt_Model& model_;
-  const SearchParams& search_params_;
   bool first_run_{true};
 
-  InputIDs<int32_t> input_ids_{model_, search_params_};
-  Logits logits_{model_, search_params_};
-  KV_Cache_Combined kv_cache_{model_, search_params_};
+  InputIDs<int32_t> input_ids_{model_, *this};
+  Logits logits_{model_, *this};
+  KV_Cache_Combined kv_cache_{model_, *this};
   PositionIDs<int32_t> position_ids_;
-
-  std::vector<const char*> input_names_, output_names_;
-  std::vector<OrtValue*> inputs_, outputs_;
 };
-}
+}  // namespace Generators

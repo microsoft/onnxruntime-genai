@@ -6,17 +6,28 @@ std::unique_ptr<OrtValue> ExpandInputs(std::unique_ptr<OrtValue>& input, int num
 void ConvertFp16ToFp32(OrtAllocator& allocator, cudaStream_t stream, OrtValue& in, std::unique_ptr<OrtValue>& p_out);
 
 struct State {
+  State(const SearchParams& search_params);
+  virtual ~State() = default;
+
   virtual RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices = {}) = 0;
+
+  const SearchParams& search_params_;
+
+  std::vector<const char*> input_names_, output_names_;
+  std::vector<OrtValue*> inputs_, outputs_;
+
+ protected:
+  void Run(OrtSession& session);  // Uses the inputs below to run
+  void ClearIO();                 // Clear all inputs/outputs
 };
 
 struct Model {
-
   Model(std::unique_ptr<Config> config, OrtEnv& ort_env, const ProviderOptions* provider_options);
-  ~Model();
+  virtual ~Model();
 
-  std::vector<int32_t> Generate(const SearchParams &params);
+  std::vector<int32_t> Generate(const SearchParams& params);
 
-  virtual std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths, const SearchParams& params)=0;
+  virtual std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths, const SearchParams& params) = 0;
 
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
@@ -32,8 +43,8 @@ struct Model {
   ONNXTensorElementDataType score_type_;
 
  protected:
-
   void InitDeviceAllocator(OrtSession& session);
+  void ValidateLogits(OrtTypeInfo& info);
 };
 
 std::unique_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const ProviderOptions* provider_options = nullptr);
@@ -44,7 +55,7 @@ namespace cuda {
 void LaunchFp16ToFp32(const uint16_t* fp16, float* fp32, int count, cudaStream_t stream);
 void LaunchInt32ToInt64(const int32_t* src, int64_t* dst, int count, cudaStream_t stream);
 
-}
+}  // namespace cuda
 #endif
 
-}
+}  // namespace Generators
