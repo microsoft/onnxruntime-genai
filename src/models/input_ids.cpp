@@ -21,7 +21,7 @@ InputIDs<T>::InputIDs(Model& model, State& state)
     value_ = OrtValue::CreateTensor<T>(model.allocator_cpu_.GetInfo(), std::span<T>(const_cast<T*>(state_.search_params_.input_ids.data()), shape_[0] * shape_[1]), shape_);
   }
 
-  value_ = ExpandInputs(value_, state_.search_params_.num_beams, *model.allocator_device_, model.device_type_, model.cuda_stream_);
+  value_ = model_.ExpandInputs(value_, state_.search_params_.num_beams);
   shape_[0] *= state_.search_params_.num_beams;
 }
 

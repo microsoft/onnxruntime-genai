@@ -5,13 +5,10 @@ from transformers import LlamaTokenizer
 device_type = og.DeviceType.CUDA
 
 # Generate input tokens from the text prompt
-tokenizer = LlamaTokenizer.from_pretrained('meta-llama/Llama-2-7b-hf')
+tokenizer = LlamaTokenizer.from_pretrained('mistralai/Mistral-7B-v0.1')
 
 print("Loading model...")
-# model=og.Model("../../test_models/llama2-7b-fp32-cpu", device_type)
-#model=og.Llama_Model("../../test_models/llama2-7b-fp16-gpu/rank_0_Llama-2-7b-hf_decoder_merged_model_fp16.onnx", device_type)
-#model=og.Llama_Model("../../test_models/llama2-7b-int4-gpu/rank_0_Llama-2-7b-hf_decoder_merged_model_int4.onnx", device_type)
-model=og.Model("../../test_models/llama2-7b-chat-int4-gpu", device_type)
+model=og.Model("../../test_models/mistral", device_type)
 print("Model loaded")
 
 # Keep asking for input prompts in an loop
@@ -31,10 +28,6 @@ while True:
     print(text, end='', flush=True)
     while not search.IsDone():
         search.SetLogits(state.Run(search.GetSequenceLength(), search.GetNextTokens()))
-
-        # search.Apply_MinLength(1)
-        # search.Apply_RepetitionPenalty(1.0)
-
         search.SampleTopP(0.7, 0.6)
 
         # Print each token as we compute it, we have to do some work to get newlines & spaces to appear properly:
@@ -45,7 +38,5 @@ while True:
           word = ' ' + word[1:]
         print(word, end='', flush=True)
 
-    # Print sequence all at once vs as it's decoded:
-    # print(tokenizer.decode(search.GetSequence(0).GetArray()))
     print()
     print()

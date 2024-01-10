@@ -36,7 +36,7 @@ Whisper_State::Whisper_State(Whisper_Model& model, RoamingArray<int32_t> sequenc
       model_{model} {
   auto& inputs = const_cast<SearchParams::Whisper&>(std::get<SearchParams::Whisper>(search_params.inputs));
 
-  auto encoder_input_ids = ExpandInputs(inputs.input_features, search_params_.num_beams, *model_.allocator_device_, model_.device_type_, model_.cuda_stream_);
+  auto encoder_input_ids = model_.ExpandInputs(inputs.input_features, search_params_.num_beams);
   encoder_hidden_states_ = OrtValue::CreateTensor<float>(*model_.allocator_device_, std::array<int64_t, 3>{decoder_input_ids_.GetShape()[0], 1500, 384});
 
   auto sequence_lengths = sequence_lengths_unk.GetCPU();
@@ -59,7 +59,7 @@ Whisper_State::Whisper_State(Whisper_Model& model, RoamingArray<int32_t> sequenc
 
   ClearIO();
 
-  decoder_input_ids_.name_ = "input_ids";
+  decoder_input_ids_.name_ = "input_ids"; // Set back to default name, since we overrode it above in the encoder step
   decoder_input_ids_.Add();
   logits_.Add();
   kv_cache_.Add();

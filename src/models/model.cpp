@@ -6,6 +6,8 @@
 #include "model.h"
 #include "gpt.h"
 #include "llama.h"
+#include "mistral.h"
+#include "phi2.h"
 #include "whisper.h"
 
 namespace Generators {
@@ -100,6 +102,10 @@ std::unique_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, con
     return std::make_unique<Gpt_Model>(std::move(config), ort_env, provider_options);
   else if (config->model_type == "llama")
     return std::make_unique<Llama_Model>(std::move(config), ort_env, provider_options);
+  else if (config->model_type == "mistral")
+    return std::make_unique<Mistral_Model>(std::move(config), ort_env, provider_options);
+  else if (config->model_type == "phi2")
+    return std::make_unique<Phi2_Model>(std::move(config), ort_env, provider_options);
   else if (config->model_type == "whisper")
     return std::make_unique<Whisper_Model>(std::move(config), ort_env, provider_options);
 
@@ -163,12 +169,12 @@ size_t GetOrtTypeSize(ONNXTensorElementDataType type) {
   }
 }
 
-std::unique_ptr<OrtValue> ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams, OrtAllocator& allocator, DeviceType device_type, cudaStream_t cuda_stream) {
+std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams) {
   // Input shape (batch_size, sequence_length). The input is required with data type T.
   // Output shape (batch_size * num_beams, sequence_length)
 
   // If we're on CUDA, we still want to do the copy to move the data over to CUDA memory where we will read from it later
-  if (num_beams == 1 && device_type == DeviceType::CPU)
+  if (num_beams == 1 && device_type_ == DeviceType::CPU)
     return std::move(input);
 
   auto input_type_info = input->GetTensorTypeAndShapeInfo();
@@ -180,13 +186,13 @@ std::unique_ptr<OrtValue> ExpandInputs(std::unique_ptr<OrtValue>& input, int num
 
   input_shape[0] *= num_beams;
 
-  auto expanded = OrtValue::CreateTensor(allocator, input_shape, element_type);
+  auto expanded = OrtValue::CreateTensor(*allocator_device_, input_shape, element_type);
 
   auto input_data = reinterpret_cast<const uint8_t*>(input->GetTensorRawData());
   auto expanded_data = reinterpret_cast<uint8_t*>(expanded->GetTensorMutableRawData());
   auto target = expanded_data;
 
-  switch (device_type) {
+  switch (device_type_) {
     case DeviceType::CPU:
       for (int i = 0; i < batch_size; i++) {
         for (int j = 0; j < num_beams; j++) {
@@ -200,7 +206,7 @@ std::unique_ptr<OrtValue> ExpandInputs(std::unique_ptr<OrtValue>& input, int num
     case DeviceType::CUDA:
       for (int i = 0; i < batch_size; i++) {
         for (int j = 0; j < num_beams; j++) {
-          cudaMemcpyAsync(target, input_data + i * data_size_bytes, data_size_bytes, cudaMemcpyHostToDevice, cuda_stream);
+          cudaMemcpyAsync(target, input_data + i * data_size_bytes, data_size_bytes, cudaMemcpyHostToDevice, cuda_stream_);
           target += data_size_bytes;
         }
       }
