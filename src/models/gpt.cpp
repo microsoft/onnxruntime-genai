@@ -9,25 +9,11 @@ Gpt_Model::Gpt_Model(std::unique_ptr<Config> config, OrtEnv& ort_env, const Prov
   session_decoder_ = OrtSession::Create(ort_env, (config_->config_path / config_->model_decoder).c_str(), session_options_.get());
 
   InitDeviceAllocator(*session_decoder_);
-  InitModelParams();
+  InitLogits(*session_decoder_->GetOutputTypeInfo(0));
 }
 
 std::unique_ptr<State> Gpt_Model::CreateState(RoamingArray<int32_t> sequence_lengths, const SearchParams& params) {
   return std::make_unique<Gpt_State>(*this, sequence_lengths, params);
-}
-
-void Gpt_Model::InitModelParams() {
-  ValidateLogits(*session_decoder_->GetOutputTypeInfo(0));
-
-  auto layer_count = static_cast<int>(session_decoder_->GetOutputCount()) - 1;
-  auto past_shape = session_decoder_->GetInputTypeInfo(3)->GetTensorTypeAndShapeInfo().GetShape();
-  auto head_count = static_cast<int>(past_shape[2]);
-  auto hidden_size = static_cast<int>(past_shape[4]);
-
-  Unreferenced(layer_count, head_count, hidden_size);
-  assert(config_->num_hidden_layers == layer_count);
-  assert(config_->num_attention_heads == head_count);
-  assert(config_->hidden_size == hidden_size);
 }
 
 Gpt_State::Gpt_State(Gpt_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const SearchParams& search_params)

@@ -45,7 +45,7 @@ struct Model {
 
  protected:
   void InitDeviceAllocator(OrtSession& session);
-  void ValidateLogits(OrtTypeInfo& info);
+  void InitLogits(OrtTypeInfo& info);
 };
 
 std::unique_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const ProviderOptions* provider_options = nullptr);

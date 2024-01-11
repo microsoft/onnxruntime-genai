@@ -16,9 +16,6 @@ struct Llama_Model : Model {
 
   std::array<const char*, 2> past_names_{"past_key_values.%d.key", "past_key_values.%d.value"};
   std::array<const char*, 2> present_names_{"present.%d.key", "present.%d.value"};
-
- private:
-  void InitModelParams();
 };
 
 struct Llama_State : State {

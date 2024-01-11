@@ -84,11 +84,8 @@ struct Config {
   std::string model_type;
   int vocab_size{};
   int hidden_size{};
-  //  int n_embed{768};  // GPT version of hidden_size?
   int num_attention_heads{};
-  //  int n_head{12}; // GPT version of num_attention_heads?
   int num_hidden_layers{};
-  //  int n_layer {12}; // GPT version of num_hidden_layers?
 };
 
 struct Search {
@@ -133,9 +130,7 @@ struct SearchParams {
   int BatchBeamSize() const { return num_beams * batch_size; }
 
   DeviceType device_type{DeviceType::CPU};
-#if USE_CUDA
   cudaStream_t cuda_stream{};
-#endif
 
 #if 0
   struct Bert {

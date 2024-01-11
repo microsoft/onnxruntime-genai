@@ -17,9 +17,6 @@ struct Whisper_Model : Model {
   std::array<const char*, 2> present_names_{"present_key_self_%d", "present_value_self_%d"};
   std::array<const char*, 2> past_cross_names_{"past_key_cross_%d", "past_value_cross_%d"};
   std::array<const char*, 2> present_cross_names_{"present_key_cross_%d", "present_value_cross_%d"};
-
- private:
-  void InitModelParams();
 };
 
 struct Whisper_State : State {

@@ -13,9 +13,6 @@ struct Gpt_Model : Model {
   std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths, const SearchParams& params) override;
 
   std::unique_ptr<OrtSession> session_decoder_;
-
- private:
-  void InitModelParams();
 };
 
 struct Gpt_State : State {

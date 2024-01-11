@@ -16,9 +16,6 @@ struct Mistral_Model : Model {
 
   std::array<const char*, 2> past_names_{"past_key.%d", "past_values.%d"};
   std::array<const char*, 2> present_names_{"present_%d.key", "present_values.%d"};
-
- private:
-  void InitModelParams();
 };
 
 struct Mistral_State : State {

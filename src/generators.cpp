@@ -53,11 +53,8 @@ SearchParams::SearchParams(const Model& model)
       length_penalty{model.config_->length_penalty},
       early_stopping{model.config_->early_stopping},
       num_beams{model.config_->num_beams},
-      device_type{model.device_type_}
-#if USE_CUDA
-      ,
+      device_type{model.device_type_},
       cuda_stream{model.cuda_stream_}
-#endif
 {
 }
 

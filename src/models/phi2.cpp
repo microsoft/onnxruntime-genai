@@ -9,9 +9,7 @@ Phi2_Model::Phi2_Model(std::unique_ptr<Config> config, OrtEnv& ort_env, const Pr
   session_decoder_ = OrtSession::Create(ort_env, (config_->config_path / config_->model_decoder).c_str(), session_options_.get());
 
   InitDeviceAllocator(*session_decoder_);
-
-  ValidateLogits(*session_decoder_->GetOutputTypeInfo(0));
-  assert(config_->num_hidden_layers == static_cast<int>(session_decoder_->GetOutputCount()) - 1);
+  InitLogits(*session_decoder_->GetOutputTypeInfo(0));
 }
 
 std::unique_ptr<State> Phi2_Model::CreateState(RoamingArray<int32_t> sequence_lengths, const SearchParams& params) {

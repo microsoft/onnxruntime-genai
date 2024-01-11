@@ -60,7 +60,7 @@ void Model::InitDeviceAllocator(OrtSession& session) {
 #endif
 }
 
-void Model::ValidateLogits(OrtTypeInfo& info) {
+void Model::InitLogits(OrtTypeInfo& info) {
   auto& logits_tensor_info = info.GetTensorTypeAndShapeInfo();
   auto logits_shape = logits_tensor_info.GetShape();
   assert(logits_shape.size() == 3);
