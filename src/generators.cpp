@@ -41,10 +41,6 @@ float Float16ToFloat32(uint16_t v) {
   return std::ldexp((sign ? -1.0f : 1.0f) * (1.0f + fraction / 1024.0f), exponent - 15);
 }
 
-Config::Config(const std::filesystem::path& path) : config_path{path} {
-  ParseConfig(path / "config.json", *this);
-}
-
 SearchParams::SearchParams(const Model& model)
     : pad_token_id{model.config_->pad_token_id},
       eos_token_id{model.config_->eos_token_id},

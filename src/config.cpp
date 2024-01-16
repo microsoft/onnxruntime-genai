@@ -102,4 +102,8 @@ void ParseConfig(const std::filesystem::path& filename, Config& config) {
   }
 }
 
+Config::Config(const std::filesystem::path& path) : config_path{path} {
+  ParseConfig(path / "config.json", *this);
+}
+
 }  // namespace Generators

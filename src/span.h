@@ -1,6 +1,5 @@
-#pragma once
-#include <vector>
-
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
 #ifndef USE_CXX17
 #include <span>
 #else

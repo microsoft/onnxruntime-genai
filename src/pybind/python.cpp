@@ -262,14 +262,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_readwrite("input_ids", &PySearchParams::py_input_ids_)
       .def_readwrite("whisper_input_features", &PySearchParams::py_whisper_input_features_)
       .def_readwrite("whisper_decoder_input_ids", &PySearchParams::py_whisper_decoder_input_ids_)
-#if 0
-      .def_property(
-          "input_ids",
-          [](PySearchParams& s) -> pybind11::array_t<int32_t> { return s.py_input_ids_; },
-          [](PySearchParams& s, pybind11::array_t<int32_t> v) {
-             s.py_input_ids_=v; s.input_ids = ToSpan(s.py_input_ids_);
-          })
-#endif
       .def("__repr__", [](PySearchParams& s) { return ToString(s); });
 
   pybind11::class_<PySearch>(m, "Search")
