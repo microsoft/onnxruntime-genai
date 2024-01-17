@@ -67,7 +67,7 @@ void InputIDs<T>::Update(RoamingArray<int32_t> next_tokens_unk) {
   }
 }
 
-template InputIDs<int32_t>;
-template InputIDs<int64_t>;
+template struct InputIDs<int32_t>;
+template struct InputIDs<int64_t>;
 
 }  // namespace Generators

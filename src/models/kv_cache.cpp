@@ -64,7 +64,7 @@ void KV_Cache_Combined::PickPastState(std::span<const int32_t> beam_indices, int
   auto element_count = shape_[0] * past_key_size;
 
   const OrtValue& present = *presents_[index];
-  auto past = OrtValue::CreateTensor<ScoreType>(*model_.allocator_device_, shape_);
+  std::unique_ptr<OrtValue> past = OrtValue::CreateTensor<ScoreType>(*model_.allocator_device_, shape_);
   auto past_span = std::span<ScoreType>(past->GetTensorMutableData<ScoreType>(), element_count);
   auto present_span = std::span<const ScoreType>(present.GetTensorData<ScoreType>(), element_count);
 
@@ -179,7 +179,7 @@ void KV_Cache::PickPastState(std::span<const int32_t> beam_indices, int index) {
   auto element_count = shape_[0] * block_size_per_beam;
 
   const OrtValue& present_value = *presents_[index];
-  auto past_value = OrtValue::CreateTensor<ScoreType>(*model_.allocator_device_, shape_);
+  std::unique_ptr<OrtValue> past_value = OrtValue::CreateTensor<ScoreType>(*model_.allocator_device_, shape_);
   auto past_span = std::span<ScoreType>(past_value->GetTensorMutableData<ScoreType>(), element_count);
   auto present_span = std::span<const ScoreType>(present_value.GetTensorData<ScoreType>(), element_count);
 

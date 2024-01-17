@@ -100,7 +100,7 @@ void PositionIDs<T>::Update(int current_length) {
     attention_mask_shape_[1] = current_length;
 
     const auto* old_data = attention_mask_->GetTensorData<T>();
-    auto attention_mask = OrtValue::CreateTensor<T>(*model_.allocator_device_, attention_mask_shape_);
+    std::unique_ptr<OrtValue> attention_mask = OrtValue::CreateTensor<T>(*model_.allocator_device_, attention_mask_shape_);
     auto* data = attention_mask->GetTensorMutableData<T>();
 
     switch (model_.device_type_) {
@@ -125,7 +125,7 @@ void PositionIDs<T>::Update(int current_length) {
   }
 }
 
-template PositionIDs<int32_t>;
-template PositionIDs<int64_t>;
+template struct PositionIDs<int32_t>;
+template struct PositionIDs<int64_t>;
 
 }  // namespace Generators
