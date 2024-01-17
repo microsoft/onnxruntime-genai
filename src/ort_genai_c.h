@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #include <stdint.h>
+#include <cstddef>
 
 #ifdef __cplusplus
 extern "C" {
