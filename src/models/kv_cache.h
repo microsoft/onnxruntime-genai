@@ -13,10 +13,6 @@ struct KV_Cache_Combined {
   void PickPastState(std::span<const int32_t> beam_indices, int index);
   void PickPastState(std::span<const int32_t> beam_indices, int index);
 
-  // KV combined
-  const char *past_name_{"past_%d"};
-  const char *present_name_{"present_%d"};
-
 private:
 
   Model& model_;
@@ -32,7 +28,7 @@ private:
 };
 
 struct KV_Cache {
-  KV_Cache(Model& model, State& state, std::span<const char*> past_names, std::span<const char*> present_names);
+  KV_Cache(Model& model, State& state);
 
   void AddEncoder(); // If model has an initial encoder step, this is used
   void Add();
@@ -47,9 +43,6 @@ private:
   int layer_count_;
   size_t input_index_{~0U}, output_index_{~0U};
 
-  std::span<const char*> past_names_;     // past key name/past value name
-  std::span<const char*> present_names_;  // present key name/present value name
-
   std::array<int64_t, 4> shape_;
 
   std::unique_ptr<OrtValue> empty_past_;
@@ -59,7 +52,7 @@ private:
 
 // Very similar to the KV_Cache, but is only created once at the encoder step, then used without modification for every decoder step
 struct Cross_Cache {
-  Cross_Cache(Model& model, State& state, std::span<const char*> past_names, std::span<const char*> present_names);
+  Cross_Cache(Model& model, State& state);
 
   void AddOutputs();
   void AddInputs();
@@ -68,8 +61,6 @@ struct Cross_Cache {
   Model& model_;
   State& state_;
   int layer_count_;
-
-  std::span<const char*> past_names_, present_names_;
 
   std::array<int64_t, 4> shape_;
 

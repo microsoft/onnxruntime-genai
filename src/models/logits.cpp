@@ -8,8 +8,8 @@ Logits::Logits(Model& model, State& state)
     : model_{model},
       state_{state} {
 
-  logits_shape_ = {state_.search_params_.batch_size * state_.search_params_.num_beams, model_.logits_uses_seq_len_ ? state_.search_params_.sequence_length : 1, state_.search_params_.vocab_size};
-  logits_ = OrtValue::CreateTensor(*model.allocator_device_, logits_shape_, model_.score_type_);
+  logits_shape_ = {state_.search_params_.batch_size * state_.search_params_.num_beams, state_.search_params_.sequence_length, state_.search_params_.vocab_size};
+  logits_ = OrtValue::CreateTensor(*model.allocator_device_, logits_shape_, model_.config_->model.logits_type);
 }
 
 RoamingArray<float> Logits::Get() {
@@ -17,7 +17,7 @@ RoamingArray<float> Logits::Get() {
 
 #if USE_CUDA
   if (model_.device_type_ == DeviceType::CUDA) {
-    if (model_.score_type_ == Ort::TypeToTensorType<Ort::Float16_t>::type) {
+    if (model_.config_->model.logits_type == Ort::TypeToTensorType<Ort::Float16_t>::type) {
       ConvertFp16ToFp32(*model_.allocator_device_, model_.cuda_stream_, *logits_, logits32_);
       return gpu_span<float>{logits32_->GetTensorMutableData<float>(), type_shape->GetElementCount()};
     }
@@ -39,7 +39,7 @@ void Logits::Update() {
   // Resize the logits shape once if it doesn't match the decoder shape
   if (logits_shape_[1] != 1) {
     logits_shape_[1] = 1;
-    logits_ = OrtValue::CreateTensor(*model_.allocator_device_, logits_shape_, model_.score_type_);
+    logits_ = OrtValue::CreateTensor(*model_.allocator_device_, logits_shape_, model_.config_->model.logits_type);
     state_.outputs_[output_index_] = logits_.get();
   }
 }

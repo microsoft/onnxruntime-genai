@@ -5,11 +5,10 @@ namespace Generators {
 
 Whisper_Model::Whisper_Model(std::unique_ptr<Config> config, OrtEnv& ort_env, const ProviderOptions* provider_options)
     : Model{std::move(config), ort_env, provider_options} {
-  session_decoder_ = OrtSession::Create(ort_env, (config_->config_path / config_->model_decoder).c_str(), session_options_.get());
-  session_encoder_ = OrtSession::Create(ort_env, (config_->config_path / config_->model_encoder_decoder_init).c_str(), session_options_.get());
+  session_decoder_ = OrtSession::Create(ort_env, (config_->config_path / config_->model.decoder).c_str(), session_options_.get());
+  session_encoder_ = OrtSession::Create(ort_env, (config_->config_path / config_->model.encoder_decoder_init).c_str(), session_options_.get());
 
   InitDeviceAllocator(*session_decoder_);
-  InitLogits(*session_decoder_->GetOutputTypeInfo(0));
 }
 
 std::unique_ptr<State> Whisper_Model::CreateState(RoamingArray<int32_t> sequence_lengths, const SearchParams& params) {
