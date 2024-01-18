@@ -4,6 +4,68 @@
 
 namespace Generators {
 
+ONNXTensorElementDataType TranslateTensorType(std::string_view value) {
+  if (value == "float32")
+    return ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
+  if (value == "float16")
+    return ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
+
+  throw std::runtime_error("Invalid tensor type: " + std::string(value));
+}
+
+struct Model_Element : JSON::Element {
+  Model_Element(Config::Model& model) : model_{model} {}
+
+  void OnString(std::string_view name, std::string_view value) override {
+    if (name == "type")
+      model_.type = value;
+    else if (name == "decoder")
+      model_.decoder = value;
+    else if (name == "encoder_decoder_init")
+      model_.encoder_decoder_init = value;
+    else if (name == "past_names_key")
+      model_.past_names_key = value;
+    else if (name == "past_names_value")
+      model_.past_names_value = value;
+    else if (name == "present_names_key")
+      model_.present_names_key = value;
+    else if (name == "present_names_value")
+      model_.present_names_value = value;
+    else if (name == "past_names")
+      model_.past_names = value;
+    else if (name == "present_names")
+      model_.present_names = value;
+    else if (name == "cross_past_names_key")
+      model_.cross_past_names_key = value;
+    else if (name == "cross_past_names_value")
+      model_.cross_past_names_value = value;
+    else if (name == "cross_present_names_key")
+      model_.cross_present_names_key = value;
+    else if (name == "cross_present_names_value")
+      model_.cross_present_names_value = value;
+    else if (name == "logits_type")
+      model_.logits_type = TranslateTensorType(value);
+    else if (name == "kv_type")
+      model_.kv_type = TranslateTensorType(value);
+    else
+      throw std::runtime_error("Unknown name: " + std::string(name));
+  }
+
+  void OnNumber(std::string_view name, double value) override {
+    if (name == "vocab_size")
+      model_.vocab_size = static_cast<int>(value);
+    else if (name == "hidden_size" || name == "n_embed")
+      model_.hidden_size = static_cast<int>(value);
+    else if (name == "num_attention_heads" || name == "num_heads" || name == "n_head")
+      model_.num_attention_heads = static_cast<int>(value);
+    else if (name == "num_hidden_layers" || name == "num_layers" || name == "n_layer")
+      model_.num_hidden_layers = static_cast<int>(value);
+  }
+
+ private:
+  Config::Model& model_;
+};
+
 struct Root_Element : JSON::Element {
   Root_Element(Config& config) : config_{config} {}
 
@@ -12,12 +74,6 @@ struct Root_Element : JSON::Element {
       config_.tokenizer_class = value;
     else if (name == "prefix")
       config_.prefix = value;
-    else if (name == "model_type")
-      config_.model_type = value;
-    else if (name == "ogai_model_decoder")
-      config_.model_decoder = value;
-    else if (name == "ogai_model_encoder_decoder_init")
-      config_.model_encoder_decoder_init = value;
   }
 
   void OnNumber(std::string_view name, double value) override {
@@ -50,16 +106,6 @@ struct Root_Element : JSON::Element {
       config_.decoder_start_token_id = static_cast<int>(value);
     else if (name == "sep_token_id")
       config_.sep_token_id = static_cast<int>(value);
-
-    // Model Class Attributes
-    else if (name == "vocab_size")
-      config_.vocab_size = static_cast<int>(value);
-    else if (name == "hidden_size" || name == "n_embed")
-      config_.hidden_size = static_cast<int>(value);
-    else if (name == "num_attention_heads" || name == "num_heads" || name == "n_head")
-      config_.num_attention_heads = static_cast<int>(value);
-    else if (name == "num_hidden_layers" || name == "num_layers" || name == "n_layer")
-      config_.num_hidden_layers = static_cast<int>(value);
   }
 
   void OnBool(std::string_view name, bool value) override {
@@ -67,7 +113,14 @@ struct Root_Element : JSON::Element {
       config_.early_stopping = value;
   }
 
+  Element& OnObject(std::string_view name) {
+    if (name == "model")
+      return model_element_;
+    return Element::OnObject(name);
+  }
+
   Config& config_;
+  Model_Element model_element_{config_.model};
 };
 
 struct RootObject_Element : JSON::Element {

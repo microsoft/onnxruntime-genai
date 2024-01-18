@@ -40,12 +40,8 @@ struct Model {
   std::unique_ptr<Ort::Allocator> allocator_cuda_;
   Ort::Allocator* allocator_device_{};  // Can be CUDA or CPU based on the DeviceType in the model
 
-  bool logits_uses_seq_len_{};  // Logits shape is [... seq_len, vocab_size ] vs [... 1, vocab_size ]
-  ONNXTensorElementDataType score_type_;
-
  protected:
   void InitDeviceAllocator(OrtSession& session);
-  void InitLogits(OrtTypeInfo& info);
 };
 
 std::unique_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const ProviderOptions* provider_options = nullptr);

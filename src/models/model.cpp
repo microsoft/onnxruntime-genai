@@ -4,6 +4,7 @@
 #include "../search_cuda.h"
 #endif
 #include "model.h"
+#include "debugging.h"
 #include "gpt.h"
 #include "llama.h"
 #include "mistral.h"
@@ -60,18 +61,6 @@ void Model::InitDeviceAllocator(OrtSession& session) {
 #endif
 }
 
-void Model::InitLogits(OrtTypeInfo& info) {
-  auto& logits_tensor_info = info.GetTensorTypeAndShapeInfo();
-  auto logits_shape = logits_tensor_info.GetShape();
-  assert(logits_shape.size() == 3);
-  logits_uses_seq_len_ = logits_shape[1] == -1;
-  score_type_ = logits_tensor_info.GetElementType();
-
-  auto vocab_size = static_cast<int>(logits_shape[2]);
-  Unreferenced(vocab_size);
-  assert(config_->vocab_size == vocab_size);
-}
-
 std::vector<int32_t> Model::Generate(const SearchParams& params) {
   auto search = params.CreateSearch();
   auto state = CreateState(search->GetSequenceLengths(), params);
@@ -98,18 +87,18 @@ std::vector<int32_t> Model::Generate(const SearchParams& params) {
 std::unique_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const ProviderOptions* provider_options) {
   auto config = std::make_unique<Config>(config_path);
 
-  if (config->model_type == "gpt2")
+  if (config->model.type == "gpt2")
     return std::make_unique<Gpt_Model>(std::move(config), ort_env, provider_options);
-  else if (config->model_type == "llama")
+  else if (config->model.type == "llama")
     return std::make_unique<Llama_Model>(std::move(config), ort_env, provider_options);
-  else if (config->model_type == "mistral")
+  else if (config->model.type == "mistral")
     return std::make_unique<Mistral_Model>(std::move(config), ort_env, provider_options);
-  else if (config->model_type == "phi2")
+  else if (config->model.type == "phi2")
     return std::make_unique<Phi2_Model>(std::move(config), ort_env, provider_options);
-  else if (config->model_type == "whisper")
+  else if (config->model.type == "whisper")
     return std::make_unique<Whisper_Model>(std::move(config), ort_env, provider_options);
 
-  throw std::runtime_error("Unsupported model_type in config.json: " + config->model_type);
+  throw std::runtime_error("Unsupported model_type in config.json: " + config->model.type);
 }
 
 #if USE_CUDA

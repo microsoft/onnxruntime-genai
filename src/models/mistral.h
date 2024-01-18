@@ -13,9 +13,6 @@ struct Mistral_Model : Model {
   std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths, const SearchParams& params) override;
 
   std::unique_ptr<OrtSession> session_decoder_;
-
-  std::array<const char*, 2> past_names_{"past_key.%d", "past_values.%d"};
-  std::array<const char*, 2> present_names_{"present_%d.key", "present_values.%d"};
 };
 
 struct Mistral_State : State {
@@ -30,7 +27,7 @@ struct Mistral_State : State {
 
   InputIDs<int64_t> input_ids_{model_, *this};
   Logits logits_{model_, *this};
-  KV_Cache kv_cache_{model_, *this, model_.past_names_, model_.present_names_};
+  KV_Cache kv_cache_{model_, *this};
   PositionIDs<int64_t> position_ids_;
 };
 

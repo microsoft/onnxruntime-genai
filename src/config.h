@@ -27,14 +27,30 @@ struct Config {
   int decoder_start_token_id{};  // If an encoder-decoder model starts decoding with a different token than bos, the id of that token.
   int sep_token_id{};            // The id of the separation token.
 
-  // Model Class Attributes
-  std::string model_decoder;
-  std::string model_encoder_decoder_init;
-  std::string model_type;
-  int vocab_size{};
-  int hidden_size{};
-  int num_attention_heads{};
-  int num_hidden_layers{};
+  struct Model {
+    std::string decoder;
+    std::string encoder_decoder_init;
+    std::string type;
+
+    ONNXTensorElementDataType logits_type{ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT}; // float16/float32 are the valid types
+    ONNXTensorElementDataType kv_type{ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT};  // float16/float32 are the valid types
+
+    int vocab_size{};
+    int hidden_size{};
+    int num_attention_heads{};
+    int num_hidden_layers{};
+
+    // KV_Cache names (will be a string with a %d in it, like "past_key_self_%d", "past_value_self_%d")
+    std::string past_names_key, past_names_value;
+    std::string present_names_key, present_names_value;
+
+    // KV_Cache_Combined names where the kv key/value are merged into one tensor
+    std::string past_names, present_names;
+
+    // Cross_Cache for models like whisper
+    std::string cross_past_names_key, cross_past_names_value;
+    std::string cross_present_names_key, cross_present_names_value;
+  } model;
 };
 
 }  // namespace Generators

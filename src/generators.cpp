@@ -44,7 +44,7 @@ float Float16ToFloat32(uint16_t v) {
 SearchParams::SearchParams(const Model& model)
     : pad_token_id{model.config_->pad_token_id},
       eos_token_id{model.config_->eos_token_id},
-      vocab_size{model.config_->vocab_size},
+      vocab_size{model.config_->model.vocab_size},
       max_length{model.config_->max_length},
       length_penalty{model.config_->length_penalty},
       early_stopping{model.config_->early_stopping},
