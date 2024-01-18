@@ -53,9 +53,6 @@ message(STATUS "Adding source files")
 file(GLOB generator_srcs CONFIGURE_DEPENDS
    "${GENERATORS_ROOT}/*.h"
    "${GENERATORS_ROOT}/*.cpp"
-)
-
-file(GLOB model_srcs CONFIGURE_DEPENDS
    "${MODELS_ROOT}/*.h"
    "${MODELS_ROOT}/*.cpp"
 )
@@ -81,27 +78,18 @@ if(USE_CUDA)
     file(GLOB generator_cuda_srcs CONFIGURE_DEPENDS
         "${GENERATORS_ROOT}/*.cu"
         "${GENERATORS_ROOT}/*.cuh"
-    )
-    list(APPEND generator_srcs ${generator_cuda_srcs})
-
-    file(GLOB model_cuda_srcs CONFIGURE_DEPENDS
         "${MODELS_ROOT}/*.cu"
         "${MODELS_ROOT}/*.cuh"
     )
-    list(APPEND model_srcs ${model_cuda_srcs})
+    list(APPEND generator_srcs ${generator_cuda_srcs})
 
     add_compile_definitions(USE_CUDA=1)
 
     include_directories("${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}")
 else()
-    file(GLOB model_cuda_srcs "${MODELS_ROOT}/*_cuda*.*")
-    list(REMOVE_ITEM model_srcs ${model_cuda_srcs})
     file(GLOB generator_cuda_srcs "${GENERATORS_ROOT}/*_cuda*.*")
     list(REMOVE_ITEM generator_srcs ${generator_cuda_srcs})
 endif()
-
-add_library (Models ${model_srcs})
-target_include_directories(Models PRIVATE ${CMAKE_SOURCE_DIR}/ort)
 
 add_library (Generators ${generator_srcs})
 target_include_directories(Generators PRIVATE ${CMAKE_SOURCE_DIR}/ort)
@@ -120,12 +108,12 @@ endif()
 add_executable (Tests ${test_srcs})
 target_include_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort)
 target_link_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort)
-target_link_libraries(Tests PRIVATE Generators Models ${ONNXRUNTIME_LIB})
+target_link_libraries(Tests PRIVATE Generators ${ONNXRUNTIME_LIB})
 
 pybind11_add_module(pybind ${pybind_srcs})
 target_include_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort)
 target_link_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort)
-target_link_libraries(pybind PRIVATE Generators Models ${ONNXRUNTIME_LIB})
+target_link_libraries(pybind PRIVATE Generators ${ONNXRUNTIME_LIB})
 set_target_properties(pybind PROPERTIES OUTPUT_NAME "onnxruntime_genai")
 
 # Visual C++ - /MP Multiple process build, /WX Warnings as errors
@@ -148,9 +136,8 @@ foreach(DLL_FILE ${onnxruntime_libs})
     )
 endforeach()
 
-# Have visual studio put all files into one single 'Sources' folder vs the default split of header files into a separate folder
-source_group("Sources" FILES ${generator_srcs})
-source_group("Sources" FILES ${model_srcs})
+# Have visual studio put all files into one single folder vs the default split of header files into a separate folder
+source_group(TREE ${GENERATORS_ROOT} FILES ${generator_srcs})
 source_group("Sources" FILES ${test_srcs})
 source_group("Sources" FILES ${pybind_srcs})
 
