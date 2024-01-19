@@ -2,8 +2,8 @@ on: [ workflow_dispatch, pull_request ]
 
 env:
   ort_dir: "onnxruntime-linux-x64-1.16.3"
-  ort_zip: "$(ort_dir).tgz"
-  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/$(ort_zip)"
+  ort_zip: "${{ env.ort_dir}}.tgz"
+  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/${{ env.ort_zip}}"
 jobs:
   job:
     runs-on: ubuntu-latest
@@ -13,16 +13,16 @@ jobs:
 
       - name: Download OnnxRuntime
         run: |
-          curl -L -o $(ort_zip) $(ort_url) 
+          curl -L -o ${{ env.ort_zip }} ${{ env.ort_url }} 
 
       - name: Unzip OnnxRuntime
         run: |
-          tar -xzf $(ort_zip)
-          rm $(ort_zip)
+          tar -xzf ${{ env.ort_zip }}
+          rm ${{ env.ort_zip }}
 
       - name: Rename OnnxRuntime to ort
         run: |
-          mv $(ort_dir) ort
+          mv ${{ env.ort_dir }} ort
 
       - name: Git Submodule Update
         run: |
@@ -37,7 +37,7 @@ jobs:
 
       - name: Verify Build Artifacts
         run: |
-          ls -l $(GITHUB_WORKSPACE)/build/Release
+          ls -l build/Release
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v3
