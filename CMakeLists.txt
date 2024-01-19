@@ -31,10 +31,12 @@ endif()
 
 project (Generators LANGUAGES CXX)
 
+# Checking if CUDA is supported
 include(CheckLanguage)
 check_language(CUDA)
-# Checking if CUDA is supported
-#find_package(CUDA)
+if (CMAKE_CUDA_COMPILER)
+    set (CUDA_FOUND TRUE)
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 # add_compile_definitions(USE_CXX17=1)
@@ -115,8 +117,6 @@ add_executable (Tests ${test_srcs})
 target_include_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
 target_link_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
 target_link_libraries(Tests PRIVATE Generators ${ONNXRUNTIME_LIB})
-
-message(${CMAKE_SOURCE_DIR}/ort/include)
 
 pybind11_add_module(pybind ${pybind_srcs})
 target_include_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
