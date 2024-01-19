@@ -13,7 +13,7 @@ jobs:
 
       - name: Download OnnxRuntime
         run: |
-          curl -L $env:ort_url -o $env:ort_zip
+          curl $env:ort_url -o $env:ort_zip
 
       - name: Unzip OnnxRuntime
         run: |
