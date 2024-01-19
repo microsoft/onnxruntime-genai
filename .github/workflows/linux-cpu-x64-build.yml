@@ -11,6 +11,14 @@ jobs:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v2
 
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      - uses: Swatinem/rust-cache@v1
+      - run: cargo install clang-tidy-sarif sarif-fmt
+
       - name: Download OnnxRuntime
         run: |
           curl -L -o ${{ env.ort_zip }} ${{ env.ort_url }} 
@@ -30,10 +38,14 @@ jobs:
 
       - name: Build with CMake
         run: |
+          set -e -x
           mkdir build
           cd build
-          cmake -G "Unix Makefiles" .. -DBUILD_SHARED_LIBS=ON -DCMAKE_BUILD_TYPE=Release
+          cmake -G "Unix Makefiles" .. -DBUILD_SHARED_LIBS=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
           cmake --build . --config Release --parallel
+          cp compile_commands.json ..
+          clang-tidy src -- | tee
+          results.sarif | sarif-fmt
 
       - name: Verify Build Artifacts
         run: |
