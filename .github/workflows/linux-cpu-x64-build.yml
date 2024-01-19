@@ -37,10 +37,10 @@ jobs:
 
       - name: Verify Build Artifacts
         run: |
-          ls -l ${{ github.workspace }}/build/Release
+          ls -l ${{ runner.workspace }}/build/Release
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v3
         with:
           name: onnxruntime-genai-linux-cpu-x64
-          path: ${{ github.workspace }}/build/Release/*
+          path: ${{ runner.host-workspace }}/build/Release/*
