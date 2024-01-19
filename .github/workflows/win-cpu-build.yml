@@ -43,5 +43,3 @@ jobs:
         run: |
           cd build
           Get-ChildItem -Path $env:GITHUB_WORKSPACE\build\Release -Recurse
-#          TODO : adding shared library to the build
-      
