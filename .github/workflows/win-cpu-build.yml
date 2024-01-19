@@ -1,8 +1,9 @@
 on: [ workflow_dispatch, push, pull_request ]
 env:
-  ort_dir: "onnxruntime-win-x64-1.16.3"
+  ort_ver: "1.16.3"
+  ort_dir: "onnxruntime-win-x64-$(ort_ver)"
   ort_zip: "$(ort_dir).zip"
-  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/onnxruntime-win-x64-1.16.3.zip"
+  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v$(ort_ver)/$(ort_zip)"
 
 jobs:
   job:
