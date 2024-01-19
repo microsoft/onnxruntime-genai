@@ -4,7 +4,6 @@
 cmake_minimum_required (VERSION 3.11)
 # include(FetchContent)
 
-
 # Enable Hot Reload for MSVC compilers if supported.
 if(POLICY CMP0141)
   cmake_policy(SET CMP0141 NEW)
@@ -46,7 +45,6 @@ set(MODELS_ROOT ${PROJECT_SOURCE_DIR}/src/models)
 set(TESTS_ROOT ${PROJECT_SOURCE_DIR}/src/tests)
 set(PYBIND_ROOT ${PROJECT_SOURCE_DIR}/src/pybind)
 
-set(USE_CUDA 1)
 
 add_subdirectory(${PROJECT_SOURCE_DIR}/extern/pybind11 ${PROJECT_SOURCE_DIR}/build/pybind)
 
@@ -99,8 +97,8 @@ else()
     list(REMOVE_ITEM generator_srcs ${generator_cuda_srcs})
 endif()
 
-add_library (Generators ${generator_srcs})
-target_include_directories(Generators PRIVATE ${CMAKE_SOURCE_DIR}/ort)
+add_library (onnxruntime-genai ${generator_srcs})
+target_include_directories(onnxruntime-genai PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
 
 if(WIN32)
   set(ONNXRUNTIME_LIB "onnxruntime.lib")
@@ -114,21 +112,21 @@ else()
 endif()
 
 add_executable (Tests ${test_srcs})
-target_include_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort)
-target_link_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort)
-target_link_libraries(Tests PRIVATE Generators ${ONNXRUNTIME_LIB})
+target_include_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
+target_link_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
+target_link_libraries(Tests PRIVATE onnxruntime-genai ${ONNXRUNTIME_LIB})
 
 pybind11_add_module(pybind ${pybind_srcs})
-target_include_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort)
-target_link_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort)
-target_link_libraries(pybind PRIVATE Generators ${ONNXRUNTIME_LIB})
+target_include_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
+target_link_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
+target_link_libraries(pybind PRIVATE onnxruntime-genai ${ONNXRUNTIME_LIB})
 set_target_properties(pybind PROPERTIES OUTPUT_NAME "onnxruntime_genai")
 
 # Visual C++ - /MP Multiple process build, /WX Warnings as errors
 # Enable:
 #   C5038: data member 'member1' will be initialized after data member 'member2'
 # Disable:
-#   C4100: 'this_': unreferenced formal parameter 
+#   C4100: 'this_': unreferenced formal parameter
 if(MSVC)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /MP /w15038 /wd4100 /W4 /WX")
 endif()
@@ -137,7 +135,7 @@ endif()
 file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/${ONNXRUNTIME_FILES}")
 foreach(DLL_FILE ${onnxruntime_libs})
     add_custom_command(
-        TARGET Generators POST_BUILD
+        TARGET onnxruntime-genai POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy
                 ${DLL_FILE}
                 ${CMAKE_BINARY_DIR}/$<CONFIG>/${DLL_FILE_NAME}
