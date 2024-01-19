@@ -41,6 +41,7 @@ jobs:
           cmake --build . --config Release --parallel
 
       - name: Verify Build Artifacts
+        if: always()
         run: |
           Get-ChildItem -Path $env:GITHUB_WORKSPACE\build\Release -Recurse
 
