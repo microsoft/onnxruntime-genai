@@ -97,10 +97,18 @@ else()
     list(REMOVE_ITEM generator_srcs ${generator_cuda_srcs})
 endif()
 
-set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
+if(WIN32)
+    set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
+endif()
+
+
 
 add_library (onnxruntime-genai ${generator_srcs})
 target_include_directories(onnxruntime-genai PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set_target_properties(onnxruntime-genai PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
 
 if(WIN32)
   set(ONNXRUNTIME_LIB "onnxruntime.lib")
