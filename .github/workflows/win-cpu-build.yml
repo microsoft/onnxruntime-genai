@@ -9,6 +9,11 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v2
+      - name: set up Visual Studio 2022
+        uses: microsoft/setup-msbuild@v1.1
+        with:
+          vs-version: '17.5'
+          cmake-version: '3.26'
       - name: Download OnnxRuntime
         run: |
           $env:ort_url = "https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/onnxruntime-win-x64-1.16.3.zip"
@@ -22,4 +27,10 @@ jobs:
         run: |
             Rename-Item -Path $env:ort_dir -NewName ort
             Get-ChildItem -Path $env:GITHUB_WORKSPACE -Recurse
+      - name: Build with CMake
+        run: |
+          mkdir build
+          cd build
+          cmake -G "Visual Studio 17 2022" -A x64 -DORT_ROOT=$env:GITHUB_WORKSPACE\ort ..
+          cmake --build . --config Release
       
