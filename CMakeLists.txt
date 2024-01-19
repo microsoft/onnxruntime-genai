@@ -99,10 +99,8 @@ endif()
 
 set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
 
-add_library (onnxruntime-genai SHARED ${generator_srcs})
-#add_library (onnxruntime-genai-static STATIC ${generator_srcs})
+add_library (onnxruntime-genai ${generator_srcs})
 target_include_directories(onnxruntime-genai PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
-#target_include_directories(onnxruntime-genai-static PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
 
 if(WIN32)
   set(ONNXRUNTIME_LIB "onnxruntime.lib")
@@ -118,7 +116,7 @@ endif()
 add_executable (Tests ${test_srcs})
 target_include_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
 target_link_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
-target_link_libraries(Tests PUBLIC onnxruntime-genai ${ONNXRUNTIME_LIB})
+target_link_libraries(Tests PRIVATE onnxruntime-genai ${ONNXRUNTIME_LIB})
 #
 #pybind11_add_module(pybind ${pybind_srcs})
 #target_include_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)

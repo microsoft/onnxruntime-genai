@@ -36,6 +36,7 @@ jobs:
           cmake --build . --config Release --parallel
 
       - name: Verify Build Artifacts
+        if: always()
         run: |
           ls -l ${{ github.workspace }}/build
 
