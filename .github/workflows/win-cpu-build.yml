@@ -18,4 +18,8 @@ jobs:
           Expand-Archive $env:ort_zip -DestinationPath .
           Remove-Item -Path $env:ort_zip
           Get-ChildItem -Path $env:GITHUB_WORKSPACE
+      - name: Rename OnnxRuntime to ort
+        run: |
+            Rename-Item -Path $env:ort_dir -NewName ort
+            Get-ChildItem -Path $env:GITHUB_WORKSPACE -Recurse
       
