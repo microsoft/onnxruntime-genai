@@ -37,7 +37,11 @@ jobs:
         run: |
           mkdir build
           cd build
-          cmake -G "Visual Studio 17 2022" -A x64 -DORT_ROOT=$env:GITHUB_WORKSPACE\ort ..
+          cmake -G "Visual Studio 17 2022" -A x64 ..
           cmake --build . --config Release
           Get-ChildItem -Path $env:GITHUB_WORKSPACE\build\Release -Filter *.dll -Recurse
+      - name: verify build folder
+        run: |
+          cd build
+          Get-ChildItem -Path $env:GITHUB_WORKSPACE\build\Release -Recurse
       
