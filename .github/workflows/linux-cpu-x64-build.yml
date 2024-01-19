@@ -59,6 +59,7 @@ jobs:
           results.sarif | sarif-fmt
 
       - name: Verify Build Artifacts
+        if: always()
         run: |
           ls -l ${{ github.workspace }}/build
 
@@ -66,4 +67,4 @@ jobs:
         uses: actions/upload-artifact@v3
         with:
           name: onnxruntime-genai-linux-cpu-x64
-          path: ${{ github.workspace }}/build/**/*.so
+          path: ${{ github.workspace }}/build/**/*.a
