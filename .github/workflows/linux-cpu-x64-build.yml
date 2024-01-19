@@ -22,7 +22,7 @@ jobs:
 
       - name: Rename OnnxRuntime to ort
         run: |
-          mv $env:ort_dir ort'
+          mv $env:ort_dir ort
 
       - name: Git Submodule Update
         run: |
