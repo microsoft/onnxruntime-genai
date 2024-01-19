@@ -35,10 +35,6 @@ jobs:
           cmake -G "Unix Makefiles" .. -DBUILD_SHARED_LIBS=ON -DCMAKE_BUILD_TYPE=Release
           cmake --build . --config Release --parallel
 
-      - name: Verify Build Artifacts
-        run: |
-          ls -l build/Release
-
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v3
         with:
