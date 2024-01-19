@@ -13,11 +13,11 @@ jobs:
 
       - name: Download OnnxRuntime
         run: |
-          curl -L -o $env:ort_zip $env:ort_url 
+          curl -L -o $ort_zip $ort_url 
 
       - name: Unzip OnnxRuntime
         run: |
-          tar -xzf $env:ort_zip
+          tar -xzf $ort_zip
           rm $env:ort_zip
 
       - name: Rename OnnxRuntime to ort
