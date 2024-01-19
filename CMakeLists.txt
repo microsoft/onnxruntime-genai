@@ -3,8 +3,7 @@
 
 cmake_minimum_required (VERSION 3.11)
 # include(FetchContent)
-# Checking if CUDA is supported
-find_package(CUDA)
+
 
 # Enable Hot Reload for MSVC compilers if supported.
 if(POLICY CMP0141)
@@ -31,6 +30,9 @@ FetchContent_MakeAvailable(safeint)
 endif()
 
 project (Generators LANGUAGES CXX)
+
+# Checking if CUDA is supported
+find_package(CUDA)
 
 set(CMAKE_CXX_STANDARD 20)
 # add_compile_definitions(USE_CXX17=1)
