@@ -20,7 +20,8 @@ OrtEnv& GetOrtEnv() {
 extern "C" {
 
 struct OgaResult {
-  OgaResult(const char *what);
+  OgaResult(const char *what){}
+ // TODO: implement this constructor !!!!
 };
 
 OgaResult* OgaCreateModel(const char* config_path, OgaDeviceType device_type, OgaModel** out) {
