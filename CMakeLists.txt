@@ -97,7 +97,7 @@ else()
     list(REMOVE_ITEM generator_srcs ${generator_cuda_srcs})
 endif()
 
-## TODO: this is a hack to get the shared library to export .lib files on windows. Se should find a better way to do this when we need to compile dynamic libraries
+## TODO: this is a hack to get the shared library to export .lib files on windows. We should find a better way when we need to compile dynamic libraries
 #if(WIN32)
 #    set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
 #endif()
