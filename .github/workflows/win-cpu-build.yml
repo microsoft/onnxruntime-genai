@@ -1,4 +1,9 @@
 on: [ workflow_dispatch, push, pull_request]
+env:
+    ort_dir: "onnxruntime-win-x64-1.16.3"
+    ort_zip: ort_dir + ".zip"
+    ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/onnxruntime-win-x64-1.16.3.zip"
+
 jobs:
   job:
     runs-on: windows-latest
@@ -6,8 +11,11 @@ jobs:
       - uses: actions/checkout@v2
       - name: Download OnnxRuntime
         run: |
-          $url = "https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/onnxruntime-win-x64-1.16.3.zip"
-          $output = "onnxruntime-win-x64-1.16.3.zip"
-          Invoke-WebRequest -Uri $url -OutFile $output
-          Expand-Archive $output -DestinationPath $env:GITHUB_WORKSPACE
-          Get-ChildItem -Path $env:GITHUB_WORKSPACE -Recurse
+          $env:ort_url = "https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/onnxruntime-win-x64-1.16.3.zip"
+          Invoke-WebRequest -Uri $env:ort_url -OutFile $env:ort_zip
+      - name: Unzip OnnxRuntime
+        run: |
+          Expand-Archive $env:ort_zip -DestinationPath .
+          Remove-Item -Path $env:ort_zip
+          Get-ChildItem -Path $env:GITHUB_WORKSPACE
+      
