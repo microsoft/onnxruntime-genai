@@ -115,12 +115,12 @@ add_executable (Tests ${test_srcs})
 target_include_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
 target_link_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
 target_link_libraries(Tests PRIVATE onnxruntime-genai ${ONNXRUNTIME_LIB})
-
-pybind11_add_module(pybind ${pybind_srcs})
-target_include_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
-target_link_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
-target_link_libraries(pybind PRIVATE onnxruntime-genai ${ONNXRUNTIME_LIB})
-set_target_properties(pybind PROPERTIES OUTPUT_NAME "onnxruntime_genai")
+#
+#pybind11_add_module(pybind ${pybind_srcs})
+#target_include_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
+#target_link_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
+#target_link_libraries(pybind PRIVATE onnxruntime-genai ${ONNXRUNTIME_LIB})
+#set_target_properties(pybind PROPERTIES OUTPUT_NAME "onnxruntime_genai")
 
 # Visual C++ - /MP Multiple process build, /WX Warnings as errors
 # Enable:
