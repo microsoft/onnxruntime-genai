@@ -31,8 +31,10 @@ endif()
 
 project (Generators LANGUAGES CXX)
 
+include(CheckLanguage)
+check_language(CUDA)
 # Checking if CUDA is supported
-find_package(CUDA)
+#find_package(CUDA)
 
 set(CMAKE_CXX_STANDARD 20)
 # add_compile_definitions(USE_CXX17=1)
@@ -96,7 +98,7 @@ else()
 endif()
 
 add_library (Generators ${generator_srcs})
-target_include_directories(Generators PRIVATE ${CMAKE_SOURCE_DIR}/ort)
+target_include_directories(Generators PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
 
 if(WIN32)
   set(ONNXRUNTIME_LIB "onnxruntime.lib")
@@ -110,13 +112,15 @@ else()
 endif()
 
 add_executable (Tests ${test_srcs})
-target_include_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort)
-target_link_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort)
+target_include_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
+target_link_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
 target_link_libraries(Tests PRIVATE Generators ${ONNXRUNTIME_LIB})
 
+message(${CMAKE_SOURCE_DIR}/ort/include)
+
 pybind11_add_module(pybind ${pybind_srcs})
-target_include_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort)
-target_link_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort)
+target_include_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
+target_link_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
 target_link_libraries(pybind PRIVATE Generators ${ONNXRUNTIME_LIB})
 set_target_properties(pybind PROPERTIES OUTPUT_NAME "onnxruntime_genai")
 
