@@ -43,3 +43,8 @@ jobs:
         run: |
           cd build
           Get-ChildItem -Path $env:GITHUB_WORKSPACE\build\Release -Recurse
+      - name: upload artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: onnxruntime-genai-win-cpu-x64
+          path: $env:GITHUB_WORKSPACE\build\Release
