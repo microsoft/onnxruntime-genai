@@ -37,7 +37,7 @@ jobs:
 
       - name: Verify Build Artifacts
         run: |
-          ls -l build/Release
+          ls -l ${{ env.GITHUB_WORKSPACE }}/build/Release
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v3
