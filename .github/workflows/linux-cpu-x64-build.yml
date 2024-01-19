@@ -44,7 +44,9 @@ jobs:
           cmake -G "Unix Makefiles" .. -DBUILD_SHARED_LIBS=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
           cmake --build . --config Release --parallel
           rm -rf build
+  
       - name: Build with CMake and clang
+        run: |
           set -e -x
           mkdir build
           cd build
