@@ -103,7 +103,7 @@ if(WIN32)
   set(ONNXRUNTIME_FILES "onnxruntime*.dll")
 elseif(APPLE)
   set(ONNXRUNTIME_LIB "libonnxruntime.dylib")
-  # TODO: Figure ONNXRUNTIME_FILES for MacOS
+  set(ONNXRUNTIME_FILES "libonnxruntime*.dylib")
 else()
   set(ONNXRUNTIME_LIB "libonnxruntime.so")
   set(ONNXRUNTIME_FILES "libonnxruntime*.so*")
