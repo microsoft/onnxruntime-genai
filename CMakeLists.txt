@@ -32,7 +32,11 @@ endif()
 project (Generators LANGUAGES CXX)
 
 # Checking if CUDA is supported
-find_package(CUDA)
+include(CheckLanguage)
+check_language(CUDA)
+if (CMAKE_CUDA_COMPILER)
+    set (CUDA_FOUND TRUE)
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 # add_compile_definitions(USE_CXX17=1)
