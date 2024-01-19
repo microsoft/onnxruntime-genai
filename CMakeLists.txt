@@ -3,6 +3,9 @@
 
 cmake_minimum_required (VERSION 3.11)
 # include(FetchContent)
+enable_language(CXX C)
+# Checking if CUDA is supported
+find_package(CUDA)
 
 # Enable Hot Reload for MSVC compilers if supported.
 if(POLICY CMP0141)
@@ -44,7 +47,7 @@ add_subdirectory(${PROJECT_SOURCE_DIR}/extern/pybind11 ${PROJECT_SOURCE_DIR}/bui
 
 # CUDA Being enabled will make it not a debug build without this option, so all of the C++ headers will complain
 # about a mismatch with the actual debug headers and it'll fail to link. I don't know why this happens, or if this is the best fix.
-if(USE_CUDA EQUAL 1 AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+if(USE_CUDA EQUAL 1 AND CUDA_FOUND AND CMAKE_BUILD_TYPE STREQUAL "Debug")
   add_compile_definitions(_DEBUG=1)
 endif()
 
@@ -67,7 +70,7 @@ file(GLOB pybind_srcs CMAKE_CONFIGURE_DEPENDS
    "${PYBIND_ROOT}/*.cpp"
 )
 
-if(USE_CUDA)
+if(USE_CUDA AND CUDA_FOUND)
     # Don't let cmake set a default value for CMAKE_CUDA_ARCHITECTURES
     cmake_policy(SET CMP0104 OLD)
     enable_language(CUDA)
