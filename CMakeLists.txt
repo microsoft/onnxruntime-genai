@@ -100,7 +100,7 @@ endif()
 add_library (onnxruntime-genai SHARED ${generator_srcs})
 #add_library (onnxruntime-genai-static STATIC ${generator_srcs})
 target_include_directories(onnxruntime-genai PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
-target_include_directories(onnxruntime-genai-static PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
+#target_include_directories(onnxruntime-genai-static PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
 
 if(WIN32)
   set(ONNXRUNTIME_LIB "onnxruntime.lib")
