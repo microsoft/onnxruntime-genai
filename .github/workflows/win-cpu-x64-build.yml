@@ -49,4 +49,4 @@ jobs:
         uses: actions/upload-artifact@v3
         with:
           name: onnxruntime-genai-win-cpu-x64
-          path: build/Release/onnxruntime-genai.*
+          path: build/Release/*.lib
