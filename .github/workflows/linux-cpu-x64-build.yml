@@ -35,8 +35,12 @@ jobs:
           cmake -G "Unix Makefiles" .. -DBUILD_SHARED_LIBS=ON -DCMAKE_BUILD_TYPE=Release
           cmake --build . --config Release --parallel
 
+      - name: Verify Build Artifacts
+        run: |
+          ls -l ${{ github.workspace }}/build/Release
+
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v3
         with:
           name: onnxruntime-genai-linux-cpu-x64
-          path: build/Release/*
+          path: ${{ github.workspace }}/build/Release/*
