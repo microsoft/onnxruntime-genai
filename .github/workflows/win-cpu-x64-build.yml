@@ -42,11 +42,10 @@ jobs:
 
       - name: Verify Build Artifacts
         run: |
-          cd build
           Get-ChildItem -Path $env:GITHUB_WORKSPACE\build\Release -Recurse
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v2
         with:
           name: onnxruntime-genai-win-cpu-x64
-          path: $env:GITHUB_WORKSPACE\build\Release
+          path: $env:GITHUB_WORKSPACE\build\Release\*.dll
