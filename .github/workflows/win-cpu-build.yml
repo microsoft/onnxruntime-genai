@@ -1,0 +1,13 @@
+on: [ workflow_dispatch, push, pull_request]
+jobs:
+  job:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Download OnnxRuntime
+        run: |
+          $url = "https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/onnxruntime-win-x64-1.16.3.zip"
+          $output = "onnxruntime-win-x64-1.16.3.zip"
+          Invoke-WebRequest -Uri $url -OutFile $output
+          Expand-Archive $output -DestinationPath $env:GITHUB_WORKSPACE
+          Get-ChildItem -Path $env:GITHUB_WORKSPACE -Recurse
