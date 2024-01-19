@@ -97,6 +97,8 @@ else()
     list(REMOVE_ITEM generator_srcs ${generator_cuda_srcs})
 endif()
 
+set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
+
 add_library (onnxruntime-genai SHARED ${generator_srcs})
 #add_library (onnxruntime-genai-static STATIC ${generator_srcs})
 target_include_directories(onnxruntime-genai PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
