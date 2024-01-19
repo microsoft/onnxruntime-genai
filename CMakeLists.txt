@@ -3,7 +3,6 @@
 
 cmake_minimum_required (VERSION 3.11)
 # include(FetchContent)
-enable_language(CXX C)
 # Checking if CUDA is supported
 find_package(CUDA)
 
