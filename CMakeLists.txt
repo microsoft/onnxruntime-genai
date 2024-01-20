@@ -3,6 +3,9 @@
 
 cmake_minimum_required (VERSION 3.11)
 # include(FetchContent)
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+include(FindCuda)
+message(${CMAKE_CUDA_COMPILER})
 
 # Enable Hot Reload for MSVC compilers if supported.
 if(POLICY CMP0141)
@@ -29,13 +32,6 @@ FetchContent_MakeAvailable(safeint)
 endif()
 
 project (Generators LANGUAGES CXX)
-
-# Checking if CUDA is supported
-include(CheckLanguage)
-check_language(CUDA)
-if (CMAKE_CUDA_COMPILER)
-    set (CUDA_FOUND TRUE)
-endif()
 
 set(CMAKE_CXX_STANDARD 20)
 # add_compile_definitions(USE_CXX17=1)
