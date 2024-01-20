@@ -2,10 +2,8 @@
 # Licensed under the MIT License.
 
 cmake_minimum_required (VERSION 3.11)
-# include(FetchContent)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
-include(FindCuda)
-message(${CMAKE_CUDA_COMPILER})
+include(FetchPackages)
 
 # Enable Hot Reload for MSVC compilers if supported.
 if(POLICY CMP0141)
@@ -13,25 +11,15 @@ if(POLICY CMP0141)
   set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "$<IF:$<AND:$<C_COMPILER_ID:MSVC>,$<CXX_COMPILER_ID:MSVC>>,$<$<CONFIG:Debug,RelWithDebInfo>:EditAndContinue>,$<$<CONFIG:Debug,RelWithDebInfo>:ProgramDatabase>>")
 endif()
 
-if(false) # We don't use GSL anymore
-FetchContent_Declare(GSL
-    GIT_REPOSITORY "https://github.com/microsoft/GSL"
-    GIT_TAG "v4.0.0"
-    GIT_SHALLOW ON
-)
-
-FetchContent_MakeAvailable(GSL)
-endif()
-
-if(false) # We don't use SafeInt anymore
-FetchContent_Declare(safeint
-    GIT_REPOSITORY "https://github.com/dcleblanc/SafeInt"
-)
-
-FetchContent_MakeAvailable(safeint)
-endif()
 
 project (Generators LANGUAGES CXX)
+
+# Checking if CUDA is supported
+include(CheckLanguage)
+check_language(CUDA)
+if (CMAKE_CUDA_COMPILER)
+    set (CUDA_FOUND TRUE)
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 # add_compile_definitions(USE_CXX17=1)
