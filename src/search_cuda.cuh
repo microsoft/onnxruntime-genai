@@ -3,7 +3,7 @@ namespace Generators {
 namespace cuda {
 
 struct ArgMaxData {
-  virtual ~ArgMaxData()=default;
+  virtual ~ArgMaxData() = default;
 };
 
 void Launch_ArgMax(std::unique_ptr<ArgMaxData>& data, int32_t* next_tokens, const float* next_token_scores, int batch_size, int vocab_size, cudaStream_t stream);
@@ -15,4 +15,4 @@ void Launch_log_softmax(float* values, int count, cudaStream_t stream);
 void TopPSampling(int32_t* next_token, float* scores, int size, float p, float temperature);
 }  // namespace cuda
 
-} // namespace Generators
+}  // namespace Generators

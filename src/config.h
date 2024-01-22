@@ -32,8 +32,8 @@ struct Config {
     std::string encoder_decoder_init;
     std::string type;
 
-    ONNXTensorElementDataType logits_type{ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT}; // float16/float32 are the valid types
-    ONNXTensorElementDataType kv_type{ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT};  // float16/float32 are the valid types
+    ONNXTensorElementDataType logits_type{ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT};  // float16/float32 are the valid types
+    ONNXTensorElementDataType kv_type{ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT};      // float16/float32 are the valid types
 
     int vocab_size{};
     int hidden_size{};

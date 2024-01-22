@@ -44,12 +44,12 @@ struct BeamSearchScorer_Cuda {
   cpu_span<int32_t> next_beam_indices_cpu_;
 
   cuda_unique_ptr<int32_t> hypothesis_buffer_ptr_;  // Allocated buffer to hold all hypotheses
-  gpu_span<int32_t> hypothesis_buffer_;                // Span of the allocated buffer
-  size_t hypothesis_buffer_used_{};                     // Offset of available buffer, or length of used buffer.
+  gpu_span<int32_t> hypothesis_buffer_;             // Span of the allocated buffer
+  size_t hypothesis_buffer_used_{};                 // Offset of available buffer, or length of used buffer.
 
   cuda_unique_ptr<cuda::HypothesisScore> hypothesis_scores_ptr_;  // num_beams_ * batch_size_, divided into num_beams_ chunks per BeamHypothesis in beam_hyps_
   cuda_unique_ptr<cuda::BeamHypotheses> beam_hyps_ptr_;
   gpu_span<cuda::BeamHypotheses> beam_hyps_;  // Shape is batch_size_
 };
 
-}
+}  // namespace Generators

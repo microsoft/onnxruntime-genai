@@ -19,4 +19,4 @@ void log_softmax(std::span<float> values) {
   std::transform(values.begin(), values.end(), values.begin(), [max, log_max](float v) { return v - max - log_max; });
 }
 
-}
+}  // namespace Generators

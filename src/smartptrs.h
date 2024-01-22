@@ -3,18 +3,22 @@
 
 namespace Generators {
 
-template<typename... T>
-void Unreferenced(const T&...) { }
+template <typename... T>
+void Unreferenced(const T&...) {}
 
 namespace Location {
 struct CPU {};
 struct GPU {};
-}
+}  // namespace Location
 
-template<typename T>
-struct cpu_span : std::span<T> { using std::span<T>::span; };
-template<typename T>
-struct gpu_span : std::span<T> { using std::span<T>::span; };
+template <typename T>
+struct cpu_span : std::span<T> {
+  using std::span<T>::span;
+};
+template <typename T>
+struct gpu_span : std::span<T> {
+  using std::span<T>::span;
+};
 
 template <typename T>
 void copy(std::span<const T> source, std::span<T> dest) {
@@ -59,7 +63,7 @@ template <typename T>
 using cuda_host_unique_ptr = std::unique_ptr<T, CudaHostDeleter>;
 
 template <typename T>
-cuda_host_unique_ptr<T> CudaMallocHostArray(size_t count, cpu_span<T>* p_span=nullptr) {
+cuda_host_unique_ptr<T> CudaMallocHostArray(size_t count, cpu_span<T>* p_span = nullptr) {
   T* p;
   ::cudaMallocHost(&p, sizeof(T) * count);
   if (p_span)
@@ -94,8 +98,7 @@ struct cuda_event_holder {
 // It does not own the original memory, only the on-demand copy memory.
 template <typename T>
 struct RoamingArray {
-
-  RoamingArray()=default;
+  RoamingArray() = default;
   RoamingArray(const RoamingArray& v) { Assign(v); }
 
   bool empty() const { return cpu_.empty() && device_.empty(); }
@@ -152,7 +155,7 @@ struct RoamingArray {
     cpu_ = v.cpu_;
     device_ = v.device_;
   }
- 
+
   cpu_span<T> cpu_;
   cuda_host_unique_ptr<T> cpu_owner_;
   gpu_span<T> device_;
@@ -162,7 +165,6 @@ struct RoamingArray {
 // A roaming array is one that can be in CPU or GPU memory, and will copy the memory as needed to be used from anywhere
 template <typename T>
 struct RoamingArray {
-
   RoamingArray() = default;
   RoamingArray(const RoamingArray& v) { Assign(v); }
 
@@ -181,11 +183,11 @@ struct RoamingArray {
   cpu_span<T> GetCPU() {
     return cpu_;
   }
- 
- void Assign(const RoamingArray<T>& v) {
+
+  void Assign(const RoamingArray<T>& v) {
     cpu_ = v.cpu_;
   }
- 
+
   cpu_span<T> cpu_;
 };
 #endif

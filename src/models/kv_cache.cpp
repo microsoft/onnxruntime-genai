@@ -114,7 +114,7 @@ KV_Cache::KV_Cache(Model& model, State& state)
   pasts_.resize(layer_count_ * 2);
   presents_.reserve(layer_count_ * 2);
 
-  shape_[2] = state_.search_params_.sequence_length; // Set this after empty_past_ has been created with 0 for this field
+  shape_[2] = state_.search_params_.sequence_length;  // Set this after empty_past_ has been created with 0 for this field
 
   for (int i = 0; i < layer_count_; ++i) {
     presents_.push_back(OrtValue::CreateTensor(*model_.allocator_device_, shape_, model_.config_->model.kv_type));

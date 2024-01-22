@@ -4,9 +4,9 @@ void OnCudaError(cudaError_t error);
 
 struct CudaCheck {
   void operator==(cudaError_t error) {
-    if (error!=cudaSuccess)
+    if (error != cudaSuccess)
       OnCudaError(error);
   }
 };
 
-}
+}  // namespace Generators

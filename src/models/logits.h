@@ -3,15 +3,13 @@
 namespace Generators {
 
 struct Logits {
-
   Logits(Model& model, State& state);
 
   void Add();
   void Update();
   RoamingArray<float> Get();
 
-private:
-
+ private:
   Model& model_;
   State& state_;
   size_t output_index_{~0U};
