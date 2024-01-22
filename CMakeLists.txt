@@ -28,7 +28,7 @@ FetchContent_Declare(safeint
 FetchContent_MakeAvailable(safeint)
 endif()
 
-project (Generators LANGUAGES CXX)
+project (Generators LANGUAGES C CXX)
 
 # Checking if CUDA is supported
 include(CheckLanguage)
