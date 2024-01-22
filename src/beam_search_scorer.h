@@ -20,8 +20,8 @@ struct BeamHypotheses {
   bool CanImprove(float best_sum_logprobs, int current_length) const;
 
   // Output results
-  void Output(size_t top_k,                            // number of sequences to return
-              size_t max_length,                     // max sequence length
+  void Output(size_t top_k,                        // number of sequences to return
+              size_t max_length,                   // max sequence length
               std::span<int32_t> sequences,        // buffer with pad token, shape (num_return_sequences, max_length)
               std::span<float> sequences_scores);  // buffer for sequence scores, with shape (num_return_sequences)
 
@@ -68,13 +68,13 @@ struct BeamSearchScorer {
   std::unique_ptr<int32_t[]> next_beam_indices_ptr_;
   cpu_span<int32_t> next_beam_indices_;
 
-  std::unique_ptr<int32_t[]> hypothesis_buffer_ptr_;    // Allocated buffer to hold all hypotheses
-  std::span<int32_t> hypothesis_buffer_;                // Span of the allocated buffer
-  int hypothesis_buffer_used_{};                        // Offset of available buffer, or length of used buffer.
+  std::unique_ptr<int32_t[]> hypothesis_buffer_ptr_;  // Allocated buffer to hold all hypotheses
+  std::span<int32_t> hypothesis_buffer_;              // Span of the allocated buffer
+  int hypothesis_buffer_used_{};                      // Offset of available buffer, or length of used buffer.
 
   std::unique_ptr<HypothesisScore[]> hypothesis_scores_ptr_;  // num_beams_ * batch_size_, divided into num_beams_ chunks per BeamHypothesis in beam_hyps_
   std::unique_ptr<BeamHypotheses[]> beam_hyps_ptr_;
   std::span<BeamHypotheses> beam_hyps_;  // Shape is batch_size_
 };
 
-}
+}  // namespace Generators

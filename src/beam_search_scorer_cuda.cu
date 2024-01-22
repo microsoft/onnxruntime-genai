@@ -4,8 +4,7 @@
 #include "span.h"
 #include "beam_search_scorer_cuda.cuh"
 
-namespace Generators
-{
+namespace Generators {
 namespace cuda {
 
 __global__ void InitializeBeamHypotheses(BeamHypotheses* beam_hyps, int beam_hyps_count, float length_penalty, HypothesisScore* beams, int num_beams) {
@@ -233,7 +232,7 @@ void LaunchBeamSearchScorer_AppendNextTokenToSequences(BeamScorerState& state_cp
                                                        cudaStream_t stream) {
   const int max_threads = 512;
   int batch_beam_size = state_cpu.batch_size_ * state_cpu.num_beams_;
-  dim3 block_size; 
+  dim3 block_size;
   dim3 grid_size;
   if (batch_beam_size * sequence_length <= max_threads) {  // Can fit into a single thread block
     block_size.x = batch_beam_size;
@@ -320,8 +319,8 @@ void LaunchBeamSearchScorer_Finalize(int batch_size,
 }
 
 __global__ void InitScoresKernel(float* beam_scores,
-                           int num_beams,
-                           int total_elements) {
+                                 int num_beams,
+                                 int total_elements) {
   int index = blockIdx.x * blockDim.x + threadIdx.x;
   if (index < total_elements) {
     int beam_index = index % num_beams;
@@ -340,6 +339,5 @@ void LaunchInitScoresKernel(
   InitScoresKernel<<<gridSize, blockSize, 0, stream>>>(beam_scores, num_beams, total_elements);
 }
 
-
-}
-}
+}  // namespace cuda
+}  // namespace Generators

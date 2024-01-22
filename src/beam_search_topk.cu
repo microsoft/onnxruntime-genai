@@ -158,7 +158,7 @@ void LaunchBeamSearchOnlineTopKStage2Kernel(
     T* output_values,
     int32_t* output_indices,
     cudaStream_t stream) {
-  assert(parts_per_beam <= 128); // Parts per beam should not be greater than 128
+  assert(parts_per_beam <= 128);  // Parts per beam should not be greater than 128
 
   int smem_stage2_size = parts_per_beam * max_k * 2 * sizeof(int32_t);
 
@@ -260,7 +260,7 @@ void LaunchBatchTopKKernel(const T* topk_scores,
                            int32_t num_beams,
                            int32_t k,
                            cudaStream_t stream) {
-  assert(k <= 64); // LaunchBatchTopKKernel doesn't support k >= 64
+  assert(k <= 64);  // LaunchBatchTopKKernel doesn't support k >= 64
 
 #define BatchTopKKernelLauncher(K)                                          \
   BatchTopKKernel<T, I, K, 32><<<batch_size, 32, 0, stream>>>(topk_scores,  \
@@ -309,17 +309,17 @@ void BeamSearchTopK(
     int32_t* output_tokens,
     int32_t* output_indices,
     cudaStream_t stream) {
-  assert(k <= 64); // BeamSearchTopK doesn't support k > 64
+  assert(k <= 64);  // BeamSearchTopK doesn't support k > 64
 
-#define TopKLauncher(K)                           \
-  TopKLauncherMaxK<float, K>(input,           \
-                         batch_size * num_beams,  \
-                         vocab_size,              \
-                         k, tmp_values_2nd_stage, \
-                         tmp_indices_2nd_stage,   \
-                         tmp_values_1st_stage,    \
-                         tmp_indices_1st_stage,   \
-                         stream);
+#define TopKLauncher(K)                               \
+  TopKLauncherMaxK<float, K>(input,                   \
+                             batch_size * num_beams,  \
+                             vocab_size,              \
+                             k, tmp_values_2nd_stage, \
+                             tmp_indices_2nd_stage,   \
+                             tmp_values_1st_stage,    \
+                             tmp_indices_1st_stage,   \
+                             stream);
 
   if (k <= 4) {
     TopKLauncher(4)
