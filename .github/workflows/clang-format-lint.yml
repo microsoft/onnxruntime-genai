@@ -1,13 +1,17 @@
-name: clang-format Check
-on: [pull_request]
+name: clang-format-lint
+on:
+  push: {main}
+  pull_request: {}
+
 jobs:
-  formatting-check:
-    name: Formatting Check
+  build:
     runs-on: ubuntu-latest
+
     steps:
     - uses: actions/checkout@v3
-    - name: Run clang-format style check for C/C++ programs.
-      uses: jidicula/clang-format-action@v4.11.0
+    - uses: DoozyX/clang-format-lint-action@v0.16.2
       with:
-        clang-format-version: '17'
-        check-path: 'src'
+        source: './src ./test'
+        extensions: 'h,cpp'
+        clangFormatVersion: 17
+        style: Google
