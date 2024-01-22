@@ -4,7 +4,7 @@
 
 namespace Generators {
 
-template<typename T>
+template <typename T>
 InputIDs<T>::InputIDs(Model& model, State& state)
     : model_{model},
       state_{state} {
@@ -33,7 +33,7 @@ void InputIDs<T>::Add() {
   state_.input_names_.push_back(name_);
 }
 
-template<typename T>
+template <typename T>
 void InputIDs<T>::Update(RoamingArray<int32_t> next_tokens_unk) {
   // Resize input_ids shape once if it doesn't match the decoder shape
   if (shape_[1] != 1) {

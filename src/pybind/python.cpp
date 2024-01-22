@@ -109,9 +109,8 @@ OrtEnv& GetOrtEnv() {
 // A roaming array is one that can be in CPU or GPU memory, and will copy the memory as needed to be used from anywhere
 template <typename T>
 struct PyRoamingArray : RoamingArray<T> {
-
   pybind11::array_t<T> GetNumpy() {
-    auto v=this->GetCPU();
+    auto v = this->GetCPU();
     py_cpu_array_ = pybind11::array_t<T>({v.size()}, {sizeof(T)}, v.data(), pybind11::capsule(v.data(), [](void*) {}));
     return py_cpu_array_;
   }
@@ -123,20 +122,21 @@ template <typename T>
 void Declare_DeviceArray(pybind11::module& m, const char* name) {
   using Type = PyRoamingArray<T>;
   pybind11::class_<Type>(m, name)
-      .def("GetArray", [](Type& t) -> pybind11::array_t<T> { return t.GetNumpy(); }, pybind11::return_value_policy::reference_internal);
+      .def(
+          "GetArray", [](Type& t) -> pybind11::array_t<T> { return t.GetNumpy(); }, pybind11::return_value_policy::reference_internal);
 }
 
 struct PySearchParams : SearchParams {
   // Turn the python py_input_ids_ into the low level parameters
   void Prepare() {
     // TODO: This will switch to using the variant vs being ifs
-    if (py_input_ids_.size()!=0) {
+    if (py_input_ids_.size() != 0) {
       batch_size = static_cast<int>(py_input_ids_.shape(0));
       sequence_length = static_cast<int>(py_input_ids_.shape(1));
       input_ids = ToSpan(py_input_ids_);
     }
 
-    if (py_whisper_input_features_.size()!=0) {
+    if (py_whisper_input_features_.size() != 0) {
       SearchParams::Whisper& whisper = inputs.emplace<SearchParams::Whisper>();
       std::span<const int64_t> shape(py_whisper_input_features_.shape(), py_whisper_input_features_.ndim());
       whisper.input_features = OrtValue::CreateTensor<float>(Ort::Allocator::GetWithDefaultOptions().GetInfo(), ToSpan(py_whisper_input_features_), shape);
@@ -155,7 +155,7 @@ struct PySearchParams : SearchParams {
 struct PySearch {
   PySearch(PySearchParams& params) {
     params.Prepare();
-    search_=params.CreateSearch();
+    search_ = params.CreateSearch();
   }
 
   void SetLogits(PyRoamingArray<float>& inputs) {

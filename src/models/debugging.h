@@ -10,4 +10,4 @@ void DumpMemory(const char* name, std::span<const float> data);
 void DumpCudaMemory(const char* name, std::span<const int32_t> data);
 void DumpCudaMemory(const char* name, std::span<const float> data);
 #endif
-}
+}  // namespace Generators

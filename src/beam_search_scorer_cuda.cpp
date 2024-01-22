@@ -7,7 +7,6 @@ namespace Generators {
 
 BeamSearchScorer_Cuda::BeamSearchScorer_Cuda(const SearchParams& parameters)
     : stream_{parameters.cuda_stream} {
-
   state_cpu_ = CudaMallocHostArray<cuda::BeamScorerState>(1);
   state_cpu_->batch_size_ = static_cast<size_t>(parameters.batch_size);
   state_cpu_->num_beams_ = static_cast<size_t>(parameters.num_beams);
@@ -28,7 +27,7 @@ BeamSearchScorer_Cuda::BeamSearchScorer_Cuda(const SearchParams& parameters)
 
   cuda::LaunchInitializeBeamHypotheses(beam_hyps_, parameters.length_penalty, beams, parameters.num_beams, stream_);
 
-  next_beam_scores_ptr_ = CudaMallocArray<float>(batch_beam_size, &next_beam_scores_ );
+  next_beam_scores_ptr_ = CudaMallocArray<float>(batch_beam_size, &next_beam_scores_);
   next_beam_tokens_ptr_ = CudaMallocArray<int32_t>(batch_beam_size, &next_beam_tokens_);
   next_beam_indices_ptr_ = CudaMallocArray<int32_t>(batch_beam_size, &next_beam_indices_);
   next_beam_indices_cpu_ptr_ = std::make_unique<int32_t[]>(batch_beam_size);
@@ -83,4 +82,4 @@ void BeamSearchScorer_Cuda::Finalize(Sequences_Cuda& sequences,
   cuda::LaunchBeamSearchScorer_Finalize(state_cpu_->batch_size_, *state_gpu_, sequences.GetSequences(), sequences.GetSequenceLength(), beam_hyps_, next_beam_scores_, output, sequence_scores, stream_);
 }
 
-}
+}  // namespace Generators

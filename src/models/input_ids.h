@@ -2,7 +2,7 @@
 
 namespace Generators {
 
-template<typename T>
+template <typename T>
 struct InputIDs {
   InputIDs(Model& model, State& state);
 
@@ -10,7 +10,7 @@ struct InputIDs {
   void Update(RoamingArray<int32_t> next_tokens);
 
   auto& GetShape() const { return shape_; }
-  const char *name_{"input_ids"};
+  const char* name_{"input_ids"};
 
  private:
   Model& model_;
