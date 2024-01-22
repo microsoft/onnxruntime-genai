@@ -14,4 +14,3 @@ jobs:
         source: './src ./test'
         extensions: 'h,cpp'
         clangFormatVersion: 17
-        style: Google
