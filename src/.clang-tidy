@@ -18,8 +18,9 @@
 # -cppcoreguidelines-pro-type-vararg: printf
 # -misc-include-cleaner: suppress errors like: "no header providing std::span is directly".
 # -cppcoreguidelines-pro-bounds-pointer-arithmetic: sometimes we use raw arrays
+# -cppcoreguidelines-avoid-non-const-global-variables: ort_env is global.
 # -bugprone-easily-swappable-parameters: hard to fix
-
+# -performance-avoid-endl: not a big deal
 Checks: >
   -*,
   cppcoreguidelines-*,
@@ -29,11 +30,14 @@ Checks: >
   bugprone-*,
   performance-*,
   misc-*,
+  -performance-avoid-endl,
   -misc-include-cleaner,
   -cppcoreguidelines-macro-usage,
   -cppcoreguidelines-pro-type-reinterpret-cast,
   -cppcoreguidelines-pro-type-vararg,
   -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -cppcoreguidelines-avoid-non-const-global-variables,
   -google-readability-todo,
   -google-runtime-references,
   -modernize-concat-nested-namespaces,
@@ -41,6 +45,7 @@ Checks: >
   -readability-identifier-length,
   -readability-uppercase-literal-suffix,
   -readability-avoid-unconditional-preprocessor-if,
+  -readability-magic-numbers,
   -bugprone-easily-swappable-parameters
 
 WarningsAsErrors: ""
