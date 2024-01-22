@@ -51,16 +51,16 @@ Whisper_State::Whisper_State(Whisper_Model& model, RoamingArray<int32_t> sequenc
 }
 
 RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
-  if (first_run_)
+  if (first_run_) {
     first_run_ = false;
-  else {
+  } else {
     UpdateInputs(next_tokens, next_indices, current_length);
     State::Run(*model_.session_decoder_);
   }
   return logits_.Get();
 }
 
-void Whisper_State::UpdateInputs(RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> beam_indices, int current_length) {
+void Whisper_State::UpdateInputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> beam_indices, int current_length) {
   decoder_input_ids_.Update(next_tokens);
   logits_.Update();
   kv_cache_.Update(beam_indices.GetCPU(), current_length);

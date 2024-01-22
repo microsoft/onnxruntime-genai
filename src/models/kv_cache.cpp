@@ -19,10 +19,10 @@ KV_Cache_Combined::KV_Cache_Combined(Model& model, State& state)
 
     char string[64];
     snprintf(string, std::size(string), model.config_->model.past_names.c_str(), i);
-    input_name_strings_.push_back(string);
+    input_name_strings_.emplace_back(string);
 
     snprintf(string, std::size(string), model.config_->model.present_names.c_str(), i);
-    output_name_strings_.push_back(string);
+    output_name_strings_.emplace_back(string);
   }
 }
 
@@ -42,10 +42,11 @@ void KV_Cache_Combined::Update(std::span<const int32_t> beam_indices, int curren
   assert(state_.search_params_.num_beams == 1 || !beam_indices.empty());  // We require beam_indices if we're a beam search
 
   for (int i = 0; i < layer_count_; i++) {
-    if (beam_indices.empty())
+    if (beam_indices.empty()) {
       pasts_[i] = std::move(presents_[i]);
-    else
+    } else {
       PickPastState(beam_indices, i);
+    }
   }
 
   shape_[3] = current_length;
@@ -84,7 +85,7 @@ void KV_Cache_Combined::PickPastState(std::span<const int32_t> beam_indices, int
 #endif
   {
     for (size_t j = 0; j < beam_indices.size(); j++) {
-      int32_t beam_index = beam_indices[j];
+      int32_t const beam_index = beam_indices[j];
       auto present_key = present_span.subspan(beam_index * block_size_per_beam, block_size_per_beam);
       auto present_value = present_span.subspan(past_key_size + beam_index * block_size_per_beam, block_size_per_beam);
 
@@ -99,10 +100,11 @@ void KV_Cache_Combined::PickPastState(std::span<const int32_t> beam_indices, int
 }
 
 void KV_Cache_Combined::PickPastState(std::span<const int32_t> beam_indices, int index) {
-  if (model_.config_->model.kv_type == Ort::TypeToTensorType<float>::type)
+  if (model_.config_->model.kv_type == Ort::TypeToTensorType<float>::type) {
     PickPastState<float>(beam_indices, index);
-  else
+  } else {
     PickPastState<Ort::Float16_t>(beam_indices, index);
+  }
 }
 
 KV_Cache::KV_Cache(Model& model, State& state)
@@ -122,14 +124,14 @@ KV_Cache::KV_Cache(Model& model, State& state)
 
     char string[64];
     snprintf(string, std::size(string), model.config_->model.past_names_key.c_str(), i);
-    input_name_strings_.push_back(string);
+    input_name_strings_.emplace_back(string);
     snprintf(string, std::size(string), model.config_->model.past_names_value.c_str(), i);
-    input_name_strings_.push_back(string);
+    input_name_strings_.emplace_back(string);
 
     snprintf(string, std::size(string), model.config_->model.present_names_key.c_str(), i);
-    output_name_strings_.push_back(string);
+    output_name_strings_.emplace_back(string);
     snprintf(string, std::size(string), model.config_->model.present_names_value.c_str(), i);
-    output_name_strings_.push_back(string);
+    output_name_strings_.emplace_back(string);
   }
 }
 
@@ -156,10 +158,11 @@ void KV_Cache::Add() {
 
 void KV_Cache::Update(std::span<const int32_t> beam_indices, int current_length) {
   for (int i = 0; i < layer_count_ * 2; i++) {
-    if (beam_indices.empty())
+    if (beam_indices.empty()) {
       pasts_[i] = std::move(presents_[i]);
-    else
+    } else {
       PickPastState(beam_indices, i);
+    }
     state_.inputs_[input_index_ + i] = pasts_[i].get();
   }
 
@@ -193,7 +196,7 @@ void KV_Cache::PickPastState(std::span<const int32_t> beam_indices, int index) {
 #endif
   {
     for (size_t j = 0; j < beam_indices.size(); j++) {
-      int32_t beam_index = beam_indices[j];
+      int32_t const beam_index = beam_indices[j];
       auto present = present_span.subspan(beam_index * block_size_per_beam, block_size_per_beam);
       auto past = past_span.subspan(j * block_size_per_beam, block_size_per_beam);
       copy(present, past);
@@ -204,10 +207,11 @@ void KV_Cache::PickPastState(std::span<const int32_t> beam_indices, int index) {
 }
 
 void KV_Cache::PickPastState(std::span<const int32_t> beam_indices, int index) {
-  if (model_.config_->model.kv_type == Ort::TypeToTensorType<float>::type)
+  if (model_.config_->model.kv_type == Ort::TypeToTensorType<float>::type) {
     PickPastState<float>(beam_indices, index);
-  else
+  } else {
     PickPastState<Ort::Float16_t>(beam_indices, index);
+  }
 }
 
 Cross_Cache::Cross_Cache(Model& model, State& state)
@@ -223,14 +227,14 @@ Cross_Cache::Cross_Cache(Model& model, State& state)
 
     char string[64];
     snprintf(string, std::size(string), model.config_->model.cross_past_names_key.c_str(), i);
-    input_name_strings_.push_back(string);
+    input_name_strings_.emplace_back(string);
     snprintf(string, std::size(string), model.config_->model.cross_past_names_value.c_str(), i);
-    input_name_strings_.push_back(string);
+    input_name_strings_.emplace_back(string);
 
     snprintf(string, std::size(string), model.config_->model.cross_present_names_key.c_str(), i);
-    output_name_strings_.push_back(string);
+    output_name_strings_.emplace_back(string);
     snprintf(string, std::size(string), model.config_->model.cross_present_names_value.c_str(), i);
-    output_name_strings_.push_back(string);
+    output_name_strings_.emplace_back(string);
   }
 }
 

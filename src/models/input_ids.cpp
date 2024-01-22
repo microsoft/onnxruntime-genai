@@ -14,8 +14,9 @@ InputIDs<T>::InputIDs(Model& model, State& state)
   if constexpr (std::is_same_v<T, int64_t>) {
     value_ = OrtValue::CreateTensor<int64_t>(model.allocator_cpu_, shape_);
     auto* p_data = value_->GetTensorMutableData<T>();
-    for (auto v : state_.search_params_.input_ids)
+    for (auto v : state_.search_params_.input_ids) {
       *p_data++ = v;
+    }
   } else {
     static_assert(std::is_same_v<T, int32_t>);
     value_ = OrtValue::CreateTensor<T>(model.allocator_cpu_.GetInfo(), std::span<T>(const_cast<T*>(state_.search_params_.input_ids.data()), shape_[0] * shape_[1]), shape_);
@@ -53,8 +54,9 @@ void InputIDs<T>::Update(RoamingArray<int32_t> next_tokens_unk) {
 #endif
     {
       auto next_tokens = next_tokens_unk.GetCPU();
-      for (int i = 0; i < shape_[0]; i++)
+      for (int i = 0; i < shape_[0]; i++) {
         data[i] = next_tokens[i];
+      }
     }
   } else {
     static_assert(std::is_same_v<T, int32_t>);

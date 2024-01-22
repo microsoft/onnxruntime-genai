@@ -34,10 +34,10 @@ void State::ClearIO() {
   outputs_.clear();
 }
 
-Model::Model(std::unique_ptr<Config> config, OrtEnv& ort_env, const ProviderOptions* provider_options) : config_{std::move(config)} {
+Model::Model(std::unique_ptr<Config> config, OrtEnv& /*ort_env*/, const ProviderOptions* provider_options) : config_{std::move(config)} {
   session_options_ = OrtSessionOptions::Create();
 
-  if (provider_options) {
+  if (provider_options != nullptr) {
 #if USE_CUDA
     if (auto* options = std::get_if<OrtCUDAProviderOptions>(provider_options)) {
       cuda_stream_ = reinterpret_cast<cudaStream_t>(options->user_compute_stream);
@@ -50,7 +50,7 @@ Model::Model(std::unique_ptr<Config> config, OrtEnv& ort_env, const ProviderOpti
 
 Model::~Model() = default;
 
-void Model::InitDeviceAllocator(OrtSession& session) {
+void Model::InitDeviceAllocator(OrtSession& /*session*/) {
   allocator_device_ = &allocator_cpu_;
 #if USE_CUDA
   if (device_type_ == DeviceType::CUDA) {
@@ -72,8 +72,9 @@ std::vector<int32_t> Model::Generate(const SearchParams& params) {
       search->SampleTopP(config_->top_p, config_->temperature);
     } else if (config_->top_k > 1) {
       search->SampleTopK(config_->top_k, config_->temperature);
-    } else
+    } else {
       search->SelectTop();
+    }
   }
 
   auto results = search->GetSequence(0);
@@ -87,9 +88,10 @@ std::vector<int32_t> Model::Generate(const SearchParams& params) {
 std::unique_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const ProviderOptions* provider_options) {
   auto config = std::make_unique<Config>(config_path);
 
-  if (config->model.type == "gpt2")
+  if (config->model.type == "gpt2") {
     return std::make_unique<Gpt_Model>(std::move(config), ort_env, provider_options);
-  else if (config->model.type == "llama")
+  }
+  if (config->model.type == "llama")
     return std::make_unique<Llama_Model>(std::move(config), ort_env, provider_options);
   else if (config->model.type == "mistral")
     return std::make_unique<Mistral_Model>(std::move(config), ort_env, provider_options);
@@ -158,13 +160,14 @@ size_t GetOrtTypeSize(ONNXTensorElementDataType type) {
   }
 }
 
-std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams) {
+std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams) const {
   // Input shape (batch_size, sequence_length). The input is required with data type T.
   // Output shape (batch_size * num_beams, sequence_length)
 
   // If we're on CUDA, we still want to do the copy to move the data over to CUDA memory where we will read from it later
-  if (num_beams == 1 && device_type_ == DeviceType::CPU)
+  if (num_beams == 1 && device_type_ == DeviceType::CPU) {
     return std::move(input);
+  }
 
   auto input_type_info = input->GetTensorTypeAndShapeInfo();
   auto element_type = input_type_info->GetElementType();
@@ -177,9 +180,9 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
 
   auto expanded = OrtValue::CreateTensor(*allocator_device_, input_shape, element_type);
 
-  auto input_data = reinterpret_cast<const uint8_t*>(input->GetTensorRawData());
-  auto expanded_data = reinterpret_cast<uint8_t*>(expanded->GetTensorMutableRawData());
-  auto target = expanded_data;
+  const auto* input_data = reinterpret_cast<const uint8_t*>(input->GetTensorRawData());
+  auto* expanded_data = reinterpret_cast<uint8_t*>(expanded->GetTensorMutableRawData());
+  auto* target = expanded_data;
 
   switch (device_type_) {
     case DeviceType::CPU:
