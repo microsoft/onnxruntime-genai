@@ -1,6 +1,5 @@
 name: clang-format-lint
 on:
-  push: {main}
   pull_request: {}
 
 jobs:
