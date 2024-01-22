@@ -7,7 +7,6 @@ namespace Generators {
 Logits::Logits(Model& model, State& state)
     : model_{model},
       state_{state} {
-
   logits_shape_ = {state_.search_params_.batch_size * state_.search_params_.num_beams, state_.search_params_.sequence_length, state_.search_params_.vocab_size};
   logits_ = OrtValue::CreateTensor(*model.allocator_device_, logits_shape_, model_.config_->model.logits_type);
 }
@@ -30,7 +29,7 @@ RoamingArray<float> Logits::Get() {
 
 void Logits::Add() {
   output_index_ = state_.outputs_.size();
-  
+
   state_.output_names_.push_back("logits");
   state_.outputs_.push_back(logits_.get());
 }

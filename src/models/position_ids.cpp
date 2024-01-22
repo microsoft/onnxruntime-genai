@@ -84,11 +84,11 @@ void PositionIDs<T>::Update(int current_length) {
           data[i] = current_length - 1;
         break;
       }
-  #if USE_CUDA
+#if USE_CUDA
       case DeviceType::CUDA:
         cuda::LaunchGpt_UpdatePositionIds(position_ids_->GetTensorMutableData<T>(), static_cast<int>(position_ids_shape_[0]), current_length, model_.cuda_stream_);
         break;
-  #endif
+#endif
       default:
         throw std::runtime_error("PositionIDs::Update - Unsupported device type");
     }

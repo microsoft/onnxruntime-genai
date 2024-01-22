@@ -43,7 +43,7 @@ Whisper_State::Whisper_State(Whisper_Model& model, RoamingArray<int32_t> sequenc
 
   ClearIO();
 
-  decoder_input_ids_.name_ = "input_ids"; // Set back to default name, since we overrode it above in the encoder step
+  decoder_input_ids_.name_ = "input_ids";  // Set back to default name, since we overrode it above in the encoder step
   decoder_input_ids_.Add();
   logits_.Add();
   kv_cache_.Add();
