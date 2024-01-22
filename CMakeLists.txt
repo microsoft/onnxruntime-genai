@@ -44,6 +44,7 @@ endif()
 
 if("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_LESS 10)
   add_compile_definitions(USE_CXX17=1)
+  message("USE C++17")
   set(CMAKE_CXX_STANDARD 17)
 else()
   set(CMAKE_CXX_STANDARD 20)
