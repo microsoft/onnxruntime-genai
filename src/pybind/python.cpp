@@ -291,9 +291,11 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   m.def("print", &TestFP32, "Test float32");
   m.def("print", &TestFP16, "Test float16");
 
+#if USE_ORT_EXT
   pybind11::class_<Tokenizer>(m, "Tokenizer")
       .def("encode", &Tokenizer::Encode)
       .def("decode", [](const Tokenizer& t, pybind11::array_t<int32_t> tokens) { return t.Decode(ToSpan(tokens)); });
+#endif
 
   pybind11::class_<Model>(m, "Model")
       .def(pybind11::init([](const std::string& config_path, DeviceType device_type) {
@@ -302,7 +304,9 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
            }),
            "str"_a, "device_type"_a = DeviceType::Auto)
       .def("Generate", [](Model& model, PySearchParams& search_params) { search_params.Prepare(); return model.Generate(search_params); })
+#if USE_ORT_EXT
       .def("CreateTokenizer", [](Model& model) { return model.CreateTokenizer(); })
+#endif
       .def("CreateState", [](Model& model, PyRoamingArray<int32_t>& sequence_lengths, const PySearchParams& search_params) { return new PyState(model, sequence_lengths, search_params); })
       .def_property_readonly("DeviceType", [](const Model& s) { return s.device_type_; });
 

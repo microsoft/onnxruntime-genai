@@ -1,5 +1,7 @@
 #pragma once
+#if USE_ORT_EXT
 #include "tfmtok_c.h"
+#endif
 
 namespace Generators {
 
@@ -34,6 +36,7 @@ struct TfmPtr {
   T* p_{};
 };
 
+#if USE_ORT_EXT
 struct Tokenizer {
   Tokenizer(Config& config);
 
@@ -42,13 +45,16 @@ struct Tokenizer {
 
   TfmPtr<TfmTokenizer> tokenizer_;
 };
+#endif
 
 struct Model {
-  Model(std::unique_ptr<Config> config, OrtEnv& ort_env, const ProviderOptions* provider_options);
+  Model(std::unique_ptr<Config> config, const ProviderOptions* provider_options);
   virtual ~Model();
 
   std::vector<int32_t> Generate(const SearchParams& params);
+#if USE_ORT_EXT
   std::unique_ptr<Tokenizer> CreateTokenizer();
+#endif
 
   virtual std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths, const SearchParams& params) = 0;
 

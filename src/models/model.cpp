@@ -34,6 +34,7 @@ void State::ClearIO() {
   outputs_.clear();
 }
 
+#if USE_ORT_EXT
 void CheckResult(tfmError_t error) {
   if (error != kTfmOK)
     throw std::runtime_error(TfmGetLastErrorMessage());
@@ -63,9 +64,9 @@ std::string Tokenizer::Decode(std::span<int32_t> tokens) const {
   CheckResult(TfmStringArrayGetItem(tfm_string_array, 0, &string));
   return string;
 }
+#endif
 
-
-Model::Model(std::unique_ptr<Config> config, OrtEnv& /*ort_env*/, const ProviderOptions* provider_options) : config_{std::move(config)} {
+Model::Model(std::unique_ptr<Config> config, const ProviderOptions* provider_options) : config_{std::move(config)} {
   session_options_ = OrtSessionOptions::Create();
 
   if (provider_options != nullptr) {
@@ -116,9 +117,11 @@ std::vector<int32_t> Model::Generate(const SearchParams& params) {
   return v;
 }
 
+#if USE_ORT_EXT
 std::unique_ptr<Tokenizer> Model::CreateTokenizer() {
     return std::make_unique<Tokenizer>(*config_);
 }
+#endif
 
 std::unique_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const ProviderOptions* provider_options) {
   auto config = std::make_unique<Config>(config_path);

@@ -20,6 +20,7 @@ if (CMAKE_CUDA_COMPILER)
     set (CUDA_FOUND TRUE)
 endif()
 set(USE_CUDA 1)
+set(USE_ORT_EXT 1) # Use the onnxruntime extensions library to support built in tokenizing
 
 if("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_LESS 9)
   message(FATAL_ERROR  "GCC version must be greater than or equal to 9")
@@ -116,12 +117,12 @@ endif()
 add_executable (Tests ${test_srcs})
 target_include_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
 target_link_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
-target_link_libraries(Tests PRIVATE onnxruntime-genai ${ONNXRUNTIME_LIB} ${ONNXRUNTIME_EXTENSIONS_LIB})
+target_link_libraries(Tests PRIVATE onnxruntime-genai ${ONNXRUNTIME_LIB})
 #
 pybind11_add_module(pybind ${pybind_srcs})
 target_include_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
 target_link_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
-target_link_libraries(pybind PRIVATE onnxruntime-genai ${ONNXRUNTIME_LIB} ${ONNXRUNTIME_EXTENSIONS_LIB})
+target_link_libraries(pybind PRIVATE onnxruntime-genai ${ONNXRUNTIME_LIB})
 set_target_properties(pybind PROPERTIES OUTPUT_NAME "onnxruntime_genai")
 
 # Visual C++ - /MP Multiple process build, /WX Warnings as errors
@@ -144,16 +145,27 @@ foreach(DLL_FILE ${onnxruntime_libs})
     )
 endforeach()
 
-# Copy the onnxruntime-extensions binaries into the build folder so it's found on launch
-file(GLOB onnxruntime_extensions_libs "${CMAKE_SOURCE_DIR}/ort/${ONNXRUNTIME_EXTENSIONS_FILES}")
-foreach(DLL_FILE ${onnxruntime_extensions_libs})
-    add_custom_command(
-        TARGET Generators POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy
-                ${DLL_FILE}
-                ${CMAKE_BINARY_DIR}/$<CONFIG>/${DLL_FILE_NAME}
-    )
-endforeach()
+if(USE_ORT_EXT)
+    add_compile_definitions(USE_ORT_EXT=1)
+    target_include_directories(onnxruntime-genai PRIVATE ${CMAKE_SOURCE_DIR}/ort-ext/include)
+    target_include_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort-ext/include)
+    target_include_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort-ext/include)
+    target_link_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort-ext/lib)
+    target_link_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort-ext/lib)
+    target_link_libraries(Tests PRIVATE ${ONNXRUNTIME_EXTENSIONS_LIB})
+    target_link_libraries(pybind PRIVATE ${ONNXRUNTIME_EXTENSIONS_LIB})
+
+    # Copy the onnxruntime-extensions binaries into the build folder so it's found on launch
+    file(GLOB onnxruntime_extensions_libs "${CMAKE_SOURCE_DIR}/ort-ext/${ONNXRUNTIME_EXTENSIONS_FILES}")
+    foreach(DLL_FILE ${onnxruntime_extensions_libs})
+        add_custom_command(
+            TARGET Generators POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy
+                    ${DLL_FILE}
+                    ${CMAKE_BINARY_DIR}/$<CONFIG>/${DLL_FILE_NAME}
+        )
+    endforeach()
+ endif()
 
 # Have visual studio put all files into one single folder vs the default split of header files into a separate folder
 source_group(TREE ${GENERATORS_ROOT} FILES ${generator_srcs})

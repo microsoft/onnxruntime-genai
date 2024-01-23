@@ -1,10 +1,6 @@
 #include "../generators.h"
 #include "../search.h"
 #include "../models/model.h"
-#include "../models/gpt.h"
-#if USE_CUDA
-#include "../search_cuda.h"
-#endif
 #include <iostream>
 
 // Our working directory is generators/build so one up puts us in the root directory:
@@ -185,7 +181,7 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
       0, 0, 0, 0, 0, 52, 195, 731, 321, 301, 734, 620, 131, 131, 131, 181, 638, 638, 638, 638,
       41, 554, 74, 622, 206, 222, 75, 223, 221, 198, 224, 572, 292, 292, 292, 292, 292, 292, 292, 292,
       0, 0, 0, 52, 328, 219, 328, 206, 288, 227, 896, 328, 328, 669, 669, 669, 669, 669, 669, 669};
-
+;
   auto provider_options = Generators::GetDefaultProviderOptions(Generators::DeviceType::CUDA);
 
   // The ONNX model is generated like the following:
@@ -241,6 +237,7 @@ void Test_BeamSearch_Gpt_Cuda() {
 
 void Test_Phi2_Cuda() {
   std::cout << "Testing_Phi2\r\n";
+#if USE_ORT_EXT
 
   auto prompt = R"(
 def print_prime(n):
@@ -267,6 +264,9 @@ Print all primes between 1 and n
 
   std::cout << tokenizer->Decode(result) << "\r\n";
   std::cout << "Test complete\r\n";
+#else
+  std::cout << "Test skipped - not built with onnxruntime extensions\r\n";
+#endif
 }
 
 #endif
