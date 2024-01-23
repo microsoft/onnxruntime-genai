@@ -236,6 +236,7 @@ void Test_BeamSearch_Gpt_Cuda() {
 }
 
 void Test_Phi2_Cuda() {
+#if TEST_PHI2
   std::cout << "Testing_Phi2\r\n";
 #if USE_ORT_EXT
 
@@ -266,6 +267,7 @@ Print all primes between 1 and n
   std::cout << "Test complete\r\n";
 #else
   std::cout << "Test skipped - not built with onnxruntime extensions\r\n";
+#endif
 #endif
 }
 
