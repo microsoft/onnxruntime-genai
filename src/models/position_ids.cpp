@@ -17,7 +17,7 @@ PositionIDs<T>::PositionIDs(Model& model, State& state, RoamingArray<int32_t>& s
     : model_{model},
       state_{state},
       use_position_ids_{use_position_ids} {
-  cpu_span<int32_t> sequence_lengths = sequence_lengths_unk;
+  cpu_span<int32_t> const sequence_lengths = sequence_lengths_unk;
   std::array<int64_t, 2> shape{state_.search_params_.batch_size, state_.search_params_.sequence_length};  // Only batch_size initially, as we haven't expanded over the beams yet
   position_ids_ = OrtValue::CreateTensor<T>(model.allocator_cpu_, shape);
   attention_mask_ = OrtValue::CreateTensor<T>(model.allocator_cpu_, shape);
@@ -80,8 +80,9 @@ void PositionIDs<T>::Update(int current_length) {
       case DeviceType::CPU: {
         // Update position IDs
         auto* data = position_ids_->GetTensorMutableData<T>();
-        for (int i = 0; i < position_ids_shape_[0]; i++)
+        for (int i = 0; i < position_ids_shape_[0]; i++) {
           data[i] = current_length - 1;
+        }
         break;
       }
 #if USE_CUDA
@@ -121,7 +122,7 @@ void PositionIDs<T>::Update(int current_length) {
         throw std::runtime_error("PositionIDs::Update - Unsupported device type");
     }
     attention_mask_ = std::move(attention_mask);
-    state_.inputs_[input_index_ + use_position_ids_] = attention_mask_.get();
+    state_.inputs_[input_index_ + static_cast<size_t>(use_position_ids_)] = attention_mask_.get();
   }
 }
 

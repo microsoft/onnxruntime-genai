@@ -17,7 +17,7 @@ struct InputIDs {
   State& state_;
   size_t input_index_{~0U};
 
-  std::array<int64_t, 2> shape_;
+  std::array<int64_t, 2> shape_{};
   std::unique_ptr<OrtValue> value_;
 };
 
