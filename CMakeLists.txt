@@ -20,7 +20,7 @@ if (CMAKE_CUDA_COMPILER)
     set (CUDA_FOUND TRUE)
 endif()
 set(USE_CUDA 1)
-set(USE_ORT_EXT 1) # Use the onnxruntime extensions library to support built in tokenizing
+set(USE_ORT_EXT 0) # Use the onnxruntime extensions library to support built in tokenizing
 
 if("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_LESS 9)
   message(FATAL_ERROR  "GCC version must be greater than or equal to 9")
