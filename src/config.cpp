@@ -100,7 +100,7 @@ struct Root_Element : JSON::Element {
     } else if (name == "length_penalty") {
       config_.length_penalty = static_cast<float>(value);
 
-    // Tokenizer Parameters
+      // Tokenizer Parameters
     } else if (name == "pad_token_id") {
       config_.pad_token_id = static_cast<int>(value);
     } else if (name == "eos_token_id") {
