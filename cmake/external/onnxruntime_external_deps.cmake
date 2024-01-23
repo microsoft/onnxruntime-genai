@@ -2,7 +2,7 @@ message("Loading Dependencies URLs ...")
 
 include(cmake/external/helper_functions.cmake)
 
-file(STRINGS deps.txt ONNXRUNTIME_DEPS_LIST)
+file(STRINGS cmake/deps.txt ONNXRUNTIME_DEPS_LIST)
 foreach(ONNXRUNTIME_DEP IN LISTS ONNXRUNTIME_DEPS_LIST)
   # Lines start with "#" are comments
   if(NOT ONNXRUNTIME_DEP MATCHES "^#")
