@@ -34,6 +34,37 @@ void State::ClearIO() {
   outputs_.clear();
 }
 
+void CheckResult(tfmError_t error) {
+  if (error != kTfmOK)
+    throw std::runtime_error(TfmGetLastErrorMessage());
+}
+
+Tokenizer::Tokenizer(Config& config) {
+  CheckResult(TfmCreateTokenizer(tokenizer_.Address(), reinterpret_cast<const char*>(config.config_path.u8string().c_str())));
+}
+
+std::vector<int32_t> Tokenizer::Encode(const char* text) const {
+
+  TfmPtr<TfmTokenId2DArray> ids;
+  CheckResult(TfmTokenize(tokenizer_, &text, 1, ids.Address()));
+
+  const tfmTokenId_t* tokens;
+  size_t count;
+  CheckResult(TfmTokenId2DArrayGetItem(ids, 0, &tokens, &count));
+  return {tokens, tokens+count};
+}
+
+std::string Tokenizer::Decode(std::span<int32_t> tokens) const {
+
+  TfmPtr<TfmStringArray> tfm_string_array;
+  CheckResult(TfmDetokenize1D(tokenizer_, reinterpret_cast<const uint32_t*>(tokens.data()), tokens.size(), tfm_string_array.Address()));
+
+  const char *string;
+  CheckResult(TfmStringArrayGetItem(tfm_string_array, 0, &string));
+  return string;
+}
+
+
 Model::Model(std::unique_ptr<Config> config, OrtEnv& ort_env, const ProviderOptions* provider_options) : config_{std::move(config)} {
   session_options_ = OrtSessionOptions::Create();
 
@@ -82,6 +113,10 @@ std::vector<int32_t> Model::Generate(const SearchParams& params) {
   std::vector<int32_t> v;
   v.assign(results_cpu.begin(), results_cpu.end());
   return v;
+}
+
+std::unique_ptr<Tokenizer> Model::CreateTokenizer() {
+    return std::make_unique<Tokenizer>(*config_);
 }
 
 std::unique_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const ProviderOptions* provider_options) {

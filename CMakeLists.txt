@@ -97,23 +97,26 @@ target_include_directories(Generators PRIVATE ${CMAKE_SOURCE_DIR}/ort)
 if(WIN32)
   set(ONNXRUNTIME_LIB "onnxruntime.lib")
   set(ONNXRUNTIME_FILES "onnxruntime*.dll")
+  set(ONNXRUNTIME_EXTENSIONS_LIB "tfmtok_c.lib")
+  set(ONNXRUNTIME_EXTENSIONS_FILES "tfmtok_c.dll")
 elseif(APPLE)
   set(ONNXRUNTIME_LIB "libonnxruntime.dylib")
   # TODO: Figure ONNXRUNTIME_FILES for MacOS
 else()
   set(ONNXRUNTIME_LIB "libonnxruntime.so")
   set(ONNXRUNTIME_FILES "libonnxruntime*.so*")
+  set(ONNXRUNTIME_EXTENSIONS_LIB "tfmtok_c.so")
 endif()
 
 add_executable (Tests ${test_srcs})
 target_include_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort)
 target_link_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort)
-target_link_libraries(Tests PRIVATE Generators ${ONNXRUNTIME_LIB})
+target_link_libraries(Tests PRIVATE Generators ${ONNXRUNTIME_LIB} ${ONNXRUNTIME_EXTENSIONS_LIB})
 
 pybind11_add_module(pybind ${pybind_srcs})
 target_include_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort)
 target_link_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort)
-target_link_libraries(pybind PRIVATE Generators ${ONNXRUNTIME_LIB})
+target_link_libraries(pybind PRIVATE Generators ${ONNXRUNTIME_LIB} ${ONNXRUNTIME_EXTENSIONS_LIB})
 set_target_properties(pybind PROPERTIES OUTPUT_NAME "onnxruntime_genai")
 
 # Visual C++ - /MP Multiple process build, /WX Warnings as errors
@@ -125,9 +128,20 @@ if(MSVC)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /MP /w15038 /wd4100 /W4 /WX")
 endif()
 
- # Copy the onnxruntime binaries into the build folder so it's found on launch
+# Copy the onnxruntime binaries into the build folder so it's found on launch
 file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/${ONNXRUNTIME_FILES}")
 foreach(DLL_FILE ${onnxruntime_libs})
+    add_custom_command(
+        TARGET Generators POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy
+                ${DLL_FILE}
+                ${CMAKE_BINARY_DIR}/$<CONFIG>/${DLL_FILE_NAME}
+    )
+endforeach()
+
+# Copy the onnxruntime-extensions binaries into the build folder so it's found on launch
+file(GLOB onnxruntime_extensions_libs "${CMAKE_SOURCE_DIR}/ort/${ONNXRUNTIME_EXTENSIONS_FILES}")
+foreach(DLL_FILE ${onnxruntime_extensions_libs})
     add_custom_command(
         TARGET Generators POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy

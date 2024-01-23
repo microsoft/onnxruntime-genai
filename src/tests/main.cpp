@@ -10,6 +10,7 @@ void Test_GreedySearch_Gpt_Fp32();
 void Test_BeamSearch_Gpt_Fp32();
 
 #if USE_CUDA
+void Test_Phi2_Cuda();
 void Test_GreedySearch_Gpt_Cuda();
 void Test_BeamSearch_Gpt_Cuda();
 #endif
@@ -28,6 +29,7 @@ int main()
     Test_BeamSearch_Gpt_Fp32();
 
 #if USE_CUDA
+    Test_Phi2_Cuda();
     Test_GreedySearch_Gpt_Cuda();
     Test_BeamSearch_Gpt_Cuda();
 #endif

@@ -101,17 +101,17 @@ std::string ToString(const Gpt_Model& v) {
 std::unique_ptr<OrtEnv> g_ort_env;
 
 OrtEnv& GetOrtEnv() {
-  if (!g_ort_env)
+  if (!g_ort_env) {
     g_ort_env = OrtEnv::Create();
+  }
   return *g_ort_env;
 }
 
 // A roaming array is one that can be in CPU or GPU memory, and will copy the memory as needed to be used from anywhere
 template <typename T>
 struct PyRoamingArray : RoamingArray<T> {
-
   pybind11::array_t<T> GetNumpy() {
-    auto v=this->GetCPU();
+    auto v = this->GetCPU();
     py_cpu_array_ = pybind11::array_t<T>({v.size()}, {sizeof(T)}, v.data(), pybind11::capsule(v.data(), [](void*) {}));
     return py_cpu_array_;
   }
@@ -123,20 +123,29 @@ template <typename T>
 void Declare_DeviceArray(pybind11::module& m, const char* name) {
   using Type = PyRoamingArray<T>;
   pybind11::class_<Type>(m, name)
-      .def("GetArray", [](Type& t) -> pybind11::array_t<T> { return t.GetNumpy(); }, pybind11::return_value_policy::reference_internal);
+      .def(
+          "GetArray", [](Type& t) -> pybind11::array_t<T> { return t.GetNumpy(); }, pybind11::return_value_policy::reference_internal);
 }
 
 struct PySearchParams : SearchParams {
   // Turn the python py_input_ids_ into the low level parameters
   void Prepare() {
     // TODO: This will switch to using the variant vs being ifs
-    if (py_input_ids_.size()!=0) {
-      batch_size = static_cast<int>(py_input_ids_.shape(0));
-      sequence_length = static_cast<int>(py_input_ids_.shape(1));
+    if (py_input_ids_.size() != 0) {
+      if (py_input_ids_.ndim() == 1) {  // Just a 1D array
+        batch_size = 1;
+        sequence_length = static_cast<int>(py_input_ids_.shape(0));
+      } else {
+        if (py_input_ids_.ndim() != 2)
+          throw std::runtime_error("Input IDs can only be 1 or 2 dimensional");
+
+        batch_size = static_cast<int>(py_input_ids_.shape(0));
+        sequence_length = static_cast<int>(py_input_ids_.shape(1));
+      }
       input_ids = ToSpan(py_input_ids_);
     }
 
-    if (py_whisper_input_features_.size()!=0) {
+    if (py_whisper_input_features_.size() != 0) {
       SearchParams::Whisper& whisper = inputs.emplace<SearchParams::Whisper>();
       std::span<const int64_t> shape(py_whisper_input_features_.shape(), py_whisper_input_features_.ndim());
       whisper.input_features = OrtValue::CreateTensor<float>(Ort::Allocator::GetWithDefaultOptions().GetInfo(), ToSpan(py_whisper_input_features_), shape);
@@ -155,7 +164,7 @@ struct PySearchParams : SearchParams {
 struct PySearch {
   PySearch(PySearchParams& params) {
     params.Prepare();
-    search_=params.CreateSearch();
+    search_ = params.CreateSearch();
   }
 
   void SetLogits(PyRoamingArray<float>& inputs) {
@@ -276,11 +285,15 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("SampleTopP", &PySearch::SampleTopP)
       .def("GetSequence", &PySearch::GetSequence, pybind11::return_value_policy::reference_internal);
 
-  // If we support models, we need to init the OrtApi
+  // We need to init the OrtApi before we can use it
   Ort::InitApi();
 
   m.def("print", &TestFP32, "Test float32");
   m.def("print", &TestFP16, "Test float16");
+
+  pybind11::class_<Tokenizer>(m, "Tokenizer")
+      .def("encode", &Tokenizer::Encode)
+      .def("decode", [](const Tokenizer& t, pybind11::array_t<int32_t> tokens) { return t.Decode(ToSpan(tokens)); });
 
   pybind11::class_<Model>(m, "Model")
       .def(pybind11::init([](const std::string& config_path, DeviceType device_type) {
@@ -289,6 +302,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
            }),
            "str"_a, "device_type"_a = DeviceType::Auto)
       .def("Generate", [](Model& model, PySearchParams& search_params) { search_params.Prepare(); return model.Generate(search_params); })
+      .def("CreateTokenizer", [](Model& model) { return model.CreateTokenizer(); })
       .def("CreateState", [](Model& model, PyRoamingArray<int32_t>& sequence_lengths, const PySearchParams& search_params) { return new PyState(model, sequence_lengths, search_params); })
       .def_property_readonly("DeviceType", [](const Model& s) { return s.device_type_; });
 
