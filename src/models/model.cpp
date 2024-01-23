@@ -45,22 +45,20 @@ Tokenizer::Tokenizer(Config& config) {
 }
 
 std::vector<int32_t> Tokenizer::Encode(const char* text) const {
-
   TfmPtr<TfmTokenId2DArray> ids;
   CheckResult(TfmTokenize(tokenizer_, &text, 1, ids.Address()));
 
   const tfmTokenId_t* tokens;
   size_t count;
   CheckResult(TfmTokenId2DArrayGetItem(ids, 0, &tokens, &count));
-  return {tokens, tokens+count};
+  return {tokens, tokens + count};
 }
 
 std::string Tokenizer::Decode(std::span<int32_t> tokens) const {
-
   TfmPtr<TfmStringArray> tfm_string_array;
   CheckResult(TfmDetokenize1D(tokenizer_, reinterpret_cast<const uint32_t*>(tokens.data()), tokens.size(), tfm_string_array.Address()));
 
-  const char *string;
+  const char* string;
   CheckResult(TfmStringArrayGetItem(tfm_string_array, 0, &string));
   return string;
 }
@@ -119,7 +117,7 @@ std::vector<int32_t> Model::Generate(const SearchParams& params) {
 
 #if USE_ORT_EXT
 std::unique_ptr<Tokenizer> Model::CreateTokenizer() {
-    return std::make_unique<Tokenizer>(*config_);
+  return std::make_unique<Tokenizer>(*config_);
 }
 #endif
 
