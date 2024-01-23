@@ -3,7 +3,7 @@
 
 cmake_minimum_required (VERSION 3.26)
 include(FetchContent)
-include(external/onnxruntime_external_deps.cmake)
+include(cmake/external/onnxruntime_external_deps.cmake)
 
 # Enable Hot Reload for MSVC compilers if supported.
 if(POLICY CMP0141)
