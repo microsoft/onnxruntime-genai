@@ -38,7 +38,7 @@ jobs:
             --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
             --container-registry onnxruntimebuildcache \
             --repository onnxruntimecpubuild
-          docker run --rm --volume $GITHUB_WORKSPACE:/onnxruntime_src --volume $RUNNER_TEMP:/build /bin/bash -w /build bash -c "cmake -G Ninja /onnxruntime_src -DBUILD_SHARED_LIBS=ON -DCMAKE_BUILD_TYPE=Release && ninja"
+          docker run --rm --volume $GITHUB_WORKSPACE:/onnxruntime_src --volume $RUNNER_TEMP:/build -w /build bash -c "cmake -G Ninja /onnxruntime_src -DBUILD_SHARED_LIBS=ON -DCMAKE_BUILD_TYPE=Release && ninja"
 
           
 
