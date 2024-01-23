@@ -7,7 +7,7 @@ from transformers import AutoConfig
 def check_ort_import():
     try:
         import onnxruntime as ort
-    except:
+    except Exception as ex:
         return False
 
     return True
