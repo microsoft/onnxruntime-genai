@@ -1,8 +1,9 @@
+
+#if 0
 #include "generators.h"
 #include <algorithm>
 #include <random>
 
-#if 0
 int top_k_sampling(std::span<float> scores, float temperature, int k) {
   std::vector<std::pair<float, int>> top_k;
   std::default_random_engine generator;

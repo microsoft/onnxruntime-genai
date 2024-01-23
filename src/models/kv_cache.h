@@ -3,7 +3,6 @@
 namespace Generators {
 
 struct KV_Cache_Combined {
-
   KV_Cache_Combined(Model& model, State& state);
 
   void Add();  // Add to state inputs/outputs
@@ -13,8 +12,7 @@ struct KV_Cache_Combined {
   void PickPastState(std::span<const int32_t> beam_indices, int index);
   void PickPastState(std::span<const int32_t> beam_indices, int index);
 
-private:
-
+ private:
   Model& model_;
   State& state_;
   int layer_count_;
@@ -30,14 +28,14 @@ private:
 struct KV_Cache {
   KV_Cache(Model& model, State& state);
 
-  void AddEncoder(); // If model has an initial encoder step, this is used
+  void AddEncoder();  // If model has an initial encoder step, this is used
   void Add();
   void Update(std::span<const int32_t> beam_indices, int current_length);
   template <typename ScoreType>
   void PickPastState(std::span<const int32_t> beam_indices, int index);
   void PickPastState(std::span<const int32_t> beam_indices, int index);
 
-private:
+ private:
   Model& model_;
   State& state_;
   int layer_count_;
@@ -67,4 +65,4 @@ struct Cross_Cache {
   std::vector<std::unique_ptr<OrtValue>> values_;
   std::vector<std::string> input_name_strings_, output_name_strings_;
 };
-} // namespace Generators
+}  // namespace Generators

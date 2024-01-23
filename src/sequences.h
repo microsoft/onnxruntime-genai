@@ -3,7 +3,6 @@ namespace Generators {
 
 // This class keeps track of sequences generated.
 struct Sequences {
- 
   Sequences(std::span<const int32_t> input_sequence, int batch_size, int beam_size, int max_length);
 
   // Returns a sequence of word IDs for a given beam index ( beam_index < batch_beam_size).
@@ -21,7 +20,6 @@ struct Sequences {
   void AppendNextTokenToSequences(std::span<const int32_t> next_tokens);
 
  private:
-
   std::unique_ptr<int32_t[]> sequences_buffer_;
 
   // Two buffers of shape (batch_size, num_beams, max_seq_length) to store sequences.
@@ -35,4 +33,4 @@ struct Sequences {
   int current_length_;
 };
 
-}
+}  // namespace Generators

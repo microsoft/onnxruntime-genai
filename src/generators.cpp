@@ -50,8 +50,7 @@ SearchParams::SearchParams(const Model& model)
       early_stopping{model.config_->early_stopping},
       num_beams{model.config_->num_beams},
       device_type{model.device_type_},
-      cuda_stream{model.cuda_stream_}
-{
+      cuda_stream{model.cuda_stream_} {
 }
 
 ProviderOptions GetDefaultProviderOptions(DeviceType device_type) {
