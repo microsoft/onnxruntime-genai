@@ -50,7 +50,7 @@ Model::Model(std::unique_ptr<Config> config, OrtEnv& /*ort_env*/, const Provider
 
 Model::~Model() = default;
 
-void Model::InitDeviceAllocator(OrtSession& /*session*/) {
+void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
   allocator_device_ = &allocator_cpu_;
 #if USE_CUDA
   if (device_type_ == DeviceType::CUDA) {
