@@ -23,13 +23,11 @@ inline Exception::Exception(const Exception& e) : ort_status_{api->CreateStatus(
 inline OrtErrorCode Exception::GetOrtErrorCode() const { return ort_status_->GetErrorCode(); }
 inline const char* Exception::what() const noexcept { return api->GetErrorMessage(ort_status_.get()); }
 
-struct StandardAllocator : OrtAllocator
-{
-  StandardAllocator() : OrtAllocator{}
-  {
+struct StandardAllocator : OrtAllocator {
+  StandardAllocator() : OrtAllocator{} {
     version = ORT_API_VERSION;
     OrtAllocator::Alloc = [](OrtAllocator* this_, size_t size) -> void* { return new std::byte[size]; };
-    OrtAllocator::Free = [](OrtAllocator* this_, void *p) { delete reinterpret_cast<std::byte*>(p); };
+    OrtAllocator::Free = [](OrtAllocator* this_, void* p) { delete reinterpret_cast<std::byte*>(p); };
   }
 };
 
@@ -37,29 +35,25 @@ inline StandardAllocator standard_allocator;
 
 // Used on methods that return a std::string. This implements an OrtAllocator that Allocates memory directly
 // from a std::string.
-struct StringAllocator : OrtAllocator
-{
-  StringAllocator() : OrtAllocator{}
-  {
+struct StringAllocator : OrtAllocator {
+  StringAllocator() : OrtAllocator{} {
     version = ORT_API_VERSION;
     OrtAllocator::Alloc = [](OrtAllocator* this_, size_t size) { return static_cast<StringAllocator*>(this_)->Alloc(size); };
   }
 
-  void* Alloc(size_t size)
-  {
+  void* Alloc(size_t size) {
     string_.resize(size);
     return string_.data();
   }
 
-  operator std::string && ()
-  {
-    string_.resize(string_.size() - 1); // Remove the trailing null
+  operator std::string&&() {
+    string_.resize(string_.size() - 1);  // Remove the trailing null
     return std::move(string_);
   }
 
   char* out;
 
-private:
+ private:
   std::string string_;
 };
 
@@ -67,31 +61,57 @@ private:
 template <typename T>
 struct TypeToTensorType;
 template <>
-struct TypeToTensorType<float> { static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT; };
+struct TypeToTensorType<float> {
+  static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
+};
 template <>
-struct TypeToTensorType<Float16_t> { static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16; };
+struct TypeToTensorType<Float16_t> {
+  static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
+};
 template <>
-struct TypeToTensorType<BFloat16_t> { static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16; };
+struct TypeToTensorType<BFloat16_t> {
+  static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16;
+};
 template <>
-struct TypeToTensorType<double> { static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE; };
+struct TypeToTensorType<double> {
+  static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE;
+};
 template <>
-struct TypeToTensorType<int8_t> { static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8; };
+struct TypeToTensorType<int8_t> {
+  static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8;
+};
 template <>
-struct TypeToTensorType<int16_t> { static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16; };
+struct TypeToTensorType<int16_t> {
+  static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16;
+};
 template <>
-struct TypeToTensorType<int32_t> { static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32; };
+struct TypeToTensorType<int32_t> {
+  static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32;
+};
 template <>
-struct TypeToTensorType<int64_t> { static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64; };
+struct TypeToTensorType<int64_t> {
+  static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;
+};
 template <>
-struct TypeToTensorType<uint8_t> { static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8; };
+struct TypeToTensorType<uint8_t> {
+  static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8;
+};
 template <>
-struct TypeToTensorType<uint16_t> { static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16; };
+struct TypeToTensorType<uint16_t> {
+  static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16;
+};
 template <>
-struct TypeToTensorType<uint32_t> { static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32; };
+struct TypeToTensorType<uint32_t> {
+  static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32;
+};
 template <>
-struct TypeToTensorType<uint64_t> { static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64; };
+struct TypeToTensorType<uint64_t> {
+  static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64;
+};
 template <>
-struct TypeToTensorType<bool> { static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL; };
+struct TypeToTensorType<bool> {
+  static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL;
+};
 
 inline std::vector<std::string> GetAvailableProviders() {
   int len;
@@ -130,7 +150,7 @@ inline std::unique_ptr<Allocator> Allocator::Create(const OrtSession& sess, cons
   return std::unique_ptr<Allocator>{static_cast<Ort::Allocator*>(p)};
 }
 
-} // namespace Ort
+}  // namespace Ort
 
 inline std::unique_ptr<OrtStatus> OrtStatus::Create(OrtErrorCode code, const std::string& what) {
   return std::unique_ptr<OrtStatus>{Ort::api->CreateStatus(code, what.c_str())};
@@ -188,13 +208,13 @@ inline std::unique_ptr<OrtMemoryInfo> OrtMemoryInfo::CreateCpu(OrtAllocatorType 
 }
 
 inline std::unique_ptr<OrtMemoryInfo> OrtMemoryInfo::Create(const char* name, OrtAllocatorType type, int id, OrtMemType mem_type) {
-  OrtMemoryInfo *p;
+  OrtMemoryInfo* p;
   Ort::ThrowOnError(Ort::api->CreateMemoryInfo(name, type, id, mem_type, &p));
   return std::unique_ptr<OrtMemoryInfo>{p};
 }
 
 inline std::unique_ptr<OrtIoBinding> OrtIoBinding::Create(OrtSession& session) {
-  OrtIoBinding *p;
+  OrtIoBinding* p;
   Ort::ThrowOnError(Ort::api->CreateIoBinding(&session, &p));
   return std::unique_ptr<OrtIoBinding>{p};
 }
@@ -205,8 +225,8 @@ inline std::vector<std::string> OrtIoBinding::GetOutputNames() const {
   size_t count{};
   Ort::ThrowOnError(Ort::api->GetBoundOutputNames(this, &Ort::standard_allocator, &buffer, &lengths, &count));
 
-  std::unique_ptr<size_t> lengths_owned{ lengths };
-  std::unique_ptr<char> buffer_owned{ buffer };
+  std::unique_ptr<size_t> lengths_owned{lengths};
+  std::unique_ptr<char> buffer_owned{buffer};
 
   std::vector<std::string> result;
   for (size_t i = 0; i < count; ++i) {
@@ -223,7 +243,7 @@ inline std::vector<std::unique_ptr<OrtValue>> OrtIoBinding::GetOutputValues() co
   size_t output_count = 0;
   OrtValue** output_buffer{};
   Ort::ThrowOnError(Ort::api->GetBoundOutputValues(this, &Ort::standard_allocator, &output_buffer, &output_count));
-  std::unique_ptr<OrtValue*> owned_output_buffer{ output_buffer };
+  std::unique_ptr<OrtValue*> owned_output_buffer{output_buffer};
 
   try {
     std::vector<std::unique_ptr<OrtValue>> result;
@@ -232,14 +252,13 @@ inline std::vector<std::unique_ptr<OrtValue>> OrtIoBinding::GetOutputValues() co
       ++owned;
     }
     return result;
-  }
-  catch (...) { // delete any untransferred OrtValues
+  } catch (...) {  // delete any untransferred OrtValues
     while (owned < output_count)
       delete output_buffer[owned++];
     throw;
   }
 }
-  
+
 inline void OrtIoBinding::BindInput(const char* name, const OrtValue& value) {
   Ort::ThrowOnError(Ort::api->BindInput(this, name, &value));
 }
@@ -269,45 +288,43 @@ inline void OrtIoBinding::SynchronizeOutputs() {
 }
 
 inline std::unique_ptr<OrtArenaCfg> OrtArenaCfg::Create(size_t max_mem, int arena_extend_strategy, int initial_chunk_size_bytes, int max_dead_bytes_per_chunk) {
-  OrtArenaCfg *p;
+  OrtArenaCfg* p;
   Ort::ThrowOnError(Ort::api->CreateArenaCfg(max_mem, arena_extend_strategy, initial_chunk_size_bytes, max_dead_bytes_per_chunk, &p));
   return std::unique_ptr<OrtArenaCfg>{p};
 }
 
-inline void OrtCommonEnvInit(OrtEnv& v, _In_ const char* logid)
-{
+inline void OrtCommonEnvInit(OrtEnv& v, _In_ const char* logid) {
   if (strcmp(logid, "onnxruntime-node") == 0) {
     Ort::ThrowOnError(Ort::api->SetLanguageProjection(&v, OrtLanguageProjection::ORT_PROJECTION_NODEJS));
-  }
-  else {
+  } else {
     Ort::ThrowOnError(Ort::api->SetLanguageProjection(&v, OrtLanguageProjection::ORT_PROJECTION_CPLUSPLUS));
   }
 }
 
 inline std::unique_ptr<OrtEnv> OrtEnv::Create(OrtLoggingLevel logging_level, _In_ const char* logid) {
-  OrtEnv *p;
+  OrtEnv* p;
   Ort::ThrowOnError(Ort::api->CreateEnv(logging_level, logid, &p));
   OrtCommonEnvInit(*p, logid);
   return std::unique_ptr<OrtEnv>(p);
 }
 
 inline std::unique_ptr<OrtEnv> OrtEnv::Create(OrtLoggingLevel logging_level, const char* logid, OrtLoggingFunction logging_function, void* logger_param) {
-  OrtEnv *p;
+  OrtEnv* p;
   Ort::ThrowOnError(Ort::api->CreateEnvWithCustomLogger(logging_function, logger_param, logging_level, logid, &p));
   OrtCommonEnvInit(*p, logid);
   return std::unique_ptr<OrtEnv>(p);
 }
 
 inline std::unique_ptr<OrtEnv> OrtEnv::Create(const OrtThreadingOptions* tp_options, OrtLoggingLevel logging_level, _In_ const char* logid) {
-  OrtEnv *p;
+  OrtEnv* p;
   Ort::ThrowOnError(Ort::api->CreateEnvWithGlobalThreadPools(logging_level, logid, tp_options, &p));
   OrtCommonEnvInit(*p, logid);
   return std::unique_ptr<OrtEnv>(p);
 }
 
 inline std::unique_ptr<OrtEnv> OrtEnv::Create(const OrtThreadingOptions* tp_options, OrtLoggingFunction logging_function, void* logger_param,
-                OrtLoggingLevel logging_level, _In_ const char* logid) {
-  OrtEnv *p;
+                                              OrtLoggingLevel logging_level, _In_ const char* logid) {
+  OrtEnv* p;
   Ort::ThrowOnError(Ort::api->CreateEnvWithCustomLoggerAndGlobalThreadPools(logging_function, logger_param, logging_level, logid, tp_options, &p));
   OrtCommonEnvInit(*p, logid);
   return std::unique_ptr<OrtEnv>(p);
@@ -363,7 +380,7 @@ inline void OrtThreadingOptions::SetGlobalCustomJoinThreadFn(OrtCustomJoinThread
 }
 
 inline std::unique_ptr<OrtCustomOpDomain> OrtCustomOpDomain::Create(const char* domain) {
-  OrtCustomOpDomain *p;
+  OrtCustomOpDomain* p;
   Ort::ThrowOnError(Ort::api->CreateCustomOpDomain(domain, &p));
   return std::unique_ptr<OrtCustomOpDomain>{p};
 }
@@ -373,7 +390,7 @@ inline void OrtCustomOpDomain::Add(const OrtCustomOp& op) {
 }
 
 inline std::unique_ptr<OrtRunOptions> OrtRunOptions::Create() {
-  OrtRunOptions *p;
+  OrtRunOptions* p;
   Ort::ThrowOnError(Ort::api->CreateRunOptions(&p));
   return std::unique_ptr<OrtRunOptions>{p};
 }
@@ -597,7 +614,7 @@ inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider(
   }
 
   Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider(this, provider_name.c_str(),
-                                                              keys.data(), values.data(), num_entries));
+                                                                    keys.data(), values.data(), num_entries));
 
   return *this;
 }
@@ -624,13 +641,13 @@ inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider_OpenVINO(co
 
 /// Session
 inline std::unique_ptr<OrtSession> OrtSession::Create(OrtEnv& env, const ORTCHAR_T* model_path, const OrtSessionOptions* options) {
-  OrtSession *p;
+  OrtSession* p;
   Ort::ThrowOnError(Ort::api->CreateSession(&env, model_path, options, &p));
   return std::unique_ptr<OrtSession>(p);
 }
 
 inline std::unique_ptr<OrtSession> OrtSession::Create(OrtEnv& env, const ORTCHAR_T* model_path, const OrtSessionOptions* options,
-  OrtPrepackedWeightsContainer& prepacked_weights_container) {
+                                                      OrtPrepackedWeightsContainer& prepacked_weights_container) {
   OrtSession* p;
   Ort::ThrowOnError(Ort::api->CreateSessionWithPrepackedWeightsContainer(&env, model_path, options, &prepacked_weights_container, &p));
   return std::unique_ptr<OrtSession>(p);
@@ -643,10 +660,10 @@ inline std::unique_ptr<OrtSession> OrtSession::Create(OrtEnv& env, const void* m
 }
 
 inline std::unique_ptr<OrtSession> OrtSession::Create(OrtEnv& env, const void* model_data, size_t model_data_length,
-  const OrtSessionOptions* options, OrtPrepackedWeightsContainer& prepacked_weights_container) {
+                                                      const OrtSessionOptions* options, OrtPrepackedWeightsContainer& prepacked_weights_container) {
   OrtSession* p;
   Ort::ThrowOnError(Ort::api->CreateSessionFromArrayWithPrepackedWeightsContainer(&env, model_data, model_data_length, options,
-    &prepacked_weights_container, &p));
+                                                                                  &prepacked_weights_container, &p));
   return std::unique_ptr<OrtSession>(p);
 }
 
@@ -747,19 +764,19 @@ inline std::unique_ptr<OrtTypeInfo> OrtSession::GetOverridableInitializerTypeInf
 }
 
 inline std::vector<std::unique_ptr<OrtValue>> OrtSession::Run(const OrtRunOptions* run_options, const char* const* input_names, const OrtValue* const* input_values, size_t input_count,
-                                              const char* const* output_names, size_t output_count) {
+                                                              const char* const* output_names, size_t output_count) {
   std::vector<OrtValue*> output_values(output_count);
-  std::vector<std::unique_ptr<OrtValue>> results(output_count); // Allocate before Run() so that if it fails, it fails before we have unowned OrtValue*s in output_values
+  std::vector<std::unique_ptr<OrtValue>> results(output_count);  // Allocate before Run() so that if it fails, it fails before we have unowned OrtValue*s in output_values
   Run(run_options, input_names, input_values, input_count, output_names, output_values.data(), output_count);
 
-  for(auto i=0;i<output_count;i++)
-    results[i]=std::unique_ptr<OrtValue>{output_values[i]};
+  for (auto i = 0; i < output_count; i++)
+    results[i] = std::unique_ptr<OrtValue>{output_values[i]};
 
   return results;
 }
 
 inline void OrtSession::Run(const OrtRunOptions* run_options, const char* const* input_names, const OrtValue* const* input_values, size_t input_count,
-                                const char* const* output_names, OrtValue** output_values, size_t output_count) {
+                            const char* const* output_names, OrtValue** output_values, size_t output_count) {
   Ort::ThrowOnError(Ort::api->Run(this, run_options, input_names, input_values, input_count, output_names, output_count, output_values));
 }
 
@@ -839,7 +856,7 @@ inline size_t OrtTensorTypeAndShapeInfo::GetElementCount() const {
   return static_cast<size_t>(out);
 }
 
-inline size_t GetDimensionsCount(const OrtTensorTypeAndShapeInfo *p) {
+inline size_t GetDimensionsCount(const OrtTensorTypeAndShapeInfo* p) {
   size_t out;
   Ort::ThrowOnError(Ort::api->GetDimensionsCount(p, &out));
   return out;
@@ -1063,28 +1080,28 @@ inline void OrtValue::UseBlockSparseIndices(const OrtShape& indices_shape, int32
 }
 
 inline void OrtValue::FillSparseTensorCoo(const OrtMemoryInfo& mem_info, const OrtSparseValuesParam& values_param,
-                                   const int64_t* indices_data, size_t indices_num) {
+                                          const int64_t* indices_data, size_t indices_num) {
   Ort::ThrowOnError(Ort::api->FillSparseTensorCoo(this, &mem_info, values_param.values_shape,
-                                            values_param.values_shape_len, values_param.data.p_data,
-                                            indices_data, indices_num));
+                                                  values_param.values_shape_len, values_param.data.p_data,
+                                                  indices_data, indices_num));
 }
 
 inline void OrtValue::FillSparseTensorCsr(const OrtMemoryInfo& data_mem_info,
-                                   const OrtSparseValuesParam& values,
-                                   const int64_t* inner_indices_data, size_t inner_indices_num,
-                                   const int64_t* outer_indices_data, size_t outer_indices_num) {
+                                          const OrtSparseValuesParam& values,
+                                          const int64_t* inner_indices_data, size_t inner_indices_num,
+                                          const int64_t* outer_indices_data, size_t outer_indices_num) {
   Ort::ThrowOnError(Ort::api->FillSparseTensorCsr(this, &data_mem_info, values.values_shape, values.values_shape_len, values.data.p_data,
-                                            inner_indices_data, inner_indices_num,
-                                            outer_indices_data, outer_indices_num));
+                                                  inner_indices_data, inner_indices_num,
+                                                  outer_indices_data, outer_indices_num));
 }
 
 inline void OrtValue::FillSparseTensorBlockSparse(const OrtMemoryInfo& data_mem_info,
-                                           const OrtSparseValuesParam& values,
-                                           const OrtShape& indices_shape,
-                                           const int32_t* indices_data) {
+                                                  const OrtSparseValuesParam& values,
+                                                  const OrtShape& indices_shape,
+                                                  const int32_t* indices_data) {
   Ort::ThrowOnError(Ort::api->FillSparseTensorBlockSparse(this, &data_mem_info, values.values_shape, values.values_shape_len, values.data.p_data,
-                                                    indices_shape.shape, indices_shape.shape_len,
-                                                    indices_data));
+                                                          indices_shape.shape, indices_shape.shape_len,
+                                                          indices_data));
 }
 
 #endif  // !defined(DISABLE_SPARSE_TENSORS)
@@ -1095,7 +1112,7 @@ inline std::unique_ptr<OrtValue> OrtValue::CreateTensor(const OrtMemoryInfo& inf
 }
 
 inline std::unique_ptr<OrtValue> OrtValue::CreateTensor(const OrtMemoryInfo& info, void* p_data, size_t p_data_byte_count, std::span<const int64_t> shape,
-                                 ONNXTensorElementDataType type) {
+                                                        ONNXTensorElementDataType type) {
   OrtValue* out;
   Ort::ThrowOnError(Ort::api->CreateTensorWithDataAsOrtValue(&info, p_data, p_data_byte_count, shape.data(), shape.size(), type, &out));
   return std::unique_ptr<OrtValue>{out};
@@ -1121,10 +1138,10 @@ inline std::unique_ptr<OrtValue> OrtValue::CreateSparseTensor(const OrtMemoryInf
 }
 
 inline std::unique_ptr<OrtValue> OrtValue::CreateSparseTensor(const OrtMemoryInfo& info, void* p_data, const OrtShape& dense_shape,
-                                       const OrtShape& values_shape, ONNXTensorElementDataType type) {
+                                                              const OrtShape& values_shape, ONNXTensorElementDataType type) {
   OrtValue* out;
   Ort::ThrowOnError(Ort::api->CreateSparseTensorWithValuesAsOrtValue(&info, p_data, dense_shape.shape, dense_shape.shape_len,
-                                                               values_shape.shape, values_shape.shape_len, type, &out));
+                                                                     values_shape.shape, values_shape.shape_len, type, &out));
   return std::unique_ptr<OrtValue>{out};
 }
 
@@ -1134,7 +1151,7 @@ inline std::unique_ptr<OrtValue> OrtValue::CreateSparseTensor(OrtAllocator* allo
 }
 
 inline std::unique_ptr<OrtValue> OrtValue::CreateSparseTensor(OrtAllocator* allocator, const OrtShape& dense_shape,
-                                       ONNXTensorElementDataType type) {
+                                                              ONNXTensorElementDataType type) {
   OrtValue* out;
   Ort::ThrowOnError(Ort::api->CreateSparseTensorAsOrtValue(allocator, dense_shape.shape, dense_shape.shape_len, type, &out));
   return std::unique_ptr<OrtValue>{out};
@@ -1202,7 +1219,7 @@ inline void* OrtKernelContext::GetGPUComputeStream() const {
 }
 
 inline std::unique_ptr<OrtOpAttr> OrtOpAttr::Create(const char* name, const void* data, int len, OrtOpAttrType type) {
-  OrtOpAttr *p;
+  OrtOpAttr* p;
   Ort::ThrowOnError(Ort::api->CreateOpAttr(name, data, len, type, &p));
   return std::unique_ptr<OrtOpAttr>{p};
 }
@@ -1257,26 +1274,26 @@ inline void OrtKernelInfo::GetAttrs(const char* name, std::vector<int64_t>& resu
 }
 
 inline std::unique_ptr<OrtOp> OrtOp::Create(const OrtKernelInfo* info, const char* op_name, const char* domain, int version,
-                     const char** type_constraint_names,
-                     const ONNXTensorElementDataType* type_constraint_values,
-                     size_t type_constraint_count,
-                     const OrtOpAttr* const* attr_values, size_t attr_count,
-                     size_t input_count, size_t output_count) {
+                                            const char** type_constraint_names,
+                                            const ONNXTensorElementDataType* type_constraint_values,
+                                            size_t type_constraint_count,
+                                            const OrtOpAttr* const* attr_values, size_t attr_count,
+                                            size_t input_count, size_t output_count) {
   OrtOp* p;
   Ort::ThrowOnError(Ort::api->CreateOp(info, op_name, domain, version, type_constraint_names, type_constraint_values,
-                                      static_cast<int>(type_constraint_count),
-                                      attr_values,
-                                      static_cast<int>(attr_count),
-                                      static_cast<int>(input_count),
-                                      static_cast<int>(output_count), &p));
+                                       static_cast<int>(type_constraint_count),
+                                       attr_values,
+                                       static_cast<int>(attr_count),
+                                       static_cast<int>(input_count),
+                                       static_cast<int>(output_count), &p));
   return std::unique_ptr<OrtOp>{p};
 }
 
 inline void OrtOp::Invoke(const OrtKernelContext* context,
-                       const OrtValue* const* input_values,
-                       size_t input_count,
-                       OrtValue* const* output_values,
-                       size_t output_count) {
+                          const OrtValue* const* input_values,
+                          size_t input_count,
+                          OrtValue* const* output_values,
+                          size_t output_count) {
   Ort::ThrowOnError(Ort::api->InvokeOp(context, this, input_values, static_cast<int>(input_count),
-                                      output_values, static_cast<int>(output_count)));
+                                       output_values, static_cast<int>(output_count)));
 }

@@ -1,0 +1,52 @@
+on: [ workflow_dispatch, pull_request ]
+env:
+  ort_dir: "onnxruntime-win-x64-1.16.3"
+  ort_zip: "$(ort_dir).zip"
+  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/$(ort_zip)"
+
+jobs:
+  job:
+    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Win2022-CPU"]
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Setup Visual Studio 2022
+        uses: microsoft/setup-msbuild@v1.1
+        with:
+          vs-version: '17.5'
+
+      - name: Download OnnxRuntime
+        run: |
+          $env:ort_url = "https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/onnxruntime-win-x64-1.16.3.zip"
+          Invoke-WebRequest -Uri $env:ort_url -OutFile $env:ort_zip
+
+      - name: Unzip OnnxRuntime
+        run: |
+          Expand-Archive $env:ort_zip -DestinationPath .
+          Remove-Item -Path $env:ort_zip
+
+      - name: Rename OnnxRuntime to ort
+        run: |
+          Rename-Item -Path $env:ort_dir -NewName ort
+
+      - name: Git Submodule Update
+        run: |
+          git submodule update --init --recursive
+
+      - name: Build with CMake
+        run: |
+          mkdir build
+          cd build
+          cmake -G "Visual Studio 17 2022" -A x64 .. -DCMAKE_BUILD_TYPE=Release
+          cmake --build . --config Release --parallel
+
+      - name: Verify Build Artifacts
+        if: always()
+        run: |
+          Get-ChildItem -Path $env:GITHUB_WORKSPACE\build\Release -Recurse
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: onnxruntime-genai-win-cpu-x64
+          path: build/Release/*.lib

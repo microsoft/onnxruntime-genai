@@ -1,8 +1,9 @@
 ﻿# Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
-cmake_minimum_required (VERSION 3.11)
-# include(FetchContent)
+cmake_minimum_required (VERSION 3.26)
+include(FetchContent)
+include(cmake/external/onnxruntime_external_deps.cmake)
 
 # Enable Hot Reload for MSVC compilers if supported.
 if(POLICY CMP0141)
@@ -10,41 +11,36 @@ if(POLICY CMP0141)
   set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "$<IF:$<AND:$<C_COMPILER_ID:MSVC>,$<CXX_COMPILER_ID:MSVC>>,$<$<CONFIG:Debug,RelWithDebInfo>:EditAndContinue>,$<$<CONFIG:Debug,RelWithDebInfo>:ProgramDatabase>>")
 endif()
 
-if(false) # We don't use GSL anymore
-FetchContent_Declare(GSL
-    GIT_REPOSITORY "https://github.com/microsoft/GSL"
-    GIT_TAG "v4.0.0"
-    GIT_SHALLOW ON
-)
+project (Generators LANGUAGES C CXX)
 
-FetchContent_MakeAvailable(GSL)
+# Checking if CUDA is supported
+include(CheckLanguage)
+check_language(CUDA)
+if (CMAKE_CUDA_COMPILER)
+    set (CUDA_FOUND TRUE)
+endif()
+set(USE_CUDA 1)
+
+if("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_LESS 9)
+  message(FATAL_ERROR  "GCC version must be greater than or equal to 9")
 endif()
 
-if(false) # We don't use SafeInt anymore
-FetchContent_Declare(safeint
-    GIT_REPOSITORY "https://github.com/dcleblanc/SafeInt"
-)
-
-FetchContent_MakeAvailable(safeint)
+if("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_LESS 10)
+  add_compile_definitions(USE_CXX17=1)
+  message("USE C++17")
+  set(CMAKE_CXX_STANDARD 17)
+else()
+  set(CMAKE_CXX_STANDARD 20)
 endif()
-
-project (Generators LANGUAGES CXX)
-
-set(CMAKE_CXX_STANDARD 20)
-# add_compile_definitions(USE_CXX17=1)
 
 set(GENERATORS_ROOT ${PROJECT_SOURCE_DIR}/src)
 set(MODELS_ROOT ${PROJECT_SOURCE_DIR}/src/models)
 set(TESTS_ROOT ${PROJECT_SOURCE_DIR}/src/tests)
 set(PYBIND_ROOT ${PROJECT_SOURCE_DIR}/src/pybind)
 
-set(USE_CUDA 1)
-
-add_subdirectory(${PROJECT_SOURCE_DIR}/extern/pybind11 ${PROJECT_SOURCE_DIR}/build/pybind)
-
 # CUDA Being enabled will make it not a debug build without this option, so all of the C++ headers will complain
 # about a mismatch with the actual debug headers and it'll fail to link. I don't know why this happens, or if this is the best fix.
-if(USE_CUDA EQUAL 1 AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+if(USE_CUDA EQUAL 1 AND CUDA_FOUND AND CMAKE_BUILD_TYPE STREQUAL "Debug")
   add_compile_definitions(_DEBUG=1)
 endif()
 
@@ -67,7 +63,7 @@ file(GLOB pybind_srcs CMAKE_CONFIGURE_DEPENDS
    "${PYBIND_ROOT}/*.cpp"
 )
 
-if(USE_CUDA)
+if(USE_CUDA AND CUDA_FOUND)
     # Don't let cmake set a default value for CMAKE_CUDA_ARCHITECTURES
     cmake_policy(SET CMP0104 OLD)
     enable_language(CUDA)
@@ -91,8 +87,17 @@ else()
     list(REMOVE_ITEM generator_srcs ${generator_cuda_srcs})
 endif()
 
-add_library (Generators ${generator_srcs})
-target_include_directories(Generators PRIVATE ${CMAKE_SOURCE_DIR}/ort)
+## TODO: this is a hack to get the shared library to export .lib files on windows. We should find a better way when we need to compile dynamic libraries
+#if(WIN32)
+#    set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
+#endif()
+
+add_library (onnxruntime-genai ${generator_srcs})
+target_include_directories(onnxruntime-genai PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set_target_properties(onnxruntime-genai PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
 
 if(WIN32)
   set(ONNXRUNTIME_LIB "onnxruntime.lib")
@@ -101,7 +106,7 @@ if(WIN32)
   set(ONNXRUNTIME_EXTENSIONS_FILES "tfmtok_c.dll")
 elseif(APPLE)
   set(ONNXRUNTIME_LIB "libonnxruntime.dylib")
-  # TODO: Figure ONNXRUNTIME_FILES for MacOS
+  set(ONNXRUNTIME_FILES "libonnxruntime*.dylib")
 else()
   set(ONNXRUNTIME_LIB "libonnxruntime.so")
   set(ONNXRUNTIME_FILES "libonnxruntime*.so*")
@@ -109,21 +114,21 @@ else()
 endif()
 
 add_executable (Tests ${test_srcs})
-target_include_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort)
-target_link_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort)
-target_link_libraries(Tests PRIVATE Generators ${ONNXRUNTIME_LIB} ${ONNXRUNTIME_EXTENSIONS_LIB})
-
+target_include_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
+target_link_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
+target_link_libraries(Tests PRIVATE onnxruntime-genai ${ONNXRUNTIME_LIB} ${ONNXRUNTIME_EXTENSIONS_LIB})
+#
 pybind11_add_module(pybind ${pybind_srcs})
-target_include_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort)
-target_link_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort)
-target_link_libraries(pybind PRIVATE Generators ${ONNXRUNTIME_LIB} ${ONNXRUNTIME_EXTENSIONS_LIB})
+target_include_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
+target_link_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
+target_link_libraries(pybind PRIVATE onnxruntime-genai ${ONNXRUNTIME_LIB} ${ONNXRUNTIME_EXTENSIONS_LIB})
 set_target_properties(pybind PROPERTIES OUTPUT_NAME "onnxruntime_genai")
 
 # Visual C++ - /MP Multiple process build, /WX Warnings as errors
 # Enable:
 #   C5038: data member 'member1' will be initialized after data member 'member2'
 # Disable:
-#   C4100: 'this_': unreferenced formal parameter 
+#   C4100: 'this_': unreferenced formal parameter
 if(MSVC)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /MP /w15038 /wd4100 /W4 /WX")
 endif()
@@ -132,7 +137,7 @@ endif()
 file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/${ONNXRUNTIME_FILES}")
 foreach(DLL_FILE ${onnxruntime_libs})
     add_custom_command(
-        TARGET Generators POST_BUILD
+        TARGET onnxruntime-genai POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy
                 ${DLL_FILE}
                 ${CMAKE_BINARY_DIR}/$<CONFIG>/${DLL_FILE_NAME}

@@ -1,0 +1,61 @@
+on: [ workflow_dispatch, pull_request ]
+
+env:
+  ort_dir: "onnxruntime-linux-x64-1.16.3"
+  ort_zip: "onnxruntime-linux-x64-1.16.3.tgz"
+  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/onnxruntime-linux-x64-1.16.3.tgz"
+jobs:
+  job:
+    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU"]
+    steps:
+      - name: Checkout OnnxRuntime GenAI repo
+        uses: actions/checkout@v2
+
+     
+
+      - name: Download OnnxRuntime
+        run: |
+          curl -L -o ${{ env.ort_zip }} ${{ env.ort_url }} 
+
+      - name: Unzip OnnxRuntime
+        run: |
+          tar -xzf ${{ env.ort_zip }}
+          rm ${{ env.ort_zip }}
+
+      - name: Rename OnnxRuntime to ort
+        run: |
+          mv ${{ env.ort_dir }} ort
+
+      - name: Git Submodule Update
+        run: |
+          git submodule update --init --recursive
+
+      - name: Build with CMake and GCC
+        run: |
+          set -e -x
+          mkdir build
+          cd build
+          cmake -G "Unix Makefiles" .. -DBUILD_SHARED_LIBS=ON -DCMAKE_BUILD_TYPE=Release
+          cmake --build . --config Release --parallel
+          cd ..
+          rm -rf build
+  
+      - name: Build with CMake and clang
+        run: |
+          set -e -x
+          mkdir build
+          cd build
+          CC=clang CXX=clang++ cmake -G "Unix Makefiles" .. -DBUILD_SHARED_LIBS=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_CLANG_TIDY=clang-tidy
+          cmake --build . --config Release --parallel
+          
+
+      - name: Verify Build Artifacts
+        if: always()
+        run: |
+          ls -l ${{ github.workspace }}/build
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: onnxruntime-genai-linux-cpu-x64
+          path: ${{ github.workspace }}/build/**/*.a

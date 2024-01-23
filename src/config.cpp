@@ -113,7 +113,7 @@ struct Root_Element : JSON::Element {
       config_.early_stopping = value;
   }
 
-  Element& OnObject(std::string_view name) {
+  Element& OnObject(std::string_view name) override {
     if (name == "model")
       return model_element_;
     return Element::OnObject(name);
