@@ -1,5 +1,4 @@
 import onnxruntime_genai as og
-import numpy as np
 from transformers import GPT2Tokenizer
 
 device_type = og.DeviceType.CPU

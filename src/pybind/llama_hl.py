@@ -1,5 +1,4 @@
 ﻿import onnxruntime_genai as og
-import numpy as np
 import time
 from transformers import LlamaTokenizer
 

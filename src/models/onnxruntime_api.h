@@ -77,7 +77,11 @@ namespace Ort {
 
 /// Before using this C++ wrapper API, you MUST call Ort::InitApi to set the below 'api' variable
 inline const OrtApi* api{};
-inline void InitApi() { api = OrtGetApiBase()->GetApi(ORT_API_VERSION); }
+inline void InitApi() {
+  api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
+  if (!api)
+    throw std::runtime_error("Onnxruntime is installed but is too old, please install a newer version");
+}
 
 /** \brief All C++ methods that can fail will throw an exception of this type
  *

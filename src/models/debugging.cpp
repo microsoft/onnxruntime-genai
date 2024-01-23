@@ -60,6 +60,10 @@ void DumpValues(ONNXTensorElementDataType type, const void* p_values_raw, size_t
       }
       break;
     }
+
+    default:
+      printf("Unhandled data type");
+      break;
   }
   printf("\r\n");
 }
@@ -87,7 +91,7 @@ void DumpTensor(OrtValue* value, bool dump_value) {
       printf("CPU\r\n");
       DumpValues(type_info->GetElementType(), value->GetTensorRawData(), element_count);
       break;
-    case OrtMemoryInfoDeviceType_GPU:
+    case OrtMemoryInfoDeviceType_GPU: {
       printf("GPU\r\n");
 #if USE_CUDA
       auto type = type_info->GetElementType();
@@ -115,6 +119,10 @@ void DumpTensor(OrtValue* value, bool dump_value) {
 #else
       printf("Unexpected, using GPU memory but not compiled with CUDA?");
 #endif
+      break;
+    }
+    default:
+      printf("Unhandled device type");
       break;
   }
 }

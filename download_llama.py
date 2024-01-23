@@ -8,7 +8,7 @@ import sys
 def check_ort_import():
     try:
         import onnxruntime as ort
-    except:
+    except Exception as ex:
         return False
 
     return True
@@ -22,13 +22,13 @@ def get_models(args: argparse.Namespace):
         "-m",
         "onnxruntime.transformers.models.llama.convert_to_onnx",
         "-m",
-        "meta-llama/Llama-2-7b-hf",
+        "meta-llama/Llama-2-7b-chat-hf",
         "--output",
-        "llama2-7b-fp32-cpu",
+        "llama2-7b-chat-int4-gpu",
         "--precision",
-        "fp32",
+        "int4",
         "--execution_provider",
-        "cpu"
+        "cuda"
     ])
     # subprocess.run(["mv", "gpt2_parity_results.csv", args.output_folder])
 
