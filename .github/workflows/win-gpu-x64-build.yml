@@ -13,6 +13,7 @@ env:
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/onnxruntime-win-x64-gpu-1.16.3.zip"
   cuda_dir: "${{ github.workspace }}\\cuda_sdk"
   cuda_version: "12.2"
+  CUDA_PATH: "${{ env.cuda_dir }}\\v${{ env.cuda_version }}"
 
 jobs:
   Windows-CUDA-12-Build:
@@ -50,10 +51,8 @@ jobs:
         run: |
           mkdir build
           cd build
-          cmake -G "Visual Studio 17 2022" -A x64 .. \
-            -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=TRUE \
-            -DCUDAToolkit_ROOT=${{ env.cuda_dir }}\\v${{ env.cuda_version }} \
-            -DCMAKE_CUDA_COMPILER=${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin\\nvcc.exe
+          cmake -G "Visual Studio 17 2022" -A x64 .. -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=TRUE -DCUDAToolkit_ROOT=${{ env.cuda_dir }}\\v${{ env.cuda_version }}
+#            -DCMAKE_CUDA_COMPILER=${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin\\nvcc.exe
           cmake --build . --config Release --parallel
 
       - name: Verify Build Artifacts

@@ -12,7 +12,7 @@ set(USE_ORT_EXT 0) # "Build with Onnxruntime Extensions tokenizer support"
 # Checking if CUDA is supported
 include(FindCUDAToolkit)
 if (CUDAToolkit_FOUND)
-    set (CUDA_FOUND TRUE)
+    message(STATUS "CUDA found CUDAToolkit_VERSION ${CUDAToolkit_VERSION} with CMAKE_CUDA_COMPILER ${CMAKE_CUDA_COMPILER}" )
 else()
     message(STATUS "CUDA not found")
 endif()
@@ -36,7 +36,7 @@ set(PYBIND_ROOT ${PROJECT_SOURCE_DIR}/src/pybind)
 
 # CUDA Being enabled will make it not a debug build without this option, so all of the C++ headers will complain
 # about a mismatch with the actual debug headers and it'll fail to link. I don't know why this happens, or if this is the best fix.
-if(USE_CUDA AND CUDA_FOUND AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+if(USE_CUDA AND CUDAToolkit_FOUND AND CMAKE_BUILD_TYPE STREQUAL "Debug")
   add_compile_definitions(_DEBUG=1)
 endif()
 
@@ -59,7 +59,7 @@ file(GLOB pybind_srcs CMAKE_CONFIGURE_DEPENDS
    "${PYBIND_ROOT}/*.cpp"
 )
 
-if(USE_CUDA AND CUDA_FOUND)
+if(USE_CUDA AND CUDAToolkit_FOUND)
     # Don't let cmake set a default value for CMAKE_CUDA_ARCHITECTURES
     cmake_policy(SET CMP0104 OLD)
     enable_language(CUDA)
