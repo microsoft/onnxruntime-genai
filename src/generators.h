@@ -67,11 +67,11 @@ struct Search {
   virtual bool IsDone() const = 0;
 
   // TODO: Beam Search only, this should be removed and made automatic
-  virtual void Finalize(size_t num_return_sequences, RoamingArray<int32_t> output, RoamingArray<float> sequence_scores) { assert(false); }
+  virtual void Finalize(size_t /*num_return_sequences*/, RoamingArray<int32_t> /*output*/, RoamingArray<float> /*sequence_scores*/) { assert(false); }
 
   virtual void SelectTop() = 0;
-  virtual void SampleTopP(float p, float temperature) { assert(false); }
-  virtual void SampleTopK(int k, float temperature) { assert(false); }
+  virtual void SampleTopP(float /*p*/, float /*temperature*/) { assert(false); }
+  virtual void SampleTopK(int /*k*/, float /*temperature*/) { assert(false); }
 };
 
 struct SearchParams {
