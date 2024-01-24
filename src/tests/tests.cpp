@@ -181,7 +181,7 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
       0, 0, 0, 0, 0, 52, 195, 731, 321, 301, 734, 620, 131, 131, 131, 181, 638, 638, 638, 638,
       41, 554, 74, 622, 206, 222, 75, 223, 221, 198, 224, 572, 292, 292, 292, 292, 292, 292, 292, 292,
       0, 0, 0, 52, 328, 219, 328, 206, 288, 227, 896, 328, 328, 669, 669, 669, 669, 669, 669, 669};
-  
+
   auto provider_options = Generators::GetDefaultProviderOptions(Generators::DeviceType::CUDA);
 
   // The ONNX model is generated like the following:
