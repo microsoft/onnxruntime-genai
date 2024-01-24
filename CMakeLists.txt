@@ -14,6 +14,8 @@ include(CheckLanguage)
 check_language(CUDA)
 if (CMAKE_CUDA_COMPILER)
     set (CUDA_FOUND TRUE)
+else()
+    message(STATUS "CUDA not found")
 endif()
 
 if("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_LESS 9)
