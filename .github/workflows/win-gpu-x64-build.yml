@@ -11,7 +11,6 @@ env:
   ort_dir: "onnxruntime-win-x64-gpu-1.16.3"
   ort_zip: "onnxruntime-win-x64-gpu-1.16.3.zip"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/onnxruntime-win-x64-gpu-1.16.3.zip"
-  CUDAToolkit_ROOT: "$env:GITHUB_WORKSPACE/cuda_sdk/v12.2"
 
 jobs:
   Windows-CUDA-12-Build:
@@ -26,7 +25,7 @@ jobs:
           architecture: 'x64'
 
       - name: Download cuda
-        run: azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v12.2" cuda_sdk
+        run: azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v12.2" $env:GITHUB_WORKSPACE\cuda_sdk
 
       - name: Download OnnxRuntime
         run: |
@@ -48,7 +47,7 @@ jobs:
         run: |
           mkdir build
           cd build
-          cmake -G "Visual Studio 17 2022" -A x64 .. -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=TRUE 
+          cmake -G "Visual Studio 17 2022" -A x64 .. -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=TRUE -DCUDAToolkit_ROOT=$env:GITHUB_WORKSPACE\cuda_sdk\v12.2
           cmake --build . --config Release --parallel
 
       - name: Verify Build Artifacts
