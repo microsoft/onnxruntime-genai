@@ -25,12 +25,15 @@ jobs:
           architecture: 'x64'
 
       - name: Download cuda
-        run: azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v12.2" $env:GITHUB_WORKSPACE\cuda_sdk
+        run: |
+          azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v12.2" $env:GITHUB_WORKSPACE\cuda_sdk
+          echo $env:GITHUB_WORKSPACE\cuda_sdk >> $env:GITHUB_PATH
 
       - name: Verify Cuda SDK
         if: always()
         run: |
           Get-ChildItem -Path $env:GITHUB_WORKSPACE\cuda_sdk -Recurse
+          echo $env:GITHUB_PATH
 
       - name: Download OnnxRuntime
         run: |
@@ -52,7 +55,7 @@ jobs:
         run: |
           mkdir build
           cd build
-          cmake -G "Visual Studio 17 2022" -A x64 .. -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=TRUE -DCUDAToolkit_ROOT="$env:GITHUB_WORKSPACE\\cuda_sdk\\v12.2"
+          cmake -G "Visual Studio 17 2022" -A x64 .. -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=TRUE
           cmake --build . --config Release --parallel
 
       - name: Verify Build Artifacts
