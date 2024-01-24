@@ -5,13 +5,9 @@ cmake_minimum_required (VERSION 3.26)
 include(FetchContent)
 include(cmake/external/onnxruntime_external_deps.cmake)
 
-# Enable Hot Reload for MSVC compilers if supported.
-if(POLICY CMP0141)
-  cmake_policy(SET CMP0141 NEW)
-  set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "$<IF:$<AND:$<C_COMPILER_ID:MSVC>,$<CXX_COMPILER_ID:MSVC>>,$<$<CONFIG:Debug,RelWithDebInfo>:EditAndContinue>,$<$<CONFIG:Debug,RelWithDebInfo>:ProgramDatabase>>")
-endif()
-
 project (Generators LANGUAGES C CXX)
+set(USE_CUDA 1) # "Build with CUDA support"
+set(USE_ORT_EXT 1) # "Build with Onnxruntime Extensions tokenizer support"
 
 # Checking if CUDA is supported
 include(CheckLanguage)
@@ -19,8 +15,6 @@ check_language(CUDA)
 if (CMAKE_CUDA_COMPILER)
     set (CUDA_FOUND TRUE)
 endif()
-set(USE_CUDA 1)
-set(USE_ORT_EXT 0) # Use the onnxruntime extensions library to support built in tokenizing
 
 if("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_LESS 9)
   message(FATAL_ERROR  "GCC version must be greater than or equal to 9")
@@ -41,7 +35,7 @@ set(PYBIND_ROOT ${PROJECT_SOURCE_DIR}/src/pybind)
 
 # CUDA Being enabled will make it not a debug build without this option, so all of the C++ headers will complain
 # about a mismatch with the actual debug headers and it'll fail to link. I don't know why this happens, or if this is the best fix.
-if(USE_CUDA EQUAL 1 AND CUDA_FOUND AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+if(USE_CUDA AND CUDA_FOUND AND CMAKE_BUILD_TYPE STREQUAL "Debug")
   add_compile_definitions(_DEBUG=1)
 endif()
 
@@ -135,7 +129,7 @@ if(MSVC)
 endif()
 
 # Copy the onnxruntime binaries into the build folder so it's found on launch
-file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/${ONNXRUNTIME_FILES}")
+file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/lib/${ONNXRUNTIME_FILES}")
 foreach(DLL_FILE ${onnxruntime_libs})
     add_custom_command(
         TARGET onnxruntime-genai POST_BUILD
@@ -156,10 +150,10 @@ if(USE_ORT_EXT)
     target_link_libraries(pybind PRIVATE ${ONNXRUNTIME_EXTENSIONS_LIB})
 
     # Copy the onnxruntime-extensions binaries into the build folder so it's found on launch
-    file(GLOB onnxruntime_extensions_libs "${CMAKE_SOURCE_DIR}/ort-ext/${ONNXRUNTIME_EXTENSIONS_FILES}")
+    file(GLOB onnxruntime_extensions_libs "${CMAKE_SOURCE_DIR}/ort-ext/lib/${ONNXRUNTIME_EXTENSIONS_FILES}")
     foreach(DLL_FILE ${onnxruntime_extensions_libs})
         add_custom_command(
-            TARGET Generators POST_BUILD
+            TARGET onnxruntime-genai POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy
                     ${DLL_FILE}
                     ${CMAKE_BINARY_DIR}/$<CONFIG>/${DLL_FILE_NAME}
