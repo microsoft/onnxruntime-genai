@@ -27,7 +27,7 @@ jobs:
       - name: Download cuda
         run: |
           azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v12.2" $env:GITHUB_WORKSPACE\cuda_sdk
-          echo $env:GITHUB_WORKSPACE\cuda_sdk >> $env:GITHUB_PATH
+          echo $env:GITHUB_WORKSPACE\cuda_sdk\v12.2\bin >> $env:GITHUB_PATH
 
       - name: Verify Cuda SDK
         if: always()
