@@ -1,0 +1,40 @@
+trigger:
+  branches:
+    include:
+    - main
+    - rel-*
+  paths:
+    exclude:
+    - docs/**
+    - README.md
+    - CONTRIBUTING.md
+    - BUILD.md
+pr:
+  branches:
+    include:
+    - main
+    - rel-*
+  paths:
+    exclude:
+    - docs/**
+    - README.md
+    - CONTRIBUTING.md
+    - BUILD.md
+
+stages:
+- stage: x64_debug
+  dependsOn: []
+  jobs:
+  - job: win
+    variables:
+      DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+      Codeql.Enabled: true
+      Codeql.TSAEnabled: true
+    workspace:
+      clean: all
+    pool: 'onnxruntime-Win-CPU-2022'
+    timeoutInMinutes:  300
+    steps:
+    - checkout: self
+      clean: true
+      submodules: none
