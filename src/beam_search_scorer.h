@@ -20,10 +20,10 @@ struct BeamHypotheses {
   bool CanImprove(float best_sum_logprobs, int current_length) const;
 
   // Output results
-  void Output(size_t top_k,                        // number of sequences to return
-              size_t max_length,                   // max sequence length
-              std::span<int32_t> sequences,        // buffer with pad token, shape (num_return_sequences, max_length)
-              std::span<float> sequences_scores);  // buffer for sequence scores, with shape (num_return_sequences)
+  void Output(size_t top_k,                              // number of sequences to return
+              size_t max_length,                         // max sequence length
+              std::span<int32_t> sequences,              // buffer with pad token, shape (num_return_sequences, max_length)
+              std::span<float> sequences_scores) const;  // buffer for sequence scores, with shape (num_return_sequences)
 
   std::span<HypothesisScore> beams_;  // Beam width sized array of hypotheses, sorted by highest scoring
   int beams_used_;                    // Number of elements used in beams_
