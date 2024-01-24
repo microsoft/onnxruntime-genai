@@ -30,7 +30,7 @@ stages:
       DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
     workspace:
       clean: all
-    pool: ${{ parameters.MachinePool }}
+    pool: 'onnxruntime-Win-CPU-2022'
     timeoutInMinutes:  300
     steps:
     - checkout: self
