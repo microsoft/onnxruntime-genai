@@ -1,4 +1,7 @@
 #pragma once
+#if USE_ORT_EXT
+#include "tfmtok_c.h"
+#endif
 
 namespace Generators {
 
@@ -20,11 +23,38 @@ struct State {
   void ClearIO();                 // Clear all inputs/outputs
 };
 
+template <typename T>
+struct TfmPtr {
+  ~TfmPtr() { TfmDispose(&p_); }
+  T** Address() {
+    assert(!p_);
+    return &p_;
+  }
+  operator T*() { return p_; }
+  operator const T*() const { return p_; }
+
+  T* p_{};
+};
+
+#if USE_ORT_EXT
+struct Tokenizer {
+  Tokenizer(Config& config);
+
+  std::vector<int32_t> Encode(const char* text) const;
+  std::string Decode(std::span<int32_t> tokens) const;
+
+  TfmPtr<TfmTokenizer> tokenizer_;
+};
+#endif
+
 struct Model {
-  Model(std::unique_ptr<Config> config, OrtEnv& ort_env, const ProviderOptions* provider_options);
+  Model(std::unique_ptr<Config> config, const ProviderOptions* provider_options);
   virtual ~Model();
 
   std::vector<int32_t> Generate(const SearchParams& params);
+#if USE_ORT_EXT
+  std::unique_ptr<Tokenizer> CreateTokenizer();
+#endif
 
   virtual std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths, const SearchParams& params) = 0;
 

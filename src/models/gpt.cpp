@@ -4,7 +4,7 @@
 namespace Generators {
 
 Gpt_Model::Gpt_Model(std::unique_ptr<Config> config, OrtEnv& ort_env, const ProviderOptions* provider_options)
-    : Model{std::move(config), ort_env, provider_options} {
+    : Model{std::move(config), provider_options} {
   session_decoder_ = OrtSession::Create(ort_env, (config_->config_path / config_->model.decoder).c_str(), session_options_.get());
 
   InitDeviceAllocator(*session_decoder_);
