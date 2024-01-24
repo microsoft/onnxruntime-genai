@@ -8,7 +8,7 @@ device_type = og.DeviceType.CUDA
 tokenizer = LlamaTokenizer.from_pretrained('mistralai/Mistral-7B-v0.1')
 
 print("Loading model...")
-model=og.Model("../../test_models/mistral", device_type)
+model=og.Model("../test_models/mistral", device_type)
 print("Model loaded")
 
 # Keep asking for input prompts in an loop
