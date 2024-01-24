@@ -7,7 +7,7 @@ include(cmake/external/onnxruntime_external_deps.cmake)
 
 project (Generators LANGUAGES C CXX)
 set(USE_CUDA 1) # "Build with CUDA support"
-set(USE_ORT_EXT 1) # "Build with Onnxruntime Extensions tokenizer support"
+set(USE_ORT_EXT 0) # "Build with Onnxruntime Extensions tokenizer support"
 
 # Checking if CUDA is supported
 include(CheckLanguage)
