@@ -1,0 +1,38 @@
+trigger:
+  branches:
+    include:
+    - main
+    - rel-*
+  paths:
+    exclude:
+    - docs/**
+    - README.md
+    - CONTRIBUTING.md
+    - BUILD.md
+pr:
+  branches:
+    include:
+    - main
+    - rel-*
+  paths:
+    exclude:
+    - docs/**
+    - README.md
+    - CONTRIBUTING.md
+    - BUILD.md
+
+stages:
+- stage: x64_debug
+  dependsOn: []
+  jobs:
+  - job: win
+    variables:
+      DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+     workspace:
+     clean: all
+    pool: ${{ parameters.MachinePool }}
+    timeoutInMinutes:  300
+    steps:
+    - checkout: self
+      clean: true
+      submodules: none
