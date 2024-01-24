@@ -38,3 +38,18 @@ stages:
     - checkout: self
       clean: true
       submodules: none
+    - task: onebranch.pipeline.tsaoptions@1
+      displayName: 'OneBranch TSAOptions'
+      inputs:
+        tsaConfigFilePath: '$(Build.SourcesDirectory)\.config\tsaoptions.json'
+        appendSourceBranchName: false
+    - task: PoliCheck@2
+      inputs:
+        targetType: 'F'
+        targetArgument: '$(Build.SourcesDirectory)'
+    - task: TSAUpload@2
+      displayName: 'TSA upload'
+      condition: and (succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+      inputs:
+        GdnPublishTsaOnboard: false
+        GdnPublishTsaConfigFile: '$(Build.SourcesDirectory)\.config\tsaoptions.json' 
