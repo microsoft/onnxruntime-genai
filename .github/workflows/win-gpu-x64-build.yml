@@ -11,6 +11,8 @@ env:
   ort_dir: "onnxruntime-win-x64-gpu-1.16.3"
   ort_zip: "onnxruntime-win-x64-gpu-1.16.3.zip"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/onnxruntime-win-x64-gpu-1.16.3.zip"
+  CUDA_PATH: "${{ github.workspace }}\\cuda_sdk\\v12.2"
+  CUDA_TOOLKIT_ROOT_DIR: "${{ github.workspace }}\\cuda_sdk\\v12.2"
 
 jobs:
   Windows-CUDA-12-Build:
@@ -26,19 +28,11 @@ jobs:
 
       - name: Download cuda
         run: |
-          azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v12.2" $env:GITHUB_WORKSPACE\cuda_sdk
-
-      - name: Set CUDA Environment Variables
-        run: |
-          echo "Setting CUDA environment variables..."
-          echo "CUDA_PATH=$env:GITHUB_WORKSPACE\\cuda_sdk\\v12.2" >> $GITHUB_ENV
-          echo "CUDA_TOOLKIT_ROOT_DIR=$env:GITHUB_WORKSPACE\\cuda_sdk\\v12.2" >> $GITHUB_ENV
+          azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v12.2" ${{ github.workspace }}\cuda_sdk
 
       - name: Verify Cuda SDK
         if: always()
         run: |
-          echo "%CUDA_PATH%"
-          echo "%CUDA_TOOLKIT_ROOT_DIR%"
           echo "${{ env.CUDA_PATH }}"
           echo "${{ env.CUDA_TOOLKIT_ROOT_DIR }}"
 
@@ -62,7 +56,7 @@ jobs:
         run: |
           mkdir build
           cd build
-          cmake -G "Visual Studio 17 2022" -A x64 .. -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=TRUE -DCMAKE_CUDA_COMPILER=%CUDA_PATH%\\bin\\nvcc.exe
+          cmake -G "Visual Studio 17 2022" -A x64 .. -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=TRUE -DCMAKE_CUDA_COMPILER=${{ env.CUDA_PATH }}\\bin\\nvcc.exe
           cmake --build . --config Release --parallel
 
       - name: Verify Build Artifacts
