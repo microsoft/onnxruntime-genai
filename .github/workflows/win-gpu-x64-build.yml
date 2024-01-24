@@ -1,0 +1,62 @@
+name: "Windows GPU x64 Build"
+on: [ workflow_dispatch, pull_request ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  AZCOPY_AUTO_LOGIN_TYPE: MSI
+  AZCOPY_MSI_CLIENT_ID: 63b63039-6328-442f-954b-5a64d124e5b4
+  ort_dir: "onnxruntime-win-x64-gpu-1.16.3"
+  ort_zip: "onnxruntime-win-x64-gpu-1.16.3.zip"
+  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/onnxruntime-win-x64-gpu-1.16.3.zip"
+
+jobs:
+  Windows-CUDA-12-Build:
+    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Win2022-GPU-A10" ]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11.x'
+          architecture: 'x64'
+
+      - name: Download cuda
+        run: azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v12.2" cuda_sdk
+
+      - name: Download OnnxRuntime
+        run: |
+          Invoke-WebRequest -Uri $env:ort_url -OutFile $env:ort_zip
+
+      - name: Unzip OnnxRuntime
+        run: |
+          Expand-Archive $env:ort_zip -DestinationPath .
+          Remove-Item -Path $env:ort_zip
+      - name: Rename OnnxRuntime to ort
+        run: |
+          Rename-Item -Path $env:ort_dir -NewName ort
+
+      - name: Git Submodule Update
+        run: |
+          git submodule update --init --recursive
+      # The build machine doesn't have a GPU. So the value of CMAKE_CUDA_ARCHITECTURES doesn't matter.
+      - name: Build with CMake
+        run: |
+          mkdir build
+          cd build
+          cmake -G "Visual Studio 17 2022" -A x64 .. -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=TRUE 
+          cmake --build . --config Release --parallel
+
+      - name: Verify Build Artifacts
+        if: always()
+        run: |
+          Get-ChildItem -Path $env:GITHUB_WORKSPACE\build\Release -Recurse
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: onnxruntime-genai-win-cpu-x64
+          path: build/Release/*.lib
