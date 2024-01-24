@@ -29,6 +29,7 @@ jobs:
 
       - name: Download OnnxRuntime
         run: |
+          $env:ort_url = "https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/onnxruntime-win-x64-gpu-1.16.3.zip"
           Invoke-WebRequest -Uri $env:ort_url -OutFile $env:ort_zip
 
       - name: Unzip OnnxRuntime
