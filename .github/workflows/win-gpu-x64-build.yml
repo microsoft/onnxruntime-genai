@@ -46,13 +46,12 @@ jobs:
       - name: Git Submodule Update
         run: |
           git submodule update --init --recursive
-      # The build machine doesn't have a GPU. So the value of CMAKE_CUDA_ARCHITECTURES doesn't matter.
+
       - name: Build with CMake
         run: |
           mkdir build
           cd build
           cmake -G "Visual Studio 17 2022" -A x64 .. -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=TRUE -DCUDAToolkit_ROOT=${{ env.cuda_dir }}\\v${{ env.cuda_version }}
-#            -DCMAKE_CUDA_COMPILER=${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin\\nvcc.exe
           cmake --build . --config Release --parallel
 
       - name: Verify Build Artifacts
