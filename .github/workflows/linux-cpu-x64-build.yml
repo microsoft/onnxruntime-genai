@@ -1,17 +1,20 @@
+name: "Linux CPU x64 Build"
 on: [ workflow_dispatch, pull_request ]
-
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
 env:
   ort_dir: "onnxruntime-linux-x64-1.16.3"
   ort_zip: "onnxruntime-linux-x64-1.16.3.tgz"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/onnxruntime-linux-x64-1.16.3.tgz"
 jobs:
   job:
-    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU"]
+    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU" ]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v2
 
-     
+
 
       - name: Download OnnxRuntime
         run: |
@@ -39,7 +42,7 @@ jobs:
           cmake --build . --config Release --parallel
           cd ..
           rm -rf build
-  
+
       - name: Build with CMake and clang
         run: |
           set -e -x
@@ -47,7 +50,7 @@ jobs:
           cd build
           CC=clang CXX=clang++ cmake -G "Unix Makefiles" .. -DBUILD_SHARED_LIBS=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_CLANG_TIDY=clang-tidy
           cmake --build . --config Release --parallel
-          
+
 
       - name: Verify Build Artifacts
         if: always()
