@@ -17,10 +17,12 @@
 # -readability-avoid-unconditional-preprocessor-if: for #if 0
 # -cppcoreguidelines-pro-type-vararg: printf
 # -misc-include-cleaner: suppress errors like: "no header providing std::span is directly".
-# -cppcoreguidelines-pro-bounds-pointer-arithmetic: sometimes we use raw arrays
+# -cppcoreguidelines-pro-bounds-pointer-arithmetic: sometimes we use raw arrays.
 # -cppcoreguidelines-avoid-non-const-global-variables: ort_env is global.
-# -bugprone-easily-swappable-parameters: hard to fix
-# -performance-avoid-endl: not a big deal
+# -bugprone-easily-swappable-parameters: hard to fix.
+# -performance-avoid-endl: not a big deal.
+# -cppcoreguidelines-slicing: some slicings are intentional.
+# -cppcoreguidelines-avoid-c-arrays,-modernize-avoid-c-arrays,-readability-function-cognitive-complexity: will fix them later
 Checks: >
   -*,
   cppcoreguidelines-*,
@@ -38,6 +40,9 @@ Checks: >
   -cppcoreguidelines-pro-bounds-pointer-arithmetic,
   -cppcoreguidelines-avoid-magic-numbers,
   -cppcoreguidelines-avoid-non-const-global-variables,
+  -cppcoreguidelines-avoid-c-arrays,
+  -cppcoreguidelines-slicing,
+  -modernize-avoid-c-arrays,
   -google-readability-todo,
   -google-runtime-references,
   -modernize-concat-nested-namespaces,
@@ -46,6 +51,7 @@ Checks: >
   -readability-uppercase-literal-suffix,
   -readability-avoid-unconditional-preprocessor-if,
   -readability-magic-numbers,
+  -readability-function-cognitive-complexity,
   -bugprone-easily-swappable-parameters
 
 WarningsAsErrors: ""
