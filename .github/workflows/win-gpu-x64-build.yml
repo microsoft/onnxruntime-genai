@@ -37,10 +37,10 @@ jobs:
       - name: Verify Cuda SDK
         if: always()
         run: |
-          echo %CUDA_PATH%
-          echo %CUDA_TOOLKIT_ROOT_DIR%
-          echo ${{ env.CUDA_PATH }}
-          echo ${{ env.CUDA_TOOLKIT_ROOT_DIR }}
+          echo "%CUDA_PATH%"
+          echo "%CUDA_TOOLKIT_ROOT_DIR%"
+          echo "${{ env.CUDA_PATH }}"
+          echo "${{ env.CUDA_TOOLKIT_ROOT_DIR }}"
 
       - name: Download OnnxRuntime
         run: |
