@@ -31,7 +31,7 @@ endif()
 set(GENERATORS_ROOT ${PROJECT_SOURCE_DIR}/src)
 set(MODELS_ROOT ${PROJECT_SOURCE_DIR}/src/models)
 set(TESTS_ROOT ${PROJECT_SOURCE_DIR}/src/tests)
-set(PYBIND_ROOT ${PROJECT_SOURCE_DIR}/src/pybind)
+set(PYTHON_ROOT ${PROJECT_SOURCE_DIR}/src/python)
 
 # CUDA Being enabled will make it not a debug build without this option, so all of the C++ headers will complain
 # about a mismatch with the actual debug headers and it'll fail to link. I don't know why this happens, or if this is the best fix.
@@ -53,9 +53,9 @@ file(GLOB test_srcs CONFIGURE_DEPENDS
    "${TESTS_ROOT}/*.cpp"
 )
 
-file(GLOB pybind_srcs CMAKE_CONFIGURE_DEPENDS
-   "${PYBIND_ROOT}/*.h"
-   "${PYBIND_ROOT}/*.cpp"
+file(GLOB python_srcs CMAKE_CONFIGURE_DEPENDS
+   "${PYTHON_ROOT}/*.h"
+   "${PYTHON_ROOT}/*.cpp"
 )
 
 if(USE_CUDA AND CUDA_FOUND)
@@ -113,11 +113,11 @@ target_include_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
 target_link_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
 target_link_libraries(Tests PRIVATE onnxruntime-genai ${ONNXRUNTIME_LIB})
 #
-pybind11_add_module(pybind ${pybind_srcs})
-target_include_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
-target_link_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
-target_link_libraries(pybind PRIVATE onnxruntime-genai ${ONNXRUNTIME_LIB})
-set_target_properties(pybind PROPERTIES OUTPUT_NAME "onnxruntime_genai")
+pybind11_add_module(python ${python_srcs})
+target_include_directories(python PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
+target_link_directories(python PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
+target_link_libraries(python PRIVATE onnxruntime-genai ${ONNXRUNTIME_LIB})
+set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
 
 # Visual C++ - /MP Multiple process build, /WX Warnings as errors
 # Enable:
@@ -143,11 +143,11 @@ if(USE_ORT_EXT)
     add_compile_definitions(USE_ORT_EXT=1)
     target_include_directories(onnxruntime-genai PRIVATE ${CMAKE_SOURCE_DIR}/ort-ext/include)
     target_include_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort-ext/include)
-    target_include_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort-ext/include)
+    target_include_directories(python PRIVATE ${CMAKE_SOURCE_DIR}/ort-ext/include)
     target_link_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort-ext/lib)
-    target_link_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort-ext/lib)
+    target_link_directories(python PRIVATE ${CMAKE_SOURCE_DIR}/ort-ext/lib)
     target_link_libraries(Tests PRIVATE ${ONNXRUNTIME_EXTENSIONS_LIB})
-    target_link_libraries(pybind PRIVATE ${ONNXRUNTIME_EXTENSIONS_LIB})
+    target_link_libraries(python PRIVATE ${ONNXRUNTIME_EXTENSIONS_LIB})
 
     # Copy the onnxruntime-extensions binaries into the build folder so it's found on launch
     file(GLOB onnxruntime_extensions_libs "${CMAKE_SOURCE_DIR}/ort-ext/lib/${ONNXRUNTIME_EXTENSIONS_FILES}")
@@ -164,6 +164,6 @@ if(USE_ORT_EXT)
 # Have visual studio put all files into one single folder vs the default split of header files into a separate folder
 source_group(TREE ${GENERATORS_ROOT} FILES ${generator_srcs})
 source_group("Sources" FILES ${test_srcs})
-source_group("Sources" FILES ${pybind_srcs})
+source_group("Sources" FILES ${python_srcs})
 
 set_property (DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT Tests)
