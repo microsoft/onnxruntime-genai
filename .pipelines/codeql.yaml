@@ -47,6 +47,9 @@ stages:
       inputs:
         targetType: 'F'
         targetArgument: '$(Build.SourcesDirectory)'
+    - task: PublishSecurityAnalysisLogs@3
+      displayName: 'Publish Security Analysis Logs'
+      continueOnError: true
     - task: TSAUpload@2
       displayName: 'TSA upload'
       condition: and (succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
