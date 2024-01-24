@@ -29,6 +29,7 @@ stages:
     variables:
       DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
       Codeql.Enabled: true
+      Codeql.TSAEnabled: true
     workspace:
       clean: all
     pool: 'onnxruntime-Win-CPU-2022'
