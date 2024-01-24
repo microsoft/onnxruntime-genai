@@ -1,4 +1,4 @@
-name: Windows_GPU_Build
+name: "Windows GPU x64 Build"
 on: [ workflow_dispatch, pull_request ]
 
 concurrency:
@@ -8,12 +8,12 @@ concurrency:
 env:
   AZCOPY_AUTO_LOGIN_TYPE: MSI
   AZCOPY_MSI_CLIENT_ID: 63b63039-6328-442f-954b-5a64d124e5b4
-  ort_dir: "onnxruntime-win-x64-gpu-1.16.3.zip"
-  ort_zip: "$(ort_dir).zip"
-  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/$(ort_zip)"
+  ort_dir: "onnxruntime-win-x64-gpu-1.16.3"
+  ort_zip: "onnxruntime-win-x64-gpu-1.16.3.zip"
+  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/onnxruntime-win-x64-gpu-1.16.3.zip"
 
 jobs:
-  Windows-CUDA-12:
+  Windows-CUDA-12-Build:
     runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Win2022-GPU-A10" ]
     steps:
       - uses: actions/checkout@v4
@@ -29,7 +29,6 @@ jobs:
 
       - name: Download OnnxRuntime
         run: |
-          $env:ort_url = "https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/onnxruntime-win-x64-gpu-1.16.3.zip"
           Invoke-WebRequest -Uri $env:ort_url -OutFile $env:ort_zip
 
       - name: Unzip OnnxRuntime
