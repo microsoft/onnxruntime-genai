@@ -27,6 +27,11 @@ jobs:
       - name: Download cuda
         run: azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v12.2" $env:GITHUB_WORKSPACE\cuda_sdk
 
+      - name: Verify Cuda SDK
+        if: always()
+        run: |
+          Get-ChildItem -Path $env:GITHUB_WORKSPACE\cuda_sdk -Recurse
+
       - name: Download OnnxRuntime
         run: |
           Invoke-WebRequest -Uri $env:ort_url -OutFile $env:ort_zip
