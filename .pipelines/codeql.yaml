@@ -28,8 +28,8 @@ stages:
   - job: win
     variables:
       DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
-     workspace:
-     clean: all
+    workspace:
+      clean: all
     pool: ${{ parameters.MachinePool }}
     timeoutInMinutes:  300
     steps:
