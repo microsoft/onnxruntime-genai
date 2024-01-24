@@ -37,20 +37,26 @@ jobs:
         run: |
           git submodule update --init --recursive
 
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v2
+        with:
+          languages: ['cpp']
+
       - name: Build with CMake
         run: |
-          mkdir build
-          cd build
           cmake -G "Visual Studio 17 2022" -A x64 .. -DCMAKE_BUILD_TYPE=Release
           cmake --build . --config Release --parallel
 
       - name: Verify Build Artifacts
         if: always()
         run: |
-          Get-ChildItem -Path $env:GITHUB_WORKSPACE\build\Release -Recurse
+          Get-ChildItem -Path $env:GITHUB_WORKSPACE\Release -Recurse
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v2
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v3
         with:
           name: onnxruntime-genai-win-cpu-x64
-          path: build/Release/*.lib
+          path: Release/*.lib
