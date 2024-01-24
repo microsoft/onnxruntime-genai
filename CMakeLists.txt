@@ -10,8 +10,7 @@ set(USE_CUDA 1) # "Build with CUDA support"
 set(USE_ORT_EXT 0) # "Build with Onnxruntime Extensions tokenizer support"
 
 # Checking if CUDA is supported
-include(CheckLanguage)
-find_package(CUDAToolkit)
+include(FindCUDAToolkit)
 if (CUDAToolkit_FOUND)
     set (CUDA_FOUND TRUE)
 else()
