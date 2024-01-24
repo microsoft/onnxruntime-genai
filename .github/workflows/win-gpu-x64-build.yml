@@ -32,7 +32,6 @@ jobs:
       - name: Verify Cuda SDK
         if: always()
         run: |
-          Get-ChildItem -Path $env:GITHUB_WORKSPACE\cuda_sdk -Recurse
           echo $env:GITHUB_PATH
 
       - name: Download OnnxRuntime
