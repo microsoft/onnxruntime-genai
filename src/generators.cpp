@@ -50,7 +50,7 @@ SearchParams::SearchParams(const Model& model)
       cuda_stream{model.cuda_stream_} {
 }
 
-ProviderOptions GetDefaultProviderOptions(DeviceType device_type) {
+ProviderOptions GetDefaultProviderOptions([[maybe_unused]] DeviceType device_type) {
   ProviderOptions options;
 #if USE_CUDA
   if (device_type == DeviceType::CUDA) {
