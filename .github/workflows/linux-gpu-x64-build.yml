@@ -47,15 +47,12 @@ jobs:
           docker run --rm onnxruntimegpubuild env
           echo "Running docker image onnxruntimegpubuild"
           docker run \
-           --gpus all \
-           --rm \
-           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-           --volume $RUNNER_TEMP:/build \
-           -w /build onnxruntimegpubuild bash \ 
-           -c "echo $PATH && /usr/bin/cmake \
-           -e CUDA_PATH=/usr/local/cuda-12.2 \
-           -G Ninja /onnxruntime_src -DBUILD_SHARED_LIBS=ON -DUSE_CUDA=ON -DCMAKE_BUILD_TYPE=Release && ninja"
-
-          
-
+            --gpus all \
+            --rm \
+            --volume $GITHUB_WORKSPACE:/onnxruntime_src \
+            --volume $RUNNER_TEMP:/build \
+            -w /build onnxruntimegpubuild bash \ 
+            -c "echo $PATH && /usr/bin/cmake \
+            -e CUDA_PATH=/usr/local/cuda-12.2 \
+            -G Ninja /onnxruntime_src -DBUILD_SHARED_LIBS=ON -DUSE_CUDA=ON -DCMAKE_BUILD_TYPE=Release && ninja"
 
