@@ -13,7 +13,9 @@ set(USE_ORT_EXT 0) # "Build with Onnxruntime Extensions tokenizer support"
 include(CheckLanguage)
 check_language(CUDA)
 if (CMAKE_CUDA_COMPILER)
-    set (CUDA_FOUND TRUE)
+    message(STATUS "CUDA found CUDAToolkit_VERSION ${CUDAToolkit_VERSION} with CMAKE_CUDA_COMPILER ${CMAKE_CUDA_COMPILER}" )
+else()
+    message(STATUS "CUDA not found")
 endif()
 
 if("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_LESS 9)
@@ -35,7 +37,7 @@ set(PYTHON_ROOT ${PROJECT_SOURCE_DIR}/src/python)
 
 # CUDA Being enabled will make it not a debug build without this option, so all of the C++ headers will complain
 # about a mismatch with the actual debug headers and it'll fail to link. I don't know why this happens, or if this is the best fix.
-if(USE_CUDA AND CUDA_FOUND AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+if(USE_CUDA AND CMAKE_CUDA_COMPILER AND CMAKE_BUILD_TYPE STREQUAL "Debug")
   add_compile_definitions(_DEBUG=1)
 endif()
 
@@ -58,7 +60,7 @@ file(GLOB python_srcs CMAKE_CONFIGURE_DEPENDS
    "${PYTHON_ROOT}/*.cpp"
 )
 
-if(USE_CUDA AND CUDA_FOUND)
+if(USE_CUDA AND CMAKE_CUDA_COMPILER)
     # Don't let cmake set a default value for CMAKE_CUDA_ARCHITECTURES
     cmake_policy(SET CMP0104 OLD)
     enable_language(CUDA)
