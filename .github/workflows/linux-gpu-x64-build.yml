@@ -1,5 +1,5 @@
 name: "Linux GPU x64 Build"
-on: [ workflow_dispatch, pull_request ]
+on: [ workflow_dispatch ]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}

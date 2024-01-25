@@ -13,8 +13,6 @@ env:
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/onnxruntime-win-x64-gpu-1.16.3.zip"
   cuda_dir: "${{ github.workspace }}\\cuda_sdk"
   cuda_version: "12.2"
-#  CUDA_PATH: "${{ github.workspace }}\\cuda_sdk\\v12.2"
-#  CUDA_TOOLKIT_ROOT_DIR: "${{ github.workspace }}\\cuda_sdk\\v12.2"
 
 jobs:
   Windows-CUDA-12-Build:
