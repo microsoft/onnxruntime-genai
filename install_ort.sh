@@ -2,5 +2,5 @@
 
 mkdir -p ort/
 
-cp /(please change)/onnxruntime/include/onnxruntime/core/session/onnxruntime_c_api.h ort/
-cp /(please change)/onnxruntime/build/Linux/Release/libonnxruntime*.so* ort/
+cp /home/aciddelgado/ort_always_main/include/onnxruntime/core/session/onnxruntime_c_api.h ort/
+cp /home/aciddelgado/ort_always_main/build/Linux/RelWithDebInfo/libonnxruntime*.so* ort/

@@ -120,7 +120,7 @@ endif()
 add_executable (Tests ${test_srcs})
 target_include_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort)
 target_link_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort)
-target_link_libraries(Tests PRIVATE Generators Models ${ONNXRUNTIME_LIB})
+target_link_libraries(Tests PRIVATE Models Generators ${ONNXRUNTIME_LIB})
 
 pybind11_add_module(pybind ${pybind_srcs})
 target_include_directories(pybind PRIVATE ${CMAKE_SOURCE_DIR}/ort)

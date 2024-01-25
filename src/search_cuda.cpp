@@ -6,6 +6,8 @@
 #include <queue>
 #include <random>
 
+#include "top_p.cuh"
+
 namespace Generators {
 
 void OnCudaError(cudaError_t error) {
@@ -172,7 +174,7 @@ void TopPSampling(int32_t* d_next_token, float* d_scores, int size, float thresh
 
   SoftMax(scores, temperature);
 
-  // Sort an array of indices into the scores
+  // Sort an array of indices by scores
   std::vector<int32_t> indices(scores.size());
   std::iota(indices.begin(), indices.end(), 0);
   std::sort(indices.begin(), indices.end(), [scores = scores.data()](int32_t i, int32_t j) { return scores[i] > scores[j]; });
@@ -192,14 +194,17 @@ void TopPSampling(int32_t* d_next_token, float* d_scores, int size, float thresh
 }
 
 void GreedySearch_Cuda::SampleTopP(float p, float temperature) {
-  std::random_device rd;
-  std::mt19937 gen(rd());
-  std::uniform_real_distribution<float> dis(0, p);
+  // std::random_device rd;
+  // std::mt19937 gen(rd());
+  // std::uniform_real_distribution<float> dis(0, p);
 
-  for (int i = 0; i < params_.batch_size; i++) {
-    std::span<float> scores = next_token_scores_.subspan(i * params_.vocab_size, params_.vocab_size);
-    TopPSampling(next_tokens_.data() + i, scores.data(), static_cast<int>(scores.size()), dis(gen), temperature);
-  }
+  // for (int i = 0; i < params_.batch_size; i++) {
+  //   std::span<float> scores = next_token_scores_.subspan(i * params_.vocab_size, params_.vocab_size);
+  //   TopPSampling(next_tokens_.data() + i, scores.data(), static_cast<int>(scores.size()), dis(gen), temperature);
+  // }
+
+  std::span<float> scores = next_token_scores_.subspan(0, params_.batch_size * params_.vocab_size);
+  cuda::SampleTopPKernel(next_tokens_.data(), scores.data(), int(scores.size() / params_.batch_size), params_.batch_size, p, temperature, params_.cuda_stream);
 
   CheckForEOS();
   AppendNextTokensToSequences();
