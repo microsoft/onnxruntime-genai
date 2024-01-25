@@ -10,6 +10,8 @@ set(USE_CUDA 1) # "Build with CUDA support"
 set(USE_ORT_EXT 0) # "Build with Onnxruntime Extensions tokenizer support"
 
 # Checking if CUDA is supported
+include(CheckLanguage)
+check_language(CUDA)
 include(FindCUDAToolkit)
 if (CUDAToolkit_FOUND)
     message(STATUS "CUDA found CUDAToolkit_VERSION ${CUDAToolkit_VERSION} with CMAKE_CUDA_COMPILER ${CMAKE_CUDA_COMPILER}" )
