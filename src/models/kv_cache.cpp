@@ -7,22 +7,22 @@ namespace Generators {
 KV_Cache_Combined::KV_Cache_Combined(Model& model, State& state)
     : model_{model},
       state_{state},
-      layer_count_{model.config_->num_hidden_layers},
-      shape_{2, state_.search_params_.batch_size * state_.search_params_.num_beams, model.config_->num_attention_heads, 0, model.config_->hidden_size},
-      empty_past_{OrtValue::CreateTensor(*model_.allocator_device_, shape_, model_.score_type_)} {
+      layer_count_{model.config_->model.num_hidden_layers},
+      shape_{2, state_.search_params_.batch_size * state_.search_params_.num_beams, model.config_->model.num_attention_heads, 0, model.config_->model.hidden_size},
+      empty_past_{OrtValue::CreateTensor(*model_.allocator_device_, shape_, model_.config_->model.kv_type)} {
   pasts_.resize(layer_count_);
   presents_.reserve(layer_count_);
 
   shape_[3] = state_.search_params_.sequence_length;
   for (int i = 0; i < layer_count_; ++i) {
-    presents_.push_back(OrtValue::CreateTensor(*model.allocator_device_, shape_, model_.score_type_));
+    presents_.push_back(OrtValue::CreateTensor(*model.allocator_device_, shape_, model_.config_->model.kv_type));
 
-    char string[32];
-    snprintf(string, std::size(string), past_name_, i);
-    input_name_strings_.push_back(string);
+    char string[64];
+    snprintf(string, std::size(string), model.config_->model.past_names.c_str(), i);
+    input_name_strings_.emplace_back(string);
 
-    snprintf(string, std::size(string), present_name_, i);
-    output_name_strings_.push_back(string);
+    snprintf(string, std::size(string), model.config_->model.present_names.c_str(), i);
+    output_name_strings_.emplace_back(string);
   }
 }
 
@@ -42,15 +42,16 @@ void KV_Cache_Combined::Update(std::span<const int32_t> beam_indices, int curren
   assert(state_.search_params_.num_beams == 1 || !beam_indices.empty());  // We require beam_indices if we're a beam search
 
   for (int i = 0; i < layer_count_; i++) {
-    if (beam_indices.empty())
+    if (beam_indices.empty()) {
       pasts_[i] = std::move(presents_[i]);
-    else
+    } else {
       PickPastState(beam_indices, i);
+    }
   }
 
   shape_[3] = current_length;
   for (int i = 0; i < layer_count_; i++) {
-    presents_[i] = OrtValue::CreateTensor(*model_.allocator_device_, shape_, model_.score_type_);
+    presents_[i] = OrtValue::CreateTensor(*model_.allocator_device_, shape_, model_.config_->model.kv_type);
     state_.inputs_[input_index_ + i] = pasts_[i].get();
     state_.outputs_[output_index_ + i] = presents_[i].get();
   }
@@ -84,7 +85,7 @@ void KV_Cache_Combined::PickPastState(std::span<const int32_t> beam_indices, int
 #endif
   {
     for (size_t j = 0; j < beam_indices.size(); j++) {
-      int32_t beam_index = beam_indices[j];
+      int32_t const beam_index = beam_indices[j];
       auto present_key = present_span.subspan(beam_index * block_size_per_beam, block_size_per_beam);
       auto present_value = present_span.subspan(past_key_size + beam_index * block_size_per_beam, block_size_per_beam);
 
@@ -99,39 +100,38 @@ void KV_Cache_Combined::PickPastState(std::span<const int32_t> beam_indices, int
 }
 
 void KV_Cache_Combined::PickPastState(std::span<const int32_t> beam_indices, int index) {
-  if (model_.score_type_ == Ort::TypeToTensorType<float>::type)
+  if (model_.config_->model.kv_type == Ort::TypeToTensorType<float>::type) {
     PickPastState<float>(beam_indices, index);
-  else
+  } else {
     PickPastState<Ort::Float16_t>(beam_indices, index);
+  }
 }
 
-KV_Cache::KV_Cache(Model& model, State& state,
-                   std::span<const char*> past_names, std::span<const char*> present_names)
+KV_Cache::KV_Cache(Model& model, State& state)
     : model_{model},
       state_{state},
-      layer_count_{model_.config_->num_hidden_layers},
-      past_names_{past_names},
-      present_names_{present_names},
-      shape_{state_.search_params_.batch_size * state_.search_params_.num_beams, model.config_->num_attention_heads, 0, model.config_->hidden_size},
-      empty_past_{OrtValue::CreateTensor(*model_.allocator_device_, shape_, model_.score_type_)} {
+      layer_count_{model_.config_->model.num_hidden_layers},
+      shape_{state_.search_params_.batch_size * state_.search_params_.num_beams, model.config_->model.num_attention_heads, 0, model.config_->model.hidden_size},
+      empty_past_{OrtValue::CreateTensor(*model_.allocator_device_, shape_, model_.config_->model.kv_type)} {
   pasts_.resize(layer_count_ * 2);
   presents_.reserve(layer_count_ * 2);
 
-  shape_[2] = state_.search_params_.sequence_length; // Set this after empty_past_ has been created with 0 for this field
+  shape_[2] = state_.search_params_.sequence_length;  // Set this after empty_past_ has been created with 0 for this field
 
   for (int i = 0; i < layer_count_; ++i) {
-    presents_.push_back(OrtValue::CreateTensor(*model_.allocator_device_, shape_, model_.score_type_));
-    presents_.push_back(OrtValue::CreateTensor(*model_.allocator_device_, shape_, model_.score_type_));
+    presents_.push_back(OrtValue::CreateTensor(*model_.allocator_device_, shape_, model_.config_->model.kv_type));
+    presents_.push_back(OrtValue::CreateTensor(*model_.allocator_device_, shape_, model_.config_->model.kv_type));
 
-    char string[32];
-    for (auto* name : past_names_) {
-      snprintf(string, std::size(string), name, i);
-      input_name_strings_.push_back(string);
-    }
-    for (auto* name : present_names_) {
-      snprintf(string, std::size(string), name, i);
-      output_name_strings_.push_back(string);
-    }
+    char string[64];
+    snprintf(string, std::size(string), model.config_->model.past_names_key.c_str(), i);
+    input_name_strings_.emplace_back(string);
+    snprintf(string, std::size(string), model.config_->model.past_names_value.c_str(), i);
+    input_name_strings_.emplace_back(string);
+
+    snprintf(string, std::size(string), model.config_->model.present_names_key.c_str(), i);
+    output_name_strings_.emplace_back(string);
+    snprintf(string, std::size(string), model.config_->model.present_names_value.c_str(), i);
+    output_name_strings_.emplace_back(string);
   }
 }
 
@@ -158,16 +158,17 @@ void KV_Cache::Add() {
 
 void KV_Cache::Update(std::span<const int32_t> beam_indices, int current_length) {
   for (int i = 0; i < layer_count_ * 2; i++) {
-    if (beam_indices.empty())
+    if (beam_indices.empty()) {
       pasts_[i] = std::move(presents_[i]);
-    else
+    } else {
       PickPastState(beam_indices, i);
+    }
     state_.inputs_[input_index_ + i] = pasts_[i].get();
   }
 
   shape_[2] = current_length;
   for (int i = 0; i < layer_count_ * 2; i++) {
-    presents_[i] = OrtValue::CreateTensor(*model_.allocator_device_, shape_, model_.score_type_);
+    presents_[i] = OrtValue::CreateTensor(*model_.allocator_device_, shape_, model_.config_->model.kv_type);
     state_.outputs_[output_index_ + i] = presents_[i].get();
   }
 }
@@ -195,7 +196,7 @@ void KV_Cache::PickPastState(std::span<const int32_t> beam_indices, int index) {
 #endif
   {
     for (size_t j = 0; j < beam_indices.size(); j++) {
-      int32_t beam_index = beam_indices[j];
+      int32_t const beam_index = beam_indices[j];
       auto present = present_span.subspan(beam_index * block_size_per_beam, block_size_per_beam);
       auto past = past_span.subspan(j * block_size_per_beam, block_size_per_beam);
       copy(present, past);
@@ -206,35 +207,34 @@ void KV_Cache::PickPastState(std::span<const int32_t> beam_indices, int index) {
 }
 
 void KV_Cache::PickPastState(std::span<const int32_t> beam_indices, int index) {
-  if (model_.score_type_ == Ort::TypeToTensorType<float>::type)
+  if (model_.config_->model.kv_type == Ort::TypeToTensorType<float>::type) {
     PickPastState<float>(beam_indices, index);
-  else
+  } else {
     PickPastState<Ort::Float16_t>(beam_indices, index);
+  }
 }
 
-Cross_Cache::Cross_Cache(Model& model, State& state,
-                         std::span<const char*> past_names, std::span<const char*> present_names)
+Cross_Cache::Cross_Cache(Model& model, State& state)
     : model_{model},
       state_{state},
-      layer_count_{model_.config_->num_hidden_layers},
-      past_names_{past_names},
-      present_names_{present_names},
-      shape_{state_.search_params_.batch_size * state_.search_params_.num_beams, model.config_->num_attention_heads, 1500, model.config_->hidden_size} {
+      layer_count_{model_.config_->model.num_hidden_layers},
+      shape_{state_.search_params_.batch_size * state_.search_params_.num_beams, model.config_->model.num_attention_heads, 1500, model.config_->model.hidden_size} {
   values_.reserve(layer_count_ * 2);
 
   for (int i = 0; i < layer_count_; ++i) {
-    char string[32];
-    values_.push_back(OrtValue::CreateTensor(*model_.allocator_device_, shape_, model_.score_type_));
-    values_.push_back(OrtValue::CreateTensor(*model_.allocator_device_, shape_, model_.score_type_));
+    values_.push_back(OrtValue::CreateTensor(*model_.allocator_device_, shape_, model_.config_->model.kv_type));
+    values_.push_back(OrtValue::CreateTensor(*model_.allocator_device_, shape_, model_.config_->model.kv_type));
 
-    for (auto* name : past_names_) {
-      snprintf(string, std::size(string), name, i);
-      input_name_strings_.push_back(string);
-    }
-    for (auto* name : present_names_) {
-      snprintf(string, std::size(string), name, i);
-      output_name_strings_.push_back(string);
-    }
+    char string[64];
+    snprintf(string, std::size(string), model.config_->model.cross_past_names_key.c_str(), i);
+    input_name_strings_.emplace_back(string);
+    snprintf(string, std::size(string), model.config_->model.cross_past_names_value.c_str(), i);
+    input_name_strings_.emplace_back(string);
+
+    snprintf(string, std::size(string), model.config_->model.cross_present_names_key.c_str(), i);
+    output_name_strings_.emplace_back(string);
+    snprintf(string, std::size(string), model.config_->model.cross_present_names_value.c_str(), i);
+    output_name_strings_.emplace_back(string);
   }
 }
 

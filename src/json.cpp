@@ -1,16 +1,18 @@
 #include "generators.h"
 #include "json.h"
+
+#include <cmath>
 #include <charconv>
 
 namespace JSON {
 
 Element s_ignore;  // A default implementation ignores all data, so keep one around for easy ignoring
 
-Element& Element::OnArray(std::string_view name) {
+Element& Element::OnArray(std::string_view /*name*/) {
   return s_ignore;
 }
 
-Element& Element::OnObject(std::string_view name) {
+Element& Element::OnObject(std::string_view /*name*/) {
   return s_ignore;
 }
 
@@ -46,12 +48,13 @@ JSON::JSON(Element& element, std::string_view document) : begin_{document.data()
   } catch (const std::exception& message) {
     // Figure out line number of error by counting carriage returns seen from start to error location
     int line = 1;
-    auto last_cr = begin_;
-    for (auto* p = begin_; p < current_; p++)
+    const auto* last_cr = begin_;
+    for (const auto* p = begin_; p < current_; p++) {
       if (*p == '\r') {
         line++;
         last_cr = p;
       }
+    }
 
     std::ostringstream oss;
     oss << "JSON Error: " << message.what() << " at line " << line << " index " << static_cast<int>(current_ - last_cr);
@@ -60,8 +63,9 @@ JSON::JSON(Element& element, std::string_view document) : begin_{document.data()
 }
 
 bool JSON::Skip(char c) {
-  if (current_ == end_ || *current_ != c)
+  if (current_ == end_ || *current_ != c) {
     return false;
+  }
 
   current_++;
   return true;
@@ -69,26 +73,29 @@ bool JSON::Skip(char c) {
 
 template <size_t TCount>
 bool JSON::Skip(const char (&sz)[TCount]) {
-  size_t count = TCount - 1;  // Remove the null terminator from the string literal
-  if (current_ + count >= end_ || std::strncmp(current_, sz, count) != 0)
+  size_t const count = TCount - 1;  // Remove the null terminator from the string literal
+  if (current_ + count >= end_ || std::strncmp(current_, sz, count) != 0) {
     return false;
+  }
 
   current_ += count;
   return true;
 }
 
 unsigned char JSON::GetChar() {
-  if (current_ == end_)
+  if (current_ == end_) {
     throw std::runtime_error("Unexpected end of JSON data");
+  }
 
   return *current_++;
 }
 
 void JSON::Parse_Whitespace() {
   while (current_ != end_) {
-    char c = *current_;
-    if (c != '\x20' && c != '\x9' && c != '\xD' && c != '\xA')  // Space, tab, cr, lf
+    char const c = *current_;
+    if (c != '\x20' && c != '\x9' && c != '\xD' && c != '\xA') {  // Space, tab, cr, lf
       return;
+    }
     current_++;
   }
 }
@@ -101,18 +108,20 @@ void JSON::Parse_Object(Element& element) {
   }
 
   while (true) {
-    if (!Skip('\"'))
+    if (!Skip('\"')) {
       throw std::runtime_error("Expecting \"");
+    }
 
     auto name = Parse_String();
 
     Parse_Whitespace();
-    if (GetChar() != ':')
+    if (GetChar() != ':') {
       throw std::runtime_error("Expecting :");
+    }
 
     Parse_Value(element, name);
 
-    char c = GetChar();
+    char const c = GetChar();
     if (c == ',') {
       Parse_Whitespace();
       continue;
@@ -129,7 +138,7 @@ void JSON::Parse_Object(Element& element) {
 
 void JSON::Parse_Value(Element& element, std::string_view name) {
   Parse_Whitespace();
-  switch (char c = GetChar()) {
+  switch (char const c = GetChar()) {
     case '{': {
       auto& element_object = element.OnObject(name);
       Parse_Object(element_object);
@@ -142,13 +151,19 @@ void JSON::Parse_Value(Element& element, std::string_view name) {
       element.OnString(name, Parse_String());
     } break;
     case 't':
-      if (Skip("rue")) element.OnBool(name, true);
+      if (Skip("rue")) {
+        element.OnBool(name, true);
+      }
       break;
     case 'f':
-      if (Skip("alse")) element.OnBool(name, false);
+      if (Skip("alse")) {
+        element.OnBool(name, false);
+      }
       break;
     case 'n':
-      if (Skip("ull")) element.OnNull(name);
+      if (Skip("ull")) {
+        element.OnNull(name);
+      }
       break;
     default:
       if (c >= '0' && c <= '9' || c == '-') {
@@ -169,9 +184,10 @@ void JSON::Parse_Array(Element& element) {
 
   while (true) {
     Parse_Value(element, {});
-    char c = GetChar();
-    if (c == ',')
+    char const c = GetChar();
+    if (c == ',') {
       continue;
+    }
     if (c == ']') {
       element.OnComplete(false);
       return;
@@ -182,10 +198,11 @@ void JSON::Parse_Array(Element& element) {
 }
 
 double JSON::Parse_Number() {
-  double value;
+  double value = NAN;
   auto result = std::from_chars(current_, end_, value);
-  if (result.ec != std::errc{})
+  if (result.ec != std::errc{}) {
     throw std::runtime_error("Expecting number");
+  }
   current_ = result.ptr;
   return value;
 }
@@ -193,8 +210,9 @@ double JSON::Parse_Number() {
 std::string JSON::Parse_String() {
   std::string string;
   while (char c = GetChar()) {
-    if (c == '"')
+    if (c == '"') {
       break;
+    }
 
     if (c == '\\') {
       switch (c = GetChar()) {
@@ -219,13 +237,15 @@ std::string JSON::Parse_String() {
           break;
         case 'u':  // 16-bit unicode escape code
         {
-          if (current_ + 4 > end_)
+          if (current_ + 4 > end_) {
             throw std::runtime_error("End of file parsing string uXXXX code");
+          }
 
-          unsigned value;
+          unsigned value = 0;
           auto result = std::from_chars(current_, current_ + 4, value, 16);
-          if (result.ec != std::errc{} || result.ptr != current_ + 4)
+          if (result.ec != std::errc{} || result.ptr != current_ + 4) {
             throw std::runtime_error("Error parsing uXXXX code");
+          }
           current_ = result.ptr;
           throw std::runtime_error("Unsupported uXXXX code used");  // TODO: Current we ignore these, as strings are already utf8
           continue;                                                 // We don't push_back the char in this case

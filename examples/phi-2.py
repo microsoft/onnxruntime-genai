@@ -11,6 +11,8 @@ print("Loading model...")
 model=og.Model("../../test_models/phi-2", device_type)
 print("Model loaded")
 
+tokenizer2=model.CreateTokenizer()
+
 # Keep asking for input prompts in an loop
 while True:
     print("Enter your text (type 'END' to stop):")

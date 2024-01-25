@@ -1,10 +1,6 @@
 #include "../generators.h"
 #include "../search.h"
 #include "../models/model.h"
-#include "../models/gpt.h"
-#if USE_CUDA
-#include "../search_cuda.h"
-#endif
 #include <iostream>
 
 // Our working directory is generators/build so one up puts us in the root directory:
@@ -59,7 +55,7 @@ void Test_GreedySearch_Gpt_Fp32() {
   for (int i = 0; i < params.batch_size; i++) {
     auto sequence = search->GetSequence(i).GetCPU();
     auto* expected_output_start = &expected_output[i * params.max_length];
-    if(!std::equal(expected_output_start, expected_output_start + params.max_length, sequence.begin(), sequence.end()))
+    if (!std::equal(expected_output_start, expected_output_start + params.max_length, sequence.begin(), sequence.end()))
       throw std::runtime_error("Test Results Mismatch");
   }
 
@@ -115,7 +111,7 @@ void Test_BeamSearch_Gpt_Fp32() {
   for (int i = 0; i < search.params_.batch_size; i++) {
     auto sequence = std::span<int32_t>(output_sequence.data() + search.params_.max_length * i, search.params_.max_length);
     auto* expected_output_start = &expected_output[i * search.params_.max_length];
-    if(!std::equal(expected_output_start, expected_output_start + search.params_.max_length, sequence.begin(), sequence.end()))
+    if (!std::equal(expected_output_start, expected_output_start + search.params_.max_length, sequence.begin(), sequence.end()))
       throw std::runtime_error("Test Results Mismatch");
   }
 
@@ -160,7 +156,7 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
     auto sequence = sequence_gpu.GetCPU();
 
     auto* expected_output_start = &expected_output[i * params.max_length];
-    if(!std::equal(expected_output_start, expected_output_start + params.max_length, sequence.begin(), sequence.end()))
+    if (!std::equal(expected_output_start, expected_output_start + params.max_length, sequence.begin(), sequence.end()))
       throw std::runtime_error("Test Results Mismatch");
   }
 
@@ -227,7 +223,7 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
   for (int i = 0; i < params.batch_size; i++) {
     auto sequence = std::span<int32_t>(output_sequence_cpu.get() + params.max_length * i, params.max_length);
     auto* expected_output_start = &expected_output[i * params.max_length];
-    if(!std::equal(expected_output_start, expected_output_start + params.max_length, sequence.begin(), sequence.end()))
+    if (!std::equal(expected_output_start, expected_output_start + params.max_length, sequence.begin(), sequence.end()))
       throw std::runtime_error("Test Results Mismatch");
   }
 
@@ -237,6 +233,42 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
 void Test_BeamSearch_Gpt_Cuda() {
   for (auto model_path : c_tiny_gpt2_model_paths)
     Test_BeamSearch_Gpt_Cuda(model_path.first, model_path.second);
+}
+
+void Test_Phi2_Cuda() {
+#if TEST_PHI2
+  std::cout << "Testing_Phi2\r\n";
+#if USE_ORT_EXT
+
+  auto prompt = R"(
+def print_prime(n):
+'''
+Print all primes between 1 and n
+'''
+)";
+
+  std::cout << "With prompt:" << prompt << "\r\n";
+
+  auto provider_options = Generators::GetDefaultProviderOptions(Generators::DeviceType::CUDA);
+  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "phi-2", &provider_options);
+  auto tokenizer = model->CreateTokenizer();
+  auto tokens = tokenizer->Encode(prompt);
+
+  Generators::SearchParams params{*model};
+  params.batch_size = 1;
+  params.sequence_length = static_cast<int>(tokens.size());
+  params.input_ids = tokens;
+  params.max_length = 128;
+
+  auto search = params.CreateSearch();
+  auto result = model->Generate(params);
+
+  std::cout << tokenizer->Decode(result) << "\r\n";
+  std::cout << "Test complete\r\n";
+#else
+  std::cout << "Test skipped - not built with onnxruntime extensions\r\n";
+#endif
+#endif
 }
 
 #endif

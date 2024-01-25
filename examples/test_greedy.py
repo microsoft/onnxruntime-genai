@@ -1,5 +1,4 @@
 import onnxruntime_genai as og
-import numpy as np
 from transformers import GPT2Tokenizer
 
 device_type = og.DeviceType.CPU
@@ -13,7 +12,6 @@ input_tokens = tokenizer.encode(text, return_tensors='np')
 model=og.Gpt_Model("../../python/onnx_models/gpt2.onnx", device_type)
 
 params=og.SearchParams()
-params.num_beams = 4
 params.max_length = 64
 params.batch_size = input_tokens.shape[0]
 params.sequence_length = input_tokens.shape[1]
@@ -22,16 +20,16 @@ params.vocab_size = model.GetVocabSize()
 params.eos_token_id = tokenizer.eos_token_id
 params.pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else params.eos_token_id
 
-search=og.BeamSearch(params, model.DeviceType)
+search=og.GreedySearch(params, model.DeviceType)
 state=og.Gpt_State(model, search.GetSequenceLengths(), params)
 
 print("Inputs:")
 print(input_tokens)
 print("Input prompt:", text)
 
-print("Running beam search loop...")
+print("Running greedy search loop...")
 while not search.IsDone():
-    search.SetLogits(state.Run(search.GetSequenceLength(), search.GetNextTokens(), search.GetNextIndices()))
+    search.SetLogits(state.Run(search.GetSequenceLength(), search.GetNextTokens()))
 
     # Scoring
     # Generators::Processors::MinLength(search, 1)

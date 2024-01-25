@@ -12,11 +12,6 @@ struct Whisper_Model : Model {
 
   std::unique_ptr<OrtSession> session_decoder_;  // decoder.onnx
   std::unique_ptr<OrtSession> session_encoder_;  // encoder_decoder_init.onnx
-
-  std::array<const char*, 2> past_names_{"past_key_self_%d", "past_value_self_%d"};
-  std::array<const char*, 2> present_names_{"present_key_self_%d", "present_value_self_%d"};
-  std::array<const char*, 2> past_cross_names_{"past_key_cross_%d", "past_value_cross_%d"};
-  std::array<const char*, 2> present_cross_names_{"present_key_cross_%d", "present_value_cross_%d"};
 };
 
 struct Whisper_State : State {
@@ -24,15 +19,15 @@ struct Whisper_State : State {
   RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) override;
 
  private:
-  void UpdateInputs(RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices, int current_length);
+  void UpdateInputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> next_indices, int current_length);
 
   Whisper_Model& model_;
   bool first_run_{true};
 
   InputIDs<int32_t> decoder_input_ids_{model_, *this};
   Logits logits_{model_, *this};
-  KV_Cache kv_cache_{model_, *this, model_.past_names_, model_.present_names_};
-  Cross_Cache cross_cache_{model_, *this, model_.past_cross_names_, model_.present_cross_names_};
+  KV_Cache kv_cache_{model_, *this};
+  Cross_Cache cross_cache_{model_, *this};
   std::unique_ptr<OrtValue> encoder_hidden_states_;
 };
 }  // namespace Generators

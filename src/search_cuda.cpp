@@ -62,7 +62,7 @@ BeamSearch_Cuda::BeamSearch_Cuda(const SearchParams& params)
 BeamSearch_Cuda::~BeamSearch_Cuda() = default;
 
 void Search_Cuda::SetLogits(RoamingArray<float> logits_unk) {
-  gpu_span<float> logits=logits_unk;
+  gpu_span<float> logits = logits_unk;
   // Logits has shape (batch_size, input_length, vocab_size),
   // where input_length equals to parameters_->sequence_length for first subgraph call, and 1 for the remaining calls.
   // RyanHill: Does it really? The output of gpt2 is always a input_length of 1, regardless of input sequence length

@@ -16,7 +16,7 @@ struct Search_Cpu : Search {
   // Extra scoring steps go here
 
   //
-  std::span<float> GetScores(int batch_beam_index);
+  std::span<float> GetScores(int batch_beam_index) const;
   Sequences& GetSequences() { return sequences_; }
 
   const SearchParams& params_;

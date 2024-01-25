@@ -1,4 +1,7 @@
 #pragma once
+#if USE_ORT_EXT
+#include "tfmtok_c.h"
+#endif
 
 namespace Generators {
 
@@ -20,19 +23,46 @@ struct State {
   void ClearIO();                 // Clear all inputs/outputs
 };
 
+template <typename T>
+struct TfmPtr {
+  ~TfmPtr() { TfmDispose(&p_); }
+  T** Address() {
+    assert(!p_);
+    return &p_;
+  }
+  operator T*() { return p_; }
+  operator const T*() const { return p_; }
+
+  T* p_{};
+};
+
+#if USE_ORT_EXT
+struct Tokenizer {
+  Tokenizer(Config& config);
+
+  std::vector<int32_t> Encode(const char* text) const;
+  std::string Decode(std::span<int32_t> tokens) const;
+
+  TfmPtr<TfmTokenizer> tokenizer_;
+};
+#endif
+
 struct Model {
-  Model(std::unique_ptr<Config> config, OrtEnv& ort_env, const ProviderOptions* provider_options);
+  Model(std::unique_ptr<Config> config, const ProviderOptions* provider_options);
   virtual ~Model();
 
   std::vector<int32_t> Generate(const SearchParams& params);
+#if USE_ORT_EXT
+  std::unique_ptr<Tokenizer> CreateTokenizer();
+#endif
 
   virtual std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths, const SearchParams& params) = 0;
 
-  std::unique_ptr<OrtValue> ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams);
+  std::unique_ptr<OrtValue> ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams) const;
 
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
-  cudaStream_t cuda_stream_;
+  cudaStream_t cuda_stream_{};
   DeviceType device_type_{DeviceType::CPU};
   Ort::Allocator& allocator_cpu_{Ort::Allocator::GetWithDefaultOptions()};
 
@@ -40,12 +70,8 @@ struct Model {
   std::unique_ptr<Ort::Allocator> allocator_cuda_;
   Ort::Allocator* allocator_device_{};  // Can be CUDA or CPU based on the DeviceType in the model
 
-  bool logits_uses_seq_len_{};  // Logits shape is [... seq_len, vocab_size ] vs [... 1, vocab_size ]
-  ONNXTensorElementDataType score_type_;
-
  protected:
   void InitDeviceAllocator(OrtSession& session);
-  void InitLogits(OrtTypeInfo& info);
 };
 
 std::unique_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const ProviderOptions* provider_options = nullptr);

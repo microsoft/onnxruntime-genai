@@ -3,7 +3,6 @@ namespace Generators {
 
 // This class keeps track of sequences generated.
 struct Sequences_Cuda {
- 
   Sequences_Cuda(std::span<const int32_t> input_sequences, int batch_size, int beam_size, int max_length, cudaStream_t stream);
 
   // Returns a sequence of word IDs for a given beam index ( beam_index < batch_beam_size).
@@ -18,7 +17,6 @@ struct Sequences_Cuda {
   void AfterDeviceAppendedNextToken();
 
  private:
-
   cuda_unique_ptr<int32_t> sequences_buffer_;
   cudaStream_t stream_;
 
@@ -33,4 +31,4 @@ struct Sequences_Cuda {
   int current_length_;
 };
 
-}
+}  // namespace Generators

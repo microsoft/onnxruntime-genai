@@ -4,6 +4,7 @@
 #include "../search_cuda.h"
 #endif
 #include "model.h"
+#include "debugging.h"
 #include "gpt.h"
 #include "llama.h"
 #include "mistral.h"
@@ -33,10 +34,40 @@ void State::ClearIO() {
   outputs_.clear();
 }
 
-Model::Model(std::unique_ptr<Config> config, OrtEnv& ort_env, const ProviderOptions* provider_options) : config_{std::move(config)} {
+#if USE_ORT_EXT
+void CheckResult(tfmError_t error) {
+  if (error != kTfmOK)
+    throw std::runtime_error(TfmGetLastErrorMessage());
+}
+
+Tokenizer::Tokenizer(Config& config) {
+  CheckResult(TfmCreateTokenizer(tokenizer_.Address(), reinterpret_cast<const char*>(config.config_path.u8string().c_str())));
+}
+
+std::vector<int32_t> Tokenizer::Encode(const char* text) const {
+  TfmPtr<TfmTokenId2DArray> ids;
+  CheckResult(TfmTokenize(tokenizer_, &text, 1, ids.Address()));
+
+  const tfmTokenId_t* tokens;
+  size_t count;
+  CheckResult(TfmTokenId2DArrayGetItem(ids, 0, &tokens, &count));
+  return {tokens, tokens + count};
+}
+
+std::string Tokenizer::Decode(std::span<int32_t> tokens) const {
+  TfmPtr<TfmStringArray> tfm_string_array;
+  CheckResult(TfmDetokenize1D(tokenizer_, reinterpret_cast<const uint32_t*>(tokens.data()), tokens.size(), tfm_string_array.Address()));
+
+  const char* string;
+  CheckResult(TfmStringArrayGetItem(tfm_string_array, 0, &string));
+  return string;
+}
+#endif
+
+Model::Model(std::unique_ptr<Config> config, const ProviderOptions* provider_options) : config_{std::move(config)} {
   session_options_ = OrtSessionOptions::Create();
 
-  if (provider_options) {
+  if (provider_options != nullptr) {
 #if USE_CUDA
     if (auto* options = std::get_if<OrtCUDAProviderOptions>(provider_options)) {
       cuda_stream_ = reinterpret_cast<cudaStream_t>(options->user_compute_stream);
@@ -49,7 +80,7 @@ Model::Model(std::unique_ptr<Config> config, OrtEnv& ort_env, const ProviderOpti
 
 Model::~Model() = default;
 
-void Model::InitDeviceAllocator(OrtSession& session) {
+void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
   allocator_device_ = &allocator_cpu_;
 #if USE_CUDA
   if (device_type_ == DeviceType::CUDA) {
@@ -58,18 +89,6 @@ void Model::InitDeviceAllocator(OrtSession& session) {
     allocator_device_ = allocator_cuda_.get();
   }
 #endif
-}
-
-void Model::InitLogits(OrtTypeInfo& info) {
-  auto& logits_tensor_info = info.GetTensorTypeAndShapeInfo();
-  auto logits_shape = logits_tensor_info.GetShape();
-  assert(logits_shape.size() == 3);
-  logits_uses_seq_len_ = logits_shape[1] == -1;
-  score_type_ = logits_tensor_info.GetElementType();
-
-  auto vocab_size = static_cast<int>(logits_shape[2]);
-  Unreferenced(vocab_size);
-  assert(config_->vocab_size == vocab_size);
 }
 
 std::vector<int32_t> Model::Generate(const SearchParams& params) {
@@ -83,8 +102,9 @@ std::vector<int32_t> Model::Generate(const SearchParams& params) {
       search->SampleTopP(config_->top_p, config_->temperature);
     } else if (config_->top_k > 1) {
       search->SampleTopK(config_->top_k, config_->temperature);
-    } else
+    } else {
       search->SelectTop();
+    }
   }
 
   auto results = search->GetSequence(0);
@@ -95,21 +115,28 @@ std::vector<int32_t> Model::Generate(const SearchParams& params) {
   return v;
 }
 
+#if USE_ORT_EXT
+std::unique_ptr<Tokenizer> Model::CreateTokenizer() {
+  return std::make_unique<Tokenizer>(*config_);
+}
+#endif
+
 std::unique_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const ProviderOptions* provider_options) {
   auto config = std::make_unique<Config>(config_path);
 
-  if (config->model_type == "gpt2")
+  if (config->model.type == "gpt2") {
     return std::make_unique<Gpt_Model>(std::move(config), ort_env, provider_options);
-  else if (config->model_type == "llama")
+  }
+  if (config->model.type == "llama")
     return std::make_unique<Llama_Model>(std::move(config), ort_env, provider_options);
-  else if (config->model_type == "mistral")
+  else if (config->model.type == "mistral")
     return std::make_unique<Mistral_Model>(std::move(config), ort_env, provider_options);
-  else if (config->model_type == "phi2")
+  else if (config->model.type == "phi2")
     return std::make_unique<Phi2_Model>(std::move(config), ort_env, provider_options);
-  else if (config->model_type == "whisper")
+  else if (config->model.type == "whisper")
     return std::make_unique<Whisper_Model>(std::move(config), ort_env, provider_options);
 
-  throw std::runtime_error("Unsupported model_type in config.json: " + config->model_type);
+  throw std::runtime_error("Unsupported model_type in config.json: " + config->model.type);
 }
 
 #if USE_CUDA
@@ -169,13 +196,14 @@ size_t GetOrtTypeSize(ONNXTensorElementDataType type) {
   }
 }
 
-std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams) {
+std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams) const {
   // Input shape (batch_size, sequence_length). The input is required with data type T.
   // Output shape (batch_size * num_beams, sequence_length)
 
   // If we're on CUDA, we still want to do the copy to move the data over to CUDA memory where we will read from it later
-  if (num_beams == 1 && device_type_ == DeviceType::CPU)
+  if (num_beams == 1 && device_type_ == DeviceType::CPU) {
     return std::move(input);
+  }
 
   auto input_type_info = input->GetTensorTypeAndShapeInfo();
   auto element_type = input_type_info->GetElementType();
@@ -188,9 +216,9 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
 
   auto expanded = OrtValue::CreateTensor(*allocator_device_, input_shape, element_type);
 
-  auto input_data = reinterpret_cast<const uint8_t*>(input->GetTensorRawData());
-  auto expanded_data = reinterpret_cast<uint8_t*>(expanded->GetTensorMutableRawData());
-  auto target = expanded_data;
+  const auto* input_data = reinterpret_cast<const uint8_t*>(input->GetTensorRawData());
+  auto* expanded_data = reinterpret_cast<uint8_t*>(expanded->GetTensorMutableRawData());
+  auto* target = expanded_data;
 
   switch (device_type_) {
     case DeviceType::CPU:

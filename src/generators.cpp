@@ -14,47 +14,43 @@ namespace Generators {
 // IEEE 752-2008 binary16 format, 1 sign bit, 5 bit exponent, 10 bit fraction
 float Float16ToFloat32(uint16_t v) {
   // Extract sign, exponent, and fraction from numpy.float16
-  int sign = (v & 0x8000) >> 15;
-  int exponent = (v & 0x7C00) >> 10;
-  int fraction = v & 0x03FF;
+  int const sign = (v & 0x8000) >> 15;
+  int const exponent = (v & 0x7C00) >> 10;
+  int const fraction = v & 0x03FF;
 
   // Handle special cases
   if (exponent == 0) {
     if (fraction == 0) {
       // Zero
-      return sign ? -0.0f : 0.0f;
-    } else {
-      // Subnormal number
-      return std::ldexp((sign ? -1.0f : 1.0f) * fraction / 1024.0f, -14);
-    }
-  } else if (exponent == 31) {
+      return sign != 0 ? -0.0f : 0.0f;
+    }  // Subnormal number
+    return std::ldexp((sign != 0 ? -1.0f : 1.0f) * static_cast<float>(fraction) / 1024.0f, -14);
+  }
+  if (exponent == 31) {
     if (fraction == 0) {
       // Infinity
-      return sign ? -std::numeric_limits<float>::infinity() : std::numeric_limits<float>::infinity();
-    } else {
-      // NaN
-      return std::numeric_limits<float>::quiet_NaN();
-    }
+      return sign != 0 ? -std::numeric_limits<float>::infinity() : std::numeric_limits<float>::infinity();
+    }  // NaN
+    return std::numeric_limits<float>::quiet_NaN();
   }
 
   // Normalized number
-  return std::ldexp((sign ? -1.0f : 1.0f) * (1.0f + fraction / 1024.0f), exponent - 15);
+  return std::ldexp((sign != 0 ? -1.0f : 1.0f) * (1.0f + static_cast<float>(fraction) / 1024.0f), exponent - 15);
 }
 
 SearchParams::SearchParams(const Model& model)
     : pad_token_id{model.config_->pad_token_id},
       eos_token_id{model.config_->eos_token_id},
-      vocab_size{model.config_->vocab_size},
+      vocab_size{model.config_->model.vocab_size},
       max_length{model.config_->max_length},
       length_penalty{model.config_->length_penalty},
       early_stopping{model.config_->early_stopping},
       num_beams{model.config_->num_beams},
       device_type{model.device_type_},
-      cuda_stream{model.cuda_stream_}
-{
+      cuda_stream{model.cuda_stream_} {
 }
 
-ProviderOptions GetDefaultProviderOptions(DeviceType device_type) {
+ProviderOptions GetDefaultProviderOptions([[maybe_unused]] DeviceType device_type) {
   ProviderOptions options;
 #if USE_CUDA
   if (device_type == DeviceType::CUDA) {
@@ -79,8 +75,9 @@ std::unique_ptr<Search> SearchParams::CreateSearch() const {
   }
 #endif
 
-  if (num_beams > 1)
+  if (num_beams > 1) {
     return std::make_unique<BeamSearch_Cpu>(*this);
+  }
   return std::make_unique<GreedySearch_Cpu>(*this);
 }
 

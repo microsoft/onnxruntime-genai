@@ -11,7 +11,7 @@ Sequences::Sequences(std::span<const int32_t> input_sequences, int batch_size, i
       max_length_{max_length},
       current_length_{static_cast<int>(input_sequences.size()) / batch_size} {
   assert(current_length_ * batch_size == input_sequences.size());  // Ensure size divided perfectly
-  size_t sequences_size = batch_beam_size_ * max_length;
+  const size_t sequences_size = static_cast<size_t>(batch_beam_size_) * max_length;
 
   if (beam_size == 1) {
     sequences_buffer_ = std::make_unique<int32_t[]>(sequences_size);
@@ -43,7 +43,7 @@ int Sequences::GetSequenceLength() const {
 }
 
 void Sequences::AppendNextTokenToSequences(std::span<const int32_t> batch_beam_indices, std::span<const int32_t> batch_beam_next_tokens) {
-  for (int i = 0; i < batch_beam_size_; i++) {
+  for (ptrdiff_t i = 0; i < batch_beam_size_; i++) {
     int batch_beam_index = batch_beam_indices[i];
     std::span<const int32_t> source = sequences_.subspan(batch_beam_index * max_length_, current_length_);
     std::span<int32_t> target = sequences_next_.subspan(i * max_length_, current_length_);

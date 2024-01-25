@@ -4,11 +4,10 @@
 namespace Generators {
 
 Llama_Model::Llama_Model(std::unique_ptr<Config> config, OrtEnv& ort_env, const ProviderOptions* provider_options)
-    : Model{std::move(config), ort_env, provider_options} {
-  session_decoder_ = OrtSession::Create(ort_env, (config_->config_path / config_->model_decoder).c_str(), session_options_.get());
+    : Model{std::move(config), provider_options} {
+  session_decoder_ = OrtSession::Create(ort_env, (config_->config_path / config_->model.decoder).c_str(), session_options_.get());
 
   InitDeviceAllocator(*session_decoder_);
-  InitLogits(*session_decoder_->GetOutputTypeInfo(0));
 }
 
 std::unique_ptr<State> Llama_Model::CreateState(RoamingArray<int32_t> sequence_lengths, const SearchParams& params) {
@@ -26,16 +25,17 @@ Llama_State::Llama_State(Llama_Model& model, RoamingArray<int32_t> sequence_leng
 }
 
 RoamingArray<float> Llama_State::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
-  if (first_run_)
+  if (first_run_) {
     first_run_ = false;
-  else
+  } else {
     UpdateInputs(next_tokens, next_indices, current_length);
+  }
 
   State::Run(*model_.session_decoder_);
   return logits_.Get();
 }
 
-void Llama_State::UpdateInputs(RoamingArray<int32_t> next_tokens_unk, RoamingArray<int32_t> beam_indices, int current_length) {
+void Llama_State::UpdateInputs(const RoamingArray<int32_t>& next_tokens_unk, RoamingArray<int32_t> beam_indices, int current_length) {
   input_ids_.Update(next_tokens_unk);
   position_ids_.Update(current_length);
   logits_.Update();

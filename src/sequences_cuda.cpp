@@ -8,7 +8,7 @@ namespace Generators {
 namespace cuda {
 void Launch_ExpandInputSequences(std::span<const int32_t> input_sequences, std::span<int32_t> sequences, int batch_size, int beam_size, int current_length, int max_length, cudaStream_t stream);
 void Launch_AppendNextTokenToSequences(std::span<const int32_t> next_tokens, std::span<int32_t> sequences, int batch_beam_size, int current_length, int max_length, cudaStream_t stream);
-}
+}  // namespace cuda
 
 Sequences_Cuda::Sequences_Cuda(std::span<const int32_t> input_sequences, int batch_size, int beam_size, int max_length, cudaStream_t stream)
     : stream_{stream},
@@ -34,12 +34,12 @@ Sequences_Cuda::Sequences_Cuda(std::span<const int32_t> input_sequences, int bat
   cudaMemcpyAsync(input_sequences_gpu.data(), input_sequences.data(), input_sequences.size_bytes(), cudaMemcpyHostToDevice, stream);
 
   cuda::Launch_ExpandInputSequences(input_sequences_gpu, sequences_, batch_size, beam_size, current_length_, max_length, stream_);
-  cudaStreamSynchronize(stream); // Until we remove the todo above, wait for this to complete as input_sequences_gpu is on the stack
+  cudaStreamSynchronize(stream);  // Until we remove the todo above, wait for this to complete as input_sequences_gpu is on the stack
 }
 
 RoamingArray<int32_t> Sequences_Cuda::GetSequence(int batch_beam_index) {
-  auto span=sequences_.subspan(batch_beam_index * max_length_, current_length_);
-  return gpu_span<int32_t>{ span.data(), span.size() };
+  auto span = sequences_.subspan(batch_beam_index * max_length_, current_length_);
+  return gpu_span<int32_t>{span.data(), span.size()};
 }
 
 int Sequences_Cuda::GetSequenceLength() const {
