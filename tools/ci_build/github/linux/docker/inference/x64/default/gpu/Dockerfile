@@ -5,7 +5,7 @@
 ARG BASEIMAGE=nvidia/cuda:12.2.2-cudnn8-devel-ubi8
 FROM $BASEIMAGE
 
-ENV PATH /opt/rh/gcc-toolset-12/root/usr/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ENV PATH="${PATH}:/opt/rh/gcc-toolset-12/root/usr/bin"
 ENV LANG=en_US.UTF-8
 ENV LC_ALL=en_US.UTF-8
 
