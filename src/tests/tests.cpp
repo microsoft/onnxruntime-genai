@@ -266,8 +266,8 @@ Print all primes between 1 and n
   // Generator version
   auto generator = model->CreateGenerator();
   while (!generator->IsDone()) {
-    auto logits=generator->RunStep();
-    
+    auto logits = generator->RunStep();
+
     generator->SelectTop();
   }
 

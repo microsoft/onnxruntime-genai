@@ -205,7 +205,7 @@ struct PyGenerator {
     return generator_->IsDone();
   }
 
-private:
+ private:
   std::unique_ptr<Generator> generator_;
   PyRoamingArray<int32_t> py_tokens_;
   PyRoamingArray<int32_t> py_indices_;
