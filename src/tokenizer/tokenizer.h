@@ -3,12 +3,12 @@
 
 #pragma once
 
-#pragma warning(disable : 4127) // conditional expression is constant
-#pragma warning(disable : 4456) // declaration of 'x' hides previous local declaration
-#pragma warning(disable : 4244) // '=' : conversion from 'char32_t' to 'unsigned char', possible loss of data)
-#pragma warning(disable : 4245) // '=' : conversion from 'int' to 'size_t', signed / unsigned mismatch
-#pragma warning(disable : 5054) // operator '*': deprecated between enumerations of different types
-#pragma warning(disable : 4389) // '==' : signed / unsigned mismatch
+#pragma warning(disable : 4127)  // conditional expression is constant
+#pragma warning(disable : 4456)  // declaration of 'x' hides previous local declaration
+#pragma warning(disable : 4244)  // '=' : conversion from 'char32_t' to 'unsigned char', possible loss of data)
+#pragma warning(disable : 4245)  // '=' : conversion from 'int' to 'size_t', signed / unsigned mismatch
+#pragma warning(disable : 5054)  // operator '*': deprecated between enumerations of different types
+#pragma warning(disable : 4389)  // '==' : signed / unsigned mismatch
 #include "config.h"
 
 namespace tfm {

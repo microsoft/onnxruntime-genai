@@ -114,7 +114,9 @@ if(USE_TOKENIZER)
 
     FetchContent_Declare(GSL URL https://github.com/microsoft/GSL/archive/refs/tags/v4.0.0.zip)
     FetchContent_MakeAvailable(GSL)
-    add_subdirectory(third_party/onnxjst)
+
+    FetchContent_Declare(simdjson URL https://github.com/simdjson/simdjson/archive/refs/tags/v3.6.3.zip URL_HASH SHA1=2b063a2e81f74a5d1cb937fadf3d2fca0f1edb09)
+    FetchContent_MakeAvailable (simdjson)
 
     add_library (tokenizer ${tokenizer_srcs})
     target_include_directories(tokenizer PUBLIC
@@ -128,8 +130,8 @@ if(USE_TOKENIZER)
     )
     target_compile_definitions(tokenizer PRIVATE _SILENCE_ALL_CXX20_DEPRECATION_WARNINGS)
 
-    add_dependencies(tokenizer sentencepiece-static onnxjst)
-    target_link_libraries(tokenizer PUBLIC sentencepiece-static onnxjst)
+    add_dependencies(tokenizer sentencepiece-static)
+    target_link_libraries(tokenizer PUBLIC sentencepiece-static simdjson)
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")

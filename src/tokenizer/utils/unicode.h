@@ -21,27 +21,80 @@ namespace unilib {
 
 class unicode {
   enum : uint8_t {
-    _Lu = 1, _Ll = 2, _Lt = 3, _Lm = 4, _Lo = 5,
-    _Mn = 6, _Mc = 7, _Me = 8,
-    _Nd = 9, _Nl = 10, _No = 11,
-    _Pc = 12, _Pd = 13, _Ps = 14, _Pe = 15, _Pi = 16, _Pf = 17, _Po = 18,
-    _Sm = 19, _Sc = 20, _Sk = 21, _So = 22,
-    _Zs = 23, _Zl = 24, _Zp = 25,
-    _Cc = 26, _Cf = 27, _Cs = 28, _Co = 29, _Cn = 30
+    _Lu = 1,
+    _Ll = 2,
+    _Lt = 3,
+    _Lm = 4,
+    _Lo = 5,
+    _Mn = 6,
+    _Mc = 7,
+    _Me = 8,
+    _Nd = 9,
+    _Nl = 10,
+    _No = 11,
+    _Pc = 12,
+    _Pd = 13,
+    _Ps = 14,
+    _Pe = 15,
+    _Pi = 16,
+    _Pf = 17,
+    _Po = 18,
+    _Sm = 19,
+    _Sc = 20,
+    _Sk = 21,
+    _So = 22,
+    _Zs = 23,
+    _Zl = 24,
+    _Zp = 25,
+    _Cc = 26,
+    _Cf = 27,
+    _Cs = 28,
+    _Co = 29,
+    _Cn = 30
   };
 
  public:
   typedef uint32_t category_t;
   enum : category_t {
-    Lu = 1 << _Lu, Ll = 1 << _Ll, Lt = 1 << _Lt, Lut = Lu | Lt, LC = Lu | Ll | Lt,
-      Lm = 1 << _Lm, Lo = 1 << _Lo, L = Lu | Ll | Lt | Lm | Lo,
-    Mn = 1 << _Mn, Mc = 1 << _Mc, Me = 1 << _Me, M = Mn | Mc | Me,
-    Nd = 1 << _Nd, Nl = 1 << _Nl, No = 1 << _No, N = Nd | Nl | No,
-    Pc = 1 << _Pc, Pd = 1 << _Pd, Ps = 1 << _Ps, Pe = 1 << _Pe, Pi = 1 << _Pi,
-      Pf = 1 << _Pf, Po = 1 << _Po, P = Pc | Pd | Ps | Pe | Pi | Pf | Po,
-    Sm = 1 << _Sm, Sc = 1 << _Sc, Sk = 1 << _Sk, So = 1 << _So, S = Sm | Sc | Sk | So,
-    Zs = 1 << _Zs, Zl = 1 << _Zl, Zp = 1 << _Zp, Z = Zs | Zl | Zp,
-    Cc = 1 << _Cc, Cf = 1 << _Cf, Cs = 1 << _Cs, Co = 1 << _Co, Cn = 1 << _Cn, C = Cc | Cf | Cs | Co | Cn
+    Lu = 1 << _Lu,
+    Ll = 1 << _Ll,
+    Lt = 1 << _Lt,
+    Lut = Lu | Lt,
+    LC = Lu | Ll | Lt,
+    Lm = 1 << _Lm,
+    Lo = 1 << _Lo,
+    L = Lu | Ll | Lt | Lm | Lo,
+    Mn = 1 << _Mn,
+    Mc = 1 << _Mc,
+    Me = 1 << _Me,
+    M = Mn | Mc | Me,
+    Nd = 1 << _Nd,
+    Nl = 1 << _Nl,
+    No = 1 << _No,
+    N = Nd | Nl | No,
+    Pc = 1 << _Pc,
+    Pd = 1 << _Pd,
+    Ps = 1 << _Ps,
+    Pe = 1 << _Pe,
+    Pi = 1 << _Pi,
+    Pf = 1 << _Pf,
+    Po = 1 << _Po,
+    P = Pc | Pd | Ps | Pe | Pi | Pf | Po,
+    Sm = 1 << _Sm,
+    Sc = 1 << _Sc,
+    Sk = 1 << _Sk,
+    So = 1 << _So,
+    S = Sm | Sc | Sk | So,
+    Zs = 1 << _Zs,
+    Zl = 1 << _Zl,
+    Zp = 1 << _Zp,
+    Z = Zs | Zl | Zp,
+    Cc = 1 << _Cc,
+    Cf = 1 << _Cf,
+    Cs = 1 << _Cs,
+    Co = 1 << _Co,
+    Cn = 1 << _Cn,
+    C = Cc | Cf | Cs | Co | Cn
   };
 
   static inline category_t category(char32_t chr);
@@ -59,7 +112,12 @@ class unicode {
   static const uint8_t othercase_index[CHARS >> 8];
   static const char32_t othercase_block[][256];
 
-  enum othercase_type { LOWER_ONLY = 1, UPPERTITLE_ONLY = 2, UPPER_ONLY = 3, LOWER_THEN_UPPER = 4, UPPER_THEN_TITLE = 5, TITLE_THEN_LOWER = 6 };
+  enum othercase_type { LOWER_ONLY = 1,
+                        UPPERTITLE_ONLY = 2,
+                        UPPER_ONLY = 3,
+                        LOWER_THEN_UPPER = 4,
+                        UPPER_THEN_TITLE = 5,
+                        TITLE_THEN_LOWER = 6 };
 };
 
 unicode::category_t unicode::category(char32_t chr) {
@@ -97,5 +155,5 @@ char32_t unicode::titlecase(char32_t chr) {
   return chr;
 }
 
-} // namespace unilib
-} // namespace ufal
+}  // namespace unilib
+}  // namespace ufal

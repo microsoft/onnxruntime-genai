@@ -38,7 +38,7 @@ typedef enum {
 typedef enum {
   kTfmKindUnknown = 0,
 
-  kTfmKindBegin = 0x7788, // starting from a number to help validate the object
+  kTfmKindBegin = 0x7788,  // starting from a number to help validate the object
   kTfmKindTokenizer = kTfmKindBegin,
   kTfmKindStringArray = 0x7789,
   kTfmKindTokenId2DArray = 0x778A,
@@ -46,12 +46,11 @@ typedef enum {
   kTfmKindEnd = 0x7999
 } tfmObjectKind_t;
 
-
 // all object managed by the library should be 'derived' from this struct
 // which eventually will be released by TfmDispose if C++, or TFM_DISPOSE if C
 typedef struct {
   int tfm_kind_;
-}TfmObject;
+} TfmObject;
 
 const int API_VERSION = 1;
 
