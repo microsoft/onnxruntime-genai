@@ -47,12 +47,6 @@ jobs:
           echo "Printing docker image environment variables"
           docker run --rm onnxruntimegpubuild env
 
-      - name: Find Cuda Libraries
-        run: |
-          echo "Finding cuda libraries"
-          docker run --rm onnxruntimegpubuild find / -name "libcuda*"
-          docker run --rm onnxruntimegpubuild ls /usr/local/cuda 
-
       - name: Build with Cmake in Docker
         run: |
           echo "Running docker image onnxruntimegpubuild"
