@@ -111,8 +111,7 @@ add_executable (Tests ${test_srcs})
 target_include_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
 target_link_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
 target_link_libraries(Tests PRIVATE onnxruntime-genai ${ONNXRUNTIME_LIB})
-
-
+set_directory_properties()
 #
 pybind11_add_module(python ${python_srcs})
 target_include_directories(python PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
@@ -120,7 +119,7 @@ target_link_directories(python PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
 target_link_libraries(python PRIVATE onnxruntime-genai ${ONNXRUNTIME_LIB})
 set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
-    set_target_properties(onnxruntime-gena PROPERTIES LINKER_LANGUAGE CUDA)
+    set_target_properties(onnxruntime-genai PROPERTIES LINKER_LANGUAGE CUDA)
     set_target_properties(python PROPERTIES LINKER_LANGUAGE CUDA)
     set_target_properties(Tests PROPERTIES LINKER_LANGUAGE CUDA)
 endif()
