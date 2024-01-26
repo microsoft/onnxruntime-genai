@@ -75,10 +75,9 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
         "${MODELS_ROOT}/*.cuh"
     )
     list(APPEND generator_srcs ${generator_cuda_srcs})
-
     add_compile_definitions(USE_CUDA=1)
-
     include_directories("${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}")
+    link_libraries(CUDA::cuda_library)
 else()
     file(GLOB generator_cuda_srcs "${GENERATORS_ROOT}/*_cuda*.*")
     list(REMOVE_ITEM generator_srcs ${generator_cuda_srcs})
@@ -114,6 +113,7 @@ add_executable (Tests ${test_srcs})
 target_include_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
 target_link_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
 target_link_libraries(Tests PRIVATE onnxruntime-genai ${ONNXRUNTIME_LIB})
+
 #
 pybind11_add_module(python ${python_srcs})
 target_include_directories(python PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
