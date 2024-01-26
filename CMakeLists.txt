@@ -8,6 +8,7 @@ include(cmake/external/onnxruntime_external_deps.cmake)
 project (Generators LANGUAGES C CXX)
 set(USE_CUDA 1) # "Build with CUDA support"
 set(USE_ORT_EXT 0) # "Build with Onnxruntime Extensions tokenizer support"
+set(USE_TOKENIZER 1)
 
 # Checking if CUDA is supported
 include(CheckLanguage)
@@ -34,6 +35,7 @@ set(GENERATORS_ROOT ${PROJECT_SOURCE_DIR}/src)
 set(MODELS_ROOT ${PROJECT_SOURCE_DIR}/src/models)
 set(TESTS_ROOT ${PROJECT_SOURCE_DIR}/src/tests)
 set(PYTHON_ROOT ${PROJECT_SOURCE_DIR}/src/python)
+set(TOKENIZER_ROOT ${PROJECT_SOURCE_DIR}/src/tokenizer)
 
 # CUDA Being enabled will make it not a debug build without this option, so all of the C++ headers will complain
 # about a mismatch with the actual debug headers and it'll fail to link. I don't know why this happens, or if this is the best fix.
@@ -58,6 +60,12 @@ file(GLOB test_srcs CONFIGURE_DEPENDS
 file(GLOB python_srcs CMAKE_CONFIGURE_DEPENDS
    "${PYTHON_ROOT}/*.h"
    "${PYTHON_ROOT}/*.cpp"
+)
+
+file(GLOB tokenizer_srcs CONFIGURE_DEPENDS
+    "${TOKENIZER_ROOT}/*.cc"
+    "${TOKENIZER_ROOT}/utils/*.cc"
+    "${TOKENIZER_ROOT}/c_api/*.cc"
 )
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
@@ -91,6 +99,38 @@ endif()
 
 add_library (onnxruntime-genai ${generator_srcs})
 target_include_directories(onnxruntime-genai PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
+
+if(USE_TOKENIZER)
+    FetchContent_Declare(spm URL https://github.com/google/sentencepiece/archive/refs/tags/v0.1.99.zip)
+    set(SPM_USE_EXTERNAL_ABSL OFF CACHE BOOL "Use external absl")
+    set(SPM_USE_BUILTIN_PROTOBUF ON CACHE BOOL "Use built-in protobuf")
+    set(SPM_ENABLE_SHARED OFF)
+
+    FetchContent_GetProperties(spm)
+    if(NOT spm_POPULATED)
+      FetchContent_Populate(spm)
+      add_subdirectory(${spm_SOURCE_DIR} ${spm_BINARY_DIR} EXCLUDE_FROM_ALL)
+    endif()
+
+    FetchContent_Declare(GSL URL https://github.com/microsoft/GSL/archive/refs/tags/v4.0.0.zip)
+    FetchContent_MakeAvailable(GSL)
+    add_subdirectory(third_party/onnxjst)
+
+    add_library (tokenizer ${tokenizer_srcs})
+    target_include_directories(tokenizer PUBLIC
+      ${TOKENIZER_ROOT}
+      ${GSL_SOURCE_DIR}/include
+      ${simdjson_SOURCE_DIR}/singleheader/
+      ${spm_SOURCE_DIR}/src
+      ${spm_SOURCE_DIR}/src/builtin_pb
+      ${spm_SOURCE_DIR}/third_party/absl
+      ${spm_SOURCE_DIR}/third_party/protobuf-lite
+    )
+    target_compile_definitions(tokenizer PRIVATE _SILENCE_ALL_CXX20_DEPRECATION_WARNINGS)
+
+    add_dependencies(tokenizer sentencepiece-static onnxjst)
+    target_link_libraries(tokenizer PUBLIC sentencepiece-static onnxjst)
+endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set_target_properties(onnxruntime-genai PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -162,6 +202,15 @@ if(USE_ORT_EXT)
         )
     endforeach()
  endif()
+
+ if(USE_TOKENIZER)
+    add_compile_definitions(USE_ORT_EXT=1)
+    target_include_directories(onnxruntime-genai PRIVATE ${TOKENIZER_ROOT})
+    target_include_directories(Tests PRIVATE ${TOKENIZER_ROOT})
+    target_include_directories(python PRIVATE ${TOKENIZER_ROOT})
+    target_link_libraries(Tests PRIVATE tokenizer)
+    target_link_libraries(python PRIVATE tokenizer)
+endif()
 
 # Have visual studio put all files into one single folder vs the default split of header files into a separate folder
 source_group(TREE ${GENERATORS_ROOT} FILES ${generator_srcs})
