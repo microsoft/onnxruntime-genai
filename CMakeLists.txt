@@ -122,9 +122,9 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
     set_target_properties(onnxruntime-genai PROPERTIES LINKER_LANGUAGE CUDA)
     set_target_properties(python PROPERTIES LINKER_LANGUAGE CUDA)
     set_target_properties(Tests PROPERTIES LINKER_LANGUAGE CUDA)
-    target_link_libraries(onnxruntime-genai PRIVATE cublasLt cublas cudnn curand cufft)
-    target_link_libraries(Tests PRIVATE cublasLt cublas cudnn curand cufft)
-    target_link_libraries(python PRIVATE cublasLt cublas cudnn curand cufft)
+    target_link_libraries(onnxruntime-genai PRIVATE cublasLt cublas cudnn curand cufft cudart)
+    target_link_libraries(Tests PRIVATE cublasLt cublas cudnn curand cufft cudart)
+    target_link_libraries(python PRIVATE cublasLt cublas cudnn curand cufft cudart)
 endif()
 
 
