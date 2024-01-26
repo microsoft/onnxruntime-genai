@@ -81,4 +81,59 @@ std::unique_ptr<Search> SearchParams::CreateSearch() const {
   return std::make_unique<GreedySearch_Cpu>(*this);
 }
 
+std::unique_ptr<Generator> CreateGenerator(Model& model, const SearchParams& search_params) {
+  return std::make_unique<Generator>(model, search_params);
+}
+
+Generator::Generator(Model& model, const SearchParams& search_params) : model_{model} {
+  search_ = search_params.CreateSearch();
+  state_ = model.CreateState(search_->GetSequenceLengths(), search_params);
+}
+
+void Generator::ComputeLogits() {
+  if (computed_logits_)
+    throw std::runtime_error("ComputeLogits called again without calling AppendNextToken* first");
+
+  search_->SetLogits(state_->Run(search_->GetSequenceLength(), search_->GetNextTokens(), search_->GetNextIndices()));
+  computed_logits_ = true;
+}
+
+bool Generator::IsDone() const {
+  if (computed_logits_)
+    throw std::runtime_error("IsDone() can't be called in the middle of processing logits");
+
+  return search_->IsDone();
+}
+
+void Generator::AppendNextToken_TopK_TopP(int top_k, float top_p, float temperature) {
+  if (search_->params_.num_beams != 1)
+    throw std::runtime_error("TopK and TopP cannot be used with a beam search");
+
+  if (!computed_logits_)
+    throw std::runtime_error("Must call ComputeLogits before AppendNextToken*");
+  computed_logits_ = false;
+
+  // TODO: Do TopK if top_k >1 then do TopP on the results
+  if (top_p < 1.0f) {
+    search_->SampleTopP(top_p, temperature);
+  } else if (top_k > 1) {
+    search_->SampleTopK(top_k, temperature);
+  } else {
+    search_->SelectTop();
+  }
+}
+
+void Generator::AppendNextToken() {
+  if (search_->params_.num_beams > 1) {
+    if (!computed_logits_)
+      throw std::runtime_error("Must call ComputeLogits before AppendNextToken*");
+    computed_logits_ = false;
+    search_->SelectTop();
+    return;
+  }
+
+  auto& config = *model_.config_;
+  AppendNextToken_TopK_TopP(config.top_k, config.top_p, config.temperature);
+}
+
 }  // namespace Generators

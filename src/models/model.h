@@ -51,7 +51,6 @@ struct Model {
   Model(std::unique_ptr<Config> config, const ProviderOptions* provider_options);
   virtual ~Model();
 
-  std::vector<int32_t> Generate(const SearchParams& params);
 #if USE_ORT_EXT
   std::unique_ptr<Tokenizer> CreateTokenizer();
 #endif
@@ -73,8 +72,6 @@ struct Model {
  protected:
   void InitDeviceAllocator(OrtSession& session);
 };
-
-std::unique_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const ProviderOptions* provider_options = nullptr);
 
 #if USE_CUDA
 namespace cuda {

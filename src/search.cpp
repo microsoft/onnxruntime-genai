@@ -9,7 +9,7 @@
 namespace Generators {
 
 Search_Cpu::Search_Cpu(const SearchParams& params)
-    : params_{params},
+    : Search{params},
       sequences_{params.input_ids, params.batch_size, params.num_beams, params_.max_length} {
   auto batch_beam_size = params.BatchBeamSize();
 

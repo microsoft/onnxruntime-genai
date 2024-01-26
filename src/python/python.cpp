@@ -161,77 +161,56 @@ struct PySearchParams : SearchParams {
   pybind11::array_t<int32_t> py_whisper_decoder_input_ids_;
 };
 
-struct PySearch {
-  PySearch(PySearchParams& params) {
-    params.Prepare();
-    search_ = params.CreateSearch();
-  }
-
-  void SetLogits(PyRoamingArray<float>& inputs) {
-    search_->SetLogits(inputs);
-  }
-
-  int GetSequenceLength() const {
-    return search_->GetSequenceLength();
+struct PyGenerator {
+  PyGenerator(Model& model, PySearchParams& search_params) {
+    search_params.Prepare();
+    generator_ = CreateGenerator(model, search_params);
   }
 
   PyRoamingArray<int32_t>& GetNextTokens() {
-    py_tokens_.Assign(search_->GetNextTokens());
+    py_tokens_.Assign(generator_->search_->GetNextTokens());
     return py_tokens_;
   }
 
-  PyRoamingArray<int32_t>& GetNextIndices() {
-    py_indices_.Assign(search_->GetNextIndices());
-    return py_indices_;
-  }
-
-  PyRoamingArray<int32_t>& GetSequenceLengths() {
-    py_sequencelengths_.Assign(search_->GetSequenceLengths());
-    return py_sequencelengths_;
-  }
-
   PyRoamingArray<int32_t>& GetSequence(int index) {
-    py_sequence_.Assign(search_->GetSequence(index));
+    py_sequence_.Assign(generator_->search_->GetSequence(index));
     return py_sequence_;
   }
 
+  void ComputeLogits() {
+    generator_->ComputeLogits();
+  }
+
+  void AppendNextToken_TopK_TopP(int top_k, float top_p, float temperature) {
+    generator_->AppendNextToken_TopK_TopP(top_k, top_p, temperature);
+  }
+
+  void AppendNextToken_TopP(float p, float temperature) {
+    generator_->AppendNextToken_TopP(p, temperature);
+  }
+
+  void AppendNextToken_TopK(int k, float temperature) {
+    generator_->AppendNextToken_TopK(k, temperature);
+  }
+
+  void AppendNextToken_Top() {
+    generator_->AppendNextToken_Top();
+  }
+
+  void AppendNextToken() {
+    generator_->AppendNextToken();
+  }
+
   bool IsDone() const {
-    return search_->IsDone();
+    return generator_->IsDone();
   }
 
-  void SelectTop() {
-    search_->SelectTop();
-  }
-
-  void SampleTopK(int k, float t) {
-    search_->SampleTopK(k, t);
-  }
-
-  void SampleTopP(float p, float t) {
-    search_->SampleTopP(p, t);
-  }
-
- private:
-  std::unique_ptr<Search> search_;
+private:
+  std::unique_ptr<Generator> generator_;
   PyRoamingArray<int32_t> py_tokens_;
   PyRoamingArray<int32_t> py_indices_;
   PyRoamingArray<int32_t> py_sequence_;
   PyRoamingArray<int32_t> py_sequencelengths_;
-};
-
-struct PyState {
-  PyState(Model& model, PyRoamingArray<int32_t>& sequence_lengths, const SearchParams& search_params) {
-    state_ = model.CreateState(sequence_lengths, search_params);
-  }
-
-  PyRoamingArray<float>& Run(int current_length, PyRoamingArray<int32_t>& next_tokens, PyRoamingArray<int32_t>& next_indices) {
-    py_logits_.Assign(state_->Run(current_length, next_tokens, next_indices));
-    return py_logits_;
-  }
-
- private:
-  std::unique_ptr<State> state_;
-  PyRoamingArray<float> py_logits_;
 };
 
 PYBIND11_MODULE(onnxruntime_genai, m) {
@@ -260,7 +239,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   pybind11::class_<PySearchParams>(m, "SearchParams")
       .def(pybind11::init<const Model&>())
-      .def("CreateSearch", [](PySearchParams& v) { return new PySearch(v); })
       .def_readonly("pad_token_id", &PySearchParams::pad_token_id)
       .def_readonly("eos_token_id", &PySearchParams::eos_token_id)
       .def_readonly("vocab_size", &PySearchParams::vocab_size)
@@ -272,18 +250,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_readwrite("whisper_input_features", &PySearchParams::py_whisper_input_features_)
       .def_readwrite("whisper_decoder_input_ids", &PySearchParams::py_whisper_decoder_input_ids_)
       .def("__repr__", [](PySearchParams& s) { return ToString(s); });
-
-  pybind11::class_<PySearch>(m, "Search")
-      .def("SetLogits", &PySearch::SetLogits)
-      .def("GetSequenceLength", &PySearch::GetSequenceLength)
-      .def("GetSequenceLengths", &PySearch::GetSequenceLengths, pybind11::return_value_policy::reference_internal)
-      .def("GetNextTokens", &PySearch::GetNextTokens, pybind11::return_value_policy::reference_internal)
-      .def("GetNextIndices", &PySearch::GetNextIndices, pybind11::return_value_policy::reference_internal)
-      .def("IsDone", &PySearch::IsDone)
-      .def("SelectTop", &PySearch::SelectTop)
-      .def("SampleTopK", &PySearch::SampleTopK)
-      .def("SampleTopP", &PySearch::SampleTopP)
-      .def("GetSequence", &PySearch::GetSequence, pybind11::return_value_policy::reference_internal);
 
   // We need to init the OrtApi before we can use it
   Ort::InitApi();
@@ -303,17 +269,18 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
              return CreateModel(GetOrtEnv(), config_path.c_str(), &provider_options);
            }),
            "str"_a, "device_type"_a = DeviceType::Auto)
-      .def("Generate", [](Model& model, PySearchParams& search_params) { search_params.Prepare(); return model.Generate(search_params); })
-#if USE_ORT_EXT
-      .def("CreateTokenizer", [](Model& model) { return model.CreateTokenizer(); })
-#endif
-      .def("CreateState", [](Model& model, PyRoamingArray<int32_t>& sequence_lengths, const PySearchParams& search_params) { return new PyState(model, sequence_lengths, search_params); })
       .def_property_readonly("DeviceType", [](const Model& s) { return s.device_type_; });
 
-  pybind11::class_<PyState>(m, "State")
-      .def(pybind11::init<Model&, PyRoamingArray<int32_t>&, const PySearchParams&>())
-      .def("Run", &PyState::Run, "current_length"_a, "next_tokens"_a, "next_indices"_a = PyRoamingArray<int32_t>{},
-           pybind11::return_value_policy::reference_internal);
+  pybind11::class_<PyGenerator>(m, "Generator")
+      .def(pybind11::init<Model&, PySearchParams&>())
+      .def("IsDone", &PyGenerator::IsDone)
+      .def("ComputeLogits", &PyGenerator::ComputeLogits)
+      .def("AppendNextToken", &PyGenerator::AppendNextToken)
+      .def("AppendNextToken_TopP", &PyGenerator::AppendNextToken_TopP)
+      .def("AppendNextToken_TopK", &PyGenerator::AppendNextToken_TopK)
+      .def("AppendNextToken_TopK_TopP", &PyGenerator::AppendNextToken_TopK_TopP)
+      .def("GetNextTokens", &PyGenerator::GetNextTokens)
+      .def("GetSequence", &PyGenerator::GetSequence);
 
 #ifdef VERSION_INFO
   m.attr("__version__") = MACRO_STRINGIFY(VERSION_INFO);
