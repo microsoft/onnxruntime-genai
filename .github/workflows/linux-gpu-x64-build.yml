@@ -35,7 +35,7 @@ jobs:
         run: |
           git submodule update --init --recursive
 
-      - name: Build with CMake and GCC
+      - name: Download Docker Image
         run: |
           set -e -x
           python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/inference/x64/default/gpu/Dockerfile \
@@ -43,16 +43,19 @@ jobs:
             --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
             --container-registry onnxruntimebuildcache \
             --repository onnxruntimegpubuild
+          
+      - name: Print Docker Environment Variables
+        run: |
           echo "Printing docker environment variables"
           docker run --rm onnxruntimegpubuild env
+
+      - name: Build with Cmake in Docker
+        run: |
           echo "Running docker image onnxruntimegpubuild"
           docker run \
             --gpus all \
             --rm \
             --volume $GITHUB_WORKSPACE:/onnxruntime_src \
             --volume $RUNNER_TEMP:/build \
-            -w /build onnxruntimegpubuild bash \ 
-            -c "echo $PATH && /usr/bin/cmake \
-            -e CUDA_PATH=/usr/local/cuda-12.2 \
-            -G Ninja /onnxruntime_src -DBUILD_SHARED_LIBS=ON -DUSE_CUDA=ON -DCMAKE_BUILD_TYPE=Release && ninja"
+            -w /build onnxruntimegpubuild bash -c "echo $PATH && /usr/bin/cmake -G Ninja /onnxruntime_src -DBUILD_SHARED_LIBS=ON -DUSE_CUDA=ON -DCMAKE_BUILD_TYPE=Release && ninja"
 
