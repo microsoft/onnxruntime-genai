@@ -136,4 +136,20 @@ void Generator::AppendNextToken() {
   AppendNextToken_TopK_TopP(config.top_k, config.top_p, config.temperature);
 }
 
+std::vector<int32_t> Generate(Model& model, const SearchParams& params) {
+  auto generator = CreateGenerator(model, params);
+
+  while (!generator->IsDone()) {
+    generator->ComputeLogits();
+    generator->AppendNextToken();
+  }
+
+  auto results = generator->search_->GetSequence(0);
+  auto results_cpu = results.GetCPU();
+
+  std::vector<int32_t> v;
+  v.assign(results_cpu.begin(), results_cpu.end());
+  return v;
+}
+
 }  // namespace Generators

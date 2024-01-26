@@ -269,6 +269,10 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
              return CreateModel(GetOrtEnv(), config_path.c_str(), &provider_options);
            }),
            "str"_a, "device_type"_a = DeviceType::Auto)
+      .def("Generate", [](Model& model, PySearchParams& search_params) { return Generate(model, search_params); })
+#if USE_ORT_EXT
+      .def("CreateTokenizer", [](Model& model) { return model.CreateTokenizer(); })
+#endif
       .def_property_readonly("DeviceType", [](const Model& s) { return s.device_type_; });
 
   pybind11::class_<PyGenerator>(m, "Generator")
