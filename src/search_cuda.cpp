@@ -15,7 +15,7 @@ void OnCudaError(cudaError_t error) {
 }
 
 Search_Cuda::Search_Cuda(const SearchParams& params)
-    : params_{params},
+    : Search{params},
       sequences_{params.input_ids, params.batch_size, params.num_beams, params_.max_length, params_.cuda_stream} {
   auto batch_beam_size = params.BatchBeamSize();
   sequence_lengths_buffer_ = std::make_unique<int32_t[]>(batch_beam_size);

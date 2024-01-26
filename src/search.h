@@ -19,8 +19,6 @@ struct Search_Cpu : Search {
   std::span<float> GetScores(int batch_beam_index) const;
   Sequences& GetSequences() { return sequences_; }
 
-  const SearchParams& params_;
-
   cpu_span<int32_t> sequence_lengths_;  // shape (beam_size*batch_size)
   std::unique_ptr<int32_t[]> sequence_lengths_buffer_;
 
@@ -37,6 +35,7 @@ struct GreedySearch_Cpu : Search_Cpu {
   GreedySearch_Cpu(const SearchParams& params);
 
   RoamingArray<int32_t> GetNextTokens() override;
+  RoamingArray<int32_t> GetNextIndices() override { return cpu_span<int32_t>{}; }
 
   void SelectTop() override;
   void SampleTopK(int k, float temperature) override;
