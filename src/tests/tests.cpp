@@ -29,7 +29,6 @@ void Test_GreedySearch_Gpt_Fp32() {
   // To generate this file:
   // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
   // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
-
   auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
   Generators::SearchParams params{*model};
@@ -119,6 +118,7 @@ void Test_BeamSearch_Gpt_Fp32() {
 }
 
 #if USE_CUDA
+
 void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label) {
   std::cout << "Test_GreedySearch_Gpt_Cuda " << model_label << std::flush;
 
@@ -233,6 +233,118 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
 void Test_BeamSearch_Gpt_Cuda() {
   for (auto model_path : c_tiny_gpt2_model_paths)
     Test_BeamSearch_Gpt_Cuda(model_path.first, model_path.second);
+}
+
+#include "tests_helper.cuh"
+void Test_TopP_Cuda() {
+  std::cout << "Test_TopP" << std::flush;
+
+  //////////// Simple Test
+  std::vector<int32_t> expected_output{5};
+  auto output_span = Generators::cpu_span<int32_t>(expected_output);
+  std::vector<float> logits_cpu{0.1, 0.1, 0.1, 0.1, 0.1, 0.5};
+  auto logits_gpu = Generators::CudaMallocArray<float>(logits_cpu.size());
+
+  auto provider_options = Generators::GetDefaultProviderOptions(Generators::DeviceType::CUDA);
+
+  Generators::SearchParams params;
+  params.max_length = 10;
+  params.batch_size = 1;
+  params.sequence_length = 1;
+  params.vocab_size = 6;
+  params.device_type = Generators::DeviceType::CUDA;
+
+  cudaMemcpyAsync(logits_gpu.get(), logits_cpu.data(), logits_cpu.size() * sizeof(float), cudaMemcpyHostToDevice, params.cuda_stream);
+  cudaStreamSynchronize(params.cuda_stream);
+  auto search = params.CreateSearch();
+
+  search->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), logits_cpu.size()));
+  search->SampleTopP(0.2, 1.0);
+
+  // Verify outputs match expected outputs
+  auto next_tokens = search->GetNextTokens().GetCPU();
+  std::cout << "next_tokens: " << next_tokens[0] << "\r\n";
+  if (!std::equal(next_tokens.begin(), next_tokens.end(), output_span.begin(), output_span.end())) 
+    throw std::runtime_error("Test Results Mismatch");
+  
+  std::cout << " completed simple test\r\n";
+
+  //////////// Batched Test
+  expected_output = {1, 2, 3, 4};
+  output_span = Generators::cpu_span<int32_t>(expected_output);
+  logits_cpu = {0.1, 0.6, 0.1, 0.1, 0.1,
+                0.1, 0.1, 0.6, 0.1, 0.1,
+                0.1, 0.1, 0.1, 0.6, 0.1,
+                0.1, 0.1, 0.1, 0.1, 0.6};
+  logits_gpu = Generators::CudaMallocArray<float>(logits_cpu.size());
+
+  params = Generators::SearchParams{};
+  params.max_length = 10;
+  params.batch_size = 4;
+  params.sequence_length = 1;
+  params.vocab_size = 5;
+  params.device_type = Generators::DeviceType::CUDA;
+
+  cudaMemcpyAsync(logits_gpu.get(), logits_cpu.data(), logits_cpu.size() * sizeof(float), cudaMemcpyHostToDevice, params.cuda_stream);
+  cudaStreamSynchronize(params.cuda_stream);
+  search = params.CreateSearch();
+
+  search->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), logits_cpu.size()));
+  search->SampleTopP(0.25, 1.0);
+
+  // Verify outputs match expected outputs
+  next_tokens = search->GetNextTokens().GetCPU();
+  std::cout << "next_tokens: " << next_tokens[0] << ", " << next_tokens[1] << ", " << next_tokens[2] << ", " << next_tokens[3] << "\r\n";
+  if (!std::equal(next_tokens.begin(), next_tokens.end(), output_span.begin(), output_span.end())) 
+    throw std::runtime_error("Test Results Mismatch");
+  
+  std::cout << " completed batched test\r\n";
+
+  //////////// Randomized Test
+  int vocab_size = 256*256; // large number, power of 2, useful for the fisher yates kernel
+  int batch_size = 5;
+
+  for (int i = 0; i < 100; i++) {
+    logits_gpu = Generators::CudaMallocArray<float>(vocab_size * batch_size);
+    auto indices_buffer = Generators::CudaMallocHostArray<int>(vocab_size * batch_size);
+    LaunchGeometricDecayKernel(logits_gpu.get(), vocab_size, batch_size, params.cuda_stream);
+    LaunchFisherYatesKernel(logits_gpu.get(), indices_buffer.get(), vocab_size, batch_size, params.cuda_stream);
+    float* cpu_logits = new float[vocab_size * batch_size];
+    cudaMemcpyAsync(cpu_logits, logits_gpu.get(), vocab_size * batch_size * sizeof(float), cudaMemcpyDeviceToHost, params.cuda_stream);
+
+    // for(int i = 0; i < vocab_size * batch_size; i++) {
+    //   std::cout << cpu_logits[i] << " ";
+    //   if ((i+1) % vocab_size == 0) std::cout << "\r\n";
+    // }
+
+    params = Generators::SearchParams{};
+    params.max_length = 10;
+    params.batch_size = batch_size;
+    params.sequence_length = 1;
+    params.vocab_size = vocab_size;
+    params.device_type = Generators::DeviceType::CUDA;
+
+    search = params.CreateSearch();
+    search->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), vocab_size * batch_size));
+    search->SampleTopP(0.95, 1.0);
+    
+    next_tokens = search->GetNextTokens().GetCPU();
+    cudaStreamSynchronize(params.cuda_stream);
+    std::cout << "next_tokens: " << next_tokens[0] << ", " << next_tokens[1] << ", " << next_tokens[2] << ", " << next_tokens[3] << ", " << next_tokens[4] << "\r\n";
+    std::cout << "next_token_scores: " << cpu_logits[next_tokens[0]] << ", " << cpu_logits[next_tokens[1]+vocab_size] << ", " << cpu_logits[next_tokens[2]+vocab_size*2] << ", " << cpu_logits[next_tokens[3]+vocab_size*3] << ", " << cpu_logits[next_tokens[4]+vocab_size*4] << "\r\n";
+
+    // Verify outputs match expected outputs
+    for (int b = 0; b < batch_size; b++) {
+      auto next_token = next_tokens[b];
+      auto next_token_score = cpu_logits[next_token + vocab_size * b];
+      if (next_token_score < 0.0001) {
+        std::cout << "next_token_score: " << next_token_score << "\r\n";
+        throw std::runtime_error("Test Results Mismatch");
+      }
+    }
+  }
+  std::cout << " completed randomized test\r\n";
+  std::cout << " - complete\r\n";
 }
 
 void Test_Phi2_Cuda() {
