@@ -14,6 +14,7 @@ include(CheckLanguage)
 check_language(CUDA)
 if (CMAKE_CUDA_COMPILER)
     message(STATUS "CUDA found CUDAToolkit_VERSION ${CUDAToolkit_VERSION} with CMAKE_CUDA_COMPILER ${CMAKE_CUDA_COMPILER}" )
+    set(CMAKE_CUDA_RUNTIME_LIBRARY Shared)
 else()
     message(STATUS "CUDA not found")
 endif()
@@ -67,7 +68,6 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
     message( STATUS "CMAKE_CUDA_COMPILER_VERSION: ${CMAKE_CUDA_COMPILER_VERSION}")
     # set(CUDA_PROPAGATE_HOST_FLAGS ON)
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcudafe --diag_suppress=2803 --expt-relaxed-constexpr")
-
     file(GLOB generator_cuda_srcs CONFIGURE_DEPENDS
         "${GENERATORS_ROOT}/*.cu"
         "${GENERATORS_ROOT}/*.cuh"
@@ -75,9 +75,7 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
         "${MODELS_ROOT}/*.cuh"
     )
     list(APPEND generator_srcs ${generator_cuda_srcs})
-
     add_compile_definitions(USE_CUDA=1)
-
     include_directories("${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}")
 else()
     file(GLOB generator_cuda_srcs "${GENERATORS_ROOT}/*_cuda*.*")
@@ -120,6 +118,15 @@ target_include_directories(python PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
 target_link_directories(python PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
 target_link_libraries(python PRIVATE onnxruntime-genai ${ONNXRUNTIME_LIB})
 set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
+if(USE_CUDA AND CMAKE_CUDA_COMPILER)
+    set_target_properties(onnxruntime-genai PROPERTIES LINKER_LANGUAGE CUDA)
+    set_target_properties(python PROPERTIES LINKER_LANGUAGE CUDA)
+    set_target_properties(Tests PROPERTIES LINKER_LANGUAGE CUDA)
+    target_link_libraries(onnxruntime-genai PRIVATE cublasLt cublas cudnn curand cufft cudart)
+    target_link_libraries(Tests PRIVATE cublasLt cublas cudnn curand cufft cudart)
+    target_link_libraries(python PRIVATE cublasLt cublas cudnn curand cufft cudart)
+endif()
+
 
 # Visual C++ - /MP Multiple process build, /WX Warnings as errors
 # Enable:
