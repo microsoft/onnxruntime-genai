@@ -7,8 +7,7 @@ include(cmake/external/onnxruntime_external_deps.cmake)
 
 project (Generators LANGUAGES C CXX)
 set(USE_CUDA 1) # "Build with CUDA support"
-set(USE_ORT_EXT 0) # "Build with Onnxruntime Extensions tokenizer support"
-set(USE_TOKENIZER 1)
+set(USE_TOKENIZER 1) # "Build with Tokenizer support"
 
 # Checking if CUDA is supported
 include(CheckLanguage)
@@ -183,30 +182,8 @@ foreach(DLL_FILE ${onnxruntime_libs})
     )
 endforeach()
 
-if(USE_ORT_EXT)
-    add_compile_definitions(USE_ORT_EXT=1)
-    target_include_directories(onnxruntime-genai PRIVATE ${CMAKE_SOURCE_DIR}/ort-ext/include)
-    target_include_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort-ext/include)
-    target_include_directories(python PRIVATE ${CMAKE_SOURCE_DIR}/ort-ext/include)
-    target_link_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort-ext/lib)
-    target_link_directories(python PRIVATE ${CMAKE_SOURCE_DIR}/ort-ext/lib)
-    target_link_libraries(Tests PRIVATE ${ONNXRUNTIME_EXTENSIONS_LIB})
-    target_link_libraries(python PRIVATE ${ONNXRUNTIME_EXTENSIONS_LIB})
-
-    # Copy the onnxruntime-extensions binaries into the build folder so it's found on launch
-    file(GLOB onnxruntime_extensions_libs "${CMAKE_SOURCE_DIR}/ort-ext/lib/${ONNXRUNTIME_EXTENSIONS_FILES}")
-    foreach(DLL_FILE ${onnxruntime_extensions_libs})
-        add_custom_command(
-            TARGET onnxruntime-genai POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy
-                    ${DLL_FILE}
-                    ${CMAKE_BINARY_DIR}/$<CONFIG>/${DLL_FILE_NAME}
-        )
-    endforeach()
- endif()
-
  if(USE_TOKENIZER)
-    add_compile_definitions(USE_ORT_EXT=1)
+    add_compile_definitions(USE_TOKENIZER=1)
     target_include_directories(onnxruntime-genai PRIVATE ${TOKENIZER_ROOT})
     target_include_directories(Tests PRIVATE ${TOKENIZER_ROOT})
     target_include_directories(python PRIVATE ${TOKENIZER_ROOT})

@@ -1,5 +1,5 @@
 #pragma once
-#if USE_ORT_EXT
+#if USE_TOKENIZER
 #include "tfmtok_c.h"
 #endif
 
@@ -36,7 +36,7 @@ struct TfmPtr {
   T* p_{};
 };
 
-#if USE_ORT_EXT
+#if USE_TOKENIZER
 struct Tokenizer {
   Tokenizer(Config& config);
 
@@ -52,7 +52,7 @@ struct Model {
   virtual ~Model();
 
   std::vector<int32_t> Generate(const SearchParams& params);
-#if USE_ORT_EXT
+#if USE_TOKENIZER
   std::unique_ptr<Tokenizer> CreateTokenizer();
 #endif
 
