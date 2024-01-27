@@ -3,6 +3,7 @@
 
 #include "tfmtok.h"
 
+#include <algorithm>
 #include <filesystem>
 
 namespace tfm {
