@@ -11,6 +11,8 @@ env:
   ort_dir: "onnxruntime-win-x64-gpu-1.16.3"
   ort_zip: "onnxruntime-win-x64-gpu-1.16.3.zip"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/onnxruntime-win-x64-gpu-1.16.3.zip"
+  cuda_dir: "${{ github.workspace }}\\cuda_sdk"
+  cuda_version: "12.2"
 
 jobs:
   Windows-CUDA-12-Build:
@@ -25,7 +27,8 @@ jobs:
           architecture: 'x64'
 
       - name: Download cuda
-        run: azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v12.2" cuda_sdk
+        run: |
+          azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v${{ env.cuda_version }}" ${{ env.cuda_dir}}
 
       - name: Download OnnxRuntime
         run: |
@@ -42,12 +45,12 @@ jobs:
       - name: Git Submodule Update
         run: |
           git submodule update --init --recursive
-      # The build machine doesn't have a GPU. So the value of CMAKE_CUDA_ARCHITECTURES doesn't matter.
+
       - name: Build with CMake
         run: |
           mkdir build
           cd build
-          cmake -G "Visual Studio 17 2022" -A x64 .. -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=TRUE 
+          cmake -G "Visual Studio 17 2022" -A x64 -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} .. -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=TRUE
           cmake --build . --config Release --parallel
 
       - name: Verify Build Artifacts

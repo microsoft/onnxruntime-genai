@@ -13,7 +13,10 @@ set(USE_ORT_EXT 0) # "Build with Onnxruntime Extensions tokenizer support"
 include(CheckLanguage)
 check_language(CUDA)
 if (CMAKE_CUDA_COMPILER)
-    set (CUDA_FOUND TRUE)
+    message(STATUS "CUDA found CUDAToolkit_VERSION ${CUDAToolkit_VERSION} with CMAKE_CUDA_COMPILER ${CMAKE_CUDA_COMPILER}" )
+    set(CMAKE_CUDA_RUNTIME_LIBRARY Shared)
+else()
+    message(STATUS "CUDA not found")
 endif()
 
 if("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_LESS 9)
@@ -35,7 +38,7 @@ set(PYTHON_ROOT ${PROJECT_SOURCE_DIR}/src/python)
 
 # CUDA Being enabled will make it not a debug build without this option, so all of the C++ headers will complain
 # about a mismatch with the actual debug headers and it'll fail to link. I don't know why this happens, or if this is the best fix.
-if(USE_CUDA AND CUDA_FOUND AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+if(USE_CUDA AND CMAKE_CUDA_COMPILER AND CMAKE_BUILD_TYPE STREQUAL "Debug")
   add_compile_definitions(_DEBUG=1)
 endif()
 
@@ -58,14 +61,13 @@ file(GLOB python_srcs CMAKE_CONFIGURE_DEPENDS
    "${PYTHON_ROOT}/*.cpp"
 )
 
-if(USE_CUDA AND CUDA_FOUND)
+if(USE_CUDA AND CMAKE_CUDA_COMPILER)
     # Don't let cmake set a default value for CMAKE_CUDA_ARCHITECTURES
     cmake_policy(SET CMP0104 OLD)
     enable_language(CUDA)
     message( STATUS "CMAKE_CUDA_COMPILER_VERSION: ${CMAKE_CUDA_COMPILER_VERSION}")
     # set(CUDA_PROPAGATE_HOST_FLAGS ON)
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcudafe --diag_suppress=2803 --expt-relaxed-constexpr")
-
     file(GLOB generator_cuda_srcs CONFIGURE_DEPENDS
         "${GENERATORS_ROOT}/*.cu"
         "${GENERATORS_ROOT}/*.cuh"
@@ -81,7 +83,6 @@ if(USE_CUDA AND CUDA_FOUND)
     list(APPEND test_srcs ${test_cuda_srcs})
 
     add_compile_definitions(USE_CUDA=1)
-
     include_directories("${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}")
 else()
     file(GLOB generator_cuda_srcs "${GENERATORS_ROOT}/*_cuda*.*")
@@ -124,6 +125,15 @@ target_include_directories(python PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
 target_link_directories(python PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
 target_link_libraries(python PRIVATE onnxruntime-genai ${ONNXRUNTIME_LIB})
 set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
+if(USE_CUDA AND CMAKE_CUDA_COMPILER)
+    set_target_properties(onnxruntime-genai PROPERTIES LINKER_LANGUAGE CUDA)
+    set_target_properties(python PROPERTIES LINKER_LANGUAGE CUDA)
+    set_target_properties(Tests PROPERTIES LINKER_LANGUAGE CUDA)
+    target_link_libraries(onnxruntime-genai PRIVATE cublasLt cublas cudnn curand cufft cudart)
+    target_link_libraries(Tests PRIVATE cublasLt cublas cudnn curand cufft cudart)
+    target_link_libraries(python PRIVATE cublasLt cublas cudnn curand cufft cudart)
+endif()
+
 
 # Visual C++ - /MP Multiple process build, /WX Warnings as errors
 # Enable:
