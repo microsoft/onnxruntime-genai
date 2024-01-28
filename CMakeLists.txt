@@ -15,7 +15,9 @@ include(CheckLanguage)
 check_language(CUDA)
 if (CMAKE_CUDA_COMPILER)
     message(STATUS "CUDA found CUDAToolkit_VERSION ${CUDAToolkit_VERSION} with CMAKE_CUDA_COMPILER ${CMAKE_CUDA_COMPILER}" )
-    set(CMAKE_CUDA_RUNTIME_LIBRARY Shared)
+    if(NOT WIN32)
+        set(CMAKE_CUDA_RUNTIME_LIBRARY Shared)
+    endif()
 else()
     message(STATUS "CUDA not found")
 endif()
@@ -119,7 +121,7 @@ target_include_directories(python PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
 target_link_directories(python PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
 target_link_libraries(python PRIVATE onnxruntime-genai ${ONNXRUNTIME_LIB})
 set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
-if(USE_CUDA AND CMAKE_CUDA_COMPILER)
+if(NOT WIN32 AND USE_CUDA AND CMAKE_CUDA_COMPILER)
     set_target_properties(onnxruntime-genai PROPERTIES LINKER_LANGUAGE CUDA)
     set_target_properties(python PROPERTIES LINKER_LANGUAGE CUDA)
     set_target_properties(Tests PROPERTIES LINKER_LANGUAGE CUDA)
@@ -175,10 +177,21 @@ if(BUILD_WHEEL)
   set(WHEEL_FILES_DIR "${CMAKE_BINARY_DIR}/wheel")
   message("Setting up wheel files in : ${WHEEL_FILES_DIR}")
 
-  set(TARGET_NAME "onnxruntime-genai")
+  set(TARGET_NAME "onnxruntime_genai")
   
   configure_file(${PYTHON_ROOT}/setup.py.in ${WHEEL_FILES_DIR}/setup.py @ONLY)
   configure_file(${PYTHON_ROOT}/py/__init__.py.in ${WHEEL_FILES_DIR}/${TARGET_NAME}/__init__.py @ONLY)
+
+  file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/${ONNXRUNTIME_FILES}")
+  foreach(DLL_FILE ${onnxruntime_libs})
+    add_custom_command(
+        TARGET onnxruntime-genai
+        COMMAND ${CMAKE_COMMAND} -E copy
+                ${DLL_FILE}
+                ${WHEEL_FILES_DIR}/${TARGET_NAME}/${DLL_FILE_NAME}
+    )
+  endforeach()
+
 
   # Copy over any additional python files
   file(GLOB pyfiles "${PYTHON_ROOT}/py/*.py")
