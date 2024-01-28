@@ -66,17 +66,5 @@ void LaunchFisherYatesKernel(float* logits, int* indices_buffer, int vocab_size,
   std::span<float> logits_span{logits, static_cast<size_t>(vocab_size * batch_size)};
   std::span<int32_t> indices{indices_buffer, static_cast<size_t>(vocab_size * batch_size)};
   Generators::cuda::launch_populate_indices(indices.data(), vocab_size, batch_size, stream);
-
-  // int* cpu_indices = new int[batch_size * vocab_size];
-  // cudaStreamSynchronize(stream);
-  // cudaMemcpy(cpu_indices, indices.data(), batch_size * vocab_size * sizeof(int), cudaMemcpyDeviceToHost);
-  // for (int i = 0; i < batch_size; i++) {
-  //   std::cout << "Batch " << i << "\r\n";
-  //   for (int j = 0; j < 16; j++) {
-  //     std::cout << cpu_indices[i * vocab_size + j] << " ";
-  //   }
-  //   std::cout << "\r\n";
-  // }
-
   FisherYatesKernel<<<num_blocks, num_threads, 0, stream>>>(logits_span.data(), indices.data(), vocab_size, random_states);
 }

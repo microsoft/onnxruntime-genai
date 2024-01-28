@@ -3,6 +3,7 @@
 #include "beam_search_scorer_cuda.cuh"
 #include "beam_search_scorer_cuda.h"
 #include "beam_search_topk.h"
+#include <iostream>
 #include <queue>
 #include <random>
 
@@ -85,6 +86,17 @@ void Search_Cuda::SetLogits(RoamingArray<float> logits_unk) {
 
     cuda::Launch_log_softmax(target.data(), static_cast<int>(target.size()), params_.cuda_stream);
   }
+
+  // float* cpu_logits = new float[params_.batch_size * params_.vocab_size];
+  // cudaStreamSynchronize(params_.cuda_stream);
+  // cudaMemcpy(cpu_logits, next_token_scores_.data(), params_.batch_size * params_.vocab_size * sizeof(float), cudaMemcpyDeviceToHost);
+  // for (int i = 0; i < params_.batch_size; i++) {
+  //   std::cout << "Batch " << i << "\r\n";
+  //   for (int j = 0; j < params_.vocab_size; j++) {
+  //     std::cout << cpu_logits[i * params_.vocab_size + j] << " ";
+  //   }
+  //   std::cout << "\r\n";
+  // }
 }
 
 RoamingArray<int32_t> GreedySearch_Cuda::GetNextTokens() {
@@ -165,39 +177,39 @@ void GreedySearch_Cuda::SelectTop() {
   AppendNextTokensToSequences();
 }
 
-// TODO: Find a good way to do this on the GPU
-void SoftMax(std::span<float> scores, float temperature);
-void TopPSampling(int32_t* d_next_token, float* d_scores, int size, float threshold, float temperature) {
-  auto scores_buffer = CudaMallocHostArray<float>(size);
-  std::span<float> scores{scores_buffer.get(), static_cast<size_t>(size)};
-  cudaMemcpy(scores.data(), d_scores, size * sizeof(float), cudaMemcpyDeviceToHost);
+// TODO: commented out in case of benchmarking
+// void SoftMax(std::span<float> scores, float temperature);
+// void TopPSampling(int32_t* d_next_token, float* d_scores, int size, float threshold, float temperature) {
+//   auto scores_buffer = CudaMallocHostArray<float>(size);
+//   std::span<float> scores{scores_buffer.get(), static_cast<size_t>(size)};
+//   cudaMemcpy(scores.data(), d_scores, size * sizeof(float), cudaMemcpyDeviceToHost);
 
-  SoftMax(scores, temperature);
+//   SoftMax(scores, temperature);
 
-  // Sort an array of indices by scores
-  std::vector<int32_t> indices(scores.size());
-  std::iota(indices.begin(), indices.end(), 0);
-  std::sort(indices.begin(), indices.end(), [scores = scores.data()](int32_t i, int32_t j) { return scores[i] > scores[j]; });
+//   // Sort an array of indices by scores
+//   std::vector<int32_t> indices(scores.size());
+//   std::iota(indices.begin(), indices.end(), 0);
+//   std::sort(indices.begin(), indices.end(), [scores = scores.data()](int32_t i, int32_t j) { return scores[i] > scores[j]; });
 
-  int32_t token = 0;
-  // Find the first token where the cumulative probability exceeds the threshold
-  for (int i = 0; i < scores.size(); i++) {
-    threshold -= scores[indices[i]];
-    if (threshold > 0)
-      continue;
+//   int32_t token = 0;
+//   // Find the first token where the cumulative probability exceeds the threshold
+//   for (int i = 0; i < scores.size(); i++) {
+//     threshold -= scores[indices[i]];
+//     if (threshold > 0)
+//       continue;
 
-    token = indices[i];
-    break;
-  }
+//     token = indices[i];
+//     break;
+//   }
 
-  cudaMemcpy(d_next_token, &token, sizeof(token), cudaMemcpyHostToDevice);
-}
+//   cudaMemcpy(d_next_token, &token, sizeof(token), cudaMemcpyHostToDevice);
+// }
 
 void GreedySearch_Cuda::SampleTopP(float p, float temperature) {
+  // TODO: commented out in case of benchmarking
   // std::random_device rd;
   // std::mt19937 gen(rd());
   // std::uniform_real_distribution<float> dis(0, p);
-
   // for (int i = 0; i < params_.batch_size; i++) {
   //   std::span<float> scores = next_token_scores_.subspan(i * params_.vocab_size, params_.vocab_size);
   //   TopPSampling(next_tokens_.data() + i, scores.data(), static_cast<int>(scores.size()), dis(gen), temperature);

@@ -1,6 +1,7 @@
 #include "../generators.h"
 #include "../search.h"
 #include "../models/model.h"
+#include <chrono>
 #include <iostream>
 
 // Our working directory is generators/build so one up puts us in the root directory:
@@ -263,10 +264,8 @@ void Test_TopP_Cuda() {
 
   // Verify outputs match expected outputs
   auto next_tokens = search->GetNextTokens().GetCPU();
-  std::cout << "next_tokens: " << next_tokens[0] << "\r\n";
   if (!std::equal(next_tokens.begin(), next_tokens.end(), output_span.begin(), output_span.end())) 
     throw std::runtime_error("Test Results Mismatch");
-  
   std::cout << " completed simple test\r\n";
 
   //////////// Batched Test
@@ -293,15 +292,15 @@ void Test_TopP_Cuda() {
   search->SampleTopP(0.25, 1.0);
 
   // Verify outputs match expected outputs
+  long long total_duration = 0;
+
   next_tokens = search->GetNextTokens().GetCPU();
-  std::cout << "next_tokens: " << next_tokens[0] << ", " << next_tokens[1] << ", " << next_tokens[2] << ", " << next_tokens[3] << "\r\n";
   if (!std::equal(next_tokens.begin(), next_tokens.end(), output_span.begin(), output_span.end())) 
     throw std::runtime_error("Test Results Mismatch");
-  
   std::cout << " completed batched test\r\n";
 
   //////////// Randomized Test
-  int vocab_size = 256*256; // large number, power of 2, useful for the fisher yates kernel
+  int vocab_size = 32000; // large number, power of 2, useful for the fisher yates kernel
   int batch_size = 5;
 
   for (int i = 0; i < 100; i++) {
@@ -312,11 +311,6 @@ void Test_TopP_Cuda() {
     float* cpu_logits = new float[vocab_size * batch_size];
     cudaMemcpyAsync(cpu_logits, logits_gpu.get(), vocab_size * batch_size * sizeof(float), cudaMemcpyDeviceToHost, params.cuda_stream);
 
-    // for(int i = 0; i < vocab_size * batch_size; i++) {
-    //   std::cout << cpu_logits[i] << " ";
-    //   if ((i+1) % vocab_size == 0) std::cout << "\r\n";
-    // }
-
     params = Generators::SearchParams{};
     params.max_length = 10;
     params.batch_size = batch_size;
@@ -326,12 +320,17 @@ void Test_TopP_Cuda() {
 
     search = params.CreateSearch();
     search->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), vocab_size * batch_size));
-    search->SampleTopP(0.95, 1.0);
     
+    auto start = std::chrono::high_resolution_clock::now();
+    search->SampleTopP(0.95, 1.0);
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end-start).count();
+    total_duration += duration;
+
     next_tokens = search->GetNextTokens().GetCPU();
     cudaStreamSynchronize(params.cuda_stream);
-    std::cout << "next_tokens: " << next_tokens[0] << ", " << next_tokens[1] << ", " << next_tokens[2] << ", " << next_tokens[3] << ", " << next_tokens[4] << "\r\n";
-    std::cout << "next_token_scores: " << cpu_logits[next_tokens[0]] << ", " << cpu_logits[next_tokens[1]+vocab_size] << ", " << cpu_logits[next_tokens[2]+vocab_size*2] << ", " << cpu_logits[next_tokens[3]+vocab_size*3] << ", " << cpu_logits[next_tokens[4]+vocab_size*4] << "\r\n";
+    // std::cout << "next_tokens: " << next_tokens[0] << ", " << next_tokens[1] << ", " << next_tokens[2] << ", " << next_tokens[3] << ", " << next_tokens[4] << "\r\n";
+    // std::cout << "next_token_scores: " << cpu_logits[next_tokens[0]] << ", " << cpu_logits[next_tokens[1]+vocab_size] << ", " << cpu_logits[next_tokens[2]+vocab_size*2] << ", " << cpu_logits[next_tokens[3]+vocab_size*3] << ", " << cpu_logits[next_tokens[4]+vocab_size*4] << "\r\n";
 
     // Verify outputs match expected outputs
     for (int b = 0; b < batch_size; b++) {
@@ -343,9 +342,15 @@ void Test_TopP_Cuda() {
       }
     }
   }
+
+  double averageDuration = static_cast<double>(total_duration) / 100.0;
+  std::cout << "Average time taken by top p sampling: "
+    << averageDuration << " microseconds" << std::endl;
+
   std::cout << " completed randomized test\r\n";
   std::cout << " - complete\r\n";
 }
+
 
 void Test_Phi2_Cuda() {
 #if TEST_PHI2
