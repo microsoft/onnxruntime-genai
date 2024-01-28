@@ -8,6 +8,7 @@ include(cmake/external/onnxruntime_external_deps.cmake)
 project (Generators LANGUAGES C CXX)
 set(USE_CUDA 1) # "Build with CUDA support"
 set(USE_ORT_EXT 0) # "Build with Onnxruntime Extensions tokenizer support"
+set(BUILD_WHEEL 1)
 
 # Checking if CUDA is supported
 include(CheckLanguage)
@@ -169,6 +170,33 @@ if(USE_ORT_EXT)
         )
     endforeach()
  endif()
+
+if(BUILD_WHEEL)
+  set(WHEEL_FILES_DIR "${CMAKE_BINARY_DIR}/wheel")
+  message("Setting up wheel files in : ${WHEEL_FILES_DIR}")
+
+  set(TARGET_NAME "onnxruntime-genai")
+  
+  configure_file(${PYTHON_ROOT}/setup.py.in ${WHEEL_FILES_DIR}/setup.py @ONLY)
+  configure_file(${PYTHON_ROOT}/py/__init__.py.in ${WHEEL_FILES_DIR}/${TARGET_NAME}/__init__.py @ONLY)
+
+  # Copy over any additional python files
+  file(GLOB pyfiles "${PYTHON_ROOT}/py/*.py")
+  foreach(filename ${pyfiles})
+    get_filename_component(target "${filename}" NAME)
+    message(STATUS "Copying ${filename} to ${target}")
+    configure_file("${filename}" "${WHEEL_FILES_DIR}/${TARGET_NAME}" COPYONLY)
+  endforeach (filename)
+
+  add_custom_target(PyPackageBuild
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:python> ${WHEEL_FILES_DIR}/${TARGET_NAME}
+    COMMAND "${PYTHON_EXECUTABLE}" -m pip wheel .
+    WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
+    COMMENT "Building wheel"
+  )
+
+  add_dependencies(PyPackageBuild python)
+endif()
 
 # Have visual studio put all files into one single folder vs the default split of header files into a separate folder
 source_group(TREE ${GENERATORS_ROOT} FILES ${generator_srcs})
