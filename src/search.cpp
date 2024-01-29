@@ -8,7 +8,7 @@
 
 namespace Generators {
 
-Search_Cpu::Search_Cpu(const SearchParams& params)
+Search_Cpu::Search_Cpu(const GeneratorParams& params)
     : Search{params},
       sequences_{params.input_ids, params.batch_size, params.num_beams, params_.max_length} {
   auto batch_beam_size = params.BatchBeamSize();
@@ -20,7 +20,7 @@ Search_Cpu::Search_Cpu(const SearchParams& params)
   memset(next_token_scores_.data(), 0, next_token_scores_.size_bytes());
 }
 
-GreedySearch_Cpu::GreedySearch_Cpu(const SearchParams& params)
+GreedySearch_Cpu::GreedySearch_Cpu(const GeneratorParams& params)
     : Search_Cpu(params) {
   next_tokens_buffer_ = AllocateArray<int32_t>(params.batch_size, &next_tokens_);
   memset(next_tokens_.data(), 0, next_tokens_.size_bytes());
@@ -29,7 +29,7 @@ GreedySearch_Cpu::GreedySearch_Cpu(const SearchParams& params)
   memset(eos_seen_.data(), 0, eos_seen_.size_bytes());
 }
 
-BeamSearch_Cpu::BeamSearch_Cpu(const SearchParams& params)
+BeamSearch_Cpu::BeamSearch_Cpu(const GeneratorParams& params)
     : Search_Cpu(params) {
   assert(params_.num_beams > 1);  // If 1, use GreedySearch
   beam_scorer_ = std::make_unique<BeamSearchScorer>(params_);

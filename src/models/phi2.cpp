@@ -10,11 +10,11 @@ Phi2_Model::Phi2_Model(std::unique_ptr<Config> config, OrtEnv& ort_env, const Pr
   InitDeviceAllocator(*session_decoder_);
 }
 
-std::unique_ptr<State> Phi2_Model::CreateState(RoamingArray<int32_t> sequence_lengths, const SearchParams& params) {
+std::unique_ptr<State> Phi2_Model::CreateState(RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params) {
   return std::make_unique<Phi2_State>(*this, sequence_lengths, params);
 }
 
-Phi2_State::Phi2_State(Phi2_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const SearchParams& search_params)
+Phi2_State::Phi2_State(Phi2_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const GeneratorParams& search_params)
     : State{search_params},
       model_{model},
       position_ids_{model, *this, sequence_lengths_unk, false /* use_position_ids */} {

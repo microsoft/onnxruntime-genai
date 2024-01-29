@@ -4,9 +4,6 @@
 #include <iostream>
 #include "../generators.h"
 #include "../search.h"
-#if USE_CUDA
-#include "../search_cuda.h"
-#endif
 #include "../models/model.h"
 
 using namespace pybind11::literals;
@@ -78,7 +75,7 @@ void TestFP16(pybind11::array_t<float16> inputs) {
   std::cout << std::endl;
 }
 
-std::string ToString(const SearchParams& v) {
+std::string ToString(const GeneratorParams& v) {
   std::ostringstream oss;
   oss << "SearchParams("
          "num_beams="
@@ -127,7 +124,7 @@ void Declare_DeviceArray(pybind11::module& m, const char* name) {
           "GetArray", [](Type& t) -> pybind11::array_t<T> { return t.GetNumpy(); }, pybind11::return_value_policy::reference_internal);
 }
 
-struct PySearchParams : SearchParams {
+struct PySearchParams : GeneratorParams {
   // Turn the python py_input_ids_ into the low level parameters
   void Prepare() {
     // TODO: This will switch to using the variant vs being ifs
@@ -146,7 +143,7 @@ struct PySearchParams : SearchParams {
     }
 
     if (py_whisper_input_features_.size() != 0) {
-      SearchParams::Whisper& whisper = inputs.emplace<SearchParams::Whisper>();
+      GeneratorParams::Whisper& whisper = inputs.emplace<GeneratorParams::Whisper>();
       std::span<const int64_t> shape(py_whisper_input_features_.shape(), py_whisper_input_features_.ndim());
       whisper.input_features = OrtValue::CreateTensor<float>(Ort::Allocator::GetWithDefaultOptions().GetInfo(), ToSpan(py_whisper_input_features_), shape);
       whisper.decoder_input_ids = ToSpan(py_whisper_decoder_input_ids_);

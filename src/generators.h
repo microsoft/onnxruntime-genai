@@ -54,11 +54,9 @@ using ProviderOptions = std::variant<
 
 ProviderOptions GetDefaultProviderOptions(DeviceType device_type);
 
-struct SearchParams {
-  SearchParams() = default;  // This constructor is only used if doing a custom model handler vs built-in
-  SearchParams(const Model& model);
-
-  std::unique_ptr<Search> CreateSearch() const;
+struct GeneratorParams {
+  GeneratorParams() = default;  // This constructor is only used if doing a custom model handler vs built-in
+  GeneratorParams(const Model& model);
 
   // Values copied from config
   int pad_token_id{};
@@ -104,31 +102,8 @@ struct SearchParams {
   std::variant<Whisper> inputs;
 };
 
-struct Search {
-  Search(const SearchParams& params) : params_{params} {}
-  virtual ~Search() = default;
-
-  virtual RoamingArray<int32_t> GetNextTokens() = 0;
-  virtual RoamingArray<int32_t> GetNextIndices() = 0;
-  virtual RoamingArray<int32_t> GetSequenceLengths() = 0;
-  virtual int GetSequenceLength() const = 0;
-  virtual RoamingArray<int32_t> GetSequence(int index) = 0;
-
-  virtual void SetLogits(RoamingArray<float> logits) = 0;
-  virtual bool IsDone() const = 0;
-
-  // TODO: Beam Search only, this should be removed and made automatic
-  virtual void Finalize(size_t /*num_return_sequences*/, RoamingArray<int32_t> /*output*/, RoamingArray<float> /*sequence_scores*/) { assert(false); }
-
-  virtual void SelectTop() = 0;
-  virtual void SampleTopP(float /*p*/, float /*temperature*/) { assert(false); }
-  virtual void SampleTopK(int /*k*/, float /*temperature*/) { assert(false); }
-
-  const SearchParams& params_;
-};
-
 struct Generator {
-  Generator(Model& model, const SearchParams& search_params);
+  Generator(Model& model, const GeneratorParams& search_params);
 
   bool IsDone() const;
   void ComputeLogits();
@@ -138,7 +113,7 @@ struct Generator {
   void AppendNextToken_Top() { AppendNextToken_TopK_TopP(1, 1.0f, 0.0f); }
   void AppendNextToken();
 
-  RoamingArray<int32_t> GetSequence(int index) { return search_->GetSequence(index); }
+  RoamingArray<int32_t> GetSequence(int index);
 
   Model& model_;
   std::unique_ptr<State> state_;
@@ -147,8 +122,8 @@ struct Generator {
 };
 
 std::unique_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const ProviderOptions* provider_options = nullptr);
-std::unique_ptr<Generator> CreateGenerator(Model& model, const SearchParams& search_params);
-std::vector<int32_t> Generate(Model& model, const SearchParams& params);  // Uses CreateGenerator and a simple loop to return the entire sequence
+std::unique_ptr<Generator> CreateGenerator(Model& model, const GeneratorParams& search_params);
+std::vector<int32_t> Generate(Model& model, const GeneratorParams& params);  // Uses CreateGenerator and a simple loop to return the entire sequence
 
 float Float16ToFloat32(uint16_t v);  // v is a IEEE 752-2008 binary16 format, 1 sign bit, 5 bit exponent, 10 bit fraction
 void top_k_indices(std::span<int32_t> top_k, std::span<const float> inputs);

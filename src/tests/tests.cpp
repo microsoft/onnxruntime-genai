@@ -32,7 +32,7 @@ void Test_GreedySearch_Gpt_Fp32() {
 
   auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
-  Generators::SearchParams params{*model};
+  Generators::GeneratorParams params{*model};
   params.max_length = 10;
   params.batch_size = static_cast<int>(input_ids_shape[0]);
   params.sequence_length = static_cast<int>(input_ids_shape[1]);
@@ -77,7 +77,7 @@ void Test_BeamSearch_Gpt_Fp32() {
 
   auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
-  Generators::SearchParams params{*model};
+  Generators::GeneratorParams params{*model};
   params.batch_size = static_cast<int>(input_ids_shape[0]);
   params.sequence_length = static_cast<int>(input_ids_shape[1]);
   params.input_ids = input_ids;
@@ -126,7 +126,7 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
   auto provider_options = Generators::GetDefaultProviderOptions(Generators::DeviceType::CUDA);
   auto model = Generators::CreateModel(*g_ort_env, model_path, &provider_options);
 
-  Generators::SearchParams params{*model};
+  Generators::GeneratorParams params{*model};
   params.batch_size = static_cast<int>(input_ids_shape[0]);
   params.sequence_length = static_cast<int>(input_ids_shape[1]);
   params.max_length = 10;
@@ -183,7 +183,7 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
   // (with separate_gpt2_decoder_for_init_run set to False as it is now set to True by default)
   auto model = Generators::CreateModel(*g_ort_env, model_path, &provider_options);
 
-  Generators::SearchParams params{*model};
+  Generators::GeneratorParams params{*model};
   params.batch_size = static_cast<int>(input_ids_shape[0]);
   params.sequence_length = static_cast<int>(input_ids_shape[1]);
   params.input_ids = input_ids;

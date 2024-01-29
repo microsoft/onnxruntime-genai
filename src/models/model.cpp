@@ -1,8 +1,5 @@
 #include "../generators.h"
 #include "../search.h"
-#if USE_CUDA
-#include "../search_cuda.h"
-#endif
 #include "model.h"
 #include "debugging.h"
 #include "gpt.h"
@@ -13,7 +10,7 @@
 
 namespace Generators {
 
-State::State(const SearchParams& search_params) : search_params_{search_params} {
+State::State(const GeneratorParams& search_params) : search_params_{search_params} {
 }
 
 void State::Run(OrtSession& session) {

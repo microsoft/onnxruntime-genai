@@ -38,7 +38,7 @@ float Float16ToFloat32(uint16_t v) {
   return std::ldexp((sign != 0 ? -1.0f : 1.0f) * (1.0f + static_cast<float>(fraction) / 1024.0f), exponent - 15);
 }
 
-SearchParams::SearchParams(const Model& model)
+GeneratorParams::GeneratorParams(const Model& model)
     : pad_token_id{model.config_->pad_token_id},
       eos_token_id{model.config_->eos_token_id},
       vocab_size{model.config_->model.vocab_size},
@@ -66,27 +66,27 @@ ProviderOptions GetDefaultProviderOptions([[maybe_unused]] DeviceType device_typ
   return options;
 }
 
-std::unique_ptr<Search> SearchParams::CreateSearch() const {
-#if USE_CUDA
-  if (device_type == DeviceType::CUDA) {
-    if (num_beams > 1)
-      return std::make_unique<BeamSearch_Cuda>(*this);
-    return std::make_unique<GreedySearch_Cuda>(*this);
-  }
-#endif
-
-  if (num_beams > 1) {
-    return std::make_unique<BeamSearch_Cpu>(*this);
-  }
-  return std::make_unique<GreedySearch_Cpu>(*this);
-}
-
-std::unique_ptr<Generator> CreateGenerator(Model& model, const SearchParams& search_params) {
+std::unique_ptr<Generator> CreateGenerator(Model& model, const GeneratorParams& search_params) {
   return std::make_unique<Generator>(model, search_params);
 }
 
-Generator::Generator(Model& model, const SearchParams& search_params) : model_{model} {
-  search_ = search_params.CreateSearch();
+std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
+#if USE_CUDA
+  if (params.device_type == DeviceType::CUDA) {
+    if (params.num_beams > 1)
+      return std::make_unique<BeamSearch_Cuda>(params);
+    return std::make_unique<GreedySearch_Cuda>(params);
+  }
+#endif
+
+  if (params.num_beams > 1) {
+    return std::make_unique<BeamSearch_Cpu>(params);
+  }
+  return std::make_unique<GreedySearch_Cpu>(params);
+}
+
+Generator::Generator(Model& model, const GeneratorParams& search_params) : model_{model} {
+  search_ = CreateSearch(search_params);
   state_ = model.CreateState(search_->GetSequenceLengths(), search_params);
 }
 
@@ -136,7 +136,11 @@ void Generator::AppendNextToken() {
   AppendNextToken_TopK_TopP(config.top_k, config.top_p, config.temperature);
 }
 
-std::vector<int32_t> Generate(Model& model, const SearchParams& params) {
+RoamingArray<int32_t> Generator::GetSequence(int index) {
+  return search_->GetSequence(index);
+}
+
+std::vector<int32_t> Generate(Model& model, const GeneratorParams& params) {
   auto generator = CreateGenerator(model, params);
 
   while (!generator->IsDone()) {

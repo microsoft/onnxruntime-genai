@@ -4,8 +4,31 @@ namespace Generators {
 
 struct BeamSearchScorer;
 
+struct Search {
+  Search(const GeneratorParams& params) : params_{params} {}
+  virtual ~Search() = default;
+
+  virtual RoamingArray<int32_t> GetNextTokens() = 0;
+  virtual RoamingArray<int32_t> GetNextIndices() = 0;
+  virtual RoamingArray<int32_t> GetSequenceLengths() = 0;
+  virtual int GetSequenceLength() const = 0;
+  virtual RoamingArray<int32_t> GetSequence(int index) = 0;
+
+  virtual void SetLogits(RoamingArray<float> logits) = 0;
+  virtual bool IsDone() const = 0;
+
+  // TODO: Beam Search only, this should be removed and made automatic
+  virtual void Finalize(size_t /*num_return_sequences*/, RoamingArray<int32_t> /*output*/, RoamingArray<float> /*sequence_scores*/) { assert(false); }
+
+  virtual void SelectTop() = 0;
+  virtual void SampleTopP(float /*p*/, float /*temperature*/) { assert(false); }
+  virtual void SampleTopK(int /*k*/, float /*temperature*/) { assert(false); }
+
+  const GeneratorParams& params_;
+};
+
 struct Search_Cpu : Search {
-  Search_Cpu(const SearchParams& params);
+  Search_Cpu(const GeneratorParams& params);
 
   int GetSequenceLength() const override;
   RoamingArray<int32_t> GetSequenceLengths() override { return sequence_lengths_; }
@@ -32,7 +55,7 @@ struct Search_Cpu : Search {
 };
 
 struct GreedySearch_Cpu : Search_Cpu {
-  GreedySearch_Cpu(const SearchParams& params);
+  GreedySearch_Cpu(const GeneratorParams& params);
 
   RoamingArray<int32_t> GetNextTokens() override;
   RoamingArray<int32_t> GetNextIndices() override { return cpu_span<int32_t>{}; }
@@ -55,7 +78,7 @@ struct GreedySearch_Cpu : Search_Cpu {
 };
 
 struct BeamSearch_Cpu : Search_Cpu {
-  BeamSearch_Cpu(const SearchParams& params);
+  BeamSearch_Cpu(const GeneratorParams& params);
   ~BeamSearch_Cpu();
 
   RoamingArray<int32_t> GetNextTokens() override;

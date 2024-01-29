@@ -7,7 +7,7 @@ namespace Generators {
 struct BeamSearchScorer_Cuda;
 
 struct Search_Cuda : Search {
-  Search_Cuda(const SearchParams& params);
+  Search_Cuda(const GeneratorParams& params);
 
   int GetSequenceLength() const override;
   RoamingArray<int32_t> GetSequenceLengths() override { return sequence_lengths_; }
@@ -42,7 +42,7 @@ struct Search_Cuda : Search {
 };
 
 struct GreedySearch_Cuda : Search_Cuda {
-  GreedySearch_Cuda(const SearchParams& params);
+  GreedySearch_Cuda(const GeneratorParams& params);
 
   RoamingArray<int32_t> GetNextTokens() override;
   RoamingArray<int32_t> GetNextIndices() override { return gpu_span<int32_t>{}; }
@@ -60,7 +60,7 @@ struct GreedySearch_Cuda : Search_Cuda {
 };
 
 struct BeamSearch_Cuda : Search_Cuda {
-  BeamSearch_Cuda(const SearchParams& params);
+  BeamSearch_Cuda(const GeneratorParams& params);
   ~BeamSearch_Cuda();
 
   RoamingArray<int32_t> GetNextTokens() override;
