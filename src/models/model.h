@@ -8,12 +8,12 @@ namespace Generators {
 void ConvertFp16ToFp32(OrtAllocator& allocator, cudaStream_t stream, OrtValue& in, std::unique_ptr<OrtValue>& p_out);
 
 struct State {
-  State(const SearchParams& search_params);
+  State(const GeneratorParams& search_params);
   virtual ~State() = default;
 
   virtual RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices = {}) = 0;
 
-  const SearchParams& search_params_;
+  const GeneratorParams& search_params_;
 
   std::vector<const char*> input_names_, output_names_;
   std::vector<OrtValue*> inputs_, outputs_;
@@ -51,12 +51,11 @@ struct Model {
   Model(std::unique_ptr<Config> config, const ProviderOptions* provider_options);
   virtual ~Model();
 
-  std::vector<int32_t> Generate(const SearchParams& params);
 #if USE_TOKENIZER
   std::unique_ptr<Tokenizer> CreateTokenizer();
 #endif
 
-  virtual std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths, const SearchParams& params) = 0;
+  virtual std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params) = 0;
 
   std::unique_ptr<OrtValue> ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams) const;
 
@@ -73,8 +72,6 @@ struct Model {
  protected:
   void InitDeviceAllocator(OrtSession& session);
 };
-
-std::unique_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const ProviderOptions* provider_options = nullptr);
 
 #if USE_CUDA
 namespace cuda {

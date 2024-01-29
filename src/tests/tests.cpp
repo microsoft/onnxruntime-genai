@@ -32,28 +32,22 @@ void Test_GreedySearch_Gpt_Fp32() {
 
   auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
-  Generators::SearchParams params{*model};
+  Generators::GeneratorParams params{*model};
   params.max_length = 10;
   params.batch_size = static_cast<int>(input_ids_shape[0]);
   params.sequence_length = static_cast<int>(input_ids_shape[1]);
   params.input_ids = input_ids;
 
-  auto search = params.CreateSearch();
-  auto state = model->CreateState(search->GetSequenceLengths(), params);
+  auto generator = Generators::CreateGenerator(*model, params);
 
-  while (!search->IsDone()) {
-    search->SetLogits(state->Run(search->GetSequenceLength(), search->GetNextTokens()));
-
-    // Scoring
-    //    Generators::Processors::MinLength(search, 1);
-    //    Generators::Processors::RepetitionPenalty(search, 1.0f);
-
-    search->SelectTop();
+  while (!generator->IsDone()) {
+    generator->ComputeLogits();
+    generator->AppendNextToken_Top();
   }
 
   // Verify outputs match expected outputs
   for (int i = 0; i < params.batch_size; i++) {
-    auto sequence = search->GetSequence(i).GetCPU();
+    auto sequence = generator->GetSequence(i).GetCPU();
     auto* expected_output_start = &expected_output[i * params.max_length];
     if (!std::equal(expected_output_start, expected_output_start + params.max_length, sequence.begin(), sequence.end()))
       throw std::runtime_error("Test Results Mismatch");
@@ -83,7 +77,7 @@ void Test_BeamSearch_Gpt_Fp32() {
 
   auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
-  Generators::SearchParams params{*model};
+  Generators::GeneratorParams params{*model};
   params.batch_size = static_cast<int>(input_ids_shape[0]);
   params.sequence_length = static_cast<int>(input_ids_shape[1]);
   params.input_ids = input_ids;
@@ -132,27 +126,26 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
   auto provider_options = Generators::GetDefaultProviderOptions(Generators::DeviceType::CUDA);
   auto model = Generators::CreateModel(*g_ort_env, model_path, &provider_options);
 
-  Generators::SearchParams params{*model};
+  Generators::GeneratorParams params{*model};
   params.batch_size = static_cast<int>(input_ids_shape[0]);
   params.sequence_length = static_cast<int>(input_ids_shape[1]);
   params.max_length = 10;
   params.input_ids = input_ids;
 
-  auto search = params.CreateSearch();
-  auto state = model->CreateState(search->GetSequenceLengths(), params);
+  auto generator = Generators::CreateGenerator(*model, params);
 
-  while (!search->IsDone()) {
-    search->SetLogits(state->Run(search->GetSequenceLength(), search->GetNextTokens()));
+  while (!generator->IsDone()) {
+    generator->ComputeLogits();
 
     // Scoring
     //    Generators::Processors_Cuda::MinLength(search, 1);
 
-    search->SelectTop();
+    generator->AppendNextToken_Top();
   }
 
   // Verify outputs match expected outputs
   for (int i = 0; i < params.batch_size; i++) {
-    auto sequence_gpu = search->GetSequence(i);
+    auto sequence_gpu = generator->GetSequence(i);
     auto sequence = sequence_gpu.GetCPU();
 
     auto* expected_output_start = &expected_output[i * params.max_length];
@@ -190,7 +183,7 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
   // (with separate_gpt2_decoder_for_init_run set to False as it is now set to True by default)
   auto model = Generators::CreateModel(*g_ort_env, model_path, &provider_options);
 
-  Generators::SearchParams params{*model};
+  Generators::GeneratorParams params{*model};
   params.batch_size = static_cast<int>(input_ids_shape[0]);
   params.sequence_length = static_cast<int>(input_ids_shape[1]);
   params.input_ids = input_ids;
@@ -198,24 +191,23 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
   params.num_beams = 4;
   params.length_penalty = 1.0f;
 
-  auto search = params.CreateSearch();
-  auto state = model->CreateState(search->GetSequenceLengths(), params);
+  auto generator = Generators::CreateGenerator(*model, params);
 
-  while (!search->IsDone()) {
-    search->SetLogits(state->Run(search->GetSequenceLength(), search->GetNextTokens(), search->GetNextIndices()));
+  while (!generator->IsDone()) {
+    generator->ComputeLogits();
 
     // Scoring
     //    Generators::Processors_Cuda::MinLength(search, 1);
     //    Generators::Processors_Cuda::RepetitionPenalty(search, 1.0f);
 
-    search->SelectTop();
+    generator->AppendNextToken();
   }
 
   size_t sequence_length = params.batch_size * params.max_length;
   auto output_sequence_cuda = Generators::CudaMallocArray<int32_t>(sequence_length);
   auto output_sequence_cpu = std::make_unique<int32_t[]>(sequence_length);
 
-  search->Finalize(1, Generators::gpu_span<int32_t>(output_sequence_cuda.get(), sequence_length), {});
+  generator->search_->Finalize(1, Generators::gpu_span<int32_t>(output_sequence_cuda.get(), sequence_length), {});
   cudaMemcpyAsync(output_sequence_cpu.get(), output_sequence_cuda.get(), sequence_length * sizeof(int32_t), cudaMemcpyDeviceToHost, params.cuda_stream);
   cudaStreamSynchronize(params.cuda_stream);
 
@@ -260,7 +252,28 @@ Print all primes between 1 and n
   params.input_ids = tokens;
   params.max_length = 128;
 
+  // Original version
   auto search = params.CreateSearch();
+  auto state = model->CreateState(search->GetSequenceLengths(), params);
+
+  while (!search->IsDone()) {
+    search->SetLogits(state->Run(search->GetSequenceLength(), search->GetNextTokens()));
+    search->SelectTop();
+  }
+
+  auto result = search->GetSequence(0);
+
+  // Generator version
+  auto generator = model->CreateGenerator();
+  while (!generator->IsDone()) {
+    auto logits = generator->RunStep();
+
+    generator->SelectTop();
+  }
+
+  auto result = generator->GetSequence(0);
+
+  // High level version
   auto result = model->Generate(params);
 
   std::cout << tokenizer->Decode(result) << "\r\n";

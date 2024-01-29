@@ -45,7 +45,7 @@ void OgaDestroyModel(OgaModel* model) {
 
 OgaResult* OgaCreateState(OgaModel* model, int32_t* sequence_lengths, size_t sequence_lengths_count, const OgaSearchParams* search_params, OgaState** out) {
   try {
-    *out = reinterpret_cast<OgaState*>(reinterpret_cast<Generators::Model*>(model)->CreateState(Generators::cpu_span<int32_t>{sequence_lengths, sequence_lengths_count}, *reinterpret_cast<const Generators::SearchParams*>(search_params)).release());
+    *out = reinterpret_cast<OgaState*>(reinterpret_cast<Generators::Model*>(model)->CreateState(Generators::cpu_span<int32_t>{sequence_lengths, sequence_lengths_count}, *reinterpret_cast<const Generators::GeneratorParams*>(search_params)).release());
     return nullptr;
   } catch (const std::exception& e) {
     return new OgaResult{e.what()};

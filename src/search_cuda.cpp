@@ -1,4 +1,5 @@
 #include "generators.h"
+#include "search.h"
 #include "search_cuda.h"
 #include "beam_search_scorer_cuda.cuh"
 #include "beam_search_scorer_cuda.h"
@@ -14,8 +15,8 @@ void OnCudaError(cudaError_t error) {
   throw std::exception();
 }
 
-Search_Cuda::Search_Cuda(const SearchParams& params)
-    : params_{params},
+Search_Cuda::Search_Cuda(const GeneratorParams& params)
+    : Search{params},
       sequences_{params.input_ids, params.batch_size, params.num_beams, params_.max_length, params_.cuda_stream} {
   auto batch_beam_size = params.BatchBeamSize();
   sequence_lengths_buffer_ = std::make_unique<int32_t[]>(batch_beam_size);
@@ -33,13 +34,13 @@ Search_Cuda::Search_Cuda(const SearchParams& params)
   *done_cpu_ = false;
 }
 
-GreedySearch_Cuda::GreedySearch_Cuda(const SearchParams& params)
+GreedySearch_Cuda::GreedySearch_Cuda(const GeneratorParams& params)
     : Search_Cuda{params} {
   next_tokens_buffer_ = CudaMallocArray<int32_t>(params.batch_size, &next_tokens_);
   cudaMemsetAsync(next_tokens_.data(), 0, next_tokens_.size_bytes(), params_.cuda_stream);
 }
 
-BeamSearch_Cuda::BeamSearch_Cuda(const SearchParams& params)
+BeamSearch_Cuda::BeamSearch_Cuda(const GeneratorParams& params)
     : Search_Cuda{params} {
   assert(params_.num_beams > 1);  // If 1, use GreedySearch
   auto batch_beam_size = params_.BatchBeamSize();
