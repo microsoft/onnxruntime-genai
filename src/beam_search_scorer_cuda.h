@@ -1,7 +1,7 @@
 namespace Generators {
 
 struct BeamSearchScorer_Cuda {
-  BeamSearchScorer_Cuda(const SearchParams& parameters);
+  BeamSearchScorer_Cuda(const GeneratorParams& parameters);
 
   void Process(Sequences_Cuda& sequences,
                std::span<const float> next_scores,

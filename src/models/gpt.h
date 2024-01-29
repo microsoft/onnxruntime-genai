@@ -10,13 +10,13 @@ namespace Generators {
 struct Gpt_Model : Model {
   Gpt_Model(std::unique_ptr<Config> config, OrtEnv& ort_env, const ProviderOptions* provider_options);
 
-  std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths, const SearchParams& params) override;
+  std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params) override;
 
   std::unique_ptr<OrtSession> session_decoder_;
 };
 
 struct Gpt_State : State {
-  Gpt_State(Gpt_Model& model, RoamingArray<int32_t> sequence_lengths, const SearchParams& search_params);
+  Gpt_State(Gpt_Model& model, RoamingArray<int32_t> sequence_lengths, const GeneratorParams& search_params);
   RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) override;
 
  private:

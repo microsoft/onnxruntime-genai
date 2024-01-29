@@ -65,7 +65,7 @@ void BeamHypotheses::Output(
   }
 }
 
-BeamSearchScorer::BeamSearchScorer(const SearchParams& parameters)
+BeamSearchScorer::BeamSearchScorer(const GeneratorParams& parameters)
     : batch_size_{parameters.batch_size},
       num_beams_{parameters.num_beams},
       max_length_{parameters.max_length},
