@@ -26,7 +26,7 @@ jobs:
         with:
           vs-version: '17.4'
           msbuild-architecture: arm64
-#          vswhere-path: 'C:\Program Files\Microsoft Visual Studio\Installer\vswhere.exe'
+          vswhere-path: 'C:\Program Files\Microsoft Visual Studio\Installer\vswhere.exe'
 
       - name: Download OnnxRuntime
         run: |
