@@ -1,0 +1,69 @@
+name: "Windows CPU arm64 Build"
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - rel-*
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+env:
+  ort_dir: "onnxruntime-win-arm64-1.16.3"
+  ort_zip: "$(ort_dir).zip"
+  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/$(ort_zip)"
+
+jobs:
+  job:
+    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Win2022-ARM-CPU"]
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Setup Visual Studio 2022
+        uses: microsoft/setup-msbuild@v1.1
+        with:
+          vs-version: '17.5'
+
+      - name: Download OnnxRuntime
+        run: |
+          $env:ort_url = "https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/onnxruntime-win-arm64-1.16.3.zip"
+          Invoke-WebRequest -Uri $env:ort_url -OutFile $env:ort_zip
+
+      - name: Unzip OnnxRuntime
+        run: |
+          Expand-Archive $env:ort_zip -DestinationPath .
+          Remove-Item -Path $env:ort_zip
+
+      - name: Rename OnnxRuntime to ort
+        run: |
+          Rename-Item -Path $env:ort_dir -NewName ort
+
+      - name: Git Submodule Update
+        run: |
+          git submodule update --init --recursive
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v2
+        with:
+          languages: 'cpp'
+
+      - name: Build with CMake
+        run: |
+          cmake -G "Visual Studio 17 2022" -A arm64 . -DCMAKE_BUILD_TYPE=Release
+          cmake --build . --config Release --parallel
+
+      - name: Verify Build Artifacts
+        if: always()
+        run: |
+          Get-ChildItem -Path $env:GITHUB_WORKSPACE\Release -Recurse
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v2
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: onnxruntime-genai-win-cpu-arm64
+          path: Release/*.lib
