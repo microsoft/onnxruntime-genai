@@ -31,7 +31,7 @@ void State::ClearIO() {
   outputs_.clear();
 }
 
-#if USE_ORT_EXT
+#if USE_TOKENIZER
 void CheckResult(tfmError_t error) {
   if (error != kTfmOK)
     throw std::runtime_error(TfmGetLastErrorMessage());
@@ -88,7 +88,7 @@ void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
 #endif
 }
 
-#if USE_ORT_EXT
+#if USE_TOKENIZER
 std::unique_ptr<Tokenizer> Model::CreateTokenizer() {
   return std::make_unique<Tokenizer>(*config_);
 }

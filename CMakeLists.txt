@@ -7,13 +7,16 @@ include(cmake/external/onnxruntime_external_deps.cmake)
 
 project (Generators LANGUAGES C CXX)
 set(USE_CUDA 1) # "Build with CUDA support"
-set(USE_ORT_EXT 0) # "Build with Onnxruntime Extensions tokenizer support"
+set(USE_TOKENIZER 1) # "Build with Tokenizer support"
 
 # Checking if CUDA is supported
 include(CheckLanguage)
 check_language(CUDA)
 if (CMAKE_CUDA_COMPILER)
-    set (CUDA_FOUND TRUE)
+    message(STATUS "CUDA found CUDAToolkit_VERSION ${CUDAToolkit_VERSION} with CMAKE_CUDA_COMPILER ${CMAKE_CUDA_COMPILER}" )
+#    set(CMAKE_CUDA_RUNTIME_LIBRARY Shared)
+else()
+    message(STATUS "CUDA not found")
 endif()
 
 if("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_LESS 9)
@@ -32,10 +35,11 @@ set(GENERATORS_ROOT ${PROJECT_SOURCE_DIR}/src)
 set(MODELS_ROOT ${PROJECT_SOURCE_DIR}/src/models)
 set(TESTS_ROOT ${PROJECT_SOURCE_DIR}/src/tests)
 set(PYTHON_ROOT ${PROJECT_SOURCE_DIR}/src/python)
+set(TOKENIZER_ROOT ${PROJECT_SOURCE_DIR}/src/tokenizer)
 
 # CUDA Being enabled will make it not a debug build without this option, so all of the C++ headers will complain
 # about a mismatch with the actual debug headers and it'll fail to link. I don't know why this happens, or if this is the best fix.
-if(USE_CUDA AND CUDA_FOUND AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+if(USE_CUDA AND CMAKE_CUDA_COMPILER AND CMAKE_BUILD_TYPE STREQUAL "Debug")
   add_compile_definitions(_DEBUG=1)
 endif()
 
@@ -58,14 +62,19 @@ file(GLOB python_srcs CMAKE_CONFIGURE_DEPENDS
    "${PYTHON_ROOT}/*.cpp"
 )
 
-if(USE_CUDA AND CUDA_FOUND)
+file(GLOB tokenizer_srcs CONFIGURE_DEPENDS
+    "${TOKENIZER_ROOT}/*.cc"
+    "${TOKENIZER_ROOT}/utils/*.cc"
+    "${TOKENIZER_ROOT}/c_api/*.cc"
+)
+
+if(USE_CUDA AND CMAKE_CUDA_COMPILER)
     # Don't let cmake set a default value for CMAKE_CUDA_ARCHITECTURES
     cmake_policy(SET CMP0104 OLD)
     enable_language(CUDA)
     message( STATUS "CMAKE_CUDA_COMPILER_VERSION: ${CMAKE_CUDA_COMPILER_VERSION}")
     # set(CUDA_PROPAGATE_HOST_FLAGS ON)
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcudafe --diag_suppress=2803 --expt-relaxed-constexpr")
-
     file(GLOB generator_cuda_srcs CONFIGURE_DEPENDS
         "${GENERATORS_ROOT}/*.cu"
         "${GENERATORS_ROOT}/*.cuh"
@@ -73,9 +82,7 @@ if(USE_CUDA AND CUDA_FOUND)
         "${MODELS_ROOT}/*.cuh"
     )
     list(APPEND generator_srcs ${generator_cuda_srcs})
-
     add_compile_definitions(USE_CUDA=1)
-
     include_directories("${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}")
 else()
     file(GLOB generator_cuda_srcs "${GENERATORS_ROOT}/*_cuda*.*")
@@ -89,6 +96,40 @@ endif()
 
 add_library (onnxruntime-genai ${generator_srcs})
 target_include_directories(onnxruntime-genai PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
+
+if(USE_TOKENIZER)
+    FetchContent_Declare(spm URL https://github.com/google/sentencepiece/archive/refs/tags/v0.1.99.zip)
+    set(SPM_USE_EXTERNAL_ABSL OFF CACHE BOOL "Use external absl")
+    set(SPM_USE_BUILTIN_PROTOBUF ON CACHE BOOL "Use built-in protobuf")
+    set(SPM_ENABLE_SHARED OFF)
+
+    FetchContent_GetProperties(spm)
+    if(NOT spm_POPULATED)
+      FetchContent_Populate(spm)
+      add_subdirectory(${spm_SOURCE_DIR} ${spm_BINARY_DIR} EXCLUDE_FROM_ALL)
+    endif()
+
+    FetchContent_Declare(GSL URL https://github.com/microsoft/GSL/archive/refs/tags/v4.0.0.zip)
+    FetchContent_MakeAvailable(GSL)
+
+    FetchContent_Declare(simdjson URL https://github.com/simdjson/simdjson/archive/refs/tags/v3.6.3.zip URL_HASH SHA1=2b063a2e81f74a5d1cb937fadf3d2fca0f1edb09)
+    FetchContent_MakeAvailable (simdjson)
+
+    add_library (tokenizer ${tokenizer_srcs})
+    target_include_directories(tokenizer PUBLIC
+      ${TOKENIZER_ROOT}
+      ${GSL_SOURCE_DIR}/include
+      ${simdjson_SOURCE_DIR}/singleheader/
+      ${spm_SOURCE_DIR}/src
+      ${spm_SOURCE_DIR}/src/builtin_pb
+      ${spm_SOURCE_DIR}/third_party/absl
+      ${spm_SOURCE_DIR}/third_party/protobuf-lite
+    )
+    target_compile_definitions(tokenizer PRIVATE _SILENCE_ALL_CXX20_DEPRECATION_WARNINGS)
+
+    add_dependencies(tokenizer sentencepiece-static)
+    target_link_libraries(tokenizer PUBLIC sentencepiece-static simdjson)
+endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set_target_properties(onnxruntime-genai PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -118,6 +159,15 @@ target_include_directories(python PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
 target_link_directories(python PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
 target_link_libraries(python PRIVATE onnxruntime-genai ${ONNXRUNTIME_LIB})
 set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
+if(USE_CUDA AND CMAKE_CUDA_COMPILER)
+    set_target_properties(onnxruntime-genai PROPERTIES LINKER_LANGUAGE CUDA)
+    set_target_properties(python PROPERTIES LINKER_LANGUAGE CUDA)
+    set_target_properties(Tests PROPERTIES LINKER_LANGUAGE CUDA)
+    target_link_libraries(onnxruntime-genai PRIVATE cublasLt cublas cudnn curand cufft cudart)
+    target_link_libraries(Tests PRIVATE cublasLt cublas cudnn curand cufft cudart)
+    target_link_libraries(python PRIVATE cublasLt cublas cudnn curand cufft cudart)
+endif()
+
 
 # Visual C++ - /MP Multiple process build, /WX Warnings as errors
 # Enable:
@@ -139,27 +189,14 @@ foreach(DLL_FILE ${onnxruntime_libs})
     )
 endforeach()
 
-if(USE_ORT_EXT)
-    add_compile_definitions(USE_ORT_EXT=1)
-    target_include_directories(onnxruntime-genai PRIVATE ${CMAKE_SOURCE_DIR}/ort-ext/include)
-    target_include_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort-ext/include)
-    target_include_directories(python PRIVATE ${CMAKE_SOURCE_DIR}/ort-ext/include)
-    target_link_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort-ext/lib)
-    target_link_directories(python PRIVATE ${CMAKE_SOURCE_DIR}/ort-ext/lib)
-    target_link_libraries(Tests PRIVATE ${ONNXRUNTIME_EXTENSIONS_LIB})
-    target_link_libraries(python PRIVATE ${ONNXRUNTIME_EXTENSIONS_LIB})
-
-    # Copy the onnxruntime-extensions binaries into the build folder so it's found on launch
-    file(GLOB onnxruntime_extensions_libs "${CMAKE_SOURCE_DIR}/ort-ext/lib/${ONNXRUNTIME_EXTENSIONS_FILES}")
-    foreach(DLL_FILE ${onnxruntime_extensions_libs})
-        add_custom_command(
-            TARGET onnxruntime-genai POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy
-                    ${DLL_FILE}
-                    ${CMAKE_BINARY_DIR}/$<CONFIG>/${DLL_FILE_NAME}
-        )
-    endforeach()
- endif()
+ if(USE_TOKENIZER)
+    add_compile_definitions(USE_TOKENIZER=1)
+    target_include_directories(onnxruntime-genai PRIVATE ${TOKENIZER_ROOT})
+    target_include_directories(Tests PRIVATE ${TOKENIZER_ROOT})
+    target_include_directories(python PRIVATE ${TOKENIZER_ROOT})
+    target_link_libraries(Tests PRIVATE tokenizer)
+    target_link_libraries(python PRIVATE tokenizer)
+endif()
 
 # Have visual studio put all files into one single folder vs the default split of header files into a separate folder
 source_group(TREE ${GENERATORS_ROOT} FILES ${generator_srcs})

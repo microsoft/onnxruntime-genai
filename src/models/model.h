@@ -1,5 +1,5 @@
 #pragma once
-#if USE_ORT_EXT
+#if USE_TOKENIZER
 #include "tfmtok_c.h"
 #endif
 
@@ -36,7 +36,7 @@ struct TfmPtr {
   T* p_{};
 };
 
-#if USE_ORT_EXT
+#if USE_TOKENIZER
 struct Tokenizer {
   Tokenizer(Config& config);
 
@@ -51,7 +51,7 @@ struct Model {
   Model(std::unique_ptr<Config> config, const ProviderOptions* provider_options);
   virtual ~Model();
 
-#if USE_ORT_EXT
+#if USE_TOKENIZER
   std::unique_ptr<Tokenizer> CreateTokenizer();
 #endif
 

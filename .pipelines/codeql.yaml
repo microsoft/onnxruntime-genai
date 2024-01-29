@@ -1,0 +1,68 @@
+trigger:
+  branches:
+    include:
+    - main
+    - rel-*
+  paths:
+    exclude:
+    - docs/**
+    - README.md
+    - CONTRIBUTING.md
+    - BUILD.md
+pr:
+  branches:
+    include:
+    - main
+    - rel-*
+  paths:
+    exclude:
+    - docs/**
+    - README.md
+    - CONTRIBUTING.md
+    - BUILD.md
+
+stages:
+- stage: x64_debug
+  dependsOn: []
+  jobs:
+  - job: win
+    variables:
+      DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+      Codeql.Enabled: true
+      Codeql.TSAEnabled: true
+    workspace:
+      clean: all
+    pool: 'onnxruntime-Win-CPU-2022'
+    timeoutInMinutes:  300
+    steps:
+    - checkout: self
+      clean: true
+      submodules: none
+    - task: onebranch.pipeline.tsaoptions@1
+      displayName: 'OneBranch TSAOptions'
+      inputs:
+        tsaConfigFilePath: '$(Build.SourcesDirectory)\.config\tsaoptions.json'
+        appendSourceBranchName: false
+    - task: CredScan@3
+      displayName: 🔍 Run CredScan
+
+    - task: PoliCheck@2
+      inputs:
+        targetType: 'F'
+        targetArgument: '$(Build.SourcesDirectory)'
+
+    - task: SdtReport@2
+      displayName: 📃 Create Security Analysis Report
+      inputs:
+        GdnExportAllTools: true
+
+    - task: PublishSecurityAnalysisLogs@3
+      displayName: 'Publish Security Analysis Logs'
+      continueOnError: true
+    - task: TSAUpload@2
+      displayName: 'TSA upload'
+      condition: and (succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+      continueOnError: true
+      inputs:
+        GdnPublishTsaOnboard: true
+        GdnPublishTsaConfigFile: '$(Build.SourcesDirectory)\.config\tsaoptions.json' 
