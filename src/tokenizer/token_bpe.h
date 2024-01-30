@@ -8,6 +8,7 @@
 #include <string>
 #include "tokenizer.h"
 
+#include "bpe_extended.hpp"
 #include "bpe_encoder.hpp"
 
 namespace tfm {
@@ -31,6 +32,7 @@ class BPETokenizer : public TokenizerImpl {
                                    std::list<OffsetMappingType>& offset_map) const;
   void CreateByteEncoder();
   void LoadPredefinedTokens(const TokenConfig& config);
+  TfmStatus DecodeExtraArgs(const simdjson::dom::element& root);
 
  protected:
   std::string_view model_name_{"GPT2"};
@@ -41,21 +43,27 @@ class BPETokenizer : public TokenizerImpl {
   std::string pad_token_{};  // no padding by default
 
   bool en_normalization_{};
-  bool skip_special_tokens_{true};
-  bool whitespace_token_{};
   std::vector<std::string_view> arr_vocab_;
   std::map<int64_t, std::string> added_tokens_;
   std::set<int64_t> all_special_ids_;
 
   uint32_t byte_encoder_[256] = {};
   std::unordered_map<char32_t, unsigned char> byte_decoder_;
-  std::unique_ptr<BpeEncoder> bbpe_encoder_;
+
+  bpe::ExtendedToken extended_token_;
+  BpeEncoder bbpe_encoder_;
 
   int64_t padding_length_ = -1;
   uint32_t unk_token_id_{};
   uint32_t bos_token_id_{};
   uint32_t eos_token_id_{};
   uint32_t pad_token_id_{};
+
+  struct {
+    bool add_prefix_space{};
+    bool skip_special_tokens_{true};
+    bool whitespace_token_{};
+  } decode_extra_args_;
 };
 
 }  // namespace tfm

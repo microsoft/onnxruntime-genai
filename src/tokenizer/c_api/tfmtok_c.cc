@@ -1,10 +1,10 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+#include <filesystem>
+#include <algorithm>
 
 #include "tfmtok.h"
 
-#include <algorithm>
-#include <filesystem>
 
 namespace tfm {
 class TokenId2DArray : public TfmObjectImpl {

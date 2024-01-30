@@ -42,7 +42,7 @@ class BpeEncoder {
     }
 
     auto ewsuffix = model_node.at_key("end_of_word_suffix");
-    if (ewsuffix.is_string()) {  
+    if (ewsuffix.is_string()) {
       end_of_word_suffix_ = model_node.at_key("end_of_word_suffix").get_c_str().value();
     }
 
@@ -105,37 +105,6 @@ class BpeEncoder {
     return {};
   }
 
-  TfmStatus LoadAddedTokens(const std::string_view added_tokens[], size_t tok_num) {
-    int id = bpe::kInvalidTokenId;
-    for (size_t n = 0; n < tok_num; ++n) {
-      std::string token(added_tokens[n]);  // Convert std::string_view to std::string
-      id = GetTokenId(token);
-      added_tokens_.Add(FromUTF8(added_tokens[n]), 0, std::make_optional(id));
-    }
-
-    return {};
-  }
-
-  // REF: https://github.com/huggingface/transformers/blob/c9e72f55b2dc4b9be4edb986dce0552582b328f2/src/transformers/tokenization_utils.py#L52
-  bpe::TokenPairs SplitByAddedAndSpecial(const std::u32string& input) const {
-    // split by added tokens
-    bpe::TokenPairs added_result;
-    bpe::TokenPairs final_result;
-    added_tokens_.Split(input, added_result);
-    for (const auto& [token, id] : added_result) {
-      if (id != bpe::kInvalidTokenId) {
-        final_result.emplace_back(token, id);
-      } else {
-        auto special_result = special_tokens_.SplitBySpecialTokens(token);
-        for (const auto& [_token, _id] : special_result) {
-          final_result.emplace_back(_token, _id);
-        }
-      }
-    }
-
-    return final_result;
-  }
-
   void PerformBPE(std::list<std::pair<uint32_t, uint32_t>>& vals) const {
     while (vals.size() >= 2) {
       auto pos_it = vals.end();
@@ -186,7 +155,7 @@ class BpeEncoder {
     }
   }
 
-  uint32_t GetTokenId(const std::string& key) {
+  uint32_t GetTokenId(const std::string& key) const {
     auto it = vocab_map_.find(key);
     if (it != end(vocab_map_)) {
       return it->second;
@@ -227,8 +196,6 @@ class BpeEncoder {
   uint32_t unk_id_ = std::numeric_limits<uint32_t>::max();
   uint32_t max_token_id_ = 0;
   std::string end_of_word_suffix_;
-  bpe::SpecialTokenMap special_tokens_;
-  TrieTree<char32_t> added_tokens_;
 };
 
 }  // namespace tfm
