@@ -1,11 +1,12 @@
 #include "generators.h"
+#include "search.h"
 #include "search_cuda.h"
 #include "beam_search_scorer_cuda.cuh"
 #include "beam_search_scorer_cuda.h"
 
 namespace Generators {
 
-BeamSearchScorer_Cuda::BeamSearchScorer_Cuda(const SearchParams& parameters)
+BeamSearchScorer_Cuda::BeamSearchScorer_Cuda(const GeneratorParams& parameters)
     : stream_{parameters.cuda_stream} {
   state_cpu_ = CudaMallocHostArray<cuda::BeamScorerState>(1);
   state_cpu_->batch_size_ = static_cast<size_t>(parameters.batch_size);

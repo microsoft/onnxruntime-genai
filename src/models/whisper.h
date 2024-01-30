@@ -8,14 +8,14 @@ namespace Generators {
 struct Whisper_Model : Model {
   Whisper_Model(std::unique_ptr<Config> config, OrtEnv& ort_env, const ProviderOptions* provider_options);
 
-  std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths, const SearchParams& params) override;
+  std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params) override;
 
   std::unique_ptr<OrtSession> session_decoder_;  // decoder.onnx
   std::unique_ptr<OrtSession> session_encoder_;  // encoder_decoder_init.onnx
 };
 
 struct Whisper_State : State {
-  Whisper_State(Whisper_Model& model, RoamingArray<int32_t> sequence_lengths, const SearchParams& params);
+  Whisper_State(Whisper_Model& model, RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params);
   RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) override;
 
  private:
