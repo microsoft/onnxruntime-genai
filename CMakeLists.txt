@@ -8,6 +8,7 @@ include(cmake/external/onnxruntime_external_deps.cmake)
 project (Generators LANGUAGES C CXX)
 set(USE_CUDA 1) # "Build with CUDA support"
 set(USE_TOKENIZER 1) # "Build with Tokenizer support"
+set(BUILD_WHEEL 1)
 
 # Checking if CUDA is supported
 include(CheckLanguage)
@@ -159,7 +160,9 @@ target_include_directories(python PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
 target_link_directories(python PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
 target_link_libraries(python PRIVATE onnxruntime-genai ${ONNXRUNTIME_LIB})
 set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
-if(USE_CUDA AND CMAKE_CUDA_COMPILER)
+
+# TODO: Windows is statically linking CUDA libraries, so remove the 'NOT WIN32' once it's using shared libraries
+if(NOT WIN32 AND USE_CUDA AND CMAKE_CUDA_COMPILER)
     set_target_properties(onnxruntime-genai PROPERTIES LINKER_LANGUAGE CUDA)
     set_target_properties(python PROPERTIES LINKER_LANGUAGE CUDA)
     set_target_properties(Tests PROPERTIES LINKER_LANGUAGE CUDA)
@@ -196,6 +199,44 @@ endforeach()
     target_include_directories(python PRIVATE ${TOKENIZER_ROOT})
     target_link_libraries(Tests PRIVATE tokenizer)
     target_link_libraries(python PRIVATE tokenizer)
+endif()
+
+if(BUILD_WHEEL)
+  set(WHEEL_FILES_DIR "${CMAKE_BINARY_DIR}/wheel")
+  message("Setting up wheel files in : ${WHEEL_FILES_DIR}")
+
+  set(TARGET_NAME "onnxruntime_genai")
+  
+  configure_file(${PYTHON_ROOT}/setup.py.in ${WHEEL_FILES_DIR}/setup.py @ONLY)
+  configure_file(${PYTHON_ROOT}/py/__init__.py.in ${WHEEL_FILES_DIR}/${TARGET_NAME}/__init__.py @ONLY)
+
+  file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/${ONNXRUNTIME_FILES}")
+  foreach(DLL_FILE ${onnxruntime_libs})
+    add_custom_command(
+        TARGET onnxruntime-genai
+        COMMAND ${CMAKE_COMMAND} -E copy
+                ${DLL_FILE}
+                ${WHEEL_FILES_DIR}/${TARGET_NAME}/${DLL_FILE_NAME}
+    )
+  endforeach()
+
+
+  # Copy over any additional python files
+  file(GLOB pyfiles "${PYTHON_ROOT}/py/*.py")
+  foreach(filename ${pyfiles})
+    get_filename_component(target "${filename}" NAME)
+    message(STATUS "Copying ${filename} to ${target}")
+    configure_file("${filename}" "${WHEEL_FILES_DIR}/${TARGET_NAME}" COPYONLY)
+  endforeach (filename)
+
+  add_custom_target(PyPackageBuild
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:python> ${WHEEL_FILES_DIR}/${TARGET_NAME}
+    COMMAND "${PYTHON_EXECUTABLE}" -m pip wheel .
+    WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
+    COMMENT "Building wheel"
+  )
+
+  add_dependencies(PyPackageBuild python)
 endif()
 
 # Have visual studio put all files into one single folder vs the default split of header files into a separate folder

@@ -1,0 +1,21 @@
+from setuptools import setup, find_packages
+from setuptools.dist import Distribution
+import sys
+
+if sys.version_info < (3, 0):
+    sys.exit('Sorry, Python < 3.0 is not supported')
+
+class BinaryDistribution(Distribution):
+    """Distribution which always forces a binary package with platform name"""
+    def has_ext_modules(foo):
+        return True
+
+setup(
+    name='@TARGET_NAME@',
+    version='1.0.0',
+    packages=find_packages(),
+    include_package_data=True,
+    package_data={'': ['*.pyd', '*.dll']},
+    install_requires=[],
+    distclass=BinaryDistribution
+)
