@@ -72,6 +72,7 @@ struct Search {
   virtual void SelectTop() = 0;
   virtual void SampleTopP(float /*p*/, float /*temperature*/) { assert(false); }
   virtual void SampleTopK(int /*k*/, float /*temperature*/) { assert(false); }
+  virtual void GetTopKSubset(int* tokens_out, int k) { assert(false); }
 };
 
 struct SearchParams {

@@ -6,8 +6,7 @@
 #include <iostream>
 #include <queue>
 #include <random>
-
-#include "top_p.cuh"
+#include "cuda_sampling.cuh"
 
 namespace Generators {
 
@@ -216,11 +215,36 @@ void GreedySearch_Cuda::SampleTopP(float p, float temperature) {
   // }
 
   std::span<float> scores = next_token_scores_.subspan(0, params_.batch_size * params_.vocab_size);
-  cuda::SampleTopPKernel(next_tokens_.data(), scores.data(), int(scores.size() / params_.batch_size), params_.batch_size, p, temperature, params_.cuda_stream);
-
+  cuda::GetSample(params_.cuda_stream, next_tokens_.data(), scores.data(), int(scores.size() / params_.batch_size), 
+                  params_.batch_size, -1, p, temperature);
   CheckForEOS();
   AppendNextTokensToSequences();
 }
+
+void GreedySearch_Cuda::SampleTopK(int k, float temperature) {
+  std::span<float> scores = next_token_scores_.subspan(0, params_.batch_size * params_.vocab_size);
+  cuda::GetSample(params_.cuda_stream, next_tokens_.data(), scores.data(), int(scores.size() / params_.batch_size), 
+                  params_.batch_size, k, 0.0, temperature);
+  CheckForEOS();
+  AppendNextTokensToSequences();
+}
+
+// TODO: API stuff... do we want this?
+// tokens_out should be preallocated with size k * batch_size
+void GreedySearch_Cuda::GetTopKSubset(int* tokens_out, int k) {
+  std::span<float> scores = next_token_scores_.subspan(0, params_.batch_size * params_.vocab_size);
+  cuda::GetTopKSubset(params_.cuda_stream, scores.data(), tokens_out, int(scores.size() / params_.batch_size), params_.batch_size, k);
+}
+
+// TODO: api stuff... do we want this?
+// void GreedySearch_Cuda::SampleTopPAndK(float p, int k, float temperature) {
+//   std::span<float> scores = next_token_scores_.subspan(0, params_.batch_size * params_.vocab_size);
+//   cuda::GetSample(params_.cuda_stream, next_tokens_.data(), scores.data(), int(scores.size() / params_.batch_size), 
+//                   params_.batch_size, k, p, temperature);
+
+//   CheckForEOS();
+//   AppendNextTokensToSequences();
+// }
 
 void GreedySearch_Cuda::CheckForEOS() {
   assert(next_tokens_.size() == eos_meet_.size());

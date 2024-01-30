@@ -1,5 +1,5 @@
 #include "tests_helper.cuh"
-#include "../top_p.cuh"
+#include "../cuda_sampling.cuh"
 #include <cuda_runtime.h>
 #include <curand.h>
 #include <curand_kernel.h>
@@ -65,6 +65,6 @@ void LaunchFisherYatesKernel(float* logits, int* indices_buffer, int vocab_size,
   cudaMalloc((void **)&random_states, num_threads * sizeof(curandState));
   std::span<float> logits_span{logits, static_cast<size_t>(vocab_size * batch_size)};
   std::span<int32_t> indices{indices_buffer, static_cast<size_t>(vocab_size * batch_size)};
-  Generators::cuda::launch_populate_indices(indices.data(), vocab_size, batch_size, stream);
+  Generators::cuda::LaunchPopulateIndices(indices.data(), vocab_size, batch_size, stream);
   FisherYatesKernel<<<num_blocks, num_threads, 0, stream>>>(logits_span.data(), indices.data(), vocab_size, random_states);
 }

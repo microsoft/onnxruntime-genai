@@ -49,8 +49,10 @@ struct GreedySearch_Cuda : Search_Cuda {
   RoamingArray<int32_t> GetNextTokens() override;
 
   void SelectTop() override;
-  void SampleTopK(int k, float t) override { assert(false); }
+  void SampleTopK(int k, float t) override;
   void SampleTopP(float p, float t) override;
+  void GetTopKSubset(int* tokens_out, int k) override;
+  // void SampleTopPAndK(float p, int k, float t) override;
 
  private:
   void CheckForEOS();

@@ -236,8 +236,11 @@ void Test_BeamSearch_Gpt_Cuda() {
     Test_BeamSearch_Gpt_Cuda(model_path.first, model_path.second);
 }
 
+// TODO: CPU LOGITS AND LOGITS CPU SHOULD NOT BE BOTH THINGS
+// ALSO IS LONG FUNCTION, SEPERATE INTO PARTS
 #include "tests_helper.cuh"
-void Test_TopP_Cuda() {
+void Test_Sampling_Cuda() {
+  //////////// TOP P TEST
   std::cout << "Test_TopP" << std::flush;
 
   //////////// Simple Test
@@ -292,7 +295,6 @@ void Test_TopP_Cuda() {
   search->SampleTopP(0.25, 1.0);
 
   // Verify outputs match expected outputs
-  long long total_duration = 0;
 
   next_tokens = search->GetNextTokens().GetCPU();
   if (!std::equal(next_tokens.begin(), next_tokens.end(), output_span.begin(), output_span.end())) 
@@ -302,7 +304,7 @@ void Test_TopP_Cuda() {
   //////////// Randomized Test
   int vocab_size = 32000; // large number, power of 2, useful for the fisher yates kernel
   int batch_size = 5;
-
+  long long total_duration = 0;
   for (int i = 0; i < 100; i++) {
     logits_gpu = Generators::CudaMallocArray<float>(vocab_size * batch_size);
     auto indices_buffer = Generators::CudaMallocHostArray<int>(vocab_size * batch_size);
@@ -348,6 +350,183 @@ void Test_TopP_Cuda() {
     << averageDuration << " microseconds" << std::endl;
 
   std::cout << " completed randomized test\r\n";
+
+  //////////// TOP K TEST
+  std::cout << "Test_TopK" << std::flush;
+
+  //////////// Small Test
+  logits_cpu = {2.0, 1.5, 1.25, 0.25, 0.25,
+                0.25, 2.0, 1.25, 1.5, 0.25,
+                0.25, 2.0, 0.25, 1.5, 1.25,
+                1.25, 0.25, 1.5, 0.25, 2.0};
+  logits_gpu = Generators::CudaMallocArray<float>(logits_cpu.size());
+
+  int k = 2;
+  vocab_size = 5;
+  batch_size = 4;
+  params = Generators::SearchParams{};
+  params.max_length = 10;
+  params.batch_size = batch_size;
+  params.sequence_length = 1;
+  params.vocab_size = vocab_size;
+  params.device_type = Generators::DeviceType::CUDA;
+
+  cudaMemcpyAsync(logits_gpu.get(), logits_cpu.data(), logits_cpu.size() * sizeof(float), cudaMemcpyHostToDevice, params.cuda_stream);
+  cudaStreamSynchronize(params.cuda_stream);
+  search = params.CreateSearch();
+
+  search->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), logits_cpu.size()));
+  search->SampleTopK(k, 1.0);
+
+  next_tokens = search->GetNextTokens().GetCPU();
+  // Verify outputs match expected outputs
+  for (int b = 0; b < batch_size; b++) {
+    auto next_token = next_tokens[b];
+    auto next_token_score = logits_cpu[next_token + vocab_size * b];
+    if (next_token_score < 1.5) {
+      std::cout << "next_token_score: " << next_token_score << "\r\n";
+      throw std::runtime_error("Test Results Mismatch");
+    }
+  }
+  std::cout << " completed batched test\r\n";
+
+  //////////// Randomized Test
+  vocab_size = 32000; // large number, power of 2, useful for the fisher yates kernel
+  batch_size = 5;
+  k = 5;
+  total_duration = 0;
+  for (int i = 0; i < 100; i++) {
+    logits_gpu = Generators::CudaMallocArray<float>(vocab_size * batch_size);
+    auto indices_buffer = Generators::CudaMallocHostArray<int>(vocab_size * batch_size);
+    LaunchGeometricDecayKernel(logits_gpu.get(), vocab_size, batch_size, params.cuda_stream);
+    LaunchFisherYatesKernel(logits_gpu.get(), indices_buffer.get(), vocab_size, batch_size, params.cuda_stream);
+    float* cpu_logits = new float[vocab_size * batch_size];
+    cudaMemcpyAsync(cpu_logits, logits_gpu.get(), vocab_size * batch_size * sizeof(float), cudaMemcpyDeviceToHost, params.cuda_stream);
+
+    params = Generators::SearchParams{};
+    params.max_length = 10;
+    params.batch_size = batch_size;
+    params.sequence_length = 1;
+    params.vocab_size = vocab_size;
+    params.device_type = Generators::DeviceType::CUDA;
+
+    search = params.CreateSearch();
+    search->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), vocab_size * batch_size));
+    
+    auto start = std::chrono::high_resolution_clock::now();
+    search->SampleTopK(k, 1.0);
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end-start).count();
+    total_duration += duration;
+
+    next_tokens = search->GetNextTokens().GetCPU();
+    cudaStreamSynchronize(params.cuda_stream);
+    // Verify outputs match expected outputs
+    for (int b = 0; b < batch_size; b++) {
+      auto next_token = next_tokens[b];
+      auto next_token_score = cpu_logits[next_token + vocab_size * b];
+      if (next_token_score < 10.0) {
+        std::cout << "next_token_score: " << next_token_score << "\r\n";
+        throw std::runtime_error("Test Results Mismatch");
+      }
+    }
+  }
+
+  averageDuration = static_cast<double>(total_duration) / 100.0;
+  std::cout << "Average time taken by top k sampling: "
+    << averageDuration << " microseconds" << std::endl;
+
+  std::cout << " completed randomized test\r\n";
+  std::cout << "completed top k test\r\n";
+
+  //////////// TOP K SUBSET TEST
+  std::cout << "Test_TopKSubset\r\n" << std::flush;
+  logits_cpu = {2.0, 1.5, 1.25, 0.25, 0.25,
+                0.25, 2.0, 1.25, 1.5, 0.25,
+                0.25, 2.0, 0.25, 1.5, 1.25,
+                1.25, 0.25, 1.5, 0.25, 2.0};
+  logits_gpu = Generators::CudaMallocArray<float>(logits_cpu.size());
+
+  k = 3;
+  vocab_size = 5;
+  batch_size = 4;
+  params = Generators::SearchParams{};
+  params.max_length = 10;
+  params.batch_size = batch_size;
+  params.sequence_length = 1;
+  params.vocab_size = vocab_size;
+  params.device_type = Generators::DeviceType::CUDA;
+
+  cudaMemcpyAsync(logits_gpu.get(), logits_cpu.data(), logits_cpu.size() * sizeof(float), cudaMemcpyHostToDevice, params.cuda_stream);
+  cudaStreamSynchronize(params.cuda_stream);
+  search = params.CreateSearch();
+
+  search->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), logits_cpu.size()));
+  auto output_tokens = Generators::CudaMallocArray<int32_t>(batch_size * k);
+  std::span<int32_t> output_tokens_span(output_tokens.get(), batch_size * k);
+  search->GetTopKSubset(output_tokens_span.data(), k);
+
+  auto output_tokens_cpu = std::vector<int>(batch_size * k);
+  cudaMemcpyAsync(output_tokens_cpu.data(), output_tokens.get(), batch_size * k * sizeof(int32_t), cudaMemcpyDeviceToHost, params.cuda_stream);
+  cudaStreamSynchronize(params.cuda_stream);
+  // Verify outputs match expected outputs 
+  for (int b = 0; b < batch_size; b++) {
+    for (int i = 0; i < k; i++) {
+      auto next_token = output_tokens_cpu[b * k + i];
+      auto next_token_score = logits_cpu[next_token + vocab_size * b];
+      if (next_token_score < 1.0) {
+        std::cout << "next_token_score: " << next_token_score << "\r\n";
+        throw std::runtime_error("Test Results Mismatch");
+      }
+    }
+  }
+
+  std::cout << " completed simple test\r\n";
+
+  //////////// Randomized Test
+  vocab_size = 32000; // large number, power of 2, useful for the fisher yates kernel
+  batch_size = 5;
+  k = 5;
+  for (int i = 0; i < 100; i++) {
+    logits_gpu = Generators::CudaMallocArray<float>(vocab_size * batch_size);
+    auto indices_buffer = Generators::CudaMallocHostArray<int>(vocab_size * batch_size);
+    LaunchGeometricDecayKernel(logits_gpu.get(), vocab_size, batch_size, params.cuda_stream);
+    LaunchFisherYatesKernel(logits_gpu.get(), indices_buffer.get(), vocab_size, batch_size, params.cuda_stream);
+    float* cpu_logits = new float[vocab_size * batch_size];
+    cudaMemcpyAsync(cpu_logits, logits_gpu.get(), vocab_size * batch_size * sizeof(float), cudaMemcpyDeviceToHost, params.cuda_stream);
+
+    params = Generators::SearchParams{};
+    params.max_length = 10;
+    params.batch_size = batch_size;
+    params.sequence_length = 1;
+    params.vocab_size = vocab_size;
+    params.device_type = Generators::DeviceType::CUDA;
+
+    search = params.CreateSearch();
+    search->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), vocab_size * batch_size));
+    auto output_tokens = Generators::CudaMallocArray<int32_t>(batch_size * k);
+    std::span<int32_t> output_tokens_span(output_tokens.get(), batch_size * k);
+    search->GetTopKSubset(output_tokens_span.data(), k);
+
+    auto output_tokens_cpu = std::vector<int>(batch_size * k);
+    cudaMemcpyAsync(output_tokens_cpu.data(), output_tokens.get(), batch_size * k * sizeof(int32_t), cudaMemcpyDeviceToHost, params.cuda_stream);
+    cudaStreamSynchronize(params.cuda_stream);
+    // Verify outputs match expected outputs
+    for (int b = 0; b < batch_size; b++) {
+      for (int i = 0; i < k; i++) {
+        auto next_token = output_tokens_cpu[b * k + i];
+        auto next_token_score = cpu_logits[next_token + vocab_size * b];
+        if (next_token_score < 1.0) {
+          std::cout << "next_token_score: " << next_token_score << "\r\n";
+          throw std::runtime_error("Test Results Mismatch");
+        }
+      }
+    }
+  }
+
+  std::cout << " completed randomized test\r\n";
+
+  std::cout << " completed subset test\r\n";
   std::cout << " - complete\r\n";
 }
 

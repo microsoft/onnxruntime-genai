@@ -50,7 +50,7 @@ __device__ __forceinline__ TopK<T, max_k> reduce_topk_op(const TopK<T, max_k>& a
   return res;
 }
 
-// kernel to compute the top k on last axis for tensor with shape: [batch, beam_size, parts_of_vocab, vacab_part_size]
+// kernel to compute the top k on last axis for tensor with shape: [batch, beam_size, parts_of_vocab, vocab_part_size]
 // Its grid is [batch * beam_size, parts_of_vocab]
 template <typename T, int max_k, int thread_block_size>
 __launch_bounds__(thread_block_size) __global__ void BeamSearchOnlineTopKStage1Kernel(
@@ -319,18 +319,18 @@ void BeamSearchTopK(
                              tmp_indices_2nd_stage,   \
                              tmp_values_1st_stage,    \
                              tmp_indices_1st_stage,   \
-                             stream);
+                             stream)
 
   if (k <= 4) {
-    TopKLauncher(4)
+    TopKLauncher(4);
   } else if (k <= 8) {
-    TopKLauncher(8)
+    TopKLauncher(8);
   } else if (k <= 16) {
-    TopKLauncher(16)
+    TopKLauncher(16);
   } else if (k <= 32) {
-    TopKLauncher(32)
+    TopKLauncher(32);
   } else {
-    TopKLauncher(64)
+    TopKLauncher(64);
   }
 
   LaunchBatchTopKKernel(tmp_values_2nd_stage,
