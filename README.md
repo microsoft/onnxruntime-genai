@@ -14,31 +14,30 @@ Users can call a high level `generate()` method, or provide their own customizat
 
     std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
      
-    Generators::Model model(*ort_env, "models/gpt2_fp32.onnx");
+    auto model=Generators::CreateModel(*ort_env, "models/gpt2_fp32.onnx");
 
-    Generators::SearchParams params{model};
+    Generators::GeneratorParams params{model};
     params.batch_size = 2;
     params.sequence_length = 4;
     params.input_ids = input_ids;
     params.max_length = max_length;
     params.num_beams = 4;
  
-    auto search = params.CreateSearch();
-    auto state = model.CreateState{search->GetSequenceLengths(), params};
+    auto generator = Generators::CreateGenerator(*model, params);
  
-    while (!search->IsDone()) {
-      search->SetLogits(state->Run(search.GetNextTokens(), search.GetNextIndices(), search.GetSequenceLength());
+    while (!generator->IsDone()) {
+      generator->ComputeLogits();
  
       // Scoring
-      search->Apply_MinLength(5);
-      search->Apply_RepetitionPenalty(1.1f);
+      generator->Apply_MinLength(5);
+      generator->Apply_RepetitionPenalty(1.1f);
  
-      search->SelectTop();
+      generator->AppendNextToken_Top();
     }
 
     // Access resulting sequences of tokens
     for(unsigned i=0;i<params.batch_size;i++) {
-      auto result=search.GetSequence(0);
+      auto result=generator.GetSequence(i);
     }
 
 ## GPT Python End to End Example
@@ -59,20 +58,19 @@ Users can call a high level `generate()` method, or provide their own customizat
     params.max_length = 64
     params.input_ids = input_tokens
 
-    search=params.CreateSearch()
-    state=model.CreateState(model, search.GetSequenceLengths(), params)
+    generator=og.Generator(model, params)
 
     print("Inputs:")
     print(input_tokens)
     print("Input prompt:", text)
 
     print("Running greedy search loop...")
-    while not search.IsDone():
-      search.SetLogits(state.Run(search.GetNextTokens(), search.GetSequenceLength())
-      search.SelectTop();
+    while not generator.IsDone():
+      generator.ComputeLogits()
+      generator.AppendNextToken_Top()
 
     print("Output:")
-    output_tokens=search.GetSequence(0).GetArray()
+    output_tokens=generator.GetSequence(0).GetArray()
     decoded_output=tokenizer.decode(output_tokens)
     print(decoded_output)
 
