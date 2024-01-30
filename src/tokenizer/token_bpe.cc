@@ -89,19 +89,16 @@ void BPETokenizer::CreateByteEncoder() {
     )
     */
     if ((/* i >= 0 && */ i < 33) || (i >= 127 && i < 161) || (i == 173)) {
-      byte_encoder_[i] = index;
       byte_decoder_[index] = i;
-      index++;
+      byte_encoder_[i] = bbpe_encoder_.GetTokenId(EncodeUTF8Char(index++));
     } else {
-      byte_encoder_[i] = i;
+      byte_encoder_[i] = bbpe_encoder_.GetTokenId(EncodeUTF8Char(i));
       byte_decoder_[i] = i;
     }
   }
 }
 
 BPETokenizer::BPETokenizer() {
-  CreateByteEncoder();
-  bbpe_encoder_ = std::make_unique<BpeEncoder>();
 }
 
 BPETokenizer::~BPETokenizer() = default;
@@ -116,10 +113,10 @@ void BPETokenizer::LoadPredefinedTokens(const TokenConfig& config) {
   eos_token_ = config.eos_token_.content_;
   pad_token_ = config.pad_token_;
 
-  unk_token_id_ = bbpe_encoder_->GetTokenId(unk_token_);
-  bos_token_id_ = bbpe_encoder_->GetTokenId(bos_token_);
-  eos_token_id_ = bbpe_encoder_->GetTokenId(eos_token_);
-  pad_token_id_ = bbpe_encoder_->GetTokenId(pad_token_);
+  unk_token_id_ = bbpe_encoder_.GetTokenId(unk_token_);
+  bos_token_id_ = bbpe_encoder_.GetTokenId(bos_token_);
+  eos_token_id_ = bbpe_encoder_.GetTokenId(eos_token_);
+  pad_token_id_ = bbpe_encoder_.GetTokenId(pad_token_);
 
   added_tokens_.emplace(std::pair(unk_token_id_, unk_token_));
   added_tokens_.emplace(std::pair(bos_token_id_, bos_token_));
@@ -132,45 +129,64 @@ void BPETokenizer::LoadPredefinedTokens(const TokenConfig& config) {
   all_special_ids_.emplace(pad_token_id_);
 }
 
+TfmStatus BPETokenizer::DecodeExtraArgs(const simdjson::dom::element& root) {
+  simdjson::dom::element decoder_obj;
+  auto error = root.at_key("decoder").get(decoder_obj);
+  if (error != simdjson::SUCCESS && error != simdjson::NO_SUCH_FIELD) {
+    return {kTfmErrorInvalidFile, "Cannot parse the decoder section in the the tokenizer.json"};
+  }
+  TryToGetJson(decoder_obj, "add_prefix_space", decode_extra_args_.add_prefix_space);
+  return TfmStatus::OK();
+}
+
 TfmStatus BPETokenizer::Onload() {
   simdjson::dom::parser parser;
   simdjson::dom::element root;
   std::string tokenizer_file = GetDataDir() + "/tokenizer.json";
   auto error = parser.load(tokenizer_file).get(root);
   if (error) {
-    return {kTfmErrorInvalidFile, "Invalid tokenizer file"};
+    return {kTfmErrorInvalidFile, "Failed to parse tokenizer.json"};
   }
 
   auto& config = *GetConfig();
   model_name_ = std::string_view(config.tokenizer_class_.c_str(),
                                  config.tokenizer_class_.find("Tokenizer"));
-  auto status = bbpe_encoder_->Load(root, config);
+  auto status = bbpe_encoder_.Load(root, config);
   if (!status.ok()) {
     return status;
   }
 
-  // update the byte encoder with token-ids
-  // it's not a bug of byte_decoder_size() here since the encoder/decoder are symmetric
-  for(uint32_t i = 0; i < byte_decoder_.size(); ++i) {
-    byte_encoder_[i] = bbpe_encoder_->GetTokenId(EncodeUTF8Char(i));
+  CreateByteEncoder();
+
+  simdjson::dom::element added_tokens_obj;
+  if (error = root["added_tokens"].get(added_tokens_obj); error) {
+    // Get AddedTokens from config
+    std::string_view added_tokens[] = {
+        config.unk_token_.content_,
+        config.eos_token_.content_,
+        config.bos_token_.content_,
+        config.pad_token_};
+    size_t num_added_tokens = sizeof(added_tokens) / sizeof(added_tokens[0]);
+
+    if (config.pad_token_.empty()) {
+      num_added_tokens--;
+    }
+    if (config.bos_token_.content_.empty()) {
+      num_added_tokens--;
+    }
+
+    status = extended_token_.LoadAddedTokens(added_tokens, num_added_tokens);
+  } else {
+    status = extended_token_.LoadAddedTokens(added_tokens_obj, added_tokens_);
   }
-
-  // Get AddedTokens from config
-  std::string_view added_tokens[] = {
-      config.bos_token_.content_,
-      config.eos_token_.content_,
-      config.unk_token_.content_,
-      config.pad_token_};
-
-  status = bbpe_encoder_->LoadAddedTokens(added_tokens,
-                                          sizeof(added_tokens) / sizeof(added_tokens[0]));
 
   if (!status.ok()) {
     return status;
   }
 
   LoadPredefinedTokens(config);
-  arr_vocab_ = bbpe_encoder_->BuildDecoder();
+  arr_vocab_ = bbpe_encoder_.BuildDecoder();
+  status = DecodeExtraArgs(root);
 
   return status;
 }
@@ -212,7 +228,7 @@ std::vector<tfmTokenId_t> BPETokenizer::Encode(std::string_view sv_input,
     return res;
   }
 
-  if (ModelName() != kModel_GPT2) {
+  if (ModelName() != kModel_GPT2 && ModelName() != kModel_CodeGen) {
     // Add BOS token to result
     res.push_back(bos_token_id_);
   }
@@ -222,7 +238,7 @@ std::vector<tfmTokenId_t> BPETokenizer::Encode(std::string_view sv_input,
   }
 
   // Parse input
-  auto special_token_split_res = bbpe_encoder_->SplitByAddedAndSpecial(input);
+  auto special_token_split_res = extended_token_.Split(input);
   bpe::TokenWithRegularExp regcmp;
 
   for (auto& seg_id : special_token_split_res) {
@@ -273,7 +289,7 @@ std::vector<tfmTokenId_t> BPETokenizer::Encode(std::string_view sv_input,
         for (int i = 0; i < utf8_token.length(); i++) {
           if (i == utf8_token.length() - 1) {
             std::string boundary(1, utf8_token[i]);
-            byte_list.emplace_back(bbpe_encoder_->GetTokenId(boundary + "</w>"), 1);
+            byte_list.emplace_back(bbpe_encoder_.GetTokenId(boundary + "</w>"), 1);
           } else {
             byte_list.emplace_back(byte_encoder_[static_cast<unsigned char>(utf8_token[i])], 1);
           }
@@ -285,7 +301,7 @@ std::vector<tfmTokenId_t> BPETokenizer::Encode(std::string_view sv_input,
       }
 
       // Perform BPE
-      bbpe_encoder_->PerformBPE(byte_list);
+      bbpe_encoder_.PerformBPE(byte_list);
 
       // Add output to result
       for (auto p : byte_list) {
@@ -317,7 +333,7 @@ std::vector<tfmTokenId_t> BPETokenizer::Encode(std::string_view sv_input,
     }
   }
 
-  if (ModelName() != kModel_GPT2) {
+  if (ModelName() != kModel_GPT2 && ModelName() != kModel_CodeGen) {
     // Add EOS token to result
     res.push_back(eos_token_id_);
   }
@@ -341,12 +357,14 @@ TfmStatus BPETokenizer::Decode(const span<tfmTokenId_t const>& ids, std::string&
   bool f_special = false;
   auto count = static_cast<size_t>(ids.size());
   auto p_ids = ids.data();
-  auto ewsuffix = bbpe_encoder_->GetEndWordSuffix();
+
+  auto& args = decode_extra_args_;
+  auto end_word_suffix = bbpe_encoder_.GetEndWordSuffix();
   for (size_t tok_idx = 0; tok_idx < count; ++tok_idx) {
     const auto token = *(p_ids + tok_idx);
     std::string decoded_token;
     f_special = all_special_ids_.count(token) ? true : false;
-    if (skip_special_tokens_ && f_special) {
+    if (args.skip_special_tokens_ && f_special) {
       f_special_last = f_special;
       continue;
     }
@@ -355,36 +373,41 @@ TfmStatus BPETokenizer::Decode(const span<tfmTokenId_t const>& ids, std::string&
       const std::string ws = added_tokens_.at(token);
       decoded_token = (std::string)ws;
     } else if (static_cast<size_t>(token) < arr_vocab_.size()) {
-      const auto str = arr_vocab_[token];
-      for (auto wchr : str) {
-        unsigned char uchr = byte_decoder_.at(wchr);
-        decoded_token.push_back(uchr);
+      const auto str = FromUTF8(arr_vocab_[token]);
+      for (unsigned char wchr : str) {
+        if (byte_decoder_.count(wchr) == 0 && wchr <= 0xFF) {
+          // std::cout << "Error: cannot find the byte_decoder_ for " << (uint32_t)(unsigned char)wchr << std::endl;
+          decoded_token.push_back(gsl::narrow<unsigned char>(wchr));
+        } else {
+          unsigned char uchr = byte_decoder_.at(wchr);
+          decoded_token.push_back(uchr);
+        }
       }
     } else {
-      if (skip_special_tokens_) {
+      if (args.skip_special_tokens_) {
         continue;
       } else {
         decoded_token = unk_token_;
       }
     }
 
-    // ugly hack for CLIP
-    if (ewsuffix.size() > 0) {
-      if (decoded_token.size() >= ewsuffix.size() &&
-          decoded_token.substr(decoded_token.size() - ewsuffix.size()) == ewsuffix) {
-        decoded_token = decoded_token.substr(0, decoded_token.size() - ewsuffix.size());
+    // remove the end_word_suffix like </w> or </s> etc.
+    if (end_word_suffix.size() > 0) {
+      if (decoded_token.size() >= end_word_suffix.size() &&
+          decoded_token.substr(decoded_token.size() - end_word_suffix.size()) == end_word_suffix) {
+        decoded_token = decoded_token.substr(0, decoded_token.size() - end_word_suffix.size());
         decoded_token += ' ';
       }
     }
 
-    if (whitespace_token_ &&
+    if (args.whitespace_token_ &&
         f_special && (tok_idx > 0 && !f_special_last)) {
       text.push_back(' ');
     }
 
     text.append(decoded_token);
 
-    if (whitespace_token_ &&
+    if (args.whitespace_token_ &&
         f_special && tok_idx != count - 1) {
       text.push_back(' ');
     }
