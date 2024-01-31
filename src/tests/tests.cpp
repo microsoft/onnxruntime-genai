@@ -231,157 +231,65 @@ void Test_BeamSearch_Gpt_Cuda() {
 // TODO: CPU LOGITS AND LOGITS CPU SHOULD NOT BE BOTH THINGS
 // LONG FUNCTION, FACTOR OUT THE COMMON PARTS
 #include "tests_helper.cuh"
-void Test_Sampling_Cuda() {
-  //////////// TOP P TEST
-  std::cout << "Test_TopP" << std::flush;
 
-  //////////// Simple Test
-  std::vector<int32_t> input_ids{ 0 };
-  std::vector<int32_t> expected_output{5};
-  auto output_span = Generators::cpu_span<int32_t>(expected_output);
-  std::vector<float> logits_cpu{0.1, 0.1, 0.1, 0.1, 0.1, 0.5};
-  auto logits_gpu = Generators::CudaMallocArray<float>(logits_cpu.size());
-
-  auto provider_options = Generators::GetDefaultProviderOptions(Generators::DeviceType::CUDA);
-
+void Batched_Sampling_TopP_Test() {
   // TODO: I don't like that I have to create a model here, but I need to pass it to the generator
   auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  Generators::GeneratorParams params{*model};
-  params.max_length = 10;
-  params.batch_size = 1;
-  params.sequence_length = 1;
-  params.vocab_size = 6;
-  params.num_beams = 1;
-  params.input_ids = input_ids; // TODO: some of this stuff like num_beams and input_ids might not need to be defined explicitly for certain applications?
-  params.device_type = Generators::DeviceType::CUDA;
-
-  cudaMemcpyAsync(logits_gpu.get(), logits_cpu.data(), logits_cpu.size() * sizeof(float), cudaMemcpyHostToDevice, params.cuda_stream);
-  cudaStreamSynchronize(params.cuda_stream);
-  auto generator = Generators::CreateGenerator(*model, params);
-  generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), logits_cpu.size()));
-  generator->search_->SampleTopP(0.2, 1.0);
-
-  // Verify outputs match expected outputs
-  auto next_tokens = generator->search_->GetNextTokens().GetCPU();
-  if (!std::equal(next_tokens.begin(), next_tokens.end(), output_span.begin(), output_span.end())) 
-    throw std::runtime_error("Test Results Mismatch");
-  std::cout << " completed simple test\r\n";
-
-  //////////// Batched Test
-  expected_output = {1, 2, 3, 4};
-  input_ids = std::vector<int32_t>{0, 1, 2, 3};
-  output_span = Generators::cpu_span<int32_t>(expected_output);
-  logits_cpu = {0.1, 0.6, 0.1, 0.1, 0.1,
-                0.1, 0.1, 0.6, 0.1, 0.1,
-                0.1, 0.1, 0.1, 0.6, 0.1,
-                0.1, 0.1, 0.1, 0.1, 0.6};
-  logits_gpu = Generators::CudaMallocArray<float>(logits_cpu.size());
-
-  params = Generators::GeneratorParams{};
-  params.max_length = 10;
-  params.batch_size = 4;
-  params.sequence_length = 1;
-  params.vocab_size = 5;
-  params.input_ids = input_ids;
-  params.device_type = Generators::DeviceType::CUDA;
-
-  cudaMemcpyAsync(logits_gpu.get(), logits_cpu.data(), logits_cpu.size() * sizeof(float), cudaMemcpyHostToDevice, params.cuda_stream);
-  cudaStreamSynchronize(params.cuda_stream);
-  generator = Generators::CreateGenerator(*model, params);
-
-  generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), logits_cpu.size()));
-  generator->search_->SampleTopP(0.25, 1.0);
-
-  // Verify outputs match expected outputs
-
-  next_tokens = generator->search_->GetNextTokens().GetCPU();
-  if (!std::equal(next_tokens.begin(), next_tokens.end(), output_span.begin(), output_span.end())) 
-    throw std::runtime_error("Test Results Mismatch");
-  std::cout << " completed batched test\r\n";
-
-  //////////// Randomized Test
-  int vocab_size = 32000; // large number, power of 2, useful for the fisher yates kernel
-  int batch_size = 5;
-  long long total_duration = 0;
-  input_ids = std::vector<int32_t>{0, 1, 2, 3, 4};
-  for (int i = 0; i < 100; i++) {
-    logits_gpu = Generators::CudaMallocArray<float>(vocab_size * batch_size);
-    auto indices_buffer = Generators::CudaMallocHostArray<int>(vocab_size * batch_size);
-    LaunchGeometricDecayKernel(logits_gpu.get(), vocab_size, batch_size, params.cuda_stream);
-    LaunchFisherYatesKernel(logits_gpu.get(), indices_buffer.get(), vocab_size, batch_size, params.cuda_stream);
-    float* cpu_logits = new float[vocab_size * batch_size];
-    cudaMemcpyAsync(cpu_logits, logits_gpu.get(), vocab_size * batch_size * sizeof(float), cudaMemcpyDeviceToHost, params.cuda_stream);
-
-    params = Generators::GeneratorParams{};
-    params.max_length = 10;
-    params.batch_size = batch_size;
-    params.sequence_length = 1;
-    params.vocab_size = vocab_size;
-    params.input_ids = input_ids;
-    params.device_type = Generators::DeviceType::CUDA;
-
-    generator = Generators::CreateGenerator(*model, params);
-    generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), vocab_size * batch_size));
-    
-    auto start = std::chrono::high_resolution_clock::now();
-    generator->search_->SampleTopP(0.95, 1.0);
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end-start).count();
-    total_duration += duration;
-
-    next_tokens = generator->search_->GetNextTokens().GetCPU();
-    cudaStreamSynchronize(params.cuda_stream);
-    // std::cout << "next_tokens: " << next_tokens[0] << ", " << next_tokens[1] << ", " << next_tokens[2] << ", " << next_tokens[3] << ", " << next_tokens[4] << "\r\n";
-    // std::cout << "next_token_scores: " << cpu_logits[next_tokens[0]] << ", " << cpu_logits[next_tokens[1]+vocab_size] << ", " << cpu_logits[next_tokens[2]+vocab_size*2] << ", " << cpu_logits[next_tokens[3]+vocab_size*3] << ", " << cpu_logits[next_tokens[4]+vocab_size*4] << "\r\n";
-
-    // Verify outputs match expected outputs
-    for (int b = 0; b < batch_size; b++) {
-      auto next_token = next_tokens[b];
-      auto next_token_score = cpu_logits[next_token + vocab_size * b];
-      if (next_token_score < 0.0001) {
-        std::cout << "next_token_score: " << next_token_score << "\r\n";
-        throw std::runtime_error("Test Results Mismatch");
-      }
-    }
-  }
-
-  double averageDuration = static_cast<double>(total_duration) / 100.0;
-  std::cout << "Average time taken by top p sampling: "
-    << averageDuration << " microseconds" << std::endl;
-
-  std::cout << " completed randomized test\r\n";
-
-  //////////// TOP K TEST
-  std::cout << "Test_TopK" << std::flush;
-
-  //////////// Small Test
-  input_ids = std::vector<int32_t>{0, 1, 2, 3};
-  logits_cpu = {2.0, 1.5, 1.25, 0.25, 0.25,
-                0.25, 2.0, 1.25, 1.5, 0.25,
-                0.25, 2.0, 0.25, 1.5, 1.25,
-                1.25, 0.25, 1.5, 0.25, 2.0};
-  logits_gpu = Generators::CudaMallocArray<float>(logits_cpu.size());
-
-  int k = 2;
-  vocab_size = 5;
-  batch_size = 4;
-  params = Generators::GeneratorParams{};
+  std::vector<int32_t> input_ids{0, 1, 2, 3};
+  std::vector<int32_t> expected_output{1, 2, 3, 4};
+  auto output_span = Generators::cpu_span<int32_t>(expected_output);
+  std::vector<float> logits_cpu = {0.1, 0.6, 0.1, 0.1, 0.1,
+                                   0.1, 0.1, 0.6, 0.1, 0.1,
+                                   0.1, 0.1, 0.1, 0.6, 0.1,
+                                   0.1, 0.1, 0.1, 0.1, 0.6};
+  auto logits_gpu = Generators::CudaMallocArray<float>(logits_cpu.size());
+  int vocab_size = 5;
+  int batch_size = 4;
+  Generators::GeneratorParams params = Generators::GeneratorParams{};
   params.max_length = 10;
   params.batch_size = batch_size;
   params.sequence_length = 1;
   params.vocab_size = vocab_size;
   params.input_ids = input_ids;
   params.device_type = Generators::DeviceType::CUDA;
-
   cudaMemcpyAsync(logits_gpu.get(), logits_cpu.data(), logits_cpu.size() * sizeof(float), cudaMemcpyHostToDevice, params.cuda_stream);
   cudaStreamSynchronize(params.cuda_stream);
-  generator = Generators::CreateGenerator(*model, params);
-
+  auto generator = Generators::CreateGenerator(*model, params);
   generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), logits_cpu.size()));
-  generator->search_->SampleTopK(k, 1.0);
-
-  next_tokens = generator->search_->GetNextTokens().GetCPU();
   // Verify outputs match expected outputs
+  generator->search_->SampleTopP(0.25, 1.0);
+  auto next_tokens = generator->search_->GetNextTokens().GetCPU();
+  if (!std::equal(next_tokens.begin(), next_tokens.end(), output_span.begin(), output_span.end())) 
+    throw std::runtime_error("Test Results Mismatch");
+  std::cout << " completed Top P batched test\r\n";
+}
+
+void Batched_Sampling_TopK_Test() {
+  // TODO: I don't like that I have to create a model here, but I need to pass it to the generator
+  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  std::vector<int32_t> input_ids{0, 1, 2, 3};
+  std::vector<float> logits_cpu{2.0, 1.5, 1.25, 0.25, 0.25,
+                                0.25, 2.0, 1.25, 1.5, 0.25,
+                                0.25, 2.0, 0.25, 1.5, 1.25,
+                                1.25, 0.25, 1.5, 0.25, 2.0};
+  auto logits_gpu = Generators::CudaMallocArray<float>(logits_cpu.size());
+  int vocab_size = 5;
+  int batch_size = 4;
+  Generators::GeneratorParams params = Generators::GeneratorParams{};
+  params.max_length = 10;
+  params.batch_size = batch_size;
+  params.sequence_length = 1;
+  params.vocab_size = vocab_size;
+  params.input_ids = input_ids;
+  params.device_type = Generators::DeviceType::CUDA;
+  cudaMemcpyAsync(logits_gpu.get(), logits_cpu.data(), logits_cpu.size() * sizeof(float), cudaMemcpyHostToDevice, params.cuda_stream);
+  cudaStreamSynchronize(params.cuda_stream);
+  auto generator = Generators::CreateGenerator(*model, params);
+  generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), logits_cpu.size()));
+  // Verify outputs match expected outputs
+  int k = 2;
+  generator->search_->SampleTopK(k, 1.0);
+  auto next_tokens = generator->search_->GetNextTokens().GetCPU();
   for (int b = 0; b < batch_size; b++) {
     auto next_token = next_tokens[b];
     auto next_token_score = logits_cpu[next_token + vocab_size * b];
@@ -390,72 +298,23 @@ void Test_Sampling_Cuda() {
       throw std::runtime_error("Test Results Mismatch");
     }
   }
-  std::cout << " completed batched test\r\n";
+  std::cout << " completed Top K batched test\r\n";
+}
 
-  //////////// Randomized Test
-  input_ids = std::vector<int32_t>{0, 1, 2, 3, 4};
-  vocab_size = 32000; // large number, power of 2, useful for the fisher yates kernel
-  batch_size = 5;
-  k = 5;
-  total_duration = 0;
-  for (int i = 0; i < 100; i++) {
-    logits_gpu = Generators::CudaMallocArray<float>(vocab_size * batch_size);
-    auto indices_buffer = Generators::CudaMallocHostArray<int>(vocab_size * batch_size);
-    LaunchGeometricDecayKernel(logits_gpu.get(), vocab_size, batch_size, params.cuda_stream);
-    LaunchFisherYatesKernel(logits_gpu.get(), indices_buffer.get(), vocab_size, batch_size, params.cuda_stream);
-    float* cpu_logits = new float[vocab_size * batch_size];
-    cudaMemcpyAsync(cpu_logits, logits_gpu.get(), vocab_size * batch_size * sizeof(float), cudaMemcpyDeviceToHost, params.cuda_stream);
-
-    params = Generators::GeneratorParams{};
-    params.max_length = 10;
-    params.batch_size = batch_size;
-    params.sequence_length = 1;
-    params.vocab_size = vocab_size;
-    params.input_ids = input_ids;
-    params.device_type = Generators::DeviceType::CUDA;
-
-    generator = Generators::CreateGenerator(*model, params);
-    generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), vocab_size * batch_size));
-    
-    auto start = std::chrono::high_resolution_clock::now();
-    generator->search_->SampleTopK(k, 1.0);
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end-start).count();
-    total_duration += duration;
-
-    next_tokens = generator->search_->GetNextTokens().GetCPU();
-    cudaStreamSynchronize(params.cuda_stream);
-    // Verify outputs match expected outputs
-    for (int b = 0; b < batch_size; b++) {
-      auto next_token = next_tokens[b];
-      auto next_token_score = cpu_logits[next_token + vocab_size * b];
-      if (next_token_score < 10.0) {
-        std::cout << "next_token_score: " << next_token_score << "\r\n";
-        throw std::runtime_error("Test Results Mismatch");
-      }
-    }
-  }
-
-  averageDuration = static_cast<double>(total_duration) / 100.0;
-  std::cout << "Average time taken by top k sampling: "
-    << averageDuration << " microseconds" << std::endl;
-
-  std::cout << " completed randomized test\r\n";
-  std::cout << "completed top k test\r\n";
-
-  //////////// TOP K SUBSET TEST
-  std::cout << "Test_TopKSubset\r\n" << std::flush;
-  logits_cpu = {2.0, 1.5, 1.25, 0.25, 0.25,
+void Batched_Subset_TopK_Test() {
+  // TODO: I don't like that I have to create a model here, but I need to pass it to the generator
+  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  std::vector<float> logits_cpu{2.0, 1.5, 1.25, 0.25, 0.25,
                 0.25, 2.0, 1.25, 1.5, 0.25,
                 0.25, 2.0, 0.25, 1.5, 1.25,
                 1.25, 0.25, 1.5, 0.25, 2.0};
-  logits_gpu = Generators::CudaMallocArray<float>(logits_cpu.size());
+  auto logits_gpu = Generators::CudaMallocArray<float>(logits_cpu.size());
 
-  input_ids = std::vector<int32_t>{0, 1, 2, 3};
-  k = 3;
-  vocab_size = 5;
-  batch_size = 4;
-  params = Generators::GeneratorParams{};
+  std::vector<int32_t> input_ids{0, 1, 2, 3};
+  int k = 3;
+  int vocab_size = 5;
+  int batch_size = 4;
+  Generators::GeneratorParams params = Generators::GeneratorParams{};
   params.max_length = 10;
   params.batch_size = batch_size;
   params.sequence_length = 1;
@@ -465,7 +324,7 @@ void Test_Sampling_Cuda() {
 
   cudaMemcpyAsync(logits_gpu.get(), logits_cpu.data(), logits_cpu.size() * sizeof(float), cudaMemcpyHostToDevice, params.cuda_stream);
   cudaStreamSynchronize(params.cuda_stream);
-  generator = Generators::CreateGenerator(*model, params);
+  auto generator = Generators::CreateGenerator(*model, params);
 
   generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), logits_cpu.size()));
   auto output_tokens = Generators::CudaMallocArray<int32_t>(batch_size * k);
@@ -487,22 +346,132 @@ void Test_Sampling_Cuda() {
     }
   }
 
-  std::cout << " completed simple test\r\n";
+  std::cout << " completed TopK Subset batched test\r\n";
+}
 
-  //////////// Randomized Test
-  input_ids = std::vector<int32_t>{0, 1, 2, 3, 4};
-  vocab_size = 32000; // large number, power of 2, useful for the fisher yates kernel
-  batch_size = 5;
-  k = 5;
+void Randomized_Sampling_TopP_Test() {
+  // TODO: I don't like that I have to create a model here, but I need to pass it to the generator
+  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  int vocab_size = 32000; // vocab size of llama
+  int batch_size = 5;
+  long long total_duration = 0;
+  std::vector<int32_t> input_ids{0, 1, 2, 3, 4};
+  Generators::GeneratorParams params = Generators::GeneratorParams{};
+  params.max_length = 10;
+  params.batch_size = batch_size;
+  params.sequence_length = 1;
+  params.vocab_size = vocab_size;
+  params.input_ids = input_ids;
+  params.device_type = Generators::DeviceType::CUDA;
   for (int i = 0; i < 100; i++) {
-    logits_gpu = Generators::CudaMallocArray<float>(vocab_size * batch_size);
+    auto logits_gpu = Generators::CudaMallocArray<float>(vocab_size * batch_size);
     auto indices_buffer = Generators::CudaMallocHostArray<int>(vocab_size * batch_size);
     LaunchGeometricDecayKernel(logits_gpu.get(), vocab_size, batch_size, params.cuda_stream);
     LaunchFisherYatesKernel(logits_gpu.get(), indices_buffer.get(), vocab_size, batch_size, params.cuda_stream);
     float* cpu_logits = new float[vocab_size * batch_size];
     cudaMemcpyAsync(cpu_logits, logits_gpu.get(), vocab_size * batch_size * sizeof(float), cudaMemcpyDeviceToHost, params.cuda_stream);
 
-    params = Generators::GeneratorParams{};
+    auto generator = Generators::CreateGenerator(*model, params);
+    generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), vocab_size * batch_size));
+    
+    auto start = std::chrono::high_resolution_clock::now();
+    generator->search_->SampleTopP(0.95, 1.0);
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end-start).count();
+    total_duration += duration;
+
+    auto next_tokens = generator->search_->GetNextTokens().GetCPU();
+    cudaStreamSynchronize(params.cuda_stream);
+    // Verify outputs match expected outputs
+    for (int b = 0; b < batch_size; b++) {
+      auto next_token = next_tokens[b];
+      auto next_token_score = cpu_logits[next_token + vocab_size * b];
+      if (next_token_score < 0.0001) {
+        std::cout << "next_token_score: " << next_token_score << "\r\n";
+        throw std::runtime_error("Test Results Mismatch");
+      }
+    }
+  }
+
+  double averageDuration = static_cast<double>(total_duration) / 100.0;
+  std::cout << "Average time taken by top p sampling: "
+    << averageDuration << " microseconds" << std::endl;
+  std::cout << " completed Top P randomized test\r\n";
+}
+
+void Randomized_Sampling_TopK_Test() {
+  // TODO: I don't like that I have to create a model here, but I need to pass it to the generator
+  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  int vocab_size = 32000; // vocab size of llama
+  int batch_size = 5;
+  long long total_duration = 0;
+  int k = 5;
+  std::vector<int32_t> input_ids{0, 1, 2, 3, 4};
+  Generators::GeneratorParams params = Generators::GeneratorParams{};
+  params.max_length = 10;
+  params.batch_size = batch_size;
+  params.sequence_length = 1;
+  params.vocab_size = vocab_size;
+  params.input_ids = input_ids;
+  params.device_type = Generators::DeviceType::CUDA;
+  for (int i = 0; i < 100; i++) {
+    auto logits_gpu = Generators::CudaMallocArray<float>(vocab_size * batch_size);
+    auto indices_buffer = Generators::CudaMallocHostArray<int>(vocab_size * batch_size);
+    LaunchGeometricDecayKernel(logits_gpu.get(), vocab_size, batch_size, params.cuda_stream);
+    LaunchFisherYatesKernel(logits_gpu.get(), indices_buffer.get(), vocab_size, batch_size, params.cuda_stream);
+    float* cpu_logits = new float[vocab_size * batch_size];
+    cudaMemcpyAsync(cpu_logits, logits_gpu.get(), vocab_size * batch_size * sizeof(float), cudaMemcpyDeviceToHost, params.cuda_stream);
+
+    auto generator = Generators::CreateGenerator(*model, params);
+    generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), vocab_size * batch_size));
+    
+    auto start = std::chrono::high_resolution_clock::now();
+    generator->search_->SampleTopK(k, 1.0);
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end-start).count();
+    total_duration += duration;
+
+    auto next_tokens = generator->search_->GetNextTokens().GetCPU();
+    cudaStreamSynchronize(params.cuda_stream);
+    // Verify outputs match expected outputs
+    for (int b = 0; b < batch_size; b++) {
+      auto next_token = next_tokens[b];
+      auto next_token_score = cpu_logits[next_token + vocab_size * b];
+      if (next_token_score < 10.0) {
+        std::cout << "next_token_score: " << next_token_score << "\r\n";
+        throw std::runtime_error("Test Results Mismatch");
+      }
+    }
+  }
+  double averageDuration = static_cast<double>(total_duration) / 100.0;
+  std::cout << "Average time taken by top k sampling: "
+    << averageDuration << " microseconds" << std::endl;
+  std::cout << " completed Top K randomized test\r\n";
+}
+
+void Randomized_Subset_TopK_Test() {
+  // TODO: I don't like that I have to create a model here, but I need to pass it to the generator
+  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  std::vector<int32_t> input_ids{0, 1, 2, 3, 4};
+  int vocab_size = 32000; // vocab_size for llama model
+  int batch_size = 5;
+  int k = 5;
+  Generators::GeneratorParams params = Generators::GeneratorParams{};
+  params.max_length = 10;
+  params.batch_size = batch_size;
+  params.sequence_length = 1;
+  params.vocab_size = vocab_size;
+  params.input_ids = input_ids;
+  params.device_type = Generators::DeviceType::CUDA;
+  for (int i = 0; i < 100; i++) {
+    auto logits_gpu = Generators::CudaMallocArray<float>(vocab_size * batch_size);
+    auto indices_buffer = Generators::CudaMallocHostArray<int>(vocab_size * batch_size);
+    LaunchGeometricDecayKernel(logits_gpu.get(), vocab_size, batch_size, params.cuda_stream);
+    LaunchFisherYatesKernel(logits_gpu.get(), indices_buffer.get(), vocab_size, batch_size, params.cuda_stream);
+    float* cpu_logits = new float[vocab_size * batch_size];
+    cudaMemcpyAsync(cpu_logits, logits_gpu.get(), vocab_size * batch_size * sizeof(float), cudaMemcpyDeviceToHost, params.cuda_stream);
+
+    Generators::GeneratorParams params = Generators::GeneratorParams{};
     params.max_length = 10;
     params.batch_size = batch_size;
     params.sequence_length = 1;
@@ -510,7 +479,7 @@ void Test_Sampling_Cuda() {
     params.input_ids = input_ids;
     params.device_type = Generators::DeviceType::CUDA;
 
-    generator = Generators::CreateGenerator(*model, params);
+    auto generator = Generators::CreateGenerator(*model, params);
     generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), vocab_size * batch_size));
     auto output_tokens = Generators::CudaMallocArray<int32_t>(batch_size * k);
     std::span<int32_t> output_tokens_span(output_tokens.get(), batch_size * k);
@@ -532,12 +501,17 @@ void Test_Sampling_Cuda() {
     }
   }
 
-  std::cout << " completed randomized test\r\n";
-
-  std::cout << " completed subset test\r\n";
-  std::cout << " - complete\r\n";
+  std::cout << " completed Top K Subset randomized test\r\n";
 }
 
+void Test_Sampling_Cuda() {
+  Batched_Sampling_TopP_Test();
+  Batched_Sampling_TopK_Test();
+  Batched_Subset_TopK_Test();
+  Randomized_Sampling_TopP_Test();
+  Randomized_Sampling_TopK_Test();
+  Randomized_Subset_TopK_Test();
+}
 
 void Test_Phi2_Cuda() {
 #if TEST_PHI2

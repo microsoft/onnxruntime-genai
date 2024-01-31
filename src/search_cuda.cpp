@@ -86,17 +86,6 @@ void Search_Cuda::SetLogits(RoamingArray<float> logits_unk) {
 
     cuda::Launch_log_softmax(target.data(), static_cast<int>(target.size()), params_.cuda_stream);
   }
-
-  // float* cpu_logits = new float[params_.batch_size * params_.vocab_size];
-  // cudaStreamSynchronize(params_.cuda_stream);
-  // cudaMemcpy(cpu_logits, next_token_scores_.data(), params_.batch_size * params_.vocab_size * sizeof(float), cudaMemcpyDeviceToHost);
-  // for (int i = 0; i < params_.batch_size; i++) {
-  //   std::cout << "Batch " << i << "\r\n";
-  //   for (int j = 0; j < params_.vocab_size; j++) {
-  //     std::cout << cpu_logits[i * params_.vocab_size + j] << " ";
-  //   }
-  //   std::cout << "\r\n";
-  // }
 }
 
 RoamingArray<int32_t> GreedySearch_Cuda::GetNextTokens() {
