@@ -10,11 +10,11 @@ Gpt_Model::Gpt_Model(std::unique_ptr<Config> config, OrtEnv& ort_env, const Prov
   InitDeviceAllocator(*session_decoder_);
 }
 
-std::unique_ptr<State> Gpt_Model::CreateState(RoamingArray<int32_t> sequence_lengths, const SearchParams& params) {
+std::unique_ptr<State> Gpt_Model::CreateState(RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params) {
   return std::make_unique<Gpt_State>(*this, sequence_lengths, params);
 }
 
-Gpt_State::Gpt_State(Gpt_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const SearchParams& search_params)
+Gpt_State::Gpt_State(Gpt_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const GeneratorParams& search_params)
     : State{search_params},
       model_{model},
       position_ids_{model, *this, sequence_lengths_unk} {

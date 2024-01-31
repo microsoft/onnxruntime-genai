@@ -1,8 +1,5 @@
 #include "../generators.h"
 #include "../search.h"
-#if USE_CUDA
-#include "../search_cuda.h"
-#endif
 #include "model.h"
 #include "debugging.h"
 #include "gpt.h"
@@ -13,7 +10,7 @@
 
 namespace Generators {
 
-State::State(const SearchParams& search_params) : search_params_{search_params} {
+State::State(const GeneratorParams& search_params) : search_params_{search_params} {
 }
 
 void State::Run(OrtSession& session) {
@@ -34,7 +31,7 @@ void State::ClearIO() {
   outputs_.clear();
 }
 
-#if USE_ORT_EXT
+#if USE_TOKENIZER
 void CheckResult(tfmError_t error) {
   if (error != kTfmOK)
     throw std::runtime_error(TfmGetLastErrorMessage());
@@ -91,31 +88,7 @@ void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
 #endif
 }
 
-std::vector<int32_t> Model::Generate(const SearchParams& params) {
-  auto search = params.CreateSearch();
-  auto state = CreateState(search->GetSequenceLengths(), params);
-
-  while (!search->IsDone()) {
-    search->SetLogits(state->Run(search->GetSequenceLength(), search->GetNextTokens()));
-
-    if (config_->top_p < 1.0f) {
-      search->SampleTopP(config_->top_p, config_->temperature);
-    } else if (config_->top_k > 1) {
-      search->SampleTopK(config_->top_k, config_->temperature);
-    } else {
-      search->SelectTop();
-    }
-  }
-
-  auto results = search->GetSequence(0);
-  auto results_cpu = results.GetCPU();
-
-  std::vector<int32_t> v;
-  v.assign(results_cpu.begin(), results_cpu.end());
-  return v;
-}
-
-#if USE_ORT_EXT
+#if USE_TOKENIZER
 std::unique_ptr<Tokenizer> Model::CreateTokenizer() {
   return std::make_unique<Tokenizer>(*config_);
 }
@@ -124,16 +97,15 @@ std::unique_ptr<Tokenizer> Model::CreateTokenizer() {
 std::unique_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const ProviderOptions* provider_options) {
   auto config = std::make_unique<Config>(config_path);
 
-  if (config->model.type == "gpt2") {
+  if (config->model.type == "gpt2")
     return std::make_unique<Gpt_Model>(std::move(config), ort_env, provider_options);
-  }
   if (config->model.type == "llama")
     return std::make_unique<Llama_Model>(std::move(config), ort_env, provider_options);
-  else if (config->model.type == "mistral")
+  if (config->model.type == "mistral")
     return std::make_unique<Mistral_Model>(std::move(config), ort_env, provider_options);
-  else if (config->model.type == "phi2")
+  if (config->model.type == "phi2")
     return std::make_unique<Phi2_Model>(std::move(config), ort_env, provider_options);
-  else if (config->model.type == "whisper")
+  if (config->model.type == "whisper")
     return std::make_unique<Whisper_Model>(std::move(config), ort_env, provider_options);
 
   throw std::runtime_error("Unsupported model_type in config.json: " + config->model.type);

@@ -38,7 +38,7 @@ float Float16ToFloat32(uint16_t v) {
   return std::ldexp((sign != 0 ? -1.0f : 1.0f) * (1.0f + static_cast<float>(fraction) / 1024.0f), exponent - 15);
 }
 
-SearchParams::SearchParams(const Model& model)
+GeneratorParams::GeneratorParams(const Model& model)
     : pad_token_id{model.config_->pad_token_id},
       eos_token_id{model.config_->eos_token_id},
       vocab_size{model.config_->model.vocab_size},
@@ -66,19 +66,94 @@ ProviderOptions GetDefaultProviderOptions([[maybe_unused]] DeviceType device_typ
   return options;
 }
 
-std::unique_ptr<Search> SearchParams::CreateSearch() const {
+std::unique_ptr<Generator> CreateGenerator(Model& model, const GeneratorParams& search_params) {
+  return std::make_unique<Generator>(model, search_params);
+}
+
+std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
 #if USE_CUDA
-  if (device_type == DeviceType::CUDA) {
-    if (num_beams > 1)
-      return std::make_unique<BeamSearch_Cuda>(*this);
-    return std::make_unique<GreedySearch_Cuda>(*this);
+  if (params.device_type == DeviceType::CUDA) {
+    if (params.num_beams > 1)
+      return std::make_unique<BeamSearch_Cuda>(params);
+    return std::make_unique<GreedySearch_Cuda>(params);
   }
 #endif
 
-  if (num_beams > 1) {
-    return std::make_unique<BeamSearch_Cpu>(*this);
+  if (params.num_beams > 1) {
+    return std::make_unique<BeamSearch_Cpu>(params);
   }
-  return std::make_unique<GreedySearch_Cpu>(*this);
+  return std::make_unique<GreedySearch_Cpu>(params);
+}
+
+Generator::Generator(Model& model, const GeneratorParams& search_params) : model_{model} {
+  search_ = CreateSearch(search_params);
+  state_ = model.CreateState(search_->GetSequenceLengths(), search_params);
+}
+
+void Generator::ComputeLogits() {
+  if (computed_logits_)
+    throw std::runtime_error("ComputeLogits called again without calling AppendNextToken* first");
+
+  search_->SetLogits(state_->Run(search_->GetSequenceLength(), search_->GetNextTokens(), search_->GetNextIndices()));
+  computed_logits_ = true;
+}
+
+bool Generator::IsDone() const {
+  if (computed_logits_)
+    throw std::runtime_error("IsDone() can't be called in the middle of processing logits");
+
+  return search_->IsDone();
+}
+
+void Generator::AppendNextToken_TopK_TopP(int top_k, float top_p, float temperature) {
+  if (search_->params_.num_beams != 1)
+    throw std::runtime_error("TopK and TopP cannot be used with a beam search");
+
+  if (!computed_logits_)
+    throw std::runtime_error("Must call ComputeLogits before AppendNextToken*");
+  computed_logits_ = false;
+
+  // TODO: Do TopK if top_k >1 then do TopP on the results
+  if (top_p < 1.0f) {
+    search_->SampleTopP(top_p, temperature);
+  } else if (top_k > 1) {
+    search_->SampleTopK(top_k, temperature);
+  } else {
+    search_->SelectTop();
+  }
+}
+
+void Generator::AppendNextToken() {
+  if (search_->params_.num_beams > 1) {
+    if (!computed_logits_)
+      throw std::runtime_error("Must call ComputeLogits before AppendNextToken*");
+    computed_logits_ = false;
+    search_->SelectTop();
+    return;
+  }
+
+  auto& config = *model_.config_;
+  AppendNextToken_TopK_TopP(config.top_k, config.top_p, config.temperature);
+}
+
+RoamingArray<int32_t> Generator::GetSequence(int index) {
+  return search_->GetSequence(index);
+}
+
+std::vector<int32_t> Generate(Model& model, const GeneratorParams& params) {
+  auto generator = CreateGenerator(model, params);
+
+  while (!generator->IsDone()) {
+    generator->ComputeLogits();
+    generator->AppendNextToken();
+  }
+
+  auto results = generator->search_->GetSequence(0);
+  auto results_cpu = results.GetCPU();
+
+  std::vector<int32_t> v;
+  v.assign(results_cpu.begin(), results_cpu.end());
+  return v;
 }
 
 }  // namespace Generators

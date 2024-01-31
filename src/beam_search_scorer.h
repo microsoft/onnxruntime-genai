@@ -32,7 +32,7 @@ struct BeamHypotheses {
 };
 
 struct BeamSearchScorer {
-  BeamSearchScorer(const SearchParams& parameters);
+  BeamSearchScorer(const GeneratorParams& parameters);
 
   void Process(Sequences& sequences,
                std::span<const float> next_scores,
