@@ -8,6 +8,7 @@ env:
   ort_zip: "onnxruntime-linux-aarch64-1.16.3.tgz"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/onnxruntime-linux-aarch64-1.16.3.tgz"
   VCPKG_FORCE_SYSTEM_BINARIES: "1"
+  docker_image: "onnxruntimecpubuild"
 jobs:
   job:
     runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2004-ARM-CPU" ]
@@ -36,15 +37,28 @@ jobs:
         run: |
           mv ${{ env.ort_dir }} ort
 
-      - name: Build with CMake and GCC
+      - name: Download Docker Image
         run: |
           set -e -x
           python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/inference/aarch64/default/cpu/Dockerfile \
             --context tools/ci_build/github/linux/docker/inference/aarch64/default/cpu \
             --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
             --container-registry onnxruntimebuildcache \
-            --repository onnxruntimecpubuild
-          docker run --rm --volume $GITHUB_WORKSPACE:/onnxruntime_src --volume $RUNNER_TEMP:/build -w /build onnxruntimecpubuild bash -c "echo $PATH && /usr/bin/cmake -G Ninja /onnxruntime_src -DBUILD_SHARED_LIBS=ON -DCMAKE_BUILD_TYPE=Release && ninja"
+            --repository ${{ env.docker_image }}
+
+      - name: Print Docker Image Environment Variables
+        run: |
+          echo "Printing docker image environment variables"
+          docker run --rm ${{ env.docker_image }} env
+
+      - name: Docker -- Build with CMake and GCC
+        run: |
+          echo "Running docker image ${{ env.docker_image }}"
+          docker run \
+          --rm \
+          --volume $GITHUB_WORKSPACE:/onnxruntime_src \
+          --volume $RUNNER_TEMP:/build \
+          -w /build ${{ env.docker_image }} bash -c "/onnxruntime_src/extern/vcpkg/bootstrap-vcpkg.sh && /usr/bin/cmake -G Ninja /onnxruntime_src -DBUILD_SHARED_LIBS=ON -DCMAKE_BUILD_TYPE=Release && ninja"
 
           
 
