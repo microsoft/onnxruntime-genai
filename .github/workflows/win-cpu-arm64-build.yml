@@ -17,7 +17,7 @@ env:
 
 jobs:
   job:
-    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Win2022-ARM-CPU"]
+    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Win11-ARM-CPU"]
     steps:
       - uses: actions/checkout@v2
 
@@ -26,7 +26,6 @@ jobs:
         with:
           vs-version: '17.4'
           msbuild-architecture: arm64
-          vswhere-path: 'C:\Program Files\Microsoft Visual Studio\Installer\vswhere.exe'
 
       - name: Download OnnxRuntime
         run: |
