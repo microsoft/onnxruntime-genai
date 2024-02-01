@@ -24,6 +24,10 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Git Submodule Update
+        run: |
+          git submodule update --init --recursive
+
       - name: Verify vcpkg
         if: always()
         run: |
