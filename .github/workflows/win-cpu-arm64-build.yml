@@ -22,8 +22,11 @@ jobs:
     steps:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v4
-        with:
-          submodules: true
+
+# This is needed for arm64 builds because the default action/checkout@v4 does not support submodules
+      - name: Checkout submodules
+        run: |
+          git submodule update --init --recursive
 
       - uses: lukka/get-cmake@latest
       - uses: lukka/run-vcpkg@v11
