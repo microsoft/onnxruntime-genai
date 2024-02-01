@@ -22,9 +22,9 @@ jobs:
     steps:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v4
-        with:
-          submodules: true
-
+      - name: Install latest Git
+        run: |
+          choco install git
 # This is needed for arm64 builds because the default action/checkout@v4 does not support submodules
       - name: Checkout submodules
         run: |
