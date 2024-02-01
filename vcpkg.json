@@ -1,0 +1,15 @@
+{
+  "name": "onnxruntime-genai",
+  "version-string": "1.0",
+  "dependencies": [
+    {
+      "name": "pybind11",
+      "features": [
+        "numpy"
+      ]
+    },
+    {
+      "name": "gtest"
+    }
+  ]
+}

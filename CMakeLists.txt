@@ -3,8 +3,9 @@
 
 cmake_minimum_required (VERSION 3.26)
 include(FetchContent)
-include(cmake/external/onnxruntime_external_deps.cmake)
-
+#include(cmake/external/onnxruntime_external_deps.cmake)
+set(CMAKE_TOOLCHAIN_FILE "${CMAKE_CURRENT_SOURCE_DIR}/extern/vcpkg/scripts/buildsystems/vcpkg.cmake"
+  CACHE STRING "Vcpkg toolchain file")
 project (Generators LANGUAGES C CXX)
 set(USE_CUDA 1) # "Build with CUDA support"
 set(USE_TOKENIZER 1) # "Build with Tokenizer support"
@@ -13,6 +14,8 @@ set(BUILD_WHEEL 1)
 # Checking if CUDA is supported
 include(CheckLanguage)
 check_language(CUDA)
+find_package(GTest REQUIRED)
+find_package(pybind11 REQUIRED)
 if (CMAKE_CUDA_COMPILER)
     message(STATUS "CUDA found CUDAToolkit_VERSION ${CUDAToolkit_VERSION} with CMAKE_CUDA_COMPILER ${CMAKE_CUDA_COMPILER}" )
 #    set(CMAKE_CUDA_RUNTIME_LIBRARY Shared)
