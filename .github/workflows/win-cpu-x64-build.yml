@@ -24,7 +24,12 @@ jobs:
         with:
           submodules: recursive
 
-      - uses: lukka/get-cmake@latest
+      - name: Verify vcpkg
+        if: always()
+        run: |
+          Get-ChildItem -Path $env:GITHUB_WORKSPACE\vcpkg -Recurse
+
+#      - uses: lukka/get-cmake@latest
       - uses: lukka/run-vcpkg@v11
         with:
           vcpkgDirectory: $GITHUB_WORKSPACE\vcpkg
