@@ -24,7 +24,7 @@ jobs:
         uses: actions/checkout@v4
       - name: Install latest Git
         run: |
-          choco install git
+          choco install git -y
 # This is needed for arm64 builds because the default action/checkout@v4 does not support submodules
       - name: Checkout submodules
         run: |
