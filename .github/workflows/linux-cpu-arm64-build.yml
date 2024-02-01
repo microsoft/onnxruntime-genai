@@ -7,6 +7,7 @@ env:
   ort_dir: "onnxruntime-linux-aarch64-1.16.3"
   ort_zip: "onnxruntime-linux-aarch64-1.16.3.tgz"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/onnxruntime-linux-aarch64-1.16.3.tgz"
+  VCPKG_FORCE_SYSTEM_BINARIES: "1"
 jobs:
   job:
     runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2004-ARM-CPU" ]
