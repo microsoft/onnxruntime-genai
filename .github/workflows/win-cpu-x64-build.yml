@@ -17,15 +17,18 @@ env:
 
 jobs:
   job:
-    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Win2022-CPU"]
+    runs-on: windows-latest
     steps:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v4
         with:
-          submodules: true
+          submodules: recursive
 
       - uses: lukka/get-cmake@latest
       - uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: $GITHUB_WORKSPACE\vcpkg
+          runVcpkgInstall: true
 
       - name: Setup Visual Studio 2022
         uses: microsoft/setup-msbuild@v1.1
