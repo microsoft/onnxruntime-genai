@@ -41,7 +41,7 @@ jobs:
 #      - uses: lukka/get-cmake@latest
       - uses: lukka/run-vcpkg@v11
         with:
-          vcpkgDirectory: ${{ github.workspace }}\vcpkg
+          vcpkgDirectory: ${{ github.workspace }}/extern/vcpkg
           runVcpkgInstall: true
 
       - name: Setup Visual Studio 2022
