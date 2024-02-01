@@ -42,7 +42,7 @@ void Test_GreedySearch_Gpt_Fp32() {
 
   while (!generator->IsDone()) {
     generator->ComputeLogits();
-    generator->AppendNextToken_Top();
+    generator->GenerateNextToken_Top();
   }
 
   // Verify outputs match expected outputs
@@ -140,7 +140,7 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
     // Scoring
     //    Generators::Processors_Cuda::MinLength(search, 1);
 
-    generator->AppendNextToken_Top();
+    generator->GenerateNextToken_Top();
   }
 
   // Verify outputs match expected outputs
@@ -200,7 +200,7 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
     //    Generators::Processors_Cuda::MinLength(search, 1);
     //    Generators::Processors_Cuda::RepetitionPenalty(search, 1.0f);
 
-    generator->AppendNextToken();
+    generator->GenerateNextToken();
   }
 
   size_t sequence_length = params.batch_size * params.max_length;
