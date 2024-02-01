@@ -24,20 +24,6 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Git Submodule Update
-        run: |
-          git submodule update --init --recursive
-
-      - name: Verify vcpkg
-        if: always()
-        run: |
-          Get-ChildItem -Path ${{ github.workspace }} -Recurse
-
-      - name: Verify vcpkg
-        if: always()
-        run: |
-          Get-ChildItem -Path ${{ github.workspace }}/../ -Recurse
-
 #      - uses: lukka/get-cmake@latest
       - uses: lukka/run-vcpkg@v11
         with:
