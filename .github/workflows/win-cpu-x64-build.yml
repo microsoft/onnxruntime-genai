@@ -31,7 +31,7 @@ jobs:
       - name: Verify vcpkg
         if: always()
         run: |
-          Get-ChildItem -Path ${{ github.workspace }} -Recurse
+          Get-ChildItem -Path ${{ github.workspace }}\..-Recurse
 
 #      - uses: lukka/get-cmake@latest
       - uses: lukka/run-vcpkg@v11
