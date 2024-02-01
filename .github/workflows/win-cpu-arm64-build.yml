@@ -24,7 +24,7 @@ jobs:
         uses: actions/checkout@v4
       - name: Install latest Git
         run: |
-          choco install git -y
+          winget install --id Git.Git -e --source winget
 # This is needed for arm64 builds because the default action/checkout@v4 does not support submodules
       - name: Checkout submodules
         run: |
