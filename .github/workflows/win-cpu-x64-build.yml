@@ -31,12 +31,12 @@ jobs:
       - name: Verify vcpkg
         if: always()
         run: |
-          Get-ChildItem -Path $env:GITHUB_WORKSPACE\vcpkg -Recurse
+          Get-ChildItem -Path ${{ github.workspace }}\vcpkg -Recurse
 
 #      - uses: lukka/get-cmake@latest
       - uses: lukka/run-vcpkg@v11
         with:
-          vcpkgDirectory: $GITHUB_WORKSPACE\vcpkg
+          vcpkgDirectory: ${{ github.workspace }}\vcpkg
           runVcpkgInstall: true
 
       - name: Setup Visual Studio 2022
