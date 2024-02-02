@@ -187,7 +187,7 @@ if(BUILD_WHEEL)
     configure_file("${filename}" "${WHEEL_FILES_DIR}/${TARGET_NAME}" COPYONLY)
   endforeach(filename)
 
-  add_custom_target(PyPackageBuild ALL
+  add_custom_target(PyPackageBuild
      COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:python> ${WHEEL_FILES_DIR}/${TARGET_NAME}
      COMMAND "${PYTHON_EXECUTABLE}" -m pip wheel .
      WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
