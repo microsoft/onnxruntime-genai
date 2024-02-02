@@ -95,7 +95,7 @@ endif()
 #    set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
 #endif()
 
-add_library (onnxruntime-genai ${generator_srcs})
+add_library (onnxruntime-genai SHARED ${generator_srcs})
 target_include_directories(onnxruntime-genai PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
 
 if(USE_TOKENIZER)
@@ -116,7 +116,7 @@ if(USE_TOKENIZER)
     FetchContent_Declare(simdjson URL https://github.com/simdjson/simdjson/archive/refs/tags/v3.6.3.zip URL_HASH SHA1=2b063a2e81f74a5d1cb937fadf3d2fca0f1edb09)
     FetchContent_MakeAvailable (simdjson)
 
-    add_library (tokenizer ${tokenizer_srcs})
+    add_library (tokenizer SHARED ${tokenizer_srcs})
     target_include_directories(tokenizer PUBLIC
       ${TOKENIZER_ROOT}
       ${GSL_SOURCE_DIR}/include
