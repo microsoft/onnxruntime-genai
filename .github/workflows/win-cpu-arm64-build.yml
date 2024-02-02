@@ -24,12 +24,12 @@ jobs:
         uses: actions/checkout@v4
       - name: Download latest Git
         run: |
-          Invoke-WebRequest https://github.com/dennisameling/git/releases/download/v2.41.0.windows.1/PortableGit-2.41.0-arm64.7z.exe -OutFile git.exe
+          Invoke-WebRequest https://github.com/dennisameling/git/releases/download/v2.41.0.windows.1/PortableGit-2.41.0-arm64.7z.exe -OutFile ${{ github.workspace }}/git.exe
 # This is needed for arm64 builds because the default action/checkout@v4 does not support submodules
       - name: Checkout submodules
         run: |
-          git.exe --version
-          git.exe submodule update --init --recursive
+          ${{ github.workspace }}/git.exe --version
+          ${{ github.workspace }}/git.exe submodule update --init --recursive
 
       - uses: lukka/get-cmake@latest
       - uses: lukka/run-vcpkg@v11
