@@ -58,10 +58,8 @@ jobs:
           --rm \
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
           --volume $RUNNER_TEMP:/build \
-          -w /build ${{ env.docker_image }} bash -c "/usr/bin/cmake -G "Unix Makefiles" /onnxruntime_src -DBUILD_SHARED_LIBS=ON -DCMAKE_BUILD_TYPE=Release && make"
+          -w /build ${{ env.docker_image }} bash -c "/usr/bin/cmake -G Ninja /onnxruntime_src -DBUILD_SHARED_LIBS=ON -DCMAKE_BUILD_TYPE=Release && ninja"
 
 #          /onnxruntime_src/extern/vcpkg/bootstrap-vcpkg.sh &&
-
-          
 
 
