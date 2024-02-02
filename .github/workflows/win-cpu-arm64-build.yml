@@ -22,17 +22,14 @@ jobs:
     steps:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v4
-      - name: Install latest Git
+      - name: Download latest Git
         run: |
-          choco install git -y
-          echo $PATH
-          echo "C:\\Program Files\\Git\\cmd" >> $GITHUB_PATH
-          echo $PATH
+          Invoke-WebRequest https://github.com/dennisameling/git/releases/download/v2.41.0.windows.1/PortableGit-2.41.0-arm64.7z.exe -OutFile git.exe
 # This is needed for arm64 builds because the default action/checkout@v4 does not support submodules
       - name: Checkout submodules
         run: |
-          "C:/Program Files/Git/cmd/git.exe" --version
-          "C:/Program Files/Git/cmd/git.exe" submodule update --init --recursive
+          git.exe --version
+          git.exe submodule update --init --recursive
 
       - uses: lukka/get-cmake@latest
       - uses: lukka/run-vcpkg@v11
