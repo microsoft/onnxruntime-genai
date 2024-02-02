@@ -7,22 +7,22 @@
 
 // TODO: namespaces?
 // This is not really geometric decay anymore
-__global__ void GeometricDecayKernel(float* logits, int vocab_size) {
+__global__ void GeometricDecayKernel(float* logits, int vocab_size, int num_large, float large_val) {
   int index = threadIdx.x;
   int batch = blockIdx.x;
   for (; index < vocab_size; index += blockDim.x) {
-    if (index < 5) {
-      logits[batch * vocab_size + index] = 10.0f + float(index);
+    if (index < num_large) {
+      logits[batch * vocab_size + index] = large_val + float(index) / 10.0f;
     } else {
       logits[batch * vocab_size + index] = 10.0f / powf(2.0f, static_cast<float>(index));
     }
   }
 }
 
-void LaunchGeometricDecayKernel(float* logits, int vocab_size, int batch_size, cudaStream_t stream) {
+void LaunchGeometricDecayKernel(float* logits, int vocab_size, int batch_size, int num_large, float large_val, cudaStream_t stream) {
   int num_threads = 256;
   int num_blocks = batch_size;
-  GeometricDecayKernel<<<num_blocks, num_threads, 0, stream>>>(logits, vocab_size);
+  GeometricDecayKernel<<<num_blocks, num_threads, 0, stream>>>(logits, vocab_size, num_large, large_val);
 }
 
 __global__ void FisherYatesKernel(float* logits, int* indices, int vocab_size, curandState* states) {

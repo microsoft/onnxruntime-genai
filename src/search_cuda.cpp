@@ -223,7 +223,9 @@ void GreedySearch_Cuda::SampleTopK(int k, float temperature) {
 // tokens_out should be preallocated with size k * batch_size
 void GreedySearch_Cuda::GetTopKSubset(int* tokens_out, int k) {
   std::span<float> scores = next_token_scores_.subspan(0, params_.batch_size * params_.vocab_size);
-  cuda::GetTopKSubset(params_.cuda_stream, scores.data(), tokens_out, int(scores.size() / params_.batch_size), params_.batch_size, k);
+  auto scores_out_buff = CudaMallocArray<float>(params_.batch_size * k);
+  std::span<float> scores_out{scores_out_buff.get(), static_cast<size_t>(params_.batch_size * k)};
+  cuda::GetTopKSubset(params_.cuda_stream, scores.data(), scores_out.data(), tokens_out, int(scores.size() / params_.batch_size), params_.batch_size, k);
 }
 
 // TODO: api stuff... do we want this?
