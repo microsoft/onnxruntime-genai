@@ -188,7 +188,7 @@ foreach(DLL_FILE ${onnxruntime_libs})
         TARGET onnxruntime-genai POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy
                 ${DLL_FILE}
-                ${CMAKE_BINARY_DIR}/$<CONFIG>/${DLL_FILE_NAME}
+                ${CMAKE_BINARY_DIR}/${DLL_FILE_NAME}
     )
 endforeach()
 
