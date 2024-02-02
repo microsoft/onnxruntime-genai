@@ -31,7 +31,7 @@ jobs:
 # This is needed for arm64 builds because the default action/checkout@v4 does not support submodules
       - name: Checkout submodules
         run: |
-          git submodule update --init --recursive
+          "C:\\Program Files\\Git\\cmd\git.exe" submodule update --init --recursive
 
       - uses: lukka/get-cmake@latest
       - uses: lukka/run-vcpkg@v11
