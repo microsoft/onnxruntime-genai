@@ -188,10 +188,10 @@ if(BUILD_WHEEL)
   endforeach(filename)
 
   add_custom_target(PyPackageBuild ALL
-    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:python> ${WHEEL_FILES_DIR}/${TARGET_NAME}
-    COMMAND "${PYTHON_EXECUTABLE}" -m pip wheel .
-    WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
-    COMMENT "Building wheel"
+     COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:python> ${WHEEL_FILES_DIR}/${TARGET_NAME}
+     COMMAND "${PYTHON_EXECUTABLE}" -m pip wheel .
+     WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
+     COMMENT "Building wheel"
   )
 
   add_dependencies(PyPackageBuild python)
