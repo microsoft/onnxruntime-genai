@@ -161,7 +161,7 @@ target_link_directories(python PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
 target_link_libraries(python PRIVATE onnxruntime-genai ${ONNXRUNTIME_LIB})
 set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
 if (WIN32)
-    SET(WINDOWS_EXPORT_ALL_SYMBOLS ON)
+    SET(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
 endif ()
 # TODO: Windows is statically linking CUDA libraries, so remove the 'NOT WIN32' once it's using shared libraries
 if (NOT WIN32 AND USE_CUDA AND CMAKE_CUDA_COMPILER)
