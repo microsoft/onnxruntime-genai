@@ -39,20 +39,20 @@ endif()
 message(STATUS "Adding source files")
 
 file(GLOB generator_srcs CONFIGURE_DEPENDS
-  "${GENERATORS_ROOT}/*.h"
-  "${GENERATORS_ROOT}/*.cpp"
-  "${MODELS_ROOT}/*.h"
-  "${MODELS_ROOT}/*.cpp"
+   "${GENERATORS_ROOT}/*.h"
+   "${GENERATORS_ROOT}/*.cpp"
+   "${MODELS_ROOT}/*.h"
+   "${MODELS_ROOT}/*.cpp"
 )
 
 file(GLOB test_srcs CONFIGURE_DEPENDS
-  "${TESTS_ROOT}/*.h"
-  "${TESTS_ROOT}/*.cpp"
+   "${TESTS_ROOT}/*.h"
+   "${TESTS_ROOT}/*.cpp"
 )
 
 file(GLOB python_srcs CMAKE_CONFIGURE_DEPENDS
-  "${PYTHON_ROOT}/*.h"
-  "${PYTHON_ROOT}/*.cpp"
+   "${PYTHON_ROOT}/*.h"
+   "${PYTHON_ROOT}/*.cpp"
 )
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
@@ -63,10 +63,10 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   # set(CUDA_PROPAGATE_HOST_FLAGS ON)
   set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcudafe --diag_suppress=2803 --expt-relaxed-constexpr")
   file(GLOB generator_cuda_srcs CONFIGURE_DEPENDS
-    "${GENERATORS_ROOT}/*.cu"
-    "${GENERATORS_ROOT}/*.cuh"
-    "${MODELS_ROOT}/*.cu"
-    "${MODELS_ROOT}/*.cuh"
+     "${GENERATORS_ROOT}/*.cu"
+     "${GENERATORS_ROOT}/*.cuh"
+     "${MODELS_ROOT}/*.cu"
+     "${MODELS_ROOT}/*.cuh"
   )
   list(APPEND generator_srcs ${generator_cuda_srcs})
   add_compile_definitions(USE_CUDA=1)
@@ -142,10 +142,10 @@ endif()
 file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/${ONNXRUNTIME_FILES}")
 foreach(DLL_FILE ${onnxruntime_libs})
   add_custom_command(
-    TARGET onnxruntime-genai POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy
-    ${DLL_FILE}
-    ${CMAKE_BINARY_DIR}/${DLL_FILE_NAME}
+     TARGET onnxruntime-genai POST_BUILD
+     COMMAND ${CMAKE_COMMAND} -E copy
+     ${DLL_FILE}
+     ${CMAKE_BINARY_DIR}/${DLL_FILE_NAME}
   )
 endforeach()
 
@@ -171,10 +171,10 @@ if(BUILD_WHEEL)
   file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/${ONNXRUNTIME_FILES}")
   foreach(DLL_FILE ${onnxruntime_libs})
     add_custom_command(
-      TARGET onnxruntime-genai
-      COMMAND ${CMAKE_COMMAND} -E copy
-      ${DLL_FILE}
-      ${WHEEL_FILES_DIR}/${TARGET_NAME}/${DLL_FILE_NAME}
+       TARGET onnxruntime-genai
+       COMMAND ${CMAKE_COMMAND} -E copy
+       ${DLL_FILE}
+       ${WHEEL_FILES_DIR}/${TARGET_NAME}/${DLL_FILE_NAME}
     )
   endforeach()
 
@@ -188,10 +188,10 @@ if(BUILD_WHEEL)
   endforeach(filename)
 
   add_custom_target(PyPackageBuild
-    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:python> ${WHEEL_FILES_DIR}/${TARGET_NAME}
-    COMMAND "${PYTHON_EXECUTABLE}" -m pip wheel .
-    WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
-    COMMENT "Building wheel"
+     COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:python> ${WHEEL_FILES_DIR}/${TARGET_NAME}
+     COMMAND "${PYTHON_EXECUTABLE}" -m pip wheel .
+     WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
+     COMMENT "Building wheel"
   )
 
   add_dependencies(PyPackageBuild python)
