@@ -20,10 +20,6 @@ jobs:
     runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Win11-ARM-CPU"]
     steps:
       - uses: actions/checkout@v2
-      - name: Install Python Wheel
-        run: |
-          pip install --upgrade pip
-          pip install --upgrade setuptools wheel
       - name: Setup Visual Studio 2022
         uses: microsoft/setup-msbuild@v1.1
         with:

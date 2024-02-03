@@ -112,8 +112,7 @@ endif()
 add_executable(Tests ${test_srcs})
 target_include_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
 target_link_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
-target_link_libraries(Tests PRIVATE onnxruntime-genai-static ${ONNXRUNTIME_LIB})
-
+target_link_libraries(Tests PRIVATE onnxruntime-genai ${ONNXRUNTIME_LIB})
 #
 pybind11_add_module(python ${python_srcs})
 target_include_directories(python PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
@@ -148,10 +147,8 @@ endif()
 file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/${ONNXRUNTIME_FILES}")
 foreach(DLL_FILE ${onnxruntime_libs})
   add_custom_command(
-     TARGET onnxruntime-genai POST_BUILD
-     COMMAND ${CMAKE_COMMAND} -E copy
-     ${DLL_FILE}
-     ${CMAKE_BINARY_DIR}/${DLL_FILE_NAME}
+    TARGET onnxruntime-genai POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy ${DLL_FILE} ${CMAKE_BINARY_DIR}/$<CONFIG>/${DLL_FILE_NAME}
   )
 endforeach()
 
@@ -176,9 +173,7 @@ if(BUILD_WHEEL)
   foreach(DLL_FILE ${onnxruntime_libs})
     add_custom_command(
        TARGET onnxruntime-genai-static
-       COMMAND ${CMAKE_COMMAND} -E copy
-       ${DLL_FILE}
-       ${WHEEL_FILES_DIR}/${TARGET_NAME}/${DLL_FILE_NAME}
+       COMMAND ${CMAKE_COMMAND} -E copy ${DLL_FILE} ${WHEEL_FILES_DIR}/${TARGET_NAME}/${DLL_FILE_NAME}
     )
   endforeach()
 
