@@ -36,6 +36,7 @@ target_compile_definitions(tokenizer PRIVATE _SILENCE_ALL_CXX20_DEPRECATION_WARN
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set_target_properties(tokenizer PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  set_target_properties(simdjson PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
 add_dependencies(tokenizer sentencepiece-static)
