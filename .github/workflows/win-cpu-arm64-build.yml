@@ -14,7 +14,7 @@ env:
   ort_dir: "onnxruntime-win-arm64-1.16.3"
   ort_zip: "$(ort_dir).zip"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/$(ort_zip)"
-  VCPKG_FORCE_SYSTEM_BINARIES: "1"
+#  VCPKG_FORCE_SYSTEM_BINARIES: "1"
 
 jobs:
   job:
