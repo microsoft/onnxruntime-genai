@@ -141,12 +141,12 @@ endif()
 # Copy the onnxruntime binaries into the build folder so it's found on launch
 file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/${ONNXRUNTIME_FILES}")
 foreach(DLL_FILE ${onnxruntime_libs})
-    add_custom_command(
-        TARGET onnxruntime-genai POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy
-                ${DLL_FILE}
-                ${CMAKE_BINARY_DIR}/$<CONFIG>/${DLL_FILE_NAME}
-    )
+  add_custom_command(
+    TARGET onnxruntime-genai POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy
+            ${DLL_FILE}
+            ${CMAKE_BINARY_DIR}/$<CONFIG>/${DLL_FILE_NAME}
+  )
 endforeach()
 
 if(USE_TOKENIZER)
