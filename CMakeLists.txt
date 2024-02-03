@@ -121,11 +121,11 @@ target_link_directories(python PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
 target_link_libraries(python PRIVATE onnxruntime-genai-static ${ONNXRUNTIME_LIB})
 set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
 
-set_target_properties(onnxruntime-genai PROPERTIES LINKER_LANGUAGE CUDA)
-target_link_libraries(onnxruntime-genai PRIVATE cublasLt cublas cudnn curand cufft cudart)
-
-# TODO: Windows is statically linking CUDA libraries, so remove the 'NOT WIN32' once it's using shared libraries
-if(NOT WIN32 AND USE_CUDA AND CMAKE_CUDA_COMPILER)
+if(USE_CUDA AND CMAKE_CUDA_COMPILER)
+  set_target_properties(onnxruntime-genai PROPERTIES LINKER_LANGUAGE CUDA)
+  target_link_libraries(onnxruntime-genai PRIVATE cublasLt cublas cudnn curand cufft cudart)
+  #  onnxruntime-genai-static is statically linked under Windows
+  if(NOT WIN32)
   set_target_properties(onnxruntime-genai-static PROPERTIES LINKER_LANGUAGE CUDA)
   target_link_libraries(onnxruntime-genai-static PRIVATE cublasLt cublas cudnn curand cufft cudart)
   set_target_properties(python PROPERTIES LINKER_LANGUAGE CUDA)
@@ -199,8 +199,8 @@ if(BUILD_WHEEL)
      COMMENT "Building wheel"
   )
 
-    add_dependencies(PyPackageBuild python)
-endif ()
+  add_dependencies(PyPackageBuild python)
+endif()
 
 # Have visual studio put all files into one single folder vs the default split of header files into a separate folder
 source_group(TREE ${GENERATORS_ROOT} FILES ${generator_srcs})
