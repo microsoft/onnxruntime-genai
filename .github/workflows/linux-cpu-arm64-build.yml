@@ -51,6 +51,11 @@ jobs:
           echo "Printing docker image environment variables"
           docker run --rm ${{ env.docker_image }} env
 
+      - name: Check Docker ninja and ninja location
+        run: |
+          echo "Printing docker image environment variables"
+          docker run --rm ${{ env.docker_image }} bash -c "ninja --version && which ninja"
+
       - name: Docker -- Build with CMake and GCC
         run: |
           echo "Running docker image ${{ env.docker_image }}"
