@@ -71,26 +71,37 @@ def update_submodules():
     run_subprocess(["git", "submodule", "update", "--init", "--recursive"]).check_returncode()
 
 
-def build(skip_wheel: bool = False):
+def build(
+    skip_wheel: bool = False,
+    cuda_home: str | bytes | os.PathLike | None = None,
+    cudnn_home: str | bytes | os.PathLike | None = None,
+    cmake_generator: str | None = None,
+):
     """Generates the CMake build tree and builds the project.
 
     Args:
         skip_wheel: Whether to skip building the Python wheel. Defaults to False.
     """
     command = [resolve_executable_path("cmake")]
+    if cmake_generator:
+        command += ["-G", cmake_generator]
     build_wheel = "OFF" if skip_wheel else "ON"
     if is_windows():
-        cmake_generator = "Visual Studio 17 2022"
-        command += ["-G", cmake_generator, "-S", ".", "-B", "build", f"-DBUILD_WHEEL={build_wheel}"]
+        if not cmake_generator:
+            command += ["-G", "Visual Studio 17 2022"]
+        command += ["-S", ".", "-B", "build", f"-DBUILD_WHEEL={build_wheel}"]
         run_subprocess(command).check_returncode()
         make_command = ["cmake", "--build", ".", "--config", "Release"]
         run_subprocess(make_command, cwd="build").check_returncode()
     elif is_linux():
-        cuda_version = "cuda"
         cuda_arch = 80
-        cuda_compiler = f"/usr/local/{cuda_version}/bin/nvcc"
-
-        env = {"CUDA_HOME": "/usr/local/cuda", "CUDNN_HOME": "/usr/lib/x86_64-linux-gnu/"}
+        cuda_compiler = None
+        env = {}
+        if cuda_home or os.environ.get("CUDA_HOME"):
+            env["CUDA_HOME"] = cuda_home if cuda_home else os.environ.get("CUDA_HOME")
+            cuda_compiler = f"{env['CUDA_HOME']}/bin/nvcc"
+        if cudnn_home or os.environ.get("CUDNN_HOME"):
+            env["CUDNN_HOME"] = cudnn_home if cudnn_home else os.environ.get("CUDNN_HOME")
 
         command += [
             "-S",
@@ -115,8 +126,38 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="ONNX Runtime GenAI Build Driver.",
     )
+    parser.add_argument(
+        "--cmake_generator",
+        choices=[
+            "MinGW Makefiles",
+            "Ninja",
+            "NMake Makefiles",
+            "Unix Makefiles",
+            "Visual Studio 17 2022",
+            "Xcode",
+        ],
+        default=None,
+        help="Specify the generator that CMake invokes.",
+    )
+    parser.add_argument(
+        "--cuda_home",
+        help="Path to CUDA home."
+        "Read from CUDA_HOME environment variable if --use_cuda is true and "
+        "--cuda_home is not specified.",
+    )
+    parser.add_argument(
+        "--cudnn_home",
+        help="Path to CUDNN home. "
+        "Read from CUDNN_HOME environment variable if --use_cuda is true and "
+        "--cudnn_home is not specified.",
+    )
     parser.add_argument("--skip_wheel", action="store_true", help="Skip building the Python wheel.")
     args = parser.parse_args()
 
     update_submodules()
-    build(skip_wheel=args.skip_wheel)
+    build(
+        skip_wheel=args.skip_wheel,
+        cuda_home=args.cuda_home,
+        cudnn_home=args.cudnn_home,
+        cmake_generator=args.cmake_generator,
+    )
