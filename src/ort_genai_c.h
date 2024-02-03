@@ -54,7 +54,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken_TopK(OgaGenera
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken_TopP(OgaGenerator*, float p, float t);
 
 /* Writes the sequence into the provided buffer 'tokens' and writes the count into 'count'. If 'tokens' is nullptr just writes the count
-*/
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetSequence(OgaGenerator*, int index, int32_t* tokens, size_t* count);
 
 #ifdef __cplusplus
