@@ -92,7 +92,7 @@ if(USE_TOKENIZER)
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  set_target_properties(onnxruntime-genai PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  set_target_properties(onnxruntime-genai-static PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
 if(WIN32)
