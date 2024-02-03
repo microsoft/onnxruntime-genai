@@ -80,9 +80,11 @@ endif()
 #if(WIN32)
 #    set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
 #endif()
-
-add_library(onnxruntime-genai ${generator_srcs})
+add_library(onnxruntime-genai SHARED ${generator_srcs})
+add_library(onnxruntime-genai-static ${generator_srcs})
 target_include_directories(onnxruntime-genai PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
+target_include_directories(onnxruntime-genai-static PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
+
 
 if(USE_TOKENIZER)
   add_subdirectory("${CMAKE_SOURCE_DIR}/src/tokenizer")
@@ -91,6 +93,7 @@ endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set_target_properties(onnxruntime-genai PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  set_target_properties(onnxruntime-genai-static PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
 if(WIN32)
@@ -115,15 +118,17 @@ target_link_libraries(Tests PRIVATE onnxruntime-genai ${ONNXRUNTIME_LIB})
 pybind11_add_module(python ${python_srcs})
 target_include_directories(python PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
 target_link_directories(python PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
-target_link_libraries(python PRIVATE onnxruntime-genai ${ONNXRUNTIME_LIB})
+target_link_libraries(python PRIVATE onnxruntime-genai-static ${ONNXRUNTIME_LIB})
 set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
 
 # TODO: Windows is statically linking CUDA libraries, so remove the 'NOT WIN32' once it's using shared libraries
 if(NOT WIN32 AND USE_CUDA AND CMAKE_CUDA_COMPILER)
   set_target_properties(onnxruntime-genai PROPERTIES LINKER_LANGUAGE CUDA)
+  set_target_properties(onnxruntime-genai-static PROPERTIES LINKER_LANGUAGE CUDA)
   set_target_properties(python PROPERTIES LINKER_LANGUAGE CUDA)
   set_target_properties(Tests PROPERTIES LINKER_LANGUAGE CUDA)
   target_link_libraries(onnxruntime-genai PRIVATE cublasLt cublas cudnn curand cufft cudart)
+  target_link_libraries(onnxruntime-genai-static PRIVATE cublasLt cublas cudnn curand cufft cudart)
   target_link_libraries(Tests PRIVATE cublasLt cublas cudnn curand cufft cudart)
   target_link_libraries(python PRIVATE cublasLt cublas cudnn curand cufft cudart)
 endif()
@@ -152,8 +157,10 @@ endforeach()
 if(USE_TOKENIZER)
   add_compile_definitions(USE_TOKENIZER=1)
   target_include_directories(onnxruntime-genai PRIVATE ${TOKENIZER_ROOT})
+  target_include_directories(onnxruntime-genai-static PRIVATE ${TOKENIZER_ROOT})
   target_include_directories(Tests PRIVATE ${TOKENIZER_ROOT})
   target_include_directories(python PRIVATE ${TOKENIZER_ROOT})
+  target_link_libraries(onnxruntime-genai PRIVATE tokenizer)
   target_link_libraries(Tests PRIVATE tokenizer)
   target_link_libraries(python PRIVATE tokenizer)
   message("Linking Tokenizer with TOKENIZER_ROOT: ${TOKENIZER_ROOT}")
@@ -162,16 +169,13 @@ endif()
 if(BUILD_WHEEL)
   set(WHEEL_FILES_DIR "${CMAKE_BINARY_DIR}/wheel")
   message("Setting up wheel files in : ${WHEEL_FILES_DIR}")
-
   set(TARGET_NAME "onnxruntime_genai")
-
   configure_file(${PYTHON_ROOT}/setup.py.in ${WHEEL_FILES_DIR}/setup.py @ONLY)
   configure_file(${PYTHON_ROOT}/py/__init__.py.in ${WHEEL_FILES_DIR}/${TARGET_NAME}/__init__.py @ONLY)
-
   file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/${ONNXRUNTIME_FILES}")
   foreach(DLL_FILE ${onnxruntime_libs})
     add_custom_command(
-       TARGET onnxruntime-genai
+       TARGET onnxruntime-genai-static
        COMMAND ${CMAKE_COMMAND} -E copy
        ${DLL_FILE}
        ${WHEEL_FILES_DIR}/${TARGET_NAME}/${DLL_FILE_NAME}
