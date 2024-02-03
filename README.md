@@ -97,11 +97,12 @@ Users can call a high level `generate()` method, or provide their own customizat
 * Copy onnxruntime library into the ort/ folder
   * Can either build Onnxruntime from source in release mode, then copy the files specified in install_ort.bat
   * Or download a release from https://github.com/microsoft/onnxruntime/releases
-  * Files in ort\ should be:
+  * Files in ort\lib\ should be:
     * onnxruntime.dll
     * onnxruntime.lib
     * onnxruntime_providers_shared.dll (if using cuda)
     * onnxruntime_providers_cuda.dll (if using cuda)
+  * Files in ort\include\ should be:
     * onnxruntime_c_api.h
 * Run the build.bat script to generate build files
 * Open build\Generators.sln in visual studio
@@ -113,11 +114,12 @@ To run the python scripts, use PYTHONPATH: `set PYTHONPATH=/path/to/onnxruntime-
 * Copy onnxruntime library into the ort/ folder
   * Can either build Onnxruntime from source in release mode, then copy the files specified in install_ort.sh
   * Or download a release from https://github.com/microsoft/onnxruntime/releases
-  * Files in ort\ should be:
+  * Files in ort/lib/ should be:
     * libonnxruntime.so
     * libonnxruntime.so.(version #)
     * libonnxruntime_providers_shared.so (if using cuda)
     * libonnxruntime_providers_cuda.so (if using cuda)
+  * Files in ort/include/ should be
     * onnxruntime_c_api.h
 * Run the build.sh script to build
 
