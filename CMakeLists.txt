@@ -126,14 +126,14 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   target_link_libraries(onnxruntime-genai PRIVATE cublasLt cublas cudnn curand cufft cudart)
   #  onnxruntime-genai-static is statically linked under Windows
   if(NOT WIN32)
-  set_target_properties(onnxruntime-genai-static PROPERTIES LINKER_LANGUAGE CUDA)
-  target_link_libraries(onnxruntime-genai-static PRIVATE cublasLt cublas cudnn curand cufft cudart)
-  set_target_properties(python PROPERTIES LINKER_LANGUAGE CUDA)
-  set_target_properties(Tests PROPERTIES LINKER_LANGUAGE CUDA)
-  target_link_libraries(Tests PRIVATE cublasLt cublas cudnn curand cufft cudart)
-  target_link_libraries(python PRIVATE cublasLt cublas cudnn curand cufft cudart)
+    set_target_properties(onnxruntime-genai-static PROPERTIES LINKER_LANGUAGE CUDA)
+    target_link_libraries(onnxruntime-genai-static PRIVATE cublasLt cublas cudnn curand cufft cudart)
+    set_target_properties(python PROPERTIES LINKER_LANGUAGE CUDA)
+    set_target_properties(Tests PROPERTIES LINKER_LANGUAGE CUDA)
+    target_link_libraries(Tests PRIVATE cublasLt cublas cudnn curand cufft cudart)
+    target_link_libraries(python PRIVATE cublasLt cublas cudnn curand cufft cudart)
+  endif()
 endif()
-
 
 # Visual C++ - /MP Multiple process build, /WX Warnings as errors
 # Enable:
