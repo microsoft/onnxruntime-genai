@@ -60,9 +60,10 @@ def run_subprocess(
     Returns:
         subprocess.CompletedProcess: The result of the subprocess.
     """
-    env.update(os.environ.copy())
+    user_env = os.environ.copy()
+    user_env.update(env)
     stdout, stderr = (subprocess.PIPE, subprocess.STDOUT) if capture else (None, None)
-    return subprocess.run(args, cwd=cwd, check=True, stdout=stdout, stderr=stderr, env=env, shell=shell)
+    return subprocess.run(args, cwd=cwd, check=True, stdout=stdout, stderr=stderr, env=user_env, shell=shell)
 
 
 def update_submodules():
@@ -77,7 +78,6 @@ def build(skip_wheel: bool = False):
         skip_wheel: Whether to skip building the Python wheel. Defaults to False.
     """
     command = [resolve_executable_path("cmake")]
-    print(skip_wheel)
     build_wheel = "OFF" if skip_wheel else "ON"
     if is_windows():
         cmake_generator = "Visual Studio 17 2022"
@@ -117,7 +117,6 @@ if __name__ == "__main__":
     )
     parser.add_argument("--skip_wheel", action="store_true", help="Skip building the Python wheel.")
     args = parser.parse_args()
-    print(args.skip_wheel)
 
     update_submodules()
     build(skip_wheel=args.skip_wheel)
