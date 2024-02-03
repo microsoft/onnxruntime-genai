@@ -121,14 +121,15 @@ target_link_directories(python PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
 target_link_libraries(python PRIVATE onnxruntime-genai-static ${ONNXRUNTIME_LIB})
 set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
 
+set_target_properties(onnxruntime-genai PROPERTIES LINKER_LANGUAGE CUDA)
+target_link_libraries(onnxruntime-genai PRIVATE cublasLt cublas cudnn curand cufft cudart)
+
 # TODO: Windows is statically linking CUDA libraries, so remove the 'NOT WIN32' once it's using shared libraries
 if(NOT WIN32 AND USE_CUDA AND CMAKE_CUDA_COMPILER)
-  set_target_properties(onnxruntime-genai PROPERTIES LINKER_LANGUAGE CUDA)
   set_target_properties(onnxruntime-genai-static PROPERTIES LINKER_LANGUAGE CUDA)
+  target_link_libraries(onnxruntime-genai-static PRIVATE cublasLt cublas cudnn curand cufft cudart)
   set_target_properties(python PROPERTIES LINKER_LANGUAGE CUDA)
   set_target_properties(Tests PROPERTIES LINKER_LANGUAGE CUDA)
-  target_link_libraries(onnxruntime-genai PRIVATE cublasLt cublas cudnn curand cufft cudart)
-  target_link_libraries(onnxruntime-genai-static PRIVATE cublasLt cublas cudnn curand cufft cudart)
   target_link_libraries(Tests PRIVATE cublasLt cublas cudnn curand cufft cudart)
   target_link_libraries(python PRIVATE cublasLt cublas cudnn curand cufft cudart)
 endif()
