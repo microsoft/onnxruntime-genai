@@ -76,10 +76,6 @@ else()
   list(REMOVE_ITEM generator_srcs ${generator_cuda_srcs})
 endif()
 
-## TODO: this is a hack to get the shared library to export .lib files on windows. We should find a better way when we need to compile dynamic libraries
-#if(WIN32)
-#    set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
-#endif()
 add_library(onnxruntime-genai SHARED ${generator_srcs})
 add_library(onnxruntime-genai-static STATIC ${generator_srcs})
 target_include_directories(onnxruntime-genai PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
