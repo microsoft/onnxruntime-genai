@@ -16,11 +16,6 @@ jobs:
         with:
           submodules: true
 
-      - uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgDirectory: ${{ github.workspace }}/extern/vcpkg
-          runVcpkgInstall: true
-
       - name: Download OnnxRuntime
         run: |
           curl -L -o ${{ env.ort_zip }} ${{ env.ort_url }} 

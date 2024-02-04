@@ -6,6 +6,7 @@ include(FetchContent)
 #include(cmake/external/onnxruntime_external_deps.cmake)
 set(CMAKE_TOOLCHAIN_FILE "${CMAKE_CURRENT_SOURCE_DIR}/extern/vcpkg/scripts/buildsystems/vcpkg.cmake"
   CACHE STRING "Vcpkg toolchain file")
+set(VCPKG_INSTALL_OPTIONS "--allow-unsupported")
 project (Generators LANGUAGES C CXX)
 set(USE_CUDA 1) # "Build with CUDA support"
 set(USE_TOKENIZER 1) # "Build with Tokenizer support"

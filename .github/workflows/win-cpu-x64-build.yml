@@ -24,10 +24,9 @@ jobs:
         with:
           submodules: recursive
 
-      - uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgDirectory: ${{ github.workspace }}/extern/vcpkg
-          runVcpkgInstall: true
+      - name: Bootstrap vcpkg
+        run: |
+          ${{ github.workspace }}\extern\vcpkg\bootstrap-vcpkg.bat
 
       - name: Setup Visual Studio 2022
         uses: microsoft/setup-msbuild@v1.1
