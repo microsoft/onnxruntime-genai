@@ -16,6 +16,10 @@ jobs:
         with:
           submodules: true
 
+      - name: Bootstrap vcpkg
+        run: |
+          ${{ github.workspace }}/extern/vcpkg/bootstrap-vcpkg.sh
+
       - name: Download OnnxRuntime
         run: |
           curl -L -o ${{ env.ort_zip }} ${{ env.ort_url }} 
