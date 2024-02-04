@@ -67,3 +67,7 @@ tar --strip 1 -xf /tmp/src/node-v18.17.1-linux-${NODEJS_ARCH}.tar.gz -C /usr
 
 cd /
 rm -rf /tmp/src
+
+git clone https://github.com/Microsoft/vcpkg.git /
+cd /vcpkg
+./bootstrap-vcpkg.sh

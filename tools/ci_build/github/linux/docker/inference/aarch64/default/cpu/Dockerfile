@@ -10,7 +10,7 @@ ENV LC_ALL=en_US.UTF-8
 
 # Setup vcpkg environment variables
 ENV VCPKG_FORCE_SYSTEM_BINARIES=1
-ENV VCPKG_DEFAULT_TRIPLET=arm64-linux
+ENV VCPKG_DEFAULT_TRIPLET=aarch64-linux
 
 # Install dependencies
 ADD scripts /tmp/scripts

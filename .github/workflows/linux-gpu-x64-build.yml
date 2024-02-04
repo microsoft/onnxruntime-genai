@@ -54,5 +54,5 @@ jobs:
             --rm \
             --volume $GITHUB_WORKSPACE:/onnxruntime_src \
             --volume $RUNNER_TEMP:/build \
-            -w /build ${{ env.docker_image }} bash -c "/onnxruntime_src/extern/vcpkg/bootstrap-vcpkg.sh && /usr/bin/cmake -G Ninja /onnxruntime_src -D -DCMAKE_CUDA_ARCHITECTURES=75 -DUSE_CUDA=1 -DCMAKE_BUILD_TYPE=Release && ninja"
+            -w /build ${{ env.docker_image }} bash -c "/onnxruntime_src/extern/vcpkg/bootstrap-vcpkg.sh && /usr/bin/cmake -G Ninja /onnxruntime_src -DCMAKE_CUDA_ARCHITECTURES=75 -DUSE_CUDA=1 -DCMAKE_BUILD_TYPE=Release && ninja"
 
