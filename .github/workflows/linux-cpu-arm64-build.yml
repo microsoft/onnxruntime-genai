@@ -30,7 +30,7 @@ jobs:
         run: |
           mv ${{ env.ort_dir }} ort
 
-      - name: Download Docker Image
+      - name: Get Docker Image
         run: |
           set -e -x
           python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/inference/aarch64/default/cpu/Dockerfile \
@@ -56,6 +56,6 @@ jobs:
           --rm \
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
           --volume $RUNNER_TEMP:/build \
-          -w /build ${{ env.docker_image }} bash -c "/onnxruntime_src/extern/vcpkg/bootstrap-vcpkg.sh && /usr/bin/cmake -G Ninja /onnxruntime_src -DCMAKE_BUILD_TYPE=Release && ninja"
+          -w /build ${{ env.docker_image }} bash -c "/onnxruntime_src/extern/vcpkg/bootstrap-vcpkg.sh && /usr/bin/cmake -G Ninja /onnxruntime_src -DCMAKE_MAKE_PROGRAM=ninja -DCMAKE_BUILD_TYPE=Release && ninja"
 
 #          /onnxruntime_src/extern/vcpkg/bootstrap-vcpkg.sh &&

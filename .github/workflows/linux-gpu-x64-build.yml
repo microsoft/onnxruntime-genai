@@ -19,12 +19,6 @@ jobs:
         with:
           submodules: true
 
-      - uses: lukka/get-cmake@latest
-      - uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgDirectory: ${{ github.workspace }}/extern/vcpkg
-          runVcpkgInstall: true
-
       - name: Download OnnxRuntime
         run: |
           curl -L -o ${{ env.ort_zip }} ${{ env.ort_url }} 
@@ -38,7 +32,7 @@ jobs:
         run: |
           mv ${{ env.ort_dir }} ort
 
-      - name: Download Docker Image
+      - name: Get Docker Image
         run: |
           set -e -x
           python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/inference/x64/default/gpu/Dockerfile \

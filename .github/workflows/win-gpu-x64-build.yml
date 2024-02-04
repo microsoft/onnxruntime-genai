@@ -23,7 +23,6 @@ jobs:
         with:
           submodules: true
 
-      - uses: lukka/get-cmake@latest
       - uses: lukka/run-vcpkg@v11
         with:
           vcpkgDirectory: ${{ github.workspace }}/extern/vcpkg
