@@ -35,9 +35,9 @@ jobs:
       - name: Run vcpkg install
         run: |
           $env:VCPKG_DEFAULT_TRIPLET = "arm64-windows"
-          $env:VCPKG_ROOT = ${{ github.workspace }}/extern/vcpkg
-          ${{ github.workspace }}/extern/vcpkg/bootstrap-vcpkg.bat
-          vcpkg install --triplet arm64-windows --allow-unsupported
+          $env:VCPKG_ROOT = ${{ github.workspace }}\extern\vcpkg
+          ${{ github.workspace }}\extern\vcpkg\bootstrap-vcpkg.bat
+          ${{ github.workspace }}\extern\vcpkg\vcpkg install --triplet arm64-windows --allow-unsupported
 
       - name: Download OnnxRuntime
         run: |
