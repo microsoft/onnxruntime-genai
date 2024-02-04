@@ -7,9 +7,7 @@ env:
   ort_dir: "onnxruntime-linux-aarch64-1.16.3"
   ort_zip: "onnxruntime-linux-aarch64-1.16.3.tgz"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/onnxruntime-linux-aarch64-1.16.3.tgz"
-  VCPKG_FORCE_SYSTEM_BINARIES: "1"
   docker_image: "onnxruntimecpubuild"
-  VCPKG_DEFAULT_TRIPLET: "arm64-linux"
 jobs:
   job:
     runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2004-ARM-CPU" ]
@@ -18,12 +16,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: true
-
-      - uses: lukka/get-cmake@latest
-      - uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgDirectory: ${{ github.workspace }}/extern/vcpkg
-          runVcpkgInstall: true
 
       - name: Download OnnxRuntime
         run: |
@@ -64,6 +56,6 @@ jobs:
           --rm \
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
           --volume $RUNNER_TEMP:/build \
-          -w /build ${{ env.docker_image }} bash -c "/onnxruntime_src/extern/vcpkg/bootstrap-vcpkg.sh && /usr/bin/cmake -G Ninja /onnxruntime_src -DBUILD_SHARED_LIBS=ON -DCMAKE_BUILD_TYPE=Release && ninja"
+          -w /build ${{ env.docker_image }} bash -c "/onnxruntime_src/extern/vcpkg/bootstrap-vcpkg.sh && /usr/bin/cmake -G Ninja /onnxruntime_src -DCMAKE_BUILD_TYPE=Release && ninja"
 
 #          /onnxruntime_src/extern/vcpkg/bootstrap-vcpkg.sh &&

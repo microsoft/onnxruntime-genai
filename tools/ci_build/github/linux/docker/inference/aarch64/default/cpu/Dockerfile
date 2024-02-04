@@ -9,7 +9,7 @@ ENV PATH /opt/rh/gcc-toolset-12/root/usr/bin:/usr/local/sbin:/usr/local/bin:/usr
 ENV LANG=en_US.UTF-8
 ENV LC_ALL=en_US.UTF-8
 ENV VCPKG_FORCE_SYSTEM_BINARIES=1
-
+ENV VCPKG_DEFAULT_TRIPLET=arm64-linux
 
 ADD scripts /tmp/scripts
 RUN cd /tmp/scripts && /tmp/scripts/install_centos.sh && /tmp/scripts/install_deps.sh && rm -rf /tmp/scripts
