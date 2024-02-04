@@ -71,6 +71,29 @@ def update_submodules():
     run_subprocess(["git", "submodule", "update", "--init", "--recursive"]).check_returncode()
 
 
+def validate_cuda_home(cuda_home: str | bytes | os.PathLike | None, cudnn_home: str | bytes | os.PathLike | None):
+    """Validate the CUDA and cuDNN home paths."""
+    validated_cuda_home = ""
+    validated_cudnn_home = ""
+
+    if cuda_home or os.environ.get("CUDA_HOME"):
+        validated_cuda_home = cuda_home if cuda_home else os.getenv("CUDA_HOME")
+        validated_cudnn_home = cudnn_home if cudnn_home else os.getenv("CUDNN_HOME")
+
+        cuda_home_valid = os.path.exists(validated_cuda_home)
+        cudnn_home_valid = os.path.exists(validated_cudnn_home)
+
+        if not cuda_home_valid or (not is_windows() and not cudnn_home_valid):
+            raise RuntimeError(
+                "cuda_home and cudnn_home paths must be specified and valid.",
+                "cuda_home='{}' valid={}. cudnn_home='{}' valid={}".format(
+                    cuda_home, cuda_home_valid, cudnn_home, cudnn_home_valid
+                ),
+            )
+
+    return validated_cuda_home, validated_cudnn_home
+
+
 def build(
     skip_wheel: bool = False,
     cuda_home: str | bytes | os.PathLike | None = None,
@@ -82,44 +105,51 @@ def build(
     Args:
         skip_wheel: Whether to skip building the Python wheel. Defaults to False.
     """
+    if not is_windows() and not is_linux():
+        raise OSError(f"Unsupported platform {platform()}.")
+
+    cuda_home, cudnn_home = validate_cuda_home(cuda_home, cudnn_home)
+
     command = [resolve_executable_path("cmake")]
+
     if cmake_generator:
         command += ["-G", cmake_generator]
-    build_wheel = "OFF" if skip_wheel else "ON"
+
     if is_windows():
         if not cmake_generator:
-            command += ["-G", "Visual Studio 17 2022"]
-        command += ["-S", ".", "-B", "build", f"-DBUILD_WHEEL={build_wheel}"]
-        run_subprocess(command).check_returncode()
-        make_command = ["cmake", "--build", ".", "--config", "Release"]
-        run_subprocess(make_command, cwd="build").check_returncode()
-    elif is_linux():
-        cuda_arch = 80
-        cuda_compiler = None
-        env = {}
-        if cuda_home or os.environ.get("CUDA_HOME"):
-            env["CUDA_HOME"] = cuda_home if cuda_home else os.environ.get("CUDA_HOME")
-            cuda_compiler = f"{env['CUDA_HOME']}/bin/nvcc"
-        if cudnn_home or os.environ.get("CUDNN_HOME"):
-            env["CUDNN_HOME"] = cudnn_home if cudnn_home else os.environ.get("CUDNN_HOME")
+            command += ["-G", "Visual Studio 17 2022", "-A", "x64"]
+        if cuda_home:
+            toolset = "host=x64" + ",cuda=" + cuda_home
+            command += ["-T", toolset]
 
-        command += [
-            "-S",
-            ".",
-            "-B",
-            "build",
-            f"-DCMAKE_CUDA_ARCHITECTURES={cuda_arch}",
-            f"-DCMAKE_CUDA_COMPILER={cuda_compiler}",
-            "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
-            "-DUSE_CXX17=ON",
-            "-DUSE_CUDA=ON",
-            f"-DBUILD_WHEEL={build_wheel}",
-        ]
-        run_subprocess(command, env=env).check_returncode()
-        make_command = ["make"]
-        run_subprocess(make_command, cwd="build", env=env).check_returncode()
-    else:
-        raise OSError(f"Unsupported platform {platform()}.")
+    build_wheel = "OFF" if skip_wheel else "ON"
+
+    command += [
+        "-S",
+        ".",
+        "-B",
+        "build",
+        "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
+        "-DUSE_CXX17=ON",
+        "-DUSE_CUDA=ON" if cuda_home else "-DUSE_CUDA=OFF",
+        f"-DBUILD_WHEEL={build_wheel}",
+    ]
+
+    cuda_compiler = None
+    env = {}
+    if cuda_home:
+        cuda_arch = 80
+        env["CUDA_HOME"] = cuda_home
+        env["PATH"] = os.path.join(env["CUDA_HOME"], "bin") + os.pathsep + os.environ["PATH"]
+        cuda_compiler = os.path.join(env["CUDA_HOME"], "bin", "nvcc")
+        command += [f"-DCMAKE_CUDA_COMPILER={cuda_compiler}", f"-DCMAKE_CUDA_ARCHITECTURES={cuda_arch}"]
+
+    if cudnn_home:
+        env["CUDNN_HOME"] = cudnn_home
+
+    run_subprocess(command, env=env).check_returncode()
+    make_command = ["cmake", "--build", ".", "--config", "Release"]
+    run_subprocess(make_command, cwd="build", env=env).check_returncode()
 
 
 if __name__ == "__main__":
