@@ -60,5 +60,6 @@ jobs:
             --rm \
             --volume $GITHUB_WORKSPACE:/onnxruntime_src \
             --volume $RUNNER_TEMP:/build \
+            -w /build onnxruntimegpubuild bash -c "/usr/bin/cmake -G Ninja /onnxruntime_src -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_CUDA_ARCHITECTURES=75 -DUSE_CUDA=1 -DCMAKE_BUILD_TYPE=Release && ninja"
             -w /build ${{ env.docker_image }} bash -c "/onnxruntime_src/extern/vcpkg/bootstrap-vcpkg.sh && /usr/bin/cmake -G Ninja /onnxruntime_src -DBUILD_SHARED_LIBS=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_CUDA_ARCHITECTURES=75 -DUSE_CUDA=1 -DCMAKE_BUILD_TYPE=Release && ninja"
 
