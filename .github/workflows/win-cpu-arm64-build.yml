@@ -32,12 +32,10 @@ jobs:
           vs-version: '17.4'
           msbuild-architecture: arm64
 
-      - name: Run vcpkg install
+      - name: Bootstrap vcpkg
         run: |
-          $env:VCPKG_DEFAULT_TRIPLET = "arm64-windows"
-          $env:VCPKG_ROOT = ${{ github.workspace }}\extern\vcpkg
           ${{ github.workspace }}\extern\vcpkg\bootstrap-vcpkg.bat
-          ${{ github.workspace }}\extern\vcpkg\vcpkg install --triplet arm64-windows --allow-unsupported
+          ${{ github.workspace }}\extern\vcpkg\vcpkg integrate install --triplet arm64-windows
 
       - name: Download OnnxRuntime
         run: |
@@ -55,7 +53,7 @@ jobs:
 
       - name: Build with CMake
         run: |
-          cmake -G "Visual Studio 17 2022" -A arm64 . -DCMAKE_BUILD_TYPE=Release
+          cmake -G "Visual Studio 17 2022" -A arm64 . -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}\\extern\\vcpkg\\scripts\\buildsystems\\vcpkg.cmake
           cmake --build . --config Release --parallel
 
       - name: Verify Build Artifacts

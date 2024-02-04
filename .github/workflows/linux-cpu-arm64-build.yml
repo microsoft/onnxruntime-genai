@@ -56,6 +56,6 @@ jobs:
           --rm \
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
           --volume $RUNNER_TEMP:/build \
-          -w /build ${{ env.docker_image }} bash -c "/onnxruntime_src/extern/vcpkg/bootstrap-vcpkg.sh && /onnxruntime_src/extern/vcpkg/vcpkg install && /usr/bin/cmake -G Ninja /onnxruntime_src -DCMAKE_TOOLCHAIN_FILE=/onnxruntime_src/extern/vcpkg/scripts/buildsystems/vcpkg.cmake -DCMAKE_MAKE_PROGRAM=ninja -DCMAKE_C_COMPILER=/opt/rh/gcc-toolset-12/root/usr/bin/cc -DCMAKE_CXX_COMPILER=/opt/rh/gcc-toolset-12/root/usr/bin/g++ -DCMAKE_BUILD_TYPE=Release && ninja"
+          -w /build ${{ env.docker_image }} bash -c "/onnxruntime_src/extern/vcpkg/bootstrap-vcpkg.sh && /usr/bin/cmake -G Ninja /onnxruntime_src -DCMAKE_TOOLCHAIN_FILE=/onnxruntime_src/extern/vcpkg/scripts/buildsystems/vcpkg.cmake -DCMAKE_MAKE_PROGRAM=ninja -DCMAKE_C_COMPILER=/opt/rh/gcc-toolset-12/root/usr/bin/cc -DCMAKE_CXX_COMPILER=/opt/rh/gcc-toolset-12/root/usr/bin/g++ -DCMAKE_BUILD_TYPE=Release && ninja"
 
 #          /onnxruntime_src/extern/vcpkg/bootstrap-vcpkg.sh &&
