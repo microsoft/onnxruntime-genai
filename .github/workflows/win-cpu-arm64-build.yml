@@ -14,21 +14,17 @@ env:
   ort_dir: "onnxruntime-win-arm64-1.16.3"
   ort_zip: "$(ort_dir).zip"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/$(ort_zip)"
-  VCPKG_DEFAULT_TRIPLET: "arm64-windows"
+  VCPKG_DEFAULT_TRIPLET: "arm-windows"
 
 jobs:
   job:
-    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Win11-ARM-CPU"]
+    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Win11-ARM-CPU" ]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v4
         with:
           submodules: true
-      - name: Run Vcpkg
-        uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgDirectory: ${{ github.workspace }}/extern/vcpkg
-          runVcpkgInstall: true
+      - uses: lukka/get-cmake@latest
       - uses: lukka/run-vcpkg@v11
         with:
           vcpkgDirectory: ${{ github.workspace }}/extern/vcpkg
