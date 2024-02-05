@@ -266,22 +266,22 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
              return CreateModel(GetOrtEnv(), config_path.c_str(), &provider_options);
            }),
            "str"_a, "device_type"_a = DeviceType::Auto)
-      .def("Generate", [](Model& model, PySearchParams& search_params) { search_params.Prepare(); return Generate(model, search_params); })
+      .def("generate", [](Model& model, PySearchParams& search_params) { search_params.Prepare(); return Generate(model, search_params); })
 #if USE_TOKENIZER
-      .def("CreateTokenizer", [](Model& model) { return model.CreateTokenizer(); })
+      .def("create_tokenizer", [](Model& model) { return model.CreateTokenizer(); })
 #endif
-      .def_property_readonly("DeviceType", [](const Model& s) { return s.device_type_; });
+      .def_property_readonly("device_type", [](const Model& s) { return s.device_type_; });
 
   pybind11::class_<PyGenerator>(m, "Generator")
       .def(pybind11::init<Model&, PySearchParams&>())
-      .def("IsDone", &PyGenerator::IsDone)
-      .def("ComputeLogits", &PyGenerator::ComputeLogits)
-      .def("GenerateNextToken", &PyGenerator::GenerateNextToken)
-      .def("GenerateNextToken_TopP", &PyGenerator::GenerateNextToken_TopP)
-      .def("GenerateNextToken_TopK", &PyGenerator::GenerateNextToken_TopK)
-      .def("GenerateNextToken_TopK_TopP", &PyGenerator::GenerateNextToken_TopK_TopP)
-      .def("GetNextTokens", &PyGenerator::GetNextTokens)
-      .def("GetSequence", &PyGenerator::GetSequence);
+      .def("is_done", &PyGenerator::IsDone)
+      .def("compute_logits", &PyGenerator::ComputeLogits)
+      .def("generate_next_token", &PyGenerator::GenerateNextToken)
+      .def("generate_next_token_topp", &PyGenerator::GenerateNextToken_TopP)
+      .def("generate_next_token_topk", &PyGenerator::GenerateNextToken_TopK)
+      .def("generate_next_token_topk_topp", &PyGenerator::GenerateNextToken_TopK_TopP)
+      .def("get_next_tokens", &PyGenerator::GetNextTokens)
+      .def("get_sequence", &PyGenerator::GetSequence);
 
 #ifdef VERSION_INFO
   m.attr("__version__") = MACRO_STRINGIFY(VERSION_INFO);
