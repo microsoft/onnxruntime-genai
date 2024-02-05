@@ -1,10 +1,10 @@
 """
 Run this script to create the desired ONNX model.
 Example usage:
-python export.py -m model_name -o model.onnx -p precision -e execution_provider
+python export.py -m model_name_or_path -o model.onnx -p precision -e execution_provider
 """
 
-from onnx import helper, numpy_helper, TensorProto, external_data_helper, load_model, save_model
+from onnx import helper, numpy_helper, TensorProto, external_data_helper, save_model
 from onnxruntime.quantization.matmul_4bits_quantizer import MatMul4BitsQuantizer
 from transformers import AutoConfig, AutoModelForCausalLM
 import numpy as np
@@ -25,7 +25,7 @@ class Model:
         self.vocab_size = config.vocab_size
         self.activation = config.hidden_act
 
-        self.model_name = config._name_or_path
+        self.model_name_or_path = config._name_or_path
         self.model_type = config.architectures[0]
         self.io_dtype = io_dtype      # {'fp16', 'fp32'}
         self.onnx_dtype = onnx_dtype  # {"int4", "fp16", "fp32"}
@@ -57,7 +57,7 @@ class Model:
             TensorProto.FLOAT: np.float32,
         }
 
-        # Map TensorProto dtypes to NumPy dtypes
+        # Map TensorProto dtypes to string dtypes
         self.to_str_dtype = {
             TensorProto.INT8: "TensorProto.INT8",
             TensorProto.INT32: "TensorProto.INT32",
@@ -696,7 +696,8 @@ class Model:
         self.make_attention_mask_reformatting()
 
         # Load PyTorch model
-        model = AutoModelForCausalLM.from_pretrained(self.model_name, cache_dir=self.cache_dir, use_auth_token=True)
+        extra_kwargs = {} if os.path.exists(self.model_name_or_path) else {"cache_dir": self.cache_dir, "use_auth_token": True}
+        model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, **extra_kwargs)
         
         # Loop through PyTorch model and map each nn.Module to ONNX/ORT ops
         self.layer_id = 0
@@ -1096,8 +1097,8 @@ class MistralModel(LlamaModel):
         #                  \       /
         #                   Reshape
         #                      |
-        #      position_ids input for GroupQueryAttention       
-        #
+        #      position_ids input for RotaryEmbedding       
+
         basename = "/model/pos_ids_reformat"
         shape_name = f"{basename}/Shape"
         self.make_shape(shape_name, "input_ids", shape=[2])
@@ -1232,7 +1233,8 @@ class PhiModel(LlamaModel):
 
 
 def create_model(args):
-    config = AutoConfig.from_pretrained(args.model_name, cache_dir=args.cache_dir, use_auth_token=True)
+    extra_kwargs = {} if os.path.exists(args.model_name_or_path) else {"cache_dir": args.cache_dir, "use_auth_token": True}
+    config = AutoConfig.from_pretrained(args.model_name_or_path, **extra_kwargs)
 
     if config.architectures[0] == "LlamaForCausalLM":
         onnx_model = LlamaModel(config, args.io_dtype, args.precision, args.execution_provider, args.cache_dir)
@@ -1241,7 +1243,7 @@ def create_model(args):
     elif config.architectures[0] == "PhiForCausalLM":
         onnx_model = PhiModel(config, args.io_dtype, args.precision, args.execution_provider, args.cache_dir)
     else:
-        raise NotImplementedError(f"The {args.model_name} model is not currently supported.")
+        raise NotImplementedError(f"The {args.model_name_or_path} model is not currently supported.")
 
     # Make ONNX model
     onnx_model.make_model()
@@ -1254,9 +1256,9 @@ def get_args():
 
     parser.add_argument(
         "-m",
-        "--model_name",
+        "--model_name_or_path",
         required=True,
-        help="Model name in Hugging Face",
+        help="Model name in Hugging Face or path to folder on disk containing the Hugging Face config, model, tokenizer, etc.",
     )
 
     parser.add_argument(
@@ -1289,7 +1291,7 @@ def get_args():
         required=False,
         type=str,
         default=os.path.join(os.path.dirname(os.path.realpath(__file__)), 'cache_dir'),
-        help="Model cache directory",
+        help="Model cache directory (if providing model name and not folder path)",
     )
 
     args = parser.parse_args()
