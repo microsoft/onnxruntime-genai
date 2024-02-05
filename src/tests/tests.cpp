@@ -235,10 +235,10 @@ void Batched_Sampling_TopP_Test() {
   std::vector<int32_t> input_ids{0, 1, 2, 3};
   std::vector<int32_t> expected_output{1, 2, 3, 4};
   auto output_span = Generators::cpu_span<int32_t>(expected_output);
-  std::vector<float> logits_cpu = {0.1, 0.6, 0.1, 0.1, 0.1,
-                                   0.1, 0.1, 0.6, 0.1, 0.1,
-                                   0.1, 0.1, 0.1, 0.6, 0.1,
-                                   0.1, 0.1, 0.1, 0.1, 0.6};
+  std::vector<float> logits_cpu = {0.1f, 0.6f, 0.1f, 0.1f, 0.1f,
+                                   0.1f, 0.1f, 0.6f, 0.1f, 0.1f,
+                                   0.1f, 0.1f, 0.1f, 0.6f, 0.1f,
+                                   0.1f, 0.1f, 0.1f, 0.1f, 0.6f};
   auto logits_gpu = Generators::CudaMallocArray<float>(logits_cpu.size());
   int vocab_size = 5;
   int batch_size = 4;
@@ -256,7 +256,7 @@ void Batched_Sampling_TopP_Test() {
   // Verify outputs match expected outputs
   generator->search_->SampleTopP(0.25, 1.0);
   auto next_tokens = generator->search_->GetNextTokens().GetCPU();
-  if (!std::equal(next_tokens.begin(), next_tokens.end(), output_span.begin(), output_span.end())) 
+  if (!std::equal(next_tokens.begin(), next_tokens.end(), output_span.begin(), output_span.end()))
     throw std::runtime_error("Test Results Mismatch");
   std::cout << " completed Top P batched test\r\n";
 }
@@ -265,10 +265,10 @@ void Batched_Sampling_TopK_Test() {
   // TODO: I don't like that I have to create a model here, but I need to pass it to the generator
   auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   std::vector<int32_t> input_ids{0, 1, 2, 3};
-  std::vector<float> logits_cpu{2.0, 1.5, 1.25, 0.25, 0.25,
-                                0.25, 2.0, 1.25, 1.5, 0.25,
-                                0.25, 2.0, 0.25, 1.5, 1.25,
-                                1.25, 0.25, 1.5, 0.25, 2.0};
+  std::vector<float> logits_cpu{2.0f, 1.5f, 1.25f, 0.25f, 0.25f,
+                                0.25f, 2.0f, 1.25f, 1.5f, 0.25f,
+                                0.25f, 2.0f, 0.25f, 1.5f, 1.25f,
+                                1.25f, 0.25f, 1.5f, 0.25f, 2.0f};
   auto logits_gpu = Generators::CudaMallocArray<float>(logits_cpu.size());
   int vocab_size = 5;
   int batch_size = 4;
@@ -301,10 +301,10 @@ void Batched_Sampling_TopK_Test() {
 void Batched_Subset_TopK_Test() {
   // TODO: I don't like that I have to create a model here, but I need to pass it to the generator
   auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  std::vector<float> logits_cpu{2.0, 1.5, 1.25, 0.25, 0.25,
-                0.25, 2.0, 1.25, 1.5, 0.25,
-                0.25, 2.0, 0.25, 1.5, 1.25,
-                1.25, 0.25, 1.5, 0.25, 2.0};
+  std::vector<float> logits_cpu{2.0f, 1.5f, 1.25f, 0.25f, 0.25f,
+                                0.25f, 2.0f, 1.25f, 1.5f, 0.25f,
+                                0.25f, 2.0f, 0.25f, 1.5f, 1.25f,
+                                1.25f, 0.25f, 1.5f, 0.25f, 2.0f};
   auto logits_gpu = Generators::CudaMallocArray<float>(logits_cpu.size());
 
   std::vector<int32_t> input_ids{0, 1, 2, 3};
@@ -331,7 +331,7 @@ void Batched_Subset_TopK_Test() {
   auto output_tokens_cpu = std::vector<int>(batch_size * k);
   cudaMemcpyAsync(output_tokens_cpu.data(), output_tokens.get(), batch_size * k * sizeof(int32_t), cudaMemcpyDeviceToHost, params.cuda_stream);
   cudaStreamSynchronize(params.cuda_stream);
-  // Verify outputs match expected outputs 
+  // Verify outputs match expected outputs
   for (int b = 0; b < batch_size; b++) {
     for (int i = 0; i < k; i++) {
       auto next_token = output_tokens_cpu[b * k + i];
@@ -349,7 +349,7 @@ void Batched_Subset_TopK_Test() {
 void Randomized_Sampling_TopP_Test() {
   // TODO: I don't like that I have to create a model here, but I need to pass it to the generator
   auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  int vocab_size = 32000; // vocab size of llama
+  int vocab_size = 32000;  // vocab size of llama
   int batch_size = 5;
   long long total_duration = 0;
   std::vector<int32_t> input_ids{0, 1, 2, 3, 4};
@@ -370,11 +370,11 @@ void Randomized_Sampling_TopP_Test() {
 
     auto generator = Generators::CreateGenerator(*model, params);
     generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), vocab_size * batch_size));
-    
+
     auto start = std::chrono::high_resolution_clock::now();
     generator->search_->SampleTopP(0.95, 1.0);
     auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end-start).count();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
     total_duration += duration;
 
     auto next_tokens = generator->search_->GetNextTokens().GetCPU();
@@ -392,14 +392,14 @@ void Randomized_Sampling_TopP_Test() {
 
   double averageDuration = static_cast<double>(total_duration) / 100.0;
   std::cout << "Average time taken by top p sampling: "
-    << averageDuration << " microseconds" << std::endl;
+            << averageDuration << " microseconds" << std::endl;
   std::cout << " completed Top P randomized test\r\n";
 }
 
 void Randomized_Sampling_TopK_Test() {
   // TODO: I don't like that I have to create a model here, but I need to pass it to the generator
   auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  int vocab_size = 32000; // vocab size of llama
+  int vocab_size = 32000;  // vocab size of llama
   int batch_size = 5;
   long long total_duration = 0;
   int k = 5;
@@ -421,11 +421,11 @@ void Randomized_Sampling_TopK_Test() {
 
     auto generator = Generators::CreateGenerator(*model, params);
     generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), vocab_size * batch_size));
-    
+
     auto start = std::chrono::high_resolution_clock::now();
     generator->search_->SampleTopK(k, 1.0);
     auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end-start).count();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
     total_duration += duration;
 
     auto next_tokens = generator->search_->GetNextTokens().GetCPU();
@@ -442,7 +442,7 @@ void Randomized_Sampling_TopK_Test() {
   }
   double averageDuration = static_cast<double>(total_duration) / 100.0;
   std::cout << "Average time taken by top k sampling: "
-    << averageDuration << " microseconds" << std::endl;
+            << averageDuration << " microseconds" << std::endl;
   std::cout << " completed Top K randomized test\r\n";
 }
 
@@ -450,7 +450,7 @@ void Randomized_Subset_TopK_Test() {
   // TODO: I don't like that I have to create a model here, but I need to pass it to the generator
   auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   std::vector<int32_t> input_ids{0, 1, 2, 3, 4};
-  int vocab_size = 32000; // vocab_size for llama model
+  int vocab_size = 32000;  // vocab_size for llama model
   int batch_size = 5;
   int k = 32;
   long long total_duration = 0;
@@ -484,7 +484,7 @@ void Randomized_Subset_TopK_Test() {
     auto start = std::chrono::high_resolution_clock::now();
     generator->search_->GetTopKSubset(output_tokens_span.data(), k);
     auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end-start).count();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
     total_duration += duration;
 
     auto output_tokens_cpu = std::vector<int>(batch_size * k);
@@ -504,7 +504,7 @@ void Randomized_Subset_TopK_Test() {
   }
   double averageDuration = static_cast<double>(total_duration) / 100.0;
   std::cout << "Average time taken by Top K Subset: "
-    << averageDuration << " microseconds" << std::endl;
+            << averageDuration << " microseconds" << std::endl;
   std::cout << " completed Top K Subset randomized test\r\n";
 }
 

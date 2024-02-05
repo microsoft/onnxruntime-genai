@@ -20,7 +20,6 @@ void BeamSearchTopK(
     int32_t* output_indices,
     cudaStream_t stream);
 
-
 template <typename T, int max_k>
 struct TopK {
   int32_t key[max_k];
