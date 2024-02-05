@@ -254,7 +254,7 @@ void Batched_Sampling_TopP_Test() {
   auto generator = Generators::CreateGenerator(*model, params);
   generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), logits_cpu.size()));
   // Verify outputs match expected outputs
-  generator->search_->SampleTopP(0.25, 1.0);
+  generator->search_->SampleTopP(0.25f, 1.0f);
   auto next_tokens = generator->search_->GetNextTokens().GetCPU();
   if (!std::equal(next_tokens.begin(), next_tokens.end(), output_span.begin(), output_span.end()))
     throw std::runtime_error("Test Results Mismatch");
@@ -290,7 +290,7 @@ void Batched_Sampling_TopK_Test() {
   for (int b = 0; b < batch_size; b++) {
     auto next_token = next_tokens[b];
     auto next_token_score = logits_cpu[next_token + vocab_size * b];
-    if (next_token_score < 1.5) {
+    if (next_token_score < 1.5f) {
       std::cout << "next_token_score: " << next_token_score << "\r\n";
       throw std::runtime_error("Test Results Mismatch");
     }
@@ -372,7 +372,7 @@ void Randomized_Sampling_TopP_Test() {
     generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), vocab_size * batch_size));
 
     auto start = std::chrono::high_resolution_clock::now();
-    generator->search_->SampleTopP(0.95, 1.0);
+    generator->search_->SampleTopP(0.95f, 1.0f);
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
     total_duration += duration;
@@ -383,7 +383,7 @@ void Randomized_Sampling_TopP_Test() {
     for (int b = 0; b < batch_size; b++) {
       auto next_token = next_tokens[b];
       auto next_token_score = cpu_logits[next_token + vocab_size * b];
-      if (next_token_score < 0.0001) {
+      if (next_token_score < 0.0001f) {
         std::cout << "next_token_score: " << next_token_score << "\r\n";
         throw std::runtime_error("Test Results Mismatch");
       }
@@ -423,7 +423,7 @@ void Randomized_Sampling_TopK_Test() {
     generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), vocab_size * batch_size));
 
     auto start = std::chrono::high_resolution_clock::now();
-    generator->search_->SampleTopK(k, 1.0);
+    generator->search_->SampleTopK(k, 1.0f);
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
     total_duration += duration;
@@ -469,14 +469,6 @@ void Randomized_Subset_TopK_Test() {
     float* cpu_logits = new float[vocab_size * batch_size];
     cudaMemcpyAsync(cpu_logits, logits_gpu.get(), vocab_size * batch_size * sizeof(float), cudaMemcpyDeviceToHost, params.cuda_stream);
 
-    Generators::GeneratorParams params = Generators::GeneratorParams{};
-    params.max_length = 10;
-    params.batch_size = batch_size;
-    params.sequence_length = 1;
-    params.vocab_size = vocab_size;
-    params.input_ids = input_ids;
-    params.device_type = Generators::DeviceType::CUDA;
-
     auto generator = Generators::CreateGenerator(*model, params);
     generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), vocab_size * batch_size));
     auto output_tokens = Generators::CudaMallocArray<int32_t>(batch_size * k);
@@ -492,8 +484,8 @@ void Randomized_Subset_TopK_Test() {
     cudaStreamSynchronize(params.cuda_stream);
     // Verify outputs match expected outputs
     for (int b = 0; b < batch_size; b++) {
-      for (int i = 0; i < k; i++) {
-        auto next_token = output_tokens_cpu[b * k + i];
+      for (int e = 0; e < k; e++) {
+        auto next_token = output_tokens_cpu[b * k + e];
         auto next_token_score = cpu_logits[next_token + vocab_size * b];
         if (next_token_score < 1.0) {
           std::cout << "next_token_score: " << next_token_score << "\r\n";
