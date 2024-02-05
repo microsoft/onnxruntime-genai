@@ -15,7 +15,7 @@ setup(
     version='1.0.0',
     packages=find_packages(),
     include_package_data=True,
-    package_data={'': ['*.pyd', '*.dll']},
+    package_data={'': ['*.pyd', '*.dll', '*.so']},
     install_requires=[],
     distclass=BinaryDistribution
 )

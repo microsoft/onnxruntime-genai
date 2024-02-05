@@ -92,7 +92,7 @@ Generator::Generator(Model& model, const GeneratorParams& search_params) : model
 
 void Generator::ComputeLogits() {
   if (computed_logits_)
-    throw std::runtime_error("ComputeLogits called again without calling AppendNextToken* first");
+    throw std::runtime_error("ComputeLogits called again without calling GenerateNextToken* first");
 
   search_->SetLogits(state_->Run(search_->GetSequenceLength(), search_->GetNextTokens(), search_->GetNextIndices()));
   computed_logits_ = true;
@@ -105,12 +105,12 @@ bool Generator::IsDone() const {
   return search_->IsDone();
 }
 
-void Generator::AppendNextToken_TopK_TopP(int top_k, float top_p, float temperature) {
+void Generator::GenerateNextToken_TopK_TopP(int top_k, float top_p, float temperature) {
   if (search_->params_.num_beams != 1)
     throw std::runtime_error("TopK and TopP cannot be used with a beam search");
 
   if (!computed_logits_)
-    throw std::runtime_error("Must call ComputeLogits before AppendNextToken*");
+    throw std::runtime_error("Must call ComputeLogits before GenerateNextToken*");
   computed_logits_ = false;
 
   // TODO: Do TopK if top_k >1 then do TopP on the results
@@ -123,17 +123,17 @@ void Generator::AppendNextToken_TopK_TopP(int top_k, float top_p, float temperat
   }
 }
 
-void Generator::AppendNextToken() {
+void Generator::GenerateNextToken() {
   if (search_->params_.num_beams > 1) {
     if (!computed_logits_)
-      throw std::runtime_error("Must call ComputeLogits before AppendNextToken*");
+      throw std::runtime_error("Must call ComputeLogits before GenerateNextToken*");
     computed_logits_ = false;
     search_->SelectTop();
     return;
   }
 
   auto& config = *model_.config_;
-  AppendNextToken_TopK_TopP(config.top_k, config.top_p, config.temperature);
+  GenerateNextToken_TopK_TopP(config.top_k, config.top_p, config.temperature);
 }
 
 RoamingArray<int32_t> Generator::GetSequence(int index) {
@@ -145,7 +145,7 @@ std::vector<int32_t> Generate(Model& model, const GeneratorParams& params) {
 
   while (!generator->IsDone()) {
     generator->ComputeLogits();
-    generator->AppendNextToken();
+    generator->GenerateNextToken();
   }
 
   auto results = generator->search_->GetSequence(0);
