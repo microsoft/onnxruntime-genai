@@ -12,11 +12,10 @@ Users can call a high level `generate()` method, or run each iteration of the mo
 
 ## Sample code for phi-2 in Python
 
-Install onnxruntime-genai:
+Install onnxruntime-genai.
 
-```bash
-pip install onnxruntime-genai
-```
+(Temporary) Build and install from source according to the instructions below.
+
 
 ```python
 import onnxruntime_genai as og
@@ -57,13 +56,14 @@ print(text)
 * Supported sampling features
   * Beam search
   * Greedy search
+  * Top P/Top K
 * APIs
   * Python
   * C/C++  
 
 ## Coming very soon
 
-* Support for the Mistrel and Whisper model architectures
+* Support for the Mistral and Whisper model architectures
 * C# API
 * Support for DirectML
 
@@ -88,8 +88,6 @@ This step requires `cmake` to be installed.
    mkdir -p ort/include
    cd ort/include
    wget https://raw.githubusercontent.com/microsoft/onnxruntime/v1.17.0/include/onnxruntime/core/session/onnxruntime_c_api.h
-   wget https://raw.githubusercontent.com/microsoft/onnxruntime/v1.17.0/include/onnxruntime/core/session/onnxruntime_cxx_api.h
-   wget https://raw.githubusercontent.com/microsoft/onnxruntime/v1.17.0/include/onnxruntime/core/session/onnxruntime_cxx_inline.h
 
    cd ..
    mkdir -p ort/lib
