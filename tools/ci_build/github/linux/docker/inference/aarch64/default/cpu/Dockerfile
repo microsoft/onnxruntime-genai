@@ -9,9 +9,10 @@ ENV LANG=en_US.UTF-8
 ENV LC_ALL=en_US.UTF-8
 
 # Setup vcpkg environment variables
+ENV VCPKG_DEFAULT_TRIPLET=arm64-linux
 ENV VCPKG_FORCE_SYSTEM_BINARIES=1
-ENV VCPKG_DEFAULT_TRIPLET=aarch64-linux
-
+ENV VCPKG_ROOT=/onnxruntime_src/extern/vcpkg
+ENV PATH="${VCPKG_ROOT}:${PATH}"
 # Install dependencies
 ADD scripts /tmp/scripts
 RUN cd /tmp/scripts && /tmp/scripts/install_centos.sh && /tmp/scripts/install_deps.sh && rm -rf /tmp/scripts
