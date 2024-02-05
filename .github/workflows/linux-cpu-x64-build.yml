@@ -22,15 +22,12 @@ jobs:
 
       - name: Download OnnxRuntime
         run: |
+          echo "Downloading ${{ env.ort_url }}"
           curl -L -o ${{ env.ort_zip }} ${{ env.ort_url }} 
-
-      - name: Unzip OnnxRuntime
-        run: |
+          echo "Unzipping ${{ env.ort_zip }}"
           tar -xzf ${{ env.ort_zip }}
           rm ${{ env.ort_zip }}
-
-      - name: Rename OnnxRuntime to ort
-        run: |
+          echo "Renaming ${{ env.ort_dir }} to ort"
           mv ${{ env.ort_dir }} ort
 
       - name: Build with CMake and GCC
@@ -61,4 +58,4 @@ jobs:
         uses: actions/upload-artifact@v3
         with:
           name: onnxruntime-genai-linux-cpu-x64
-          path: ${{ github.workspace }}/build/**/*.a
+          path: ${{ github.workspace }}/build/**/*.so
