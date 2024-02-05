@@ -11,7 +11,7 @@ ENV LC_ALL=en_US.UTF-8
 # Set up CUDA and CUDNN environment variables
 ENV CUDA_HOME=/usr/local/cuda
 ENV CUDNN_HOME=/usr/lib/x86_64-linux-gnu/
-ENV PATH="/usr/local/cuda/binet:${PATH}"
+ENV PATH="/usr/local/cuda/bin:${PATH}"
 ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
 ENV CUDAHOSTCXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
 
