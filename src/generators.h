@@ -107,11 +107,11 @@ struct Generator {
 
   bool IsDone() const;
   void ComputeLogits();
-  void AppendNextToken_TopK_TopP(int top_k, float top_p, float temperature);
-  void AppendNextToken_TopP(float p, float temperature) { AppendNextToken_TopK_TopP(0, p, temperature); }
-  void AppendNextToken_TopK(int k, float temperature) { AppendNextToken_TopK_TopP(k, 1.0f, temperature); }
-  void AppendNextToken_Top() { AppendNextToken_TopK_TopP(1, 1.0f, 0.0f); }
-  void AppendNextToken();
+  void GenerateNextToken_TopK_TopP(int top_k, float top_p, float temperature);
+  void GenerateNextToken_TopP(float p, float temperature) { GenerateNextToken_TopK_TopP(0, p, temperature); }
+  void GenerateNextToken_TopK(int k, float temperature) { GenerateNextToken_TopK_TopP(k, 1.0f, temperature); }
+  void GenerateNextToken_Top() { GenerateNextToken_TopK_TopP(1, 1.0f, 0.0f); }
+  void GenerateNextToken();
 
   RoamingArray<int32_t> GetSequence(int index);
 

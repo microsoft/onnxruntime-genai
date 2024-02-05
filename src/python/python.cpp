@@ -178,24 +178,24 @@ struct PyGenerator {
     generator_->ComputeLogits();
   }
 
-  void AppendNextToken_TopK_TopP(int top_k, float top_p, float temperature) {
-    generator_->AppendNextToken_TopK_TopP(top_k, top_p, temperature);
+  void GenerateNextToken_TopK_TopP(int top_k, float top_p, float temperature) {
+    generator_->GenerateNextToken_TopK_TopP(top_k, top_p, temperature);
   }
 
-  void AppendNextToken_TopP(float p, float temperature) {
-    generator_->AppendNextToken_TopP(p, temperature);
+  void GenerateNextToken_TopP(float p, float temperature) {
+    generator_->GenerateNextToken_TopP(p, temperature);
   }
 
-  void AppendNextToken_TopK(int k, float temperature) {
-    generator_->AppendNextToken_TopK(k, temperature);
+  void GenerateNextToken_TopK(int k, float temperature) {
+    generator_->GenerateNextToken_TopK(k, temperature);
   }
 
-  void AppendNextToken_Top() {
-    generator_->AppendNextToken_Top();
+  void GenerateNextToken_Top() {
+    generator_->GenerateNextToken_Top();
   }
 
-  void AppendNextToken() {
-    generator_->AppendNextToken();
+  void GenerateNextToken() {
+    generator_->GenerateNextToken();
   }
 
   bool IsDone() const {
@@ -266,7 +266,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
              return CreateModel(GetOrtEnv(), config_path.c_str(), &provider_options);
            }),
            "str"_a, "device_type"_a = DeviceType::Auto)
-      .def("Generate", [](Model& model, PySearchParams& search_params) { return Generate(model, search_params); })
+      .def("Generate", [](Model& model, PySearchParams& search_params) { search_params.Prepare(); return Generate(model, search_params); })
 #if USE_TOKENIZER
       .def("CreateTokenizer", [](Model& model) { return model.CreateTokenizer(); })
 #endif
@@ -276,10 +276,10 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def(pybind11::init<Model&, PySearchParams&>())
       .def("IsDone", &PyGenerator::IsDone)
       .def("ComputeLogits", &PyGenerator::ComputeLogits)
-      .def("AppendNextToken", &PyGenerator::AppendNextToken)
-      .def("AppendNextToken_TopP", &PyGenerator::AppendNextToken_TopP)
-      .def("AppendNextToken_TopK", &PyGenerator::AppendNextToken_TopK)
-      .def("AppendNextToken_TopK_TopP", &PyGenerator::AppendNextToken_TopK_TopP)
+      .def("GenerateNextToken", &PyGenerator::GenerateNextToken)
+      .def("GenerateNextToken_TopP", &PyGenerator::GenerateNextToken_TopP)
+      .def("GenerateNextToken_TopK", &PyGenerator::GenerateNextToken_TopK)
+      .def("GenerateNextToken_TopK_TopP", &PyGenerator::GenerateNextToken_TopK_TopP)
       .def("GetNextTokens", &PyGenerator::GetNextTokens)
       .def("GetSequence", &PyGenerator::GetSequence);
 

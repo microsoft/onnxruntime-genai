@@ -6,6 +6,7 @@
 
 extern std::unique_ptr<OrtEnv> g_ort_env;
 
+void Test_GreedySearch_Gpt_Fp32_C_API();
 void Test_GreedySearch_Gpt_Fp32();
 void Test_BeamSearch_Gpt_Fp32();
 
@@ -25,6 +26,7 @@ int main() {
   std::cout << "done" << std::endl;
 
   try {
+    Test_GreedySearch_Gpt_Fp32_C_API();
     Test_GreedySearch_Gpt_Fp32();
     Test_BeamSearch_Gpt_Fp32();
 

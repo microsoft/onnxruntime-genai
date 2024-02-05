@@ -26,54 +26,36 @@ typedef enum OgaDeviceType {
   OgaDeviceTypeCUDA,
 } OgaDeviceType;
 
-typedef enum OgaDataType {
-  OgaDataTypeFloat32,
-  OgaDataTypeInt64,
-} OgaDataType;
-
 typedef struct OgaResult OgaResult;
-typedef struct OgaArray OgaArray;
-typedef struct OgaSearchParams OgaSearchParams;
-typedef struct OgaSearch OgaSearch;
+typedef struct OgaGeneratorParams OgaGeneratorParams;
+typedef struct OgaGenerator OgaGenerator;
 typedef struct OgaModel OgaModel;
-typedef struct OgaState OgaState;
-typedef struct OgaRoamingArray OgaRoamingArray;
-
-OGA_EXPORT void OGA_API_CALL OgaDestroyArray(OgaArray*);
-OGA_EXPORT size_t OGA_API_CALL OgaArrayGetSize(OgaArray*);
-OGA_EXPORT OgaDataType OGA_API_CALL OgaArrayGetType(OgaArray*);
-OGA_EXPORT OgaDeviceType OGA_API_CALL OgaArrayGetNativeDeviceType(OgaArray*);
-OGA_EXPORT void* OGA_API_CALL OgaArrayGetData(OgaArray*, OgaDeviceType*);
 
 OGA_EXPORT const char* OGA_API_CALL OgaResultGetError(OgaResult*);
 OGA_EXPORT void OGA_API_CALL OgaDestroyResult(OgaResult*);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaDeviceType device_type, OgaModel** out);
 OGA_EXPORT void OGA_API_CALL OgaDestroyModel(OgaModel*);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaModelGenerate(OgaSearchParams* search_params);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelGenerate(OgaGeneratorParams* generator_params);
 
-OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateSearchParams(OgaModel* model, OgaSearchParams** out);
-OGA_EXPORT void OGA_API_CALL OgaDestroySearchParams(OgaSearchParams*);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaSearchParamsCreateSearch(OgaSearchParams*, OgaSearch** out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaSearchParamsSetInputIDs(OgaSearchParams*, int32_t* input_ids, size_t input_ids_count, int num_batches);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaSearchParamsSetWhisperInputFeatures(OgaSearchParams*, int32_t* inputs, size_t count);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaSearchParamsSetWhisperDecoderInputIDs(OgaSearchParams*, int32_t* input_ids, size_t input_ids_count);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateGeneratorParams(OgaModel* model, OgaGeneratorParams** out);
+OGA_EXPORT void OGA_API_CALL OgaDestroyGeneratorParams(OgaGeneratorParams*);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetMaxLength(OgaGeneratorParams*, int max_length);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputIDs(OgaGeneratorParams*, const int32_t* input_ids, size_t input_ids_count, size_t sequence_length, size_t batch_size);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperInputFeatures(OgaGeneratorParams*, const int32_t* inputs, size_t count);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperDecoderInputIDs(OgaGeneratorParams*, const int32_t* input_ids, size_t input_ids_count);
 
-OGA_EXPORT void OGA_API_CALL OgaDestroySearch(OgaSearch*);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaSearchSetLogits(OgaSearch*, OgaArray*);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaSearchGetSequenceLength(OgaSearch*, size_t* sequence_length);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaSearchGetSequenceLengths(OgaSearch*, size_t* sequence_length);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaSearchGetNextTokens(OgaSearch*, OgaArray**);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaSearchGetNextIndices(OgaSearch*, OgaArray**);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaSearchIsDone(OgaSearch*, bool* out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaSearchSelectTop(OgaSearch*);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaSearchSampleTopK(OgaSearch*, int k, float t);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaSearchSampleTopP(OgaSearch*, float p, float t);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaSearchGetSequence(OgaSearch*, int index, OgaArray**);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateGenerator(OgaModel* model, const OgaGeneratorParams* params, OgaGenerator** out);
+OGA_EXPORT void OGA_API_CALL OgaDestroyGenerator(OgaGenerator*);
+OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsDone(const OgaGenerator*);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_ComputeLogits(OgaGenerator*);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken_Top(OgaGenerator*);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken_TopK(OgaGenerator*, int k, float t);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken_TopP(OgaGenerator*, float p, float t);
 
-OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateState(OgaModel* model, int32_t* sequence_lengths, size_t sequence_lengths_count, const OgaSearchParams* search_params, OgaState** out);
-OGA_EXPORT void OGA_API_CALL OgaDestroyState(OgaState*);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaStateRun(int current_length, int32_t* next_tokens, size_t next_tokens_count, int32_t* next_indices, size_t next_indices_count, float* logits, float** logits_count);
+/* Writes the sequence into the provided buffer 'tokens' and writes the count into 'count'. If 'tokens' is nullptr just writes the count
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetSequence(OgaGenerator*, int index, int32_t* tokens, size_t* count);
 
 #ifdef __cplusplus
 }
