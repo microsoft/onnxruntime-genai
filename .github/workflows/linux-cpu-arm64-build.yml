@@ -53,6 +53,6 @@ jobs:
           --rm \
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
           --volume $RUNNER_TEMP:/build \
-          -w /build ${{ env.docker_image }} bash -c "echo '---Boostring vcpkg---' && /onnxruntime_src/extern/vcpkg/bootstrap-vcpkg.sh && echo '---Running vcpkg install---' && /usr/bin/cmake -B build -S /onnxruntime_src -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build --parallel 8 --config Release"
+          -w /build ${{ env.docker_image }} bash -c "echo '---Boostring vcpkg---' && /onnxruntime_src/extern/vcpkg/bootstrap-vcpkg.sh && echo '---Running vcpkg install---' && vcpkg install pybind11 && echo '---Run CMAKE---'  /usr/bin/cmake -B build -S /onnxruntime_src -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build --parallel 8 --config Release"
 
 #          /onnxruntime_src/extern/vcpkg/bootstrap-vcpkg.sh &&
