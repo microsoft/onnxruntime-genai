@@ -11,5 +11,6 @@
       "name": "gtest",
       "version>=": "1.14.0"
     }
-  ]
+  ],
+  "builtin-baseline": "10e052511428d6b0c7fcc63a139e8024bb146032"
 }
