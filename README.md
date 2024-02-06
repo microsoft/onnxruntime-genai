@@ -2,133 +2,138 @@
 
 Run generative AI models with ONNX Runtime.
 
-This library provides the generative AI loop for ONNX models run with ONNX Runtime, including logits processing, search and sampling, and KV cache management.
+This library provides the generative AI loop for ONNX models, including inference with ONNX Runtime, logits processing, search and sampling, and KV cache management.
 
-Users can call a high level `generate()` method, or provide their own customizations of the loop.
+Users can call a high level `generate()` method, or run each iteration of the model in a loop.
 
 * Search techniques like greedy/beam search to generate token sequences
 * Built in scoring tools like repetition penalties
 * Easy custom scoring
 
-## GPT C++ Usage Example
+## Sample code for phi-2 in Python
 
-    std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
-     
-    auto model=Generators::CreateModel(*ort_env, "models/gpt2_fp32.onnx");
+Install onnxruntime-genai.
 
-    Generators::GeneratorParams params{model};
-    params.batch_size = 2;
-    params.sequence_length = 4;
-    params.input_ids = input_ids;
-    params.max_length = max_length;
-    params.num_beams = 4;
- 
-    auto generator = Generators::CreateGenerator(*model, params);
- 
-    while (!generator->IsDone()) {
-      generator->ComputeLogits();
- 
-      // Scoring
-      generator->Apply_MinLength(5);
-      generator->Apply_RepetitionPenalty(1.1f);
- 
-      generator->AppendNextToken_Top();
-    }
+(Temporary) Build and install from source according to the instructions below.
 
-    // Access resulting sequences of tokens
-    for(unsigned i=0;i<params.batch_size;i++) {
-      auto result=generator.GetSequence(i);
-    }
 
-## GPT Python End to End Example
+```python
+import onnxruntime_genai as og
 
-    import onnxruntime_genai as og
-    import numpy as np
-    from transformers import GPT2Tokenizer
+model=og.Model(f'models/microsoft/phi-2', device_type)
 
-    text = "The best hotel in bay area"
+tokenizer = model.CreateTokenizer()
 
-    # Generate input tokens from the text prompt
-    tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
-    input_tokens = tokenizer.encode(text, return_tensors='np')
+prompt = '''def print_prime(n):
+    """
+    Print all primes between 1 and n
+    """'''
 
-    model=og.Model("../../python/onnx_models", og.DeviceType.CUDA)
+tokens = tokenizer.encode(prompt)
 
-    params=og.SearchParams(model)
-    params.max_length = 64
-    params.input_ids = input_tokens
+params=og.SearchParams(model)
+params.max_length = 200
+params.input_ids = tokens
 
-    generator=og.Generator(model, params)
+output_tokens=model.Generate(params)
 
-    print("Inputs:")
-    print(input_tokens)
-    print("Input prompt:", text)
+text = tokenizer.decode(output_tokens)
 
-    print("Running greedy search loop...")
-    while not generator.IsDone():
-      generator.ComputeLogits()
-      generator.AppendNextToken_Top()
+print("Output:")
+print(text)
+```
 
-    print("Output:")
-    output_tokens=generator.GetSequence(0).GetArray()
-    decoded_output=tokenizer.decode(output_tokens)
-    print(decoded_output)
 
-# Features
+## Features
 
-* Built in Model Support:
-  * GPT2
-  * Llama2
-* CPU & CUDA
-* Beam & Greedy Searches
-* C++ static library
-* Python Bindings
+* Supported model architectures:
+  * Phi-2
+  * Llama
+  * GPT
+* Supported targets:   
+  * CPU
+  * GPU (CUDA)
+* Supported sampling features
+  * Beam search
+  * Greedy search
+  * Top P/Top K
+* APIs
+  * Python
+  * C/C++  
 
-# Future
+## Coming very soon
 
-* Make model code stateless, move state into search? This would allow for multiple searches with one model loaded
-* Support more models built-in, T5/Whisper/Llama
-* Tokenizer?
+* Support for the Mistral and Whisper model architectures
+* C# API
+* Support for DirectML
 
-# Building
+## Roadmap
 
-## Windows
+* Automatic model download and cache
+* More model architectures
 
-* Copy onnxruntime library into the ort/ folder
-  * Can either build Onnxruntime from source in release mode, then copy the files specified in install_ort.bat
-  * Or download a release from https://github.com/microsoft/onnxruntime/releases
-  * Files in ort\lib\ should be:
-    * onnxruntime.dll
-    * onnxruntime.lib
-    * onnxruntime_providers_shared.dll (if using cuda)
-    * onnxruntime_providers_cuda.dll (if using cuda)
-  * Files in ort\include\ should be:
-    * onnxruntime_c_api.h
-* Run the build.bat script to generate build files
-* Open build\Generators.sln in visual studio
+## Build from source
 
-To run the python scripts, use PYTHONPATH: `set PYTHONPATH=/path/to/onnxruntime-genai/build/Release/`
+This step requires `cmake` to be installed.
 
-## Linux
+1. Clone this repo
 
-* Copy onnxruntime library into the ort/ folder
-  * Can either build Onnxruntime from source in release mode, then copy the files specified in install_ort.sh
-  * Or download a release from https://github.com/microsoft/onnxruntime/releases
-  * Files in ort/lib/ should be:
-    * libonnxruntime.so
-    * libonnxruntime.so.(version #)
-    * libonnxruntime_providers_shared.so (if using cuda)
-    * libonnxruntime_providers_cuda.so (if using cuda)
-  * Files in ort/include/ should be
-    * onnxruntime_c_api.h
-* Run the build.sh script to build
+   ```bash
+   git clone https://github.com/microsoft/onnxruntime-genai
+   ```
 
-To run the python scripts, use PYTHONPATH: `export PYTHONPATH=/path/to/onnxruntime-genai/build/`
+2. Install ONNX Runtime
 
-## Prerequites
+   ```bash
+   mkdir -p ort/include
+   cd ort/include
+   wget https://raw.githubusercontent.com/microsoft/onnxruntime/v1.17.0/include/onnxruntime/core/session/onnxruntime_c_api.h
 
-* Onnxruntime
-* cmake
+   cd ..
+   mkdir -p ort/lib
+   cd ort/lib
+   wget https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-linux-x64-gpu-1.17.0.tgz
+   tar xvzf onnxruntime-linux-x64-gpu-1.17.0.tgz 
+   cp onnxruntime-linux-x64-gpu-1.17.0/lib/libonnxruntime*.so* .
+   ```
+
+3. Build onnxruntime-genai
+
+   ```bash
+   bash build.sh
+   ```
+
+   Or build.bat on Windows
+
+4. Build wheel (temporary)
+
+   ```bash
+   cd build
+   make PyPackageBuild
+   ```
+   
+5. Install Python wheel
+
+   ```bash
+   cd wheel
+   pip install *.whl
+   ```
+
+## Model download and export
+
+ONNX models are run from a local folder, via a string supplied to the `Model()` method. 
+
+To source `microsoft/phi-2` optimized for your target, download and run the following script:
+
+```bash
+wget https://github.com/microsoft/onnxruntime-genai/blob/kvaishnavi/models/models/export.py
+```
+
+Export int4 CPU version 
+```bash
+python export.py python models/export.py --m microsoft/phi-2 -p int4 -e cpu -o phi2-int4-cpu.onnx
+```
+
 
 ## Contributing
 
