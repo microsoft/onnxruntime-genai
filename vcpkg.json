@@ -5,11 +5,11 @@
   "dependencies": [
     {
       "name": "pybind11",
-      "version": "2.11.1"
+      "version>=": "2.11.1"
     },
     {
       "name": "gtest",
-      "version": "1.14.0"
+      "version>=": "1.14.0"
     }
   ]
 }
