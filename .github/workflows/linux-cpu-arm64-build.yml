@@ -26,11 +26,11 @@ jobs:
           rm ${{ env.ort_zip }}
           echo "Renaming ${{ env.ort_dir }} to ort"
           mv ${{ env.ort_dir }} ort
-      - name: Bootstrap VCPKG
-        run: |
-          echo "Bootstrap VCPKG"
-          ./extern/vcpkg/bootstrap-vcpkg.sh
-          vcpkg integrate install
+#      - name: Bootstrap VCPKG
+#        run: |
+#          echo "Bootstrap VCPKG"
+#          ./extern/vcpkg/bootstrap-vcpkg.sh
+#          vcpkg integrate install
 
       - name: Get Docker Image
         run: |
