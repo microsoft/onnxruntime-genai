@@ -208,3 +208,17 @@ source_group("Sources" FILES ${test_srcs})
 source_group("Sources" FILES ${python_srcs})
 
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT Tests)
+
+enable_testing()
+
+add_executable(
+  tests
+  test/test.cpp
+)
+target_link_libraries(
+  tests
+  GTest::gtest_main
+)
+
+include(GoogleTest)
+gtest_discover_tests(tests)

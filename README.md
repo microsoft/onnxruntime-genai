@@ -84,6 +84,8 @@ This step requires `cmake` to be installed.
 
 2. Install ONNX Runtime
 
+These instructions are for the Linux GPU build of ONNX Runtime. Replace the location with the operating system and target of choice. 
+
    ```bash
    mkdir -p ort/include
    cd ort/include
