@@ -12,6 +12,7 @@ env:
   docker_image: "onnxruntimegpubuild"
 jobs:
   job:
+    name: "Linux GPU x64 Build"
     runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2004-T4" ]
     steps:
       - name: Checkout OnnxRuntime GenAI repo

@@ -11,10 +11,10 @@ ENV LC_ALL=en_US.UTF-8
 # Setup vcpkg environment variables
 ENV VCPKG_DEFAULT_TRIPLET=arm64-linux
 ENV VCPKG_FORCE_SYSTEM_BINARIES=1
-ENV CMAKE_C_COMPILER=/opt/rh/gcc-toolset-12/root/usr/bin/gcc
-ENV CMAKE_CXX_COMPILER=/opt/rh/gcc-toolset-12/root/usr/bin/g++
-ENV CC=/opt/rh/gcc-toolset-12/root/usr/bin/gcc
-ENV CXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
+#ENV CMAKE_C_COMPILER=/opt/rh/gcc-toolset-12/root/usr/bin/gcc
+#ENV CMAKE_CXX_COMPILER=/opt/rh/gcc-toolset-12/root/usr/bin/g++
+#ENV CC=/opt/rh/gcc-toolset-12/root/usr/bin/gcc
+#ENV CXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
 
 # Install dependencies
 ADD scripts /tmp/scripts

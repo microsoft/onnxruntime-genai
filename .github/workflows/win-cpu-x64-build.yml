@@ -17,6 +17,7 @@ env:
 
 jobs:
   job:
+    name: "Windows CPU x64 Build"
     runs-on: windows-latest
     steps:
       - name: Checkout OnnxRuntime GenAI repo

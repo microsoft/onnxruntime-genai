@@ -10,6 +10,7 @@ env:
   docker_image: "onnxruntimecpubuild"
 jobs:
   job:
+    name: "Linux CPU ARM64 Build"
     runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2004-ARM-CPU" ]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
@@ -26,11 +27,11 @@ jobs:
           rm ${{ env.ort_zip }}
           echo "Renaming ${{ env.ort_dir }} to ort"
           mv ${{ env.ort_dir }} ort
-#      - name: Bootstrap VCPKG
-#        run: |
-#          echo "Bootstrap VCPKG"
-#          ./extern/vcpkg/bootstrap-vcpkg.sh
-#          vcpkg integrate install
+
+      - name: Replace vcpkg linux.cmake aarch64-linux-gnu-gcc with gcc
+        run: |
+          sed -i 's/aarch64-linux-gnu-gcc/gcc/g' ort/extern/vcpkg/scripts/toolchains/linux.cmake
+          sed -i 's/aarch64-linux-gnu-g++/g++/g' ort/extern/vcpkg/scripts/toolchains/linux.cmake
 
       - name: Get Docker Image
         run: |
@@ -41,16 +42,6 @@ jobs:
             --container-registry onnxruntimebuildcache \
             --repository ${{ env.docker_image }}
 
-      - name: Print Docker Image Environment Variables
-        run: |
-          echo "Printing docker image environment variables"
-          docker run --rm ${{ env.docker_image }} env
-
-      - name: Check Docker ninja and ninja location
-        run: |
-          echo "Printing docker image environment variables"
-          docker run --rm ${{ env.docker_image }} bash -c "ninja --version && which ninja && which cc && which g++ && g++ --version && gcc --version"
-
       - name: Docker -- Build with CMake and GCC
         run: |
           echo "Running docker image ${{ env.docker_image }}"
@@ -58,6 +49,6 @@ jobs:
           --rm \
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
           --volume $RUNNER_TEMP:/build \
-          -w /build ${{ env.docker_image }} bash -c "echo '---Boostring vcpkg---' && /onnxruntime_src/extern/vcpkg/bootstrap-vcpkg.sh && echo '---Run CMAKE---'  /usr/bin/cmake -B build -S /onnxruntime_src -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build --parallel 8 --config Release"
+          -w /build ${{ env.docker_image }} bash -c "/onnxruntime_src/extern/vcpkg/bootstrap-vcpkg.sh && /usr/bin/cmake -B build -S /onnxruntime_src -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build --parallel 8 --config Release"
 
 #          /onnxruntime_src/extern/vcpkg/bootstrap-vcpkg.sh &&
