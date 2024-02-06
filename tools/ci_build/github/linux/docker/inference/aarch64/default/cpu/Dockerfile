@@ -13,6 +13,8 @@ ENV VCPKG_DEFAULT_TRIPLET=x64-linux
 ENV VCPKG_FORCE_SYSTEM_BINARIES=1
 ENV VCPKG_ROOT=/onnxruntime_src/extern/vcpkg
 ENV PATH="${VCPKG_ROOT}:${PATH}"
+ENV CMAKE_C_COMPILER=/opt/rh/gcc-toolset-12/root/usr/bin/gcc
+ENV CMAKE_CXX_COMPILER=/opt/rh/gcc-toolset-12/root/usr/bin/g++
 ENV CC=/opt/rh/gcc-toolset-12/root/usr/bin/gcc
 ENV CXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
 
