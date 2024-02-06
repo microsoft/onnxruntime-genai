@@ -48,7 +48,7 @@ jobs:
           set -e -x
           mkdir build
           cd build
-          CC=clang CXX=clang++ cmake -G "Unix Makefiles" .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_CLANG_TIDY=clang-tidy
+          CC=clang CXX=clang++ cmake -G "Unix Makefiles" .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_CLANG_TIDY=clang-tidy -DUSE_CUDA=OFF
           cmake --build . --config Release --parallel
 
 
