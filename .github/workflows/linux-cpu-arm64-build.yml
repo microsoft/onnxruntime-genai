@@ -30,8 +30,8 @@ jobs:
 
       - name: Replace vcpkg linux.cmake aarch64-linux-gnu-gcc with gcc
         run: |
-          sed -i 's/aarch64-linux-gnu-gcc/gcc/g' ort/extern/vcpkg/scripts/toolchains/linux.cmake
-          sed -i 's/aarch64-linux-gnu-g++/g++/g' ort/extern/vcpkg/scripts/toolchains/linux.cmake
+          sed -i 's/aarch64-linux-gnu-gcc/gcc/g' ${{ github.workspace }}/extern/vcpkg/scripts/toolchains/linux.cmake
+          sed -i 's/aarch64-linux-gnu-g++/g++/g' ${{ github.workspace }}/extern/vcpkg/scripts/toolchains/linux.cmake
 
       - name: Get Docker Image
         run: |

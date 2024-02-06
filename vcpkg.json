@@ -3,7 +3,13 @@
   "version-string": "0.0.1",
   "license": "MIT",
   "dependencies": [
-    "pybind11",
-    "gtest"
+    {
+      "name": "pybind11",
+      "version": "2.11.1"
+    },
+    {
+      "name": "gtest",
+      "version": "1.14.0"
+    }
   ]
 }
