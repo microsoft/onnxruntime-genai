@@ -118,7 +118,7 @@ wget https://github.com/microsoft/onnxruntime-genai/blob/kvaishnavi/models/model
 
 Export int4 CPU version 
 ```bash
-python export.py python models/export.py --m microsoft/phi-2 -p int4 -e cpu -o phi2-int4-cpu.onnx
+python export.py python models/export.py -m microsoft/phi-2 -p int4 -e cpu -o phi2-int4-cpu.onnx
 ```
 
 
