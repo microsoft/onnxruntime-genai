@@ -85,34 +85,21 @@ This step requires `cmake` to be installed.
 2. Install ONNX Runtime
 
    ```bash
-   mkdir -p ort/include
-   cd ort/include
-   wget https://raw.githubusercontent.com/microsoft/onnxruntime/v1.17.0/include/onnxruntime/core/session/onnxruntime_c_api.h
-
-   cd ..
-   mkdir -p ort/lib
-   cd ort/lib
+   mkdir -p ort
+   cd ort
    wget https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-linux-x64-gpu-1.17.0.tgz
    tar xvzf onnxruntime-linux-x64-gpu-1.17.0.tgz 
-   cp onnxruntime-linux-x64-gpu-1.17.0/lib/libonnxruntime*.so* .
+   mv onnxruntime-linux-x64-gpu-1.17.0/include .
+   mv onnxruntime-linux-x64-gpu-1.17.0/lib .
    ```
 
 3. Build onnxruntime-genai
 
    ```bash
-   bash build.sh
-   ```
-
-   Or build.bat on Windows
-
-4. Build wheel (temporary)
-
-   ```bash
-   cd build
-   make PyPackageBuild
+   python build.py
    ```
    
-5. Install Python wheel
+4. Install Python wheel
 
    ```bash
    cd wheel
