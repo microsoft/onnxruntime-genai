@@ -96,13 +96,14 @@ This step requires `cmake` to be installed.
 3. Build onnxruntime-genai
 
    ```bash
+   cd ..
    python build.py
    ```
    
 4. Install Python wheel
 
    ```bash
-   cd wheel
+   cd build/wheel
    pip install *.whl
    ```
 
@@ -113,7 +114,7 @@ ONNX models are run from a local folder, via a string supplied to the `Model()` 
 To source `microsoft/phi-2` optimized for your target, download and run the following script:
 
 ```bash
-wget https://github.com/microsoft/onnxruntime-genai/blob/kvaishnavi/models/models/export.py
+wget https://raw.githubusercontent.com/microsoft/onnxruntime-genai/kvaishnavi/models/src/python/models/export.py
 ```
 
 Export int4 CPU version 
