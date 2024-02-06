@@ -18,21 +18,21 @@ env:
 jobs:
   job:
     name: "Windows CPU x64 Build"
-    runs-on: windows-latest
+    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Win2022-CPU"]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Bootstrap vcpkg
-        run: |
-          ${{ github.workspace }}\extern\vcpkg\bootstrap-vcpkg.bat
-
       - name: Setup Visual Studio 2022
         uses: microsoft/setup-msbuild@v1.1
         with:
           vs-version: '17.5'
+
+      - name: Bootstrap vcpkg
+        run: |
+          ${{ github.workspace }}\extern\vcpkg\bootstrap-vcpkg.bat
 
       - name: Download OnnxRuntime
         run: |
