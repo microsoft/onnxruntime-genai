@@ -111,7 +111,8 @@ This step requires `cmake` to be installed.
 
 ONNX models are run from a local folder, via a string supplied to the `Model()` method. 
 
-To source `microsoft/phi-2` optimized for your target, download and run the following script:
+To source `microsoft/phi-2` optimized for your target, download and run the following script. You will need to be logged into HuggingFace via the CLI to run the script.
+
 
 ```bash
 wget https://raw.githubusercontent.com/microsoft/onnxruntime-genai/kvaishnavi/models/src/python/models/export.py
@@ -119,6 +120,7 @@ wget https://raw.githubusercontent.com/microsoft/onnxruntime-genai/kvaishnavi/mo
 
 Export int4 CPU version 
 ```bash
+huggingface-cli login --token <your HuggingFace token>
 python export.py python models/export.py -m microsoft/phi-2 -p int4 -e cpu -o phi2-int4-cpu.onnx
 ```
 
