@@ -3,13 +3,15 @@
 
 cmake_minimum_required(VERSION 3.26)
 include(FetchContent)
-include(cmake/external/onnxruntime_external_deps.cmake)
-
+include(CMakeDependentOption)
 project(Generators LANGUAGES C CXX)
 option(USE_CUDA "Build with CUDA support" ON)
 option(USE_TOKENIZER "Build with Tokenizer support" ON)
 option(ENABLE_PYTHON "Enable python buildings" ON)
-cmake_dependent_option(BUILD_WHEEL "Build the python wheel" ON "ENABLE_PYTHON" ON)
+cmake_dependent_option(BUILD_WHEEL "Build the python wheel" ON "ENABLE_PYTHON" OFF)
+
+include(cmake/external/onnxruntime_external_deps.cmake)
+
 
 # Checking if CUDA is supported
 include(CheckLanguage)
