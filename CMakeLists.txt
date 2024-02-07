@@ -157,7 +157,7 @@ endif()
 file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/lib/${ONNXRUNTIME_FILES}")
 foreach(DLL_FILE ${onnxruntime_libs})
   add_custom_command(
-     TARGET onnxruntime-genai POST_BUILD
+     DEPENDS onnxruntime-genai
      COMMAND ${CMAKE_COMMAND} -E copy ${DLL_FILE} ${CMAKE_BINARY_DIR}/$<CONFIG>/
   )
 endforeach()
@@ -190,7 +190,7 @@ if(BUILD_WHEEL)
   file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/lib/${ONNXRUNTIME_FILES}")
   foreach(DLL_FILE ${onnxruntime_libs})
     add_custom_command(
-       TARGET onnxruntime-genai-static POST_BUILD
+       DEPENDS onnxruntime-genai-static
        COMMAND ${CMAKE_COMMAND} -E copy ${DLL_FILE} ${WHEEL_FILES_DIR}/${TARGET_NAME}/
     )
   endforeach()
