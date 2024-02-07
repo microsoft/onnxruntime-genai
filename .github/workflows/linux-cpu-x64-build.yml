@@ -29,10 +29,7 @@ jobs:
         run: |
           mv ${{ env.ort_dir }} ort
 
-      - name: Verify Build ort lib
-        if: always()
-        run: |
-          ls -l ort/lib
+      
 
       - name: Git Submodule Update
         run: |
