@@ -277,9 +277,9 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("is_done", &PyGenerator::IsDone)
       .def("compute_logits", &PyGenerator::ComputeLogits)
       .def("generate_next_token", &PyGenerator::GenerateNextToken)
-      .def("generate_next_token_topp", &PyGenerator::GenerateNextToken_TopP)
-      .def("generate_next_token_topk", &PyGenerator::GenerateNextToken_TopK)
-      .def("generate_next_token_topk_topp", &PyGenerator::GenerateNextToken_TopK_TopP)
+      .def("generate_next_token_top_p", &PyGenerator::GenerateNextToken_TopP)
+      .def("generate_next_token_top_k", &PyGenerator::GenerateNextToken_TopK)
+      .def("generate_next_token_top_k_top_p", &PyGenerator::GenerateNextToken_TopK_TopP)
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
       .def("get_sequence", &PyGenerator::GetSequence);
 
