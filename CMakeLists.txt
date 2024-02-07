@@ -153,12 +153,11 @@ endif()
 
 # Copy the onnxruntime binaries into the build folder so it's found on launch
 file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/lib/${ONNXRUNTIME_FILES}")
-foreach(DLL_FILE ${onnxruntime_libs})
-  add_custom_target( CopyOnnxRuntimeSharedLibraries ALL
-     DEPENDS onnxruntime-genai
-     COMMAND ${CMAKE_COMMAND} -E copy ${DLL_FILE} ${CMAKE_BINARY_DIR}/$<CONFIG>/
-  )
-endforeach()
+add_custom_target(CopyOnnxRuntimeSharedLibraries ALL
+   COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} ${CMAKE_BINARY_DIR}/$<CONFIG>/
+)
+add_dependencies(onnxruntime-genai CopyOnnxRuntimeSharedLibraries)
+add_dependencies(onnxruntime-genai-static CopyOnnxRuntimeSharedLibraries)
 
 if(USE_TOKENIZER)
   add_compile_definitions(USE_TOKENIZER=1)
@@ -181,12 +180,10 @@ if(BUILD_WHEEL)
   configure_file(${PYTHON_ROOT}/setup.py.in ${WHEEL_FILES_DIR}/setup.py @ONLY)
   configure_file(${PYTHON_ROOT}/py/__init__.py.in ${WHEEL_FILES_DIR}/${TARGET_NAME}/__init__.py @ONLY)
   file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/lib/${ONNXRUNTIME_FILES}")
-  foreach(DLL_FILE ${onnxruntime_libs})
-    add_custom_target( CopyOnnxRuntimeSharedLibrariesWheel ALL
-       DEPENDS onnxruntime-genai-static
-       COMMAND ${CMAKE_COMMAND} -E copy ${DLL_FILE} ${WHEEL_FILES_DIR}/${TARGET_NAME}/
-    )
-  endforeach()
+  add_custom_target(CopyOnnxRuntimeSharedLibrariesWheel ALL
+     DEPENDS onnxruntime-genai-static
+     COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} ${WHEEL_FILES_DIR}/${TARGET_NAME}/
+  )
 
 
   # Copy over any additional python files
@@ -203,7 +200,7 @@ if(BUILD_WHEEL)
     WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
     COMMENT "Building wheel"
   )
-
+  add_dependencies(PyPackageBuild CopyOnnxRuntimeSharedLibrariesWheel)
   add_dependencies(PyPackageBuild python)
 endif()
 
