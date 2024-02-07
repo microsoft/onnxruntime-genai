@@ -152,11 +152,9 @@ if(MSVC)
 endif()
 
 # Copy the onnxruntime binaries into the build folder so it's found on launch
-
-
 file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/lib/${ONNXRUNTIME_FILES}")
 foreach(DLL_FILE ${onnxruntime_libs})
-  add_custom_command(
+  add_custom_target( CopyOnnxRuntimeSharedLibraries ALL
      DEPENDS onnxruntime-genai
      COMMAND ${CMAKE_COMMAND} -E copy ${DLL_FILE} ${CMAKE_BINARY_DIR}/$<CONFIG>/
   )
@@ -177,7 +175,6 @@ if(USE_TOKENIZER)
 endif()
 
 if(BUILD_WHEEL)
-
   set(WHEEL_FILES_DIR "${CMAKE_BINARY_DIR}/wheel")
   message("Setting up wheel files in : ${WHEEL_FILES_DIR}")
   set(TARGET_NAME "onnxruntime_genai")
@@ -185,7 +182,7 @@ if(BUILD_WHEEL)
   configure_file(${PYTHON_ROOT}/py/__init__.py.in ${WHEEL_FILES_DIR}/${TARGET_NAME}/__init__.py @ONLY)
   file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/lib/${ONNXRUNTIME_FILES}")
   foreach(DLL_FILE ${onnxruntime_libs})
-    add_custom_command(
+    add_custom_target( CopyOnnxRuntimeSharedLibrariesWheel ALL
        DEPENDS onnxruntime-genai-static
        COMMAND ${CMAKE_COMMAND} -E copy ${DLL_FILE} ${WHEEL_FILES_DIR}/${TARGET_NAME}/
     )
