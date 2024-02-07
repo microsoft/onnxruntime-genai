@@ -153,11 +153,10 @@ endif()
 
 # Copy the onnxruntime binaries into the build folder so it's found on launch
 file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/lib/${ONNXRUNTIME_FILES}")
-add_custom_target(CopyOnnxRuntimeSharedLibraries ALL
+add_custom_command(
+   TARGET CopyOnnxRuntimeSharedLibrariesToConfig POST_BUILD
    COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} ${CMAKE_BINARY_DIR}/$<CONFIG>/
 )
-add_dependencies(onnxruntime-genai CopyOnnxRuntimeSharedLibraries)
-add_dependencies(onnxruntime-genai-static CopyOnnxRuntimeSharedLibraries)
 
 if(USE_TOKENIZER)
   add_compile_definitions(USE_TOKENIZER=1)
@@ -180,7 +179,7 @@ if(BUILD_WHEEL)
   configure_file(${PYTHON_ROOT}/setup.py.in ${WHEEL_FILES_DIR}/setup.py @ONLY)
   configure_file(${PYTHON_ROOT}/py/__init__.py.in ${WHEEL_FILES_DIR}/${TARGET_NAME}/__init__.py @ONLY)
   file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/lib/${ONNXRUNTIME_FILES}")
-  add_custom_target(CopyOnnxRuntimeSharedLibrariesWheel ALL
+  add_custom_target(CopyOnnxRuntimeStaticLibrariesToWheel ALL
      DEPENDS onnxruntime-genai-static
      COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} ${WHEEL_FILES_DIR}/${TARGET_NAME}/
   )
@@ -194,14 +193,14 @@ if(BUILD_WHEEL)
     configure_file("${filename}" "${WHEEL_FILES_DIR}/${TARGET_NAME}" COPYONLY)
   endforeach(filename)
 
-  add_custom_target(PyPackageBuild ALL
+  add_custom_target(BuildWheel ALL
     COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:python> ${WHEEL_FILES_DIR}/${TARGET_NAME}
     COMMAND "${PYTHON_EXECUTABLE}" -m pip wheel .
     WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
     COMMENT "Building wheel"
   )
-  add_dependencies(PyPackageBuild CopyOnnxRuntimeSharedLibrariesWheel)
-  add_dependencies(PyPackageBuild python)
+  add_dependencies(BuildWheel CopyOnnxRuntimeStaticLibrariesToWheel)
+  add_dependencies(BuildWheel python)
 endif()
 
 # Have visual studio put all files into one single folder vs the default split of header files into a separate folder
