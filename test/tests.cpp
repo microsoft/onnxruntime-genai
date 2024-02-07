@@ -1,6 +1,6 @@
-#include "../generators.h"
-#include "../search.h"
-#include "../models/model.h"
+#include <generators.h>
+#include <search.h>
+#include <models/model.h>
 #include <iostream>
 
 // Our working directory is generators/build so one up puts us in the root directory:
