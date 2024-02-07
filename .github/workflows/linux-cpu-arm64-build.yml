@@ -41,7 +41,7 @@ jobs:
             --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
             --container-registry onnxruntimebuildcache \
             --repository onnxruntimecpubuild
-          docker run --rm --volume $GITHUB_WORKSPACE:/onnxruntime_src --volume $RUNNER_TEMP:/build -w /build onnxruntimecpubuild bash -c "echo $PATH && /usr/bin/cmake -B . --preset linux_gcc_cpu_release /onnxruntime_src && /usr/bin/cmake -B . --preset linux_gcc_cpu_release --build --parallel"
+          docker run --rm --volume $GITHUB_WORKSPACE:/onnxruntime_src --volume $RUNNER_TEMP:/build -w /build onnxruntimecpubuild bash -c "echo $PATH && /usr/bin/cmake -B . --preset linux_gcc_cpu_release /onnxruntime_src && /usr/bin/cmake --build --preset linux_gcc_cpu_release --parallel ."
 
           
 

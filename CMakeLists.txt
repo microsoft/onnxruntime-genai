@@ -15,7 +15,9 @@ include(cmake/external/onnxruntime_external_deps.cmake)
 
 # Checking if CUDA is supported
 include(CheckLanguage)
-check_language(CUDA)
+if(USE_CUDA)
+  check_language(CUDA)
+endif()
 if("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_LESS 9)
   message(FATAL_ERROR "GCC version must be greater than or equal to 9")
 endif()
