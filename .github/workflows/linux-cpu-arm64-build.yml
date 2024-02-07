@@ -41,7 +41,7 @@ jobs:
             --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
             --container-registry onnxruntimebuildcache \
             --repository onnxruntimecpubuild
-          docker run --rm --volume $GITHUB_WORKSPACE:/onnxruntime_src --volume $RUNNER_TEMP:/build -w /build onnxruntimecpubuild bash -c "echo $PATH && /usr/bin/cmake -G Ninja /onnxruntime_src -DBUILD_WHEEL=ON -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=OFF && ninja"
+          docker run --rm --volume $GITHUB_WORKSPACE:/onnxruntime_src --volume $RUNNER_TEMP:/build -w /build onnxruntimecpubuild bash -c "echo $PATH && /usr/bin/cmake -G Ninja /onnxruntime_src -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=OFF && ninja"
 
           
 
