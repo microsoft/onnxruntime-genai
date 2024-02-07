@@ -42,20 +42,20 @@ endif()
 message(STATUS "Adding source files")
 
 file(GLOB generator_srcs CONFIGURE_DEPENDS
-   "${GENERATORS_ROOT}/*.h"
-   "${GENERATORS_ROOT}/*.cpp"
-   "${MODELS_ROOT}/*.h"
-   "${MODELS_ROOT}/*.cpp"
+  "${GENERATORS_ROOT}/*.h"
+  "${GENERATORS_ROOT}/*.cpp"
+  "${MODELS_ROOT}/*.h"
+  "${MODELS_ROOT}/*.cpp"
 )
 
 file(GLOB test_srcs CONFIGURE_DEPENDS
-   "${TESTS_ROOT}/*.h"
-   "${TESTS_ROOT}/*.cpp"
+  "${TESTS_ROOT}/*.h"
+  "${TESTS_ROOT}/*.cpp"
 )
 
 file(GLOB python_srcs CMAKE_CONFIGURE_DEPENDS
-   "${PYTHON_ROOT}/*.h"
-   "${PYTHON_ROOT}/*.cpp"
+  "${PYTHON_ROOT}/*.h"
+  "${PYTHON_ROOT}/*.cpp"
 )
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
@@ -66,10 +66,10 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   # set(CUDA_PROPAGATE_HOST_FLAGS ON)
   set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcudafe --diag_suppress=2803 --expt-relaxed-constexpr")
   file(GLOB generator_cuda_srcs CONFIGURE_DEPENDS
-     "${GENERATORS_ROOT}/*.cu"
-     "${GENERATORS_ROOT}/*.cuh"
-     "${MODELS_ROOT}/*.cu"
-     "${MODELS_ROOT}/*.cuh"
+    "${GENERATORS_ROOT}/*.cu"
+    "${GENERATORS_ROOT}/*.cuh"
+    "${MODELS_ROOT}/*.cu"
+    "${MODELS_ROOT}/*.cuh"
   )
   list(APPEND generator_srcs ${generator_cuda_srcs})
   add_compile_definitions(USE_CUDA=1)
@@ -154,8 +154,8 @@ endif()
 # Copy the onnxruntime binaries into the build folder so it's found on launch
 file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/lib/${ONNXRUNTIME_FILES}")
 add_custom_command(
-   TARGET CopyOnnxRuntimeSharedLibrariesToConfig POST_BUILD
-   COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} ${CMAKE_BINARY_DIR}/$<CONFIG>/
+  TARGET onnxruntime-genai POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} ${CMAKE_BINARY_DIR}/$<CONFIG>/
 )
 
 if(USE_TOKENIZER)
@@ -180,8 +180,8 @@ if(BUILD_WHEEL)
   configure_file(${PYTHON_ROOT}/py/__init__.py.in ${WHEEL_FILES_DIR}/${TARGET_NAME}/__init__.py @ONLY)
   file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/lib/${ONNXRUNTIME_FILES}")
   add_custom_target(CopyOnnxRuntimeStaticLibrariesToWheel ALL
-     DEPENDS onnxruntime-genai-static
-     COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} ${WHEEL_FILES_DIR}/${TARGET_NAME}/
+    DEPENDS onnxruntime-genai-static
+    COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} ${WHEEL_FILES_DIR}/${TARGET_NAME}/
   )
 
 
