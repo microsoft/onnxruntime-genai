@@ -29,8 +29,6 @@ jobs:
         run: |
           mv ${{ env.ort_dir }} ort
 
-      
-
       - name: Git Submodule Update
         run: |
           git submodule update --init --recursive
