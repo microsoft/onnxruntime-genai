@@ -7,50 +7,6 @@
     },
     "configurePresets": [
         {
-            "name": "windows_Win32_relwithdebinfo_asan",
-            "displayName": "windows Win32 relwithdebinfo asan",
-            "generator": "Visual Studio 17 2022",
-            "binaryDir": "${sourceDir}/relwithdebinfo/asan",
-            "cacheVariables": {
-                "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob1 /DNDEBUG /fsanitize=address",
-                "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob1 /DNDEBUG /fsanitize=address",
-                "CMAKE_EXE_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
-                "CMAKE_MODULE_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
-                "CMAKE_SHARED_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
-                "USE_CUDA": "OFF",
-                "ENABLE_PYTHON": "OFF",
-                "USE_TOKENIZER": "OFF"
-            },
-            "architecture": "Win32",
-            "condition": {
-                "type": "equals",
-                "lhs": "${hostSystemName}",
-                "rhs": "Windows"
-            }
-        },
-        {
-            "name": "windows_Win32_release_asan",
-            "displayName": "windows Win32 release asan",
-            "generator": "Visual Studio 17 2022",
-            "binaryDir": "${sourceDir}/release/asan",
-            "cacheVariables": {
-                "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG /fsanitize=address",
-                "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG /fsanitize=address",
-                "CMAKE_EXE_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
-                "CMAKE_MODULE_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
-                "CMAKE_SHARED_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
-                "USE_CUDA": "OFF",
-                "ENABLE_PYTHON": "OFF",
-                "USE_TOKENIZER": "OFF"
-            },
-            "architecture": "Win32",
-            "condition": {
-                "type": "equals",
-                "lhs": "${hostSystemName}",
-                "rhs": "Windows"
-            }
-        },
-        {
             "name": "windows_Win32_debug_asan",
             "displayName": "windows Win32 debug asan",
             "generator": "Visual Studio 17 2022",
@@ -95,13 +51,13 @@
             }
         },
         {
-            "name": "windows_Win32_relwithdebinfo",
-            "displayName": "windows Win32 relwithdebinfo",
+            "name": "windows_Win32_relwithdebinfo_asan",
+            "displayName": "windows Win32 relwithdebinfo asan",
             "generator": "Visual Studio 17 2022",
-            "binaryDir": "${sourceDir}/relwithdebinfo/default",
+            "binaryDir": "${sourceDir}/relwithdebinfo/asan",
             "cacheVariables": {
-                "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob1 /DNDEBUG",
-                "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob1 /DNDEBUG",
+                "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob1 /DNDEBUG /fsanitize=address",
+                "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob1 /DNDEBUG /fsanitize=address",
                 "CMAKE_EXE_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
                 "CMAKE_MODULE_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
                 "CMAKE_SHARED_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
@@ -117,13 +73,13 @@
             }
         },
         {
-            "name": "windows_Win32_release",
-            "displayName": "windows Win32 release",
+            "name": "windows_Win32_release_asan",
+            "displayName": "windows Win32 release asan",
             "generator": "Visual Studio 17 2022",
-            "binaryDir": "${sourceDir}/release/default",
+            "binaryDir": "${sourceDir}/release/asan",
             "cacheVariables": {
-                "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG",
-                "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG",
+                "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG /fsanitize=address",
+                "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG /fsanitize=address",
                 "CMAKE_EXE_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
                 "CMAKE_MODULE_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
                 "CMAKE_SHARED_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
@@ -183,19 +139,21 @@
             }
         },
         {
-            "name": "windows_x64_relwithdebinfo_asan",
-            "displayName": "windows x64 relwithdebinfo asan",
+            "name": "windows_Win32_relwithdebinfo",
+            "displayName": "windows Win32 relwithdebinfo",
             "generator": "Visual Studio 17 2022",
-            "binaryDir": "${sourceDir}/relwithdebinfo/asan",
+            "binaryDir": "${sourceDir}/relwithdebinfo/default",
             "cacheVariables": {
-                "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob1 /DNDEBUG /fsanitize=address",
-                "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob1 /DNDEBUG /fsanitize=address",
+                "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob1 /DNDEBUG",
+                "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob1 /DNDEBUG",
                 "CMAKE_EXE_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
                 "CMAKE_MODULE_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
                 "CMAKE_SHARED_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
-                "USE_CUDA": "OFF"
+                "USE_CUDA": "OFF",
+                "ENABLE_PYTHON": "OFF",
+                "USE_TOKENIZER": "OFF"
             },
-            "architecture": "x64",
+            "architecture": "Win32",
             "condition": {
                 "type": "equals",
                 "lhs": "${hostSystemName}",
@@ -203,19 +161,21 @@
             }
         },
         {
-            "name": "windows_x64_release_asan",
-            "displayName": "windows x64 release asan",
+            "name": "windows_Win32_release",
+            "displayName": "windows Win32 release",
             "generator": "Visual Studio 17 2022",
-            "binaryDir": "${sourceDir}/release/asan",
+            "binaryDir": "${sourceDir}/release/default",
             "cacheVariables": {
-                "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG /fsanitize=address",
-                "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG /fsanitize=address",
+                "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG",
+                "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG",
                 "CMAKE_EXE_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
                 "CMAKE_MODULE_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
                 "CMAKE_SHARED_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
-                "USE_CUDA": "OFF"
+                "USE_CUDA": "OFF",
+                "ENABLE_PYTHON": "OFF",
+                "USE_TOKENIZER": "OFF"
             },
-            "architecture": "x64",
+            "architecture": "Win32",
             "condition": {
                 "type": "equals",
                 "lhs": "${hostSystemName}",
@@ -263,13 +223,13 @@
             }
         },
         {
-            "name": "windows_x64_relwithdebinfo",
-            "displayName": "windows x64 relwithdebinfo",
+            "name": "windows_x64_relwithdebinfo_asan",
+            "displayName": "windows x64 relwithdebinfo asan",
             "generator": "Visual Studio 17 2022",
-            "binaryDir": "${sourceDir}/relwithdebinfo/default",
+            "binaryDir": "${sourceDir}/relwithdebinfo/asan",
             "cacheVariables": {
-                "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob1 /DNDEBUG",
-                "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob1 /DNDEBUG",
+                "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob1 /DNDEBUG /fsanitize=address",
+                "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob1 /DNDEBUG /fsanitize=address",
                 "CMAKE_EXE_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
                 "CMAKE_MODULE_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
                 "CMAKE_SHARED_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
@@ -283,13 +243,13 @@
             }
         },
         {
-            "name": "windows_x64_release",
-            "displayName": "windows x64 release",
+            "name": "windows_x64_release_asan",
+            "displayName": "windows x64 release asan",
             "generator": "Visual Studio 17 2022",
-            "binaryDir": "${sourceDir}/release/default",
+            "binaryDir": "${sourceDir}/release/asan",
             "cacheVariables": {
-                "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG",
-                "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG",
+                "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG /fsanitize=address",
+                "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG /fsanitize=address",
                 "CMAKE_EXE_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
                 "CMAKE_MODULE_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
                 "CMAKE_SHARED_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
@@ -343,63 +303,58 @@
             }
         },
         {
-            "name": "linux_gcc_relwithdebinfo_asan",
-            "displayName": "linux gcc relwithdebinfo asan",
-            "generator": "Ninja",
-            "binaryDir": "${sourceDir}/gcc/relwithdebinfo",
+            "name": "windows_x64_relwithdebinfo",
+            "displayName": "windows x64 relwithdebinfo",
+            "generator": "Visual Studio 17 2022",
+            "binaryDir": "${sourceDir}/relwithdebinfo/default",
             "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-                "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe -ggdb3",
-                "CMAKE_CXX_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe -ggdb3",
-                "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
-                "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
-                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack"
+                "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob1 /DNDEBUG",
+                "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob1 /DNDEBUG",
+                "CMAKE_EXE_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
+                "CMAKE_MODULE_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
+                "CMAKE_SHARED_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
+                "USE_CUDA": "OFF"
             },
-            "environment": {
-                "CC": "gcc",
-                "CXX": "g++"
-            },
+            "architecture": "x64",
             "condition": {
                 "type": "equals",
                 "lhs": "${hostSystemName}",
-                "rhs": "Linux"
+                "rhs": "Windows"
             }
         },
         {
-            "name": "linux_gcc_release_asan",
-            "displayName": "linux gcc release asan",
-            "generator": "Ninja",
-            "binaryDir": "${sourceDir}/gcc/release",
+            "name": "windows_x64_release",
+            "displayName": "windows x64 release",
+            "generator": "Visual Studio 17 2022",
+            "binaryDir": "${sourceDir}/release/default",
             "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Release",
-                "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe",
-                "CMAKE_CXX_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe",
-                "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
-                "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
-                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack"
+                "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG",
+                "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG",
+                "CMAKE_EXE_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
+                "CMAKE_MODULE_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
+                "CMAKE_SHARED_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
+                "USE_CUDA": "OFF"
             },
-            "environment": {
-                "CC": "gcc",
-                "CXX": "g++"
-            },
+            "architecture": "x64",
             "condition": {
                 "type": "equals",
                 "lhs": "${hostSystemName}",
-                "rhs": "Linux"
+                "rhs": "Windows"
             }
         },
         {
-            "name": "linux_gcc_debug_asan",
-            "displayName": "linux gcc debug asan",
+            "name": "linux_gcc_cpu_debug_asan",
+            "displayName": "linux gcc cpu debug asan",
             "generator": "Ninja",
-            "binaryDir": "${sourceDir}/gcc/debug",
+            "binaryDir": "${sourceDir}/gcc_cpu/debug",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug",
                 "CMAKE_C_FLAGS": "-ggdb3 -O0 -fsanitize=address",
                 "CMAKE_CXX_FLAGS": "-ggdb3 -O0 -fsanitize=address -D_GLIBCXX_DEBUG",
                 "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -fsanitize=address",
                 "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -fsanitize=address",
-                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -fsanitize=address"
+                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -fsanitize=address",
+                "USE_CUDA": "OFF"
             },
             "environment": {
                 "CC": "gcc",
@@ -412,17 +367,18 @@
             }
         },
         {
-            "name": "linux_gcc_minsizerel_asan",
-            "displayName": "linux gcc minsizerel asan",
+            "name": "linux_gcc_cpu_minsizerel_asan",
+            "displayName": "linux gcc cpu minsizerel asan",
             "generator": "Ninja",
-            "binaryDir": "${sourceDir}/gcc/minsizerel",
+            "binaryDir": "${sourceDir}/gcc_cpu/minsizerel",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "MinSizeRel",
                 "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -Os -pipe -ggdb3",
                 "CMAKE_CXX_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -Os -pipe -ggdb3",
                 "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
                 "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
-                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack"
+                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
+                "USE_CUDA": "OFF"
             },
             "environment": {
                 "CC": "gcc",
@@ -435,17 +391,18 @@
             }
         },
         {
-            "name": "linux_gcc_relwithdebinfo",
-            "displayName": "linux gcc relwithdebinfo",
+            "name": "linux_gcc_cpu_relwithdebinfo_asan",
+            "displayName": "linux gcc cpu relwithdebinfo asan",
             "generator": "Ninja",
-            "binaryDir": "${sourceDir}/gcc/relwithdebinfo",
+            "binaryDir": "${sourceDir}/gcc_cpu/relwithdebinfo",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "RelWithDebInfo",
                 "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe -ggdb3",
                 "CMAKE_CXX_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe -ggdb3",
                 "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
                 "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
-                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack"
+                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
+                "USE_CUDA": "OFF"
             },
             "environment": {
                 "CC": "gcc",
@@ -458,17 +415,18 @@
             }
         },
         {
-            "name": "linux_gcc_release",
-            "displayName": "linux gcc release",
+            "name": "linux_gcc_cpu_release_asan",
+            "displayName": "linux gcc cpu release asan",
             "generator": "Ninja",
-            "binaryDir": "${sourceDir}/gcc/release",
+            "binaryDir": "${sourceDir}/gcc_cpu/release",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release",
                 "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe",
                 "CMAKE_CXX_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe",
                 "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
                 "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
-                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack"
+                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
+                "USE_CUDA": "OFF"
             },
             "environment": {
                 "CC": "gcc",
@@ -481,17 +439,18 @@
             }
         },
         {
-            "name": "linux_gcc_debug",
-            "displayName": "linux gcc debug",
+            "name": "linux_gcc_cpu_debug",
+            "displayName": "linux gcc cpu debug",
             "generator": "Ninja",
-            "binaryDir": "${sourceDir}/gcc/debug",
+            "binaryDir": "${sourceDir}/gcc_cpu/debug",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug",
                 "CMAKE_C_FLAGS": "-ggdb3 -O0",
                 "CMAKE_CXX_FLAGS": "-ggdb3 -O0 -D_GLIBCXX_DEBUG",
                 "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
                 "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
-                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack"
+                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
+                "USE_CUDA": "OFF"
             },
             "environment": {
                 "CC": "gcc",
@@ -504,17 +463,18 @@
             }
         },
         {
-            "name": "linux_gcc_minsizerel",
-            "displayName": "linux gcc minsizerel",
+            "name": "linux_gcc_cpu_minsizerel",
+            "displayName": "linux gcc cpu minsizerel",
             "generator": "Ninja",
-            "binaryDir": "${sourceDir}/gcc/minsizerel",
+            "binaryDir": "${sourceDir}/gcc_cpu/minsizerel",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "MinSizeRel",
                 "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -Os -pipe -ggdb3",
                 "CMAKE_CXX_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -Os -pipe -ggdb3",
                 "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
                 "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
-                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack"
+                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
+                "USE_CUDA": "OFF"
             },
             "environment": {
                 "CC": "gcc",
@@ -527,21 +487,22 @@
             }
         },
         {
-            "name": "linux_clang_relwithdebinfo_asan",
-            "displayName": "linux clang relwithdebinfo asan",
+            "name": "linux_gcc_cpu_relwithdebinfo",
+            "displayName": "linux gcc cpu relwithdebinfo",
             "generator": "Ninja",
-            "binaryDir": "${sourceDir}/clang/relwithdebinfo",
+            "binaryDir": "${sourceDir}/gcc_cpu/relwithdebinfo",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "RelWithDebInfo",
                 "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe -ggdb3",
                 "CMAKE_CXX_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe -ggdb3",
-                "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
-                "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
-                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu"
+                "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
+                "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
+                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
+                "USE_CUDA": "OFF"
             },
             "environment": {
-                "CC": "\\usr\\bin\\clang",
-                "CXX": "\\usr\\bin\\clang++"
+                "CC": "gcc",
+                "CXX": "g++"
             },
             "condition": {
                 "type": "equals",
@@ -550,21 +511,22 @@
             }
         },
         {
-            "name": "linux_clang_release_asan",
-            "displayName": "linux clang release asan",
+            "name": "linux_gcc_cpu_release",
+            "displayName": "linux gcc cpu release",
             "generator": "Ninja",
-            "binaryDir": "${sourceDir}/clang/release",
+            "binaryDir": "${sourceDir}/gcc_cpu/release",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release",
                 "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe",
                 "CMAKE_CXX_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe",
-                "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
-                "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
-                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu"
+                "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
+                "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
+                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
+                "USE_CUDA": "OFF"
             },
             "environment": {
-                "CC": "\\usr\\bin\\clang",
-                "CXX": "\\usr\\bin\\clang++"
+                "CC": "gcc",
+                "CXX": "g++"
             },
             "condition": {
                 "type": "equals",
@@ -573,21 +535,22 @@
             }
         },
         {
-            "name": "linux_clang_debug_asan",
-            "displayName": "linux clang debug asan",
+            "name": "linux_clang_cpu_debug_asan",
+            "displayName": "linux clang cpu debug asan",
             "generator": "Ninja",
-            "binaryDir": "${sourceDir}/clang/debug",
+            "binaryDir": "${sourceDir}/clang_cpu/debug",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug",
                 "CMAKE_C_FLAGS": "-ggdb3 -O0 -fsanitize=address",
                 "CMAKE_CXX_FLAGS": "-ggdb3 -O0 -fsanitize=address",
                 "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -fsanitize=address -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
                 "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -fsanitize=address -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
-                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -fsanitize=address -L\\usr\\lib64\\x86_64-unknown-linux-gnu"
+                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -fsanitize=address -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
+                "USE_CUDA": "OFF"
             },
             "environment": {
-                "CC": "\\usr\\bin\\clang",
-                "CXX": "\\usr\\bin\\clang++"
+                "CC": "clang",
+                "CXX": "clang++"
             },
             "condition": {
                 "type": "equals",
@@ -596,21 +559,22 @@
             }
         },
         {
-            "name": "linux_clang_minsizerel_asan",
-            "displayName": "linux clang minsizerel asan",
+            "name": "linux_clang_cpu_minsizerel_asan",
+            "displayName": "linux clang cpu minsizerel asan",
             "generator": "Ninja",
-            "binaryDir": "${sourceDir}/clang/minsizerel",
+            "binaryDir": "${sourceDir}/clang_cpu/minsizerel",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "MinSizeRel",
                 "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -Os -pipe -ggdb3",
                 "CMAKE_CXX_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -Os -pipe -ggdb3",
                 "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
                 "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
-                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu"
+                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
+                "USE_CUDA": "OFF"
             },
             "environment": {
-                "CC": "\\usr\\bin\\clang",
-                "CXX": "\\usr\\bin\\clang++"
+                "CC": "clang",
+                "CXX": "clang++"
             },
             "condition": {
                 "type": "equals",
@@ -619,21 +583,22 @@
             }
         },
         {
-            "name": "linux_clang_relwithdebinfo",
-            "displayName": "linux clang relwithdebinfo",
+            "name": "linux_clang_cpu_relwithdebinfo_asan",
+            "displayName": "linux clang cpu relwithdebinfo asan",
             "generator": "Ninja",
-            "binaryDir": "${sourceDir}/clang/relwithdebinfo",
+            "binaryDir": "${sourceDir}/clang_cpu/relwithdebinfo",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "RelWithDebInfo",
                 "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe -ggdb3",
                 "CMAKE_CXX_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe -ggdb3",
                 "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
                 "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
-                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu"
+                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
+                "USE_CUDA": "OFF"
             },
             "environment": {
-                "CC": "\\usr\\bin\\clang",
-                "CXX": "\\usr\\bin\\clang++"
+                "CC": "clang",
+                "CXX": "clang++"
             },
             "condition": {
                 "type": "equals",
@@ -642,21 +607,22 @@
             }
         },
         {
-            "name": "linux_clang_release",
-            "displayName": "linux clang release",
+            "name": "linux_clang_cpu_release_asan",
+            "displayName": "linux clang cpu release asan",
             "generator": "Ninja",
-            "binaryDir": "${sourceDir}/clang/release",
+            "binaryDir": "${sourceDir}/clang_cpu/release",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release",
                 "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe",
                 "CMAKE_CXX_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe",
                 "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
                 "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
-                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu"
+                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
+                "USE_CUDA": "OFF"
             },
             "environment": {
-                "CC": "\\usr\\bin\\clang",
-                "CXX": "\\usr\\bin\\clang++"
+                "CC": "clang",
+                "CXX": "clang++"
             },
             "condition": {
                 "type": "equals",
@@ -665,21 +631,22 @@
             }
         },
         {
-            "name": "linux_clang_debug",
-            "displayName": "linux clang debug",
+            "name": "linux_clang_cpu_debug",
+            "displayName": "linux clang cpu debug",
             "generator": "Ninja",
-            "binaryDir": "${sourceDir}/clang/debug",
+            "binaryDir": "${sourceDir}/clang_cpu/debug",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug",
                 "CMAKE_C_FLAGS": "-ggdb3 -O0",
                 "CMAKE_CXX_FLAGS": "-ggdb3 -O0",
                 "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
                 "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
-                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu"
+                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
+                "USE_CUDA": "OFF"
             },
             "environment": {
-                "CC": "\\usr\\bin\\clang",
-                "CXX": "\\usr\\bin\\clang++"
+                "CC": "clang",
+                "CXX": "clang++"
             },
             "condition": {
                 "type": "equals",
@@ -688,21 +655,262 @@
             }
         },
         {
-            "name": "linux_clang_minsizerel",
-            "displayName": "linux clang minsizerel",
+            "name": "linux_clang_cpu_minsizerel",
+            "displayName": "linux clang cpu minsizerel",
             "generator": "Ninja",
-            "binaryDir": "${sourceDir}/clang/minsizerel",
+            "binaryDir": "${sourceDir}/clang_cpu/minsizerel",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "MinSizeRel",
                 "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -Os -pipe -ggdb3",
                 "CMAKE_CXX_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -Os -pipe -ggdb3",
                 "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
                 "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
-                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu"
+                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
+                "USE_CUDA": "OFF"
             },
             "environment": {
-                "CC": "\\usr\\bin\\clang",
-                "CXX": "\\usr\\bin\\clang++"
+                "CC": "clang",
+                "CXX": "clang++"
+            },
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Linux"
+            }
+        },
+        {
+            "name": "linux_clang_cpu_relwithdebinfo",
+            "displayName": "linux clang cpu relwithdebinfo",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/clang_cpu/relwithdebinfo",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+                "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe -ggdb3",
+                "CMAKE_CXX_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe -ggdb3",
+                "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
+                "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
+                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
+                "USE_CUDA": "OFF"
+            },
+            "environment": {
+                "CC": "clang",
+                "CXX": "clang++"
+            },
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Linux"
+            }
+        },
+        {
+            "name": "linux_clang_cpu_release",
+            "displayName": "linux clang cpu release",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/clang_cpu/release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe",
+                "CMAKE_CXX_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe",
+                "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
+                "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
+                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
+                "USE_CUDA": "OFF"
+            },
+            "environment": {
+                "CC": "clang",
+                "CXX": "clang++"
+            },
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Linux"
+            }
+        },
+        {
+            "name": "linux_gcc_cuda_debug_asan",
+            "displayName": "linux gcc cuda debug asan",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/gcc_cuda/debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_C_FLAGS": "-ggdb3 -O0 -fsanitize=address",
+                "CMAKE_CXX_FLAGS": "-ggdb3 -O0 -fsanitize=address -D_GLIBCXX_DEBUG",
+                "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -fsanitize=address",
+                "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -fsanitize=address",
+                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -fsanitize=address",
+                "USE_CUDA": "ON"
+            },
+            "environment": {
+                "CC": "gcc",
+                "CXX": "g++"
+            },
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Linux"
+            }
+        },
+        {
+            "name": "linux_gcc_cuda_minsizerel_asan",
+            "displayName": "linux gcc cuda minsizerel asan",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/gcc_cuda/minsizerel",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "MinSizeRel",
+                "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -Os -pipe -ggdb3",
+                "CMAKE_CXX_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -Os -pipe -ggdb3",
+                "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
+                "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
+                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
+                "USE_CUDA": "ON"
+            },
+            "environment": {
+                "CC": "gcc",
+                "CXX": "g++"
+            },
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Linux"
+            }
+        },
+        {
+            "name": "linux_gcc_cuda_relwithdebinfo_asan",
+            "displayName": "linux gcc cuda relwithdebinfo asan",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/gcc_cuda/relwithdebinfo",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+                "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe -ggdb3",
+                "CMAKE_CXX_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe -ggdb3",
+                "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
+                "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
+                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
+                "USE_CUDA": "ON"
+            },
+            "environment": {
+                "CC": "gcc",
+                "CXX": "g++"
+            },
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Linux"
+            }
+        },
+        {
+            "name": "linux_gcc_cuda_release_asan",
+            "displayName": "linux gcc cuda release asan",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/gcc_cuda/release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe",
+                "CMAKE_CXX_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe",
+                "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
+                "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
+                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
+                "USE_CUDA": "ON"
+            },
+            "environment": {
+                "CC": "gcc",
+                "CXX": "g++"
+            },
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Linux"
+            }
+        },
+        {
+            "name": "linux_gcc_cuda_debug",
+            "displayName": "linux gcc cuda debug",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/gcc_cuda/debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_C_FLAGS": "-ggdb3 -O0",
+                "CMAKE_CXX_FLAGS": "-ggdb3 -O0 -D_GLIBCXX_DEBUG",
+                "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
+                "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
+                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
+                "USE_CUDA": "ON"
+            },
+            "environment": {
+                "CC": "gcc",
+                "CXX": "g++"
+            },
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Linux"
+            }
+        },
+        {
+            "name": "linux_gcc_cuda_minsizerel",
+            "displayName": "linux gcc cuda minsizerel",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/gcc_cuda/minsizerel",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "MinSizeRel",
+                "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -Os -pipe -ggdb3",
+                "CMAKE_CXX_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -Os -pipe -ggdb3",
+                "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
+                "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
+                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
+                "USE_CUDA": "ON"
+            },
+            "environment": {
+                "CC": "gcc",
+                "CXX": "g++"
+            },
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Linux"
+            }
+        },
+        {
+            "name": "linux_gcc_cuda_relwithdebinfo",
+            "displayName": "linux gcc cuda relwithdebinfo",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/gcc_cuda/relwithdebinfo",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+                "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe -ggdb3",
+                "CMAKE_CXX_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe -ggdb3",
+                "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
+                "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
+                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
+                "USE_CUDA": "ON"
+            },
+            "environment": {
+                "CC": "gcc",
+                "CXX": "g++"
+            },
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Linux"
+            }
+        },
+        {
+            "name": "linux_gcc_cuda_release",
+            "displayName": "linux gcc cuda release",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/gcc_cuda/release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe",
+                "CMAKE_CXX_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe",
+                "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
+                "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
+                "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
+                "USE_CUDA": "ON"
+            },
+            "environment": {
+                "CC": "gcc",
+                "CXX": "g++"
             },
             "condition": {
                 "type": "equals",
@@ -713,14 +921,6 @@
     ],
     "buildPresets": [
         {
-            "name": "windows_Win32_relwithdebinfo_asan",
-            "configurePreset": "windows_Win32_relwithdebinfo_asan"
-        },
-        {
-            "name": "windows_Win32_release_asan",
-            "configurePreset": "windows_Win32_release_asan"
-        },
-        {
             "name": "windows_Win32_debug_asan",
             "configurePreset": "windows_Win32_debug_asan"
         },
@@ -729,12 +929,12 @@
             "configurePreset": "windows_Win32_minsizerel_asan"
         },
         {
-            "name": "windows_Win32_relwithdebinfo",
-            "configurePreset": "windows_Win32_relwithdebinfo"
+            "name": "windows_Win32_relwithdebinfo_asan",
+            "configurePreset": "windows_Win32_relwithdebinfo_asan"
         },
         {
-            "name": "windows_Win32_release",
-            "configurePreset": "windows_Win32_release"
+            "name": "windows_Win32_release_asan",
+            "configurePreset": "windows_Win32_release_asan"
         },
         {
             "name": "windows_Win32_debug",
@@ -745,12 +945,12 @@
             "configurePreset": "windows_Win32_minsizerel"
         },
         {
-            "name": "windows_x64_relwithdebinfo_asan",
-            "configurePreset": "windows_x64_relwithdebinfo_asan"
+            "name": "windows_Win32_relwithdebinfo",
+            "configurePreset": "windows_Win32_relwithdebinfo"
         },
         {
-            "name": "windows_x64_release_asan",
-            "configurePreset": "windows_x64_release_asan"
+            "name": "windows_Win32_release",
+            "configurePreset": "windows_Win32_release"
         },
         {
             "name": "windows_x64_debug_asan",
@@ -761,12 +961,12 @@
             "configurePreset": "windows_x64_minsizerel_asan"
         },
         {
-            "name": "windows_x64_relwithdebinfo",
-            "configurePreset": "windows_x64_relwithdebinfo"
+            "name": "windows_x64_relwithdebinfo_asan",
+            "configurePreset": "windows_x64_relwithdebinfo_asan"
         },
         {
-            "name": "windows_x64_release",
-            "configurePreset": "windows_x64_release"
+            "name": "windows_x64_release_asan",
+            "configurePreset": "windows_x64_release_asan"
         },
         {
             "name": "windows_x64_debug",
@@ -777,68 +977,108 @@
             "configurePreset": "windows_x64_minsizerel"
         },
         {
-            "name": "linux_gcc_relwithdebinfo_asan",
-            "configurePreset": "linux_gcc_relwithdebinfo_asan"
+            "name": "windows_x64_relwithdebinfo",
+            "configurePreset": "windows_x64_relwithdebinfo"
         },
         {
-            "name": "linux_gcc_release_asan",
-            "configurePreset": "linux_gcc_release_asan"
+            "name": "windows_x64_release",
+            "configurePreset": "windows_x64_release"
         },
         {
-            "name": "linux_gcc_debug_asan",
-            "configurePreset": "linux_gcc_debug_asan"
+            "name": "linux_gcc_cpu_debug_asan",
+            "configurePreset": "linux_gcc_cpu_debug_asan"
         },
         {
-            "name": "linux_gcc_minsizerel_asan",
-            "configurePreset": "linux_gcc_minsizerel_asan"
+            "name": "linux_gcc_cpu_minsizerel_asan",
+            "configurePreset": "linux_gcc_cpu_minsizerel_asan"
         },
         {
-            "name": "linux_gcc_relwithdebinfo",
-            "configurePreset": "linux_gcc_relwithdebinfo"
+            "name": "linux_gcc_cpu_relwithdebinfo_asan",
+            "configurePreset": "linux_gcc_cpu_relwithdebinfo_asan"
         },
         {
-            "name": "linux_gcc_release",
-            "configurePreset": "linux_gcc_release"
+            "name": "linux_gcc_cpu_release_asan",
+            "configurePreset": "linux_gcc_cpu_release_asan"
         },
         {
-            "name": "linux_gcc_debug",
-            "configurePreset": "linux_gcc_debug"
+            "name": "linux_gcc_cpu_debug",
+            "configurePreset": "linux_gcc_cpu_debug"
         },
         {
-            "name": "linux_gcc_minsizerel",
-            "configurePreset": "linux_gcc_minsizerel"
+            "name": "linux_gcc_cpu_minsizerel",
+            "configurePreset": "linux_gcc_cpu_minsizerel"
         },
         {
-            "name": "linux_clang_relwithdebinfo_asan",
-            "configurePreset": "linux_clang_relwithdebinfo_asan"
+            "name": "linux_gcc_cpu_relwithdebinfo",
+            "configurePreset": "linux_gcc_cpu_relwithdebinfo"
         },
         {
-            "name": "linux_clang_release_asan",
-            "configurePreset": "linux_clang_release_asan"
+            "name": "linux_gcc_cpu_release",
+            "configurePreset": "linux_gcc_cpu_release"
         },
         {
-            "name": "linux_clang_debug_asan",
-            "configurePreset": "linux_clang_debug_asan"
+            "name": "linux_clang_cpu_debug_asan",
+            "configurePreset": "linux_clang_cpu_debug_asan"
         },
         {
-            "name": "linux_clang_minsizerel_asan",
-            "configurePreset": "linux_clang_minsizerel_asan"
+            "name": "linux_clang_cpu_minsizerel_asan",
+            "configurePreset": "linux_clang_cpu_minsizerel_asan"
         },
         {
-            "name": "linux_clang_relwithdebinfo",
-            "configurePreset": "linux_clang_relwithdebinfo"
+            "name": "linux_clang_cpu_relwithdebinfo_asan",
+            "configurePreset": "linux_clang_cpu_relwithdebinfo_asan"
         },
         {
-            "name": "linux_clang_release",
-            "configurePreset": "linux_clang_release"
+            "name": "linux_clang_cpu_release_asan",
+            "configurePreset": "linux_clang_cpu_release_asan"
         },
         {
-            "name": "linux_clang_debug",
-            "configurePreset": "linux_clang_debug"
+            "name": "linux_clang_cpu_debug",
+            "configurePreset": "linux_clang_cpu_debug"
         },
         {
-            "name": "linux_clang_minsizerel",
-            "configurePreset": "linux_clang_minsizerel"
+            "name": "linux_clang_cpu_minsizerel",
+            "configurePreset": "linux_clang_cpu_minsizerel"
+        },
+        {
+            "name": "linux_clang_cpu_relwithdebinfo",
+            "configurePreset": "linux_clang_cpu_relwithdebinfo"
+        },
+        {
+            "name": "linux_clang_cpu_release",
+            "configurePreset": "linux_clang_cpu_release"
+        },
+        {
+            "name": "linux_gcc_cuda_debug_asan",
+            "configurePreset": "linux_gcc_cuda_debug_asan"
+        },
+        {
+            "name": "linux_gcc_cuda_minsizerel_asan",
+            "configurePreset": "linux_gcc_cuda_minsizerel_asan"
+        },
+        {
+            "name": "linux_gcc_cuda_relwithdebinfo_asan",
+            "configurePreset": "linux_gcc_cuda_relwithdebinfo_asan"
+        },
+        {
+            "name": "linux_gcc_cuda_release_asan",
+            "configurePreset": "linux_gcc_cuda_release_asan"
+        },
+        {
+            "name": "linux_gcc_cuda_debug",
+            "configurePreset": "linux_gcc_cuda_debug"
+        },
+        {
+            "name": "linux_gcc_cuda_minsizerel",
+            "configurePreset": "linux_gcc_cuda_minsizerel"
+        },
+        {
+            "name": "linux_gcc_cuda_relwithdebinfo",
+            "configurePreset": "linux_gcc_cuda_relwithdebinfo"
+        },
+        {
+            "name": "linux_gcc_cuda_release",
+            "configurePreset": "linux_gcc_cuda_release"
         }
     ]
 }
