@@ -156,7 +156,7 @@ endif()
 file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/lib/${ONNXRUNTIME_FILES}")
 add_custom_command(
   TARGET onnxruntime-genai POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} ${CMAKE_BINARY_DIR}/$<CONFIG>/
+  COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} ${CMAKE_BINARY_DIR}/
 )
 
 if(USE_TOKENIZER)
