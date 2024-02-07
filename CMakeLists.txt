@@ -28,7 +28,7 @@ endif()
 
 set(GENERATORS_ROOT ${PROJECT_SOURCE_DIR}/src)
 set(MODELS_ROOT ${PROJECT_SOURCE_DIR}/src/models)
-set(TESTS_ROOT ${PROJECT_SOURCE_DIR}/src/tests)
+set(TESTS_ROOT ${PROJECT_SOURCE_DIR}/test)
 set(PYTHON_ROOT ${PROJECT_SOURCE_DIR}/src/python)
 
 # CUDA Being enabled will make it not a debug build without this option, so all of the C++ headers will complain
@@ -212,11 +212,14 @@ set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT T
 enable_testing()
 
 add_executable(
-  tests
-  test/test.cpp
+  unit_tests
+  ${TEST_SRCS}
+  ${GENERATOR_SRCS}
 )
+
 target_link_libraries(
-  tests
+  onnxruntime-genai
+  unit_tests
   GTest::gtest_main
 )
 
