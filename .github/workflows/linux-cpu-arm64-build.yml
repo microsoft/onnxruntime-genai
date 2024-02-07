@@ -14,11 +14,14 @@ jobs:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v2
 
-
-
       - name: Download OnnxRuntime
         run: |
           curl -L -o ${{ env.ort_zip }} ${{ env.ort_url }} 
+
+      - name: Verify Build ort lib
+        if: always()
+        run: |
+          ls -l ort/lib
 
       - name: Unzip OnnxRuntime
         run: |
