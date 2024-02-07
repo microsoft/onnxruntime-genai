@@ -1,9 +1,9 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "../generators.h"
-#include "../search.h"
-#include "../models/model.h"
+#include <generators.h>
+#include <search.h>
+#include <models/model.h>
 #include <chrono>
 #include <iostream>
 #include <random>

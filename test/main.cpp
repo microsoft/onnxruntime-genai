@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "../generators.h"
+#include <generators.h>
 #include <iostream>
 
 extern std::unique_ptr<OrtEnv> g_ort_env;
