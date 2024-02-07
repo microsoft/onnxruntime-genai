@@ -6,9 +6,10 @@ include(FetchContent)
 include(cmake/external/onnxruntime_external_deps.cmake)
 
 project(Generators LANGUAGES C CXX)
-set(USE_CUDA 1) # "Build with CUDA support"
-set(USE_TOKENIZER 1) # "Build with Tokenizer support"
-set(BUILD_WHEEL 1)
+option(USE_CUDA "Build with CUDA support" ON)
+option(USE_TOKENIZER "Build with Tokenizer support" ON)
+option(ENABLE_PYTHON "Enable python buildings" ON)
+cmake_dependent_option(BUILD_WHEEL "Build the python wheel" ON "ENABLE_PYTHON" ON)
 
 # Checking if CUDA is supported
 include(CheckLanguage)
@@ -76,6 +77,9 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   list(APPEND generator_srcs ${generator_cuda_srcs})
   add_compile_definitions(USE_CUDA=1)
   include_directories("${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}")
+elseif(USE_CUDA)
+  # USE_CUDA is true but cmake could not find the cuda compiler
+  message(FATAL_ERROR "USE_CUDA is ON but no cuda compiler was found.")
 else()
   file(GLOB generator_cuda_srcs "${GENERATORS_ROOT}/*_cuda*.*")
   list(REMOVE_ITEM generator_srcs ${generator_cuda_srcs})
@@ -116,23 +120,28 @@ target_include_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
 target_link_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
 target_link_libraries(Tests PRIVATE onnxruntime-genai-static ${ONNXRUNTIME_LIB})
 #
-pybind11_add_module(python ${python_srcs})
-target_include_directories(python PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
-target_link_directories(python PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
-target_link_libraries(python PRIVATE onnxruntime-genai-static ${ONNXRUNTIME_LIB})
-set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
+
+if(ENABLE_PYTHON)
+  pybind11_add_module(python ${python_srcs})
+  target_include_directories(python PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
+  target_link_directories(python PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
+  target_link_libraries(python PRIVATE onnxruntime-genai-static ${ONNXRUNTIME_LIB})
+  set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
+endif()
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   set_target_properties(onnxruntime-genai PROPERTIES LINKER_LANGUAGE CUDA)
   set_target_properties(Tests PROPERTIES LINKER_LANGUAGE CUDA)
-  set_target_properties(python PROPERTIES LINKER_LANGUAGE CUDA)
   target_link_libraries(onnxruntime-genai PRIVATE cublasLt cublas cudnn curand cufft cudart)
   target_link_libraries(Tests PRIVATE cublasLt cublas cudnn curand cufft cudart)
-  target_link_libraries(python PRIVATE cublasLt cublas cudnn curand cufft cudart)
   #  onnxruntime-genai-static is statically linked under Windows
   if(NOT WIN32)
     set_target_properties(onnxruntime-genai-static PROPERTIES LINKER_LANGUAGE CUDA)
     target_link_libraries(onnxruntime-genai-static PRIVATE cublasLt cublas cudnn curand cufft cudart)
+  endif()
+  if(ENABLE_PYTHON)
+    set_target_properties(python PROPERTIES LINKER_LANGUAGE CUDA)
+    target_link_libraries(python PRIVATE cublasLt cublas cudnn curand cufft cudart)
   endif()
 endif()
 
@@ -159,9 +168,12 @@ if(USE_TOKENIZER)
   target_include_directories(onnxruntime-genai PRIVATE ${TOKENIZER_ROOT})
   target_include_directories(onnxruntime-genai-static PRIVATE ${TOKENIZER_ROOT})
   target_include_directories(Tests PRIVATE ${TOKENIZER_ROOT})
-  target_include_directories(python PRIVATE ${TOKENIZER_ROOT})
   target_link_libraries(onnxruntime-genai PRIVATE tokenizer)
   target_link_libraries(onnxruntime-genai-static PRIVATE tokenizer)
+  if(ENABLE_PYTHON)
+    target_include_directories(python PRIVATE ${TOKENIZER_ROOT})
+    target_link_libraries(python PRIVATE tokenizer)
+  endif()
   message("Linking Tokenizer with TOKENIZER_ROOT: ${TOKENIZER_ROOT}")
 endif()
 
@@ -188,11 +200,11 @@ if(BUILD_WHEEL)
     configure_file("${filename}" "${WHEEL_FILES_DIR}/${TARGET_NAME}" COPYONLY)
   endforeach(filename)
 
-  add_custom_target(PyPackageBuild
-     COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:python> ${WHEEL_FILES_DIR}/${TARGET_NAME}
-     COMMAND "${PYTHON_EXECUTABLE}" -m pip wheel .
-     WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
-     COMMENT "Building wheel"
+  add_custom_target(PyPackageBuild ALL
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:python> ${WHEEL_FILES_DIR}/${TARGET_NAME}
+    COMMAND "${PYTHON_EXECUTABLE}" -m pip wheel .
+    WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
+    COMMENT "Building wheel"
   )
 
   add_dependencies(PyPackageBuild python)
