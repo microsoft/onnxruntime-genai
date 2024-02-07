@@ -19,6 +19,7 @@ endforeach()
 
 message("Loading Dependencies ...")
 
+if(ENABLE_PYTHON)
 FetchContent_Declare(
     pybind11_project
     URL ${DEP_URL_pybind11}
@@ -31,6 +32,7 @@ if(TARGET pybind11::module)
   set(pybind11_lib pybind11::module)
 else()
   set(pybind11_dep pybind11::pybind11)
+endif()
 endif()
 
 FetchContent_Declare(
