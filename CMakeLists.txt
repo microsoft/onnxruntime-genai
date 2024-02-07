@@ -99,14 +99,17 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 if(WIN32)
+  set (COPY_COMMAND copy)
   set(ONNXRUNTIME_LIB "onnxruntime.lib")
   set(ONNXRUNTIME_FILES "onnxruntime*.dll")
   set(ONNXRUNTIME_EXTENSIONS_LIB "tfmtok_c.lib")
   set(ONNXRUNTIME_EXTENSIONS_FILES "tfmtok_c.dll")
 elseif(APPLE)
+  SET(COPY_COMMAND cp)
   set(ONNXRUNTIME_LIB "libonnxruntime.dylib")
   set(ONNXRUNTIME_FILES "libonnxruntime*.dylib")
 else()
+  SET(COPY_COMMAND cp)
   set(ONNXRUNTIME_LIB "libonnxruntime.so")
   set(ONNXRUNTIME_FILES "libonnxruntime*.so*")
   set(ONNXRUNTIME_EXTENSIONS_LIB "tfmtok_c.so")
@@ -152,11 +155,12 @@ if(MSVC)
 endif()
 
 # Copy the onnxruntime binaries into the build folder so it's found on launch
+
 file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/lib/${ONNXRUNTIME_FILES}")
 foreach(DLL_FILE ${onnxruntime_libs})
   add_custom_command(
      TARGET onnxruntime-genai POST_BUILD
-     COMMAND ${CMAKE_COMMAND} -E copy ${DLL_FILE} ${CMAKE_BINARY_DIR}/$<CONFIG>/${DLL_FILE_NAME}
+     COMMAND ${CMAKE_COMMAND} -E ${COPY_COMMAND} ${DLL_FILE} ${CMAKE_BINARY_DIR}/$<CONFIG>/${DLL_FILE_NAME}
   )
 endforeach()
 
@@ -175,6 +179,7 @@ if(USE_TOKENIZER)
 endif()
 
 if(BUILD_WHEEL)
+
   set(WHEEL_FILES_DIR "${CMAKE_BINARY_DIR}/wheel")
   message("Setting up wheel files in : ${WHEEL_FILES_DIR}")
   set(TARGET_NAME "onnxruntime_genai")
@@ -184,7 +189,7 @@ if(BUILD_WHEEL)
   foreach(DLL_FILE ${onnxruntime_libs})
     add_custom_command(
        TARGET onnxruntime-genai-static POST_BUILD
-       COMMAND ${CMAKE_COMMAND} -E copy ${DLL_FILE} ${WHEEL_FILES_DIR}/${TARGET_NAME}/${DLL_FILE_NAME}
+       COMMAND ${CMAKE_COMMAND} -E ${COPY_COMMAND} ${DLL_FILE} ${WHEEL_FILES_DIR}/${TARGET_NAME}/${DLL_FILE_NAME}
     )
   endforeach()
 
@@ -198,7 +203,7 @@ if(BUILD_WHEEL)
   endforeach(filename)
 
   add_custom_target(PyPackageBuild ALL
-    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:python> ${WHEEL_FILES_DIR}/${TARGET_NAME}
+    COMMAND ${CMAKE_COMMAND} -E ${COPY_COMMAND} $<TARGET_FILE:python> ${WHEEL_FILES_DIR}/${TARGET_NAME}
     COMMAND "${PYTHON_EXECUTABLE}" -m pip wheel .
     WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
     COMMENT "Building wheel"
