@@ -166,44 +166,7 @@ void GreedySearch_Cuda::SelectTop() {
   AppendNextTokensToSequences();
 }
 
-// TODO: commented out in case of benchmarking
-// void SoftMax(std::span<float> scores, float temperature);
-// void TopPSampling(int32_t* d_next_token, float* d_scores, int size, float threshold, float temperature) {
-//   auto scores_buffer = CudaMallocHostArray<float>(size);
-//   std::span<float> scores{scores_buffer.get(), static_cast<size_t>(size)};
-//   cudaMemcpy(scores.data(), d_scores, size * sizeof(float), cudaMemcpyDeviceToHost);
-
-//   SoftMax(scores, temperature);
-
-//   // Sort an array of indices by scores
-//   std::vector<int32_t> indices(scores.size());
-//   std::iota(indices.begin(), indices.end(), 0);
-//   std::sort(indices.begin(), indices.end(), [scores = scores.data()](int32_t i, int32_t j) { return scores[i] > scores[j]; });
-
-//   int32_t token = 0;
-//   // Find the first token where the cumulative probability exceeds the threshold
-//   for (int i = 0; i < scores.size(); i++) {
-//     threshold -= scores[indices[i]];
-//     if (threshold > 0)
-//       continue;
-
-//     token = indices[i];
-//     break;
-//   }
-
-//   cudaMemcpy(d_next_token, &token, sizeof(token), cudaMemcpyHostToDevice);
-// }
-
 void GreedySearch_Cuda::SampleTopP(float p, float temperature) {
-  // TODO: commented out in case of benchmarking
-  // std::random_device rd;
-  // std::mt19937 gen(rd());
-  // std::uniform_real_distribution<float> dis(0, p);
-  // for (int i = 0; i < params_.batch_size; i++) {
-  //   std::span<float> scores = next_token_scores_.subspan(i * params_.vocab_size, params_.vocab_size);
-  //   TopPSampling(next_tokens_.data() + i, scores.data(), static_cast<int>(scores.size()), dis(gen), temperature);
-  // }
-
   std::span<float> scores = next_token_scores_.subspan(0, params_.batch_size * params_.vocab_size);
   cuda::GetSample(params_.cuda_stream, next_tokens_.data(), scores.data(), int(scores.size() / params_.batch_size),
                   params_.batch_size, -1, p, temperature);
@@ -219,24 +182,13 @@ void GreedySearch_Cuda::SampleTopK(int k, float temperature) {
   AppendNextTokensToSequences();
 }
 
-// TODO: API stuff... do we want this?
-// tokens_out should be preallocated with size k * batch_size
-void GreedySearch_Cuda::GetTopKSubset(int* tokens_out, int k) {
+void GreedySearch_Cuda::SampleTopPAndK(float p, int k, float temperature) {
   std::span<float> scores = next_token_scores_.subspan(0, params_.batch_size * params_.vocab_size);
-  auto scores_out_buff = CudaMallocArray<float>(params_.batch_size * k);
-  std::span<float> scores_out{scores_out_buff.get(), static_cast<size_t>(params_.batch_size * k)};
-  cuda::GetTopKSubset(params_.cuda_stream, scores.data(), scores_out.data(), tokens_out, int(scores.size() / params_.batch_size), params_.batch_size, k);
+  cuda::GetSample(params_.cuda_stream, next_tokens_.data(), scores.data(), int(scores.size() / params_.batch_size),
+                  params_.batch_size, k, p, temperature);
+  CheckForEOS();
+  AppendNextTokensToSequences();
 }
-
-// TODO: api stuff... do we want this?
-// void GreedySearch_Cuda::SampleTopPAndK(float p, int k, float temperature) {
-//   std::span<float> scores = next_token_scores_.subspan(0, params_.batch_size * params_.vocab_size);
-//   cuda::GetSample(params_.cuda_stream, next_tokens_.data(), scores.data(), int(scores.size() / params_.batch_size),
-//                   params_.batch_size, k, p, temperature);
-
-//   CheckForEOS();
-//   AppendNextTokensToSequences();
-// }
 
 void GreedySearch_Cuda::CheckForEOS() {
   assert(next_tokens_.size() == eos_meet_.size());

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
 #include "tests_helper.cuh"
 #include "../cuda_sampling.cuh"
 #include <cuda_runtime.h>
