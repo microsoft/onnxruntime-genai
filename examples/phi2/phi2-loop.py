@@ -6,8 +6,6 @@ print("Model loaded")
 tokenizer=model.create_tokenizer()
 print("Tokenizer created")
 
-tokenizer=model.create_tokenizer()
-
 prompt = '''def print_prime(n):
     """
     Print all primes between 1 and n

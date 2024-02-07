@@ -1,4 +1,3 @@
-import argparse
 import time
 import onnxruntime_genai as og
 
