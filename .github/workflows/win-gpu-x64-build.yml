@@ -51,8 +51,14 @@ jobs:
           mkdir build
           cd build
           cmake -G "Visual Studio 17 2022" -A x64 -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} .. -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=TRUE
-          cmake --build . --config Release --parallel
-
+          echo "===> Building onnxruntime-genai Shared <==="
+          cmake --build . --config Release --parallel --target onnxruntime-genai
+          echo "===> Building onnxruntime-genai Static <==="
+          cmake --build . --config Release --parallel --target onnxruntime-genai-static
+          echo "===> Building onnxruntime-genai python wheel <==="
+          cmake --build . --config Release --parallel --target python
+          echo "===> Building onnxruntime-genai Unit Tests <==="  
+          cmake --build . --config Release --parallel --target unit_tests
       - name: Verify Build Artifacts
         if: always()
         run: |
