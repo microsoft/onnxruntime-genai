@@ -17,7 +17,7 @@ env:
 
 jobs:
   job:
-    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Win2022-CPU"]
+    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Win2022-CPU" ]
     steps:
       - uses: actions/checkout@v2
 
@@ -51,7 +51,8 @@ jobs:
 
       - name: Build with CMake
         run: |
-          python build.py
+          cmake -G "Visual Studio 17 2022" -A arm64 . -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=OFF
+          cmake --build . --config Release --parallel
 
       - name: Verify Build Artifacts
         if: always()
