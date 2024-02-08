@@ -11,7 +11,9 @@ option(ENABLE_PYTHON "Enable python buildings" ON)
 cmake_dependent_option(BUILD_WHEEL "Build the python wheel" ON "ENABLE_PYTHON" OFF)
 
 include(cmake/external/onnxruntime_external_deps.cmake)
-
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/${CMAKE_BUILD_TYPE}/lib")
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/${CMAKE_BUILD_TYPE}/lib")
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/${CMAKE_BUILD_TYPE}/bin")
 
 # Checking if CUDA is supported
 include(CheckLanguage)
@@ -156,7 +158,7 @@ endif()
 file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/lib/${ONNXRUNTIME_FILES}")
 add_custom_command(
   TARGET onnxruntime-genai POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} ${CMAKE_BINARY_DIR}/
+  COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} "${CMAKE_BINARY_DIR}/${CMAKE_BUILD_TYPE}/lib"
 )
 
 if(USE_TOKENIZER)
