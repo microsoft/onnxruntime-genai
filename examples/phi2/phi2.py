@@ -16,7 +16,7 @@ tokens = tokenizer.encode(prompt)
 
 print(tokens)
 
-params=og.search_params(model)
+params=og.SearchParams(model)
 params.max_length = 200
 params.input_ids = tokens
 

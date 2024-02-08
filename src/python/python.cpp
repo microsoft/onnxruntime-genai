@@ -234,7 +234,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .value("CUDA", DeviceType::CUDA)
       .export_values();
 
-  pybind11::class_<PySearchParams>(m, "search_params")
+  pybind11::class_<PySearchParams>(m, "SearchParams")
       .def(pybind11::init<const Model&>())
       .def_readonly("pad_token_id", &PySearchParams::pad_token_id)
       .def_readonly("eos_token_id", &PySearchParams::eos_token_id)

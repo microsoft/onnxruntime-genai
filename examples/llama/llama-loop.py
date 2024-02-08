@@ -11,7 +11,7 @@ prompt = "I like walking my cute dog"
 
 input_tokens = tokenizer.encode(prompt)
 
-params=og.search_params(model)
+params=og.SearchParams(model)
 params.max_length = 256
 params.input_ids = input_tokens
 
