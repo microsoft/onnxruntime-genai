@@ -14,10 +14,9 @@ void Test_BeamSearch_Gpt_Fp32();
 void Test_Phi2_Cuda();
 void Test_GreedySearch_Gpt_Cuda();
 void Test_BeamSearch_Gpt_Cuda();
-void Test_Sampling_Cuda();
 #endif
 
-int main() {
+int old_main() {
   std::cout << "Generators Utility Library" << std::endl;
 
   std::cout << "Initializing OnnxRuntime...";
@@ -35,7 +34,6 @@ int main() {
     Test_GreedySearch_Gpt_Cuda();
     Test_BeamSearch_Gpt_Cuda();
     Test_Phi2_Cuda();
-    Test_Sampling_Cuda();
 #endif
   } catch (const std::exception& e) {
     std::cout << "Fatal Exception: " << e.what() << std::endl;
