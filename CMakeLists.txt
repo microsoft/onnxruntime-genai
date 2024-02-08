@@ -177,7 +177,7 @@ if(BUILD_WHEEL)
   set(TARGET_NAME "onnxruntime_genai")
   configure_file(${PYTHON_ROOT}/setup.py.in ${WHEEL_FILES_DIR}/setup.py @ONLY)
   configure_file(${PYTHON_ROOT}/py/__init__.py.in ${WHEEL_FILES_DIR}/${TARGET_NAME}/__init__.py @ONLY)
-  file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/${ONNXRUNTIME_FILES}")
+  file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/lib/${ONNXRUNTIME_FILES}")
   foreach(DLL_FILE ${onnxruntime_libs})
     add_custom_command(
        TARGET onnxruntime-genai-static
