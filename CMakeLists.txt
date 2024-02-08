@@ -2,17 +2,7 @@
 # Licensed under the MIT License.
 
 cmake_minimum_required(VERSION 3.26)
-project(Generators LANGUAGES C CXX)
-# All Options should be defined in cmake/options.cmake
-include(cmake/options.cmake)
-include(cmake/external/onnxruntime_external_deps.cmake)
-# Checking if CUDA is supported
-include(CheckLanguage)
-check_language(CUDA)
-if("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_LESS 9)
-  message(FATAL_ERROR "GCC version must be greater than or equal to 9")
-endif()
-# Set the output directory based on build configuration
+
 if(WIN32)
   # For Windows
   set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/lib")
@@ -24,6 +14,18 @@ else()
   set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
   set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 endif()
+
+project(Generators LANGUAGES C CXX)
+# All Options should be defined in cmake/options.cmake
+include(cmake/options.cmake)
+include(cmake/external/onnxruntime_external_deps.cmake)
+# Checking if CUDA is supported
+include(CheckLanguage)
+check_language(CUDA)
+if("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_LESS 9)
+  message(FATAL_ERROR "GCC version must be greater than or equal to 9")
+endif()
+# Set the output directory based on build configuration
 
 if("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_LESS 10)
   add_compile_definitions(USE_CXX17=1)
