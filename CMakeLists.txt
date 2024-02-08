@@ -81,9 +81,8 @@ endif()
 
 add_library(onnxruntime-genai SHARED ${generator_srcs})
 add_library(onnxruntime-genai-static STATIC ${generator_srcs})
-target_include_directories(onnxruntime-genai PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
-target_include_directories(onnxruntime-genai-static PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
-
+target_include_directories(onnxruntime-genai PRIVATE ${ORT_HEADER_DIR})
+target_include_directories(onnxruntime-genai-static PRIVATE ${ORT_HEADER_DIR})
 
 if(USE_TOKENIZER)
   add_subdirectory("${CMAKE_SOURCE_DIR}/src/tokenizer")
@@ -109,25 +108,22 @@ else()
   set(ONNXRUNTIME_EXTENSIONS_LIB "tfmtok_c.so")
 endif()
 
-add_executable(unit_tests ${test_srcs})
-target_include_directories(unit_tests PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
-target_link_directories(unit_tests PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
-target_link_libraries(unit_tests PRIVATE onnxruntime-genai-static ${ONNXRUNTIME_LIB})
-#
+if(ENABLE_TESTS)
+  add_subdirectory("${CMAKE_SOURCE_DIR}/test")
+  message("Enabling tests")
+endif()
 
 if(ENABLE_PYTHON)
   pybind11_add_module(python ${python_srcs})
-  target_include_directories(python PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
-  target_link_directories(python PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
+  target_include_directories(python PRIVATE ${ORT_HEADER_DIR})
+  target_link_directories(python PRIVATE ${ORT_LIB_DIR})
   target_link_libraries(python PRIVATE onnxruntime-genai-static ${ONNXRUNTIME_LIB})
   set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
 endif()
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   set_target_properties(onnxruntime-genai PROPERTIES LINKER_LANGUAGE CUDA)
-  set_target_properties(unit_tests PROPERTIES LINKER_LANGUAGE CUDA)
   target_link_libraries(onnxruntime-genai PRIVATE cublasLt cublas cudnn curand cufft cudart)
-  target_link_libraries(unit_tests PRIVATE cublasLt cublas cudnn curand cufft cudart)
   #  onnxruntime-genai-static is statically linked under Windows
   if(NOT WIN32)
     set_target_properties(onnxruntime-genai-static PROPERTIES LINKER_LANGUAGE CUDA)
@@ -149,11 +145,11 @@ if(MSVC)
 endif()
 
 # Copy the onnxruntime binaries into the build folder so it's found on launch
-file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/lib/${ONNXRUNTIME_FILES}")
+file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_FILES}")
 foreach(DLL_FILE ${onnxruntime_libs})
   add_custom_command(
-     TARGET onnxruntime-genai POST_BUILD
-     COMMAND ${CMAKE_COMMAND} -E copy_if_different  ${DLL_FILE} $<TARGET_FILE_DIR:onnxruntime-genai>
+    TARGET onnxruntime-genai POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DLL_FILE} $<TARGET_FILE_DIR:onnxruntime-genai>
   )
 endforeach()
 
@@ -161,7 +157,6 @@ if(USE_TOKENIZER)
   add_compile_definitions(USE_TOKENIZER=1)
   target_include_directories(onnxruntime-genai PRIVATE ${TOKENIZER_ROOT})
   target_include_directories(onnxruntime-genai-static PRIVATE ${TOKENIZER_ROOT})
-  target_include_directories(unit_tests PRIVATE ${TOKENIZER_ROOT})
   target_link_libraries(onnxruntime-genai PRIVATE tokenizer)
   target_link_libraries(onnxruntime-genai-static PRIVATE tokenizer)
   if(ENABLE_PYTHON)
@@ -177,7 +172,6 @@ endif()
 
 # Have visual studio put all files into one single folder vs the default split of header files into a separate folder
 source_group(TREE ${GENERATORS_ROOT} FILES ${generator_srcs})
-source_group("Sources" FILES ${test_srcs})
 source_group("Sources" FILES ${python_srcs})
 
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT unit_tests)
