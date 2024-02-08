@@ -200,7 +200,6 @@ if(BUILD_WHEEL)
     WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
     COMMENT "Building wheel"
   )
-  add_dependencies(BuildWheel CopyOnnxRuntimeStaticLibrariesToWheel)
   add_dependencies(BuildWheel python)
 endif()
 
