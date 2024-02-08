@@ -17,9 +17,7 @@ env:
 
 jobs:
   job:
-#    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Win2022-CPU"]
-    runs-on: windows-latest
-
+    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Win2022-CPU"]
     steps:
       - uses: actions/checkout@v2
 

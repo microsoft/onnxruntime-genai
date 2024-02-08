@@ -12,7 +12,6 @@ cmake_dependent_option(BUILD_WHEEL "Build the python wheel" ON "ENABLE_PYTHON" O
 
 include(cmake/external/onnxruntime_external_deps.cmake)
 # Set the output directory based on build configuration
-# Set the output directory based on build configuration
 if(WIN32)
     # For Windows
     set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/lib")
@@ -222,8 +221,8 @@ source_group("Sources" FILES ${python_srcs})
 
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT unit_tests)
 
-#enable_testing()
-#
+enable_testing()
+
 target_include_directories(
   unit_tests
   PRIVATE
@@ -238,4 +237,4 @@ target_link_libraries(
 )
 
 include(GoogleTest)
-#gtest_discover_tests(unit_tests)
+gtest_discover_tests(unit_tests)
