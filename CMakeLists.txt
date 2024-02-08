@@ -2,30 +2,20 @@
 # Licensed under the MIT License.
 
 cmake_minimum_required(VERSION 3.26)
-
-if(WIN32)
-  # For Windows
-  set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/lib")
-  set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/lib")
-  set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/bin")
-else()
-  # For Unix-like systems
-  set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
-  set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
-  set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-endif()
-
+include(FetchContent)
+include(CMakeDependentOption)
 project(Generators LANGUAGES C CXX)
 # All Options should be defined in cmake/options.cmake
 include(cmake/options.cmake)
 include(cmake/external/onnxruntime_external_deps.cmake)
 # Checking if CUDA is supported
 include(CheckLanguage)
-check_language(CUDA)
+if(USE_CUDA)
+  check_language(CUDA)
+endif()
 if("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_LESS 9)
   message(FATAL_ERROR "GCC version must be greater than or equal to 9")
 endif()
-# Set the output directory based on build configuration
 
 if("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_LESS 10)
   add_compile_definitions(USE_CXX17=1)
@@ -160,11 +150,12 @@ endif()
 
 # Copy the onnxruntime binaries into the build folder so it's found on launch
 file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/lib/${ONNXRUNTIME_FILES}")
-add_custom_command(
-  TARGET onnxruntime-genai POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}"
-  COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
-)
+foreach(DLL_FILE ${onnxruntime_libs})
+  add_custom_command(
+     TARGET onnxruntime-genai POST_BUILD
+     COMMAND ${CMAKE_COMMAND} -E copy_if_different  ${DLL_FILE} $<TARGET_FILE_DIR:onnxruntime-genai>
+  )
+endforeach()
 
 if(USE_TOKENIZER)
   add_compile_definitions(USE_TOKENIZER=1)
@@ -186,11 +177,13 @@ if(BUILD_WHEEL)
   set(TARGET_NAME "onnxruntime_genai")
   configure_file(${PYTHON_ROOT}/setup.py.in ${WHEEL_FILES_DIR}/setup.py @ONLY)
   configure_file(${PYTHON_ROOT}/py/__init__.py.in ${WHEEL_FILES_DIR}/${TARGET_NAME}/__init__.py @ONLY)
-  file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/lib/${ONNXRUNTIME_FILES}")
-  add_custom_target(CopyOnnxRuntimeStaticLibrariesToWheel ALL
-    DEPENDS onnxruntime-genai-static
-    COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} ${WHEEL_FILES_DIR}/${TARGET_NAME}/
-  )
+  file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/${ONNXRUNTIME_FILES}")
+  foreach(DLL_FILE ${onnxruntime_libs})
+    add_custom_command(
+       TARGET onnxruntime-genai-static
+       COMMAND ${CMAKE_COMMAND} -E copy ${DLL_FILE} ${WHEEL_FILES_DIR}/${TARGET_NAME}/${DLL_FILE_NAME}
+    )
+  endforeach()
 
 
   # Copy over any additional python files
