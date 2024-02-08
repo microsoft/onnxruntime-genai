@@ -27,9 +27,9 @@ endif()
 
 set(GENERATORS_ROOT ${PROJECT_SOURCE_DIR}/src)
 set(MODELS_ROOT ${PROJECT_SOURCE_DIR}/src/models)
-set(TESTS_ROOT ${PROJECT_SOURCE_DIR}/test)
 set(PYTHON_ROOT ${PROJECT_SOURCE_DIR}/src/python)
-
+set(ORT_HEADER_DIR ${CMAKE_SOURCE_DIR}/ort/include)
+set(ORT_LIB_DIR ${CMAKE_SOURCE_DIR}/ort/lib)
 # CUDA Being enabled will make it not a debug build without this option, so all of the C++ headers will complain
 # about a mismatch with the actual debug headers and it'll fail to link. I don't know why this happens, or if this is the best fix.
 if(USE_CUDA AND CMAKE_CUDA_COMPILER AND CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -91,7 +91,6 @@ endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set_target_properties(onnxruntime-genai-static PROPERTIES POSITION_INDEPENDENT_CODE ON)
-
 endif()
 
 if(WIN32)
@@ -173,9 +172,3 @@ endif()
 # Have visual studio put all files into one single folder vs the default split of header files into a separate folder
 source_group(TREE ${GENERATORS_ROOT} FILES ${generator_srcs})
 source_group("Sources" FILES ${python_srcs})
-
-set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT unit_tests)
-
-if(ENABLE_UNIT_TESTS)
-  include(cmake/unit_testing.cmake)
-endif()
