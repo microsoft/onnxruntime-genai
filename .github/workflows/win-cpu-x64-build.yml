@@ -45,7 +45,7 @@ jobs:
           git submodule update --init --recursive
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v2
+        uses: github/codeql-action/init@v3
         with:
           languages: 'cpp'
 
@@ -60,7 +60,7 @@ jobs:
           Get-ChildItem -Path $env:GITHUB_WORKSPACE\Release -Recurse
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v2
+        uses: github/codeql-action/analyze@v3
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v3
