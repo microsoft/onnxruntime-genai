@@ -2,18 +2,10 @@
 # Licensed under the MIT License.
 
 cmake_minimum_required(VERSION 3.26)
-include(FetchContent)
-include(CMakeDependentOption)
 project(Generators LANGUAGES C CXX)
-option(USE_CUDA "Build with CUDA support" ON)
-option(USE_TOKENIZER "Build with Tokenizer support" ON)
-option(ENABLE_PYTHON "Enable python buildings" ON)
-option(ENABLE_UNIT_TESTS "Enable unit tests" ON)
-
-cmake_dependent_option(BUILD_WHEEL "Build the python wheel" ON "ENABLE_PYTHON" OFF)
-
+# All Options should be defined in cmake/options.cmake
+include(cmake/options.cmake)
 include(cmake/external/onnxruntime_external_deps.cmake)
-
 # Checking if CUDA is supported
 include(CheckLanguage)
 check_language(CUDA)
@@ -157,6 +149,7 @@ file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/lib/${ONNXRUNTIME_FILES}")
 add_custom_command(
   TARGET onnxruntime-genai POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}"
+  COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
 )
 
 if(USE_TOKENIZER)
@@ -212,5 +205,5 @@ source_group("Sources" FILES ${python_srcs})
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT unit_tests)
 
 if(ENABLE_UNIT_TESTS)
-  include(cmake/setup_unit_testing.cmake)
+  include(cmake/unit_testing.cmake)
 endif()
