@@ -32,7 +32,7 @@ endif()
 
 set(GENERATORS_ROOT ${PROJECT_SOURCE_DIR}/src)
 set(MODELS_ROOT ${PROJECT_SOURCE_DIR}/src/models)
-set(TESTS_ROOT ${PROJECT_SOURCE_DIR}/src/tests)
+set(TESTS_ROOT ${PROJECT_SOURCE_DIR}/test)
 set(PYTHON_ROOT ${PROJECT_SOURCE_DIR}/src/python)
 
 # CUDA Being enabled will make it not a debug build without this option, so all of the C++ headers will complain
@@ -115,10 +115,10 @@ else()
   set(ONNXRUNTIME_EXTENSIONS_LIB "tfmtok_c.so")
 endif()
 
-add_executable(Tests ${test_srcs})
-target_include_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
-target_link_directories(Tests PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
-target_link_libraries(Tests PRIVATE onnxruntime-genai-static ${ONNXRUNTIME_LIB})
+add_executable(unit_tests ${test_srcs})
+target_include_directories(unit_tests PRIVATE ${CMAKE_SOURCE_DIR}/ort/include)
+target_link_directories(unit_tests PRIVATE ${CMAKE_SOURCE_DIR}/ort/lib)
+target_link_libraries(unit_tests PRIVATE onnxruntime-genai-static ${ONNXRUNTIME_LIB})
 #
 
 if(ENABLE_PYTHON)
@@ -131,9 +131,9 @@ endif()
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   set_target_properties(onnxruntime-genai PROPERTIES LINKER_LANGUAGE CUDA)
-  set_target_properties(Tests PROPERTIES LINKER_LANGUAGE CUDA)
+  set_target_properties(unit_tests PROPERTIES LINKER_LANGUAGE CUDA)
   target_link_libraries(onnxruntime-genai PRIVATE cublasLt cublas cudnn curand cufft cudart)
-  target_link_libraries(Tests PRIVATE cublasLt cublas cudnn curand cufft cudart)
+  target_link_libraries(unit_tests PRIVATE cublasLt cublas cudnn curand cufft cudart)
   #  onnxruntime-genai-static is statically linked under Windows
   if(NOT WIN32)
     set_target_properties(onnxruntime-genai-static PROPERTIES LINKER_LANGUAGE CUDA)
@@ -165,7 +165,7 @@ if(USE_TOKENIZER)
   add_compile_definitions(USE_TOKENIZER=1)
   target_include_directories(onnxruntime-genai PRIVATE ${TOKENIZER_ROOT})
   target_include_directories(onnxruntime-genai-static PRIVATE ${TOKENIZER_ROOT})
-  target_include_directories(Tests PRIVATE ${TOKENIZER_ROOT})
+  target_include_directories(unit_tests PRIVATE ${TOKENIZER_ROOT})
   target_link_libraries(onnxruntime-genai PRIVATE tokenizer)
   target_link_libraries(onnxruntime-genai-static PRIVATE tokenizer)
   if(ENABLE_PYTHON)
@@ -211,4 +211,22 @@ source_group(TREE ${GENERATORS_ROOT} FILES ${generator_srcs})
 source_group("Sources" FILES ${test_srcs})
 source_group("Sources" FILES ${python_srcs})
 
-set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT Tests)
+set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT unit_tests)
+
+enable_testing()
+
+target_include_directories (
+  unit_tests
+  PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+)
+
+
+target_link_libraries(
+  unit_tests
+  PRIVATE
+  GTest::gtest_main
+)
+
+include(GoogleTest)
+gtest_discover_tests(unit_tests)

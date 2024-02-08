@@ -18,6 +18,7 @@ foreach(ONNXRUNTIME_DEP IN LISTS ONNXRUNTIME_DEPS_LIST)
 endforeach()
 
 message("Loading Dependencies ...")
+
 if(ENABLE_PYTHON)
 FetchContent_Declare(
     pybind11_project
@@ -33,3 +34,13 @@ else()
   set(pybind11_dep pybind11::pybind11)
 endif()
 endif()
+
+FetchContent_Declare(
+  googletest
+  URL ${DEP_URL_googletest}
+  URL_HASH SHA1=${DEP_SHA1_googletest}
+  FIND_PACKAGE_ARGS 1.14.0...<2.0.0 NAMES GTest
+)
+
+onnxruntime_fetchcontent_makeavailable(googletest)
+
