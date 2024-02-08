@@ -8,21 +8,23 @@ project(Generators LANGUAGES C CXX)
 option(USE_CUDA "Build with CUDA support" ON)
 option(USE_TOKENIZER "Build with Tokenizer support" ON)
 option(ENABLE_PYTHON "Enable python buildings" ON)
+option(ENABLE_UNIT_TESTS "Enable unit tests" ON)
+
 cmake_dependent_option(BUILD_WHEEL "Build the python wheel" ON "ENABLE_PYTHON" OFF)
 
 include(cmake/external/onnxruntime_external_deps.cmake)
-# Set the output directory based on build configuration
-if(WIN32)
-    # For Windows
-    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/lib")
-    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/lib")
-    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/bin")
-else()
-    # For Unix-like systems
-    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
-    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
-    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-endif()
+## Set the output directory based on build configuration
+#if(WIN32)
+#  # For Windows
+#  set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/lib")
+#  set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/lib")
+#  set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/bin")
+#else()
+#  # For Unix-like systems
+#  set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+#  set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+#  set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+#endif()
 
 # Checking if CUDA is supported
 include(CheckLanguage)
@@ -221,20 +223,6 @@ source_group("Sources" FILES ${python_srcs})
 
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT unit_tests)
 
-enable_testing()
-
-target_include_directories(
-  unit_tests
-  PRIVATE
-  ${CMAKE_SOURCE_DIR}/src
-)
-
-
-target_link_libraries(
-  unit_tests
-  PRIVATE
-  GTest::gtest_main
-)
-
-include(GoogleTest)
-gtest_discover_tests(unit_tests)
+if(ENABLE_UNIT_TESTS)
+  include(cmake/setup_unit_testing.cmake)
+endif()
