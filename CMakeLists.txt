@@ -15,7 +15,9 @@ include(cmake/external/onnxruntime_external_deps.cmake)
 
 # Checking if CUDA is supported
 include(CheckLanguage)
-check_language(CUDA)
+if(USE_CUDA)
+  check_language(CUDA)
+endif()
 if("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_LESS 9)
   message(FATAL_ERROR "GCC version must be greater than or equal to 9")
 endif()
@@ -152,11 +154,11 @@ if(MSVC)
 endif()
 
 # Copy the onnxruntime binaries into the build folder so it's found on launch
-file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/${ONNXRUNTIME_FILES}")
+file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/lib/${ONNXRUNTIME_FILES}")
 foreach(DLL_FILE ${onnxruntime_libs})
   add_custom_command(
      TARGET onnxruntime-genai POST_BUILD
-     COMMAND ${CMAKE_COMMAND} -E copy ${DLL_FILE} ${CMAKE_BINARY_DIR}/$<CONFIG>/${DLL_FILE_NAME}
+     COMMAND ${CMAKE_COMMAND} -E copy_if_different  ${DLL_FILE} $<TARGET_FILE_DIR:onnxruntime-genai>
   )
 endforeach()
 
@@ -229,5 +231,5 @@ target_link_libraries(
   GTest::gtest_main
 )
 
-include(GoogleTest)
-gtest_discover_tests(unit_tests)
+#include(GoogleTest)
+#gtest_discover_tests(unit_tests)

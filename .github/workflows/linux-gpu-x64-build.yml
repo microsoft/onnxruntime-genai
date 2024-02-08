@@ -54,6 +54,5 @@ jobs:
             --gpus all \
             --rm \
             --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-            --volume $RUNNER_TEMP:/build \
-            -w /build onnxruntimegpubuild bash -c "/usr/bin/cmake -G Ninja /onnxruntime_src -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_CUDA_ARCHITECTURES=75 -DUSE_CUDA=1 -DCMAKE_BUILD_TYPE=Release && ninja"
+            -w /onnxruntime_src onnxruntimegpubuild bash -c "echo $PATH && /usr/bin/cmake -DCMAKE_CUDA_ARCHITECTURES=86 --preset linux_gcc_cuda_release && /usr/bin/cmake --build --preset linux_gcc_cuda_release"
 
