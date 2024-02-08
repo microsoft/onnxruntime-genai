@@ -17,18 +17,6 @@
 
   "bos_token_id": 1,
   "eos_token_id": 2,
-  "hidden_act": "silu",
-  "initializer_range": 0.02,
-  "intermediate_size": 11008,
-  "max_position_embeddings": 4096,
-  "pretraining_tp": 1,
-  "rms_norm_eps": 1e-05,
-  "rope_scaling": null,
-  "tie_word_embeddings": false,
-  "torch_dtype": "float16",
-  "transformers_version": "4.31.0.dev0",
-  "use_cache": true,
-
   "max_length": 4096,
   "min_length":0,
   "top_p":0.7,

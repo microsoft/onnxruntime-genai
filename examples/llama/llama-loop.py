@@ -1,5 +1,4 @@
 ﻿import onnxruntime_genai as og
-from transformers import LlamaTokenizer
 
 print("Loading model...")
 model=og.Model("model", og.DeviceType.CPU)
