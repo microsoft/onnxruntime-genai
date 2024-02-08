@@ -49,6 +49,11 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
   "${MODELS_ROOT}/*.cpp"
 )
 
+file(GLOB python_srcs CMAKE_CONFIGURE_DEPENDS
+  "${PYTHON_ROOT}/*.h"
+  "${PYTHON_ROOT}/*.cpp"
+)
+
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   # Don't let cmake set a default value for CMAKE_CUDA_ARCHITECTURES
   cmake_policy(SET CMP0104 OLD)
