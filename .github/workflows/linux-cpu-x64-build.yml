@@ -36,16 +36,16 @@ jobs:
       - name: Build with CMake and GCC
         run: |
           set -e -x
+          rm -rf build
           cmake --preset linux_gcc_cpu_release
           cmake --build --preset linux_gcc_cpu_release
-          rm -rf build
-
+          
       - name: Build with CMake and clang
         run: |
           set -e -x
+          rm -rf build
           cmake --preset linux_clang_cpu_release
           cmake --build --preset linux_clang_cpu_release
-          rm -rf build
 
       - name: Verify Build Artifacts
         if: always()
