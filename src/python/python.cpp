@@ -77,7 +77,7 @@ void TestFP16(pybind11::array_t<float16> inputs) {
 
 std::string ToString(const GeneratorParams& v) {
   std::ostringstream oss;
-  oss << "search_params("
+  oss << "SearchParams("
          "num_beams="
       << v.num_beams << ", batch_size=" << v.batch_size << ", sequence_length=" << v.sequence_length << ", max_length=" << v.max_length << ", pad_token_id=" << v.pad_token_id << ", eos_token_id=" << v.eos_token_id << ", vocab_size=" << v.vocab_size << ", length_penalty=" << v.length_penalty << ", early_stopping=" << v.early_stopping << ")";
 
