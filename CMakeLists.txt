@@ -12,17 +12,18 @@ cmake_dependent_option(BUILD_WHEEL "Build the python wheel" ON "ENABLE_PYTHON" O
 
 include(cmake/external/onnxruntime_external_deps.cmake)
 # Set the output directory based on build configuration
-#if(NOT WIN32)
-#    # For Windows
-#    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/lib")
-#    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/lib")
-#    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/bin")
-#else()
-#    # For Unix-like systems
-#    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
-#    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
-#    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-#endif()
+# Set the output directory based on build configuration
+if(WIN32)
+    # For Windows
+    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/lib")
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/lib")
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/bin")
+else()
+    # For Unix-like systems
+    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+endif()
 
 # Checking if CUDA is supported
 include(CheckLanguage)
@@ -87,8 +88,7 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   include_directories("${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}")
 elseif(USE_CUDA)
   # USE_CUDA is true but cmake could not find the cuda compiler
-  message(WARNING "USE_CUDA is ON but no cuda compiler was found. Setting USE_CUDA to OFF")
-  set(USE_CUDA OFF)
+  message(FATAL_ERROR "USE_CUDA is ON but no cuda compiler was found.")
 else()
   file(GLOB generator_cuda_srcs "${GENERATORS_ROOT}/*_cuda*.*")
   list(REMOVE_ITEM generator_srcs ${generator_cuda_srcs})
@@ -224,7 +224,7 @@ set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT u
 
 #enable_testing()
 #
-target_include_directories (
+target_include_directories(
   unit_tests
   PRIVATE
   ${CMAKE_SOURCE_DIR}/src
