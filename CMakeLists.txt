@@ -37,6 +37,9 @@ if(MSVC)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /MP /w15038 /wd4100 /W4 /WX")
 endif()
 
+set(ORT_HEADER_DIR ${CMAKE_SOURCE_DIR}/ort/include)
+set(ORT_LIB_DIR ${CMAKE_SOURCE_DIR}/ort/lib)
+
 # CUDA Being enabled will make it not a debug build without this option, so all of the C++ headers will complain
 # about a mismatch with the actual debug headers and it'll fail to link. I don't know why this happens, or if this is the best fix.
 if(USE_CUDA AND CMAKE_CUDA_COMPILER AND CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -56,9 +59,6 @@ else()
   set(ONNXRUNTIME_FILES "libonnxruntime*.so*")
   set(ONNXRUNTIME_EXTENSIONS_LIB "tfmtok_c.so")
 endif()
-
-set(ORT_HEADER_DIR ${CMAKE_SOURCE_DIR}/ort/include)
-set(ORT_LIB_DIR ${CMAKE_SOURCE_DIR}/ort/lib)
 
 if(USE_TOKENIZER)
   add_subdirectory("${CMAKE_SOURCE_DIR}/src/tokenizer")
