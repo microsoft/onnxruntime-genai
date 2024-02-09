@@ -17,7 +17,6 @@ target_include_directories(onnxruntime-genai-static PRIVATE ${ORT_HEADER_DIR})
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set_target_properties(onnxruntime-genai-static PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
-
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   # Don't let cmake set a default value for CMAKE_CUDA_ARCHITECTURES
   cmake_policy(SET CMP0104 OLD)
@@ -56,10 +55,12 @@ if(USE_TOKENIZER)
 endif()
 # Copy the onnxruntime binaries into the build folder so it's found on launch
 file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_FILES}")
-add_custom_command(
-  TARGET onnxruntime-genai POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different ${onnxruntime_libs} $<TARGET_FILE_DIR:onnxruntime-genai>
-)
+foreach(DLL_FILE ${onnxruntime_libs})
+  add_custom_command(
+    TARGET onnxruntime-genai POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DLL_FILE} $<TARGET_FILE_DIR:onnxruntime-genai>
+  )
+endforeach()
 
 # Have visual studio put all files into one single folder vs the default split of header files into a separate folder
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${generator_srcs})
