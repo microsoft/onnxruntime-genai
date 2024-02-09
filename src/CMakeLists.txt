@@ -6,6 +6,11 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/models/*.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/models/*.cpp"
 )
+file(GLOB generator_cuda_exclusion_srcs "${CMAKE_CURRENT_SOURCE_DIR}/*_cuda*.*")
+list(REMOVE_ITEM generator_srcs ${generator_cuda_exclusion_srcs})
+
+add_library(onnxruntime-genai SHARED ${generator_srcs})
+add_library(onnxruntime-genai-static STATIC ${generator_srcs})
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   # Don't let cmake set a default value for CMAKE_CUDA_ARCHITECTURES
@@ -19,7 +24,9 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
     "${CMAKE_CURRENT_SOURCE_DIR}/models/*.cu"
     "${CMAKE_CURRENT_SOURCE_DIR}/models/*.cuh"
   )
+
   list(APPEND generator_srcs ${generator_cuda_srcs})
+  list(APPEND generator_srcs ${generator_cuda_exclusion_srcs})
   add_compile_definitions(USE_CUDA=1)
   include_directories("${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}")
   set_target_properties(onnxruntime-genai PROPERTIES LINKER_LANGUAGE CUDA)
@@ -30,14 +37,10 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
     target_link_libraries(onnxruntime-genai-static PRIVATE cublasLt cublas cudnn curand cufft cudart)
   endif()
 elseif(USE_CUDA)
-  message(FATAL_ERROR "USE_CUDA is ON but no cuda compiler was found, disabling USE_CUDA.")
-else()
-  file(GLOB generator_cuda_srcs "${CMAKE_CURRENT_SOURCE_DIR}/*_cuda*.*")
-  list(REMOVE_ITEM generator_srcs ${generator_cuda_srcs})
+  message(STATUS "USE_CUDA is ON but no cuda compiler was found, disabling USE_CUDA.")
+  set(USE_CUDA OFF)
 endif()
 
-add_library(onnxruntime-genai SHARED ${generator_srcs})
-add_library(onnxruntime-genai-static STATIC ${generator_srcs})
 target_include_directories(onnxruntime-genai PRIVATE ${ORT_HEADER_DIR})
 target_include_directories(onnxruntime-genai-static PRIVATE ${ORT_HEADER_DIR})
 
