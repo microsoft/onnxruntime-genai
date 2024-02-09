@@ -11,6 +11,12 @@ list(REMOVE_ITEM generator_srcs ${generator_cuda_exclusion_srcs})
 
 add_library(onnxruntime-genai SHARED ${generator_srcs})
 add_library(onnxruntime-genai-static STATIC ${generator_srcs})
+target_include_directories(onnxruntime-genai PRIVATE ${ORT_HEADER_DIR})
+target_include_directories(onnxruntime-genai-static PRIVATE ${ORT_HEADER_DIR})
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  set_target_properties(onnxruntime-genai-static PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   # Don't let cmake set a default value for CMAKE_CUDA_ARCHITECTURES
@@ -39,13 +45,6 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
 elseif(USE_CUDA)
   message(STATUS "USE_CUDA is ON but no cuda compiler was found, disabling USE_CUDA.")
   set(USE_CUDA OFF)
-endif()
-
-target_include_directories(onnxruntime-genai PRIVATE ${ORT_HEADER_DIR})
-target_include_directories(onnxruntime-genai-static PRIVATE ${ORT_HEADER_DIR})
-
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  set_target_properties(onnxruntime-genai-static PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
 if(USE_TOKENIZER)
