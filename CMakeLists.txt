@@ -27,7 +27,6 @@ endif()
 
 set(GENERATORS_ROOT ${PROJECT_SOURCE_DIR}/src)
 set(MODELS_ROOT ${PROJECT_SOURCE_DIR}/src/models)
-set(PYTHON_ROOT ${PROJECT_SOURCE_DIR}/src/python)
 set(ORT_HEADER_DIR ${CMAKE_SOURCE_DIR}/ort/include)
 set(ORT_LIB_DIR ${CMAKE_SOURCE_DIR}/ort/lib)
 # CUDA Being enabled will make it not a debug build without this option, so all of the C++ headers will complain
@@ -43,11 +42,6 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
   "${GENERATORS_ROOT}/*.cpp"
   "${MODELS_ROOT}/*.h"
   "${MODELS_ROOT}/*.cpp"
-)
-
-file(GLOB test_srcs CONFIGURE_DEPENDS
-  "${TESTS_ROOT}/*.h"
-  "${TESTS_ROOT}/*.cpp"
 )
 
 file(GLOB python_srcs CMAKE_CONFIGURE_DEPENDS
@@ -84,11 +78,6 @@ add_library(onnxruntime-genai-static STATIC ${generator_srcs})
 target_include_directories(onnxruntime-genai PRIVATE ${ORT_HEADER_DIR})
 target_include_directories(onnxruntime-genai-static PRIVATE ${ORT_HEADER_DIR})
 
-if(USE_TOKENIZER)
-  add_subdirectory("${CMAKE_SOURCE_DIR}/src/tokenizer")
-  message("Using Tokenizer")
-endif()
-
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set_target_properties(onnxruntime-genai-static PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
@@ -107,17 +96,19 @@ else()
   set(ONNXRUNTIME_EXTENSIONS_LIB "tfmtok_c.so")
 endif()
 
+if(USE_TOKENIZER)
+  add_subdirectory("${CMAKE_SOURCE_DIR}/src/tokenizer")
+  message("------------------Using Tokenizer------------------")
+endif()
+
 if(ENABLE_TESTS)
   add_subdirectory("${CMAKE_SOURCE_DIR}/test")
-  message("Enabling tests")
+  message("------------------Enabling tests------------------")
 endif()
 
 if(ENABLE_PYTHON)
-  pybind11_add_module(python ${python_srcs})
-  target_include_directories(python PRIVATE ${ORT_HEADER_DIR})
-  target_link_directories(python PRIVATE ${ORT_LIB_DIR})
-  target_link_libraries(python PRIVATE onnxruntime-genai-static ${ONNXRUNTIME_LIB})
-  set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
+  add_subdirectory("${CMAKE_SOURCE_DIR}/src/python")
+  message("------------------Enabling Python Wheel------------------")
 endif()
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
@@ -127,10 +118,6 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   if(NOT WIN32)
     set_target_properties(onnxruntime-genai-static PROPERTIES LINKER_LANGUAGE CUDA)
     target_link_libraries(onnxruntime-genai-static PRIVATE cublasLt cublas cudnn curand cufft cudart)
-  endif()
-  if(ENABLE_PYTHON)
-    set_target_properties(python PROPERTIES LINKER_LANGUAGE CUDA)
-    target_link_libraries(python PRIVATE cublasLt cublas cudnn curand cufft cudart)
   endif()
 endif()
 
@@ -158,17 +145,7 @@ if(USE_TOKENIZER)
   target_include_directories(onnxruntime-genai-static PRIVATE ${TOKENIZER_ROOT})
   target_link_libraries(onnxruntime-genai PRIVATE tokenizer)
   target_link_libraries(onnxruntime-genai-static PRIVATE tokenizer)
-  if(ENABLE_PYTHON)
-    target_include_directories(python PRIVATE ${TOKENIZER_ROOT})
-    target_link_libraries(python PRIVATE tokenizer)
-  endif()
-  message("Linking Tokenizer with TOKENIZER_ROOT: ${TOKENIZER_ROOT}")
-endif()
-
-if(BUILD_WHEEL)
-  include(cmake/build_wheel.cmake)
 endif()
 
 # Have visual studio put all files into one single folder vs the default split of header files into a separate folder
 source_group(TREE ${GENERATORS_ROOT} FILES ${generator_srcs})
-source_group("Sources" FILES ${python_srcs})
