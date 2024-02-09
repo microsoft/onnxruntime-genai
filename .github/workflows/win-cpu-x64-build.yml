@@ -18,6 +18,9 @@ env:
 jobs:
   job:
     runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Win2022-CPU"]
+    permissions:
+      security-events: write
+      actions: read
     steps:
       - uses: actions/checkout@v2
 
