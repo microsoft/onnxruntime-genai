@@ -23,5 +23,5 @@ endif()
 source_group("Sources" FILES ${test_srcs})
 set_property(DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT unit_tests)
 
-#include(GoogleTest)
-#gtest_discover_tests(unit_tests)
+include(GoogleTest)
+gtest_discover_tests(unit_tests)
