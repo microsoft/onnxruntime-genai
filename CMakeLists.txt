@@ -78,8 +78,14 @@ if(ENABLE_PYTHON)
   message("------------------Enabling Python Wheel------------------")
 endif()
 
-
-
+# Visual C++ - /MP Multiple process build, /WX Warnings as errors
+# Enable:
+#   C5038: data member 'member1' will be initialized after data member 'member2'
+# Disable:
+#   C4100: 'this_': unreferenced formal parameter
+if(MSVC)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /MP /w15038 /wd4100 /W4 /WX")
+endif()
 
 
 
