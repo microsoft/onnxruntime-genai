@@ -65,11 +65,11 @@ add_custom_command(
 if(ENABLE_PYTHON)
   message("------------------Enabling Python Wheel------------------")
   set(WHEEL_FILES_DIR "${CMAKE_BINARY_DIR}/wheel")
-  set(WHEEL_TARGET_NAME "onnxruntime_genai")
+  set(TARGET_NAME "onnxruntime_genai")
 
   add_custom_command(
     TARGET onnxruntime-genai-static POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} ${WHEEL_FILES_DIR}/${WHEEL_TARGET_NAME}/
+    COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} ${WHEEL_FILES_DIR}/${TARGET_NAME}/
   )
   add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/python")
 
