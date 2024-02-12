@@ -11,6 +11,10 @@ option(ENABLE_TESTS "Enable tests" ON)
 option(ENABLE_PYTHON "Enable python buildings" ON)
 cmake_dependent_option(BUILD_WHEEL "Build the python wheel" ON "ENABLE_PYTHON" OFF)
 
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+
 include(cmake/external/onnxruntime_external_deps.cmake)
 # Checking if CUDA is supported
 include(CheckLanguage)
@@ -56,21 +60,21 @@ set(WHEEL_TARGET_NAME "onnxruntime_genai")
 file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_FILES}")
 
 if(USE_TOKENIZER)
-  add_subdirectory("${CMAKE_SOURCE_DIR}/src/tokenizer")
   message("------------------Using Tokenizer------------------")
+  add_subdirectory("${CMAKE_SOURCE_DIR}/src/tokenizer")
 endif()
 
-add_subdirectory("${CMAKE_SOURCE_DIR}/src")
 message("------------------Building Generators------------------")
+add_subdirectory("${CMAKE_SOURCE_DIR}/src")
 
 if(ENABLE_TESTS)
-  add_subdirectory("${CMAKE_SOURCE_DIR}/test")
   message("------------------Enabling tests------------------")
+  add_subdirectory("${CMAKE_SOURCE_DIR}/test")
 endif()
 
 if(ENABLE_PYTHON)
-  add_subdirectory("${CMAKE_SOURCE_DIR}/src/python")
   message("------------------Enabling Python Wheel------------------")
+  add_subdirectory("${CMAKE_SOURCE_DIR}/src/python")
 endif()
 
 # Visual C++ - /MP Multiple process build, /WX Warnings as errors

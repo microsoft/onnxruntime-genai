@@ -63,7 +63,7 @@ add_custom_command(
 if(ENABLE_PYTHON)
   add_custom_command(
     TARGET onnxruntime-genai-static POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy onnxruntime_libs ${WHEEL_FILES_DIR}/${WHEEL_TARGET_NAME}/
+    COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} ${WHEEL_FILES_DIR}/${WHEEL_TARGET_NAME}/
   )
 endif()
 # Have visual studio put all files into one single folder vs the default split of header files into a separate folder
