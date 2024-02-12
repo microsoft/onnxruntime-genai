@@ -16,8 +16,6 @@ endif()
 source_group("Sources" FILES ${python_srcs})
 
 if(BUILD_WHEEL)
-
-
   configure_file(${CMAKE_CURRENT_SOURCE_DIR}/setup.py.in ${WHEEL_FILES_DIR}/setup.py @ONLY)
   configure_file(${CMAKE_CURRENT_SOURCE_DIR}/py/__init__.py.in ${WHEEL_FILES_DIR}/${WHEEL_TARGET_NAME}/__init__.py @ONLY)
   # Copy over any additional python files
