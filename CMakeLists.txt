@@ -61,6 +61,12 @@ file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_FILES}")
 message("------------------Building Generators------------------")
 add_subdirectory("${CMAKE_SOURCE_DIR}/src")
 
+if(ENABLE_TESTS)
+  message("------------------Enabling Testing------------------")
+  add_subdirectory("${CMAKE_SOURCE_DIR}/test")
+  target_link_libraries(unit_tests PRIVATE onnxruntime-genai-static)
+endif()
+
 # Visual C++ - /MP Multiple process build, /WX Warnings as errors
 # Enable:
 #   C5038: data member 'member1' will be initialized after data member 'member2'
