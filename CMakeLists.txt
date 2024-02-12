@@ -29,6 +29,7 @@ else()
   set(CMAKE_CXX_STANDARD 20)
 endif()
 
+
 set(ORT_HEADER_DIR ${CMAKE_SOURCE_DIR}/ort/include)
 set(ORT_LIB_DIR ${CMAKE_SOURCE_DIR}/ort/lib)
 
@@ -52,6 +53,8 @@ else()
   set(ONNXRUNTIME_EXTENSIONS_LIB "tfmtok_c.so")
 endif()
 
+file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_FILES}")
+
 if(USE_TOKENIZER)
   add_subdirectory("${CMAKE_SOURCE_DIR}/src/tokenizer")
   message("------------------Using Tokenizer------------------")
@@ -66,6 +69,12 @@ if(ENABLE_TESTS)
 endif()
 
 if(ENABLE_PYTHON)
+  set(WHEEL_FILES_DIR "${CMAKE_BINARY_DIR}/wheel")
+  set(WHEEL_TARGET_NAME "onnxruntime_genai")
+  add_custom_command(
+    TARGET onnxruntime-genai-static POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy onnxruntime_libs ${WHEEL_FILES_DIR}/${WHEEL_TARGET_NAME}/
+  )
   add_subdirectory("${CMAKE_SOURCE_DIR}/src/python")
   message("------------------Enabling Python Wheel------------------")
 endif()
