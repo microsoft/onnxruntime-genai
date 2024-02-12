@@ -10,7 +10,7 @@ target_include_directories(unit_tests PRIVATE
   ${CMAKE_SOURCE_DIR}/src
 )
 target_link_directories(unit_tests PRIVATE ${ORT_LIB_DIR})
-target_link_libraries(unit_tests PUBLIC
+target_link_libraries(unit_tests PRIVATE
   onnxruntime-genai-static
   ${ONNXRUNTIME_LIB}
   GTest::gtest_main
