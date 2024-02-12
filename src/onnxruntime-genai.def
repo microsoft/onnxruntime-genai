@@ -1,0 +1,16 @@
+LIBRARY
+EXPORTS
+ OgaResultGetError @1
+ OgaDestroyResult @2
+ OgaCreateModel @3
+ OgaDestroyModel @4
+ OgaCreateGeneratorParams @5
+ OgaDestroyGeneratorParams @6
+ OgaGeneratorParamsSetMaxLength @7
+ OgaGeneratorParamsSetInputIDs @8
+ OgaCreateGenerator @9
+ OgaDestroyGenerator @10
+ OgaGenerator_IsDone @11
+ OgaGenerator_ComputeLogits @12
+ OgaGenerator_GenerateNextToken_Top @13
+ OgaGenerator_GetSequence @14
