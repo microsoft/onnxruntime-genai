@@ -17,10 +17,10 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   # set(CUDA_PROPAGATE_HOST_FLAGS ON)
   set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcudafe --diag_suppress=2803 --expt-relaxed-constexpr")
   file(GLOB generator_cuda_srcs CONFIGURE_DEPENDS
-    "${GENERATORS_ROOT}/*.cu"
-    "${GENERATORS_ROOT}/*.cuh"
-    "${MODELS_ROOT}/*.cu"
-    "${MODELS_ROOT}/*.cuh"
+    "${CMAKE_CURRENT_SOURCE_DIR}/*.cu"
+    "${CMAKE_CURRENT_SOURCE_DIR}/*.cuh"
+    "${CMAKE_CURRENT_SOURCE_DIR}/models/*.cu"
+    "${CMAKE_CURRENT_SOURCE_DIR}/models/*.cuh"
   )
   list(APPEND generator_srcs ${generator_cuda_srcs})
   list(APPEND generator_srcs ${generator_cuda_exclusion_srcs})
