@@ -54,7 +54,7 @@ jobs:
       - name: Verify Build Artifacts
         if: always()
         run: |
-          Get-ChildItem -Path $env:GITHUB_WORKSPACE\build\release\cuda_defaulte -Recurse
+          Get-ChildItem -Path $env:GITHUB_WORKSPACE\build\release\cuda_default -Recurse
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v3
