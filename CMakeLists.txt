@@ -106,10 +106,22 @@ if(ENABLE_TESTS)
   message("------------------Enabling tests------------------")
 endif()
 
+set(WHEEL_FILES_DIR "${CMAKE_BINARY_DIR}/wheel")
+
 if(ENABLE_PYTHON)
   add_subdirectory("${CMAKE_SOURCE_DIR}/src/python")
   message("------------------Enabling Python Wheel------------------")
 endif()
+
+file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_FILES}")
+add_custom_command(
+  TARGET onnxruntime-genai-static POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} ${WHEEL_FILES_DIR}/${TARGET_NAME}/
+)
+add_custom_command(
+  TARGET onnxruntime-genai-static POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} ${DLL_FILE} $<TARGET_FILE_DIR:onnxruntime-genai>
+)
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   set_target_properties(onnxruntime-genai PROPERTIES LINKER_LANGUAGE CUDA)

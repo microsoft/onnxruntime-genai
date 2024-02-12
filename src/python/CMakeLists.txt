@@ -16,18 +16,11 @@ endif()
 source_group("Sources" FILES ${python_srcs})
 
 if(BUILD_WHEEL)
-  set(WHEEL_FILES_DIR "${CMAKE_BINARY_DIR}/wheel")
   message("Setting up wheel files in : ${WHEEL_FILES_DIR}")
   set(TARGET_NAME "onnxruntime_genai")
   configure_file(${CMAKE_CURRENT_SOURCE_DIR}/setup.py.in ${WHEEL_FILES_DIR}/setup.py @ONLY)
   configure_file(${CMAKE_CURRENT_SOURCE_DIR}/py/__init__.py.in ${WHEEL_FILES_DIR}/${TARGET_NAME}/__init__.py @ONLY)
-  file(GLOB onnxruntime_libs "${CMAKE_SOURCE_DIR}/ort/${ONNXRUNTIME_FILES}")
-  foreach(DLL_FILE ${onnxruntime_libs})
-    add_custom_command(
-      TARGET onnxruntime-genai-static
-      COMMAND ${CMAKE_COMMAND} -E copy ${DLL_FILE} ${WHEEL_FILES_DIR}/${TARGET_NAME}/${DLL_FILE_NAME}
-    )
-  endforeach()
+
   # Copy over any additional python files
   file(GLOB pyfiles "${CMAKE_CURRENT_SOURCE_DIR}/py/*.py")
   foreach(filename ${pyfiles})
