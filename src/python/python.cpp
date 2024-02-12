@@ -143,9 +143,22 @@ struct PySearchParams : GeneratorParams {
     }
 
     if (py_whisper_input_features_.size() != 0) {
-      GeneratorParams::Whisper& whisper = inputs.emplace<GeneratorParams::Whisper>();
-      std::span<const int64_t> shape(py_whisper_input_features_.shape(), py_whisper_input_features_.ndim());
-      whisper.input_features = OrtValue::CreateTensor<float>(Ort::Allocator::GetWithDefaultOptions().GetInfo(), ToSpan(py_whisper_input_features_), shape);
+      Whisper& whisper = inputs.emplace<Whisper>();
+      auto input_data = ToSpan(py_whisper_input_features_);
+      const pybind11::ssize_t* ptr = py_whisper_input_features_.shape(); // Assuming this returns a pointer to ssize_t
+      size_t size = py_whisper_input_features_.ndim(); // Assuming this returns the size of the data
+
+      std::vector<float> data_vector(size);
+      for (size_t i = 0; i < size; ++i) {
+        data_vector[i] = static_cast<float>(ptr[i]); // Convert ssize_t to float and store in vector
+      }
+
+      std::span<float> shape(data_vector.data(), data_vector.size()); // Initialize span with the vector data
+
+      whisper.input_features = OrtValue::CreateTensor<float>(
+        Ort::Allocator::GetWithDefaultOptions().GetInfo(),
+        input_data,
+        shape);
       whisper.decoder_input_ids = ToSpan(py_whisper_decoder_input_ids_);
       batch_size = 1;
       sequence_length = static_cast<int>(py_whisper_decoder_input_ids_.shape(1));
