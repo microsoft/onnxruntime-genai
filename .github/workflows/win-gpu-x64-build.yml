@@ -48,15 +48,13 @@ jobs:
 
       - name: Build with CMake
         run: |
-          mkdir build
-          cd build
-          cmake -G "Visual Studio 17 2022" -A x64 -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} .. -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=TRUE
-          cmake --build . --config Release --parallel
+          cmake -DCMAKE_CUDA_ARCHITECTURES=86 --preset windows_x64_cuda_release -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }}
+          cmake --build --preset windows_x64_cuda_release
 
       - name: Verify Build Artifacts
         if: always()
         run: |
-          Get-ChildItem -Path $env:GITHUB_WORKSPACE\build\Release -Recurse
+          Get-ChildItem -Path $env:GITHUB_WORKSPACE\build\release\cuda_defaulte -Recurse
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v3
