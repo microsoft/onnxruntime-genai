@@ -36,21 +36,16 @@ jobs:
       - name: Build with CMake and GCC
         run: |
           set -e -x
-          mkdir build
-          cd build
-          cmake -G "Unix Makefiles" .. -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=OFF
-          cmake --build . --config Release --parallel
-          cd ..
           rm -rf build
-
+          cmake --preset linux_gcc_cpu_release
+          cmake --build --preset linux_gcc_cpu_release
+          
       - name: Build with CMake and clang
         run: |
           set -e -x
-          mkdir build
-          cd build
-          CC=clang CXX=clang++ cmake -G "Unix Makefiles" .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_CLANG_TIDY=clang-tidy -DUSE_CUDA=OFF
-          cmake --build . --config Release --parallel
-
+          rm -rf build
+          cmake --preset linux_clang_cpu_release
+          cmake --build --preset linux_clang_cpu_release
 
       - name: Verify Build Artifacts
         if: always()
