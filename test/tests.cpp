@@ -1,12 +1,11 @@
+#include <gtest/gtest.h>
 #include <generators.h>
 #include <search.h>
 #include <models/model.h>
 #include <iostream>
 
 // Our working directory is generators/build so one up puts us in the root directory:
-#define MODEL_PATH "../test_models/"
-
-std::unique_ptr<OrtEnv> g_ort_env;
+#define MODEL_PATH "../../test_models/"
 
 // To generate this file:
 // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
@@ -16,8 +15,10 @@ static const std::pair<const char*, const char*> c_tiny_gpt2_model_paths[] = {
     {MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp16", "fp16"},
 };
 
-void Test_GreedySearch_Gpt_Fp32() {
-  std::cout << "Test_GreedySearch_Gpt fp32" << std::flush;
+TEST(ModelTests, GreedySearchGptFp32) {
+  std::unique_ptr<OrtEnv> g_ort_env;
+  Ort::InitApi();
+  g_ort_env = OrtEnv::Create();
 
   std::vector<int64_t> input_ids_shape{2, 4};
   std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
@@ -25,11 +26,10 @@ void Test_GreedySearch_Gpt_Fp32() {
   std::vector<int32_t> expected_output{
       0, 0, 0, 52, 204, 204, 204, 204, 204, 204,
       0, 0, 195, 731, 731, 114, 114, 114, 114, 114};
-
+  
   // To generate this file:
   // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
   // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
-
   auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
   Generators::GeneratorParams params{*model};
@@ -49,15 +49,15 @@ void Test_GreedySearch_Gpt_Fp32() {
   for (int i = 0; i < params.batch_size; i++) {
     auto sequence = generator->GetSequence(i).GetCPU();
     auto* expected_output_start = &expected_output[i * params.max_length];
-    if (!std::equal(expected_output_start, expected_output_start + params.max_length, sequence.begin(), sequence.end()))
-      throw std::runtime_error("Test Results Mismatch");
+    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params.max_length * sizeof(int32_t)));
   }
-
-  std::cout << " - complete\r\n";
 }
 
-void Test_BeamSearch_Gpt_Fp32() {
-  std::cout << "Test_BeamSearch_Gpt fp32" << std::flush;
+TEST(ModelTests, BeamSearchGptFp32) {
+
+  std::unique_ptr<OrtEnv> g_ort_env;
+  Ort::InitApi();
+  g_ort_env = OrtEnv::Create();
 
   std::vector<int64_t> input_ids_shape{3, 12};
   std::vector<int32_t> input_ids{
@@ -105,16 +105,15 @@ void Test_BeamSearch_Gpt_Fp32() {
   for (int i = 0; i < search.params_.batch_size; i++) {
     auto sequence = std::span<int32_t>(output_sequence.data() + search.params_.max_length * i, search.params_.max_length);
     auto* expected_output_start = &expected_output[i * search.params_.max_length];
-    if (!std::equal(expected_output_start, expected_output_start + search.params_.max_length, sequence.begin(), sequence.end()))
-      throw std::runtime_error("Test Results Mismatch");
+    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params.max_length * sizeof(int32_t)));
   }
-
-  std::cout << " - complete\r\n";
 }
 
 #if USE_CUDA
 void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label) {
-  std::cout << "Test_GreedySearch_Gpt_Cuda " << model_label << std::flush;
+  std::unique_ptr<OrtEnv> g_ort_env;
+  Ort::InitApi();
+  g_ort_env = OrtEnv::Create();
 
   std::vector<int64_t> input_ids_shape{2, 4};
   std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
@@ -147,22 +146,20 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
   for (int i = 0; i < params.batch_size; i++) {
     auto sequence_gpu = generator->GetSequence(i);
     auto sequence = sequence_gpu.GetCPU();
-
     auto* expected_output_start = &expected_output[i * params.max_length];
-    if (!std::equal(expected_output_start, expected_output_start + params.max_length, sequence.begin(), sequence.end()))
-      throw std::runtime_error("Test Results Mismatch");
+    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params.max_length * sizeof(int32_t)));
   }
-
-  std::cout << " - complete\r\n";
 }
 
-void Test_GreedySearch_Gpt_Cuda() {
+TEST(ModelTests, GreedySearchGptCuda) {
   for (auto model_path : c_tiny_gpt2_model_paths)
     Test_GreedySearch_Gpt_Cuda(model_path.first, model_path.second);
 }
 
 void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
-  std::cout << "Test_BeamSearch_Gpt_Cuda " << model_label << std::flush;
+  std::unique_ptr<OrtEnv> g_ort_env;
+  Ort::InitApi();
+  g_ort_env = OrtEnv::Create();
 
   std::vector<int64_t> input_ids_shape{3, 12};
   std::vector<int32_t> input_ids{
@@ -215,22 +212,21 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
   for (int i = 0; i < params.batch_size; i++) {
     auto sequence = std::span<int32_t>(output_sequence_cpu.get() + params.max_length * i, params.max_length);
     auto* expected_output_start = &expected_output[i * params.max_length];
-    if (!std::equal(expected_output_start, expected_output_start + params.max_length, sequence.begin(), sequence.end()))
-      throw std::runtime_error("Test Results Mismatch");
+    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params.max_length * sizeof(int32_t)));
   }
-
-  std::cout << " - complete\r\n";
 }
 
-void Test_BeamSearch_Gpt_Cuda() {
+TEST(ModelTests, BeamSearchGptCuda) {
   for (auto model_path : c_tiny_gpt2_model_paths)
     Test_BeamSearch_Gpt_Cuda(model_path.first, model_path.second);
 }
 
-void Test_Phi2_Cuda() {
+TEST(ModelTests, Test_Phi2_Cuda) {
 #if TEST_PHI2
-  std::cout << "Testing_Phi2\r\n";
 #if USE_TOKENIZER
+  std::unique_ptr<OrtEnv> g_ort_env;
+  Ort::InitApi();
+  g_ort_env = OrtEnv::Create();
 
   auto prompt = R"(
 def print_prime(n):
@@ -246,38 +242,38 @@ Print all primes between 1 and n
   auto tokenizer = model->CreateTokenizer();
   auto tokens = tokenizer->Encode(prompt);
 
-  Generators::SearchParams params{*model};
+  Generators::GeneratorParams params{*model};
   params.batch_size = 1;
   params.sequence_length = static_cast<int>(tokens.size());
   params.input_ids = tokens;
   params.max_length = 128;
 
+  // TODO: Not sure if we want to keep this "original version" artifact
   // Original version
-  auto search = params.CreateSearch();
-  auto state = model->CreateState(search->GetSequenceLengths(), params);
+  // auto search = params.CreateSearch();
+  // auto state = model->CreateState(search->GetSequenceLengths(), params);
 
-  while (!search->IsDone()) {
-    search->SetLogits(state->Run(search->GetSequenceLength(), search->GetNextTokens()));
-    search->SelectTop();
-  }
+  // while (!search->IsDone()) {
+  //   search->SetLogits(state->Run(search->GetSequenceLength(), search->GetNextTokens()));
+  //   search->SelectTop();
+  // }
 
-  auto result = search->GetSequence(0);
+  // auto result = search->GetSequence(0);
 
   // Generator version
-  auto generator = model->CreateGenerator();
+  auto generator = Generators::CreateGenerator(*model, params);
   while (!generator->IsDone()) {
-    auto logits = generator->RunStep();
-
-    generator->SelectTop();
+    generator->ComputeLogits();
+    generator->GenerateNextToken_Top();
   }
 
   auto result = generator->GetSequence(0);
 
+  // TODO: Not sure if we want this either
   // High level version
-  auto result = model->Generate(params);
+  // auto result = Generators::Generate(model, params);
 
-  std::cout << tokenizer->Decode(result) << "\r\n";
-  std::cout << "Test complete\r\n";
+  std::cout << tokenizer->Decode(result.GetCPU()) << "\r\n";
 #else
   std::cout << "Test skipped - not built with onnxruntime extensions\r\n";
 #endif

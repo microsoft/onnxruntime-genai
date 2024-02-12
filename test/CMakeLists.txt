@@ -20,6 +20,12 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   target_link_libraries(unit_tests PRIVATE cublasLt cublas cudnn curand cufft cudart)
 endif()
 
+if(USE_TOKENIZER)
+  add_compile_definitions(USE_TOKENIZER=1)
+  target_include_directories(unit_tests PRIVATE ${TOKENIZER_ROOT})
+  target_link_libraries(unit_tests PRIVATE tokenizer)
+endif()
+
 source_group("Sources" FILES ${test_srcs})
 set_property(DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT unit_tests)
 
