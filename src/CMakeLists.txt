@@ -49,6 +49,8 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
 endif()
 
 if(USE_TOKENIZER)
+  message("------------------Using Tokenizer------------------")
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/tokenizer")
   add_compile_definitions(USE_TOKENIZER=1)
   target_include_directories(onnxruntime-genai PRIVATE ${TOKENIZER_ROOT})
   target_include_directories(onnxruntime-genai-static PRIVATE ${TOKENIZER_ROOT})
@@ -61,10 +63,16 @@ add_custom_command(
   COMMAND ${CMAKE_COMMAND} -E copy_if_different ${onnxruntime_libs} $<TARGET_FILE_DIR:onnxruntime-genai>
 )
 if(ENABLE_PYTHON)
+  message("------------------Enabling Python Wheel------------------")
+  set(WHEEL_FILES_DIR "${CMAKE_BINARY_DIR}/wheel")
+  set(WHEEL_TARGET_NAME "onnxruntime_genai")
+
   add_custom_command(
     TARGET onnxruntime-genai-static POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} ${WHEEL_FILES_DIR}/${WHEEL_TARGET_NAME}/
   )
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/python")
+
 endif()
 # Have visual studio put all files into one single folder vs the default split of header files into a separate folder
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${generator_srcs})

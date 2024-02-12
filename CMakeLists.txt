@@ -55,14 +55,8 @@ else()
   set(ONNXRUNTIME_FILES "libonnxruntime*.so*")
   set(ONNXRUNTIME_EXTENSIONS_LIB "tfmtok_c.so")
 endif()
-set(WHEEL_FILES_DIR "${CMAKE_BINARY_DIR}/wheel")
-set(WHEEL_TARGET_NAME "onnxruntime_genai")
-file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_FILES}")
 
-if(USE_TOKENIZER)
-  message("------------------Using Tokenizer------------------")
-  add_subdirectory("${CMAKE_SOURCE_DIR}/src/tokenizer")
-endif()
+file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_FILES}")
 
 message("------------------Building Generators------------------")
 add_subdirectory("${CMAKE_SOURCE_DIR}/src")
@@ -70,11 +64,6 @@ add_subdirectory("${CMAKE_SOURCE_DIR}/src")
 if(ENABLE_TESTS)
   message("------------------Enabling tests------------------")
   add_subdirectory("${CMAKE_SOURCE_DIR}/test")
-endif()
-
-if(ENABLE_PYTHON)
-  message("------------------Enabling Python Wheel------------------")
-  add_subdirectory("${CMAKE_SOURCE_DIR}/src/python")
 endif()
 
 # Visual C++ - /MP Multiple process build, /WX Warnings as errors
