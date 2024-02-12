@@ -1,6 +1,12 @@
 ﻿# Files to tell git to ignore
 
+.vscode
 /src/.vs
+/src/csharp/.vs
+src/csharp/bin/
+src/csharp/obj/
+test/csharp/bin/
+test/csharp/obj/
 /ort
 /build
 /test_models

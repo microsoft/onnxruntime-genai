@@ -101,6 +101,7 @@ def build(
     cuda_home: str | bytes | os.PathLike | None = None,
     cudnn_home: str | bytes | os.PathLike | None = None,
     cmake_generator: str | None = None,
+    enable_csharp: bool = False,
 ):
     """Generates the CMake build tree and builds the project.
 
@@ -153,6 +154,12 @@ def build(
     make_command = ["cmake", "--build", ".", "--config", "Release"]
     run_subprocess(make_command, cwd="build", env=env).check_returncode()
 
+    if enable_csharp:
+        dotnet = resolve_executable_path("dotnet")
+        csharp_build_command = [dotnet, "build", ".", "-c", "Release"]
+        run_subprocess(csharp_build_command, cwd=os.path.join("src", "csharp")).check_returncode()
+        run_subprocess(csharp_build_command, cwd=os.path.join("test", "csharp")).check_returncode()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -184,6 +191,7 @@ if __name__ == "__main__":
         "--cudnn_home is not specified.",
     )
     parser.add_argument("--skip_wheel", action="store_true", help="Skip building the Python wheel.")
+    parser.add_argument("--enable_csharp", action="store_true", help="Build the C# API.")
     args = parser.parse_args()
 
     update_submodules()
@@ -192,4 +200,5 @@ if __name__ == "__main__":
         cuda_home=args.cuda_home,
         cudnn_home=args.cudnn_home,
         cmake_generator=args.cmake_generator,
+        enable_csharp=args.enable_csharp,
     )
