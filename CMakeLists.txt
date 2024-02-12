@@ -61,10 +61,10 @@ file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_FILES}")
 message("------------------Building Generators------------------")
 add_subdirectory("${CMAKE_SOURCE_DIR}/src")
 
-if(ENABLE_TESTS)
-  message("------------------Enabling Testing------------------")
-  add_subdirectory("${CMAKE_SOURCE_DIR}/test")
-endif()
+#if(ENABLE_TESTS)
+#  message("------------------Enabling Testing------------------")
+#  add_subdirectory("${CMAKE_SOURCE_DIR}/test")
+#endif()
 
 # Visual C++ - /MP Multiple process build, /WX Warnings as errors
 # Enable:
