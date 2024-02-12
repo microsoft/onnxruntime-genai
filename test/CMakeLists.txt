@@ -11,13 +11,14 @@ target_include_directories(unit_tests PRIVATE
 )
 target_link_directories(unit_tests PRIVATE ${ORT_LIB_DIR})
 target_link_libraries(unit_tests PRIVATE
+  onnxruntime-genai-static
   ${ONNXRUNTIME_LIB}
   GTest::gtest_main
 )
-if(USE_CUDA AND CMAKE_CUDA_COMPILER)
-  set_target_properties(unit_tests PROPERTIES LINKER_LANGUAGE CUDA)
-  target_link_libraries(unit_tests PRIVATE cublasLt cublas cudnn curand cufft cudart)
-endif()
+#if(USE_CUDA AND CMAKE_CUDA_COMPILER)
+#  set_target_properties(unit_tests PROPERTIES LINKER_LANGUAGE CUDA)
+#  target_link_libraries(unit_tests PRIVATE cublasLt cublas cudnn curand cufft cudart)
+#endif()
 
 source_group("Sources" FILES ${test_srcs})
 set_property(DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT unit_tests)

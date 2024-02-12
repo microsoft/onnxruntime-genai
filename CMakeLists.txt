@@ -64,7 +64,6 @@ add_subdirectory("${CMAKE_SOURCE_DIR}/src")
 if(ENABLE_TESTS)
   message("------------------Enabling Testing------------------")
   add_subdirectory("${CMAKE_SOURCE_DIR}/test")
-  target_link_libraries(unit_tests PRIVATE onnxruntime-genai-static)
 endif()
 
 # Visual C++ - /MP Multiple process build, /WX Warnings as errors
