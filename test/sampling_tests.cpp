@@ -43,8 +43,9 @@ TEST(SamplingTests, BatchedSamplingTopP) {
   // Verify outputs match expected outputs
   generator->search_->SampleTopP(0.25f, 1.0f);
   auto next_tokens = generator->search_->GetNextTokens().GetCPU();
-  if (!std::equal(next_tokens.begin(), next_tokens.end(), output_span.begin(), output_span.end()))
-    throw std::runtime_error("Test Results Mismatch");
+  EXPECT_TRUE(0 == std::memcmp(output_span.data(), next_tokens.data(), expected_output.size() * sizeof(int32_t)));
+  // if (!std::equal(next_tokens.begin(), next_tokens.end(), output_span.begin(), output_span.end()))
+  //   throw std::runtime_error("Test Results Mismatch");
 }
 
 TEST(SamplingTests, BatchedSamplingTopK) {
