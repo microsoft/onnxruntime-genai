@@ -1,5 +1,5 @@
 enable_testing()
-include(GoogleTest)
+
 set(TESTS_ROOT ${CMAKE_CURRENT_SOURCE_DIR} PARENT_SCOPE)
 file(GLOB test_srcs CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/*.h"
@@ -25,5 +25,5 @@ endif()
 source_group("Sources" FILES ${test_srcs})
 set_property(DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT unit_tests)
 #set_property(TARGET unit_tests PROPERTY TARGET_RUNTIME_LIBRARY_DIRS ${ORT_LIB_DIR})
-
+include(GoogleTest)
 gtest_discover_tests(unit_tests)

@@ -154,9 +154,9 @@ endforeach()
 if(USE_TOKENIZER)
   add_compile_definitions(USE_TOKENIZER=1)
   target_include_directories(onnxruntime-genai PRIVATE ${TOKENIZER_ROOT})
-  target_include_directories(onnxruntime-genai-static PRIVATE ${TOKENIZER_ROOT})
+  target_include_directories(onnxruntime-genai-static PUBLIC ${TOKENIZER_ROOT})
   target_link_libraries(onnxruntime-genai PRIVATE tokenizer)
-  target_link_libraries(onnxruntime-genai-static PRIVATE tokenizer)
+  target_link_libraries(onnxruntime-genai-static PUBLIC tokenizer)
 endif()
 
 # Have visual studio put all files into one single folder vs the default split of header files into a separate folder
