@@ -30,8 +30,9 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
     "${CMAKE_CURRENT_SOURCE_DIR}/models/*.cuh"
   )
 
-  list(APPEND generator_srcs ${generator_cuda_srcs})
-  list(APPEND generator_srcs ${generator_cuda_exclusion_srcs})
+  target_sources(onnxruntime-genai PRIVATE ${generator_cuda_srcs} ${generator_cuda_exclusion_srcs})
+  target_sources(onnxruntime-genai-static PRIVATE ${generator_cuda_srcs} ${generator_cuda_exclusion_srcs})
+  list(APPEND generator_srcs ${generator_cuda_srcs} ${generator_cuda_exclusion_srcs})
   add_compile_definitions(USE_CUDA=1)
   include_directories("${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}")
   set_target_properties(onnxruntime-genai PROPERTIES LINKER_LANGUAGE CUDA)
