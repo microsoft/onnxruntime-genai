@@ -22,8 +22,7 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
     "${CMAKE_CURRENT_SOURCE_DIR}/models/*.cu"
     "${CMAKE_CURRENT_SOURCE_DIR}/models/*.cuh"
   )
-  list(APPEND generator_srcs ${generator_cuda_srcs})
-  list(APPEND generator_srcs ${generator_cuda_exclusion_srcs})
+  list(APPEND generator_srcs ${generator_cuda_srcs} ${generator_cuda_exclusion_srcs})
   add_compile_definitions(USE_CUDA=1)
   include_directories("${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}")
 elseif(USE_CUDA)
@@ -42,10 +41,11 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   set_target_properties(onnxruntime-genai PROPERTIES LINKER_LANGUAGE CUDA)
   target_link_libraries(onnxruntime-genai PRIVATE cublasLt cublas cudnn curand cufft cudart)
   #  onnxruntime-genai-static is statically linked under Windows
-  if(NOT WIN32)
-    set_target_properties(onnxruntime-genai-static PROPERTIES LINKER_LANGUAGE CUDA)
-    target_link_libraries(onnxruntime-genai-static PRIVATE cublasLt cublas cudnn curand cufft cudart)
-  endif()
+  set_target_properties(onnxruntime-genai-static PROPERTIES LINKER_LANGUAGE CUDA)
+  target_link_libraries(onnxruntime-genai-static PRIVATE cublasLt cublas cudnn curand cufft cudart)
+#  if(NOT WIN32)
+#
+#  endif()
 endif()
 
 if(USE_TOKENIZER)
