@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 #include "tests_helper.cuh"
-#include "../cuda_sampling.cuh"
+#include "../src/cuda_sampling.cuh"
 #include <cuda_runtime.h>
 #include <curand.h>
 #include <curand_kernel.h>

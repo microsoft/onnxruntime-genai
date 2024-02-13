@@ -9,7 +9,7 @@
 #include <random>
 
 // Our working directory is generators/build so one up puts us in the root directory:
-#define MODEL_PATH "../test_models/"
+#define MODEL_PATH "../../test_models/"
 
 #if USE_CUDA
 #include "tests_helper.cuh"
@@ -44,8 +44,6 @@ TEST(SamplingTests, BatchedSamplingTopP) {
   generator->search_->SampleTopP(0.25f, 1.0f);
   auto next_tokens = generator->search_->GetNextTokens().GetCPU();
   EXPECT_TRUE(0 == std::memcmp(output_span.data(), next_tokens.data(), expected_output.size() * sizeof(int32_t)));
-  // if (!std::equal(next_tokens.begin(), next_tokens.end(), output_span.begin(), output_span.end()))
-  //   throw std::runtime_error("Test Results Mismatch");
 }
 
 TEST(SamplingTests, BatchedSamplingTopK) {
