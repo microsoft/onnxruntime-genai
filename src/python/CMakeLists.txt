@@ -1,4 +1,3 @@
-set(PYTHON_ROOT ${CMAKE_CURRENT_SOURCE_DIR} PARENT_SCOPE)
 file(GLOB python_srcs CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/*.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
@@ -29,6 +28,8 @@ if(BUILD_WHEEL)
     configure_file("${filename}" "${WHEEL_FILES_DIR}/${TARGET_NAME}" COPYONLY)
   endforeach(filename)
   add_custom_target(PyPackageBuild ALL
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:onnxruntime-genai> ${WHEEL_FILES_DIR}/${TARGET_NAME}
+    COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} ${WHEEL_FILES_DIR}/${TARGET_NAME}
     COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:python> ${WHEEL_FILES_DIR}/${TARGET_NAME}
     COMMAND "${PYTHON_EXECUTABLE}" -m pip wheel .
     WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
