@@ -41,6 +41,7 @@ jobs:
             --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
             --container-registry onnxruntimebuildcache \
             --repository ${{ env.docker_image }}
+          docker run --rm --volume $GITHUB_WORKSPACE:/onnxruntime_src  -w /onnxruntime_src onnxruntimecpubuild bash -c "echo $PATH && /usr/bin/cmake --preset linux_gcc_cpu_release && /usr/bin/cmake --build --preset linux_gcc_cpu_release"
 
       - name: Docker -- Build with CMake and GCC
         run: |

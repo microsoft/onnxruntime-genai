@@ -1,8 +1,8 @@
-#include "../generators.h"
-#include "../search.h"
-#include "../models/model.h"
+#include <generators.h>
+#include <search.h>
+#include <models/model.h>
 #include <iostream>
-#include "../ort_genai_c.h"
+#include <ort_genai_c.h>
 
 // Our working directory is generators/build so one up puts us in the root directory:
 #define MODEL_PATH "../test_models/"

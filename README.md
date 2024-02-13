@@ -22,7 +22,7 @@ import onnxruntime_genai as og
 
 model=og.Model(f'models/microsoft/phi-2', device_type)
 
-tokenizer = model.CreateTokenizer()
+tokenizer = model.create_tokenizer()
 
 prompt = '''def print_prime(n):
     """
@@ -35,7 +35,7 @@ params=og.SearchParams(model)
 params.max_length = 200
 params.input_ids = tokens
 
-output_tokens=model.Generate(params)
+output_tokens=model.generate(params)
 
 text = tokenizer.decode(output_tokens)
 
@@ -84,38 +84,28 @@ This step requires `cmake` to be installed.
 
 2. Install ONNX Runtime
 
-   ```bash
-   mkdir -p ort/include
-   cd ort/include
-   wget https://raw.githubusercontent.com/microsoft/onnxruntime/v1.17.0/include/onnxruntime/core/session/onnxruntime_c_api.h
+These instructions are for the Linux GPU build of ONNX Runtime. Replace the location with the operating system and target of choice. 
 
-   cd ..
-   mkdir -p ort/lib
-   cd ort/lib
+   ```bash
+   mkdir -p ort
+   cd ort
    wget https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-linux-x64-gpu-1.17.0.tgz
    tar xvzf onnxruntime-linux-x64-gpu-1.17.0.tgz 
-   cp onnxruntime-linux-x64-gpu-1.17.0/lib/libonnxruntime*.so* .
+   mv onnxruntime-linux-x64-gpu-1.17.0/include .
+   mv onnxruntime-linux-x64-gpu-1.17.0/lib .
    ```
 
 3. Build onnxruntime-genai
 
    ```bash
-   bash build.sh
-   ```
-
-   Or build.bat on Windows
-
-4. Build wheel (temporary)
-
-   ```bash
-   cd build
-   make PyPackageBuild
+   cd ..
+   python build.py --cuda_home <path_to_cuda_home> --cudnn_home <path_to_cudnn_home>
    ```
    
-5. Install Python wheel
+4. Install Python wheel
 
    ```bash
-   cd wheel
+   cd build/wheel
    pip install *.whl
    ```
 
@@ -123,15 +113,17 @@ This step requires `cmake` to be installed.
 
 ONNX models are run from a local folder, via a string supplied to the `Model()` method. 
 
-To source `microsoft/phi-2` optimized for your target, download and run the following script:
+To source `microsoft/phi-2` optimized for your target, download and run the following script. You will need to be logged into HuggingFace via the CLI to run the script.
+
 
 ```bash
-wget https://github.com/microsoft/onnxruntime-genai/blob/kvaishnavi/models/models/export.py
+wget https://raw.githubusercontent.com/microsoft/onnxruntime-genai/kvaishnavi/models/src/python/models/export.py
 ```
 
 Export int4 CPU version 
 ```bash
-python export.py python models/export.py --m microsoft/phi-2 -p int4 -e cpu -o phi2-int4-cpu.onnx
+huggingface-cli login --token <your HuggingFace token>
+python export.py python models/export.py -m microsoft/phi-2 -p int4 -e cpu -o phi2-int4-cpu.onnx
 ```
 
 
