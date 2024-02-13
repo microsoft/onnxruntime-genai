@@ -64,6 +64,7 @@ struct GreedySearch_Cpu : Search_Cpu {
   void SelectTop() override;
   void SampleTopK(int k, float temperature) override;
   void SampleTopP(float p, float temperature) override;
+  void SampleTopPAndK(float /*p*/, int /*k*/, float /*temperature*/) override;
 
  private:
   bool PadIfAlreadyEOS(size_t batch_id);

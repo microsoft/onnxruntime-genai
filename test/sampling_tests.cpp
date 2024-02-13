@@ -11,10 +11,107 @@
 // Our working directory is generators/build so one up puts us in the root directory:
 #define MODEL_PATH "../../test_models/"
 
+TEST(SamplingTests, BatchedSamplingTopPCpu) {
+  std::unique_ptr<OrtEnv> g_ort_env;
+  Ort::InitApi();
+  g_ort_env = OrtEnv::Create();
+  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  std::vector<int32_t> input_ids{0, 1, 2, 3};
+  std::vector<int32_t> expected_output{1, 2, 3, 4};
+  auto output_span = Generators::cpu_span<int32_t>(expected_output);
+  std::vector<float> logits_cpu = {0.1f, 0.6f, 0.1f, 0.1f, 0.1f,
+                                   0.1f, 0.1f, 0.6f, 0.1f, 0.1f,
+                                   0.1f, 0.1f, 0.1f, 0.6f, 0.1f,
+                                   0.1f, 0.1f, 0.1f, 0.1f, 0.6f};
+  int vocab_size = 5;
+  int batch_size = 4;
+  Generators::GeneratorParams params = Generators::GeneratorParams{};
+  params.max_length = 10;
+  params.batch_size = batch_size;
+  params.sequence_length = 1;
+  params.vocab_size = vocab_size;
+  params.input_ids = input_ids;
+  params.device_type = Generators::DeviceType::CUDA;
+  auto generator = Generators::CreateGenerator(*model, params);
+  auto logits_span = Generators::cpu_span<float>(logits_cpu);
+  generator->search_->SetLogits(logits_span);
+  // Verify outputs match expected outputs
+  generator->search_->SampleTopP(0.25f, 1.0f);
+  auto next_tokens = generator->search_->GetNextTokens().GetCPU();
+  EXPECT_TRUE(0 == std::memcmp(output_span.data(), next_tokens.data(), expected_output.size() * sizeof(int32_t)));
+}
+
+TEST(SamplingTests, BatchedSamplingTopKCpu) {
+  std::unique_ptr<OrtEnv> g_ort_env;
+  Ort::InitApi();
+  g_ort_env = OrtEnv::Create();
+  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  std::vector<int32_t> input_ids{0, 1, 2, 3};
+  std::vector<float> logits_cpu{2.0f, 1.5f, 1.25f, 0.25f, 0.25f,
+                                0.25f, 2.0f, 1.25f, 1.5f, 0.25f,
+                                0.25f, 2.0f, 0.25f, 1.5f, 1.25f,
+                                1.25f, 0.25f, 1.5f, 0.25f, 2.0f};
+  int vocab_size = 5;
+  int batch_size = 4;
+  Generators::GeneratorParams params = Generators::GeneratorParams{};
+  params.max_length = 10;
+  params.batch_size = batch_size;
+  params.sequence_length = 1;
+  params.vocab_size = vocab_size;
+  params.input_ids = input_ids;
+  params.device_type = Generators::DeviceType::CPU;
+  auto generator = Generators::CreateGenerator(*model, params);
+  auto logits_span = Generators::cpu_span<float>(logits_cpu);
+  generator->search_->SetLogits(logits_span);;
+  // Verify outputs match expected outputs
+  int k = 2;
+  generator->search_->SampleTopK(k, 1.0);
+  auto next_tokens = generator->search_->GetNextTokens().GetCPU();
+  for (int b = 0; b < batch_size; b++) {
+    auto next_token = next_tokens[b];
+    auto next_token_score = logits_cpu[next_token + vocab_size * b];
+    EXPECT_GT(next_token_score, 1.25f);
+  }
+}
+
+TEST(SamplingTests, BatchedSamplingTopPAndKCpu) {
+  std::unique_ptr<OrtEnv> g_ort_env;
+  Ort::InitApi();
+  g_ort_env = OrtEnv::Create();
+  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  std::vector<int32_t> input_ids{0, 1, 2, 3};
+  std::vector<float> logits_cpu{2.0f, 1.5f, 1.25f, 0.25f, 0.25f,
+                                0.25f, 2.0f, 1.25f, 1.5f, 0.25f,
+                                0.25f, 2.0f, 0.25f, 1.5f, 1.25f,
+                                1.25f, 0.25f, 1.5f, 0.25f, 2.0f};
+  int vocab_size = 5;
+  int batch_size = 4;
+  Generators::GeneratorParams params = Generators::GeneratorParams{};
+  params.max_length = 10;
+  params.batch_size = batch_size;
+  params.sequence_length = 1;
+  params.vocab_size = vocab_size;
+  params.input_ids = input_ids;
+  params.device_type = Generators::DeviceType::CPU;
+  auto generator = Generators::CreateGenerator(*model, params);
+  auto logits_span = Generators::cpu_span<float>(logits_cpu);
+  generator->search_->SetLogits(logits_span);
+  // Verify outputs match expected outputs
+  float p = 0.25f;
+  int k = 2;
+  generator->search_->SampleTopPAndK(p, k, 1.0);
+  auto next_tokens = generator->search_->GetNextTokens().GetCPU();
+  for (int b = 0; b < batch_size; b++) {
+    auto next_token = next_tokens[b];
+    auto next_token_score = logits_cpu[next_token + vocab_size * b];
+    EXPECT_GT(next_token_score, 1.25f);
+  }
+}
+
 #if USE_CUDA
 #include "tests_helper.cuh"
 
-TEST(SamplingTests, BatchedSamplingTopP) {
+TEST(SamplingTests, BatchedSamplingTopPCuda) {
   std::unique_ptr<OrtEnv> g_ort_env;
   Ort::InitApi();
   g_ort_env = OrtEnv::Create();
@@ -46,7 +143,7 @@ TEST(SamplingTests, BatchedSamplingTopP) {
   EXPECT_TRUE(0 == std::memcmp(output_span.data(), next_tokens.data(), expected_output.size() * sizeof(int32_t)));
 }
 
-TEST(SamplingTests, BatchedSamplingTopK) {
+TEST(SamplingTests, BatchedSamplingTopKCuda) {
   std::unique_ptr<OrtEnv> g_ort_env;
   Ort::InitApi();
   g_ort_env = OrtEnv::Create();
@@ -81,7 +178,7 @@ TEST(SamplingTests, BatchedSamplingTopK) {
   }
 }
 
-TEST(SamplingTests, BatchedSamplingTopPAndK) {
+TEST(SamplingTests, BatchedSamplingTopPAndKCuda) {
   std::unique_ptr<OrtEnv> g_ort_env;
   Ort::InitApi();
   g_ort_env = OrtEnv::Create();
