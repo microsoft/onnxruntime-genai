@@ -4,7 +4,7 @@
 
 namespace Generators {
 
-Logits::Logits(Model& model, State& state)
+Logits::Logits(const Model& model, State& state)
     : model_{model},
       state_{state} {
   logits_shape_ = {state_.search_params_.batch_size * state_.search_params_.num_beams, state_.search_params_.sequence_length, state_.search_params_.vocab_size};

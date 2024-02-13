@@ -5,7 +5,7 @@
 namespace Generators {
 
 template <typename T>
-InputIDs<T>::InputIDs(Model& model, State& state)
+InputIDs<T>::InputIDs(const Model& model, State& state)
     : model_{model},
       state_{state} {
   shape_ = {state_.search_params_.batch_size, state_.search_params_.sequence_length};

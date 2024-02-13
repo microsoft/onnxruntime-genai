@@ -13,7 +13,7 @@ void LaunchGpt_UpdateMask(int64_t* mask_data, const int64_t* old_mask_data, int 
 }  // namespace cuda
 
 template <typename T>
-PositionIDs<T>::PositionIDs(Model& model, State& state, RoamingArray<int32_t>& sequence_lengths_unk, bool use_position_ids)
+PositionIDs<T>::PositionIDs(const Model& model, State& state, RoamingArray<int32_t>& sequence_lengths_unk, bool use_position_ids)
     : model_{model},
       state_{state},
       use_position_ids_{use_position_ids} {

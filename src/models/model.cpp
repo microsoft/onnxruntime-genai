@@ -31,7 +31,7 @@ void State::ClearIO() {
   outputs_.clear();
 }
 
-#if USE_TOKENIZER
+//#if USE_TOKENIZER
 void CheckResult(tfmError_t error) {
   if (error != kTfmOK)
     throw std::runtime_error(TfmGetLastErrorMessage());
@@ -59,7 +59,7 @@ std::string Tokenizer::Decode(std::span<int32_t> tokens) const {
   CheckResult(TfmStringArrayGetItem(tfm_string_array, 0, &string));
   return string;
 }
-#endif
+//#endif
 
 Model::Model(std::unique_ptr<Config> config, const ProviderOptions* provider_options) : config_{std::move(config)} {
   session_options_ = OrtSessionOptions::Create();
@@ -89,7 +89,7 @@ void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
 }
 
 #if USE_TOKENIZER
-std::unique_ptr<Tokenizer> Model::CreateTokenizer() {
+std::unique_ptr<Tokenizer> Model::CreateTokenizer() const {
   return std::make_unique<Tokenizer>(*config_);
 }
 #endif
