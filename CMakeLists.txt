@@ -2,12 +2,13 @@
 # Licensed under the MIT License.
 
 cmake_minimum_required(VERSION 3.26)
-include(FetchContent)
-include(CMakeDependentOption)
 project(Generators LANGUAGES C CXX)
+# All options are defined in cmake/options.cmake
 include(cmake/options.cmake)
-
+# All external dependencies are defined in cmake/external
 include(cmake/external/onnxruntime_external_deps.cmake)
+# All top-level variables are defined in cmake/variables.cmake
+include(cmake/variables.cmake)
 # Checking if CUDA is supported
 include(CheckLanguage)
 if(USE_CUDA)
@@ -25,26 +26,10 @@ else()
   set(CMAKE_CXX_STANDARD 20)
 endif()
 
-set(ORT_HEADER_DIR ${CMAKE_SOURCE_DIR}/ort/include)
-set(ORT_LIB_DIR ${CMAKE_SOURCE_DIR}/ort/lib)
 # CUDA Being enabled will make it not a debug build without this option, so all of the C++ headers will complain
 # about a mismatch with the actual debug headers and it'll fail to link. I don't know why this happens, or if this is the best fix.
 if(USE_CUDA AND CMAKE_CUDA_COMPILER AND CMAKE_BUILD_TYPE STREQUAL "Debug")
   add_compile_definitions(_DEBUG=1)
-endif()
-
-if(WIN32)
-  set(ONNXRUNTIME_LIB "onnxruntime.lib")
-  set(ONNXRUNTIME_FILES "onnxruntime*.dll")
-  set(ONNXRUNTIME_EXTENSIONS_LIB "tfmtok_c.lib")
-  set(ONNXRUNTIME_EXTENSIONS_FILES "tfmtok_c.dll")
-elseif(APPLE)
-  set(ONNXRUNTIME_LIB "libonnxruntime.dylib")
-  set(ONNXRUNTIME_FILES "libonnxruntime*.dylib")
-else()
-  set(ONNXRUNTIME_LIB "libonnxruntime.so")
-  set(ONNXRUNTIME_FILES "libonnxruntime*.so*")
-  set(ONNXRUNTIME_EXTENSIONS_LIB "tfmtok_c.so")
 endif()
 
 file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_FILES}")
