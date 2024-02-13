@@ -5,11 +5,7 @@ cmake_minimum_required(VERSION 3.26)
 include(FetchContent)
 include(CMakeDependentOption)
 project(Generators LANGUAGES C CXX)
-option(USE_CUDA "Build with CUDA support" ON)
-option(USE_TOKENIZER "Build with Tokenizer support" ON)
-option(ENABLE_TESTS "Enable tests" ON)
-option(ENABLE_PYTHON "Enable python buildings" ON)
-cmake_dependent_option(BUILD_WHEEL "Build the python wheel" ON "ENABLE_PYTHON" OFF)
+include(cmake/options.cmake)
 
 include(cmake/external/onnxruntime_external_deps.cmake)
 # Checking if CUDA is supported
@@ -31,7 +27,6 @@ endif()
 
 set(ORT_HEADER_DIR ${CMAKE_SOURCE_DIR}/ort/include)
 set(ORT_LIB_DIR ${CMAKE_SOURCE_DIR}/ort/lib)
-
 # CUDA Being enabled will make it not a debug build without this option, so all of the C++ headers will complain
 # about a mismatch with the actual debug headers and it'll fail to link. I don't know why this happens, or if this is the best fix.
 if(USE_CUDA AND CMAKE_CUDA_COMPILER AND CMAKE_BUILD_TYPE STREQUAL "Debug")

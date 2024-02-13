@@ -18,8 +18,11 @@ if(USE_TOKENIZER)
   target_include_directories(python PRIVATE ${TOKENIZER_ROOT})
 endif()
 if(BUILD_WHEEL)
+  message("Setting up wheel files in : ${WHEEL_FILES_DIR}")
+  set(TARGET_NAME "onnxruntime_genai")
   configure_file(${CMAKE_CURRENT_SOURCE_DIR}/setup.py.in ${WHEEL_FILES_DIR}/setup.py @ONLY)
   configure_file(${CMAKE_CURRENT_SOURCE_DIR}/py/__init__.py.in ${WHEEL_FILES_DIR}/${TARGET_NAME}/__init__.py @ONLY)
+
   # Copy over any additional python files
   file(GLOB pyfiles "${CMAKE_CURRENT_SOURCE_DIR}/py/*.py")
   foreach(filename ${pyfiles})
