@@ -9,9 +9,6 @@ using Microsoft.ML.OnnxRuntimeGenAI;
 using System.Collections.Generic;
 using System.Linq;
 
-// This runs in a separate package built from EndToEndTests
-// and for this reason it can not refer to non-public members
-// of Onnxruntime package
 namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 {
     public partial class GeneratorTests

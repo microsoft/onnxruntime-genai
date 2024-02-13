@@ -155,6 +155,9 @@ def build(
     run_subprocess(make_command, cwd="build", env=env).check_returncode()
 
     if enable_csharp:
+        if not is_windows():
+            raise RuntimeError("C# API is only supported on Windows.")
+
         dotnet = resolve_executable_path("dotnet")
         csharp_build_command = [dotnet, "build", ".", "-c", "Release"]
         run_subprocess(csharp_build_command, cwd=os.path.join("src", "csharp")).check_returncode()

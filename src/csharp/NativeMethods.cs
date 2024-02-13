@@ -14,7 +14,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         }
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr OgaResultGetError(IntPtr /* OgaResult* */ result);
+        public static extern IntPtr /* const char* */ OgaResultGetError(IntPtr /* OgaResult* */ result);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern void OgaDestroyResult(IntPtr /* OgaResult* */ result);

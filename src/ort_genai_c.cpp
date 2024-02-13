@@ -9,7 +9,6 @@
 #include "generators.h"
 #include "models/model.h"
 #include "search.h"
-#include <iostream>
 
 namespace Generators {
 
