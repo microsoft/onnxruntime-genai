@@ -16,7 +16,7 @@ void Test_GreedySearch_Gpt_Cuda();
 void Test_BeamSearch_Gpt_Cuda();
 #endif
 
-int old_main() {
+int main() {
   std::cout << "Generators Utility Library" << std::endl;
 
   std::cout << "Initializing OnnxRuntime...";
