@@ -99,7 +99,7 @@ These instructions are for the Linux GPU build of ONNX Runtime. Replace the loca
 
    ```bash
    cd ..
-   python build.py
+   python build.py --cuda_home <path_to_cuda_home> --cudnn_home <path_to_cudnn_home>
    ```
    
 4. Install Python wheel
