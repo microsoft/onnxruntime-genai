@@ -34,13 +34,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         {
             IntPtr nullPtr = IntPtr.Zero;
             UIntPtr sequenceLength = UIntPtr.Zero;
-            Result.VerifySuccess(NativeMethods.OgaGenerator_GetSequence(_generatorHandle, index, out nullPtr, out sequenceLength));
-            int[] sequence = new int[sequenceLength.ToUInt32()];
+            Result.VerifySuccess(NativeMethods.OgaGenerator_GetSequence(_generatorHandle, index, nullPtr, out sequenceLength));
+            int[] sequence = new int[sequenceLength.ToUInt64()];
             GCHandle handle = GCHandle.Alloc(sequence, GCHandleType.Pinned);
             try
             {
                 IntPtr sequencePtr = handle.AddrOfPinnedObject();
-                Result.VerifySuccess(NativeMethods.OgaGenerator_GetSequence(_generatorHandle, index, out sequencePtr, out sequenceLength));
+                Result.VerifySuccess(NativeMethods.OgaGenerator_GetSequence(_generatorHandle, index, sequencePtr, out sequenceLength));
             }
             finally
             {

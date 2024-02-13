@@ -159,6 +159,7 @@ def build(
         csharp_build_command = [dotnet, "build", ".", "-c", "Release"]
         run_subprocess(csharp_build_command, cwd=os.path.join("src", "csharp")).check_returncode()
         run_subprocess(csharp_build_command, cwd=os.path.join("test", "csharp")).check_returncode()
+        run_subprocess([dotnet, "test", "-c", "Release"], cwd=os.path.join("test", "csharp")).check_returncode()
 
 
 if __name__ == "__main__":

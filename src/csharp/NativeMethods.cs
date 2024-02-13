@@ -65,7 +65,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr OgaGenerator_GetSequence(IntPtr /* OgaGenerator* */ generator,
                                                              int index,
-                                                             out IntPtr /* int32_t* */ tokens,
+                                                             IntPtr /* int32_t* */ tokens,
                                                              out UIntPtr /* size_t* */ tokensCount);
     }
 }
