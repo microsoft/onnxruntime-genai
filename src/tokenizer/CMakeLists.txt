@@ -8,6 +8,7 @@ FetchContent_Declare(spm URL https://github.com/google/sentencepiece/archive/ref
 set(SPM_USE_EXTERNAL_ABSL OFF CACHE BOOL "Use external absl")
 set(SPM_USE_BUILTIN_PROTOBUF ON CACHE BOOL "Use built-in protobuf")
 set(SPM_ENABLE_SHARED OFF)
+set(SPM_ENABLE_TCMALLOC OFF CACHE BOOL "Disable tcmalloc")
 
 FetchContent_GetProperties(spm)
 if(NOT spm_POPULATED)
