@@ -5,12 +5,8 @@ cmake_minimum_required(VERSION 3.26)
 include(FetchContent)
 include(CMakeDependentOption)
 project(Generators LANGUAGES C CXX)
-option(USE_CUDA "Build with CUDA support" ON)
-option(USE_TOKENIZER "Build with Tokenizer support" ON)
-option(ENABLE_TESTS "Enable tests" ON)
-option(ENABLE_PYTHON "Enable python buildings" ON)
-cmake_dependent_option(BUILD_WHEEL "Build the python wheel" ON "ENABLE_PYTHON" OFF)
-
+# All Options should be defined in cmake/options.cmake
+include(cmake/options.cmake)
 include(cmake/external/onnxruntime_external_deps.cmake)
 # Checking if CUDA is supported
 include(CheckLanguage)
@@ -33,7 +29,6 @@ set(GENERATORS_ROOT ${PROJECT_SOURCE_DIR}/src)
 set(MODELS_ROOT ${PROJECT_SOURCE_DIR}/src/models)
 set(ORT_HEADER_DIR ${CMAKE_SOURCE_DIR}/ort/include)
 set(ORT_LIB_DIR ${CMAKE_SOURCE_DIR}/ort/lib)
-
 # CUDA Being enabled will make it not a debug build without this option, so all of the C++ headers will complain
 # about a mismatch with the actual debug headers and it'll fail to link. I don't know why this happens, or if this is the best fix.
 if(USE_CUDA AND CMAKE_CUDA_COMPILER AND CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -111,10 +106,22 @@ if(ENABLE_TESTS)
   message("------------------Enabling tests------------------")
 endif()
 
+set(WHEEL_FILES_DIR "${CMAKE_BINARY_DIR}/wheel")
+
 if(ENABLE_PYTHON)
   add_subdirectory("${CMAKE_SOURCE_DIR}/src/python")
   message("------------------Enabling Python Wheel------------------")
 endif()
+
+file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_FILES}")
+add_custom_command(
+  TARGET onnxruntime-genai-static POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} ${WHEEL_FILES_DIR}/${TARGET_NAME}/
+)
+add_custom_command(
+  TARGET onnxruntime-genai-static POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} ${DLL_FILE} $<TARGET_FILE_DIR:onnxruntime-genai>
+)
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   set_target_properties(onnxruntime-genai PROPERTIES LINKER_LANGUAGE CUDA)
@@ -147,13 +154,10 @@ endforeach()
 if(USE_TOKENIZER)
   add_compile_definitions(USE_TOKENIZER=1)
   target_include_directories(onnxruntime-genai PRIVATE ${TOKENIZER_ROOT})
-  target_include_directories(onnxruntime-genai-static PRIVATE ${TOKENIZER_ROOT})
+  target_include_directories(onnxruntime-genai-static PUBLIC ${TOKENIZER_ROOT})
   target_link_libraries(onnxruntime-genai PRIVATE tokenizer)
-  target_link_libraries(onnxruntime-genai-static PRIVATE tokenizer)
+  target_link_libraries(onnxruntime-genai-static PUBLIC tokenizer)
 endif()
 
 # Have visual studio put all files into one single folder vs the default split of header files into a separate folder
 source_group(TREE ${GENERATORS_ROOT} FILES ${generator_srcs})
-
-
-
