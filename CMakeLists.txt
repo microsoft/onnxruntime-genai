@@ -27,8 +27,9 @@ endif()
 
 set(GENERATORS_ROOT ${PROJECT_SOURCE_DIR}/src)
 set(MODELS_ROOT ${PROJECT_SOURCE_DIR}/src/models)
-set(ORT_HEADER_DIR ${CMAKE_SOURCE_DIR}/ort/include)
-set(ORT_LIB_DIR ${CMAKE_SOURCE_DIR}/ort/lib)
+set(ORT_HOME ${CMAKE_SOURCE_DIR}/ort CACHE PATH "Path to the onnxruntime root directory.")
+set(ORT_HEADER_DIR ${ORT_HOME}/include)
+set(ORT_LIB_DIR ${ORT_HOME}/lib)
 # CUDA Being enabled will make it not a debug build without this option, so all of the C++ headers will complain
 # about a mismatch with the actual debug headers and it'll fail to link. I don't know why this happens, or if this is the best fix.
 if(USE_CUDA AND CMAKE_CUDA_COMPILER AND CMAKE_BUILD_TYPE STREQUAL "Debug")
