@@ -7,6 +7,8 @@
 // Our working directory is generators/build so one up puts us in the root directory:
 #define MODEL_PATH "../../test_models/"
 
+std::unique_ptr<OrtEnv> g_ort_env;
+
 // To generate this file:
 // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
 // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
@@ -16,10 +18,6 @@ static const std::pair<const char*, const char*> c_tiny_gpt2_model_paths[] = {
 };
 
 TEST(ModelTests, GreedySearchGptFp32) {
-  std::unique_ptr<OrtEnv> g_ort_env;
-  Ort::InitApi();
-  g_ort_env = OrtEnv::Create();
-
   std::vector<int64_t> input_ids_shape{2, 4};
   std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
 
@@ -54,11 +52,6 @@ TEST(ModelTests, GreedySearchGptFp32) {
 }
 
 TEST(ModelTests, BeamSearchGptFp32) {
-
-  std::unique_ptr<OrtEnv> g_ort_env;
-  Ort::InitApi();
-  g_ort_env = OrtEnv::Create();
-
   std::vector<int64_t> input_ids_shape{3, 12};
   std::vector<int32_t> input_ids{
       0, 0, 0, 0, 0, 52, 195, 731, 321, 301, 734, 620,
@@ -111,10 +104,6 @@ TEST(ModelTests, BeamSearchGptFp32) {
 
 #if USE_CUDA
 void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label) {
-  std::unique_ptr<OrtEnv> g_ort_env;
-  Ort::InitApi();
-  g_ort_env = OrtEnv::Create();
-
   std::vector<int64_t> input_ids_shape{2, 4};
   std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
 
@@ -157,10 +146,6 @@ TEST(ModelTests, GreedySearchGptCuda) {
 }
 
 void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
-  std::unique_ptr<OrtEnv> g_ort_env;
-  Ort::InitApi();
-  g_ort_env = OrtEnv::Create();
-
   std::vector<int64_t> input_ids_shape{3, 12};
   std::vector<int32_t> input_ids{
       0, 0, 0, 0, 0, 52, 195, 731, 321, 301, 734, 620,
@@ -224,10 +209,6 @@ TEST(ModelTests, BeamSearchGptCuda) {
 TEST(ModelTests, TestApiCuda) {
 #if TEST_PHI2
 #if USE_TOKENIZER
-  std::unique_ptr<OrtEnv> g_ort_env;
-  Ort::InitApi();
-  g_ort_env = OrtEnv::Create();
-
   auto prompt = R"(
 def print_prime(n):
 '''
@@ -267,10 +248,6 @@ Print all primes between 1 and n
 TEST(ModelTests, TestHighLevelApiCuda) {
 #if TEST_PHI2
 #if USE_TOKENIZER
-  std::unique_ptr<OrtEnv> g_ort_env;
-  Ort::InitApi();
-  g_ort_env = OrtEnv::Create();
-
   auto prompt = R"(
 def print_prime(n):
 '''

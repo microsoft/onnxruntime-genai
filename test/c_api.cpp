@@ -37,10 +37,6 @@ void CheckResult(OgaResult* result) {
 }
 
 TEST(CAPITests, GreedySearchGptFp32CAPI) {
-  std::unique_ptr<OrtEnv> g_ort_env;
-  Ort::InitApi();
-  g_ort_env = OrtEnv::Create();
-
   std::vector<int64_t> input_ids_shape{2, 4};
   std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
 
