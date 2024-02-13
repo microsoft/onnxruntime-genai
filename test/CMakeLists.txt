@@ -19,7 +19,6 @@ target_link_libraries(ng_unit_tests PRIVATE
 
 # google unit test
 add_executable(unit_tests test.cpp)
-add_executable(unit_tests ${test_srcs})
 target_include_directories(unit_tests PRIVATE
   ${ORT_HEADER_DIR}
   ${CMAKE_SOURCE_DIR}/src
