@@ -117,8 +117,8 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputIDs(OgaGeneratorParams* oga_pa
 
 OgaResult* OGA_API_CALL OgaGenerate(const OgaModel* model, OgaGeneratorParams* generator_params, OgaSequences** out) {
   OGA_TRY
-  Sequences result=Generators::Generate(*reinterpret_cast<const Generators::Model*>(model), *reinterpret_cast<const Generators::GeneratorParams*>(generator_params));
-  *out=reinterpret_cast<OgaSequences*>(std::make_unique<Sequences>(std::move(result)).release());
+  Sequences result = Generators::Generate(*reinterpret_cast<const Generators::Model*>(model), *reinterpret_cast<const Generators::GeneratorParams*>(generator_params));
+  *out = reinterpret_cast<OgaSequences*>(std::make_unique<Sequences>(std::move(result)).release());
   return nullptr;
   OGA_CATCH
 }
@@ -183,5 +183,4 @@ void OGA_API_CALL OgaDestroyGeneratorParams(OgaGeneratorParams* p) {
 void OGA_API_CALL OgaDestroyGenerator(OgaGenerator* p) {
   delete reinterpret_cast<Generators::Generator*>(p);
 }
-
 }

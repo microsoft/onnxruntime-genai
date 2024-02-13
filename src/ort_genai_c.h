@@ -44,7 +44,7 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyResult(OgaResult*);
 OGA_EXPORT void OGA_API_CALL OgaDestroyBuffer(OgaBuffer*);
 OGA_EXPORT OgaDataType OGA_API_CALL OgaBufferGetType(const OgaBuffer*);
 OGA_EXPORT size_t OGA_API_CALL OgaBufferGetDimCount(const OgaBuffer*);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaBufferGetDims(const OgaBuffer*, size_t *dims, size_t dim_count);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaBufferGetDims(const OgaBuffer*, size_t* dims, size_t dim_count);
 OGA_EXPORT const void* OGA_API_CALL OgaBufferGetData(const OgaBuffer*);
 
 OGA_EXPORT void OGA_API_CALL OgaDestroySequences(OgaSequences*);
