@@ -4,7 +4,20 @@ file(GLOB test_srcs CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/*.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
 )
-add_executable(unit_tests ${test_srcs})
+# Not the google unit test
+add_executable(ng_unit_tests c_api.cpp main.cpp tests.cpp)
+target_include_directories(ng_unit_tests PRIVATE
+  ${ORT_HEADER_DIR}
+  ${CMAKE_SOURCE_DIR}/src
+)
+target_link_directories(ng_unit_tests PRIVATE ${ORT_LIB_DIR})
+target_link_libraries(ng_unit_tests PRIVATE
+  onnxruntime-genai-static
+  ${ONNXRUNTIME_LIB}
+)
+
+# google unit test
+add_executable(unit_tests test.cpp)
 target_include_directories(unit_tests PRIVATE
   ${ORT_HEADER_DIR}
   ${CMAKE_SOURCE_DIR}/src

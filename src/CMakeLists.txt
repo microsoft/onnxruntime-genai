@@ -73,9 +73,9 @@ if(ENABLE_PYTHON)
   add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/python")
 
 endif()
-if(ENABLE_TESTS)
-  message("------------------Enabling Testing------------------")
-  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/test")
-endif()
+#if(ENABLE_TESTS)
+#  message("------------------Enabling Testing------------------")
+#  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/test")
+#endif()
 # Have visual studio put all files into one single folder vs the default split of header files into a separate folder
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${generator_srcs})
