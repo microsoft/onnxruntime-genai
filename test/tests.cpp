@@ -221,7 +221,7 @@ TEST(ModelTests, BeamSearchGptCuda) {
     Test_BeamSearch_Gpt_Cuda(model_path.first, model_path.second);
 }
 
-TEST(ModelTests, Test_Phi2_Cuda) {
+TEST(ModelTests, TestApiCuda) {
 #if TEST_PHI2
 #if USE_TOKENIZER
   std::unique_ptr<OrtEnv> g_ort_env;
@@ -248,18 +248,6 @@ Print all primes between 1 and n
   params.input_ids = tokens;
   params.max_length = 128;
 
-  // TODO: Not sure if we want to keep this "original version" artifact
-  // Original version
-  // auto search = params.CreateSearch();
-  // auto state = model->CreateState(search->GetSequenceLengths(), params);
-
-  // while (!search->IsDone()) {
-  //   search->SetLogits(state->Run(search->GetSequenceLength(), search->GetNextTokens()));
-  //   search->SelectTop();
-  // }
-
-  // auto result = search->GetSequence(0);
-
   // Generator version
   auto generator = Generators::CreateGenerator(*model, params);
   while (!generator->IsDone()) {
@@ -269,11 +257,44 @@ Print all primes between 1 and n
 
   auto result = generator->GetSequence(0);
 
-  // TODO: Not sure if we want this either
-  // High level version
-  // auto result = Generators::Generate(model, params);
-
   std::cout << tokenizer->Decode(result.GetCPU()) << "\r\n";
+#else
+  std::cout << "Test skipped - not built with onnxruntime extensions\r\n";
+#endif
+#endif
+}
+
+TEST(ModelTests, TestHighLevelApiCuda) {
+#if TEST_PHI2
+#if USE_TOKENIZER
+  std::unique_ptr<OrtEnv> g_ort_env;
+  Ort::InitApi();
+  g_ort_env = OrtEnv::Create();
+
+  auto prompt = R"(
+def print_prime(n):
+'''
+Print all primes between 1 and n
+'''
+)";
+
+  std::cout << "With prompt:" << prompt << "\r\n";
+
+  auto provider_options = Generators::GetDefaultProviderOptions(Generators::DeviceType::CUDA);
+  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "phi-2", &provider_options);
+  auto tokenizer = model->CreateTokenizer();
+  auto tokens = tokenizer->Encode(prompt);
+
+  Generators::GeneratorParams params{*model};
+  params.batch_size = 1;
+  params.sequence_length = static_cast<int>(tokens.size());
+  params.input_ids = tokens;
+  params.max_length = 128;
+
+  // High level version
+  auto result = Generators::Generate(*model, params);
+
+  std::cout << tokenizer->Decode(result) << "\r\n";
 #else
   std::cout << "Test skipped - not built with onnxruntime extensions\r\n";
 #endif
