@@ -14,3 +14,14 @@ EXPORTS
  OgaGenerator_ComputeLogits @12
  OgaGenerator_GenerateNextToken_Top @13
  OgaGenerator_GetSequence @14
+ OgaDestroyBuffer @15
+ OgaBufferGetType @16
+ OgaBufferGetDimCount @17
+ OgaBufferGetDims @18
+ OgaBufferGetData @19
+ OgaDestroySequences @20
+ OgaSequencesCount @21
+ OgaSequencesGetSequenceCount @22
+ OgaSequencesGetSequenceData @23
+ OgaGenerate @24
+ 

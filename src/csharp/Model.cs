@@ -24,6 +24,31 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         internal IntPtr Handle { get { return _modelHandle; } }
 
+        public int[][] Generate(GeneratorParams generatorParams)
+        {
+            IntPtr nativeSequences = IntPtr.Zero;
+            Result.VerifySuccess(NativeMethods.OgaGenerate(_modelHandle, generatorParams.Handle, out nativeSequences));
+            try
+            {
+                ulong batchSize = NativeMethods.OgaSequencesCount(nativeSequences);
+                int[][] sequences = new int[batchSize][];
+
+                for (ulong sequenceIndex = 0; sequenceIndex < batchSize; sequenceIndex++)
+                {
+                    ulong sequenceLength = NativeMethods.OgaSequencesGetSequenceCount(nativeSequences, sequenceIndex);
+                    sequences[sequenceIndex] = new int[sequenceLength];
+                    IntPtr sequencePtr = NativeMethods.OgaSequencesGetSequenceData(nativeSequences, sequenceIndex);
+                    Marshal.Copy(sequencePtr, sequences[sequenceIndex], 0, sequences[sequenceIndex].Length);
+                }
+
+                return sequences;
+            }
+            finally
+            {
+                NativeMethods.OgaDestroySequences(nativeSequences);
+            }
+        }
+
         ~Model()
         {
             Dispose(false);

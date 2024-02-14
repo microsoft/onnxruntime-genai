@@ -59,6 +59,15 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                             Assert.Equal(expectedSequence, sequence);
                         }
                     }
+
+                    int[][] sequences = model.Generate(generatorParams);
+                    Assert.NotNull(sequences);
+
+                    for (ulong i = 0; i < batchSize; i++)
+                    {
+                        var expectedSequence = expectedOutput.Skip((int)i * (int)maxLength).Take((int)maxLength);
+                        Assert.Equal(expectedSequence, sequences[i]);
+                    }
                 }
             }
         }
