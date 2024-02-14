@@ -101,6 +101,7 @@ def build(
     cuda_home: str | bytes | os.PathLike | None = None,
     cudnn_home: str | bytes | os.PathLike | None = None,
     cmake_generator: str | None = None,
+    ort_home: str | bytes | os.PathLike | None = None,
     enable_csharp: bool = False,
 ):
     """Generates the CMake build tree and builds the project.
@@ -137,6 +138,12 @@ def build(
         "-DUSE_CUDA=ON" if cuda_home else "-DUSE_CUDA=OFF",
         f"-DBUILD_WHEEL={build_wheel}",
     ]
+
+    if ort_home:
+        ort_home = os.path.abspath(ort_home)
+        if not os.path.isdir(ort_home):
+            raise RuntimeError(f"ORT_HOME '{ort_home}' does not exist.")
+        command += [f"-DORT_HOME={ort_home}"]
 
     cuda_compiler = None
     env = {}
@@ -195,6 +202,7 @@ if __name__ == "__main__":
         "--cudnn_home is not specified.",
     )
     parser.add_argument("--skip_wheel", action="store_true", help="Skip building the Python wheel.")
+    parser.add_argument("--ort_home", default=None, help="Root directory of onnxruntime.")
     parser.add_argument("--enable_csharp", action="store_true", help="Build the C# API.")
     args = parser.parse_args()
 
@@ -204,5 +212,6 @@ if __name__ == "__main__":
         cuda_home=args.cuda_home,
         cudnn_home=args.cudnn_home,
         cmake_generator=args.cmake_generator,
+        ort_home=args.ort_home,
         enable_csharp=args.enable_csharp,
     )
