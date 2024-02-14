@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <assert.h>
+#include <sstream>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
