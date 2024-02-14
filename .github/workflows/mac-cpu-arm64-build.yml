@@ -16,6 +16,10 @@ jobs:
         with:
           submodules: true
 
+      - name: Install ninja
+        run: |
+          brew install ninja
+
       - name: Download OnnxRuntime
         run: |
           curl -L -o ${{ env.ort_zip }} ${{ env.ort_url }} 
