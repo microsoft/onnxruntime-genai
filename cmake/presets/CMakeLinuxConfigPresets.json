@@ -1,4 +1,5 @@
 {
+  "version": 6,
   "configurePresets": [
     {
       "name": "linux_gcc_default",
