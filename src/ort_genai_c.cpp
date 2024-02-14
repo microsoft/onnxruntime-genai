@@ -23,6 +23,8 @@ OrtEnv& GetOrtEnv() {
 
 }  // namespace Generators
 
+using Sequences = std::vector<std::vector<int32_t>>;
+
 extern "C" {
 
 #define OGA_TRY try {
@@ -41,6 +43,46 @@ const char* OGA_API_CALL OgaResultGetError(OgaResult* result) {
   return result->what_.c_str();
 }
 
+struct OgaBuffer {
+  std::unique_ptr<uint8_t[]> data_;
+  std::vector<size_t> dims_;
+  OgaDataType type_;
+};
+
+OgaDataType OGA_API_CALL OgaBufferGetType(const OgaBuffer* p) {
+  return p->type_;
+}
+
+size_t OGA_API_CALL OgaBufferGetDimCount(const OgaBuffer* p) {
+  return p->dims_.size();
+}
+
+OgaResult* OGA_API_CALL OgaBufferGetDims(const OgaBuffer* p, size_t* dims, size_t dim_count) {
+  OGA_TRY
+  if (dim_count != p->dims_.size())
+    throw std::runtime_error("OgaBufferGetDims - passed in buffer size does not match dim count");
+
+  std::copy(p->dims_.begin(), p->dims_.end(), dims);
+  return nullptr;
+  OGA_CATCH
+}
+
+const void* OGA_API_CALL OgaBufferGetData(const OgaBuffer* p) {
+  return p->data_.get();
+}
+
+size_t OGA_API_CALL OgaSequencesCount(const OgaSequences* p) {
+  return reinterpret_cast<const Sequences*>(p)->size();
+}
+
+size_t OGA_API_CALL OgaSequencesGetSequenceCount(const OgaSequences* p, size_t sequence) {
+  return (*reinterpret_cast<const Sequences*>(p))[sequence].size();
+}
+
+const int32_t* OGA_API_CALL OgaSequencesGetSequenceData(const OgaSequences* p, size_t sequence) {
+  return (*reinterpret_cast<const Sequences*>(p))[sequence].data();
+}
+
 OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaDeviceType device_type, OgaModel** out) {
   OGA_TRY
   auto provider_options = Generators::GetDefaultProviderOptions(static_cast<Generators::DeviceType>(device_type));
@@ -49,9 +91,9 @@ OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaDeviceType de
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaCreateGeneratorParams(OgaModel* model, OgaGeneratorParams** out) {
+OgaResult* OGA_API_CALL OgaCreateGeneratorParams(const OgaModel* model, OgaGeneratorParams** out) {
   OGA_TRY
-  *out = reinterpret_cast<OgaGeneratorParams*>(new Generators::GeneratorParams(*reinterpret_cast<Generators::Model*>(model)));
+  *out = reinterpret_cast<OgaGeneratorParams*>(new Generators::GeneratorParams(*reinterpret_cast<const Generators::Model*>(model)));
   return nullptr;
   OGA_CATCH
 }
@@ -73,9 +115,17 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputIDs(OgaGeneratorParams* oga_pa
   OGA_CATCH
 }
 
-OgaResult* OgaCreateGenerator(OgaModel* model, const OgaGeneratorParams* generator_params, OgaGenerator** out) {
+OgaResult* OGA_API_CALL OgaGenerate(const OgaModel* model, OgaGeneratorParams* generator_params, OgaSequences** out) {
   OGA_TRY
-  *out = reinterpret_cast<OgaGenerator*>(CreateGenerator(*reinterpret_cast<Generators::Model*>(model), *reinterpret_cast<const Generators::GeneratorParams*>(generator_params)).release());
+  Sequences result = Generators::Generate(*reinterpret_cast<const Generators::Model*>(model), *reinterpret_cast<const Generators::GeneratorParams*>(generator_params));
+  *out = reinterpret_cast<OgaSequences*>(std::make_unique<Sequences>(std::move(result)).release());
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaCreateGenerator(const OgaModel* model, const OgaGeneratorParams* generator_params, OgaGenerator** out) {
+  OGA_TRY
+  *out = reinterpret_cast<OgaGenerator*>(CreateGenerator(*reinterpret_cast<const Generators::Model*>(model), *reinterpret_cast<const Generators::GeneratorParams*>(generator_params)).release());
   return nullptr;
   OGA_CATCH
 }
@@ -98,9 +148,9 @@ OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken_Top(OgaGenerator* generat
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGenerator_GetSequence(OgaGenerator* oga_generator, int index, int32_t* tokens, size_t* count) {
+OgaResult* OGA_API_CALL OgaGenerator_GetSequence(const OgaGenerator* oga_generator, int index, int32_t* tokens, size_t* count) {
   OGA_TRY
-  auto& generator = *reinterpret_cast<Generators::Generator*>(oga_generator);
+  auto& generator = *reinterpret_cast<const Generators::Generator*>(oga_generator);
   auto sequence = generator.GetSequence(index);
   auto sequence_cpu = sequence.GetCPU();
   *count = sequence_cpu.size();
@@ -112,6 +162,14 @@ OgaResult* OGA_API_CALL OgaGenerator_GetSequence(OgaGenerator* oga_generator, in
 
 void OGA_API_CALL OgaDestroyResult(OgaResult* p) {
   delete p;
+}
+
+void OGA_API_CALL OgaDestroyBuffer(OgaBuffer* p) {
+  delete p;
+}
+
+void OGA_API_CALL OgaDestroySequences(OgaSequences* p) {
+  delete reinterpret_cast<Sequences*>(p);
 }
 
 void OGA_API_CALL OgaDestroyModel(OgaModel* p) {
