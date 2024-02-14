@@ -123,7 +123,7 @@ wget https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/src/pyth
 Export int4 CPU version 
 ```bash
 huggingface-cli login --token <your HuggingFace token>
-python export.py python models/export.py -m microsoft/phi-2 -p int4 -e cpu -o phi2-int4-cpu.onnx
+python export.py -m microsoft/phi-2 -p int4 -e cpu -o phi2-int4-cpu.onnx
 ```
 
 
