@@ -17,10 +17,10 @@
 namespace Generators {
 namespace cuda {
 
-const int max_threads = 1024;
-constexpr int GPU_WARP_SIZE = 32;
+constexpr int kMaxThreads = 1024;
+constexpr int kGPUWarpSize = 32;
 
-////////////// SOFTMAX KERNELS AND LAUNCHER //////////////
+// Softmax Kernels and Launchers
 
 template <typename T, typename AccumT>
 struct MaxFloat {
@@ -103,10 +103,10 @@ __device__ __forceinline__ AccumT SoftmaxReduce(AccumT* smem, AccumT val, const 
   __syncthreads();
   AccumT warpVal = defaultVal;
   // First warp will perform per-warp reductions for the remaining warps
-  if (threadIdx.x < GPU_WARP_SIZE) {
-    int warps_per_block = blockDim.x / GPU_WARP_SIZE;
+  if (threadIdx.x < kGPUWarpSize) {
+    int warps_per_block = blockDim.x / kGPUWarpSize;
     for (int i = 0; i < warps_per_block; ++i) {
-      warpVal = r(warpVal, smem[i * GPU_WARP_SIZE + threadIdx.x]);
+      warpVal = r(warpVal, smem[i * kGPUWarpSize + threadIdx.x]);
     }
     smem[threadIdx.x] = warpVal;
   }
@@ -115,7 +115,7 @@ __device__ __forceinline__ AccumT SoftmaxReduce(AccumT* smem, AccumT val, const 
   AccumT blockVal = defaultVal;
   if (threadIdx.x == 0) {
     #pragma unroll
-    for (int i = 0; i < GPU_WARP_SIZE; ++i) {
+    for (int i = 0; i < kGPUWarpSize; ++i) {
       blockVal = r(blockVal, smem[i]);
     }
     smem[0] = blockVal;
@@ -127,7 +127,7 @@ __device__ __forceinline__ AccumT SoftmaxReduce(AccumT* smem, AccumT val, const 
 
 dim3 SoftmaxGetBlockSize(int ILP, uint64_t size) {
   uint64_t block_size = 1;
-  uint64_t max_block_size = min(size / ILP, static_cast<uint64_t>(max_threads));
+  uint64_t max_block_size = min(size / ILP, static_cast<uint64_t>(kMaxThreads));
   // In the vectorized case we want to trade off allowing more of the buffers to be accessed
   // in a vectorized way against wanting a larger block size to get better utilisation.
   // In general with ILP you can have (ILP-1)/ILP of the buffer accessed vectorised, at the risk
@@ -138,7 +138,7 @@ dim3 SoftmaxGetBlockSize(int ILP, uint64_t size) {
   }
   while (block_size < max_block_size) block_size *= 2;
   // Launch at least a single warp - the kernel assumes that.
-  block_size = max(block_size, static_cast<uint64_t>(GPU_WARP_SIZE));
+  block_size = max(block_size, static_cast<uint64_t>(kGPUWarpSize));
   return dim3(static_cast<unsigned int>(block_size));
 }
 
@@ -290,7 +290,7 @@ void DispatchBlockwiseSoftmaxForward(cudaStream_t* stream, float* output, const 
   }
 }
 
-/////////////// POPULATE KERNEL LAUNCHERS ////////////////
+// Populate Kernels and Launchers
 
 __global__ void PopulateIndices(int* indices, int size, int batch_size) {
   int global_index = threadIdx.x + blockIdx.x * blockDim.x;
@@ -318,7 +318,7 @@ void LaunchPopulateOffsets(int* offsets, int size, int batch_size, cudaStream_t 
   PopulateOffsets<<<grid, block, 0, stream>>>(offsets, size, batch_size);
 }
 
-/////////////// SORTING KERNEL LAUNCHER //////////////////
+// Sorting Kernel Launcher
 
 template <typename T>
 void LaunchSortPairs(void* d_temp_storage,
@@ -359,7 +359,7 @@ void GetTempStorageSize(const T* d_keys_in,
   }
 }
 
-/////////////// SAMPLE KERNEL LAUNCHER ///////////////////
+// Sampling Kernels and Launchers
 
 template <int kBlockSize>
 __global__ void PrefixSumKernel(float* scores, float* prefix_sums, int sample_range, int batch_size) {
@@ -516,7 +516,7 @@ void LaunchSampleKernel(cudaStream_t stream, float* scores, int* indices, int* i
   SampleKernel<256><<<grid, block, 0, stream>>>(prefix_sums.data(), indices, index_out, sample_range, thresholds.data());
 }
 
-/////////////// TOP P+K KERNEL LAUNCHER ////////////////////
+// Top P+K Kernel Launchers
 
 // Outputs sorted scores and corresponding indices... scores_out and indices_out should already be allocated
 void SoftmaxAndSort(cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, float temperature) {
@@ -542,12 +542,25 @@ void SoftmaxAndSort(cudaStream_t stream, float* scores_in, float* scores_out, in
 }
 
 void LaunchGetTopKSubsetFullSort(cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k) {
-  // Softmax and sort scores
+  // Sort indices and scores
   auto scores_buffer = CudaMallocArray<float>(vocab_size * batch_size);
   auto indices_buffer = CudaMallocArray<int>(vocab_size * batch_size);
   std::span<float> scores_sorted{scores_buffer.get(), static_cast<size_t>(vocab_size * batch_size)};
   std::span<int> indices_sorted{indices_buffer.get(), static_cast<size_t>(vocab_size * batch_size)};
-  SoftmaxAndSort(stream, scores_in, scores_sorted.data(), indices_sorted.data(), vocab_size, batch_size, 1.0);
+  auto offsets_buffer = CudaMallocArray<int>(batch_size + 1);
+  std::span<int> offsets_gpu{offsets_buffer.get(), static_cast<size_t>(batch_size + 1)};
+  LaunchPopulateOffsets(offsets_gpu.data(), vocab_size, batch_size, stream);
+  auto indices_in_buffer = CudaMallocArray<int>(vocab_size * batch_size);
+  std::span<int32_t> indices_in{indices_in_buffer.get(), static_cast<size_t>(vocab_size * batch_size)};
+  LaunchPopulateIndices(indices_in.data(), vocab_size, batch_size, stream);
+  size_t temp_storage_bytes = 0;
+  GetTempStorageSize<float>(scores_in, indices_in.data(), offsets_gpu.data(), vocab_size * batch_size,
+                            batch_size, stream, /*is_descending*/true, temp_storage_bytes);
+  auto temp_buffer = CudaMallocArray<float>(temp_storage_bytes / sizeof(float));
+  std::span<float> temp_span{temp_buffer.get(), temp_storage_bytes / sizeof(float)};
+  LaunchSortPairs<float>(temp_span.data(), temp_storage_bytes, scores_in, scores_sorted.data(),
+                         indices_in.data(), indices_sorted.data(), vocab_size * batch_size, batch_size, offsets_gpu.data(),
+                         stream, /*is_descending*/true);
   // Get top k subset
   dim3 grid(batch_size * int(1 + k / 256), 1, 1);
   dim3 block(256, 1, 1);
