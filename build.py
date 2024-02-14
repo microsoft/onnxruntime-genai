@@ -168,8 +168,11 @@ def build(
         dotnet = resolve_executable_path("dotnet")
         csharp_build_command = [dotnet, "build", ".", "-c", "Release"]
         run_subprocess(csharp_build_command, cwd=os.path.join("src", "csharp")).check_returncode()
-        run_subprocess(csharp_build_command, cwd=os.path.join("test", "csharp")).check_returncode()
-        run_subprocess([dotnet, "test", "-c", "Release"], cwd=os.path.join("test", "csharp")).check_returncode()
+        properties = []
+        if ort_home:
+            properties += [f"/p:OrtHome={ort_home}"]
+        run_subprocess(csharp_build_command + properties, cwd=os.path.join("test", "csharp")).check_returncode()
+        run_subprocess([dotnet, "test", "-c", "Release"] + properties, cwd=os.path.join("test", "csharp")).check_returncode()
 
 
 if __name__ == "__main__":

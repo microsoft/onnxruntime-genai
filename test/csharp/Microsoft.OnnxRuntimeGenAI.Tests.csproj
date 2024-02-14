@@ -22,7 +22,8 @@
     <!--internal build related properties for Windows -->
     <OnnxRuntimeGenAIBuildDirectory>$(TestsSrcRoot)\..\build</OnnxRuntimeGenAIBuildDirectory>
     <NativeBuildOutputDir>$(OnnxRuntimeGenAIBuildDirectory)\$(Configuration)</NativeBuildOutputDir>
-    <OnnxruntimeLibDirectory>$(TestsSrcRoot)\..\ort\lib</OnnxruntimeLibDirectory>
+    <OrtHome>$(TestsSrcRoot)\..\ort</OrtHome>
+    <OnnxruntimeLibDirectory>$(OrtHome)\lib</OnnxruntimeLibDirectory>
   </PropertyGroup>
 
   <ItemGroup>
