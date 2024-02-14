@@ -7,38 +7,6 @@
   },
   "buildPresets": [
     {
-      "name": "windows_Win32_cpu_release_asan",
-      "configurePreset": "windows_Win32_cpu_release_asan"
-    },
-    {
-      "name": "windows_Win32_cpu_debug_asan",
-      "configurePreset": "windows_Win32_cpu_debug_asan"
-    },
-    {
-      "name": "windows_Win32_cpu_relwithdebinfo_asan",
-      "configurePreset": "windows_Win32_cpu_relwithdebinfo_asan"
-    },
-    {
-      "name": "windows_Win32_cpu_minsizerel_asan",
-      "configurePreset": "windows_Win32_cpu_minsizerel_asan"
-    },
-    {
-      "name": "windows_Win32_cpu_release",
-      "configurePreset": "windows_Win32_cpu_release"
-    },
-    {
-      "name": "windows_Win32_cpu_debug",
-      "configurePreset": "windows_Win32_cpu_debug"
-    },
-    {
-      "name": "windows_Win32_cpu_relwithdebinfo",
-      "configurePreset": "windows_Win32_cpu_relwithdebinfo"
-    },
-    {
-      "name": "windows_Win32_cpu_minsizerel",
-      "configurePreset": "windows_Win32_cpu_minsizerel"
-    },
-    {
       "name": "windows_x64_cpu_release_asan",
       "configurePreset": "windows_x64_cpu_release_asan"
     },
