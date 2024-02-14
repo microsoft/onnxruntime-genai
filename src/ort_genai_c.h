@@ -49,8 +49,8 @@ OGA_EXPORT const void* OGA_API_CALL OgaBufferGetData(const OgaBuffer*);
 
 OGA_EXPORT void OGA_API_CALL OgaDestroySequences(OgaSequences*);
 OGA_EXPORT size_t OGA_API_CALL OgaSequencesCount(const OgaSequences*);
-OGA_EXPORT size_t OGA_API_CALL OgaSequencesGetSequenceCount(const OgaSequences*, size_t sequence);
-OGA_EXPORT const int32_t* OGA_API_CALL OgaSequencesGetSequenceData(const OgaSequences*, size_t sequence);
+OGA_EXPORT size_t OGA_API_CALL OgaSequencesGetSequenceCount(const OgaSequences*, size_t sequence_index);
+OGA_EXPORT const int32_t* OGA_API_CALL OgaSequencesGetSequenceData(const OgaSequences*, size_t sequence_index);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaDeviceType device_type, OgaModel** out);
 OGA_EXPORT void OGA_API_CALL OgaDestroyModel(OgaModel*);
