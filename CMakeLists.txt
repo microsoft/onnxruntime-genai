@@ -44,6 +44,9 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
   "${MODELS_ROOT}/*.h"
   "${MODELS_ROOT}/*.cpp"
 )
+file(GLOB generator_cuda_exclude_srcs "${GENERATORS_ROOT}/*_cuda*.*")
+# Remove the cuda files from the generator_srcs unless we are using cuda
+list(REMOVE_ITEM generator_srcs ${generator_cuda_exclude_srcs})
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   # Don't let cmake set a default value for CMAKE_CUDA_ARCHITECTURES
@@ -58,15 +61,13 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
     "${MODELS_ROOT}/*.cu"
     "${MODELS_ROOT}/*.cuh"
   )
-  list(APPEND generator_srcs ${generator_cuda_srcs})
+  list(APPEND generator_srcs ${generator_cuda_srcs} ${generator_cuda_exclude_srcs})
   add_compile_definitions(USE_CUDA=1)
   include_directories("${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}")
 elseif(USE_CUDA)
   # USE_CUDA is true but cmake could not find the cuda compiler
-  message(FATAL_ERROR "USE_CUDA is ON but no cuda compiler was found.")
-else()
-  file(GLOB generator_cuda_srcs "${GENERATORS_ROOT}/*_cuda*.*")
-  list(REMOVE_ITEM generator_srcs ${generator_cuda_srcs})
+  message(WARNING "USE_CUDA is ON but no cuda compiler was found. Disabling CUDA support.")
+  set(USE_CUDA OFF)
 endif()
 
 add_library(onnxruntime-genai SHARED ${generator_srcs})
@@ -117,7 +118,7 @@ if(NOT EXISTS "${ORT_LIB_DIR}/${ONNXRUNTIME_LIB}")
   message(FATAL_ERROR "Expected the ONNX Runtime library to be found at ${ORT_LIB_DIR}/${ONNXRUNTIME_LIB}. Actual: Not found.")
 endif()
 if(NOT EXISTS "${ORT_HEADER_DIR}/onnxruntime_c_api.h")
-  message(FATAL_ERROR "Expected the ONNX Runtime C API header to be found at "${ORT_HEADER_DIR}/onnxruntime_c_api.h". Actual: Not found.")
+  message(FATAL_ERROR "Expected the ONNX Runtime C API header to be found at " ${ORT_HEADER_DIR}/onnxruntime_c_api.h". Actual: Not found.")
 endif()
 if(USE_CUDA AND NOT EXISTS "${ORT_LIB_DIR}/${ONNXRUNTIME_PROVIDERS_CUDA_LIB}")
   message(FATAL_ERROR "Expected the ONNX Runtime providers cuda library to be found at ${ORT_LIB_DIR}/${ONNXRUNTIME_PROVIDERS_CUDA_LIB}. Actual: Not found.")
