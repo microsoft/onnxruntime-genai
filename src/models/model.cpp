@@ -31,7 +31,7 @@ void State::ClearIO() {
   outputs_.clear();
 }
 
-#if NO_TOKENIZER
+#ifdef NO_TOKENIZER
 Tokenizer::Tokenizer(Config& config) {
 }
 

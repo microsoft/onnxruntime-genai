@@ -1,5 +1,5 @@
 #pragma once
-#if !NO_TOKENIZER
+#ifndef NO_TOKENIZER
 #include "tfmtok_c.h"
 #endif
 
@@ -23,7 +23,7 @@ struct State {
   void ClearIO();                 // Clear all inputs/outputs
 };
 
-#if NO_TOKENIZER
+#ifdef NO_TOKENIZER
 struct Tokenizer {
   Tokenizer(Config& config);
 

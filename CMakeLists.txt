@@ -94,11 +94,15 @@ else()
   set(ONNXRUNTIME_EXTENSIONS_LIB "tfmtok_c.so")
 endif()
 
-if(USE_TOKENIZER)
-  add_subdirectory("${CMAKE_SOURCE_DIR}/src/tokenizer")
-  message("------------------Using Tokenizer------------------")
-else()
+if(NO_TOKENIZEROOT)
   add_compile_definitions(NO_TOKENIZER=1)
+  message("----------------Tokenizer Disabled------------------")
+else()
+  add_subdirectory("${CMAKE_SOURCE_DIR}/src/tokenizer")
+  target_include_directories(onnxruntime-genai PRIVATE ${TOKENIZER_ROOT})
+  target_include_directories(onnxruntime-genai-static PUBLIC ${TOKENIZER_ROOT})
+  target_link_libraries(onnxruntime-genai PRIVATE tokenizer)
+  target_link_libraries(onnxruntime-genai-static PUBLIC tokenizer)
 endif()
 
 if(ENABLE_TESTS)
@@ -152,13 +156,6 @@ foreach(DLL_FILE ${onnxruntime_libs})
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DLL_FILE} $<TARGET_FILE_DIR:onnxruntime-genai>
   )
 endforeach()
-
-if(USE_TOKENIZER)
-  target_include_directories(onnxruntime-genai PRIVATE ${TOKENIZER_ROOT})
-  target_include_directories(onnxruntime-genai-static PUBLIC ${TOKENIZER_ROOT})
-  target_link_libraries(onnxruntime-genai PRIVATE tokenizer)
-  target_link_libraries(onnxruntime-genai-static PUBLIC tokenizer)
-endif()
 
 # Have visual studio put all files into one single folder vs the default split of header files into a separate folder
 source_group(TREE ${GENERATORS_ROOT} FILES ${generator_srcs})
