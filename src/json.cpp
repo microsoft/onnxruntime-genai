@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <charconv>
+#include <sstream>
 
 namespace JSON {
 
@@ -198,7 +199,7 @@ void JSON::Parse_Array(Element& element) {
 }
 
 double JSON::Parse_Number() {
-  double value = NAN;
+  int value = NAN;
   auto result = std::from_chars(current_, end_, value);
   if (result.ec != std::errc{}) {
     throw std::runtime_error("Expecting number");
