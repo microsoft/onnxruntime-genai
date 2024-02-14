@@ -96,8 +96,9 @@ endif()
 
 if(USE_TOKENIZER)
   add_subdirectory("${CMAKE_SOURCE_DIR}/src/tokenizer")
-  add_compile_definitions(USE_TOKENIZER=1)
   message("------------------Using Tokenizer------------------")
+else()
+  add_compile_definitions(NO_TOKENIZER=1)
 endif()
 
 if(ENABLE_TESTS)
