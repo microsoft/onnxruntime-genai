@@ -1,0 +1,16 @@
+{
+  "name": "onnxruntime-genai",
+  "version-string": "0.0.1",
+  "license": "MIT",
+  "dependencies": [
+    {
+      "name": "pybind11",
+      "version>=": "2.11.1"
+    },
+    {
+      "name": "gtest",
+      "version>=": "1.14.0"
+    }
+  ],
+  "builtin-baseline": "10e052511428d6b0c7fcc63a139e8024bb146032"
+}

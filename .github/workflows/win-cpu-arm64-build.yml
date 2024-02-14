@@ -14,17 +14,28 @@ env:
   ort_dir: "onnxruntime-win-arm64-1.16.3"
   ort_zip: "$(ort_dir).zip"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/$(ort_zip)"
+  VCPKG_DEFAULT_TRIPLET: "arm64-windows"
 
 jobs:
   job:
-    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Win11-ARM-CPU"]
+    name: "Windows CPU ARM64 Build"
+    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Win11-ARM-CPU" ]
     steps:
-      - uses: actions/checkout@v2
+      - name: Checkout OnnxRuntime GenAI repo
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+
       - name: Setup Visual Studio 2022
         uses: microsoft/setup-msbuild@v1.1
         with:
           vs-version: '17.4'
           msbuild-architecture: arm64
+
+      - name: Bootstrap vcpkg
+        run: |
+          ${{ github.workspace }}\extern\vcpkg\bootstrap-vcpkg.bat
 
       - name: Download OnnxRuntime
         run: |
@@ -54,4 +65,6 @@ jobs:
         uses: actions/upload-artifact@v3
         with:
           name: onnxruntime-genai-win-cpu-arm64
-          path: Release/*.lib
+          path: |
+            Release/onnxruntime-genai.lib
+            Release/onnxruntime-genai.dll

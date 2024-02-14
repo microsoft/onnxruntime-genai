@@ -9,29 +9,27 @@ env:
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/onnxruntime-linux-x64-1.16.3.tgz"
 jobs:
   job:
+    name: "Linux CPU x64 Build"
     runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU" ]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
+        with:
+          submodules: true
 
-
+      - name: Bootstrap vcpkg
+        run: |
+          ${{ github.workspace }}/extern/vcpkg/bootstrap-vcpkg.sh
 
       - name: Download OnnxRuntime
         run: |
+          echo "Downloading ${{ env.ort_url }}"
           curl -L -o ${{ env.ort_zip }} ${{ env.ort_url }} 
-
-      - name: Unzip OnnxRuntime
-        run: |
+          echo "Unzipping ${{ env.ort_zip }}"
           tar -xzf ${{ env.ort_zip }}
           rm ${{ env.ort_zip }}
-
-      - name: Rename OnnxRuntime to ort
-        run: |
+          echo "Renaming ${{ env.ort_dir }} to ort"
           mv ${{ env.ort_dir }} ort
-
-      - name: Git Submodule Update
-        run: |
-          git submodule update --init --recursive
 
       - name: Build with CMake and GCC
         run: |
@@ -56,4 +54,4 @@ jobs:
         uses: actions/upload-artifact@v3
         with:
           name: onnxruntime-genai-linux-cpu-x64
-          path: ${{ github.workspace }}/build/**/*.a
+          path: ${{ github.workspace }}/build/**/*.so
