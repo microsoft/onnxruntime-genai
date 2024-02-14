@@ -1,4 +1,4 @@
-name: "Linux CPU ARM64 Build"
+name: "MacOS CPU ARM64 Build"
 on: [ workflow_dispatch, pull_request ]
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
