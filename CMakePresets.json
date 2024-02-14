@@ -7,7 +7,8 @@
   },
   "include": [
     "cmake/presets/CMakeBuildPresets.json",
-    "cmake/presets/CMakeConfigPresets.json"
+    "cmake/presets/CMakeWinConfigPresets.json",
+    "cmake/presets/CMakeLinuxConfigPresets.json"
   ]
 
 }

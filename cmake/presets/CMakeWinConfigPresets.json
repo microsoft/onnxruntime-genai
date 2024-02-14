@@ -1,0 +1,200 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 23,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "windows_default",
+      "generator": "Visual Studio 17 2022",
+      "cacheVariables": {
+        "CMAKE_EXE_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
+        "CMAKE_MODULE_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
+        "CMAKE_SHARED_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "windows_cpu_default",
+      "inherits": "windows_default",
+      "architecture": "x64",
+      "cacheVariables": {
+        "USE_CUDA": "OFF"
+      }
+    },
+    {
+      "name": "windows_cuda_default",
+      "inherits": "windows_default",
+      "architecture": "x64",
+      "cacheVariables": {
+        "USE_CUDA": "ON"
+      }
+    },
+    {
+      "name": "windows_x64_cpu_release_asan",
+      "inherits": "windows_cpu_default",
+      "displayName": "windows x64 cpu release asan",
+      "binaryDir": "${sourceDir}/build/release/cpu_asan",
+      "cacheVariables": {
+        "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG /fsanitize=address",
+        "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG /fsanitize=address"
+      }
+    },
+    {
+      "name": "windows_x64_cpu_debug_asan",
+      "inherits": "windows_cpu_default",
+      "displayName": "windows x64 cpu debug asan",
+      "binaryDir": "${sourceDir}/build/debug/cpu_asan",
+      "cacheVariables": {
+        "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /Ob0 /Od /RTC1 /fsanitize=address",
+        "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /Ob0 /Od /RTC1 /fsanitize=address"
+      }
+    },
+    {
+      "name": "windows_x64_cpu_relwithdebinfo_asan",
+      "inherits": "windows_cpu_default",
+      "displayName": "windows x64 cpu relwithdebinfo asan",
+      "binaryDir": "${sourceDir}/build/relwithdebinfo/cpu_asan",
+      "cacheVariables": {
+        "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob1 /DNDEBUG /fsanitize=address",
+        "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob1 /DNDEBUG /fsanitize=address"
+      }
+    },
+    {
+      "name": "windows_x64_cpu_minsizerel_asan",
+      "inherits": "windows_cpu_default",
+      "displayName": "windows x64 cpu minsizerel asan",
+      "binaryDir": "${sourceDir}/build/minsizerel/cpu_asan",
+      "cacheVariables": {
+        "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O1 /Ob1 /DNDEBUG /fsanitize=address",
+        "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O1 /Ob1 /DNDEBUG /fsanitize=address"
+      }
+    },
+    {
+      "name": "windows_x64_cpu_release",
+      "inherits": "windows_cpu_default",
+      "displayName": "windows x64 cpu release",
+      "binaryDir": "${sourceDir}/build/release/cpu_default",
+      "cacheVariables": {
+        "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG",
+        "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG"
+      }
+    },
+    {
+      "name": "windows_x64_cpu_debug",
+      "inherits": "windows_cpu_default",
+      "displayName": "windows x64 cpu debug",
+      "binaryDir": "${sourceDir}/build/debug/cpu_default",
+      "cacheVariables": {
+        "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /Ob0 /Od /RTC1",
+        "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /Ob0 /Od /RTC1"
+      }
+    },
+    {
+      "name": "windows_x64_cpu_relwithdebinfo",
+      "inherits": "windows_cpu_default",
+      "displayName": "windows x64 cpu relwithdebinfo",
+      "binaryDir": "${sourceDir}/build/relwithdebinfo/cpu_default",
+      "cacheVariables": {
+        "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob1 /DNDEBUG",
+        "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob1 /DNDEBUG"
+      }
+    },
+    {
+      "name": "windows_x64_cpu_minsizerel",
+      "inherits": "windows_cpu_default",
+      "displayName": "windows x64 cpu minsizerel",
+      "binaryDir": "${sourceDir}/build/minsizerel/cpu_default",
+      "cacheVariables": {
+        "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O1 /Ob1 /DNDEBUG",
+        "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O1 /Ob1 /DNDEBUG"
+      }
+    },
+    {
+      "name": "windows_x64_cuda_release_asan",
+      "inherits": "windows_cuda_default",
+      "displayName": "windows x64 cuda release asan",
+      "binaryDir": "${sourceDir}/build/release/cuda_asan",
+      "cacheVariables": {
+        "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG /fsanitize=address",
+        "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG /fsanitize=address"
+      }
+    },
+    {
+      "name": "windows_x64_cuda_debug_asan",
+      "inherits": "windows_cuda_default",
+      "displayName": "windows x64 cuda debug asan",
+      "binaryDir": "${sourceDir}/build/debug/cuda_asan",
+      "cacheVariables": {
+        "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /Ob0 /Od /RTC1 /fsanitize=address",
+        "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /Ob0 /Od /RTC1 /fsanitize=address"
+      }
+    },
+    {
+      "name": "windows_x64_cuda_relwithdebinfo_asan",
+      "inherits": "windows_cuda_default",
+      "displayName": "windows x64 cuda relwithdebinfo asan",
+      "binaryDir": "${sourceDir}/build/relwithdebinfo/cuda_asan",
+      "cacheVariables": {
+        "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob1 /DNDEBUG /fsanitize=address",
+        "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob1 /DNDEBUG /fsanitize=address"
+      }
+    },
+    {
+      "name": "windows_x64_cuda_minsizerel_asan",
+      "inherits": "windows_cuda_default",
+      "displayName": "windows x64 cuda minsizerel asan",
+      "binaryDir": "${sourceDir}/build/minsizerel/cuda_asan",
+      "cacheVariables": {
+        "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O1 /Ob1 /DNDEBUG /fsanitize=address",
+        "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O1 /Ob1 /DNDEBUG /fsanitize=address"
+      }
+    },
+    {
+      "name": "windows_x64_cuda_release",
+      "inherits": "windows_cuda_default",
+      "displayName": "windows x64 cuda release",
+      "binaryDir": "${sourceDir}/build/release/cuda_default",
+      "cacheVariables": {
+        "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG",
+        "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG"
+      }
+    },
+    {
+      "name": "windows_x64_cuda_debug",
+      "inherits": "windows_cuda_default",
+      "displayName": "windows x64 cuda debug",
+      "binaryDir": "${sourceDir}/build/debug/cuda_default",
+      "cacheVariables": {
+        "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /Ob0 /Od /RTC1",
+        "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /Ob0 /Od /RTC1"
+      }
+    },
+    {
+      "name": "windows_x64_cuda_relwithdebinfo",
+      "inherits": "windows_cuda_default",
+      "displayName": "windows x64 cuda relwithdebinfo",
+      "binaryDir": "${sourceDir}/build/relwithdebinfo/cuda_default",
+      "cacheVariables": {
+        "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob1 /DNDEBUG",
+        "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob1 /DNDEBUG"
+      }
+    },
+    {
+      "name": "windows_x64_cuda_minsizerel",
+      "inherits": "windows_cuda_default",
+      "displayName": "windows x64 cuda minsizerel",
+      "binaryDir": "${sourceDir}/build/minsizerel/cuda_default",
+      "cacheVariables": {
+        "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O1 /Ob1 /DNDEBUG",
+        "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O1 /Ob1 /DNDEBUG"
+      }
+    }
+  ]
+}
