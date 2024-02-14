@@ -1,10 +1,4 @@
 {
-  "version": 6,
-  "cmakeMinimumRequired": {
-    "major": 3,
-    "minor": 23,
-    "patch": 0
-  },
   "buildPresets": [
     {
       "name": "windows_x64_cpu_release_asan",
