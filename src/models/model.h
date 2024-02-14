@@ -52,10 +52,10 @@ struct Model {
   virtual ~Model();
 
 #if USE_TOKENIZER
-  std::unique_ptr<Tokenizer> CreateTokenizer();
+  std::unique_ptr<Tokenizer> CreateTokenizer() const;
 #endif
 
-  virtual std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params) = 0;
+  virtual std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params) const = 0;
 
   std::unique_ptr<OrtValue> ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams) const;
 

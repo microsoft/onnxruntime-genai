@@ -89,7 +89,7 @@ void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
 }
 
 #if USE_TOKENIZER
-std::unique_ptr<Tokenizer> Model::CreateTokenizer() {
+std::unique_ptr<Tokenizer> Model::CreateTokenizer() const {
   return std::make_unique<Tokenizer>(*config_);
 }
 #endif

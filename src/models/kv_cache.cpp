@@ -4,7 +4,7 @@
 
 namespace Generators {
 
-KV_Cache_Combined::KV_Cache_Combined(Model& model, State& state)
+KV_Cache_Combined::KV_Cache_Combined(const Model& model, State& state)
     : model_{model},
       state_{state},
       layer_count_{model.config_->model.num_hidden_layers},
@@ -107,7 +107,7 @@ void KV_Cache_Combined::PickPastState(std::span<const int32_t> beam_indices, int
   }
 }
 
-KV_Cache::KV_Cache(Model& model, State& state)
+KV_Cache::KV_Cache(const Model& model, State& state)
     : model_{model},
       state_{state},
       layer_count_{model_.config_->model.num_hidden_layers},
@@ -214,7 +214,7 @@ void KV_Cache::PickPastState(std::span<const int32_t> beam_indices, int index) {
   }
 }
 
-Cross_Cache::Cross_Cache(Model& model, State& state)
+Cross_Cache::Cross_Cache(const Model& model, State& state)
     : model_{model},
       state_{state},
       layer_count_{model_.config_->model.num_hidden_layers},

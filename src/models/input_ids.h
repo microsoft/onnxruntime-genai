@@ -4,7 +4,7 @@ namespace Generators {
 
 template <typename T>
 struct InputIDs {
-  InputIDs(Model& model, State& state);
+  InputIDs(const Model& model, State& state);
 
   void Add();
   void Update(RoamingArray<int32_t> next_tokens);
@@ -13,7 +13,7 @@ struct InputIDs {
   const char* name_{"input_ids"};
 
  private:
-  Model& model_;
+  const Model& model_;
   State& state_;
   size_t input_index_{~0U};
 

@@ -101,6 +101,7 @@ endif()
 
 if(USE_TOKENIZER)
   add_subdirectory("${CMAKE_SOURCE_DIR}/src/tokenizer")
+  add_compile_definitions(USE_TOKENIZER=1)
   message("------------------Using Tokenizer------------------")
 endif()
 
@@ -159,7 +160,6 @@ foreach(DLL_FILE ${onnxruntime_libs})
 endforeach()
 
 if(USE_TOKENIZER)
-  add_compile_definitions(USE_TOKENIZER=1)
   target_include_directories(onnxruntime-genai PRIVATE ${TOKENIZER_ROOT})
   target_include_directories(onnxruntime-genai-static PUBLIC ${TOKENIZER_ROOT})
   target_link_libraries(onnxruntime-genai PRIVATE tokenizer)
