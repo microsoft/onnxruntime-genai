@@ -1,4 +1,5 @@
 {
+  "version": 6,
   "buildPresets": [
     {
       "name": "windows_x64_cpu_release_asan",
