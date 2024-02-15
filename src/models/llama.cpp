@@ -10,11 +10,11 @@ Llama_Model::Llama_Model(std::unique_ptr<Config> config, OrtEnv& ort_env, const 
   InitDeviceAllocator(*session_decoder_);
 }
 
-std::unique_ptr<State> Llama_Model::CreateState(RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params) {
+std::unique_ptr<State> Llama_Model::CreateState(RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params) const {
   return std::make_unique<Llama_State>(*this, sequence_lengths, params);
 }
 
-Llama_State::Llama_State(Llama_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const GeneratorParams& search_params)
+Llama_State::Llama_State(const Llama_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const GeneratorParams& search_params)
     : State{search_params},
       model_{model},
       position_ids_{model, *this, sequence_lengths_unk} {

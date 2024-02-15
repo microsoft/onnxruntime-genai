@@ -8,7 +8,7 @@
 #include <random>
 
 // Our working directory is generators/build so one up puts us in the root directory:
-#define MODEL_PATH "../test_models/"
+#define MODEL_PATH "../../test_models/"
 
 std::unique_ptr<OrtEnv> g_ort_env;
 
