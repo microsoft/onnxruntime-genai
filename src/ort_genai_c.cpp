@@ -149,16 +149,14 @@ OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken_Top(OgaGenerator* generat
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGenerator_GetSequence(const OgaGenerator* oga_generator, int index, int32_t* tokens, size_t* count) {
-  OGA_TRY
+size_t OGA_API_CALL OgaGenerator_GetSequenceLength(const OgaGenerator* oga_generator, int index) {
   auto& generator = *reinterpret_cast<const Generators::Generator*>(oga_generator);
-  auto sequence = generator.GetSequence(index);
-  auto sequence_cpu = sequence.GetCPU();
-  *count = sequence_cpu.size();
-  if (tokens)
-    std::copy(sequence_cpu.begin(), sequence_cpu.end(), tokens);
-  return nullptr;
-  OGA_CATCH
+  return generator.GetSequence(index).GetCPU().size();
+}
+
+const int32_t* OGA_API_CALL OgaGenerator_GetSequence(const OgaGenerator* oga_generator, int index) {
+  auto& generator = *reinterpret_cast<const Generators::Generator*>(oga_generator);
+  return generator.GetSequence(index).GetCPU().data();
 }
 
 void OGA_API_CALL OgaDestroyResult(OgaResult* p) {

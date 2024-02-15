@@ -21,7 +21,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         public void SetMaxLength(int maxLength)
         {
-            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetMaxLength(_generatorParamsHandle, maxLength));
+            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetMaxLength(_generatorParamsHandle, (IntPtr)maxLength));
         }
 
         public void SetInputIDs(IReadOnlyCollection<int> inputIDs, ulong sequenceLength, ulong batchSize)

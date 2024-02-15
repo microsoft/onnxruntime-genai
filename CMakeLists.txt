@@ -10,6 +10,7 @@ include(cmake/options.cmake)
 include(cmake/external/onnxruntime_external_deps.cmake)
 # Checking if CUDA is supported
 include(CheckLanguage)
+add_compile_definitions(BUILDING_ORT_GENAI_C)
 if(USE_CUDA)
   check_language(CUDA)
 endif()
@@ -45,10 +46,6 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
   "${MODELS_ROOT}/*.cpp"
 )
 
-if(WIN32)
-  list(APPEND generator_srcs "${GENERATORS_ROOT}/onnxruntime-genai.def")
-endif()
-
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   # Don't let cmake set a default value for CMAKE_CUDA_ARCHITECTURES
   cmake_policy(SET CMP0104 OLD)
@@ -83,7 +80,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 if(WIN32)
-  set_property(TARGET onnxruntime-genai PROPERTY LINK_FLAGS -DEF:"${GENERATORS_ROOT}/onnxruntime-genai.def")
   set(ONNXRUNTIME_LIB "onnxruntime.dll")
   set(ONNXRUNTIME_PROVIDERS_CUDA_LIB "onnxruntime_providers_cuda.dll")
   set(ONNXRUNTIME_FILES "onnxruntime*.dll")

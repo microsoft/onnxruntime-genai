@@ -33,22 +33,10 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public int[] GetSequence(int index)
         {
             IntPtr nullPtr = IntPtr.Zero;
-            UIntPtr sequenceLength = UIntPtr.Zero;
-            Result.VerifySuccess(NativeMethods.OgaGenerator_GetSequence(_generatorHandle, index, nullPtr, out sequenceLength));
+            UIntPtr sequenceLength = NativeMethods.OgaGenerator_GetSequenceLength(_generatorHandle, (IntPtr)index);
             int[] sequence = new int[sequenceLength.ToUInt64()];
-            GCHandle handle = GCHandle.Alloc(sequence, GCHandleType.Pinned);
-            try
-            {
-                IntPtr sequencePtr = handle.AddrOfPinnedObject();
-                Result.VerifySuccess(NativeMethods.OgaGenerator_GetSequence(_generatorHandle, index, sequencePtr, out sequenceLength));
-            }
-            finally
-            {
-                if (handle.IsAllocated)
-                {
-                    handle.Free();
-                }
-            }
+            IntPtr sequencePtr = NativeMethods.OgaGenerator_GetSequence(_generatorHandle, (IntPtr)index);
+            Marshal.Copy(sequencePtr, sequence, 0, sequence.Length);
 
             return sequence;
         }

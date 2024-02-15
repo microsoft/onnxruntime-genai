@@ -11,7 +11,8 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
     {
         private static string GetErrorMessage(IntPtr nativeResult)
         {
-            return Marshal.PtrToStringAnsi(NativeMethods.OgaResultGetError(nativeResult));
+
+            return Utils.FromUtf8(NativeMethods.OgaResultGetError(nativeResult));
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

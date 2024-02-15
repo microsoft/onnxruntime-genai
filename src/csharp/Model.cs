@@ -19,7 +19,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         public Model(string modelPath, DeviceType deviceType)
         {
-            Result.VerifySuccess(NativeMethods.OgaCreateModel(modelPath, deviceType, out _modelHandle));
+            Result.VerifySuccess(NativeMethods.OgaCreateModel(Utils.ToUtf8(modelPath), deviceType, out _modelHandle));
         }
 
         internal IntPtr Handle { get { return _modelHandle; } }
@@ -30,14 +30,14 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaGenerate(_modelHandle, generatorParams.Handle, out nativeSequences));
             try
             {
-                ulong batchSize = NativeMethods.OgaSequencesCount(nativeSequences);
+                ulong batchSize = NativeMethods.OgaSequencesCount(nativeSequences).ToUInt64();
                 int[][] sequences = new int[batchSize][];
 
                 for (ulong sequenceIndex = 0; sequenceIndex < batchSize; sequenceIndex++)
                 {
-                    ulong sequenceLength = NativeMethods.OgaSequencesGetSequenceCount(nativeSequences, sequenceIndex);
+                    ulong sequenceLength = NativeMethods.OgaSequencesGetSequenceCount(nativeSequences, (UIntPtr)sequenceIndex).ToUInt64();
                     sequences[sequenceIndex] = new int[sequenceLength];
-                    IntPtr sequencePtr = NativeMethods.OgaSequencesGetSequenceData(nativeSequences, sequenceIndex);
+                    IntPtr sequencePtr = NativeMethods.OgaSequencesGetSequenceData(nativeSequences, (UIntPtr)sequenceIndex);
                     Marshal.Copy(sequencePtr, sequences[sequenceIndex], 0, sequences[sequenceIndex].Length);
                 }
 

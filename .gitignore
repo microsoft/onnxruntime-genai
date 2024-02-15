@@ -5,6 +5,7 @@
 /src/csharp/.vs
 src/csharp/bin/
 src/csharp/obj/
+test/csharp/.vs
 test/csharp/bin/
 test/csharp/obj/
 /ort
