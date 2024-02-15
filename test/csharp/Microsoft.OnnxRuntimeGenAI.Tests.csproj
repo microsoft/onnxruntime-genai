@@ -12,7 +12,7 @@
 
     <LangVersion>default</LangVersion>
     <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
-    <Configurations>Debug;Release;RelWithDebInfo</Configurations>
+    <Configurations>Debug;RelWithDebInfo</Configurations>
 
     <RootNamespace>Microsoft.ML.OnnxRuntimeGenAI.Tests</RootNamespace>
     <AssemblyName>Microsoft.ML.OnnxRuntimeGenAI.Tests</AssemblyName>

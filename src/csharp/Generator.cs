@@ -9,6 +9,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
     public class Generator : IDisposable
     {
         private IntPtr _generatorHandle;
+        private bool _disposed = false;
 
         public Generator(Model model, GeneratorParams generatorParams)
         {
@@ -30,15 +31,14 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaGenerator_GenerateNextToken_Top(_generatorHandle));
         }
 
-        public int[] GetSequence(int index)
+        public ReadOnlySpan<int> GetSequence(ulong index)
         {
-            IntPtr nullPtr = IntPtr.Zero;
-            UIntPtr sequenceLength = NativeMethods.OgaGenerator_GetSequenceLength(_generatorHandle, (IntPtr)index);
-            int[] sequence = new int[sequenceLength.ToUInt64()];
-            IntPtr sequencePtr = NativeMethods.OgaGenerator_GetSequence(_generatorHandle, (IntPtr)index);
-            Marshal.Copy(sequencePtr, sequence, 0, sequence.Length);
-
-            return sequence;
+            ulong sequenceLength = NativeMethods.OgaGenerator_GetSequenceLength(_generatorHandle, (UIntPtr)index).ToUInt64();
+            IntPtr sequencePtr = NativeMethods.OgaGenerator_GetSequence(_generatorHandle, (UIntPtr)index);
+            unsafe
+            {
+                return new ReadOnlySpan<int>(sequencePtr.ToPointer(), (int)sequenceLength);
+            }
         }
 
         ~Generator()
@@ -54,11 +54,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         protected virtual void Dispose(bool disposing)
         {
-            if (_generatorHandle != IntPtr.Zero)
+            if (_disposed)
             {
-                NativeMethods.OgaDestroyGenerator(_generatorHandle);
-                _generatorHandle = IntPtr.Zero;
+                return;
             }
+            NativeMethods.OgaDestroyGenerator(_generatorHandle);
+            _generatorHandle = IntPtr.Zero;
+            _disposed = true;
         }
     }
 }

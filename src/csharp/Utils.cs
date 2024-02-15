@@ -9,8 +9,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 {
     internal class Utils
     {
+        public static byte[] EmptyByteArray = new byte[] { 0 };
+
         public static byte[] ToUtf8(string str)
         {
+            if (string.IsNullOrEmpty(str))
+                return EmptyByteArray;
+
             int arraySize = UTF8Encoding.UTF8.GetByteCount(str);
             byte[] utf8Bytes = new byte[arraySize + 1];
             UTF8Encoding.UTF8.GetBytes(str, 0, str.Length, utf8Bytes, 0);

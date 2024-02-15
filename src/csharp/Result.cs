@@ -23,7 +23,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                 try
                 {
                     string errorMessage = GetErrorMessage(nativeResult);
-                    throw new Exception(errorMessage);
+                    throw new OnnxRuntimeGenAIException(errorMessage);
                 }
                 finally
                 {

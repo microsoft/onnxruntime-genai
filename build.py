@@ -158,7 +158,7 @@ def build(
         env["CUDNN_HOME"] = cudnn_home
 
     run_subprocess(command, env=env).check_returncode()
-    make_command = ["cmake", "--build", ".", "--config", "Release"]
+    make_command = ["cmake", "--build", ".", "--config", "RelWithDebInfo"]
     run_subprocess(make_command, cwd="build", env=env).check_returncode()
 
     if enable_csharp:
@@ -166,13 +166,13 @@ def build(
             raise RuntimeError("C# API is only supported on Windows.")
 
         dotnet = resolve_executable_path("dotnet")
-        csharp_build_command = [dotnet, "build", ".", "-c", "Release"]
+        csharp_build_command = [dotnet, "build", ".", "-c", "RelWithDebInfo"]
         run_subprocess(csharp_build_command, cwd=os.path.join("src", "csharp")).check_returncode()
         properties = []
         if ort_home:
             properties += [f"/p:OrtHome={ort_home}"]
         run_subprocess(csharp_build_command + properties, cwd=os.path.join("test", "csharp")).check_returncode()
-        run_subprocess([dotnet, "test", "-c", "Release"] + properties, cwd=os.path.join("test", "csharp")).check_returncode()
+        run_subprocess([dotnet, "test", "-c", "RelWithDebInfo"] + properties, cwd=os.path.join("test", "csharp")).check_returncode()
 
 
 if __name__ == "__main__":

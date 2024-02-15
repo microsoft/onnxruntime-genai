@@ -24,6 +24,9 @@ extern "C" {
 #define OGA_API_CALL
 #endif
 
+// ONNX Runtime Generative AI C API
+// This API is not thread safe.
+
 typedef enum OgaDeviceType {
   OgaDeviceTypeAuto,
   OgaDeviceTypeCPU,
@@ -112,7 +115,7 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyModel(OgaModel* model);
  *             after it is done using the sequences.
  * \return OgaResult containing the error message if the generation failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerate(const OgaModel* model, OgaGeneratorParams* generator_params, OgaSequences** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerate(const OgaModel* model, const OgaGeneratorParams* generator_params, OgaSequences** out);
 
 /*
  * \brief Creates a OgaGeneratorParams from the given model.
@@ -134,12 +137,12 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyGeneratorParams(OgaGeneratorParams* gener
  * \param[in] max_length The maximum length of the generated sequences.
  * \return OgaResult containing the error message if the setting of the maximum length failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetMaxLength(OgaGeneratorParams* generator_params, int max_length);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetMaxLength(OgaGeneratorParams* generator_params, size_t max_length);
 
 /*
  * \brief Sets the input ids for the generator params. The input ids are used to seed the generation.
  * \param[in] params The generator params to set the input ids on.
- * \param[in] input_ids The input ids to set.
+ * \param[in] input_ids The input ids array of size input_ids_count = batch_size * sequence_length.
  * \param[in] input_ids_count The total number of input ids.
  * \param[in] sequence_length The sequence length of the input ids.
  * \param[in] batch_size The batch size of the input ids.
@@ -195,7 +198,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken_TopP(OgaGenera
  * \param[in] generator The generator to get the count of the tokens for the sequence at the given index.
  * \return The number tokens in the sequence at the given index.
  */
-OGA_EXPORT size_t OGA_API_CALL OgaGenerator_GetSequenceLength(const OgaGenerator* generator, int index);
+OGA_EXPORT size_t OGA_API_CALL OgaGenerator_GetSequenceLength(const OgaGenerator* generator, size_t index);
 
 /*
  * \brief Returns a pointer to the sequence data at the given index. The number of tokens in the sequence
@@ -205,7 +208,7 @@ OGA_EXPORT size_t OGA_API_CALL OgaGenerator_GetSequenceLength(const OgaGenerator
  *         and will be freed when the OgaGenerator is destroyed. The caller must copy the data if it needs to
  *         be used after the OgaGenerator is destroyed.
  */
-OGA_EXPORT const int32_t* OGA_API_CALL OgaGenerator_GetSequence(const OgaGenerator* generator, int index);
+OGA_EXPORT const int32_t* OGA_API_CALL OgaGenerator_GetSequence(const OgaGenerator* generator, size_t index);
 
 #ifdef __cplusplus
 }

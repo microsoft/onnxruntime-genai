@@ -23,7 +23,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         [Fact(DisplayName = "TestGreedySearch")]
         public void TestGreedySearch()
         {
-            int maxLength = 10;
+            ulong maxLength = 10;
             var inputIDs = new List<int> { 0, 0, 0, 52, 0, 0, 195, 731 };
             var inputIDsShape = new ulong[] { 2, 4 };
             ulong batchSize = inputIDsShape[0];
@@ -54,13 +54,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 
                         for (ulong i = 0; i < batchSize; i++)
                         {
-                            var sequence = generator.GetSequence((int)i);
+                            var sequence = generator.GetSequence(i).ToArray();
                             var expectedSequence = expectedOutput.Skip((int)i * (int)maxLength).Take((int)maxLength);
                             Assert.Equal(expectedSequence, sequence);
                         }
                     }
 
-                    int[][] sequences = model.Generate(generatorParams);
+                    int[][] sequences = model.Generate(generatorParams).ToArray();
                     Assert.NotNull(sequences);
 
                     for (ulong i = 0; i < batchSize; i++)

@@ -16,6 +16,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
     public class Model : IDisposable
     {
         private IntPtr _modelHandle;
+        private bool _disposed = false;
 
         public Model(string modelPath, DeviceType deviceType)
         {
@@ -24,29 +25,11 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         internal IntPtr Handle { get { return _modelHandle; } }
 
-        public int[][] Generate(GeneratorParams generatorParams)
+        public Sequences Generate(GeneratorParams generatorParams)
         {
             IntPtr nativeSequences = IntPtr.Zero;
             Result.VerifySuccess(NativeMethods.OgaGenerate(_modelHandle, generatorParams.Handle, out nativeSequences));
-            try
-            {
-                ulong batchSize = NativeMethods.OgaSequencesCount(nativeSequences).ToUInt64();
-                int[][] sequences = new int[batchSize][];
-
-                for (ulong sequenceIndex = 0; sequenceIndex < batchSize; sequenceIndex++)
-                {
-                    ulong sequenceLength = NativeMethods.OgaSequencesGetSequenceCount(nativeSequences, (UIntPtr)sequenceIndex).ToUInt64();
-                    sequences[sequenceIndex] = new int[sequenceLength];
-                    IntPtr sequencePtr = NativeMethods.OgaSequencesGetSequenceData(nativeSequences, (UIntPtr)sequenceIndex);
-                    Marshal.Copy(sequencePtr, sequences[sequenceIndex], 0, sequences[sequenceIndex].Length);
-                }
-
-                return sequences;
-            }
-            finally
-            {
-                NativeMethods.OgaDestroySequences(nativeSequences);
-            }
+            return new Sequences(nativeSequences);
         }
 
         ~Model()
@@ -62,11 +45,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         protected virtual void Dispose(bool disposing)
         {
-            if (_modelHandle != IntPtr.Zero)
+            if (_disposed)
             {
-                NativeMethods.OgaDestroyModel(_modelHandle);
-                _modelHandle = IntPtr.Zero;
+                return;
             }
+            NativeMethods.OgaDestroyModel(_modelHandle);
+            _modelHandle = IntPtr.Zero;
+            _disposed = true;
         }
     }
 }

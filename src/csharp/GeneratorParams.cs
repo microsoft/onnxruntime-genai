@@ -11,6 +11,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
     public class GeneratorParams : IDisposable
     {
         private IntPtr _generatorParamsHandle;
+        private bool _disposed = false;
 
         public GeneratorParams(Model model)
         {
@@ -19,9 +20,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         internal IntPtr Handle { get { return _generatorParamsHandle; } }
 
-        public void SetMaxLength(int maxLength)
+        public void SetMaxLength(ulong maxLength)
         {
-            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetMaxLength(_generatorParamsHandle, (IntPtr)maxLength));
+            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetMaxLength(_generatorParamsHandle, (UIntPtr)maxLength));
         }
 
         public void SetInputIDs(IReadOnlyCollection<int> inputIDs, ulong sequenceLength, ulong batchSize)
@@ -43,11 +44,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         protected virtual void Dispose(bool disposing)
         {
-            if (_generatorParamsHandle != IntPtr.Zero)
+            if (_disposed)
             {
-                NativeMethods.OgaDestroyGeneratorParams(_generatorParamsHandle);
-                _generatorParamsHandle = IntPtr.Zero;
+                return;
             }
+            NativeMethods.OgaDestroyGeneratorParams(_generatorParamsHandle);
+            _generatorParamsHandle = IntPtr.Zero;
+            _disposed = true;
         }
     }
 }

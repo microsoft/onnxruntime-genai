@@ -18,7 +18,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         // when it no longer needs the result. If the error message is needed after the OgaResult
         // object is destroyed, it should be copied to a new buffer.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* const char* */ OgaResultGetError(IntPtr /* OgaResult* */ result);
+        public static extern IntPtr /* const char* */ OgaResultGetError(IntPtr /* const OgaResult* */ result);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern void OgaDestroyResult(IntPtr /* OgaResult* */ result);
@@ -32,7 +32,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public static extern void OgaDestroyModel(IntPtr /* OgaModel* */ model);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaCreateGeneratorParams(IntPtr /* OgaModel* */ model,
+        public static extern IntPtr /* OgaResult* */ OgaCreateGeneratorParams(IntPtr /* const OgaModel* */ model,
                                                                               out IntPtr /* OgaGeneratorParams** */ generatorParams);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
@@ -41,7 +41,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         // This function is used to set the maximum length that the generated sequences can have.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsSetMaxLength(IntPtr /* OgaGeneratorParams* */ generatorParams,
-                                                                                    IntPtr /* int */ maxLength);
+                                                                                    UIntPtr /* size_t */ maxLength);
 
         // This function is used to set the input IDs for the generator.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
@@ -52,8 +52,8 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                                    UIntPtr /* size_t */ batchSize);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaCreateGenerator(IntPtr /* OgaModel* */ model,
-                                                                        IntPtr /* OgaGeneratorParams* */ generatorParams,
+        public static extern IntPtr /* OgaResult* */ OgaCreateGenerator(IntPtr /* const OgaModel* */ model,
+                                                                        IntPtr /* const OgaGeneratorParams* */ generatorParams,
                                                                         out IntPtr /* OgaGenerator** */ generator);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
@@ -61,7 +61,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         // This function is used to check if the generator has finished generating all sequences.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern bool OgaGenerator_IsDone(IntPtr /* OgaGenerator* */ generator);
+        public static extern bool OgaGenerator_IsDone(IntPtr /* const OgaGenerator* */ generator);
 
         // This function is used to compute the logits for the next token in the sequence.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
@@ -73,40 +73,40 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         // This function returns the length of the sequence at the given index.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern UIntPtr /* size_t */ OgaGenerator_GetSequenceLength(IntPtr /* OgaGenerator* */ generator,
-                                                                                 IntPtr /* int */ index);
+        public static extern UIntPtr /* size_t */ OgaGenerator_GetSequenceLength(IntPtr /* const OgaGenerator* */ generator,
+                                                                                 UIntPtr /* size_t */ index);
 
         // This function returns the sequence data at the given index. The returned pointer is owned by the
         // OgaGenerator object and will be freed when the OgaGenerator object is destroyed. It is expected
         // that the caller copies the data returned by this function after calling this function.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* const in32_t* */ OgaGenerator_GetSequence(IntPtr /* OgaGenerator* */ generator,
-                                                                                 IntPtr /* int */ index);
+        public static extern IntPtr /* const in32_t* */ OgaGenerator_GetSequence(IntPtr /* const OgaGenerator* */ generator,
+                                                                                 UIntPtr /* size_t */ index);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern void OgaDestroySequences(IntPtr /* OgaSequences* */ sequences);
 
         // This function returns the number of sequences in the OgaSequences object.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern UIntPtr OgaSequencesCount(IntPtr /* OgaSequences* */ sequences);
+        public static extern UIntPtr OgaSequencesCount(IntPtr /* const OgaSequences* */ sequences);
 
         // This function returns the number of tokens in the sequence at the given index of the OgaSequences object.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern UIntPtr OgaSequencesGetSequenceCount(IntPtr /* OgaSequences* */ sequences,
+        public static extern UIntPtr OgaSequencesGetSequenceCount(IntPtr /* const OgaSequences* */ sequences,
                                                                   UIntPtr /* size_t */ sequenceIndex);
 
         // This function returns the sequence data at the given index of the OgaSequences object. The returned
         // pointer is owned by the OgaSequences object and will be freed when the OgaSequences object is destroyed.
         // It is expected that the caller copies the data returned by this function after calling this function.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* const int32_t* */ OgaSequencesGetSequenceData(IntPtr /* OgaSequences* */ sequences,
+        public static extern IntPtr /* const int32_t* */ OgaSequencesGetSequenceData(IntPtr /* const OgaSequences* */ sequences,
                                                                                      UIntPtr /* size_t */ sequenceIndex);
 
         // This function is used to generate sequences for the given model using the given generator parameters.
         // The OgaSequences object is an array of sequences, where each sequence is an array of tokens.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaGenerate(IntPtr /* OgaModel* */ model,
-                                                                 IntPtr /* OgaGeneratorParams* */ generatorParams,
+        public static extern IntPtr /* OgaResult* */ OgaGenerate(IntPtr /* const OgaModel* */ model,
+                                                                 IntPtr /* const OgaGeneratorParams* */ generatorParams,
                                                                  out IntPtr /* OgaSequences** */ sequences);
     }
 }

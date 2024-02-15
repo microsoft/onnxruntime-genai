@@ -99,7 +99,7 @@ OgaResult* OGA_API_CALL OgaCreateGeneratorParams(const OgaModel* model, OgaGener
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGeneratorParamsSetMaxLength(OgaGeneratorParams* params, int max_length) {
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetMaxLength(OgaGeneratorParams* params, size_t max_length) {
   reinterpret_cast<Generators::GeneratorParams*>(params)->max_length = static_cast<int>(max_length);
   return nullptr;
 }
@@ -116,7 +116,7 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputIDs(OgaGeneratorParams* oga_pa
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGenerate(const OgaModel* model, OgaGeneratorParams* generator_params, OgaSequences** out) {
+OgaResult* OGA_API_CALL OgaGenerate(const OgaModel* model, const OgaGeneratorParams* generator_params, OgaSequences** out) {
   OGA_TRY
   Sequences result = Generators::Generate(*reinterpret_cast<const Generators::Model*>(model), *reinterpret_cast<const Generators::GeneratorParams*>(generator_params));
   *out = reinterpret_cast<OgaSequences*>(std::make_unique<Sequences>(std::move(result)).release());
@@ -149,14 +149,14 @@ OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken_Top(OgaGenerator* generat
   OGA_CATCH
 }
 
-size_t OGA_API_CALL OgaGenerator_GetSequenceLength(const OgaGenerator* oga_generator, int index) {
+size_t OGA_API_CALL OgaGenerator_GetSequenceLength(const OgaGenerator* oga_generator, size_t index) {
   auto& generator = *reinterpret_cast<const Generators::Generator*>(oga_generator);
-  return generator.GetSequence(index).GetCPU().size();
+  return generator.GetSequence(static_cast<int>(index)).GetCPU().size();
 }
 
-const int32_t* OGA_API_CALL OgaGenerator_GetSequence(const OgaGenerator* oga_generator, int index) {
+const int32_t* OGA_API_CALL OgaGenerator_GetSequence(const OgaGenerator* oga_generator, size_t index) {
   auto& generator = *reinterpret_cast<const Generators::Generator*>(oga_generator);
-  return generator.GetSequence(index).GetCPU().data();
+  return generator.GetSequence(static_cast<int>(index)).GetCPU().data();
 }
 
 void OGA_API_CALL OgaDestroyResult(OgaResult* p) {
