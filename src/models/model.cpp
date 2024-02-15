@@ -62,7 +62,7 @@ std::vector<int32_t> Tokenizer::Encode(const char* text) const {
   return {tokens, tokens + count};
 }
 
-std::string Tokenizer::Decode(std::span<int32_t> tokens) const {
+std::string Tokenizer::Decode(std::span<const int32_t> tokens) const {
   TfmPtr<TfmStringArray> tfm_string_array;
   CheckResult(TfmDetokenize1D(tokenizer_, reinterpret_cast<const uint32_t*>(tokens.data()), tokens.size(), tfm_string_array.Address()));
 

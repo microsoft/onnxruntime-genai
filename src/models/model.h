@@ -49,7 +49,7 @@ struct Tokenizer {
   Tokenizer(Config& config);
 
   std::vector<int32_t> Encode(const char* text) const;
-  std::string Decode(std::span<int32_t> tokens) const;
+  std::string Decode(std::span<const int32_t> tokens) const;
 
   TfmPtr<TfmTokenizer> tokenizer_;
 };

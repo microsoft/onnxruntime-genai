@@ -29,6 +29,7 @@ typedef enum OgaDeviceType {
 typedef enum OgaDataType {
   OgaDataType_int32,
   OgaDataType_float32,
+  OgaDataType_string, // UTF8 string
 } OgaDataType;
 
 typedef struct OgaResult OgaResult;
@@ -37,9 +38,12 @@ typedef struct OgaGenerator OgaGenerator;
 typedef struct OgaModel OgaModel;
 typedef struct OgaBuffer OgaBuffer;
 typedef struct OgaSequences OgaSequences;
+typedef struct OgaTokenizer OgaTokenizer;
+typedef struct OgaTokenizerStream OgaTokenizerStream;
 
 OGA_EXPORT const char* OGA_API_CALL OgaResultGetError(OgaResult*);
 OGA_EXPORT void OGA_API_CALL OgaDestroyResult(OgaResult*);
+OGA_EXPORT void OGA_API_CALL OgaDestroyString(const char*);
 
 OGA_EXPORT void OGA_API_CALL OgaDestroyBuffer(OgaBuffer*);
 OGA_EXPORT OgaDataType OGA_API_CALL OgaBufferGetType(const OgaBuffer*);
@@ -75,6 +79,22 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken_TopP(OgaGenera
 /* Writes the sequence into the provided buffer 'tokens' and writes the count into 'count'. If 'tokens' is nullptr just writes the count
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetSequence(const OgaGenerator*, int index, int32_t* tokens, size_t* count);
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTokenizer(const OgaModel* model, OgaTokenizer** out);
+OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizer(OgaTokenizer*);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer*, const char* const* strings, size_t count, OgaSequences** out);
+
+/* Decode a single token sequence and returns a null terminated utf8 string. out_string must be freed with OgaDestroyString
+*/
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer*, const int32_t* tokens, size_t token_count, const char** out_string);
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTokenizerStream(const OgaTokenizer*, OgaTokenizerStream** out);
+OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizerStream(OgaTokenizerStream*);
+
+/* Streaming decoder for tokens. Allows displaying a decoded token stream as the tokens are generated.
+* As not every token will result in bytes written to the string, bytes_written may sometimes be zero.
+*/
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerDecodeStream(const OgaTokenizer*, OgaTokenizerStream*, int32_t token, char* string, size_t string_size, size_t* bytes_written);
 
 #ifdef __cplusplus
 }

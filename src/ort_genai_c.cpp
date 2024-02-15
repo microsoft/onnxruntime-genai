@@ -160,7 +160,43 @@ OgaResult* OGA_API_CALL OgaGenerator_GetSequence(const OgaGenerator* oga_generat
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaCreateTokenizer(const OgaModel* model, OgaTokenizer** out) {
+  OGA_TRY
+  *out = reinterpret_cast<OgaTokenizer*>(reinterpret_cast<const Generators::Model*>(model)->CreateTokenizer().release());
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer* p, const char* const* strings, size_t count, OgaSequences** out) {
+  OGA_TRY
+  auto& tokenizer = *reinterpret_cast<const Generators::Tokenizer*>(p);
+  auto sequences = std::make_unique<Sequences>();
+  for (size_t i = 0; i < count; i++) {
+    sequences->emplace_back(tokenizer.Encode(strings[i]));
+  }
+  *out = reinterpret_cast<OgaSequences*>(sequences.release());
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer* p, const int32_t* tokens, size_t token_count, const char** out_string) {
+  OGA_TRY
+  auto& tokenizer = *reinterpret_cast<const Generators::Tokenizer*>(p);
+
+  auto string = tokenizer.Decode({tokens, token_count});
+  auto length = string.length() + 1;
+  auto cstr_buffer = std::make_unique<char[]>(length);
+  strcpy_s(cstr_buffer.get(), length, string.c_str());
+  *out_string = cstr_buffer.release();
+  return nullptr;
+  OGA_CATCH
+}
+
 void OGA_API_CALL OgaDestroyResult(OgaResult* p) {
+  delete p;
+}
+
+void OGA_API_CALL OgaDestroyString(const char* p) {
   delete p;
 }
 
@@ -182,5 +218,9 @@ void OGA_API_CALL OgaDestroyGeneratorParams(OgaGeneratorParams* p) {
 
 void OGA_API_CALL OgaDestroyGenerator(OgaGenerator* p) {
   delete reinterpret_cast<Generators::Generator*>(p);
+}
+
+void OGA_API_CALL OgaDestroyTokenizer(OgaTokenizer* p) {
+  delete reinterpret_cast<Generators::Tokenizer*>(p);
 }
 }
