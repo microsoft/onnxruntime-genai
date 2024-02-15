@@ -104,7 +104,7 @@ class Model:
         self.quant_attrs = {
             "int4": {
                 "block_size": int(extra_options["int4_block_size"]) if "int4_block_size" in extra_options else 32,
-                "accuracy_level": int(extra_options["int4_accuracy_level"]) if "int_accuracy_level" in extra_options else None,
+                "accuracy_level": int(extra_options["int4_accuracy_level"]) if "int4_accuracy_level" in extra_options else None,
             }
         }
 
