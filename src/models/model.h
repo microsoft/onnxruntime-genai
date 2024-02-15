@@ -1,5 +1,5 @@
 #pragma once
-#if USE_TOKENIZER
+#ifndef NO_TOKENIZER
 #include "tfmtok_c.h"
 #endif
 
@@ -23,6 +23,15 @@ struct State {
   void ClearIO();                 // Clear all inputs/outputs
 };
 
+#ifdef NO_TOKENIZER
+struct Tokenizer {
+  Tokenizer(Config& config);
+
+  std::vector<int32_t> Encode(const char* text) const;
+  std::string Decode(std::span<int32_t> tokens) const;
+};
+#else
+
 template <typename T>
 struct TfmPtr {
   ~TfmPtr() { TfmDispose(&p_); }
@@ -36,7 +45,6 @@ struct TfmPtr {
   T* p_{};
 };
 
-#if USE_TOKENIZER
 struct Tokenizer {
   Tokenizer(Config& config);
 
@@ -51,11 +59,9 @@ struct Model {
   Model(std::unique_ptr<Config> config, const ProviderOptions* provider_options);
   virtual ~Model();
 
-#if USE_TOKENIZER
-  std::unique_ptr<Tokenizer> CreateTokenizer();
-#endif
+  std::unique_ptr<Tokenizer> CreateTokenizer() const;
 
-  virtual std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params) = 0;
+  virtual std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params) const = 0;
 
   std::unique_ptr<OrtValue> ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams) const;
 

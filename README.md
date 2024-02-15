@@ -117,13 +117,13 @@ To source `microsoft/phi-2` optimized for your target, download and run the foll
 
 
 ```bash
-wget https://raw.githubusercontent.com/microsoft/onnxruntime-genai/kvaishnavi/models/src/python/models/export.py
+wget https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/src/python/models/export.py
 ```
 
 Export int4 CPU version 
 ```bash
 huggingface-cli login --token <your HuggingFace token>
-python export.py python models/export.py -m microsoft/phi-2 -p int4 -e cpu -o phi2-int4-cpu.onnx
+python export.py -m microsoft/phi-2 -p int4 -e cpu -o phi2-int4-cpu.onnx
 ```
 
 

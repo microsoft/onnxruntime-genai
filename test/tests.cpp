@@ -271,7 +271,7 @@ Print all primes between 1 and n
   // High level version
   auto result = Generators::Generate(*model, params);
 
-  std::cout << tokenizer->Decode(result) << "\r\n";
+  std::cout << tokenizer->Decode(result[0]) << "\r\n";
 #else
   std::cout << "Test skipped - not built with onnxruntime extensions\r\n";
 #endif
