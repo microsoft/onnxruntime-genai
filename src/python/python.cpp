@@ -84,17 +84,6 @@ std::string ToString(const GeneratorParams& v) {
   return oss.str();
 }
 
-#if 0
-std::string ToString(const Gpt_Model& v) {
-  std::ostringstream oss;
-  oss << "Gpt_Model("
-         "vocab_size="
-      << v.vocab_size_ << ", head_count=" << v.head_count_ << ", hidden_size=" << v.hidden_size_ << ", layer_count=" << v.layer_count_ << ")";
-
-  return oss.str();
-}
-#endif
-
 std::unique_ptr<OrtEnv> g_ort_env;
 
 OrtEnv& GetOrtEnv() {
@@ -254,11 +243,9 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   m.def("print", &TestFP32, "Test float32");
   m.def("print", &TestFP16, "Test float16");
 
-#if USE_TOKENIZER
   pybind11::class_<Tokenizer>(m, "Tokenizer")
       .def("encode", &Tokenizer::Encode)
       .def("decode", [](const Tokenizer& t, pybind11::array_t<int32_t> tokens) { return t.Decode(ToSpan(tokens)); });
-#endif
 
   pybind11::class_<Model>(m, "Model")
       .def(pybind11::init([](const std::string& config_path, DeviceType device_type) {
@@ -267,9 +254,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
            }),
            "str"_a, "device_type"_a = DeviceType::Auto)
       .def("generate", [](Model& model, PySearchParams& search_params) { search_params.Prepare(); return Generate(model, search_params); })
-#if USE_TOKENIZER
       .def("create_tokenizer", [](Model& model) { return model.CreateTokenizer(); })
-#endif
       .def_property_readonly("device_type", [](const Model& s) { return s.device_type_; });
 
   pybind11::class_<PyGenerator>(m, "Generator")
