@@ -29,7 +29,7 @@ typedef enum OgaDeviceType {
 typedef enum OgaDataType {
   OgaDataType_int32,
   OgaDataType_float32,
-  OgaDataType_string, // UTF8 string
+  OgaDataType_string,  // UTF8 string
 } OgaDataType;
 
 typedef struct OgaResult OgaResult;
@@ -85,15 +85,15 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizer(OgaTokenizer*);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer*, const char* const* strings, size_t count, OgaSequences** out);
 
 /* Decode a single token sequence and returns a null terminated utf8 string. out_string must be freed with OgaDestroyString
-*/
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer*, const int32_t* tokens, size_t token_count, const char** out_string);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTokenizerStream(const OgaTokenizer*, OgaTokenizerStream** out);
 OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizerStream(OgaTokenizerStream*);
 
 /* Streaming decoder for tokens. Allows displaying a decoded token stream as the tokens are generated.
-* As not every token will result in bytes written to the string, bytes_written may sometimes be zero.
-*/
+ * As not every token will result in bytes written to the string, bytes_written may sometimes be zero.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerDecodeStream(const OgaTokenizer*, OgaTokenizerStream*, int32_t token, char* string, size_t string_size, size_t* bytes_written);
 
 #ifdef __cplusplus
