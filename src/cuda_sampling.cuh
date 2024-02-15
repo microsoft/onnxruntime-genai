@@ -1,6 +1,5 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-// #include <cub/cub.cuh>
 #include "smartptrs.h"
 
 namespace Generators {
@@ -8,13 +7,11 @@ namespace cuda {
 
 struct SamplingData {
   SamplingData(int batch_size, int vocab_size, cudaStream_t stream);
-  // Always used
   std::unique_ptr<int, Generators::CudaDeleter> indices_sorted = nullptr;
   std::unique_ptr<float, Generators::CudaDeleter> scores_sorted = nullptr;
   std::unique_ptr<float, Generators::CudaDeleter> scores_softmaxed = nullptr;
   std::unique_ptr<float, Generators::CudaDeleter> prefix_sums = nullptr;
   std::unique_ptr<float, Generators::CudaDeleter> thresholds = nullptr;
-  // Used when full sort is necessary
   std::unique_ptr<int, Generators::CudaDeleter> indices_in = nullptr;
   std::unique_ptr<int, Generators::CudaDeleter> offsets = nullptr;
   std::unique_ptr<float, Generators::CudaDeleter> temp_buffer = nullptr;
