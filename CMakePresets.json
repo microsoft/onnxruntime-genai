@@ -2,13 +2,11 @@
   "version": 6,
   "cmakeMinimumRequired": {
     "major": 3,
-    "minor": 23,
+    "minor": 26,
     "patch": 0
   },
   "include": [
-    "cmake/presets/CMakeBuildPresets.json",
-    "cmake/presets/CMakeWinConfigPresets.json",
-    "cmake/presets/CMakeLinuxConfigPresets.json"
+    "cmake/presets/CMakeBuildPresets.json"
   ]
 
 }

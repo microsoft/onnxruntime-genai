@@ -1,5 +1,9 @@
 {
   "version": 6,
+  "include": [
+    "CMakeWinConfigPresets.json",
+    "CMakeLinuxConfigPresets.json"
+  ],
   "buildPresets": [
     {
       "name": "windows_x64_cpu_release_asan",
