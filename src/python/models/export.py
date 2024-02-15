@@ -103,8 +103,8 @@ class Model:
         # Quantization-specific variables (INT4, INT8, etc.)
         self.quant_attrs = {
             "int4": {
-                "block_size": int(extra_options["block_size"]) if "block_size" in extra_options else 32,
-                "accuracy_level": int(extra_options["accuracy_level"]) if "accuracy_level" in extra_options else None,
+                "block_size": int(extra_options["int4_block_size"]) if "int4_block_size" in extra_options else 32,
+                "accuracy_level": int(extra_options["int4_accuracy_level"]) if "int_accuracy_level" in extra_options else None,
             }
         }
 
@@ -1319,8 +1319,8 @@ def get_args():
         default=os.path.join(os.path.dirname(os.path.realpath(__file__)), 'cache_dir'),
         help="""
             Key value pairs for various options. Currently support:
-                block_size = 16/32/64/128/256: Specify the block_size for int4 quantization.
-                accuracy_level = 1/2/3/4: Specify the minimum accuracy level for activation of matmul in int4 quantization.
+                int4_block_size = 16/32/64/128/256: Specify the block_size for int4 quantization.
+                int4_accuracy_level = 1/2/3/4: Specify the minimum accuracy level for activation of matmul in int4 quantization.
                                           4 is int8, which means input A of int4 quantized matmul is quantized to int8 and input B is upcasted to int8 for computation.
                                           1 is fp32, 2 is fp16, and 3 is bf16.
             """,
