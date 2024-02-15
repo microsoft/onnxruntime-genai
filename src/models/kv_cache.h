@@ -3,7 +3,7 @@
 namespace Generators {
 
 struct KV_Cache_Combined {
-  KV_Cache_Combined(Model& model, State& state);
+  KV_Cache_Combined(const Model& model, State& state);
 
   void Add();  // Add to state inputs/outputs
   void Update(std::span<const int32_t> beam_indices, int current_length);
@@ -13,7 +13,7 @@ struct KV_Cache_Combined {
   void PickPastState(std::span<const int32_t> beam_indices, int index);
 
  private:
-  Model& model_;
+  const Model& model_;
   State& state_;
   int layer_count_;
   size_t input_index_{~0U}, output_index_{~0U};
@@ -26,7 +26,7 @@ struct KV_Cache_Combined {
 };
 
 struct KV_Cache {
-  KV_Cache(Model& model, State& state);
+  KV_Cache(const Model& model, State& state);
 
   void AddEncoder();  // If model has an initial encoder step, this is used
   void Add();
@@ -36,7 +36,7 @@ struct KV_Cache {
   void PickPastState(std::span<const int32_t> beam_indices, int index);
 
  private:
-  Model& model_;
+  const Model& model_;
   State& state_;
   int layer_count_;
   size_t input_index_{~0U}, output_index_{~0U};
@@ -50,13 +50,13 @@ struct KV_Cache {
 
 // Very similar to the KV_Cache, but is only created once at the encoder step, then used without modification for every decoder step
 struct Cross_Cache {
-  Cross_Cache(Model& model, State& state);
+  Cross_Cache(const Model& model, State& state);
 
   void AddOutputs();
   void AddInputs();
 
  private:
-  Model& model_;
+  const Model& model_;
   State& state_;
   int layer_count_;
 

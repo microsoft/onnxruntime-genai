@@ -103,7 +103,7 @@ struct GeneratorParams {
 };
 
 struct Generator {
-  Generator(Model& model, const GeneratorParams& search_params);
+  Generator(const Model& model, const GeneratorParams& search_params);
 
   bool IsDone() const;
   void ComputeLogits();
@@ -113,17 +113,17 @@ struct Generator {
   void GenerateNextToken_Top() { GenerateNextToken_TopK_TopP(1, 1.0f, 0.0f); }
   void GenerateNextToken();
 
-  RoamingArray<int32_t> GetSequence(int index);
+  RoamingArray<int32_t> GetSequence(int index) const;
 
-  Model& model_;
+  const Model& model_;
   std::unique_ptr<State> state_;
   std::unique_ptr<Search> search_;
   bool computed_logits_{};  // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
 };
 
 std::unique_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const ProviderOptions* provider_options = nullptr);
-std::unique_ptr<Generator> CreateGenerator(Model& model, const GeneratorParams& search_params);
-std::vector<int32_t> Generate(Model& model, const GeneratorParams& params);  // Uses CreateGenerator and a simple loop to return the entire sequence
+std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& search_params);
+std::vector<std::vector<int32_t>> Generate(const Model& model, const GeneratorParams& params);  // Uses CreateGenerator and a simple loop to return the entire sequence
 
 float Float16ToFloat32(uint16_t v);  // v is a IEEE 752-2008 binary16 format, 1 sign bit, 5 bit exponent, 10 bit fraction
 void top_k_indices(std::span<int32_t> top_k, std::span<const float> inputs);

@@ -11,7 +11,6 @@ void Test_GreedySearch_Gpt_Fp32();
 void Test_BeamSearch_Gpt_Fp32();
 
 #if USE_CUDA
-void Test_Phi2_Cuda();
 void Test_GreedySearch_Gpt_Cuda();
 void Test_BeamSearch_Gpt_Cuda();
 #endif
@@ -19,13 +18,14 @@ void Test_BeamSearch_Gpt_Cuda();
 int main() {
   std::cout << "Generators Utility Library" << std::endl;
 
-  std::cout << "Initializing OnnxRuntime...";
-  std::cout.flush();
-  Ort::InitApi();
-  g_ort_env = OrtEnv::Create();
-  std::cout << "done" << std::endl;
-
   try {
+
+    std::cout << "Initializing OnnxRuntime...";
+    std::cout.flush();
+    Ort::InitApi();
+    g_ort_env = OrtEnv::Create();
+    std::cout << "done" << std::endl;
+
     Test_GreedySearch_Gpt_Fp32_C_API();
     Test_GreedySearch_Gpt_Fp32();
     Test_BeamSearch_Gpt_Fp32();
@@ -33,7 +33,6 @@ int main() {
 #if USE_CUDA
     Test_GreedySearch_Gpt_Cuda();
     Test_BeamSearch_Gpt_Cuda();
-    Test_Phi2_Cuda();
 #endif
   } catch (const std::exception& e) {
     std::cout << "Fatal Exception: " << e.what() << std::endl;
