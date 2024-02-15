@@ -119,7 +119,7 @@
     },
     {
       "name": "windows_x64_cpu_relwithdebinfo",
-      "inherits": "windows_relwithdebinfo_defualt",
+      "inherits": "windows_relwithdebinfo_default",
       "displayName": "windows x64 cpu relwithdebinfo",
       "binaryDir": "${sourceDir}/build/relwithdebinfo/cpu_default"
     },
