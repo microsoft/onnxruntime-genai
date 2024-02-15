@@ -91,9 +91,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public static extern UIntPtr OgaSequencesCount(IntPtr /* OgaSequences* */ sequences);
 
         // This function returns the number of tokens in the sequence at the given index of the OgaSequences object.
-        // The OgaSequences object can be thought of as a 2D array of sequences, where the first dimension is the
-        // number of sequences as per OgaSequencesCount and the second dimension is the sequence length
-        // as per OgaSequencesGetSequenceCount.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern UIntPtr OgaSequencesGetSequenceCount(IntPtr /* OgaSequences* */ sequences,
                                                                   UIntPtr /* size_t */ sequenceIndex);
@@ -106,6 +103,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                                      UIntPtr /* size_t */ sequenceIndex);
 
         // This function is used to generate sequences for the given model using the given generator parameters.
+        // The OgaSequences object is an array of sequences, where each sequence is an array of tokens.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaGenerate(IntPtr /* OgaModel* */ model,
                                                                  IntPtr /* OgaGeneratorParams* */ generatorParams,

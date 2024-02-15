@@ -40,6 +40,8 @@ typedef struct OgaGeneratorParams OgaGeneratorParams;
 typedef struct OgaGenerator OgaGenerator;
 typedef struct OgaModel OgaModel;
 typedef struct OgaBuffer OgaBuffer;
+// OgaSequences is an array of token arrays where the number of token arrays can be obtained using
+// OgaSequencesCount and the number of tokens in each token array can be obtained using OgaSequencesGetSequenceCount.
 typedef struct OgaSequences OgaSequences;
 
 /*
@@ -83,15 +85,13 @@ OGA_EXPORT size_t OGA_API_CALL OgaSequencesGetSequenceCount(const OgaSequences* 
  * \brief Returns a pointer to the sequence data at the given index. The number of tokens in the sequence
  *        is given by OgaSequencesGetSequenceCount
  * \param[in] sequences
- * \return The pointer to the sequence data at the given index. The sequence data is owned by the OgaSequences
- *         and will be freed when the OgaSequences is destroyed. The caller must copy the data if it needs to
- *         be used after the OgaSequences is destroyed.
+ * \return The pointer to the sequence data at the given index. The pointer is valid until the OgaSequences is destroyed.
  */
 OGA_EXPORT const int32_t* OGA_API_CALL OgaSequencesGetSequenceData(const OgaSequences* sequences, size_t sequence_index);
 
 /*
  * \brief Creates a model from the given configuration directory and device type.
- * \param[in] config_path The path to the model configuration directory.
+ * \param[in] config_path The path to the model configuration directory. The path is expected to be encoded in UTF-8.
  * \param[in] device_type The device type to use for the model.
  * \param[out] out The created model.
  * \return OgaResult containing the error message if the model creation failed.
@@ -105,9 +105,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaDe
 OGA_EXPORT void OGA_API_CALL OgaDestroyModel(OgaModel* model);
 
 /*
- * \brief Generates sequences of tokens from the model execution based on the given generator params.
- *        The sequences can be thought of as a 2D array of tokens where the first dimension is the batch size
- *        and the second dimension is the sequence length for each sequence.
+ * \brief Generates an array of token arrays from the model execution based on the given generator params.
  * \param[in] model The model to use for generation.
  * \param[in] generator_params The parameters to use for generation.
  * \param[out] out The generated sequences of tokens. The caller is responsible for freeing the sequences using OgaDestroySequences
