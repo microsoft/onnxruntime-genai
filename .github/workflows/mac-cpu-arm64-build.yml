@@ -1,0 +1,55 @@
+name: "MacOS CPU ARM64 Build"
+on: [ workflow_dispatch, pull_request ]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+env:
+  ort_dir: "onnxruntime-osx-arm64-1.17.0"
+  ort_zip: "onnxruntime-osx-arm64-1.17.0.tgz"
+  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-osx-arm64-1.17.0.tgz"
+jobs:
+  job:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout OnnxRuntime GenAI repo
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install ninja
+        run: |
+          brew install ninja
+
+      - name: Download OnnxRuntime
+        run: |
+          curl -L -o ${{ env.ort_zip }} ${{ env.ort_url }} 
+
+      - name: Unzip OnnxRuntime
+        run: |
+          tar -xzf ${{ env.ort_zip }}
+          rm ${{ env.ort_zip }}
+
+      - name: Rename OnnxRuntime to ort
+        run: |
+          mv ${{ env.ort_dir }} ort
+
+      - name: Build with CMake and Clang
+        run: |
+      - name: Build with CMake
+        run: |
+          cmake -G "Ninja" -B build . -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=OFF
+          cmake --build build --config Release --parallel
+        continue-on-error: true
+
+      - name: Verify Build Artifacts
+        if: always()
+        run: |
+          ls -l ${{ github.workspace }}/build
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: onnxruntime-genai-mac-cpu-arm64
+          path: ${{ github.workspace }}/build/**/*.a
+
+
