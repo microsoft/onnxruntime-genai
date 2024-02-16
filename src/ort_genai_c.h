@@ -91,15 +91,15 @@ OGA_EXPORT void OGA_API_CALL OgaTokenizerDestroyStrings(const char* const* strin
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer*, const int32_t* tokens, size_t token_count, const char** out_string);
 
 /* OgaTokenizerStream is to decoded token strings incrementally, one token at a time.
-*/
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTokenizerStream(const OgaTokenizer*, OgaTokenizerStream** out);
 OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizerStream(OgaTokenizerStream*);
 
 /*
-* Decode a single token in the stream. If this results in a word being generated, it will be returned in 'out'.
-* The caller is responsible for concatenating each chunk together to generate the complete result.
-* 'out' is valid until the next call to OgaTokenizerStreamDecode or when the OgaTokenizerStream is destroyed
-*/
+ * Decode a single token in the stream. If this results in a word being generated, it will be returned in 'out'.
+ * The caller is responsible for concatenating each chunk together to generate the complete result.
+ * 'out' is valid until the next call to OgaTokenizerStreamDecode or when the OgaTokenizerStream is destroyed
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream*, int32_t token, const char** out);
 
 #ifdef __cplusplus
