@@ -110,7 +110,7 @@ void Declare_DeviceArray(pybind11::module& m, const char* name) {
   using Type = PyRoamingArray<T>;
   pybind11::class_<Type>(m, name)
       .def(
-          "GetArray", [](Type& t) -> pybind11::array_t<T> { return t.GetNumpy(); }, pybind11::return_value_policy::reference_internal);
+          "get_array", [](Type& t) -> pybind11::array_t<T> { return t.GetNumpy(); }, pybind11::return_value_policy::reference_internal);
 }
 
 struct PySearchParams : GeneratorParams {
@@ -262,6 +262,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("is_done", &PyGenerator::IsDone)
       .def("compute_logits", &PyGenerator::ComputeLogits)
       .def("generate_next_token", &PyGenerator::GenerateNextToken)
+      .def("generate_next_token_top", &PyGenerator::GenerateNextToken_Top)
       .def("generate_next_token_top_p", &PyGenerator::GenerateNextToken_TopP)
       .def("generate_next_token_top_k", &PyGenerator::GenerateNextToken_TopK)
       .def("generate_next_token_top_k_top_p", &PyGenerator::GenerateNextToken_TopK_TopP)
@@ -273,6 +274,14 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 #else
   m.attr("__version__") = "dev";
 #endif
+
+  m.def("is_cuda_package", [](){
+#ifdef USE_CUDA
+    return true;
+#else
+    return false;
+#endif
+  });
 }
 
 }  // namespace Generators
