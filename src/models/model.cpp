@@ -57,7 +57,7 @@ void CheckResult(tfmError_t error) {
 }
 
 const std::string& TokenizerStream::Decode(int32_t token) {
-  chunk_=tokenizer_.Decode({&token, 1});
+  chunk_ = tokenizer_.Decode({&token, 1});
   return chunk_;
 }
 

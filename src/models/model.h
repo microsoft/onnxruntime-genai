@@ -52,7 +52,7 @@ struct TfmPtr {
 };
 
 struct TokenizerStream {
-  TokenizerStream(const Tokenizer& tokenizer) : tokenizer_ {tokenizer} { }
+  TokenizerStream(const Tokenizer& tokenizer) : tokenizer_{tokenizer} {}
 
   const std::string& Decode(int32_t token);
 
