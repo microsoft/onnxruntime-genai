@@ -82,10 +82,9 @@ void Test_GreedySearch_Gpt_Fp32_C_API() {
 
   // Verify outputs match expected outputs
   for (int i = 0; i < batch_size; i++) {
-    size_t token_count;
-    CheckResult(OgaGenerator_GetSequence(generator, i, nullptr, &token_count));
-    std::vector<int32_t> sequence(token_count);
-    CheckResult(OgaGenerator_GetSequence(generator, i, sequence.data(), &token_count));
+    size_t token_count = OgaGenerator_GetSequenceLength(generator, i);
+    const int32_t* data = OgaGenerator_GetSequence(generator, i);
+    std::vector<int32_t> sequence(data, data + token_count);
 
     auto* expected_output_start = &expected_output[i * max_length];
     if (!std::equal(expected_output_start, expected_output_start + max_length, sequence.begin(), sequence.end()))

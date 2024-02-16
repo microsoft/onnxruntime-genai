@@ -10,6 +10,7 @@ include(cmake/options.cmake)
 include(cmake/external/onnxruntime_external_deps.cmake)
 # Checking if CUDA is supported
 include(CheckLanguage)
+add_compile_definitions(BUILDING_ORT_GENAI_C)
 if(USE_CUDA)
   check_language(CUDA)
 endif()
@@ -134,6 +135,8 @@ if(USE_CUDA AND NOT EXISTS "${ORT_LIB_DIR}/${ONNXRUNTIME_PROVIDERS_CUDA_LIB}")
 endif()
 
 file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_FILES}")
+target_link_directories(onnxruntime-genai PRIVATE ${ORT_LIB_DIR})
+target_link_libraries(onnxruntime-genai PRIVATE ${ONNXRUNTIME_LIB})
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   set_target_properties(onnxruntime-genai PROPERTIES LINKER_LANGUAGE CUDA)

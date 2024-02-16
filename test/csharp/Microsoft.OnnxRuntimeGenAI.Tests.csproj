@@ -1,0 +1,58 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net6.0</TargetFrameworks>
+    <IsPackable>false</IsPackable>
+    <Platforms>x64</Platforms>
+    <OutputPath>bin\x64\$(Configuration)\</OutputPath>
+    <IsTestProject>true</IsTestProject>
+
+    <TestsSrcRoot>$(ProjectDir)..\..\test</TestsSrcRoot>
+    <CsharpTestsSrcRoot>$(TestsSrcRoot)\csharp</CsharpTestsSrcRoot>
+
+    <LangVersion>default</LangVersion>
+    <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
+    <Configurations>Debug;RelWithDebInfo</Configurations>
+
+    <RootNamespace>Microsoft.ML.OnnxRuntimeGenAI.Tests</RootNamespace>
+    <AssemblyName>Microsoft.ML.OnnxRuntimeGenAI.Tests</AssemblyName>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!--internal build related properties for Windows -->
+    <OnnxRuntimeGenAIBuildDirectory>$(TestsSrcRoot)\..\build</OnnxRuntimeGenAIBuildDirectory>
+    <NativeBuildOutputDir>$(OnnxRuntimeGenAIBuildDirectory)\$(Configuration)</NativeBuildOutputDir>
+    <OrtHome>$(TestsSrcRoot)\..\ort</OrtHome>
+    <OnnxruntimeLibDirectory>$(OrtHome)\lib</OnnxruntimeLibDirectory>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="$(NativeBuildOutputDir)\onnxruntime-genai.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Include="$(OnnxruntimeLibDirectory)\onnxruntime.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Condition="Exists('$(OnnxruntimeLibDirectory)\onnxruntime_providers_shared.dll')" Include="$(OnnxruntimeLibDirectory)\onnxruntime_providers_shared.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Condition="Exists('$(OnnxruntimeLibDirectory)\onnxruntime_providers_cuda.dll')" Include="$(OnnxruntimeLibDirectory)\onnxruntime_providers_cuda.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.5.0" />
+    <PackageReference Include="xunit" Version="2.4.1" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.4.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="$(TestsSrcRoot)\..\src\csharp\Microsoft.ML.OnnxRuntimeGenAI.csproj" />
+  </ItemGroup>
+
+</Project>
