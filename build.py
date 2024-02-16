@@ -102,6 +102,7 @@ def build(
     cudnn_home: str | bytes | os.PathLike | None = None,
     cmake_generator: str | None = None,
     ort_home: str | bytes | os.PathLike | None = None,
+    enable_csharp: bool = False,
 ):
     """Generates the CMake build tree and builds the project.
 
@@ -157,8 +158,21 @@ def build(
         env["CUDNN_HOME"] = cudnn_home
 
     run_subprocess(command, env=env).check_returncode()
-    make_command = ["cmake", "--build", ".", "--config", "Release"]
+    make_command = ["cmake", "--build", ".", "--config", "RelWithDebInfo"]
     run_subprocess(make_command, cwd="build", env=env).check_returncode()
+
+    if enable_csharp:
+        if not is_windows():
+            raise RuntimeError("C# API is only supported on Windows.")
+
+        dotnet = resolve_executable_path("dotnet")
+        csharp_build_command = [dotnet, "build", ".", "-c", "RelWithDebInfo"]
+        run_subprocess(csharp_build_command, cwd=os.path.join("src", "csharp")).check_returncode()
+        properties = []
+        if ort_home:
+            properties += [f"/p:OrtHome={ort_home}"]
+        run_subprocess(csharp_build_command + properties, cwd=os.path.join("test", "csharp")).check_returncode()
+        run_subprocess([dotnet, "test", "-c", "RelWithDebInfo"] + properties, cwd=os.path.join("test", "csharp")).check_returncode()
 
 
 if __name__ == "__main__":
@@ -192,6 +206,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--skip_wheel", action="store_true", help="Skip building the Python wheel.")
     parser.add_argument("--ort_home", default=None, help="Root directory of onnxruntime.")
+    parser.add_argument("--enable_csharp", action="store_true", help="Build the C# API.")
     args = parser.parse_args()
 
     update_submodules()
@@ -201,4 +216,5 @@ if __name__ == "__main__":
         cudnn_home=args.cudnn_home,
         cmake_generator=args.cmake_generator,
         ort_home=args.ort_home,
+        enable_csharp=args.enable_csharp,
     )

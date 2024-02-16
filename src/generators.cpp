@@ -113,8 +113,9 @@ void Generator::GenerateNextToken_TopK_TopP(int top_k, float top_p, float temper
     throw std::runtime_error("Must call ComputeLogits before GenerateNextToken*");
   computed_logits_ = false;
 
-  // TODO: Do TopK if top_k >1 then do TopP on the results
-  if (top_p < 1.0f) {
+  if (top_p < 1.0f && top_k > 1) {
+    search_->SampleTopPAndK(top_p, top_k, temperature);
+  } else if (top_p < 1.0f) {
     search_->SampleTopP(top_p, temperature);
   } else if (top_k > 1) {
     search_->SampleTopK(top_k, temperature);

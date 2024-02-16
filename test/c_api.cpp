@@ -1,3 +1,4 @@
+#include <gtest/gtest.h>
 #include <generators.h>
 #include <search.h>
 #include <models/model.h>
@@ -5,7 +6,7 @@
 #include <ort_genai_c.h>
 
 // Our working directory is generators/build so one up puts us in the root directory:
-#define MODEL_PATH "../../test_models/"
+#define MODEL_PATH "../../test/test_models/"
 
 struct Deleters {
   void operator()(OgaResult* p) {
@@ -51,7 +52,7 @@ void CheckResult(OgaResult* result) {
   throw std::runtime_error(OgaResultGetError(result));
 }
 
-void Test_Tokenizer_C_API() {
+TEST(CAPITests, TokenizerCAPI) {
   OgaModel* model;
   CheckResult(OgaCreateModel(MODEL_PATH "../examples/phi2/model", OgaDeviceTypeCPU, &model));
   OgaModelPtr model_ptr{model};
@@ -112,9 +113,7 @@ void Test_Tokenizer_C_API() {
   }
 }
 
-void Test_GreedySearch_Gpt_Fp32_C_API() {
-  std::cout << "Test_GreedySearch_Gpt fp32 C API" << std::flush;
-
+TEST(CAPITests, GreedySearchGptFp32CAPI) {
   std::vector<int64_t> input_ids_shape{2, 4};
   std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
 
@@ -151,14 +150,12 @@ void Test_GreedySearch_Gpt_Fp32_C_API() {
 
   // Verify outputs match expected outputs
   for (int i = 0; i < batch_size; i++) {
-    size_t token_count;
-    CheckResult(OgaGenerator_GetSequence(generator, i, nullptr, &token_count));
-    std::vector<int32_t> sequence(token_count);
-    CheckResult(OgaGenerator_GetSequence(generator, i, sequence.data(), &token_count));
+    size_t token_count = OgaGenerator_GetSequenceLength(generator, i);
+    const int32_t* data = OgaGenerator_GetSequence(generator, i);
+    std::vector<int32_t> sequence(data, data + token_count);
 
     auto* expected_output_start = &expected_output[i * max_length];
-    if (!std::equal(expected_output_start, expected_output_start + max_length, sequence.begin(), sequence.end()))
-      throw std::runtime_error("Test Results Mismatch");
+    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), max_length * sizeof(int32_t)));
   }
 
   // Test high level API
@@ -171,9 +168,6 @@ void Test_GreedySearch_Gpt_Fp32_C_API() {
     std::span<const int32_t> sequence{OgaSequencesGetSequenceData(sequences, i), OgaSequencesGetSequenceCount(sequences, i)};
 
     auto* expected_output_start = &expected_output[i * max_length];
-    if (!std::equal(expected_output_start, expected_output_start + max_length, sequence.begin(), sequence.end()))
-      throw std::runtime_error("Test Results Mismatch");
+    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), max_length * sizeof(int32_t)));
   }
-
-  std::cout << " - complete\r\n";
 }

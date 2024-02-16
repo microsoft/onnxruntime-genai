@@ -10,6 +10,7 @@ include(cmake/options.cmake)
 include(cmake/external/onnxruntime_external_deps.cmake)
 # Checking if CUDA is supported
 include(CheckLanguage)
+add_compile_definitions(BUILDING_ORT_GENAI_C)
 if(USE_CUDA)
   check_language(CUDA)
 endif()
@@ -58,9 +59,19 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
     "${MODELS_ROOT}/*.cu"
     "${MODELS_ROOT}/*.cuh"
   )
+  file(GLOB test_cuda_srcs CONFIGURE_DEPENDS
+    "${TESTS_ROOT}/*.cu"
+    "${TESTS_ROOT}/*.cuh"
+  )
+  list(APPEND test_srcs ${test_cuda_srcs})
   list(APPEND generator_srcs ${generator_cuda_srcs})
   add_compile_definitions(USE_CUDA=1)
   include_directories("${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}")
+  if(ENABLE_TESTS AND TEST_PHI2)
+    add_compile_definitions(TEST_PHI2=1)
+  else()
+    add_compile_definitions(TEST_PHI2=0)
+  endif()
 elseif(USE_CUDA)
   # USE_CUDA is true but cmake could not find the cuda compiler
   message(FATAL_ERROR "USE_CUDA is ON but no cuda compiler was found.")
@@ -129,6 +140,8 @@ if(USE_CUDA AND NOT EXISTS "${ORT_LIB_DIR}/${ONNXRUNTIME_PROVIDERS_CUDA_LIB}")
 endif()
 
 file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_FILES}")
+target_link_directories(onnxruntime-genai PRIVATE ${ORT_LIB_DIR})
+target_link_libraries(onnxruntime-genai PRIVATE ${ONNXRUNTIME_LIB})
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   set_target_properties(onnxruntime-genai PROPERTIES LINKER_LANGUAGE CUDA)
