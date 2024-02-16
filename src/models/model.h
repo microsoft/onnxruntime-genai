@@ -5,6 +5,8 @@
 
 namespace Generators {
 
+struct Tokenizer;
+
 void ConvertFp16ToFp32(OrtAllocator& allocator, cudaStream_t stream, OrtValue& in, std::unique_ptr<OrtValue>& p_out);
 
 struct State {
@@ -24,6 +26,10 @@ struct State {
 };
 
 #ifdef NO_TOKENIZER
+struct TokenizerStream {
+  const std::string& Decode(int32_t token);
+};
+
 struct Tokenizer {
   Tokenizer(Config& config);
 
@@ -45,8 +51,20 @@ struct TfmPtr {
   T* p_{};
 };
 
+struct TokenizerStream {
+  TokenizerStream(const Tokenizer& tokenizer) : tokenizer_ {tokenizer} { }
+
+  const std::string& Decode(int32_t token);
+
+ private:
+  const Tokenizer& tokenizer_;
+  std::string chunk_;
+};
+
 struct Tokenizer {
   Tokenizer(Config& config);
+
+  std::unique_ptr<TokenizerStream> CreateStream() const;
 
   std::vector<int32_t> Encode(const char* text) const;
   std::string Decode(std::span<const int32_t> tokens) const;

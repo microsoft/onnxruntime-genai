@@ -243,9 +243,13 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   m.def("print", &TestFP32, "Test float32");
   m.def("print", &TestFP16, "Test float16");
 
+  pybind11::class_<TokenizerStream>(m, "TokenizerStream")
+      .def("decode", [](TokenizerStream& t, int32_t token) { return t.Decode(token); });
+
   pybind11::class_<Tokenizer>(m, "Tokenizer")
       .def("encode", &Tokenizer::Encode)
-      .def("decode", [](const Tokenizer& t, pybind11::array_t<int32_t> tokens) { return t.Decode(ToSpan(tokens)); });
+      .def("decode", [](const Tokenizer& t, pybind11::array_t<int32_t> tokens) { return t.Decode(ToSpan(tokens)); })
+      .def("create_stream", [](const Tokenizer& t) { return t.CreateStream(); });
 
   pybind11::class_<Model>(m, "Model")
       .def(pybind11::init([](const std::string& config_path, DeviceType device_type) {

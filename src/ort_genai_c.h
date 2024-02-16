@@ -82,19 +82,25 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetSequence(const OgaGenerator*,
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTokenizer(const OgaModel* model, OgaTokenizer** out);
 OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizer(OgaTokenizer*);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer*, const char* const* strings, size_t count, OgaSequences** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncodeBatch(const OgaTokenizer*, const char* const* strings, size_t count, OgaSequences** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerDecodeBatch(const OgaTokenizer*, const OgaSequences* tokens, const char* const** out_strings);
+OGA_EXPORT void OGA_API_CALL OgaTokenizerDestroyStrings(const char* const* strings, size_t count);
 
 /* Decode a single token sequence and returns a null terminated utf8 string. out_string must be freed with OgaDestroyString
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer*, const int32_t* tokens, size_t token_count, const char** out_string);
 
+/* OgaTokenizerStream is to decoded token strings incrementally, one token at a time.
+*/
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTokenizerStream(const OgaTokenizer*, OgaTokenizerStream** out);
 OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizerStream(OgaTokenizerStream*);
 
-/* Streaming decoder for tokens. Allows displaying a decoded token stream as the tokens are generated.
- * As not every token will result in bytes written to the string, bytes_written may sometimes be zero.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerDecodeStream(const OgaTokenizer*, OgaTokenizerStream*, int32_t token, char* string, size_t string_size, size_t* bytes_written);
+/*
+* Decode a single token in the stream. If this results in a word being generated, it will be returned in 'out'.
+* The caller is responsible for concatenating each chunk together to generate the complete result.
+* 'out' is valid until the next call to OgaTokenizerStreamDecode or when the OgaTokenizerStream is destroyed
+*/
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream*, int32_t token, const char** out);
 
 #ifdef __cplusplus
 }
