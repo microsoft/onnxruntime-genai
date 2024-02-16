@@ -3,6 +3,7 @@
 #ifndef USE_CXX17
 #include <span>
 #else
+#include <vector>
 namespace std {
 
 template <typename T>
@@ -12,6 +13,8 @@ struct span {
 
   span(const span<std::remove_const_t<T> >& s) : p_{const_cast<T*>(s.data())}, length_{s.size()} {}
   span(std::vector<std::remove_const_t<T> >& s) : p_{const_cast<T*>(s.data())}, length_{s.size()} {}
+  template <auto N>
+  span(std::array<std::remove_const_t<T>, N> s) : p_{const_cast<T*>(s.data())}, length_{s.size()} {}
 
   bool empty() const { return length_ == 0; }
 
@@ -21,16 +24,14 @@ struct span {
   T* data() { return p_; }
   const T* data() const { return p_; }
 
-  T& operator[](size_t index) { return p_[index]; }
+  T& operator[](size_t index) const { return p_[index]; }
 
-  T& back() { return p_[length_ - 1]; }
-  T back() const { return p_[length_ - 1]; }
+  T& back() const { return p_[length_ - 1]; }
 
-  T* begin() { return p_; }
-  T* end() { return p_ + length_; }
+  T* begin() const { return p_; }
+  T* end() const { return p_ + length_; }
 
-  span subspan(size_t index, size_t length) { return span(p_ + index, length); }
-  span<const T> subspan(size_t index, size_t length) const { return span(p_ + index, length); }
+  span subspan(size_t index, size_t length) const { return span(p_ + index, length); }
 
  private:
   T* p_{};

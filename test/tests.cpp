@@ -1,8 +1,12 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
 #include <gtest/gtest.h>
 #include <generators.h>
 #include <search.h>
 #include <models/model.h>
 #include <iostream>
+#include <random>
 
 // Our working directory is generators/build so one up puts us in the root directory:
 #define MODEL_PATH "../../test_models/"
@@ -103,6 +107,7 @@ TEST(ModelTests, BeamSearchGptFp32) {
 }
 
 #if USE_CUDA
+
 void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label) {
   std::vector<int64_t> input_ids_shape{2, 4};
   std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
@@ -208,7 +213,8 @@ TEST(ModelTests, BeamSearchGptCuda) {
 
 TEST(ModelTests, TestApiCuda) {
 #if TEST_PHI2
-#if USE_TOKENIZER
+#ifndef NO_TOKENIZER
+
   auto prompt = R"(
 def print_prime(n):
 '''
@@ -247,7 +253,7 @@ Print all primes between 1 and n
 
 TEST(ModelTests, TestHighLevelApiCuda) {
 #if TEST_PHI2
-#if USE_TOKENIZER
+#ifndef NO_TOKENIZER
   auto prompt = R"(
 def print_prime(n):
 '''

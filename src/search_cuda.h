@@ -1,6 +1,7 @@
 #pragma once
 #include "sequences_cuda.h"
 #include "search_cuda.cuh"
+#include "cuda_sampling.cuh"
 
 namespace Generators {
 
@@ -48,8 +49,9 @@ struct GreedySearch_Cuda : Search_Cuda {
   RoamingArray<int32_t> GetNextIndices() override { return gpu_span<int32_t>{}; }
 
   void SelectTop() override;
-  void SampleTopK(int k, float t) override { assert(false); }
+  void SampleTopK(int k, float t) override;
   void SampleTopP(float p, float t) override;
+  void SampleTopPAndK(float p, int k, float t) override;
 
  private:
   void CheckForEOS();
@@ -57,6 +59,7 @@ struct GreedySearch_Cuda : Search_Cuda {
 
   cuda_unique_ptr<int32_t> next_tokens_buffer_;
   std::unique_ptr<cuda::ArgMaxData> argmaxdata_;
+  std::unique_ptr<cuda::SamplingData> samplingdata_;
 };
 
 struct BeamSearch_Cuda : Search_Cuda {
