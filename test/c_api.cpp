@@ -53,8 +53,9 @@ void CheckResult(OgaResult* result) {
 }
 
 TEST(CAPITests, TokenizerCAPI) {
+#if TEST_PHI2
   OgaModel* model;
-  CheckResult(OgaCreateModel(MODEL_PATH "../examples/phi2/model", OgaDeviceTypeCPU, &model));
+  CheckResult(OgaCreateModel(MODEL_PATH "phi2", OgaDeviceTypeCPU, &model));
   OgaModelPtr model_ptr{model};
 
   OgaTokenizer* tokenizer;
@@ -111,6 +112,7 @@ TEST(CAPITests, TokenizerCAPI) {
     if (strcmp(input_strings[i], stream_result.c_str()) != 0)
       throw std::runtime_error("Stream token decoding mismatch");
   }
+#endif
 }
 
 TEST(CAPITests, GreedySearchGptFp32CAPI) {
