@@ -35,16 +35,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             }
         }
 
-        public int[][] ToArray()
-        {
-            int[][] sequences = new int[_numSequences][];
-            for (ulong sequenceIndex = 0; sequenceIndex < _numSequences; sequenceIndex++)
-            {
-                sequences[sequenceIndex] = this[sequenceIndex].ToArray();
-            }
-            return sequences;
-        }
-
         ~Sequences()
         {
             Dispose(false);
