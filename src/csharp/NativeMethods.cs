@@ -98,6 +98,8 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         // This function returns the sequence data at the given index of the OgaSequences object. The returned
         // pointer is owned by the OgaSequences object and will be freed when the OgaSequences object is destroyed.
         // It is expected that the caller copies the data returned by this function after calling this function.
+        // The number of sequences in the OgaSequences object can be obtained using the OgaSequencesCount function.
+        // The number of tokens in the sequence at the given index can be obtained using the OgaSequencesGetSequenceCount function.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* const int32_t* */ OgaSequencesGetSequenceData(IntPtr /* const OgaSequences* */ sequences,
                                                                                      UIntPtr /* size_t */ sequenceIndex);
