@@ -26,10 +26,6 @@
       "configurePreset": "linux_gcc_cpu_release"
     },
     {
-      "name": "linux_gcc_cpu_release",
-      "configurePreset": "linux_gcc_cpu_release"
-    },
-    {
       "name": "linux_gcc_cpu_debug",
       "configurePreset": "linux_gcc_cpu_debug"
     },
