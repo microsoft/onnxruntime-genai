@@ -1,7 +1,11 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
 #include <generators.h>
 #include <search.h>
 #include <models/model.h>
 #include <iostream>
+#include <random>
 
 // Our working directory is generators/build so one up puts us in the root directory:
 #define MODEL_PATH "../../test_models/"
@@ -29,7 +33,6 @@ void Test_GreedySearch_Gpt_Fp32() {
   // To generate this file:
   // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
   // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
-
   auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
   Generators::GeneratorParams params{*model};
@@ -113,6 +116,7 @@ void Test_BeamSearch_Gpt_Fp32() {
 }
 
 #if USE_CUDA
+
 void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label) {
   std::cout << "Test_GreedySearch_Gpt_Cuda " << model_label << std::flush;
 
@@ -226,4 +230,62 @@ void Test_BeamSearch_Gpt_Cuda() {
   for (auto model_path : c_tiny_gpt2_model_paths)
     Test_BeamSearch_Gpt_Cuda(model_path.first, model_path.second);
 }
+
+void Test_Phi2_Cuda() {
+#if TEST_PHI2
+  std::cout << "Testing_Phi2\r\n";
+#if NOT NO_TOKENIZER
+
+  auto prompt = R"(
+def print_prime(n):
+'''
+Print all primes between 1 and n
+'''
+)";
+
+  std::cout << "With prompt:" << prompt << "\r\n";
+
+  auto provider_options = Generators::GetDefaultProviderOptions(Generators::DeviceType::CUDA);
+  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "phi-2", &provider_options);
+  auto tokenizer = model->CreateTokenizer();
+  auto tokens = tokenizer->Encode(prompt);
+
+  Generators::GeneratorParams params{*model};
+  params.batch_size = 1;
+  params.sequence_length = static_cast<int>(tokens.size());
+  params.input_ids = tokens;
+  params.max_length = 128;
+
+  // Original version
+  auto search = params.CreateSearch();
+  auto state = model->CreateState(search->GetSequenceLengths(), params);
+
+  while (!search->IsDone()) {
+    search->SetLogits(state->Run(search->GetSequenceLength(), search->GetNextTokens()));
+    search->SelectTop();
+  }
+
+  auto result = search->GetSequence(0);
+
+  // Generator version
+  auto generator = model->CreateGenerator();
+  while (!generator->IsDone()) {
+    auto logits = generator->RunStep();
+
+    generator->SelectTop();
+  }
+
+  auto result = generator->GetSequence(0);
+
+  // High level version
+  auto result = model->Generate(params);
+
+  std::cout << tokenizer->Decode(result) << "\r\n";
+  std::cout << "Test complete\r\n";
+#else
+  std::cout << "Test skipped - not built with onnxruntime extensions\r\n";
+#endif
+#endif
+}
+
 #endif

@@ -18,7 +18,7 @@ target_link_libraries(ng_unit_tests PRIVATE
 )
 
 # google unit test
-add_executable(unit_tests test.cpp)
+add_executable(unit_tests test.cpp sampling_benchmark.cpp sampling_tests.cpp)
 target_include_directories(unit_tests PRIVATE
   ${ORT_HEADER_DIR}
   ${CMAKE_SOURCE_DIR}/src
@@ -31,12 +31,16 @@ target_link_libraries(unit_tests PRIVATE
   GTest::gtest_main
 )
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
+  file(GLOB cuda_test_srcs CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/*.cu"
+    "${CMAKE_CURRENT_SOURCE_DIR}/*.cuh"
+  )
   set_target_properties(unit_tests PROPERTIES LINKER_LANGUAGE CUDA)
   target_link_libraries(unit_tests PRIVATE cublasLt cublas cudnn curand cufft cudart)
+  target_sources(unit_tests PRIVATE ${cuda_test_srcs})
 endif()
 
 source_group("Sources" FILES ${test_srcs})
 set_property(DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT unit_tests)
 #set_property(TARGET unit_tests PROPERTY TARGET_RUNTIME_LIBRARY_DIRS ${ORT_LIB_DIR})
 include(GoogleTest)
-gtest_discover_tests(unit_tests)
