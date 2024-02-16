@@ -229,7 +229,7 @@ void GreedySearch_Cpu::SampleTopPAndK(float p, int k, float temperature) {
     std::partial_sort(indices.begin(), indices.begin() + k, indices.end(), [scores = scores.data()](int i, int j) { return scores[i] > scores[j]; });
     // Sample a probability threshold
     float threshold = dis(gen);
-    int32_t token = indices[k-1];
+    int32_t token = indices[k - 1];
     // Find the first token where the cumulative probability exceeds the threshold
     for (int i = 0; i < k; i++) {
       threshold -= scores[indices[i]];

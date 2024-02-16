@@ -62,7 +62,8 @@ TEST(SamplingTests, BatchedSamplingTopKCpu) {
   params.device_type = Generators::DeviceType::CPU;
   auto generator = Generators::CreateGenerator(*model, params);
   auto logits_span = Generators::cpu_span<float>(logits_cpu);
-  generator->search_->SetLogits(logits_span);;
+  generator->search_->SetLogits(logits_span);
+  ;
   // Verify outputs match expected outputs
   int k = 2;
   generator->search_->SampleTopK(k, 1.0);
