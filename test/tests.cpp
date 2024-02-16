@@ -234,7 +234,7 @@ void Test_BeamSearch_Gpt_Cuda() {
 void Test_Phi2_Cuda() {
 #if TEST_PHI2
   std::cout << "Testing_Phi2\r\n";
-#if USE_TOKENIZER
+#if NOT NO_TOKENIZER
 
   auto prompt = R"(
 def print_prime(n):
