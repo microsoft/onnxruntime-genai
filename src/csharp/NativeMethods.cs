@@ -45,11 +45,11 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         // This function is used to set the input IDs for the generator.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsSetInputIDs(IntPtr /* OgaGeneratorParams* */ generatorParams,
-                                                                                   int[] /* const int32_t* */ inputIDs,
-                                                                                   UIntPtr /* size_t */ inputIDsCount,
-                                                                                   UIntPtr /* size_t */ sequenceLength,
-                                                                                   UIntPtr /* size_t */ batchSize);
+        public static extern unsafe IntPtr /* OgaResult* */ OgaGeneratorParamsSetInputIDs(IntPtr /* OgaGeneratorParams* */ generatorParams,
+                                                                                          int* /* const int32_t* */ inputIDs,
+                                                                                          UIntPtr /* size_t */ inputIDsCount,
+                                                                                          UIntPtr /* size_t */ sequenceLength,
+                                                                                          UIntPtr /* size_t */ batchSize);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaCreateGenerator(IntPtr /* const OgaModel* */ model,

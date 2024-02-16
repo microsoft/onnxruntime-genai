@@ -25,10 +25,15 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetMaxLength(_generatorParamsHandle, (UIntPtr)maxLength));
         }
 
-        public void SetInputIDs(IReadOnlyCollection<int> inputIDs, ulong sequenceLength, ulong batchSize)
+        public void SetInputIDs(ReadOnlySpan<int> inputIDs, ulong sequenceLength, ulong batchSize)
         {
-            int[] inputIDsArray = inputIDs.ToArray();
-            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetInputIDs(_generatorParamsHandle, inputIDsArray, (UIntPtr)inputIDsArray.Length, (UIntPtr)sequenceLength, (UIntPtr)batchSize));
+            unsafe
+            {
+                fixed (int* inputIDsPtr = inputIDs)
+                {
+                    Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetInputIDs(_generatorParamsHandle, inputIDsPtr, (UIntPtr)inputIDs.Length, (UIntPtr)sequenceLength, (UIntPtr)batchSize));
+                }
+            }
         }
 
         ~GeneratorParams()

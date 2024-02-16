@@ -26,6 +26,10 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         {
             get
             {
+                if (sequenceIndex >= _numSequences)
+                {
+                    throw new ArgumentOutOfRangeException(nameof(sequenceIndex));
+                }
                 ulong sequenceLength = NativeMethods.OgaSequencesGetSequenceCount(_sequencesHandle, (UIntPtr)sequenceIndex).ToUInt64();
                 IntPtr sequencePtr = NativeMethods.OgaSequencesGetSequenceData(_sequencesHandle, (UIntPtr)sequenceIndex);
                 unsafe

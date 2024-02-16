@@ -24,7 +24,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         public void TestGreedySearch()
         {
             ulong maxLength = 10;
-            var inputIDs = new List<int> { 0, 0, 0, 52, 0, 0, 195, 731 };
+            int[] inputIDs = new int[] { 0, 0, 0, 52, 0, 0, 195, 731 };
             var inputIDsShape = new ulong[] { 2, 4 };
             ulong batchSize = inputIDsShape[0];
             ulong sequenceLength = inputIDsShape[1];
