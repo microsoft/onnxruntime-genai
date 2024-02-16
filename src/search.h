@@ -1,4 +1,5 @@
 #include "sequences.h"
+#include <random>
 
 namespace Generators {
 
@@ -77,6 +78,9 @@ struct GreedySearch_Cpu : Search_Cpu {
   std::span<bool> eos_seen_;  // shape (batch_size)
   std::unique_ptr<bool[]> eos_seen_buffer_;
   int not_done_count_{params_.batch_size};  // When zero, every batch entry is done (starts at batch_size_)
+
+  std::random_device rd;
+  std::mt19937 gen;
 };
 
 struct BeamSearch_Cpu : Search_Cpu {

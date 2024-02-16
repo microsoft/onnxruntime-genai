@@ -4,7 +4,6 @@
 #include "beam_search_scorer.h"
 #include <queue>
 #include <algorithm>
-#include <random>
 
 namespace Generators {
 
@@ -21,7 +20,7 @@ Search_Cpu::Search_Cpu(const GeneratorParams& params)
 }
 
 GreedySearch_Cpu::GreedySearch_Cpu(const GeneratorParams& params)
-    : Search_Cpu(params) {
+    : Search_Cpu(params), gen(rd()) {
   next_tokens_buffer_ = AllocateArray<int32_t>(params.batch_size, &next_tokens_);
   memset(next_tokens_.data(), 0, next_tokens_.size_bytes());
 
@@ -171,59 +170,36 @@ void SoftMax(std::span<float> scores, float temperature) {
 }
 
 void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
-  std::random_device rd;
-  std::mt19937 gen(rd());
-  std::uniform_real_distribution<float> dis(0, k);
-
   std::vector<int32_t> top_k;
   top_k.resize(k);
   for (size_t batch_id = 0; batch_id < params_.batch_size; batch_id++) {
     std::span<float> const scores = next_token_scores_.subspan(batch_id * params_.vocab_size, params_.vocab_size);
-
     SoftMax(scores, temperature);
-
     // Find the top K scores
     std::vector<int> indices(scores.size());
     std::iota(indices.begin(), indices.end(), 0);
     std::partial_sort(indices.begin(), indices.begin() + k, indices.end(), [scores = scores.data()](int i, int j) { return scores[i] > scores[j]; });
-
-    // Normalize the top K probabilities
-    // float total = std::accumulate(indices.begin(), indices.begin() + k, 0.0f, [scores = scores.data()](float sum, int i) { return sum + scores[i]; });
-    // std::transform(indices.begin(), indices.begin() + k, scores.begin(), scores.begin() + k, [scores = scores.data(), total](int i) { return scores[i] / total; });
-
     // Sample a token from the top K
-    std::random_device rd;
-    std::mt19937 gen(rd());
     std::discrete_distribution<> dis(scores.begin(), scores.begin() + k);
-
     SetNextToken(batch_id, indices[dis(gen)]);
   }
-
   AppendNextTokensToSequences();
 }
 
 void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
-  std::random_device rd;
-  std::mt19937 gen(rd());
   std::uniform_real_distribution<float> dis(0, p);
-
   for (size_t batch_id = 0; batch_id < params_.batch_size; batch_id++) {
     if (PadIfAlreadyEOS(batch_id)) {
       continue;
     }
-
     std::span<float> const scores = next_token_scores_.subspan(batch_id * params_.vocab_size, params_.vocab_size);
-
     SoftMax(scores, temperature);
-
     // Sort an array of indices into the scores
     std::vector<int32_t> indices(scores.size());
     std::iota(indices.begin(), indices.end(), 0);
     std::sort(indices.begin(), indices.end(), [scores = scores.data()](int32_t i, int32_t j) { return scores[i] > scores[j]; });
-
     // Sample a probability threshold
     float threshold = dis(gen);
-
     int32_t token = 0;
     // Find the first token where the cumulative probability exceeds the threshold
     for (int i = 0; i < scores.size(); i++) {
@@ -231,39 +207,28 @@ void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
       if (threshold > 0) {
         continue;
       }
-
       token = indices[i];
       break;
     }
-
     SetNextToken(batch_id, token);
   }
-
   AppendNextTokensToSequences();
 }
 
 void GreedySearch_Cpu::SampleTopPAndK(float p, int k, float temperature) {
-  std::random_device rd;
-  std::mt19937 gen(rd());
   std::uniform_real_distribution<float> dis(0, p);
-
   for (size_t batch_id = 0; batch_id < params_.batch_size; batch_id++) {
     if (PadIfAlreadyEOS(batch_id)) {
       continue;
     }
-
     std::span<float> const scores = next_token_scores_.subspan(batch_id * params_.vocab_size, params_.vocab_size);
-
     SoftMax(scores, temperature);
-
     // Find the top K scores
     std::vector<int> indices(scores.size());
     std::iota(indices.begin(), indices.end(), 0);
     std::partial_sort(indices.begin(), indices.begin() + k, indices.end(), [scores = scores.data()](int i, int j) { return scores[i] > scores[j]; });
-
     // Sample a probability threshold
     float threshold = dis(gen);
-
     int32_t token = indices[k-1];
     // Find the first token where the cumulative probability exceeds the threshold
     for (int i = 0; i < k; i++) {
@@ -271,14 +236,11 @@ void GreedySearch_Cpu::SampleTopPAndK(float p, int k, float temperature) {
       if (threshold > 0) {
         continue;
       }
-
       token = indices[i];
       break;
     }
-
     SetNextToken(batch_id, token);
   }
-
   AppendNextTokensToSequences();
 }
 
