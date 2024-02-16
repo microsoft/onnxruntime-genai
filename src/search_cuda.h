@@ -1,6 +1,7 @@
 #pragma once
 #include "sequences_cuda.h"
 #include "search_cuda.cuh"
+#include "cuda_sampling.cuh"
 
 namespace Generators {
 
@@ -58,6 +59,7 @@ struct GreedySearch_Cuda : Search_Cuda {
 
   cuda_unique_ptr<int32_t> next_tokens_buffer_;
   std::unique_ptr<cuda::ArgMaxData> argmaxdata_;
+  std::unique_ptr<cuda::SamplingData> samplingdata_;
 };
 
 struct BeamSearch_Cuda : Search_Cuda {

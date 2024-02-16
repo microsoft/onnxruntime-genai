@@ -7,7 +7,6 @@
 #include <iostream>
 #include <queue>
 #include <random>
-#include "cuda_sampling.cuh"
 
 namespace Generators {
 
@@ -40,6 +39,7 @@ GreedySearch_Cuda::GreedySearch_Cuda(const GeneratorParams& params)
     : Search_Cuda{params} {
   next_tokens_buffer_ = CudaMallocArray<int32_t>(params.batch_size, &next_tokens_);
   cudaMemsetAsync(next_tokens_.data(), 0, next_tokens_.size_bytes(), params_.cuda_stream);
+  samplingdata_ = std::make_unique<cuda::SamplingData>(params_.batch_size, params_.vocab_size, params_.cuda_stream);
 }
 
 BeamSearch_Cuda::BeamSearch_Cuda(const GeneratorParams& params)
@@ -168,7 +168,7 @@ void GreedySearch_Cuda::SelectTop() {
 
 void GreedySearch_Cuda::SampleTopP(float p, float temperature) {
   std::span<float> scores = next_token_scores_.subspan(0, params_.batch_size * params_.vocab_size);
-  cuda::GetSample(params_.cuda_stream, next_tokens_.data(), scores.data(), int(scores.size() / params_.batch_size),
+  cuda::GetSample(samplingdata_.get(), params_.cuda_stream, next_tokens_.data(), scores.data(), int(scores.size() / params_.batch_size),
                   params_.batch_size, -1, p, temperature);
   CheckForEOS();
   AppendNextTokensToSequences();
@@ -176,7 +176,7 @@ void GreedySearch_Cuda::SampleTopP(float p, float temperature) {
 
 void GreedySearch_Cuda::SampleTopK(int k, float temperature) {
   std::span<float> scores = next_token_scores_.subspan(0, params_.batch_size * params_.vocab_size);
-  cuda::GetSample(params_.cuda_stream, next_tokens_.data(), scores.data(), int(scores.size() / params_.batch_size),
+  cuda::GetSample(samplingdata_.get(), params_.cuda_stream, next_tokens_.data(), scores.data(), int(scores.size() / params_.batch_size),
                   params_.batch_size, k, 0.0, temperature);
   CheckForEOS();
   AppendNextTokensToSequences();
@@ -184,7 +184,7 @@ void GreedySearch_Cuda::SampleTopK(int k, float temperature) {
 
 void GreedySearch_Cuda::SampleTopPAndK(float p, int k, float temperature) {
   std::span<float> scores = next_token_scores_.subspan(0, params_.batch_size * params_.vocab_size);
-  cuda::GetSample(params_.cuda_stream, next_tokens_.data(), scores.data(), int(scores.size() / params_.batch_size),
+  cuda::GetSample(samplingdata_.get(), params_.cuda_stream, next_tokens_.data(), scores.data(), int(scores.size() / params_.batch_size),
                   params_.batch_size, k, p, temperature);
   CheckForEOS();
   AppendNextTokensToSequences();

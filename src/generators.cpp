@@ -66,7 +66,7 @@ ProviderOptions GetDefaultProviderOptions([[maybe_unused]] DeviceType device_typ
   return options;
 }
 
-std::unique_ptr<Generator> CreateGenerator(Model& model, const GeneratorParams& search_params) {
+std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& search_params) {
   return std::make_unique<Generator>(model, search_params);
 }
 
@@ -85,7 +85,7 @@ std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
   return std::make_unique<GreedySearch_Cpu>(params);
 }
 
-Generator::Generator(Model& model, const GeneratorParams& search_params) : model_{model} {
+Generator::Generator(const Model& model, const GeneratorParams& search_params) : model_{model} {
   search_ = CreateSearch(search_params);
   state_ = model.CreateState(search_->GetSequenceLengths(), search_params);
 }
@@ -137,11 +137,11 @@ void Generator::GenerateNextToken() {
   GenerateNextToken_TopK_TopP(config.top_k, config.top_p, config.temperature);
 }
 
-RoamingArray<int32_t> Generator::GetSequence(int index) {
+RoamingArray<int32_t> Generator::GetSequence(int index) const {
   return search_->GetSequence(index);
 }
 
-std::vector<int32_t> Generate(Model& model, const GeneratorParams& params) {
+std::vector<std::vector<int32_t>> Generate(const Model& model, const GeneratorParams& params) {
   auto generator = CreateGenerator(model, params);
 
   while (!generator->IsDone()) {
@@ -149,12 +149,16 @@ std::vector<int32_t> Generate(Model& model, const GeneratorParams& params) {
     generator->GenerateNextToken();
   }
 
-  auto results = generator->search_->GetSequence(0);
-  auto results_cpu = results.GetCPU();
+  std::vector<std::vector<int32_t>> result;
 
-  std::vector<int32_t> v;
-  v.assign(results_cpu.begin(), results_cpu.end());
-  return v;
+  for (int i = 0; i < params.batch_size; i++) {
+    auto sequence = generator->search_->GetSequence(i);
+    auto sequence_cpu = sequence.GetCPU();
+
+    auto& v = result.emplace_back();
+    v.assign(sequence_cpu.begin(), sequence_cpu.end());
+  }
+  return result;
 }
 
 }  // namespace Generators

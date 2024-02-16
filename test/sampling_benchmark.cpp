@@ -10,7 +10,7 @@
 #include <chrono>
 
 // Our working directory is generators/build so one up puts us in the root directory:
-#define MODEL_PATH "../../test_models/"
+#define MODEL_PATH "../../test/test_models/"
 
 #if USE_CUDA
 #include "tests_helper.cuh"
@@ -55,12 +55,6 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopP) {
 
     auto next_tokens = generator->search_->GetNextTokens().GetCPU();
     cudaStreamSynchronize(params.cuda_stream);
-    // Verify outputs match expected outputs
-    // for (int b = 0; b < batch_size; b++) {
-    //   auto next_token = next_tokens[b];
-    //   auto next_token_score = cpu_logits[next_token + vocab_size * b];
-    //   EXPECT_GT(next_token_score, 0.0001f);
-    // }
   }
   double average_time = total_time / double(num_iter);
   std::cout << "Average time taken by TopP: "
@@ -108,12 +102,6 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopK) {
 
     auto next_tokens = generator->search_->GetNextTokens().GetCPU();
     cudaStreamSynchronize(params.cuda_stream);
-    // Verify outputs match expected outputs
-    // for (int b = 0; b < batch_size; b++) {
-    //   auto next_token = next_tokens[b];
-    //   auto next_token_score = cpu_logits[next_token + vocab_size * b];
-    //   EXPECT_GT(next_token_score, 10.0f);
-    // }
   }
   double average_time = total_time / double(num_iter);
   std::cout << "Average time taken by TopK: "
@@ -162,12 +150,6 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopPAndK) {
 
     auto next_tokens = generator->search_->GetNextTokens().GetCPU();
     cudaStreamSynchronize(params.cuda_stream);
-    // Verify outputs match expected outputs
-    // for (int b = 0; b < batch_size; b++) {
-    //   auto next_token = next_tokens[b];
-    //   auto next_token_score = cpu_logits[next_token + vocab_size * b];
-    //   EXPECT_GT(next_token_score, 10.0f);
-    // }
   }
   double average_time = total_time / double(num_iter);
   std::cout << "Average time taken by TopP+K: "

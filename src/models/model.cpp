@@ -31,7 +31,18 @@ void State::ClearIO() {
   outputs_.clear();
 }
 
-#if USE_TOKENIZER
+#ifdef NO_TOKENIZER
+Tokenizer::Tokenizer(Config& config) {
+}
+
+std::vector<int32_t> Tokenizer::Encode(const char* text) const {
+  throw std::runtime_error("Tokenizer not enabled");
+}
+
+std::string Tokenizer::Decode(std::span<int32_t> tokens) const {
+  throw std::runtime_error("Tokenizer not enabled");
+}
+#else
 void CheckResult(tfmError_t error) {
   if (error != kTfmOK)
     throw std::runtime_error(TfmGetLastErrorMessage());
@@ -88,11 +99,9 @@ void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
 #endif
 }
 
-#if USE_TOKENIZER
-std::unique_ptr<Tokenizer> Model::CreateTokenizer() {
+std::unique_ptr<Tokenizer> Model::CreateTokenizer() const {
   return std::make_unique<Tokenizer>(*config_);
 }
-#endif
 
 std::unique_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const ProviderOptions* provider_options) {
   auto config = std::make_unique<Config>(config_path);

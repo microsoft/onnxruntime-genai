@@ -6,43 +6,9 @@ This library provides the generative AI loop for ONNX models, including inferenc
 
 Users can call a high level `generate()` method, or run each iteration of the model in a loop.
 
-* Search techniques like greedy/beam search to generate token sequences
-* Built in scoring tools like repetition penalties
+* Support greedy/beam search and TopP, TopK sampling to generate token sequences
+* Built in logits processing like repetition penalties
 * Easy custom scoring
-
-## Sample code for phi-2 in Python
-
-Install onnxruntime-genai.
-
-(Temporary) Build and install from source according to the instructions below.
-
-
-```python
-import onnxruntime_genai as og
-
-model=og.Model(f'models/microsoft/phi-2', device_type)
-
-tokenizer = model.create_tokenizer()
-
-prompt = '''def print_prime(n):
-    """
-    Print all primes between 1 and n
-    """'''
-
-tokens = tokenizer.encode(prompt)
-
-params=og.SearchParams(model)
-params.max_length = 200
-params.input_ids = tokens
-
-output_tokens=model.generate(params)
-
-text = tokenizer.decode(output_tokens)
-
-print("Output:")
-print(text)
-```
-
 
 ## Features
 
@@ -117,13 +83,46 @@ To source `microsoft/phi-2` optimized for your target, download and run the foll
 
 
 ```bash
-wget https://raw.githubusercontent.com/microsoft/onnxruntime-genai/kvaishnavi/models/src/python/models/export.py
+wget https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/src/python/models/export.py
 ```
 
 Export int4 CPU version 
 ```bash
 huggingface-cli login --token <your HuggingFace token>
-python export.py python models/export.py -m microsoft/phi-2 -p int4 -e cpu -o phi2-int4-cpu.onnx
+python export.py -m microsoft/phi-2 -p int4 -e cpu -o phi2-int4-cpu.onnx
+```
+
+## Sample code for phi-2 in Python
+
+Install onnxruntime-genai.
+
+(Temporary) Build and install from source according to the instructions below.
+
+
+```python
+import onnxruntime_genai as og
+
+model=og.Model(f'models/microsoft/phi-2', device_type)
+
+tokenizer = model.create_tokenizer()
+
+prompt = '''def print_prime(n):
+    """
+    Print all primes between 1 and n
+    """'''
+
+tokens = tokenizer.encode(prompt)
+
+params=og.SearchParams(model)
+params.max_length = 200
+params.input_ids = tokens
+
+output_tokens=model.generate(params)
+
+text = tokenizer.decode(output_tokens)
+
+print("Output:")
+print(text)
 ```
 
 
