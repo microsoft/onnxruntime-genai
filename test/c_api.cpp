@@ -6,7 +6,7 @@
 #include <ort_genai_c.h>
 
 // Our working directory is generators/build so one up puts us in the root directory:
-#define MODEL_PATH "../../test_models/"
+#define MODEL_PATH "../../test/test_models/"
 
 struct Deleters {
   void operator()(OgaResult* p) {
@@ -102,6 +102,4 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
     auto* expected_output_start = &expected_output[i * max_length];
     EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), max_length * sizeof(int32_t)));
   }
-
-  std::cout << " - complete\r\n";
 }

@@ -3,7 +3,7 @@
 /src/.vs
 /ort
 /build
-/test_models/*
+/test/test_models/*
 /cache_models
 /*.csv
 .idea
@@ -11,5 +11,5 @@ cache_dir
 *.onnx
 *.onnx.data
 
-!/test_models/hf-internal-testing/
-!/test_models/hf-internal-testing/tiny-random-gpt2*/*.onnx
+!test/test_models/hf-internal-testing/
+!test/test_models/hf-internal-testing/tiny-random-gpt2*/*.onnx

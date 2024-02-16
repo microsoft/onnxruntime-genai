@@ -10,7 +10,7 @@
 #include <chrono>
 
 // Our working directory is generators/build so one up puts us in the root directory:
-#define MODEL_PATH "../../test_models/"
+#define MODEL_PATH "../../test/test_models/"
 
 #if USE_CUDA
 #include "tests_helper.cuh"
