@@ -5,20 +5,8 @@ file(GLOB test_srcs CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
 )
 
-# Not the google unit test
-add_executable(ng_unit_tests c_api.cpp main.cpp tests.cpp)
-target_include_directories(ng_unit_tests PRIVATE
-  ${ORT_HEADER_DIR}
-  ${CMAKE_SOURCE_DIR}/src
-)
-target_link_directories(ng_unit_tests PRIVATE ${ORT_LIB_DIR})
-target_link_libraries(ng_unit_tests PRIVATE
-  onnxruntime-genai-static
-  ${ONNXRUNTIME_LIB}
-)
-
 # google unit test
-add_executable(unit_tests test.cpp sampling_benchmark.cpp sampling_tests.cpp)
+add_executable(unit_tests main.cpp c_api.cpp tests.cpp sampling_benchmark.cpp sampling_tests.cpp)
 target_include_directories(unit_tests PRIVATE
   ${ORT_HEADER_DIR}
   ${CMAKE_SOURCE_DIR}/src
@@ -38,6 +26,13 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   set_target_properties(unit_tests PROPERTIES LINKER_LANGUAGE CUDA)
   target_link_libraries(unit_tests PRIVATE cublasLt cublas cudnn curand cufft cudart)
   target_sources(unit_tests PRIVATE ${cuda_test_srcs})
+endif()
+
+if(NO_TOKENIZER)
+  add_compile_definitions(NO_TOKENIZER=1)
+else()
+  target_include_directories(unit_tests PRIVATE ${TOKENIZER_ROOT})
+  target_link_libraries(unit_tests PRIVATE tokenizer)
 endif()
 
 source_group("Sources" FILES ${test_srcs})
