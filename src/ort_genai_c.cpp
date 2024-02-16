@@ -189,7 +189,12 @@ OgaResult* OGA_API_CALL OgaTokenizerDecodeBatch(const OgaTokenizer* p, const Oga
     auto string = tokenizer.Decode(sequences[i]);
     auto length = string.length() + 1;
     auto& cstr_buffer = strings.emplace_back(std::make_unique<char[]>(length));
+#ifdef _MSC_VER
     strcpy_s(cstr_buffer.get(), length, string.c_str());
+#else
+    strncpy(cstr_buffer.get(), string.c_str(), length);
+    cstr_buffer[length] = 0;
+#endif
   }
 
   auto strings_buffer = std::make_unique<const char*[]>(strings.size());
@@ -214,7 +219,12 @@ OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer* p, const int32_t*
   auto string = tokenizer.Decode({tokens, token_count});
   auto length = string.length() + 1;
   auto cstr_buffer = std::make_unique<char[]>(length);
+#if _MSC_VER
   strcpy_s(cstr_buffer.get(), length, string.c_str());
+#else
+  strncpy(cstr_buffer.get(), string.c_str(), length);
+  cstr_buffer[length] = 0;
+#endif
   *out_string = cstr_buffer.release();
   return nullptr;
   OGA_CATCH
