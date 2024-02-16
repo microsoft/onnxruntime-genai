@@ -108,6 +108,134 @@ TEST(SamplingTests, BatchedSamplingTopPAndKCpu) {
   }
 }
 
+void CreateRandomLogits(float* logits, int num_large, int vocab_size, int batch_size, std::mt19937& engine) {
+  std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+  for (int b = 0; b < batch_size; b++) {
+    for (int v = 0; v < vocab_size; v++) {
+      logits[v + b * vocab_size] = dist(engine);
+    }
+  }
+  // Randomly set num_large elements to be large
+  std::uniform_int_distribution<> dist_large(0, vocab_size - 1);
+  for (int b = 0; b < batch_size; b++) {
+    for (int i = 0; i < num_large; i++) {
+      int index = dist_large(engine);
+      logits[index + b * vocab_size] = 25.0f;
+    }
+  }
+}
+
+TEST(SamplingTests, RandomizedSamplingTopPCpu) {
+  std::unique_ptr<OrtEnv> g_ort_env;
+  Ort::InitApi();
+  g_ort_env = OrtEnv::Create();
+  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  int vocab_size = 32000;  // vocab size of llama
+  int batch_size = 5;
+  std::vector<int32_t> input_ids{0, 1, 2, 3, 4};
+  Generators::GeneratorParams params = Generators::GeneratorParams{};
+  params.max_length = 10;
+  params.batch_size = batch_size;
+  params.sequence_length = 1;
+  params.vocab_size = vocab_size;
+  params.input_ids = input_ids;
+  params.device_type = Generators::DeviceType::CPU;
+  int num_iter = 100;
+  for (int i = 0; i < num_iter; i++) {
+    std::unique_ptr<float[]> logits_cpu(new float[vocab_size * batch_size]);
+    std::random_device rd;
+    std::mt19937 engine(rd());
+    std::uniform_int_distribution<> dist(1, 25);
+    int num_large = dist(engine);
+    CreateRandomLogits(logits_cpu.get(), num_large, vocab_size, batch_size, engine);
+    auto generator = Generators::CreateGenerator(*model, params);
+    generator->search_->SetLogits(Generators::cpu_span<float>(logits_cpu.get(), vocab_size * batch_size));
+    generator->search_->SampleTopP(0.95f, 1.0f);
+    auto next_tokens = generator->search_->GetNextTokens().GetCPU();
+    // Verify outputs match expected outputs
+    for (int b = 0; b < batch_size; b++) {
+      auto next_token = next_tokens[b];
+      auto next_token_score = logits_cpu[next_token + vocab_size * b];
+      EXPECT_GT(next_token_score, 1.0f);
+    }
+  }
+}
+
+TEST(SamplingTests, RandomizedSamplingTopKCpu) {
+  std::unique_ptr<OrtEnv> g_ort_env;
+  Ort::InitApi();
+  g_ort_env = OrtEnv::Create();
+  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  int vocab_size = 32000;  // vocab size of llama
+  int batch_size = 5;
+  int k = 5;
+  std::vector<int32_t> input_ids{0, 1, 2, 3, 4};
+  Generators::GeneratorParams params = Generators::GeneratorParams{};
+  params.max_length = 10;
+  params.batch_size = batch_size;
+  params.sequence_length = 1;
+  params.vocab_size = vocab_size;
+  params.input_ids = input_ids;
+  params.device_type = Generators::DeviceType::CPU;
+  int num_iter = 100;
+  for (int i = 0; i < num_iter; i++) {
+    std::unique_ptr<float[]> logits_cpu(new float[vocab_size * batch_size]);
+    std::random_device rd;
+    std::mt19937 engine(rd());
+    std::uniform_int_distribution<> dist(5, 25);
+    int num_large = dist(engine);
+    CreateRandomLogits(logits_cpu.get(), num_large, vocab_size, batch_size, engine);
+    auto generator = Generators::CreateGenerator(*model, params);
+    generator->search_->SetLogits(Generators::cpu_span<float>(logits_cpu.get(), vocab_size * batch_size));
+    generator->search_->SampleTopK(k, 1.0f);
+    auto next_tokens = generator->search_->GetNextTokens().GetCPU();
+    // Verify outputs match expected outputs
+    for (int b = 0; b < batch_size; b++) {
+      auto next_token = next_tokens[b];
+      auto next_token_score = logits_cpu[next_token + vocab_size * b];
+      EXPECT_GT(next_token_score, 10.0f);
+    }
+  }
+}
+
+TEST(SamplingTests, RandomizedSamplingTopPAndKCpu) {
+  std::unique_ptr<OrtEnv> g_ort_env;
+  Ort::InitApi();
+  g_ort_env = OrtEnv::Create();
+  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  int vocab_size = 32000;  // vocab size of llama
+  int batch_size = 5;
+  float p = 0.95f;
+  int k = 5;
+  std::vector<int32_t> input_ids{0, 1, 2, 3, 4};
+  Generators::GeneratorParams params = Generators::GeneratorParams{};
+  params.max_length = 10;
+  params.batch_size = batch_size;
+  params.sequence_length = 1;
+  params.vocab_size = vocab_size;
+  params.input_ids = input_ids;
+  params.device_type = Generators::DeviceType::CPU;
+  int num_iter = 100;
+  for (int i = 0; i < num_iter; i++) {
+    std::unique_ptr<float[]> logits_cpu(new float[vocab_size * batch_size]);
+    std::random_device rd;
+    std::mt19937 engine(rd());
+    std::uniform_int_distribution<> dist(5, 25);
+    int num_large = dist(engine);
+    CreateRandomLogits(logits_cpu.get(), num_large, vocab_size, batch_size, engine);
+    auto generator = Generators::CreateGenerator(*model, params);
+    generator->search_->SetLogits(Generators::cpu_span<float>(logits_cpu.get(), vocab_size * batch_size));
+    generator->search_->SampleTopPAndK(p, k, 1.0f);
+    auto next_tokens = generator->search_->GetNextTokens().GetCPU();
+    // Verify outputs match expected outputs
+    for (int b = 0; b < batch_size; b++) {
+      auto next_token = next_tokens[b];
+      auto next_token_score = logits_cpu[next_token + vocab_size * b];
+      EXPECT_GT(next_token_score, 10.0f);
+    }
+  }
+}
+
 #if USE_CUDA
 #include "tests_helper.cuh"
 
@@ -214,7 +342,7 @@ TEST(SamplingTests, BatchedSamplingTopPAndKCuda) {
   }
 }
 
-TEST(SamplingTests, RandomizedSamplingTopP) {
+TEST(SamplingTests, RandomizedSamplingTopPCuda) {
   std::unique_ptr<OrtEnv> g_ort_env;
   Ort::InitApi();
   g_ort_env = OrtEnv::Create();
@@ -257,7 +385,7 @@ TEST(SamplingTests, RandomizedSamplingTopP) {
   }
 }
 
-TEST(SamplingTests, RandomizedSamplingTopK) {
+TEST(SamplingTests, RandomizedSamplingTopKCuda) {
   std::unique_ptr<OrtEnv> g_ort_env;
   Ort::InitApi();
   g_ort_env = OrtEnv::Create();
@@ -300,7 +428,7 @@ TEST(SamplingTests, RandomizedSamplingTopK) {
   }
 }
 
-TEST(SamplingTests, RandomizedSamplingTopPAndK) {
+TEST(SamplingTests, RandomizedSamplingTopPAndKCuda) {
   std::unique_ptr<OrtEnv> g_ort_env;
   Ort::InitApi();
   g_ort_env = OrtEnv::Create();
