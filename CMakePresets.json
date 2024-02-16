@@ -6,7 +6,8 @@
     "patch": 0
   },
   "include": [
-    "cmake/presets/CMakeBuildPresets.json"
+    "cmake/presets/CMakeWinBuildPresets.json",
+    "cmake/presets/CMakeLinuxBuildPresets.json"
   ]
 
 }

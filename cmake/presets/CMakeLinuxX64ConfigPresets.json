@@ -1,89 +1,9 @@
 {
   "version": 6,
+  "include": [
+    "CMakeLinuxDefaultConfigPresets.json"
+  ],
   "configurePresets": [
-    {
-      "name": "linux_gcc_default",
-      "architecture": "x64",
-      "cacheVariables": {
-        "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
-        "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
-        "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
-        "CMAKE_POSITION_INDEPENDENT_CODE": "ON",
-        "USE_CUDA": "OFF"
-      },
-      "environment": {
-        "CC": "gcc",
-        "CXX": "g++"
-      },
-      "condition": {
-        "type": "equals",
-        "lhs": "${hostSystemName}",
-        "rhs": "Linux"
-      }
-    },
-    {
-      "name": "linux_clang_default",
-      "inherits": "linux_gcc_default",
-      "cacheVariables": {
-        "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
-        "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
-        "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu"
-      },
-      "environment": {
-        "CC": "clang",
-        "CXX": "clang++"
-      }
-    },
-    {
-      "name": "linux_gcc_asan_default",
-      "inherits": "linux_gcc_default",
-      "cacheVariables": {
-        "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -fsanitize=address",
-        "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -fsanitize=address",
-        "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -fsanitize=address"
-      }
-    },
-    {
-      "name": "linux_clang_asan_default",
-      "inherits": "linux_gcc_default",
-      "cacheVariables": {
-        "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -fsanitize=address -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
-        "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -fsanitize=address -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
-        "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -fsanitize=address -L\\usr\\lib64\\x86_64-unknown-linux-gnu"
-      }
-    },
-    {
-      "name": "linux_release_default",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe",
-        "CMAKE_CXX_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe"
-      }
-    },
-    {
-      "name": "linux_relwithdebinfo_default",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe -ggdb3",
-        "CMAKE_CXX_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe -ggdb3"
-      }
-    },
-    {
-      "name": "linux_debug_default",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_C_FLAGS": "-ggdb3 -O0",
-        "CMAKE_CXX_FLAGS": "-ggdb3 -O0 -D_GLIBCXX_DEBUG"
-      }
-    },
-    {
-      "name": "linux_MinSizeRel_default",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "MinSizeRel",
-        "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -Os -pipe -ggdb3",
-        "CMAKE_CXX_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -Os -pipe -ggdb3"
-      }
-    },
     {
       "name": "linux_gcc_cpu_release_asan",
       "displayName": "linux gcc cpu release asan",
@@ -128,6 +48,16 @@
         "linux_release_default"
       ],
       "binaryDir": "${sourceDir}/build/gcc_cpu/release"
+    },
+    {
+      "name": "linux_gcc_cpu_arm64_release",
+      "displayName": "linux gcc cpu release",
+      "inherits": [
+        "linux_gcc_cpu_release",
+        "linux_release_default"
+      ],
+      "binaryDir": "${sourceDir}/build/gcc_cpu/release",
+      "architecture": "arm64"
     },
     {
       "name": "linux_gcc_cpu_debug",

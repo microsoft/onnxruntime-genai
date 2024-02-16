@@ -1,0 +1,18 @@
+{
+  "version": 6,
+  "include": [
+    "CMakeLinuxDefaultConfigPresets.json"
+  ],
+  "configurePresets": [
+    {
+      "name": "linux_gcc_cpu_arm64_release",
+      "displayName": "linux gcc cpu release",
+      "inherits": [
+        "linux_gcc_cpu_release",
+        "linux_release_default"
+      ],
+      "binaryDir": "${sourceDir}/build/gcc_cpu/release",
+      "architecture": "arm64"
+    }
+  ]
+}
