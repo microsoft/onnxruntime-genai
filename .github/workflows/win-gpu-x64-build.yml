@@ -46,14 +46,14 @@ jobs:
 
       - name: Build with CMake
         run: |
-          cmake -G "Visual Studio 17 2022" -S . -B build -A x64 -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} .. -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=TRUE
+          cmake -G "Visual Studio 17 2022" -S . -B build -A x64 -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=TRUE
           cmake --build build --config Release --parallel
 
       - name: Verify Build Artifacts
         if: always()
         continue-on-error: true
         run: |
-          Get-ChildItem -Path $env:GITHUB_WORKSPACE\build\ -Recurse
+          Get-ChildItem -Path $env:GITHUB_WORKSPACE\build\test\Release -Recurse
 
       - name: Run tests
         run: |

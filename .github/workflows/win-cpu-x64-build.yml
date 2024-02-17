@@ -54,7 +54,7 @@ jobs:
       - name: Build with CMake
         run: |
           cmake -G "Visual Studio 17 2022" -A x64 -S . -B build -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=OFF
-          cmake --build . --config Release --parallel
+          cmake --build build --config Release --parallel
 
       - name: Verify Build Artifacts
         if: always()
