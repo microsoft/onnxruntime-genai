@@ -8,9 +8,6 @@
 #include <iostream>
 #include <random>
 
-// Our working directory is generators/build so one up puts us in the root directory:
-#define MODEL_PATH "../../test/test_models/"
-
 std::unique_ptr<OrtEnv> g_ort_env;
 
 // To generate this file:
@@ -28,11 +25,12 @@ TEST(ModelTests, GreedySearchGptFp32) {
   std::vector<int32_t> expected_output{
       0, 0, 0, 52, 204, 204, 204, 204, 204, 204,
       0, 0, 195, 731, 731, 114, 114, 114, 114, 114};
-  
+
   // To generate this file:
   // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
   // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
-  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto model = Generators::CreateModel(*g_ort_env,
+                                       MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
   Generators::GeneratorParams params{*model};
   params.max_length = 10;
@@ -51,7 +49,8 @@ TEST(ModelTests, GreedySearchGptFp32) {
   for (int i = 0; i < params.batch_size; i++) {
     auto sequence = generator->GetSequence(i).GetCPU();
     auto* expected_output_start = &expected_output[i * params.max_length];
-    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params.max_length * sizeof(int32_t)));
+    EXPECT_TRUE(
+        0 == std::memcmp(expected_output_start, sequence.data(), params.max_length * sizeof(int32_t)));
   }
 }
 
@@ -64,7 +63,8 @@ TEST(ModelTests, BeamSearchGptFp32) {
 
   std::vector<int32_t> expected_output{
       0, 0, 0, 0, 0, 52, 195, 731, 321, 301, 734, 620, 131, 131, 131, 181, 638, 638, 638, 638,
-      41, 554, 74, 622, 206, 222, 75, 223, 221, 198, 224, 572, 292, 292, 292, 292, 292, 292, 292, 292,
+      41, 554, 74, 622, 206, 222, 75, 223, 221, 198, 224, 572, 292, 292, 292, 292, 292, 292, 292,
+      292,
       0, 0, 0, 52, 328, 219, 328, 206, 288, 227, 896, 328, 328, 669, 669, 669, 669, 669, 669, 669};
 
   // The ONNX model is generated like the following:
@@ -72,7 +72,8 @@ TEST(ModelTests, BeamSearchGptFp32) {
   //        --output tiny_gpt2_beamsearch_fp16.onnx --use_gpu --max_length 20
   // (with separate_gpt2_decoder_for_init_run set to False as it is now set to True by default)
 
-  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto model = Generators::CreateModel(*g_ort_env,
+                                       MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
   Generators::GeneratorParams params{*model};
   params.batch_size = static_cast<int>(input_ids_shape[0]);
@@ -86,7 +87,8 @@ TEST(ModelTests, BeamSearchGptFp32) {
   auto state = model->CreateState(search.sequence_lengths_, params);
 
   while (!search.IsDone()) {
-    search.SetLogits(state->Run(search.GetSequenceLength(), search.GetNextTokens(), search.GetNextIndices()));
+    search.SetLogits(state->Run(search.GetSequenceLength(), search.GetNextTokens(),
+                                search.GetNextIndices()));
 
     // Scoring
     Generators::Processors::MinLength(search, 1);
@@ -100,9 +102,11 @@ TEST(ModelTests, BeamSearchGptFp32) {
 
   // Verify outputs match expected outputs
   for (int i = 0; i < search.params_.batch_size; i++) {
-    auto sequence = std::span<int32_t>(output_sequence.data() + search.params_.max_length * i, search.params_.max_length);
+    auto sequence = std::span<int32_t>(output_sequence.data() + search.params_.max_length * i,
+                                       search.params_.max_length);
     auto* expected_output_start = &expected_output[i * search.params_.max_length];
-    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params.max_length * sizeof(int32_t)));
+    EXPECT_TRUE(
+        0 == std::memcmp(expected_output_start, sequence.data(), params.max_length * sizeof(int32_t)));
   }
 }
 

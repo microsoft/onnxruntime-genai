@@ -51,7 +51,7 @@ jobs:
       - name: Verify Build Artifacts
         if: always()
         run: |
-          ls -l ${{ github.workspace }}/build/gcc_cpu/release"
+          ls -l ${{ github.workspace }}/build/gcc_cpu/release
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v3

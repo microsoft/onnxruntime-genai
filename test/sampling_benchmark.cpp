@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#if USE_CUDA
 #include <gtest/gtest.h>
 #include <generators.h>
 #include <search.h>
@@ -8,11 +9,6 @@
 #include <iostream>
 #include <random>
 #include <chrono>
-
-// Our working directory is generators/build so one up puts us in the root directory:
-#define MODEL_PATH "../../test/test_models/"
-
-#if USE_CUDA
 #include "tests_helper.cuh"
 
 TEST(Benchmarks, BenchmarkRandomizedSamplingTopP) {
