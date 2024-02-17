@@ -10,7 +10,7 @@ env:
   ort_zip: "onnxruntime-linux-x64-gpu-1.17.0.tgz"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-linux-x64-gpu-1.17.0.tgz"
 jobs:
-  job:
+  linux-gpu-x64-build:
     runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2004-T4" ]
     steps:
       - name: Checkout OnnxRuntime GenAI repo

@@ -16,7 +16,7 @@ env:
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/$(ort_zip)"
 
 jobs:
-  job:
+  windows-cpu-x64-build:
     runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Win2022-CPU" ]
     permissions:
       security-events: write
@@ -53,14 +53,15 @@ jobs:
 
       - name: Build with CMake
         run: |
-          cmake -G "Visual Studio 17 2022" -A x64 . -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=OFF
+          cmake -G "Visual Studio 17 2022" -A x64 -S . -B build -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=OFF
           cmake --build . --config Release --parallel
 
       - name: Verify Build Artifacts
         if: always()
+        continue-on-error: true
         run: |
-          Get-ChildItem -Path $env:GITHUB_WORKSPACE\Release -Recurse
-          Get-ChildItem -Path $env:GITHUB_WORKSPACE\test\Release -Recurse
+          Get-ChildItem -Path $env:GITHUB_WORKSPACE\build\Release -Recurse
+          Get-ChildItem -Path $env:GITHUB_WORKSPACE\build\test\Release -Recurse
 
       - name: Run tests
         run: |

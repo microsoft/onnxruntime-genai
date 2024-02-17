@@ -8,7 +8,7 @@ env:
   ort_zip: "onnxruntime-linux-aarch64-1.17.0.tgz"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-linux-aarch64-1.17.0.tgz"
 jobs:
-  job:
+  linux-cpu-arm64-build:
     runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2004-ARM-CPU" ]
     steps:
       - name: Checkout OnnxRuntime GenAI repo

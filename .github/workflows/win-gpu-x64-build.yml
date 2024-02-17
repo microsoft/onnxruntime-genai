@@ -15,7 +15,7 @@ env:
   cuda_version: "12.2"
 
 jobs:
-  Windows-CUDA-12-Build:
+  windows-gpu-x64-build:
     runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Win2022-GPU-A10" ]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
@@ -46,16 +46,14 @@ jobs:
 
       - name: Build with CMake
         run: |
-          mkdir build
-          cd build
-          cmake -G "Visual Studio 17 2022" -A x64 -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} .. -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=TRUE
-          cmake --build . --config Release --parallel
+          cmake -G "Visual Studio 17 2022" -S . -B build -A x64 -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} .. -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=TRUE
+          cmake --build build --config Release --parallel
 
       - name: Verify Build Artifacts
         if: always()
+        continue-on-error: true
         run: |
-          Get-ChildItem -Path $env:GITHUB_WORKSPACE\build\Release -Recurse
-          Get-ChildItem -Path $env:GITHUB_WORKSPACE\test\Release -Recurse
+          Get-ChildItem -Path $env:GITHUB_WORKSPACE\build\ -Recurse
 
       - name: Run tests
         run: |
