@@ -36,6 +36,7 @@ typedef enum OgaDeviceType {
 typedef enum OgaDataType {
   OgaDataType_int32,
   OgaDataType_float32,
+  OgaDataType_string,  // UTF8 string
 } OgaDataType;
 
 typedef struct OgaResult OgaResult;
@@ -46,6 +47,8 @@ typedef struct OgaBuffer OgaBuffer;
 // OgaSequences is an array of token arrays where the number of token arrays can be obtained using
 // OgaSequencesCount and the number of tokens in each token array can be obtained using OgaSequencesGetSequenceCount.
 typedef struct OgaSequences OgaSequences;
+typedef struct OgaTokenizer OgaTokenizer;
+typedef struct OgaTokenizerStream OgaTokenizerStream;
 
 /*
  * \param[in] result OgaResult that contains the error message.
@@ -58,6 +61,7 @@ OGA_EXPORT const char* OGA_API_CALL OgaResultGetError(OgaResult* result);
  * \param[in] result OgaResult to be destroyed.
  */
 OGA_EXPORT void OGA_API_CALL OgaDestroyResult(OgaResult*);
+OGA_EXPORT void OGA_API_CALL OgaDestroyString(const char*);
 
 OGA_EXPORT void OGA_API_CALL OgaDestroyBuffer(OgaBuffer*);
 OGA_EXPORT OgaDataType OGA_API_CALL OgaBufferGetType(const OgaBuffer*);
@@ -209,6 +213,28 @@ OGA_EXPORT size_t OGA_API_CALL OgaGenerator_GetSequenceLength(const OgaGenerator
  *         be used after the OgaGenerator is destroyed.
  */
 OGA_EXPORT const int32_t* OGA_API_CALL OgaGenerator_GetSequence(const OgaGenerator* generator, size_t index);
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTokenizer(const OgaModel* model, OgaTokenizer** out);
+OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizer(OgaTokenizer*);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncodeBatch(const OgaTokenizer*, const char* const* strings, size_t count, OgaSequences** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerDecodeBatch(const OgaTokenizer*, const OgaSequences* tokens, const char* const** out_strings);
+OGA_EXPORT void OGA_API_CALL OgaTokenizerDestroyStrings(const char* const* strings, size_t count);
+
+/* Decode a single token sequence and returns a null terminated utf8 string. out_string must be freed with OgaDestroyString
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer*, const int32_t* tokens, size_t token_count, const char** out_string);
+
+/* OgaTokenizerStream is to decoded token strings incrementally, one token at a time.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTokenizerStream(const OgaTokenizer*, OgaTokenizerStream** out);
+OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizerStream(OgaTokenizerStream*);
+
+/*
+ * Decode a single token in the stream. If this results in a word being generated, it will be returned in 'out'.
+ * The caller is responsible for concatenating each chunk together to generate the complete result.
+ * 'out' is valid until the next call to OgaTokenizerStreamDecode or when the OgaTokenizerStream is destroyed
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream*, int32_t token, const char** out);
 
 #ifdef __cplusplus
 }
