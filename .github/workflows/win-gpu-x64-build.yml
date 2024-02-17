@@ -18,9 +18,11 @@ jobs:
   Windows-CUDA-12-Build:
     runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Win2022-GPU-A10" ]
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout OnnxRuntime GenAI repo
+        uses: actions/checkout@v4
         with:
-          submodules: false
+          submodules: true
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11.x'
@@ -42,10 +44,6 @@ jobs:
         run: |
           Rename-Item -Path $env:ort_dir -NewName ort
 
-      - name: Git Submodule Update
-        run: |
-          git submodule update --init --recursive
-
       - name: Build with CMake
         run: |
           mkdir build
@@ -57,6 +55,11 @@ jobs:
         if: always()
         run: |
           Get-ChildItem -Path $env:GITHUB_WORKSPACE\build\Release -Recurse
+          Get-ChildItem -Path $env:GITHUB_WORKSPACE\test\Release -Recurse
+
+      - name: Run tests
+        run: |
+          .\test\Release\unit_tests.exe
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v3

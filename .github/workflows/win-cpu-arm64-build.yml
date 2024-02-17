@@ -17,9 +17,13 @@ env:
 
 jobs:
   job:
-    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Win11-ARM-CPU"]
+    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Win11-ARM-CPU" ]
     steps:
-      - uses: actions/checkout@v2
+      - name: Checkout OnnxRuntime GenAI repo
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
       - name: Setup Visual Studio 2022
         uses: microsoft/setup-msbuild@v1.1
         with:
@@ -49,6 +53,11 @@ jobs:
         if: always()
         run: |
           Get-ChildItem -Path $env:GITHUB_WORKSPACE\Release -Recurse
+          Get-ChildItem -Path $env:GITHUB_WORKSPACE\test\Release -Recurse
+
+      - name: Run tests
+        run: |
+          .\test\Release\unit_tests.exe
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v3

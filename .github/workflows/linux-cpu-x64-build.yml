@@ -12,9 +12,9 @@ jobs:
     runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU" ]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
-        uses: actions/checkout@v2
-
-
+        uses: actions/checkout@v4
+        with:
+          submodules: true
 
       - name: Download OnnxRuntime
         run: |
@@ -29,17 +29,18 @@ jobs:
         run: |
           mv ${{ env.ort_dir }} ort
 
-      - name: Git Submodule Update
-        run: |
-          git submodule update --init --recursive
-
       - name: Build with CMake and GCC
         run: |
           set -e -x
           rm -rf build
           cmake --preset linux_gcc_cpu_release
           cmake --build --preset linux_gcc_cpu_release
-          
+
+      - name: Run tests
+        run: |
+          set -e -x
+          ./build/gcc_cpu/release/test/unit_tests
+
       - name: Build with CMake and clang
         run: |
           set -e -x
@@ -50,7 +51,7 @@ jobs:
       - name: Verify Build Artifacts
         if: always()
         run: |
-          ls -l ${{ github.workspace }}/build
+          ls -l ${{ github.workspace }}/build/gcc_cpu/release"
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v3
