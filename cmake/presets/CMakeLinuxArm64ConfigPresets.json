@@ -6,9 +6,9 @@
   "configurePresets": [
     {
       "name": "linux_gcc_cpu_arm64_release",
-      "displayName": "linux gcc cpu release",
+      "displayName": "linux gcc cpu arm64 release",
       "inherits": [
-        "linux_gcc_cpu_release",
+        "linux_gcc_default",
         "linux_release_default"
       ],
       "binaryDir": "${sourceDir}/build/gcc_cpu/release",
