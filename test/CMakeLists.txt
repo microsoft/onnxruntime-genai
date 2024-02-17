@@ -6,7 +6,13 @@ file(GLOB test_srcs CONFIGURE_DEPENDS
 )
 
 # google unit test
-add_executable(unit_tests main.cpp c_api.cpp tests.cpp sampling_benchmark.cpp sampling_tests.cpp)
+add_executable(unit_tests
+  main.cpp
+  c_api_tests.cpp
+  model_tests.cpp
+  sampling_tests.cpp
+  sampling_benchmark.cpp
+)
 target_include_directories(unit_tests PRIVATE
   ${ORT_HEADER_DIR}
   ${CMAKE_SOURCE_DIR}/src
