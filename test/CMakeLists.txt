@@ -46,8 +46,11 @@ add_custom_command(TARGET unit_tests POST_BUILD
   ${CMAKE_CURRENT_SOURCE_DIR}/test_models
   $<TARGET_FILE_DIR:unit_tests>/test_models
 )
+add_custom_command(TARGET unit_tests POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy ${ONNXRUNTIME_LIB} $<TARGET_FILE_DIR:unit_tests>
+  WORKING_DIRECTORY "${ORT_LIB_DIR}"
+)
 add_compile_definitions(MODEL_PATH="$<TARGET_FILE_DIR:unit_tests>/test_models/")
 source_group("Sources" FILES ${test_srcs})
 set_property(DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT unit_tests)
-#set_property(TARGET unit_tests PROPERTY TARGET_RUNTIME_LIBRARY_DIRS ${ORT_LIB_DIR})
 include(GoogleTest)
