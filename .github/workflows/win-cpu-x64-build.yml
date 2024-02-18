@@ -20,7 +20,7 @@ jobs:
     strategy:
       matrix:
         additional_steps: [ build_only, with_static_analysis ]
-    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Win2022-CPU" ]
+    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Win2022-CPU"]
     permissions:
       security-events: write
       actions: read
@@ -49,7 +49,7 @@ jobs:
         run: |
           Rename-Item -Path $env:ort_dir -NewName ort
 
-      - name: Install additional_steps
+      - name: Install CodeQL
         if: matrix.additional_steps == 'with_static_analysis'
         uses: github/codeql-action/init@v3
         with:
