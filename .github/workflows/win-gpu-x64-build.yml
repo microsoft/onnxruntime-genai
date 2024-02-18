@@ -32,6 +32,11 @@ jobs:
         run: |
           azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v${{ env.cuda_version }}" ${{ env.cuda_dir}}
 
+      - name: Prepend CUDA to PATH
+        run: |
+          $env:PATH = "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin;" + $env:PATH 
+          echo "Current PATH variable is: $env:PATH"
+
       - name: Download OnnxRuntime
         run: |
           Invoke-WebRequest -Uri $env:ort_url -OutFile $env:ort_zip
@@ -57,7 +62,6 @@ jobs:
 
       - name: Prepend CUDA to PATH and Run tests
         run: |
-          $env:PATH = "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin;" + $env:PATH 
           echo "Current PATH variable is: $env:PATH" 
           .\build\test\Release\unit_tests.exe
 

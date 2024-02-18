@@ -46,9 +46,9 @@ add_custom_command(TARGET unit_tests POST_BUILD
   ${CMAKE_CURRENT_SOURCE_DIR}/test_models
   $<TARGET_FILE_DIR:unit_tests>/test_models
 )
+file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_FILES}")
 add_custom_command(TARGET unit_tests POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E copy ${ONNXRUNTIME_LIB} $<TARGET_FILE_DIR:unit_tests>
-  WORKING_DIRECTORY "${ORT_LIB_DIR}"
+  COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} $<TARGET_FILE_DIR:unit_tests>
 )
 add_compile_definitions(MODEL_PATH="$<TARGET_FILE_DIR:unit_tests>/test_models/")
 source_group("Sources" FILES ${test_srcs})
