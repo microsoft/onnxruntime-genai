@@ -16,13 +16,19 @@ env:
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/$(ort_zip)"
 
 jobs:
-  job:
-    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Win2022-CPU"]
+  win_cpu_x64:
+    strategy:
+      matrix:
+        additional_steps: [ build_only, with_static_analysis ]
+    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Win2022-CPU" ]
     permissions:
       security-events: write
       actions: read
     steps:
-      - uses: actions/checkout@v2
+      - name: Checkout OnnxRuntime GenAI repo
+        uses: actions/checkout@v4
+        with:
+          submodules: 'true'
 
       - name: Setup Visual Studio 2022
         uses: microsoft/setup-msbuild@v1.1
@@ -43,12 +49,9 @@ jobs:
         run: |
           Rename-Item -Path $env:ort_dir -NewName ort
 
-      - name: Git Submodule Update
-        run: |
-          git submodule update --init --recursive
-
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+      - name: Install additional_steps
+        if: matrix.additional_steps == 'with_static_analysis'
+        uses: github/additional_steps-action/init@v3
         with:
           languages: 'cpp'
 
@@ -58,14 +61,16 @@ jobs:
           cmake --build . --config Release --parallel
 
       - name: Verify Build Artifacts
-        if: always()
+        if: matrix.additional_steps == 'build_only' && always()
         run: |
           Get-ChildItem -Path $env:GITHUB_WORKSPACE\Release -Recurse
 
-      - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+      - name: Perform additional_steps Analysis\
+        if: matrix.additional_steps == 'with_static_analysis'
+        uses: github/additional_steps-action/analyze@v3
 
       - name: Upload Build Artifacts
+        if: matrix.additional_steps == 'with_static_analysis'
         uses: actions/upload-artifact@v3
         with:
           name: onnxruntime-genai-win-cpu-x64
