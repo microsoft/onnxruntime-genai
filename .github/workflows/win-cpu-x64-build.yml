@@ -70,7 +70,7 @@ jobs:
         uses: github/codeql-action/analyze@v3
 
       - name: Upload Build Artifacts
-        if: matrix.additional_steps == 'with_static_analysis'
+        if: matrix.additional_steps == 'build_only'
         uses: actions/upload-artifact@v3
         with:
           name: onnxruntime-genai-win-cpu-x64
