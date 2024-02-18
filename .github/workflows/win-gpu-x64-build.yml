@@ -57,8 +57,8 @@ jobs:
 
       - name: Prepend ${{ env.cuda_dir }}\\v${{ env.cuda_version }} to PATH and Run tests
         run: |
-          echo "${{ env.cuda_dir }}\\v${{ env.cuda_version }};$env:GITHUB_PATH" > $env:GITHUB_PATH
-          echo "Current PATH variable is: $env:GITHUB_PATH"
+          echo "${{ env.cuda_dir }}\\v${{ env.cuda_version }}" >> $GITHUB_PATH
+          echo "Current PATH variable is: $GITHUB_PATH"
           .\build\test\Release\unit_tests.exe
 
       - name: Upload Build Artifacts
