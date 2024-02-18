@@ -56,8 +56,10 @@ jobs:
           Get-ChildItem -Path $env:GITHUB_WORKSPACE\Release -Recurse
           Get-ChildItem -Path $env:GITHUB_WORKSPACE\test\Release -Recurse
 
-      - name: Run tests
+      - name: Prepend PATh and Run tests
         run: |
+          echo "${{ env.cuda_dir }}\\v${{ env.cuda_version }};$GITHUB_PATH" | Out-File -FilePath $GITHUB_PATH -Encoding utf8 -Confirm
+          echo "Current PATH variable is : $GITHUB_PATH"
           .\build\test\Release\unit_tests.exe
 
       - name: Upload Build Artifacts
