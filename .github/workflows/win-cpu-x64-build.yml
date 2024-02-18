@@ -65,7 +65,7 @@ jobs:
         run: |
           Get-ChildItem -Path $env:GITHUB_WORKSPACE\Release -Recurse
 
-      - name: Perform CodeQL Analysis\
+      - name: Perform CodeQL Analysis
         if: matrix.additional_steps == 'with_static_analysis'
         uses: github/codeql-action/analyze@v3
 
