@@ -1,8 +1,8 @@
 {
   "version": 6,
   "include": [
-    "CMakeLinuxX64ConfigPresets.json",
-    "CMakeLinuxArm64ConfigPresets.json"
+    "CMakeLinuxGccConfigPresets.json",
+    "CMakeLinuxClangConfigPresets.json"
   ],
   "buildPresets": [
     {
@@ -100,10 +100,6 @@
     {
       "name": "linux_gcc_cuda_minsizerel",
       "configurePreset": "linux_gcc_cuda_minsizerel"
-    },
-    {
-      "name": "linux_gcc_cpu_arm64_release",
-      "configurePreset": "linux_gcc_cpu_arm64_release"
     }
   ]
 }

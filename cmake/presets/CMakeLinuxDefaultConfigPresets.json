@@ -3,7 +3,7 @@
   "configurePresets": [
     {
       "name": "linux_gcc_default",
-      "architecture": "x64",
+      "generator": "Ninja",
       "cacheVariables": {
         "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
         "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
