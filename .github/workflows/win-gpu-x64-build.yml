@@ -57,7 +57,7 @@ jobs:
 
       - name: Prepend CUDA to PATH and Run tests
         run: |
-          $env:PATH = "${{ env.cuda_dir }}\\v${{ env.cuda_version }};" + $env:PATH 
+          $env:PATH = "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin;" + $env:PATH 
           echo "Current PATH variable is: $env:PATH" 
           .\build\test\Release\unit_tests.exe
 
