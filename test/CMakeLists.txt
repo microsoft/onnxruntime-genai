@@ -40,17 +40,15 @@ else()
   target_include_directories(unit_tests PRIVATE ${TOKENIZER_ROOT})
   target_link_libraries(unit_tests PRIVATE tokenizer)
 endif()
-
-add_custom_command(TARGET unit_tests POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E copy_directory
-  ${CMAKE_CURRENT_SOURCE_DIR}/test_models
-  $<TARGET_FILE_DIR:unit_tests>/test_models
-)
 file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_FILES}")
+set(TEST_MODEL_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/test_models/"  "${CMAKE_SOURCE_DIR}/examples/")
+set(TEST_MODEL_DES_DIR "$<TARGET_FILE_DIR:unit_tests>/test_models/")
 add_custom_command(TARGET unit_tests POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_directory ${TEST_MODEL_SRC_DIR} ${TEST_MODEL_DES_DIR}
   COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} $<TARGET_FILE_DIR:unit_tests>
 )
-add_compile_definitions(MODEL_PATH="$<TARGET_FILE_DIR:unit_tests>/test_models/")
+
+add_compile_definitions(MODEL_PATH="${TEST_MODEL_DES_DIR}")
 source_group("Sources" FILES ${test_srcs})
 set_property(DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT unit_tests)
 include(GoogleTest)
