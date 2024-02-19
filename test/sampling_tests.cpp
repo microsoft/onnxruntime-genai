@@ -9,6 +9,10 @@
 #include <random>
 #include "tests_helper.cuh"
 
+#ifndef MODEL_PATH
+#define MODEL_PATH "../../test/test_models/"
+#endif
+
 TEST(SamplingTests, BatchedSamplingTopP) {
   std::unique_ptr<OrtEnv> g_ort_env;
   Ort::InitApi();

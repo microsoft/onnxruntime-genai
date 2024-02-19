@@ -11,6 +11,10 @@
 #include <chrono>
 #include "tests_helper.cuh"
 
+#ifndef MODEL_PATH
+#define MODEL_PATH "../../test/test_models/"
+#endif
+
 TEST(Benchmarks, BenchmarkRandomizedSamplingTopP) {
   std::unique_ptr<OrtEnv> g_ort_env;
   Ort::InitApi();
