@@ -1316,7 +1316,7 @@ def get_args():
         required=False,
         metavar="KEY=VALUE",
         nargs='+',
-        default=os.path.join(os.path.dirname(os.path.realpath(__file__)), 'cache_dir'),
+        default="",
         help="""
             Key value pairs for various options. Currently support:
                 int4_block_size = 16/32/64/128/256: Specify the block_size for int4 quantization.
