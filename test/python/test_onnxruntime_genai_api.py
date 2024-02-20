@@ -9,11 +9,12 @@ import onnxruntime_genai as og
 import pytest
 
 
-# TODO (baijumeswani) : address crash on cuda og.DeviceType.CUDA
+# FIXME : address crash on cuda og.DeviceType.CUDA
 @pytest.mark.parametrize("device", [og.DeviceType.Auto, og.DeviceType.CPU])
-def test_greedy_search(device, test_data_path):
+@pytest.mark.parametrize("relative_model_path", [Path("hf-internal-testing") / "tiny-random-gpt2-fp32", Path("hf-internal-testing") / "tiny-random-gpt2-fp32"])
+def test_greedy_search(device, test_data_path, relative_model_path):
     model_path = os.fspath(
-        Path(test_data_path) / "hf-internal-testing" / "tiny-random-gpt2-fp32"
+        Path(test_data_path) / relative_model_path
     )
 
     model = og.Model(model_path, device)

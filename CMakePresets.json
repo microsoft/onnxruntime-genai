@@ -615,9 +615,7 @@
                 "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
                 "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
                 "CMAKE_POSITION_INDEPENDENT_CODE": "ON",
-                "USE_CUDA": "OFF",
-                "ENABLE_PYTHON": "ON",
-                "USE_TOKENIZER": "ON"
+                "USE_CUDA": "OFF"
             },
             "environment": {
                 "CC": "gcc",
@@ -1017,9 +1015,7 @@
                 "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
                 "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
                 "CMAKE_POSITION_INDEPENDENT_CODE": "ON",
-                "USE_CUDA": "ON",
-                "ENABLE_PYTHON": "ON",
-                "USE_TOKENIZER": "ON"
+                "USE_CUDA": "ON"
             },
             "environment": {
                 "CC": "gcc",
