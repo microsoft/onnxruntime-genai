@@ -12,7 +12,7 @@ env:
   ort_zip: "onnxruntime-win-x64-gpu-1.17.0.zip"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-win-x64-gpu-1.17.0.zip"
   cuda_dir: "${{ github.workspace }}\\cuda_sdk"
-  cuda_version: "11.8"
+  cuda_version: "12.2"
 
 jobs:
   windows-gpu-x64-build:
@@ -31,18 +31,20 @@ jobs:
       - name: Download cuda
         run: |
           azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v${{ env.cuda_version }}" ${{ env.cuda_dir}}
-
-      - name: Download OnnxRuntime
+      - name: Download Onnxruntime
         run: |
-          Invoke-WebRequest -Uri $env:ort_url -OutFile $env:ort_zip
-
-      - name: Unzip OnnxRuntime
-        run: |
-          Expand-Archive $env:ort_zip -DestinationPath .
-          Remove-Item -Path $env:ort_zip
-      - name: Rename OnnxRuntime to ort
-        run: |
-          Rename-Item -Path $env:ort_dir -NewName ort
+          azcopy.exe cp "https://lotusscus.blob.core.windows.net/models/onnxruntime-gpu/1.17.0/win/ort" ort
+#      - name: Download OnnxRuntime
+#        run: |
+#          Invoke-WebRequest -Uri $env:ort_url -OutFile $env:ort_zip
+#
+#      - name: Unzip OnnxRuntime
+#        run: |
+#          Expand-Archive $env:ort_zip -DestinationPath .
+#          Remove-Item -Path $env:ort_zip
+#      - name: Rename OnnxRuntime to ort
+#        run: |
+#          Rename-Item -Path $env:ort_dir -NewName ort
 
       - name: Build with CMake
         run: |

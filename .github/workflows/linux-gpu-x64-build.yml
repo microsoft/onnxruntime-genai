@@ -17,19 +17,21 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: true
-
-      - name: Download OnnxRuntime
+      - name: Download Onnxruntime
         run: |
-          curl -L -o ${{ env.ort_zip }} ${{ env.ort_url }} 
-
-      - name: Unzip OnnxRuntime
-        run: |
-          tar -xzf ${{ env.ort_zip }}
-          rm ${{ env.ort_zip }}
-
-      - name: Rename OnnxRuntime to ort
-        run: |
-          mv ${{ env.ort_dir }} ort
+          azcopy.exe cp "https://lotusscus.blob.core.windows.net/models/onnxruntime-gpu/1.17.0/linux/ort" ort
+#      - name: Download OnnxRuntime
+#        run: |
+#          curl -L -o ${{ env.ort_zip }} ${{ env.ort_url }}
+#
+#      - name: Unzip OnnxRuntime
+#        run: |
+#          tar -xzf ${{ env.ort_zip }}
+#          rm ${{ env.ort_zip }}
+#
+#      - name: Rename OnnxRuntime to ort
+#        run: |
+#          mv ${{ env.ort_dir }} ort
 
       - name: Download Docker Image
         run: |
