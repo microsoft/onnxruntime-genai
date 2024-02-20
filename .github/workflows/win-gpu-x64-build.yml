@@ -55,7 +55,7 @@ jobs:
 
       - name: Install the python wheel and test dependencies
         run: |
-          for %i in (build\wheel\onnxruntime*.whl) do python -m pip install "%~i"
+          python -m pip pip install (Get-ChildItem ("build\wheel\*.whl"))
           python -m pip install -r test\python\requirements.txt
 
       - name: Run the python tests
