@@ -13,7 +13,8 @@ ENV CUDNN_HOME=/usr/lib/x86_64-linux-gnu/
 ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
 ENV CUDAHOSTCXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
 ADD scripts /tmp/scripts
-RUN cd /tmp/scripts && /tmp/scripts/install_centos.sh && /tmp/scripts/install_deps.sh && rm -rf /tmp/scripts
+RUN cd /tmp/scripts && /tmp/scripts/install_python.sh && /tmp/scripts/install_centos.sh && /tmp/scripts/install_deps.sh && rm -rf /tmp/scripts
+
 
 ARG BUILD_UID=1001
 ARG BUILD_USER=onnxruntimedev
