@@ -20,7 +20,7 @@ Search_Cpu::Search_Cpu(const GeneratorParams& params)
 }
 
 GreedySearch_Cpu::GreedySearch_Cpu(const GeneratorParams& params)
-    : Search_Cpu(params), gen(rd()) {
+    : Search_Cpu(params), gen_(rd_()) {
   next_tokens_buffer_ = AllocateArray<int32_t>(params.batch_size, &next_tokens_);
   memset(next_tokens_.data(), 0, next_tokens_.size_bytes());
 
@@ -170,8 +170,6 @@ void SoftMax(std::span<float> scores, float temperature) {
 }
 
 void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
-  std::vector<int32_t> top_k;
-  top_k.resize(k);
   for (size_t batch_id = 0; batch_id < params_.batch_size; batch_id++) {
     std::span<float> const scores = next_token_scores_.subspan(batch_id * params_.vocab_size, params_.vocab_size);
     SoftMax(scores, temperature);
@@ -181,7 +179,7 @@ void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
     std::partial_sort(indices.begin(), indices.begin() + k, indices.end(), [scores = scores.data()](int i, int j) { return scores[i] > scores[j]; });
     // Sample a token from the top K
     std::discrete_distribution<> dis(scores.begin(), scores.begin() + k);
-    SetNextToken(batch_id, indices[dis(gen)]);
+    SetNextToken(batch_id, indices[dis(gen_)]);
   }
   AppendNextTokensToSequences();
 }
@@ -199,7 +197,7 @@ void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
     std::iota(indices.begin(), indices.end(), 0);
     std::sort(indices.begin(), indices.end(), [scores = scores.data()](int32_t i, int32_t j) { return scores[i] > scores[j]; });
     // Sample a probability threshold
-    float threshold = dis(gen);
+    float threshold = dis(gen_);
     int32_t token = 0;
     // Find the first token where the cumulative probability exceeds the threshold
     for (int i = 0; i < scores.size(); i++) {
@@ -228,7 +226,7 @@ void GreedySearch_Cpu::SampleTopPAndK(float p, int k, float temperature) {
     std::iota(indices.begin(), indices.end(), 0);
     std::partial_sort(indices.begin(), indices.begin() + k, indices.end(), [scores = scores.data()](int i, int j) { return scores[i] > scores[j]; });
     // Sample a probability threshold
-    float threshold = dis(gen);
+    float threshold = dis(gen_);
     int32_t token = indices[k - 1];
     // Find the first token where the cumulative probability exceeds the threshold
     for (int i = 0; i < k; i++) {
