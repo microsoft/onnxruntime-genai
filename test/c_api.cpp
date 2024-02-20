@@ -21,6 +21,12 @@ struct Deleters {
   void operator()(OgaModel* p) {
     OgaDestroyModel(p);
   }
+  void operator()(OgaTokenizer* p) {
+    OgaDestroyTokenizer(p);
+  }
+  void operator()(OgaTokenizerStream* p) {
+    OgaDestroyTokenizerStream(p);
+  }
   void operator()(OgaGeneratorParams* p) {
     OgaDestroyGeneratorParams(p);
   }
@@ -33,6 +39,8 @@ using OgaResultPtr = std::unique_ptr<OgaResult, Deleters>;
 using OgaBufferPtr = std::unique_ptr<OgaBuffer, Deleters>;
 using OgaSequencesPtr = std::unique_ptr<OgaSequences, Deleters>;
 using OgaModelPtr = std::unique_ptr<OgaModel, Deleters>;
+using OgaTokenizerPtr = std::unique_ptr<OgaTokenizer, Deleters>;
+using OgaTokenizerStreamPtr = std::unique_ptr<OgaTokenizerStream, Deleters>;
 using OgaGeneratorParamsPtr = std::unique_ptr<OgaGeneratorParams, Deleters>;
 using OgaGeneratorPtr = std::unique_ptr<OgaGenerator, Deleters>;
 
@@ -42,6 +50,69 @@ void CheckResult(OgaResult* result) {
 
   OgaResultPtr result_ptr{result};
   throw std::runtime_error(OgaResultGetError(result));
+}
+
+TEST(CAPITests, TokenizerCAPI) {
+#if TEST_PHI2
+  OgaModel* model;
+  CheckResult(OgaCreateModel(MODEL_PATH "phi2", OgaDeviceTypeCPU, &model));
+  OgaModelPtr model_ptr{model};
+
+  OgaTokenizer* tokenizer;
+  CheckResult(OgaCreateTokenizer(model, &tokenizer));
+  OgaTokenizerPtr tokenizer_ptr{tokenizer};
+
+  const char* input_strings[] = {
+      "This is a test.",
+      "Rats are awesome pets!",
+      "The quick brown fox jumps over the lazy dog.",
+  };
+
+  OgaSequences* sequences;
+  CheckResult(OgaTokenizerEncodeBatch(tokenizer, input_strings, std::size(input_strings), &sequences));
+  OgaSequencesPtr sequences_ptr{sequences};
+
+  // Decode Batch
+  {
+    const char* const* out_strings;
+    CheckResult(OgaTokenizerDecodeBatch(tokenizer, sequences, &out_strings));
+    for (size_t i = 0; i < OgaSequencesCount(sequences); i++) {
+      std::cout << "Decoded string:" << out_strings[i] << std::endl;
+      if (strcmp(input_strings[i], out_strings[i]) != 0)
+        throw std::runtime_error("Batch Token decoding mismatch");
+    }
+    OgaTokenizerDestroyStrings(out_strings, OgaSequencesCount(sequences));
+  }
+
+  // Decode Single
+  for (size_t i = 0; i < OgaSequencesCount(sequences); i++) {
+    std::span<const int32_t> sequence{OgaSequencesGetSequenceData(sequences, i), OgaSequencesGetSequenceCount(sequences, i)};
+    const char* out_string;
+    CheckResult(OgaTokenizerDecode(tokenizer, sequence.data(), sequence.size(), &out_string));
+    std::cout << "Decoded string:" << out_string << std::endl;
+    if (strcmp(input_strings[i], out_string) != 0)
+      throw std::runtime_error("Token decoding mismatch");
+    OgaDestroyString(out_string);
+  }
+
+  // Stream Decode
+  for (size_t i = 0; i < OgaSequencesCount(sequences); i++) {
+    OgaTokenizerStream* tokenizer_stream;
+    CheckResult(OgaCreateTokenizerStream(tokenizer, &tokenizer_stream));
+    OgaTokenizerStreamPtr tokenizer_stream_ptr{tokenizer_stream};
+
+    std::span<const int32_t> sequence{OgaSequencesGetSequenceData(sequences, i), OgaSequencesGetSequenceCount(sequences, i)};
+    std::string stream_result;
+    for (auto& token : sequence) {
+      const char* chunk;
+      CheckResult(OgaTokenizerStreamDecode(tokenizer_stream, token, &chunk));
+      stream_result += std::string(chunk);
+    }
+    std::cout << "Stream decoded string:" << stream_result << std::endl;
+    if (strcmp(input_strings[i], stream_result.c_str()) != 0)
+      throw std::runtime_error("Stream token decoding mismatch");
+  }
+#endif
 }
 
 TEST(CAPITests, GreedySearchGptFp32CAPI) {
@@ -97,7 +168,7 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
   // Verify outputs match expected outputs
   for (int i = 0; i < batch_size; i++) {
     std::span<const int32_t> sequence{OgaSequencesGetSequenceData(sequences, i), OgaSequencesGetSequenceCount(sequences, i)};
-   
+
     auto* expected_output_start = &expected_output[i * max_length];
     EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), max_length * sizeof(int32_t)));
   }

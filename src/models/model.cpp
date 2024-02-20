@@ -32,6 +32,14 @@ void State::ClearIO() {
 }
 
 #ifdef NO_TOKENIZER
+const std::string& TokenizerStream::Decode(int32_t token) {
+  throw std::runtime_error("Tokenizer not enabled");
+}
+
+std::unique_ptr<TokenizerStream> Tokenizer::CreateStream() const {
+  return std::make_unique<TokenizerStream>();
+}
+
 Tokenizer::Tokenizer(Config& config) {
 }
 
@@ -48,8 +56,17 @@ void CheckResult(tfmError_t error) {
     throw std::runtime_error(TfmGetLastErrorMessage());
 }
 
+const std::string& TokenizerStream::Decode(int32_t token) {
+  chunk_ = tokenizer_.Decode({&token, 1});
+  return chunk_;
+}
+
 Tokenizer::Tokenizer(Config& config) {
   CheckResult(TfmCreateTokenizer(tokenizer_.Address(), reinterpret_cast<const char*>(config.config_path.u8string().c_str())));
+}
+
+std::unique_ptr<TokenizerStream> Tokenizer::CreateStream() const {
+  return std::make_unique<TokenizerStream>(*this);
 }
 
 std::vector<int32_t> Tokenizer::Encode(const char* text) const {
@@ -62,7 +79,7 @@ std::vector<int32_t> Tokenizer::Encode(const char* text) const {
   return {tokens, tokens + count};
 }
 
-std::string Tokenizer::Decode(std::span<int32_t> tokens) const {
+std::string Tokenizer::Decode(std::span<const int32_t> tokens) const {
   TfmPtr<TfmStringArray> tfm_string_array;
   CheckResult(TfmDetokenize1D(tokenizer_, reinterpret_cast<const uint32_t*>(tokens.data()), tokens.size(), tfm_string_array.Address()));
 
