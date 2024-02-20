@@ -2,7 +2,7 @@
 # Licensed under the MIT License.
 
 # This file is used by Zip-Nuget Packaging NoContribOps Pipeline,Zip-Nuget-Java Packaging Pipeline
-ARG BASEIMAGE=nvidia/cuda:12.2.2-cudnn8-devel-ubi8
+ARG BASEIMAGE=nvidia/cuda:11.8.0-cudnn8-devel-ubi8
 FROM $BASEIMAGE
 
 ENV PATH="/usr/local/cuda/binet:/opt/rh/gcc-toolset-12/root/usr/bin:${PATH}"
