@@ -12,13 +12,12 @@
 // Our working directory is generators/build so one up puts us in the root directory:
 #define MODEL_PATH "../../test/test_models/"
 
+extern std::unique_ptr<OrtEnv> g_ort_env;
+
 #if USE_CUDA
 #include "tests_helper.cuh"
 
 TEST(Benchmarks, BenchmarkRandomizedSamplingTopP) {
-  std::unique_ptr<OrtEnv> g_ort_env;
-  Ort::InitApi();
-  g_ort_env = OrtEnv::Create();
   auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   int vocab_size = 32000;  // vocab size of llama
   int batch_size = 1;
@@ -62,9 +61,6 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopP) {
 }
 
 TEST(Benchmarks, BenchmarkRandomizedSamplingTopK) {
-  std::unique_ptr<OrtEnv> g_ort_env;
-  Ort::InitApi();
-  g_ort_env = OrtEnv::Create();
   auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   int vocab_size = 32000;  // vocab size of llama
   int batch_size = 1;
@@ -109,9 +105,6 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopK) {
 }
 
 TEST(Benchmarks, BenchmarkRandomizedSamplingTopPAndK) {
-  std::unique_ptr<OrtEnv> g_ort_env;
-  Ort::InitApi();
-  g_ort_env = OrtEnv::Create();
   auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   int vocab_size = 32000;  // vocab size of llama
   int batch_size = 1;

@@ -11,13 +11,12 @@
 // Our working directory is generators/build so one up puts us in the root directory:
 #define MODEL_PATH "../../test/test_models/"
 
+extern std::unique_ptr<OrtEnv> g_ort_env;
+
 #if USE_CUDA
 #include "tests_helper.cuh"
 
 TEST(SamplingTests, BatchedSamplingTopP) {
-  std::unique_ptr<OrtEnv> g_ort_env;
-  Ort::InitApi();
-  g_ort_env = OrtEnv::Create();
   auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   std::vector<int32_t> input_ids{0, 1, 2, 3};
   std::vector<int32_t> expected_output{1, 2, 3, 4};
@@ -47,9 +46,6 @@ TEST(SamplingTests, BatchedSamplingTopP) {
 }
 
 TEST(SamplingTests, BatchedSamplingTopK) {
-  std::unique_ptr<OrtEnv> g_ort_env;
-  Ort::InitApi();
-  g_ort_env = OrtEnv::Create();
   auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   std::vector<int32_t> input_ids{0, 1, 2, 3};
   std::vector<float> logits_cpu{2.0f, 1.5f, 1.25f, 0.25f, 0.25f,
@@ -82,9 +78,6 @@ TEST(SamplingTests, BatchedSamplingTopK) {
 }
 
 TEST(SamplingTests, BatchedSamplingTopPAndK) {
-  std::unique_ptr<OrtEnv> g_ort_env;
-  Ort::InitApi();
-  g_ort_env = OrtEnv::Create();
   auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   std::vector<int32_t> input_ids{0, 1, 2, 3};
   std::vector<float> logits_cpu{2.0f, 1.5f, 1.25f, 0.25f, 0.25f,
@@ -118,9 +111,6 @@ TEST(SamplingTests, BatchedSamplingTopPAndK) {
 }
 
 TEST(SamplingTests, RandomizedSamplingTopP) {
-  std::unique_ptr<OrtEnv> g_ort_env;
-  Ort::InitApi();
-  g_ort_env = OrtEnv::Create();
   auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   int vocab_size = 32000;  // vocab size of llama
   int batch_size = 5;
@@ -161,9 +151,6 @@ TEST(SamplingTests, RandomizedSamplingTopP) {
 }
 
 TEST(SamplingTests, RandomizedSamplingTopK) {
-  std::unique_ptr<OrtEnv> g_ort_env;
-  Ort::InitApi();
-  g_ort_env = OrtEnv::Create();
   auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   int vocab_size = 32000;  // vocab size of llama
   int batch_size = 5;
@@ -204,9 +191,6 @@ TEST(SamplingTests, RandomizedSamplingTopK) {
 }
 
 TEST(SamplingTests, RandomizedSamplingTopPAndK) {
-  std::unique_ptr<OrtEnv> g_ort_env;
-  Ort::InitApi();
-  g_ort_env = OrtEnv::Create();
   auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   int vocab_size = 32000;  // vocab size of llama
   int batch_size = 5;
