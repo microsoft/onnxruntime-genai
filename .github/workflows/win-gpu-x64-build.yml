@@ -8,7 +8,7 @@ concurrency:
 env:
   AZCOPY_AUTO_LOGIN_TYPE: MSI
   AZCOPY_MSI_CLIENT_ID: 63b63039-6328-442f-954b-5a64d124e5b4
-  ort_dir: "onnxruntime-win-x64-cuda12-1.17.0"
+  ort_dir: "onnxruntime-win-x64-cuda-1.17.0"
   ort_zip: "onnxruntime-win-x64-cuda12-1.17.0.zip"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-win-x64-cuda12-1.17.0.zip"
   cuda_dir: "${{ github.workspace }}\\cuda_sdk"
