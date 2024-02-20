@@ -6,9 +6,12 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  ort_dir: "onnxruntime-linux-x64-cuda-1.17.0"
-  ort_zip: "onnxruntime-linux-x64-cuda12-1.17.0.tgz"
-  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-linux-x64-cuda12-1.17.0.tgz"
+  ort_dir: "onnxruntime-linux-x64-gpu-1.17.0"
+  ort_zip: "onnxruntime-linux-x64-gpu-1.17.0.tgz"
+  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-linux-x64-gpu-1.17.0.tgz"
+#  ort_dir: "onnxruntime-linux-x64-cuda-1.17.0"
+#  ort_zip: "onnxruntime-linux-x64-cuda12-1.17.0.tgz"
+#  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-linux-x64-cuda12-1.17.0.tgz"
 jobs:
   linux-gpu-x64-build:
     runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2004-T4" ]
