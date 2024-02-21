@@ -158,9 +158,9 @@ void BeamSearch_Cuda::SelectTop() {
 }
 
 void GreedySearch_Cuda::SelectTop() {
-  auto next_token_scores = next_token_scores_.data();
-  cuda::Launch_ArgMax(argmaxdata_, next_tokens_.data(), next_token_scores, params_.batch_size, params_.vocab_size, params_.cuda_stream);
-
+  std::span<float> scores = next_token_scores_.subspan(0, params_.batch_size * params_.vocab_size);
+  cuda::GetSample(samplingdata_.get(), params_.cuda_stream, next_tokens_.data(), scores.data(), int(scores.size() / params_.batch_size),
+                  params_.batch_size, 1, 0.0, 1.0);
   CheckForEOS();
   AppendNextTokensToSequences();
 }

@@ -553,13 +553,13 @@ void GetTopKSubset(SamplingData* data, cudaStream_t stream, float* scores_in, fl
   std::span<float> scores_softmaxed{data->scores_softmaxed.get(), static_cast<size_t>(vocab_size * batch_size)};
   DispatchBlockwiseSoftmaxForward<false>(&stream, scores_softmaxed.data(), const_cast<const float*>(scores_in), vocab_size, vocab_size, vocab_size, batch_size, temperature);
   // Get top k subset
-  #define GetTopK(max_k)                       \
+  #define GetTopK(max_k)                              \
   LaunchGetTopKSubset<max_k>(stream,                  \
                              scores_softmaxed.data(), \
-                             scores_out,       \
-                             indices_out,      \
-                             vocab_size,       \
-                             batch_size,       \
+                             scores_out,              \
+                             indices_out,             \
+                             vocab_size,              \
+                             batch_size,              \
                              k)
 
   if (k <= 4) {
