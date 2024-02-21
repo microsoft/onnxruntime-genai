@@ -10,6 +10,7 @@ ENV LANG=en_US.UTF-8
 ENV LC_ALL=en_US.UTF-8
 ENV CUDA_HOME=/usr/local/cuda-11.8
 ENV CUDA_PATH=/usr/local/cuda-11.8
+ENV CUDA_BIN_PATH=/usr/local/cuda-11.8
 ENV CUDNN_HOME=/usr/local/cuda-11.8
 ENV LD_LIBRARY_PATH="/usr/local/cuda-11.8/lib64:${LD_LIBRARY_PATH}"
 ENV CUDAHOSTCXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
