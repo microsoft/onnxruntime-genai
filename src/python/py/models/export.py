@@ -1,3 +1,8 @@
+# -------------------------------------------------------------------------
+# Copyright (c) Microsoft Corporation.  All rights reserved.
+# Licensed under the MIT License.  See License.txt in the project root for
+# license information.
+# --------------------------------------------------------------------------
 """
 Run this script to create the desired ONNX model.
 """
@@ -12,6 +17,7 @@ import argparse
 import gc
 import json
 import os
+import textwrap
 
 class Model:
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -33,7 +39,7 @@ class Model:
         self.ep = ep
 
         self.cache_dir = cache_dir
-        self.decoder_filename = extra_options["decoder_filename"] if "decoder_filename" in extra_options else "decoder_model.onnx"
+        self.filename = extra_options["filename"] if "filename" in extra_options else "model.onnx"
         self.extra_options = extra_options
         
         self.inputs = []
@@ -123,7 +129,7 @@ class Model:
             "model": {
                 "bos_token_id": config.bos_token_id,
                 "context_length": self.context_length,
-                "decoder": self.decoder_filename,
+                "decoder": self.filename,
                 "eos_token_id": config.eos_token_id,
                 "head_size": self.head_size,
                 "hidden_size": self.hidden_size,
@@ -199,7 +205,7 @@ class Model:
             model = self.to_int4(model)
 
         # Save ONNX model with only one external data file and delete any existing duplicate copies
-        out_path = os.path.join(os.path.dirname(out_dir), self.decoder_filename)
+        out_path = os.path.join(os.path.dirname(out_dir), self.filename)
         data_path = os.path.join(os.path.dirname(out_dir), os.path.basename(out_path) + ".data")
         if os.path.exists(out_path):
             print(f"Overwriting {out_path}")
@@ -1313,36 +1319,38 @@ def parse_extra_options(kv_items):
     return kv_pairs
 
 
-def create_model(args):
-    os.makedirs(args.cache_dir, exist_ok=True)
-    extra_kwargs = {} if os.path.exists(args.model_name_or_path) else {"cache_dir": args.cache_dir, "use_auth_token": True}
-    config = AutoConfig.from_pretrained(args.model_name_or_path, **extra_kwargs)
+def create_model(model_name_or_path, output_dir, precision, execution_provider, cache_dir, **extra_options):
+    os.makedirs(cache_dir, exist_ok=True)
+    extra_kwargs = {} if os.path.exists(model_name_or_path) else {"cache_dir": cache_dir, "use_auth_token": True}
+    config = AutoConfig.from_pretrained(model_name_or_path, **extra_kwargs)
 
-    extra_options = parse_extra_options(args.extra_options)
+    # Set input/output precision of ONNX model
+    io_dtype = TensorProto.FLOAT if precision in {"int8", "fp32"} or (precision == "int4" and execution_provider == "cpu") else TensorProto.FLOAT16
+
     if config.architectures[0] == "LlamaForCausalLM":
-        onnx_model = LlamaModel(config, args.io_dtype, args.precision, args.execution_provider, args.cache_dir, extra_options)
+        onnx_model = LlamaModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "MistralForCausalLM":
-        onnx_model = MistralModel(config, args.io_dtype, args.precision, args.execution_provider, args.cache_dir, extra_options)
+        onnx_model = MistralModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "PhiForCausalLM":
-        onnx_model = PhiModel(config, args.io_dtype, args.precision, args.execution_provider, args.cache_dir, extra_options)
+        onnx_model = PhiModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
     else:
-        raise NotImplementedError(f"The {args.model_name_or_path} model is not currently supported.")
+        raise NotImplementedError(f"The {model_name_or_path} model is not currently supported.")
 
     # Make ONNX model
     onnx_model.make_model()
 
     # Save ONNX model
-    onnx_model.save_model(args.output)
+    onnx_model.save_model(output_dir)
 
     # Make GenAI config
-    onnx_model.make_genai_config(args.model_name_or_path, extra_kwargs, args.output)
+    onnx_model.make_genai_config(model_name_or_path, extra_kwargs, output_dir)
 
     # Copy Hugging Face processing files to output folder
-    onnx_model.save_processing(args.model_name_or_path, extra_kwargs, args.output)
+    onnx_model.save_processing(model_name_or_path, extra_kwargs, output_dir)
 
 
 def get_args():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(formatter_class=argparse.RawTextHelpFormatter)
 
     parser.add_argument(
         "-m",
@@ -1388,31 +1396,27 @@ def get_args():
         required=False,
         metavar="KEY=VALUE",
         nargs='+',
-        help="""
+        help=textwrap.dedent("""\
             Key value pairs for various options. Currently supports:
                 int4_block_size = 16/32/64/128/256: Specify the block_size for int4 quantization.
                 int4_accuracy_level = 1/2/3/4: Specify the minimum accuracy level for activation of MatMul in int4 quantization.
-                                          4 is int8, which means input A of int4 quantized MatMul is quantized to int8 and input B is upcasted to int8 for computation.
-                                          1 is fp32, 2 is fp16, and 3 is bf16.
-                num_hidden_layers = manually specify the number of layers in your ONNX model (for unit testing purposes)
-                token_dtype = int32 (default) or int64: Specify the dtype of the tokenized output
-                decoder_filename = filename for decoder-only model or decoder component of model (default is 'decoder_model.onnx')
-            """,
+                    4 is int8, which means input A of int4 quantized MatMul is quantized to int8 and input B is upcasted to int8 for computation.
+                    3 is bf16.
+                    2 is fp16.
+                    1 is fp32.
+                num_hidden_layers = Manually specify the number of layers in your ONNX model (for unit testing purposes).
+                token_dtype = 'int32' (default) or 'int64': Specify the dtype of the tokenized outputs that the model receives.
+                filename = Filename for ONNX model (default is 'model.onnx').
+                    For models with multiple components, each component is exported to its own ONNX model.
+                    The filename for each component will be '<filename>_<component-name>.onnx' (ex: '<filename>_encoder.onnx', '<filename>_decoder.onnx').
+            """),
     )
 
     args = parser.parse_args()
-
     print("Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, INT4 CPU, INT4 CUDA")
-
-    # Set input/output precision of ONNX model
-    if args.precision in {"int8", "fp32"} or (args.precision == "int4" and args.execution_provider == "cpu"):
-        io_dtype = TensorProto.FLOAT
-    else:
-        io_dtype = TensorProto.FLOAT16
-    setattr(args, "io_dtype", io_dtype)
-    
     return args
 
 if __name__ == '__main__':
     args = get_args()
-    create_model(args)
+    extra_options = parse_extra_options(args.extra_options)
+    create_model(args.model_name_or_path, args.output, args.precision, args.execution_provider, args.cache_dir, **extra_options)
