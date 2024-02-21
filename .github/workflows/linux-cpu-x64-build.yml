@@ -39,6 +39,16 @@ jobs:
           cmake --preset linux_${{ matrix.compiler }}_cpu_release
           cmake --build --preset linux_${{ matrix.compiler }}_cpu_release
 
+      # TODO: Reenable tests once permission denied error goes away.
+      # - name: Install the python wheel and test dependencies
+      #   run: |
+      #     python3 -m pip install build/clang_cpu/release/wheel/onnxruntime_genai*.whl
+      #     python3 -m pip install -r test/python/requirements.txt
+
+      # - name: Run the python tests
+      #   run: |
+      #     python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models
+
       - name: Verify Build Artifacts
         if: always()
         continue-on-error: true

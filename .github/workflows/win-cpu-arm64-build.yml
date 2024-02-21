@@ -49,6 +49,15 @@ jobs:
           cmake -G "Visual Studio 17 2022" -A arm64 -S . -B build -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=OFF
           cmake --build build --config Release --parallel
 
+      - name: Install the python wheel and test dependencies
+        run: |
+          python -m pip install (Get-ChildItem ("wheel\*.whl"))
+          python -m pip install -r test\python\requirements.txt
+
+      - name: Run the python tests
+        run: |
+          python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\test_models"
+
       - name: Verify Build Artifacts
         if: always()
         continue-on-error: true

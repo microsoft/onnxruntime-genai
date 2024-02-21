@@ -88,9 +88,6 @@ struct Model {
   cudaStream_t cuda_stream_{};
   DeviceType device_type_{DeviceType::CPU};
   Ort::Allocator& allocator_cpu_{Ort::Allocator::GetWithDefaultOptions()};
-
-  std::unique_ptr<OrtMemoryInfo> memory_info_cuda_;
-  std::unique_ptr<Ort::Allocator> allocator_cuda_;
   Ort::Allocator* allocator_device_{};  // Can be CUDA or CPU based on the DeviceType in the model
 
  protected:
