@@ -9,10 +9,7 @@ import onnxruntime_genai as og
 import pytest
 
 
-# FIXME: CUDA device does not work on the CI pipeline because the pipeline uses different cuda versions for
-# onnxruntime-genai and onnxruntime. This introduces incompatibility.
-# @pytest.mark.parametrize("device", [og.DeviceType.CPU, og.DeviceType.CUDA] if og.is_cuda_available() else [og.DeviceType.CPU])
-@pytest.mark.parametrize("device", [og.DeviceType.CPU])
+@pytest.mark.parametrize("device", [og.DeviceType.CPU, og.DeviceType.CUDA] if og.is_cuda_available() else [og.DeviceType.CPU])
 @pytest.mark.parametrize("relative_model_path", [Path("hf-internal-testing") / "tiny-random-gpt2-fp32", Path("hf-internal-testing") / "tiny-random-gpt2-fp32"])
 def test_greedy_search(device, test_data_path, relative_model_path):
     model_path = os.fspath(
