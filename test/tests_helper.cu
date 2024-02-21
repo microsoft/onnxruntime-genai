@@ -6,7 +6,7 @@
 #include <cuda_runtime.h>
 #include <curand.h>
 #include <curand_kernel.h>
-#include <span>
+#include "span.h"
 
 // TODO: namespaces?
 // This is not really geometric decay anymore
