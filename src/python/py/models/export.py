@@ -1,36 +1,39 @@
 """
 Run this script to create the desired ONNX model.
-Example usage:
-python export.py -m model_name_or_path -o model.onnx -p precision -e execution_provider
 """
 
 from onnx import helper, numpy_helper, TensorProto, external_data_helper, save_model
 from onnxruntime.quantization.matmul_4bits_quantizer import MatMul4BitsQuantizer
-from transformers import AutoConfig, AutoModelForCausalLM
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 import numpy as np
 import torch
 
 import argparse
 import gc
+import json
 import os
 
 class Model:
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        self.context_length = config.max_position_embeddings
         self.intermediate_size = config.intermediate_size
         self.hidden_size = config.hidden_size
         self.num_kv_heads = config.num_key_value_heads
         self.num_attn_heads = config.num_attention_heads
         self.head_size = config.hidden_size // config.num_attention_heads
-        self.num_layers = config.num_hidden_layers
+        self.num_layers = int(extra_options["num_hidden_layers"]) if "num_hidden_layers" in extra_options else config.num_hidden_layers
         self.vocab_size = config.vocab_size
         self.activation = config.hidden_act
 
         self.model_name_or_path = config._name_or_path
         self.model_type = config.architectures[0]
+        self.token_dtype = TensorProto.INT64 if "token_dtype" in extra_options else TensorProto.INT32
         self.io_dtype = io_dtype      # {'fp16', 'fp32'}
         self.onnx_dtype = onnx_dtype  # {"int4", "fp16", "fp32"}
         self.ep = ep
+
         self.cache_dir = cache_dir
+        self.decoder_filename = extra_options["decoder_filename"] if "decoder_filename" in extra_options else "decoder_model.onnx"
         self.extra_options = extra_options
         
         self.inputs = []
@@ -60,11 +63,11 @@ class Model:
 
         # Map TensorProto dtypes to string dtypes
         self.to_str_dtype = {
-            TensorProto.INT8: "TensorProto.INT8",
-            TensorProto.INT32: "TensorProto.INT32",
-            TensorProto.INT64: "TensorProto.INT64",
-            TensorProto.FLOAT16: "TensorProto.FLOAT16",
-            TensorProto.FLOAT: "TensorProto.FLOAT",
+            TensorProto.INT8: "int8",
+            TensorProto.INT32: "int32",
+            TensorProto.INT64: "int64",
+            TensorProto.FLOAT16: "float16",
+            TensorProto.FLOAT: "float32",
         }
         
         # Mask-specific variables
@@ -108,8 +111,58 @@ class Model:
             }
         }
 
-    def save(self, out_path):
-        print("Saving ONNX model")
+    def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
+        config = GenerationConfig.from_pretrained(model_name_or_path, **extra_kwargs)
+        hf_default_search_values = {
+            "max_length": 20,
+            "pad_token_id": None,
+            "top_k": 50,
+        }
+
+        genai_config = {
+            "model": {
+                "bos_token_id": config.bos_token_id,
+                "context_length": self.context_length,
+                "decoder": self.decoder_filename,
+                "eos_token_id": config.eos_token_id,
+                "head_size": self.head_size,
+                "hidden_size": self.hidden_size,
+                "logits_type": self.to_str_dtype[self.io_dtype],
+                "kv_type": self.to_str_dtype[self.io_dtype],
+                "num_attention_heads": self.num_attn_heads,
+                "num_hidden_layers": self.num_layers,
+                "num_key_value_heads": self.num_kv_heads,
+                "pad_token_id": config.pad_token_id if hasattr(config, "pad_token_id") and config.pad_token_id != hf_default_search_values["pad_token_id"] else config.eos_token_id,
+                "type": self.model_type[ : self.model_type.find("For")].lower(),
+                "vocab_size": self.vocab_size,
+            },
+            "search": {
+                "diversity_penalty": config.diversity_penalty if hasattr(config, "diversity_penalty") else 0.0,
+                "length_penalty": config.length_penalty if hasattr(config, "length_penalty") else 1.0,
+                "max_length": config.max_length if hasattr(config, "max_length") and config.max_length != hf_default_search_values["max_length"] else self.context_length,
+                "min_length": 0,
+                "no_repeat_ngram_size": config.no_repeat_ngram_size if hasattr(config, "no_repeat_ngram_size") else 0,
+                "num_beams": config.num_beams if hasattr(config, "num_beams") else 1,
+                "num_return_sequences": config.num_return_sequences if hasattr(config, "num_return_sequences") else 1,
+                "repetition_penalty": config.repetition_penalty if hasattr(config, "repetition_penalty") else 1.0,
+                "temperature": config.temperature if hasattr(config, "temperature") else 1.0,
+                "top_k": config.top_k if hasattr(config, "top_k") and config.top_k != hf_default_search_values["top_k"] else 0,
+                "top_p": config.top_p if hasattr(config, "top_p") else 1.0,
+            },
+        }
+
+        print(f"Saving GenAI config in {out_dir}")
+        with open(os.path.join(os.path.dirname(out_dir),"genai_config.json"), "w") as f:
+            json.dump(genai_config, f, indent=4)
+
+    def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
+        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, **extra_kwargs)
+        dest_dir = os.path.dirname(out_dir)
+        print(f"Saving processing files in {dest_dir} for GenAI")
+        tokenizer.save_pretrained(dest_dir)
+
+    def save_model(self, out_dir):
+        print(f"Saving ONNX model in {out_dir}")
         gc.collect()
 
         # Create ONNX model
@@ -136,24 +189,35 @@ class Model:
             if path.endswith(".bin"):
                 os.remove(os.path.join(self.cache_dir, path))
 
+        # Delete temporary cache dir if empty
+        if len(os.listdir(self.cache_dir)) == 0:
+            os.rmdir(self.cache_dir)
+
         # Quantize ONNX model to desired precision
         # TODO: Replace by quantizing the MatMuls as they are created
         if self.onnx_dtype == "int4":
-            model = self.to_int4(model, out_path)
+            model = self.to_int4(model)
 
-        # Save ONNX model with only one external data file
-        data_path = os.path.basename(out_path) + ".data"
+        # Save ONNX model with only one external data file and delete any existing duplicate copies
+        out_path = os.path.join(os.path.dirname(out_dir), self.decoder_filename)
+        data_path = os.path.join(os.path.dirname(out_dir), os.path.basename(out_path) + ".data")
+        if os.path.exists(out_path):
+            print(f"Overwriting {out_path}")
+            os.remove(out_path)
+        if os.path.exists(data_path):
+            print(f"Overwriting {data_path}")
+            os.remove(data_path)
         save_model(
             model,
             out_path,
             save_as_external_data=True,
             all_tensors_to_one_file=True,
-            location=data_path,
+            location=os.path.basename(data_path),
             size_threshold=0,
             convert_attribute=False,
         )
 
-    def to_int4(self, model, out_path):
+    def to_int4(self, model):
         quant = MatMul4BitsQuantizer(
             model=model,
             block_size=self.quant_attrs["int4"]["block_size"],
@@ -212,7 +276,7 @@ class Model:
         inputs = []
         for name in self.model_inputs:
             shape = self.input_shapes[name]
-            inputs.append(helper.make_tensor_value_info(name, TensorProto.INT64, shape=shape))
+            inputs.append(helper.make_tensor_value_info(name, self.token_dtype, shape=shape))
 
         # Add model-specific outputs to list of model outputs
         outputs = [
@@ -697,7 +761,7 @@ class Model:
         self.make_attention_mask_reformatting()
 
         # Load PyTorch model
-        extra_kwargs = {} if os.path.exists(self.model_name_or_path) else {"cache_dir": self.cache_dir, "use_auth_token": True}
+        extra_kwargs = {} if os.path.exists(self.model_name_or_path) else {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {"cache_dir": self.cache_dir, "use_auth_token": True}
         model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, **extra_kwargs)
         
         # Loop through PyTorch model and map each nn.Module to ONNX/ORT ops
@@ -1028,6 +1092,7 @@ class Model:
 
         return expand_name
 
+
 class LlamaModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
@@ -1243,11 +1308,13 @@ def parse_extra_options(kv_items):
         for kv_str in kv_items:
             kv = kv_str.split('=')
             kv_pairs[kv[0].strip()] = kv[1].strip()
-    print(kv_pairs)
+
+    print(f"Extra options: {kv_pairs}")
     return kv_pairs
 
 
 def create_model(args):
+    os.makedirs(args.cache_dir, exist_ok=True)
     extra_kwargs = {} if os.path.exists(args.model_name_or_path) else {"cache_dir": args.cache_dir, "use_auth_token": True}
     config = AutoConfig.from_pretrained(args.model_name_or_path, **extra_kwargs)
 
@@ -1265,7 +1332,13 @@ def create_model(args):
     onnx_model.make_model()
 
     # Save ONNX model
-    onnx_model.save(args.output)
+    onnx_model.save_model(args.output)
+
+    # Make GenAI config
+    onnx_model.make_genai_config(args.model_name_or_path, extra_kwargs, args.output)
+
+    # Copy Hugging Face processing files to output folder
+    onnx_model.save_processing(args.model_name_or_path, extra_kwargs, args.output)
 
 
 def get_args():
@@ -1282,8 +1355,7 @@ def get_args():
         "-o",
         "--output",
         required=True,
-        default=os.path.join(".", "model.onnx"),
-        help="Path to ONNX model (with external data files saved in the same folder as the model)",
+        help="Path to folder containing ONNX model and additional files (e.g. GenAI config, external data files, etc.)",
     )
 
     parser.add_argument(
@@ -1316,13 +1388,15 @@ def get_args():
         required=False,
         metavar="KEY=VALUE",
         nargs='+',
-        default="",
         help="""
-            Key value pairs for various options. Currently support:
+            Key value pairs for various options. Currently supports:
                 int4_block_size = 16/32/64/128/256: Specify the block_size for int4 quantization.
-                int4_accuracy_level = 1/2/3/4: Specify the minimum accuracy level for activation of matmul in int4 quantization.
-                                          4 is int8, which means input A of int4 quantized matmul is quantized to int8 and input B is upcasted to int8 for computation.
+                int4_accuracy_level = 1/2/3/4: Specify the minimum accuracy level for activation of MatMul in int4 quantization.
+                                          4 is int8, which means input A of int4 quantized MatMul is quantized to int8 and input B is upcasted to int8 for computation.
                                           1 is fp32, 2 is fp16, and 3 is bf16.
+                num_hidden_layers = manually specify the number of layers in your ONNX model (for unit testing purposes)
+                token_dtype = int32 (default) or int64: Specify the dtype of the tokenized output
+                decoder_filename = filename for decoder-only model or decoder component of model (default is 'decoder_model.onnx')
             """,
     )
 
