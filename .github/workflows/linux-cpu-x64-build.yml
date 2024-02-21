@@ -49,11 +49,13 @@ jobs:
 
       - name: Install the python wheel and test dependencies
         run: |
+          cd onnxruntime-genai
           python3 -m pip install build/gcc_cpu/release/wheel/onnxruntime_genai*.whl
           python3 -m pip install -r test/python/requirements.txt
 
       - name: Run the python tests
         run: |
+          cd onnxruntime-genai
           python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models
 
       - name: Verify Build Artifacts

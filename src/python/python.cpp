@@ -279,7 +279,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   m.attr("__version__") = "dev";
 #endif
 
-  m.def("is_cuda_package", []() {
+  m.def("is_cuda_available", []() {
 #ifdef USE_CUDA
     return true;
 #else
