@@ -11,5 +11,6 @@ try:
     from onnxruntime_genai.@TARGET_NAME@ import *
 except ImportError:
     _dll_directory.add_dll_directory()
+    from onnxruntime_genai.@TARGET_NAME@ import *
 
-from onnxruntime_genai.@TARGET_NAME@ import *
+__version__ = "@VERSION_INFO@"

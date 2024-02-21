@@ -8,9 +8,6 @@
 
 using namespace pybind11::literals;
 
-#define STRINGIFY(x) #x
-#define MACRO_STRINGIFY(x) STRINGIFY(x)
-
 struct float16 {
   uint16_t v_;
   float AsFloat32() const { return Generators::Float16ToFloat32(v_); }
@@ -272,12 +269,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("generate_next_token_top_k_top_p", &PyGenerator::GenerateNextToken_TopK_TopP)
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
       .def("get_sequence", &PyGenerator::GetSequence);
-
-#ifdef VERSION_INFO
-  m.attr("__version__") = MACRO_STRINGIFY(VERSION_INFO);
-#else
-  m.attr("__version__") = "dev";
-#endif
 
   m.def("is_cuda_available", []() {
 #ifdef USE_CUDA
