@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <package >
   <metadata>
-    <id>Microsoft.ML.OnnxRuntimeGenAI</id>
-    <version>1.0.0</version>
+    <!-- id can be either Microsoft.ML.OnnxRuntimeGenAI or Microsoft.ML.OnnxRuntimeGenAI.Gpu -->
+    <!-- depending on the type of build -->
+    <id>$id$</id>
+    <version>$version$</version>
     <authors>Microsoft</authors>
     <owners>Microsoft</owners>
     <description>ONNX Runtime Generative AI Native Package</description>
@@ -14,13 +16,13 @@
     <tags>ONNX;ONNX Runtime;ONNX Runtime Gen AI;Machine Learning</tags>
     <dependencies>
       <group targetFramework="NETSTANDARD" >
-        <dependency id="Microsoft.ML.OnnxRuntimeGenAI.Managed" version="1.0.0" />
+        <dependency id="Microsoft.ML.OnnxRuntimeGenAI.Managed" version="$version$" />
       </group>
       <group targetFramework="NETCOREAPP" >
-        <dependency id="Microsoft.ML.OnnxRuntimeGenAI.Managed" version="1.0.0" />
+        <dependency id="Microsoft.ML.OnnxRuntimeGenAI.Managed" version="$version$" />
       </group>
       <group targetFramework="NETFRAMEWORK" >
-        <dependency id="Microsoft.ML.OnnxRuntimeGenAI.Managed" version="1.0.0" />
+        <dependency id="Microsoft.ML.OnnxRuntimeGenAI.Managed" version="$version$" />
       </group>
     </dependencies>
   </metadata>
@@ -33,16 +35,16 @@
     <file src="..\win-x64\RelWithDebInfo\onnxruntime-genai.dll" target="runtimes\win-x64\native" />
 
     <!-- Windows arm64 -->
-    <file src="..\win-arm64\RelWithDebInfo\onnxruntime-genai.lib" target="runtimes\win-arm64\native" />
-    <file src="..\win-arm64\RelWithDebInfo\onnxruntime-genai.dll" target="runtimes\win-arm64\native" />
+    <!-- <file src="..\win-arm64\RelWithDebInfo\onnxruntime-genai.lib" target="runtimes\win-arm64\native" />
+    <file src="..\win-arm64\RelWithDebInfo\onnxruntime-genai.dll" target="runtimes\win-arm64\native" /> -->
 
     <!-- Targets -->
-    <file src="targets\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\netstandard2.1" />
-    <file src="targets\Microsoft.ML.OnnxRuntimeGenAI.props" target="build\netstandard2.1" />
+    <file src="targets\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\netstandard2.1\$id$.targets" />
+    <file src="targets\Microsoft.ML.OnnxRuntimeGenAI.props" target="build\netstandard2.1\$id$.props" />
 
     <!-- Includes -->
     <file src="..\src\ort_genai_c.h" target="build\native\include" />
-    <file src="targets\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\native" />
-    <file src="targets\Microsoft.ML.OnnxRuntimeGenAI.props" target="build\native" />
+    <file src="targets\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\native\$id$.targets" />
+    <file src="targets\Microsoft.ML.OnnxRuntimeGenAI.props" target="build\native\$id$.props" />
   </files>
 </package>

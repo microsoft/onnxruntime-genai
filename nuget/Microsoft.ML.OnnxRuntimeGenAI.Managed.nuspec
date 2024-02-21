@@ -2,7 +2,7 @@
 <package >
   <metadata>
     <id>Microsoft.ML.OnnxRuntimeGenAI.Managed</id>
-    <version>1.0.0</version>
+    <version>$version$</version>
     <authors>Microsoft</authors>
     <owners>Microsoft</owners>
     <description>ONNX Runtime Generative AI Managed Package</description>
