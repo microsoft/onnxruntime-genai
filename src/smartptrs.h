@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 #pragma once
 #include <memory>
-#include <span>
+#include "span.h"
 
 namespace Generators {
 
