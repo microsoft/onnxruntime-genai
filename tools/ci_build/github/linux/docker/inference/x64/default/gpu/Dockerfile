@@ -5,7 +5,7 @@
 ARG BASEIMAGE=nvidia/cuda:11.8.0-cudnn8-devel-ubi8
 FROM $BASEIMAGE
 
-ENV PATH="/usr/local/cuda-11.8/bin:/opt/rh/gcc-toolset-12/root/usr/bin:${PATH}"
+ENV PATH="/usr/local/nvidia/bin:/usr/local/cuda/bin:/opt/rh/gcc-toolset-12/root/usr/bin:${PATH}"
 ENV LANG=en_US.UTF-8
 ENV LC_ALL=en_US.UTF-8
 ENV CUDA_HOME=/usr/local/cuda-11.8
@@ -21,3 +21,4 @@ ARG BUILD_USER=onnxruntimedev
 RUN adduser --uid $BUILD_UID $BUILD_USER
 WORKDIR /home/$BUILD_USER
 USER $BUILD_USER
+ENV CUDA_MODULE_LOADING "LAZY"
