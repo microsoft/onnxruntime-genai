@@ -55,6 +55,11 @@ jobs:
           echo "Printing docker image environment variables"
           docker run --rm onnxruntimegpubuild env
 
+      - name: Check CUDA Info
+        run: |
+            echo "Finding CUDA version"
+            docker run --rm onnxruntimegpubuild bash -c "nvcc --version && which nvcc && nvidia-smi"
+
       - name: Docker -- Configure with CMake and GCC
         run: |
           echo "Running docker image onnxruntimegpubuild"
