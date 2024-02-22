@@ -81,7 +81,7 @@ void PositionIDs<T>::Update(int current_length) {
         throw std::runtime_error("PositionIDs::Update - Unsupported device type");
     }
     initial_sequence_lengths_.clear();
-  } else { // Just incrementing existing position IDs
+  } else {  // Just incrementing existing position IDs
     switch (model_.device_type_) {
       case DeviceType::CPU: {
         // Increment position IDs
