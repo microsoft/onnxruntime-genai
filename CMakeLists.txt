@@ -8,6 +8,11 @@ project(Generators LANGUAGES C CXX)
 # All Options should be defined in cmake/options.cmake
 include(cmake/options.cmake)
 include(cmake/external/onnxruntime_external_deps.cmake)
+
+file(READ "VERSION_INFO" ver)
+set(VERSION_INFO ${ver} CACHE STRING "Set the onnxruntime-genai version info.")
+message("Building onnxruntime-genai for version ${VERSION_INFO}")
+
 # Checking if CUDA is supported
 include(CheckLanguage)
 add_compile_definitions(BUILDING_ORT_GENAI_C)

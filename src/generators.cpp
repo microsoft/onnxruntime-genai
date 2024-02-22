@@ -50,6 +50,38 @@ GeneratorParams::GeneratorParams(const Model& model)
       cuda_stream{model.cuda_stream_} {
 }
 
+void GeneratorParams::SetInputSequences(const TokenSequences& sequences) {
+  const bool pad_right = true;  // FUTURE: Pull from model config, but default to padding on the right
+
+  size_t max_count = 0;
+  for (auto& sequence : sequences)
+    max_count = std::max(max_count, sequence.size());
+
+  const size_t input_ids_count = max_count * sequences.size();
+
+  input_ids_owner_ = std::make_unique<int32_t[]>(input_ids_count);
+  auto new_input_ids = std::span<int32_t>(input_ids_owner_.get(), input_ids_count);
+
+  input_ids = new_input_ids;
+  sequence_length = static_cast<int>(max_count);
+  batch_size = static_cast<int>(sequences.size());
+
+  // Copy and pad the input sequences with pad_token_id
+  for (size_t sequence_index = 0; sequence_index < sequences.size(); sequence_index++) {
+    auto output_span = new_input_ids.subspan(sequence_index * max_count, max_count);
+    auto input_span = sequences[sequence_index];
+
+    auto pad_count = max_count - input_span.size();
+    if (pad_right) {
+      std::copy(input_span.begin(), input_span.end(), output_span.begin());
+      std::fill(output_span.end() - pad_count, output_span.end(), pad_token_id);
+    } else {
+      std::fill(output_span.begin(), output_span.begin() + pad_count, pad_token_id);
+      std::copy(input_span.begin(), input_span.end(), output_span.begin() + pad_count);
+    }
+  }
+}
+
 ProviderOptions GetDefaultProviderOptions([[maybe_unused]] DeviceType device_type) {
   ProviderOptions options;
 #if USE_CUDA
@@ -141,7 +173,7 @@ RoamingArray<int32_t> Generator::GetSequence(int index) const {
   return search_->GetSequence(index);
 }
 
-std::vector<std::vector<int32_t>> Generate(const Model& model, const GeneratorParams& params) {
+TokenSequences Generate(const Model& model, const GeneratorParams& params) {
   auto generator = CreateGenerator(model, params);
 
   while (!generator->IsDone()) {
@@ -149,7 +181,7 @@ std::vector<std::vector<int32_t>> Generate(const Model& model, const GeneratorPa
     generator->GenerateNextToken();
   }
 
-  std::vector<std::vector<int32_t>> result;
+  TokenSequences result;
 
   for (int i = 0; i < params.batch_size; i++) {
     auto sequence = generator->search_->GetSequence(i);

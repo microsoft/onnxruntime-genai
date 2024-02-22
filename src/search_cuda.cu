@@ -38,22 +38,6 @@ struct ArgMaxDataImpl : ArgMaxData {
   cuda_unique_ptr<cub::KeyValuePair<int, float>> argmaxen_owner_;
 };
 
-void Launch_ArgMax(std::unique_ptr<ArgMaxData>& p_data, int32_t* next_tokens, const float* next_token_scores, int batch_size, int vocab_size, cudaStream_t stream) {
-  if (!p_data)
-    p_data = std::make_unique<ArgMaxDataImpl>();
-  auto& data = static_cast<ArgMaxDataImpl&>(*p_data);
-
-  if (!data.temp_storage_) {
-    data.argmaxen_owner_ = CudaMallocArray<cub::KeyValuePair<int, float>>(batch_size, &data.argmaxen_);
-    CudaCheck() == cub::DeviceReduce::ArgMax(data.temp_storage_.get(), data.temp_storage_element_size_, next_token_scores, &data.argmaxen_[0], vocab_size, stream);
-    data.temp_storage_ = CudaMallocArray<uint8_t>(data.temp_storage_element_size_ * batch_size);
-  }
-
-  for (int batch_index = 0; batch_index < batch_size; batch_index++)
-    CudaCheck() == cub::DeviceReduce::ArgMax(data.temp_storage_.get() + data.temp_storage_element_size_ * batch_index, data.temp_storage_element_size_, next_token_scores + batch_index * vocab_size, &data.argmaxen_[batch_index], vocab_size, stream);
-  ArgMax<<<1, batch_size, 0, stream>>>(data.argmaxen_.data(), next_tokens, batch_size);
-}
-
 __global__ void log_softmax(float* values, int count) {
   float max = *std::max_element(values, values + count);
   //  std::vector<float> scaled(values.begin(), values.end());

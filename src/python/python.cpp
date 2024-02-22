@@ -8,9 +8,6 @@
 
 using namespace pybind11::literals;
 
-#define STRINGIFY(x) #x
-#define MACRO_STRINGIFY(x) STRINGIFY(x)
-
 struct float16 {
   uint16_t v_;
   float AsFloat32() const { return Generators::Float16ToFloat32(v_); }
@@ -113,7 +110,7 @@ void Declare_DeviceArray(pybind11::module& m, const char* name) {
           "get_array", [](Type& t) -> pybind11::array_t<T> { return t.GetNumpy(); }, pybind11::return_value_policy::reference_internal);
 }
 
-struct PySearchParams : GeneratorParams {
+struct PyGeneratorParams : GeneratorParams {
   // Turn the python py_input_ids_ into the low level parameters
   void Prepare() {
     // TODO: This will switch to using the variant vs being ifs
@@ -148,7 +145,7 @@ struct PySearchParams : GeneratorParams {
 };
 
 struct PyGenerator {
-  PyGenerator(Model& model, PySearchParams& search_params) {
+  PyGenerator(Model& model, PyGeneratorParams& search_params) {
     search_params.Prepare();
     generator_ = CreateGenerator(model, search_params);
   }
@@ -223,19 +220,20 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .value("CUDA", DeviceType::CUDA)
       .export_values();
 
-  pybind11::class_<PySearchParams>(m, "SearchParams")
+  pybind11::class_<PyGeneratorParams>(m, "GeneratorParams")
       .def(pybind11::init<const Model&>())
-      .def_readonly("pad_token_id", &PySearchParams::pad_token_id)
-      .def_readonly("eos_token_id", &PySearchParams::eos_token_id)
-      .def_readonly("vocab_size", &PySearchParams::vocab_size)
-      .def_readwrite("num_beams", &PySearchParams::num_beams)
-      .def_readwrite("max_length", &PySearchParams::max_length)
-      .def_readwrite("length_penalty", &PySearchParams::length_penalty)
-      .def_readwrite("early_stopping", &PySearchParams::early_stopping)
-      .def_readwrite("input_ids", &PySearchParams::py_input_ids_)
-      .def_readwrite("whisper_input_features", &PySearchParams::py_whisper_input_features_)
-      .def_readwrite("whisper_decoder_input_ids", &PySearchParams::py_whisper_decoder_input_ids_)
-      .def("__repr__", [](PySearchParams& s) { return ToString(s); });
+      .def_readonly("pad_token_id", &PyGeneratorParams::pad_token_id)
+      .def_readonly("eos_token_id", &PyGeneratorParams::eos_token_id)
+      .def_readonly("vocab_size", &PyGeneratorParams::vocab_size)
+      .def_readwrite("num_beams", &PyGeneratorParams::num_beams)
+      .def_readwrite("max_length", &PyGeneratorParams::max_length)
+      .def_readwrite("length_penalty", &PyGeneratorParams::length_penalty)
+      .def_readwrite("early_stopping", &PyGeneratorParams::early_stopping)
+      .def_readwrite("input_ids", &PyGeneratorParams::py_input_ids_)
+      .def_readwrite("whisper_input_features", &PyGeneratorParams::py_whisper_input_features_)
+      .def_readwrite("whisper_decoder_input_ids", &PyGeneratorParams::py_whisper_decoder_input_ids_)
+      .def("set_input_sequences", &PyGeneratorParams::SetInputSequences)
+      .def("__repr__", [](PyGeneratorParams& s) { return ToString(s); });
 
   // We need to init the OrtApi before we can use it
   Ort::InitApi();
@@ -249,6 +247,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   pybind11::class_<Tokenizer>(m, "Tokenizer")
       .def("encode", &Tokenizer::Encode)
       .def("decode", [](const Tokenizer& t, pybind11::array_t<int32_t> tokens) { return t.Decode(ToSpan(tokens)); })
+      .def("encode_batch", [](const Tokenizer& t, std::vector<std::string> strings) { return t.EncodeBatch(strings); })
+      .def("decode_batch", &Tokenizer::DecodeBatch)
       .def("create_stream", [](const Tokenizer& t) { return t.CreateStream(); });
 
   pybind11::class_<Model>(m, "Model")
@@ -257,12 +257,12 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
              return CreateModel(GetOrtEnv(), config_path.c_str(), &provider_options);
            }),
            "str"_a, "device_type"_a = DeviceType::Auto)
-      .def("generate", [](Model& model, PySearchParams& search_params) { search_params.Prepare(); return Generate(model, search_params); })
+      .def("generate", [](Model& model, PyGeneratorParams& search_params) { search_params.Prepare(); return Generate(model, search_params); })
       .def("create_tokenizer", [](Model& model) { return model.CreateTokenizer(); })
       .def_property_readonly("device_type", [](const Model& s) { return s.device_type_; });
 
   pybind11::class_<PyGenerator>(m, "Generator")
-      .def(pybind11::init<Model&, PySearchParams&>())
+      .def(pybind11::init<Model&, PyGeneratorParams&>())
       .def("is_done", &PyGenerator::IsDone)
       .def("compute_logits", &PyGenerator::ComputeLogits)
       .def("generate_next_token", &PyGenerator::GenerateNextToken)
@@ -272,12 +272,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("generate_next_token_top_k_top_p", &PyGenerator::GenerateNextToken_TopK_TopP)
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
       .def("get_sequence", &PyGenerator::GetSequence);
-
-#ifdef VERSION_INFO
-  m.attr("__version__") = MACRO_STRINGIFY(VERSION_INFO);
-#else
-  m.attr("__version__") = "dev";
-#endif
 
   m.def("is_cuda_available", []() {
 #ifdef USE_CUDA
