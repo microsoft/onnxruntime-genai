@@ -55,10 +55,10 @@ python builder.py -m path_to_local_folder_on_disk -o /path/to/output/folder -p p
 This scenario is for when you want to have control over some specific settings. The below example shows how you can pass key-value arguments to `--extra_options`.
 ```
 # From wheel:
-python -m onnxruntime_genai.models.builder -m model_name -o /path/to/output/folder -p precision -e execution_provider -c cache_dir_to_save_hf_files --extra_options filename=decoder.onnx token_dtype=int64
+python -m onnxruntime_genai.models.builder -m model_name -o /path/to/output/folder -p precision -e execution_provider -c cache_dir_to_save_hf_files --extra_options filename=decoder.onnx
 
 # From source:
-python builder.py -m model_name -o /path/to/output/folder -p precision -e execution_provider -c cache_dir_to_save_hf_files --extra_options filename=decoder.onnx token_dtype=int64
+python builder.py -m model_name -o /path/to/output/folder -p precision -e execution_provider -c cache_dir_to_save_hf_files --extra_options filename=decoder.onnx
 ```
 To see all available options through `--extra_options`, please use the `help` commands in the `Full Usage` section above.
 

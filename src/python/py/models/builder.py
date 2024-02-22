@@ -33,7 +33,6 @@ class Model:
 
         self.model_name_or_path = config._name_or_path
         self.model_type = config.architectures[0]
-        self.token_dtype = TensorProto.INT64 if "token_dtype" in extra_options else TensorProto.INT32
         self.io_dtype = io_dtype      # {'fp16', 'fp32'}
         self.onnx_dtype = onnx_dtype  # {"int4", "fp16", "fp32"}
         self.ep = ep
@@ -69,11 +68,11 @@ class Model:
 
         # Map TensorProto dtypes to string dtypes
         self.to_str_dtype = {
-            TensorProto.INT8: "int8",
-            TensorProto.INT32: "int32",
-            TensorProto.INT64: "int64",
-            TensorProto.FLOAT16: "float16",
-            TensorProto.FLOAT: "float32",
+            TensorProto.INT8: "TensorProto.INT8",
+            TensorProto.INT32: "TensorProto.INT32",
+            TensorProto.INT64: "TensorProto.INT64",
+            TensorProto.FLOAT16: "TensorProto.FLOAT16",
+            TensorProto.FLOAT: "TensorProto.FLOAT",
         }
         
         # Mask-specific variables
@@ -133,8 +132,8 @@ class Model:
                 "eos_token_id": config.eos_token_id,
                 "head_size": self.head_size,
                 "hidden_size": self.hidden_size,
-                "logits_type": self.to_str_dtype[self.io_dtype],
-                "kv_type": self.to_str_dtype[self.io_dtype],
+                "logits_type": "float32" if self.io_dtype == TensorProto.FLOAT else "float16",
+                "kv_type": "float32" if self.io_dtype == TensorProto.FLOAT else "float16",
                 "num_attention_heads": self.num_attn_heads,
                 "num_hidden_layers": self.num_layers,
                 "num_key_value_heads": self.num_kv_heads,
@@ -282,7 +281,7 @@ class Model:
         inputs = []
         for name in self.model_inputs:
             shape = self.input_shapes[name]
-            inputs.append(helper.make_tensor_value_info(name, self.token_dtype, shape=shape))
+            inputs.append(helper.make_tensor_value_info(name, TensorProto.INT64, shape=shape))
 
         # Add model-specific outputs to list of model outputs
         outputs = [
@@ -658,17 +657,14 @@ class Model:
         # Make nodes for the MLP subgraph
         #
         #           root_input
-        #         /            \
+        #          /          \
         #   UpProjMatMul    GateProjMatMul
-        #         \         /  |
-        #          \  Sigmoid  |
-        #           \       \  |
-        #            \       Mul
-        #             \     /
-        #              \   / 
-        #               Mul
-        #                |
-        #          DownProjMatMul
+        #          \          |
+        #           \     ActFunc
+        #            \   /
+        #             Mul
+        #              |
+        #        DownProjMatMul
         
         # Make MatMul nodes
         gate_name = f"/model/layers.{layer_id}/mlp/gate_proj/MatMul"
@@ -676,12 +672,12 @@ class Model:
         up_name = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
         self.make_matmul(mlp.up_proj.weight.detach().numpy(), up_name, root_input)
 
-        # Make activation nodes
-        mul_act_name = self.make_activation(layer_id, gate_name)
+        # Make activation node(s)
+        act_fn_name = self.make_activation(layer_id, root_input=f"{gate_name}/output_0")
 
         # Make Mul node after activation
         mul_name = f"/model/layers.{layer_id}/mlp/Mul"
-        mul_inputs = [f"{mul_act_name}/output_0", f"{up_name}/output_0"]
+        mul_inputs = [f"{act_fn_name}/output_0", f"{up_name}/output_0"]
         self.make_mul(mul_name, mul_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
 
         # Make output MatMul node
@@ -691,25 +687,27 @@ class Model:
         # Assign output 0 of previous MatMul as skip input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = f"{down_name}/output_0"
 
-    def make_silu(self, layer_id, root_input):
-        # Make activation nodes for this activation subgraph
+    def make_activation_with_mul(self, layer_id, root_input, activation):
+        # Make nodes for this activation subgraph
         #
         #       root_input (GateProjMatMul)
         #         /  |
-        #   Sigmoid  |
+        #   ActFunc  |
         #          \ |
         #           Mul
-        sig_act_name = f"/model/layers.{layer_id}/mlp/act_fn/Sigmoid"
-        self.make_sigmoid(sig_act_name, f"{root_input}/output_0", dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        act_name = f"/model/layers.{layer_id}/mlp/act_fn/{activation}"
+        act_output = f"{act_name}/output_0"
+        self.make_node(activation, inputs=[root_input], outputs=[act_output], name=act_name)
+        self.make_value_info(act_output, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
 
         mul_act_name = f"/model/layers.{layer_id}/mlp/act_fn/Mul"
-        mul_act_inputs = [f"{root_input}/output_0", f"{sig_act_name}/output_0"]
+        mul_act_inputs = [root_input, act_output]
         self.make_mul(mul_act_name, mul_act_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
 
         return mul_act_name
 
     def make_fast_gelu(self, layer_id, root_input):
-        # Make activation nodes for this activation subgraph
+        # Make nodes for this activation subgraph
         #
         #       root_input (Add)
         #           |
@@ -722,10 +720,12 @@ class Model:
         return fast_gelu_name
 
     def make_activation(self, layer_id, root_input):
-        if self.activation == "silu":
-            output_name = self.make_silu(layer_id, root_input)
-        elif self.activation in {"gelu_new", "fast_gelu"}:
+        if self.activation in {"silu", "swish"}:
+            output_name = self.make_activation_with_mul(layer_id, root_input, "Sigmoid")
+        elif self.activation in {"gelu_new", "gelu_fast"}:
             output_name = self.make_fast_gelu(layer_id, root_input)
+        elif self.activation in {"gelu"}:
+            output_name = self.make_activation_with_mul(layer_id, root_input, "Gelu")
         else:
             raise NotImplementedError(f"The {self.activation} activation function is not currently supported.")
         return output_name
@@ -784,7 +784,7 @@ class Model:
                 self.layer_id += 1
             elif self.layer_id == self.num_layers and self.has_final_norm(module, model):
                 # SkipLayerNorm after last decoder layer (MatMul --> SkipLayerNorm)
-                print("Reading final RMSNorm")
+                print("Reading final norm")
                 self.make_layernorm(self.layer_id, module, skip=True, simple=self.layernorm_attrs["simple"], location="final_norm")
             elif isinstance(module, torch.nn.Linear) and module.out_features == self.vocab_size:
                 # Language modeling head (SkipLayerNorm --> logits)
@@ -970,7 +970,7 @@ class Model:
         less_inputs = [f"{range_name}/output_0", f"{reshape_name}/output_0"]
         self.make_less(less_name, less_inputs)
         where_2_name = f"{basename}/Where_2"
-        where_2_inputs = [f"{less_name}/output_0", f"/model/constants/{self.io_dtype}/0D/0", f"{constant_shape_name}/output_0"]
+        where_2_inputs = [f"{less_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/0", f"{constant_shape_name}/output_0"]
         self.make_where(where_2_name, where_2_inputs, dtype=self.io_dtype, shape=None)
         unsqueeze_8_name = f"{basename}/Unsqueeze_8"
         unsqueeze_8_inputs = [f"{where_2_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
@@ -1006,12 +1006,12 @@ class Model:
         cast_1_name = f"{basename}/Cast_1"
         self.make_cast(cast_1_name, f"{expand_name}/output_0", dtype=self.io_dtype, shape=["unk", "unk", "unk", "unk"])
         sub_name = f"{basename}/Sub"
-        sub_inputs = [f"/model/constants/{self.io_dtype}/0D/1", f"{cast_1_name}/output_0"]
+        sub_inputs = [f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/1", f"{cast_1_name}/output_0"]
         self.make_sub(sub_name, sub_inputs, dtype=self.io_dtype, shape=["unk", "unk", "unk", "unk"])
         cast_2_name = f"{basename}/Cast_2"
         self.make_cast(cast_2_name, f"{sub_name}/output_0", dtype=TensorProto.BOOL, shape=["unk", "unk", "unk", "unk"])
         where_2_name = f"{basename}/Where_2"
-        where_2_inputs = [f"{cast_2_name}/output_0", f"/model/constants/{self.io_dtype}/0D/{np.finfo(self.to_numpy_dtype[self.io_dtype]).min}", f"{sub_name}/output_0"]
+        where_2_inputs = [f"{cast_2_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{np.finfo(self.to_numpy_dtype[self.io_dtype]).min}", f"{sub_name}/output_0"]
         self.make_where(where_2_name, where_2_inputs, dtype=self.io_dtype, shape=["unk", "unk", "unk", "unk"])
 
         return where_2_name
@@ -1405,7 +1405,6 @@ def get_args():
                     2 is fp16.
                     1 is fp32.
                 num_hidden_layers = Manually specify the number of layers in your ONNX model (for unit testing purposes).
-                token_dtype = 'int32' (default) or 'int64': Specify the dtype of the tokenized outputs that the model receives.
                 filename = Filename for ONNX model (default is 'model.onnx').
                     For models with multiple components, each component is exported to its own ONNX model.
                     The filename for each component will be '<filename>_<component-name>.onnx' (ex: '<filename>_encoder.onnx', '<filename>_decoder.onnx').
