@@ -31,7 +31,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             var expectedOutput = new int[] { 0, 0, 0, 52, 204, 204, 204, 204, 204, 204,
                                              0, 0, 195, 731, 731, 114, 114, 114, 114, 114 };
 
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "testdata", "hf-internal-testing", "tiny-random-gpt2-fp32");
+            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "hf-internal-testing", "tiny-random-gpt2-fp32");
             using (var model = new Model(modelPath, DeviceType.CPU))
             {
                 Assert.NotNull(model);

@@ -1,34 +1,21 @@
 <Project Sdk="MSBuild.Sdk.Extras/3.0.22">
   <PropertyGroup>
     <TargetFrameworks>netstandard2.1</TargetFrameworks>
-    <Platforms>x64</Platforms>
+    <Platforms>AnyCPU</Platforms>
     <LangVersion>default</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 
     <!--internal build related properties-->
     <SrcRoot>$(ProjectDir)..\..\src</SrcRoot>
     <CsharpSrcRoot>$(SrcRoot)\csharp</CsharpSrcRoot>
-    <TargetArchitecture>x64</TargetArchitecture>
 
     <RootNamespace>Microsoft.ML.OnnxRuntimeGenAI</RootNamespace>
     <AssemblyName>Microsoft.ML.OnnxRuntimeGenAI</AssemblyName>
     <EnableDefaultItems>false</EnableDefaultItems>
 
-    <PackageId>Microsoft.ML.OnnxRuntimeGenAI.Managed</PackageId>
-    <Authors>Microsoft</Authors>
-    <PackageVersion>1.0.0</PackageVersion>
-    <Version>$(PackageVersion)</Version>
-    <Description>This package contains ONNX Runtime Generative AI API for .Net platforms</Description>
-    <PackageTags>ONNX;ONNX Runtime;ONNX Runtime Gen AI;Machine Learning</PackageTags>
-    <PackageProjectUrl>https://github.com/microsoft/onnxruntime-genai</PackageProjectUrl>
-    <Copyright>© Microsoft Corporation. All rights reserved.</Copyright>
-    <PackageLicenseFile>LICENSE.txt</PackageLicenseFile>
-    <!-- sourcelink flags -->
-    <PublishRepositoryUrl>false</PublishRepositoryUrl>
-
     <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
-    <Configurations>Debug;RelWithDebInfo</Configurations>
+    <Configurations>Debug;RelWithDebInfo;Release</Configurations>
 
     <IsLinuxBuild Condition="'$([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform($([System.Runtime.InteropServices.OSPlatform]::Linux)))' == 'true'">true</IsLinuxBuild>
     <IsWindowsBuild Condition="'$([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform($([System.Runtime.InteropServices.OSPlatform]::Windows)))' == 'true'">true</IsWindowsBuild>
@@ -46,6 +33,8 @@
     <None Include="$(NativeBuildOutputDir)\onnxruntime-genai.dll" Condition="Exists('$(NativeBuildOutputDir)\onnxruntime-genai.dll')" PackagePath="" Pack="false" CopyToOutputDirectory="PreserveNewest" Visible="false" />
     <None Include="$(NativeBuildOutputDir)\onnxruntime.dll" Condition="Exists('$(NativeBuildOutputDir)\onnxruntime.dll')" PackagePath="" Pack="false" CopyToOutputDirectory="PreserveNewest" Visible="false" />
     <None Include="$(CsharpSrcRoot)\..\..\LICENSE" PackagePath="" Pack="true" Visible="false" CopyToOutputDirectory="PreserveNewest" />
+    <None Condition="Exists('$(NativeBuildOutputDir)\onnxruntime_providers_shared.dll')" Include="$(NativeBuildOutputDir)\onnxruntime_providers_shared.dll" CopyToOutputDirectory="Never" Visible="false" />
+    <None Condition="Exists('$(NativeBuildOutputDir)\onnxruntime_providers_cuda.dll')" Include="$(NativeBuildOutputDir)\onnxruntime_providers_cuda.dll" CopyToOutputDirectory="Never" Visible="false" />
   </ItemGroup>
 
   <ItemGroup>
