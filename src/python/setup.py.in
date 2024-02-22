@@ -12,7 +12,7 @@ class BinaryDistribution(Distribution):
 
 setup(
     name='@TARGET_NAME@',
-    version='1.0.0',
+    version='@VERSION_INFO@',
     packages=['onnxruntime_genai', 'onnxruntime_genai.models'],
     include_package_data=True,
     package_data={'': ['*.pyd', '*.dll', '*.so']},
