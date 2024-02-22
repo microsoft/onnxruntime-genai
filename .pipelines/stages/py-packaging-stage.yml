@@ -3,7 +3,7 @@ parameters:
   type: boolean
 - name: enable_windows_gpu
   type: boolean
-- name: enable_windows_gpu
+- name: enable_windows_arm
   type: boolean
 - name: enable_linux_cpu
   type: boolean
