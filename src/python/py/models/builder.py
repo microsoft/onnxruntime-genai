@@ -1,27 +1,33 @@
+# -------------------------------------------------------------------------
+# Copyright (c) Microsoft Corporation.  All rights reserved.
+# Licensed under the MIT License.  See License.txt in the project root for
+# license information.
+# --------------------------------------------------------------------------
 """
 Run this script to create the desired ONNX model.
-Example usage:
-python export.py -m model_name_or_path -o model.onnx -p precision -e execution_provider
 """
 
 from onnx import helper, numpy_helper, TensorProto, external_data_helper, save_model
 from onnxruntime.quantization.matmul_4bits_quantizer import MatMul4BitsQuantizer
-from transformers import AutoConfig, AutoModelForCausalLM
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 import numpy as np
 import torch
 
 import argparse
 import gc
+import json
 import os
+import textwrap
 
 class Model:
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        self.context_length = config.max_position_embeddings
         self.intermediate_size = config.intermediate_size
         self.hidden_size = config.hidden_size
         self.num_kv_heads = config.num_key_value_heads
         self.num_attn_heads = config.num_attention_heads
         self.head_size = config.hidden_size // config.num_attention_heads
-        self.num_layers = config.num_hidden_layers
+        self.num_layers = int(extra_options["num_hidden_layers"]) if "num_hidden_layers" in extra_options else config.num_hidden_layers
         self.vocab_size = config.vocab_size
         self.activation = config.hidden_act
 
@@ -30,7 +36,9 @@ class Model:
         self.io_dtype = io_dtype      # {'fp16', 'fp32'}
         self.onnx_dtype = onnx_dtype  # {"int4", "fp16", "fp32"}
         self.ep = ep
+
         self.cache_dir = cache_dir
+        self.filename = extra_options["filename"] if "filename" in extra_options else "model.onnx"
         self.extra_options = extra_options
         
         self.inputs = []
@@ -108,8 +116,52 @@ class Model:
             }
         }
 
-    def save(self, out_path):
-        print("Saving ONNX model")
+    def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
+        config = GenerationConfig.from_pretrained(model_name_or_path, **extra_kwargs)
+        genai_config = {
+            "model": {
+                "bos_token_id": config.bos_token_id,
+                "context_length": self.context_length,
+                "decoder": self.filename,
+                "eos_token_id": config.eos_token_id,
+                "head_size": self.head_size,
+                "hidden_size": self.hidden_size,
+                "logits_type": "float32" if self.io_dtype == TensorProto.FLOAT else "float16",
+                "kv_type": "float32" if self.io_dtype == TensorProto.FLOAT else "float16",
+                "num_attention_heads": self.num_attn_heads,
+                "num_hidden_layers": self.num_layers,
+                "num_key_value_heads": self.num_kv_heads,
+                "pad_token_id": config.pad_token_id if hasattr(config, "pad_token_id") else config.eos_token_id,
+                "type": self.model_type[ : self.model_type.find("For")].lower(),
+                "vocab_size": self.vocab_size,
+            },
+            "search": {
+                "diversity_penalty": config.diversity_penalty if hasattr(config, "diversity_penalty") else 0.0,
+                "length_penalty": config.length_penalty if hasattr(config, "length_penalty") else 1.0,
+                "max_length": config.max_length if hasattr(config, "max_length") else 20,
+                "min_length": 0,
+                "no_repeat_ngram_size": config.no_repeat_ngram_size if hasattr(config, "no_repeat_ngram_size") else 0,
+                "num_beams": config.num_beams if hasattr(config, "num_beams") else 1,
+                "num_return_sequences": config.num_return_sequences if hasattr(config, "num_return_sequences") else 1,
+                "repetition_penalty": config.repetition_penalty if hasattr(config, "repetition_penalty") else 1.0,
+                "temperature": config.temperature if hasattr(config, "temperature") else 1.0,
+                "top_k": config.top_k if hasattr(config, "top_k") else 50,
+                "top_p": config.top_p if hasattr(config, "top_p") else 1.0,
+            },
+        }
+
+        print(f"Saving GenAI config in {out_dir}")
+        with open(os.path.join(os.path.dirname(out_dir),"genai_config.json"), "w") as f:
+            json.dump(genai_config, f, indent=4)
+
+    def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
+        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, **extra_kwargs)
+        dest_dir = os.path.dirname(out_dir)
+        print(f"Saving processing files in {dest_dir} for GenAI")
+        tokenizer.save_pretrained(dest_dir)
+
+    def save_model(self, out_dir):
+        print(f"Saving ONNX model in {out_dir}")
         gc.collect()
 
         # Create ONNX model
@@ -136,24 +188,35 @@ class Model:
             if path.endswith(".bin"):
                 os.remove(os.path.join(self.cache_dir, path))
 
+        # Delete temporary cache dir if empty
+        if len(os.listdir(self.cache_dir)) == 0:
+            os.rmdir(self.cache_dir)
+
         # Quantize ONNX model to desired precision
         # TODO: Replace by quantizing the MatMuls as they are created
         if self.onnx_dtype == "int4":
-            model = self.to_int4(model, out_path)
+            model = self.to_int4(model)
 
-        # Save ONNX model with only one external data file
-        data_path = os.path.basename(out_path) + ".data"
+        # Save ONNX model with only one external data file and delete any existing duplicate copies
+        out_path = os.path.join(os.path.dirname(out_dir), self.filename)
+        data_path = os.path.join(os.path.dirname(out_dir), os.path.basename(out_path) + ".data")
+        if os.path.exists(out_path):
+            print(f"Overwriting {out_path}")
+            os.remove(out_path)
+        if os.path.exists(data_path):
+            print(f"Overwriting {data_path}")
+            os.remove(data_path)
         save_model(
             model,
             out_path,
             save_as_external_data=True,
             all_tensors_to_one_file=True,
-            location=data_path,
+            location=os.path.basename(data_path),
             size_threshold=0,
             convert_attribute=False,
         )
 
-    def to_int4(self, model, out_path):
+    def to_int4(self, model):
         quant = MatMul4BitsQuantizer(
             model=model,
             block_size=self.quant_attrs["int4"]["block_size"],
@@ -588,17 +651,14 @@ class Model:
         # Make nodes for the MLP subgraph
         #
         #           root_input
-        #         /            \
+        #          /          \
         #   UpProjMatMul    GateProjMatMul
-        #         \         /  |
-        #          \  Sigmoid  |
-        #           \       \  |
-        #            \       Mul
-        #             \     /
-        #              \   / 
-        #               Mul
-        #                |
-        #          DownProjMatMul
+        #          \          |
+        #           \     ActFunc
+        #            \   /
+        #             Mul
+        #              |
+        #        DownProjMatMul
         
         # Make MatMul nodes
         gate_name = f"/model/layers.{layer_id}/mlp/gate_proj/MatMul"
@@ -606,12 +666,12 @@ class Model:
         up_name = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
         self.make_matmul(mlp.up_proj.weight.detach().numpy(), up_name, root_input)
 
-        # Make activation nodes
-        mul_act_name = self.make_activation(layer_id, gate_name)
+        # Make activation node(s)
+        act_fn_name = self.make_activation(layer_id, root_input=f"{gate_name}/output_0")
 
         # Make Mul node after activation
         mul_name = f"/model/layers.{layer_id}/mlp/Mul"
-        mul_inputs = [f"{mul_act_name}/output_0", f"{up_name}/output_0"]
+        mul_inputs = [f"{act_fn_name}/output_0", f"{up_name}/output_0"]
         self.make_mul(mul_name, mul_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
 
         # Make output MatMul node
@@ -621,25 +681,27 @@ class Model:
         # Assign output 0 of previous MatMul as skip input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = f"{down_name}/output_0"
 
-    def make_silu(self, layer_id, root_input):
-        # Make activation nodes for this activation subgraph
+    def make_activation_with_mul(self, layer_id, root_input, activation):
+        # Make nodes for this activation subgraph
         #
         #       root_input (GateProjMatMul)
         #         /  |
-        #   Sigmoid  |
+        #   ActFunc  |
         #          \ |
         #           Mul
-        sig_act_name = f"/model/layers.{layer_id}/mlp/act_fn/Sigmoid"
-        self.make_sigmoid(sig_act_name, f"{root_input}/output_0", dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        act_name = f"/model/layers.{layer_id}/mlp/act_fn/{activation}"
+        act_output = f"{act_name}/output_0"
+        self.make_node(activation, inputs=[root_input], outputs=[act_output], name=act_name)
+        self.make_value_info(act_output, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
 
         mul_act_name = f"/model/layers.{layer_id}/mlp/act_fn/Mul"
-        mul_act_inputs = [f"{root_input}/output_0", f"{sig_act_name}/output_0"]
+        mul_act_inputs = [root_input, act_output]
         self.make_mul(mul_act_name, mul_act_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
 
         return mul_act_name
 
     def make_fast_gelu(self, layer_id, root_input):
-        # Make activation nodes for this activation subgraph
+        # Make nodes for this activation subgraph
         #
         #       root_input (Add)
         #           |
@@ -652,10 +714,12 @@ class Model:
         return fast_gelu_name
 
     def make_activation(self, layer_id, root_input):
-        if self.activation == "silu":
-            output_name = self.make_silu(layer_id, root_input)
-        elif self.activation in {"gelu_new", "fast_gelu"}:
+        if self.activation in {"silu", "swish"}:
+            output_name = self.make_activation_with_mul(layer_id, root_input, "Sigmoid")
+        elif self.activation in {"gelu_new", "gelu_fast"}:
             output_name = self.make_fast_gelu(layer_id, root_input)
+        elif self.activation in {"gelu"}:
+            output_name = self.make_activation_with_mul(layer_id, root_input, "Gelu")
         else:
             raise NotImplementedError(f"The {self.activation} activation function is not currently supported.")
         return output_name
@@ -697,7 +761,7 @@ class Model:
         self.make_attention_mask_reformatting()
 
         # Load PyTorch model
-        extra_kwargs = {} if os.path.exists(self.model_name_or_path) else {"cache_dir": self.cache_dir, "use_auth_token": True}
+        extra_kwargs = {} if os.path.exists(self.model_name_or_path) else {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {"cache_dir": self.cache_dir, "use_auth_token": True}
         model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, **extra_kwargs)
         
         # Loop through PyTorch model and map each nn.Module to ONNX/ORT ops
@@ -714,7 +778,7 @@ class Model:
                 self.layer_id += 1
             elif self.layer_id == self.num_layers and self.has_final_norm(module, model):
                 # SkipLayerNorm after last decoder layer (MatMul --> SkipLayerNorm)
-                print("Reading final RMSNorm")
+                print("Reading final norm")
                 self.make_layernorm(self.layer_id, module, skip=True, simple=self.layernorm_attrs["simple"], location="final_norm")
             elif isinstance(module, torch.nn.Linear) and module.out_features == self.vocab_size:
                 # Language modeling head (SkipLayerNorm --> logits)
@@ -900,7 +964,7 @@ class Model:
         less_inputs = [f"{range_name}/output_0", f"{reshape_name}/output_0"]
         self.make_less(less_name, less_inputs)
         where_2_name = f"{basename}/Where_2"
-        where_2_inputs = [f"{less_name}/output_0", f"/model/constants/{self.io_dtype}/0D/0", f"{constant_shape_name}/output_0"]
+        where_2_inputs = [f"{less_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/0", f"{constant_shape_name}/output_0"]
         self.make_where(where_2_name, where_2_inputs, dtype=self.io_dtype, shape=None)
         unsqueeze_8_name = f"{basename}/Unsqueeze_8"
         unsqueeze_8_inputs = [f"{where_2_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
@@ -936,12 +1000,12 @@ class Model:
         cast_1_name = f"{basename}/Cast_1"
         self.make_cast(cast_1_name, f"{expand_name}/output_0", dtype=self.io_dtype, shape=["unk", "unk", "unk", "unk"])
         sub_name = f"{basename}/Sub"
-        sub_inputs = [f"/model/constants/{self.io_dtype}/0D/1", f"{cast_1_name}/output_0"]
+        sub_inputs = [f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/1", f"{cast_1_name}/output_0"]
         self.make_sub(sub_name, sub_inputs, dtype=self.io_dtype, shape=["unk", "unk", "unk", "unk"])
         cast_2_name = f"{basename}/Cast_2"
         self.make_cast(cast_2_name, f"{sub_name}/output_0", dtype=TensorProto.BOOL, shape=["unk", "unk", "unk", "unk"])
         where_2_name = f"{basename}/Where_2"
-        where_2_inputs = [f"{cast_2_name}/output_0", f"/model/constants/{self.io_dtype}/0D/{np.finfo(self.to_numpy_dtype[self.io_dtype]).min}", f"{sub_name}/output_0"]
+        where_2_inputs = [f"{cast_2_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{np.finfo(self.to_numpy_dtype[self.io_dtype]).min}", f"{sub_name}/output_0"]
         self.make_where(where_2_name, where_2_inputs, dtype=self.io_dtype, shape=["unk", "unk", "unk", "unk"])
 
         return where_2_name
@@ -1027,6 +1091,7 @@ class Model:
         self.make_expand(expand_name, expand_inputs, dtype=expand_dtype, shape=expand_shape)
 
         return expand_name
+
 
 class LlamaModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -1243,33 +1308,43 @@ def parse_extra_options(kv_items):
         for kv_str in kv_items:
             kv = kv_str.split('=')
             kv_pairs[kv[0].strip()] = kv[1].strip()
-    print(kv_pairs)
+
+    print(f"Extra options: {kv_pairs}")
     return kv_pairs
 
 
-def create_model(args):
-    extra_kwargs = {} if os.path.exists(args.model_name_or_path) else {"cache_dir": args.cache_dir, "use_auth_token": True}
-    config = AutoConfig.from_pretrained(args.model_name_or_path, **extra_kwargs)
+def create_model(model_name_or_path, output_dir, precision, execution_provider, cache_dir, **extra_options):
+    os.makedirs(cache_dir, exist_ok=True)
+    extra_kwargs = {} if os.path.exists(model_name_or_path) else {"cache_dir": cache_dir, "use_auth_token": True}
+    config = AutoConfig.from_pretrained(model_name_or_path, **extra_kwargs)
 
-    extra_options = parse_extra_options(args.extra_options)
+    # Set input/output precision of ONNX model
+    io_dtype = TensorProto.FLOAT if precision in {"int8", "fp32"} or (precision == "int4" and execution_provider == "cpu") else TensorProto.FLOAT16
+
     if config.architectures[0] == "LlamaForCausalLM":
-        onnx_model = LlamaModel(config, args.io_dtype, args.precision, args.execution_provider, args.cache_dir, extra_options)
+        onnx_model = LlamaModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "MistralForCausalLM":
-        onnx_model = MistralModel(config, args.io_dtype, args.precision, args.execution_provider, args.cache_dir, extra_options)
+        onnx_model = MistralModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "PhiForCausalLM":
-        onnx_model = PhiModel(config, args.io_dtype, args.precision, args.execution_provider, args.cache_dir, extra_options)
+        onnx_model = PhiModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
     else:
-        raise NotImplementedError(f"The {args.model_name_or_path} model is not currently supported.")
+        raise NotImplementedError(f"The {model_name_or_path} model is not currently supported.")
 
     # Make ONNX model
     onnx_model.make_model()
 
     # Save ONNX model
-    onnx_model.save(args.output)
+    onnx_model.save_model(output_dir)
+
+    # Make GenAI config
+    onnx_model.make_genai_config(model_name_or_path, extra_kwargs, output_dir)
+
+    # Copy Hugging Face processing files to output folder
+    onnx_model.save_processing(model_name_or_path, extra_kwargs, output_dir)
 
 
 def get_args():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(formatter_class=argparse.RawTextHelpFormatter)
 
     parser.add_argument(
         "-m",
@@ -1282,8 +1357,7 @@ def get_args():
         "-o",
         "--output",
         required=True,
-        default=os.path.join(".", "model.onnx"),
-        help="Path to ONNX model (with external data files saved in the same folder as the model)",
+        help="Path to folder containing ONNX model and additional files (e.g. GenAI config, external data files, etc.)",
     )
 
     parser.add_argument(
@@ -1316,29 +1390,26 @@ def get_args():
         required=False,
         metavar="KEY=VALUE",
         nargs='+',
-        default="",
-        help="""
-            Key value pairs for various options. Currently support:
+        help=textwrap.dedent("""\
+            Key value pairs for various options. Currently supports:
                 int4_block_size = 16/32/64/128/256: Specify the block_size for int4 quantization.
-                int4_accuracy_level = 1/2/3/4: Specify the minimum accuracy level for activation of matmul in int4 quantization.
-                                          4 is int8, which means input A of int4 quantized matmul is quantized to int8 and input B is upcasted to int8 for computation.
-                                          1 is fp32, 2 is fp16, and 3 is bf16.
-            """,
+                int4_accuracy_level = 1/2/3/4: Specify the minimum accuracy level for activation of MatMul in int4 quantization.
+                    4 is int8, which means input A of int4 quantized MatMul is quantized to int8 and input B is upcasted to int8 for computation.
+                    3 is bf16.
+                    2 is fp16.
+                    1 is fp32.
+                num_hidden_layers = Manually specify the number of layers in your ONNX model (for unit testing purposes).
+                filename = Filename for ONNX model (default is 'model.onnx').
+                    For models with multiple components, each component is exported to its own ONNX model.
+                    The filename for each component will be '<filename>_<component-name>.onnx' (ex: '<filename>_encoder.onnx', '<filename>_decoder.onnx').
+            """),
     )
 
     args = parser.parse_args()
-
     print("Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, INT4 CPU, INT4 CUDA")
-
-    # Set input/output precision of ONNX model
-    if args.precision in {"int8", "fp32"} or (args.precision == "int4" and args.execution_provider == "cpu"):
-        io_dtype = TensorProto.FLOAT
-    else:
-        io_dtype = TensorProto.FLOAT16
-    setattr(args, "io_dtype", io_dtype)
-    
     return args
 
 if __name__ == '__main__':
     args = get_args()
-    create_model(args)
+    extra_options = parse_extra_options(args.extra_options)
+    create_model(args.model_name_or_path, args.output, args.precision, args.execution_provider, args.cache_dir, **extra_options)

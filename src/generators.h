@@ -31,6 +31,9 @@ struct Model;
 struct State;
 struct Search;
 
+// Token sequences are a vector of int32 vectors
+using TokenSequences = std::vector<std::vector<int32_t>>;
+
 // If we don't include cuda_runtime.h, we define this to avoid lots of extra #ifdefs
 #ifndef USE_CUDA
 using cudaStream_t = void*;
@@ -57,6 +60,8 @@ ProviderOptions GetDefaultProviderOptions(DeviceType device_type);
 struct GeneratorParams {
   GeneratorParams() = default;  // This constructor is only used if doing a custom model handler vs built-in
   GeneratorParams(const Model& model);
+
+  void SetInputSequences(const TokenSequences& sequences);
 
   // Values copied from config
   int pad_token_id{};
@@ -100,6 +105,9 @@ struct GeneratorParams {
   };
 
   std::variant<Whisper> inputs;
+
+ private:
+  std::unique_ptr<int32_t[]> input_ids_owner_;
 };
 
 struct Generator {

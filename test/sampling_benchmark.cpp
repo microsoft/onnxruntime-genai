@@ -265,4 +265,46 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopPAndKCuda) {
             << average_time << " microseconds" << std::endl;
 }
 
+TEST(Benchmarks, BenchmarkRandomizedSelectTopCuda) {
+  std::unique_ptr<OrtEnv> g_ort_env;
+  Ort::InitApi();
+  g_ort_env = OrtEnv::Create();
+  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  int vocab_size = 32000;  // vocab size of llama
+  int batch_size = 12;
+  std::vector<int32_t> input_ids{0, 1, 2, 3, 4};
+  Generators::GeneratorParams params = Generators::GeneratorParams{};
+  params.max_length = 10;
+  params.batch_size = batch_size;
+  params.sequence_length = 1;
+  params.vocab_size = vocab_size;
+  params.input_ids = input_ids;
+  params.device_type = Generators::DeviceType::CUDA;
+  auto logits_gpu = Generators::CudaMallocArray<float>(vocab_size * batch_size);
+  auto indices_buffer = Generators::CudaMallocArray<int>(vocab_size * batch_size);
+  float* cpu_logits = new float[vocab_size * batch_size];
+  std::random_device rd;
+  std::mt19937 engine(rd());
+  std::uniform_int_distribution<> dist(1, 25);
+  double total_time = 0.0;
+  int num_iter = 1000;
+  for (int i = 0; i < num_iter; i++) {
+    int num_large = dist(engine);
+    auto generator = Generators::CreateGenerator(*model, params);
+    LaunchGeometricDecayKernel(logits_gpu.get(), vocab_size, batch_size, num_large, 20.0f, params.cuda_stream);
+    LaunchFisherYatesKernel(logits_gpu.get(), indices_buffer.get(), vocab_size, batch_size, params.cuda_stream);
+    cudaMemcpy(cpu_logits, logits_gpu.get(), vocab_size * batch_size * sizeof(float), cudaMemcpyDeviceToHost);
+    generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), vocab_size * batch_size));
+    cudaStreamSynchronize(params.cuda_stream);
+    auto start = std::chrono::high_resolution_clock::now();
+    generator->search_->SelectTop();
+    auto stop = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
+    total_time += duration.count();
+  }
+  double average_time = total_time / double(num_iter);
+  std::cout << "Average time taken by Top1: "
+            << average_time << " microseconds" << std::endl;
+}
+
 #endif
