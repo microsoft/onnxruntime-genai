@@ -1,9 +1,4 @@
 parameters:
-- name: build_py_parameters
-  displayName: >
-    Extra parameters to pass to build.py. Don't put newlines in here.
-  type: string
-  default: ''
 
 - name: enable_linux_cpu
   displayName: 'Whether Linux CPU package is built.'
@@ -126,7 +121,6 @@ stages:
           workingDirectory: '$(Build.BinariesDirectory)'
           displayName: 'Install python modules'
 
-      - template: download-deps.yml
 
       - task: PythonScript@0
         displayName: 'Update deps.txt'
