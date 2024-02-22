@@ -41,6 +41,9 @@ jobs:
         run: |
           mv ${{ env.ort_dir }} ort
 
+      - name: Print nvidia-smi
+        run: |
+          nvidia-smi
       - name: Download Docker Image
         run: |
           set -e -x
@@ -58,7 +61,7 @@ jobs:
       - name: Check CUDA Info
         run: |
             echo "Finding CUDA version"
-            docker run --rm onnxruntimegpubuild bash -c "nvcc --version && which nvcc && nvidia-smi"
+            docker run --rm onnxruntimegpubuild bash -c "nvcc --version && which nvcc"
 
       - name: Docker -- Configure with CMake and GCC
         run: |
