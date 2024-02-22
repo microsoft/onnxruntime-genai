@@ -5,7 +5,7 @@
 #include <memory>
 #include <numeric>
 #include <random>
-#include <span>
+#include "span.h"
 #include "beam_search_topk.h"
 #include "cuda_sampling.cuh"
 #include "smartptrs.h"

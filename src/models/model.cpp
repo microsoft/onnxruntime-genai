@@ -90,6 +90,23 @@ std::string Tokenizer::Decode(std::span<const int32_t> tokens) const {
 }
 #endif
 
+#if USE_CUDA
+// Since Python/Others can and will hold onto a generator object past the model object's lifetime we need to ensure
+// the allocator used is not destroyed until last. This keeps the allocator around until exit, after all other memory
+// has been destroyed. Without this, we will crash in the Onnxruntime BFCArena code when deleting tensors due to the
+// arena already being destroyed.
+Ort::Allocator* GetCudaAllocator(OrtSession& session) {
+  static std::unique_ptr<OrtMemoryInfo> memory_info_cuda_;
+  static std::unique_ptr<Ort::Allocator> allocator_cuda_;
+
+  if (!allocator_cuda_) {
+    memory_info_cuda_ = OrtMemoryInfo::Create("Cuda", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+    allocator_cuda_ = Ort::Allocator::Create(session, *memory_info_cuda_);
+  }
+  return allocator_cuda_.get();
+}
+#endif
+
 Model::Model(std::unique_ptr<Config> config, const ProviderOptions* provider_options) : config_{std::move(config)} {
   session_options_ = OrtSessionOptions::Create();
 
@@ -110,9 +127,7 @@ void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
   allocator_device_ = &allocator_cpu_;
 #if USE_CUDA
   if (device_type_ == DeviceType::CUDA) {
-    memory_info_cuda_ = OrtMemoryInfo::Create("Cuda", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-    allocator_cuda_ = Ort::Allocator::Create(session, *memory_info_cuda_);
-    allocator_device_ = allocator_cuda_.get();
+    allocator_device_ = GetCudaAllocator(session);
   }
 #endif
 }
