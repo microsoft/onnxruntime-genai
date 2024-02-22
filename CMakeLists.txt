@@ -127,8 +127,6 @@ if(ENABLE_TESTS)
   message("------------------Enabling tests------------------")
 endif()
 
-set(WHEEL_FILES_DIR "${CMAKE_BINARY_DIR}/wheel")
-
 if(ENABLE_PYTHON)
   add_subdirectory("${CMAKE_SOURCE_DIR}/src/python")
   message("------------------Enabling Python Wheel------------------")

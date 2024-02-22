@@ -1,14 +1,4 @@
 parameters:
-- name: enable_linux_cpu
-  displayName: 'Whether Linux CPU package is built.'
-  type: boolean
-  default: true
-
-- name: enable_linux_gpu
-  displayName: 'Whether Linux GPU package is built.'
-  type: boolean
-  default: true
-
 - name: enable_windows_cpu
   displayName: 'Whether Windows CPU package is built.'
   type: boolean
@@ -17,10 +7,20 @@ parameters:
 - name: enable_windows_gpu
   displayName: 'Whether Windows GPU package is built.'
   type: boolean
-  default: true
+  default: false
 
-- name: enable_mac_cpu
-  displayName: 'Whether Mac CPU package is built.'
+- name: enable_windows_arm
+  displayName: 'Whether Windows ARM package is built.'
+  type: boolean
+  default: false
+
+- name: enable_linux_cpu
+  displayName: 'Whether Linux CPU package is built.'
+  type: boolean
+  default: false
+
+- name: enable_linux_gpu
+  displayName: 'Whether Linux GPU package is built.'
   type: boolean
   default: false
 
@@ -28,49 +28,25 @@ parameters:
   displayName: 'Whether Linux ARM package is built.'
   type: boolean
   default: false
-resources:
-  repositories:
-  - repository: manylinux
-    type: Github
-    endpoint: Microsoft
-    name: pypa/manylinux
-    ref: 5eda9aded5462201e6310105728d33016e637ea7
+
+variables:
+  NIGHTLY_BUILD: 1
+
+#resources:
+#  repositories:
+#  - repository: manylinux
+#    type: Github
+#    endpoint: Microsoft
+#    name: pypa/manylinux
+#    ref: 5eda9aded5462201e6310105728d33016e637ea7
+
 trigger: none
 stages:
-- template: templates/py-packaging-stage.yml
+- template: stages/py-packaging-stage.yml
   parameters:
     enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
     enable_linux_gpu: ${{ parameters.enable_linux_gpu }}
+    enable_linux_arm: ${{ parameters.enable_linux_arm }}
     enable_windows_cpu: ${{ parameters.enable_windows_cpu }}
     enable_windows_gpu: ${{ parameters.enable_windows_gpu }}
-    enable_mac_cpu: ${{ parameters.enable_mac_cpu }}
-    enable_linux_arm: ${{ parameters.enable_linux_arm }}
-
-- stage: win-cpu-x64
-  jobs:
-  - job: win-cpu-x64
-    workspace:
-      clean: all
-    pool:
-      onnxruntime-Win-CPU-2022
-- stage: win-gpu-x64
-  jobs:
-  - job: win-gpu-x64
-    workspace:
-      clean: all
-    pool:
-      onnxruntime-Win2022-GPU-A10
-- stage: linux-cpu-x64
-  jobs:
-  - job: linux-cpu-x64
-    workspace:
-      clean: all
-    pool:
-      onnxruntime-Ubuntu2204-AMD-CPU
-- stage: linux-gpu-x64
-  jobs:
-  - job: linux-gpu-x64
-    workspace:
-      clean: all
-    pool:
-      onnxruntime-Ubuntu2204-AMD-CPU
+    enable_windows_arm: ${{ parameters.enable_windows_arm }}
