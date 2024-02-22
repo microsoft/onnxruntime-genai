@@ -100,6 +100,7 @@ struct GeneratorParams {
   };
 
   std::variant<Whisper> inputs;
+  std::unique_ptr<int32_t[]> input_ids_owner_;
 };
 
 struct Generator {

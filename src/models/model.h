@@ -97,13 +97,4 @@ struct Model {
   void InitDeviceAllocator(OrtSession& session);
 };
 
-#if USE_CUDA
-namespace cuda {
-
-void LaunchFp16ToFp32(const uint16_t* fp16, float* fp32, int count, cudaStream_t stream);
-void LaunchInt32ToInt64(const int32_t* src, int64_t* dst, int count, cudaStream_t stream);
-
-}  // namespace cuda
-#endif
-
 }  // namespace Generators

@@ -5,16 +5,22 @@
 namespace Generators {
 namespace cuda {
 
-__global__ void Gpt_UpdatePositionIds(int32_t* positions, int batch_beam_size, int current_length) {
+template<typename T>
+__global__ void UpdatePositionIds(T* positions, int batch_beam_size) {
   for (int i = 0; i < batch_beam_size; i++)
-    positions[i] = current_length - 1;
+    positions[i]++;
 }
 
-void LaunchGpt_UpdatePositionIds(int32_t* positions, int batch_beam_size, int current_length, cudaStream_t stream) {
-  Gpt_UpdatePositionIds<<<1, 1, 0, stream>>>(positions, batch_beam_size, current_length);
+template<typename T>
+void Launch_UpdatePositionIds(T* positions, int batch_beam_size, cudaStream_t stream) {
+  UpdatePositionIds<<<1, 1, 0, stream>>>(positions, batch_beam_size);
 }
 
-__global__ void Gpt_UpdateMask(int32_t* mask_data, const int32_t* old_mask_data, int batch_beam_size, int current_length) {
+template void Launch_UpdatePositionIds(int32_t* positions, int batch_beam_size, cudaStream_t stream);
+template void Launch_UpdatePositionIds(int64_t* positions, int batch_beam_size, cudaStream_t stream);
+
+template<typename T>
+__global__ void UpdateAttentionMask(T* mask_data, const T* old_mask_data, int batch_beam_size, int current_length) {
   for (int i = 0; i < batch_beam_size; i++) {
     for (int j = 0; j < current_length - 1; j++) {
       mask_data[i * current_length + j] = old_mask_data[i * (current_length - 1) + j];
@@ -23,32 +29,13 @@ __global__ void Gpt_UpdateMask(int32_t* mask_data, const int32_t* old_mask_data,
   }
 }
 
-void LaunchGpt_UpdateMask(int32_t* mask_data, const int32_t* old_mask_data, int batch_beam_size, int current_length, cudaStream_t stream) {
-  Gpt_UpdateMask<<<1, 1, 0, stream>>>(mask_data, old_mask_data, batch_beam_size, current_length);
+template<typename T>
+void Launch_UpdateAttentionMask(T* mask_data, const T* old_mask_data, int batch_beam_size, int current_length, cudaStream_t stream) {
+  UpdateAttentionMask<<<1, 1, 0, stream>>>(mask_data, old_mask_data, batch_beam_size, current_length);
 }
 
-__global__ void Gpt_UpdatePositionIds(int64_t* positions, int batch_beam_size, int current_length) {
-  for (int i = 0; i < batch_beam_size; i++) {
-    positions[i] = current_length - 1;
-  }
-}
-
-void LaunchGpt_UpdatePositionIds(int64_t* positions, int batch_beam_size, int current_length, cudaStream_t stream) {
-  Gpt_UpdatePositionIds<<<1, 1, 0, stream>>>(positions, batch_beam_size, current_length);
-}
-
-__global__ void Gpt_UpdateMask(int64_t* mask_data, const int64_t* old_mask_data, int batch_beam_size, int current_length) {
-  for (int i = 0; i < batch_beam_size; i++) {
-    for (int j = 0; j < current_length - 1; j++) {
-      mask_data[i * current_length + j] = old_mask_data[i * (current_length - 1) + j];
-    }
-    mask_data[i * current_length + current_length - 1] = 1;
-  }
-}
-
-void LaunchGpt_UpdateMask(int64_t* mask_data, const int64_t* old_mask_data, int batch_beam_size, int current_length, cudaStream_t stream) {
-  Gpt_UpdateMask<<<1, 1, 0, stream>>>(mask_data, old_mask_data, batch_beam_size, current_length);
-}
+template void Launch_UpdateAttentionMask(int32_t* mask_data, const int32_t* old_mask_data, int batch_beam_size, int current_length, cudaStream_t stream);
+template void Launch_UpdateAttentionMask(int64_t* mask_data, const int64_t* old_mask_data, int batch_beam_size, int current_length, cudaStream_t stream);
 
 __global__ void ConvertFp16ToFp32(const half* src, float* dst, int count) {
   int idx = threadIdx.x + blockIdx.x * blockDim.x;

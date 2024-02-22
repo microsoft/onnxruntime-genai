@@ -116,6 +116,43 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputIDs(OgaGeneratorParams* oga_pa
   OGA_CATCH
 }
 
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputSequences(OgaGeneratorParams* oga_params, const OgaSequences* p_sequences) {
+  OGA_TRY
+  auto& params = *reinterpret_cast<Generators::GeneratorParams*>(oga_params);
+  auto& sequences = *reinterpret_cast<const Sequences*>(p_sequences);
+  const bool pad_right = true;
+
+  size_t max_length = 0;
+  for (auto& sequence : sequences)
+    max_length = std::max(max_length, sequence.size());
+
+  const size_t input_ids_count = max_length * sequences.size();
+
+  params.input_ids_owner_ = std::make_unique<int32_t[]>(input_ids_count);
+  auto input_ids = std::span<int32_t>(params.input_ids_owner_.get(), input_ids_count);
+  params.input_ids = input_ids;
+  params.sequence_length = static_cast<int>(max_length);
+  params.batch_size = static_cast<int>(sequences.size());
+
+  // Copy and pad the input sequences with pad_token_id
+  for (size_t sequence_index = 0; sequence_index < sequences.size(); sequence_index++) {
+    auto output_span = input_ids.subspan(sequence_index * max_length, max_length);
+    auto input_span = sequences[sequence_index];
+
+    auto pad_count = max_length - input_span.size();
+    if (pad_right) {
+      std::copy(input_span.begin(), input_span.end(), output_span.begin());
+      std::fill(output_span.end() - pad_count, output_span.end(), params.pad_token_id);
+    } else {
+      std::fill(output_span.begin(), output_span.begin() + pad_count, params.pad_token_id);
+      std::copy(input_span.begin(), input_span.end(), output_span.begin() + pad_count);
+    }
+  }
+
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaGenerate(const OgaModel* model, const OgaGeneratorParams* generator_params, OgaSequences** out) {
   OGA_TRY
   Sequences result = Generators::Generate(*reinterpret_cast<const Generators::Model*>(model), *reinterpret_cast<const Generators::GeneratorParams*>(generator_params));

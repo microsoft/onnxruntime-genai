@@ -7,6 +7,7 @@
 #include "mistral.h"
 #include "phi2.h"
 #include "whisper.h"
+#include "kernels.h"
 
 namespace Generators {
 
