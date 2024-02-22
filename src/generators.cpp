@@ -51,7 +51,7 @@ GeneratorParams::GeneratorParams(const Model& model)
 }
 
 void GeneratorParams::SetInputSequences(const TokenSequences& sequences) {
-  const bool pad_right = true; // FUTURE: Pull from model config, but default to padding on the right
+  const bool pad_right = true;  // FUTURE: Pull from model config, but default to padding on the right
 
   size_t max_count = 0;
   for (auto& sequence : sequences)
@@ -81,7 +81,6 @@ void GeneratorParams::SetInputSequences(const TokenSequences& sequences) {
     }
   }
 }
-
 
 ProviderOptions GetDefaultProviderOptions([[maybe_unused]] DeviceType device_type) {
   ProviderOptions options;
