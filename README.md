@@ -46,26 +46,38 @@ This step requires `cmake` to be installed.
 
    ```bash
    git clone https://github.com/microsoft/onnxruntime-genai
+   cd onnxruntime-genai
    ```
 
 2. Install ONNX Runtime
 
-These instructions are for the Linux GPU build of ONNX Runtime. Replace the location with the operating system and target of choice. 
+    * Install from release
 
-   ```bash
-   mkdir -p ort
-   cd ort
-   wget https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-linux-x64-gpu-1.17.0.tgz
-   tar xvzf onnxruntime-linux-x64-gpu-1.17.0.tgz 
-   mv onnxruntime-linux-x64-gpu-1.17.0/include .
-   mv onnxruntime-linux-x64-gpu-1.17.0/lib .
-   ```
+      These instructions are for the Linux GPU build of ONNX Runtime. Replace the location with the operating system and target of choice. 
+
+      ```bash
+      mkdir -p ort
+      cd ort
+      wget https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-linux-x64-gpu-1.17.0.tgz
+      tar xvzf onnxruntime-linux-x64-gpu-1.17.0.tgz 
+      mv onnxruntime-linux-x64-gpu-1.17.0/include .
+      mv onnxruntime-linux-x64-gpu-1.17.0/lib .
+      ```
+
+    * Or copy equivalent files from a local source build
+      ```
+      git clone https://github.com/microsoft/onnxruntime.git
+      cd onnxruntime
+      ./build.sh --build_shared_lib --skip_tests --parallel [--use_cuda] 
+      ```
 
 3. Build onnxruntime-genai
 
+   If you are building for CUDA, add the cuda_home and cudnn_home arguments.
+
    ```bash
    cd ..
-   python build.py --cuda_home <path_to_cuda_home> --cudnn_home <path_to_cudnn_home>
+   python build.py [--cuda_home <path_to_cuda_home> --cudnn_home <path_to_cudnn_home>]
    ```
    
 4. Install Python wheel

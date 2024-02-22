@@ -13,7 +13,7 @@ prompt = '''def print_prime(n):
 
 input_tokens = tokenizer.encode(prompt)
 
-params=og.SearchParams(model)
+params=og.GeneratorParams(model)
 params.max_length = 256
 params.input_ids = input_tokens
 
@@ -30,12 +30,12 @@ while not generator.is_done():
     # search.apply_minLength(1)
     # search.apply_repetition_penalty(1.0)
 
-    generator.generate_next_token_topp(0.7, 0.6)
+    generator.generate_next_token_top_p(0.7, 0.6)
 
     print(tokenizer.decode([generator.get_next_tokens().GetArray()[0]]), ' ', end='', flush=True)
 
     # Print sequence all at once vs as it's decoded:
-    print(tokenizer.decode(generator.get_sequence(0).GetArray()))
+    print(tokenizer.decode(generator.get_sequence(0).get_array()))
     
     print()
     print()

@@ -14,12 +14,12 @@ prompt = '''def print_prime(n):
 
 tokens = tokenizer.encode(prompt)
 
-params=og.SearchParams(model)
+params=og.GeneratorParams(model)
 params.max_length = 200
 params.input_ids = tokens
 
 start_time=time.time()
-output_tokens=model.generate(params)
+output_tokens=model.generate(params)[0]
 run_time=time.time()-start_time
 
 print(f"Tokens: {len(output_tokens)} Time: {run_time:.2f} Tokens per second: {len(output_tokens)/run_time:.2f}")

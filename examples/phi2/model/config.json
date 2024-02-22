@@ -19,6 +19,6 @@
   "eos_token_id": 2,
   "max_length": 4096,
   "min_length":0,
-  "top_p":0.7,
+  "top_k": 1,
   "temperature":0.6
 }

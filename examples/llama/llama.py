@@ -13,7 +13,7 @@ while True:
     text = input("Input:")
     input_tokens = tokenizer.encode(text)
 
-    params=og.SearchParams(model)
+    params=og.GeneratorParams(model)
     params.max_length = 64
     params.input_ids = input_tokens
 
