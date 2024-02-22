@@ -1,9 +1,9 @@
 parameters:
-- name: enable_windows_cpu
+- name: enable_win_cpu
   type: boolean
-- name: enable_windows_gpu
+- name: enable_win_gpu
   type: boolean
-- name: enable_windows_arm
+- name: enable_win_arm
   type: boolean
 - name: enable_linux_cpu
   type: boolean
@@ -13,12 +13,12 @@ parameters:
   type: boolean
 
 stages:
-- ${{ if eq(parameters.enable_windows_cpu, true) }}:
-  - template: jobs/py-windows-cpu-packaging-job.yml
-- ${{ if eq(parameters.enable_windows_gpu, true) }}:
-  - template: jobs/py-windows-gpu-packaging-job.yml
-- ${{ if eq(parameters.enable_windows_arm, true) }}:
-  - template: jobs/py-windows-cpu-packaging-job.yml
+- ${{ if eq(parameters.enable_win_cpu, true) }}:
+  - template: jobs/py-win-cpu-packaging-job.yml
+- ${{ if eq(parameters.enable_win_gpu, true) }}:
+  - template: jobs/py-win-gpu-packaging-job.yml
+- ${{ if eq(parameters.enable_win_arm, true) }}:
+  - template: jobs/py-win-cpu-packaging-job.yml
     parameters:
       arch: 'arm64'
 

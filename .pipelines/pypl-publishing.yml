@@ -1,15 +1,15 @@
 parameters:
-- name: enable_windows_cpu
+- name: enable_win_cpu
   displayName: 'Whether Windows CPU package is built.'
   type: boolean
   default: true
 
-- name: enable_windows_gpu
+- name: enable_win_gpu
   displayName: 'Whether Windows GPU package is built.'
   type: boolean
   default: false
 
-- name: enable_windows_arm
+- name: enable_win_arm
   displayName: 'Whether Windows ARM package is built.'
   type: boolean
   default: false
@@ -47,6 +47,6 @@ stages:
     enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
     enable_linux_gpu: ${{ parameters.enable_linux_gpu }}
     enable_linux_arm: ${{ parameters.enable_linux_arm }}
-    enable_windows_cpu: ${{ parameters.enable_windows_cpu }}
-    enable_windows_gpu: ${{ parameters.enable_windows_gpu }}
-    enable_windows_arm: ${{ parameters.enable_windows_arm }}
+    enable_win_cpu: ${{ parameters.enable_win_cpu }}
+    enable_win_gpu: ${{ parameters.enable_win_gpu }}
+    enable_win_arm: ${{ parameters.enable_win_arm }}

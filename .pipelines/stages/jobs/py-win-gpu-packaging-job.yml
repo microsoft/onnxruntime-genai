@@ -133,7 +133,7 @@ jobs:
     displayName: 'Clean Agent Directories'
     condition: always()
 
-#  - ${{ if eq(parameters.enable_windows_gpu, true) }}:
+#  - ${{ if eq(parameters.enable_win_gpu, true) }}:
 #      - template: py-win-gpu.yml
 #        parameters:
 #          MACHINE_POOL: 'onnxruntime-Win2022-GPU-T4'
