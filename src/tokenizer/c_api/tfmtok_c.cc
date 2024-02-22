@@ -1,10 +1,10 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+
 #include <filesystem>
 #include <algorithm>
 
 #include "tfmtok.h"
-
 
 namespace tfm {
 class TokenId2DArray : public TfmObjectImpl {
@@ -46,10 +46,8 @@ class DetokenizerCache : public TfmObjectImpl {
   DetokenizerCache() : TfmObjectImpl(tfmObjectKind_t::kTfmKindDetokenizerCache) {}
   ~DetokenizerCache() override = default;
 
-  [[nodiscard]] TfmStatus Detokenize(const std::vector<span<tfmTokenId_t const>>& token_ids,
-                                     std::vector<std::string>& output_text) const {
-    return {};
-  }
+  std::unique_ptr<DecoderState> decoder_state_{};
+  std::string last_text_{};  // last detokenized text
 };
 
 }  // namespace tfm
@@ -126,6 +124,7 @@ tfmError_t TFM_API_CALL TfmCreateTokenizer(TfmTokenizer** tokenizer,
     return tfmError_t();
   }
 
+  last_error_message = status.error_message();
   return status.code();
 }
 
@@ -194,6 +193,7 @@ tfmError_t TFM_API_CALL TfmTokenize(const TfmTokenizer* tokenizer,
 tfmError_t TFM_API_CALL TfmDetokenize(const TfmTokenizer* tokenizer,
                                       const TfmTokenId2DArray* input, TfmStringArray** output) {
   if (tokenizer == nullptr || input == nullptr || output == nullptr) {
+    last_error_message = "Invalid argument";
     return kTfmErrorInvalidArgument;
   }
 
@@ -339,21 +339,30 @@ tfmError_t TFM_API_CALL TfmTokenId2DArrayGetItem(const TfmTokenId2DArray* token_
   return tfmError_t();
 }
 
-tfmError_t TfmDetokenizeCached(const TfmDetokenizerCache* cache,
-                               const TfmTokenId2DArray* input,
-                               TfmStringArray** output) {
-  if (cache == nullptr || input == nullptr || output == nullptr) {
+tfmError_t TfmDetokenizeCached(const TfmTokenizer* tokenizer,
+                               TfmDetokenizerCache* cache,
+                               tfmTokenId_t next_id, const char** text_out) {
+  if (tokenizer == nullptr || cache == nullptr || text_out == nullptr) {
     last_error_message = "Invalid argument";
     return kTfmErrorInvalidArgument;
   }
 
-  const auto token_ptr = static_cast<const DetokenizerCache*>(cache);
-  ReturnableStatus status(token_ptr->IsInstanceOf(tfmObjectKind_t::kTfmKindDetokenizerCache));
+  const auto token_ptr = static_cast<const Tokenizer*>(cache);
+  ReturnableStatus status(token_ptr->IsInstanceOf(tfmObjectKind_t::kTfmKindTokenizer));
   if (!status.ok()) {
     return status.code();
   }
 
-  // TODO: implement
+  auto cache_ptr = static_cast<DetokenizerCache*>(cache);
+  status = ReturnableStatus(token_ptr->IsInstanceOf(tfmObjectKind_t::kTfmKindDetokenizerCache));
+  if (!status.ok()) {
+    return status.code();
+  }
 
-  return kTfmErrorUnimplemented;
+  status = ReturnableStatus(token_ptr->Id2Token(next_id, cache_ptr->last_text_, cache_ptr->decoder_state_));
+  if (status.ok()) {
+    *text_out = cache_ptr->last_text_.c_str();
+  }
+
+  return status.code();
 }

@@ -17,6 +17,12 @@ class BPETokenizer : public TokenizerImpl {
  public:
   BPETokenizer();
   ~BPETokenizer() override;
+  class BPEDeocerState : public DecoderState {
+   public:
+    BPEDeocerState() = default;
+    ~BPEDeocerState() override = default;
+    bool f_special_last;
+  };
 
  public:
   TfmStatus Onload() override;
@@ -24,7 +30,11 @@ class BPETokenizer : public TokenizerImpl {
   TfmStatus Decode(const span<tfmTokenId_t const>& ids, std::string& text) const override;
   std::string_view ModelName() const;
 
+  TfmStatus Id2Token(tfmTokenId_t id, std::string& token, DecoderState** state) const override;
+
  private:
+  TfmStatus Id2Token(tfmTokenId_t id, std::string& token, bool skip_special_tokens, bool& f_special_last) const;
+
   using OffsetMappingType = std::list<std::pair<size_t, size_t>>;
   std::vector<tfmTokenId_t> Encode(std::string_view sv_input,
                                    int64_t max_length,
