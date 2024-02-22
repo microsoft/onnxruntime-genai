@@ -60,7 +60,6 @@ def test_batching(device, test_data_path, relative_model_path):
     model = og.Model(model_path, device)
     tokenizer = model.create_tokenizer()
 
-    '''
     prompts = [
       "This is a test.",
       "Rats are awesome pets!",
@@ -73,4 +72,3 @@ def test_batching(device, test_data_path, relative_model_path):
 
     output_sequences = model.generate(params)
     print(tokenizer.decode_batch(output_sequences))
-    '''
