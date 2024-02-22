@@ -40,10 +40,9 @@ jobs:
 
   - template: steps/set-nightly-build-option-variable-step.yml
 
-
   - bash: |
       pip install -r scripts\requirements.txt
-      python3 scripts\download_onnxruntime.py --is_gpu $(isGPU)
+      python3 scripts\download_onnxruntime.py --ort_version 1.17.0
     displayName: Download OnnxRuntime
     workingDirectory: $(Build.SourcesDirectory)
 
@@ -53,12 +52,8 @@ jobs:
       scriptPath: '$(Build.SourcesDirectory)\scripts\download_onnxruntime.py'
       arguments: >
         --ort_version 1.17.0
-        --is_gpu $(isGPU)
       workingDirectory: '$(Build.SourcesDirectory)'
-  - ${{ if eq(variables['isGPU'], 'True') }}:
-    - bash: |
 
-      displayName: 'Download CUDA'
 
   - task: VSBuild@1
     displayName: 'Build'

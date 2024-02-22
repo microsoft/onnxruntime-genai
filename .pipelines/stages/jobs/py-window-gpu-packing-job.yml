@@ -1,25 +1,22 @@
 jobs:
-- job: Windows_CPU_Wheels
+- job: Windows_GPU_Wheels
   pool: 'onnxruntime-Win-CPU-2022'
   strategy:
     matrix:
-      Python38_x64:
+      Python38:
         PythonVersion: '3.8'
-        buildArch: x64
-      Python39_x64:
+      Python39:
         PythonVersion: '3.9'
-        buildArch: x64
-      Python310_x64:
+      Python310:
         PythonVersion: '3.10'
-        buildArch: x64
-      Python311_x64:
+      Python311:
         PythonVersion: '3.11'
-        buildArch: x64
-      Python312_x64:
+      Python312:
         PythonVersion: '3.12'
-        buildArch: x64
   variables:
     BuildConfig: 'RelWithDebInfo'
+    cuda_version: '12.2'
+    cuda_dir: "$(Build.SourcesDirectory)\\cuda_sdk"
   timeoutInMinutes: 180
   workspace:
     clean: all
@@ -53,12 +50,15 @@ jobs:
       scriptPath: '$(Build.SourcesDirectory)\scripts\download_onnxruntime.py'
       arguments: >
         --ort_version 1.17.0
-        --is_gpu $(isGPU)
+        --is_gpu True
       workingDirectory: '$(Build.SourcesDirectory)'
-  - ${{ if eq(variables['isGPU'], 'True') }}:
-    - bash: |
+  - task: Bash@3
+    displayName: 'Download CUDA'
+    inputs:
+      targetType: 'inline'
+      script: |
+        azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" ${{ env.cuda_dir}}
 
-      displayName: 'Download CUDA'
 
   - task: VSBuild@1
     displayName: 'Build'
@@ -131,32 +131,3 @@ jobs:
   - task: mspremier.PostBuildCleanup.PostBuildCleanup-task.PostBuildCleanup@3
     displayName: 'Clean Agent Directories'
     condition: always()
-- job: Windows_GPU_Wheels
-  pool: 'onnxruntime-Win-CPU-2022'
-  strategy:
-    matrix:
-      Python38:
-        PythonVersion: '3.8'
-      Python39:
-        PythonVersion: '3.9'
-      Python310:
-        PythonVersion: '3.10'
-      Python311:
-        PythonVersion: '3.11'
-      Python312:
-        PythonVersion: '3.12'
-  variables:
-    BuildConfig: 'RelWithDebInfo'
-    cuda_version: '12.2'
-    cuda_dir: "$(Build.SourcesDirectory)\\cuda_sdk"
-  timeoutInMinutes: 180
-  workspace:
-    clean: all
-  steps:
-    # might need non-py deps
-  - task: Bash@3
-    displayName: 'Download CUDA'
-    inputs:
-      targetType: 'inline'
-      script: |
-        azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" ${{ env.cuda_dir}}
