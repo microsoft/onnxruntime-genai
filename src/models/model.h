@@ -69,6 +69,10 @@ struct Tokenizer {
   std::vector<int32_t> Encode(const char* text) const;
   std::string Decode(std::span<const int32_t> tokens) const;
 
+  TokenSequences EncodeBatch(std::span<const char*> strings) const;
+  TokenSequences EncodeBatch(std::span<const std::string> strings) const;
+  std::vector<std::string> DecodeBatch(const TokenSequences& sequences) const;
+
   TfmPtr<TfmTokenizer> tokenizer_;
 };
 #endif
@@ -93,14 +97,5 @@ struct Model {
  protected:
   void InitDeviceAllocator(OrtSession& session);
 };
-
-#if USE_CUDA
-namespace cuda {
-
-void LaunchFp16ToFp32(const uint16_t* fp16, float* fp32, int count, cudaStream_t stream);
-void LaunchInt32ToInt64(const int32_t* src, int64_t* dst, int count, cudaStream_t stream);
-
-}  // namespace cuda
-#endif
 
 }  // namespace Generators

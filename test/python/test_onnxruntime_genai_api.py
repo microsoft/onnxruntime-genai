@@ -21,7 +21,7 @@ def test_greedy_search(device, test_data_path, relative_model_path):
 
     model = og.Model(model_path, device)
 
-    search_params = og.SearchParams(model)
+    search_params = og.GeneratorParams(model)
     search_params.input_ids = np.array(
         [[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32
     )
@@ -49,3 +49,30 @@ def test_greedy_search(device, test_data_path, relative_model_path):
     sequences = model.generate(search_params)
     for i in range(len(sequences)):
         assert sequences[i] == expected_sequence[i].tolist()
+
+'''
+TODO: Enable once the phi-2 model exists
+
+@pytest.mark.parametrize("device", [og.DeviceType.CPU])
+@pytest.mark.parametrize("relative_model_path", [Path("phi-2")])
+def test_batching(device, test_data_path, relative_model_path):
+    model_path = os.fspath(
+        Path(test_data_path) / relative_model_path
+    )
+
+    model = og.Model(model_path, device)
+    tokenizer = model.create_tokenizer()
+
+    prompts = [
+      "This is a test.",
+      "Rats are awesome pets!",
+      "The quick brown fox jumps over the lazy dog.",
+    ]
+
+    params=og.GeneratorParams(model)
+    params.max_length=20 # To run faster
+    params.set_input_sequences(tokenizer.encode_batch(prompts))
+
+    output_sequences = model.generate(params)
+    print(tokenizer.decode_batch(output_sequences))
+'''
