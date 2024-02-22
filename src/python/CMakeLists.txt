@@ -23,59 +23,6 @@ if(BUILD_WHEEL)
   # Copy over any additional python files
   file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/py/" DESTINATION ${WHEEL_FILES_DIR}/${TARGET_NAME}/)
 
-  # file(GLOB_RECURSE pyfiles "${CMAKE_CURRENT_SOURCE_DIR}/*.py")
-  # foreach(filename ${pyfiles})
-  #   get_filename_component(target "${filename}" NAME)
-  #   message(STATUS "Copying ${filename} to ${target}")
-  #   configure_file("${filename}" "${WHEEL_FILES_DIR}/${TARGET_NAME}" COPYONLY)
-  # endforeach(filename)
-
-  # Copy over all python files
-  # file(GLOB_RECURSE pyfiles "${CMAKE_CURRENT_SOURCE_DIR}/*.py")
-  # foreach(filename ${pyfiles})
-  #   # Get current source path without filename
-  #   get_filename_component(source_path_to_file "${filename}" DIRECTORY)
-
-  #   # Get relative directory within source path without filename
-  #   string(REPLACE "${CMAKE_CURRENT_SOURCE_DIR}" "" dir_to_create source_path_to_file)
-
-  #   # Create directory if it doesn't exist
-  #   file(MAKE_DIRECTORY dir_to_create)
-
-  #   # Get filename
-  #   get_filename_component(target "${filename}" NAME)
-
-  #   # Copy file to new directory
-  #   message(STATUS "Copying ${filename} to ${WHEEL_FILES_DIR}/${TARGET_NAME}/${dir_to_create}")
-  #   configure_file("${filename}" "${WHEEL_FILES_DIR}/${TARGET_NAME}/${dir_to_create}" COPYONLY)
-  # endforeach(filename)
-
-  # Copy over model builder python files
-  # file(GLOB_RECURSE model_builder_files "${CMAKE_CURRENT_SOURCE_DIR}/models/*.py")
-  # foreach(filename ${model_builder_files})
-  #   get_filename_component(target "${filename}" NAME)
-  #   message(STATUS "Current source dir is ${CMAKE_CURRENT_SOURCE_DIR}")
-  #   message(STATUS "Wheel files dir is ${WHEEL_FILES_DIR}")
-  #   message(STATUS "Target name is ${TARGET_NAME}")
-  #   message(STATUS "Copying ${filename} to ${target}")
-  #   configure_file("${filename}" "${WHEEL_FILES_DIR}/${TARGET_NAME}" COPYONLY)
-  # endforeach(filename)
-  # add_custom_target(copy-runtime-files ALL
-  #   COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/models ${CMAKE_BINARY_DIR}/models
-  #   DEPENDS ${MY_TARGET})
-
-  # Copy 'models' directory to wheel
-  # file(GLOB model_builder_files CONFIGURE_DEPENDS
-  #     "${CMAKE_CURRENT_SOURCE_DIR}/src/python/models/*.py"
-  # )
-  # add_custom_command(
-  #   TARGET python POST_BUILD
-  #   COMMAND ${CMAKE_COMMAND} -E make_directory ${WHEEL_FILES_DIR}/${TARGET_NAME}/models
-  #   COMMAND ${CMAKE_COMMAND} -E copy
-  #       ${model_builder_files}
-  #       ${WHEEL_FILES_DIR}/${TARGET_NAME}/models/
-  # )
-
   file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_FILES}")
   add_custom_target(PyPackageBuild ALL
     # COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/" "${WHEEL_FILES_DIR}/"
