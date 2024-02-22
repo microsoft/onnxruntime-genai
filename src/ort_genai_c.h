@@ -49,6 +49,7 @@ typedef struct OgaBuffer OgaBuffer;
 typedef struct OgaSequences OgaSequences;
 typedef struct OgaTokenizer OgaTokenizer;
 typedef struct OgaTokenizerStream OgaTokenizerStream;
+typedef struct OgaStringArray OgaStringArray;
 
 /*
  * \param[in] result OgaResult that contains the error message.
@@ -145,7 +146,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetMaxLength(OgaGeneratorPa
 
 /*
  * \brief Sets the input ids for the generator params. The input ids are used to seed the generation.
- * \param[in] params The generator params to set the input ids on.
+ * \param[in] generator_params The generator params to set the input ids on.
  * \param[in] input_ids The input ids array of size input_ids_count = batch_size * sequence_length.
  * \param[in] input_ids_count The total number of input ids.
  * \param[in] sequence_length The sequence length of the input ids.
@@ -155,6 +156,12 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetMaxLength(OgaGeneratorPa
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputIDs(OgaGeneratorParams* generator_params, const int32_t* input_ids,
                                                                  size_t input_ids_count, size_t sequence_length, size_t batch_size);
 
+/*
+ * \brief Sets the input id sequences for the generator params. The input id sequences are used to seed the generation.
+ * \param[in] generator_params The generator params to set the input ids on.
+ * \param[in] sequences The input id sequences.
+ * \return OgaResult containing the error message if the setting of the input id sequences failed.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputSequences(OgaGeneratorParams* generator_params, const OgaSequences* sequences);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperInputFeatures(OgaGeneratorParams*, const int32_t* inputs, size_t count);
@@ -218,9 +225,8 @@ OGA_EXPORT const int32_t* OGA_API_CALL OgaGenerator_GetSequence(const OgaGenerat
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTokenizer(const OgaModel* model, OgaTokenizer** out);
 OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizer(OgaTokenizer*);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncodeBatch(const OgaTokenizer*, const char** strings, size_t count, OgaSequences** out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerDecodeBatch(const OgaTokenizer*, const OgaSequences* tokens, const char*** out_strings);
-OGA_EXPORT void OGA_API_CALL OgaTokenizerDestroyStrings(const char** strings, size_t count);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncodeBatch(const OgaTokenizer*, const OgaStringArray* string_array, OgaSequences** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerDecodeBatch(const OgaTokenizer*, const OgaSequences* tokens, OgaStringArray** out_strings);
 
 /* Decode a single token sequence and returns a null terminated utf8 string. out_string must be freed with OgaDestroyString
  */
@@ -237,6 +243,49 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizerStream(OgaTokenizerStream*);
  * 'out' is valid until the next call to OgaTokenizerStreamDecode or when the OgaTokenizerStream is destroyed
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream*, int32_t token, const char** out);
+
+/*
+ * \brief Creates an object of type OgaStringArray.
+ * \return The result of the operation. If the operation is successful, a nullptr is returned.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateStringArray(OgaStringArray** out);
+
+/*
+ * \brief Destroys OgaStringArray.
+ */
+OGA_EXPORT void OGA_API_CALL OgaDestroyStringArray(OgaStringArray* string_array);
+
+/*
+ * \brief Adds the given string to the OgaStringArray.
+ * \param[inout] string_array The string array to which the string is to be added
+ * \param[in] str The string to be added to the OgaStringArray.
+ * \return The result of the operation. If the operation is successful, a nullptr is returned.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStringArrayAddString(OgaStringArray* string_array, const char* str);
+
+/*
+ * \brief Adds the given strings to the OgaStringArray.
+ * \param[inout] string_array The string array to which the strings are to be added
+ * \param[in] strings The strings to be added to the OgaStringArray.
+ * \return The result of the operation. If the operation is successful, a nullptr is returned.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStringArrayAddStrings(OgaStringArray* string_array, const char* const* strings, size_t count);
+
+/*
+ * \brief Gets the number of strings in the OgaStringArray.
+ * \param[in] string_array The OgaStringArray to get the count of the strings.
+ * \return The number of strings in the OgaStringArray.
+ */
+OGA_EXPORT size_t OGA_API_CALL OgaStringArrayGetCount(const OgaStringArray* string_array);
+
+/*
+ * \brief Gets the string at the given index in the OgaStringArray.
+ * \param[in] string_array The OgaStringArray to get the string from.
+ * \param[in] index The index of the string to get.
+ * \param[out] out The string at the given index in the OgaStringArray. The string will be valid until the OgaStringArray is destroyed.
+ * \return The result of the operation. If the operation is successful, a nullptr is returned.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStringArrayGetString(const OgaStringArray* string_array, size_t index, const char** out);
 
 #ifdef __cplusplus
 }

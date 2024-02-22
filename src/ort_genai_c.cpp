@@ -173,45 +173,24 @@ OgaResult* OGA_API_CALL OgaCreateTokenizer(const OgaModel* model, OgaTokenizer**
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaTokenizerEncodeBatch(const OgaTokenizer* p, const char** strings, size_t count, OgaSequences** out) {
+OgaResult* OGA_API_CALL OgaTokenizerEncodeBatch(const OgaTokenizer* p, const OgaStringArray* string_array, OgaSequences** out) {
   OGA_TRY
   auto& tokenizer = *reinterpret_cast<const Generators::Tokenizer*>(p);
-  *out = reinterpret_cast<OgaSequences*>(std::make_unique<Generators::TokenSequences>(std::move(tokenizer.EncodeBatch({strings, count}))).release());
+  auto& strings = *reinterpret_cast<const std::vector<std::string>*>(string_array);
+  *out = reinterpret_cast<OgaSequences*>(std::make_unique<Generators::TokenSequences>(std::move(tokenizer.EncodeBatch(strings))).release());
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaTokenizerDecodeBatch(const OgaTokenizer* p, const OgaSequences* p_sequences, const char*** out_strings) {
+OgaResult* OGA_API_CALL OgaTokenizerDecodeBatch(const OgaTokenizer* p, const OgaSequences* p_sequences, OgaStringArray** out_strings) {
   OGA_TRY
   auto& tokenizer = *reinterpret_cast<const Generators::Tokenizer*>(p);
   auto& sequences = *reinterpret_cast<const Generators::TokenSequences*>(p_sequences);
 
-  auto strings = tokenizer.DecodeBatch(sequences);
-  std::vector<std::unique_ptr<char[]>> c_strings;
-  for (auto& string : strings) {
-    auto length = string.length() + 1;
-    auto& cstr_buffer = c_strings.emplace_back(std::make_unique<char[]>(length));
-#ifdef _MSC_VER
-    strcpy_s(cstr_buffer.get(), length, string.c_str());
-#else
-    strncpy(cstr_buffer.get(), string.c_str(), length);
-    cstr_buffer[length] = 0;
-#endif
-  }
-
-  auto strings_buffer = std::make_unique<const char*[]>(strings.size());
-  for (size_t i = 0; i < strings.size(); i++) {
-    strings_buffer[i] = c_strings[i].release();
-  }
-  *out_strings = strings_buffer.release();
+  *out_strings = reinterpret_cast<OgaStringArray*>(
+    std::make_unique<std::vector<std::string>>(tokenizer.DecodeBatch(sequences)).release());
   return nullptr;
   OGA_CATCH
-}
-
-void OGA_API_CALL OgaTokenizerDestroyStrings(const char** strings, size_t count) {
-  for (size_t i = 0; i < count; i++)
-    delete strings[i];
-  delete strings;
 }
 
 OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer* p, const int32_t* tokens, size_t token_count, const char** out_string) {
@@ -244,6 +223,45 @@ OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream* p, int32_t 
   *out = reinterpret_cast<Generators::TokenizerStream*>(p)->Decode(token).c_str();
   return nullptr;
   OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaCreateStringArray(OgaStringArray** out) {
+  OGA_TRY
+  *out = reinterpret_cast<OgaStringArray*>(std::make_unique<std::vector<std::string>>().release());
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaStringArrayAddString(OgaStringArray* string_array, const char* str) {
+  OGA_TRY
+  reinterpret_cast<std::vector<std::string>*>(string_array)->push_back(str);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaStringArrayAddStrings(OgaStringArray* string_array, const char* const* strings, size_t count) {
+  OGA_TRY
+  auto& strs = *reinterpret_cast<std::vector<std::string>*>(string_array);
+  for (size_t i = 0; i < count; i++) {
+    strs.push_back(strings[i]);
+  }
+  return nullptr;
+  OGA_CATCH
+}
+
+size_t OGA_API_CALL OgaStringArrayGetCount(const OgaStringArray* string_array) {
+  return reinterpret_cast<const std::vector<std::string>*>(string_array)->size();
+}
+
+OgaResult* OGA_API_CALL OgaStringArrayGetString(const OgaStringArray* string_array, size_t index, const char** out) {
+  OGA_TRY
+  *out = (*reinterpret_cast<const std::vector<std::string>*>(string_array))[index].c_str();
+  return nullptr;
+  OGA_CATCH
+}
+
+void OGA_API_CALL OgaDestroyStringArray(OgaStringArray* string_array) {
+  delete reinterpret_cast<std::vector<std::string>*>(string_array);
 }
 
 void OGA_API_CALL OgaDestroyResult(OgaResult* p) {
