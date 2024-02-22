@@ -74,7 +74,7 @@ TEST(CAPITests, TokenizerCAPI) {
 
   // Decode Batch
   {
-    const char* const* out_strings;
+    const char** out_strings;
     CheckResult(OgaTokenizerDecodeBatch(tokenizer, sequences, &out_strings));
     for (size_t i = 0; i < OgaSequencesCount(sequences); i++) {
       std::cout << "Decoded string:" << out_strings[i] << std::endl;
@@ -138,7 +138,7 @@ TEST(CAPITests, EndToEndPhiBatch) {
   OgaGeneratorParams* params;
   CheckResult(OgaCreateGeneratorParams(model, &params));
   OgaGeneratorParamsPtr params_ptr{params};
-  CheckResult(OgaGeneratorParamsSetMaxLength(params, 64));
+  CheckResult(OgaGeneratorParamsSetMaxLength(params, 20));
   CheckResult(OgaGeneratorParamsSetInputSequences(params, input_sequences));
 
   OgaSequences* output_sequences;
@@ -147,7 +147,7 @@ TEST(CAPITests, EndToEndPhiBatch) {
 
   // Decode The Batch
   {
-    const char* const* out_strings;
+    const char** out_strings;
     CheckResult(OgaTokenizerDecodeBatch(tokenizer, output_sequences, &out_strings));
     for (size_t i = 0; i < OgaSequencesCount(output_sequences); i++) {
       std::cout << "Decoded string:" << out_strings[i] << std::endl;

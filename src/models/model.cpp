@@ -88,6 +88,30 @@ std::string Tokenizer::Decode(std::span<const int32_t> tokens) const {
   CheckResult(TfmStringArrayGetItem(tfm_string_array, 0, &string));
   return string;
 }
+
+TokenSequences Tokenizer::EncodeBatch(std::span<const char*> strings) const {
+  TokenSequences sequences;
+  for (size_t i = 0; i < strings.size(); i++) {
+    sequences.emplace_back(Encode(strings[i]));
+  }
+  return sequences;
+}
+
+TokenSequences Tokenizer::EncodeBatch(std::span<const std::string> strings) const {
+  TokenSequences sequences;
+  for (size_t i = 0; i < strings.size(); i++) {
+    sequences.emplace_back(Encode(strings[i].c_str()));
+  }
+  return sequences;
+}
+
+std::vector<std::string> Tokenizer::DecodeBatch(const TokenSequences& sequences) const {
+  std::vector<std::string> strings;
+  for (auto& sequence : sequences)
+    strings.emplace_back(Decode(sequence));
+  return strings;
+}
+
 #endif
 
 #if USE_CUDA

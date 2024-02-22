@@ -69,6 +69,10 @@ struct Tokenizer {
   std::vector<int32_t> Encode(const char* text) const;
   std::string Decode(std::span<const int32_t> tokens) const;
 
+  TokenSequences EncodeBatch(std::span<const char*> strings) const;
+  TokenSequences EncodeBatch(std::span<const std::string> strings) const;
+  std::vector<std::string> DecodeBatch(const TokenSequences& sequences) const;
+
   TfmPtr<TfmTokenizer> tokenizer_;
 };
 #endif
