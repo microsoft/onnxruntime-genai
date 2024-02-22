@@ -50,6 +50,9 @@ def test_greedy_search(device, test_data_path, relative_model_path):
     for i in range(len(sequences)):
         assert sequences[i] == expected_sequence[i].tolist()
 
+'''
+TODO: Enable once the phi-2 model exists
+
 @pytest.mark.parametrize("device", [og.DeviceType.CPU])
 @pytest.mark.parametrize("relative_model_path", [Path("phi-2")])
 def test_batching(device, test_data_path, relative_model_path):
@@ -72,3 +75,4 @@ def test_batching(device, test_data_path, relative_model_path):
 
     output_sequences = model.generate(params)
     print(tokenizer.decode_batch(output_sequences))
+'''
