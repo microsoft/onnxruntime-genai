@@ -118,12 +118,6 @@ class Model:
 
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
         config = GenerationConfig.from_pretrained(model_name_or_path, **extra_kwargs)
-        hf_default_search_values = {
-            "max_length": 20,
-            "pad_token_id": None,
-            "top_k": 50,
-        }
-
         genai_config = {
             "model": {
                 "bos_token_id": config.bos_token_id,
@@ -137,21 +131,21 @@ class Model:
                 "num_attention_heads": self.num_attn_heads,
                 "num_hidden_layers": self.num_layers,
                 "num_key_value_heads": self.num_kv_heads,
-                "pad_token_id": config.pad_token_id if hasattr(config, "pad_token_id") and config.pad_token_id != hf_default_search_values["pad_token_id"] else config.eos_token_id,
+                "pad_token_id": config.pad_token_id if hasattr(config, "pad_token_id") else config.eos_token_id,
                 "type": self.model_type[ : self.model_type.find("For")].lower(),
                 "vocab_size": self.vocab_size,
             },
             "search": {
                 "diversity_penalty": config.diversity_penalty if hasattr(config, "diversity_penalty") else 0.0,
                 "length_penalty": config.length_penalty if hasattr(config, "length_penalty") else 1.0,
-                "max_length": config.max_length if hasattr(config, "max_length") and config.max_length != hf_default_search_values["max_length"] else self.context_length,
+                "max_length": config.max_length if hasattr(config, "max_length") else 20,
                 "min_length": 0,
                 "no_repeat_ngram_size": config.no_repeat_ngram_size if hasattr(config, "no_repeat_ngram_size") else 0,
                 "num_beams": config.num_beams if hasattr(config, "num_beams") else 1,
                 "num_return_sequences": config.num_return_sequences if hasattr(config, "num_return_sequences") else 1,
                 "repetition_penalty": config.repetition_penalty if hasattr(config, "repetition_penalty") else 1.0,
                 "temperature": config.temperature if hasattr(config, "temperature") else 1.0,
-                "top_k": config.top_k if hasattr(config, "top_k") and config.top_k != hf_default_search_values["top_k"] else 0,
+                "top_k": config.top_k if hasattr(config, "top_k") else 50,
                 "top_p": config.top_p if hasattr(config, "top_p") else 1.0,
             },
         }
