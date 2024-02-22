@@ -7,7 +7,7 @@
 
 extern std::unique_ptr<OrtEnv> g_ort_env;
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
   std::cout << "Generators Utility Library" << std::endl;
   std::cout << "Initializing OnnxRuntime... ";
   std::cout.flush();
@@ -21,7 +21,7 @@ int main(int argc, char **argv) {
     g_ort_env.reset();
     std::cout << "done" << std::endl;
     return result;
-  } catch (const Ort::Exception& e) {
+  } catch (const std::exception& e) {
     std::cerr << "Error: " << e.what() << std::endl;
     return 0;
   }
