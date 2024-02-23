@@ -15,6 +15,7 @@ def download_extract_rename(url, extracted_folder):
     response = requests.get(url)
     with open(filename, "wb") as f:
         f.write(response.content)
+    print("filename", filename)
 
     # Extract the contents based on file extension
     if file_extension == 'zip':
@@ -29,6 +30,7 @@ def download_extract_rename(url, extracted_folder):
 
     # Rename the extracted folder
     dest_folder = os.path.splitext(filename)[0]  # remove the file extension
+    print("dest_folder", dest_folder)
     os.rename(dest_folder, extracted_folder)
 
     # Clean up the downloaded file
@@ -60,4 +62,6 @@ if __name__ == "__main__":
     ort_url = ort_url_generator(args.ort_version, args.is_gpu, args.alt_cuda_version)
     # Name of the folder after extraction
     extracted_folder_name = f"{os.path.dirname(os.path.abspath(__file__))}/../ort/"
+    print("ort_url:", ort_url)
+    print("extracted_folder_name", extracted_folder_name)
     download_extract_rename(ort_url, extracted_folder_name)
