@@ -48,7 +48,7 @@ jobs:
     displayName: Download OnnxRuntime
     workingDirectory: $(Build.SourcesDirectory)
 
-  - bash: |
+  - powershell: |
       Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
 
   - bash: |
