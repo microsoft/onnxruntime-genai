@@ -68,7 +68,7 @@ jobs:
     inputs:
       ArtifactName: onnxruntime-genai-linux-cpu-$(buildArch)
 
-  - template: steps/component-governance-component-detection-steps.yml
+  - template: steps/component-governance-component-detection-step.yml
     parameters:
       condition: 'succeeded'
 
