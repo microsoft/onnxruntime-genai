@@ -57,13 +57,12 @@ jobs:
     displayName: 'Build pybind with CMake'
 
   # Esrp signing
-  - template: win-esrp-dll.yml
+  - template: steps/win-esrp-dll-step.yml
     parameters:
-      FolderPath: '$(Build.BinariesDirectory)\$(BuildConfig)\$(BuildConfig)\onnxruntime\capi'
+      FolderPath: '$(Build.BinariesDirectory)\build\python\$(BuildConfig)\wheel\onnxruntime_genai'
       DisplayName: 'ESRP - Sign Native dlls'
       DoEsrp: true
       Pattern: '*.pyd,*.dll'
-
   - bash: |
       cmake --build build --config $(BuildConfig) --parallel --target PyPackageBuild
     displayName: 'Build Python Wheel'
