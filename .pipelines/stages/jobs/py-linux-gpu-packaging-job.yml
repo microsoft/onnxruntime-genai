@@ -1,7 +1,4 @@
 parameters:
-- name: arch
-  type: string
-
 - name: cuda_version
   type: string
   default: '11.8'
