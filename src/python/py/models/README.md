@@ -5,6 +5,7 @@ This folder contains the model builder tool, which greatly accelerates creating 
 ## Current Support
 The tool currently supports the following model architectures.
 
+- Gemma
 - LLaMA
 - Mistral
 - Phi
