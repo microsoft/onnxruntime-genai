@@ -188,7 +188,7 @@ OgaResult* OGA_API_CALL OgaTokenizerDecodeBatch(const OgaTokenizer* p, const Oga
   auto& sequences = *reinterpret_cast<const Generators::TokenSequences*>(p_sequences);
 
   *out_strings = reinterpret_cast<OgaStringArray*>(
-    std::make_unique<std::vector<std::string>>(tokenizer.DecodeBatch(sequences)).release());
+      std::make_unique<std::vector<std::string>>(tokenizer.DecodeBatch(sequences)).release());
   return nullptr;
   OGA_CATCH
 }
