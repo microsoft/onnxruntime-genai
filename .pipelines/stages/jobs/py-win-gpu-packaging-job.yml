@@ -62,7 +62,7 @@ jobs:
   # Esrp signing
   - template: steps/win-esrp-dll-step.yml
     parameters:
-      FolderPath: '$(Build.BinariesDirectory)\build\python\$(BuildConfig)\wheel\'
+      FolderPath: '$(Build.BinariesDirectory)\build\src\python\$(BuildConfig)\wheel\'
       DisplayName: 'ESRP - Sign Native dlls'
       DoEsrp: true
       Pattern: '*.pyd,*.dll'
