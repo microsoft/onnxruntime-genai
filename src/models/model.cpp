@@ -58,7 +58,7 @@ void CheckResult(tfmError_t error) {
 }
 
 TokenizerStream::TokenizerStream(const Tokenizer& tokenizer)
- : tokenizer_{tokenizer} {
+    : tokenizer_{tokenizer} {
   CheckResult(TfmCreate(kTfmKindDetokenizerCache, cache_.Address()));
 }
 
