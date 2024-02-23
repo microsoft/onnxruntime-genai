@@ -57,8 +57,15 @@ void CheckResult(tfmError_t error) {
     throw std::runtime_error(TfmGetLastErrorMessage());
 }
 
+TokenizerStream::TokenizerStream(const Tokenizer& tokenizer)
+ : tokenizer_{tokenizer} {
+  CheckResult(TfmCreate(kTfmKindDetokenizerCache, cache_.Address()));
+}
+
 const std::string& TokenizerStream::Decode(int32_t token) {
-  chunk_ = tokenizer_.Decode({&token, 1});
+  const char* string;
+  CheckResult(TfmDetokenizeCached(tokenizer_.tokenizer_, cache_, token, &string));
+  chunk_ = string;
   return chunk_;
 }
 

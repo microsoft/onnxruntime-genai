@@ -96,7 +96,7 @@ tfmError_t TFM_API_CALL TfmCreate(tfmObjectKind_t kind, TfmObject** object, ...)
   }
 
   if (kind == tfmObjectKind_t::kTfmKindDetokenizerCache) {
-    *object = static_cast<TfmObject*>(new TfmDetokenizerCache());
+    *object = static_cast<TfmObject*>(new DetokenizerCache());
   } /* else if (kind == tfmObjectKind_t::kTfmKindTokenizer) {
     *object = static_cast<TfmObject*>(new TfmTokenizer());
   } */
@@ -347,18 +347,19 @@ tfmError_t TfmDetokenizeCached(const TfmTokenizer* tokenizer,
     return kTfmErrorInvalidArgument;
   }
 
-  const auto token_ptr = static_cast<const Tokenizer*>(cache);
+  const auto token_ptr = static_cast<const Tokenizer*>(tokenizer);
   ReturnableStatus status(token_ptr->IsInstanceOf(tfmObjectKind_t::kTfmKindTokenizer));
   if (!status.ok()) {
     return status.code();
   }
 
   auto cache_ptr = static_cast<DetokenizerCache*>(cache);
-  status = ReturnableStatus(token_ptr->IsInstanceOf(tfmObjectKind_t::kTfmKindDetokenizerCache));
+  status = ReturnableStatus(cache_ptr->IsInstanceOf(tfmObjectKind_t::kTfmKindDetokenizerCache));
   if (!status.ok()) {
     return status.code();
   }
 
+  cache_ptr->last_text_.clear();
   status = ReturnableStatus(token_ptr->Id2Token(next_id, cache_ptr->last_text_, cache_ptr->decoder_state_));
   if (status.ok()) {
     *text_out = cache_ptr->last_text_.c_str();
