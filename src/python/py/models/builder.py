@@ -1398,7 +1398,7 @@ def get_args():
         "-o",
         "--output",
         required=True,
-        help="Path to folder containing ONNX model and additional files (e.g. GenAI config, external data files, etc.)",
+        help="Path to folder to store ONNX model and additional files (e.g. GenAI config, external data files, etc.)",
     )
 
     parser.add_argument(
@@ -1422,7 +1422,7 @@ def get_args():
         "--cache_dir",
         required=False,
         type=str,
-        default=os.path.join(os.path.dirname(os.path.realpath(__file__)), 'cache_dir'),
+        default=os.path.join('.', 'cache_dir'),
         help="Model cache directory (if providing model name and not folder path)",
     )
 
