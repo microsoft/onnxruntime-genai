@@ -17,7 +17,7 @@ jobs:
   variables:
     BuildConfig: 'RelWithDebInfo'
     cuda_version: '12.2'
-    cuda_dir: "$(Build.SourcesDirectory)\\cuda_sdk"
+    cuda_dir: '$(Build.SourcesDirectory)\cuda_sdk'
   timeoutInMinutes: 180
   workspace:
     clean: all
@@ -46,16 +46,16 @@ jobs:
   - powershell: |
       Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
 
-  - task: Bash@3
+  - powershell: |
+      azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" $(cuda_dir)
     displayName: 'Download CUDA'
-    inputs:
-      targetType: 'inline'
-      script: |
-        azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" $(cuda_dir)
+
   - powershell: |
       Get-ChildItem -Path $(cuda_dir) -Recurse
-  - bash: |
-      cmake -G "Visual Studio 17 2022" -A x64 -T cuda=$(cuda_dir)\\v$(cuda_version) -DCMAKE_BUILD_TYPE=$(BuildConfig) -DUSE_CUDA=TRUE -S . -B build
+    displayName: 'Verify CUDA download'
+
+  - powershell: |
+      cmake -G "Visual Studio 17 2022" -A x64 -T cuda=$(cuda_dir)\v$(cuda_version) -DCMAKE_BUILD_TYPE=$(BuildConfig) -DUSE_CUDA=TRUE -S . -B build
       cmake --build build --config $(BuildConfig) --parallel  --target python
     displayName: 'Build pybind with CMake'
 
