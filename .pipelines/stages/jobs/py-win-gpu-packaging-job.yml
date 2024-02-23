@@ -50,7 +50,7 @@ jobs:
       targetType: 'inline'
       script: |
         azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" $(cuda_dir)
-  - bahs: |
+  - bash: |
       ls $(cuda_dir)
   - bash: |
       cmake -G "Visual Studio 17 2022" -A x64 -T cuda=$(cuda_dir)\\v$(cuda_version) -DCMAKE_BUILD_TYPE=$(BuildConfig) -DUSE_CUDA=TRUE
