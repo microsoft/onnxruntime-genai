@@ -39,11 +39,11 @@ def download_extract_rename(url, extracted_folder):
     print("Downloading Onnxruntime, extraction, and renaming completed successfully.")
 
 
-def ort_url_generator(ort_version, is_gpu, alt_cuda_version) -> str:
+def ort_url_generator(ort_version, is_gpu, alt_cuda_version, os, arch) -> str:
     gpu_suffix = f"-cuda{alt_cuda_version}" if alt_cuda_version is not None else "-gpu"
     return (f'https://github.com/microsoft/onnxruntime/releases/download/'
             f'v{ort_version}'
-            f'/onnxruntime-osx-arm64{gpu_suffix if is_gpu else ""}-{ort_version}.tgz')
+            f'/onnxruntime-{os}-{arch}{gpu_suffix if is_gpu else ""}-{ort_version}.tgz')
 
 
 def parse_argument():
@@ -51,15 +51,22 @@ def parse_argument():
     parser.add_argument("--ort_version", "-v", type=str, default="1.17.0")
     parser.add_argument("--is_gpu", "-g", type=bool, default=False,
                         help="Whether to use GPU or not. Default is False.")
-    parser.add_argument("--alt_cuda_version", "-a", type=str, default=None,
+    parser.add_argument("--alt_cuda_version", "-c", type=str, default=None,
                         help="Whether to use next alternative CUDA or not. Default is None.")
+    parser.add_argument("--os", "-o", type=str, default="linux",
+                        choices=["linux", "win", "osx"],
+                        help="Operating system. Default is linux.")
+    parser.add_argument("--arch", "-a", type=str, default="x64",
+                        choices=["x64", "arm64"],
+                        help="Architecture. Default is x64.")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_argument()
     # URL of the file to download
-    ort_url = ort_url_generator(args.ort_version, args.is_gpu, args.alt_cuda_version)
+    ort_url = ort_url_generator(args.ort_version, args.is_gpu, args.alt_cuda_version,
+                                args.os, args.arch)
     # Name of the folder after extraction
     extracted_folder_name = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ort")
     print("ort_url:", ort_url)
