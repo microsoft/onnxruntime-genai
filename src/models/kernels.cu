@@ -7,13 +7,14 @@ namespace cuda {
 
 template<typename T>
 __global__ void UpdatePositionIds(T* positions, int batch_beam_size) {
-  for (int i = 0; i < batch_beam_size; i++)
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < batch_beam_size)
     positions[i]++;
 }
 
 template<typename T>
 void Launch_UpdatePositionIds(T* positions, int batch_beam_size, cudaStream_t stream) {
-  UpdatePositionIds<<<1, 1, 0, stream>>>(positions, batch_beam_size);
+  UpdatePositionIds<T><<<(batch_beam_size + 255) / 256, 256, 0, stream>>>(positions, batch_beam_size);
 }
 
 template void Launch_UpdatePositionIds(int32_t* positions, int batch_beam_size, cudaStream_t stream);
@@ -21,17 +22,21 @@ template void Launch_UpdatePositionIds(int64_t* positions, int batch_beam_size, 
 
 template<typename T>
 __global__ void UpdateAttentionMask(T* mask_data, const T* old_mask_data, int batch_beam_size, int current_length) {
-  for (int i = 0; i < batch_beam_size; i++) {
-    for (int j = 0; j < current_length - 1; j++) {
+  int global_index = blockIdx.x * blockDim.x + threadIdx.x;
+  int i = global_index / current_length;
+  int j = global_index % current_length;
+  if (i < batch_beam_size) {
+    if (j < current_length - 1) {
       mask_data[i * current_length + j] = old_mask_data[i * (current_length - 1) + j];
+    } else {
+      mask_data[i * current_length + j] = 1;
     }
-    mask_data[i * current_length + current_length - 1] = 1;
   }
 }
 
 template<typename T>
 void Launch_UpdateAttentionMask(T* mask_data, const T* old_mask_data, int batch_beam_size, int current_length, cudaStream_t stream) {
-  UpdateAttentionMask<<<1, 1, 0, stream>>>(mask_data, old_mask_data, batch_beam_size, current_length);
+  UpdateAttentionMask<T><<<(batch_beam_size * current_length + 255) / 256, 256, 0, stream>>>(mask_data, old_mask_data, batch_beam_size, current_length);
 }
 
 template void Launch_UpdateAttentionMask(int32_t* mask_data, const int32_t* old_mask_data, int batch_beam_size, int current_length, cudaStream_t stream);
@@ -39,9 +44,8 @@ template void Launch_UpdateAttentionMask(int64_t* mask_data, const int64_t* old_
 
 __global__ void ConvertFp16ToFp32(const half* src, float* dst, int count) {
   int idx = threadIdx.x + blockIdx.x * blockDim.x;
-  if (idx < count) {
+  if (idx < count)
     dst[idx] = __half2float(src[idx]);
-  }
 }
 
 void LaunchFp16ToFp32(const uint16_t* fp16, float* fp32, int count, cudaStream_t stream) {

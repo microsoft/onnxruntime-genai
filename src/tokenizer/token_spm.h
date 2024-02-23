@@ -19,8 +19,16 @@ class SpmTokenizer : public TokenizerImpl {
   TfmStatus Onload() override;
   TfmStatus Encode(std::string_view input, std::vector<tfmTokenId_t>& ids) const override;
   TfmStatus Decode(const span<tfmTokenId_t const>& ids, std::string& text) const override;
+  TfmStatus Id2Token(tfmTokenId_t id, std::string& token, DecoderState** state) const override;
 
  private:
+  class SpmDeocerState : public DecoderState {
+   public:
+    SpmDeocerState() = default;
+    ~SpmDeocerState() override = default;
+    bool last_control_char_ = false;
+  };
+
   std::unique_ptr<sentencepiece::SentencePieceProcessor> spm_processor_;
 };
 

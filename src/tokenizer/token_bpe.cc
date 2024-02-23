@@ -89,11 +89,11 @@ void BPETokenizer::CreateByteEncoder() {
     )
     */
     if ((/* i >= 0 && */ i < 33) || (i >= 127 && i < 161) || (i == 173)) {
-      byte_decoder_[index] = i;
+      byte_decoder_[index] = gsl::narrow<unsigned char>(i);
       byte_encoder_[i] = bbpe_encoder_.GetTokenId(EncodeUTF8Char(index++));
     } else {
       byte_encoder_[i] = bbpe_encoder_.GetTokenId(EncodeUTF8Char(i));
-      byte_decoder_[i] = i;
+      byte_decoder_[i] = gsl::narrow<unsigned char>(i);
     }
   }
 }
@@ -159,7 +159,9 @@ TfmStatus BPETokenizer::Onload() {
   CreateByteEncoder();
 
   simdjson::dom::element added_tokens_obj;
-  if (error = root["added_tokens"].get(added_tokens_obj); error) {
+  if (error = root["added_tokens"].get(added_tokens_obj); !error) {
+    status = extended_token_.LoadAddedTokens(added_tokens_obj, added_tokens_);
+  } else {
     // Get AddedTokens from config
     std::string_view added_tokens[] = {
         config.unk_token_.content_,
@@ -174,10 +176,12 @@ TfmStatus BPETokenizer::Onload() {
     if (config.bos_token_.content_.empty()) {
       num_added_tokens--;
     }
+    std::vector<uint32_t> ids(num_added_tokens);
+    for (size_t i = 0; i < num_added_tokens; ++i) {
+      ids[i] = bbpe_encoder_.GetTokenId(std::string(added_tokens[i]));
+    }
 
-    status = extended_token_.LoadAddedTokens(added_tokens, num_added_tokens);
-  } else {
-    status = extended_token_.LoadAddedTokens(added_tokens_obj, added_tokens_);
+    status = extended_token_.LoadAddedTokens(added_tokens, ids.data(), num_added_tokens);
   }
 
   if (!status.ok()) {
@@ -270,7 +274,7 @@ std::vector<tfmTokenId_t> BPETokenizer::Encode(std::string_view sv_input,
 
       std::string utf8_token = ToUTF8(std::u32string(tok));
 
-      size_t space_dif = 0;
+      int32_t space_dif = 0;
       if (compute_offset_mapping) {
         // Handle special case for offset mapping
         if (utf8_token.at(0) == ' ') {
@@ -284,9 +288,9 @@ std::vector<tfmTokenId_t> BPETokenizer::Encode(std::string_view sv_input,
 
       if (clean_up_spaces) {
         // Whitespace clean
-        utf8_token.erase(std::remove(utf8_token.begin(), utf8_token.end(), U' '), utf8_token.end());
+        utf8_token.erase(std::remove(utf8_token.begin(), utf8_token.end(), ' '), utf8_token.end());
 
-        for (int i = 0; i < utf8_token.length(); i++) {
+        for (size_t i = 0; i < utf8_token.length(); i++) {
           if (i == utf8_token.length() - 1) {
             std::string boundary(1, utf8_token[i]);
             byte_list.emplace_back(bbpe_encoder_.GetTokenId(boundary + "</w>"), 1);
@@ -304,7 +308,7 @@ std::vector<tfmTokenId_t> BPETokenizer::Encode(std::string_view sv_input,
       bbpe_encoder_.PerformBPE(byte_list);
 
       // Add output to result
-      for (auto p : byte_list) {
+      for (const auto& p : byte_list) {
         if (static_cast<int64_t>(res.size()) >= max_length) {
           break;
         }
@@ -316,7 +320,7 @@ std::vector<tfmTokenId_t> BPETokenizer::Encode(std::string_view sv_input,
             offset_mapping.emplace_back(std::make_pair(offset, gsl::narrow<size_t>(offset + p.second)));
             offset += p.second;
           } else {
-            offset_mapping.emplace_back(std::make_pair(offset, gsl::narrow<size_t>(offset + (size_t)p.second + space_dif)));
+            offset_mapping.emplace_back(std::make_pair(offset, gsl::narrow<size_t>(offset + p.second + space_dif)));
             offset += ((size_t)p.second + space_dif);
           }
         }
@@ -352,53 +356,64 @@ TfmStatus BPETokenizer::Encode(std::string_view sv_input, std::vector<tfmTokenId
   return {};
 }
 
+TfmStatus BPETokenizer::Id2Token(tfmTokenId_t id, std::string& token, bool skip_special_tokens, bool& f_special_last) const {
+  bool f_special = all_special_ids_.count(id) ? true : false;
+  if (skip_special_tokens && f_special) {
+    f_special_last = f_special;
+    return {};
+  }
+
+  if (added_tokens_.count(id)) {
+    const std::string ws = added_tokens_.at(id);
+    token = (std::string)ws;
+  } else if (static_cast<size_t>(id) < arr_vocab_.size()) {
+    const auto str = FromUTF8(arr_vocab_[id]);
+    for (auto wchr : str) {
+      if (byte_decoder_.count(wchr) == 0 && wchr <= 0xFF) {
+        token.push_back(gsl::narrow<unsigned char>(wchr));
+      } else {
+        unsigned char uchr = byte_decoder_.at(wchr);
+        token.push_back(uchr);
+      }
+    }
+  } else {
+    if (skip_special_tokens) {
+      f_special_last = f_special;
+      return {};
+    } else {
+      token = unk_token_;
+    }
+  }
+
+  // remove the end_word_suffix like </w> or </s> etc.
+  auto& end_word_suffix = bbpe_encoder_.GetEndWordSuffix();
+  if (end_word_suffix.size() > 0) {
+    if (token.size() >= end_word_suffix.size() &&
+        token.substr(token.size() - end_word_suffix.size()) == end_word_suffix) {
+      token = token.substr(0, token.size() - end_word_suffix.size());
+      token += ' ';
+    }
+  }
+
+  f_special_last = f_special;
+  return {};
+}
+
 TfmStatus BPETokenizer::Decode(const span<tfmTokenId_t const>& ids, std::string& text) const {
   bool f_special_last = false;
-  bool f_special = false;
   auto count = static_cast<size_t>(ids.size());
   auto p_ids = ids.data();
 
   auto& args = decode_extra_args_;
-  auto end_word_suffix = bbpe_encoder_.GetEndWordSuffix();
   for (size_t tok_idx = 0; tok_idx < count; ++tok_idx) {
-    const auto token = *(p_ids + tok_idx);
+    const auto id = *(p_ids + tok_idx);
     std::string decoded_token;
-    f_special = all_special_ids_.count(token) ? true : false;
-    if (args.skip_special_tokens_ && f_special) {
-      f_special_last = f_special;
-      continue;
+    auto status = Id2Token(id, decoded_token, args.skip_special_tokens_, f_special_last);
+    if (!status.ok()) {
+      return status;
     }
 
-    if (added_tokens_.count(token)) {
-      const std::string ws = added_tokens_.at(token);
-      decoded_token = (std::string)ws;
-    } else if (static_cast<size_t>(token) < arr_vocab_.size()) {
-      const auto str = FromUTF8(arr_vocab_[token]);
-      for (unsigned char wchr : str) {
-        if (byte_decoder_.count(wchr) == 0 && wchr <= 0xFF) {
-          // std::cout << "Error: cannot find the byte_decoder_ for " << (uint32_t)(unsigned char)wchr << std::endl;
-          decoded_token.push_back(gsl::narrow<unsigned char>(wchr));
-        } else {
-          unsigned char uchr = byte_decoder_.at(wchr);
-          decoded_token.push_back(uchr);
-        }
-      }
-    } else {
-      if (args.skip_special_tokens_) {
-        continue;
-      } else {
-        decoded_token = unk_token_;
-      }
-    }
-
-    // remove the end_word_suffix like </w> or </s> etc.
-    if (end_word_suffix.size() > 0) {
-      if (decoded_token.size() >= end_word_suffix.size() &&
-          decoded_token.substr(decoded_token.size() - end_word_suffix.size()) == end_word_suffix) {
-        decoded_token = decoded_token.substr(0, decoded_token.size() - end_word_suffix.size());
-        decoded_token += ' ';
-      }
-    }
+    bool f_special = all_special_ids_.count(id) ? true : false;
 
     if (args.whitespace_token_ &&
         f_special && (tok_idx > 0 && !f_special_last)) {
@@ -411,8 +426,6 @@ TfmStatus BPETokenizer::Decode(const span<tfmTokenId_t const>& ids, std::string&
         f_special && tok_idx != count - 1) {
       text.push_back(' ');
     }
-
-    f_special_last = f_special;
   }
 
   if (!text.empty() && text.back() == ' ') {
@@ -420,6 +433,31 @@ TfmStatus BPETokenizer::Decode(const span<tfmTokenId_t const>& ids, std::string&
   }
 
   return {};
+}
+
+TfmStatus BPETokenizer::Id2Token(tfmTokenId_t id, std::string& token, DecoderState** state) const {
+  auto bpe_state = static_cast<BPEDeocerState*>(*state);
+  std::unique_ptr<BPEDeocerState> bpe_state_ptr;
+  bool is_first = false;
+  if (bpe_state == nullptr) {
+    bpe_state_ptr = std::make_unique<BPEDeocerState>();
+    bpe_state = bpe_state_ptr.get();
+    is_first = true;
+  }
+
+  auto status = Id2Token(id, token, decode_extra_args_.skip_special_tokens_, bpe_state->f_special_last);
+  if (status.ok()) {
+    if (bpe_state_ptr) {
+      *state = bpe_state_ptr.release();
+    }
+
+    // TODO: handle whitespace_token_ here
+    // if (decode_extra_args_.whitespace_token_ &&
+    //     f_special && (is_first && !f_special_last)) {
+    //   token = ' ' + token;
+    // }
+  }
+  return status;
 }
 
 }  // namespace tfm
