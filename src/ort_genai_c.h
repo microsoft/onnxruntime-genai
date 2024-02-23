@@ -228,6 +228,10 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizer(OgaTokenizer*);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncodeBatch(const OgaTokenizer*, const OgaStringArray* string_array, OgaSequences** out);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerDecodeBatch(const OgaTokenizer*, const OgaSequences* tokens, OgaStringArray** out_strings);
 
+/* Encodes a single string and returns the encoded sequence of tokens. The sequence of tokens must be freed with OgaDestroySequences
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer*, const char* str, OgaSequences** out);
+
 /* Decode a single token sequence and returns a null terminated utf8 string. out_string must be freed with OgaDestroyString
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer*, const int32_t* tokens, size_t token_count, const char** out_string);

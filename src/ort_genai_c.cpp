@@ -193,6 +193,16 @@ OgaResult* OGA_API_CALL OgaTokenizerDecodeBatch(const OgaTokenizer* p, const Oga
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer* p, const char* str, OgaSequences** out) {
+  OGA_TRY
+  auto& tokenizer = *reinterpret_cast<const Generators::Tokenizer*>(p);
+  auto out_tokens = std::make_unique<Generators::TokenSequences>();
+  out_tokens->emplace_back(std::move(tokenizer.Encode(str)));
+  *out = reinterpret_cast<OgaSequences*>(out_tokens.release());
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer* p, const int32_t* tokens, size_t token_count, const char** out_string) {
   OGA_TRY
   auto& tokenizer = *reinterpret_cast<const Generators::Tokenizer*>(p);

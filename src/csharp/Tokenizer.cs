@@ -59,6 +59,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             }
         }
 
+        public Sequences Encode(string str)
+        {
+            IntPtr nativeSequences = IntPtr.Zero;
+            Result.VerifySuccess(NativeMethods.OgaTokenizerEncode(_tokenizerHandle, Utils.ToUtf8(str), out nativeSequences));
+            return new Sequences(nativeSequences);
+        }
+
         public string Decode(ReadOnlySpan<int> sequence)
         {
             IntPtr outStr = IntPtr.Zero;

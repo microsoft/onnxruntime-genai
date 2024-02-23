@@ -15,7 +15,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
     {
         private readonly ITestOutputHelper output;
 
-        public GeneratorTests(ITestOutputHelper o)
+        public OnnxRuntimeGenAITests(ITestOutputHelper o)
         {
             this.output = o;
         }
@@ -164,6 +164,30 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                         }
                         Assert.Equal(strings[i], decodedString);
                     }
+                }
+            }
+        }
+
+        [Fact(DisplayName = "TestTokenizerSingleEncodeDecode")]
+        public void TestTokenizerSingleEncodeDecode()
+        {
+            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "phi-2");
+            using (var model = new Model(modelPath, DeviceType.CPU))
+            {
+                Assert.NotNull(model);
+                using (var tokenizer = new Tokenizer(model))
+                {
+                    Assert.NotNull(tokenizer);
+                    var tokenizerStream = tokenizer.CreateStream();
+
+                    var str = "She sells sea shells by the sea shore.";
+
+                    var sequences = tokenizer.Encode(str);
+
+                    Assert.NotNull(sequences);
+
+                    string decodedString = tokenizer.Decode(sequences[0]);
+                    Assert.Equal(str, decodedString);
                 }
             }
         }

@@ -80,6 +80,19 @@ TEST(CAPITests, TokenizerCAPI) {
   CheckResult(OgaTokenizerEncodeBatch(tokenizer, string_array, &sequences));
   OgaSequencesPtr sequences_ptr{sequences};
 
+  // Encode single decode single
+  {
+    const char* input_string = "She sells sea shells by the sea shore.";
+    OgaSequences* input_sequences;
+    CheckResult(OgaTokenizerEncode(tokenizer, input_string, &input_sequences));
+    OgaSequencesPtr input_sequences_ptr{input_sequences};
+
+    std::span<const int32_t> sequence{OgaSequencesGetSequenceData(input_sequences, 0), OgaSequencesGetSequenceCount(input_sequences, 0)};
+    const char* out_string;
+    CheckResult(OgaTokenizerDecode(tokenizer, sequence.data(), sequence.size(), &out_string));
+    ASSERT_STREQ(input_string, out_string);
+  }
+
   // Decode Batch
   {
     OgaStringArray* out_strings = nullptr;
