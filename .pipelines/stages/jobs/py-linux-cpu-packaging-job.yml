@@ -1,3 +1,7 @@
+parameters:
+  - name: arch
+    type: string
+    default: 'x64'
 jobs:
 - job: Linux_CPU_Wheels
   strategy:
@@ -6,10 +10,11 @@ jobs:
         buildArch: 'x64'
         machine_pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
         docker_arch: 'x64'
-      arm64:
-        buildArch: 'arm64'
-        machine_pool: 'onnxruntime-linux-ARM64-CPU-2019'
-        docker_arch: 'aarch64'
+      ${{ if eq(parameters.arch, 'arm64') }}:
+        arm64:
+          buildArch: 'arm64'
+          machine_pool: 'onnxruntime-linux-ARM64-CPU-2019'
+          docker_arch: 'aarch64'
   timeoutInMinutes: 240
   workspace:
     clean: all
@@ -62,12 +67,6 @@ jobs:
     displayName: 'Publish Artifact: ONNXRuntime python wheel'
     inputs:
       ArtifactName: onnxruntime-genai-linux-cpu-$(buildArch)
-
-  - task: PublishPipelineArtifact@0
-    displayName: 'Publish Test Binaries'
-    inputs:
-      artifactName: 'drop-linux-cpu-$(buildArch)'
-      targetPath: '$(Build.BinariesDirectory)/${{ parameters.cmake_build_type }}'
 
   - template: steps/component-governance-component-detection-steps.yml
     parameters:
