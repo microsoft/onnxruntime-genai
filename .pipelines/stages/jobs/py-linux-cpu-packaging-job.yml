@@ -35,7 +35,7 @@ jobs:
     clean: true
     submodules: true
 
-  - template: set-nightly-build-option-variable-step.yml
+  - template: steps/set-nightly-build-option-variable-step.yml
 
   - bash: |
       pip install -r scripts/requirements.txt
