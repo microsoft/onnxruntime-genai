@@ -16,9 +16,10 @@ params=og.GeneratorParams(model)
 params.max_length = 256
 params.set_input_sequences(input_tokens)
 
-print("Generator created")
 
 generator=og.Generator(model, params)
+
+print("Generator created")
 
 print("Running generation loop ...")
 

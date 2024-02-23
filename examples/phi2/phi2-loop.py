@@ -19,6 +19,8 @@ params.input_ids = input_tokens
 
 generator=og.Generator(model, params)
 
+print("Generator created")
+
 print("Output:")
 
 print(prompt, end='', flush=True)
