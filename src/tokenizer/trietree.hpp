@@ -20,7 +20,7 @@ class TrieTree {
 
   void Add(const std::basic_string<CharT>& key, int idx = 0,
            const std::optional<ValueT>& value = std::nullopt) noexcept {
-    if (idx == key.length()) {
+    if (static_cast<size_t>(idx) == key.length()) {
       if (!value) {
         value_ = std::make_optional(gsl::narrow<ValueT>(key[0]));
       } else {

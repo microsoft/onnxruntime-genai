@@ -77,6 +77,11 @@ class span {
   size_t size_;
 };
 
+class DecoderState {
+ public:
+  virtual ~DecoderState() = default;
+};
+
 /**
  * @brief The Tokenizer class is responsible for tokenizing and detokenizing text.
  */
@@ -109,6 +114,11 @@ class Tokenizer : public TfmObjectImpl {
    */
   TfmStatus Detokenize(const std::vector<span<tfmTokenId_t const>>& t_ids, std::vector<std::string>& t_text) const;
 
+  /**
+   * @brief Represents the status of the tokenization process.
+   */
+  TfmStatus Id2Token(tfmTokenId_t /* id */, std::string& /* token */, std::unique_ptr<DecoderState>& /* cache */) const;
+
   // the override function for all derived classes.
  protected:
   /**
@@ -140,6 +150,8 @@ class Tokenizer : public TfmObjectImpl {
    * @return The status of the batch decoding operation.
    */
   virtual TfmStatus BatchDecode(const std::vector<span<tfmTokenId_t const>>& t_ids, std::vector<std::string>& t_text) const = 0;
+
+  virtual TfmStatus Id2Token(tfmTokenId_t id, std::string& token, DecoderState** state) const = 0;
 };
 
 /**

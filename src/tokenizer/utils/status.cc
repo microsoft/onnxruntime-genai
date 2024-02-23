@@ -6,7 +6,7 @@
 #include "tfmtok.h"
 
 struct TfmStatus::Rep {
-  tfmError_t code;
+  tfmError_t code{kTfmOK};
   std::string error_message;
 };
 
@@ -74,8 +74,8 @@ std::string TfmStatus::ToString() const {
     case tfmError_t::kTfmErrorOutOfRange:
       result = "Out of range";
       break;
-    case tfmError_t::kTfmErrorUnimplemented:
-      result = "Unimplemented";
+    case tfmError_t::kTfmErrorNotImplemented:
+      result = "Not implemented";
       break;
     case tfmError_t::kTfmErrorInternal:
       result = "Internal";

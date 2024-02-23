@@ -29,7 +29,7 @@ TfmStatus RwkvTokenizer::Onload() {
 
     std::string raw = line.substr(line.find(' ') + 1, line.rfind(' ') - line.find(' ') - 1);
     std::string x;
-    int key_length = 0;
+    size_t key_length = 0;
     if (UnquoteString(raw, x)) {
       std::from_chars(line.data() + r_ws + 1, line.data() + line.size(), key_length);
     }
