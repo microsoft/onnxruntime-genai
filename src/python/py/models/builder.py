@@ -1359,7 +1359,7 @@ def create_model(model_name_or_path, output_dir, precision, execution_provider, 
     # Set input/output precision of ONNX model
     io_dtype = TensorProto.FLOAT if precision in {"int8", "fp32"} or (precision == "int4" and execution_provider == "cpu") else TensorProto.FLOAT16
 
-    # List options in alphabetical order
+    # List architecture options in alphabetical order
     if config.architectures[0] == "GemmaForCausalLM":
         onnx_model = GemmaModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "LlamaForCausalLM":
