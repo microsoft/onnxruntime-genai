@@ -43,7 +43,7 @@ jobs:
     displayName: Download OnnxRuntime
     workingDirectory: $(Build.SourcesDirectory)
 
-  - scripts: |
+  - script: |
       set -e -x
       python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/inference/$(docker_arch)/default/cpu/Dockerfile \
         --context tools/ci_build/github/linux/docker/inference/$(docker_arch)/default/cpu \
