@@ -1,9 +1,68 @@
-#- ${{ if eq(parameters.enable_linux_gpu, true) }}:
-#  - template: py-linux-gpu.yml
-#    parameters:
-#      arch: 'x86_64'
-#      machine_pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
-#      extra_build_arg: ${{ parameters.build_py_parameters }}
-#      cmake_build_type: ${{ parameters.cmake_build_type }}
+parameters:
+- name: arch
+  type: string
 
-#onnxruntime-Ubuntu2204-AMD-CPU
+- name: cuda_version
+  type: string
+  default: '11.8'
+  values:
+  - 11.8
+  - 12.2
+jobs:
+- job: Linux_GPU_Wheels
+  timeoutInMinutes: 240
+  workspace:
+    clean: all
+  pool: onnxruntime-Ubuntu2204-AMD-CPU
+  variables:
+  # The build machine pool doesn't have dotnet, so it can't run CG.
+  - name: skipComponentGovernanceDetection
+    value: true
+  steps:
+  - checkout: self
+    clean: true
+    submodules: recursive
+
+  - template: steps/set-nightly-build-option-variable-step.yml
+  - bash: |
+      pip install -r scripts/requirements.txt
+      python3 scripts/download_onnxruntime.py --ort_version 1.17.0 --os linux --is_gpu True --arch $(buildArch)
+    displayName: Download OnnxRuntime
+    workingDirectory: $(Build.SourcesDirectory)
+
+  - script: |
+      set -e -x
+      python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/inference/x64/default/gpu/Dockerfile \
+        --context tools/ci_build/github/linux/docker/inference/x64/default/gpu \
+        --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
+        --container-registry onnxruntimebuildcache \
+        --repository onnxruntimegpubuild
+    displayName: 'Get Docker Image'
+
+  - script: |
+      docker run \
+        --gpus all \
+        --rm \
+        --volume $(Build.SourcesDirectory):/onnxruntime_src  \
+        -w /onnxruntime_src onnxruntimegpubuild bash -c "echo $PATH && /usr/bin/cmake -DCMAKE_CUDA_ARCHITECTURES=86 --preset linux_gcc_cuda_release && /usr/bin/cmake --build --preset linux_gcc_cuda_release"
+    displayName: 'Build Python Wheel'
+
+  - task: CopyFiles@2
+    displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
+    inputs:
+      SourceFolder: '$(Build.SourcesDirectory)/build/gcc_cpu/release/wheel'
+      Contents: '*.whl'
+      TargetFolder: '$(Build.ArtifactStagingDirectory)'
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Artifact: ONNXRuntime python wheel'
+    inputs:
+      ArtifactName: onnxruntime-genai-linux-gpu
+
+  - template: steps/component-governance-component-detection-step.yml
+    parameters:
+      condition: 'succeeded'
+
+  - task: mspremier.PostBuildCleanup.PostBuildCleanup-task.PostBuildCleanup@3
+    displayName: 'Clean Agent Directories'
+    condition: always()

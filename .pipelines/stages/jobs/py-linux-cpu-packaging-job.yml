@@ -23,23 +23,17 @@ jobs:
   # The build machine pool doesn't have dotnet, so it can't run CG.
   - name: skipComponentGovernanceDetection
     value: true
-  - name: ORT_CACHE_DIR
-    value: $(Agent.TempDirectory)/ort_ccache
-  - name: TODAY
-    value: $[format('{0:dd}{0:MM}{0:yyyy}', pipeline.startTime)]
-  - name: BuildConfig
-    value: 'RelWithDebInfo'
 
   steps:
   - checkout: self
     clean: true
-    submodules: true
+    submodules: recursive
 
   - template: steps/set-nightly-build-option-variable-step.yml
 
   - bash: |
       pip install -r scripts/requirements.txt
-      python3 scripts/download_onnxruntime.py --ort_version 1.17.0 --os linux --arch $(buildArch)
+      python3 scripts/download_onnxruntime.py --ort_version 1.17.0 --os linux --is_gpu False --arch $(buildArch)
     displayName: Download OnnxRuntime
     workingDirectory: $(Build.SourcesDirectory)
 
@@ -56,6 +50,7 @@ jobs:
       set -e -x
       docker run --rm --volume $(Build.SourcesDirectory):/onnxruntime_src  -w /onnxruntime_src onnxruntimecpubuild$(docker_arch) bash -c "echo $PATH && /usr/bin/cmake --preset linux_gcc_cpu_release && /usr/bin/cmake --build --preset linux_gcc_cpu_release"
     displayName: 'Build Python Wheel'
+
   - task: CopyFiles@2
     displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
     inputs:
