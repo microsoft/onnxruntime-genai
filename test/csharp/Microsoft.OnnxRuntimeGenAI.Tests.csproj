@@ -3,8 +3,7 @@
   <PropertyGroup>
     <TargetFrameworks>net6.0</TargetFrameworks>
     <IsPackable>false</IsPackable>
-    <Platforms>x64</Platforms>
-    <OutputPath>bin\x64\$(Configuration)\</OutputPath>
+    <Platforms>AnyCPU</Platforms>
     <IsTestProject>true</IsTestProject>
 
     <TestsSrcRoot>$(ProjectDir)..\..\test</TestsSrcRoot>
@@ -12,7 +11,7 @@
 
     <LangVersion>default</LangVersion>
     <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
-    <Configurations>Debug;RelWithDebInfo</Configurations>
+    <Configurations>Debug;RelWithDebInfo;Release</Configurations>
 
     <RootNamespace>Microsoft.ML.OnnxRuntimeGenAI.Tests</RootNamespace>
     <AssemblyName>Microsoft.ML.OnnxRuntimeGenAI.Tests</AssemblyName>
@@ -42,6 +41,11 @@
     <None Condition="Exists('$(OnnxruntimeLibDirectory)\onnxruntime_providers_cuda.dll')" Include="$(OnnxruntimeLibDirectory)\onnxruntime_providers_cuda.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
+    </None>
+    <None Include="$(TestsSrcRoot)\test_models\**">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+      <LinkBase>"test_models\"</LinkBase>
     </None>
   </ItemGroup>
 

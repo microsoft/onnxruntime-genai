@@ -103,6 +103,7 @@ def build(
     cmake_generator: str | None = None,
     ort_home: str | bytes | os.PathLike | None = None,
     enable_csharp: bool = False,
+    build_dir: str | bytes | os.PathLike | None = None,
 ):
     """Generates the CMake build tree and builds the project.
 
@@ -127,12 +128,13 @@ def build(
             command += ["-T", toolset]
 
     build_wheel = "OFF" if skip_wheel else "ON"
+    build_dir = os.path.abspath(build_dir) if build_dir else os.path.join(os.getcwd(), "build")
 
     command += [
         "-S",
         ".",
         "-B",
-        "build",
+        build_dir,
         "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
         "-DUSE_CXX17=ON",
         "-DUSE_CUDA=ON" if cuda_home else "-DUSE_CUDA=OFF",
@@ -157,22 +159,34 @@ def build(
     if cudnn_home:
         env["CUDNN_HOME"] = cudnn_home
 
+    config = "RelWithDebInfo"
     run_subprocess(command, env=env).check_returncode()
-    make_command = ["cmake", "--build", ".", "--config", "RelWithDebInfo"]
-    run_subprocess(make_command, cwd="build", env=env).check_returncode()
+    make_command = ["cmake", "--build", ".", "--config", config]
+    run_subprocess(make_command, cwd=build_dir, env=env).check_returncode()
 
     if enable_csharp:
         if not is_windows():
             raise RuntimeError("C# API is only supported on Windows.")
 
         dotnet = resolve_executable_path("dotnet")
-        csharp_build_command = [dotnet, "build", ".", "-c", "RelWithDebInfo"]
-        run_subprocess(csharp_build_command, cwd=os.path.join("src", "csharp")).check_returncode()
-        properties = []
+        configuration = f"/p:Configuration={config}"
+        platorm = "/p:Platform=Any CPU"
+        # Tests folder does not have a sln file. We use the csproj file to build and test.
+        # The csproj file requires the platform to be AnyCPU (not "Any CPU")
+        platform_for_tests_csproj = "/p:Platform=AnyCPU"
+        native_lib_path = f"/p:NativeBuildOutputDir={os.path.join(build_dir, config)}"
+
+        # Build the library
+        properties = [configuration, platorm, native_lib_path]
+        csharp_build_command = [dotnet, "build", ".",]
+        run_subprocess(csharp_build_command + properties, cwd=os.path.join("src", "csharp")).check_returncode()
+
+        # Build the tests and run them
+        tests_properties = [configuration, platform_for_tests_csproj, native_lib_path]
         if ort_home:
-            properties += [f"/p:OrtHome={ort_home}"]
-        run_subprocess(csharp_build_command + properties, cwd=os.path.join("test", "csharp")).check_returncode()
-        run_subprocess([dotnet, "test", "-c", "RelWithDebInfo"] + properties, cwd=os.path.join("test", "csharp")).check_returncode()
+            tests_properties += [f"/p:OrtHome={ort_home}"]
+        run_subprocess(csharp_build_command + tests_properties, cwd=os.path.join("test", "csharp")).check_returncode()
+        run_subprocess([dotnet, "test"] + tests_properties, cwd=os.path.join("test", "csharp")).check_returncode()
 
 
 if __name__ == "__main__":
@@ -207,6 +221,7 @@ if __name__ == "__main__":
     parser.add_argument("--skip_wheel", action="store_true", help="Skip building the Python wheel.")
     parser.add_argument("--ort_home", default=None, help="Root directory of onnxruntime.")
     parser.add_argument("--enable_csharp", action="store_true", help="Build the C# API.")
+    parser.add_argument("--build_dir", default=None, help="Path to output directory.")
     args = parser.parse_args()
 
     update_submodules()
@@ -217,4 +232,5 @@ if __name__ == "__main__":
         cmake_generator=args.cmake_generator,
         ort_home=args.ort_home,
         enable_csharp=args.enable_csharp,
+        build_dir=args.build_dir,
     )

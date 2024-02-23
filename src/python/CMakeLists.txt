@@ -18,15 +18,11 @@ if(BUILD_WHEEL)
   message("Setting up wheel files in : ${WHEEL_FILES_DIR}")
   set(TARGET_NAME "onnxruntime_genai")
   configure_file(${CMAKE_CURRENT_SOURCE_DIR}/setup.py.in ${WHEEL_FILES_DIR}/setup.py @ONLY)
-  configure_file(${CMAKE_CURRENT_SOURCE_DIR}/py/__init__.py.in ${WHEEL_FILES_DIR}/${TARGET_NAME}/__init__.py @ONLY)
+  configure_file(${CMAKE_CURRENT_SOURCE_DIR}/__init__.py.in ${WHEEL_FILES_DIR}/${TARGET_NAME}/__init__.py @ONLY)
 
   # Copy over any additional python files
-  file(GLOB pyfiles "${CMAKE_CURRENT_SOURCE_DIR}/py/*.py")
-  foreach(filename ${pyfiles})
-    get_filename_component(target "${filename}" NAME)
-    message(STATUS "Copying ${filename} to ${target}")
-    configure_file("${filename}" "${WHEEL_FILES_DIR}/${TARGET_NAME}" COPYONLY)
-  endforeach(filename)
+  file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/py/" DESTINATION ${WHEEL_FILES_DIR}/${TARGET_NAME}/)
+
   file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_FILES}")
   add_custom_target(PyPackageBuild ALL
     COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:onnxruntime-genai> ${WHEEL_FILES_DIR}/${TARGET_NAME}
