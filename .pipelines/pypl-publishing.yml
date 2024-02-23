@@ -7,7 +7,7 @@ parameters:
 - name: enable_win_gpu
   displayName: 'Whether Windows GPU package is built.'
   type: boolean
-  default: false
+  default: true
 
 - name: enable_win_arm
   displayName: 'Whether Windows ARM package is built.'
@@ -28,9 +28,6 @@ parameters:
   displayName: 'Whether Linux ARM package is built.'
   type: boolean
   default: false
-
-variables:
-  NIGHTLY_BUILD: 1
 
 #resources:
 #  repositories:

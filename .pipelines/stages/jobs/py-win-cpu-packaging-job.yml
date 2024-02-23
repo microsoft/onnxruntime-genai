@@ -43,14 +43,14 @@ jobs:
   - template: steps/set-nightly-build-option-variable-step.yml
 
   - bash: |
-      pip install -r scripts\requirements.txt
-      python3 scripts\download_onnxruntime.py --ort_version 1.17.0
+      pip install -r scripts/requirements.txt
+      python3 scripts/download_onnxruntime.py --ort_version 1.17.0
     displayName: Download OnnxRuntime
     workingDirectory: $(Build.SourcesDirectory)
 
   - bash: |
-      cmake -G "Visual Studio 17 2022" -A x64 
-      cmake --build build --config Release --parallel  --target python
+      cmake -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=$(BuildConfig) -DUSE_CUDA=OFF
+      cmake --build build --config $(BuildConfig)  --parallel  --target python
     displayName: 'Build pybind with CMake'
 
   # Esrp signing
@@ -62,7 +62,7 @@ jobs:
       Pattern: '*.pyd,*.dll'
 
   - bash: |
-      cmake --build build --config Release --parallel --target PyPackageBuild
+      cmake --build build --config $(BuildConfig) --parallel --target PyPackageBuild
     displayName: 'Build Python Wheel'
 
   - task: CopyFiles@2
