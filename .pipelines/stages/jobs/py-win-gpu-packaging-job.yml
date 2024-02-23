@@ -40,7 +40,7 @@ jobs:
 
   - bash: |
       pip install -r scripts/requirements.txt
-      python3 scripts/download_onnxruntime.py --ort_version 1.17.0 --is_gpu $(isGPU)
+      python3 scripts/download_onnxruntime.py --ort_version 1.17.0 --is_gpu True
     displayName: Download OnnxRuntime
     workingDirectory: $(Build.SourcesDirectory)
 
