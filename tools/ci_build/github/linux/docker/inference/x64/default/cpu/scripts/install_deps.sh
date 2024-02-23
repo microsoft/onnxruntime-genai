@@ -52,8 +52,5 @@ cmake --build build-cmake
 mv ./build-cmake/ninja /usr/bin
 popd
 
-GetFile https://nodejs.org/dist/v18.17.1/node-v18.17.1-linux-${NODEJS_ARCH}.tar.gz /tmp/src/node-v18.17.1-linux-${NODEJS_ARCH}.tar.gz
-tar --strip 1 -xf /tmp/src/node-v18.17.1-linux-${NODEJS_ARCH}.tar.gz -C /usr
-
 cd /
 rm -rf /tmp/src
