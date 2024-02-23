@@ -38,6 +38,40 @@ Users can call a high level `generate()` method, or run each iteration of the mo
 * Automatic model download and cache
 * More model architectures
 
+## Sample code for phi-2 in Python
+
+Install onnxruntime-genai.
+
+(Temporary) Build and install from source according to the instructions below.
+
+
+```python
+import onnxruntime_genai as og
+
+model=og.Model(f'models/microsoft/phi-2', device_type)
+
+tokenizer = model.create_tokenizer()
+
+prompt = '''def print_prime(n):
+    """
+    Print all primes between 1 and n
+    """'''
+
+tokens = tokenizer.encode(prompt)
+
+params=og.SearchParams(model)
+params.max_length = 200
+params.input_ids = tokens
+
+output_tokens=model.generate(params)
+
+text = tokenizer.decode(output_tokens)
+
+print("Output:")
+print(text)
+```
+
+
 ## Build from source
 
 This step requires `cmake` to be installed.
@@ -119,49 +153,23 @@ ONNX models are run from a local folder, via a string supplied to the `Model()` 
 
 To source `microsoft/phi-2` optimized for your target, download and run the following script. You will need to be logged into HuggingFace via the CLI to run the script.
 
+Install model builder dependencies.
 
 ```bash
-wget https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/src/python/models/export.py
+pip install numpy
+pip install transformers
+pip install torch
+pip install onnx
+pip install onnxruntime
 ```
+
 
 Export int4 CPU version 
 ```bash
 huggingface-cli login --token <your HuggingFace token>
-python export.py -m microsoft/phi-2 -p int4 -e cpu -o phi2-int4-cpu.onnx
+python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -p int4 -e cpu -o <model folder>
 ```
 
-## Sample code for phi-2 in Python
-
-Install onnxruntime-genai.
-
-(Temporary) Build and install from source according to the instructions below.
-
-
-```python
-import onnxruntime_genai as og
-
-model=og.Model(f'models/microsoft/phi-2', device_type)
-
-tokenizer = model.create_tokenizer()
-
-prompt = '''def print_prime(n):
-    """
-    Print all primes between 1 and n
-    """'''
-
-tokens = tokenizer.encode(prompt)
-
-params=og.SearchParams(model)
-params.max_length = 200
-params.input_ids = tokens
-
-output_tokens=model.generate(params)
-
-text = tokenizer.decode(output_tokens)
-
-print("Output:")
-print(text)
-```
 
 
 ## Contributing
