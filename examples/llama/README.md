@@ -31,10 +31,11 @@ pip install onnx
 pip install onnxruntime
 ```
 
+Run the model builder script to load, optimize, quantize and export the model. More details can be found [here](../../src/python/py/models/README.md)
 
 ```bash
 cd examples/phi2
-python -m onnxruntime_genai.models.builder.py -m meta-llama/Llama-2-7b-chat-hf -e cpu -p int4 -o model
+python -m onnxruntime_genai.models.builder.py -m meta-llama/Llama-2-7b-chat-hf -e cpu -p int4 -o ./model
 ```
 
 ## Run Llama
