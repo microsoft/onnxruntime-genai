@@ -39,12 +39,12 @@ def download_extract_rename(url, extracted_folder):
     print("Downloading Onnxruntime, extraction, and renaming completed successfully.")
 
 
-def ort_url_generator(ort_version, is_gpu, alt_cuda_version, os, arch) -> str:
+def ort_url_generator(ort_version, is_gpu, alt_cuda_version, os_, arch) -> str:
     gpu_suffix = f"-cuda{alt_cuda_version}" if alt_cuda_version is not None else "-gpu"
     return (f'https://github.com/microsoft/onnxruntime/releases/download/'
             f'v{ort_version}'
-            f'/onnxruntime-{os}-{arch}{gpu_suffix if is_gpu else ""}-{ort_version}'
-            f'.{"zip" if os is "win" else "tgz"}')
+            f'/onnxruntime-{os_}-{arch}{gpu_suffix if is_gpu else ""}-{ort_version}'
+            f'.{"zip" if os_ == "win" else "tgz"}')
 
 
 def parse_argument():
