@@ -61,7 +61,7 @@ if __name__ == "__main__":
     # URL of the file to download
     ort_url = ort_url_generator(args.ort_version, args.is_gpu, args.alt_cuda_version)
     # Name of the folder after extraction
-    extracted_folder_name = f"{os.path.dirname(os.path.abspath(__file__))}/../ort/"
+    extracted_folder_name = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ort")
     print("ort_url:", ort_url)
     print("extracted_folder_name", extracted_folder_name)
     download_extract_rename(ort_url, extracted_folder_name)

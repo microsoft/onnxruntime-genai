@@ -43,6 +43,8 @@ jobs:
       python3 scripts/download_onnxruntime.py --ort_version 1.17.0 --is_gpu True
     displayName: Download OnnxRuntime
     workingDirectory: $(Build.SourcesDirectory)
+  - bash: |
+      Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
 
   - task: Bash@3
     displayName: 'Download CUDA'
@@ -51,7 +53,7 @@ jobs:
       script: |
         azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" $(cuda_dir)
   - bash: |
-      ls $(cuda_dir)
+      Get-ChildItem -Path $(cuda_dir) -Recurse
   - bash: |
       cmake -G "Visual Studio 17 2022" -A x64 -T cuda=$(cuda_dir)\\v$(cuda_version) -DCMAKE_BUILD_TYPE=$(BuildConfig) -DUSE_CUDA=TRUE
       cmake --build build --config $(BuildConfig) --parallel  --target python

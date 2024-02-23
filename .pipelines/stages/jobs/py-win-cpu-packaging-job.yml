@@ -44,12 +44,13 @@ jobs:
 
   - bash: |
       pip install -r scripts/requirements.txt
-      python3 scripts/download_onnxruntime.py --ort_version 1.17.0
+      python3 scripts\\download_onnxruntime.py --ort_version 1.17.0
     displayName: Download OnnxRuntime
     workingDirectory: $(Build.SourcesDirectory)
+
   - bash: |
-      ls $(Build.SourcesDirectory)
-      ls $(Build.SourcesDirectory)\ort
+      Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
+
   - bash: |
       cmake -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=$(BuildConfig) -DUSE_CUDA=OFF
       cmake --build build --config $(BuildConfig)  --parallel  --target python
