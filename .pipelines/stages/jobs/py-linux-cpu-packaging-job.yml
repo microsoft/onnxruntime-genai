@@ -1,26 +1,78 @@
+jobs:
+- job: Linux_CPU_Wheels
+  strategy:
+    matrix:
+      x64:
+        buildArch: 'x64'
+        machine_pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
+        docker_arch: 'x64'
+      arm64:
+        buildArch: 'arm64'
+        machine_pool: 'onnxruntime-linux-ARM64-CPU-2019'
+        docker_arch: 'aarch64'
+  timeoutInMinutes: 240
+  workspace:
+    clean: all
+  pool: $(machine_pool)
+  variables:
+  # The build machine pool doesn't have dotnet, so it can't run CG.
+  - name: skipComponentGovernanceDetection
+    value: true
+  - name: ORT_CACHE_DIR
+    value: $(Agent.TempDirectory)/ort_ccache
+  - name: TODAY
+    value: $[format('{0:dd}{0:MM}{0:yyyy}', pipeline.startTime)]
+  - name: BuildConfig
+    value: 'RelWithDebInfo'
 
+  steps:
+  - checkout: self
+    clean: true
+    submodules: true
 
+  - template: set-nightly-build-option-variable-step.yml
 
-  - ${{ if eq(parameters.enable_linux_arm, true) }}:
-      - template: py-linux.yml
-        parameters:
-          arch: 'aarch64'
-          machine_pool: 'onnxruntime-linux-ARM64-CPU-2019'
-          base_image: 'arm64v8/almalinux:8'
-          devtoolset_rootpath: /opt/rh/gcc-toolset-12/root
-          ld_library_path_arg: /opt/rh/gcc-toolset-12/root/usr/lib64:/opt/rh/gcc-toolset-12/root/usr/lib:/opt/rh/gcc-toolset-12/root/usr/lib64/dyninst:/opt/rh/gcc-toolset-12/root/usr/lib/dyninst:/usr/local/lib64
-          prepend_path: '/opt/rh/gcc-toolset-12/root/usr/bin:'
-          extra_build_arg: ${{ parameters.build_py_parameters }}
-          cmake_build_type: ${{ parameters.cmake_build_type }}
+  - bash: |
+      pip install -r scripts/requirements.txt
+      python3 scripts/download_onnxruntime.py --ort_version 1.17.0 --os linux --arch $(buildArch)
+    displayName: Download OnnxRuntime
+    workingDirectory: $(Build.SourcesDirectory)
 
-  - ${{ if eq(parameters.enable_linux_cpu, true) }}:
-      - template: py-linux.yml
-        parameters:
-          arch: 'x86_64'
-          machine_pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
-          base_image: 'registry.access.redhat.com/ubi8/ubi'
-          devtoolset_rootpath: /opt/rh/gcc-toolset-12/root
-          ld_library_path_arg: /opt/rh/gcc-toolset-12/root/usr/lib64:/opt/rh/gcc-toolset-12/root/usr/lib:/opt/rh/gcc-toolset-12/root/usr/lib64/dyninst:/opt/rh/gcc-toolset-12/root/usr/lib/dyninst:/usr/local/lib64
-          prepend_path: '/opt/rh/gcc-toolset-12/root/usr/bin:'
-          extra_build_arg: ${{ parameters.build_py_parameters }}
-          cmake_build_type: ${{ parameters.cmake_build_type }}
+  - scripts: |
+      set -e -x
+      python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/inference/$(docker_arch)/default/cpu/Dockerfile \
+        --context tools/ci_build/github/linux/docker/inference/$(docker_arch)/default/cpu \
+        --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
+        --container-registry onnxruntimebuildcache \
+        --repository onnxruntimecpubuild$(docker_arch)
+    displayName: 'Get Docker Image'
+  # - build
+  - script: |
+      set -e -x
+      docker run --rm --volume $(Build.SourcesDirectory):/onnxruntime_src  -w /onnxruntime_src onnxruntimecpubuild$(docker_arch) bash -c "echo $PATH && /usr/bin/cmake --preset linux_gcc_cpu_release && /usr/bin/cmake --build --preset linux_gcc_cpu_release"
+    displayName: 'Build Python Wheel'
+  - task: CopyFiles@2
+    displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
+    inputs:
+      SourceFolder: '$(Build.SourcesDirectory)/build/gcc_cpu/release/wheel'
+      Contents: '*.whl'
+      TargetFolder: '$(Build.ArtifactStagingDirectory)'
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Artifact: ONNXRuntime python wheel'
+    inputs:
+      ArtifactName: onnxruntime-genai-linux-cpu-$(buildArch)
+
+  - task: PublishPipelineArtifact@0
+    displayName: 'Publish Test Binaries'
+    inputs:
+      artifactName: 'drop-linux-cpu-$(buildArch)'
+      targetPath: '$(Build.BinariesDirectory)/${{ parameters.cmake_build_type }}'
+
+  - template: steps/component-governance-component-detection-steps.yml
+    parameters:
+      condition: 'succeeded'
+
+  - task: mspremier.PostBuildCleanup.PostBuildCleanup-task.PostBuildCleanup@3
+    displayName: 'Clean Agent Directories'
+    condition: always()
