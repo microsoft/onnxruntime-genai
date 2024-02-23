@@ -47,7 +47,7 @@ jobs:
       python3 scripts/download_onnxruntime.py --ort_version 1.17.0
     displayName: Download OnnxRuntime
     workingDirectory: $(Build.SourcesDirectory)
-  - bahs: |
+  - bash: |
       ls $(Build.SourcesDirectory)
       ls $(Build.SourcesDirectory)\ort
   - bash: |
