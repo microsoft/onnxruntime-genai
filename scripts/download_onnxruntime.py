@@ -43,7 +43,8 @@ def ort_url_generator(ort_version, is_gpu, alt_cuda_version, os, arch) -> str:
     gpu_suffix = f"-cuda{alt_cuda_version}" if alt_cuda_version is not None else "-gpu"
     return (f'https://github.com/microsoft/onnxruntime/releases/download/'
             f'v{ort_version}'
-            f'/onnxruntime-{os}-{arch}{gpu_suffix if is_gpu else ""}-{ort_version}.tgz')
+            f'/onnxruntime-{os}-{arch}{gpu_suffix if is_gpu else ""}-{ort_version}'
+            f'.{"zip" if os is "win" else "tgz"}')
 
 
 def parse_argument():
