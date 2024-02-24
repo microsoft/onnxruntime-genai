@@ -9,7 +9,7 @@ cd onnxruntime-genai
 
 ## Install the onnxruntime-genai library
 
-* (Temporary) Build the library according to [the build instructions](../README.md#build-from-source)
+* (Temporary) Build the library according to [the build instructions](../../README.md#build-from-source)
 
 * Install the python package
 
