@@ -34,10 +34,8 @@ while not generator.is_done():
 
     generator.generate_next_token_top_p(0.7, 0.6)
 
-    print(tokenizer.decode([generator.get_next_tokens().GetArray()[0]]), ' ', end='', flush=True)
-
-    # Print sequence all at once vs as it's decoded:
-    print(tokenizer.decode(generator.get_sequence(0).get_array()))
+# Print sequence all at once vs as it's decoded:
+print(tokenizer.decode(generator.get_sequence(0).get_array()))
     
-    print()
-    print()
+print()
+print()

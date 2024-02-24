@@ -19,7 +19,7 @@ while True:
 
     start_time=time.time()
     output_tokens=model.generate(params)
-    run_time=time.time()-start_time;
+    run_time=time.time()-start_time
     print(f"Tokens: {len(output_tokens)} Time: {run_time:.2f} Tokens per second: {len(output_tokens)/run_time:.2f}")
 
     print("Output:")
