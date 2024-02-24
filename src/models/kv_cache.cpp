@@ -7,8 +7,8 @@ namespace Generators {
 KV_Cache_Combined::KV_Cache_Combined(const Model& model, State& state)
     : model_{model},
       state_{state},
-      layer_count_{model.config_->model.num_hidden_layers},
-      shape_{2, state_.search_params_.batch_size * state_.search_params_.num_beams, model.config_->model.num_attention_heads, 0, model.config_->model.hidden_size},
+      layer_count_{model.config_->model.decoder.num_hidden_layers},
+      shape_{2, state_.search_params_.batch_size * state_.search_params_.num_beams, model.config_->model.decoder.num_key_value_heads, 0, model.config_->model.decoder.head_size},
       empty_past_{OrtValue::CreateTensor(*model_.allocator_device_, shape_, model_.config_->model.kv_type)} {
   pasts_.resize(layer_count_);
   presents_.reserve(layer_count_);
@@ -18,10 +18,10 @@ KV_Cache_Combined::KV_Cache_Combined(const Model& model, State& state)
     presents_.push_back(OrtValue::CreateTensor(*model.allocator_device_, shape_, model_.config_->model.kv_type));
 
     char string[64];
-    snprintf(string, std::size(string), model.config_->model.past_names.c_str(), i);
+    snprintf(string, std::size(string), model.config_->model.decoder.inputs.past_names.c_str(), i);
     input_name_strings_.emplace_back(string);
 
-    snprintf(string, std::size(string), model.config_->model.present_names.c_str(), i);
+    snprintf(string, std::size(string), model.config_->model.decoder.outputs.present_names.c_str(), i);
     output_name_strings_.emplace_back(string);
   }
 }
@@ -110,8 +110,8 @@ void KV_Cache_Combined::PickPastState(std::span<const int32_t> beam_indices, int
 KV_Cache::KV_Cache(const Model& model, State& state)
     : model_{model},
       state_{state},
-      layer_count_{model_.config_->model.num_hidden_layers},
-      shape_{state_.search_params_.batch_size * state_.search_params_.num_beams, model.config_->model.num_attention_heads, 0, model.config_->model.hidden_size},
+      layer_count_{model_.config_->model.decoder.num_hidden_layers},
+      shape_{state_.search_params_.batch_size * state_.search_params_.num_beams, model.config_->model.decoder.num_key_value_heads, 0, model.config_->model.decoder.head_size},
       empty_past_{OrtValue::CreateTensor(*model_.allocator_device_, shape_, model_.config_->model.kv_type)} {
   pasts_.resize(layer_count_ * 2);
   presents_.reserve(layer_count_ * 2);
@@ -123,14 +123,14 @@ KV_Cache::KV_Cache(const Model& model, State& state)
     presents_.push_back(OrtValue::CreateTensor(*model_.allocator_device_, shape_, model_.config_->model.kv_type));
 
     char string[64];
-    snprintf(string, std::size(string), model.config_->model.past_names_key.c_str(), i);
+    snprintf(string, std::size(string), model.config_->model.decoder.inputs.past_key_names.c_str(), i);
     input_name_strings_.emplace_back(string);
-    snprintf(string, std::size(string), model.config_->model.past_names_value.c_str(), i);
+    snprintf(string, std::size(string), model.config_->model.decoder.inputs.past_value_names.c_str(), i);
     input_name_strings_.emplace_back(string);
 
-    snprintf(string, std::size(string), model.config_->model.present_names_key.c_str(), i);
+    snprintf(string, std::size(string), model.config_->model.decoder.outputs.present_key_names.c_str(), i);
     output_name_strings_.emplace_back(string);
-    snprintf(string, std::size(string), model.config_->model.present_names_value.c_str(), i);
+    snprintf(string, std::size(string), model.config_->model.decoder.outputs.present_value_names.c_str(), i);
     output_name_strings_.emplace_back(string);
   }
 }
@@ -217,8 +217,8 @@ void KV_Cache::PickPastState(std::span<const int32_t> beam_indices, int index) {
 Cross_Cache::Cross_Cache(const Model& model, State& state)
     : model_{model},
       state_{state},
-      layer_count_{model_.config_->model.num_hidden_layers},
-      shape_{state_.search_params_.batch_size * state_.search_params_.num_beams, model.config_->model.num_attention_heads, 1500, model.config_->model.hidden_size} {
+      layer_count_{model_.config_->model.decoder.num_hidden_layers},
+      shape_{state_.search_params_.batch_size * state_.search_params_.num_beams, model.config_->model.decoder.num_key_value_heads, 1500, model.config_->model.decoder.head_size} {
   values_.reserve(layer_count_ * 2);
 
   for (int i = 0; i < layer_count_; ++i) {
@@ -226,14 +226,14 @@ Cross_Cache::Cross_Cache(const Model& model, State& state)
     values_.push_back(OrtValue::CreateTensor(*model_.allocator_device_, shape_, model_.config_->model.kv_type));
 
     char string[64];
-    snprintf(string, std::size(string), model.config_->model.cross_past_names_key.c_str(), i);
+    snprintf(string, std::size(string), model.config_->model.decoder.inputs.cross_past_key_names.c_str(), i);
     input_name_strings_.emplace_back(string);
-    snprintf(string, std::size(string), model.config_->model.cross_past_names_value.c_str(), i);
+    snprintf(string, std::size(string), model.config_->model.decoder.inputs.cross_past_value_names.c_str(), i);
     input_name_strings_.emplace_back(string);
 
-    snprintf(string, std::size(string), model.config_->model.cross_present_names_key.c_str(), i);
+    snprintf(string, std::size(string), model.config_->model.decoder.outputs.cross_present_key_names.c_str(), i);
     output_name_strings_.emplace_back(string);
-    snprintf(string, std::size(string), model.config_->model.cross_present_names_value.c_str(), i);
+    snprintf(string, std::size(string), model.config_->model.decoder.outputs.cross_present_value_names.c_str(), i);
     output_name_strings_.emplace_back(string);
   }
 }
