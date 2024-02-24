@@ -58,7 +58,8 @@ jobs:
       cmake -G "Visual Studio 17 2022" -A x64 -T cuda=$(cuda_dir)\v$(cuda_version) -DCMAKE_BUILD_TYPE=$(BuildConfig) -DUSE_CUDA=TRUE -S . -B build
       cmake --build build --config $(BuildConfig) --parallel  --target python
     displayName: 'Build pybind with CMake'
-
+  - powershell: |
+      Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
   # Esrp signing
   - template: steps/win-esrp-dll-step.yml
     parameters:
@@ -69,7 +70,8 @@ jobs:
   - bash: |
       cmake --build build --config $(BuildConfig) --parallel --target PyPackageBuild
     displayName: 'Build Python Wheel'
-
+  - powershell: |
+      Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
   - task: CopyFiles@2
     displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
     inputs:
