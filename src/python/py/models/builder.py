@@ -26,7 +26,7 @@ class Model:
         self.hidden_size = config.hidden_size
         self.num_kv_heads = config.num_key_value_heads
         self.num_attn_heads = config.num_attention_heads
-        self.head_size = config.hidden_size // config.num_attention_heads
+        self.head_size = config.head_dim if hasattr(config, "head_dim") else config.hidden_size // config.num_attention_heads
         self.num_layers = int(extra_options["num_hidden_layers"]) if "num_hidden_layers" in extra_options else config.num_hidden_layers
         self.vocab_size = config.vocab_size
         self.activation = config.hidden_act
@@ -125,24 +125,33 @@ class Model:
 
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
         config = GenerationConfig.from_pretrained(model_name_or_path, **extra_kwargs)
+        inputs = dict(zip(self.input_shapes.keys(), self.input_shapes.keys()))
+        inputs.update({
+            "past_key_names": "past_key_values.%d.key",
+            "past_value_names": "past_key_values.%d.value",
+        })
         genai_config = {
             "model": {
                 "bos_token_id": config.bos_token_id,
                 "context_length": self.context_length,
-                "decoder": self.filename,
+                "decoder": {
+                    "filename": self.filename,
+                    "head_size": self.head_size,
+                    "hidden_size": self.hidden_size,
+                    "inputs": inputs,
+                    "outputs": {
+                        "logits": "logits",
+                        "present_key_names": "present.%d.key",
+                        "present_value_names": "present.%d.value",
+                    },
+                    "num_attention_heads": self.num_attn_heads,
+                    "num_hidden_layers": self.num_layers,
+                    "num_key_value_heads": self.num_kv_heads,
+                },
                 "eos_token_id": config.eos_token_id,
-                "head_size": self.head_size,
-                "hidden_size": self.hidden_size,
                 "logits_type": "float32" if self.io_dtype == TensorProto.FLOAT else "float16",
                 "kv_type": "float32" if self.io_dtype == TensorProto.FLOAT else "float16",
-                "num_attention_heads": self.num_attn_heads,
-                "num_hidden_layers": self.num_layers,
-                "num_key_value_heads": self.num_kv_heads,
                 "pad_token_id": config.pad_token_id if hasattr(config, "pad_token_id") and config.pad_token_id != None else config.eos_token_id,
-                "past_key_names": "past_key_values.%d.key",
-                "past_value_names": "past_key_values.%d.value",
-                "present_key_names": "present.%d.key",
-                "present_value_names": "present.%d.value",
                 "type": self.model_type[ : self.model_type.find("For")].lower(),
                 "vocab_size": self.vocab_size,
             },
@@ -555,9 +564,8 @@ class Model:
 
         inputs = [root_input, kwargs.pop("position_ids"), cos_cache_name, sin_cache_name]
         output = f"{name}/output_0"
-        k_dim = (self.hidden_size // self.num_attn_heads) * self.num_kv_heads
         self.make_node("RotaryEmbedding", inputs=inputs, outputs=[output], name=name, domain="com.microsoft", interleaved=0, **kwargs)
-        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', (k_dim if "k_rotary" in name else self.hidden_size)])
+        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * (self.num_kv_heads if "k_rotary" in name else self.num_attn_heads)])
 
     def make_attention_op(self, name, **kwargs):
         op_type = self.attention_attrs["op_type"]
@@ -578,7 +586,7 @@ class Model:
         output = f"{name}/output_0"
         outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
         self.make_node("MultiHeadAttention", inputs=inputs, outputs=outputs, name=name, domain="com.microsoft", num_heads=self.num_attn_heads)
-        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * self.num_attn_heads])
 
     def make_group_query_attention(self, name, **kwargs):
         inputs = [
@@ -589,7 +597,7 @@ class Model:
         output = f"{name}/output_0"
         outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
         self.make_node("GroupQueryAttention", inputs=inputs, outputs=outputs, name=name, domain="com.microsoft", num_heads=self.num_attn_heads, kv_num_heads=self.num_kv_heads)
-        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * self.num_attn_heads])
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         # Make nodes for the Attention subgraph
