@@ -62,7 +62,7 @@ jobs:
   # Esrp signing
   - template: steps/win-esrp-dll-step.yml
     parameters:
-      FolderPath: '$(Build.BinariesDirectory)\build\src\python\$(BuildConfig)\wheel\'
+      FolderPath: '$(Build.SourcesDirectory)\build\wheel\onnxruntime-genai\'
       DisplayName: 'ESRP - Sign Native dlls'
       DoEsrp: true
       Pattern: '*.pyd,*.dll'
@@ -73,7 +73,7 @@ jobs:
   - task: CopyFiles@2
     displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
     inputs:
-      SourceFolder: '$(Build.BinariesDirectory)\$(BuildConfig)\$(BuildConfig)\wheel\'
+      SourceFolder: '$(Build.SourcesDirectory)\build\wheel\onnxruntime-genai\'
       Contents: '*.whl'
       TargetFolder: '$(Build.ArtifactStagingDirectory)'
 
