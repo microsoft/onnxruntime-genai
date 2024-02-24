@@ -31,7 +31,7 @@ pip install onnx
 pip install onnxruntime
 ```
 
-Run the model builder script to load, optimize, quantize and export the model. More details can be found [here](../../src/python/py/models/README.md)
+Run the model builder script to export, optimize, and quantize the model. More details can be found [here](../../src/python/py/models/README.md)
 
 ```bash
 cd examples/phi2
