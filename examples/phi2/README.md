@@ -27,7 +27,7 @@ Run the model builder script to export, optimize, and quantize the model. More d
 
 ```bash
 cd examples/phi2
-python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -e cpu -p int4 -o ./model
+python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -e cpu -p int4 -o ./example-models/phi2-int4-cpu
 ```
 
 ## Run the phi-2 model

@@ -2,7 +2,9 @@
 import time
 
 print("Loading model...")
-model=og.Model("model", og.DeviceType.CPU)
+
+# The first argument is the name of the folder containing the model files
+model=og.Model("example-models/llama2-7b-chat-int4-cpu", og.DeviceType.CPU)
 print("Model loaded")
 tokenizer=model.create_tokenizer()
 print("Tokenizer created")
