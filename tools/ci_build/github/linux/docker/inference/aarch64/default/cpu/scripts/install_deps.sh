@@ -52,5 +52,18 @@ cmake --build build-cmake
 mv ./build-cmake/ninja /usr/bin
 popd
 
+echo "Installing Node.js"
+
+if [[ "$CPU_ARCH" = "x86_64" ]]; then
+  NODEJS_ARCH=x64
+elif [[ "$CPU_ARCH" = "aarch64" ]]; then
+  NODEJS_ARCH=arm64
+else
+  NODEJS_ARCH=$CPU_ARCH
+fi
+# The EOL for nodejs v18.17.1 LTS is April 2025
+GetFile https://nodejs.org/dist/v18.17.1/node-v18.17.1-linux-${NODEJS_ARCH}.tar.gz /tmp/src/node-v18.17.1-linux-${NODEJS_ARCH}.tar.gz
+tar --strip 1 -xf /tmp/src/node-v18.17.1-linux-${NODEJS_ARCH}.tar.gz -C /usr
+
 cd /
 rm -rf /tmp/src
