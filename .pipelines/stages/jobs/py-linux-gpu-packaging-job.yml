@@ -15,7 +15,8 @@ jobs:
   # The build machine pool doesn't have dotnet, so it can't run CG.
   - name: skipComponentGovernanceDetection
     value: true
-  - ort_version: '1.17.0'
+  - name: ort_version
+    value: '1.17.0'
 
   steps:
   - checkout: self # due to checkout multiple repos, the root directory is $(Build.SourcesDirectory)/onnxruntime-genai,
