@@ -45,8 +45,7 @@ def parse_args():
 
     parser.add_argument("--docker-path", default="docker", help="Path to docker.")
 
-    parser.add_argument("--manylinux-src", default=os.path.join("extern", "manylinux"),
-                        help="Path to manylinux src folder")
+    parser.add_argument("--manylinux-src", default="manylinux", help="Path to manylinux src folder")
 
     parser.add_argument(
         "--multiple_repos",
