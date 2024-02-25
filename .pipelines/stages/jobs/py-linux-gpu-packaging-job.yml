@@ -16,18 +16,20 @@ jobs:
   - name: skipComponentGovernanceDetection
     value: true
   steps:
-  - checkout: self
+  - checkout: self # due to checkout multiple repos, the root directory is $(Build.SourcesDirectory)/onnxruntime-genai,
     clean: true
     submodules: recursive
-  - checkout: manylinux
+
+  - checkout: manylinux # due to checkout multiple repos, the root directory is $(Build.SourcesDirectory)/manylinux,
     submodules: false
+
   - template: steps/set-nightly-build-option-variable-step.yml
 
   - bash: |
       pip3 install -r requirements.txt
       python3 download_onnxruntime.py --ort_version 1.17.0 --os linux --is_gpu True --arch x64
     displayName: Download OnnxRuntime
-    workingDirectory: $(Build.SourcesDirectory)/scripts
+    workingDirectory: $(Build.SourcesDirectory)/onnxruntime-genai/scripts
 
   - script: |
       set -e -x
@@ -50,7 +52,7 @@ jobs:
   - task: CopyFiles@2
     displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
     inputs:
-      SourceFolder: '$(Build.SourcesDirectory)/build/gcc_gpu/release/wheel'
+      SourceFolder: '$(Build.SourcesDirectory)/onnxruntime-genai/build/gcc_gpu/release/wheel'
       Contents: '*.whl'
       TargetFolder: '$(Build.ArtifactStagingDirectory)'
 
