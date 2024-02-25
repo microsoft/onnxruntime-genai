@@ -43,11 +43,11 @@ jobs:
 
   - template: steps/set-nightly-build-option-variable-step.yml
 
-  #  - bash: |
-  #      pip3 install -r requirements.txt
-  #      python3 download_onnxruntime.py --ort_version 1.17.0 --os win --arch x64
-  #    displayName: Download OnnxRuntime
-  #    workingDirectory: '$(Build.SourcesDirectory)\scripts'
+  - bash: |
+      pip3 install -r requirements.txt
+#      python3 download_onnxruntime.py --ort_version 1.17.0 --os win --arch x64
+    displayName: Download OnnxRuntime
+    workingDirectory: '$(Build.SourcesDirectory)\scripts'
 
   - task: DownloadGitHubRelease@0
     inputs:
