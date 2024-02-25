@@ -35,7 +35,7 @@ Run the model builder script to export, optimize, and quantize the model. More d
 
 ```bash
 cd examples/phi2
-python -m python -m onnxruntime_genai.models.builder -m meta-llama/Llama-2-7b-chat-hf -e cpu -p int4 -o ./example-models/llama2-7b-chat-int4-cpu
+python -m onnxruntime_genai.models.builder -m meta-llama/Llama-2-7b-chat-hf -e cpu -p int4 -o ./example-models/llama2-7b-chat-int4-cpu
 ```
 
 ## Run Llama
