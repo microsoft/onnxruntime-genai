@@ -40,7 +40,7 @@ jobs:
       userRepository: 'microsoft/onnxruntime'
       defaultVersionType: 'specificTag'
       version: 'v$(ort_version)'
-      itemPattern: 'onnxruntime-linux-$(buildArch)-gpu-$(ort_version)*'
+      itemPattern: 'onnxruntime-linux-x64-gpu-$(ort_version)*'
       downloadPath: '$(Build.SourcesDirectory)'
     displayName: Download the ONNXRuntime prebuilt package.
       -
@@ -53,7 +53,7 @@ jobs:
     displayName: Unpack ONNXRuntime package.
 
   - bash: |
-      mv  onnxruntime-linux-$(buildArch)-gpu-$(ort_version) ort
+      mv  onnxruntime-linux-x64-gpu-$(ort_version) ort
     displayName: Rename Onnxruntime to ort
     workingDirectory: '$(Build.SourcesDirectory)/onnxruntime-genai'
 

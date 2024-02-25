@@ -51,7 +51,7 @@ jobs:
       userRepository: 'microsoft/onnxruntime'
       defaultVersionType: 'specificTag'
       version: 'v$(ort_version)'
-      itemPattern: 'onnxruntime-win-$(buildArch)-gpu-$(ort_version).zip'
+      itemPattern: 'onnxruntime-win-x64-gpu-$(ort_version).zip'
       downloadPath: '$(Build.SourcesDirectory)'
     displayName: Download ONNXRuntime
       -
@@ -64,7 +64,7 @@ jobs:
     displayName: Unzip OnnxRuntime
 
   - powershell: |
-      Rename-Item -Path onnxruntime-win-$(buildArch)-gpu-$(ort_version) -NewName ort
+      Rename-Item -Path onnxruntime-win-x64-gpu-$(ort_version) -NewName ort
     displayName: Rename Onnxruntime to ort
     workingDirectory: '$(Build.SourcesDirectory)'
 
