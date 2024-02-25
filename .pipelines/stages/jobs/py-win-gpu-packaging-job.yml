@@ -38,18 +38,8 @@ jobs:
 
   - template: steps/set-nightly-build-option-variable-step.yml
 
-  - task: PythonScript@0
-    inputs:
-      scriptSource: inline
-      script: |
-        import sys
-        np_version = 'numpy==1.21.6' if sys.version_info < (3, 11) else 'numpy==1.24.2'
-        import subprocess
-        subprocess.call(['pip', 'install', '-q', 'setuptools', 'wheel', 'requests', np_version])
-      workingDirectory: '$(Build.SourcesDirectory)'
-      displayName: 'Install python modules'
-
   - bash: |
+      pip install -r scripts/requirements.txt
       python3 scripts/download_onnxruntime.py --ort_version 1.17.0 --is_gpu True --os win --arch x64
     displayName: Download OnnxRuntime
     workingDirectory: $(Build.SourcesDirectory)

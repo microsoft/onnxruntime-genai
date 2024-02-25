@@ -29,12 +29,12 @@ if(BUILD_WHEEL)
     COMMAND ${CMAKE_COMMAND} -E copy
     $<TARGET_FILE:onnxruntime-genai> ${onnxruntime_libs} $<TARGET_FILE:python>
     ${WHEEL_TARGET_NAME}
-    COMMENT "Copying files to wheel directory"
+    COMMENT "Copying files to wheel directory: ${WHEEL_TARGET_NAME}"
   )
   add_custom_target(PyPackageBuild ALL
     COMMAND "${PYTHON_EXECUTABLE}" -m pip wheel .
     WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
-    COMMENT "Building wheel"
+    COMMENT "Building wheel on ${WHEEL_FILES_DIR}"
   )
   add_dependencies(PyPackageBuild python)
 endif()
