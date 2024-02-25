@@ -70,6 +70,7 @@ jobs:
     displayName: 'Build Python Wheel'
   - powershell: |
       Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
+
   - task: CopyFiles@2
     displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
     inputs:

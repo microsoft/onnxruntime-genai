@@ -21,6 +21,7 @@ jobs:
     submodules: recursive
 
   - template: steps/set-nightly-build-option-variable-step.yml
+
   - bash: |
       pip install -r scripts/requirements.txt
       python3 scripts/download_onnxruntime.py --ort_version 1.17.0 --os linux --is_gpu True --arch x64
@@ -29,14 +30,15 @@ jobs:
 
   - script: |
       set -e -x
-      python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/inference/x64/default/gpu/Dockerfile \
-        --context tools/ci_build/github/linux/docker/inference/x64/default/gpu \
+      python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux//Dockerfile.manylinux2_28_gpu \
+        --context tools/ci_build/github/linux/docker/manylinux \
         --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
         --container-registry onnxruntimebuildcache \
         --repository onnxruntimegpubuild
     displayName: 'Get Docker Image'
 
   - script: |
+      set -e -x
       docker run \
         --gpus all \
         --rm \
@@ -47,7 +49,7 @@ jobs:
   - task: CopyFiles@2
     displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
     inputs:
-      SourceFolder: '$(Build.SourcesDirectory)/build/gcc_cpu/release/wheel'
+      SourceFolder: '$(Build.SourcesDirectory)/build/gcc_gpu/release/wheel'
       Contents: '*.whl'
       TargetFolder: '$(Build.ArtifactStagingDirectory)'
 

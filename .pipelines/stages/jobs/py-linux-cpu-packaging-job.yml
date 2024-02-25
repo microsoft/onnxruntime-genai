@@ -39,16 +39,19 @@ jobs:
 
   - script: |
       set -e -x
-      python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/inference/$(docker_arch)/default/cpu/Dockerfile \
-        --context tools/ci_build/github/linux/docker/inference/$(docker_arch)/default/cpu \
+      python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cpu \
+        --context tools/ci_build/github/linux/docker/manylinux \
         --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
         --container-registry onnxruntimebuildcache \
         --repository onnxruntimecpubuild$(docker_arch)
     displayName: 'Get Docker Image'
-  # - build
+
   - script: |
       set -e -x
-      docker run --rm --volume $(Build.SourcesDirectory):/onnxruntime_src  -w /onnxruntime_src onnxruntimecpubuild$(docker_arch) bash -c "echo $PATH && /usr/bin/cmake --preset linux_gcc_cpu_release && /usr/bin/cmake --build --preset linux_gcc_cpu_release"
+      docker run \
+      --rm \
+      --volume $(Build.SourcesDirectory):/onnxruntime_src \
+      -w /onnxruntime_src onnxruntimecpubuild$(docker_arch) bash -c "echo $PATH && /usr/bin/cmake --preset linux_gcc_cpu_release && /usr/bin/cmake --build --preset linux_gcc_cpu_release"
     displayName: 'Build Python Wheel'
 
   - task: CopyFiles@2

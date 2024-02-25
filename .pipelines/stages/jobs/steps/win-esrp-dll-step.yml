@@ -19,6 +19,7 @@ steps:
 - task: SFP.build-tasks.custom-build-task-1.EsrpCodeSigning@2
   displayName: ${{ parameters.DisplayName }}
   condition: and(succeeded(), eq('${{ parameters.DoEsrp }}', true))
+  continueOnError: true
   inputs:
     ConnectedServiceName: 'OnnxRuntime CodeSign 20190817'
     FolderPath: ${{ parameters.FolderPath }}

@@ -97,7 +97,7 @@ def main():
             "patch",
             "-p1",
             "-i",
-            str((Path(SCRIPT_DIR) / "github" / "linux" / "docker" / "manylinux.patch").resolve()),
+            str((Path(SCRIPT_DIR) / "github" / "linux" / "docker" /"manylinux"/ "manylinux.patch").resolve()),
             cwd=str(dest),
         )
 
