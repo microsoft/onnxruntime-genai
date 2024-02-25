@@ -59,7 +59,7 @@ jobs:
       cmake --build build --config $(BuildConfig) --parallel  --target python
     displayName: 'Build pybind with CMake'
   - powershell: |
-      Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
+      Get-ChildItem -Path $(Build.SourcesDirectory)\build\wheel\ -Recurse
   # Esrp signing
   - template: steps/win-esrp-dll-step.yml
     parameters:
@@ -68,7 +68,7 @@ jobs:
       DoEsrp: true
       Pattern: '*.pyd,*.dll'
   - bash: |
-      cmake --build build --config $(BuildConfig) --parallel --target PyPackageBuild
+      cmake --build build --config $(BuildConfig) --parallel
     displayName: 'Build Python Wheel'
   - powershell: |
       Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
