@@ -1,0 +1,190 @@
+parameters:
+  arch: 'x64'
+jobs:
+- job: Windows_Wheels
+  pool: 'onnxruntime-Win-CPU-2022'
+  strategy:
+    matrix:
+      Python38_x64:
+        PythonVersion: '3.8'
+        EP: cpu
+        ort_version: '1.17.0'
+        buildArch: ${{ parameters.arch }}
+      Python39_x64:
+        PythonVersion: '3.9'
+        EP: cpu
+        ort_version: '1.17.0'
+        buildArch: ${{ parameters.arch }}
+      Python310_x64:
+        PythonVersion: '3.10'
+        EP: cpu
+        ort_version: '1.17.0'
+        buildArch: ${{ parameters.arch }}
+      Python311_x64:
+        PythonVersion: '3.11'
+        EP: cpu
+        ort_version: '1.17.0'
+        buildArch: ${{ parameters.arch }}
+      Python312_x64:
+        PythonVersion: '3.12'
+        EP: cpu
+        ort_version: '1.17.0'
+        buildArch: ${{ parameters.arch }}
+      Python38_GPU:
+        PythonVersion: '3.8'
+        EP: gpu
+        ort_version: '1.17.0'
+        buildArch: 'x64'
+      Python39_GPU:
+        PythonVersion: '3.9'
+        EP: gpu
+        ort_version: '1.17.0'
+        buildArch: 'x64'
+      Python310_GPU:
+        PythonVersion: '3.10'
+        EP: gpu
+        ort_version: '1.17.0'
+        buildArch: 'x64'
+      Python311_GPU:
+        PythonVersion: '3.11'
+        EP: gpu
+        ort_version: '1.17.0'
+        buildArch: 'x64'
+      Python312_GPU:
+        PythonVersion: '3.12'
+        EP: gpu
+        ort_version: '1.17.0'
+        buildArch: 'x64'
+  variables:
+  - name: BuildConfig
+    value: 'RelWithDebInfo'
+  - name : Onnxruntime_package
+    ${{ if eq(EP, 'gpu') }}:
+      value: onnxruntime-win-$(buildArch)-$(ort_version)
+    ${{ else }}:
+      value: onnxruntime-win-x64-gpu-$(ort_version)
+
+
+  timeoutInMinutes: 180
+  workspace:
+    clean: all
+  steps:
+  - checkout: self
+    clean: true
+    submodules: recursive
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: $(PythonVersion)
+      addToPath: true
+      architecture: $(buildArch)
+  - task: onebranch.pipeline.tsaoptions@1
+    displayName: 'OneBranch TSAOptions'
+    inputs:
+      tsaConfigFilePath: '$(Build.SourcesDirectory)\.config\tsaoptions.json'
+      appendSourceBranchName: false
+
+  - template: steps/set-nightly-build-option-variable-step.yml
+
+  - bash: |
+      pip3 install -r requirements.txt
+#      python3 download_onnxruntime.py --ort_version 1.17.0 --os win --arch x64
+    displayName: Download OnnxRuntime
+    workingDirectory: '$(Build.SourcesDirectory)\scripts'
+
+  - task: DownloadGitHubRelease@0
+    inputs:
+      connection: 'GitHub - Release'
+      userRepository: 'microsoft/onnxruntime'
+      defaultVersionType: 'specificTag'
+      version: 'v$(ort_version)'
+      itemPattern: '$(Onnxruntime_package)*'
+      downloadPath: '$(Build.SourcesDirectory)'
+    displayName: Download ONNXRuntime
+      -
+  - task: ExtractFiles@1
+    inputs:
+      archiveFilePatterns: '**/*.zip'
+      destinationFolder: '$(Build.SourcesDirectory)'
+      cleanDestinationFolder: false
+      overwriteExistingFiles: true
+    displayName: Unzip OnnxRuntime
+
+  - powershell: |
+      Rename-Item -Path $(Onnxruntime_package) -NewName ort
+    displayName: Rename Onnxruntime to ort
+    workingDirectory: '$(Build.SourcesDirectory)'
+
+  - powershell: |
+      azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" $(cuda_dir)
+      Get-ChildItem -Path $(cuda_dir) -Recurse
+      cmake -G "Visual Studio 17 2022" -A x64 -T cuda=$(cuda_dir)\v$(cuda_version) -DCMAKE_BUILD_TYPE=$(BuildConfig) -DUSE_CUDA=TRUE -S . -B build
+      cmake --build build --config $(BuildConfig) --parallel
+    condition: eq(variables.EP 'gpu')
+    displayName: 'Build pybind with CMake GPU'
+
+  - bash: |
+      cmake -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=$(BuildConfig) -DUSE_CUDA=OFF -S . -B build
+      cmake --build build --config $(BuildConfig)  --parallel
+    displayName: 'Build pybind with CMake CPU'
+    condition: ne(variables.EP 'gpu')
+
+  - powershell: |
+      Get-ChildItem -Path $(Build.SourcesDirectory)\build\wheel -Recurse
+
+  - template: steps/win-esrp-dll-step.yml
+    parameters:
+      FolderPath: '$(Build.SourcesDirectory)\build\wheel\onnxruntime-genai\'
+      DisplayName: 'ESRP - Sign Native dlls'
+      DoEsrp: true
+      Pattern: '*.pyd,*.dll'
+  #
+  #  - bash: |
+  #      cmake --build build --config $(BuildConfig) --parallel
+  #    displayName: 'Build Python Wheel'
+  - powershell: |
+      Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
+
+  - task: CopyFiles@2
+    displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
+    inputs:
+      SourceFolder: '$(Build.SourcesDirectory)\build\wheel\'
+      Contents: '*.whl'
+      TargetFolder: '$(Build.ArtifactStagingDirectory)'
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Artifact: ONNXRuntime Genai python wheel'
+    inputs:
+      ArtifactName: onnxruntime-genai-win-$(EP)-$(buildArch)
+
+  - script: |
+      7z x *.whl
+    workingDirectory: '$(Build.ArtifactStagingDirectory)'
+    displayName: 'unzip the package'
+
+  - task: CredScan@3
+    displayName: 'Run CredScan'
+    inputs:
+      debugMode: false
+    continueOnError: true
+
+  - task: BinSkim@4
+    displayName: 'Run BinSkim'
+    inputs:
+      AnalyzeTargetGlob: '+:file|$(Build.ArtifactStagingDirectory)\**\*.dll;-:file|$(Build.ArtifactStagingDirectory)\**\DirectML.dll'
+    continueOnError: true
+
+  - task: TSAUpload@2
+    displayName: 'TSA upload'
+    condition: and(and (succeeded(), and(eq(variables['buildArch'], 'x64'), eq(variables['PythonVersion'], '3.8'))), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    inputs:
+      GdnPublishTsaOnboard: false
+      GdnPublishTsaConfigFile: '$(Build.sourcesDirectory)\.gdn\.gdntsa'
+    continueOnError: true
+
+  - template: steps/component-governance-component-detection-step.yml
+    parameters:
+      condition: 'succeeded'
+
+  - task: mspremier.PostBuildCleanup.PostBuildCleanup-task.PostBuildCleanup@3
+    displayName: 'Clean Agent Directories'
+    condition: always()
