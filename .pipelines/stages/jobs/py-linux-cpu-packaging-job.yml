@@ -49,17 +49,22 @@ jobs:
       userRepository: 'microsoft/onnxruntime'
       defaultVersionType: 'specificTag'
       version: 'v$(ort_version)'
-      itemPattern: '*-linux-$(buildArch)-$(ort_version)*'
+      itemPattern: 'onnxruntime-linux-$(buildArch)-$(ort_version)*'
       downloadPath: '$(Build.SourcesDirectory)'
-    displayName: Download the ONNXRuntime prebuilt package.
+    displayName: Download ONNXRuntime
       -
   - task: ExtractFiles@1
     inputs:
       archiveFilePatterns: '**/*.tgz'
-      destinationFolder: '$(Build.SourcesDirectory)/onnxruntime-genai/ort'
+      destinationFolder: '$(Build.SourcesDirectory)/onnxruntime-genai'
       cleanDestinationFolder: false
       overwriteExistingFiles: true
-    displayName: Unpack ONNXRuntime package.
+    displayName: Unzip OnnxRuntime
+
+  - bash: |
+      mv  onnxruntime-linux-$(buildArch)-$(ort_version) ort
+    displayName: Rename Onnxruntime to ort
+    workingDirectory: '$(Build.SourcesDirectory)/onnxruntime-genai'
 
   - script: |
       set -e -x

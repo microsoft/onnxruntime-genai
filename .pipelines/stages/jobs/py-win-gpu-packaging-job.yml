@@ -51,17 +51,22 @@ jobs:
       userRepository: 'microsoft/onnxruntime'
       defaultVersionType: 'specificTag'
       version: 'v$(ort_version)'
-      itemPattern: '*-win-$(buildArch)-gpu-$(ort_version)*'
+      itemPattern: 'onnxruntime-win-$(buildArch)-gpu-$(ort_version).zip'
       downloadPath: '$(Build.SourcesDirectory)'
-    displayName: Download the ONNXRuntime prebuilt package.
+    displayName: Download ONNXRuntime
       -
   - task: ExtractFiles@1
     inputs:
       archiveFilePatterns: '**/*.zip'
-      destinationFolder: '$(Build.SourcesDirectory)\ort'
+      destinationFolder: '$(Build.SourcesDirectory)'
       cleanDestinationFolder: false
       overwriteExistingFiles: true
-    displayName: Unpack ONNXRuntime package.
+    displayName: Unzip OnnxRuntime
+
+  - powershell: |
+      Rename-Item -Path onnxruntime-win-$(buildArch)-gpu-$(ort_version) -NewName ort
+    displayName: Rename Onnxruntime to ort
+    workingDirectory: '$(Build.SourcesDirectory)'
 
   - powershell: |
       Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
