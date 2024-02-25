@@ -18,6 +18,7 @@ jobs:
     BuildConfig: 'RelWithDebInfo'
     cuda_version: '12.2'
     cuda_dir: '$(Build.SourcesDirectory)\cuda_sdk'
+    ort_version: '1.17.0'
   timeoutInMinutes: 180
   workspace:
     clean: all

@@ -1,7 +1,7 @@
 parameters:
-  - name: arch
-    type: string
-    default: 'x64'
+- name: arch
+  type: string
+  default: 'x64'
 jobs:
 - job: Linux_CPU_Wheels
   strategy:
@@ -23,8 +23,7 @@ jobs:
   # The build machine pool doesn't have dotnet, so it can't run CG.
   - name: skipComponentGovernanceDetection
     value: true
-  - name: ort_version
-    value: '1.17.0'
+  - ort_version: '1.17.0'
 
   steps:
   - checkout: self # due to checkout multiple repos, the root directory is $(Build.SourcesDirectory)/onnxruntime-genai,
@@ -37,11 +36,11 @@ jobs:
   - template: steps/set-nightly-build-option-variable-step.yml
 
 
-#  - bash: |
-#      pip3 install -r requirements.txt
-#      python3 download_onnxruntime.py --ort_version 1.17.0 --os linux --is_gpu False --arch $(buildArch)
-#    displayName: Download OnnxRuntime
-#    workingDirectory: $(Build.SourcesDirectory)/onnxruntime-genai/scripts
+  #  - bash: |
+  #      pip3 install -r requirements.txt
+  #      python3 download_onnxruntime.py --ort_version 1.17.0 --os linux --is_gpu False --arch $(buildArch)
+  #    displayName: Download OnnxRuntime
+  #    workingDirectory: $(Build.SourcesDirectory)/onnxruntime-genai/scripts
 
   - task: DownloadGitHubRelease@0
     inputs:

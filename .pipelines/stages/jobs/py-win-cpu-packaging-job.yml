@@ -22,6 +22,7 @@ jobs:
         buildArch: ${{ parameters.arch }}
   variables:
     BuildConfig: 'RelWithDebInfo'
+    ort_version: '1.17.0'
   timeoutInMinutes: 180
   workspace:
     clean: all
