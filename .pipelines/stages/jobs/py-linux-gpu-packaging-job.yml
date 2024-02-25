@@ -25,11 +25,29 @@ jobs:
 
   - template: steps/set-nightly-build-option-variable-step.yml
 
-  - bash: |
-      pip3 install -r requirements.txt
-      python3 download_onnxruntime.py --ort_version 1.17.0 --os linux --is_gpu True --arch x64
-    displayName: Download OnnxRuntime
-    workingDirectory: $(Build.SourcesDirectory)/onnxruntime-genai/scripts
+#  - bash: |
+#      pip3 install -r requirements.txt
+#      python3 download_onnxruntime.py --ort_version 1.17.0 --os linux --is_gpu True --arch x64
+#    displayName: Download OnnxRuntime
+#    workingDirectory: $(Build.SourcesDirectory)/onnxruntime-genai/scripts
+
+  - task: DownloadGitHubRelease@0
+    inputs:
+      connection: 'GitHub - Release'
+      userRepository: 'microsoft/onnxruntime'
+      defaultVersionType: 'specificTag'
+      version: 'v$(ort_version)'
+      itemPattern: '*-linux-$(buildArch)-gpu-$(ort_version)*'
+      downloadPath: '$(Build.SourcesDirectory)'
+    displayName: Download the ONNXRuntime prebuilt package.
+      -
+  - task: ExtractFiles@1
+    inputs:
+      archiveFilePatterns: '**/*.tgz'
+      destinationFolder: '$(Build.SourcesDirectory)/onnxruntime-genai/ort'
+      cleanDestinationFolder: false
+      overwriteExistingFiles: true
+    displayName: Unpack ONNXRuntime package.
 
   - script: |
       set -e -x

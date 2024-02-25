@@ -38,11 +38,29 @@ jobs:
 
   - template: steps/set-nightly-build-option-variable-step.yml
 
-  - bash: |
-      pip3 install -r requirements.txt
-      python3 download_onnxruntime.py --ort_version 1.17.0 --is_gpu True --os win --arch x64
-    displayName: Download OnnxRuntime
-    workingDirectory: '$(Build.SourcesDirectory)\scripts'
+#  - bash: |
+#      pip3 install -r requirements.txt
+##      python3 download_onnxruntime.py --ort_version 1.17.0 --is_gpu True --os win --arch x64
+#    displayName: Download requirements.txt
+#    workingDirectory: '$(Build.SourcesDirectory)\scripts'
+
+  - task: DownloadGitHubRelease@0
+    inputs:
+      connection: 'GitHub - Release'
+      userRepository: 'microsoft/onnxruntime'
+      defaultVersionType: 'specificTag'
+      version: 'v$(ort_version)'
+      itemPattern: '*-win-$(buildArch)-gpu-$(ort_version)*'
+      downloadPath: '$(Build.SourcesDirectory)'
+    displayName: Download the ONNXRuntime prebuilt package.
+      -
+  - task: ExtractFiles@1
+    inputs:
+      archiveFilePatterns: '**/*.zip'
+      destinationFolder: '$(Build.SourcesDirectory)\ort'
+      cleanDestinationFolder: false
+      overwriteExistingFiles: true
+    displayName: Unpack ONNXRuntime package.
 
   - powershell: |
       Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
