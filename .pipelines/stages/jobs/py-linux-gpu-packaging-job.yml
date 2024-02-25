@@ -64,6 +64,7 @@ jobs:
         --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
         --container-registry onnxruntimebuildcache \
         --manylinux-src $(Build.SourcesDirectory)/manylinux \
+        --multiple_repos \
         --repository onnxruntimegpubuild
     displayName: 'Get Docker Image'
     workingDirectory: '$(Build.SourcesDirectory)/onnxruntime-genai'
