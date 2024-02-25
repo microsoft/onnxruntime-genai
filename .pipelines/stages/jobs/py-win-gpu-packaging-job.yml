@@ -93,7 +93,7 @@ jobs:
   - task: CopyFiles@2
     displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
     inputs:
-      SourceFolder: '$(Build.SourcesDirectory)\build\wheel\onnxruntime-genai\'
+      SourceFolder: '$(Build.SourcesDirectory)\build\wheel\'
       Contents: '*.whl'
       TargetFolder: '$(Build.ArtifactStagingDirectory)'
 

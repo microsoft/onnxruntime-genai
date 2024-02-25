@@ -29,6 +29,9 @@ jobs:
     clean: true
     submodules: recursive
 
+  - checkout: manylinux
+    submodules: false
+
   - template: steps/set-nightly-build-option-variable-step.yml
 
   - bash: |
