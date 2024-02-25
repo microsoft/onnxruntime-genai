@@ -43,10 +43,10 @@ jobs:
   - template: steps/set-nightly-build-option-variable-step.yml
 
   - bash: |
-      pip install -r scripts/requirements.txt
-      python3 scripts\\download_onnxruntime.py --ort_version 1.17.0 --os win --arch x64
+      pip3 install -r requirements.txt
+      python3 download_onnxruntime.py --ort_version 1.17.0 --os win --arch x64
     displayName: Download OnnxRuntime
-    workingDirectory: $(Build.SourcesDirectory)
+    workingDirectory: '$(Build.SourcesDirectory)\scripts'
 
   - bash: |
       cmake -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=$(BuildConfig) -DUSE_CUDA=OFF -S . -B build

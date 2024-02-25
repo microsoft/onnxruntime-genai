@@ -35,10 +35,10 @@ jobs:
   - template: steps/set-nightly-build-option-variable-step.yml
 
   - bash: |
-      pip install -r scripts/requirements.txt
-      python3 scripts/download_onnxruntime.py --ort_version 1.17.0 --os linux --is_gpu False --arch $(buildArch)
+      pip3 install -r requirements.txt
+      python3 download_onnxruntime.py --ort_version 1.17.0 --os linux --is_gpu False --arch $(buildArch)
     displayName: Download OnnxRuntime
-    workingDirectory: $(Build.SourcesDirectory)
+    workingDirectory: $(Build.SourcesDirectory)/scripts
 
   - script: |
       set -e -x
