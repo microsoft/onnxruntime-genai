@@ -122,7 +122,7 @@ RUN manylinux-entrypoint /build_scripts/build-cpython.sh 3.12.1
 
 FROM build_cpython AS all_python
 COPY build_scripts/install-pypy.sh \
-     build_scripts/pypy.sha256 \
+#     build_scripts/pypy.sha256 \
      build_scripts/finalize-python.sh \
      /build_scripts/
 RUN manylinux-entrypoint /build_scripts/install-pypy.sh 3.8 7.3.9

@@ -6,7 +6,7 @@ pybind11_add_module(python ${python_srcs})
 target_include_directories(python PRIVATE ${ORT_HEADER_DIR})
 target_link_directories(python PRIVATE ${ORT_LIB_DIR})
 target_link_libraries(python PRIVATE onnxruntime-genai-static ${ONNXRUNTIME_LIB})
-set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime-genai")
+set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   set_target_properties(python PROPERTIES LINKER_LANGUAGE CUDA)
