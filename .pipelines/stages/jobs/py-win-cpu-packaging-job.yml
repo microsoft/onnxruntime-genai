@@ -42,32 +42,40 @@ jobs:
 
   - template: steps/set-nightly-build-option-variable-step.yml
 
+  - task: PythonScript@0
+    inputs:
+      scriptSource: inline
+      script: |
+        import sys
+        np_version = 'numpy==1.21.6' if sys.version_info < (3, 11) else 'numpy==1.24.2'
+        import subprocess
+        subprocess.call(['pip', 'install', '-q', 'setuptools', 'wheel', 'requests', np_version])
+      workingDirectory: '$(Build.BinariesDirectory)'
+      displayName: 'Install python modules'
+
   - bash: |
-      pip install -r scripts/requirements.txt
       python3 scripts\\download_onnxruntime.py --ort_version 1.17.0 --os win --arch x64
     displayName: Download OnnxRuntime
     workingDirectory: $(Build.SourcesDirectory)
 
-
-
   - bash: |
       cmake -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=$(BuildConfig) -DUSE_CUDA=OFF -S . -B build
-      cmake --build build --config $(BuildConfig)  --parallel  --target python
+      cmake --build build --config $(BuildConfig)  --parallel
     displayName: 'Build pybind with CMake'
 
   - powershell: |
       Get-ChildItem -Path $(Build.SourcesDirectory)\build\wheel -Recurse
   # Esrp signing
-  - template: steps/win-esrp-dll-step.yml
-    parameters:
-      FolderPath: '$(Build.SourcesDirectory)\build\wheel\onnxruntime-genai\'
-      DisplayName: 'ESRP - Sign Native dlls'
-      DoEsrp: true
-      Pattern: '*.pyd,*.dll'
-
-  - bash: |
-      cmake --build build --config $(BuildConfig) --parallel
-    displayName: 'Build Python Wheel'
+#  - template: steps/win-esrp-dll-step.yml
+#    parameters:
+#      FolderPath: '$(Build.SourcesDirectory)\build\wheel\onnxruntime-genai\'
+#      DisplayName: 'ESRP - Sign Native dlls'
+#      DoEsrp: true
+#      Pattern: '*.pyd,*.dll'
+#
+#  - bash: |
+#      cmake --build build --config $(BuildConfig) --parallel
+#    displayName: 'Build Python Wheel'
   - powershell: |
       Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
 
