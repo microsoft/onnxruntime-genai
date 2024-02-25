@@ -36,15 +36,6 @@ jobs:
 
   - template: steps/set-nightly-build-option-variable-step.yml
 
-  - task: DownloadGitHubRelease@0
-    inputs:
-      connection: 'GitHub - Release'
-      userRepository: 'microsoft/onnxruntime'
-      defaultVersionType: 'specificTag'
-      version: 'v$(ort_version)'
-      itemPattern: '*-linux-$(buildArch)-$(ort_version)*'
-      downloadPath: '$(Build.SourcesDirectory)'
-    displayName: Download the ONNXRuntime prebuilt package.
 
 #  - bash: |
 #      pip3 install -r requirements.txt
@@ -76,8 +67,10 @@ jobs:
         --context tools/ci_build/github/linux/docker/manylinux \
         --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
         --container-registry onnxruntimebuildcache \
+        --manylinux-src $(Build.SourcesDirectory)/manylinux \
         --repository onnxruntimecpubuild$(docker_arch)
     displayName: 'Get Docker Image'
+    workingDirectory: '$(Build.SourcesDirectory)/onnxruntime-genai'
 
   - script: |
       set -e -x
@@ -86,6 +79,7 @@ jobs:
       --volume $(Build.SourcesDirectory):/onnxruntime_src \
       -w /onnxruntime_src onnxruntimecpubuild$(docker_arch) bash -c "echo $PATH && /usr/bin/cmake --preset linux_gcc_cpu_release && /usr/bin/cmake --build --preset linux_gcc_cpu_release"
     displayName: 'Build Python Wheel'
+    workingDirectory: '$(Build.SourcesDirectory)/onnxruntime-genai'
 
   - task: CopyFiles@2
     displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
