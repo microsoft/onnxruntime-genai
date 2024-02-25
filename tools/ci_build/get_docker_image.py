@@ -22,14 +22,15 @@ log = get_logger("get_docker_image")
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Build a docker image and push it to a remote Azure Container Registry."
-        "The content in the remote registry can be used as a cache when we need to build the thing again."
-        "The user must be logged in to the container registry."
+                    "The content in the remote registry can be used as a cache when we need to build the thing again."
+                    "The user must be logged in to the container registry."
     )
 
     parser.add_argument("--dockerfile", default="Dockerfile", help="Path to the Dockerfile.")
     parser.add_argument("--context", default=".", help="Path to the build context.")
     parser.add_argument(
-        "--docker-build-args", default="", help="Arguments that will be passed to the 'docker build' command."
+        "--docker-build-args", default="",
+        help="Arguments that will be passed to the 'docker build' command."
     )
 
     parser.add_argument(
@@ -38,11 +39,14 @@ def parse_args():
     )
     parser.add_argument("--repository", required=True, help="The image repository name.")
 
-    parser.add_argument("--use_imagecache", action="store_true", help="use cached image in pipeline cache")
+    parser.add_argument("--use_imagecache",
+                        action="store_true",
+                        help="use cached image in pipeline cache")
 
     parser.add_argument("--docker-path", default="docker", help="Path to docker.")
 
-    parser.add_argument("--manylinux-src", default="manylinux", help="Path to manylinux src folder")
+    parser.add_argument("--manylinux-src", default=os.path.join("extern", "manylinux"),
+                        help="Path to manylinux src folder")
 
     parser.add_argument(
         "--multiple_repos",
@@ -97,7 +101,8 @@ def main():
             "patch",
             "-p1",
             "-i",
-            str((Path(SCRIPT_DIR) / "github" / "linux" / "docker" /"manylinux"/ "manylinux.patch").resolve()),
+            str((Path(
+                SCRIPT_DIR) / "github" / "linux" / "docker" / "manylinux" / "manylinux.patch").resolve()),
             cwd=str(dest),
         )
 
@@ -108,7 +113,7 @@ def main():
             "error",
             "buildx",
             "build",
-#            "--push",
+            #            "--push",
             "--tag",
             full_image_name,
             "--cache-from",

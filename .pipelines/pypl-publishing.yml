@@ -29,13 +29,13 @@ parameters:
   type: boolean
   default: false
 
-#resources:
-#  repositories:
-#  - repository: manylinux
-#    type: Github
-#    endpoint: Microsoft
-#    name: pypa/manylinux
-#    ref: 5eda9aded5462201e6310105728d33016e637ea7
+resources:
+  repositories:
+  - repository: manylinux
+    type: Github
+    endpoint: Microsoft
+    name: pypa/manylinux
+    ref: 5eda9aded5462201e6310105728d33016e637ea7
 
 trigger: none
 stages:
