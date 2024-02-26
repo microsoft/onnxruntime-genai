@@ -46,9 +46,8 @@ jobs:
       scriptSource: inline
       script: |
         import sys
-        np_version = 'numpy==1.21.6' if sys.version_info < (3, 11) else 'numpy==1.24.2'
         import subprocess
-        subprocess.call(['pip', 'install', '-q', 'setuptools', 'wheel', np_version])
+        subprocess.call(['pip', 'install', '-q', 'setuptools', 'wheel', 'build', 'packaging'])
       workingDirectory: '$(Build.BinariesDirectory)'
       displayName: 'Install python modules'
 
