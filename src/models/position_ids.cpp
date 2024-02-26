@@ -53,10 +53,10 @@ void PositionIDs<T>::Add() {
   input_index_ = state_.inputs_.size();
 
   state_.inputs_.push_back(position_ids_.get());
-  state_.input_names_.push_back("position_ids");
+  state_.input_names_.push_back(model_.config_->model.decoder.inputs.position_ids.c_str());
 
   state_.inputs_.push_back(attention_mask_.get());
-  state_.input_names_.push_back("attention_mask");
+  state_.input_names_.push_back(model_.config_->model.decoder.inputs.attention_mask.c_str());
 }
 
 template <typename T>
