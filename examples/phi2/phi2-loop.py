@@ -1,7 +1,9 @@
 ﻿import onnxruntime_genai as og
 
 print("Loading model...")
-model=og.Model("model", og.DeviceType.CPU)
+
+# The first argument is the name of the folder containing the model files
+model=og.Model("example-models/phi2-int4-cpu", og.DeviceType.CPU)
 print("Model loaded")
 tokenizer=model.create_tokenizer()
 print("Tokenizer created")
@@ -13,11 +15,13 @@ prompt = '''def print_prime(n):
 
 input_tokens = tokenizer.encode(prompt)
 
-params=og.SearchParams(model)
+params=og.GeneratorParams(model)
 params.max_length = 256
 params.input_ids = input_tokens
 
 generator=og.Generator(model, params)
+
+print("Generator created")
 
 print("Output:")
 
@@ -30,12 +34,10 @@ while not generator.is_done():
     # search.apply_minLength(1)
     # search.apply_repetition_penalty(1.0)
 
-    generator.generate_next_token_topp(0.7, 0.6)
+    generator.generate_next_token_top_p(0.7, 0.6)
 
-    print(tokenizer.decode([generator.get_next_tokens().GetArray()[0]]), ' ', end='', flush=True)
-
-    # Print sequence all at once vs as it's decoded:
-    print(tokenizer.decode(generator.get_sequence(0).GetArray()))
+# Print sequence all at once vs as it's decoded:
+print(tokenizer.decode(generator.get_sequence(0).get_array()))
     
-    print()
-    print()
+print()
+print()

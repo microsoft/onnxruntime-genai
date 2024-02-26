@@ -2,7 +2,9 @@ import time
 import onnxruntime_genai as og
 
 print(f"Loading model... ")
-model=og.Model(f'model', og.DeviceType.CPU)
+
+# The first argument is the name of the folder containing the model files
+model=og.Model(f'example-models/phi2-int4-cpu', og.DeviceType.CPU)
 print("Model loaded")
 
 tokenizer = model.create_tokenizer()
@@ -14,7 +16,7 @@ prompt = '''def print_prime(n):
 
 tokens = tokenizer.encode(prompt)
 
-params=og.SearchParams(model)
+params=og.GeneratorParams(model)
 params.max_length = 200
 params.input_ids = tokens
 

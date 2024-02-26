@@ -38,60 +38,6 @@ Users can call a high level `generate()` method, or run each iteration of the mo
 * Automatic model download and cache
 * More model architectures
 
-## Build from source
-
-This step requires `cmake` to be installed.
-
-1. Clone this repo
-
-   ```bash
-   git clone https://github.com/microsoft/onnxruntime-genai
-   ```
-
-2. Install ONNX Runtime
-
-These instructions are for the Linux GPU build of ONNX Runtime. Replace the location with the operating system and target of choice. 
-
-   ```bash
-   mkdir -p ort
-   cd ort
-   wget https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-linux-x64-gpu-1.17.0.tgz
-   tar xvzf onnxruntime-linux-x64-gpu-1.17.0.tgz 
-   mv onnxruntime-linux-x64-gpu-1.17.0/include .
-   mv onnxruntime-linux-x64-gpu-1.17.0/lib .
-   ```
-
-3. Build onnxruntime-genai
-
-   ```bash
-   cd ..
-   python build.py --cuda_home <path_to_cuda_home> --cudnn_home <path_to_cudnn_home>
-   ```
-   
-4. Install Python wheel
-
-   ```bash
-   cd build/wheel
-   pip install *.whl
-   ```
-
-## Model download and export
-
-ONNX models are run from a local folder, via a string supplied to the `Model()` method. 
-
-To source `microsoft/phi-2` optimized for your target, download and run the following script. You will need to be logged into HuggingFace via the CLI to run the script.
-
-
-```bash
-wget https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/src/python/models/export.py
-```
-
-Export int4 CPU version 
-```bash
-huggingface-cli login --token <your HuggingFace token>
-python export.py -m microsoft/phi-2 -p int4 -e cpu -o phi2-int4-cpu.onnx
-```
-
 ## Sample code for phi-2 in Python
 
 Install onnxruntime-genai.
@@ -124,6 +70,106 @@ text = tokenizer.decode(output_tokens)
 print("Output:")
 print(text)
 ```
+
+
+## Build from source
+
+This step requires `cmake` to be installed.
+
+1. Clone this repo
+
+   ```bash
+   git clone https://github.com/microsoft/onnxruntime-genai
+   cd onnxruntime-genai
+   ```
+
+2. Install ONNX Runtime
+
+    By default, the onnxruntime-genai build expects to find the ONNX Runtime include and binaries in a folder called `ort` in the root directory of onnxruntime-genai. You can put the ONNX Runtime files in a different location and specify this location to the onnxruntime-genai build. These instructions use ORT_HOME as the location.
+
+    * Install from release
+
+      These instructions are for the Linux GPU build of ONNX Runtime. Replace the location with the operating system and target of choice. 
+
+      ```bash
+      cd $ORT_HOME
+      wget https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-linux-x64-gpu-1.17.0.tgz
+      tar xvzf onnxruntime-linux-x64-gpu-1.17.0.tgz 
+      mv onnxruntime-linux-x64-gpu-1.17.0/include .
+      mv onnxruntime-linux-x64-gpu-1.17.0/lib .
+      ```
+
+    * Or build from source
+
+      ```
+      git clone https://github.com/microsoft/onnxruntime.git
+      cd onnxruntime
+      ```
+
+      Create include and lib folders in the ORT_HOME directory
+
+      ```bash
+      mkdir $ORT_HOME/include
+      mkdir $ORT_HOME/lib
+      ```
+
+      Build from source and copy the include and libraries into ORT_HOME
+
+      On Windows
+
+      ```cmd
+      build.bat --build_shared_lib --skip_tests --parallel [--use_cuda]
+      copy include\onnxruntime\core\session\onnxruntime_c_api.h $ORT_HOME\include
+      copy build\Windows\Debug\Debug\*.dll $ORT_HOME\lib
+      ```
+
+      On Linux
+
+      ```cmd
+      ./build.sh --build_shared_lib --skip_tests --parallel [--use_cuda]
+      cp include/onnxruntime/core/session/onnxruntime_c_api.h $ORT_HOME/include
+      cp build/Linux/RelWithDebInfo/libonnxruntime*.so* $ORT_HOME/lib
+      ```
+
+3. Build onnxruntime-genai
+
+   If you are building for CUDA, add the cuda_home and cudnn_home arguments.
+
+   ```bash
+   cd ..
+   python build.py [--cuda_home <path_to_cuda_home> --cudnn_home <path_to_cudnn_home>]
+   ```
+   
+4. Install Python wheel
+
+   ```bash
+   cd build/wheel
+   pip install *.whl
+   ```
+
+## Model download and export
+
+ONNX models are run from a local folder, via a string supplied to the `Model()` method. 
+
+To source `microsoft/phi-2` optimized for your target, download and run the following script. You will need to be logged into HuggingFace via the CLI to run the script.
+
+Install model builder dependencies.
+
+```bash
+pip install numpy
+pip install transformers
+pip install torch
+pip install onnx
+pip install onnxruntime
+```
+
+
+Export int4 CPU version 
+```bash
+huggingface-cli login --token <your HuggingFace token>
+python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -p int4 -e cpu -o <model folder>
+```
+
 
 
 ## Contributing

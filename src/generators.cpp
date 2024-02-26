@@ -39,13 +39,13 @@ float Float16ToFloat32(uint16_t v) {
 }
 
 GeneratorParams::GeneratorParams(const Model& model)
-    : pad_token_id{model.config_->pad_token_id},
-      eos_token_id{model.config_->eos_token_id},
+    : pad_token_id{model.config_->model.pad_token_id},
+      eos_token_id{model.config_->model.eos_token_id},
       vocab_size{model.config_->model.vocab_size},
-      max_length{model.config_->max_length},
-      length_penalty{model.config_->length_penalty},
-      early_stopping{model.config_->early_stopping},
-      num_beams{model.config_->num_beams},
+      max_length{model.config_->search.max_length},
+      length_penalty{model.config_->search.length_penalty},
+      early_stopping{model.config_->search.early_stopping},
+      num_beams{model.config_->search.num_beams},
       device_type{model.device_type_},
       cuda_stream{model.cuda_stream_} {
 }
@@ -166,7 +166,7 @@ void Generator::GenerateNextToken() {
   }
 
   auto& config = *model_.config_;
-  GenerateNextToken_TopK_TopP(config.top_k, config.top_p, config.temperature);
+  GenerateNextToken_TopK_TopP(config.search.top_k, config.search.top_p, config.search.temperature);
 }
 
 RoamingArray<int32_t> Generator::GetSequence(int index) const {

@@ -33,7 +33,7 @@ RoamingArray<float> Logits::Get() {
 void Logits::Add() {
   output_index_ = state_.outputs_.size();
 
-  state_.output_names_.push_back("logits");
+  state_.output_names_.push_back(model_.config_->model.decoder.outputs.logits.c_str());
   state_.outputs_.push_back(logits_.get());
 }
 
