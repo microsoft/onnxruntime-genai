@@ -24,7 +24,7 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
     "${CMAKE_CURRENT_SOURCE_DIR}/*.cuh"
   )
   set_target_properties(unit_tests PROPERTIES LINKER_LANGUAGE CUDA)
-  target_link_libraries(unit_tests PRIVATE cublasLt cublas cudnn curand cufft cudart)
+  target_link_libraries(unit_tests PRIVATE cublasLt cublas curand cufft cudart)
   target_sources(unit_tests PRIVATE ${cuda_test_srcs})
 endif()
 
