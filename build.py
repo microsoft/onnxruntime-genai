@@ -73,33 +73,29 @@ def update_submodules():
     run_subprocess(["git", "submodule", "update", "--init", "--recursive"]).check_returncode()
 
 
-def validate_cuda_home(cuda_home: str | bytes | os.PathLike | None, cudnn_home: str | bytes | os.PathLike | None):
+def validate_cuda_home(cuda_home: str | bytes | os.PathLike | None):
     """Validate the CUDA and cuDNN home paths."""
     validated_cuda_home = ""
-    validated_cudnn_home = ""
 
     if cuda_home or os.environ.get("CUDA_HOME"):
         validated_cuda_home = cuda_home if cuda_home else os.getenv("CUDA_HOME")
-        validated_cudnn_home = cudnn_home if cudnn_home else os.getenv("CUDNN_HOME")
 
         cuda_home_valid = os.path.exists(validated_cuda_home)
-        cudnn_home_valid = os.path.exists(validated_cudnn_home)
 
-        if not cuda_home_valid or (not is_windows() and not cudnn_home_valid):
+        if not cuda_home_valid:
             raise RuntimeError(
-                "cuda_home and cudnn_home paths must be specified and valid.",
-                "cuda_home='{}' valid={}. cudnn_home='{}' valid={}".format(
-                    cuda_home, cuda_home_valid, cudnn_home, cudnn_home_valid
+                "cuda_home paths must be specified and valid.",
+                "cuda_home='{}' valid={}.".format(
+                    cuda_home, cuda_home_valid
                 ),
             )
 
-    return validated_cuda_home, validated_cudnn_home
+    return validated_cuda_home
 
 
 def build(
     skip_wheel: bool = False,
     cuda_home: str | bytes | os.PathLike | None = None,
-    cudnn_home: str | bytes | os.PathLike | None = None,
     cmake_generator: str | None = None,
     ort_home: str | bytes | os.PathLike | None = None,
     enable_csharp: bool = False,
@@ -113,7 +109,7 @@ def build(
     if not is_windows() and not is_linux():
         raise OSError(f"Unsupported platform {platform()}.")
 
-    cuda_home, cudnn_home = validate_cuda_home(cuda_home, cudnn_home)
+    cuda_home = validate_cuda_home(cuda_home)
 
     command = [resolve_executable_path("cmake")]
 
@@ -155,9 +151,6 @@ def build(
         env["PATH"] = os.path.join(env["CUDA_HOME"], "bin") + os.pathsep + os.environ["PATH"]
         cuda_compiler = os.path.join(env["CUDA_HOME"], "bin", "nvcc")
         command += [f"-DCMAKE_CUDA_COMPILER={cuda_compiler}", f"-DCMAKE_CUDA_ARCHITECTURES={cuda_arch}"]
-
-    if cudnn_home:
-        env["CUDNN_HOME"] = cudnn_home
 
     config = "RelWithDebInfo"
     run_subprocess(command, env=env).check_returncode()
@@ -212,12 +205,6 @@ if __name__ == "__main__":
         "Read from CUDA_HOME environment variable if --use_cuda is true and "
         "--cuda_home is not specified.",
     )
-    parser.add_argument(
-        "--cudnn_home",
-        help="Path to CUDNN home. "
-        "Read from CUDNN_HOME environment variable if --use_cuda is true and "
-        "--cudnn_home is not specified.",
-    )
     parser.add_argument("--skip_wheel", action="store_true", help="Skip building the Python wheel.")
     parser.add_argument("--ort_home", default=None, help="Root directory of onnxruntime.")
     parser.add_argument("--enable_csharp", action="store_true", help="Build the C# API.")
@@ -228,7 +215,6 @@ if __name__ == "__main__":
     build(
         skip_wheel=args.skip_wheel,
         cuda_home=args.cuda_home,
-        cudnn_home=args.cudnn_home,
         cmake_generator=args.cmake_generator,
         ort_home=args.ort_home,
         enable_csharp=args.enable_csharp,
