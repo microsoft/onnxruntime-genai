@@ -8,7 +8,7 @@ KV_Cache_Combined::KV_Cache_Combined(const Model& model, State& state)
     : model_{model},
       state_{state},
       layer_count_{model.config_->model.decoder.num_hidden_layers},
-      shape_{2, state_.search_params_.batch_size * state_.search_params_.num_beams, model.config_->model.decoder.num_key_value_heads, 0, model.config_->model.decoder.head_size},
+      shape_{2, static_cast<int64_t>(state_.search_params_.batch_size) * state_.search_params_.num_beams, model.config_->model.decoder.num_key_value_heads, 0, model.config_->model.decoder.head_size},
       empty_past_{OrtValue::CreateTensor(*model_.allocator_device_, shape_, model_.config_->model.kv_type)} {
   pasts_.resize(layer_count_);
   presents_.reserve(layer_count_);
@@ -111,7 +111,7 @@ KV_Cache::KV_Cache(const Model& model, State& state)
     : model_{model},
       state_{state},
       layer_count_{model_.config_->model.decoder.num_hidden_layers},
-      shape_{state_.search_params_.batch_size * state_.search_params_.num_beams, model.config_->model.decoder.num_key_value_heads, 0, model.config_->model.decoder.head_size},
+      shape_{static_cast<int64_t>(state_.search_params_.batch_size) * state_.search_params_.num_beams, model.config_->model.decoder.num_key_value_heads, 0, model.config_->model.decoder.head_size},
       empty_past_{OrtValue::CreateTensor(*model_.allocator_device_, shape_, model_.config_->model.kv_type)} {
   pasts_.resize(layer_count_ * 2);
   presents_.reserve(layer_count_ * 2);
@@ -218,7 +218,7 @@ Cross_Cache::Cross_Cache(const Model& model, State& state)
     : model_{model},
       state_{state},
       layer_count_{model_.config_->model.decoder.num_hidden_layers},
-      shape_{state_.search_params_.batch_size * state_.search_params_.num_beams, model.config_->model.decoder.num_key_value_heads, 1500, model.config_->model.decoder.head_size} {
+      shape_{static_cast<int64_t>(state_.search_params_.batch_size) * state_.search_params_.num_beams, model.config_->model.decoder.num_key_value_heads, 1500, model.config_->model.decoder.head_size} {
   values_.reserve(layer_count_ * 2);
 
   for (int i = 0; i < layer_count_; ++i) {
