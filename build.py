@@ -218,6 +218,6 @@ if __name__ == "__main__":
         cuda_home=args.cuda_home,
         cmake_generator=args.cmake_generator,
         ort_home=args.ort_home,
-        skip_csharp=args.enable_csharp,
+        skip_csharp=args.skip_csharp,
         build_dir=args.build_dir,
     )
