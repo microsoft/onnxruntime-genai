@@ -72,7 +72,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
-        [Fact(DisplayName = "TestTokenizerBatchEncodeDecode")]
+        [Fact(Skip = "Phi-2 is not available in the CI pipeline")]
         public void TestTokenizerBatchEncodeDecode()
         {
             string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "phi-2");
@@ -101,7 +101,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
-        [Fact(DisplayName = "TestTokenizerBatchEncodeSingleDecode")]
+        [Fact(Skip = "Phi-2 is not available in the CI pipeline")]
         public void TestTokenizerBatchEncodeSingleDecode()
         {
             string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "phi-2");
@@ -132,7 +132,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
-        [Fact(DisplayName = "TestTokenizerBatchEncodeStreamDecode")]
+        [Fact(Skip = "Phi-2 is not available in the CI pipeline")]
         public void TestTokenizerBatchEncodeStreamDecode()
         {
             string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "phi-2");
@@ -168,7 +168,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
-        [Fact(DisplayName = "TestTokenizerSingleEncodeDecode")]
+        [Fact(Skip = "Phi-2 is not available in the CI pipeline")]
         public void TestTokenizerSingleEncodeDecode()
         {
             string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "phi-2");
@@ -192,7 +192,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
-        [Fact(DisplayName = "TestPhi2")]
+        [Fact(Skip = "Phi-2 is not available in the CI pipeline")]
         public void TestPhi2()
         {
             string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "phi-2");
