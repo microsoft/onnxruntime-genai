@@ -2,11 +2,12 @@ file(GLOB python_srcs CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/*.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
 )
+set(TARGET_NAME "onnxruntime_genai")
 pybind11_add_module(python ${python_srcs})
 target_include_directories(python PRIVATE ${ORT_HEADER_DIR})
 target_link_directories(python PRIVATE ${ORT_LIB_DIR})
 target_link_libraries(python PRIVATE onnxruntime-genai-static ${ONNXRUNTIME_LIB})
-set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
+set_target_properties(python PROPERTIES OUTPUT_NAME ${TARGET_NAME})
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   set_target_properties(python PROPERTIES LINKER_LANGUAGE CUDA)
@@ -17,7 +18,7 @@ source_group("Sources" FILES ${python_srcs})
 if(BUILD_WHEEL)
   set(WHEEL_FILES_DIR "${CMAKE_BINARY_DIR}/wheel")
   message("Setting up wheel files in : ${WHEEL_FILES_DIR}")
-  set(WHEEL_TARGET_NAME "${WHEEL_FILES_DIR}/onnxruntime_genai")
+  set(WHEEL_TARGET_NAME "${WHEEL_FILES_DIR}/${TARGET_NAME}")
   configure_file(${CMAKE_CURRENT_SOURCE_DIR}/setup.py.in ${WHEEL_FILES_DIR}/setup.py @ONLY)
   configure_file(${CMAKE_CURRENT_SOURCE_DIR}/__init__.py.in ${WHEEL_TARGET_NAME}/__init__.py @ONLY)
 
