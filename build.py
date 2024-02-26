@@ -74,7 +74,7 @@ def update_submodules():
 
 
 def validate_cuda_home(cuda_home: str | bytes | os.PathLike | None):
-    """Validate the CUDA and cuDNN home paths."""
+    """Validate the CUDA home paths."""
     validated_cuda_home = ""
 
     if cuda_home or os.environ.get("CUDA_HOME"):
