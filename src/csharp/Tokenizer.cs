@@ -3,6 +3,7 @@
 
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
@@ -18,44 +19,57 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         public Sequences EncodeBatch(string[] strings)
         {
-            IntPtr nativeSequences = IntPtr.Zero;
             IntPtr stringArray = IntPtr.Zero;
-            Result.VerifySuccess(NativeMethods.OgaCreateStringArray(out stringArray));
+            UIntPtr[] stringLengths = new UIntPtr[strings.Length];
+            for (int i = 0; i < strings.Length; i++)
+            {
+                stringLengths[i] = (UIntPtr)UTF8Encoding.UTF8.GetByteCount(strings[i]);
+            }
+
+            unsafe
+            {
+                fixed (UIntPtr* stringLengthsPtr = stringLengths)
+                {
+                    Result.VerifySuccess(NativeMethods.OgaCreateAllocatedStrings((UIntPtr)strings.Length, stringLengthsPtr, out stringArray));
+                }
+            }
+
             try
             {
-                foreach (string s in strings)
+                for (ulong i = 0; i < (ulong)strings.Length; i++)
                 {
-                    Result.VerifySuccess(NativeMethods.OgaStringArrayAddString(stringArray, Utils.ToUtf8(s)));
+                    Result.VerifySuccess(NativeMethods.OgaStringsGetBuffer(stringArray, (UIntPtr)i, out IntPtr buffer));
+                    Utils.ToNativeBuffer(strings[i], buffer, (int)stringLengths[i]);
                 }
-                Result.VerifySuccess(NativeMethods.OgaTokenizerEncodeBatch(_tokenizerHandle, stringArray, out nativeSequences));
+                Result.VerifySuccess(NativeMethods.OgaTokenizerEncodeBatchStrings(_tokenizerHandle, stringArray, out IntPtr nativeSequences));
+
+                return new Sequences(nativeSequences);
             }
             finally
             {
-                NativeMethods.OgaDestroyStringArray(stringArray);
+                NativeMethods.OgaDestroyStrings(stringArray);
             }
-
-            return new Sequences(nativeSequences);
         }
 
         public string[] DecodeBatch(Sequences sequences)
         {
             IntPtr stringArray = IntPtr.Zero;
-            Result.VerifySuccess(NativeMethods.OgaTokenizerDecodeBatch(_tokenizerHandle, sequences.Handle, out stringArray));
+            Result.VerifySuccess(NativeMethods.OgaTokenizerDecodeBatchStrings(_tokenizerHandle, sequences.Handle, out stringArray));
             try
             {
-                ulong numStrings = NativeMethods.OgaStringArrayGetCount(stringArray).ToUInt64();
+                ulong numStrings = NativeMethods.OgaStringsGetCount(stringArray).ToUInt64();
                 string[] result = new string[numStrings];
                 for (ulong i = 0; i < numStrings; i++)
                 {
                     IntPtr outStr = IntPtr.Zero;
-                    Result.VerifySuccess(NativeMethods.OgaStringArrayGetString(stringArray, (UIntPtr)i, out outStr));
+                    Result.VerifySuccess(NativeMethods.OgaStringsGetString(stringArray, (UIntPtr)i, out outStr));
                     result[i] = Utils.FromUtf8(outStr);
                 }
                 return result;
             }
             finally
             {
-                NativeMethods.OgaDestroyStringArray(stringArray);
+                NativeMethods.OgaDestroyStrings(stringArray);
             }
         }
 

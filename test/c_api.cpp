@@ -33,8 +33,8 @@ struct Deleters {
   void operator()(OgaGenerator* p) {
     OgaDestroyGenerator(p);
   }
-  void operator()(OgaStringArray* p) {
-    OgaDestroyStringArray(p);
+  void operator()(OgaStrings* p) {
+    OgaDestroyStrings(p);
   }
 };
 
@@ -46,7 +46,7 @@ using OgaTokenizerPtr = std::unique_ptr<OgaTokenizer, Deleters>;
 using OgaTokenizerStreamPtr = std::unique_ptr<OgaTokenizerStream, Deleters>;
 using OgaGeneratorParamsPtr = std::unique_ptr<OgaGeneratorParams, Deleters>;
 using OgaGeneratorPtr = std::unique_ptr<OgaGenerator, Deleters>;
-using OgaStringArrayPtr = std::unique_ptr<OgaStringArray, Deleters>;
+using OgaStringsPtr = std::unique_ptr<OgaStrings, Deleters>;
 
 void CheckResult(OgaResult* result) {
   if (!result)
@@ -66,18 +66,14 @@ TEST(CAPITests, TokenizerCAPI) {
   CheckResult(OgaCreateTokenizer(model, &tokenizer));
   OgaTokenizerPtr tokenizer_ptr{tokenizer};
 
-  OgaStringArray* string_array = nullptr;
-  CheckResult(OgaCreateStringArray(&string_array));
-  OgaStringArrayPtr string_array_ptr{string_array};
   const char* input_strings[] = {
       "This is a test.",
       "Rats are awesome pets!",
       "The quick brown fox jumps over the lazy dog.",
   };
-  OgaStringArrayAddStrings(string_array, input_strings, std::size(input_strings));
 
   OgaSequences* sequences;
-  CheckResult(OgaTokenizerEncodeBatch(tokenizer, string_array, &sequences));
+  CheckResult(OgaTokenizerEncodeBatch(tokenizer, input_strings, std::size(input_strings), &sequences));
   OgaSequencesPtr sequences_ptr{sequences};
 
   // Encode single decode single
@@ -95,12 +91,33 @@ TEST(CAPITests, TokenizerCAPI) {
 
   // Decode Batch
   {
-    OgaStringArray* out_strings = nullptr;
+    const char** out_strings;
     CheckResult(OgaTokenizerDecodeBatch(tokenizer, sequences, &out_strings));
-    OgaStringArrayPtr out_string_array_ptr{out_strings};
     for (size_t i = 0; i < OgaSequencesCount(sequences); i++) {
+      std::cout << "Decoded string:" << out_strings[i] << std::endl;
+      if (strcmp(input_strings[i], out_strings[i]) != 0)
+        throw std::runtime_error("Batch Token decoding mismatch");
+    }
+    OgaTokenizerDestroyStrings(out_strings, OgaSequencesCount(sequences));
+  }
+
+  // Encode batch strings and decode datch strings
+  {
+    OgaStrings* string_array = nullptr;
+    CheckResult(OgaCreateStrings(&string_array));
+    OgaStringsPtr string_array_ptr{string_array};
+    OgaStringsAddStrings(string_array, input_strings, std::size(input_strings));
+
+    OgaSequences* encoded_sequences;
+    CheckResult(OgaTokenizerEncodeBatchStrings(tokenizer, string_array, &encoded_sequences));
+    OgaSequencesPtr encoded_sequences_ptr{encoded_sequences};
+
+    OgaStrings* out_strings = nullptr;
+    CheckResult(OgaTokenizerDecodeBatchStrings(tokenizer, encoded_sequences, &out_strings));
+    OgaStringsPtr out_string_array_ptr{out_strings};
+    for (size_t i = 0; i < OgaSequencesCount(encoded_sequences); i++) {
       const char* out_string = nullptr;
-      CheckResult(OgaStringArrayGetString(out_strings, i, &out_string));
+      CheckResult(OgaStringsGetString(out_strings, i, &out_string));
       std::cout << "Decoded string:" << out_string << std::endl;
       if (strcmp(input_strings[i], out_string) != 0)
         throw std::runtime_error("Batch Token decoding mismatch");
@@ -148,18 +165,14 @@ TEST(CAPITests, EndToEndPhiBatch) {
   CheckResult(OgaCreateTokenizer(model, &tokenizer));
   OgaTokenizerPtr tokenizer_ptr{tokenizer};
 
-  OgaStringArray* string_array = nullptr;
-  CheckResult(OgaCreateStringArray(&string_array));
-  OgaStringArrayPtr string_array_ptr{string_array};
   const char* input_strings[] = {
       "This is a test.",
       "Rats are awesome pets!",
       "The quick brown fox jumps over the lazy dog.",
   };
-  CheckResult(OgaStringArrayAddStrings(string_array, input_strings, std::size(input_strings)));
 
   OgaSequences* input_sequences;
-  CheckResult(OgaTokenizerEncodeBatch(tokenizer, string_array, &input_sequences));
+  CheckResult(OgaTokenizerEncodeBatch(tokenizer, input_strings, std::size(input_strings), &input_sequences));
   OgaSequencesPtr sequences_ptr{input_sequences};
 
   OgaGeneratorParams* params;
@@ -174,14 +187,12 @@ TEST(CAPITests, EndToEndPhiBatch) {
 
   // Decode The Batch
   {
-    OgaStringArray* out_strings = nullptr;
+    const char** out_strings;
     CheckResult(OgaTokenizerDecodeBatch(tokenizer, output_sequences, &out_strings));
-    OgaStringArrayPtr out_string_array_ptr{out_strings};
     for (size_t i = 0; i < OgaSequencesCount(output_sequences); i++) {
-      const char* out_string;
-      CheckResult(OgaStringArrayGetString(out_strings, i, &out_string));
-      std::cout << "Decoded string:" << out_string << std::endl;
+      std::cout << "Decoded string:" << out_strings[i] << std::endl;
     }
+    OgaTokenizerDestroyStrings(out_strings, OgaSequencesCount(output_sequences));
   }
 #endif
 }

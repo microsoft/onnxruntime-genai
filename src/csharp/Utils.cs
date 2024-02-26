@@ -9,9 +9,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 {
     internal class Utils
     {
-        public static byte[] EmptyByteArray = new byte[] { 0 };
+        internal static byte[] EmptyByteArray = new byte[] { 0 };
 
-        public static byte[] ToUtf8(string str)
+        internal static byte[] ToUtf8(string str)
         {
             if (string.IsNullOrEmpty(str))
                 return EmptyByteArray;
@@ -36,6 +36,18 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                 }
                 var nativeBytes = (byte*)nativeUtf8;
                 return Encoding.UTF8.GetString(nativeBytes, len);
+            }
+        }
+
+        internal static void ToNativeBuffer(string str, IntPtr buffer, int bufferLength)
+        {
+            unsafe
+            {
+                byte* bufferBytes = (byte*)buffer.ToPointer();
+                fixed (char* chars = str)
+                {
+                    UTF8Encoding.UTF8.GetBytes(chars, str.Length, bufferBytes, bufferLength);
+                }
             }
         }
     }
