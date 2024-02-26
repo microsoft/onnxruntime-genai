@@ -7,14 +7,12 @@
 
 namespace JSON {
 
-Element s_ignore;  // A default implementation ignores all data, so keep one around for easy ignoring
-
 Element& Element::OnArray(std::string_view /*name*/) {
-  return s_ignore;
+  throw unknown_value_error{};
 }
 
 Element& Element::OnObject(std::string_view /*name*/) {
-  return s_ignore;
+  throw unknown_value_error{};
 }
 
 struct JSON {
@@ -139,39 +137,43 @@ void JSON::Parse_Object(Element& element) {
 
 void JSON::Parse_Value(Element& element, std::string_view name) {
   Parse_Whitespace();
-  switch (char const c = GetChar()) {
-    case '{': {
-      auto& element_object = element.OnObject(name);
-      Parse_Object(element_object);
-    } break;
-    case '[': {
-      auto& element_array = element.OnArray(name);
-      Parse_Array(element_array);
-    } break;
-    case '"': {
-      element.OnString(name, Parse_String());
-    } break;
-    case 't':
-      if (Skip("rue")) {
-        element.OnBool(name, true);
-      }
-      break;
-    case 'f':
-      if (Skip("alse")) {
-        element.OnBool(name, false);
-      }
-      break;
-    case 'n':
-      if (Skip("ull")) {
-        element.OnNull(name);
-      }
-      break;
-    default:
-      if (c >= '0' && c <= '9' || c == '-') {
-        --current_;
-        element.OnNumber(name, Parse_Number());
-      }
-      break;
+  try {
+    switch (char const c = GetChar()) {
+      case '{': {
+        auto& element_object = element.OnObject(name);
+        Parse_Object(element_object);
+      } break;
+      case '[': {
+        auto& element_array = element.OnArray(name);
+        Parse_Array(element_array);
+      } break;
+      case '"': {
+        element.OnString(name, Parse_String());
+      } break;
+      case 't':
+        if (Skip("rue")) {
+          element.OnBool(name, true);
+        }
+        break;
+      case 'f':
+        if (Skip("alse")) {
+          element.OnBool(name, false);
+        }
+        break;
+      case 'n':
+        if (Skip("ull")) {
+          element.OnNull(name);
+        }
+        break;
+      default:
+        if (c >= '0' && c <= '9' || c == '-') {
+          --current_;
+          element.OnNumber(name, Parse_Number());
+        }
+        break;
+    }
+  } catch (const unknown_value_error&) {
+    throw std::runtime_error("Unknown value: " + std::string(name));
   }
   Parse_Whitespace();
 }

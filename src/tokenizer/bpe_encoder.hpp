@@ -68,18 +68,30 @@ class BpeEncoder {
       unk_id_ = id;
     }
 
-    auto merges_node = model_node.at_key("merges");
-    for (auto it = merges_node.begin(); it != merges_node.end(); ++it) {
-      std::string line = (*it).get_c_str().value();
-      line.erase(std::remove(line.begin(), line.end(), '\r'), line.end());
+    simdjson::dom::element merges_node = model_node.at_key("merges");
+    if (!merges_node.is_array()) {
+      return TfmStatus{kTfmErrorInvalidFile, "Cannot find the merges key in the the tokenizer.json"};
+    } else {
+      auto status = LoadMerges(merges_node);
+      if (!status.ok()) {
+        return status;
+      }
+    }
+
+    return {};
+  }
+
+  TfmStatus LoadMerges(simdjson::dom::element merges_node) {
+    auto lines = merges_node.get_array();
+    for (auto each_line : lines) {
+      std::string_view line = each_line.get_string();
       if (line.empty()) continue;
-      if ((line[0] == '#') && (it == merges_node.begin())) continue;
       auto pos = line.find(' ');
       if (pos == std::string::npos) {
-        return {kTfmErrorInvalidFile, "Cannot know how to parse line: " + line};
+        return {kTfmErrorInvalidFile, "Cannot know how to parse line: " + std::string(line)};
       }
-      std::string w1 = line.substr(0, pos);
-      std::string w2 = line.substr(pos + 1);
+      std::string w1(line.substr(0, pos));
+      std::string w2(line.substr(pos + 1));
       int token_length = gsl::narrow<int>(w1.length() + w2.length());
       if (w2.find("</w>") != std::string::npos || w1.find("</w>") != std::string::npos) {
         token_length -= 4;
@@ -89,17 +101,6 @@ class BpeEncoder {
       auto iww = GetTokenId(w1 + w2);
       BpeNode value{iww, gsl::narrow<uint32_t>(bpe_rank_.size()), token_length};
       bpe_rank_[GetRankKey(iw1, iw2)] = value;
-    }
-
-    id2token_map_.resize(vocab_map_.size());
-    for (const auto& [t, i] : vocab_map_) {
-      if (i > static_cast<uint32_t>(std::numeric_limits<int32_t>::max())) {
-        continue;  // safe purpose.
-      }
-      if (i > id2token_map_.size()) {
-        id2token_map_.resize(static_cast<size_t>(i) + 1);
-      }
-      id2token_map_[i] = t;
     }
 
     return {};
@@ -166,7 +167,7 @@ class BpeEncoder {
 
   std::vector<std::string_view> BuildDecoder() const {
     std::vector<std::string_view> decoder;
-    decoder.resize(max_token_id_ + 1);
+    decoder.resize(static_cast<size_t>(max_token_id_) + 1);
     for (const auto& [str, id] : vocab_map_) {
       assert(id <= max_token_id_);
       decoder[id] = str.c_str();
@@ -189,9 +190,7 @@ class BpeEncoder {
 
  private:
   std::map<uint64_t, BpeNode> bpe_rank_;
-
   std::unordered_map<std::string, uint32_t> vocab_map_;
-  std::vector<std::string> id2token_map_;
 
   uint32_t unk_id_ = std::numeric_limits<uint32_t>::max();
   uint32_t max_token_id_ = 0;

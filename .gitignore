@@ -15,6 +15,7 @@ test/csharp/obj/
 /*.csv
 .idea
 cache_dir
+example-models
 *.onnx
 *.onnx.data
 
