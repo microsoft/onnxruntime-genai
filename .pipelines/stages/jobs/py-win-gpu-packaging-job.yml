@@ -98,7 +98,7 @@ jobs:
 #   Esrp signing
   - template: steps/win-esrp-dll-step.yml
     parameters:
-      FolderPath: '$(Build.SourcesDirectory)\build\wheel\onnxruntime-genai\'
+      FolderPath: '$(Build.SourcesDirectory)\build\wheel\onnxruntime_genai\'
       DisplayName: 'ESRP - Sign Native dlls'
       DoEsrp: true
       Pattern: '*.pyd,*.dll'
