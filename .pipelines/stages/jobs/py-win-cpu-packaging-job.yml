@@ -79,13 +79,13 @@ jobs:
 
   - powershell: |
       Get-ChildItem -Path $(Build.SourcesDirectory)\build\wheel -Recurse
-  # Esrp signing
-  #  - template: steps/win-esrp-dll-step.yml
-  #    parameters:
-  #      FolderPath: '$(Build.SourcesDirectory)\build\wheel\onnxruntime-genai\'
-  #      DisplayName: 'ESRP - Sign Native dlls'
-  #      DoEsrp: true
-  #      Pattern: '*.pyd,*.dll'
+
+  - template: steps/win-esrp-dll-step.yml
+    parameters:
+      FolderPath: '$(Build.SourcesDirectory)\build\wheel\onnxruntime-genai\'
+      DisplayName: 'ESRP - Sign Native dlls'
+      DoEsrp: true
+      Pattern: '*.pyd,*.dll'
   #
   #  - bash: |
   #      cmake --build build --config $(BuildConfig) --parallel
