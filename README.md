@@ -15,6 +15,7 @@ Users can call a high level `generate()` method, or run each iteration of the mo
 * Supported model architectures:
   * Phi-2
   * Llama
+  * Gemma
   * GPT
 * Supported targets:   
   * CPU
