@@ -151,11 +151,11 @@ target_link_libraries(onnxruntime-genai PRIVATE ${ONNXRUNTIME_LIB})
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   set_target_properties(onnxruntime-genai PROPERTIES LINKER_LANGUAGE CUDA)
-  target_link_libraries(onnxruntime-genai PRIVATE cublasLt cublas cudnn curand cufft cudart)
+  target_link_libraries(onnxruntime-genai PRIVATE cublasLt cublas curand cufft cudart)
   #  onnxruntime-genai-static is statically linked under Windows
   if(NOT WIN32)
     set_target_properties(onnxruntime-genai-static PROPERTIES LINKER_LANGUAGE CUDA)
-    target_link_libraries(onnxruntime-genai-static PRIVATE cublasLt cublas cudnn curand cufft cudart)
+    target_link_libraries(onnxruntime-genai-static PRIVATE cublasLt cublas curand cufft cudart)
   endif()
 endif()
 

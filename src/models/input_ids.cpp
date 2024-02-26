@@ -9,6 +9,7 @@ template <typename T>
 InputIDs<T>::InputIDs(const Model& model, State& state)
     : model_{model},
       state_{state} {
+  name_ = model_.config_->model.decoder.inputs.input_ids.c_str();
   shape_ = {state_.search_params_.batch_size, state_.search_params_.sequence_length};
 
   // If 64-bit, convert from 32-bit to 64-bit

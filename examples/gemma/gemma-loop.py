@@ -3,7 +3,7 @@
 print("Loading model...")
 
 # The first argument is the name of the folder containing the model files
-model=og.Model("example-models/llama2-7b-chat-int4-cpu", og.DeviceType.CPU)
+model=og.Model("./example-models/gemma-2b-cuda", og.DeviceType.CUDA)
 print("Model loaded")
 tokenizer=model.create_tokenizer()
 print("Tokenizer created")

@@ -5,7 +5,7 @@
 #include "gpt.h"
 #include "llama.h"
 #include "mistral.h"
-#include "phi2.h"
+#include "phi.h"
 #include "whisper.h"
 #include "kernels.h"
 
@@ -172,11 +172,13 @@ std::unique_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, con
 
   if (config->model.type == "gpt2")
     return std::make_unique<Gpt_Model>(std::move(config), ort_env, provider_options);
-  if (config->model.type == "llama")
+
+  // gemma and llama share the same architecture
+  if (config->model.type == "llama" || config->model.type == "gemma")
     return std::make_unique<Llama_Model>(std::move(config), ort_env, provider_options);
   if (config->model.type == "mistral")
     return std::make_unique<Mistral_Model>(std::move(config), ort_env, provider_options);
-  if (config->model.type == "phi2")
+  if (config->model.type == "phi")
     return std::make_unique<Phi2_Model>(std::move(config), ort_env, provider_options);
   if (config->model.type == "whisper")
     return std::make_unique<Whisper_Model>(std::move(config), ort_env, provider_options);
