@@ -10,7 +10,7 @@ set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   set_target_properties(python PROPERTIES LINKER_LANGUAGE CUDA)
-  # target_link_libraries(python PRIVATE cublasLt cublas cudnn curand cufft cudart)
+  target_link_libraries(python PRIVATE cublasLt cublas cudnn curand cufft cudart)
 endif()
 source_group("Sources" FILES ${python_srcs})
 
