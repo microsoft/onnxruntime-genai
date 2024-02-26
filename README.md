@@ -134,11 +134,11 @@ This step requires `cmake` to be installed.
 
 3. Build onnxruntime-genai
 
-   If you are building for CUDA, add the cuda_home and cudnn_home arguments.
+   If you are building for CUDA, add the cuda_home argument.
 
    ```bash
    cd ..
-   python build.py [--cuda_home <path_to_cuda_home> --cudnn_home <path_to_cudnn_home>]
+   python build.py [--cuda_home <path_to_cuda_home>]
    ```
    
 4. Install Python wheel
