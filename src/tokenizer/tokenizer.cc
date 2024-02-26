@@ -18,7 +18,8 @@ TfmStatus CreateBPETokenizer(const std::string& tokenizer_path,
   if (tokenizer_type == "BPE") {
     token_ptr = std::make_unique<BPETokenizer>();
   } else if (tokenizer_type.empty()) {
-    if (token_cfg->tokenizer_class_ == "LlamaTokenizer") {
+    if (token_cfg->tokenizer_class_ == "LlamaTokenizer" ||
+        token_cfg->tokenizer_class_ == "GemmaTokenizer") {
       token_ptr = std::make_unique<SpmTokenizer>();
     } else if (token_cfg->tokenizer_class_ == "GPT2Tokenizer" ||
                token_cfg->tokenizer_class_ == "CLIPTokenizer" ||
