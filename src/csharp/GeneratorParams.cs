@@ -36,6 +36,11 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             }
         }
 
+        public void SetInputSequences(Sequences sequences)
+        {
+            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetInputSequences(_generatorParamsHandle, sequences.Handle));
+        }
+
         ~GeneratorParams()
         {
             Dispose(false);

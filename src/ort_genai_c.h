@@ -69,6 +69,8 @@ OGA_EXPORT size_t OGA_API_CALL OgaBufferGetDimCount(const OgaBuffer*);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaBufferGetDims(const OgaBuffer*, size_t* dims, size_t dim_count);
 OGA_EXPORT const void* OGA_API_CALL OgaBufferGetData(const OgaBuffer*);
 
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateSequences(OgaSequences** out);
+
 /*
  * \param[in] sequences OgaSequences to be destroyed.
  */
@@ -145,7 +147,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetMaxLength(OgaGeneratorPa
 
 /*
  * \brief Sets the input ids for the generator params. The input ids are used to seed the generation.
- * \param[in] params The generator params to set the input ids on.
+ * \param[in] generator_params The generator params to set the input ids on.
  * \param[in] input_ids The input ids array of size input_ids_count = batch_size * sequence_length.
  * \param[in] input_ids_count The total number of input ids.
  * \param[in] sequence_length The sequence length of the input ids.
@@ -155,6 +157,12 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetMaxLength(OgaGeneratorPa
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputIDs(OgaGeneratorParams* generator_params, const int32_t* input_ids,
                                                                  size_t input_ids_count, size_t sequence_length, size_t batch_size);
 
+/*
+ * \brief Sets the input id sequences for the generator params. The input id sequences are used to seed the generation.
+ * \param[in] generator_params The generator params to set the input ids on.
+ * \param[in] sequences The input id sequences.
+ * \return OgaResult containing the error message if the setting of the input id sequences failed.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputSequences(OgaGeneratorParams* generator_params, const OgaSequences* sequences);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperInputFeatures(OgaGeneratorParams*, const int32_t* inputs, size_t count);
@@ -221,6 +229,11 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizer(OgaTokenizer*);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncodeBatch(const OgaTokenizer*, const char** strings, size_t count, OgaSequences** out);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerDecodeBatch(const OgaTokenizer*, const OgaSequences* tokens, const char*** out_strings);
 OGA_EXPORT void OGA_API_CALL OgaTokenizerDestroyStrings(const char** strings, size_t count);
+
+/* Encodes a single string and adds the encoded sequence of tokens to the OgaSequences. The OgaSequences must be freed with OgaDestroySequences
+   when it is no longer needed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer*, const char* str, OgaSequences* sequences);
 
 /* Decode a single token sequence and returns a null terminated utf8 string. out_string must be freed with OgaDestroyString
  */
