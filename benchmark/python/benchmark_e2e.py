@@ -18,8 +18,6 @@
 
 from typing import List
 import datetime
-import itertools
-import json
 # import numpy as np
 import onnxruntime_genai as og
 # import torch
