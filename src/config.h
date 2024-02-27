@@ -10,9 +10,6 @@ struct Config {
   struct Model {
     std::string type;
 
-    ONNXTensorElementDataType logits_type{ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT};  // float16/float32 are the valid types
-    ONNXTensorElementDataType kv_type{ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT};      // float16/float32 are the valid types
-
     int pad_token_id{};            // The id of the padding token.
     int eos_token_id{};            // The id of the end-of-stream token.
     int bos_token_id{};            // The id of the beginning-of-stream token.

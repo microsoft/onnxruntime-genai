@@ -78,6 +78,16 @@ struct Tokenizer {
 };
 #endif
 
+struct SessionInfo {
+  SessionInfo(OrtSession& session);
+
+  ONNXTensorElementDataType GetInputDataType(const std::string& name) const;
+  ONNXTensorElementDataType GetOutputDataType(const std::string& name) const;
+
+ private:
+  std::unordered_map<std::string, ONNXTensorElementDataType> inputs_, outputs_;
+};
+
 struct Model {
   Model(std::unique_ptr<Config> config, const ProviderOptions* provider_options);
   virtual ~Model();
@@ -94,6 +104,8 @@ struct Model {
   DeviceType device_type_{DeviceType::CPU};
   Ort::Allocator& allocator_cpu_{Ort::Allocator::GetWithDefaultOptions()};
   Ort::Allocator* allocator_device_{};  // Can be CUDA or CPU based on the DeviceType in the model
+
+  std::unique_ptr<SessionInfo> session_info_;
 
  protected:
   void InitDeviceAllocator(OrtSession& session);
