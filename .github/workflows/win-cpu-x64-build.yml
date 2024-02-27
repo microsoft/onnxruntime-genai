@@ -80,7 +80,7 @@ jobs:
 
       - name: Run tests
         run: |
-          .\$env:cmake_build_dir\test\Release\unit_tests.exe
+          .\build\test\Release\unit_tests.exe
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
