@@ -38,17 +38,5 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                 return Encoding.UTF8.GetString(nativeBytes, len);
             }
         }
-
-        internal static void ToNativeBuffer(string str, IntPtr buffer, int bufferLength)
-        {
-            unsafe
-            {
-                byte* bufferBytes = (byte*)buffer.ToPointer();
-                fixed (char* chars = str)
-                {
-                    UTF8Encoding.UTF8.GetBytes(chars, str.Length, bufferBytes, bufferLength);
-                }
-            }
-        }
     }
 }
