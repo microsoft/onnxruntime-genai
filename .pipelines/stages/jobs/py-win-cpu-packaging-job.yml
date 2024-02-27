@@ -53,12 +53,6 @@ jobs:
 
   - template: steps/set-nightly-build-option-variable-step.yml
 
-#  - bash: |
-#      pip3 install -r requirements.txt
-##      python3 download_onnxruntime.py --ort_version 1.17.0 --os win --arch x64
-#    displayName: Download OnnxRuntime
-#    workingDirectory: '$(Build.SourcesDirectory)\scripts'
-
   - task: DownloadGitHubRelease@0
     inputs:
       connection: 'GitHub - Release'
@@ -84,7 +78,7 @@ jobs:
 
   - bash: |
       cmake -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=$(BuildConfig) -DUSE_CUDA=OFF -S . -B build
-      cmake --build build --config $(BuildConfig)  --parallel
+      cmake --build build --config $(BuildConfig)  --parallel --target python
     displayName: 'Build pybind with CMake'
 
   - powershell: |
@@ -97,9 +91,10 @@ jobs:
       DoEsrp: true
       Pattern: '*.pyd,*.dll'
   #
-  #  - bash: |
-  #      cmake --build build --config $(BuildConfig) --parallel
-  #    displayName: 'Build Python Wheel'
+  - bash: |
+      cmake --build build --config $(BuildConfig) --parallel --target PyPackageBuild
+    displayName: 'Build Python Wheel'
+
   - powershell: |
       Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
 

@@ -91,7 +91,7 @@ jobs:
 
   - powershell: |
       cmake -G "Visual Studio 17 2022" -A x64 -T cuda=$(cuda_dir)\v$(cuda_version) -DCMAKE_BUILD_TYPE=$(BuildConfig) -DUSE_CUDA=TRUE -S . -B build
-      cmake --build build --config $(BuildConfig) --parallel
+      cmake --build build --config $(BuildConfig) --parallel --target python
     displayName: 'Build pybind with CMake'
   - powershell: |
       Get-ChildItem -Path $(Build.SourcesDirectory)\build\wheel\ -Recurse
@@ -103,15 +103,10 @@ jobs:
       DoEsrp: true
       Pattern: '*.pyd,*.dll'
 
-#  - task: PythonScript@0
-#    displayName: 'Build wheel'
-#    inputs:
-#      scriptPath: '$(Build.SourcesDirectory)\setup.py'
-#      arguments: 'bdist_wheel ${{ parameters.BUILD_PY_PARAMETERS }} $(NightlyBuildOption) --wheel_name_suffix=${{ parameters.EP_NAME }}'
-#      workingDirectory: '$(Build.BinariesDirectory)\RelWithDebInfo\RelWithDebInfo'
-#  - bash: |
-#      cmake --build build --config $(BuildConfig) --parallel
-#    displayName: 'Build Python Wheel'
+  - bash: |
+      cmake --build build --config $(BuildConfig) --parallel --target PyPackageBuild
+    displayName: 'Build Python Wheel'
+
   - powershell: |
       Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
   - task: CopyFiles@2
