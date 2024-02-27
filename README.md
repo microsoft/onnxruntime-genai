@@ -119,9 +119,9 @@ This step requires `cmake` to be installed.
       On Windows
 
       ```cmd
-      build.bat --build_shared_lib --skip_tests --parallel [--use_cuda]
+      build.bat --config RelWithDebInfo --build_shared_lib --skip_tests --parallel [--use_cuda]
       copy include\onnxruntime\core\session\onnxruntime_c_api.h $ORT_HOME\include
-      copy build\Windows\Debug\Debug\*.dll $ORT_HOME\lib
+      copy build\Windows\RelWithDebInfo\RelWithDebInfo\*.dll $ORT_HOME\lib
       ```
 
       On Linux
