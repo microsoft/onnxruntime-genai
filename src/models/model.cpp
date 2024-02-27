@@ -166,15 +166,13 @@ Model::Model(std::unique_ptr<Config> config, const ProviderOptions* provider_opt
   session_options_ = OrtSessionOptions::Create();
 
   if (provider_options != nullptr) {
-    if (auto* options = std::get_if<OrtCUDAProviderOptions>(provider_options)) {
 #if USE_CUDA
+    if (auto* options = std::get_if<OrtCUDAProviderOptions>(provider_options)) {
       cuda_stream_ = reinterpret_cast<cudaStream_t>(options->user_compute_stream);
       session_options_->AppendExecutionProvider_CUDA(*options);
       device_type_ = DeviceType::CUDA;
-#else
-      throw std::runtime_error("Trying to use cuda with the non cuda version of onnxruntime-genai");
-#endif
     }
+#endif
   }
 }
 
