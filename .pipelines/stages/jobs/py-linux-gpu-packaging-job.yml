@@ -59,6 +59,8 @@ jobs:
 
   - script: |
       set -e -x
+      az login --identity
+      az acr login --name onnxruntimebuildcache
       python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux//Dockerfile.manylinux2_28_cuda \
         --context tools/ci_build/github/linux/docker/manylinux \
         --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
