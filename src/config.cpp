@@ -130,10 +130,6 @@ struct Model_Element : JSON::Element {
   void OnString(std::string_view name, std::string_view value) override {
     if (name == "type") {
       v_.type = value;
-    } else if (name == "logits_type") {
-      std::cout << "genai-config.json warning: logits_type is deprecated" << std::endl;  // TODO: Remove once removed from model builder
-    } else if (name == "kv_type") {
-      std::cout << "genai-config.json warning: kv_type is deprecated" << std::endl;  // TODO: Remove once removed from model builder
     } else
       throw JSON::unknown_value_error{};
   }

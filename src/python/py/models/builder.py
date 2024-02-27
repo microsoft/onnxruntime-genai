@@ -149,8 +149,6 @@ class Model:
                     "num_key_value_heads": self.num_kv_heads,
                 },
                 "eos_token_id": config.eos_token_id,
-                "logits_type": "float32" if self.io_dtype == TensorProto.FLOAT else "float16",
-                "kv_type": "float32" if self.io_dtype == TensorProto.FLOAT else "float16",
                 "pad_token_id": config.pad_token_id if hasattr(config, "pad_token_id") and config.pad_token_id != None else config.eos_token_id,
                 "type": self.model_type[ : self.model_type.find("For")].lower(),
                 "vocab_size": self.vocab_size,
