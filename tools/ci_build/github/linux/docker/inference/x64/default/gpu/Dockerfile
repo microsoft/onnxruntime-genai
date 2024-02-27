@@ -5,7 +5,7 @@
 ARG BASEIMAGE=nvidia/cuda:11.8.0-cudnn8-devel-ubi8
 FROM $BASEIMAGE
 
-ENV PATH="/usr/local/nvidia/bin:/usr/local/cuda/bin:/opt/rh/gcc-toolset-12/root/usr/bin:${PATH}"
+ENV PATH="/usr/local/cuda/bin:${PATH}"
 ENV LANG=en_US.UTF-8
 ENV LC_ALL=en_US.UTF-8
 ENV CUDA_HOME=/usr/local/cuda-11.8
@@ -13,7 +13,7 @@ ENV CUDA_PATH=/usr/local/cuda-11.8
 ENV CUDA_BIN_PATH=/usr/local/cuda-11.8
 ENV CUDNN_HOME=/usr/local/cuda-11.8
 ENV LD_LIBRARY_PATH="/usr/local/cuda-11.8/lib64:${LD_LIBRARY_PATH}"
-ENV CUDAHOSTCXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
+#ENV CUDAHOSTCXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
 ADD scripts /tmp/scripts
 RUN cd /tmp/scripts && /tmp/scripts/install_centos.sh && /tmp/scripts/install_deps.sh && rm -rf /tmp/scripts
 
