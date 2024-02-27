@@ -1,26 +1,13 @@
-# This is an end-to-end benchmarking script for the Phi-2 model.
+# This is an end-to-end benchmarking script for any ONNX model.
 #
-# TODO: what is steps to run
 # Prerequisites: 
-# 1) Install `huggingface-cli`:
+# 0) Install onnxruntime-genai and onnxruntime
 #
-# $ pip install huggingface_hub
+# 1) Use builder.py to build the desired ONNX model
 #
-# 2) Install `ONNX Runtime v1.16.2 or higher`
-#
-# Main: install ONNX Runtime stable build
-# $ pip install onnxruntime-gpu
-#
-# Alternative: install ONNX Runtime nightly build
-# $ pip install ort-nightly-gpu
-#
-# Alternative: build from source (instructions available at https://onnxruntime.ai/docs/build/inferencing.html)
+# 2) Run this script with the desired arguments. Run benchmark_e2e.py -h for help.
 
-from typing import List
-import datetime
-# import numpy as np
 import onnxruntime_genai as og
-# import torch
 import time
 import argparse
 
@@ -32,7 +19,6 @@ def generate_prompt(model, tokenizer, prompt_length) -> str:
     params.max_length = prompt_length
     params.input_ids = tokens
     generator=og.Generator(model, params)
-    # TODO: handle eos token case
     while not generator.is_done():
         generator.compute_logits()
         generator.generate_next_token_top_k(50, 1.0)
@@ -181,7 +167,6 @@ def main(args):
     save_results(all_csv_metrics, filename)
 
 if __name__ == "__main__":
-    # TODO: add top_k and top_p as arguments
     parser = argparse.ArgumentParser(description="End-to-end benchmarking for gen-ai")
     parser.add_argument('-i', '--input_folder', type=str, required=True, help='Onnx model folder path (must contain config.json and model.onnx)')
     parser.add_argument('-b', '--batch_size', type=int, default=1, help='Number of sequences to generate in parallel')

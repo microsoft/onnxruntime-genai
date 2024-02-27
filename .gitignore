@@ -18,6 +18,7 @@ cache_dir
 example-models
 *.onnx
 *.onnx.data
+benchmark/python/*.csv
 
 !test/test_models/hf-internal-testing/
 !test/test_models/hf-internal-testing/tiny-random-gpt2*/*.onnx
