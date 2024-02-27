@@ -77,8 +77,10 @@ def validate_cuda_home(cuda_home: str | bytes | os.PathLike | None):
     """Validate the CUDA home paths."""
     validated_cuda_home = ""
 
-    if cuda_home or os.environ.get("CUDA_HOME"):
+    if cuda_home or os.environ.get("CUDA_HOME") or (is_windows() and os.environ.get("CUDA_PATH")):
         validated_cuda_home = cuda_home if cuda_home else os.getenv("CUDA_HOME")
+        if not validated_cuda_home and is_windows():
+            validated_cuda_home = os.getenv("CUDA_PATH")
 
         cuda_home_valid = os.path.exists(validated_cuda_home)
 
@@ -98,7 +100,7 @@ def build(
     cuda_home: str | bytes | os.PathLike | None = None,
     cmake_generator: str | None = None,
     ort_home: str | bytes | os.PathLike | None = None,
-    enable_csharp: bool = False,
+    skip_csharp: bool = False,
     build_dir: str | bytes | os.PathLike | None = None,
 ):
     """Generates the CMake build tree and builds the project.
@@ -157,7 +159,7 @@ def build(
     make_command = ["cmake", "--build", ".", "--config", config]
     run_subprocess(make_command, cwd=build_dir, env=env).check_returncode()
 
-    if enable_csharp:
+    if not skip_csharp:
         if not is_windows():
             raise RuntimeError("C# API is only supported on Windows.")
 
@@ -202,12 +204,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--cuda_home",
         help="Path to CUDA home."
-        "Read from CUDA_HOME environment variable if --use_cuda is true and "
-        "--cuda_home is not specified.",
+        "Read from CUDA_HOME or CUDA_PATH environment variable if not specified.",
     )
     parser.add_argument("--skip_wheel", action="store_true", help="Skip building the Python wheel.")
     parser.add_argument("--ort_home", default=None, help="Root directory of onnxruntime.")
-    parser.add_argument("--enable_csharp", action="store_true", help="Build the C# API.")
+    parser.add_argument("--skip_csharp", action="store_true", help="Skip building the C# API.")
     parser.add_argument("--build_dir", default=None, help="Path to output directory.")
     args = parser.parse_args()
 
@@ -217,6 +218,6 @@ if __name__ == "__main__":
         cuda_home=args.cuda_home,
         cmake_generator=args.cmake_generator,
         ort_home=args.ort_home,
-        enable_csharp=args.enable_csharp,
+        skip_csharp=args.skip_csharp,
         build_dir=args.build_dir,
     )
