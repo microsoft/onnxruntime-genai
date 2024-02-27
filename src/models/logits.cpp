@@ -9,7 +9,6 @@ Logits::Logits(const Model& model, State& state)
       state_{state},
       shape_{state_.search_params_.batch_size * state_.search_params_.num_beams, state_.search_params_.sequence_length, state_.search_params_.vocab_size},
       type_{model_.session_info_->GetOutputDataType(model_.config_->model.decoder.outputs.logits)} {
-
   value_ = OrtValue::CreateTensor(*model.allocator_device_, shape_, type_);
 
   if (model_.device_type_ == DeviceType::CPU && type_ != Ort::TypeToTensorType<float>::type)

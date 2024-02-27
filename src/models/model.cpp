@@ -139,7 +139,6 @@ Ort::Allocator* GetCudaAllocator(OrtSession& session) {
 #endif
 
 SessionInfo::SessionInfo(OrtSession& session) {
-
   auto input_names = session.GetInputNames();
   std::vector<ONNXTensorElementDataType> input_types(input_names.size());
   for (size_t i = 0; i < input_types.size(); i++) {
@@ -156,11 +155,11 @@ SessionInfo::SessionInfo(OrtSession& session) {
 }
 
 ONNXTensorElementDataType SessionInfo::GetInputDataType(const std::string& name) const {
-    return inputs_.find(name)->second;
+  return inputs_.find(name)->second;
 }
 
 ONNXTensorElementDataType SessionInfo::GetOutputDataType(const std::string& name) const {
-    return outputs_.find(name)->second;
+  return outputs_.find(name)->second;
 }
 
 Model::Model(std::unique_ptr<Config> config, const ProviderOptions* provider_options) : config_{std::move(config)} {

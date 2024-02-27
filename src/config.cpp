@@ -2,7 +2,7 @@
 #include "json.h"
 #include <fstream>
 #include <sstream>
-#include <iostream> // std::cout warnings
+#include <iostream>  // std::cout warnings
 
 namespace Generators {
 
@@ -131,7 +131,7 @@ struct Model_Element : JSON::Element {
     if (name == "type") {
       v_.type = value;
     } else if (name == "logits_type") {
-      std::cout << "genai-config.json warning: logits_type is deprecated" << std::endl; // TODO: Remove once removed from model builder
+      std::cout << "genai-config.json warning: logits_type is deprecated" << std::endl;  // TODO: Remove once removed from model builder
     } else if (name == "kv_type") {
       std::cout << "genai-config.json warning: kv_type is deprecated" << std::endl;  // TODO: Remove once removed from model builder
     } else

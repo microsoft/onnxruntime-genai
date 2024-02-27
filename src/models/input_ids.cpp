@@ -13,7 +13,7 @@ InputIDs::InputIDs(const Model& model, State& state)
   type_ = model_.session_info_->GetInputDataType(name_);
 
   // If 64-bit, convert from 32-bit to 64-bit
-  if(type_==Ort::TypeToTensorType<int64_t>::type) {
+  if (type_ == Ort::TypeToTensorType<int64_t>::type) {
     value_ = OrtValue::CreateTensor(model.allocator_cpu_, shape_, type_);
     auto* p_data = value_->GetTensorMutableData<int64_t>();
     for (auto v : state_.search_params_.input_ids) {
@@ -45,7 +45,7 @@ void InputIDs::Update(RoamingArray<int32_t> next_tokens_unk) {
   }
 
   // Update input_ids with next tokens, converting from 32-bit to 64-bit
-  if(type_ == Ort::TypeToTensorType<int64_t>::type) {
+  if (type_ == Ort::TypeToTensorType<int64_t>::type) {
     auto* data = value_->GetTensorMutableData<int64_t>();
 #if USE_CUDA
     if (model_.device_type_ == DeviceType::CUDA) {
