@@ -33,9 +33,6 @@ struct Deleters {
   void operator()(OgaGenerator* p) {
     OgaDestroyGenerator(p);
   }
-  void operator()(OgaStrings* p) {
-    OgaDestroyStrings(p);
-  }
 };
 
 using OgaResultPtr = std::unique_ptr<OgaResult, Deleters>;
@@ -46,7 +43,6 @@ using OgaTokenizerPtr = std::unique_ptr<OgaTokenizer, Deleters>;
 using OgaTokenizerStreamPtr = std::unique_ptr<OgaTokenizerStream, Deleters>;
 using OgaGeneratorParamsPtr = std::unique_ptr<OgaGeneratorParams, Deleters>;
 using OgaGeneratorPtr = std::unique_ptr<OgaGenerator, Deleters>;
-using OgaStringsPtr = std::unique_ptr<OgaStrings, Deleters>;
 
 void CheckResult(OgaResult* result) {
   if (!result)
@@ -80,7 +76,8 @@ TEST(CAPITests, TokenizerCAPI) {
   {
     const char* input_string = "She sells sea shells by the sea shore.";
     OgaSequences* input_sequences;
-    CheckResult(OgaTokenizerEncode(tokenizer, input_string, &input_sequences));
+    CheckResult(OgaCreateSequences(&input_sequences));
+    CheckResult(OgaTokenizerEncode(tokenizer, input_string, input_sequences));
     OgaSequencesPtr input_sequences_ptr{input_sequences};
 
     std::span<const int32_t> sequence{OgaSequencesGetSequenceData(input_sequences, 0), OgaSequencesGetSequenceCount(input_sequences, 0)};
@@ -99,29 +96,6 @@ TEST(CAPITests, TokenizerCAPI) {
         throw std::runtime_error("Batch Token decoding mismatch");
     }
     OgaTokenizerDestroyStrings(out_strings, OgaSequencesCount(sequences));
-  }
-
-  // Encode batch strings and decode datch strings
-  {
-    OgaStrings* string_array = nullptr;
-    CheckResult(OgaCreateStrings(&string_array));
-    OgaStringsPtr string_array_ptr{string_array};
-    OgaStringsAddStrings(string_array, input_strings, std::size(input_strings));
-
-    OgaSequences* encoded_sequences;
-    CheckResult(OgaTokenizerEncodeBatchStrings(tokenizer, string_array, &encoded_sequences));
-    OgaSequencesPtr encoded_sequences_ptr{encoded_sequences};
-
-    OgaStrings* out_strings = nullptr;
-    CheckResult(OgaTokenizerDecodeBatchStrings(tokenizer, encoded_sequences, &out_strings));
-    OgaStringsPtr out_string_array_ptr{out_strings};
-    for (size_t i = 0; i < OgaSequencesCount(encoded_sequences); i++) {
-      const char* out_string = nullptr;
-      CheckResult(OgaStringsGetString(out_strings, i, &out_string));
-      std::cout << "Decoded string:" << out_string << std::endl;
-      if (strcmp(input_strings[i], out_string) != 0)
-        throw std::runtime_error("Batch Token decoding mismatch");
-    }
   }
 
   // Decode Single

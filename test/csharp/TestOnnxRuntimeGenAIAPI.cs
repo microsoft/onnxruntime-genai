@@ -72,10 +72,10 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
-        [Fact(Skip = "Phi-2 is not available in the CI pipeline")]
+        [Fact(DisplayName = "TestTokenizerBatchEncodeDecode")]
         public void TestTokenizerBatchEncodeDecode()
         {
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "phi-2");
+            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "hf-internal-testing", "tiny-random-gpt2-fp32");
             using (var model = new Model(modelPath, DeviceType.CPU))
             {
                 Assert.NotNull(model);
@@ -101,10 +101,10 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
-        [Fact(Skip = "Phi-2 is not available in the CI pipeline")]
+        [Fact(DisplayName = "TestTokenizerBatchEncodeSingleDecode")]
         public void TestTokenizerBatchEncodeSingleDecode()
         {
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "phi-2");
+            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "hf-internal-testing", "tiny-random-gpt2-fp32");
             using (var model = new Model(modelPath, DeviceType.CPU))
             {
                 Assert.NotNull(model);
@@ -132,10 +132,10 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
-        [Fact(Skip = "Phi-2 is not available in the CI pipeline")]
+        [Fact(DisplayName = "TestTokenizerBatchEncodeStreamDecode")]
         public void TestTokenizerBatchEncodeStreamDecode()
         {
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "phi-2");
+            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "hf-internal-testing", "tiny-random-gpt2-fp32");
             using (var model = new Model(modelPath, DeviceType.CPU))
             {
                 Assert.NotNull(model);
@@ -168,10 +168,10 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
-        [Fact(Skip = "Phi-2 is not available in the CI pipeline")]
+        [Fact(DisplayName = "TestTokenizerSingleEncodeDecode")]
         public void TestTokenizerSingleEncodeDecode()
         {
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "phi-2");
+            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "hf-internal-testing", "tiny-random-gpt2-fp32");
             using (var model = new Model(modelPath, DeviceType.CPU))
             {
                 Assert.NotNull(model);

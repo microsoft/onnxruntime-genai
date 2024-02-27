@@ -89,6 +89,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                                  UIntPtr /* size_t */ index);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaCreateSequences(out IntPtr /* OgaSequences** */ sequences);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern void OgaDestroySequences(IntPtr /* OgaSequences* */ sequences);
 
         // This function returns the number of sequences in the OgaSequences object.
@@ -117,29 +120,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                  out IntPtr /* OgaSequences** */ sequences);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern unsafe IntPtr /* OgaResult* */ OgaCreateAllocatedStrings(UIntPtr /* size_t */ numStrings,
-                                                                                      UIntPtr* /* const size_t* */ stringLengths,
-                                                                                      out IntPtr /* OgaStrings** */ strings);
-
-        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaStringsGetBuffer(IntPtr /* OgaStrings* */ strings,
-                                                                         UIntPtr /* size_t */ index,
-                                                                         out IntPtr /* char** */ str);
-
-        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern void OgaDestroyStrings(IntPtr /* OgaStrings* */ strings);
-
-        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern UIntPtr /* size_t */ OgaStringsGetCount(IntPtr /* const OgaStrings* */ strings);
-
-        // This function returns the string at the given index of the OgaStrings object. The returned pointer
-        // is owned by the OgaStrings object and will be freed when the OgaStrings object is destroyed.
-        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaStringsGetString(IntPtr /* const OgaStrings* */ strings,
-                                                                         UIntPtr /* size_t */ index,
-                                                                         out IntPtr /* const char** */ outStr);
-
-        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaCreateTokenizer(IntPtr /* const OgaModel* */ model,
                                                                         out IntPtr /* OgaTokenizer** */ tokenizer);
 
@@ -147,19 +127,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public static extern void OgaDestroyTokenizer(IntPtr /* OgaTokenizer* */ model);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaTokenizerEncodeBatchStrings(IntPtr /* const OgaTokenizer* */ tokenizer,
-                                                                                    IntPtr /* const OgaStrings* */ strings,
-                                                                                    out IntPtr /* OgaSequences** */ sequences);
-
-        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaTokenizerDecodeBatchStrings(IntPtr /* const OgaTokenizer* */ tokenizer,
-                                                                                    IntPtr /* const OgaSequences* */ sequences,
-                                                                                    out IntPtr /* OgaStrings** */ strings);
-
-        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaTokenizerEncode(IntPtr /* const OgaTokenizer* */ tokenizer,
                                                                         byte[] /* const char* */ strings,
-                                                                        out IntPtr /* OgaSequences** */ sequences);
+                                                                        IntPtr /* OgaSequences* */ sequences);
 
 
         // This function is used to decode the given token into a string. The caller is responsible for freeing the

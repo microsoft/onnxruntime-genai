@@ -70,6 +70,13 @@ const void* OGA_API_CALL OgaBufferGetData(const OgaBuffer* p) {
   return p->data_.get();
 }
 
+OgaResult* OGA_API_CALL OgaCreateSequences(OgaSequences** out) {
+  OGA_TRY
+  *out = reinterpret_cast<OgaSequences*>(std::make_unique<Generators::TokenSequences>().release());
+  return nullptr;
+  OGA_CATCH
+}
+
 size_t OGA_API_CALL OgaSequencesCount(const OgaSequences* p) {
   return reinterpret_cast<const Generators::TokenSequences*>(p)->size();
 }
@@ -214,32 +221,11 @@ void OGA_API_CALL OgaTokenizerDestroyStrings(const char** strings, size_t count)
   delete strings;
 }
 
-OgaResult* OGA_API_CALL OgaTokenizerEncodeBatchStrings(const OgaTokenizer* p, const OgaStrings* string_array, OgaSequences** out) {
+OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer* p, const char* str, OgaSequences* sequences) {
   OGA_TRY
   auto& tokenizer = *reinterpret_cast<const Generators::Tokenizer*>(p);
-  auto& strings = *reinterpret_cast<const std::vector<std::string>*>(string_array);
-  *out = reinterpret_cast<OgaSequences*>(std::make_unique<Generators::TokenSequences>(std::move(tokenizer.EncodeBatch(strings))).release());
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaTokenizerDecodeBatchStrings(const OgaTokenizer* p, const OgaSequences* p_sequences, OgaStrings** out_strings) {
-  OGA_TRY
-  auto& tokenizer = *reinterpret_cast<const Generators::Tokenizer*>(p);
-  auto& sequences = *reinterpret_cast<const Generators::TokenSequences*>(p_sequences);
-
-  *out_strings = reinterpret_cast<OgaStrings*>(
-      std::make_unique<std::vector<std::string>>(tokenizer.DecodeBatch(sequences)).release());
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer* p, const char* str, OgaSequences** out) {
-  OGA_TRY
-  auto& tokenizer = *reinterpret_cast<const Generators::Tokenizer*>(p);
-  auto out_tokens = std::make_unique<Generators::TokenSequences>();
-  out_tokens->emplace_back(std::move(tokenizer.Encode(str)));
-  *out = reinterpret_cast<OgaSequences*>(out_tokens.release());
+  auto& token_sequences = *reinterpret_cast<Generators::TokenSequences*>(sequences);
+  token_sequences.emplace_back(tokenizer.Encode(str));
   return nullptr;
   OGA_CATCH
 }
@@ -274,63 +260,6 @@ OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream* p, int32_t 
   *out = reinterpret_cast<Generators::TokenizerStream*>(p)->Decode(token).c_str();
   return nullptr;
   OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaCreateStrings(OgaStrings** out) {
-  OGA_TRY
-  *out = reinterpret_cast<OgaStrings*>(std::make_unique<std::vector<std::string>>().release());
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaCreateAllocatedStrings(size_t num_strings, size_t* str_lengths, OgaStrings** out) {
-  OGA_TRY
-  auto strings = std::make_unique<std::vector<std::string>>(num_strings);
-  for (size_t i = 0; i < num_strings; i++) {
-    strings->at(i).resize(str_lengths[i]);
-  }
-  *out = reinterpret_cast<OgaStrings*>(strings.release());
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaStringsGetBuffer(OgaStrings* string_array, size_t index, char** out) {
-  OGA_TRY
-  *out = &((*reinterpret_cast<std::vector<std::string>*>(string_array))[index])[0];
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaStringsAddString(OgaStrings* string_array, const char* str) {
-  OGA_TRY
-  reinterpret_cast<std::vector<std::string>*>(string_array)->push_back(str);
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaStringsAddStrings(OgaStrings* string_array, const char* const* strings, size_t count) {
-  OGA_TRY
-  auto& strs = *reinterpret_cast<std::vector<std::string>*>(string_array);
-  for (size_t i = 0; i < count; i++) {
-    strs.push_back(strings[i]);
-  }
-  return nullptr;
-  OGA_CATCH
-}
-
-size_t OGA_API_CALL OgaStringsGetCount(const OgaStrings* string_array) {
-  return reinterpret_cast<const std::vector<std::string>*>(string_array)->size();
-}
-
-OgaResult* OGA_API_CALL OgaStringsGetString(const OgaStrings* string_array, size_t index, const char** out) {
-  OGA_TRY
-  *out = (*reinterpret_cast<const std::vector<std::string>*>(string_array))[index].c_str();
-  return nullptr;
-  OGA_CATCH
-}
-
-void OGA_API_CALL OgaDestroyStrings(OgaStrings* string_array) {
-  delete reinterpret_cast<std::vector<std::string>*>(string_array);
 }
 
 void OGA_API_CALL OgaDestroyResult(OgaResult* p) {
