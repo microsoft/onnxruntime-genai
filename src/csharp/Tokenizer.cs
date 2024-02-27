@@ -41,7 +41,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             string[] result = new string[sequences.NumSequences];
             for (ulong i = 0; i < sequences.NumSequences; i++)
             {
-                IntPtr outStr = IntPtr.Zero;
                 result[i] = Decode(sequences[i]);
             }
 
