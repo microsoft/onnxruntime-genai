@@ -14,6 +14,7 @@ env:
   ort_dir: "onnxruntime-win-x64-1.17.0"
   ort_zip: "$(ort_dir).zip"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/$(ort_zip)"
+  cmake_build_dir: build
 
 jobs:
   windows-cpu-x64-build:
@@ -53,12 +54,12 @@ jobs:
 
       - name: Build with CMake
         run: |
-          cmake -G "Visual Studio 17 2022" -A x64 -S . -B build -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=OFF
-          cmake --build build --config Release --parallel
+          cmake -G "Visual Studio 17 2022" -A x64 -S . -B $env:cmake_build_dir -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=OFF
+          cmake --build $env:cmake_build_dir --config Release --parallel
 
       - name: Install the python wheel and test dependencies
         run: |
-          python -m pip install (Get-ChildItem ("build\wheel\*.whl"))
+          python -m pip install (Get-ChildItem ("$env:cmake_build_dir\wheel\*.whl"))
           python -m pip install -r test\python\requirements.txt
 
       - name: Run the Python Tests
@@ -68,18 +69,18 @@ jobs:
       - name: Build the C# API and Run the C# Tests
         run: |
           cd test\csharp
-          dotnet test /p:NativeBuildOutputDir="..\..\Release\"
+          dotnet test /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:cmake_build_dir\Release"
 
       - name: Verify Build Artifacts
         if: always()
         continue-on-error: true
         run: |
-          Get-ChildItem -Path $env:GITHUB_WORKSPACE\build\Release -Recurse
-          Get-ChildItem -Path $env:GITHUB_WORKSPACE\build\test\Release -Recurse
+          Get-ChildItem -Path $env:GITHUB_WORKSPACE\$env:cmake_build_dir\Release -Recurse
+          Get-ChildItem -Path $env:GITHUB_WORKSPACE\$env:cmake_build_dir\test\Release -Recurse
 
       - name: Run tests
         run: |
-          .\build\test\Release\unit_tests.exe
+          .\$env:cmake_build_dir\test\Release\unit_tests.exe
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3

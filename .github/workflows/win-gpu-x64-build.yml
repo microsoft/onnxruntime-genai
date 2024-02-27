@@ -19,6 +19,7 @@ env:
 #  CUDA_PATH: "${{ github.workspace }}\\cuda_sdk\\v12.2"
   cuda_version: "11.8"
   CUDA_PATH: ${{ github.workspace }}\\cuda_sdk\\v11.8
+  cmake_build_dir: build
 
 
 jobs:
@@ -69,10 +70,10 @@ jobs:
         run: |
           echo "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      - name: Build the C# API and run the C# tests
+      - name: Build the C# API and Run the C# Tests
         run: |
           cd test\csharp
-          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="..\..\build\Release\"
+          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:cmake_build_dir\Release"
 
       - name: Verify Build Artifacts
         if: always()
