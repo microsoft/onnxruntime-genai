@@ -18,7 +18,7 @@ while (true)
     var sequences = tokenizer.Encode(prompt);
 
     using GeneratorParams generatorParams = new GeneratorParams(model);
-    generatorParams.SetMaxLength(200);
+    generatorParams.SetSearchOption("max_length", 200);
     generatorParams.SetInputSequences(sequences);
 
     var outputSequences = model.Generate(generatorParams);

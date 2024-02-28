@@ -38,10 +38,15 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern void OgaDestroyGeneratorParams(IntPtr /* OgaGeneratorParams* */ generatorParams);
 
-        // This function is used to set the maximum length that the generated sequences can have.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsSetMaxLength(IntPtr /* OgaGeneratorParams* */ generatorParams,
-                                                                                    UIntPtr /* size_t */ maxLength);
+        public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsSetSearchNumber(IntPtr /* OgaGeneratorParams* */ generatorParams,
+                                                                                       byte[] /* const char* */ searchOption,
+                                                                                       double value);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsSetSearchBool(IntPtr /* OgaGeneratorParams* */ generatorParams,
+                                                                                     byte[] /* const char* */ searchOption,
+                                                                                     bool value);
 
         // This function is used to set the input IDs for the generator.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
