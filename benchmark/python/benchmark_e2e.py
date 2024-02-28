@@ -5,7 +5,10 @@
 #
 # 1) Use builder.py to build the desired ONNX model
 #
-# 2) Run this script with the desired arguments. Run benchmark_e2e.py -h for help.
+# 2) For accurate wall clock numbers, modify genai_config.json to include the following:
+#    "min_length": {prompt_length + generation_length}
+#
+# 3) Run this script with the desired arguments. Run benchmark_e2e.py -h for help.
 
 import onnxruntime_genai as og
 import time
@@ -66,7 +69,7 @@ def main(args):
     prompt = [generate_prompt(model, tokenizer, prompt_length)] * batch_size
     tokens = tokenizer.encode_batch(prompt)
     if args.verbose: print("Running warmup runs...")
-    for i in tqdm(range(args.warmup)):
+    for _ in tqdm(range(args.warmup)):
         params = og.GeneratorParams(model)
         params.max_length = prompt_length + generation_length
         params.input_ids = tokens
@@ -82,7 +85,7 @@ def main(args):
     sampling_times = []
     wall_clock_times = []
     if args.verbose: print(f"Running benchmark for batch size = {batch_size}, prompt length = {prompt_length}")
-    for i in tqdm(range(num_repetitions)):
+    for _ in tqdm(range(num_repetitions)):
         # Prepare run
         max_length = prompt_length + generation_length
         params = og.GeneratorParams(model)
@@ -191,7 +194,7 @@ if __name__ == "__main__":
     parser.add_argument('-w', '--warmup', type=int, default=5, help='Number of warmup runs before benchmarking')
     parser.add_argument('-k', '--top_k', type=int, default=50, help='Top k tokens to sample from')
     parser.add_argument('-p', '--top_p', type=float, default=1.0, help='Top p probability to sample with')
-    parser.add_argument('-o', '--output', type=str, default='genai_e2e', help='Output CSV file name or path')
+    parser.add_argument('-o', '--output', type=str, default='genai_e2e', help='Output CSV file name or path (with .csv extension)')
     parser.add_argument('-ep', '--execution_provider', type=str, choices=['cpu', 'cuda'], default='cpu', help='Execution provider (device) to use, default is CPU, use CUDA for GPU')
     parser.add_argument('-v', '--verbose', action='store_true', help='Print extra information')
     parser.add_argument('-mo', '--print_model_output', action='store_true', help='Print model output')
