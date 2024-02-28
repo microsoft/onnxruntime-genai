@@ -129,10 +129,6 @@ struct Model_Element : JSON::Element {
   void OnString(std::string_view name, std::string_view value) override {
     if (name == "type") {
       v_.type = value;
-    } else if (name == "logits_type") {
-      v_.logits_type = TranslateTensorType(value);
-    } else if (name == "kv_type") {
-      v_.kv_type = TranslateTensorType(value);
     } else
       throw JSON::unknown_value_error{};
   }
