@@ -14,8 +14,8 @@ std::unique_ptr<State> Phi2_Model::CreateState(RoamingArray<int32_t> sequence_le
   return std::make_unique<Phi2_State>(*this, sequence_lengths, params);
 }
 
-Phi2_State::Phi2_State(const Phi2_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const GeneratorParams& search_params)
-    : State{search_params},
+Phi2_State::Phi2_State(const Phi2_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const GeneratorParams& params)
+    : State{params},
       model_{model},
       position_ids_{model, *this, sequence_lengths_unk} {
   input_ids_.Add();

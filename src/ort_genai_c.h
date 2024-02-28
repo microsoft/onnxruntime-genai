@@ -145,6 +145,9 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyGeneratorParams(OgaGeneratorParams* gener
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetMaxLength(OgaGeneratorParams* generator_params, size_t max_length);
 
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchNumber(OgaGeneratorParams* generator_params, const char* name, double value);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* generator_params, const char* name, bool value);
+
 /*
  * \brief Sets the input ids for the generator params. The input ids are used to seed the generation.
  * \param[in] generator_params The generator params to set the input ids on.

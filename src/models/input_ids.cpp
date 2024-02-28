@@ -9,24 +9,24 @@ InputIDs::InputIDs(const Model& model, State& state)
     : model_{model},
       state_{state} {
   name_ = model_.config_->model.decoder.inputs.input_ids.c_str();
-  shape_ = {state_.search_params_.batch_size, state_.search_params_.sequence_length};
+  shape_ = {state_.params_.batch_size, state_.params_.sequence_length};
   type_ = model_.session_info_->GetInputDataType(name_);
 
   // If 64-bit, convert from 32-bit to 64-bit
   if (type_ == Ort::TypeToTensorType<int64_t>::type) {
     value_ = OrtValue::CreateTensor(model.allocator_cpu_, shape_, type_);
     auto* p_data = value_->GetTensorMutableData<int64_t>();
-    for (auto v : state_.search_params_.input_ids) {
+    for (auto v : state_.params_.input_ids) {
       *p_data++ = v;
     }
   } else {
     if (type_ != Ort::TypeToTensorType<int32_t>::type)
       throw std::runtime_error("InputIDs must be int64 or int32");
-    value_ = OrtValue::CreateTensor<int32_t>(model.allocator_cpu_.GetInfo(), std::span<int32_t>(const_cast<int32_t*>(state_.search_params_.input_ids.data()), shape_[0] * shape_[1]), shape_);
+    value_ = OrtValue::CreateTensor<int32_t>(model.allocator_cpu_.GetInfo(), std::span<int32_t>(const_cast<int32_t*>(state_.params_.input_ids.data()), shape_[0] * shape_[1]), shape_);
   }
 
-  value_ = model_.ExpandInputs(value_, state_.search_params_.num_beams);
-  shape_[0] *= state_.search_params_.num_beams;
+  value_ = model_.ExpandInputs(value_, state_.params_.search.num_beams);
+  shape_[0] *= state_.params_.search.num_beams;
 }
 
 void InputIDs::Add() {

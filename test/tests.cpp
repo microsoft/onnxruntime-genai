@@ -35,7 +35,7 @@ TEST(ModelTests, GreedySearchGptFp32) {
   auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
   Generators::GeneratorParams params{*model};
-  params.max_length = 10;
+  params.search.max_length = 10;
   params.batch_size = static_cast<int>(input_ids_shape[0]);
   params.sequence_length = static_cast<int>(input_ids_shape[1]);
   params.input_ids = input_ids;
@@ -50,8 +50,8 @@ TEST(ModelTests, GreedySearchGptFp32) {
   // Verify outputs match expected outputs
   for (int i = 0; i < params.batch_size; i++) {
     auto sequence = generator->GetSequence(i).GetCPU();
-    auto* expected_output_start = &expected_output[i * params.max_length];
-    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params.max_length * sizeof(int32_t)));
+    auto* expected_output_start = &expected_output[i * params.search.max_length];
+    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params.search.max_length * sizeof(int32_t)));
   }
 }
 
@@ -78,9 +78,9 @@ TEST(ModelTests, BeamSearchGptFp32) {
   params.batch_size = static_cast<int>(input_ids_shape[0]);
   params.sequence_length = static_cast<int>(input_ids_shape[1]);
   params.input_ids = input_ids;
-  params.max_length = 20;
-  params.length_penalty = 1.0f;
-  params.num_beams = 4;
+  params.search.max_length = 20;
+  params.search.length_penalty = 1.0f;
+  params.search.num_beams = 4;
 
   Generators::BeamSearch_Cpu search{params};
   auto state = model->CreateState(search.sequence_lengths_, params);
@@ -89,20 +89,20 @@ TEST(ModelTests, BeamSearchGptFp32) {
     search.SetLogits(state->Run(search.GetSequenceLength(), search.GetNextTokens(), search.GetNextIndices()));
 
     // Scoring
-    Generators::Processors::MinLength(search, 1);
-    Generators::Processors::RepetitionPenalty(search, 1.0f);
+    search.ApplyMinLength(1);
+    search.ApplyRepetitionPenalty(1.0f);
 
     search.SelectTop();
   }
 
-  std::vector<int32_t> output_sequence(search.params_.batch_size * search.params_.max_length);
+  std::vector<int32_t> output_sequence(search.params_.batch_size * search.params_.search.max_length);
   search.Finalize(1, Generators::cpu_span<int32_t>{output_sequence}, {});
 
   // Verify outputs match expected outputs
   for (int i = 0; i < search.params_.batch_size; i++) {
-    auto sequence = std::span<int32_t>(output_sequence.data() + search.params_.max_length * i, search.params_.max_length);
-    auto* expected_output_start = &expected_output[i * search.params_.max_length];
-    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params.max_length * sizeof(int32_t)));
+    auto sequence = std::span<int32_t>(output_sequence.data() + search.params_.search.max_length * i, search.params_.search.max_length);
+    auto* expected_output_start = &expected_output[i * search.params_.search.max_length];
+    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params.search.max_length * sizeof(int32_t)));
   }
 }
 
@@ -122,7 +122,7 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
   Generators::GeneratorParams params{*model};
   params.batch_size = static_cast<int>(input_ids_shape[0]);
   params.sequence_length = static_cast<int>(input_ids_shape[1]);
-  params.max_length = 10;
+  params.search.max_length = 10;
   params.input_ids = input_ids;
 
   auto generator = Generators::CreateGenerator(*model, params);
@@ -140,8 +140,8 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
   for (int i = 0; i < params.batch_size; i++) {
     auto sequence_gpu = generator->GetSequence(i);
     auto sequence = sequence_gpu.GetCPU();
-    auto* expected_output_start = &expected_output[i * params.max_length];
-    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params.max_length * sizeof(int32_t)));
+    auto* expected_output_start = &expected_output[i * params.search.max_length];
+    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params.search.max_length * sizeof(int32_t)));
   }
 }
 
@@ -174,9 +174,9 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
   params.batch_size = static_cast<int>(input_ids_shape[0]);
   params.sequence_length = static_cast<int>(input_ids_shape[1]);
   params.input_ids = input_ids;
-  params.max_length = 20;
-  params.num_beams = 4;
-  params.length_penalty = 1.0f;
+  params.search.max_length = 20;
+  params.search.num_beams = 4;
+  params.search.length_penalty = 1.0f;
 
   auto generator = Generators::CreateGenerator(*model, params);
 
@@ -190,7 +190,7 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
     generator->GenerateNextToken();
   }
 
-  size_t sequence_length = params.batch_size * params.max_length;
+  size_t sequence_length = params.batch_size * params.search.max_length;
   auto output_sequence_cuda = Generators::CudaMallocArray<int32_t>(sequence_length);
   auto output_sequence_cpu = std::make_unique<int32_t[]>(sequence_length);
 
@@ -200,9 +200,9 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
 
   // Verify outputs match expected outputs
   for (int i = 0; i < params.batch_size; i++) {
-    auto sequence = std::span<int32_t>(output_sequence_cpu.get() + params.max_length * i, params.max_length);
-    auto* expected_output_start = &expected_output[i * params.max_length];
-    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params.max_length * sizeof(int32_t)));
+    auto sequence = std::span<int32_t>(output_sequence_cpu.get() + params.search.max_length * i, params.search.max_length);
+    auto* expected_output_start = &expected_output[i * params.search.max_length];
+    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params.search.max_length * sizeof(int32_t)));
   }
 }
 
@@ -233,7 +233,7 @@ Print all primes between 1 and n
   params.batch_size = 1;
   params.sequence_length = static_cast<int>(tokens.size());
   params.input_ids = tokens;
-  params.max_length = 128;
+  params.search.max_length = 128;
 
   // Generator version
   auto generator = Generators::CreateGenerator(*model, params);
@@ -272,7 +272,7 @@ Print all primes between 1 and n
   params.batch_size = 1;
   params.sequence_length = static_cast<int>(tokens.size());
   params.input_ids = tokens;
-  params.max_length = 128;
+  params.search.max_length = 128;
 
   // High level version
   auto result = Generators::Generate(*model, params);

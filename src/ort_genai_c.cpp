@@ -105,8 +105,22 @@ OgaResult* OGA_API_CALL OgaCreateGeneratorParams(const OgaModel* model, OgaGener
 }
 
 OgaResult* OGA_API_CALL OgaGeneratorParamsSetMaxLength(OgaGeneratorParams* params, size_t max_length) {
-  reinterpret_cast<Generators::GeneratorParams*>(params)->max_length = static_cast<int>(max_length);
+  reinterpret_cast<Generators::GeneratorParams*>(params)->search.max_length = static_cast<int>(max_length);
   return nullptr;
+}
+
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchNumber(OgaGeneratorParams* generator_params, const char* name, double value) {
+  OGA_TRY
+  Generators::SetSearchNumber(reinterpret_cast<Generators::GeneratorParams*>(generator_params)->search, name, value);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* generator_params, const char* name, bool value) {
+  OGA_TRY
+  Generators::SetSearchBool(reinterpret_cast<Generators::GeneratorParams*>(generator_params)->search, name, value);
+  return nullptr;
+  OGA_CATCH
 }
 
 OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputIDs(OgaGeneratorParams* oga_params, const int32_t* input_ids, size_t input_ids_count, size_t sequence_length, size_t batch_size) {

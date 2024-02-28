@@ -14,8 +14,8 @@ std::unique_ptr<State> Llama_Model::CreateState(RoamingArray<int32_t> sequence_l
   return std::make_unique<Llama_State>(*this, sequence_lengths, params);
 }
 
-Llama_State::Llama_State(const Llama_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const GeneratorParams& search_params)
-    : State{search_params},
+Llama_State::Llama_State(const Llama_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const GeneratorParams& params)
+    : State{params},
       model_{model},
       position_ids_{model, *this, sequence_lengths_unk} {
   input_ids_.Add();

@@ -23,7 +23,7 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopPCpu) {
   int batch_size = 1;
   std::vector<int32_t> input_ids{0, 1, 2, 3, 4};
   Generators::GeneratorParams params = Generators::GeneratorParams{};
-  params.max_length = 10;
+  params.search.max_length = 10;
   params.batch_size = batch_size;
   params.sequence_length = 1;
   params.vocab_size = vocab_size;
@@ -58,7 +58,7 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopKCpu) {
   int k = 5;
   std::vector<int32_t> input_ids{0, 1, 2, 3, 4};
   Generators::GeneratorParams params = Generators::GeneratorParams{};
-  params.max_length = 10;
+  params.search.max_length = 10;
   params.batch_size = batch_size;
   params.sequence_length = 1;
   params.vocab_size = vocab_size;
@@ -96,7 +96,7 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopPAndKCpu) {
   int k = 5;
   std::vector<int32_t> input_ids{0, 1, 2, 3, 4};
   Generators::GeneratorParams params = Generators::GeneratorParams{};
-  params.max_length = 10;
+  params.search.max_length = 10;
   params.batch_size = batch_size;
   params.sequence_length = 1;
   params.vocab_size = vocab_size;
@@ -135,7 +135,7 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopPCuda) {
   int batch_size = 1;
   std::vector<int32_t> input_ids{0, 1, 2, 3, 4};
   Generators::GeneratorParams params = Generators::GeneratorParams{};
-  params.max_length = 10;
+  params.search.max_length = 10;
   params.batch_size = batch_size;
   params.sequence_length = 1;
   params.vocab_size = vocab_size;
@@ -182,7 +182,7 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopKCuda) {
   int k = 5;
   std::vector<int32_t> input_ids{0, 1, 2, 3, 4};
   Generators::GeneratorParams params = Generators::GeneratorParams{};
-  params.max_length = 10;
+  params.search.max_length = 10;
   params.batch_size = batch_size;
   params.sequence_length = 1;
   params.vocab_size = vocab_size;
@@ -226,7 +226,7 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopPAndKCuda) {
   int k = 5;
   std::vector<int32_t> input_ids{0, 1, 2, 3, 4};
   Generators::GeneratorParams params = Generators::GeneratorParams{};
-  params.max_length = 10;
+  params.search.max_length = 10;
   params.batch_size = batch_size;
   params.sequence_length = 1;
   params.vocab_size = vocab_size;
@@ -272,7 +272,7 @@ TEST(Benchmarks, BenchmarkRandomizedSelectTopCuda) {
   int batch_size = 12;
   std::vector<int32_t> input_ids{0, 1, 2, 3, 4};
   Generators::GeneratorParams params = Generators::GeneratorParams{};
-  params.max_length = 10;
+  params.search.max_length = 10;
   params.batch_size = batch_size;
   params.sequence_length = 1;
   params.vocab_size = vocab_size;

@@ -9,7 +9,7 @@ namespace Generators {
 
 Search_Cpu::Search_Cpu(const GeneratorParams& params)
     : Search{params},
-      sequences_{params.input_ids, params.batch_size, params.num_beams, params_.max_length} {
+      sequences_{params.input_ids, params.batch_size, params.search.num_beams, params_.search.max_length} {
   auto batch_beam_size = params.BatchBeamSize();
 
   sequence_lengths_buffer_ = AllocateArray<int32_t>(batch_beam_size, &sequence_lengths_);
@@ -30,7 +30,7 @@ GreedySearch_Cpu::GreedySearch_Cpu(const GeneratorParams& params)
 
 BeamSearch_Cpu::BeamSearch_Cpu(const GeneratorParams& params)
     : Search_Cpu(params) {
-  assert(params_.num_beams > 1);  // If 1, use GreedySearch
+  assert(params_.search.num_beams > 1);  // If 1, use GreedySearch
   beam_scorer_ = std::make_unique<BeamSearchScorer>(params_);
 }
 
@@ -85,7 +85,7 @@ void BeamSearch_Cpu::SelectTop() {
   int offset = 0;
   int batch_beam_index = 0;
   for (int i = 0; i < params_.batch_size; i++) {
-    for (int j = 0; j < params_.num_beams; j++, batch_beam_index++) {
+    for (int j = 0; j < params_.search.num_beams; j++, batch_beam_index++) {
       for (int k = 0; k < params_.vocab_size; k++, offset++) {
         next_token_scores_[offset] += beam_scores[batch_beam_index];
       }
@@ -93,7 +93,7 @@ void BeamSearch_Cpu::SelectTop() {
   }
 
   // TODO: Write output scores?
-  unsigned const top_k = 2 * params_.num_beams;
+  unsigned const top_k = 2 * params_.search.num_beams;
 
   struct ScoreIndex {
     float score;
@@ -112,7 +112,7 @@ void BeamSearch_Cpu::SelectTop() {
 
   for (int batch_index = 0; batch_index < params_.batch_size; batch_index++) {
     std::priority_queue<ScoreIndex, std::vector<ScoreIndex>> queue;
-    auto token_scores_sub = next_token_scores_.subspan(batch_index * params_.num_beams * params_.vocab_size, params_.num_beams * params_.vocab_size);
+    auto token_scores_sub = next_token_scores_.subspan(batch_index * params_.search.num_beams * params_.vocab_size, params_.search.num_beams * params_.vocab_size);
     for (int i = 0; i < token_scores_sub.size(); i++) {
       queue.push({token_scores_sub[i], i});
     }
@@ -265,7 +265,7 @@ void GreedySearch_Cpu::SetNextToken(size_t batch_id, int32_t token) {
 void GreedySearch_Cpu::AppendNextTokensToSequences() {
   sequences_.AppendNextTokenToSequences(next_tokens_);
 
-  if (sequences_.GetSequenceLength() == params_.max_length) {
+  if (sequences_.GetSequenceLength() == params_.search.max_length) {
     done_ = true;
   }
 }
@@ -273,7 +273,7 @@ void GreedySearch_Cpu::AppendNextTokensToSequences() {
 void BeamSearch_Cpu::AppendNextTokensToSequences() {
   sequences_.AppendNextTokenToSequences(beam_scorer_->GetNextIndicesCPU(), beam_scorer_->GetNextTokens());
 
-  if (sequences_.GetSequenceLength() == params_.max_length) {
+  if (sequences_.GetSequenceLength() == params_.search.max_length) {
     done_ = true;
   }
 }
@@ -287,25 +287,26 @@ std::span<float> Search_Cpu::GetScores(int batch_beam_index) const {
   return next_token_scores_.subspan(batch_beam_index * params_.vocab_size, params_.vocab_size);
 }
 
-namespace Processors {
-
-void MinLength(Search_Cpu& search, int min_length) {
-  if (search.sequences_.GetSequenceLength() >= min_length) {
+void Search_Cpu::ApplyMinLength(int min_length) {
+  if (sequences_.GetSequenceLength() >= min_length) {
     return;
   }
 
-  const int batch_beam_size = search.params_.BatchBeamSize();
+  const int batch_beam_size = params_.BatchBeamSize();
   for (int i = 0; i < batch_beam_size; i++) {
-    std::span<float> const beam_token_scores = search.GetScores(i);
-    beam_token_scores[search.params_.eos_token_id] = std::numeric_limits<float>::lowest();
+    std::span<float> const beam_token_scores = GetScores(i);
+    beam_token_scores[params_.eos_token_id] = std::numeric_limits<float>::lowest();
   }
 }
 
-void RepetitionPenalty(Search_Cpu& search, float penalty) {
-  const int batch_beam_size = search.params_.BatchBeamSize();
+void Search_Cpu::ApplyRepetitionPenalty(float penalty) {
+  if (penalty == 1.0f)
+    return;
+
+  const int batch_beam_size = params_.BatchBeamSize();
   for (int i = 0; i < batch_beam_size; i++) {
-    std::span<float> const beam_token_scores = search.GetScores(i);
-    std::span<const int32_t> const sequence = search.sequences_.GetSequence(i);
+    std::span<float> const beam_token_scores = GetScores(i);
+    std::span<const int32_t> const sequence = sequences_.GetSequence(i);
 
     // Find unique word IDs in sequence.
     std::unordered_set<int32_t> unique_word_ids;
@@ -322,7 +323,5 @@ void RepetitionPenalty(Search_Cpu& search, float penalty) {
     }
   }
 }
-
-}  // namespace Processors
 
 }  // namespace Generators
