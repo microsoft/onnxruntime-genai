@@ -58,7 +58,7 @@ jobs:
   variables:
   - name: BuildConfig
     value: 'RelWithDebInfo'
-  - name : Onnxruntime_package
+  - name: Onnxruntime_package
     ${{ if eq(EP, 'gpu') }}:
       value: onnxruntime-win-$(buildArch)-$(ort_version)
     ${{ else }}:
@@ -85,11 +85,15 @@ jobs:
 
   - template: steps/set-nightly-build-option-variable-step.yml
 
-  - bash: |
-      pip3 install -r requirements.txt
-#      python3 download_onnxruntime.py --ort_version 1.17.0 --os win --arch x64
-    displayName: Download OnnxRuntime
-    workingDirectory: '$(Build.SourcesDirectory)\scripts'
+  - task: PythonScript@0
+    inputs:
+      scriptSource: inline
+      script: |
+        import sys
+        import subprocess
+        subprocess.call(['pip', 'install', '-q', 'setuptools', 'wheel', 'build', 'packaging'])
+      workingDirectory: '$(Build.BinariesDirectory)'
+      displayName: 'Install python modules'
 
   - task: DownloadGitHubRelease@0
     inputs:

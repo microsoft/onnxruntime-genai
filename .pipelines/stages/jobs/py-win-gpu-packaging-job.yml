@@ -49,12 +49,6 @@ jobs:
 
   - template: steps/set-nightly-build-option-variable-step.yml
 
-#  - bash: |
-#      pip3 install -r requirements.txt
-#    #      python3 download_onnxruntime.py --ort_version 1.17.0 --is_gpu True --os win --arch x64
-#    displayName: Download requirements.txt
-#    workingDirectory: '$(Build.SourcesDirectory)\scripts'
-
   - task: DownloadGitHubRelease@0
     inputs:
       connection: 'GitHub - Release'
