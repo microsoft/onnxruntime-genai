@@ -2,13 +2,10 @@
 
 ## Install the onnxruntime-genai library
 
-* (Temporary) Build the library according to [the build instructions](../README.md#build-from-source)
-
 * Install the python package
 
   ```bash
-  cd build/wheel
-  pip install onnxruntime-genai-*.whl
+  pip install onnxruntime-genai
   ```
 
 ## Get the model
@@ -26,13 +23,10 @@ pip install onnxruntime
 Run the model builder script to export, optimize, and quantize the model. More details can be found [here](../../src/python/py/models/README.md)
 
 ```bash
-cd examples/phi2
-python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -e cpu -p int4 -o ./example-models/phi2-int4-cpu
+cd examples\\phi2\\csharp
+python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -p int4 -e cpu -o phi-2\
 ```
 
 ## Run the phi-2 model
 
-```bash
-python phi2.py
-```
-
+Open [HelloPhi2.sln](HelloPhi2.sln) and run the console application.
