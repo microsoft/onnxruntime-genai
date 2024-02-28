@@ -249,7 +249,7 @@ void Search_Cuda::ApplyMinLength(int min_length) {
 }
 
 void Search_Cuda::ApplyRepetitionPenalty(float penalty) {
-  if (penalty==1.0f)
+  if (penalty == 1.0f)
     return;
 
   cuda::LaunchRepetitionPenaltyProcessor(sequences_.GetSequences().data(),

@@ -27,8 +27,8 @@ struct Search {
   virtual void SampleTopPAndK(float /*p*/, int /*k*/, float /*temperature*/) { assert(false); }
 
   // Scoring features
-  virtual void ApplyMinLength(int min_length)=0;
-  virtual void ApplyRepetitionPenalty(float penalty)=0;
+  virtual void ApplyMinLength(int min_length) = 0;
+  virtual void ApplyRepetitionPenalty(float penalty) = 0;
 
   const GeneratorParams& params_;
 };
@@ -104,10 +104,5 @@ struct BeamSearch_Cpu : Search_Cpu {
 
   std::unique_ptr<BeamSearchScorer> beam_scorer_;
 };
-
-namespace Processors {
-void MinLength(Search_Cpu& search, int min_length);
-void RepetitionPenalty(Search_Cpu& search, float penalty);
-}  // namespace Processors
 
 }  // namespace Generators

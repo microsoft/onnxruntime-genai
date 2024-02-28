@@ -284,8 +284,8 @@ void ParseConfig(const std::filesystem::path& filename, Config& config) {
 Config::Config(const std::filesystem::path& path) : config_path{path} {
   ParseConfig(path / "genai_config.json", *this);
 
-  if (search.max_length==0)
-    search.max_length=model.context_length;
+  if (search.max_length == 0)
+    search.max_length = model.context_length;
 }
 
 }  // namespace Generators
