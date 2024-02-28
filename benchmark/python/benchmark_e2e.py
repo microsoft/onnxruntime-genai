@@ -10,9 +10,11 @@
 import onnxruntime_genai as og
 import time
 import argparse
+from tqdm import tqdm
 
 # Use input model to generate prompt
 def generate_prompt(model, tokenizer, prompt_length) -> str:
+    temperature = 1.0
     prompt = "a"
     tokens = tokenizer.encode(prompt)
     params=og.GeneratorParams(model)
@@ -21,7 +23,7 @@ def generate_prompt(model, tokenizer, prompt_length) -> str:
     generator=og.Generator(model, params)
     while not generator.is_done():
         generator.compute_logits()
-        generator.generate_next_token_top_k(50, 1.0)
+        generator.generate_next_token_top_k(5, temperature)
     return tokenizer.decode(generator.get_sequence(0).get_array())
 
 def save_results(results, filename):
@@ -39,6 +41,8 @@ def save_results(results, filename):
             "Token Generation Latency (ms)",
             "Sampling Throughput (tps)",
             "Sampling Latency (ms)",
+            "Wall Clock Throughput (tps)",
+            "Wall Clock Time (s)",
         ],
     )
     df = df.transpose()  # This line swaps the rows and columns
@@ -47,38 +51,38 @@ def save_results(results, filename):
 
 def main(args):
     # Get user arguments
-    num_repititions = args.repetitions
+    num_repetitions = args.repetitions
     generation_length = args.generation_length
     batch_size, prompt_length = args.batch_size, args.prompt_length
+    temperature = 1.0
 
     # Get tokenizer, and model
     if args.verbose: print(f"Loading model... ")
-    model=og.Model(f'{args.input_folder}', og.DeviceType.CPU if args.device == 'cpu' else og.DeviceType.CUDA)
+    model=og.Model(f'{args.input_folder}', og.DeviceType.CPU if args.execution_provider == 'cpu' else og.DeviceType.CUDA)
     if args.verbose: print("Model loaded")
     tokenizer = model.create_tokenizer()
 
     # Generate prompt
     prompt = [generate_prompt(model, tokenizer, prompt_length)] * batch_size
+    tokens = tokenizer.encode_batch(prompt)
     if args.verbose: print("Running warmup runs...")
-    for i in range(args.warmup):
-        if args.verbose: print(f"Running warmup repetition {i+1}...")
-        tokens = tokenizer.encode_batch(prompt)
+    for i in tqdm(range(args.warmup)):
         params = og.GeneratorParams(model)
         params.max_length = prompt_length + generation_length
         params.input_ids = tokens
         generator = og.Generator(model, params)
         while not generator.is_done():
             generator.compute_logits()
-            generator.generate_next_token_top_k_top_p(args.top_k, args.top_p, 1.0)
+            generator.generate_next_token_top_k_top_p(args.top_k, args.top_p, temperature)
         if args.print_model_output: print(tokenizer.decode(generator.get_sequence(0).get_array()))
 
     tokenize_times = []
     prompt_times = []
     token_gen_times = []
     sampling_times = []
+    wall_clock_times = []
     if args.verbose: print(f"Running benchmark for batch size = {batch_size}, prompt length = {prompt_length}")
-    for i in range(num_repititions):
-        if args.verbose: print(f"Running repetition {i+1}...")
+    for i in tqdm(range(num_repetitions)):
         # Prepare run
         max_length = prompt_length + generation_length
         params = og.GeneratorParams(model)
@@ -87,36 +91,38 @@ def main(args):
         generator = og.Generator(model, params)
 
         # Measure tokenization
-        tokenize_start_time = time.time()
+        tokenize_start_time = time.perf_counter()
         tokens = tokenizer.encode_batch(prompt)
-        tokenize_end_time = time.time()
+        tokenize_end_time = time.perf_counter()
         tokenize_times.append(tokenize_end_time - tokenize_start_time)
 
         # Measure prompt processing
-        prompt_start_time = time.time()
+        prompt_start_time = time.perf_counter()
         generator.compute_logits()
-        prompt_end_time = time.time()
+        prompt_end_time = time.perf_counter()
         prompt_times.append(prompt_end_time - prompt_start_time)
 
-        sampling_start_time = time.time()
-        generator.generate_next_token_top_k_top_p(args.top_k, args.top_p, 1.0)
-        sampling_end_time = time.time()
+        sampling_start_time = time.perf_counter()
+        generator.generate_next_token_top_k_top_p(args.top_k, args.top_p, temperature)
+        sampling_end_time = time.perf_counter()
         sampling_times.append(sampling_end_time - sampling_start_time)
 
         # Measure token generation
+        wall_clock_start_time = time.time()
         while not generator.is_done():
             # Run inference
-            token_gen_start_time = time.time()
+            token_gen_start_time = time.perf_counter()
             generator.compute_logits()
-            token_gen_end_time = time.time()
+            token_gen_end_time = time.perf_counter()
 
-            sampling_start_time = time.time()
-            generator.generate_next_token_top_k_top_p(args.top_k, args.top_p, 1.0)
-            sampling_end_time = time.time()
+            sampling_start_time = time.perf_counter()
+            generator.generate_next_token_top_k_top_p(args.top_k, args.top_p, temperature)
+            sampling_end_time = time.perf_counter()
             
             token_gen_times.append(token_gen_end_time - token_gen_start_time)
             sampling_times.append(sampling_end_time - sampling_start_time)
-            # TODO: might want or have to add check eos token here...
+        wall_clock_end_time = time.time()
+        wall_clock_times.append(wall_clock_end_time - wall_clock_start_time)
         if args.print_model_output: print(tokenizer.decode(generator.get_sequence(0).get_array()))
 
     # Calculate tokenization metrics
@@ -148,6 +154,13 @@ def main(args):
     print(f"Average Sampling Latency (per token): {avg_sampling_latency_ms} ms")
     print(f"Average Sampling Throughput (per token): {avg_sampling_thrpt} tps")
 
+    # Calculate wall clock time
+    avg_wall_clock_time = sum(wall_clock_times) / len(wall_clock_times)
+    avg_wall_clock_thrpt = batch_size * (generation_length / avg_wall_clock_time)
+    print(f"Average Wall Clock Time: {avg_wall_clock_time} s")
+    print(f"Average Wall Clock Throughput: {avg_wall_clock_thrpt} tps")
+
+
     all_csv_metrics = [[
         batch_size, 
         prompt_length, 
@@ -159,11 +172,13 @@ def main(args):
         avg_token_gen_latency_ms, 
         avg_sampling_thrpt, 
         avg_sampling_latency_ms,
+        avg_wall_clock_thrpt,
+        avg_wall_clock_time,
     ]]
 
     # Add metrics to CSV
     if args.verbose: print("Adding results to CSV")
-    filename = args.output + ".csv"
+    filename = args.output
     save_results(all_csv_metrics, filename)
 
 if __name__ == "__main__":
@@ -177,7 +192,7 @@ if __name__ == "__main__":
     parser.add_argument('-k', '--top_k', type=int, default=50, help='Top k tokens to sample from')
     parser.add_argument('-p', '--top_p', type=float, default=1.0, help='Top p probability to sample with')
     parser.add_argument('-o', '--output', type=str, default='genai_e2e', help='Output CSV file name or path')
-    parser.add_argument('-d', '--device', type=str, choices=['cpu', 'cuda'], default='cpu', help='Device to use, default is CPU, use CUDA for GPU')
+    parser.add_argument('-ep', '--execution_provider', type=str, choices=['cpu', 'cuda'], default='cpu', help='Execution provider (device) to use, default is CPU, use CUDA for GPU')
     parser.add_argument('-v', '--verbose', action='store_true', help='Print extra information')
     parser.add_argument('-mo', '--print_model_output', action='store_true', help='Print model output')
     args = parser.parse_args()
