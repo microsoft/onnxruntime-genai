@@ -13,7 +13,7 @@ struct span {
   span(T* p, size_t length) : p_{p}, length_{length} {}
 
   span(const span<std::remove_const_t<T> >& s) : p_{const_cast<T*>(s.data())}, length_{s.size()} {}
-  span(std::vector<std::remove_const_t<T> >& s) : p_{const_cast<T*>(s.data())}, length_{s.size()} {}
+  span(const std::vector<std::remove_const_t<T> >& s) : p_{const_cast<T*>(s.data())}, length_{s.size()} {}
   template <auto N>
   span(std::array<std::remove_const_t<T>, N> s) : p_{const_cast<T*>(s.data())}, length_{s.size()} {}
 
