@@ -112,7 +112,7 @@ def main():
             "error",
             "buildx",
             "build",
-            #            "--push",
+            "--push",
             "--tag",
             full_image_name,
             "--cache-from",
