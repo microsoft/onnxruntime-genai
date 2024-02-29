@@ -152,7 +152,7 @@ TEST(CAPITests, EndToEndPhiBatch) {
   OgaGeneratorParams* params;
   CheckResult(OgaCreateGeneratorParams(model, &params));
   OgaGeneratorParamsPtr params_ptr{params};
-  CheckResult(OgaGeneratorParamsSetMaxLength(params, 20));
+  CheckResult(OgaGeneratorParamsSetSearchNumber(params, "max_length", 20));
   CheckResult(OgaGeneratorParamsSetInputSequences(params, input_sequences));
 
   OgaSequences* output_sequences;
@@ -170,7 +170,6 @@ TEST(CAPITests, EndToEndPhiBatch) {
   }
 #endif
 }
-
 
 TEST(CAPITests, GreedySearchGptFp32CAPI) {
   std::vector<int64_t> input_ids_shape{2, 4};
@@ -195,7 +194,7 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
   OgaGeneratorParams* params;
   CheckResult(OgaCreateGeneratorParams(model, &params));
   OgaGeneratorParamsPtr params_ptr{params};
-  CheckResult(OgaGeneratorParamsSetMaxLength(params, max_length));
+  CheckResult(OgaGeneratorParamsSetSearchNumber(params, "max_length", max_length));
   CheckResult(OgaGeneratorParamsSetInputIDs(params, input_ids.data(), input_ids.size(), sequence_length, batch_size));
 
   OgaGenerator* generator;

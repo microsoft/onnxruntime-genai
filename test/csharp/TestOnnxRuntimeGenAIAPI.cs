@@ -39,7 +39,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                 {
                     Assert.NotNull(generatorParams);
 
-                    generatorParams.SetMaxLength(maxLength);
+                    generatorParams.SetSearchOption("max_length", maxLength);
                     generatorParams.SetInputIDs(inputIDs, sequenceLength, batchSize);
 
                     using (var generator = new Generator(model, generatorParams))
@@ -216,7 +216,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                     using GeneratorParams generatorParams = new GeneratorParams(model);
                     Assert.NotNull(generatorParams);
 
-                    generatorParams.SetMaxLength(20);
+                    generatorParams.SetSearchOption("max_length", 20);
                     generatorParams.SetInputSequences(sequences);
 
                     var outputSequences = model.Generate(generatorParams);

@@ -17,7 +17,7 @@ prompt = '''def print_prime(n):
 tokens = tokenizer.encode(prompt)
 
 params=og.GeneratorParams(model)
-params.max_length = 200
+params.set_search_options({"max_length":200})
 params.input_ids = tokens
 
 start_time=time.time()

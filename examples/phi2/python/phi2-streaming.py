@@ -3,7 +3,7 @@
 print("Loading model...")
 
 # The first argument is the name of the folder containing the model files
-model=og.Model("example-models/phi2-int4-cpu", og.DeviceType.CPU)
+model=og.Model(f'example-models/phi2-int4-cpu', og.DeviceType.CPU)
 print("Model loaded")
 tokenizer=model.create_tokenizer()
 print("Tokenizer created")
@@ -16,7 +16,7 @@ prompt = '''def print_prime(n):
 input_tokens = tokenizer.encode(prompt)
 
 params=og.GeneratorParams(model)
-params.max_length = 256
+params.set_search_options({"max_length":256})
 params.input_ids = input_tokens
 
 generator=og.Generator(model, params)

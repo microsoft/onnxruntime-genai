@@ -64,18 +64,17 @@ struct GeneratorParams {
 
   void SetInputSequences(const TokenSequences& sequences);
 
-  // Values copied from config
+  Config::Search search;
+
+  // Read only values copied from model
   int pad_token_id{};
   int eos_token_id{};
   int vocab_size{};
-  int max_length{};
-  float length_penalty{};
-  bool early_stopping{};
+  int context_length{};
 
   int batch_size{};
   int sequence_length{};
-  int num_beams{1};
-  int BatchBeamSize() const { return num_beams * batch_size; }
+  int BatchBeamSize() const { return search.num_beams * batch_size; }
 
   DeviceType device_type{DeviceType::CPU};
   cudaStream_t cuda_stream{};
@@ -112,7 +111,7 @@ struct GeneratorParams {
 };
 
 struct Generator {
-  Generator(const Model& model, const GeneratorParams& search_params);
+  Generator(const Model& model, const GeneratorParams& params);
 
   bool IsDone() const;
   void ComputeLogits();
@@ -131,7 +130,7 @@ struct Generator {
 };
 
 std::unique_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const ProviderOptions* provider_options = nullptr);
-std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& search_params);
+std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params);
 std::vector<std::vector<int32_t>> Generate(const Model& model, const GeneratorParams& params);  // Uses CreateGenerator and a simple loop to return the entire sequence
 
 float Float16ToFloat32(uint16_t v);  // v is a IEEE 752-2008 binary16 format, 1 sign bit, 5 bit exponent, 10 bit fraction
