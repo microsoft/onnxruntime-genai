@@ -21,7 +21,7 @@ def generate_prompt(model, tokenizer, prompt_length) -> str:
     prompt = "a"
     tokens = tokenizer.encode(prompt)
     params=og.GeneratorParams(model)
-    params.max_length = prompt_length
+    params.set_search_options({"max_length":prompt_length, "min_length":prompt_length+1})
     params.input_ids = tokens
     generator=og.Generator(model, params)
     while not generator.is_done():
@@ -55,8 +55,8 @@ def save_results(results, filename):
 def main(args):
     # Get user arguments
     num_repetitions = args.repetitions
-    generation_length = args.generation_length
-    batch_size, prompt_length = args.batch_size, args.prompt_length
+    batch_size, prompt_length, generation_length = args.batch_size, args.prompt_length, args.generation_length
+    max_length = prompt_length + generation_length
     temperature = 1.0
 
     # Get tokenizer, and model
@@ -71,8 +71,8 @@ def main(args):
     if args.verbose: print("Running warmup runs...")
     for _ in tqdm(range(args.warmup)):
         params = og.GeneratorParams(model)
-        params.max_length = prompt_length + generation_length
         params.input_ids = tokens
+        params.set_search_options({"max_length":max_length, "min_length":max_length})
         generator = og.Generator(model, params)
         while not generator.is_done():
             generator.compute_logits()
@@ -87,10 +87,9 @@ def main(args):
     if args.verbose: print(f"Running benchmark for batch size = {batch_size}, prompt length = {prompt_length}")
     for _ in tqdm(range(num_repetitions)):
         # Prepare run
-        max_length = prompt_length + generation_length
         params = og.GeneratorParams(model)
-        params.max_length = max_length
         params.input_ids = tokens
+        params.set_search_options({"max_length":max_length, "min_length":max_length})
         generator = og.Generator(model, params)
 
         # Measure tokenization
