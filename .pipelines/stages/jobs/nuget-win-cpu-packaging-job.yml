@@ -47,8 +47,8 @@ jobs:
     workingDirectory: '$(Build.SourcesDirectory)'
 
   - bash: |
-      cmake -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=$(BuildConfig) -DUSE_CUDA=OFF -S . -B build
-      cmake --build $(build_dir) --config $(BuildConfig)  --parallel --target python
+      cmake -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=$(BuildConfig) -DUSE_CUDA=OFF -S . -B $(build_dir)
+      cmake --build $(build_dir) --config $(BuildConfig)  --parallel --target onnxruntime-genai
     displayName: 'Build C++ with CMake'
 
   - bash:
