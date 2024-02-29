@@ -1,10 +1,10 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #pragma once
-// #ifndef USE_CXX17
-#if 0
+#ifndef USE_CXX17
 #include <span>
 #else
+#include <array>
 #include <vector>
 namespace std {
 
@@ -16,7 +16,7 @@ struct span {
   span(const span<std::remove_const_t<T> >& s) : p_{const_cast<T*>(s.data())}, length_{s.size()} {}
   span(const std::vector<std::remove_const_t<T> >& s) : p_{const_cast<T*>(s.data())}, length_{s.size()} {}
   template <size_t N>
-  span(const std::array<std::remove_const_t<T>, N>& s) : p_{const_cast<T*>(s.data())}, length_{s.size()} {}
+  span(std::array<std::remove_const_t<T>, N> s) : p_{const_cast<T*>(s.data())}, length_{s.size()} {}
 
   bool empty() const { return length_ == 0; }
 

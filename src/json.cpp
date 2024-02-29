@@ -209,12 +209,12 @@ double JSON::Parse_Number() {
   }
   current_ = result.ptr;
 #else
-auto end = const_cast<char*>(end_);
-value = std::strtod(current_, &end);
-if (current_ == end) {
-  throw std::runtime_error("Expecting number");
-}
-current_ = end;
+  auto end = const_cast<char*>(end_);
+  value = std::strtod(current_, &end);
+  if (current_ == end) {
+    throw std::runtime_error("Expecting number");
+  }
+  current_ = end;
 #endif
   return value;
 }
