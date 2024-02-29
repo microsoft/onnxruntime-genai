@@ -52,41 +52,46 @@ jobs:
     displayName: 'Build C++ with CMake'
 
   - bash:
+      cd src\csharp
+      dotnet build . /p:Configuration=$(BuildConfig) /p:Platform="Any CPU" /p:NativeBuildOutputDir='$(build_dir)\$(BuildConfig)'
     displayName: 'Build CSharp'
+    workingDirectory: '$(Build.SourcesDirectory)'
 
   - powershell: |
       Get-ChildItem -Path $(Build.SourcesDirectory)\$(build_dir)\ -Recurse
 
   - template: steps/win-esrp-dll-step.yml
     parameters:
-      FolderPath: '$(Build.SourcesDirectory)\build\wheel\onnxruntime_genai'
+      FolderPath: '$(Build.SourcesDirectory)\$(build_dir)\$(BuildConfig)'
       DisplayName: 'ESRP - Sign Native dlls'
       DoEsrp: true
       Pattern: '*.pyd,*.dll'
   #
-  - bash: |
-      cmake --build $(build_dir) --config $(BuildConfig) --parallel --target PyPackageBuild
-    displayName: 'Build Python Wheel'
+  - powershell: |
+      cd nuget
+      nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.nuspec -Prop version=0.1.0 -Prop id="Microsoft.ML.OnnxRuntimeGenAI"
+    displayName: 'Nuget Packaging'
+    workingDirectory: '$(Build.SourcesDirectory)'
 
   - powershell: |
       Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
 
-  - task: CopyFiles@2
-    displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
-    inputs:
-      SourceFolder: '$(Build.SourcesDirectory)\build\wheel\'
-      Contents: '*.whl'
-      TargetFolder: '$(Build.ArtifactStagingDirectory)'
+#  - task: CopyFiles@2
+#    displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
+#    inputs:
+#      SourceFolder: '$(Build.SourcesDirectory)\build\wheel\'
+#      Contents: '*.whl'
+#      TargetFolder: '$(Build.ArtifactStagingDirectory)'
 
-  - task: PublishBuildArtifacts@1
-    displayName: 'Publish Artifact: ONNXRuntime Genai python wheel'
-    inputs:
-      ArtifactName: onnxruntime-genai-win-cpu-${{ parameters.arch }}
+#  - task: PublishBuildArtifacts@1
+#    displayName: 'Publish Artifact: ONNXRuntime Genai python wheel'
+#    inputs:
+#      ArtifactName: onnxruntime-genai-win-cpu-${{ parameters.arch }}
 
-  - script: |
-      7z x *.whl
-    workingDirectory: '$(Build.ArtifactStagingDirectory)'
-    displayName: 'unzip the package'
+#  - script: |
+#      7z x *.whl
+#    workingDirectory: '$(Build.ArtifactStagingDirectory)'
+#    displayName: 'unzip the package'
 
   - task: CredScan@3
     displayName: 'Run CredScan'
@@ -94,15 +99,16 @@ jobs:
       debugMode: false
     continueOnError: true
 
-  - task: BinSkim@4
-    displayName: 'Run BinSkim'
-    inputs:
-      AnalyzeTargetGlob: '+:file|$(Build.ArtifactStagingDirectory)\**\*genai.dll;-:file|$(Build.ArtifactStagingDirectory)\**\DirectML.dll'
-    continueOnError: true
+#  - task: BinSkim@4
+#    displayName: 'Run BinSkim'
+#    inputs:
+#      AnalyzeTargetGlob: '+:file|$(Build.ArtifactStagingDirectory)\**\*genai.dll;-:file|$(Build.ArtifactStagingDirectory)\**\DirectML.dll'
+#    continueOnError: true
 
   - task: TSAUpload@2
     displayName: 'TSA upload'
-    condition: and(and (succeeded(), and(eq(variables['buildArch'], 'x64'), eq(variables['PythonVersion'], '3.8'))), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    condition: and(succeeded(),eq(variables['buildArch'], 'x64'), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+
     inputs:
       GdnPublishTsaOnboard: false
       GdnPublishTsaConfigFile: '$(Build.sourcesDirectory)\.gdn\.gdntsa'

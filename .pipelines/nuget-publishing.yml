@@ -7,7 +7,7 @@ parameters:
 - name: enable_win_gpu
   displayName: 'Whether Windows GPU package is built.'
   type: boolean
-  default: true
+  default: false
 
 - name: enable_win_arm
   displayName: 'Whether Windows ARM package is built.'
