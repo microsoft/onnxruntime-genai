@@ -284,6 +284,9 @@ void ParseConfig(const std::filesystem::path& filename, Config& config) {
 Config::Config(const std::filesystem::path& path) : config_path{path} {
   ParseConfig(path / "genai_config.json", *this);
 
+  if (model.context_length == 0)
+    throw std::runtime_error("model context_length is 0 or was not set. It must be greater than 0");
+
   if (search.max_length == 0)
     search.max_length = model.context_length;
 }
