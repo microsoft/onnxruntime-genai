@@ -110,7 +110,7 @@ void BeamSearch_Cpu::SelectTop() {
   auto next_indices = std::span<int32_t>(indices.get(), top_k * params_.batch_size);
   auto next_tokens = std::span<int32_t>(tokens.get(), top_k * params_.batch_size);
 
-  for (int batch_index = 0; batch_index < params_.batch_size; batch_index++) {
+  for (size_t batch_index = 0; batch_index < static_cast<size_t>(params_.batch_size); batch_index++) {
     std::priority_queue<ScoreIndex, std::vector<ScoreIndex>> queue;
     auto token_scores_sub = next_token_scores_.subspan(batch_index * params_.search.num_beams * params_.vocab_size, params_.search.num_beams * params_.vocab_size);
     for (int i = 0; i < token_scores_sub.size(); i++) {
