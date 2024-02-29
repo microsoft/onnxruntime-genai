@@ -52,10 +52,9 @@ jobs:
     displayName: 'Build C++ with CMake'
 
   - bash:
-      cd src\csharp
       dotnet build . /p:Configuration=$(BuildConfig) /p:Platform="Any CPU" /p:NativeBuildOutputDir='$(build_dir)\$(BuildConfig)'
     displayName: 'Build CSharp'
-    workingDirectory: '$(Build.SourcesDirectory)'
+    workingDirectory: '$(Build.SourcesDirectory)\src\csharp'
 
   - powershell: |
       Get-ChildItem -Path $(Build.SourcesDirectory)\$(build_dir)\ -Recurse
