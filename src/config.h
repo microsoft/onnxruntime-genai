@@ -10,9 +10,6 @@ struct Config {
   struct Model {
     std::string type;
 
-    ONNXTensorElementDataType logits_type{ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT};  // float16/float32 are the valid types
-    ONNXTensorElementDataType kv_type{ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT};      // float16/float32 are the valid types
-
     int pad_token_id{};            // The id of the padding token.
     int eos_token_id{};            // The id of the end-of-stream token.
     int bos_token_id{};            // The id of the beginning-of-stream token.
@@ -56,8 +53,8 @@ struct Config {
 
   struct Search {
     int min_length{};
-    int max_length{};  // 0 = Use model's context_length
-    int num_beams{1};  //  1 means no beam search.
+    int max_length{};  // If omitted or 0 in json file, will be set to model.context_length on load
+    int num_beams{1};  // 1 means no beam search.
     int num_return_sequences{1};
     float repetition_penalty{1.0f};  // 1.0 means no penalty.
     int top_k{};                     // Number of highest probability vocabulary tokens to keep for top-k-filtering that will be used by default in the generate method of the model.
@@ -69,5 +66,8 @@ struct Config {
     float length_penalty{1.0f};  // Exponential penalty to the length that is used with beam-based generation. length_penalty > 0.0 promotes longer sequences, while length_penalty < 0.0 encourages shorter sequences.
   } search;
 };
+
+void SetSearchNumber(Config::Search& search, std::string_view name, double value);
+void SetSearchBool(Config::Search& search, std::string_view name, bool value);
 
 }  // namespace Generators

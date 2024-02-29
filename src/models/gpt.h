@@ -16,7 +16,7 @@ struct Gpt_Model : Model {
 };
 
 struct Gpt_State : State {
-  Gpt_State(const Gpt_Model& model, RoamingArray<int32_t> sequence_lengths, const GeneratorParams& search_params);
+  Gpt_State(const Gpt_Model& model, RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params);
   RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) override;
 
  private:
@@ -25,9 +25,9 @@ struct Gpt_State : State {
   const Gpt_Model& model_;
   bool first_run_{true};
 
-  InputIDs<int32_t> input_ids_{model_, *this};
+  InputIDs input_ids_{model_, *this};
   Logits logits_{model_, *this};
   KV_Cache_Combined kv_cache_{model_, *this};
-  PositionIDs<int32_t> position_ids_;
+  PositionIDs position_ids_;
 };
 }  // namespace Generators

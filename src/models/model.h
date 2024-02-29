@@ -10,12 +10,12 @@ struct Tokenizer;
 void ConvertFp16ToFp32(OrtAllocator& allocator, cudaStream_t stream, OrtValue& in, std::unique_ptr<OrtValue>& p_out);
 
 struct State {
-  State(const GeneratorParams& search_params);
+  State(const GeneratorParams& params);
   virtual ~State() = default;
 
   virtual RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices = {}) = 0;
 
-  const GeneratorParams& search_params_;
+  const GeneratorParams& params_;
 
   std::vector<const char*> input_names_, output_names_;
   std::vector<OrtValue*> inputs_, outputs_;
@@ -78,6 +78,16 @@ struct Tokenizer {
 };
 #endif
 
+struct SessionInfo {
+  SessionInfo(OrtSession& session);
+
+  ONNXTensorElementDataType GetInputDataType(const std::string& name) const;
+  ONNXTensorElementDataType GetOutputDataType(const std::string& name) const;
+
+ private:
+  std::unordered_map<std::string, ONNXTensorElementDataType> inputs_, outputs_;
+};
+
 struct Model {
   Model(std::unique_ptr<Config> config, const ProviderOptions* provider_options);
   virtual ~Model();
@@ -94,6 +104,8 @@ struct Model {
   DeviceType device_type_{DeviceType::CPU};
   Ort::Allocator& allocator_cpu_{Ort::Allocator::GetWithDefaultOptions()};
   Ort::Allocator* allocator_device_{};  // Can be CUDA or CPU based on the DeviceType in the model
+
+  std::unique_ptr<SessionInfo> session_info_;
 
  protected:
   void InitDeviceAllocator(OrtSession& session);

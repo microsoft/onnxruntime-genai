@@ -25,10 +25,10 @@ struct Llama_State : State {
   const Llama_Model& model_;
   bool first_run_{true};
 
-  InputIDs<int64_t> input_ids_{model_, *this};
+  InputIDs input_ids_{model_, *this};
   Logits logits_{model_, *this};
   KV_Cache kv_cache_{model_, *this};
-  PositionIDs<int64_t> position_ids_;
+  PositionIDs position_ids_;
 };
 
 }  // namespace Generators

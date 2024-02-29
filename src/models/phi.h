@@ -25,8 +25,8 @@ struct Phi2_State : State {
   const Phi2_Model& model_;
   bool first_run_{true};
 
-  InputIDs<int64_t> input_ids_{model_, *this};
-  PositionIDs<int64_t> position_ids_;
+  InputIDs input_ids_{model_, *this};
+  PositionIDs position_ids_;
   Logits logits_{model_, *this};
   KV_Cache kv_cache_{model_, *this};
 };

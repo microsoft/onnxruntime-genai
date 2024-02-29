@@ -9,9 +9,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 {
     internal class Utils
     {
-        public static byte[] EmptyByteArray = new byte[] { 0 };
+        internal static byte[] EmptyByteArray = new byte[] { 0 };
 
-        public static byte[] ToUtf8(string str)
+        internal static byte[] ToUtf8(string str)
         {
             if (string.IsNullOrEmpty(str))
                 return EmptyByteArray;

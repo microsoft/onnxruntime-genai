@@ -19,6 +19,7 @@ struct KV_Cache_Combined {
   size_t input_index_{~0U}, output_index_{~0U};
 
   std::array<int64_t, 5> shape_;
+  ONNXTensorElementDataType type_;
 
   std::unique_ptr<OrtValue> empty_past_;
   std::vector<std::unique_ptr<OrtValue>> pasts_, presents_;
@@ -42,6 +43,7 @@ struct KV_Cache {
   size_t input_index_{~0U}, output_index_{~0U};
 
   std::array<int64_t, 4> shape_;
+  ONNXTensorElementDataType type_;
 
   std::unique_ptr<OrtValue> empty_past_;
   std::vector<std::unique_ptr<OrtValue>> pasts_, presents_;
@@ -61,6 +63,7 @@ struct Cross_Cache {
   int layer_count_;
 
   std::array<int64_t, 4> shape_;
+  ONNXTensorElementDataType type_;
 
   std::vector<std::unique_ptr<OrtValue>> values_;
   std::vector<std::string> input_name_strings_, output_name_strings_;

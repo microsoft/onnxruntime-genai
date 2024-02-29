@@ -75,30 +75,30 @@ def update_submodules():
 
 def validate_cuda_home(cuda_home: str | bytes | os.PathLike | None):
     """Validate the CUDA home paths."""
-    validated_cuda_home = ""
+    validated_cuda_home = cuda_home if cuda_home else os.getenv("CUDA_HOME")
+    if not validated_cuda_home and is_windows():
+        validated_cuda_home = os.getenv("CUDA_PATH")
 
-    if cuda_home or os.environ.get("CUDA_HOME"):
-        validated_cuda_home = cuda_home if cuda_home else os.getenv("CUDA_HOME")
+    cuda_home_valid = os.path.exists(validated_cuda_home) if validated_cuda_home else False
 
-        cuda_home_valid = os.path.exists(validated_cuda_home)
-
-        if not cuda_home_valid:
-            raise RuntimeError(
-                "cuda_home paths must be specified and valid.",
-                "cuda_home='{}' valid={}.".format(
-                    cuda_home, cuda_home_valid
-                ),
-            )
+    if not cuda_home_valid:
+        raise RuntimeError(
+            "cuda_home paths must be specified and valid.",
+            "cuda_home='{}' valid={}.".format(
+                cuda_home, cuda_home_valid
+            ),
+        )
 
     return validated_cuda_home
 
 
 def build(
     skip_wheel: bool = False,
+    use_cuda: str | None = None,
     cuda_home: str | bytes | os.PathLike | None = None,
     cmake_generator: str | None = None,
     ort_home: str | bytes | os.PathLike | None = None,
-    enable_csharp: bool = False,
+    skip_csharp: bool = False,
     build_dir: str | bytes | os.PathLike | None = None,
 ):
     """Generates the CMake build tree and builds the project.
@@ -108,8 +108,11 @@ def build(
     """
     if not is_windows() and not is_linux():
         raise OSError(f"Unsupported platform {platform()}.")
+    
+    if cuda_home and not use_cuda:
+        raise ValueError("cuda_home is specified but use_cuda is not specified.")
 
-    cuda_home = validate_cuda_home(cuda_home)
+    cuda_home = validate_cuda_home(cuda_home) if use_cuda else None
 
     command = [resolve_executable_path("cmake")]
 
@@ -157,7 +160,7 @@ def build(
     make_command = ["cmake", "--build", ".", "--config", config]
     run_subprocess(make_command, cwd=build_dir, env=env).check_returncode()
 
-    if enable_csharp:
+    if not skip_csharp:
         if not is_windows():
             raise RuntimeError("C# API is only supported on Windows.")
 
@@ -202,21 +205,22 @@ if __name__ == "__main__":
     parser.add_argument(
         "--cuda_home",
         help="Path to CUDA home."
-        "Read from CUDA_HOME environment variable if --use_cuda is true and "
-        "--cuda_home is not specified.",
+        "Read from CUDA_HOME or CUDA_PATH environment variable if not specified. Not read if --use_cuda is not specified.",
     )
     parser.add_argument("--skip_wheel", action="store_true", help="Skip building the Python wheel.")
     parser.add_argument("--ort_home", default=None, help="Root directory of onnxruntime.")
-    parser.add_argument("--enable_csharp", action="store_true", help="Build the C# API.")
+    parser.add_argument("--skip_csharp", action="store_true", help="Skip building the C# API.")
     parser.add_argument("--build_dir", default=None, help="Path to output directory.")
+    parser.add_argument("--use_cuda", action="store_true", help="Whether to use CUDA. Default is to not use cuda.")
     args = parser.parse_args()
 
     update_submodules()
     build(
         skip_wheel=args.skip_wheel,
+        use_cuda=args.use_cuda,
         cuda_home=args.cuda_home,
         cmake_generator=args.cmake_generator,
         ort_home=args.ort_home,
-        enable_csharp=args.enable_csharp,
+        skip_csharp=args.skip_csharp,
         build_dir=args.build_dir,
     )
