@@ -4,7 +4,7 @@ ARG BASEIMAGE=nvidia/cuda:11.8.0-cudnn8-devel-ubi8
 ARG DEVTOOLSET_ROOTPATH=/usr
 ARG LD_LIBRARY_PATH_ARG=/usr/local/lib64
 ARG PREPEND_PATH=/usr/local/cuda/bin
-#ARG TRT_VERSION=8.6.1.6-1.cuda11.8
+ARG TRT_VERSION=8.6.1.6-1.cuda11.8
 
 #Build manylinux docker image begin
 FROM $BASEIMAGE AS runtime_base
@@ -13,7 +13,7 @@ ARG PLATFORM
 ARG DEVTOOLSET_ROOTPATH
 ARG LD_LIBRARY_PATH_ARG
 ARG PREPEND_PATH
-#ARG TRT_VERSION
+ARG TRT_VERSION
 LABEL maintainer="The ManyLinux project"
 
 ENV AUDITWHEEL_POLICY=${POLICY} AUDITWHEEL_ARCH=${PLATFORM} AUDITWHEEL_PLAT=${POLICY}_${PLATFORM}
@@ -172,9 +172,15 @@ else \
     echo "TRT_VERSION is none skipping Tensor RT Installation" ; \
 fi
 
-ADD scripts /tmp/
+ADD scripts /tmp/scripts
 
-RUN cd /tmp/scripts && /tmp/scripts/install_centos.sh && /tmp/scripts/install_deps.sh && rm -rf /tmp/scripts
+RUN if [ "$(echo $CUDA_VERSION | cut -d. -f1)" -ge 12 ]; then \
+    echo "Using GCC 12 because CUDA version is greater than or equal to 12"; \
+    cd /tmp/scripts && /tmp/scripts/install_centos_gcc12.sh && /tmp/scripts/install_deps.sh && rm -rf /tmp/scripts; \
+else \
+    echo "Using default gcc because CUDA version is less than 12"; \
+    cd /tmp/scripts && /tmp/scripts/install_centos.sh && /tmp/scripts/install_deps.sh && rm -rf /tmp/scripts; \
+fi
 
 ARG BUILD_UID=1001
 ARG BUILD_USER=onnxruntimedev
