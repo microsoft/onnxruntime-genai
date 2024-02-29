@@ -19,9 +19,10 @@ struct Search_Cuda : Search {
     return *done_cpu_;
   }  // TODO: Use an event
   void SetLogits(RoamingArray<float> logits);
-  // Extra scoring steps go here
 
-  //
+  void ApplyMinLength(int min_length) override;
+  void ApplyRepetitionPenalty(float penalty) override;
+
   std::span<float> GetScores(int batch_beam_index);
   std::span<float> GetScores();
   Sequences_Cuda& GetSequences() { return sequences_; }

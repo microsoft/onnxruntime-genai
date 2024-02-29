@@ -8,7 +8,7 @@ KV_Cache_Combined::KV_Cache_Combined(const Model& model, State& state)
     : model_{model},
       state_{state},
       layer_count_{model.config_->model.decoder.num_hidden_layers},
-      shape_{2, static_cast<int64_t>(state_.search_params_.batch_size) * state_.search_params_.num_beams, model.config_->model.decoder.num_key_value_heads, 0, model.config_->model.decoder.head_size} {
+      shape_{2, state_.params_.BatchBeamSize(), model.config_->model.decoder.num_key_value_heads, 0, model.config_->model.decoder.head_size} {
   pasts_.resize(layer_count_);
   presents_.reserve(layer_count_);
 
@@ -25,7 +25,7 @@ KV_Cache_Combined::KV_Cache_Combined(const Model& model, State& state)
   type_ = model_.session_info_->GetInputDataType(input_name_strings_[0]);
 
   empty_past_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
-  shape_[3] = state_.search_params_.sequence_length;
+  shape_[3] = state_.params_.sequence_length;
 
   for (int i = 0; i < layer_count_; ++i) {
     presents_.push_back(OrtValue::CreateTensor(*model.allocator_device_, shape_, type_));
@@ -45,7 +45,7 @@ void KV_Cache_Combined::Add() {
 }
 
 void KV_Cache_Combined::Update(std::span<const int32_t> beam_indices, int current_length) {
-  assert(state_.search_params_.num_beams == 1 || !beam_indices.empty());  // We require beam_indices if we're a beam search
+  assert(state_.params_.search.num_beams == 1 || !beam_indices.empty());  // We require beam_indices if we're a beam search
 
   for (int i = 0; i < layer_count_; i++) {
     if (beam_indices.empty()) {
@@ -117,7 +117,8 @@ KV_Cache::KV_Cache(const Model& model, State& state)
     : model_{model},
       state_{state},
       layer_count_{model_.config_->model.decoder.num_hidden_layers},
-      shape_{static_cast<int64_t>(state_.search_params_.batch_size) * state_.search_params_.num_beams, model.config_->model.decoder.num_key_value_heads, 0, model.config_->model.decoder.head_size} {
+      shared_past_present_{model_.config_->model.decoder.kv_shared_past_present && state_.params_.search.num_beams == 1 && model_.device_type_ == DeviceType::CUDA},
+      shape_{state_.params_.BatchBeamSize(), model.config_->model.decoder.num_key_value_heads, 0, model.config_->model.decoder.head_size} {
   pasts_.resize(layer_count_ * 2);
   presents_.reserve(layer_count_ * 2);
 
@@ -138,7 +139,12 @@ KV_Cache::KV_Cache(const Model& model, State& state)
   type_ = model_.session_info_->GetInputDataType(input_name_strings_[0]);
 
   empty_past_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
-  shape_[2] = state_.search_params_.sequence_length;  // Set this after empty_past_ has been created with 0 for this field
+
+  // Set the size after empty_past_ has been created with 0 for this field
+  if (shared_past_present_)
+    shape_[2] = state_.params_.search.max_length;
+  else
+    shape_[2] = state_.params_.sequence_length;
 
   for (int i = 0; i < layer_count_; ++i) {
     presents_.push_back(OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_));
@@ -165,9 +171,19 @@ void KV_Cache::Add() {
     state_.outputs_.push_back(presents_[i].get());
     state_.output_names_.push_back(output_name_strings_[i].c_str());
   }
+
+  // For shared_past_present, the past & presents never change, so set the inputs to the present values (outputs are already set above)
+  if (shared_past_present_) {
+    for (int i = 0; i < layer_count_ * 2; ++i) {
+      state_.inputs_[input_index_ + i] = presents_[i].get();
+    }
+  }
 }
 
 void KV_Cache::Update(std::span<const int32_t> beam_indices, int current_length) {
+  if (shared_past_present_)
+    return;
+
   for (int i = 0; i < layer_count_ * 2; i++) {
     if (beam_indices.empty()) {
       pasts_[i] = std::move(presents_[i]);
@@ -229,7 +245,7 @@ Cross_Cache::Cross_Cache(const Model& model, State& state)
     : model_{model},
       state_{state},
       layer_count_{model_.config_->model.decoder.num_hidden_layers},
-      shape_{static_cast<int64_t>(state_.search_params_.batch_size) * state_.search_params_.num_beams, model.config_->model.decoder.num_key_value_heads, 1500, model.config_->model.decoder.head_size} {
+      shape_{state_.params_.BatchBeamSize(), model.config_->model.decoder.num_key_value_heads, 1500, model.config_->model.decoder.head_size} {
   values_.reserve(layer_count_ * 2);
 
   for (int i = 0; i < layer_count_; ++i) {

@@ -10,12 +10,12 @@ struct Tokenizer;
 void ConvertFp16ToFp32(OrtAllocator& allocator, cudaStream_t stream, OrtValue& in, std::unique_ptr<OrtValue>& p_out);
 
 struct State {
-  State(const GeneratorParams& search_params);
+  State(const GeneratorParams& params);
   virtual ~State() = default;
 
   virtual RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices = {}) = 0;
 
-  const GeneratorParams& search_params_;
+  const GeneratorParams& params_;
 
   std::vector<const char*> input_names_, output_names_;
   std::vector<OrtValue*> inputs_, outputs_;

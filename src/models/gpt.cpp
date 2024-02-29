@@ -13,8 +13,8 @@ std::unique_ptr<State> Gpt_Model::CreateState(RoamingArray<int32_t> sequence_len
   return std::make_unique<Gpt_State>(*this, sequence_lengths, params);
 }
 
-Gpt_State::Gpt_State(const Gpt_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const GeneratorParams& search_params)
-    : State{search_params},
+Gpt_State::Gpt_State(const Gpt_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const GeneratorParams& params)
+    : State{params},
       model_{model},
       position_ids_{model, *this, sequence_lengths_unk} {
   input_ids_.Add();

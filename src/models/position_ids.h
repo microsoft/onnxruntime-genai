@@ -22,9 +22,9 @@ struct PositionIDs {
   size_t input_index_{~0U};
   ONNXTensorElementDataType type_;  // Common type for position_ids and attention_mask
 
-  std::array<int64_t, 2> position_ids_shape_{};  // {search_params.batch_size*search_params.beam_size, search_params.sequence_length}
+  std::array<int64_t, 2> position_ids_shape_{};  // {params.batch_size*params.beam_size, params.sequence_length}
   std::unique_ptr<OrtValue> position_ids_;
-  std::array<int64_t, 2> attention_mask_shape_{};  // {search_params.batch_size*search_params.beam_size, search_params.sequence_length}
+  std::array<int64_t, 2> attention_mask_shape_{};  // {params.batch_size*params.beam_size, params.sequence_length}
   std::unique_ptr<OrtValue> attention_mask_;
 
   std::vector<int32_t> initial_sequence_lengths_;
