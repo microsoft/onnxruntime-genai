@@ -68,10 +68,9 @@ jobs:
       Pattern: '*.pyd,*.dll'
   #
   - powershell: |
-      cd nuget
       nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.nuspec -Prop version=0.1.0 -Prop id="Microsoft.ML.OnnxRuntimeGenAI"
     displayName: 'Nuget Packaging'
-    workingDirectory: '$(Build.SourcesDirectory)'
+    workingDirectory: '$(Build.SourcesDirectory)\nuget'
 
   - powershell: |
       Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
