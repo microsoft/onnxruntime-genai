@@ -31,6 +31,7 @@ struct Config {
       int num_key_value_heads{};
       int num_hidden_layers{};
       int head_size{};
+      bool kv_shared_past_present{};
 
       struct Inputs {
         std::string input_ids{"input_ids"};
