@@ -1,0 +1,117 @@
+parameters:
+  arch: 'x64'
+jobs:
+- job: Windows_CPU_Wheels
+  pool: 'onnxruntime-Win-CPU-2022'
+  variables:
+    BuildConfig: 'RelWithDebInfo'
+    ort_version: '1.17.0'
+    build_dir: win-${{ parameters.arch }}
+  timeoutInMinutes: 180
+  workspace:
+    clean: all
+  steps:
+  - checkout: self
+    clean: true
+    submodules: recursive
+
+  - task: onebranch.pipeline.tsaoptions@1
+    displayName: 'OneBranch TSAOptions'
+    inputs:
+      tsaConfigFilePath: '$(Build.SourcesDirectory)\.config\tsaoptions.json'
+      appendSourceBranchName: false
+
+  - template: steps/set-nightly-build-option-variable-step.yml
+
+  - task: DownloadGitHubRelease@0
+    inputs:
+      connection: 'GitHub - Release'
+      userRepository: 'microsoft/onnxruntime'
+      defaultVersionType: 'specificTag'
+      version: 'v$(ort_version)'
+      itemPattern: 'onnxruntime-win-${{ parameters.arch }}-$(ort_version)*'
+      downloadPath: '$(Build.SourcesDirectory)'
+    displayName: Download ONNXRuntime
+      -
+  - task: ExtractFiles@1
+    inputs:
+      archiveFilePatterns: '**/*.zip'
+      destinationFolder: '$(Build.SourcesDirectory)'
+      cleanDestinationFolder: false
+      overwriteExistingFiles: true
+    displayName: Unzip OnnxRuntime
+
+  - powershell: |
+      Rename-Item -Path onnxruntime-win-${{ parameters.arch }}-$(ort_version) -NewName ort
+    displayName: Rename Onnxruntime to ort
+    workingDirectory: '$(Build.SourcesDirectory)'
+
+  - bash: |
+      cmake -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=$(BuildConfig) -DUSE_CUDA=OFF -S . -B build
+      cmake --build $(build_dir) --config $(BuildConfig)  --parallel --target python
+    displayName: 'Build C++ with CMake'
+
+  - bash:
+    displayName: 'Build CSharp'
+
+  - powershell: |
+      Get-ChildItem -Path $(Build.SourcesDirectory)\$(build_dir)\ -Recurse
+
+  - template: steps/win-esrp-dll-step.yml
+    parameters:
+      FolderPath: '$(Build.SourcesDirectory)\build\wheel\onnxruntime_genai'
+      DisplayName: 'ESRP - Sign Native dlls'
+      DoEsrp: true
+      Pattern: '*.pyd,*.dll'
+  #
+  - bash: |
+      cmake --build $(build_dir) --config $(BuildConfig) --parallel --target PyPackageBuild
+    displayName: 'Build Python Wheel'
+
+  - powershell: |
+      Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
+
+  - task: CopyFiles@2
+    displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
+    inputs:
+      SourceFolder: '$(Build.SourcesDirectory)\build\wheel\'
+      Contents: '*.whl'
+      TargetFolder: '$(Build.ArtifactStagingDirectory)'
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Artifact: ONNXRuntime Genai python wheel'
+    inputs:
+      ArtifactName: onnxruntime-genai-win-cpu-${{ parameters.arch }}
+
+  - script: |
+      7z x *.whl
+    workingDirectory: '$(Build.ArtifactStagingDirectory)'
+    displayName: 'unzip the package'
+
+  - task: CredScan@3
+    displayName: 'Run CredScan'
+    inputs:
+      debugMode: false
+    continueOnError: true
+
+  - task: BinSkim@4
+    displayName: 'Run BinSkim'
+    inputs:
+      AnalyzeTargetGlob: '+:file|$(Build.ArtifactStagingDirectory)\**\*genai.dll;-:file|$(Build.ArtifactStagingDirectory)\**\DirectML.dll'
+    continueOnError: true
+
+  - task: TSAUpload@2
+    displayName: 'TSA upload'
+    condition: and(and (succeeded(), and(eq(variables['buildArch'], 'x64'), eq(variables['PythonVersion'], '3.8'))), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    inputs:
+      GdnPublishTsaOnboard: false
+      GdnPublishTsaConfigFile: '$(Build.sourcesDirectory)\.gdn\.gdntsa'
+    continueOnError: true
+
+  - template: steps/component-governance-component-detection-step.yml
+    parameters:
+      condition: 'succeeded'
+
+  - task: mspremier.PostBuildCleanup.PostBuildCleanup-task.PostBuildCleanup@3
+    displayName: 'Clean Agent Directories'
+    condition: always()
