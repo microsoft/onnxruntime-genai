@@ -1,13 +1,12 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
-from __future__ import annotations
-
 import argparse
 import logging
 import os
 import subprocess
 import sys
+from typing import Dict, List, Optional, Union
 
 logging.basicConfig(
     format="%(asctime)s %(name)s [%(levelname)s] - %(message)s", level=logging.DEBUG
@@ -20,13 +19,13 @@ def is_windows():
 
 
 def run_subprocess(
-    args: list[str],
-    cwd: str | bytes | os.PathLike | None = None,
+    args: List[str],
+    cwd: Optional[Union[str, bytes, os.PathLike]] = None,
     capture: bool = False,
-    dll_path: str | bytes | os.PathLike | None = None,
+    dll_path: Optional[Union[str, bytes, os.PathLike]] = None,
     shell: bool = False,
-    env: dict[str, str] = {},
-    log: logging.Logger | None = None,
+    env: Dict[str, str] = {},
+    log: Optional[logging.Logger] = None,
 ):
     if log:
         log.info(f"Running subprocess in '{cwd or os.getcwd()}'\n{args}")
@@ -59,11 +58,22 @@ def run_subprocess(
     return completed_process
 
 
-def run_onnxruntime_genai_api_tests(cwd: str | bytes | os.PathLike, log: logging.Logger, 
-                                    test_models: str | bytes | os.PathLike):
+def run_onnxruntime_genai_api_tests(
+    cwd: Union[str, bytes, os.PathLike],
+    log: logging.Logger,
+    test_models: Union[str, bytes, os.PathLike],
+):
     log.debug("Running: ONNX Runtime GenAI API Tests")
 
-    command = [sys.executable, "-m", "pytest", "-sv", "test_onnxruntime_genai_api.py", "--test_models", test_models]
+    command = [
+        sys.executable,
+        "-m",
+        "pytest",
+        "-sv",
+        "test_onnxruntime_genai_api.py",
+        "--test_models",
+        test_models,
+    ]
 
     run_subprocess(command, cwd=cwd, log=log).check_returncode()
 
@@ -72,9 +82,7 @@ def parse_arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cwd", help="Path to the current working directory")
     parser.add_argument(
-        "--test_models",
-        help="Path to the test_models directory",
-        required=True
+        "--test_models", help="Path to the test_models directory", required=True
     )
     return parser.parse_args()
 
@@ -84,7 +92,9 @@ def main():
 
     log.info("Running onnxruntime-genai tests pipeline")
 
-    run_onnxruntime_genai_api_tests(os.path.abspath(args.cwd), log, os.path.abspath(args.test_models))
+    run_onnxruntime_genai_api_tests(
+        os.path.abspath(args.cwd), log, os.path.abspath(args.test_models)
+    )
 
     return 0
 
