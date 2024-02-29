@@ -5,10 +5,7 @@
 #
 # 1) Use builder.py to build the desired ONNX model
 #
-# 2) For accurate wall clock numbers, modify genai_config.json to include the following:
-#    "min_length": {prompt_length + generation_length}
-#
-# 3) Run this script with the desired arguments. Run benchmark_e2e.py -h for help.
+# 2) Run this script with the desired arguments. Run benchmark_e2e.py -h for help.
 
 import onnxruntime_genai as og
 import time
