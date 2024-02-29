@@ -10,11 +10,11 @@ BeamSearchScorer_Cuda::BeamSearchScorer_Cuda(const GeneratorParams& parameters)
     : stream_{parameters.cuda_stream} {
   state_cpu_ = CudaMallocHostArray<cuda::BeamScorerState>(1);
   state_cpu_->batch_size_ = static_cast<size_t>(parameters.batch_size);
-  state_cpu_->num_beams_ = static_cast<size_t>(parameters.num_beams);
-  state_cpu_->max_length_ = static_cast<size_t>(parameters.max_length);
+  state_cpu_->num_beams_ = static_cast<size_t>(parameters.search.num_beams);
+  state_cpu_->max_length_ = static_cast<size_t>(parameters.search.max_length);
   state_cpu_->pad_token_id_ = parameters.pad_token_id;
   state_cpu_->eos_token_id_ = parameters.eos_token_id;
-  state_cpu_->early_stopping_ = parameters.early_stopping;
+  state_cpu_->early_stopping_ = parameters.search.early_stopping;
   state_cpu_->not_done_count_ = parameters.batch_size;
   state_cpu_->hypothesis_buffer_used_ = 0;
   state_gpu_ = CudaMallocArray<cuda::BeamScorerState>(1);
@@ -26,7 +26,7 @@ BeamSearchScorer_Cuda::BeamSearchScorer_Cuda(const GeneratorParams& parameters)
   hypothesis_scores_ptr_ = CudaMallocArray<cuda::HypothesisScore>(batch_beam_size, &beams);
   beam_hyps_ptr_ = CudaMallocArray<cuda::BeamHypotheses>(state_cpu_->batch_size_, &beam_hyps_);
 
-  cuda::LaunchInitializeBeamHypotheses(beam_hyps_, parameters.length_penalty, beams, parameters.num_beams, stream_);
+  cuda::LaunchInitializeBeamHypotheses(beam_hyps_, parameters.search.length_penalty, beams, parameters.search.num_beams, stream_);
 
   next_beam_scores_ptr_ = CudaMallocArray<float>(batch_beam_size, &next_beam_scores_);
   next_beam_tokens_ptr_ = CudaMallocArray<int32_t>(batch_beam_size, &next_beam_tokens_);
@@ -34,7 +34,7 @@ BeamSearchScorer_Cuda::BeamSearchScorer_Cuda(const GeneratorParams& parameters)
   next_beam_indices_cpu_ptr_ = std::make_unique<int32_t[]>(batch_beam_size);
   next_beam_indices_cpu_ = cpu_span<int32_t>(next_beam_indices_cpu_ptr_.get(), batch_beam_size);
 
-  cuda::LaunchInitScoresKernel(next_beam_scores_.data(), parameters.batch_size, parameters.num_beams, stream_);
+  cuda::LaunchInitScoresKernel(next_beam_scores_.data(), parameters.batch_size, parameters.search.num_beams, stream_);
 
   // Space to store intermediate sequence with length sequence_length, sequence_length + 1, ..., max_sequence_length.
   size_t per_beam = (state_cpu_->max_length_ * (state_cpu_->max_length_ + 1) - (parameters.sequence_length - 1) * parameters.sequence_length) / 2;

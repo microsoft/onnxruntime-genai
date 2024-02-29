@@ -39,13 +39,10 @@ float Float16ToFloat32(uint16_t v) {
 }
 
 GeneratorParams::GeneratorParams(const Model& model)
-    : pad_token_id{model.config_->model.pad_token_id},
+    : search{model.config_->search},
+      pad_token_id{model.config_->model.pad_token_id},
       eos_token_id{model.config_->model.eos_token_id},
       vocab_size{model.config_->model.vocab_size},
-      max_length{model.config_->search.max_length},
-      length_penalty{model.config_->search.length_penalty},
-      early_stopping{model.config_->search.early_stopping},
-      num_beams{model.config_->search.num_beams},
       device_type{model.device_type_},
       cuda_stream{model.cuda_stream_} {
 }
@@ -100,28 +97,33 @@ ProviderOptions GetDefaultProviderOptions([[maybe_unused]] DeviceType device_typ
   return options;
 }
 
-std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& search_params) {
-  return std::make_unique<Generator>(model, search_params);
+std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params) {
+  return std::make_unique<Generator>(model, params);
 }
 
 std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
 #if USE_CUDA
   if (params.device_type == DeviceType::CUDA) {
-    if (params.num_beams > 1)
+    if (params.search.num_beams > 1)
       return std::make_unique<BeamSearch_Cuda>(params);
     return std::make_unique<GreedySearch_Cuda>(params);
   }
 #endif
 
-  if (params.num_beams > 1) {
+  if (params.search.num_beams > 1) {
     return std::make_unique<BeamSearch_Cpu>(params);
   }
   return std::make_unique<GreedySearch_Cpu>(params);
 }
 
-Generator::Generator(const Model& model, const GeneratorParams& search_params) : model_{model} {
-  search_ = CreateSearch(search_params);
-  state_ = model.CreateState(search_->GetSequenceLengths(), search_params);
+Generator::Generator(const Model& model, const GeneratorParams& params) : model_{model} {
+  if (params.search.max_length == 0)
+    throw std::runtime_error("search max_length is 0");
+  if (params.search.max_length > model.config_->model.context_length)
+    throw std::runtime_error("max_length cannot be greater than model context_length");
+
+  search_ = CreateSearch(params);
+  state_ = model.CreateState(search_->GetSequenceLengths(), params);
 }
 
 void Generator::ComputeLogits() {
@@ -130,6 +132,10 @@ void Generator::ComputeLogits() {
 
   search_->SetLogits(state_->Run(search_->GetSequenceLength(), search_->GetNextTokens(), search_->GetNextIndices()));
   computed_logits_ = true;
+
+  auto& search = search_->params_.search;
+  search_->ApplyMinLength(search.min_length);
+  search_->ApplyRepetitionPenalty(search.repetition_penalty);
 }
 
 bool Generator::IsDone() const {
@@ -140,7 +146,7 @@ bool Generator::IsDone() const {
 }
 
 void Generator::GenerateNextToken_TopK_TopP(int top_k, float top_p, float temperature) {
-  if (search_->params_.num_beams != 1)
+  if (search_->params_.search.num_beams != 1)
     throw std::runtime_error("TopK and TopP cannot be used with a beam search");
 
   if (!computed_logits_)
@@ -159,7 +165,8 @@ void Generator::GenerateNextToken_TopK_TopP(int top_k, float top_p, float temper
 }
 
 void Generator::GenerateNextToken() {
-  if (search_->params_.num_beams > 1) {
+  auto& search = search_->params_.search;
+  if (search.num_beams > 1) {
     if (!computed_logits_)
       throw std::runtime_error("Must call ComputeLogits before GenerateNextToken*");
     computed_logits_ = false;
@@ -167,8 +174,7 @@ void Generator::GenerateNextToken() {
     return;
   }
 
-  auto& config = *model_.config_;
-  GenerateNextToken_TopK_TopP(config.search.top_k, config.search.top_p, config.search.temperature);
+  GenerateNextToken_TopK_TopP(search.top_k, search.top_p, search.temperature);
 }
 
 RoamingArray<int32_t> Generator::GetSequence(int index) const {

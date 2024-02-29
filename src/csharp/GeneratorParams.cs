@@ -20,9 +20,14 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         internal IntPtr Handle { get { return _generatorParamsHandle; } }
 
-        public void SetMaxLength(ulong maxLength)
+        public void SetSearchOption(string searchOption, double value)
         {
-            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetMaxLength(_generatorParamsHandle, (UIntPtr)maxLength));
+            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetSearchNumber(_generatorParamsHandle, Utils.ToUtf8(searchOption), value));
+        }
+
+        public void SetSearchOption(string searchOption, bool value)
+        {
+            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetSearchBool(_generatorParamsHandle, Utils.ToUtf8(searchOption), value));
         }
 
         public void SetInputIDs(ReadOnlySpan<int> inputIDs, ulong sequenceLength, ulong batchSize)

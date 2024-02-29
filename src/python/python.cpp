@@ -76,7 +76,7 @@ std::string ToString(const GeneratorParams& v) {
   std::ostringstream oss;
   oss << "SearchParams("
          "num_beams="
-      << v.num_beams << ", batch_size=" << v.batch_size << ", sequence_length=" << v.sequence_length << ", max_length=" << v.max_length << ", pad_token_id=" << v.pad_token_id << ", eos_token_id=" << v.eos_token_id << ", vocab_size=" << v.vocab_size << ", length_penalty=" << v.length_penalty << ", early_stopping=" << v.early_stopping << ")";
+      << v.search.num_beams << ", batch_size=" << v.batch_size << ", sequence_length=" << v.sequence_length << ", max_length=" << v.search.max_length << ", pad_token_id=" << v.pad_token_id << ", eos_token_id=" << v.eos_token_id << ", vocab_size=" << v.vocab_size << ", length_penalty=" << v.search.length_penalty << ", early_stopping=" << v.search.early_stopping << ")";
 
   return oss.str();
 }
@@ -139,15 +139,33 @@ struct PyGeneratorParams : GeneratorParams {
     }
   }
 
+  void SetSearchOptions(const pybind11::dict& dict) {
+    for (auto& entry : dict) {
+      auto name = entry.first.cast<std::string>();
+      try {
+        if (pybind11::isinstance<pybind11::float_>(entry.second)) {
+          SetSearchNumber(search, name, entry.second.cast<double>());
+        } else if (pybind11::isinstance<pybind11::bool_>(entry.second)) {
+          SetSearchBool(search, name, entry.second.cast<bool>());
+        } else if (pybind11::isinstance<pybind11::int_>(entry.second)) {
+          SetSearchNumber(search, name, entry.second.cast<int>());
+        } else
+          throw std::runtime_error("Unknown search option type, can be float/bool/int");
+      } catch (const std::exception& e) {
+        throw std::runtime_error("Unknown search option:" + name);
+      }
+    }
+  }
+
   pybind11::array_t<int32_t> py_input_ids_;
   pybind11::array_t<float> py_whisper_input_features_;
   pybind11::array_t<int32_t> py_whisper_decoder_input_ids_;
 };
 
 struct PyGenerator {
-  PyGenerator(Model& model, PyGeneratorParams& search_params) {
-    search_params.Prepare();
-    generator_ = CreateGenerator(model, search_params);
+  PyGenerator(Model& model, PyGeneratorParams& params) {
+    params.Prepare();
+    generator_ = CreateGenerator(model, params);
   }
 
   PyRoamingArray<int32_t>& GetNextTokens() {
@@ -225,13 +243,10 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_readonly("pad_token_id", &PyGeneratorParams::pad_token_id)
       .def_readonly("eos_token_id", &PyGeneratorParams::eos_token_id)
       .def_readonly("vocab_size", &PyGeneratorParams::vocab_size)
-      .def_readwrite("num_beams", &PyGeneratorParams::num_beams)
-      .def_readwrite("max_length", &PyGeneratorParams::max_length)
-      .def_readwrite("length_penalty", &PyGeneratorParams::length_penalty)
-      .def_readwrite("early_stopping", &PyGeneratorParams::early_stopping)
       .def_readwrite("input_ids", &PyGeneratorParams::py_input_ids_)
       .def_readwrite("whisper_input_features", &PyGeneratorParams::py_whisper_input_features_)
       .def_readwrite("whisper_decoder_input_ids", &PyGeneratorParams::py_whisper_decoder_input_ids_)
+      .def("set_search_options", &PyGeneratorParams::SetSearchOptions)
       .def("set_input_sequences", &PyGeneratorParams::SetInputSequences)
       .def("__repr__", [](PyGeneratorParams& s) { return ToString(s); });
 
@@ -257,7 +272,14 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
              return CreateModel(GetOrtEnv(), config_path.c_str(), &provider_options);
            }),
            "str"_a, "device_type"_a = DeviceType::Auto)
-      .def("generate", [](Model& model, PyGeneratorParams& search_params) { search_params.Prepare(); return Generate(model, search_params); })
+      .def("generate", [](Model& model, PyGeneratorParams& params) { params.Prepare(); return Generate(model, params); })
+      .def("generate_sequence", [](Model& model, pybind11::array_t<int32_t> input_ids, const pybind11::dict& search_options) {
+        PyGeneratorParams params{model};
+        params.SetSearchOptions(search_options);
+        params.py_input_ids_ = input_ids;
+        params.Prepare();
+        return Generate(model, params)[0];
+      })
       .def("create_tokenizer", [](Model& model) { return model.CreateTokenizer(); })
       .def_property_readonly("device_type", [](const Model& s) { return s.device_type_; });
 

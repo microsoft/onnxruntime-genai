@@ -8,7 +8,7 @@
 // The root element also has no names.
 //
 namespace JSON {
-struct unknown_value_error {};  // Throw this from any Element callback to throw a std::runtime error reporting the unknown value name
+struct unknown_value_error : std::exception {};  // Throw this from any Element callback to throw a std::runtime error reporting the unknown value name
 
 struct Element {
   virtual void OnComplete(bool empty) {}  // Called when parsing for this element is finished (empty is true when it's an empty element)

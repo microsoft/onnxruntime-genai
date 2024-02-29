@@ -106,6 +106,22 @@ void LaunchAddProbsKernel(float* log_probs,
   AddProbsKernel<<<gridSize, blockSize, 0, stream>>>(log_probs, cum_log_probs, vocab_size, total_elements);
 }
 
+__global__ void SetScoreProcessor(float* next_token_scores, int batch_beam_size, int vocab_size, int token, float score) {
+  int index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= batch_beam_size)
+    return;
+
+  next_token_scores[index*vocab_size+token] = score;
+}
+
+void LaunchSetScoreProcessor(float* next_token_scores, int batch_beam_size, int vocab_size, int token, float score, cudaStream_t stream) {
+  int total_elements = batch_beam_size;
+  constexpr int blockSize = 256;
+  const int gridSize = (total_elements + blockSize - 1) / blockSize;
+
+  SetScoreProcessor<<<gridSize, blockSize, 0, stream>>>(next_token_scores, batch_beam_size, vocab_size, token, score);
+}
+
 __global__ void RepetitionPenaltyProcessor(const int32_t* sequences, float* next_token_scores, int max_sequence_length, int vocab_size, int total_elements, int current_sequence_length, float repetition_penalty) {
   int index = blockIdx.x * blockDim.x + threadIdx.x;
   if (index >= total_elements)

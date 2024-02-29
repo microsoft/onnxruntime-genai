@@ -61,7 +61,7 @@ int main() {
   OgaGeneratorParams* params;
   CheckResult(OgaCreateGeneratorParams(model, &params));
   OgaGeneratorParamsPtr params_ptr{params};
-  CheckResult(OgaGeneratorParamsSetMaxLength(params, 200));
+  CheckResult(OgaGeneratorParamsSetSearchNumber(params, "max_length", 200));
   CheckResult(OgaGeneratorParamsSetInputSequences(params, sequences));
 
   OgaSequences* output_sequences;

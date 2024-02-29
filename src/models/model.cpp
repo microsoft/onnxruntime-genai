@@ -11,7 +11,7 @@
 
 namespace Generators {
 
-State::State(const GeneratorParams& search_params) : search_params_{search_params} {
+State::State(const GeneratorParams& params) : params_{params} {
 }
 
 void State::Run(OrtSession& session) {
