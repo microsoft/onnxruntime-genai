@@ -52,7 +52,7 @@ jobs:
     displayName: 'Build C++ with CMake'
 
   - bash:
-      dotnet build . /p:Configuration=$(BuildConfig) /p:Platform="Any CPU" /p:NativeBuildOutputDir='$(build_dir)\$(BuildConfig)'
+      dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(BuildConfig)" -p:Platform="Any CPU" -p:NativeBuildOutputDir="$(build_dir)\$(BuildConfig)"
     displayName: 'Build CSharp'
     workingDirectory: '$(Build.SourcesDirectory)\src\csharp'
 
