@@ -155,6 +155,8 @@ class Model:
             },
             "search": {
                 "diversity_penalty": config.diversity_penalty if hasattr(config, "diversity_penalty") else 0.0,
+                "early_stopping": True,
+                "kv_shared_past_present": True if self.attention_attrs["op_type"] == "GroupQueryAttention" else False,
                 "length_penalty": config.length_penalty if hasattr(config, "length_penalty") else 1.0,
                 "max_length": config.max_length if hasattr(config, "max_length") else 20,
                 "min_length": 0,
