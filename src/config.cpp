@@ -107,6 +107,13 @@ struct Decoder_Element : JSON::Element {
       throw JSON::unknown_value_error{};
   }
 
+  void OnBool(std::string_view name, bool value) override {
+    if (name == "kv_shared_past_present") {
+      v_.kv_shared_past_present = value;
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
   Element& OnObject(std::string_view name) override {
     if (name == "inputs") {
       return inputs_;
