@@ -26,6 +26,10 @@ struct Search {
   virtual void SampleTopK(int /*k*/, float /*temperature*/) { assert(false); }
   virtual void SampleTopPAndK(float /*p*/, int /*k*/, float /*temperature*/) { assert(false); }
 
+  // Scoring features
+  virtual void ApplyMinLength(int min_length) = 0;
+  virtual void ApplyRepetitionPenalty(float penalty) = 0;
+
   const GeneratorParams& params_;
 };
 
@@ -38,9 +42,10 @@ struct Search_Cpu : Search {
 
   bool IsDone() const override { return done_; }
   void SetLogits(RoamingArray<float> logits) override;
-  // Extra scoring steps go here
 
-  //
+  void ApplyMinLength(int min_length) override;
+  void ApplyRepetitionPenalty(float penalty) override;
+
   std::span<float> GetScores(int batch_beam_index) const;
   Sequences& GetSequences() { return sequences_; }
 
@@ -99,10 +104,5 @@ struct BeamSearch_Cpu : Search_Cpu {
 
   std::unique_ptr<BeamSearchScorer> beam_scorer_;
 };
-
-namespace Processors {
-void MinLength(Search_Cpu& search, int min_length);
-void RepetitionPenalty(Search_Cpu& search, float penalty);
-}  // namespace Processors
 
 }  // namespace Generators

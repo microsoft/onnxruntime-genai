@@ -12,20 +12,20 @@ PositionIDs::PositionIDs(const Model& model, State& state, RoamingArray<int32_t>
   if (type_ != Ort::TypeToTensorType<int32_t>::type && type_ != Ort::TypeToTensorType<int64_t>::type)
     throw std::runtime_error("position_ids & attention_mask only support int32 or int64 types");
 
-  std::array<int64_t, 2> shape{state_.search_params_.batch_size, state_.search_params_.sequence_length};  // Only batch_size initially, as we haven't expanded over the beams yet
+  std::array<int64_t, 2> shape{state_.params_.batch_size, state_.params_.sequence_length};  // Only batch_size initially, as we haven't expanded over the beams yet
   position_ids_ = OrtValue::CreateTensor(model.allocator_cpu_, shape, type_);
   attention_mask_ = OrtValue::CreateTensor(model.allocator_cpu_, shape, type_);
 
-  initial_sequence_lengths_.resize(state_.search_params_.batch_size * state_.search_params_.num_beams);
+  initial_sequence_lengths_.resize(state_.params_.BatchBeamSize());
 
   if (type_ == Ort::TypeToTensorType<int32_t>::type)
     InitializeTensors<int32_t>(shape, sequence_lengths_unk);
   else
     InitializeTensors<int64_t>(shape, sequence_lengths_unk);
 
-  position_ids_ = model_.ExpandInputs(position_ids_, state_.search_params_.num_beams);
-  attention_mask_ = model_.ExpandInputs(attention_mask_, state_.search_params_.num_beams);
-  shape[0] *= state_.search_params_.num_beams;
+  position_ids_ = model_.ExpandInputs(position_ids_, state_.params_.search.num_beams);
+  attention_mask_ = model_.ExpandInputs(attention_mask_, state_.params_.search.num_beams);
+  shape[0] *= state_.params_.search.num_beams;
   position_ids_shape_ = shape;
   attention_mask_shape_ = shape;
 }
@@ -126,13 +126,13 @@ void PositionIDs::InitializeTensors(std::array<int64_t, 2> shape, cpu_span<int32
   // Set position id to be 0 for pad tokens, and accumulated sum of mask in a batch for other tokens
   auto* mask_data = attention_mask_->GetTensorMutableData<T>();
   auto* position_data = position_ids_->GetTensorMutableData<T>();
-  const auto* word_id = state_.search_params_.input_ids.data();
+  const auto* word_id = state_.params_.input_ids.data();
   auto* mask = mask_data;
   auto* position = position_data;
   for (int i = 0; i < shape[0]; i++) {
     T abs_position = 0;
     for (int j = 0; j < shape[1]; j++, word_id++, mask++, position++) {
-      if (*word_id == state_.search_params_.pad_token_id) {
+      if (*word_id == state_.params_.pad_token_id) {
         *mask = 0;
         *position = 0;
       } else {
@@ -141,9 +141,9 @@ void PositionIDs::InitializeTensors(std::array<int64_t, 2> shape, cpu_span<int32
       }
     }
 
-    for (int k = 0; k < state_.search_params_.num_beams; k++) {
-      sequence_lengths[i * state_.search_params_.num_beams + k] = static_cast<int32_t>(abs_position);
-      initial_sequence_lengths_[i * state_.search_params_.num_beams + k] = static_cast<int32_t>(abs_position);
+    for (int k = 0; k < state_.params_.search.num_beams; k++) {
+      sequence_lengths[i * state_.params_.search.num_beams + k] = static_cast<int32_t>(abs_position);
+      initial_sequence_lengths_[i * state_.params_.search.num_beams + k] = static_cast<int32_t>(abs_position);
     }
   }
 }

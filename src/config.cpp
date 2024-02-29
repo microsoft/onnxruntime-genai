@@ -215,6 +215,14 @@ struct Search_Element : JSON::Element {
   Config::Search& v_;
 };
 
+void SetSearchNumber(Config::Search& search, std::string_view name, double value) {
+  Search_Element(search).OnNumber(name, value);
+}
+
+void SetSearchBool(Config::Search& search, std::string_view name, bool value) {
+  Search_Element(search).OnBool(name, value);
+}
+
 struct Root_Element : JSON::Element {
   explicit Root_Element(Config& config) : config_{config} {}
 
@@ -275,6 +283,12 @@ void ParseConfig(const std::filesystem::path& filename, Config& config) {
 
 Config::Config(const std::filesystem::path& path) : config_path{path} {
   ParseConfig(path / "genai_config.json", *this);
+
+  if (model.context_length == 0)
+    throw std::runtime_error("model context_length is 0 or was not set. It must be greater than 0");
+
+  if (search.max_length == 0)
+    search.max_length = model.context_length;
 }
 
 }  // namespace Generators
