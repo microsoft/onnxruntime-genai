@@ -78,9 +78,9 @@ jobs:
       Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
 
   - task: CopyFiles@2
-    displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
+    displayName: 'Copy Nuget to: $(Build.ArtifactStagingDirectory)'
     inputs:
-      SourceFolder: '$(Build.SourcesDirectory)\build\wheel\'
+      SourceFolder: '$(Build.SourcesDirectory)\nuget'
       Contents: '*.nupkg'
       TargetFolder: '$(Build.ArtifactStagingDirectory)'
 
