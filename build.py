@@ -94,7 +94,7 @@ def validate_cuda_home(cuda_home: str | bytes | os.PathLike | None):
 
 def build(
     skip_wheel: bool = False,
-    use_cuda: str | None = None,
+    use_cuda: bool | None = None,
     cuda_home: str | bytes | os.PathLike | None = None,
     cmake_generator: str | None = None,
     ort_home: str | bytes | os.PathLike | None = None,
@@ -110,7 +110,7 @@ def build(
         raise OSError(f"Unsupported platform {platform()}.")
     
     if cuda_home and not use_cuda:
-        raise ValueError("cuda_home is specified but use_cuda is not specified.")
+        use_cuda = True
 
     cuda_home = validate_cuda_home(cuda_home) if use_cuda else None
 
