@@ -73,6 +73,7 @@ jobs:
         -w /onnxruntime_src/ onnxruntimegpubuild \
         bash -c "echo $PATH && \
         /usr/bin/cmake --preset linux_gcc_cuda_release \
+        -DMANYLINUX=ON \
         -DCMAKE_CUDA_ARCHITECTURES=\"60;61;70;75;80;86\" \
         -DPYTHON_EXECUTABLE=/opt/python/cp38-cp38/bin/python3.8 && \
         /usr/bin/cmake --build --preset linux_gcc_cuda_release"
@@ -85,7 +86,7 @@ jobs:
       --rm \
       --volume $(Build.SourcesDirectory)/onnxruntime-genai:/onnxruntime_src \
       -w /onnxruntime_src/ onnxruntimegpubuild \
-      bash -c "echo $PATH && /usr/bin/cmake --preset linux_gcc_cuda_release -DCMAKE_CUDA_ARCHITECTURES=\"60;61;70;75;80;86\" -DPYTHON_EXECUTABLE=/opt/python/cp39-cp39/bin/python3.9 && /usr/bin/cmake --build --preset linux_gcc_cuda_release"
+      bash -c "echo $PATH && /usr/bin/cmake --preset linux_gcc_cuda_release -DMANYLINUX=ON -DCMAKE_CUDA_ARCHITECTURES=\"60;61;70;75;80;86\" -DPYTHON_EXECUTABLE=/opt/python/cp39-cp39/bin/python3.9 && /usr/bin/cmake --build --preset linux_gcc_cuda_release"
     displayName: 'Build Python Wheel 3.9'
     workingDirectory: '$(Build.SourcesDirectory)/onnxruntime-genai'
   - script: |
@@ -93,7 +94,7 @@ jobs:
       docker run \
       --rm \
       --volume $(Build.SourcesDirectory)/onnxruntime-genai:/onnxruntime_src \
-      -w /onnxruntime_src/ onnxruntimegpubuild bash -c "echo $PATH && /usr/bin/cmake --preset linux_gcc_cuda_release -DCMAKE_CUDA_ARCHITECTURES=\"60;61;70;75;80;86\" -DPYTHON_EXECUTABLE=/opt/python/cp310-cp310/bin/python3.10 && /usr/bin/cmake --build --preset linux_gcc_cuda_release"
+      -w /onnxruntime_src/ onnxruntimegpubuild bash -c "echo $PATH && /usr/bin/cmake --preset linux_gcc_cuda_release -DMANYLINUX=ON -DCMAKE_CUDA_ARCHITECTURES=\"60;61;70;75;80;86\" -DPYTHON_EXECUTABLE=/opt/python/cp310-cp310/bin/python3.10 && /usr/bin/cmake --build --preset linux_gcc_cuda_release"
     displayName: 'Build Python Wheel 3.10'
     workingDirectory: '$(Build.SourcesDirectory)/onnxruntime-genai'
   - script: |
@@ -101,7 +102,7 @@ jobs:
       docker run \
       --rm \
       --volume $(Build.SourcesDirectory)/onnxruntime-genai:/onnxruntime_src \
-      -w /onnxruntime_src/ onnxruntimegpubuild bash -c "echo $PATH && /usr/bin/cmake --preset linux_gcc_cuda_release -DCMAKE_CUDA_ARCHITECTURES=\"60;61;70;75;80;86\" -DPYTHON_EXECUTABLE=/opt/python/cp311-cp311/bin/python3.11 && /usr/bin/cmake --build --preset linux_gcc_cuda_release"
+      -w /onnxruntime_src/ onnxruntimegpubuild bash -c "echo $PATH && /usr/bin/cmake --preset linux_gcc_cuda_release -DMANYLINUX=ON -DCMAKE_CUDA_ARCHITECTURES=\"60;61;70;75;80;86\" -DPYTHON_EXECUTABLE=/opt/python/cp311-cp311/bin/python3.11 && /usr/bin/cmake --build --preset linux_gcc_cuda_release"
     displayName: 'Build Python Wheel 3.11'
     workingDirectory: '$(Build.SourcesDirectory)/onnxruntime-genai'
   - script: |
@@ -109,7 +110,7 @@ jobs:
       docker run \
       --rm \
       --volume $(Build.SourcesDirectory)/onnxruntime-genai:/onnxruntime_src \
-      -w /onnxruntime_src/ onnxruntimegpubuild bash -c "echo $PATH && /usr/bin/cmake --preset linux_gcc_cuda_release -DCMAKE_CUDA_ARCHITECTURES=\"60;61;70;75;80;86\" -DPYTHON_EXECUTABLE=/opt/python/cp312-cp312/bin/python3.12 && /usr/bin/cmake --build --preset linux_gcc_cuda_release"
+      -w /onnxruntime_src/ onnxruntimegpubuild bash -c "echo $PATH && /usr/bin/cmake --preset linux_gcc_cuda_release -DMANYLINUX=ON -DCMAKE_CUDA_ARCHITECTURES=\"60;61;70;75;80;86\" -DPYTHON_EXECUTABLE=/opt/python/cp312-cp312/bin/python3.12 && /usr/bin/cmake --build --preset linux_gcc_cuda_release"
     displayName: 'Build Python Wheel 3.12'
     workingDirectory: '$(Build.SourcesDirectory)/onnxruntime-genai'
     
