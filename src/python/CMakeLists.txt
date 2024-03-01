@@ -54,7 +54,7 @@ if(BUILD_WHEEL)
   )
   set(modified_exclude_list)
   foreach(item IN LISTS auditwheel_exclude_list)
-    list(APPEND modified_exclude_list "--exclude ${item}")
+    list(APPEND modified_exclude_list "--exclude" ${item}")
   endforeach()
 
   if(MANYLINUX)
