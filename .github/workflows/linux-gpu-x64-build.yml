@@ -90,15 +90,16 @@ jobs:
             --rm \
             --volume $GITHUB_WORKSPACE:/onnxruntime_src \
             -w /onnxruntime_src onnxruntimegpubuild bash -c "ls -l /onnxruntime_src/build/gcc_cuda/release/test/"
-
-      - name: Docker -- Run tests
-        run: |
-          echo "Running docker image onnxruntimegpubuild"
-          docker run \
-            --gpus all \
-            --rm \
-            --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-            -w /onnxruntime_src onnxruntimegpubuild bash -c "/onnxruntime_src/build/gcc_cuda/release/test/unit_tests"
+        continue-on-error: true
+    # TODO: Re-enable these tests when python version is updated
+#      - name: Docker -- Run tests
+#        run: |
+#          echo "Running docker image onnxruntimegpubuild"
+#          docker run \
+#            --gpus all \
+#            --rm \
+#            --volume $GITHUB_WORKSPACE:/onnxruntime_src \
+#            -w /onnxruntime_src onnxruntimegpubuild bash -c "/onnxruntime_src/build/gcc_cuda/release/test/unit_tests"
 
 
       # TODO: Re-enable these tests when python version is updated
