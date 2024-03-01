@@ -205,8 +205,8 @@ struct Search_Element : JSON::Element {
   }
 
   void OnBool(std::string_view name, bool value) override {
-    if (name == "kv_shared_past_present") {
-      v_.kv_shared_past_present = value;
+    if (name == "past_present_share_buffer") {
+      v_.past_present_share_buffer = value;
     } else if (name == "early_stopping") {
       v_.early_stopping = value;
     } else
