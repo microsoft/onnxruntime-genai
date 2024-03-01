@@ -6,10 +6,8 @@ jobs:
   variables:
     BuildConfig: 'RelWithDebInfo'
     ort_version: '1.17.0'
-    if [eq(parameters.arch, 'x64')]:
-      build_dir: win-x64
-    if [eq(parameters.arch, 'arm64')]:
-      build_dir: win-arm64
+    build_dir: win-x64
+
   timeoutInMinutes: 180
   workspace:
     clean: all
