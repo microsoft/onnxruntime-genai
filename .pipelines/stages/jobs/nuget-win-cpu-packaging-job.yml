@@ -89,22 +89,17 @@ jobs:
     inputs:
       ArtifactName: onnxruntime-genai-win-cpu-${{ parameters.arch }}
 
-  #  - script: |
-  #      7z x *.whl
-  #    workingDirectory: '$(Build.ArtifactStagingDirectory)'
-  #    displayName: 'unzip the package'
-
   - task: CredScan@3
     displayName: 'Run CredScan'
     inputs:
       debugMode: false
     continueOnError: true
 
-  #  - task: BinSkim@4
-  #    displayName: 'Run BinSkim'
-  #    inputs:
-  #      AnalyzeTargetGlob: '+:file|$(Build.ArtifactStagingDirectory)\**\*genai.dll;-:file|$(Build.ArtifactStagingDirectory)\**\DirectML.dll'
-  #    continueOnError: true
+  - task: BinSkim@4
+    displayName: 'Run BinSkim'
+    inputs:
+      AnalyzeTargetGlob: '$(Build.SourcesDirectory)\$(build_dir)\**\*.dll'
+    continueOnError: true
 
   - task: TSAUpload@2
     displayName: 'TSA upload'
