@@ -11,7 +11,6 @@
 #define MODEL_PATH "../../test/test_models/"
 #endif
 std::unique_ptr<OrtEnv> g_ort_env;
-#ifdef TODO_FIX_IT
 
 // To generate this file:
 // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
@@ -284,5 +283,4 @@ Print all primes between 1 and n
 #endif
 }
 
-#endif
 #endif

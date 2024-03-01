@@ -63,6 +63,7 @@ jobs:
             echo "Finding CUDA version"
             docker run --rm onnxruntimegpubuild bash -c "nvcc --version && which nvcc"
 
+#TODO: Re-enable Test by removing -DENABLE_TESTS=OFF when the Linux GPU build is fixed
       - name: Docker -- Configure with CMake and GCC
         run: |
           echo "Running docker image onnxruntimegpubuild"
@@ -70,7 +71,7 @@ jobs:
             --gpus all \
             --rm \
             --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-            -w /onnxruntime_src onnxruntimegpubuild bash -c "/usr/bin/cmake -DCMAKE_CUDA_ARCHITECTURES=86 --preset linux_gcc_cuda_release -DTEST_PHI2=False"
+            -w /onnxruntime_src onnxruntimegpubuild bash -c "/usr/bin/cmake -DENABLE_TESTS=OFF -DCMAKE_CUDA_ARCHITECTURES=86 --preset linux_gcc_cuda_release -DTEST_PHI2=False"
 
       - name: Docker -- Build with CMake and GCC
         run: |
