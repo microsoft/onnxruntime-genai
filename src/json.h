@@ -8,16 +8,18 @@
 // The root element also has no names.
 //
 namespace JSON {
+struct unknown_value_error : std::exception {};  // Throw this from any Element callback to throw a std::runtime error reporting the unknown value name
+
 struct Element {
   virtual void OnComplete(bool empty) {}  // Called when parsing for this element is finished (empty is true when it's an empty element)
 
-  virtual void OnString(std::string_view name, std::string_view value) {}
-  virtual void OnNumber(std::string_view name, double value) {}
-  virtual void OnBool(std::string_view name, bool value) {}
-  virtual void OnNull(std::string_view name) {}
+  virtual void OnString(std::string_view name, std::string_view value) { throw unknown_value_error{}; }
+  virtual void OnNumber(std::string_view name, double value) { throw unknown_value_error{}; }
+  virtual void OnBool(std::string_view name, bool value) { throw unknown_value_error{}; }
+  virtual void OnNull(std::string_view name) { throw unknown_value_error{}; }
 
-  virtual Element& OnArray(std::string_view name);   // Default behavior ignores all elements
-  virtual Element& OnObject(std::string_view name);  // Default behavior ignores all elements
+  virtual Element& OnArray(std::string_view name);
+  virtual Element& OnObject(std::string_view name);
 };
 
 void Parse(Element& element, std::string_view document);

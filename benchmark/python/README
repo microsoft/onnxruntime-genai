@@ -1,0 +1,13 @@
+This is an end-to-end benchmarking script for any GenAI-supported ONNX model.
+
+
+Prerequisites: 
+0) Install onnxruntime-genai and onnxruntime
+
+1) Use builder.py to build the desired ONNX model
+
+2) Run this script with the desired arguments. Run benchmark_e2e.py -h for help.
+
+
+Example call to benchmarking script
+python benchmark_e2e.py -i {model folder} -b 1 -l 128 -g 256 -r 100 -w 10 -k 5 -o {output csv file name} -ep cuda

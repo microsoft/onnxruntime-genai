@@ -5,7 +5,7 @@ namespace Generators {
 
 Llama_Model::Llama_Model(std::unique_ptr<Config> config, OrtEnv& ort_env, const ProviderOptions* provider_options)
     : Model{std::move(config), provider_options} {
-  session_decoder_ = OrtSession::Create(ort_env, (config_->config_path / config_->model.decoder).c_str(), session_options_.get());
+  session_decoder_ = OrtSession::Create(ort_env, (config_->config_path / config_->model.decoder.filename).c_str(), session_options_.get());
 
   InitDeviceAllocator(*session_decoder_);
 }
@@ -14,8 +14,8 @@ std::unique_ptr<State> Llama_Model::CreateState(RoamingArray<int32_t> sequence_l
   return std::make_unique<Llama_State>(*this, sequence_lengths, params);
 }
 
-Llama_State::Llama_State(const Llama_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const GeneratorParams& search_params)
-    : State{search_params},
+Llama_State::Llama_State(const Llama_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const GeneratorParams& params)
+    : State{params},
       model_{model},
       position_ids_{model, *this, sequence_lengths_unk} {
   input_ids_.Add();

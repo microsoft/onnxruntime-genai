@@ -5,7 +5,7 @@ namespace Generators {
 
 Mistral_Model::Mistral_Model(std::unique_ptr<Config> config, OrtEnv& ort_env, const ProviderOptions* provider_options)
     : Model{std::move(config), provider_options} {
-  session_decoder_ = OrtSession::Create(ort_env, (config_->config_path / config_->model.decoder).c_str(), session_options_.get());
+  session_decoder_ = OrtSession::Create(ort_env, (config_->config_path / config_->model.decoder.filename).c_str(), session_options_.get());
 
   InitDeviceAllocator(*session_decoder_);
 }
@@ -14,8 +14,8 @@ std::unique_ptr<State> Mistral_Model::CreateState(RoamingArray<int32_t> sequence
   return std::make_unique<Mistral_State>(*this, sequence_lengths, params);
 }
 
-Mistral_State::Mistral_State(const Mistral_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const GeneratorParams& search_params)
-    : State{search_params},
+Mistral_State::Mistral_State(const Mistral_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const GeneratorParams& params)
+    : State{params},
       model_{model},
       position_ids_{model, *this, sequence_lengths_unk} {
   input_ids_.Add();

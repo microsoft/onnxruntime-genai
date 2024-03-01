@@ -24,7 +24,7 @@ struct Whisper_State : State {
   const Whisper_Model& model_;
   bool first_run_{true};
 
-  InputIDs<int32_t> decoder_input_ids_{model_, *this};
+  InputIDs decoder_input_ids_{model_, *this};
   Logits logits_{model_, *this};
   KV_Cache kv_cache_{model_, *this};
   Cross_Cache cross_cache_{model_, *this};

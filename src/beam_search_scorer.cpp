@@ -67,11 +67,11 @@ void BeamHypotheses::Output(
 
 BeamSearchScorer::BeamSearchScorer(const GeneratorParams& parameters)
     : batch_size_{parameters.batch_size},
-      num_beams_{parameters.num_beams},
-      max_length_{parameters.max_length},
+      num_beams_{parameters.search.num_beams},
+      max_length_{parameters.search.max_length},
       pad_token_id_{parameters.pad_token_id},
       eos_token_id_{parameters.eos_token_id},
-      early_stopping_{parameters.early_stopping},
+      early_stopping_{parameters.search.early_stopping},
       not_done_count_{parameters.batch_size} {
   size_t const batch_beam_size = static_cast<size_t>(batch_size_) * num_beams_;
 
@@ -79,7 +79,7 @@ BeamSearchScorer::BeamSearchScorer(const GeneratorParams& parameters)
   hypothesis_scores_ptr_ = AllocateArray<HypothesisScore>(batch_beam_size, &beams);
   beam_hyps_ptr_ = AllocateArray<BeamHypotheses>(batch_size_, &beam_hyps_);
   for (size_t i = 0; i < batch_size_; i++) {
-    beam_hyps_[i].Init(parameters.length_penalty, beams.subspan(i * num_beams_, num_beams_));
+    beam_hyps_[i].Init(parameters.search.length_penalty, beams.subspan(i * num_beams_, num_beams_));
   }
 
   next_beam_scores_ptr_ = AllocateArray<float>(batch_beam_size, &next_beam_scores_);
@@ -96,8 +96,8 @@ BeamSearchScorer::BeamSearchScorer(const GeneratorParams& parameters)
   // This ensures that the beams in the same group don't produce same tokens every time.
   std::span<float> const beam_scores = next_beam_scores_;
   for (int i = 0; i < parameters.batch_size; i++) {
-    for (int j = 1; j < parameters.num_beams; j++) {
-      beam_scores[i * parameters.num_beams + j] = -1e9;
+    for (int j = 1; j < parameters.search.num_beams; j++) {
+      beam_scores[i * parameters.search.num_beams + j] = -1e9;
     }
   }
 }

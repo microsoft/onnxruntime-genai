@@ -54,14 +54,23 @@ jobs:
           cmake -G "Visual Studio 17 2022" -A x64 -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} .. -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=TRUE
           cmake --build . --config Release --parallel
 
-      - name: Install the python wheel and test dependencies
+      - name: Install the Python Wheel and Test Dependencies
         run: |
           python -m pip install (Get-ChildItem ("build\wheel\*.whl"))
           python -m pip install -r test\python\requirements.txt
 
-      - name: Run the python tests
+      - name: Run the Python Tests
         run: |
           python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\test_models"
+
+      - name: Add CUDA to PATH
+        run: |
+          echo "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Build the C# API and run the C# tests
+        run: |
+          cd test\csharp
+          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="..\..\build\Release\"
 
       - name: Verify Build Artifacts
         if: always()

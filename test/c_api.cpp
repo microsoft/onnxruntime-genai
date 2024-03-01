@@ -72,6 +72,20 @@ TEST(CAPITests, TokenizerCAPI) {
   CheckResult(OgaTokenizerEncodeBatch(tokenizer, input_strings, std::size(input_strings), &sequences));
   OgaSequencesPtr sequences_ptr{sequences};
 
+  // Encode single decode single
+  {
+    const char* input_string = "She sells sea shells by the sea shore.";
+    OgaSequences* input_sequences;
+    CheckResult(OgaCreateSequences(&input_sequences));
+    CheckResult(OgaTokenizerEncode(tokenizer, input_string, input_sequences));
+    OgaSequencesPtr input_sequences_ptr{input_sequences};
+
+    std::span<const int32_t> sequence{OgaSequencesGetSequenceData(input_sequences, 0), OgaSequencesGetSequenceCount(input_sequences, 0)};
+    const char* out_string;
+    CheckResult(OgaTokenizerDecode(tokenizer, sequence.data(), sequence.size(), &out_string));
+    ASSERT_STREQ(input_string, out_string);
+  }
+
   // Decode Batch
   {
     const char** out_strings;
@@ -138,7 +152,7 @@ TEST(CAPITests, EndToEndPhiBatch) {
   OgaGeneratorParams* params;
   CheckResult(OgaCreateGeneratorParams(model, &params));
   OgaGeneratorParamsPtr params_ptr{params};
-  CheckResult(OgaGeneratorParamsSetMaxLength(params, 20));
+  CheckResult(OgaGeneratorParamsSetSearchNumber(params, "max_length", 20));
   CheckResult(OgaGeneratorParamsSetInputSequences(params, input_sequences));
 
   OgaSequences* output_sequences;
@@ -156,7 +170,6 @@ TEST(CAPITests, EndToEndPhiBatch) {
   }
 #endif
 }
-
 
 TEST(CAPITests, GreedySearchGptFp32CAPI) {
   std::vector<int64_t> input_ids_shape{2, 4};
@@ -181,7 +194,7 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
   OgaGeneratorParams* params;
   CheckResult(OgaCreateGeneratorParams(model, &params));
   OgaGeneratorParamsPtr params_ptr{params};
-  CheckResult(OgaGeneratorParamsSetMaxLength(params, max_length));
+  CheckResult(OgaGeneratorParamsSetSearchNumber(params, "max_length", max_length));
   CheckResult(OgaGeneratorParamsSetInputIDs(params, input_ids.data(), input_ids.size(), sequence_length, batch_size));
 
   OgaGenerator* generator;

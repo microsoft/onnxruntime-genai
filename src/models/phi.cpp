@@ -1,11 +1,11 @@
 #include "../generators.h"
-#include "phi2.h"
+#include "phi.h"
 
 namespace Generators {
 
 Phi2_Model::Phi2_Model(std::unique_ptr<Config> config, OrtEnv& ort_env, const ProviderOptions* provider_options)
     : Model{std::move(config), provider_options} {
-  session_decoder_ = OrtSession::Create(ort_env, (config_->config_path / config_->model.decoder).c_str(), session_options_.get());
+  session_decoder_ = OrtSession::Create(ort_env, (config_->config_path / config_->model.decoder.filename).c_str(), session_options_.get());
 
   InitDeviceAllocator(*session_decoder_);
 }
@@ -14,8 +14,8 @@ std::unique_ptr<State> Phi2_Model::CreateState(RoamingArray<int32_t> sequence_le
   return std::make_unique<Phi2_State>(*this, sequence_lengths, params);
 }
 
-Phi2_State::Phi2_State(const Phi2_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const GeneratorParams& search_params)
-    : State{search_params},
+Phi2_State::Phi2_State(const Phi2_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const GeneratorParams& params)
+    : State{params},
       model_{model},
       position_ids_{model, *this, sequence_lengths_unk} {
   input_ids_.Add();
