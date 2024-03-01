@@ -110,7 +110,7 @@ jobs:
   - task: CopyFiles@2
     displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
     inputs:
-      SourceFolder: '$(Build.SourcesDirectory)/onnxruntime-genai/build/gcc_gpu/release/wheel'
+      SourceFolder: '$(Build.SourcesDirectory)/onnxruntime-genai/build/gcc_cuda/release/wheel'
       Contents: '*.whl'
       TargetFolder: '$(Build.ArtifactStagingDirectory)'
 
