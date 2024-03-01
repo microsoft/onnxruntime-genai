@@ -17,6 +17,24 @@ bool IsSurrogate(char32_t c);
 bool Unescape(const std::string_view& source, std::string& unescaped, bool is_bytes);
 bool UnquoteString(const std::string& str, std::string& unquoted);
 
+inline size_t UTF8Len(char byte1) {
+  const size_t lookup[] = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 3, 4};
+  uint8_t highbits = static_cast<uint8_t>(byte1) >> 4;
+  return lookup[highbits];
+}
+
+inline size_t UTF8Len(char32_t codepoint) {
+  if (codepoint <= 0x7F) {
+    return 1;
+  } else if (codepoint <= 0x7FF) {
+    return 2;
+  } else if (codepoint <= 0xFFFF) {
+    return 3;
+  } else {
+    return 4;
+  }
+}
+
 inline std::u32string FromUTF8(const std::string_view& utf8) {
   std::u32string ucs32;
   ucs32.reserve(utf8.length() / 2);  // a rough estimation for less memory allocation.

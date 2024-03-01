@@ -39,7 +39,7 @@ class RwkvTokenizer : public TokenizerImpl {
  public:
   RwkvTokenizer() = default;
 
-  TfmStatus Onload() override;
+  TfmStatus OnLoad() override;
   TfmStatus Encode(std::string_view input, std::vector<tfmTokenId_t>& ids) const override;
 
   TfmStatus Decode(const span<tfmTokenId_t const>& ids, std::string& text) const override;
