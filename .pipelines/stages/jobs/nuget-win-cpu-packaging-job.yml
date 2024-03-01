@@ -64,7 +64,7 @@ jobs:
       FolderPath: '$(Build.SourcesDirectory)\$(build_dir)\$(BuildConfig)'
       DisplayName: 'ESRP - Sign Native dlls'
       DoEsrp: true
-      Pattern: '*.pyd,*.dll'
+      Pattern: '*.dll'
   #
   - powershell: |
       nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.nuspec -Prop version=0.1.0 -Prop id="Microsoft.ML.OnnxRuntimeGenAI"

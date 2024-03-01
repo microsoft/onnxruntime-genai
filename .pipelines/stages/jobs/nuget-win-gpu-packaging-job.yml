@@ -7,6 +7,7 @@ jobs:
     cuda_version: '12.2'
     cuda_dir: '$(Build.SourcesDirectory)\cuda_sdk'
     ort_version: '1.17.0'
+    build_dir: win-${{ parameters.arch }}
   timeoutInMinutes: 180
   workspace:
     clean: all
@@ -14,26 +15,12 @@ jobs:
   - checkout: self
     clean: true
     submodules: recursive
-  - task: UsePythonVersion@0
-    inputs:
-      versionSpec: $(PythonVersion)
-      addToPath: true
-      architecture: x64
+
   - task: onebranch.pipeline.tsaoptions@1
     displayName: 'OneBranch TSAOptions'
     inputs:
       tsaConfigFilePath: '$(Build.SourcesDirectory)\.config\tsaoptions.json'
       appendSourceBranchName: false
-
-  - task: PythonScript@0
-    inputs:
-      scriptSource: inline
-      script: |
-        import sys
-        import subprocess
-        subprocess.call(['pip', 'install', '-q', 'setuptools', 'wheel', 'build', 'packaging'])
-      workingDirectory: '$(Build.BinariesDirectory)'
-      displayName: 'Install python modules'
 
   - template: steps/set-nightly-build-option-variable-step.yml
 
@@ -72,41 +59,49 @@ jobs:
     displayName: 'Verify CUDA download'
 
   - powershell: |
-      cmake -G "Visual Studio 17 2022" -A x64 -T cuda=$(cuda_dir)\v$(cuda_version) -DCMAKE_BUILD_TYPE=$(BuildConfig) -DUSE_CUDA=TRUE -S . -B build
-      cmake --build build --config $(BuildConfig) --parallel --target python
-    displayName: 'Build pybind with CMake'
+      cmake -G "Visual Studio 17 2022" -A x64 -T cuda=$(cuda_dir)\v$(cuda_version) -DCMAKE_BUILD_TYPE=$(BuildConfig) -DUSE_CUDA=TRUE -S . -B $(build_dir)
+      cmake --build $(build_dir) --config $(BuildConfig) --parallel --target onnxruntime-genai
+    displayName: 'Build C++ with CMake'
+
+  - bash:
+      dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(BuildConfig)" -p:NativeBuildOutputDir="$(build_dir)\$(BuildConfig)"
+    displayName: 'Build CSharp'
+    workingDirectory: '$(Build.SourcesDirectory)\src\csharp'
+
   - powershell: |
-      Get-ChildItem -Path $(Build.SourcesDirectory)\build\wheel\ -Recurse
+      Get-ChildItem -Path $(Build.SourcesDirectory)\$(build_dir)\ -Recurse
   #   Esrp signing
   - template: steps/win-esrp-dll-step.yml
     parameters:
-      FolderPath: '$(Build.SourcesDirectory)\build\wheel\onnxruntime_genai\'
+      FolderPath: '$(Build.SourcesDirectory)\$(build_dir)\$(BuildConfig)'
       DisplayName: 'ESRP - Sign Native dlls'
       DoEsrp: true
-      Pattern: '*.pyd,*.dll'
+      Pattern: '*.dll'
 
-  - bash: |
-      cmake --build build --config $(BuildConfig) --parallel --target PyPackageBuild
-    displayName: 'Build Python Wheel'
+  - powershell: |
+      nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.nuspec -Prop version=0.1.0 -Prop id="Microsoft.ML.OnnxRuntimeGenAI.Gpu"
+      nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec -Prop version=0.1.0 -Prop id="Microsoft.ML.OnnxRuntimeGenAI"
+    displayName: 'Nuget Packaging'
+    workingDirectory: '$(Build.SourcesDirectory)\nuget'
 
   - powershell: |
       Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
-  - task: CopyFiles@2
-    displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
-    inputs:
-      SourceFolder: '$(Build.SourcesDirectory)\build\wheel\'
-      Contents: '*.whl'
-      TargetFolder: '$(Build.ArtifactStagingDirectory)'
+#  - task: CopyFiles@2
+#    displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
+#    inputs:
+#      SourceFolder: '$(Build.SourcesDirectory)\build\wheel\'
+#      Contents: '*.whl'
+#      TargetFolder: '$(Build.ArtifactStagingDirectory)'
 
-  - task: PublishBuildArtifacts@1
-    displayName: 'Publish Artifact: ONNXRuntime Genai python wheel'
-    inputs:
-      ArtifactName: onnxruntime-genai-win-gpu
-
-  - script: |
-      7z x *.whl
-    workingDirectory: '$(Build.ArtifactStagingDirectory)'
-    displayName: 'unzip the package'
+#  - task: PublishBuildArtifacts@1
+#    displayName: 'Publish Artifact: ONNXRuntime Genai python wheel'
+#    inputs:
+#      ArtifactName: onnxruntime-genai-win-gpu
+#
+#  - script: |
+#      7z x *.whl
+#    workingDirectory: '$(Build.ArtifactStagingDirectory)'
+#    displayName: 'unzip the package'
 
   - task: CredScan@3
     displayName: 'Run CredScan'
@@ -114,11 +109,11 @@ jobs:
       debugMode: false
     continueOnError: true
 
-  - task: BinSkim@4
-    displayName: 'Run BinSkim'
-    inputs:
-      AnalyzeTargetGlob: '+:file|$(Build.ArtifactStagingDirectory)\**\*genai.dll;-:file|$(Build.ArtifactStagingDirectory)\**\DirectML.dll'
-    continueOnError: true
+#  - task: BinSkim@4
+#    displayName: 'Run BinSkim'
+#    inputs:
+#      AnalyzeTargetGlob: '+:file|$(Build.ArtifactStagingDirectory)\**\*genai.dll;-:file|$(Build.ArtifactStagingDirectory)\**\DirectML.dll'
+#    continueOnError: true
 
   - task: TSAUpload@2
     displayName: 'TSA upload'
