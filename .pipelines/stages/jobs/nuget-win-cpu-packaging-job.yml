@@ -6,7 +6,10 @@ jobs:
   variables:
     BuildConfig: 'RelWithDebInfo'
     ort_version: '1.17.0'
-    build_dir: win-${{ parameters.arch }}
+    if [eq(parameters.arch, 'x64')]:
+    - build_dir: win-x64
+    if [eq(parameters.arch, 'arm64')]:
+    - build_dir: win-arm64
   timeoutInMinutes: 180
   workspace:
     clean: all
@@ -76,22 +79,22 @@ jobs:
   - powershell: |
       Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
 
-#  - task: CopyFiles@2
-#    displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
-#    inputs:
-#      SourceFolder: '$(Build.SourcesDirectory)\build\wheel\'
-#      Contents: '*.whl'
-#      TargetFolder: '$(Build.ArtifactStagingDirectory)'
+  - task: CopyFiles@2
+    displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
+    inputs:
+      SourceFolder: '$(Build.SourcesDirectory)\build\wheel\'
+      Contents: '*.nupkg'
+      TargetFolder: '$(Build.ArtifactStagingDirectory)'
 
-#  - task: PublishBuildArtifacts@1
-#    displayName: 'Publish Artifact: ONNXRuntime Genai python wheel'
-#    inputs:
-#      ArtifactName: onnxruntime-genai-win-cpu-${{ parameters.arch }}
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Artifact: ONNXRuntime Genai python wheel'
+    inputs:
+      ArtifactName: onnxruntime-genai-win-cpu-${{ parameters.arch }}
 
-#  - script: |
-#      7z x *.whl
-#    workingDirectory: '$(Build.ArtifactStagingDirectory)'
-#    displayName: 'unzip the package'
+  #  - script: |
+  #      7z x *.whl
+  #    workingDirectory: '$(Build.ArtifactStagingDirectory)'
+  #    displayName: 'unzip the package'
 
   - task: CredScan@3
     displayName: 'Run CredScan'
@@ -99,11 +102,11 @@ jobs:
       debugMode: false
     continueOnError: true
 
-#  - task: BinSkim@4
-#    displayName: 'Run BinSkim'
-#    inputs:
-#      AnalyzeTargetGlob: '+:file|$(Build.ArtifactStagingDirectory)\**\*genai.dll;-:file|$(Build.ArtifactStagingDirectory)\**\DirectML.dll'
-#    continueOnError: true
+  #  - task: BinSkim@4
+  #    displayName: 'Run BinSkim'
+  #    inputs:
+  #      AnalyzeTargetGlob: '+:file|$(Build.ArtifactStagingDirectory)\**\*genai.dll;-:file|$(Build.ArtifactStagingDirectory)\**\DirectML.dll'
+  #    continueOnError: true
 
   - task: TSAUpload@2
     displayName: 'TSA upload'

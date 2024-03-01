@@ -86,17 +86,17 @@ jobs:
 
   - powershell: |
       Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
-#  - task: CopyFiles@2
-#    displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
-#    inputs:
-#      SourceFolder: '$(Build.SourcesDirectory)\build\wheel\'
-#      Contents: '*.whl'
-#      TargetFolder: '$(Build.ArtifactStagingDirectory)'
+  - task: CopyFiles@2
+    displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
+    inputs:
+      SourceFolder: '$(Build.SourcesDirectory)\build\wheel\'
+      Contents: '*.nupkg'
+      TargetFolder: '$(Build.ArtifactStagingDirectory)'
 
-#  - task: PublishBuildArtifacts@1
-#    displayName: 'Publish Artifact: ONNXRuntime Genai python wheel'
-#    inputs:
-#      ArtifactName: onnxruntime-genai-win-gpu
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Artifact: ONNXRuntime Genai python wheel'
+    inputs:
+      ArtifactName: onnxruntime-genai-win-gpu
 #
 #  - script: |
 #      7z x *.whl
