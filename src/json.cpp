@@ -202,11 +202,20 @@ void JSON::Parse_Array(Element& element) {
 
 double JSON::Parse_Number() {
   double value = NAN;
+#ifndef USE_CXX17
   auto result = std::from_chars(current_, end_, value);
   if (result.ec != std::errc{}) {
     throw std::runtime_error("Expecting number");
   }
   current_ = result.ptr;
+#else
+  auto end = const_cast<char*>(end_);
+  value = std::strtod(current_, &end);
+  if (current_ == end) {
+    throw std::runtime_error("Expecting number");
+  }
+  current_ = end;
+#endif
   return value;
 }
 
