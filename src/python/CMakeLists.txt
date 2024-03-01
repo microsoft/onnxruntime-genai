@@ -37,11 +37,27 @@ if(BUILD_WHEEL)
     ${WHEEL_TARGET_NAME}
     COMMENT "Copying files to wheel directory: ${WHEEL_TARGET_NAME}"
   )
+  set(auditwheel_exclude_list
+    "libcublas.so.11"
+    "libcublas.so.12"
+    "libcublasLt.so.11"
+    "libcublasLt.so.12"
+    "libcudart.so.11.0"
+    "libcudart.so.12"
+    "libcudnn.so.8"
+    "libcufft.so.10"
+    "libcufft.so.11"
+    "libcurand.so.10"
+  )
+  foreach(item IN LISTS auditwheel_exclude_list)
+    set(item "--exclude ${item}")
+  endforeach()
+
   if(MANYLINUX)
     add_custom_target(PyPackageBuild ALL
       COMMAND ${PYTHON_EXECUTABLE} -m pip wheel .
       COMMAND ${CMAKE_COMMAND} -E remove ${WHEEL_TARGET_NAME}/onnxruntime_genai.cpython-*
-      COMMAND auditwheel repair onnxruntime_genai*linux_x86_64.whl -w ${WHEEL_FILES_DIR} --exclude llibcublas.* --exclude libcublasLt.* --exclude libcudnn.* --exclude libcurand.* --exclude libcufft.* --exclude libcudart.*
+      COMMAND auditwheel repair onnxruntime_genai*linux_x86_64.whl -w ${WHEEL_FILES_DIR} ${auditwheel_exclude_list}
       WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
       COMMENT "Building wheel with MANYLINUX on ${WHEEL_FILES_DIR}"
     )
