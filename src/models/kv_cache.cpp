@@ -117,7 +117,7 @@ KV_Cache::KV_Cache(const Model& model, State& state)
     : model_{model},
       state_{state},
       layer_count_{model_.config_->model.decoder.num_hidden_layers},
-      shared_past_present_{model_.config_->model.decoder.kv_shared_past_present && state_.params_.search.num_beams == 1 && model_.device_type_ == DeviceType::CUDA},
+      past_present_share_buffer_{state_.params_.search.past_present_share_buffer && state_.params_.search.num_beams == 1 && model_.device_type_ == DeviceType::CUDA},
       shape_{state_.params_.BatchBeamSize(), model.config_->model.decoder.num_key_value_heads, 0, model.config_->model.decoder.head_size} {
   pasts_.resize(layer_count_ * 2);
   presents_.reserve(layer_count_ * 2);
@@ -141,7 +141,7 @@ KV_Cache::KV_Cache(const Model& model, State& state)
   empty_past_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
 
   // Set the size after empty_past_ has been created with 0 for this field
-  if (shared_past_present_)
+  if (past_present_share_buffer_)
     shape_[2] = state_.params_.search.max_length;
   else
     shape_[2] = state_.params_.sequence_length;
@@ -173,7 +173,7 @@ void KV_Cache::Add() {
   }
 
   // For shared_past_present, the past & presents never change, so set the inputs to the present values (outputs are already set above)
-  if (shared_past_present_) {
+  if (past_present_share_buffer_) {
     for (int i = 0; i < layer_count_ * 2; ++i) {
       state_.inputs_[input_index_ + i] = presents_[i].get();
     }
@@ -181,7 +181,7 @@ void KV_Cache::Add() {
 }
 
 void KV_Cache::Update(std::span<const int32_t> beam_indices, int current_length) {
-  if (shared_past_present_)
+  if (past_present_share_buffer_)
     return;
 
   for (int i = 0; i < layer_count_ * 2; i++) {
