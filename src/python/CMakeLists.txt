@@ -33,14 +33,24 @@ if(BUILD_WHEEL)
   file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_FILES}")
   add_custom_command(TARGET python POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy
-    $<TARGET_FILE:onnxruntime-genai> ${onnxruntime_libs} $<TARGET_FILE:python>
+    ${onnxruntime_libs} $<TARGET_FILE:python>
     ${WHEEL_TARGET_NAME}
     COMMENT "Copying files to wheel directory: ${WHEEL_TARGET_NAME}"
   )
-  add_custom_target(PyPackageBuild ALL
-    COMMAND "${PYTHON_EXECUTABLE}" -m pip wheel .
-    WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
-    COMMENT "Building wheel on ${WHEEL_FILES_DIR}"
-  )
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_custom_target(PyPackageBuild ALL
+      COMMAND ${PYTHON_EXECUTABLE} -m pip wheel .
+      COMMAND ${CMAKE_COMMAND} -E remove ${WHEEL_FILES_DIR}/onnxruntime_genai.cpython-*
+      COMMAND auditwheel repair ${WHEEL_FILES_DIR}/onnxruntime_genai-*.whl -w ${WHEEL_FILES_DIR} --exclude llibcublas.* libcublasLt.* libcudnn.* libcurand.* libcufft.* libcudart.*
+      WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
+      COMMENT "Building wheel on ${WHEEL_FILES_DIR}"
+    )
+  else()
+    add_custom_target(PyPackageBuild ALL
+      COMMAND ${PYTHON_EXECUTABLE} -m pip wheel .
+      WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
+      COMMENT "Building wheel on ${WHEEL_FILES_DIR}"
+    )
+  endif()
   add_dependencies(PyPackageBuild python)
 endif()
