@@ -7,7 +7,6 @@
 Run this script to create the desired ONNX model.
 """
 
-from gguf_model import GGUFModel
 from onnx import helper, numpy_helper, TensorProto, external_data_helper, save_model
 from onnxruntime.quantization.matmul_4bits_quantizer import MatMul4BitsQuantizer
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GenerationConfig
@@ -154,7 +153,6 @@ class Model:
                 "eos_token_id": config.eos_token_id,
                 "pad_token_id": config.pad_token_id if hasattr(config, "pad_token_id") and config.pad_token_id != None else config.eos_token_id,
                 "type": self.model_type[ : self.model_type.find("For")].lower(),
-                "unk_token_id": config.unk_token_id if hasattr(config, "unk_token_id") and config.unk_token_id != None else config.eos_token_id + 1,
                 "vocab_size": self.vocab_size,
             },
             "search": {
@@ -260,11 +258,6 @@ class Model:
     def make_external_tensor(self, np_data, name, **kwargs):
         tensor = numpy_helper.from_array(np_data)
         tensor.name = name
-
-        print(f"Tensor name: {name}")
-        print(f"Tensor data: {np_data}")
-        print(f"Tensor dtype: {np_data.dtype}")
-        print(f"Tensor shape: {np_data.shape}")
 
         filename = f"{name}.bin"
         external_data_helper.set_external_data(tensor, location=filename)
@@ -814,6 +807,7 @@ class Model:
         # Load weights of original model
         if input_path.endswith(".gguf"):
             # Load GGUF model
+            from gguf_model import GGUFModel
             model = GGUFModel.from_pretrained(self.model_type, input_path, self.head_size, self.hidden_size, self.intermediate_size, self.num_attn_heads, self.num_kv_heads, self.vocab_size)
             self.layernorm_attrs["add_offset"] = 0  # add offset already done for GGUF models
         else:

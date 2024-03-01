@@ -80,38 +80,26 @@ class GGUFModel:
         self.lm_head = GGUFTensorModule()
         self.layers = []
 
-        from transformers import AutoModelForCausalLM
-        import numpy as np
-        pt_model = AutoModelForCausalLM.from_pretrained("google/gemma-7b", cache_dir="/kvaishnavi_data/kvaishnavi/")
-
         layer_id = 0
-        module = GGUFDecoderLayer(layer_id)
-        eps = 1e-2
-        
+        module = GGUFDecoderLayer(layer_id)        
         for tensor in sorted(reader.tensors, key=lambda t: t.name):
             name = tensor.name
-            print(name)
 
             if name == "token_embd.weight":
-                # official GGUF file for Gemma uses a vocab size of '256128' instead of the config's default value of '256000'
+                # Remove tensor data's padding via `reduce` when GGUF model's vocab size is larger than the config's vocab size
                 embedding_shape = [vocab_size, hidden_size]
                 self.embedding.weight.tensor = tensor.data[ : reduce(lambda x, y: x*y, embedding_shape)].reshape(embedding_shape)
-                #assert np.allclose(pt_model.model.embed_tokens.weight.detach().numpy().astype('float16'), self.embedding.weight.tensor, rtol=eps, atol=eps)
             elif name == "output_norm.weight":
                 self.final_norm.weight.tensor = tensor.data
-                #assert np.allclose(pt_model.model.norm.weight.detach().numpy().astype('float32') + 1, self.final_norm.weight.tensor, rtol=eps, atol=eps)
             elif name == "output_norm.bias":
                 self.final_norm.add_bias()
                 self.final_norm.bias.tensor = tensor.data
-                # #assert np.allclose(pt_model.model.norm.bias.detach().numpy().astype('float32'), self.final_norm.bias.tensor, rtol=eps, atol=eps)
             elif name == "output.weight":
                 lm_head_shape = [vocab_size, hidden_size]
                 self.lm_head.weight.tensor = tensor.data.reshape(lm_head_shape)
-                # #assert np.allclose(pt_model.lm_head.weight.detach().numpy().astype('float16'), self.lm_head.weight.tensor, rtol=eps, atol=eps)
             elif name == "output.bias":
                 self.lm_head.add_bias()
                 self.lm_head.bias.tensor = tensor.data
-                # #assert np.allclose(pt_model.lm_head.bias.detach().numpy().astype('float32'), self.lm_head.bias.tensor, rtol=eps, atol=eps)
             else:
                 curr_layer_id = int(name.split(".")[1])
                 if curr_layer_id != layer_id:
@@ -125,91 +113,73 @@ class GGUFModel:
                 if bool(re.match(r"^blk\.\d+\.attn_norm\.weight$", name)):
                     # blk.layer_id.attn_norm.weight
                     module.input_layernorm.weight.tensor = tensor.data
-                    #assert np.allclose(pt_model.model.layers[layer_id].input_layernorm.weight.detach().numpy().astype('float32') + 1, module.input_layernorm.weight.tensor, rtol=eps, atol=eps)
                 elif bool(re.match(r"^blk\.\d+\.attn_norm\.bias$", name)):
                     # blk.layer_id.attn_norm.bias
                     module.input_layernorm.add_bias()
                     module.input_layernorm.bias.tensor = tensor.data
-                    # #assert np.allclose(pt_model.model.layers[layer_id].input_layernorm.bias.detach().numpy().astype('float32'), module.input_layernorm.bias.tensor, rtol=eps, atol=eps)
                 elif bool(re.match(r"^blk\.\d+\.attn_q\.weight$", name)):
                     # blk.layer_id.attn_q.weight
                     q_shape = [head_size * num_attn_heads, hidden_size]
                     module.self_attn.q_proj.weight.tensor = tensor.data.reshape(q_shape)
-                    #assert np.allclose(pt_model.model.layers[layer_id].self_attn.q_proj.weight.detach().numpy().astype('float16'), module.self_attn.q_proj.weight.tensor, rtol=eps, atol=eps)
                 elif bool(re.match(r"^blk\.\d+\.attn_q\.bias$", name)):
                     # blk.layer_id.attn_q.bias
                     module.self_attn.q_proj.add_bias()
                     module.self_attn.q_proj.bias.tensor = tensor.data
-                    # #assert np.allclose(pt_model.model.layers[layer_id].self_attn.q_proj.bias.detach().numpy().astype('float32'), module.self_attn.q_proj.bias.tensor, rtol=eps, atol=eps)
                 elif bool(re.match(r"^blk\.\d+\.attn_k\.weight$", name)):
                     # blk.layer_id.attn_k.weight
                     k_shape = [head_size * num_kv_heads, hidden_size]
                     module.self_attn.k_proj.weight.tensor = tensor.data.reshape(k_shape)
-                    #assert np.allclose(pt_model.model.layers[layer_id].self_attn.k_proj.weight.detach().numpy().astype('float16'), module.self_attn.k_proj.weight.tensor, rtol=eps, atol=eps)
                 elif bool(re.match(r"^blk\.\d+\.attn_k\.bias$", name)):
                     # blk.layer_id.attn_k.bias
                     module.self_attn.k_proj.add_bias()
                     module.self_attn.k_proj.bias.tensor = tensor.data
-                    # #assert np.allclose(pt_model.model.layers[layer_id].self_attn.k_proj.bias.detach().numpy().astype('float32'), module.self_attn.k_proj.bias.tensor, rtol=eps, atol=eps)
                 elif bool(re.match(r"^blk\.\d+\.attn_v\.weight$", name)):
                     # blk.layer_id.attn_v.weight
                     v_shape = [head_size * num_kv_heads, hidden_size]
                     module.self_attn.v_proj.weight.tensor = tensor.data.reshape(v_shape)
-                    #assert np.allclose(pt_model.model.layers[layer_id].self_attn.v_proj.weight.detach().numpy().astype('float16'), module.self_attn.v_proj.weight.tensor, rtol=eps, atol=eps)
                 elif bool(re.match(r"^blk\.\d+\.attn_v\.bias$", name)):
                     # blk.layer_id.attn_v.bias
                     module.self_attn.v_proj.add_bias()
                     module.self_attn.v_proj.bias.tensor = tensor.data
-                    # #assert np.allclose(pt_model.model.layers[layer_id].self_attn.v_proj.bias.detach().numpy().astype('float16'), module.self_attn.v_proj.bias.tensor, rtol=eps, atol=eps)
                 elif bool(re.match(r"^blk\.\d+\.attn_output\.weight$", name)):
                     # blk.layer_id.attn_output.weight
                     o_shape = [hidden_size, head_size * num_attn_heads]
                     module.self_attn.o_proj.weight.tensor = tensor.data.reshape(o_shape)
-                    #assert np.allclose(pt_model.model.layers[layer_id].self_attn.o_proj.weight.detach().numpy().astype('float16'), module.self_attn.o_proj.weight.tensor, rtol=eps, atol=eps)
                 elif bool(re.match(r"^blk\.\d+\.attn_output\.bias$", name)):
                     # blk.layer_id.attn_output.bias
                     module.self_attn.o_proj.add_bias()
                     module.self_attn.o_proj.bias.tensor = tensor.data
-                    # #assert np.allclose(pt_model.model.layers[layer_id].self_attn.o_proj.bias.detach().numpy().astype('float32'), module.self_attn.o_proj.bias.tensor, rtol=eps, atol=eps)
                 elif bool(re.match(r"^blk\.\d+\.ffn_norm\.weight$", name)):
                     # blk.layer_id.ffn_norm.weight
                     module.post_attention_layernorm.weight.tensor = tensor.data
-                    #assert np.allclose(pt_model.model.layers[layer_id].post_attention_layernorm.weight.detach().numpy().astype('float32') + 1, module.post_attention_layernorm.weight.tensor, rtol=eps, atol=eps)
                 elif bool(re.match(r"^blk\.\d+\.ffn_norm\.bias$", name)):
                     # blk.layer_id.ffn_norm.bias
                     module.post_attention_layernorm.add_bias()
                     module.post_attention_layernorm.bias.tensor = tensor.data
-                    # #assert np.allclose(pt_model.model.layers[layer_id].post_attention_layernorm.bias.detach().numpy().astype('float32'), module.post_attention_layernorm.weight.tensor, rtol=eps, atol=eps)
                 elif bool(re.match(r"^blk\.\d+\.ffn_gate\.weight$", name)):
                     # blk.layer_id.ffn_gate.weight
                     gate_shape = [intermediate_size, hidden_size]
                     module.mlp.gate_proj.weight.tensor = tensor.data.reshape(gate_shape)
-                    #assert np.allclose(pt_model.model.layers[layer_id].mlp.gate_proj.weight.detach().numpy().astype('float16'), module.mlp.gate_proj.weight.tensor, rtol=eps, atol=eps)
                 elif bool(re.match(r"^blk\.\d+\.ffn_gate\.bias$", name)):
                     # blk.layer_id.ffn_gate.bias
                     module.mlp.gate_proj.add_bias()
                     module.mlp.gate_proj.bias.tensor = tensor.data
-                    # #assert np.allclose(pt_model.model.layers[layer_id].mlp.gate_proj.bias.detach().numpy().astype('float32'), module.mlp.gate_proj.bias.tensor, rtol=eps, atol=eps)
                 elif bool(re.match(r"^blk\.\d+\.ffn_up\.weight$", name)):
                     # blk.layer_id.ffn_up.weight
                     up_shape = [intermediate_size, hidden_size]
                     module.mlp.up_proj.weight.tensor = tensor.data.reshape(up_shape)
-                    #assert np.allclose(pt_model.model.layers[layer_id].mlp.up_proj.weight.detach().numpy().astype('float16'), module.mlp.up_proj.weight.tensor, rtol=eps, atol=eps)
                 elif bool(re.match(r"^blk\.\d+\.ffn_up\.bias$", name)):
                     # blk.layer_id.ffn_up.bias
                     module.mlp.up_proj.add_bias()
                     module.mlp.up_proj.bias.tensor = tensor.data
-                    # #assert np.allclose(pt_model.model.layers[layer_id].mlp.up_proj.bias.detach().numpy().astype('float32'), module.mlp.up_proj.bias.tensor, rtol=eps, atol=eps)
                 elif bool(re.match(r"^blk\.\d+\.ffn_down\.weight$", name)):
                     # blk.layer_id.ffn_down.weight
                     down_shape = [hidden_size, intermediate_size]
                     module.mlp.down_proj.weight.tensor = tensor.data.reshape(down_shape)
-                    #assert np.allclose(pt_model.model.layers[layer_id].mlp.down_proj.weight.detach().numpy().astype('float16'), module.mlp.down_proj.weight.tensor, rtol=eps, atol=eps)
                 elif bool(re.match(r"^blk\.\d+\.ffn_down\.bias$", name)):
                     # blk.layer_id.ffn_down.bias
                     module.mlp.down_proj.add_bias()
                     module.mlp.down_proj.bias.tensor = tensor.data
-                    # #assert np.allclose(pt_model.model.layers[layer_id].mlp.down_proj.bias.detach().numpy().astype('float32'), module.mlp.down_proj.bias.tensor, rtol=eps, atol=eps)
                 else:
                     raise NotImplementedError(f"{name} in your GGUF model is not recognized")
         
@@ -220,7 +190,6 @@ class GGUFModel:
         if self.lm_head.weight.tensor is None:
             # Embedding and LM head share same weights + biases (lm_head.weight == embedding.weight and lm_head.bias == embedding.bias)
             self.lm_head.weight.tensor = self.embedding.weight.tensor
-            #assert np.allclose(pt_model.lm_head.weight.detach().numpy().astype('float16'), self.lm_head.weight.tensor, rtol=eps, atol=eps)
             if self.lm_head.bias is not None:
                 self.lm_head.bias.tensor = self.embedding.bias.tensor
     
