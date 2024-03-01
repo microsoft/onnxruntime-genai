@@ -17,6 +17,7 @@ test/csharp/obj/
 cache_dir
 *.onnx
 *.onnx.data
+__pycache__
 
 !test/test_models/hf-internal-testing/
 !test/test_models/hf-internal-testing/tiny-random-gpt2*/*.onnx
