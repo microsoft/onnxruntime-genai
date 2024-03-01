@@ -85,7 +85,6 @@ class BPETokenizer : public TokenizerImpl {
   uint32_t eos_token_id_{};
   uint32_t pad_token_id_{};
 
-
   struct {
     bool add_prefix_space{};
     bool skip_special_tokens_{true};
