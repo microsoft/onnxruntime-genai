@@ -68,6 +68,8 @@ jobs:
   #
   - powershell: |
       nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.nuspec -Prop version=0.1.0 -Prop id="Microsoft.ML.OnnxRuntimeGenAI"
+      nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec -Prop version=0.1.0 -Prop id="Microsoft.ML.OnnxRuntimeGenAI"
+
     displayName: 'Nuget Packaging'
     workingDirectory: '$(Build.SourcesDirectory)\nuget'
 
