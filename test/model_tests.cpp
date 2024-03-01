@@ -7,11 +7,11 @@
 #include <models/model.h>
 #include <iostream>
 #include <random>
-#ifdef TODO_FIX_IT
 #ifndef MODEL_PATH
 #define MODEL_PATH "../../test/test_models/"
 #endif
 std::unique_ptr<OrtEnv> g_ort_env;
+#ifdef TODO_FIX_IT
 
 // To generate this file:
 // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
@@ -19,8 +19,7 @@ std::unique_ptr<OrtEnv> g_ort_env;
 static const std::pair<const char*, const char*> c_tiny_gpt2_model_paths[] = {
     {MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32", "fp32"},
     {MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp16", "fp16"},
-};
-
+}
 TEST(ModelTests, GreedySearchGptFp32) {
   std::vector<int64_t> input_ids_shape{2, 4};
   std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
