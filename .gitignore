@@ -1,13 +1,9 @@
 ﻿# Files to tell git to ignore
 
 .vscode
-/src/.vs
-/src/csharp/.vs
-src/csharp/bin/
-src/csharp/obj/
-test/csharp/.vs
-test/csharp/bin/
-test/csharp/obj/
+*.vs
+*bin/
+*obj/
 /ort
 /build
 /test/test_models/*
@@ -18,6 +14,7 @@ cache_dir
 example-models
 *.onnx
 *.onnx.data
+benchmark/python/*.csv
 
 !test/test_models/hf-internal-testing/
 !test/test_models/hf-internal-testing/tiny-random-gpt2*/*.onnx

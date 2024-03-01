@@ -129,10 +129,6 @@ struct Model_Element : JSON::Element {
   void OnString(std::string_view name, std::string_view value) override {
     if (name == "type") {
       v_.type = value;
-    } else if (name == "logits_type") {
-      v_.logits_type = TranslateTensorType(value);
-    } else if (name == "kv_type") {
-      v_.kv_type = TranslateTensorType(value);
     } else
       throw JSON::unknown_value_error{};
   }
@@ -209,7 +205,9 @@ struct Search_Element : JSON::Element {
   }
 
   void OnBool(std::string_view name, bool value) override {
-    if (name == "early_stopping") {
+    if (name == "past_present_share_buffer") {
+      v_.past_present_share_buffer = value;
+    } else if (name == "early_stopping") {
       v_.early_stopping = value;
     } else
       throw JSON::unknown_value_error{};
@@ -218,6 +216,14 @@ struct Search_Element : JSON::Element {
  private:
   Config::Search& v_;
 };
+
+void SetSearchNumber(Config::Search& search, std::string_view name, double value) {
+  Search_Element(search).OnNumber(name, value);
+}
+
+void SetSearchBool(Config::Search& search, std::string_view name, bool value) {
+  Search_Element(search).OnBool(name, value);
+}
 
 struct Root_Element : JSON::Element {
   explicit Root_Element(Config& config) : config_{config} {}
@@ -279,6 +285,12 @@ void ParseConfig(const std::filesystem::path& filename, Config& config) {
 
 Config::Config(const std::filesystem::path& path) : config_path{path} {
   ParseConfig(path / "genai_config.json", *this);
+
+  if (model.context_length == 0)
+    throw std::runtime_error("model context_length is 0 or was not set. It must be greater than 0");
+
+  if (search.max_length == 0)
+    search.max_length = model.context_length;
 }
 
 }  // namespace Generators

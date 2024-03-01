@@ -11,7 +11,7 @@
 
 namespace Generators {
 
-State::State(const GeneratorParams& search_params) : search_params_{search_params} {
+State::State(const GeneratorParams& params) : params_{params} {
 }
 
 void State::Run(OrtSession& session) {
@@ -138,6 +138,30 @@ Ort::Allocator* GetCudaAllocator(OrtSession& session) {
 }
 #endif
 
+SessionInfo::SessionInfo(OrtSession& session) {
+  auto input_names = session.GetInputNames();
+  std::vector<ONNXTensorElementDataType> input_types(input_names.size());
+  for (size_t i = 0; i < input_types.size(); i++) {
+    auto input_type = session.GetInputTypeInfo(i)->GetTensorTypeAndShapeInfo().GetElementType();
+    inputs_.emplace(std::make_pair(std::move(input_names[i]), input_type));
+  }
+
+  auto output_names = session.GetOutputNames();
+  std::vector<ONNXTensorElementDataType> output_types(output_names.size());
+  for (size_t i = 0; i < output_types.size(); i++) {
+    auto output_type = session.GetOutputTypeInfo(i)->GetTensorTypeAndShapeInfo().GetElementType();
+    outputs_.emplace(std::make_pair(std::move(output_names[i]), output_type));
+  }
+}
+
+ONNXTensorElementDataType SessionInfo::GetInputDataType(const std::string& name) const {
+  return inputs_.find(name)->second;
+}
+
+ONNXTensorElementDataType SessionInfo::GetOutputDataType(const std::string& name) const {
+  return outputs_.find(name)->second;
+}
+
 Model::Model(std::unique_ptr<Config> config, const ProviderOptions* provider_options) : config_{std::move(config)} {
   session_options_ = OrtSessionOptions::Create();
 
@@ -161,6 +185,7 @@ void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
     allocator_device_ = GetCudaAllocator(session);
   }
 #endif
+  session_info_ = std::make_unique<SessionInfo>(session);
 }
 
 std::unique_ptr<Tokenizer> Model::CreateTokenizer() const {

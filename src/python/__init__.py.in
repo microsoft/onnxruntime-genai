@@ -8,9 +8,9 @@ try:
     # it could be because the cuda dlls could not be found on windows.
     # Try adding the cuda dlls path to the dll search directory
     # and import onnxruntime_genai again.
-    from onnxruntime_genai.@TARGET_NAME@ import *
+    from onnxruntime_genai.@PACKAGE_DIR_NAME@ import *
 except ImportError:
     _dll_directory.add_dll_directory()
-    from onnxruntime_genai.@TARGET_NAME@ import *
+    from onnxruntime_genai.@PACKAGE_DIR_NAME@ import *
 
 __version__ = "@VERSION_INFO@"
