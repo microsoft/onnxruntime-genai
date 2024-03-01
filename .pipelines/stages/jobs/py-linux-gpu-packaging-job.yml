@@ -118,7 +118,7 @@ jobs:
     displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
     inputs:
       SourceFolder: '$(Build.SourcesDirectory)/onnxruntime-genai/build/gcc_cuda/release/wheel'
-      Contents: '*.whl'
+      Contents: '*manylinux*.whl'
       TargetFolder: '$(Build.ArtifactStagingDirectory)'
 
   - task: PublishBuildArtifacts@1
