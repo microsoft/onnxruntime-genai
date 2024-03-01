@@ -7,7 +7,7 @@ jobs:
     cuda_version: '12.2'
     cuda_dir: '$(Build.SourcesDirectory)\cuda_sdk'
     ort_version: '1.17.0'
-    build_dir: win-${{ parameters.arch }}
+    build_dir: win-x64
   timeoutInMinutes: 180
   workspace:
     clean: all
@@ -80,7 +80,7 @@ jobs:
 
   - powershell: |
       nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.nuspec -Prop version=0.1.0 -Prop id="Microsoft.ML.OnnxRuntimeGenAI.Gpu"
-      nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec -Prop version=0.1.0 -Prop id="Microsoft.ML.OnnxRuntimeGenAI"
+      nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec -Prop version=0.1.0 -Prop id="Microsoft.ML.OnnxRuntimeGenAI.Gpu"
     displayName: 'Nuget Packaging'
     workingDirectory: '$(Build.SourcesDirectory)\nuget'
 
