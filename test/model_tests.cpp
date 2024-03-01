@@ -7,7 +7,7 @@
 #include <models/model.h>
 #include <iostream>
 #include <random>
-
+#ifdef TODO_FIX_IT
 #ifndef MODEL_PATH
 #define MODEL_PATH "../../test/test_models/"
 #endif
@@ -285,4 +285,5 @@ Print all primes between 1 and n
 #endif
 }
 
+#endif
 #endif

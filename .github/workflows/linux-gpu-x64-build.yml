@@ -70,7 +70,7 @@ jobs:
             --gpus all \
             --rm \
             --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-            -w /onnxruntime_src onnxruntimegpubuild bash -c "/usr/bin/cmake -DENABLE_TESTS=OFF -DCMAKE_CUDA_ARCHITECTURES=86 --preset linux_gcc_cuda_release -DTEST_PHI2=False"
+            -w /onnxruntime_src onnxruntimegpubuild bash -c "/usr/bin/cmake -DCMAKE_CUDA_ARCHITECTURES=86 --preset linux_gcc_cuda_release -DTEST_PHI2=False"
 
       - name: Docker -- Build with CMake and GCC
         run: |
