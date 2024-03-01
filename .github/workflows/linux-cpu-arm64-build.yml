@@ -36,12 +36,14 @@ jobs:
       - name: Build with CMake and GCC
         run: |
           set -e -x
+          az login --identity -u /subscriptions/00c06639-6ee4-454e-8058-8d8b1703bd87/resourcegroups/proj-onnxruntime-dev/providers/Microsoft.ManagedIdentity/userAssignedIdentities/ortcibuild_readonly
+          az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
           python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/inference/aarch64/default/cpu/Dockerfile \
             --context tools/ci_build/github/linux/docker/inference/aarch64/default/cpu \
             --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
             --container-registry onnxruntimebuildcache \
-            --repository onnxruntimecpubuild
-          docker run --rm --volume $GITHUB_WORKSPACE:/onnxruntime_src  -w /onnxruntime_src onnxruntimecpubuild bash -c "echo $PATH && /usr/bin/cmake --preset linux_gcc_cpu_release && /usr/bin/cmake --build --preset linux_gcc_cpu_release"
+            --repository onnxruntimecpubuild_arm64_gha
+          docker run --rm --volume $GITHUB_WORKSPACE:/onnxruntime_src  -w /onnxruntime_src onnxruntimecpubuild_arm64_gha bash -c "echo $PATH && /usr/bin/cmake --preset linux_gcc_cpu_release && /usr/bin/cmake --build --preset linux_gcc_cpu_release"
 
       # TODO: Re-enable these tests when python version is updated
       # - name: Install the onnxruntime-genai Python wheel and run Python tests
@@ -50,4 +52,4 @@ jobs:
       #     docker run \
       #       --rm \
       #       --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-      #       -w /onnxruntime_src onnxruntimecpubuild bash -c "python3 -m pip install /onnxruntime_src/build/gcc_cpu/release/wheel/onnxruntime_genai*.whl && python3 -m pip install -r test/python/requirements.txt && python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models"
+      #       -w /onnxruntime_src onnxruntimecpubuild_arm64_gha bash -c "python3 -m pip install /onnxruntime_src/build/gcc_cpu/release/wheel/onnxruntime_genai*.whl && python3 -m pip install -r test/python/requirements.txt && python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models"
