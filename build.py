@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+import warnings
 
 
 def is_windows():
@@ -162,7 +163,8 @@ def build(
 
     if not skip_csharp:
         if not is_windows():
-            raise RuntimeError("C# API is only supported on Windows.")
+            warnings.warn('C# API is only supported on Windows.', UserWarning)
+            return
 
         dotnet = resolve_executable_path("dotnet")
         configuration = f"/p:Configuration={config}"
