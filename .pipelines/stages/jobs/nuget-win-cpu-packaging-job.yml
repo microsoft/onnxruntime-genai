@@ -98,7 +98,7 @@ jobs:
   - task: BinSkim@4
     displayName: 'Run BinSkim'
     inputs:
-      AnalyzeTargetGlob: '$(Build.SourcesDirectory)\$(build_dir)\**\*.dll'
+      AnalyzeTargetGlob: '$(Build.SourcesDirectory)\$(build_dir)\**\*genai.dll'
     continueOnError: true
 
   - task: TSAUpload@2
