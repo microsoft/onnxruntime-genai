@@ -52,15 +52,16 @@ if(BUILD_WHEEL)
     "libnvinfer_plugin.so.8"
     "libnvonnxparser.so.8"
   )
+  set(modified_exclude_list)
   foreach(item IN LISTS auditwheel_exclude_list)
-    set(item "--exclude ${item}")
+    list(APPEND modified_exclude_list "--exclude ${item}")
   endforeach()
 
   if(MANYLINUX)
     add_custom_target(PyPackageBuild ALL
       COMMAND ${PYTHON_EXECUTABLE} -m pip wheel .
       COMMAND ${CMAKE_COMMAND} -E remove ${WHEEL_TARGET_NAME}/onnxruntime_genai.cpython-*
-      COMMAND auditwheel repair onnxruntime_genai*linux_x86_64.whl -w ${WHEEL_FILES_DIR} ${auditwheel_exclude_list}
+      COMMAND auditwheel repair onnxruntime_genai*linux_x86_64.whl -w ${WHEEL_FILES_DIR} ${modified_exclude_list}
       WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
       COMMENT "Building wheel with MANYLINUX on ${WHEEL_FILES_DIR}"
     )
