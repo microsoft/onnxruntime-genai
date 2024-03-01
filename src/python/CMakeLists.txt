@@ -41,7 +41,7 @@ if(BUILD_WHEEL)
     add_custom_target(PyPackageBuild ALL
       COMMAND ${PYTHON_EXECUTABLE} -m pip wheel .
       COMMAND ${CMAKE_COMMAND} -E remove ${WHEEL_TARGET_NAME}/onnxruntime_genai.cpython-*
-      COMMAND auditwheel repair onnxruntime_genai-*linux_[a-z].whl -w ${WHEEL_FILES_DIR} --exclude llibcublas.* --exclude libcublasLt.* --exclude libcudnn.* --exclude libcurand.* --exclude libcufft.* --exclude libcudart.*
+      COMMAND auditwheel repair onnxruntime_genai*linux_[a-z].whl -w ${WHEEL_FILES_DIR} --exclude llibcublas.* --exclude libcublasLt.* --exclude libcudnn.* --exclude libcurand.* --exclude libcufft.* --exclude libcudart.*
       WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
       COMMENT "Building wheel with MANYLINUX on ${WHEEL_FILES_DIR}"
     )
