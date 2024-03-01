@@ -13,6 +13,12 @@
 
 namespace tfm {
 
+enum class BpeModelType {
+  kBmtGPT2,
+  kBmtCLIP,
+  kBmtSPM,
+};
+
 class BPETokenizer : public TokenizerImpl {
  public:
   BPETokenizer();
@@ -25,21 +31,28 @@ class BPETokenizer : public TokenizerImpl {
   };
 
  public:
-  TfmStatus Onload() override;
+  static bool IsSupportedModel(const std::string_view& model_name);
+  TfmStatus OnLoad() override;
   TfmStatus Encode(std::string_view input, std::vector<tfmTokenId_t>& ids) const override;
   TfmStatus Decode(const span<tfmTokenId_t const>& ids, std::string& text) const override;
   std::string_view ModelName() const;
+  BpeModelType ModelType() const;
 
   TfmStatus Id2Token(tfmTokenId_t id, std::string& token, DecoderState** state) const override;
 
  private:
   TfmStatus Id2Token(tfmTokenId_t id, std::string& token, bool skip_special_tokens, bool& f_special_last) const;
+  TfmStatus SpmId2Token(tfmTokenId_t id, std::string& token, bool& f_special_last) const;
 
   using OffsetMappingType = std::list<std::pair<size_t, size_t>>;
   std::vector<tfmTokenId_t> Encode(std::string_view sv_input,
                                    int64_t max_length,
                                    bool compute_offset_mapping,
                                    std::list<OffsetMappingType>& offset_map) const;
+  std::vector<tfmTokenId_t> SpmEncode(std::string_view sv_input,
+                                      int64_t max_length,
+                                      bool compute_offset_mapping,
+                                      std::list<OffsetMappingType>& offset_map) const;
   void CreateByteEncoder();
   void LoadPredefinedTokens(const TokenConfig& config);
   TfmStatus DecodeExtraArgs(const simdjson::dom::element& root);
@@ -52,6 +65,9 @@ class BPETokenizer : public TokenizerImpl {
   std::string unk_token_{"<|endoftext|>"};
   std::string pad_token_{};  // no padding by default
 
+  bool add_dummpy_prefix_{};  // for SPM
+  bool add_bos_token_{};
+  bool add_eos_token_{};
   bool en_normalization_{};
   std::vector<std::string_view> arr_vocab_;
   std::map<int64_t, std::string> added_tokens_;
@@ -68,6 +84,7 @@ class BPETokenizer : public TokenizerImpl {
   uint32_t bos_token_id_{};
   uint32_t eos_token_id_{};
   uint32_t pad_token_id_{};
+
 
   struct {
     bool add_prefix_space{};

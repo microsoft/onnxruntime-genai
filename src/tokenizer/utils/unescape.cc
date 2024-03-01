@@ -43,7 +43,7 @@ std::string EncodeUTF8Char(char32_t utf8_char) {
 
 bool ValidateUTF8(const std::string& data) {
   int cnt = 0;
-  for (auto i = 0; i < data.size(); i++) {
+  for (size_t i = 0; i < data.size(); i++) {
     int x = data[i];
     if (!cnt) {
       if ((x >> 5) == 0b110) {

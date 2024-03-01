@@ -18,7 +18,7 @@ class TokenizerImpl : public Tokenizer {
   void SetDataDir(const std::string& dir) { tokenizer_dir_ = dir; }
 
  public:
-  TfmStatus Onload() override;
+  TfmStatus OnLoad() override;
 
   TfmStatus BatchEncode(const std::vector<std::string_view>& input, std::vector<std::vector<tfmTokenId_t>>& t_ids) const override;
 
