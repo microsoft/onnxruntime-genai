@@ -77,16 +77,13 @@ def test_tokenizer_encode_decode(
     sequences = None
     if batch_encode:
         sequences = tokenizer.encode_batch(prompts)
-    else:
-        sequences = [tokenizer.encode(prompt) for prompt in prompts]
-
-    decoded_strings = None
-    if batch_decode:
         decoded_strings = tokenizer.decode_batch(sequences)
+        assert prompts == decoded_strings
     else:
-        decoded_strings = [tokenizer.decode(sequence) for sequence in sequences]
-
-    assert prompts == decoded_strings
+        for prompt in prompts:
+            sequence = tokenizer.encode(prompt)
+            decoded_string = tokenizer.decode(sequence)
+            assert prompt == decoded_string
 
 
 @pytest.mark.parametrize("device", [og.DeviceType.CPU])
