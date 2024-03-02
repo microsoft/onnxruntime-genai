@@ -105,13 +105,13 @@ def test_tokenizer_stream(device, test_data_path, relative_model_path):
         "The quick brown fox jumps over the lazy dog.",
     ]
 
-    for index, prompt in prompts:
+    for prompt in prompts:
         sequence = tokenizer.encode(prompt)
         decoded_string = ""
         for token in sequence:
             decoded_string += tokenizer_stream.decode(token)
 
-        assert decoded_string == prompts[index]
+        assert decoded_string == prompt
 
 
 # TODO: Enable once the phi-2 model exists
