@@ -1,9 +1,9 @@
 {
   "model": {
     "type": "gpt2",
-    "pad_token_id": 0,
-    "bos_token_id": 0,
-    "eos_token_id": 0,
+    "pad_token_id": 98,
+    "bos_token_id": 98,
+    "eos_token_id": 98,
     "vocab_size": 1000,
     "context_length": 512,
     "decoder": {
