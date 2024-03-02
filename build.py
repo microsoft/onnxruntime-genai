@@ -101,6 +101,7 @@ def build(
     ort_home: str | bytes | os.PathLike | None = None,
     skip_csharp: bool = False,
     build_dir: str | bytes | os.PathLike | None = None,
+    parallel: bool = False,
 ):
     """Generates the CMake build tree and builds the project.
 
@@ -159,6 +160,8 @@ def build(
     config = "RelWithDebInfo"
     run_subprocess(command, env=env).check_returncode()
     make_command = ["cmake", "--build", ".", "--config", config]
+    if parallel:
+        make_command.append("--parallel")
     run_subprocess(make_command, cwd=build_dir, env=env).check_returncode()
 
     if not skip_csharp:
@@ -214,6 +217,7 @@ if __name__ == "__main__":
     parser.add_argument("--skip_csharp", action="store_true", help="Skip building the C# API.")
     parser.add_argument("--build_dir", default=None, help="Path to output directory.")
     parser.add_argument("--use_cuda", action="store_true", help="Whether to use CUDA. Default is to not use cuda.")
+    parser.add_argument("--parallel", action="store_true", help="Enable parallel build.")
     args = parser.parse_args()
 
     update_submodules()
@@ -225,4 +229,5 @@ if __name__ == "__main__":
         ort_home=args.ort_home,
         skip_csharp=args.skip_csharp,
         build_dir=args.build_dir,
+        parallel=args.parallel,
     )
