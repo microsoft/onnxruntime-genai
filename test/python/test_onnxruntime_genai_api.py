@@ -47,7 +47,7 @@ def test_greedy_search(device, test_data_path, relative_model_path):
     )
     for i in range(batch_size):
         assert np.array_equal(
-            expected_sequence[i], generator.get_sequence(i).get_array()
+            expected_sequence[i], generator.get_sequence(i)
         )
 
     sequences = model.generate(search_params)
@@ -67,7 +67,7 @@ def test_tokenizer_encode_decode(
     model_path = os.fspath(Path(test_data_path) / relative_model_path)
 
     model = og.Model(model_path, device)
-    tokenizer = model.create_tokenizer()
+    tokenizer = og.Tokenizer(model)
 
     prompts = [
         "This is a test.",
@@ -97,7 +97,7 @@ def test_tokenizer_stream(device, test_data_path, relative_model_path):
     model_path = os.fspath(Path(test_data_path) / relative_model_path)
 
     model = og.Model(model_path, device)
-    tokenizer = model.create_tokenizer()
+    tokenizer = og.Tokenizer(model)
     tokenizer_stream = tokenizer.create_stream()
 
     prompts = [
@@ -123,7 +123,7 @@ def test_batching(device, test_data_path, relative_model_path):
     model_path = os.fspath(Path(test_data_path) / relative_model_path)
 
     model = og.Model(model_path, device)
-    tokenizer = model.create_tokenizer()
+    tokenizer = og.Tokenizer(model)
 
     prompts = [
         "This is a test.",
