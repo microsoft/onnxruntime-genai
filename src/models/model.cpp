@@ -33,7 +33,7 @@ void State::ClearIO() {
 }
 
 std::vector<int32_t> PadInputs(std::span<std::span<const int32_t>> sequences, int32_t pad_token_id) {
-  bool pad_right_{false};
+  bool pad_right_{true};
 
   size_t max_length = 0;
   for (auto& sequence : sequences)
