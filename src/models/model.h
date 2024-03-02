@@ -62,7 +62,7 @@ struct TokenizerStream {
   std::string chunk_;
 };
 
- // Turn an array of ragged token sequences into a 2D input suitable for batching. Handles padding for the model
+// Turn an array of ragged token sequences into a 2D input suitable for batching. Handles padding for the model
 // Sequence length is vector.size()/count
 std::vector<int32_t> PadInputs(std::span<std::span<const int32_t> > sequences, int32_t pad_token_id);
 

@@ -103,7 +103,7 @@ struct GeneratorParams {
 
   std::variant<Whisper> inputs;
 
-  std::vector<int32_t> input_ids_owner; // Backing memory of input_ids in some cases
+  std::vector<int32_t> input_ids_owner;  // Backing memory of input_ids in some cases
 };
 
 struct Generator {

@@ -200,18 +200,18 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("encode", &Tokenizer::Encode)
       .def("decode", [](const Tokenizer& t, pybind11::array_t<int32_t> tokens) { return t.Decode(ToSpan(tokens)); })
       .def("encode_batch", [](const Tokenizer& t, std::vector<std::string> strings) {
-          auto result=t.EncodeBatch(strings);
-          return pybind11::array_t<int32_t>({strings.size(), result.size()/strings.size()}, result.data());
+        auto result = t.EncodeBatch(strings);
+        return pybind11::array_t<int32_t>({strings.size(), result.size() / strings.size()}, result.data());
       })
       .def("decode_batch", [](const Tokenizer& t, pybind11::array_t<int32_t> tokens) {
-          if (tokens.ndim() == 1) {  // Just a 1D array
-            return t.DecodeBatch(ToSpan(tokens), 1);
-          } else {
-            if (tokens.ndim() != 2)
-              throw std::runtime_error("token shape can only be 1 or 2 dimensional");
+        if (tokens.ndim() == 1) {  // Just a 1D array
+          return t.DecodeBatch(ToSpan(tokens), 1);
+        } else {
+          if (tokens.ndim() != 2)
+            throw std::runtime_error("token shape can only be 1 or 2 dimensional");
 
-            return t.DecodeBatch(ToSpan(tokens), tokens.shape(0));
-          }
+          return t.DecodeBatch(ToSpan(tokens), tokens.shape(0));
+        }
       })
       .def("create_stream", [](const Tokenizer& t) { return t.CreateStream(); });
 
