@@ -8,28 +8,6 @@
 
 using namespace pybind11::literals;
 
-struct float16 {
-  uint16_t v_;
-  float AsFloat32() const { return Generators::Float16ToFloat32(v_); }
-};
-
-namespace pybind11 {
-namespace detail {
-template <>
-struct npy_format_descriptor<float16> {
-  static constexpr auto name = _("float16");
-  static pybind11::dtype dtype() {
-    handle ptr = npy_api::get().PyArray_DescrFromType_(23 /*NPY_FLOAT16*/); /* import numpy as np; print(np.dtype(np.float16).num */
-    return reinterpret_borrow<pybind11::dtype>(ptr);
-  }
-  static std::string format() {
-    // following: https://docs.python.org/3/library/struct.html#format-characters
-    return "e";
-  }
-};
-}  // namespace detail
-}  // namespace pybind11
-
 template <typename T>
 std::span<T> ToSpan(pybind11::array_t<T> v) {
   if constexpr (std::is_const_v<T>)
@@ -43,43 +21,7 @@ pybind11::array_t<T> ToPython(std::span<T> v) {
   return pybind11::array_t<T>(v.size(), v.data());
 }
 
-template <typename T>
-pybind11::array_t<T> ToUnownedPython(std::span<T> v) {
-  return pybind11::array_t<T>({v.size()}, {sizeof(T)}, v.data(), pybind11::capsule(v.data(), [](void*) {}));
-}
-
 namespace Generators {
-
-void TestFP32(pybind11::array_t<float> inputs) {
-  pybind11::buffer_info buf_info = inputs.request();
-  const float* p = static_cast<const float*>(buf_info.ptr);
-
-  std::cout << "float32 values: ";
-
-  for (unsigned i = 0; i < buf_info.size; i++)
-    std::cout << p[i] << " ";
-  std::cout << std::endl;
-}
-
-void TestFP16(pybind11::array_t<float16> inputs) {
-  pybind11::buffer_info buf_info = inputs.request();
-  const float16* p = static_cast<const float16*>(buf_info.ptr);
-
-  std::cout << "float16 values: ";
-
-  for (unsigned i = 0; i < buf_info.size; i++)
-    std::cout << p[i].AsFloat32() << " ";
-  std::cout << std::endl;
-}
-
-std::string ToString(const GeneratorParams& v) {
-  std::ostringstream oss;
-  oss << "SearchParams("
-         "num_beams="
-      << v.search.num_beams << ", batch_size=" << v.batch_size << ", sequence_length=" << v.sequence_length << ", max_length=" << v.search.max_length << ", pad_token_id=" << v.pad_token_id << ", eos_token_id=" << v.eos_token_id << ", vocab_size=" << v.vocab_size << ", length_penalty=" << v.search.length_penalty << ", early_stopping=" << v.search.early_stopping << ")";
-
-  return oss.str();
-}
 
 std::unique_ptr<OrtEnv> g_ort_env;
 
@@ -168,14 +110,14 @@ struct PyGenerator {
     generator_ = CreateGenerator(model, params);
   }
 
-  PyRoamingArray<int32_t>& GetNextTokens() {
+  pybind11::array_t<int32_t> GetNextTokens() {
     py_tokens_.Assign(generator_->search_->GetNextTokens());
-    return py_tokens_;
+    return ToPython(py_tokens_.GetCPU());
   }
 
-  PyRoamingArray<int32_t>& GetSequence(int index) {
+  pybind11::array_t<int32_t> GetSequence(int index) {
     py_sequence_.Assign(generator_->search_->GetSequence(index));
-    return py_sequence_;
+    return ToPython(py_sequence_.GetCPU());
   }
 
   void ComputeLogits() {
@@ -233,7 +175,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   Declare_DeviceArray<int32_t>(m, "DeviceArray_int32");
 
   pybind11::enum_<DeviceType>(m, "DeviceType")
-      .value("Auto", DeviceType::Auto)
       .value("CPU", DeviceType::CPU)
       .value("CUDA", DeviceType::CUDA)
       .export_values();
@@ -246,24 +187,32 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_readwrite("input_ids", &PyGeneratorParams::py_input_ids_)
       .def_readwrite("whisper_input_features", &PyGeneratorParams::py_whisper_input_features_)
       .def_readwrite("whisper_decoder_input_ids", &PyGeneratorParams::py_whisper_decoder_input_ids_)
-      .def("set_search_options", &PyGeneratorParams::SetSearchOptions)
-      .def("set_input_sequences", &PyGeneratorParams::SetInputSequences)
-      .def("__repr__", [](PyGeneratorParams& s) { return ToString(s); });
+      .def("set_search_options", &PyGeneratorParams::SetSearchOptions);
 
   // We need to init the OrtApi before we can use it
   Ort::InitApi();
-
-  m.def("print", &TestFP32, "Test float32");
-  m.def("print", &TestFP16, "Test float16");
 
   pybind11::class_<TokenizerStream>(m, "TokenizerStream")
       .def("decode", [](TokenizerStream& t, int32_t token) { return t.Decode(token); });
 
   pybind11::class_<Tokenizer>(m, "Tokenizer")
+      .def(pybind11::init([](Model& model) { return model.CreateTokenizer(); }))
       .def("encode", &Tokenizer::Encode)
       .def("decode", [](const Tokenizer& t, pybind11::array_t<int32_t> tokens) { return t.Decode(ToSpan(tokens)); })
-      .def("encode_batch", [](const Tokenizer& t, std::vector<std::string> strings) { return t.EncodeBatch(strings); })
-      .def("decode_batch", &Tokenizer::DecodeBatch)
+      .def("encode_batch", [](const Tokenizer& t, std::vector<std::string> strings) {
+          auto result=t.EncodeBatch(strings);
+          return pybind11::array_t<int32_t>({strings.size(), result.size()/strings.size()}, result.data());
+      })
+      .def("decode_batch", [](const Tokenizer& t, pybind11::array_t<int32_t> tokens) {
+          if (tokens.ndim() == 1) {  // Just a 1D array
+            return t.DecodeBatch(ToSpan(tokens), 1);
+          } else {
+            if (tokens.ndim() != 2)
+              throw std::runtime_error("token shape can only be 1 or 2 dimensional");
+
+            return t.DecodeBatch(ToSpan(tokens), tokens.shape(1));
+          }
+      })
       .def("create_stream", [](const Tokenizer& t) { return t.CreateStream(); });
 
   pybind11::class_<Model>(m, "Model")
@@ -271,7 +220,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
              auto provider_options = GetDefaultProviderOptions(device_type);
              return CreateModel(GetOrtEnv(), config_path.c_str(), &provider_options);
            }),
-           "str"_a, "device_type"_a = DeviceType::Auto)
+           "str"_a, "device_type"_a = DeviceType::CPU)
       .def("generate", [](Model& model, PyGeneratorParams& params) { params.Prepare(); return Generate(model, params); })
       .def("generate_sequence", [](Model& model, pybind11::array_t<int32_t> input_ids, const pybind11::dict& search_options) {
         PyGeneratorParams params{model};
@@ -280,7 +229,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         params.Prepare();
         return Generate(model, params)[0];
       })
-      .def("create_tokenizer", [](Model& model) { return model.CreateTokenizer(); })
       .def_property_readonly("device_type", [](const Model& s) { return s.device_type_; });
 
   pybind11::class_<PyGenerator>(m, "Generator")

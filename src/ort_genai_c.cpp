@@ -134,7 +134,16 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputSequences(OgaGenera
   OGA_TRY
   auto& params = *reinterpret_cast<Generators::GeneratorParams*>(oga_params);
   auto& sequences = *reinterpret_cast<const Generators::TokenSequences*>(p_sequences);
-  params.SetInputSequences(sequences);
+
+  std::vector<std::span<const int32_t>> span_sequences;
+  for (size_t i = 0; i < sequences.size(); i++) {
+    span_sequences.emplace_back(sequences[i]);
+  }
+
+  params.input_ids_owner = Generators::PadInputs(span_sequences, params.pad_token_id);
+  params.batch_size = static_cast<int>(sequences.size());
+  params.sequence_length = static_cast<int>(params.input_ids_owner.size() / params.batch_size);
+  params.input_ids = params.input_ids_owner;
   return nullptr;
   OGA_CATCH
 }
@@ -187,47 +196,6 @@ OgaResult* OGA_API_CALL OgaCreateTokenizer(const OgaModel* model, OgaTokenizer**
   *out = reinterpret_cast<OgaTokenizer*>(reinterpret_cast<const Generators::Model*>(model)->CreateTokenizer().release());
   return nullptr;
   OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaTokenizerEncodeBatch(const OgaTokenizer* p, const char** strings, size_t count, OgaSequences** out) {
-  OGA_TRY
-  auto& tokenizer = *reinterpret_cast<const Generators::Tokenizer*>(p);
-  *out = reinterpret_cast<OgaSequences*>(std::make_unique<Generators::TokenSequences>(std::move(tokenizer.EncodeBatch({strings, count}))).release());
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaTokenizerDecodeBatch(const OgaTokenizer* p, const OgaSequences* p_sequences, const char*** out_strings) {
-  OGA_TRY
-  auto& tokenizer = *reinterpret_cast<const Generators::Tokenizer*>(p);
-  auto& sequences = *reinterpret_cast<const Generators::TokenSequences*>(p_sequences);
-
-  auto strings = tokenizer.DecodeBatch(sequences);
-  std::vector<std::unique_ptr<char[]>> c_strings;
-  for (auto& string : strings) {
-    auto length = string.length() + 1;
-    auto& cstr_buffer = c_strings.emplace_back(std::make_unique<char[]>(length));
-#ifdef _MSC_VER
-    strcpy_s(cstr_buffer.get(), length, string.c_str());
-#else
-    strncpy(cstr_buffer.get(), string.c_str(), length);
-    cstr_buffer[length] = 0;
-#endif
-  }
-
-  auto strings_buffer = std::make_unique<const char*[]>(strings.size());
-  for (size_t i = 0; i < strings.size(); i++) {
-    strings_buffer[i] = c_strings[i].release();
-  }
-  *out_strings = strings_buffer.release();
-  return nullptr;
-  OGA_CATCH
-}
-
-void OGA_API_CALL OgaTokenizerDestroyStrings(const char** strings, size_t count) {
-  for (size_t i = 0; i < count; i++)
-    delete strings[i];
-  delete strings;
 }
 
 OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer* p, const char* str, OgaSequences* sequences) {

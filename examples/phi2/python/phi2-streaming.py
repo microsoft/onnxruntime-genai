@@ -5,7 +5,7 @@ print("Loading model...")
 # The first argument is the name of the folder containing the model files
 model=og.Model(f'example-models/phi2-int4-cpu', og.DeviceType.CPU)
 print("Model loaded")
-tokenizer=model.create_tokenizer()
+tokenizer=og.Tokenizer(model)
 print("Tokenizer created")
 
 prompt = '''def print_prime(n):
@@ -30,4 +30,4 @@ print(prompt, end='', flush=True)
 while not generator.is_done():
     generator.compute_logits()
     generator.generate_next_token_top_p(0.7, 0.6)
-    print(tokenizer_stream.decode(generator.get_sequence(0).get_array()[-1]), end='', flush=True)
+    print(tokenizer_stream.decode(generator.get_next_tokens()[0]), end='', flush=True)

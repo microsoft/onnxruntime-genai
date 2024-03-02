@@ -32,6 +32,34 @@ void State::ClearIO() {
   outputs_.clear();
 }
 
+std::vector<int32_t> PadInputs(std::span<std::span<const int32_t>> sequences, int32_t pad_token_id) {
+  bool pad_right_{false};
+
+  size_t max_length = 0;
+  for (auto& sequence : sequences)
+    max_length = std::max(max_length, sequence.size());
+
+  std::vector<int32_t> result(max_length * sequences.size());
+  std::span<int32_t> result_span(result);
+
+  // Copy and pad the sequences with pad_token_id
+  for (size_t i = 0; i < sequences.size(); i++) {
+    auto output_span = result_span.subspan(i * max_length, max_length);
+    auto input_span = sequences[i];
+
+    auto pad_count = max_length - input_span.size();
+    if (pad_right_) {
+      std::copy(input_span.begin(), input_span.end(), output_span.begin());
+      std::fill(output_span.end() - pad_count, output_span.end(), pad_token_id);
+    } else {
+      std::fill(output_span.begin(), output_span.begin() + pad_count, pad_token_id);
+      std::copy(input_span.begin(), input_span.end(), output_span.begin() + pad_count);
+    }
+  }
+
+  return result;
+}
+
 #ifdef NO_TOKENIZER
 const std::string& TokenizerStream::Decode(int32_t token) {
   throw std::runtime_error("Tokenizer not enabled");
@@ -69,7 +97,7 @@ const std::string& TokenizerStream::Decode(int32_t token) {
   return chunk_;
 }
 
-Tokenizer::Tokenizer(Config& config) {
+Tokenizer::Tokenizer(Config& config) : pad_token_id_{config.model.pad_token_id} {
   CheckResult(TfmCreateTokenizer(tokenizer_.Address(), reinterpret_cast<const char*>(config.config_path.u8string().c_str())));
 }
 
@@ -96,26 +124,22 @@ std::string Tokenizer::Decode(std::span<const int32_t> tokens) const {
   return string;
 }
 
-TokenSequences Tokenizer::EncodeBatch(std::span<const char*> strings) const {
-  TokenSequences sequences;
-  for (size_t i = 0; i < strings.size(); i++) {
-    sequences.emplace_back(Encode(strings[i]));
-  }
-  return sequences;
-}
-
-TokenSequences Tokenizer::EncodeBatch(std::span<const std::string> strings) const {
-  TokenSequences sequences;
+std::vector<int32_t> Tokenizer::EncodeBatch(std::span<const std::string> strings) const {
+  std::vector<std::vector<int32_t>> sequences;
+  std::vector<std::span<const int32_t> > span_sequences;
   for (size_t i = 0; i < strings.size(); i++) {
     sequences.emplace_back(Encode(strings[i].c_str()));
+    span_sequences.emplace_back(sequences.back());
   }
-  return sequences;
+
+  return PadInputs(span_sequences, pad_token_id_);
 }
 
-std::vector<std::string> Tokenizer::DecodeBatch(const TokenSequences& sequences) const {
+std::vector<std::string> Tokenizer::DecodeBatch(std::span<const int32_t> sequences, size_t count) const {
+  size_t sequence_length = sequences.size()/count;
   std::vector<std::string> strings;
-  for (auto& sequence : sequences)
-    strings.emplace_back(Decode(sequence));
+  for (size_t i=0;i<count;i++)
+    strings.emplace_back(Decode(sequences.subspan(sequence_length*i, sequence_length)));
   return strings;
 }
 
