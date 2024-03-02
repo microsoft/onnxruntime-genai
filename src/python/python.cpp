@@ -210,7 +210,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
             if (tokens.ndim() != 2)
               throw std::runtime_error("token shape can only be 1 or 2 dimensional");
 
-            return t.DecodeBatch(ToSpan(tokens), tokens.shape(1));
+            return t.DecodeBatch(ToSpan(tokens), tokens.shape(0));
           }
       })
       .def("create_stream", [](const Tokenizer& t) { return t.CreateStream(); });

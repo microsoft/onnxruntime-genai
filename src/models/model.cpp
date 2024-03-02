@@ -126,7 +126,7 @@ std::string Tokenizer::Decode(std::span<const int32_t> tokens) const {
 
 std::vector<int32_t> Tokenizer::EncodeBatch(std::span<const std::string> strings) const {
   std::vector<std::vector<int32_t>> sequences;
-  std::vector<std::span<const int32_t> > span_sequences;
+  std::vector<std::span<const int32_t>> span_sequences;
   for (size_t i = 0; i < strings.size(); i++) {
     sequences.emplace_back(Encode(strings[i].c_str()));
     span_sequences.emplace_back(sequences.back());
@@ -136,10 +136,12 @@ std::vector<int32_t> Tokenizer::EncodeBatch(std::span<const std::string> strings
 }
 
 std::vector<std::string> Tokenizer::DecodeBatch(std::span<const int32_t> sequences, size_t count) const {
-  size_t sequence_length = sequences.size()/count;
+  if (sequences.size() % count != 0)
+    throw std::runtime_error("DecodeBatch: sequences must be evenly divisible by the count");
+  size_t sequence_length = sequences.size() / count;
   std::vector<std::string> strings;
-  for (size_t i=0;i<count;i++)
-    strings.emplace_back(Decode(sequences.subspan(sequence_length*i, sequence_length)));
+  for (size_t i = 0; i < count; i++)
+    strings.emplace_back(Decode(sequences.subspan(sequence_length * i, sequence_length)));
   return strings;
 }
 
