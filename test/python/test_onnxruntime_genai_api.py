@@ -77,9 +77,9 @@ def test_tokenizer_encode_decode(
     sequences = None
     if batch_encode:
         sequences = tokenizer.encode_batch(prompts)
-        decoded_strings = tokenizer.decode_batch(sequences)
         # Disabled temporarily as the genai_confg.json for this test has the wrong pad_token_id
         # Changing that will break the numeric tests, so this is the simpler change
+        # decoded_strings = tokenizer.decode_batch(sequences)
         # assert prompts == decoded_strings
     else:
         for prompt in prompts:
