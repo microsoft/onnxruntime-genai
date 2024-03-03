@@ -99,4 +99,4 @@ jobs:
             --gpus all \
             --rm \
             --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-            -w /onnxruntime_src onnxruntimegpubuild bash -c "python3 -m pip install /onnxruntime_src/build/gcc_cuda/release/wheel/onnxruntime_genai*.whl --user && python3 -m pip install -r test/python/requirements.txt --user && python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models"
+            -w /onnxruntime_src onnxruntimegpubuild bash -c "python3 -m pip install /onnxruntime_src/build/gcc_cuda/release/wheel/onnxruntime_genai*.whl --user && python3 -m pip install -r test/python/requirements.txt --user && python3 test/python/test_onnxruntime_genai.py --cwd /onnxruntime_src/test/python --test_models /onnxruntime_src/test/test_models"
