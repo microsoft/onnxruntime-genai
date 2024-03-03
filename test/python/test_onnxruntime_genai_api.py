@@ -112,7 +112,7 @@ def test_tokenizer_stream(device, test_data_path, relative_model_path):
 # TODO: CUDA pipelines use python3.6 and do not have a way to download models since downloading models
 # requires pytorch and hf transformers. This test should be re-enabled once the pipeline is updated.
 @pytest.mark.skipif(
-    not og.is_cuda_available(), reason="CUDA pipelines cannot download models."
+    og.is_cuda_available(), reason="CUDA pipelines cannot download models."
 )
 @pytest.mark.parametrize("device", [og.DeviceType.CPU])
 @pytest.mark.parametrize("relative_model_path", [Path("phi-2")])
