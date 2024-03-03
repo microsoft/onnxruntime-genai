@@ -85,12 +85,9 @@ jobs:
       $VERSION = Get-Content $(Build.SourcesDirectory)\VERSION_INFO
       nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.nuspec `
         -Prop version=$VERSION `
-        -Prop id="Microsoft.ML.OnnxRuntimeGenAI.Gpu" `
-        -Prop build_dir=$(build_dir) `
-        -Prop build_config=$(build_config)
+        -Prop id="Microsoft.ML.OnnxRuntimeGenAI.Gpu"
       nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec `
-        -Prop version=$VERSION `
-        -Prop build_config=$(build_config)
+        -Prop version=$VERSION
     displayName: 'Nuget Packaging'
     workingDirectory: '$(Build.SourcesDirectory)\nuget'
 
