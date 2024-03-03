@@ -36,7 +36,7 @@ jobs:
       - name: Build with CMake and GCC
         run: |
           set -e -x
-          az login --identity -u 63b63039-6328-442f-954b-5a64d124e5b
+          az login --identity -u /subscriptions/00c06639-6ee4-454e-8058-8d8b1703bd87/resourcegroups/proj-onnxruntime-dev/providers/Microsoft.ManagedIdentity/userAssignedIdentities/ortcibuild_readonly
           az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
           python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/inference/aarch64/default/cpu/Dockerfile \
             --context tools/ci_build/github/linux/docker/inference/aarch64/default/cpu \
