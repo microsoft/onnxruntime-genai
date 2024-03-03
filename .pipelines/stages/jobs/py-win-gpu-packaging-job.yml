@@ -1,7 +1,7 @@
 jobs:
 - job: Windows_GPU_Wheels
   pool: 'onnxruntime-Win-CPU-2022'
-#  pool: 'onnxruntime-Win2022-GPU-A10'
+  #  pool: 'onnxruntime-Win2022-GPU-A10'
   strategy:
     matrix:
       Python38:
@@ -89,7 +89,7 @@ jobs:
     displayName: 'Build pybind with CMake'
   - powershell: |
       Get-ChildItem -Path $(Build.SourcesDirectory)\build\wheel\ -Recurse
-#   Esrp signing
+  #   Esrp signing
   - template: steps/win-esrp-dll-step.yml
     parameters:
       FolderPath: '$(Build.SourcesDirectory)\build\wheel\onnxruntime_genai\'
@@ -131,6 +131,10 @@ jobs:
     inputs:
       AnalyzeTargetGlob: '$(Build.ArtifactStagingDirectory)\**\*genai.dll'
     continueOnError: true
+
+  - powershell: |
+      Get-ChildItem -Path $(Build.ArtifactStagingDirectory) -Recurse
+    displayName: 'Verify the package'
 
   - task: TSAUpload@2
     displayName: 'TSA upload'

@@ -115,6 +115,10 @@ jobs:
     workingDirectory: '$(Build.ArtifactStagingDirectory)'
     displayName: 'unzip the package'
 
+  - powershell: |
+      Get-ChildItem -Path $(Build.ArtifactStagingDirectory) -Recurse
+    displayName: 'Verify the package'
+
   - task: CredScan@3
     displayName: 'Run CredScan'
     inputs:
