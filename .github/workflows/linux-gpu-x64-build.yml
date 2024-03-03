@@ -31,9 +31,6 @@ jobs:
         run: |
           mv ${{ env.ort_dir }} ort
 
-      - name: Print nvidia-smi
-        run: |
-          nvidia-smi
       - name: Download Docker Image
         run: |
           set -e -x
@@ -48,39 +45,42 @@ jobs:
           echo "Printing docker image environment variables"
           docker run --rm onnxruntimegpubuild env
 
-      - name: Check CUDA Info
+      - name: Build with Cmake in Docker
         run: |
-            echo "Finding CUDA version"
-            docker run --rm onnxruntimegpubuild bash -c "nvcc --version && which nvcc"
-
+          echo "Running docker image onnxruntimegpubuild"
+          docker run \
+            --gpus all \
+            --rm \
+            --volume $GITHUB_WORKSPACE:/onnxruntime_src \
+            -w /onnxruntime_src onnxruntimegpubuild bash -c "echo $PATH && /usr/bin/cmake -DCMAKE_CUDA_ARCHITECTURES=86 --preset linux_gcc_cuda_release && /usr/bin/cmake --build --preset linux_gcc_cuda_release"
 #TODO: Re-enable Test by removing -DENABLE_TESTS=OFF when the Linux GPU build is fixed
-      - name: Docker -- Configure with CMake and GCC
-        run: |
-          echo "Running docker image onnxruntimegpubuild"
-          docker run \
-            --gpus all \
-            --rm \
-            --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-            -w /onnxruntime_src onnxruntimegpubuild \
-            bash -c "/usr/bin/cmake -DENABLE_TESTS=OFF -DCMAKE_CUDA_ARCHITECTURES=86 --preset linux_gcc_cuda_release -DTEST_PHI2=False"
-      - name: Docker -- Build with CMake and GCC
-        run: |
-          echo "Running docker image onnxruntimegpubuild"
-          docker run \
-            --gpus all \
-            --rm \
-            --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-            -w /onnxruntime_src onnxruntimegpubuild bash -c "/usr/bin/cmake --build --preset linux_gcc_cuda_release"
-
-      - name: Docker -- check test directory
-        run: |
-          echo "Running docker image onnxruntimegpubuild"
-          docker run \
-            --gpus all \
-            --rm \
-            --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-            -w /onnxruntime_src onnxruntimegpubuild bash -c "ls -l /onnxruntime_src/build/gcc_cuda/release/test/"
-        continue-on-error: true
+#      - name: Docker -- Configure with CMake and GCC
+#        run: |
+#          echo "Running docker image onnxruntimegpubuild"
+#          docker run \
+#            --gpus all \
+#            --rm \
+#            --volume $GITHUB_WORKSPACE:/onnxruntime_src \
+#            -w /onnxruntime_src onnxruntimegpubuild \
+#            bash -c "/usr/bin/cmake -DCMAKE_CUDA_ARCHITECTURES=86 --preset linux_gcc_cuda_release -DTEST_PHI2=False"
+#      - name: Docker -- Build with CMake and GCC
+#        run: |
+#          echo "Running docker image onnxruntimegpubuild"
+#          docker run \
+#            --gpus all \
+#            --rm \
+#            --volume $GITHUB_WORKSPACE:/onnxruntime_src \
+#            -w /onnxruntime_src onnxruntimegpubuild bash -c "/usr/bin/cmake --build --preset linux_gcc_cuda_release"
+#
+#      - name: Docker -- check test directory
+#        run: |
+#          echo "Running docker image onnxruntimegpubuild"
+#          docker run \
+#            --gpus all \
+#            --rm \
+#            --volume $GITHUB_WORKSPACE:/onnxruntime_src \
+#            -w /onnxruntime_src onnxruntimegpubuild bash -c "ls -l /onnxruntime_src/build/gcc_cuda/release/test/"
+#        continue-on-error: true
     # TODO: Re-enable these tests when python version is updated
 #      - name: Docker -- Run tests
 #        run: |
