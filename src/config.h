@@ -31,7 +31,6 @@ struct Config {
       int num_key_value_heads{};
       int num_hidden_layers{};
       int head_size{};
-      bool kv_shared_past_present{};
 
       struct Inputs {
         std::string input_ids{"input_ids"};
@@ -64,7 +63,8 @@ struct Config {
     bool early_stopping{true};  //  Whether to stop the beam search when at least num_beams sentences are finished per batch or not.
     int no_repeat_ngram_size{};
     float diversity_penalty{};
-    float length_penalty{1.0f};  // Exponential penalty to the length that is used with beam-based generation. length_penalty > 0.0 promotes longer sequences, while length_penalty < 0.0 encourages shorter sequences.
+    float length_penalty{1.0f};        // Exponential penalty to the length that is used with beam-based generation. length_penalty > 0.0 promotes longer sequences, while length_penalty < 0.0 encourages shorter sequences.
+    bool past_present_share_buffer{};  // The past/present kv tensors are shared and allocated once to max_length (cuda only)
   } search;
 };
 

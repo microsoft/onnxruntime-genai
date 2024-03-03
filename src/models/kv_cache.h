@@ -41,7 +41,7 @@ struct KV_Cache {
   State& state_;
   int layer_count_;
   size_t input_index_{~0U}, output_index_{~0U};
-  bool shared_past_present_;  // True if model.decoder.kv_shared_past_present is set to true, and we're using cuda, and not beam search
+  bool past_present_share_buffer_;  // True if model.decoder.past_present_share_buffer is set to true, and we're using cuda, and not beam search
 
   std::array<int64_t, 4> shape_;
   ONNXTensorElementDataType type_;

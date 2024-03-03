@@ -131,7 +131,7 @@ class Tokenizer : public TfmObjectImpl {
    *
    * @return The status of the onload operation.
    */
-  virtual TfmStatus Onload() = 0;
+  virtual TfmStatus OnLoad() = 0;
 
   /**
    * @brief Batch encodes the input text.

@@ -9,7 +9,7 @@ static std::string MakeString(const char* s1, std::string_view s2) {
   return std::string(s1) + std::string(s2);
 }
 
-TfmStatus RwkvTokenizer::Onload() {
+TfmStatus RwkvTokenizer::OnLoad() {
   auto text_tokens = GetDataDir();
   std::istringstream file(text_tokens);
   std::string line;

@@ -58,12 +58,11 @@ jobs:
             --volume $GITHUB_WORKSPACE:/onnxruntime_src \
             -w /onnxruntime_src onnxruntimegpubuild_gha bash -c "echo $PATH && /usr/bin/cmake -DCMAKE_CUDA_ARCHITECTURES=86 --preset linux_gcc_cuda_release && /usr/bin/cmake --build --preset linux_gcc_cuda_release"
 
-      # TODO: Re-enable these tests when python version is updated
-      # - name: Install the onnxruntime-genai Python wheel and run Python tests
-      #   run: |
-      #     echo "Installing the onnxruntime-genai Python wheel and running the Python tests"
-      #     docker run \
-      #       --gpus all \
-      #       --rm \
-      #       --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-      #       -w /onnxruntime_src onnxruntimegpubuild_gha bash -c "python3 -m pip install /onnxruntime_src/build/gcc_cuda/release/wheel/onnxruntime_genai*.whl && python3 -m pip install -r test/python/requirements.txt && python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models"
+      - name: Install the onnxruntime-genai Python wheel and run Python tests
+        run: |
+          echo "Installing the onnxruntime-genai Python wheel and running the Python tests"
+          docker run \
+            --gpus all \
+            --rm \
+            --volume $GITHUB_WORKSPACE:/onnxruntime_src \
+            -w /onnxruntime_src onnxruntimegpubuild_gha bash -c "python3 -m pip install /onnxruntime_src/build/gcc_cuda/release/wheel/onnxruntime_genai*.whl --user && python3 -m pip install -r test/python/requirements.txt --user && python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models"

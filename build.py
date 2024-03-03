@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+import warnings
 
 
 def is_windows():
@@ -94,12 +95,13 @@ def validate_cuda_home(cuda_home: str | bytes | os.PathLike | None):
 
 def build(
     skip_wheel: bool = False,
-    use_cuda: str | None = None,
+    use_cuda: bool | None = None,
     cuda_home: str | bytes | os.PathLike | None = None,
     cmake_generator: str | None = None,
     ort_home: str | bytes | os.PathLike | None = None,
     skip_csharp: bool = False,
     build_dir: str | bytes | os.PathLike | None = None,
+    parallel: bool = False,
 ):
     """Generates the CMake build tree and builds the project.
 
@@ -110,7 +112,7 @@ def build(
         raise OSError(f"Unsupported platform {platform()}.")
     
     if cuda_home and not use_cuda:
-        raise ValueError("cuda_home is specified but use_cuda is not specified.")
+        use_cuda = True
 
     cuda_home = validate_cuda_home(cuda_home) if use_cuda else None
 
@@ -158,11 +160,14 @@ def build(
     config = "RelWithDebInfo"
     run_subprocess(command, env=env).check_returncode()
     make_command = ["cmake", "--build", ".", "--config", config]
+    if parallel:
+        make_command.append("--parallel")
     run_subprocess(make_command, cwd=build_dir, env=env).check_returncode()
 
     if not skip_csharp:
         if not is_windows():
-            raise RuntimeError("C# API is only supported on Windows.")
+            warnings.warn('C# API is only supported on Windows.', UserWarning)
+            return
 
         dotnet = resolve_executable_path("dotnet")
         configuration = f"/p:Configuration={config}"
@@ -212,6 +217,7 @@ if __name__ == "__main__":
     parser.add_argument("--skip_csharp", action="store_true", help="Skip building the C# API.")
     parser.add_argument("--build_dir", default=None, help="Path to output directory.")
     parser.add_argument("--use_cuda", action="store_true", help="Whether to use CUDA. Default is to not use cuda.")
+    parser.add_argument("--parallel", action="store_true", help="Enable parallel build.")
     args = parser.parse_args()
 
     update_submodules()
@@ -223,4 +229,5 @@ if __name__ == "__main__":
         ort_home=args.ort_home,
         skip_csharp=args.skip_csharp,
         build_dir=args.build_dir,
+        parallel=args.parallel,
     )
