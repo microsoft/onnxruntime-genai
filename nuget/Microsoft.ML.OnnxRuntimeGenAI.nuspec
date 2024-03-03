@@ -5,7 +5,7 @@
     <!-- depending on the type of build -->
     <id>$id$</id>
     <version>$version$</version>
-    <build_dri>$build_dir$</build_dir>
+    <build_dir>$build_dir$</build_dir>
     <build_config>$build_config$</build_config>
     <authors>Microsoft</authors>
     <owners>Microsoft</owners>
