@@ -69,13 +69,13 @@ jobs:
   #
   - powershell: |
       $VERSION = Get-Content $(Build.SourcesDirectory)\VERSION_INFO
-      nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.nuspec \
-        -Prop version=$VERSION \
-        -Prop id="Microsoft.ML.OnnxRuntimeGenAI" \
-        -Prop build_dir=$(build_dir) \
+      nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.nuspec `
+        -Prop version=$VERSION `
+        -Prop id="Microsoft.ML.OnnxRuntimeGenAI" `
+        -Prop build_dir=$(build_dir) `
         -Prop build_config=$(build_config)
-      nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec \
-        -Prop version=$VERSION \
+      nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec `
+        -Prop version=$VERSION `
         -Prop build_config=$(build_config)
 
     displayName: 'Nuget Packaging'
@@ -110,7 +110,7 @@ jobs:
 
   - task: TSAUpload@2
     displayName: 'TSA upload'
-    condition: and(succeeded(),eq(${{ parameters.arch }}, 'x64'), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    condition: and(succeeded(),eq('${{ parameters.arch }}', 'x64'), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
 
     inputs:
       GdnPublishTsaOnboard: false
