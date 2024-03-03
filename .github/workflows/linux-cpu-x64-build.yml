@@ -7,6 +7,7 @@ env:
   ort_dir: "onnxruntime-linux-x64-1.17.0"
   ort_zip: "onnxruntime-linux-x64-1.17.0.tgz"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-linux-x64-1.17.0.tgz"
+
 jobs:
   linux_cpu_x64:
     strategy:
@@ -54,14 +55,13 @@ jobs:
         run: |
           ls -l ${{ github.workspace }}/build/${{ matrix.compiler }}_cpu/release
 
-      - if: ${{ matrix.compiler }} == 'gcc'
-        name: Run tests
+      - name: Run tests
         run: |
           set -e -x
           ./build/${{ matrix.compiler }}_cpu/release/test/unit_tests
 
-      - if: ${{ matrix.compiler }} == 'gcc'
-        name: Upload Build Artifacts
+      - name: Upload Build Artifacts
+        if: ${{ matrix.compiler == 'gcc'}}
         uses: actions/upload-artifact@v3
         with:
           name: onnxruntime-genai-linux-cpu-x64
