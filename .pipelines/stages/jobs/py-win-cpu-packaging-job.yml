@@ -81,6 +81,8 @@ jobs:
       cmake --build build --config $(BuildConfig)  --parallel --target python
     displayName: 'Build pybind with CMake'
 
+# BinSkim is skipped because onnxruntime-genai is build as static library
+
   - powershell: |
       Get-ChildItem -Path $(Build.SourcesDirectory)\build\wheel -Recurse
 
@@ -94,12 +96,6 @@ jobs:
   - bash: |
       cmake --build build --config $(BuildConfig) --parallel --target PyPackageBuild
     displayName: 'Build Python Wheel'
-
-  - task: BinSkim@4
-    displayName: 'Run BinSkim'
-    inputs:
-      AnalyzeTargetGlob: '$(Build.SourcesDirectory)\**\*onnxruntime-genai*.dll'
-    continueOnError: true
 
   - powershell: |
       Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
