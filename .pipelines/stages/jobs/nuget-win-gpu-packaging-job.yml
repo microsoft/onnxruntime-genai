@@ -1,9 +1,12 @@
+parameters:
+  arch: 'x64'
+  ort_version: '1.17.0'
 jobs:
 - job: Windows_GPU_Wheels
   pool: 'onnxruntime-Win-CPU-2022'
   #  pool: 'onnxruntime-Win2022-GPU-A10'
   variables:
-    BuildConfig: 'RelWithDebInfo'
+    build_config: 'RelWithDebInfo'
     cuda_version: '12.2'
     cuda_dir: '$(Build.SourcesDirectory)\cuda_sdk'
     ort_version: '1.17.0'
@@ -29,8 +32,8 @@ jobs:
       connection: 'GitHub - Release'
       userRepository: 'microsoft/onnxruntime'
       defaultVersionType: 'specificTag'
-      version: 'v$(ort_version)'
-      itemPattern: 'onnxruntime-win-x64-gpu-$(ort_version).zip'
+      version: 'v${{ parameters.ort_version }}'
+      itemPattern: 'onnxruntime-win-x64-gpu-${{ parameters.ort_version }}.zip'
       downloadPath: '$(Build.SourcesDirectory)'
     displayName: Download ONNXRuntime
       -
@@ -43,7 +46,7 @@ jobs:
     displayName: Unzip OnnxRuntime
 
   - powershell: |
-      Rename-Item -Path onnxruntime-win-x64-gpu-$(ort_version) -NewName ort
+      Rename-Item -Path onnxruntime-win-x64-gpu-${{ parameters.ort_version }} -NewName ort
     displayName: Rename Onnxruntime to ort
     workingDirectory: '$(Build.SourcesDirectory)'
 
@@ -59,12 +62,12 @@ jobs:
     displayName: 'Verify CUDA download'
 
   - powershell: |
-      cmake -G "Visual Studio 17 2022" -A x64 -T cuda=$(cuda_dir)\v$(cuda_version) -DCMAKE_BUILD_TYPE=$(BuildConfig) -DUSE_CUDA=TRUE -S . -B $(build_dir)
-      cmake --build $(build_dir) --config $(BuildConfig) --parallel --target onnxruntime-genai
+      cmake -G "Visual Studio 17 2022" -A x64 -T cuda=$(cuda_dir)\v$(cuda_version) -DCMAKE_BUILD_TYPE=$(build_config) -DUSE_CUDA=TRUE -S . -B $(build_dir)
+      cmake --build $(build_dir) --config $(build_config) --parallel --target onnxruntime-genai
     displayName: 'Build C++ with CMake'
 
   - bash:
-      dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(BuildConfig)" -p:NativeBuildOutputDir="$(build_dir)\$(BuildConfig)"
+      dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(build_config)" -p:NativeBuildOutputDir="$(build_dir)\$(build_config)"
     displayName: 'Build CSharp'
     workingDirectory: '$(Build.SourcesDirectory)\src\csharp'
 
@@ -73,14 +76,21 @@ jobs:
   #   Esrp signing
   - template: steps/win-esrp-dll-step.yml
     parameters:
-      FolderPath: '$(Build.SourcesDirectory)\$(build_dir)\$(BuildConfig)'
+      FolderPath: '$(Build.SourcesDirectory)\$(build_dir)\$(build_config)'
       DisplayName: 'ESRP - Sign Native dlls'
       DoEsrp: true
       Pattern: '*.dll'
 
   - powershell: |
-      nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.nuspec -Prop version=0.1.0 -Prop id="Microsoft.ML.OnnxRuntimeGenAI.Gpu"
-      nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec -Prop version=0.1.0 -Prop id="Microsoft.ML.OnnxRuntimeGenAI.Gpu"
+      $VERSION = Get-Content $(Build.SourcesDirectory)\VERSION_INFO
+      nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.nuspec \
+        -Prop version=$VERSION \
+        -Prop id="Microsoft.ML.OnnxRuntimeGenAI.Gpu" \
+        -Prop build_dir=$(build_dir) \
+        -Prop build_config=$(build_config)
+      nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec \
+        -Prop version=$VERSION \
+        -Prop build_config=$(build_config)
     displayName: 'Nuget Packaging'
     workingDirectory: '$(Build.SourcesDirectory)\nuget'
 

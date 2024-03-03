@@ -5,6 +5,8 @@
     <!-- depending on the type of build -->
     <id>$id$</id>
     <version>$version$</version>
+    <build_dri>$build_dir$</build_dir>
+    <build_config>$build_config$</build_config>
     <authors>Microsoft</authors>
     <owners>Microsoft</owners>
     <description>ONNX Runtime Generative AI Native Package</description>
@@ -31,12 +33,12 @@
     <file src="..\README.md" target="README.md" />
 
     <!-- Windows x64 -->
-    <file src="..\win-x64\RelWithDebInfo\onnxruntime-genai.lib" target="runtimes\win-x64\native" />
-    <file src="..\win-x64\RelWithDebInfo\onnxruntime-genai.dll" target="runtimes\win-x64\native" />
+    <file src="..\$build_dir$\$build_config$\onnxruntime-genai.lib" target="runtimes\$build_dir$\native" />
+    <file src="..\$build_dir$\$build_config$\onnxruntime-genai.dll" target="runtimes\$build_dir$\native" />
 
 <!--      --><!-- Windows arm64 -->
-<!--     <file src="..\win-arm64\RelWithDebInfo\onnxruntime-genai.lib" target="runtimes\win-arm64\native" /> -->
-<!--     <file src="..\win-arm64\RelWithDebInfo\onnxruntime-genai.dll" target="runtimes\win-arm64\native" /> -->
+<!--     <file src="..\$build_dir$\$build_config$\onnxruntime-genai.lib" target="runtimes\$build_dir$\native" /> -->
+<!--     <file src="..\$build_dir$\$build_config$\onnxruntime-genai.dll" target="runtimes\$build_dir$\native" /> -->
 
     <!-- Targets -->
     <file src="targets\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\netstandard2.1\$id$.targets" />
