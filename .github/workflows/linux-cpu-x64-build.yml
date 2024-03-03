@@ -41,7 +41,7 @@ jobs:
 
       - name: Install the python wheel and test dependencies
         run: |
-          python3 -m pip install build/clang_cpu/release/wheel/onnxruntime_genai*.whl
+          python3 -m pip install build/${{ matrix.compiler }}_cpu/release/wheel/onnxruntime_genai*.whl
           python3 -m pip install -r test/python/requirements.txt --user
 
       - name: Run the python tests
