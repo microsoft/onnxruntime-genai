@@ -32,7 +32,6 @@ elseif(USE_CUDA AND CMAKE_CUDA_COMPILER AND CMAKE_CUDA_COMPILER_VERSION VERSION_
   add_compile_definitions(USE_CXX17=1)
   message("USE C++17 Because of CUDA Version is less than 12")
   set(CMAKE_CXX_STANDARD 17)
-#  set(CMAKE_CUDA_STANDARD 17)
 else()
   set(CMAKE_CXX_STANDARD 20)
 endif()

@@ -47,6 +47,8 @@ jobs:
 
       - name: Build with Cmake in Docker
         run: |
+          az login --identity -u /subscriptions/00c06639-6ee4-454e-8058-8d8b1703bd87/resourcegroups/proj-onnxruntime-dev/providers/Microsoft.ManagedIdentity/userAssignedIdentities/ortcibuild_readonly
+          az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
           echo "Running docker image onnxruntimegpubuild"
           docker run \
             --gpus all \
