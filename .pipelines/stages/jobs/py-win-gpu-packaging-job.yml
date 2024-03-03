@@ -129,7 +129,7 @@ jobs:
   - task: BinSkim@4
     displayName: 'Run BinSkim'
     inputs:
-      AnalyzeTargetGlob: '+:file|$(Build.ArtifactStagingDirectory)\**\*genai.dll;-:file|$(Build.ArtifactStagingDirectory)\**\DirectML.dll'
+      AnalyzeTargetGlob: '$(Build.ArtifactStagingDirectory)\**\*genai.dll'
     continueOnError: true
 
   - task: TSAUpload@2
