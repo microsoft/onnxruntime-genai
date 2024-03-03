@@ -9,75 +9,16 @@ const char kModel_GPT2[] = "GPT2";
 const char kModel_Roberta[] = "Roberta";
 const char kModel_CLIP[] = "CLIP";
 const char kModel_CodeGen[] = "CodeGen";
+const char kModel_Llama[] = "Llama";
+const char KModel_Gemma[] = "Gemma";
 
-// Note: the following logic comes from CPython: unicodetype_db.h (_PyUnicode_IsWhitespace)
-bool IsUnicodeSpace(char32_t ch) {
-  const std::set<char32_t> unicode_spaces = {
-      0x0009,  // CHARACTER TABULATION
-      0x000A,  // LINE FEED (LF)
-      0x000B,  // LINE TABULATION
-      0x000C,  // FORM FEED (FF)
-      0x000D,  // CARRIAGE RETURN (CR)
-      0x001C,  // FILE SEPARATOR
-      0x001D,  // GROUP SEPARATOR
-      0x001E,  // RECORD SEPARATOR
-      0x001F,  // UNIT SEPARATOR
-      0x0020,  // SPACE
-      0x0085,  // NEXT
-      0x00A0,  // NO-BREAK SPACE
-      0x1680,  // OGHAM SPACE MARK
-      0x2000,  // EN QUAD
-      0x2001,  // EM QUAD
-      0x2002,  // EN SPACE
-      0x2003,  // EM SPACE
-      0x2004,  // THREE-PER-EM SPACE
-      0x2005,  // FOUR-PER-EM SPACE
-      0x2006,  // SIX-PER-EM SPACE
-      0x2007,  // FIGURE SPACE
-      0x2008,  // PUNCTUATION SPACE
-      0x2009,  // THIN SPACE
-      0x200A,  // HAIR SPACE
-      0x2028,  // LINE SEPARATOR
-      0x2029,  // PARAGRAPH SEPARATOR
-      0x202F,  // NARROW NO-BREAK SPACE
-      0x205F,  // MEDIUM MATHEMATICAL SPACE
-      0x3000,  // IDEOGRAPHIC SPACE
-  };
-  return unicode_spaces.count(ch) > 0;
-}
-
-// only support latin now
-char32_t ToLower(char32_t c) {
-  if ((c >= 'A') && (c <= 'Z')) {
-    return c + 'a' - 'A';
-  } else if ((c >= U'À' && (c <= U'ß'))) {
-    return c + U'à' - U'À';
-  }
-  return c;
-}
-
-bool AllSpaceUstring(const std::u32string& str) {
-  return std::all_of(str.begin(), str.end(), [](char32_t ch) { return IsUnicodeSpace(ch); });
-}
-
-std::u32string RemoveConsecutiveSpaces(const std::u32string& input) {
-  std::u32string result;
-  result.reserve(input.size());
-  bool lastWasSpace = false;
-
-  for (auto ch : input) {
-    if (IsUnicodeSpace(ch)) {
-      if (!lastWasSpace) {
-        result.push_back(ch);
-      }
-      lastWasSpace = true;
-    } else {
-      result.push_back(ch);
-      lastWasSpace = false;
-    }
-  }
-
-  return result;
+bool BPETokenizer::IsSupportedModel(const std::string_view& model_name) {
+  return model_name == kModel_GPT2 ||
+         model_name == kModel_Roberta ||
+         model_name == kModel_CLIP ||
+         model_name == kModel_CodeGen ||
+         model_name == kModel_Llama ||
+         model_name == KModel_Gemma;
 }
 
 void BPETokenizer::CreateByteEncoder() {
@@ -107,6 +48,18 @@ std::string_view BPETokenizer::ModelName() const {
   return model_name_;
 }
 
+BpeModelType BPETokenizer::ModelType() const {
+  auto name = ModelName();
+  auto type = BpeModelType::kBmtGPT2;
+  if (name == kModel_Llama || name == KModel_Gemma) {
+    type = BpeModelType::kBmtSPM;
+  } else if (name == kModel_CLIP) {
+    type = BpeModelType::kBmtCLIP;
+  }
+
+  return type;
+}
+
 void BPETokenizer::LoadPredefinedTokens(const TokenConfig& config) {
   unk_token_ = config.unk_token_.content_;
   bos_token_ = config.bos_token_.content_;
@@ -127,6 +80,19 @@ void BPETokenizer::LoadPredefinedTokens(const TokenConfig& config) {
   all_special_ids_.emplace(bos_token_id_);
   all_special_ids_.emplace(eos_token_id_);
   all_special_ids_.emplace(pad_token_id_);
+
+  if (ModelName() == kModel_Llama) {
+    add_dummpy_prefix_ = true;
+  }
+
+  if (ModelType() != BpeModelType::kBmtGPT2) {
+    add_bos_token_ = true;
+    add_eos_token_ = true;
+  }
+
+  if (ModelType() == BpeModelType::kBmtSPM) {
+    add_eos_token_ = false;
+  }
 }
 
 TfmStatus BPETokenizer::DecodeExtraArgs(const simdjson::dom::element& root) {
@@ -139,7 +105,7 @@ TfmStatus BPETokenizer::DecodeExtraArgs(const simdjson::dom::element& root) {
   return TfmStatus::OK();
 }
 
-TfmStatus BPETokenizer::Onload() {
+TfmStatus BPETokenizer::OnLoad() {
   simdjson::dom::parser parser;
   simdjson::dom::element root;
   std::string tokenizer_file = GetDataDir() + "/tokenizer.json";
@@ -195,10 +161,81 @@ TfmStatus BPETokenizer::Onload() {
   return status;
 }
 
-std::vector<tfmTokenId_t> BPETokenizer::Encode(std::string_view sv_input,
-                                               int64_t max_length,
-                                               bool compute_offset_mapping,
-                                               std::list<OffsetMappingType>& offset_map) const {
+// Note: the following logic comes from CPython: unicodetype_db.h (_PyUnicode_IsWhitespace)
+static bool IsUnicodeSpace(char32_t ch) {
+  const std::set<char32_t> unicode_spaces = {
+      0x0009,  // CHARACTER TABULATION
+      0x000A,  // LINE FEED (LF)
+      0x000B,  // LINE TABULATION
+      0x000C,  // FORM FEED (FF)
+      0x000D,  // CARRIAGE RETURN (CR)
+      0x001C,  // FILE SEPARATOR
+      0x001D,  // GROUP SEPARATOR
+      0x001E,  // RECORD SEPARATOR
+      0x001F,  // UNIT SEPARATOR
+      0x0020,  // SPACE
+      0x0085,  // NEXT
+      0x00A0,  // NO-BREAK SPACE
+      0x1680,  // OGHAM SPACE MARK
+      0x2000,  // EN QUAD
+      0x2001,  // EM QUAD
+      0x2002,  // EN SPACE
+      0x2003,  // EM SPACE
+      0x2004,  // THREE-PER-EM SPACE
+      0x2005,  // FOUR-PER-EM SPACE
+      0x2006,  // SIX-PER-EM SPACE
+      0x2007,  // FIGURE SPACE
+      0x2008,  // PUNCTUATION SPACE
+      0x2009,  // THIN SPACE
+      0x200A,  // HAIR SPACE
+      0x2028,  // LINE SEPARATOR
+      0x2029,  // PARAGRAPH SEPARATOR
+      0x202F,  // NARROW NO-BREAK SPACE
+      0x205F,  // MEDIUM MATHEMATICAL SPACE
+      0x3000,  // IDEOGRAPHIC SPACE
+  };
+  return unicode_spaces.count(ch) > 0;
+}
+
+// only support latin now
+static char32_t ToLower(char32_t c) {
+  if ((c >= 'A') && (c <= 'Z')) {
+    return c + 'a' - 'A';
+  } else if ((c >= U'À' && (c <= U'ß'))) {
+    return c + U'à' - U'À';
+  }
+  return c;
+}
+
+static bool AllSpaceUstring(const std::u32string& str) {
+  return std::all_of(str.begin(), str.end(), [](char32_t ch) { return IsUnicodeSpace(ch); });
+}
+
+static std::u32string RemoveConsecutiveSpaces(const std::u32string& input) {
+  std::u32string result;
+  result.reserve(input.size());
+  bool lastWasSpace = false;
+
+  for (auto ch : input) {
+    if (IsUnicodeSpace(ch)) {
+      if (!lastWasSpace) {
+        result.push_back(ch);
+      }
+      lastWasSpace = true;
+    } else {
+      result.push_back(ch);
+      lastWasSpace = false;
+    }
+  }
+
+  return result;
+}
+
+std::vector<tfmTokenId_t>
+BPETokenizer::Encode(std::string_view sv_input,
+                     int64_t max_length,
+                     bool compute_offset_mapping,
+                     std::list<OffsetMappingType>& offset_map) const {
   std::vector<tfmTokenId_t> res;
   std::list<std::pair<uint32_t, uint32_t>> byte_list;
 
@@ -232,13 +269,17 @@ std::vector<tfmTokenId_t> BPETokenizer::Encode(std::string_view sv_input,
     return res;
   }
 
-  if (ModelName() != kModel_GPT2 && ModelName() != kModel_CodeGen) {
+  if (add_bos_token_) {
     // Add BOS token to result
     res.push_back(bos_token_id_);
   }
   if (ModelName() == kModel_CLIP) {
     // Convert to lowercase
-    std::transform(input.begin(), input.end(), input.begin(), [](char32_t c) { return static_cast<char32_t>(ToLower(c)); });
+    std::transform(
+        input.begin(),
+        input.end(),
+        input.begin(),
+        [](char32_t c) { return static_cast<char32_t>(ToLower(c)); });
   }
 
   // Parse input
@@ -337,7 +378,90 @@ std::vector<tfmTokenId_t> BPETokenizer::Encode(std::string_view sv_input,
     }
   }
 
-  if (ModelName() != kModel_GPT2 && ModelName() != kModel_CodeGen) {
+  if (add_eos_token_) {
+    // Add EOS token to result
+    res.push_back(eos_token_id_);
+  }
+
+  return res;
+}
+
+static const char spm_underscore[] = "\xe2\x96\x81";
+
+static std::string ReplaceAll(std::string_view s, const std::string& search, const std::string& replace) {
+  std::string result;
+  for (size_t pos = 0;; pos += search.length()) {
+    auto new_pos = s.find(search, pos);
+    if (new_pos == std::string::npos) {
+      result += s.substr(pos, s.size() - pos);
+      break;
+    }
+    result += s.substr(pos, new_pos - pos);
+    result += replace;
+    pos = new_pos;
+  }
+
+  return result;
+}
+
+std::vector<tfmTokenId_t>
+BPETokenizer::SpmEncode(std::string_view sv_input,
+                        int64_t max_length,
+                        bool /*compute_offset_mapping */,
+                        std::list<OffsetMappingType>& /* offset_map */) const {
+  std::vector<tfmTokenId_t> res;
+  std::list<std::pair<uint32_t, uint32_t>> byte_list;
+
+  if (add_bos_token_) {
+    // Add BOS token to result
+    res.push_back(bos_token_id_);
+  }
+
+  // Replace all spaces with '▁' for SP model
+  std::string prefix = add_dummpy_prefix_ ? spm_underscore : "";
+  auto escaped_input = prefix + ReplaceAll(sv_input, " ", spm_underscore);
+  auto ucs32_input = FromUTF8(escaped_input);
+  auto special_token_split_res = extended_token_.Split(ucs32_input);
+
+  for (auto& seg_id : special_token_split_res) {
+    if (static_cast<int64_t>(res.size()) >= max_length) {
+      break;
+    }
+
+    byte_list.clear();
+    int id = seg_id.second;
+    if (id != bpe::kInvalidTokenId) {
+      size_t utf8_len = 0;
+      for (auto chr : seg_id.first) {
+        utf8_len += UTF8Len(chr);
+      }
+      byte_list.emplace_back(static_cast<tfmTokenId_t>(id), gsl::narrow<uint32_t>(utf8_len));
+    } else {
+
+      for (size_t offset = 0; offset < seg_id.first.size(); ++offset) {
+        auto utf8s = EncodeUTF8Char(seg_id.first[offset]);
+        auto byte_id = bbpe_encoder_.GetTokenId(utf8s);
+        if (byte_id == bpe::kInvalidTokenId) {
+          byte_id = unk_token_id_;  // for safety
+        }
+
+        byte_list.emplace_back(static_cast<tfmTokenId_t>(byte_id), gsl::narrow<uint32_t>(utf8s.length()));
+      }
+    }
+    // Perform BPE
+    bbpe_encoder_.PerformBPE(byte_list);
+
+    // Add output to result
+    for (const auto& p : byte_list) {
+      if (static_cast<int64_t>(res.size()) >= max_length) {
+        break;
+      }
+
+      res.push_back(p.first);
+    }
+  }  // for (auto& seg_id : special_token_split_res)
+
+  if (add_eos_token_) {
     // Add EOS token to result
     res.push_back(eos_token_id_);
   }
@@ -348,15 +472,15 @@ std::vector<tfmTokenId_t> BPETokenizer::Encode(std::string_view sv_input,
 TfmStatus BPETokenizer::Encode(std::string_view sv_input, std::vector<tfmTokenId_t>& ids) const {
   std::list<OffsetMappingType> offset_map;
   auto max_length = padding_length_ < 0 ? std::numeric_limits<uint32_t>::max() : padding_length_;
-  std::vector<tfmTokenId_t> res = Encode(sv_input,
-                                         max_length,
-                                         false,
-                                         offset_map);
+  std::vector<tfmTokenId_t> res =
+      ModelType() == BpeModelType::kBmtSPM ? SpmEncode(sv_input, max_length, false, offset_map)
+                                           : Encode(sv_input, max_length, false, offset_map);
   ids = res;
   return {};
 }
 
-TfmStatus BPETokenizer::Id2Token(tfmTokenId_t id, std::string& token, bool skip_special_tokens, bool& f_special_last) const {
+TfmStatus BPETokenizer::Id2Token(tfmTokenId_t id, std::string& token,
+                                 bool skip_special_tokens, bool& f_special_last) const {
   bool f_special = all_special_ids_.count(id) ? true : false;
   if (skip_special_tokens && f_special) {
     f_special_last = f_special;
@@ -399,6 +523,26 @@ TfmStatus BPETokenizer::Id2Token(tfmTokenId_t id, std::string& token, bool skip_
   return {};
 }
 
+TfmStatus BPETokenizer::SpmId2Token(tfmTokenId_t id, std::string& token, bool& f_special_last) const {
+  std::string_view piece = id < arr_vocab_.size() ? arr_vocab_[id] : "";
+  if (piece.empty() || all_special_ids_.count(id)) {
+    token = "";
+    f_special_last = true;
+  } else if (IsSpmByteWord(piece)) {
+    char buf[3] = {piece[3], piece[4], 0};  // something like <0x20>
+    token = {static_cast<char>(strtol(buf, NULL, 16))};
+  } else {
+    token = ReplaceAll(piece, spm_underscore, " ");
+  }
+
+  if (!token.empty() && token[0] == ' ' && f_special_last) {
+    token = token.substr(1);
+    f_special_last = false;
+  }
+
+  return {};
+}
+
 TfmStatus BPETokenizer::Decode(const span<tfmTokenId_t const>& ids, std::string& text) const {
   bool f_special_last = false;
   auto count = static_cast<size_t>(ids.size());
@@ -408,7 +552,8 @@ TfmStatus BPETokenizer::Decode(const span<tfmTokenId_t const>& ids, std::string&
   for (size_t tok_idx = 0; tok_idx < count; ++tok_idx) {
     const auto id = *(p_ids + tok_idx);
     std::string decoded_token;
-    auto status = Id2Token(id, decoded_token, args.skip_special_tokens_, f_special_last);
+    auto status = ModelType() == BpeModelType::kBmtSPM ? SpmId2Token(id, decoded_token, f_special_last)
+                                                       : Id2Token(id, decoded_token, args.skip_special_tokens_, f_special_last);
     if (!status.ok()) {
       return status;
     }
@@ -428,7 +573,8 @@ TfmStatus BPETokenizer::Decode(const span<tfmTokenId_t const>& ids, std::string&
     }
   }
 
-  if (!text.empty() && text.back() == ' ') {
+  if (ModelType() == BpeModelType::kBmtCLIP &&
+      !text.empty() && text.back() == ' ') {
     text.pop_back();
   }
 
@@ -445,18 +591,28 @@ TfmStatus BPETokenizer::Id2Token(tfmTokenId_t id, std::string& token, DecoderSta
     is_first = true;
   }
 
-  auto status = Id2Token(id, token, decode_extra_args_.skip_special_tokens_, bpe_state->f_special_last);
+  bool f_special_last = bpe_state->f_special_last;
+  auto status = ModelName() == "Llama" ? SpmId2Token(id, token, bpe_state->f_special_last)
+                                       : Id2Token(id, token,
+                                                  decode_extra_args_.skip_special_tokens_,
+                                                  bpe_state->f_special_last);
   if (status.ok()) {
     if (bpe_state_ptr) {
       *state = bpe_state_ptr.release();
     }
+    // bpe_state->f_special_last is already update for next iteration, so it is current.
+    bool f_special = bpe_state->f_special_last;
+    if (decode_extra_args_.whitespace_token_) {
+      if (f_special && (is_first && !f_special_last)) {
+        token = std::string(" ") + token;
+      }
 
-    // TODO: handle whitespace_token_ here
-    // if (decode_extra_args_.whitespace_token_ &&
-    //     f_special && (is_first && !f_special_last)) {
-    //   token = ' ' + token;
-    // }
+      if (f_special && id != eos_token_id_) {
+        token.push_back(' ');
+      }
+    }  // end case of whitespace_token_
   }
+
   return status;
 }
 

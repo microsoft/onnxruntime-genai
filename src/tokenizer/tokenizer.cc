@@ -1,10 +1,21 @@
 #include "token_bpe.h"
-#include "token_spm.h"
 #include "token_rwkv.h"
 
+#include <filesystem>
 #include <memory>
 
 namespace tfm {
+
+static std::string_view GetModelName(const std::string_view& tok_cls) {
+  constexpr std::string_view tok = "Tokenizer";
+  if (tok_cls.size() > tok.length()) {
+    if (tok_cls.substr(tok_cls.size() - tok.length()) == tok) {
+      return tok_cls.substr(0, tok_cls.size() - tok.length());
+    }
+  }
+
+  return tok_cls;
+}
 
 Tokenizer::Tokenizer() : TfmObjectImpl(tfmObjectKind_t::kTfmKindTokenizer) {}
 
@@ -15,22 +26,26 @@ TfmStatus CreateBPETokenizer(const std::string& tokenizer_path,
   auto config_file = tokenizer_path + "/tokenizer_config.json";
   auto status = token_cfg->LoadJson(config_file);
 
-  if (tokenizer_type == "BPE") {
-    token_ptr = std::make_unique<BPETokenizer>();
-  } else if (tokenizer_type.empty()) {
-    if (token_cfg->tokenizer_class_ == "LlamaTokenizer" ||
-        token_cfg->tokenizer_class_ == "GemmaTokenizer") {
-      token_ptr = std::make_unique<SpmTokenizer>();
-    } else if (token_cfg->tokenizer_class_ == "GPT2Tokenizer" ||
-               token_cfg->tokenizer_class_ == "CLIPTokenizer" ||
-               token_cfg->tokenizer_class_ == "CodeGenTokenizer") {
-      token_ptr = std::make_unique<BPETokenizer>();
+  std::string type = tokenizer_type;
+  if (type.empty()) {
+    if (BPETokenizer::IsSupportedModel(GetModelName(token_cfg->tokenizer_class_))) {
+      type = "BPE";
+    } else if (std::filesystem::exists(tokenizer_path + "/tokenizer.model")) {
+      // if 'tokenizer.model exists in the tokenizer_path, then it is a sentencepiece model
+      type = "SPM";
     } else {
-      status = TfmStatus(kTfmErrorInvalidArgument, "Invalid tokenizer class");
+      status = TfmStatus(kTfmErrorInvalidArgument, "Cannot determine the tokenizer type from tokenizer_path argument");
     }
-  } else {
-    status = TfmStatus(kTfmErrorInvalidArgument, "Invalid tokenizer type");
   }
+
+  if (type == "BPE") {
+    token_ptr = std::make_unique<BPETokenizer>();
+  } /* else if (type == "SPM") {
+    token_ptr = std::make_unique<SpmTokenizer>();
+  } */ else {
+    status = TfmStatus(kTfmErrorInvalidArgument, "Unknown tokenizer_type, (BPE, SPM, RKWV) are supported.");
+  }
+
   if (status.ok()) {
     status = token_ptr->LoadData(std::move(token_cfg), tokenizer_path);
     if (!status.ok()) {
@@ -68,7 +83,7 @@ TfmStatus Tokenizer::LoadData(std::unique_ptr<TokenConfig> token_cfg,
   }
 
   impl.SetDataDir(tokenizer_dir);
-  return impl.Onload();
+  return impl.OnLoad();
 }
 
 TfmStatus Tokenizer::Tokenize(const std::vector<std::string_view>& input,
@@ -93,7 +108,7 @@ TfmStatus Tokenizer::Id2Token(tfmTokenId_t id, std::string& token, std::unique_p
   return status;
 }
 
-TfmStatus TokenizerImpl::Onload() { return TfmStatus::OK(); };
+TfmStatus TokenizerImpl::OnLoad() { return TfmStatus::OK(); };
 
 TfmStatus TokenizerImpl::BatchEncode(
     const std::vector<std::string_view>& input,

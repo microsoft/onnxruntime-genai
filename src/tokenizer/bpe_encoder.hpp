@@ -19,6 +19,10 @@
 
 namespace tfm {
 
+inline bool IsSpmByteWord(std::string_view word) {
+  return word.size() == 6 && word[0] == '<' && word[1] == '0' && word[2] == 'x' && word[5] == '>';
+}
+
 class BpeEncoder {
  public:
   BpeEncoder() = default;
@@ -34,7 +38,8 @@ class BpeEncoder {
     if (!unk_token_obj.is_null()) {
       unk_token = model_node.at_key("unk_token").get_c_str().value();
       if (config.unk_token_.content_ != unk_token) {
-        return TfmStatus{kTfmErrorInvalidFile, "The unk_token in the tokenizer.json is not the same as the one in the config"};
+        return TfmStatus{kTfmErrorInvalidFile,
+                         "The unk_token in the tokenizer.json is not the same as the one in the config"};
       }
     }
     if (model_node.at_key("vocab").is_null() || model_node.at_key("merges").is_null()) {
@@ -51,8 +56,16 @@ class BpeEncoder {
     if (error) {
       return TfmStatus{kTfmErrorInvalidFile, "Cannot find the vocab key in the the tokenizer.json"};
     }
+
+    std::string spm_byte;
     for (auto [_key, _value] : vocab_obj) {
       uint32_t id = gsl::narrow_cast<uint32_t>(_value.get_uint64());
+      if (IsSpmByteWord(_key)) {
+        char buf[3] = {_key[3], _key[4], 0};  // something like <0x20>
+        spm_byte = {static_cast<char>(strtol(buf, NULL, 16))};
+        _key = spm_byte;
+      }
+
       vocab_map_[std::string(_key)] = id;
       if (id > max_token_id_) {
         max_token_id_ = id;
@@ -71,14 +84,9 @@ class BpeEncoder {
     simdjson::dom::element merges_node = model_node.at_key("merges");
     if (!merges_node.is_array()) {
       return TfmStatus{kTfmErrorInvalidFile, "Cannot find the merges key in the the tokenizer.json"};
-    } else {
-      auto status = LoadMerges(merges_node);
-      if (!status.ok()) {
-        return status;
-      }
     }
 
-    return {};
+    return LoadMerges(merges_node);
   }
 
   TfmStatus LoadMerges(simdjson::dom::element merges_node) {
@@ -163,6 +171,11 @@ class BpeEncoder {
     } else {
       return unk_id_;
     }
+  }
+
+  uint32_t GetTokenId(std::string_view key, tfmTokenId_t default_id = bpe::kInvalidTokenId) const {
+    auto it = vocab_map_.find(std::string(key));
+    return it != end(vocab_map_) ? it->second : default_id;
   }
 
   std::vector<std::string_view> BuildDecoder() const {

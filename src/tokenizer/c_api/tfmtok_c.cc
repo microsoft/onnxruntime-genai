@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <cstdarg>
 #include <filesystem>
 #include <algorithm>
 
@@ -95,12 +96,16 @@ tfmError_t TFM_API_CALL TfmCreate(tfmObjectKind_t kind, TfmObject** object, ...)
     return kTfmErrorInvalidArgument;
   }
 
-  if (kind == tfmObjectKind_t::kTfmKindDetokenizerCache) {
-    *object = static_cast<TfmObject*>(new DetokenizerCache());
-  } /* else if (kind == tfmObjectKind_t::kTfmKindTokenizer) {
-    *object = static_cast<TfmObject*>(new TfmTokenizer());
-  } */
+  va_list args;
+  va_start(args, object);
 
+  if (kind == tfmObjectKind_t::kTfmKindDetokenizerCache) {
+    *object = std::make_unique<DetokenizerCache>().release();
+  } else if (kind == tfmObjectKind_t::kTfmKindTokenizer) {
+    return TfmCreateTokenizer(static_cast<TfmTokenizer**>(object), va_arg(args, const char*));
+  }
+
+  va_end(args);
   return tfmError_t();
 }
 

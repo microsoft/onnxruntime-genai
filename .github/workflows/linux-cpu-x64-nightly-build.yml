@@ -1,5 +1,13 @@
-name: "Linux CPU x64 Build"
-on: [ workflow_dispatch, pull_request ]
+name: "Linux CPU x64 Nightly Build"
+
+# Run at 5:00 AM UTC every day
+# 9:00 PM PST
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 5 * * *"
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
@@ -8,16 +16,13 @@ env:
   ort_zip: "onnxruntime-linux-x64-1.17.0.tgz"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-linux-x64-1.17.0.tgz"
 jobs:
-  linux_cpu_x64:
-    strategy:
-      matrix:
-        compiler: [ gcc, clang ]
+  job:
     runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU" ]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
-        uses: actions/checkout@v4
-        with:
-          submodules: true
+        uses: actions/checkout@v2
+
+
 
       - name: Download OnnxRuntime
         run: |
@@ -32,36 +37,39 @@ jobs:
         run: |
           mv ${{ env.ort_dir }} ort
 
-      - name: Build with CMake and GCC
+      - name: Git Submodule Update
+        run: |
+          git submodule update --init --recursive
+          
+      - name: Build with CMake and clang
         run: |
           set -e -x
           rm -rf build
-          cmake --preset linux_${{ matrix.compiler }}_cpu_release
-          cmake --build --preset linux_${{ matrix.compiler }}_cpu_release
+          cmake --preset linux_clang_cpu_release
+          cmake --build --preset linux_clang_cpu_release
 
       - name: Install the python wheel and test dependencies
         run: |
           python3 -m pip install build/clang_cpu/release/wheel/onnxruntime_genai*.whl
-          python3 -m pip install -r test/python/requirements.txt --user
+          python3 -m pip install -r test/python/requirements-nightly-cpu.txt --user
+
+      - name: Get HuggingFace Token
+        run: |
+          az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
+          HF_TOKEN=$(az keyvault secret show --vault-name anubissvcsecret --name ANUBIS-HUGGINGFACE-TOKEN --query value)
+          echo "::add-mask::$HF_TOKEN"
+          echo "HF_TOKEN=$HF_TOKEN" >> $GITHUB_ENV
 
       - name: Run the python tests
         run: |
-          python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models
+          python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models --e2e
 
       - name: Verify Build Artifacts
         if: always()
-        continue-on-error: true
         run: |
-          ls -l ${{ github.workspace }}/build/${{ matrix.compiler }}_cpu/release
+          ls -l ${{ github.workspace }}/build
 
-      - if: ${{ matrix.compiler }} == 'gcc'
-        name: Run tests
-        run: |
-          set -e -x
-          ./build/${{ matrix.compiler }}_cpu/release/test/unit_tests
-
-      - if: ${{ matrix.compiler }} == 'gcc'
-        name: Upload Build Artifacts
+      - name: Upload Build Artifacts
         uses: actions/upload-artifact@v3
         with:
           name: onnxruntime-genai-linux-cpu-x64

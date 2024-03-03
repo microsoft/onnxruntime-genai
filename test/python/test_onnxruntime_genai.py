@@ -1,13 +1,14 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
-from __future__ import annotations
-
 import argparse
 import logging
 import os
-import subprocess
+import pathlib
 import sys
+from typing import Union
+
+from _test_utils import run_subprocess
 
 logging.basicConfig(
     format="%(asctime)s %(name)s [%(levelname)s] - %(message)s", level=logging.DEBUG
@@ -15,66 +16,54 @@ logging.basicConfig(
 log = logging.getLogger("onnxruntime-genai-tests")
 
 
-def is_windows():
-    return sys.platform.startswith("win")
-
-
-def run_subprocess(
-    args: list[str],
-    cwd: str | bytes | os.PathLike | None = None,
-    capture: bool = False,
-    dll_path: str | bytes | os.PathLike | None = None,
-    shell: bool = False,
-    env: dict[str, str] = {},
-    log: logging.Logger | None = None,
+def run_onnxruntime_genai_api_tests(
+    cwd: Union[str, bytes, os.PathLike],
+    log: logging.Logger,
+    test_models: Union[str, bytes, os.PathLike],
 ):
-    if log:
-        log.info(f"Running subprocess in '{cwd or os.getcwd()}'\n{args}")
-    user_env = os.environ.copy()
-    user_env.update(env)
-    if dll_path:
-        if is_windows():
-            user_env["PATH"] = dll_path + os.pathsep + user_env["PATH"]
-        else:
-            if "LD_LIBRARY_PATH" in user_env:
-                user_env["LD_LIBRARY_PATH"] += os.pathsep + dll_path
-            else:
-                user_env["LD_LIBRARY_PATH"] = dll_path
-
-    stdout, stderr = (subprocess.PIPE, subprocess.STDOUT) if capture else (None, None)
-    completed_process = subprocess.run(
-        args,
-        cwd=cwd,
-        check=True,
-        stdout=stdout,
-        stderr=stderr,
-        env=user_env,
-        shell=shell,
-    )
-
-    if log:
-        log.debug(
-            "Subprocess completed. Return code=" + str(completed_process.returncode)
-        )
-    return completed_process
-
-
-def run_onnxruntime_genai_api_tests(cwd: str | bytes | os.PathLike, log: logging.Logger, 
-                                    test_models: str | bytes | os.PathLike):
     log.debug("Running: ONNX Runtime GenAI API Tests")
 
-    command = [sys.executable, "-m", "pytest", "-sv", "test_onnxruntime_genai_api.py", "--test_models", test_models]
+    command = [
+        sys.executable,
+        "-m",
+        "pytest",
+        "-sv",
+        "test_onnxruntime_genai_api.py",
+        "--test_models",
+        test_models,
+    ]
 
+    run_subprocess(command, cwd=cwd, log=log).check_returncode()
+
+
+def run_onnxruntime_genai_e2e_tests(
+    cwd: Union[str, bytes, os.PathLike],
+    log: logging.Logger,
+):
+    log.debug("Running: ONNX Runtime GenAI E2E Tests")
+
+    log.debug("Running: Phi-2")
+    command = [sys.executable, "test_onnxruntime_genai_phi2.py"]
     run_subprocess(command, cwd=cwd, log=log).check_returncode()
 
 
 def parse_arguments():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--cwd", help="Path to the current working directory")
+    parser.add_argument(
+        "--cwd",
+        help="Path to the current working directory",
+        default=pathlib.Path(__file__).parent.resolve().absolute(),
+    )
     parser.add_argument(
         "--test_models",
         help="Path to the test_models directory",
-        required=True
+        default=pathlib.Path(__file__).parent.parent.resolve().absolute()
+        / "test_models",
+    )
+    parser.add_argument(
+        "--e2e",
+        help="Whether to run e2e tests. If not specified e2e tests will not run.",
+        action="store_true",
     )
     return parser.parse_args()
 
@@ -84,7 +73,12 @@ def main():
 
     log.info("Running onnxruntime-genai tests pipeline")
 
-    run_onnxruntime_genai_api_tests(os.path.abspath(args.cwd), log, os.path.abspath(args.test_models))
+    run_onnxruntime_genai_api_tests(
+        os.path.abspath(args.cwd), log, os.path.abspath(args.test_models)
+    )
+
+    if args.e2e:
+        run_onnxruntime_genai_e2e_tests(os.path.abspath(args.cwd), log)
 
     return 0
 

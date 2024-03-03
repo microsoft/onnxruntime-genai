@@ -100,11 +100,13 @@ class Model:
         }
 
         # RotaryEmbedding-specific variables
+        partial_rotary_factor = config.partial_rotary_factor if hasattr(config, "partial_rotary_factor") else 1.0
         self.rotemb_attrs = {
-            "create_rotary_embedding_caches": True,  # Create cos/sin caches for rotary embeddings
-            "num_heads": 0,                          # For partial rotary embeddings (RotaryEmbedding kernel expects a default value of 0)
-            "rotary_embedding_dim": 0,               # For partial rotary embeddings (RotaryEmbedding kernel expects a default value of 0)
-            "theta": config.rope_theta,              # Base value if calculating cos/sin caches from scratch
+            "create_rotary_embedding_caches": True,          # Create cos/sin caches for rotary embeddings
+            "partial_rotary_factor": partial_rotary_factor,  # Factor for partial rotary embeddings
+            "num_heads": 0,                                  # For partial rotary embeddings (RotaryEmbedding kernel expects a default value of 0)
+            "rotary_embedding_dim": 0,                       # For partial rotary embeddings (RotaryEmbedding kernel expects a default value of 0)
+            "theta": config.rope_theta,                      # Base value if calculating cos/sin caches from scratch
         }
 
         # Attention-specific variables (MHA, GQA, GQA + Rot.Emb., etc.)
@@ -545,7 +547,8 @@ class Model:
         if self.rotemb_attrs["create_rotary_embedding_caches"]:
             if not hasattr(rotemb, "cos_cached"):
                 # Create cos/sin caches if not already created
-                inv_freq = 1.0 / (self.rotemb_attrs["theta"] ** (torch.arange(0, self.head_size, 2, dtype=torch.int64).float() / self.head_size))
+                dim = int(self.rotemb_attrs["partial_rotary_factor"] * self.head_size)
+                inv_freq = 1.0 / (self.rotemb_attrs["theta"] ** (torch.arange(0, dim, 2, dtype=torch.int64).float() / dim))
                 t = torch.arange(self.context_length, dtype=torch.int64).type_as(inv_freq)
                 freqs = torch.outer(t, inv_freq)
                 emb = torch.cat((freqs, freqs), dim=-1)
@@ -789,7 +792,7 @@ class Model:
             # Norm after last decoder layer of model (last layer --> norm)
             self.layernorm_attrs["last_layernorm"] = True
 
-    def make_model(self):
+    def make_model(self, input_path):
         # Make inputs and outputs to ONNX model
         self.make_inputs_and_outputs()
 
@@ -802,14 +805,22 @@ class Model:
         #         4D causal attention mask
         self.make_attention_mask_reformatting()
 
-        # Load PyTorch model
-        extra_kwargs = {} if os.path.exists(self.model_name_or_path) else {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {"cache_dir": self.cache_dir, "use_auth_token": True}
-        model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, **extra_kwargs)
+        # Load weights of original model
+        if input_path.endswith(".gguf"):
+            # Load GGUF model
+            from gguf_model import GGUFModel
+            model = GGUFModel.from_pretrained(self.model_type, input_path, self.head_size, self.hidden_size, self.intermediate_size, self.num_attn_heads, self.num_kv_heads, self.vocab_size)
+            self.layernorm_attrs["add_offset"] = 0  # add offset already done for GGUF models
+        else:
+            # Load PyTorch model
+            extra_kwargs = {} if os.path.exists(self.model_name_or_path) else {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {"cache_dir": self.cache_dir, "use_auth_token": True}
+            model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, **extra_kwargs)
         
-        # Loop through PyTorch model and map each nn.Module to ONNX/ORT ops
+        # Loop through model and map each module to ONNX/ORT ops
         self.layer_id = 0
         for module in model.modules():
-            if isinstance(module, torch.nn.Embedding):
+            if isinstance(module, torch.nn.Embedding) or (hasattr(model, "embedding") and module == model.embedding):
+                # Checks (Hugging Face logic) or (GGUF logic)
                 # Embedding layer
                 print("Reading embedding layer")
                 self.make_embedding(module.weight.detach().numpy())
@@ -822,7 +833,8 @@ class Model:
                 # SkipLayerNorm after last decoder layer (MatMul --> SkipLayerNorm)
                 print("Reading final norm")
                 self.make_layernorm(self.layer_id, module, skip=True, simple=self.layernorm_attrs["simple"], location="final_norm")
-            elif isinstance(module, torch.nn.Linear) and module.out_features == self.vocab_size:
+            elif (isinstance(module, torch.nn.Linear) and module.out_features == self.vocab_size) or (hasattr(model, "lm_head") and module == model.lm_head):
+                # Checks (Hugging Face logic) or (GGUF logic)
                 # Language modeling head (SkipLayerNorm --> logits)
                 print("Reading LM head")
                 self.make_lm_head(module)
@@ -830,9 +842,12 @@ class Model:
         del model
 
     def has_final_norm(self, module, model):
-        norm = hasattr(model.model, "norm") and module == model.model.norm
-        final_layernorm = hasattr(model.model, "final_layernorm") and module == model.model.final_layernorm
-        return norm or final_layernorm
+        # Hugging Face names
+        hf_norm = hasattr(model, "model") and hasattr(model.model, "norm") and module == model.model.norm
+        hf_final_layernorm = hasattr(model, "model") and hasattr(model.model, "final_layernorm") and module == model.model.final_layernorm
+        # GGUF names
+        gguf_final_norm = hasattr(model, "final_norm") and module == model.final_norm
+        return hf_norm or hf_final_layernorm or gguf_final_norm
 
     def make_attention_mask_reformatting(self):
         # Make nodes for the attention mask subgraphs that reformat the
@@ -1362,11 +1377,15 @@ def parse_extra_options(kv_items):
     return kv_pairs
 
 
-def create_model(model_name_or_path, output_dir, precision, execution_provider, cache_dir, **extra_options):
+def create_model(model_name, input_path, output_dir, precision, execution_provider, cache_dir, **extra_options):
+    # Create cache and output directories
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(cache_dir, exist_ok=True)
-    extra_kwargs = {} if os.path.exists(model_name_or_path) else {"cache_dir": cache_dir, "use_auth_token": True}
-    config = AutoConfig.from_pretrained(model_name_or_path, **extra_kwargs)
+
+    # Load model config
+    extra_kwargs = {} if os.path.isdir(input_path) else {"cache_dir": cache_dir, "use_auth_token": True}
+    hf_name = input_path if os.path.isdir(input_path) else model_name
+    config = AutoConfig.from_pretrained(hf_name, **extra_kwargs)
 
     # Set input/output precision of ONNX model
     io_dtype = TensorProto.FLOAT if precision in {"int8", "fp32"} or (precision == "int4" and execution_provider == "cpu") else TensorProto.FLOAT16
@@ -1381,19 +1400,19 @@ def create_model(model_name_or_path, output_dir, precision, execution_provider, 
     elif config.architectures[0] == "PhiForCausalLM":
         onnx_model = PhiModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
     else:
-        raise NotImplementedError(f"The {model_name_or_path} model is not currently supported.")
+        raise NotImplementedError(f"The {hf_name} model is not currently supported.")
 
     # Make ONNX model
-    onnx_model.make_model()
+    onnx_model.make_model(input_path)
 
     # Save ONNX model
     onnx_model.save_model(output_dir)
 
     # Make GenAI config
-    onnx_model.make_genai_config(model_name_or_path, extra_kwargs, output_dir)
+    onnx_model.make_genai_config(hf_name, extra_kwargs, output_dir)
 
     # Copy Hugging Face processing files to output folder
-    onnx_model.save_processing(model_name_or_path, extra_kwargs, output_dir)
+    onnx_model.save_processing(hf_name, extra_kwargs, output_dir)
 
 
 def get_args():
@@ -1401,9 +1420,22 @@ def get_args():
 
     parser.add_argument(
         "-m",
-        "--model_name_or_path",
-        required=True,
-        help="Model name in Hugging Face or path to folder on disk containing the Hugging Face config, model, tokenizer, etc.",
+        "--model_name",
+        required=False,
+        default=None,
+        help="Model name in Hugging Face. Do not use if providing an input path to a Hugging Face directory in -i/--input.",
+    )
+
+    parser.add_argument(
+        "-i",
+        "--input",
+        required=False,
+        default="",
+        help=textwrap.dedent("""\
+            Input model source. Currently supported options are:
+                hf_path: Path to folder on disk containing the Hugging Face config, model, tokenizer, etc.
+                gguf_path: Path to float16/float32 GGUF file on disk containing the GGUF model
+            """),
     )
 
     parser.add_argument(
@@ -1435,7 +1467,7 @@ def get_args():
         required=False,
         type=str,
         default=os.path.join('.', 'cache_dir'),
-        help="Model cache directory (if providing model name and not folder path)",
+        help="Cache directory for Hugging Face files and temporary ONNX external data files",
     )
 
     parser.add_argument(
@@ -1465,4 +1497,4 @@ def get_args():
 if __name__ == '__main__':
     args = get_args()
     extra_options = parse_extra_options(args.extra_options)
-    create_model(args.model_name_or_path, args.output, args.precision, args.execution_provider, args.cache_dir, **extra_options)
+    create_model(args.model_name, args.input, args.output, args.precision, args.execution_provider, args.cache_dir, **extra_options)
