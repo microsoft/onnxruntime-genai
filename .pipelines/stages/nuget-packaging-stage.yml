@@ -31,16 +31,16 @@ stages:
         arch: 'arm64'
         ort_version: ${{ parameters.ort_version }}
 
-  - ${{ if eq(parameters.enable_linux_cpu, true) }}:
-    - template: jobs/nuget-linux-cpu-packaging-job.yml
-      parameters:
-        ort_version: ${{ parameters.ort_version }}
-  - ${{ if eq(parameters.enable_linux_gpu, true) }}:
-    - template: jobs/nuget-linux-gpu-packaging-job.yml
-      parameters:
-        ort_version: ${{ parameters.ort_version }}
-  - ${{ if eq(parameters.enable_linux_arm, true) }}:
-    - template: jobs/nuget-linux-cpu-packaging-job.yml
-      parameters:
-        arch: 'arm64'
-        ort_version: ${{ parameters.ort_version }}
+#  - ${{ if eq(parameters.enable_linux_cpu, true) }}:
+#    - template: jobs/nuget-linux-cpu-packaging-job.yml
+#      parameters:
+#        ort_version: ${{ parameters.ort_version }}
+#  - ${{ if eq(parameters.enable_linux_gpu, true) }}:
+#    - template: jobs/nuget-linux-gpu-packaging-job.yml
+#      parameters:
+#        ort_version: ${{ parameters.ort_version }}
+#  - ${{ if eq(parameters.enable_linux_arm, true) }}:
+#    - template: jobs/nuget-linux-cpu-packaging-job.yml
+#      parameters:
+#        arch: 'arm64'
+#        ort_version: ${{ parameters.ort_version }}
