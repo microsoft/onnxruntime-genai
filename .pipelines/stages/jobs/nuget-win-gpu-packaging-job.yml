@@ -53,5 +53,5 @@ jobs:
     inputs:
       ArtifactName: onnxruntime-genai-win-gpu
 
-  - template: compliant-and-cleanup.yml
+  - template: steps/compliant-and-cleanup.yml
 

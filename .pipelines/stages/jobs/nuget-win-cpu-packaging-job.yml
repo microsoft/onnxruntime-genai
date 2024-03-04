@@ -50,4 +50,4 @@ jobs:
     displayName: 'Publish Artifact: ONNXRuntime Genai python wheel'
     inputs:
       ArtifactName: onnxruntime-genai-win-cpu-${{ parameters.arch }}
-  - template: compliant-and-cleanup.yml
+  - template: steps/compliant-and-cleanup.yml

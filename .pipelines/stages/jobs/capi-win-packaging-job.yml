@@ -57,5 +57,5 @@ jobs:
       ${{ else }}:
         ArtifactName: onnxruntime-genai-capi-win-gpu
 
-  - template: compliant-and-cleanup.yml
+  - template: steps/ompliant-and-cleanup.yml
 
