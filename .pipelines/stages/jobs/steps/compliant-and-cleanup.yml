@@ -13,7 +13,7 @@ steps:
     GdnPublishTsaConfigFile: '$(Build.sourcesDirectory)\.config\tsaoptions.json'
   continueOnError: true
 
-- template: steps/component-governance-component-detection-step.yml
+- template: component-governance-component-detection-step.yml
   parameters:
     condition: 'succeeded'
 
