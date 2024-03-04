@@ -1,5 +1,7 @@
 parameters:
   arch: 'x64'
+  ort_version: '1.17.0'
+
 jobs:
 - job: Windows_CPU_Wheels
   pool: 'onnxruntime-Win-CPU-2022'
@@ -58,8 +60,8 @@ jobs:
       connection: 'GitHub - Release'
       userRepository: 'microsoft/onnxruntime'
       defaultVersionType: 'specificTag'
-      version: 'v$(ort_version)'
-      itemPattern: 'onnxruntime-win-$(buildArch)-$(ort_version)*'
+      version: 'v${{ parameters.ort_version }}'
+      itemPattern: 'onnxruntime-win-$(buildArch)-${{ parameters.ort_version }}*'
       downloadPath: '$(Build.SourcesDirectory)'
     displayName: Download ONNXRuntime
       -
@@ -72,14 +74,16 @@ jobs:
     displayName: Unzip OnnxRuntime
 
   - powershell: |
-      Rename-Item -Path onnxruntime-win-$(buildArch)-$(ort_version) -NewName ort
+      Rename-Item -Path onnxruntime-win-$(buildArch)-${{ parameters.ort_version }} -NewName ort
     displayName: Rename Onnxruntime to ort
     workingDirectory: '$(Build.SourcesDirectory)'
 
   - bash: |
-      cmake -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=$(BuildConfig) -DUSE_CUDA=OFF -S . -B build
+      cmake -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=$(BuildConfig) -DUSE_CUDA=OFF -DENABLE_TESTS=OFF -S . -B build
       cmake --build build --config $(BuildConfig)  --parallel --target python
     displayName: 'Build pybind with CMake'
+
+  # BinSkim is skipped because onnxruntime-genai is build as static library
 
   - powershell: |
       Get-ChildItem -Path $(Build.SourcesDirectory)\build\wheel -Recurse
@@ -115,16 +119,14 @@ jobs:
     workingDirectory: '$(Build.ArtifactStagingDirectory)'
     displayName: 'unzip the package'
 
+  - powershell: |
+      Get-ChildItem -Path $(Build.ArtifactStagingDirectory) -Recurse
+    displayName: 'Verify the package'
+
   - task: CredScan@3
     displayName: 'Run CredScan'
     inputs:
       debugMode: false
-    continueOnError: true
-
-  - task: BinSkim@4
-    displayName: 'Run BinSkim'
-    inputs:
-      AnalyzeTargetGlob: '+:file|$(Build.ArtifactStagingDirectory)\**\*genai.dll;-:file|$(Build.ArtifactStagingDirectory)\**\DirectML.dll'
     continueOnError: true
 
   - task: TSAUpload@2

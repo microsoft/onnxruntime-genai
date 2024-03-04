@@ -11,27 +11,40 @@ parameters:
   type: boolean
 - name: enable_linux_arm
   type: boolean
+- name: ort_version
+  type: string
 
 stages:
 - stage: py_packaging
   jobs:
   - ${{ if eq(parameters.enable_win_cpu, true) }}:
     - template: jobs/py-win-cpu-packaging-job.yml
+      parameters:
+        ort_version: ${{ parameters.ort_version }}
   - ${{ if eq(parameters.enable_win_gpu, true) }}:
     - template: jobs/py-win-gpu-packaging-job.yml
+      parameters:
+        ort_version: ${{ parameters.ort_version }}
   - ${{ if eq(parameters.enable_win_arm, true) }}:
     - template: jobs/py-win-cpu-packaging-job.yml
       parameters:
         arch: 'arm64'
+        ort_version: ${{ parameters.ort_version }}
+
 
   - ${{ if eq(parameters.enable_linux_cpu, true) }}:
     - template: jobs/py-linux-cpu-packaging-job.yml
+      parameters:
+        ort_version: ${{ parameters.ort_version }}
   - ${{ if eq(parameters.enable_linux_gpu, true) }}:
     - template: jobs/py-linux-gpu-packaging-job.yml
+      parameters:
+        ort_version: ${{ parameters.ort_version }}
   - ${{ if eq(parameters.enable_linux_arm, true) }}:
     - template: jobs/py-linux-cpu-packaging-job.yml
       parameters:
         arch: 'arm64'
+        ort_version: ${{ parameters.ort_version }}
 
 
 

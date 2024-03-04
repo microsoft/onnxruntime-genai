@@ -15,6 +15,7 @@ endif()
 source_group("Sources" FILES ${python_srcs})
 
 if(BUILD_WHEEL)
+  set(WHEEL_FILES_DIR "${CMAKE_BINARY_DIR}/wheel")
   message("Setting up wheel files in : ${WHEEL_FILES_DIR}")
   if(USE_CUDA)
     set(TARGET_NAME "onnxruntime-genai-cuda")
@@ -22,20 +23,54 @@ if(BUILD_WHEEL)
     set(TARGET_NAME "onnxruntime-genai")
   endif()
   set(PACKAGE_DIR_NAME "onnxruntime_genai")
+  set(WHEEL_TARGET_NAME "${WHEEL_FILES_DIR}/${PACKAGE_DIR_NAME}")
   configure_file(${CMAKE_CURRENT_SOURCE_DIR}/setup.py.in ${WHEEL_FILES_DIR}/setup.py @ONLY)
-  configure_file(${CMAKE_CURRENT_SOURCE_DIR}/__init__.py.in ${WHEEL_FILES_DIR}/${PACKAGE_DIR_NAME}/__init__.py @ONLY)
+  configure_file(${CMAKE_CURRENT_SOURCE_DIR}/__init__.py.in ${WHEEL_TARGET_NAME}/__init__.py @ONLY)
 
   # Copy over any additional python files
-  file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/py/" DESTINATION ${WHEEL_FILES_DIR}/${PACKAGE_DIR_NAME}/)
+  file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/py/" DESTINATION ${WHEEL_TARGET_NAME}/)
 
   file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_FILES}")
-  add_custom_target(PyPackageBuild ALL
-    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:onnxruntime-genai> ${WHEEL_FILES_DIR}/${PACKAGE_DIR_NAME}
-    COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} ${WHEEL_FILES_DIR}/${PACKAGE_DIR_NAME}
-    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:python> ${WHEEL_FILES_DIR}/${PACKAGE_DIR_NAME}
-    COMMAND "${PYTHON_EXECUTABLE}" -m pip wheel .
-    WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
-    COMMENT "Building wheel"
+  add_custom_command(TARGET python POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy
+    ${onnxruntime_libs} $<TARGET_FILE:python>
+    ${WHEEL_TARGET_NAME}
+    COMMENT "Copying files to wheel directory: ${WHEEL_TARGET_NAME}"
   )
+  set(auditwheel_exclude_list
+    "libcublas.so.11"
+    "libcublas.so.12"
+    "libcublasLt.so.11"
+    "libcublasLt.so.12"
+    "libcudart.so.11.0"
+    "libcudart.so.12"
+    "libcudnn.so.8"
+    "libcufft.so.10"
+    "libcufft.so.11"
+    "libcurand.so.10"
+    "libnvinfer.so.8"
+    "libnvinfer_plugin.so.8"
+    "libnvonnxparser.so.8"
+  )
+  set(modified_exclude_list)
+  foreach(item IN LISTS auditwheel_exclude_list)
+    list(APPEND modified_exclude_list "--exclude" ${item})
+  endforeach()
+
+  if(MANYLINUX)
+    add_custom_target(PyPackageBuild ALL
+      COMMAND ${PYTHON_EXECUTABLE} -m pip wheel .
+      COMMAND ${CMAKE_COMMAND} -E remove ${WHEEL_TARGET_NAME}/onnxruntime_genai.cpython-*
+      COMMAND auditwheel repair onnxruntime_genai*linux_x86_64.whl -w ${WHEEL_FILES_DIR} ${modified_exclude_list}
+      WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
+      COMMENT "Building wheel with MANYLINUX on ${WHEEL_FILES_DIR}"
+    )
+  else()
+    add_custom_target(PyPackageBuild ALL
+      COMMAND ${PYTHON_EXECUTABLE} -m pip wheel .
+      WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
+      COMMENT "Building wheel on ${WHEEL_FILES_DIR}"
+    )
+  endif()
   add_dependencies(PyPackageBuild python)
 endif()

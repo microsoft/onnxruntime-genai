@@ -5,7 +5,12 @@ import pytest
 
 
 def pytest_addoption(parser):
-    parser.addoption("--test_models", help="Path to the current working directory", type=str, required=True)
+    parser.addoption(
+        "--test_models",
+        help="Path to the current working directory",
+        type=str,
+        required=True,
+    )
 
 
 @pytest.fixture
