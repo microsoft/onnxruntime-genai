@@ -32,34 +32,34 @@ jobs:
       - name: Download Docker Image
         run: |
           set -e -x
-          az login --identity -u /subscriptions/00c06639-6ee4-454e-8058-8d8b1703bd87/resourcegroups/proj-onnxruntime-dev/providers/Microsoft.ManagedIdentity/userAssignedIdentities/ortcibuild_readonly
+          az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
           az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
           python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/inference/aarch64/default/cpu/Dockerfile \
           --context tools/ci_build/github/linux/docker/inference/aarch64/default/cpu \
           --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
           --container-registry onnxruntimebuildcache \
-          --repository onnxruntimecpubuild
+          --repository ort_genai_linux_arm64_gha
 
       - name: Doker -- Configure with CMake and GCC
         run: |
           docker run --rm \
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-          -w /onnxruntime_src onnxruntimecpubuild bash -c "/usr/bin/cmake --preset linux_gcc_cpu_release"
+          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "/usr/bin/cmake --preset linux_gcc_cpu_release"
 
       - name: Docker -- Build with CMake and GCC
         run: |
           docker run --rm \
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-          -w /onnxruntime_src onnxruntimecpubuild bash -c "/usr/bin/cmake --build --preset linux_gcc_cpu_release"
+          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "/usr/bin/cmake --build --preset linux_gcc_cpu_release"
 
       - name: Dokcer -- check test directory
         run: |
           docker run --rm \
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-          -w /onnxruntime_src onnxruntimecpubuild bash -c "ls -l /onnxruntime_src/build/gcc_cpu/release/test/"
+          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "ls -l /onnxruntime_src/build/gcc_cpu/release/test/"
 
       - name: Docker -- Run tests
         run: |
           docker run --rm \
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-          -w /onnxruntime_src onnxruntimecpubuild bash -c "/onnxruntime_src/build/gcc_cpu/release/test/unit_tests"   
+          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "/onnxruntime_src/build/gcc_cpu/release/test/unit_tests"   

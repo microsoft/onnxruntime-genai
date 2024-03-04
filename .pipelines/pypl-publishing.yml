@@ -1,4 +1,19 @@
 parameters:
+- name: enable_win_cpu
+  displayName: 'Whether Windows CPU package is built.'
+  type: boolean
+  default: true
+
+- name: enable_win_gpu
+  displayName: 'Whether Windows GPU package is built.'
+  type: boolean
+  default: true
+
+- name: enable_win_arm
+  displayName: 'Whether Windows ARM package is built.'
+  type: boolean
+  default: false
+
 - name: enable_linux_cpu
   displayName: 'Whether Linux CPU package is built.'
   type: boolean
@@ -9,25 +24,15 @@ parameters:
   type: boolean
   default: true
 
-- name: enable_windows_cpu
-  displayName: 'Whether Windows CPU package is built.'
-  type: boolean
-  default: true
-
-- name: enable_windows_gpu
-  displayName: 'Whether Windows GPU package is built.'
-  type: boolean
-  default: true
-
-- name: enable_mac_cpu
-  displayName: 'Whether Mac CPU package is built.'
-  type: boolean
-  default: false
-
 - name: enable_linux_arm
   displayName: 'Whether Linux ARM package is built.'
   type: boolean
   default: false
+- name: ort_version
+  displayName: 'OnnxRuntime version'
+  type: string
+  default: '1.17.0'
+
 resources:
   repositories:
   - repository: manylinux
@@ -35,33 +40,15 @@ resources:
     endpoint: Microsoft
     name: pypa/manylinux
     ref: 5eda9aded5462201e6310105728d33016e637ea7
+
 trigger: none
 stages:
-- stage: win-cpu-x64
-  jobs:
-  - job: win-cpu-x64
-    workspace:
-      clean: all
-    pool:
-      onnxruntime-Win-CPU-2022
-- stage: win-gpu-x64
-  jobs:
-  - job: win-gpu-x64
-    workspace:
-      clean: all
-    pool:
-      onnxruntime-Win2022-GPU-A10
-- stage: linux-cpu-x64
-  jobs:
-  - job: linux-cpu-x64
-    workspace:
-      clean: all
-    pool:
-      onnxruntime-Ubuntu2204-AMD-CPU
-- stage: linux-gpu-x64
-  jobs:
-  - job: linux-gpu-x64
-    workspace:
-      clean: all
-    pool:
-      onnxruntime-Ubuntu2204-AMD-CPU
+- template: stages/py-packaging-stage.yml
+  parameters:
+    enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
+    enable_linux_gpu: ${{ parameters.enable_linux_gpu }}
+    enable_linux_arm: ${{ parameters.enable_linux_arm }}
+    enable_win_cpu: ${{ parameters.enable_win_cpu }}
+    enable_win_gpu: ${{ parameters.enable_win_gpu }}
+    enable_win_arm: ${{ parameters.enable_win_arm }}
+    ort_version: ${{ parameters.ort_version }}

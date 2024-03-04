@@ -1,0 +1,167 @@
+parameters:
+- name: arch
+  type: string
+  default: 'x64'
+- name: ort_version
+  type: string
+  default: '1.17.0'
+jobs:
+- job: Linux_CPU_Wheels
+  strategy:
+    matrix:
+      x64:
+        buildArch: 'x64'
+        machine_pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
+        docker_arch: 'x64'
+      ${{ if eq(parameters.arch, 'arm64') }}:
+        arm64:
+          buildArch: 'arm64'
+          machine_pool: 'onnxruntime-linux-ARM64-CPU-2019'
+          docker_arch: 'aarch64'
+  timeoutInMinutes: 240
+  workspace:
+    clean: all
+  pool: $(machine_pool)
+  variables:
+  # The build machine pool doesn't have dotnet, so it can't run CG.
+  - name: skipComponentGovernanceDetection
+    value: true
+
+  steps:
+  - checkout: self # due to checkout multiple repos, the root directory is $(Build.SourcesDirectory)/onnxruntime-genai,
+    clean: true
+    submodules: recursive
+
+  - checkout: manylinux # due to checkout multiple repos, the root directory is $(Build.SourcesDirectory)/manylinux,
+    submodules: false
+
+  - template: steps/set-nightly-build-option-variable-step.yml
+
+  - task: DownloadGitHubRelease@0
+    inputs:
+      connection: 'GitHub - Release'
+      userRepository: 'microsoft/onnxruntime'
+      defaultVersionType: 'specificTag'
+      version: 'v${{ parameters.ort_version }}'
+      itemPattern: 'onnxruntime-linux-$(buildArch)-${{ parameters.ort_version }}*'
+      downloadPath: '$(Build.SourcesDirectory)'
+    displayName: Download ONNXRuntime
+      -
+  - task: ExtractFiles@1
+    inputs:
+      archiveFilePatterns: '**/*.tgz'
+      destinationFolder: '$(Build.SourcesDirectory)/onnxruntime-genai'
+      cleanDestinationFolder: false
+      overwriteExistingFiles: true
+    displayName: Unzip OnnxRuntime
+
+  - bash: |
+      mv  onnxruntime-linux-$(buildArch)-${{ parameters.ort_version }} ort
+    displayName: Rename Onnxruntime to ort
+    workingDirectory: '$(Build.SourcesDirectory)/onnxruntime-genai'
+
+  - script: |
+      set -e -x
+      az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
+      az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
+      python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cpu \
+        --context tools/ci_build/github/linux/docker/manylinux \
+        --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
+        --container-registry onnxruntimebuildcache \
+        --manylinux-src $(Build.SourcesDirectory)/manylinux \
+        --multiple_repos \
+        --repository onnxruntimecpubuild$(docker_arch)
+    displayName: 'Get Docker Image'
+    workingDirectory: '$(Build.SourcesDirectory)/onnxruntime-genai'
+
+  - script: |
+      set -e -x
+      docker run \
+      --rm \
+      --volume $(Build.SourcesDirectory)/onnxruntime-genai:/onnxruntime_src \
+      -w /onnxruntime_src/ onnxruntimecpubuild$(docker_arch) \
+      bash -c " \
+          /usr/bin/cmake --preset linux_gcc_cpu_release \
+          -DENABLE_TESTS=OFF \
+          -DMANYLINUX=ON \
+          -DPYTHON_EXECUTABLE=/opt/python/cp38-cp38/bin/python3.8 && \
+          /usr/bin/cmake --build --preset linux_gcc_cpu_release"
+    displayName: 'Build Python Wheel 3.8'
+    workingDirectory: '$(Build.SourcesDirectory)/onnxruntime-genai'
+
+  - script: |
+      set -e -x
+      docker run \
+      --rm \
+      --volume $(Build.SourcesDirectory)/onnxruntime-genai:/onnxruntime_src \
+      -w /onnxruntime_src/ onnxruntimecpubuild$(docker_arch) \
+        bash -c " \
+          /usr/bin/cmake --preset linux_gcc_cpu_release \
+          -DENABLE_TESTS=OFF \
+          -DMANYLINUX=ON \
+          -DPYTHON_EXECUTABLE=/opt/python/cp39-cp39/bin/python3.9 && \
+          /usr/bin/cmake --build --preset linux_gcc_cpu_release"
+    displayName: 'Build Python Wheel 3.9'
+    workingDirectory: '$(Build.SourcesDirectory)/onnxruntime-genai'
+  - script: |
+      set -e -x
+      docker run \
+      --rm \
+      --volume $(Build.SourcesDirectory)/onnxruntime-genai:/onnxruntime_src \
+      -w /onnxruntime_src/ onnxruntimecpubuild$(docker_arch) \
+        bash -c " \
+          /usr/bin/cmake --preset linux_gcc_cpu_release \
+          -DENABLE_TESTS=OFF \
+          -DMANYLINUX=ON \
+          -DPYTHON_EXECUTABLE=/opt/python/cp310-cp310/bin/python3.10 && \
+          /usr/bin/cmake --build --preset linux_gcc_cpu_release"
+    displayName: 'Build Python Wheel 3.10'
+    workingDirectory: '$(Build.SourcesDirectory)/onnxruntime-genai'
+  - script: |
+      set -e -x
+      docker run \
+      --rm \
+      --volume $(Build.SourcesDirectory)/onnxruntime-genai:/onnxruntime_src \
+      -w /onnxruntime_src/ onnxruntimecpubuild$(docker_arch) \
+        bash -c " \
+          /usr/bin/cmake --preset linux_gcc_cpu_release \
+          -DENABLE_TESTS=OFF \
+          -DMANYLINUX=ON \
+          -DPYTHON_EXECUTABLE=/opt/python/cp311-cp311/bin/python3.11 && \
+          /usr/bin/cmake --build --preset linux_gcc_cpu_release"
+    displayName: 'Build Python Wheel 3.11'
+    workingDirectory: '$(Build.SourcesDirectory)/onnxruntime-genai'
+  - script: |
+      set -e -x
+      docker run \
+      --rm \
+      --volume $(Build.SourcesDirectory)/onnxruntime-genai:/onnxruntime_src \
+      -w /onnxruntime_src/ onnxruntimecpubuild$(docker_arch) \
+        bash -c " \
+          /usr/bin/cmake --preset linux_gcc_cpu_release \
+          -DENABLE_TESTS=OFF \
+          -DMANYLINUX=ON \
+          -DPYTHON_EXECUTABLE=/opt/python/cp312-cp312/bin/python3.12 && \
+          /usr/bin/cmake --build --preset linux_gcc_cpu_release"
+    displayName: 'Build Python Wheel 3.12'
+    workingDirectory: '$(Build.SourcesDirectory)/onnxruntime-genai'
+
+  - task: CopyFiles@2
+    displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
+    inputs:
+      SourceFolder: '$(Build.SourcesDirectory)/onnxruntime-genai/build/gcc_cpu/release/wheel'
+      Contents: '*manylinux*.whl'
+      TargetFolder: '$(Build.ArtifactStagingDirectory)'
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Artifact: ONNXRuntime python wheel'
+    inputs:
+      ArtifactName: onnxruntime-genai-linux-cpu-$(buildArch)
+
+  - template: steps/component-governance-component-detection-step.yml
+    parameters:
+      condition: 'succeeded'
+
+  - task: mspremier.PostBuildCleanup.PostBuildCleanup-task.PostBuildCleanup@3
+    displayName: 'Clean Agent Directories'
+    condition: always()
