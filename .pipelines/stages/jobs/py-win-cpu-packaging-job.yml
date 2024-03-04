@@ -1,5 +1,7 @@
 parameters:
   arch: 'x64'
+  ort_version: '1.17.0'
+
 jobs:
 - job: Windows_CPU_Wheels
   pool: 'onnxruntime-Win-CPU-2022'
@@ -58,8 +60,8 @@ jobs:
       connection: 'GitHub - Release'
       userRepository: 'microsoft/onnxruntime'
       defaultVersionType: 'specificTag'
-      version: 'v$(ort_version)'
-      itemPattern: 'onnxruntime-win-$(buildArch)-$(ort_version)*'
+      version: 'v${{ parameters.ort_version }}'
+      itemPattern: 'onnxruntime-win-$(buildArch)-${{ parameters.ort_version }}*'
       downloadPath: '$(Build.SourcesDirectory)'
     displayName: Download ONNXRuntime
       -
@@ -72,7 +74,7 @@ jobs:
     displayName: Unzip OnnxRuntime
 
   - powershell: |
-      Rename-Item -Path onnxruntime-win-$(buildArch)-$(ort_version) -NewName ort
+      Rename-Item -Path onnxruntime-win-$(buildArch)-${{ parameters.ort_version }} -NewName ort
     displayName: Rename Onnxruntime to ort
     workingDirectory: '$(Build.SourcesDirectory)'
 
@@ -81,7 +83,7 @@ jobs:
       cmake --build build --config $(BuildConfig)  --parallel --target python
     displayName: 'Build pybind with CMake'
 
-# BinSkim is skipped because onnxruntime-genai is build as static library
+  # BinSkim is skipped because onnxruntime-genai is build as static library
 
   - powershell: |
       Get-ChildItem -Path $(Build.SourcesDirectory)\build\wheel -Recurse

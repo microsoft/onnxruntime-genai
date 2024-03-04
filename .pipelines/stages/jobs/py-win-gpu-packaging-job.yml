@@ -1,3 +1,7 @@
+parameters:
+- name: ort_version
+  type: string
+  default: '1.17.0'
 jobs:
 - job: Windows_GPU_Wheels
   pool: 'onnxruntime-Win-CPU-2022'
@@ -18,7 +22,6 @@ jobs:
     BuildConfig: 'RelWithDebInfo'
     cuda_version: '12.2'
     cuda_dir: '$(Build.SourcesDirectory)\cuda_sdk'
-    ort_version: '1.17.0'
   timeoutInMinutes: 180
   workspace:
     clean: all
@@ -54,8 +57,8 @@ jobs:
       connection: 'GitHub - Release'
       userRepository: 'microsoft/onnxruntime'
       defaultVersionType: 'specificTag'
-      version: 'v$(ort_version)'
-      itemPattern: 'onnxruntime-win-x64-gpu-$(ort_version).zip'
+      version: 'v${{ parameters.ort_version }}'
+      itemPattern: 'onnxruntime-win-x64-gpu-${{ parameters.ort_version }}.zip'
       downloadPath: '$(Build.SourcesDirectory)'
     displayName: Download ONNXRuntime
       -
@@ -68,7 +71,7 @@ jobs:
     displayName: Unzip OnnxRuntime
 
   - powershell: |
-      Rename-Item -Path onnxruntime-win-x64-gpu-$(ort_version) -NewName ort
+      Rename-Item -Path onnxruntime-win-x64-gpu-${{ parameters.ort_version }} -NewName ort
     displayName: Rename Onnxruntime to ort
     workingDirectory: '$(Build.SourcesDirectory)'
 
