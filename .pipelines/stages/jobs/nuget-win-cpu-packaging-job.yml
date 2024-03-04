@@ -1,0 +1,123 @@
+parameters:
+  arch: 'x64'
+  ort_version: '1.17.0'
+jobs:
+- job: Windows_CPU_Wheels
+  pool: 'onnxruntime-Win-CPU-2022'
+  variables:
+    build_config: 'RelWithDebInfo'
+    build_dir: win-x64
+
+  timeoutInMinutes: 180
+  workspace:
+    clean: all
+  steps:
+  - checkout: self
+    clean: true
+    submodules: recursive
+
+  - task: onebranch.pipeline.tsaoptions@1
+    displayName: 'OneBranch TSAOptions'
+    inputs:
+      tsaConfigFilePath: '$(Build.SourcesDirectory)\.config\tsaoptions.json'
+      appendSourceBranchName: false
+
+  - template: steps/set-nightly-build-option-variable-step.yml
+
+  - task: DownloadGitHubRelease@0
+    inputs:
+      connection: 'GitHub - Release'
+      userRepository: 'microsoft/onnxruntime'
+      defaultVersionType: 'specificTag'
+      version: 'v${{ parameters.ort_version }}'
+      itemPattern: 'onnxruntime-win-${{ parameters.arch }}-${{ parameters.ort_version }}*'
+      downloadPath: '$(Build.SourcesDirectory)'
+    displayName: Download ONNXRuntime
+      -
+  - task: ExtractFiles@1
+    inputs:
+      archiveFilePatterns: '**/*.zip'
+      destinationFolder: '$(Build.SourcesDirectory)'
+      cleanDestinationFolder: false
+      overwriteExistingFiles: true
+    displayName: Unzip OnnxRuntime
+
+  - powershell: |
+      Rename-Item -Path onnxruntime-win-${{ parameters.arch }}-${{ parameters.ort_version }} -NewName ort
+    displayName: Rename Onnxruntime to ort
+    workingDirectory: '$(Build.SourcesDirectory)'
+
+  - bash: |
+      cmake -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=$(build_config) -DUSE_CUDA=OFF -DENABLE_TESTS=OFF -S . -B $(build_dir)
+      cmake --build $(build_dir) --config $(build_config)  --parallel --target onnxruntime-genai
+    displayName: 'Build C++ with CMake'
+
+  - bash:
+      dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(build_config)" -p:NativeBuildOutputDir="$(build_dir)\$(build_config)"
+    displayName: 'Build CSharp'
+    workingDirectory: '$(Build.SourcesDirectory)\src\csharp'
+
+  - powershell: |
+      Get-ChildItem -Path $(Build.SourcesDirectory)\$(build_dir)\ -Recurse
+
+  - template: steps/win-esrp-dll-step.yml
+    parameters:
+      FolderPath: '$(Build.SourcesDirectory)\$(build_dir)\$(build_config)'
+      DisplayName: 'ESRP - Sign Native dlls'
+      DoEsrp: true
+      Pattern: '*.dll'
+  #
+  - powershell: |
+      $VERSION = Get-Content $(Build.SourcesDirectory)\VERSION_INFO
+      nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.nuspec `
+        -Prop version=$VERSION `
+        -Prop id="Microsoft.ML.OnnxRuntimeGenAI"
+      nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec `
+        -Prop version=$VERSION 
+
+    displayName: 'Nuget Packaging'
+    workingDirectory: '$(Build.SourcesDirectory)\nuget'
+
+  - powershell: |
+      Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
+
+  - task: CopyFiles@2
+    displayName: 'Copy Nuget to: $(Build.ArtifactStagingDirectory)'
+    inputs:
+      SourceFolder: '$(Build.SourcesDirectory)\nuget'
+      Contents: '*.nupkg'
+      TargetFolder: '$(Build.ArtifactStagingDirectory)'
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Artifact: ONNXRuntime Genai python wheel'
+    inputs:
+      ArtifactName: onnxruntime-genai-win-cpu-${{ parameters.arch }}
+
+  - task: CredScan@3
+    displayName: 'Run CredScan'
+    inputs:
+      debugMode: false
+    continueOnError: true
+
+  - task: BinSkim@4
+    displayName: 'Run BinSkim'
+    inputs:
+      AnalyzeTargetGlob: '$(Build.SourcesDirectory)\$(build_dir)\**\*genai.dll'
+    continueOnError: true
+
+  - task: TSAUpload@2
+    displayName: 'TSA upload'
+    condition: and(succeeded(),eq('${{ parameters.arch }}', 'x64'), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+
+    inputs:
+      GdnPublishTsaOnboard: false
+      GdnPublishTsaConfigFile: '$(Build.sourcesDirectory)\.gdn\.gdntsa'
+    continueOnError: true
+
+  - template: steps/component-governance-component-detection-step.yml
+    parameters:
+      condition: 'succeeded'
+
+  - task: mspremier.PostBuildCleanup.PostBuildCleanup-task.PostBuildCleanup@3
+    displayName: 'Clean Agent Directories'
+    condition: always()
