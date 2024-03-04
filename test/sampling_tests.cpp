@@ -9,8 +9,9 @@
 #include <random>
 
 // Our working directory is generators/build so one up puts us in the root directory:
+#ifndef MODEL_PATH
 #define MODEL_PATH "../../test/test_models/"
-
+#endif
 extern std::unique_ptr<OrtEnv> g_ort_env;
 
 TEST(SamplingTests, BatchedSamplingTopPCpu) {

@@ -6,7 +6,13 @@ file(GLOB test_srcs CONFIGURE_DEPENDS
 )
 
 # google unit test
-add_executable(unit_tests main.cpp c_api.cpp tests.cpp sampling_benchmark.cpp sampling_tests.cpp)
+add_executable(unit_tests
+  main.cpp
+  c_api_tests.cpp
+  model_tests.cpp
+  sampling_tests.cpp
+  sampling_benchmark.cpp
+)
 target_include_directories(unit_tests PRIVATE
   ${ORT_HEADER_DIR}
   ${CMAKE_SOURCE_DIR}/src
@@ -34,8 +40,15 @@ else()
   target_include_directories(unit_tests PRIVATE ${TOKENIZER_ROOT})
   target_link_libraries(unit_tests PRIVATE tokenizer)
 endif()
+file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_FILES}")
+set(TEST_MODEL_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/test_models/")
+set(TEST_MODEL_DES_DIR "$<TARGET_FILE_DIR:unit_tests>/test_models/")
+add_custom_command(TARGET unit_tests POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_directory ${TEST_MODEL_SRC_DIR} ${TEST_MODEL_DES_DIR}
+  COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} $<TARGET_FILE_DIR:unit_tests>
+)
 
+add_compile_definitions(MODEL_PATH="${TEST_MODEL_DES_DIR}")
 source_group("Sources" FILES ${test_srcs})
 set_property(DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT unit_tests)
-#set_property(TARGET unit_tests PROPERTY TARGET_RUNTIME_LIBRARY_DIRS ${ORT_LIB_DIR})
 include(GoogleTest)

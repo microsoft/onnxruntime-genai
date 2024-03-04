@@ -2,6 +2,8 @@
 # Licensed under the MIT License
 
 import os
+import sys
+import sysconfig
 from pathlib import Path
 
 import numpy as np
@@ -21,7 +23,7 @@ import pytest
     ],
 )
 def test_greedy_search(device, test_data_path, relative_model_path):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+    model_path = os.fspath(Path(test_data_path()) / relative_model_path)
 
     model = og.Model(model_path, device)
 
@@ -29,7 +31,7 @@ def test_greedy_search(device, test_data_path, relative_model_path):
     search_params.input_ids = np.array(
         [[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32
     )
-    search_params.set_search_options({"max_length":10})
+    search_params.set_search_options({"max_length": 10})
     input_ids_shape = [2, 4]
     batch_size = input_ids_shape[0]
 
@@ -46,25 +48,23 @@ def test_greedy_search(device, test_data_path, relative_model_path):
         dtype=np.int32,
     )
     for i in range(batch_size):
-        assert np.array_equal(
-            expected_sequence[i], generator.get_sequence(i)
-        )
+        assert np.array_equal(expected_sequence[i], generator.get_sequence(i))
 
     sequences = model.generate(search_params)
     for i in range(len(sequences)):
         assert sequences[i] == expected_sequence[i].tolist()
 
 
-@pytest.mark.parametrize("device", [og.DeviceType.CPU])
-@pytest.mark.parametrize(
-    "relative_model_path", [Path("hf-internal-testing") / "tiny-random-gpt2-fp32"]
+# TODO: CUDA pipelines use python3.6 and do not have a way to download models since downloading models
+# requires pytorch and hf transformers. This test should be re-enabled once the pipeline is updated.
+@pytest.mark.skipif(
+    sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8,
+    reason="Python 3.8 is required for downloading models.",
 )
-@pytest.mark.parametrize("batch_encode", [True, False])
-@pytest.mark.parametrize("batch_decode", [True, False])
-def test_tokenizer_encode_decode(
-    device, test_data_path, relative_model_path, batch_encode, batch_decode
-):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+@pytest.mark.parametrize("device", [og.DeviceType.CPU])
+@pytest.mark.parametrize("batch", [True, False])
+def test_tokenizer_encode_decode(device, test_data_path, batch):
+    model_path = os.fspath(Path(test_data_path("phi-2")))
 
     model = og.Model(model_path, device)
     tokenizer = og.Tokenizer(model)
@@ -75,12 +75,10 @@ def test_tokenizer_encode_decode(
         "The quick brown fox jumps over the lazy dog.",
     ]
     sequences = None
-    if batch_encode:
+    if batch:
         sequences = tokenizer.encode_batch(prompts)
-        # Disabled temporarily as the genai_confg.json for this test has the wrong pad_token_id
-        # Changing that will break the numeric tests, so this is the simpler change
-        # decoded_strings = tokenizer.decode_batch(sequences)
-        # assert prompts == decoded_strings
+        decoded_strings = tokenizer.decode_batch(sequences)
+        assert prompts == decoded_strings
     else:
         for prompt in prompts:
             sequence = tokenizer.encode(prompt)
@@ -93,7 +91,7 @@ def test_tokenizer_encode_decode(
     "relative_model_path", [Path("hf-internal-testing") / "tiny-random-gpt2-fp32"]
 )
 def test_tokenizer_stream(device, test_data_path, relative_model_path):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+    model_path = os.fspath(Path(test_data_path()) / relative_model_path)
 
     model = og.Model(model_path, device)
     tokenizer = og.Tokenizer(model)
@@ -114,12 +112,16 @@ def test_tokenizer_stream(device, test_data_path, relative_model_path):
         assert decoded_string == prompt
 
 
-# TODO: Enable once the phi-2 model exists
-@pytest.mark.skip(reason="Phi-2 model does not exist in the pipeline.")
+# TODO: CUDA pipelines use python3.6 and do not have a way to download models since downloading models
+# requires pytorch and hf transformers. This test should be re-enabled once the pipeline is updated.
+@pytest.mark.skipif(
+    sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8,
+    reason="Python 3.8 is required for downloading models.",
+)
 @pytest.mark.parametrize("device", [og.DeviceType.CPU])
 @pytest.mark.parametrize("relative_model_path", [Path("phi-2")])
 def test_batching(device, test_data_path, relative_model_path):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+    model_path = os.fspath(Path(test_data_path()) / relative_model_path)
 
     model = og.Model(model_path, device)
     tokenizer = og.Tokenizer(model)
@@ -131,8 +133,8 @@ def test_batching(device, test_data_path, relative_model_path):
     ]
 
     params = og.GeneratorParams(model)
-    params.set_search_options({"max_length":20}) # To run faster
-    params.set_input_sequences(tokenizer.encode_batch(prompts))
+    params.set_search_options({"max_length": 20})  # To run faster
+    params.input_ids = tokenizer.encode_batch(prompts)
 
     output_sequences = model.generate(params)
     print(tokenizer.decode_batch(output_sequences))
