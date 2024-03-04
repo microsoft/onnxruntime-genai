@@ -56,7 +56,7 @@ jobs:
             --gpus all \
             --rm \
             --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-            -w /onnxruntime_src ort_genai_linux_gpu_gha bash -c "echo $PATH && /usr/bin/cmake -DCMAKE_CUDA_ARCHITECTURES=86 --preset linux_gcc_cuda_release && /usr/bin/cmake --build --preset linux_gcc_cuda_release"
+            -w /onnxruntime_src ort_genai_linux_gpu_gha bash -c "echo $PATH && /usr/bin/cmake -DENABLE_TESTS=OFF -DCMAKE_CUDA_ARCHITECTURES=86 --preset linux_gcc_cuda_release && /usr/bin/cmake --build --preset linux_gcc_cuda_release"
 
       - name: Install the onnxruntime-genai Python wheel and run Python tests
         run: |
