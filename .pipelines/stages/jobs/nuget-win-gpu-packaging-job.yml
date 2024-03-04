@@ -15,56 +15,11 @@ jobs:
   workspace:
     clean: all
   steps:
-  - checkout: self
-    clean: true
-    submodules: recursive
-
-  - task: onebranch.pipeline.tsaoptions@1
-    displayName: 'OneBranch TSAOptions'
-    inputs:
-      tsaConfigFilePath: '$(Build.SourcesDirectory)\.config\tsaoptions.json'
-      appendSourceBranchName: false
-
-  - template: steps/set-nightly-build-option-variable-step.yml
-
-  - task: DownloadGitHubRelease@0
-    inputs:
-      connection: 'GitHub - Release'
-      userRepository: 'microsoft/onnxruntime'
-      defaultVersionType: 'specificTag'
-      version: 'v${{ parameters.ort_version }}'
-      itemPattern: 'onnxruntime-win-x64-gpu-${{ parameters.ort_version }}.zip'
-      downloadPath: '$(Build.SourcesDirectory)'
-    displayName: Download ONNXRuntime
-      -
-  - task: ExtractFiles@1
-    inputs:
-      archiveFilePatterns: '**/*.zip'
-      destinationFolder: '$(Build.SourcesDirectory)'
-      cleanDestinationFolder: false
-      overwriteExistingFiles: true
-    displayName: Unzip OnnxRuntime
-
-  - powershell: |
-      Rename-Item -Path onnxruntime-win-x64-gpu-${{ parameters.ort_version }} -NewName ort
-    displayName: Rename Onnxruntime to ort
-    workingDirectory: '$(Build.SourcesDirectory)'
-
-  - powershell: |
-      Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
-
-  - powershell: |
-      azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" $(cuda_dir)
-    displayName: 'Download CUDA'
-
-  - powershell: |
-      Get-ChildItem -Path $(cuda_dir) -Recurse
-    displayName: 'Verify CUDA download'
-
-  - powershell: |
-      cmake -G "Visual Studio 17 2022" -A x64 -T cuda=$(cuda_dir)\v$(cuda_version) -DENABLE_TESTS=OFF -DCMAKE_BUILD_TYPE=$(build_config) -DUSE_CUDA=TRUE -S . -B $(build_dir)
-      cmake --build $(build_dir) --config $(build_config) --parallel --target onnxruntime-genai
-    displayName: 'Build C++ with CMake'
+  - template: steps/capi-win-build-step.yml
+    parameters:
+      arch: ${{ parameters.arch }}
+      ort_version: ${{ parameters.ort_version }}
+      build_gpu: true
 
   - bash:
       dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(build_config)" -p:NativeBuildOutputDir="$(build_dir)\$(build_config)"
@@ -73,13 +28,6 @@ jobs:
 
   - powershell: |
       Get-ChildItem -Path $(Build.SourcesDirectory)\$(build_dir)\ -Recurse
-  #   Esrp signing
-  - template: steps/win-esrp-dll-step.yml
-    parameters:
-      FolderPath: '$(Build.SourcesDirectory)\$(build_dir)\$(build_config)'
-      DisplayName: 'ESRP - Sign Native dlls'
-      DoEsrp: true
-      Pattern: '*.dll'
 
   - powershell: |
       $VERSION = Get-Content $(Build.SourcesDirectory)\VERSION_INFO
@@ -105,30 +53,5 @@ jobs:
     inputs:
       ArtifactName: onnxruntime-genai-win-gpu
 
-  - task: CredScan@3
-    displayName: 'Run CredScan'
-    inputs:
-      debugMode: false
-    continueOnError: true
+  - template: compliant-and-cleanup.yml
 
-  - task: BinSkim@4
-    displayName: 'Run BinSkim'
-    inputs:
-      AnalyzeTargetGlob: '$(Build.SourcesDirectory)\$(build_dir)\**\*genai.dll'
-    continueOnError: true
-
-  - task: TSAUpload@2
-    displayName: 'TSA upload'
-    condition: and(and (succeeded(), eq(variables['PythonVersion'], '3.8')), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
-    inputs:
-      GdnPublishTsaOnboard: false
-      GdnPublishTsaConfigFile: '$(Build.sourcesDirectory)\.config\tsaoptions.json'
-    continueOnError: true
-
-  - template: steps/component-governance-component-detection-step.yml
-    parameters:
-      condition: 'succeeded'
-
-  - task: mspremier.PostBuildCleanup.PostBuildCleanup-task.PostBuildCleanup@3
-    displayName: 'Clean Agent Directories'
-    condition: always()

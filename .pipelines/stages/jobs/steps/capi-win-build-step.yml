@@ -1,0 +1,76 @@
+parameters:
+  arch: 'x64'
+  ort_version: '1.17.0'
+  build_gpu: false
+  build_dir: win-x64
+  build_config: 'RelWithDebInfo'
+variables:
+  cuda_dir: '$(Build.SourcesDirectory)\cuda_sdk'
+  cuda_version: '11.8'
+steps:
+- checkout: self
+  clean: true
+  submodules: recursive
+- task: onebranch.pipeline.tsaoptions@1
+  displayName: 'OneBranch TSAOptions'
+  inputs:
+    tsaConfigFilePath: '$(Build.SourcesDirectory)\.config\tsaoptions.json'
+    appendSourceBranchName: false
+
+- template: set-nightly-build-option-variable-step.yml
+
+- task: DownloadGitHubRelease@0
+  inputs:
+    connection: 'GitHub - Release'
+    userRepository: 'microsoft/onnxruntime'
+    defaultVersionType: 'specificTag'
+    version: 'v${{ parameters.ort_version }}'
+    itemPattern: 'onnxruntime-win-${{ parameters.arch }}-${{ parameters.ort_version }}*'
+    downloadPath: '$(Build.SourcesDirectory)'
+  displayName: Download ONNXRuntime
+
+- task: ExtractFiles@1
+  inputs:
+    archiveFilePatterns: '**/*.zip'
+    destinationFolder: '$(Build.SourcesDirectory)'
+    cleanDestinationFolder: false
+    overwriteExistingFiles: true
+  displayName: Unzip OnnxRuntime
+
+- powershell: |
+    Rename-Item -Path onnxruntime-win-${{ parameters.arch }}-${{ parameters.ort_version }} -NewName ort
+  displayName: Rename Onnxruntime to ort
+  workingDirectory: '$(Build.SourcesDirectory)'
+
+- powershell: |
+    azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" $(cuda_dir)
+    Get-ChildItem -Path $(cuda_dir) -Recurse
+  displayName: 'Download CUDA'
+  condition: ${{ eq(parameters.build_gpu, true) }}
+
+- bash: |
+    cmake -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=${{ parameters.build_config }} -DUSE_CUDA=OFF -DENABLE_TESTS=OFF -S . -B ${{ parameters.build_dir }}
+  displayName: 'Configure CMake C API without CUDA'
+  condition: ${{ ne(parameters.build_gpu, true) }}
+
+- bash: |
+    cmake -G "Visual Studio 17 2022" -A x64 -T cuda=$(cuda_dir)\v$(cuda_version) -DENABLE_TESTS=OFF -DCMAKE_BUILD_TYPE=${{ parameters.build_config }} -DUSE_CUDA=TRUE -S . -B ${{ parameters.build_dir }}
+  displayName: 'Configure CMake C API with CUDA'
+  condition: ${{ eq(parameters.build_gpu, true) }}
+
+- bash: |
+    cmake --build ${{ parameters.build_dir }} --config ${{ parameters.build_config }} --parallel --target onnxruntime-genai
+  displayName: 'Build CMake C API CUDA'
+
+- template: win-esrp-dll-step.yml
+  parameters:
+    FolderPath: '$(Build.SourcesDirectory)\${{ parameters.build_dir }}\${{ parameters.build_config }}'
+    DisplayName: 'ESRP - Sign Native dlls'
+    DoEsrp: true
+    Pattern: '*.dll'
+
+- task: BinSkim@4
+  displayName: 'Run BinSkim'
+  inputs:
+    AnalyzeTargetGlob: '$(Build.SourcesDirectory)\${{ parameters.build_dir }}\**\*genai.dll'
+  continueOnError: true

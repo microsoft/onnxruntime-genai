@@ -1,0 +1,22 @@
+steps:
+- task: CredScan@3
+  displayName: 'Run CredScan'
+  inputs:
+    debugMode: false
+  continueOnError: true
+
+- task: TSAUpload@2
+  displayName: 'TSA upload'
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  inputs:
+    GdnPublishTsaOnboard: false
+    GdnPublishTsaConfigFile: '$(Build.sourcesDirectory)\.config\tsaoptions.json'
+  continueOnError: true
+
+- template: steps/component-governance-component-detection-step.yml
+  parameters:
+    condition: 'succeeded'
+
+- task: mspremier.PostBuildCleanup.PostBuildCleanup-task.PostBuildCleanup@3
+  displayName: 'Clean Agent Directories'
+  condition: always()

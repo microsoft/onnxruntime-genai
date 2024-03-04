@@ -1,0 +1,61 @@
+parameters:
+  arch: 'x64'
+  ort_version: '1.17.0'
+  build_gpu: true
+jobs:
+- job: Windows_GPU_Wheels
+  pool: 'onnxruntime-Win-CPU-2022'
+  variables:
+    build_config: 'RelWithDebInfo'
+    build_dir: win-x64
+  timeoutInMinutes: 180
+  steps:
+  - template: steps/capi-win-build-step.yml
+    parameters:
+      arch: ${{ parameters.arch }}
+      ort_version: ${{ parameters.ort_version }}
+      build_gpu: ${{ parameters.build_gpu }}
+      build_config: $(build_config)
+      build_dir: $(build_dir)
+
+  - task: CopyFiles@2
+    displayName: 'Copy C API library files to ArtifactStagingDirectory'
+    inputs:
+      SourceFolder: '$(Build.SourcesDirectory)'
+      Contents: |
+        '$(build_dir)\$(build_config)\*.dll'
+        '$(build_dir)\$(build_config)\*.lib'
+        '$(build_dir)\$(build_config)\*.pdb'
+        ort\lib\*
+      TargetFolder: '$(Build.ArtifactStagingDirectory)\lib'
+
+  - task: CopyFiles@2
+    displayName: 'Copy C API header to ArtifactStagingDirectory'
+    inputs:
+      SourceFolder: '$(Build.SourcesDirectory)'
+      Contents: |
+        src\ort_genai_c.h
+        ort\include\*
+      TargetFolder: '$(Build.ArtifactStagingDirectory)\include'
+
+  - task: CopyFiles@2
+    displayName: 'Copy other files to ArtifactStagingDirectory'
+    inputs:
+      SourceFolder: '$(Build.SourcesDirectory)'
+      Contents: |
+        VERSION_INFO
+        LICENSE
+        SECURITY.md
+        README.md
+      TargetFolder: '$(Build.ArtifactStagingDirectory)'
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Artifact: ONNXRuntime Genai python wheel'
+    inputs:
+      ${{ if eq(parameters.build_gpu, false) }}:
+        ArtifactName: onnxruntime-genai-capi-win-cpu-${{ parameters.arch }}
+      ${{ else }}:
+        ArtifactName: onnxruntime-genai-capi-win-gpu
+
+  - template: compliant-and-cleanup.yml
+
