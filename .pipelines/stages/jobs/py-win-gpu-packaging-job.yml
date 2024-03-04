@@ -20,7 +20,7 @@ jobs:
         PythonVersion: '3.12'
   variables:
     BuildConfig: 'RelWithDebInfo'
-    cuda_version: '12.2'
+    cuda_version: '11.8'
     cuda_dir: '$(Build.SourcesDirectory)\cuda_sdk'
   timeoutInMinutes: 180
   workspace:
