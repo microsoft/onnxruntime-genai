@@ -1,4 +1,6 @@
 #pragma once
+#include <filesystem>
+
 namespace Generators {
 
 struct Config {
