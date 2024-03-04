@@ -4,7 +4,7 @@ import time
 print("Loading model...")
 model=og.Model("./example-models/gemma-2b-cuda", og.DeviceType.CUDA)
 print("Model loaded")
-tokenizer=model.create_tokenizer()
+tokenizer=og.Tokenizer(model)
 print("Tokenizer created")
 
 
@@ -14,7 +14,7 @@ while True:
     input_tokens = tokenizer.encode(text)
 
     params=og.GeneratorParams(model)
-    params.max_length = 64
+    params.set_search_options({"max_length":64})
     params.input_ids = input_tokens
 
     start_time=time.time()
