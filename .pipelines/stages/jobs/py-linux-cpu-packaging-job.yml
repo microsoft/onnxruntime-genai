@@ -113,7 +113,7 @@ jobs:
           /usr/bin/cmake --preset linux_gcc_cpu_release \
           -DENABLE_TESTS=OFF \
           -DMANYLINUX=ON \
-          -DPYTHON_EXECUTABL`E=/opt/python/cp310-cp310/bin/python3.10 && \
+          -DPYTHON_EXECUTABLE=/opt/python/cp310-cp310/bin/python3.10 && \
           /usr/bin/cmake --build --preset linux_gcc_cpu_release"
     displayName: 'Build Python Wheel 3.10'
     workingDirectory: '$(Build.SourcesDirectory)/onnxruntime-genai'
