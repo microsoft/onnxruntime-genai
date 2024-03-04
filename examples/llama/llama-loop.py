@@ -32,5 +32,5 @@ while not generator.is_done():
 print("Outputs:")
 
 for i in range(len(prompts)):
-   print(tokenizer.decode(generator.get_sequence(i).get_array()))
+   print(tokenizer.decode(generator.get_sequence(i)))
    print()
