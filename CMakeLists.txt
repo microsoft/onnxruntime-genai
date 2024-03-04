@@ -96,6 +96,11 @@ add_library(onnxruntime-genai-static STATIC ${generator_srcs})
 target_include_directories(onnxruntime-genai PRIVATE ${ORT_HEADER_DIR})
 target_include_directories(onnxruntime-genai-static PRIVATE ${ORT_HEADER_DIR})
 
+if(CMAKE_GENERATOR_TOOLSET MATCHES "Visual Studio")
+  target_link_options(onnxruntime-genai PRIVATE "/CETCOMPAT")
+  target_link_options(onnxruntime-genai-static PRIVATE "/CETCOMPAT")
+endif()
+
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set_target_properties(onnxruntime-genai-static PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
@@ -132,8 +137,6 @@ if(ENABLE_TESTS)
   add_subdirectory("${CMAKE_SOURCE_DIR}/test")
   message("------------------Enabling tests------------------")
 endif()
-
-set(WHEEL_FILES_DIR "${CMAKE_BINARY_DIR}/wheel")
 
 if(ENABLE_PYTHON)
   add_subdirectory("${CMAKE_SOURCE_DIR}/src/python")
