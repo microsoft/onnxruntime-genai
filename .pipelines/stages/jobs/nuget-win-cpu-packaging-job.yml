@@ -108,10 +108,9 @@ jobs:
   - task: TSAUpload@2
     displayName: 'TSA upload'
     condition: and(succeeded(),eq('${{ parameters.arch }}', 'x64'), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
-
     inputs:
       GdnPublishTsaOnboard: false
-      GdnPublishTsaConfigFile: '$(Build.sourcesDirectory)\.gdn\.gdntsa'
+      GdnPublishTsaConfigFile: '$(Build.sourcesDirectory)\.config\tsaoptions.json'
     continueOnError: true
 
   - template: steps/component-governance-component-detection-step.yml
