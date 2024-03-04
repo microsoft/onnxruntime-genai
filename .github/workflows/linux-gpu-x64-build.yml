@@ -56,7 +56,7 @@ jobs:
             --gpus all \
             --rm \
             --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-            -w /onnxruntime_src onnxruntimegpubuild bash -c "/usr/bin/cmake -DENABLE_TESTS=OFF -DCMAKE_CUDA_ARCHITECTURES=86 --preset linux_gcc_cuda_release && /usr/bin/cmake --build --preset linux_gcc_cuda_release"
+            -w /onnxruntime_src onnxruntimegpubuild bash -c "/usr/bin/cmake -DENABLE_TESTS=ON -DCMAKE_CUDA_ARCHITECTURES=86 --preset linux_gcc_cuda_release && /usr/bin/cmake --build --preset linux_gcc_cuda_release"
 
       # TODO: Re-enable these tests when python version is updated
       - name: Docker -- Run tests
