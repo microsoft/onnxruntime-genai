@@ -134,7 +134,7 @@ jobs:
     condition: and(and (succeeded(), and(eq(variables['buildArch'], 'x64'), eq(variables['PythonVersion'], '3.8'))), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
     inputs:
       GdnPublishTsaOnboard: false
-      GdnPublishTsaConfigFile: '$(Build.sourcesDirectory)\.gdn\.gdntsa'
+      GdnPublishTsaConfigFile: '$(Build.sourcesDirectory)\.config\tsaoptions.json'
     continueOnError: true
 
   - template: steps/component-governance-component-detection-step.yml
