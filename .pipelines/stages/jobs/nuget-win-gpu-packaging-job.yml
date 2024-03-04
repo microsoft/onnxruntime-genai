@@ -1,15 +1,24 @@
 parameters:
-  arch: 'x64'
   ort_version: '1.17.0'
+  cuda_version: '11.8'
 jobs:
 - job: Windows_GPU_Wheels
+  strategy:
+    matrix:
+      x64_cpu:
+        arch: 'x64'
+        ep: cpu
+      arm64_cpu:
+        arch: 'arm64'
+        ep: cpu
+      x64_gpu:
+        arch: 'x64'
+        ep: gpu
   pool: 'onnxruntime-Win-CPU-2022'
-  #  pool: 'onnxruntime-Win2022-GPU-A10'
   variables:
     build_config: 'RelWithDebInfo'
     cuda_version: '11.8'
     cuda_dir: '$(Build.SourcesDirectory)\cuda_sdk'
-    ort_version: '1.17.0'
     build_dir: win-x64
   timeoutInMinutes: 180
   workspace:
@@ -17,7 +26,7 @@ jobs:
   steps:
   - template: steps/capi-win-build-step.yml
     parameters:
-      arch: ${{ parameters.arch }}
+      arch: $(arch)
       ort_version: ${{ parameters.ort_version }}
       build_gpu: true
 
