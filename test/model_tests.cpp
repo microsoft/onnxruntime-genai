@@ -7,10 +7,9 @@
 #include <models/model.h>
 #include <iostream>
 #include <random>
-
-// Our working directory is generators/build so one up puts us in the root directory:
+#ifndef MODEL_PATH
 #define MODEL_PATH "../../test/test_models/"
-
+#endif
 std::unique_ptr<OrtEnv> g_ort_env;
 
 // To generate this file:
@@ -32,7 +31,8 @@ TEST(ModelTests, GreedySearchGptFp32) {
   // To generate this file:
   // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
   // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
-  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto model = Generators::CreateModel(*g_ort_env,
+                                       MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
   Generators::GeneratorParams params{*model};
   params.search.max_length = 10;

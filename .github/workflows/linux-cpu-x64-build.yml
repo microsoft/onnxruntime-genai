@@ -7,14 +7,18 @@ env:
   ort_dir: "onnxruntime-linux-x64-1.17.0"
   ort_zip: "onnxruntime-linux-x64-1.17.0.tgz"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-linux-x64-1.17.0.tgz"
+
 jobs:
-  job:
+  linux_cpu_x64:
+    strategy:
+      matrix:
+        compiler: [ gcc, clang ]
     runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU" ]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
-        uses: actions/checkout@v2
-
-
+        uses: actions/checkout@v4
+        with:
+          submodules: true
 
       - name: Download OnnxRuntime
         run: |
@@ -29,27 +33,16 @@ jobs:
         run: |
           mv ${{ env.ort_dir }} ort
 
-      - name: Git Submodule Update
-        run: |
-          git submodule update --init --recursive
-
       - name: Build with CMake and GCC
         run: |
           set -e -x
           rm -rf build
-          cmake --preset linux_gcc_cpu_release
-          cmake --build --preset linux_gcc_cpu_release
-          
-      - name: Build with CMake and clang
-        run: |
-          set -e -x
-          rm -rf build
-          cmake --preset linux_clang_cpu_release
-          cmake --build --preset linux_clang_cpu_release
+          cmake --preset linux_${{ matrix.compiler }}_cpu_release
+          cmake --build --preset linux_${{ matrix.compiler }}_cpu_release
 
       - name: Install the python wheel and test dependencies
         run: |
-          python3 -m pip install build/clang_cpu/release/wheel/onnxruntime_genai*.whl
+          python3 -m pip install build/${{ matrix.compiler }}_cpu/release/wheel/onnxruntime_genai*.whl
           python3 -m pip install -r test/python/requirements.txt --user
 
       - name: Run the python tests
@@ -58,10 +51,17 @@ jobs:
 
       - name: Verify Build Artifacts
         if: always()
+        continue-on-error: true
         run: |
-          ls -l ${{ github.workspace }}/build
+          ls -l ${{ github.workspace }}/build/${{ matrix.compiler }}_cpu/release
+
+      - name: Run tests
+        run: |
+          set -e -x
+          ./build/${{ matrix.compiler }}_cpu/release/test/unit_tests
 
       - name: Upload Build Artifacts
+        if: ${{ matrix.compiler == 'gcc'}}
         uses: actions/upload-artifact@v3
         with:
           name: onnxruntime-genai-linux-cpu-x64
