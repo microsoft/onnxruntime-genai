@@ -53,7 +53,7 @@ jobs:
 
   - script: |
       set -e -x
-      az login --identity -u /subscriptions/00c06639-6ee4-454e-8058-8d8b1703bd87/resourcegroups/proj-onnxruntime-dev/providers/Microsoft.ManagedIdentity/userAssignedIdentities/ortcibuild_readonly
+      az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
       az acr login --name onnxruntimebuildcache  --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
       python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux//Dockerfile.manylinux2_28_cuda \
         --context tools/ci_build/github/linux/docker/manylinux \
