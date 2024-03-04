@@ -62,9 +62,9 @@ jobs:
       - name: Get HuggingFace Token
         run: |
           az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
-          HF_TOKEN=$(az keyvault secret show --vault-name anubissvcsecret --name ANUBIS-HUGGINGFACE-TOKEN --query value)
-          echo "::add-mask::$HF_TOKEN"
-          echo "HF_TOKEN=$HF_TOKEN" >> $GITHUB_ENV
+          $HF_TOKEN = (az keyvault secret show --vault-name anubissvcsecret --name ANUBIS-HUGGINGFACE-TOKEN --query value)
+          Write-Output "::add-mask::$HF_TOKEN"
+          Add-Content -Path $env:GITHUB_ENV -Value "HF_TOKEN=$HF_TOKEN"
 
       - name: Run the Python Tests
         run: |
