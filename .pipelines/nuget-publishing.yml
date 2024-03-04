@@ -29,6 +29,11 @@ parameters:
   type: boolean
   default: false
 
+- name: ort_version
+  displayName: 'OnnxRuntime version'
+  type: string
+  default: '1.17.0'
+  
 resources:
   repositories:
   - repository: manylinux
