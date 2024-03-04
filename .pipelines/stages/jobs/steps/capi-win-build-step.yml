@@ -4,9 +4,8 @@ parameters:
   build_gpu: false
   build_dir: win-x64
   build_config: 'RelWithDebInfo'
-variables:
-  cuda_dir: '$(Build.SourcesDirectory)\cuda_sdk'
   cuda_version: '11.8'
+
 steps:
 - checkout: self
   clean: true
@@ -43,10 +42,11 @@ steps:
   workingDirectory: '$(Build.SourcesDirectory)'
 
 - powershell: |
-    azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" $(cuda_dir)
-    Get-ChildItem -Path $(cuda_dir) -Recurse
+    azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$${{ parameters.cuda_version }}" cuda_sdk
+    Get-ChildItem -Path cuda_sdk -Recurse
   displayName: 'Download CUDA'
   condition: ${{ eq(parameters.build_gpu, true) }}
+  workingDirectory: '$(Build.SourcesDirectory)'
 
 - bash: |
     cmake -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=${{ parameters.build_config }} -DUSE_CUDA=OFF -DENABLE_TESTS=OFF -S . -B ${{ parameters.build_dir }}
@@ -54,7 +54,7 @@ steps:
   condition: ${{ ne(parameters.build_gpu, true) }}
 
 - bash: |
-    cmake -G "Visual Studio 17 2022" -A x64 -T cuda=$(cuda_dir)\v$(cuda_version) -DENABLE_TESTS=OFF -DCMAKE_BUILD_TYPE=${{ parameters.build_config }} -DUSE_CUDA=TRUE -S . -B ${{ parameters.build_dir }}
+    cmake -G "Visual Studio 17 2022" -A x64 -T cuda=$(cuda_dir)\v$${{ parameters.cuda_version }} -DENABLE_TESTS=OFF -DCMAKE_BUILD_TYPE=${{ parameters.build_config }} -DUSE_CUDA=TRUE -S . -B ${{ parameters.build_dir }}
   displayName: 'Configure CMake C API with CUDA'
   condition: ${{ eq(parameters.build_gpu, true) }}
 
