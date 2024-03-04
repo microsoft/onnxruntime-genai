@@ -4,10 +4,9 @@
 #include <models/model.h>
 #include <iostream>
 #include <ort_genai_c.h>
-
-// Our working directory is generators/build so one up puts us in the root directory:
+#ifndef MODEL_PATH
 #define MODEL_PATH "../../test/test_models/"
-
+#endif
 struct Deleters {
   void operator()(OgaResult* p) {
     OgaDestroyResult(p);

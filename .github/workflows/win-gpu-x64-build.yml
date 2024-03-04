@@ -11,17 +11,26 @@ env:
   ort_dir: "onnxruntime-win-x64-gpu-1.17.0"
   ort_zip: "onnxruntime-win-x64-gpu-1.17.0.zip"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-win-x64-gpu-1.17.0.zip"
+#  ort_dir: "onnxruntime-win-x64-cuda-1.17.0"
+#  ort_zip: "onnxruntime-win-x64-cuda12-1.17.0.zip"
+#  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-win-x64-cuda12-1.17.0.zip"
   cuda_dir: "${{ github.workspace }}\\cuda_sdk"
-  cuda_version: "12.2"
-  CUDA_PATH: "${{ github.workspace }}\\cuda_sdk\\v12.2"
+#  cuda_version: "12.2"
+#  CUDA_PATH: "${{ github.workspace }}\\cuda_sdk\\v12.2"
+  cuda_version: "11.8"
+  CUDA_PATH: ${{ github.workspace }}\\cuda_sdk\\v11.8
+  cmake_build_dir: build
+
 
 jobs:
-  Windows-CUDA-12-Build:
+  windows-gpu-x64-build:
     runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Win2022-GPU-A10" ]
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout OnnxRuntime GenAI repo
+        uses: actions/checkout@v4
         with:
-          submodules: false
+          submodules: true
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11.x'
@@ -43,16 +52,10 @@ jobs:
         run: |
           Rename-Item -Path $env:ort_dir -NewName ort
 
-      - name: Git Submodule Update
-        run: |
-          git submodule update --init --recursive
-
       - name: Build with CMake
         run: |
-          mkdir build
-          cd build
-          cmake -G "Visual Studio 17 2022" -A x64 -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} .. -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=TRUE
-          cmake --build . --config Release --parallel
+          cmake -G "Visual Studio 17 2022" -S . -B build -A x64 -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=TRUE -DTEST_PHI2=False
+          cmake --build build --config Release --parallel
 
       - name: Install the Python Wheel and Test Dependencies
         run: |
@@ -74,15 +77,22 @@ jobs:
         run: |
           echo "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      - name: Build the C# API and run the C# tests
+      - name: Build the C# API and Run the C# Tests
         run: |
           cd test\csharp
-          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="..\..\build\Release\"
+          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:cmake_build_dir\Release"
 
       - name: Verify Build Artifacts
         if: always()
+        continue-on-error: true
         run: |
-          Get-ChildItem -Path $env:GITHUB_WORKSPACE\build\Release -Recurse
+          Get-ChildItem -Path $env:GITHUB_WORKSPACE\build\test\Release -Recurse
+
+      - name: Prepend CUDA to PATH and Run tests
+        run: |
+          $env:PATH = "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin;" + $env:PATH 
+          echo "Current PATH variable is: $env:PATH" 
+          .\build\test\Release\unit_tests.exe
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v3

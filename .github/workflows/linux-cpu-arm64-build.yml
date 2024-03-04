@@ -8,13 +8,13 @@ env:
   ort_zip: "onnxruntime-linux-aarch64-1.17.0.tgz"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-linux-aarch64-1.17.0.tgz"
 jobs:
-  job:
+  linux-cpu-arm64-build:
     runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2004-ARM-CPU" ]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
-        uses: actions/checkout@v2
-
-
+        uses: actions/checkout@v4
+        with:
+          submodules: 'true'
 
       - name: Download OnnxRuntime
         run: |
@@ -29,16 +29,37 @@ jobs:
         run: |
           mv ${{ env.ort_dir }} ort
 
-      - name: Git Submodule Update
-        run: |
-          git submodule update --init --recursive
-
-      - name: Build with CMake and GCC
+      - name: Download Docker Image
         run: |
           set -e -x
+          az login --identity -u /subscriptions/00c06639-6ee4-454e-8058-8d8b1703bd87/resourcegroups/proj-onnxruntime-dev/providers/Microsoft.ManagedIdentity/userAssignedIdentities/ortcibuild_readonly
+          az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
           python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/inference/aarch64/default/cpu/Dockerfile \
-            --context tools/ci_build/github/linux/docker/inference/aarch64/default/cpu \
-            --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
-            --container-registry onnxruntimebuildcache \
-            --repository onnxruntimecpubuild
-          docker run --rm --volume $GITHUB_WORKSPACE:/onnxruntime_src  -w /onnxruntime_src onnxruntimecpubuild bash -c "echo $PATH && /usr/bin/cmake --preset linux_gcc_cpu_release && /usr/bin/cmake --build --preset linux_gcc_cpu_release"
+          --context tools/ci_build/github/linux/docker/inference/aarch64/default/cpu \
+          --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
+          --container-registry onnxruntimebuildcache \
+          --repository onnxruntimecpubuild
+
+      - name: Doker -- Configure with CMake and GCC
+        run: |
+          docker run --rm \
+          --volume $GITHUB_WORKSPACE:/onnxruntime_src \
+          -w /onnxruntime_src onnxruntimecpubuild bash -c "/usr/bin/cmake --preset linux_gcc_cpu_release"
+
+      - name: Docker -- Build with CMake and GCC
+        run: |
+          docker run --rm \
+          --volume $GITHUB_WORKSPACE:/onnxruntime_src \
+          -w /onnxruntime_src onnxruntimecpubuild bash -c "/usr/bin/cmake --build --preset linux_gcc_cpu_release"
+
+      - name: Dokcer -- check test directory
+        run: |
+          docker run --rm \
+          --volume $GITHUB_WORKSPACE:/onnxruntime_src \
+          -w /onnxruntime_src onnxruntimecpubuild bash -c "ls -l /onnxruntime_src/build/gcc_cpu/release/test/"
+
+      - name: Docker -- Run tests
+        run: |
+          docker run --rm \
+          --volume $GITHUB_WORKSPACE:/onnxruntime_src \
+          -w /onnxruntime_src onnxruntimecpubuild bash -c "/onnxruntime_src/build/gcc_cpu/release/test/unit_tests"   

@@ -8,7 +8,7 @@ env:
   ort_zip: "onnxruntime-osx-arm64-1.17.0.tgz"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-osx-arm64-1.17.0.tgz"
 jobs:
-  job:
+  mac-cpu-arm64-build:
     runs-on: macos-latest
     steps:
       - name: Checkout OnnxRuntime GenAI repo
@@ -37,12 +37,13 @@ jobs:
         run: |
       - name: Build with CMake
         run: |
-          cmake -G "Ninja" -B build . -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=OFF
+          cmake -G "Ninja" -B build -S . -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=OFF
           cmake --build build --config Release --parallel
         continue-on-error: true
 
       - name: Verify Build Artifacts
         if: always()
+        continue-on-error: true
         run: |
           ls -l ${{ github.workspace }}/build
 
