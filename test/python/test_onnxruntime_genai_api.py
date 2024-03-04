@@ -2,6 +2,7 @@
 # Licensed under the MIT License
 
 import os
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -56,7 +57,7 @@ def test_greedy_search(device, test_data_path, relative_model_path):
 # TODO: CUDA pipelines use python3.6 and do not have a way to download models since downloading models
 # requires pytorch and hf transformers. This test should be re-enabled once the pipeline is updated.
 @pytest.mark.skipif(
-    og.is_cuda_available(), reason="CUDA pipelines cannot download models."
+    sys.version_info.minor < 8, reason="Python 3.8 is required for downloading models."
 )
 @pytest.mark.parametrize("device", [og.DeviceType.CPU])
 @pytest.mark.parametrize("batch", [True, False])
@@ -112,7 +113,7 @@ def test_tokenizer_stream(device, test_data_path, relative_model_path):
 # TODO: CUDA pipelines use python3.6 and do not have a way to download models since downloading models
 # requires pytorch and hf transformers. This test should be re-enabled once the pipeline is updated.
 @pytest.mark.skipif(
-    og.is_cuda_available(), reason="CUDA pipelines cannot download models."
+    sys.version_info.minor < 8, reason="Python 3.8 is required for downloading models."
 )
 @pytest.mark.parametrize("device", [og.DeviceType.CPU])
 @pytest.mark.parametrize("relative_model_path", [Path("phi-2")])
