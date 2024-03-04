@@ -62,7 +62,7 @@ jobs:
     displayName: 'Verify CUDA download'
 
   - powershell: |
-      cmake -G "Visual Studio 17 2022" -A x64 -T cuda=$(cuda_dir)\v$(cuda_version) -DCMAKE_BUILD_TYPE=$(build_config) -DUSE_CUDA=TRUE -S . -B $(build_dir)
+      cmake -G "Visual Studio 17 2022" -A x64 -T cuda=$(cuda_dir)\v$(cuda_version) -DENABLE_TESTS=OFF -DCMAKE_BUILD_TYPE=$(build_config) -DUSE_CUDA=TRUE -S . -B $(build_dir)
       cmake --build $(build_dir) --config $(build_config) --parallel --target onnxruntime-genai
     displayName: 'Build C++ with CMake'
 
