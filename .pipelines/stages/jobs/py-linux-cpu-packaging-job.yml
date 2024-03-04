@@ -82,6 +82,7 @@ jobs:
       -w /onnxruntime_src/ onnxruntimecpubuild$(docker_arch) \
       bash -c " \
           /usr/bin/cmake --preset linux_gcc_cpu_release \
+          -DENABLE_TESTS=OFF \
           -DMANYLINUX=ON \
           -DPYTHON_EXECUTABLE=/opt/python/cp38-cp38/bin/python3.8 && \
           /usr/bin/cmake --build --preset linux_gcc_cpu_release"
@@ -96,6 +97,7 @@ jobs:
       -w /onnxruntime_src/ onnxruntimecpubuild$(docker_arch) \
         bash -c " \
           /usr/bin/cmake --preset linux_gcc_cpu_release \
+          -DENABLE_TESTS=OFF \
           -DMANYLINUX=ON \
           -DPYTHON_EXECUTABLE=/opt/python/cp39-cp39/bin/python3.9 && \
           /usr/bin/cmake --build --preset linux_gcc_cpu_release"
@@ -109,7 +111,8 @@ jobs:
       -w /onnxruntime_src/ onnxruntimecpubuild$(docker_arch) \
         bash -c " \
           /usr/bin/cmake --preset linux_gcc_cpu_release \
-          -DMANYLINUX=`ON \
+          -DENABLE_TESTS=OFF \
+          -DMANYLINUX=ON \
           -DPYTHON_EXECUTABL`E=/opt/python/cp310-cp310/bin/python3.10 && \
           /usr/bin/cmake --build --preset linux_gcc_cpu_release"
     displayName: 'Build Python Wheel 3.10'
@@ -122,6 +125,7 @@ jobs:
       -w /onnxruntime_src/ onnxruntimecpubuild$(docker_arch) \
         bash -c " \
           /usr/bin/cmake --preset linux_gcc_cpu_release \
+          -DENABLE_TESTS=OFF \
           -DMANYLINUX=ON \
           -DPYTHON_EXECUTABLE=/opt/python/cp311-cp311/bin/python3.11 && \
           /usr/bin/cmake --build --preset linux_gcc_cpu_release"
@@ -135,6 +139,7 @@ jobs:
       -w /onnxruntime_src/ onnxruntimecpubuild$(docker_arch) \
         bash -c " \
           /usr/bin/cmake --preset linux_gcc_cpu_release \
+          -DENABLE_TESTS=OFF \
           -DMANYLINUX=ON \
           -DPYTHON_EXECUTABLE=/opt/python/cp312-cp312/bin/python3.12 && \
           /usr/bin/cmake --build --preset linux_gcc_cpu_release"
