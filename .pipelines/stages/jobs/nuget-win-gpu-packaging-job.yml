@@ -7,7 +7,7 @@ jobs:
   #  pool: 'onnxruntime-Win2022-GPU-A10'
   variables:
     build_config: 'RelWithDebInfo'
-    cuda_version: '12.2'
+    cuda_version: '11.8'
     cuda_dir: '$(Build.SourcesDirectory)\cuda_sdk'
     ort_version: '1.17.0'
     build_dir: win-x64
