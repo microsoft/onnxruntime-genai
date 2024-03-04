@@ -30,7 +30,7 @@ jobs:
           mv ${{ env.ort_dir }} ort
 
       - name: Download Docker Image
-        run:
+        run: |
           set -e -x
           az login --identity -u /subscriptions/00c06639-6ee4-454e-8058-8d8b1703bd87/resourcegroups/proj-onnxruntime-dev/providers/Microsoft.ManagedIdentity/userAssignedIdentities/ortcibuild_readonly
           az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
