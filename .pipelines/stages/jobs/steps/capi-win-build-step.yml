@@ -42,26 +42,25 @@ steps:
   displayName: Rename Onnxruntime to ort
   workingDirectory: '$(Build.SourcesDirectory)'
 
-- bash: |
-    set -e -x
-    azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v${{ parameters.cuda_version }}" '$(Build.SourcesDirectory)\cuda_sdk'
-  displayName: 'Download CUDA'
-  condition: eq(${{ parameters.ep }}, 'gpu')
-  workingDirectory: '$(Build.SourcesDirectory)'
+- ${{ if eq(parameters.ep, 'gpu')}}:
+  - bash: |
+      set -e -x
+      azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v${{ parameters.cuda_version }}" '$(Build.SourcesDirectory)\cuda_sdk'
+    displayName: 'Download CUDA'
+    workingDirectory: '$(Build.SourcesDirectory)'
+  - bash: |
+      set -e -x
+      cmake -G "Visual Studio 17 2022" -A x64 -T cuda='$(Build.SourcesDirectory)\cuda_sdk\v${{ parameters.cuda_version }}' -DENABLE_TESTS=OFF -DCMAKE_BUILD_TYPE=${{ parameters.build_config }} -DUSE_CUDA=TRUE -S . -B ${{ parameters.build_dir }}
+    displayName: 'Configure CMake C API with CUDA'
+    condition: eq(${{ parameters.ep }}, 'gpu')
+    workingDirectory: '$(Build.SourcesDirectory)'
 
-- bash: |
-    set -e -x
-    cmake -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=${{ parameters.build_config }} -DUSE_CUDA=OFF -DENABLE_TESTS=OFF -S . -B ${{ parameters.build_dir }}
-  displayName: 'Configure CMake C API without CUDA'
-  condition: ne(${{ parameters.ep }}, 'gpu')
-  workingDirectory: '$(Build.SourcesDirectory)'
-
-- bash: |
-    set -e -x
-    cmake -G "Visual Studio 17 2022" -A x64 -T cuda='$(Build.SourcesDirectory)\cuda_sdk\v${{ parameters.cuda_version }}' -DENABLE_TESTS=OFF -DCMAKE_BUILD_TYPE=${{ parameters.build_config }} -DUSE_CUDA=TRUE -S . -B ${{ parameters.build_dir }}
-  displayName: 'Configure CMake C API with CUDA'
-  condition: eq(${{ parameters.ep }}, 'gpu')
-  workingDirectory: '$(Build.SourcesDirectory)'
+- ${{ if ne(parameters.ep, 'gpu')}}:
+  - bash: |
+      set -e -x
+      cmake -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=${{ parameters.build_config }} -DUSE_CUDA=OFF -DENABLE_TESTS=OFF -S . -B ${{ parameters.build_dir }}
+    displayName: 'Configure CMake C API without CUDA'
+    workingDirectory: '$(Build.SourcesDirectory)'
 
 - bash: |
     set -e -x
