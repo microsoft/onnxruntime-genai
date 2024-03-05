@@ -34,6 +34,14 @@ parameters:
   type: string
   default: '1.17.0'
 
+- name: cuda_version
+  displayName: 'CUDA version'
+  type: string
+  default: '11.8'
+  values:
+  - '11.8'
+  - '12.2'
+
 resources:
   repositories:
   - repository: manylinux
@@ -48,20 +56,27 @@ stages:
   - template: stages/capi-win-packaging-job.yml
     parameters:
       arch: 'x64'
-      ort_version: '1.17.0'
+      ort_version: ${{ parameters.ort_version }}
       build_gpu: false
+      ort_name: 'onnxruntime-win-x64-${{ parameters.ort_version }}'
 
   ${{ if eq(parameter.enable_win_gpu, true) }}:
   - template: stages/capi-win-packaging-job.yml
     parameters:
       arch: 'x64'
-      ort_version: '1.17.0'
+      ort_version: ${{ parameters.ort_version }}
       build_gpu: true
+      cuda_version: ${{ parameters.cuda_version }}
+      ${{ if eq(parameter.cuda_version, '12.2') }}:
+        ort_name: 'onnxruntime-win-x64-cuda12-${{ parameters.ort_version }}'
+      ${{ else }}:
+        ort_name: 'onnxruntime-win-x64-gpu-${{ parameters.ort_version }}'
 
   ${{ if eq(parameter.enable_win_arm, true) }}:
   - template: stages/capi-win-packaging-job.yml
     parameters:
       arch: 'arm64'
-      ort_version: '1.17.0'
+      ort_version: ${{ parameters.ort_version }}
       build_gpu: false
+      ort_name: 'onnxruntime-win-arm64-${{ parameters.ort_version }}'
 

@@ -4,6 +4,7 @@ parameters:
   build_x64_cpu: true
   build_gpu: true
   build_arm64_cpu: false
+  ort_name: 'onnxruntime-win-x64-1.17.0'
 jobs:
 - job: Windows_Wheels
   strategy:
@@ -14,6 +15,7 @@ jobs:
         build_dir: win-x64
         artifactName: onnxruntime-genai-nuget-win-cpu-x64
         id: Microsoft.ML.OnnxRuntimeGenAI
+        ort_name: ${{ parameters.ort_name }}
       ${{ if eq(parameters.build_arm64, true) }}:
         arm64_cpu:
           arch: 'arm64'
@@ -21,6 +23,7 @@ jobs:
           build_dir: win-arm64
           artifactName: onnxruntime-genai-nuget-win-cpu-arm64
           id: Microsoft.ML.OnnxRuntimeGenAI
+          ort_name: ${{ parameters.ort_name }}
       ${{ if eq(parameters.build_gpu, true) }}:
         x64_gpu:
           arch: 'x64'
@@ -28,6 +31,7 @@ jobs:
           build_dir: win-x64
           artifactName: onnxruntime-genai-nuget-win-gpu-x64
           id: Microsoft.ML.OnnxRuntimeGenAI.Gpu
+          ort_name: ${{ parameters.ort_name }}
   pool: 'onnxruntime-Win-CPU-2022'
   variables:
     build_config: 'RelWithDebInfo'
