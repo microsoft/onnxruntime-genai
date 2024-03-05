@@ -1,25 +1,36 @@
 parameters:
   ort_version: '1.17.0'
   cuda_version: '11.8'
+  build_x64_cpu: true
+  build_gpu: true
+  build_arm64_cpu: false
 jobs:
-- job: Windows_GPU_Wheels
+- job: Windows_Wheels
   strategy:
     matrix:
       x64_cpu:
         arch: 'x64'
         ep: cpu
-      arm64_cpu:
-        arch: 'arm64'
-        ep: cpu
-      x64_gpu:
-        arch: 'x64'
-        ep: gpu
+        build_dir: win-x64
+        artifactName: onnxruntime-genai-nuget-win-cpu-x64
+        id: Microsoft.ML.OnnxRuntimeGenAI
+      ${{ if eq(parameters.build_arm64, true) }}:
+        arm64_cpu:
+          arch: 'arm64'
+          ep: cpu
+          build_dir: win-arm64
+          artifactName: onnxruntime-genai-nuget-win-cpu-arm64
+          id: Microsoft.ML.OnnxRuntimeGenAI
+      ${{ if eq(parameters.build_gpu, true) }}:
+        x64_gpu:
+          arch: 'x64'
+          ep: gpu
+          build_dir: win-x64
+          artifactName: onnxruntime-genai-nuget-win-gpu-x64
+          id: Microsoft.ML.OnnxRuntimeGenAI.Gpu
   pool: 'onnxruntime-Win-CPU-2022'
   variables:
     build_config: 'RelWithDebInfo'
-    cuda_version: '11.8'
-    cuda_dir: '$(Build.SourcesDirectory)\cuda_sdk'
-    build_dir: win-x64
   timeoutInMinutes: 180
   workspace:
     clean: all
@@ -29,6 +40,8 @@ jobs:
       arch: $(arch)
       ort_version: ${{ parameters.ort_version }}
       build_gpu: true
+      build_config: $(build_config)
+      cuda_version: ${{ parameters.cuda_version }}
 
   - bash:
       dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(build_config)" -p:NativeBuildOutputDir="$(build_dir)\$(build_config)"
@@ -36,13 +49,10 @@ jobs:
     workingDirectory: '$(Build.SourcesDirectory)\src\csharp'
 
   - powershell: |
-      Get-ChildItem -Path $(Build.SourcesDirectory)\$(build_dir)\ -Recurse
-
-  - powershell: |
       $VERSION = Get-Content $(Build.SourcesDirectory)\VERSION_INFO
       nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.nuspec `
         -Prop version=$VERSION `
-        -Prop id="Microsoft.ML.OnnxRuntimeGenAI.Gpu"
+        -Prop id=$(id)
       nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec `
         -Prop version=$VERSION
     displayName: 'Nuget Packaging'
@@ -60,7 +70,7 @@ jobs:
   - task: PublishBuildArtifacts@1
     displayName: 'Publish Artifact: ONNXRuntime Genai python wheel'
     inputs:
-      ArtifactName: onnxruntime-genai-win-gpu
+      ArtifactName: $(artifactName)
 
-  - template: steps/compliant-and-cleanup.yml
+  - template: steps/compliant-and-cleanup-step.yml
 

@@ -33,7 +33,15 @@ parameters:
   displayName: 'OnnxRuntime version'
   type: string
   default: '1.17.0'
-  
+
+- name: cuda_version
+  displayName: 'CUDA version'
+  type: string
+  values:
+  - '11.8'
+  - '11.5'
+  default: '11.8'
+
 resources:
   repositories:
   - repository: manylinux
@@ -53,3 +61,4 @@ stages:
     enable_win_gpu: ${{ parameters.enable_win_gpu }}
     enable_win_arm: ${{ parameters.enable_win_arm }}
     ort_version: '1.17.0'
+    cuda_version: ${{ parameters.cuda_version }}
