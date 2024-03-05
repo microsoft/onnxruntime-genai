@@ -422,7 +422,7 @@ std::vector<tfmTokenId_t> BPETokenizer::SpmEncode(std::string_view sv_input, int
       for (size_t offset = 0; offset < seg_id.first.size(); ++offset) {
         auto utf8s = EncodeUTF8Char(seg_id.first[offset]);
         auto byte_id = bbpe_encoder_.GetTokenId(utf8s);
-        if (byte_id == bpe::kInvalidTokenId) {
+        if (static_cast<int>(byte_id) == bpe::kInvalidTokenId) {
           byte_id = unk_token_id_;  // for safety
         }
 
