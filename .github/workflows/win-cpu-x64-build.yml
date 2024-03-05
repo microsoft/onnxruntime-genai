@@ -59,7 +59,7 @@ jobs:
 
     - name: Install the python wheel and test dependencies
       run: |
-        python -m pip install (Get-ChildItem ("$env:cmake_build_dir\wheel\*.whl"))
+        python -m pip install (Get-ChildItem ("$env:cmake_build_dir\wheel\Release\*.whl"))
         python -m pip install -r test\python\requirements-nightly-cpu.txt
 
     - name: Get HuggingFace Token
@@ -76,7 +76,7 @@ jobs:
     - name: Build the C# API and Run the C# Tests
       run: |
         cd test\csharp
-        dotnet test /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:cmake_build_dir"
+        dotnet test /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:cmake_build_dir\Release"
 
     - name: Verify Build Artifacts
       if: always()
@@ -88,7 +88,7 @@ jobs:
     - name: Run tests
       run: |
         .\unit_tests.exe
-      working-directory: '$env:GITHUB_WORKSPACE\$env:cmake_build_dir\test'
+      working-directory: '$env:GITHUB_WORKSPACE\$env:cmake_build_dir\test\Release'
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v3
