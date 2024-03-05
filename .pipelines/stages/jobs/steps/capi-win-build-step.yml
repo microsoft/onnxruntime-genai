@@ -25,7 +25,7 @@ steps:
     userRepository: 'microsoft/onnxruntime'
     defaultVersionType: 'specificTag'
     version: 'v${{ parameters.ort_version }}'
-    itemPattern: '${{ ort_name }}*'
+    itemPattern: '${{ parameters.ort_name }}*'
     downloadPath: '$(Build.SourcesDirectory)'
   displayName: Download ONNXRuntime
 
