@@ -7,7 +7,7 @@
     {
       "name": "windows_x64_cpu_release_asan",
       "jobs": "${env.NPROC}",
-      "configurePreset": "windows_x64_cpu_release_asan",
+      "configurePreset": "windows_x64_cpu_release_asan"
     },
     {
       "name": "windows_x64_cpu_debug_asan",
