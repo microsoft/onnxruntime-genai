@@ -58,9 +58,9 @@ TEST(SamplingTests, BatchedSamplingTopKCpu) {
   params.input_ids = input_ids;
   params.device_type = Generators::DeviceType::CPU;
   auto generator = Generators::CreateGenerator(*model, params);
-  auto logits_span = Generators::cpu_span<float>(logits_cpu);
-  generator->search_->SetLogits(logits_span);
-  ;
+  auto logits_copy = logits_cpu;
+  generator->search_->SetLogits(Generators::cpu_span<float>(logits_copy));
+
   // Verify outputs match expected outputs
   int k = 2;
   generator->search_->SampleTopK(k, 1.0);
@@ -89,8 +89,8 @@ TEST(SamplingTests, BatchedSamplingTopPAndKCpu) {
   params.input_ids = input_ids;
   params.device_type = Generators::DeviceType::CPU;
   auto generator = Generators::CreateGenerator(*model, params);
-  auto logits_span = Generators::cpu_span<float>(logits_cpu);
-  generator->search_->SetLogits(logits_span);
+  auto logits_copy = logits_cpu;
+  generator->search_->SetLogits(Generators::cpu_span<float>(logits_copy));
   // Verify outputs match expected outputs
   float p = 0.25f;
   int k = 2;
@@ -132,7 +132,7 @@ TEST(SamplingTests, RandomizedSamplingTopPCpu) {
   params.vocab_size = vocab_size;
   params.input_ids = input_ids;
   params.device_type = Generators::DeviceType::CPU;
-  std::unique_ptr<float[]> logits_cpu(new float[vocab_size * batch_size]);
+  std::vector<float> logits_cpu(vocab_size * batch_size);
   std::random_device rd;
   std::mt19937 engine(rd());
   std::uniform_int_distribution<> dist(1, 25);
@@ -140,8 +140,9 @@ TEST(SamplingTests, RandomizedSamplingTopPCpu) {
   for (int i = 0; i < num_iter; i++) {
     auto generator = Generators::CreateGenerator(*model, params);
     int num_large = dist(engine);
-    CreateRandomLogits(logits_cpu.get(), num_large, vocab_size, batch_size, engine);
-    generator->search_->SetLogits(Generators::cpu_span<float>(logits_cpu.get(), vocab_size * batch_size));
+    CreateRandomLogits(logits_cpu.data(), num_large, vocab_size, batch_size, engine);
+    auto logits_copy = logits_cpu;
+    generator->search_->SetLogits(Generators::cpu_span<float>(logits_copy));
     generator->search_->SampleTopP(0.95f, 1.0f);
     auto next_tokens = generator->search_->GetNextTokens().GetCPU();
     // Verify outputs match expected outputs
@@ -166,7 +167,7 @@ TEST(SamplingTests, RandomizedSamplingTopKCpu) {
   params.vocab_size = vocab_size;
   params.input_ids = input_ids;
   params.device_type = Generators::DeviceType::CPU;
-  std::unique_ptr<float[]> logits_cpu(new float[vocab_size * batch_size]);
+  std::vector<float> logits_cpu(vocab_size * batch_size);
   std::random_device rd;
   std::mt19937 engine(rd());
   std::uniform_int_distribution<> dist(5, 25);
@@ -174,8 +175,9 @@ TEST(SamplingTests, RandomizedSamplingTopKCpu) {
   for (int i = 0; i < num_iter; i++) {
     int num_large = dist(engine);
     auto generator = Generators::CreateGenerator(*model, params);
-    CreateRandomLogits(logits_cpu.get(), num_large, vocab_size, batch_size, engine);
-    generator->search_->SetLogits(Generators::cpu_span<float>(logits_cpu.get(), vocab_size * batch_size));
+    CreateRandomLogits(logits_cpu.data(), num_large, vocab_size, batch_size, engine);
+    auto logits_copy=logits_cpu;
+    generator->search_->SetLogits(Generators::cpu_span<float>(logits_copy));
     generator->search_->SampleTopK(k, 1.0f);
     auto next_tokens = generator->search_->GetNextTokens().GetCPU();
     // Verify outputs match expected outputs
@@ -201,7 +203,7 @@ TEST(SamplingTests, RandomizedSamplingTopPAndKCpu) {
   params.vocab_size = vocab_size;
   params.input_ids = input_ids;
   params.device_type = Generators::DeviceType::CPU;
-  std::unique_ptr<float[]> logits_cpu(new float[vocab_size * batch_size]);
+  std::vector<float> logits_cpu(vocab_size * batch_size);
   std::random_device rd;
   std::mt19937 engine(rd());
   std::uniform_int_distribution<> dist(5, 25);
@@ -209,8 +211,9 @@ TEST(SamplingTests, RandomizedSamplingTopPAndKCpu) {
   for (int i = 0; i < num_iter; i++) {
     int num_large = dist(engine);
     auto generator = Generators::CreateGenerator(*model, params);
-    CreateRandomLogits(logits_cpu.get(), num_large, vocab_size, batch_size, engine);
-    generator->search_->SetLogits(Generators::cpu_span<float>(logits_cpu.get(), vocab_size * batch_size));
+    CreateRandomLogits(logits_cpu.data(), num_large, vocab_size, batch_size, engine);
+    auto logits_copy = logits_cpu;
+    generator->search_->SetLogits(Generators::cpu_span<float>(logits_copy));
     generator->search_->SampleTopPAndK(p, k, 1.0f);
     auto next_tokens = generator->search_->GetNextTokens().GetCPU();
     // Verify outputs match expected outputs

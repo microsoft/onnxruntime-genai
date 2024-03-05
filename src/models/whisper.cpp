@@ -62,7 +62,6 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
 
 void Whisper_State::UpdateInputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> beam_indices, int current_length) {
   decoder_input_ids_.Update(next_tokens);
-  logits_.Update();
   kv_cache_.Update(beam_indices.GetCPU(), current_length);
 }
 

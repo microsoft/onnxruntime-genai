@@ -94,10 +94,10 @@ This step requires `cmake` to be installed.
 
       ```bash
       cd $ORT_HOME
-      wget https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-linux-x64-gpu-1.17.0.tgz
-      tar xvzf onnxruntime-linux-x64-gpu-1.17.0.tgz 
-      mv onnxruntime-linux-x64-gpu-1.17.0/include .
-      mv onnxruntime-linux-x64-gpu-1.17.0/lib .
+      wget https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/onnxruntime-linux-x64-gpu-1.17.1.tgz
+      tar xvzf onnxruntime-linux-x64-gpu-1.17.1.tgz 
+      mv onnxruntime-linux-x64-gpu-1.17.1/include .
+      mv onnxruntime-linux-x64-gpu-1.17.1/lib .
       ```
 
     * Or build from source

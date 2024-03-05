@@ -272,7 +272,7 @@ TEST(Benchmarks, BenchmarkRandomizedSelectTopCuda) {
   auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   int vocab_size = 32000;  // vocab size of llama
   int batch_size = 12;
-  std::vector<int32_t> input_ids{0, 1, 2, 3, 4};
+  std::vector<int32_t> input_ids{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}; // Needs to match batch_size
   Generators::GeneratorParams params = Generators::GeneratorParams{};
   params.search.max_length = 10;
   params.batch_size = batch_size;
@@ -282,7 +282,7 @@ TEST(Benchmarks, BenchmarkRandomizedSelectTopCuda) {
   params.device_type = Generators::DeviceType::CUDA;
   auto logits_gpu = Generators::CudaMallocArray<float>(vocab_size * batch_size);
   auto indices_buffer = Generators::CudaMallocArray<int>(vocab_size * batch_size);
-  float* cpu_logits = new float[vocab_size * batch_size];
+  std::vector<float> cpu_logits(vocab_size * batch_size);
   std::random_device rd;
   std::mt19937 engine(rd());
   std::uniform_int_distribution<> dist(1, 25);
@@ -293,7 +293,7 @@ TEST(Benchmarks, BenchmarkRandomizedSelectTopCuda) {
     auto generator = Generators::CreateGenerator(*model, params);
     LaunchGeometricDecayKernel(logits_gpu.get(), vocab_size, batch_size, num_large, 20.0f, params.cuda_stream);
     LaunchFisherYatesKernel(logits_gpu.get(), indices_buffer.get(), vocab_size, batch_size, params.cuda_stream);
-    cudaMemcpy(cpu_logits, logits_gpu.get(), vocab_size * batch_size * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(cpu_logits.data(), logits_gpu.get(), vocab_size * batch_size * sizeof(float), cudaMemcpyDeviceToHost);
     generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), vocab_size * batch_size));
     cudaStreamSynchronize(params.cuda_stream);
     auto start = std::chrono::high_resolution_clock::now();

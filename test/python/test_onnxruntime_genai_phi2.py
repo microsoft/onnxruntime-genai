@@ -3,9 +3,11 @@
 
 import os
 import sys
-from _test_utils import run_subprocess
-import onnxruntime_genai as og
 import tempfile
+
+import onnxruntime_genai as og
+
+from _test_utils import run_subprocess
 
 
 def download_model(download_path: str | bytes | os.PathLike, device: str):
@@ -39,7 +41,7 @@ def run_model(model_path: str | bytes | os.PathLike, device: og.DeviceType):
     sequences = tokenizer.encode_batch(prompts)
     params = og.GeneratorParams(model)
     params.set_search_options({"max_length": 200})
-    params.set_input_sequences(sequences)
+    params.input_ids=sequences
 
     output_sequences = model.generate(params)
     output = tokenizer.decode_batch(output_sequences)

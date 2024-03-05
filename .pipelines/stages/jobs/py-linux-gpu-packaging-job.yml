@@ -7,7 +7,7 @@ parameters:
   - 12.2
 - name: ort_version
   type: string
-  default: '1.17.0'
+  default: '1.17.1'
 jobs:
 - job: Linux_GPU_Wheels
   timeoutInMinutes: 240
@@ -19,7 +19,7 @@ jobs:
   - name: skipComponentGovernanceDetection
     value: true
   - name: ort_version
-    value: '1.17.0'
+    value: '1.17.1'
 
   steps:
   - checkout: self # due to checkout multiple repos, the root directory is $(Build.SourcesDirectory)/onnxruntime-genai,

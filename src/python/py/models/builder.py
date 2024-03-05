@@ -157,6 +157,7 @@ class Model:
             },
             "search": {
                 "diversity_penalty": config.diversity_penalty if hasattr(config, "diversity_penalty") else 0.0,
+                "do_sample": config.do_sample if hasattr(config, "do_sample") else False,
                 "early_stopping": True,
                 "length_penalty": config.length_penalty if hasattr(config, "length_penalty") else 1.0,
                 "max_length": config.max_length if hasattr(config, "max_length") else 20,
