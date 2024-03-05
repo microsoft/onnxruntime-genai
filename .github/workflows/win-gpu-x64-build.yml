@@ -81,11 +81,11 @@ jobs:
       if: always()
       continue-on-error: true
       run: |
+        
         Get-ChildItem -Path $env:GITHUB_WORKSPACE\$env:cmake_build_dir -Recurse
 
     - name: Prepend CUDA to PATH and Run tests
       run: |
         $env:PATH = "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin;" + $env:PATH 
         echo "Current PATH variable is: $env:PATH" 
-        .\unit_tests.exe
-      working-directory: '$env:GITHUB_WORKSPACE\$env:cmake_build_dir\test\Release'
+        $env:GITHUB_WORKSPACE\\$env:cmake_build_dir\test\Release\unit_tests.exe

@@ -87,8 +87,7 @@ jobs:
 
     - name: Run tests
       run: |
-        .\unit_tests.exe
-      working-directory: '$env:GITHUB_WORKSPACE\$env:cmake_build_dir\test\Release'
+        $env:GITHUB_WORKSPACE\\$env:cmake_build_dir\test\Release\unit_tests.exe
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v3
