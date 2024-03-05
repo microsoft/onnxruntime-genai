@@ -55,7 +55,7 @@ steps:
     workingDirectory: '$(Build.SourcesDirectory)'
   - bash: |
       set -e -x
-      cmake --preset windows_x64_cuda_release -T cuda='$(Build.SourcesDirectory)\cuda_sdk\v${{ parameters.cuda_version }}' -DTEST_PHI2=False
+      cmake --preset windows_x64_cuda_release -T cuda='$(Build.SourcesDirectory)\cuda_sdk\v${{ parameters.cuda_version }}'
       cmake --build --preset windows_x64_cuda_release --parallel
     displayName: 'Configure CMake C API with CUDA'
     condition: eq(${{ parameters.ep }}, 'gpu')
