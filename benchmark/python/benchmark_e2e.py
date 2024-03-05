@@ -24,7 +24,7 @@ def generate_prompt(model, tokenizer, prompt_length) -> str:
     while not generator.is_done():
         generator.compute_logits()
         generator.generate_next_token_top_k(5, temperature)
-    return tokenizer.decode(generator.get_sequence(0).get_array())
+    return tokenizer.decode(generator.get_sequence(0))
 
 def save_results(results, filename):
     import pandas as pd
@@ -74,7 +74,7 @@ def main(args):
         while not generator.is_done():
             generator.compute_logits()
             generator.generate_next_token_top_k_top_p(args.top_k, args.top_p, temperature)
-        if args.print_model_output: print(tokenizer.decode(generator.get_sequence(0).get_array()))
+        if args.print_model_output: print(tokenizer.decode(generator.get_sequence(0)))
 
     tokenize_times = []
     prompt_times = []
@@ -122,7 +122,7 @@ def main(args):
             sampling_times.append(sampling_end_time - sampling_start_time)
         wall_clock_end_time = time.time()
         wall_clock_times.append(wall_clock_end_time - wall_clock_start_time)
-        if args.print_model_output: print(tokenizer.decode(generator.get_sequence(0).get_array()))
+        if args.print_model_output: print(tokenizer.decode(generator.get_sequence(0)))
 
     # Calculate tokenization metrics
     avg_tokenization_latency_s = sum(tokenize_times) / len(tokenize_times)

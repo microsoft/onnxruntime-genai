@@ -43,7 +43,14 @@ jobs:
       - name: Install the python wheel and test dependencies
         run: |
           python3 -m pip install build/${{ matrix.compiler }}_cpu/release/wheel/onnxruntime_genai*.whl
-          python3 -m pip install -r test/python/requirements.txt --user
+          python3 -m pip install -r test/python/requirements-nightly-cpu.txt --user
+
+      - name: Get HuggingFace Token
+        run: |
+          az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
+          HF_TOKEN=$(az keyvault secret show --vault-name anubissvcsecret --name ANUBIS-HUGGINGFACE-TOKEN --query value)
+          echo "::add-mask::$HF_TOKEN"
+          echo "HF_TOKEN=$HF_TOKEN" >> $GITHUB_ENV
 
       - name: Run the python tests
         run: |

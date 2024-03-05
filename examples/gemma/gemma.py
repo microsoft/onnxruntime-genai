@@ -4,7 +4,7 @@ import time
 print("Loading model...")
 model=og.Model("./example-models/gemma-2b-cuda", og.DeviceType.CUDA)
 print("Model loaded")
-tokenizer=model.create_tokenizer()
+tokenizer=og.Tokenizer(model)
 print("Tokenizer created")
 
 

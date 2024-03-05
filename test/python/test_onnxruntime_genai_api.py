@@ -2,6 +2,8 @@
 # Licensed under the MIT License
 
 import os
+import sys
+import sysconfig
 from pathlib import Path
 
 import numpy as np
@@ -21,7 +23,7 @@ import pytest
     ],
 )
 def test_greedy_search(device, test_data_path, relative_model_path):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+    model_path = os.fspath(Path(test_data_path()) / relative_model_path)
 
     model = og.Model(model_path, device)
 
@@ -46,28 +48,26 @@ def test_greedy_search(device, test_data_path, relative_model_path):
         dtype=np.int32,
     )
     for i in range(batch_size):
-        assert np.array_equal(
-            expected_sequence[i], generator.get_sequence(i).get_array()
-        )
+        assert np.array_equal(expected_sequence[i], generator.get_sequence(i))
 
     sequences = model.generate(search_params)
     for i in range(len(sequences)):
         assert sequences[i] == expected_sequence[i].tolist()
 
 
-@pytest.mark.parametrize("device", [og.DeviceType.CPU])
-@pytest.mark.parametrize(
-    "relative_model_path", [Path("hf-internal-testing") / "tiny-random-gpt2-fp32"]
+# TODO: CUDA pipelines use python3.6 and do not have a way to download models since downloading models
+# requires pytorch and hf transformers. This test should be re-enabled once the pipeline is updated.
+@pytest.mark.skipif(
+    sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8,
+    reason="Python 3.8 is required for downloading models.",
 )
-@pytest.mark.parametrize("batch_encode", [True, False])
-@pytest.mark.parametrize("batch_decode", [True, False])
-def test_tokenizer_encode_decode(
-    device, test_data_path, relative_model_path, batch_encode, batch_decode
-):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+@pytest.mark.parametrize("device", [og.DeviceType.CPU])
+@pytest.mark.parametrize("batch", [True, False])
+def test_tokenizer_encode_decode(device, test_data_path, batch):
+    model_path = os.fspath(Path(test_data_path("phi-2")))
 
     model = og.Model(model_path, device)
-    tokenizer = model.create_tokenizer()
+    tokenizer = og.Tokenizer(model)
 
     prompts = [
         "This is a test.",
@@ -75,18 +75,15 @@ def test_tokenizer_encode_decode(
         "The quick brown fox jumps over the lazy dog.",
     ]
     sequences = None
-    if batch_encode:
+    if batch:
         sequences = tokenizer.encode_batch(prompts)
-    else:
-        sequences = [tokenizer.encode(prompt) for prompt in prompts]
-
-    decoded_strings = None
-    if batch_decode:
         decoded_strings = tokenizer.decode_batch(sequences)
+        assert prompts == decoded_strings
     else:
-        decoded_strings = [tokenizer.decode(sequence) for sequence in sequences]
-
-    assert prompts == decoded_strings
+        for prompt in prompts:
+            sequence = tokenizer.encode(prompt)
+            decoded_string = tokenizer.decode(sequence)
+            assert prompt == decoded_string
 
 
 @pytest.mark.parametrize("device", [og.DeviceType.CPU])
@@ -94,10 +91,10 @@ def test_tokenizer_encode_decode(
     "relative_model_path", [Path("hf-internal-testing") / "tiny-random-gpt2-fp32"]
 )
 def test_tokenizer_stream(device, test_data_path, relative_model_path):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+    model_path = os.fspath(Path(test_data_path()) / relative_model_path)
 
     model = og.Model(model_path, device)
-    tokenizer = model.create_tokenizer()
+    tokenizer = og.Tokenizer(model)
     tokenizer_stream = tokenizer.create_stream()
 
     prompts = [
@@ -105,25 +102,29 @@ def test_tokenizer_stream(device, test_data_path, relative_model_path):
         "Rats are awesome pets!",
         "The quick brown fox jumps over the lazy dog.",
     ]
-    sequences = tokenizer.encode_batch(prompts)
 
-    for index, sequence in enumerate(sequences):
+    for prompt in prompts:
+        sequence = tokenizer.encode(prompt)
         decoded_string = ""
         for token in sequence:
             decoded_string += tokenizer_stream.decode(token)
 
-        assert decoded_string == prompts[index]
+        assert decoded_string == prompt
 
 
-# TODO: Enable once the phi-2 model exists
-@pytest.mark.skip(reason="Phi-2 model does not exist in the pipeline.")
+# TODO: CUDA pipelines use python3.6 and do not have a way to download models since downloading models
+# requires pytorch and hf transformers. This test should be re-enabled once the pipeline is updated.
+@pytest.mark.skipif(
+    sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8,
+    reason="Python 3.8 is required for downloading models.",
+)
 @pytest.mark.parametrize("device", [og.DeviceType.CPU])
 @pytest.mark.parametrize("relative_model_path", [Path("phi-2")])
 def test_batching(device, test_data_path, relative_model_path):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+    model_path = os.fspath(Path(test_data_path()) / relative_model_path)
 
     model = og.Model(model_path, device)
-    tokenizer = model.create_tokenizer()
+    tokenizer = og.Tokenizer(model)
 
     prompts = [
         "This is a test.",
@@ -133,7 +134,7 @@ def test_batching(device, test_data_path, relative_model_path):
 
     params = og.GeneratorParams(model)
     params.set_search_options({"max_length": 20})  # To run faster
-    params.set_input_sequences(tokenizer.encode_batch(prompts))
+    params.input_ids = tokenizer.encode_batch(prompts)
 
     output_sequences = model.generate(params)
     print(tokenizer.decode_batch(output_sequences))
