@@ -43,7 +43,7 @@ jobs:
     parameters:
       arch: $(arch)
       ort_version: ${{ parameters.ort_version }}
-      build_gpu: true
+      ep: $(ep)
       build_config: $(build_config)
       cuda_version: ${{ parameters.cuda_version }}
 

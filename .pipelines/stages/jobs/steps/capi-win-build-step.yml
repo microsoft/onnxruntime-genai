@@ -1,7 +1,7 @@
 parameters:
   arch: 'x64'
   ort_version: '1.17.0'
-  build_gpu: false
+  ep: 'cpu'
   build_dir: win-x64
   build_config: 'RelWithDebInfo'
   cuda_version: '11.8'
@@ -46,21 +46,21 @@ steps:
     set -e -x
     azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v${{ parameters.cuda_version }}" '$(Build.SourcesDirectory)\cuda_sdk'
   displayName: 'Download CUDA'
-  condition: eq(${{ parameters.build_gpu }}, true)
+  condition: eq(${{ parameters.ep }}, 'gpu')
   workingDirectory: '$(Build.SourcesDirectory)'
 
 - bash: |
     set -e -x
     cmake -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=${{ parameters.build_config }} -DUSE_CUDA=OFF -DENABLE_TESTS=OFF -S . -B ${{ parameters.build_dir }}
   displayName: 'Configure CMake C API without CUDA'
-  condition: ne(${{ parameters.build_gpu }}, true)
+  condition: ne(${{ parameters.ep }}, 'gpu')
   workingDirectory: '$(Build.SourcesDirectory)'
 
 - bash: |
     set -e -x
     cmake -G "Visual Studio 17 2022" -A x64 -T cuda='$(Build.SourcesDirectory)\cuda_sdk\v${{ parameters.cuda_version }}' -DENABLE_TESTS=OFF -DCMAKE_BUILD_TYPE=${{ parameters.build_config }} -DUSE_CUDA=TRUE -S . -B ${{ parameters.build_dir }}
   displayName: 'Configure CMake C API with CUDA'
-  condition: eq(${{ parameters.build_gpu }}, true)
+  condition: eq(${{ parameters.ep }}, 'gpu')
   workingDirectory: '$(Build.SourcesDirectory)'
 
 - bash: |

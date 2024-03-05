@@ -1,11 +1,11 @@
 parameters:
   arch: 'x64'
   ort_version: '1.17.0'
-  build_gpu: false
+  ep: 'cpu'
   ort_name: 'onnxruntime-win-x64-1.17.0'
   cuda_version: '11.8'
 jobs:
-- job: Windows_GPU_Wheels
+- job: Windows_Wheels
   pool: 'onnxruntime-Win-CPU-2022'
   variables:
     build_config: 'RelWithDebInfo'
@@ -16,7 +16,7 @@ jobs:
     parameters:
       arch: ${{ parameters.arch }}
       ort_version: ${{ parameters.ort_version }}
-      build_gpu: ${{ parameters.build_gpu }}
+      ep: ${{ parameters.ep }}
       build_config: $(build_config)
       build_dir: $(build_dir)
       ort_name: ${{ parameters.ort_name }}
@@ -56,7 +56,7 @@ jobs:
   - task: PublishBuildArtifacts@1
     displayName: 'Publish Artifact: ONNXRuntime Genai python wheel'
     inputs:
-      ${{ if eq(parameters.build_gpu, false) }}:
+      ${{ if eq(parameters.ep, 'cpu') }}:
         ArtifactName: onnxruntime-genai-capi-win-cpu-${{ parameters.arch }}
       ${{ else }}:
         ArtifactName: onnxruntime-genai-capi-win-gpu
