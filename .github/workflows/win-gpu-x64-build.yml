@@ -11,15 +11,10 @@ env:
   ort_dir: "onnxruntime-win-x64-gpu-1.17.0"
   ort_zip: "onnxruntime-win-x64-gpu-1.17.0.zip"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-win-x64-gpu-1.17.0.zip"
-  #  ort_dir: "onnxruntime-win-x64-cuda-1.17.0"
-  #  ort_zip: "onnxruntime-win-x64-cuda12-1.17.0.zip"
-  #  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-win-x64-cuda12-1.17.0.zip"
   cuda_dir: "${{ github.workspace }}\\cuda_sdk"
-  #  cuda_version: "12.2"
-  #  CUDA_PATH: "${{ github.workspace }}\\cuda_sdk\\v12.2"
   cuda_version: "11.8"
   CUDA_PATH: ${{ github.workspace }}\\cuda_sdk\\v11.8
-  cmake_build_dir: 'build/release/gpu_default'
+  cmake_build_dir: 'build/release/cuda_default'
 
 
 jobs:
@@ -86,7 +81,7 @@ jobs:
       if: always()
       continue-on-error: true
       run: |
-        Get-ChildItem -Path "$env:GITHUB_WORKSPACE\$env:cmake_build_dir" -Recurse
+        Get-ChildItem -Path $env:GITHUB_WORKSPACE\$env:cmake_build_dir -Recurse
 
     - name: Prepend CUDA to PATH and Run tests
       run: |
