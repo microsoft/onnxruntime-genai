@@ -114,35 +114,40 @@ bool Generator::IsDone() const {
 }
 
 void Generator::GenerateNextToken_TopK_TopP(int top_k, float top_p, float temperature) {
-  if (search_->params_.search.num_beams != 1)
-    throw std::runtime_error("TopK and TopP cannot be used with a beam search");
-
   if (!computed_logits_)
     throw std::runtime_error("Must call ComputeLogits before GenerateNextToken*");
   computed_logits_ = false;
 
-  if (top_p < 1.0f && top_k > 1) {
+  if (top_p == 0.0f && top_k == 1) {
+    search_->SelectTop();
+    return;
+  }
+
+  // The user explicitly called TopK_TopP on a beam search
+  if (search_->params_.search.num_beams != 1)
+    throw std::runtime_error("TopK and TopP cannot be used with a beam search");
+
+  // Sanity checks
+  if (top_p < 0.0f || top_p > 1.0f)
+    throw std::runtime_error("top_p must be between 0.0 and 1.0");
+  if (top_k < 1)
+    throw std::runtime_error("top_k must be 1 or greater");
+
+  if (top_p > 0.0f && top_k > 1) {
     search_->SampleTopPAndK(top_p, top_k, temperature);
-  } else if (top_p < 1.0f) {
-    search_->SampleTopP(top_p, temperature);
   } else if (top_k > 1) {
     search_->SampleTopK(top_k, temperature);
   } else {
-    search_->SelectTop();
+    search_->SampleTopP(top_p, temperature);
   }
 }
 
 void Generator::GenerateNextToken() {
   auto& search = search_->params_.search;
-  if (search.num_beams > 1) {
-    if (!computed_logits_)
-      throw std::runtime_error("Must call ComputeLogits before GenerateNextToken*");
-    computed_logits_ = false;
-    search_->SelectTop();
-    return;
-  }
-
-  GenerateNextToken_TopK_TopP(search.top_k, search.top_p, search.temperature);
+  if (search.do_sample)
+    GenerateNextToken_TopK_TopP(search.top_k, search.top_p, search.temperature);
+  else
+    GenerateNextToken_Top();
 }
 
 RoamingArray<int32_t> Generator::GetSequence(int index) const {

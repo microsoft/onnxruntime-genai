@@ -16,7 +16,7 @@ input_tokens = tokenizer.encode_batch(prompts)
 
 params=og.GeneratorParams(model)
 params.set_search_options({"max_length":256})
-params.set_input_sequences(input_tokens)
+params.input_ids=input_tokens
 
 
 generator=og.Generator(model, params)

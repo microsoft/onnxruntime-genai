@@ -129,10 +129,6 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
 
   while (!generator->IsDone()) {
     generator->ComputeLogits();
-
-    // Scoring
-    //    Generators::Processors_Cuda::MinLength(search, 1);
-
     generator->GenerateNextToken_Top();
   }
 
@@ -182,11 +178,6 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
 
   while (!generator->IsDone()) {
     generator->ComputeLogits();
-
-    // Scoring
-    //    Generators::Processors_Cuda::MinLength(search, 1);
-    //    Generators::Processors_Cuda::RepetitionPenalty(search, 1.0f);
-
     generator->GenerateNextToken();
   }
 
