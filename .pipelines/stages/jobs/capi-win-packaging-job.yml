@@ -2,7 +2,6 @@ parameters:
   arch: 'x64'
   ort_version: '1.17.0'
   ep: 'cpu'
-  ort_name: 'onnxruntime-win-x64-1.17.0'
   cuda_version: '11.8'
 jobs:
 - job: Windows_Wheels
@@ -19,7 +18,6 @@ jobs:
       ep: ${{ parameters.ep }}
       build_config: $(build_config)
       build_dir: $(build_dir)
-      ort_name: ${{ parameters.ort_name }}
       cuda_version: ${{ parameters.cuda_version }}≈
 
   - task: CopyFiles@2

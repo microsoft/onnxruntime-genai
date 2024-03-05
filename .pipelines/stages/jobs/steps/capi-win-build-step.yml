@@ -5,7 +5,6 @@ parameters:
   build_dir: win-x64
   build_config: 'RelWithDebInfo'
   cuda_version: '11.8'
-  ort_name: 'onnxruntime-win-x64-1.17.0'
 
 steps:
 - checkout: self
@@ -25,7 +24,13 @@ steps:
     userRepository: 'microsoft/onnxruntime'
     defaultVersionType: 'specificTag'
     version: 'v${{ parameters.ort_version }}'
-    itemPattern: '${{ parameters.ort_name }}*'
+    ${{ if eq(parameters.ep, 'gpu') }}:
+      ${{ if eq(parameters.cuda_version, '11.8') }}:
+        itemPattern: 'onnxruntime-win-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}*'
+      ${{ else }}:
+        itemPattern: 'onnxruntime-win-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}*'
+    ${{ else }}:
+      itemPattern: 'onnxruntime-win-${{ parameters.arch }}-${{ parameters.ort_version }}*'
     downloadPath: '$(Build.SourcesDirectory)'
   displayName: Download ONNXRuntime
 
