@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #pragma once
-#ifndef USE_CXX17
+#if __cplusplus >= 202002L
 #include <span>
 #else
 #include <array>
