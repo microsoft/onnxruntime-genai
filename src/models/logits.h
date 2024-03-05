@@ -6,7 +6,6 @@ struct Logits {
   Logits(const Model& model, State& state);
 
   void Add();
-  void Update();
   RoamingArray<float> Get();
 
  private:
@@ -16,8 +15,8 @@ struct Logits {
 
   std::array<int64_t, 3> shape_{};
   ONNXTensorElementDataType type_;
-  std::unique_ptr<OrtValue> value_;
-  std::unique_ptr<OrtValue> value32_;  // When model output is fp16, this holds the fp32 conversion of them
+  std::unique_ptr<OrtValue> value32_; // Always fp32 values
+  std::unique_ptr<OrtValue> value16_; // When model output is fp16
 };
 
 }  // namespace Generators

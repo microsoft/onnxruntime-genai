@@ -11,12 +11,7 @@ Search_Cpu::Search_Cpu(const GeneratorParams& params)
     : Search{params},
       sequences_{params.input_ids, params.batch_size, params.search.num_beams, params_.search.max_length} {
   auto batch_beam_size = params.BatchBeamSize();
-
   sequence_lengths_buffer_ = AllocateArray<int32_t>(batch_beam_size, &sequence_lengths_);
-
-  size_t const next_token_size = batch_beam_size * params_.vocab_size;
-  next_token_scores_buffer_ = AllocateArray<float>(next_token_size, &next_token_scores_);
-  memset(next_token_scores_.data(), 0, next_token_scores_.size_bytes());
 }
 
 GreedySearch_Cpu::GreedySearch_Cpu(const GeneratorParams& params)
@@ -37,26 +32,12 @@ BeamSearch_Cpu::BeamSearch_Cpu(const GeneratorParams& params)
 BeamSearch_Cpu::~BeamSearch_Cpu() = default;
 
 void Search_Cpu::SetLogits(RoamingArray<float> logits_unk) {
-  cpu_span<float> const logits = logits_unk;
-  // Logits has shape (batch_size, input_length, vocab_size),
-  // where input_length equals to parameters_->sequence_length for first subgraph call, and 1 for the remaining calls.
-
+  next_token_scores_ = logits_unk.GetCPU();
   auto batch_beam_size = params_.BatchBeamSize();
-  auto input_length = logits.size() / (batch_beam_size * params_.vocab_size);
-  assert(logits.size() % (batch_beam_size * params_.vocab_size) == 0);  // Should divide evenly
 
-  // TODO: if input_length==1, use token scores directly
-
-  // Get logits for the last token:
-  //    next_token_logits = logits[:, -1, :], and the result shape is (batch_size, vocab_size)
-  // When input_length == 1, use logits directly in SoftmaxCPU below so it only need for input_length > 1.
-  const float* current_logits = logits.data() + (input_length - 1) * params_.vocab_size;
+  // Apply log_softmax to the input logits
   for (int i = 0; i < batch_beam_size; i++) {
-    std::span<const float> const source(current_logits, params_.vocab_size);
-    std::span<float> const target = next_token_scores_.subspan(i * params_.vocab_size, params_.vocab_size);
-    copy(source, target);
-    current_logits += input_length * params_.vocab_size;
-
+    std::span<float> target = next_token_scores_.subspan(i * params_.vocab_size, params_.vocab_size);
     log_softmax(target);
   }
 }

@@ -38,7 +38,6 @@ RoamingArray<float> Phi2_State::Run(int current_length, RoamingArray<int32_t> ne
 void Phi2_State::UpdateInputs(const RoamingArray<int32_t>& next_tokens_unk, RoamingArray<int32_t> beam_indices, int current_length) {
   input_ids_.Update(next_tokens_unk);
   position_ids_.Update(current_length);
-  logits_.Update();
   kv_cache_.Update(beam_indices.GetCPU(), current_length);
 }
 
