@@ -39,7 +39,7 @@ parameters:
   type: string
   values:
   - '11.8'
-  - '11.5'
+  - '12.2'
   default: '11.8'
 
 resources:
