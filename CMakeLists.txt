@@ -66,9 +66,9 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   # Don't let cmake set a default value for CMAKE_CUDA_ARCHITECTURES
-  cmake_policy(SET CMP0104 OLD)
-  enable_language(CUDA)
-  message(STATUS "CMAKE_CUDA_COMPILER_VERSION: ${CMAKE_CUDA_COMPILER_VERSION}")
+  # cmake_policy(SET CMP0104 OLD)
+  # enable_language(CUDA)
+  # message(STATUS "CMAKE_CUDA_COMPILER_VERSION: ${CMAKE_CUDA_COMPILER_VERSION}")
   # set(CUDA_PROPAGATE_HOST_FLAGS ON)
   set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcudafe --diag_suppress=2803 --expt-relaxed-constexpr")
   file(GLOB generator_cuda_srcs CONFIGURE_DEPENDS
