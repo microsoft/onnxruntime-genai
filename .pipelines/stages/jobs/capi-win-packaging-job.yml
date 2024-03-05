@@ -71,5 +71,5 @@ jobs:
     inputs:
       ArtifactName: $(artifactName)
 
-  - template: steps/ompliant-and-cleanup-step.yml
+  - template: steps/compliant-and-cleanup-step.yml
 
