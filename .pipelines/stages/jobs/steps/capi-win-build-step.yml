@@ -55,7 +55,8 @@ steps:
     workingDirectory: '$(Build.SourcesDirectory)'
   - bash: |
       set -e -x
-      cmake -G "Visual Studio 17 2022" -A x64 -T cuda='$(Build.SourcesDirectory)\cuda_sdk\v${{ parameters.cuda_version }}' -DENABLE_TESTS=OFF -DCMAKE_BUILD_TYPE=${{ parameters.build_config }} -DUSE_CUDA=TRUE -S . -B ${{ parameters.build_dir }}
+      cmake --preset windows_x64_cuda_release -T cuda='$(Build.SourcesDirectory)\cuda_sdk\v${{ parameters.cuda_version }}' -DTEST_PHI2=False
+      cmake --build --preset windows_x64_cuda_release --parallel
     displayName: 'Configure CMake C API with CUDA'
     condition: eq(${{ parameters.ep }}, 'gpu')
     workingDirectory: '$(Build.SourcesDirectory)'
@@ -63,15 +64,10 @@ steps:
 - ${{ if ne(parameters.ep, 'gpu')}}:
   - bash: |
       set -e -x
-      cmake -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=${{ parameters.build_config }} -DUSE_CUDA=OFF -DENABLE_TESTS=OFF -S . -B ${{ parameters.build_dir }}
+      cmake --preset windows_x64_cpu_release
+      cmake --build --preset windows_x64_cpu_release --parallel
     displayName: 'Configure CMake C API without CUDA'
     workingDirectory: '$(Build.SourcesDirectory)'
-
-- bash: |
-    set -e -x
-    cmake --build ${{ parameters.build_dir }} --config ${{ parameters.build_config }} --parallel --target onnxruntime-genai
-  displayName: 'Build CMake C API CUDA'
-  workingDirectory: '$(Build.SourcesDirectory)'
 
 - template: win-esrp-dll-step.yml
   parameters:
