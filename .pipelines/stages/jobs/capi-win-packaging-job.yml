@@ -4,7 +4,7 @@ parameters:
   ep: 'cpu'
   arch: 'x64'
 jobs:
-- job: Windows_CAPI
+- job: Windows_CAPI_Packaging_${{ parameters.arch }}_${{ parameters.ep }}
   pool: 'onnxruntime-Win-CPU-2022'
   variables:
   - name: build_config
@@ -20,11 +20,9 @@ jobs:
     value: ${{ parameters.ep }}
   - name: artifactName
     value: onnxruntime-genai-capi-win-${{ parameters.arch }}-${{ parameters.arch }}
-- job: Windows_Wheels
-  pool: 'onnxruntime-Win-CPU-2022'
-  variables:
-    build_config: 'RelWithDebInfo'
   timeoutInMinutes: 180
+  workspace:
+    clean: all
   steps:
   - template: steps/capi-win-build-step.yml
     parameters:

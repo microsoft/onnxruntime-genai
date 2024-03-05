@@ -4,7 +4,7 @@ parameters:
   ep: 'cpu'
   arch: 'x64'
 jobs:
-- job: Windows_Nuget
+- job: Windows_Nuget_Packaging_${{ parameters.arch }}_${{ parameters.ep }}
   pool: 'onnxruntime-Win-CPU-2022'
   variables:
   - name: build_config
@@ -25,7 +25,6 @@ jobs:
     value: ${{ parameters.ep }}
   - name: artifactName
     value: onnxruntime-genai-nuget-win-${{ parameters.arch }}-${{ parameters.arch }}
-
   timeoutInMinutes: 180
   workspace:
     clean: all
