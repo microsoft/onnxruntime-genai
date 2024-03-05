@@ -75,10 +75,10 @@ steps:
 
 - template: win-esrp-dll-step.yml
   parameters:
-    FolderPath: '$(Build.SourcesDirectory)\${{ parameters.build_dir }}\${{ parameters.build_config }}'
+    FolderPath: '$(Build.SourcesDirectory)\${{ parameters.build_dir }}'
     DisplayName: 'ESRP - Sign Native dlls'
     DoEsrp: true
-    Pattern: '*.dll'
+    Pattern: '**\*genai.dll'
 
 - task: BinSkim@4
   displayName: 'Run BinSkim'
