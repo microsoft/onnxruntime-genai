@@ -40,7 +40,9 @@ target_link_libraries(unit_tests PRIVATE
   GTest::gtest_main
 )
 
-target_link_libraries(unit_tests PRIVATE stdc++fs)
+if(NOT WIN32)
+  target_link_libraries(unit_tests PRIVATE stdc++fs)
+endif()
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   file(GLOB cuda_test_srcs CONFIGURE_DEPENDS
