@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 
 #include <cstdarg>
-#include <filesystem>
 #include <algorithm>
 
 #include "tfmtok.h"
