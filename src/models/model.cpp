@@ -13,7 +13,6 @@ State::State(const GeneratorParams& params) : params_{params} {
 }
 
 void State::Run(OrtSession& session) {
-
 #if 0
   // To show input values, enable this block (output values will be shapes only at this point)
   printf("**Inputs:\r\n");

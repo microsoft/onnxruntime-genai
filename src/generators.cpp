@@ -128,7 +128,7 @@ void Generator::GenerateNextToken_TopK_TopP(int top_k, float top_p, float temper
     throw std::runtime_error("TopK and TopP cannot be used with a beam search");
 
   // Sanity checks
-  if (top_p<0.0f || top_p>1.0f)
+  if (top_p < 0.0f || top_p > 1.0f)
     throw std::runtime_error("top_p must be between 0.0 and 1.0");
   if (top_k < 1)
     throw std::runtime_error("top_k must be 1 or greater");
