@@ -52,14 +52,14 @@ resources:
 
 trigger: none
 stages:
-  ${{ if eq(parameter.enable_win_cpu, true) }}:
+- ${{ if eq(parameter.enable_win_cpu, true) }}:
   - template: stages/capi-win-packaging-job.yml
     parameters:
       arch: 'x64'
       ort_version: ${{ parameters.ort_version }}
       build_gpu: false
 
-  ${{ if eq(parameter.enable_win_gpu, true) }}:
+- ${{ if eq(parameter.enable_win_gpu, true) }}:
   - template: stages/capi-win-packaging-job.yml
     parameters:
       arch: 'x64'
@@ -67,7 +67,7 @@ stages:
       build_gpu: true
       cuda_version: ${{ parameters.cuda_version }}
 
-  ${{ if eq(parameter.enable_win_arm, true) }}:
+- ${{ if eq(parameter.enable_win_arm, true) }}:
   - template: stages/capi-win-packaging-job.yml
     parameters:
       arch: 'arm64'
