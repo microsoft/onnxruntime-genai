@@ -88,4 +88,4 @@ jobs:
       run: |
         $env:PATH = "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin;" + $env:PATH 
         echo "Current PATH variable is: $env:PATH" 
-        $env:GITHUB_WORKSPACE\\$env:cmake_build_dir\test\Release\unit_tests.exe
+        .\build\release\cuda_default\test\Release\unit_tests.exe
