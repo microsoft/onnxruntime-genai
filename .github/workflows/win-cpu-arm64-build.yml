@@ -47,8 +47,8 @@ jobs:
 
       - name: Build with CMake
         run: |
-          cmake -G "Visual Studio 17 2022" -A arm64 -S . -B $env:cmake_build_dir -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=OFF
-          cmake --build $env:cmake_build_dir --config Release --parallel
+          cmake --preset windows_arm64_cpu_release
+          cmake --build --preset windows_arm64_cpu_release
 
       - name: Install the Python Wheel and Test Dependencies
         run: |
@@ -74,9 +74,3 @@ jobs:
       - name: Run tests
         run: |
           .\build\test\Release\unit_tests.exe
-
-      - name: Upload Build Artifacts
-        uses: actions/upload-artifact@v3
-        with:
-          name: onnxruntime-genai-win-cpu-arm64
-          path: Release/*.lib

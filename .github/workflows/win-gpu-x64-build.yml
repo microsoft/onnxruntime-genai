@@ -11,12 +11,12 @@ env:
   ort_dir: "onnxruntime-win-x64-gpu-1.17.0"
   ort_zip: "onnxruntime-win-x64-gpu-1.17.0.zip"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-win-x64-gpu-1.17.0.zip"
-#  ort_dir: "onnxruntime-win-x64-cuda-1.17.0"
-#  ort_zip: "onnxruntime-win-x64-cuda12-1.17.0.zip"
-#  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-win-x64-cuda12-1.17.0.zip"
+  #  ort_dir: "onnxruntime-win-x64-cuda-1.17.0"
+  #  ort_zip: "onnxruntime-win-x64-cuda12-1.17.0.zip"
+  #  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-win-x64-cuda12-1.17.0.zip"
   cuda_dir: "${{ github.workspace }}\\cuda_sdk"
-#  cuda_version: "12.2"
-#  CUDA_PATH: "${{ github.workspace }}\\cuda_sdk\\v12.2"
+  #  cuda_version: "12.2"
+  #  CUDA_PATH: "${{ github.workspace }}\\cuda_sdk\\v12.2"
   cuda_version: "11.8"
   CUDA_PATH: ${{ github.workspace }}\\cuda_sdk\\v11.8
   cmake_build_dir: build
@@ -26,76 +26,70 @@ jobs:
   windows-gpu-x64-build:
     runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Win2022-GPU-A10" ]
     steps:
-      - name: Checkout OnnxRuntime GenAI repo
-        uses: actions/checkout@v4
-        with:
-          submodules: true
+    - name: Checkout OnnxRuntime GenAI repo
+      uses: actions/checkout@v4
+      with:
+        submodules: true
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11.x'
-          architecture: 'x64'
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11.x'
+        architecture: 'x64'
 
-      - name: Download cuda
-        run: |
-          azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v${{ env.cuda_version }}" ${{ env.cuda_dir}}
+    - name: Download cuda
+      run: |
+        azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v${{ env.cuda_version }}" ${{ env.cuda_dir}}
 
-      - name: Download OnnxRuntime
-        run: |
-          Invoke-WebRequest -Uri $env:ort_url -OutFile $env:ort_zip
+    - name: Download OnnxRuntime
+      run: |
+        Invoke-WebRequest -Uri $env:ort_url -OutFile $env:ort_zip
 
-      - name: Unzip OnnxRuntime
-        run: |
-          Expand-Archive $env:ort_zip -DestinationPath .
-          Remove-Item -Path $env:ort_zip
-      - name: Rename OnnxRuntime to ort
-        run: |
-          Rename-Item -Path $env:ort_dir -NewName ort
+    - name: Unzip OnnxRuntime
+      run: |
+        Expand-Archive $env:ort_zip -DestinationPath .
+        Remove-Item -Path $env:ort_zip
+    - name: Rename OnnxRuntime to ort
+      run: |
+        Rename-Item -Path $env:ort_dir -NewName ort
 
-      - name: Build with CMake
-        run: |
-          cmake -G "Visual Studio 17 2022" -S . -B build -A x64 -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=TRUE -DTEST_PHI2=False
-          cmake --build build --config Release --parallel
+    - name: Build with CMake
+      run: |
+        cmake --preset windows_x64_cuda_release -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} -DTEST_PHI2=False
+        cmake --build --preset windows_x64_cuda_release
 
-      - name: Install the Python Wheel and Test Dependencies
-        run: |
-          python -m pip install (Get-ChildItem ("build\wheel\*.whl"))
-          python -m pip install -r test\python\requirements-nightly-cpu.txt
+    - name: Install the Python Wheel and Test Dependencies
+      run: |
+        python -m pip install (Get-ChildItem ("build\wheel\*.whl"))
+        python -m pip install -r test\python\requirements-nightly-cpu.txt
 
-      - name: Get HuggingFace Token
-        run: |
-          az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
-          $HF_TOKEN = (az keyvault secret show --vault-name anubissvcsecret --name ANUBIS-HUGGINGFACE-TOKEN --query value)
-          Write-Output "::add-mask::$HF_TOKEN"
-          Add-Content -Path $env:GITHUB_ENV -Value "HF_TOKEN=$HF_TOKEN"
+    - name: Get HuggingFace Token
+      run: |
+        az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
+        $HF_TOKEN = (az keyvault secret show --vault-name anubissvcsecret --name ANUBIS-HUGGINGFACE-TOKEN --query value)
+        Write-Output "::add-mask::$HF_TOKEN"
+        Add-Content -Path $env:GITHUB_ENV -Value "HF_TOKEN=$HF_TOKEN"
 
-      - name: Run the Python Tests
-        run: |
-          python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\test_models"
+    - name: Run the Python Tests
+      run: |
+        python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\test_models"
 
-      - name: Add CUDA to PATH
-        run: |
-          echo "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+    - name: Add CUDA to PATH
+      run: |
+        echo "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      - name: Build the C# API and Run the C# Tests
-        run: |
-          cd test\csharp
-          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:cmake_build_dir\Release"
+    - name: Build the C# API and Run the C# Tests
+      run: |
+        cd test\csharp
+        dotnet test /p:Configuration=release /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:cmake_build_dir\release"
 
-      - name: Verify Build Artifacts
-        if: always()
-        continue-on-error: true
-        run: |
-          Get-ChildItem -Path $env:GITHUB_WORKSPACE\build\test\Release -Recurse
+    - name: Verify Build Artifacts
+      if: always()
+      continue-on-error: true
+      run: |
+        Get-ChildItem -Path $env:GITHUB_WORKSPACE\build\test\release -Recurse
 
-      - name: Prepend CUDA to PATH and Run tests
-        run: |
-          $env:PATH = "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin;" + $env:PATH 
-          echo "Current PATH variable is: $env:PATH" 
-          .\build\test\Release\unit_tests.exe
-
-      - name: Upload Build Artifacts
-        uses: actions/upload-artifact@v3
-        with:
-          name: onnxruntime-genai-win-cpu-x64
-          path: build/Release/*.lib
+    - name: Prepend CUDA to PATH and Run tests
+      run: |
+        $env:PATH = "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin;" + $env:PATH 
+        echo "Current PATH variable is: $env:PATH" 
+        .\build\test\release\unit_tests.exe

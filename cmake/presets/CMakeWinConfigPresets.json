@@ -200,6 +200,18 @@
       "cacheVariables": {
         "USE_CUDA": "ON"
       }
+    },
+    {
+      "name": "windows_arm64_cpu_relwithdebinfo",
+      "inherits": "windows_x64_cpu_relwithdebinfo",
+      "displayName": "windows arm64 cpu relwithdebinfo",
+      "architecture": "arm64"
+    },
+    {
+      "name": "windows_arm64_cpu_release",
+      "inherits": "windows_x64_cpu_release",
+      "displayName": "windows arm64 cpu release",
+      "architecture": "arm64"
     }
   ]
 }
