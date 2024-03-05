@@ -4,7 +4,7 @@ parameters:
   default: 'x64'
 - name: ort_version
   type: string
-  default: '1.17.0'
+  default: '1.17.1'
 jobs:
 - job: Linux_CPU_Wheels
   strategy:
