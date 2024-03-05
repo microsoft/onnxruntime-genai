@@ -19,7 +19,7 @@ env:
   #  CUDA_PATH: "${{ github.workspace }}\\cuda_sdk\\v12.2"
   cuda_version: "11.8"
   CUDA_PATH: ${{ github.workspace }}\\cuda_sdk\\v11.8
-  cmake_build_dir: build
+  cmake_build_dir: 'build/release/gpu_default'
 
 
 jobs:
@@ -80,16 +80,17 @@ jobs:
     - name: Build the C# API and Run the C# Tests
       run: |
         cd test\csharp
-        dotnet test /p:Configuration=release /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:cmake_build_dir\release"
+        dotnet test /p:Configuration=release /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:cmake_build_dir"
 
     - name: Verify Build Artifacts
       if: always()
       continue-on-error: true
       run: |
-        Get-ChildItem -Path $env:GITHUB_WORKSPACE\build\test\release -Recurse
+        Get-ChildItem -Path '$env:GITHUB_WORKSPACE\$env:cmake_build_dir' -Recurse
 
     - name: Prepend CUDA to PATH and Run tests
       run: |
         $env:PATH = "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin;" + $env:PATH 
         echo "Current PATH variable is: $env:PATH" 
-        .\build\test\release\unit_tests.exe
+        .\unit_tests.exe
+      working-directory: '$env:GITHUB_WORKSPACE\$env:cmake_build_dir\test'
