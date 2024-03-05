@@ -3,8 +3,8 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - main
-      - rel-*
+    - main
+    - rel-*
   pull_request:
 
 concurrency:
@@ -14,7 +14,7 @@ env:
   ort_dir: "onnxruntime-win-x64-1.17.0"
   ort_zip: "$(ort_dir).zip"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/$(ort_zip)"
-  cmake_build_dir: build
+  cmake_build_dir: 'build/release/cpu_default'
 
 jobs:
   windows-cpu-x64-build:
@@ -23,77 +23,72 @@ jobs:
       security-events: write
       actions: read
     steps:
-      - name: Checkout OnnxRuntime GenAI repo
-        uses: actions/checkout@v4
-        with:
-          submodules: true
+    - name: Checkout OnnxRuntime GenAI repo
+      uses: actions/checkout@v4
+      with:
+        submodules: true
 
-      - name: Setup Visual Studio 2022
-        uses: microsoft/setup-msbuild@v1.1
-        with:
-          vs-version: '17.5'
+    - name: Setup Visual Studio 2022
+      uses: microsoft/setup-msbuild@v1.1
+      with:
+        vs-version: '17.5'
 
-      - name: Download OnnxRuntime
-        run: |
-          $env:ort_url = "https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-win-x64-1.17.0.zip"
-          Invoke-WebRequest -Uri $env:ort_url -OutFile $env:ort_zip
+    - name: Download OnnxRuntime
+      run: |
+        $env:ort_url = "https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-win-x64-1.17.0.zip"
+        Invoke-WebRequest -Uri $env:ort_url -OutFile $env:ort_zip
 
-      - name: Unzip OnnxRuntime
-        run: |
-          Expand-Archive $env:ort_zip -DestinationPath .
-          Remove-Item -Path $env:ort_zip
+    - name: Unzip OnnxRuntime
+      run: |
+        Expand-Archive $env:ort_zip -DestinationPath .
+        Remove-Item -Path $env:ort_zip
 
-      - name: Rename OnnxRuntime to ort
-        run: |
-          Rename-Item -Path $env:ort_dir -NewName ort
+    - name: Rename OnnxRuntime to ort
+      run: |
+        Rename-Item -Path $env:ort_dir -NewName ort
 
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
-        with:
-          languages: 'cpp'
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v3
+      with:
+        languages: 'cpp'
 
-      - name: Build with CMake
-        run: |
-          cmake -G "Visual Studio 17 2022" -A x64 -S . -B $env:cmake_build_dir -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=OFF
-          cmake --build $env:cmake_build_dir --config Release --parallel
+    - name: Build with CMake
+      run: |
+        cmake --preset windows_x64_cpu_release
+        cmake --build --preset windows_x64_cpu_release --parallel
 
-      - name: Install the python wheel and test dependencies
-        run: |
-          python -m pip install (Get-ChildItem ("$env:cmake_build_dir\wheel\*.whl"))
-          python -m pip install -r test\python\requirements-nightly-cpu.txt
+    - name: Install the python wheel and test dependencies
+      run: |
+        python -m pip install (Get-ChildItem ("$env:cmake_build_dir\wheel\*.whl"))
+        python -m pip install -r test\python\requirements-nightly-cpu.txt
 
-      - name: Get HuggingFace Token
-        run: |
-          az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
-          $HF_TOKEN = (az keyvault secret show --vault-name anubissvcsecret --name ANUBIS-HUGGINGFACE-TOKEN --query value)
-          Write-Output "::add-mask::$HF_TOKEN"
-          Add-Content -Path $env:GITHUB_ENV -Value "HF_TOKEN=$HF_TOKEN"
+    - name: Get HuggingFace Token
+      run: |
+        az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
+        $HF_TOKEN = (az keyvault secret show --vault-name anubissvcsecret --name ANUBIS-HUGGINGFACE-TOKEN --query value)
+        Write-Output "::add-mask::$HF_TOKEN"
+        Add-Content -Path $env:GITHUB_ENV -Value "HF_TOKEN=$HF_TOKEN"
 
-      - name: Run the Python Tests
-        run: |
-          python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\test_models"
+    - name: Run the Python Tests
+      run: |
+        python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\test_models"
 
-      - name: Build the C# API and Run the C# Tests
-        run: |
-          cd test\csharp
-          dotnet test /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:cmake_build_dir\Release"
+    - name: Build the C# API and Run the C# Tests
+      run: |
+        cd test\csharp
+        dotnet test /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:cmake_build_dir\Release"
 
-      - name: Verify Build Artifacts
-        if: always()
-        continue-on-error: true
-        run: |
-          Get-ChildItem -Path $env:GITHUB_WORKSPACE\$env:cmake_build_dir\Release -Recurse
-          Get-ChildItem -Path $env:GITHUB_WORKSPACE\$env:cmake_build_dir\test\Release -Recurse
+    - name: Verify Build Artifacts
+      if: always()
+      continue-on-error: true
+      run: |
+        Get-ChildItem -Path $env:GITHUB_WORKSPACE\$env:cmake_build_dir -Recurse
+        Get-ChildItem -Path $env:GITHUB_WORKSPACE\$env:cmake_build_dir\test -Recurse
 
-      - name: Run tests
-        run: |
-          .\build\test\Release\unit_tests.exe
+    - name: Run tests
+      run: |
+        .\build\release\cpu_default\test\Release\unit_tests.exe
 
-      - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
 
-      - name: Upload Build Artifacts
-        uses: actions/upload-artifact@v3
-        with:
-          name: onnxruntime-genai-win-cpu-x64
-          path: Release/*.lib
