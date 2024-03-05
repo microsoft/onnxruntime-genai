@@ -5,32 +5,27 @@ parameters:
   arch: 'x64'
 jobs:
 - job: Windows_Nuget
-  strategy:
-    matrix:
-      ${{ if and(eq(parameters.arch, 'x64'), eq(parameters.ep, 'cpu')) }}:
-        x64_cpu:
-          arch: 'x64'
-          ep: cpu
-          build_dir: win-x64
-          artifactName: onnxruntime-genai-nuget-win-cpu-x64
-          id: Microsoft.ML.OnnxRuntimeGenAI
-      ${{ if and(eq(parameters.arch, 'arm64'), eq(parameters.ep, 'cpu')) }}:
-        arm64_cpu:
-          arch: 'arm64'
-          ep: cpu
-          build_dir: win-arm64
-          artifactName: onnxruntime-genai-nuget-win-cpu-arm64
-          id: Microsoft.ML.OnnxRuntimeGenAI
-      ${{ if and(eq(parameters.arch, 'x64'), eq(parameters.ep, 'gpu')) }}:
-        x64_gpu:
-          arch: 'x64'
-          ep: gpu
-          build_dir: win-x64
-          artifactName: onnxruntime-genai-nuget-win-gpu-x64
-          id: Microsoft.ML.OnnxRuntimeGenAI.Gpu
   pool: 'onnxruntime-Win-CPU-2022'
   variables:
-    build_config: 'RelWithDebInfo'
+  - name: build_config
+    value: 'RelWithDebInfo'
+  - name: build_dir
+    ${{ if eq(parameters.arch, 'x64') }}:
+      value: win-x64
+    ${{ if eq(parameters.arch, 'arm64') }}:
+      value: win-arm64
+  - name: id
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      value: Microsoft.ML.OnnxRuntimeGenAI
+    ${{ if eq(parameters.ep, 'gpu') }}:
+      value: Microsoft.ML.OnnxRuntimeGenAI.Gpu
+  - name: arch
+    value: ${{ parameters.arch }}
+  - name: ep
+    value: ${{ parameters.ep }}
+  - name: artifactName
+    value: onnxruntime-genai-nuget-win-${{ parameters.arch }}-${{ parameters.arch }}
+
   timeoutInMinutes: 180
   workspace:
     clean: all

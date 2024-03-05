@@ -4,29 +4,22 @@ parameters:
   ep: 'cpu'
   arch: 'x64'
 jobs:
-- job: Windows_Nuget
-  strategy:
-    matrix:
-      ${{ if and(eq(parameters.arch, 'x64'), eq(parameters.ep, 'cpu')) }}:
-        x64_cpu:
-          arch: 'x64'
-          ep: cpu
-          build_dir: win-x64
-          artifactName: onnxruntime-genai-capi-win-cpu-x64
-          id: Microsoft.ML.OnnxRuntimeGenAI
-      ${{ if and(eq(parameters.arch, 'arm64'), eq(parameters.ep, 'cpu')) }}:
-        arm64_cpu:
-          arch: 'arm64'
-          ep: cpu
-          build_dir: win-arm64
-          artifactName: onnxruntime-genai-capi-win-cpu-arm64
-          id: Microsoft.ML.OnnxRuntimeGenAI
-      ${{ if and(eq(parameters.arch, 'x64'), eq(parameters.ep, 'gpu')) }}:
-        x64_gpu:
-          arch: 'x64'
-          ep: gpu
-          build_dir: win-x64
-          artifactName: onnxruntime-genai-capi-win-gpu-x64
+- job: Windows_CAPI
+  pool: 'onnxruntime-Win-CPU-2022'
+  variables:
+  - name: build_config
+    value: 'RelWithDebInfo'
+  - name: build_dir
+    ${{ if eq(parameters.arch, 'x64') }}:
+      value: win-x64
+    ${{ if eq(parameters.arch, 'arm64') }}:
+      value: win-arm64
+  - name: arch
+    value: ${{ parameters.arch }}
+  - name: ep
+    value: ${{ parameters.ep }}
+  - name: artifactName
+    value: onnxruntime-genai-capi-win-${{ parameters.arch }}-${{ parameters.arch }}
 - job: Windows_Wheels
   pool: 'onnxruntime-Win-CPU-2022'
   variables:
@@ -76,10 +69,7 @@ jobs:
   - task: PublishBuildArtifacts@1
     displayName: 'Publish Artifact: ONNXRuntime Genai python wheel'
     inputs:
-      ${{ if eq(parameters.ep, 'cpu') }}:
-        ArtifactName: onnxruntime-genai-capi-win-cpu-${{ parameters.arch }}
-      ${{ else }}:
-        ArtifactName: onnxruntime-genai-capi-win-gpu
+      ArtifactName: $(artifactName)
 
   - template: steps/ompliant-and-cleanup.yml
 
