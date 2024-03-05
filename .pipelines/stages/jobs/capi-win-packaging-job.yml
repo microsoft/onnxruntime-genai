@@ -1,7 +1,7 @@
 parameters:
   arch: 'x64'
   ort_version: '1.17.0'
-  build_gpu: true
+  build_gpu: false
   ort_name: 'onnxruntime-win-x64-1.17.0'
   cuda_version: '11.8'
 jobs:
