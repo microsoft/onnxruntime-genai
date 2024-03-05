@@ -59,7 +59,7 @@ jobs:
 
     - name: Install the Python Wheel and Test Dependencies
       run: |
-        python -m pip install (Get-ChildItem ("$env:cmake_build_dir\wheel\Release\*.whl"))
+        python -m pip install (Get-ChildItem ("$env:cmake_build_dir\wheel\*.whl"))
         python -m pip install -r test\python\requirements-nightly-cpu.txt
 
     - name: Get HuggingFace Token
@@ -86,7 +86,7 @@ jobs:
       if: always()
       continue-on-error: true
       run: |
-        Get-ChildItem -Path '$env:GITHUB_WORKSPACE\$env:cmake_build_dir' -Recurse
+        Get-ChildItem -Path "$env:GITHUB_WORKSPACE\$env:cmake_build_dir" -Recurse
 
     - name: Prepend CUDA to PATH and Run tests
       run: |
