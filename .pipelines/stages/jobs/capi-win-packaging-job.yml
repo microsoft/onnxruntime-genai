@@ -59,6 +59,8 @@ jobs:
       TargetFolder: '$(Build.ArtifactStagingDirectory)\lib'
 
   - powershell: |
+      echo $(build_dir)
+      echo $(build_config)
       Get-ChildItem -Path $(Build.SourcesDirectory)\$(build_dir)\$(build_config) -Recurse
 
   - task: CopyFiles@2
