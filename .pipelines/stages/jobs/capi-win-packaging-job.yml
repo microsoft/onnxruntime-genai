@@ -19,7 +19,7 @@ jobs:
   - name: ep
     value: ${{ parameters.ep }}
   - name: artifactName
-    value: onnxruntime-genai-capi-win-${{ parameters.arch }}-${{ parameters.arch }}
+    value: onnxruntime-genai-capi-win-${{ parameters.ep }}-${{ parameters.arch }}
   timeoutInMinutes: 180
   workspace:
     clean: all
@@ -57,6 +57,9 @@ jobs:
         '*genai.lib'
         '*genai.pdb'
       TargetFolder: '$(Build.ArtifactStagingDirectory)\lib'
+
+  - powershell: |
+      Get-ChildItem -Path '$(Build.SourcesDirectory)\$(build_dir)\$(build_config)' -Recurse
 
   - task: CopyFiles@2
     displayName: 'Copy GenAi C API header to ArtifactStagingDirectory'
