@@ -55,7 +55,7 @@ jobs:
     - name: Build with CMake
       run: |
         cmake --preset windows_x64_cuda_release -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} -DTEST_PHI2=False
-        cmake --build --preset windows_x64_cuda_release
+        cmake --build --preset windows_x64_cuda_release --parallel
 
     - name: Install the Python Wheel and Test Dependencies
       run: |

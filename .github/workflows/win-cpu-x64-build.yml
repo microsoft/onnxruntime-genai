@@ -55,7 +55,7 @@ jobs:
     - name: Build with CMake
       run: |
         cmake --preset windows_x64_cpu_release
-        cmake --build --preset windows_x64_cpu_release
+        cmake --build --preset windows_x64_cpu_release --parallel
 
     - name: Install the python wheel and test dependencies
       run: |

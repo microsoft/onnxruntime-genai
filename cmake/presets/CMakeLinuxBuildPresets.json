@@ -7,122 +7,98 @@
   "buildPresets": [
     {
       "name": "linux_gcc_cpu_release_asan",
-      "jobs": "$env{nproc}",
       "configurePreset": "linux_gcc_cpu_release_asan"
     },
     {
       "name": "linux_gcc_cpu_debug_asan",
-      "jobs": "$env{nproc}",
       "configurePreset": "linux_gcc_cpu_debug_asan"
     },
     {
       "name": "linux_gcc_cpu_relwithdebinfo_asan",
-      "jobs": "$env{nproc}",
       "configurePreset": "linux_gcc_cpu_relwithdebinfo_asan"
     },
     {
       "name": "linux_gcc_cpu_minsizerel_asan",
-      "jobs": "$env{nproc}",
       "configurePreset": "linux_gcc_cpu_minsizerel_asan"
     },
     {
       "name": "linux_gcc_cpu_release",
-      "jobs": "$env{nproc}",
       "configurePreset": "linux_gcc_cpu_release"
     },
     {
       "name": "linux_gcc_cpu_debug",
-      "jobs": "$env{nproc}",
       "configurePreset": "linux_gcc_cpu_debug"
     },
     {
       "name": "linux_gcc_cpu_relwithdebinfo",
-      "jobs": "$env{nproc}",
       "configurePreset": "linux_gcc_cpu_relwithdebinfo"
     },
     {
       "name": "linux_gcc_cpu_minsizerel",
-      "jobs": "$env{nproc}",
       "configurePreset": "linux_gcc_cpu_minsizerel"
     },
     {
       "name": "linux_clang_cpu_release_asan",
-      "jobs": "$env{nproc}",
       "configurePreset": "linux_clang_cpu_release_asan"
     },
     {
       "name": "linux_clang_cpu_debug_asan",
-      "jobs": "$env{nproc}",
       "configurePreset": "linux_clang_cpu_debug_asan"
     },
     {
       "name": "linux_clang_cpu_relwithdebinfo_asan",
-      "jobs": "$env{nproc}",
       "configurePreset": "linux_clang_cpu_relwithdebinfo_asan"
     },
     {
       "name": "linux_clang_cpu_minsizerel_asan",
-      "jobs": "$env{nproc}",
       "configurePreset": "linux_clang_cpu_minsizerel_asan"
     },
     {
       "name": "linux_clang_cpu_release",
-      "jobs": "$env{nproc}",
       "configurePreset": "linux_clang_cpu_release"
     },
     {
       "name": "linux_clang_cpu_debug",
-      "jobs": "$env{nproc}",
       "configurePreset": "linux_clang_cpu_debug"
     },
     {
       "name": "linux_clang_cpu_relwithdebinfo",
-      "jobs": "$env{nproc}",
       "configurePreset": "linux_clang_cpu_relwithdebinfo"
     },
     {
       "name": "linux_clang_cpu_minsizerel",
-      "jobs": "$env{nproc}",
       "configurePreset": "linux_clang_cpu_minsizerel"
     },
     {
       "name": "linux_gcc_cuda_release_asan",
-      "jobs": "$env{nproc}",
       "configurePreset": "linux_gcc_cuda_release_asan"
     },
     {
       "name": "linux_gcc_cuda_debug_asan",
-      "jobs": "$env{nproc}",
       "configurePreset": "linux_gcc_cuda_debug_asan"
     },
     {
       "name": "linux_gcc_cuda_relwithdebinfo_asan",
-      "jobs": "$env{nproc}",
       "configurePreset": "linux_gcc_cuda_relwithdebinfo_asan"
     },
     {
       "name": "linux_gcc_cuda_minsizerel_asan",
-      "jobs": "$env{nproc}",
       "configurePreset": "linux_gcc_cuda_minsizerel_asan"
     },
     {
       "name": "linux_gcc_cuda_release",
-      "jobs": "$env{nproc}",
       "configurePreset": "linux_gcc_cuda_release"
     },
     {
       "name": "linux_gcc_cuda_debug",
-      "jobs": "$env{nproc}",
       "configurePreset": "linux_gcc_cuda_debug"
     },
     {
       "name": "linux_gcc_cuda_relwithdebinfo",
-      "jobs": "$env{nproc}",
       "configurePreset": "linux_gcc_cuda_relwithdebinfo"
     },
     {
       "name": "linux_gcc_cuda_minsizerel",
-      "jobs": "$env{nproc}",
       "configurePreset": "linux_gcc_cuda_minsizerel"
     }
   ]
