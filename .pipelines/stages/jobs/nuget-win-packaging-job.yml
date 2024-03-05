@@ -1,27 +1,27 @@
 parameters:
   ort_version: '1.17.0'
   cuda_version: '11.8'
-  build_x64_cpu: true
-  build_gpu: true
-  build_arm64_cpu: false
+  ep: 'cpu'
+  arch: 'x64'
 jobs:
-- job: Windows_Wheels
+- job: Windows_Nuget
   strategy:
     matrix:
-      x64_cpu:
-        arch: 'x64'
-        ep: cpu
-        build_dir: win-x64
-        artifactName: onnxruntime-genai-nuget-win-cpu-x64
-        id: Microsoft.ML.OnnxRuntimeGenAI
-      ${{ if eq(parameters.build_arm64, true) }}:
+      ${{ if and(eq(parameters.arch, 'x64'), eq(parameters.ep, 'cpu')) }}:
+        x64_cpu:
+          arch: 'x64'
+          ep: cpu
+          build_dir: win-x64
+          artifactName: onnxruntime-genai-nuget-win-cpu-x64
+          id: Microsoft.ML.OnnxRuntimeGenAI
+      ${{ if and(eq(parameters.arch, 'arm64'), eq(parameters.ep, 'cpu')) }}:
         arm64_cpu:
           arch: 'arm64'
           ep: cpu
           build_dir: win-arm64
           artifactName: onnxruntime-genai-nuget-win-cpu-arm64
           id: Microsoft.ML.OnnxRuntimeGenAI
-      ${{ if eq(parameters.build_gpu, true) }}:
+      ${{ if and(eq(parameters.arch, 'x64'), eq(parameters.ep, 'gpu')) }}:
         x64_gpu:
           arch: 'x64'
           ep: gpu
@@ -40,6 +40,7 @@ jobs:
       arch: $(arch)
       ort_version: ${{ parameters.ort_version }}
       ep: $(ep)
+      build_dir: $(build_dir)
       build_config: $(build_config)
       cuda_version: ${{ parameters.cuda_version }}
 

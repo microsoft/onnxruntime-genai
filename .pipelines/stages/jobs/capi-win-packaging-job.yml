@@ -1,24 +1,46 @@
 parameters:
-  arch: 'x64'
   ort_version: '1.17.0'
-  ep: 'cpu'
   cuda_version: '11.8'
+  ep: 'cpu'
+  arch: 'x64'
 jobs:
+- job: Windows_Nuget
+  strategy:
+    matrix:
+      ${{ if and(eq(parameters.arch, 'x64'), eq(parameters.ep, 'cpu')) }}:
+        x64_cpu:
+          arch: 'x64'
+          ep: cpu
+          build_dir: win-x64
+          artifactName: onnxruntime-genai-capi-win-cpu-x64
+          id: Microsoft.ML.OnnxRuntimeGenAI
+      ${{ if and(eq(parameters.arch, 'arm64'), eq(parameters.ep, 'cpu')) }}:
+        arm64_cpu:
+          arch: 'arm64'
+          ep: cpu
+          build_dir: win-arm64
+          artifactName: onnxruntime-genai-capi-win-cpu-arm64
+          id: Microsoft.ML.OnnxRuntimeGenAI
+      ${{ if and(eq(parameters.arch, 'x64'), eq(parameters.ep, 'gpu')) }}:
+        x64_gpu:
+          arch: 'x64'
+          ep: gpu
+          build_dir: win-x64
+          artifactName: onnxruntime-genai-capi-win-gpu-x64
 - job: Windows_Wheels
   pool: 'onnxruntime-Win-CPU-2022'
   variables:
     build_config: 'RelWithDebInfo'
-    build_dir: win-x64
   timeoutInMinutes: 180
   steps:
   - template: steps/capi-win-build-step.yml
     parameters:
-      arch: ${{ parameters.arch }}
+      arch: $(arch)
       ort_version: ${{ parameters.ort_version }}
-      ep: ${{ parameters.ep }}
+      ep: $(ep)
       build_config: $(build_config)
       build_dir: $(build_dir)
-      cuda_version: ${{ parameters.cuda_version }}≈
+      cuda_version: ${{ parameters.cuda_version }}
 
   - task: CopyFiles@2
     displayName: 'Copy C API library files to ArtifactStagingDirectory'

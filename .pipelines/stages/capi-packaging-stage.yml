@@ -17,7 +17,7 @@ parameters:
   type: string
 
 stages:
-- stage: nuget_packaging
+- stage: capi_packaging
   variables:
   - name: arch
     ${{ if or(eq(parameters.enable_win_cpu, true), eq(parameters.enable_win_gpu, true)) }}:
@@ -30,23 +30,9 @@ stages:
     ${{ if eq(parameters.enable_win_gpu, true) }}:
       value: 'gpu'
   jobs:
-  - template: jobs/nuget-win-packaging-job.yml
+  - template: jobs/capi-win-packaging-job.yml
     parameters:
       cuda_version: ${{ parameters.cuda_version }}
       ort_version: ${{ parameters.ort_version }}
       arch: $(arch)
       ep: $(ep)
-
-#  - ${{ if eq(parameters.enable_linux_cpu, true) }}:
-#    - template: jobs/nuget-linux-cpu-packaging-job.yml
-#      parameters:
-#        ort_version: ${{ parameters.ort_version }}
-#  - ${{ if eq(parameters.enable_linux_gpu, true) }}:
-#    - template: jobs/nuget-linux-gpu-packaging-job.yml
-#      parameters:
-#        ort_version: ${{ parameters.ort_version }}
-#  - ${{ if eq(parameters.enable_linux_arm, true) }}:
-#    - template: jobs/nuget-linux-cpu-packaging-job.yml
-#      parameters:
-#        arch: 'arm64'
-#        ort_version: ${{ parameters.ort_version }}
