@@ -1,6 +1,6 @@
 parameters:
   arch: 'x64'
-  ort_version: '1.17.0'
+  ort_version: '1.17.1'
 
 jobs:
 - job: Windows_CPU_Wheels
@@ -24,7 +24,7 @@ jobs:
         buildArch: ${{ parameters.arch }}
   variables:
     BuildConfig: 'RelWithDebInfo'
-    ort_version: '1.17.0'
+    ort_version: '1.17.1'
   timeoutInMinutes: 180
   workspace:
     clean: all

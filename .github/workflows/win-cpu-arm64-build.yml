@@ -11,9 +11,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 env:
-  ort_dir: "onnxruntime-win-arm64-1.17.0"
+  ort_dir: "onnxruntime-win-arm64-1.17.1"
   ort_zip: "$(ort_dir).zip"
-  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/$(ort_zip)"
+  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/$(ort_zip)"
   cmake_build_dir: 'build/release/cpu_default'
 
 jobs:
@@ -33,7 +33,7 @@ jobs:
 
     - name: Download OnnxRuntime
       run: |
-        $env:ort_url = "https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-win-arm64-1.17.0.zip"
+        $env:ort_url = "https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/onnxruntime-win-arm64-1.17.1.zip"
         Invoke-WebRequest -Uri $env:ort_url -OutFile $env:ort_zip
 
     - name: Unzip OnnxRuntime
