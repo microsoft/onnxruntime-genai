@@ -11,9 +11,9 @@ jobs:
     value: 'RelWithDebInfo'
   - name: build_dir
     ${{ if eq(parameters.arch, 'x64') }}:
-      value: win-x64
+      value: 'win-x64'
     ${{ if eq(parameters.arch, 'arm64') }}:
-      value: win-arm64
+      value: 'win-arm64'
   - name: arch
     value: ${{ parameters.arch }}
   - name: ep
@@ -53,9 +53,9 @@ jobs:
     inputs:
       SourceFolder: '$(Build.SourcesDirectory)\$(build_dir)\$(build_config)'
       Contents: |
-        '*.dll'
-        '*.lib'
-        '*.pdb'
+        '*genai.dll'
+        '*genai.lib'
+        '*genai.pdb'
       TargetFolder: '$(Build.ArtifactStagingDirectory)\lib'
 
   - task: CopyFiles@2
