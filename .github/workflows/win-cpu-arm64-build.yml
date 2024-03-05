@@ -73,5 +73,5 @@ jobs:
 
     - name: Run tests
       run: |
-        .\build\test\Release\unit_tests.exe
+        .\unit_tests.exe
       working-directory: '$env:GITHUB_WORKSPACE\$env:cmake_build_dir\test\Release'
