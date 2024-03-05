@@ -57,7 +57,7 @@ steps:
 
 - bash: |
     set -e -x
-    cmake -G "Visual Studio 17 2022" -A x64 -T cuda='cuda_sdk\v${{ parameters.cuda_version }}' -DENABLE_TESTS=OFF -DCMAKE_BUILD_TYPE=${{ parameters.build_config }} -DUSE_CUDA=TRUE -S . -B ${{ parameters.build_dir }}
+    cmake -G "Visual Studio 17 2022" -A x64 -T cuda='$(Build.SourcesDirectory)\cuda_sdk\v${{ parameters.cuda_version }}' -DENABLE_TESTS=OFF -DCMAKE_BUILD_TYPE=${{ parameters.build_config }} -DUSE_CUDA=TRUE -S . -B ${{ parameters.build_dir }}
   displayName: 'Configure CMake C API with CUDA'
   condition: ${{ eq(parameters.build_gpu, true) }}
   workingDirectory: '$(Build.SourcesDirectory)'
