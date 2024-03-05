@@ -58,13 +58,6 @@ BeamSearch_Cuda::~BeamSearch_Cuda() = default;
 
 void Search_Cuda::SetLogits(RoamingArray<float> logits_unk) {
   next_token_scores_ = logits_unk.GetGPU();
-  auto batch_beam_size = params_.BatchBeamSize();
-
-  // Apply log_softmax to the input logits
-  for (int i = 0; i < batch_beam_size; i++) {
-    std::span<float> target = next_token_scores_.subspan(i * params_.vocab_size, params_.vocab_size);
-    cuda::Launch_log_softmax(target.data(), static_cast<int>(target.size()), params_.cuda_stream);
-  }
 }
 
 RoamingArray<int32_t> GreedySearch_Cuda::GetNextTokens() {
