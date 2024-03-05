@@ -32,7 +32,7 @@ struct Model;
 struct State;
 struct Search;
 
-// Token sequences are a vector of int32 vectors
+// OgaSequences are a vector of int32 vectors
 using TokenSequences = std::vector<std::vector<int32_t>>;
 
 // If we don't include cuda_runtime.h, we define this to avoid lots of extra #ifdefs
@@ -41,7 +41,6 @@ using cudaStream_t = void*;
 #endif
 
 enum struct DeviceType {
-  Auto,
   CPU,
   CUDA,
 };
@@ -61,8 +60,6 @@ ProviderOptions GetDefaultProviderOptions(DeviceType device_type);
 struct GeneratorParams {
   GeneratorParams() = default;  // This constructor is only used if doing a custom model handler vs built-in
   GeneratorParams(const Model& model);
-
-  void SetInputSequences(const TokenSequences& sequences);
 
   Config::Search search;
 
@@ -106,8 +103,7 @@ struct GeneratorParams {
 
   std::variant<Whisper> inputs;
 
- private:
-  std::unique_ptr<int32_t[]> input_ids_owner_;
+  std::vector<int32_t> input_ids_owner;  // Backing memory of input_ids in some cases
 };
 
 struct Generator {
@@ -117,8 +113,8 @@ struct Generator {
   void ComputeLogits();
   void GenerateNextToken_TopK_TopP(int top_k, float top_p, float temperature);
   void GenerateNextToken_TopP(float p, float temperature) { GenerateNextToken_TopK_TopP(0, p, temperature); }
-  void GenerateNextToken_TopK(int k, float temperature) { GenerateNextToken_TopK_TopP(k, 1.0f, temperature); }
-  void GenerateNextToken_Top() { GenerateNextToken_TopK_TopP(1, 1.0f, 0.0f); }
+  void GenerateNextToken_TopK(int k, float temperature) { GenerateNextToken_TopK_TopP(k, 0.0f, temperature); }
+  void GenerateNextToken_Top() { GenerateNextToken_TopK_TopP(1, 0.0f, 0.0f); }
   void GenerateNextToken();
 
   RoamingArray<int32_t> GetSequence(int index) const;

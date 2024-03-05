@@ -3,9 +3,11 @@
 
 import os
 import sys
-from _test_utils import run_subprocess
-import onnxruntime_genai as og
 import tempfile
+
+import onnxruntime_genai as og
+
+from _test_utils import run_subprocess
 
 
 def download_model(download_path: str | bytes | os.PathLike, device: str):

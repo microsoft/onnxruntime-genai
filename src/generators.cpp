@@ -47,38 +47,6 @@ GeneratorParams::GeneratorParams(const Model& model)
       cuda_stream{model.cuda_stream_} {
 }
 
-void GeneratorParams::SetInputSequences(const TokenSequences& sequences) {
-  const bool pad_right = true;  // FUTURE: Pull from model config, but default to padding on the right
-
-  size_t max_count = 0;
-  for (auto& sequence : sequences)
-    max_count = std::max(max_count, sequence.size());
-
-  const size_t input_ids_count = max_count * sequences.size();
-
-  input_ids_owner_ = std::make_unique<int32_t[]>(input_ids_count);
-  auto new_input_ids = std::span<int32_t>(input_ids_owner_.get(), input_ids_count);
-
-  input_ids = new_input_ids;
-  sequence_length = static_cast<int>(max_count);
-  batch_size = static_cast<int>(sequences.size());
-
-  // Copy and pad the input sequences with pad_token_id
-  for (size_t sequence_index = 0; sequence_index < sequences.size(); sequence_index++) {
-    auto output_span = new_input_ids.subspan(sequence_index * max_count, max_count);
-    auto input_span = sequences[sequence_index];
-
-    auto pad_count = max_count - input_span.size();
-    if (pad_right) {
-      std::copy(input_span.begin(), input_span.end(), output_span.begin());
-      std::fill(output_span.end() - pad_count, output_span.end(), pad_token_id);
-    } else {
-      std::fill(output_span.begin(), output_span.begin() + pad_count, pad_token_id);
-      std::copy(input_span.begin(), input_span.end(), output_span.begin() + pad_count);
-    }
-  }
-}
-
 ProviderOptions GetDefaultProviderOptions([[maybe_unused]] DeviceType device_type) {
   ProviderOptions options;
   if (device_type == DeviceType::CUDA) {
@@ -146,35 +114,40 @@ bool Generator::IsDone() const {
 }
 
 void Generator::GenerateNextToken_TopK_TopP(int top_k, float top_p, float temperature) {
-  if (search_->params_.search.num_beams != 1)
-    throw std::runtime_error("TopK and TopP cannot be used with a beam search");
-
   if (!computed_logits_)
     throw std::runtime_error("Must call ComputeLogits before GenerateNextToken*");
   computed_logits_ = false;
 
-  if (top_p < 1.0f && top_k > 1) {
+  if (top_p == 0.0f && top_k == 1) {
+    search_->SelectTop();
+    return;
+  }
+
+  // The user explicitly called TopK_TopP on a beam search
+  if (search_->params_.search.num_beams != 1)
+    throw std::runtime_error("TopK and TopP cannot be used with a beam search");
+
+  // Sanity checks
+  if (top_p < 0.0f || top_p > 1.0f)
+    throw std::runtime_error("top_p must be between 0.0 and 1.0");
+  if (top_k < 1)
+    throw std::runtime_error("top_k must be 1 or greater");
+
+  if (top_p > 0.0f && top_k > 1) {
     search_->SampleTopPAndK(top_p, top_k, temperature);
-  } else if (top_p < 1.0f) {
-    search_->SampleTopP(top_p, temperature);
   } else if (top_k > 1) {
     search_->SampleTopK(top_k, temperature);
   } else {
-    search_->SelectTop();
+    search_->SampleTopP(top_p, temperature);
   }
 }
 
 void Generator::GenerateNextToken() {
   auto& search = search_->params_.search;
-  if (search.num_beams > 1) {
-    if (!computed_logits_)
-      throw std::runtime_error("Must call ComputeLogits before GenerateNextToken*");
-    computed_logits_ = false;
-    search_->SelectTop();
-    return;
-  }
-
-  GenerateNextToken_TopK_TopP(search.top_k, search.top_p, search.temperature);
+  if (search.do_sample)
+    GenerateNextToken_TopK_TopP(search.top_k, search.top_p, search.temperature);
+  else
+    GenerateNextToken_Top();
 }
 
 RoamingArray<int32_t> Generator::GetSequence(int index) const {

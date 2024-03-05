@@ -8,9 +8,8 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 {
     public enum DeviceType : long
     {
-        Auto = 0,
-        CPU = 1,
-        CUDA = 2
+        CPU = 0,
+        CUDA = 1
     }
 
     public class Model : IDisposable

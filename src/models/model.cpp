@@ -3,9 +3,7 @@
 #include "model.h"
 #include "debugging.h"
 #include "gpt.h"
-#include "llama.h"
-#include "mistral.h"
-#include "phi.h"
+#include "decoder_only.h"
 #include "whisper.h"
 #include "kernels.h"
 
@@ -16,13 +14,20 @@ State::State(const GeneratorParams& params) : params_{params} {
 
 void State::Run(OrtSession& session) {
 #if 0
-    printf("**Inputs:\r\n");
-    DumpTensors(inputs_.data(), input_names_.data(), input_names_.size(), true);
-    printf("**Outputs:\r\n");
-    DumpTensors(outputs_.data(), output_names_.data(), output_names_.size(), false);
+  // To show input values, enable this block (output values will be shapes only at this point)
+  printf("**Inputs:\r\n");
+  DumpTensors(inputs_.data(), input_names_.data(), input_names_.size(), true);
+  printf("**Outputs:\r\n");
+  DumpTensors(outputs_.data(), output_names_.data(), output_names_.size(), false);
 #endif
 
   session.Run(nullptr, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
+
+#if 0
+  // To show the output values, enable this block
+  printf("**Outputs:\r\n");
+  DumpTensors(outputs_.data(), output_names_.data(), output_names_.size(), true);
+#endif
 }
 
 void State::ClearIO() {
@@ -30,6 +35,34 @@ void State::ClearIO() {
   output_names_.clear();
   inputs_.clear();
   outputs_.clear();
+}
+
+std::vector<int32_t> PadInputs(std::span<std::span<const int32_t>> sequences, int32_t pad_token_id) {
+  bool pad_right_{true};
+
+  size_t max_length = 0;
+  for (auto& sequence : sequences)
+    max_length = std::max(max_length, sequence.size());
+
+  std::vector<int32_t> result(max_length * sequences.size());
+  std::span<int32_t> result_span(result);
+
+  // Copy and pad the sequences with pad_token_id
+  for (size_t i = 0; i < sequences.size(); i++) {
+    auto output_span = result_span.subspan(i * max_length, max_length);
+    auto input_span = sequences[i];
+
+    auto pad_count = max_length - input_span.size();
+    if (pad_right_) {
+      std::copy(input_span.begin(), input_span.end(), output_span.begin());
+      std::fill(output_span.end() - pad_count, output_span.end(), pad_token_id);
+    } else {
+      std::fill(output_span.begin(), output_span.begin() + pad_count, pad_token_id);
+      std::copy(input_span.begin(), input_span.end(), output_span.begin() + pad_count);
+    }
+  }
+
+  return result;
 }
 
 #ifdef NO_TOKENIZER
@@ -69,7 +102,7 @@ const std::string& TokenizerStream::Decode(int32_t token) {
   return chunk_;
 }
 
-Tokenizer::Tokenizer(Config& config) {
+Tokenizer::Tokenizer(Config& config) : pad_token_id_{config.model.pad_token_id} {
   CheckResult(TfmCreateTokenizer(tokenizer_.Address(), reinterpret_cast<const char*>(config.config_path.u8string().c_str())));
 }
 
@@ -96,26 +129,24 @@ std::string Tokenizer::Decode(std::span<const int32_t> tokens) const {
   return string;
 }
 
-TokenSequences Tokenizer::EncodeBatch(std::span<const char*> strings) const {
-  TokenSequences sequences;
-  for (size_t i = 0; i < strings.size(); i++) {
-    sequences.emplace_back(Encode(strings[i]));
-  }
-  return sequences;
-}
-
-TokenSequences Tokenizer::EncodeBatch(std::span<const std::string> strings) const {
-  TokenSequences sequences;
+std::vector<int32_t> Tokenizer::EncodeBatch(std::span<const std::string> strings) const {
+  std::vector<std::vector<int32_t>> sequences;
+  std::vector<std::span<const int32_t>> span_sequences;
   for (size_t i = 0; i < strings.size(); i++) {
     sequences.emplace_back(Encode(strings[i].c_str()));
+    span_sequences.emplace_back(sequences.back());
   }
-  return sequences;
+
+  return PadInputs(span_sequences, pad_token_id_);
 }
 
-std::vector<std::string> Tokenizer::DecodeBatch(const TokenSequences& sequences) const {
+std::vector<std::string> Tokenizer::DecodeBatch(std::span<const int32_t> sequences, size_t count) const {
+  if (sequences.size() % count != 0)
+    throw std::runtime_error("DecodeBatch: sequences must be evenly divisible by the count");
+  size_t sequence_length = sequences.size() / count;
   std::vector<std::string> strings;
-  for (auto& sequence : sequences)
-    strings.emplace_back(Decode(sequence));
+  for (size_t i = 0; i < count; i++)
+    strings.emplace_back(Decode(sequences.subspan(sequence_length * i, sequence_length)));
   return strings;
 }
 
@@ -155,11 +186,17 @@ SessionInfo::SessionInfo(OrtSession& session) {
 }
 
 ONNXTensorElementDataType SessionInfo::GetInputDataType(const std::string& name) const {
-  return inputs_.find(name)->second;
+  auto result = inputs_.find(name);
+  if (result == inputs_.end())
+    throw std::runtime_error("Model input was not found: " + name);
+  return result->second;
 }
 
 ONNXTensorElementDataType SessionInfo::GetOutputDataType(const std::string& name) const {
-  return outputs_.find(name)->second;
+  auto result = outputs_.find(name);
+  if (result == outputs_.end())
+    throw std::runtime_error("Model output was not found: " + name);
+  return result->second;
 }
 
 Model::Model(std::unique_ptr<Config> config, const ProviderOptions* provider_options) : config_{std::move(config)} {
@@ -197,14 +234,8 @@ std::unique_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, con
 
   if (config->model.type == "gpt2")
     return std::make_unique<Gpt_Model>(std::move(config), ort_env, provider_options);
-
-  // gemma and llama share the same architecture
-  if (config->model.type == "llama" || config->model.type == "gemma")
-    return std::make_unique<Llama_Model>(std::move(config), ort_env, provider_options);
-  if (config->model.type == "mistral")
-    return std::make_unique<Mistral_Model>(std::move(config), ort_env, provider_options);
-  if (config->model.type == "phi")
-    return std::make_unique<Phi2_Model>(std::move(config), ort_env, provider_options);
+  if (config->model.type == "llama" || config->model.type == "gemma" || config->model.type == "mistral" || config->model.type == "phi")
+    return std::make_unique<DecoderOnly_Model>(std::move(config), ort_env, provider_options);
   if (config->model.type == "whisper")
     return std::make_unique<Whisper_Model>(std::move(config), ort_env, provider_options);
 

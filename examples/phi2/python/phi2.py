@@ -7,7 +7,7 @@ print(f"Loading model... ")
 model=og.Model(f'example-models/phi2-int4-cpu', og.DeviceType.CPU)
 print("Model loaded")
 
-tokenizer = model.create_tokenizer()
+tokenizer = og.Tokenizer(model)
 
 prompt = '''def print_prime(n):
     """

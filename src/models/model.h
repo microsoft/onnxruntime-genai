@@ -62,6 +62,10 @@ struct TokenizerStream {
   std::string chunk_;
 };
 
+// Turn an array of ragged token sequences into a 2D input suitable for batching. Handles padding for the model
+// Sequence length is vector.size()/count
+std::vector<int32_t> PadInputs(std::span<std::span<const int32_t> > sequences, int32_t pad_token_id);
+
 struct Tokenizer {
   Tokenizer(Config& config);
 
@@ -70,11 +74,13 @@ struct Tokenizer {
   std::vector<int32_t> Encode(const char* text) const;
   std::string Decode(std::span<const int32_t> tokens) const;
 
-  TokenSequences EncodeBatch(std::span<const char*> strings) const;
-  TokenSequences EncodeBatch(std::span<const std::string> strings) const;
-  std::vector<std::string> DecodeBatch(const TokenSequences& sequences) const;
+  std::vector<int32_t> EncodeBatch(std::span<const std::string> strings) const;
+  std::vector<std::string> DecodeBatch(std::span<const int32_t> sequences, size_t count) const;
 
   TfmPtr<TfmTokenizer> tokenizer_;
+
+ private:
+  int32_t pad_token_id_;
 };
 #endif
 
