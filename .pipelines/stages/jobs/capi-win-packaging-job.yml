@@ -33,24 +33,37 @@ jobs:
       build_dir: $(build_dir)
       cuda_version: ${{ parameters.cuda_version }}
 
+  - powershell: |
+      Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
+
   - task: CopyFiles@2
-    displayName: 'Copy C API library files to ArtifactStagingDirectory'
+    displayName: 'Copy Onnxruntime C API library files to ArtifactStagingDirectory'
     inputs:
-      SourceFolder: '$(Build.SourcesDirectory)'
-      Contents: |
-        '$(build_dir)\$(build_config)\*.dll'
-        '$(build_dir)\$(build_config)\*.lib'
-        '$(build_dir)\$(build_config)\*.pdb'
-        ort\lib\*
+      SourceFolder: '$(Build.SourcesDirectory)\ort\lib'
       TargetFolder: '$(Build.ArtifactStagingDirectory)\lib'
 
   - task: CopyFiles@2
-    displayName: 'Copy C API header to ArtifactStagingDirectory'
+    displayName: 'Copy Onnxruntime C API header files to ArtifactStagingDirectory'
     inputs:
-      SourceFolder: '$(Build.SourcesDirectory)'
+      SourceFolder: '$(Build.SourcesDirectory)\ort\include'
+      TargetFolder: '$(Build.ArtifactStagingDirectory)\include'
+
+  - task: CopyFiles@2
+    displayName: 'Copy GenAi C API library files to ArtifactStagingDirectory'
+    inputs:
+      SourceFolder: '$(Build.SourcesDirectory)\$(build_dir)\$(build_config)'
       Contents: |
-        src\ort_genai_c.h
-        ort\include\*
+        '*.dll'
+        '*.lib'
+        '*.pdb'
+      TargetFolder: '$(Build.ArtifactStagingDirectory)\lib'
+
+  - task: CopyFiles@2
+    displayName: 'Copy GenAi C API header to ArtifactStagingDirectory'
+    inputs:
+      SourceFolder: '$(Build.SourcesDirectory)\src'
+      Contents: |
+        ort_genai_c.h
       TargetFolder: '$(Build.ArtifactStagingDirectory)\include'
 
   - task: CopyFiles@2
