@@ -47,8 +47,6 @@ jobs:
           echo "Printing docker image environment variables"
           docker run --rm ort_genai_linux_gpu_gha env
 
-      #TODO: Re-enable Test by removing -DENABLE_TESTS=OFF when the Linux GPU build is fixed
-
       - name: Build with Cmake in Docker
         run: |
           echo "Running docker image ort_genai_linux_gpu_gha"
@@ -56,7 +54,7 @@ jobs:
             --gpus all \
             --rm \
             --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-            -w /onnxruntime_src ort_genai_linux_gpu_gha bash -c "echo $PATH && /usr/bin/cmake -DENABLE_TESTS=ON -DCMAKE_CUDA_ARCHITECTURES=86 --preset linux_gcc_cuda_release && /usr/bin/cmake --build --preset linux_gcc_cuda_release"
+            -w /onnxruntime_src ort_genai_linux_gpu_gha bash -c "echo $PATH && /usr/bin/cmake -DCMAKE_CUDA_ARCHITECTURES=86 --preset linux_gcc_cuda_release && /usr/bin/cmake --build --preset linux_gcc_cuda_release"
       
       - name: Install the onnxruntime-genai Python wheel and run Python tests
         run: |
@@ -66,9 +64,7 @@ jobs:
             --rm \
             --volume $GITHUB_WORKSPACE:/onnxruntime_src \
             -w /onnxruntime_src ort_genai_linux_gpu_gha bash -c "python3 -m pip install /onnxruntime_src/build/gcc_cuda/release/wheel/onnxruntime_genai*.whl --user && python3 -m pip install -r test/python/requirements.txt --user && python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models"
-            -w /onnxruntime_src ort_genai_linux_gpu_gha bash -c "/usr/bin/cmake -DENABLE_TESTS=ON -DCMAKE_CUDA_ARCHITECTURES=86 --preset linux_gcc_cuda_release && /usr/bin/cmake --build --preset linux_gcc_cuda_release"
 
-      # TODO: Re-enable these tests when python version is updated
       - name: Docker -- Run tests
         run: |
           echo "Running docker image ort_genai_linux_gpu_gha"
