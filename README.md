@@ -51,7 +51,7 @@ import onnxruntime_genai as og
 
 model = og.Model(f'models/microsoft/phi-2', device_type)
 
-tokenizer = model.create_tokenizer()
+tokenizer = og.Tokenizer(model)
 
 prompt = '''def print_prime(n):
     """
@@ -61,7 +61,7 @@ prompt = '''def print_prime(n):
 tokens = tokenizer.encode(prompt)
 
 params = og.SearchParams(model)
-params.max_length = 200
+params.set_search_options({"max_length":200})
 params.input_ids = tokens
 
 output_tokens = model.generate(params)

@@ -42,34 +42,6 @@ const char* OGA_API_CALL OgaResultGetError(OgaResult* result) {
   return result->what_.c_str();
 }
 
-struct OgaBuffer {
-  std::unique_ptr<uint8_t[]> data_;
-  std::vector<size_t> dims_;
-  OgaDataType type_;
-};
-
-OgaDataType OGA_API_CALL OgaBufferGetType(const OgaBuffer* p) {
-  return p->type_;
-}
-
-size_t OGA_API_CALL OgaBufferGetDimCount(const OgaBuffer* p) {
-  return p->dims_.size();
-}
-
-OgaResult* OGA_API_CALL OgaBufferGetDims(const OgaBuffer* p, size_t* dims, size_t dim_count) {
-  OGA_TRY
-  if (dim_count != p->dims_.size())
-    throw std::runtime_error("OgaBufferGetDims - passed in buffer size does not match dim count");
-
-  std::copy(p->dims_.begin(), p->dims_.end(), dims);
-  return nullptr;
-  OGA_CATCH
-}
-
-const void* OGA_API_CALL OgaBufferGetData(const OgaBuffer* p) {
-  return p->data_.get();
-}
-
 OgaResult* OGA_API_CALL OgaCreateSequences(OgaSequences** out) {
   OGA_TRY
   *out = reinterpret_cast<OgaSequences*>(std::make_unique<Generators::TokenSequences>().release());
@@ -244,10 +216,6 @@ void OGA_API_CALL OgaDestroyResult(OgaResult* p) {
 }
 
 void OGA_API_CALL OgaDestroyString(const char* p) {
-  delete p;
-}
-
-void OGA_API_CALL OgaDestroyBuffer(OgaBuffer* p) {
   delete p;
 }
 
