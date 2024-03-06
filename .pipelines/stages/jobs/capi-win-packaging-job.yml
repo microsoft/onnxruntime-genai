@@ -4,40 +4,61 @@ parameters:
   ep: 'cpu'
   cuda_version: '11.8'
 jobs:
-- job: Windows_Wheels
+- job: Windows_CAPI_Packaging_${{ parameters.arch }}_${{ parameters.ep }}
   pool: 'onnxruntime-Win-CPU-2022'
   variables:
-    build_config: 'RelWithDebInfo'
-    build_dir: win-x64
+  - name: arch
+    value: ${{ parameters.arch }}
+  - name: artifactName
+    value: onnxruntime-genai-capi-win-${{ parameters.ep }}-${{ parameters.arch }}
+  - name: build_dir
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      value: 'build\release\cpu_default'
+    ${{ if eq(parameters.ep, 'gpu') }}:
+      value: 'build\release\cuda_default'
   timeoutInMinutes: 180
+  workspace:
+    clean: all
   steps:
   - template: steps/capi-win-build-step.yml
     parameters:
-      arch: ${{ parameters.arch }}
+      arch: $(arch)
       ort_version: ${{ parameters.ort_version }}
       ep: ${{ parameters.ep }}
-      build_config: $(build_config)
-      build_dir: $(build_dir)
-      cuda_version: ${{ parameters.cuda_version }}≈
+      cuda_version: ${{ parameters.cuda_version }}
+
+  - powershell: |
+      Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
+    displayName: 'List all files in the repo for ${{ parameters.arch }} ${{ parameters.ep }}'
 
   - task: CopyFiles@2
-    displayName: 'Copy C API library files to ArtifactStagingDirectory'
+    displayName: 'Copy Onnxruntime C API library files to ArtifactStagingDirectory'
     inputs:
-      SourceFolder: '$(Build.SourcesDirectory)'
-      Contents: |
-        '$(build_dir)\$(build_config)\*.dll'
-        '$(build_dir)\$(build_config)\*.lib'
-        '$(build_dir)\$(build_config)\*.pdb'
-        ort\lib\*
+      SourceFolder: '$(Build.SourcesDirectory)\ort\lib'
       TargetFolder: '$(Build.ArtifactStagingDirectory)\lib'
 
   - task: CopyFiles@2
-    displayName: 'Copy C API header to ArtifactStagingDirectory'
+    displayName: 'Copy Onnxruntime C API header files to ArtifactStagingDirectory'
     inputs:
-      SourceFolder: '$(Build.SourcesDirectory)'
+      SourceFolder: '$(Build.SourcesDirectory)\ort\include'
+      TargetFolder: '$(Build.ArtifactStagingDirectory)\include'
+
+  - task: CopyFiles@2
+    displayName: 'Copy GenAi C API library files to ArtifactStagingDirectory'
+    inputs:
+      SourceFolder: '$(Build.SourcesDirectory)\$(build_dir)\Release'
       Contents: |
-        src\ort_genai_c.h
-        ort\include\*
+        onnxruntime-genai.dll
+        onnxruntime-genai.lib
+        onnxruntime-genai.pdb
+      TargetFolder: '$(Build.ArtifactStagingDirectory)\lib'
+
+  - task: CopyFiles@2
+    displayName: 'Copy GenAi C API header to ArtifactStagingDirectory'
+    inputs:
+      SourceFolder: '$(Build.SourcesDirectory)\src'
+      Contents: |
+        ort_genai_c.h
       TargetFolder: '$(Build.ArtifactStagingDirectory)\include'
 
   - task: CopyFiles@2
@@ -52,12 +73,9 @@ jobs:
       TargetFolder: '$(Build.ArtifactStagingDirectory)'
 
   - task: PublishBuildArtifacts@1
-    displayName: 'Publish Artifact: ONNXRuntime Genai python wheel'
+    displayName: 'Publish Artifact: ONNXRuntime Genai capi'
     inputs:
-      ${{ if eq(parameters.ep, 'cpu') }}:
-        ArtifactName: onnxruntime-genai-capi-win-cpu-${{ parameters.arch }}
-      ${{ else }}:
-        ArtifactName: onnxruntime-genai-capi-win-gpu
+      ArtifactName: $(artifactName)
 
-  - template: steps/ompliant-and-cleanup.yml
+  - template: steps/compliant-and-cleanup-step.yml
 

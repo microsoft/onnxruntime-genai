@@ -2,8 +2,6 @@ parameters:
   arch: 'x64'
   ort_version: '1.17.1'
   ep: 'cpu'
-  build_dir: win-x64
-  build_config: 'RelWithDebInfo'
   cuda_version: '11.8'
 
 steps:
@@ -32,7 +30,7 @@ steps:
     ${{ else }}:
       itemPattern: 'onnxruntime-win-${{ parameters.arch }}-${{ parameters.ort_version }}*'
     downloadPath: '$(Build.SourcesDirectory)'
-  displayName: Download ONNXRuntime
+  displayName: Download ONNXRuntime ${{ parameters.arch }} ${{ parameters.ep }}
 
 - task: ExtractFiles@1
   inputs:
@@ -44,44 +42,53 @@ steps:
 
 - powershell: |
     Rename-Item -Path onnxruntime-win-${{ parameters.arch }}-${{ parameters.ort_version }} -NewName ort
-  displayName: Rename Onnxruntime to ort
+  displayName: Rename Onnxruntime CPU to ort
+  condition: eq('${{ parameters.ep }}', 'cpu')
   workingDirectory: '$(Build.SourcesDirectory)'
 
-- ${{ if eq(parameters.ep, 'gpu')}}:
-  - bash: |
-      set -e -x
-      azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v${{ parameters.cuda_version }}" '$(Build.SourcesDirectory)\cuda_sdk'
-    displayName: 'Download CUDA'
-    workingDirectory: '$(Build.SourcesDirectory)'
-  - bash: |
-      set -e -x
-      cmake -G "Visual Studio 17 2022" -A x64 -T cuda='$(Build.SourcesDirectory)\cuda_sdk\v${{ parameters.cuda_version }}' -DENABLE_TESTS=OFF -DCMAKE_BUILD_TYPE=${{ parameters.build_config }} -DUSE_CUDA=TRUE -S . -B ${{ parameters.build_dir }}
-    displayName: 'Configure CMake C API with CUDA'
-    condition: eq(${{ parameters.ep }}, 'gpu')
-    workingDirectory: '$(Build.SourcesDirectory)'
+- powershell: |
+    Rename-Item -Path onnxruntime-win-${{ parameters.arch }}-gpu-${{ parameters.ort_version }} -NewName ort
+  displayName: Rename Onnxruntime CUDA 11 to ort
+  condition: and(eq('${{ parameters.ep }}', 'gpu'), eq('${{ parameters.cuda_version }}', '11.8'))
+  workingDirectory: '$(Build.SourcesDirectory)'
 
-- ${{ if ne(parameters.ep, 'gpu')}}:
-  - bash: |
-      set -e -x
-      cmake -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=${{ parameters.build_config }} -DUSE_CUDA=OFF -DENABLE_TESTS=OFF -S . -B ${{ parameters.build_dir }}
-    displayName: 'Configure CMake C API without CUDA'
-    workingDirectory: '$(Build.SourcesDirectory)'
+- powershell: |
+    Rename-Item -Path onnxruntime-win-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }} -NewName ort
+  displayName: Rename Onnxruntime CUDA 12 to ort
+  condition: and(eq('${{ parameters.ep }}', 'gpu'), eq('${{ parameters.cuda_version }}', '12.2'))
+  workingDirectory: '$(Build.SourcesDirectory)'
 
 - bash: |
     set -e -x
-    cmake --build ${{ parameters.build_dir }} --config ${{ parameters.build_config }} --parallel --target onnxruntime-genai
-  displayName: 'Build CMake C API CUDA'
+    azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v${{ parameters.cuda_version }}" '$(Build.SourcesDirectory)\cuda_sdk'
+  displayName: 'Download CUDA'
+  condition: eq('${{ parameters.ep }}', 'gpu')
+  workingDirectory: '$(Build.SourcesDirectory)'
+- bash: |
+    set -e -x
+    cmake --preset windows_x64_cuda_release -T cuda='$(Build.SourcesDirectory)\cuda_sdk\v${{ parameters.cuda_version }}'
+    cmake --build --preset windows_x64_cuda_release --parallel
+  displayName: 'Configure CMake C API with CUDA'
+  condition: eq('${{ parameters.ep }}', 'gpu')
+  workingDirectory: '$(Build.SourcesDirectory)'
+
+- bash: |
+    set -e -x
+    cmake --preset windows_x64_cpu_release
+    cmake --build --preset windows_x64_cpu_release --parallel
+  displayName: 'Configure CMake C API without CUDA'
+  condition: eq('${{ parameters.ep }}', 'cpu')
   workingDirectory: '$(Build.SourcesDirectory)'
 
 - template: win-esrp-dll-step.yml
   parameters:
-    FolderPath: '$(Build.SourcesDirectory)\${{ parameters.build_dir }}\${{ parameters.build_config }}'
+    FolderPath: '$(Build.SourcesDirectory)'
     DisplayName: 'ESRP - Sign Native dlls'
     DoEsrp: true
-    Pattern: '*.dll'
+    Pattern: '**\*genai.dll'
 
 - task: BinSkim@4
   displayName: 'Run BinSkim'
   inputs:
-    AnalyzeTargetGlob: '$(Build.SourcesDirectory)\${{ parameters.build_dir }}\**\*genai.dll'
+    AnalyzeTargetGlob: '$(Build.SourcesDirectory)\**\*genai.dll'
   continueOnError: true

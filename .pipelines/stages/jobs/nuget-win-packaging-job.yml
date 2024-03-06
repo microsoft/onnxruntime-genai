@@ -1,36 +1,30 @@
 parameters:
   ort_version: '1.17.1'
   cuda_version: '11.8'
-  build_x64_cpu: true
-  build_gpu: true
-  build_arm64_cpu: false
+  ep: 'cpu'
+  arch: 'x64'
 jobs:
-- job: Windows_Wheels
-  strategy:
-    matrix:
-      x64_cpu:
-        arch: 'x64'
-        ep: cpu
-        build_dir: win-x64
-        artifactName: onnxruntime-genai-nuget-win-cpu-x64
-        id: Microsoft.ML.OnnxRuntimeGenAI
-      ${{ if eq(parameters.build_arm64, true) }}:
-        arm64_cpu:
-          arch: 'arm64'
-          ep: cpu
-          build_dir: win-arm64
-          artifactName: onnxruntime-genai-nuget-win-cpu-arm64
-          id: Microsoft.ML.OnnxRuntimeGenAI
-      ${{ if eq(parameters.build_gpu, true) }}:
-        x64_gpu:
-          arch: 'x64'
-          ep: gpu
-          build_dir: win-x64
-          artifactName: onnxruntime-genai-nuget-win-gpu-x64
-          id: Microsoft.ML.OnnxRuntimeGenAI.Gpu
+- job: Windows_Nuget_Packaging_${{ parameters.arch }}_${{ parameters.ep }}
   pool: 'onnxruntime-Win-CPU-2022'
   variables:
-    build_config: 'RelWithDebInfo'
+  - name: build_config
+    value: 'Release'
+  - name: build_dir
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      value: 'build/release/cpu_default'
+    ${{ if eq(parameters.ep, 'gpu') }}:
+      value: 'build/release/cuda_default'
+  - name: id
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      value: Microsoft.ML.OnnxRuntimeGenAI
+    ${{ if eq(parameters.ep, 'gpu') }}:
+      value: Microsoft.ML.OnnxRuntimeGenAI.Gpu
+  - name: arch
+    value: ${{ parameters.arch }}
+  - name: ep
+    value: ${{ parameters.ep }}
+  - name: artifactName
+    value: onnxruntime-genai-nuget-win-${{ parameters.ep }}-${{ parameters.arch }}
   timeoutInMinutes: 180
   workspace:
     clean: all
@@ -40,7 +34,6 @@ jobs:
       arch: $(arch)
       ort_version: ${{ parameters.ort_version }}
       ep: $(ep)
-      build_config: $(build_config)
       cuda_version: ${{ parameters.cuda_version }}
 
   - bash:
@@ -52,9 +45,12 @@ jobs:
       $VERSION = Get-Content $(Build.SourcesDirectory)\VERSION_INFO
       nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.nuspec `
         -Prop version=$VERSION `
-        -Prop id=$(id)
+        -Prop id=$(id) `
+        -Prop configuration=$(build_config) `
+        -Prop buildPath=$(build_dir)
       nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec `
-        -Prop version=$VERSION
+        -Prop version=$VERSION `
+        -Prop configuration=$(build_config)
     displayName: 'Nuget Packaging'
     workingDirectory: '$(Build.SourcesDirectory)\nuget'
 
@@ -68,7 +64,7 @@ jobs:
       TargetFolder: '$(Build.ArtifactStagingDirectory)'
 
   - task: PublishBuildArtifacts@1
-    displayName: 'Publish Artifact: ONNXRuntime Genai python wheel'
+    displayName: 'Publish Artifact: ONNXRuntime Genai nuget'
     inputs:
       ArtifactName: $(artifactName)
 

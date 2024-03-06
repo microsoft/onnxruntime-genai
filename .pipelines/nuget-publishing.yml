@@ -60,6 +60,6 @@ stages:
     enable_win_cpu: ${{ parameters.enable_win_cpu }}
     enable_win_gpu: ${{ parameters.enable_win_gpu }}
     enable_win_arm: ${{ parameters.enable_win_arm }}
-    ort_version: '1.17.1'
+    ort_version: ${{ parameters.ort_version }}
     cuda_version: ${{ parameters.cuda_version }}
 
