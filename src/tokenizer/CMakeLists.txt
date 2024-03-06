@@ -1,4 +1,18 @@
 set(TOKENIZER_ROOT ${CMAKE_CURRENT_SOURCE_DIR} PARENT_SCOPE)
+
+if("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_LESS 10)
+  add_compile_definitions(USE_CXX17=1)
+  message("Tokenizer is using C++17 because GCC Version is less than 10")
+  set(CMAKE_CXX_STANDARD 17)
+elseif(USE_CUDA AND CMAKE_CUDA_COMPILER AND CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 12)
+  add_compile_definitions(USE_CXX17=1)
+  message("Tokenizer is using C++17 Because CUDA Version is less than 12")
+  set(CMAKE_CXX_STANDARD 17)
+else()
+  message("Tokenizer is using C++20")
+  set(CMAKE_CXX_STANDARD 20)
+endif()
+
 file(GLOB tokenizer_srcs CONFIGURE_DEPENDS
    "${CMAKE_CURRENT_SOURCE_DIR}/*.cc"
    "${CMAKE_CURRENT_SOURCE_DIR}/utils/*.cc"
@@ -12,6 +26,11 @@ FetchContent_Declare(simdjson URL https://github.com/simdjson/simdjson/archive/r
 FetchContent_MakeAvailable(simdjson)
 
 add_library(tokenizer STATIC ${tokenizer_srcs})
+
+if(NOT WIN32)
+   target_link_libraries(tokenizer PRIVATE stdc++fs)
+endif()
+
 message(STATUS "GSL_SOURCE_DIR: ${GSL_SOURCE_DIR}")
 target_include_directories(tokenizer PUBLIC
    ${CMAKE_CURRENT_SOURCE_DIR}
