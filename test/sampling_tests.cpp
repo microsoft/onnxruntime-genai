@@ -94,7 +94,7 @@ TEST(SamplingTests, BatchedSamplingTopPAndKCpu) {
   // Verify outputs match expected outputs
   float p = 0.25f;
   int k = 2;
-  generator->search_->SampleTopPAndK(p, k, 1.0);
+  generator->search_->SampleTopKTopP(k, p, 1.0);
   auto next_tokens = generator->search_->GetNextTokens().GetCPU();
   for (int b = 0; b < batch_size; b++) {
     auto next_token = next_tokens[b];
@@ -214,7 +214,7 @@ TEST(SamplingTests, RandomizedSamplingTopPAndKCpu) {
     CreateRandomLogits(logits_cpu.data(), num_large, vocab_size, batch_size, engine);
     auto logits_copy = logits_cpu;
     generator->search_->SetLogits(Generators::cpu_span<float>(logits_copy));
-    generator->search_->SampleTopPAndK(p, k, 1.0f);
+    generator->search_->SampleTopKTopP(k, p, 1.0f);
     auto next_tokens = generator->search_->GetNextTokens().GetCPU();
     // Verify outputs match expected outputs
     for (int b = 0; b < batch_size; b++) {
@@ -313,7 +313,7 @@ TEST(SamplingTests, BatchedSamplingTopPAndKCuda) {
   // Verify outputs match expected outputs
   float p = 0.25f;
   int k = 2;
-  generator->search_->SampleTopPAndK(p, k, 1.0);
+  generator->search_->SampleTopKTopP(k, p, 1.0);
   auto next_tokens = generator->search_->GetNextTokens().GetCPU();
   for (int b = 0; b < batch_size; b++) {
     auto next_token = next_tokens[b];
@@ -427,7 +427,7 @@ TEST(SamplingTests, RandomizedSamplingTopPAndKCuda) {
     LaunchFisherYatesKernel(logits_gpu.get(), indices_buffer.get(), vocab_size, batch_size, params.cuda_stream);
     cudaMemcpyAsync(cpu_logits, logits_gpu.get(), vocab_size * batch_size * sizeof(float), cudaMemcpyDeviceToHost, params.cuda_stream);
     generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), vocab_size * batch_size));
-    generator->search_->SampleTopPAndK(p, k, 1.0f);
+    generator->search_->SampleTopKTopP(k, p, 1.0f);
     auto next_tokens = generator->search_->GetNextTokens().GetCPU();
     cudaStreamSynchronize(params.cuda_stream);
     // Verify outputs match expected outputs
