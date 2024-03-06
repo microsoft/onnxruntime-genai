@@ -38,11 +38,11 @@ jobs:
       SourceFolder: '$(Build.SourcesDirectory)\ort\lib'
       TargetFolder: '$(Build.ArtifactStagingDirectory)\lib'
 
-  - task: CopyFiles@2
-    displayName: 'Copy Onnxruntime C API header files to ArtifactStagingDirectory'
-    inputs:
-      SourceFolder: '$(Build.SourcesDirectory)\ort\include'
-      TargetFolder: '$(Build.ArtifactStagingDirectory)\include'
+#  - task: CopyFiles@2
+#    displayName: 'Copy Onnxruntime C API header files to ArtifactStagingDirectory'
+#    inputs:
+#      SourceFolder: '$(Build.SourcesDirectory)\ort\include'
+#      TargetFolder: '$(Build.ArtifactStagingDirectory)\include'
 
   - task: CopyFiles@2
     displayName: 'Copy GenAi C API library files to ArtifactStagingDirectory'
