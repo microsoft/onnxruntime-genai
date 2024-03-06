@@ -139,6 +139,8 @@ void Generator::GenerateNextToken_TopK_TopP(int top_k, float top_p, float temper
     search_->SampleTopK(top_k, temperature);
   } else {
     assert(top_k == 0);
+    if (top_p == 0.0f)
+      throw std::runtime_error("top_k and top_p cannot both be zero");
     search_->SampleTopP(top_p, temperature);
   }
 }
