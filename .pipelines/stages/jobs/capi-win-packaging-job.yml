@@ -53,9 +53,6 @@ jobs:
         onnxruntime-genai.pdb
       TargetFolder: '$(Build.ArtifactStagingDirectory)\lib'
 
-  - powershell: |
-      Get-ChildItem -Path $(Build.SourcesDirectory)$(build_dir)\Release -Recurse
-
   - task: CopyFiles@2
     displayName: 'Copy GenAi C API header to ArtifactStagingDirectory'
     inputs:
