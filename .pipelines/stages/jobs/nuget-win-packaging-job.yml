@@ -42,7 +42,7 @@ jobs:
     workingDirectory: '$(Build.SourcesDirectory)\src\csharp'
 
   - powershell: |
-      $VERSION = Get-Content $(Build.SourcesDirectory)\VERSION_INFO
+      $VERSION = 0.1.0-rc1
       nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.nuspec `
         -Prop version=$VERSION `
         -Prop id=$(id) `
