@@ -21,6 +21,10 @@ target_link_directories(python PRIVATE ${ORT_LIB_DIR})
 target_link_libraries(python PRIVATE onnxruntime-genai-static ${ONNXRUNTIME_LIB})
 set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
 
+if(NOT WIN32)
+   target_link_libraries(python PRIVATE stdc++fs)
+endif()
+
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   cmake_policy(SET CMP0104 OLD)
   enable_language(CUDA)
