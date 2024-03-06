@@ -34,7 +34,7 @@ pip install onnxruntime
 Run the model builder script to export, optimize, and quantize the model. More details can be found [here](../../src/python/py/models/README.md)
 
 ```bash
-cd examples/llama
+cd examples/mistral
 python -m onnxruntime_genai.models.builder -m mistralai/Mistral-7B-v0.1 -e cuda -p fp16 -o ./example-models/mistral-7b-fp16-cuda
 ```
 
