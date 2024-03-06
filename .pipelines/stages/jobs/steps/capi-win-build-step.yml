@@ -45,27 +45,27 @@ steps:
   displayName: Rename Onnxruntime to ort
   workingDirectory: '$(Build.SourcesDirectory)'
 
-- ${{ if eq(parameters.ep, 'gpu')}}:
-  - bash: |
-      set -e -x
-      azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v${{ parameters.cuda_version }}" '$(Build.SourcesDirectory)\cuda_sdk'
-    displayName: 'Download CUDA'
-    workingDirectory: '$(Build.SourcesDirectory)'
-  - bash: |
-      set -e -x
-      cmake --preset windows_x64_cuda_release -T cuda='$(Build.SourcesDirectory)\cuda_sdk\v${{ parameters.cuda_version }}'
-      cmake --build --preset windows_x64_cuda_release --parallel
-    displayName: 'Configure CMake C API with CUDA'
-    condition: eq(${{ parameters.ep }}, 'gpu')
-    workingDirectory: '$(Build.SourcesDirectory)'
+- bash: |
+    set -e -x
+    azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v${{ parameters.cuda_version }}" '$(Build.SourcesDirectory)\cuda_sdk'
+  displayName: 'Download CUDA'
+  condition: eq(${{ parameters.ep }}, 'gpu')
+  workingDirectory: '$(Build.SourcesDirectory)'
+- bash: |
+    set -e -x
+    cmake --preset windows_x64_cuda_release -T cuda='$(Build.SourcesDirectory)\cuda_sdk\v${{ parameters.cuda_version }}'
+    cmake --build --preset windows_x64_cuda_release --parallel
+  displayName: 'Configure CMake C API with CUDA'
+  condition: eq(${{ parameters.ep }}, 'gpu')
+  workingDirectory: '$(Build.SourcesDirectory)'
 
-- ${{ if ne(parameters.ep, 'gpu')}}:
-  - bash: |
-      set -e -x
-      cmake --preset windows_x64_cpu_release
-      cmake --build --preset windows_x64_cpu_release --parallel
-    displayName: 'Configure CMake C API without CUDA'
-    workingDirectory: '$(Build.SourcesDirectory)'
+- bash: |
+    set -e -x
+    cmake --preset windows_x64_cpu_release
+    cmake --build --preset windows_x64_cpu_release --parallel
+  displayName: 'Configure CMake C API without CUDA'
+  condition: eq(${{ parameters.ep }}, 'cpu')
+  workingDirectory: '$(Build.SourcesDirectory)'
 
 - template: win-esrp-dll-step.yml
   parameters:
