@@ -1,0 +1,44 @@
+parameters:
+  - name: id
+    type: string
+  - name: build_dir
+    type: string
+  - name: artifactName
+    type: string
+  - name: build_config
+    type: string
+    default: 'Release'
+  - name: version
+    type: string
+steps:
+  - bash:
+      dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="${{ parameters.build_config }} " -p:NativeBuildOutputDir="${{ parameters.build_dir }} \${{ parameters.build_config }} "
+    displayName: 'Build CSharp'
+    workingDirectory: '$(Build.SourcesDirectory)\src\csharp'
+
+  - powershell: |
+      nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.nuspec `
+        -Prop version=${{ parameters.version }} `
+        -Prop id=${{ parameters.id }} `
+        -Prop configuration=${{ parameters.build_config }}  `
+        -Prop buildPath=${{ parameters.build_dir }}
+      nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec `
+        -Prop version=${{ parameters.version }} `
+        -Prop configuration=${{ parameters.build_config }}
+    displayName: 'Nuget Packaging'
+    workingDirectory: '$(Build.SourcesDirectory)\nuget'
+
+  - powershell: |
+      Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
+
+  - task: CopyFiles@2
+    displayName: 'Copy Nuget to: $(Build.ArtifactStagingDirectory)'
+    inputs:
+      SourceFolder: '$(Build.SourcesDirectory)\nuget'
+      Contents: '*.nupkg'
+      TargetFolder: '$(Build.ArtifactStagingDirectory)'
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Artifact: ONNXRuntime Genai nuget'
+    inputs:
+      ArtifactName: onnxruntime-genai-nuget-win-${{ parameters.ep }}-${{ parameters.arch }}
