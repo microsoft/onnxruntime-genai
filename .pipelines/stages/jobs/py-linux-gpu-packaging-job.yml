@@ -51,6 +51,7 @@ jobs:
 
   - bash: |
       mv  onnxruntime-linux-x64-gpu-${{ parameters.ort_version }} ort
+      rm -rf ort/lib/*tensorrt*
     displayName: Rename Onnxruntime to ort
     workingDirectory: '$(Build.SourcesDirectory)/onnxruntime-genai'
 
