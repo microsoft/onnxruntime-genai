@@ -5,7 +5,6 @@
 
 #include "tfmtok_c.h"
 
-#include <filesystem>
 #include <string>
 #include <vector>
 #include <string_view>
