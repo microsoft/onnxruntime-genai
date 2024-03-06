@@ -42,7 +42,20 @@ steps:
 
 - powershell: |
     Rename-Item -Path onnxruntime-win-${{ parameters.arch }}-${{ parameters.ort_version }} -NewName ort
-  displayName: Rename Onnxruntime to ort
+  displayName: Rename Onnxruntime CPU to ort
+  condition: eq('${{ parameters.ep }}', 'cpu')
+  workingDirectory: '$(Build.SourcesDirectory)'
+
+- powershell: |
+    Rename-Item -Path onnxruntime-win-${{ parameters.arch }}-gpu-${{ parameters.ort_version }} -NewName ort
+  displayName: Rename Onnxruntime CUDA 11 to ort
+  condition: and(eq('${{ parameters.ep }}', 'gpu'), eq('${{ parameters.cuda_version }}', '11.8'))
+  workingDirectory: '$(Build.SourcesDirectory)'
+
+- powershell: |
+    Rename-Item -Path onnxruntime-win-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }} -NewName ort
+  displayName: Rename Onnxruntime CUDA 12 to ort
+  condition: and(eq('${{ parameters.ep }}', 'gpu'), eq('${{ parameters.cuda_version }}', '12.2'))
   workingDirectory: '$(Build.SourcesDirectory)'
 
 - bash: |
