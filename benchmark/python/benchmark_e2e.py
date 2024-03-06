@@ -60,7 +60,7 @@ def main(args):
     if args.verbose: print(f"Loading model... ")
     model=og.Model(f'{args.input_folder}', og.DeviceType.CPU if args.execution_provider == 'cpu' else og.DeviceType.CUDA)
     if args.verbose: print("Model loaded")
-    tokenizer = model.create_tokenizer()
+    tokenizer = og.Tokenizer(model)
 
     # Generate prompt
     prompt = [generate_prompt(model, tokenizer, prompt_length)] * batch_size
