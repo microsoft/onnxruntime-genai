@@ -11,9 +11,6 @@ struct Deleters {
   void operator()(OgaResult* p) {
     OgaDestroyResult(p);
   }
-  void operator()(OgaBuffer* p) {
-    OgaDestroyBuffer(p);
-  }
   void operator()(OgaSequences* p) {
     OgaDestroySequences(p);
   }
@@ -35,7 +32,6 @@ struct Deleters {
 };
 
 using OgaResultPtr = std::unique_ptr<OgaResult, Deleters>;
-using OgaBufferPtr = std::unique_ptr<OgaBuffer, Deleters>;
 using OgaSequencesPtr = std::unique_ptr<OgaSequences, Deleters>;
 using OgaModelPtr = std::unique_ptr<OgaModel, Deleters>;
 using OgaTokenizerPtr = std::unique_ptr<OgaTokenizer, Deleters>;
