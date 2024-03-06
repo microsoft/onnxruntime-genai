@@ -1,7 +1,7 @@
 parameters:
 - name: ort_version
   type: string
-  default: '1.17.0'
+  default: '1.17.1'
 jobs:
 - job: Windows_GPU_Wheels
   pool: 'onnxruntime-Win-CPU-2022'

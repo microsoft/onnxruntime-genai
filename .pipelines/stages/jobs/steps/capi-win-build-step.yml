@@ -1,6 +1,6 @@
 parameters:
   arch: 'x64'
-  ort_version: '1.17.0'
+  ort_version: '1.17.1'
   ep: 'cpu'
   cuda_version: '11.8'
 

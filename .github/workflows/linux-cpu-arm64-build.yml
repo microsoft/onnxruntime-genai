@@ -4,9 +4,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 env:
-  ort_dir: "onnxruntime-linux-aarch64-1.17.0"
-  ort_zip: "onnxruntime-linux-aarch64-1.17.0.tgz"
-  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-linux-aarch64-1.17.0.tgz"
+  ort_dir: "onnxruntime-linux-aarch64-1.17.1"
+  ort_zip: "onnxruntime-linux-aarch64-1.17.1.tgz"
+  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/onnxruntime-linux-aarch64-1.17.1.tgz"
 jobs:
   linux-cpu-arm64-build:
     runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2004-ARM-CPU" ]

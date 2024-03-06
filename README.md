@@ -13,10 +13,10 @@ Users can call a high level `generate()` method, or run each iteration of the mo
 ## Features
 
 * Supported model architectures:
-  * Phi-2
-  * Llama
   * Gemma
-  * GPT
+  * LLaMA
+  * Mistral
+  * Phi-2
 * Supported targets:   
   * CPU
   * GPU (CUDA)
@@ -30,7 +30,7 @@ Users can call a high level `generate()` method, or run each iteration of the mo
 
 ## Coming very soon
 
-* Support for the Mistral and Whisper model architectures
+* Support for the Whisper model architectures
 * C# API
 * Support for DirectML
 
@@ -49,7 +49,7 @@ Install onnxruntime-genai.
 ```python
 import onnxruntime_genai as og
 
-model=og.Model(f'models/microsoft/phi-2', device_type)
+model = og.Model(f'models/microsoft/phi-2', device_type)
 
 tokenizer = model.create_tokenizer()
 
@@ -60,11 +60,11 @@ prompt = '''def print_prime(n):
 
 tokens = tokenizer.encode(prompt)
 
-params=og.SearchParams(model)
+params = og.SearchParams(model)
 params.max_length = 200
 params.input_ids = tokens
 
-output_tokens=model.generate(params)
+output_tokens = model.generate(params)
 
 text = tokenizer.decode(output_tokens)
 
@@ -94,10 +94,10 @@ This step requires `cmake` to be installed.
 
       ```bash
       cd $ORT_HOME
-      wget https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-linux-x64-gpu-1.17.0.tgz
-      tar xvzf onnxruntime-linux-x64-gpu-1.17.0.tgz 
-      mv onnxruntime-linux-x64-gpu-1.17.0/include .
-      mv onnxruntime-linux-x64-gpu-1.17.0/lib .
+      wget https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/onnxruntime-linux-x64-gpu-1.17.1.tgz
+      tar xvzf onnxruntime-linux-x64-gpu-1.17.1.tgz 
+      mv onnxruntime-linux-x64-gpu-1.17.1/include .
+      mv onnxruntime-linux-x64-gpu-1.17.1/lib .
       ```
 
     * Or build from source
@@ -152,7 +152,7 @@ This step requires `cmake` to be installed.
 
 ONNX models are run from a local folder, via a string supplied to the `Model()` method. 
 
-To source `microsoft/phi-2` optimized for your target, download and run the following script. You will need to be logged into HuggingFace via the CLI to run the script.
+To source `microsoft/phi-2` optimized for your target, download and run the following script. You will need to be logged into Hugging Face via the CLI to run the script.
 
 Install model builder dependencies.
 

@@ -36,7 +36,6 @@ struct Search_Cuda : Search {
   gpu_span<int32_t> next_tokens_;  // shape (beam_size*batch_size)
 
   gpu_span<float> next_token_scores_;  // shape (beam_size*batch_size, vocab_size)
-  cuda_unique_ptr<float> next_token_scores_buffer_;
 
   cuda_host_unique_ptr<bool> done_cpu_;
 

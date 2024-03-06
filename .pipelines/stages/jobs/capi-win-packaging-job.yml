@@ -1,8 +1,8 @@
 parameters:
-  ort_version: '1.17.0'
-  cuda_version: '11.8'
-  ep: 'cpu'
   arch: 'x64'
+  ort_version: '1.17.1'
+  ep: 'cpu'
+  cuda_version: '11.8'
 jobs:
 - job: Windows_CAPI_Packaging_${{ parameters.arch }}_${{ parameters.ep }}
   pool: 'onnxruntime-Win-CPU-2022'

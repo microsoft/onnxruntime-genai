@@ -25,11 +25,6 @@ Search_Cuda::Search_Cuda(const GeneratorParams& params)
   eos_meet_buffer_ = CudaMallocArray<bool>(batch_beam_size, &eos_meet_);
   cudaMemsetAsync(eos_meet_.data(), 0, eos_meet_.size_bytes(), params_.cuda_stream);
 
-  // below buffers are on cpu or cuda
-  size_t next_token_size = batch_beam_size * params_.vocab_size;
-  next_token_scores_buffer_ = CudaMallocArray<float>(next_token_size, &next_token_scores_);
-  cudaMemsetAsync(next_token_scores_.data(), 0, next_token_scores_.size_bytes(), params_.cuda_stream);
-
   done_cpu_ = CudaMallocHostArray<bool>(1);
   *done_cpu_ = false;
 }
@@ -62,29 +57,7 @@ BeamSearch_Cuda::BeamSearch_Cuda(const GeneratorParams& params)
 BeamSearch_Cuda::~BeamSearch_Cuda() = default;
 
 void Search_Cuda::SetLogits(RoamingArray<float> logits_unk) {
-  gpu_span<float> logits = logits_unk;
-  // Logits has shape (batch_size, input_length, vocab_size),
-  // where input_length equals to parameters_->sequence_length for first subgraph call, and 1 for the remaining calls.
-  // RyanHill: Does it really? The output of gpt2 is always a input_length of 1, regardless of input sequence length
-
-  auto batch_beam_size = params_.BatchBeamSize();
-  auto input_length = logits.size() / (batch_beam_size * params_.vocab_size);
-  assert(logits.size() % (batch_beam_size * params_.vocab_size) == 0);  // Should divide evenly
-
-  // TODO: if input_length==1, use token scores directly
-
-  // Get logits for the last token:
-  //    next_token_logits = logits[:, -1, :], and the result shape is (batch_size, vocab_size)
-  // When input_length == 1, use logits directly in SoftmaxCPU below so it only need for input_length > 1.
-  const float* current_logits = logits.data() + (input_length - 1) * params_.vocab_size;
-  for (int i = 0; i < batch_beam_size; i++) {
-    std::span<const float> source(current_logits, params_.vocab_size);
-    std::span<float> target = next_token_scores_.subspan(i * params_.vocab_size, params_.vocab_size);
-    CudaCheck() == cudaMemcpyAsync(target.data(), source.data(), source.size_bytes(), cudaMemcpyDeviceToDevice, params_.cuda_stream);
-    current_logits += input_length * params_.vocab_size;
-
-    cuda::Launch_log_softmax(target.data(), static_cast<int>(target.size()), params_.cuda_stream);
-  }
+  next_token_scores_ = logits_unk.GetGPU();
 }
 
 RoamingArray<int32_t> GreedySearch_Cuda::GetNextTokens() {

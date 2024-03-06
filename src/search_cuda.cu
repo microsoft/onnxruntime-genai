@@ -38,21 +38,6 @@ struct ArgMaxDataImpl : ArgMaxData {
   cuda_unique_ptr<cub::KeyValuePair<int, float>> argmaxen_owner_;
 };
 
-__global__ void log_softmax(float* values, int count) {
-  float max = *std::max_element(values, values + count);
-  //  std::vector<float> scaled(values.begin(), values.end());
-  float sum = 0.0f;
-  for (int i = 0; i < count; i++)
-    sum += std::exp(values[i] - max);
-
-  float log_max = std::log(sum);
-  // std::transform(values, values+count, values, [max, log_max](float v) { return v - max - log_max; });
-}
-
-void Launch_log_softmax(float* values, int count, cudaStream_t stream) {
-  log_softmax<<<1, 1, 0, stream>>>(values, count);
-}
-
 __global__ void CheckForEOS(int32_t* next_tokens, int next_tokens_count, bool* eos_meet, int eos_token_id, int pad_token_id, bool* done_cpu) {
   // Look for EOS tokens, if seen set EOS flag and replace with pad token
   for (size_t batch_id = 0; batch_id < next_tokens_count; ++batch_id) {

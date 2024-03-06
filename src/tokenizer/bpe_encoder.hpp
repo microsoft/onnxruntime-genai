@@ -27,6 +27,8 @@ class BpeEncoder {
  public:
   BpeEncoder() = default;
 
+  static bool IsGemmaModel(const TokenConfig& config) { return config.tokenizer_class_ == "GemmaTokenizer"; }
+
   TfmStatus Load(const simdjson::dom::element& tok_json, const TokenConfig& config) {
     auto model_node = tok_json.at_key("model");
     if (model_node.is_null()) {
@@ -57,10 +59,11 @@ class BpeEncoder {
       return TfmStatus{kTfmErrorInvalidFile, "Cannot find the vocab key in the the tokenizer.json"};
     }
 
+    bool is_gemma = IsGemmaModel(config);
     std::string spm_byte;
     for (auto [_key, _value] : vocab_obj) {
       uint32_t id = gsl::narrow_cast<uint32_t>(_value.get_uint64());
-      if (IsSpmByteWord(_key)) {
+      if (IsSpmByteWord(_key) && !is_gemma) {
         char buf[3] = {_key[3], _key[4], 0};  // something like <0x20>
         spm_byte = {static_cast<char>(strtol(buf, NULL, 16))};
         _key = spm_byte;
@@ -69,6 +72,20 @@ class BpeEncoder {
       vocab_map_[std::string(_key)] = id;
       if (id > max_token_id_) {
         max_token_id_ = id;
+      }
+    }
+
+    if (is_gemma) {
+      static const char* hex = "0123456789ABCDEF";
+      for (int cc = 0; cc <= 0xFF; ++cc) {
+        unsigned char ch = gsl::narrow<unsigned char>(cc);
+        if (vocab_map_.find(std::string(1, ch)) == vocab_map_.end()) {
+          const char buf[7] = {'<', '0', 'x', hex[ch >> 4], hex[ch & 15], '>', 0};
+          auto it = vocab_map_.find(buf);
+          if (it != vocab_map_.end()) {
+            vocab_map_[std::string(1, ch)] = it->second;
+          }
+        }
       }
     }
 
