@@ -8,12 +8,12 @@ jobs:
   pool: 'onnxruntime-Win-CPU-2022'
   variables:
   - name: build_config
-    value: 'RelWithDebInfo'
+    value: 'Release'
   - name: build_dir
-    ${{ if eq(parameters.arch, 'x64') }}:
-      value: win-x64
-    ${{ if eq(parameters.arch, 'arm64') }}:
-      value: win-arm64
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      value: 'build/release/cpu_default'
+    ${{ if eq(parameters.ep, 'gpu') }}:
+      value: 'build/release/cuda_default'
   - name: id
     ${{ if eq(parameters.ep, 'cpu') }}:
       value: Microsoft.ML.OnnxRuntimeGenAI
@@ -34,8 +34,6 @@ jobs:
       arch: $(arch)
       ort_version: ${{ parameters.ort_version }}
       ep: $(ep)
-      build_dir: $(build_dir)
-      build_config: $(build_config)
       cuda_version: ${{ parameters.cuda_version }}
 
   - bash:
@@ -47,7 +45,9 @@ jobs:
       $VERSION = Get-Content $(Build.SourcesDirectory)\VERSION_INFO
       nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.nuspec `
         -Prop version=$VERSION `
-        -Prop id=$(id)
+        -Prop id=$(id) `
+        -Prop configuration=$(build_config) `
+        -Prop buildPath=$(build_dir)
       nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec `
         -Prop version=$VERSION
     displayName: 'Nuget Packaging'

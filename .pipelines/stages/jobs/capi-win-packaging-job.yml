@@ -7,13 +7,6 @@ jobs:
 - job: Windows_CAPI_Packaging_${{ parameters.arch }}_${{ parameters.ep }}
   pool: 'onnxruntime-Win-CPU-2022'
   variables:
-  - name: build_config
-    value: 'RelWithDebInfo'
-  - name: build_dir
-    ${{ if eq(parameters.arch, 'x64') }}:
-      value: 'win-x64'
-    ${{ if eq(parameters.arch, 'arm64') }}:
-      value: 'win-arm64'
   - name: arch
     value: ${{ parameters.arch }}
   - name: ep
@@ -29,8 +22,6 @@ jobs:
       arch: $(arch)
       ort_version: ${{ parameters.ort_version }}
       ep: $(ep)
-      build_config: $(build_config)
-      build_dir: $(build_dir)
       cuda_version: ${{ parameters.cuda_version }}
 
   - powershell: |
@@ -51,17 +42,12 @@ jobs:
   - task: CopyFiles@2
     displayName: 'Copy GenAi C API library files to ArtifactStagingDirectory'
     inputs:
-      SourceFolder: '$(Build.SourcesDirectory)\$(build_dir)\$(build_config)'
+      SourceFolder: '$(Build.SourcesDirectory)'
       Contents: |
-        '*genai.dll'
-        '*genai.lib'
-        '*genai.pdb'
+        '**\*genai.dll'
+        '**\*genai.lib'
+        '**\*genai.pdb'
       TargetFolder: '$(Build.ArtifactStagingDirectory)\lib'
-
-  - powershell: |
-      echo $(build_dir)
-      echo $(build_config)
-      Get-ChildItem -Path $(Build.SourcesDirectory)\$(build_dir)\$(build_config) -Recurse
 
   - task: CopyFiles@2
     displayName: 'Copy GenAi C API header to ArtifactStagingDirectory'
