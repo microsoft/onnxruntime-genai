@@ -24,7 +24,7 @@ jobs:
   - name: ep
     value: ${{ parameters.ep }}
   - name: artifactName
-    value: onnxruntime-genai-nuget-win-${{ parameters.arch }}-${{ parameters.arch }}
+    value: onnxruntime-genai-nuget-win-${{ parameters.ep }}-${{ parameters.arch }}
   timeoutInMinutes: 180
   workspace:
     clean: all
@@ -64,7 +64,7 @@ jobs:
       TargetFolder: '$(Build.ArtifactStagingDirectory)'
 
   - task: PublishBuildArtifacts@1
-    displayName: 'Publish Artifact: ONNXRuntime Genai python wheel'
+    displayName: 'Publish Artifact: ONNXRuntime Genai nuget'
     inputs:
       ArtifactName: $(artifactName)
 
