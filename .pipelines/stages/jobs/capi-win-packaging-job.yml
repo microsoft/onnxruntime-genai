@@ -11,6 +11,11 @@ jobs:
     value: ${{ parameters.arch }}
   - name: artifactName
     value: onnxruntime-genai-capi-win-${{ parameters.ep }}-${{ parameters.arch }}
+  - name: build_dir
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      value: 'build/release/cpu_default'
+    ${{ if eq(parameters.ep, 'gpu') }}:
+      value: 'build/release/cuda_default'
   timeoutInMinutes: 180
   workspace:
     clean: all
@@ -41,12 +46,15 @@ jobs:
   - task: CopyFiles@2
     displayName: 'Copy GenAi C API library files to ArtifactStagingDirectory'
     inputs:
-      SourceFolder: '$(Build.SourcesDirectory)'
+      SourceFolder: '$(Build.SourcesDirectory)\$(build_dir)\Release'
       Contents: |
-        '**\*genai.dll'
-        '**\*genai.lib'
-        '**\*genai.pdb'
+        onnxruntime-genai.dll
+        onnxruntime-genai.lib
+        onnxruntime-genai.pdb
       TargetFolder: '$(Build.ArtifactStagingDirectory)\lib'
+
+  - powershell: |
+      Get-ChildItem -Path $(Build.SourcesDirectory)$(build_dir)\Release -Recurse
 
   - task: CopyFiles@2
     displayName: 'Copy GenAi C API header to ArtifactStagingDirectory'
