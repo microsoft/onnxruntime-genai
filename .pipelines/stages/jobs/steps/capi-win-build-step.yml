@@ -30,7 +30,7 @@ steps:
     ${{ else }}:
       itemPattern: 'onnxruntime-win-${{ parameters.arch }}-${{ parameters.ort_version }}*'
     downloadPath: '$(Build.SourcesDirectory)'
-  displayName: Download ONNXRuntime
+  displayName: Download ONNXRuntime ${{ parameters.arch }} ${{ parameters.ep }}
 
 - task: ExtractFiles@1
   inputs:

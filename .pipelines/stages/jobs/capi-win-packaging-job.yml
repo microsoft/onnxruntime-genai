@@ -9,8 +9,6 @@ jobs:
   variables:
   - name: arch
     value: ${{ parameters.arch }}
-  - name: ep
-    value: ${{ parameters.ep }}
   - name: artifactName
     value: onnxruntime-genai-capi-win-${{ parameters.ep }}-${{ parameters.arch }}
   timeoutInMinutes: 180
@@ -21,11 +19,12 @@ jobs:
     parameters:
       arch: $(arch)
       ort_version: ${{ parameters.ort_version }}
-      ep: $(ep)
+      ep: ${{ parameters.ep }}
       cuda_version: ${{ parameters.cuda_version }}
 
   - powershell: |
       Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
+    displayName: 'List all files in the repo for ${{ parameters.arch }} ${{ parameters.ep }}'
 
   - task: CopyFiles@2
     displayName: 'Copy Onnxruntime C API library files to ArtifactStagingDirectory'
