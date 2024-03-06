@@ -41,4 +41,4 @@ steps:
   - task: PublishBuildArtifacts@1
     displayName: 'Publish Artifact: ONNXRuntime Genai nuget'
     inputs:
-      ArtifactName: onnxruntime-genai-nuget-win-${{ parameters.ep }}-${{ parameters.arch }}
+      ArtifactName: ${{ parameters.artifactName }}
