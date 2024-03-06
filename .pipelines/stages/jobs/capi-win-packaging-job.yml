@@ -33,9 +33,29 @@ jobs:
 
   - task: CopyFiles@2
     displayName: 'Copy Onnxruntime C API library files to ArtifactStagingDirectory'
+    condition: succeeded()
     inputs:
       SourceFolder: '$(Build.SourcesDirectory)\ort\lib'
+      Contents: |
+        onnxruntime.dll
+        onnxruntime.lib
+        onnxruntime.pdb
+
       TargetFolder: '$(Build.ArtifactStagingDirectory)\lib'
+
+  - ${{ if eq(parameters.ep, 'gpu') }}:
+    - task: CopyFiles@2
+      displayName: 'Copy Onnxruntime CUDA C API library files to ArtifactStagingDirectory'
+      inputs:
+        SourceFolder: '$(Build.SourcesDirectory)\ort\lib'
+        Contents: |
+          onnxruntime_providers_cuda.dll
+          onnxruntime_providers_cuda.lib
+          onnxruntime_providers_cuda.pdb
+          onnxruntime_providers_shared.dll
+          onnxruntime_providers_shared.lib
+          onnxruntime_providers_shared.pdb
+        TargetFolder: '$(Build.ArtifactStagingDirectory)\lib'
 
   - task: CopyFiles@2
     displayName: 'Copy Onnxruntime C API header files to ArtifactStagingDirectory'
