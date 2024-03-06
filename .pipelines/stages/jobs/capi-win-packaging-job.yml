@@ -13,9 +13,9 @@ jobs:
     value: onnxruntime-genai-capi-win-${{ parameters.ep }}-${{ parameters.arch }}
   - name: build_dir
     ${{ if eq(parameters.ep, 'cpu') }}:
-      value: 'build/release/cpu_default'
+      value: 'build\release\cpu_default'
     ${{ if eq(parameters.ep, 'gpu') }}:
-      value: 'build/release/cuda_default'
+      value: 'build\release\cuda_default'
   timeoutInMinutes: 180
   workspace:
     clean: all
