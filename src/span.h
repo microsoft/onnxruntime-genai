@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #pragma once
-#if __cplusplus >= 202002L
+#if __cplusplus >= 202002L && !defined(_WIN32)
 #include <span>
 #else
 #include <array>

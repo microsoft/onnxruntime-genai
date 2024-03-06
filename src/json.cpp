@@ -202,7 +202,7 @@ void JSON::Parse_Array(Element& element) {
 
 double JSON::Parse_Number() {
   double value = NAN;
-#if __cplusplus >= 202002L
+#if __cplusplus >= 202002L && !defined(_WIN32)
   auto result = std::from_chars(current_, end_, value);
   if (result.ec != std::errc{}) {
     throw std::runtime_error("Expecting number");
