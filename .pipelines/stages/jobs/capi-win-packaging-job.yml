@@ -22,7 +22,7 @@ jobs:
   workspace:
     clean: all
   steps:
-  - template: steps/win-build-step.yml
+  - template: steps/capi-win-build-step.yml
     parameters:
       arch: ${{ parameters.arch }}
       ort_version: ${{ parameters.ort_version }}
@@ -35,16 +35,9 @@ jobs:
 
   - task: CopyFiles@2
     displayName: 'Copy Onnxruntime C API library files to ArtifactStagingDirectory'
-    condition: succeeded()
     inputs:
       SourceFolder: '$(Build.SourcesDirectory)\ort\lib'
       TargetFolder: '$(Build.ArtifactStagingDirectory)\lib'
-
-  #  - task: CopyFiles@2
-  #    displayName: 'Copy Onnxruntime C API header files to ArtifactStagingDirectory'
-  #    inputs:
-  #      SourceFolder: '$(Build.SourcesDirectory)\ort\include'
-  #      TargetFolder: '$(Build.ArtifactStagingDirectory)\include'
 
   - task: CopyFiles@2
     displayName: 'Copy GenAi C API library files to ArtifactStagingDirectory'
