@@ -49,7 +49,8 @@ jobs:
         -Prop configuration=$(build_config) `
         -Prop buildPath=$(build_dir)
       nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec `
-        -Prop version=$VERSION
+        -Prop version=$VERSION `
+        -Prop configuration=$(build_config)
     displayName: 'Nuget Packaging'
     workingDirectory: '$(Build.SourcesDirectory)\nuget'
 
