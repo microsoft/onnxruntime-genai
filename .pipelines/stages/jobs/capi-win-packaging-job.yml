@@ -22,7 +22,7 @@ jobs:
   workspace:
     clean: all
   steps:
-  - template: steps/capi-win-build-step.yml
+  - template: steps/win-build-step.yml.yml
     parameters:
       arch: ${{ parameters.arch }}
       ort_version: ${{ parameters.ort_version }}
