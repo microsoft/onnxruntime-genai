@@ -1,14 +1,20 @@
 parameters:
-  ort_version: '1.17.1'
-  cuda_version: '11.8'
-  ep: 'cpu'
-  arch: 'x64'
+- name: arch
+  type: string
+- name: ep
+  type: string
+- name: ort_version
+  type: string
+- name: cuda_version
+  type: string
 jobs:
 - job: Windows_Nuget_Packaging_${{ parameters.arch }}_${{ parameters.ep }}
   pool: 'onnxruntime-Win-CPU-2022'
   variables:
   - name: build_config
     value: 'Release'
+  - name: artifactName
+    value: onnxruntime-genai-nuget-win-${{ parameters.ep }}-${{ parameters.arch }}
   - name: build_dir
     ${{ if eq(parameters.ep, 'cpu') }}:
       value: 'build/release/cpu_default'
@@ -19,21 +25,15 @@ jobs:
       value: Microsoft.ML.OnnxRuntimeGenAI
     ${{ if eq(parameters.ep, 'gpu') }}:
       value: Microsoft.ML.OnnxRuntimeGenAI.Gpu
-  - name: arch
-    value: ${{ parameters.arch }}
-  - name: ep
-    value: ${{ parameters.ep }}
-  - name: artifactName
-    value: onnxruntime-genai-nuget-win-${{ parameters.ep }}-${{ parameters.arch }}
   timeoutInMinutes: 180
   workspace:
     clean: all
   steps:
   - template: steps/capi-win-build-step.yml
     parameters:
-      arch: $(arch)
+      arch: ${{ parameters.arch }}
       ort_version: ${{ parameters.ort_version }}
-      ep: $(ep)
+      ep: ${{ parameters.ep }}
       cuda_version: ${{ parameters.cuda_version }}
 
   - bash:
@@ -42,7 +42,7 @@ jobs:
     workingDirectory: '$(Build.SourcesDirectory)\src\csharp'
 
   - powershell: |
-      $VERSION = Get-Content $(Build.SourcesDirectory)\VERSION_INFO
+      $VERSION = '0.1.0-rc1'
       nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.nuspec `
         -Prop version=$VERSION `
         -Prop id=$(id) `
