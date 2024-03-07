@@ -6,8 +6,10 @@
 *obj/
 /ort
 /build
+/build_*
 /test/test_models/*
 /cache_models
+/onnxruntime-linux-x64-*
 /*.csv
 .idea
 cache_dir
