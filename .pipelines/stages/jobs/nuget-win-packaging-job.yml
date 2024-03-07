@@ -41,6 +41,11 @@ jobs:
     displayName: 'Build CSharp'
     workingDirectory: '$(Build.SourcesDirectory)\src\csharp'
 
+  - template: steps/win-esrp-dll-step.yml
+    parameters:
+      FolderPath: '$(Build.SourcesDirectory)\src\csharp\bin\Release\'
+      DisplayName: 'ESRP - Sign C# dlls'
+
   - powershell: |
       $VERSION = '0.1.0-rc1'
       nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.nuspec `

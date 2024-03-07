@@ -80,12 +80,16 @@ steps:
   condition: eq('${{ parameters.ep }}', 'cpu')
   workingDirectory: '$(Build.SourcesDirectory)'
 
-- template: win-esrp-dll-step.yml
-  parameters:
-    FolderPath: '$(Build.SourcesDirectory)'
-    DisplayName: 'ESRP - Sign Native dlls'
-    DoEsrp: true
-    Pattern: '**\*genai.dll'
+- ${{ if eq(parameters.ep, 'cpu') }}:
+  - template: win-esrp-dll-step.yml
+    parameters:
+      FolderPath: '$(Build.SourcesDirectory)\build\release\cpu_default\Release'
+      DisplayName: 'ESRP - Sign Native dlls'
+- ${{ else }}:
+  - template: win-esrp-dll-step.yml
+    parameters:
+      FolderPath: '$(Build.SourcesDirectory)\build\release\cuda_default\Release'
+      DisplayName: 'ESRP - Sign C++ dlls'
 
 - task: BinSkim@4
   displayName: 'Run BinSkim'
