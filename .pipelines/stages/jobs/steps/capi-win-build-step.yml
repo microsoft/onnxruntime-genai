@@ -85,7 +85,7 @@ steps:
     FolderPath: '$(Build.SourcesDirectory)'
     DisplayName: 'ESRP - Sign Native dlls'
     DoEsrp: true
-    Pattern: '**\*genai.dll'
+    Pattern: '**/*genai.dll'
 
 - task: BinSkim@4
   displayName: 'Run BinSkim'
