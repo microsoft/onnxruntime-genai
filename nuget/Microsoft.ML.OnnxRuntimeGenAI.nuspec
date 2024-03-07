@@ -29,6 +29,7 @@
   <files>
     <file src="..\LICENSE" target="LICENSE" />
     <file src="..\README.md" target="README.md" />
+    <file src="..\ThirdPartyNotices.txt" target="ThirdPartyNotices.txt" />
 
     <!-- Windows x64 -->
     <file src="..\$buildPath$\$configuration$\onnxruntime-genai.lib" target="runtimes\win-x64\native" />
