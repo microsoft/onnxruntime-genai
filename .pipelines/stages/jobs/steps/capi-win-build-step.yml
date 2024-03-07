@@ -81,7 +81,7 @@ steps:
   workingDirectory: '$(Build.SourcesDirectory)'
 
 - ${{ if eq(parameters.ep, 'cpu') }}:
-  - template: steps/win-esrp-dll-step.yml
+  - template: win-esrp-dll-step.yml
     parameters:
       FolderPath: '$(Build.SourcesDirectory)\build\release\cpu_default\Release'
       DisplayName: 'ESRP - Sign Native dlls'
