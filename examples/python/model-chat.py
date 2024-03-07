@@ -3,12 +3,12 @@ import argparse
 import time
 
 def main(args):
-    print("Loading model...")
+    if args.verbose: print("Loading model...")
     model = og.Model(f'{args.model}', og.DeviceType.CPU if args.execution_provider == 'cpu' else og.DeviceType.CUDA)
-    print("Model loaded")
+    if args.verbose: print("Model loaded")
     tokenizer = og.Tokenizer(model)
-    print("Tokenizer created")
-    print()
+    if args.verbose: print("Tokenizer created")
+    if args.verbose: print()
 
     # Keep asking for input prompts in an loop
     while True:
@@ -16,14 +16,14 @@ def main(args):
         input_tokens = tokenizer.encode(text)
 
         params = og.GeneratorParams(model)
-        params.set_search_options({"max_length": args.max_length, "top_p": args.top_p, "top_k": args.top_k})
+        params.set_search_options({"max_length": args.max_length, "top_p": args.top_p, "top_k": args.top_k, "temperature": args.temperature})
         params.input_ids = input_tokens
 
         start_time = time.time()
         output_tokens = model.generate(params)[0]
         run_time = time.time() - start_time
 
-        print()
+        if args.verbose: print()
         print("Output: ")
         print(tokenizer.decode(output_tokens))
 
@@ -39,5 +39,6 @@ if __name__ == "__main__":
     parser.add_argument('-p', '--top_p', type=float, default=0.9, help='Top p probability to sample with')
     parser.add_argument('-k', '--top_k', type=int, default=50, help='Top k tokens to sample from')
     parser.add_argument('-v', '--verbose', action='store_true', help='Print verbose output')
+    parser.add_argument('-t', '--temperature', type=float, default=1.0, help='Temperature to sample with')
     args = parser.parse_args()
     main(args)
