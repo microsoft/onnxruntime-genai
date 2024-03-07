@@ -1,35 +1,42 @@
 import onnxruntime_genai as og
 import argparse
+import time
 
 def main(args):
     if args.verbose: print("Loading model...")
-    model=og.Model(f'{args.model}', og.DeviceType.CPU if args.execution_provider == 'cpu' else og.DeviceType.CUDA)
+    model = og.Model(f'{args.model}', og.DeviceType.CPU if args.execution_provider == 'cpu' else og.DeviceType.CUDA)
     if args.verbose: print("Model loaded")
-    tokenizer=og.Tokenizer(model)
-    tokenizer_stream=tokenizer.create_stream()
+    tokenizer = og.Tokenizer(model)
     if args.verbose: print("Tokenizer created")
 
     if args.input is not None:
-        prompt = args.input
+        prompts = [args.input]
     else:
-        prompt = "I like walking my cute dog"
-    input_tokens = tokenizer.encode(prompt)
+        prompts = ["I like walking my cute dog",
+                "What is the best restaurant in town?",
+                "Hello, how are you today?"]
+    input_tokens = tokenizer.encode_batch(prompts)
     if args.verbose: print("Prompt(s) encoded")
 
     params = og.GeneratorParams(model)
-    params.set_search_options({"max_length": args.max_length, "top_p": args.top_p, "top_k": args.top_k})
+    params.set_search_options({"max_length": args.max_length, "top_p": args.top_p, "top_k": args.top_k, "temperature": args.temperature, "repetition_penalty": args.repetition_penalty})
     params.input_ids = input_tokens
     if args.verbose: print("GeneratorParams created")
 
-    generator=og.Generator(model, params)
-    if args.verbose: print("Generator created")
+    if args.verbose: print("Generating tokens ...")
+    start_time = time.time()
+    output_tokens = model.generate(params)
+    run_time = time.time() - start_time
 
-    if args.verbose: print("Running generation loop ...")
-    print(f'\n{prompt}', end='')
-    while not generator.is_done():
-        generator.compute_logits()
-        generator.generate_next_token_top_k_top_p(args.top_k, args.top_p, args.temperature)
-        print(tokenizer_stream.decode(generator.get_next_tokens()[0]), end='', flush=True)
+    for i in range(len(prompts)):
+        print(f'Prompt #{i}: {prompts[i]}')
+        print()
+        print(tokenizer.decode(output_tokens[i]))
+        print()
+    
+    print()
+    print(f"Tokens: {len(output_tokens[0])} Time: {run_time:.2f} Tokens per second: {len(output_tokens[0])/run_time:.2f}")
+    print()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="End-to-end token generation loop example for gen-ai")
@@ -40,6 +47,7 @@ if __name__ == "__main__":
     parser.add_argument('-p', '--top_p', type=float, default=0.9, help='Top p probability to sample with')
     parser.add_argument('-k', '--top_k', type=int, default=50, help='Top k tokens to sample from')
     parser.add_argument('-t', '--temperature', type=float, default=1.0, help='Temperature to sample with')
+    parser.add_argument('-r', '--repetition_penalty', type=float, default=1.0, help='Repetition penalty to sample with')
     parser.add_argument('-v', '--verbose', action='store_true', help='Print verbose output')
     args = parser.parse_args()
     main(args)

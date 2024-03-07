@@ -18,7 +18,7 @@ pip install numpy
 pip install transformers
 pip install torch
 pip install onnx
-pip install onnxruntime
+pip install onnxruntime-gpu
 ```
 
 Choose a model. Examples of supported ones are:
@@ -30,7 +30,7 @@ Choose a model. Examples of supported ones are:
 Run the model builder script to export, optimize, and quantize the model. More details can be found [here](../../src/python/py/models/README.md)
 
 ```bash
-cd examples/phi2/python
+cd examples/python
 python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -e cpu -p int4 -o ./example-models/phi2-int4-cpu
 ```
 
