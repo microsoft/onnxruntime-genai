@@ -36,15 +36,10 @@ python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -e cpu -p int4 -o 
 
 ## Run the example model script
 
-To run the chat example...
+See accompanying chat-e2e-example.sh and generate-e2e-example.sh scripts for end-to-end examples of workflow.
 
-```bash
-python model-chat.py -m {path to model folder} -ep {cpu or cuda}
-```
-
-To run the token generation loop example...
-
+To run the python examples...
 ```bash
 python model-generate.py -m {path to model folder} -ep {cpu or cuda} -i {string prompt}
+python model-chat.py -m {path to model folder} -ep {cpu or cuda}
 ```
-
