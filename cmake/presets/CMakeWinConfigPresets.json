@@ -22,7 +22,7 @@
       "inherits": "windows_cpu_default",
       "cacheVariables": {
         "USE_CUDA": "ON",
-        "DCMAKE_CUDA_ARCHITECTURES": "60;61;70;75;80;86"
+        "CMAKE_CUDA_ARCHITECTURES": "60;61;70;75;80;86"
       }
     },
     {
