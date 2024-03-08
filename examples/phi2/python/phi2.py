@@ -4,7 +4,7 @@ import onnxruntime_genai as og
 print(f"Loading model... ")
 
 # The first argument is the name of the folder containing the model files
-model=og.Model(f'phi2', og.DeviceType.CUDA)
+model=og.Model(f'example-models/phi2-int4-cpu', og.DeviceType.CPU)
 print("Model loaded")
 
 tokenizer = og.Tokenizer(model)
