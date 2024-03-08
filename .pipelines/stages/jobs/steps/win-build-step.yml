@@ -91,8 +91,9 @@ steps:
     FolderPath: '$(Build.SourcesDirectory)\build\release\${{ parameters.ep }}_default\Release'
     DisplayName: 'ESRP - Sign C++ dlls'
 
-- task: BinSkim@4
-  displayName: 'Run BinSkim'
-  inputs:
-    AnalyzeTargetGlob: '$(Build.SourcesDirectory)\**\*genai.dll'
-  continueOnError: true
+- ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
+  - task: BinSkim@4
+    displayName: 'Run BinSkim'
+    inputs:
+      AnalyzeTargetGlob: '$(Build.SourcesDirectory)\**\*genai.dll'
+    continueOnError: true
