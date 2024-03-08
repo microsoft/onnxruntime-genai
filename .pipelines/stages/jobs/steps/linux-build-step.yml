@@ -31,46 +31,6 @@ steps:
       itemPattern: 'onnxruntime-linux-${{ parameters.arch }}-${{ parameters.ort_version }}*'
     downloadPath: '$(Build.SourcesDirectory)'
   displayName: Download ONNXRuntime ${{ parameters.arch }} ${{ parameters.ep }}
-    -
-- task: ExtractFiles@1
-  inputs:
-    archiveFilePatterns: '**/*.tgz'
-    destinationFolder: '$(Build.SourcesDirectory)/onnxruntime-genai'
-    cleanDestinationFolder: false
-    overwriteExistingFiles: true
-  displayName: Unzip OnnxRuntime
-
-- bash: |
-    mv  onnxruntime-linux-$(buildArch)-${{ parameters.ort_version }} ort
-  displayName: Rename Onnxruntime to ort
-  workingDirectory: '$(Build.SourcesDirectory)/onnxruntime-genai'
-
-- checkout: self
-  clean: true
-  submodules: recursive
-- task: onebranch.pipeline.tsaoptions@1
-  displayName: 'OneBranch TSAOptions'
-  inputs:
-    tsaConfigFilePath: '$(Build.SourcesDirectory)\.config\tsaoptions.json'
-    appendSourceBranchName: false
-
-- template: set-nightly-build-option-variable-step.yml
-
-- task: DownloadGitHubRelease@0
-  inputs:
-    connection: 'GitHub - Release'
-    userRepository: 'microsoft/onnxruntime'
-    defaultVersionType: 'specificTag'
-    version: 'v${{ parameters.ort_version }}'
-    ${{ if eq(parameters.ep, 'cuda') }}:
-      ${{ if eq(parameters.cuda_version, '11.8') }}:
-        itemPattern: 'onnxruntime-linux-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}*'
-      ${{ else }}:
-        itemPattern: 'onnxruntime-linux-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}*'
-    ${{ else }}:
-      itemPattern: 'onnxruntime-linux-${{ parameters.arch }}-${{ parameters.ort_version }}*'
-    downloadPath: '$(Build.SourcesDirectory)'
-  displayName: Download ONNXRuntime ${{ parameters.arch }} ${{ parameters.ep }}
 
 - task: ExtractFiles@1
   inputs:

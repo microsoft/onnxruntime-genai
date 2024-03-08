@@ -3,7 +3,7 @@ parameters:
   ort_version: '1.17.1'
   ep: 'cpu'
   cuda_version: '11.8'
-
+  target: 'onnxruntime-genai'
 steps:
 - checkout: self
   clean: true
@@ -22,7 +22,7 @@ steps:
     userRepository: 'microsoft/onnxruntime'
     defaultVersionType: 'specificTag'
     version: 'v${{ parameters.ort_version }}'
-    ${{ if eq(parameters.ep, 'gpu') }}:
+    ${{ if eq(parameters.ep, 'cuda') }}:
       ${{ if eq(parameters.cuda_version, '11.8') }}:
         itemPattern: 'onnxruntime-win-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}*'
       ${{ else }}:
@@ -49,45 +49,42 @@ steps:
 - powershell: |
     Rename-Item -Path onnxruntime-win-${{ parameters.arch }}-gpu-${{ parameters.ort_version }} -NewName ort
   displayName: Rename Onnxruntime CUDA 11 to ort
-  condition: and(eq('${{ parameters.ep }}', 'gpu'), eq('${{ parameters.cuda_version }}', '11.8'))
+  condition: and(eq('${{ parameters.ep }}', 'cuda'), eq('${{ parameters.cuda_version }}', '11.8'))
   workingDirectory: '$(Build.SourcesDirectory)'
 
 - powershell: |
     Rename-Item -Path onnxruntime-win-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }} -NewName ort
   displayName: Rename Onnxruntime CUDA 12 to ort
-  condition: and(eq('${{ parameters.ep }}', 'gpu'), eq('${{ parameters.cuda_version }}', '12.2'))
+  condition: and(eq('${{ parameters.ep }}', 'cuda'), eq('${{ parameters.cuda_version }}', '12.2'))
   workingDirectory: '$(Build.SourcesDirectory)'
 
 - powershell: |
     azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v${{ parameters.cuda_version }}" '$(Build.SourcesDirectory)\cuda_sdk'
   displayName: 'Download CUDA'
-  condition: eq('${{ parameters.ep }}', 'gpu')
+  condition: eq('${{ parameters.ep }}', 'cuda')
   workingDirectory: '$(Build.SourcesDirectory)'
 
 - powershell: |
-    cmake --preset windows_x64_cuda_release -T cuda='$(Build.SourcesDirectory)\cuda_sdk\v${{ parameters.cuda_version }}'
-    cmake --build --preset windows_x64_cuda_release --parallel
+    cmake --preset windows_${{ parameters.arch }}_${{ parameters.ep }}_release -T cuda='$(Build.SourcesDirectory)\cuda_sdk\v${{ parameters.cuda_version }}'
   displayName: 'Configure CMake C API with CUDA'
-  condition: eq('${{ parameters.ep }}', 'gpu')
+  condition: eq('${{ parameters.ep }}', 'cuda')
   workingDirectory: '$(Build.SourcesDirectory)'
 
 - powershell: |
-    cmake --preset windows_x64_cpu_release
-    cmake --build --preset windows_x64_cpu_release --parallel
+    cmake --preset windows_${{ parameters.arch }}_${{ parameters.ep }}_release
   displayName: 'Configure CMake C API without CUDA'
-  condition: eq('${{ parameters.ep }}', 'cpu')
+  condition: ne('${{ parameters.ep }}', 'cuda')
   workingDirectory: '$(Build.SourcesDirectory)'
 
-- ${{ if eq(parameters.ep, 'cpu') }}:
-  - template: win-esrp-dll-step.yml
-    parameters:
-      FolderPath: '$(Build.SourcesDirectory)\build\release\cpu_default\Release'
-      DisplayName: 'ESRP - Sign Native dlls'
-- ${{ else }}:
-  - template: win-esrp-dll-step.yml
-    parameters:
-      FolderPath: '$(Build.SourcesDirectory)\build\release\cuda_default\Release'
-      DisplayName: 'ESRP - Sign C++ dlls'
+- powershell: |
+    cmake --build --preset windows_${{ parameters.arch }}_${{ parameters.ep }}_release --parallel --target ${{ parameters.target }}
+  displayName: 'Build C API'
+  workingDirectory: '$(Build.SourcesDirectory)'
+
+- template: win-esrp-dll-step.yml
+  parameters:
+    FolderPath: '$(Build.SourcesDirectory)\build\release\${{ parameters.ep }}_default\Release'
+    DisplayName: 'ESRP - Sign C++ dlls'
 
 - task: BinSkim@4
   displayName: 'Run BinSkim'
