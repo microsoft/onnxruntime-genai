@@ -131,7 +131,7 @@ steps:
         -DENABLE_TESTS=OFF \
         -DMANYLINUX=ON \
         -DPYTHON_EXECUTABLE=/opt/python/cp311-cp311/bin/python3.11 && \
-        /usr/bin/cmake --build --preset linux_gcc_cpu_release"
+        /usr/bin/cmake --build --preset linux_gcc_${{ parameters.ep }}_release"
   displayName: 'Build Python Wheel 3.11'
   workingDirectory: '$(Build.SourcesDirectory)/onnxruntime-genai'
 - script: |
