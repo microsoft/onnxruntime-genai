@@ -21,7 +21,7 @@ struct State {
   std::vector<OrtValue*> inputs_, outputs_;
 
  protected:
-  void Run(OrtSession& session);  // Uses the inputs below to run
+  void Run(OrtSession& session, OrtRunOptions& run_options);  // Uses the inputs below to run
   void ClearIO();                 // Clear all inputs/outputs
 };
 
@@ -106,6 +106,7 @@ struct Model {
 
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
+  std::unique_ptr<OrtRunOptions> run_options_;
   cudaStream_t cuda_stream_{};
   DeviceType device_type_{DeviceType::CPU};
   Ort::Allocator& allocator_cpu_{Ort::Allocator::GetWithDefaultOptions()};

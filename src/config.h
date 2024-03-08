@@ -6,6 +6,8 @@ struct Config {
   Config() = default;
   Config(const std::filesystem::path& path);
 
+  bool can_use_cuda_graphs{};  // True if the model can use cuda graphs for optimization
+
   std::filesystem::path config_path;  // Path of the config directory
 
   struct Model {
@@ -37,6 +39,8 @@ struct Config {
         std::string input_ids{"input_ids"};
         std::string position_ids{"position_ids"};
         std::string attention_mask{"attention_mask"};
+        std::string seqlens_k{"seqlens_k"};
+        std::string total_sequence_length{"total_sequence_length"};
         std::string past_key_names{"past_key_values.%d.key"}, past_value_names{"past_key_values.%d.value"};
         std::string past_names;  // When key/value pairs are combined
         std::string cross_past_key_names, cross_past_value_names;

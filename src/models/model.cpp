@@ -15,7 +15,7 @@ namespace Generators {
 State::State(const GeneratorParams& params) : params_{params} {
 }
 
-void State::Run(OrtSession& session) {
+void State::Run(OrtSession& session, OrtRunOptions &run_options) {
 #if 0
   // To show input values, enable this block (output values will be shapes only at this point)
   printf("**Inputs:\r\n");
@@ -24,7 +24,7 @@ void State::Run(OrtSession& session) {
   DumpTensors(outputs_.data(), output_names_.data(), output_names_.size(), false);
 #endif
 
-  session.Run(nullptr, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
+  session.Run(&run_options, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
 
 #if 0
   // To show the output values, enable this block
@@ -203,6 +203,7 @@ ONNXTensorElementDataType SessionInfo::GetOutputDataType(const std::string& name
 }
 
 Model::Model(std::unique_ptr<Config> config, const ProviderOptions* provider_options) : config_{std::move(config)} {
+  run_options_ = OrtRunOptions::Create();
   session_options_ = OrtSessionOptions::Create();
 
   constexpr int min_thread_nums = 1;

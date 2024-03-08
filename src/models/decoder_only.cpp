@@ -17,9 +17,10 @@ std::unique_ptr<State> DecoderOnly_Model::CreateState(RoamingArray<int32_t> sequ
 DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const GeneratorParams& params)
     : State{params},
       model_{model},
-      position_ids_{model, *this, sequence_lengths_unk} {
+      position_metadata_{model, *this, sequence_lengths_unk} {
   input_ids_.Add();
-  position_ids_.Add();
+  position_metadata_.AddAttentionMask();
+  position_metadata_.AddPositionIDs();
   logits_.Add();
   kv_cache_.Add();
 }
@@ -31,13 +32,14 @@ RoamingArray<float> DecoderOnly_State::Run(int current_length, RoamingArray<int3
     UpdateInputs(next_tokens, next_indices, current_length);
   }
 
-  State::Run(*model_.session_decoder_);
+  State::Run(*model_.session_decoder_, *model_.run_options_);
   return logits_.Get();
 }
 
 void DecoderOnly_State::UpdateInputs(const RoamingArray<int32_t>& next_tokens_unk, RoamingArray<int32_t> beam_indices, int current_length) {
   input_ids_.Update(next_tokens_unk);
-  position_ids_.Update(current_length);
+  position_metadata_.UpdateAttentionMask(current_length);
+  position_metadata_.UpdatePositionIDs(current_length);
   kv_cache_.Update(beam_indices.GetCPU(), current_length);
 }
 

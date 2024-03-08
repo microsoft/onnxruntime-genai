@@ -2,20 +2,25 @@
 
 namespace Generators {
 
-struct PositionIDs {
-  PositionIDs(const Model& model, State& state, RoamingArray<int32_t>& sequence_lengths);
+struct PositionMetadata {
+  PositionMetadata(const Model& model, State& state, RoamingArray<int32_t>& sequence_lengths);
 
-  void Add();
-  void Update(int current_length);
+  void AddAttentionMask();
+  void AddPositionIDs();
+  void AddSeqlensK();
+  void AddTotalSequenceLength();
+
+  void UpdatePositionIDs(int current_length);
+  void UpdateAttentionMask(int current_length);
 
  private:
   template <typename T>
   void InitializeTensors(std::array<int64_t, 2> shape, cpu_span<int32_t> sequence_lengths);
 
   template <typename T>
-  void UpdatePositionIDs();
+  void UpdatePositionIDsImpl();
   template <typename T>
-  void UpdateAttentionMask(T* data, const T* old_data, int current_length);
+  void UpdateAttentionMaskImpl(T* data, const T* old_data, int current_length);
 
   const Model& model_;
   State& state_;
@@ -26,6 +31,10 @@ struct PositionIDs {
   std::unique_ptr<OrtValue> position_ids_;
   std::array<int64_t, 2> attention_mask_shape_{};  // {params.batch_size*params.beam_size, params.sequence_length}
   std::unique_ptr<OrtValue> attention_mask_;
+  std::array<int64_t, 1> senlens_k_shape_{}; // {params.batch_size}
+  std::unique_ptr<OrtValue> seqlens_k_;
+  std::array<int64_t, 0> total_sequence_length_shape_{}; // scalar
+  std::unique_ptr<OrtValue> total_sequence_length_;
 
   std::vector<int32_t> initial_sequence_lengths_;
 };
