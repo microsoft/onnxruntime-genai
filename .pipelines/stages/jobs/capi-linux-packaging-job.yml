@@ -11,10 +11,12 @@ jobs:
 - job: Linux_CAPI_Packaging_${{ parameters.arch }}_${{ parameters.ep }}
   pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
   timeoutInMinutes: 180
+  variables:
+    artifactName: 'onnxruntime-genai-capi-linux-${{ parameters.ep }}-${{ parameters.arch }}'
   workspace:
     clean: all
   steps:
-  - template: steps/win-build-step.yml
+  - template: steps/linux-build-step.yml
     parameters:
       arch: ${{ parameters.arch }}
       ort_version: ${{ parameters.ort_version }}
@@ -25,7 +27,7 @@ jobs:
     displayName: 'Copy Onnxruntime C API library files to ArtifactStagingDirectory'
     inputs:
       SourceFolder: '$(Build.SourcesDirectory)/ort/lib'
-      TargetFolder: '$(Build.ArtifactStagingDirectory)/lib'
+      TargetFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)/lib'
 
   - task: CopyFiles@2
     displayName: 'Copy GenAi C API library files to ArtifactStagingDirectory'
@@ -33,7 +35,7 @@ jobs:
       SourceFolder: '$(Build.SourcesDirectory)/build/release/${{ parameters.ep }}_default/Release'
       Contents: |
         onnxruntime-genai.so
-      TargetFolder: '$(Build.ArtifactStagingDirectory)/lib'
+      TargetFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)/lib'
 
   - task: CopyFiles@2
     displayName: 'Copy GenAi C API header to ArtifactStagingDirectory'
@@ -41,7 +43,7 @@ jobs:
       SourceFolder: '$(Build.SourcesDirectory)/src'
       Contents: |
         ort_genai_c.h
-      TargetFolder: '$(Build.ArtifactStagingDirectory)/include'
+      TargetFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)/include'
 
   - task: CopyFiles@2
     displayName: 'Copy other files to ArtifactStagingDirectory'
@@ -53,12 +55,21 @@ jobs:
         SECURITY.md
         README.md
         ThirdPartyNotices.txt
-      TargetFolder: '$(Build.ArtifactStagingDirectory)'
+      TargetFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)'
+
+  - task: ArchiveFiles@2
+    inputs:
+      rootFolderOrFile: '$(Build.ArtifactStagingDirectory)\$(artifactName)'
+      includeRootFolder: true
+      archiveType: 'zip' # Options: zip, 7z, tar, wim
+      archiveFile: '$(Build.ArtifactStagingDirectory)\$(artifactName).zip'
+      replaceExistingArchive: true
 
   - task: PublishBuildArtifacts@1
     displayName: 'Publish Artifact: ONNXRuntime Genai capi'
     inputs:
-      ArtifactName: onnxruntime-genai-capi-win-${{ parameters.ep }}-${{ parameters.arch }}
+      ArtifactName: $(artifactName)
+      targetPath: '$(Build.ArtifactStagingDirectory)\$(artifactName).zip'
 
   - template: steps/compliant-and-cleanup-step.yml
 
