@@ -59,6 +59,11 @@ steps:
   workingDirectory: '$(Build.SourcesDirectory)'
 
 - powershell: |
+    Remove-Item *tensorrt*  -Force
+  displayName: Remove TensorRT
+  workingDirectory: '$(Build.SourcesDirectory)/ort'
+
+- powershell: |
     azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v${{ parameters.cuda_version }}" '$(Build.SourcesDirectory)\cuda_sdk'
   displayName: 'Download CUDA'
   condition: eq('${{ parameters.ep }}', 'cuda')
