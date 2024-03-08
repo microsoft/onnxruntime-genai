@@ -104,7 +104,7 @@ jobs:
       DoEsrp: true
       Pattern: '*.pyd,*.dll'
 
-  - bash: |
+  - powershell: |
       cmake --build build --config $(BuildConfig) --parallel --target PyPackageBuild
     displayName: 'Build Python Wheel'
 
