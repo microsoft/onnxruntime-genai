@@ -36,15 +36,20 @@ stages:
     - template: jobs/py-linux-packaging-job.yml
       parameters:
         ort_version: ${{ parameters.ort_version }}
+        arch: 'x64'
+        ep: 'cpu'
   - ${{ if eq(parameters.enable_linux_gpu, true) }}:
     - template: jobs/py-linux-packaging-job.yml
       parameters:
         ort_version: ${{ parameters.ort_version }}
+        arch: 'x64'
+        ep: 'cuda'
   - ${{ if eq(parameters.enable_linux_arm, true) }}:
     - template: jobs/py-linux-packaging-job.yml
       parameters:
-        arch: 'arm64'
         ort_version: ${{ parameters.ort_version }}
+        arch: 'arm64'
+        ep: 'cpu'
 
 
 
