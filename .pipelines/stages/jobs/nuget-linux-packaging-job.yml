@@ -9,15 +9,15 @@ parameters:
   type: string
 
 jobs:
-- job: Windows_Nuget_Packaging_${{ parameters.arch }}_${{ parameters.ep }}
-  pool: 'onnxruntime-Win-CPU-2022'
+- job: Linux_Nuget_Packaging_${{ parameters.arch }}_${{ parameters.ep }}
+  pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
   variables:
   - name: build_config
     value: 'Release'
   - name: artifactName
-    value: onnxruntime-genai-nuget-win-${{ parameters.ep }}-${{ parameters.arch }}
+    value: onnxruntime-genai-nuget-linux-${{ parameters.ep }}-${{ parameters.arch }}
   - name: build_dir
-    value: 'build/release/${{ parameters.ep }}_default'
+    value: 'build/gcc_${{ parameters.ep }}/release'
   - name: id
     ${{ if eq(parameters.ep, 'cpu') }}:
       value: Microsoft.ML.OnnxRuntimeGenAI
@@ -27,7 +27,7 @@ jobs:
   workspace:
     clean: all
   steps:
-  - template: steps/win-build-step.yml
+  - template: steps/linux-build-step.yml
     parameters:
       arch: ${{ parameters.arch }}
       ort_version: ${{ parameters.ort_version }}

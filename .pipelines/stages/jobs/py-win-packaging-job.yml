@@ -60,10 +60,10 @@ jobs:
 
   - template: steps/win-esrp-dll-step.yml
     parameters:
-      FolderPath: '$(Build.SourcesDirectory)\build\release\${{ parameters.ep }}_default\Release\wheel\onnxruntime_genai'
-      DisplayName: 'ESRP - Sign Native dlls'
+      FolderPath: '$(Build.SourcesDirectory)\build\release\${{ parameters.ep }}_default\wheel\onnxruntime_genai'
+      DisplayName: 'ESRP - PYD Sign'
       DoEsrp: true
-      Pattern: '*.pyd,*.dll'
+      Pattern: '*.pyd'
 
   - powershell: |
       cmake --build --preset windows_${{ parameters.arch }}_${{ parameters.ep }}_release --parallel --PyPackageBuild

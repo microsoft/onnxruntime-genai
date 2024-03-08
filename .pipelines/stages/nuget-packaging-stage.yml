@@ -32,7 +32,7 @@ stages:
         cuda_version: ${{ parameters.cuda_version }}
         ort_version: ${{ parameters.ort_version }}
         arch: 'x64'
-        ep: 'gpu'
+        ep: 'cuda'
   - ${{ if eq(parameters.enable_win_arm, true) }}:
     - template: jobs/nuget-win-packaging-job.yml
       parameters:
