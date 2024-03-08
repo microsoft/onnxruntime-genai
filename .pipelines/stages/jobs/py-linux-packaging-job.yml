@@ -43,6 +43,7 @@ jobs:
       ort_version: ${{ parameters.ort_version }}
       ep: ${{ parameters.ep }}
       cuda_version: ${{ parameters.cuda_version }}
+      target: 'python'
 
   - script: |
       ls $(Build.SourcesDirectory) -R

@@ -71,12 +71,16 @@ jobs:
       archiveFile: '$(Build.ArtifactStagingDirectory)\$(artifactName).zip'
       replaceExistingArchive: true
 
+  - task: DeleteFiles@1
+    inputs:
+      SourceFolder: '$(Build.ArtifactStagingDirectory)\$(artifactName)'
+      Contents: '*'
+      RemoveSourceFolder: true
+
   - task: PublishBuildArtifacts@1
     displayName: 'Publish Artifact: ONNXRuntime Genai capi'
     inputs:
       ArtifactName: $(artifactName)
-      targetPath: '$(Build.ArtifactStagingDirectory)\$(artifactName).zip'
-
 
   - template: steps/compliant-and-cleanup-step.yml
 
