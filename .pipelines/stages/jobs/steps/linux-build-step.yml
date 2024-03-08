@@ -1,0 +1,191 @@
+parameters:
+  arch: 'x64'
+  ort_version: '1.17.1'
+  ep: 'cpu'
+  cuda_version: '11.8'
+
+steps:
+
+- checkout: self # due to checkout multiple repos, the root directory is $(Build.SourcesDirectory)/onnxruntime-genai,
+  clean: true
+  submodules: recursive
+
+- checkout: manylinux # due to checkout multiple repos, the root directory is $(Build.SourcesDirectory)/manylinux,
+  clean: true
+  submodules: recursive
+
+- template: steps/set-nightly-build-option-variable-step.yml
+
+- task: DownloadGitHubRelease@0
+  inputs:
+    connection: 'GitHub - Release'
+    userRepository: 'microsoft/onnxruntime'
+    defaultVersionType: 'specificTag'
+    version: 'v${{ parameters.ort_version }}'
+    ${{ if eq(parameters.ep, 'cuda') }}:
+      ${{ if eq(parameters.cuda_version, '11.8') }}:
+        itemPattern: 'onnxruntime-linux-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}*'
+      ${{ else }}:
+        itemPattern: 'onnxruntime-linux-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}*'
+    ${{ else }}:
+      itemPattern: 'onnxruntime-linux-${{ parameters.arch }}-${{ parameters.ort_version }}*'
+    downloadPath: '$(Build.SourcesDirectory)'
+  displayName: Download ONNXRuntime ${{ parameters.arch }} ${{ parameters.ep }}
+    -
+- task: ExtractFiles@1
+  inputs:
+    archiveFilePatterns: '**/*.tgz'
+    destinationFolder: '$(Build.SourcesDirectory)/onnxruntime-genai'
+    cleanDestinationFolder: false
+    overwriteExistingFiles: true
+  displayName: Unzip OnnxRuntime
+
+- bash: |
+    mv  onnxruntime-linux-$(buildArch)-${{ parameters.ort_version }} ort
+  displayName: Rename Onnxruntime to ort
+  workingDirectory: '$(Build.SourcesDirectory)/onnxruntime-genai'
+
+- checkout: self
+  clean: true
+  submodules: recursive
+- task: onebranch.pipeline.tsaoptions@1
+  displayName: 'OneBranch TSAOptions'
+  inputs:
+    tsaConfigFilePath: '$(Build.SourcesDirectory)\.config\tsaoptions.json'
+    appendSourceBranchName: false
+
+- template: set-nightly-build-option-variable-step.yml
+
+- task: DownloadGitHubRelease@0
+  inputs:
+    connection: 'GitHub - Release'
+    userRepository: 'microsoft/onnxruntime'
+    defaultVersionType: 'specificTag'
+    version: 'v${{ parameters.ort_version }}'
+    ${{ if eq(parameters.ep, 'cuda') }}:
+      ${{ if eq(parameters.cuda_version, '11.8') }}:
+        itemPattern: 'onnxruntime-linux-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}*'
+      ${{ else }}:
+        itemPattern: 'onnxruntime-linux-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}*'
+    ${{ else }}:
+      itemPattern: 'onnxruntime-linux-${{ parameters.arch }}-${{ parameters.ort_version }}*'
+    downloadPath: '$(Build.SourcesDirectory)'
+  displayName: Download ONNXRuntime ${{ parameters.arch }} ${{ parameters.ep }}
+
+- task: ExtractFiles@1
+  inputs:
+    archiveFilePatterns: '**/*.tgz'
+    destinationFolder: '$(Build.SourcesDirectory)'
+    cleanDestinationFolder: false
+    overwriteExistingFiles: true
+  displayName: Unzip OnnxRuntime
+
+- bash: |
+    mv onnxruntime-linux-${{ parameters.arch }}-${{ parameters.ort_version }} ort
+  displayName: Rename Onnxruntime CPU to ort
+  condition: eq('${{ parameters.ep }}', 'cpu')
+  workingDirectory: '$(Build.SourcesDirectory)'
+
+- bash: |
+    mv onnxruntime-linux-${{ parameters.arch }}-gpu-${{ parameters.ort_version }} ort
+  displayName: Rename Onnxruntime CUDA 11 to ort
+  condition: and(eq('${{ parameters.ep }}', 'cuda'), eq('${{ parameters.cuda_version }}', '11.8'))
+  workingDirectory: '$(Build.SourcesDirectory)'
+
+- bash: |
+    mv onnxruntime-linux-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }} ort
+  displayName: Rename Onnxruntime CUDA 12 to ort
+  condition: and(eq('${{ parameters.ep }}', 'cuda'), eq('${{ parameters.cuda_version }}', '12.2'))
+  workingDirectory: '$(Build.SourcesDirectory)'
+
+- script: |
+    set -e -x
+    az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
+    az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
+    python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_${{ parameters.ep }} \
+      --context tools/ci_build/github/linux/docker/manylinux \
+      --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
+      --container-registry onnxruntimebuildcache \
+      --manylinux-src $(Build.SourcesDirectory)/manylinux \
+      --multiple_repos \
+      --repository onnxruntime${{ parameters.ep }}build${{ parameters.arch }}
+  displayName: 'Get Docker Image'
+  workingDirectory: '$(Build.SourcesDirectory)/onnxruntime-genai'
+
+- script: |
+    set -e -x
+    docker run \
+    --rm \
+    --volume $(Build.SourcesDirectory)/onnxruntime-genai:/onnxruntime_src \
+    -w /onnxruntime_src/ onnxruntime${{ parameters.ep }}build$(docker_arch) \
+    bash -c " \
+        /usr/bin/cmake --preset linux_gcc_${{ parameters.ep }}_release \
+        -DENABLE_TESTS=OFF \
+        -DMANYLINUX=ON \
+        -DPYTHON_EXECUTABLE=/opt/python/cp38-cp38/bin/python3.8 && \
+        /usr/bin/cmake --build --preset linux_gcc_${{ parameters.ep }}_release"
+  displayName: 'Build Python Wheel 3.8'
+  workingDirectory: '$(Build.SourcesDirectory)/onnxruntime-genai'
+
+- script: |
+    set -e -x
+    docker run \
+    --rm \
+    --volume $(Build.SourcesDirectory)/onnxruntime-genai:/onnxruntime_src \
+    -w /onnxruntime_src/ onnxruntime${{ parameters.ep }}build$(docker_arch) \
+      bash -c " \
+        /usr/bin/cmake --preset linux_gcc_${{ parameters.ep }}_release \
+        -DENABLE_TESTS=OFF \
+        -DMANYLINUX=ON \
+        -DPYTHON_EXECUTABLE=/opt/python/cp39-cp39/bin/python3.9 && \
+        /usr/bin/cmake --build --preset linux_gcc_${{ parameters.ep }}_release"
+  displayName: 'Build Python Wheel 3.9'
+  workingDirectory: '$(Build.SourcesDirectory)/onnxruntime-genai'
+- script: |
+    set -e -x
+    docker run \
+    --rm \
+    --volume $(Build.SourcesDirectory)/onnxruntime-genai:/onnxruntime_src \
+    -w /onnxruntime_src/ onnxruntime${{ parameters.ep }}build$(docker_arch) \
+      bash -c " \
+        /usr/bin/cmake --preset linux_gcc_${{ parameters.ep }}_release \
+        -DENABLE_TESTS=OFF \
+        -DMANYLINUX=ON \
+        -DPYTHON_EXECUTABLE=/opt/python/cp310-cp310/bin/python3.10 && \
+        /usr/bin/cmake --build --preset linux_gcc_${{ parameters.ep }}_release"
+  displayName: 'Build Python Wheel 3.10'
+  workingDirectory: '$(Build.SourcesDirectory)/onnxruntime-genai'
+- script: |
+    set -e -x
+    docker run \
+    --rm \
+    --volume $(Build.SourcesDirectory)/onnxruntime-genai:/onnxruntime_src \
+    -w /onnxruntime_src/ onnxruntime${{ parameters.ep }}build$(docker_arch) \
+      bash -c " \
+        /usr/bin/cmake --preset linux_gcc_${{ parameters.ep }}_release \
+        -DENABLE_TESTS=OFF \
+        -DMANYLINUX=ON \
+        -DPYTHON_EXECUTABLE=/opt/python/cp311-cp311/bin/python3.11 && \
+        /usr/bin/cmake --build --preset linux_gcc_cpu_release"
+  displayName: 'Build Python Wheel 3.11'
+  workingDirectory: '$(Build.SourcesDirectory)/onnxruntime-genai'
+- script: |
+    set -e -x
+    docker run \
+    --rm \
+    --volume $(Build.SourcesDirectory)/onnxruntime-genai:/onnxruntime_src \
+    -w /onnxruntime_src/ onnxruntime${{ parameters.ep }}build$(docker_arch) \
+      bash -c " \
+        /usr/bin/cmake --preset linux_gcc_${{ parameters.ep }}_release \
+        -DENABLE_TESTS=OFF \
+        -DMANYLINUX=ON \
+        -DPYTHON_EXECUTABLE=/opt/python/cp312-cp312/bin/python3.12 && \
+        /usr/bin/cmake --build --preset linux_gcc_${{ parameters.ep }}_release"
+  displayName: 'Build Python Wheel 3.12'
+  workingDirectory:
+
+- task: BinSkim@4
+  displayName: 'Run BinSkim'
+  inputs:
+    AnalyzeTargetGlob: '$(Build.SourcesDirectory)/**/*genai.so'
+  continueOnError: true

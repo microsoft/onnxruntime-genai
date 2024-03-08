@@ -22,38 +22,12 @@ jobs:
     value: '1.17.1'
 
   steps:
-  - checkout: self # due to checkout multiple repos, the root directory is $(Build.SourcesDirectory)/onnxruntime-genai,
-    clean: true
-    submodules: recursive
-
-  - checkout: manylinux # due to checkout multiple repos, the root directory is $(Build.SourcesDirectory)/manylinux,
-    submodules: false
-
-  - template: steps/set-nightly-build-option-variable-step.yml
-
-  - task: DownloadGitHubRelease@0
-    inputs:
-      connection: 'GitHub - Release'
-      userRepository: 'microsoft/onnxruntime'
-      defaultVersionType: 'specificTag'
-      version: 'v${{ parameters.ort_version }}'
-      itemPattern: 'onnxruntime-linux-x64-gpu-${{ parameters.ort_version }}*'
-      downloadPath: '$(Build.SourcesDirectory)'
-    displayName: Download the ONNXRuntime prebuilt package.
-      -
-  - task: ExtractFiles@1
-    inputs:
-      archiveFilePatterns: '**/*.tgz'
-      destinationFolder: '$(Build.SourcesDirectory)/onnxruntime-genai'
-      cleanDestinationFolder: false
-      overwriteExistingFiles: true
-    displayName: Unpack ONNXRuntime package.
-
-  - bash: |
-      mv  onnxruntime-linux-x64-gpu-${{ parameters.ort_version }} ort
-      rm -rf ort/lib/*tensorrt*
-    displayName: Rename Onnxruntime to ort
-    workingDirectory: '$(Build.SourcesDirectory)/onnxruntime-genai'
+  - template: steps/linux-build-step.yml
+    parameters:
+      arch: ${{ parameters.arch }}
+      ort_version: ${{ parameters.ort_version }}
+      ep: ${{ parameters.ep }}
+      cuda_version: ${{ parameters.cuda_version }}
 
   - script: |
       set -e -x
