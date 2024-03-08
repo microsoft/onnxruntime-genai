@@ -75,7 +75,7 @@ jobs:
   - task: CopyFiles@2
     displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
     inputs:
-      SourceFolder: '$(Build.SourcesDirectory)\build\gcc_${{ parameters.ep }}\release\wheel'
+      SourceFolder: '$(Build.SourcesDirectory)\build\release\${{ parameters.ep }}_default\wheel'
       Contents: '*.whl'
       TargetFolder: '$(Build.ArtifactStagingDirectory)'
 

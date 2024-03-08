@@ -8,6 +8,7 @@
       "name": "linux_gcc_cpu_release_asan",
       "displayName": "linux gcc cpu release asan",
       "inherits": [
+        "linux_gcc_asan_default",
         "linux_gcc_default",
         "linux_release_default"
       ],
@@ -18,6 +19,7 @@
       "displayName": "linux gcc cpu debug asan",
       "inherits": [
         "linux_gcc_asan_default",
+        "linux_gcc_default",
         "linux_debug_default"
       ],
       "binaryDir": "${sourceDir}/build/gcc_cpu/debug"
@@ -26,6 +28,7 @@
       "name": "linux_gcc_cpu_relwithdebinfo_asan",
       "displayName": "linux gcc cpu relwithdebinfo asan",
       "inherits": [
+        "linux_gcc_asan_default",
         "linux_gcc_default",
         "linux_relwithdebinfo_default"
       ],
@@ -35,8 +38,9 @@
       "name": "linux_gcc_cpu_minsizerel_asan",
       "displayName": "linux gcc cpu minsizerel asan",
       "inherits": [
+        "linux_gcc_asan_default",
         "linux_gcc_default",
-        "linux_MinSizeRel_default"
+        "linux_minsizerel_default"
       ],
       "binaryDir": "${sourceDir}/build/gcc_cpu/minsizerel"
     },
@@ -54,7 +58,7 @@
       "displayName": "linux gcc cpu debug",
       "inherits": [
         "linux_gcc_default",
-        "linux_release_default"
+        "linux_debug_default"
       ],
       "binaryDir": "${sourceDir}/build/gcc_cpu/debug"
     },
@@ -72,7 +76,7 @@
       "displayName": "linux gcc cpu minsizerel",
       "inherits": [
         "linux_gcc_default",
-        "linux_MinSizeRel_default"
+        "linux_minsizerel_default"
       ],
       "binaryDir": "${sourceDir}/build/gcc_cpu/minsizerel"
     },
@@ -81,96 +85,76 @@
       "displayName": "linux gcc cuda release asan",
       "inherits": [
         "linux_gcc_asan_default",
+        "linux_gcc_cuda_default",
         "linux_release_default"
       ],
-      "binaryDir": "${sourceDir}/build/gcc_cuda/release",
-      "cacheVariables": {
-        "USE_CUDA": "ON"
-      }
+      "binaryDir": "${sourceDir}/build/gcc_cuda/release"
     },
     {
       "name": "linux_gcc_cuda_debug_asan",
       "displayName": "linux gcc cuda debug asan",
       "inherits": [
         "linux_gcc_asan_default",
+        "linux_gcc_cuda_default",
         "linux_debug_default"
       ],
-      "binaryDir": "${sourceDir}/build/gcc_cuda/debug",
-      "cacheVariables": {
-        "USE_CUDA": "ON"
-      }
+      "binaryDir": "${sourceDir}/build/gcc_cuda/debug"
     },
     {
       "name": "linux_gcc_cuda_relwithdebinfo_asan",
       "displayName": "linux gcc cuda relwithdebinfo asan",
       "inherits": [
         "linux_gcc_asan_default",
+        "linux_gcc_cuda_default",
         "linux_relwithdebinfo_default"
       ],
-      "binaryDir": "${sourceDir}/build/gcc_cuda/relwithdebinfo",
-      "cacheVariables": {
-        "USE_CUDA": "ON"
-      }
+      "binaryDir": "${sourceDir}/build/gcc_cuda/relwithdebinfo"
     },
     {
       "name": "linux_gcc_cuda_minsizerel_asan",
       "displayName": "linux gcc cuda minsizerel asan",
       "inherits": [
         "linux_gcc_asan_default",
-        "linux_MinSizeRel_default"
+        "linux_gcc_cuda_default",
+        "linux_minsizerel_default"
       ],
-      "binaryDir": "${sourceDir}/build/gcc_cuda/minsizerel",
-      "cacheVariables": {
-        "USE_CUDA": "ON"
-      }
+      "binaryDir": "${sourceDir}/build/gcc_cuda/minsizerel"
     },
     {
       "name": "linux_gcc_cuda_release",
       "displayName": "linux gcc cuda release",
       "inherits": [
-        "linux_gcc_default",
+        "linux_gcc_cuda_default",
         "linux_release_default"
       ],
-      "binaryDir": "${sourceDir}/build/gcc_cuda/release",
-      "cacheVariables": {
-        "USE_CUDA": "ON"
-      }
+      "binaryDir": "${sourceDir}/build/gcc_cuda/release"
     },
     {
       "name": "linux_gcc_cuda_debug",
       "displayName": "linux gcc cuda debug",
       "inherits": [
-        "linux_gcc_default",
+        "linux_gcc_cuda_default",
         "linux_debug_default"
       ],
-      "binaryDir": "${sourceDir}/build/gcc_cuda/debug",
-      "cacheVariables": {
-        "USE_CUDA": "ON"
-      }
+      "binaryDir": "${sourceDir}/build/gcc_cuda/debug"
     },
     {
       "name": "linux_gcc_cuda_relwithdebinfo",
       "displayName": "linux gcc cuda relwithdebinfo",
       "inherits": [
-        "linux_gcc_default",
+        "linux_gcc_cuda_default",
         "linux_relwithdebinfo_default"
       ],
-      "binaryDir": "${sourceDir}/build/gcc_cuda/relwithdebinfo",
-      "cacheVariables": {
-        "USE_CUDA": "ON"
-      }
+      "binaryDir": "${sourceDir}/build/gcc_cuda/relwithdebinfo"
     },
     {
       "name": "linux_gcc_cuda_minsizerel",
       "displayName": "linux gcc cuda minsizerel",
       "inherits": [
-        "linux_gcc_default",
-        "linux_MinSizeRel_default"
+        "linux_gcc_cuda_default",
+        "linux_minsizerel_default"
       ],
-      "binaryDir": "${sourceDir}/build/gcc_cuda/minsizerel",
-      "cacheVariables": {
-        "USE_CUDA": "ON"
-      }
+      "binaryDir": "${sourceDir}/build/gcc_cuda/minsizerel"
     }
   ]
 }
