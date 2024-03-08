@@ -59,17 +59,18 @@ jobs:
 
   - task: ArchiveFiles@2
     inputs:
-      rootFolderOrFile: '$(Build.ArtifactStagingDirectory)\$(artifactName)'
+      rootFolderOrFile: '$(Build.ArtifactStagingDirectory)/$(artifactName)'
       includeRootFolder: true
-      archiveType: 'zip' # Options: zip, 7z, tar, wim
-      archiveFile: '$(Build.ArtifactStagingDirectory)\$(artifactName).zip'
+      archiveType: 'tar' # Options: zip, 7z, tar, wim      archiveType: 'tar' # Options: zip, 7z, tar, wim
+      tarCompression: 'gz'
+      archiveFile: '$(Build.ArtifactStagingDirectory)/$(artifactName).tgz'
       replaceExistingArchive: true
 
   - task: PublishBuildArtifacts@1
     displayName: 'Publish Artifact: ONNXRuntime Genai capi'
     inputs:
       ArtifactName: $(artifactName)
-      targetPath: '$(Build.ArtifactStagingDirectory)\$(artifactName).zip'
+      targetPath: '$(Build.ArtifactStagingDirectory)/$(artifactName).tgz'
 
   - template: steps/compliant-and-cleanup-step.yml
 
