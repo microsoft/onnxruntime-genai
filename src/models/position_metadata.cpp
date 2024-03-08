@@ -28,16 +28,18 @@ PositionMetadata::PositionMetadata(const Model& model, State& state, RoamingArra
   shape[0] *= state_.params_.search.num_beams;
   position_ids_shape_ = shape;
   attention_mask_shape_ = shape;
-
-  input_index_ = state_.inputs_.size();
 }
 
 void PositionMetadata::AddAttentionMask() {
+  mask_input_index_ = state_.inputs_.size();
+
   state_.inputs_.push_back(attention_mask_.get());
   state_.input_names_.push_back(model_.config_->model.decoder.inputs.attention_mask.c_str());
 }
 
 void PositionMetadata::AddPositionIDs() {
+  posid_input_index_ = state_.inputs_.size();
+
   state_.inputs_.push_back(position_ids_.get());
   state_.input_names_.push_back(model_.config_->model.decoder.inputs.position_ids.c_str());
 }
@@ -45,7 +47,7 @@ void PositionMetadata::AddPositionIDs() {
 void PositionMetadata::AddSeqlensK() {
   senlens_k_shape_ = {state_.params_.batch_size};
   seqlens_k_ = OrtValue::CreateTensor(model_.allocator_cpu_, senlens_k_shape_, type_);
-  // TODO: do math
+  // TODO: do math and set idx
   seqlens_k_ = model_.ExpandInputs(seqlens_k_, state_.params_.search.num_beams);
   state_.inputs_.push_back(seqlens_k_.get());
   state_.input_names_.push_back(model_.config_->model.decoder.inputs.seqlens_k.c_str());
@@ -53,7 +55,7 @@ void PositionMetadata::AddSeqlensK() {
 
 void PositionMetadata::AddTotalSequenceLength() {
   total_sequence_length_ = OrtValue::CreateTensor(model_.allocator_cpu_, total_sequence_length_shape_, type_);
-  // TODO: do math
+  // TODO: do math and set idx
   state_.inputs_.push_back(total_sequence_length_.get());
   state_.input_names_.push_back(model_.config_->model.decoder.inputs.total_sequence_length.c_str());
 }
@@ -63,7 +65,7 @@ void PositionMetadata::UpdatePositionIDs(int current_length) {
   if (initial_sequence_lengths_.size()) {
     position_ids_shape_[1] = 1;
     position_ids_ = OrtValue::CreateTensor(*model_.allocator_device_, position_ids_shape_, type_);
-    state_.inputs_[input_index_] = position_ids_.get();
+    state_.inputs_[posid_input_index_] = position_ids_.get();
 
     // Copy the initial values over to the device specific tensor
     switch (model_.device_type_) {
@@ -136,7 +138,7 @@ void PositionMetadata::UpdateAttentionMask(int current_length) {
         throw std::runtime_error("PositionIDs::Update - Unsupported device type");
     }
     attention_mask_ = std::move(next_attention_mask);
-    state_.inputs_[input_index_ + 1] = attention_mask_.get();
+    state_.inputs_[mask_input_index_] = attention_mask_.get();
   }
 }
 

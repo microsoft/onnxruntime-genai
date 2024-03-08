@@ -18,8 +18,8 @@ Gpt_State::Gpt_State(const Gpt_Model& model, RoamingArray<int32_t> sequence_leng
       model_{model},
       position_metadata_{model, *this, sequence_lengths_unk} {
   input_ids_.Add();
-  position_metadata_.AddAttentionMask();
   position_metadata_.AddPositionIDs();
+  position_metadata_.AddAttentionMask();
   logits_.Add();
   kv_cache_.Add();
 }
@@ -37,8 +37,8 @@ RoamingArray<float> Gpt_State::Run(int current_length, RoamingArray<int32_t> nex
 
 void Gpt_State::UpdateInputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> beam_indices, int current_length) {
   input_ids_.Update(next_tokens);
-  position_metadata_.UpdateAttentionMask(current_length);
   position_metadata_.UpdatePositionIDs(current_length);
+  position_metadata_.UpdateAttentionMask(current_length);
   kv_cache_.Update(beam_indices.GetCPU(), current_length);
 }
 

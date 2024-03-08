@@ -24,7 +24,8 @@ struct PositionMetadata {
 
   const Model& model_;
   State& state_;
-  size_t input_index_{~0U};
+  size_t mask_input_index_{~0U};
+  size_t posid_input_index_{~0U};
   ONNXTensorElementDataType type_;  // Common type for position_ids and attention_mask
 
   std::array<int64_t, 2> position_ids_shape_{};  // {params.batch_size*params.beam_size, params.sequence_length}
