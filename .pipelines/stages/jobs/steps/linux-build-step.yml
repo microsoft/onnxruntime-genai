@@ -83,7 +83,7 @@ steps:
       docker run \
       --rm \
       --volume $(Build.SourcesDirectory)/onnxruntime-genai:/onnxruntime_src \
-      -w /onnxruntime_src/ onnxruntime${{ parameters.ep }}build$(docker_arch) \
+      -w /onnxruntime_src/ onnxruntime${{ parameters.ep }}build${{ parameters.arch }} \
       bash -c " \
           /usr/bin/cmake --preset linux_gcc_${{ parameters.ep }}_release \
             -DENABLE_TESTS=OFF \
@@ -99,7 +99,7 @@ steps:
       docker run \
       --rm \
       --volume $(Build.SourcesDirectory)/onnxruntime-genai:/onnxruntime_src \
-      -w /onnxruntime_src/ onnxruntime${{ parameters.ep }}build$(docker_arch) \
+      -w /onnxruntime_src/ onnxruntime${{ parameters.ep }}build${{ parameters.arch }} \
         bash -c " \
           /usr/bin/cmake --preset linux_gcc_${{ parameters.ep }}_release \
             -DENABLE_TESTS=OFF \
@@ -115,7 +115,7 @@ steps:
       docker run \
       --rm \
       --volume $(Build.SourcesDirectory)/onnxruntime-genai:/onnxruntime_src \
-      -w /onnxruntime_src/ onnxruntime${{ parameters.ep }}build$(docker_arch) \
+      -w /onnxruntime_src/ onnxruntime${{ parameters.ep }}build${{ parameters.arch }} \
         bash -c " \
           /usr/bin/cmake --preset linux_gcc_${{ parameters.ep }}_release \
             -DENABLE_TESTS=OFF \
@@ -130,7 +130,7 @@ steps:
       docker run \
       --rm \
       --volume $(Build.SourcesDirectory)/onnxruntime-genai:/onnxruntime_src \
-      -w /onnxruntime_src/ onnxruntime${{ parameters.ep }}build$(docker_arch) \
+      -w /onnxruntime_src/ onnxruntime${{ parameters.ep }}build${{ parameters.arch }} \
         bash -c " \
           /usr/bin/cmake --preset linux_gcc_${{ parameters.ep }}_release \
             -DENABLE_TESTS=OFF \
@@ -145,7 +145,7 @@ steps:
       docker run \
       --rm \
       --volume $(Build.SourcesDirectory)/onnxruntime-genai:/onnxruntime_src \
-      -w /onnxruntime_src/ onnxruntime${{ parameters.ep }}build$(docker_arch) \
+      -w /onnxruntime_src/ onnxruntime${{ parameters.ep }}build${{ parameters.arch }} \
         bash -c " \
           /usr/bin/cmake --preset linux_gcc_${{ parameters.ep }}_release \
             -DENABLE_TESTS=OFF \
@@ -161,7 +161,7 @@ steps:
       docker run \
       --rm \
       --volume $(Build.SourcesDirectory)/onnxruntime-genai:/onnxruntime_src \
-      -w /onnxruntime_src/ onnxruntime${{ parameters.ep }}build$(docker_arch) \
+      -w /onnxruntime_src/ onnxruntime${{ parameters.ep }}build${{ parameters.arch }} \
       bash -c " \
           /usr/bin/cmake --preset linux_gcc_${{ parameters.ep }}_release \
             -DENABLE_TESTS=OFF && \
