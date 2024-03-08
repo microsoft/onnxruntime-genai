@@ -19,6 +19,7 @@
   <files>
     <file src="..\LICENSE" target="LICENSE" />
     <file src="..\README.md" target="README.md" />
+    <file src="..\ThirdPartyNotices.txt" target="ThirdPartyNotices.txt" />
 
     <file src="..\src\csharp\bin\$configuration$\netstandard2.1\Microsoft.ML.OnnxRuntimeGenAI.dll" target="lib\netstandard2.1" />
     <file src="..\src\csharp\bin\$configuration$\netstandard2.1\Microsoft.ML.OnnxRuntimeGenAI.pdb" target="lib\netstandard2.1" />

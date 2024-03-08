@@ -1,3 +1,6 @@
+#include <algorithm>
+#include <thread>
+
 #include "../generators.h"
 #include "../search.h"
 #include "model.h"
@@ -201,6 +204,11 @@ ONNXTensorElementDataType SessionInfo::GetOutputDataType(const std::string& name
 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
+
+  constexpr int min_thread_nums = 1;
+  constexpr int max_thread_nums = 16;
+  int num_of_cores = std::max(min_thread_nums, static_cast<int>(std::thread::hardware_concurrency() / 2));
+  session_options_->SetIntraOpNumThreads(std::min(num_of_cores, max_thread_nums));
 }
 
 Model::~Model() = default;
