@@ -64,9 +64,9 @@ jobs:
       DisplayName: 'ESRP - Sign Native dlls'
       DoEsrp: true
       Pattern: '*.pyd,*.dll'
-  #
+
   - powershell: |
-      cmake --build --preset windows_${{ parameters.arch }}_${{ parameters.ep }}_release --parallel --target ${{ parameters.target }}
+      cmake --build --preset windows_${{ parameters.arch }}_${{ parameters.ep }}_release --parallel --PyPackageBuild
     displayName: 'Build Python Wheel'
 
   - powershell: |
