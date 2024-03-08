@@ -63,8 +63,7 @@ const int32_t* OGA_API_CALL OgaSequencesGetSequenceData(const OgaSequences* p, s
 
 OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaDeviceType device_type, OgaModel** out) {
   OGA_TRY
-  auto provider_options = Generators::GetDefaultProviderOptions(static_cast<Generators::DeviceType>(device_type));
-  *out = reinterpret_cast<OgaModel*>(Generators::CreateModel(Generators::GetOrtEnv(), config_path, &provider_options).release());
+  *out = reinterpret_cast<OgaModel*>(Generators::CreateModel(Generators::GetOrtEnv(), config_path).release());
   return nullptr;
   OGA_CATCH
 }

@@ -47,24 +47,6 @@ GeneratorParams::GeneratorParams(const Model& model)
       cuda_stream{model.cuda_stream_} {
 }
 
-ProviderOptions GetDefaultProviderOptions([[maybe_unused]] DeviceType device_type) {
-  ProviderOptions options;
-  if (device_type == DeviceType::CUDA) {
-#if USE_CUDA
-    cudaStream_t cuda_stream;
-    cudaStreamCreate(&cuda_stream);
-
-    auto& cuda_options = options.emplace<OrtCUDAProviderOptions>();
-    cuda_options.has_user_compute_stream = true;
-    cuda_options.user_compute_stream = cuda_stream;
-#else
-    throw std::runtime_error("Trying to use cuda with the non cuda version of onnxruntime-genai");
-#endif
-  }
-
-  return options;
-}
-
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params) {
   return std::make_unique<Generator>(model, params);
 }

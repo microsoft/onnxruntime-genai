@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #pragma once
+#include <assert.h>
 #include <memory>
 #include "span.h"
 
@@ -94,6 +95,34 @@ struct cuda_event_holder {
   cudaEvent_t v_{};
 };
 
+struct cuda_stream_holder {
+  void Create() {
+    assert(!v_);
+    cudaStreamCreate(&v_);
+  }
+
+  ~cuda_stream_holder() {
+    if (v_)
+      (void)cudaStreamDestroy(v_);
+  }
+
+  operator cudaStream_t() const { return v_; }
+  cudaStream_t get() const { return v_; }
+
+ private:
+  cudaStream_t v_ {};
+};
+#else
+struct cuda_stream_holder {
+  void Create() {
+    assert(false);
+  }
+
+  operator cudaStream_t() const { return v_; }
+
+ private:
+  cudaStream_t v_{};
+};
 #endif
 
 #if USE_CUDA

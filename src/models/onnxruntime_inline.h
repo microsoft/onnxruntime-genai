@@ -150,6 +150,16 @@ inline std::unique_ptr<Allocator> Allocator::Create(const OrtSession& sess, cons
   return std::unique_ptr<Allocator>{static_cast<Ort::Allocator*>(p)};
 }
 
+inline void SetCurrentGpuDeviceId(int device_id) {
+  api->SetCurrentGpuDeviceId(device_id);
+}
+
+inline int GetCurrentGpuDeviceId() {
+  int id;
+  ThrowOnError(api->GetCurrentGpuDeviceId(&id));
+  return id;
+}
+
 }  // namespace Ort
 
 inline std::unique_ptr<OrtStatus> OrtStatus::Create(OrtErrorCode code, const std::string& what) {
@@ -441,6 +451,16 @@ inline OrtRunOptions& OrtRunOptions::SetTerminate() {
 inline OrtRunOptions& OrtRunOptions::UnsetTerminate() {
   Ort::ThrowOnError(Ort::api->RunOptionsUnsetTerminate(this));
   return *this;
+}
+
+inline std::unique_ptr<OrtCUDAProviderOptionsV2> OrtCUDAProviderOptionsV2::Create() {
+  OrtCUDAProviderOptionsV2* p;
+  Ort::ThrowOnError(Ort::api->CreateCUDAProviderOptions(&p));
+  return std::unique_ptr<OrtCUDAProviderOptionsV2>{p};
+}
+
+inline void OrtCUDAProviderOptionsV2::Update(const char* const* keys, const char* const* values, size_t count) {
+  Ort::ThrowOnError(Ort::api->UpdateCUDAProviderOptions(this, keys, values, count));
 }
 
 inline std::unique_ptr<OrtSessionOptions> OrtSessionOptions::Create() {

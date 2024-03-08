@@ -199,18 +199,8 @@ ONNXTensorElementDataType SessionInfo::GetOutputDataType(const std::string& name
   return result->second;
 }
 
-Model::Model(std::unique_ptr<Config> config, const ProviderOptions* provider_options) : config_{std::move(config)} {
-  session_options_ = OrtSessionOptions::Create();
-
-  if (provider_options != nullptr) {
-#if USE_CUDA
-    if (auto* options = std::get_if<OrtCUDAProviderOptions>(provider_options)) {
-      cuda_stream_ = reinterpret_cast<cudaStream_t>(options->user_compute_stream);
-      session_options_->AppendExecutionProvider_CUDA(*options);
-      device_type_ = DeviceType::CUDA;
-    }
-#endif
-  }
+Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
+  CreateSessionOptions();
 }
 
 Model::~Model() = default;
@@ -225,19 +215,76 @@ void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
   session_info_ = std::make_unique<SessionInfo>(session);
 }
 
+void Model::CreateSessionOptions() {
+  session_options_ = OrtSessionOptions::Create();
+  auto& ort_options = *session_options_;
+  auto& options = config_->model.decoder.session_options;
+
+  if (options.intra_op_num_threads.has_value()) {
+    ort_options.SetIntraOpNumThreads(options.intra_op_num_threads.value());
+  }
+
+  if (options.inter_op_num_threads.has_value()) {
+    ort_options.SetInterOpNumThreads(options.inter_op_num_threads.value());
+  }
+
+  if (options.enable_cpu_mem_arena.has_value()) {
+    if (options.enable_cpu_mem_arena.value())
+      ort_options.EnableCpuMemArena();
+    else
+      ort_options.DisableCpuMemArena();
+  }
+
+  if (options.enable_mem_pattern.has_value()) {
+    if (options.enable_cpu_mem_arena.value())
+      ort_options.EnableMemPattern();
+    else
+      ort_options.DisableMemPattern();
+  }
+
+  if (options.log_id.has_value()) {
+    ort_options.SetLogId(options.log_id.value().c_str());
+  }
+
+  if (options.log_severity_level.has_value()) {
+    ort_options.SetLogSeverityLevel(options.log_severity_level.value());
+  }
+
+  for (auto& provider_options : options.provider_options) {
+    if (provider_options.name == "cuda") {
+      auto ort_provider_options = OrtCUDAProviderOptionsV2::Create();
+      std::vector<const char*> keys, values;
+      for (auto& option : provider_options.options) {
+        keys.emplace_back(option.first.c_str());
+        values.emplace_back(option.second.c_str());
+      }
+
+      // Create and set our cudaStream_t
+      cuda_stream_.Create();
+      auto cuda_stream_string = std::to_string(reinterpret_cast<uintptr_t>(cuda_stream_.get()));
+      keys.emplace_back("user_compute_stream");
+      values.emplace_back(cuda_stream_string.c_str());    
+
+      ort_provider_options->Update(keys.data(), values.data(), keys.size());
+      ort_options.AppendExecutionProvider_CUDA_V2(*ort_provider_options);
+      device_type_ = DeviceType::CUDA;
+    }
+  }
+}
+
 std::unique_ptr<Tokenizer> Model::CreateTokenizer() const {
   return std::make_unique<Tokenizer>(*config_);
 }
 
-std::unique_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const ProviderOptions* provider_options) {
+std::unique_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path) {
   auto config = std::make_unique<Config>(config_path);
 
   if (config->model.type == "gpt2")
-    return std::make_unique<Gpt_Model>(std::move(config), ort_env, provider_options);
+    return std::make_unique<Gpt_Model>(std::move(config), ort_env);
   if (config->model.type == "llama" || config->model.type == "gemma" || config->model.type == "mistral" || config->model.type == "phi")
-    return std::make_unique<DecoderOnly_Model>(std::move(config), ort_env, provider_options);
+    return std::make_unique<DecoderOnly_Model>(std::move(config), ort_env);
   if (config->model.type == "whisper")
-    return std::make_unique<Whisper_Model>(std::move(config), ort_env, provider_options);
+    return std::make_unique<Whisper_Model>(std::move(config), ort_env);
 
   throw std::runtime_error("Unsupported model_type in config.json: " + config->model.type);
 }

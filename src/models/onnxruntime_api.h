@@ -101,6 +101,9 @@ struct Exception : std::exception {
 /// This is a C++ wrapper for OrtApi::GetAvailableProviders() and returns a vector of strings representing the available execution providers.
 std::vector<std::string> GetAvailableProviders();
 
+inline void SetCurrentGpuDeviceId(int device_id);
+inline int GetCurrentGpuDeviceId();
+
 /** \brief IEEE 754 half-precision floating point data type
  * \details It is necessary for type dispatching to make use of C++ API
  * The type is implicitly convertible to/from uint16_t.
@@ -329,6 +332,15 @@ struct OrtRunOptions {
   OrtRunOptions& UnsetTerminate();
 
   static void operator delete(void* p) { Ort::api->ReleaseRunOptions(reinterpret_cast<OrtRunOptions*>(p)); }
+  Ort::Abstract make_abstract;
+};
+
+struct OrtCUDAProviderOptionsV2 {
+  static std::unique_ptr<OrtCUDAProviderOptionsV2> Create();
+
+  void Update(const char* const* keys, const char* const* values, size_t count);
+
+  static void operator delete(void* p) { Ort::api->ReleaseCUDAProviderOptions(reinterpret_cast<OrtCUDAProviderOptionsV2*>(p)); }
   Ort::Abstract make_abstract;
 };
 

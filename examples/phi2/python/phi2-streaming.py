@@ -3,7 +3,8 @@
 print("Loading model...")
 
 # The first argument is the name of the folder containing the model files
-model=og.Model(f'example-models/phi2-int4-cpu', og.DeviceType.CPU)
+# model=og.Model(f'example-models/phi2-int4-cpu')
+model=og.Model(f'example-models/phi2-fp16-cuda')
 print("Model loaded")
 tokenizer=og.Tokenizer(model)
 print("Tokenizer created")
