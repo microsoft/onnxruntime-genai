@@ -13,11 +13,11 @@ jobs:
   pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
   variables:
   - name: build_config
-    value: 'Release'
+    value: 'release'
   - name: artifactName
     value: onnxruntime-genai-nuget-linux-${{ parameters.ep }}-${{ parameters.arch }}
   - name: build_dir
-    value: 'build/gcc_${{ parameters.ep }}/release'
+    value: 'build/gcc_${{ parameters.ep }}'
   - name: id
     ${{ if eq(parameters.ep, 'cpu') }}:
       value: Microsoft.ML.OnnxRuntimeGenAI
@@ -35,35 +35,36 @@ jobs:
       cuda_version: ${{ parameters.cuda_version }}
       target: 'onnxruntime-genai'
 
-  - powershell: |
+  - script: |
       dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(build_config)" -p:NativeBuildOutputDir="$(build_dir)\$(build_config)"
     displayName: 'Build CSharp'
-    workingDirectory: '$(Build.SourcesDirectory)\src\csharp'
+    workingDirectory: '$(Build.SourcesDirectory)/src/csharp'
 
   - template: steps/win-esrp-dll-step.yml
     parameters:
-      FolderPath: '$(Build.SourcesDirectory)\src\csharp\bin\Release\'
+      FolderPath: '$(Build.SourcesDirectory)/src/csharp/bin/$(build_config)/'
       DisplayName: 'ESRP - Sign C# dlls'
 
-  - powershell: |
-      $VERSION = '0.1.0-rc1'
-      nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.nuspec `
-        -Prop version=$VERSION `
-        -Prop id=$(id) `
-        -Prop configuration=$(build_config) `
+  - script: |
+      VERSION="0.1.0-rc1"
+      nuget pack Microsoft.ML.OnnxRuntimeGenAI.nuspec \
+        -Prop version=$VERSION \
+        -Prop id=$(id) \
+        -Prop configuration=$(build_config) \
         -Prop buildPath=$(build_dir)
-      nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec `
-        -Prop version=$VERSION `
+      nuget pack Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec \
+        -Prop version=$VERSION \
         -Prop configuration=$(build_config)
     displayName: 'Nuget Packaging'
-    workingDirectory: '$(Build.SourcesDirectory)\nuget'
+    workingDirectory: '$(Build.SourcesDirectory)/nuget'
 
-  - powershell: |
-      Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
+  - script: |
+      ls $(Build.SourcesDirectory) -R
+
   - task: CopyFiles@2
     displayName: 'Copy Nuget to: $(Build.ArtifactStagingDirectory)'
     inputs:
-      SourceFolder: '$(Build.SourcesDirectory)\nuget'
+      SourceFolder: '$(Build.SourcesDirectory)/nuget'
       Contents: '*.nupkg'
       TargetFolder: '$(Build.ArtifactStagingDirectory)'
 

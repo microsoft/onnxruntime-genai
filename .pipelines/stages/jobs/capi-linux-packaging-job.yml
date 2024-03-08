@@ -23,6 +23,9 @@ jobs:
       ep: ${{ parameters.ep }}
       cuda_version: ${{ parameters.cuda_version }}
 
+  - script: |
+      ls $(Build.SourcesDirectory) -R
+
   - task: CopyFiles@2
     displayName: 'Copy Onnxruntime C API library files to ArtifactStagingDirectory'
     inputs:
