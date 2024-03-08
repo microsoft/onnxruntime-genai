@@ -14,7 +14,7 @@ steps:
   clean: true
   submodules: recursive
 
-- template: steps/set-nightly-build-option-variable-step.yml
+- template: set-nightly-build-option-variable-step.yml
 
 - task: DownloadGitHubRelease@0
   inputs:
