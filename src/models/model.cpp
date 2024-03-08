@@ -204,11 +204,6 @@ ONNXTensorElementDataType SessionInfo::GetOutputDataType(const std::string& name
 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
-
-  constexpr int min_thread_nums = 1;
-  constexpr int max_thread_nums = 16;
-  int num_of_cores = std::max(min_thread_nums, static_cast<int>(std::thread::hardware_concurrency() / 2));
-  session_options_->SetIntraOpNumThreads(std::min(num_of_cores, max_thread_nums));
 }
 
 Model::~Model() = default;
@@ -227,6 +222,12 @@ void Model::CreateSessionOptions() {
   session_options_ = OrtSessionOptions::Create();
   auto& ort_options = *session_options_;
   auto& options = config_->model.decoder.session_options;
+
+  // Default to a limit of 16 threads to optimize performance
+  constexpr int min_thread_nums = 1;
+  constexpr int max_thread_nums = 16;
+  int num_of_cores = std::max(min_thread_nums, static_cast<int>(std::thread::hardware_concurrency() / 2));
+  ort_options.SetIntraOpNumThreads(std::min(num_of_cores, max_thread_nums));
 
   if (options.intra_op_num_threads.has_value()) {
     ort_options.SetIntraOpNumThreads(options.intra_op_num_threads.value());
