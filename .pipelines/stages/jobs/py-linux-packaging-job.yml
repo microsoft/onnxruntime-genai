@@ -15,7 +15,7 @@ parameters:
   - 'cpu'
   - 'cuda'
 jobs:
-- job: Linux_${{ parameters.ep }}_Wheels
+- job: Linux_${{ parameters.ep }}_${{ parameters.arch }}_Wheels
   strategy:
     matrix:
       x64:

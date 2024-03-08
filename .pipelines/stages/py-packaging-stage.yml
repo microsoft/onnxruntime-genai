@@ -15,7 +15,7 @@ parameters:
   type: string
 
 stages:
-- stage: py_packaging
+- stage: Python Packaging Stage
   jobs:
   - ${{ if eq(parameters.enable_win_cpu, true) }}:
     - template: jobs/py-win-cpu-packaging-job.yml
