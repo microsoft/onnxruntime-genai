@@ -18,15 +18,15 @@ stages:
 - stage: Python_Packaging_Stage
   jobs:
   - ${{ if eq(parameters.enable_win_cpu, true) }}:
-    - template: jobs/py-win-cpu-packaging-job.yml
+    - template: jobs/py-win-packaging-job.yml
       parameters:
         ort_version: ${{ parameters.ort_version }}
   - ${{ if eq(parameters.enable_win_gpu, true) }}:
-    - template: jobs/py-win-gpu-packaging-job.yml
+    - template: jobs/py-win-packaging-job.yml
       parameters:
         ort_version: ${{ parameters.ort_version }}
   - ${{ if eq(parameters.enable_win_arm, true) }}:
-    - template: jobs/py-win-cpu-packaging-job.yml
+    - template: jobs/py-win-packaging-job.yml
       parameters:
         arch: 'arm64'
         ort_version: ${{ parameters.ort_version }}
