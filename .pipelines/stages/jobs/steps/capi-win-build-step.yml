@@ -58,22 +58,21 @@ steps:
   condition: and(eq('${{ parameters.ep }}', 'gpu'), eq('${{ parameters.cuda_version }}', '12.2'))
   workingDirectory: '$(Build.SourcesDirectory)'
 
-- bash: |
+- powershell: |
     set -e -x
     azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v${{ parameters.cuda_version }}" '$(Build.SourcesDirectory)\cuda_sdk'
   displayName: 'Download CUDA'
   condition: eq('${{ parameters.ep }}', 'gpu')
   workingDirectory: '$(Build.SourcesDirectory)'
-- bash: |
-    set -e -x
+
+- powershell: |
     cmake --preset windows_x64_cuda_release -T cuda='$(Build.SourcesDirectory)\cuda_sdk\v${{ parameters.cuda_version }}'
     cmake --build --preset windows_x64_cuda_release --parallel
   displayName: 'Configure CMake C API with CUDA'
   condition: eq('${{ parameters.ep }}', 'gpu')
   workingDirectory: '$(Build.SourcesDirectory)'
 
-- bash: |
-    set -e -x
+- powershell: |
     cmake --preset windows_x64_cpu_release
     cmake --build --preset windows_x64_cpu_release --parallel
   displayName: 'Configure CMake C API without CUDA'
