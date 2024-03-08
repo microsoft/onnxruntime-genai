@@ -36,7 +36,7 @@ jobs:
       ep: ${{ parameters.ep }}
       cuda_version: ${{ parameters.cuda_version }}
 
-  - bash:
+  - powershell: |
       dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(build_config)" -p:NativeBuildOutputDir="$(build_dir)\$(build_config)"
     displayName: 'Build CSharp'
     workingDirectory: '$(Build.SourcesDirectory)\src\csharp'
