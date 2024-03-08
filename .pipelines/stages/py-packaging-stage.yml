@@ -21,15 +21,20 @@ stages:
     - template: jobs/py-win-packaging-job.yml
       parameters:
         ort_version: ${{ parameters.ort_version }}
+        arch: 'x64'
+        ep: 'cpu'
   - ${{ if eq(parameters.enable_win_gpu, true) }}:
     - template: jobs/py-win-packaging-job.yml
       parameters:
         ort_version: ${{ parameters.ort_version }}
+        arch: 'x64'
+        ep: 'cuda'
   - ${{ if eq(parameters.enable_win_arm, true) }}:
     - template: jobs/py-win-packaging-job.yml
       parameters:
-        arch: 'arm64'
         ort_version: ${{ parameters.ort_version }}
+        arch: 'arm64'
+        ep: 'cpu'
 
 
   - ${{ if eq(parameters.enable_linux_cpu, true) }}:
