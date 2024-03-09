@@ -4,7 +4,7 @@ parameters:
   ep: 'cpu'
   cuda_version: '11.8'
   target: 'onnxruntime-genai'
-  python_version: '3.8'
+  python_version: "3.8"
   genai_src: '$(Build.SourcesDirectory)/onnxruntime-genai'
 steps:
 
