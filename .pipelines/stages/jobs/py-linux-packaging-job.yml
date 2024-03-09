@@ -23,14 +23,14 @@ jobs:
     matrix:
       Python38:
         python_version: '3.8'
-#      Python39:
-#        python_version: '3.8'
-#      Python310:
-#        python_version: '3.8'
-#      Python311:
-#        python_version: '3.8'
-#      Python312:
-#        python_version: '3.8'
+      Python39:
+        python_version: '3.9'
+      Python310:
+        python_version: '3.10'
+      Python311:
+        python_version: '3.11'
+      Python312:
+        python_version: '3.12'
   timeoutInMinutes: 240
   workspace:
     clean: all
