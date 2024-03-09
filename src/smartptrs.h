@@ -119,6 +119,7 @@ struct cuda_stream_holder {
   }
 
   operator cudaStream_t() const { return v_; }
+  cudaStream_t get() const { return v_; }
 
  private:
   cudaStream_t v_{};

@@ -276,8 +276,21 @@ void Model::CreateSessionOptions() {
 
       ort_provider_options->Update(keys.data(), values.data(), keys.size());
       ort_options.AppendExecutionProvider_CUDA_V2(*ort_provider_options);
-      device_type_ = DeviceType::CUDA;
-    }
+      device_type_ = DeviceType::CUDA;  // Scoring will use CUDA
+    } else if (provider_options.name == "rocm") {
+      OrtROCMProviderOptions ort_provider_options;
+
+      std::vector<const char*> keys, values;
+      for (auto& option : provider_options.options) {
+        keys.emplace_back(option.first.c_str());
+        values.emplace_back(option.second.c_str());
+      }
+
+      Ort::ThrowOnError(Ort::api->UpdateROCMProviderOptions(&ort_provider_options, keys.data(), values.data(), keys.size()));
+      ort_options.AppendExecutionProvider_ROCM(ort_provider_options);
+      device_type_ = DeviceType::CPU;  // Scoring uses CPU, even though the model uses ROCM
+    } else
+      throw std::runtime_error("Unknown provider type: " + provider_options.name);
   }
 }
 
