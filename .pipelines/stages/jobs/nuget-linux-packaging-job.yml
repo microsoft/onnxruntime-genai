@@ -49,6 +49,7 @@ jobs:
       DisplayName: 'ESRP - Sign C# dlls'
 
   - script: |
+      set -e -x
       VERSION="0.1.0-rc1"
       nuget pack Microsoft.ML.OnnxRuntimeGenAI.nuspec \
         -Prop version=$VERSION \
