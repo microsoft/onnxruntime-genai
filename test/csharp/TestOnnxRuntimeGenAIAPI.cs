@@ -1,6 +1,14 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+using System;
+using System.IO;
+using Xunit;
+using Xunit.Abstractions;
+using Microsoft.ML.OnnxRuntimeGenAI;
+using System.Collections.Generic;
+using System.Linq;
+
 namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 {
     public partial class OnnxRuntimeGenAITests
