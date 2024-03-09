@@ -1,19 +1,20 @@
 # ONNX Runtime GenAI Model Builder
 
-This folder contains the model builder tool, which greatly accelerates creating optimized and quantized ONNX models that run with ONNX Runtime GenAI.
+This folder contains the model builder for quickly creating optimized and quantized ONNX models within a few minutes that run with ONNX Runtime GenAI.
 
 # Contents
- - [Current Support](#current-support)
- - [Usage](#usage)
-   - [Full Usage](#full-usage)
-   - [Original PyTorch Model from Hugging Face](#original-pytorch-model-from-hugging-face)
-   - [Original PyTorch Model from Disk](#original-pytorch-model-from-disk)
-   - [Customized or Finetuned PyTorch Model](#customized-or-finetuned-pytorch-model)
-   - [GGUF Model](#gguf-model)
-   - [Extra Options](#extra-options)
-   - [Unit Testing Models](#unit-testing-models)
-     - [Option 1: Use the model builder tool directly](#option-1-use-the-model-builder-tool-directly)
-     - [Option 2: Edit the config.json file](#option-2-edit-the-configjson-file-on-disk-and-then-run-the-model-builder-tool)
+- [Current Support](#current-support)
+- [Usage](#usage)
+  - [Full Usage](#full-usage)
+  - [Original PyTorch Model from Hugging Face](#original-pytorch-model-from-hugging-face)
+  - [Original PyTorch Model from Disk](#original-pytorch-model-from-disk)
+  - [Customized or Finetuned PyTorch Model](#customized-or-finetuned-pytorch-model)
+  - [GGUF Model](#gguf-model)
+  - [Extra Options](#extra-options)
+  - [Unit Testing Models](#unit-testing-models)
+    - [Option 1: Use the model builder tool directly](#option-1-use-the-model-builder-tool-directly)
+    - [Option 2: Edit the config.json file](#option-2-edit-the-configjson-file-on-disk-and-then-run-the-model-builder-tool)
+- [Design](#design)
 
 ## Current Support
 The tool currently supports the following model architectures.
@@ -22,6 +23,8 @@ The tool currently supports the following model architectures.
 - LLaMA
 - Mistral
 - Phi
+
+It is intended for supporting the latest, popular state-of-the-art models.
 
 ## Usage
 
@@ -125,3 +128,7 @@ python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_fold
 # From source:
 python3 builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_where_hf_files_are_saved
 ```
+
+## Design
+
+Please read the [design document](DESIGN.md) for more details and for how to contribute.
