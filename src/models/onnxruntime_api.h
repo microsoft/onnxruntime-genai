@@ -339,6 +339,7 @@ struct OrtCUDAProviderOptionsV2 {
   static std::unique_ptr<OrtCUDAProviderOptionsV2> Create();
 
   void Update(const char* const* keys, const char* const* values, size_t count);
+  void UpdateValue(const char* key, void* value);
 
   static void operator delete(void* p) { Ort::api->ReleaseCUDAProviderOptions(reinterpret_cast<OrtCUDAProviderOptionsV2*>(p)); }
   Ort::Abstract make_abstract;

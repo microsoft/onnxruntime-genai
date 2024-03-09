@@ -463,6 +463,10 @@ inline void OrtCUDAProviderOptionsV2::Update(const char* const* keys, const char
   Ort::ThrowOnError(Ort::api->UpdateCUDAProviderOptions(this, keys, values, count));
 }
 
+inline void OrtCUDAProviderOptionsV2::UpdateValue(const char* key, void* value) {
+  Ort::ThrowOnError(Ort::api->UpdateCUDAProviderOptionsWithValue(this, key, value));
+}
+
 inline std::unique_ptr<OrtSessionOptions> OrtSessionOptions::Create() {
   OrtSessionOptions* p;
   Ort::ThrowOnError(Ort::api->CreateSessionOptions(&p));

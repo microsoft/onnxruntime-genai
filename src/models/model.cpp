@@ -267,14 +267,12 @@ void Model::CreateSessionOptions() {
         keys.emplace_back(option.first.c_str());
         values.emplace_back(option.second.c_str());
       }
+      ort_provider_options->Update(keys.data(), values.data(), keys.size());
 
       // Create and set our cudaStream_t
       cuda_stream_.Create();
-      auto cuda_stream_string = std::to_string(reinterpret_cast<uintptr_t>(cuda_stream_.get()));
-      keys.emplace_back("user_compute_stream");
-      values.emplace_back(cuda_stream_string.c_str());
+      ort_provider_options->UpdateValue("user_compute_stream", cuda_stream_.get());
 
-      ort_provider_options->Update(keys.data(), values.data(), keys.size());
       ort_options.AppendExecutionProvider_CUDA_V2(*ort_provider_options);
       device_type_ = DeviceType::CUDA;  // Scoring will use CUDA
     } else if (provider_options.name == "rocm") {
