@@ -27,11 +27,6 @@ extern "C" {
 // ONNX Runtime Generative AI C API
 // This API is not thread safe.
 
-typedef enum OgaDeviceType {
-  OgaDeviceTypeCPU,
-  OgaDeviceTypeCUDA,
-} OgaDeviceType;
-
 typedef struct OgaResult OgaResult;
 typedef struct OgaGeneratorParams OgaGeneratorParams;
 typedef struct OgaGenerator OgaGenerator;
@@ -91,7 +86,7 @@ OGA_EXPORT const int32_t* OGA_API_CALL OgaSequencesGetSequenceData(const OgaSequ
  * \param[out] out The created model.
  * \return OgaResult containing the error message if the model creation failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaDeviceType device_type, OgaModel** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaModel** out);
 
 /*
  * \brief Destroys the given model.

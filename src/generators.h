@@ -10,6 +10,7 @@
 #include "span.h"
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <queue>
 #include <set>
 #include <stdexcept>
