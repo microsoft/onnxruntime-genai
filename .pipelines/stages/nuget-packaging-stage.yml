@@ -41,24 +41,24 @@ stages:
         arch: 'arm64'
         ep: 'cpu'
 
-  - ${{ if eq(parameters.enable_linux_cpu, true) }}:
-    - template: jobs/nuget-linux-packaging-job.yml
-      parameters:
-        cuda_version: ${{ parameters.cuda_version }}
-        ort_version: ${{ parameters.ort_version }}
-        arch: 'x64'
-        ep: 'cpu'
-  - ${{ if eq(parameters.enable_linux_gpu, true) }}:
-    - template: jobs/nuget-linux-packaging-job.yml
-      parameters:
-        cuda_version: ${{ parameters.cuda_version }}
-        ort_version: ${{ parameters.ort_version }}
-        arch: 'x64'
-        ep: 'cuda'
-  - ${{ if eq(parameters.enable_linux_arm, true) }}:
-    - template: jobs/nuget-linux-packaging-job.yml
-      parameters:
-        cuda_version: ${{ parameters.cuda_version }}
-        ort_version: ${{ parameters.ort_version }}
-        arch: 'arm64'
-        ep: 'cpu'
+#  - ${{ if eq(parameters.enable_linux_cpu, true) }}:
+#    - template: jobs/nuget-linux-packaging-job.yml
+#      parameters:
+#        cuda_version: ${{ parameters.cuda_version }}
+#        ort_version: ${{ parameters.ort_version }}
+#        arch: 'x64'
+#        ep: 'cpu'
+#  - ${{ if eq(parameters.enable_linux_gpu, true) }}:
+#    - template: jobs/nuget-linux-packaging-job.yml
+#      parameters:
+#        cuda_version: ${{ parameters.cuda_version }}
+#        ort_version: ${{ parameters.ort_version }}
+#        arch: 'x64'
+#        ep: 'cuda'
+#  - ${{ if eq(parameters.enable_linux_arm, true) }}:
+#    - template: jobs/nuget-linux-packaging-job.yml
+#      parameters:
+#        cuda_version: ${{ parameters.cuda_version }}
+#        ort_version: ${{ parameters.ort_version }}
+#        arch: 'arm64'
+#        ep: 'cpu'
