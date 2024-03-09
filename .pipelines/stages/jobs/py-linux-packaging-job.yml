@@ -23,14 +23,14 @@ jobs:
     matrix:
       Python38:
         PythonExecutable: '/opt/python/cp38-cp38/bin/python3.8'
-      Python39:
-        PythonExecutable: '/opt/python/cp39-cp39/bin/python3.9'
-      Python310:
-        PythonExecutable: '/opt/python/cp310-cp310/bin/python3.10'
-      Python311:
-        PythonExecutable: '/opt/python/cp311-cp311/bin/python3.11'
-      Python312:
-        PythonExecutable: '/opt/python/cp312-cp312/bin/python3.12'
+#      Python39:
+#        PythonExecutable: '/opt/python/cp39-cp39/bin/python3.9'
+#      Python310:
+#        PythonExecutable: '/opt/python/cp310-cp310/bin/python3.10'
+#      Python311:
+#        PythonExecutable: '/opt/python/cp311-cp311/bin/python3.11'
+#      Python312:
+#        PythonExecutable: '/opt/python/cp312-cp312/bin/python3.12'
   timeoutInMinutes: 240
   workspace:
     clean: all

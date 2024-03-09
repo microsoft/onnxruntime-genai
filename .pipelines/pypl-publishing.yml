@@ -22,7 +22,7 @@ parameters:
 - name: enable_linux_gpu
   displayName: 'Whether Linux GPU package is built.'
   type: boolean
-  default: true
+  default: false
 
 - name: enable_linux_arm
   displayName: 'Whether Linux ARM package is built.'
