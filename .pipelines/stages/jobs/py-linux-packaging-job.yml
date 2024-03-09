@@ -22,19 +22,14 @@ jobs:
   strategy:
     matrix:
       Python38:
-        PythonVersion: '3.8'
         PythonExecutable: '/opt/python/cp38-cp38/bin/python3.8'
       Python39:
-        PythonVersion: '3.9'
         PythonExecutable: '/opt/python/cp39-cp39/bin/python3.9'
       Python310:
-        PythonVersion: '3.10'
         PythonExecutable: '/opt/python/cp310-cp310/bin/python3.10'
       Python311:
-        PythonVersion: '3.11'
         PythonExecutable: '/opt/python/cp311-cp311/bin/python3.11'
       Python312:
-        PythonVersion: '3.12'
         PythonExecutable: '/opt/python/cp312-cp312/bin/python3.12'
   timeoutInMinutes: 240
   workspace:
@@ -53,7 +48,6 @@ jobs:
       ep: ${{ parameters.ep }}
       cuda_version: ${{ parameters.cuda_version }}
       target: 'python'
-      python_version: $(PythonVersion)
       python_exe: $(PythonExecutable)
 
   - script: |

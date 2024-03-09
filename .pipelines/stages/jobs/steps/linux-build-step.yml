@@ -5,7 +5,6 @@ parameters:
   cuda_version: '11.8'
   target: 'onnxruntime-genai'
   python_exe: 'python3'
-  python_version: '3.8'
   genai_src: '$(Build.SourcesDirectory)/onnxruntime-genai'
 steps:
 
@@ -94,7 +93,7 @@ steps:
             -DPYTHON_EXECUTABLE=${{ parameters.python_exe }} && \
           /usr/bin/cmake --build --preset linux_gcc_${{ parameters.ep }}_release \
             --target python"
-    displayName: 'Build Python Wheel ${{ parameters.python_version }}'
+    displayName: 'Build Python Wheel'
     workingDirectory: '${{ parameters.genai_src }}'
 - ${{ else }}:
   - script: |
