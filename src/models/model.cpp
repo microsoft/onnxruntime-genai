@@ -272,7 +272,7 @@ void Model::CreateSessionOptions() {
       cuda_stream_.Create();
       auto cuda_stream_string = std::to_string(reinterpret_cast<uintptr_t>(cuda_stream_.get()));
       keys.emplace_back("user_compute_stream");
-      values.emplace_back(cuda_stream_string.c_str());    
+      values.emplace_back(cuda_stream_string.c_str());
 
       ort_provider_options->Update(keys.data(), values.data(), keys.size());
       ort_options.AppendExecutionProvider_CUDA_V2(*ort_provider_options);

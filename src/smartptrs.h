@@ -110,7 +110,7 @@ struct cuda_stream_holder {
   cudaStream_t get() const { return v_; }
 
  private:
-  cudaStream_t v_ {};
+  cudaStream_t v_{};
 };
 #else
 struct cuda_stream_holder {

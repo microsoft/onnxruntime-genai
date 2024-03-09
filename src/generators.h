@@ -21,6 +21,9 @@
 #if USE_CUDA
 #include <cuda_runtime.h>
 #include "cuda_common.h"
+#else
+// If we don't include cuda_runtime.h, we define this to avoid lots of extra #ifdefs
+using cudaStream_t = void*;
 #endif
 
 #include "smartptrs.h"
@@ -34,11 +37,6 @@ struct Search;
 
 // OgaSequences are a vector of int32 vectors
 using TokenSequences = std::vector<std::vector<int32_t>>;
-
-// If we don't include cuda_runtime.h, we define this to avoid lots of extra #ifdefs
-#ifndef USE_CUDA
-using cudaStream_t = void*;
-#endif
 
 enum struct DeviceType {
   CPU,

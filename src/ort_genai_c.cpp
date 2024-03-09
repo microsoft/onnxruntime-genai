@@ -61,7 +61,7 @@ const int32_t* OGA_API_CALL OgaSequencesGetSequenceData(const OgaSequences* p, s
   return (*reinterpret_cast<const Generators::TokenSequences*>(p))[sequence].data();
 }
 
-OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaDeviceType device_type, OgaModel** out) {
+OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaDeviceType /*device_type*/, OgaModel** out) {
   OGA_TRY
   *out = reinterpret_cast<OgaModel*>(Generators::CreateModel(Generators::GetOrtEnv(), config_path).release());
   return nullptr;
