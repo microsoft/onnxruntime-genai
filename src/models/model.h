@@ -22,7 +22,7 @@ struct State {
 
  protected:
   void Run(OrtSession& session, OrtRunOptions& run_options);  // Uses the inputs below to run
-  void ClearIO();                 // Clear all inputs/outputs
+  void ClearIO();                                             // Clear all inputs/outputs
 };
 
 #ifdef NO_TOKENIZER
