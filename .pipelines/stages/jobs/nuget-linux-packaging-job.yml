@@ -18,6 +18,8 @@ jobs:
     value: onnxruntime-genai-nuget-linux-${{ parameters.ep }}-${{ parameters.arch }}
   - name: build_dir
     value: 'build/gcc_${{ parameters.ep }}'
+  - name: genai_src
+    value: '$(Build.SourcesDirectory)/onnxruntime-genai'
   - name: id
     ${{ if eq(parameters.ep, 'cpu') }}:
       value: Microsoft.ML.OnnxRuntimeGenAI
@@ -35,14 +37,15 @@ jobs:
       cuda_version: ${{ parameters.cuda_version }}
       target: 'onnxruntime-genai'
 
+
   - script: |
       dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(build_config)" -p:NativeBuildOutputDir="$(build_dir)\$(build_config)"
     displayName: 'Build CSharp'
-    workingDirectory: '$(Build.SourcesDirectory)/src/csharp'
+    workingDirectory: '$(genai_src)/src/csharp'
 
   - template: steps/win-esrp-dll-step.yml
     parameters:
-      FolderPath: '$(Build.SourcesDirectory)/src/csharp/bin/$(build_config)/'
+      FolderPath: '$(genai_src)/src/csharp/bin/$(build_config)/'
       DisplayName: 'ESRP - Sign C# dlls'
 
   - script: |
@@ -56,15 +59,15 @@ jobs:
         -Prop version=$VERSION \
         -Prop configuration=$(build_config)
     displayName: 'Nuget Packaging'
-    workingDirectory: '$(Build.SourcesDirectory)/nuget'
+    workingDirectory: '$(genai_src)/nuget'
 
   - script: |
-      ls $(Build.SourcesDirectory) -R
+      ls $(genai_src) -R
 
   - task: CopyFiles@2
     displayName: 'Copy Nuget to: $(Build.ArtifactStagingDirectory)'
     inputs:
-      SourceFolder: '$(Build.SourcesDirectory)/nuget'
+      SourceFolder: '$(genai_src)/nuget'
       Contents: '*.nupkg'
       TargetFolder: '$(Build.ArtifactStagingDirectory)'
 

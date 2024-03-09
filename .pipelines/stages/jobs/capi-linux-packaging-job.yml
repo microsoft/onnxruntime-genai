@@ -12,6 +12,7 @@ jobs:
   pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
   timeoutInMinutes: 180
   variables:
+    genai_src: '$(Build.SourcesDirectory)/onnxruntime-genai'
     artifactName: 'onnxruntime-genai-capi-linux-${{ parameters.ep }}-${{ parameters.arch }}'
   workspace:
     clean: all
@@ -24,19 +25,16 @@ jobs:
       cuda_version: ${{ parameters.cuda_version }}
       target: 'onnxruntime-genai'
 
-  - script: |
-      ls $(Build.SourcesDirectory) -R
-
   - task: CopyFiles@2
     displayName: 'Copy Onnxruntime C API library files to ArtifactStagingDirectory'
     inputs:
-      SourceFolder: '$(Build.SourcesDirectory)/ort/lib'
+      SourceFolder: '$(genai_src)/ort/lib'
       TargetFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)/lib'
 
   - task: CopyFiles@2
     displayName: 'Copy GenAi C API library files to ArtifactStagingDirectory'
     inputs:
-      SourceFolder: '$(Build.SourcesDirectory)/build/release/${{ parameters.ep }}_default/Release'
+      SourceFolder: '$(genai_src)/build/release/${{ parameters.ep }}_default/Release'
       Contents: |
         onnxruntime-genai.so
       TargetFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)/lib'
@@ -44,7 +42,7 @@ jobs:
   - task: CopyFiles@2
     displayName: 'Copy GenAi C API header to ArtifactStagingDirectory'
     inputs:
-      SourceFolder: '$(Build.SourcesDirectory)/src'
+      SourceFolder: '$(genai_src)/src'
       Contents: |
         ort_genai_c.h
       TargetFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)/include'
@@ -52,7 +50,7 @@ jobs:
   - task: CopyFiles@2
     displayName: 'Copy other files to ArtifactStagingDirectory'
     inputs:
-      SourceFolder: '$(Build.SourcesDirectory)'
+      SourceFolder: '$(genai_src)'
       Contents: |
         VERSION_INFO
         LICENSE

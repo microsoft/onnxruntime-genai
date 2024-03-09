@@ -14,23 +14,32 @@ parameters:
   values:
   - 'cpu'
   - 'cuda'
+- name: machine_pool
+  type: string
+  default: 'onnxruntime-Ubuntu2204-AMD-CPU'
 jobs:
 - job: Linux_${{ parameters.ep }}_${{ parameters.arch }}_Wheels
   strategy:
     matrix:
-      x64:
-        buildArch: 'x64'
-        machine_pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
-        docker_arch: 'x64'
-      ${{ if eq(parameters.arch, 'arm64') }}:
-        arm64:
-          buildArch: 'arm64'
-          machine_pool: 'onnxruntime-linux-ARM64-CPU-2019'
-          docker_arch: 'aarch64'
+      Python38:
+        PythonVersion: '3.8'
+        PythonExecutable: '/opt/python/cp38-cp38/bin/python3.8'
+      Python39:
+        PythonVersion: '3.9'
+        PythonExecutable: '/opt/python/cp39-cp39/bin/python3.9'
+      Python310:
+        PythonVersion: '3.10'
+        PythonExecutable: '/opt/python/cp310-cp310/bin/python3.10'
+      Python311:
+        PythonVersion: '3.11'
+        PythonExecutable: '/opt/python/cp311-cp311/bin/python3.11'
+      Python312:
+        PythonVersion: '3.12'
+        PythonExecutable: '/opt/python/cp312-cp312/bin/python3.12'
   timeoutInMinutes: 240
   workspace:
     clean: all
-  pool: $(machine_pool)
+  pool: ${{ parameters.machine_pool }}
   variables:
   # The build machine pool doesn't have dotnet, so it can't run CG.
   - name: skipComponentGovernanceDetection
@@ -44,6 +53,8 @@ jobs:
       ep: ${{ parameters.ep }}
       cuda_version: ${{ parameters.cuda_version }}
       target: 'python'
+      python_version: $(PythonVersion)
+      python_exe: $(PythonExecutable)
 
   - script: |
       ls $(Build.SourcesDirectory) -R
@@ -58,7 +69,7 @@ jobs:
   - task: PublishBuildArtifacts@1
     displayName: 'Publish Artifact: ONNXRuntime python wheel'
     inputs:
-      ArtifactName: onnxruntime-genai-linux-${{ parameters.ep }}-$(buildArch)
+      ArtifactName: onnxruntime-genai-linux-${{ parameters.ep }}-${{ parameters.arch }}
 
   - template: steps/component-governance-component-detection-step.yml
     parameters:
