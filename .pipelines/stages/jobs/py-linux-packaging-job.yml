@@ -48,7 +48,7 @@ jobs:
       ep: ${{ parameters.ep }}
       cuda_version: ${{ parameters.cuda_version }}
       target: 'python'
-      python_exe: $(PythonExecutable)
+      python_path: $(PythonExecutable)
 
   - script: |
       ls $(Build.SourcesDirectory) -R
