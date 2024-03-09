@@ -22,10 +22,11 @@ steps:
     archive: 'zip'
     ${{ if eq(parameters.ep, 'cpu') }}:
       ort_filename: 'onnxruntime-win-${{ parameters.arch }}-cpu-${{ parameters.ort_version }}'
-    ${{ else if eq(parameters.cuda_version, '11.8') }}:
-      ort_filename: 'onnxruntime-win-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}'
     ${{ else}}:
-      ort_filename: 'onnxruntime-win-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
+      ${{ else if eq(parameters.cuda_version, '11.8') }}:
+        ort_filename: 'onnxruntime-win-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}'
+      ${{ else }}:
+        ort_filename: 'onnxruntime-win-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
 
 - powershell: |
     azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v${{ parameters.cuda_version }}" '$(Build.SourcesDirectory)\cuda_sdk'
