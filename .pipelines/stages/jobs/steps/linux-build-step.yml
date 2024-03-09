@@ -4,7 +4,7 @@ parameters:
   ep: 'cpu'
   cuda_version: '11.8'
   target: 'onnxruntime-genai'
-  python_path: 'python3'
+  python_version: '3.8'
   genai_src: '$(Build.SourcesDirectory)/onnxruntime-genai'
 steps:
 
@@ -90,11 +90,77 @@ steps:
           /usr/bin/cmake --preset linux_gcc_${{ parameters.ep }}_release \
             -DENABLE_TESTS=OFF \
             -DMANYLINUX=ON \
-            -DPYTHON_EXECUTABLE=${{ parameters.python_path }} && \
+            -DPYTHON_EXECUTABLE=/opt/python/cp38-cp38/bin/python3.8 && \
           /usr/bin/cmake --build --preset linux_gcc_${{ parameters.ep }}_release \
             --target python"
     displayName: 'Build Python Wheel'
     workingDirectory: '${{ parameters.genai_src }}'
+    condition: eq('${{ parameters.python_version }}', '3.8')
+  - script: |
+      set -e -x
+      docker run \
+      --rm \
+      --volume ${{ parameters.genai_src }}:/ort_genai_src \
+      -w /ort_genai_src/ onnxruntime${{ parameters.ep }}build${{ parameters.arch }} \
+      bash -c " \
+          /usr/bin/cmake --preset linux_gcc_${{ parameters.ep }}_release \
+            -DENABLE_TESTS=OFF \
+            -DMANYLINUX=ON \
+            -DPYTHON_EXECUTABLE=/opt/python/cp39-cp39/bin/python3.9 && \
+          /usr/bin/cmake --build --preset linux_gcc_${{ parameters.ep }}_release \
+            --target python"
+    displayName: 'Build Python Wheel'
+    workingDirectory: '${{ parameters.genai_src }}'
+    condition: eq('${{ parameters.python_version }}', '3.9')
+  - script: |
+      set -e -x
+      docker run \
+      --rm \
+      --volume ${{ parameters.genai_src }}:/ort_genai_src \
+      -w /ort_genai_src/ onnxruntime${{ parameters.ep }}build${{ parameters.arch }} \
+      bash -c " \
+          /usr/bin/cmake --preset linux_gcc_${{ parameters.ep }}_release \
+            -DENABLE_TESTS=OFF \
+            -DMANYLINUX=ON \
+            -DPYTHON_EXECUTABLE=/opt/python/cp310-cp310/bin/python3.10 && \
+          /usr/bin/cmake --build --preset linux_gcc_${{ parameters.ep }}_release \
+            --target python"
+    displayName: 'Build Python Wheel'
+    workingDirectory: '${{ parameters.genai_src }}'
+    condition: eq('${{ parameters.python_version }}', '3.10')
+  - script: |
+      set -e -x
+      docker run \
+      --rm \
+      --volume ${{ parameters.genai_src }}:/ort_genai_src \
+      -w /ort_genai_src/ onnxruntime${{ parameters.ep }}build${{ parameters.arch }} \
+      bash -c " \
+          /usr/bin/cmake --preset linux_gcc_${{ parameters.ep }}_release \
+            -DENABLE_TESTS=OFF \
+            -DMANYLINUX=ON \
+            -DPYTHON_EXECUTABLE=/opt/python/cp311-cp311/bin/python3.11 && \
+          /usr/bin/cmake --build --preset linux_gcc_${{ parameters.ep }}_release \
+            --target python"
+    displayName: 'Build Python Wheel'
+    workingDirectory: '${{ parameters.genai_src }}'
+    condition: eq('${{ parameters.python_version }}', '3.11')
+  - script: |
+      set -e -x
+      docker run \
+      --rm \
+      --volume ${{ parameters.genai_src }}:/ort_genai_src \
+      -w /ort_genai_src/ onnxruntime${{ parameters.ep }}build${{ parameters.arch }} \
+      bash -c " \
+          /usr/bin/cmake --preset linux_gcc_${{ parameters.ep }}_release \
+            -DENABLE_TESTS=OFF \
+            -DMANYLINUX=ON \
+            -DPYTHON_EXECUTABLE=/opt/python/cp312-cp312/bin/python3.12 && \
+          /usr/bin/cmake --build --preset linux_gcc_${{ parameters.ep }}_release \
+            --target python"
+    displayName: 'Build Python Wheel'
+    workingDirectory: '${{ parameters.genai_src }}'
+    condition: eq('${{ parameters.python_version }}', '3.12')
+
 - ${{ else }}:
   - script: |
       set -e -x

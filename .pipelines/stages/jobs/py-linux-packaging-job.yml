@@ -22,15 +22,15 @@ jobs:
   strategy:
     matrix:
       Python38:
-        PythonExecutable: '/opt/python/cp38-cp38/bin/python3.8'
+        python_version: '3.8'
 #      Python39:
-#        PythonExecutable: '/opt/python/cp39-cp39/bin/python3.9'
+#        python_version: '3.8'
 #      Python310:
-#        PythonExecutable: '/opt/python/cp310-cp310/bin/python3.10'
+#        python_version: '3.8'
 #      Python311:
-#        PythonExecutable: '/opt/python/cp311-cp311/bin/python3.11'
+#        python_version: '3.8'
 #      Python312:
-#        PythonExecutable: '/opt/python/cp312-cp312/bin/python3.12'
+#        python_version: '3.8'
   timeoutInMinutes: 240
   workspace:
     clean: all
@@ -48,7 +48,7 @@ jobs:
       ep: ${{ parameters.ep }}
       cuda_version: ${{ parameters.cuda_version }}
       target: 'python'
-      python_path: $(PythonExecutable)
+      python_version: $(python_version)
 
   - script: |
       ls $(Build.SourcesDirectory) -R
