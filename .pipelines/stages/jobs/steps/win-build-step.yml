@@ -23,7 +23,7 @@ steps:
     ${{ if eq(parameters.ep, 'cpu') }}:
       ort_filename: 'onnxruntime-win-${{ parameters.arch }}-cpu-${{ parameters.ort_version }}'
     ${{ else}}:
-      ${{ else if eq(parameters.cuda_version, '11.8') }}:
+      ${{ if eq(parameters.cuda_version, '11.8') }}:
         ort_filename: 'onnxruntime-win-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}'
       ${{ else }}:
         ort_filename: 'onnxruntime-win-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
