@@ -33,5 +33,4 @@ steps:
     Contents: '*tensorrt*'
     RemoveSourceFolder: false
   displayName: 'Remove tensorrt from lib'
-  workingDirectory: '${{ parameters.genai_src }}'
   continueOnError: true
