@@ -22,6 +22,7 @@ steps:
   parameters:
     genai_src: ${{ parameters.genai_src }}
     archive: 'tgz'
+    ort_version: ${{ parameters.ort_version }}
     ${{ if eq(parameters.ep, 'cpu') }}:
       ort_filename: 'onnxruntime-linux-${{ parameters.arch }}-cpu-${{ parameters.ort_version }}'
     ${{ else}}:

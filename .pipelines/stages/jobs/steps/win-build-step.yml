@@ -19,6 +19,7 @@ steps:
 - template: download-ort.yaml
   parameters:
     genai_src: '$(Build.SourcesDirectory)'
+    ort_version: ${{ parameters.ort_version }}
     archive: 'zip'
     ${{ if eq(parameters.ep, 'cpu') }}:
       ort_filename: 'onnxruntime-win-${{ parameters.arch }}-cpu-${{ parameters.ort_version }}'

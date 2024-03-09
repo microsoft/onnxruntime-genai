@@ -1,6 +1,7 @@
 parameters:
   genai_src: '$(Build.SourcesDirectory)'
   ort_filename: 'onnxruntime-linux-cpu-1.17.1'
+  ort_version: '1.17.1'
   archive: 'tgz'
 steps:
 - task: DownloadGitHubRelease@0
