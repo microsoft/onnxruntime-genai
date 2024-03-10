@@ -24,7 +24,7 @@ steps:
     archive: 'tgz'
     ort_version: ${{ parameters.ort_version }}
     ${{ if eq(parameters.ep, 'cpu') }}:
-      ort_filename: 'onnxruntime-linux-${{ parameters.arch }}-cpu-${{ parameters.ort_version }}'
+      ort_filename: 'onnxruntime-linux-${{ parameters.arch }}-${{ parameters.ort_version }}'
     ${{ else}}:
       ${{if eq(parameters.cuda_version, '11.8') }}:
         ort_filename: 'onnxruntime-linux-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}'
