@@ -1,9 +1,18 @@
 parameters:
-  arch: 'x64'
-  ort_version: '1.17.1'
-  ep: 'cpu'
-  cuda_version: '11.8'
-  target: 'onnxruntime-genai'
+- name: arch
+  type: string
+- name: ep
+  type: string
+  default: 'cpu'
+- name: ort_version
+  type: string
+  default: '1.17.1'
+- name: cuda_version
+  type: string
+  default: '11.8'
+- name: target
+  type: string
+  default: 'onnxruntime-genai'
 steps:
 - checkout: self
   clean: true
@@ -15,6 +24,14 @@ steps:
     appendSourceBranchName: false
 
 - template: set-nightly-build-option-variable-step.yml
+
+- script: |
+    echo "arch=${{ parameters.arch }}"
+    echo "ort_version=${{ parameters.ort_version }}"
+    echo "ep=${{ parameters.ep }}"
+    echo "cuda_version=${{ parameters.cuda_version }}"
+    echo "target=${{ parameters.target }}"
+  displayName: 'Print Parameters'
 
 - template: download-ort.yaml
   parameters:
