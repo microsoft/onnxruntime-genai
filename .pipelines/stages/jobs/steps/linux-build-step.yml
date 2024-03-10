@@ -68,7 +68,7 @@ steps:
   displayName: 'Get Docker Image'
   workingDirectory: '${{ parameters.genai_src }}'
 
-- ${{ if eq(parameters.target, 'python' }}:
+- ${{ if eq(parameters.target, 'python') }}:
   - script: |
       set -e -x
       docker run \
