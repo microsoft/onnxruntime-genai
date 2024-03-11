@@ -29,12 +29,12 @@ jobs:
     value : 'onnxruntime-genai-capi-win-${{ parameters.ep }}-${{ parameters.arch }}'
   - name: ort_filename
     ${{ if eq(parameters.ep, 'cpu') }}:
-      value: 'onnxruntime-win-${{ parameters.arch }}-$(ort_version)'
+      value: 'onnxruntime-win-${{ parameters.arch }}-${{ parameters.ort_version }}'
     ${{ else}}:
       ${{if eq(parameters.cuda_version, '11.8') }}:
-        value: 'onnxruntime-win-${{ parameters.arch }}-gpu-$(ort_version)'
+        value: 'onnxruntime-win-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}'
       ${{ else }}:
-        value: 'onnxruntime-win-${{ parameters.arch }}-cuda12-$(ort_version)'
+        value: 'onnxruntime-win-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
   workspace:
     clean: all
   steps:

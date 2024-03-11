@@ -41,6 +41,10 @@ jobs:
   # The build machine pool doesn't have dotnet, so it can't run CG.
   - name: skipComponentGovernanceDetection
     value: true
+  - name: ep
+    value: ${{ parameters.ep }}
+  - name: cuda_version
+    value: ${{ parameters.cuda_version }}
   - name: ort_filename
     ${{ if eq(parameters.ep, 'cpu') }}:
       value: 'onnxruntime-linux-${{ parameters.arch }}-${{ parameters.ort_version }}'

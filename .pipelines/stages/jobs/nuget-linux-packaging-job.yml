@@ -15,23 +15,23 @@ jobs:
   timeoutInMinutes: 180
   variables:
   - name: artifactName
-    value: 'onnxruntime-genai-capi-linux-$(ep)-$(arch)'
+    value: 'onnxruntime-genai-capi-linux-${{ parameters.ep }}-${{ parameters.arch }}'
   - name: ort_version
     value: ${{ parameters.ort_version }}
   - name: arch
-    value: ${{ parameters.cuda_version }}
+    value: ${{ parameters.arch }}
   - name: ep
     value: ${{ parameters.ep }}
-  - nane: buildDir
-    value: '$(Build.SourcesDirectory)\build\release\$(ep)_default\Release'
+  - name: buildDir
+    value: '$(Build.SourcesDirectory)\build\release\${{ parameters.ep }}_default\Release'
   - name: ort_filename
     ${{ if eq(parameters.ep, 'cpu') }}:
-      value: 'onnxruntime-linux-$(arch)-$(ort_version)'
+      value: 'onnxruntime-linux-${{ parameters.arch }}-${{ parameters.ort_version }}'
     ${{ else}}:
       ${{if eq(parameters.cuda_version, '11.8') }}:
-        value: 'onnxruntime-linux-$(arch)-gpu-$(ort_version)'
+        value: 'onnxruntime-linux-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}'
       ${{ else }}:
-        value: 'onnxruntime-linux-$(arch)-cuda12-$(ort_version)'
+        value: 'onnxruntime-linux-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
   workspace:
     clean: all
   steps:
