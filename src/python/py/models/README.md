@@ -128,7 +128,3 @@ python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_fold
 # From source:
 python3 builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_where_hf_files_are_saved
 ```
-
-## Design
-
-Please read the [design document](DESIGN.md) for more details and for how to contribute.
