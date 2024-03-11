@@ -19,14 +19,13 @@ steps:
     echo "ort_version=$(ort_version)"
     echo "ep=$(ep)"
     echo "genai_src=${{ parameters.genai_src }}"
-    echo "ort_filename=${{ parameters.ort_filename }}"
+    echo "ort_filename=$(ort_filename)"
   displayName: 'Print Parameters'
 
 - template: utils/download-ort.yml
   parameters:
     archive: 'tgz'
     genai_src: ${{ parameters.genai_src }}
-    ort_filename: ${{ parameters.ort_filename }}
 - bash: |
     set -e -x
     az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
