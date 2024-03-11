@@ -4,18 +4,6 @@ parameters:
 - name: target
   type: string
 steps:
-- template: utils/check_variable.yml
-  parameters:
-    var: ep
-- template: utils/check_variable.yml
-  parameters:
-    var: arch
-- template: utils/check_variable.yml
-  parameters:
-    var: PyNoDotVer
-- template: utils/check_variable.yml
-  parameters:
-    var: PyDotVer
 
 - checkout: self # due to checkout multiple repos, the root directory is $(Build.SourcesDirectory)/onnxruntime-genai,
   clean: true
