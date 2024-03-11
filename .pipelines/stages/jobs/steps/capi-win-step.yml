@@ -3,6 +3,12 @@ parameters:
   type: string
   default: 'onnxruntime-genai'
 steps:
+- bash: |
+    echo "##[error]Error: ep and arch are not set"
+    exit 1
+  displayName: 'Check if variables arch and ep are set'
+  condition: or( eq (variables['ep'], ''), eq (variables['arch'], ''))
+
 - checkout: self
   clean: true
   submodules: recursive

@@ -1,0 +1,13 @@
+parameters:
+- name: var
+  type: string
+steps:
+- ${{ if eq('$(${{ parameters.var }})', '') }}:
+  - bash: |
+      echo "##[error]Error: ${{ parameters.var }}  is not set"
+      exit 1
+    displayName: 'Check if variable--${{ parameters.var }} are set'
+- ${{ else }}:
+  - bash: |
+      echo "##[debug] ${{ parameters.var }} is set
+    displayName: 'Check if variable--${{ parameters.var }} are set'

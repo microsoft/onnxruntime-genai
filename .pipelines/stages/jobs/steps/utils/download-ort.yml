@@ -4,6 +4,12 @@ parameters:
 - name: archiveType
   type: string
 steps:
+- bash: |
+    echo "##[error]Error: ort_version and ort_filename are not set"
+    exit 1
+  displayName: 'Check if variables ort_filename and ort_filename are set'
+  condition: or( eq (variables['ort_version'], ''), eq (variables['ort_filename'], ''))
+
 - task: DownloadGitHubRelease@0
   inputs:
     connection: 'GitHub - Release'
