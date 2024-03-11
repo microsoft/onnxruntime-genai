@@ -71,19 +71,19 @@ steps:
   continueOnError: true
 
 - script: |
-    ls $(genai_src) -R
+    ls ${{ parameters.genai_src }} -R
   displayName: 'List files from SourceDirectory'
 
 - task: CopyFiles@2
   displayName: 'Copy Onnxruntime C API library files to ArtifactStagingDirectory'
   inputs:
-    SourceFolder: '$(genai_src)/ort/lib'
+    SourceFolder: '${{ parameters.genai_src }}/ort/lib'
     TargetFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)/lib'
 
 - task: CopyFiles@2
   displayName: 'Copy GenAi C API library files to ArtifactStagingDirectory'
   inputs:
-    SourceFolder: '$(genai_src)/build/gcc_${{ parameters.ep }}/release'
+    SourceFolder: '${{ parameters.genai_src }}/build/gcc_${{ parameters.ep }}/release'
     Contents: |
       onnxruntime-genai.so
     TargetFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)/lib'
@@ -91,7 +91,7 @@ steps:
 - task: CopyFiles@2
   displayName: 'Copy GenAi C API header to ArtifactStagingDirectory'
   inputs:
-    SourceFolder: '$(genai_src)/src'
+    SourceFolder: '${{ parameters.genai_src }}/src'
     Contents: |
       ort_genai_c.h
     TargetFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)/include'
@@ -99,7 +99,7 @@ steps:
 - task: CopyFiles@2
   displayName: 'Copy other files to ArtifactStagingDirectory'
   inputs:
-    SourceFolder: '$(genai_src)'
+    SourceFolder: '${{ parameters.genai_src }}'
     Contents: |
       VERSION_INFO
       LICENSE
