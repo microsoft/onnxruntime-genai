@@ -23,7 +23,7 @@ steps:
 
 - template: utils/download-ort.yml
   parameters:
-    archive: 'tgz'
+    archiveType: 'tgz'
     genai_src: ${{ parameters.genai_src }}
 - script: |
     set -e -x

@@ -25,7 +25,7 @@ steps:
 
 - template: utils/download-ort.yml
   parameters:
-    archive: 'zip'
+    archiveType: 'zip'
     genai_src: '$(Build.SourcesDirectory)'
 
 - powershell: |
