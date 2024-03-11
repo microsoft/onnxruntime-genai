@@ -28,13 +28,13 @@ stages:
         ort_version: ${{ parameters.ort_version }}
 
   - ${{ if eq(parameters.enable_linux_cpu, true) }}:
-    - template: jobs/capi-nuget-linux-packaging-job.yml
+    - template: jobs/nuget-linux-packaging-job.yml
       parameters:
         arch: 'x64'
         ep: 'cpu'
         ort_version: ${{ parameters.ort_version }}
   - ${{ if eq(parameters.enable_linux_gpu, true) }}:
-    - template: jobs/capi-nuget-linux-packaging-job.yml
+    - template: jobs/nuget-linux-packaging-job.yml
       parameters:
         arch: 'x64'
         cuda_version: ${{ parameters.cuda_version }}
