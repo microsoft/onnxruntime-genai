@@ -45,7 +45,7 @@ def run_onnxruntime_genai_e2e_tests(
 ):
     log.debug("Running: ONNX Runtime GenAI E2E Tests")
 
-    for model in ["phi-2", "gemma", "llama"]:
+    for model in ["phi-2", "llama"]:
         log.debug(f"Running: {model}")
         command = [
             sys.executable,

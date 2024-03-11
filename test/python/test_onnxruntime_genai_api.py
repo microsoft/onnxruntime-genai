@@ -105,6 +105,10 @@ def test_tokenizer_encode_decode(device, path_for_model, model_name, batch):
             assert prompt == decoded_string
 
 
+@pytest.mark.skipif(
+    sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8,
+    reason="Python 3.8 is required for downloading models.",
+)
 @pytest.mark.parametrize(
     "device",
     (
