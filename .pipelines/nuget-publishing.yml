@@ -45,8 +45,6 @@ trigger: none
 stages:
 - template: stages/nuget-packaging-stage.yml
   parameters:
-    enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
-    enable_linux_gpu: ${{ parameters.enable_linux_gpu }}
     enable_win_cpu: ${{ parameters.enable_win_cpu }}
     enable_win_gpu: ${{ parameters.enable_win_gpu }}
     ort_version: ${{ parameters.ort_version }}
