@@ -8,7 +8,7 @@
 namespace Generators {
 
 struct Gpt_Model : Model {
-  Gpt_Model(std::unique_ptr<Config> config, OrtEnv& ort_env, const ProviderOptions* provider_options);
+  Gpt_Model(std::unique_ptr<Config> config, OrtEnv& ort_env);
 
   std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params) const override;
 

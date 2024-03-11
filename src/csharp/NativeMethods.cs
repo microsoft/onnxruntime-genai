@@ -25,7 +25,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaCreateModel(byte[] /* const char* */ configPath,
-                                                                    DeviceType /* OgaDeviceType */ deviceType,
                                                                     out IntPtr /* OgaModel** */ model);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
@@ -161,5 +160,11 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public static extern IntPtr /* OgaResult* */ OgaTokenizerStreamDecode(IntPtr /* const OgaTokenizerStream* */ tokenizerStream,
                                                                               int /* int32_t */ token,
                                                                               out IntPtr /* const char** */ outStr);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaSetCurrentGpuDeviceId(int /* int32_t */ device_id);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaGetCurrentGpuDeviceId(out IntPtr /* int32_t */ device_id);
     }
 }

@@ -95,7 +95,7 @@ struct SessionInfo {
 };
 
 struct Model {
-  Model(std::unique_ptr<Config> config, const ProviderOptions* provider_options);
+  Model(std::unique_ptr<Config> config);
   virtual ~Model();
 
   std::unique_ptr<Tokenizer> CreateTokenizer() const;
@@ -107,7 +107,8 @@ struct Model {
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
   std::unique_ptr<OrtRunOptions> run_options_;
-  cudaStream_t cuda_stream_{};
+
+  cuda_stream_holder cuda_stream_;
   DeviceType device_type_{DeviceType::CPU};
   Ort::Allocator& allocator_cpu_{Ort::Allocator::GetWithDefaultOptions()};
   Ort::Allocator* allocator_device_{};  // Can be CUDA or CPU based on the DeviceType in the model
@@ -116,6 +117,7 @@ struct Model {
 
  protected:
   void InitDeviceAllocator(OrtSession& session);
+  void CreateSessionOptions();
 };
 
 }  // namespace Generators
