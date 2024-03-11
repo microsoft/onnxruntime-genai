@@ -67,6 +67,7 @@ steps:
   parameters:
     FolderPath: '$(Build.SourcesDirectory)\build\release\${{ parameters.ep }}_default\Release'
     DisplayName: 'ESRP - Sign C++ dlls'
+  condition: eq('${{ parameters.target }}', 'onnxruntime-genai')
 
 - ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
   - task: BinSkim@4
