@@ -1,0 +1,59 @@
+parameters:
+- name: arch
+  type: string
+- name: ep
+  type: string
+- name: ort_version
+  type: string
+- name: cuda_version
+  type: string
+  default: ''
+jobs:
+- job: Windows_CAPI_Packaging_${{ parameters.arch }}_${{ parameters.ep }}
+  pool: 'onnxruntime-Win-CPU-2022'
+  timeoutInMinutes: 180
+  variables:
+  - name: build_config
+    value: 'Release'
+  - name: build_dir
+    value: 'build/release/${{ parameters.ep }}_default'
+  - name: artifactName
+    value : 'onnxruntime-genai-capi-win-${{ parameters.ep }}-${{ parameters.arch }}'
+  - name: ort_filename
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      value: 'onnxruntime-win-${{ parameters.arch }}-${{ parameters.ort_version }}'
+    ${{ else}}:
+      ${{if eq(parameters.cuda_version, '11.8') }}:
+        value: 'onnxruntime-win-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}'
+      ${{ else }}:
+        value: 'onnxruntime-win-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
+  workspace:
+    clean: all
+  steps:
+  - template: steps/capi-win-step.yml
+    parameters:
+      arch: ${{ parameters.arch }}
+      cuda_version: ${{ parameters.cuda_version }}
+      ep: ${{ parameters.ep }}
+      ort_filename: $(ort_filename)
+      ort_version: ${{ parameters.ort_version }}
+      target: 'onnxruntime-genai'
+
+  - template: steps/nuget-win-step.yml
+    parameters:
+      build_config: $(build_config)
+      build_dir: $(build_dir)
+      arch: ${{ parameters.arch }}
+      ep: ${{ parameters.ep }}
+      ${{ if eq(parameters.ep, 'cpu') }}:
+        id: Microsoft.ML.OnnxRuntimeGenAI
+      ${{ if eq(parameters.ep, 'cuda') }}:
+        id: Microsoft.ML.OnnxRuntimeGenAI.Gpu
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Artifact: ONNXRuntime Genai capi'
+    inputs:
+      ArtifactName: $(artifactName)
+
+  - template: steps/compliant-and-cleanup-step.yml
+

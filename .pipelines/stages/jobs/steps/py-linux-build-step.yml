@@ -34,7 +34,7 @@ steps:
     echo "ort_filename=${{ parameters.ort_filename }}"
   displayName: 'Print Parameters'
 
-- template: download-ort.yaml
+- template: download-ort.yml
   parameters:
     archive: 'tgz'
     genai_src: ${{ parameters.genai_src }}

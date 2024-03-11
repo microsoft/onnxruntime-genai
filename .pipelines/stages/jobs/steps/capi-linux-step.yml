@@ -30,7 +30,7 @@ steps:
     echo "ort_filename=${{ parameters.ort_filename }}"
   displayName: 'Print Parameters'
 
-- template: download-ort.yaml
+- template: download-ort.yml
   parameters:
     archive: 'tgz'
     genai_src: ${{ parameters.genai_src }}
@@ -67,9 +67,58 @@ steps:
 - task: BinSkim@4
   displayName: 'Run BinSkim'
   inputs:
-    AnalyzeTargetGlob: '$(Build.SourcesDirectory)/**/*genai.so'
+    AnalyzeTargetGlob: '$(Build.SourcesDirectory)/onnxruntime-genai/build/**/*genai.so'
   continueOnError: true
 
 - script: |
     ls $(genai_src) -R
   displayName: 'List files from SourceDirectory'
+
+- task: CopyFiles@2
+  displayName: 'Copy Onnxruntime C API library files to ArtifactStagingDirectory'
+  inputs:
+    SourceFolder: '$(genai_src)/ort/lib'
+    TargetFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)/lib'
+
+- task: CopyFiles@2
+  displayName: 'Copy GenAi C API library files to ArtifactStagingDirectory'
+  inputs:
+    SourceFolder: '$(genai_src)/build/gcc_${{ parameters.ep }}/release'
+    Contents: |
+      onnxruntime-genai.so
+    TargetFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)/lib'
+
+- task: CopyFiles@2
+  displayName: 'Copy GenAi C API header to ArtifactStagingDirectory'
+  inputs:
+    SourceFolder: '$(genai_src)/src'
+    Contents: |
+      ort_genai_c.h
+    TargetFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)/include'
+
+- task: CopyFiles@2
+  displayName: 'Copy other files to ArtifactStagingDirectory'
+  inputs:
+    SourceFolder: '$(genai_src)'
+    Contents: |
+      VERSION_INFO
+      LICENSE
+      SECURITY.md
+      README.md
+      ThirdPartyNotices.txt
+    TargetFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)'
+
+- task: ArchiveFiles@2
+  inputs:
+    rootFolderOrFile: '$(Build.ArtifactStagingDirectory)/$(artifactName)'
+    includeRootFolder: true
+    archiveType: 'tar' # Options: zip, 7z, tar, wim      archiveType: 'tar' # Options: zip, 7z, tar, wim
+    tarCompression: 'gz'
+    archiveFile: '$(Build.ArtifactStagingDirectory)/$(artifactName).tgz'
+    replaceExistingArchive: true
+
+- task: DeleteFiles@1
+  inputs:
+    SourceFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)'
+    Contents: '*'
+    RemoveSourceFolder: true

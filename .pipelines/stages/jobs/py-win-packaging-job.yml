@@ -53,7 +53,7 @@ jobs:
       workingDirectory: '$(Build.BinariesDirectory)'
       displayName: 'Install python modules'
 
-  - template: steps/win-build-step.yml
+  - template: steps/capi-win-step.yml
     parameters:
       arch: ${{ parameters.arch }}
       cuda_version: ${{ parameters.cuda_version }}
