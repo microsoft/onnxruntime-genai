@@ -6,6 +6,7 @@
       "generator": "Ninja",
       "cacheVariables": {
         "CMAKE_POSITION_INDEPENDENT_CODE": "ON",
+        "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-z,now",
         "USE_CUDA": "OFF"
       },
       "environment": {
@@ -54,7 +55,7 @@
       "name": "linux_release_default",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe",
+        "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe ",
         "CMAKE_CXX_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe"
       }
     },
