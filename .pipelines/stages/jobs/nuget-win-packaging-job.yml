@@ -37,7 +37,6 @@ jobs:
       arch: ${{ parameters.arch }}
       cuda_version: ${{ parameters.cuda_version }}
       ep: ${{ parameters.ep }}
-      ort_filename: $(ort_filename)
       target: 'onnxruntime-genai'
 
   - template: steps/nuget-win-step.yml

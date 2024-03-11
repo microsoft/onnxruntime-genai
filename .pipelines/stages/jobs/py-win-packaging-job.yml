@@ -58,8 +58,6 @@ jobs:
       arch: ${{ parameters.arch }}
       cuda_version: ${{ parameters.cuda_version }}
       ep: ${{ parameters.ep }}
-      ort_filename: $(ort_filename)
-      ort_version: $(ort_version)
       target: 'python'
 
   - template: steps/compliant/win-esrp-dll-step.yml
