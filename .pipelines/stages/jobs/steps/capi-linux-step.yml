@@ -20,7 +20,7 @@ steps:
   clean: true
   submodules: recursive
 
-- template: set-nightly-build-option-variable-step.yml
+- template: set-nightly-build-option-variable.yml
 
 - script: |
     echo "arch=${{ parameters.arch }}"
@@ -30,7 +30,7 @@ steps:
     echo "ort_filename=${{ parameters.ort_filename }}"
   displayName: 'Print Parameters'
 
-- template: download-ort.yml
+- template: utils/download-ort.yml
   parameters:
     archive: 'tgz'
     genai_src: ${{ parameters.genai_src }}

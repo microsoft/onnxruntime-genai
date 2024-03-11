@@ -21,7 +21,7 @@ steps:
     AnalyzeTargetGlob: '$(Build.SourcesDirectory)\src\csharp\**\*.dll'
   continueOnError: true
 
-- template: win-esrp-dll-step.yml
+- template: compliant/win-esrp-dll-step.yml
   parameters:
     FolderPath: '$(Build.SourcesDirectory)\src\csharp\bin\Release\'
     DisplayName: 'ESRP - Sign C# dlls'

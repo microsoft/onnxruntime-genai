@@ -23,7 +23,7 @@ steps:
     tsaConfigFilePath: '$(Build.SourcesDirectory)\.config\tsaoptions.json'
     appendSourceBranchName: false
 
-- template: set-nightly-build-option-variable-step.yml
+- template: set-nightly-build-option-variable.yml
 
 - script: |
     echo "arch=${{ parameters.arch }}"
@@ -34,7 +34,7 @@ steps:
     echo "ort_filename=${{ parameters.ort_filename }}"
   displayName: 'Print Parameters'
 
-- template: download-ort.yml
+- template: utils/download-ort.yml
   parameters:
     archive: 'zip'
     genai_src: '$(Build.SourcesDirectory)'
@@ -65,7 +65,7 @@ steps:
   workingDirectory: '$(Build.SourcesDirectory)'
 
 - ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
-  - template: win-esrp-dll-step.yml
+  - template: compliant/win-esrp-dll-step.yml
     parameters:
       FolderPath: '$(Build.SourcesDirectory)\build\release\${{ parameters.ep }}_default\Release'
       DisplayName: 'ESRP - Sign C++ dlls'

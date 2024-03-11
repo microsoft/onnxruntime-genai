@@ -62,7 +62,7 @@ jobs:
       ort_version: ${{ parameters.ort_version }}
       target: 'python'
 
-  - template: steps/win-esrp-dll-step.yml
+  - template: steps/compliant/win-esrp-dll-step.yml
     parameters:
       FolderPath: '$(Build.SourcesDirectory)\build\release\${{ parameters.ep }}_default\wheel\onnxruntime_genai'
       DisplayName: 'ESRP - PYD Sign'
@@ -88,33 +88,4 @@ jobs:
     inputs:
       ArtifactName: onnxruntime-genai-win-${{ parameters.ep }}-${{ parameters.arch }}
 
-  - script: |
-      7z x *.whl
-    workingDirectory: '$(Build.ArtifactStagingDirectory)'
-    displayName: 'unzip the package'
-
-  - powershell: |
-      Get-ChildItem -Path $(Build.ArtifactStagingDirectory) -Recurse
-    displayName: 'Verify the package'
-
-  - task: CredScan@3
-    displayName: 'Run CredScan'
-    inputs:
-      debugMode: false
-    continueOnError: true
-
-  - task: TSAUpload@2
-    displayName: 'TSA upload'
-    condition: and(and (succeeded(), and(eq(variables['buildArch'], 'x64'), eq(variables['PythonVersion'], '3.8'))), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
-    inputs:
-      GdnPublishTsaOnboard: false
-      GdnPublishTsaConfigFile: '$(Build.sourcesDirectory)\.config\tsaoptions.json'
-    continueOnError: true
-
-  - template: steps/component-governance-component-detection-step.yml
-    parameters:
-      condition: 'succeeded'
-
-  - task: mspremier.PostBuildCleanup.PostBuildCleanup-task.PostBuildCleanup@3
-    displayName: 'Clean Agent Directories'
-    condition: always()
+- template: steps/compliant-and-cleanup-step.yml
