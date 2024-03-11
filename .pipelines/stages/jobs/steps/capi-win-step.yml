@@ -89,3 +89,4 @@ steps:
     artifactName: $(artifactName)
     archiveType: zip
     ep: ${{ parameters.ep }}
+    buildDir: '$(Build.SourcesDirectory)\build\release\${{ parameters.ep }}_default\Release'

@@ -80,3 +80,4 @@ steps:
     artifactName: $(artifactName)
     archiveType: tar
     ep: ${{ parameters.ep }}
+    buildDir: '${{ parameters.genai_src }}/build/gcc_${{ parameters.ep }}/release'
