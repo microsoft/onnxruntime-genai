@@ -82,52 +82,10 @@ steps:
     inputs:
       AnalyzeTargetGlob: '$(Build.SourcesDirectory)\**\*.pyd'
     continueOnError: true
-- task: CopyFiles@2
-  displayName: 'Copy Onnxruntime C API library files to ArtifactStagingDirectory'
-  inputs:
-    SourceFolder: '$(Build.SourcesDirectory)\ort\lib'
-    TargetFolder: '$(Build.ArtifactStagingDirectory)\$(artifactName)\lib'
 
-- task: CopyFiles@2
-  displayName: 'Copy GenAi C API library files to ArtifactStagingDirectory'
-  inputs:
-    SourceFolder: '$(Build.SourcesDirectory)\build\release\${{ parameters.ep }}_default\Release'
-    Contents: |
-      onnxruntime-genai.dll
-      onnxruntime-genai.lib
-      onnxruntime-genai.pdb
-    TargetFolder: '$(Build.ArtifactStagingDirectory)\$(artifactName)\lib'
-
-- task: CopyFiles@2
-  displayName: 'Copy GenAi C API header to ArtifactStagingDirectory'
-  inputs:
-    SourceFolder: '$(Build.SourcesDirectory)\src'
-    Contents: |
-      ort_genai_c.h
-    TargetFolder: '$(Build.ArtifactStagingDirectory)\$(artifactName)\include'
-
-- task: CopyFiles@2
-  displayName: 'Copy other files to ArtifactStagingDirectory'
-  inputs:
-    SourceFolder: '$(Build.SourcesDirectory)'
-    Contents: |
-      VERSION_INFO
-      LICENSE
-      SECURITY.md
-      README.md
-      ThirdPartyNotices.txt
-    TargetFolder: '$(Build.ArtifactStagingDirectory)\$(artifactName)'
-
-- task: ArchiveFiles@2
-  inputs:
-    rootFolderOrFile: '$(Build.ArtifactStagingDirectory)\$(artifactName)'
-    includeRootFolder: true
-    archiveType: 'zip' # Options: zip, 7z, tar, wim
-    archiveFile: '$(Build.ArtifactStagingDirectory)\$(artifactName).zip'
-    replaceExistingArchive: true
-
-- task: DeleteFiles@1
-  inputs:
-    SourceFolder: '$(Build.ArtifactStagingDirectory)\$(artifactName)'
-    Contents: '*'
-    RemoveSourceFolder: true
+- template: utils/capi-archive.yml
+  parameters:
+    genai_src: '$(Build.SourcesDirectory)'
+    artifactName: $(artifactName)
+    archiveType: zip
+    ep: ${{ parameters.ep }}

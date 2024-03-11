@@ -74,51 +74,9 @@ steps:
     ls ${{ parameters.genai_src }} -R
   displayName: 'List files from SourceDirectory'
 
-- task: CopyFiles@2
-  displayName: 'Copy Onnxruntime C API library files to ArtifactStagingDirectory'
-  inputs:
-    SourceFolder: '${{ parameters.genai_src }}/ort/lib'
-    TargetFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)/lib'
-
-- task: CopyFiles@2
-  displayName: 'Copy GenAi C API library files to ArtifactStagingDirectory'
-  inputs:
-    SourceFolder: '${{ parameters.genai_src }}/build/gcc_${{ parameters.ep }}/release'
-    Contents: |
-      onnxruntime-genai.so
-    TargetFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)/lib'
-
-- task: CopyFiles@2
-  displayName: 'Copy GenAi C API header to ArtifactStagingDirectory'
-  inputs:
-    SourceFolder: '${{ parameters.genai_src }}/src'
-    Contents: |
-      ort_genai_c.h
-    TargetFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)/include'
-
-- task: CopyFiles@2
-  displayName: 'Copy other files to ArtifactStagingDirectory'
-  inputs:
-    SourceFolder: '${{ parameters.genai_src }}'
-    Contents: |
-      VERSION_INFO
-      LICENSE
-      SECURITY.md
-      README.md
-      ThirdPartyNotices.txt
-    TargetFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)'
-
-- task: ArchiveFiles@2
-  inputs:
-    rootFolderOrFile: '$(Build.ArtifactStagingDirectory)/$(artifactName)'
-    includeRootFolder: true
-    archiveType: 'tar' # Options: zip, 7z, tar, wim      archiveType: 'tar' # Options: zip, 7z, tar, wim
-    tarCompression: 'gz'
-    archiveFile: '$(Build.ArtifactStagingDirectory)/$(artifactName).tgz'
-    replaceExistingArchive: true
-
-- task: DeleteFiles@1
-  inputs:
-    SourceFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)'
-    Contents: '*'
-    RemoveSourceFolder: true
+- template: utils/capi-archive.yml
+  parameters:
+    genai_src: ${{ parameters.genai_src }}
+    artifactName: $(artifactName)
+    archiveType: tar
+    ep: ${{ parameters.ep }}
