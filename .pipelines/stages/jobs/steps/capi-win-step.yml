@@ -37,19 +37,19 @@ steps:
 - powershell: |
     azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" '$(Build.SourcesDirectory)\cuda_sdk'
   displayName: 'Download CUDA'
-  condition: eq('$(ep)', 'cuda')
+  condition: eq(vriables['ep'], 'cuda')
   workingDirectory: '$(Build.SourcesDirectory)'
 
 - powershell: |
     cmake --preset windows_$(arch)_$(ep)_release -T cuda='$(Build.SourcesDirectory)\cuda_sdk\v$(cuda_version)'
   displayName: 'Configure CMake C API with CUDA'
-  condition: eq('$(ep)', 'cuda')
+  condition: eq(vriables['ep'], 'cuda')
   workingDirectory: '$(Build.SourcesDirectory)'
 
 - powershell: |
     cmake --preset windows_$(arch)_$(ep)_release
   displayName: 'Configure CMake C API without CUDA'
-  condition: ne('$(ep)', 'cuda')
+  condition: ne(vriables['ep'], 'cuda')
   workingDirectory: '$(Build.SourcesDirectory)'
 
 - powershell: |

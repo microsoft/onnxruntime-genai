@@ -64,6 +64,7 @@ jobs:
   - template: steps/capi-win-step.yml
     parameters:
       target: 'python'
+#      ep: ${{ parameters.ep }}
 
   - template: steps/compliant/win-esrp-dll-step.yml
     parameters:
