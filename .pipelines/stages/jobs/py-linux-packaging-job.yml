@@ -7,6 +7,7 @@ parameters:
   type: string
 - name: cuda_version
   type: string
+  default: ''
 - name: machine_pool
   type: string
   default: 'onnxruntime-Ubuntu2204-AMD-CPU'

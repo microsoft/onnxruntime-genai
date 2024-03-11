@@ -7,6 +7,7 @@ parameters:
   type: string
 - name: cuda_version
   type: string
+  default: ''
 jobs:
 - job: Windows_CAPI_Packaging_${{ parameters.arch }}_${{ parameters.ep }}
   pool: 'onnxruntime-Win-CPU-2022'

@@ -3,11 +3,12 @@ parameters:
   type: boolean
 - name: enable_win_gpu
   type: boolean
-
 - name: ort_version
   type: string
 - name: cuda_version
   type: string
+  default: ''
+
 
 stages:
 - stage: nuget_packaging

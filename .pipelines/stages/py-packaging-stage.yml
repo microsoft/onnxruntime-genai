@@ -11,6 +11,7 @@ parameters:
   type: string
 - name: cuda_version
   type: string
+  default: ''
 stages:
 - stage: Python_Packaging_Stage
   jobs:

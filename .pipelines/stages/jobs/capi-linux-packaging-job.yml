@@ -7,6 +7,8 @@ parameters:
   type: string
 - name: cuda_version
   type: string
+  default: ''
+
 jobs:
 - job: Linux_CAPI_Packaging_${{ parameters.arch }}_${{ parameters.ep }}
   pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
