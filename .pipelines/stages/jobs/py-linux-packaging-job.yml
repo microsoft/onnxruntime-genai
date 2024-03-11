@@ -16,15 +16,20 @@ jobs:
   strategy:
     matrix:
       Python38:
-        PythonVersion: '3.8'
+        PyDotVer: '3.8'
+        PyNoDotVer: '38'
       Python39:
-        PythonVersion: '3.9'
+        PyDotVer: '3.9'
+        PyNoDotVer: '39'
       Python310:
-        PythonVersion: '3.10'
+        PyDotVer: '3.10'
+        PyNoDotVer: '310'
       Python311:
-        PythonVersion: '3.11'
+        PyDotVer: '3.11'
+        PyNoDotVer: '311'
       Python312:
-        PythonVersion: '3.12'
+        PyDotVer: '3.12'
+        PyNoDotVer: '312'
   timeoutInMinutes: 240
   workspace:
     clean: all
@@ -49,7 +54,8 @@ jobs:
       ort_version: ${{ parameters.ort_version }}
       ep: ${{ parameters.ep }}
       ort_filename: $(ort_filename)
-      PythonVersion: $(PythonVersion)
+      PyDotVer: $(PyDotVer)
+      PyNoDotVer: $(PyNoDotVer)
 
   - script: |
       ls $(Build.SourcesDirectory) -R

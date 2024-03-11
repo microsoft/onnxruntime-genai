@@ -7,7 +7,9 @@ parameters:
   type: string
 - name: ort_version
   type: string
-- name: PythonVersion
+- name: PyDotVer
+  type: string
+- name: PyNoDotVer
   type: string
 - name: genai_src
   type: string
@@ -62,10 +64,10 @@ steps:
         /usr/bin/cmake --preset linux_gcc_${{ parameters.ep }}_release \
           -DENABLE_TESTS=OFF \
           -DMANYLINUX=ON \
-          -DPYTHON_EXECUTABLE=/opt/python/cp${{ replace(parameters.PythonVersion, '.', '') }}-cp${{ replace(parameters.PythonVersion, '.', '') }}/bin/python${{ parameters.PythonVersion }} && \
+          -DPYTHON_EXECUTABLE=/opt/python/cp${{ parameters.PyNoDotVer }}-cp${{ parameters.PyNoDotVer }}/bin/python${{ parameters.PyDotVer }} && \
         /usr/bin/cmake --build --preset linux_gcc_${{ parameters.ep }}_release \
           --target python"
-  displayName: 'Build Python Wheel ${{ parameters.PythonVersion }}'
+  displayName: 'Build Python Wheel ${{ parameters.PyNoDotVer }}'
   workingDirectory: '${{ parameters.genai_src }}'
 
 - script: |
