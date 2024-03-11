@@ -51,10 +51,10 @@ steps:
         /usr/bin/cmake --preset linux_gcc_$(ep)_release \
           -DENABLE_TESTS=OFF \
           -DMANYLINUX=ON \
-          -DPYTHON_EXECUTABLE=/opt/python/cp${{ parameters.PyNoDotVer }}-cp${{ parameters.PyNoDotVer }}/bin/python${{ parameters.PyDotVer }} && \
+          -DPYTHON_EXECUTABLE=/opt/python/cp$(PyNoDotVer)-cp$(PyNoDotVer)/bin/python$(PyDotVer) && \
         /usr/bin/cmake --build --preset linux_gcc_$(ep)_release \
           --target python"
-  displayName: 'Build Python ${{ parameters.PyNoDotVer }}'
+  displayName: 'Build Python $(PyNoDotVer)'
   workingDirectory: '${{ parameters.genai_src }}'
 
 - bash: |
@@ -67,10 +67,10 @@ steps:
         /usr/bin/cmake --build --preset linux_gcc_$(ep)_release \
           -DENABLE_TESTS=OFF \
           -DMANYLINUX=ON \
-          -DPYTHON_EXECUTABLE=/opt/python/cp${{ parameters.PyNoDotVer }}-cp${{ parameters.PyNoDotVer }}/bin/python${{ parameters.PyDotVer }} && \
+          -DPYTHON_EXECUTABLE=/opt/python/cp$(PyNoDotVer)-cp$(PyNoDotVer)/bin/python$(PyDotVer) && \
         /usr/bin/cmake --build --preset linux_gcc_$(ep)_release \
           --target PyPackageBuild"
-  displayName: 'PyPackageBuild ${{ parameters.PyNoDotVer }}'
+  displayName: 'PyPackageBuild $(PyNoDotVer)'
   workingDirectory: '${{ parameters.genai_src }}'
 
 - script: |
