@@ -88,4 +88,4 @@ jobs:
     inputs:
       ArtifactName: onnxruntime-genai-win-${{ parameters.ep }}-${{ parameters.arch }}
 
-- template: steps/compliant-and-cleanup-step.yml
+  - template: steps/compliant-and-cleanup-step.yml
