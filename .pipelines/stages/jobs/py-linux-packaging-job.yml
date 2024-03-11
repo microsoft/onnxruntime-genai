@@ -5,9 +5,6 @@ parameters:
 - name: ort_version
   type: string
   default: '1.17.1'
-- name: cuda_version
-  type: string
-  default: '11.8'
 - name: ep
   type: string
   default: 'cpu'
@@ -39,15 +36,22 @@ jobs:
   # The build machine pool doesn't have dotnet, so it can't run CG.
   - name: skipComponentGovernanceDetection
     value: true
-
+  - name: ort_filename
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      value: 'onnxruntime-linux-${{ parameters.arch }}-${{ parameters.ort_version }}'
+    ${{ else}}:
+      ${{if eq(parameters.cuda_version, '11.8') }}:
+        value: 'onnxruntime-linux-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}'
+      ${{ else }}:
+        value: 'onnxruntime-linux-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
   steps:
   - template: steps/linux-build-step.yml
     parameters:
       arch: ${{ parameters.arch }}
       ort_version: ${{ parameters.ort_version }}
       ep: ${{ parameters.ep }}
-      cuda_version: ${{ parameters.cuda_version }}
       target: 'python'
+      ort_filename: $(ort_filename)
       python_version: $(PythonVersion)
 
   - script: |

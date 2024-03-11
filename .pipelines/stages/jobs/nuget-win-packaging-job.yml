@@ -23,6 +23,14 @@ jobs:
       value: Microsoft.ML.OnnxRuntimeGenAI
     ${{ if eq(parameters.ep, 'cuda') }}:
       value: Microsoft.ML.OnnxRuntimeGenAI.Gpu
+  - name: ort_filename
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      value: 'onnxruntime-win-${{ parameters.arch }}-${{ parameters.ort_version }}'
+    ${{ else}}:
+      ${{if eq(parameters.cuda_version, '11.8') }}:
+        value: 'onnxruntime-win-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}'
+      ${{ else }}:
+        value: 'onnxruntime-win-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
   timeoutInMinutes: 180
   workspace:
     clean: all
@@ -32,8 +40,8 @@ jobs:
       arch: ${{ parameters.arch }}
       ort_version: ${{ parameters.ort_version }}
       ep: ${{ parameters.ep }}
-      cuda_version: ${{ parameters.cuda_version }}
       target: 'onnxruntime-genai'
+      ort_filename: $(ort_filename)
 
   - powershell: |
       dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(build_config)" -p:NativeBuildOutputDir="$(build_dir)\$(build_config)"

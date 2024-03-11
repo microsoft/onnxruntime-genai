@@ -3,13 +3,10 @@ parameters:
   type: string
 - name: ep
   type: string
-  default: 'cpu'
 - name: ort_version
   type: string
-  default: '1.17.1'
-- name: cuda_version
+- name: ort_filename
   type: string
-  default: '11.8'
 - name: target
   type: string
   default: 'onnxruntime-genai'
@@ -31,20 +28,15 @@ steps:
     echo "ep=${{ parameters.ep }}"
     echo "cuda_version=${{ parameters.cuda_version }}"
     echo "target=${{ parameters.target }}"
+    echo "ort_filename=${{ parameters.ort_filename }}"
   displayName: 'Print Parameters'
 
 - template: download-ort.yaml
   parameters:
-    genai_src: '$(Build.SourcesDirectory)'
-    ort_version: ${{ parameters.ort_version }}
     archive: 'zip'
-    ${{ if eq(parameters.ep, 'cpu') }}:
-      ort_filename: 'onnxruntime-win-${{ parameters.arch }}-${{ parameters.ort_version }}'
-    ${{ else}}:
-      ${{ if eq(parameters.cuda_version, '11.8') }}:
-        ort_filename: 'onnxruntime-win-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}'
-      ${{ else }}:
-        ort_filename: 'onnxruntime-win-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
+    genai_src: '$(Build.SourcesDirectory)'
+    ort_filename: ${{ parameters.ort_filename }}
+    ort_version: ${{ parameters.ort_version }}
 
 - powershell: |
     azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v${{ parameters.cuda_version }}" '$(Build.SourcesDirectory)\cuda_sdk'

@@ -12,8 +12,18 @@ jobs:
   pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
   timeoutInMinutes: 180
   variables:
-    genai_src: '$(Build.SourcesDirectory)/onnxruntime-genai'
-    artifactName: 'onnxruntime-genai-capi-linux-${{ parameters.ep }}-${{ parameters.arch }}'
+  - name: genai_src
+    value: '$(Build.SourcesDirectory)/onnxruntime-genai'
+  - name: artifactName
+    value: 'onnxruntime-genai-capi-linux-${{ parameters.ep }}-${{ parameters.arch }}'
+  - name: ort_filename
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      value: 'onnxruntime-linux-${{ parameters.arch }}-${{ parameters.ort_version }}'
+    ${{ else}}:
+      ${{if eq(parameters.cuda_version, '11.8') }}:
+        value: 'onnxruntime-linux-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}'
+      ${{ else }}:
+        value: 'onnxruntime-linux-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
   workspace:
     clean: all
   steps:
@@ -22,8 +32,8 @@ jobs:
       arch: ${{ parameters.arch }}
       ort_version: ${{ parameters.ort_version }}
       ep: ${{ parameters.ep }}
-      cuda_version: ${{ parameters.cuda_version }}
       target: 'onnxruntime-genai'
+      ort_filename: $(ort_filename)
 
   - task: CopyFiles@2
     displayName: 'Copy Onnxruntime C API library files to ArtifactStagingDirectory'

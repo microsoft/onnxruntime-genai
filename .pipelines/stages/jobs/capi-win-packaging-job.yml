@@ -12,7 +12,16 @@ jobs:
   pool: 'onnxruntime-Win-CPU-2022'
   timeoutInMinutes: 180
   variables:
-    artifactName: 'onnxruntime-genai-capi-win-${{ parameters.ep }}-${{ parameters.arch }}'
+  - name: artifactName
+    value : 'onnxruntime-genai-capi-win-${{ parameters.ep }}-${{ parameters.arch }}'
+  - name: ort_filename
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      value: 'onnxruntime-win-${{ parameters.arch }}-${{ parameters.ort_version }}'
+    ${{ else}}:
+      ${{if eq(parameters.cuda_version, '11.8') }}:
+        value: 'onnxruntime-win-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}'
+      ${{ else }}:
+        value: 'onnxruntime-win-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
   workspace:
     clean: all
   steps:
@@ -21,7 +30,7 @@ jobs:
       arch: ${{ parameters.arch }}
       ort_version: ${{ parameters.ort_version }}
       ep: ${{ parameters.ep }}
-      cuda_version: ${{ parameters.cuda_version }}
+      ort_filename: $(ort_filename)
 
   - powershell: |
       Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse

@@ -3,13 +3,10 @@ parameters:
   type: string
 - name: ep
   type: string
-  default: 'cpu'
+- name: ort_filename
+  type: string
 - name: ort_version
   type: string
-  default: '1.17.1'
-- name: cuda_version
-  type: string
-  default: '11.8'
 - name: target
   type: string
   default: 'onnxruntime-genai'
@@ -35,25 +32,18 @@ steps:
     echo "arch=${{ parameters.arch }}"
     echo "ort_version=${{ parameters.ort_version }}"
     echo "ep=${{ parameters.ep }}"
-    echo "cuda_version=${{ parameters.cuda_version }}"
     echo "target=${{ parameters.target }}"
     echo "python_version=${{ parameters.python_version }}"
     echo "genai_src=${{ parameters.genai_src }}"
+    echo "ort_filename=${{ parameters.ort_filename }}"
   displayName: 'Print Parameters'
 
 - template: download-ort.yaml
   parameters:
-    genai_src: ${{ parameters.genai_src }}
     archive: 'tgz'
+    genai_src: ${{ parameters.genai_src }}
+    ort_filename: ${{ parameters.ort_filename }}
     ort_version: ${{ parameters.ort_version }}
-    ${{ if eq(parameters.ep, 'cpu') }}:
-      ort_filename: 'onnxruntime-linux-${{ parameters.arch }}-${{ parameters.ort_version }}'
-    ${{ else}}:
-      ${{if eq(parameters.cuda_version, '11.8') }}:
-        ort_filename: 'onnxruntime-linux-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}'
-      ${{ else }}:
-        ort_filename: 'onnxruntime-linux-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
-
 - script: |
     set -e -x
     az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4

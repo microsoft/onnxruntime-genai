@@ -1,19 +1,13 @@
 parameters:
 - name: arch
   type: string
-  default: 'x64'
 - name: ort_version
   type: string
-  default: '1.17.1'
 - name: cuda_version
   type: string
-  default: '11.8'
+  default: ''
 - name: ep
   type: string
-  default: 'cpu'
-  values:
-  - 'cpu'
-  - 'cuda'
 jobs:
 - job: Windows_${{ parameters.ep }}_${{ parameters.arch }}_Wheels
   pool: 'onnxruntime-Win-CPU-2022'
@@ -30,6 +24,15 @@ jobs:
       Python312_x64:
         PythonVersion: '3.12'
   timeoutInMinutes: 180
+  variables:
+  - name: ort_filename
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      value: 'onnxruntime-win-${{ parameters.arch }}-${{ parameters.ort_version }}'
+    ${{ else}}:
+      ${{if eq(parameters.cuda_version, '11.8') }}:
+        value: 'onnxruntime-win-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}'
+      ${{ else }}:
+        value: 'onnxruntime-win-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
   workspace:
     clean: all
   steps:
@@ -55,8 +58,8 @@ jobs:
       arch: ${{ parameters.arch }}
       ort_version: ${{ parameters.ort_version }}
       ep: ${{ parameters.ep }}
-      cuda_version: ${{ parameters.cuda_version }}
       target: 'python'
+      ort_filename: $(ort_filename)
 
   - template: steps/win-esrp-dll-step.yml
     parameters:
