@@ -1,9 +1,4 @@
 parameters:
-
-- name: arch
-  type: string
-- name: ep
-  type: string
 - name: target
   type: string
   default: 'onnxruntime-genai'
@@ -25,7 +20,7 @@ steps:
     echo "arch=${{ parameters.arch }}"
     echo "ort_version=$(ort_version)"
     echo "ep=${{ parameters.ep }}"
-    echo "cuda_version=${{ parameters.cuda_version }}"
+    echo "cuda_version=$(cuda_version)"
     echo "target=${{ parameters.target }}"
     echo "ort_filename=$(ort_filename)"
   displayName: 'Print Parameters'
@@ -36,13 +31,13 @@ steps:
     genai_src: '$(Build.SourcesDirectory)'
 
 - powershell: |
-    azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v${{ parameters.cuda_version }}" '$(Build.SourcesDirectory)\cuda_sdk'
+    azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" '$(Build.SourcesDirectory)\cuda_sdk'
   displayName: 'Download CUDA'
   condition: eq('${{ parameters.ep }}', 'cuda')
   workingDirectory: '$(Build.SourcesDirectory)'
 
 - powershell: |
-    cmake --preset windows_${{ parameters.arch }}_${{ parameters.ep }}_release -T cuda='$(Build.SourcesDirectory)\cuda_sdk\v${{ parameters.cuda_version }}'
+    cmake --preset windows_${{ parameters.arch }}_${{ parameters.ep }}_release -T cuda='$(Build.SourcesDirectory)\cuda_sdk\v$(cuda_version)'
   displayName: 'Configure CMake C API with CUDA'
   condition: eq('${{ parameters.ep }}', 'cuda')
   workingDirectory: '$(Build.SourcesDirectory)'
@@ -61,7 +56,7 @@ steps:
 - ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
   - template: compliant/win-esrp-dll-step.yml
     parameters:
-      FolderPath: '$(Build.SourcesDirectory)\build\release\${{ parameters.ep }}_default\Release'
+      FolderPath: '$(buildDir)'
       DisplayName: 'ESRP - Sign C++ dlls'
 
   - task: BinSkim@4
@@ -73,9 +68,7 @@ steps:
   - template: utils/capi-archive.yml
     parameters:
       genai_src: '$(Build.SourcesDirectory)'
-      artifactName: $(artifactName)
       archiveType: zip
-      buildDir: '$(Build.SourcesDirectory)\build\release\${{ parameters.ep }}_default\Release'
 
 - ${{ if eq(parameters.target, 'python') }}:
   - task: BinSkim@4

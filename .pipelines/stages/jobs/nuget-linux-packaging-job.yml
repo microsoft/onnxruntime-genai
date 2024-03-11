@@ -22,6 +22,8 @@ jobs:
     value: ${{ parameters.cuda_version }}
   - name: ep
     value: ${{ parameters.ep }}
+  - nane: buildDir
+    value: '$(Build.SourcesDirectory)\build\release\${{ parameters.ep }}_default\Release'
   - name: ort_filename
     ${{ if eq(parameters.ep, 'cpu') }}:
       value: 'onnxruntime-linux-${{ parameters.arch }}-$(ort_version)'

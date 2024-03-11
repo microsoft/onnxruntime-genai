@@ -13,10 +13,16 @@ jobs:
   pool: 'onnxruntime-Win-CPU-2022'
   timeoutInMinutes: 180
   variables:
-  - name: build_config
+  - name: buildConfig
     value: 'Release'
+  - name: cuda_version
+    value: ${{ parameters.cuda_version }}
   - name: ort_version
     value: ${{ parameters.ort_version }}
+  - name: arch
+    value: ${{ parameters.arch }}
+  - name: ep
+    value: ${{ parameters.ep }}
   - name: build_dir
     value: 'build/release/${{ parameters.ep }}_default'
   - name: artifactName
@@ -35,16 +41,11 @@ jobs:
   - template: steps/capi-win-step.yml
     parameters:
       arch: ${{ parameters.arch }}
-      cuda_version: ${{ parameters.cuda_version }}
       ep: ${{ parameters.ep }}
       target: 'onnxruntime-genai'
 
   - template: steps/nuget-win-step.yml
     parameters:
-      build_config: $(build_config)
-      build_dir: $(build_dir)
-      arch: ${{ parameters.arch }}
-      ep: ${{ parameters.ep }}
       ${{ if eq(parameters.ep, 'cpu') }}:
         id: Microsoft.ML.OnnxRuntimeGenAI
       ${{ if eq(parameters.ep, 'cuda') }}:

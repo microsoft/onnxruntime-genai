@@ -1,17 +1,9 @@
 parameters:
-- name: arch
-  type: string
-- name: ep
-  type: string
-- name: build_config
-  type: string
-- name: build_dir
-  type: string
 - name: id
   type: string
 steps:
 - powershell: |
-    dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="${{ parameters.build_config }}" -p:NativeBuildOutputDir="${{ parameters.build_dir }}\${{ parameters.build_config }}"
+    dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(buildConfig)" -p:NativeBuildOutputDir="$(buildDir)\$(buildConfig)"
   displayName: 'Build CSharp'
   workingDirectory: '$(Build.SourcesDirectory)\src\csharp'
 
@@ -31,17 +23,17 @@ steps:
     nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.nuspec `
       -Prop version=$VERSION `
       -Prop id=${{ parameters.id }} `
-      -Prop configuration=${{ parameters.build_config }} `
-      -Prop buildPath=${{ parameters.build_dir }}
+      -Prop configuration=$(buildConfig) `
+      -Prop buildPath=$(buildDir)
     nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec `
       -Prop version=$VERSION `
-      -Prop configuration=${{ parameters.build_config }}
+      -Prop configuration=$(buildConfig)
   displayName: 'Nuget Packaging'
   workingDirectory: '$(Build.SourcesDirectory)\nuget'
 
 - powershell: |
     Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
-  displayName: 'List all files in the repo for ${{ parameters.arch }} ${{ parameters.ep }}'
+  displayName: 'List all files in the repo for'
 
 - powershell: |
     Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse

@@ -1,8 +1,4 @@
 parameters:
-- name: arch
-  type: string
-- name: ep
-  type: string
 - name: genai_src
   type: string
   default: '$(Build.SourcesDirectory)/onnxruntime-genai'
@@ -70,6 +66,4 @@ steps:
 - template: utils/capi-archive.yml
   parameters:
     genai_src: ${{ parameters.genai_src }}
-    artifactName: $(artifactName)
     archiveType: tar
-    buildDir: '${{ parameters.genai_src }}/build/gcc_$(ep)/release'

@@ -3,8 +3,6 @@ parameters:
   type: string
 - name: archiveType
   type: string
-- name: buildDir
-  type: string
 steps:
 - task: CopyFiles@2
   displayName: 'Copy Onnxruntime C API library files to ArtifactStagingDirectory'
@@ -15,7 +13,7 @@ steps:
 - task: CopyFiles@2
   displayName: 'Copy GenAi C API library files to ArtifactStagingDirectory'
   inputs:
-    SourceFolder: '${{ parameters.buildDir }}'
+    SourceFolder: '$(buildDir)'
     Contents: |
       onnxruntime-genai.so
     TargetFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)/lib'

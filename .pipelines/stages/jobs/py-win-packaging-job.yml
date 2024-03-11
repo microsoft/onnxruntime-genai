@@ -56,7 +56,6 @@ jobs:
   - template: steps/capi-win-step.yml
     parameters:
       arch: ${{ parameters.arch }}
-      cuda_version: ${{ parameters.cuda_version }}
       ep: ${{ parameters.ep }}
       target: 'python'
 
