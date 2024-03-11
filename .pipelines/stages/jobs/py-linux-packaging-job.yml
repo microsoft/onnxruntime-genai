@@ -1,16 +1,12 @@
 parameters:
 - name: arch
   type: string
-  default: 'x64'
 - name: ort_version
   type: string
-  default: '1.17.1'
 - name: ep
   type: string
-  default: 'cpu'
-  values:
-  - 'cpu'
-  - 'cuda'
+- name: cuda_version
+  type: string
 - name: machine_pool
   type: string
   default: 'onnxruntime-Ubuntu2204-AMD-CPU'
