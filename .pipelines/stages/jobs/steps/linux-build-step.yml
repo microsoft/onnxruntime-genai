@@ -11,7 +11,7 @@ parameters:
   type: string
   default: 'onnxruntime-genai'
 - name: python_version
-  type: number
+  type: string
   default: '3.8'
 - name: genai_src
   type: string
