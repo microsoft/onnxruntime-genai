@@ -1,10 +1,8 @@
 parameters:
 - name: genai_src
   type: string
-  default: '$(Build.SourcesDirectory)/onnxruntime-genai'
 - name: target
   type: string
-  default: 'onnxruntime-genai'
 steps:
 
 - checkout: self # due to checkout multiple repos, the root directory is $(Build.SourcesDirectory)/onnxruntime-genai,

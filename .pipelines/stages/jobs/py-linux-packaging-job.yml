@@ -8,12 +8,6 @@ parameters:
 - name: cuda_version
   type: string
   default: ''
-- name: machine_pool
-  type: string
-  default: 'onnxruntime-Ubuntu2204-AMD-CPU'
-- name: genai_src
-  type: string
-  default: '$(Build.SourcesDirectory)/onnxruntime-genai'
 jobs:
 - job: Linux_${{ parameters.ep }}_${{ parameters.arch }}_Wheels
   strategy:
@@ -36,7 +30,7 @@ jobs:
   timeoutInMinutes: 240
   workspace:
     clean: all
-  pool: ${{ parameters.machine_pool }}
+  pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
   variables:
   # The build machine pool doesn't have dotnet, so it can't run CG.
   - name: skipComponentGovernanceDetection
@@ -59,6 +53,7 @@ jobs:
   - template: steps/capi-linux-step.yml
     parameters:
       target: 'python'
+      genai_src: '$(Build.SourcesDirectory)/onnxruntime-genai'
 
   - task: PublishBuildArtifacts@1
     displayName: 'Publish Artifact: ONNXRuntime python wheel'
