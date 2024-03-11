@@ -10,12 +10,12 @@ parameters:
   default: ''
 
 jobs:
-- job: Linux_CAPI_Packaging_${{ parameters.arch }}_${{ parameters.ep }}
+- job: Linux_CAPI_Packaging_$(arch)_$(ep)
   pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
   timeoutInMinutes: 180
   variables:
   - name: artifactName
-    value: 'onnxruntime-genai-capi-linux-${{ parameters.ep }}-${{ parameters.arch }}'
+    value: 'onnxruntime-genai-capi-linux-$(ep)-$(arch)'
   - name: ort_version
     value: ${{ parameters.ort_version }}
   - name: arch
@@ -23,15 +23,15 @@ jobs:
   - name: ep
     value: ${{ parameters.ep }}
   - nane: buildDir
-    value: '$(Build.SourcesDirectory)\build\release\${{ parameters.ep }}_default\Release'
+    value: '$(Build.SourcesDirectory)\build\release\$(ep)_default\Release'
   - name: ort_filename
     ${{ if eq(parameters.ep, 'cpu') }}:
-      value: 'onnxruntime-linux-${{ parameters.arch }}-$(ort_version)'
+      value: 'onnxruntime-linux-$(arch)-$(ort_version)'
     ${{ else}}:
       ${{if eq(parameters.cuda_version, '11.8') }}:
-        value: 'onnxruntime-linux-${{ parameters.arch }}-gpu-$(ort_version)'
+        value: 'onnxruntime-linux-$(arch)-gpu-$(ort_version)'
       ${{ else }}:
-        value: 'onnxruntime-linux-${{ parameters.arch }}-cuda12-$(ort_version)'
+        value: 'onnxruntime-linux-$(arch)-cuda12-$(ort_version)'
   workspace:
     clean: all
   steps:

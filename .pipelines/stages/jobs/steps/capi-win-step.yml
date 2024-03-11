@@ -15,9 +15,9 @@ steps:
 - template: utils/set-nightly-build-option-variable.yml
 
 - script: |
-    echo "arch=${{ parameters.arch }}"
+    echo "arch=$(arch)"
     echo "ort_version=$(ort_version)"
-    echo "ep=${{ parameters.ep }}"
+    echo "ep=$(ep)"
     echo "cuda_version=$(cuda_version)"
     echo "target=${{ parameters.target }}"
     echo "ort_filename=$(ort_filename)"
@@ -31,23 +31,23 @@ steps:
 - powershell: |
     azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" '$(Build.SourcesDirectory)\cuda_sdk'
   displayName: 'Download CUDA'
-  condition: eq('${{ parameters.ep }}', 'cuda')
+  condition: eq('$(ep)', 'cuda')
   workingDirectory: '$(Build.SourcesDirectory)'
 
 - powershell: |
-    cmake --preset windows_${{ parameters.arch }}_${{ parameters.ep }}_release -T cuda='$(Build.SourcesDirectory)\cuda_sdk\v$(cuda_version)'
+    cmake --preset windows_$(arch)_$(ep)_release -T cuda='$(Build.SourcesDirectory)\cuda_sdk\v$(cuda_version)'
   displayName: 'Configure CMake C API with CUDA'
-  condition: eq('${{ parameters.ep }}', 'cuda')
+  condition: eq('$(ep)', 'cuda')
   workingDirectory: '$(Build.SourcesDirectory)'
 
 - powershell: |
-    cmake --preset windows_${{ parameters.arch }}_${{ parameters.ep }}_release
+    cmake --preset windows_$(arch)_$(ep)_release
   displayName: 'Configure CMake C API without CUDA'
-  condition: ne('${{ parameters.ep }}', 'cuda')
+  condition: ne('$(ep)', 'cuda')
   workingDirectory: '$(Build.SourcesDirectory)'
 
 - powershell: |
-    cmake --build --preset windows_${{ parameters.arch }}_${{ parameters.ep }}_release --parallel --target ${{ parameters.target }}
+    cmake --build --preset windows_$(arch)_$(ep)_release --parallel --target ${{ parameters.target }}
   displayName: 'Build C API'
   workingDirectory: '$(Build.SourcesDirectory)'
 

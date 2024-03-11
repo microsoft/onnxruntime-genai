@@ -1,14 +1,4 @@
 parameters:
-- name: arch
-  type: string
-- name: ep
-  type: string
-- name: ort_filename
-  type: string
-- name: PyDotVer
-  type: string
-- name: PyNoDotVer
-  type: string
 - name: genai_src
   type: string
   default: '$(Build.SourcesDirectory)/onnxruntime-genai'
@@ -25,9 +15,9 @@ steps:
 - template: utils/set-nightly-build-option-variable.yml
 
 - bash: |
-    echo "arch=${{ parameters.arch }}"
+    echo "arch=$(arch)"
     echo "ort_version=$(ort_version)"
-    echo "ep=${{ parameters.ep }}"
+    echo "ep=$(ep)"
     echo "genai_src=${{ parameters.genai_src }}"
     echo "ort_filename=${{ parameters.ort_filename }}"
   displayName: 'Print Parameters'
@@ -41,13 +31,13 @@ steps:
     set -e -x
     az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
     az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
-    python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_${{ parameters.ep }} \
+    python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_$(ep) \
       --context tools/ci_build/github/linux/docker/manylinux \
       --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
       --container-registry onnxruntimebuildcache \
       --manylinux-src $(Build.SourcesDirectory)/manylinux \
       --multiple_repos \
-      --repository onnxruntime${{ parameters.ep }}build${{ parameters.arch }}
+      --repository onnxruntime$(ep)build$(arch)
   displayName: 'Get Docker Image'
   workingDirectory: '${{ parameters.genai_src }}'
 
@@ -56,13 +46,13 @@ steps:
     docker run \
     --rm \
     --volume ${{ parameters.genai_src }}:/ort_genai_src \
-    -w /ort_genai_src/ onnxruntime${{ parameters.ep }}build${{ parameters.arch }} \
+    -w /ort_genai_src/ onnxruntime$(ep)build$(arch) \
     bash -c " \
-        /usr/bin/cmake --preset linux_gcc_${{ parameters.ep }}_release \
+        /usr/bin/cmake --preset linux_gcc_$(ep)_release \
           -DENABLE_TESTS=OFF \
           -DMANYLINUX=ON \
           -DPYTHON_EXECUTABLE=/opt/python/cp${{ parameters.PyNoDotVer }}-cp${{ parameters.PyNoDotVer }}/bin/python${{ parameters.PyDotVer }} && \
-        /usr/bin/cmake --build --preset linux_gcc_${{ parameters.ep }}_release \
+        /usr/bin/cmake --build --preset linux_gcc_$(ep)_release \
           --target python"
   displayName: 'Build Python ${{ parameters.PyNoDotVer }}'
   workingDirectory: '${{ parameters.genai_src }}'
@@ -72,13 +62,13 @@ steps:
     docker run \
     --rm \
     --volume ${{ parameters.genai_src }}:/ort_genai_src \
-    -w /ort_genai_src/ onnxruntime${{ parameters.ep }}build${{ parameters.arch }} \
+    -w /ort_genai_src/ onnxruntime$(ep)build$(arch) \
     bash -c " \
-        /usr/bin/cmake --build --preset linux_gcc_${{ parameters.ep }}_release \
+        /usr/bin/cmake --build --preset linux_gcc_$(ep)_release \
           -DENABLE_TESTS=OFF \
           -DMANYLINUX=ON \
           -DPYTHON_EXECUTABLE=/opt/python/cp${{ parameters.PyNoDotVer }}-cp${{ parameters.PyNoDotVer }}/bin/python${{ parameters.PyDotVer }} && \
-        /usr/bin/cmake --build --preset linux_gcc_${{ parameters.ep }}_release \
+        /usr/bin/cmake --build --preset linux_gcc_$(ep)_release \
           --target PyPackageBuild"
   displayName: 'PyPackageBuild ${{ parameters.PyNoDotVer }}'
   workingDirectory: '${{ parameters.genai_src }}'
@@ -90,6 +80,6 @@ steps:
 - task: CopyFiles@2
   displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
   inputs:
-    SourceFolder: '${{ parameters.genai_src }}/build/gcc_${{ parameters.ep }}/release/wheel'
+    SourceFolder: '${{ parameters.genai_src }}/build/gcc_$(ep)/release/wheel'
     Contents: '*manylinux*.whl'
     TargetFolder: '$(Build.ArtifactStagingDirectory)'

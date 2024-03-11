@@ -15,7 +15,7 @@ parameters:
   type: string
   default: '$(Build.SourcesDirectory)/onnxruntime-genai'
 jobs:
-- job: Linux_${{ parameters.ep }}_${{ parameters.arch }}_Wheels
+- job: Linux_$(ep)_$(arch)_Wheels
   strategy:
     matrix:
       Python38:
@@ -43,26 +43,20 @@ jobs:
     value: true
   - name: ort_filename
     ${{ if eq(parameters.ep, 'cpu') }}:
-      value: 'onnxruntime-linux-${{ parameters.arch }}-$(ort_version)'
+      value: 'onnxruntime-linux-${{ parameters.arch }}-${{ parameters.ort_version }}'
     ${{ else}}:
       ${{if eq(parameters.cuda_version, '11.8') }}:
-        value: 'onnxruntime-linux-${{ parameters.arch }}-gpu-$(ort_version)'
+        value: 'onnxruntime-linux-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}'
       ${{ else }}:
-        value: 'onnxruntime-linux-${{ parameters.arch }}-cuda12-$(ort_version)'
+        value: 'onnxruntime-linux-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
   steps:
 
   - template: steps/py-linux-build-step.yml
-    parameters:
-      arch: ${{ parameters.arch }}
-      ep: ${{ parameters.ep }}
-      ort_filename: $(ort_filename)
-      PyDotVer: $(PyDotVer)
-      PyNoDotVer: $(PyNoDotVer)
 
   - task: PublishBuildArtifacts@1
     displayName: 'Publish Artifact: ONNXRuntime python wheel'
     inputs:
-      ArtifactName: onnxruntime-genai-linux-${{ parameters.ep }}-${{ parameters.arch }}
+      ArtifactName: onnxruntime-genai-linux-$(ep)-$(arch)
 
   - template: steps/compliant-and-cleanup-step.yml
 

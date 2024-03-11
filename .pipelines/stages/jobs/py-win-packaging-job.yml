@@ -9,7 +9,7 @@ parameters:
 - name: ep
   type: string
 jobs:
-- job: Windows_${{ parameters.ep }}_${{ parameters.arch }}_Wheels
+- job: Windows_$(ep)_$(arch)_Wheels
   pool: 'onnxruntime-Win-CPU-2022'
   strategy:
     matrix:
@@ -41,7 +41,7 @@ jobs:
     inputs:
       versionSpec: $(PythonVersion)
       addToPath: true
-      architecture: ${{ parameters.arch }}
+      architecture: $(arch)
 
   - task: PythonScript@0
     inputs:
@@ -59,13 +59,13 @@ jobs:
 
   - template: steps/compliant/win-esrp-dll-step.yml
     parameters:
-      FolderPath: '$(Build.SourcesDirectory)\build\release\${{ parameters.ep }}_default\wheel\onnxruntime_genai'
+      FolderPath: '$(Build.SourcesDirectory)\build\release\$(ep)_default\wheel\onnxruntime_genai'
       DisplayName: 'ESRP - PYD Sign'
       DoEsrp: true
       Pattern: '*.pyd'
 
   - powershell: |
-      cmake --build --preset windows_${{ parameters.arch }}_${{ parameters.ep }}_release --parallel --PyPackageBuild
+      cmake --build --preset windows_$(arch)_$(ep)_release --parallel --PyPackageBuild
     displayName: 'Build Python Wheel'
 
   - powershell: |
@@ -74,13 +74,13 @@ jobs:
   - task: CopyFiles@2
     displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
     inputs:
-      SourceFolder: '$(Build.SourcesDirectory)\build\release\${{ parameters.ep }}_default\wheel'
+      SourceFolder: '$(Build.SourcesDirectory)\build\release\$(ep)_default\wheel'
       Contents: '*.whl'
       TargetFolder: '$(Build.ArtifactStagingDirectory)'
 
   - task: PublishBuildArtifacts@1
     displayName: 'Publish Artifact: ONNXRuntime Genai python wheel'
     inputs:
-      ArtifactName: onnxruntime-genai-win-${{ parameters.ep }}-${{ parameters.arch }}
+      ArtifactName: onnxruntime-genai-win-$(ep)-$(arch)
 
   - template: steps/compliant-and-cleanup-step.yml
