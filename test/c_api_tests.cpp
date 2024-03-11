@@ -50,7 +50,7 @@ void CheckResult(OgaResult* result) {
 TEST(CAPITests, TokenizerCAPI) {
 #if TEST_PHI2
   OgaModel* model;
-  CheckResult(OgaCreateModel(MODEL_PATH "phi-2", OgaDeviceTypeCPU, &model));
+  CheckResult(OgaCreateModel(MODEL_PATH "phi-2", &model));
   OgaModelPtr model_ptr{model};
 
   OgaTokenizer* tokenizer;
@@ -121,7 +121,7 @@ TEST(CAPITests, TokenizerCAPI) {
 TEST(CAPITests, EndToEndPhiBatch) {
 #if TEST_PHI2
   OgaModel* model;
-  CheckResult(OgaCreateModel(MODEL_PATH "phi-2", OgaDeviceTypeCPU, &model));
+  CheckResult(OgaCreateModel(MODEL_PATH "phi-2", &model));
   OgaModelPtr model_ptr{model};
 
   OgaTokenizer* tokenizer;
@@ -180,7 +180,7 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
   // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
 
   OgaModel* model;
-  CheckResult(OgaCreateModel(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32", OgaDeviceTypeCPU, &model));
+  CheckResult(OgaCreateModel(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32", &model));
   OgaModelPtr model_ptr{model};
 
   OgaGeneratorParams* params;
