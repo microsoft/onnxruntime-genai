@@ -13,7 +13,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         public Model(string modelPath)
         {
-            Result.VerifySuccess(NativeMethods.OgaCreateModel(Utils.ToUtf8(modelPath), out _modelHandle));
+            Result.VerifySuccess(NativeMethods.OgaCreateModel(StringUtils.ToUtf8(modelPath), out _modelHandle));
         }
 
         internal IntPtr Handle { get { return _modelHandle; } }

@@ -210,6 +210,20 @@ OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream* p, int32_t 
   OGA_CATCH
 }
 
+OGA_EXPORT OgaResult* OGA_API_CALL OgaSetCurrentGpuDeviceId(int device_id) {
+  OGA_TRY
+  Ort::SetCurrentGpuDeviceId(device_id);
+  return nullptr;
+  OGA_CATCH
+}
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGetCurrentGpuDeviceId(int* device_id) {
+  OGA_TRY
+  *device_id = Ort::GetCurrentGpuDeviceId();
+  return nullptr;
+  OGA_CATCH
+}
+
 void OGA_API_CALL OgaDestroyResult(OgaResult* p) {
   delete p;
 }
