@@ -10,7 +10,7 @@ parameters:
 - name: target
   type: string
   default: 'onnxruntime-genai'
-- name: py_ver
+- name: python_version
   type: number
   default: '3.8'
 - name: genai_src
@@ -33,7 +33,7 @@ steps:
     echo "ort_version=${{ parameters.ort_version }}"
     echo "ep=${{ parameters.ep }}"
     echo "target=${{ parameters.target }}"
-    echo "py_ver=${{ parameters.py_ver }}"
+    echo "python_version=${{ parameters.python_version }}"
     echo "genai_src=${{ parameters.genai_src }}"
     echo "ort_filename=${{ parameters.ort_filename }}"
   displayName: 'Print Parameters'
@@ -73,7 +73,7 @@ steps:
           /usr/bin/cmake --build --preset linux_gcc_${{ parameters.ep }}_release \
             --target python"
     displayName: 'Build Python Wheel 3.8'
-    condition: ${{ eq(parameters.py_ver, 3.8) }}
+    condition: ${{ eq(parameters.python_version, 3.8) }}
     workingDirectory: '${{ parameters.genai_src }}'
   - script: |
       set -e -x
@@ -89,7 +89,7 @@ steps:
           /usr/bin/cmake --build --preset linux_gcc_${{ parameters.ep }}_release \
             --target python"
     displayName: 'Build Python Wheel 3.9'
-    condition: ${{ eq(parameters.py_ver, 3.9) }}
+    condition: ${{ eq(parameters.python_version, 3.9) }}
     workingDirectory: '${{ parameters.genai_src }}'
   - script: |
       set -e -x
@@ -105,7 +105,7 @@ steps:
           /usr/bin/cmake --build --preset linux_gcc_${{ parameters.ep }}_release \
             --target python"
     displayName: 'Build Python Wheel 3.10'
-    condition: ${{ eq(parameters.py_ver, 3.10) }}
+    condition: ${{ eq(parameters.python_version, 3.10) }}
     workingDirectory: '${{ parameters.genai_src }}'
   - script: |
       set -e -x
@@ -121,7 +121,7 @@ steps:
           /usr/bin/cmake --build --preset linux_gcc_${{ parameters.ep }}_release \
             --target python"
     displayName: 'Build Python Wheel 3.11'
-    condition: ${{ eq(parameters.py_ver, 3.11) }}
+    condition: ${{ eq(parameters.python_version, 3.11) }}
     workingDirectory: '${{ parameters.genai_src }}'
   - script: |
       set -e -x
@@ -137,7 +137,7 @@ steps:
           /usr/bin/cmake --build --preset linux_gcc_${{ parameters.ep }}_release \
             --target python"
     displayName: 'Build Python Wheel 3.12'
-    condition: ${{ eq(parameters.py_ver, 3.12) }}
+    condition: ${{ eq(parameters.python_version, 3.12) }}
     workingDirectory: '${{ parameters.genai_src }}'
 - ${{ else }}:
   - script: |
