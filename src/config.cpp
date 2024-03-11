@@ -16,6 +16,85 @@ ONNXTensorElementDataType TranslateTensorType(std::string_view value) {
   throw std::runtime_error("Invalid tensor type: " + std::string(value));
 }
 
+struct ProviderOptions_Element : JSON::Element {
+  explicit ProviderOptions_Element(Config::ProviderOptions& v) : v_{v} {}
+
+  void OnString(std::string_view name, std::string_view value) override {
+    v_.options.emplace_back(name, value);
+  }
+
+ private:
+  Config::ProviderOptions& v_;
+};
+
+struct ProviderOptionsObject_Element : JSON::Element {
+  explicit ProviderOptionsObject_Element(std::vector<Config::ProviderOptions>& v) : v_{v} {}
+
+  JSON::Element& OnObject(std::string_view name) override {
+    if (options_element_)
+      throw std::runtime_error("Each object in the provider_options array can only have one member (named value)");
+    auto& options = v_.emplace_back();
+    options.name = name;
+    options_element_ = std::make_unique<ProviderOptions_Element>(options);
+    return *options_element_;
+  }
+
+ private:
+  std::vector<Config::ProviderOptions>& v_;
+  std::unique_ptr<ProviderOptions_Element> options_element_;
+};
+
+struct ProviderOptionsArray_Element : JSON::Element {
+  explicit ProviderOptionsArray_Element(std::vector<Config::ProviderOptions>& v) : v_{v} {}
+
+  JSON::Element& OnObject(std::string_view name) override { return object_; }
+
+ private:
+  std::vector<Config::ProviderOptions>& v_;
+  ProviderOptionsObject_Element object_{v_};
+};
+
+struct SessionOptions_Element : JSON::Element {
+  explicit SessionOptions_Element(Config::SessionOptions& v) : v_{v} {}
+
+  void OnString(std::string_view name, std::string_view value) override {
+    if (name == "log_id") {
+      v_.log_id = value;
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
+  void OnNumber(std::string_view name, double value) override {
+    if (name == "intra_op_num_threads")
+      v_.intra_op_num_threads = static_cast<int>(value);
+    else if (name == "inter_op_num_threads")
+      v_.inter_op_num_threads = static_cast<int>(value);
+    else if (name == "log_severity_level")
+      v_.log_severity_level = static_cast<int>(value);
+    else
+      throw JSON::unknown_value_error{};
+  }
+
+  void OnBool(std::string_view name, bool value) override {
+    if (name == "enable_cpu_mem_arena")
+      v_.enable_cpu_mem_arena = value;
+    else if (name == "enable_mem_pattern")
+      v_.enable_mem_pattern = value;
+    else
+      throw JSON::unknown_value_error{};
+  }
+
+  JSON::Element& OnArray(std::string_view name) override {
+    if (name == "provider_options")
+      return provider_options_;
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::SessionOptions& v_;
+  ProviderOptionsArray_Element provider_options_{v_.provider_options};
+};
+
 struct EncoderDecoderInit_Element : JSON::Element {
   explicit EncoderDecoderInit_Element(Config::Model::EncoderDecoderInit& v) : v_{v} {}
 
@@ -108,6 +187,9 @@ struct Decoder_Element : JSON::Element {
   }
 
   Element& OnObject(std::string_view name) override {
+    if (name == "session_options") {
+      return session_options_;
+    }
     if (name == "inputs") {
       return inputs_;
     }
@@ -119,6 +201,7 @@ struct Decoder_Element : JSON::Element {
 
  private:
   Config::Model::Decoder& v_;
+  SessionOptions_Element session_options_{v_.session_options};
   Inputs_Element inputs_{v_.inputs};
   Outputs_Element outputs_{v_.outputs};
 };

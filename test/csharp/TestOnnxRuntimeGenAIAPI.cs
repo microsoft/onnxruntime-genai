@@ -46,7 +46,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                                              0, 0, 195, 731, 731, 114, 114, 114, 114, 114 };
 
             string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "hf-internal-testing", "tiny-random-gpt2-fp32");
-            using (var model = new Model(modelPath, DeviceType.CPU))
+            using (var model = new Model(modelPath))
             {
                 Assert.NotNull(model);
                 using (var generatorParams = new GeneratorParams(model))
@@ -90,14 +90,14 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         public void TestTokenizerBatchEncodeDecode()
         {
             string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
-            using (var model = new Model(modelPath, DeviceType.CPU))
+            using (var model = new Model(modelPath))
             {
                 Assert.NotNull(model);
                 using (var tokenizer = new Tokenizer(model))
                 {
                     Assert.NotNull(tokenizer);
 
-                    var strings = new string[] { 
+                    var strings = new string[] {
                         "This is a test.",
                         "Rats are awesome pets!",
                         "The quick brown fox jumps over the lazy dog."
@@ -119,14 +119,14 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         public void TestTokenizerBatchEncodeSingleDecode()
         {
             string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
-            using (var model = new Model(modelPath, DeviceType.CPU))
+            using (var model = new Model(modelPath))
             {
                 Assert.NotNull(model);
                 using (var tokenizer = new Tokenizer(model))
                 {
                     Assert.NotNull(tokenizer);
 
-                    var strings = new string[] { 
+                    var strings = new string[] {
                         "This is a test.",
                         "Rats are awesome pets!",
                         "The quick brown fox jumps over the lazy dog."
@@ -150,7 +150,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         public void TestTokenizerBatchEncodeStreamDecode()
         {
             string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
-            using (var model = new Model(modelPath, DeviceType.CPU))
+            using (var model = new Model(modelPath))
             {
                 Assert.NotNull(model);
                 using (var tokenizer = new Tokenizer(model))
@@ -158,7 +158,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                     Assert.NotNull(tokenizer);
                     var tokenizerStream = tokenizer.CreateStream();
 
-                    var strings = new string[] { 
+                    var strings = new string[] {
                         "This is a test.",
                         "Rats are awesome pets!",
                         "The quick brown fox jumps over the lazy dog."
@@ -186,7 +186,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         public void TestTokenizerSingleEncodeDecode()
         {
             string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
-            using (var model = new Model(modelPath, DeviceType.CPU))
+            using (var model = new Model(modelPath))
             {
                 Assert.NotNull(model);
                 using (var tokenizer = new Tokenizer(model))
@@ -210,14 +210,14 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         public void TestPhi2()
         {
             string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
-            using (var model = new Model(modelPath, DeviceType.CPU))
+            using (var model = new Model(modelPath))
             {
                 Assert.NotNull(model);
                 using (var tokenizer = new Tokenizer(model))
                 {
                     Assert.NotNull(tokenizer);
 
-                    var strings = new string[] { 
+                    var strings = new string[] {
                         "This is a test.",
                         "Rats are awesome pets!",
                         "The quick brown fox jumps over the lazy dog."

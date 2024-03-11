@@ -29,7 +29,7 @@ import pytest
 def test_greedy_search(device, test_data_path, relative_model_path):
     model_path = os.fspath(Path(test_data_path) / relative_model_path)
 
-    model = og.Model(model_path, device)
+    model = og.Model(model_path)
 
     search_params = og.GeneratorParams(model)
     search_params.input_ids = np.array(
@@ -84,7 +84,6 @@ def test_tokenizer_encode_decode(device, path_for_model, model_name, batch):
 
     model = og.Model(
         path_for_model(model_name, "cpu" if device == og.DeviceType.CPU else "cuda"),
-        device,
     )
     tokenizer = og.Tokenizer(model)
 
@@ -119,7 +118,7 @@ def test_tokenizer_encode_decode(device, path_for_model, model_name, batch):
 )
 def test_tokenizer_stream(device, phi2_for):
     model = og.Model(
-        phi2_for("cpu") if device == og.DeviceType.CPU else phi2_for("cuda"), device
+        phi2_for("cpu") if device == og.DeviceType.CPU else phi2_for("cuda")
     )
     tokenizer = og.Tokenizer(model)
     tokenizer_stream = tokenizer.create_stream()
@@ -155,7 +154,7 @@ def test_tokenizer_stream(device, phi2_for):
 )
 def test_batching(device, phi2_for):
     model = og.Model(
-        phi2_for("cpu") if device == og.DeviceType.CPU else phi2_for("cuda"), device
+        phi2_for("cpu") if device == og.DeviceType.CPU else phi2_for("cuda")
     )
     tokenizer = og.Tokenizer(model)
 

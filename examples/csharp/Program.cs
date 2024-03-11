@@ -6,7 +6,7 @@ Console.WriteLine("Hello, Phi-2!");
 Console.WriteLine("-------------");
 
 string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "phi-2");
-using Model model = new Model(modelPath, DeviceType.CPU);
+using Model model = new Model(modelPath);
 using Tokenizer tokenizer = new Tokenizer(model);
 
 while (true)

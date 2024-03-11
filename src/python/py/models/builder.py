@@ -138,6 +138,10 @@ class Model:
                 "bos_token_id": config.bos_token_id,
                 "context_length": self.context_length,
                 "decoder": {
+                    "session_options" : {
+                        "provider_options" : [
+                        ]
+                    },
                     "filename": self.filename,
                     "head_size": self.head_size,
                     "hidden_size": self.hidden_size,
@@ -173,6 +177,10 @@ class Model:
                 "top_p": config.top_p if hasattr(config, "top_p") else 1.0,
             },
         }
+
+        if self.ep == "cuda":
+            cuda_options = { "cuda" : { } }
+            genai_config["model"]["decoder"]["session_options"]["provider_options"].append(cuda_options)
 
         print(f"Saving GenAI config in {out_dir}")
         with open(os.path.join(out_dir,"genai_config.json"), "w") as f:
