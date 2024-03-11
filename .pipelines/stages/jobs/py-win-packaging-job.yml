@@ -29,6 +29,8 @@ jobs:
     value: ${{ parameters.ep }}
   - name: cuda_version
     value: ${{ parameters.cuda_version }}
+  - name: arch
+    value: ${{ parameters.arch }}
   - name: ort_version
     value: ${{ parameters.ort_version }}
   - name: ort_filename

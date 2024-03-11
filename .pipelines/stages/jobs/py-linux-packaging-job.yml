@@ -56,7 +56,9 @@ jobs:
         value: 'onnxruntime-linux-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
   steps:
 
-  - template: steps/py-linux-build-step.yml
+  - template: steps/capi-linux-step.yml
+    parameters:
+      target: 'python'
 
   - task: PublishBuildArtifacts@1
     displayName: 'Publish Artifact: ONNXRuntime python wheel'

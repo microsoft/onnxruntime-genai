@@ -36,6 +36,8 @@ jobs:
     clean: all
   steps:
   - template: steps/capi-linux-step.yml
+    parameters:
+      target: 'onnxruntime-genai'
 
 # TODO: Add a step to build the nuget package
 
