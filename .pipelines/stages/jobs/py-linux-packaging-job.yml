@@ -48,7 +48,7 @@ jobs:
       ort_version: ${{ parameters.ort_version }}
       ep: ${{ parameters.ep }}
       ort_filename: $(ort_filename)
-      python_version: $(PythonVersion)
+      PythonVersion: $(PythonVersion)
 
   - script: |
       ls $(Build.SourcesDirectory) -R

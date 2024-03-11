@@ -7,7 +7,7 @@ parameters:
   type: string
 - name: ort_version
   type: string
-- name: python_version
+- name: PythonVersion
   type: string
 - name: genai_src
   type: string
@@ -28,7 +28,7 @@ steps:
     echo "arch=${{ parameters.arch }}"
     echo "ort_version=${{ parameters.ort_version }}"
     echo "ep=${{ parameters.ep }}"
-    echo "python_version=${{ parameters.python_version }}"
+    echo "PythonVersion=${{ parameters.PythonVersion }}"
     echo "genai_src=${{ parameters.genai_src }}"
     echo "ort_filename=${{ parameters.ort_filename }}"
   displayName: 'Print Parameters'
@@ -53,7 +53,7 @@ steps:
   displayName: 'Get Docker Image'
   workingDirectory: '${{ parameters.genai_src }}'
 
-- ${{ if eq(parameters.python_version, '3.8') }}:
+- ${{ if eq(parameters.PythonVersion, '3.8') }}:
   - script: |
       set -e -x
       docker run \
@@ -69,7 +69,7 @@ steps:
             --target python"
     displayName: 'Build Python Wheel 3.8'
     workingDirectory: '${{ parameters.genai_src }}'
-- ${{ if eq(parameters.python_version, '3.9') }}:
+- ${{ if eq(parameters.PythonVersion, '3.9') }}:
   - script: |
       set -e -x
       docker run \
@@ -85,7 +85,7 @@ steps:
             --target python"
     displayName: 'Build Python Wheel 3.9'
     workingDirectory: '${{ parameters.genai_src }}'
-- ${{ if eq(parameters.python_version, '3.10') }}:
+- ${{ if eq(parameters.PythonVersion, '3.10') }}:
   - script: |
       set -e -x
       docker run \
@@ -101,7 +101,7 @@ steps:
               --target python"
     displayName: 'Build Python Wheel 3.10'
     workingDirectory: '${{ parameters.genai_src }}'
-- ${{ if eq(parameters.python_version, '3.11') }}:
+- ${{ if eq(parameters.PythonVersion, '3.11') }}:
   - script: |
       set -e -x
       docker run \
@@ -117,7 +117,7 @@ steps:
             --target python"
     displayName: 'Build Python Wheel 3.11'
     workingDirectory: '${{ parameters.genai_src }}'
-- ${{ if eq(parameters.python_version, '3.12') }}:
+- ${{ if eq(parameters.PythonVersion, '3.12') }}:
   - script: |
       set -e -x
       docker run \
