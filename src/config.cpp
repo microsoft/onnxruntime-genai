@@ -58,9 +58,11 @@ struct SessionOptions_Element : JSON::Element {
   explicit SessionOptions_Element(Config::SessionOptions& v) : v_{v} {}
 
   void OnString(std::string_view name, std::string_view value) override {
-    if (name == "log_id") {
+    if (name == "log_id")
       v_.log_id = value;
-    } else
+    else if (name == "enable_profiling")
+      v_.enable_profiling = value;
+    else
       throw JSON::unknown_value_error{};
   }
 
