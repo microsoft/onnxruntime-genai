@@ -42,6 +42,16 @@ jobs:
       ${{ else }}:
         value: 'onnxruntime-linux-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
   steps:
+#  - checkout: self # due to checkout multiple repos, the root directory is $(Build.SourcesDirectory)/onnxruntime-genai,
+#    clean: true
+#    submodules: recursive
+#
+#  - checkout: manylinux # due to checkout multiple repos, the root directory is $(Build.SourcesDirectory)/manylinux,
+#    clean: true
+#    submodules: recursive
+#
+#  - template: set-nightly-build-option-variable-step.yml
+
   - template: steps/py-linux-build-step.yml
     parameters:
       arch: ${{ parameters.arch }}
