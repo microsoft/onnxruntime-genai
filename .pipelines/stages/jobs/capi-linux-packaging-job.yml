@@ -29,12 +29,11 @@ jobs:
   workspace:
     clean: all
   steps:
-  - template: steps/linux-build-step.yml
+  - template: steps/capi-linux-build-step.yml
     parameters:
       arch: ${{ parameters.arch }}
       ort_version: ${{ parameters.ort_version }}
       ep: ${{ parameters.ep }}
-      target: 'onnxruntime-genai'
       ort_filename: $(ort_filename)
 
   - task: CopyFiles@2

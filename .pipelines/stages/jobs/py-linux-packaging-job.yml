@@ -42,12 +42,11 @@ jobs:
       ${{ else }}:
         value: 'onnxruntime-linux-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
   steps:
-  - template: steps/linux-build-step.yml
+  - template: steps/py-linux-build-step.yml
     parameters:
       arch: ${{ parameters.arch }}
       ort_version: ${{ parameters.ort_version }}
       ep: ${{ parameters.ep }}
-      target: 'python'
       ort_filename: $(ort_filename)
       python_version: $(PythonVersion)
 

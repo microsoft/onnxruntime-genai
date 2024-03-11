@@ -1,0 +1,77 @@
+parameters:
+- name: arch
+  type: string
+- name: ep
+  type: string
+- name: ort_filename
+  type: string
+- name: ort_version
+  type: string
+- name: genai_src
+  type: string
+  default: '$(Build.SourcesDirectory)/onnxruntime-genai'
+steps:
+
+- checkout: self # due to checkout multiple repos, the root directory is $(Build.SourcesDirectory)/onnxruntime-genai,
+  clean: true
+  submodules: recursive
+
+- checkout: manylinux # due to checkout multiple repos, the root directory is $(Build.SourcesDirectory)/manylinux,
+  clean: true
+  submodules: recursive
+
+- template: set-nightly-build-option-variable-step.yml
+
+- script: |
+    echo "arch=${{ parameters.arch }}"
+    echo "ort_version=${{ parameters.ort_version }}"
+    echo "ep=${{ parameters.ep }}"
+    echo "target=${{ parameters.target }}"
+    echo "python_version=${{ parameters.python_version }}"
+    echo "genai_src=${{ parameters.genai_src }}"
+    echo "ort_filename=${{ parameters.ort_filename }}"
+  displayName: 'Print Parameters'
+
+- template: download-ort.yaml
+  parameters:
+    archive: 'tgz'
+    genai_src: ${{ parameters.genai_src }}
+    ort_filename: ${{ parameters.ort_filename }}
+    ort_version: ${{ parameters.ort_version }}
+- script: |
+    set -e -x
+    az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
+    az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
+    python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_${{ parameters.ep }} \
+      --context tools/ci_build/github/linux/docker/manylinux \
+      --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
+      --container-registry onnxruntimebuildcache \
+      --manylinux-src $(Build.SourcesDirectory)/manylinux \
+      --multiple_repos \
+      --repository onnxruntime${{ parameters.ep }}build${{ parameters.arch }}
+  displayName: 'Get Docker Image'
+  workingDirectory: '${{ parameters.genai_src }}'
+
+- script: |
+    set -e -x
+    docker run \
+    --rm \
+    --volume ${{ parameters.genai_src }}:/ort_genai_src \
+    -w /ort_genai_src/ onnxruntime${{ parameters.ep }}build${{ parameters.arch }} \
+    bash -c " \
+        /usr/bin/cmake --preset linux_gcc_${{ parameters.ep }}_release \
+          -DENABLE_TESTS=OFF && \
+        /usr/bin/cmake --build --preset linux_gcc_${{ parameters.ep }}_release \
+          --target onnxruntime-genai"
+  displayName: 'Build GenAi'
+  workingDirectory: '${{ parameters.genai_src }}'
+
+- task: BinSkim@4
+  displayName: 'Run BinSkim'
+  inputs:
+    AnalyzeTargetGlob: '$(Build.SourcesDirectory)/**/*genai.so'
+  continueOnError: true
+
+- script: |
+    ls $(genai_src) -R
+  displayName: 'List files from SourceDirectory'
