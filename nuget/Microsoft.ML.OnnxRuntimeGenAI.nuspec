@@ -34,8 +34,6 @@
     <!-- Windows x64 -->
     <file src="..\$buildPath$\$configuration$\onnxruntime-genai.lib" target="runtimes\win-x64\native" />
     <file src="..\$buildPath$\$configuration$\onnxruntime-genai.dll" target="runtimes\win-x64\native" />
-    <file src="..\$buildPath$\$configuration$\onnxruntime-genai.dll" target="runtimes\win-x64\native" />
-
 
 <!--      --><!-- Windows arm64 -->
 <!--     <file src="..\$buildPath$\$configuration$\onnxruntime-genai.lib" target="runtimes\win-arm64\native" /> -->
