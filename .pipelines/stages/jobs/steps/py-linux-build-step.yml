@@ -75,7 +75,7 @@ steps:
     docker run \
     --rm \
     --volume ${{ parameters.genai_src }}:/ort_genai_src \
-    -w /ort_genai_src/ onnxuntime${{ parameters.ep }}build${{ parameters.arch }} \
+    -w /ort_genai_src/ onnxruntime${{ parameters.ep }}build${{ parameters.arch }} \
     bash -c " \
         /usr/bin/cmake --build --preset linux_gcc_${{ parameters.ep }}_release \
           -DENABLE_TESTS=OFF \
