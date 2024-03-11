@@ -11,10 +11,14 @@ import onnxruntime_genai as og
 import pytest
 
 
-# FIXME: CUDA device does not work on the CI pipeline because the pipeline uses different cuda versions for
-# onnxruntime-genai and onnxruntime. This introduces incompatibility.
-# @pytest.mark.parametrize("device", [og.DeviceType.CPU, og.DeviceType.CUDA] if og.is_cuda_available() else [og.DeviceType.CPU])
-@pytest.mark.parametrize("device", [og.DeviceType.CPU])
+@pytest.mark.parametrize(
+    "device",
+    (
+        [og.DeviceType.CPU, og.DeviceType.CUDA]
+        if og.is_cuda_available()
+        else [og.DeviceType.CPU]
+    ),
+)
 @pytest.mark.parametrize(
     "relative_model_path",
     [
@@ -23,7 +27,7 @@ import pytest
     ],
 )
 def test_greedy_search(device, test_data_path, relative_model_path):
-    model_path = os.fspath(Path(test_data_path()) / relative_model_path)
+    model_path = os.fspath(Path(test_data_path) / relative_model_path)
 
     model = og.Model(model_path, device)
 
@@ -61,12 +65,27 @@ def test_greedy_search(device, test_data_path, relative_model_path):
     sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8,
     reason="Python 3.8 is required for downloading models.",
 )
-@pytest.mark.parametrize("device", [og.DeviceType.CPU])
+@pytest.mark.parametrize(
+    "device",
+    (
+        [og.DeviceType.CPU, og.DeviceType.CUDA]
+        if og.is_cuda_available()
+        else [og.DeviceType.CPU]
+    ),
+)
 @pytest.mark.parametrize("batch", [True, False])
-def test_tokenizer_encode_decode(device, test_data_path, batch):
-    model_path = os.fspath(Path(test_data_path("phi-2")))
+@pytest.mark.parametrize("model_name", ["phi-2", "gemma", "llama"])
+def test_tokenizer_encode_decode(device, path_for_model, model_name, batch):
+    model_path = path_for_model(
+        model_name, "cpu" if device == og.DeviceType.CPU else "cuda"
+    )
+    if not os.path.exists(model_path):
+        pytest.skip(f"Model {model_name} not found at {model_path}.")
 
-    model = og.Model(model_path, device)
+    model = og.Model(
+        path_for_model(model_name, "cpu" if device == og.DeviceType.CPU else "cuda"),
+        device,
+    )
     tokenizer = og.Tokenizer(model)
 
     prompts = [
@@ -86,14 +105,18 @@ def test_tokenizer_encode_decode(device, test_data_path, batch):
             assert prompt == decoded_string
 
 
-@pytest.mark.parametrize("device", [og.DeviceType.CPU])
 @pytest.mark.parametrize(
-    "relative_model_path", [Path("hf-internal-testing") / "tiny-random-gpt2-fp32"]
+    "device",
+    (
+        [og.DeviceType.CPU, og.DeviceType.CUDA]
+        if og.is_cuda_available()
+        else [og.DeviceType.CPU]
+    ),
 )
-def test_tokenizer_stream(device, test_data_path, relative_model_path):
-    model_path = os.fspath(Path(test_data_path()) / relative_model_path)
-
-    model = og.Model(model_path, device)
+def test_tokenizer_stream(device, phi2_for):
+    model = og.Model(
+        phi2_for("cpu") if device == og.DeviceType.CPU else phi2_for("cuda"), device
+    )
     tokenizer = og.Tokenizer(model)
     tokenizer_stream = tokenizer.create_stream()
 
@@ -118,12 +141,18 @@ def test_tokenizer_stream(device, test_data_path, relative_model_path):
     sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8,
     reason="Python 3.8 is required for downloading models.",
 )
-@pytest.mark.parametrize("device", [og.DeviceType.CPU])
-@pytest.mark.parametrize("relative_model_path", [Path("phi-2")])
-def test_batching(device, test_data_path, relative_model_path):
-    model_path = os.fspath(Path(test_data_path()) / relative_model_path)
-
-    model = og.Model(model_path, device)
+@pytest.mark.parametrize(
+    "device",
+    (
+        [og.DeviceType.CPU, og.DeviceType.CUDA]
+        if og.is_cuda_available()
+        else [og.DeviceType.CPU]
+    ),
+)
+def test_batching(device, phi2_for):
+    model = og.Model(
+        phi2_for("cpu") if device == og.DeviceType.CPU else phi2_for("cuda"), device
+    )
     tokenizer = og.Tokenizer(model)
 
     prompts = [

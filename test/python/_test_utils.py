@@ -50,3 +50,41 @@ def run_subprocess(
             "Subprocess completed. Return code=" + str(completed_process.returncode)
         )
     return completed_process
+
+
+def download_models(download_path, device, num_hidden_layers=None):
+    # python -m onnxruntime_genai.models.builder -m <model_name> -p int4 -e cpu -o <download_path> --extra_options num_hidden_layers=1
+    model_names = {
+        "cpu": {
+            "phi-2": "microsoft/phi-2",
+            "llama": "meta-llama/Llama-2-7b-chat-hf",
+        },
+        "cuda": {
+            "phi-2": "microsoft/phi-2",
+            "gemma": "google/gemma-2b",
+            "llama": "meta-llama/Llama-2-7b-chat-hf",
+        },
+    }
+    for model_name, model_identifier in model_names[device].items():
+        model_path = os.path.join(download_path, device, model_name)
+        if not os.path.exists(model_path):
+            command = [
+                sys.executable,
+                "-m",
+                "onnxruntime_genai.models.builder",
+                "-m",
+                model_identifier,
+                "-p",
+                "int4",
+                "-e",
+                device,
+                "-o",
+                model_path,
+                "--extra_options",
+                f"num_hidden_layers={num_hidden_layers}",
+            ]
+            if num_hidden_layers:
+                command.extend(
+                    ["--extra_options", f"num_hidden_layers={num_hidden_layers}"]
+                )
+            run_subprocess(command).check_returncode()

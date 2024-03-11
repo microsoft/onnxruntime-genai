@@ -6,9 +6,11 @@ import logging
 import os
 import pathlib
 import sys
+import sysconfig
 from typing import Union
 
-from _test_utils import run_subprocess
+import onnxruntime_genai as og
+from _test_utils import download_models, run_subprocess
 
 logging.basicConfig(
     format="%(asctime)s %(name)s [%(levelname)s] - %(message)s", level=logging.DEBUG
@@ -39,12 +41,19 @@ def run_onnxruntime_genai_api_tests(
 def run_onnxruntime_genai_e2e_tests(
     cwd: Union[str, bytes, os.PathLike],
     log: logging.Logger,
+    test_models: Union[str, bytes, os.PathLike],
 ):
     log.debug("Running: ONNX Runtime GenAI E2E Tests")
 
-    log.debug("Running: Phi-2")
-    command = [sys.executable, "test_onnxruntime_genai_phi2.py"]
-    run_subprocess(command, cwd=cwd, log=log).check_returncode()
+    for model in ["phi-2", "gemma", "llama"]:
+        log.debug(f"Running: {model}")
+        command = [
+            sys.executable,
+            "test_onnxruntime_genai_e2e.py",
+            "--model_path",
+            os.path.join(test_models, "cpu", model),
+        ]
+        run_subprocess(command, cwd=cwd, log=log).check_returncode()
 
 
 def parse_arguments():
@@ -73,12 +82,28 @@ def main():
 
     log.info("Running onnxruntime-genai tests pipeline")
 
+    num_hidden_layers = None if args.e2e else 1
+    if not (sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8):
+        download_models(
+            os.path.abspath(args.test_models),
+            "cpu",
+            num_hidden_layers=num_hidden_layers,
+        )
+        if og.is_cuda_available():
+            download_models(
+                os.path.abspath(args.test_models),
+                "cuda",
+                num_hidden_layers=num_hidden_layers,
+            )
+
     run_onnxruntime_genai_api_tests(
         os.path.abspath(args.cwd), log, os.path.abspath(args.test_models)
     )
 
     if args.e2e:
-        run_onnxruntime_genai_e2e_tests(os.path.abspath(args.cwd), log)
+        run_onnxruntime_genai_e2e_tests(
+            os.path.abspath(args.cwd), log, os.path.abspath(args.test_models)
+        )
 
     return 0
 
