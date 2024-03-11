@@ -3,6 +3,10 @@ parameters:
   type: boolean
 - name: enable_win_gpu
   type: boolean
+- name: enable_linux_cpu
+  type: boolean
+- name: enable_linux_gpu
+  type: boolean
 - name: ort_version
   type: string
 - name: cuda_version

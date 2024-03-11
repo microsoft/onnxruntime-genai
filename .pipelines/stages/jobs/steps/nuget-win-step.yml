@@ -6,7 +6,7 @@ parameters:
 - name: build_config
   type: string
 - name: build_dir
-  type:
+  type: string
 - name: id
   type: string
 steps:
