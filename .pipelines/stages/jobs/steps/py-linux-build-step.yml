@@ -28,7 +28,6 @@ steps:
     echo "arch=${{ parameters.arch }}"
     echo "ort_version=${{ parameters.ort_version }}"
     echo "ep=${{ parameters.ep }}"
-    echo "target=${{ parameters.target }}"
     echo "python_version=${{ parameters.python_version }}"
     echo "genai_src=${{ parameters.genai_src }}"
     echo "ort_filename=${{ parameters.ort_filename }}"
