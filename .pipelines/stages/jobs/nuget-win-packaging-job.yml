@@ -9,7 +9,7 @@ parameters:
   type: string
   default: ''
 jobs:
-- job: Windows_CAPI_Packaging_$(arch)_$(ep)
+- job: Windows_Nuget_Packaging_${{ parameters.ep }}_${{ parameters.arch }}
   pool: 'onnxruntime-Win-CPU-2022'
   timeoutInMinutes: 180
   variables:

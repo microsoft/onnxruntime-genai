@@ -9,7 +9,7 @@ parameters:
 - name: ep
   type: string
 jobs:
-- job: Windows_$(ep)_$(arch)_Wheels
+- job: Windows_${{ parameters.ep }}_${{ parameters.arch }}_Wheels
   pool: 'onnxruntime-Win-CPU-2022'
   strategy:
     matrix:

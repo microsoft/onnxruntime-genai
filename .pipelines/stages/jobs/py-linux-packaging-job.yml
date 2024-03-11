@@ -15,7 +15,7 @@ parameters:
   type: string
   default: '$(Build.SourcesDirectory)/onnxruntime-genai'
 jobs:
-- job: Linux_$(ep)_$(arch)_Wheels
+- job: Linux_${{ parameters.ep }}_${{ parameters.arch }}_Wheels
   strategy:
     matrix:
       Python38:

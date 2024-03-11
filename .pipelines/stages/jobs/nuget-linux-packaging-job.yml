@@ -10,7 +10,7 @@ parameters:
   default: ''
 
 jobs:
-- job: Linux_CAPI_Packaging_$(arch)_$(ep)
+- job: Linux_Nuget_Packaging_${{ parameters.ep }}_${{ parameters.arch }}
   pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
   timeoutInMinutes: 180
   variables:
