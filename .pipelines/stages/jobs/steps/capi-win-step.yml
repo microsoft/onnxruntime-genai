@@ -2,8 +2,6 @@ parameters:
 - name: target
   type: string
   default: 'onnxruntime-genai'
-- name: cuda_version
-  type: string
 steps:
 - checkout: self
   clean: true

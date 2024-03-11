@@ -40,8 +40,6 @@ jobs:
   steps:
   - template: steps/capi-win-step.yml
     parameters:
-      arch: ${{ parameters.arch }}
-      ep: ${{ parameters.ep }}
       target: 'onnxruntime-genai'
 
   - template: steps/nuget-win-step.yml

@@ -36,10 +36,6 @@ jobs:
     clean: all
   steps:
   - template: steps/capi-linux-step.yml
-    parameters:
-      arch: ${{ parameters.arch }}
-      ep: ${{ parameters.ep }}
-      ort_filename: $(ort_filename)
 
 # TODO: Add a step to build the nuget package
 
