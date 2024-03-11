@@ -43,18 +43,17 @@ jobs:
     value: true
   - name: ort_filename
     ${{ if eq(parameters.ep, 'cpu') }}:
-      value: 'onnxruntime-linux-${{ parameters.arch }}-${{ parameters.ort_version }}'
+      value: 'onnxruntime-linux-${{ parameters.arch }}-$(ort_version)'
     ${{ else}}:
       ${{if eq(parameters.cuda_version, '11.8') }}:
-        value: 'onnxruntime-linux-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}'
+        value: 'onnxruntime-linux-${{ parameters.arch }}-gpu-$(ort_version)'
       ${{ else }}:
-        value: 'onnxruntime-linux-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
+        value: 'onnxruntime-linux-${{ parameters.arch }}-cuda12-$(ort_version)'
   steps:
 
   - template: steps/py-linux-build-step.yml
     parameters:
       arch: ${{ parameters.arch }}
-      ort_version: ${{ parameters.ort_version }}
       ep: ${{ parameters.ep }}
       ort_filename: $(ort_filename)
       PyDotVer: $(PyDotVer)

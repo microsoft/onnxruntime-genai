@@ -1,6 +1,5 @@
 parameters:
   genai_src: '$(Build.SourcesDirectory)'
-  ort_version: '1.17.1'
   archive: 'tgz'
 steps:
 - task: DownloadGitHubRelease@0
@@ -8,7 +7,7 @@ steps:
     connection: 'GitHub - Release'
     userRepository: 'microsoft/onnxruntime'
     defaultVersionType: 'specificTag'
-    version: 'v${{ parameters.ort_version }}'
+    version: 'v$(ort_version)'
     itemPattern: '$(ort_filename)*'
     downloadPath: '${{ parameters.genai_src }}'
   displayName: Download $(ort_filename)

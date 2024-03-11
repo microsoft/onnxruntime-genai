@@ -4,8 +4,6 @@ parameters:
   type: string
 - name: ep
   type: string
-- name: ort_version
-  type: string
 - name: target
   type: string
   default: 'onnxruntime-genai'
@@ -25,7 +23,7 @@ steps:
 
 - script: |
     echo "arch=${{ parameters.arch }}"
-    echo "ort_version=${{ parameters.ort_version }}"
+    echo "ort_version=$(ort_version)"
     echo "ep=${{ parameters.ep }}"
     echo "cuda_version=${{ parameters.cuda_version }}"
     echo "target=${{ parameters.target }}"
@@ -36,7 +34,6 @@ steps:
   parameters:
     archive: 'zip'
     genai_src: '$(Build.SourcesDirectory)'
-    ort_version: ${{ parameters.ort_version }}
 
 - powershell: |
     azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v${{ parameters.cuda_version }}" '$(Build.SourcesDirectory)\cuda_sdk'
@@ -73,17 +70,16 @@ steps:
       AnalyzeTargetGlob: '$(Build.SourcesDirectory)\**\*genai.dll'
     continueOnError: true
 
+  - template: utils/capi-archive.yml
+    parameters:
+      genai_src: '$(Build.SourcesDirectory)'
+      artifactName: $(artifactName)
+      archiveType: zip
+      buildDir: '$(Build.SourcesDirectory)\build\release\${{ parameters.ep }}_default\Release'
+
 - ${{ if eq(parameters.target, 'python') }}:
   - task: BinSkim@4
     displayName: 'Run BinSkim'
     inputs:
       AnalyzeTargetGlob: '$(Build.SourcesDirectory)\**\*.pyd'
     continueOnError: true
-
-- template: utils/capi-archive.yml
-  parameters:
-    genai_src: '$(Build.SourcesDirectory)'
-    artifactName: $(artifactName)
-    archiveType: zip
-    ep: ${{ parameters.ep }}
-    buildDir: '$(Build.SourcesDirectory)\build\release\${{ parameters.ep }}_default\Release'

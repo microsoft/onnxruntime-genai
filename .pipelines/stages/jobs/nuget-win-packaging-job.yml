@@ -15,18 +15,20 @@ jobs:
   variables:
   - name: build_config
     value: 'Release'
+  - name: ort_version
+    value: ${{ parameters.ort_version }}
   - name: build_dir
     value: 'build/release/${{ parameters.ep }}_default'
   - name: artifactName
     value : 'onnxruntime-genai-capi-win-${{ parameters.ep }}-${{ parameters.arch }}'
   - name: ort_filename
     ${{ if eq(parameters.ep, 'cpu') }}:
-      value: 'onnxruntime-win-${{ parameters.arch }}-${{ parameters.ort_version }}'
+      value: 'onnxruntime-win-${{ parameters.arch }}-$(ort_version)'
     ${{ else}}:
       ${{if eq(parameters.cuda_version, '11.8') }}:
-        value: 'onnxruntime-win-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}'
+        value: 'onnxruntime-win-${{ parameters.arch }}-gpu-$(ort_version)'
       ${{ else }}:
-        value: 'onnxruntime-win-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
+        value: 'onnxruntime-win-${{ parameters.arch }}-cuda12-$(ort_version)'
   workspace:
     clean: all
   steps:
@@ -36,7 +38,6 @@ jobs:
       cuda_version: ${{ parameters.cuda_version }}
       ep: ${{ parameters.ep }}
       ort_filename: $(ort_filename)
-      ort_version: ${{ parameters.ort_version }}
       target: 'onnxruntime-genai'
 
   - template: steps/nuget-win-step.yml

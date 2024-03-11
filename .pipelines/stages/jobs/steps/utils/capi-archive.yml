@@ -1,10 +1,6 @@
 parameters:
 - name: genai_src
   type: string
-- name: artifactName
-  type: string
-- name: ep
-  type: string
 - name: archiveType
   type: string
 - name: buildDir
@@ -14,7 +10,7 @@ steps:
   displayName: 'Copy Onnxruntime C API library files to ArtifactStagingDirectory'
   inputs:
     SourceFolder: '${{ parameters.genai_src }}/ort/lib'
-    TargetFolder: '$(Build.ArtifactStagingDirectory)/${{ parameters.artifactName }}/lib'
+    TargetFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)/lib'
 
 - task: CopyFiles@2
   displayName: 'Copy GenAi C API library files to ArtifactStagingDirectory'
@@ -22,7 +18,7 @@ steps:
     SourceFolder: '${{ parameters.buildDir }}'
     Contents: |
       onnxruntime-genai.so
-    TargetFolder: '$(Build.ArtifactStagingDirectory)/${{ parameters.artifactName }}/lib'
+    TargetFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)/lib'
 
 - task: CopyFiles@2
   displayName: 'Copy GenAi C API header to ArtifactStagingDirectory'
@@ -30,7 +26,7 @@ steps:
     SourceFolder: '${{ parameters.genai_src }}/src'
     Contents: |
       ort_genai_c.h
-    TargetFolder: '$(Build.ArtifactStagingDirectory)/${{ parameters.artifactName }}/include'
+    TargetFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)/include'
 
 - task: CopyFiles@2
   displayName: 'Copy other files to ArtifactStagingDirectory'
@@ -42,20 +38,20 @@ steps:
       SECURITY.md
       README.md
       ThirdPartyNotices.txt
-    TargetFolder: '$(Build.ArtifactStagingDirectory)/${{ parameters.artifactName }}'
+    TargetFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)'
 
 - task: ArchiveFiles@2
   inputs:
-    rootFolderOrFile: '$(Build.ArtifactStagingDirectory)/${{ parameters.artifactName }}'
+    rootFolderOrFile: '$(Build.ArtifactStagingDirectory)/$(artifactName)'
     includeRootFolder: true
     archiveType: ${{ parameters.archiveType }}
     ${{ if eq(parameters.archiveType, 'tar') }}:
       tarCompression: 'gz'
-    archiveFile: '$(Build.ArtifactStagingDirectory)/${{ parameters.artifactName }}.${{ parameters.archiveType }}'
+    archiveFile: '$(Build.ArtifactStagingDirectory)/$(artifactName).${{ parameters.archiveType }}'
     replaceExistingArchive: true
 
 - task: DeleteFiles@1
   inputs:
-    SourceFolder: '$(Build.ArtifactStagingDirectory)/${{ parameters.artifactName }}'
+    SourceFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)'
     Contents: '*'
     RemoveSourceFolder: true

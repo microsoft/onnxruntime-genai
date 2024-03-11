@@ -27,12 +27,12 @@ jobs:
   variables:
   - name: ort_filename
     ${{ if eq(parameters.ep, 'cpu') }}:
-      value: 'onnxruntime-win-${{ parameters.arch }}-${{ parameters.ort_version }}'
+      value: 'onnxruntime-win-${{ parameters.arch }}-$(ort_version)'
     ${{ else}}:
       ${{if eq(parameters.cuda_version, '11.8') }}:
-        value: 'onnxruntime-win-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}'
+        value: 'onnxruntime-win-${{ parameters.arch }}-gpu-$(ort_version)'
       ${{ else }}:
-        value: 'onnxruntime-win-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
+        value: 'onnxruntime-win-${{ parameters.arch }}-cuda12-$(ort_version)'
   workspace:
     clean: all
   steps:
@@ -59,7 +59,7 @@ jobs:
       cuda_version: ${{ parameters.cuda_version }}
       ep: ${{ parameters.ep }}
       ort_filename: $(ort_filename)
-      ort_version: ${{ parameters.ort_version }}
+      ort_version: $(ort_version)
       target: 'python'
 
   - template: steps/compliant/win-esrp-dll-step.yml
