@@ -28,9 +28,11 @@ jobs:
   - template: steps/win-build-step.yml
     parameters:
       arch: ${{ parameters.arch }}
-      ort_version: ${{ parameters.ort_version }}
+      cuda_version: ${{ parameters.cuda_version }}
       ep: ${{ parameters.ep }}
       ort_filename: $(ort_filename)
+      ort_version: ${{ parameters.ort_version }}
+      target: 'onnxruntime-genai'
 
   - powershell: |
       Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse

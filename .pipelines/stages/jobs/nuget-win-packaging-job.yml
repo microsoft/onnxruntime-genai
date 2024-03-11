@@ -35,13 +35,20 @@ jobs:
   workspace:
     clean: all
   steps:
+  - powershell: |
+      azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v${{ parameters.cuda_version }}" '$(Build.SourcesDirectory)\cuda_sdk'
+    displayName: 'Download CUDA'
+    condition: eq('${{ parameters.ep }}', 'cuda')
+    workingDirectory: '$(Build.SourcesDirectory)'
+
   - template: steps/win-build-step.yml
     parameters:
       arch: ${{ parameters.arch }}
-      ort_version: ${{ parameters.ort_version }}
+      cuda_version: ${{ parameters.cuda_version }}
       ep: ${{ parameters.ep }}
-      target: 'onnxruntime-genai'
       ort_filename: $(ort_filename)
+      ort_version: ${{ parameters.ort_version }}
+      target: 'onnxruntime-genai'
 
   - powershell: |
       dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(build_config)" -p:NativeBuildOutputDir="$(build_dir)\$(build_config)"
