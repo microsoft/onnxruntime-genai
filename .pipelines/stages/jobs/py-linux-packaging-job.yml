@@ -49,8 +49,8 @@ jobs:
       ort_version: ${{ parameters.ort_version }}
       ep: ${{ parameters.ep }}
       ort_filename: $(ort_filename)
-      PythonVersion: $(PythonVersion)
-      PythonNoDot: $[replace($(PythonVersion), '.', '')]
+      PyDotVer: $(PythonVersion)
+      PyNoDotVer: $[replace($(PythonVersion), '.', '')]
 
   - script: |
       ls $(Build.SourcesDirectory) -R
