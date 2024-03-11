@@ -38,7 +38,7 @@ jobs:
   - template: steps/capi-linux-step.yml
     parameters:
       target: 'onnxruntime-genai'
-      genai_src: '$(Build.SourcesDirectory)'
+      genai_src: '$(Build.SourcesDirectory)/onnxruntime-genai'
 
 # TODO: Add a step to build the nuget package
 
