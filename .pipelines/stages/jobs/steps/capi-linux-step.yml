@@ -20,7 +20,7 @@ steps:
   clean: true
   submodules: recursive
 
-- template: set-nightly-build-option-variable.yml
+- template: utils/set-nightly-build-option-variable.yml
 
 - script: |
     echo "arch=${{ parameters.arch }}"
