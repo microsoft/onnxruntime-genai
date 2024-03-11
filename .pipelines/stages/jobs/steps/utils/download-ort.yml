@@ -1,6 +1,5 @@
 parameters:
   genai_src: '$(Build.SourcesDirectory)'
-  ort_filename: 'onnxruntime-linux-1.17.1'
   ort_version: '1.17.1'
   archive: 'tgz'
 steps:
@@ -10,9 +9,9 @@ steps:
     userRepository: 'microsoft/onnxruntime'
     defaultVersionType: 'specificTag'
     version: 'v${{ parameters.ort_version }}'
-    itemPattern: '${{ parameters.ort_filename }}*'
+    itemPattern: '$(ort_filename)*'
     downloadPath: '${{ parameters.genai_src }}'
-  displayName: Download ${{ parameters.ort_filename }}
+  displayName: Download $(ort_filename)
 
 - task: ExtractFiles@1
   inputs:
@@ -24,7 +23,7 @@ steps:
 
 - task: CopyFiles@2
   inputs:
-    SourceFolder: '${{ parameters.genai_src }}/${{ parameters.ort_filename }}'
+    SourceFolder: '${{ parameters.genai_src }}/$(ort_filename)'
     TargetFolder: '${{ parameters.genai_src }}/ort'
   displayName: Copy OnnxRuntime to ort
 

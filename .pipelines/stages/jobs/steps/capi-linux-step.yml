@@ -3,8 +3,6 @@ parameters:
   type: string
 - name: ep
   type: string
-- name: ort_filename
-  type: string
 - name: ort_version
   type: string
 - name: genai_src
@@ -27,14 +25,13 @@ steps:
     echo "ort_version=${{ parameters.ort_version }}"
     echo "ep=${{ parameters.ep }}"
     echo "genai_src=${{ parameters.genai_src }}"
-    echo "ort_filename=${{ parameters.ort_filename }}"
+    echo "ort_filename=$(ort_filename)"
   displayName: 'Print Parameters'
 
 - template: utils/download-ort.yml
   parameters:
     archive: 'tgz'
     genai_src: ${{ parameters.genai_src }}
-    ort_filename: ${{ parameters.ort_filename }}
     ort_version: ${{ parameters.ort_version }}
 - script: |
     set -e -x

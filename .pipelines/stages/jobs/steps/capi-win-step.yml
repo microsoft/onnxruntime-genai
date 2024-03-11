@@ -6,8 +6,6 @@ parameters:
   type: string
 - name: ort_version
   type: string
-- name: ort_filename
-  type: string
 - name: target
   type: string
   default: 'onnxruntime-genai'
@@ -31,14 +29,13 @@ steps:
     echo "ep=${{ parameters.ep }}"
     echo "cuda_version=${{ parameters.cuda_version }}"
     echo "target=${{ parameters.target }}"
-    echo "ort_filename=${{ parameters.ort_filename }}"
+    echo "ort_filename=$(ort_filename)"
   displayName: 'Print Parameters'
 
 - template: utils/download-ort.yml
   parameters:
     archive: 'zip'
     genai_src: '$(Build.SourcesDirectory)'
-    ort_filename: ${{ parameters.ort_filename }}
     ort_version: ${{ parameters.ort_version }}
 
 - powershell: |
