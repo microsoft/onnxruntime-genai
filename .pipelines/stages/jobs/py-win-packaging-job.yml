@@ -53,12 +53,6 @@ jobs:
       workingDirectory: '$(Build.BinariesDirectory)'
       displayName: 'Install python modules'
 
-  - powershell: |
-      azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v${{ parameters.cuda_version }}" '$(Build.SourcesDirectory)\cuda_sdk'
-    displayName: 'Download CUDA'
-    condition: eq('${{ parameters.ep }}', 'cuda')
-    workingDirectory: '$(Build.SourcesDirectory)'
-
   - template: steps/win-build-step.yml
     parameters:
       arch: ${{ parameters.arch }}
