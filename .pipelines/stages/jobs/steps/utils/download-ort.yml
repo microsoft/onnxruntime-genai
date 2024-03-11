@@ -1,6 +1,8 @@
 parameters:
-  genai_src: '$(Build.SourcesDirectory)'
-  archive: 'tgz'
+- name: genai_src
+  type: string
+- name: archiveType
+  type: string
 steps:
 - task: DownloadGitHubRelease@0
   inputs:
@@ -14,7 +16,7 @@ steps:
 
 - task: ExtractFiles@1
   inputs:
-    archiveFilePatterns: '**/*.${{ parameters.archive }}'
+    archiveFilePatterns: '**/*.${{ parameters.archiveType }}'
     destinationFolder: '${{ parameters.genai_src }}'
     cleanDestinationFolder: false
     overwriteExistingFiles: true
