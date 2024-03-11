@@ -50,6 +50,7 @@ jobs:
       ep: ${{ parameters.ep }}
       ort_filename: $(ort_filename)
       PythonVersion: $(PythonVersion)
+      PythonNoDot: $(PythonVersion).replace('.', '')
 
   - script: |
       ls $(Build.SourcesDirectory) -R
