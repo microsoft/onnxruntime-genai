@@ -7,8 +7,8 @@ import os
 import onnxruntime_genai as og
 
 
-def run_model(model_path: str | bytes | os.PathLike, device: og.DeviceType):
-    model = og.Model(model_path, device)
+def run_model(model_path: str | bytes | os.PathLike):
+    model = og.Model(model_path)
 
     tokenizer = og.Tokenizer(model)
     prompts = [
@@ -35,8 +35,4 @@ if __name__ == "__main__":
         required=True,
     )
     args = parser.parse_args()
-
-    device = "cuda" if og.is_cuda_available() else "cpu"
-    run_model(
-        args.model_path, og.DeviceType.CPU if device == "cpu" else og.DeviceType.CUDA
-    )
+    run_model(args.model_path)
