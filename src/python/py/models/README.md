@@ -1,6 +1,6 @@
 # ONNX Runtime GenAI Model Builder
 
-This folder contains the model builder tool, which greatly accelerates creating optimized and quantized ONNX models that run with ONNX Runtime GenAI.
+This folder contains the model builder for quickly creating optimized and quantized ONNX models within a few minutes that run with ONNX Runtime GenAI.
 
 # Contents
  - [Current Support](#current-support)
@@ -23,6 +23,8 @@ The tool currently supports the following model architectures.
 - LLaMA
 - Mistral
 - Phi
+
+It is intended for supporting the latest, popular state-of-the-art models.
 
 ## Usage
 
@@ -138,3 +140,7 @@ python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_fold
 # From source:
 python3 builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_where_hf_files_are_saved
 ```
+
+## Design
+
+Please read the [design document](DESIGN.md) for more details and for how to contribute.
