@@ -27,7 +27,7 @@ struct PositionIDs {
   std::array<int64_t, 2> attention_mask_shape_{};  // {params.batch_size*params.beam_size, params.sequence_length}
   std::unique_ptr<OrtValue> attention_mask_;
 
-  std::vector<int32_t> initial_sequence_lengths_;
+  std::unique_ptr<OrtValue> position_ids_next_;  // Replaces position_ids_ after the first Run() call
 };
 
 }  // namespace Generators
