@@ -4,7 +4,7 @@ import time
 
 def main(args):
     if args.verbose: print("Loading model...")
-    model = og.Model(f'{args.model}', og.DeviceType.CPU if args.execution_provider == 'cpu' else og.DeviceType.CUDA)
+    model = og.Model(f'{args.model}')
     if args.verbose: print("Model loaded")
     tokenizer = og.Tokenizer(model)
     if args.verbose: print("Tokenizer created")
@@ -41,7 +41,6 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="End-to-end token generation loop example for gen-ai")
     parser.add_argument('-m', '--model', type=str, required=True, help='Onnx model folder path (must contain config.json and model.onnx)')
-    parser.add_argument('-ep', '--execution_provider', type=str, choices=['cpu', 'cuda'], required=True, help='Execution provider (device) to use, default is CPU, use CUDA for GPU')
     parser.add_argument('-pr', '--prompts', nargs='*', required=False, help='Input prompts to generate tokens from')
     parser.add_argument('-l', '--max_length', type=int, default=512, help='Max number of tokens to generate after prompt')
     parser.add_argument('-p', '--top_p', type=float, default=0.9, help='Top p probability to sample with')
