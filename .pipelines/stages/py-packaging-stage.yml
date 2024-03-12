@@ -3,48 +3,47 @@ parameters:
   type: boolean
 - name: enable_win_gpu
   type: boolean
-- name: enable_win_arm
-  type: boolean
 - name: enable_linux_cpu
   type: boolean
 - name: enable_linux_gpu
   type: boolean
-- name: enable_linux_arm
-  type: boolean
 - name: ort_version
   type: string
-
+- name: cuda_version
+  type: string
+  default: ''
 stages:
-- stage: py_packaging
+- stage: Python_Packaging_Stage
   jobs:
   - ${{ if eq(parameters.enable_win_cpu, true) }}:
-    - template: jobs/py-win-cpu-packaging-job.yml
+    - template: jobs/py-win-packaging-job.yml
       parameters:
+        arch: 'x64'
+        ep: 'cpu'
         ort_version: ${{ parameters.ort_version }}
   - ${{ if eq(parameters.enable_win_gpu, true) }}:
-    - template: jobs/py-win-gpu-packaging-job.yml
+    - template: jobs/py-win-packaging-job.yml
       parameters:
-        ort_version: ${{ parameters.ort_version }}
-  - ${{ if eq(parameters.enable_win_arm, true) }}:
-    - template: jobs/py-win-cpu-packaging-job.yml
-      parameters:
-        arch: 'arm64'
+        arch: 'x64'
+        cuda_version: ${{ parameters.cuda_version }}
+        ep: 'cuda'
         ort_version: ${{ parameters.ort_version }}
 
 
   - ${{ if eq(parameters.enable_linux_cpu, true) }}:
-    - template: jobs/py-linux-cpu-packaging-job.yml
+    - template: jobs/py-linux-packaging-job.yml
       parameters:
+        arch: 'x64'
+        ep: 'cpu'
         ort_version: ${{ parameters.ort_version }}
   - ${{ if eq(parameters.enable_linux_gpu, true) }}:
-    - template: jobs/py-linux-gpu-packaging-job.yml
+    - template: jobs/py-linux-packaging-job.yml
       parameters:
+        arch: 'x64'
+        cuda_version: ${{ parameters.cuda_version }}
+        ep: 'cuda'
         ort_version: ${{ parameters.ort_version }}
-  - ${{ if eq(parameters.enable_linux_arm, true) }}:
-    - template: jobs/py-linux-cpu-packaging-job.yml
-      parameters:
-        arch: 'arm64'
-        ort_version: ${{ parameters.ort_version }}
+
 
 
 

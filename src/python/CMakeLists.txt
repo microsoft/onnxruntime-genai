@@ -24,6 +24,11 @@ if(NOT WIN32)
 endif()
 set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
 
+if(CMAKE_GENERATOR_TOOLSET MATCHES "Visual Studio")
+  target_link_options(python PRIVATE "/CETCOMPAT")
+  target_compile_options(python PRIVATE "/sdl" PRIVATE "/Qspectre")
+endif()
+
 if(NOT WIN32)
    target_link_libraries(python PRIVATE stdc++fs)
 endif()
