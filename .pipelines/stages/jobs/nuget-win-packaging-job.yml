@@ -1,8 +1,14 @@
 parameters:
 - name: arch
   type: string
+  values:
+    - 'x64'
+    - 'arm64'
 - name: ep
   type: string
+  values:
+  - 'cpu'
+  - 'cuda'
 - name: ort_version
   type: string
 - name: cuda_version
@@ -35,6 +41,11 @@ jobs:
         value: 'onnxruntime-win-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}'
       ${{ else }}:
         value: 'onnxruntime-win-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
+  - name: ext
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      value: ''
+    ${{ if eq(parameters.ep, 'cuda') }}:
+      value: 'Gpu'
   workspace:
     clean: all
   steps:
@@ -43,11 +54,7 @@ jobs:
       target: 'onnxruntime-genai'
 
   - template: steps/nuget-win-step.yml
-    parameters:
-      ${{ if eq(parameters.ep, 'cpu') }}:
-        id: Microsoft.ML.OnnxRuntimeGenAI
-      ${{ if eq(parameters.ep, 'cuda') }}:
-        id: Microsoft.ML.OnnxRuntimeGenAI.Gpu
+
 
   - task: PublishBuildArtifacts@1
     displayName: 'Publish Artifact: ONNXRuntime Genai capi'

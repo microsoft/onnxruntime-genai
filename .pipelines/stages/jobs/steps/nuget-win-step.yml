@@ -1,6 +1,3 @@
-parameters:
-- name: id
-  type: string
 steps:
 - powershell: |
     dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(buildConfig)" -p:NativeBuildOutputDir="$(buildDir)\$(buildConfig)"
@@ -22,7 +19,7 @@ steps:
     $VERSION = '0.1.0-rc1'
     nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.nuspec `
       -Prop version=$VERSION `
-      -Prop id=${{ parameters.id }} `
+      -Prop ext=$(ext) `
       -Prop configuration=$(buildConfig) `
       -Prop buildPath=$(buildDir)
     nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec `
