@@ -45,7 +45,7 @@ jobs:
     ${{ if eq(parameters.ep, 'cpu') }}:
       value: ''
     ${{ if eq(parameters.ep, 'cuda') }}:
-      value: 'Gpu'
+      value: 'Cuda'
   workspace:
     clean: all
   steps:
