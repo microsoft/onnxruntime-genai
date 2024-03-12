@@ -5,20 +5,16 @@ steps:
 
 - checkout: self
   clean: true
-  path: $(Pipeline.Workspace)
+  path: $(Build.SourcesDirectory)/onnxruntime-genai
   submodules: recursive
 
 - checkout: manylinux
   clean: true
-  path: $(Pipeline.Workspace)/onnxruntime-genai
+  path: $(Build.Repository.LocalPath)
   submodules: recursive
 
 - script: |
-    ls $(Pipeline.Workspace) -R
-  displayName: 'List files from SourceDirectory'
-  
-- script: |
-    ls $(Pipeline.Workspace) -R
+    ls $(Build.Repository.LocalPath) -R
   displayName: 'List files from SourceDirectory'
 
 - template: utils/set-nightly-build-option-variable.yml
@@ -39,18 +35,18 @@ steps:
       --context tools/ci_build/github/linux/docker/manylinux \
       --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
       --container-registry onnxruntimebuildcache \
-      --manylinux-src $(Pipeline.Workspace)/manylinux \
+      --manylinux-src $(Build.Repository.LocalPath)/manylinux \
       --multiple_repos \
       --repository onnxruntime$(ep)build$(arch)
   displayName: 'Get Docker Image'
-  workingDirectory: '$(Pipeline.Workspace)'
+  workingDirectory: '$(Build.Repository.LocalPath)'
 
 - ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
   - script: |
       set -e -x
       docker run \
       --rm \
-      --volume $(Pipeline.Workspace):/ort_genai_src \
+      --volume $(Build.Repository.LocalPath):/ort_genai_src \
       -w /ort_genai_src/ onnxruntime$(ep)build$(arch) \
       bash -c " \
           /usr/bin/cmake --preset linux_gcc_$(ep)_release \
@@ -58,11 +54,11 @@ steps:
           /usr/bin/cmake --build --preset linux_gcc_$(ep)_release \
             --target onnxruntime-genai"
     displayName: 'Build GenAi'
-    workingDirectory: '$(Pipeline.Workspace)'
+    workingDirectory: '$(Build.Repository.LocalPath)'
   - task: BinSkim@4
     displayName: 'Run BinSkim'
     inputs:
-      AnalyzeTargetGlob: '$(Pipeline.Workspace)/onnxruntime-genai/build/**/*genai.so'
+      AnalyzeTargetGlob: '$(Build.Repository.LocalPath)/onnxruntime-genai/build/**/*genai.so'
     continueOnError: true
   - template: utils/capi-archive.yml
     parameters:
@@ -72,7 +68,7 @@ steps:
       set -e -x
       docker run \
       --rm \
-      --volume $(Pipeline.Workspace):/ort_genai_src \
+      --volume $(Build.Repository.LocalPath):/ort_genai_src \
       -w /ort_genai_src/ onnxruntime$(ep)build$(arch) \
       bash -c " \
           /usr/bin/cmake --preset linux_gcc_$(ep)_release \
@@ -82,12 +78,12 @@ steps:
           /usr/bin/cmake --build --preset linux_gcc_$(ep)_release \
             --target python"
     displayName: 'Build Python $(PyNoDotVer)'
-    workingDirectory: '$(Pipeline.Workspace)'
+    workingDirectory: '$(Build.Repository.LocalPath)'
   - bash: |
       set -e -x
       docker run \
       --rm \
-      --volume $(Pipeline.Workspace):/ort_genai_src \
+      --volume $(Build.Repository.LocalPath):/ort_genai_src \
       -w /ort_genai_src/ onnxruntime$(ep)build$(arch) \
       bash -c " \
           /usr/bin/cmake --build --preset linux_gcc_$(ep)_release \
@@ -97,15 +93,15 @@ steps:
           /usr/bin/cmake --build --preset linux_gcc_$(ep)_release \
             --target PyPackageBuild"
     displayName: 'PyPackageBuild $(PyNoDotVer)'
-    workingDirectory: '$(Pipeline.Workspace)'
+    workingDirectory: '$(Build.Repository.LocalPath)'
   - task: CopyFiles@2
     displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
     inputs:
-      SourceFolder: '$(Pipeline.Workspace)/build/gcc_$(ep)/release/wheel'
+      SourceFolder: '$(Build.Repository.LocalPath)/build/gcc_$(ep)/release/wheel'
       Contents: '*manylinux*.whl'
       TargetFolder: '$(Build.ArtifactStagingDirectory)'
 
 - script: |
-    ls $(Pipeline.Workspace) -R
+    ls $(Build.Repository.LocalPath) -R
   displayName: 'List files from SourceDirectory'
 

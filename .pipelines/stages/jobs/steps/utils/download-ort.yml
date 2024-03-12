@@ -15,26 +15,26 @@ steps:
     defaultVersionType: 'specificTag'
     version: 'v$(ort_version)'
     itemPattern: '$(ort_filename)*'
-    downloadPath: '$(Pipeline.Workspace)'
+    downloadPath: '$(Build.Repository.LocalPath)'
   displayName: Download $(ort_filename)
 
 - task: ExtractFiles@1
   inputs:
     archiveFilePatterns: '**/*.${{ parameters.archiveType }}'
-    destinationFolder: '$(Pipeline.Workspace)'
+    destinationFolder: '$(Build.Repository.LocalPath)'
     cleanDestinationFolder: false
     overwriteExistingFiles: true
   displayName: Unzip OnnxRuntime
 
 - task: CopyFiles@2
   inputs:
-    SourceFolder: '$(Pipeline.Workspace)/$(ort_filename)'
-    TargetFolder: '$(Pipeline.Workspace)/ort'
+    SourceFolder: '$(Build.Repository.LocalPath)/$(ort_filename)'
+    TargetFolder: '$(Build.Repository.LocalPath)/ort'
   displayName: Copy OnnxRuntime to ort
 
 - task: DeleteFiles@1
   inputs:
-    SourceFolder: '$(Pipeline.Workspace)/ort/lib'
+    SourceFolder: '$(Build.Repository.LocalPath)/ort/lib'
     Contents: '*tensorrt*'
     RemoveSourceFolder: false
   displayName: 'Remove tensorrt from lib'
