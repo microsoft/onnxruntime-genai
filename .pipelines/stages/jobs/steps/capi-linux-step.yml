@@ -10,7 +10,7 @@ steps:
 
 - checkout: manylinux
   clean: true
-  path: $(Build.Repository.LocalPath)
+  path: $(Build.Repository.LocalPath)/manylinux
   submodules: recursive
 
 - script: |
