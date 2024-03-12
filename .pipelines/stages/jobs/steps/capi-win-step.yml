@@ -15,7 +15,7 @@ steps:
 - task: onebranch.pipeline.tsaoptions@1
   displayName: 'OneBranch TSAOptions'
   inputs:
-    tsaConfigFilePath: '$(Build.SourcesDirectory)\.config\tsaoptions.json'
+    tsaConfigFilePath: '$(Pipeline.Workspace)\.config\tsaoptions.json'
     appendSourceBranchName: false
 
 - template: utils/set-nightly-build-option-variable.yml
@@ -32,30 +32,29 @@ steps:
 - template: utils/download-ort.yml
   parameters:
     archiveType: 'zip'
-    genai_src: '$(Build.SourcesDirectory)'
 
 - powershell: |
-    azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" '$(Build.SourcesDirectory)\cuda_sdk'
+    azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" '$(Pipeline.Workspace)\cuda_sdk'
   displayName: 'Download CUDA'
   condition: eq(variables['ep'], 'cuda')
-  workingDirectory: '$(Build.SourcesDirectory)'
+  workingDirectory: '$(Pipeline.Workspace)'
 
 - powershell: |
-    cmake --preset windows_$(arch)_$(ep)_release -T cuda='$(Build.SourcesDirectory)\cuda_sdk\v$(cuda_version)'
+    cmake --preset windows_$(arch)_$(ep)_release -T cuda='$(Pipeline.Workspace)\cuda_sdk\v$(cuda_version)'
   displayName: 'Configure CMake C API with CUDA'
   condition: eq(variables['ep'], 'cuda')
-  workingDirectory: '$(Build.SourcesDirectory)'
+  workingDirectory: '$(Pipeline.Workspace)'
 
 - powershell: |
     cmake --preset windows_$(arch)_$(ep)_release
   displayName: 'Configure CMake C API without CUDA'
   condition: ne(variables['ep'], 'cuda')
-  workingDirectory: '$(Build.SourcesDirectory)'
+  workingDirectory: '$(Pipeline.Workspace)'
 
 - powershell: |
     cmake --build --preset windows_$(arch)_$(ep)_release --parallel --target ${{ parameters.target }}
   displayName: 'Build C API'
-  workingDirectory: '$(Build.SourcesDirectory)'
+  workingDirectory: '$(Pipeline.Workspace)'
 
 - ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
   - template: compliant/win-esrp-dll-step.yml
@@ -66,17 +65,16 @@ steps:
   - task: BinSkim@4
     displayName: 'Run BinSkim'
     inputs:
-      AnalyzeTargetGlob: '$(Build.SourcesDirectory)\**\*genai.dll'
+      AnalyzeTargetGlob: '$(Pipeline.Workspace)\**\*genai.dll'
     continueOnError: true
 
   - template: utils/capi-archive.yml
     parameters:
-      genai_src: '$(Build.SourcesDirectory)'
       archiveType: zip
 
 - ${{ if eq(parameters.target, 'python') }}:
   - task: BinSkim@4
     displayName: 'Run BinSkim'
     inputs:
-      AnalyzeTargetGlob: '$(Build.SourcesDirectory)\**\*.pyd'
+      AnalyzeTargetGlob: '$(Pipeline.Workspace)\**\*.pyd'
     continueOnError: true

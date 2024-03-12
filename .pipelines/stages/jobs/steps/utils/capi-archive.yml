@@ -1,6 +1,4 @@
 parameters:
-- name: genai_src
-  type: string
 - name: archiveType
   type: string
 steps:
@@ -13,14 +11,14 @@ steps:
 - task: CopyFiles@2
   displayName: 'Copy Onnxruntime C API library files to ArtifactStagingDirectory'
   inputs:
-    SourceFolder: '${{ parameters.genai_src }}/ort/lib'
+    SourceFolder: '$(Pipeline.Workspace)/ort/lib'
     TargetFolder: '$(Build.ArtifactStagingDirectory)\$(artifactName)\lib'
 
 - ${{ if eq(parameters.archiveType, 'tar') }}:
   - task: CopyFiles@2
     displayName: 'Copy Onnxruntime C API dll files to ArtifactStagingDirectory'
     inputs:
-      SourceFolder: '${{ parameters.genai_src }}/$(buildDir)'
+      SourceFolder: '$(Pipeline.Workspace)/$(buildDir)'
       Contents: |
         onnxruntime-genai.so
       TargetFolder: '$(Build.ArtifactStagingDirectory)\$(artifactName)\lib'
@@ -28,7 +26,7 @@ steps:
   - task: CopyFiles@2
     displayName: 'Copy Onnxruntime C API dll files to ArtifactStagingDirectory'
     inputs:
-      SourceFolder: '${{ parameters.genai_src }}\$(buildDir)\Release'
+      SourceFolder: '$(Pipeline.Workspace)\$(buildDir)\Release'
       Contents: |
         onnxruntime-genai.dll
         onnxruntime-genai.lib
@@ -38,7 +36,7 @@ steps:
 - task: CopyFiles@2
   displayName: 'Copy GenAi C API header to ArtifactStagingDirectory'
   inputs:
-    SourceFolder: '${{ parameters.genai_src }}/src'
+    SourceFolder: '$(Pipeline.Workspace)/src'
     Contents: |
       ort_genai_c.h
     TargetFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)/include'
@@ -46,7 +44,7 @@ steps:
 - task: CopyFiles@2
   displayName: 'Copy other files to ArtifactStagingDirectory'
   inputs:
-    SourceFolder: '${{ parameters.genai_src }}'
+    SourceFolder: '$(Pipeline.Workspace)'
     Contents: |
       VERSION_INFO
       LICENSE

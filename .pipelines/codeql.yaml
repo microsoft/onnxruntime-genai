@@ -41,7 +41,7 @@ stages:
     - task: onebranch.pipeline.tsaoptions@1
       displayName: 'OneBranch TSAOptions'
       inputs:
-        tsaConfigFilePath: '$(Build.SourcesDirectory)\.config\tsaoptions.json'
+        tsaConfigFilePath: '$(Pipeline.Workspace)\.config\tsaoptions.json'
         appendSourceBranchName: false
     - task: CredScan@3
       displayName: 🔍 Run CredScan
@@ -49,7 +49,7 @@ stages:
     - task: PoliCheck@2
       inputs:
         targetType: 'F'
-        targetArgument: '$(Build.SourcesDirectory)'
+        targetArgument: '$(Pipeline.Workspace)'
 
     - task: SdtReport@2
       displayName: 📃 Create Security Analysis Report
@@ -65,4 +65,4 @@ stages:
       continueOnError: true
       inputs:
         GdnPublishTsaOnboard: true
-        GdnPublishTsaConfigFile: '$(Build.SourcesDirectory)\.config\tsaoptions.json' 
+        GdnPublishTsaConfigFile: '$(Pipeline.Workspace)\.config\tsaoptions.json' 

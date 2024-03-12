@@ -22,4 +22,4 @@ steps:
     inputs:
       # ignore dmlc-core tracker for its CI, which is not used in onnxruntime build
       # ignore unit tests in emscripten. emscripten unit tests are not used in onnxruntime build
-      ignoreDirectories: '$(Build.SourcesDirectory)/cmake/external/emsdk/upstream/emscripten/tests'
+      ignoreDirectories: '$(Pipeline.Workspace)/cmake/external/emsdk/upstream/emscripten/tests'
