@@ -21,6 +21,7 @@ struct Config {
     std::optional<bool> enable_mem_pattern;
     std::optional<std::string> log_id;
     std::optional<int> log_severity_level;
+    std::optional<std::string> enable_profiling;
 
     std::vector<ProviderOptions> provider_options;
   };
