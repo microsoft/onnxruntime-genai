@@ -7,12 +7,17 @@ steps:
 
 - checkout: self # due to checkout multiple repos, the root directory is $(Build.SourcesDirectory)/onnxruntime-genai,
   clean: true
+  path: $(Build.SourcesDirectory)
   submodules: recursive
 
 - checkout: manylinux # due to checkout multiple repos, the root directory is $(Build.SourcesDirectory)/manylinux,
   clean: true
+  path: $(Build.SourcesDirectory)/onnxruntime-genai
   submodules: recursive
 
+- script: |
+    ls $(Build.SourcesDirectory) -R
+  displayName: 'List files from SourceDirectory'
 - template: utils/set-nightly-build-option-variable.yml
 
 - bash: |
