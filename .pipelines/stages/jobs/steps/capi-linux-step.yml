@@ -5,15 +5,18 @@ steps:
 
 - checkout: self
   clean: true
-  path: onnxruntime-genai-src
+  path: onnxruntime-genai
   submodules: recursive
 
 - checkout: manylinux
   clean: true
-  path: $(Build.Repository.LocalPath)/manylinux
+  path: manylinux
   submodules: recursive
 
 - script: |
+    set -e -x
+    echo "$(Build.SourcesDirectory)"
+    echo "$(Build.Repository.LocalPath)"
     ls $(Build.Repository.LocalPath) -R
   displayName: 'List files from SourceDirectory'
 
