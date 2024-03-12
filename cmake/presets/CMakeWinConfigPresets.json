@@ -18,8 +18,15 @@
       }
     },
     {
-      "name": "windows_release_default",
+      "name": "windows_cuda_default",
       "inherits": "windows_cpu_default",
+      "cacheVariables": {
+        "USE_CUDA": "ON",
+        "CMAKE_CUDA_ARCHITECTURES": "60;61;70;75;80;86"
+      }
+    },
+    {
+      "name": "windows_release_default",
       "cacheVariables": {
         "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG",
         "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG"
@@ -27,7 +34,6 @@
     },
     {
       "name": "windows_debug_default",
-      "inherits": "windows_cpu_default",
       "cacheVariables": {
         "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /Ob0 /Od /RTC1",
         "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /Ob0 /Od /RTC1"
@@ -35,7 +41,6 @@
     },
     {
       "name": "windows_relwithdebinfo_default",
-      "inherits": "windows_cpu_default",
       "cacheVariables": {
         "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob1 /DNDEBUG",
         "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob1 /DNDEBUG"
@@ -43,7 +48,6 @@
     },
     {
       "name": "windows_minsizerel_default",
-      "inherits": "windows_cpu_default",
       "cacheVariables": {
         "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O1 /Ob1 /DNDEBUG",
         "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O1 /Ob1 /DNDEBUG"
@@ -51,7 +55,6 @@
     },
     {
       "name": "windows_release_asan_default",
-      "inherits": "windows_release_default",
       "cacheVariables": {
         "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG /fsanitize=address",
         "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob2 /DNDEBUG /fsanitize=address"
@@ -59,7 +62,6 @@
     },
     {
       "name": "windows_debug_asan_default",
-      "inherits": "windows_debug_default",
       "cacheVariables": {
         "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /Ob0 /Od /RTC1 /fsanitize=address",
         "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /Ob0 /Od /RTC1 /fsanitize=address"
@@ -67,7 +69,6 @@
     },
     {
       "name": "windows_relwithdebinfo_asan_default",
-      "inherits": "windows_relwithdebinfo_default",
       "cacheVariables": {
         "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob1 /DNDEBUG /fsanitize=address",
         "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O2 /Ob1 /DNDEBUG /fsanitize=address"
@@ -75,7 +76,6 @@
     },
     {
       "name": "windows_minsizerel_asan_default",
-      "inherits": "windows_minsizerel_default",
       "cacheVariables": {
         "CMAKE_C_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O1 /Ob1 /DNDEBUG /fsanitize=address",
         "CMAKE_CXX_FLAGS": "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 /O1 /Ob1 /DNDEBUG /fsanitize=address"
@@ -83,55 +83,82 @@
     },
     {
       "name": "windows_x64_cpu_release_asan",
-      "inherits": "windows_release_asan_default",
+      "inherits": [
+        "windows_release_asan_default",
+        "windows_cpu_default"
+      ],
       "displayName": "windows x64 cpu release asan",
       "binaryDir": "${sourceDir}/build/release/cpu_asan"
     },
     {
       "name": "windows_x64_cpu_debug_asan",
-      "inherits": "windows_debug_asan_default",
+      "inherits": [
+        "windows_debug_asan_default",
+        "windows_cpu_default"
+      ],
       "displayName": "windows x64 cpu debug asan",
       "binaryDir": "${sourceDir}/build/debug/cpu_asan"
     },
     {
       "name": "windows_x64_cpu_relwithdebinfo_asan",
-      "inherits": "windows_relwithdebinfo_asan_default",
+      "inherits": [
+        "windows_relwithdebinfo_asan_default",
+        "windows_cpu_default"
+      ],
       "displayName": "windows x64 cpu relwithdebinfo asan",
       "binaryDir": "${sourceDir}/build/relwithdebinfo/cpu_asan"
     },
     {
       "name": "windows_x64_cpu_minsizerel_asan",
-      "inherits": "windows_minsizerel_asan_default",
+      "inherits": [
+        "windows_minsizerel_asan_default",
+        "windows_cpu_default"
+      ],
       "displayName": "windows x64 cpu minsizerel asan",
       "binaryDir": "${sourceDir}/build/minsizerel/cpu_asan"
     },
     {
       "name": "windows_x64_cpu_release",
-      "inherits": "windows_release_default",
+      "inherits": [
+        "windows_release_default",
+        "windows_cpu_default"
+      ],
       "displayName": "windows x64 cpu release",
       "binaryDir": "${sourceDir}/build/release/cpu_default"
     },
     {
       "name": "windows_x64_cpu_debug",
-      "inherits": "windows_debug_default",
+      "inherits": [
+        "windows_debug_default",
+        "windows_cpu_default"
+      ],
       "displayName": "windows x64 cpu debug",
       "binaryDir": "${sourceDir}/build/debug/cpu_default"
     },
     {
       "name": "windows_x64_cpu_relwithdebinfo",
-      "inherits": "windows_relwithdebinfo_default",
+      "inherits": [
+        "windows_relwithdebinfo_default",
+        "windows_cpu_default"
+      ],
       "displayName": "windows x64 cpu relwithdebinfo",
       "binaryDir": "${sourceDir}/build/relwithdebinfo/cpu_default"
     },
     {
       "name": "windows_x64_cpu_minsizerel",
-      "inherits": "windows_minsizerel_default",
+      "inherits": [
+        "windows_minsizerel_default",
+        "windows_cpu_default"
+      ],
       "displayName": "windows x64 cpu minsizerel",
       "binaryDir": "${sourceDir}/build/minsizerel/cpu_default"
     },
     {
       "name": "windows_x64_cuda_release_asan",
-      "inherits": "windows_release_asan_default",
+      "inherits": [
+        "windows_release_asan_default",
+        "windows_cuda_default"
+      ],
       "displayName": "windows x64 cuda release asan",
       "binaryDir": "${sourceDir}/build/release/cuda_asan",
       "cacheVariables": {
@@ -140,7 +167,10 @@
     },
     {
       "name": "windows_x64_cuda_debug_asan",
-      "inherits": "windows_debug_asan_default",
+      "inherits": [
+        "windows_debug_asan_default",
+        "windows_cuda_default"
+      ],
       "displayName": "windows x64 cuda debug asan",
       "binaryDir": "${sourceDir}/build/debug/cuda_asan",
       "cacheVariables": {
@@ -149,7 +179,10 @@
     },
     {
       "name": "windows_x64_cuda_relwithdebinfo_asan",
-      "inherits": "windows_relwithdebinfo_asan_default",
+      "inherits": [
+        "windows_relwithdebinfo_asan_default",
+        "windows_cuda_default"
+      ],
       "displayName": "windows x64 cuda relwithdebinfo asan",
       "binaryDir": "${sourceDir}/build/relwithdebinfo/cuda_asan",
       "cacheVariables": {
@@ -158,7 +191,10 @@
     },
     {
       "name": "windows_x64_cuda_minsizerel_asan",
-      "inherits": "windows_release_asan_default",
+      "inherits": [
+        "windows_minsizerel_asan_default",
+        "windows_cuda_default"
+      ],
       "displayName": "windows x64 cuda minsizerel asan",
       "binaryDir": "${sourceDir}/build/minsizerel/cuda_asan",
       "cacheVariables": {
@@ -167,7 +203,10 @@
     },
     {
       "name": "windows_x64_cuda_release",
-      "inherits": "windows_release_default",
+      "inherits": [
+        "windows_release_default",
+        "windows_cuda_default"
+      ],
       "displayName": "windows x64 cuda release",
       "binaryDir": "${sourceDir}/build/release/cuda_default",
       "cacheVariables": {
@@ -176,7 +215,10 @@
     },
     {
       "name": "windows_x64_cuda_debug",
-      "inherits": "windows_debug_default",
+      "inherits": [
+        "windows_debug_default",
+        "windows_cuda_default"
+      ],
       "displayName": "windows x64 cuda debug",
       "binaryDir": "${sourceDir}/build/debug/cuda_default",
       "cacheVariables": {
@@ -185,7 +227,10 @@
     },
     {
       "name": "windows_x64_cuda_relwithdebinfo",
-      "inherits": "windows_relwithdebinfo_default",
+      "inherits": [
+        "windows_relwithdebinfo_default",
+        "windows_cuda_default"
+      ],
       "displayName": "windows x64 cuda relwithdebinfo",
       "binaryDir": "${sourceDir}/build/relwithdebinfo/cuda_default",
       "cacheVariables": {
@@ -194,7 +239,10 @@
     },
     {
       "name": "windows_x64_cuda_minsizerel",
-      "inherits": "windows_minsizerel_default",
+      "inherits": [
+        "windows_minsizerel_default",
+        "windows_cuda_default"
+      ],
       "displayName": "windows x64 cuda minsizerel",
       "binaryDir": "${sourceDir}/build/minsizerel/cuda_default",
       "cacheVariables": {

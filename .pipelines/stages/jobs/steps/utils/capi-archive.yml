@@ -1,0 +1,74 @@
+parameters:
+- name: genai_src
+  type: string
+- name: archiveType
+  type: string
+steps:
+- bash: |
+    echo "##[error]Error: artifactName and buildDir are not set"
+    exit 1
+  displayName: 'Check if variables ort_filename and ort_filename are set'
+  condition: or( eq (variables['artifactName'], ''), eq (variables['buildDir'], ''))
+
+- task: CopyFiles@2
+  displayName: 'Copy Onnxruntime C API library files to ArtifactStagingDirectory'
+  inputs:
+    SourceFolder: '${{ parameters.genai_src }}/ort/lib'
+    TargetFolder: '$(Build.ArtifactStagingDirectory)\$(artifactName)\lib'
+
+- ${{ if eq(parameters.archiveType, 'tar') }}:
+  - task: CopyFiles@2
+    displayName: 'Copy Onnxruntime C API dll files to ArtifactStagingDirectory'
+    inputs:
+      SourceFolder: '${{ parameters.genai_src }}/$(buildDir)'
+      Contents: |
+        onnxruntime-genai.so
+      TargetFolder: '$(Build.ArtifactStagingDirectory)\$(artifactName)\lib'
+- ${{ else }}:
+  - task: CopyFiles@2
+    displayName: 'Copy Onnxruntime C API dll files to ArtifactStagingDirectory'
+    inputs:
+      SourceFolder: '${{ parameters.genai_src }}\$(buildDir)\Release'
+      Contents: |
+        onnxruntime-genai.dll
+        onnxruntime-genai.lib
+        onnxruntime-genai.pdb
+      TargetFolder: '$(Build.ArtifactStagingDirectory)\$(artifactName)\lib'
+
+- task: CopyFiles@2
+  displayName: 'Copy GenAi C API header to ArtifactStagingDirectory'
+  inputs:
+    SourceFolder: '${{ parameters.genai_src }}/src'
+    Contents: |
+      ort_genai_c.h
+    TargetFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)/include'
+
+- task: CopyFiles@2
+  displayName: 'Copy other files to ArtifactStagingDirectory'
+  inputs:
+    SourceFolder: '${{ parameters.genai_src }}'
+    Contents: |
+      VERSION_INFO
+      LICENSE
+      SECURITY.md
+      README.md
+      ThirdPartyNotices.txt
+    TargetFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)'
+
+- task: ArchiveFiles@2
+  inputs:
+    rootFolderOrFile: '$(Build.ArtifactStagingDirectory)/$(artifactName)'
+    includeRootFolder: true
+    archiveType: ${{ parameters.archiveType }}
+    ${{ if eq(parameters.archiveType, 'tar') }}:
+      tarCompression: 'gz'
+      archiveFile: '$(Build.ArtifactStagingDirectory)/$(artifactName).tgz'
+    ${{ else }}:
+      archiveFile: '$(Build.ArtifactStagingDirectory)/$(artifactName).zip'
+    replaceExistingArchive: true
+
+- task: DeleteFiles@1
+  inputs:
+    SourceFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)'
+    Contents: '*'
+    RemoveSourceFolder: true
