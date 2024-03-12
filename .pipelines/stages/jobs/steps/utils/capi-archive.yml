@@ -20,7 +20,7 @@ steps:
   - task: CopyFiles@2
     displayName: 'Copy Onnxruntime C API dll files to ArtifactStagingDirectory'
     inputs:
-      SourceFolder: '${{ parameters.genai_src }}/$(build_dir)'
+      SourceFolder: '${{ parameters.genai_src }}/$(buildDir)'
       Contents: |
         onnxruntime-genai.so
       TargetFolder: '$(Build.ArtifactStagingDirectory)/lib'
@@ -28,7 +28,7 @@ steps:
   - task: CopyFiles@2
     displayName: 'Copy Onnxruntime C API dll files to ArtifactStagingDirectory'
     inputs:
-      SourceFolder: '${{ parameters.genai_src }}\$(build_dir)\Release'
+      SourceFolder: '${{ parameters.genai_src }}\$(buildDir)\Release'
       Contents: |
         onnxruntime-genai.dll
         onnxruntime-genai.lib
