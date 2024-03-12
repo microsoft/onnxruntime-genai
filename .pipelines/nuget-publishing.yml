@@ -12,12 +12,12 @@ parameters:
 - name: enable_linux_cpu
   displayName: 'Whether Linux CPU package is built.'
   type: boolean
-  default: false
+  default: true
 
 - name: enable_linux_cuda
   displayName: 'Whether Linux CUDA package is built.'
   type: boolean
-  default: false
+  default: true
 
 
 - name: ort_version
