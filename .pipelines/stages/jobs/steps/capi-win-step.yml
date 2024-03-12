@@ -73,7 +73,6 @@ steps:
     parameters:
       genai_src: '$(Build.SourcesDirectory)'
       archiveType: zip
-      os: win
 
 - ${{ if eq(parameters.target, 'python') }}:
   - task: BinSkim@4

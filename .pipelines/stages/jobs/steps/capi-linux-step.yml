@@ -62,7 +62,6 @@ steps:
     parameters:
       genai_src: ${{ parameters.genai_src }}
       archiveType: tar
-      os: linux
 - ${{ if eq(parameters.target, 'python') }}:
   - bash: |
       set -e -x

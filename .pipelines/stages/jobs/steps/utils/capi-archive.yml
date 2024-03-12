@@ -3,8 +3,6 @@ parameters:
   type: string
 - name: archiveType
   type: string
-- name: os
-  type: string
 steps:
 - bash: |
     echo "##[error]Error: artifactName and buildDir are not set"
@@ -18,7 +16,7 @@ steps:
     SourceFolder: '${{ parameters.genai_src }}/ort/lib'
     TargetFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)/lib'
 
-- ${{ if eq(parameters.os, 'linux') }}:
+- ${{ if eq(parameters.archiveType, 'tar') }}:
   - task: CopyFiles@2
     displayName: 'Copy Onnxruntime C API dll files to ArtifactStagingDirectory'
     inputs:
