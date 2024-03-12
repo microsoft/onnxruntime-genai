@@ -24,7 +24,7 @@ jobs:
   - name: ep
     value: ${{ parameters.ep }}
   - name: buildDir
-    value: '$(Build.SourcesDirectory)\build\release\${{ parameters.ep }}_default'
+    value: 'build\release\${{ parameters.ep }}_default'
   - name: artifactName
     value : 'onnxruntime-genai-capi-win-${{ parameters.ep }}-${{ parameters.arch }}'
   - name: ort_filename

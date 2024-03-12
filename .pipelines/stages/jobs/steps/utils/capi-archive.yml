@@ -3,6 +3,8 @@ parameters:
   type: string
 - name: archiveType
   type: string
+- name: os
+  type: string
 steps:
 - bash: |
     echo "##[error]Error: artifactName and buildDir are not set"
@@ -16,13 +18,24 @@ steps:
     SourceFolder: '${{ parameters.genai_src }}/ort/lib'
     TargetFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)/lib'
 
-- task: CopyFiles@2
-  displayName: 'Copy GenAi C API library files to ArtifactStagingDirectory'
-  inputs:
-    SourceFolder: '$(buildDir)'
-    Contents: |
-      onnxruntime-genai.so
-    TargetFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)/lib'
+- ${{ if eq(parameters.os, 'linux') }}:
+  - task: CopyFiles@2
+    displayName: 'Copy Onnxruntime C API dll files to ArtifactStagingDirectory'
+    inputs:
+      SourceFolder: '${{ parameters.genai_src }}/$(build_dir)'
+      Contents: |
+        onnxruntime-genai.so
+      TargetFolder: '$(Build.ArtifactStagingDirectory)/lib'
+- ${{ else }}:
+  - task: CopyFiles@2
+    displayName: 'Copy Onnxruntime C API dll files to ArtifactStagingDirectory'
+    inputs:
+      SourceFolder: '${{ parameters.genai_src }}\$(build_dir)\Release'
+      Contents: |
+        onnxruntime-genai.dll
+        onnxruntime-genai.lib
+        onnxruntime-genai.pdb
+      TargetFolder: '$(Build.ArtifactStagingDirectory)\lib'
 
 - task: CopyFiles@2
   displayName: 'Copy GenAi C API header to ArtifactStagingDirectory'
