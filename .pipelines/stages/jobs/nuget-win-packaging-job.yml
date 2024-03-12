@@ -20,11 +20,11 @@ jobs:
       value: 'build/release/cpu_default'
     ${{ if eq(parameters.ep, 'gpu') }}:
       value: 'build/release/cuda_default'
-  - name: id
+  - name: ext
     ${{ if eq(parameters.ep, 'cpu') }}:
-      value: Microsoft.ML.OnnxRuntimeGenAI
+      value: ""
     ${{ if eq(parameters.ep, 'gpu') }}:
-      value: Microsoft.ML.OnnxRuntimeGenAI.Gpu
+      value: ".Gpu"
   timeoutInMinutes: 180
   workspace:
     clean: all
@@ -50,7 +50,7 @@ jobs:
       $VERSION = '0.1.0-rc1'
       nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.nuspec `
         -Prop version=$VERSION `
-        -Prop id=$(id) `
+        -Prop ext=$(ext) `
         -Prop configuration=$(build_config) `
         -Prop buildPath=$(build_dir)
       nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec `
