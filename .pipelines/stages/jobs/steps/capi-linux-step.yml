@@ -5,7 +5,7 @@ steps:
 
 - checkout: self
   clean: true
-  path: $(Build.SourcesDirectory)/g/onnxruntime-genai
+  path: onnxruntime-genai-src
   submodules: recursive
 
 - checkout: manylinux
