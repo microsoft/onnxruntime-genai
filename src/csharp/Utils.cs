@@ -7,7 +7,21 @@ using System.Text;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
-    internal class Utils
+    public class Utils
+    {
+        public static void SetCurrentGpuDeviceId(int device_id)
+        {
+            Result.VerifySuccess(NativeMethods.OgaSetCurrentGpuDeviceId(device_id));
+        }
+        public static int GetCurrentGpuDeviceId()
+        {
+            IntPtr device_id = IntPtr.Zero;
+            Result.VerifySuccess(NativeMethods.OgaGetCurrentGpuDeviceId(out device_id));
+            return (int)device_id.ToInt64();
+        }
+    }
+
+    internal class StringUtils
     {
         internal static byte[] EmptyByteArray = new byte[] { 0 };
 

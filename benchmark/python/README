@@ -10,4 +10,4 @@ Prerequisites:
 
 
 Example call to benchmarking script
-python benchmark_e2e.py -i {model folder} -b 1 -l 128 -g 256 -r 100 -w 10 -k 5 -o {output csv file name} -ep cuda
+python benchmark_e2e.py -i {model folder} -b 1 -l 128 -g 256 -r 100 -w 10 -k 5 -o {output csv file name}

@@ -3,7 +3,7 @@
   <metadata>
     <!-- id can be either Microsoft.ML.OnnxRuntimeGenAI or Microsoft.ML.OnnxRuntimeGenAI.Gpu -->
     <!-- depending on the type of build -->
-    <id>$id$</id>
+    <id>Microsoft.ML.OnnxRuntimeGenAI$ext$</id>
     <version>$version$</version>
     <authors>Microsoft</authors>
     <owners>Microsoft</owners>
@@ -17,12 +17,15 @@
     <dependencies>
       <group targetFramework="NETSTANDARD" >
         <dependency id="Microsoft.ML.OnnxRuntimeGenAI.Managed" version="$version$" />
+        <dependency id="Microsoft.ML.OnnxRuntime$ext$" version="1.17.1" />
       </group>
       <group targetFramework="NETCOREAPP" >
         <dependency id="Microsoft.ML.OnnxRuntimeGenAI.Managed" version="$version$" />
+        <dependency id="Microsoft.ML.OnnxRuntime$ext$" version="1.17.1" />
       </group>
       <group targetFramework="NETFRAMEWORK" >
         <dependency id="Microsoft.ML.OnnxRuntimeGenAI.Managed" version="$version$" />
+        <dependency id="Microsoft.ML.OnnxRuntime$ext$" version="1.17.1" />
       </group>
     </dependencies>
   </metadata>
@@ -40,12 +43,12 @@
 <!--     <file src="..\$buildPath$\$configuration$\onnxruntime-genai.dll" target="runtimes\win-arm64\native" /> -->
 
     <!-- Targets -->
-    <file src="targets\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\netstandard2.1\$id$.targets" />
-    <file src="targets\Microsoft.ML.OnnxRuntimeGenAI.props" target="build\netstandard2.1\$id$.props" />
+    <file src="targets\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\netstandard2.1\Microsoft.ML.OnnxRuntimeGenAI$ext$.targets" />
+    <file src="targets\Microsoft.ML.OnnxRuntimeGenAI.props" target="build\netstandard2.1\Microsoft.ML.OnnxRuntimeGenAI$ext$.props" />
 
     <!-- Includes -->
     <file src="..\src\ort_genai_c.h" target="build\native\include" />
-    <file src="targets\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\native\$id$.targets" />
-    <file src="targets\Microsoft.ML.OnnxRuntimeGenAI.props" target="build\native\$id$.props" />
+    <file src="targets\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\native\Microsoft.ML.OnnxRuntimeGenAI$ext$.targets" />
+    <file src="targets\Microsoft.ML.OnnxRuntimeGenAI.props" target="build\native\Microsoft.ML.OnnxRuntimeGenAI$ext$.props" />
   </files>
 </package>

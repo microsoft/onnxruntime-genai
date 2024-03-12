@@ -1,4 +1,4 @@
-# Phi-2
+# Gen-AI Python Examples
 
 ## Install the onnxruntime-genai library
 
