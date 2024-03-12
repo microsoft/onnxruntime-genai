@@ -80,8 +80,6 @@ def download_models(download_path, device, num_hidden_layers=None):
                 device,
                 "-o",
                 model_path,
-                "--extra_options",
-                f"num_hidden_layers={num_hidden_layers}",
             ]
             if num_hidden_layers:
                 command.extend(
