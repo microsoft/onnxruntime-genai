@@ -39,7 +39,7 @@ jobs:
 
       - name: Install the python wheel and test dependencies
         run: |
-          python3 -m pip install build/gcc_cpu/release/wheel/onnxruntime_genai*.whl
+          python3 -m pip install build/cpu/wheel/onnxruntime_genai*.whl
           python3 -m pip install -r test/python/requirements-nightly-cpu.txt --user
 
       - name: Get HuggingFace Token
