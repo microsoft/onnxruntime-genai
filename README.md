@@ -26,12 +26,12 @@ Users can call a high level `generate()` method, or run each iteration of the mo
   * Top P/Top K
 * APIs
   * Python
+  * C#
   * C/C++  
 
 ## Coming very soon
 
 * Support for the Whisper model architectures
-* C# API
 * Support for DirectML
 
 ## Roadmap
