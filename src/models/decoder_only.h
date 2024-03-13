@@ -21,9 +21,11 @@ struct DecoderOnly_State : State {
 
  private:
   void UpdateInputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> next_indices, int current_length);
+  int GetGraphAnnotationId() const;
 
   const DecoderOnly_Model& model_;
   bool first_run_{true};
+  int graph_annotation_id_{0};
 
   InputIDs input_ids_{model_, *this};
   Logits logits_{model_, *this};

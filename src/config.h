@@ -6,9 +6,9 @@ struct Config {
   Config() = default;
   Config(const std::filesystem::path& path);
 
-  bool use_cuda_graphs{false};  // True if the model can use cuda graphs for optimization
-
   std::filesystem::path config_path;  // Path of the config directory
+
+  bool use_cuda_graphs{false};
 
   using ProviderOption = std::pair<std::string, std::string>;
   struct ProviderOptions {
@@ -59,7 +59,7 @@ struct Config {
         std::string position_ids{"position_ids"};
         std::string attention_mask{"attention_mask"};
         std::string seqlens_k{"seqlens_k"};
-        std::string total_sequence_length{"total_sequence_length"};
+        std::string total_sequence_length{"total_seq_len"};
         std::string past_key_names{"past_key_values.%d.key"}, past_value_names{"past_key_values.%d.value"};
         std::string past_names;  // When key/value pairs are combined
         std::string cross_past_key_names, cross_past_value_names;
@@ -95,5 +95,6 @@ struct Config {
 
 void SetSearchNumber(Config::Search& search, std::string_view name, double value);
 void SetSearchBool(Config::Search& search, std::string_view name, bool value);
+bool IsCudaGraphEnabled(Config::SessionOptions& session_options);
 
 }  // namespace Generators

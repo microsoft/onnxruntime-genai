@@ -12,6 +12,7 @@ struct StaticBuffer {
 
  private:
   size_t GetElementSize(ONNXTensorElementDataType type);
+  size_t GetNumElements(std::span<const int64_t> shape);
 
   Ort::Allocator* allocator_{nullptr};
   const OrtMemoryInfo& info_;

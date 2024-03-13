@@ -121,6 +121,10 @@ struct Inputs_Element : JSON::Element {
       v_.position_ids = value;
     } else if (name == "attention_mask") {
       v_.attention_mask = value;
+    } else if (name == "seqlens_k") {
+      v_.seqlens_k = value;
+    } else if (name == "total_seq_len") {
+      v_.total_sequence_length = value;
     } else if (name == "past_key_names") {
       v_.past_key_names = value;
     } else if (name == "past_value_names") {
@@ -312,6 +316,20 @@ void SetSearchBool(Config::Search& search, std::string_view name, bool value) {
   Search_Element(search).OnBool(name, value);
 }
 
+bool IsCudaGraphEnabled(Config::SessionOptions& session_options) {
+  for (const auto& provider_options : session_options.provider_options) {
+    if (provider_options.name == "cuda") {
+      for (const auto& value : provider_options.options) {
+        if (value.first == "enable_cuda_graph") {
+          // Is it the correct value string?
+          return value.second == "true" || value.second == "1";
+        }
+      }
+    }
+  }
+  return false;
+}
+
 struct Root_Element : JSON::Element {
   explicit Root_Element(Config& config) : config_{config} {}
 
@@ -378,6 +396,8 @@ Config::Config(const std::filesystem::path& path) : config_path{path} {
 
   if (search.max_length == 0)
     search.max_length = model.context_length;
+
+  use_cuda_graphs = IsCudaGraphEnabled(model.decoder.session_options);
 }
 
 }  // namespace Generators

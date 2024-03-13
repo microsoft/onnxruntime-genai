@@ -17,6 +17,15 @@ Logits::Logits(const Model& model, State& state)
     value32_ = std::move(logits_tensor);
   else
     value16_ = std::move(logits_tensor);
+
+  if (model_.device_type_ == DeviceType::CUDA && model_.config_->use_cuda_graphs) {
+    if (type_ == Ort::TypeToTensorType<float>::type) {
+      sb_logits32_ = std::make_unique<StaticBuffer>(model_.allocator_device_);
+    }
+    if (type_ == Ort::TypeToTensorType<Ort::Float16_t>::type) {
+      sb_logits16_ = std::make_unique<StaticBuffer>(model_.allocator_device_);
+    }
+  }
 }
 
 RoamingArray<float> Logits::Get() {
@@ -37,6 +46,7 @@ RoamingArray<float> Logits::Get() {
     const size_t num_beams = state_.params_.search.num_beams;
 
     shape_[1] = 1;
+    // bugbug: not done yet
     auto value_next = !sb_logits32_ ? OrtValue::CreateTensor<float>(*model_.allocator_device_, shape_)
                                     : sb_logits32_->GetOrCreateTensor(shape_, type_);
     auto logits_next = cpu_span<float>{value_next->GetTensorMutableData<float>(), element_count};

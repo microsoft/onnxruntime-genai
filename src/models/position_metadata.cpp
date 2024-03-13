@@ -31,7 +31,7 @@ PositionMetadata::PositionMetadata(const Model& model, State& state, RoamingArra
   position_ids_shape_ = shape;
   attention_mask_shape_ = shape;
 
-  if (model_.config_->use_cuda_graphs) {
+  if (model_.device_type_ == DeviceType::CUDA && model_.config_->use_cuda_graphs) {
     sb_position_ids_ = std::make_unique<StaticBuffer>(model_.allocator_device_);
     sb_seqlens_k_ = std::make_unique<StaticBuffer>(model_.allocator_device_);
   }
@@ -52,7 +52,9 @@ void PositionMetadata::AddPositionIDs() {
 }
 
 void PositionMetadata::AddSeqlensK() {
-  senlens_k_shape_ = {state_.params_.batch_size * state_.params_.search.num_beams};
+  seqlens_k_input_index_ = state_.inputs_.size();
+
+  senlens_k_shape_ = {static_cast<int64_t>(state_.params_.batch_size) * state_.params_.search.num_beams};
   seqlens_k_ = OrtValue::CreateTensor(model_.allocator_cpu_, senlens_k_shape_, Ort::TypeToTensorType<int32_t>::type);
 
   std::copy(initial_sequence_lengths_.begin(),
@@ -64,6 +66,7 @@ void PositionMetadata::AddSeqlensK() {
 }
 
 void PositionMetadata::AddTotalSequenceLength() {
+  total_sequence_length_input_index_ = state_.inputs_.size();
   total_sequence_length_ = OrtValue::CreateTensor(model_.allocator_cpu_,
                                                   total_sequence_length_shape_,
                                                   Ort::TypeToTensorType<int32_t>::type);
@@ -75,7 +78,7 @@ void PositionMetadata::AddTotalSequenceLength() {
 
 void PositionMetadata::UpdatePositionIDs(int current_length) {
   // Reallocate position_ids for the 2nd and onward shape
-  if (position_ids_next_) {
+  if (is_first_posid_update_) {
     position_ids_shape_[1] = 1;
     if (!sb_position_ids_) {
       position_ids_ = std::move(position_ids_next_);
@@ -98,6 +101,7 @@ void PositionMetadata::UpdatePositionIDs(int current_length) {
       }
 #endif
     }
+    is_first_posid_update_ = false;
     state_.inputs_[posid_input_index_] = position_ids_.get();
   } else {  // Just incrementing existing position IDs
     switch (model_.device_type_) {
@@ -129,9 +133,9 @@ void PositionMetadata::UpdateSeqlensK(int current_length) {
 
   if (is_first_seqlen_update_) {
     if (!sb_seqlens_k_) {
-      seqlens_k_ = OrtValue::CreateTensor(*model_.allocator_device_, senlens_k_shape_, type_);
+      seqlens_k_ = OrtValue::CreateTensor(*model_.allocator_device_, senlens_k_shape_, Ort::TypeToTensorType<int32_t>::type);
     } else {
-      seqlens_k_ = sb_seqlens_k_->GetOrCreateTensor(senlens_k_shape_, type_);
+      seqlens_k_ = sb_seqlens_k_->GetOrCreateTensor(senlens_k_shape_, Ort::TypeToTensorType<int32_t>::type);
     }
     state_.inputs_[seqlens_k_input_index_] = seqlens_k_.get();
     cudaMemcpyAsync(seqlens_k_->GetTensorMutableRawData(), initial_sequence_lengths_.data(), sizeof(int32_t) * initial_sequence_lengths_.size(), cudaMemcpyHostToDevice, model_.cuda_stream_);

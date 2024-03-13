@@ -28,7 +28,7 @@ InputIDs::InputIDs(const Model& model, State& state)
   value_ = model_.ExpandInputs(value_, state_.params_.search.num_beams);
   shape_[0] *= state_.params_.search.num_beams;
 
-  if (model_.config_->use_cuda_graphs) {
+  if (model_.device_type_ == DeviceType::CUDA && model_.config_->use_cuda_graphs) {
     sb_input_ids_ = std::make_unique<StaticBuffer>(model_.allocator_device_);
   }
 }

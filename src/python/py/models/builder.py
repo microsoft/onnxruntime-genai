@@ -37,6 +37,7 @@ class Model:
         self.io_dtype = io_dtype      # {'fp16', 'fp32'}
         self.onnx_dtype = onnx_dtype  # {"int4", "fp16", "fp32"}
         self.ep = ep
+        self.enable_cuda_graph = "enable_cuda_graph" in extra_options and extra_options["enable_cuda_graph"] == "1"
 
         self.cache_dir = cache_dir
         self.filename = extra_options["filename"] if "filename" in extra_options else "model.onnx"
@@ -53,6 +54,16 @@ class Model:
             "input_ids": ["batch_size", "sequence_length"],
             "attention_mask": ["batch_size", "total_sequence_length"],
             "position_ids": ["batch_size", "sequence_length"],
+            "seqlens_k": ["batch_size"],
+            "total_seq_len": [],
+        }
+
+        self.input_types = {
+            "input_ids": TensorProto.INT64,
+            "attention_mask": TensorProto.INT64,
+            "position_ids": TensorProto.INT64,
+            "seqlens_k": TensorProto.INT32,
+            "total_seq_len": TensorProto.INT32,
         }
 
         # Store names of Constant ops already created
@@ -181,6 +192,8 @@ class Model:
 
         if self.ep == "cuda":
             cuda_options = { "cuda" : { } }
+            if self.enable_cuda_graph:
+                cuda_options["cuda"]["enable_cuda_graph"] = "1"
             genai_config["model"]["decoder"]["session_options"]["provider_options"].append(cuda_options)
 
         print(f"Saving GenAI config in {out_dir}")
@@ -307,7 +320,8 @@ class Model:
         inputs = []
         for name in self.model_inputs:
             shape = self.input_shapes[name]
-            inputs.append(helper.make_tensor_value_info(name, TensorProto.INT64, shape=shape))
+            type = self.input_types[name]
+            inputs.append(helper.make_tensor_value_info(name, type, shape=shape))
 
         # Add model-specific outputs to list of model outputs
         outputs = [
@@ -587,7 +601,9 @@ class Model:
         if op_type == "MultiHeadAttention":
             self.make_multi_head_attention(name, add_qk=f"{self.mask_attrs['mask_name']}/output_0", **kwargs)
         elif op_type == "GroupQueryAttention":
-            self.make_group_query_attention(name, seqlens_k=f"{self.mask_attrs['seqlens_k']}/output_0", total_seq_len=f"{self.mask_attrs['total_seq_len']}/output_0", **kwargs)
+            seqlens_k_name = f"{self.mask_attrs['seqlens_k']}/output_0" if not self.enable_cuda_graph else "seqlens_k"
+            total_seq_len_name = f"{self.mask_attrs['total_seq_len']}/output_0" if not self.enable_cuda_graph else "total_seq_len"
+            self.make_group_query_attention(name, seqlens_k=seqlens_k_name, total_seq_len=total_seq_len_name, **kwargs)
         else:
             raise NotImplementedError(f"The {op_type} op is not currently supported.")
 
@@ -1164,13 +1180,23 @@ class Model:
 class LlamaModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        self.model_inputs = ["input_ids", "attention_mask", "position_ids"]
+        if self.enable_cuda_graph:
+            self.model_inputs = ["input_ids", "position_ids", "seqlens_k", "total_seq_len"]
+        else:
+            self.model_inputs = ["input_ids", "attention_mask", "position_ids"]
 
     def make_attention_mask_reformatting(self):
         if not self.attention_attrs["use_gqa"]:
             super().make_attention_mask_reformatting()
             return
 
+        if self.enable_cuda_graph:
+            # ORT does not allow nodes to be placed on mulitple execution providers 
+            # with cuda graph enabled. Thus the attention mask is deprecated and the
+            # subgraph is replaced with seqlens_k and total_seq_len as the raw 
+            # inputs to GroupQueryAttention.
+            return
+        
         # Make nodes for the attention mask subgraph that calculates 
         # attributes about the 2D attention mask to use in GroupQueryAttention
         #
@@ -1184,7 +1210,6 @@ class LlamaModel(Model):
         #              |                |
         #          seqlens_k      total_seq_len
         #            (1D)             (int)
-
         basename = "/model/attn_mask_reformat"
         attn_mask_basename = f"{basename}/attn_mask_subgraph"
 
@@ -1265,54 +1290,6 @@ class PhiModel(LlamaModel):
 
     def make_rotary_embedding(self, rotemb, name, root_input, **kwargs):
         super().make_rotary_embedding(rotemb, name, root_input, num_heads=self.rotemb_attrs["num_heads"], rotary_embedding_dim=self.rotemb_attrs["rotary_embedding_dim"], **kwargs)
-
-    def make_group_query_attention(self, name, **kwargs):
-        if self.layer_id < self.num_layers - 3:
-            super().make_group_query_attention(name, **kwargs)
-            return
-
-        # Cast inputs and outputs of GroupQueryAttention
-        input_kwargs = {"q_path", "k_path", "v_path", "past_k", "past_v"}
-        new_kwargs = {}
-
-        # Make input cast nodes to bfloat16
-        for input_name in input_kwargs:
-            cast_name = f"/model/layers.{self.layer_id}/attn/{input_name.replace('path', 'proj')}/Cast"
-            cast_shape = ['batch_size', 'sequence_length', self.hidden_size] if input_name in {"q_path", "k_path", "v_path"} else ["batch_size", self.num_kv_heads, "past_sequence_length", self.head_size]
-            self.make_cast(cast_name, kwargs[input_name], dtype=TensorProto.BFLOAT16, shape=cast_shape)
-            new_kwargs[input_name] = f"{cast_name}/output_0"
-
-        # Make GroupQueryAttention node
-        inputs = [
-            new_kwargs["q_path"], new_kwargs["k_path"], new_kwargs["v_path"],
-            new_kwargs["past_k"], new_kwargs["past_v"],
-            kwargs.get("seqlens_k", ""), kwargs.get("total_seq_len", ""),
-        ]
-        outputs = [f"{name}/Cast/output_0", f"{name}/output_1", f"{name}/output_2"]
-        self.make_node("GroupQueryAttention", inputs=inputs, outputs=outputs, name=name, domain="com.microsoft", num_heads=self.num_attn_heads, kv_num_heads=self.num_kv_heads)
-        self.make_value_info(outputs[0], TensorProto.BFLOAT16, shape=['batch_size', 'sequence_length', self.hidden_size])
-
-        present_kv_shape = ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size]
-        self.make_value_info(outputs[1], TensorProto.BFLOAT16, shape=present_kv_shape)
-        self.make_value_info(outputs[2], TensorProto.BFLOAT16, shape=present_kv_shape)
-
-        # Make output cast nodes to float16
-        target_dtype = TensorProto.FLOAT16
-
-        cast_o_path_name = f"{name}/o_proj/Cast"
-        cast_o_path_output = f"{name}/output_0"
-        self.make_node("Cast", inputs=[outputs[0]], outputs=[cast_o_path_output], name=cast_o_path_name, to=target_dtype)
-        self.make_value_info(cast_o_path_output, target_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
-        
-        cast_present_k_name = f"{name}/present_k/Cast"
-        cast_present_k_output = f"present.{self.layer_id}.key"
-        self.make_node("Cast", inputs=[outputs[1]], outputs=[cast_present_k_output], name=cast_present_k_name, to=target_dtype)
-        self.make_value_info(cast_present_k_output, target_dtype, shape=present_kv_shape)
-        
-        cast_present_v_name = f"{name}/present_v/Cast"
-        cast_present_v_output = f"present.{self.layer_id}.value"
-        self.make_node("Cast", inputs=[outputs[2]], outputs=[cast_present_v_output], name=cast_present_v_name, to=target_dtype)
-        self.make_value_info(cast_present_v_output, target_dtype, shape=present_kv_shape)
         
     def make_mlp(self, layer_id, mlp, root_input):
         # Make nodes for the MLP subgraph
@@ -1503,6 +1480,7 @@ def get_args():
                     The filename for each component will be '<filename>_<component-name>.onnx' (ex: '<filename>_encoder.onnx', '<filename>_decoder.onnx').
                 config_only = Generate config and pre/post processing files only.
                     Use this option when you already have your optimized and/or quantized ONNX model.
+                enable_cuda_graph = 1 : Enable CUDA graph capture for CUDA execution provider. Limitations may apply.
             """),
     )
 
