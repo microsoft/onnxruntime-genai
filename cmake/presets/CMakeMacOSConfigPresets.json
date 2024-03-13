@@ -26,8 +26,8 @@
       "name": "macos_release_default",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe ",
-        "CMAKE_CXX_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe"
+        "CMAKE_C_FLAGS": " -O3 -pipe -march=arm64",
+        "CMAKE_CXX_FLAGS": " -O3 -pipe -march=arm64"
       }
     },
     {
