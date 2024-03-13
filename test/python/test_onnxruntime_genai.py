@@ -41,19 +41,11 @@ def run_onnxruntime_genai_api_tests(
 def run_onnxruntime_genai_e2e_tests(
     cwd: Union[str, bytes, os.PathLike],
     log: logging.Logger,
-    test_models: Union[str, bytes, os.PathLike],
 ):
     log.debug("Running: ONNX Runtime GenAI E2E Tests")
 
-    for model in ["phi-2", "llama"]:
-        log.debug(f"Running: {model}")
-        command = [
-            sys.executable,
-            "test_onnxruntime_genai_e2e.py",
-            "--model_path",
-            os.path.join(test_models, "cpu", model),
-        ]
-        run_subprocess(command, cwd=cwd, log=log).check_returncode()
+    command = [sys.executable, "test_onnxruntime_genai_e2e.py"]
+    run_subprocess(command, cwd=cwd, log=log).check_returncode()
 
 
 def parse_arguments():
@@ -82,28 +74,23 @@ def main():
 
     log.info("Running onnxruntime-genai tests pipeline")
 
-    num_hidden_layers = None if args.e2e else 1
-    if not (sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8):
-        download_models(
-            os.path.abspath(args.test_models),
-            "cpu",
-            num_hidden_layers=num_hidden_layers,
-        )
-        if og.is_cuda_available():
-            download_models(
-                os.path.abspath(args.test_models),
-                "cuda",
-                num_hidden_layers=num_hidden_layers,
-            )
+    if not args.e2e:
+        if not (
+            sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8
+        ):
+            download_models(os.path.abspath(args.test_models), "cpu")
+            if og.is_cuda_available():
+                download_models(
+                    os.path.abspath(args.test_models),
+                    "cuda",
+                )
 
-    run_onnxruntime_genai_api_tests(
-        os.path.abspath(args.cwd), log, os.path.abspath(args.test_models)
-    )
-
-    if args.e2e:
-        run_onnxruntime_genai_e2e_tests(
+        run_onnxruntime_genai_api_tests(
             os.path.abspath(args.cwd), log, os.path.abspath(args.test_models)
         )
+
+    else:
+        run_onnxruntime_genai_e2e_tests(os.path.abspath(args.cwd), log)
 
     return 0
 

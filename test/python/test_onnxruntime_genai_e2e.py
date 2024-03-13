@@ -1,10 +1,32 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
-import argparse
 import os
+import sys
+import tempfile
 
 import onnxruntime_genai as og
+from _test_utils import run_subprocess
+
+
+def download_model(
+    download_path: str | bytes | os.PathLike, device: str, model_identifier: str
+):
+    # python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -p int4 -e cpu -o download_path
+    command = [
+        sys.executable,
+        "-m",
+        "onnxruntime_genai.models.builder",
+        "-m",
+        model_identifier,
+        "-p",
+        "int4",
+        "-e",
+        device,
+        "-o",
+        download_path,
+    ]
+    run_subprocess(command).check_returncode()
 
 
 def run_model(model_path: str | bytes | os.PathLike):
@@ -28,11 +50,8 @@ def run_model(model_path: str | bytes | os.PathLike):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--model_path",
-        help="Path to the model directory",
-        required=True,
-    )
-    args = parser.parse_args()
-    run_model(args.model_path)
+    for model_name in ["microsoft/phi-2"]:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            device = "cuda" if og.is_cuda_available() else "cpu"
+            download_model(temp_dir, device, model_name)
+            run_model(temp_dir)

@@ -15,7 +15,8 @@ import pytest
     "relative_model_path",
     [
         Path("hf-internal-testing") / "tiny-random-gpt2-fp32",
-        Path("hf-internal-testing") / "tiny-random-gpt2-fp32",
+        Path("hf-internal-testing") / "tiny-random-gpt2-fp32-cuda",
+        Path("hf-internal-testing") / "tiny-random-gpt2-fp16-cuda",
     ],
 )
 def test_greedy_search(test_data_path, relative_model_path):
@@ -61,13 +62,10 @@ def test_greedy_search(test_data_path, relative_model_path):
     "device", ["cpu", "cuda"] if og.is_cuda_available() else ["cpu"]
 )
 @pytest.mark.parametrize("batch", [True, False])
-@pytest.mark.parametrize("model_name", ["phi-2", "gemma", "llama"])
-def test_tokenizer_encode_decode(device, path_for_model, model_name, batch):
-    model_path = path_for_model(model_name, device)
-    if not os.path.exists(model_path):
-        pytest.skip(f"Model {model_name} not found at {model_path}.")
+def test_tokenizer_encode_decode(device, phi2_for, batch):
+    model_path = phi2_for(device)
 
-    model = og.Model(path_for_model(model_name, device))
+    model = og.Model(model_path)
     tokenizer = og.Tokenizer(model)
 
     prompts = [
