@@ -27,8 +27,14 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, RoamingArra
 
 RoamingArray<float> DecoderOnly_State::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
   if (first_run_) {
+    if (model_.config_->use_cuda_graphs) {
+      model_.run_options_->AddConfigEntry("gpu_graph_id", "-1");
+    }
     first_run_ = false;
   } else {
+    if (model_.config_->use_cuda_graphs) {
+      model_.run_options_->AddConfigEntry("gpu_graph_id", "-1");
+    }
     UpdateInputs(next_tokens, next_indices, current_length);
   }
 

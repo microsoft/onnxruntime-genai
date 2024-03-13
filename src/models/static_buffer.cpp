@@ -1,6 +1,7 @@
 #include "../generators.h"
 #include "../span.h"
 #include "static_buffer.h"
+#include <iostream>
 
 namespace Generators {
 
@@ -10,6 +11,7 @@ StaticBuffer::StaticBuffer(Ort::Allocator* allocator) : allocator_{allocator}, i
 std::unique_ptr<OrtValue> StaticBuffer::GetOrCreateTensor(std::span<const int64_t> shape,
                                                           ONNXTensorElementDataType type) {
   size_t new_bytes = GetElementSize(type) * shape.size();
+  std::cout << "GetOrCreateTensor: new_bytes = " << new_bytes << std::endl;
   if (buffer_ == nullptr) {
     buffer_ = allocator_->Alloc(new_bytes);
     bytes_ = new_bytes;
@@ -19,6 +21,7 @@ std::unique_ptr<OrtValue> StaticBuffer::GetOrCreateTensor(std::span<const int64_
   return OrtValue::CreateTensor(info_, buffer_, new_bytes, shape, type);
 }
 
+// TODO: same as GetOrtTypeSize() in model.cc. Should be moved to a common place
 size_t StaticBuffer::GetElementSize(ONNXTensorElementDataType type) {
   switch (type) {
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:

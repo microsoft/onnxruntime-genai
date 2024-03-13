@@ -17,6 +17,8 @@ PositionMetadata::PositionMetadata(const Model& model, State& state, RoamingArra
   position_ids_next_ = OrtValue::CreateTensor(model.allocator_cpu_, std::array<int64_t, 2>{shape[0], 1}, type_);
   attention_mask_ = OrtValue::CreateTensor(model.allocator_cpu_, shape, type_);
 
+  initial_sequence_lengths_.resize(state_.params_.BatchBeamSize());
+
   if (type_ == Ort::TypeToTensorType<int32_t>::type)
     InitializeTensors<int32_t>(shape, sequence_lengths_unk);
   else
@@ -78,6 +80,7 @@ void PositionMetadata::UpdatePositionIDs(int current_length) {
     if (!sb_position_ids_) {
       position_ids_ = std::move(position_ids_next_);
     } else {
+#if USE_CUDA
       position_ids_ = sb_position_ids_->GetOrCreateTensor(position_ids_shape_, type_);
       assert(model_.device_type_ == DeviceType::CUDA);
       if (type_ == Ort::TypeToTensorType<int32_t>::type) {
@@ -93,6 +96,7 @@ void PositionMetadata::UpdatePositionIDs(int current_length) {
                         cudaMemcpyDeviceToDevice,
                         model_.cuda_stream_);
       }
+#endif
     }
     state_.inputs_[posid_input_index_] = position_ids_.get();
   } else {  // Just incrementing existing position IDs
