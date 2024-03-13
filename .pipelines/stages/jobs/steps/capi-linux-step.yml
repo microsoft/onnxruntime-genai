@@ -10,14 +10,14 @@ steps:
 
 - checkout: manylinux
   clean: true
-  path: manylinux
+  path: onnxruntime-genai/manylinux
   submodules: recursive
 
 - script: |
     set -e -x
     echo "$(Build.SourcesDirectory)"
     echo "$(Build.Repository.LocalPath)"
-    ls $(Build.Repository.LocalPath) -R
+    ls $(Build.SourcesDirectory) -R
   displayName: 'List files from SourceDirectory'
 
 - template: utils/set-nightly-build-option-variable.yml
@@ -38,7 +38,7 @@ steps:
       --context tools/ci_build/github/linux/docker/manylinux \
       --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
       --container-registry onnxruntimebuildcache \
-      --manylinux-src $(Build.Repository.LocalPath)/manylinux \
+      --manylinux-src $(Build.SourcesDirectory)/manylinux \
       --multiple_repos \
       --repository onnxruntime$(ep)build$(arch)
   displayName: 'Get Docker Image'
