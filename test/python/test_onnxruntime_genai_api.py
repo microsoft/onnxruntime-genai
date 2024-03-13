@@ -13,8 +13,7 @@ import pytest
 
 # FIXME: CUDA device does not work on the CI pipeline because the pipeline uses different cuda versions for
 # onnxruntime-genai and onnxruntime. This introduces incompatibility.
-# @pytest.mark.parametrize("device", [og.DeviceType.CPU, og.DeviceType.CUDA] if og.is_cuda_available() else [og.DeviceType.CPU])
-@pytest.mark.parametrize("device", [og.DeviceType.CPU])
+# Once this works, cuda converted models need to be added (ex: tiny-random-gpt2-fp16-cuda)
 @pytest.mark.parametrize(
     "relative_model_path",
     [
@@ -22,10 +21,10 @@ import pytest
         Path("hf-internal-testing") / "tiny-random-gpt2-fp32",
     ],
 )
-def test_greedy_search(device, test_data_path, relative_model_path):
+def test_greedy_search(test_data_path, relative_model_path):
     model_path = os.fspath(Path(test_data_path()) / relative_model_path)
 
-    model = og.Model(model_path, device)
+    model = og.Model(model_path)
 
     search_params = og.GeneratorParams(model)
     search_params.input_ids = np.array(
@@ -61,12 +60,11 @@ def test_greedy_search(device, test_data_path, relative_model_path):
     sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8,
     reason="Python 3.8 is required for downloading models.",
 )
-@pytest.mark.parametrize("device", [og.DeviceType.CPU])
 @pytest.mark.parametrize("batch", [True, False])
-def test_tokenizer_encode_decode(device, test_data_path, batch):
+def test_tokenizer_encode_decode(test_data_path, batch):
     model_path = os.fspath(Path(test_data_path("phi-2")))
 
-    model = og.Model(model_path, device)
+    model = og.Model(model_path)
     tokenizer = og.Tokenizer(model)
 
     prompts = [
@@ -86,14 +84,13 @@ def test_tokenizer_encode_decode(device, test_data_path, batch):
             assert prompt == decoded_string
 
 
-@pytest.mark.parametrize("device", [og.DeviceType.CPU])
 @pytest.mark.parametrize(
     "relative_model_path", [Path("hf-internal-testing") / "tiny-random-gpt2-fp32"]
 )
-def test_tokenizer_stream(device, test_data_path, relative_model_path):
+def test_tokenizer_stream(test_data_path, relative_model_path):
     model_path = os.fspath(Path(test_data_path()) / relative_model_path)
 
-    model = og.Model(model_path, device)
+    model = og.Model(model_path)
     tokenizer = og.Tokenizer(model)
     tokenizer_stream = tokenizer.create_stream()
 
@@ -118,12 +115,11 @@ def test_tokenizer_stream(device, test_data_path, relative_model_path):
     sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8,
     reason="Python 3.8 is required for downloading models.",
 )
-@pytest.mark.parametrize("device", [og.DeviceType.CPU])
 @pytest.mark.parametrize("relative_model_path", [Path("phi-2")])
-def test_batching(device, test_data_path, relative_model_path):
+def test_batching(test_data_path, relative_model_path):
     model_path = os.fspath(Path(test_data_path()) / relative_model_path)
 
-    model = og.Model(model_path, device)
+    model = og.Model(model_path)
     tokenizer = og.Tokenizer(model)
 
     prompts = [

@@ -24,7 +24,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             {
                 foreach (string str in strings)
                 {
-                    Result.VerifySuccess(NativeMethods.OgaTokenizerEncode(_tokenizerHandle, Utils.ToUtf8(str), nativeSequences));
+                    Result.VerifySuccess(NativeMethods.OgaTokenizerEncode(_tokenizerHandle, StringUtils.ToUtf8(str), nativeSequences));
                 }
 
                 return new Sequences(nativeSequences);
@@ -52,7 +52,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaCreateSequences(out IntPtr nativeSequences));
             try
             {
-                Result.VerifySuccess(NativeMethods.OgaTokenizerEncode(_tokenizerHandle, Utils.ToUtf8(str), nativeSequences));
+                Result.VerifySuccess(NativeMethods.OgaTokenizerEncode(_tokenizerHandle, StringUtils.ToUtf8(str), nativeSequences));
                 return new Sequences(nativeSequences);
             }
             catch
@@ -74,7 +74,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             }
             try
             {
-                return Utils.FromUtf8(outStr);
+                return StringUtils.FromUtf8(outStr);
             }
             finally
             {

@@ -31,7 +31,7 @@ def download_model(download_path: str | bytes | os.PathLike, device: str):
 def run_model(model_path: str | bytes | os.PathLike, device: og.DeviceType):
     model = og.Model(model_path, device)
 
-    tokenizer = model.create_tokenizer()
+    tokenizer = og.Tokenizer(model)
     prompts = [
         "def is_prime(n):",
         "def compute_gcd(x, y):",

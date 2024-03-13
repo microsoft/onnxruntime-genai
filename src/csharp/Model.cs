@@ -6,20 +6,14 @@ using System.Runtime.InteropServices;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
-    public enum DeviceType : long
-    {
-        CPU = 0,
-        CUDA = 1
-    }
-
     public class Model : IDisposable
     {
         private IntPtr _modelHandle;
         private bool _disposed = false;
 
-        public Model(string modelPath, DeviceType deviceType)
+        public Model(string modelPath)
         {
-            Result.VerifySuccess(NativeMethods.OgaCreateModel(Utils.ToUtf8(modelPath), deviceType, out _modelHandle));
+            Result.VerifySuccess(NativeMethods.OgaCreateModel(StringUtils.ToUtf8(modelPath), out _modelHandle));
         }
 
         internal IntPtr Handle { get { return _modelHandle; } }

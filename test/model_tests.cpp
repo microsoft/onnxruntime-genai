@@ -16,8 +16,8 @@ std::unique_ptr<OrtEnv> g_ort_env;
 // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
 // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
 static const std::pair<const char*, const char*> c_tiny_gpt2_model_paths[] = {
-    {MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32", "fp32"},
-    {MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp16", "fp16"},
+    {MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32-cuda", "fp32"},
+    {MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp16-cuda", "fp16"},
 };
 
 TEST(ModelTests, GreedySearchGptFp32) {
@@ -116,8 +116,7 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
       0, 0, 0, 52, 204, 204, 204, 204, 204, 204,
       0, 0, 195, 731, 731, 114, 114, 114, 114, 114};
 
-  auto provider_options = Generators::GetDefaultProviderOptions(Generators::DeviceType::CUDA);
-  auto model = Generators::CreateModel(*g_ort_env, model_path, &provider_options);
+  auto model = Generators::CreateModel(*g_ort_env, model_path);
 
   Generators::GeneratorParams params{*model};
   params.batch_size = static_cast<int>(input_ids_shape[0]);
@@ -158,13 +157,11 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
       41, 554, 74, 622, 206, 222, 75, 223, 221, 198, 224, 572, 292, 292, 292, 292, 292, 292, 292, 292,
       0, 0, 0, 52, 328, 219, 328, 206, 288, 227, 896, 328, 328, 669, 669, 669, 669, 669, 669, 669};
 
-  auto provider_options = Generators::GetDefaultProviderOptions(Generators::DeviceType::CUDA);
-
   // The ONNX model is generated like the following:
   // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2
   //        --output tiny_gpt2_beamsearch_fp16.onnx --use_gpu --max_length 20
   // (with separate_gpt2_decoder_for_init_run set to False as it is now set to True by default)
-  auto model = Generators::CreateModel(*g_ort_env, model_path, &provider_options);
+  auto model = Generators::CreateModel(*g_ort_env, model_path);
 
   Generators::GeneratorParams params{*model};
   params.batch_size = static_cast<int>(input_ids_shape[0]);
@@ -215,8 +212,7 @@ Print all primes between 1 and n
 
   std::cout << "With prompt:" << prompt << "\r\n";
 
-  auto provider_options = Generators::GetDefaultProviderOptions(Generators::DeviceType::CUDA);
-  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "phi-2", &provider_options);
+  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "phi-2");
   auto tokenizer = model->CreateTokenizer();
   auto tokens = tokenizer->Encode(prompt);
 
@@ -254,8 +250,7 @@ Print all primes between 1 and n
 
   std::cout << "With prompt:" << prompt << "\r\n";
 
-  auto provider_options = Generators::GetDefaultProviderOptions(Generators::DeviceType::CUDA);
-  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "phi-2", &provider_options);
+  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "phi-2");
   auto tokenizer = model->CreateTokenizer();
   auto tokens = tokenizer->Encode(prompt);
 

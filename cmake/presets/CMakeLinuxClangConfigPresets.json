@@ -41,7 +41,7 @@
       "displayName": "linux clang cpu minsizerel asan",
       "inherits": [
         "linux_clang_default",
-        "linux_MinSizeRel_default"
+        "linux_minsizerel_default"
       ],
       "binaryDir": "${sourceDir}/build/clang_cpu/minsizerel",
       "cacheVariables": {}
@@ -78,7 +78,7 @@
       "displayName": "linux clang cpu minsizerel",
       "inherits": [
         "linux_clang_default",
-        "linux_MinSizeRel_default"
+        "linux_minsizerel_default"
       ],
       "binaryDir": "${sourceDir}/build/clang_cpu/minsizerel",
       "cacheVariables": {}

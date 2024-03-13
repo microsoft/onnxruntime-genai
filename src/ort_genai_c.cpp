@@ -61,10 +61,9 @@ const int32_t* OGA_API_CALL OgaSequencesGetSequenceData(const OgaSequences* p, s
   return (*reinterpret_cast<const Generators::TokenSequences*>(p))[sequence].data();
 }
 
-OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaDeviceType device_type, OgaModel** out) {
+OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaModel** out) {
   OGA_TRY
-  auto provider_options = Generators::GetDefaultProviderOptions(static_cast<Generators::DeviceType>(device_type));
-  *out = reinterpret_cast<OgaModel*>(Generators::CreateModel(Generators::GetOrtEnv(), config_path, &provider_options).release());
+  *out = reinterpret_cast<OgaModel*>(Generators::CreateModel(Generators::GetOrtEnv(), config_path).release());
   return nullptr;
   OGA_CATCH
 }
@@ -207,6 +206,20 @@ OgaResult* OGA_API_CALL OgaCreateTokenizerStream(const OgaTokenizer* p, OgaToken
 OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream* p, int32_t token, const char** out) {
   OGA_TRY
   *out = reinterpret_cast<Generators::TokenizerStream*>(p)->Decode(token).c_str();
+  return nullptr;
+  OGA_CATCH
+}
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaSetCurrentGpuDeviceId(int device_id) {
+  OGA_TRY
+  Ort::SetCurrentGpuDeviceId(device_id);
+  return nullptr;
+  OGA_CATCH
+}
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGetCurrentGpuDeviceId(int* device_id) {
+  OGA_TRY
+  *device_id = Ort::GetCurrentGpuDeviceId();
   return nullptr;
   OGA_CATCH
 }

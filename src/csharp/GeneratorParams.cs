@@ -22,12 +22,12 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         public void SetSearchOption(string searchOption, double value)
         {
-            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetSearchNumber(_generatorParamsHandle, Utils.ToUtf8(searchOption), value));
+            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetSearchNumber(_generatorParamsHandle, StringUtils.ToUtf8(searchOption), value));
         }
 
         public void SetSearchOption(string searchOption, bool value)
         {
-            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetSearchBool(_generatorParamsHandle, Utils.ToUtf8(searchOption), value));
+            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetSearchBool(_generatorParamsHandle, StringUtils.ToUtf8(searchOption), value));
         }
 
         public void SetInputIDs(ReadOnlySpan<int> inputIDs, ulong sequenceLength, ulong batchSize)
