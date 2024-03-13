@@ -72,7 +72,12 @@ struct PyGeneratorParams : GeneratorParams {
 
     if (py_whisper_input_features_.size() != 0) {
       GeneratorParams::Whisper& whisper = inputs.emplace<GeneratorParams::Whisper>();
+#ifdef __APPLE__
+      std::span shape(reinterpret_cast<const int64_t *>(py_whisper_input_features_.shape()),
+                      py_whisper_input_features_.ndim());
+#else
       std::span<const int64_t> shape(py_whisper_input_features_.shape(), py_whisper_input_features_.ndim());
+#endif
       whisper.input_features = OrtValue::CreateTensor<float>(Ort::Allocator::GetWithDefaultOptions().GetInfo(), ToSpan(py_whisper_input_features_), shape);
       whisper.decoder_input_ids = ToSpan(py_whisper_decoder_input_ids_);
       batch_size = 1;

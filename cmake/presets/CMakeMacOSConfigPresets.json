@@ -1,0 +1,90 @@
+{
+  "version": 6,
+  "include": [
+    "CMakeLinuxDefaultConfigPresets.json"
+  ],
+  "configurePresets": [
+        {
+      "name": "macos_default",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/cpu",
+      "cacheVariables": {
+        "CMAKE_POSITION_INDEPENDENT_CODE": "ON",
+        "USE_CUDA": "OFF"
+      },
+      "environment": {
+        "CC": "clang",
+        "CXX": "clang++"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      }
+    },
+    {
+      "name": "macos_release_default",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe ",
+        "CMAKE_CXX_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe"
+      }
+    },
+    {
+      "name": "macos_relwithdebinfo_default",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe -ggdb3",
+        "CMAKE_CXX_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe -ggdb3"
+      }
+    },
+    {
+      "name": "macos_debug_default",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_C_FLAGS": "-ggdb3 -O0",
+        "CMAKE_CXX_FLAGS": "-ggdb3 -O0 -D_GLIBCXX_DEBUG"
+      }
+    },
+    {
+      "name": "macos_minsizerel_default",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "MinSizeRel",
+        "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -Os -pipe -ggdb3",
+        "CMAKE_CXX_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -Os -pipe -ggdb3"
+      }
+    },
+    {
+      "name": "macos_cpu_release",
+      "displayName": "macos cpu release",
+      "inherits": [
+        "macos_default",
+        "macos_release_default"
+      ]
+    },
+    {
+      "name": "macos_cpu_debug",
+      "displayName": "macos cpu debug",
+      "inherits": [
+        "macos_default",
+        "macos_debug_default"
+      ]
+    },
+    {
+      "name": "macos_cpu_relwithdebinfo",
+      "displayName": "macos cpu relwithdebinfo",
+      "inherits": [
+        "macos_default",
+        "macos_relwithdebinfo_default"
+      ]
+    },
+    {
+      "name": "macos_cpu_minsizerel",
+      "displayName": "macos cpu minsizerel",
+      "inherits": [
+        "macos_default",
+        "macos_minsizerel_default"
+      ]
+    }
+  ]
+}

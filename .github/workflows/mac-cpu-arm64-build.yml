@@ -37,9 +37,9 @@ jobs:
         run: |
       - name: Build with CMake
         run: |
-          cmake -G "Ninja" -B build -S . -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=OFF
-          cmake --build build --config Release --parallel
-        continue-on-error: true
+          cmake --preset macos_cpu_release
+          cmake --build --preset macos_cpu_release --parallel
+        continue-on-error: false
 
       - name: Verify Build Artifacts
         if: always()
