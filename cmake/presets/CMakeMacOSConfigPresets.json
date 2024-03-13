@@ -10,6 +10,7 @@
       "binaryDir": "${sourceDir}/build/cpu",
       "cacheVariables": {
         "CMAKE_POSITION_INDEPENDENT_CODE": "ON",
+        "CMAKE_OSX_ARCHITECTURES": "arm64",
         "USE_CUDA": "OFF"
       },
       "environment": {
@@ -26,16 +27,16 @@
       "name": "macos_release_default",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_C_FLAGS": " -O3 -pipe -march=arm64",
-        "CMAKE_CXX_FLAGS": " -O3 -pipe -march=arm64"
+        "CMAKE_C_FLAGS": " -O3 -pipe",
+        "CMAKE_CXX_FLAGS": " -O3 -pipe"
       }
     },
     {
       "name": "macos_relwithdebinfo_default",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe -ggdb3",
-        "CMAKE_CXX_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe -ggdb3"
+        "CMAKE_C_FLAGS": "-O3 -pipe -ggdb3",
+        "CMAKE_CXX_FLAGS": "-O3 -pipe -ggdb3"
       }
     },
     {
@@ -50,8 +51,8 @@
       "name": "macos_minsizerel_default",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "MinSizeRel",
-        "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -Os -pipe -ggdb3",
-        "CMAKE_CXX_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -Os -pipe -ggdb3"
+        "CMAKE_C_FLAGS": "-Os -pipe -ggdb3",
+        "CMAKE_CXX_FLAGS": "-Os -pipe -ggdb3"
       }
     },
     {
