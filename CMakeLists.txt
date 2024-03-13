@@ -8,7 +8,6 @@ project(Generators LANGUAGES C CXX)
 # All Options should be defined in cmake/options.cmake
 include(cmake/options.cmake)
 include(cmake/external/onnxruntime_external_deps.cmake)
-include(cmake/cxx_standard.cmake)
 
 file(READ "VERSION_INFO" ver)
 set(VERSION_INFO ${ver} CACHE STRING "Set the onnxruntime-genai version info.")
@@ -31,6 +30,8 @@ endif()
 if("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_LESS 8)
   message(FATAL_ERROR "GCC version must be greater than or equal to 8")
 endif()
+
+include(cmake/cxx_standard.cmake)
 
 set(GENERATORS_ROOT ${PROJECT_SOURCE_DIR}/src)
 set(MODELS_ROOT ${PROJECT_SOURCE_DIR}/src/models)
