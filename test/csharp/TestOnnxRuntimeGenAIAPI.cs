@@ -93,7 +93,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             int topK = 100;
             float temp = 0.6f;
             ulong maxLength = 20;
-            
+
             string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
             using (var model = new Model(modelPath))
             {
@@ -135,7 +135,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             float topP = 0.6f;
             float temp = 0.6f;
             ulong maxLength = 20;
-            
+
             string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
             using (var model = new Model(modelPath))
             {
@@ -178,7 +178,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             float topP = 0.6f;
             float temp = 0.6f;
             ulong maxLength = 20;
-            
+
             string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
             using (var model = new Model(modelPath))
             {
