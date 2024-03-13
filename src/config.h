@@ -6,7 +6,7 @@ struct Config {
   Config() = default;
   Config(const std::filesystem::path& path);
 
-  bool can_use_cuda_graphs{};  // True if the model can use cuda graphs for optimization
+  bool use_cuda_graphs{};  // True if the model can use cuda graphs for optimization
 
   std::filesystem::path config_path;  // Path of the config directory
 

@@ -203,6 +203,9 @@ ONNXTensorElementDataType SessionInfo::GetOutputDataType(const std::string& name
 }
 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
+  // TODO: add function to create run options
+  run_options_ = OrtRunOptions::Create();
+
   CreateSessionOptions();
 }
 
@@ -219,7 +222,6 @@ void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
 }
 
 void Model::CreateSessionOptions() {
-  run_options_ = OrtRunOptions::Create();
   session_options_ = OrtSessionOptions::Create();
   auto& ort_options = *session_options_;
   auto& options = config_->model.decoder.session_options;
