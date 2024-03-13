@@ -1,4 +1,4 @@
-# Phi-2
+# Gen-AI C# Phi-2 Example
 
 ## Install the onnxruntime-genai library
 
