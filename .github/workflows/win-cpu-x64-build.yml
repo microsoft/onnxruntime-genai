@@ -14,7 +14,7 @@ env:
   ort_dir: "onnxruntime-win-x64-1.17.1"
   ort_zip: "$(ort_dir).zip"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/$(ort_zip)"
-  cmake_build_dir: 'build/cpu'
+  binaryDir: 'build/cpu'
 
 jobs:
   windows-cpu-x64-build:
@@ -59,7 +59,7 @@ jobs:
 
     - name: Install the python wheel and test dependencies
       run: |
-        python -m pip install (Get-ChildItem ("$env:cmake_build_dir\wheel\*.whl"))
+        python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl"))
         python -m pip install -r test\python\requirements-nightly-cpu.txt
 
     - name: Get HuggingFace Token
@@ -76,14 +76,14 @@ jobs:
     - name: Build the C# API and Run the C# Tests
       run: |
         cd test\csharp
-        dotnet test /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:cmake_build_dir\Release"
+        dotnet test /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release"
 
     - name: Verify Build Artifacts
       if: always()
       continue-on-error: true
       run: |
-        Get-ChildItem -Path $env:GITHUB_WORKSPACE\$env:cmake_build_dir -Recurse
-        Get-ChildItem -Path $env:GITHUB_WORKSPACE\$env:cmake_build_dir\test -Recurse
+        Get-ChildItem -Path $env:GITHUB_WORKSPACE\$env:binaryDir -Recurse
+        Get-ChildItem -Path $env:GITHUB_WORKSPACE\$env:binaryDir\test -Recurse
 
     - name: Run tests
       run: |
