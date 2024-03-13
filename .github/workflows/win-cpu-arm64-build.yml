@@ -14,7 +14,7 @@ env:
   ort_dir: "onnxruntime-win-arm64-1.17.1"
   ort_zip: "$(ort_dir).zip"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/$(ort_zip)"
-  cmake_build_dir: 'build/release/cpu_default'
+  cmake_build_dir: 'build/cpu'
 
 jobs:
   windows-cpu-arm64-build:

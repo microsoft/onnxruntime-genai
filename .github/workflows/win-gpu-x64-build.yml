@@ -14,7 +14,7 @@ env:
   cuda_dir: "${{ github.workspace }}\\cuda_sdk"
   cuda_version: "11.8"
   CUDA_PATH: ${{ github.workspace }}\\cuda_sdk\\v11.8
-  cmake_build_dir: 'build/release/cuda_default'
+  cmake_build_dir: 'build/cuda'
 
 
 jobs:
