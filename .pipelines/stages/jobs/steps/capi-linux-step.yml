@@ -96,7 +96,7 @@ steps:
   - task: CopyFiles@2
     displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
     inputs:
-      SourceFolder: '${{ parameters.genai_src }}/build/gcc_$(ep)/release/wheel'
+      SourceFolder: '${{ parameters.genai_src }}/build/$(ep)/wheel'
       Contents: '*manylinux*.whl'
       TargetFolder: '$(Build.ArtifactStagingDirectory)'
 

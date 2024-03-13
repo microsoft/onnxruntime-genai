@@ -12,7 +12,7 @@
         "linux_gcc_default",
         "linux_release_default"
       ],
-      "binaryDir": "${sourceDir}/build/gcc_cpu/release"
+      "binaryDir": "${sourceDir}/build/cpu"
     },
     {
       "name": "linux_gcc_cpu_debug_asan",
@@ -22,7 +22,7 @@
         "linux_gcc_default",
         "linux_debug_default"
       ],
-      "binaryDir": "${sourceDir}/build/gcc_cpu/debug"
+      "binaryDir": "${sourceDir}/build/cpu"
     },
     {
       "name": "linux_gcc_cpu_relwithdebinfo_asan",
@@ -32,7 +32,7 @@
         "linux_gcc_default",
         "linux_relwithdebinfo_default"
       ],
-      "binaryDir": "${sourceDir}/build/gcc_cpu/relwithdebinfo"
+      "binaryDir": "${sourceDir}/build/cpu"
     },
     {
       "name": "linux_gcc_cpu_minsizerel_asan",
@@ -42,7 +42,7 @@
         "linux_gcc_default",
         "linux_minsizerel_default"
       ],
-      "binaryDir": "${sourceDir}/build/gcc_cpu/minsizerel"
+      "binaryDir": "${sourceDir}/build/cpu"
     },
     {
       "name": "linux_gcc_cpu_release",
@@ -51,7 +51,7 @@
         "linux_gcc_default",
         "linux_release_default"
       ],
-      "binaryDir": "${sourceDir}/build/gcc_cpu/release"
+      "binaryDir": "${sourceDir}/build/cpu"
     },
     {
       "name": "linux_gcc_cpu_debug",
@@ -60,7 +60,7 @@
         "linux_gcc_default",
         "linux_debug_default"
       ],
-      "binaryDir": "${sourceDir}/build/gcc_cpu/debug"
+      "binaryDir": "${sourceDir}/build/cpu"
     },
     {
       "name": "linux_gcc_cpu_relwithdebinfo",
@@ -69,7 +69,7 @@
         "linux_gcc_default",
         "linux_relwithdebinfo_default"
       ],
-      "binaryDir": "${sourceDir}/build/gcc_cpu/relwithdebinfo"
+      "binaryDir": "${sourceDir}/build/cpu"
     },
     {
       "name": "linux_gcc_cpu_minsizerel",
@@ -78,7 +78,7 @@
         "linux_gcc_default",
         "linux_minsizerel_default"
       ],
-      "binaryDir": "${sourceDir}/build/gcc_cpu/minsizerel"
+      "binaryDir": "${sourceDir}/build/cpu"
     },
     {
       "name": "linux_gcc_cuda_release_asan",
@@ -88,7 +88,7 @@
         "linux_gcc_cuda_default",
         "linux_release_default"
       ],
-      "binaryDir": "${sourceDir}/build/gcc_cuda/release"
+      "binaryDir": "${sourceDir}/build/cuda"
     },
     {
       "name": "linux_gcc_cuda_debug_asan",
@@ -98,7 +98,7 @@
         "linux_gcc_cuda_default",
         "linux_debug_default"
       ],
-      "binaryDir": "${sourceDir}/build/gcc_cuda/debug"
+      "binaryDir": "${sourceDir}/build/cuda"
     },
     {
       "name": "linux_gcc_cuda_relwithdebinfo_asan",
@@ -108,7 +108,7 @@
         "linux_gcc_cuda_default",
         "linux_relwithdebinfo_default"
       ],
-      "binaryDir": "${sourceDir}/build/gcc_cuda/relwithdebinfo"
+      "binaryDir": "${sourceDir}/build/cuda"
     },
     {
       "name": "linux_gcc_cuda_minsizerel_asan",
@@ -118,7 +118,7 @@
         "linux_gcc_cuda_default",
         "linux_minsizerel_default"
       ],
-      "binaryDir": "${sourceDir}/build/gcc_cuda/minsizerel"
+      "binaryDir": "${sourceDir}/build/cuda"
     },
     {
       "name": "linux_gcc_cuda_release",
@@ -127,7 +127,7 @@
         "linux_gcc_cuda_default",
         "linux_release_default"
       ],
-      "binaryDir": "${sourceDir}/build/gcc_cuda/release"
+      "binaryDir": "${sourceDir}/build/cuda"
     },
     {
       "name": "linux_gcc_cuda_debug",
@@ -136,7 +136,7 @@
         "linux_gcc_cuda_default",
         "linux_debug_default"
       ],
-      "binaryDir": "${sourceDir}/build/gcc_cuda/debug"
+      "binaryDir": "${sourceDir}/build/cuda"
     },
     {
       "name": "linux_gcc_cuda_relwithdebinfo",
@@ -145,7 +145,7 @@
         "linux_gcc_cuda_default",
         "linux_relwithdebinfo_default"
       ],
-      "binaryDir": "${sourceDir}/build/gcc_cuda/relwithdebinfo"
+      "binaryDir": "${sourceDir}/build/cuda"
     },
     {
       "name": "linux_gcc_cuda_minsizerel",
@@ -154,7 +154,7 @@
         "linux_gcc_cuda_default",
         "linux_minsizerel_default"
       ],
-      "binaryDir": "${sourceDir}/build/gcc_cuda/minsizerel"
+      "binaryDir": "${sourceDir}/build/cuda"
     }
   ]
 }

@@ -96,7 +96,7 @@
         "windows_cpu_default"
       ],
       "displayName": "windows x64 cpu release asan",
-      "binaryDir": "${sourceDir}/build/release/cpu_asan"
+      "binaryDir": "${sourceDir}/build/cpu_asan"
     },
     {
       "name": "windows_x64_cpu_debug_asan",
@@ -105,7 +105,7 @@
         "windows_cpu_default"
       ],
       "displayName": "windows x64 cpu debug asan",
-      "binaryDir": "${sourceDir}/build/debug/cpu_asan"
+      "binaryDir": "${sourceDir}/build/cpu_asan"
     },
     {
       "name": "windows_x64_cpu_relwithdebinfo_asan",
@@ -114,7 +114,7 @@
         "windows_cpu_default"
       ],
       "displayName": "windows x64 cpu relwithdebinfo asan",
-      "binaryDir": "${sourceDir}/build/relwithdebinfo/cpu_asan"
+      "binaryDir": "${sourceDir}/build/cpu_asan"
     },
     {
       "name": "windows_x64_cpu_minsizerel_asan",
@@ -123,7 +123,7 @@
         "windows_cpu_default"
       ],
       "displayName": "windows x64 cpu minsizerel asan",
-      "binaryDir": "${sourceDir}/build/minsizerel/cpu_asan"
+      "binaryDir": "${sourceDir}/build/cpu_asan"
     },
     {
       "name": "windows_x64_cpu_release",
@@ -132,7 +132,7 @@
         "windows_cpu_default"
       ],
       "displayName": "windows x64 cpu release",
-      "binaryDir": "${sourceDir}/build/release/cpu_default"
+      "binaryDir": "${sourceDir}/build/cpu"
     },
     {
       "name": "windows_x64_cpu_debug",
@@ -141,7 +141,7 @@
         "windows_cpu_default"
       ],
       "displayName": "windows x64 cpu debug",
-      "binaryDir": "${sourceDir}/build/debug/cpu_default"
+      "binaryDir": "${sourceDir}/build/cpu"
     },
     {
       "name": "windows_x64_cpu_relwithdebinfo",
@@ -150,7 +150,7 @@
         "windows_cpu_default"
       ],
       "displayName": "windows x64 cpu relwithdebinfo",
-      "binaryDir": "${sourceDir}/build/relwithdebinfo/cpu_default"
+      "binaryDir": "${sourceDir}/build/cpu"
     },
     {
       "name": "windows_x64_cpu_minsizerel",
@@ -159,7 +159,7 @@
         "windows_cpu_default"
       ],
       "displayName": "windows x64 cpu minsizerel",
-      "binaryDir": "${sourceDir}/build/minsizerel/cpu_default"
+      "binaryDir": "${sourceDir}/build/cpu"
     },
     {
       "name": "windows_x64_cuda_release_asan",
@@ -168,7 +168,7 @@
         "windows_cuda_default"
       ],
       "displayName": "windows x64 cuda release asan",
-      "binaryDir": "${sourceDir}/build/release/cuda_asan",
+      "binaryDir": "${sourceDir}/build/cuda_asan",
       "cacheVariables": {
         "USE_CUDA": "ON"
       }
@@ -180,7 +180,7 @@
         "windows_cuda_default"
       ],
       "displayName": "windows x64 cuda debug asan",
-      "binaryDir": "${sourceDir}/build/debug/cuda_asan",
+      "binaryDir": "${sourceDir}/build/cuda_asan",
       "cacheVariables": {
         "USE_CUDA": "ON"
       }
@@ -192,7 +192,7 @@
         "windows_cuda_default"
       ],
       "displayName": "windows x64 cuda relwithdebinfo asan",
-      "binaryDir": "${sourceDir}/build/relwithdebinfo/cuda_asan",
+      "binaryDir": "${sourceDir}/build/cuda_asan",
       "cacheVariables": {
         "USE_CUDA": "ON"
       }
@@ -204,7 +204,7 @@
         "windows_cuda_default"
       ],
       "displayName": "windows x64 cuda minsizerel asan",
-      "binaryDir": "${sourceDir}/build/minsizerel/cuda_asan",
+      "binaryDir": "${sourceDir}/build/cuda_asan",
       "cacheVariables": {
         "USE_CUDA": "ON"
       }
@@ -216,7 +216,7 @@
         "windows_cuda_default"
       ],
       "displayName": "windows x64 cuda release",
-      "binaryDir": "${sourceDir}/build/release/cuda_default",
+      "binaryDir": "${sourceDir}/build/cuda",
       "cacheVariables": {
         "USE_CUDA": "ON"
       }
@@ -228,7 +228,7 @@
         "windows_cuda_default"
       ],
       "displayName": "windows x64 cuda debug",
-      "binaryDir": "${sourceDir}/build/debug/cuda_default",
+      "binaryDir": "${sourceDir}/build/cuda",
       "cacheVariables": {
         "USE_CUDA": "ON"
       }
@@ -240,7 +240,7 @@
         "windows_cuda_default"
       ],
       "displayName": "windows x64 cuda relwithdebinfo",
-      "binaryDir": "${sourceDir}/build/relwithdebinfo/cuda_default",
+      "binaryDir": "${sourceDir}/build/cuda",
       "cacheVariables": {
         "USE_CUDA": "ON"
       }
@@ -252,7 +252,7 @@
         "windows_cuda_default"
       ],
       "displayName": "windows x64 cuda minsizerel",
-      "binaryDir": "${sourceDir}/build/minsizerel/cuda_default",
+      "binaryDir": "${sourceDir}/build/cuda",
       "cacheVariables": {
         "USE_CUDA": "ON"
       }

@@ -88,4 +88,4 @@ jobs:
       run: |
         $env:PATH = "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin;" + $env:PATH 
         echo "Current PATH variable is: $env:PATH" 
-        .\build\release\cuda_default\test\Release\unit_tests.exe
+        .\build\cuda\test\Release\unit_tests.exe

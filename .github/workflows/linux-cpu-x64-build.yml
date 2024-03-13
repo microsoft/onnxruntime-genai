@@ -57,9 +57,9 @@ jobs:
         if: always()
         continue-on-error: true
         run: |
-          ls -l ${{ github.workspace }}/build/gcc_cpu/release
+          ls -l ${{ github.workspace }}/build/cpu
 
       - name: Run tests
         run: |
           set -e -x
-          ./build/gcc_cpu/release/test/unit_tests
+          ./build/cpu/test/unit_tests

@@ -11,7 +11,7 @@
         "linux_clang_asan_default",
         "linux_release_default"
       ],
-      "binaryDir": "${sourceDir}/build/clang_cpu/release"
+      "binaryDir": "${sourceDir}/build/cpu"
     },
     {
       "name": "linux_clang_cpu_debug_asan",
@@ -20,7 +20,7 @@
         "linux_clang_asan_default",
         "linux_debug_default"
       ],
-      "binaryDir": "${sourceDir}/build/clang_cpu/debug",
+      "binaryDir": "${sourceDir}/build/cpu",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_C_FLAGS": "-ggdb3 -O0 -fsanitize=address",
@@ -34,7 +34,7 @@
         "linux_clang_asan_default",
         "linux_relwithdebinfo_default"
       ],
-      "binaryDir": "${sourceDir}/build/clang_cpu/relwithdebinfo"
+      "binaryDir": "${sourceDir}/build/cpu"
     },
     {
       "name": "linux_clang_cpu_minsizerel_asan",
@@ -43,7 +43,7 @@
         "linux_clang_default",
         "linux_minsizerel_default"
       ],
-      "binaryDir": "${sourceDir}/build/clang_cpu/minsizerel",
+      "binaryDir": "${sourceDir}/build/cpu",
       "cacheVariables": {}
     },
     {
@@ -53,7 +53,7 @@
         "linux_clang_default",
         "linux_release_default"
       ],
-      "binaryDir": "${sourceDir}/build/clang_cpu/release"
+      "binaryDir": "${sourceDir}/build/cpu"
     },
     {
       "name": "linux_clang_cpu_debug",
@@ -62,7 +62,7 @@
         "linux_clang_default",
         "linux_debug_default"
       ],
-      "binaryDir": "${sourceDir}/build/clang_cpu/debug"
+      "binaryDir": "${sourceDir}/build/cpu"
     },
     {
       "name": "linux_clang_cpu_relwithdebinfo",
@@ -71,7 +71,7 @@
         "linux_clang_default",
         "linux_relwithdebinfo_default"
       ],
-      "binaryDir": "${sourceDir}/build/clang_cpu/relwithdebinfo"
+      "binaryDir": "${sourceDir}/build/cpu"
     },
     {
       "name": "linux_clang_cpu_minsizerel",
@@ -80,7 +80,7 @@
         "linux_clang_default",
         "linux_minsizerel_default"
       ],
-      "binaryDir": "${sourceDir}/build/clang_cpu/minsizerel",
+      "binaryDir": "${sourceDir}/build/cpu",
       "cacheVariables": {}
     }
   ]

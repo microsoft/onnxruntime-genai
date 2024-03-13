@@ -87,7 +87,7 @@ jobs:
 
     - name: Run tests
       run: |
-        .\build\release\cpu_default\test\Release\unit_tests.exe
+        .\build\cpu\test\Release\unit_tests.exe
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v3
