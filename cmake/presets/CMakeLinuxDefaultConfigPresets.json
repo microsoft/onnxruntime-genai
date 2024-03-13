@@ -5,10 +5,10 @@
       "name": "linux_gcc_default",
       "generator": "Ninja",
       "cacheVariables": {
-        "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
-        "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
-        "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack",
         "CMAKE_POSITION_INDEPENDENT_CODE": "ON",
+        "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-z,now",
+        "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-z,now",
+        "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-z,now",
         "USE_CUDA": "OFF"
       },
       "environment": {
@@ -22,13 +22,16 @@
       }
     },
     {
-      "name": "linux_clang_default",
+      "name": "linux_gcc_cuda_default",
       "inherits": "linux_gcc_default",
       "cacheVariables": {
-        "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
-        "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
-        "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -L\\usr\\lib64\\x86_64-unknown-linux-gnu"
-      },
+        "USE_CUDA": "ON",
+        "CMAKE_CUDA_ARCHITECTURES": "60;61;70;75;80;86"
+      }
+    },
+    {
+      "name": "linux_clang_default",
+      "inherits": "linux_gcc_default",
       "environment": {
         "CC": "clang",
         "CXX": "clang++"
@@ -36,7 +39,6 @@
     },
     {
       "name": "linux_gcc_asan_default",
-      "inherits": "linux_gcc_default",
       "cacheVariables": {
         "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -fsanitize=address",
         "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -fsanitize=address",
@@ -45,7 +47,6 @@
     },
     {
       "name": "linux_clang_asan_default",
-      "inherits": "linux_gcc_default",
       "cacheVariables": {
         "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -fsanitize=address -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
         "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -fsanitize=address -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
@@ -56,7 +57,7 @@
       "name": "linux_release_default",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe",
+        "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe ",
         "CMAKE_CXX_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -O3 -pipe"
       }
     },
@@ -77,7 +78,7 @@
       }
     },
     {
-      "name": "linux_MinSizeRel_default",
+      "name": "linux_minsizerel_default",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "MinSizeRel",
         "CMAKE_C_FLAGS": "-DNDEBUG -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -Os -pipe -ggdb3",

@@ -262,6 +262,11 @@ void Model::CreateSessionOptions() {
     ort_options.SetLogSeverityLevel(options.log_severity_level.value());
   }
 
+  if (options.enable_profiling.has_value()) {
+    std::filesystem::path profile_file_prefix{options.enable_profiling.value()};
+    ort_options.EnableProfiling(profile_file_prefix.c_str());
+  }
+
   for (auto& provider_options : options.provider_options) {
     if (provider_options.name == "cuda") {
       auto ort_provider_options = OrtCUDAProviderOptionsV2::Create();

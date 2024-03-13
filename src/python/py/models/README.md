@@ -1,6 +1,6 @@
 # ONNX Runtime GenAI Model Builder
 
-This folder contains the model builder tool, which greatly accelerates creating optimized and quantized ONNX models that run with ONNX Runtime GenAI.
+This folder contains the model builder for quickly creating optimized and quantized ONNX models within a few minutes that run with ONNX Runtime GenAI.
 
 # Contents
  - [Current Support](#current-support)
@@ -11,6 +11,7 @@ This folder contains the model builder tool, which greatly accelerates creating 
    - [Customized or Finetuned PyTorch Model](#customized-or-finetuned-pytorch-model)
    - [GGUF Model](#gguf-model)
    - [Extra Options](#extra-options)
+   - [Config Only](#config-only)
    - [Unit Testing Models](#unit-testing-models)
      - [Option 1: Use the model builder tool directly](#option-1-use-the-model-builder-tool-directly)
      - [Option 2: Edit the config.json file](#option-2-edit-the-configjson-file-on-disk-and-then-run-the-model-builder-tool)
@@ -22,6 +23,8 @@ The tool currently supports the following model architectures.
 - LLaMA
 - Mistral
 - Phi
+
+It is intended for supporting the latest, popular state-of-the-art models.
 
 ## Usage
 
@@ -86,6 +89,18 @@ python3 builder.py -m model_name -o path_to_output_folder -p precision -e execut
 ```
 To see all available options through `--extra_options`, please use the `help` commands in the `Full Usage` section above.
 
+### Config Only
+This scenario is for when you already have your optimized and/or quantized ONNX model and you need to create the config files to run with ONNX Runtime GenAI.
+```
+# From wheel:
+python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options config_only=true
+
+# From source:
+python3 builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options config_only=true
+```
+
+Afterwards, please open the `genai_config.json` file in the output folder and modify the fields as needed for your model. You should store your ONNX model in the output folder as well.
+
 ### Unit Testing Models
 This scenario is where your PyTorch model is already downloaded locally (either in the default Hugging Face cache directory or in a local folder on disk). If it is not already downloaded locally, here is an example of how you can download it.
 
@@ -125,3 +140,7 @@ python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_fold
 # From source:
 python3 builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_where_hf_files_are_saved
 ```
+
+## Design
+
+Please read the [design document](DESIGN.md) for more details and for how to contribute.

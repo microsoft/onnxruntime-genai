@@ -45,6 +45,7 @@ struct PositionMetadata {
   std::array<int64_t, 0> total_sequence_length_shape_{};  // scalar
   std::unique_ptr<OrtValue> total_sequence_length_;
 
+  std::unique_ptr<OrtValue> position_ids_next_;  // Replaces position_ids_ after the first Run() call
   std::vector<int32_t> initial_sequence_lengths_;
 
   // Used for decoding runs with cuda graphs.

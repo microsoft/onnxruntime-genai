@@ -58,7 +58,7 @@ def main(args):
 
     # Get tokenizer, and model
     if args.verbose: print(f"Loading model... ")
-    model=og.Model(f'{args.input_folder}', og.DeviceType.CPU if args.execution_provider == 'cpu' else og.DeviceType.CUDA)
+    model=og.Model(f'{args.input_folder}')
     if args.verbose: print("Model loaded")
     tokenizer = og.Tokenizer(model)
 
@@ -191,7 +191,6 @@ if __name__ == "__main__":
     parser.add_argument('-k', '--top_k', type=int, default=50, help='Top k tokens to sample from')
     parser.add_argument('-p', '--top_p', type=float, default=1.0, help='Top p probability to sample with')
     parser.add_argument('-o', '--output', type=str, default='genai_e2e', help='Output CSV file name or path (with .csv extension)')
-    parser.add_argument('-ep', '--execution_provider', type=str, choices=['cpu', 'cuda'], default='cpu', help='Execution provider (device) to use, default is CPU, use CUDA for GPU')
     parser.add_argument('-v', '--verbose', action='store_true', help='Print extra information')
     parser.add_argument('-mo', '--print_model_output', action='store_true', help='Print model output')
     args = parser.parse_args()

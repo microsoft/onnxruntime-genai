@@ -14,9 +14,8 @@ PositionMetadata::PositionMetadata(const Model& model, State& state, RoamingArra
 
   std::array<int64_t, 2> shape{state_.params_.batch_size, state_.params_.sequence_length};  // Only batch_size initially, as we haven't expanded over the beams yet
   position_ids_ = OrtValue::CreateTensor(model.allocator_cpu_, shape, type_);
+  position_ids_next_ = OrtValue::CreateTensor(model.allocator_cpu_, std::array<int64_t, 2>{shape[0], 1}, type_);
   attention_mask_ = OrtValue::CreateTensor(model.allocator_cpu_, shape, type_);
-
-  initial_sequence_lengths_.resize(state_.params_.BatchBeamSize());
 
   if (type_ == Ort::TypeToTensorType<int32_t>::type)
     InitializeTensors<int32_t>(shape, sequence_lengths_unk);
@@ -24,6 +23,7 @@ PositionMetadata::PositionMetadata(const Model& model, State& state, RoamingArra
     InitializeTensors<int64_t>(shape, sequence_lengths_unk);
 
   position_ids_ = model_.ExpandInputs(position_ids_, state_.params_.search.num_beams);
+  position_ids_next_ = model_.ExpandInputs(position_ids_next_, state_.params_.search.num_beams);
   attention_mask_ = model_.ExpandInputs(attention_mask_, state_.params_.search.num_beams);
   shape[0] *= state_.params_.search.num_beams;
   position_ids_shape_ = shape;
@@ -73,35 +73,28 @@ void PositionMetadata::AddTotalSequenceLength() {
 
 void PositionMetadata::UpdatePositionIDs(int current_length) {
   // Reallocate position_ids for the 2nd and onward shape
-  if (is_first_posid_update_) {
+  if (position_ids_next_) {
     position_ids_shape_[1] = 1;
     if (!sb_position_ids_) {
-      position_ids_ = OrtValue::CreateTensor(*model_.allocator_device_, position_ids_shape_, type_);
+      position_ids_ = std::move(position_ids_next_);
     } else {
       position_ids_ = sb_position_ids_->GetOrCreateTensor(position_ids_shape_, type_);
+      assert(model_.device_type_ == DeviceType::CUDA);
+      if (type_ == Ort::TypeToTensorType<int32_t>::type) {
+        cudaMemcpyAsync(position_ids_->GetTensorMutableRawData(),
+                        position_ids_next_->GetTensorData<int32_t>(),
+                        sizeof(int32_t) * position_ids_shape_[0],
+                        cudaMemcpyDeviceToDevice,
+                        model_.cuda_stream_);
+      } else {
+        cudaMemcpyAsync(position_ids_->GetTensorMutableRawData(),
+                        position_ids_next_->GetTensorData<int64_t>(),
+                        sizeof(int64_t) * position_ids_shape_[0],
+                        cudaMemcpyDeviceToDevice,
+                        model_.cuda_stream_);
+      }
     }
     state_.inputs_[posid_input_index_] = position_ids_.get();
-
-    // Copy the initial values over to the device specific tensor
-    switch (model_.device_type_) {
-      case DeviceType::CPU:
-        if (type_ == Ort::TypeToTensorType<int32_t>::type)
-          std::copy(initial_sequence_lengths_.begin(), initial_sequence_lengths_.end(), position_ids_->GetTensorMutableData<int32_t>());
-        else
-          std::copy(initial_sequence_lengths_.begin(), initial_sequence_lengths_.end(), position_ids_->GetTensorMutableData<int64_t>());
-        break;
-#if USE_CUDA
-      case DeviceType::CUDA:
-        if (type_ == Ort::TypeToTensorType<int32_t>::type)
-          cudaMemcpyAsync(position_ids_->GetTensorMutableRawData(), initial_sequence_lengths_.data(), sizeof(int32_t) * initial_sequence_lengths_.size(), cudaMemcpyHostToDevice, model_.cuda_stream_);
-        else
-          cudaMemcpyAsync(position_ids_->GetTensorMutableRawData(), initial_sequence_lengths_.data(), sizeof(int64_t) * initial_sequence_lengths_.size(), cudaMemcpyHostToDevice, model_.cuda_stream_);
-        break;
-#endif
-      default:
-        throw std::runtime_error("PositionIDs::Update - Unsupported device type");
-    }
-    is_first_posid_update_ = false;
   } else {  // Just incrementing existing position IDs
     switch (model_.device_type_) {
       case DeviceType::CPU: {
@@ -187,6 +180,7 @@ void PositionMetadata::InitializeTensors(std::array<int64_t, 2> shape, cpu_span<
   // Set position id to be 0 for pad tokens, and accumulated sum of mask in a batch for other tokens
   auto* mask_data = attention_mask_->GetTensorMutableData<T>();
   auto* position_data = position_ids_->GetTensorMutableData<T>();
+  auto* position_data_next = position_ids_next_->GetTensorMutableData<T>();
   const auto* word_id = state_.params_.input_ids.data();
   auto* mask = mask_data;
   auto* position = position_data;
@@ -202,6 +196,7 @@ void PositionMetadata::InitializeTensors(std::array<int64_t, 2> shape, cpu_span<
       }
     }
 
+    position_data_next[i] = abs_position;
     for (int k = 0; k < state_.params_.search.num_beams; k++) {
       sequence_lengths[i * state_.params_.search.num_beams + k] = static_cast<int32_t>(abs_position);
       initial_sequence_lengths_[i * state_.params_.search.num_beams + k] = static_cast<int32_t>(abs_position);
