@@ -15,7 +15,7 @@ steps:
 - task: onebranch.pipeline.tsaoptions@1
   displayName: 'OneBranch TSAOptions'
   inputs:
-    tsaConfigFilePath: '$(Build.Repository.LocalPath)\.config\tsaoptions.json'
+    tsaConfigFilePath: 'onnxruntime-genai\.config\tsaoptions.json'
     appendSourceBranchName: false
 
 - template: utils/set-nightly-build-option-variable.yml
@@ -34,13 +34,13 @@ steps:
     archiveType: 'zip'
 
 - powershell: |
-    azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" '$(Build.Repository.LocalPath)\cuda_sdk'
+    azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" 'cuda_sdk'
   displayName: 'Download CUDA'
   condition: eq(variables['ep'], 'cuda')
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
-    cmake --preset windows_$(arch)_$(ep)_release -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)'
+    cmake --preset windows_$(arch)_$(ep)_release -T cuda='cuda_sdk\v$(cuda_version)'
   displayName: 'Configure CMake C API with CUDA'
   condition: eq(variables['ep'], 'cuda')
   workingDirectory: '$(Build.Repository.LocalPath)'

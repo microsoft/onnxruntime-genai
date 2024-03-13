@@ -38,7 +38,7 @@ steps:
       --context tools/ci_build/github/linux/docker/manylinux \
       --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
       --container-registry onnxruntimebuildcache \
-      --manylinux-src $(Build.SourcesDirectory)/manylinux \
+      --manylinux-src manylinux \
       --multiple_repos \
       --repository onnxruntime$(ep)build$(arch)
   displayName: 'Get Docker Image'
@@ -61,7 +61,7 @@ steps:
   - task: BinSkim@4
     displayName: 'Run BinSkim'
     inputs:
-      AnalyzeTargetGlob: '$(Build.Repository.LocalPath)/onnxruntime-genai/build/**/*genai.so'
+      AnalyzeTargetGlob: '$(Build.Repository.LocalPath)/build/**/*genai.so'
     continueOnError: true
   - template: utils/capi-archive.yml
     parameters:
