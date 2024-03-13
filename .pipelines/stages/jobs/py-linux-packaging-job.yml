@@ -56,7 +56,6 @@ jobs:
   - template: steps/capi-linux-step.yml
     parameters:
       target: 'python'
-      genai_src: '$(Build.SourcesDirectory)/onnxruntime-genai'
 
   - task: PublishBuildArtifacts@1
     displayName: 'Publish Artifact: ONNXRuntime python wheel'
