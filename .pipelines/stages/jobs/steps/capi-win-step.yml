@@ -10,6 +10,7 @@ steps:
   condition: or( eq (variables['ep'], ''), eq (variables['arch'], ''))
 
 - checkout: self
+  path: onnxruntime-genai
   clean: true
   submodules: recursive
 - task: onebranch.pipeline.tsaoptions@1
