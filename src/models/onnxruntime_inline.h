@@ -151,10 +151,15 @@ inline std::unique_ptr<Allocator> Allocator::Create(const OrtSession& sess, cons
 }
 
 inline void SetCurrentGpuDeviceId(int device_id) {
+#ifdef __APPLE__
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunused-result"
+#endif
   api->SetCurrentGpuDeviceId(device_id);
+#ifdef __APPLE__
 #pragma clang diagnostic pop
+#endif
+
 }
 
 inline int GetCurrentGpuDeviceId() {
