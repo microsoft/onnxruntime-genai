@@ -159,7 +159,6 @@ inline void SetCurrentGpuDeviceId(int device_id) {
 #ifdef __APPLE__
 #pragma clang diagnostic pop
 #endif
-
 }
 
 inline int GetCurrentGpuDeviceId() {
