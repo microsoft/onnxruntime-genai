@@ -21,16 +21,13 @@ target_link_directories(python PRIVATE ${ORT_LIB_DIR})
 target_link_libraries(python PRIVATE onnxruntime-genai-static ${ONNXRUNTIME_LIB})
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set_property(TARGET python APPEND_STRING PROPERTY LINK_FLAGS " -Xlinker -rpath=\\$ORIGIN")
+  target_link_libraries(python PRIVATE stdc++fs)
 endif()
 set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
 
 if(CMAKE_GENERATOR_TOOLSET MATCHES "Visual Studio")
   target_link_options(python PRIVATE "/CETCOMPAT")
   target_compile_options(python PRIVATE "/sdl" PRIVATE "/Qspectre")
-endif()
-
-if(NOT WIN32)
-   target_link_libraries(python PRIVATE stdc++fs)
 endif()
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
