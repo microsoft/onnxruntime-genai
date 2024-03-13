@@ -41,11 +41,16 @@ jobs:
         value: 'onnxruntime-win-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}'
       ${{ else }}:
         value: 'onnxruntime-win-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
-  - name: ext
+  - name: genai_nuget_ext
     ${{ if eq(parameters.ep, 'cpu') }}:
       value: ''
     ${{ if eq(parameters.ep, 'cuda') }}:
-      value: 'Gpu'
+      value: '.Cuda'
+  - name: ort_nuget_ext
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      value: ''
+    ${{ if eq(parameters.ep, 'cuda') }}:
+      value: '.Gpu'
   workspace:
     clean: all
   steps:

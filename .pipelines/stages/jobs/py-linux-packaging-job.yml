@@ -35,6 +35,8 @@ jobs:
   # The build machine pool doesn't have dotnet, so it can't run CG.
   - name: skipComponentGovernanceDetection
     value: true
+  - name: arch
+    value: ${{ parameters.arch }}
   - name: ep
     value: ${{ parameters.ep }}
   - name: cuda_version
