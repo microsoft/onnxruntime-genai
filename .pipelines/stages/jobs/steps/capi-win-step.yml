@@ -16,7 +16,7 @@ steps:
 - task: onebranch.pipeline.tsaoptions@1
   displayName: 'OneBranch TSAOptions'
   inputs:
-    tsaConfigFilePath: 'onnxruntime-genai\.config\tsaoptions.json'
+    tsaConfigFilePath: '$(Build.Repository.LocalPath)\.config\tsaoptions.json'
     appendSourceBranchName: false
 
 - template: utils/set-nightly-build-option-variable.yml
