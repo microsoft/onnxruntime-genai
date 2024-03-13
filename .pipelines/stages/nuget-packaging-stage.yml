@@ -1,11 +1,11 @@
 parameters:
 - name: enable_win_cpu
   type: boolean
-- name: enable_win_gpu
+- name: enable_win_cuda
   type: boolean
 - name: enable_linux_cpu
   type: boolean
-- name: enable_linux_gpu
+- name: enable_linux_cuda
   type: boolean
 - name: ort_version
   type: string
@@ -23,7 +23,7 @@ stages:
         arch: 'x64'
         ep: 'cpu'
         ort_version: ${{ parameters.ort_version }}
-  - ${{ if eq(parameters.enable_win_gpu, true) }}:
+  - ${{ if eq(parameters.enable_win_cuda, true) }}:
     - template: jobs/nuget-win-packaging-job.yml
       parameters:
         arch: 'x64'
@@ -37,7 +37,7 @@ stages:
         arch: 'x64'
         ep: 'cpu'
         ort_version: ${{ parameters.ort_version }}
-  - ${{ if eq(parameters.enable_linux_gpu, true) }}:
+  - ${{ if eq(parameters.enable_linux_cuda, true) }}:
     - template: jobs/nuget-linux-packaging-job.yml
       parameters:
         arch: 'x64'
