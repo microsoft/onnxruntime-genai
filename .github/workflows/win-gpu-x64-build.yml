@@ -8,7 +8,7 @@ concurrency:
 env:
   AZCOPY_AUTO_LOGIN_TYPE: MSI
   AZCOPY_MSI_CLIENT_ID: 63b63039-6328-442f-954b-5a64d124e5b4
-  ort_dir: "onnxruntime-win-x64-gpu-1.17.1"
+  ort_dir: "${{ github.workspace }}\\onnxruntime-win-x64-gpu-1.17.1"
   ort_zip: "onnxruntime-win-x64-gpu-1.17.1.zip"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/onnxruntime-win-x64-gpu-1.17.1.zip"
   cuda_dir: "${{ github.workspace }}\\cuda_sdk"
@@ -37,22 +37,29 @@ jobs:
       with:
         path: ${{ env.cuda_dir }}
         key: ${{ runner.os }}-cuda-${{ env.cuda_version }}
-        restore-keys: |
-          ${{ runner.os }}-cuda-${{ env.cuda_version }}
 
     - name: Download cuda
       if: steps.cache-cuda.outputs.cache-hit != 'true'
       run: |
         azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v${{ env.cuda_version }}" ${{ env.cuda_dir}}
 
+    - name: Cache OnnxRuntime
+      uses: actions/cache@v4
+      id: cache-ort
+      with:
+        path: ${{ env.ort_dir }}
+        key: ${{ runner.os }}-ort-${{ env.ort_dir }}
     - name: Download OnnxRuntime
+      if: steps.cache-ort.outputs.cache-hit != 'true'
       run: |
         Invoke-WebRequest -Uri $env:ort_url -OutFile $env:ort_zip
 
     - name: Unzip OnnxRuntime
+      if: steps.cache-ort.outputs.cache-hit != 'true'
       run: |
         Expand-Archive $env:ort_zip -DestinationPath .
         Remove-Item -Path $env:ort_zip
+
     - name: Rename OnnxRuntime to ort
       run: |
         Rename-Item -Path $env:ort_dir -NewName ort
