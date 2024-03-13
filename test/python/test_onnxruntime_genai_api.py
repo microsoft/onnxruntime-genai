@@ -13,11 +13,15 @@ import pytest
 
 @pytest.mark.parametrize(
     "relative_model_path",
-    [
-        Path("hf-internal-testing") / "tiny-random-gpt2-fp32",
-        Path("hf-internal-testing") / "tiny-random-gpt2-fp32-cuda",
-        Path("hf-internal-testing") / "tiny-random-gpt2-fp16-cuda",
-    ],
+    (
+        [
+            Path("hf-internal-testing") / "tiny-random-gpt2-fp32",
+            Path("hf-internal-testing") / "tiny-random-gpt2-fp32-cuda",
+            Path("hf-internal-testing") / "tiny-random-gpt2-fp16-cuda",
+        ]
+        if og.is_cuda_available()
+        else [Path("hf-internal-testing") / "tiny-random-gpt2-fp32"]
+    ),
 )
 def test_greedy_search(test_data_path, relative_model_path):
     model_path = os.fspath(Path(test_data_path) / relative_model_path)
