@@ -31,7 +31,17 @@ jobs:
         python-version: '3.11.x'
         architecture: 'x64'
 
+    - name: Cache Cuda SDK
+      uses: actions/cache@v4
+      id: cache-cuda
+      with:
+        path: ${{ env.cuda_dir }}
+        key: ${{ runner.os }}-cuda-${{ env.cuda_version }}
+        restore-keys: |
+          ${{ runner.os }}-cuda-${{ env.cuda_version }}
+
     - name: Download cuda
+      if: steps.cache-cuda.outputs.cache-hit != 'true'
       run: |
         azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v${{ env.cuda_version }}" ${{ env.cuda_dir}}
 
