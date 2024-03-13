@@ -14,13 +14,13 @@ steps:
     userRepository: 'microsoft/onnxruntime'
     defaultVersionType: 'specificTag'
     version: 'v$(ort_version)'
-    itemPattern: '$(ort_filename)*'
+    itemPattern: '$(ort_filename).${{ parameters.archiveType }}'
     downloadPath: '$(Build.Repository.LocalPath)'
   displayName: Download $(ort_filename)
 
 - task: ExtractFiles@1
   inputs:
-    archiveFilePatterns: '**/*.${{ parameters.archiveType }}'
+    archiveFilePatterns: '$(Build.Repository.LocalPath)/$(ort_filename).${{ parameters.archiveType }}'
     destinationFolder: '$(Build.Repository.LocalPath)'
     cleanDestinationFolder: false
     overwriteExistingFiles: true
