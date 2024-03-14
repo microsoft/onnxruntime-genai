@@ -20,6 +20,15 @@ Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> s
       model_{model} {
   auto& inputs = const_cast<GeneratorParams::Whisper&>(std::get<GeneratorParams::Whisper>(params.inputs));
 
+#if USE_CUDA
+  // Convert input_features from float32 to float16 if necessary
+  if (model_.device_type_ == DeviceType::CUDA && model_.session_info_->GetInputDataType("encoder_input_ids") == Ort::TypeToTensorType<Ort::Float16_t>::type) {
+    std::unique_ptr<OrtValue> input_features_32;
+    ConvertFp32ToFp16(*model_.allocator_device_, model_.cuda_stream_, *inputs.input_features, input_features_32);
+    inputs.input_features = std::move(input_features_32);
+  }
+#endif
+
   auto encoder_input_ids = model_.ExpandInputs(inputs.input_features, params_.search.num_beams);
   encoder_hidden_states_ = OrtValue::CreateTensor<float>(*model_.allocator_device_, std::array<int64_t, 3>{decoder_input_ids_.GetShape()[0], 1500, 384});
 

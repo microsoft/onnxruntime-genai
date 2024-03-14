@@ -336,6 +336,28 @@ void ConvertFp16ToFp32(OrtAllocator& allocator, cudaStream_t stream, OrtValue& i
 
   cuda::LaunchFp16ToFp32(fp16, fp32, count, stream);
 }
+
+void ConvertFp32ToFp16(OrtAllocator& allocator, cudaStream_t stream, OrtValue& in, std::unique_ptr<OrtValue>& p_out) {
+  auto shape_info = in.GetTensorTypeAndShapeInfo();
+  auto shape = shape_info->GetShape();
+  assert(shape_info->GetElementType() == Ort::TypeToTensorType<float>::type);
+
+  bool allocate_p_out = p_out == nullptr;
+  if (p_out) {
+    auto out_shape_info = p_out->GetTensorTypeAndShapeInfo();
+    auto out_shape = out_shape_info->GetShape();
+    allocate_p_out = shape != out_shape;
+  }
+
+  if (allocate_p_out)
+    p_out = OrtValue::CreateTensor<Ort::Float16_t>(allocator, shape);
+
+  int count = static_cast<int>(shape_info->GetElementCount());
+  auto* fp32 = in.GetTensorData<float>();
+  auto* fp16 = p_out->GetTensorMutableData<uint16_t>();
+
+  cuda::LaunchFp32ToFp16(fp32, fp16, count, stream);
+}
 #endif
 
 size_t GetOrtTypeSize(ONNXTensorElementDataType type) {
