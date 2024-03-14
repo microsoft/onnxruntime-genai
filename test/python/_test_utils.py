@@ -50,3 +50,34 @@ def run_subprocess(
             "Subprocess completed. Return code=" + str(completed_process.returncode)
         )
     return completed_process
+
+
+def download_models(download_path, device):
+    # python -m onnxruntime_genai.models.builder -m <model_name> -p int4 -e cpu -o <download_path> --extra_options num_hidden_layers=1
+    model_names = {
+        "cpu": {
+            "phi-2": "microsoft/phi-2",
+        },
+        "cuda": {
+            "phi-2": "microsoft/phi-2",
+        },
+    }
+    for model_name, model_identifier in model_names[device].items():
+        model_path = os.path.join(download_path, device, model_name)
+        if not os.path.exists(model_path):
+            command = [
+                sys.executable,
+                "-m",
+                "onnxruntime_genai.models.builder",
+                "-m",
+                model_identifier,
+                "-p",
+                "int4",
+                "-e",
+                device,
+                "-o",
+                model_path,
+                "--extra_options",
+                "num_hidden_layers=1",
+            ]
+            run_subprocess(command).check_returncode()

@@ -1,0 +1,95 @@
+parameters:
+- name: arch
+  type: string
+- name: ort_version
+  type: string
+- name: cuda_version
+  type: string
+  default: ''
+- name: ep
+  type: string
+jobs:
+- job: Windows_${{ parameters.ep }}_${{ parameters.arch }}_Wheels
+  pool: 'onnxruntime-Win-CPU-2022'
+  strategy:
+    matrix:
+      Python38_x64:
+        PythonVersion: '3.8'
+      Python39_x64:
+        PythonVersion: '3.9'
+      Python310_x64:
+        PythonVersion: '3.10'
+      Python311_x64:
+        PythonVersion: '3.11'
+      Python312_x64:
+        PythonVersion: '3.12'
+  timeoutInMinutes: 180
+  variables:
+  - name: ep
+    value: ${{ parameters.ep }}
+  - name: cuda_version
+    value: ${{ parameters.cuda_version }}
+  - name: arch
+    value: ${{ parameters.arch }}
+  - name: ort_version
+    value: ${{ parameters.ort_version }}
+  - name: ort_filename
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      value: 'onnxruntime-win-${{ parameters.arch }}-${{ parameters.ort_version }}'
+    ${{ else}}:
+      ${{if eq(parameters.cuda_version, '11.8') }}:
+        value: 'onnxruntime-win-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}'
+      ${{ else }}:
+        value: 'onnxruntime-win-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
+  workspace:
+    clean: all
+  steps:
+
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: $(PythonVersion)
+      addToPath: true
+      architecture: $(arch)
+
+  - task: PythonScript@0
+    inputs:
+      scriptSource: inline
+      script: |
+        import sys
+        import subprocess
+        subprocess.call(['pip', 'install', '-q', 'setuptools', 'wheel', 'build', 'packaging'])
+      workingDirectory: '$(Build.BinariesDirectory)'
+      displayName: 'Install python modules'
+
+  - template: steps/capi-win-step.yml
+    parameters:
+      target: 'python'
+#      ep: ${{ parameters.ep }}
+
+  - template: steps/compliant/win-esrp-dll-step.yml
+    parameters:
+      FolderPath: '$(Build.Repository.LocalPath)\build\release\$(ep)_default\wheel\onnxruntime_genai'
+      DisplayName: 'ESRP - PYD Sign'
+      DoEsrp: true
+      Pattern: '*.pyd'
+
+  - powershell: |
+      cmake --build --preset windows_$(arch)_$(ep)_release --parallel --PyPackageBuild
+    displayName: 'Build Python Wheel'
+
+  - powershell: |
+      Get-ChildItem -Path $(Build.Repository.LocalPath) -Recurse
+
+  - task: CopyFiles@2
+    displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
+    inputs:
+      SourceFolder: '$(Build.Repository.LocalPath)\build\release\$(ep)_default\wheel'
+      Contents: '*.whl'
+      TargetFolder: '$(Build.ArtifactStagingDirectory)'
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Artifact: ONNXRuntime Genai python wheel'
+    inputs:
+      ArtifactName: onnxruntime-genai-win-$(ep)-$(arch)
+
+  - template: steps/compliant-and-cleanup-step.yml

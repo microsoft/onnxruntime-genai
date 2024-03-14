@@ -10,9 +10,6 @@ env:
 
 jobs:
   linux_cpu_x64:
-    strategy:
-      matrix:
-        compiler: [ gcc, clang ]
     runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU" ]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
@@ -37,12 +34,12 @@ jobs:
         run: |
           set -e -x
           rm -rf build
-          cmake --preset linux_${{ matrix.compiler }}_cpu_release
-          cmake --build --preset linux_${{ matrix.compiler }}_cpu_release
+          cmake --preset linux_gcc_cpu_release
+          cmake --build --preset linux_gcc_cpu_release
 
       - name: Install the python wheel and test dependencies
         run: |
-          python3 -m pip install build/${{ matrix.compiler }}_cpu/release/wheel/onnxruntime_genai*.whl
+          python3 -m pip install build/gcc_cpu/release/wheel/onnxruntime_genai*.whl
           python3 -m pip install -r test/python/requirements-nightly-cpu.txt --user
 
       - name: Get HuggingFace Token
@@ -52,6 +49,8 @@ jobs:
           echo "::add-mask::$HF_TOKEN"
           echo "HF_TOKEN=$HF_TOKEN" >> $GITHUB_ENV
 
+      # This will also download all the test models to the test/test_models directory
+      # These models are used by the python tests as well as C#, C++ and others.
       - name: Run the python tests
         run: |
           python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models
@@ -60,16 +59,9 @@ jobs:
         if: always()
         continue-on-error: true
         run: |
-          ls -l ${{ github.workspace }}/build/${{ matrix.compiler }}_cpu/release
+          ls -l ${{ github.workspace }}/build/gcc_cpu/release
 
       - name: Run tests
         run: |
           set -e -x
-          ./build/${{ matrix.compiler }}_cpu/release/test/unit_tests
-
-      - name: Upload Build Artifacts
-        if: ${{ matrix.compiler == 'gcc'}}
-        uses: actions/upload-artifact@v3
-        with:
-          name: onnxruntime-genai-linux-cpu-x64
-          path: ${{ github.workspace }}/build/**/*.a
+          ./build/gcc_cpu/release/test/unit_tests

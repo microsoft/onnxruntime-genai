@@ -10,6 +10,7 @@
 #include "span.h"
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <queue>
 #include <set>
 #include <stdexcept>
@@ -21,6 +22,9 @@
 #if USE_CUDA
 #include <cuda_runtime.h>
 #include "cuda_common.h"
+#else
+// If we don't include cuda_runtime.h, we define this to avoid lots of extra #ifdefs
+using cudaStream_t = void*;
 #endif
 
 #include "smartptrs.h"
@@ -35,27 +39,10 @@ struct Search;
 // OgaSequences are a vector of int32 vectors
 using TokenSequences = std::vector<std::vector<int32_t>>;
 
-// If we don't include cuda_runtime.h, we define this to avoid lots of extra #ifdefs
-#ifndef USE_CUDA
-using cudaStream_t = void*;
-#endif
-
 enum struct DeviceType {
   CPU,
   CUDA,
 };
-
-struct OrtCPUProviderOptions {};  // Stub so that ProviderOptions isn't empty without cuda
-
-using ProviderOptions = std::variant<
-    OrtCPUProviderOptions
-#if USE_CUDA
-    ,
-    OrtCUDAProviderOptions
-#endif
-    >;
-
-ProviderOptions GetDefaultProviderOptions(DeviceType device_type);
 
 struct GeneratorParams {
   GeneratorParams() = default;  // This constructor is only used if doing a custom model handler vs built-in
@@ -112,7 +99,7 @@ struct Generator {
   bool IsDone() const;
   void ComputeLogits();
   void GenerateNextToken_TopK_TopP(int top_k, float top_p, float temperature);
-  void GenerateNextToken_TopP(float p, float temperature) { GenerateNextToken_TopK_TopP(1, p, temperature); }
+  void GenerateNextToken_TopP(float p, float temperature) { GenerateNextToken_TopK_TopP(0, p, temperature); }
   void GenerateNextToken_TopK(int k, float temperature) { GenerateNextToken_TopK_TopP(k, 0.0f, temperature); }
   void GenerateNextToken_Top() { GenerateNextToken_TopK_TopP(1, 0.0f, 0.0f); }
   void GenerateNextToken();
@@ -125,7 +112,7 @@ struct Generator {
   bool computed_logits_{};  // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
 };
 
-std::unique_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const ProviderOptions* provider_options = nullptr);
+std::unique_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path);
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params);
 std::vector<std::vector<int32_t>> Generate(const Model& model, const GeneratorParams& params);  // Uses CreateGenerator and a simple loop to return the entire sequence
 

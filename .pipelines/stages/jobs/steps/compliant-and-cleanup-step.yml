@@ -10,10 +10,10 @@ steps:
   condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
   inputs:
     GdnPublishTsaOnboard: false
-    GdnPublishTsaConfigFile: '$(Build.sourcesDirectory)\.config\tsaoptions.json'
+    GdnPublishTsaConfigFile: '$(Build.Repository.LocalPath)\.config\tsaoptions.json'
   continueOnError: true
 
-- template: component-governance-component-detection-step.yml
+- template: compliant/component-governance-component-detection-step.yml
   parameters:
     condition: 'succeeded'
 

@@ -47,24 +47,6 @@ GeneratorParams::GeneratorParams(const Model& model)
       cuda_stream{model.cuda_stream_} {
 }
 
-ProviderOptions GetDefaultProviderOptions([[maybe_unused]] DeviceType device_type) {
-  ProviderOptions options;
-  if (device_type == DeviceType::CUDA) {
-#if USE_CUDA
-    cudaStream_t cuda_stream;
-    cudaStreamCreate(&cuda_stream);
-
-    auto& cuda_options = options.emplace<OrtCUDAProviderOptions>();
-    cuda_options.has_user_compute_stream = true;
-    cuda_options.user_compute_stream = cuda_stream;
-#else
-    throw std::runtime_error("Trying to use cuda with the non cuda version of onnxruntime-genai");
-#endif
-  }
-
-  return options;
-}
-
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params) {
   return std::make_unique<Generator>(model, params);
 }
@@ -118,7 +100,7 @@ void Generator::GenerateNextToken_TopK_TopP(int top_k, float top_p, float temper
     throw std::runtime_error("Must call ComputeLogits before GenerateNextToken*");
   computed_logits_ = false;
 
-  if (top_p == 0.0f && top_k == 1) {
+  if (top_k == 1) {
     search_->SelectTop();
     return;
   }
@@ -131,13 +113,16 @@ void Generator::GenerateNextToken_TopK_TopP(int top_k, float top_p, float temper
   if (top_p < 0.0f || top_p > 1.0f)
     throw std::runtime_error("top_p must be between 0.0 and 1.0");
   if (top_k < 0)
-    throw std::runtime_error("top_k must be 1 or greater");
+    throw std::runtime_error("top_k must be 0 or greater");
 
   if (top_p > 0.0f && top_k > 1) {
     search_->SampleTopPAndK(top_p, top_k, temperature);
   } else if (top_k > 1) {
     search_->SampleTopK(top_k, temperature);
   } else {
+    assert(top_k == 0);
+    if (top_p == 0.0f)
+      throw std::runtime_error("top_k and top_p cannot both be zero");
     search_->SampleTopP(top_p, temperature);
   }
 }

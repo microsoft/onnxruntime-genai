@@ -1,0 +1,81 @@
+parameters:
+- name: target
+  type: string
+  default: 'onnxruntime-genai'
+steps:
+- bash: |
+    echo "##[error]Error: ep and arch are not set"
+    exit 1
+  displayName: 'Check if variables arch and ep are set'
+  condition: or( eq (variables['ep'], ''), eq (variables['arch'], ''))
+
+- checkout: self
+  path: onnxruntime-genai
+  clean: true
+  submodules: recursive
+- task: onebranch.pipeline.tsaoptions@1
+  displayName: 'OneBranch TSAOptions'
+  inputs:
+    tsaConfigFilePath: '$(Build.Repository.LocalPath)\.config\tsaoptions.json'
+    appendSourceBranchName: false
+
+- template: utils/set-nightly-build-option-variable.yml
+
+- script: |
+    echo "arch=$(arch)"
+    echo "ort_version=$(ort_version)"
+    echo "ep=$(ep)"
+    echo "cuda_version=$(cuda_version)"
+    echo "target=${{ parameters.target }}"
+    echo "ort_filename=$(ort_filename)"
+  displayName: 'Print Parameters'
+
+- template: utils/download-ort.yml
+  parameters:
+    archiveType: 'zip'
+
+- powershell: |
+    azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" 'cuda_sdk'
+  displayName: 'Download CUDA'
+  condition: eq(variables['ep'], 'cuda')
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
+- powershell: |
+    cmake --preset windows_$(arch)_$(ep)_release -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)'
+  displayName: 'Configure CMake C API with CUDA'
+  condition: eq(variables['ep'], 'cuda')
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
+- powershell: |
+    cmake --preset windows_$(arch)_$(ep)_release
+  displayName: 'Configure CMake C API without CUDA'
+  condition: ne(variables['ep'], 'cuda')
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
+- powershell: |
+    cmake --build --preset windows_$(arch)_$(ep)_release --parallel --target ${{ parameters.target }}
+  displayName: 'Build C API'
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
+- ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
+  - template: compliant/win-esrp-dll-step.yml
+    parameters:
+      FolderPath: '$(buildDir)'
+      DisplayName: 'ESRP - Sign C++ dlls'
+
+  - task: BinSkim@4
+    displayName: 'Run BinSkim'
+    inputs:
+      AnalyzeTargetGlob: '$(Build.Repository.LocalPath)\**\*genai.dll'
+    continueOnError: true
+
+  - template: utils/capi-archive.yml
+    parameters:
+      archiveType: zip
+
+- ${{ if eq(parameters.target, 'python') }}:
+  - task: BinSkim@4
+    displayName: 'Run BinSkim'
+    inputs:
+      AnalyzeTargetGlob: '$(Build.Repository.LocalPath)\**\*.pyd'
+    continueOnError: true

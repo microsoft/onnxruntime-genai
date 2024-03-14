@@ -29,7 +29,7 @@ class Model:
         self.window_size = config.sliding_window if hasattr(config, "sliding_window") else -1  # default is -1 in GroupQueryAttention kernel
         self.intermediate_size = config.intermediate_size
         self.hidden_size = config.hidden_size
-        self.num_kv_heads = config.num_key_value_heads
+        self.num_kv_heads = config.num_key_value_heads if hasattr(config, "num_key_value_heads") else config.num_attention_heads
         self.num_attn_heads = config.num_attention_heads
         self.head_size = config.head_dim if hasattr(config, "head_dim") else config.hidden_size // config.num_attention_heads
         self.num_layers = int(extra_options["num_hidden_layers"]) if "num_hidden_layers" in extra_options else config.num_hidden_layers
@@ -107,6 +107,7 @@ class Model:
 
         # RotaryEmbedding-specific variables
         partial_rotary_factor = config.partial_rotary_factor if hasattr(config, "partial_rotary_factor") else 1.0
+        rope_theta = config.rope_theta if hasattr(config, "rope_theta") else 10000
         self.rotemb_attrs = {
             "create_rotary_embedding_caches": True,          # Create cos/sin caches for rotary embeddings
             "theta": config.rope_theta,                      # Base value if calculating cos/sin caches from scratch
@@ -114,6 +115,7 @@ class Model:
             "partial_rotary_factor": partial_rotary_factor,  # Factor for partial rotary embeddings
             "num_heads": 0,                                  # For partial rotary embeddings (RotaryEmbedding kernel expects a default value of 0)
             "rotary_embedding_dim": 0,                       # For partial rotary embeddings (RotaryEmbedding kernel expects a default value of 0)
+            "theta": rope_theta,                             # Base value if calculating cos/sin caches from scratch
         }
 
         # Attention-specific variables (MHA, GQA, GQA + Rot.Emb., etc.)
@@ -159,6 +161,10 @@ class Model:
                 "bos_token_id": config.bos_token_id,
                 "context_length": self.context_length,
                 "decoder": {
+                    "session_options" : {
+                        "log_id": "onnxruntime-genai",
+                        "provider_options" : []
+                    },
                     "filename": self.filename,
                     "head_size": self.head_size,
                     "hidden_size": self.hidden_size,
@@ -194,6 +200,10 @@ class Model:
                 "top_p": config.top_p if hasattr(config, "top_p") else 1.0,
             },
         }
+
+        if self.ep == "cuda":
+            cuda_options = { "cuda" : { } }
+            genai_config["model"]["decoder"]["session_options"]["provider_options"].append(cuda_options)
 
         logger.info(f"Saving GenAI config in {out_dir}")
         with open(os.path.join(out_dir,"genai_config.json"), "w") as f:
@@ -1456,23 +1466,26 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
     # Set input/output precision of ONNX model
     io_dtype = TensorProto.FLOAT if precision in {"int8", "fp32"} or (precision == "int4" and execution_provider == "cpu") else TensorProto.FLOAT16
 
-    # List architecture options in alphabetical order
-    if config.architectures[0] == "GemmaForCausalLM":
-        onnx_model = GemmaModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
-    elif config.architectures[0] == "LlamaForCausalLM":
-        onnx_model = LlamaModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
-    elif config.architectures[0] == "MistralForCausalLM":
-        onnx_model = MistralModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
-    elif config.architectures[0] == "PhiForCausalLM":
-        onnx_model = PhiModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+    if "config_only" not in extra_options:
+        # List architecture options in alphabetical order
+        if config.architectures[0] == "GemmaForCausalLM":
+            onnx_model = GemmaModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "LlamaForCausalLM":
+            onnx_model = LlamaModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "MistralForCausalLM":
+            onnx_model = MistralModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "PhiForCausalLM":
+            onnx_model = PhiModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        else:
+            raise NotImplementedError(f"The {hf_name} model is not currently supported.")
+
+        # Make ONNX model
+        onnx_model.make_model(input_path)
+
+        # Save ONNX model
+        onnx_model.save_model(output_dir)
     else:
-        raise NotImplementedError(f"The {hf_name} model is not currently supported.")
-
-    # Make ONNX model
-    onnx_model.make_model(input_path)
-
-    # Save ONNX model
-    onnx_model.save_model(output_dir)
+        onnx_model = Model(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
 
     # Make GenAI config
     onnx_model.make_genai_config(hf_name, extra_kwargs, output_dir)
@@ -1553,6 +1566,8 @@ def get_args():
                 filename = Filename for ONNX model (default is 'model.onnx').
                     For models with multiple components, each component is exported to its own ONNX model.
                     The filename for each component will be '<filename>_<component-name>.onnx' (ex: '<filename>_encoder.onnx', '<filename>_decoder.onnx').
+                config_only = Generate config and pre/post processing files only.
+                    Use this option when you already have your optimized and/or quantized ONNX model.
             """),
     )
 

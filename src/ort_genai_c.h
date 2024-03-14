@@ -27,22 +27,10 @@ extern "C" {
 // ONNX Runtime Generative AI C API
 // This API is not thread safe.
 
-typedef enum OgaDeviceType {
-  OgaDeviceTypeCPU,
-  OgaDeviceTypeCUDA,
-} OgaDeviceType;
-
-typedef enum OgaDataType {
-  OgaDataType_int32,
-  OgaDataType_float32,
-  OgaDataType_string,  // UTF8 string
-} OgaDataType;
-
 typedef struct OgaResult OgaResult;
 typedef struct OgaGeneratorParams OgaGeneratorParams;
 typedef struct OgaGenerator OgaGenerator;
 typedef struct OgaModel OgaModel;
-typedef struct OgaBuffer OgaBuffer;
 // OgaSequences is an array of token arrays where the number of token arrays can be obtained using
 // OgaSequencesCount and the number of tokens in each token array can be obtained using OgaSequencesGetSequenceCount.
 typedef struct OgaSequences OgaSequences;
@@ -61,12 +49,6 @@ OGA_EXPORT const char* OGA_API_CALL OgaResultGetError(OgaResult* result);
  */
 OGA_EXPORT void OGA_API_CALL OgaDestroyResult(OgaResult*);
 OGA_EXPORT void OGA_API_CALL OgaDestroyString(const char*);
-
-OGA_EXPORT void OGA_API_CALL OgaDestroyBuffer(OgaBuffer*);
-OGA_EXPORT OgaDataType OGA_API_CALL OgaBufferGetType(const OgaBuffer*);
-OGA_EXPORT size_t OGA_API_CALL OgaBufferGetDimCount(const OgaBuffer*);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaBufferGetDims(const OgaBuffer*, size_t* dims, size_t dim_count);
-OGA_EXPORT const void* OGA_API_CALL OgaBufferGetData(const OgaBuffer*);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateSequences(OgaSequences** out);
 
@@ -104,7 +86,7 @@ OGA_EXPORT const int32_t* OGA_API_CALL OgaSequencesGetSequenceData(const OgaSequ
  * \param[out] out The created model.
  * \return OgaResult containing the error message if the model creation failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaDeviceType device_type, OgaModel** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaModel** out);
 
 /*
  * \brief Destroys the given model.
@@ -241,6 +223,9 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizerStream(OgaTokenizerStream*);
  * 'out' is valid until the next call to OgaTokenizerStreamDecode or when the OgaTokenizerStream is destroyed
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream*, int32_t token, const char** out);
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaSetCurrentGpuDeviceId(int device_id);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGetCurrentGpuDeviceId(int* device_id);
 
 #ifdef __cplusplus
 }

@@ -72,7 +72,12 @@ struct PyGeneratorParams : GeneratorParams {
 
     if (py_whisper_input_features_.size() != 0) {
       GeneratorParams::Whisper& whisper = inputs.emplace<GeneratorParams::Whisper>();
+#ifdef __APPLE__
+      std::span shape(reinterpret_cast<const int64_t*>(py_whisper_input_features_.shape()),
+                      py_whisper_input_features_.ndim());
+#else
       std::span<const int64_t> shape(py_whisper_input_features_.shape(), py_whisper_input_features_.ndim());
+#endif
       whisper.input_features = OrtValue::CreateTensor<float>(Ort::Allocator::GetWithDefaultOptions().GetInfo(), ToSpan(py_whisper_input_features_), shape);
       whisper.decoder_input_ids = ToSpan(py_whisper_decoder_input_ids_);
       batch_size = 1;
@@ -174,11 +179,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   Declare_DeviceArray<float>(m, "DeviceArray_float");
   Declare_DeviceArray<int32_t>(m, "DeviceArray_int32");
 
-  pybind11::enum_<DeviceType>(m, "DeviceType")
-      .value("CPU", DeviceType::CPU)
-      .value("CUDA", DeviceType::CUDA)
-      .export_values();
-
   pybind11::class_<PyGeneratorParams>(m, "GeneratorParams")
       .def(pybind11::init<const Model&>())
       .def_readonly("pad_token_id", &PyGeneratorParams::pad_token_id)
@@ -216,11 +216,9 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("create_stream", [](const Tokenizer& t) { return t.CreateStream(); });
 
   pybind11::class_<Model>(m, "Model")
-      .def(pybind11::init([](const std::string& config_path, DeviceType device_type) {
-             auto provider_options = GetDefaultProviderOptions(device_type);
-             return CreateModel(GetOrtEnv(), config_path.c_str(), &provider_options);
-           }),
-           "str"_a, "device_type"_a = DeviceType::CPU)
+      .def(pybind11::init([](const std::string& config_path) {
+        return CreateModel(GetOrtEnv(), config_path.c_str());
+      }))
       .def("generate", [](Model& model, PyGeneratorParams& params) { params.Prepare(); return Generate(model, params); })
       .def("generate_sequence", [](Model& model, pybind11::array_t<int32_t> input_ids, const pybind11::dict& search_options) {
         PyGeneratorParams params{model};
@@ -250,6 +248,9 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         return false;
 #endif
   });
+
+  m.def("set_current_gpu_device_id", [](int device_id) { Ort::SetCurrentGpuDeviceId(device_id); });
+  m.def("get_current_gpu_device_id", []() { return Ort::GetCurrentGpuDeviceId(); });
 }
 
 }  // namespace Generators

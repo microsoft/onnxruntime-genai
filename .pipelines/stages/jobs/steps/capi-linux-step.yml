@@ -1,0 +1,110 @@
+parameters:
+- name: target
+  type: string
+steps:
+
+- checkout: self
+  clean: true
+  path: onnxruntime-genai
+  submodules: recursive
+
+- checkout: manylinux
+  clean: true
+  path: onnxruntime-genai/manylinux
+  submodules: recursive
+
+- script: |
+    set -e -x
+    echo "$(Build.SourcesDirectory)"
+    echo "$(Build.Repository.LocalPath)"
+    ls $(Build.SourcesDirectory) -R
+  displayName: 'List files from SourceDirectory'
+
+- template: utils/set-nightly-build-option-variable.yml
+
+- bash: |
+    echo "arch=$(arch)"
+    echo "ep=$(ep)"
+  displayName: 'Print Parameters'
+
+- template: utils/download-ort.yml
+  parameters:
+    archiveType: 'tgz'
+- bash: |
+    set -e -x
+    az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
+    az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
+    python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_$(ep) \
+      --context tools/ci_build/github/linux/docker/manylinux \
+      --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
+      --container-registry onnxruntimebuildcache \
+      --manylinux-src manylinux \
+      --multiple_repos \
+      --repository onnxruntime$(ep)build$(arch)
+  displayName: 'Get Docker Image'
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
+- ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
+  - script: |
+      set -e -x
+      docker run \
+      --rm \
+      --volume $(Build.Repository.LocalPath):/ort_genai_src \
+      -w /ort_genai_src/ onnxruntime$(ep)build$(arch) \
+      bash -c " \
+          /usr/bin/cmake --preset linux_gcc_$(ep)_release \
+            -DENABLE_TESTS=OFF && \
+          /usr/bin/cmake --build --preset linux_gcc_$(ep)_release \
+            --target onnxruntime-genai"
+    displayName: 'Build GenAi'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+  - task: BinSkim@4
+    displayName: 'Run BinSkim'
+    inputs:
+      AnalyzeTargetGlob: '$(Build.Repository.LocalPath)/build/**/*genai.so'
+    continueOnError: true
+  - template: utils/capi-archive.yml
+    parameters:
+      archiveType: tar
+- ${{ if eq(parameters.target, 'python') }}:
+  - bash: |
+      set -e -x
+      docker run \
+      --rm \
+      --volume $(Build.Repository.LocalPath):/ort_genai_src \
+      -w /ort_genai_src/ onnxruntime$(ep)build$(arch) \
+      bash -c " \
+          /usr/bin/cmake --preset linux_gcc_$(ep)_release \
+            -DENABLE_TESTS=OFF \
+            -DMANYLINUX=ON \
+            -DPYTHON_EXECUTABLE=/opt/python/cp$(PyNoDotVer)-cp$(PyNoDotVer)/bin/python$(PyDotVer) && \
+          /usr/bin/cmake --build --preset linux_gcc_$(ep)_release \
+            --target python"
+    displayName: 'Build Python $(PyNoDotVer)'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+  - bash: |
+      set -e -x
+      docker run \
+      --rm \
+      --volume $(Build.Repository.LocalPath):/ort_genai_src \
+      -w /ort_genai_src/ onnxruntime$(ep)build$(arch) \
+      bash -c " \
+          /usr/bin/cmake --build --preset linux_gcc_$(ep)_release \
+            -DENABLE_TESTS=OFF \
+            -DMANYLINUX=ON \
+            -DPYTHON_EXECUTABLE=/opt/python/cp$(PyNoDotVer)-cp$(PyNoDotVer)/bin/python$(PyDotVer) && \
+          /usr/bin/cmake --build --preset linux_gcc_$(ep)_release \
+            --target PyPackageBuild"
+    displayName: 'PyPackageBuild $(PyNoDotVer)'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+  - task: CopyFiles@2
+    displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
+    inputs:
+      SourceFolder: '$(Build.Repository.LocalPath)/build/gcc_$(ep)/release/wheel'
+      Contents: '*manylinux*.whl'
+      TargetFolder: '$(Build.ArtifactStagingDirectory)'
+
+- script: |
+    ls $(Build.Repository.LocalPath) -R
+  displayName: 'List files from SourceDirectory'
+

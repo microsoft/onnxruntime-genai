@@ -11,9 +11,6 @@ struct Deleters {
   void operator()(OgaResult* p) {
     OgaDestroyResult(p);
   }
-  void operator()(OgaBuffer* p) {
-    OgaDestroyBuffer(p);
-  }
   void operator()(OgaSequences* p) {
     OgaDestroySequences(p);
   }
@@ -35,7 +32,6 @@ struct Deleters {
 };
 
 using OgaResultPtr = std::unique_ptr<OgaResult, Deleters>;
-using OgaBufferPtr = std::unique_ptr<OgaBuffer, Deleters>;
 using OgaSequencesPtr = std::unique_ptr<OgaSequences, Deleters>;
 using OgaModelPtr = std::unique_ptr<OgaModel, Deleters>;
 using OgaTokenizerPtr = std::unique_ptr<OgaTokenizer, Deleters>;
@@ -54,7 +50,7 @@ void CheckResult(OgaResult* result) {
 TEST(CAPITests, TokenizerCAPI) {
 #if TEST_PHI2
   OgaModel* model;
-  CheckResult(OgaCreateModel(MODEL_PATH "phi-2", OgaDeviceTypeCPU, &model));
+  CheckResult(OgaCreateModel(MODEL_PATH "phi-2", &model));
   OgaModelPtr model_ptr{model};
 
   OgaTokenizer* tokenizer;
@@ -125,7 +121,7 @@ TEST(CAPITests, TokenizerCAPI) {
 TEST(CAPITests, EndToEndPhiBatch) {
 #if TEST_PHI2
   OgaModel* model;
-  CheckResult(OgaCreateModel(MODEL_PATH "phi-2", OgaDeviceTypeCPU, &model));
+  CheckResult(OgaCreateModel(MODEL_PATH "phi-2", &model));
   OgaModelPtr model_ptr{model};
 
   OgaTokenizer* tokenizer;
@@ -184,7 +180,7 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
   // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
 
   OgaModel* model;
-  CheckResult(OgaCreateModel(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32", OgaDeviceTypeCPU, &model));
+  CheckResult(OgaCreateModel(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32", &model));
   OgaModelPtr model_ptr{model};
 
   OgaGeneratorParams* params;

@@ -102,6 +102,7 @@ def build(
     skip_csharp: bool = False,
     build_dir: str | bytes | os.PathLike | None = None,
     parallel: bool = False,
+    config: str = "RelWithDebInfo",
 ):
     """Generates the CMake build tree and builds the project.
 
@@ -127,6 +128,7 @@ def build(
         if cuda_home:
             toolset = "host=x64" + ",cuda=" + cuda_home
             command += ["-T", toolset]
+    command += [f"-DCMAKE_BUILD_TYPE={config}"]
 
     build_wheel = "OFF" if skip_wheel else "ON"
     build_dir = os.path.abspath(build_dir) if build_dir else os.path.join(os.getcwd(), "build")
@@ -157,7 +159,6 @@ def build(
         cuda_compiler = os.path.join(env["CUDA_HOME"], "bin", "nvcc")
         command += [f"-DCMAKE_CUDA_COMPILER={cuda_compiler}", f"-DCMAKE_CUDA_ARCHITECTURES={cuda_arch}"]
 
-    config = "RelWithDebInfo"
     run_subprocess(command, env=env).check_returncode()
     make_command = ["cmake", "--build", ".", "--config", config]
     if parallel:
@@ -218,6 +219,12 @@ if __name__ == "__main__":
     parser.add_argument("--build_dir", default=None, help="Path to output directory.")
     parser.add_argument("--use_cuda", action="store_true", help="Whether to use CUDA. Default is to not use cuda.")
     parser.add_argument("--parallel", action="store_true", help="Enable parallel build.")
+    parser.add_argument(
+        "--config",
+        default="RelWithDebInfo",
+        type=str,
+        choices=["Debug", "MinSizeRel", "Release", "RelWithDebInfo"],
+        help="Configuration(s) to build.")
     args = parser.parse_args()
 
     update_submodules()
@@ -230,4 +237,5 @@ if __name__ == "__main__":
         skip_csharp=args.skip_csharp,
         build_dir=args.build_dir,
         parallel=args.parallel,
+        config=args.config,
     )

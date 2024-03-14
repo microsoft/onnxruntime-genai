@@ -6,8 +6,10 @@
 *obj/
 /ort
 /build
+/build_*
 /test/test_models/*
 /cache_models
+/onnxruntime-linux-x64-*
 /*.csv
 .idea
 cache_dir
@@ -16,6 +18,8 @@ example-models
 *.onnx.data
 __pycache__
 benchmark/python/*.csv
+examples/python/genai_models
+examples/python/hf_cache
 
 !test/test_models/hf-internal-testing/
 !test/test_models/hf-internal-testing/tiny-random-gpt2*/*.onnx

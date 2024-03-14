@@ -1,4 +1,5 @@
 #pragma once
+
 namespace Generators {
 
 struct Config {
@@ -6,6 +7,24 @@ struct Config {
   Config(const std::filesystem::path& path);
 
   std::filesystem::path config_path;  // Path of the config directory
+
+  using ProviderOption = std::pair<std::string, std::string>;
+  struct ProviderOptions {
+    std::string name;
+    std::vector<ProviderOption> options;
+  };
+
+  struct SessionOptions {
+    std::optional<int> intra_op_num_threads;
+    std::optional<int> inter_op_num_threads;
+    std::optional<bool> enable_cpu_mem_arena;
+    std::optional<bool> enable_mem_pattern;
+    std::optional<std::string> log_id;
+    std::optional<int> log_severity_level;
+    std::optional<std::string> enable_profiling;
+
+    std::vector<ProviderOptions> provider_options;
+  };
 
   struct Model {
     std::string type;
@@ -25,6 +44,7 @@ struct Config {
 
     struct Decoder {
       std::string filename;
+      SessionOptions session_options;
 
       int hidden_size{};          // Not currently used, potentially useful for embeddings in the future
       int num_attention_heads{};  // Not currently used, potentially useful if num_key_value_heads isn't set

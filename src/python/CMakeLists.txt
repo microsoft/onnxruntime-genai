@@ -1,3 +1,16 @@
+if("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_LESS 10)
+  add_compile_definitions(USE_CXX17=1)
+  message("Python is using C++17 because GCC Version is less than 10")
+  set(CMAKE_CXX_STANDARD 17)
+elseif(USE_CUDA AND CMAKE_CUDA_COMPILER AND CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 12)
+  add_compile_definitions(USE_CXX17=1)
+  message("Python is using C++17 Because CUDA Version is less than 12")
+  set(CMAKE_CXX_STANDARD 17)
+else()
+  message("Python is using C++20")
+  set(CMAKE_CXX_STANDARD 20)
+endif()
+
 file(GLOB python_srcs CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/*.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
@@ -6,9 +19,20 @@ pybind11_add_module(python ${python_srcs})
 target_include_directories(python PRIVATE ${ORT_HEADER_DIR})
 target_link_directories(python PRIVATE ${ORT_LIB_DIR})
 target_link_libraries(python PRIVATE onnxruntime-genai-static ${ONNXRUNTIME_LIB})
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  set_property(TARGET python APPEND_STRING PROPERTY LINK_FLAGS " -Xlinker -rpath=\\$ORIGIN")
+  target_link_libraries(python PRIVATE stdc++fs)
+endif()
 set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
 
+if(CMAKE_GENERATOR_TOOLSET MATCHES "Visual Studio")
+  target_link_options(python PRIVATE "/CETCOMPAT")
+  target_compile_options(python PRIVATE "/sdl" PRIVATE "/Qspectre")
+endif()
+
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
+  cmake_policy(SET CMP0104 OLD)
+  enable_language(CUDA)
   set_target_properties(python PROPERTIES LINKER_LANGUAGE CUDA)
   target_link_libraries(python PRIVATE cublasLt cublas cudnn curand cufft cudart)
 endif()
@@ -29,6 +53,7 @@ if(BUILD_WHEEL)
 
   # Copy over any additional python files
   file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/py/" DESTINATION ${WHEEL_TARGET_NAME}/)
+  file(COPY "${CMAKE_SOURCE_DIR}/ThirdPartyNotices.txt" DESTINATION ${WHEEL_TARGET_NAME}/)
 
   file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_FILES}")
   add_custom_command(TARGET python POST_BUILD

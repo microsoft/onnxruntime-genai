@@ -20,6 +20,20 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             this.output = o;
         }
 
+        private class IgnoreOnModelAbsebceFact : FactAttribute
+        {
+            public IgnoreOnModelAbsebceFact()
+            {
+                string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
+                bool exists = System.IO.Directory.Exists(modelPath);
+                if (!System.IO.Directory.Exists(modelPath))
+                {
+                    // Skip this test on some machines since the model cannot be downloaded on those machines at runtime.
+                    Skip = "Skipping this test since the model does not exist.";
+                }
+            }
+        }
+
         [Fact(DisplayName = "TestGreedySearch")]
         public void TestGreedySearch()
         {
@@ -32,7 +46,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                                              0, 0, 195, 731, 731, 114, 114, 114, 114, 114 };
 
             string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "hf-internal-testing", "tiny-random-gpt2-fp32");
-            using (var model = new Model(modelPath, DeviceType.CPU))
+            using (var model = new Model(modelPath))
             {
                 Assert.NotNull(model);
                 using (var generatorParams = new GeneratorParams(model))
@@ -72,18 +86,18 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
-        [Fact(DisplayName = "TestTokenizerBatchEncodeDecode")]
+        [IgnoreOnModelAbsebceFact(DisplayName = "TestTokenizerBatchEncodeDecode")]
         public void TestTokenizerBatchEncodeDecode()
         {
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "hf-internal-testing", "tiny-random-gpt2-fp32");
-            using (var model = new Model(modelPath, DeviceType.CPU))
+            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
+            using (var model = new Model(modelPath))
             {
                 Assert.NotNull(model);
                 using (var tokenizer = new Tokenizer(model))
                 {
                     Assert.NotNull(tokenizer);
 
-                    var strings = new string[] { 
+                    var strings = new string[] {
                         "This is a test.",
                         "Rats are awesome pets!",
                         "The quick brown fox jumps over the lazy dog."
@@ -101,18 +115,18 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
-        [Fact(DisplayName = "TestTokenizerBatchEncodeSingleDecode")]
+        [IgnoreOnModelAbsebceFact(DisplayName = "TestTokenizerBatchEncodeSingleDecode")]
         public void TestTokenizerBatchEncodeSingleDecode()
         {
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "hf-internal-testing", "tiny-random-gpt2-fp32");
-            using (var model = new Model(modelPath, DeviceType.CPU))
+            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
+            using (var model = new Model(modelPath))
             {
                 Assert.NotNull(model);
                 using (var tokenizer = new Tokenizer(model))
                 {
                     Assert.NotNull(tokenizer);
 
-                    var strings = new string[] { 
+                    var strings = new string[] {
                         "This is a test.",
                         "Rats are awesome pets!",
                         "The quick brown fox jumps over the lazy dog."
@@ -132,11 +146,11 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
-        [Fact(DisplayName = "TestTokenizerBatchEncodeStreamDecode")]
+        [IgnoreOnModelAbsebceFact(DisplayName = "TestTokenizerBatchEncodeStreamDecode")]
         public void TestTokenizerBatchEncodeStreamDecode()
         {
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "hf-internal-testing", "tiny-random-gpt2-fp32");
-            using (var model = new Model(modelPath, DeviceType.CPU))
+            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
+            using (var model = new Model(modelPath))
             {
                 Assert.NotNull(model);
                 using (var tokenizer = new Tokenizer(model))
@@ -144,7 +158,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                     Assert.NotNull(tokenizer);
                     var tokenizerStream = tokenizer.CreateStream();
 
-                    var strings = new string[] { 
+                    var strings = new string[] {
                         "This is a test.",
                         "Rats are awesome pets!",
                         "The quick brown fox jumps over the lazy dog."
@@ -168,11 +182,11 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
-        [Fact(DisplayName = "TestTokenizerSingleEncodeDecode")]
+        [IgnoreOnModelAbsebceFact(DisplayName = "TestTokenizerSingleEncodeDecode")]
         public void TestTokenizerSingleEncodeDecode()
         {
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "hf-internal-testing", "tiny-random-gpt2-fp32");
-            using (var model = new Model(modelPath, DeviceType.CPU))
+            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
+            using (var model = new Model(modelPath))
             {
                 Assert.NotNull(model);
                 using (var tokenizer = new Tokenizer(model))
@@ -192,18 +206,18 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
-        [Fact(Skip = "Phi-2 is not available in the CI pipeline")]
+        [IgnoreOnModelAbsebceFact(DisplayName = "TestPhi2")]
         public void TestPhi2()
         {
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "phi-2");
-            using (var model = new Model(modelPath, DeviceType.CPU))
+            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
+            using (var model = new Model(modelPath))
             {
                 Assert.NotNull(model);
                 using (var tokenizer = new Tokenizer(model))
                 {
                     Assert.NotNull(tokenizer);
 
-                    var strings = new string[] { 
+                    var strings = new string[] {
                         "This is a test.",
                         "Rats are awesome pets!",
                         "The quick brown fox jumps over the lazy dog."
