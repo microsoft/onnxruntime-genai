@@ -27,10 +27,6 @@ FetchContent_MakeAvailable(simdjson)
 
 add_library(tokenizer STATIC ${tokenizer_srcs})
 
-if(NOT WIN32)
-   target_link_libraries(tokenizer PRIVATE stdc++fs)
-endif()
-
 message(STATUS "GSL_SOURCE_DIR: ${GSL_SOURCE_DIR}")
 target_include_directories(tokenizer PUBLIC
    ${CMAKE_CURRENT_SOURCE_DIR}
@@ -40,6 +36,7 @@ target_include_directories(tokenizer PUBLIC
 target_compile_definitions(tokenizer PRIVATE _SILENCE_ALL_CXX20_DEPRECATION_WARNINGS)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_link_libraries(tokenizer PRIVATE stdc++fs)
   set_target_properties(tokenizer PROPERTIES POSITION_INDEPENDENT_CODE ON)
   set_target_properties(simdjson PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()

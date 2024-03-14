@@ -2,41 +2,43 @@ steps:
 - powershell: |
     dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(buildConfig)" -p:NativeBuildOutputDir="$(buildDir)\$(buildConfig)"
   displayName: 'Build CSharp'
-  workingDirectory: '$(Build.SourcesDirectory)\src\csharp'
+  workingDirectory: '$(Build.Repository.LocalPath)\src\csharp'
 
 - task: BinSkim@4
   displayName: 'Run BinSkim'
   inputs:
-    AnalyzeTargetGlob: '$(Build.SourcesDirectory)\src\csharp\**\*.dll'
+    AnalyzeTargetGlob: '$(Build.Repository.LocalPath)\src\csharp\**\*.dll'
   continueOnError: true
 
 - template: compliant/win-esrp-dll-step.yml
   parameters:
-    FolderPath: '$(Build.SourcesDirectory)\src\csharp\bin\Release\'
+    FolderPath: '$(Build.Repository.LocalPath)\src\csharp\bin\Release\'
     DisplayName: 'ESRP - Sign C# dlls'
 
 - powershell: |
     $VERSION = '0.1.0-rc1'
     nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.nuspec `
       -Prop version=$VERSION `
-      -Prop ext=$(ext) `
+      -Prop genai_nuget_ext=$(genai_nuget_ext) `
+      -Prop ort_nuget_ext=$(ort_nuget_ext) `
+      -Prop ort_version=$(ort_version) `
       -Prop configuration=$(buildConfig) `
       -Prop buildPath=$(buildDir)
     nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec `
       -Prop version=$VERSION `
       -Prop configuration=$(buildConfig)
   displayName: 'Nuget Packaging'
-  workingDirectory: '$(Build.SourcesDirectory)\nuget'
+  workingDirectory: '$(Build.Repository.LocalPath)\nuget'
 
 - powershell: |
-    Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
+    Get-ChildItem -Path $(Build.Repository.LocalPath) -Recurse
   displayName: 'List all files in the repo for'
 
 - powershell: |
-    Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
+    Get-ChildItem -Path $(Build.Repository.LocalPath) -Recurse
 - task: CopyFiles@2
   displayName: 'Copy Nuget to: $(Build.ArtifactStagingDirectory)'
   inputs:
-    SourceFolder: '$(Build.SourcesDirectory)\nuget'
+    SourceFolder: '$(Build.Repository.LocalPath)\nuget'
     Contents: '*.nupkg'
     TargetFolder: '$(Build.ArtifactStagingDirectory)'

@@ -40,7 +40,7 @@ target_link_libraries(unit_tests PRIVATE
   GTest::gtest_main
 )
 
-if(NOT WIN32)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_link_libraries(unit_tests PRIVATE stdc++fs)
 endif()
 
