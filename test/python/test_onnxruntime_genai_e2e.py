@@ -13,6 +13,8 @@ def download_model(
     download_path: str | bytes | os.PathLike, device: str, model_identifier: str
 ):
     # python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -p int4 -e cpu -o download_path
+    # Or with cuda graph enabled:
+    # python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -p int4 -e cuda --extra_options enable_cuda_graph=1 -o download_path
     command = [
         sys.executable,
         "-m",
@@ -26,6 +28,9 @@ def download_model(
         "-o",
         download_path,
     ]
+    if device == "cuda":
+        command.append("--extra_options")
+        command.append("enable_cuda_graph=1")
     run_subprocess(command).check_returncode()
 
 
