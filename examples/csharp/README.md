@@ -13,9 +13,8 @@ To generate the model with model builder:
 
 1. Install the python package
 
-   ```bash
-   pip install onnxruntime-genai
-   ```
+   Install the Python package according to the [installation instructions](https://onnxruntime.ai/docs/genai/install).
+
 
 2. Install the model builder script dependencies
 
