@@ -148,9 +148,10 @@ KV_Cache::KV_Cache(const Model& model, State& state)
 
   if (model_.device_type_ == DeviceType::CUDA && model_.config_->use_cuda_graphs) {
     assert(past_present_share_buffer_);
+    size_t max_beam_batch_size = model_.config_->search.num_beams * model_.config_->max_batch_size;
     sb_kv_caches_.reserve(layer_count_ * 2);
     for (int i = 0; i < layer_count_ * 2; ++i) {
-      sb_kv_caches_.push_back(std::make_unique<StaticBuffer>(model_.allocator_device_));
+      sb_kv_caches_.push_back(std::make_unique<StaticBuffer>(model_.allocator_device_, max_beam_batch_size));
     }
   }
 

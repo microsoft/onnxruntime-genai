@@ -32,8 +32,9 @@ PositionMetadata::PositionMetadata(const Model& model, State& state, RoamingArra
   attention_mask_shape_ = shape;
 
   if (model_.device_type_ == DeviceType::CUDA && model_.config_->use_cuda_graphs) {
-    sb_position_ids_ = std::make_unique<StaticBuffer>(model_.allocator_device_);
-    sb_seqlens_k_ = std::make_unique<StaticBuffer>(model_.allocator_device_);
+    size_t max_beam_batch_size = model_.config_->search.num_beams * model_.config_->max_batch_size;
+    sb_position_ids_ = std::make_unique<StaticBuffer>(model_.allocator_device_, max_beam_batch_size);
+    sb_seqlens_k_ = std::make_unique<StaticBuffer>(model_.allocator_device_, max_beam_batch_size);
   }
 }
 

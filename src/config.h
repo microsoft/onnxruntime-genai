@@ -9,6 +9,8 @@ struct Config {
   std::filesystem::path config_path;  // Path of the config directory
 
   bool use_cuda_graphs{false};
+  //TODO: pass it from config file
+  size_t max_batch_size{16};
 
   using ProviderOption = std::pair<std::string, std::string>;
   struct ProviderOptions {

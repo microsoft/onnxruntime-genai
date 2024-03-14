@@ -322,7 +322,7 @@ bool IsCudaGraphEnabled(Config::SessionOptions& session_options) {
       for (const auto& value : provider_options.options) {
         if (value.first == "enable_cuda_graph") {
           // Is it the correct value string?
-          return value.second == "true" || value.second == "1";
+          return value.second == "1";
         }
       }
     }

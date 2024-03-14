@@ -67,7 +67,7 @@ void DecoderOnly_State::UpdateInputs(const RoamingArray<int32_t>& next_tokens_un
 
 int DecoderOnly_State::GetGraphAnnotationId() const {
   // Here we use the batch size as the graph annotation id.
-  return input_ids_.GetShape()[0];
+  return static_cast<int>(input_ids_.GetShape()[0]);
 }
 
 }  // namespace Generators
