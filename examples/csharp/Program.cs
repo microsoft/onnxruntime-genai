@@ -37,8 +37,8 @@ while (true)
 
     else if (option == 2) //Streaming Output
     {
-        var tokenizerStream = tokenizer.CreateStream();
-        var generator = new Generator(model, generatorParams);
+        using var tokenizerStream = tokenizer.CreateStream();
+        using var generator = new Generator(model, generatorParams);
         while (!generator.IsDone())
         {
             generator.ComputeLogits();
