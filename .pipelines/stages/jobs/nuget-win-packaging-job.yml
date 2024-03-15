@@ -67,13 +67,8 @@ jobs:
   - template: steps/nuget-win-step.yml
 
 
-  - task: PublishBuildArtifacts@1
-    displayName: 'Publish Artifact: ONNXRuntime Genai capi'
-    inputs:
-      ArtifactName: $(artifactName)
-
   - ${{ if or(eq(parameters.publish_to_nuget, true), eq(parameters.publish_to_ado_feed, true))}}:
-    - template: steps/nuget-publishing-step.yml
+    - template: steps/nuget-releasing-step.yml
       parameters:
         publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
         publish_to_nuget: ${{ parameters.publish_to_nuget }}
