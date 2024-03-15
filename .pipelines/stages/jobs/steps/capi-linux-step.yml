@@ -100,7 +100,7 @@ steps:
   - task: CopyFiles@2
     displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
     inputs:
-      SourceFolder: '$(Build.Repository.LocalPath)/build/gcc_$(ep)/release/wheel'
+      SourceFolder: '$(Build.Repository.LocalPath)/build/$(ep)/wheel'
       Contents: '*manylinux*.whl'
       TargetFolder: '$(Build.ArtifactStagingDirectory)'
 

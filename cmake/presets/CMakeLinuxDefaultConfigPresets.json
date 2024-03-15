@@ -39,6 +39,7 @@
     },
     {
       "name": "linux_gcc_asan_default",
+      "inherits": "linux_gcc_default",
       "cacheVariables": {
         "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -fsanitize=address",
         "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -fsanitize=address",
@@ -47,6 +48,7 @@
     },
     {
       "name": "linux_clang_asan_default",
+      "inherits": "linux_clang_default",
       "cacheVariables": {
         "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -fsanitize=address -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
         "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-Bsymbolic-functions -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -fsanitize=address -L\\usr\\lib64\\x86_64-unknown-linux-gnu",
