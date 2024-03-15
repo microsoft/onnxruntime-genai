@@ -56,10 +56,10 @@ jobs:
         run: |
           docker run --rm \
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "ls -l /onnxruntime_src/build/gcc_cpu/release/test/"
+          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "ls -l /onnxruntime_src/build/cpu/test/"
 
       - name: Docker -- Run tests
         run: |
           docker run --rm \
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "/onnxruntime_src/build/gcc_cpu/release/test/unit_tests"   
+          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "/onnxruntime_src/build/cpu/test/unit_tests"   
