@@ -14,6 +14,10 @@ parameters:
 - name: cuda_version
   type: string
   default: ''
+- name: publish_to_ado_feed
+  type: boolean
+- name: publish_to_nuget
+  type: boolean
 jobs:
 - job: Windows_Nuget_Packaging_${{ parameters.ep }}_${{ parameters.arch }}
   pool: 'onnxruntime-Win-CPU-2022'
@@ -33,6 +37,8 @@ jobs:
     value: 'build\${{ parameters.ep }}'
   - name: artifactName
     value : 'onnxruntime-genai-capi-win-${{ parameters.ep }}-${{ parameters.arch }}'
+  - name: GDN_CODESIGN_TARGETDIRECTORY
+    value: '$(Build.BinariesDirectory)/nuget-artifact/final-package'
   - name: ort_filename
     ${{ if eq(parameters.ep, 'cpu') }}:
       value: 'onnxruntime-win-${{ parameters.arch }}-${{ parameters.ort_version }}'
@@ -65,6 +71,14 @@ jobs:
     displayName: 'Publish Artifact: ONNXRuntime Genai capi'
     inputs:
       ArtifactName: $(artifactName)
+
+  - ${{ if or(eq(parameters.publish_to_nuget, true), eq(parameters.publish_to_ado_feed, true))}}:
+    - template: steps/nuget-publishing-step.yml
+      parameters:
+        ep: ${{ parameters.ep }}
+        arch: ${{ parameters.arch }}
+        ort_version: ${{ parameters.ort_version }}
+        cuda_version: ${{ parameters.cuda_version }}
 
   - template: steps/compliant-and-cleanup-step.yml
 
