@@ -10,6 +10,8 @@ Users can call a high level `generate()` method, or run each iteration of the mo
 * Built in logits processing like repetition penalties
 * Easy custom scoring
 
+See full documentation at [https://onnxruntime.ai/docs/genai].
+
 ## Features
 
 * Supported model architectures:
