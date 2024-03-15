@@ -122,13 +122,17 @@ class Model:
         self.attention_attrs = {
             "op_type": "MultiHeadAttention",                 # Attention op to use
             "use_rotemb_in_gqa": False,                      # Use rotary embeddings within GroupQueryAttention (instead of a separate RotaryEmbedding op)
+            "use_packed_matmul": False,                      # Use packed MatMul (instead of 3 separate MatMuls for Q/K/V)
         }
         # Check if GroupQueryAttention can be used (FP16 CUDA) or has to be used (num_attention_heads != num_key_value_heads)
         if (ep == "cuda" and io_dtype == TensorProto.FLOAT16) or self.num_attn_heads != self.num_kv_heads:
             self.attention_attrs["op_type"] = "GroupQueryAttention"
 
             if self.num_attn_heads != self.num_kv_heads:
+                self.attention_attrs["use_packed_matmul"] = False
                 logger.warning("GroupQueryAttention (GQA) is required for this model. GQA is currently supported only for INT4 CUDA and FP16 CUDA.")
+            else:
+                self.attention_attrs["use_packed_matmul"] = True
             
             # GQA + Rot.Emb. does not require `position ids` as input
             self.attention_attrs["use_rotemb_in_gqa"] = True
@@ -491,9 +495,19 @@ class Model:
     #     self.make_node("MatMulNBits", inputs=[root_input, weight, scales], outputs=[output], name=name)
     #     self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
 
-    # TODO: make packed QKV MatMul
-    # def make_packed_matmul(self, q_matmul, k_matmul, v_matmul, name, root_input, **kwargs):
-    #     pass
+    def make_packed_matmul(self, q_matmul, k_matmul, v_matmul, name, root_input, **kwargs):
+        # # Combine 3 Matmuls of shape HxH into 1 packed MatMul of shape 3HxH
+        # # Note: Packed MatMul is of shape 3HxH instead of Hx3H because `make_matmul` will apply a transpose before saving
+        # h = q_matmul.shape[0]
+        # matmul = np.stack((q_matmul.transpose(), k_matmul.transpose(), v_matmul.transpose()), axis=1).reshape(h, 3*h).transpose()
+        # self.make_matmul(matmul, name, root_input, **kwargs)
+
+        # N = num_heads * head_size, H = hidden_size
+        # Combine 3 Matmuls of shape NxH into 1 packed MatMul of shape 3NxH
+        # Note: Packed MatMul is of shape 3NxH instead of Hx3N because `make_matmul` will apply a transpose before saving
+        N, H = q_matmul.shape
+        matmul = np.stack((q_matmul.transpose(), k_matmul.transpose(), v_matmul.transpose()), axis=1).reshape(H, 3*N).transpose()
+        self.make_matmul(matmul, name, root_input, **kwargs)
 
     def make_add_bias(self, add, name, root_input, **kwargs):
         bias = name[1:].replace("/", ".") + ".bias"
@@ -508,6 +522,11 @@ class Model:
             self.make_value_info(output, dtype=self.io_dtype, shape=shape)
         else:
             self.make_add(name, add_bias_inputs, dtype=self.io_dtype, shape=shape)
+
+    def make_packed_add(self, q_add, k_add, v_add, name, root_input, **kwargs):
+        # Combine 3 Adds of shape H into 1 packed Add of shape 3H
+        add = np.stack((q_add, k_add, v_add), axis=0).flatten()
+        self.make_add_bias(add, name, root_input, **kwargs)
 
     def make_embedding(self, embedding):
         weight = "model.embed_tokens.weight"
@@ -684,33 +703,48 @@ class Model:
         v_input_to_attention = ""
 
         # Make MatMul nodes
-        q_matmul_name = f"/model/layers.{layer_id}/attn/q_proj/MatMul"
-        q_input_to_attention = f"{q_matmul_name}/output_0"
-        self.make_matmul(attention.q_proj.weight.detach().numpy(), q_matmul_name, root_input)
-        k_matmul_name = f"/model/layers.{layer_id}/attn/k_proj/MatMul"
-        k_input_to_attention = f"{k_matmul_name}/output_0"
-        self.make_matmul(attention.k_proj.weight.detach().numpy(), k_matmul_name, root_input)
-        v_matmul_name = f"/model/layers.{layer_id}/attn/v_proj/MatMul"
-        v_input_to_attention = f"{v_matmul_name}/output_0"
-        self.make_matmul(attention.v_proj.weight.detach().numpy(), v_matmul_name, root_input)
+        q_matmul_name, k_matmul_name, v_matmul_name, qkv_matmul_name = "", "", "", ""
+        if self.attention_attrs["use_packed_matmul"]:
+            # Combine 3 MatMuls into 1 packed MatMul
+            qkv_matmul_name = f"/model/layers.{layer_id}/attn/qkv_proj/MatMul"
+            q_input_to_attention = f"{qkv_matmul_name}/output_0"
+            self.make_packed_matmul(attention.q_proj.weight.detach().numpy(), attention.k_proj.weight.detach().numpy(), attention.v_proj.weight.detach().numpy(), qkv_matmul_name, root_input)
+        else:
+            q_matmul_name = f"/model/layers.{layer_id}/attn/q_proj/MatMul"
+            q_input_to_attention = f"{q_matmul_name}/output_0"
+            self.make_matmul(attention.q_proj.weight.detach().numpy(), q_matmul_name, root_input)
+            k_matmul_name = f"/model/layers.{layer_id}/attn/k_proj/MatMul"
+            k_input_to_attention = f"{k_matmul_name}/output_0"
+            self.make_matmul(attention.k_proj.weight.detach().numpy(), k_matmul_name, root_input)
+            v_matmul_name = f"/model/layers.{layer_id}/attn/v_proj/MatMul"
+            v_input_to_attention = f"{v_matmul_name}/output_0"
+            self.make_matmul(attention.v_proj.weight.detach().numpy(), v_matmul_name, root_input)
 
         # Make Add nodes (if bias exists)
         q_bias_exists = attention.q_proj.bias is not None
         k_bias_exists = attention.k_proj.bias is not None
         v_bias_exists = attention.v_proj.bias is not None
+        all_bias_exists = q_bias_exists and k_bias_exists and v_bias_exists
 
-        if q_bias_exists:
-            q_add_name = f"/model/layers.{layer_id}/attn/q_proj/Add"
-            q_input_to_attention = f"{q_add_name}/output_0"
-            self.make_add_bias(attention.q_proj.bias.detach().numpy(), q_add_name, root_input=f"{q_matmul_name}/output_0")
-        if k_bias_exists:
-            k_add_name = f"/model/layers.{layer_id}/attn/k_proj/Add"
-            k_input_to_attention = f"{k_add_name}/output_0"
-            self.make_add_bias(attention.k_proj.bias.detach().numpy(), k_add_name, root_input=f"{k_matmul_name}/output_0")
-        if v_bias_exists:
-            v_add_name = f"/model/layers.{layer_id}/attn/v_proj/Add"
-            v_input_to_attention = f"{v_add_name}/output_0"
-            self.make_add_bias(attention.v_proj.bias.detach().numpy(), v_add_name, root_input=f"{v_matmul_name}/output_0")
+        q_add_name, k_add_name, v_add_name, qkv_add_name = "", "", "", ""
+        if all_bias_exists and self.attention_attrs["use_packed_matmul"]:
+            # Combine 3 Adds into 1 packed Add
+            qkv_add_name = f"/model/layers.{layer_id}/attn/qkv_proj/Add"
+            q_input_to_attention = f"{qkv_add_name}/output_0"
+            self.make_packed_add(attention.q_proj.bias.detach().numpy(), attention.k_proj.bias.detach().numpy(), attention.v_proj.bias.detach().numpy(), qkv_add_name, root_input=f"{qkv_matmul_name}/output_0")
+        else:
+            if q_bias_exists:
+                q_add_name = f"/model/layers.{layer_id}/attn/q_proj/Add"
+                q_input_to_attention = f"{q_add_name}/output_0"
+                self.make_add_bias(attention.q_proj.bias.detach().numpy(), q_add_name, root_input=f"{q_matmul_name}/output_0")
+            if k_bias_exists:
+                k_add_name = f"/model/layers.{layer_id}/attn/k_proj/Add"
+                k_input_to_attention = f"{k_add_name}/output_0"
+                self.make_add_bias(attention.k_proj.bias.detach().numpy(), k_add_name, root_input=f"{k_matmul_name}/output_0")
+            if v_bias_exists:
+                v_add_name = f"/model/layers.{layer_id}/attn/v_proj/Add"
+                v_input_to_attention = f"{v_add_name}/output_0"
+                self.make_add_bias(attention.v_proj.bias.detach().numpy(), v_add_name, root_input=f"{v_matmul_name}/output_0")
 
         # Make RotaryEmbedding nodes
         if not self.attention_attrs["use_rotemb_in_gqa"]:
@@ -1335,15 +1369,15 @@ class Model:
 class LlamaModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        self.attention_attrs["use_rotemb_in_gqa"] = True
-        self.model_inputs.remove("position_ids")
+        # self.attention_attrs["use_rotemb_in_gqa"] = True
+        # self.model_inputs.remove("position_ids")
 
 
 class MistralModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        self.attention_attrs["use_rotemb_in_gqa"] = True
-        self.model_inputs.remove("position_ids")
+        # self.attention_attrs["use_rotemb_in_gqa"] = True
+        # self.model_inputs.remove("position_ids")
         self.position_ids_name = f"{self.make_position_ids_reformatting()}/output_0" if not self.attention_attrs["use_rotemb_in_gqa"] else "position_ids"
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
