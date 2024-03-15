@@ -75,10 +75,6 @@ jobs:
   - ${{ if or(eq(parameters.publish_to_nuget, true), eq(parameters.publish_to_ado_feed, true))}}:
     - template: steps/nuget-publishing-step.yml
       parameters:
-        ep: ${{ parameters.ep }}
-        arch: ${{ parameters.arch }}
-        ort_version: ${{ parameters.ort_version }}
-        cuda_version: ${{ parameters.cuda_version }}
         publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
         publish_to_nuget: ${{ parameters.publish_to_nuget }}
 
