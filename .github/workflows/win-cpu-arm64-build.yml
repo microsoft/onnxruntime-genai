@@ -45,9 +45,12 @@ jobs:
       run: |
         Rename-Item -Path $env:ort_dir -NewName ort
 
-    - name: Build with CMake
+    - name: Configure CMake
       run: |
         cmake --preset windows_arm64_cpu_release
+
+    - name: Build with CMake
+      run: |
         cmake --build --preset windows_arm64_cpu_release --parallel
 
     - name: Install the Python Wheel and Test Dependencies
