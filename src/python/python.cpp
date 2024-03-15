@@ -3,6 +3,7 @@
 #include <pybind11/numpy.h>
 #include <iostream>
 #include "../generators.h"
+#include "../json.h"
 #include "../search.h"
 #include "../models/model.h"
 
@@ -92,8 +93,8 @@ struct PyGeneratorParams : GeneratorParams {
         } else if (pybind11::isinstance<pybind11::int_>(entry.second)) {
           SetSearchNumber(search, name, entry.second.cast<int>());
         } else
-          throw std::runtime_error("Unknown search option type, can be float/bool/int");
-      } catch (const std::exception& e) {
+          throw std::runtime_error("Unknown search option type, can be float/bool/int:" + name);
+      } catch (JSON::unknown_value_error& e) {
         throw std::runtime_error("Unknown search option:" + name);
       }
     }

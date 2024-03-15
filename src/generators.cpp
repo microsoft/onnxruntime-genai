@@ -71,6 +71,10 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
     throw std::runtime_error("search max_length is 0");
   if (params.search.max_length > model.config_->model.context_length)
     throw std::runtime_error("max_length cannot be greater than model context_length");
+  if (params.batch_size < 1)
+    throw std::runtime_error("batch_size must be 1 or greater");
+  if (params.vocab_size < 1)
+    throw std::runtime_error("vocab_size must be 1 or greater");
 
   search_ = CreateSearch(params);
   state_ = model.CreateState(search_->GetSequenceLengths(), params);
