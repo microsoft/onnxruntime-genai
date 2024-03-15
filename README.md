@@ -98,7 +98,7 @@ python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -p int4 -e cpu -o 
 
 ## Known issues
 
-* Mistrel and Gemma support on CUDA only
+* Mistral and Gemma support on CUDA only
 
 ## Contributing
 
