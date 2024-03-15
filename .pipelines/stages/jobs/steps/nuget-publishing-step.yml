@@ -10,7 +10,7 @@ steps:
 
 - script: mkdir "$(GDN_CODESIGN_TARGETDIRECTORY)"
 
-- script: move "$(artifactName)\*.nupkg" "$(GDN_CODESIGN_TARGETDIRECTORY)"
+- script: move "$(Build.ArtifactStagingDirectory)\*.nupkg" "$(GDN_CODESIGN_TARGETDIRECTORY)"
 
 - powershell: |
     New-Item -Path $(Agent.TempDirectory) -Name "binfiles" -ItemType "directory"

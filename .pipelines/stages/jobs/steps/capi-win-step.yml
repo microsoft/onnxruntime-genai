@@ -62,6 +62,7 @@ steps:
     parameters:
       FolderPath: '$(buildDir)'
       DisplayName: 'ESRP - Sign C++ dlls'
+      Pattern: '*genai.dll'
 
   - task: BinSkim@4
     displayName: 'Run BinSkim'

@@ -14,7 +14,7 @@ steps:
   parameters:
     FolderPath: '$(Build.Repository.LocalPath)\src\csharp\bin\Release\'
     DisplayName: 'ESRP - Sign C# dlls'
-
+    Pattern: '*OnnxRuntimeGenAI*.dll'
 - powershell: |
     $VERSION = '0.1.0-rc1'
     nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.nuspec `
