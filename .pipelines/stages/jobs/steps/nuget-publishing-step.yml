@@ -3,56 +3,55 @@ parameters:
   type: boolean
 - name: publish_to_nuget
   type: boolean
-  steps:
+steps:
+- task: NuGetToolInstaller@1
+  inputs:
+    versionSpec: 6.8.x
 
-  - task: NuGetToolInstaller@1
+- script: mkdir "$(GDN_CODESIGN_TARGETDIRECTORY)"
+
+- download: build
+  displayName: 'Download Pipeline Artifact - Signed NuGet Package'
+  artifact: 'drop-signed-nuget-GPU'
+
+- script: move "$(artifactName)\*.nupkg" "$(GDN_CODESIGN_TARGETDIRECTORY)"
+
+- powershell: |
+    New-Item -Path $(Agent.TempDirectory) -Name "binfiles" -ItemType "directory"
+    $base_path_name = Join-Path -Path $(Agent.TempDirectory) -ChildPath "binfiles"
+    Get-ChildItem $(GDN_CODESIGN_TARGETDIRECTORY) -Filter *.nupkg |
+        Foreach-Object {
+          $dir_name = Join-Path -Path $base_path_name -ChildPath $_.Basename
+          $cmd = "7z.exe x $($_.FullName) -y -o$dir_name"
+          Write-Output $cmd
+          Invoke-Expression -Command $cmd
+        }
+    dir $(Agent.TempDirectory)
+    tree $(Agent.TempDirectory)
+  workingDirectory: '$(Agent.TempDirectory)'
+
+- task: CodeSign@1
+  displayName: 'Run Codesign Validation'
+
+- task: PublishSecurityAnalysisLogs@3
+  displayName: 'Publish Security Analysis Logs'
+  continueOnError: true
+
+- task: PostAnalysis@2
+  inputs:
+    GdnBreakAllTools: true
+    GdnBreakPolicy: M365
+    GdnBreakPolicyMinSev: Error
+
+- template: utils/get-nuget-package-version-as-variable.yml
+  parameters:
+    packageFolder: '$(GDN_CODESIGN_TARGETDIRECTORY)'
+#This task must be run on a Windows machine
+- ${{ if eq(parameters.publish_to_ado_feed, true) }}:
+  - task: NuGetCommand@2
+    displayName: 'NuGet push ${{ parameters.artifact_feed }}'
     inputs:
-      versionSpec: 6.8.x
-
-  - script: mkdir "$(GDN_CODESIGN_TARGETDIRECTORY)"
-
-  - download: build
-    displayName: 'Download Pipeline Artifact - Signed NuGet Package'
-    artifact: 'drop-signed-nuget-GPU'
-
-  - script: move "$(artifactName)\*.nupkg" "$(GDN_CODESIGN_TARGETDIRECTORY)"
-
-  - powershell: |
-      New-Item -Path $(Agent.TempDirectory) -Name "binfiles" -ItemType "directory"
-      $base_path_name = Join-Path -Path $(Agent.TempDirectory) -ChildPath "binfiles"
-      Get-ChildItem $(GDN_CODESIGN_TARGETDIRECTORY) -Filter *.nupkg |
-          Foreach-Object {
-            $dir_name = Join-Path -Path $base_path_name -ChildPath $_.Basename
-            $cmd = "7z.exe x $($_.FullName) -y -o$dir_name"
-            Write-Output $cmd
-            Invoke-Expression -Command $cmd
-          }
-      dir $(Agent.TempDirectory)
-      tree $(Agent.TempDirectory)
-    workingDirectory: '$(Agent.TempDirectory)'
-
-  - task: CodeSign@1
-    displayName: 'Run Codesign Validation'
-
-  - task: PublishSecurityAnalysisLogs@3
-    displayName: 'Publish Security Analysis Logs'
-    continueOnError: true
-
-  - task: PostAnalysis@2
-    inputs:
-      GdnBreakAllTools: true
-      GdnBreakPolicy: M365
-      GdnBreakPolicyMinSev: Error
-
-  - template: utils/get-nuget-package-version-as-variable.yml
-    parameters:
-      packageFolder: '$(GDN_CODESIGN_TARGETDIRECTORY)'
-  #This task must be run on a Windows machine
-  - ${{ if eq(parameters.publish_to_ado_feed, true) }}:
-    - task: NuGetCommand@2
-      displayName: 'NuGet push ${{ parameters.artifact_feed }}'
-      inputs:
-        command: push
-        packagesToPush: '$(GDN_CODESIGN_TARGETDIRECTORY)/*.nupkg'
-        publishVstsFeed: '2692857e-05ef-43b4-ba9c-ccf1c22c437c/d3daa2b0-aa56-45ac-8145-2c3dc0661c87'
-      allowPackageConflicts: true
+      command: push
+      packagesToPush: '$(GDN_CODESIGN_TARGETDIRECTORY)/*.nupkg'
+      publishVstsFeed: '2692857e-05ef-43b4-ba9c-ccf1c22c437c/d3daa2b0-aa56-45ac-8145-2c3dc0661c87'
+    allowPackageConflicts: true
