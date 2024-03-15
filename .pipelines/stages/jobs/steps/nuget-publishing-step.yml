@@ -49,7 +49,7 @@ steps:
 #This task must be run on a Windows machine
 - ${{ if eq(parameters.publish_to_ado_feed, true) }}:
   - task: NuGetCommand@2
-    displayName: 'NuGet push ${{ parameters.artifact_feed }}'
+    displayName: 'NuGet push to Azure DevOps Feed'
     inputs:
       command: push
       packagesToPush: '$(GDN_CODESIGN_TARGETDIRECTORY)/*.nupkg'
