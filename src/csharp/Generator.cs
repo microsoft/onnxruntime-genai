@@ -35,19 +35,19 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaGenerator_GenerateNextToken_Top(_generatorHandle));
         }
 
-        public void GenerateNextTokenTopK(int k, float temprature)
+        public void GenerateNextTokenTopK(int k, float temperature)
         {
-            Result.VerifySuccess(NativeMethods.OgaGenerator_GenerateNextToken_TopK(_generatorHandle, k, temprature));
+            Result.VerifySuccess(NativeMethods.OgaGenerator_GenerateNextToken_TopK(_generatorHandle, k, temperature));
         }
 
-        public void GenerateNextTokenTopP(float p, float temprature)
+        public void GenerateNextTokenTopP(float p, float temperature)
         {
-            Result.VerifySuccess(NativeMethods.OgaGenerator_GenerateNextToken_TopP(_generatorHandle, p, temprature));
+            Result.VerifySuccess(NativeMethods.OgaGenerator_GenerateNextToken_TopP(_generatorHandle, p, temperature));
         }
 
-        public void GenerateNextTokenTopKTopP(int k, float p, float temprature)
+        public void GenerateNextTokenTopKTopP(int k, float p, float temperature)
         {
-            Result.VerifySuccess(NativeMethods.OgaGenerator_GenerateNextToken_TopK_TopP(_generatorHandle, k, p, temprature));
+            Result.VerifySuccess(NativeMethods.OgaGenerator_GenerateNextToken_TopK_TopP(_generatorHandle, k, p, temperature));
         }
 
         public ReadOnlySpan<int> GetSequence(ulong index)
