@@ -13,6 +13,10 @@ def main(args):
     # Keep asking for input prompts in an loop
     while True:
         text = input("Input: ")
+        if not text:
+            print("Error, input cannot be empty")
+            continue
+
         input_tokens = tokenizer.encode(text)
 
         params = og.GeneratorParams(model)

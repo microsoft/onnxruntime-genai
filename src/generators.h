@@ -56,7 +56,7 @@ struct GeneratorParams {
   int vocab_size{};
   int context_length{};
 
-  int batch_size{};
+  int batch_size{1};
   int sequence_length{};
   int BatchBeamSize() const { return search.num_beams * batch_size; }
 
