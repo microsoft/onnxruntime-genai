@@ -79,6 +79,8 @@ jobs:
         arch: ${{ parameters.arch }}
         ort_version: ${{ parameters.ort_version }}
         cuda_version: ${{ parameters.cuda_version }}
+        publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
+        publish_to_nuget: ${{ parameters.publish_to_nuget }}
 
   - template: steps/compliant-and-cleanup-step.yml
 
