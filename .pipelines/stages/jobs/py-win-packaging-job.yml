@@ -24,6 +24,7 @@ jobs:
       Python312_x64:
         PythonVersion: '3.12'
   timeoutInMinutes: 180
+#  set variables here to be used in the template and steps
   variables:
   - name: ep
     value: ${{ parameters.ep }}

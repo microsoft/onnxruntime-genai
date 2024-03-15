@@ -22,6 +22,7 @@ jobs:
 - job: Windows_Nuget_Packaging_${{ parameters.ep }}_${{ parameters.arch }}
   pool: 'onnxruntime-Win-CPU-2022'
   timeoutInMinutes: 180
+#  set variables here to be used in the template and steps
   variables:
   - name: buildConfig
     value: 'Release'

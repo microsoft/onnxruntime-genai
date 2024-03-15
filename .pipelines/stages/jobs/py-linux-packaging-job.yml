@@ -31,6 +31,7 @@ jobs:
   workspace:
     clean: all
   pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
+#  set variables here to be used in the template and steps
   variables:
   # The build machine pool doesn't have dotnet, so it can't run CG.
   - name: skipComponentGovernanceDetection

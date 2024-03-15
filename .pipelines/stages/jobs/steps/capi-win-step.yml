@@ -27,7 +27,6 @@ steps:
     echo "ep=$(ep)"
     echo "cuda_version=$(cuda_version)"
     echo "target=${{ parameters.target }}"
-    echo "ort_filename=$(ort_filename)"
   displayName: 'Print Parameters'
 
 - template: utils/download-ort.yml

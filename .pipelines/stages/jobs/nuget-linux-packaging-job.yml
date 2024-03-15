@@ -13,6 +13,7 @@ jobs:
 - job: Linux_Nuget_Packaging_${{ parameters.ep }}_${{ parameters.arch }}
   pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
   timeoutInMinutes: 180
+#  set variables here to be used in the template and steps
   variables:
   - name: artifactName
     value: 'onnxruntime-genai-capi-linux-${{ parameters.ep }}-${{ parameters.arch }}'
