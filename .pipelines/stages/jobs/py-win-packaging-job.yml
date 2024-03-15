@@ -68,7 +68,7 @@ jobs:
 
   - template: steps/compliant/win-esrp-dll-step.yml
     parameters:
-      FolderPath: '$(Build.SourcesDirectory)\build\$(ep)\wheel\onnxruntime_genai'
+      FolderPath: '$(Build.Repository.LocalPath)\build\$(ep)\wheel\onnxruntime_genai'
       DisplayName: 'ESRP - PYD Sign'
       DoEsrp: true
       Pattern: '*.pyd'
@@ -78,12 +78,12 @@ jobs:
     displayName: 'Build Python Wheel'
 
   - powershell: |
-      Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
+      Get-ChildItem -Path $(Build.Repository.LocalPath) -Recurse
 
   - task: CopyFiles@2
     displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
     inputs:
-      SourceFolder: '$(Build.SourcesDirectory)\build\$(ep)\wheel'
+      SourceFolder: '$(Build.Repository.LocalPath)\build\$(ep)\wheel'
       Contents: '*.whl'
       TargetFolder: '$(Build.ArtifactStagingDirectory)'
 

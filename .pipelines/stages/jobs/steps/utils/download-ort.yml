@@ -1,6 +1,4 @@
 parameters:
-- name: genai_src
-  type: string
 - name: archiveType
   type: string
 steps:
@@ -16,27 +14,27 @@ steps:
     userRepository: 'microsoft/onnxruntime'
     defaultVersionType: 'specificTag'
     version: 'v$(ort_version)'
-    itemPattern: '$(ort_filename)*'
-    downloadPath: '${{ parameters.genai_src }}'
+    itemPattern: '$(ort_filename).${{ parameters.archiveType }}'
+    downloadPath: '$(Build.Repository.LocalPath)'
   displayName: Download $(ort_filename)
 
 - task: ExtractFiles@1
   inputs:
-    archiveFilePatterns: '**/*.${{ parameters.archiveType }}'
-    destinationFolder: '${{ parameters.genai_src }}'
+    archiveFilePatterns: '$(Build.Repository.LocalPath)/$(ort_filename).${{ parameters.archiveType }}'
+    destinationFolder: '$(Build.Repository.LocalPath)'
     cleanDestinationFolder: false
     overwriteExistingFiles: true
   displayName: Unzip OnnxRuntime
 
 - task: CopyFiles@2
   inputs:
-    SourceFolder: '${{ parameters.genai_src }}/$(ort_filename)'
-    TargetFolder: '${{ parameters.genai_src }}/ort'
+    SourceFolder: '$(Build.Repository.LocalPath)/$(ort_filename)'
+    TargetFolder: '$(Build.Repository.LocalPath)/ort'
   displayName: Copy OnnxRuntime to ort
 
 - task: DeleteFiles@1
   inputs:
-    SourceFolder: '${{ parameters.genai_src }}/ort/lib'
+    SourceFolder: '$(Build.Repository.LocalPath)/ort/lib'
     Contents: '*tensorrt*'
     RemoveSourceFolder: false
   displayName: 'Remove tensorrt from lib'
