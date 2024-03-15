@@ -31,11 +31,16 @@ Users can call a high level `generate()` method, or run each iteration of the mo
 
 ## Coming very soon
 
-* Support for the Whisper model architectures
 * Support for DirectML
+* Support for the encoder decoder model architectures, such as whisper, T5 and BART.
+
+## Coming soon
+
+* Support for mobile devices (Android and iOS) with Java and Objective-C bindings
 
 ## Roadmap
 
+* Stable diffusion pipeline
 * Automatic model download and cache
 * More model architectures
 
@@ -91,6 +96,9 @@ huggingface-cli login --token <your HuggingFace token>
 python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -p int4 -e cpu -o <model folder>
 ```
 
+## Known issues
+
+* Mistrel and Gemma support on CUDA only
 
 ## Contributing
 
