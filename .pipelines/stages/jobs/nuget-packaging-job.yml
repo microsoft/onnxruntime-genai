@@ -24,7 +24,7 @@ jobs:
 #  set variables here to be used in the template and steps
   variables:
   - name: arch
-    value: {es: c, el: b}
+    value: ${{ parameters.arch }}
   - name: artifactName
     value: 'onnxruntime-genai-${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.arch }}'
   - name: buildConfig
@@ -48,9 +48,8 @@ jobs:
       ${{ else }}:
         value: 'onnxruntime-${{ parameters.os }}-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
   - name: nuget_ext
-    value:
-      ort: {cpu: '', cuda: '.Gpu'}
-      genai: {cpu: '', cuda: '.Cuda'}
+    ort: {cpu: '', cuda: '.Gpu'}
+    genai: {cpu: '', cuda: '.Cuda'}
 
   workspace:
     clean: all
