@@ -67,7 +67,7 @@ jobs:
 
 # TODO: Add a step to build the linux nuget package
   - ${{ if eq(parameters.os, 'win') }}:
-    - template: steps/nuget-${{ parameters.ep }}-step.yml
+    - template: steps/nuget-${{ parameters.os }}-step.yml
     - ${{ if or(eq(parameters.publish_to_nuget, true), eq(parameters.publish_to_ado_feed, true))}}:
       - template: steps/nuget-releasing-step.yml
         parameters:
