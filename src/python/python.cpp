@@ -3,6 +3,7 @@
 #include <pybind11/numpy.h>
 #include <iostream>
 #include "../generators.h"
+#include "../json.h"
 #include "../search.h"
 #include "../models/model.h"
 
@@ -72,7 +73,12 @@ struct PyGeneratorParams : GeneratorParams {
 
     if (py_whisper_input_features_.size() != 0) {
       GeneratorParams::Whisper& whisper = inputs.emplace<GeneratorParams::Whisper>();
+#ifdef __APPLE__
+      std::span shape(reinterpret_cast<const int64_t*>(py_whisper_input_features_.shape()),
+                      py_whisper_input_features_.ndim());
+#else
       std::span<const int64_t> shape(py_whisper_input_features_.shape(), py_whisper_input_features_.ndim());
+#endif
       whisper.input_features = OrtValue::CreateTensor<float>(Ort::Allocator::GetWithDefaultOptions().GetInfo(), ToSpan(py_whisper_input_features_), shape);
       whisper.decoder_input_ids = ToSpan(py_whisper_decoder_input_ids_);
       batch_size = 1;
@@ -92,8 +98,8 @@ struct PyGeneratorParams : GeneratorParams {
         } else if (pybind11::isinstance<pybind11::int_>(entry.second)) {
           SetSearchNumber(search, name, entry.second.cast<int>());
         } else
-          throw std::runtime_error("Unknown search option type, can be float/bool/int");
-      } catch (const std::exception& e) {
+          throw std::runtime_error("Unknown search option type, can be float/bool/int:" + name);
+      } catch (JSON::unknown_value_error& e) {
         throw std::runtime_error("Unknown search option:" + name);
       }
     }

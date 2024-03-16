@@ -23,7 +23,7 @@ jobs:
   - name: ep
     value: ${{ parameters.ep }}
   - name: buildDir
-    value: 'build/gcc_${{ parameters.ep }}/release'
+    value: 'build/${{ parameters.ep }}'
   - name: ort_filename
     ${{ if eq(parameters.ep, 'cpu') }}:
       value: 'onnxruntime-linux-${{ parameters.arch }}-${{ parameters.ort_version }}'

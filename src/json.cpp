@@ -49,7 +49,7 @@ JSON::JSON(Element& element, std::string_view document) : begin_{document.data()
     int line = 1;
     const auto* last_cr = begin_;
     for (const auto* p = begin_; p < current_; p++) {
-      if (*p == '\r') {
+      if (*p == '\n') {
         line++;
         last_cr = p;
       }
@@ -108,7 +108,7 @@ void JSON::Parse_Object(Element& element) {
 
   while (true) {
     if (!Skip('\"')) {
-      throw std::runtime_error("Expecting \"");
+      throw std::runtime_error("Expecting \" to start next object name, possibly due to an extra trailing ',' before this");
     }
 
     auto name = Parse_String();
@@ -202,7 +202,7 @@ void JSON::Parse_Array(Element& element) {
 
 double JSON::Parse_Number() {
   double value = NAN;
-#ifndef USE_CXX17
+#if !defined(USE_CXX17) && !defined(__APPLE__)
   auto result = std::from_chars(current_, end_, value);
   if (result.ec != std::errc{}) {
     throw std::runtime_error("Expecting number");
