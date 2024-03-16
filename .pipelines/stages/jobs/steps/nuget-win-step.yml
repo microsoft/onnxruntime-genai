@@ -19,8 +19,8 @@ steps:
     $VERSION = '0.1.0-rc1'
     nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.nuspec `
       -Prop version=$VERSION `
-      -Prop genai_nuget_ext=$(genai_nuget_ext) `
-      -Prop ort_nuget_ext=$(ort_nuget_ext) `
+      -Prop genai_nuget_ext=$(nuget_ext.genai.$(ep)) `
+      -Prop ort_nuget_ext=$(nuget_ext.ort.$(ep)) `
       -Prop ort_version=$(ort_version) `
       -Prop configuration=$(buildConfig) `
       -Prop buildPath=$(buildDir)

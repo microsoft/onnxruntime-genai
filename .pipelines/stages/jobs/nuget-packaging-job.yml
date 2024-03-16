@@ -20,12 +20,11 @@ jobs:
     pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
   ${{ if eq(parameters.os, 'win') }}:
     pool: 'onnxruntime-Win-CPU-2022'
-
   timeoutInMinutes: 180
 #  set variables here to be used in the template and steps
   variables:
   - name: arch
-    value: ${{ parameters.arch }}
+    value: {es: c, el: b}
   - name: artifactName
     value: 'onnxruntime-genai-${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.arch }}'
   - name: buildConfig
@@ -42,22 +41,17 @@ jobs:
     value: '$(Build.ArtifactStagingDirectory)/nuget'
   - name: ort_filename
     ${{ if eq(parameters.ep, 'cpu') }}:
-      value: 'onnxruntime-${{ parameters.ep }}-${{ parameters.arch }}-${{ parameters.ort_version }}'
+      value: 'onnxruntime-${{ parameters.os }}-${{ parameters.arch }}-${{ parameters.ort_version }}'
     ${{ else}}:
       ${{if eq(parameters.cuda_version, '11.8') }}:
-        value: 'onnxruntime-${{ parameters.ep }}-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}'
+        value: 'onnxruntime-${{ parameters.os }}-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}'
       ${{ else }}:
-        value: 'onnxruntime-${{ parameters.ep }}-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
-  - name: genai_nuget_ext
-    ${{ if eq(parameters.ep, 'cpu') }}:
-      value: ''
-    ${{ if eq(parameters.ep, 'cuda') }}:
-      value: '.Cuda'
-  - name: ort_nuget_ext
-    ${{ if eq(parameters.ep, 'cpu') }}:
-      value: ''
-    ${{ if eq(parameters.ep, 'cuda') }}:
-      value: '.Gpu'
+        value: 'onnxruntime-${{ parameters.os }}-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
+  - name: nuget_ext
+    value:
+      ort: {cpu: '', cuda: '.Gpu'}
+      genai: {cpu: '', cuda: '.Cuda'}
+
   workspace:
     clean: all
   steps:
