@@ -61,7 +61,7 @@ jobs:
   workspace:
     clean: all
   steps:
-  - template: steps/capi-${{ parameters.ep }}-step.yml
+  - template: steps/capi-${{ parameters.os }}-step.yml
     parameters:
       target: 'onnxruntime-genai'
 
