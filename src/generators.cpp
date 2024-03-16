@@ -66,7 +66,7 @@ std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
   return std::make_unique<GreedySearch_Cpu>(params);
 }
 
-Generator::Generator(const Model& model, const GeneratorParams& params) : model_{&model} {
+Generator::Generator(const Model& model, const GeneratorParams& params) : model_{model.shared_from_this()} {
   if (params.search.max_length == 0)
     throw std::runtime_error("search max_length is 0");
   if (params.search.max_length > model.config_->model.context_length)
