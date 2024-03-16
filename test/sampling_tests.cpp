@@ -35,8 +35,9 @@ TEST(SamplingTests, BatchedSamplingTopPCpu) {
   auto generator = Generators::CreateGenerator(*model, *params);
   auto logits_span = Generators::cpu_span<float>(logits_cpu);
   generator->search_->SetLogits(logits_span);
+  generator->computed_logits_ = true;
   // Verify outputs match expected outputs
-  generator->search_->SampleTopP(0.25f, 1.0f);
+  generator->GenerateNextToken_TopP(0.25f, 1.0f);
   auto next_tokens = generator->search_->GetNextTokens().GetCPU();
   EXPECT_TRUE(0 == std::memcmp(output_span.data(), next_tokens.data(), expected_output.size() * sizeof(int32_t)));
 }
@@ -60,10 +61,11 @@ TEST(SamplingTests, BatchedSamplingTopKCpu) {
   auto generator = Generators::CreateGenerator(*model, *params);
   auto logits_copy = logits_cpu;
   generator->search_->SetLogits(Generators::cpu_span<float>(logits_copy));
+  generator->computed_logits_ = true;
 
   // Verify outputs match expected outputs
   int k = 2;
-  generator->search_->SampleTopK(k, 1.0);
+  generator->GenerateNextToken_TopK(k, 1.0);
   auto next_tokens = generator->search_->GetNextTokens().GetCPU();
   for (int b = 0; b < batch_size; b++) {
     auto next_token = next_tokens[b];
@@ -91,10 +93,11 @@ TEST(SamplingTests, BatchedSamplingTopPAndKCpu) {
   auto generator = Generators::CreateGenerator(*model, *params);
   auto logits_copy = logits_cpu;
   generator->search_->SetLogits(Generators::cpu_span<float>(logits_copy));
+  generator->computed_logits_ = true;
   // Verify outputs match expected outputs
   float p = 0.25f;
   int k = 2;
-  generator->search_->SampleTopPAndK(p, k, 1.0);
+  generator->GenerateNextToken_TopK_TopP(k, p, 1.0);
   auto next_tokens = generator->search_->GetNextTokens().GetCPU();
   for (int b = 0; b < batch_size; b++) {
     auto next_token = next_tokens[b];
@@ -143,7 +146,8 @@ TEST(SamplingTests, RandomizedSamplingTopPCpu) {
     CreateRandomLogits(logits_cpu.data(), num_large, vocab_size, batch_size, engine);
     auto logits_copy = logits_cpu;
     generator->search_->SetLogits(Generators::cpu_span<float>(logits_copy));
-    generator->search_->SampleTopP(0.95f, 1.0f);
+    generator->computed_logits_ = true;
+    generator->GenerateNextToken_TopP(0.95f, 1.0f);
     auto next_tokens = generator->search_->GetNextTokens().GetCPU();
     // Verify outputs match expected outputs
     for (int b = 0; b < batch_size; b++) {
@@ -178,7 +182,8 @@ TEST(SamplingTests, RandomizedSamplingTopKCpu) {
     CreateRandomLogits(logits_cpu.data(), num_large, vocab_size, batch_size, engine);
     auto logits_copy=logits_cpu;
     generator->search_->SetLogits(Generators::cpu_span<float>(logits_copy));
-    generator->search_->SampleTopK(k, 1.0f);
+    generator->computed_logits_ = true;
+    generator->GenerateNextToken_TopK(k, 1.0f);
     auto next_tokens = generator->search_->GetNextTokens().GetCPU();
     // Verify outputs match expected outputs
     for (int b = 0; b < batch_size; b++) {
@@ -214,7 +219,8 @@ TEST(SamplingTests, RandomizedSamplingTopPAndKCpu) {
     CreateRandomLogits(logits_cpu.data(), num_large, vocab_size, batch_size, engine);
     auto logits_copy = logits_cpu;
     generator->search_->SetLogits(Generators::cpu_span<float>(logits_copy));
-    generator->search_->SampleTopPAndK(p, k, 1.0f);
+    generator->computed_logits_ = true;
+    generator->GenerateNextToken_TopK_TopP(k, p, 1.0f);
     auto next_tokens = generator->search_->GetNextTokens().GetCPU();
     // Verify outputs match expected outputs
     for (int b = 0; b < batch_size; b++) {
@@ -251,8 +257,9 @@ TEST(SamplingTests, BatchedSamplingTopPCuda) {
   cudaStreamSynchronize(params->cuda_stream);
   auto generator = Generators::CreateGenerator(*model, *params);
   generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), logits_cpu.size()));
+  generator->computed_logits_ = true;
   // Verify outputs match expected outputs
-  generator->search_->SampleTopP(0.25f, 1.0f);
+  generator->GenerateNextToken_TopP(0.25f, 1.0f);
   auto next_tokens = generator->search_->GetNextTokens().GetCPU();
   EXPECT_TRUE(0 == std::memcmp(output_span.data(), next_tokens.data(), expected_output.size() * sizeof(int32_t)));
 }
@@ -278,9 +285,10 @@ TEST(SamplingTests, BatchedSamplingTopKCuda) {
   cudaStreamSynchronize(params->cuda_stream);
   auto generator = Generators::CreateGenerator(*model, *params);
   generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), logits_cpu.size()));
+  generator->computed_logits_ = true;
   // Verify outputs match expected outputs
   int k = 2;
-  generator->search_->SampleTopK(k, 1.0);
+  generator->GenerateNextToken_TopK(k, 1.0);
   auto next_tokens = generator->search_->GetNextTokens().GetCPU();
   for (int b = 0; b < batch_size; b++) {
     auto next_token = next_tokens[b];
@@ -310,10 +318,11 @@ TEST(SamplingTests, BatchedSamplingTopPAndKCuda) {
   cudaStreamSynchronize(params->cuda_stream);
   auto generator = Generators::CreateGenerator(*model, *params);
   generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), logits_cpu.size()));
+  generator->computed_logits_ = true;
   // Verify outputs match expected outputs
   float p = 0.25f;
   int k = 2;
-  generator->search_->SampleTopPAndK(p, k, 1.0);
+  generator->GenerateNextToken_TopK_TopP(k, p, 1.0);
   auto next_tokens = generator->search_->GetNextTokens().GetCPU();
   for (int b = 0; b < batch_size; b++) {
     auto next_token = next_tokens[b];
@@ -348,7 +357,8 @@ TEST(SamplingTests, RandomizedSamplingTopPCuda) {
     LaunchFisherYatesKernel(logits_gpu.get(), indices_buffer.get(), vocab_size, batch_size, params->cuda_stream);
     cudaMemcpyAsync(cpu_logits, logits_gpu.get(), vocab_size * batch_size * sizeof(float), cudaMemcpyDeviceToHost, params->cuda_stream);
     generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), vocab_size * batch_size));
-    generator->search_->SampleTopP(0.95f, 1.0f);
+    generator->computed_logits_ = true;
+    generator->GenerateNextToken_TopP(0.95f, 1.0f);
     auto next_tokens = generator->search_->GetNextTokens().GetCPU();
     cudaStreamSynchronize(params->cuda_stream);
     // Verify outputs match expected outputs
@@ -387,7 +397,8 @@ TEST(SamplingTests, RandomizedSamplingTopKCuda) {
     cudaMemcpyAsync(cpu_logits, logits_gpu.get(), vocab_size * batch_size * sizeof(float), cudaMemcpyDeviceToHost, params->cuda_stream);
     auto generator = Generators::CreateGenerator(*model, *params);
     generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), vocab_size * batch_size));
-    generator->search_->SampleTopK(k, 1.0f);
+    generator->computed_logits_ = true;
+    generator->GenerateNextToken_TopK(k, 1.0f);
     auto next_tokens = generator->search_->GetNextTokens().GetCPU();
     cudaStreamSynchronize(params->cuda_stream);
     // Verify outputs match expected outputs
@@ -427,7 +438,8 @@ TEST(SamplingTests, RandomizedSamplingTopPAndKCuda) {
     LaunchFisherYatesKernel(logits_gpu.get(), indices_buffer.get(), vocab_size, batch_size, params->cuda_stream);
     cudaMemcpyAsync(cpu_logits, logits_gpu.get(), vocab_size * batch_size * sizeof(float), cudaMemcpyDeviceToHost, params->cuda_stream);
     generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), vocab_size * batch_size));
-    generator->search_->SampleTopPAndK(p, k, 1.0f);
+    generator->computed_logits_ = true;
+    generator->GenerateNextToken_TopK_TopP(k, p, 1.0f);
     auto next_tokens = generator->search_->GetNextTokens().GetCPU();
     cudaStreamSynchronize(params->cuda_stream);
     // Verify outputs match expected outputs
@@ -465,7 +477,8 @@ TEST(SamplingTests, RandomizedSamplingSelectTopCuda) {
     cudaMemcpyAsync(cpu_logits, logits_gpu.get(), vocab_size * batch_size * sizeof(float), cudaMemcpyDeviceToHost, params->cuda_stream);
     auto generator = Generators::CreateGenerator(*model, *params);
     generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), vocab_size * batch_size));
-    generator->search_->SelectTop();
+    generator->computed_logits_ = true;
+    generator->GenerateNextToken_Top();
     auto next_tokens = generator->search_->GetNextTokens().GetCPU();
     cudaStreamSynchronize(params->cuda_stream);
     // Verify outputs match expected outputs

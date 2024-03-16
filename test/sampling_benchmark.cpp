@@ -117,7 +117,7 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopPAndKCpu) {
     generator->search_->SetLogits(Generators::cpu_span<float>(logits_cpu.data(), vocab_size * batch_size));
 
     auto start = std::chrono::high_resolution_clock::now();
-    generator->search_->SampleTopPAndK(p, k, 1.0f);
+    generator->search_->SampleTopKTopP(k, p, 1.0f);
     auto stop = std::chrono::high_resolution_clock::now();
 
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
@@ -252,7 +252,7 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopPAndKCuda) {
 
     cudaStreamSynchronize(params->cuda_stream);
     auto start = std::chrono::high_resolution_clock::now();
-    generator->search_->SampleTopPAndK(p, k, 1.0f);
+    generator->search_->SampleTopKTopP(k, p, 1.0f);
     auto stop = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
     total_time += duration.count();

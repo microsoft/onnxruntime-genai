@@ -187,7 +187,7 @@ void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
   AppendNextTokensToSequences();
 }
 
-void GreedySearch_Cpu::SampleTopPAndK(float p, int k, float temperature) {
+void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature) {
   std::uniform_real_distribution<float> dis(0, p);
   for (size_t batch_id = 0; batch_id < params_->batch_size; batch_id++) {
     if (PadIfAlreadyEOS(batch_id)) {
