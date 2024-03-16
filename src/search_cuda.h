@@ -51,7 +51,7 @@ struct GreedySearch_Cuda : Search_Cuda {
   void SelectTop() override;
   void SampleTopK(int k, float t) override;
   void SampleTopP(float p, float t) override;
-  void SampleTopPAndK(float p, int k, float t) override;
+  void SampleTopKTopP(int k, float p, float t) override;
 
  private:
   void CheckForEOS();

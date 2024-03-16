@@ -24,7 +24,7 @@ struct Search {
   virtual void SelectTop() = 0;
   virtual void SampleTopP(float /*p*/, float /*temperature*/) { assert(false); }
   virtual void SampleTopK(int /*k*/, float /*temperature*/) { assert(false); }
-  virtual void SampleTopPAndK(float /*p*/, int /*k*/, float /*temperature*/) { assert(false); }
+  virtual void SampleTopKTopP(int /*k*/, float /*p*/, float /*temperature*/) { assert(false); }
 
   // Scoring features
   virtual void ApplyMinLength(int min_length) = 0;
@@ -69,7 +69,7 @@ struct GreedySearch_Cpu : Search_Cpu {
   void SelectTop() override;
   void SampleTopK(int k, float temperature) override;
   void SampleTopP(float p, float temperature) override;
-  void SampleTopPAndK(float /*p*/, int /*k*/, float /*temperature*/) override;
+  void SampleTopKTopP(int /*k*/, float /*p*/, float /*temperature*/) override;
 
  private:
   bool PadIfAlreadyEOS(size_t batch_id);
