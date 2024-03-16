@@ -590,39 +590,7 @@ class Model:
         self.make_node("RotaryEmbedding", inputs=inputs, outputs=[output], name=name, domain="com.microsoft", interleaved=0, **kwargs)
         self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * (self.num_kv_heads if "k_rotary" in name else self.num_attn_heads)])
 
-    # def make_repeat_kv(self, layer_id, root_input, past_kv, present_kv, **kwargs):
-    #     basename = f"/model/layers.{layer_id}/attn/{'k_proj' if past_kv.endswith('key') else 'v_proj'}/repeat_kv"
-        
-    #     reshape_1_name = f"{basename}/Reshape_1"
-    #     reshape_1_inputs = [root_input, f"/model/constants/TensorProto.INT64/1D/0, 0, {self.num_kv_heads}, -1"]
-    #     self.make_reshape(reshape_1_name, reshape_1_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.num_kv_heads, self.head_size])
-    #     transpose_1_name = f"{basename}/Transpose_1"
-    #     transpose_1_input = f"{reshape_1_name}/output_0"
-    #     self.make_transpose(transpose_1_name, transpose_1_input, dtype=self.io_dtype, shape=['batch_size', self.num_kv_heads, 'sequence_length', self.head_size], perm=[0,2,1,3])
-    #     concat_name = f"{basename}/Concat"
-    #     concat_inputs = [past_kv, f"{transpose_1_name}/output_0"]
-    #     self.make_node("Concat", inputs=concat_inputs, outputs=[present_kv], name=concat_name, axis=2)
-
-    #     unsqueeze_name = f"{basename}/Unsqueeze"
-    #     unsqueeze_inputs = [present_kv, "/model/constants/TensorProto.INT64/1D/2"]
-    #     self.make_unsqueeze(unsqueeze_name, unsqueeze_inputs, dtype=self.io_dtype, shape=['batch_size', self.num_kv_heads, 1, 'sequence_length', self.head_size])
-    #     expand_name = f"{basename}/Expand"
-    #     expand_inputs = [f"{unsqueeze_name}/output_0", ???]
-    #     self.make_expand(expand_name, expand_inputs, dtype=self.io_dtype, shape=['batch_size', self.num_kv_heads, self.num_attn_heads // self.num_kv_heads, 'sequence_length', self.head_size])
-    #     reshape_2_name = f"{basename}/Reshape_2"
-    #     reshape_2_inputs = [f"{expand_name}/output_0", f"/model/constants/TensorProto.INT64/1D/0, -1, 0, 0"]
-    #     self.make_reshape(reshape_2_name, reshape_2_inputs, dtype=self.io_dtype, shape=['batch_size', self.num_attn_heads, 'sequence_length', self.head_size])
-    #     transpose_2_name = f"{basename}/Transpose_2"
-    #     transpose_2_input = f"{reshape_2_name}/output_0"
-    #     self.make_transpose(transpose_2_name, transpose_2_input, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.num_attn_heads, self.head_size], perm=[0,2,1,3])
-    #     reshape_3_name = f"{basename}/Reshape_3"
-    #     reshape_3_inputs = [f"{transpose_2_name}/output_0", f"/model/constants/TensorProto.INT64/1D/0, 0, -1"]
-    #     self.make_reshape(reshape_2_name, reshape_2_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.num_attn_heads * self.head_size])
-
-    #     input_to_attention = f"{reshape_3_name}/output_0"
-    #     return input_to_attention
-
-    # Note: This function and any corresponding changes to support it are temporary until ORT supports GQA for CPU
+    # TODO: This function and any corresponding changes to support it are temporary until ORT supports GQA for CPU
     def make_repeat_kv(self, layer_id, root_input, past_kv, present_kv, **kwargs):
         # Make subgraph that repeats tensor of shape (batch_size, sequence_length, num_kv_heads, head_size)
         # to shape (batch_size, sequence_length, num_attn_heads, head_size) in an interleaved pattern
@@ -654,6 +622,8 @@ class Model:
         #        |     +-----------+-----------+-----------+
         #        |                 |
         #        |                 +-----------------------+
+        #        |                 |                       |
+        #        |                 |                      Mul
         #        |                 |                       |
         #        |              Concat                   Concat
         #        |               (5D)                     (4D)
@@ -690,6 +660,8 @@ class Model:
         #                 Reshape
         #                    |
         #                Transpose
+        #                    |
+        #                 Reshape
         basename = f"/model/layers.{layer_id}/attn/{'k_proj' if past_kv.endswith('key') else 'v_proj'}/repeat_kv"
 
         # Make the initial subgraph
@@ -777,7 +749,7 @@ class Model:
         #
         # Where (from above)  Concat (from above)
         #                   \           \
-        # Unsqueeze --> Expand --> Reshape --> Transpose
+        # Unsqueeze --> Expand --> Reshape --> Transpose --> Reshape
         unsqueeze_5_name = f"{basename}/Unsqueeze_5"
         unsqueeze_5_inputs = [present_kv, "/model/constants/TensorProto.INT64/1D/2"]
         self.make_unsqueeze(unsqueeze_5_name, unsqueeze_5_inputs, dtype=self.io_dtype, shape=['batch_size', self.num_kv_heads, 1, 'sequence_length', self.head_size])
@@ -1503,54 +1475,6 @@ class PhiModel(LlamaModel):
 
     def make_rotary_embedding(self, rotemb, name, root_input, **kwargs):
         super().make_rotary_embedding(rotemb, name, root_input, num_heads=self.rotemb_attrs["num_heads"], rotary_embedding_dim=self.rotemb_attrs["rotary_embedding_dim"], **kwargs)
-
-    def make_group_query_attention(self, name, **kwargs):
-        if self.layer_id < self.num_layers - 3:
-            super().make_group_query_attention(name, **kwargs)
-            return
-
-        # Cast inputs and outputs of GroupQueryAttention
-        input_kwargs = {"q_path", "k_path", "v_path", "past_k", "past_v"}
-        new_kwargs = {}
-
-        # Make input cast nodes to bfloat16
-        for input_name in input_kwargs:
-            cast_name = f"/model/layers.{self.layer_id}/attn/{input_name.replace('path', 'proj')}/Cast"
-            cast_shape = ['batch_size', 'sequence_length', self.hidden_size] if input_name in {"q_path", "k_path", "v_path"} else ["batch_size", self.num_kv_heads, "past_sequence_length", self.head_size]
-            self.make_cast(cast_name, kwargs[input_name], dtype=TensorProto.BFLOAT16, shape=cast_shape)
-            new_kwargs[input_name] = f"{cast_name}/output_0"
-
-        # Make GroupQueryAttention node
-        inputs = [
-            new_kwargs["q_path"], new_kwargs["k_path"], new_kwargs["v_path"],
-            new_kwargs["past_k"], new_kwargs["past_v"],
-            kwargs.get("seqlens_k", ""), kwargs.get("total_seq_len", ""),
-        ]
-        outputs = [f"{name}/Cast/output_0", f"{name}/output_1", f"{name}/output_2"]
-        self.make_node("GroupQueryAttention", inputs=inputs, outputs=outputs, name=name, domain="com.microsoft", num_heads=self.num_attn_heads, kv_num_heads=self.num_kv_heads)
-        self.make_value_info(outputs[0], TensorProto.BFLOAT16, shape=['batch_size', 'sequence_length', self.hidden_size])
-
-        present_kv_shape = ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size]
-        self.make_value_info(outputs[1], TensorProto.BFLOAT16, shape=present_kv_shape)
-        self.make_value_info(outputs[2], TensorProto.BFLOAT16, shape=present_kv_shape)
-
-        # Make output cast nodes to float16
-        target_dtype = TensorProto.FLOAT16
-
-        cast_o_path_name = f"{name}/o_proj/Cast"
-        cast_o_path_output = f"{name}/output_0"
-        self.make_node("Cast", inputs=[outputs[0]], outputs=[cast_o_path_output], name=cast_o_path_name, to=target_dtype)
-        self.make_value_info(cast_o_path_output, target_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
-        
-        cast_present_k_name = f"{name}/present_k/Cast"
-        cast_present_k_output = f"present.{self.layer_id}.key"
-        self.make_node("Cast", inputs=[outputs[1]], outputs=[cast_present_k_output], name=cast_present_k_name, to=target_dtype)
-        self.make_value_info(cast_present_k_output, target_dtype, shape=present_kv_shape)
-        
-        cast_present_v_name = f"{name}/present_v/Cast"
-        cast_present_v_output = f"present.{self.layer_id}.value"
-        self.make_node("Cast", inputs=[outputs[2]], outputs=[cast_present_v_output], name=cast_present_v_name, to=target_dtype)
-        self.make_value_info(cast_present_v_output, target_dtype, shape=present_kv_shape)
         
     def make_mlp(self, layer_id, mlp, root_input):
         # Make nodes for the MLP subgraph
