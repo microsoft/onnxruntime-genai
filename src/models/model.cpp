@@ -301,15 +301,15 @@ std::unique_ptr<Tokenizer> Model::CreateTokenizer() const {
   return std::make_unique<Tokenizer>(*config_);
 }
 
-std::unique_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path) {
+std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path) {
   auto config = std::make_unique<Config>(config_path);
 
   if (config->model.type == "gpt2")
-    return std::make_unique<Gpt_Model>(std::move(config), ort_env);
+    return std::make_shared<Gpt_Model>(std::move(config), ort_env);
   if (config->model.type == "llama" || config->model.type == "gemma" || config->model.type == "mistral" || config->model.type == "phi")
-    return std::make_unique<DecoderOnly_Model>(std::move(config), ort_env);
+    return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
   if (config->model.type == "whisper")
-    return std::make_unique<Whisper_Model>(std::move(config), ort_env);
+    return std::make_shared<Whisper_Model>(std::move(config), ort_env);
 
   throw std::runtime_error("Unsupported model_type in config.json: " + config->model.type);
 }

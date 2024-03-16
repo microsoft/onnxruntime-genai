@@ -63,7 +63,9 @@ const int32_t* OGA_API_CALL OgaSequencesGetSequenceData(const OgaSequences* p, s
 
 OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaModel** out) {
   OGA_TRY
-  *out = reinterpret_cast<OgaModel*>(Generators::CreateModel(Generators::GetOrtEnv(), config_path).release());
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), config_path);
+  model->external_owner_ = model;
+  *out = reinterpret_cast<OgaModel*>(model.get());
   return nullptr;
   OGA_CATCH
 }
@@ -237,7 +239,7 @@ void OGA_API_CALL OgaDestroySequences(OgaSequences* p) {
 }
 
 void OGA_API_CALL OgaDestroyModel(OgaModel* p) {
-  delete reinterpret_cast<Generators::Model*>(p);
+  reinterpret_cast<Generators::Model*>(p)->external_owner_ = nullptr;
 }
 
 void OGA_API_CALL OgaDestroyGeneratorParams(OgaGeneratorParams* p) {

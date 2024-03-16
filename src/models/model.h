@@ -94,7 +94,7 @@ struct SessionInfo {
   std::unordered_map<std::string, ONNXTensorElementDataType> inputs_, outputs_;
 };
 
-struct Model {
+struct Model : std::enable_shared_from_this<Model> {
   Model(std::unique_ptr<Config> config);
   virtual ~Model();
 
@@ -112,6 +112,8 @@ struct Model {
   Ort::Allocator* allocator_device_{};  // Can be CUDA or CPU based on the DeviceType in the model
 
   std::unique_ptr<SessionInfo> session_info_;
+
+  std::shared_ptr<Model> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
 
  protected:
   void InitDeviceAllocator(OrtSession& session);

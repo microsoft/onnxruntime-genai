@@ -216,7 +216,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       })
       .def("create_stream", [](const Tokenizer& t) { return t.CreateStream(); });
 
-  pybind11::class_<Model>(m, "Model")
+  pybind11::class_<Model, std::shared_ptr<Model>>(m, "Model")
       .def(pybind11::init([](const std::string& config_path) {
         return CreateModel(GetOrtEnv(), config_path.c_str());
       }))
