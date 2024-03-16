@@ -46,6 +46,8 @@ stages:
         ep: 'cpu'
         ort_version: ${{ parameters.ort_version }}
         os: 'linux'
+        publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
+        publish_to_nuget: ${{ parameters.publish_to_nuget }}
   - ${{ if eq(parameters.enable_linux_cuda, true) }}:
     - template: jobs/nuget-packaging-job.yml
       parameters:
@@ -54,3 +56,5 @@ stages:
         ep: 'cuda'
         ort_version: ${{ parameters.ort_version }}
         os: 'linux'
+        publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
+        publish_to_nuget: ${{ parameters.publish_to_nuget }}

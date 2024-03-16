@@ -68,11 +68,11 @@ jobs:
 # TODO: Add a step to build the linux nuget package
   - ${{ if eq(parameters.os, 'win') }}:
     - template: steps/nuget-${{ parameters.os }}-step.yml
-  - ${{ if and(eq(parameters.os, 'win'), or(eq(parameters.publish_to_nuget, true), eq(parameters.publish_to_ado_feed, true)))}}:
-    - template: steps/nuget-releasing-step.yml
-      parameters:
-        publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
-        publish_to_nuget: ${{ parameters.publish_to_nuget }}
+    - ${{ if or(eq(parameters.publish_to_nuget, true), eq(parameters.publish_to_ado_feed, true))}}:
+      - template: steps/nuget-releasing-step.yml
+        parameters:
+          publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
+          publish_to_nuget: ${{ parameters.publish_to_nuget }}
 
   - template: steps/compliant-and-cleanup-step.yml
 
