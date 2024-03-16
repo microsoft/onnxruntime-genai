@@ -1,19 +1,15 @@
 parameters:
 - name: arch
   type: string
-  values:
-    - 'x64'
-    - 'arm64'
 - name: ep
   type: string
-  values:
-  - 'cpu'
-  - 'cuda'
 - name: ort_version
   type: string
 - name: cuda_version
   type: string
   default: ''
+- name: os
+  type: string
 - name: publish_to_ado_feed
   type: boolean
 - name: publish_to_nuget
@@ -24,30 +20,30 @@ jobs:
   timeoutInMinutes: 180
 #  set variables here to be used in the template and steps
   variables:
-  - name: buildConfig
-    value: 'Release'
-  - name: cuda_version
-    value: ${{ parameters.cuda_version }}
-  - name: ort_version
-    value: ${{ parameters.ort_version }}
   - name: arch
     value: ${{ parameters.arch }}
+  - name: artifactName
+    value: 'onnxruntime-genai-capi-${{ parameters.ep }}-${{ parameters.ep }}-${{ parameters.arch }}'
+  - name: buildConfig
+    value: 'Release'
+  - name: buildDir
+    value: 'build/${{ parameters.ep }}'
+  - name: cuda_version
+    value: ${{ parameters.cuda_version }}
   - name: ep
     value: ${{ parameters.ep }}
-  - name: buildDir
-    value: 'build\${{ parameters.ep }}'
-  - name: artifactName
-    value : 'onnxruntime-genai-capi-win-${{ parameters.ep }}-${{ parameters.arch }}'
+  - name: ort_version
+    value: ${{ parameters.ort_version }}
   - name: GDN_CODESIGN_TARGETDIRECTORY
     value: '$(Build.BinariesDirectory)/nuget-artifact/final-package'
   - name: ort_filename
     ${{ if eq(parameters.ep, 'cpu') }}:
-      value: 'onnxruntime-win-${{ parameters.arch }}-${{ parameters.ort_version }}'
+      value: 'onnxruntime-${{ parameters.ep }}-${{ parameters.arch }}-${{ parameters.ort_version }}'
     ${{ else}}:
       ${{if eq(parameters.cuda_version, '11.8') }}:
-        value: 'onnxruntime-win-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}'
+        value: 'onnxruntime-${{ parameters.ep }}-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}'
       ${{ else }}:
-        value: 'onnxruntime-win-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
+        value: 'onnxruntime-${{ parameters.ep }}-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
   - name: genai_nuget_ext
     ${{ if eq(parameters.ep, 'cpu') }}:
       value: ''
@@ -61,12 +57,13 @@ jobs:
   workspace:
     clean: all
   steps:
-  - template: steps/capi-win-step.yml
+  - template: steps/capi-${{ parameters.ep }}-step.yml
     parameters:
       target: 'onnxruntime-genai'
 
-  - template: steps/nuget-win-step.yml
-
+# TODO: Add a step to build the linux nuget package
+  - ${{ if ne(parameters.os, 'linux') }}:
+    - template: steps/nuget-${{ parameters.ep }}-step.yml
 
   - ${{ if or(eq(parameters.publish_to_nuget, true), eq(parameters.publish_to_ado_feed, true))}}:
     - template: steps/nuget-releasing-step.yml
