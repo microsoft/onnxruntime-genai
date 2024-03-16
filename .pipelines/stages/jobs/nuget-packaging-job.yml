@@ -39,7 +39,7 @@ jobs:
   - name: ort_version
     value: ${{ parameters.ort_version }}
   - name: GDN_CODESIGN_TARGETDIRECTORY
-    value: '$(Build.BinariesDirectory)/nuget-artifact/final-package'
+    value: '$(Build.ArtifactStagingDirectory)/nuget'
   - name: ort_filename
     ${{ if eq(parameters.ep, 'cpu') }}:
       value: 'onnxruntime-${{ parameters.ep }}-${{ parameters.arch }}-${{ parameters.ort_version }}'
