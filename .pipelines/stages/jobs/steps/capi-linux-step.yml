@@ -89,6 +89,13 @@ steps:
             --target python"
     displayName: 'Build Python $(PyNoDotVer)'
     workingDirectory: '$(Build.Repository.LocalPath)'
+
+  - task: BinSkim@4
+    displayName: 'Run BinSkim'
+    inputs:
+      AnalyzeTargetGlob: '$(Build.Repository.LocalPath)/**/*.pyd'
+    continueOnError: true
+
   - bash: |
       set -e -x
       docker run \
@@ -104,12 +111,6 @@ steps:
             --target PyPackageBuild"
     displayName: 'PyPackageBuild $(PyNoDotVer)'
     workingDirectory: '$(Build.Repository.LocalPath)'
-
-  - task: BinSkim@4
-    displayName: 'Run BinSkim'
-    inputs:
-      AnalyzeTargetGlob: '$(Build.Repository.LocalPath)\**\*.pyd'
-    continueOnError: true
 
   - task: CopyFiles@2
     displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
