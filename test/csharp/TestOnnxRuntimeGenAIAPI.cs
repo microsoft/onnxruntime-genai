@@ -8,6 +8,7 @@ using Xunit.Abstractions;
 using Microsoft.ML.OnnxRuntimeGenAI;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection.Emit;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 {
@@ -81,6 +82,188 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                     {
                         var expectedSequence = expectedOutput.Skip((int)i * (int)maxLength).Take((int)maxLength);
                         Assert.Equal(expectedSequence, sequences[i].ToArray());
+                    }
+                }
+            }
+        }
+
+        [Fact(DisplayName = "TestTopKSearch")]
+        public void TestTopKSearch()
+        {
+            int topK = 50;
+            float temp = 0f;
+            ulong maxLength = 10;
+            int[] inputIDs = new int[] { 0, 0, 0, 52, 0, 0, 195, 731 };
+            var inputIDsShape = new ulong[] { 2, 4 };
+            ulong batchSize = inputIDsShape[0];
+            ulong sequenceLength = inputIDsShape[1];
+            var expectedOutput = new int[] { 0, 0, 0, 52, 38, 38, 38, 38, 38, 38,
+                                             0, 0, 195, 731, 38, 38, 38, 38, 38, 38 };
+
+            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "hf-internal-testing", "tiny-random-gpt2-fp32");
+            using (var model = new Model(modelPath))
+            {
+                Assert.NotNull(model);
+                using (var generatorParams = new GeneratorParams(model))
+                {
+                    Assert.NotNull(generatorParams);
+
+                    generatorParams.SetSearchOption("max_length", maxLength);
+                    generatorParams.SetInputIDs(inputIDs, sequenceLength, batchSize);
+
+                    using (var generator = new Generator(model, generatorParams))
+                    {
+                        Assert.NotNull(generator);
+
+                        while (!generator.IsDone())
+                        {
+                            generator.ComputeLogits();
+                            generator.GenerateNextTokenTopK(topK, temp);
+                        }
+
+                        for (ulong i = 0; i < batchSize; i++)
+                        {
+                            var sequence = generator.GetSequence(i).ToArray();
+                            var expectedSequence = expectedOutput.Skip((int)i * (int)maxLength).Take((int)maxLength);
+                            Assert.Equal(expectedSequence, sequence);
+                            Console.WriteLine(sequence);
+                        }
+                    }
+
+                    generatorParams.SetSearchOption("do_sample", true);
+                    generatorParams.SetSearchOption("top_k", topK);
+                    generatorParams.SetSearchOption("temperature", temp);
+                    generatorParams.SetInputIDs(inputIDs, sequenceLength, batchSize);
+                    var sequences = model.Generate(generatorParams);
+                    Assert.NotNull(sequences);
+
+                    for (ulong i = 0; i < batchSize; i++)
+                    {
+                        var sequence = sequences[i].ToArray();
+                        var expectedSequence = expectedOutput.Skip((int)i * (int)maxLength).Take((int)maxLength);
+                        Assert.Equal(expectedSequence, sequence);
+                    }
+                }
+            }
+        }
+
+        [Fact(DisplayName = "TestTopPSearch")]
+        public void TestTopPSearch()
+        {
+            float topP = 1f;
+            float temp = 0f;
+            ulong maxLength = 10;
+            int[] inputIDs = new int[] { 0, 0, 0, 52, 0, 0, 195, 731 };
+            var inputIDsShape = new ulong[] { 2, 4 };
+            ulong batchSize = inputIDsShape[0];
+            ulong sequenceLength = inputIDsShape[1];
+            var expectedOutput = new int[] { 0, 0, 0, 52, 0, 0, 0, 0, 0, 0,
+                                             0, 0, 195, 731, 0, 0, 0, 0, 0, 0 };
+
+            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "hf-internal-testing", "tiny-random-gpt2-fp32");
+            using (var model = new Model(modelPath))
+            {
+                Assert.NotNull(model);
+                using (var generatorParams = new GeneratorParams(model))
+                {
+                    Assert.NotNull(generatorParams);
+
+                    generatorParams.SetSearchOption("max_length", maxLength);
+                    generatorParams.SetInputIDs(inputIDs, sequenceLength, batchSize);
+
+                    using (var generator = new Generator(model, generatorParams))
+                    {
+                        Assert.NotNull(generator);
+
+                        while (!generator.IsDone())
+                        {
+                            generator.ComputeLogits();
+                            generator.GenerateNextTokenTopP(topP, temp);
+                        }
+
+                        for (ulong i = 0; i < batchSize; i++)
+                        {
+                            var sequence = generator.GetSequence(i).ToArray();
+                            var expectedSequence = expectedOutput.Skip((int)i * (int)maxLength).Take((int)maxLength);
+                            Assert.Equal(expectedSequence, sequence);
+                            Console.WriteLine(sequence);
+                        }
+                    }
+
+                    generatorParams.SetSearchOption("do_sample", true);
+                    generatorParams.SetSearchOption("top_p", topP);
+                    generatorParams.SetSearchOption("temperature", temp);
+                    generatorParams.SetInputIDs(inputIDs, sequenceLength, batchSize);
+                    var sequences = model.Generate(generatorParams);
+                    Assert.NotNull(sequences);
+
+                    for (ulong i = 0; i < batchSize; i++)
+                    {
+                        var sequence = sequences[i].ToArray();
+                        var expectedSequence = expectedOutput.Skip((int)i * (int)maxLength).Take((int)maxLength);
+                        Assert.Equal(expectedSequence, sequence);
+                    }
+                }
+            }
+        }
+
+        [Fact(DisplayName = "TestTopKTopPSearch")]
+        public void TestTopKTopPSearch()
+        {
+            int topK = 100;
+            float topP = 1f;
+            float temp = 0f;
+            ulong maxLength = 10;
+            int[] inputIDs = new int[] { 0, 0, 0, 52, 0, 0, 195, 731 };
+            var inputIDsShape = new ulong[] { 2, 4 };
+            ulong batchSize = inputIDsShape[0];
+            ulong sequenceLength = inputIDsShape[1];
+            var expectedOutput = new int[] { 0, 0, 0, 52, 78, 78, 78, 78, 78, 78,
+                                             0, 0, 195, 731, 78, 78, 78, 78, 78, 78 };
+
+            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "hf-internal-testing", "tiny-random-gpt2-fp32");
+            using (var model = new Model(modelPath))
+            {
+                Assert.NotNull(model);
+                using (var generatorParams = new GeneratorParams(model))
+                {
+                    Assert.NotNull(generatorParams);
+
+                    generatorParams.SetSearchOption("max_length", maxLength);
+                    generatorParams.SetInputIDs(inputIDs, sequenceLength, batchSize);
+
+                    using (var generator = new Generator(model, generatorParams))
+                    {
+                        Assert.NotNull(generator);
+
+                        while (!generator.IsDone())
+                        {
+                            generator.ComputeLogits();
+                            generator.GenerateNextTokenTopKTopP(topK, topP, temp);
+                        }
+
+                        for (ulong i = 0; i < batchSize; i++)
+                        {
+                            var sequence = generator.GetSequence(i).ToArray();
+                            var expectedSequence = expectedOutput.Skip((int)i * (int)maxLength).Take((int)maxLength);
+                            Assert.Equal(expectedSequence, sequence);
+                            Console.WriteLine(sequence);
+                        }
+                    }
+
+                    generatorParams.SetSearchOption("do_sample", true);
+                    generatorParams.SetSearchOption("top_p", topP);
+                    generatorParams.SetSearchOption("top_k", topK);
+                    generatorParams.SetSearchOption("temperature", temp);
+                    generatorParams.SetInputIDs(inputIDs, sequenceLength, batchSize);
+                    var sequences = model.Generate(generatorParams);
+                    Assert.NotNull(sequences);
+
+                    for (ulong i = 0; i < batchSize; i++)
+                    {
+                        var sequence = sequences[i].ToArray();
+                        var expectedSequence = expectedOutput.Skip((int)i * (int)maxLength).Take((int)maxLength);
+                        Assert.Equal(expectedSequence, sequence);
                     }
                 }
             }
