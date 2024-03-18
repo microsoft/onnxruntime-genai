@@ -83,17 +83,19 @@ def main(args):
     wall_clock_times = []
     if args.verbose: print(f"Running benchmark for batch size = {batch_size}, prompt length = {prompt_length}")
     for _ in tqdm(range(num_repetitions)):
-        # Prepare run
-        params = og.GeneratorParams(model)
-        params.input_ids = tokens
-        params.set_search_options({"max_length":max_length, "min_length":max_length})
-        generator = og.Generator(model, params)
-
+        wall_clock_start_time = time.time()
+        
         # Measure tokenization
         tokenize_start_time = time.perf_counter()
         tokens = tokenizer.encode_batch(prompt)
         tokenize_end_time = time.perf_counter()
         tokenize_times.append(tokenize_end_time - tokenize_start_time)
+
+        # Prepare run
+        params = og.GeneratorParams(model)
+        params.input_ids = tokens
+        params.set_search_options({"max_length":max_length, "min_length":max_length})
+        generator = og.Generator(model, params)
 
         # Measure prompt processing
         prompt_start_time = time.perf_counter()
@@ -107,7 +109,6 @@ def main(args):
         sampling_times.append(sampling_end_time - sampling_start_time)
 
         # Measure token generation
-        wall_clock_start_time = time.time()
         while not generator.is_done():
             # Run inference
             token_gen_start_time = time.perf_counter()
