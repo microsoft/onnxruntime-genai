@@ -71,6 +71,12 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
     throw std::runtime_error("search max_length is 0");
   if (params.search.max_length > model.config_->model.context_length)
     throw std::runtime_error("max_length cannot be greater than model context_length");
+  if (params.batch_size < 1)
+    throw std::runtime_error("batch_size must be 1 or greater");
+  if (params.vocab_size < 1)
+    throw std::runtime_error("vocab_size must be 1 or greater");
+  if (params.sequence_length >= params.search.max_length)
+    throw std::runtime_error("input sequence_length is >= max_length");
 
   search_ = CreateSearch(params);
   state_ = model.CreateState(search_->GetSequenceLengths(), params);
@@ -116,7 +122,7 @@ void Generator::GenerateNextToken_TopK_TopP(int top_k, float top_p, float temper
     throw std::runtime_error("top_k must be 0 or greater");
 
   if (top_p > 0.0f && top_k > 1) {
-    search_->SampleTopPAndK(top_p, top_k, temperature);
+    search_->SampleTopKTopP(top_k, top_p, temperature);
   } else if (top_k > 1) {
     search_->SampleTopK(top_k, temperature);
   } else {
