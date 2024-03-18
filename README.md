@@ -48,7 +48,7 @@ See full documentation at [https://onnxruntime.ai/docs/genai].
 
 ## Sample code for phi-2 in Python
 
-[Install](https://onnxruntime.ai/docs/genai/install) the onnxruntime-genai Python package.
+[Install](https://onnxruntime.ai/docs/genai/howto/install) the onnxruntime-genai Python package.
 
 ```python
 import onnxruntime_genai as og

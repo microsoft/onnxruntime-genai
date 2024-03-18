@@ -8,7 +8,7 @@ To generate the model with model builder:
 
 1. Install the python package
 
-   Install the Python package according to the [installation instructions](https://onnxruntime.ai/docs/genai/install).
+   Install the Python package according to the [installation instructions](https://onnxruntime.ai/docs/genai/howto/install).
 
 2. Install the model builder script dependencies
 
@@ -33,6 +33,6 @@ If you bring your own model, you need to provide the configuration. See the [con
 
 ## Run the phi-2 model
 
-Install the OnnxRuntime.GenAI nuget according to the [installation instructions](https://onnxruntime.ai/docs/genai/install).
+Install the OnnxRuntime.GenAI nuget according to the [installation instructions](https://onnxruntime.ai/docs/genai/howto/install).
 
 Open [HelloPhi2.sln](HelloPhi2.sln) and run the console application.

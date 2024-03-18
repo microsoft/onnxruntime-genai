@@ -2,7 +2,7 @@
 
 ## Install the onnxruntime-genai library
 
-Install the python package according to the [installation instructions](https://onnxruntime.ai/docs/genai/install).
+Install the python package according to the [installation instructions](https://onnxruntime.ai/docs/genai/howto/install).
 
 
 ## Get the model
