@@ -46,7 +46,7 @@ Users can call a high level `generate()` method, or run each iteration of the mo
 
 ## Sample code for phi-2 in Python
 
-[Install](https://onnxruntime.ai/docs/genai/install) the onnxruntime-genai Python package.
+[Install](https://onnxruntime.ai/docs/genai/howto/install) the onnxruntime-genai Python package.
 
 ```python
 import onnxruntime_genai as og
