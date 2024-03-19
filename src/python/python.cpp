@@ -53,26 +53,33 @@ void Declare_DeviceArray(pybind11::module& m, const char* name) {
           "get_array", [](Type& t) -> pybind11::array_t<T> { return t.GetNumpy(); }, pybind11::return_value_policy::reference_internal);
 }
 
-struct PyGeneratorParams : GeneratorParams {
+struct PyGeneratorParams {
+  PyGeneratorParams(const Model& model) : params_{std::make_shared<GeneratorParams>(model)} {
+  }
+
+  operator const GeneratorParams&() const { return *params_; }
+
+  std::shared_ptr<GeneratorParams> params_;
+
   // Turn the python py_input_ids_ into the low level parameters
   void Prepare() {
     // TODO: This will switch to using the variant vs being ifs
     if (py_input_ids_.size() != 0) {
       if (py_input_ids_.ndim() == 1) {  // Just a 1D array
-        batch_size = 1;
-        sequence_length = static_cast<int>(py_input_ids_.shape(0));
+        params_->batch_size = 1;
+        params_->sequence_length = static_cast<int>(py_input_ids_.shape(0));
       } else {
         if (py_input_ids_.ndim() != 2)
           throw std::runtime_error("Input IDs can only be 1 or 2 dimensional");
 
-        batch_size = static_cast<int>(py_input_ids_.shape(0));
-        sequence_length = static_cast<int>(py_input_ids_.shape(1));
+        params_->batch_size = static_cast<int>(py_input_ids_.shape(0));
+        params_->sequence_length = static_cast<int>(py_input_ids_.shape(1));
       }
-      input_ids = ToSpan(py_input_ids_);
+      params_->input_ids = ToSpan(py_input_ids_);
     }
 
     if (py_whisper_input_features_.size() != 0) {
-      GeneratorParams::Whisper& whisper = inputs.emplace<GeneratorParams::Whisper>();
+      GeneratorParams::Whisper& whisper = params_->inputs.emplace<GeneratorParams::Whisper>();
 #ifdef __APPLE__
       std::span shape(reinterpret_cast<const int64_t*>(py_whisper_input_features_.shape()),
                       py_whisper_input_features_.ndim());
@@ -81,9 +88,9 @@ struct PyGeneratorParams : GeneratorParams {
 #endif
       whisper.input_features = OrtValue::CreateTensor<float>(Ort::Allocator::GetWithDefaultOptions().GetInfo(), ToSpan(py_whisper_input_features_), shape);
       whisper.decoder_input_ids = ToSpan(py_whisper_decoder_input_ids_);
-      batch_size = 1;
-      sequence_length = static_cast<int>(py_whisper_decoder_input_ids_.shape(1));
-      input_ids = ToSpan(py_whisper_decoder_input_ids_);
+      params_->batch_size = 1;
+      params_->sequence_length = static_cast<int>(py_whisper_decoder_input_ids_.shape(1));
+      params_->input_ids = ToSpan(py_whisper_decoder_input_ids_);
     }
   }
 
@@ -92,11 +99,11 @@ struct PyGeneratorParams : GeneratorParams {
       auto name = entry.first.cast<std::string>();
       try {
         if (pybind11::isinstance<pybind11::float_>(entry.second)) {
-          SetSearchNumber(search, name, entry.second.cast<double>());
+          SetSearchNumber(params_->search, name, entry.second.cast<double>());
         } else if (pybind11::isinstance<pybind11::bool_>(entry.second)) {
-          SetSearchBool(search, name, entry.second.cast<bool>());
+          SetSearchBool(params_->search, name, entry.second.cast<bool>());
         } else if (pybind11::isinstance<pybind11::int_>(entry.second)) {
-          SetSearchNumber(search, name, entry.second.cast<int>());
+          SetSearchNumber(params_->search, name, entry.second.cast<int>());
         } else
           throw std::runtime_error("Unknown search option type, can be float/bool/int:" + name);
       } catch (JSON::unknown_value_error& e) {
@@ -182,9 +189,9 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   pybind11::class_<PyGeneratorParams>(m, "GeneratorParams")
       .def(pybind11::init<const Model&>())
-      .def_readonly("pad_token_id", &PyGeneratorParams::pad_token_id)
-      .def_readonly("eos_token_id", &PyGeneratorParams::eos_token_id)
-      .def_readonly("vocab_size", &PyGeneratorParams::vocab_size)
+      .def_property_readonly("pad_token_id", [](const PyGeneratorParams& v) { return v.params_->pad_token_id; })
+      .def_property_readonly("eos_token_id", [](const PyGeneratorParams& v) { return v.params_->eos_token_id; })
+      .def_property_readonly("vocab_size", [](const PyGeneratorParams& v) { return v.params_->vocab_size; })
       .def_readwrite("input_ids", &PyGeneratorParams::py_input_ids_)
       .def_readwrite("whisper_input_features", &PyGeneratorParams::py_whisper_input_features_)
       .def_readwrite("whisper_decoder_input_ids", &PyGeneratorParams::py_whisper_decoder_input_ids_)
@@ -221,13 +228,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         return CreateModel(GetOrtEnv(), config_path.c_str());
       }))
       .def("generate", [](Model& model, PyGeneratorParams& params) { params.Prepare(); return Generate(model, params); })
-      .def("generate_sequence", [](Model& model, pybind11::array_t<int32_t> input_ids, const pybind11::dict& search_options) {
-        PyGeneratorParams params{model};
-        params.SetSearchOptions(search_options);
-        params.py_input_ids_ = input_ids;
-        params.Prepare();
-        return Generate(model, params)[0];
-      })
       .def_property_readonly("device_type", [](const Model& s) { return s.device_type_; });
 
   pybind11::class_<PyGenerator>(m, "Generator")

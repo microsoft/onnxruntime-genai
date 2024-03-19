@@ -44,7 +44,7 @@ enum struct DeviceType {
   CUDA,
 };
 
-struct GeneratorParams {
+struct GeneratorParams : std::enable_shared_from_this<GeneratorParams> {
   GeneratorParams() = default;  // This constructor is only used if doing a custom model handler vs built-in
   GeneratorParams(const Model& model);
 
@@ -91,6 +91,8 @@ struct GeneratorParams {
   std::variant<Whisper> inputs;
 
   std::vector<int32_t> input_ids_owner;  // Backing memory of input_ids in some cases
+
+  std::shared_ptr<GeneratorParams> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
 };
 
 struct Generator {

@@ -95,13 +95,13 @@ TEST(ModelTests, BeamSearchGptFp32) {
     search.SelectTop();
   }
 
-  std::vector<int32_t> output_sequence(static_cast<size_t>(search.params_.batch_size) * search.params_.search.max_length);
+  std::vector<int32_t> output_sequence(static_cast<size_t>(search.params_->batch_size) * search.params_->search.max_length);
   search.Finalize(1, Generators::cpu_span<int32_t>{output_sequence}, {});
 
   // Verify outputs match expected outputs
-  for (size_t i = 0; i < static_cast<size_t>(search.params_.batch_size); i++) {
-    auto sequence = std::span<int32_t>(output_sequence.data() + search.params_.search.max_length * i, search.params_.search.max_length);
-    auto* expected_output_start = &expected_output[i * search.params_.search.max_length];
+  for (size_t i = 0; i < static_cast<size_t>(search.params_->batch_size); i++) {
+    auto sequence = std::span<int32_t>(output_sequence.data() + search.params_->search.max_length * i, search.params_->search.max_length);
+    auto* expected_output_start = &expected_output[i * search.params_->search.max_length];
     EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params.search.max_length * sizeof(int32_t)));
   }
 }

@@ -15,7 +15,7 @@ struct Search_Cuda : Search {
   RoamingArray<int32_t> GetSequence(int index) override { return sequences_.GetSequence(index); }
 
   bool IsDone() const {
-    cudaStreamSynchronize(params_.cuda_stream);
+    cudaStreamSynchronize(params_->cuda_stream);
     return *done_cpu_;
   }  // TODO: Use an event
   void SetLogits(RoamingArray<float> logits);

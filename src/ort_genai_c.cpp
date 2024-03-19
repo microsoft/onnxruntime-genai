@@ -72,7 +72,9 @@ OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaModel** out) 
 
 OgaResult* OGA_API_CALL OgaCreateGeneratorParams(const OgaModel* model, OgaGeneratorParams** out) {
   OGA_TRY
-  *out = reinterpret_cast<OgaGeneratorParams*>(new Generators::GeneratorParams(*reinterpret_cast<const Generators::Model*>(model)));
+  auto params = std::make_shared<Generators::GeneratorParams>(*reinterpret_cast<const Generators::Model*>(model));
+  params->external_owner_ = params;
+  *out = reinterpret_cast<OgaGeneratorParams*>(params.get());
   return nullptr;
   OGA_CATCH
 }
@@ -243,7 +245,7 @@ void OGA_API_CALL OgaDestroyModel(OgaModel* p) {
 }
 
 void OGA_API_CALL OgaDestroyGeneratorParams(OgaGeneratorParams* p) {
-  delete reinterpret_cast<Generators::GeneratorParams*>(p);
+  reinterpret_cast<Generators::GeneratorParams*>(p)->external_owner_ = nullptr;
 }
 
 void OGA_API_CALL OgaDestroyGenerator(OgaGenerator* p) {

@@ -12,7 +12,7 @@
 
 namespace Generators {
 
-State::State(const GeneratorParams& params) : params_{params} {
+State::State(const GeneratorParams& params) : params_{params.shared_from_this()} {
 }
 
 void State::Run(OrtSession& session) {

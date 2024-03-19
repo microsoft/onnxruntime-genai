@@ -15,7 +15,7 @@ struct State {
 
   virtual RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices = {}) = 0;
 
-  const GeneratorParams& params_;
+  std::shared_ptr<const GeneratorParams> params_;
 
   std::vector<const char*> input_names_, output_names_;
   std::vector<OrtValue*> inputs_, outputs_;

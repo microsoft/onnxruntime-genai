@@ -87,7 +87,7 @@ void Generator::ComputeLogits() {
   search_->SetLogits(state_->Run(search_->GetSequenceLength(), search_->GetNextTokens(), search_->GetNextIndices()));
   computed_logits_ = true;
 
-  auto& search = search_->params_.search;
+  auto& search = search_->params_->search;
   search_->ApplyMinLength(search.min_length);
   search_->ApplyRepetitionPenalty(search.repetition_penalty);
 }
@@ -110,7 +110,7 @@ void Generator::GenerateNextToken_TopK_TopP(int top_k, float top_p, float temper
   }
 
   // The user explicitly called TopK_TopP on a beam search
-  if (search_->params_.search.num_beams != 1)
+  if (search_->params_->search.num_beams != 1)
     throw std::runtime_error("TopK and TopP cannot be used with a beam search");
 
   // Sanity checks
@@ -132,7 +132,7 @@ void Generator::GenerateNextToken_TopK_TopP(int top_k, float top_p, float temper
 }
 
 void Generator::GenerateNextToken() {
-  auto& search = search_->params_.search;
+  auto& search = search_->params_->search;
   if (search.do_sample)
     GenerateNextToken_TopK_TopP(search.top_k, search.top_p, search.temperature);
   else
