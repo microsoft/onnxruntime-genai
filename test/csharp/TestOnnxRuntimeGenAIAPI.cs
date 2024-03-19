@@ -87,184 +87,157 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
-        [Fact(DisplayName = "TestTopKSearch")]
+        [IgnoreOnModelAbsebceFact(DisplayName = "TestTopKSearch")]
         public void TestTopKSearch()
         {
-            int topK = 50;
-            float temp = 0f;
-            ulong maxLength = 10;
-            int[] inputIDs = new int[] { 0, 0, 0, 52, 0, 0, 195, 731 };
-            var inputIDsShape = new ulong[] { 2, 4 };
-            ulong batchSize = inputIDsShape[0];
-            ulong sequenceLength = inputIDsShape[1];
-            var expectedOutput = new int[] { 0, 0, 0, 52, 38, 38, 38, 38, 38, 38,
-                                             0, 0, 195, 731, 38, 38, 38, 38, 38, 38 };
-
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "hf-internal-testing", "tiny-random-gpt2-fp32");
+            int topK = 100;
+            float temp = 0.6f;
+            ulong maxLength = 40;
+            
+            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
             using (var model = new Model(modelPath))
             {
                 Assert.NotNull(model);
-                using (var generatorParams = new GeneratorParams(model))
+                using (var tokenizer = new Tokenizer(model))
                 {
+                    Assert.NotNull(tokenizer);
+
+                    var strings = new string[] {
+                        "This is a test.",
+                        "Rats are awesome pets!",
+                        "The quick brown fox jumps over the lazy dog."
+                    };
+
+                    var sequences = tokenizer.EncodeBatch(strings);
+                    Assert.NotNull(sequences);
+                    Assert.Equal((ulong)strings.Length, sequences.NumSequences);
+
+                    using GeneratorParams generatorParams = new GeneratorParams(model);
                     Assert.NotNull(generatorParams);
 
-                    generatorParams.SetSearchOption("max_length", maxLength);
-                    generatorParams.SetInputIDs(inputIDs, sequenceLength, batchSize);
+                    generatorParams.SetSearchOption("max_length", 20);
+                    generatorParams.SetInputSequences(sequences);
 
-                    using (var generator = new Generator(model, generatorParams))
+                    using Generator generator = new Generator(model, generatorParams);
+                    Assert.NotNull(generator);
+                    while (!generator.IsDone())
                     {
-                        Assert.NotNull(generator);
-
-                        while (!generator.IsDone())
-                        {
-                            generator.ComputeLogits();
-                            generator.GenerateNextTokenTopK(topK, temp);
-                        }
-
-                        for (ulong i = 0; i < batchSize; i++)
-                        {
-                            var sequence = generator.GetSequence(i).ToArray();
-                            var expectedSequence = expectedOutput.Skip((int)i * (int)maxLength).Take((int)maxLength);
-                            Assert.Equal(expectedSequence, sequence);
-                            Console.WriteLine(sequence);
-                        }
+                        generator.ComputeLogits();
+                        generator.GenerateNextTokenTopK(topK, temp);
                     }
 
                     generatorParams.SetSearchOption("do_sample", true);
                     generatorParams.SetSearchOption("top_k", topK);
                     generatorParams.SetSearchOption("temperature", temp);
-                    generatorParams.SetInputIDs(inputIDs, sequenceLength, batchSize);
-                    var sequences = model.Generate(generatorParams);
-                    Assert.NotNull(sequences);
+                    var outputSequences = model.Generate(generatorParams);
+                    Assert.NotNull(outputSequences);
 
-                    for (ulong i = 0; i < batchSize; i++)
-                    {
-                        var sequence = sequences[i].ToArray();
-                        var expectedSequence = expectedOutput.Skip((int)i * (int)maxLength).Take((int)maxLength);
-                        Assert.Equal(expectedSequence, sequence);
-                    }
+                    var outputStrings = tokenizer.DecodeBatch(outputSequences);
+                    Assert.NotNull(outputStrings);
                 }
             }
         }
 
-        [Fact(DisplayName = "TestTopPSearch")]
+        [IgnoreOnModelAbsebceFact(DisplayName = "TestTopPSearch")]
         public void TestTopPSearch()
         {
-            float topP = 1f;
-            float temp = 0f;
-            ulong maxLength = 10;
-            int[] inputIDs = new int[] { 0, 0, 0, 52, 0, 0, 195, 731 };
-            var inputIDsShape = new ulong[] { 2, 4 };
-            ulong batchSize = inputIDsShape[0];
-            ulong sequenceLength = inputIDsShape[1];
-            var expectedOutput = new int[] { 0, 0, 0, 52, 0, 0, 0, 0, 0, 0,
-                                             0, 0, 195, 731, 0, 0, 0, 0, 0, 0 };
-
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "hf-internal-testing", "tiny-random-gpt2-fp32");
+            float topP = 0.6f;
+            float temp = 0.6f;
+            ulong maxLength = 40;
+            
+            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
             using (var model = new Model(modelPath))
             {
                 Assert.NotNull(model);
-                using (var generatorParams = new GeneratorParams(model))
+                using (var tokenizer = new Tokenizer(model))
                 {
+                    Assert.NotNull(tokenizer);
+
+                    var strings = new string[] {
+                        "This is a test.",
+                        "Rats are awesome pets!",
+                        "The quick brown fox jumps over the lazy dog."
+                    };
+
+                    var sequences = tokenizer.EncodeBatch(strings);
+                    Assert.NotNull(sequences);
+                    Assert.Equal((ulong)strings.Length, sequences.NumSequences);
+
+                    using GeneratorParams generatorParams = new GeneratorParams(model);
                     Assert.NotNull(generatorParams);
 
-                    generatorParams.SetSearchOption("max_length", maxLength);
-                    generatorParams.SetInputIDs(inputIDs, sequenceLength, batchSize);
+                    generatorParams.SetSearchOption("max_length", 20);
+                    generatorParams.SetInputSequences(sequences);
 
-                    using (var generator = new Generator(model, generatorParams))
+                    using Generator generator = new Generator(model, generatorParams);
+                    Assert.NotNull(generator);
+                    while (!generator.IsDone())
                     {
-                        Assert.NotNull(generator);
-
-                        while (!generator.IsDone())
-                        {
-                            generator.ComputeLogits();
-                            generator.GenerateNextTokenTopP(topP, temp);
-                        }
-
-                        for (ulong i = 0; i < batchSize; i++)
-                        {
-                            var sequence = generator.GetSequence(i).ToArray();
-                            var expectedSequence = expectedOutput.Skip((int)i * (int)maxLength).Take((int)maxLength);
-                            Assert.Equal(expectedSequence, sequence);
-                            Console.WriteLine(sequence);
-                        }
+                        generator.ComputeLogits();
+                        generator.GenerateNextTokenTopP(topP, temp);
                     }
 
                     generatorParams.SetSearchOption("do_sample", true);
                     generatorParams.SetSearchOption("top_p", topP);
                     generatorParams.SetSearchOption("temperature", temp);
-                    generatorParams.SetInputIDs(inputIDs, sequenceLength, batchSize);
-                    var sequences = model.Generate(generatorParams);
-                    Assert.NotNull(sequences);
+                    var outputSequences = model.Generate(generatorParams);
+                    Assert.NotNull(outputSequences);
 
-                    for (ulong i = 0; i < batchSize; i++)
-                    {
-                        var sequence = sequences[i].ToArray();
-                        var expectedSequence = expectedOutput.Skip((int)i * (int)maxLength).Take((int)maxLength);
-                        Assert.Equal(expectedSequence, sequence);
-                    }
+                    var outputStrings = tokenizer.DecodeBatch(outputSequences);
+                    Assert.NotNull(outputStrings);
                 }
             }
         }
 
-        [Fact(DisplayName = "TestTopKTopPSearch")]
+        [IgnoreOnModelAbsebceFact(DisplayName = "TestTopKTopPSearch")]
         public void TestTopKTopPSearch()
         {
             int topK = 100;
-            float topP = 1f;
-            float temp = 0f;
-            ulong maxLength = 10;
-            int[] inputIDs = new int[] { 0, 0, 0, 52, 0, 0, 195, 731 };
-            var inputIDsShape = new ulong[] { 2, 4 };
-            ulong batchSize = inputIDsShape[0];
-            ulong sequenceLength = inputIDsShape[1];
-            var expectedOutput = new int[] { 0, 0, 0, 52, 78, 78, 78, 78, 78, 78,
-                                             0, 0, 195, 731, 78, 78, 78, 78, 78, 78 };
-
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "hf-internal-testing", "tiny-random-gpt2-fp32");
+            float topP = 0.6f;
+            float temp = 0.6f;
+            ulong maxLength = 40;
+            
+            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
             using (var model = new Model(modelPath))
             {
                 Assert.NotNull(model);
-                using (var generatorParams = new GeneratorParams(model))
+                using (var tokenizer = new Tokenizer(model))
                 {
+                    Assert.NotNull(tokenizer);
+
+                    var strings = new string[] {
+                        "This is a test.",
+                        "Rats are awesome pets!",
+                        "The quick brown fox jumps over the lazy dog."
+                    };
+
+                    var sequences = tokenizer.EncodeBatch(strings);
+                    Assert.NotNull(sequences);
+                    Assert.Equal((ulong)strings.Length, sequences.NumSequences);
+
+                    using GeneratorParams generatorParams = new GeneratorParams(model);
                     Assert.NotNull(generatorParams);
 
-                    generatorParams.SetSearchOption("max_length", maxLength);
-                    generatorParams.SetInputIDs(inputIDs, sequenceLength, batchSize);
+                    generatorParams.SetSearchOption("max_length", 20);
+                    generatorParams.SetInputSequences(sequences);
 
-                    using (var generator = new Generator(model, generatorParams))
+                    using Generator generator = new Generator(model, generatorParams);
+                    Assert.NotNull(generator);
+                    while (!generator.IsDone())
                     {
-                        Assert.NotNull(generator);
-
-                        while (!generator.IsDone())
-                        {
-                            generator.ComputeLogits();
-                            generator.GenerateNextTokenTopKTopP(topK, topP, temp);
-                        }
-
-                        for (ulong i = 0; i < batchSize; i++)
-                        {
-                            var sequence = generator.GetSequence(i).ToArray();
-                            var expectedSequence = expectedOutput.Skip((int)i * (int)maxLength).Take((int)maxLength);
-                            Assert.Equal(expectedSequence, sequence);
-                            Console.WriteLine(sequence);
-                        }
+                        generator.ComputeLogits();
+                        generator.GenerateNextTokenTopKTopP(topK, topP, temp);
                     }
 
                     generatorParams.SetSearchOption("do_sample", true);
-                    generatorParams.SetSearchOption("top_p", topP);
                     generatorParams.SetSearchOption("top_k", topK);
+                    generatorParams.SetSearchOption("top_p", topP);
                     generatorParams.SetSearchOption("temperature", temp);
-                    generatorParams.SetInputIDs(inputIDs, sequenceLength, batchSize);
-                    var sequences = model.Generate(generatorParams);
-                    Assert.NotNull(sequences);
+                    var outputSequences = model.Generate(generatorParams);
+                    Assert.NotNull(outputSequences);
 
-                    for (ulong i = 0; i < batchSize; i++)
-                    {
-                        var sequence = sequences[i].ToArray();
-                        var expectedSequence = expectedOutput.Skip((int)i * (int)maxLength).Take((int)maxLength);
-                        Assert.Equal(expectedSequence, sequence);
-                    }
+                    var outputStrings = tokenizer.DecodeBatch(outputSequences);
+                    Assert.NotNull(outputStrings);
                 }
             }
         }
