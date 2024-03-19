@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 
 using System;
-using System.Runtime.InteropServices;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
@@ -26,9 +25,29 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaGenerator_ComputeLogits(_generatorHandle));
         }
 
+        public void GenerateNextToken()
+        {
+            Result.VerifySuccess(NativeMethods.OgaGenerator_GenerateNextToken(_generatorHandle));
+        }
+
         public void GenerateNextTokenTop()
         {
             Result.VerifySuccess(NativeMethods.OgaGenerator_GenerateNextToken_Top(_generatorHandle));
+        }
+
+        public void GenerateNextTokenTopK(int k, float temperature)
+        {
+            Result.VerifySuccess(NativeMethods.OgaGenerator_GenerateNextToken_TopK(_generatorHandle, k, temperature));
+        }
+
+        public void GenerateNextTokenTopP(float p, float temperature)
+        {
+            Result.VerifySuccess(NativeMethods.OgaGenerator_GenerateNextToken_TopP(_generatorHandle, p, temperature));
+        }
+
+        public void GenerateNextTokenTopKTopP(int k, float p, float temperature)
+        {
+            Result.VerifySuccess(NativeMethods.OgaGenerator_GenerateNextToken_TopK_TopP(_generatorHandle, k, p, temperature));
         }
 
         public ReadOnlySpan<int> GetSequence(ulong index)

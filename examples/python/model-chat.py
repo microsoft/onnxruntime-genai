@@ -20,7 +20,7 @@ def main(args):
         input_tokens = tokenizer.encode(text)
 
         params = og.GeneratorParams(model)
-        params.set_search_options({"max_length": args.max_length, "top_p": args.top_p, "top_k": args.top_k, "temperature": args.temperature, "repetition_penalty": args.repetition_penalty})
+        params.set_search_options({"do_sample": True, "max_length": args.max_length, "top_p": args.top_p, "top_k": args.top_k, "temperature": args.temperature, "repetition_penalty": args.repetition_penalty})
         params.input_ids = input_tokens
         generator = og.Generator(model, params)
         if args.verbose: print("Generator created")
@@ -29,7 +29,7 @@ def main(args):
         print(f'\n{text}', end='')
         while not generator.is_done():
             generator.compute_logits()
-            generator.generate_next_token_top_k_top_p(args.top_k, args.top_p, args.temperature)
+            generator.generate_next_token()
             print(tokenizer_stream.decode(generator.get_next_tokens()[0]), end='', flush=True)
         print()
 

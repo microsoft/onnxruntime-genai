@@ -18,12 +18,12 @@ def generate_prompt(model, tokenizer, prompt_length) -> str:
     prompt = "a"
     tokens = tokenizer.encode(prompt)
     params=og.GeneratorParams(model)
-    params.set_search_options({"max_length":prompt_length, "min_length":prompt_length+1})
+    params.set_search_options({"do_sample":True, "top_k":5, "temperature":temperature, "max_length":prompt_length, "min_length":prompt_length+1})
     params.input_ids = tokens
     generator=og.Generator(model, params)
     while not generator.is_done():
         generator.compute_logits()
-        generator.generate_next_token_top_k(5, temperature)
+        generator.generate_next_token()
     return tokenizer.decode(generator.get_sequence(0))
 
 def save_results(results, filename):
@@ -65,15 +65,17 @@ def main(args):
     # Generate prompt
     prompt = [generate_prompt(model, tokenizer, prompt_length)] * batch_size
     tokens = tokenizer.encode_batch(prompt)
+
+    params = og.GeneratorParams(model)
+    params.input_ids = tokens
+    params.set_search_options({"do_sample":True, "top_k":args.top_k, "top_p":args.top_p, "temperature":temperature, "max_length":max_length, "min_length":max_length})
+
     if args.verbose: print("Running warmup runs...")
     for _ in tqdm(range(args.warmup)):
-        params = og.GeneratorParams(model)
-        params.input_ids = tokens
-        params.set_search_options({"max_length":max_length, "min_length":max_length})
         generator = og.Generator(model, params)
         while not generator.is_done():
             generator.compute_logits()
-            generator.generate_next_token_top_k_top_p(args.top_k, args.top_p, temperature)
+            generator.generate_next_token()
         if args.print_model_output: print(tokenizer.decode(generator.get_sequence(0)))
 
     tokenize_times = []
@@ -84,9 +86,6 @@ def main(args):
     if args.verbose: print(f"Running benchmark for batch size = {batch_size}, prompt length = {prompt_length}")
     for _ in tqdm(range(num_repetitions)):
         # Prepare run
-        params = og.GeneratorParams(model)
-        params.input_ids = tokens
-        params.set_search_options({"max_length":max_length, "min_length":max_length})
         generator = og.Generator(model, params)
 
         # Measure tokenization
@@ -102,7 +101,7 @@ def main(args):
         prompt_times.append(prompt_end_time - prompt_start_time)
 
         sampling_start_time = time.perf_counter()
-        generator.generate_next_token_top_k_top_p(args.top_k, args.top_p, temperature)
+        generator.generate_next_token()
         sampling_end_time = time.perf_counter()
         sampling_times.append(sampling_end_time - sampling_start_time)
 
@@ -115,7 +114,7 @@ def main(args):
             token_gen_end_time = time.perf_counter()
 
             sampling_start_time = time.perf_counter()
-            generator.generate_next_token_top_k_top_p(args.top_k, args.top_p, temperature)
+            generator.generate_next_token()
             sampling_end_time = time.perf_counter()
             
             token_gen_times.append(token_gen_end_time - token_gen_start_time)

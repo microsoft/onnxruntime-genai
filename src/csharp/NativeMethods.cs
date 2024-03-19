@@ -78,7 +78,30 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         // This function is used to generate the next token in the sequence using the greedy search algorithm.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaGenerator_GenerateNextToken(IntPtr /* OgaGenerator* */ generator);
+
+        // This function is used to generate the next token in the sequence using the greedy search algorithm.
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaGenerator_GenerateNextToken_Top(IntPtr /* OgaGenerator* */ generator);
+
+        // This function is used to generate the next token in the sequence using the greedy search algorithm.
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaGenerator_GenerateNextToken_TopK(IntPtr /* OgaGenerator* */ generator,
+                                                                                         int /* int32_t */ k,
+                                                                                         float /* single_t */ t);
+
+        // This function is used to generate the next token in the sequence using the greedy search algorithm.
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaGenerator_GenerateNextToken_TopP(IntPtr /* OgaGenerator* */ generator,
+                                                                                         float /* single_t */ p,
+                                                                                         float /* single_t */ t);
+
+        // This function is used to generate the next token in the sequence using the greedy search algorithm.
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaGenerator_GenerateNextToken_TopK_TopP(IntPtr /* OgaGenerator* */ generator,
+                                                                                         int /* int32_t */ k,
+                                                                                         float /* single_t */ p,
+                                                                                         float /* single_t */ t);
 
         // This function returns the length of the sequence at the given index.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]

@@ -154,7 +154,7 @@ void GreedySearch_Cuda::SampleTopK(int k, float temperature) {
   AppendNextTokensToSequences();
 }
 
-void GreedySearch_Cuda::SampleTopPAndK(float p, int k, float temperature) {
+void GreedySearch_Cuda::SampleTopKTopP(int k, float p, float temperature) {
   std::span<float> scores = next_token_scores_.subspan(0, params_->batch_size * params_->vocab_size);
   cuda::GetSample(samplingdata_.get(), params_->cuda_stream, next_tokens_.data(), scores.data(), int(scores.size() / params_->batch_size),
                   params_->batch_size, k, p, temperature);

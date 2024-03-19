@@ -180,8 +180,16 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_ComputeLogits(OgaGenerator* gene
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken_Top(OgaGenerator* generator);
 
+/* Top-K sampling: most probable words from the model's output probability distribution for the next word
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken_TopK(OgaGenerator* generator, int k, float t);
+
+/*Top-P sampling selects words from the smallest set of words whose cumulative probability exceeds a predefined threshold (p)
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken_TopP(OgaGenerator* generator, float p, float t);
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken_TopK_TopP(OgaGenerator* generator, int k, float p, float t);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator);
 
 /*
  * \brief Returns the number of tokens in the sequence at the given index.
