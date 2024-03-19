@@ -18,12 +18,12 @@ def generate_prompt(model, tokenizer, prompt_length) -> str:
     prompt = "a"
     tokens = tokenizer.encode(prompt)
     params=og.GeneratorParams(model)
-    params.set_search_options({"max_length":prompt_length, "min_length":prompt_length+1})
+    params.set_search_options({"do_sample":True, "top_k":5, "temperature":temperature, "max_length":prompt_length, "min_length":prompt_length+1})
     params.input_ids = tokens
     generator=og.Generator(model, params)
     while not generator.is_done():
         generator.compute_logits()
-        generator.generate_next_token_top_k(5, temperature)
+        generator.generate_next_token()
     return tokenizer.decode(generator.get_sequence(0))
 
 def save_results(results, filename):

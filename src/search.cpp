@@ -33,6 +33,14 @@ BeamSearch_Cpu::~BeamSearch_Cpu() = default;
 
 void Search_Cpu::SetLogits(RoamingArray<float> logits_unk) {
   next_token_scores_ = logits_unk.GetCPU();
+
+  auto batch_beam_size = params_.BatchBeamSize();
+  assert(next_token_scores_.size() % (batch_beam_size * params_.vocab_size) == 0);  // Should divide evenly
+
+  for (int i = 0; i < batch_beam_size; i++) {
+    std::span<float> const target = next_token_scores_.subspan(i * params_.vocab_size, params_.vocab_size);
+    log_softmax(target);
+  }
 }
 
 RoamingArray<int32_t> GreedySearch_Cpu::GetNextTokens() {

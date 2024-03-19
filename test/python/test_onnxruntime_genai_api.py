@@ -32,14 +32,14 @@ def test_greedy_search(test_data_path, relative_model_path):
     search_params.input_ids = np.array(
         [[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32
     )
-    search_params.set_search_options({"max_length": 10})
+    search_params.set_search_options({"do_sample": False, "max_length": 10})
     input_ids_shape = [2, 4]
     batch_size = input_ids_shape[0]
 
     generator = og.Generator(model, search_params)
     while not generator.is_done():
         generator.compute_logits()
-        generator.generate_next_token_top()
+        generator.generate_next_token()
 
     expected_sequence = np.array(
         [

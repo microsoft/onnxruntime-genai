@@ -119,7 +119,7 @@ void Generator::GenerateNextToken_TopK_TopP(int top_k, float top_p, float temper
   if (top_k < 0)
     throw std::runtime_error("top_k must be 0 or greater");
 
-  if (top_p > 0.0f && top_k > 1) {
+  if (top_p > 0.0f && top_p < 1.0f && top_k > 1) {
     search_->SampleTopPAndK(top_p, top_k, temperature);
   } else if (top_k > 1) {
     search_->SampleTopK(top_k, temperature);
