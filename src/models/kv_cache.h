@@ -1,5 +1,7 @@
 #pragma once
 
+#include "static_buffer.h"
+
 namespace Generators {
 
 struct KV_Cache_Combined {
@@ -49,6 +51,8 @@ struct KV_Cache {
   std::unique_ptr<OrtValue> empty_past_;
   std::vector<std::unique_ptr<OrtValue>> pasts_, presents_;
   std::vector<std::string> input_name_strings_, output_name_strings_;
+
+  std::vector<std::unique_ptr<StaticBuffer>> sb_kv_caches_;
 };
 
 // Very similar to the KV_Cache, but is only created once at the encoder step, then used without modification for every decoder step

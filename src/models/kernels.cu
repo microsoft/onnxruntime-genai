@@ -5,14 +5,14 @@
 namespace Generators {
 namespace cuda {
 
-template<typename T>
+template <typename T>
 __global__ void UpdatePositionIds(T* positions, int batch_beam_size) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < batch_beam_size)
     positions[i]++;
 }
 
-template<typename T>
+template <typename T>
 void Launch_UpdatePositionIds(T* positions, int batch_beam_size, cudaStream_t stream) {
   UpdatePositionIds<T><<<(batch_beam_size + 255) / 256, 256, 0, stream>>>(positions, batch_beam_size);
 }
@@ -20,7 +20,7 @@ void Launch_UpdatePositionIds(T* positions, int batch_beam_size, cudaStream_t st
 template void Launch_UpdatePositionIds(int32_t* positions, int batch_beam_size, cudaStream_t stream);
 template void Launch_UpdatePositionIds(int64_t* positions, int batch_beam_size, cudaStream_t stream);
 
-template<typename T>
+template <typename T>
 __global__ void UpdateAttentionMask(T* mask_data, const T* old_mask_data, int batch_beam_size, int current_length) {
   int global_index = blockIdx.x * blockDim.x + threadIdx.x;
   int i = global_index / current_length;
@@ -34,7 +34,7 @@ __global__ void UpdateAttentionMask(T* mask_data, const T* old_mask_data, int ba
   }
 }
 
-template<typename T>
+template <typename T>
 void Launch_UpdateAttentionMask(T* mask_data, const T* old_mask_data, int batch_beam_size, int current_length, cudaStream_t stream) {
   UpdateAttentionMask<T><<<(batch_beam_size * current_length + 255) / 256, 256, 0, stream>>>(mask_data, old_mask_data, batch_beam_size, current_length);
 }

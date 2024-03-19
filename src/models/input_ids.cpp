@@ -27,6 +27,11 @@ InputIDs::InputIDs(const Model& model, State& state)
 
   value_ = model_.ExpandInputs(value_, state_.params_.search.num_beams);
   shape_[0] *= state_.params_.search.num_beams;
+
+  if (model_.device_type_ == DeviceType::CUDA && model_.config_->use_cuda_graphs) {
+    size_t max_beam_batch_size = model_.config_->search.num_beams * model_.config_->max_batch_size;
+    sb_input_ids_ = std::make_unique<StaticBuffer>(model_.allocator_device_, max_beam_batch_size);
+  }
 }
 
 void InputIDs::Add() {
@@ -40,7 +45,12 @@ void InputIDs::Update(RoamingArray<int32_t> next_tokens_unk) {
   // Resize input_ids shape once if it doesn't match the decoder shape
   if (shape_[1] != 1) {
     shape_[1] = 1;
-    value_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
+    if (!sb_input_ids_) {
+      value_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
+    } else {
+      value_ = sb_input_ids_->GetOrCreateTensor(shape_, type_);
+    }
+
     state_.inputs_[input_index_] = value_.get();
   }
 

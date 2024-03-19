@@ -39,7 +39,7 @@ Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> s
   kv_cache_.AddEncoder();
   cross_cache_.AddOutputs();
 
-  State::Run(*model_.session_encoder_);
+  State::Run(*model_.session_encoder_, *model_.run_options_);
 
   ClearIO();
 
@@ -55,7 +55,7 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
     first_run_ = false;
   } else {
     UpdateInputs(next_tokens, next_indices, current_length);
-    State::Run(*model_.session_decoder_);
+    State::Run(*model_.session_decoder_, *model_.run_options_);
   }
   return logits_.Get();
 }
