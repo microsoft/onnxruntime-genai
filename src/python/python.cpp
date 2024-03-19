@@ -203,7 +203,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   pybind11::class_<TokenizerStream>(m, "TokenizerStream")
       .def("decode", [](TokenizerStream& t, int32_t token) { return t.Decode(token); });
 
-  pybind11::class_<Tokenizer>(m, "Tokenizer")
+  pybind11::class_<Tokenizer, std::shared_ptr<Tokenizer>>(m, "Tokenizer")
       .def(pybind11::init([](Model& model) { return model.CreateTokenizer(); }))
       .def("encode", &Tokenizer::Encode)
       .def("decode", [](const Tokenizer& t, pybind11::array_t<int32_t> tokens) { return t.Decode(ToSpan(tokens)); })

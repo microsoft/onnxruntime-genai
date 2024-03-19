@@ -196,7 +196,9 @@ const int32_t* OGA_API_CALL OgaGenerator_GetSequence(const OgaGenerator* oga_gen
 
 OgaResult* OGA_API_CALL OgaCreateTokenizer(const OgaModel* model, OgaTokenizer** out) {
   OGA_TRY
-  *out = reinterpret_cast<OgaTokenizer*>(reinterpret_cast<const Generators::Model*>(model)->CreateTokenizer().release());
+  auto tokenizer = reinterpret_cast<const Generators::Model*>(model)->CreateTokenizer();
+  tokenizer->external_owner_ = tokenizer;
+  *out = reinterpret_cast<OgaTokenizer*>(tokenizer.get());
   return nullptr;
   OGA_CATCH
 }
@@ -281,7 +283,7 @@ void OGA_API_CALL OgaDestroyGenerator(OgaGenerator* p) {
 }
 
 void OGA_API_CALL OgaDestroyTokenizer(OgaTokenizer* p) {
-  delete reinterpret_cast<Generators::Tokenizer*>(p);
+  reinterpret_cast<Generators::Tokenizer*>(p)->external_owner_ = nullptr;
 }
 
 void OGA_API_CALL OgaDestroyTokenizerStream(OgaTokenizerStream* p) {

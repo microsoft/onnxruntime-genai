@@ -57,7 +57,7 @@ struct TokenizerStream {
   const std::string& Decode(int32_t token);
 
  private:
-  const Tokenizer& tokenizer_;
+  std::shared_ptr<const Tokenizer> tokenizer_;
   TfmPtr<TfmObject> cache_;
   std::string chunk_;
 };
@@ -66,7 +66,7 @@ struct TokenizerStream {
 // Sequence length is vector.size()/count
 std::vector<int32_t> PadInputs(std::span<std::span<const int32_t> > sequences, int32_t pad_token_id);
 
-struct Tokenizer {
+struct Tokenizer : std::enable_shared_from_this<Tokenizer> {
   Tokenizer(Config& config);
 
   std::unique_ptr<TokenizerStream> CreateStream() const;
@@ -78,6 +78,7 @@ struct Tokenizer {
   std::vector<std::string> DecodeBatch(std::span<const int32_t> sequences, size_t count) const;
 
   TfmPtr<TfmTokenizer> tokenizer_;
+  std::shared_ptr<Tokenizer> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
 
  private:
   int32_t pad_token_id_;
@@ -98,7 +99,7 @@ struct Model : std::enable_shared_from_this<Model> {
   Model(std::unique_ptr<Config> config);
   virtual ~Model();
 
-  std::unique_ptr<Tokenizer> CreateTokenizer() const;
+  std::shared_ptr<Tokenizer> CreateTokenizer() const;
 
   virtual std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params) const = 0;
 

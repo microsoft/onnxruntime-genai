@@ -94,13 +94,13 @@ void CheckResult(tfmError_t error) {
 }
 
 TokenizerStream::TokenizerStream(const Tokenizer& tokenizer)
-    : tokenizer_{tokenizer} {
+    : tokenizer_{tokenizer.shared_from_this()} {
   CheckResult(TfmCreate(kTfmKindDetokenizerCache, cache_.Address()));
 }
 
 const std::string& TokenizerStream::Decode(int32_t token) {
   const char* string;
-  CheckResult(TfmDetokenizeCached(tokenizer_.tokenizer_, cache_, token, &string));
+  CheckResult(TfmDetokenizeCached(tokenizer_->tokenizer_, cache_, token, &string));
   chunk_ = string;
   return chunk_;
 }
@@ -297,8 +297,8 @@ void Model::CreateSessionOptions() {
   }
 }
 
-std::unique_ptr<Tokenizer> Model::CreateTokenizer() const {
-  return std::make_unique<Tokenizer>(*config_);
+std::shared_ptr<Tokenizer> Model::CreateTokenizer() const {
+  return std::make_shared<Tokenizer>(*config_);
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path) {
@@ -312,6 +312,15 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path) {
     return std::make_shared<Whisper_Model>(std::move(config), ort_env);
 
   throw std::runtime_error("Unsupported model_type in config.json: " + config->model.type);
+}
+
+std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Model& model) {
+  return std::make_shared<GeneratorParams>(model);
+}
+
+// Used by benchmarking tests only, should not be used normally
+std::shared_ptr<GeneratorParams> CreateGeneratorParams() {
+  return std::make_shared<GeneratorParams>();
 }
 
 #if USE_CUDA

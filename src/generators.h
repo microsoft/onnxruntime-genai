@@ -115,6 +115,8 @@ struct Generator {
 };
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path);
+std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Model& model);
+std::shared_ptr<GeneratorParams> CreateGeneratorParams(); // For benchmarking purposes only
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params);
 std::vector<std::vector<int32_t>> Generate(const Model& model, const GeneratorParams& params);  // Uses CreateGenerator and a simple loop to return the entire sequence
 
