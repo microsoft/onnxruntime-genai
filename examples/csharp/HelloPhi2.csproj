@@ -9,7 +9,7 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu" Version="1.17.1" />
-    <PackageReference Include="Microsoft.ML.OnnxRuntimeGenAI.Gpu" Version="0.1.0" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntimeGenAI.Cuda" Version="0.1.0" />
     <PackageReference Include="Microsoft.ML.OnnxRuntimeGenAI.Managed" Version="0.1.0" />
   </ItemGroup>
 
