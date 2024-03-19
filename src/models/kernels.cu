@@ -54,6 +54,18 @@ void LaunchFp16ToFp32(const uint16_t* fp16, float* fp32, int count, cudaStream_t
   ConvertFp16ToFp32<<<num_blocks, block_size, 0, stream>>>(reinterpret_cast<const half*>(fp16), fp32, count);
 }
 
+__global__ void ConvertFp32ToFp16(const float* src, half* dst, int count) {
+  int idx = threadIdx.x + blockIdx.x * blockDim.x;
+  if (idx < count)
+    dst[idx] = __float2half(src[idx]);
+}
+
+void LaunchFp32ToFp16(const float* fp32, uint16_t* fp16, int count, cudaStream_t stream) {
+  int block_size = 256;
+  int num_blocks = (count + block_size - 1) / block_size;
+  ConvertFp32ToFp16<<<num_blocks, block_size, 0, stream>>>(fp32, reinterpret_cast<half*>(fp16), count);
+}
+
 __global__ void ConvertInt32ToInt64(const int32_t* src, int64_t* dst, int count) {
   int idx = threadIdx.x + blockIdx.x * blockDim.x;
   if (idx < count) {
