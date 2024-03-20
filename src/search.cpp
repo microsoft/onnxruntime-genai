@@ -67,7 +67,7 @@ void BeamSearch_Cpu::SelectTop() {
   }
 
   // TODO: Write output scores?
-  unsigned const top_k = 2 * params_->search.num_beams;
+  const size_t top_k = 2 * params_->search.num_beams;
 
   struct ScoreIndex {
     float score;
@@ -86,7 +86,7 @@ void BeamSearch_Cpu::SelectTop() {
 
   for (size_t batch_index = 0; batch_index < static_cast<size_t>(params_->batch_size); batch_index++) {
     std::priority_queue<ScoreIndex, std::vector<ScoreIndex>> queue;
-    auto token_scores_sub = next_token_scores_.subspan(batch_index * params_->search.num_beams * params_->vocab_size, params_->search.num_beams * params_->vocab_size);
+    auto token_scores_sub = next_token_scores_.subspan(batch_index * params_->search.num_beams * params_->vocab_size, static_cast<size_t>(params_->search.num_beams) * params_->vocab_size);
     for (int i = 0; i < token_scores_sub.size(); i++) {
       queue.push({token_scores_sub[i], i});
     }
@@ -258,7 +258,7 @@ void BeamSearch_Cpu::Finalize(size_t num_return_sequences, RoamingArray<int32_t>
 
 std::span<float> Search_Cpu::GetScores(int batch_beam_index) const {
   assert(batch_beam_index >= 0 && batch_beam_index < params_->BatchBeamSize());
-  return next_token_scores_.subspan(batch_beam_index * params_->vocab_size, params_->vocab_size);
+  return next_token_scores_.subspan(static_cast<size_t>(batch_beam_index) * params_->vocab_size, params_->vocab_size);
 }
 
 void Search_Cpu::ApplyMinLength(int min_length) {
