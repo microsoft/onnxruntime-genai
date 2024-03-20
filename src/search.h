@@ -6,7 +6,7 @@ namespace Generators {
 struct BeamSearchScorer;
 
 struct Search {
-  Search(const GeneratorParams& params) : params_{params} {}
+  Search(const GeneratorParams& params) : params_{params.shared_from_this()} {}
   virtual ~Search() = default;
 
   virtual RoamingArray<int32_t> GetNextTokens() = 0;
@@ -30,7 +30,7 @@ struct Search {
   virtual void ApplyMinLength(int min_length) = 0;
   virtual void ApplyRepetitionPenalty(float penalty) = 0;
 
-  const GeneratorParams& params_;
+  std::shared_ptr<const GeneratorParams> params_;
 };
 
 struct Search_Cpu : Search {
@@ -81,7 +81,7 @@ struct GreedySearch_Cpu : Search_Cpu {
 
   std::span<bool> eos_seen_;  // shape (batch_size)
   std::unique_ptr<bool[]> eos_seen_buffer_;
-  int not_done_count_{params_.batch_size};  // When zero, every batch entry is done (starts at batch_size_)
+  int not_done_count_{params_->batch_size};  // When zero, every batch entry is done (starts at batch_size_)
 
   std::random_device rd_;
   std::mt19937 gen_;
