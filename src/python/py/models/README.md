@@ -62,10 +62,10 @@ python3 builder.py -m model_name -o path_to_output_folder -p precision -e execut
 This scenario is where your PyTorch model has been customized or finetuned for one of the currently supported model architectures and your model can be loaded in Hugging Face.
 ```
 # From wheel:
-python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider
+python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files
 
 # From source:
-python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider
+python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files
 ```
 
 ### GGUF Model
