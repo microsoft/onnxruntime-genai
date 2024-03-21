@@ -64,7 +64,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                         while (!generator.IsDone())
                         {
                             generator.ComputeLogits();
-                            generator.GenerateNextTokenTop();
+                            generator.GenerateNextToken();
                         }
 
                         for (ulong i = 0; i < batchSize; i++)
