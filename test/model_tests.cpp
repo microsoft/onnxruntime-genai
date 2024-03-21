@@ -44,7 +44,7 @@ TEST(ModelTests, GreedySearchGptFp32) {
 
   while (!generator->IsDone()) {
     generator->ComputeLogits();
-    generator->GenerateNextToken_Top();
+    generator->GenerateNextToken();
   }
 
   // Verify outputs match expected outputs
@@ -128,7 +128,7 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
 
   while (!generator->IsDone()) {
     generator->ComputeLogits();
-    generator->GenerateNextToken_Top();
+    generator->GenerateNextToken();
   }
 
   // Verify outputs match expected outputs
@@ -226,7 +226,7 @@ Print all primes between 1 and n
   auto generator = Generators::CreateGenerator(*model, *params);
   while (!generator->IsDone()) {
     generator->ComputeLogits();
-    generator->GenerateNextToken_Top();
+    generator->GenerateNextToken();
   }
 
   auto result = generator->GetSequence(0);
