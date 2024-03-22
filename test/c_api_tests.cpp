@@ -3,7 +3,7 @@
 #include <search.h>
 #include <models/model.h>
 #include <iostream>
-#include <ort_genai_c.h>
+#include <ort_genai.h>
 #ifndef MODEL_PATH
 #define MODEL_PATH "../../test/test_models/"
 #endif
