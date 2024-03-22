@@ -5,7 +5,7 @@
 // GenAI C++ API
 //
 // This is a zero cost wrapper around the C API, and provides for a set of C++ classes with automatic resource management
- 
+
 /* A simple end to end example of how to generate an answer from a prompt:
  *
  * auto model = OgaModel::Create("phi-2");
@@ -27,7 +27,7 @@
 // The types defined in this file are to give us zero overhead C++ style interfaces around an opaque C pointer.
 // For example, there is no actual 'OgaModel' type defined anywhere, so we create a fake definition here
 // that lets users have a C++ style OgaModel type that can be held in a std::unique_ptr.
-// 
+//
 // This OgaAbstract struct is to prevent accidentally trying to use them by value.
 struct OgaAbstract {
   OgaAbstract() = delete;
