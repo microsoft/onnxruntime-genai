@@ -85,6 +85,8 @@ def main(args):
     wall_clock_times = []
     if args.verbose: print(f"Running benchmark for batch size = {batch_size}, prompt length = {prompt_length}")
     for _ in tqdm(range(num_repetitions)):
+        wall_clock_start_time = time.time()
+
         # Prepare run
         generator = og.Generator(model, params)
 
@@ -93,6 +95,12 @@ def main(args):
         tokens = tokenizer.encode_batch(prompt)
         tokenize_end_time = time.perf_counter()
         tokenize_times.append(tokenize_end_time - tokenize_start_time)
+
+        # Prepare run
+        params = og.GeneratorParams(model)
+        params.input_ids = tokens
+        params.set_search_options({"max_length":max_length, "min_length":max_length})
+        generator = og.Generator(model, params)
 
         # Measure prompt processing
         prompt_start_time = time.perf_counter()
@@ -106,7 +114,6 @@ def main(args):
         sampling_times.append(sampling_end_time - sampling_start_time)
 
         # Measure token generation
-        wall_clock_start_time = time.time()
         while not generator.is_done():
             # Run inference
             token_gen_start_time = time.perf_counter()
@@ -154,7 +161,7 @@ def main(args):
 
     # Calculate wall clock time
     avg_wall_clock_time = sum(wall_clock_times) / len(wall_clock_times)
-    avg_wall_clock_thrpt = batch_size * (generation_length / avg_wall_clock_time)
+    avg_wall_clock_thrpt = batch_size * (max_length / avg_wall_clock_time)
     print(f"Average Wall Clock Time: {avg_wall_clock_time} s")
     print(f"Average Wall Clock Throughput: {avg_wall_clock_thrpt} tps")
 
