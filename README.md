@@ -98,10 +98,6 @@ huggingface-cli login --token <your HuggingFace token>
 python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -p int4 -e cpu -o <model folder>
 ```
 
-## Known issues
-
-* Mistral and Gemma support on CUDA only
-
 ## Contributing
 
 This project welcomes contributions and suggestions.  Most contributions require you to agree to a
