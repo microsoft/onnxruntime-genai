@@ -20,12 +20,12 @@ Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> s
       model_{model} {
   auto& inputs = const_cast<GeneratorParams::Whisper&>(std::get<GeneratorParams::Whisper>(params.inputs));
 
-  auto encoder_input_ids = model_.ExpandInputs(inputs.input_features, params_.search.num_beams);
+  auto encoder_input_ids = model_.ExpandInputs(inputs.input_features, params_->search.num_beams);
   encoder_hidden_states_ = OrtValue::CreateTensor<float>(*model_.allocator_device_, std::array<int64_t, 3>{decoder_input_ids_.GetShape()[0], 1500, 384});
 
   auto sequence_lengths = sequence_lengths_unk.GetCPU();
   for (int i = 0; i < decoder_input_ids_.GetShape()[0]; i++) {
-    sequence_lengths[i] = static_cast<int32_t>(params_.sequence_length);
+    sequence_lengths[i] = static_cast<int32_t>(params_->sequence_length);
   }
 
   input_names_.push_back("encoder_input_ids");

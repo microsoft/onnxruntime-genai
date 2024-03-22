@@ -63,14 +63,18 @@ const int32_t* OGA_API_CALL OgaSequencesGetSequenceData(const OgaSequences* p, s
 
 OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaModel** out) {
   OGA_TRY
-  *out = reinterpret_cast<OgaModel*>(Generators::CreateModel(Generators::GetOrtEnv(), config_path).release());
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), config_path);
+  model->external_owner_ = model;
+  *out = reinterpret_cast<OgaModel*>(model.get());
   return nullptr;
   OGA_CATCH
 }
 
 OgaResult* OGA_API_CALL OgaCreateGeneratorParams(const OgaModel* model, OgaGeneratorParams** out) {
   OGA_TRY
-  *out = reinterpret_cast<OgaGeneratorParams*>(new Generators::GeneratorParams(*reinterpret_cast<const Generators::Model*>(model)));
+  auto params = std::make_shared<Generators::GeneratorParams>(*reinterpret_cast<const Generators::Model*>(model));
+  params->external_owner_ = params;
+  *out = reinterpret_cast<OgaGeneratorParams*>(params.get());
   return nullptr;
   OGA_CATCH
 }
@@ -145,9 +149,37 @@ OgaResult* OGA_API_CALL OgaGenerator_ComputeLogits(OgaGenerator* generator) {
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator) {
+  OGA_TRY
+  reinterpret_cast<Generators::Generator*>(generator)->GenerateNextToken();
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken_Top(OgaGenerator* generator) {
   OGA_TRY
   reinterpret_cast<Generators::Generator*>(generator)->GenerateNextToken_Top();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken_TopK(OgaGenerator* generator, int k, float t) {
+  OGA_TRY
+  reinterpret_cast<Generators::Generator*>(generator)->GenerateNextToken_TopK(k, t);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken_TopP(OgaGenerator* generator, float p, float t) {
+  OGA_TRY
+  reinterpret_cast<Generators::Generator*>(generator)->GenerateNextToken_TopP(p, t);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken_TopK_TopP(OgaGenerator* generator, int k, float p, float t) {
+  OGA_TRY
+  reinterpret_cast<Generators::Generator*>(generator)->GenerateNextToken_TopK_TopP(k, p, t);
   return nullptr;
   OGA_CATCH
 }
@@ -164,7 +196,9 @@ const int32_t* OGA_API_CALL OgaGenerator_GetSequence(const OgaGenerator* oga_gen
 
 OgaResult* OGA_API_CALL OgaCreateTokenizer(const OgaModel* model, OgaTokenizer** out) {
   OGA_TRY
-  *out = reinterpret_cast<OgaTokenizer*>(reinterpret_cast<const Generators::Model*>(model)->CreateTokenizer().release());
+  auto tokenizer = reinterpret_cast<const Generators::Model*>(model)->CreateTokenizer();
+  tokenizer->external_owner_ = tokenizer;
+  *out = reinterpret_cast<OgaTokenizer*>(tokenizer.get());
   return nullptr;
   OGA_CATCH
 }
@@ -237,11 +271,11 @@ void OGA_API_CALL OgaDestroySequences(OgaSequences* p) {
 }
 
 void OGA_API_CALL OgaDestroyModel(OgaModel* p) {
-  delete reinterpret_cast<Generators::Model*>(p);
+  reinterpret_cast<Generators::Model*>(p)->external_owner_ = nullptr;
 }
 
 void OGA_API_CALL OgaDestroyGeneratorParams(OgaGeneratorParams* p) {
-  delete reinterpret_cast<Generators::GeneratorParams*>(p);
+  reinterpret_cast<Generators::GeneratorParams*>(p)->external_owner_ = nullptr;
 }
 
 void OGA_API_CALL OgaDestroyGenerator(OgaGenerator* p) {
@@ -249,7 +283,7 @@ void OGA_API_CALL OgaDestroyGenerator(OgaGenerator* p) {
 }
 
 void OGA_API_CALL OgaDestroyTokenizer(OgaTokenizer* p) {
-  delete reinterpret_cast<Generators::Tokenizer*>(p);
+  reinterpret_cast<Generators::Tokenizer*>(p)->external_owner_ = nullptr;
 }
 
 void OGA_API_CALL OgaDestroyTokenizerStream(OgaTokenizerStream* p) {
