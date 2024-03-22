@@ -66,7 +66,7 @@ std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
   return std::make_unique<GreedySearch_Cpu>(params);
 }
 
-Generator::Generator(const Model& model, const GeneratorParams& params) : model_{model.shared_from_this()} {
+Generator::Generator(const Model& model, const GeneratorParams& params) : model_{model} {
   if (params.search.max_length == 0)
     throw std::runtime_error("search max_length is 0");
   if (params.search.max_length > model.config_->model.context_length)
@@ -89,7 +89,7 @@ void Generator::ComputeLogits() {
   search_->SetLogits(state_->Run(search_->GetSequenceLength(), search_->GetNextTokens(), search_->GetNextIndices()));
   computed_logits_ = true;
 
-  auto& search = search_->params_->search;
+  auto& search = search_->params_.search;
   search_->ApplyMinLength(search.min_length);
   search_->ApplyRepetitionPenalty(search.repetition_penalty);
 }
@@ -112,7 +112,7 @@ void Generator::GenerateNextToken_TopK_TopP(int top_k, float top_p, float temper
   }
 
   // The user explicitly called TopK_TopP on a beam search
-  if (search_->params_->search.num_beams != 1)
+  if (search_->params_.search.num_beams != 1)
     throw std::runtime_error("TopK and TopP cannot be used with a beam search");
 
   // Sanity checks
@@ -121,7 +121,7 @@ void Generator::GenerateNextToken_TopK_TopP(int top_k, float top_p, float temper
   if (top_k < 0)
     throw std::runtime_error("top_k must be 0 or greater");
 
-  if (top_p > 0.0f && top_p < 1.0f && top_k > 1) {
+  if (top_p > 0.0f && top_k > 1) {
     search_->SampleTopKTopP(top_k, top_p, temperature);
   } else if (top_k > 1) {
     search_->SampleTopK(top_k, temperature);
@@ -134,7 +134,7 @@ void Generator::GenerateNextToken_TopK_TopP(int top_k, float top_p, float temper
 }
 
 void Generator::GenerateNextToken() {
-  auto& search = search_->params_->search;
+  auto& search = search_->params_.search;
   if (search.do_sample)
     GenerateNextToken_TopK_TopP(search.top_k, search.top_p, search.temperature);
   else
