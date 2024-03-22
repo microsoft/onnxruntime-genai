@@ -33,9 +33,9 @@ struct Result {
 extern "C" {
 
 #define OGA_TRY try {
-#define OGA_CATCH                   \
-  }                                 \
-  catch (const std::exception& e) { \
+#define OGA_CATCH                                                                                  \
+  }                                                                                                \
+  catch (const std::exception& e) {                                                                \
     return reinterpret_cast<OgaResult*>(std::make_unique<Generators::Result>(e.what()).release()); \
   }
 
@@ -260,7 +260,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGetCurrentGpuDeviceId(int* device_id) {
 }
 
 void OGA_API_CALL OgaDestroyResult(OgaResult* p) {
-  delete p;
+  delete reinterpret_cast<Generators::Result*>(p);
 }
 
 void OGA_API_CALL OgaDestroyString(const char* p) {
