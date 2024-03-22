@@ -31,6 +31,7 @@ jobs:
   workspace:
     clean: all
   pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
+#  set variables here to be used in the template and steps
   variables:
   # The build machine pool doesn't have dotnet, so it can't run CG.
   - name: skipComponentGovernanceDetection
@@ -39,6 +40,8 @@ jobs:
     value: ${{ parameters.arch }}
   - name: ep
     value: ${{ parameters.ep }}
+  - name: artifactName
+    value: 'onnxruntime-genai-capi-linux-${{ parameters.ep }}-${{ parameters.arch }}-python'
   - name: cuda_version
     value: ${{ parameters.cuda_version }}
   - name: ort_version
@@ -57,11 +60,6 @@ jobs:
     parameters:
       target: 'python'
       genai_src: '$(Build.SourcesDirectory)/onnxruntime-genai'
-
-  - task: PublishBuildArtifacts@1
-    displayName: 'Publish Artifact: ONNXRuntime python wheel'
-    inputs:
-      ArtifactName: onnxruntime-genai-linux-$(ep)-$(arch)
 
   - template: steps/compliant-and-cleanup-step.yml
 

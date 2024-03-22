@@ -1,30 +1,35 @@
 parameters:
-- name: genai_src
-  type: string
 - name: target
   type: string
 steps:
 
-- checkout: self # due to checkout multiple repos, the root directory is $(Build.SourcesDirectory)/onnxruntime-genai,
+- checkout: self
   clean: true
+  path: onnxruntime-genai
   submodules: recursive
 
-- checkout: manylinux # due to checkout multiple repos, the root directory is $(Build.SourcesDirectory)/manylinux,
+- checkout: manylinux
   clean: true
+  path: onnxruntime-genai/manylinux
   submodules: recursive
+
+- script: |
+    set -e -x
+    echo "$(Build.SourcesDirectory)"
+    echo "$(Build.Repository.LocalPath)"
+    ls $(Build.SourcesDirectory) -R
+  displayName: 'List files from SourceDirectory'
 
 - template: utils/set-nightly-build-option-variable.yml
 
 - bash: |
     echo "arch=$(arch)"
     echo "ep=$(ep)"
-    echo "genai_src=${{ parameters.genai_src }}"
   displayName: 'Print Parameters'
 
 - template: utils/download-ort.yml
   parameters:
     archiveType: 'tgz'
-    genai_src: ${{ parameters.genai_src }}
 - bash: |
     set -e -x
     az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
@@ -33,18 +38,18 @@ steps:
       --context tools/ci_build/github/linux/docker/manylinux \
       --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
       --container-registry onnxruntimebuildcache \
-      --manylinux-src $(Build.SourcesDirectory)/manylinux \
+      --manylinux-src manylinux \
       --multiple_repos \
       --repository onnxruntime$(ep)build$(arch)
   displayName: 'Get Docker Image'
-  workingDirectory: '${{ parameters.genai_src }}'
+  workingDirectory: '$(Build.Repository.LocalPath)'
 
 - ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
   - script: |
       set -e -x
       docker run \
       --rm \
-      --volume ${{ parameters.genai_src }}:/ort_genai_src \
+      --volume $(Build.Repository.LocalPath):/ort_genai_src \
       -w /ort_genai_src/ onnxruntime$(ep)build$(arch) \
       bash -c " \
           /usr/bin/cmake --preset linux_gcc_$(ep)_release \
@@ -52,22 +57,28 @@ steps:
           /usr/bin/cmake --build --preset linux_gcc_$(ep)_release \
             --target onnxruntime-genai"
     displayName: 'Build GenAi'
-    workingDirectory: '${{ parameters.genai_src }}'
+    workingDirectory: '$(Build.Repository.LocalPath)'
   - task: BinSkim@4
     displayName: 'Run BinSkim'
     inputs:
-      AnalyzeTargetGlob: '$(Build.SourcesDirectory)/onnxruntime-genai/build/**/*genai.so'
+      AnalyzeTargetGlob: '$(Build.Repository.LocalPath)/build/**/*genai.so'
     continueOnError: true
   - template: utils/capi-archive.yml
     parameters:
-      genai_src: ${{ parameters.genai_src }}
       archiveType: tar
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Artifact: ONNXRuntime Genai capi'
+    inputs:
+      ArtifactName: $(artifactName)-capi
+      PathtoPublish: '$(Build.ArtifactStagingDirectory)/capi'
+
 - ${{ if eq(parameters.target, 'python') }}:
   - bash: |
       set -e -x
       docker run \
       --rm \
-      --volume ${{ parameters.genai_src }}:/ort_genai_src \
+      --volume $(Build.Repository.LocalPath):/ort_genai_src \
       -w /ort_genai_src/ onnxruntime$(ep)build$(arch) \
       bash -c " \
           /usr/bin/cmake --preset linux_gcc_$(ep)_release \
@@ -77,12 +88,19 @@ steps:
           /usr/bin/cmake --build --preset linux_gcc_$(ep)_release \
             --target python"
     displayName: 'Build Python $(PyNoDotVer)'
-    workingDirectory: '${{ parameters.genai_src }}'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+
+  - task: BinSkim@4
+    displayName: 'Run BinSkim'
+    inputs:
+      AnalyzeTargetGlob: '$(Build.Repository.LocalPath)/**/*.pyd'
+    continueOnError: true
+
   - bash: |
       set -e -x
       docker run \
       --rm \
-      --volume ${{ parameters.genai_src }}:/ort_genai_src \
+      --volume $(Build.Repository.LocalPath):/ort_genai_src \
       -w /ort_genai_src/ onnxruntime$(ep)build$(arch) \
       bash -c " \
           /usr/bin/cmake --build --preset linux_gcc_$(ep)_release \
@@ -92,15 +110,22 @@ steps:
           /usr/bin/cmake --build --preset linux_gcc_$(ep)_release \
             --target PyPackageBuild"
     displayName: 'PyPackageBuild $(PyNoDotVer)'
-    workingDirectory: '${{ parameters.genai_src }}'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+
   - task: CopyFiles@2
     displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
     inputs:
-      SourceFolder: '${{ parameters.genai_src }}/build/gcc_$(ep)/release/wheel'
+      SourceFolder: '$(Build.Repository.LocalPath)/build/$(ep)/wheel'
       Contents: '*manylinux*.whl'
-      TargetFolder: '$(Build.ArtifactStagingDirectory)'
+      TargetFolder: '$(Build.ArtifactStagingDirectory)/wheel'
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Artifact: ONNXRuntime python wheel'
+    inputs:
+      ArtifactName: $(artifactName)
+      PathtoPublish: '$(Build.ArtifactStagingDirectory)/wheel'
 
 - script: |
-    ls ${{ parameters.genai_src }} -R
+    ls $(Build.Repository.LocalPath) -R
   displayName: 'List files from SourceDirectory'
 
