@@ -149,9 +149,9 @@ OgaResult* OGA_API_CALL OgaGenerator_ComputeLogits(OgaGenerator* generator) {
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken_Top(OgaGenerator* generator) {
+OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator) {
   OGA_TRY
-  reinterpret_cast<Generators::Generator*>(generator)->GenerateNextToken_Top();
+  reinterpret_cast<Generators::Generator*>(generator)->GenerateNextToken();
   return nullptr;
   OGA_CATCH
 }

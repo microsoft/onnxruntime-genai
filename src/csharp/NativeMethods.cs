@@ -78,7 +78,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         // This function is used to generate the next token in the sequence using the greedy search algorithm.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaGenerator_GenerateNextToken_Top(IntPtr /* OgaGenerator* */ generator);
+        public static extern IntPtr /* OgaResult* */ OgaGenerator_GenerateNextToken(IntPtr /* OgaGenerator* */ generator);
 
         // This function returns the length of the sequence at the given index.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
