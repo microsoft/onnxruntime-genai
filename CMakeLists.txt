@@ -5,6 +5,7 @@ cmake_minimum_required(VERSION 3.26)
 include(FetchContent)
 include(CMakeDependentOption)
 project(Generators LANGUAGES C CXX)
+
 # All Options should be defined in cmake/options.cmake
 include(cmake/options.cmake)
 include(cmake/external/onnxruntime_external_deps.cmake)
@@ -35,9 +36,17 @@ include(cmake/cxx_standard.cmake)
 
 set(GENERATORS_ROOT ${PROJECT_SOURCE_DIR}/src)
 set(MODELS_ROOT ${PROJECT_SOURCE_DIR}/src/models)
+
 set(ORT_HOME ${CMAKE_SOURCE_DIR}/ort CACHE PATH "Path to the onnxruntime root directory.")
-set(ORT_HEADER_DIR ${ORT_HOME}/include)
-set(ORT_LIB_DIR ${ORT_HOME}/lib)
+if (ANDROID)
+  # Paths are based on the directory structure of the ORT Android AAR.
+  set(ORT_HEADER_DIR ${ORT_HOME}/headers)
+  set(ORT_LIB_DIR ${ORT_HOME}/jni/${ANDROID_ABI})
+else()
+  set(ORT_HEADER_DIR ${ORT_HOME}/include)
+  set(ORT_LIB_DIR ${ORT_HOME}/lib)
+endif()
+
 # CUDA Being enabled will make it not a debug build without this option, so all of the C++ headers will complain
 # about a mismatch with the actual debug headers and it'll fail to link. I don't know why this happens, or if this is the best fix.
 if(USE_CUDA AND CMAKE_CUDA_COMPILER AND CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -92,6 +101,10 @@ add_library(onnxruntime-genai SHARED ${generator_srcs})
 add_library(onnxruntime-genai-static STATIC ${generator_srcs})
 target_include_directories(onnxruntime-genai PRIVATE ${ORT_HEADER_DIR})
 target_include_directories(onnxruntime-genai-static PRIVATE ${ORT_HEADER_DIR})
+
+set_target_properties(onnxruntime-genai PROPERTIES FOLDER "Sources")
+set_target_properties(onnxruntime-genai-static PROPERTIES FOLDER "Sources")
+source_group(TREE ${PROJECT_SOURCE_DIR} FILES ${generator_srcs})
 
 if(CMAKE_GENERATOR_TOOLSET MATCHES "Visual Studio")
   target_link_options(onnxruntime-genai PRIVATE "/CETCOMPAT")
