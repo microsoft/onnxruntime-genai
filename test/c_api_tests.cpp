@@ -187,6 +187,7 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
   CheckResult(OgaCreateGeneratorParams(model, &params));
   OgaGeneratorParamsPtr params_ptr{params};
   CheckResult(OgaGeneratorParamsSetSearchNumber(params, "max_length", max_length));
+  CheckResult(OgaGeneratorParamsSetSearchBool(params, "do_sample", false));
   CheckResult(OgaGeneratorParamsSetInputIDs(params, input_ids.data(), input_ids.size(), sequence_length, batch_size));
 
   OgaGenerator* generator;
@@ -195,7 +196,7 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
 
   while (!OgaGenerator_IsDone(generator)) {
     CheckResult(OgaGenerator_ComputeLogits(generator));
-    CheckResult(OgaGenerator_GenerateNextToken_Top(generator));
+    CheckResult(OgaGenerator_GenerateNextToken(generator));
   }
 
   // Verify outputs match expected outputs
@@ -252,20 +253,11 @@ TEST(CAPITests, TopKCAPI) {
   CheckResult(OgaCreateGeneratorParams(model, &params));
   OgaGeneratorParamsPtr params_ptr{params};
   CheckResult(OgaGeneratorParamsSetSearchNumber(params, "max_length", 40));
-  CheckResult(OgaGeneratorParamsSetInputSequences(params, input_sequences));
-
-  OgaGenerator* generator;
-  CheckResult(OgaCreateGenerator(model, params, &generator));
-  OgaGeneratorPtr generator_ptr{generator};
-
-  while (!OgaGenerator_IsDone(generator)) {
-    CheckResult(OgaGenerator_ComputeLogits(generator));
-    CheckResult(OgaGenerator_GenerateNextToken_TopK(generator, top_k, temp));
-  }
-
   CheckResult(OgaGeneratorParamsSetSearchBool(params, "do_sample", true));
   CheckResult(OgaGeneratorParamsSetSearchNumber(params, "top_k", top_k));
   CheckResult(OgaGeneratorParamsSetSearchNumber(params, "temperature", temp));
+  CheckResult(OgaGeneratorParamsSetInputSequences(params, input_sequences));
+
   OgaSequences* output_sequences;
   CheckResult(OgaGenerate(model, params, &output_sequences));
   OgaSequencesPtr output_sequences_ptr{output_sequences};
@@ -310,20 +302,10 @@ TEST(CAPITests, TopPCAPI) {
   CheckResult(OgaCreateGeneratorParams(model, &params));
   OgaGeneratorParamsPtr params_ptr{params};
   CheckResult(OgaGeneratorParamsSetSearchNumber(params, "max_length", 40));
-  CheckResult(OgaGeneratorParamsSetInputSequences(params, input_sequences));
-
-  OgaGenerator* generator;
-  CheckResult(OgaCreateGenerator(model, params, &generator));
-  OgaGeneratorPtr generator_ptr{generator};
-
-  while (!OgaGenerator_IsDone(generator)) {
-    CheckResult(OgaGenerator_ComputeLogits(generator));
-    CheckResult(OgaGenerator_GenerateNextToken_TopP(generator, top_p, temp));
-  }
-
   CheckResult(OgaGeneratorParamsSetSearchBool(params, "do_sample", true));
   CheckResult(OgaGeneratorParamsSetSearchNumber(params, "top_p", top_p));
   CheckResult(OgaGeneratorParamsSetSearchNumber(params, "temperature", temp));
+  CheckResult(OgaGeneratorParamsSetInputSequences(params, input_sequences));
   OgaSequences* output_sequences;
   CheckResult(OgaGenerate(model, params, &output_sequences));
   OgaSequencesPtr output_sequences_ptr{output_sequences};
@@ -369,21 +351,11 @@ TEST(CAPITests, TopKTopPCAPI) {
   CheckResult(OgaCreateGeneratorParams(model, &params));
   OgaGeneratorParamsPtr params_ptr{params};
   CheckResult(OgaGeneratorParamsSetSearchNumber(params, "max_length", 40));
-  CheckResult(OgaGeneratorParamsSetInputSequences(params, input_sequences));
-
-  OgaGenerator* generator;
-  CheckResult(OgaCreateGenerator(model, params, &generator));
-  OgaGeneratorPtr generator_ptr{generator};
-
-  while (!OgaGenerator_IsDone(generator)) {
-    CheckResult(OgaGenerator_ComputeLogits(generator));
-    CheckResult(OgaGenerator_GenerateNextToken_TopK_TopP(generator, top_k, top_p, temp));
-  }
-
   CheckResult(OgaGeneratorParamsSetSearchBool(params, "do_sample", true));
   CheckResult(OgaGeneratorParamsSetSearchNumber(params, "top_k", top_k));
   CheckResult(OgaGeneratorParamsSetSearchNumber(params, "top_p", top_p));
   CheckResult(OgaGeneratorParamsSetSearchNumber(params, "temperature", temp));
+  CheckResult(OgaGeneratorParamsSetInputSequences(params, input_sequences));
   OgaSequences* output_sequences;
   CheckResult(OgaGenerate(model, params, &output_sequences));
   OgaSequencesPtr output_sequences_ptr{output_sequences};

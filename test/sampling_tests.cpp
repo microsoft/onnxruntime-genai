@@ -27,6 +27,8 @@ TEST(SamplingTests, BatchedSamplingTopPCpu) {
   int batch_size = 4;
   auto params = Generators::CreateGeneratorParams();
   params->search.max_length = 10;
+  params->search.do_sample=true;
+  params->search.top_p=0.25f;
   params->batch_size = batch_size;
   params->sequence_length = 1;
   params->vocab_size = vocab_size;
@@ -37,7 +39,7 @@ TEST(SamplingTests, BatchedSamplingTopPCpu) {
   generator->search_->SetLogits(logits_span);
   generator->computed_logits_ = true;
   // Verify outputs match expected outputs
-  generator->GenerateNextToken_TopP(0.25f, 1.0f);
+  generator->GenerateNextToken();
   auto next_tokens = generator->search_->GetNextTokens().GetCPU();
   EXPECT_TRUE(0 == std::memcmp(output_span.data(), next_tokens.data(), expected_output.size() * sizeof(int32_t)));
 }
@@ -53,6 +55,8 @@ TEST(SamplingTests, BatchedSamplingTopKCpu) {
   int batch_size = 4;
   auto params = Generators::CreateGeneratorParams();
   params->search.max_length = 10;
+  params->search.do_sample = true;
+  params->search.top_k = 2;
   params->batch_size = batch_size;
   params->sequence_length = 1;
   params->vocab_size = vocab_size;
@@ -64,8 +68,7 @@ TEST(SamplingTests, BatchedSamplingTopKCpu) {
   generator->computed_logits_ = true;
 
   // Verify outputs match expected outputs
-  int k = 2;
-  generator->GenerateNextToken_TopK(k, 1.0);
+  generator->GenerateNextToken();
   auto next_tokens = generator->search_->GetNextTokens().GetCPU();
   for (int b = 0; b < batch_size; b++) {
     auto next_token = next_tokens[b];
@@ -85,6 +88,9 @@ TEST(SamplingTests, BatchedSamplingTopPAndKCpu) {
   int batch_size = 4;
   auto params = Generators::CreateGeneratorParams();
   params->search.max_length = 10;
+  params->search.do_sample = true;
+  params->search.top_k = 2;
+  params->search.top_p = 0.25f;
   params->batch_size = batch_size;
   params->sequence_length = 1;
   params->vocab_size = vocab_size;
@@ -95,9 +101,7 @@ TEST(SamplingTests, BatchedSamplingTopPAndKCpu) {
   generator->search_->SetLogits(Generators::cpu_span<float>(logits_copy));
   generator->computed_logits_ = true;
   // Verify outputs match expected outputs
-  float p = 0.25f;
-  int k = 2;
-  generator->GenerateNextToken_TopK_TopP(k, p, 1.0);
+  generator->GenerateNextToken();
   auto next_tokens = generator->search_->GetNextTokens().GetCPU();
   for (int b = 0; b < batch_size; b++) {
     auto next_token = next_tokens[b];
@@ -130,6 +134,8 @@ TEST(SamplingTests, RandomizedSamplingTopPCpu) {
   std::vector<int32_t> input_ids{0, 1, 2, 3, 4};
   auto params = Generators::CreateGeneratorParams();
   params->search.max_length = 10;
+  params->search.do_sample = true;
+  params->search.top_p = 0.95f;
   params->batch_size = batch_size;
   params->sequence_length = 1;
   params->vocab_size = vocab_size;
@@ -147,7 +153,7 @@ TEST(SamplingTests, RandomizedSamplingTopPCpu) {
     auto logits_copy = logits_cpu;
     generator->search_->SetLogits(Generators::cpu_span<float>(logits_copy));
     generator->computed_logits_ = true;
-    generator->GenerateNextToken_TopP(0.95f, 1.0f);
+    generator->GenerateNextToken();
     auto next_tokens = generator->search_->GetNextTokens().GetCPU();
     // Verify outputs match expected outputs
     for (int b = 0; b < batch_size; b++) {
@@ -166,6 +172,8 @@ TEST(SamplingTests, RandomizedSamplingTopKCpu) {
   std::vector<int32_t> input_ids{0, 1, 2, 3, 4};
   auto params = Generators::CreateGeneratorParams();
   params->search.max_length = 10;
+  params->search.do_sample = true;
+  params->search.top_k = k;
   params->batch_size = batch_size;
   params->sequence_length = 1;
   params->vocab_size = vocab_size;
@@ -183,7 +191,7 @@ TEST(SamplingTests, RandomizedSamplingTopKCpu) {
     auto logits_copy=logits_cpu;
     generator->search_->SetLogits(Generators::cpu_span<float>(logits_copy));
     generator->computed_logits_ = true;
-    generator->GenerateNextToken_TopK(k, 1.0f);
+    generator->GenerateNextToken();
     auto next_tokens = generator->search_->GetNextTokens().GetCPU();
     // Verify outputs match expected outputs
     for (int b = 0; b < batch_size; b++) {
@@ -203,6 +211,9 @@ TEST(SamplingTests, RandomizedSamplingTopPAndKCpu) {
   std::vector<int32_t> input_ids{0, 1, 2, 3, 4};
   auto params = Generators::CreateGeneratorParams();
   params->search.max_length = 10;
+  params->search.do_sample = true;
+  params->search.top_k = k;
+  params->search.top_p = p;
   params->batch_size = batch_size;
   params->sequence_length = 1;
   params->vocab_size = vocab_size;
@@ -220,7 +231,7 @@ TEST(SamplingTests, RandomizedSamplingTopPAndKCpu) {
     auto logits_copy = logits_cpu;
     generator->search_->SetLogits(Generators::cpu_span<float>(logits_copy));
     generator->computed_logits_ = true;
-    generator->GenerateNextToken_TopK_TopP(k, p, 1.0f);
+    generator->GenerateNextToken();
     auto next_tokens = generator->search_->GetNextTokens().GetCPU();
     // Verify outputs match expected outputs
     for (int b = 0; b < batch_size; b++) {
@@ -248,6 +259,8 @@ TEST(SamplingTests, BatchedSamplingTopPCuda) {
   int batch_size = 4;
   auto params = Generators::CreateGeneratorParams();
   params->search.max_length = 10;
+  params->search.do_sample = true;
+  params->search.top_p = 0.25f;
   params->batch_size = batch_size;
   params->sequence_length = 1;
   params->vocab_size = vocab_size;
@@ -259,7 +272,7 @@ TEST(SamplingTests, BatchedSamplingTopPCuda) {
   generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), logits_cpu.size()));
   generator->computed_logits_ = true;
   // Verify outputs match expected outputs
-  generator->GenerateNextToken_TopP(0.25f, 1.0f);
+  generator->GenerateNextToken();
   auto next_tokens = generator->search_->GetNextTokens().GetCPU();
   EXPECT_TRUE(0 == std::memcmp(output_span.data(), next_tokens.data(), expected_output.size() * sizeof(int32_t)));
 }
@@ -276,6 +289,8 @@ TEST(SamplingTests, BatchedSamplingTopKCuda) {
   int batch_size = 4;
   auto params = Generators::CreateGeneratorParams();
   params->search.max_length = 10;
+  params->search.do_sample = true;
+  params->search.top_k = 2;
   params->batch_size = batch_size;
   params->sequence_length = 1;
   params->vocab_size = vocab_size;
@@ -287,8 +302,7 @@ TEST(SamplingTests, BatchedSamplingTopKCuda) {
   generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), logits_cpu.size()));
   generator->computed_logits_ = true;
   // Verify outputs match expected outputs
-  int k = 2;
-  generator->GenerateNextToken_TopK(k, 1.0);
+  generator->GenerateNextToken();
   auto next_tokens = generator->search_->GetNextTokens().GetCPU();
   for (int b = 0; b < batch_size; b++) {
     auto next_token = next_tokens[b];
@@ -309,6 +323,9 @@ TEST(SamplingTests, BatchedSamplingTopPAndKCuda) {
   int batch_size = 4;
   auto params = Generators::CreateGeneratorParams();
   params->search.max_length = 10;
+  params->search.do_sample = true;
+  params->search.top_k = 2;
+  params->search.top_p = 0.25f;
   params->batch_size = batch_size;
   params->sequence_length = 1;
   params->vocab_size = vocab_size;
@@ -320,9 +337,7 @@ TEST(SamplingTests, BatchedSamplingTopPAndKCuda) {
   generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), logits_cpu.size()));
   generator->computed_logits_ = true;
   // Verify outputs match expected outputs
-  float p = 0.25f;
-  int k = 2;
-  generator->GenerateNextToken_TopK_TopP(k, p, 1.0);
+  generator->GenerateNextToken();
   auto next_tokens = generator->search_->GetNextTokens().GetCPU();
   for (int b = 0; b < batch_size; b++) {
     auto next_token = next_tokens[b];
@@ -338,6 +353,8 @@ TEST(SamplingTests, RandomizedSamplingTopPCuda) {
   std::vector<int32_t> input_ids{0, 1, 2, 3, 4};
   auto params = Generators::CreateGeneratorParams();
   params->search.max_length = 10;
+  params->search.do_sample = true;
+  params->search.top_p = 0.95f;
   params->batch_size = batch_size;
   params->sequence_length = 1;
   params->vocab_size = vocab_size;
@@ -358,7 +375,7 @@ TEST(SamplingTests, RandomizedSamplingTopPCuda) {
     cudaMemcpyAsync(cpu_logits, logits_gpu.get(), vocab_size * batch_size * sizeof(float), cudaMemcpyDeviceToHost, params->cuda_stream);
     generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), vocab_size * batch_size));
     generator->computed_logits_ = true;
-    generator->GenerateNextToken_TopP(0.95f, 1.0f);
+    generator->GenerateNextToken();
     auto next_tokens = generator->search_->GetNextTokens().GetCPU();
     cudaStreamSynchronize(params->cuda_stream);
     // Verify outputs match expected outputs
@@ -378,6 +395,8 @@ TEST(SamplingTests, RandomizedSamplingTopKCuda) {
   std::vector<int32_t> input_ids{0, 1, 2, 3, 4};
   auto params = Generators::CreateGeneratorParams();
   params->search.max_length = 10;
+  params->search.do_sample = true;
+  params->search.top_k = k;
   params->batch_size = batch_size;
   params->sequence_length = 1;
   params->vocab_size = vocab_size;
@@ -398,7 +417,7 @@ TEST(SamplingTests, RandomizedSamplingTopKCuda) {
     auto generator = Generators::CreateGenerator(*model, *params);
     generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), vocab_size * batch_size));
     generator->computed_logits_ = true;
-    generator->GenerateNextToken_TopK(k, 1.0f);
+    generator->GenerateNextToken();
     auto next_tokens = generator->search_->GetNextTokens().GetCPU();
     cudaStreamSynchronize(params->cuda_stream);
     // Verify outputs match expected outputs
@@ -419,6 +438,9 @@ TEST(SamplingTests, RandomizedSamplingTopPAndKCuda) {
   std::vector<int32_t> input_ids{0, 1, 2, 3, 4};
   auto params = Generators::CreateGeneratorParams();
   params->search.max_length = 10;
+  params->search.do_sample = true;
+  params->search.top_k = k;
+  params->search.top_p = p;
   params->batch_size = batch_size;
   params->sequence_length = 1;
   params->vocab_size = vocab_size;
@@ -439,7 +461,7 @@ TEST(SamplingTests, RandomizedSamplingTopPAndKCuda) {
     cudaMemcpyAsync(cpu_logits, logits_gpu.get(), vocab_size * batch_size * sizeof(float), cudaMemcpyDeviceToHost, params->cuda_stream);
     generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), vocab_size * batch_size));
     generator->computed_logits_ = true;
-    generator->GenerateNextToken_TopK_TopP(k, p, 1.0f);
+    generator->GenerateNextToken();
     auto next_tokens = generator->search_->GetNextTokens().GetCPU();
     cudaStreamSynchronize(params->cuda_stream);
     // Verify outputs match expected outputs
@@ -478,7 +500,7 @@ TEST(SamplingTests, RandomizedSamplingSelectTopCuda) {
     auto generator = Generators::CreateGenerator(*model, *params);
     generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), vocab_size * batch_size));
     generator->computed_logits_ = true;
-    generator->GenerateNextToken_Top();
+    generator->GenerateNextToken();
     auto next_tokens = generator->search_->GetNextTokens().GetCPU();
     cudaStreamSynchronize(params->cuda_stream);
     // Verify outputs match expected outputs
