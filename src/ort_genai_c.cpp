@@ -157,34 +157,6 @@ OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator) 
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken_Top(OgaGenerator* generator) {
-  OGA_TRY
-  reinterpret_cast<Generators::Generator*>(generator)->GenerateNextToken_Top();
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken_TopK(OgaGenerator* generator, int k, float t) {
-  OGA_TRY
-  reinterpret_cast<Generators::Generator*>(generator)->GenerateNextToken_TopK(k, t);
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken_TopP(OgaGenerator* generator, float p, float t) {
-  OGA_TRY
-  reinterpret_cast<Generators::Generator*>(generator)->GenerateNextToken_TopP(p, t);
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken_TopK_TopP(OgaGenerator* generator, int k, float p, float t) {
-  OGA_TRY
-  reinterpret_cast<Generators::Generator*>(generator)->GenerateNextToken_TopK_TopP(k, p, t);
-  return nullptr;
-  OGA_CATCH
-}
-
 size_t OGA_API_CALL OgaGenerator_GetSequenceLength(const OgaGenerator* oga_generator, size_t index) {
   auto& generator = *reinterpret_cast<const Generators::Generator*>(oga_generator);
   return generator.GetSequence(static_cast<int>(index)).GetCPU().size();

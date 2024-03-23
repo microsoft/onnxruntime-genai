@@ -79,7 +79,7 @@ struct Config {
     int num_return_sequences{1};
     float repetition_penalty{1.0f};  // 1.0 means no penalty.
     int top_k{};                     // Number of highest probability vocabulary tokens to keep for top-k-filtering that will be used by default in the generate method of the model.
-    float top_p{1.0f};               // If set to float < 1, only the most probable tokens with probabilities that add up to top_p or higher are kept for generation.
+    float top_p{};                   // If set to float >0 and <1, only the most probable tokens with probabilities that add up to top_p or higher are kept for generation.
     float temperature{1.0f};
     bool early_stopping{true};  //  Whether to stop the beam search when at least num_beams sentences are finished per batch or not.
     int no_repeat_ngram_size{};
