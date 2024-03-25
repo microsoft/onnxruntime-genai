@@ -95,7 +95,7 @@ target_include_directories(onnxruntime-genai-static PRIVATE ${ORT_HEADER_DIR})
 
 if(CMAKE_GENERATOR_TOOLSET MATCHES "Visual Studio")
   target_link_options(onnxruntime-genai PRIVATE "/CETCOMPAT")
-  target_compile_options(onnxruntime-genai PRIVATE "/sdl")
+  target_compile_options(onnxruntime-genai PRIVATE "/sdl" PRIVATE "/Qspectre")
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")

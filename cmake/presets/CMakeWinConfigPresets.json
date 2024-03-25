@@ -6,9 +6,9 @@
       "generator": "Visual Studio 17 2022",
       "architecture": "x64",
       "cacheVariables": {
-        "CMAKE_EXE_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
-        "CMAKE_MODULE_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
-        "CMAKE_SHARED_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
+        "CMAKE_EXE_LINKER_FLAGS_INIT": "/profile /CETCOMPAT /DYNAMICBASE",
+        "CMAKE_MODULE_LINKER_FLAGS_INIT": "/profile /CETCOMPAT /DYNAMICBASE",
+        "CMAKE_SHARED_LINKER_FLAGS_INIT": "/profile /CETCOMPAT /DYNAMICBASE",
         "USE_CUDA": "OFF"
       },
       "condition": {
