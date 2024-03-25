@@ -33,10 +33,9 @@ python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -p int4 -e cpu -o 
   - onnxruntime.dll
   - onnxruntime_providers_shared.dll
   - onnxruntime_providers_cuda.dll
-  - onnxruntime.lib
   - onnxruntime-genai.dll
   - onnxruntime-genai.lib
-2. Copy over the `ort_genai_c.h` header file to the [include](include) directory.
+2. Copy over the `ort_genai.h` and `ort_genai_c.h` header files to the [include](include) directory.
 
 On Windows:
 ```bash

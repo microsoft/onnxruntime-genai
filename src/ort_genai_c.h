@@ -42,7 +42,7 @@ typedef struct OgaTokenizerStream OgaTokenizerStream;
  * \return Error message contained in the OgaResult. The const char* is owned by the OgaResult
  *         and can will be freed when the OgaResult is destroyed.
  */
-OGA_EXPORT const char* OGA_API_CALL OgaResultGetError(OgaResult* result);
+OGA_EXPORT const char* OGA_API_CALL OgaResultGetError(const OgaResult* result);
 
 /*
  * \param[in] result OgaResult to be destroyed.
