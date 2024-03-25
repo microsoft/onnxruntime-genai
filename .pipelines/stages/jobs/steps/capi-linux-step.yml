@@ -93,7 +93,7 @@ steps:
   - task: BinSkim@4
     displayName: 'Run BinSkim'
     inputs:
-      AnalyzeTargetGlob: '$(Build.Repository.LocalPath)/**/*.pyd'
+      AnalyzeTargetGlob: '$(Build.Repository.LocalPath)/build/**/*cpython*.so'
     continueOnError: true
 
   - bash: |
@@ -122,7 +122,7 @@ steps:
   - task: PublishBuildArtifacts@1
     displayName: 'Publish Artifact: ONNXRuntime python wheel'
     inputs:
-      ArtifactName: $(artifactName)-wheel
+      ArtifactName: $(artifactName)
       PathtoPublish: '$(Build.ArtifactStagingDirectory)/wheel'
 
 - script: |
