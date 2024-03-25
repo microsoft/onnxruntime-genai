@@ -93,7 +93,7 @@ steps:
   - task: BinSkim@4
     displayName: 'Run BinSkim'
     inputs:
-      AnalyzeTargetGlob: '$(Build.Repository.LocalPath)/**/*.pyd'
+      AnalyzeTargetGlob: '$(Build.Repository.LocalPath)/build/**/*cpython*.so'
     continueOnError: true
 
   - bash: |
