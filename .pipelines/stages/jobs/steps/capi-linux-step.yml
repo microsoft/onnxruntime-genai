@@ -122,7 +122,7 @@ steps:
   - task: PublishBuildArtifacts@1
     displayName: 'Publish Artifact: ONNXRuntime python wheel'
     inputs:
-      ArtifactName: $(artifactName)
+      ArtifactName: $(artifactName)-wheel
       PathtoPublish: '$(Build.ArtifactStagingDirectory)/wheel'
 
 - script: |

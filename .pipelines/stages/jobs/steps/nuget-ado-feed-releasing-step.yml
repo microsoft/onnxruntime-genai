@@ -1,8 +1,3 @@
-parameters:
-- name: publish_to_ado_feed
-  type: boolean
-- name: publish_to_nuget
-  type: boolean
 steps:
 - task: NuGetToolInstaller@1
   inputs:
@@ -39,11 +34,10 @@ steps:
   parameters:
     packageFolder: '$(GDN_CODESIGN_TARGETDIRECTORY)'
 #This task must be run on a Windows machine
-- ${{ if eq(parameters.publish_to_ado_feed, true) }}:
-  - task: NuGetCommand@2
-    displayName: 'NuGet push to Azure DevOps Feed'
-    inputs:
-      command: push
-      packagesToPush: '$(GDN_CODESIGN_TARGETDIRECTORY)/*.nupkg'
-      publishVstsFeed: 'PublicPackages/onnxruntime-genai'
-      allowPackageConflicts: true
+- task: NuGetCommand@2
+  displayName: 'NuGet push to Azure DevOps Feed'
+  inputs:
+    command: push
+    packagesToPush: '$(GDN_CODESIGN_TARGETDIRECTORY)/*.nupkg'
+    publishVstsFeed: 'PublicPackages/onnxruntime-genai'
+    allowPackageConflicts: true
