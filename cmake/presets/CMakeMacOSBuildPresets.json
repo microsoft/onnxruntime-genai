@@ -1,0 +1,24 @@
+{
+  "version": 6,
+  "include": [
+    "CMakeMacOSConfigPresets.json"
+  ],
+  "buildPresets": [
+    {
+      "name": "macos_cpu_release",
+      "configurePreset": "macos_cpu_release"
+    },
+    {
+      "name": "macos_cpu_debug",
+      "configurePreset": "macos_cpu_debug"
+    },
+    {
+      "name": "macos_cpu_relwithdebinfo",
+      "configurePreset": "macos_cpu_relwithdebinfo"
+    },
+    {
+      "name": "macos_cpu_minsizerel",
+      "configurePreset": "macos_cpu_minsizerel"
+    }
+  ]
+}

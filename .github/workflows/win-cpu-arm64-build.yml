@@ -14,7 +14,7 @@ env:
   ort_dir: "onnxruntime-win-arm64-1.17.1"
   ort_zip: "$(ort_dir).zip"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/$(ort_zip)"
-  cmake_build_dir: 'build/release/cpu_default'
+  binaryDir: 'build/cpu'
 
 jobs:
   windows-cpu-arm64-build:
@@ -45,14 +45,17 @@ jobs:
       run: |
         Rename-Item -Path $env:ort_dir -NewName ort
 
-    - name: Build with CMake
+    - name: Configure CMake
       run: |
         cmake --preset windows_arm64_cpu_release
+
+    - name: Build with CMake
+      run: |
         cmake --build --preset windows_arm64_cpu_release --parallel
 
     - name: Install the Python Wheel and Test Dependencies
       run: |
-        python -m pip install (Get-ChildItem ("$env:cmake_build_dir\wheel\*.whl"))
+        python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl"))
         python -m pip install -r test\python\requirements.txt
 
     - name: Run the Python Tests
@@ -62,15 +65,15 @@ jobs:
     - name: Build the C# API and Run the C# Tests
       run: |
         cd test\csharp
-        dotnet test /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:cmake_build_dir\Release"
+        dotnet test /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release"
 
     - name: Verify Build Artifacts
       if: always()
       continue-on-error: true
       run: |
-        Get-ChildItem -Path $env:GITHUB_WORKSPACE\$env:cmake_build_dir -Recurse
-        Get-ChildItem -Path $env:GITHUB_WORKSPACE\$env:cmake_build_dir\test -Recurse
+        Get-ChildItem -Path $env:GITHUB_WORKSPACE\$env:binaryDir -Recurse
+        Get-ChildItem -Path $env:GITHUB_WORKSPACE\$env:binaryDir\test -Recurse
 
     - name: Run tests
       run: |
-        .\build\release\cpu_default\test\Release\unit_tests.exe
+        .\build\cpu\test\Release\unit_tests.exe

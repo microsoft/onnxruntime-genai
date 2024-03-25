@@ -59,7 +59,6 @@ jobs:
   - template: steps/capi-linux-step.yml
     parameters:
       target: 'python'
-      genai_src: '$(Build.SourcesDirectory)/onnxruntime-genai'
 
   - template: steps/compliant-and-cleanup-step.yml
 
