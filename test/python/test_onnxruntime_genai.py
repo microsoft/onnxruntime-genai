@@ -6,9 +6,11 @@ import logging
 import os
 import pathlib
 import sys
+import sysconfig
 from typing import Union
 
-from _test_utils import run_subprocess
+import onnxruntime_genai as og
+from _test_utils import download_models, run_subprocess
 
 logging.basicConfig(
     format="%(asctime)s %(name)s [%(levelname)s] - %(message)s", level=logging.DEBUG
@@ -42,8 +44,7 @@ def run_onnxruntime_genai_e2e_tests(
 ):
     log.debug("Running: ONNX Runtime GenAI E2E Tests")
 
-    log.debug("Running: Phi-2")
-    command = [sys.executable, "test_onnxruntime_genai_phi2.py"]
+    command = [sys.executable, "test_onnxruntime_genai_e2e.py"]
     run_subprocess(command, cwd=cwd, log=log).check_returncode()
 
 
@@ -73,11 +74,22 @@ def main():
 
     log.info("Running onnxruntime-genai tests pipeline")
 
-    run_onnxruntime_genai_api_tests(
-        os.path.abspath(args.cwd), log, os.path.abspath(args.test_models)
-    )
+    if not args.e2e:
+        if not (
+            sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8
+        ):
+            download_models(os.path.abspath(args.test_models), "cpu")
+            if og.is_cuda_available():
+                download_models(
+                    os.path.abspath(args.test_models),
+                    "cuda",
+                )
 
-    if args.e2e:
+        run_onnxruntime_genai_api_tests(
+            os.path.abspath(args.cwd), log, os.path.abspath(args.test_models)
+        )
+
+    else:
         run_onnxruntime_genai_e2e_tests(os.path.abspath(args.cwd), log)
 
     return 0

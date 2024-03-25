@@ -24,11 +24,14 @@ jobs:
       Python312_x64:
         PythonVersion: '3.12'
   timeoutInMinutes: 180
+#  set variables here to be used in the template and steps
   variables:
   - name: ep
     value: ${{ parameters.ep }}
   - name: cuda_version
     value: ${{ parameters.cuda_version }}
+  - name: artifactName
+    value: 'onnxruntime-genai-capi-win-${{ parameters.ep }}-${{ parameters.arch }}-wheel'
   - name: arch
     value: ${{ parameters.arch }}
   - name: ort_version
@@ -64,32 +67,5 @@ jobs:
   - template: steps/capi-win-step.yml
     parameters:
       target: 'python'
-#      ep: ${{ parameters.ep }}
-
-  - template: steps/compliant/win-esrp-dll-step.yml
-    parameters:
-      FolderPath: '$(Build.SourcesDirectory)\build\release\$(ep)_default\wheel\onnxruntime_genai'
-      DisplayName: 'ESRP - PYD Sign'
-      DoEsrp: true
-      Pattern: '*.pyd'
-
-  - powershell: |
-      cmake --build --preset windows_$(arch)_$(ep)_release --parallel --PyPackageBuild
-    displayName: 'Build Python Wheel'
-
-  - powershell: |
-      Get-ChildItem -Path $(Build.SourcesDirectory) -Recurse
-
-  - task: CopyFiles@2
-    displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
-    inputs:
-      SourceFolder: '$(Build.SourcesDirectory)\build\release\$(ep)_default\wheel'
-      Contents: '*.whl'
-      TargetFolder: '$(Build.ArtifactStagingDirectory)'
-
-  - task: PublishBuildArtifacts@1
-    displayName: 'Publish Artifact: ONNXRuntime Genai python wheel'
-    inputs:
-      ArtifactName: onnxruntime-genai-win-$(ep)-$(arch)
 
   - template: steps/compliant-and-cleanup-step.yml

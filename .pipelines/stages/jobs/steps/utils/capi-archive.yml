@@ -7,7 +7,7 @@ steps:
 - bash: |
     echo "##[error]Error: artifactName and buildDir are not set"
     exit 1
-  displayName: 'Check if variables ort_filename and ort_filename are set'
+  displayName: 'Check if variables artifactName and buildDir are set'
   condition: or( eq (variables['artifactName'], ''), eq (variables['buildDir'], ''))
 
 - task: CopyFiles@2
@@ -62,9 +62,9 @@ steps:
     archiveType: ${{ parameters.archiveType }}
     ${{ if eq(parameters.archiveType, 'tar') }}:
       tarCompression: 'gz'
-      archiveFile: '$(Build.ArtifactStagingDirectory)/$(artifactName).tgz'
+      archiveFile: '$(Build.ArtifactStagingDirectory)/capi/$(artifactName).tgz'
     ${{ else }}:
-      archiveFile: '$(Build.ArtifactStagingDirectory)/$(artifactName).zip'
+      archiveFile: '$(Build.ArtifactStagingDirectory)/capi/$(artifactName).zip'
     replaceExistingArchive: true
 
 - task: DeleteFiles@1

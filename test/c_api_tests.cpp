@@ -187,6 +187,7 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
   CheckResult(OgaCreateGeneratorParams(model, &params));
   OgaGeneratorParamsPtr params_ptr{params};
   CheckResult(OgaGeneratorParamsSetSearchNumber(params, "max_length", max_length));
+  CheckResult(OgaGeneratorParamsSetSearchBool(params, "do_sample", false));
   CheckResult(OgaGeneratorParamsSetInputIDs(params, input_ids.data(), input_ids.size(), sequence_length, batch_size));
 
   OgaGenerator* generator;
@@ -195,7 +196,7 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
 
   while (!OgaGenerator_IsDone(generator)) {
     CheckResult(OgaGenerator_ComputeLogits(generator));
-    CheckResult(OgaGenerator_GenerateNextToken_Top(generator));
+    CheckResult(OgaGenerator_GenerateNextToken(generator));
   }
 
   // Verify outputs match expected outputs
@@ -221,3 +222,153 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
     EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), max_length * sizeof(int32_t)));
   }
 }
+
+#if TEST_PHI2
+TEST(CAPITests, TopKCAPI) {
+  float top_k = 50;
+  float temp = 0.6f;
+
+  OgaModel* model;
+  CheckResult(OgaCreateModel(MODEL_PATH "phi-2", &model));
+  OgaModelPtr model_ptr{model};
+
+  OgaTokenizer* tokenizer;
+  CheckResult(OgaCreateTokenizer(model, &tokenizer));
+  OgaTokenizerPtr tokenizer_ptr{tokenizer};
+
+  OgaSequences* input_sequences;
+  CheckResult(OgaCreateSequences(&input_sequences));
+  OgaSequencesPtr sequences_ptr{input_sequences};
+
+  const char* input_strings[] = {
+      "This is a test.",
+      "Rats are awesome pets!",
+      "The quick brown fox jumps over the lazy dog.",
+  };
+
+  for (auto& string : input_strings)
+    CheckResult(OgaTokenizerEncode(tokenizer, string, input_sequences));
+
+  OgaGeneratorParams* params;
+  CheckResult(OgaCreateGeneratorParams(model, &params));
+  OgaGeneratorParamsPtr params_ptr{params};
+  CheckResult(OgaGeneratorParamsSetSearchNumber(params, "max_length", 40));
+  CheckResult(OgaGeneratorParamsSetSearchBool(params, "do_sample", true));
+  CheckResult(OgaGeneratorParamsSetSearchNumber(params, "top_k", top_k));
+  CheckResult(OgaGeneratorParamsSetSearchNumber(params, "temperature", temp));
+  CheckResult(OgaGeneratorParamsSetInputSequences(params, input_sequences));
+
+  OgaSequences* output_sequences;
+  CheckResult(OgaGenerate(model, params, &output_sequences));
+  OgaSequencesPtr output_sequences_ptr{output_sequences};
+
+  // Decode The Batch
+  for (size_t i = 0; i < OgaSequencesCount(output_sequences); i++) {
+    std::span<const int32_t> sequence{OgaSequencesGetSequenceData(output_sequences, i), OgaSequencesGetSequenceCount(output_sequences, i)};
+
+    const char* out_string;
+    CheckResult(OgaTokenizerDecode(tokenizer, sequence.data(), sequence.size(), &out_string));
+    std::cout << "Decoded string:" << out_string << std::endl;
+    OgaDestroyString(out_string);
+  }
+}
+
+TEST(CAPITests, TopPCAPI) {
+  float top_p = 0.6f;
+  float temp = 0.6f;
+
+  OgaModel* model;
+  CheckResult(OgaCreateModel(MODEL_PATH "phi-2", &model));
+  OgaModelPtr model_ptr{model};
+
+  OgaTokenizer* tokenizer;
+  CheckResult(OgaCreateTokenizer(model, &tokenizer));
+  OgaTokenizerPtr tokenizer_ptr{tokenizer};
+
+  OgaSequences* input_sequences;
+  CheckResult(OgaCreateSequences(&input_sequences));
+  OgaSequencesPtr sequences_ptr{input_sequences};
+
+  const char* input_strings[] = {
+      "This is a test.",
+      "Rats are awesome pets!",
+      "The quick brown fox jumps over the lazy dog.",
+  };
+
+  for (auto& string : input_strings)
+    CheckResult(OgaTokenizerEncode(tokenizer, string, input_sequences));
+
+  OgaGeneratorParams* params;
+  CheckResult(OgaCreateGeneratorParams(model, &params));
+  OgaGeneratorParamsPtr params_ptr{params};
+  CheckResult(OgaGeneratorParamsSetSearchNumber(params, "max_length", 40));
+  CheckResult(OgaGeneratorParamsSetSearchBool(params, "do_sample", true));
+  CheckResult(OgaGeneratorParamsSetSearchNumber(params, "top_p", top_p));
+  CheckResult(OgaGeneratorParamsSetSearchNumber(params, "temperature", temp));
+  CheckResult(OgaGeneratorParamsSetInputSequences(params, input_sequences));
+  OgaSequences* output_sequences;
+  CheckResult(OgaGenerate(model, params, &output_sequences));
+  OgaSequencesPtr output_sequences_ptr{output_sequences};
+
+  // Decode The Batch
+  for (size_t i = 0; i < OgaSequencesCount(output_sequences); i++) {
+    std::span<const int32_t> sequence{OgaSequencesGetSequenceData(output_sequences, i), OgaSequencesGetSequenceCount(output_sequences, i)};
+
+    const char* out_string;
+    CheckResult(OgaTokenizerDecode(tokenizer, sequence.data(), sequence.size(), &out_string));
+    std::cout << "Decoded string:" << out_string << std::endl;
+    OgaDestroyString(out_string);
+  }
+}
+
+TEST(CAPITests, TopKTopPCAPI) {
+  float top_p = 0.6f;
+  int top_k = 50;
+  float temp = 0.6f;
+
+  OgaModel* model;
+  CheckResult(OgaCreateModel(MODEL_PATH "phi-2", &model));
+  OgaModelPtr model_ptr{model};
+
+  OgaTokenizer* tokenizer;
+  CheckResult(OgaCreateTokenizer(model, &tokenizer));
+  OgaTokenizerPtr tokenizer_ptr{tokenizer};
+
+  OgaSequences* input_sequences;
+  CheckResult(OgaCreateSequences(&input_sequences));
+  OgaSequencesPtr sequences_ptr{input_sequences};
+
+  const char* input_strings[] = {
+      "This is a test.",
+      "Rats are awesome pets!",
+      "The quick brown fox jumps over the lazy dog.",
+  };
+
+  for (auto& string : input_strings)
+    CheckResult(OgaTokenizerEncode(tokenizer, string, input_sequences));
+
+  OgaGeneratorParams* params;
+  CheckResult(OgaCreateGeneratorParams(model, &params));
+  OgaGeneratorParamsPtr params_ptr{params};
+  CheckResult(OgaGeneratorParamsSetSearchNumber(params, "max_length", 40));
+  CheckResult(OgaGeneratorParamsSetSearchBool(params, "do_sample", true));
+  CheckResult(OgaGeneratorParamsSetSearchNumber(params, "top_k", top_k));
+  CheckResult(OgaGeneratorParamsSetSearchNumber(params, "top_p", top_p));
+  CheckResult(OgaGeneratorParamsSetSearchNumber(params, "temperature", temp));
+  CheckResult(OgaGeneratorParamsSetInputSequences(params, input_sequences));
+  OgaSequences* output_sequences;
+  CheckResult(OgaGenerate(model, params, &output_sequences));
+  OgaSequencesPtr output_sequences_ptr{output_sequences};
+
+  // Decode The Batch
+  for (size_t i = 0; i < OgaSequencesCount(output_sequences); i++) {
+    std::span<const int32_t> sequence{OgaSequencesGetSequenceData(output_sequences, i), OgaSequencesGetSequenceCount(output_sequences, i)};
+
+    const char* out_string;
+    CheckResult(OgaTokenizerDecode(tokenizer, sequence.data(), sequence.size(), &out_string));
+    std::cout << "Decoded string:" << out_string << std::endl;
+    OgaDestroyString(out_string);
+  }
+}
+
+#endif // TEST_PHI2

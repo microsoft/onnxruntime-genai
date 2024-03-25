@@ -151,7 +151,7 @@ inline std::unique_ptr<Allocator> Allocator::Create(const OrtSession& sess, cons
 }
 
 inline void SetCurrentGpuDeviceId(int device_id) {
-  api->SetCurrentGpuDeviceId(device_id);
+  ThrowOnError(api->SetCurrentGpuDeviceId(device_id));
 }
 
 inline int GetCurrentGpuDeviceId() {

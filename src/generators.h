@@ -44,7 +44,7 @@ enum struct DeviceType {
   CUDA,
 };
 
-struct GeneratorParams {
+struct GeneratorParams : std::enable_shared_from_this<GeneratorParams> {
   GeneratorParams() = default;  // This constructor is only used if doing a custom model handler vs built-in
   GeneratorParams(const Model& model);
 
@@ -91,6 +91,8 @@ struct GeneratorParams {
   std::variant<Whisper> inputs;
 
   std::vector<int32_t> input_ids_owner;  // Backing memory of input_ids in some cases
+
+  std::shared_ptr<GeneratorParams> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
 };
 
 struct Generator {
@@ -98,21 +100,19 @@ struct Generator {
 
   bool IsDone() const;
   void ComputeLogits();
-  void GenerateNextToken_TopK_TopP(int top_k, float top_p, float temperature);
-  void GenerateNextToken_TopP(float p, float temperature) { GenerateNextToken_TopK_TopP(0, p, temperature); }
-  void GenerateNextToken_TopK(int k, float temperature) { GenerateNextToken_TopK_TopP(k, 0.0f, temperature); }
-  void GenerateNextToken_Top() { GenerateNextToken_TopK_TopP(1, 0.0f, 0.0f); }
   void GenerateNextToken();
 
   RoamingArray<int32_t> GetSequence(int index) const;
 
-  const Model& model_;
+  std::shared_ptr<const Model> model_;
   std::unique_ptr<State> state_;
   std::unique_ptr<Search> search_;
   bool computed_logits_{};  // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
 };
 
-std::unique_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path);
+std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path);
+std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Model& model);
+std::shared_ptr<GeneratorParams> CreateGeneratorParams();  // For benchmarking purposes only
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params);
 std::vector<std::vector<int32_t>> Generate(const Model& model, const GeneratorParams& params);  // Uses CreateGenerator and a simple loop to return the entire sequence
 
