@@ -62,9 +62,6 @@ jobs:
   workspace:
     clean: all
   steps:
-  - template: steps/capi-${{ parameters.os }}-step.yml
-    parameters:
-      target: 'onnxruntime-genai'
   - ${{ if eq(parameters.os, 'linux') }}:
     - template: steps/capi-linux-step.yml
       parameters:
