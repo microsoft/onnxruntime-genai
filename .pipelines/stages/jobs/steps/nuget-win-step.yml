@@ -53,4 +53,4 @@ steps:
   displayName: 'Publish Artifact: ONNXRuntime Genai capi'
   inputs:
     PathtoPublish: '$(Build.ArtifactStagingDirectory)\nuget'
-    ArtifactName: $(artifactName)-nuget'
+    ArtifactName: $(artifactName)-nuget
