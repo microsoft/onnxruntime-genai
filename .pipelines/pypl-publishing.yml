@@ -55,3 +55,4 @@ stages:
     enable_win_cuda: ${{ parameters.enable_win_cuda }}
     ort_version: ${{ parameters.ort_version }}
     cuda_version: ${{ parameters.cuda_version }}
+    publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
