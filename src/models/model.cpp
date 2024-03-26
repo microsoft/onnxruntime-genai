@@ -9,7 +9,7 @@
 #include "decoder_only.h"
 #include "whisper.h"
 #include "kernels.h"
-#ifdef _WIN32
+#ifdef USE_DML
 //  Because dml_provider_factory includes windows headers that #define min and max, this next line will prevent this from happening
 #define NOMINMAX
 #include "dml_provider_factory.h"
@@ -296,8 +296,7 @@ void Model::CreateSessionOptions() {
 
       Ort::ThrowOnError(Ort::api->UpdateROCMProviderOptions(&ort_provider_options, keys.data(), values.data(), keys.size()));
       ort_options.AppendExecutionProvider_ROCM(ort_provider_options);
-      device_type_ = DeviceType::CPU;  // Scoring uses CPU, even though the model uses ROCM
-#ifdef _WIN32
+#ifdef USE_DML
     } else if (provider_options.name == "dml") {
       const OrtDmlApi* p_dml_api{};
       Ort::ThrowOnError(Ort::api->GetExecutionProviderApi("DML", ORT_API_VERSION, reinterpret_cast<const void**>(&p_dml_api)));
