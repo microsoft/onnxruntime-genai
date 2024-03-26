@@ -137,22 +137,6 @@ struct PyGenerator {
     generator_->ComputeLogits();
   }
 
-  void GenerateNextToken_TopK_TopP(int top_k, float top_p, float temperature) {
-    generator_->GenerateNextToken_TopK_TopP(top_k, top_p, temperature);
-  }
-
-  void GenerateNextToken_TopP(float p, float temperature) {
-    generator_->GenerateNextToken_TopP(p, temperature);
-  }
-
-  void GenerateNextToken_TopK(int k, float temperature) {
-    generator_->GenerateNextToken_TopK(k, temperature);
-  }
-
-  void GenerateNextToken_Top() {
-    generator_->GenerateNextToken_Top();
-  }
-
   void GenerateNextToken() {
     generator_->GenerateNextToken();
   }
@@ -235,10 +219,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("is_done", &PyGenerator::IsDone)
       .def("compute_logits", &PyGenerator::ComputeLogits)
       .def("generate_next_token", &PyGenerator::GenerateNextToken)
-      .def("generate_next_token_top", &PyGenerator::GenerateNextToken_Top)
-      .def("generate_next_token_top_p", &PyGenerator::GenerateNextToken_TopP)
-      .def("generate_next_token_top_k", &PyGenerator::GenerateNextToken_TopK)
-      .def("generate_next_token_top_k_top_p", &PyGenerator::GenerateNextToken_TopK_TopP)
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
       .def("get_sequence", &PyGenerator::GetSequence);
 

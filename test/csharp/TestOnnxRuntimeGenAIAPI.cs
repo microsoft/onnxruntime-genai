@@ -64,7 +64,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                         while (!generator.IsDone())
                         {
                             generator.ComputeLogits();
-                            generator.GenerateNextTokenTop();
+                            generator.GenerateNextToken();
                         }
 
                         for (ulong i = 0; i < batchSize; i++)
@@ -92,7 +92,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         {
             int topK = 100;
             float temp = 0.6f;
-            ulong maxLength = 40;
+            ulong maxLength = 20;
             
             string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
             using (var model = new Model(modelPath))
@@ -115,17 +115,8 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                     using GeneratorParams generatorParams = new GeneratorParams(model);
                     Assert.NotNull(generatorParams);
 
-                    generatorParams.SetSearchOption("max_length", 20);
                     generatorParams.SetInputSequences(sequences);
-
-                    using Generator generator = new Generator(model, generatorParams);
-                    Assert.NotNull(generator);
-                    while (!generator.IsDone())
-                    {
-                        generator.ComputeLogits();
-                        generator.GenerateNextTokenTopK(topK, temp);
-                    }
-
+                    generatorParams.SetSearchOption("max_length", maxLength);
                     generatorParams.SetSearchOption("do_sample", true);
                     generatorParams.SetSearchOption("top_k", topK);
                     generatorParams.SetSearchOption("temperature", temp);
@@ -143,7 +134,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         {
             float topP = 0.6f;
             float temp = 0.6f;
-            ulong maxLength = 40;
+            ulong maxLength = 20;
             
             string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
             using (var model = new Model(modelPath))
@@ -166,17 +157,8 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                     using GeneratorParams generatorParams = new GeneratorParams(model);
                     Assert.NotNull(generatorParams);
 
-                    generatorParams.SetSearchOption("max_length", 20);
                     generatorParams.SetInputSequences(sequences);
-
-                    using Generator generator = new Generator(model, generatorParams);
-                    Assert.NotNull(generator);
-                    while (!generator.IsDone())
-                    {
-                        generator.ComputeLogits();
-                        generator.GenerateNextTokenTopP(topP, temp);
-                    }
-
+                    generatorParams.SetSearchOption("max_length", maxLength);
                     generatorParams.SetSearchOption("do_sample", true);
                     generatorParams.SetSearchOption("top_p", topP);
                     generatorParams.SetSearchOption("temperature", temp);
@@ -195,7 +177,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             int topK = 100;
             float topP = 0.6f;
             float temp = 0.6f;
-            ulong maxLength = 40;
+            ulong maxLength = 20;
             
             string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
             using (var model = new Model(modelPath))
@@ -218,17 +200,8 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                     using GeneratorParams generatorParams = new GeneratorParams(model);
                     Assert.NotNull(generatorParams);
 
-                    generatorParams.SetSearchOption("max_length", 20);
                     generatorParams.SetInputSequences(sequences);
-
-                    using Generator generator = new Generator(model, generatorParams);
-                    Assert.NotNull(generator);
-                    while (!generator.IsDone())
-                    {
-                        generator.ComputeLogits();
-                        generator.GenerateNextTokenTopKTopP(topK, topP, temp);
-                    }
-
+                    generatorParams.SetSearchOption("max_length", maxLength);
                     generatorParams.SetSearchOption("do_sample", true);
                     generatorParams.SetSearchOption("top_k", topK);
                     generatorParams.SetSearchOption("top_p", topP);

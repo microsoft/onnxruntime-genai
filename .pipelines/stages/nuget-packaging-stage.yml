@@ -12,35 +12,49 @@ parameters:
 - name: cuda_version
   type: string
   default: ''
-
+- name: publish_to_ado_feed
+  type: boolean
+- name: publish_to_nuget
+  type: boolean
 
 stages:
 - stage: nuget_packaging
   jobs:
   - ${{ if eq(parameters.enable_win_cpu, true) }}:
-    - template: jobs/nuget-win-packaging-job.yml
+    - template: jobs/nuget-packaging-job.yml
       parameters:
         arch: 'x64'
         ep: 'cpu'
         ort_version: ${{ parameters.ort_version }}
+        os: 'win'
+        publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
+        publish_to_nuget: ${{ parameters.publish_to_nuget }}
   - ${{ if eq(parameters.enable_win_cuda, true) }}:
-    - template: jobs/nuget-win-packaging-job.yml
+    - template: jobs/nuget-packaging-job.yml
       parameters:
         arch: 'x64'
         cuda_version: ${{ parameters.cuda_version }}
         ep: 'cuda'
         ort_version: ${{ parameters.ort_version }}
-
+        os: 'win'
+        publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
+        publish_to_nuget: ${{ parameters.publish_to_nuget }}
   - ${{ if eq(parameters.enable_linux_cpu, true) }}:
-    - template: jobs/nuget-linux-packaging-job.yml
+    - template: jobs/nuget-packaging-job.yml
       parameters:
         arch: 'x64'
         ep: 'cpu'
         ort_version: ${{ parameters.ort_version }}
+        os: 'linux'
+        publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
+        publish_to_nuget: ${{ parameters.publish_to_nuget }}
   - ${{ if eq(parameters.enable_linux_cuda, true) }}:
-    - template: jobs/nuget-linux-packaging-job.yml
+    - template: jobs/nuget-packaging-job.yml
       parameters:
         arch: 'x64'
         cuda_version: ${{ parameters.cuda_version }}
         ep: 'cuda'
         ort_version: ${{ parameters.ort_version }}
+        os: 'linux'
+        publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
+        publish_to_nuget: ${{ parameters.publish_to_nuget }}

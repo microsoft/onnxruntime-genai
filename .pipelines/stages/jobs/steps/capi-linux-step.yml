@@ -66,6 +66,13 @@ steps:
   - template: utils/capi-archive.yml
     parameters:
       archiveType: tar
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Artifact: ONNXRuntime Genai capi'
+    inputs:
+      ArtifactName: $(artifactName)-capi
+      PathtoPublish: '$(Build.ArtifactStagingDirectory)/capi'
+
 - ${{ if eq(parameters.target, 'python') }}:
   - bash: |
       set -e -x
@@ -82,6 +89,13 @@ steps:
             --target python"
     displayName: 'Build Python $(PyNoDotVer)'
     workingDirectory: '$(Build.Repository.LocalPath)'
+
+  - task: BinSkim@4
+    displayName: 'Run BinSkim'
+    inputs:
+      AnalyzeTargetGlob: '$(Build.Repository.LocalPath)/**/*.pyd'
+    continueOnError: true
+
   - bash: |
       set -e -x
       docker run \
@@ -97,12 +111,19 @@ steps:
             --target PyPackageBuild"
     displayName: 'PyPackageBuild $(PyNoDotVer)'
     workingDirectory: '$(Build.Repository.LocalPath)'
+
   - task: CopyFiles@2
     displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
     inputs:
       SourceFolder: '$(Build.Repository.LocalPath)/build/$(ep)/wheel'
       Contents: '*manylinux*.whl'
-      TargetFolder: '$(Build.ArtifactStagingDirectory)'
+      TargetFolder: '$(Build.ArtifactStagingDirectory)/wheel'
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Artifact: ONNXRuntime python wheel'
+    inputs:
+      ArtifactName: $(artifactName)
+      PathtoPublish: '$(Build.ArtifactStagingDirectory)/wheel'
 
 - script: |
     ls $(Build.Repository.LocalPath) -R

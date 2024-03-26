@@ -84,7 +84,7 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
 
 void Generator::ComputeLogits() {
   if (computed_logits_)
-    throw std::runtime_error("ComputeLogits called again without calling GenerateNextToken* first");
+    throw std::runtime_error("ComputeLogits called again without calling GenerateNextToken first");
 
   search_->SetLogits(state_->Run(search_->GetSequenceLength(), search_->GetNextTokens(), search_->GetNextIndices()));
   computed_logits_ = true;
@@ -101,44 +101,35 @@ bool Generator::IsDone() const {
   return search_->IsDone();
 }
 
-void Generator::GenerateNextToken_TopK_TopP(int top_k, float top_p, float temperature) {
+void Generator::GenerateNextToken() {
   if (!computed_logits_)
-    throw std::runtime_error("Must call ComputeLogits before GenerateNextToken*");
+    throw std::runtime_error("Must call ComputeLogits before GenerateNextToken");
   computed_logits_ = false;
 
-  if (top_k == 1) {
+  auto& search = search_->params_->search;
+  if (!search.do_sample || search.top_k == 1) {
     search_->SelectTop();
     return;
   }
 
   // The user explicitly called TopK_TopP on a beam search
-  if (search_->params_->search.num_beams != 1)
+  if (search.num_beams != 1)
     throw std::runtime_error("TopK and TopP cannot be used with a beam search");
 
   // Sanity checks
-  if (top_p < 0.0f || top_p > 1.0f)
+  if (search.top_p < 0.0f || search.top_p > 1.0f)
     throw std::runtime_error("top_p must be between 0.0 and 1.0");
-  if (top_k < 0)
+  if (search.top_k < 0)
     throw std::runtime_error("top_k must be 0 or greater");
 
-  if (top_p > 0.0f && top_p < 1.0f && top_k > 1) {
-    search_->SampleTopKTopP(top_k, top_p, temperature);
-  } else if (top_k > 1) {
-    search_->SampleTopK(top_k, temperature);
+  if (search.top_p > 0.0f && search.top_p < 1.0f && search.top_k > 1) {
+    search_->SampleTopKTopP(search.top_k, search.top_p, search.temperature);
+  } else if (search.top_k > 1) {
+    search_->SampleTopK(search.top_k, search.temperature);
   } else {
-    assert(top_k == 0);
-    if (top_p == 0.0f)
-      throw std::runtime_error("top_k and top_p cannot both be zero");
-    search_->SampleTopP(top_p, temperature);
+    assert(search.top_k == 0);
+    search_->SampleTopP(search.top_p, search.temperature);
   }
-}
-
-void Generator::GenerateNextToken() {
-  auto& search = search_->params_->search;
-  if (search.do_sample)
-    GenerateNextToken_TopK_TopP(search.top_k, search.top_p, search.temperature);
-  else
-    GenerateNextToken_Top();
 }
 
 RoamingArray<int32_t> Generator::GetSequence(int index) const {
