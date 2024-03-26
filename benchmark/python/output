@@ -1,0 +1,12 @@
+Batch Size,1.0
+Prompt Length,128.0
+Tokenization Throughput (tps),2683.59902623915
+Tokenization Latency (ms),0.37263391073793173
+Prompt Processing Throughput (tps),14600.297229003849
+Prompt Processing Latency (ms),0.06849175631941762
+Token Generation Throughput (tps),257.5347160030977
+Token Generation Latency (ms),3.882971645609021
+Sampling Throughput (tps),47263.26307837957
+Sampling Latency (ms),0.021158082088865483
+Wall Clock Throughput (tps),364.75685284405847
+Wall Clock Time (s),1.052756094932556
