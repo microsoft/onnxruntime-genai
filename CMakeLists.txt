@@ -82,6 +82,10 @@ else()
   list(REMOVE_ITEM generator_srcs ${generator_cuda_srcs})
 endif()
 
+if(USE_DML AND WIN32)
+  add_compile_definitions(USE_DML=1)
+endif()
+
 if(ENABLE_TESTS AND TEST_PHI2)
   add_compile_definitions(TEST_PHI2=1)
 else()
