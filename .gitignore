@@ -25,3 +25,4 @@ examples/python/hf_cache
 !test/test_models/hf-internal-testing/tiny-random-gpt2*/*.onnx
 /onnxruntime-android-1.17.1
 /onnxruntime-win-x64-1.17.0
+/Microsoft.ML.OnnxRuntime.1.18.0-dev-20240322-0323-ca825cb6e6
