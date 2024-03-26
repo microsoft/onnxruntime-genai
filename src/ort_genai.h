@@ -1,6 +1,13 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #include "ort_genai_c.h"
+#include <memory>
+
+#if __cplusplus >= 202002L
+#include <span>
+#else
+#include <stdexcept>
+#endif
 
 // GenAI C++ API
 //
@@ -84,12 +91,21 @@ struct OgaSequences : OgaAbstract {
     return OgaSequencesCount(this);
   }
 
+#if __cplusplus >= 202002L
   std::span<const int32_t> Get(size_t index) const {
-    return {OgaSequencesGetSequenceData(this, index), OgaSequencesGetSequenceCount(this, index)};
-  }
+#else
+  std::pair<const int32_t*, size_t> Get(size_t index) const {
+#endif
+      return { OgaSequencesGetSequenceData(this, index),
+               OgaSequencesGetSequenceCount(this, index) };
+}
 
-  static void operator delete(void* p) { OgaDestroySequences(reinterpret_cast<OgaSequences*>(p)); }
-};
+static void
+operator delete(void* p) {
+  OgaDestroySequences(reinterpret_cast<OgaSequences*>(p));
+}
+}
+;
 
 struct OgaTokenizer : OgaAbstract {
   static std::unique_ptr<OgaTokenizer> Create(const OgaModel& model) {
@@ -102,14 +118,26 @@ struct OgaTokenizer : OgaAbstract {
     OgaCheckResult(OgaTokenizerEncode(this, str, &sequences));
   }
 
+#if __cplusplus >= 202002L
   OgaString Decode(std::span<const int32_t> tokens) const {
-    const char* p;
-    OgaCheckResult(OgaTokenizerDecode(this, tokens.data(), tokens.size(), &p));
-    return p;
-  }
+#else
+  OgaString Decode(const std::pair<const int32_t*, size_t>& tokens) const {
+#endif
+      const char * p;
+#if __cplusplus >= 202002L
+  OgaCheckResult(OgaTokenizerDecode(this, tokens.data(), tokens.size(), &p));
+#else
+    OgaCheckResult(OgaTokenizerDecode(this, tokens.first, tokens.second, &p));
+#endif
+  return p;
+}
 
-  static void operator delete(void* p) { OgaDestroyTokenizer(reinterpret_cast<OgaTokenizer*>(p)); }
-};
+static void
+operator delete(void* p) {
+  OgaDestroyTokenizer(reinterpret_cast<OgaTokenizer*>(p));
+}
+}
+;
 
 struct OgaTokenizerStream : OgaAbstract {
   static std::unique_ptr<OgaTokenizerStream> Create(const OgaTokenizer& tokenizer) {
@@ -181,9 +209,18 @@ struct OgaGenerator : OgaAbstract {
     OgaCheckResult(OgaGenerator_GenerateNextToken(this));
   }
 
+#if __cplusplus >= 202002L
   std::span<const int32_t> GetSequence(size_t index) const {
-    return {OgaGenerator_GetSequence(this, index), OgaGenerator_GetSequenceLength(this, index)};
-  }
+#else
+  std::pair<const int32_t*, size_t> GetSequence(size_t index) const {
+#endif
+      return { OgaGenerator_GetSequence(this, index),
+               OgaGenerator_GetSequenceLength(this, index) };
+}
 
-  static void operator delete(void* p) { OgaDestroyGenerator(reinterpret_cast<OgaGenerator*>(p)); }
-};
+static void
+operator delete(void* p) {
+  OgaDestroyGenerator(reinterpret_cast<OgaGenerator*>(p));
+}
+}
+;

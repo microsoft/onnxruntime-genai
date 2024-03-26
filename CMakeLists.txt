@@ -140,6 +140,11 @@ if(ENABLE_PYTHON)
   message("------------------Enabling Python Wheel------------------")
 endif()
 
+if(BUILD_SERVER)
+  add_subdirectory("${CMAKE_SOURCE_DIR}/server")
+  message("------------------Building the server------------------")
+endif()
+
 if(NOT EXISTS "${ORT_LIB_DIR}/${ONNXRUNTIME_LIB}")
   message(FATAL_ERROR "Expected the ONNX Runtime library to be found at ${ORT_LIB_DIR}/${ONNXRUNTIME_LIB}. Actual: Not found.")
 endif()

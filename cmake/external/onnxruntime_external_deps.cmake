@@ -44,3 +44,18 @@ FetchContent_Declare(
 
 onnxruntime_fetchcontent_makeavailable(googletest)
 
+FetchContent_Declare(
+    nlohmann_json
+    URL ${DEP_URL_json}
+    URL_HASH SHA1=${DEP_SHA1_json}
+    FIND_PACKAGE_ARGS 3.10 NAMES nlohmann_json
+)
+onnxruntime_fetchcontent_makeavailable(nlohmann_json)
+
+FetchContent_Declare(
+    httplib
+    URL ${DEP_URL_httplib}
+    URL_HASH SHA1=${DEP_SHA1_httplib}
+    FIND_PACKAGE_ARGS 0.15 NAMES httplib
+)
+onnxruntime_fetchcontent_makeavailable(httplib)
