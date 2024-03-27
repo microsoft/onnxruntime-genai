@@ -59,7 +59,7 @@ steps:
 - ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
   - template: compliant/win-esrp-dll-step.yml
     parameters:
-      FolderPath: '$(buildDir)'
+      FolderPath: '$(Build.Repository.LocalPath)\$(buildDir)'
       DisplayName: 'ESRP - Sign C++ dlls'
       Pattern: '*genai.dll'
 
