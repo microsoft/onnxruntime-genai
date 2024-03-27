@@ -96,6 +96,7 @@ def validate_cuda_home(cuda_home: str | bytes | os.PathLike | None):
 def build(
     skip_wheel: bool = False,
     use_cuda: bool | None = None,
+    use_dml: bool | None = None,
     cuda_home: str | bytes | os.PathLike | None = None,
     cmake_generator: str | None = None,
     ort_home: str | bytes | os.PathLike | None = None,
@@ -141,6 +142,7 @@ def build(
         "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
         "-DUSE_CXX17=ON",
         "-DUSE_CUDA=ON" if cuda_home else "-DUSE_CUDA=OFF",
+        "-DUSE_DML=ON" if use_dml else "-DUSE_DML=OFF",
         f"-DBUILD_WHEEL={build_wheel}",
     ]
 
@@ -218,6 +220,7 @@ if __name__ == "__main__":
     parser.add_argument("--skip_csharp", action="store_true", help="Skip building the C# API.")
     parser.add_argument("--build_dir", default=None, help="Path to output directory.")
     parser.add_argument("--use_cuda", action="store_true", help="Whether to use CUDA. Default is to not use cuda.")
+    parser.add_argument("--use_dml", action="store_true", help="Whether to use DML. Default is to not use DML.")
     parser.add_argument("--parallel", action="store_true", help="Enable parallel build.")
     parser.add_argument(
         "--config",
@@ -231,6 +234,7 @@ if __name__ == "__main__":
     build(
         skip_wheel=args.skip_wheel,
         use_cuda=args.use_cuda,
+        use_dml=args.use_dml,
         cuda_home=args.cuda_home,
         cmake_generator=args.cmake_generator,
         ort_home=args.ort_home,

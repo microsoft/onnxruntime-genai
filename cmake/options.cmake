@@ -1,6 +1,7 @@
 include(CMakeDependentOption)
 
 option(USE_CUDA "Build with CUDA support" ON)
+option(USE_DML "Build with DML support" OFF)
 option(NO_TOKENIZER "Don't include the Tokenizer" OFF)
 option(ENABLE_PYTHON "Build the Python API." ON)
 option(ENABLE_TESTS "Enable tests" ON)
