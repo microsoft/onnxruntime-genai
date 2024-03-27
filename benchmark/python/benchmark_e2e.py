@@ -11,10 +11,8 @@ import onnxruntime_genai as og
 import time
 import argparse
 from tqdm import tqdm
-import os
 import subprocess
 import threading
-import sys
 import psutil
 
 peak_cpu_memory = 0.0
