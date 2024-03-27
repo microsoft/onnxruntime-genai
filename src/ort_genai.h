@@ -96,8 +96,8 @@ struct OgaSequences : OgaAbstract {
 #else
   std::pair<const int32_t*, size_t> Get(size_t index) const {
 #endif
-      return { OgaSequencesGetSequenceData(this, index),
-               OgaSequencesGetSequenceCount(this, index) };
+      return {OgaSequencesGetSequenceData(this, index),
+              OgaSequencesGetSequenceCount(this, index)};
 }
 
 static void
@@ -214,8 +214,8 @@ struct OgaGenerator : OgaAbstract {
 #else
   std::pair<const int32_t*, size_t> GetSequence(size_t index) const {
 #endif
-      return { OgaGenerator_GetSequence(this, index),
-               OgaGenerator_GetSequenceLength(this, index) };
+      return {OgaGenerator_GetSequence(this, index),
+              OgaGenerator_GetSequenceLength(this, index)};
 }
 
 static void

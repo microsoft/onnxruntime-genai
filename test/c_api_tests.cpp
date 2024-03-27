@@ -123,7 +123,11 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
     auto sequence = generator->GetSequence(i);
 
     auto* expected_output_start = &expected_output[i * max_length];
+#if __cplusplus >= 202002L
+    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), max_length * sizeof(int32_t)));
+#else
     EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.first, max_length * sizeof(int32_t)));
+#endif
   }
 
   // Test high level API
@@ -134,7 +138,11 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
     auto sequence = sequences->Get(i);
 
     auto* expected_output_start = &expected_output[i * max_length];
+#if __cplusplus >= 202002L
+    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), max_length * sizeof(int32_t)));
+#else
     EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.first, max_length * sizeof(int32_t)));
+#endif
   }
 }
 
