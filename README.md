@@ -120,8 +120,8 @@ onnxruntime-genai
 │   │   │   ...
 │   │   │   provider_options.h
 │   │   lib/
-│   │   │   libonnxruntime.(so|dylib|dll)
-│   │   │   onnxruntime_providers_shared.(so|dylib|dll)
+│   │   │   (lib)onnxruntime.(so|dylib|dll)
+│   │   │   (lib)onnxruntime_providers_shared.(so|dylib|dll)
 ```
 
 ## Contributing
