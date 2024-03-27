@@ -32,6 +32,11 @@ parameters:
   - '11.8'
   - '12.2'
 
+- name: publish_to_ado_feed
+  displayName: 'Whether to publish the packages to ADO feed.'
+  type: boolean
+  default: false
+
 resources:
   repositories:
   - repository: manylinux
@@ -50,3 +55,4 @@ stages:
     enable_win_cuda: ${{ parameters.enable_win_cuda }}
     ort_version: ${{ parameters.ort_version }}
     cuda_version: ${{ parameters.cuda_version }}
+    publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}

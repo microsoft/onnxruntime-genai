@@ -1,11 +1,12 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-#include "ort_genai_c.h"
 #include <memory>
 #include <onnxruntime_c_api.h>
-#include <exception>
+#include <stdexcept>
 #include <cstdint>
 #include <cstddef>
+#include "span.h"
+#include "ort_genai_c.h"
 #include "generators.h"
 #include "models/model.h"
 #include "search.h"
@@ -22,24 +23,24 @@ OrtEnv& GetOrtEnv() {
   return *g_ort_env;
 }
 
+struct Result {
+  explicit Result(const char* what) : what_{what} {}
+  std::string what_;
+};
+
 }  // namespace Generators
 
 extern "C" {
 
 #define OGA_TRY try {
-#define OGA_CATCH                   \
-  }                                 \
-  catch (const std::exception& e) { \
-    return new OgaResult{e.what()}; \
+#define OGA_CATCH                                                                                  \
+  }                                                                                                \
+  catch (const std::exception& e) {                                                                \
+    return reinterpret_cast<OgaResult*>(std::make_unique<Generators::Result>(e.what()).release()); \
   }
 
-struct OgaResult {
-  explicit OgaResult(const char* what) : what_{what} {}
-  std::string what_;
-};
-
-const char* OGA_API_CALL OgaResultGetError(OgaResult* result) {
-  return result->what_.c_str();
+const char* OGA_API_CALL OgaResultGetError(const OgaResult* result) {
+  return reinterpret_cast<const Generators::Result*>(result)->what_.c_str();
 }
 
 OgaResult* OGA_API_CALL OgaCreateSequences(OgaSequences** out) {
@@ -231,7 +232,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGetCurrentGpuDeviceId(int* device_id) {
 }
 
 void OGA_API_CALL OgaDestroyResult(OgaResult* p) {
-  delete p;
+  delete reinterpret_cast<Generators::Result*>(p);
 }
 
 void OGA_API_CALL OgaDestroyString(const char* p) {

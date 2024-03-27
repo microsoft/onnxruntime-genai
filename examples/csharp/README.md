@@ -1,5 +1,13 @@
 # Gen-AI C# Phi-2 Example
 
+## Install the onnxruntime-genai library
+
+* Install the python package
+
+  ```bash
+  pip install onnxruntime-genai
+  ```
+
 ## Get the model
 
 You can generate the model using the model builder provided with this library, or bring your own model.
