@@ -4,6 +4,10 @@
 
 Install the python package according to the [installation instructions](https://onnxruntime.ai/docs/genai/howto/install).
 
+  ```bash
+  cd build/wheel
+  pip install onnxruntime_genai-*.whl
+  ```
 
 ## Get the model
 
