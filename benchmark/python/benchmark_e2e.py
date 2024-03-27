@@ -17,28 +17,31 @@ import threading
 import sys
 import psutil
 
-peak_memory = 0.0
+peak_cpu_memory = 0.0
+peak_gpu_memory = 0.0
 peak_memory_lock = threading.Lock()
 stop_monitoring = False
 
+try:
+    subprocess.run(["nvidia-smi"], check=True)
+    IS_NVIDIA_SYSTEM = True
+except Exception:
+    IS_NVIDIA_SYSTEM = False
 
 # Monitor the GPU memory usage
 def monitor_gpu_memory():
-    global peak_memory, peak_gpus_memory
-    peak_gpus_memory = []
+    global peak_gpu_memory
 
     while not stop_monitoring:
-        result = subprocess.run(['nvidia-smi', '--query-gpu=memory.used', '--format=csv'], capture_output=True, text=True)
+        result = subprocess.run(['nvidia-smi', '--query-gpu=memory.used', '--format=csv,noheader,nounits'], capture_output=True, text=True)
 
         memory_usage = result.stdout.splitlines()
 
         if len(memory_usage) > 1:
-            gpu_memory = [float(line.split(' ')[0]) for line in memory_usage[1:]]
-            current_peak = max(gpu_memory)
+            gpu_memory = [float(line) for line in memory_usage]
+            current_peak = round(max(gpu_memory) / 1024, 2)
             with peak_memory_lock:
-                if current_peak > peak_memory:
-                    peak_gpus_memory = gpu_memory
-                    peak_memory = current_peak
+                peak_gpu_memory = max(current_peak, peak_gpu_memory)
         else:
             print("No GPU Memory Info Found")
         time.sleep(0.1)
@@ -46,12 +49,13 @@ def monitor_gpu_memory():
 
 # Monitor the CPU memory usage
 def monitor_cpu_memory():
-    global peak_memory
+    global peak_cpu_memory
 
     while not stop_monitoring:
-        current_used_memory = getattra(process, "memory_info")()[0]
-        peak_memory = max(peak_memory, current_used_memory)
-
+        current_used_memory = psutil.virtual_memory().used
+        with peak_memory_lock:
+            peak_cpu_memory = round(max(peak_cpu_memory, current_used_memory) / 1024**3, 2)
+        time.sleep(0.1)
 
 # Use input model to generate prompt
 def generate_prompt(model, tokenizer, prompt_length) -> str:
@@ -84,6 +88,7 @@ def save_results(results, filename):
             "Sampling Latency (ms)",
             "Wall Clock Throughput (tps)",
             "Wall Clock Time (s)",
+            "peak_gpu_memory (GiB)" if IS_NVIDIA_SYSTEM else "peak_cpu_memory(GiB)"
         ],
     )
     df = df.transpose()  # This line swaps the rows and columns
@@ -93,17 +98,10 @@ def save_results(results, filename):
 def main(args):
     global stop_monitoring
 
-    try:
-        subprocess.run(["nvidia-smi"], check=True)
-        IS_NVIDIA_SYSTEM = True
-    except Exception:
-        IS_NVIDIA_SYSTEM = False
-
     if IS_NVIDIA_SYSTEM:
         monitor_thread = threading.Thread(target=monitor_gpu_memory)
     else:
-        # cpu monitor thread
-        monitor_process = Process(target=monitor_cpu_memory, daemon=True)
+        monitor_thread = threading.Thread(target=monitor_cpu_memory)
 
 
     # Get user arguments
@@ -191,7 +189,10 @@ def main(args):
     stop_monitoring = True
     monitor_thread.join()
 
-    print(f"************** Peak GPU Memory Usage: {peak_memory / 1024} GiB ********************")
+    if IS_NVIDIA_SYSTEM:
+        print(f"************** Peak GPU Memory Usage: {peak_gpu_memory} GiB ********************")
+    else:
+        print(f"************** Peak CPU Memory Usage: {peak_cpu_memory} GiB ********************")
 
     # Calculate tokenization metrics
     avg_tokenization_latency_s = sum(tokenize_times) / len(tokenize_times)
@@ -242,6 +243,7 @@ def main(args):
         avg_sampling_latency_ms,
         avg_wall_clock_thrpt,
         avg_wall_clock_time,
+        peak_gpu_memory if IS_NVIDIA_SYSTEM else peak_cpu_memory
     ]]
 
     # Add metrics to CSV
