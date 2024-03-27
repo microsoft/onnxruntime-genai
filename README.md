@@ -97,6 +97,32 @@ Export int4 CPU version
 huggingface-cli login --token <your HuggingFace token>
 python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -p int4 -e cpu -o <model folder>
 ```
+## Getting the latest nightly Onnxruntime build
+By default, onnxruntime-genai uses the latest stable release of onnxruntime. If you want to use the latest nightly build 
+of onnxruntime, you can download the nightly build of onnxruntime from our
+[Azure DevOps Artifacts](https://aiinfra.visualstudio.com/PublicPackages/_artifacts/feed/OnnxRuntime/).
+nuget package can be uncompressed by renaming the extension to `.zip` and extracting the contents.
+The onnxruntime dynamlic libraries and header files are available in the nightly build. You can extract the nuget package
+and copy the dynamic libraries and header files to the `ort/` folder under onnxruntime-genai project root on the same level
+as this `README.md` file. 
+
+The library files are located in the `runtime/$OS-$Arch/native` folder and the header files are located in the
+`build/native/include` folder in the nuget package.
+
+The final folder structure should look like this:
+```
+onnxruntime-genai
+│   README.md
+│   ... 
+│   ort/
+│   │   include/
+│   │   │   coreml_provider_factory.h
+│   │   │   ...
+│   │   │   provider_options.h
+│   │   lib/
+│   │   │   (lib)onnxruntime.(so|dylib|dll)
+│   │   │   (lib)onnxruntime_providers_shared.(so|dylib|dll)
+```
 
 ## Contributing
 
