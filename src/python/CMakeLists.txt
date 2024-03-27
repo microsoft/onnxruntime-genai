@@ -1,5 +1,5 @@
 include(${CMAKE_SOURCE_DIR}/cmake/cxx_standard.cmake)
-
+include(${CMAKE_SOURCE_DIR}/cmake/util_func.cmake)
 file(GLOB python_srcs CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/*.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
@@ -14,19 +14,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
 
-if(MSVC)
-  check_cxx_compiler_flag(-sdl HAS_SDL)
-  check_cxx_compiler_flag(-Qspectre HAS_QSPECTRE)
-  if (HAS_SDL)
-    target_compile_options(python PRIVATE "/sdl")
-  endif ()
-  if (HAS_QSPECTRE)
-    target_compile_options(python PRIVATE "/Qspectre")
-  endif ()
-  if (NOT CMAKE_SYSTEM_PROCESSOR MATCHES "arm" AND NOT USE_CUDA)
-    target_compile_options(python PRIVATE "/CETCOMPAT")
-  endif ()
-endif ()
+genai_set_target_compile_options(python)
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   cmake_policy(SET CMP0104 OLD)
