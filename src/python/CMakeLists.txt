@@ -14,9 +14,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
 
-if(CMAKE_GENERATOR_TOOLSET MATCHES "Visual Studio")
-  target_link_options(python PRIVATE "/CETCOMPAT")
+if(MSVC)
   target_compile_options(python PRIVATE "/sdl" PRIVATE "/Qspectre")
+  if (NOT CMAKE_SYSTEM_PROCESSOR MATCHES "arm")
+    target_compile_options(python PRIVATE "/CETCOMPAT")
+  endif()
 endif()
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
