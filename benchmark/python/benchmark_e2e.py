@@ -11,22 +11,20 @@ import onnxruntime_genai as og
 import time
 import argparse
 from tqdm import tqdm
-import shutil
 import os
 import subprocess
 import threading
 import sys
-
+import psutil
 
 peak_memory = 0.0
 peak_memory_lock = threading.Lock()
-gpu_memory_data = []
 stop_monitoring = False
 
 
 # Monitor the GPU memory usage
 def monitor_gpu_memory():
-    global peak_memory, peak_gpus_memory, gpu_memory_data
+    global peak_memory, peak_gpus_memory
     peak_gpus_memory = []
 
     while not stop_monitoring:
@@ -36,7 +34,6 @@ def monitor_gpu_memory():
 
         if len(memory_usage) > 1:
             gpu_memory = [float(line.split(' ')[0]) for line in memory_usage[1:]]
-            gpu_memory_data.append(gpu_memory)
             current_peak = max(gpu_memory)
             with peak_memory_lock:
                 if current_peak > peak_memory:
@@ -45,6 +42,15 @@ def monitor_gpu_memory():
         else:
             print("No GPU Memory Info Found")
         time.sleep(0.1)
+
+
+# Monitor the CPU memory usage
+def monitor_cpu_memory():
+    global peak_memory
+
+    while not stop_monitoring:
+        current_used_memory = getattra(process, "memory_info")()[0]
+        peak_memory = max(peak_memory, current_used_memory)
 
 
 # Use input model to generate prompt
@@ -97,7 +103,7 @@ def main(args):
         monitor_thread = threading.Thread(target=monitor_gpu_memory)
     else:
         # cpu monitor thread
-        pass
+        monitor_process = Process(target=monitor_cpu_memory, daemon=True)
 
 
     # Get user arguments
