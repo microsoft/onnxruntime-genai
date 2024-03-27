@@ -6,7 +6,7 @@ Install the python package according to the [installation instructions](https://
 
   ```bash
   cd build/wheel
-  pip install onnxruntime-genai-*.whl
+  pip install onnxruntime_genai-*.whl
   ```
 
 ## Get the model
