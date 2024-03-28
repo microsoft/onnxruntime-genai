@@ -18,7 +18,7 @@ def generate_prompt(model, tokenizer, prompt_length) -> str:
     prompt = "a"
     tokens = tokenizer.encode(prompt)
     params=og.GeneratorParams(model)
-    params.set_search_options({"do_sample":True, "top_k":5, "temperature":temperature, "max_length":prompt_length, "min_length":prompt_length+1})
+    params.set_search_options({"do_sample":True, "top_k":5, "temperature":temperature, "max_length":prompt_length, "min_length":prompt_length})
     params.input_ids = tokens
     generator=og.Generator(model, params)
     while not generator.is_done():
@@ -84,9 +84,9 @@ def main(args):
     sampling_times = []
     wall_clock_times = []
     if args.verbose: print(f"Running benchmark for batch size = {batch_size}, prompt length = {prompt_length}")
+    
     for _ in tqdm(range(num_repetitions)):
         wall_clock_start_time = time.time()
-
         # Prepare run
         generator = og.Generator(model, params)
 
