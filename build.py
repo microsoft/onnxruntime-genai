@@ -95,6 +95,7 @@ def validate_cuda_home(cuda_home: str | bytes | os.PathLike | None):
 
 def build(
     skip_wheel: bool = False,
+    skip_python: bool = False,
     use_cuda: bool | None = None,
     use_dml: bool | None = None,
     cuda_home: str | bytes | os.PathLike | None = None,
@@ -125,13 +126,13 @@ def build(
 
     if is_windows():
         if not cmake_generator:
-            command += ["-G", "Visual Studio 17 2022", "-A", "x64"]
+            command += ["-G", "Visual Studio 17 2022", "-A", "x64"]  # this doesn't work for ARM64 Windows
         if cuda_home:
             toolset = "host=x64" + ",cuda=" + cuda_home
             command += ["-T", toolset]
     command += [f"-DCMAKE_BUILD_TYPE={config}"]
 
-    build_wheel = "OFF" if skip_wheel else "ON"
+    build_wheel = "OFF" if (skip_python or skip_wheel) else "ON"
     build_dir = os.path.abspath(build_dir) if build_dir else os.path.join(os.getcwd(), "build")
 
     command += [
@@ -144,6 +145,7 @@ def build(
         "-DUSE_CUDA=ON" if cuda_home else "-DUSE_CUDA=OFF",
         "-DUSE_DML=ON" if use_dml else "-DUSE_DML=OFF",
         f"-DBUILD_WHEEL={build_wheel}",
+        "-DENABLE_PYTHON=" + ("OFF" if skip_python else "ON"),
     ]
 
     if ort_home:
@@ -216,6 +218,7 @@ if __name__ == "__main__":
         "Read from CUDA_HOME or CUDA_PATH environment variable if not specified. Not read if --use_cuda is not specified.",
     )
     parser.add_argument("--skip_wheel", action="store_true", help="Skip building the Python wheel.")
+    parser.add_argument("--skip_python", action="store_true", help="Skip building the Python API.")
     parser.add_argument("--ort_home", default=None, help="Root directory of onnxruntime.")
     parser.add_argument("--skip_csharp", action="store_true", help="Skip building the C# API.")
     parser.add_argument("--build_dir", default=None, help="Path to output directory.")
@@ -233,6 +236,7 @@ if __name__ == "__main__":
     update_submodules()
     build(
         skip_wheel=args.skip_wheel,
+        skip_python=args.skip_python,
         use_cuda=args.use_cuda,
         use_dml=args.use_dml,
         cuda_home=args.cuda_home,

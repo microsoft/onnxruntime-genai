@@ -1,5 +1,12 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+
+#pragma once
+
+#include <memory>
+#include <span>
+#include <stdexcept>
+
 #include "ort_genai_c.h"
 
 // GenAI C++ API

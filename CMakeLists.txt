@@ -127,6 +127,8 @@ else()
   set(ONNXRUNTIME_EXTENSIONS_LIB "tfmtok_c.so")
 endif()
 
+file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_FILES}")
+
 if(NO_TOKENIZEROOT)
   add_compile_definitions(NO_TOKENIZER=1)
   message("----------------Tokenizer Disabled------------------")
@@ -148,6 +150,11 @@ if(ENABLE_PYTHON)
   message("------------------Enabling Python Wheel------------------")
 endif()
 
+if(ENABLE_MODEL_BENCHMARK)
+  add_subdirectory("${CMAKE_SOURCE_DIR}/benchmark/c")
+  message("------------------Enabling model benchmark------------------")
+endif()
+
 if(NOT EXISTS "${ORT_LIB_DIR}/${ONNXRUNTIME_LIB}")
   message(FATAL_ERROR "Expected the ONNX Runtime library to be found at ${ORT_LIB_DIR}/${ONNXRUNTIME_LIB}. Actual: Not found.")
 endif()
@@ -158,7 +165,6 @@ if(USE_CUDA AND NOT EXISTS "${ORT_LIB_DIR}/${ONNXRUNTIME_PROVIDERS_CUDA_LIB}")
   message(FATAL_ERROR "Expected the ONNX Runtime providers cuda library to be found at ${ORT_LIB_DIR}/${ONNXRUNTIME_PROVIDERS_CUDA_LIB}. Actual: Not found.")
 endif()
 
-file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_FILES}")
 target_link_directories(onnxruntime-genai PRIVATE ${ORT_LIB_DIR})
 target_link_libraries(onnxruntime-genai PRIVATE ${ONNXRUNTIME_LIB})
 
@@ -182,7 +188,6 @@ if(MSVC)
 endif()
 
 # Copy the onnxruntime binaries into the build folder so it's found on launch
-file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_FILES}")
 foreach(DLL_FILE ${onnxruntime_libs})
   add_custom_command(
     TARGET onnxruntime-genai POST_BUILD
