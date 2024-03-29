@@ -183,6 +183,9 @@ endif()
 
 # Copy the onnxruntime binaries into the build folder so it's found on launch
 file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_FILES}")
+if(USE_DML)
+  list(APPEND onnxruntime_libs "${ORT_LIB_DIR}/DirectML.dll")
+endif()
 foreach(DLL_FILE ${onnxruntime_libs})
   add_custom_command(
     TARGET onnxruntime-genai POST_BUILD
