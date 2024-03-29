@@ -6,6 +6,7 @@
 #include <memory>
 #include <span>
 #include <stdexcept>
+#include <type_traits>
 
 #include "ort_genai_c.h"
 
@@ -146,16 +147,15 @@ struct OgaGeneratorParams : OgaAbstract {
     return std::unique_ptr<OgaGeneratorParams>(p);
   }
 
-  void SetSearchOption(const char* name, int value) {
-    OgaCheckResult(OgaGeneratorParamsSetSearchNumber(this, name, value));
-  }
-
-  void SetSearchOption(const char* name, double value) {
-    OgaCheckResult(OgaGeneratorParamsSetSearchNumber(this, name, value));
-  }
-
-  void SetSearchOption(const char* name, bool value) {
-    OgaCheckResult(OgaGeneratorParamsSetSearchBool(this, name, value));
+  template <typename T>
+  std::enable_if_t<std::is_arithmetic_v<T>, void>
+  SetSearchOption(const char* name, T value) {
+    if constexpr (std::is_same_v<T, bool>) {
+      OgaCheckResult(OgaGeneratorParamsSetSearchBool(this, name, value));
+    } else {
+      OgaCheckResult(OgaGeneratorParamsSetSearchNumber(this, name,
+                                                       static_cast<double>(value)));
+    }
   }
 
   void SetInputIDs(const int32_t* input_ids, size_t input_ids_count, size_t sequence_length, size_t batch_size) {

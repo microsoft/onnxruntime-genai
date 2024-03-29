@@ -1,8 +1,11 @@
 add_executable(model_benchmark
   ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/options.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/options.cpp
 )
 
 target_include_directories(model_benchmark PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_SOURCE_DIR}/src  # directory containing the ort_genai headers
 )
 
