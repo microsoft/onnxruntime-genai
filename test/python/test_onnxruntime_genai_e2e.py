@@ -10,7 +10,7 @@ from _test_utils import run_subprocess
 
 
 def download_model(
-    download_path: str | bytes | os.PathLike, device: str, model_identifier: str
+    download_path: str | bytes | os.PathLike, device: str, model_identifier: str, precision: str
 ):
     # python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -p int4 -e cpu -o download_path
     command = [
@@ -20,7 +20,7 @@ def download_model(
         "-m",
         model_identifier,
         "-p",
-        "int4",
+        precision,
         "-e",
         device,
         "-o",
@@ -53,5 +53,7 @@ if __name__ == "__main__":
     for model_name in ["microsoft/phi-2"]:
         with tempfile.TemporaryDirectory() as temp_dir:
             device = "cuda" if og.is_cuda_available() else "cpu"
-            download_model(temp_dir, device, model_name)
+            download_model(temp_dir, device, model_name, int4)
             run_model(temp_dir)
+            download_model(temp_dir, "cpu", model_name, fp32)
+            
