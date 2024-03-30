@@ -63,7 +63,7 @@ struct OgaModel : OgaAbstract {
     return std::unique_ptr<OgaModel>(p);
   }
 
-  std::unique_ptr<OgaSequences> Generate(const OgaGeneratorParams& params) {
+  std::unique_ptr<OgaSequences> Generate(const OgaGeneratorParams& params) const {
     OgaSequences* p;
     OgaCheckResult(OgaGenerate(this, &params, &p));
     return std::unique_ptr<OgaSequences>(p);
@@ -147,6 +147,8 @@ struct OgaGeneratorParams : OgaAbstract {
     return std::unique_ptr<OgaGeneratorParams>(p);
   }
 
+  // Set a search option value.
+  // This template only allows numeric or boolean values.
   template <typename T>
   std::enable_if_t<std::is_arithmetic_v<T>, void>
   SetSearchOption(const char* name, T value) {
