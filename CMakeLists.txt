@@ -128,6 +128,9 @@ else()
 endif()
 
 file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_FILES}")
+if(USE_DML)
+  list(APPEND onnxruntime_libs "${ORT_LIB_DIR}/DirectML.dll")
+endif()
 
 if(NO_TOKENIZEROOT)
   add_compile_definitions(NO_TOKENIZER=1)
