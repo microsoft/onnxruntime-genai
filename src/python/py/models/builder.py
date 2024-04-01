@@ -902,7 +902,6 @@ class Model:
         v_bias_exists = attention.v_proj.bias is not None
         all_bias_exists = q_bias_exists and k_bias_exists and v_bias_exists
 
-        # q_add_name, k_add_name, v_add_name, qkv_add_name = "", "", "", ""
         if all_bias_exists and self.attention_attrs["use_packed_matmul"]:
             # Combine 3 Adds into 1 packed Add
             qkv_add_name = f"/model/layers.{layer_id}/attn/qkv_proj/Add"
