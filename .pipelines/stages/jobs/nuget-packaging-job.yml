@@ -1,0 +1,80 @@
+parameters:
+- name: arch
+  type: string
+- name: ep
+  type: string
+- name: ort_version
+  type: string
+- name: cuda_version
+  type: string
+  default: ''
+- name: os
+  type: string
+  values:
+  - 'linux'
+  - 'win'
+- name: publish_to_ado_feed
+  type: boolean
+
+jobs:
+- job: nuget_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}_packaging
+  ${{ if eq(parameters.os, 'linux') }}:
+    pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
+  ${{ if eq(parameters.os, 'win') }}:
+    pool: 'onnxruntime-Win-CPU-2022'
+  timeoutInMinutes: 180
+  #  set variables here to be used in the template and steps
+  variables:
+  - name: arch
+    value: ${{ parameters.arch }}
+  - name: artifactName
+    value: 'onnxruntime-genai-${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.arch }}'
+  - name: buildConfig
+    value: 'Release'
+  - name: buildDir
+    value: 'build/${{ parameters.ep }}'
+  - name: cuda_version
+    value: ${{ parameters.cuda_version }}
+  - name: ep
+    value: ${{ parameters.ep }}
+  - name: ort_version
+    value: ${{ parameters.ort_version }}
+  - name: GDN_CODESIGN_TARGETDIRECTORY
+    value: '$(Build.ArtifactStagingDirectory)/nuget'
+  - name: ort_filename
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      value: 'onnxruntime-${{ parameters.os }}-${{ parameters.arch }}-${{ parameters.ort_version }}'
+    ${{ else}}:
+      ${{if eq(parameters.cuda_version, '11.8') }}:
+        value: 'onnxruntime-${{ parameters.os }}-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}'
+      ${{ else }}:
+        value: 'onnxruntime-${{ parameters.os }}-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
+  - name: genai_nuget_ext
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      value: ''
+    ${{ if eq(parameters.ep, 'cuda') }}:
+      value: '.Cuda'
+  - name: ort_nuget_ext
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      value: ''
+    ${{ if eq(parameters.ep, 'cuda') }}:
+      value: '.Gpu'
+  workspace:
+    clean: all
+  steps:
+  - ${{ if eq(parameters.os, 'linux') }}:
+    - template: steps/capi-linux-step.yml
+      parameters:
+        target: 'onnxruntime-genai'
+    # TODO: Add a step to build the linux nuget package
+
+  - ${{ if eq(parameters.os, 'win') }}:
+    - template: steps/capi-win-step.yml
+      parameters:
+        target: 'onnxruntime-genai'
+    - template: steps/nuget-win-step.yml
+    - ${{ if eq(parameters.publish_to_ado_feed, true)}}:
+      - template: steps/nuget-ado-feed-releasing-step.yml
+
+  - template: steps/compliant-and-cleanup-step.yml
+

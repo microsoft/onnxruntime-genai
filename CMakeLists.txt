@@ -82,6 +82,14 @@ else()
   list(REMOVE_ITEM generator_srcs ${generator_cuda_srcs})
 endif()
 
+if(USE_DML)
+  if(WIN32)
+    add_compile_definitions(USE_DML=1)
+  else()
+    message(FATAL_ERROR "USE_DML is ON but this isn't windows.")
+  endif()
+endif()
+
 if(ENABLE_TESTS AND TEST_PHI2)
   add_compile_definitions(TEST_PHI2=1)
 else()
@@ -175,6 +183,9 @@ endif()
 
 # Copy the onnxruntime binaries into the build folder so it's found on launch
 file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_FILES}")
+if(USE_DML)
+  list(APPEND onnxruntime_libs "${ORT_LIB_DIR}/DirectML.dll")
+endif()
 foreach(DLL_FILE ${onnxruntime_libs})
   add_custom_command(
     TARGET onnxruntime-genai POST_BUILD

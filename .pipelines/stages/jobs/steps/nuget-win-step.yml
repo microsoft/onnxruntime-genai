@@ -14,9 +14,9 @@ steps:
   parameters:
     FolderPath: '$(Build.Repository.LocalPath)\src\csharp\bin\Release\'
     DisplayName: 'ESRP - Sign C# dlls'
-
+    Pattern: '*OnnxRuntimeGenAI*.dll'
 - powershell: |
-    $VERSION = '0.1.0-rc1'
+    $VERSION = '0.1.0-rc4'
     nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.nuspec `
       -Prop version=$VERSION `
       -Prop genai_nuget_ext=$(genai_nuget_ext) `
@@ -41,4 +41,16 @@ steps:
   inputs:
     SourceFolder: '$(Build.Repository.LocalPath)\nuget'
     Contents: '*.nupkg'
-    TargetFolder: '$(Build.ArtifactStagingDirectory)'
+    TargetFolder: '$(Build.ArtifactStagingDirectory)\nuget'
+
+- template: compliant/esrp_nuget.yml
+  parameters:
+    DisplayName: 'ESRP - sign NuGet package'
+    FolderPath: '$(Build.ArtifactStagingDirectory)\nuget'
+    DoEsrp: 'true'
+
+- task: PublishBuildArtifacts@1
+  displayName: 'Publish Artifact: ONNXRuntime Genai capi'
+  inputs:
+    PathtoPublish: '$(Build.ArtifactStagingDirectory)\nuget'
+    ArtifactName: $(artifactName)-nuget

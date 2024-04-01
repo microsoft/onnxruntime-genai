@@ -42,7 +42,7 @@ typedef struct OgaTokenizerStream OgaTokenizerStream;
  * \return Error message contained in the OgaResult. The const char* is owned by the OgaResult
  *         and can will be freed when the OgaResult is destroyed.
  */
-OGA_EXPORT const char* OGA_API_CALL OgaResultGetError(OgaResult* result);
+OGA_EXPORT const char* OGA_API_CALL OgaResultGetError(const OgaResult* result);
 
 /*
  * \param[in] result OgaResult to be destroyed.
@@ -172,16 +172,7 @@ OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsDone(const OgaGenerator* generator);
  * \return OgaResult containing the error message if the computation of the logits failed.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_ComputeLogits(OgaGenerator* generator);
-
-/*
- * \brief Generates the next token based on the computed logits using the greedy search.
- * \param[in] generator The generator to generate the next token for.
- * \return OgaResult containing the error message if the generation of the next token failed.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken_Top(OgaGenerator* generator);
-
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken_TopK(OgaGenerator* generator, int k, float t);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken_TopP(OgaGenerator* generator, float p, float t);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator);
 
 /*
  * \brief Returns the number of tokens in the sequence at the given index.

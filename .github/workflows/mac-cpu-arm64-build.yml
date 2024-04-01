@@ -33,11 +33,12 @@ jobs:
         run: |
           mv ${{ env.ort_dir }} ort
 
-      - name: Build with CMake and Clang
-        run: |
-      - name: Build with CMake
+      - name: Configure CMake
         run: |
           cmake --preset macos_cpu_release
+
+      - name: Build with CMake
+        run: |
           cmake --build --preset macos_cpu_release --parallel
         continue-on-error: false
 
