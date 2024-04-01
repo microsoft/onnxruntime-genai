@@ -1018,7 +1018,7 @@ class Model:
         #              |
         #           FC1_Add
         #              |
-        #           FastGelu
+        #           ActFunc
         #              |
         #          FC2_MatMul
         #              |
@@ -1031,11 +1031,11 @@ class Model:
         self.make_add_bias(mlp.fc1.bias.detach().numpy(), fc1_add_name, root_input=f"{fc1_matmul_name}/output_0")
 
         # Make activation function
-        fast_gelu_name = self.make_activation(layer_id, root_input=f"{fc1_add_name}/output_0")
+        act_fn_name = self.make_activation(layer_id, root_input=f"{fc1_add_name}/output_0")
 
         # Make second layer of fully connected nodes (FC2)
         fc2_matmul_name = f"/model/layers.{layer_id}/mlp/fc2/MatMul"
-        self.make_matmul(mlp.fc2.weight.detach().numpy(), fc2_matmul_name, root_input=f"{fast_gelu_name}/output_0")
+        self.make_matmul(mlp.fc2.weight.detach().numpy(), fc2_matmul_name, root_input=f"{act_fn_name}/output_0")
         fc2_add_name = f"/model/layers.{layer_id}/mlp/fc2/Add"
         self.make_add_bias(mlp.fc2.bias.detach().numpy(), fc2_add_name, root_input=f"{fc2_matmul_name}/output_0")
 
