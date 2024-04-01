@@ -80,7 +80,7 @@ Statistics ComputeStats(const std::vector<Duration>& measurements) {
             }) /
         (stats.n - 1);
 
-    const float stddev = std::sqrtf(variance);
+    const float stddev = std::sqrt(variance);
     stats.stddev = DurationFp{stddev};
   }
 
