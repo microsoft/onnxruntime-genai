@@ -51,11 +51,9 @@ def run_model(model_path: str | bytes | os.PathLike):
 
 if __name__ == "__main__":
     for model_name in ["microsoft/phi-2"]:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            device = "cuda" if og.is_cuda_available() else "cpu"
-            download_model(temp_dir, device, model_name, "int4")
-            run_model(temp_dir)
-            download_model(temp_dir, "cpu", model_name, "fp32")
-            run_model(temp_dir)
-            
+        for precision in ["int4", "fp32"]:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                device = "cuda" if og.is_cuda_available() else "cpu"
+                download_model(temp_dir, device, model_name, precision)
+                run_model(temp_dir)
             
