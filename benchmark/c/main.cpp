@@ -1,12 +1,14 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <cmath>
 #include <algorithm>
 #include <chrono>
 #include <iostream>
 #include <numeric>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "ort_genai.h"
@@ -85,6 +87,31 @@ Statistics ComputeStats(const std::vector<Duration>& measurements) {
   return stats;
 }
 
+void WritePerTokenStats(std::string_view label,
+                        const Statistics& stats,
+                        const size_t tokens_per_measurement) {
+  using MicrosecondsFp = std::chrono::duration<float, std::chrono::microseconds::period>;
+  const auto avg_us = MicrosecondsFp{stats.average};
+  std::cout << label << ":"
+            << "\n\tavg (us):       " << avg_us.count()
+            << "\n\tavg (tokens/s): " << 1.0e6f / avg_us.count() * tokens_per_measurement
+            << "\n\tp50 (us):       " << MicrosecondsFp{stats.p50}.count()
+            << "\n\tstddev (us):    " << MicrosecondsFp{stats.stddev}.count()
+            << "\n\tn:              " << stats.n << " * " << tokens_per_measurement << " token(s)"
+            << "\n";
+}
+
+void WriteE2EStats(std::string_view label,
+                   const Statistics& stats) {
+  using MillisecondsFp = std::chrono::duration<float, std::chrono::milliseconds::period>;
+  std::cout << label << ":"
+            << "\n\tavg (ms):       " << MillisecondsFp{stats.average}.count()
+            << "\n\tp50 (ms):       " << MillisecondsFp{stats.p50}.count()
+            << "\n\tstddev (ms):    " << MillisecondsFp{stats.stddev}.count()
+            << "\n\tn:              " << stats.n
+            << "\n";
+}
+
 std::string GeneratePrompt(size_t num_prompt_tokens, const OgaModel& model, const OgaTokenizer& tokenizer) {
   const char* const base_prompt = "A";
   auto base_prompt_sequences = OgaSequences::Create();
@@ -133,11 +160,12 @@ void RunBenchmark(const benchmark::Options& opts) {
     return params;
   };
 
+  const auto generator_params = make_generator_params();
+
   // warmup
   if (opts.verbose) std::cout << "Running warmup iterations (" << opts.num_warmup_iterations << ")...\n";
   for (size_t i = 0; i < opts.num_warmup_iterations; ++i) {
-    auto params = make_generator_params();
-    auto output_sequences = model->Generate(*params);
+    auto output_sequences = model->Generate(*generator_params);
 
     if (opts.verbose && i == 0) {
       // show prompt and output on first iteration
@@ -156,8 +184,7 @@ void RunBenchmark(const benchmark::Options& opts) {
 
   if (opts.verbose) std::cout << "Running iterations (" << opts.num_iterations << ")...\n";
   for (size_t i = 0; i < opts.num_iterations; ++i) {
-    auto params = make_generator_params();
-    auto generator = OgaGenerator::Create(*model, *params);
+    auto generator = OgaGenerator::Create(*model, *generator_params);
 
     {
       Timing e2e_gen_timing{e2e_gen_times};
@@ -192,35 +219,10 @@ void RunBenchmark(const benchmark::Options& opts) {
     const auto token_gen_stats = ComputeStats(token_gen_times);
     const auto sampling_stats = ComputeStats(sampling_times);
 
-    auto write_per_token_stats = [](const std::string& label,
-                                    const Statistics& stats,
-                                    const size_t tokens_per_measurement) {
-      using MicrosecondsFp = std::chrono::duration<float, std::chrono::microseconds::period>;
-      const auto avg_us = MicrosecondsFp{stats.average};
-      std::cout << label << ":"
-                << "\n\tavg (us):       " << avg_us.count()
-                << "\n\tavg (tokens/s): " << 1.0e6f / avg_us.count() * tokens_per_measurement
-                << "\n\tp50 (us):       " << MicrosecondsFp{stats.p50}.count()
-                << "\n\tstddev (us):    " << MicrosecondsFp{stats.stddev}.count()
-                << "\n\tn:              " << stats.n << " * " << tokens_per_measurement << " token(s)"
-                << "\n";
-    };
-
-    auto write_e2e_stats = [](const std::string& label,
-                              const Statistics& stats) {
-      using MillisecondsFp = std::chrono::duration<float, std::chrono::milliseconds::period>;
-      std::cout << label << ":"
-                << "\n\tavg (ms):       " << MillisecondsFp{stats.average}.count()
-                << "\n\tp50 (ms):       " << MillisecondsFp{stats.p50}.count()
-                << "\n\tstddev (ms):    " << MillisecondsFp{stats.stddev}.count()
-                << "\n\tn:              " << stats.n
-                << "\n";
-    };
-
-    write_per_token_stats("Prompt processing", prompt_processing_stats, opts.batch_size * num_prompt_tokens);
-    write_per_token_stats("Token generation", token_gen_stats, opts.batch_size);
-    write_per_token_stats("Token sampling", sampling_stats, opts.batch_size);
-    write_e2e_stats("E2E generation", e2e_gen_stats);
+    WritePerTokenStats("Prompt processing", prompt_processing_stats, opts.batch_size * num_prompt_tokens);
+    WritePerTokenStats("Token generation", token_gen_stats, opts.batch_size);
+    WritePerTokenStats("Token sampling", sampling_stats, opts.batch_size);
+    WriteE2EStats("E2E generation", e2e_gen_stats);
   }
 }
 

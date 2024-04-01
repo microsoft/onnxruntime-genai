@@ -4,7 +4,7 @@
 #pragma once
 
 #include <memory>
-#include <span>
+#include "span.h"  // TODO Use the std span header if we can assume C++20.
 #include <stdexcept>
 #include <type_traits>
 
