@@ -49,8 +49,13 @@ class Model:
         self.value_infos = []
         self.nodes = []
 
-        # Map input names to input shapes
-        self.model_inputs = ["input_ids", "attention_mask", "position_ids"]
+        # Map input names to their types and shapes
+        self.input_names = ["input_ids", "attention_mask", "position_ids"]
+        self.input_types = {
+            "input_ids": TensorProto.INT64,
+            "attention_mask": TensorProto.INT64,
+            "position_ids": TensorProto.INT64,
+        }
         self.input_shapes = {
             "input_ids": ["batch_size", "sequence_length"],
             "attention_mask": ["batch_size", "total_sequence_length"],
@@ -133,7 +138,7 @@ class Model:
             
             # GQA + Rot.Emb. does not require `position ids` as input
             self.attention_attrs["use_rotemb_in_gqa"] = True
-            self.model_inputs.remove("position_ids")
+            self.input_names.remove("position_ids")
 
         # MLP-specific variables
         self.mlp_attrs = {
@@ -152,7 +157,7 @@ class Model:
 
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
         config = GenerationConfig.from_pretrained(model_name_or_path, **extra_kwargs)
-        inputs = dict(zip(self.model_inputs, self.model_inputs))
+        inputs = dict(zip(self.input_names, self.input_names))
         inputs.update({
             "past_key_names": "past_key_values.%d.key",
             "past_value_names": "past_key_values.%d.value",
@@ -329,9 +334,10 @@ class Model:
     def make_inputs_and_outputs(self):
         # Add model-specific inputs to list of model inputs
         inputs = []
-        for name in self.model_inputs:
+        for name in self.input_names:
+            dtype = self.input_types[name]
             shape = self.input_shapes[name]
-            inputs.append(helper.make_tensor_value_info(name, TensorProto.INT64, shape=shape))
+            inputs.append(helper.make_tensor_value_info(name, dtype, shape=shape))
 
         # Add model-specific outputs to list of model outputs
         outputs = [
@@ -1557,14 +1563,14 @@ class LlamaModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         # self.attention_attrs["use_rotemb_in_gqa"] = True
-        # self.model_inputs.remove("position_ids")
+        # self.input_names.remove("position_ids")
 
 
 class MistralModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         # self.attention_attrs["use_rotemb_in_gqa"] = True
-        # self.model_inputs.remove("position_ids")
+        # self.input_names.remove("position_ids")
         self.position_ids_name = f"{self.make_position_ids_reformatting()}/output_0" if not self.attention_attrs["use_rotemb_in_gqa"] else "position_ids"
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
