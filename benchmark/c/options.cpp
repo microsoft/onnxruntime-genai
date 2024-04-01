@@ -25,7 +25,7 @@ namespace {
     << "    -i,--input_folder <path>\n"
     << "      Path to the ONNX model directory to benchmark, compatible with onnxruntime-genai.\n "
     << "    -b,--batch_size <number>\n"
-    << "      Number of sequences to generate in parallel.\n"
+    << "      Number of sequences to generate in parallel. Default: " << defaults.batch_size << "\n"
     << "    -l,--prompt_length <number>\n"
     << "      Number of tokens in the prompt. Default: " << defaults.num_prompt_tokens << "\n"
     << "    -g,--generation_length <number>\n"
@@ -35,7 +35,7 @@ namespace {
     << "    -w,--warmup <number>\n"
     << "      Number of warmup runs before benchmarking. Default: " << defaults.num_warmup_iterations << "\n"
     << "    -v,--verbose\n"
-    << "      Show more informational output."
+    << "      Show more informational output.\n"
     << "    -h,--help\n"
     << "      Show this help message and exit.\n";
 
