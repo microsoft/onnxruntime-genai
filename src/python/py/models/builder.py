@@ -16,11 +16,8 @@ import torch
 import argparse
 import gc
 import json
-import logging
 import os
 import textwrap
-
-logger = logging.getLogger(__name__)
 
 
 class Model:
@@ -130,7 +127,7 @@ class Model:
 
             if self.num_attn_heads != self.num_kv_heads:
                 self.attention_attrs["use_packed_matmul"] = False
-                logger.warning("GroupQueryAttention (GQA) is required for this model. GQA is currently supported only for INT4 CUDA and FP16 CUDA.")
+                print("GroupQueryAttention (GQA) is required for this model. GQA is currently supported only for INT4 CUDA and FP16 CUDA.")
             else:
                 self.attention_attrs["use_packed_matmul"] = True
             
@@ -209,17 +206,17 @@ class Model:
             cuda_options = { "cuda" : { } }
             genai_config["model"]["decoder"]["session_options"]["provider_options"].append(cuda_options)
 
-        logger.info(f"Saving GenAI config in {out_dir}")
+        print(f"Saving GenAI config in {out_dir}")
         with open(os.path.join(out_dir,"genai_config.json"), "w") as f:
             json.dump(genai_config, f, indent=4)
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
         tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, **extra_kwargs)
-        logger.info(f"Saving processing files in {out_dir} for GenAI")
+        print(f"Saving processing files in {out_dir} for GenAI")
         tokenizer.save_pretrained(out_dir)
 
     def save_model(self, out_dir):
-        logger.info(f"Saving ONNX model in {out_dir}")
+        print(f"Saving ONNX model in {out_dir}")
         gc.collect()
 
         # Create ONNX model
@@ -259,11 +256,12 @@ class Model:
         out_path = os.path.join(out_dir, self.filename)
         data_path = os.path.join(out_dir, os.path.basename(out_path) + ".data")
         if os.path.exists(out_path):
-            logger.info(f"Overwriting {out_path}")
+            print(f"Overwriting {out_path}")
             os.remove(out_path)
         if os.path.exists(data_path):
-            logger.info(f"Overwriting {data_path}")
+            print(f"Overwriting {data_path}")
             os.remove(data_path)
+        
         save_model(
             model,
             out_path,
@@ -957,21 +955,21 @@ class Model:
             if isinstance(module, torch.nn.Embedding) or (hasattr(model, "embedding") and module == model.embedding):
                 # Checks (Hugging Face logic) or (GGUF logic)
                 # Embedding layer
-                logger.info("Reading embedding layer")
+                print("Reading embedding layer")
                 self.make_embedding(module.weight.detach().numpy())
             elif module.__class__.__name__.endswith("DecoderLayer"):
                 # Each decoder layer of model
-                logger.info(f"Reading decoder layer {self.layer_id}")
+                print(f"Reading decoder layer {self.layer_id}")
                 self.make_layer(self.layer_id, module)
                 self.layer_id += 1
             elif self.layer_id == self.num_layers and self.has_final_norm(module, model):
                 # SkipLayerNorm after last decoder layer (MatMul --> SkipLayerNorm)
-                logger.info("Reading final norm")
+                print("Reading final norm")
                 self.make_layernorm(self.layer_id, module, skip=True, simple=self.layernorm_attrs["simple"], location="final_norm")
             elif (isinstance(module, torch.nn.Linear) and module.out_features == self.vocab_size) or (hasattr(model, "lm_head") and module == model.lm_head):
                 # Checks (Hugging Face logic) or (GGUF logic)
                 # Language modeling head (SkipLayerNorm --> logits)
-                logger.info("Reading LM head")
+                print("Reading LM head")
                 self.make_lm_head(module)
 
         del model
@@ -1390,7 +1388,7 @@ class PhiModel(Model):
         # self.input_shapes["position_ids"] = [1]  # Note: This is optional and only needed if you want position_ids to be an int instead of a 2D tensor
         self.layernorm_attrs["simple"] = False
         self.rotemb_attrs["num_heads"] = self.num_attn_heads
-        self.rotemb_attrs["rotary_embedding_dim"] = self.num_attn_heads
+        self.rotemb_attrs["rotary_embedding_dim"] = self.head_size * self.rotemb_attrs["partial_rotary_factor"]
         # self.attention_attrs["use_rotemb_in_gqa"] = False
         self.mlp_attrs["use_proj"], self.mlp_attrs["use_fc"] = False, True
 
@@ -1483,7 +1481,7 @@ def parse_extra_options(kv_items):
             kv = kv_str.split('=')
             kv_pairs[kv[0].strip()] = kv[1].strip()
 
-    logger.info(f"Extra options: {kv_pairs}")
+    print(f"Extra options: {kv_pairs}")
     return kv_pairs
 
 
@@ -1606,7 +1604,7 @@ def get_args():
     )
 
     args = parser.parse_args()
-    logger.warning("Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, INT4 CPU, INT4 CUDA")
+    print("Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, INT4 CPU, INT4 CUDA")
     return args
 
 if __name__ == '__main__':
