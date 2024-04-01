@@ -10,7 +10,7 @@
 /test/test_models/*
 /cache_models
 /onnxruntime-linux-x64-*
-/*.csv
+*.csv
 .idea
 cache_dir
 example-models
