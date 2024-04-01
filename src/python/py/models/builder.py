@@ -112,12 +112,11 @@ class Model:
         rope_theta = config.rope_theta if hasattr(config, "rope_theta") else 10000
         self.rotemb_attrs = {
             "create_rotary_embedding_caches": True,          # Create cos/sin caches for rotary embeddings
-            "theta": config.rope_theta,                      # Base value if calculating cos/sin caches from scratch
-            "interleaved": 0,                                # Interleave the rotary embeddings (e.g. [0, 0, 0, 1, 1, 1] to [0, 1, 0, 1, 0, 1], RotaryEmbedding kernel expects a default value of 0)
+            "theta": rope_theta,                             # Base value if calculating cos/sin caches from scratch
             "partial_rotary_factor": partial_rotary_factor,  # Factor for partial rotary embeddings
+            "interleaved": 0,                                # Interleave the rotary embeddings (e.g. [0, 0, 0, 1, 1, 1] to [0, 1, 0, 1, 0, 1], RotaryEmbedding kernel expects a default value of 0)
             "num_heads": 0,                                  # For partial rotary embeddings (RotaryEmbedding kernel expects a default value of 0)
             "rotary_embedding_dim": 0,                       # For partial rotary embeddings (RotaryEmbedding kernel expects a default value of 0)
-            "theta": rope_theta,                             # Base value if calculating cos/sin caches from scratch
         }
 
         # Attention-specific variables (MHA, GQA, GQA + Rot.Emb., etc.)
@@ -126,16 +125,12 @@ class Model:
             "use_rotemb_in_gqa": False,                      # Use rotary embeddings within GroupQueryAttention (instead of a separate RotaryEmbedding op)
             "use_packed_matmul": False,                      # Use packed MatMul (instead of 3 separate MatMuls for Q/K/V)
         }
-        # Check if GroupQueryAttention can be used (FP16 CUDA) or has to be used (num_attention_heads != num_key_value_heads)
-        if (ep == "cuda" and io_dtype == TensorProto.FLOAT16) or self.num_attn_heads != self.num_kv_heads:
+        if ep == "cuda" and io_dtype == TensorProto.FLOAT16:
             self.attention_attrs["op_type"] = "GroupQueryAttention"
+            print("GroupQueryAttention (GQA) is used in this model. GQA is currently supported only for INT4 CUDA and FP16 CUDA.")
 
-            if self.num_attn_heads != self.num_kv_heads:
-                self.attention_attrs["use_packed_matmul"] = False
-                print("GroupQueryAttention (GQA) is required for this model. GQA is currently supported only for INT4 CUDA and FP16 CUDA.")
-            else:
-                self.attention_attrs["use_packed_matmul"] = True
-            
+            self.attention_attrs["use_packed_matmul"] = self.num_attn_heads == self.num_kv_heads
+
             # GQA + Rot.Emb. does not require `position ids` as input
             self.attention_attrs["use_rotemb_in_gqa"] = True
             self.input_names.remove("position_ids")
@@ -505,12 +500,6 @@ class Model:
     #     self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
 
     def make_packed_matmul(self, q_matmul, k_matmul, v_matmul, name, root_input, **kwargs):
-        # # Combine 3 Matmuls of shape HxH into 1 packed MatMul of shape 3HxH
-        # # Note: Packed MatMul is of shape 3HxH instead of Hx3H because `make_matmul` will apply a transpose before saving
-        # h = q_matmul.shape[0]
-        # matmul = np.stack((q_matmul.transpose(), k_matmul.transpose(), v_matmul.transpose()), axis=1).reshape(h, 3*h).transpose()
-        # self.make_matmul(matmul, name, root_input, **kwargs)
-
         # N = num_heads * head_size, H = hidden_size
         # Combine 3 Matmuls of shape NxH into 1 packed MatMul of shape 3NxH
         # Note: Packed MatMul is of shape 3NxH instead of Hx3N because `make_matmul` will apply a transpose before saving
@@ -1562,15 +1551,11 @@ class Model:
 class LlamaModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        # self.attention_attrs["use_rotemb_in_gqa"] = True
-        # self.input_names.remove("position_ids")
 
 
 class MistralModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        # self.attention_attrs["use_rotemb_in_gqa"] = True
-        # self.input_names.remove("position_ids")
         self.position_ids_name = f"{self.make_position_ids_reformatting()}/output_0" if not self.attention_attrs["use_rotemb_in_gqa"] else "position_ids"
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
@@ -1583,8 +1568,7 @@ class PhiModel(Model):
         # self.input_shapes["position_ids"] = [1]  # Note: This is optional and only needed if you want position_ids to be an int instead of a 2D tensor
         self.layernorm_attrs["simple"] = False
         self.rotemb_attrs["num_heads"] = self.num_attn_heads
-        self.rotemb_attrs["rotary_embedding_dim"] = self.head_size * self.rotemb_attrs["partial_rotary_factor"]
-        # self.attention_attrs["use_rotemb_in_gqa"] = False
+        self.rotemb_attrs["rotary_embedding_dim"] = int(self.head_size * self.rotemb_attrs["partial_rotary_factor"])
         self.mlp_attrs["use_proj"], self.mlp_attrs["use_fc"] = False, True
 
     def make_rotary_embedding(self, rotemb, name, root_input, **kwargs):
