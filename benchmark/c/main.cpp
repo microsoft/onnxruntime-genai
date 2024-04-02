@@ -123,7 +123,9 @@ std::string GeneratePrompt(size_t num_prompt_tokens, const OgaModel& model, cons
   params->SetInputSequences(*base_prompt_sequences);
 
   auto output_sequences = model.Generate(*params);
-  return std::string{tokenizer.Decode(output_sequences->Get(0))};
+  const auto output_sequence_length = output_sequences->SequenceCount(0);
+  const auto* output_sequence_data = output_sequences->SequenceData(0);
+  return std::string{tokenizer.Decode(output_sequence_data, output_sequence_length)};
 }
 
 void RunBenchmark(const benchmark::Options& opts) {
@@ -148,7 +150,7 @@ void RunBenchmark(const benchmark::Options& opts) {
     tokenizer->Encode(prompt.c_str(), *prompt_sequences);
   }
 
-  const size_t num_prompt_tokens = prompt_sequences->Get(0).size();
+  const size_t num_prompt_tokens = prompt_sequences->SequenceCount(0);
   const size_t num_tokens = num_prompt_tokens + opts.num_tokens_to_generate;
 
   auto make_generator_params = [&] {
@@ -169,7 +171,9 @@ void RunBenchmark(const benchmark::Options& opts) {
     if (opts.verbose && i == 0) {
       // show prompt and output on first iteration
       std::cout << "Prompt:\n\t" << prompt << "\n";
-      auto output = tokenizer->Decode(output_sequences->Get(0));
+      const auto output_sequence_length = output_sequences->SequenceCount(0);
+      const auto* output_sequence_data = output_sequences->SequenceData(0);
+      const auto output = tokenizer->Decode(output_sequence_data, output_sequence_length);
       std::cout << "Output:\n\t" << output << "\n";
     }
   }

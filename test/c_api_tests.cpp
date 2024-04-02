@@ -120,10 +120,13 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
 
   // Verify outputs match expected outputs
   for (int i = 0; i < batch_size; i++) {
-    auto sequence = generator->GetSequence(i);
+    const auto sequence_length = generator->GetSequenceLength(i);
+    const auto* sequence_data = generator->GetSequenceData(i);
 
-    auto* expected_output_start = &expected_output[i * max_length];
-    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), max_length * sizeof(int32_t)));
+    ASSERT_LE(sequence_length, max_length);
+
+    const auto* expected_output_start = &expected_output[i * max_length];
+    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
   }
 
   // Test high level API
@@ -131,10 +134,13 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
 
   // Verify outputs match expected outputs
   for (int i = 0; i < batch_size; i++) {
-    auto sequence = sequences->Get(i);
+    const auto sequence_length = sequences->SequenceCount(i);
+    const auto* sequence_data = sequences->SequenceData(i);
 
-    auto* expected_output_start = &expected_output[i * max_length];
-    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), max_length * sizeof(int32_t)));
+    ASSERT_LE(sequence_length, max_length);
+
+    const auto* expected_output_start = &expected_output[i * max_length];
+    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
   }
 }
 

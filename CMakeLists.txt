@@ -44,6 +44,10 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER AND CMAKE_BUILD_TYPE STREQUAL "Debug")
   add_compile_definitions(_DEBUG=1)
 endif()
 
+if(MSVC)
+  add_compile_options(/Zc:__cplusplus)  # set updated value for __cplusplus macro instead of 199711L
+endif()
+
 message(STATUS "Adding source files")
 
 file(GLOB generator_srcs CONFIGURE_DEPENDS

@@ -4,9 +4,12 @@
 #pragma once
 
 #include <memory>
-#include "span.h"  // TODO Use the std span header if we can assume C++20.
 #include <stdexcept>
 #include <type_traits>
+
+#if __cplusplus >= 202002L
+#include <span>
+#endif
 
 #include "ort_genai_c.h"
 
@@ -92,9 +95,19 @@ struct OgaSequences : OgaAbstract {
     return OgaSequencesCount(this);
   }
 
-  std::span<const int32_t> Get(size_t index) const {
-    return {OgaSequencesGetSequenceData(this, index), OgaSequencesGetSequenceCount(this, index)};
+  size_t SequenceCount(size_t index) const {
+    return OgaSequencesGetSequenceCount(this, index);
   }
+
+  const int32_t* SequenceData(size_t index) const {
+    return OgaSequencesGetSequenceData(this, index);
+  }
+
+#if __cplusplus >= 202002L
+  std::span<const int32_t> Get(size_t index) const {
+    return {SequenceData(index), SequenceCount(index)};
+  }
+#endif
 
   static void operator delete(void* p) { OgaDestroySequences(reinterpret_cast<OgaSequences*>(p)); }
 };
@@ -110,11 +123,19 @@ struct OgaTokenizer : OgaAbstract {
     OgaCheckResult(OgaTokenizerEncode(this, str, &sequences));
   }
 
+  OgaString Decode(const int32_t* tokens_data, size_t tokens_length) const {
+    const char* p;
+    OgaCheckResult(OgaTokenizerDecode(this, tokens_data, tokens_length, &p));
+    return p;
+  }
+
+#if __cplusplus >= 202002L
   OgaString Decode(std::span<const int32_t> tokens) const {
     const char* p;
     OgaCheckResult(OgaTokenizerDecode(this, tokens.data(), tokens.size(), &p));
     return p;
   }
+#endif
 
   static void operator delete(void* p) { OgaDestroyTokenizer(reinterpret_cast<OgaTokenizer*>(p)); }
 };
@@ -190,9 +211,19 @@ struct OgaGenerator : OgaAbstract {
     OgaCheckResult(OgaGenerator_GenerateNextToken(this));
   }
 
-  std::span<const int32_t> GetSequence(size_t index) const {
-    return {OgaGenerator_GetSequence(this, index), OgaGenerator_GetSequenceLength(this, index)};
+  size_t GetSequenceLength(size_t index) const {
+    return OgaGenerator_GetSequenceLength(this, index);
   }
+
+  const int32_t* GetSequenceData(size_t index) const {
+    return OgaGenerator_GetSequence(this, index);
+  }
+
+#if __cplusplus >= 202002L
+  std::span<const int32_t> GetSequence(size_t index) const {
+    return {GetSequenceData(index), GetSequenceLength(index)};
+  }
+#endif
 
   static void operator delete(void* p) { OgaDestroyGenerator(reinterpret_cast<OgaGenerator*>(p)); }
 };
