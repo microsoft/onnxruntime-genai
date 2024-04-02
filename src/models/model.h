@@ -88,6 +88,9 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer> {
 struct SessionInfo {
   SessionInfo(OrtSession& session);
 
+  bool HasInput(const std::string& name) const;
+  bool HasOutput(const std::string& name) const;
+
   ONNXTensorElementDataType GetInputDataType(const std::string& name) const;
   ONNXTensorElementDataType GetOutputDataType(const std::string& name) const;
 
