@@ -70,13 +70,12 @@ Statistics ComputeStats(const std::vector<Duration>& measurements) {
 
   if (stats.n > 1) {
     const float variance =
-        std::transform_reduce(
+        std::accumulate(
             measurements.begin(), measurements.end(),
             0.0f,
-            std::plus<>{},
-            [mean = stats.average.count()](const Duration& m) {
+            [mean = stats.average.count()](float accumulator, const Duration& m) -> float {
               const float distance_from_mean = m.count() - mean;
-              return distance_from_mean * distance_from_mean;
+              return accumulator + distance_from_mean * distance_from_mean;
             }) /
         (stats.n - 1);
 
