@@ -45,7 +45,8 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER AND CMAKE_BUILD_TYPE STREQUAL "Debug")
 endif()
 
 if(MSVC)
-  add_compile_options(/Zc:__cplusplus)  # set updated value for __cplusplus macro instead of 199711L
+  # set updated value for __cplusplus macro instead of 199711L
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>)
 endif()
 
 message(STATUS "Adding source files")
