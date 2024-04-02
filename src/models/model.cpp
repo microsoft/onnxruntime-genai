@@ -211,11 +211,11 @@ SessionInfo::SessionInfo(OrtSession& session) {
 }
 
 bool SessionInfo::HasInput(const std::string& name) const {
-  return inputs_.contains(name);
+  return inputs_.find(name) != inputs_.end();
 }
 
 bool SessionInfo::HasOutput(const std::string& name) const {
-  return outputs_.contains(name);
+  return outputs_.find(name) != outputs_.end();
 }
 
 ONNXTensorElementDataType SessionInfo::GetInputDataType(const std::string& name) const {
