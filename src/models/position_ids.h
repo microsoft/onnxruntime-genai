@@ -21,6 +21,7 @@ struct PositionIDs {
   State& state_;
   size_t input_index_{~0U};
   ONNXTensorElementDataType type_;  // Common type for position_ids and attention_mask
+  bool has_position_ids_;
 
   std::array<int64_t, 2> position_ids_shape_{};  // {params.batch_size*params.beam_size, params.sequence_length}
   std::unique_ptr<OrtValue> position_ids_;
