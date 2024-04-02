@@ -210,6 +210,14 @@ SessionInfo::SessionInfo(OrtSession& session) {
   }
 }
 
+bool SessionInfo::HasInput(const std::string& name) const {
+  return inputs_.find(name) != inputs_.end();
+}
+
+bool SessionInfo::HasOutput(const std::string& name) const {
+  return outputs_.find(name) != outputs_.end();
+}
+
 ONNXTensorElementDataType SessionInfo::GetInputDataType(const std::string& name) const {
   auto result = inputs_.find(name);
   if (result == inputs_.end())
