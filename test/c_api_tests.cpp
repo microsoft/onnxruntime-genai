@@ -205,7 +205,7 @@ struct Phi2Test {
 TEST(CAPITests, TopKCAPI) {
   Phi2Test test;
 
-  test.params_->SetSearchOption("do_sample", true);
+  test.params_->SetSearchOptionBool("do_sample", true);
   test.params_->SetSearchOption("top_k", 50);
   test.params_->SetSearchOption("temperature", 0.6f);
 
@@ -215,7 +215,7 @@ TEST(CAPITests, TopKCAPI) {
 TEST(CAPITests, TopPCAPI) {
   Phi2Test test;
 
-  test.params_->SetSearchOption("do_sample", true);
+  test.params_->SetSearchOptionBool("do_sample", true);
   test.params_->SetSearchOption("top_p", 0.6f);
   test.params_->SetSearchOption("temperature", 0.6f);
 
@@ -225,7 +225,7 @@ TEST(CAPITests, TopPCAPI) {
 TEST(CAPITests, TopKTopPCAPI) {
   Phi2Test test;
 
-  test.params_->SetSearchOption("do_sample", true);
+  test.params_->SetSearchOptionBool("do_sample", true);
   test.params_->SetSearchOption("top_k", 50);
   test.params_->SetSearchOption("top_p", 0.6f);
   test.params_->SetSearchOption("temperature", 0.6f);

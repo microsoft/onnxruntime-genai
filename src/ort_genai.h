@@ -5,7 +5,6 @@
 
 #include <memory>
 #include <stdexcept>
-#include <type_traits>
 
 #if __cplusplus >= 202002L
 #include <span>
@@ -168,17 +167,12 @@ struct OgaGeneratorParams : OgaAbstract {
     return std::unique_ptr<OgaGeneratorParams>(p);
   }
 
-  // Set a search option value.
-  // This template only allows numeric or boolean values.
-  template <typename T>
-  std::enable_if_t<std::is_arithmetic_v<T>, void>
-  SetSearchOption(const char* name, T value) {
-    if constexpr (std::is_same_v<T, bool>) {
-      OgaCheckResult(OgaGeneratorParamsSetSearchBool(this, name, value));
-    } else {
-      OgaCheckResult(OgaGeneratorParamsSetSearchNumber(this, name,
-                                                       static_cast<double>(value)));
-    }
+  void SetSearchOption(const char* name, double value) {
+    OgaCheckResult(OgaGeneratorParamsSetSearchNumber(this, name, value));
+  }
+
+  void SetSearchOptionBool(const char* name, bool value) {
+    OgaCheckResult(OgaGeneratorParamsSetSearchBool(this, name, value));
   }
 
   void SetInputIDs(const int32_t* input_ids, size_t input_ids_count, size_t sequence_length, size_t batch_size) {
