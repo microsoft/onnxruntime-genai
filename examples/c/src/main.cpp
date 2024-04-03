@@ -4,8 +4,8 @@
 
 // C++ API Example
 
-void CXX_API() {
-  auto model = OgaModel::Create("phi-2");
+void CXX_API(const char* model_path) {
+  auto model = OgaModel::Create(model_path);
   auto tokenizer = OgaTokenizer::Create(*model);
 
   const char* prompt = "def is_prime(num):";
@@ -34,9 +34,9 @@ void CheckResult(OgaResult* result) {
   }
 }
 
-void C_API() {
+void C_API(const char* model_path) {
   OgaModel* model;
-  OgaCreateModel("phi-2", &model);
+  OgaCreateModel(model_path, &model);
 
   OgaTokenizer* tokenizer;
   CheckResult(OgaCreateTokenizer(model, &tokenizer));
@@ -74,16 +74,26 @@ void C_API() {
   OgaDestroyModel(model);
 }
 
-int main() {
+static void print_usage(int /*argc*/, char** argv) {
+  std::cerr << "usage: " << argv[0] << " model_path" << std::endl;
+}
+
+int main(int argc, char** argv) {
+  if (argc != 2) {
+    print_usage(argc, argv);
+    return -1;
+  }
+
+
   std::cout << "-------------" << std::endl;
   std::cout << "Hello, Phi-2!" << std::endl;
   std::cout << "-------------" << std::endl;
 
   std::cout << "C++ API" << std::endl;
-  CXX_API();
+  CXX_API(argv[1]);
 
   std::cout << "C API" << std::endl;
-  C_API();
+  C_API(argv[1]);
 
   return 0;
 }
