@@ -41,7 +41,10 @@ class Model:
         self.cache_dir = cache_dir
         self.filename = extra_options["filename"] if "filename" in extra_options else "model.onnx"
         self.extra_options = extra_options
-        
+
+        self.world_size = int(extra_options["world_size"]) if "world_size" in extra_options else 1
+        self.rank = int(extra_options["rank"]) if "rank" in extra_options else 0
+
         self.inputs = []
         self.outputs = []
         self.initializers = []
@@ -75,7 +78,7 @@ class Model:
             TensorProto.FLOAT16: "TensorProto.FLOAT16",
             TensorProto.FLOAT: "TensorProto.FLOAT",
         }
-        
+
         # Mask-specific variables
         self.mask_attrs = {
             "mask_name": "",            # Name of node that outputs 4D causal attention mask (used as add_qk in MultiHeadAttention)
@@ -125,6 +128,15 @@ class Model:
                 "block_size": int(extra_options["int4_block_size"]) if "int4_block_size" in extra_options else 32,
                 "accuracy_level": int(extra_options["int4_accuracy_level"]) if "int4_accuracy_level" in extra_options else None,
             }
+        }
+
+        # MoE-specific variables
+        num_experts = config.num_experts if hasattr(config, "num_experts") else 1
+        self.moe_attrs = {
+            "num_experts": num_experts,          # Number of experts in MoE layer
+            "top_k": 1,                          # Number of experts to select in MoE layer
+            "activation_type": "relu",           # Activation function for MoE layer
+            "normalize_routing_weights": False,  # Normalize routing weights in MoE layer
         }
 
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
@@ -318,19 +330,45 @@ class Model:
         for i in range(self.num_layers):
             # Add KV cache to inputs
             key_name = f"past_key_values.{i}.key"
-            inputs.append(helper.make_tensor_value_info(key_name, self.io_dtype, shape=["batch_size", self.num_kv_heads, "past_sequence_length", self.head_size]))
+            inputs.append(helper.make_tensor_value_info(key_name, self.io_dtype, shape=["batch_size", self.num_kv_heads // self.world_size, "past_sequence_length", self.head_size]))
             value_name = f"past_key_values.{i}.value"
-            inputs.append(helper.make_tensor_value_info(value_name, self.io_dtype, shape=["batch_size", self.num_kv_heads, "past_sequence_length", self.head_size]))
+            inputs.append(helper.make_tensor_value_info(value_name, self.io_dtype, shape=["batch_size", self.num_kv_heads // self.world_size, "past_sequence_length", self.head_size]))
 
             # Add KV cache to outputs
             key_name = f"present.{i}.key"
-            outputs.append(helper.make_tensor_value_info(key_name, self.io_dtype, shape=["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size]))
+            outputs.append(helper.make_tensor_value_info(key_name, self.io_dtype, shape=["batch_size", self.num_kv_heads // self.world_size, "total_sequence_length", self.head_size]))
             value_name = f"present.{i}.value"
-            outputs.append(helper.make_tensor_value_info(value_name, self.io_dtype, shape=["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size]))
+            outputs.append(helper.make_tensor_value_info(value_name, self.io_dtype, shape=["batch_size", self.num_kv_heads // self.world_size, "total_sequence_length", self.head_size]))
 
         self.inputs = inputs
         self.outputs = outputs
 
+    def make_shard(self, torch_weight, sharding_axis=0):
+        # Shard 1D or 2D weights along specified axis.
+        if torch.is_tensor(torch_weight):
+            torch_weight = torch_weight.detach().numpy()
+
+        if self.world_size == 1:
+            return torch_weight
+        
+        assert len(torch_weight.shape) == 1 or len(torch_weight.shape) == 2, "Only 1D or 2D weights are supported"
+        if len(torch_weight.shape) == 1:
+            assert sharding_axis == 0, "Sharding axis must be 0 for 1D weights"
+        if len(torch_weight.shape) == 2:
+            assert sharding_axis == 0 or sharding_axis == 1, "Sharding axis must be 0 or 1 for 2D weights"
+
+        local_dim = torch_weight.shape[sharding_axis] // self.world_size
+        idx_start = self.rank * local_dim
+        idx_end = idx_start + local_dim
+
+        if len(torch_weight.shape) == 1:
+            return torch_weight[idx_start : idx_end]
+
+        if sharding_axis == 0:
+            return torch_weight[idx_start : idx_end, :]
+        
+        return torch_weight[:, idx_start : idx_end]
+        
     def make_constant(self, name):
         # Make constant ops for 0, 1, 2, 3, etc.
         # Format of name is "/model/constants/{dtype}/{shape}/{num}"
@@ -481,7 +519,7 @@ class Model:
     def make_add_bias(self, add, name, root_input, **kwargs):
         bias = name[1:].replace("/", ".") + ".bias"
         self.make_external_tensor(add.astype(self.to_numpy_dtype[self.io_dtype]), bias)
-        
+
         add_bias_inputs = [root_input, bias]
         shape = ['batch_size', 'sequence_length', add.shape[0]]
 
@@ -491,6 +529,10 @@ class Model:
             self.make_value_info(output, dtype=self.io_dtype, shape=shape)
         else:
             self.make_add(name, add_bias_inputs, dtype=self.io_dtype, shape=shape)
+
+    def make_all_reduce(self, name, root_input):
+        output = f"{name}/output_0"
+        self.make_node("AllReduce", inputs=[root_input], outputs=[output], name=name, domain="com.microsoft")
 
     def make_embedding(self, embedding):
         weight = "model.embed_tokens.weight"
@@ -588,7 +630,7 @@ class Model:
         inputs = [root_input, kwargs.pop("position_ids"), cos_cache_name, sin_cache_name]
         output = f"{name}/output_0"
         self.make_node("RotaryEmbedding", inputs=inputs, outputs=[output], name=name, domain="com.microsoft", interleaved=0, **kwargs)
-        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * (self.num_kv_heads if "k_rotary" in name else self.num_attn_heads)])
+        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * (self.num_kv_heads // self.world_size if "k_rotary" in name else self.num_attn_heads // self.world_size)])
 
     # TODO: This function and any corresponding changes to support it are temporary until ORT supports GQA for CPU
     def make_repeat_kv(self, layer_id, root_input, past_kv, present_kv, **kwargs):
@@ -609,7 +651,7 @@ class Model:
         #                |   present_kv
         #                |
         #        +-------+---------+
-        #        |                 |        
+        #        |                 |
         #        |               Shape
         #        |                 |
         #        |     +-----------+-----------+-----------+
@@ -682,7 +724,7 @@ class Model:
         concat_1_name = f"{basename}/Concat_1"
         concat_1_inputs = [past_kv, f"{transpose_1_name}/output_0"]
         self.make_node("Concat", inputs=concat_1_inputs, outputs=[present_kv], name=concat_1_name, axis=2)
-        
+
         shape_1_name = f"{basename}/Shape_1"
         self.make_shape(shape_1_name, present_kv, shape=[4])
         gather_1_name = f"{basename}/Gather_1"
@@ -771,7 +813,7 @@ class Model:
 
     def make_attention_op(self, name, **kwargs):
         op_type = self.attention_attrs["op_type"]
-        
+
         if op_type == "MultiHeadAttention":
             self.make_multi_head_attention(name, add_qk=f"{self.mask_attrs['mask_name']}/output_0", **kwargs)
         elif op_type == "GroupQueryAttention":
@@ -798,8 +840,9 @@ class Model:
         ]
         output = f"{name}/output_0"
         outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
-        self.make_node("GroupQueryAttention", inputs=inputs, outputs=outputs, name=name, domain="com.microsoft", num_heads=self.num_attn_heads, kv_num_heads=self.num_kv_heads, local_window_size=self.window_size)
-        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * self.num_attn_heads])
+        scale = 1 / np.sqrt(self.head_size)
+        self.make_node("GroupQueryAttention", inputs=inputs, outputs=outputs, name=name, domain="com.microsoft", num_heads=int(self.num_attn_heads // self.world_size), kv_num_heads=int(self.num_kv_heads // self.world_size), local_window_size=self.window_size, scale=scale)
+        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', int(self.head_size * self.num_attn_heads // self.world_size)])
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         # Make nodes for the Attention subgraph
@@ -842,13 +885,15 @@ class Model:
 
         # Make MatMul nodes
         q_matmul_name = f"/model/layers.{layer_id}/attn/q_proj/MatMul"
-        self.make_matmul(attention.q_proj.weight.detach().numpy(), q_matmul_name, root_input)
+        self.make_matmul(self.make_shard(attention.q_proj.weight, sharding_axis=0), q_matmul_name, root_input)
         q_input_to_attention = f"{q_matmul_name}/output_0"
+
         k_matmul_name = f"/model/layers.{layer_id}/attn/k_proj/MatMul"
-        self.make_matmul(attention.k_proj.weight.detach().numpy(), k_matmul_name, root_input)
+        self.make_matmul(self.make_shard(attention.k_proj.weight, sharding_axis=0), k_matmul_name, root_input)
         k_input_to_attention = f"{k_matmul_name}/output_0"
+
         v_matmul_name = f"/model/layers.{layer_id}/attn/v_proj/MatMul"
-        self.make_matmul(attention.v_proj.weight.detach().numpy(), v_matmul_name, root_input)
+        self.make_matmul(self.make_shard(attention.v_proj.weight, sharding_axis=0), v_matmul_name, root_input)
         v_input_to_attention = f"{v_matmul_name}/output_0"
 
         # Make Add nodes (if bias exists)
@@ -858,15 +903,15 @@ class Model:
 
         if q_bias_exists:
             q_add_name = f"/model/layers.{layer_id}/attn/q_proj/Add"
-            self.make_add_bias(attention.q_proj.bias.detach().numpy(), q_add_name, root_input=f"{q_matmul_name}/output_0")
+            self.make_add_bias(self.make_shard(attention.q_proj.bias), q_add_name, root_input=f"{q_matmul_name}/output_0")
             q_input_to_attention = f"{q_add_name}/output_0"
         if k_bias_exists:
             k_add_name = f"/model/layers.{layer_id}/attn/k_proj/Add"
-            self.make_add_bias(attention.k_proj.bias.detach().numpy(), k_add_name, root_input=f"{k_matmul_name}/output_0")
+            self.make_add_bias(self.make_shard(attention.k_proj.bias), k_add_name, root_input=f"{k_matmul_name}/output_0")
             k_input_to_attention = f"{k_add_name}/output_0"
         if v_bias_exists:
             v_add_name = f"/model/layers.{layer_id}/attn/v_proj/Add"
-            self.make_add_bias(attention.v_proj.bias.detach().numpy(), v_add_name, root_input=f"{v_matmul_name}/output_0")
+            self.make_add_bias(self.make_shard(attention.v_proj.bias), v_add_name, root_input=f"{v_matmul_name}/output_0")
             v_input_to_attention = f"{v_add_name}/output_0"
 
         # Make RotaryEmbedding nodes
@@ -901,7 +946,12 @@ class Model:
         o_proj = 'o_proj' if hasattr(attention, 'o_proj') else 'dense'
         o_matmul_name = f"/model/layers.{layer_id}/attn/o_proj/MatMul"
         o_weight = eval(f"attention.{o_proj}.weight.detach().numpy()")
-        self.make_matmul(o_weight, o_matmul_name, f"{attn_name}/output_0")
+        self.make_matmul(self.make_shard(o_weight, sharding_axis=1), o_matmul_name, f"{attn_name}/output_0")
+
+        if self.world_size > 1:
+            all_reduce_name = f"/model/layers.{layer_id}/attn/o_proj/AllReduce"
+            self.make_all_reduce(all_reduce_name, f"{o_matmul_name}/output_0")
+            o_matmul_name = all_reduce_name
 
         # Make Add node (output projection bias node if bias exists)
         o_bias_exists = eval(f"attention.{o_proj}.bias") is not None
@@ -925,12 +975,14 @@ class Model:
         #             Mul
         #              |
         #        DownProjMatMul
-        
+        if mlp is None:
+            return
+
         # Make MatMul nodes
         gate_name = f"/model/layers.{layer_id}/mlp/gate_proj/MatMul"
-        self.make_matmul(mlp.gate_proj.weight.detach().numpy(), gate_name, root_input)
+        self.make_matmul(self.make_shard(mlp.gate_proj.weight, sharding_axis=0), gate_name, root_input)
         up_name = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
-        self.make_matmul(mlp.up_proj.weight.detach().numpy(), up_name, root_input)
+        self.make_matmul(self.make_shard(mlp.up_proj.weight, sharding_axis=0), up_name, root_input)
 
         # Make activation node(s)
         act_fn_name = self.make_activation(layer_id, root_input=f"{gate_name}/output_0")
@@ -938,14 +990,113 @@ class Model:
         # Make Mul node after activation
         mul_name = f"/model/layers.{layer_id}/mlp/Mul"
         mul_inputs = [f"{act_fn_name}/output_0", f"{up_name}/output_0"]
-        self.make_mul(mul_name, mul_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        self.make_mul(mul_name, mul_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size // self.world_size])
 
         # Make output MatMul node
         down_name = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
-        self.make_matmul(mlp.down_proj.weight.detach().numpy(), down_name, f"{mul_name}/output_0")
+        self.make_matmul(self.make_shard(mlp.down_proj.weight, sharding_axis=1), down_name, f"{mul_name}/output_0")
 
         # Assign output 0 of previous MatMul as skip input to next SkipLayerNorm
-        self.layernorm_attrs["skip_input"] = f"{down_name}/output_0"
+        if self.world_size > 1:
+            all_reduce_name = f"/model/layers.{layer_id}/mlp/AllReduce"
+            self.make_all_reduce(all_reduce_name, f"{down_name}/output_0")
+            self.layernorm_attrs["skip_input"] = f"{all_reduce_name}/output_0"
+        else:
+            self.layernorm_attrs["skip_input"] = f"{down_name}/output_0"
+
+    def make_block_sparse_moe(self, layer_id, bsm, root_input):
+        if bsm is None:
+            return
+
+        num_experts = self.moe_attrs["num_experts"]
+        top_k = self.moe_attrs["top_k"]
+        activation_type = self.moe_attrs["activation_type"]
+        normalize_routing_weights = self.moe_attrs["normalize_routing_weights"]
+        
+        # Make MoE nodes
+        gate_name = f"/model/layers.{layer_id}/moe/gate/MatMul"
+        self.make_matmul(bsm.gate.weight.detach().numpy(), gate_name, root_input)
+
+        shape_name = f"/model/layers.{layer_id}/moe/gate/Shape"
+        self.make_shape(shape_name, f"{gate_name}/output_0", shape=[3])
+
+        gather_name = f"/model/layers.{layer_id}/moe/gate/Gather"
+        self.make_gather(gather_name, [f"{shape_name}/output_0", "/model/constants/TensorProto.INT64/0D/2"], axis=0)
+
+        unsqueeze_name = f"/model/layers.{layer_id}/moe/gate/Unsqueeze"
+        self.make_unsqueeze(unsqueeze_name, [f"{gather_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"], dtype=TensorProto.INT64, shape=[1])
+
+        concat_name = f"/model/layers.{layer_id}/moe/gate/Concat"
+        self.make_concat(concat_name, ["/model/constants/TensorProto.INT64/1D/-1", f"{unsqueeze_name}/output_0"], dtype=TensorProto.INT64, shape=[2], axis=0)
+
+        gate_reshape_name = f"/model/layers.{layer_id}/moe/gate/Reshape"
+        self.make_reshape(gate_reshape_name, [f"{gate_name}/output_0", f"{concat_name}/output_0"], dtype=self.io_dtype, shape=['num_rows', num_experts])
+
+        moe_name = f"/model/layers.{layer_id}/moe"
+        w1_list = []
+        w2_list = []
+        w3_list = []
+
+        hidden_size = self.hidden_size
+        inter_size = self.intermediate_size
+
+        for i in range(num_experts):
+            w1_list.append(torch.reshape(bsm.experts[i].w1.weight, (hidden_size, inter_size)))
+            w2_list.append(torch.reshape(bsm.experts[i].w2.weight, (inter_size, hidden_size)))
+            w3_list.append(torch.reshape(bsm.experts[i].w3.weight, (hidden_size, inter_size)))
+
+        moe_expert_1_name = f"model.layers.{layer_id}.moe.weight_1"
+        moe_expert_2_name = f"model.layers.{layer_id}.moe.weight_2"
+        moe_expert_3_name = f"model.layers.{layer_id}.moe.weight_3"
+
+        moe_experts_weight1_full = torch.stack(w1_list, dim=0).detach().numpy()
+        moe_experts_weight2_full = torch.stack(w2_list, dim=0).detach().numpy()
+        moe_experts_weight3_full = torch.stack(w3_list, dim=0).detach().numpy()
+
+        moe_experts_weight1 = moe_experts_weight1_full
+        moe_experts_weight2 = moe_experts_weight2_full
+        moe_experts_weight3 = moe_experts_weight3_full
+
+        if self.world_size > 1:
+            def get_fc1_tensor_shards(expert_weights):
+                return (
+                    expert_weights.reshape(-1, inter_size, hidden_size)
+                    .transpose(0, 2, 1)[
+                        :, :, self.rank * inter_size // self.world_size : (self.rank + 1) * inter_size // self.world_size
+                    ]
+                    .transpose(0, 2, 1).reshape(-1, hidden_size, inter_size // self.world_size)
+                )
+
+            def get_fc2_tensor_shards(expert_weights):
+                return (
+                    expert_weights.reshape(-1, hidden_size, inter_size)
+                    .transpose(0, 2, 1)[
+                        :, self.rank * inter_size // self.world_size : (self.rank + 1) * inter_size // self.world_size, :
+                    ]
+                    .transpose(0, 2, 1).reshape(-1, inter_size // self.world_size, hidden_size)
+                )
+
+            moe_experts_weight1 = get_fc1_tensor_shards(moe_experts_weight1_full)
+            moe_experts_weight2 = get_fc2_tensor_shards(moe_experts_weight2_full)
+            moe_experts_weight3 = get_fc1_tensor_shards(moe_experts_weight3_full)
+
+        self.make_external_tensor(moe_experts_weight1.astype(self.to_numpy_dtype[self.io_dtype]), moe_expert_1_name)
+        self.make_external_tensor(moe_experts_weight2.astype(self.to_numpy_dtype[self.io_dtype]), moe_expert_2_name)
+        self.make_external_tensor(moe_experts_weight3.astype(self.to_numpy_dtype[self.io_dtype]), moe_expert_3_name)
+
+        bias_ph = "" # Placeholder for bias
+        inputs = [root_input, f"{gate_reshape_name}/output_0", moe_expert_1_name, bias_ph, moe_expert_2_name, bias_ph, moe_expert_3_name]
+        output = f"{moe_name}/output_0"
+        if self.world_size > 1:        
+            self.make_node("ShardedMoE", inputs=inputs, outputs=[output], name=moe_name, domain="com.microsoft",
+                            k=top_k, activation_type=activation_type, normalize_routing_weights=normalize_routing_weights, tensor_shards=self.world_size)
+        else:
+            self.make_node("MoE", inputs=inputs, outputs=[output], name=moe_name, domain="com.microsoft",
+                            k=top_k, activation_type=activation_type, normalize_routing_weights=normalize_routing_weights)
+        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+
+        # Assign output 0 of previous MoE as root input to next SkipLayerNorm
+        self.layernorm_attrs["skip_input"] = output
 
     def make_activation_with_mul(self, layer_id, root_input, activation, domain):
         # Make nodes for this activation subgraph
@@ -958,11 +1109,11 @@ class Model:
         act_name = f"/model/layers.{layer_id}/mlp/act_fn/{activation}"
         act_output = f"{act_name}/output_0"
         self.make_node(activation, inputs=[root_input], outputs=[act_output], name=act_name, domain=domain)
-        self.make_value_info(act_output, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        self.make_value_info(act_output, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size // self.world_size])
 
         mul_act_name = f"/model/layers.{layer_id}/mlp/act_fn/Mul"
         mul_act_inputs = [root_input, act_output]
-        self.make_mul(mul_act_name, mul_act_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        self.make_mul(mul_act_name, mul_act_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size // self.world_size])
 
         return mul_act_name
 
@@ -975,7 +1126,7 @@ class Model:
         gelu_name = f"/model/layers.{layer_id}/mlp/act_fn/{activation}"
         output = f"{gelu_name}/output_0"
         self.make_node(activation, inputs=[root_input], outputs=[output], name=gelu_name, domain="com.microsoft")
-        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.intermediate_size])
+        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.intermediate_size // self.world_size])
 
         return gelu_name
 
@@ -1006,7 +1157,10 @@ class Model:
         self.make_layernorm(layer_id, layer.input_layernorm, skip=not self.layernorm_attrs["first_layernorm"], simple=self.layernorm_attrs["simple"], location="input")
         self.make_attention(layer_id, layer.self_attn, self.layernorm_attrs["output_0"])
         self.make_layernorm(layer_id, layer.post_attention_layernorm, skip=True, simple=self.layernorm_attrs["simple"], location="post_attention")
-        self.make_mlp(layer_id, layer.mlp, self.layernorm_attrs["output_0"])
+        if hasattr(layer, "mlp"):
+            self.make_mlp(layer_id, layer.mlp, self.layernorm_attrs["output_0"])
+        if hasattr(layer, "block_sparse_moe"):
+            self.make_block_sparse_moe(layer_id, layer.block_sparse_moe, self.layernorm_attrs["output_0"])
 
         self.layernorm_attrs["first_layernorm"] = False
         if layer_id == self.num_layers - 1:
@@ -1036,7 +1190,7 @@ class Model:
             # Load PyTorch model
             extra_kwargs = {} if os.path.exists(self.model_name_or_path) else {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {"cache_dir": self.cache_dir, "use_auth_token": True}
             model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, **extra_kwargs)
-        
+
         # Loop through model and map each module to ONNX/ORT ops
         self.layer_id = 0
         for module in model.modules():
@@ -1078,9 +1232,9 @@ class Model:
         #            /         \               |
         #         Shape       Shape          Shape
         #          |            |              |
-        #        Gather       Gather         Gather                              
+        #        Gather       Gather         Gather
         #       (idx=0)       (idx=1)        (idx=2)
-        #          |            |    |\      /                                        
+        #          |            |    |\      /
         #          |            |    | \    /
         #          |            |    |   Add                                      attention_mask--------+
         #          |            |    |    |                                       /           \         |
@@ -1217,7 +1371,7 @@ class Model:
         concat_3_name = f"{basename}/Concat_3"
         concat_3_inputs = [f"{unsqueeze_7_name}/output_0", "/model/constants/TensorProto.INT64/1D/1"]
         self.make_concat(concat_3_name, concat_3_inputs, dtype=TensorProto.INT64, shape=[2], axis=0)
-        
+
         # Bottom path
         shape_5_name = f"{basename}/Shape_5"
         self.make_shape(shape_5_name, f"{constant_shape_name}/output_0", shape=[2])
@@ -1293,7 +1447,7 @@ class Model:
         #            /         \
         #         Shape       Shape
         #          |            |
-        #        Gather       Gather                              
+        #        Gather       Gather
         #       (idx=0)       (idx=1)
         #          |            |
         #      Unsqueeze   Unsqueeze   Unsqueeze (unsqueeze_for_concat)
@@ -1341,7 +1495,7 @@ class Model:
         unsqueeze_2_name = f"{basename}/Unsqueeze_2"
         unsqueeze_2_inputs = [f"{gather_2_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
         self.make_unsqueeze(unsqueeze_2_name, unsqueeze_2_inputs, dtype=TensorProto.INT64, shape=[1])
-        
+
         concat_name = f"{basename}/Concat" if not input_ids_subgraph else f"{basename}/Concat_1"
         concat_first_two_inputs = [f"{unsqueeze_1_name}/output_0", "/model/constants/TensorProto.INT64/1D/1"]
         concat_last_two_inputs = [f"{unsqueeze_for_concat}/output_0", f"{unsqueeze_2_name}/output_0"] if not input_ids_subgraph else [f"{unsqueeze_2_name}/output_0", f"{unsqueeze_for_concat}/output_0"]
@@ -1358,7 +1512,7 @@ class Model:
         equal_name = f"{basename}/Equal"
         equal_inputs = [f"{concat_name}/output_0", f"{mul_name}/output_0"]
         self.make_equal(equal_name, equal_inputs, shape=[4])
-        
+
         where_name = f"{basename}/Where_1"
         where_inputs = [f"{equal_name}/output_0", f"{constant_shape_name}/output_0", f"{concat_name}/output_0"]
         self.make_where(where_name, where_inputs, dtype=TensorProto.INT64, shape=[4])
@@ -1369,7 +1523,7 @@ class Model:
         self.make_expand(expand_name, expand_inputs, dtype=expand_dtype, shape=expand_shape)
 
         return expand_name
-    
+
 
 class LlamaModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -1381,7 +1535,7 @@ class LlamaModel(Model):
             super().make_attention_mask_reformatting()
             return
 
-        # Make nodes for the attention mask subgraph that calculates 
+        # Make nodes for the attention mask subgraph that calculates
         # attributes about the 2D attention mask to use in GroupQueryAttention
         #
         #                attention_mask
@@ -1441,7 +1595,7 @@ class MistralModel(LlamaModel):
         #                  \       /
         #                   Reshape
         #                      |
-        #      position_ids input for RotaryEmbedding       
+        #      position_ids input for RotaryEmbedding
 
         basename = "/model/pos_ids_reformat"
         shape_name = f"{basename}/Shape"
@@ -1471,11 +1625,11 @@ class PhiModel(LlamaModel):
         # self.input_shapes["position_ids"] = [1]  # Note: This is optional and only needed if you want position_ids to be an int instead of a 2D tensor
         self.layernorm_attrs["simple"] = False
         self.rotemb_attrs["num_heads"] = self.num_attn_heads
-        self.rotemb_attrs["rotary_embedding_dim"] = int(self.head_size * self.rotemb_attrs["partial_rotary_factor"])
+        self.rotemb_attrs["rotary_embedding_dim"] = self.num_attn_heads
 
     def make_rotary_embedding(self, rotemb, name, root_input, **kwargs):
         super().make_rotary_embedding(rotemb, name, root_input, num_heads=self.rotemb_attrs["num_heads"], rotary_embedding_dim=self.rotemb_attrs["rotary_embedding_dim"], **kwargs)
-        
+
     def make_mlp(self, layer_id, mlp, root_input):
         # Make nodes for the MLP subgraph
         #
@@ -1490,19 +1644,24 @@ class PhiModel(LlamaModel):
         #          FC2_MatMul
         #              |
         #           FC2_Add
-
         # Make first layer of fully connected nodes (FC1)
         fc1_matmul_name = f"/model/layers.{layer_id}/mlp/fc1/MatMul"
-        self.make_matmul(mlp.fc1.weight.detach().numpy(), fc1_matmul_name, root_input)
+        self.make_matmul(self.make_shard(mlp.fc1.weight, sharding_axis=0), fc1_matmul_name, root_input)
         fc1_add_name = f"/model/layers.{layer_id}/mlp/fc1/Add"
-        self.make_add_bias(mlp.fc1.bias.detach().numpy(), fc1_add_name, root_input=f"{fc1_matmul_name}/output_0")
+        self.make_add_bias(self.make_shard(mlp.fc1.bias), fc1_add_name, root_input=f"{fc1_matmul_name}/output_0")
 
         # Make activation function
         fast_gelu_name = self.make_activation(layer_id, root_input=f"{fc1_add_name}/output_0")
 
         # Make second layer of fully connected nodes (FC2)
         fc2_matmul_name = f"/model/layers.{layer_id}/mlp/fc2/MatMul"
-        self.make_matmul(mlp.fc2.weight.detach().numpy(), fc2_matmul_name, root_input=f"{fast_gelu_name}/output_0")
+        self.make_matmul(self.make_shard(mlp.fc2.weight, sharding_axis=1), fc2_matmul_name, root_input=f"{fast_gelu_name}/output_0")
+
+        if self.world_size > 1:
+            all_reduce_name = f"/model/layers.{layer_id}/mlp/all_reduce"
+            self.make_all_reduce(all_reduce_name, f"{fc2_matmul_name}/output_0")
+            fc2_matmul_name = all_reduce_name
+
         fc2_add_name = f"/model/layers.{layer_id}/mlp/fc2/Add"
         self.make_add_bias(mlp.fc2.bias.detach().numpy(), fc2_add_name, root_input=f"{fc2_matmul_name}/output_0")
 
@@ -1523,7 +1682,7 @@ class PhiModel(LlamaModel):
         if layer_id == self.num_layers - 1:
             # Norm after last decoder layer of model (last layer --> norm)
             self.layernorm_attrs["last_layernorm"] = True
-        
+
         # Assign output 0 of residual Add as skip input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = f"{residual_add_name}/output_0"
 
@@ -1534,13 +1693,21 @@ class GemmaModel(MistralModel):
         self.embed_attrs["normalize"] = True
         self.layernorm_attrs["add_offset"] = 1
 
+class MixtralModel(MistralModel):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.moe_attrs["num_experts"] = 8
+        self.moe_attrs["top_k"] = 2
+        self.moe_attrs["activation_type"] = "silu"
+        self.moe_attrs["normalize_routing_weights"] = 1
+
 
 def parse_extra_options(kv_items):
     """
     Parse key value pairs that are separated by '='
     """
     kv_pairs = {}
-    
+
     if kv_items:
         for kv_str in kv_items:
             kv = kv_str.split('=')
@@ -1573,6 +1740,8 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             onnx_model = MistralModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "PhiForCausalLM":
             onnx_model = PhiModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "MixtralForCausalLM":
+            onnx_model = MixtralModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         else:
             raise NotImplementedError(f"The {hf_name} model is not currently supported.")
 
@@ -1665,6 +1834,8 @@ def get_args():
                     The filename for each component will be '<filename>_<component-name>.onnx' (ex: '<filename>_encoder.onnx', '<filename>_decoder.onnx').
                 config_only = Generate config and pre/post processing files only.
                     Use this option when you already have your optimized and/or quantized ONNX model.
+                world_size = Number of GPUs to use for distributed inference. Default is 1.
+                rank = Rank of current GPU in distributed inference. Must be less than world_size. Default is 0.
             """),
     )
 
