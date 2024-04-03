@@ -205,17 +205,17 @@ struct OgaGenerator : OgaAbstract {
     OgaCheckResult(OgaGenerator_GenerateNextToken(this));
   }
 
-  size_t GetSequenceLength(size_t index) const {
-    return OgaGenerator_GetSequenceLength(this, index);
+  size_t GetSequenceCount(size_t index) const {
+    return OgaGenerator_GetSequenceCount(this, index);
   }
 
   const int32_t* GetSequenceData(size_t index) const {
-    return OgaGenerator_GetSequence(this, index);
+    return OgaGenerator_GetSequenceData(this, index);
   }
 
 #if __cplusplus >= 202002L
   std::span<const int32_t> GetSequence(size_t index) const {
-    return {GetSequenceData(index), GetSequenceLength(index)};
+    return {GetSequenceData(index), GetSequenceCount(index)};
   }
 #endif
 

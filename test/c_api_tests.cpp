@@ -120,7 +120,7 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
 
   // Verify outputs match expected outputs
   for (int i = 0; i < batch_size; i++) {
-    const auto sequence_length = generator->GetSequenceLength(i);
+    const auto sequence_length = generator->GetSequenceCount(i);
     const auto* sequence_data = generator->GetSequenceData(i);
 
     ASSERT_LE(sequence_length, max_length);

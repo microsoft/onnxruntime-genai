@@ -157,12 +157,12 @@ OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator) 
   OGA_CATCH
 }
 
-size_t OGA_API_CALL OgaGenerator_GetSequenceLength(const OgaGenerator* oga_generator, size_t index) {
+size_t OGA_API_CALL OgaGenerator_GetSequenceCount(const OgaGenerator* oga_generator, size_t index) {
   auto& generator = *reinterpret_cast<const Generators::Generator*>(oga_generator);
   return generator.GetSequence(static_cast<int>(index)).GetCPU().size();
 }
 
-const int32_t* OGA_API_CALL OgaGenerator_GetSequence(const OgaGenerator* oga_generator, size_t index) {
+const int32_t* OGA_API_CALL OgaGenerator_GetSequenceData(const OgaGenerator* oga_generator, size_t index) {
   auto& generator = *reinterpret_cast<const Generators::Generator*>(oga_generator);
   return generator.GetSequence(static_cast<int>(index)).GetCPU().data();
 }
