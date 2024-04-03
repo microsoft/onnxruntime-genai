@@ -32,8 +32,8 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         public ReadOnlySpan<int> GetSequence(ulong index)
         {
-            ulong sequenceLength = NativeMethods.OgaGenerator_GetSequenceLength(_generatorHandle, (UIntPtr)index).ToUInt64();
-            IntPtr sequencePtr = NativeMethods.OgaGenerator_GetSequence(_generatorHandle, (UIntPtr)index);
+            ulong sequenceLength = NativeMethods.OgaGenerator_GetSequenceCount(_generatorHandle, (UIntPtr)index).ToUInt64();
+            IntPtr sequencePtr = NativeMethods.OgaGenerator_GetSequenceData(_generatorHandle, (UIntPtr)index);
             unsafe
             {
                 return new ReadOnlySpan<int>(sequencePtr.ToPointer(), (int)sequenceLength);
