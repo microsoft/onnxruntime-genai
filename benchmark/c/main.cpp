@@ -129,13 +129,6 @@ std::string GeneratePrompt(size_t num_prompt_tokens, const OgaModel& model, cons
 }
 
 void RunBenchmark(const benchmark::Options& opts) {
-  if (opts.verbose) {
-    std::cout << "Batch size: " << opts.batch_size
-              << ", prompt tokens: " << opts.num_prompt_tokens
-              << ", tokens to generate: " << opts.num_tokens_to_generate
-              << "\n";
-  }
-
   auto model = OgaModel::Create(opts.model_path.c_str());
   auto tokenizer = OgaTokenizer::Create(*model);
 
@@ -217,15 +210,21 @@ void RunBenchmark(const benchmark::Options& opts) {
   }
 
   {
+    std::cout << "Batch size: " << opts.batch_size
+              << ", prompt tokens: " << num_prompt_tokens
+              << ", tokens to generate: " << opts.num_tokens_to_generate
+              << "\n";
+
     const auto e2e_gen_stats = ComputeStats(e2e_gen_times);
     const auto prompt_processing_stats = ComputeStats(prompt_processing_times);
     const auto token_gen_stats = ComputeStats(token_gen_times);
     const auto sampling_stats = ComputeStats(sampling_times);
 
-    WritePerTokenStats("Prompt processing", prompt_processing_stats, opts.batch_size * num_prompt_tokens);
+    WritePerTokenStats("Prompt processing (time to first token)",
+                       prompt_processing_stats, opts.batch_size * num_prompt_tokens);
     WritePerTokenStats("Token generation", token_gen_stats, opts.batch_size);
     WritePerTokenStats("Token sampling", sampling_stats, opts.batch_size);
-    WriteE2EStats("E2E generation", e2e_gen_stats);
+    WriteE2EStats("E2E generation (entire generation loop)", e2e_gen_stats);
   }
 }
 
