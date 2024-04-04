@@ -343,31 +343,31 @@ class Model:
         self.inputs = inputs
         self.outputs = outputs
 
-    def make_shard(self, torch_weight, sharding_axis=0):
+    def make_shard(self, weight, sharding_axis=0):
         # Shard 1D or 2D weights along specified axis.
-        if torch.is_tensor(torch_weight):
-            torch_weight = torch_weight.detach().numpy()
+        if torch.is_tensor(weight):
+            weight = weight.detach().numpy()
 
         if self.world_size == 1:
-            return torch_weight
+            return weight
         
-        assert len(torch_weight.shape) == 1 or len(torch_weight.shape) == 2, "Only 1D or 2D weights are supported"
-        if len(torch_weight.shape) == 1:
+        assert len(weight.shape) == 1 or len(weight.shape) == 2, "Only 1D or 2D weights are supported"
+        if len(weight.shape) == 1:
             assert sharding_axis == 0, "Sharding axis must be 0 for 1D weights"
-        if len(torch_weight.shape) == 2:
+        if len(weight.shape) == 2:
             assert sharding_axis == 0 or sharding_axis == 1, "Sharding axis must be 0 or 1 for 2D weights"
 
-        local_dim = torch_weight.shape[sharding_axis] // self.world_size
+        local_dim = weight.shape[sharding_axis] // self.world_size
         idx_start = self.rank * local_dim
         idx_end = idx_start + local_dim
 
-        if len(torch_weight.shape) == 1:
-            return torch_weight[idx_start : idx_end]
+        if len(weight.shape) == 1:
+            return weight[idx_start : idx_end]
 
         if sharding_axis == 0:
-            return torch_weight[idx_start : idx_end, :]
+            return weight[idx_start : idx_end, :]
         
-        return torch_weight[:, idx_start : idx_end]
+        return weight[:, idx_start : idx_end]
         
     def make_constant(self, name):
         # Make constant ops for 0, 1, 2, 3, etc.
@@ -829,8 +829,9 @@ class Model:
         ]
         output = f"{name}/output_0"
         outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
-        self.make_node("MultiHeadAttention", inputs=inputs, outputs=outputs, name=name, domain="com.microsoft", num_heads=self.num_attn_heads)
-        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * self.num_attn_heads])
+        scale = 1 / np.sqrt(self.head_size)
+        self.make_node("MultiHeadAttention", inputs=inputs, outputs=outputs, name=name, domain="com.microsoft", num_heads=int(self.num_attn_heads // self.world_size), scale=scale)
+        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', int(self.head_size * self.num_attn_heads // self.world_size)])
 
     def make_group_query_attention(self, name, **kwargs):
         inputs = [
@@ -1146,6 +1147,9 @@ class Model:
         matmul_name = "/lm_head/MatMul"
         root_input = self.layernorm_attrs["output_0"]
         self.make_matmul(lm_head.weight.detach().numpy(), matmul_name, root_input, logits=not bias_exists)
+
+        # We should do make_shard(lm_head.weight, sharding_axis=0) here, but given that it has minor impact on performance
+        # and requires changes in generation, leave it to the next PR.
 
         if bias_exists:
             add_name = "/lm_head/Add"
