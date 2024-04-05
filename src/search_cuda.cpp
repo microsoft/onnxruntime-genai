@@ -35,7 +35,7 @@ GreedySearch_Cuda::GreedySearch_Cuda(const GeneratorParams& params)
   cudaMemsetAsync(next_tokens_.data(), 0, next_tokens_.size_bytes(), params_->cuda_stream);
 
   unsigned long long random_seed;
-  if (params_->search.random_seed!=-1)
+  if (params_->search.random_seed != -1)
     random_seed = params_->search.random_seed;
   else
     random_seed = std::random_device{}();
