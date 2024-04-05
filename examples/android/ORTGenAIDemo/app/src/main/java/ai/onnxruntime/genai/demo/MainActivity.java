@@ -77,14 +77,18 @@ public class MainActivity extends AppCompatActivity implements GenAIWrapper.Toke
         // Right-click on the files folder an update the phi-int4-cpu folder.
         File fd = getFilesDir();
 
-        genAIWrapper = new GenAIWrapper(fd.getPath() + "/phi2-int4-cpu-compint8");
+        genAIWrapper = new GenAIWrapper(fd.getPath() + "/phi2-int4-cpu-compint8/");
         genAIWrapper.setTokenUpdateListener(this);
         String output = genAIWrapper.run(promptQuestion);
-        generatedTV.setText(output);
+//        generatedTV.setText(output);
     }
 
     @Override
     public void onTokenUpdate(String token) {
-        generatedTV.setText(token);
+        runOnUiThread(() -> {
+            CharSequence generated = generatedTV.getText();
+            generatedTV.setText(generated + token);
+        });
+
     }
 }
