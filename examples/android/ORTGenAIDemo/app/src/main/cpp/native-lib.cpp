@@ -117,7 +117,7 @@ Java_ai_onnxruntime_genai_demo_GenAIWrapper_run(JNIEnv *env, jobject thiz, jlong
     GeneratorParamsPtr gp_cleanup{generator_params, OgaDestroyGeneratorParams};
 
     // generatorParams.SetSearchOption("max_length", 200);
-    check_result(OgaGeneratorParamsSetSearchNumber(generator_params, "max_length", 200));  // TODO: Rename this API. 'search number' is really opaque
+    check_result(OgaGeneratorParamsSetSearchNumber(generator_params, "max_length", 100));  // TODO: Rename this API. 'search number' is really opaque
     // generatorParams.SetInputSequences(sequences);
     check_result(OgaGeneratorParamsSetInputSequences(generator_params, sequences));
 
