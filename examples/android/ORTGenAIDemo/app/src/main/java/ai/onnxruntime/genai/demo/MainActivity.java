@@ -58,7 +58,13 @@ public class MainActivity extends AppCompatActivity implements GenAIWrapper.Toke
                  // below line we are setting text in our edit text as empty
                  userMsgEdt.setText("");
  */
-                  performQA();
+                // Start a new thread
+                new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                       performQA();
+                    }
+                }).start();
             }
         });
     }
