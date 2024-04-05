@@ -22,7 +22,7 @@ GreedySearch_Cpu::GreedySearch_Cpu(const GeneratorParams& params)
     std::random_device rd;
     std::array<uint32_t, decltype(gen_)::state_size> data;
     std::generate(std::begin(data), std::end(data), std::ref(rd));
-    std::seed_seq seq{data.begin(), data.end()};
+    std::seed_seq seq(data.begin(), data.end());
     gen_.seed(seq);
   }
 
