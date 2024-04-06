@@ -10,15 +10,14 @@
 
     <TextView
         android:id="@+id/sample_text"
-        android:layout_width="365dp"
-        android:layout_height="412dp"
-        android:text="Hello World!"
+        android:layout_width="386dp"
+        android:layout_height="461dp"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintHorizontal_bias="0.347"
+        app:layout_constraintHorizontal_bias="0.48"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintVertical_bias="0.172" />
+        app:layout_constraintVertical_bias="0.211" />
 
     <LinearLayout
         app:layout_constraintBottom_toBottomOf="parent"

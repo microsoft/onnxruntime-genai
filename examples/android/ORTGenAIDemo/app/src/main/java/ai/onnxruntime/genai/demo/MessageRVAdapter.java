@@ -11,6 +11,9 @@ import androidx.recyclerview.widget.RecyclerView;
 
 import java.util.ArrayList;
 
+/*Note:: These two files(MessageModal.java/MessageRVAdapter.java) are copied from online for another chatbot app, thought would be useful to handle
+the bot/user view. NEED UPDATE.
+ */
 public class MessageRVAdapter extends RecyclerView.Adapter {
 
     // variable for our array list and context.

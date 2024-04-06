@@ -3,27 +3,32 @@ package ai.onnxruntime.genai.demo;
 import androidx.appcompat.app.AppCompatActivity;
 
 import android.os.Bundle;
-import android.os.Handler;
-import android.os.Looper;
 import android.util.Log;
 import android.view.View;
+import android.widget.EditText;
 import android.widget.ImageButton;
 import android.widget.TextView;
-
-
-import org.w3c.dom.Text;
+import android.widget.Toast;
 
 import java.io.File;
-import java.util.concurrent.CountDownLatch;
+import java.util.ArrayList;
+import java.util.Arrays;
+
 
 import ai.onnxruntime.genai.demo.databinding.ActivityMainBinding;
 
 public class MainActivity extends AppCompatActivity implements GenAIWrapper.TokenUpdateListener {
     private ActivityMainBinding binding;
+    private EditText userMsgEdt;
     private GenAIWrapper genAIWrapper;
     private ImageButton sendMsgIB;
 
-    private String promptQuestion = "What is the square root of pi.";
+    private String promptQuestion;
+
+    private ArrayList<String> promptQuestions = new ArrayList<>(Arrays.asList(
+            "What is the square root of pi.",
+            "Print prime numbers.",
+            "Write a detailed analogy between mathematics and a lighthouse."));
 
     private TextView generatedTV;
 
@@ -35,36 +40,31 @@ public class MainActivity extends AppCompatActivity implements GenAIWrapper.Toke
         setContentView(binding.getRoot());
 
         sendMsgIB = findViewById(R.id.idIBSend);
+        userMsgEdt = findViewById(R.id.idEdtMessage);
         generatedTV = findViewById(R.id.sample_text);
 
         // adding on click listener for send message button.
         sendMsgIB.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                // TODO:
                 // Checking if the message entered
                 // by user is empty or not.
-                /* if (userMsgEdt.getText().toString().isEmpty()) {
-                // if the edit text is empty display a toast message.
+                if (userMsgEdt.getText().toString().isEmpty()) {
+                    // if the edit text is empty display a toast message.
                     Toast.makeText(MainActivity.this, "Please enter your message..", Toast.LENGTH_SHORT).show();
                     return;
-                 }
-
-                 // Calling a method to send message
-                 // to our GenAI bot to get response.
-
-                 // sendMessage(userMsgEdt.getText().toString());
-
-                 // below line we are setting text in our edit text as empty
-                 userMsgEdt.setText("");
- */
-                // Start a new thread
+                } else {
+                    promptQuestion = userMsgEdt.getText().toString();
+                }
                 new Thread(new Runnable() {
                     @Override
                     public void run() {
-                       performQA();
+                        performQA(promptQuestion);
                     }
                 }).start();
+                // Clear Edit Text or prompt question.
+                userMsgEdt.setText("");
+                promptQuestion="";
             }
         });
     }
@@ -74,7 +74,7 @@ public class MainActivity extends AppCompatActivity implements GenAIWrapper.Toke
         super.onDestroy();
     }
 
-    private void performQA() {
+    private void performQA(String question) {
 
         // manually upload the model. easiest from Android Studio.
         // Create emulator. Make sure it has at least 8GB of internal storage!
@@ -85,16 +85,16 @@ public class MainActivity extends AppCompatActivity implements GenAIWrapper.Toke
 
         genAIWrapper = new GenAIWrapper(fd.getPath() + "/phi2-int4-cpu-compint8/");
         genAIWrapper.setTokenUpdateListener(this);
-        String output = genAIWrapper.run(promptQuestion);
-//        generatedTV.setText(output);
+        genAIWrapper.run(question);
     }
 
     @Override
     public void onTokenUpdate(String token) {
         runOnUiThread(() -> {
+            // Update and aggregate the generated text and write to text box.
             CharSequence generated = generatedTV.getText();
             generatedTV.setText(generated + token);
+            generatedTV.invalidate();
         });
-
     }
 }
