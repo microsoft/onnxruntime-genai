@@ -56,7 +56,7 @@ def main(args):
 
         if args.verbose:
             run_time = time.time() - started_timestamp
-            print(f"Prompt tokens: {len(input_tokens)}, New tokens: {len(new_tokens)}, Time to first: {(first_token_timestamp - started_timestamp):.2f}s, New tokens per second: {len(new_tokens)/run_time:.2f} tps")
+            print(f"Prompt length: {prompt_length}, New tokens: {len(new_tokens)}, Time to first: {(first_token_timestamp - started_timestamp):.2f}s, New tokens per second: {len(new_tokens)/run_time:.2f} tps")
 
 
 if __name__ == "__main__":
