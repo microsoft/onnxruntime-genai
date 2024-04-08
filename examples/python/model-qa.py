@@ -3,6 +3,9 @@ import argparse
 import time
 
 def main(args):
+    app_started_timestamp = 0
+    started_timestamp = 0
+    first_token_timestamp = 0
     if args.verbose:
         print("Loading model...")
         app_started_timestamp = time.time()
