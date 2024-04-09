@@ -19,7 +19,7 @@ def main(args):
     if args.verbose: print("Tokenizer created")
     if args.verbose: print()
 
-    # Keep asking for input prompts in an loop
+    # Keep asking for input prompts in a loop
     while True:
         text = input("Input: ")
         if not text:
