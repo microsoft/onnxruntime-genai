@@ -19,7 +19,7 @@ def main(args):
     if args.verbose: print("Prompt(s) encoded")
 
     params = og.GeneratorParams(model)
-    params.set_search_options({"max_length": args.max_length, "top_p": args.top_p, "top_k": args.top_k, "temperature": args.temperature, "repetition_penalty": args.repetition_penalty})
+    params.set_search_options(max_length=args.max_length, top_p=args.top_p, top_k=args.top_k, temperature=args.temperature, repetition_penalty=args.repetition_penalty)
     params.input_ids = input_tokens
     if args.verbose: print("GeneratorParams created")
 

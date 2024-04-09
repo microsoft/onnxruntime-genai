@@ -20,7 +20,7 @@ def main(args):
         input_tokens = tokenizer.encode(text)
 
         params = og.GeneratorParams(model)
-        params.set_search_options({"do_sample": True, "max_length": args.max_length, "top_p": args.top_p, "top_k": args.top_k, "temperature": args.temperature, "repetition_penalty": args.repetition_penalty})
+        params.set_search_options(random_seed=1234, do_sample=True, max_length=args.max_length, top_p=args.top_p, top_k=args.top_k, temperature=args.temperature, repetition_penalty=args.repetition_penalty)
         params.input_ids = input_tokens
         generator = og.Generator(model, params)
         if args.verbose: print("Generator created")
@@ -30,8 +30,10 @@ def main(args):
         while not generator.is_done():
             generator.compute_logits()
             generator.generate_next_token()
-            print(tokenizer_stream.decode(generator.get_next_tokens()[0]), end='', flush=True)
+            # print(tokenizer_stream.decode(generator.get_next_tokens()[0]), end='', flush=True)
         print()
+
+        print(tokenizer.decode(generator.get_sequence(0)))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="End-to-end chat-bot example for gen-ai")

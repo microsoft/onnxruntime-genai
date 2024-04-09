@@ -94,7 +94,7 @@ struct PyGeneratorParams {
     }
   }
 
-  void SetSearchOptions(const pybind11::dict& dict) {
+  void SetSearchOptions(const pybind11::kwargs& dict) {
     for (auto& entry : dict) {
       auto name = entry.first.cast<std::string>();
       try {
