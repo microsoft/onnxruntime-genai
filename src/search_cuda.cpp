@@ -170,13 +170,24 @@ void GreedySearch_Cuda::CheckForEOS() {
 void GreedySearch_Cuda::AppendNextTokensToSequences() {
   sequences_.AppendNextTokenToSequences(next_tokens_);
 
-  if (sequences_.GetSequenceLength() == params_->search.max_length)
+  if (sequences_.GetSequenceLength() == params_->search.max_length) {
+    if (g_log.enabled && g_log.hit_max_length)
+      Log("hit_max_length", "greedy cuda hit");
     *done_cpu_ = true;
+  }
 }
 
 bool BeamSearch_Cuda::IsDone() const {
   beam_scorer_->IsDone();
-  return beam_scorer_->IsDoneLater() || sequences_.GetSequenceLength() == params_->search.max_length;
+  if (beam_scorer_->IsDoneLater())
+    return true;
+
+  if (sequences_.GetSequenceLength() == params_->search.max_length) {
+    if (g_log.enabled && g_log.hit_max_length)
+      Log("hit_max_length", "beam cuda hit");
+    return true;
+  }
+  return false;
 }
 
 void BeamSearch_Cuda::AppendNextTokensToSequences() {

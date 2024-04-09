@@ -43,6 +43,20 @@ const char* OGA_API_CALL OgaResultGetError(const OgaResult* result) {
   return reinterpret_cast<const Generators::Result*>(result)->what_.c_str();
 }
 
+OgaResult* OGA_API_CALL OgaSetLogBool(const char* name, bool value) {
+  OGA_TRY
+  Generators::SetLogBool(name, value);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaSetLogString(const char* name, const char* value) {
+  OGA_TRY
+  Generators::SetLogString(name, value);
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaCreateSequences(OgaSequences** out) {
   OGA_TRY
   *out = reinterpret_cast<OgaSequences*>(std::make_unique<Generators::TokenSequences>().release());

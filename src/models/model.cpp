@@ -4,7 +4,6 @@
 #include "../generators.h"
 #include "../search.h"
 #include "model.h"
-#include "debugging.h"
 #include "gpt.h"
 #include "decoder_only.h"
 #include "whisper.h"
@@ -21,21 +20,25 @@ State::State(const GeneratorParams& params) : params_{params.shared_from_this()}
 }
 
 void State::Run(OrtSession& session) {
-#if 0
-  // To show input values, enable this block (output values will be shapes only at this point)
-  printf("**Inputs:\r\n");
-  DumpTensors(inputs_.data(), input_names_.data(), input_names_.size(), true);
-  printf("**Outputs:\r\n");
-  DumpTensors(outputs_.data(), output_names_.data(), output_names_.size(), false);
-#endif
+  if (g_log.enabled && g_log.model_input_values) {
+    auto& stream=Log("model_input_values");
+    stream << std::endl;
+    DumpTensors(stream, inputs_.data(), input_names_.data(), input_names_.size(), true);
+  }
+
+  if (g_log.enabled && g_log.model_output_shapes) {
+    auto& stream = Log("model_output_shapes");
+    stream << std::endl;
+    DumpTensors(stream, outputs_.data(), output_names_.data(), output_names_.size(), false);
+  }
 
   session.Run(nullptr, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
 
-#if 0
-  // To show the output values, enable this block
-  printf("**Outputs:\r\n");
-  DumpTensors(outputs_.data(), output_names_.data(), output_names_.size(), true);
-#endif
+  if (g_log.enabled && g_log.model_output_values) {
+    auto& stream = Log("model_output_values");
+    stream << std::endl;
+    DumpTensors(stream, outputs_.data(), output_names_.data(), output_names_.size(), true);
+  }
 }
 
 void State::ClearIO() {

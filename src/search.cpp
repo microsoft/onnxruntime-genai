@@ -230,6 +230,8 @@ void GreedySearch_Cpu::SetNextToken(size_t batch_id, int32_t token) {
   next_tokens_[batch_id] = token;
   if (token == params_->eos_token_id) {
     eos_seen_[batch_id] = true;
+    if (g_log.enabled && g_log.hit_eos)
+      Log("hit_eos", "EOS seen on batch " + std::to_string(batch_id));
     if (--not_done_count_ == 0) {
       done_ = true;
     }
@@ -240,6 +242,8 @@ void GreedySearch_Cpu::AppendNextTokensToSequences() {
   sequences_.AppendNextTokenToSequences(next_tokens_);
 
   if (sequences_.GetSequenceLength() == params_->search.max_length) {
+    if (g_log.enabled && g_log.hit_max_length)
+      Log("hit_max_length", "greedy cpu hit");
     done_ = true;
   }
 }
@@ -248,6 +252,8 @@ void BeamSearch_Cpu::AppendNextTokensToSequences() {
   sequences_.AppendNextTokenToSequences(beam_scorer_->GetNextIndicesCPU(), beam_scorer_->GetNextTokens());
 
   if (sequences_.GetSequenceLength() == params_->search.max_length) {
+    if (g_log.enabled && g_log.hit_max_length)
+      Log("hit_max_length", "beam cpu hit");
     done_ = true;
   }
 }
