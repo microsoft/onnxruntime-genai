@@ -21,7 +21,7 @@ State::State(const GeneratorParams& params) : params_{params.shared_from_this()}
 
 void State::Run(OrtSession& session) {
   if (g_log.enabled && g_log.model_input_values) {
-    auto& stream=Log("model_input_values");
+    auto& stream = Log("model_input_values");
     stream << std::endl;
     DumpTensors(stream, inputs_.data(), input_names_.data(), input_names_.size(), true);
   }

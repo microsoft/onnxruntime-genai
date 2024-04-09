@@ -38,8 +38,10 @@ void SetLogString(std::string_view name, std::string_view value) {
   if (name == "filename") {
     if (value.empty())
       gp_logfile.reset();
-    else
-      gp_logfile = std::make_unique<std::ofstream>(L"testing");
+    else {
+      std::filesystem::path filename{value};
+      gp_logfile = std::make_unique<std::ofstream>(filename);
+    }
 
     if (gp_logfile)
       gp_stream = gp_logfile.get();
