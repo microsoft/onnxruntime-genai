@@ -22,15 +22,9 @@ public class MainActivity extends AppCompatActivity implements GenAIWrapper.Toke
     private EditText userMsgEdt;
     private GenAIWrapper genAIWrapper;
     private ImageButton sendMsgIB;
-
     private String promptQuestion;
-
-    private ArrayList<String> promptQuestions = new ArrayList<>(Arrays.asList(
-            "What is the square root of pi.",
-            "Print prime numbers.",
-            "Write a detailed analogy between mathematics and a lighthouse."));
-
     private TextView generatedTV;
+    private TextView promptTV;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -42,6 +36,7 @@ public class MainActivity extends AppCompatActivity implements GenAIWrapper.Toke
         sendMsgIB = findViewById(R.id.idIBSend);
         userMsgEdt = findViewById(R.id.idEdtMessage);
         generatedTV = findViewById(R.id.sample_text);
+        promptTV = findViewById(R.id.user_text);
 
         // adding on click listener for send message button.
         sendMsgIB.setOnClickListener(new View.OnClickListener() {
@@ -55,15 +50,18 @@ public class MainActivity extends AppCompatActivity implements GenAIWrapper.Toke
                     return;
                 } else {
                     promptQuestion = userMsgEdt.getText().toString();
+                    Log.i("GenAI: prompt question", promptQuestion);
                 }
                 new Thread(new Runnable() {
                     @Override
                     public void run() {
+                        promptTV.setText(promptQuestion);
                         performQA(promptQuestion);
                     }
                 }).start();
                 // Clear Edit Text or prompt question.
                 userMsgEdt.setText("");
+                generatedTV.setText("");
                 promptQuestion="";
             }
         });
