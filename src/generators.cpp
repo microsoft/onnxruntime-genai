@@ -86,7 +86,7 @@ void Generator::ComputeLogits() {
   if (computed_logits_)
     throw std::runtime_error("ComputeLogits called again without calling GenerateNextToken first");
 
-  auto logits=state_->Run(search_->GetSequenceLength(), search_->GetNextTokens(), search_->GetNextIndices());
+  auto logits = state_->Run(search_->GetSequenceLength(), search_->GetNextTokens(), search_->GetNextIndices());
   if (g_log.enabled && g_log.model_logits) {
     auto& stream = Log("model_logits");
     DumpSpan(stream, logits.GetCPU());

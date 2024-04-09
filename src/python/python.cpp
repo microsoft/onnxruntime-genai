@@ -244,7 +244,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 #ifdef USE_CUDA
     return true;
 #else
-    return false;
+        return false;
 #endif
   });
 

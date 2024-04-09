@@ -60,17 +60,17 @@ std::ostream& operator<<(std::ostream& stream, Ort::Float16_t v) {
   return stream;
 }
 
-template<typename T>
+template <typename T>
 void DumpSpan(std::ostream& stream, std::span<const T> values) {
   if (values.size() <= c_value_count) {
     for (auto v : values)
       stream << v << ' ';
   } else {
-    for(size_t i=0;i<c_value_count/2;i++)
+    for (size_t i = 0; i < c_value_count / 2; i++)
       stream << values[i] << ' ';
     stream << "... ";
-    for(size_t i=values.size()-c_value_count/2;i<values.size();i++)
-      stream << values[i] << ' '; 
+    for (size_t i = values.size() - c_value_count / 2; i < values.size(); i++)
+      stream << values[i] << ' ';
   }
 }
 
