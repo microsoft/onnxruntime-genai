@@ -6,11 +6,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  ort_dir: "onnxruntime-linux-x64-gpu-1.17.1"
-  ort_zip: "onnxruntime-linux-x64-gpu-1.17.1.tgz"
-  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/onnxruntime-linux-x64-gpu-1.17.1.tgz"
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime.Gpu.Linux&api-version=6.0-preview.1"
-  ORT_NIGHTLY_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime.Gpu.Linux"
+  ORT_NIGHTLY_PACKAGE_NAME: Microsoft.ML.OnnxRuntime.Gpu.
+  ORT_NIGHTLY_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
+
 
 jobs:
   linux-gpu-x64-build:
