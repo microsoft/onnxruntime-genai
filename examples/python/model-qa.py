@@ -6,14 +6,12 @@ def main(args):
     app_started_timestamp = 0
     started_timestamp = 0
     first_token_timestamp = 0
-    if args.verbose:
-        print("Loading model...")
-        app_started_timestamp = time.time()
+    if args.verbose: print("Loading model...")
+    if args.timings: app_started_timestamp = time.time()
 
     model = og.Model(f'{args.model}')
     model_loaded_timestamp  = time.time()
-    if args.verbose:
-        print("Model loaded in {:.2f} seconds".format(model_loaded_timestamp - app_started_timestamp))
+    if args.verbose: print("Model loaded")
     tokenizer = og.Tokenizer(model)
     tokenizer_stream = tokenizer.create_stream()
     if args.verbose: print("Tokenizer created")
@@ -26,7 +24,7 @@ def main(args):
             print("Error, input cannot be empty")
             continue
 
-        if args.verbose: started_timestamp = time.time()
+        if args.timings: started_timestamp = time.time()
 
         input_tokens = tokenizer.encode(args.system_prompt + text)
 
@@ -39,22 +37,24 @@ def main(args):
         if args.verbose: print("Generator created")
 
         if args.verbose: print("Running generation loop ...")
-        first = True
-        new_tokens = []
+        if args.timings:
+            first = True
+            new_tokens = []
 
         while not generator.is_done():
             generator.compute_logits()
             generator.generate_next_token()
-            if first:
-                first_token_timestamp = time.time()
-                first = False
+            if args.timings:
+                if first:
+                    first_token_timestamp = time.time()
+                    first = False
 
             new_token = generator.get_next_tokens()[0]
             print(tokenizer_stream.decode(new_token), end='', flush=True)
-            if args.verbose: new_tokens.append(new_token)
+            if args.timings: new_tokens.append(new_token)
         print()
 
-        if args.verbose:
+        if args.timings:
             prompt_time = first_token_timestamp - started_timestamp
             run_time = time.time() - first_token_timestamp
             print(f"Prompt length: {prompt_length}, New tokens: {len(new_tokens)}, Time to first: {(prompt_time):.2f}s, Prompt tokens per second: {prompt_length/prompt_time:.2f} tps, New tokens per second: {len(new_tokens)/run_time:.2f} tps")
@@ -69,7 +69,8 @@ if __name__ == "__main__":
     parser.add_argument('-k', '--top_k', type=int, default=50, help='Top k tokens to sample from')
     parser.add_argument('-t', '--temperature', type=float, default=1.0, help='Temperature to sample with')
     parser.add_argument('-r', '--repetition_penalty', type=float, default=1.0, help='Repetition penalty to sample with')
-    parser.add_argument('-v', '--verbose', action='store_true', help='Print verbose output and timing information')
+    parser.add_argument('-v', '--verbose', action='store_true', help='Print verbose output and timing information. Defaults to false')
     parser.add_argument('-s', '--system_prompt', type=str, default='', help='Prepend a system prompt to the user input prompt. Defaults to empty')
+    parser.add_argument('-g', '--timings', action='store_true', help='Print timing information for each generation step. Defaults to false')
     args = parser.parse_args()
     main(args)
