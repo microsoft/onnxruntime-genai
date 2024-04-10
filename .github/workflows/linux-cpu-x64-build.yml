@@ -28,7 +28,7 @@ jobs:
 
       - name: Download OnnxRuntime
         run: |
-          nuget install ${{ env.ORT_NIGHTLY_PACKAGE_NAME }} -version ${{ env.ORT_NIGHTLY_VERSION }} -x -Source ${{ env.ORT_NIGHTLY_SOURCE }}
+          nuget install "${{ env.ORT_NIGHTLY_PACKAGE_NAME }}" -version "${{ env.ORT_NIGHTLY_VERSION }}" -x -Source "${{ env.ORT_NIGHTLY_SOURCE }}"
 
       - name: Extra OnnxRuntime library and header files
         run: |
