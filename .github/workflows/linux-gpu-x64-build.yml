@@ -36,7 +36,10 @@ jobs:
         run: |
           dotnet add package "${{ env.ORT_NIGHTLY_PACKAGE_NAME }}" --version "${{ env.ORT_NIGHTLY_VERSION }}" --source "${{ env.ORT_NIGHTLY_SOURCE }}"
         continue-on-error: true
-
+      - name: list files
+        shell: bash
+        run: |
+          ls -l
       - name: Extra OnnxRuntime library and header files
         run: |
           mkdir -p ort/lib

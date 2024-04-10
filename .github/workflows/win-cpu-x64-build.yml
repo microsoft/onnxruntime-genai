@@ -45,7 +45,13 @@ jobs:
         ORT_NIGHTLY_VERSION=$(curl -s "${{ env.ORT_NIGHTLY_REST_API }}" | jq -r '.value[0].versions[0].normalizedVersion')
         echo "$ORT_NIGHTLY_VERSION" 
         echo "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" >> $GITHUB_ENV
-
+    - name: Download OnnxRuntime Nightly
+      run: |
+        nuget install ${{ env.ORT_NIGHTLY_PACKAGE_NAME }} -version ${{ env.ORT_NIGHTLY_VERSION }} -x
+    - name: list files
+      shell: bash
+      run: |
+        ls -l
     - name: Extra OnnxRuntime library and header files
       run: |
         mkdir -p ort/lib
