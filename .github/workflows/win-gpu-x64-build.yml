@@ -8,14 +8,12 @@ concurrency:
 env:
   AZCOPY_AUTO_LOGIN_TYPE: MSI
   AZCOPY_MSI_CLIENT_ID: 63b63039-6328-442f-954b-5a64d124e5b4
-  ort_dir: "onnxruntime-win-x64-gpu-1.17.1"
-  ort_zip: "onnxruntime-win-x64-gpu-1.17.1.zip"
-  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/onnxruntime-win-x64-gpu-1.17.1.zip"
   cuda_dir: "${{ github.workspace }}\\cuda_sdk"
   cuda_version: "11.8"
   CUDA_PATH: ${{ github.workspace }}\\cuda_sdk\\v11.8
   binaryDir: 'build/cuda'
-
+  ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
+  ORT_NIGHTLY_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime.Gpu.Windows"
 
 jobs:
   windows-gpu-x64-build:
@@ -35,17 +33,26 @@ jobs:
       run: |
         azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v${{ env.cuda_version }}" ${{ env.cuda_dir}}
 
-    - name: Download OnnxRuntime
+    - name : Install jq and nuget
       run: |
-        Invoke-WebRequest -Uri $env:ort_url -OutFile $env:ort_zip
+        choco install -y jq nuget.commandline curl
 
-    - name: Unzip OnnxRuntime
+    - name: Get the Latest OnnxRuntime Nightly Version
+      shell: bash
       run: |
-        Expand-Archive $env:ort_zip -DestinationPath .
-        Remove-Item -Path $env:ort_zip
-    - name: Rename OnnxRuntime to ort
+        ORT_NIGHTLY_VERSION=$(curl -s "${{ env.ORT_NIGHTLY_REST_API }}" | jq -r '.value[0].versions[0].normalizedVersion')
+        echo "$ORT_NIGHTLY_VERSION" 
+        echo "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" >> $GITHUB_ENV
+    - name: Download OnnxRuntime Nightly
       run: |
-        Rename-Item -Path $env:ort_dir -NewName ort
+        nuget install ${{ env.ORT_NIGHTLY_PACKAGE_NAME }} -version ${{ env.ORT_NIGHTLY_VERSION }} -x -NonInteractive
+
+    - run: dir /s ${{ env.ORT_NIGHTLY_PACKAGE_NAME }}
+    - name: Extra OnnxRuntime library and header files
+      run: |
+        mkdir -p ort/lib
+        mv ${{ env.ORT_NIGHTLY_PACKAGE_NAME }}/build/native/include ort/
+        mv ${{ env.ORT_NIGHTLY_PACKAGE_NAME }}/runtimes/win-x64/native/* ort/lib/    
 
     - name: Configure CMake
       run: |

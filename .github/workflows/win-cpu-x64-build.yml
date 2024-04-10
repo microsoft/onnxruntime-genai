@@ -11,9 +11,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 env:
-  ort_dir: "onnxruntime-win-x64-1.17.1"
-  ort_zip: "$(ort_dir).zip"
-  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/$(ort_zip)"
   binaryDir: 'build/cpu'
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
   ORT_NIGHTLY_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
@@ -48,10 +45,9 @@ jobs:
     - name: Download OnnxRuntime Nightly
       run: |
         nuget install ${{ env.ORT_NIGHTLY_PACKAGE_NAME }} -version ${{ env.ORT_NIGHTLY_VERSION }} -x -NonInteractive
-    - name: list files
-      shell: bash
-      run: |
-        ls -l
+
+    - run: dir /s ${{ env.ORT_NIGHTLY_PACKAGE_NAME }}
+
     - name: Extra OnnxRuntime library and header files
       run: |
         mkdir -p ort/lib
