@@ -15,6 +15,8 @@ env:
   ort_zip: "$(ort_dir).zip"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/$(ort_zip)"
   binaryDir: 'build/cpu'
+  ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
+  ORT_NIGHTLY_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
 
 jobs:
   windows-cpu-arm64-build:
@@ -31,19 +33,21 @@ jobs:
         vs-version: '17.4'
         msbuild-architecture: arm64
 
-    - name: Download OnnxRuntime
+    - name : Install jq and nuget
       run: |
-        $env:ort_url = "https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/onnxruntime-win-arm64-1.17.1.zip"
-        Invoke-WebRequest -Uri $env:ort_url -OutFile $env:ort_zip
+        choco install jq nuget.commandline
 
-    - name: Unzip OnnxRuntime
+    - name: Get the Latest OnnxRuntime Nightly Version
       run: |
-        Expand-Archive $env:ort_zip -DestinationPath .
-        Remove-Item -Path $env:ort_zip
+        ORT_NIGHTLY_VERSION=$(curl -s "${{ env.ORT_NIGHTLY_REST_API }}" | jq -r '.value[0].versions[0].normalizedVersion')
+        echo "$ORT_NIGHTLY_VERSION" 
+        echo "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" >> $GITHUB_ENV
 
-    - name: Rename OnnxRuntime to ort
+    - name: Extra OnnxRuntime library and header files
       run: |
-        Rename-Item -Path $env:ort_dir -NewName ort
+        mkdir -p ort/lib
+        mv ${{ env.ORT_NIGHTLY_PACKAGE_NAME }}/build/native/include ort/
+        mv ${{ env.ORT_NIGHTLY_PACKAGE_NAME }}/runtimes/win-arm64/native/* ort/lib/
 
     - name: Configure CMake
       run: |

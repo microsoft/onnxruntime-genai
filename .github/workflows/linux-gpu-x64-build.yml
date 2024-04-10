@@ -9,6 +9,8 @@ env:
   ort_dir: "onnxruntime-linux-x64-gpu-1.17.1"
   ort_zip: "onnxruntime-linux-x64-gpu-1.17.1.tgz"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/onnxruntime-linux-x64-gpu-1.17.1.tgz"
+  ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
+  ORT_NIGHTLY_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
 
 jobs:
   linux-gpu-x64-build:
@@ -18,18 +20,29 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: true
-      - name: Download OnnxRuntime
+      - name: Install jq and nuget
         run: |
-          curl -L -o ${{ env.ort_zip }} ${{ env.ort_url }}
+          sudo apt-get install jq nuget
 
-      - name: Unzip OnnxRuntime
+      - name: Get the Latest OnnxRuntime Nightly Version
         run: |
-          tar -xzf ${{ env.ort_zip }}
-          rm ${{ env.ort_zip }}
+          ORT_NIGHTLY_VERSION=$(curl -s "${{ env.ORT_NIGHTLY_REST_API }}" | jq -r '.value[0].versions[0].normalizedVersion')
+          echo "$ORT_NIGHTLY_VERSION" 
+          echo "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" >> $GITHUB_ENV
+      - name: Search Nuget Source
+        run: |
+          nuget search "${{ env.ORT_NIGHTLY_PACKAGE_NAME }}" -Source "${{ env.ORT_NIGHTLY_SOURCE }}" -Verbosity detailed
 
-      - name: Rename OnnxRuntime to ort
+      - name: Download OnnxRuntime Nightly
         run: |
-          mv ${{ env.ort_dir }} ort
+          nuget install "${{ env.ORT_NIGHTLY_PACKAGE_NAME }}" -version "${{ env.ORT_NIGHTLY_VERSION }}" -x -Source "${{ env.ORT_NIGHTLY_SOURCE }}"
+
+      - name: Extra OnnxRuntime library and header files
+        run: |
+          mkdir -p ort/lib
+          mv ${{ env.ORT_NIGHTLY_PACKAGE_NAME }}/build/native/include ort/
+          mv ${{ env.ORT_NIGHTLY_PACKAGE_NAME }}/runtimes/linux-x64/native/* ort/lib/
+
 
       - name: Download Docker Image
         run: |
