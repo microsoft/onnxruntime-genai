@@ -37,7 +37,15 @@ class Model:
         self.model_type = config.architectures[0]
         self.io_dtype = io_dtype      # {'fp16', 'fp32'}
         self.onnx_dtype = onnx_dtype  # {"int4", "fp16", "fp32"}
+
+        # EP-specific variables
         self.ep = ep
+        self.ep_attrs = {
+            "cpu": {},
+            "cuda": {},
+            "dml": {},
+        }
+        self.vllm = "for_vllm" in extra_options
 
         self.cache_dir = cache_dir
         self.filename = extra_options["filename"] if "filename" in extra_options else "model.onnx"
@@ -49,17 +57,35 @@ class Model:
         self.value_infos = []
         self.nodes = []
 
-        # Map input names to their types and shapes
+        # Map input and output names to their types and shapes
         self.input_names = ["input_ids", "attention_mask", "position_ids"]
         self.input_types = {
-            "input_ids": TensorProto.INT64,
-            "attention_mask": TensorProto.INT64,
-            "position_ids": TensorProto.INT64,
+            "input_ids": TensorProto.INT64,                                                                      # For standard models
+            "attention_mask": TensorProto.INT64,                                                                 # For standard models
+            "position_ids": TensorProto.INT64,                                                                   # For standard models
+            "past_key_values.key": self.io_dtype,                                                                # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format)
+            "past_key_values.value": self.io_dtype,                                                              # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format)
+            "input_metadata": TensorProto.INT64,                                                                 # For vLLM
         }
         self.input_shapes = {
-            "input_ids": ["batch_size", "sequence_length"],
-            "attention_mask": ["batch_size", "total_sequence_length"],
-            "position_ids": ["batch_size", "sequence_length"],
+            "input_ids": ["batch_size", "sequence_length"],                                                      # For standard models
+            "attention_mask": ["batch_size", "total_sequence_length"],                                           # For standard models
+            "position_ids": ["batch_size", "sequence_length"],                                                   # For standard models
+            "past_key_values.key": ["batch_size", self.num_kv_heads, "past_sequence_length", self.head_size],    # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format)
+            "past_key_values.value": ["batch_size", self.num_kv_heads, "past_sequence_length", self.head_size],  # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format)
+            "input_metadata": [1],                                                                               # For vLLM
+        }
+
+        self.output_names = ["logits"]
+        self.output_types = {
+            "logits": self.io_dtype,                                                                             # For standard models
+            "present.key": self.io_dtype,                                                                        # For standard models (note that `present.key` is written this way to match Hugging Face format)
+            "present.value": self.io_dtype,                                                                      # For standard models (note that `present.value` is written this way to match Hugging Face format)
+        }
+        self.output_shapes = {
+            "logits": ["batch_size", "sequence_length", self.vocab_size],                                        # For standard models
+            "present.key": ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size],           # For standard models (note that `present.key` is written this way to match Hugging Face format)
+            "present.value": ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size],         # For standard models (note that `present.value` is written this way to match Hugging Face format)
         }
 
         # Store names of Constant ops already created
@@ -122,17 +148,30 @@ class Model:
         # Attention-specific variables (MHA, GQA, GQA + Rot.Emb., etc.)
         self.attention_attrs = {
             "op_type": "MultiHeadAttention",                 # Attention op to use
-            "use_rotemb_in_gqa": False,                      # Use rotary embeddings within GroupQueryAttention (instead of a separate RotaryEmbedding op)
+            "use_rotemb_in_attn": False,                     # Use rotary embeddings within attention op (instead of a separate RotaryEmbedding op)
             "use_packed_matmul": False,                      # Use packed MatMul (instead of 3 separate MatMuls for Q/K/V)
         }
-        if ep == "cuda" and io_dtype == TensorProto.FLOAT16:
+        if self.vllm:
+            # Change model settings for vLLM
+            self.attention_attrs["op_type"] = "PagedAttention"
+            print("PagedAttention (PA) is used in this model. PA is currently supported only for models running in vLLM.")
+
+            # vLLM requires an additional input called `input_metadata`
+            self.input_names.append("input_metadata")
+
+            # vLLM changes the shapes of the input KV caches and does not have output KV caches
+            self.input_shapes["past_key_values.key"] = ["num_blocks", "num_heads", "head_size_x", "block_size", "x"]
+            self.input_shapes["past_key_values.value"] = ["num_blocks", "num_heads", "head_size", "block_size"]
+
+        elif self.ep == "cuda" and self.io_dtype == TensorProto.FLOAT16:
+            # Change model settings for GroupQueryAttention
             self.attention_attrs["op_type"] = "GroupQueryAttention"
             print("GroupQueryAttention (GQA) is used in this model. GQA is currently supported only for INT4 CUDA and FP16 CUDA.")
 
             self.attention_attrs["use_packed_matmul"] = self.num_attn_heads == self.num_kv_heads
 
             # GQA + Rot.Emb. does not require `position ids` as input
-            self.attention_attrs["use_rotemb_in_gqa"] = True
+            self.attention_attrs["use_rotemb_in_attn"] = True
             self.input_names.remove("position_ids")
 
         # MLP-specific variables
@@ -180,7 +219,7 @@ class Model:
                     "num_key_value_heads": self.num_kv_heads,
                 },
                 "eos_token_id": config.eos_token_id,
-                "pad_token_id": config.pad_token_id if hasattr(config, "pad_token_id") and config.pad_token_id != None else config.eos_token_id,
+                "pad_token_id": config.pad_token_id if hasattr(config, "pad_token_id") and config.pad_token_id is not None else config.eos_token_id,
                 "type": self.model_type[ : self.model_type.find("For")].lower(),
                 "vocab_size": self.vocab_size,
             },
@@ -202,9 +241,9 @@ class Model:
             },
         }
 
-        if self.ep == "cuda":
-            cuda_options = { "cuda" : { } }
-            genai_config["model"]["decoder"]["session_options"]["provider_options"].append(cuda_options)
+        if self.ep != "cpu":
+            ep_options = { self.ep : self.ep_attrs[self.ep] }
+            genai_config["model"]["decoder"]["session_options"]["provider_options"].append(ep_options)
 
         print(f"Saving GenAI config in {out_dir}")
         with open(os.path.join(out_dir,"genai_config.json"), "w") as f:
@@ -335,23 +374,26 @@ class Model:
             inputs.append(helper.make_tensor_value_info(name, dtype, shape=shape))
 
         # Add model-specific outputs to list of model outputs
-        outputs = [
-            helper.make_tensor_value_info("logits", self.io_dtype, shape=["batch_size", "sequence_length", self.vocab_size])
-        ]
+        outputs = []
+        for name in self.output_names:
+            dtype = self.output_types[name]
+            shape = self.output_shapes[name]
+            outputs.append(helper.make_tensor_value_info(name, dtype, shape=shape))
 
         # Add KV cache to inputs and outputs
         for i in range(self.num_layers):
             # Add KV cache to inputs
             key_name = f"past_key_values.{i}.key"
-            inputs.append(helper.make_tensor_value_info(key_name, self.io_dtype, shape=["batch_size", self.num_kv_heads, "past_sequence_length", self.head_size]))
+            inputs.append(helper.make_tensor_value_info(key_name, self.input_types["past_key_values.key"], shape=self.input_shapes["past_key_values.key"]))
             value_name = f"past_key_values.{i}.value"
-            inputs.append(helper.make_tensor_value_info(value_name, self.io_dtype, shape=["batch_size", self.num_kv_heads, "past_sequence_length", self.head_size]))
+            inputs.append(helper.make_tensor_value_info(value_name, self.input_types["past_key_values.value"], shape=self.input_shapes["past_key_values.value"]))
 
             # Add KV cache to outputs
-            key_name = f"present.{i}.key"
-            outputs.append(helper.make_tensor_value_info(key_name, self.io_dtype, shape=["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size]))
-            value_name = f"present.{i}.value"
-            outputs.append(helper.make_tensor_value_info(value_name, self.io_dtype, shape=["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size]))
+            if not self.vllm:
+                key_name = f"present.{i}.key"
+                outputs.append(helper.make_tensor_value_info(key_name, self.output_types["present.key"], shape=self.output_shapes["present.key"]))
+                value_name = f"present.{i}.value"
+                outputs.append(helper.make_tensor_value_info(value_name, self.output_types["present.value"], shape=self.output_shapes["present.value"]))
 
         self.inputs = inputs
         self.outputs = outputs
@@ -591,6 +633,10 @@ class Model:
         return output_0
 
     def make_rotary_embedding_caches(self, rotemb):
+        # if self.vllm:
+        #     cos_cache_name, sin_cache_name = "sin_cos_cache", ""
+        # else:
+        #     cos_cache_name, sin_cache_name = "cos_cache", "sin_cache"
         cos_cache_name, sin_cache_name = "cos_cache", "sin_cache"
 
         if self.rotemb_attrs["create_rotary_embedding_caches"]:
@@ -611,6 +657,15 @@ class Model:
             self.make_external_tensor(cos_cache.astype(self.to_numpy_dtype[self.io_dtype]), cos_cache_name)
             sin_cache = sin_cache.squeeze()[:, : (hidden_dim // 2)].detach().numpy()
             self.make_external_tensor(sin_cache.astype(self.to_numpy_dtype[self.io_dtype]), sin_cache_name)
+
+            # if self.vllm:
+            #     # Combine caches, save combined cache, and return name
+            #     cos_sin_cache = np.concatenate([sin_cache, cos_cache], axis=-1)
+            #     self.make_external_tensor(cos_cache.astype(self.to_numpy_dtype[self.io_dtype]), cos_cache_name)
+            # else:
+            #     # Save separate caches and return their names
+            #     self.make_external_tensor(cos_cache.astype(self.to_numpy_dtype[self.io_dtype]), cos_cache_name)
+            #     self.make_external_tensor(sin_cache.astype(self.to_numpy_dtype[self.io_dtype]), sin_cache_name)
 
             self.rotemb_attrs["create_rotary_embedding_caches"] = False
 
@@ -810,6 +865,8 @@ class Model:
             self.make_multi_head_attention(name, add_qk=f"{self.mask_attrs['mask_name']}/output_0", **kwargs)
         elif op_type == "GroupQueryAttention":
             self.make_group_query_attention(name, seqlens_k=f"{self.mask_attrs['seqlens_k']}/output_0", total_seq_len=f"{self.mask_attrs['total_seq_len']}/output_0", **kwargs)
+        elif op_type == "PagedAttention":
+            self.make_paged_attention(name, **kwargs)
         else:
             raise NotImplementedError(f"The {op_type} op is not currently supported.")
 
@@ -829,14 +886,32 @@ class Model:
             kwargs["q_path"], kwargs["k_path"], kwargs["v_path"],
             kwargs.get("past_k", ""), kwargs.get("past_v", ""),
             kwargs.get("seqlens_k", ""), kwargs.get("total_seq_len", ""),
-            kwargs.get("cos_cache", ""), kwargs.get("sin_cache", "")
+            kwargs.get("cos_cache", ""), kwargs.get("sin_cache", ""),
         ]
         output = f"{name}/output_0"
         outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
         self.make_node(
             "GroupQueryAttention", inputs=inputs, outputs=outputs, name=name, domain="com.microsoft",
             num_heads=self.num_attn_heads, kv_num_heads=self.num_kv_heads, local_window_size=self.window_size,
-            do_rotary=self.attention_attrs["use_rotemb_in_gqa"], rotary_interleaved=self.rotemb_attrs["interleaved"],
+            do_rotary=self.attention_attrs["use_rotemb_in_attn"], rotary_interleaved=self.rotemb_attrs["interleaved"],
+        )
+        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * self.num_attn_heads])
+
+    def make_paged_attention(self, name, **kwargs):
+        # `cos_cache` input will contain the packed `sin_cos_cache` needed for PagedAttention
+        inputs = [
+            kwargs["q_path"], kwargs["k_path"], kwargs["v_path"],
+            kwargs.get("past_k", ""), kwargs.get("past_v", ""), "input_metadata",
+            # kwargs.get("position_ids", ""), kwargs.get("cos_cache", ""),
+        ]
+        output = f"{name}/output_0"
+        # self.make_node(
+        #     "PagedAttention", inputs=inputs, outputs=[output], name=name, domain="com.microsoft",
+        #     num_heads=self.num_attn_heads, num_kv_heads=self.num_kv_heads, head_size=self.head_size, scale=np.sqrt(1 / self.head_size), mask_type="RoPE",
+        # )
+        self.make_node(
+            "PagedAttention", inputs=inputs, outputs=[output], name=name, domain="vllm.ort.ext",
+            num_heads=self.num_attn_heads, num_kv_heads=self.num_kv_heads, head_size=self.head_size, scale=np.sqrt(1 / self.head_size), mask_type="RoPE",
         )
         self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * self.num_attn_heads])
 
@@ -923,7 +998,7 @@ class Model:
 
         # Make RotaryEmbedding nodes
         cos_cache_name, sin_cache_name = "", ""
-        if self.attention_attrs["use_rotemb_in_gqa"]:
+        if self.attention_attrs["use_rotemb_in_attn"]:
             cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches(attention.rotary_emb)
         else:
             q_rotary_name = f"/model/layers.{layer_id}/attn/q_rotary/RotaryEmbedding"
@@ -938,7 +1013,7 @@ class Model:
         past_v = f"past_key_values.{layer_id}.value"
         present_k = f"present.{layer_id}.key"
         present_v = f"present.{layer_id}.value"
-        if self.num_attn_heads != self.num_kv_heads and self.attention_attrs["op_type"] != "GroupQueryAttention":
+        if self.num_attn_heads != self.num_kv_heads and self.attention_attrs["op_type"] == "MultiHeadAttention":
             k_input_to_attention = self.make_repeat_kv(layer_id, root_input=k_input_to_attention, past_kv=past_k, present_kv=present_k)
             v_input_to_attention = self.make_repeat_kv(layer_id, root_input=v_input_to_attention, past_kv=past_v, present_kv=present_v)
             past_k, past_v, present_k, present_v = "", "", "", ""
@@ -1168,7 +1243,7 @@ class Model:
     def make_attention_mask_reformatting(self):
         if self.attention_attrs["op_type"] == "GroupQueryAttention":
             self.make_attention_mask_reformatting_for_gqa()            
-        else:
+        elif self.attention_attrs["op_type"] == "MultiHeadAttention":
             self.make_attention_mask_reformatting_2d_to_4d()
 
     def make_attention_mask_reformatting_2d_to_4d(self):
@@ -1555,7 +1630,7 @@ class LlamaModel(Model):
 class MistralModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        self.position_ids_name = f"{self.make_position_ids_reformatting()}/output_0" if not self.attention_attrs["use_rotemb_in_gqa"] else "position_ids"
+        self.position_ids_name = f"{self.make_position_ids_reformatting()}/output_0" if not self.attention_attrs["use_rotemb_in_attn"] else "position_ids"
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         super().make_attention(layer_id, attention, root_input, position_ids=self.position_ids_name, **kwargs)
@@ -1730,6 +1805,8 @@ def get_args():
                     The filename for each component will be '<filename>_<component-name>.onnx' (ex: '<filename>_encoder.onnx', '<filename>_decoder.onnx').
                 config_only = Generate config and pre/post processing files only.
                     Use this option when you already have your optimized and/or quantized ONNX model.
+                for_vllm = Generate model for vLLM.
+                    The model will use PagedAttention then instead of MultiHeadAttention, GroupQueryAttention, etc.
             """),
     )
 
