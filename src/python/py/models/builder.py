@@ -57,12 +57,13 @@ class Model:
         self.value_infos = []
         self.nodes = []
 
-        # Map input and output names to their types and shapes
+        # Map input names to their types and shapes
         self.input_names = ["input_ids", "attention_mask", "position_ids"]
         self.input_types = {
             "input_ids": TensorProto.INT64,                                                                      # For standard models
             "attention_mask": TensorProto.INT64,                                                                 # For standard models
             "position_ids": TensorProto.INT64,                                                                   # For standard models
+            "inputs_embeds": self.io_dtype,                                                                      # For standard models where you want to remove the embedding layer from the model (note that `inputs_embeds` is written this way to match Hugging Face format)
             "past_key_values.key": self.io_dtype,                                                                # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format)
             "past_key_values.value": self.io_dtype,                                                              # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format)
             "input_metadata": TensorProto.INT64,                                                                 # For vLLM
@@ -71,22 +72,32 @@ class Model:
             "input_ids": ["batch_size", "sequence_length"],                                                      # For standard models
             "attention_mask": ["batch_size", "total_sequence_length"],                                           # For standard models
             "position_ids": ["batch_size", "sequence_length"],                                                   # For standard models
+            "inputs_embeds": ["batch_size", "sequence_length", self.hidden_size],                                # For standard models where you want to remove the embedding layer from the model (note that `inputs_embeds` is written this way to match Hugging Face format)
             "past_key_values.key": ["batch_size", self.num_kv_heads, "past_sequence_length", self.head_size],    # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format)
             "past_key_values.value": ["batch_size", self.num_kv_heads, "past_sequence_length", self.head_size],  # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format)
             "input_metadata": [1],                                                                               # For vLLM
         }
+        self.exclude_embeds = "exclude_embeds" in extra_options
+        if self.exclude_embeds:
+            self.input_names = [name.replace("input_ids", "inputs_embeds") for name in self.input_names]
 
+        # Map output names to their types and shapes
         self.output_names = ["logits"]
         self.output_types = {
+            "hidden_states": self.io_dtype,                                                                      # For standard models where you want to remove the language modeling head from the model (note that `hidden_states` is written this way to match Hugging Face format)
             "logits": self.io_dtype,                                                                             # For standard models
             "present.key": self.io_dtype,                                                                        # For standard models (note that `present.key` is written this way to match Hugging Face format)
             "present.value": self.io_dtype,                                                                      # For standard models (note that `present.value` is written this way to match Hugging Face format)
         }
         self.output_shapes = {
+            "hidden_states": ["batch_size", "sequence_length", self.hidden_size],                                # For standard models where you want to remove the language modeling head from the model (note that `hidden_states` is written this way to match Hugging Face format)
             "logits": ["batch_size", "sequence_length", self.vocab_size],                                        # For standard models
             "present.key": ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size],           # For standard models (note that `present.key` is written this way to match Hugging Face format)
             "present.value": ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size],         # For standard models (note that `present.value` is written this way to match Hugging Face format)
         }
+        self.exclude_lm_head = "exclude_lm_head" in extra_options
+        if self.exclude_lm_head:
+            self.output_names = [name.replace("logits", "hidden_states") for name in self.output_names]
 
         # Store names of Constant ops already created
         self.constants = set()
@@ -615,6 +626,8 @@ class Model:
 
         output_0 = f"/model/layers.{layer_id}/{location}_layernorm/output_0"
         output_3 = f"/model/layers.{layer_id}/{location}_layernorm/output_3"
+        if self.layernorm_attrs["last_layernorm"] and self.exclude_lm_head:
+            output_0 = "hidden_states"
         outputs = [output_0, "", "", output_3] if skip and not self.layernorm_attrs["last_layernorm"] else [output_0]
 
         self.make_node(op_type, inputs=inputs, outputs=outputs, name=name, domain=("com.microsoft" if skip else None), **kwargs)
@@ -633,10 +646,6 @@ class Model:
         return output_0
 
     def make_rotary_embedding_caches(self, rotemb):
-        # if self.vllm:
-        #     cos_cache_name, sin_cache_name = "sin_cos_cache", ""
-        # else:
-        #     cos_cache_name, sin_cache_name = "cos_cache", "sin_cache"
         cos_cache_name, sin_cache_name = "cos_cache", "sin_cache"
 
         if self.rotemb_attrs["create_rotary_embedding_caches"]:
@@ -657,15 +666,6 @@ class Model:
             self.make_external_tensor(cos_cache.astype(self.to_numpy_dtype[self.io_dtype]), cos_cache_name)
             sin_cache = sin_cache.squeeze()[:, : (hidden_dim // 2)].detach().numpy()
             self.make_external_tensor(sin_cache.astype(self.to_numpy_dtype[self.io_dtype]), sin_cache_name)
-
-            # if self.vllm:
-            #     # Combine caches, save combined cache, and return name
-            #     cos_sin_cache = np.concatenate([sin_cache, cos_cache], axis=-1)
-            #     self.make_external_tensor(cos_cache.astype(self.to_numpy_dtype[self.io_dtype]), cos_cache_name)
-            # else:
-            #     # Save separate caches and return their names
-            #     self.make_external_tensor(cos_cache.astype(self.to_numpy_dtype[self.io_dtype]), cos_cache_name)
-            #     self.make_external_tensor(sin_cache.astype(self.to_numpy_dtype[self.io_dtype]), sin_cache_name)
 
             self.rotemb_attrs["create_rotary_embedding_caches"] = False
 
@@ -898,20 +898,15 @@ class Model:
         self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * self.num_attn_heads])
 
     def make_paged_attention(self, name, **kwargs):
-        # `cos_cache` input will contain the packed `sin_cos_cache` needed for PagedAttention
         inputs = [
             kwargs["q_path"], kwargs["k_path"], kwargs["v_path"],
             kwargs.get("past_k", ""), kwargs.get("past_v", ""), "input_metadata",
-            # kwargs.get("position_ids", ""), kwargs.get("cos_cache", ""),
         ]
         output = f"{name}/output_0"
-        # self.make_node(
-        #     "PagedAttention", inputs=inputs, outputs=[output], name=name, domain="com.microsoft",
-        #     num_heads=self.num_attn_heads, num_kv_heads=self.num_kv_heads, head_size=self.head_size, scale=np.sqrt(1 / self.head_size), mask_type="RoPE",
-        # )
         self.make_node(
             "PagedAttention", inputs=inputs, outputs=[output], name=name, domain="vllm.ort.ext",
-            num_heads=self.num_attn_heads, num_kv_heads=self.num_kv_heads, head_size=self.head_size, scale=np.sqrt(1 / self.head_size), mask_type="RoPE",
+            num_heads=self.num_attn_heads, num_kv_heads=self.num_kv_heads, head_size=self.head_size,
+            scale=np.sqrt(1 / self.head_size), mask_type="RoPE",
         )
         self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * self.num_attn_heads])
 
@@ -1187,14 +1182,8 @@ class Model:
         # Make inputs and outputs to ONNX model
         self.make_inputs_and_outputs()
 
-        # Make attention mask reformatting nodes
-        #
-        #           2D attention mask
-        #                   |
-        #    attention mask reformatting subgraph
-        #                   |
-        #         4D causal attention mask
-        self.make_attention_mask_reformatting()
+        # Make pre-processing nodes
+        self.make_preprocessing_nodes()
 
         # Load weights of original model
         if input_path.endswith(".gguf"):
@@ -1212,23 +1201,32 @@ class Model:
         for module in model.modules():
             if isinstance(module, torch.nn.Embedding) or (hasattr(model, "embedding") and module == model.embedding):
                 # Checks (Hugging Face logic) or (GGUF logic)
-                # Embedding layer
-                print("Reading embedding layer")
-                self.make_embedding(module.weight.detach().numpy())
+                if not self.exclude_embeds:
+                    # Embedding layer
+                    print("Reading embedding layer")
+                    self.make_embedding(module.weight.detach().numpy())
+                else:
+                    # Exclude embedding layer from model
+                    self.layernorm_attrs["root_input"] = "inputs_embeds"
+                    self.layernorm_attrs["skip_input"] = "inputs_embeds"
+
             elif module.__class__.__name__.endswith("DecoderLayer"):
                 # Each decoder layer of model
                 print(f"Reading decoder layer {self.layer_id}")
                 self.make_layer(self.layer_id, module)
                 self.layer_id += 1
+
             elif self.layer_id == self.num_layers and self.has_final_norm(module, model):
                 # SkipLayerNorm after last decoder layer (MatMul --> SkipLayerNorm)
                 print("Reading final norm")
                 self.make_layernorm(self.layer_id, module, skip=True, simple=self.layernorm_attrs["simple"], location="final_norm")
+
             elif (isinstance(module, torch.nn.Linear) and module.out_features == self.vocab_size) or (hasattr(model, "lm_head") and module == model.lm_head):
                 # Checks (Hugging Face logic) or (GGUF logic)
-                # Language modeling head (SkipLayerNorm --> logits)
-                print("Reading LM head")
-                self.make_lm_head(module)
+                if not self.exclude_lm_head:
+                    # Language modeling head (SkipLayerNorm --> logits)
+                    print("Reading LM head")
+                    self.make_lm_head(module)
 
         del model
 
@@ -1240,10 +1238,21 @@ class Model:
         gguf_final_norm = hasattr(model, "final_norm") and module == model.final_norm
         return hf_norm or hf_final_layernorm or gguf_final_norm
 
+    def make_preprocessing_nodes(self):
+        self.make_attention_mask_reformatting()
+        # TODO: add make_position_ids_reformatting() here
+
     def make_attention_mask_reformatting(self):
         if self.attention_attrs["op_type"] == "GroupQueryAttention":
             self.make_attention_mask_reformatting_for_gqa()            
         elif self.attention_attrs["op_type"] == "MultiHeadAttention":
+            # Make attention mask reformatting nodes
+            #
+            #           2D attention mask
+            #                   |
+            #    attention mask reformatting subgraph
+            #                   |
+            #         4D causal attention mask
             self.make_attention_mask_reformatting_2d_to_4d()
 
     def make_attention_mask_reformatting_2d_to_4d(self):
@@ -1427,7 +1436,7 @@ class Model:
         unsqueeze_9_inputs = [f"{unsqueeze_8_name}/output_0", "/model/constants/TensorProto.INT64/1D/1"]
         self.make_unsqueeze(unsqueeze_9_name, unsqueeze_9_inputs, dtype=self.io_dtype, shape=None)
 
-        expand_name = self.make_common_mask_reformat_subgraph(basename, root_input="input_ids", unsqueeze_for_concat=unsqueeze_3_name, unsqueeze_for_expand=unsqueeze_9_name, input_ids_subgraph=True)
+        expand_name = self.make_common_mask_reformat_subgraph(basename, root_input="input_ids" if not self.exclude_embeds else "inputs_embeds", unsqueeze_for_concat=unsqueeze_3_name, unsqueeze_for_expand=unsqueeze_9_name, input_ids_subgraph=True)
         return unsqueeze_6_name, expand_name
 
     def make_attention_mask_subgraph(self, basename, unsqueeze_for_concat):
@@ -1502,9 +1511,9 @@ class Model:
         #                              Expand
 
         shape_1_name = f"{basename}/Shape_1"
-        self.make_shape(shape_1_name, root_input, shape=[2])
+        self.make_shape(shape_1_name, root_input, shape=[3] if self.exclude_embeds and input_ids_subgraph else [2])
         shape_2_name = f"{basename}/Shape_2"
-        self.make_shape(shape_2_name, root_input, shape=[2])
+        self.make_shape(shape_2_name, root_input, shape=[3] if self.exclude_embeds and input_ids_subgraph else [2])
         gather_1_name = f"{basename}/Gather_1"
         gather_1_inputs = [f"{shape_1_name}/output_0", "/model/constants/TensorProto.INT64/0D/0"]
         self.make_gather(gather_1_name, gather_1_inputs, axis=0)
@@ -1805,6 +1814,12 @@ def get_args():
                     The filename for each component will be '<filename>_<component-name>.onnx' (ex: '<filename>_encoder.onnx', '<filename>_decoder.onnx').
                 config_only = Generate config and pre/post processing files only.
                     Use this option when you already have your optimized and/or quantized ONNX model.
+                exclude_embeds = Remove embedding layer from your ONNX model.
+                    Use this option when you want to remove the embedding layer from within your ONNX model.
+                    Instead of `input_ids`, you will have `inputs_embeds` as the input to your ONNX model.
+                exclude_lm_head = Remove language modeling head from your ONNX model.
+                    Use this option when you want to remove the language modeling head from within your ONNX model.
+                    Instead of `logits`, you will have `hidden_states` as the output to your ONNX model.
                 for_vllm = Generate model for vLLM.
                     The model will use PagedAttention then instead of MultiHeadAttention, GroupQueryAttention, etc.
             """),
