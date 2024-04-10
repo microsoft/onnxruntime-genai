@@ -47,7 +47,7 @@ jobs:
         echo "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" >> $GITHUB_ENV
     - name: Download OnnxRuntime Nightly
       run: |
-        nuget install ${{ env.ORT_NIGHTLY_PACKAGE_NAME }} -version ${{ env.ORT_NIGHTLY_VERSION }} -x
+        nuget install ${{ env.ORT_NIGHTLY_PACKAGE_NAME }} -version ${{ env.ORT_NIGHTLY_VERSION }} -x -NonInteractive
     - name: list files
       shell: bash
       run: |
