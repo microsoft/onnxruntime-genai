@@ -16,9 +16,12 @@ jobs:
         with:
           submodules: true
 
-      - name: Install jq and nuget
+      - name: Install jq and dotnet
         run: |
-          sudo apt-get install jq nuget
+          wget https://packages.microsoft.com/config/ubuntu/20.04/packages-microsoft-prod.deb -O packages-microsoft-prod.deb
+          sudo dpkg -i packages-microsoft-prod.deb
+          rm packages-microsoft-prod.deb
+          sudo apt-get update && sudo apt-get install -y dotnet-sdk-8.0 jq
 
       - name: Get the Latest OnnxRuntime Nightly Version
         run: |
@@ -31,7 +34,7 @@ jobs:
 
       - name: Download OnnxRuntime Nightly
         run: |
-          nuget install "${{ env.ORT_NIGHTLY_PACKAGE_NAME }}" -version "${{ env.ORT_NIGHTLY_VERSION }}" -x -Source "${{ env.ORT_NIGHTLY_SOURCE }}"
+          dotnet add package "${{ env.ORT_NIGHTLY_PACKAGE_NAME }}" --version "${{ env.ORT_NIGHTLY_VERSION }}" --source "${{ env.ORT_NIGHTLY_SOURCE }}"
 
       - name: Extra OnnxRuntime library and header files
         run: |
