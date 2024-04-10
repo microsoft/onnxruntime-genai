@@ -6,6 +6,7 @@ concurrency:
 env:
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
   ORT_NIGHTLY_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
+  ORT_NIGHTLY_PACKAGE_NAME_L: "microsoft.ml.onnxruntime"
   ORT_NIGHTLY_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
 jobs:
   linux_cpu_x64:
@@ -40,8 +41,8 @@ jobs:
       - name: Extra OnnxRuntime library and header files
         run: |
           mkdir -p ort/lib
-          mv ${{ env.ORT_NIGHTLY_PACKAGE_NAME@L }}/build/native/include ort/
-          mv ${{ env.ORT_NIGHTLY_PACKAGE_NAME@L }}/runtimes/linux-x64/native/* ort/lib/
+          mv ${{ env.ORT_NIGHTLY_PACKAGE_NAME_L }}/build/native/include ort/
+          mv ${{ env.ORT_NIGHTLY_PACKAGE_NAME_L }}/runtimes/linux-x64/native/* ort/lib/
 
       - name: Build with CMake and GCC
         run: |
