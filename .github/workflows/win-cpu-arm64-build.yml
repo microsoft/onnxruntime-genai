@@ -38,6 +38,7 @@ jobs:
         choco install -y jq nuget.commandline curl
 
     - name: Get the Latest OnnxRuntime Nightly Version
+      shell: bash
       run: |
         ORT_NIGHTLY_VERSION=$(curl -s "${{ env.ORT_NIGHTLY_REST_API }}" | jq -r '.value[0].versions[0].normalizedVersion')
         echo "$ORT_NIGHTLY_VERSION" 
