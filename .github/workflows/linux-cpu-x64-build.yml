@@ -4,9 +4,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 env:
-  ort_dir: "onnxruntime-linux-x64-1.17.1"
-  ort_zip: "onnxruntime-linux-x64-1.17.1.tgz"
-  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/onnxruntime-linux-x64-1.17.1.tgz"
+  ort_dir: "onnxruntime-linux-x64-1.17.3"
+  ort_zip: "onnxruntime-linux-x64-1.17.3.tgz"
+  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/onnxruntime-linux-x64-1.17.3.tgz"
 
 jobs:
   linux_cpu_x64:
