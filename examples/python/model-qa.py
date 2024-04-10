@@ -26,8 +26,6 @@ def main(args):
 
         input_tokens = tokenizer.encode(args.system_prompt + text)
 
-        prompt_length = 
-
         params = og.GeneratorParams(model)
         params.set_search_options({"do_sample": False, "max_length": args.max_length, "min_length": args.min_length, "top_p": args.top_p, "top_k": args.top_k, "temperature": args.temperature, "repetition_penalty": args.repetition_penalty})
         params.input_ids = input_tokens
