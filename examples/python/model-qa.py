@@ -3,14 +3,12 @@ import argparse
 import time
 
 def main(args):
-    app_started_timestamp = 0
-    started_timestamp = 0
-    first_token_timestamp = 0
     if args.verbose: print("Loading model...")
-    if args.timings: app_started_timestamp = time.time()
+    if args.timings:
+        started_timestamp = 0
+        first_token_timestamp = 0
 
     model = og.Model(f'{args.model}')
-    model_loaded_timestamp  = time.time()
     if args.verbose: print("Model loaded")
     tokenizer = og.Tokenizer(model)
     tokenizer_stream = tokenizer.create_stream()
