@@ -28,13 +28,11 @@ jobs:
           ORT_NIGHTLY_VERSION=$(curl -s "${{ env.ORT_NIGHTLY_REST_API }}" | jq -r '.value[0].versions[0].normalizedVersion')
           echo "$ORT_NIGHTLY_VERSION" 
           echo "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" >> $GITHUB_ENV
-#      - name: Search Nuget Source
-#        run: |
-#          nuget search "${{ env.ORT_NIGHTLY_PACKAGE_NAME }}" -Source "${{ env.ORT_NIGHTLY_SOURCE }}" -Verbosity detailed
 
       - name: Download OnnxRuntime Nightly
         run: |
           dotnet add package "${{ env.ORT_NIGHTLY_PACKAGE_NAME }}" --version "${{ env.ORT_NIGHTLY_VERSION }}" --source "${{ env.ORT_NIGHTLY_SOURCE }}"
+        continue-on-error: true
 
       - name: Extra OnnxRuntime library and header files
         run: |
