@@ -4,10 +4,8 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 env:
-  ort_dir: "onnxruntime-linux-x64-1.17.1"
-  ort_zip: "onnxruntime-linux-x64-1.17.1.tgz"
-  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/onnxruntime-linux-x64-1.17.1.tgz"
-
+  ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
+  ORT_NIGHTLY_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
 jobs:
   linux_cpu_x64:
     runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU" ]
@@ -16,19 +14,21 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: true
+      - name: Get the Latest OnnxRuntime Nightly Version
+        run: |
+          ORT_NIGHTLY_VERSION=$(curl -s ${{ env.ORT_NIGHTLY_REST_API }} | jq -r '.value[0].versions[0].version')
+          echo "$ORT_NIGHTLY_VERSION" 
+          echo "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" >> $GITHUB_ENV
 
       - name: Download OnnxRuntime
         run: |
-          curl -L -o ${{ env.ort_zip }} ${{ env.ort_url }} 
+          nuget install ${{ env.ORT_NIGHTLY_PACKAGE_NAME }} --version ${{ env.ORT_NIGHTLY_VERSION }} -x
 
-      - name: Unzip OnnxRuntime
+      - name: Extra OnnxRuntime library and header files
         run: |
-          tar -xzf ${{ env.ort_zip }}
-          rm ${{ env.ort_zip }}
-
-      - name: Rename OnnxRuntime to ort
-        run: |
-          mv ${{ env.ort_dir }} ort
+          mkdir -p ort/lib
+          mv ${{ env.ORT_NIGHTLY_PACKAGE_NAME }}/build/native/include ort/
+          mv ${{ env.ORT_NIGHTLY_PACKAGE_NAME }}/runtimes/linux-x64/native/* ort/lib/
 
       - name: Build with CMake and GCC
         run: |
