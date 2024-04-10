@@ -51,6 +51,7 @@ public class MainActivity extends AppCompatActivity implements GenAIWrapper.Toke
                 } else {
                     promptQuestion = userMsgEdt.getText().toString();
                     Log.i("GenAI: prompt question", promptQuestion);
+                    setVisibility();
                 }
                 new Thread(new Runnable() {
                     @Override
@@ -94,5 +95,12 @@ public class MainActivity extends AppCompatActivity implements GenAIWrapper.Toke
             generatedTV.setText(generated + token);
             generatedTV.invalidate();
         });
+    }
+
+    public void setVisibility(){
+        TextView view = (TextView) findViewById(R.id.user_text);
+        view.setVisibility(View.VISIBLE);
+        TextView botView = (TextView) findViewById(R.id.sample_text);
+        botView.setVisibility(View.VISIBLE);
     }
 }
