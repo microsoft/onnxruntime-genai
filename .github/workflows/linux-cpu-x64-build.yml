@@ -14,9 +14,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: true
-      - name: Install jq tool
+
+      - name: Install jq and nuget
         run: |
-          sudo apt-get update
           sudo apt-get install jq nuget
 
       - name: Get the Latest OnnxRuntime Nightly Version
@@ -27,7 +27,7 @@ jobs:
 
       - name: Download OnnxRuntime
         run: |
-          nuget install ${{ env.ORT_NIGHTLY_PACKAGE_NAME }} --version ${{ env.ORT_NIGHTLY_VERSION }} -x
+          nuget install ${{ env.ORT_NIGHTLY_PACKAGE_NAME }} -version ${{ env.ORT_NIGHTLY_VERSION }} -x
 
       - name: Extra OnnxRuntime library and header files
         run: |
