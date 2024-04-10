@@ -37,6 +37,9 @@ def main(args):
             first = True
             new_tokens = []
 
+        print()
+        print("Output: ", end='', flush=True)
+
         while not generator.is_done():
             generator.compute_logits()
             generator.generate_next_token()
@@ -49,11 +52,12 @@ def main(args):
             print(tokenizer_stream.decode(new_token), end='', flush=True)
             if args.timings: new_tokens.append(new_token)
         print()
+        print()
 
         if args.timings:
             prompt_time = first_token_timestamp - started_timestamp
             run_time = time.time() - first_token_timestamp
-            print(f"Prompt length: {len(input_tokens)}, New tokens: {len(new_tokens)}, Time to first: {(prompt_time):.2f}s, Prompt tokens per second: {prompt_length/prompt_time:.2f} tps, New tokens per second: {len(new_tokens)/run_time:.2f} tps")
+            print(f"Prompt length: {len(input_tokens)}, New tokens: {len(new_tokens)}, Time to first: {(prompt_time):.2f}s, Prompt tokens per second: {len(input_tokens)/prompt_time:.2f} tps, New tokens per second: {len(new_tokens)/run_time:.2f} tps")
 
 
 if __name__ == "__main__":
