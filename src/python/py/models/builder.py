@@ -95,7 +95,7 @@ class Model:
             "present.key": ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size],           # For standard models (note that `present.key` is written this way to match Hugging Face format)
             "present.value": ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size],         # For standard models (note that `present.value` is written this way to match Hugging Face format)
         }
-        self.exclude_lm_head = "exclude_lm_head" in extra_options
+        self.exclude_lm_head = self.vllm or "exclude_lm_head" in extra_options
         if self.exclude_lm_head:
             self.output_names = [name.replace("logits", "hidden_states") for name in self.output_names]
 
@@ -109,6 +109,15 @@ class Model:
             TensorProto.INT64: np.int64,
             TensorProto.FLOAT16: np.float16,
             TensorProto.FLOAT: np.float32,
+        }
+
+        # Map TensorProto dtypes to Torch dtypes
+        self.to_torch_dtype = {
+            TensorProto.INT8: torch.uint8,
+            TensorProto.INT32: torch.int32,
+            TensorProto.INT64: torch.int64,
+            TensorProto.FLOAT16: torch.float16,
+            TensorProto.FLOAT: torch.float32,
         }
 
         # Map TensorProto dtypes to string dtypes
@@ -321,6 +330,11 @@ class Model:
             size_threshold=0,
             convert_attribute=False,
         )
+        # Save LM head weight and bias externally for vLLM
+        if self.vllm:
+            torch.save(self.lm_head_weight.to(self.to_torch_dtype[self.io_dtype]), os.path.join(out_dir, "lm_head_weight.pt"))
+            if self.lm_head_bias is not None:
+                torch.save(self.lm_head_bias.to(self.to_torch_dtype[self.io_dtype]), os.path.join(out_dir, "lm_head_bias.pt"))
 
     def to_int4(self, model):
         quant = MatMul4BitsQuantizer(
@@ -515,6 +529,11 @@ class Model:
     def make_mul(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Mul", inputs=inputs, outputs=[output], name=name)
+        self.make_value_info(output, dtype, shape=shape)
+
+    def make_actmul(self, name, root_input, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("silu_and_mul", inputs=[root_input], outputs=[output], name=name, domain="vllm.ort.ext")
         self.make_value_info(output, dtype, shape=shape)
 
     def make_transpose(self, name, root_input, dtype, shape, perm):
@@ -950,7 +969,12 @@ class Model:
         v_input_to_attention = ""
 
         # Make MatMul nodes
-        if self.attention_attrs["use_packed_matmul"]:
+        if self.vllm:
+            # Create packed MatMul
+            qkv_matmul_name = f"/model/layers.{layer_id}/attn/qkv_proj/MatMul"
+            self.make_matmul(attention.qkv_proj.weight.detach().numpy(), qkv_matmul_name, root_input)
+            q_input_to_attention = f"{qkv_matmul_name}/output_0"
+        elif self.attention_attrs["use_packed_matmul"]:
             # Combine 3 MatMuls into 1 packed MatMul
             qkv_matmul_name = f"/model/layers.{layer_id}/attn/qkv_proj/MatMul"
             self.make_packed_matmul(attention.q_proj.weight.detach().numpy(), attention.k_proj.weight.detach().numpy(), attention.v_proj.weight.detach().numpy(), qkv_matmul_name, root_input)
@@ -967,16 +991,22 @@ class Model:
             v_input_to_attention = f"{v_matmul_name}/output_0"
 
         # Make Add nodes (if bias exists)
-        q_bias_exists = attention.q_proj.bias is not None
-        k_bias_exists = attention.k_proj.bias is not None
-        v_bias_exists = attention.v_proj.bias is not None
+        q_bias_exists = eval(f"attention.{'q_proj' if not self.vllm else 'qkv_proj'}.bias is not None")
+        k_bias_exists = eval(f"attention.{'k_proj' if not self.vllm else 'qkv_proj'}.bias is not None")
+        v_bias_exists = eval(f"attention.{'v_proj' if not self.vllm else 'qkv_proj'}.bias is not None")
         all_bias_exists = q_bias_exists and k_bias_exists and v_bias_exists
 
-        if all_bias_exists and self.attention_attrs["use_packed_matmul"]:
-            # Combine 3 Adds into 1 packed Add
-            qkv_add_name = f"/model/layers.{layer_id}/attn/qkv_proj/Add"
-            self.make_packed_add(attention.q_proj.bias.detach().numpy(), attention.k_proj.bias.detach().numpy(), attention.v_proj.bias.detach().numpy(), qkv_add_name, root_input=q_input_to_attention)
-            q_input_to_attention = f"{qkv_add_name}/output_0"
+        if all_bias_exists:
+            if self.vllm:
+                # Combine 3 Adds into 1 packed Add
+                qkv_add_name = f"/model/layers.{layer_id}/attn/qkv_proj/Add"
+                self.make_add_bias(attention.qkv_proj.bias.detach().numpy(), qkv_add_name, root_input=q_input_to_attention)
+                q_input_to_attention = f"{qkv_add_name}/output_0"
+            elif self.attention_attrs["use_packed_matmul"]:
+                # Combine 3 Adds into 1 packed Add
+                qkv_add_name = f"/model/layers.{layer_id}/attn/qkv_proj/Add"
+                self.make_packed_add(attention.q_proj.bias.detach().numpy(), attention.k_proj.bias.detach().numpy(), attention.v_proj.bias.detach().numpy(), qkv_add_name, root_input=q_input_to_attention)
+                q_input_to_attention = f"{qkv_add_name}/output_0"
         else:
             if q_bias_exists:
                 q_add_name = f"/model/layers.{layer_id}/attn/q_proj/Add"
@@ -1058,19 +1088,28 @@ class Model:
         #              |
         #        DownProjMatMul
         
-        # Make MatMul nodes
-        gate_name = f"/model/layers.{layer_id}/mlp/gate_proj/MatMul"
-        self.make_matmul(mlp.gate_proj.weight.detach().numpy(), gate_name, root_input)
-        up_name = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
-        self.make_matmul(mlp.up_proj.weight.detach().numpy(), up_name, root_input)
+        if not self.vllm:
+            # Make MatMul nodes
+            gate_name = f"/model/layers.{layer_id}/mlp/gate_proj/MatMul"
+            self.make_matmul(mlp.gate_proj.weight.detach().numpy(), gate_name, root_input)
+            up_name = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
+            self.make_matmul(mlp.up_proj.weight.detach().numpy(), up_name, root_input)
 
-        # Make activation node(s)
-        act_fn_name = self.make_activation(layer_id, root_input=f"{gate_name}/output_0")
+            # Make activation node(s)
+            act_fn_name = self.make_activation(layer_id, root_input=f"{gate_name}/output_0")
 
-        # Make Mul node after activation
-        mul_name = f"/model/layers.{layer_id}/mlp/Mul"
-        mul_inputs = [f"{act_fn_name}/output_0", f"{up_name}/output_0"]
-        self.make_mul(mul_name, mul_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+            # Make Mul node after activation
+            mul_name = f"/model/layers.{layer_id}/mlp/Mul"
+            mul_inputs = [f"{act_fn_name}/output_0", f"{up_name}/output_0"]
+            self.make_mul(mul_name, mul_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        else:
+            # Make fused MatMul for GateProj-UpProj
+            gate_up_name = f"/model/layers.{layer_id}/mlp/gate_up_proj/MatMul"
+            self.make_matmul(mlp.gate_up_proj.weight.detach().numpy(), gate_up_name, root_input)
+
+            # Make fused "activation + Mul" for ActFunc-Mul
+            mul_name = f"/model/layers.{layer_id}/mlp/act_fn_mul/{self.activation.title()}"
+            self.make_actmul(mul_name, root_input=f"{gate_up_name}/output_0", dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size // 2])
 
         # Make output MatMul node
         down_name = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
@@ -1193,14 +1232,14 @@ class Model:
             self.layernorm_attrs["add_offset"] = 0  # add offset already done for GGUF models
         else:
             # Load PyTorch model
-            extra_kwargs = {} if os.path.exists(self.model_name_or_path) else {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {"cache_dir": self.cache_dir, "use_auth_token": True}
+            extra_kwargs = {"trust_remote_code": True} if os.path.exists(self.model_name_or_path) else {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {"cache_dir": self.cache_dir, "use_auth_token": True}
             model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, **extra_kwargs)
         
         # Loop through model and map each module to ONNX/ORT ops
         self.layer_id = 0
         for module in model.modules():
-            if isinstance(module, torch.nn.Embedding) or (hasattr(model, "embedding") and module == model.embedding):
-                # Checks (Hugging Face logic) or (GGUF logic)
+            if isinstance(module, torch.nn.Embedding) or (hasattr(model, "embedding") and module == model.embedding) or module.__class__.__name__.endswith("ParallelEmbedding"):
+                # Checks (Hugging Face logic) or (GGUF logic) or (vLLM logic)
                 if not self.exclude_embeds:
                     # Embedding layer
                     print("Reading embedding layer")
@@ -1227,6 +1266,10 @@ class Model:
                     # Language modeling head (SkipLayerNorm --> logits)
                     print("Reading LM head")
                     self.make_lm_head(module)
+                elif self.vllm:
+                    # Save language modeling head to disk as PyTorch tensor
+                    self.lm_head_weight = module.weight
+                    self.lm_head_bias = module.bias
 
         del model
 
@@ -1705,7 +1748,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
     os.makedirs(cache_dir, exist_ok=True)
 
     # Load model config
-    extra_kwargs = {} if os.path.isdir(input_path) else {"cache_dir": cache_dir, "use_auth_token": True}
+    extra_kwargs = {"trust_remote_code": True} if os.path.isdir(input_path) else {"cache_dir": cache_dir, "use_auth_token": True}
     hf_name = input_path if os.path.isdir(input_path) else model_name
     config = AutoConfig.from_pretrained(hf_name, **extra_kwargs)
 
