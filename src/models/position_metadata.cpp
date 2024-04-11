@@ -8,26 +8,32 @@ namespace Generators {
 PositionMetadata::PositionMetadata(const Model& model, State& state, RoamingArray<int32_t>& sequence_lengths_unk)
     : model_{model},
       state_{state} {
-  type_ = model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.position_ids);
+  has_mask_input_ = model_.session_info_->HasInput(model_.config_->model.decoder.inputs.attention_mask);
+  has_posid_input_ = model_.session_info_->HasInput(model_.config_->model.decoder.inputs.position_ids);
+  has_seqlens_k_input_ = model_.session_info_->HasInput(model_.config_->model.decoder.inputs.seqlens_k);
+  has_total_sequence_length_input_ = model_.session_info_->HasInput(model_.config_->model.decoder.inputs.total_sequence_length);
+
+  type_ = model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.attention_mask);
+
   if (type_ != Ort::TypeToTensorType<int32_t>::type && type_ != Ort::TypeToTensorType<int64_t>::type)
     throw std::runtime_error("position_ids & attention_mask only support int32 or int64 types");
 
-  std::array<int64_t, 2> shape{state_.params_.batch_size, state_.params_.sequence_length};  // Only batch_size initially, as we haven't expanded over the beams yet
+  std::array<int64_t, 2> shape{state_.params_->batch_size, state_.params_->sequence_length};  // Only batch_size initially, as we haven't expanded over the beams yet
   position_ids_ = OrtValue::CreateTensor(model.allocator_cpu_, shape, type_);
   position_ids_next_ = OrtValue::CreateTensor(model.allocator_cpu_, std::array<int64_t, 2>{shape[0], 1}, type_);
   attention_mask_ = OrtValue::CreateTensor(model.allocator_cpu_, shape, type_);
 
-  initial_sequence_lengths_.resize(state_.params_.BatchBeamSize());
+  initial_sequence_lengths_.resize(state_.params_->BatchBeamSize());
 
   if (type_ == Ort::TypeToTensorType<int32_t>::type)
     InitializeTensors<int32_t>(shape, sequence_lengths_unk);
   else
     InitializeTensors<int64_t>(shape, sequence_lengths_unk);
 
-  position_ids_ = model_.ExpandInputs(position_ids_, state_.params_.search.num_beams);
-  position_ids_next_ = model_.ExpandInputs(position_ids_next_, state_.params_.search.num_beams);
-  attention_mask_ = model_.ExpandInputs(attention_mask_, state_.params_.search.num_beams);
-  shape[0] *= state_.params_.search.num_beams;
+  position_ids_ = model_.ExpandInputs(position_ids_, state_.params_->search.num_beams);
+  position_ids_next_ = model_.ExpandInputs(position_ids_next_, state_.params_->search.num_beams);
+  attention_mask_ = model_.ExpandInputs(attention_mask_, state_.params_->search.num_beams);
+  shape[0] *= state_.params_->search.num_beams;
   position_ids_shape_ = shape;
   attention_mask_shape_ = shape;
 
@@ -35,6 +41,36 @@ PositionMetadata::PositionMetadata(const Model& model, State& state, RoamingArra
     size_t max_beam_batch_size = model_.config_->search.num_beams * model_.config_->max_batch_size;
     sb_position_ids_ = std::make_unique<StaticBuffer>(model_.allocator_device_, max_beam_batch_size);
     sb_seqlens_k_ = std::make_unique<StaticBuffer>(model_.allocator_device_, max_beam_batch_size);
+  }
+}
+
+void PositionMetadata::Add() {
+  if (has_posid_input_) {
+    AddPositionIDs();
+  }
+  if (has_seqlens_k_input_) {
+    AddSeqlensK();
+  }
+  if (has_total_sequence_length_input_) {
+    AddTotalSequenceLength();
+  }
+  if (has_mask_input_) {
+    AddAttentionMask();
+  }
+}
+
+void PositionMetadata::Update(int current_length) {
+  if (has_posid_input_) {
+    UpdatePositionIDs(current_length);
+  }
+  if (has_seqlens_k_input_) {
+    UpdateSeqlensK(current_length);
+  }
+  if (has_total_sequence_length_input_) {
+    UpdateTotalSequenceLength(current_length);
+  }
+  if (has_mask_input_) {
+    UpdateAttentionMask(current_length);
   }
 }
 
@@ -55,7 +91,7 @@ void PositionMetadata::AddPositionIDs() {
 void PositionMetadata::AddSeqlensK() {
   seqlens_k_input_index_ = state_.inputs_.size();
 
-  senlens_k_shape_ = {static_cast<int64_t>(state_.params_.batch_size) * state_.params_.search.num_beams};
+  senlens_k_shape_ = {static_cast<int64_t>(state_.params_->batch_size) * state_.params_->search.num_beams};
   seqlens_k_ = OrtValue::CreateTensor(model_.allocator_cpu_, senlens_k_shape_, Ort::TypeToTensorType<int32_t>::type);
 
   std::copy(initial_sequence_lengths_.begin(),
@@ -72,7 +108,7 @@ void PositionMetadata::AddTotalSequenceLength() {
                                                   total_sequence_length_shape_,
                                                   Ort::TypeToTensorType<int32_t>::type);
 
-  total_sequence_length_->GetTensorMutableData<int32_t>()[0] = state_.params_.sequence_length;
+  total_sequence_length_->GetTensorMutableData<int32_t>()[0] = state_.params_->sequence_length;
   state_.inputs_.push_back(total_sequence_length_.get());
   state_.input_names_.push_back(model_.config_->model.decoder.inputs.total_sequence_length.c_str());
 }
@@ -114,15 +150,15 @@ void PositionMetadata::UpdatePositionIDs(int current_length) {
         break;
       }
 #if USE_CUDA
-      case DeviceType::CUDA:
-        if (type_ == Ort::TypeToTensorType<int32_t>::type)
-          cuda::Launch_UpdatePositionIds(position_ids_->GetTensorMutableData<int32_t>(), static_cast<int>(position_ids_shape_[0]), model_.cuda_stream_);
-        else
-          cuda::Launch_UpdatePositionIds(position_ids_->GetTensorMutableData<int64_t>(), static_cast<int>(position_ids_shape_[0]), model_.cuda_stream_);
-        break;
+        case DeviceType::CUDA:
+          if (type_ == Ort::TypeToTensorType<int32_t>::type)
+            cuda::Launch_UpdatePositionIds(position_ids_->GetTensorMutableData<int32_t>(), static_cast<int>(position_ids_shape_[0]), model_.cuda_stream_);
+          else
+            cuda::Launch_UpdatePositionIds(position_ids_->GetTensorMutableData<int64_t>(), static_cast<int>(position_ids_shape_[0]), model_.cuda_stream_);
+          break;
 #endif
-      default:
-        throw std::runtime_error("PositionIDs::Update - Unsupported device type");
+        default:
+          throw std::runtime_error("PositionIDs::Update - Unsupported device type");
     }
   }
 }
@@ -152,35 +188,33 @@ void PositionMetadata::UpdateTotalSequenceLength(int current_length) {
 }
 
 void PositionMetadata::UpdateAttentionMask(int current_length) {
-  {
-    // Update attention mask
-    assert(attention_mask_shape_[1] == current_length - 1);  // We should always be growing by 1
-    attention_mask_shape_[1] = current_length;
+  // Update attention mask
+  assert(attention_mask_shape_[1] == current_length - 1);  // We should always be growing by 1
+  attention_mask_shape_[1] = current_length;
 
-    std::unique_ptr<OrtValue> next_attention_mask = OrtValue::CreateTensor(*model_.allocator_device_, attention_mask_shape_, type_);
+  std::unique_ptr<OrtValue> next_attention_mask = OrtValue::CreateTensor(*model_.allocator_device_, attention_mask_shape_, type_);
 
-    switch (model_.device_type_) {
-      case DeviceType::CPU: {
-        if (type_ == Ort::TypeToTensorType<int32_t>::type)
-          UpdateAttentionMaskImpl(next_attention_mask->GetTensorMutableData<int32_t>(), attention_mask_->GetTensorData<int32_t>(), current_length);
-        else
-          UpdateAttentionMaskImpl(next_attention_mask->GetTensorMutableData<int64_t>(), attention_mask_->GetTensorData<int64_t>(), current_length);
-        break;
-      }
-#if USE_CUDA
-      case DeviceType::CUDA:
-        if (type_ == Ort::TypeToTensorType<int32_t>::type)
-          cuda::Launch_UpdateAttentionMask(next_attention_mask->GetTensorMutableData<int32_t>(), attention_mask_->GetTensorData<int32_t>(), static_cast<int>(attention_mask_shape_[0]), current_length, model_.cuda_stream_);
-        else
-          cuda::Launch_UpdateAttentionMask(next_attention_mask->GetTensorMutableData<int64_t>(), attention_mask_->GetTensorData<int64_t>(), static_cast<int>(attention_mask_shape_[0]), current_length, model_.cuda_stream_);
-        break;
-#endif
-      default:
-        throw std::runtime_error("PositionIDs::Update - Unsupported device type");
+  switch (model_.device_type_) {
+    case DeviceType::CPU: {
+      if (type_ == Ort::TypeToTensorType<int32_t>::type)
+        UpdateAttentionMaskImpl(next_attention_mask->GetTensorMutableData<int32_t>(), attention_mask_->GetTensorData<int32_t>(), current_length);
+      else
+        UpdateAttentionMaskImpl(next_attention_mask->GetTensorMutableData<int64_t>(), attention_mask_->GetTensorData<int64_t>(), current_length);
+      break;
     }
-    attention_mask_ = std::move(next_attention_mask);
-    state_.inputs_[mask_input_index_] = attention_mask_.get();
+#if USE_CUDA
+    case DeviceType::CUDA:
+      if (type_ == Ort::TypeToTensorType<int32_t>::type)
+        cuda::Launch_UpdateAttentionMask(next_attention_mask->GetTensorMutableData<int32_t>(), attention_mask_->GetTensorData<int32_t>(), static_cast<int>(attention_mask_shape_[0]), current_length, model_.cuda_stream_);
+      else
+        cuda::Launch_UpdateAttentionMask(next_attention_mask->GetTensorMutableData<int64_t>(), attention_mask_->GetTensorData<int64_t>(), static_cast<int>(attention_mask_shape_[0]), current_length, model_.cuda_stream_);
+      break;
+#endif
+    default:
+      throw std::runtime_error("PositionIDs::Update - Unsupported device type");
   }
+  attention_mask_ = std::move(next_attention_mask);
+  state_.inputs_[mask_input_index_] = attention_mask_.get();
 }
 
 template <typename T>
@@ -190,13 +224,13 @@ void PositionMetadata::InitializeTensors(std::array<int64_t, 2> shape, cpu_span<
   auto* mask_data = attention_mask_->GetTensorMutableData<T>();
   auto* position_data = position_ids_->GetTensorMutableData<T>();
   auto* position_data_next = position_ids_next_->GetTensorMutableData<T>();
-  const auto* word_id = state_.params_.input_ids.data();
+  const auto* word_id = state_.params_->input_ids.data();
   auto* mask = mask_data;
   auto* position = position_data;
   for (int i = 0; i < shape[0]; i++) {
     T abs_position = 0;
     for (int j = 0; j < shape[1]; j++, word_id++, mask++, position++) {
-      if (*word_id == state_.params_.pad_token_id) {
+      if (*word_id == state_.params_->pad_token_id) {
         *mask = 0;
         *position = 0;
       } else {
@@ -206,9 +240,9 @@ void PositionMetadata::InitializeTensors(std::array<int64_t, 2> shape, cpu_span<
     }
 
     position_data_next[i] = abs_position;
-    for (int k = 0; k < state_.params_.search.num_beams; k++) {
-      sequence_lengths[i * state_.params_.search.num_beams + k] = static_cast<int32_t>(abs_position);
-      initial_sequence_lengths_[i * state_.params_.search.num_beams + k] = static_cast<int32_t>(abs_position);
+    for (int k = 0; k < state_.params_->search.num_beams; k++) {
+      sequence_lengths[i * state_.params_->search.num_beams + k] = static_cast<int32_t>(abs_position);
+      initial_sequence_lengths_[i * state_.params_->search.num_beams + k] = static_cast<int32_t>(abs_position);
     }
   }
 }

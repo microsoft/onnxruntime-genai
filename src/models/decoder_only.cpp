@@ -19,13 +19,7 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, RoamingArra
       model_{model},
       position_metadata_{model, *this, sequence_lengths_unk} {
   input_ids_.Add();
-  position_metadata_.AddPositionIDs();
-  if (model_.config_->use_cuda_graphs) {
-    position_metadata_.AddSeqlensK();
-    position_metadata_.AddTotalSequenceLength();
-  } else {
-    position_metadata_.AddAttentionMask();
-  }
+  position_metadata_.Add();
   logits_.Add();
   kv_cache_.Add();
 }
@@ -55,13 +49,7 @@ RoamingArray<float> DecoderOnly_State::Run(int current_length, RoamingArray<int3
 
 void DecoderOnly_State::UpdateInputs(const RoamingArray<int32_t>& next_tokens_unk, RoamingArray<int32_t> beam_indices, int current_length) {
   input_ids_.Update(next_tokens_unk);
-  position_metadata_.UpdatePositionIDs(current_length);
-  if (model_.config_->use_cuda_graphs) {
-    position_metadata_.UpdateSeqlensK(current_length);
-    position_metadata_.UpdateTotalSequenceLength(current_length);
-  } else {
-    position_metadata_.UpdateAttentionMask(current_length);
-  }
+  position_metadata_.Update(current_length);
   kv_cache_.Update(beam_indices.GetCPU(), current_length);
 }
 

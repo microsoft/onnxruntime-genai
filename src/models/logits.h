@@ -21,8 +21,8 @@ struct Logits {
   std::unique_ptr<OrtValue> value16_;  // When model output is fp16
 
   // Used for decoding runs with cuda graphs.
-  std::unique_ptr<StaticBuffer> sb_logits32_{nullptr};
-  std::unique_ptr<StaticBuffer> sb_logits16_{nullptr};
+  std::unique_ptr<StaticBuffer> sb_logits32_;
+  std::unique_ptr<StaticBuffer> sb_logits16_;
 };
 
 }  // namespace Generators

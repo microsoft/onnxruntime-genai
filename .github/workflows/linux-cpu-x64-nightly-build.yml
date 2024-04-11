@@ -45,12 +45,12 @@ jobs:
         run: |
           set -e -x
           rm -rf build
-          cmake --preset linux_clang_cpu_release
-          cmake --build --preset linux_clang_cpu_release
+          cmake --preset linux_gcc_cpu_release
+          cmake --build --preset linux_gcc_cpu_release
 
       - name: Install the python wheel and test dependencies
         run: |
-          python3 -m pip install build/clang_cpu/release/wheel/onnxruntime_genai*.whl
+          python3 -m pip install build/cpu/wheel/onnxruntime_genai*.whl
           python3 -m pip install -r test/python/requirements-nightly-cpu.txt --user
 
       - name: Get HuggingFace Token

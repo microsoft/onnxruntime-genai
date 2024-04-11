@@ -1,0 +1,105 @@
+parameters:
+- name: arch
+  type: string
+- name: ep
+  type: string
+- name: ort_version
+  type: string
+- name: cuda_version
+  type: string
+  default: ''
+- name: os
+  type: string
+  values:
+  - 'linux'
+  - 'win'
+- name: publish_to_ado_feed
+  type: boolean
+
+jobs:
+- job: python_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}_packaging
+  ${{ if eq(parameters.os, 'linux') }}:
+    pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
+  ${{ if eq(parameters.os, 'win') }}:
+    pool: 'onnxruntime-Win-CPU-2022'
+  strategy:
+    matrix:
+      Python38:
+        PyDotVer: '3.8'
+        PyNoDotVer: '38'
+      Python39:
+        PyDotVer: '3.9'
+        PyNoDotVer: '39'
+      Python310:
+        PyDotVer: '3.10'
+        PyNoDotVer: '310'
+      Python311:
+        PyDotVer: '3.11'
+        PyNoDotVer: '311'
+      Python312:
+        PyDotVer: '3.12'
+        PyNoDotVer: '312'
+  timeoutInMinutes: 240
+  workspace:
+    clean: all
+  #  set variables here to be used in the template and steps
+  variables:
+  - name: skipComponentGovernanceDetection
+    ${{ if eq(parameters.os, 'linux') }}:
+      value: true
+    ${{ if eq(parameters.os, 'win') }}:
+      value: false
+  - name: arch
+    value: ${{ parameters.arch }}
+  - name: artifactName
+    value: 'onnxruntime-genai-${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.arch }}'
+  - name: buildConfig
+    value: 'Release'
+  - name: buildDir
+    value: 'build/${{ parameters.ep }}'
+  - name: cuda_version
+    value: ${{ parameters.cuda_version }}
+  - name: ep
+    value: ${{ parameters.ep }}
+  - name: ort_version
+    value: ${{ parameters.ort_version }}
+  - name: ort_filename
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      value: 'onnxruntime-${{ parameters.os }}-${{ parameters.arch }}-${{ parameters.ort_version }}'
+    ${{ else}}:
+      ${{if eq(parameters.cuda_version, '11.8') }}:
+        value: 'onnxruntime-${{ parameters.os }}-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}'
+      ${{ else }}:
+        value: 'onnxruntime-${{ parameters.os }}-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
+  steps:
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: $(PyDotVer)
+      addToPath: true
+      architecture: $(arch)
+  - task: PythonScript@0
+    inputs:
+      scriptSource: inline
+      script: |
+        import sys
+        import subprocess
+        subprocess.call(['pip', 'install', '-q', 'setuptools', 'wheel', 'build', 'packaging', 'twine'])
+      workingDirectory: '$(Build.BinariesDirectory)'
+      displayName: 'Install python modules'
+
+  - ${{ if eq(parameters.os, 'linux') }}:
+    - template: steps/capi-linux-step.yml
+      parameters:
+        target: 'python'
+
+  # Windows job needs to set the python version and install the required packages
+  - ${{ if eq(parameters.os, 'win') }}:
+    - template: steps/capi-win-step.yml
+      parameters:
+        target: 'python'
+
+  - ${{ if eq(parameters.publish_to_ado_feed, true)}}:
+    - template: steps/py-ado-feed-releasing-step.yml
+
+  - template: steps/compliant-and-cleanup-step.yml
+

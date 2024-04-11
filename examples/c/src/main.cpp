@@ -1,72 +1,61 @@
 #include <iostream>
-#include "ort_genai_c.h"
+#include <span>
+#include "ort_genai.h"
 
-struct Deleters {
-  void operator()(OgaResult* p) {
-    OgaDestroyResult(p);
-  }
-  void operator()(OgaSequences* p) {
-    OgaDestroySequences(p);
-  }
-  void operator()(OgaModel* p) {
-    OgaDestroyModel(p);
-  }
-  void operator()(OgaGeneratorParams* p) {
-    OgaDestroyGeneratorParams(p);
-  }
-  void operator()(OgaGenerator* p) {
-    OgaDestroyGenerator(p);
-  }
-  void operator()(OgaTokenizer* p) {
-    OgaDestroyTokenizer(p);
-  }
-};
+// C++ API Example
 
-using OgaResultPtr = std::unique_ptr<OgaResult, Deleters>;
-using OgaSequencesPtr = std::unique_ptr<OgaSequences, Deleters>;
-using OgaModelPtr = std::unique_ptr<OgaModel, Deleters>;
-using OgaGeneratorParamsPtr = std::unique_ptr<OgaGeneratorParams, Deleters>;
-using OgaGeneratorPtr = std::unique_ptr<OgaGenerator, Deleters>;
-using OgaTokenizerPtr = std::unique_ptr<OgaTokenizer, Deleters>;
-
-void CheckResult(OgaResult* result) {
-  if (!result)
-    return;
-
-  OgaResultPtr result_ptr{result};
-  throw std::runtime_error(OgaResultGetError(result));
-}
-
-int main() {
-  std::cout << "-------------" << std::endl;
-  std::cout << "Hello, Phi-2!" << std::endl;
-  std::cout << "-------------" << std::endl;
-
-  OgaModel* model;
-  CheckResult(OgaCreateModel("phi-2", OgaDeviceTypeCPU, &model));
-  OgaModelPtr model_ptr{model};
-
-  OgaTokenizer* tokenizer;
-  CheckResult(OgaCreateTokenizer(model, &tokenizer));
-  OgaTokenizerPtr tokenizer_ptr{tokenizer};
+void CXX_API(const char* model_path) {
+  auto model = OgaModel::Create(model_path);
+  auto tokenizer = OgaTokenizer::Create(*model);
 
   const char* prompt = "def is_prime(num):";
   std::cout << "Prompt: " << std::endl << prompt << std::endl;
 
+  auto sequences = OgaSequences::Create();
+  tokenizer->Encode(prompt, *sequences);
+
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 200);
+  params->SetInputSequences(*sequences);
+
+  auto output_sequences = model->Generate(*params);
+  auto out_string = tokenizer->Decode(output_sequences->Get(0));
+
+  std::cout << "Output: " << std::endl << out_string << std::endl;
+}
+
+// C API Example
+
+void CheckResult(OgaResult* result) {
+  if (result) {
+    std::string string=OgaResultGetError(result);
+    OgaDestroyResult(result);
+    throw std::runtime_error(string);
+  }
+}
+
+void C_API(const char* model_path) {
+  OgaModel* model;
+  OgaCreateModel(model_path, &model);
+
+  OgaTokenizer* tokenizer;
+  CheckResult(OgaCreateTokenizer(model, &tokenizer));
+
+  const char* prompt = "def is_prime(num):";
+  std::cout << "Prompt: " << std::endl
+            << prompt << std::endl;
+
   OgaSequences* sequences;
   CheckResult(OgaCreateSequences(&sequences));
-  OgaSequencesPtr sequences_ptr{sequences};
   CheckResult(OgaTokenizerEncode(tokenizer, prompt, sequences));
 
   OgaGeneratorParams* params;
   CheckResult(OgaCreateGeneratorParams(model, &params));
-  OgaGeneratorParamsPtr params_ptr{params};
   CheckResult(OgaGeneratorParamsSetSearchNumber(params, "max_length", 200));
   CheckResult(OgaGeneratorParamsSetInputSequences(params, sequences));
 
   OgaSequences* output_sequences;
   CheckResult(OgaGenerate(model, params, &output_sequences));
-  OgaSequencesPtr output_sequences_ptr{output_sequences};
 
   size_t sequence_length = OgaSequencesGetSequenceCount(output_sequences, 0);
   const int32_t* sequence = OgaSequencesGetSequenceData(output_sequences, 0);
@@ -74,7 +63,37 @@ int main() {
   const char* out_string;
   CheckResult(OgaTokenizerDecode(tokenizer, sequence, sequence_length, &out_string));
 
-  std::cout << "Output: " << std::endl << out_string << std::endl;
+  std::cout << "Output: " << std::endl
+            << out_string << std::endl;
+
+  OgaDestroyString(out_string);
+  OgaDestroySequences(output_sequences);
+  OgaDestroyGeneratorParams(params);
+  OgaDestroySequences(sequences);
+  OgaDestroyTokenizer(tokenizer);
+  OgaDestroyModel(model);
+}
+
+static void print_usage(int /*argc*/, char** argv) {
+  std::cerr << "usage: " << argv[0] << " model_path" << std::endl;
+}
+
+int main(int argc, char** argv) {
+  if (argc != 2) {
+    print_usage(argc, argv);
+    return -1;
+  }
+
+
+  std::cout << "-------------" << std::endl;
+  std::cout << "Hello, Phi-2!" << std::endl;
+  std::cout << "-------------" << std::endl;
+
+  std::cout << "C++ API" << std::endl;
+  CXX_API(argv[1]);
+
+  std::cout << "C API" << std::endl;
+  C_API(argv[1]);
 
   return 0;
 }

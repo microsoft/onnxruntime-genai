@@ -289,6 +289,8 @@ struct Search_Element : JSON::Element {
       v_.diversity_penalty = static_cast<float>(value);
     } else if (name == "length_penalty") {
       v_.length_penalty = static_cast<float>(value);
+    } else if (name == "random_seed") {
+      v_.random_seed = static_cast<int>(value);
     } else
       throw JSON::unknown_value_error{};
   }
