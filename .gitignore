@@ -19,6 +19,8 @@ example-models
 *.onnx.data
 __pycache__
 benchmark/python/*.csv
+models_outputs
+models_outputs_cpu
 benchmark/python/output
 examples/python/genai_models
 examples/python/hf_cache
