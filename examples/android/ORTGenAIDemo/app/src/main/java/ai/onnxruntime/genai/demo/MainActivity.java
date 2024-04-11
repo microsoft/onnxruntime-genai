@@ -18,17 +18,20 @@ import java.util.Arrays;
 import ai.onnxruntime.genai.demo.databinding.ActivityMainBinding;
 
 public class MainActivity extends AppCompatActivity implements GenAIWrapper.TokenUpdateListener {
+
     private ActivityMainBinding binding;
     private EditText userMsgEdt;
     private GenAIWrapper genAIWrapper;
     private ImageButton sendMsgIB;
-    private String promptQuestion;
     private TextView generatedTV;
     private TextView promptTV;
+    private static final String TAG = "genai.demo.MainActivity";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        genAIWrapper = createGenAIWrapper();
 
         binding = ActivityMainBinding.inflate(getLayoutInflater());
         setContentView(binding.getRoot());
@@ -48,43 +51,61 @@ public class MainActivity extends AppCompatActivity implements GenAIWrapper.Toke
                     // if the edit text is empty display a toast message.
                     Toast.makeText(MainActivity.this, "Please enter your message..", Toast.LENGTH_SHORT).show();
                     return;
-                } else {
-                    promptQuestion = userMsgEdt.getText().toString();
-                    Log.i("GenAI: prompt question", promptQuestion);
-                    setVisibility();
                 }
-                new Thread(new Runnable() {
-                    @Override
-                    public void run() {
-                        promptTV.setText(promptQuestion);
-                        performQA(promptQuestion);
-                    }
-                }).start();
+
+                String promptQuestion = userMsgEdt.getText().toString();
+                Log.i(TAG, "prompt question: " + promptQuestion);
+                setVisibility();
+
+                // Disable send button while responding to prompt.
+                sendMsgIB.setEnabled(false);
+
+                promptTV.setText(promptQuestion);
                 // Clear Edit Text or prompt question.
                 userMsgEdt.setText("");
                 generatedTV.setText("");
-                promptQuestion="";
+
+                new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        genAIWrapper.run(promptQuestion);
+
+                        runOnUiThread(() -> {
+                            sendMsgIB.setEnabled(true);
+                        });
+                    }
+                }).start();
             }
         });
     }
 
     @Override
     protected void onDestroy() {
+        try {
+            genAIWrapper.close();
+        } catch (Exception e) {
+            Log.e(TAG, "exception from closing genAIWrapper", e);
+        }
+        genAIWrapper = null;
         super.onDestroy();
     }
 
-    private void performQA(String question) {
-
+    private GenAIWrapper createGenAIWrapper() {
         // manually upload the model. easiest from Android Studio.
         // Create emulator. Make sure it has at least 8GB of internal storage!
         // Debug app to do initial copy
         // In Device Explorer navigate to /data/data/ai.onnxruntime.genai.demo/files
         // Right-click on the files folder an update the phi-int4-cpu folder.
-        File fd = getFilesDir();
 
-        genAIWrapper = new GenAIWrapper(fd.getPath() + "/phi2-int4-cpu-compint8/");
-        genAIWrapper.setTokenUpdateListener(this);
-        genAIWrapper.run(question);
+        //File fd = getFilesDir();
+
+        File fd = new File("/data/local/tmp/onnxruntime-genai/models");
+        String modelDirName = "phi2-int4-cpu-compfp32";
+        //String modelDirName = "phi2-int4-cpu-compint8";
+        GenAIWrapper wrapper = new GenAIWrapper(fd.getPath() + "/" + modelDirName);
+        wrapper.setTokenUpdateListener(this);
+
+        return wrapper;
     }
 
     @Override
