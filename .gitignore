@@ -1,6 +1,7 @@
 ﻿# Files to tell git to ignore
 
 .vscode
+
 *.vs
 *bin/
 *obj/
@@ -18,6 +19,7 @@ example-models
 *.onnx.data
 __pycache__
 benchmark/python/*.csv
+benchmark/python/output
 examples/python/genai_models
 examples/python/hf_cache
 
