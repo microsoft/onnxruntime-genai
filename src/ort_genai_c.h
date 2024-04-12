@@ -1,5 +1,8 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+
+#pragma once
+
 #include <stdint.h>
 #include <cstddef>
 
@@ -179,17 +182,17 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* 
  * \param[in] generator The generator to get the count of the tokens for the sequence at the given index.
  * \return The number tokens in the sequence at the given index.
  */
-OGA_EXPORT size_t OGA_API_CALL OgaGenerator_GetSequenceLength(const OgaGenerator* generator, size_t index);
+OGA_EXPORT size_t OGA_API_CALL OgaGenerator_GetSequenceCount(const OgaGenerator* generator, size_t index);
 
 /*
  * \brief Returns a pointer to the sequence data at the given index. The number of tokens in the sequence
- *        is given by OgaGenerator_GetSequenceLength
+ *        is given by OgaGenerator_GetSequenceCount
  * \param[in] generator The generator to get the sequence data for the sequence at the given index.
  * \return The pointer to the sequence data at the given index. The sequence data is owned by the OgaGenerator
  *         and will be freed when the OgaGenerator is destroyed. The caller must copy the data if it needs to
  *         be used after the OgaGenerator is destroyed.
  */
-OGA_EXPORT const int32_t* OGA_API_CALL OgaGenerator_GetSequence(const OgaGenerator* generator, size_t index);
+OGA_EXPORT const int32_t* OGA_API_CALL OgaGenerator_GetSequenceData(const OgaGenerator* generator, size_t index);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTokenizer(const OgaModel* model, OgaTokenizer** out);
 OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizer(OgaTokenizer*);

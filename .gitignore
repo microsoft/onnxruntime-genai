@@ -10,7 +10,7 @@
 /test/test_models/*
 /cache_models
 /onnxruntime-linux-x64-*
-/*.csv
+*.csv
 .idea
 cache_dir
 example-models
@@ -23,3 +23,5 @@ examples/python/hf_cache
 
 !test/test_models/hf-internal-testing/
 !test/test_models/hf-internal-testing/tiny-random-gpt2*/*.onnx
+
+.ipynb_checkpoints/

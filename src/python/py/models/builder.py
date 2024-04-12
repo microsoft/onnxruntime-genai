@@ -19,6 +19,7 @@ import json
 import os
 import textwrap
 
+
 class Model:
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         self.context_length = config.max_position_embeddings
@@ -36,7 +37,14 @@ class Model:
         self.model_type = config.architectures[0]
         self.io_dtype = io_dtype      # {'fp16', 'fp32'}
         self.onnx_dtype = onnx_dtype  # {"int4", "fp16", "fp32"}
+
+        # EP-specific variables
         self.ep = ep
+        self.ep_attrs = {
+            "cpu": {},
+            "cuda": {},
+            "dml": {},
+        }
 
         self.cache_dir = cache_dir
         self.filename = extra_options["filename"] if "filename" in extra_options else "model.onnx"
@@ -51,12 +59,47 @@ class Model:
         self.value_infos = []
         self.nodes = []
 
-        # Map input names to input shapes
-        self.input_shapes = {
-            "input_ids": ["batch_size", "sequence_length"],
-            "attention_mask": ["batch_size", "total_sequence_length"],
-            "position_ids": ["batch_size", "sequence_length"],
+        # Map input names to their types and shapes
+        self.input_names = ["input_ids", "attention_mask", "position_ids"]
+        self.input_types = {
+            "input_ids": TensorProto.INT64,                                                                      # For standard models
+            "attention_mask": TensorProto.INT64,                                                                 # For standard models
+            "position_ids": TensorProto.INT64,                                                                   # For standard models
+            "inputs_embeds": self.io_dtype,                                                                      # For standard models where you want to remove the embedding layer from the model (note that `inputs_embeds` is written this way to match Hugging Face format)
+            "past_key_values.key": self.io_dtype,                                                                # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format)
+            "past_key_values.value": self.io_dtype,                                                              # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format)
         }
+        self.input_shapes = {
+            "input_ids": ["batch_size", "sequence_length"],                                                      # For standard models
+            "attention_mask": ["batch_size", "total_sequence_length"],                                           # For standard models
+            "position_ids": ["batch_size", "sequence_length"],                                                   # For standard models
+            "inputs_embeds": ["batch_size", "sequence_length", self.hidden_size],                                # For standard models where you want to remove the embedding layer from the model (note that `inputs_embeds` is written this way to match Hugging Face format)
+            "past_key_values.key": 
+            ["batch_size", self.num_kv_heads // self.world_size, "past_sequence_length", self.head_size],        # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format)
+            "past_key_values.value": 
+            ["batch_size", self.num_kv_heads// self.world_size, "past_sequence_length", self.head_size],         # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format)
+        }
+        self.exclude_embeds = "exclude_embeds" in extra_options
+        if self.exclude_embeds:
+            self.input_names = [name.replace("input_ids", "inputs_embeds") for name in self.input_names]
+
+        # Map output names to their types and shapes
+        self.output_names = ["logits"]
+        self.output_types = {
+            "hidden_states": self.io_dtype,                                                                      # For standard models where you want to remove the language modeling head from the model (note that `hidden_states` is written this way to match Hugging Face format)
+            "logits": self.io_dtype,                                                                             # For standard models
+            "present.key": self.io_dtype,                                                                        # For standard models (note that `present.key` is written this way to match Hugging Face format)
+            "present.value": self.io_dtype,                                                                      # For standard models (note that `present.value` is written this way to match Hugging Face format)
+        }
+        self.output_shapes = {
+            "hidden_states": ["batch_size", "sequence_length", self.hidden_size],                                # For standard models where you want to remove the language modeling head from the model (note that `hidden_states` is written this way to match Hugging Face format)
+            "logits": ["batch_size", "sequence_length", self.vocab_size],                                        # For standard models
+            "present.key": ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size],           # For standard models (note that `present.key` is written this way to match Hugging Face format)
+            "present.value": ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size],         # For standard models (note that `present.value` is written this way to match Hugging Face format)
+        }
+        self.exclude_lm_head = "exclude_lm_head" in extra_options
+        if self.exclude_lm_head:
+            self.output_names = [name.replace("logits", "hidden_states") for name in self.output_names]
 
         # Store names of Constant ops already created
         self.constants = set()
@@ -108,19 +151,36 @@ class Model:
         rope_theta = config.rope_theta if hasattr(config, "rope_theta") else 10000
         self.rotemb_attrs = {
             "create_rotary_embedding_caches": True,          # Create cos/sin caches for rotary embeddings
+            "theta": rope_theta,                             # Base value if calculating cos/sin caches from scratch
             "partial_rotary_factor": partial_rotary_factor,  # Factor for partial rotary embeddings
+            "interleaved": 0,                                # Interleave the rotary embeddings (e.g. [0, 0, 0, 1, 1, 1] to [0, 1, 0, 1, 0, 1], RotaryEmbedding kernel expects a default value of 0)
             "num_heads": 0,                                  # For partial rotary embeddings (RotaryEmbedding kernel expects a default value of 0)
             "rotary_embedding_dim": 0,                       # For partial rotary embeddings (RotaryEmbedding kernel expects a default value of 0)
-            "theta": rope_theta,                             # Base value if calculating cos/sin caches from scratch
         }
 
         # Attention-specific variables (MHA, GQA, GQA + Rot.Emb., etc.)
         self.attention_attrs = {
-            "op_type": "MultiHeadAttention",                                # Attention op to use
-            "use_gqa": ep == "cuda" and io_dtype == TensorProto.FLOAT16     # Check if GroupQueryAttention can be used
+            "op_type": "MultiHeadAttention",                 # Attention op to use
+            "use_rotemb_in_attn": False,                     # Use rotary embeddings within attention op (instead of a separate RotaryEmbedding op)
+            "use_packed_matmul": False,                      # Use packed MatMul (instead of 3 separate MatMuls for Q/K/V)
         }
-        if self.attention_attrs["use_gqa"]:
+        if self.ep == "cuda" and self.io_dtype == TensorProto.FLOAT16:
+            # Change model settings for GroupQueryAttention
             self.attention_attrs["op_type"] = "GroupQueryAttention"
+            print("GroupQueryAttention (GQA) is used in this model. GQA is currently supported only for INT4 CUDA and FP16 CUDA.")
+
+            self.attention_attrs["use_packed_matmul"] = self.num_attn_heads == self.num_kv_heads
+
+            # GQA + Rot.Emb. does not require `position ids` as input
+            self.attention_attrs["use_rotemb_in_attn"] = True
+            self.input_names.remove("position_ids")
+
+        # MLP-specific variables
+        self.mlp_attrs = {
+            "use_proj": True,           # Use projection style for MLP (GateProj/UpProj/DownProj)
+            "use_fc": False,            # Use fully-connected style for MLP (FC1/FC2)
+            "output_0": "",             # Output 0 for MLP layer
+        }
 
         # Quantization-specific variables (INT4, INT8, etc.)
         self.quant_attrs = {
@@ -141,7 +201,7 @@ class Model:
 
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
         config = GenerationConfig.from_pretrained(model_name_or_path, **extra_kwargs)
-        inputs = dict(zip(self.input_shapes.keys(), self.input_shapes.keys()))
+        inputs = dict(zip(self.input_names, self.input_names))
         inputs.update({
             "past_key_names": "past_key_values.%d.key",
             "past_value_names": "past_key_values.%d.value",
@@ -169,7 +229,7 @@ class Model:
                     "num_key_value_heads": self.num_kv_heads,
                 },
                 "eos_token_id": config.eos_token_id,
-                "pad_token_id": config.pad_token_id if hasattr(config, "pad_token_id") and config.pad_token_id != None else config.eos_token_id,
+                "pad_token_id": config.pad_token_id if hasattr(config, "pad_token_id") and config.pad_token_id is not None else config.eos_token_id,
                 "type": self.model_type[ : self.model_type.find("For")].lower(),
                 "vocab_size": self.vocab_size,
             },
@@ -191,9 +251,9 @@ class Model:
             },
         }
 
-        if self.ep == "cuda":
-            cuda_options = { "cuda" : { } }
-            genai_config["model"]["decoder"]["session_options"]["provider_options"].append(cuda_options)
+        if self.ep != "cpu":
+            ep_options = { self.ep : self.ep_attrs[self.ep] }
+            genai_config["model"]["decoder"]["session_options"]["provider_options"].append(ep_options)
 
         print(f"Saving GenAI config in {out_dir}")
         with open(os.path.join(out_dir,"genai_config.json"), "w") as f:
@@ -250,6 +310,7 @@ class Model:
         if os.path.exists(data_path):
             print(f"Overwriting {data_path}")
             os.remove(data_path)
+        
         save_model(
             model,
             out_path,
@@ -317,28 +378,32 @@ class Model:
     def make_inputs_and_outputs(self):
         # Add model-specific inputs to list of model inputs
         inputs = []
-        for name in self.model_inputs:
+        for name in self.input_names:
+            dtype = self.input_types[name]
             shape = self.input_shapes[name]
-            inputs.append(helper.make_tensor_value_info(name, TensorProto.INT64, shape=shape))
+            inputs.append(helper.make_tensor_value_info(name, dtype, shape=shape))
 
         # Add model-specific outputs to list of model outputs
-        outputs = [
-            helper.make_tensor_value_info("logits", self.io_dtype, shape=["batch_size", "sequence_length", self.vocab_size])
-        ]
+        outputs = []
+        for name in self.output_names:
+            dtype = self.output_types[name]
+            shape = self.output_shapes[name]
+            outputs.append(helper.make_tensor_value_info(name, dtype, shape=shape))
 
         # Add KV cache to inputs and outputs
         for i in range(self.num_layers):
             # Add KV cache to inputs
             key_name = f"past_key_values.{i}.key"
-            inputs.append(helper.make_tensor_value_info(key_name, self.io_dtype, shape=["batch_size", self.num_kv_heads // self.world_size, "past_sequence_length", self.head_size]))
+
+            inputs.append(helper.make_tensor_value_info(key_name, self.input_types["past_key_values.key"], shape=self.input_shapes["past_key_values.key"]))
             value_name = f"past_key_values.{i}.value"
-            inputs.append(helper.make_tensor_value_info(value_name, self.io_dtype, shape=["batch_size", self.num_kv_heads // self.world_size, "past_sequence_length", self.head_size]))
+            inputs.append(helper.make_tensor_value_info(value_name, self.input_types["past_key_values.value"], shape=self.input_shapes["past_key_values.value"]))
 
             # Add KV cache to outputs
             key_name = f"present.{i}.key"
-            outputs.append(helper.make_tensor_value_info(key_name, self.io_dtype, shape=["batch_size", self.num_kv_heads // self.world_size, "total_sequence_length", self.head_size]))
+            outputs.append(helper.make_tensor_value_info(key_name, self.output_types["present.key"], shape=self.output_shapes["present.key"]))
             value_name = f"present.{i}.value"
-            outputs.append(helper.make_tensor_value_info(value_name, self.io_dtype, shape=["batch_size", self.num_kv_heads // self.world_size, "total_sequence_length", self.head_size]))
+            outputs.append(helper.make_tensor_value_info(value_name, self.output_types["present.value"], shape=self.output_shapes["present.value"]))
 
         self.inputs = inputs
         self.outputs = outputs
@@ -512,9 +577,13 @@ class Model:
     #     self.make_node("MatMulNBits", inputs=[root_input, weight, scales], outputs=[output], name=name)
     #     self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
 
-    # TODO: make packed QKV MatMul
-    # def make_packed_matmul(self, q_matmul, k_matmul, v_matmul, name, root_input, **kwargs):
-    #     pass
+    def make_packed_matmul(self, q_matmul, k_matmul, v_matmul, name, root_input, **kwargs):
+        # N = num_heads * head_size, H = hidden_size
+        # Combine 3 Matmuls of shape NxH into 1 packed MatMul of shape 3NxH
+        # Note: Packed MatMul is of shape 3NxH instead of Hx3N because `make_matmul` will apply a transpose before saving
+        N, H = q_matmul.shape
+        matmul = np.stack((q_matmul.transpose(), k_matmul.transpose(), v_matmul.transpose()), axis=1).reshape(H, 3*N).transpose()
+        self.make_matmul(matmul, name, root_input, **kwargs)
 
     def make_add_bias(self, add, name, root_input, **kwargs):
         bias = name[1:].replace("/", ".") + ".bias"
@@ -533,6 +602,11 @@ class Model:
     def make_all_reduce(self, name, root_input):
         output = f"{name}/output_0"
         self.make_node("AllReduce", inputs=[root_input], outputs=[output], name=name, domain="com.microsoft")
+
+    def make_packed_add(self, q_add, k_add, v_add, name, root_input, **kwargs):
+        # Combine 3 Adds of shape H into 1 packed Add of shape 3H
+        add = np.stack((q_add, k_add, v_add), axis=0).flatten()
+        self.make_add_bias(add, name, root_input, **kwargs)
 
     def make_embedding(self, embedding):
         weight = "model.embed_tokens.weight"
@@ -581,6 +655,8 @@ class Model:
 
         output_0 = f"/model/layers.{layer_id}/{location}_layernorm/output_0"
         output_3 = f"/model/layers.{layer_id}/{location}_layernorm/output_3"
+        if self.layernorm_attrs["last_layernorm"] and self.exclude_lm_head:
+            output_0 = "hidden_states"
         outputs = [output_0, "", "", output_3] if skip and not self.layernorm_attrs["last_layernorm"] else [output_0]
 
         self.make_node(op_type, inputs=inputs, outputs=outputs, name=name, domain=("com.microsoft" if skip else None), **kwargs)
@@ -629,7 +705,8 @@ class Model:
 
         inputs = [root_input, kwargs.pop("position_ids"), cos_cache_name, sin_cache_name]
         output = f"{name}/output_0"
-        self.make_node("RotaryEmbedding", inputs=inputs, outputs=[output], name=name, domain="com.microsoft", interleaved=0, **kwargs)
+
+        self.make_node("RotaryEmbedding", inputs=inputs, outputs=[output], name=name, domain="com.microsoft", interleaved=self.rotemb_attrs["interleaved"], **kwargs)
         self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * (self.num_kv_heads // self.world_size if "k_rotary" in name else self.num_attn_heads // self.world_size)])
 
     # TODO: This function and any corresponding changes to support it are temporary until ORT supports GQA for CPU
@@ -838,12 +915,18 @@ class Model:
             kwargs["q_path"], kwargs["k_path"], kwargs["v_path"],
             kwargs.get("past_k", ""), kwargs.get("past_v", ""),
             kwargs.get("seqlens_k", ""), kwargs.get("total_seq_len", ""),
+            kwargs.get("cos_cache", ""), kwargs.get("sin_cache", ""),
         ]
         output = f"{name}/output_0"
         outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
+
         scale = 1 / np.sqrt(self.head_size)
-        self.make_node("GroupQueryAttention", inputs=inputs, outputs=outputs, name=name, domain="com.microsoft", num_heads=int(self.num_attn_heads // self.world_size), kv_num_heads=int(self.num_kv_heads // self.world_size), local_window_size=self.window_size, scale=scale)
-        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', int(self.head_size * self.num_attn_heads // self.world_size)])
+        self.make_node(
+            "GroupQueryAttention", inputs=inputs, outputs=outputs, name=name, domain="com.microsoft",
+            num_heads=self.num_attn_heads // self.world_size, kv_num_heads=self.num_kv_heads // self.world_size, local_window_size=self.window_size,
+            scale=scale, do_rotary=self.attention_attrs["use_rotemb_in_attn"], rotary_interleaved=self.rotemb_attrs["interleaved"],
+        )
+        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * self.num_attn_heads // self.world_size])
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         # Make nodes for the Attention subgraph
@@ -885,62 +968,81 @@ class Model:
         v_input_to_attention = ""
 
         # Make MatMul nodes
-        q_matmul_name = f"/model/layers.{layer_id}/attn/q_proj/MatMul"
-        self.make_matmul(self.make_shard(attention.q_proj.weight, sharding_axis=0), q_matmul_name, root_input)
-        q_input_to_attention = f"{q_matmul_name}/output_0"
-
-        k_matmul_name = f"/model/layers.{layer_id}/attn/k_proj/MatMul"
-        self.make_matmul(self.make_shard(attention.k_proj.weight, sharding_axis=0), k_matmul_name, root_input)
-        k_input_to_attention = f"{k_matmul_name}/output_0"
-
-        v_matmul_name = f"/model/layers.{layer_id}/attn/v_proj/MatMul"
-        self.make_matmul(self.make_shard(attention.v_proj.weight, sharding_axis=0), v_matmul_name, root_input)
-        v_input_to_attention = f"{v_matmul_name}/output_0"
+        if self.attention_attrs["use_packed_matmul"]:
+            # Combine 3 MatMuls into 1 packed MatMul
+            qkv_matmul_name = f"/model/layers.{layer_id}/attn/qkv_proj/MatMul"
+            self.make_packed_matmul(self.make_shard(attention.q_proj.weight, sharding_axis=0), 
+                                    self.make_shard(attention.k_proj.weight, sharding_axis=0), 
+                                    self.make_shard(attention.v_proj.weight, sharding_axis=0), 
+                                    qkv_matmul_name, root_input)
+            q_input_to_attention = f"{qkv_matmul_name}/output_0"
+        else:
+            q_matmul_name = f"/model/layers.{layer_id}/attn/q_proj/MatMul"
+            self.make_matmul(self.make_shard(attention.q_proj.weight, sharding_axis=0), q_matmul_name, root_input)
+            q_input_to_attention = f"{q_matmul_name}/output_0"
+            k_matmul_name = f"/model/layers.{layer_id}/attn/k_proj/MatMul"
+            self.make_matmul(self.make_shard(attention.k_proj.weight, sharding_axis=0), k_matmul_name, root_input)
+            k_input_to_attention = f"{k_matmul_name}/output_0"
+            v_matmul_name = f"/model/layers.{layer_id}/attn/v_proj/MatMul"
+            self.make_matmul(self.make_shard(attention.v_proj.weight, sharding_axis=0), v_matmul_name, root_input)
+            v_input_to_attention = f"{v_matmul_name}/output_0"
 
         # Make Add nodes (if bias exists)
         q_bias_exists = attention.q_proj.bias is not None
         k_bias_exists = attention.k_proj.bias is not None
         v_bias_exists = attention.v_proj.bias is not None
+        all_bias_exists = q_bias_exists and k_bias_exists and v_bias_exists
 
-        if q_bias_exists:
-            q_add_name = f"/model/layers.{layer_id}/attn/q_proj/Add"
-            self.make_add_bias(self.make_shard(attention.q_proj.bias), q_add_name, root_input=f"{q_matmul_name}/output_0")
-            q_input_to_attention = f"{q_add_name}/output_0"
-        if k_bias_exists:
-            k_add_name = f"/model/layers.{layer_id}/attn/k_proj/Add"
-            self.make_add_bias(self.make_shard(attention.k_proj.bias), k_add_name, root_input=f"{k_matmul_name}/output_0")
-            k_input_to_attention = f"{k_add_name}/output_0"
-        if v_bias_exists:
-            v_add_name = f"/model/layers.{layer_id}/attn/v_proj/Add"
-            self.make_add_bias(self.make_shard(attention.v_proj.bias), v_add_name, root_input=f"{v_matmul_name}/output_0")
-            v_input_to_attention = f"{v_add_name}/output_0"
+        if all_bias_exists and self.attention_attrs["use_packed_matmul"]:
+            # Combine 3 Adds into 1 packed Add
+            qkv_add_name = f"/model/layers.{layer_id}/attn/qkv_proj/Add"
+            self.make_packed_add(self.make_shard(attention.q_proj.bias), 
+                                 self.make_shard(attention.k_proj.bias), 
+                                 self.make_shard(attention.v_proj.bias), 
+                                 qkv_add_name, root_input=q_input_to_attention)
+            q_input_to_attention = f"{qkv_add_name}/output_0"
+        else:
+            if q_bias_exists:
+                q_add_name = f"/model/layers.{layer_id}/attn/q_proj/Add"
+                self.make_add_bias(self.make_shard(attention.q_proj.bias), q_add_name, root_input=f"{q_matmul_name}/output_0")
+                q_input_to_attention = f"{q_add_name}/output_0"
+            if k_bias_exists:
+                k_add_name = f"/model/layers.{layer_id}/attn/k_proj/Add"
+                self.make_add_bias(self.make_shard(attention.k_proj.bias), k_add_name, root_input=f"{k_matmul_name}/output_0")
+                k_input_to_attention = f"{k_add_name}/output_0"
+            if v_bias_exists:
+                v_add_name = f"/model/layers.{layer_id}/attn/v_proj/Add"
+                self.make_add_bias(self.make_shard(attention.v_proj.bias), v_add_name, root_input=f"{v_matmul_name}/output_0")
+                v_input_to_attention = f"{v_add_name}/output_0"
 
         # Make RotaryEmbedding nodes
-        q_rotary_name = f"/model/layers.{layer_id}/attn/q_rotary/RotaryEmbedding"
-        q_rotary_input = f"{q_matmul_name if not q_bias_exists else q_add_name}/output_0"
-        self.make_rotary_embedding(attention.rotary_emb, q_rotary_name, q_rotary_input, position_ids=kwargs.get("position_ids", "position_ids"))
-        q_input_to_attention = f"{q_rotary_name}/output_0"
-
-        k_rotary_name = f"/model/layers.{layer_id}/attn/k_rotary/RotaryEmbedding"
-        k_rotary_input = f"{k_matmul_name if not k_bias_exists else k_add_name}/output_0"
-        self.make_rotary_embedding(attention.rotary_emb, k_rotary_name, k_rotary_input, position_ids=kwargs.get("position_ids", "position_ids"))
-        k_input_to_attention = f"{k_rotary_name}/output_0"
+        cos_cache_name, sin_cache_name = "", ""
+        if self.attention_attrs["use_rotemb_in_attn"]:
+            cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches(attention.rotary_emb)
+        else:
+            q_rotary_name = f"/model/layers.{layer_id}/attn/q_rotary/RotaryEmbedding"
+            self.make_rotary_embedding(attention.rotary_emb, q_rotary_name, root_input=q_input_to_attention, position_ids=kwargs.get("position_ids", "position_ids"))
+            q_input_to_attention = f"{q_rotary_name}/output_0"
+            k_rotary_name = f"/model/layers.{layer_id}/attn/k_rotary/RotaryEmbedding"
+            self.make_rotary_embedding(attention.rotary_emb, k_rotary_name, root_input=k_input_to_attention, position_ids=kwargs.get("position_ids", "position_ids"))
+            k_input_to_attention = f"{k_rotary_name}/output_0"
 
         # Make repeat KV nodes (TODO: remove once ORT supports GQA for CPU)
         past_k = f"past_key_values.{layer_id}.key"
         past_v = f"past_key_values.{layer_id}.value"
         present_k = f"present.{layer_id}.key"
         present_v = f"present.{layer_id}.value"
-        if self.num_attn_heads != self.num_kv_heads and not self.attention_attrs['use_gqa']:
-            k_input_to_attention = self.make_repeat_kv(layer_id, k_input_to_attention, past_k, present_k)
-            v_input_to_attention = self.make_repeat_kv(layer_id, v_input_to_attention, past_v, present_v)
+        if self.num_attn_heads != self.num_kv_heads and self.attention_attrs["op_type"] == "MultiHeadAttention":
+            k_input_to_attention = self.make_repeat_kv(layer_id, root_input=k_input_to_attention, past_kv=past_k, present_kv=present_k)
+            v_input_to_attention = self.make_repeat_kv(layer_id, root_input=v_input_to_attention, past_kv=past_v, present_kv=present_v)
             past_k, past_v, present_k, present_v = "", "", "", ""
 
         # Make attention node (e.g. MultiHeadAttention, GroupQueryAttention, etc.)
         attn_name = f"/model/layers.{layer_id}/attn/{self.attention_attrs['op_type']}"
         self.make_attention_op(
             attn_name, q_path=q_input_to_attention, k_path=k_input_to_attention, v_path=v_input_to_attention,
-            past_k=past_k, past_v=past_v, present_k=present_k, present_v=present_v, **kwargs,
+            past_k=past_k, past_v=past_v, present_k=present_k, present_v=present_v,
+            cos_cache=cos_cache_name, sin_cache=sin_cache_name, **kwargs,
         )
 
         # Make MatMul node (output projection weight node)
@@ -965,6 +1067,14 @@ class Model:
         self.layernorm_attrs["skip_input"] = f"{o_matmul_name if not o_bias_exists else o_add_name}/output_0"
 
     def make_mlp(self, layer_id, mlp, root_input):
+        if self.mlp_attrs["use_proj"]:
+            self.make_mlp_proj(layer_id, mlp, root_input)
+        elif self.mlp_attrs["use_fc"]:
+            self.make_mlp_fc(layer_id, mlp, root_input)
+        else:
+            raise NotImplementedError(f"The MLP layer type is not set.")
+
+    def make_mlp_proj(self, layer_id, mlp, root_input):
         # Make nodes for the MLP subgraph
         #
         #           root_input
@@ -1099,6 +1209,44 @@ class Model:
         # Assign output 0 of previous MoE as root input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = output
 
+    def make_mlp_fc(self, layer_id, mlp, root_input):
+        # Make nodes for the MLP subgraph
+        #
+        #          root_input
+        #              |
+        #          FC1_MatMul
+        #              |
+        #           FC1_Add
+        #              |
+        #           FastGelu
+        #              |
+        #          FC2_MatMul
+        #              |
+        #           FC2_Add
+        # Make first layer of fully connected nodes (FC1)
+        fc1_matmul_name = f"/model/layers.{layer_id}/mlp/fc1/MatMul"
+        self.make_matmul(self.make_shard(mlp.fc1.weight, sharding_axis=0), fc1_matmul_name, root_input)
+        fc1_add_name = f"/model/layers.{layer_id}/mlp/fc1/Add"
+        self.make_add_bias(self.make_shard(mlp.fc1.bias), fc1_add_name, root_input=f"{fc1_matmul_name}/output_0")
+
+        # Make activation function
+        act_fn_name = self.make_activation(layer_id, root_input=f"{fc1_add_name}/output_0")
+
+        # Make second layer of fully connected nodes (FC2)
+        fc2_matmul_name = f"/model/layers.{layer_id}/mlp/fc2/MatMul"
+        self.make_matmul(self.make_shard(mlp.fc2.weight, sharding_axis=1), fc2_matmul_name, root_input=f"{act_fn_name}/output_0")
+
+        if self.world_size > 1:
+            all_reduce_name = f"/model/layers.{layer_id}/mlp/all_reduce"
+            self.make_all_reduce(all_reduce_name, f"{fc2_matmul_name}/output_0")
+            fc2_matmul_name = all_reduce_name
+
+        fc2_add_name = f"/model/layers.{layer_id}/mlp/fc2/Add"
+        self.make_add_bias(mlp.fc2.bias.detach().numpy(), fc2_add_name, root_input=f"{fc2_matmul_name}/output_0")
+
+        # Assign output 0 of MLP layer as output of last layer
+        self.mlp_attrs["output_0"] = f"{fc2_add_name}/output_0"
+
     def make_activation_with_mul(self, layer_id, root_input, activation, domain):
         # Make nodes for this activation subgraph
         #
@@ -1175,14 +1323,8 @@ class Model:
         # Make inputs and outputs to ONNX model
         self.make_inputs_and_outputs()
 
-        # Make attention mask reformatting nodes
-        #
-        #           2D attention mask
-        #                   |
-        #    attention mask reformatting subgraph
-        #                   |
-        #         4D causal attention mask
-        self.make_attention_mask_reformatting()
+        # Make pre-processing nodes
+        self.make_preprocessing_nodes()
 
         # Load weights of original model
         if input_path.endswith(".gguf"):
@@ -1192,7 +1334,7 @@ class Model:
             self.layernorm_attrs["add_offset"] = 0  # add offset already done for GGUF models
         else:
             # Load PyTorch model
-            extra_kwargs = {} if os.path.exists(self.model_name_or_path) else {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {"cache_dir": self.cache_dir, "use_auth_token": True}
+            extra_kwargs = {"trust_remote_code": True} if os.path.exists(self.model_name_or_path) else {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {"cache_dir": self.cache_dir, "use_auth_token": True}
             model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, **extra_kwargs)
 
         # Loop through model and map each module to ONNX/ORT ops
@@ -1200,23 +1342,32 @@ class Model:
         for module in model.modules():
             if isinstance(module, torch.nn.Embedding) or (hasattr(model, "embedding") and module == model.embedding):
                 # Checks (Hugging Face logic) or (GGUF logic)
-                # Embedding layer
-                print("Reading embedding layer")
-                self.make_embedding(module.weight.detach().numpy())
+                if not self.exclude_embeds:
+                    # Embedding layer
+                    print("Reading embedding layer")
+                    self.make_embedding(module.weight.detach().numpy())
+                else:
+                    # Exclude embedding layer from model
+                    self.layernorm_attrs["root_input"] = "inputs_embeds"
+                    self.layernorm_attrs["skip_input"] = "inputs_embeds"
+
             elif module.__class__.__name__.endswith("DecoderLayer"):
                 # Each decoder layer of model
                 print(f"Reading decoder layer {self.layer_id}")
                 self.make_layer(self.layer_id, module)
                 self.layer_id += 1
+
             elif self.layer_id == self.num_layers and self.has_final_norm(module, model):
                 # SkipLayerNorm after last decoder layer (MatMul --> SkipLayerNorm)
                 print("Reading final norm")
                 self.make_layernorm(self.layer_id, module, skip=True, simple=self.layernorm_attrs["simple"], location="final_norm")
+
             elif (isinstance(module, torch.nn.Linear) and module.out_features == self.vocab_size) or (hasattr(model, "lm_head") and module == model.lm_head):
                 # Checks (Hugging Face logic) or (GGUF logic)
-                # Language modeling head (SkipLayerNorm --> logits)
-                print("Reading LM head")
-                self.make_lm_head(module)
+                if not self.exclude_lm_head:
+                    # Language modeling head (SkipLayerNorm --> logits)
+                    print("Reading LM head")
+                    self.make_lm_head(module)
 
         del model
 
@@ -1228,7 +1379,24 @@ class Model:
         gguf_final_norm = hasattr(model, "final_norm") and module == model.final_norm
         return hf_norm or hf_final_layernorm or gguf_final_norm
 
+    def make_preprocessing_nodes(self):
+        self.make_attention_mask_reformatting()
+        # TODO: add make_position_ids_reformatting() here
+
     def make_attention_mask_reformatting(self):
+        if self.attention_attrs["op_type"] == "GroupQueryAttention":
+            self.make_attention_mask_reformatting_for_gqa()            
+        elif self.attention_attrs["op_type"] == "MultiHeadAttention":
+            # Make attention mask reformatting nodes
+            #
+            #           2D attention mask
+            #                   |
+            #    attention mask reformatting subgraph
+            #                   |
+            #         4D causal attention mask
+            self.make_attention_mask_reformatting_2d_to_4d()
+
+    def make_attention_mask_reformatting_2d_to_4d(self):
         # Make nodes for the attention mask subgraphs that reformat the
         # 2D attention mask (B, S) to 4D causal attention mask (B, N, S, T)
         #
@@ -1409,7 +1577,7 @@ class Model:
         unsqueeze_9_inputs = [f"{unsqueeze_8_name}/output_0", "/model/constants/TensorProto.INT64/1D/1"]
         self.make_unsqueeze(unsqueeze_9_name, unsqueeze_9_inputs, dtype=self.io_dtype, shape=None)
 
-        expand_name = self.make_common_mask_reformat_subgraph(basename, root_input="input_ids", unsqueeze_for_concat=unsqueeze_3_name, unsqueeze_for_expand=unsqueeze_9_name, input_ids_subgraph=True)
+        expand_name = self.make_common_mask_reformat_subgraph(basename, root_input="input_ids" if not self.exclude_embeds else "inputs_embeds", unsqueeze_for_concat=unsqueeze_3_name, unsqueeze_for_expand=unsqueeze_9_name, input_ids_subgraph=True)
         return unsqueeze_6_name, expand_name
 
     def make_attention_mask_subgraph(self, basename, unsqueeze_for_concat):
@@ -1484,9 +1652,9 @@ class Model:
         #                              Expand
 
         shape_1_name = f"{basename}/Shape_1"
-        self.make_shape(shape_1_name, root_input, shape=[2])
+        self.make_shape(shape_1_name, root_input, shape=[3] if self.exclude_embeds and input_ids_subgraph else [2])
         shape_2_name = f"{basename}/Shape_2"
-        self.make_shape(shape_2_name, root_input, shape=[2])
+        self.make_shape(shape_2_name, root_input, shape=[3] if self.exclude_embeds and input_ids_subgraph else [2])
         gather_1_name = f"{basename}/Gather_1"
         gather_1_inputs = [f"{shape_1_name}/output_0", "/model/constants/TensorProto.INT64/0D/0"]
         self.make_gather(gather_1_name, gather_1_inputs, axis=0)
@@ -1527,19 +1695,9 @@ class Model:
         self.make_expand(expand_name, expand_inputs, dtype=expand_dtype, shape=expand_shape)
 
         return expand_name
-
-
-class LlamaModel(Model):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        self.model_inputs = ["input_ids", "attention_mask", "position_ids"]
-
-    def make_attention_mask_reformatting(self):
-        if not self.attention_attrs["use_gqa"]:
-            super().make_attention_mask_reformatting()
-            return
-
-        # Make nodes for the attention mask subgraph that calculates
+    
+    def make_attention_mask_reformatting_for_gqa(self):
+        # Make nodes for the attention mask subgraph that calculates 
         # attributes about the 2D attention mask to use in GroupQueryAttention
         #
         #                attention_mask
@@ -1578,12 +1736,6 @@ class LlamaModel(Model):
         self.mask_attrs["seqlens_k"] = cast_1_name
         self.mask_attrs["total_seq_len"] = cast_2_name
 
-
-class MistralModel(LlamaModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        self.position_ids_name = self.make_position_ids_reformatting()
-
     def make_position_ids_reformatting(self):
         # Make nodes for the position ids reformatting subgraph
         #
@@ -1619,67 +1771,42 @@ class MistralModel(LlamaModel):
 
         return reshape_name
 
+
+class LlamaModel(Model):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+
+class MistralModel(Model):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.position_ids_name = f"{self.make_position_ids_reformatting()}/output_0" if not self.attention_attrs["use_rotemb_in_attn"] else "position_ids"
+
     def make_attention(self, layer_id, attention, root_input, **kwargs):
-        super().make_attention(layer_id, attention, root_input, position_ids=f"{self.position_ids_name}/output_0", **kwargs)
+        super().make_attention(layer_id, attention, root_input, position_ids=self.position_ids_name, **kwargs)
 
 
-class PhiModel(LlamaModel):
+class PhiModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         # self.input_shapes["position_ids"] = [1]  # Note: This is optional and only needed if you want position_ids to be an int instead of a 2D tensor
         self.layernorm_attrs["simple"] = False
         self.rotemb_attrs["num_heads"] = self.num_attn_heads
-        self.rotemb_attrs["rotary_embedding_dim"] = self.num_attn_heads
+        self.rotemb_attrs["rotary_embedding_dim"] = int(self.head_size * self.rotemb_attrs["partial_rotary_factor"])
+        self.mlp_attrs["use_proj"], self.mlp_attrs["use_fc"] = False, True
 
     def make_rotary_embedding(self, rotemb, name, root_input, **kwargs):
         super().make_rotary_embedding(rotemb, name, root_input, num_heads=self.rotemb_attrs["num_heads"], rotary_embedding_dim=self.rotemb_attrs["rotary_embedding_dim"], **kwargs)
-
-    def make_mlp(self, layer_id, mlp, root_input):
-        # Make nodes for the MLP subgraph
-        #
-        #          root_input
-        #              |
-        #          FC1_MatMul
-        #              |
-        #           FC1_Add
-        #              |
-        #           FastGelu
-        #              |
-        #          FC2_MatMul
-        #              |
-        #           FC2_Add
-        # Make first layer of fully connected nodes (FC1)
-        fc1_matmul_name = f"/model/layers.{layer_id}/mlp/fc1/MatMul"
-        self.make_matmul(self.make_shard(mlp.fc1.weight, sharding_axis=0), fc1_matmul_name, root_input)
-        fc1_add_name = f"/model/layers.{layer_id}/mlp/fc1/Add"
-        self.make_add_bias(self.make_shard(mlp.fc1.bias), fc1_add_name, root_input=f"{fc1_matmul_name}/output_0")
-
-        # Make activation function
-        fast_gelu_name = self.make_activation(layer_id, root_input=f"{fc1_add_name}/output_0")
-
-        # Make second layer of fully connected nodes (FC2)
-        fc2_matmul_name = f"/model/layers.{layer_id}/mlp/fc2/MatMul"
-        self.make_matmul(self.make_shard(mlp.fc2.weight, sharding_axis=1), fc2_matmul_name, root_input=f"{fast_gelu_name}/output_0")
-
-        if self.world_size > 1:
-            all_reduce_name = f"/model/layers.{layer_id}/mlp/all_reduce"
-            self.make_all_reduce(all_reduce_name, f"{fc2_matmul_name}/output_0")
-            fc2_matmul_name = all_reduce_name
-
-        fc2_add_name = f"/model/layers.{layer_id}/mlp/fc2/Add"
-        self.make_add_bias(mlp.fc2.bias.detach().numpy(), fc2_add_name, root_input=f"{fc2_matmul_name}/output_0")
-
-        return fc2_add_name
 
     def make_layer(self, layer_id, layer):
         # Each Phi decoder layer is defined as:
         # input_layernorm --> attention --> MLP --> residual_add
         self.make_layernorm(layer_id, layer.input_layernorm, skip=not self.layernorm_attrs["first_layernorm"], simple=self.layernorm_attrs["simple"], location="input")
         self.make_attention(layer_id, layer.self_attn, self.layernorm_attrs["output_0"])
-        fc2_add_name = self.make_mlp(layer_id, layer.mlp, self.layernorm_attrs["output_0"])
+        self.make_mlp(layer_id, layer.mlp, self.layernorm_attrs["output_0"])
 
         residual_add_name = f"/model/layers.{layer_id}/residual_add/Add"
-        residual_add_inputs = [self.layernorm_attrs['skip_input'], f"{fc2_add_name}/output_0"]
+        residual_add_inputs = [self.layernorm_attrs['skip_input'], self.mlp_attrs["output_0"]]
         self.make_add(residual_add_name, residual_add_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
 
         self.layernorm_attrs["first_layernorm"] = False
@@ -1727,7 +1854,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
     os.makedirs(cache_dir, exist_ok=True)
 
     # Load model config
-    extra_kwargs = {} if os.path.isdir(input_path) else {"cache_dir": cache_dir, "use_auth_token": True}
+    extra_kwargs = {"trust_remote_code": True} if os.path.isdir(input_path) else {"cache_dir": cache_dir, "use_auth_token": True}
     hf_name = input_path if os.path.isdir(input_path) else model_name
     config = AutoConfig.from_pretrained(hf_name, **extra_kwargs)
 
@@ -1840,6 +1967,12 @@ def get_args():
                     Use this option when you already have your optimized and/or quantized ONNX model.
                 world_size = Number of GPUs to use for distributed inference. Default is 1.
                 rank = Rank of current GPU in distributed inference. Must be less than world_size. Default is 0.
+                exclude_embeds = Remove embedding layer from your ONNX model.
+                    Use this option when you want to remove the embedding layer from within your ONNX model.
+                    Instead of `input_ids`, you will have `inputs_embeds` as the input to your ONNX model.
+                exclude_lm_head = Remove language modeling head from your ONNX model.
+                    Use this option when you want to remove the language modeling head from within your ONNX model.
+                    Instead of `logits`, you will have `hidden_states` as the output to your ONNX model.
             """),
     )
 

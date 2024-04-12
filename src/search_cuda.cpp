@@ -33,7 +33,13 @@ GreedySearch_Cuda::GreedySearch_Cuda(const GeneratorParams& params)
     : Search_Cuda{params} {
   next_tokens_buffer_ = CudaMallocArray<int32_t>(params.batch_size, &next_tokens_);
   cudaMemsetAsync(next_tokens_.data(), 0, next_tokens_.size_bytes(), params_->cuda_stream);
-  samplingdata_ = std::make_unique<cuda::SamplingData>(params_->batch_size, params_->vocab_size, params_->cuda_stream);
+
+  unsigned long long random_seed;
+  if (params_->search.random_seed != -1)
+    random_seed = params_->search.random_seed;
+  else
+    random_seed = std::random_device{}();
+  samplingdata_ = std::make_unique<cuda::SamplingData>(random_seed, params_->batch_size, params_->vocab_size, params_->cuda_stream);
 }
 
 BeamSearch_Cuda::BeamSearch_Cuda(const GeneratorParams& params)
