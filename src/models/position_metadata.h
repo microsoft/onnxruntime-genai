@@ -50,8 +50,7 @@ struct PositionMetadata {
   std::unique_ptr<OrtValue> attention_mask_;
   std::array<int64_t, 1> senlens_k_shape_{};  // {params.batch_size*params.beam_size}
   std::unique_ptr<OrtValue> seqlens_k_;
-  std::array<int64_t, 0> total_sequence_length_shape_{};  // scalar
-  std::unique_ptr<OrtValue> total_sequence_length_;
+  std::unique_ptr<OrtValue> total_sequence_length_; // Scalar
 
   std::unique_ptr<OrtValue> position_ids_next_;  // Replaces position_ids_ after the first Run() call
   std::vector<int32_t> initial_sequence_lengths_;

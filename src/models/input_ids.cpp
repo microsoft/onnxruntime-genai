@@ -28,8 +28,8 @@ InputIDs::InputIDs(const Model& model, State& state)
   value_ = model_.ExpandInputs(value_, state_.params_->search.num_beams);
   shape_[0] *= state_.params_->search.num_beams;
 
-  if (model_.device_type_ == DeviceType::CUDA && model_.config_->use_cuda_graphs) {
-    size_t max_beam_batch_size = model_.config_->search.num_beams * model_.config_->max_batch_size;
+  if (model_.device_type_ == DeviceType::CUDA && model_.use_cuda_graphs_) {
+    size_t max_beam_batch_size = model_.config_->search.num_beams * model_.max_batch_size_;
     sb_input_ids_ = std::make_unique<StaticBuffer>(model_.allocator_device_, max_beam_batch_size);
   }
 }
@@ -48,7 +48,7 @@ void InputIDs::Update(RoamingArray<int32_t> next_tokens_unk) {
     if (!sb_input_ids_) {
       value_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
     } else {
-      value_ = sb_input_ids_->GetOrCreateTensor(shape_, type_);
+      value_ = sb_input_ids_->CreateTensorOnStaticBuffer(shape_, type_);
     }
 
     state_.inputs_[input_index_] = value_.get();

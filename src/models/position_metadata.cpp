@@ -37,8 +37,8 @@ PositionMetadata::PositionMetadata(const Model& model, State& state, RoamingArra
   position_ids_shape_ = shape;
   attention_mask_shape_ = shape;
 
-  if (model_.device_type_ == DeviceType::CUDA && model_.config_->use_cuda_graphs) {
-    size_t max_beam_batch_size = model_.config_->search.num_beams * model_.config_->max_batch_size;
+  if (model_.device_type_ == DeviceType::CUDA && model_.use_cuda_graphs_) {
+    size_t max_beam_batch_size = model_.config_->search.num_beams * model_.max_batch_size_;
     sb_position_ids_ = std::make_unique<StaticBuffer>(model_.allocator_device_, max_beam_batch_size);
     sb_seqlens_k_ = std::make_unique<StaticBuffer>(model_.allocator_device_, max_beam_batch_size);
   }
@@ -105,7 +105,7 @@ void PositionMetadata::AddSeqlensK() {
 void PositionMetadata::AddTotalSequenceLength() {
   total_sequence_length_input_index_ = state_.inputs_.size();
   total_sequence_length_ = OrtValue::CreateTensor(model_.allocator_cpu_,
-                                                  total_sequence_length_shape_,
+                                                  {},
                                                   Ort::TypeToTensorType<int32_t>::type);
 
   total_sequence_length_->GetTensorMutableData<int32_t>()[0] = state_.params_->sequence_length;
@@ -121,7 +121,7 @@ void PositionMetadata::UpdatePositionIDs(int current_length) {
       position_ids_ = std::move(position_ids_next_);
     } else {
 #if USE_CUDA
-      position_ids_ = sb_position_ids_->GetOrCreateTensor(position_ids_shape_, type_);
+      position_ids_ = sb_position_ids_->CreateTensorOnStaticBuffer(position_ids_shape_, type_);
       assert(model_.device_type_ == DeviceType::CUDA);
       if (type_ == Ort::TypeToTensorType<int32_t>::type) {
         cudaMemcpyAsync(position_ids_->GetTensorMutableRawData(),
@@ -150,15 +150,15 @@ void PositionMetadata::UpdatePositionIDs(int current_length) {
         break;
       }
 #if USE_CUDA
-        case DeviceType::CUDA:
-          if (type_ == Ort::TypeToTensorType<int32_t>::type)
-            cuda::Launch_UpdatePositionIds(position_ids_->GetTensorMutableData<int32_t>(), static_cast<int>(position_ids_shape_[0]), model_.cuda_stream_);
-          else
-            cuda::Launch_UpdatePositionIds(position_ids_->GetTensorMutableData<int64_t>(), static_cast<int>(position_ids_shape_[0]), model_.cuda_stream_);
-          break;
+      case DeviceType::CUDA:
+        if (type_ == Ort::TypeToTensorType<int32_t>::type)
+          cuda::Launch_UpdatePositionIds(position_ids_->GetTensorMutableData<int32_t>(), static_cast<int>(position_ids_shape_[0]), model_.cuda_stream_);
+        else
+          cuda::Launch_UpdatePositionIds(position_ids_->GetTensorMutableData<int64_t>(), static_cast<int>(position_ids_shape_[0]), model_.cuda_stream_);
+        break;
 #endif
-        default:
-          throw std::runtime_error("PositionIDs::Update - Unsupported device type");
+      default:
+        throw std::runtime_error("PositionIDs::Update - Unsupported device type");
     }
   }
 }
@@ -172,7 +172,7 @@ void PositionMetadata::UpdateSeqlensK(int current_length) {
     if (!sb_seqlens_k_) {
       seqlens_k_ = OrtValue::CreateTensor(*model_.allocator_device_, senlens_k_shape_, Ort::TypeToTensorType<int32_t>::type);
     } else {
-      seqlens_k_ = sb_seqlens_k_->GetOrCreateTensor(senlens_k_shape_, Ort::TypeToTensorType<int32_t>::type);
+      seqlens_k_ = sb_seqlens_k_->CreateTensorOnStaticBuffer(senlens_k_shape_, Ort::TypeToTensorType<int32_t>::type);
     }
     state_.inputs_[seqlens_k_input_index_] = seqlens_k_.get();
     cudaMemcpyAsync(seqlens_k_->GetTensorMutableRawData(), initial_sequence_lengths_.data(), sizeof(int32_t) * initial_sequence_lengths_.size(), cudaMemcpyHostToDevice, model_.cuda_stream_);

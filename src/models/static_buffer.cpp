@@ -7,8 +7,8 @@ namespace Generators {
 StaticBuffer::StaticBuffer(Ort::Allocator* allocator, size_t max_beam_batch_size) : allocator_{allocator}, info_{allocator_->GetInfo()}, max_beam_batch_size_{max_beam_batch_size} {
 }
 
-std::unique_ptr<OrtValue> StaticBuffer::GetOrCreateTensor(std::span<const int64_t> shape,
-                                                          ONNXTensorElementDataType type) {
+std::unique_ptr<OrtValue> StaticBuffer::CreateTensorOnStaticBuffer(std::span<const int64_t> shape,
+                                                                   ONNXTensorElementDataType type) {
   size_t new_bytes = GetElementSize(type) * GetNumElements(shape);
   if (buffer_ == nullptr) {
     // Assuming the first dimension is the batch size

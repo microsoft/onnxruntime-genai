@@ -38,7 +38,7 @@ class Model:
         self.io_dtype = io_dtype      # {'fp16', 'fp32'}
         self.onnx_dtype = onnx_dtype  # {"int4", "fp16", "fp32"}
         self.ep = ep
-        self.enable_cuda_graph = "enable_cuda_graph" in extra_options and extra_options["enable_cuda_graph"] == "1"
+        self.can_use_cuda_graph = "can_use_cuda_graph" in extra_options and extra_options["can_use_cuda_graph"] == "1"
 
         self.cache_dir = cache_dir
         self.filename = extra_options["filename"] if "filename" in extra_options else "model.onnx"
@@ -215,8 +215,8 @@ class Model:
 
         if self.ep == "cuda":
             cuda_options = { "cuda" : { } }
-            if self.enable_cuda_graph:
-                cuda_options["cuda"]["enable_cuda_graph"] = "1"
+            if self.can_use_cuda_graph:
+                cuda_options["cuda"]["can_use_cuda_graph"] = "1"
             genai_config["model"]["decoder"]["session_options"]["provider_options"].append(cuda_options)
 
         print(f"Saving GenAI config in {out_dir}")
@@ -822,8 +822,8 @@ class Model:
         if op_type == "MultiHeadAttention":
             self.make_multi_head_attention(name, add_qk=f"{self.mask_attrs['mask_name']}/output_0", **kwargs)
         elif op_type == "GroupQueryAttention":
-            seqlens_k_name = f"{self.mask_attrs['seqlens_k']}/output_0" if not self.enable_cuda_graph else "seqlens_k"
-            total_seq_len_name = f"{self.mask_attrs['total_seq_len']}/output_0" if not self.enable_cuda_graph else "total_seq_len"
+            seqlens_k_name = f"{self.mask_attrs['seqlens_k']}/output_0" if not self.can_use_cuda_graph else "seqlens_k"
+            total_seq_len_name = f"{self.mask_attrs['total_seq_len']}/output_0" if not self.can_use_cuda_graph else "total_seq_len"
             self.make_group_query_attention(name, seqlens_k=seqlens_k_name, total_seq_len=total_seq_len_name, **kwargs)
         else:
             raise NotImplementedError(f"The {op_type} op is not currently supported.")
@@ -1565,7 +1565,7 @@ class Model:
 class LlamaModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        if self.enable_cuda_graph:
+        if self.can_use_cuda_graph:
             self.model_inputs = ["input_ids", "position_ids", "seqlens_k", "total_seq_len"]
         else:
             self.model_inputs = ["input_ids", "attention_mask", "position_ids"]
@@ -1575,7 +1575,7 @@ class LlamaModel(Model):
             super().make_attention_mask_reformatting()
             return
 
-        if self.enable_cuda_graph:
+        if self.can_use_cuda_graph:
             # ORT does not allow nodes to be placed on mulitple execution providers
             # with cuda graph enabled. Thus the attention mask is deprecated and the
             # subgraph is replaced with seqlens_k and total_seq_len as the raw
@@ -1761,7 +1761,7 @@ def get_args():
                     The filename for each component will be '<filename>_<component-name>.onnx' (ex: '<filename>_encoder.onnx', '<filename>_decoder.onnx').
                 config_only = Generate config and pre/post processing files only.
                     Use this option when you already have your optimized and/or quantized ONNX model.
-                enable_cuda_graph = 1 : Enable CUDA graph capture for CUDA execution provider. Limitations may apply.
+                can_use_cuda_graph = 1 : The model can use CUDA graph capture for CUDA execution provider. Limitations may apply.
             """),
     )
 

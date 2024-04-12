@@ -8,10 +8,7 @@ struct Config {
 
   std::filesystem::path config_path;  // Path of the config directory
 
-  bool use_cuda_graphs{false};
-  // TODO: pass it from config file/generator ctor when serving stack is supported
-  // Hardcoded for now
-  size_t max_batch_size{16};
+  bool can_use_cuda_graphs{false};
 
   using ProviderOption = std::pair<std::string, std::string>;
   struct ProviderOptions {

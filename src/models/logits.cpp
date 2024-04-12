@@ -18,8 +18,8 @@ Logits::Logits(const Model& model, State& state)
   else
     value16_ = std::move(logits_tensor);
 
-  if (model_.device_type_ == DeviceType::CUDA && model_.config_->use_cuda_graphs) {
-    size_t max_beam_batch_size = model_.config_->search.num_beams * model_.config_->max_batch_size;
+  if (model_.device_type_ == DeviceType::CUDA && model_.use_cuda_graphs_) {
+    size_t max_beam_batch_size = model_.config_->search.num_beams * model_.max_batch_size_;
     if (type_ == Ort::TypeToTensorType<float>::type) {
       sb_logits32_ = std::make_unique<StaticBuffer>(model_.allocator_device_, max_beam_batch_size);
     }
@@ -49,7 +49,7 @@ RoamingArray<float> Logits::Get() {
     shape_[1] = 1;
     // bugbug: not done yet
     auto value_next = !sb_logits32_ ? OrtValue::CreateTensor<float>(*model_.allocator_device_, shape_)
-                                    : sb_logits32_->GetOrCreateTensor(shape_, type_);
+                                    : sb_logits32_->CreateTensorOnStaticBuffer(shape_, type_);
     auto logits_next = cpu_span<float>{value_next->GetTensorMutableData<float>(), element_count};
 
     size_t vocab_index = 0;  // Simpler math to have this index go up by vocab_size for every logit chunk we process
@@ -83,7 +83,7 @@ RoamingArray<float> Logits::Get() {
     value32_ = std::move(value_next);
     if (type_ == Ort::TypeToTensorType<Ort::Float16_t>::type)
       value16_ = !sb_logits16_ ? OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_)
-                               : sb_logits16_->GetOrCreateTensor(shape_, type_);
+                               : sb_logits16_->CreateTensorOnStaticBuffer(shape_, type_);
 
     state_.outputs_[output_index_] = type_ == Ort::TypeToTensorType<float>::type ? value32_.get() : value16_.get();
   }

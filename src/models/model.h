@@ -108,6 +108,8 @@ struct Model : std::enable_shared_from_this<Model> {
 
   std::unique_ptr<OrtValue> ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams) const;
 
+  void GetMaxBatchSizeFromGeneratorParams(const GeneratorParams& params);
+
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
   std::unique_ptr<OrtRunOptions> run_options_;
@@ -120,6 +122,9 @@ struct Model : std::enable_shared_from_this<Model> {
   std::unique_ptr<SessionInfo> session_info_;
 
   std::shared_ptr<Model> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
+
+  bool use_cuda_graphs_{};
+  int max_batch_size_{};
 
  protected:
   void InitDeviceAllocator(OrtSession& session);

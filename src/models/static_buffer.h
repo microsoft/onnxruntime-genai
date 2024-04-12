@@ -7,8 +7,8 @@ struct StaticBuffer {
   StaticBuffer(Ort::Allocator* allocator, size_t max_beam_batch_size);
   ~StaticBuffer();
 
-  std::unique_ptr<OrtValue> GetOrCreateTensor(std::span<const int64_t> shape,
-                                              ONNXTensorElementDataType type);
+  std::unique_ptr<OrtValue> CreateTensorOnStaticBuffer(std::span<const int64_t> shape,
+                                                       ONNXTensorElementDataType type);
 
  private:
   size_t GetElementSize(ONNXTensorElementDataType type);
