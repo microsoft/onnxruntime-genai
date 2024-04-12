@@ -1,7 +1,6 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
-#include <iostream>
 #include "../generators.h"
 #include "../json.h"
 #include "../search.h"
@@ -217,7 +216,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def(pybind11::init([](const std::string& config_path) {
         return CreateModel(GetOrtEnv(), config_path.c_str());
       }))
-      .def("generate", [](Model& model, PyGeneratorParams& params) { params.Prepare(); return Generate(model, params); })
+      .def("generate", [](Model& model, PyGeneratorParams& params) { params.Prepare(); model.GetMaxBatchSizeFromGeneratorParams(params); return Generate(model, params); })
       .def_property_readonly("device_type", [](const Model& s) { return s.device_type_; });
 
   pybind11::class_<PyGenerator>(m, "Generator")

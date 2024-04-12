@@ -13,7 +13,18 @@ PositionInputs::PositionInputs(const Model& model, State& state, RoamingArray<in
   has_seqlens_k_input_ = model_.session_info_->HasInput(model_.config_->model.decoder.inputs.seqlens_k);
   has_total_sequence_length_input_ = model_.session_info_->HasInput(model_.config_->model.decoder.inputs.total_sequence_length);
 
-  type_ = model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.attention_mask);
+  type_ = Ort::TypeToTensorType<int32_t>::type;
+  if (has_mask_input_) {
+    type_ = model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.attention_mask);
+  }
+  if (has_posid_input_) {
+    if (has_mask_input_) {
+      if (model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.position_ids) != type_) {
+        throw std::runtime_error("position_ids & attention_mask must have the same data type");
+      }
+    }
+    type_ = model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.position_ids);
+  }
 
   if (type_ != Ort::TypeToTensorType<int32_t>::type && type_ != Ort::TypeToTensorType<int64_t>::type)
     throw std::runtime_error("position_ids & attention_mask only support int32 or int64 types");
@@ -37,7 +48,7 @@ PositionInputs::PositionInputs(const Model& model, State& state, RoamingArray<in
   position_ids_shape_ = shape;
   attention_mask_shape_ = shape;
 
-  if (model_.device_type_ == DeviceType::CUDA && model_.use_cuda_graphs_) {
+  if (model_.device_type_ == DeviceType::CUDA && model_.use_cuda_graph_) {
     size_t max_beam_batch_size = model_.config_->search.num_beams * model_.max_batch_size_;
     sb_position_ids_ = std::make_unique<StaticBuffer>(model_.allocator_device_, max_beam_batch_size);
     sb_seqlens_k_ = std::make_unique<StaticBuffer>(model_.allocator_device_, max_beam_batch_size);

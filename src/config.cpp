@@ -322,8 +322,7 @@ bool IsCudaGraphEnabled(Config::SessionOptions& session_options) {
   for (const auto& provider_options : session_options.provider_options) {
     if (provider_options.name == "cuda") {
       for (const auto& value : provider_options.options) {
-        if (value.first == "can_use_cuda_graph") {
-          // Is it the correct value string?
+        if (value.first == "enable_cuda_graph") {
           return value.second == "1";
         }
       }
@@ -399,7 +398,7 @@ Config::Config(const std::filesystem::path& path) : config_path{path} {
   if (search.max_length == 0)
     search.max_length = model.context_length;
 
-  can_use_cuda_graphs = IsCudaGraphEnabled(model.decoder.session_options);
+  enable_cuda_graph = IsCudaGraphEnabled(model.decoder.session_options);
 }
 
 }  // namespace Generators

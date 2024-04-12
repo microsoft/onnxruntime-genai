@@ -2,7 +2,6 @@
 #include "decoder_only.h"
 
 namespace Generators {
-
 DecoderOnly_Model::DecoderOnly_Model(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
   session_decoder_ = OrtSession::Create(ort_env, (config_->config_path / config_->model.decoder.filename).c_str(), session_options_.get());
@@ -26,7 +25,7 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, RoamingArra
 
 RoamingArray<float> DecoderOnly_State::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
   if (first_run_) {
-    if (model_.use_cuda_graphs_) {
+    if (model_.use_cuda_graph_) {
       model_.run_options_->AddConfigEntry("gpu_graph_id", "-1");
     }
     first_run_ = false;
@@ -37,7 +36,7 @@ RoamingArray<float> DecoderOnly_State::Run(int current_length, RoamingArray<int3
   State::Run(*model_.session_decoder_, *model_.run_options_);
 
   // Set the graph id for the following runs.
-  if (model_.use_cuda_graphs_) {
+  if (model_.use_cuda_graph_) {
     int new_graph_annotation_id = GetGraphAnnotationId();
     if (new_graph_annotation_id != graph_annotation_id_) {
       graph_annotation_id_ = new_graph_annotation_id;

@@ -476,10 +476,10 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
 void Model::GetMaxBatchSizeFromGeneratorParams(const GeneratorParams& params) {
   max_batch_size_ = params.max_batch_size;
   if (max_batch_size_ > 0 && DeviceType::CUDA == device_type_) {
-    if (!config_->can_use_cuda_graphs) {
+    if (!config_->enable_cuda_graph) {
       throw std::runtime_error("CUDA graphs are not enabled in this model");
     }
-    use_cuda_graphs_ = true;
+    use_cuda_graph_ = true;
   }
 }
 

@@ -123,7 +123,7 @@ struct Model : std::enable_shared_from_this<Model> {
 
   std::shared_ptr<Model> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
 
-  bool use_cuda_graphs_{};
+  bool use_cuda_graph_{};
   int max_batch_size_{};
 
  protected:

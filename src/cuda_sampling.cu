@@ -8,7 +8,6 @@
 #include <algorithm>
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
-#include <iostream>
 #include <memory>
 #include <numeric>
 #include <random>
