@@ -96,7 +96,6 @@ class Model:
             "logits": ["batch_size", "sequence_length", self.vocab_size],                                        # For standard models
             "present.key": ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size],           # For standard models (note that `present.key` is written this way to match Hugging Face format)
             "present.value": ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size],         # For standard models (note that `present.value` is written this way to match Hugging Face format)
->>>>>>> e295090d8c224bc85f29ded9fcaa3991c53f3694
         }
         self.exclude_lm_head = "exclude_lm_head" in extra_options
         if self.exclude_lm_head:
