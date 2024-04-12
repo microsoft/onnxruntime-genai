@@ -7,7 +7,7 @@ namespace Generators {
 
 struct Tokenizer;
 
-void ConvertFp16ToFp32(OrtAllocator& allocator, cudaStream_t stream, OrtValue& in, std::unique_ptr<OrtValue>& p_out);
+void ConvertFp16ToFp32(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<OrtValue>& p_out, DeviceType device_type, cudaStream_t stream);
 
 struct State {
   State(const GeneratorParams& params);

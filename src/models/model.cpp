@@ -366,8 +366,7 @@ std::shared_ptr<GeneratorParams> CreateGeneratorParams() {
   return std::make_shared<GeneratorParams>();
 }
 
-#if USE_CUDA
-void ConvertFp16ToFp32(OrtAllocator& allocator, cudaStream_t stream, OrtValue& in, std::unique_ptr<OrtValue>& p_out) {
+void ConvertFp16ToFp32(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<OrtValue>& p_out, DeviceType device_type, cudaStream_t stream) {
   auto shape_info = in.GetTensorTypeAndShapeInfo();
   auto shape = shape_info->GetShape();
   assert(shape_info->GetElementType() == Ort::TypeToTensorType<Ort::Float16_t>::type);
@@ -386,9 +385,22 @@ void ConvertFp16ToFp32(OrtAllocator& allocator, cudaStream_t stream, OrtValue& i
   auto* fp16 = in.GetTensorData<uint16_t>();
   auto* fp32 = p_out->GetTensorMutableData<float>();
 
-  cuda::LaunchFp16ToFp32(fp16, fp32, count, stream);
-}
+  switch (device_type) {
+    case DeviceType::CPU:
+      for (int i = 0; i < count; i++)
+        fp32[i] = Float16ToFloat32(fp16[i]);
+      break;
+
+#ifdef USE_CUDA
+    case DeviceType::CUDA:
+      cuda::LaunchFp16ToFp32(fp16, fp32, count, stream);
+      break;
 #endif
+
+    default:
+      throw std::runtime_error("ConvertFp16ToFp32 - Unsupported device type");
+  }
+}
 
 size_t GetOrtTypeSize(ONNXTensorElementDataType type) {
   switch (type) {

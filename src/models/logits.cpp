@@ -9,9 +9,6 @@ Logits::Logits(const Model& model, State& state)
       state_{state},
       shape_{static_cast<int64_t>(state_.params_->batch_size) * state_.params_->search.num_beams, state_.params_->sequence_length, state_.params_->vocab_size},
       type_{model_.session_info_->GetOutputDataType(model_.config_->model.decoder.outputs.logits)} {
-  if (model_.device_type_ == DeviceType::CPU && type_ != Ort::TypeToTensorType<float>::type)
-    throw std::runtime_error("Model logits_type can only be float32 on CPU");
-
   auto logits_tensor = OrtValue::CreateTensor(*model.allocator_device_, shape_, type_);
   if (type_ == Ort::TypeToTensorType<float>::type)
     value32_ = std::move(logits_tensor);
@@ -32,11 +29,9 @@ Logits::Logits(const Model& model, State& state)
 RoamingArray<float> Logits::Get() {
   size_t element_count = shape_[0] * shape_[1] * shape_[2];
 
-#if USE_CUDA
   // Convert from float16 to float32 if necessary
-  if (model_.device_type_ == DeviceType::CUDA && type_ == Ort::TypeToTensorType<Ort::Float16_t>::type)
-    ConvertFp16ToFp32(*model_.allocator_device_, model_.cuda_stream_, *value16_, value32_);
-#endif
+  if (type_ == Ort::TypeToTensorType<Ort::Float16_t>::type)
+    ConvertFp16ToFp32(*model_.allocator_device_, *value16_, value32_, model_.device_type_, model_.cuda_stream_);
 
   // First iteration? Then copy the logits over to a {batch_beams, 1, vocab_size} tensor
   // We'll reuse this tensor for all future iterations
