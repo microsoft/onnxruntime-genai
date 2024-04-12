@@ -3,7 +3,7 @@
 #include "input_ids.h"
 #include "logits.h"
 #include "kv_cache.h"
-#include "position_metadata.h"
+#include "position_inputs.h"
 
 namespace Generators {
 
@@ -30,7 +30,7 @@ struct DecoderOnly_State : State {
   InputIDs input_ids_{model_, *this};
   Logits logits_{model_, *this};
   KV_Cache kv_cache_{model_, *this};
-  PositionMetadata position_metadata_;
+  PositionInputs position_inputs_;
 };
 
 }  // namespace Generators

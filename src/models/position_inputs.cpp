@@ -1,11 +1,11 @@
 #include "../generators.h"
 #include "model.h"
-#include "position_metadata.h"
+#include "position_inputs.h"
 #include "kernels.h"
 
 namespace Generators {
 
-PositionMetadata::PositionMetadata(const Model& model, State& state, RoamingArray<int32_t>& sequence_lengths_unk)
+PositionInputs::PositionInputs(const Model& model, State& state, RoamingArray<int32_t>& sequence_lengths_unk)
     : model_{model},
       state_{state} {
   has_mask_input_ = model_.session_info_->HasInput(model_.config_->model.decoder.inputs.attention_mask);
@@ -44,7 +44,7 @@ PositionMetadata::PositionMetadata(const Model& model, State& state, RoamingArra
   }
 }
 
-void PositionMetadata::Add() {
+void PositionInputs::Add() {
   if (has_posid_input_) {
     AddPositionIDs();
   }
@@ -59,7 +59,7 @@ void PositionMetadata::Add() {
   }
 }
 
-void PositionMetadata::Update(int current_length) {
+void PositionInputs::Update(int current_length) {
   if (has_posid_input_) {
     UpdatePositionIDs(current_length);
   }
@@ -74,21 +74,21 @@ void PositionMetadata::Update(int current_length) {
   }
 }
 
-void PositionMetadata::AddAttentionMask() {
+void PositionInputs::AddAttentionMask() {
   mask_input_index_ = state_.inputs_.size();
 
   state_.inputs_.push_back(attention_mask_.get());
   state_.input_names_.push_back(model_.config_->model.decoder.inputs.attention_mask.c_str());
 }
 
-void PositionMetadata::AddPositionIDs() {
+void PositionInputs::AddPositionIDs() {
   posid_input_index_ = state_.inputs_.size();
 
   state_.inputs_.push_back(position_ids_.get());
   state_.input_names_.push_back(model_.config_->model.decoder.inputs.position_ids.c_str());
 }
 
-void PositionMetadata::AddSeqlensK() {
+void PositionInputs::AddSeqlensK() {
   seqlens_k_input_index_ = state_.inputs_.size();
 
   senlens_k_shape_ = {static_cast<int64_t>(state_.params_->batch_size) * state_.params_->search.num_beams};
@@ -102,7 +102,7 @@ void PositionMetadata::AddSeqlensK() {
   state_.input_names_.push_back(model_.config_->model.decoder.inputs.seqlens_k.c_str());
 }
 
-void PositionMetadata::AddTotalSequenceLength() {
+void PositionInputs::AddTotalSequenceLength() {
   total_sequence_length_input_index_ = state_.inputs_.size();
   total_sequence_length_ = OrtValue::CreateTensor(model_.allocator_cpu_,
                                                   {},
@@ -113,7 +113,7 @@ void PositionMetadata::AddTotalSequenceLength() {
   state_.input_names_.push_back(model_.config_->model.decoder.inputs.total_sequence_length.c_str());
 }
 
-void PositionMetadata::UpdatePositionIDs(int current_length) {
+void PositionInputs::UpdatePositionIDs(int current_length) {
   // Reallocate position_ids for the 2nd and onward shape
   if (is_first_posid_update_) {
     position_ids_shape_[1] = 1;
@@ -163,7 +163,7 @@ void PositionMetadata::UpdatePositionIDs(int current_length) {
   }
 }
 
-void PositionMetadata::UpdateSeqlensK(int current_length) {
+void PositionInputs::UpdateSeqlensK(int current_length) {
 #if USE_CUDA
   assert(type_ == Ort::TypeToTensorType<int32_t>::type);
   assert(model_.device_type_ == DeviceType::CUDA);
@@ -183,11 +183,11 @@ void PositionMetadata::UpdateSeqlensK(int current_length) {
 #endif
 }
 
-void PositionMetadata::UpdateTotalSequenceLength(int current_length) {
+void PositionInputs::UpdateTotalSequenceLength(int current_length) {
   total_sequence_length_->GetTensorMutableData<int32_t>()[0] = current_length;
 }
 
-void PositionMetadata::UpdateAttentionMask(int current_length) {
+void PositionInputs::UpdateAttentionMask(int current_length) {
   // Update attention mask
   assert(attention_mask_shape_[1] == current_length - 1);  // We should always be growing by 1
   attention_mask_shape_[1] = current_length;
@@ -218,7 +218,7 @@ void PositionMetadata::UpdateAttentionMask(int current_length) {
 }
 
 template <typename T>
-void PositionMetadata::InitializeTensors(std::array<int64_t, 2> shape, cpu_span<int32_t> sequence_lengths) {
+void PositionInputs::InitializeTensors(std::array<int64_t, 2> shape, cpu_span<int32_t> sequence_lengths) {
   // Set attention mask to be 0 for pad tokens, and 1 for all other tokens.
   // Set position id to be 0 for pad tokens, and accumulated sum of mask in a batch for other tokens
   auto* mask_data = attention_mask_->GetTensorMutableData<T>();
@@ -248,7 +248,7 @@ void PositionMetadata::InitializeTensors(std::array<int64_t, 2> shape, cpu_span<
 }
 
 template <typename T>
-void PositionMetadata::UpdatePositionIDsImpl() {
+void PositionInputs::UpdatePositionIDsImpl() {
   // Increment position IDs
   auto* data = position_ids_->GetTensorMutableData<T>();
   for (int i = 0; i < position_ids_shape_[0]; i++) {
@@ -257,7 +257,7 @@ void PositionMetadata::UpdatePositionIDsImpl() {
 };
 
 template <typename T>
-void PositionMetadata::UpdateAttentionMaskImpl(T* data, const T* old_data, int current_length) {
+void PositionInputs::UpdateAttentionMaskImpl(T* data, const T* old_data, int current_length) {
   for (int i = 0; i < attention_mask_shape_[0]; i++) {
     for (int j = 0; j < current_length - 1; j++) {
       data[i * current_length + j] = old_data[i * (current_length - 1) + j];

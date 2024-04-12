@@ -16,9 +16,9 @@ std::unique_ptr<State> Gpt_Model::CreateState(RoamingArray<int32_t> sequence_len
 Gpt_State::Gpt_State(const Gpt_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const GeneratorParams& params)
     : State{params},
       model_{model},
-      position_metadata_{model, *this, sequence_lengths_unk} {
+      position_inputs_{model, *this, sequence_lengths_unk} {
   input_ids_.Add();
-  position_metadata_.Add();
+  position_inputs_.Add();
   logits_.Add();
   kv_cache_.Add();
 }
@@ -36,7 +36,7 @@ RoamingArray<float> Gpt_State::Run(int current_length, RoamingArray<int32_t> nex
 
 void Gpt_State::UpdateInputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> beam_indices, int current_length) {
   input_ids_.Update(next_tokens);
-  position_metadata_.Update(current_length);
+  position_inputs_.Update(current_length);
   kv_cache_.Update(beam_indices.GetCPU(), current_length);
 }
 
