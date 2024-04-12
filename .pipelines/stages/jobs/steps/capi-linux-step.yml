@@ -81,11 +81,11 @@ steps:
       --volume $(Build.Repository.LocalPath):/ort_genai_src \
       -w /ort_genai_src/ onnxruntime$(ep)build$(arch) \
       bash -c " \
-          /usr/bin/cmake --preset linux_gcc_$(ep)_release \
+          /usr/bin/cmake --preset linux_gcc_$(ep)_debug \
             -DENABLE_TESTS=OFF \
             -DMANYLINUX=ON \
             -DPYTHON_EXECUTABLE=/opt/python/cp$(PyNoDotVer)-cp$(PyNoDotVer)/bin/python$(PyDotVer) && \
-          /usr/bin/cmake --build --preset linux_gcc_$(ep)_release \
+          /usr/bin/cmake --build --preset linux_gcc_$(ep)_debug \
             --target python"
     displayName: 'Build Python $(PyNoDotVer)'
     workingDirectory: '$(Build.Repository.LocalPath)'
@@ -103,11 +103,11 @@ steps:
       --volume $(Build.Repository.LocalPath):/ort_genai_src \
       -w /ort_genai_src/ onnxruntime$(ep)build$(arch) \
       bash -c " \
-          /usr/bin/cmake --build --preset linux_gcc_$(ep)_release \
+          /usr/bin/cmake --build --preset linux_gcc_$(ep)_debug \
             -DENABLE_TESTS=OFF \
             -DMANYLINUX=ON \
             -DPYTHON_EXECUTABLE=/opt/python/cp$(PyNoDotVer)-cp$(PyNoDotVer)/bin/python$(PyDotVer) && \
-          /usr/bin/cmake --build --preset linux_gcc_$(ep)_release \
+          /usr/bin/cmake --build --preset linux_gcc_$(ep)_debug \
             --target PyPackageBuild"
     displayName: 'PyPackageBuild $(PyNoDotVer)'
     workingDirectory: '$(Build.Repository.LocalPath)'
