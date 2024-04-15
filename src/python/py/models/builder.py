@@ -1222,7 +1222,7 @@ class Model:
         # TODO: add make_position_ids_reformatting() here
 
     def make_attention_mask_reformatting(self):
-        if self.ep_attrs["cuda"]["enable_cuda_graph"] == "1"
+        if self.ep_attrs["cuda"]["enable_cuda_graph"] == "1":
             # ORT does not allow nodes to be placed on mulitple execution providers
             # with cuda graph enabled. Thus the attention mask is deprecated and the
             # subgraph is replaced with seqlens_k and total_seq_len as the raw
