@@ -38,14 +38,16 @@ class Model:
         self.io_dtype = io_dtype      # {'fp16', 'fp32'}
         self.onnx_dtype = onnx_dtype  # {"int4", "fp16", "fp32"}
 
+        enable_cuda_graph = "1" if "enable_cuda_graph" in extra_options and extra_options["enable_cuda_graph"] == "1" else "0"
         # EP-specific variables
         self.ep = ep
         self.ep_attrs = {
             "cpu": {},
-            "cuda": {},
+            "cuda": {
+                "enable_cuda_graph": enable_cuda_graph
+            },  # "1" if the the model is able to enable cuda graph, "0" otherwise.
             "dml": {},
         }
-        self.ep_attrs["cuda"]["enable_cuda_graph"] = "1" if "enable_cuda_graph" in extra_options and extra_options["enable_cuda_graph"] == "1" else "0"
 
         self.cache_dir = cache_dir
         self.filename = extra_options["filename"] if "filename" in extra_options else "model.onnx"

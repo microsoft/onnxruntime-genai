@@ -1,6 +1,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
+#include <iostream>
 #include "../generators.h"
 #include "../json.h"
 #include "../search.h"
