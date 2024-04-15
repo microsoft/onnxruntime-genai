@@ -29,7 +29,7 @@ InputIDs::InputIDs(const Model& model, State& state)
   shape_[0] *= state_.params_->search.num_beams;
 
   if (model_.device_type_ == DeviceType::CUDA && model_.use_cuda_graph_) {
-    size_t max_beam_batch_size = model_.config_->search.num_beams * model_.max_batch_size_;
+    size_t max_beam_batch_size = static_cast<size_t>(model_.config_->search.num_beams) * model_.max_batch_size_;
     sb_input_ids_ = std::make_unique<StaticBuffer>(model_.allocator_device_, max_beam_batch_size);
   }
 }

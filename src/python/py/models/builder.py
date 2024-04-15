@@ -40,12 +40,12 @@ class Model:
 
         # EP-specific variables
         self.ep = ep
-        self.enable_cuda_graph = "enable_cuda_graph" in extra_options and extra_options["enable_cuda_graph"] == "1"
         self.ep_attrs = {
             "cpu": {},
             "cuda": {},
             "dml": {},
         }
+        self.ep_attrs["cuda"]["enable_cuda_graph"] = "1" if "enable_cuda_graph" in extra_options and extra_options["enable_cuda_graph"] == "1" else "0"
 
         self.cache_dir = cache_dir
         self.filename = extra_options["filename"] if "filename" in extra_options else "model.onnx"
@@ -58,7 +58,7 @@ class Model:
         self.nodes = []
 
         # Map input names to their types and shapes
-        self.input_names = ["input_ids", "attention_mask", "position_ids"] if not self.enable_cuda_graph else ["input_ids", "position_ids", "seqlens_k", "total_seq_len"]
+        self.input_names = ["input_ids", "attention_mask", "position_ids"]
         self.input_types = {
             "input_ids": TensorProto.INT64,                                                                      # For standard models
             "attention_mask": TensorProto.INT64,                                                                 # For standard models
@@ -82,6 +82,9 @@ class Model:
         self.exclude_embeds = "exclude_embeds" in extra_options
         if self.exclude_embeds:
             self.input_names = [name.replace("input_ids", "inputs_embeds") for name in self.input_names]
+
+        if self.ep_attrs["cuda"]["enable_cuda_graph"] == '1':
+            self.input_names = ["input_ids", "position_ids", "seqlens_k", "total_seq_len"]
 
         # Map output names to their types and shapes
         self.output_names = ["logits"]
@@ -244,8 +247,6 @@ class Model:
 
         if self.ep != "cpu":
             ep_options = { self.ep : self.ep_attrs[self.ep] }
-            if self.enable_cuda_graph and self.ep == "cuda":
-                ep_options["cuda"]["enable_cuda_graph"] = "1"
             genai_config["model"]["decoder"]["session_options"]["provider_options"].append(ep_options)
 
         print(f"Saving GenAI config in {out_dir}")
@@ -855,8 +856,8 @@ class Model:
         if op_type == "MultiHeadAttention":
             self.make_multi_head_attention(name, add_qk=f"{self.mask_attrs['mask_name']}/output_0", **kwargs)
         elif op_type == "GroupQueryAttention":
-            seqlens_k_name = f"{self.mask_attrs['seqlens_k']}/output_0" if not self.enable_cuda_graph else "seqlens_k"
-            total_seq_len_name = f"{self.mask_attrs['total_seq_len']}/output_0" if not self.enable_cuda_graph else "total_seq_len"
+            seqlens_k_name = f"{self.mask_attrs['seqlens_k']}/output_0" if self.ep_attrs["cuda"]["enable_cuda_graph"] == "0" else "seqlens_k"
+            total_seq_len_name = f"{self.mask_attrs['total_seq_len']}/output_0" if self.ep_attrs["cuda"]["enable_cuda_graph"] == "0" else "total_seq_len"
             self.make_group_query_attention(name, seqlens_k=seqlens_k_name, total_seq_len=total_seq_len_name, **kwargs)
         else:
             raise NotImplementedError(f"The {op_type} op is not currently supported.")
@@ -1221,7 +1222,7 @@ class Model:
         # TODO: add make_position_ids_reformatting() here
 
     def make_attention_mask_reformatting(self):
-        if self.enable_cuda_graph:
+        if self.ep_attrs["cuda"]["enable_cuda_graph"] == "1"
             # ORT does not allow nodes to be placed on mulitple execution providers
             # with cuda graph enabled. Thus the attention mask is deprecated and the
             # subgraph is replaced with seqlens_k and total_seq_len as the raw
@@ -1804,7 +1805,9 @@ def get_args():
                 exclude_lm_head = Remove language modeling head from your ONNX model.
                     Use this option when you want to remove the language modeling head from within your ONNX model.
                     Instead of `logits`, you will have `hidden_states` as the output to your ONNX model.
-                enable_cuda_graph = 1 : The model can use CUDA graph capture for CUDA execution provider. Limitations may apply.
+                enable_cuda_graph = 1 : The model can use CUDA graph capture for CUDA execution provider. If enabled, raw inputs(seqlens_k and total_seq_len)
+                    to the GroupQueryAttention are populated to the graph inputs to ensure all nodes are placed on the CUDA EP. Currently there's no gurantee 
+                    that cuda graph be enabled as it depends on the model and the graph structure.
             """),
     )
 

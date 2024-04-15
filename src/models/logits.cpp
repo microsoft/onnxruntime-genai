@@ -16,7 +16,7 @@ Logits::Logits(const Model& model, State& state)
     value16_ = std::move(logits_tensor);
 
   if (model_.device_type_ == DeviceType::CUDA && model_.use_cuda_graph_) {
-    size_t max_beam_batch_size = model_.config_->search.num_beams * model_.max_batch_size_;
+    size_t max_beam_batch_size = static_cast<size_t>(model_.config_->search.num_beams) * model_.max_batch_size_;
     if (type_ == Ort::TypeToTensorType<float>::type) {
       sb_logits32_ = std::make_unique<StaticBuffer>(model_.allocator_device_, max_beam_batch_size);
     }
