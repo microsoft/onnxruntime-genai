@@ -397,8 +397,6 @@ Config::Config(const std::filesystem::path& path) : config_path{path} {
 
   if (search.max_length == 0)
     search.max_length = model.context_length;
-
-  enable_cuda_graph = IsCudaGraphEnabled(model.decoder.session_options);
 }
 
 }  // namespace Generators

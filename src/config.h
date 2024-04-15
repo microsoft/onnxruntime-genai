@@ -8,8 +8,6 @@ struct Config {
 
   std::filesystem::path config_path;  // Path of the config directory
 
-  bool enable_cuda_graph{false};
-
   using ProviderOption = std::pair<std::string, std::string>;
   struct ProviderOptions {
     std::string name;
