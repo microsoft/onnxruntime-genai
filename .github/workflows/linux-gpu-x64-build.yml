@@ -13,6 +13,8 @@ env:
 jobs:
   linux-cuda-x64-build:
     env :
+      ep: "cuda"
+      arch: "x64"
       PyNoDotVer: "38"
       PyDotVer: "3.8"
     runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2004-T4" ]
@@ -55,7 +57,12 @@ jobs:
             --container-registry onnxruntimebuildcache \
             --manylinux-src manylinux \
             --multiple_repos \
-            --repository onnxruntimecudabuildx64
+            --repository onnxruntime$epbuild$arch
+
+#      - name: Print Docker Image Environment Variables
+#        run: |
+#          echo "Printing docker image environment variables"
+#          docker run --rm onnxruntime$epbuild$arch env
 
       - name: Build with Cmake in Docker
         run: |
@@ -64,7 +71,7 @@ jobs:
             --gpus all \
             --rm \
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
-            -w /ort_genai_src onnxruntimecudabuildx64 bash -c "echo $PATH && /usr/bin/cmake -DCMAKE_CUDA_ARCHITECTURES=86 --preset linux_gcc_cuda_release && /usr/bin/cmake --build --preset linux_gcc_cuda_release"
+            -w /ort_genai_src onnxruntime$epbuild$arch bash -c "echo $PATH && /usr/bin/cmake -DCMAKE_CUDA_ARCHITECTURES=86 --preset linux_gcc_cuda_release && /usr/bin/cmake --build --preset linux_gcc_cuda_release"
 
       - name: Install the onnxruntime-genai Python wheel and run Python tests
         run: |
@@ -73,13 +80,13 @@ jobs:
             --gpus all \
             --rm \
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
-            -w /ort_genai_src onnxruntimecudabuildx64 bash -c "python3 -m pip install /ort_genai_src/build/cuda/wheel/onnxruntime_genai*.whl --user && python3 -m pip install -r test/python/requirements.txt --user && python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models"
+            -w /ort_genai_src onnxruntime$epbuild$arch bash -c "python3 -m pip install /ort_genai_src/build/cuda/wheel/onnxruntime_genai*.whl --user && python3 -m pip install -r test/python/requirements.txt --user && python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models"
 
       - name: Docker -- Run tests
         run: |
-          echo "Running docker image onnxruntimecudabuildx64"
+          echo "Running docker image onnxruntime$epbuild$arch"
           docker run \
             --gpus all \
             --rm \
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
-            -w /ort_genai_src onnxruntimecudabuildx64 bash -c "/ort_genai_src/build/cuda/test/unit_tests"
+            -w /ort_genai_src onnxruntime$epbuild$arch bash -c "/ort_genai_src/build/cuda/test/unit_tests"
