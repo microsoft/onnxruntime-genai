@@ -1,0 +1,10 @@
+﻿<Application x:Class="Genny.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:Genny"
+             StartupUri="MainWindow.xaml">
+    <Application.Resources>
+        <BitmapImage x:Key="ImageAvatarUser" UriSource="/Images/user.png" />
+        <BitmapImage x:Key="ImageAvatarRobot" UriSource="/Images/robot.png" />
+    </Application.Resources>
+</Application>
