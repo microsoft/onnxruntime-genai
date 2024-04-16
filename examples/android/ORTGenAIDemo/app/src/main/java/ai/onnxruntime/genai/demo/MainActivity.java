@@ -97,11 +97,9 @@ public class MainActivity extends AppCompatActivity implements GenAIWrapper.Toke
         // In Device Explorer navigate to /data/data/ai.onnxruntime.genai.demo/files
         // Right-click on the files folder an update the phi-int4-cpu folder.
 
-        //File fd = getFilesDir();
+        File fd = getFilesDir();
 
-        File fd = new File("/data/local/tmp/onnxruntime-genai/models");
-        String modelDirName = "phi2-int4-cpu-compfp32";
-        //String modelDirName = "phi2-int4-cpu-compint8";
+        String modelDirName = "phi2-int4-cpu-compint8";
         GenAIWrapper wrapper = new GenAIWrapper(fd.getPath() + "/" + modelDirName);
         wrapper.setTokenUpdateListener(this);
 
