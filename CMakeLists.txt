@@ -8,7 +8,6 @@ project(Generators LANGUAGES C CXX)
 # All Options should be defined in cmake/options.cmake
 include(cmake/options.cmake)
 include(cmake/external/onnxruntime_external_deps.cmake)
-include(cmake/util_func.cmake)
 
 file(READ "VERSION_INFO" ver)
 set(VERSION_INFO ${ver} CACHE STRING "Set the onnxruntime-genai version info.")
@@ -107,7 +106,10 @@ add_library(onnxruntime-genai-static STATIC ${generator_srcs})
 target_include_directories(onnxruntime-genai PRIVATE ${ORT_HEADER_DIR})
 target_include_directories(onnxruntime-genai-static PRIVATE ${ORT_HEADER_DIR})
 
-genai_set_target_compile_options(onnxruntime-genai)
+if(CMAKE_GENERATOR_TOOLSET MATCHES "Visual Studio")
+  target_link_options(onnxruntime-genai PRIVATE "/CETCOMPAT")
+  target_compile_options(onnxruntime-genai PRIVATE "/sdl")
+endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set_target_properties(onnxruntime-genai-static PROPERTIES POSITION_INDEPENDENT_CODE ON)
