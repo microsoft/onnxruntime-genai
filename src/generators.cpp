@@ -9,6 +9,10 @@
 #include "search_cuda.h"
 #endif
 
+#if USE_DML
+#include "search_dml.h"
+#endif
+
 namespace Generators {
 
 // IEEE 752-2008 binary16 format, 1 sign bit, 5 bit exponent, 10 bit fraction
@@ -51,12 +55,21 @@ std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorPa
   return std::make_unique<Generator>(model, params);
 }
 
-std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
+std::unique_ptr<Search> CreateSearch(const GeneratorParams& params, const Model& model) {
 #if USE_CUDA
   if (params.device_type == DeviceType::CUDA) {
     if (params.search.num_beams > 1)
       return std::make_unique<BeamSearch_Cuda>(params);
     return std::make_unique<GreedySearch_Cuda>(params);
+  }
+#endif
+
+#if USE_DML
+  if (params.device_type == DeviceType::DML) {
+    if (params.search.num_beams > 1) {
+      return std::make_unique<BeamSearch_Dml>(params, model.GetDmlExecutionContext(), model.GetDmlReadbackHeap());
+    }
+    return std::make_unique<GreedySearch_Dml>(params, model.GetDmlExecutionContext(), model.GetDmlReadbackHeap());
   }
 #endif
 
@@ -78,7 +91,7 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
   if (params.sequence_length >= params.search.max_length)
     throw std::runtime_error("input sequence_length is >= max_length");
 
-  search_ = CreateSearch(params);
+  search_ = CreateSearch(params, model);
   state_ = model.CreateState(search_->GetSequenceLengths(), params);
 }
 

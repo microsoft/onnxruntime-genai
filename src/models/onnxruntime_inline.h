@@ -26,8 +26,8 @@ inline const char* Exception::what() const noexcept { return api->GetErrorMessag
 struct StandardAllocator : OrtAllocator {
   StandardAllocator() : OrtAllocator{} {
     version = ORT_API_VERSION;
-    OrtAllocator::Alloc = [](OrtAllocator* /*this_*/, size_t size) -> void* { return new std::byte[size]; };
-    OrtAllocator::Free = [](OrtAllocator* /*this_*/, void* p) { delete reinterpret_cast<std::byte*>(p); };
+    OrtAllocator::Alloc = [](OrtAllocator* /*this_*/, size_t size) -> void* { return new uint8_t[size]; };
+    OrtAllocator::Free = [](OrtAllocator* /*this_*/, void* p) { delete reinterpret_cast<uint8_t*>(p); };
   }
 };
 

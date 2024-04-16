@@ -97,6 +97,16 @@ void PositionIDs::Update(int current_length) {
           cuda::Launch_UpdateAttentionMask(next_attention_mask->GetTensorMutableData<int64_t>(), attention_mask_->GetTensorData<int64_t>(), static_cast<int>(attention_mask_shape_[0]), current_length, model_.cuda_stream_);
         break;
 #endif
+
+#if USE_DML
+      case DeviceType::DML: {
+        if (type_ == Ort::TypeToTensorType<int32_t>::type)
+          UpdateAttentionMask(next_attention_mask->GetTensorMutableData<int32_t>(), attention_mask_->GetTensorData<int32_t>(), current_length);
+        else
+          UpdateAttentionMask(next_attention_mask->GetTensorMutableData<int64_t>(), attention_mask_->GetTensorData<int64_t>(), current_length);
+        break;
+      }
+#endif
       default:
         throw std::runtime_error("PositionIDs::Update - Unsupported device type");
     }

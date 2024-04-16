@@ -1,42 +1,16 @@
 #pragma once
 
-#include "sequences.h"
 #include <random>
+#include "sequences.h"
+#include "search.h"
+#include "models/dml_readback_heap.h"
 
 namespace Generators {
 
 struct BeamSearchScorer;
 
-struct Search {
-  Search(const GeneratorParams& params) : params_{params.shared_from_this()} {}
-  virtual ~Search() = default;
-
-  virtual RoamingArray<int32_t> GetNextTokens() = 0;
-  virtual RoamingArray<int32_t> GetNextIndices() = 0;
-  virtual RoamingArray<int32_t> GetSequenceLengths() = 0;
-  virtual int GetSequenceLength() const = 0;
-  virtual RoamingArray<int32_t> GetSequence(int index) = 0;
-
-  virtual void SetLogits(RoamingArray<float> logits) = 0;
-  virtual bool IsDone() const = 0;
-
-  // TODO: Beam Search only, this should be removed and made automatic
-  virtual void Finalize(size_t /*num_return_sequences*/, RoamingArray<int32_t> /*output*/, RoamingArray<float> /*sequence_scores*/) { assert(false); }
-
-  virtual void SelectTop() = 0;
-  virtual void SampleTopP(float /*p*/, float /*temperature*/) { assert(false); }
-  virtual void SampleTopK(int /*k*/, float /*temperature*/) { assert(false); }
-  virtual void SampleTopKTopP(int /*k*/, float /*p*/, float /*temperature*/) { assert(false); }
-
-  // Scoring features
-  virtual void ApplyMinLength(int min_length) = 0;
-  virtual void ApplyRepetitionPenalty(float penalty) = 0;
-
-  std::shared_ptr<const GeneratorParams> params_;
-};
-
-struct Search_Cpu : Search {
-  Search_Cpu(const GeneratorParams& params);
+struct Search_Dml : Search {
+  Search_Dml(const GeneratorParams& params, DmlExecutionContext* dml_execution_context, DmlReadbackHeap* dml_readback_heap);
 
   int GetSequenceLength() const override;
   RoamingArray<int32_t> GetSequenceLengths() override { return sequence_lengths_; }
@@ -60,10 +34,13 @@ struct Search_Cpu : Search {
 
   Sequences sequences_;
   bool done_{};
+
+  DmlExecutionContext* dml_execution_context_;
+  DmlReadbackHeap* dml_readback_heap_;
 };
 
-struct GreedySearch_Cpu : Search_Cpu {
-  GreedySearch_Cpu(const GeneratorParams& params);
+struct GreedySearch_Dml : Search_Dml {
+  GreedySearch_Dml(const GeneratorParams& params, DmlExecutionContext* dml_execution_context, DmlReadbackHeap* dml_readback_heap);
 
   RoamingArray<int32_t> GetNextTokens() override;
   RoamingArray<int32_t> GetNextIndices() override { return cpu_span<int32_t>{}; }
@@ -89,9 +66,9 @@ struct GreedySearch_Cpu : Search_Cpu {
   std::mt19937 gen_;
 };
 
-struct BeamSearch_Cpu : Search_Cpu {
-  BeamSearch_Cpu(const GeneratorParams& params);
-  ~BeamSearch_Cpu();
+struct BeamSearch_Dml : Search_Dml {
+  BeamSearch_Dml(const GeneratorParams& params, DmlExecutionContext* dml_execution_context, DmlReadbackHeap* dml_readback_heap);
+  ~BeamSearch_Dml();
 
   RoamingArray<int32_t> GetNextTokens() override;
   RoamingArray<int32_t> GetNextIndices() override;

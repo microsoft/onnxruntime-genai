@@ -5,6 +5,10 @@
 #include <memory>
 #include "span.h"
 
+#if USE_DML
+#include "models/dml_readback_heap.h"
+#endif
+
 namespace Generators {
 
 template <typename... T>
@@ -193,6 +197,65 @@ struct RoamingArray {
   cuda_host_unique_ptr<T> cpu_owner_;
   gpu_span<T> device_;
   cuda_unique_ptr<T> device_owner_;
+};
+#elif USE_DML
+// A roaming array is one that can be in CPU or GPU memory, and will copy the memory as needed to be used from anywhere
+// It does not own the original memory, only the on-demand copy memory.
+template <typename T>
+struct RoamingArray {
+  RoamingArray() = default;
+  RoamingArray(const RoamingArray& v) { Assign(v); }
+
+  bool empty() const { return cpu_data_.empty() && gpu_data_ == nullptr; }
+
+  RoamingArray(cpu_span<T> cpu_data) {
+    SetCPU(cpu_data);
+  }
+
+  RoamingArray(DmlReadbackHeap* dml_readback_heap, ID3D12Resource* gpu_data, uint64_t offset, uint64_t size_in_bytes) {
+    SetGPU(readback_heap, v, offset, size_in_bytes);
+  }
+
+  operator cpu_span<T>() { return GetCPU(); }
+
+  void SetCPU(cpu_span<T> cpu) {
+    cpu_data_ = cpu;
+    gpu_data_ = nullptr;
+  }
+
+  void SetGPU(DmlReadbackHeap* dml_readback_heap, ID3D12Resource* gpu_data, uint64_t offset, uint64_t size_in_bytes) {
+    dml_readback_heap_ = dml_readback_heap;
+    gpu_data_ = gpu_data;
+    gpu_offset_ = offset;
+    gpu_size_in_bytes_ = size_in_bytes;
+    cpu_data_ = {};
+  }
+
+  cpu_span<T> GetCPU() {
+    if (cpu_.empty() && !device_.empty()) {
+      cpu_owner_ = CudaMallocHostArray<T>(device_.size(), &cpu_);
+
+      dml_readback_heap_->ReadbackFromGpu()
+
+      cudaMemcpy(cpu_.data(), device_.data(), cpu_.size_bytes(), cudaMemcpyDeviceToHost);
+    }
+
+    return cpu_data_;
+  }
+
+  void Assign(const RoamingArray<T>& v) {
+    cpu_data_ = v.cpu_data_;
+    gpu_data_ = v.gpu_data_;
+    gpu_offset_ = v.gpu_offset_;
+    gpu_size_in_bytes_ = v.gpu_size_in_bytes_;
+    dml_readback_heap_ = v.dml_readback_heap_;
+  }
+
+  cpu_span<T> cpu_data_;
+  ComPtr<ID3D12Resource> gpu_data_;
+  uint64_t gpu_offset_;
+  uint64_t gpu_size_in_bytes_;
+  DmlReadbackHeap* dml_readback_heap_;
 };
 #else
 // A roaming array is one that can be in CPU or GPU memory, and will copy the memory as needed to be used from anywhere

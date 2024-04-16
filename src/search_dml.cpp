@@ -1,21 +1,23 @@
-#include "generators.h"
-#include "softmax.h"
-#include "search.h"
-#include "beam_search_scorer.h"
 #include <queue>
 #include <algorithm>
+#include "generators.h"
+#include "softmax.h"
+#include "search_dml.h"
+#include "beam_search_scorer.h"
 
 namespace Generators {
 
-Search_Cpu::Search_Cpu(const GeneratorParams& params)
+Search_Dml::Search_Dml(const GeneratorParams& params, DmlExecutionContext* dml_execution_context, DmlReadbackHeap* dml_readback_heap)
     : Search{params},
-      sequences_{params.input_ids, params.batch_size, params.search.num_beams, params_->search.max_length} {
+      sequences_{params.input_ids, params.batch_size, params.search.num_beams, params_->search.max_length},
+      dml_execution_context_(dml_execution_context),
+      dml_readback_heap_(dml_readback_heap) {
   auto batch_beam_size = params.BatchBeamSize();
   sequence_lengths_buffer_ = AllocateArray<int32_t>(batch_beam_size, &sequence_lengths_);
 }
 
-GreedySearch_Cpu::GreedySearch_Cpu(const GeneratorParams& params)
-    : Search_Cpu(params), gen_(rd_()) {
+GreedySearch_Dml::GreedySearch_Dml(const GeneratorParams& params, DmlExecutionContext* dml_execution_context, DmlReadbackHeap* dml_readback_heap)
+    : Search_Dml(params, dml_execution_context, dml_readback_heap), gen_(rd_()) {
   next_tokens_buffer_ = AllocateArray<int32_t>(params.batch_size, &next_tokens_);
   memset(next_tokens_.data(), 0, next_tokens_.size_bytes());
 
@@ -23,35 +25,36 @@ GreedySearch_Cpu::GreedySearch_Cpu(const GeneratorParams& params)
   memset(eos_seen_.data(), 0, eos_seen_.size_bytes());
 }
 
-BeamSearch_Cpu::BeamSearch_Cpu(const GeneratorParams& params)
-    : Search_Cpu(params) {
+BeamSearch_Dml::BeamSearch_Dml(const GeneratorParams& params, DmlExecutionContext* dml_execution_context, DmlReadbackHeap* dml_readback_heap)
+    : Search_Dml(params, dml_execution_context, dml_readback_heap) {
   assert(params_->search.num_beams > 1);  // If 1, use GreedySearch
   beam_scorer_ = std::make_unique<BeamSearchScorer>(*params_);
 }
 
-BeamSearch_Cpu::~BeamSearch_Cpu() = default;
+BeamSearch_Dml::~BeamSearch_Dml() = default;
 
-void Search_Cpu::SetLogits(RoamingArray<float> logits_unk) {
+void Search_Dml::SetLogits(RoamingArray<float> logits_unk) {
+  // TODO (pavignol): Optimize (ideally do the computation on the GPU)
   next_token_scores_ = logits_unk.GetCPU();
 }
 
-RoamingArray<int32_t> GreedySearch_Cpu::GetNextTokens() {
+RoamingArray<int32_t> GreedySearch_Dml::GetNextTokens() {
   return next_tokens_;
 }
 
-RoamingArray<int32_t> BeamSearch_Cpu::GetNextTokens() {
+RoamingArray<int32_t> BeamSearch_Dml::GetNextTokens() {
   return beam_scorer_->GetNextTokens();
 }
 
-RoamingArray<int32_t> BeamSearch_Cpu::GetNextIndices() {
+RoamingArray<int32_t> BeamSearch_Dml::GetNextIndices() {
   return beam_scorer_->GetNextIndicesCPU();
 }
 
-int Search_Cpu::GetSequenceLength() const {
+int Search_Dml::GetSequenceLength() const {
   return sequences_.GetSequenceLength();
 }
 
-void BeamSearch_Cpu::SelectTop() {
+void BeamSearch_Dml::SelectTop() {
   auto beam_scores = beam_scorer_->GetNextScores();
   // Add beam score to next token scores. Corresponding python code is like:
   //    next_token_scores = next_token_scores + beam_scores[:, None].expand_as(next_token_scores)
@@ -115,7 +118,7 @@ void BeamSearch_Cpu::SelectTop() {
   AppendNextTokensToSequences();
 }
 
-void GreedySearch_Cpu::SelectTop() {
+void GreedySearch_Dml::SelectTop() {
   // next_tokens = torch.argmax(scores, dim=-1)
   for (size_t batch_id = 0; batch_id < params_->batch_size; batch_id++) {
     if (PadIfAlreadyEOS(batch_id)) {
@@ -143,7 +146,7 @@ static void SoftMax(std::span<float> scores, float temperature) {
   std::transform(scores.begin(), scores.end(), scores.begin(), [exp_sum](float score) { return score / exp_sum; });
 }
 
-void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
+void GreedySearch_Dml::SampleTopK(int k, float temperature) {
   for (size_t batch_id = 0; batch_id < params_->batch_size; batch_id++) {
     std::span<float> const scores = next_token_scores_.subspan(batch_id * params_->vocab_size, params_->vocab_size);
     SoftMax(scores, temperature);
@@ -158,7 +161,7 @@ void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
   AppendNextTokensToSequences();
 }
 
-void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
+void GreedySearch_Dml::SampleTopP(float p, float temperature) {
   std::uniform_real_distribution<float> dis(0, p);
   for (size_t batch_id = 0; batch_id < params_->batch_size; batch_id++) {
     if (PadIfAlreadyEOS(batch_id)) {
@@ -187,7 +190,7 @@ void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
   AppendNextTokensToSequences();
 }
 
-void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature) {
+void GreedySearch_Dml::SampleTopKTopP(int k, float p, float temperature) {
   std::uniform_real_distribution<float> dis(0, p);
   for (size_t batch_id = 0; batch_id < params_->batch_size; batch_id++) {
     if (PadIfAlreadyEOS(batch_id)) {
@@ -216,7 +219,7 @@ void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature) {
   AppendNextTokensToSequences();
 }
 
-bool GreedySearch_Cpu::PadIfAlreadyEOS(size_t batch_id) {
+bool GreedySearch_Dml::PadIfAlreadyEOS(size_t batch_id) {
   // If this batch entry has already seen the EOS token, append the pad token
   if (!eos_seen_[batch_id]) {
     return false;
@@ -226,7 +229,7 @@ bool GreedySearch_Cpu::PadIfAlreadyEOS(size_t batch_id) {
   return true;
 }
 
-void GreedySearch_Cpu::SetNextToken(size_t batch_id, int32_t token) {
+void GreedySearch_Dml::SetNextToken(size_t batch_id, int32_t token) {
   next_tokens_[batch_id] = token;
   if (token == params_->eos_token_id) {
     eos_seen_[batch_id] = true;
@@ -236,7 +239,7 @@ void GreedySearch_Cpu::SetNextToken(size_t batch_id, int32_t token) {
   }
 }
 
-void GreedySearch_Cpu::AppendNextTokensToSequences() {
+void GreedySearch_Dml::AppendNextTokensToSequences() {
   sequences_.AppendNextTokenToSequences(next_tokens_);
 
   if (sequences_.GetSequenceLength() == params_->search.max_length) {
@@ -244,7 +247,7 @@ void GreedySearch_Cpu::AppendNextTokensToSequences() {
   }
 }
 
-void BeamSearch_Cpu::AppendNextTokensToSequences() {
+void BeamSearch_Dml::AppendNextTokensToSequences() {
   sequences_.AppendNextTokenToSequences(beam_scorer_->GetNextIndicesCPU(), beam_scorer_->GetNextTokens());
 
   if (sequences_.GetSequenceLength() == params_->search.max_length) {
@@ -252,16 +255,16 @@ void BeamSearch_Cpu::AppendNextTokensToSequences() {
   }
 }
 
-void BeamSearch_Cpu::Finalize(size_t num_return_sequences, RoamingArray<int32_t> output, RoamingArray<float> sequence_scores) {
+void BeamSearch_Dml::Finalize(size_t num_return_sequences, RoamingArray<int32_t> output, RoamingArray<float> sequence_scores) {
   beam_scorer_->Finalize(sequences_, num_return_sequences, output, sequence_scores);
 }
 
-std::span<float> Search_Cpu::GetScores(int batch_beam_index) const {
+std::span<float> Search_Dml::GetScores(int batch_beam_index) const {
   assert(batch_beam_index >= 0 && batch_beam_index < params_->BatchBeamSize());
   return next_token_scores_.subspan(static_cast<size_t>(batch_beam_index) * params_->vocab_size, params_->vocab_size);
 }
 
-void Search_Cpu::ApplyMinLength(int min_length) {
+void Search_Dml::ApplyMinLength(int min_length) {
   if (sequences_.GetSequenceLength() >= min_length) {
     return;
   }
@@ -273,7 +276,7 @@ void Search_Cpu::ApplyMinLength(int min_length) {
   }
 }
 
-void Search_Cpu::ApplyRepetitionPenalty(float penalty) {
+void Search_Dml::ApplyRepetitionPenalty(float penalty) {
   if (penalty == 1.0f)
     return;
 

@@ -2,6 +2,10 @@
 #include "model.h"
 #include "logits.h"
 
+#if USE_DML
+#include "dml_helpers.h"
+#endif
+
 namespace Generators {
 
 Logits::Logits(const Model& model, State& state)
@@ -38,7 +42,6 @@ RoamingArray<float> Logits::Get() {
 
     shape_[1] = 1;
     auto value_next = OrtValue::CreateTensor<float>(*model_.allocator_device_, shape_);
-    auto logits_next = cpu_span<float>{value_next->GetTensorMutableData<float>(), element_count};
 
     size_t vocab_index = 0;  // Simpler math to have this index go up by vocab_size for every logit chunk we process
 
@@ -51,16 +54,48 @@ RoamingArray<float> Logits::Get() {
           break;
       }
 
-      auto logits = std::span<float>{value32_->GetTensorMutableData<float>(), element_count};
       for (int beam_index = 0; beam_index < num_beams; beam_index++) {
-        std::span<const float> source = logits.subspan(vocab_index * seq_length + token_index * vocab_size, vocab_size);
-        auto target = logits_next.subspan(vocab_index, vocab_size);
+        switch (model_.device_type_) {
 #if USE_CUDA
-        if (model_.device_type_ == DeviceType::CUDA)
-          CudaCheck() == cudaMemcpyAsync(target.data(), source.data(), source.size_bytes(), cudaMemcpyDeviceToDevice, state_.params_->cuda_stream);
-        else
+          case DeviceType::CUDA: {
+            auto logits_next = gpu_span<float>{value_next->GetTensorMutableData<float>(), element_count};
+            auto logits = std::span<float>{value32_->GetTensorMutableData<float>(), element_count};
+            std::span<const float> source = logits.subspan(vocab_index * seq_length + token_index * vocab_size, vocab_size);
+            auto target = logits_next.subspan(vocab_index, vocab_size);
+            CudaCheck() == cudaMemcpyAsync(target.data(), source.data(), source.size_bytes(), cudaMemcpyDeviceToDevice, state_.params_->cuda_stream);
+          } break;
 #endif
-          copy(source, target);
+
+#if USE_DML
+          case DeviceType::DML: {
+            ComPtr<ID3D12Resource> source_resource;
+            Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, value32_->GetTensorMutableRawData(), &source_resource));
+
+            ComPtr<ID3D12Resource> target_resource;
+            Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, value_next->GetTensorMutableRawData(), &target_resource));
+
+            uint64_t source_offset = (vocab_index * seq_length + token_index * vocab_size) * sizeof(float);
+            uint64_t target_offset = vocab_index * sizeof(float);
+            uint64_t data_size_in_bytes = vocab_size * sizeof(float);
+            model_.GetDmlExecutionContext()->CopyBufferRegion(
+                target_resource.Get(),
+                target_offset,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                source_resource.Get(),
+                source_offset,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                data_size_in_bytes);
+          } break;
+#endif
+
+          case DeviceType::CPU: {
+            auto logits_next = cpu_span<float>{value_next->GetTensorMutableData<float>(), element_count};
+            auto logits = std::span<float>{value32_->GetTensorMutableData<float>(), element_count};
+            std::span<const float> source = logits.subspan(vocab_index * seq_length + token_index * vocab_size, vocab_size);
+            auto target = logits_next.subspan(vocab_index, vocab_size);
+            copy(source, target);
+          } break;
+        }
 
         vocab_index += vocab_size;
       }
@@ -79,6 +114,16 @@ RoamingArray<float> Logits::Get() {
   if (model_.device_type_ == DeviceType::CUDA)
     return gpu_span<float>{value32_->GetTensorMutableData<float>(), element_count};
 #endif
+
+#if USE_DML
+  if (model_.device_type_ == DeviceType::DML) {
+    ComPtr<ID3D12Resource> logits_resource;
+    Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, value32_->GetTensorMutableRawData(), &logits_resource));
+
+    return RoamingArray<float>(model_.GetDmlReadbackHeap(), logits_resource.Get(), 0, element_count);
+  }
+#endif
+
   return cpu_span<float>{value32_->GetTensorMutableData<float>(), element_count};
 }
 

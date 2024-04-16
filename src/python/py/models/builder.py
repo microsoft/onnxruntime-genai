@@ -114,7 +114,7 @@ class Model:
         # Attention-specific variables (MHA, GQA, GQA + Rot.Emb., etc.)
         self.attention_attrs = {
             "op_type": "MultiHeadAttention",                                # Attention op to use
-            "use_gqa": ep == "cuda" and io_dtype == TensorProto.FLOAT16     # Check if GroupQueryAttention can be used
+            "use_gqa": (ep == "cuda" and io_dtype == TensorProto.FLOAT16) or ep == "dml"     # Check if GroupQueryAttention can be used
         }
         if self.attention_attrs["use_gqa"]:
             self.attention_attrs["op_type"] = "GroupQueryAttention"
@@ -182,6 +182,9 @@ class Model:
         if self.ep == "cuda":
             cuda_options = { "cuda" : { } }
             genai_config["model"]["decoder"]["session_options"]["provider_options"].append(cuda_options)
+        elif self.ep == "dml":
+            dml_options = { "dml" : { } }
+            genai_config["model"]["decoder"]["session_options"]["provider_options"].append(dml_options)
 
         print(f"Saving GenAI config in {out_dir}")
         with open(os.path.join(out_dir,"genai_config.json"), "w") as f:
@@ -1633,7 +1636,7 @@ def get_args():
         "-e",
         "--execution_provider",
         required=True,
-        choices=["cpu", "cuda"],
+        choices=["cpu", "cuda", "dml"],
         help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU)",
     )
 

@@ -9,6 +9,7 @@
 #include "decoder_only.h"
 #include "whisper.h"
 #include "kernels.h"
+
 #ifdef USE_DML
 //  Because dml_provider_factory includes windows headers that #define min and max, this next line will prevent this from happening
 #define NOMINMAX
@@ -30,6 +31,90 @@ static std::wstring CurrentModulePath() {
 
   return out_path;
 }
+
+static ComPtr<ID3D12Resource> CreateD3D12ResourceOfByteSize(
+    ID3D12Device* d3dDevice,
+    size_t resourceByteSize,
+    D3D12_HEAP_TYPE heapType = D3D12_HEAP_TYPE_DEFAULT,
+    D3D12_RESOURCE_STATES resourceState = D3D12_RESOURCE_STATE_COMMON,
+    D3D12_RESOURCE_FLAGS resourceFlags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) {
+  resourceByteSize = std::max(resourceByteSize, size_t(DML_MINIMUM_BUFFER_TENSOR_ALIGNMENT));
+
+  // DML needs the resources' sizes to be a multiple of 4 bytes
+  (resourceByteSize += 3) &= ~3;
+
+  D3D12_HEAP_PROPERTIES heapProperties = {};
+  heapProperties.Type = heapType;
+  heapProperties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+  heapProperties.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+  heapProperties.CreationNodeMask = 1;
+  heapProperties.VisibleNodeMask = 1;
+
+  D3D12_RESOURCE_DESC resourceDesc = {};
+  resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  resourceDesc.Alignment = 0;
+  resourceDesc.Width = static_cast<uint64_t>(resourceByteSize);
+  resourceDesc.Height = 1;
+  resourceDesc.DepthOrArraySize = 1;
+  resourceDesc.MipLevels = 1;
+  resourceDesc.Format = DXGI_FORMAT_UNKNOWN;
+  resourceDesc.SampleDesc = {1, 0};
+  resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  resourceDesc.Flags = resourceFlags;
+
+  ComPtr<ID3D12Resource> gpuResource;
+  THROW_IF_FAILED(d3dDevice->CreateCommittedResource(
+      &heapProperties,
+      D3D12_HEAP_FLAG_NONE,
+      &resourceDesc,
+      resourceState,
+      nullptr,
+      IID_PPV_ARGS(&gpuResource)));
+
+  return gpuResource;
+}
+
+static void UploadDataToDml(
+    DmlObjects& dml_objects,
+    ID3D12Resource* destinationResource,
+    uint64_t dst_offset,
+    std::span<const uint8_t> sourceData) {
+  // Get the size of the resource.
+  D3D12_RESOURCE_DESC resourceDesc = destinationResource->GetDesc();
+  assert(resourceDesc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER);
+  const size_t dataSizeInBytes = static_cast<size_t>(resourceDesc.Width);
+
+  // Create intermediate upload resource visible to both CPU and GPU.
+  dml_objects.upload_buffer = CreateD3D12ResourceOfByteSize(dml_objects.d3d12Device.Get(), dataSizeInBytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_FLAG_NONE);
+
+  // Copy CPU-side data to shared memory that is both CPU and GPU visible.
+  size_t clampedDataByteSize = std::min(dataSizeInBytes, sourceData.size());
+  uint8_t* uploadBufferData = nullptr;
+  THROW_IF_FAILED(dml_objects.upload_buffer->Map(0, nullptr, reinterpret_cast<void**>(&uploadBufferData)));
+  memcpy(uploadBufferData, sourceData.data(), clampedDataByteSize);
+  dml_objects.upload_buffer->Unmap(0, nullptr);
+
+  D3D12_RESOURCE_BARRIER resourceBarrier{};
+  resourceBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  resourceBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+  resourceBarrier.Transition = {};
+  resourceBarrier.Transition.pResource = destinationResource;
+  resourceBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  resourceBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+  resourceBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+
+  // Issue deferred command to copy from the intermediate shared resource to the final GPU resource,
+  // and then execute the commands.
+  dml_objects.commandList->CopyBufferRegion(destinationResource, dst_offset, dml_objects.upload_buffer.Get(), dst_offset, sourceData.size());
+  dml_objects.commandList->ResourceBarrier(1, &resourceBarrier);
+  THROW_IF_FAILED(dml_objects.commandList->Close());
+  ID3D12CommandList* commandLists[] = {dml_objects.commandList.Get()};
+  dml_objects.commandQueue->ExecuteCommandLists(ARRAYSIZE(commandLists), commandLists);
+
+  THROW_IF_FAILED(dml_objects.commandAllocator->Reset());
+  THROW_IF_FAILED(dml_objects.commandList->Reset(dml_objects.commandAllocator.Get(), nullptr));
+}
+
 #endif
 
 namespace Generators {
@@ -194,6 +279,22 @@ Ort::Allocator* GetCudaAllocator(OrtSession& session) {
 }
 #endif
 
+#if USE_DML
+// Since Python/Others can and will hold onto a generator object past the model object's lifetime we need to ensure
+// the allocator used is not destroyed until last. This keeps the allocator around until exit, after all other memory
+// has been destroyed.
+Ort::Allocator* GetDmlAllocator(OrtSession& session) {
+  static std::unique_ptr<OrtMemoryInfo> memory_info_dml_;
+  static std::unique_ptr<Ort::Allocator> allocator_dml_;
+
+  if (!allocator_dml_) {
+    memory_info_dml_ = OrtMemoryInfo::Create("DML", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+    allocator_dml_ = Ort::Allocator::Create(session, *memory_info_dml_);
+  }
+  return allocator_dml_.get();
+}
+#endif
+
 SessionInfo::SessionInfo(OrtSession& session) {
   auto input_names = session.GetInputNames();
   std::vector<ONNXTensorElementDataType> input_types(input_names.size());
@@ -245,6 +346,13 @@ void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
     allocator_device_ = GetCudaAllocator(session);
   }
 #endif
+
+#if USE_DML
+  if (device_type_ == DeviceType::DML) {
+    allocator_device_ = GetDmlAllocator(session);
+  }
+#endif
+
   session_info_ = std::make_unique<SessionInfo>(session);
 }
 
@@ -323,14 +431,19 @@ void Model::CreateSessionOptions() {
       ort_options.AppendExecutionProvider_ROCM(ort_provider_options);
 #ifdef USE_DML
     } else if (provider_options.name == "dml") {
-      const OrtDmlApi* p_dml_api{};
-      Ort::ThrowOnError(Ort::api->GetExecutionProviderApi("DML", ORT_API_VERSION, reinterpret_cast<const void**>(&p_dml_api)));
-      if (!p_dml_api)
+      dml_objects_ = CreateDmlObjects();
+      dml_execution_context_ = std::make_unique<DmlExecutionContext>(dml_objects_.d3d12Device.Get(), dml_objects_.commandQueue.Get());
+      dml_pooled_upload_heap_ = std::make_unique<DmlPooledUploadHeap>(dml_objects_.d3d12Device.Get(), dml_execution_context_.get());
+      dml_readback_heap_ = std::make_unique<DmlReadbackHeap>(dml_objects_.d3d12Device.Get());
+
+      Ort::ThrowOnError(Ort::api->GetExecutionProviderApi("DML", ORT_API_VERSION, reinterpret_cast<const void**>(&p_dml_api_)));
+      if (!p_dml_api_)
         throw std::runtime_error("Unexpected nullptr getting OrtDmlApi");
       auto directml_dll = CurrentModulePath() + L"DirectML.dll";
       if (LoadLibraryExW(directml_dll.c_str(), nullptr, 0) == NULL)
         throw std::runtime_error("DirectML.dll not found");
-      p_dml_api->SessionOptionsAppendExecutionProvider_DML(&ort_options, 0);
+      p_dml_api_->SessionOptionsAppendExecutionProvider_DML1(&ort_options, nullptr, dml_objects_.commandQueue.Get());
+      device_type_ = DeviceType::DML;  // Scoring will use DML
 #endif
     } else
       throw std::runtime_error("Unknown provider type: " + provider_options.name);
@@ -441,29 +554,52 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
   auto expanded = OrtValue::CreateTensor(*allocator_device_, input_shape, element_type);
 
   const auto* input_data = reinterpret_cast<const uint8_t*>(input->GetTensorRawData());
-  auto* expanded_data = reinterpret_cast<uint8_t*>(expanded->GetTensorMutableRawData());
-  auto* target = expanded_data;
 
   switch (device_type_) {
-    case DeviceType::CPU:
+    case DeviceType::CPU: {
+      auto* expanded_data = reinterpret_cast<uint8_t*>(expanded->GetTensorMutableRawData());
+      auto* target = expanded_data;
+
       for (int i = 0; i < batch_size; i++) {
         for (int j = 0; j < num_beams; j++) {
           memcpy(target, input_data + i * data_size_bytes, data_size_bytes);
           target += data_size_bytes;
         }
       }
-      break;
+    } break;
 
 #if USE_CUDA
-    case DeviceType::CUDA:
+    case DeviceType::CUDA: {
+      auto* expanded_data = reinterpret_cast<uint8_t*>(expanded->GetTensorMutableRawData());
+      auto* target = expanded_data;
+
       for (int i = 0; i < batch_size; i++) {
         for (int j = 0; j < num_beams; j++) {
           cudaMemcpyAsync(target, input_data + i * data_size_bytes, data_size_bytes, cudaMemcpyHostToDevice, cuda_stream_);
           target += data_size_bytes;
         }
       }
-      break;
+
+    } break;
 #endif
+
+#if USE_DML
+    case DeviceType::DML: {
+      ComPtr<ID3D12Resource> target_resource;
+      Ort::ThrowOnError(p_dml_api_->GetD3D12ResourceFromAllocation(allocator_device_, expanded->GetTensorMutableRawData(), &target_resource));
+      uint64_t target_offset = 0;
+
+      for (int i = 0; i < batch_size; i++) {
+        for (int j = 0; j < num_beams; j++) {
+          // TODO (pavignol): Batch the uploads into a single command list and/or copy
+          auto data_span = std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(input_data + i * data_size_bytes), data_size_bytes);
+          dml_pooled_upload_heap_->BeginUploadToGpu(target_resource.Get(), target_offset, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, data_span);
+          target_offset += data_size_bytes;
+        }
+      }
+    } break;
+#endif
+
     default:
       throw std::runtime_error("ExpandInputs - Unsupported device type");
   }

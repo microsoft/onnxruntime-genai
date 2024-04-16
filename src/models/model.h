@@ -3,6 +3,14 @@
 #include "tfmtok_c.h"
 #endif
 
+#ifdef USE_DML
+#include "dml_helpers.h"
+#include "dml_provider_factory.h"
+#include "dml_execution_context.h"
+#include "dml_pooled_upload_heap.h"
+#include "dml_readback_heap.h"
+#endif
+
 namespace Generators {
 
 struct Tokenizer;
@@ -119,9 +127,25 @@ struct Model : std::enable_shared_from_this<Model> {
 
   std::shared_ptr<Model> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
 
+#if USE_DML
+  DmlExecutionContext* GetDmlExecutionContext() const { return dml_execution_context_.get(); }
+  DmlReadbackHeap* GetDmlReadbackHeap() const { return dml_readback_heap_.get(); }
+  const OrtDmlApi* GetOrtDmlApi() const { return p_dml_api_; }
+#endif
+
  protected:
   void InitDeviceAllocator(OrtSession& session);
   void CreateSessionOptions();
+
+#if USE_DML
+ private:
+
+  mutable DmlObjects dml_objects_;
+  const OrtDmlApi* p_dml_api_ = nullptr;
+  std::unique_ptr<DmlPooledUploadHeap> dml_pooled_upload_heap_;
+  std::unique_ptr<DmlExecutionContext> dml_execution_context_;
+  std::unique_ptr<DmlReadbackHeap> dml_readback_heap_;
+#endif
 };
 
 }  // namespace Generators
