@@ -1788,7 +1788,7 @@ def get_args():
                     Instead of `input_ids`, you will have `inputs_embeds` as the input to your ONNX model.
                 exclude_lm_head = Remove language modeling head from your ONNX model.
                     Use this option when you want to remove the language modeling head from within your ONNX model.
-                    Instead of `logits`, you will have `hidden_states` as the output to your ONNX model.
+                    Instead of `logits`, you will have `hidden_states` as the output to your ONNX model. Test.
             """),
     )
 
