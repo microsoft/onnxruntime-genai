@@ -53,6 +53,8 @@ void PositionIDs::Update(int current_length) {
       state_.inputs_[input_index_] = position_ids_.get();
     } else {  // Just incrementing existing position IDs
       switch (model_.device_type_) {
+        case DeviceType::DML:
+          // DML doesn't support on-device position ids update yet, so we fall back to the CPU
         case DeviceType::CPU: {
           if (type_ == Ort::TypeToTensorType<int32_t>::type)
             UpdatePositionIDs<int32_t>();
@@ -79,9 +81,15 @@ void PositionIDs::Update(int current_length) {
     assert(attention_mask_shape_[1] == current_length - 1);  // We should always be growing by 1
     attention_mask_shape_[1] = current_length;
 
+#if USE_DML
+    std::unique_ptr<OrtValue> next_attention_mask = OrtValue::CreateTensor(model_.allocator_cpu_, attention_mask_shape_, type_);
+#else
     std::unique_ptr<OrtValue> next_attention_mask = OrtValue::CreateTensor(*model_.allocator_device_, attention_mask_shape_, type_);
+#endif
 
     switch (model_.device_type_) {
+      case DeviceType::DML:
+        // DML doesn't support on-device mask updating yet, so we fallback to the CPU
       case DeviceType::CPU: {
         if (type_ == Ort::TypeToTensorType<int32_t>::type)
           UpdateAttentionMask(next_attention_mask->GetTensorMutableData<int32_t>(), attention_mask_->GetTensorData<int32_t>(), current_length);

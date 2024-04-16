@@ -9,7 +9,11 @@ Logits::Logits(const Model& model, State& state)
       state_{state},
       shape_{static_cast<int64_t>(state_.params_->batch_size) * state_.params_->search.num_beams, state_.params_->sequence_length, state_.params_->vocab_size},
       type_{model_.session_info_->GetOutputDataType(model_.config_->model.decoder.outputs.logits)} {
+#ifdef USE_DML
+  auto logits_tensor = OrtValue::CreateTensor(model.allocator_cpu_, shape_, type_);
+#else
   auto logits_tensor = OrtValue::CreateTensor(*model.allocator_device_, shape_, type_);
+#endif
   if (type_ == Ort::TypeToTensorType<float>::type)
     value32_ = std::move(logits_tensor);
   else
@@ -21,7 +25,11 @@ RoamingArray<float> Logits::Get() {
 
   // Convert from float16 to float32 if necessary
   if (type_ == Ort::TypeToTensorType<Ort::Float16_t>::type)
+#if USE_DML
+    ConvertFp16ToFp32(model_.allocator_cpu_, *value16_, value32_, model_.device_type_, model_.cuda_stream_);
+#else
     ConvertFp16ToFp32(*model_.allocator_device_, *value16_, value32_, model_.device_type_, model_.cuda_stream_);
+#endif
 
   // First iteration? Then copy the logits over to a {batch_beams, 1, vocab_size} tensor
   // We'll reuse this tensor for all future iterations
@@ -32,7 +40,13 @@ RoamingArray<float> Logits::Get() {
     const size_t num_beams = state_.params_->search.num_beams;
 
     shape_[1] = 1;
+
+#if USE_DML
+    auto value_next = OrtValue::CreateTensor<float>(model_.allocator_cpu_, shape_);
+#else
     auto value_next = OrtValue::CreateTensor<float>(*model_.allocator_device_, shape_);
+#endif
+
     auto logits_next = cpu_span<float>{value_next->GetTensorMutableData<float>(), element_count};
 
     size_t vocab_index = 0;  // Simpler math to have this index go up by vocab_size for every logit chunk we process
@@ -65,7 +79,11 @@ RoamingArray<float> Logits::Get() {
 
     value32_ = std::move(value_next);
     if (type_ == Ort::TypeToTensorType<Ort::Float16_t>::type)
+#if USE_DML
+      value16_ = OrtValue::CreateTensor(model_.allocator_cpu_, shape_, type_);
+#else
       value16_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
+#endif
 
     state_.outputs_[output_index_] = type_ == Ort::TypeToTensorType<float>::type ? value32_.get() : value16_.get();
   }

@@ -159,12 +159,13 @@ class Model:
             "use_rotemb_in_attn": False,                     # Use rotary embeddings within attention op (instead of a separate RotaryEmbedding op)
             "use_packed_matmul": False,                      # Use packed MatMul (instead of 3 separate MatMuls for Q/K/V)
         }
-        if self.ep == "cuda" and self.io_dtype == TensorProto.FLOAT16:
+        if self.ep in {"cuda", "dml"} and self.io_dtype == TensorProto.FLOAT16:
             # Change model settings for GroupQueryAttention
             self.attention_attrs["op_type"] = "GroupQueryAttention"
-            print("GroupQueryAttention (GQA) is used in this model. GQA is currently supported only for INT4 CUDA and FP16 CUDA.")
+            print("GroupQueryAttention (GQA) is used in this model. GQA is currently supported only for INT4 and FP16 on the CUDA and DML execution providers.")
 
-            self.attention_attrs["use_packed_matmul"] = self.num_attn_heads == self.num_kv_heads
+            # DML doesn't support stacked Q/K/V for GQA yet
+            self.attention_attrs["use_packed_matmul"] = self.ep != "dml" and self.num_attn_heads == self.num_kv_heads
 
             # GQA + Rot.Emb. does not require `position ids` as input
             self.attention_attrs["use_rotemb_in_attn"] = True
@@ -1751,7 +1752,7 @@ def get_args():
         "-e",
         "--execution_provider",
         required=True,
-        choices=["cpu", "cuda"],
+        choices=["cpu", "cuda", "dml"],
         help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU)",
     )
 

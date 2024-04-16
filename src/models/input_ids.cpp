@@ -40,7 +40,11 @@ void InputIDs::Update(RoamingArray<int32_t> next_tokens_unk) {
   // Resize input_ids shape once if it doesn't match the decoder shape
   if (shape_[1] != 1) {
     shape_[1] = 1;
+#ifdef USE_DML
+    value_ = OrtValue::CreateTensor(model_.allocator_cpu_, shape_, type_);
+#else
     value_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
+#endif
     state_.inputs_[input_index_] = value_.get();
   }
 
