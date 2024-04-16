@@ -37,7 +37,7 @@ namespace Generators {
 State::State(const GeneratorParams& params) : params_{params.shared_from_this()} {
 }
 
-void State::Run(OrtSession& session) {
+void State::Run(OrtSession& session, OrtRunOptions& run_options) {
 #if 0
   // To show input values, enable this block (output values will be shapes only at this point)
   printf("**Inputs:\r\n");
@@ -46,7 +46,7 @@ void State::Run(OrtSession& session) {
   DumpTensors(outputs_.data(), output_names_.data(), output_names_.size(), false);
 #endif
 
-  session.Run(nullptr, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
+  session.Run(&run_options, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
 
 #if 0
   // To show the output values, enable this block
@@ -233,6 +233,9 @@ ONNXTensorElementDataType SessionInfo::GetOutputDataType(const std::string& name
 }
 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
+  // TODO: add function to create run options
+  run_options_ = OrtRunOptions::Create();
+
   CreateSessionOptions();
 }
 
@@ -480,6 +483,16 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
       throw std::runtime_error("ExpandInputs - Unsupported device type");
   }
   return expanded;
+}
+
+void Model::GetMaxBatchSizeFromGeneratorParams(const GeneratorParams& params) {
+  max_batch_size_ = params.max_batch_size;
+  if (max_batch_size_ > 0 && DeviceType::CUDA == device_type_) {
+    if (!IsCudaGraphEnabled(config_->model.decoder.session_options)) {
+      throw std::runtime_error("CUDA graphs are not enabled in this model");
+    }
+    use_cuda_graph_ = true;
+  }
 }
 
 }  // namespace Generators

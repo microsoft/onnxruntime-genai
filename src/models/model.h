@@ -21,8 +21,8 @@ struct State {
   std::vector<OrtValue*> inputs_, outputs_;
 
  protected:
-  void Run(OrtSession& session);  // Uses the inputs below to run
-  void ClearIO();                 // Clear all inputs/outputs
+  void Run(OrtSession& session, OrtRunOptions& run_options);  // Uses the inputs below to run
+  void ClearIO();                                             // Clear all inputs/outputs
 };
 
 #ifdef NO_TOKENIZER
@@ -108,8 +108,12 @@ struct Model : std::enable_shared_from_this<Model> {
 
   std::unique_ptr<OrtValue> ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams) const;
 
+  void GetMaxBatchSizeFromGeneratorParams(const GeneratorParams& params);
+
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
+  std::unique_ptr<OrtRunOptions> run_options_;
+
   cuda_stream_holder cuda_stream_;
   DeviceType device_type_{DeviceType::CPU};
   Ort::Allocator& allocator_cpu_{Ort::Allocator::GetWithDefaultOptions()};
@@ -118,6 +122,9 @@ struct Model : std::enable_shared_from_this<Model> {
   std::unique_ptr<SessionInfo> session_info_;
 
   std::shared_ptr<Model> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
+
+  bool use_cuda_graph_{};
+  int max_batch_size_{};
 
  protected:
   void InitDeviceAllocator(OrtSession& session);
