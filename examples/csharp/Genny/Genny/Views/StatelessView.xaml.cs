@@ -36,6 +36,9 @@ namespace Genny.Views
         public static readonly DependencyProperty TokenizerProperty =
             DependencyProperty.Register(nameof(Tokenizer), typeof(Tokenizer), typeof(StatelessView));
 
+        public static readonly DependencyProperty ModelOptionsProperty =
+            DependencyProperty.Register(nameof(ModelOptions), typeof(ModelOptionsModel), typeof(StatelessView));
+
         public static readonly DependencyProperty SearchOptionsProperty =
             DependencyProperty.Register(nameof(SearchOptions), typeof(SearchOptionsModel), typeof(StatelessView));
 
@@ -55,6 +58,12 @@ namespace Genny.Views
         {
             get { return (Tokenizer)GetValue(TokenizerProperty); }
             set { SetValue(TokenizerProperty, value); }
+        }
+
+        public ModelOptionsModel ModelOptions
+        {
+            get { return (ModelOptionsModel)GetValue(ModelOptionsProperty); }
+            set { SetValue(ModelOptionsProperty, value); }
         }
 
         public SearchOptionsModel SearchOptions

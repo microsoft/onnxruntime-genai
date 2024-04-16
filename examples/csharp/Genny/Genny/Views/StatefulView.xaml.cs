@@ -20,7 +20,6 @@ namespace Genny.Views
     public partial class StatefulView : UserControl, INotifyPropertyChanged
     {
         private string _prompt;
-        private readonly int _contextSize = 2048; //TODO
         private readonly List<int> _pastTokens;
         private CancellationTokenSource _cancellationTokenSource;
 
@@ -39,6 +38,9 @@ namespace Genny.Views
 
         public static readonly DependencyProperty TokenizerProperty =
             DependencyProperty.Register(nameof(Tokenizer), typeof(Tokenizer), typeof(StatefulView));
+
+        public static readonly DependencyProperty ModelOptionsProperty =
+            DependencyProperty.Register(nameof(ModelOptions), typeof(ModelOptionsModel), typeof(StatefulView));
 
         public static readonly DependencyProperty SearchOptionsProperty =
             DependencyProperty.Register(nameof(SearchOptions), typeof(SearchOptionsModel), typeof(StatefulView));
@@ -59,6 +61,12 @@ namespace Genny.Views
         {
             get { return (Tokenizer)GetValue(TokenizerProperty); }
             set { SetValue(TokenizerProperty, value); }
+        }
+
+        public ModelOptionsModel ModelOptions
+        {
+            get { return (ModelOptionsModel)GetValue(ModelOptionsProperty); }
+            set { SetValue(ModelOptionsProperty, value); }
         }
 
         public SearchOptionsModel SearchOptions
@@ -141,7 +149,11 @@ namespace Genny.Views
 
             using var generatorParams = new GeneratorParams(Model);
             generatorParams.ApplySearchOptions(SearchOptions);
-            generatorParams.SetSearchOption("max_length", Math.Min(_pastTokens.Count + SearchOptions.MaxLength, _contextSize)); // TODO: handle (input > max_length) better
+
+            // max_length is per message, so increment max_length for next call
+            var newMaxLength = Math.Min(_pastTokens.Count + SearchOptions.MaxLength, ModelOptions.ContextLength);
+            generatorParams.SetSearchOption("max_length", newMaxLength); 
+
             generatorParams.SetInputIDs(CollectionsMarshal.AsSpan(_pastTokens), (ulong)_pastTokens.Count, 1);
 
             using var tokenizerStream = Tokenizer.CreateStream();
@@ -166,8 +178,8 @@ namespace Genny.Views
         {
             _pastTokens.AddRange(sequences[0].ToArray());
 
-            // Only keep context length worth of history
-            while (_pastTokens.Count > _contextSize)
+            // Only keep (context_length - max_length) worth of history
+            while (_pastTokens.Count > ModelOptions.ContextLength - SearchOptions.MaxLength)
             {
                 _pastTokens.RemoveAt(0);
             }

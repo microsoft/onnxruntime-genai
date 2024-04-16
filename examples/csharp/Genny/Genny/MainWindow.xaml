@@ -27,7 +27,7 @@
 
                 <DockPanel>
                     <GroupBox DockPanel.Dock="Top" Header="Search Options" Margin="2,5,0,1">
-                        <controls:SearchOptionsControl x:Name="SearchOptionsControl"  />
+                        <controls:SearchOptionsControl SearchOptions="{Binding Configuration.SearchOptions}"  />
                     </GroupBox>
                 </DockPanel>
 
@@ -39,14 +39,22 @@
                 <!--StatelessView Tab-->
                 <TabItem Header="Stateless">
                     <Grid IsEnabled="{Binding IsModelLoaded}">
-                        <views:StatelessView Model="{Binding Model}" Tokenizer="{Binding Tokenizer}" SearchOptions="{Binding SearchOptions, ElementName=SearchOptionsControl}" />
+                        <views:StatelessView
+                            Model="{Binding Model}"
+                            Tokenizer="{Binding Tokenizer}"
+                            ModelOptions="{Binding Configuration.ModelOptions}"
+                            SearchOptions="{Binding Configuration.SearchOptions}" />
                     </Grid>
                 </TabItem>
 
                 <!--StatefulView Tab-->
                 <TabItem Header="Stateful">
                     <Grid IsEnabled="{Binding IsModelLoaded}">
-                        <views:StatefulView Model="{Binding Model}" Tokenizer="{Binding Tokenizer}" SearchOptions="{Binding SearchOptions, ElementName=SearchOptionsControl}" />
+                        <views:StatefulView 
+                            Model="{Binding Model}"
+                            Tokenizer="{Binding Tokenizer}"
+                            ModelOptions="{Binding Configuration.ModelOptions}"
+                            SearchOptions="{Binding Configuration.SearchOptions}" />
                     </Grid>
                 </TabItem>
 

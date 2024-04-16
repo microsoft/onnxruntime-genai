@@ -1,8 +1,11 @@
 ﻿using Genny.Utils;
+using Genny.ViewModel;
 using Microsoft.ML.OnnxRuntimeGenAI;
 using System;
 using System.ComponentModel;
+using System.IO;
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 using System.Threading.Tasks;
 using System.Windows;
 
@@ -15,6 +18,7 @@ namespace Genny
     {
         private Model _model;
         private Tokenizer _tokenizer;
+        private ConfigurationModel _configuration;
         private string _modelPath = "D:\\Repositories\\phi2_onnx";
         private bool _isModelLoaded;
 
@@ -33,12 +37,19 @@ namespace Genny
             get { return _model; }
             set { _model = value; NotifyPropertyChanged(); }
         }
-      
+
         public Tokenizer Tokenizer
         {
             get { return _tokenizer; }
             set { _tokenizer = value; NotifyPropertyChanged(); }
         }
+
+        public ConfigurationModel Configuration
+        {
+            get { return _configuration; }
+            set { _configuration = value; NotifyPropertyChanged(); }
+        }
+
 
         public bool IsModelLoaded
         {
@@ -73,6 +84,7 @@ namespace Genny
             await UnloadModelAsync();
             try
             {
+                Configuration = await LoadConfigAsync(ModelPath);
                 await Task.Run(() =>
                 {
                     Model = new Model(ModelPath);
@@ -101,6 +113,13 @@ namespace Genny
             return Task.CompletedTask;
         }
 
+
+        private static async Task<ConfigurationModel> LoadConfigAsync(string modelPath)
+        {
+            var configPath = Path.Combine(modelPath, "genai_config.json");
+            var configJson = await File.ReadAllTextAsync(configPath);
+            return JsonSerializer.Deserialize<ConfigurationModel>(configJson);
+        }
 
         #region INotifyPropertyChanged
         public event PropertyChangedEventHandler PropertyChanged;
