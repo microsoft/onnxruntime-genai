@@ -20,6 +20,10 @@ def is_linux():
     """Check if the current platform is Linux."""
     return sys.platform.startswith("linux")
 
+def is_mac():
+    """Check if the current platform is MacOS"""
+    return sys.platform.startswith("darwin")
+
 
 def platform():
     """Get the current platform."""
@@ -110,7 +114,7 @@ def build(
     Args:
         skip_wheel: Whether to skip building the Python wheel. Defaults to False.
     """
-    if not is_windows() and not is_linux():
+    if not is_windows() and not is_linux() and not is_mac():
         raise OSError(f"Unsupported platform {platform()}.")
     
     if cuda_home and not use_cuda:
