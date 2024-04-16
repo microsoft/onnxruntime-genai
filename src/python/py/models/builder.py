@@ -38,11 +38,14 @@ class Model:
         self.io_dtype = io_dtype      # {'fp16', 'fp32'}
         self.onnx_dtype = onnx_dtype  # {"int4", "fp16", "fp32"}
 
+        enable_cuda_graph = "1" if "enable_cuda_graph" in extra_options and extra_options["enable_cuda_graph"] == "1" else "0"
         # EP-specific variables
         self.ep = ep
         self.ep_attrs = {
             "cpu": {},
-            "cuda": {},
+            "cuda": {
+                "enable_cuda_graph": enable_cuda_graph
+            },  # "1" if the the model is able to enable cuda graph, "0" otherwise.
             "dml": {},
         }
 
@@ -65,6 +68,8 @@ class Model:
             "input_ids": TensorProto.INT64,                                                                      # For standard models
             "attention_mask": TensorProto.INT64,                                                                 # For standard models
             "position_ids": TensorProto.INT64,                                                                   # For standard models
+            "seqlens_k": TensorProto.INT32,                                                                      # For standard models with cuda graph enabled
+            "total_seq_len": TensorProto.INT32,                                                                  # For standard models with cuda graph enabled
             "inputs_embeds": self.io_dtype,                                                                      # For standard models where you want to remove the embedding layer from the model (note that `inputs_embeds` is written this way to match Hugging Face format)
             "past_key_values.key": self.io_dtype,                                                                # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format)
             "past_key_values.value": self.io_dtype,                                                              # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format)
@@ -73,6 +78,8 @@ class Model:
             "input_ids": ["batch_size", "sequence_length"],                                                      # For standard models
             "attention_mask": ["batch_size", "total_sequence_length"],                                           # For standard models
             "position_ids": ["batch_size", "sequence_length"],                                                   # For standard models
+            "seqlens_k": ["batch_size"],                                                                         # For standard models with cuda graph enabled
+            "total_seq_len": [],                                                                                 # For standard models with cuda graph enabled
             "inputs_embeds": ["batch_size", "sequence_length", self.hidden_size],                                # For standard models where you want to remove the embedding layer from the model (note that `inputs_embeds` is written this way to match Hugging Face format)
             "past_key_values.key": 
             ["batch_size", self.num_kv_heads // self.world_size, "past_sequence_length", self.head_size],        # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format)
@@ -82,6 +89,9 @@ class Model:
         self.exclude_embeds = "exclude_embeds" in extra_options
         if self.exclude_embeds:
             self.input_names = [name.replace("input_ids", "inputs_embeds") for name in self.input_names]
+
+        if self.ep_attrs["cuda"]["enable_cuda_graph"] == '1':
+            self.input_names = ["input_ids", "position_ids", "seqlens_k", "total_seq_len"]
 
         # Map output names to their types and shapes
         self.output_names = ["logits"]
@@ -310,7 +320,7 @@ class Model:
         if os.path.exists(data_path):
             print(f"Overwriting {data_path}")
             os.remove(data_path)
-        
+
         save_model(
             model,
             out_path,
@@ -894,7 +904,9 @@ class Model:
         if op_type == "MultiHeadAttention":
             self.make_multi_head_attention(name, add_qk=f"{self.mask_attrs['mask_name']}/output_0", **kwargs)
         elif op_type == "GroupQueryAttention":
-            self.make_group_query_attention(name, seqlens_k=f"{self.mask_attrs['seqlens_k']}/output_0", total_seq_len=f"{self.mask_attrs['total_seq_len']}/output_0", **kwargs)
+            seqlens_k_name = f"{self.mask_attrs['seqlens_k']}/output_0" if self.ep_attrs["cuda"]["enable_cuda_graph"] == "0" else "seqlens_k"
+            total_seq_len_name = f"{self.mask_attrs['total_seq_len']}/output_0" if self.ep_attrs["cuda"]["enable_cuda_graph"] == "0" else "total_seq_len"
+            self.make_group_query_attention(name, seqlens_k=seqlens_k_name, total_seq_len=total_seq_len_name, **kwargs)
         else:
             raise NotImplementedError(f"The {op_type} op is not currently supported.")
 
@@ -1115,6 +1127,47 @@ class Model:
         else:
             self.layernorm_attrs["skip_input"] = f"{down_name}/output_0"
 
+    def make_mlp_fc(self, layer_id, mlp, root_input):
+        # Make nodes for the MLP subgraph
+        #
+        #          root_input
+        #              |
+        #          FC1_MatMul
+        #              |
+        #           FC1_Add
+        #              |
+        #           FastGelu
+        #              |
+        #          FC2_MatMul
+        #              |
+        #           FC2_Add
+        # Make first layer of fully connected nodes (FC1)
+        if mlp is None:
+            return
+        
+        fc1_matmul_name = f"/model/layers.{layer_id}/mlp/fc1/MatMul"
+        self.make_matmul(self.make_shard(mlp.fc1.weight, sharding_axis=0), fc1_matmul_name, root_input)
+        fc1_add_name = f"/model/layers.{layer_id}/mlp/fc1/Add"
+        self.make_add_bias(self.make_shard(mlp.fc1.bias), fc1_add_name, root_input=f"{fc1_matmul_name}/output_0")
+
+        # Make activation function
+        act_fn_name = self.make_activation(layer_id, root_input=f"{fc1_add_name}/output_0")
+
+        # Make second layer of fully connected nodes (FC2)
+        fc2_matmul_name = f"/model/layers.{layer_id}/mlp/fc2/MatMul"
+        self.make_matmul(self.make_shard(mlp.fc2.weight, sharding_axis=1), fc2_matmul_name, root_input=f"{act_fn_name}/output_0")
+
+        if self.world_size > 1:
+            all_reduce_name = f"/model/layers.{layer_id}/mlp/all_reduce"
+            self.make_all_reduce(all_reduce_name, f"{fc2_matmul_name}/output_0")
+            fc2_matmul_name = all_reduce_name
+
+        fc2_add_name = f"/model/layers.{layer_id}/mlp/fc2/Add"
+        self.make_add_bias(mlp.fc2.bias.detach().numpy(), fc2_add_name, root_input=f"{fc2_matmul_name}/output_0")
+
+        # Assign output 0 of MLP layer as output of last layer
+        self.mlp_attrs["output_0"] = f"{fc2_add_name}/output_0"
+
     def make_block_sparse_moe(self, layer_id, bsm, root_input):
         if bsm is None:
             return
@@ -1208,44 +1261,6 @@ class Model:
 
         # Assign output 0 of previous MoE as root input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = output
-
-    def make_mlp_fc(self, layer_id, mlp, root_input):
-        # Make nodes for the MLP subgraph
-        #
-        #          root_input
-        #              |
-        #          FC1_MatMul
-        #              |
-        #           FC1_Add
-        #              |
-        #           FastGelu
-        #              |
-        #          FC2_MatMul
-        #              |
-        #           FC2_Add
-        # Make first layer of fully connected nodes (FC1)
-        fc1_matmul_name = f"/model/layers.{layer_id}/mlp/fc1/MatMul"
-        self.make_matmul(self.make_shard(mlp.fc1.weight, sharding_axis=0), fc1_matmul_name, root_input)
-        fc1_add_name = f"/model/layers.{layer_id}/mlp/fc1/Add"
-        self.make_add_bias(self.make_shard(mlp.fc1.bias), fc1_add_name, root_input=f"{fc1_matmul_name}/output_0")
-
-        # Make activation function
-        act_fn_name = self.make_activation(layer_id, root_input=f"{fc1_add_name}/output_0")
-
-        # Make second layer of fully connected nodes (FC2)
-        fc2_matmul_name = f"/model/layers.{layer_id}/mlp/fc2/MatMul"
-        self.make_matmul(self.make_shard(mlp.fc2.weight, sharding_axis=1), fc2_matmul_name, root_input=f"{act_fn_name}/output_0")
-
-        if self.world_size > 1:
-            all_reduce_name = f"/model/layers.{layer_id}/mlp/all_reduce"
-            self.make_all_reduce(all_reduce_name, f"{fc2_matmul_name}/output_0")
-            fc2_matmul_name = all_reduce_name
-
-        fc2_add_name = f"/model/layers.{layer_id}/mlp/fc2/Add"
-        self.make_add_bias(mlp.fc2.bias.detach().numpy(), fc2_add_name, root_input=f"{fc2_matmul_name}/output_0")
-
-        # Assign output 0 of MLP layer as output of last layer
-        self.mlp_attrs["output_0"] = f"{fc2_add_name}/output_0"
 
     def make_activation_with_mul(self, layer_id, root_input, activation, domain):
         # Make nodes for this activation subgraph
@@ -1384,6 +1399,12 @@ class Model:
         # TODO: add make_position_ids_reformatting() here
 
     def make_attention_mask_reformatting(self):
+        if self.ep_attrs["cuda"]["enable_cuda_graph"] == "1":
+            # ORT does not allow nodes to be placed on mulitple execution providers
+            # with cuda graph enabled. Thus the attention mask is deprecated and the
+            # subgraph is replaced with seqlens_k and total_seq_len as the raw
+            # inputs to GroupQueryAttention.
+            return
         if self.attention_attrs["op_type"] == "GroupQueryAttention":
             self.make_attention_mask_reformatting_for_gqa()            
         elif self.attention_attrs["op_type"] == "MultiHeadAttention":
@@ -1695,9 +1716,10 @@ class Model:
         self.make_expand(expand_name, expand_inputs, dtype=expand_dtype, shape=expand_shape)
 
         return expand_name
-    
+
+
     def make_attention_mask_reformatting_for_gqa(self):
-        # Make nodes for the attention mask subgraph that calculates 
+        # Make nodes for the attention mask subgraph that calculates
         # attributes about the 2D attention mask to use in GroupQueryAttention
         #
         #                attention_mask
@@ -1710,7 +1732,6 @@ class Model:
         #              |                |
         #          seqlens_k      total_seq_len
         #            (1D)             (int)
-
         basename = "/model/attn_mask_reformat"
         attn_mask_basename = f"{basename}/attn_mask_subgraph"
 
@@ -1973,6 +1994,9 @@ def get_args():
                 exclude_lm_head = Remove language modeling head from your ONNX model.
                     Use this option when you want to remove the language modeling head from within your ONNX model.
                     Instead of `logits`, you will have `hidden_states` as the output to your ONNX model.
+                enable_cuda_graph = 1 : The model can use CUDA graph capture for CUDA execution provider. If enabled, raw inputs(seqlens_k and total_seq_len)
+                    to the GroupQueryAttention are populated to the graph inputs to ensure all nodes are placed on the CUDA EP. Currently there's no gurantee 
+                    that cuda graph be enabled as it depends on the model and the graph structure.
             """),
     )
 
