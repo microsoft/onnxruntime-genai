@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
 #pragma once
 
 namespace Generators {
@@ -9,12 +12,13 @@ struct LogItems {
   // Special log related entries
   bool enabled{};        // Global on/off for all logging
   bool ansi_tags{true};  // Use ansi SGR color & style tags to make console output easier to read
+  bool warning{true};   // warning messages, like options that were set but don't apply
 
   // Loggable actions, will always have the name below with the log entry
   bool generate_next_token{};
   bool append_next_tokens{};
-  bool hit_eos{true};  // Only works for CPU non beam search
-  bool hit_max_length{true};
+  bool hit_eos{};  // Only works for CPU non beam search
+  bool hit_max_length{};
   bool model_input_values{};   // Dump the input tensor shapes & values before the model runs
   bool model_output_shapes{};  // Before the model runs there are only the output shapes, no values in them. Useful for pre Session::Run debugging
   bool model_output_values{};  // After the model runs the output tensor values can be displayed

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
 #include "generators.h"
 #include "json.h"
 #include <iostream>
@@ -14,6 +17,8 @@ void SetLogBool(std::string_view name, bool value) {
     g_log.enabled = value;
   else if (name == "ansi_tags")
     g_log.ansi_tags = value;
+  else if (name == "warning")
+    g_log.warning = value;
   else if (name == "generate_next_token")
     g_log.generate_next_token = value;
   else if (name == "append_next_tokens")

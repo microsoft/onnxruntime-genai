@@ -119,6 +119,9 @@ KV_Cache::KV_Cache(const Model& model, State& state)
       layer_count_{model_.config_->model.decoder.num_hidden_layers},
       past_present_share_buffer_{state_.params_->search.past_present_share_buffer && state_.params_->search.num_beams == 1 && model_.device_type_ == DeviceType::CUDA},
       shape_{state_.params_->BatchBeamSize(), model.config_->model.decoder.num_key_value_heads, 0, model.config_->model.decoder.head_size} {
+  if (g_log.enabled && g_log.warning && past_present_share_buffer_ != state_.params_->search.past_present_share_buffer)
+    Log("warning", "past_present_share_buffer search option set to true, but has been disabled due to the current configuration. See https://aka.ms/generate_config for details");
+
   pasts_.resize(layer_count_ * 2);
   presents_.reserve(layer_count_ * 2);
 
@@ -181,6 +184,7 @@ void KV_Cache::Add() {
 }
 
 void KV_Cache::Update(std::span<const int32_t> beam_indices, int current_length) {
+  // If we're sharing past & present buffers there is nothing to do here, so early exit
   if (past_present_share_buffer_)
     return;
 
