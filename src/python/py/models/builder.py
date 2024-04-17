@@ -159,7 +159,7 @@ class Model:
             "use_rotemb_in_attn": False,                     # Use rotary embeddings within attention op (instead of a separate RotaryEmbedding op)
             "use_packed_matmul": False,                      # Use packed MatMul (instead of 3 separate MatMuls for Q/K/V)
         }
-        if self.ep == "cuda" and self.io_dtype == TensorProto.FLOAT16:
+        if (self.ep == "cuda" and self.io_dtype == TensorProto.FLOAT16) or (self.ep == "cpu" and self.io_dtype == TensorProto.FLOAT):
             # Change model settings for GroupQueryAttention
             self.attention_attrs["op_type"] = "GroupQueryAttention"
             print("GroupQueryAttention (GQA) is used in this model. GQA is currently supported only for INT4 CUDA and FP16 CUDA.")
