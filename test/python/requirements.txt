@@ -1,6 +1,8 @@
 numpy
 pytest
 onnx
-onnxruntime
+onnxruntime_gpu
 torch
 transformers
+huggingface_hub[cli]
+torch==2.2.1+cpu
