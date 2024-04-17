@@ -173,6 +173,8 @@ class Model:
             self.attention_attrs["use_rotemb_in_attn"] = True
             self.input_names.remove("position_ids")
 
+        self.past_present_share_buffer = self.attention_attrs["op_type"] == "GroupQueryAttention"
+
         # MLP-specific variables
         self.mlp_attrs = {
             "use_proj": True,           # Use projection style for MLP (GateProj/UpProj/DownProj)
@@ -232,7 +234,7 @@ class Model:
                 "no_repeat_ngram_size": config.no_repeat_ngram_size if hasattr(config, "no_repeat_ngram_size") else 0,
                 "num_beams": config.num_beams if hasattr(config, "num_beams") else 1,
                 "num_return_sequences": config.num_return_sequences if hasattr(config, "num_return_sequences") else 1,
-                "past_present_share_buffer": self.attention_attrs["op_type"] == "GroupQueryAttention",
+                "past_present_share_buffer": self.past_present_share_buffer,
                 "repetition_penalty": config.repetition_penalty if hasattr(config, "repetition_penalty") else 1.0,
                 "temperature": config.temperature if hasattr(config, "temperature") else 1.0,
                 "top_k": 1,
@@ -1219,10 +1221,12 @@ class Model:
     def make_attention_mask_reformatting(self):
         if self.ep_attrs["cuda"]["enable_cuda_graph"] == "1":
             # ORT does not allow nodes to be placed on mulitple execution providers
-            # with cuda graph enabled. We've only verified it works with GQA.
+            # with cuda graph enabled. We've only verified it works with GQA and with
+            # past_present_share_buffer enabled(so the total_seq_len in GQA is hardcoded
+            # to a fixed value by logic).
             # For other models, we need to check if it works and update the logic here.
             # This assertion is temporary.
-            assert self.attention_attrs["op_type"] == "GroupQueryAttention"
+            assert self.past_present_share_buffer
 
         if self.attention_attrs["op_type"] == "GroupQueryAttention":
             self.make_attention_mask_reformatting_for_gqa()
