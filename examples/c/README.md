@@ -48,5 +48,5 @@ cmake --build . --config Release
 
 ```bash
 cd build\\Release
-.\phi2.exe
+.\phi2.exe path_to_model
 ```

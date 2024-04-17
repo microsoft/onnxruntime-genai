@@ -56,6 +56,8 @@ struct Config {
         std::string input_ids{"input_ids"};
         std::string position_ids{"position_ids"};
         std::string attention_mask{"attention_mask"};
+        std::string seqlens_k{"seqlens_k"};
+        std::string total_sequence_length{"total_seq_len"};
         std::string past_key_names{"past_key_values.%d.key"}, past_value_names{"past_key_values.%d.value"};
         std::string past_names;  // When key/value pairs are combined
         std::string cross_past_key_names, cross_past_value_names;
@@ -86,10 +88,12 @@ struct Config {
     float diversity_penalty{};
     float length_penalty{1.0f};        // Exponential penalty to the length that is used with beam-based generation. length_penalty > 0.0 promotes longer sequences, while length_penalty < 0.0 encourages shorter sequences.
     bool past_present_share_buffer{};  // The past/present kv tensors are shared and allocated once to max_length (cuda only)
+    int random_seed{-1};               // -1 = Seed with random device, otherwise use value to seed RNG
   } search;
 };
 
 void SetSearchNumber(Config::Search& search, std::string_view name, double value);
 void SetSearchBool(Config::Search& search, std::string_view name, bool value);
+bool IsCudaGraphEnabled(Config::SessionOptions& session_options);
 
 }  // namespace Generators

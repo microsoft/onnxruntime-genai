@@ -23,7 +23,7 @@ parameters:
 - name: ort_version
   displayName: 'OnnxRuntime version'
   type: string
-  default: '1.17.1'
+  default: '1.17.3'
 
 - name: cuda_version
   displayName: 'CUDA version'

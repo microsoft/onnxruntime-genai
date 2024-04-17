@@ -112,6 +112,10 @@ struct PyGeneratorParams {
     }
   }
 
+  void TryUseCudaGraphWithMaxBatchSize(pybind11::int_ max_batch_size) {
+    params_->max_batch_size = max_batch_size.cast<int>();
+  }
+
   pybind11::array_t<int32_t> py_input_ids_;
   pybind11::array_t<float> py_whisper_input_features_;
   pybind11::array_t<int32_t> py_whisper_decoder_input_ids_;
@@ -120,6 +124,7 @@ struct PyGeneratorParams {
 struct PyGenerator {
   PyGenerator(Model& model, PyGeneratorParams& params) {
     params.Prepare();
+    model.GetMaxBatchSizeFromGeneratorParams(params);
     generator_ = CreateGenerator(model, params);
   }
 
@@ -195,7 +200,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_readwrite("input_ids", &PyGeneratorParams::py_input_ids_)
       .def_readwrite("whisper_input_features", &PyGeneratorParams::py_whisper_input_features_)
       .def_readwrite("whisper_decoder_input_ids", &PyGeneratorParams::py_whisper_decoder_input_ids_)
-      .def("set_search_options", &PyGeneratorParams::SetSearchOptions);
+      .def("set_search_options", &PyGeneratorParams::SetSearchOptions)
+      .def("try_use_cuda_graph_with_max_batch_size", &PyGeneratorParams::TryUseCudaGraphWithMaxBatchSize);
 
   // We need to init the OrtApi before we can use it
   Ort::InitApi();
@@ -227,7 +233,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def(pybind11::init([](const std::string& config_path) {
         return CreateModel(GetOrtEnv(), config_path.c_str());
       }))
-      .def("generate", [](Model& model, PyGeneratorParams& params) { params.Prepare(); return Generate(model, params); })
+      .def("generate", [](Model& model, PyGeneratorParams& params) { params.Prepare(); model.GetMaxBatchSizeFromGeneratorParams(params); return Generate(model, params); })
       .def_property_readonly("device_type", [](const Model& s) { return s.device_type_; });
 
   pybind11::class_<PyGenerator>(m, "Generator")

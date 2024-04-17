@@ -12,6 +12,23 @@
 //  Because dml_provider_factory includes windows headers that #define min and max, this next line will prevent this from happening
 #define NOMINMAX
 #include "dml_provider_factory.h"
+
+EXTERN_C IMAGE_DOS_HEADER __ImageBase;
+
+static std::wstring CurrentModulePath() {
+  wchar_t path[MAX_PATH];
+  GetModuleFileNameW((HINSTANCE)&__ImageBase, path, _countof(path));
+
+  wchar_t absolute_path[MAX_PATH];
+  wchar_t* name;
+  GetFullPathNameW(path, _countof(path), absolute_path, &name);
+
+  auto idx = std::distance(absolute_path, name);
+  auto out_path = std::wstring(absolute_path);
+  out_path.resize(idx);
+
+  return out_path;
+}
 #endif
 
 namespace Generators {
@@ -19,7 +36,7 @@ namespace Generators {
 State::State(const GeneratorParams& params) : params_{params.shared_from_this()} {
 }
 
-void State::Run(OrtSession& session) {
+void State::Run(OrtSession& session, OrtRunOptions& run_options) {
   if (g_log.enabled && g_log.model_input_values) {
     auto& stream = Log("model_input_values");
     stream << std::endl;
@@ -32,7 +49,7 @@ void State::Run(OrtSession& session) {
     DumpTensors(stream, outputs_.data(), output_names_.data(), output_names_.size(), false);
   }
 
-  session.Run(nullptr, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
+  session.Run(&run_options, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
 
   if (g_log.enabled && g_log.model_output_values) {
     auto& stream = Log("model_output_values");
@@ -196,6 +213,14 @@ SessionInfo::SessionInfo(OrtSession& session) {
   }
 }
 
+bool SessionInfo::HasInput(const std::string& name) const {
+  return inputs_.find(name) != inputs_.end();
+}
+
+bool SessionInfo::HasOutput(const std::string& name) const {
+  return outputs_.find(name) != outputs_.end();
+}
+
 ONNXTensorElementDataType SessionInfo::GetInputDataType(const std::string& name) const {
   auto result = inputs_.find(name);
   if (result == inputs_.end())
@@ -211,6 +236,9 @@ ONNXTensorElementDataType SessionInfo::GetOutputDataType(const std::string& name
 }
 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
+  // TODO: add function to create run options
+  run_options_ = OrtRunOptions::Create();
+
   CreateSessionOptions();
 }
 
@@ -305,6 +333,9 @@ void Model::CreateSessionOptions() {
       Ort::ThrowOnError(Ort::api->GetExecutionProviderApi("DML", ORT_API_VERSION, reinterpret_cast<const void**>(&p_dml_api)));
       if (!p_dml_api)
         throw std::runtime_error("Unexpected nullptr getting OrtDmlApi");
+      auto directml_dll = CurrentModulePath() + L"DirectML.dll";
+      if (LoadLibraryExW(directml_dll.c_str(), nullptr, 0) == NULL)
+        throw std::runtime_error("DirectML.dll not found");
       p_dml_api->SessionOptionsAppendExecutionProvider_DML(&ort_options, 0);
 #endif
     } else
@@ -338,8 +369,7 @@ std::shared_ptr<GeneratorParams> CreateGeneratorParams() {
   return std::make_shared<GeneratorParams>();
 }
 
-#if USE_CUDA
-void ConvertFp16ToFp32(OrtAllocator& allocator, cudaStream_t stream, OrtValue& in, std::unique_ptr<OrtValue>& p_out) {
+void ConvertFp16ToFp32(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<OrtValue>& p_out, DeviceType device_type, cudaStream_t stream) {
   auto shape_info = in.GetTensorTypeAndShapeInfo();
   auto shape = shape_info->GetShape();
   assert(shape_info->GetElementType() == Ort::TypeToTensorType<Ort::Float16_t>::type);
@@ -358,9 +388,22 @@ void ConvertFp16ToFp32(OrtAllocator& allocator, cudaStream_t stream, OrtValue& i
   auto* fp16 = in.GetTensorData<uint16_t>();
   auto* fp32 = p_out->GetTensorMutableData<float>();
 
-  cuda::LaunchFp16ToFp32(fp16, fp32, count, stream);
-}
+  switch (device_type) {
+    case DeviceType::CPU:
+      for (int i = 0; i < count; i++)
+        fp32[i] = Float16ToFloat32(fp16[i]);
+      break;
+
+#ifdef USE_CUDA
+    case DeviceType::CUDA:
+      cuda::LaunchFp16ToFp32(fp16, fp32, count, stream);
+      break;
 #endif
+
+    default:
+      throw std::runtime_error("ConvertFp16ToFp32 - Unsupported device type");
+  }
+}
 
 size_t GetOrtTypeSize(ONNXTensorElementDataType type) {
   switch (type) {
@@ -443,6 +486,16 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
       throw std::runtime_error("ExpandInputs - Unsupported device type");
   }
   return expanded;
+}
+
+void Model::GetMaxBatchSizeFromGeneratorParams(const GeneratorParams& params) {
+  max_batch_size_ = params.max_batch_size;
+  if (max_batch_size_ > 0 && DeviceType::CUDA == device_type_) {
+    if (!IsCudaGraphEnabled(config_->model.decoder.session_options)) {
+      throw std::runtime_error("CUDA graphs are not enabled in this model");
+    }
+    use_cuda_graph_ = true;
+  }
 }
 
 }  // namespace Generators

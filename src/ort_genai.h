@@ -1,5 +1,15 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+
+#pragma once
+
+#include <memory>
+#include <stdexcept>
+
+#if __cplusplus >= 202002L
+#include <span>
+#endif
+
 #include "ort_genai_c.h"
 
 // GenAI C++ API
@@ -65,7 +75,7 @@ struct OgaModel : OgaAbstract {
     return std::unique_ptr<OgaModel>(p);
   }
 
-  std::unique_ptr<OgaSequences> Generate(const OgaGeneratorParams& params) {
+  std::unique_ptr<OgaSequences> Generate(const OgaGeneratorParams& params) const {
     OgaSequences* p;
     OgaCheckResult(OgaGenerate(this, &params, &p));
     return std::unique_ptr<OgaSequences>(p);
@@ -94,9 +104,19 @@ struct OgaSequences : OgaAbstract {
     return OgaSequencesCount(this);
   }
 
-  std::span<const int32_t> Get(size_t index) const {
-    return {OgaSequencesGetSequenceData(this, index), OgaSequencesGetSequenceCount(this, index)};
+  size_t SequenceCount(size_t index) const {
+    return OgaSequencesGetSequenceCount(this, index);
   }
+
+  const int32_t* SequenceData(size_t index) const {
+    return OgaSequencesGetSequenceData(this, index);
+  }
+
+#if __cplusplus >= 202002L
+  std::span<const int32_t> Get(size_t index) const {
+    return {SequenceData(index), SequenceCount(index)};
+  }
+#endif
 
   static void operator delete(void* p) { OgaDestroySequences(reinterpret_cast<OgaSequences*>(p)); }
 };
@@ -112,11 +132,19 @@ struct OgaTokenizer : OgaAbstract {
     OgaCheckResult(OgaTokenizerEncode(this, str, &sequences));
   }
 
+  OgaString Decode(const int32_t* tokens_data, size_t tokens_length) const {
+    const char* p;
+    OgaCheckResult(OgaTokenizerDecode(this, tokens_data, tokens_length, &p));
+    return p;
+  }
+
+#if __cplusplus >= 202002L
   OgaString Decode(std::span<const int32_t> tokens) const {
     const char* p;
     OgaCheckResult(OgaTokenizerDecode(this, tokens.data(), tokens.size(), &p));
     return p;
   }
+#endif
 
   static void operator delete(void* p) { OgaDestroyTokenizer(reinterpret_cast<OgaTokenizer*>(p)); }
 };
@@ -149,15 +177,11 @@ struct OgaGeneratorParams : OgaAbstract {
     return std::unique_ptr<OgaGeneratorParams>(p);
   }
 
-  void SetSearchOption(const char* name, int value) {
-    OgaCheckResult(OgaGeneratorParamsSetSearchNumber(this, name, value));
-  }
-
   void SetSearchOption(const char* name, double value) {
     OgaCheckResult(OgaGeneratorParamsSetSearchNumber(this, name, value));
   }
 
-  void SetSearchOption(const char* name, bool value) {
+  void SetSearchOptionBool(const char* name, bool value) {
     OgaCheckResult(OgaGeneratorParamsSetSearchBool(this, name, value));
   }
 
@@ -191,9 +215,19 @@ struct OgaGenerator : OgaAbstract {
     OgaCheckResult(OgaGenerator_GenerateNextToken(this));
   }
 
-  std::span<const int32_t> GetSequence(size_t index) const {
-    return {OgaGenerator_GetSequence(this, index), OgaGenerator_GetSequenceLength(this, index)};
+  size_t GetSequenceCount(size_t index) const {
+    return OgaGenerator_GetSequenceCount(this, index);
   }
+
+  const int32_t* GetSequenceData(size_t index) const {
+    return OgaGenerator_GetSequenceData(this, index);
+  }
+
+#if __cplusplus >= 202002L
+  std::span<const int32_t> GetSequence(size_t index) const {
+    return {GetSequenceData(index), GetSequenceCount(index)};
+  }
+#endif
 
   static void operator delete(void* p) { OgaDestroyGenerator(reinterpret_cast<OgaGenerator*>(p)); }
 };
