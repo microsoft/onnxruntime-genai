@@ -69,7 +69,7 @@ jobs:
             bash -c " \
               /usr/bin/cmake --preset linux_gcc_cuda_release \
                 -DMANYLINUX=ON \
-                -DPYTHON_EXECUTABLE=${{ env.PYTHON_EXECUTABLE }} \"
+                -DPYTHON_EXECUTABLE=${{ env.PYTHON_EXECUTABLE }} "
 
       - name: Build with Cmake in Docker
         run: |
