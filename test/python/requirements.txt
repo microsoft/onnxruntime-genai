@@ -1,3 +1,6 @@
 numpy
 pytest
 onnx
+onnxruntime
+torch
+transformers
