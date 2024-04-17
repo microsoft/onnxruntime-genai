@@ -1136,7 +1136,7 @@ class Model:
         #              |
         #           FC1_Add
         #              |
-        #           FastGelu
+        #           ActFunc
         #              |
         #          FC2_MatMul
         #              |
