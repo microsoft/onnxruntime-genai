@@ -104,8 +104,10 @@ class Model:
         self.output_shapes = {
             "hidden_states": ["batch_size", "sequence_length", self.hidden_size],                                # For standard models where you want to remove the language modeling head from the model (note that `hidden_states` is written this way to match Hugging Face format)
             "logits": ["batch_size", "sequence_length", self.vocab_size],                                        # For standard models
-            "present.key": ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size],           # For standard models (note that `present.key` is written this way to match Hugging Face format)
-            "present.value": ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size],         # For standard models (note that `present.value` is written this way to match Hugging Face format)
+            "present.key": 
+            ["batch_size", self.num_kv_heads // self.world_size, "total_sequence_length", self.head_size],       # For standard models (note that `present.key` is written this way to match Hugging Face format)
+            "present.value": 
+            ["batch_size", self.num_kv_heads // self.world_size, "total_sequence_length", self.head_size],       # For standard models (note that `present.value` is written this way to match Hugging Face format)
         }
         self.exclude_lm_head = "exclude_lm_head" in extra_options
         if self.exclude_lm_head:
