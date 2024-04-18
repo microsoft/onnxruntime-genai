@@ -85,7 +85,7 @@ class Model:
         if self.exclude_embeds:
             self.input_names = [name.replace("input_ids", "inputs_embeds") for name in self.input_names]
 
-        if self.ep_attrs["cuda"]["enable_cuda_graph"] == '1':
+        if self.cuda_graph_enabled():
             self.input_names = ["input_ids", "position_ids", "seqlens_k", "total_seq_len"]
 
         # Map output names to their types and shapes
@@ -178,8 +178,9 @@ class Model:
             self.attention_attrs["use_packed_matmul"] = self.ep != "dml" and self.num_attn_heads == self.num_kv_heads
 
             # GQA + Rot.Emb. does not require `position ids` as input
-            self.attention_attrs["use_rotemb_in_attn"] = True
-            self.input_names.remove("position_ids")
+            if self.ep == "cuda":
+                self.attention_attrs["use_rotemb_in_attn"] = True
+                self.input_names.remove("position_ids")
 
         # MLP-specific variables
         self.mlp_attrs = {
@@ -255,6 +256,9 @@ class Model:
         print(f"Saving GenAI config in {out_dir}")
         with open(os.path.join(out_dir,"genai_config.json"), "w") as f:
             json.dump(genai_config, f, indent=4)
+
+    def cuda_graph_enabled(self):
+        return self.ep_attrs["cuda"]["enable_cuda_graph"] == '1' or self.ep == "dml"
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
         tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, **extra_kwargs)
@@ -859,8 +863,8 @@ class Model:
         if op_type == "MultiHeadAttention":
             self.make_multi_head_attention(name, add_qk=f"{self.mask_attrs['mask_name']}/output_0", **kwargs)
         elif op_type == "GroupQueryAttention":
-            seqlens_k_name = f"{self.mask_attrs['seqlens_k']}/output_0" if self.ep_attrs["cuda"]["enable_cuda_graph"] == "0" else "seqlens_k"
-            total_seq_len_name = f"{self.mask_attrs['total_seq_len']}/output_0" if self.ep_attrs["cuda"]["enable_cuda_graph"] == "0" else "total_seq_len"
+            seqlens_k_name = f"{self.mask_attrs['seqlens_k']}/output_0" if not self.cuda_graph_enabled() else "seqlens_k"
+            total_seq_len_name = f"{self.mask_attrs['total_seq_len']}/output_0" if not self.cuda_graph_enabled() else "total_seq_len"
             self.make_group_query_attention(name, seqlens_k=seqlens_k_name, total_seq_len=total_seq_len_name, **kwargs)
         else:
             raise NotImplementedError(f"The {op_type} op is not currently supported.")
@@ -1225,7 +1229,7 @@ class Model:
         # TODO: add make_position_ids_reformatting() here
 
     def make_attention_mask_reformatting(self):
-        if self.ep_attrs["cuda"]["enable_cuda_graph"] == "1":
+        if self.ep_attrs["cuda"]["enable_cuda_graph"] == "1" or self.ep == "dml":
             # ORT does not allow nodes to be placed on mulitple execution providers
             # with cuda graph enabled. Thus the attention mask is deprecated and the
             # subgraph is replaced with seqlens_k and total_seq_len as the raw

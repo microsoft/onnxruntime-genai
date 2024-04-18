@@ -54,6 +54,7 @@ struct PositionInputs {
 
   std::unique_ptr<OrtValue> position_ids_next_;  // Replaces position_ids_ after the first Run() call
   std::vector<int32_t> initial_sequence_lengths_;
+  std::unique_ptr<OrtValue> attention_mask_next_;
 
   // Used for decoding runs with cuda graphs.
   std::unique_ptr<StaticBuffer> sb_position_ids_;

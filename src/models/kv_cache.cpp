@@ -146,7 +146,7 @@ KV_Cache::KV_Cache(const Model& model, State& state)
   else
     shape_[2] = state_.params_->sequence_length;
 
-  if (model_.device_type_ == DeviceType::CUDA && model_.use_cuda_graph_) {
+  if (model_.use_cuda_graph_ && (model_.device_type_ == DeviceType::CUDA || model_.device_type_ == DeviceType::DML)) {
     assert(past_present_share_buffer_);
     size_t max_beam_batch_size = static_cast<size_t>(model_.config_->search.num_beams) * model_.max_batch_size_;
     sb_kv_caches_.reserve(layer_count_ * 2);

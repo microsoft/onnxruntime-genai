@@ -347,15 +347,38 @@ void Model::CreateSessionOptions() {
       ort_options.AppendExecutionProvider_ROCM(ort_provider_options);
 #ifdef USE_DML
     } else if (provider_options.name == "dml") {
-      device_type_ = DeviceType::DML;  // We use a DML allocator for input/output caches, but other tensors will use CPU tensors
-      const OrtDmlApi* p_dml_api{};
-      Ort::ThrowOnError(Ort::api->GetExecutionProviderApi("DML", ORT_API_VERSION, reinterpret_cast<const void**>(&p_dml_api)));
-      if (!p_dml_api)
-        throw std::runtime_error("Unexpected nullptr getting OrtDmlApi");
+      dml_objects_ = CreateDmlObjects();
+
       auto directml_dll = CurrentModulePath() + L"DirectML.dll";
-      if (LoadLibraryExW(directml_dll.c_str(), nullptr, 0) == NULL)
+      wil::unique_hmodule smart_directml_dll(LoadLibraryExW(directml_dll.c_str(), nullptr, 0));
+      THROW_LAST_ERROR_IF(!smart_directml_dll);
+
+      if (LoadLibraryExW(directml_dll.c_str(), nullptr, 0) == NULL) {
         throw std::runtime_error("DirectML.dll not found");
-      p_dml_api->SessionOptionsAppendExecutionProvider_DML(&ort_options, 0);
+      }
+
+      auto dml_create_device1_fn = reinterpret_cast<decltype(&DMLCreateDevice1)>(GetProcAddress(smart_directml_dll.get(), "DMLCreateDevice1"));
+      THROW_LAST_ERROR_IF(!dml_create_device1_fn);
+      THROW_IF_FAILED(dml_create_device1_fn(dml_objects_.d3d12Device.Get(), DML_CREATE_DEVICE_FLAG_NONE, DML_FEATURE_LEVEL_5_0, IID_PPV_ARGS(&dml_device_)));
+
+      Ort::ThrowOnError(Ort::api->GetExecutionProviderApi("DML", ORT_API_VERSION, reinterpret_cast<const void**>(&p_dml_api_)));
+      if (!p_dml_api_) {
+        throw std::runtime_error("Unexpected nullptr getting OrtDmlApi");
+      }
+
+      dml_execution_context_ = std::make_unique<DmlExecutionContext>(
+          dml_objects_.d3d12Device.Get(),
+          dml_device_.Get(),
+          dml_objects_.commandQueue.Get(),
+          *allocator_device_,
+          p_dml_api_);
+
+      dml_pooled_upload_heap_ = std::make_unique<DmlPooledUploadHeap>(dml_objects_.d3d12Device.Get(), dml_execution_context_.get());
+      dml_readback_heap_ = std::make_unique<DmlReadbackHeap>(dml_objects_.d3d12Device.Get(), dml_execution_context_.get());
+
+      ort_options.AddConfigEntry("ep.dml.enable_graph_capture", "1");
+      p_dml_api_->SessionOptionsAppendExecutionProvider_DML1(&ort_options, dml_device_.Get(), dml_objects_.commandQueue.Get());
+      device_type_ = DeviceType::DML;  // We use a DML allocator for input/output caches, but other tensors will use CPU tensors
 #endif
     } else
       throw std::runtime_error("Unknown provider type: " + provider_options.name);
@@ -408,8 +431,6 @@ void ConvertFp16ToFp32(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<Or
   auto* fp32 = p_out->GetTensorMutableData<float>();
 
   switch (device_type) {
-    case DeviceType::DML:
-      // DML doesn't currently support on-device scoring, so we fall back to the CPU
     case DeviceType::CPU:
       for (int i = 0; i < count; i++)
         fp32[i] = Float16ToFloat32(fp16[i]);
@@ -425,6 +446,77 @@ void ConvertFp16ToFp32(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<Or
       throw std::runtime_error("ConvertFp16ToFp32 - Unsupported device type");
   }
 }
+
+#if USE_DML
+void DmlConvertFp16ToFp32(
+    DmlExecutionContext* execution_context,
+    OrtAllocator& allocator,
+    OrtValue& in,
+    std::unique_ptr<OrtValue>& p_out,
+    IDMLDevice* dml_device,
+    const OrtDmlApi* ort_dml_api,
+    DmlReusedCommandListState& command_list_state) {
+  auto shape_info = in.GetTensorTypeAndShapeInfo();
+  auto shape = shape_info->GetShape();
+  assert(shape_info->GetElementType() == Ort::TypeToTensorType<Ort::Float16_t>::type);
+
+  bool allocate_p_out = p_out == nullptr;
+  if (p_out) {
+    auto out_shape_info = p_out->GetTensorTypeAndShapeInfo();
+    auto out_shape = out_shape_info->GetShape();
+    allocate_p_out = shape != out_shape;
+  }
+
+  if (allocate_p_out) {
+    p_out = OrtValue::CreateTensor<float>(allocator, shape);
+  }
+
+  int element_count = static_cast<int>(shape_info->GetElementCount());
+
+  bool rebind = command_list_state.previousOutput != p_out.get();
+
+  // If the sizes change, we need to recompile the operator and rebuild the command lists. It should only happen
+  // once after the very first iteration.
+  if (rebind) {
+    auto compiled_cast_operator = CreateCastOperator(dml_device, element_count, DML_TENSOR_DATA_TYPE_FLOAT16, DML_TENSOR_DATA_TYPE_FLOAT32);
+
+    ComPtr<ID3D12Resource> persistent_resource;
+    uint64_t persistent_resource_size = compiled_cast_operator->GetBindingProperties().PersistentResourceSize;
+
+    std::optional<DML_BUFFER_BINDING> persistent_resource_binding;
+
+    if (persistent_resource_size > 0) {
+      std::array<int64_t, 1> persistent_resource_shape = {static_cast<int64_t>(persistent_resource_size)};
+      auto persistent_tensor = OrtValue::CreateTensor(allocator, persistent_resource_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+      Ort::ThrowOnError(ort_dml_api->GetD3D12ResourceFromAllocation(&allocator, persistent_tensor->GetTensorMutableRawData(), &persistent_resource));
+      persistent_resource_binding = DML_BUFFER_BINDING{persistent_resource.Get(), 0, persistent_resource_size};
+    }
+
+    DML_BINDING_DESC persistent_resource_bindingDesc = persistent_resource_binding
+                                                           ? DML_BINDING_DESC{DML_BINDING_TYPE_BUFFER, &*persistent_resource_binding}
+                                                           : DML_BINDING_DESC{DML_BINDING_TYPE_NONE, nullptr};
+
+    DML_BINDING_DESC inputArrayBindingDesc = DML_BINDING_DESC{DML_BINDING_TYPE_NONE, nullptr};
+    execution_context->InitializeOperator(compiled_cast_operator.Get(), persistent_resource_bindingDesc, inputArrayBindingDesc);
+    command_list_state = BuildReusableCommandList(dml_device, compiled_cast_operator.Get(), persistent_resource.Get(), persistent_resource_binding);
+    command_list_state.previousOutput = p_out.get();
+  }
+
+  ComPtr<ID3D12Resource> source_resource;
+  Ort::ThrowOnError(ort_dml_api->GetD3D12ResourceFromAllocation(&allocator, in.GetTensorMutableData<uint8_t>(), &source_resource));
+
+  ComPtr<ID3D12Resource> target_resource;
+  Ort::ThrowOnError(ort_dml_api->GetD3D12ResourceFromAllocation(&allocator, p_out->GetTensorMutableData<uint8_t>(), &target_resource));
+
+  std::array<ID3D12Resource*, 1> input_resources = {source_resource.Get()};
+  std::array<uint64_t, 1> input_sizes = {element_count * sizeof(Ort::Float16_t)};
+
+  std::array<ID3D12Resource*, 1> output_resources = {target_resource.Get()};;
+  std::array<uint64_t, 1> output_sizes = {element_count * sizeof(float)};
+
+  ExecuteReusableCommandList(execution_context, command_list_state, allocator, ort_dml_api, input_resources, input_sizes, output_resources, output_sizes, rebind);
+}
+#endif
 
 size_t GetOrtTypeSize(ONNXTensorElementDataType type) {
   switch (type) {
@@ -514,6 +606,12 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
 
 void Model::GetMaxBatchSizeFromGeneratorParams(const GeneratorParams& params) {
   max_batch_size_ = params.max_batch_size;
+
+  if (device_type_ == DeviceType::DML) {
+    use_cuda_graph_ = true;
+    return;
+  }
+
   if (max_batch_size_ > 0 && DeviceType::CUDA == device_type_) {
     if (!IsCudaGraphEnabled(config_->model.decoder.session_options)) {
       throw std::runtime_error("CUDA graphs are not enabled in this model");

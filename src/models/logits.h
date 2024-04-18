@@ -23,6 +23,11 @@ struct Logits {
   // Used for decoding runs with cuda graphs.
   std::unique_ptr<StaticBuffer> sb_logits32_;
   std::unique_ptr<StaticBuffer> sb_logits16_;
+
+#if USE_DML
+  DmlReusedCommandListState logits_cast_command_list_state_{};
+  std::unique_ptr<OrtValue> value32_cpu_;
+#endif
 };
 
 }  // namespace Generators

@@ -5,6 +5,16 @@
 
 namespace Generators {
 
+template <typename NewType, typename OldTypeContainer>
+std::span<NewType> reinterpret_span(OldTypeContainer& oldSpan) {
+  using OldType = decltype(*oldSpan.data());
+  size_t newElementCount = static_cast<size_t>(oldSpan.size()) * sizeof(OldType) / sizeof(NewType);
+  assert(newElementCount * sizeof(NewType) == oldSpan.size() * sizeof(OldType));
+
+  NewType* p = reinterpret_cast<NewType*>(oldSpan.data());
+  return std::span<NewType>(p, p + newElementCount);
+}
+
 InputIDs::InputIDs(const Model& model, State& state)
     : model_{model},
       state_{state} {
@@ -28,7 +38,7 @@ InputIDs::InputIDs(const Model& model, State& state)
   value_ = model_.ExpandInputs(value_, state_.params_->search.num_beams);
   shape_[0] *= state_.params_->search.num_beams;
 
-  if (model_.device_type_ == DeviceType::CUDA && model_.use_cuda_graph_) {
+  if (model_.use_cuda_graph_ && (model_.device_type_ == DeviceType::CUDA || model_.device_type_ == DeviceType::DML)) {
     size_t max_beam_batch_size = static_cast<size_t>(model_.config_->search.num_beams) * model_.max_batch_size_;
     sb_input_ids_ = std::make_unique<StaticBuffer>(model_.allocator_device_, max_beam_batch_size);
   }
@@ -46,8 +56,7 @@ void InputIDs::Update(RoamingArray<int32_t> next_tokens_unk) {
   if (shape_[1] != 1) {
     shape_[1] = 1;
     if (!sb_input_ids_) {
-      auto& allocator = model_.device_type_ == DeviceType::DML ? model_.allocator_cpu_ : *model_.allocator_device_;
-      value_ = OrtValue::CreateTensor(allocator, shape_, type_);
+      value_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
     } else {
       value_ = sb_input_ids_->CreateTensorOnStaticBuffer(shape_, type_);
     }
@@ -57,17 +66,37 @@ void InputIDs::Update(RoamingArray<int32_t> next_tokens_unk) {
 
   // Update input_ids with next tokens, converting from 32-bit to 64-bit
   if (type_ == Ort::TypeToTensorType<int64_t>::type) {
-    auto* data = value_->GetTensorMutableData<int64_t>();
+    switch (model_.device_type_) {
 #if USE_CUDA
-    if (model_.device_type_ == DeviceType::CUDA) {
-      auto next_tokens = next_tokens_unk.GetGPU();
-      cuda::LaunchInt32ToInt64(next_tokens.data(), data, static_cast<int>(next_tokens.size()), model_.cuda_stream_);
-    } else
+      case DeviceType::CUDA: {
+        auto* data = value_->GetTensorMutableData<int64_t>();
+        auto next_tokens = next_tokens_unk.GetGPU();
+        cuda::LaunchInt32ToInt64(next_tokens.data(), data, static_cast<int>(next_tokens.size()), model_.cuda_stream_);
+      } break;
 #endif
-    {
-      auto next_tokens = next_tokens_unk.GetCPU();
-      for (int i = 0; i < shape_[0]; i++) {
-        data[i] = next_tokens[i];
+
+#if USE_DML
+      case DeviceType::DML: {
+        ComPtr<ID3D12Resource> target_resource;
+        Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, value_->GetTensorMutableRawData(), &target_resource));
+
+        auto source = std::span<const uint8_t>(
+            reinterpret_cast<const uint8_t*>(next_tokens_unk.GetCPU().data()),
+            next_tokens_unk.GetCPU().size_bytes());
+
+        model_.GetDmlUploadHeap()->BeginUploadToGpu(
+            target_resource.Get(),
+            0,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            source);
+      } break;
+#endif
+      case DeviceType::CPU: {
+        auto* data = value_->GetTensorMutableData<int64_t>();
+        auto next_tokens = next_tokens_unk.GetCPU();
+        for (int i = 0; i < shape_[0]; i++) {
+          data[i] = next_tokens[i];
+        }
       }
     }
   } else {

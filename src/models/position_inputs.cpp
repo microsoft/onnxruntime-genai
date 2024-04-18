@@ -48,7 +48,7 @@ PositionInputs::PositionInputs(const Model& model, State& state, RoamingArray<in
   position_ids_shape_ = shape;
   attention_mask_shape_ = shape;
 
-  if (model_.device_type_ == DeviceType::CUDA && model_.use_cuda_graph_) {
+  if (model_.use_cuda_graph_ && (model_.device_type_ == DeviceType::CUDA || model_.device_type_ == DeviceType::DML)) {
     size_t max_beam_batch_size = static_cast<size_t>(model_.config_->search.num_beams) * model_.max_batch_size_;
     sb_position_ids_ = std::make_unique<StaticBuffer>(model_.allocator_device_, max_beam_batch_size);
     sb_seqlens_k_ = std::make_unique<StaticBuffer>(model_.allocator_device_, max_beam_batch_size);
@@ -147,14 +147,69 @@ void PositionInputs::UpdatePositionIDs(int current_length) {
                         cudaMemcpyDeviceToDevice,
                         model_.cuda_stream_);
       }
+#elif USE_DML
+      position_ids_ = sb_position_ids_->CreateTensorOnStaticBuffer(position_ids_shape_, type_);
+      assert(model_.device_type_ == DeviceType::DML);
+
+      ComPtr<ID3D12Resource> target_resource;
+      Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, position_ids_->GetTensorMutableRawData(), &target_resource));
+
+      if (type_ == Ort::TypeToTensorType<int32_t>::type) {
+        auto source = std::span(position_ids_next_->GetTensorData<const uint8_t>(), sizeof(int32_t) * position_ids_shape_[0]);
+
+        model_.GetDmlUploadHeap()->BeginUploadToGpu(
+            target_resource.Get(),
+            0,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            source);
+      } else {
+        auto source = std::span(position_ids_next_->GetTensorData<const uint8_t>(), sizeof(int64_t) * position_ids_shape_[0]);
+
+        model_.GetDmlUploadHeap()->BeginUploadToGpu(
+            target_resource.Get(),
+            0,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            source);
+      }
 #endif
     }
     is_first_posid_update_ = false;
     state_.inputs_[posid_input_index_] = position_ids_.get();
   } else {  // Just incrementing existing position IDs
     switch (model_.device_type_) {
-      case DeviceType::DML:
-        // DML doesn't support on-device position ids update yet, so we fall back to the CPU
+#if USE_DML
+      case DeviceType::DML: {
+        ComPtr<ID3D12Resource> target_resource;
+        Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, position_ids_->GetTensorMutableRawData(), &target_resource));
+
+        // DML doesn't support on-device position ids update yet, so we do it on the CPU
+        if (type_ == Ort::TypeToTensorType<int32_t>::type) {
+          auto* source = position_ids_next_->GetTensorMutableData<int32_t>();
+          for (int i = 0; i < position_ids_shape_[0]; i++) {
+            source[i]++;
+          }
+
+          auto source_bytes = std::span(reinterpret_cast<const uint8_t*>(source), sizeof(int32_t) * position_ids_shape_[0]);
+          model_.GetDmlUploadHeap()->BeginUploadToGpu(
+              target_resource.Get(),
+              0,
+              D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+              source_bytes);
+        } else {
+          auto* source = position_ids_next_->GetTensorMutableData<int64_t>();
+          for (int i = 0; i < position_ids_shape_[0]; i++) {
+            source[i]++;
+          }
+
+          auto source_bytes = std::span(reinterpret_cast<const uint8_t*>(source), sizeof(int64_t) * position_ids_shape_[0]);
+          model_.GetDmlUploadHeap()->BeginUploadToGpu(
+              target_resource.Get(),
+              0,
+              D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+              source_bytes);
+        }
+      } break;
+#endif
       case DeviceType::CPU: {
         if (type_ == Ort::TypeToTensorType<int32_t>::type)
           UpdatePositionIDsImpl<int32_t>();
@@ -193,6 +248,34 @@ void PositionInputs::UpdateSeqlensK(int current_length) {
   } else {
     cuda::Launch_UpdatePositionIds(seqlens_k_->GetTensorMutableData<int32_t>(), static_cast<int>(senlens_k_shape_[0]), model_.cuda_stream_);
   }
+#elif USE_DML
+  assert(model_.device_type_ == DeviceType::DML);
+
+  if (is_first_seqlen_update_) {
+    if (!sb_seqlens_k_) {
+      seqlens_k_ = OrtValue::CreateTensor(*model_.allocator_device_, senlens_k_shape_, Ort::TypeToTensorType<int32_t>::type);
+    } else {
+      seqlens_k_ = sb_seqlens_k_->CreateTensorOnStaticBuffer(senlens_k_shape_, Ort::TypeToTensorType<int32_t>::type);
+    }
+    state_.inputs_[seqlens_k_input_index_] = seqlens_k_.get();
+
+    is_first_seqlen_update_ = false;
+  } else {
+    for (int i = 0; i < initial_sequence_lengths_.size(); i++) {
+      initial_sequence_lengths_[i]++;
+    }
+  }
+
+  auto source = std::span(reinterpret_cast<const uint8_t*>(initial_sequence_lengths_.data()), sizeof(int32_t) * initial_sequence_lengths_.size());
+
+  ComPtr<ID3D12Resource> target_resource;
+  Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, seqlens_k_->GetTensorMutableRawData(), &target_resource));
+
+  model_.GetDmlUploadHeap()->BeginUploadToGpu(
+      target_resource.Get(),
+      0,
+      D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+      source);
 #endif
 }
 

@@ -3,11 +3,30 @@
 #include "tfmtok_c.h"
 #endif
 
+#ifdef USE_DML
+#include "dml_helpers.h"
+#include "dml_provider_factory.h"
+#include "dml_execution_context.h"
+#include "dml_pooled_upload_heap.h"
+#include "dml_readback_heap.h"
+#endif
+
 namespace Generators {
 
 struct Tokenizer;
 
 void ConvertFp16ToFp32(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<OrtValue>& p_out, DeviceType device_type, cudaStream_t stream);
+
+#ifdef USE_DML
+void DmlConvertFp16ToFp32(
+    DmlExecutionContext* execution_context,
+    OrtAllocator& allocator,
+    OrtValue& in,
+    std::unique_ptr<OrtValue>& p_out,
+    IDMLDevice* dml_device,
+    const OrtDmlApi* ort_dml_api,
+    DmlReusedCommandListState& command_list_state);
+#endif
 
 struct State {
   State(const GeneratorParams& params);
@@ -126,9 +145,27 @@ struct Model : std::enable_shared_from_this<Model> {
   bool use_cuda_graph_{};
   int max_batch_size_{};
 
+#if USE_DML
+  DmlExecutionContext* GetDmlExecutionContext() const { return dml_execution_context_.get(); }
+  DmlReadbackHeap* GetDmlReadbackHeap() const { return dml_readback_heap_.get(); }
+  DmlPooledUploadHeap* GetDmlUploadHeap() const { return dml_pooled_upload_heap_.get(); }
+  const OrtDmlApi* GetOrtDmlApi() const { return p_dml_api_; }
+  IDMLDevice* GetDmlDevice() const { return dml_device_.Get(); }
+#endif
+
  protected:
   void InitDeviceAllocator(OrtSession& session);
   void CreateSessionOptions();
+
+#if USE_DML
+ private:
+  mutable DmlObjects dml_objects_;
+  const OrtDmlApi* p_dml_api_ = nullptr;
+  std::unique_ptr<DmlPooledUploadHeap> dml_pooled_upload_heap_;
+  std::unique_ptr<DmlExecutionContext> dml_execution_context_;
+  std::unique_ptr<DmlReadbackHeap> dml_readback_heap_;
+  ComPtr<IDMLDevice> dml_device_;
+#endif
 };
 
 }  // namespace Generators
