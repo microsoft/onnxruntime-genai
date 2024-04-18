@@ -160,7 +160,7 @@ void PositionInputs::UpdateAttentionMask(int current_length) {
     }
 #if USE_CUDA
     case DeviceType::CUDA: {
-      int max_seq_len = state_.params_->search.max_length;
+      int max_seq_len = sb_attention_mask_ ? state_.params_->search.max_length : current_length;
       bool update_only = sb_attention_mask_ && !is_first_mask_update_;
       if (type_ == Ort::TypeToTensorType<int32_t>::type) {
         cuda::Launch_UpdateAttentionMask(attention_mask_next_->GetTensorMutableData<int32_t>(),

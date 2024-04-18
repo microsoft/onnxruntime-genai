@@ -20,15 +20,15 @@ template void Launch_UpdatePositionIds(int64_t *positions, int batch_beam_size, 
 
 template <typename T>
 __global__ void CopyAndUpdateAttentionMask(T *mask_data, const T *old_mask_data, int batch_beam_size,
-                                           int current_length) {
+                                           int current_length, int max_length) {
     int global_index = blockIdx.x * blockDim.x + threadIdx.x;
     int i = global_index / current_length;
     int j = global_index % current_length;
     if (i < batch_beam_size) {
         if (j < current_length - 1) {
-            mask_data[i * current_length + j] = old_mask_data[i * (current_length - 1) + j];
+            mask_data[i * max_length + j] = old_mask_data[i * (max_length - 1) + j];
         } else {
-            mask_data[i * current_length + j] = 1;
+            mask_data[i * max_length + j] = 1;
         }
     }
 }
@@ -49,7 +49,7 @@ void Launch_UpdateAttentionMask(T *mask_data, const T *old_mask_data, int batch_
             <<<batch_beam_size, 1, 0, stream>>>(mask_data, batch_beam_size, current_length, max_length);
     } else {
         CopyAndUpdateAttentionMask<T><<<(batch_beam_size * current_length + 255) / 256, 256, 0, stream>>>(
-            mask_data, old_mask_data, batch_beam_size, current_length);
+            mask_data, old_mask_data, batch_beam_size, current_length, max_length);
     }
 }
 
