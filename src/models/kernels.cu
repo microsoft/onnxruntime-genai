@@ -26,7 +26,7 @@ __global__ void CopyAndUpdateAttentionMask(T *mask_data, const T *old_mask_data,
     int j = global_index % current_length;
     if (i < batch_beam_size) {
         if (j < current_length - 1) {
-            mask_data[i * max_length + j] = old_mask_data[i * (max_length - 1) + j];
+            mask_data[i * max_length + j] = old_mask_data[i * (current_length - 1) + j];
         } else {
             mask_data[i * max_length + j] = 1;
         }
@@ -48,7 +48,7 @@ void Launch_UpdateAttentionMask(T *mask_data, const T *old_mask_data, int batch_
         UpdateAttentionMask<T>
             <<<batch_beam_size, 1, 0, stream>>>(mask_data, batch_beam_size, current_length, max_length);
     } else {
-        CopyAndUpdateAttentionMask<T><<<(batch_beam_size * current_length + 255) / 256, 256, 0, stream>>>(
+        CopyAndUpdateAttentionMask<T><<<(batch_beam_size * max_length + 255) / 256, 256, 0, stream>>>(
             mask_data, old_mask_data, batch_beam_size, current_length, max_length);
     }
 }

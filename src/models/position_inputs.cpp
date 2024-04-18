@@ -142,22 +142,39 @@ void PositionInputs::UpdatePositionIDs(int current_length) {
 void PositionInputs::UpdateAttentionMask(int current_length) {
   // Update attention mask
   if (sb_attention_mask_) {
+#if USE_CUDA
+    attention_mask_shape_[1] = state_.params_->search.max_length;
+    attention_mask_next_ = sb_attention_mask_->CreateTensorOnStaticBuffer(attention_mask_shape_, type_);
     if (is_first_mask_update_) {
-      attention_mask_shape_[1] = state_.params_->search.max_length;
-      attention_mask_next_ = sb_attention_mask_->CreateTensorOnStaticBuffer(attention_mask_shape_, type_);
+      if (type_ == Ort::TypeToTensorType<int32_t>::type) {
+        cudaMemsetAsync(attention_mask_next_->GetTensorMutableRawData(),
+                        0,
+                        sizeof(int32_t) * attention_mask_shape_[0] * attention_mask_shape_[1],
+                        model_.cuda_stream_);
+      } else {
+        cudaMemsetAsync(attention_mask_next_->GetTensorMutableRawData(),
+                        0,
+                        sizeof(int64_t) * attention_mask_shape_[0] * attention_mask_shape_[1],
+                        model_.cuda_stream_);
+      }
     }
+#endif
   } else {
     assert(attention_mask_shape_[1] == current_length - 1);  // We should always be growing by 1
     attention_mask_shape_[1] = current_length;
-    attention_mask_next_ = OrtValue::CreateTensor(model_.allocator_cpu_, attention_mask_shape_, type_);
+    attention_mask_next_ = OrtValue::CreateTensor(*model_.allocator_device_, attention_mask_shape_, type_);
   }
 
   switch (model_.device_type_) {
     case DeviceType::CPU: {
       if (type_ == Ort::TypeToTensorType<int32_t>::type)
-        UpdateAttentionMaskImpl(attention_mask_next_->GetTensorMutableData<int32_t>(), attention_mask_->GetTensorData<int32_t>(), current_length);
+        UpdateAttentionMaskImpl(attention_mask_next_->GetTensorMutableData<int32_t>(),
+                                attention_mask_->GetTensorData<int32_t>(),
+                                current_length);
       else
-        UpdateAttentionMaskImpl(attention_mask_next_->GetTensorMutableData<int64_t>(), attention_mask_->GetTensorData<int64_t>(), current_length);
+        UpdateAttentionMaskImpl(attention_mask_next_->GetTensorMutableData<int64_t>(),
+                                attention_mask_->GetTensorData<int64_t>(),
+                                current_length);
       break;
     }
 #if USE_CUDA
