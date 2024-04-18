@@ -9,6 +9,7 @@ Logits::Logits(const Model& model, State& state)
       state_{state},
       shape_{static_cast<int64_t>(state_.params_->batch_size) * state_.params_->search.num_beams, state_.params_->sequence_length, state_.params_->vocab_size},
       type_{model_.session_info_->GetOutputDataType(model_.config_->model.decoder.outputs.logits)} {
+  // DML doesn't support on-device scoring yet, so fall back to the CPU
   auto& allocator = model_.device_type_ == DeviceType::DML ? model_.allocator_cpu_ : *model_.allocator_device_;
   auto logits_tensor = OrtValue::CreateTensor(allocator, shape_, type_);
   if (type_ == Ort::TypeToTensorType<float>::type)
@@ -29,6 +30,7 @@ Logits::Logits(const Model& model, State& state)
 
 RoamingArray<float> Logits::Get() {
   size_t element_count = shape_[0] * shape_[1] * shape_[2];
+  // DML doesn't support on-device scoring yet, so fall back to the CPU
   auto& allocator = model_.device_type_ == DeviceType::DML ? model_.allocator_cpu_ : *model_.allocator_device_;
 
   // Convert from float16 to float32 if necessary
