@@ -177,6 +177,8 @@ class Model:
 
         self.past_present_share_buffer = self.attention_attrs["op_type"] == "GroupQueryAttention"
 
+        self.past_present_share_buffer = self.attention_attrs["op_type"] == "GroupQueryAttention"
+
         # MLP-specific variables
         self.mlp_attrs = {
             "use_proj": True,           # Use projection style for MLP (GateProj/UpProj/DownProj)
