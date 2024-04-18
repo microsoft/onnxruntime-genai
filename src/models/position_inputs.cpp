@@ -226,9 +226,11 @@ void PositionInputs::UpdateAttentionMask(int current_length) {
     attention_mask_next_ = sb_attention_mask_next_->CreateTensorOnStaticBuffer(attention_mask_shape_, type_);
 #endif
   } else {
+    // DML doesn't support on-device mask updating yet, so use a CPU allocator
+    auto& allocator = model_.device_type_ == DeviceType::DML ? model_.allocator_cpu_ : *model_.allocator_device_;
     assert(attention_mask_shape_[1] == current_length - 1);  // We should always be growing by 1
     attention_mask_shape_[1] = current_length;
-    attention_mask_next_ = OrtValue::CreateTensor(*model_.allocator_device_, attention_mask_shape_, type_);
+    attention_mask_next_ = OrtValue::CreateTensor(allocator, attention_mask_shape_, type_);
   }
 
   switch (model_.device_type_) {
