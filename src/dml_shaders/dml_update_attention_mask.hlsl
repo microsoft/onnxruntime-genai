@@ -14,9 +14,9 @@ RWStructuredBuffer<T> outputMask : register(u1);
 cbuffer Constants
 {
     uint maxSeqLen;
+    uint seqLen;
     uint elementCount;
     uint startIndex;
-    uint seqLen;
 };
 
 [RootSignature(ROOT_SIG_DEF)]
@@ -28,17 +28,14 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     {
         uint sequenceIndex = globalIndex % maxSeqLen;
 
-        if (seqLen > 1 && sequenceIndex < seqLen)
+        if (seqLen > 1)
         {
-            outputMask[globalIndex] = 1;
-        }
-        else if (sequenceIndex == 0 || inputMask[sequenceIndex] == 1 || inputMask[sequenceIndex - 1] == 1)
-        {
-            outputMask[globalIndex] = 1;
+            const T value = sequenceIndex < seqLen ? 1 : 0;
+            outputMask[globalIndex] = value;
         }
         else
         {
-            outputMask[globalIndex] = 0;
+            outputMask[globalIndex] = (sequenceIndex == 0 || inputMask[sequenceIndex] == 1 || inputMask[sequenceIndex - 1] == 1) ? 1 : 0;
         }
     }
 }

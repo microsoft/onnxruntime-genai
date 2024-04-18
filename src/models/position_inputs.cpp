@@ -224,16 +224,6 @@ void PositionInputs::UpdateAttentionMask(int current_length) {
     attention_mask_shape_[1] = state_.params_->search.max_length;
     attention_mask_ = sb_attention_mask_->CreateTensorOnStaticBuffer(attention_mask_shape_, type_);
     attention_mask_next_ = sb_attention_mask_next_->CreateTensorOnStaticBuffer(attention_mask_shape_, type_);
-
-    if (is_first_mask_update_) {
-#if USE_DML
-      ComPtr<ID3D12Resource> attention_mask_resource;
-      Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, attention_mask_->GetTensorMutableRawData(), &attention_mask_resource));
-
-      std::array<uint8_t, 1> pattern = {0};
-      model_.GetDmlExecutionContext()->FillBufferWithPattern(attention_mask_resource.Get(), pattern);
-#endif
-    }
 #endif
   } else {
     assert(attention_mask_shape_[1] == current_length - 1);  // We should always be growing by 1

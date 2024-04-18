@@ -153,6 +153,12 @@ DmlUpdateMaskKernel::DmlUpdateMaskKernel(
     m_graphicsCommandList->Dispatch(dispatchSizeX, 1, 1);
   }
 
+  // Barrier all outputs.
+  std::array<D3D12_RESOURCE_BARRIER, 1> output_barriers = {
+      CD3DX12_RESOURCE_BARRIER::UAV(m_attention_mask_next_resource.Get()),
+  };
+  m_graphicsCommandList->ResourceBarrier(static_cast<uint32_t>(output_barriers.size()), output_barriers.data());
+
   // Copy the next mask to the current mask for next iteration
   if (dtype_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
     m_graphicsCommandList->CopyBufferRegion(m_attention_mask_resource.Get(), 0, m_attention_mask_next_resource.Get(), 0, m_constants.elementCount * sizeof(int32_t));
@@ -161,4 +167,6 @@ DmlUpdateMaskKernel::DmlUpdateMaskKernel(
   } else {
     THROW_HR(E_NOTIMPL);
   }
+
+  m_graphicsCommandList->Close();
 }
