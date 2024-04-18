@@ -65,8 +65,6 @@ class Model:
             "input_ids": TensorProto.INT64,                                                                      # For standard models
             "attention_mask": TensorProto.INT64,                                                                 # For standard models
             "position_ids": TensorProto.INT64,                                                                   # For standard models
-            "seqlens_k": TensorProto.INT32,                                                                      # For standard models with cuda graph enabled
-            "total_seq_len": TensorProto.INT32,                                                                  # For standard models with cuda graph enabled
             "inputs_embeds": self.io_dtype,                                                                      # For standard models where you want to remove the embedding layer from the model (note that `inputs_embeds` is written this way to match Hugging Face format)
             "past_key_values.key": self.io_dtype,                                                                # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format)
             "past_key_values.value": self.io_dtype,                                                              # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format)
@@ -75,8 +73,6 @@ class Model:
             "input_ids": ["batch_size", "sequence_length"],                                                      # For standard models
             "attention_mask": ["batch_size", "total_sequence_length"],                                           # For standard models
             "position_ids": ["batch_size", "sequence_length"],                                                   # For standard models
-            "seqlens_k": ["batch_size"],                                                                         # For standard models with cuda graph enabled
-            "total_seq_len": [],                                                                                 # For standard models with cuda graph enabled
             "inputs_embeds": ["batch_size", "sequence_length", self.hidden_size],                                # For standard models where you want to remove the embedding layer from the model (note that `inputs_embeds` is written this way to match Hugging Face format)
             "past_key_values.key": ["batch_size", self.num_kv_heads, "past_sequence_length", self.head_size],    # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format)
             "past_key_values.value": ["batch_size", self.num_kv_heads, "past_sequence_length", self.head_size],  # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format)
@@ -84,9 +80,6 @@ class Model:
         self.exclude_embeds = "exclude_embeds" in extra_options
         if self.exclude_embeds:
             self.input_names = [name.replace("input_ids", "inputs_embeds") for name in self.input_names]
-
-        if self.ep_attrs["cuda"]["enable_cuda_graph"] == '1':
-            self.input_names = ["input_ids", "position_ids", "seqlens_k", "total_seq_len"]
 
         # Map output names to their types and shapes
         self.output_names = ["logits"]
@@ -180,6 +173,8 @@ class Model:
             self.attention_attrs["use_rotemb_in_attn"] = True
             self.input_names.remove("position_ids")
 
+        self.past_present_share_buffer = self.attention_attrs["op_type"] == "GroupQueryAttention"
+
         # MLP-specific variables
         self.mlp_attrs = {
             "use_proj": True,           # Use projection style for MLP (GateProj/UpProj/DownProj)
@@ -239,7 +234,7 @@ class Model:
                 "no_repeat_ngram_size": config.no_repeat_ngram_size if hasattr(config, "no_repeat_ngram_size") else 0,
                 "num_beams": config.num_beams if hasattr(config, "num_beams") else 1,
                 "num_return_sequences": config.num_return_sequences if hasattr(config, "num_return_sequences") else 1,
-                "past_present_share_buffer": self.attention_attrs["op_type"] == "GroupQueryAttention",
+                "past_present_share_buffer": self.past_present_share_buffer,
                 "repetition_penalty": config.repetition_penalty if hasattr(config, "repetition_penalty") else 1.0,
                 "temperature": config.temperature if hasattr(config, "temperature") else 1.0,
                 "top_k": 1,
@@ -858,8 +853,8 @@ class Model:
         if op_type == "MultiHeadAttention":
             self.make_multi_head_attention(name, add_qk=f"{self.mask_attrs['mask_name']}/output_0", **kwargs)
         elif op_type == "GroupQueryAttention":
-            seqlens_k_name = f"{self.mask_attrs['seqlens_k']}/output_0" if self.ep_attrs["cuda"]["enable_cuda_graph"] == "0" else "seqlens_k"
-            total_seq_len_name = f"{self.mask_attrs['total_seq_len']}/output_0" if self.ep_attrs["cuda"]["enable_cuda_graph"] == "0" else "total_seq_len"
+            seqlens_k_name = f"{self.mask_attrs['seqlens_k']}/output_0"
+            total_seq_len_name = f"{self.mask_attrs['total_seq_len']}/output_0"
             self.make_group_query_attention(name, seqlens_k=seqlens_k_name, total_seq_len=total_seq_len_name, **kwargs)
         else:
             raise NotImplementedError(f"The {op_type} op is not currently supported.")
@@ -1226,12 +1221,15 @@ class Model:
     def make_attention_mask_reformatting(self):
         if self.ep_attrs["cuda"]["enable_cuda_graph"] == "1":
             # ORT does not allow nodes to be placed on mulitple execution providers
-            # with cuda graph enabled. Thus the attention mask is deprecated and the
-            # subgraph is replaced with seqlens_k and total_seq_len as the raw
-            # inputs to GroupQueryAttention.
-            return
+            # with cuda graph enabled. We've only verified it works with GQA and with
+            # past_present_share_buffer enabled(so the total_seq_len in GQA is hardcoded
+            # to a fixed value by logic).
+            # For other models, we need to check if it works and update the logic here.
+            # This assertion is temporary.
+            assert self.past_present_share_buffer
+
         if self.attention_attrs["op_type"] == "GroupQueryAttention":
-            self.make_attention_mask_reformatting_for_gqa()            
+            self.make_attention_mask_reformatting_for_gqa()
         elif self.attention_attrs["op_type"] == "MultiHeadAttention":
             # Make attention mask reformatting nodes
             #
@@ -1807,9 +1805,9 @@ def get_args():
                 exclude_lm_head = Remove language modeling head from your ONNX model.
                     Use this option when you want to remove the language modeling head from within your ONNX model.
                     Instead of `logits`, you will have `hidden_states` as the output to your ONNX model.
-                enable_cuda_graph = 1 : The model can use CUDA graph capture for CUDA execution provider. If enabled, raw inputs(seqlens_k and total_seq_len)
-                    to the GroupQueryAttention are populated to the graph inputs to ensure all nodes are placed on the CUDA EP. Currently there's no gurantee 
-                    that cuda graph be enabled as it depends on the model and the graph structure.
+                enable_cuda_graph = 1 : The model can use CUDA graph capture for CUDA execution provider. If enabled, all nodes being placed on the CUDA EP
+                    is the prerequisite for the CUDA graph to be used correctly. It is not guaranteed that cuda graph be enabled as it depends on the model
+                    and the graph structure.
             """),
     )
 

@@ -486,12 +486,23 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
 }
 
 void Model::GetMaxBatchSizeFromGeneratorParams(const GeneratorParams& params) {
+  bool is_cuda_graph_enabled = IsCudaGraphEnabled(config_->model.decoder.session_options);
   max_batch_size_ = params.max_batch_size;
-  if (max_batch_size_ > 0 && DeviceType::CUDA == device_type_) {
-    if (!IsCudaGraphEnabled(config_->model.decoder.session_options)) {
-      throw std::runtime_error("CUDA graphs are not enabled in this model");
+
+  if (DeviceType::CUDA == device_type_) {
+    if (max_batch_size_ == 0 && is_cuda_graph_enabled) {
+      throw std::runtime_error("CUDA graph is enabled, but max_batch_size is not set.");
     }
-    use_cuda_graph_ = true;
+    if (max_batch_size_ > 0) {
+      if (!is_cuda_graph_enabled) {
+        throw std::runtime_error("CUDA graph is not enabled.");
+      }
+      use_cuda_graph_ = true;
+    }
+  } else {
+    if (is_cuda_graph_enabled || max_batch_size_ > 0) {
+      throw std::runtime_error("CUDA graph is not supported on this device");
+    }
   }
 }
 
