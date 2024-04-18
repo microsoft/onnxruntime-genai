@@ -141,9 +141,11 @@ void PositionInputs::UpdatePositionIDs(int current_length) {
 
 void PositionInputs::UpdateAttentionMask(int current_length) {
   // Update attention mask
-  if (sb_attention_mask_ && is_first_mask_update_) {
-    attention_mask_shape_[1] = state_.params_->search.max_length;
-    attention_mask_next_ = sb_attention_mask_->CreateTensorOnStaticBuffer(attention_mask_shape_, type_);
+  if (sb_attention_mask_) {
+    if (is_first_mask_update_) {
+      attention_mask_shape_[1] = state_.params_->search.max_length;
+      attention_mask_next_ = sb_attention_mask_->CreateTensorOnStaticBuffer(attention_mask_shape_, type_);
+    }
   } else {
     assert(attention_mask_shape_[1] == current_length - 1);  // We should always be growing by 1
     attention_mask_shape_[1] = current_length;
