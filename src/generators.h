@@ -42,6 +42,7 @@ using TokenSequences = std::vector<std::vector<int32_t>>;
 enum struct DeviceType {
   CPU,
   CUDA,
+  DML,
 };
 
 struct GeneratorParams : std::enable_shared_from_this<GeneratorParams> {
