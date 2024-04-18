@@ -151,6 +151,7 @@ struct Model : std::enable_shared_from_this<Model> {
   DmlPooledUploadHeap* GetDmlUploadHeap() const { return dml_pooled_upload_heap_.get(); }
   const OrtDmlApi* GetOrtDmlApi() const { return p_dml_api_; }
   IDMLDevice* GetDmlDevice() const { return dml_device_.Get(); }
+  ID3D12Device* GetD3D12Device() const { return dml_objects_.d3d12Device.Get(); }
 #endif
 
  protected:

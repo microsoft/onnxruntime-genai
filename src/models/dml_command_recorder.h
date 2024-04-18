@@ -55,6 +55,10 @@ class DmlCommandRecorder {
   void Open();
   void CloseAndExecute();
 
+  void FillBufferWithPattern(
+      ID3D12Resource* dstBuffer,
+      std::span<const uint8_t> value);
+
   bool HasUnsubmittedWork() {
     return m_operationsRecordedInCurrentCommandList;
   }

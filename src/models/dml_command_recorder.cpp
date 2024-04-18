@@ -74,6 +74,63 @@ void DmlCommandRecorder::ExecuteCommandList(
   *completionValue = gpuEvent.fenceValue;
 }
 
+void DmlCommandRecorder::FillBufferWithPattern(
+    ID3D12Resource* dstBuffer,
+    std::span<const uint8_t> value) {
+  // The fill pattern for ClearUnorderedAccessViewUint is 16 bytes.
+  union {
+    uint32_t integers[4];
+    uint8_t bytes[16];
+  } fillPattern = {};
+
+  assert(ARRAYSIZE(fillPattern.bytes) == 16);
+  assert(value.size() <= ARRAYSIZE(fillPattern.bytes));  // No element is expected larger than 128 bits (e.g. complex128).
+
+  if (!value.empty()) {
+    assert(ARRAYSIZE(fillPattern.bytes) % value.size() == 0);  // Should fit evenly into 16 bytes (e.g. uint8, float16, uint32, float64...).
+
+    // Repeat the value multiple times into the pattern buffer.
+    size_t valueIndex = 0;
+    for (uint8_t& p : fillPattern.bytes) {
+      p = value[valueIndex++];
+      valueIndex = (valueIndex == value.size()) ? 0 : valueIndex;
+    }
+  }
+  // Else just leave fill pattern as zeroes.
+
+  // Create a RAW buffer UAV over the resource.
+  D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
+  uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+  uavDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+  uavDesc.Buffer.NumElements = static_cast<uint32_t>(dstBuffer->GetDesc().Width / sizeof(uint32_t));
+  uavDesc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+
+  const uint32_t neededDescriptorCount = 1;
+  DmlDescriptorRange descriptorRangeCpu = m_descriptorPool.AllocDescriptors(neededDescriptorCount, m_queue->GetNextCompletionEvent(), D3D12_DESCRIPTOR_HEAP_FLAG_NONE);
+  DmlDescriptorRange descriptorRangeGpu = m_descriptorPool.AllocDescriptors(neededDescriptorCount, m_queue->GetNextCompletionEvent(), D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE);
+  m_d3dDevice->CreateUnorderedAccessView(dstBuffer, nullptr, &uavDesc, descriptorRangeCpu.cpuHandle);
+  m_d3dDevice->CreateUnorderedAccessView(dstBuffer, nullptr, &uavDesc, descriptorRangeGpu.cpuHandle);
+
+  SetDescriptorHeap(descriptorRangeGpu.heap);
+
+  // Record a ClearUAV onto the command list.
+  m_currentCommandList->ClearUnorderedAccessViewUint(
+      descriptorRangeGpu.gpuHandle,
+      descriptorRangeCpu.cpuHandle,
+      dstBuffer,
+      fillPattern.integers,
+      0,
+      nullptr);
+  m_operationsRecordedInCurrentCommandList = true;
+
+// Barrier all outputs.
+#pragma warning(push)
+#pragma warning(disable : 6387)
+  auto uav = CD3DX12_RESOURCE_BARRIER::UAV(nullptr);
+  m_currentCommandList->ResourceBarrier(1, &uav);
+#pragma warning(pop)
+}
+
 ComPtr<ID3D12GraphicsCommandList> DmlCommandRecorder::GetCommandList() {
   // Assume operations are added by the caller after this returns
   m_operationsRecordedInCurrentCommandList = true;

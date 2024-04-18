@@ -16,9 +16,8 @@
             "hidden_size": 2560,
             "inputs": {
                 "input_ids": "input_ids",
+                "attention_mask": "attention_mask",
                 "position_ids": "position_ids",
-                "seqlens_k": "seqlens_k",
-                "total_seq_len": "total_seq_len",
                 "past_key_names": "past_key_values.%d.key",
                 "past_value_names": "past_key_values.%d.value"
             },

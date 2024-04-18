@@ -44,6 +44,10 @@ class DmlExecutionContext {
       const DML_BINDING_DESC& persistentResourceBinding,
       const DML_BINDING_DESC& inputArrayBinding);
 
+  void FillBufferWithPattern(
+      ID3D12Resource* dstBuffer,
+      std::span<const uint8_t> pattern);
+
   void ExecuteCommandList(
       ID3D12GraphicsCommandList* commandList,
       _Outptr_ ID3D12Fence** fence,

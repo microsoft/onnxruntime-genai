@@ -80,6 +80,14 @@ void DmlExecutionContext::AddUAVBarrier() {
   m_dmlRecorder.AddUAVBarrier();
 }
 
+void DmlExecutionContext::FillBufferWithPattern(
+    ID3D12Resource* dstBuffer,
+    std::span<const uint8_t> pattern)
+{
+    SetCommandRecorder(&m_dmlRecorder);
+    m_dmlRecorder.FillBufferWithPattern(dstBuffer, pattern);
+}
+
 void DmlExecutionContext::ResourceBarrier(std::span<const D3D12_RESOURCE_BARRIER> barriers) {
   assert(!m_closed);
   SetCommandRecorder(&m_dmlRecorder);

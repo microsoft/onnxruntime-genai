@@ -605,18 +605,29 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
 }
 
 void Model::GetMaxBatchSizeFromGeneratorParams(const GeneratorParams& params) {
+  bool is_cuda_graph_enabled = device_type_ == DeviceType::DML || IsCudaGraphEnabled(config_->model.decoder.session_options);
   max_batch_size_ = params.max_batch_size;
 
-  if (device_type_ == DeviceType::DML) {
-    use_cuda_graph_ = true;
-    return;
-  }
-
-  if (max_batch_size_ > 0 && DeviceType::CUDA == device_type_) {
-    if (!IsCudaGraphEnabled(config_->model.decoder.session_options)) {
-      throw std::runtime_error("CUDA graphs are not enabled in this model");
+  if (DeviceType::CUDA == device_type_) {
+    if (max_batch_size_ == 0 && is_cuda_graph_enabled) {
+      throw std::runtime_error("CUDA graph is enabled, but max_batch_size is not set.");
     }
+    if (max_batch_size_ > 0) {
+      if (!is_cuda_graph_enabled) {
+        throw std::runtime_error("CUDA graph is not enabled.");
+      }
+      use_cuda_graph_ = true;
+    }
+  } else if (DeviceType::DML == device_type_) {
+    if (max_batch_size_ == 0) {
+      throw std::runtime_error("max_batch_size needs to be set when using DirectML.");
+    }
+
     use_cuda_graph_ = true;
+  } else {
+    if (is_cuda_graph_enabled || max_batch_size_ > 0) {
+      throw std::runtime_error("CUDA graph is not supported on this device");
+    }
   }
 }
 
