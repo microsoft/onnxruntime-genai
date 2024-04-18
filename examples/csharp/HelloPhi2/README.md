@@ -28,7 +28,7 @@ To generate the model with model builder:
    pip install onnxruntime
    ```
    
-3. Run the model builder script to export, optimize, and quantize the model. More details can be found [here](../../src/python/py/models/README.md)
+3. Run the model builder script to export, optimize, and quantize the model. More details can be found [here](../../../src/python/py/models/README.md)
 
    ```bash
    cd examples/python
