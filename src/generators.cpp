@@ -86,7 +86,13 @@ void Generator::ComputeLogits() {
   if (computed_logits_)
     throw std::runtime_error("ComputeLogits called again without calling GenerateNextToken first");
 
-  search_->SetLogits(state_->Run(search_->GetSequenceLength(), search_->GetNextTokens(), search_->GetNextIndices()));
+  auto logits = state_->Run(search_->GetSequenceLength(), search_->GetNextTokens(), search_->GetNextIndices());
+  if (g_log.enabled && g_log.model_logits) {
+    auto& stream = Log("model_logits");
+    DumpSpan(stream, logits.GetCPU());
+    stream << std::endl;
+  }
+  search_->SetLogits(logits);
   computed_logits_ = true;
 
   auto& search = search_->params_->search;
@@ -105,8 +111,18 @@ void Generator::GenerateNextToken() {
   if (!computed_logits_)
     throw std::runtime_error("Must call ComputeLogits before GenerateNextToken");
   computed_logits_ = false;
-
   auto& search = search_->params_->search;
+
+  if (g_log.enabled && g_log.generate_next_token) {
+    auto& stream = Log("generate_next_token");
+    stream << SGR::Fg_Green << "do_sample: " << SGR::Reset << search.do_sample << ' '
+           << SGR::Fg_Green << "top_k: " << SGR::Reset << search.top_k << ' '
+           << SGR::Fg_Green << "top_p: " << SGR::Reset << search.top_p << ' '
+           << SGR::Fg_Green << "temperature: " << SGR::Reset << search.temperature << ' '
+           << SGR::Fg_Cyan << "sequence length: " << SGR::Reset << search_->GetSequenceLength()
+           << std::endl;
+  }
+
   if (!search.do_sample || search.top_k == 1) {
     search_->SelectTop();
     return;

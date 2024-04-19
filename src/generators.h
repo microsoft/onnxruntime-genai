@@ -29,7 +29,9 @@ using cudaStream_t = void*;
 
 #include "smartptrs.h"
 #include "models/onnxruntime_api.h"
+#include "models/debugging.h"
 #include "config.h"
+#include "logging.h"
 
 namespace Generators {
 struct Model;
