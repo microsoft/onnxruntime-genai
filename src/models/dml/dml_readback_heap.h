@@ -10,31 +10,31 @@
 // readback heap - just maintain a single resource and reallocate it if it's not big enough.
 class DmlReadbackHeap {
  public:
-  DmlReadbackHeap(ID3D12Device* device, DmlExecutionContext* executionContext);
+  DmlReadbackHeap(ID3D12Device* device, DmlExecutionContext* execution_context);
 
   // Copies data from the specified GPU resource into CPU memory pointed-to by the span. This method will block
   // until the copy is complete.
   void ReadbackFromGpu(
       std::span<uint8_t> dst,
       ID3D12Resource* src,
-      uint64_t srcOffset,
-      D3D12_RESOURCE_STATES srcState);
+      uint64_t src_offset,
+      D3D12_RESOURCE_STATES src_state);
 
   // Overload supporting batching
   void ReadbackFromGpu(
       std::span<void*> dst,
-      std::span<const uint32_t> dstSizes,
+      std::span<const uint32_t> dst_sizes,
       std::span<ID3D12Resource*> src,
-      D3D12_RESOURCE_STATES srcState);
+      D3D12_RESOURCE_STATES src_state);
 
  private:
   void EnsureReadbackHeap(size_t size);
 
-  static constexpr size_t c_initialCapacity = 1024 * 1024;  // 1MB
+  static constexpr size_t c_initial_capacity = 1024 * 1024;  // 1MB
 
-  ComPtr<ID3D12Device> m_device;
+  ComPtr<ID3D12Device> device_;
   DmlExecutionContext* execution_context_;
 
-  ComPtr<ID3D12Resource> m_readbackHeap;
-  size_t m_capacity = 0;
+  ComPtr<ID3D12Resource> readback_heap_;
+  size_t capacity_ = 0;
 };

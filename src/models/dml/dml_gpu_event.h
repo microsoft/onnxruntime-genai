@@ -11,11 +11,11 @@ using Microsoft::WRL::ComPtr;
 
 // Represents a fence which will be signaled at some point (usually by the GPU).
 struct DmlGpuEvent {
-  uint64_t fenceValue;
+  uint64_t fence_value;
   ComPtr<ID3D12Fence> fence;
 
   bool IsSignaled() const {
-    return fence->GetCompletedValue() >= fenceValue;
+    return fence->GetCompletedValue() >= fence_value;
   }
 
   // Blocks until IsSignaled returns true.

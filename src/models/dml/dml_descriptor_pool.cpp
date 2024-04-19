@@ -6,102 +6,102 @@
 #include <wil/result.h>
 #include "dml_descriptor_pool.h"
 
-DmlDescriptorHeap::DmlDescriptorHeap(ID3D12DescriptorHeap* heap) : m_heap(heap),
-                                                             m_capacity(heap->GetDesc().NumDescriptors),
-                                                             m_headCpuHandle(heap->GetCPUDescriptorHandleForHeapStart()),
-                                                             m_headGpuHandle(heap->GetGPUDescriptorHandleForHeapStart()),
-                                                             m_heapFlags(heap->GetDesc().Flags) {
+DmlDescriptorHeap::DmlDescriptorHeap(ID3D12DescriptorHeap* heap) : heap_(heap),
+                                                                   capacity_(heap->GetDesc().NumDescriptors),
+                                                                   head_cpu_handle_(heap->GetCPUDescriptorHandleForHeapStart()),
+                                                                   head_gpu_handle_(heap->GetGPUDescriptorHandleForHeapStart()),
+                                                                   heap_flags_(heap->GetDesc().Flags) {
   ComPtr<ID3D12Device> device;
   THROW_IF_FAILED(heap->GetDevice(IID_PPV_ARGS(device.GetAddressOf())));
-  m_handleIncrementSize = device->GetDescriptorHandleIncrementSize(heap->GetDesc().Type);
+  handle_increment_size_ = device->GetDescriptorHandleIncrementSize(heap->GetDesc().Type);
 }
 
 std::optional<DmlDescriptorRange> DmlDescriptorHeap::TryAllocDescriptors(
-    uint32_t numDescriptors,
-    DmlGpuEvent completionEvent,
-    D3D12_DESCRIPTOR_HEAP_FLAGS heapFlags) {
+    uint32_t num_descriptors,
+    DmlGpuEvent completion_event,
+    D3D12_DESCRIPTOR_HEAP_FLAGS heap_flags) {
   // Bail if the desired heap creation flags are incompatible with the existing heap.
-  if (m_heapFlags != heapFlags) {
+  if (heap_flags_ != heap_flags) {
     return std::nullopt;
   }
 
-  if ((m_completionEvent.fence != nullptr) && (m_completionEvent.IsSignaled())) {
+  if ((completion_event_.fence != nullptr) && (completion_event_.IsSignaled())) {
     // This class always allocates descriptors from the end of the heap.
     // If the most recent completion event is signaled, then all previous
     // allocations have completed; the entire capacity is available to use.
-    m_size = 0;
-    m_headCpuHandle = m_heap->GetCPUDescriptorHandleForHeapStart();
-    m_headGpuHandle = m_heap->GetGPUDescriptorHandleForHeapStart();
+    size_ = 0;
+    head_cpu_handle_ = heap_->GetCPUDescriptorHandleForHeapStart();
+    head_gpu_handle_ = heap_->GetGPUDescriptorHandleForHeapStart();
   }
 
   // The caller will need to create a new heap if there is no space left in this one.
-  uint32_t spaceRemaining = m_capacity - m_size;
-  if (spaceRemaining < numDescriptors) {
+  uint32_t space_remaining = capacity_ - size_;
+  if (space_remaining < num_descriptors) {
     return std::nullopt;
   }
 
-  DmlDescriptorRange range = {m_heap.Get(), m_headCpuHandle, m_headGpuHandle};
+  DmlDescriptorRange range = {heap_.Get(), head_cpu_handle_, head_gpu_handle_};
 
-  m_size += numDescriptors;
-  m_completionEvent = completionEvent;
-  m_headCpuHandle.Offset(numDescriptors, m_handleIncrementSize);
-  m_headGpuHandle.Offset(numDescriptors, m_handleIncrementSize);
+  size_ += num_descriptors;
+  completion_event_ = completion_event;
+  head_cpu_handle_.Offset(num_descriptors, handle_increment_size_);
+  head_gpu_handle_.Offset(num_descriptors, handle_increment_size_);
 
   return range;
 }
 
-DescriptorPool::DescriptorPool(ID3D12Device* device, uint32_t initialCapacity) : m_device(device),
-                                                                                 m_initialHeapCapacity(initialCapacity) {
-  CreateHeap(initialCapacity, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE);
+DescriptorPool::DescriptorPool(ID3D12Device* device, uint32_t initial_capacity) : device_(device),
+                                                                                  initial_heap_capacity_(initial_capacity) {
+  CreateHeap(initial_capacity, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE);
 }
 
 DmlDescriptorRange DescriptorPool::AllocDescriptors(
-    uint32_t numDescriptors,
-    DmlGpuEvent completionEvent,
-    D3D12_DESCRIPTOR_HEAP_FLAGS heapFlags) {
+    uint32_t num_descriptors,
+    DmlGpuEvent completion_event,
+    D3D12_DESCRIPTOR_HEAP_FLAGS heap_flags) {
   // Attempt to allocate from an existing heap.
-  for (DmlDescriptorHeap& heap : m_heaps) {
-    auto descriptorRange = heap.TryAllocDescriptors(numDescriptors, completionEvent, heapFlags);
-    if (descriptorRange.has_value()) {
-      return descriptorRange.value();
+  for (DmlDescriptorHeap& heap : heaps_) {
+    auto descriptor_range = heap.TryAllocDescriptors(num_descriptors, completion_event, heap_flags);
+    if (descriptor_range.has_value()) {
+      return descriptor_range.value();
     }
   }
 
   // A new descriptor heap must be created.
-  uint32_t newHeapCapacity = std::max(numDescriptors, m_initialHeapCapacity);
-  CreateHeap(newHeapCapacity, heapFlags);
-  auto descriptorRange = m_heaps.back().TryAllocDescriptors(numDescriptors, completionEvent, heapFlags);
-  assert(descriptorRange.has_value());
-  return descriptorRange.value();
+  uint32_t new_heap_capacity = std::max(num_descriptors, initial_heap_capacity_);
+  CreateHeap(new_heap_capacity, heap_flags);
+  auto descriptor_range = heaps_.back().TryAllocDescriptors(num_descriptors, completion_event, heap_flags);
+  assert(descriptor_range.has_value());
+  return descriptor_range.value();
 }
 
 void DescriptorPool::Trim() {
   // Remove any heaps that are not pending execution.
-  auto it = std::remove_if(m_heaps.begin(), m_heaps.end(), [](const DmlDescriptorHeap& heap) {
-    auto completionEvent = heap.GetLastCompletionEvent();
-    return !completionEvent.fence || completionEvent.IsSignaled();
+  auto it = std::remove_if(heaps_.begin(), heaps_.end(), [](const DmlDescriptorHeap& heap) {
+    auto completion_event = heap.GetLastCompletionEvent();
+    return !completion_event.fence || completion_event.IsSignaled();
   });
 
-  m_heaps.erase(it, m_heaps.end());
+  heaps_.erase(it, heaps_.end());
 }
 
-void DescriptorPool::CreateHeap(uint32_t numDescriptors, D3D12_DESCRIPTOR_HEAP_FLAGS heapFlags) {
+void DescriptorPool::CreateHeap(uint32_t num_descriptors, D3D12_DESCRIPTOR_HEAP_FLAGS heap_flags) {
   // This pool only manages CBV/SRV/UAV descriptors.
   D3D12_DESCRIPTOR_HEAP_DESC desc = {};
-  desc.Flags = heapFlags;
-  desc.NumDescriptors = numDescriptors;
+  desc.Flags = heap_flags;
+  desc.NumDescriptors = num_descriptors;
   desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 
   ComPtr<ID3D12DescriptorHeap> heap;
-  THROW_IF_FAILED(m_device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(heap.GetAddressOf())));
+  THROW_IF_FAILED(device_->CreateDescriptorHeap(&desc, IID_PPV_ARGS(heap.GetAddressOf())));
 
-  m_heaps.push_back(DmlDescriptorHeap{heap.Get()});
+  heaps_.push_back(DmlDescriptorHeap{heap.Get()});
 }
 
 uint32_t DescriptorPool::GetTotalCapacity() const {
   uint32_t capacity = 0;
 
-  for (auto& heap : m_heaps) {
+  for (auto& heap : heaps_) {
     capacity += heap.GetCapacity();
   }
 

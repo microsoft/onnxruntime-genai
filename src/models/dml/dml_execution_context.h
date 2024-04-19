@@ -17,11 +17,11 @@ class DmlExecutionContext {
  public:
   // Constructs an DmlExecutionContext that executes on the supplied queue.
   DmlExecutionContext(
-      ID3D12Device* d3d12Device,
-      IDMLDevice* dmlDevice,
+      ID3D12Device* d3d12_device,
+      IDMLDevice* dml_device,
       ID3D12CommandQueue* queue,
-      Ort::Allocator& deviceAllocator,
-      const OrtDmlApi* ortDmlApi);
+      Ort::Allocator& device_allocator,
+      const OrtDmlApi* ort_dml_api);
 
   // Waits for flushed work, discards unflushed work, and discards associated references to
   // prevent circular references.  Must be the last call on the object before destruction.
@@ -31,28 +31,28 @@ class DmlExecutionContext {
   // barriers are automatically inserted to transition the source and destination resources to COPY_SOURCE and
   // COPY_DEST if necessary.
   void CopyBufferRegion(
-      ID3D12Resource* dstBuffer,
-      uint64_t dstOffset,
-      D3D12_RESOURCE_STATES dstState,
-      ID3D12Resource* srcBuffer,
-      uint64_t srcOffset,
-      D3D12_RESOURCE_STATES srcState,
-      uint64_t byteCount);
+      ID3D12Resource* dst_buffer,
+      uint64_t dst_offset,
+      D3D12_RESOURCE_STATES dst_state,
+      ID3D12Resource* src_buffer,
+      uint64_t src_offset,
+      D3D12_RESOURCE_STATES src_state,
+      uint64_t byte_count);
 
   void InitializeOperator(
       IDMLCompiledOperator* op,
-      const DML_BINDING_DESC& persistentResourceBinding,
-      const DML_BINDING_DESC& inputArrayBinding);
+      const DML_BINDING_DESC& persistent_resource_binding,
+      const DML_BINDING_DESC& input_array_binding);
 
   void ExecuteCommandList(
-      ID3D12GraphicsCommandList* commandList,
+      ID3D12GraphicsCommandList* command_list,
       _Outptr_ ID3D12Fence** fence,
-      _Out_ uint64_t* completionValue);
+      _Out_ uint64_t* completion_value);
 
   void AddUAVBarrier();
   void ResourceBarrier(std::span<const D3D12_RESOURCE_BARRIER> barriers);
 
-  void GetCommandListForRecordingAndInvalidateState(ID3D12GraphicsCommandList** commandList);
+  void GetCommandListForRecordingAndInvalidateState(ID3D12GraphicsCommandList** command_list);
 
   // Forces all queued work to begin executing on the GPU. This method returns immediately and does not wait
   // for the submitted work to complete execution on the GPU.
@@ -72,14 +72,14 @@ class DmlExecutionContext {
   D3D12_COMMAND_LIST_TYPE GetCommandListTypeForQueue() const;
 
  private:
-  void SetCommandRecorder(DmlCommandRecorder* newRecorder);
+  void SetCommandRecorder(DmlCommandRecorder* new_recorder);
 
-  std::shared_ptr<DmlCommandQueue> m_queue;
+  std::shared_ptr<DmlCommandQueue> queue_;
 
-  DmlCommandRecorder* m_currentRecorder = nullptr;
+  DmlCommandRecorder* current_recorder_ = nullptr;
 
   // Up to one of these is active at a time
-  DmlCommandRecorder m_dmlRecorder;
+  DmlCommandRecorder dml_recorder_;
 
-  bool m_closed = false;
+  bool closed_ = false;
 };

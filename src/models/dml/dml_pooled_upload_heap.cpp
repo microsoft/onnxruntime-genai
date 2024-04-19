@@ -8,8 +8,8 @@
 #include "dml_pooled_upload_heap.h"
 #include "dml_execution_context.h"
 
-DmlPooledUploadHeap::DmlPooledUploadHeap(ID3D12Device* device, DmlExecutionContext* executionContext)
-    : m_device(device), m_executionContext(executionContext) {
+DmlPooledUploadHeap::DmlPooledUploadHeap(ID3D12Device* device, DmlExecutionContext* execution_context)
+    : device_(device), execution_context_(execution_context) {
 }
 
 static size_t Align(size_t offset, size_t alignment) {
@@ -17,10 +17,10 @@ static size_t Align(size_t offset, size_t alignment) {
   return (offset + alignment - 1) & ~(alignment - 1);
 }
 
-std::optional<size_t> DmlPooledUploadHeap::FindOffsetForAllocation(const Chunk& chunk, size_t sizeInBytes) {
-  assert(sizeInBytes != 0);
+std::optional<size_t> DmlPooledUploadHeap::FindOffsetForAllocation(const Chunk& chunk, size_t size_in_bytes) {
+  assert(size_in_bytes != 0);
 
-  if (chunk.capacityInBytes < sizeInBytes) {
+  if (chunk.capacity_in_bytes < size_in_bytes) {
     // This chunk isn't even big enough to accommodate this allocation
     return std::nullopt;
   }
@@ -33,17 +33,17 @@ std::optional<size_t> DmlPooledUploadHeap::FindOffsetForAllocation(const Chunk& 
   // Chunks are used as ring buffers, which means this allocation should go after the most recent previous
   // allocation
 
-  const auto& lastAllocation = chunk.allocations.back();
-  size_t newAllocationBegin = lastAllocation.offsetInChunk + lastAllocation.sizeInBytes;
-  newAllocationBegin = Align(newAllocationBegin, c_allocationAlignment);
+  const auto& last_allocation = chunk.allocations.back();
+  size_t new_allocation_begin = last_allocation.offset_in_chunk + last_allocation.size_in_bytes;
+  new_allocation_begin = Align(new_allocation_begin, c_allocation_alignment);
 
-  if (newAllocationBegin + sizeInBytes < newAllocationBegin) {
+  if (new_allocation_begin + size_in_bytes < new_allocation_begin) {
     // Overflow
     return std::nullopt;
   }
 
-  const auto& firstAllocation = chunk.allocations.front();
-  if (firstAllocation.offsetInChunk <= lastAllocation.offsetInChunk) {
+  const auto& first_allocation = chunk.allocations.front();
+  if (first_allocation.offset_in_chunk <= last_allocation.offset_in_chunk) {
     // This is the case where there's potentially free space at the beginning and end of the chunk, but not
     // the middle:
     // e.g.
@@ -51,15 +51,15 @@ std::optional<size_t> DmlPooledUploadHeap::FindOffsetForAllocation(const Chunk& 
     //          ^^^^   ^^
     //          first  last
 
-    if (newAllocationBegin + sizeInBytes <= chunk.capacityInBytes) {
+    if (new_allocation_begin + size_in_bytes <= chunk.capacity_in_bytes) {
       // There's enough space between the end of the last allocation and the end of the chunk
-      return newAllocationBegin;
+      return new_allocation_begin;
     } else {
       // Otherwise there's not enough space at the end of the chunk - try the beginning of the chunk instead
-      newAllocationBegin = 0;
-      if (newAllocationBegin + sizeInBytes <= firstAllocation.offsetInChunk) {
+      new_allocation_begin = 0;
+      if (new_allocation_begin + size_in_bytes <= first_allocation.offset_in_chunk) {
         // There was enough space between the start of the buffer, and the start of the first allocation
-        return newAllocationBegin;
+        return new_allocation_begin;
       }
     }
   } else {
@@ -69,9 +69,9 @@ std::optional<size_t> DmlPooledUploadHeap::FindOffsetForAllocation(const Chunk& 
     //       ^^         ^^^^
     //       last       first
 
-    if (newAllocationBegin + sizeInBytes <= firstAllocation.offsetInChunk) {
+    if (new_allocation_begin + size_in_bytes <= first_allocation.offset_in_chunk) {
       // There's enough space between the end of the last allocation, and the start of the first one
-      return newAllocationBegin;
+      return new_allocation_begin;
     }
   }
 
@@ -79,10 +79,10 @@ std::optional<size_t> DmlPooledUploadHeap::FindOffsetForAllocation(const Chunk& 
   return std::nullopt;
 }
 
-/* static */ DmlPooledUploadHeap::Chunk DmlPooledUploadHeap::CreateChunk(ID3D12Device* device, size_t sizeInBytes) {
-  ComPtr<ID3D12Resource> uploadBuffer;
+/* static */ DmlPooledUploadHeap::Chunk DmlPooledUploadHeap::CreateChunk(ID3D12Device* device, size_t size_in_bytes) {
+  ComPtr<ID3D12Resource> upload_buffer;
   auto heap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
-  auto buffer = CD3DX12_RESOURCE_DESC::Buffer(sizeInBytes);
+  auto buffer = CD3DX12_RESOURCE_DESC::Buffer(size_in_bytes);
 
   THROW_IF_FAILED(device->CreateCommittedResource(
       &heap,
@@ -90,40 +90,40 @@ std::optional<size_t> DmlPooledUploadHeap::FindOffsetForAllocation(const Chunk& 
       &buffer,
       D3D12_RESOURCE_STATE_GENERIC_READ,
       nullptr,
-      IID_PPV_ARGS(uploadBuffer.ReleaseAndGetAddressOf())));
+      IID_PPV_ARGS(upload_buffer.ReleaseAndGetAddressOf())));
 
-  return Chunk{sizeInBytes, std::move(uploadBuffer)};
+  return Chunk{size_in_bytes, std::move(upload_buffer)};
 }
 
-std::pair<DmlPooledUploadHeap::Chunk*, size_t> DmlPooledUploadHeap::Reserve(size_t sizeInBytes) {
+std::pair<DmlPooledUploadHeap::Chunk*, size_t> DmlPooledUploadHeap::Reserve(size_t size_in_bytes) {
   // Try to find a chunk with enough free space to accommodate the requested allocation size
-  for (Chunk& chunk : m_chunks) {
-    std::optional<size_t> offsetForAllocation = FindOffsetForAllocation(chunk, sizeInBytes);
-    if (offsetForAllocation) {
+  for (Chunk& chunk : chunks_) {
+    std::optional<size_t> offset_for_allocation = FindOffsetForAllocation(chunk, size_in_bytes);
+    if (offset_for_allocation) {
       // There's enough space in this chunk - return
-      return std::make_pair(&chunk, *offsetForAllocation);
+      return std::make_pair(&chunk, *offset_for_allocation);
     }
   }
 
   // No chunks were able to accommodate the allocation - create a new chunk and return that instead
 
   // At least double the capacity of the pool
-  const size_t newChunkSize = std::max({m_totalCapacity, c_minChunkSize, sizeInBytes});
-  m_chunks.push_back(CreateChunk(m_device.Get(), newChunkSize));
-  m_totalCapacity += newChunkSize;
+  const size_t new_chunk_size = std::max({total_capacity_, c_min_chunk_size, size_in_bytes});
+  chunks_.push_back(CreateChunk(device_.Get(), new_chunk_size));
+  total_capacity_ += new_chunk_size;
 
   // Allocate from the beginning of the new chunk
-  return std::make_pair(&m_chunks.back(), 0);
+  return std::make_pair(&chunks_.back(), 0);
 }
 
 void DmlPooledUploadHeap::ReclaimAllocations() {
-  for (Chunk& chunk : m_chunks) {
+  for (Chunk& chunk : chunks_) {
     auto* allocs = &chunk.allocations;
 
     // Remove all allocations which have had their fences signaled - this indicates that they are no longer
     // being used by the GPU. We can stop as soon as we find an allocation which is still in use, because we
     // only use a single command queue and executions always complete in the order they were submitted.
-    while (!allocs->empty() && allocs->front().doneEvent.IsSignaled()) {
+    while (!allocs->empty() && allocs->front().done_event.IsSignaled()) {
       allocs->pop_front();
     }
   }
@@ -131,8 +131,8 @@ void DmlPooledUploadHeap::ReclaimAllocations() {
 
 DmlGpuEvent DmlPooledUploadHeap::BeginUploadToGpu(
     ID3D12Resource* dst,
-    uint64_t dstOffset,
-    D3D12_RESOURCE_STATES dstState,
+    uint64_t dst_offset,
+    D3D12_RESOURCE_STATES dst_state,
     std::span<const uint8_t> src) {
   assert(!src.empty());
   assert(dst->GetDesc().Dimension == D3D12_RESOURCE_DIMENSION_BUFFER);
@@ -143,36 +143,36 @@ DmlGpuEvent DmlPooledUploadHeap::BeginUploadToGpu(
 
   // Allocate space from the upload heap
   Chunk* chunk = nullptr;
-  size_t offsetInChunk = 0;
-  std::tie(chunk, offsetInChunk) = Reserve(src.size());
+  size_t offset_in_chunk = 0;
+  std::tie(chunk, offset_in_chunk) = Reserve(src.size());
 
   assert(chunk != nullptr);
-  assert(offsetInChunk + src.size() <= chunk->capacityInBytes);
+  assert(offset_in_chunk + src.size() <= chunk->capacity_in_bytes);
 
   // Map the upload heap and copy the source data into it at the specified offset
-  void* uploadHeapData = nullptr;
-  THROW_IF_FAILED(chunk->resource->Map(0, nullptr, &uploadHeapData));
-  memcpy(static_cast<byte*>(uploadHeapData) + offsetInChunk, src.data(), src.size());
+  void* upload_heap_data = nullptr;
+  THROW_IF_FAILED(chunk->resource->Map(0, nullptr, &upload_heap_data));
+  memcpy(static_cast<byte*>(upload_heap_data) + offset_in_chunk, src.data(), src.size());
   chunk->resource->Unmap(0, nullptr);
 
   // Copy from the upload heap into the destination resource
-  m_executionContext->CopyBufferRegion(
+  execution_context_->CopyBufferRegion(
       dst,
-      dstOffset,
-      dstState,
+      dst_offset,
+      dst_state,
       chunk->resource.Get(),
-      offsetInChunk,
+      offset_in_chunk,
       D3D12_RESOURCE_STATE_GENERIC_READ,
       src.size());
 
-  DmlGpuEvent doneEvent = m_executionContext->GetCurrentCompletionEvent();
+  DmlGpuEvent done_event = execution_context_->GetCurrentCompletionEvent();
 
-  m_executionContext->Flush();
+  execution_context_->Flush();
 
   // Add an allocation entry to the chunk
-  chunk->allocations.push_back(Allocation{static_cast<size_t>(src.size()), offsetInChunk, doneEvent});
+  chunk->allocations.push_back(Allocation{static_cast<size_t>(src.size()), offset_in_chunk, done_event});
 
-  return doneEvent;
+  return done_event;
 }
 
 void DmlPooledUploadHeap::Trim() {
@@ -181,72 +181,72 @@ void DmlPooledUploadHeap::Trim() {
   ReclaimAllocations();
 
   // Release any chunks which have no allocations
-  auto it = std::remove_if(m_chunks.begin(), m_chunks.end(), [](const Chunk& c) {
+  auto it = std::remove_if(chunks_.begin(), chunks_.end(), [](const Chunk& c) {
     return c.allocations.empty();
   });
-  m_chunks.erase(it, m_chunks.end());
+  chunks_.erase(it, chunks_.end());
 
   // Re-calculate total capacity
-  m_totalCapacity = 0;
-  for (const auto& chunk : m_chunks) {
-    m_totalCapacity += chunk.capacityInBytes;
+  total_capacity_ = 0;
+  for (const auto& chunk : chunks_) {
+    total_capacity_ += chunk.capacity_in_bytes;
   }
 }
 
 void DmlPooledUploadHeap::AssertInvariants() {
 #ifdef _DEBUG
 
-  auto chunkCapacityComparer = [](const Chunk& lhs, const Chunk& rhs) {
-    return lhs.capacityInBytes < rhs.capacityInBytes;
+  auto chunk_capacity_comparer = [](const Chunk& lhs, const Chunk& rhs) {
+    return lhs.capacity_in_bytes < rhs.capacity_in_bytes;
   };
 
   // Chunks should be sorted by ascending capacity
-  assert(std::is_sorted(m_chunks.begin(), m_chunks.end(), chunkCapacityComparer));
+  assert(std::is_sorted(chunks_.begin(), chunks_.end(), chunk_capacity_comparer));
 
   // Allocations in a chunk should be sorted by ascending fence value
-  for (const auto& chunk : m_chunks) {
-    auto allocFenceValueComparer = [](const Allocation& lhs, const Allocation& rhs) {
-      return lhs.doneEvent.fenceValue < rhs.doneEvent.fenceValue;
+  for (const auto& chunk : chunks_) {
+    auto alloc_fence_value_comparer = [](const Allocation& lhs, const Allocation& rhs) {
+      return lhs.done_event.fence_value < rhs.done_event.fence_value;
     };
-    assert(std::is_sorted(chunk.allocations.begin(), chunk.allocations.end(), allocFenceValueComparer));
+    assert(std::is_sorted(chunk.allocations.begin(), chunk.allocations.end(), alloc_fence_value_comparer));
   }
 
   // Validate chunk properties
-  for (const auto& chunk : m_chunks) {
+  for (const auto& chunk : chunks_) {
     assert(chunk.resource != nullptr);
-    assert(chunk.capacityInBytes == chunk.resource->GetDesc().Width);
+    assert(chunk.capacity_in_bytes == chunk.resource->GetDesc().Width);
   }
 
   // Validate allocation properties
-  for (const auto& chunk : m_chunks) {
+  for (const auto& chunk : chunks_) {
     for (const auto& alloc : chunk.allocations) {
-      assert(alloc.offsetInChunk + alloc.sizeInBytes <= chunk.capacityInBytes);
-      assert(alloc.offsetInChunk % c_allocationAlignment == 0);  // Validate alignment
+      assert(alloc.offset_in_chunk + alloc.size_in_bytes <= chunk.capacity_in_bytes);
+      assert(alloc.offset_in_chunk % c_allocation_alignment == 0);  // Validate alignment
     }
   }
 
   // Validate no overlapping allocations
-  for (const auto& chunk : m_chunks) {
-    auto allocOffsetComparer = [](const Allocation& lhs, const Allocation& rhs) {
-      return lhs.offsetInChunk < rhs.offsetInChunk;
+  for (const auto& chunk : chunks_) {
+    auto alloc_offset_comparer = [](const Allocation& lhs, const Allocation& rhs) {
+      return lhs.offset_in_chunk < rhs.offset_in_chunk;
     };
 
-    std::vector<Allocation> allocationsSortedByOffset(chunk.allocations.begin(), chunk.allocations.end());
-    std::sort(allocationsSortedByOffset.begin(), allocationsSortedByOffset.end(), allocOffsetComparer);
+    std::vector<Allocation> allocations_sorted_by_offset(chunk.allocations.begin(), chunk.allocations.end());
+    std::sort(allocations_sorted_by_offset.begin(), allocations_sorted_by_offset.end(), alloc_offset_comparer);
 
-    for (size_t i = 1; i < allocationsSortedByOffset.size(); ++i) {
-      const auto& alloc = allocationsSortedByOffset[i - 1];
-      const auto& nextAlloc = allocationsSortedByOffset[i];
-      assert(alloc.offsetInChunk + alloc.sizeInBytes <= nextAlloc.offsetInChunk);
+    for (size_t i = 1; i < allocations_sorted_by_offset.size(); ++i) {
+      const auto& alloc = allocations_sorted_by_offset[i - 1];
+      const auto& next_alloc = allocations_sorted_by_offset[i];
+      assert(alloc.offset_in_chunk + alloc.size_in_bytes <= next_alloc.offset_in_chunk);
     }
   }
 
   // Validate total capacity of pool
-  size_t calculatedCapacity = 0;
-  for (const auto& chunk : m_chunks) {
-    calculatedCapacity += chunk.capacityInBytes;
+  size_t calculated_capacity = 0;
+  for (const auto& chunk : chunks_) {
+    calculated_capacity += chunk.capacity_in_bytes;
   }
-  assert(calculatedCapacity == m_totalCapacity);
+  assert(calculated_capacity == total_capacity_);
 
 #endif  // #ifdef _DEBUG
 }

@@ -24,45 +24,45 @@ class DmlDescriptorHeap {
   // Reserves descriptors from the end of the heap. Returns nullopt if there is
   // no space left in the heap.
   std::optional<DmlDescriptorRange> TryAllocDescriptors(
-      uint32_t numDescriptors,
-      DmlGpuEvent completionEvent,
-      D3D12_DESCRIPTOR_HEAP_FLAGS heapFlags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE);
+      uint32_t num_descriptors,
+      DmlGpuEvent completion_event,
+      D3D12_DESCRIPTOR_HEAP_FLAGS heap_flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE);
 
   DmlGpuEvent GetLastCompletionEvent() const {
-    return m_completionEvent;
+    return completion_event_;
   }
 
   uint32_t GetCapacity() const {
-    return m_capacity;
+    return capacity_;
   }
 
  private:
-  ComPtr<ID3D12DescriptorHeap> m_heap;
-  uint32_t m_capacity = 0;
-  uint32_t m_size = 0;
-  uint32_t m_handleIncrementSize = 0;
-  CD3DX12_CPU_DESCRIPTOR_HANDLE m_headCpuHandle;
-  CD3DX12_GPU_DESCRIPTOR_HANDLE m_headGpuHandle;
-  D3D12_DESCRIPTOR_HEAP_FLAGS m_heapFlags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+  ComPtr<ID3D12DescriptorHeap> heap_;
+  uint32_t capacity_ = 0;
+  uint32_t size_ = 0;
+  uint32_t handle_increment_size_ = 0;
+  CD3DX12_CPU_DESCRIPTOR_HANDLE head_cpu_handle_;
+  CD3DX12_GPU_DESCRIPTOR_HANDLE head_gpu_handle_;
+  D3D12_DESCRIPTOR_HEAP_FLAGS heap_flags_ = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
 
   // Most recent GPU completion event. Allocations are always done at the end,
   // so there is no fragmentation of the heap.
-  DmlGpuEvent m_completionEvent;
+  DmlGpuEvent completion_event_;
 };
 
 // Manages a pool of CBV/SRV/UAV descriptors.
 class DescriptorPool {
  public:
-  DescriptorPool(ID3D12Device* device, uint32_t initialCapacity);
+  DescriptorPool(ID3D12Device* device, uint32_t initial_capacity);
 
   // Reserves a contiguous range of descriptors from a single descriptor heap. The
   // lifetime of the referenced descriptor heap is managed by the DescriptorPool class.
   // The caller must supply a DmlGpuEvent that informs the pool when the reserved descriptors
   // are no longer required.
   DmlDescriptorRange AllocDescriptors(
-      uint32_t numDescriptors,
-      DmlGpuEvent completionEvent,
-      D3D12_DESCRIPTOR_HEAP_FLAGS heapFlags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE);
+      uint32_t num_descriptors,
+      DmlGpuEvent completion_event,
+      D3D12_DESCRIPTOR_HEAP_FLAGS heap_flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE);
 
   // Releases all descriptor heaps that contain only descriptors which have completed
   // their work on the GPU.
@@ -72,9 +72,9 @@ class DescriptorPool {
   uint32_t GetTotalCapacity() const;
 
  private:
-  ComPtr<ID3D12Device> m_device;
-  std::vector<DmlDescriptorHeap> m_heaps;
-  const uint32_t m_initialHeapCapacity;
+  ComPtr<ID3D12Device> device_;
+  std::vector<DmlDescriptorHeap> heaps_;
+  const uint32_t initial_heap_capacity_;
 
-  void CreateHeap(uint32_t numDescriptors, D3D12_DESCRIPTOR_HEAP_FLAGS heapFlags);
+  void CreateHeap(uint32_t num_descriptors, D3D12_DESCRIPTOR_HEAP_FLAGS heap_flags);
 };

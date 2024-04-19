@@ -11,34 +11,34 @@ using Microsoft::WRL::ComPtr;
 class DmlIncrementValuesKernel {
  public:
   DmlIncrementValuesKernel(
-      ID3D12Device* d3d12Device,
-      DmlExecutionContext* executionContext,
-      uint32_t elementCount,
+      ID3D12Device* d3d12_device,
+      DmlExecutionContext* execution_context,
+      uint32_t element_count,
       ONNXTensorElementDataType dtype,
       ID3D12Resource* values_resource);
 
-  ID3D12GraphicsCommandList* GetCommandList() { return m_graphicsCommandList.Get(); }
+  ID3D12GraphicsCommandList* GetCommandList() { return graphics_command_list_.Get(); }
 
  private:
   struct Constants {
-    uint32_t elementCount;
-    uint32_t startIndex;
+    uint32_t element_count;
+    uint32_t start_index;
   };
 
-  ComPtr<ID3D12Device> m_device;
-  ComPtr<ID3D12RootSignature> m_rootSignature;
-  ComPtr<ID3D12PipelineState> m_pipelineState;
-  Constants m_constants;
-  DmlExecutionContext* m_executionContext;
+  ComPtr<ID3D12Device> device_;
+  ComPtr<ID3D12RootSignature> root_signature_;
+  ComPtr<ID3D12PipelineState> pipeline_state_;
+  Constants constants_;
+  DmlExecutionContext* execution_context_;
 
-  ComPtr<ID3D12GraphicsCommandList> m_graphicsCommandList;
-  ComPtr<ID3D12CommandAllocator> m_commandAllocator;
-  ComPtr<ID3D12DescriptorHeap> m_heap;
+  ComPtr<ID3D12GraphicsCommandList> graphics_command_list_;
+  ComPtr<ID3D12CommandAllocator> command_allocator_;
+  ComPtr<ID3D12DescriptorHeap> heap_;
 
   ONNXTensorElementDataType dtype_;
-  ComPtr<ID3D12Resource> m_values_resource;
-  uint32_t m_totalElementCount;
+  ComPtr<ID3D12Resource> values_resource_;
+  uint32_t total_element_count_;
 
-  constexpr static uint32_t m_constantCount = sizeof(Constants) / sizeof(uint32_t);
-  constexpr static uint32_t m_uavCount = 1;
+  constexpr static uint32_t constant_count_ = sizeof(Constants) / sizeof(uint32_t);
+  constexpr static uint32_t uav_count_ = 1;
 };

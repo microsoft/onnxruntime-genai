@@ -8,34 +8,34 @@
 #define ROOT_SIG_DEF "DescriptorTable(UAV(u0, numDescriptors=2, flags=DATA_VOLATILE | DESCRIPTORS_VOLATILE)), RootConstants(num32BitConstants=1, b0)"
 #define NUM_THREADS 256
 
-RWStructuredBuffer<T> inputMask : register(u0);
-RWStructuredBuffer<T> outputMask : register(u1);
+RWStructuredBuffer<T> input_mask : register(u0);
+RWStructuredBuffer<T> output_mask : register(u1);
 
 cbuffer Constants
 {
-    uint maxSeqLen;
-    uint seqLen;
-    uint elementCount;
-    uint startIndex;
+    uint max_seq_len;
+    uint seq_len;
+    uint element_count;
+    uint start_index;
 };
 
 [RootSignature(ROOT_SIG_DEF)]
 [numthreads(NUM_THREADS, 1, 1)]
-void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
+void CSMain(uint3 dispatch_thread_id : SV_DispatchThreadID)
 {
-    uint globalIndex = dispatchThreadID.x + startIndex;
-    if (globalIndex < elementCount)
+    uint global_index = dispatch_thread_id.x + start_index;
+    if (global_index < element_count)
     {
-        uint sequenceIndex = globalIndex % maxSeqLen;
+        uint sequence_index = global_index % max_seq_len;
 
-        if (seqLen > 1)
+        if (seq_len > 1)
         {
-            const T value = sequenceIndex < seqLen ? 1 : 0;
-            outputMask[globalIndex] = value;
+            const T value = sequence_index < seq_len ? 1 : 0;
+            output_mask[global_index] = value;
         }
         else
         {
-            outputMask[globalIndex] = (sequenceIndex == 0 || inputMask[sequenceIndex] == 1 || inputMask[sequenceIndex - 1] == 1) ? 1 : 0;
+            output_mask[global_index] = (sequence_index == 0 || input_mask[sequence_index] == 1 || input_mask[sequence_index - 1] == 1) ? 1 : 0;
         }
     }
 }

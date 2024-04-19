@@ -8,7 +8,7 @@
 #include "dml_execution_context.h"
 
 static ComPtr<ID3D12Resource> CreateReadbackHeap(ID3D12Device* device, size_t size) {
-  ComPtr<ID3D12Resource> readbackHeap;
+  ComPtr<ID3D12Resource> readback_heap;
   auto heap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_READBACK);
   auto buffer = CD3DX12_RESOURCE_DESC::Buffer(size);
 
@@ -18,65 +18,65 @@ static ComPtr<ID3D12Resource> CreateReadbackHeap(ID3D12Device* device, size_t si
       &buffer,
       D3D12_RESOURCE_STATE_COPY_DEST,
       nullptr,
-      IID_PPV_ARGS(readbackHeap.ReleaseAndGetAddressOf())));
+      IID_PPV_ARGS(readback_heap.ReleaseAndGetAddressOf())));
 
-  return readbackHeap;
+  return readback_heap;
 }
 
-DmlReadbackHeap::DmlReadbackHeap(ID3D12Device* device, DmlExecutionContext* executionContext)
-    : m_device(device),
-      execution_context_(executionContext) {
+DmlReadbackHeap::DmlReadbackHeap(ID3D12Device* device, DmlExecutionContext* execution_context)
+    : device_(device),
+      execution_context_(execution_context) {
 }
 
-static size_t ComputeNewCapacity(size_t existingCapacity, size_t desiredCapacity) {
-  size_t newCapacity = existingCapacity;
+static size_t ComputeNewCapacity(size_t existing_capacity, size_t desired_capacity) {
+  size_t new_capacity = existing_capacity;
 
-  while (newCapacity < desiredCapacity) {
-    if (newCapacity >= std::numeric_limits<size_t>::max() / 2) {
+  while (new_capacity < desired_capacity) {
+    if (new_capacity >= std::numeric_limits<size_t>::max() / 2) {
       // Overflow; there's no way we can satisfy this allocation request
       THROW_HR(E_OUTOFMEMORY);
     }
 
-    newCapacity *= 2;  // geometric growth
+    new_capacity *= 2;  // geometric growth
   }
 
-  return newCapacity;
+  return new_capacity;
 }
 
 void DmlReadbackHeap::EnsureReadbackHeap(size_t size) {
-  if (!m_readbackHeap) {
+  if (!readback_heap_) {
     // Initialize the readback heap for the first time
-    assert(m_capacity == 0);
-    m_capacity = ComputeNewCapacity(c_initialCapacity, size);
-    m_readbackHeap = CreateReadbackHeap(m_device.Get(), m_capacity);
-  } else if (m_capacity < size) {
+    assert(capacity_ == 0);
+    capacity_ = ComputeNewCapacity(c_initial_capacity, size);
+    readback_heap_ = CreateReadbackHeap(device_.Get(), capacity_);
+  } else if (capacity_ < size) {
     // Ensure there's sufficient capacity
-    m_capacity = ComputeNewCapacity(m_capacity, size);
+    capacity_ = ComputeNewCapacity(capacity_, size);
 
-    m_readbackHeap = nullptr;
-    m_readbackHeap = CreateReadbackHeap(m_device.Get(), m_capacity);
+    readback_heap_ = nullptr;
+    readback_heap_ = CreateReadbackHeap(device_.Get(), capacity_);
   }
 
-  assert(m_readbackHeap->GetDesc().Width >= size);
+  assert(readback_heap_->GetDesc().Width >= size);
 }
 
 void DmlReadbackHeap::ReadbackFromGpu(
     std::span<uint8_t> dst,
     ID3D12Resource* src,
-    uint64_t srcOffset,
-    D3D12_RESOURCE_STATES srcState) {
+    uint64_t src_offset,
+    D3D12_RESOURCE_STATES src_state) {
   assert(!dst.empty());
 
   EnsureReadbackHeap(dst.size());
 
   // Copy from the source resource into the readback heap
   execution_context_->CopyBufferRegion(
-      m_readbackHeap.Get(),
+      readback_heap_.Get(),
       0,
       D3D12_RESOURCE_STATE_COPY_DEST,
       src,
-      srcOffset,
-      srcState,
+      src_offset,
+      src_state,
       dst.size());
 
   // Wait for completion and map the result
@@ -85,44 +85,44 @@ void DmlReadbackHeap::ReadbackFromGpu(
   execution_context_->ReleaseCompletedReferences();
 
   // Map the readback heap and copy it into the destination
-  void* readbackHeapData = nullptr;
-  THROW_IF_FAILED(m_readbackHeap->Map(0, nullptr, &readbackHeapData));
-  memcpy(dst.data(), readbackHeapData, dst.size());
-  m_readbackHeap->Unmap(0, nullptr);
+  void* readback_heap_data = nullptr;
+  THROW_IF_FAILED(readback_heap_->Map(0, nullptr, &readback_heap_data));
+  memcpy(dst.data(), readback_heap_data, dst.size());
+  readback_heap_->Unmap(0, nullptr);
 }
 
 void DmlReadbackHeap::ReadbackFromGpu(
     std::span<void*> dst,
-    std::span<const uint32_t> dstSizes,
+    std::span<const uint32_t> dst_sizes,
     std::span<ID3D12Resource*> src,
-    D3D12_RESOURCE_STATES srcState) {
+    D3D12_RESOURCE_STATES src_state) {
   assert(dst.size() == src.size());
-  assert(dstSizes.size() == src.size());
+  assert(dst_sizes.size() == src.size());
 
   if (dst.empty()) {
     return;
   }
 
-  uint32_t totalSize = 0;
-  for (auto size : dstSizes) {
-    totalSize += size;
+  uint32_t total_size = 0;
+  for (auto size : dst_sizes) {
+    total_size += size;
   }
 
-  EnsureReadbackHeap(totalSize);
+  EnsureReadbackHeap(total_size);
 
   // Copy from the source resource into the readback heap
   uint32_t offset = 0;
   for (uint32_t i = 0; i < dst.size(); ++i) {
     execution_context_->CopyBufferRegion(
-        m_readbackHeap.Get(),
+        readback_heap_.Get(),
         offset,
         D3D12_RESOURCE_STATE_COPY_DEST,
         src[i],
         0,
-        srcState,
-        dstSizes[i]);
+        src_state,
+        dst_sizes[i]);
 
-    offset += dstSizes[i];
+    offset += dst_sizes[i];
   }
 
   // Wait for completion and map the result
@@ -131,15 +131,15 @@ void DmlReadbackHeap::ReadbackFromGpu(
   execution_context_->ReleaseCompletedReferences();
 
   // Map the readback heap and copy it into the destination
-  void* readbackHeapData = nullptr;
-  THROW_IF_FAILED(m_readbackHeap->Map(0, nullptr, &readbackHeapData));
+  void* readback_heap_data = nullptr;
+  THROW_IF_FAILED(readback_heap_->Map(0, nullptr, &readback_heap_data));
 
   // Copy from the source resource into the readback heap
   offset = 0;
   for (uint32_t i = 0; i < dst.size(); ++i) {
-    memcpy(dst[i], static_cast<uint8_t*>(readbackHeapData) + offset, dstSizes[i]);
-    offset += dstSizes[i];
+    memcpy(dst[i], static_cast<uint8_t*>(readback_heap_data) + offset, dst_sizes[i]);
+    offset += dst_sizes[i];
   }
 
-  m_readbackHeap->Unmap(0, nullptr);
+  readback_heap_->Unmap(0, nullptr);
 }

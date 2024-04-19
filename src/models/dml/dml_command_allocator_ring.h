@@ -15,37 +15,37 @@ class DmlCommandAllocatorRing {
       ID3D12Device* device,
       D3D12_COMMAND_LIST_TYPE commandListType,
       DmlGpuEvent initialEvent) {
-    for (auto& info : m_commandAllocators) {
+    for (auto& info : command_allocators_) {
       THROW_IF_FAILED(device->CreateCommandAllocator(
           commandListType,
           IID_PPV_ARGS(info.allocator.ReleaseAndGetAddressOf())));
 
-      info.completionEvent = initialEvent;
+      info.completion_event = initialEvent;
     }
   }
 
-  ID3D12CommandAllocator* GetNextAllocator(DmlGpuEvent nextCompletionEvent) {
-    size_t earliestOtherAllocator = (m_currentCommandAllocator + 1) % AllocatorCount;
+  ID3D12CommandAllocator* GetNextAllocator(DmlGpuEvent next_completion_event) {
+    size_t earliest_other_allocator = (current_command_allocator_ + 1) % AllocatorCount;
 
-    assert(!m_commandAllocators[m_currentCommandAllocator].completionEvent.IsSignaled() ||
-           m_commandAllocators[earliestOtherAllocator].completionEvent.IsSignaled());
+    assert(!command_allocators_[current_command_allocator_].completion_event.IsSignaled() ||
+           command_allocators_[earliest_other_allocator].completion_event.IsSignaled());
 
-    if (m_commandAllocators[earliestOtherAllocator].completionEvent.IsSignaled()) {
-      THROW_IF_FAILED(m_commandAllocators[earliestOtherAllocator].Get()->Reset());
-      m_currentCommandAllocator = earliestOtherAllocator;
+    if (command_allocators_[earliest_other_allocator].completion_event.IsSignaled()) {
+      THROW_IF_FAILED(command_allocators_[earliest_other_allocator].Get()->Reset());
+      current_command_allocator_ = earliest_other_allocator;
     }
 
     // Set the completion event for the current allocator so it can be reset eventually.
-    m_commandAllocators[m_currentCommandAllocator].completionEvent = nextCompletionEvent;
+    command_allocators_[current_command_allocator_].completion_event = next_completion_event;
 
-    return m_commandAllocators[m_currentCommandAllocator].Get();
+    return command_allocators_[current_command_allocator_].Get();
   }
 
   // Updates the completion event of the current allocator to a different value.  This is used when the caller
   // decides to issue an unrelated call to the queue such as ExecuteCommandLists which updates its fence between calling
   // GetNextAllocator and executing the work which it recorded using the allocator it received.
-  void UpdateCurrentAllocatorCompletionEvent(DmlGpuEvent nextCompletionEvent) {
-    m_commandAllocators[m_currentCommandAllocator].completionEvent = nextCompletionEvent;
+  void UpdateCurrentAllocatorCompletionEvent(DmlGpuEvent next_completion_event) {
+    command_allocators_[current_command_allocator_].completion_event = next_completion_event;
   }
 
  private:
@@ -54,11 +54,11 @@ class DmlCommandAllocatorRing {
 
     // The event which will be signaled when the last command list submitted using this allocator
     // completes execution on the GPU.
-    DmlGpuEvent completionEvent = {};
+    DmlGpuEvent completion_event = {};
 
     ID3D12CommandAllocator* Get() const { return allocator.Get(); }
   };
 
-  std::array<CommandAllocatorInfo, AllocatorCount> m_commandAllocators;
-  size_t m_currentCommandAllocator = 0;
+  std::array<CommandAllocatorInfo, AllocatorCount> command_allocators_;
+  size_t current_command_allocator_ = 0;
 };

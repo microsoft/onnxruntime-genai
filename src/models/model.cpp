@@ -255,11 +255,11 @@ void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
     uint32_t smart_container_ptr_size = static_cast<uint32_t>(sizeof(smart_container.GetAddressOf()));
 
     // We reuse the allocator assigned to this device if possible; otherwise, we create a new one and store it on the device
-    if (FAILED(dml_objects_.d3d12Device->GetPrivateData(dml_smart_container_guid, &smart_container_ptr_size, smart_container.GetAddressOf()))) {
+    if (FAILED(dml_objects_.d3d12_device->GetPrivateData(dml_smart_container_guid, &smart_container_ptr_size, smart_container.GetAddressOf()))) {
       auto memory_info_dml = OrtMemoryInfo::Create("DML", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
       auto allocator_dml = Ort::Allocator::Create(session, *memory_info_dml);
       smart_container = wil::MakeOrThrow<DmlSmartContainer>(std::move(memory_info_dml), std::move(allocator_dml));
-      THROW_IF_FAILED(dml_objects_.d3d12Device->SetPrivateDataInterface(dml_smart_container_guid, smart_container.Get()));
+      THROW_IF_FAILED(dml_objects_.d3d12_device->SetPrivateDataInterface(dml_smart_container_guid, smart_container.Get()));
     }
 
     allocator_device_ = smart_container->GetAllocator();
@@ -356,7 +356,7 @@ void Model::CreateSessionOptions() {
 
       auto dml_create_device1_fn = reinterpret_cast<decltype(&DMLCreateDevice1)>(GetProcAddress(smart_directml_dll.get(), "DMLCreateDevice1"));
       THROW_LAST_ERROR_IF(!dml_create_device1_fn);
-      THROW_IF_FAILED(dml_create_device1_fn(dml_objects_.d3d12Device.Get(), DML_CREATE_DEVICE_FLAG_NONE, DML_FEATURE_LEVEL_5_0, IID_PPV_ARGS(&dml_device_)));
+      THROW_IF_FAILED(dml_create_device1_fn(dml_objects_.d3d12_device.Get(), DML_CREATE_DEVICE_FLAG_NONE, DML_FEATURE_LEVEL_5_0, IID_PPV_ARGS(&dml_device_)));
 
       Ort::ThrowOnError(Ort::api->GetExecutionProviderApi("DML", ORT_API_VERSION, reinterpret_cast<const void**>(&p_dml_api_)));
       if (!p_dml_api_) {
@@ -364,17 +364,17 @@ void Model::CreateSessionOptions() {
       }
 
       dml_execution_context_ = std::make_unique<DmlExecutionContext>(
-          dml_objects_.d3d12Device.Get(),
+          dml_objects_.d3d12_device.Get(),
           dml_device_.Get(),
-          dml_objects_.commandQueue.Get(),
+          dml_objects_.command_queue.Get(),
           *allocator_device_,
           p_dml_api_);
 
-      dml_pooled_upload_heap_ = std::make_unique<DmlPooledUploadHeap>(dml_objects_.d3d12Device.Get(), dml_execution_context_.get());
-      dml_readback_heap_ = std::make_unique<DmlReadbackHeap>(dml_objects_.d3d12Device.Get(), dml_execution_context_.get());
+      dml_pooled_upload_heap_ = std::make_unique<DmlPooledUploadHeap>(dml_objects_.d3d12_device.Get(), dml_execution_context_.get());
+      dml_readback_heap_ = std::make_unique<DmlReadbackHeap>(dml_objects_.d3d12_device.Get(), dml_execution_context_.get());
 
       ort_options.AddConfigEntry("ep.dml.enable_graph_capture", "1");
-      p_dml_api_->SessionOptionsAppendExecutionProvider_DML1(&ort_options, dml_device_.Get(), dml_objects_.commandQueue.Get());
+      p_dml_api_->SessionOptionsAppendExecutionProvider_DML1(&ort_options, dml_device_.Get(), dml_objects_.command_queue.Get());
       device_type_ = DeviceType::DML;  // We use a DML allocator for input/output caches, but other tensors will use CPU tensors
 #endif
     } else

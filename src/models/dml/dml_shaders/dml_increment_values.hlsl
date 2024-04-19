@@ -12,17 +12,17 @@ RWStructuredBuffer<T> values : register(u0);
 
 cbuffer Constants
 {
-    uint elementCount;
-    uint startIndex;
+    uint element_count;
+    uint start_index;
 };
 
 [RootSignature(ROOT_SIG_DEF)]
 [numthreads(NUM_THREADS, 1, 1)]
-void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
+void CSMain(uint3 dispatch_thread_id : SV_DispatchThreadID)
 {
-    uint globalIndex = dispatchThreadID.x + startIndex;
-    if (globalIndex < elementCount)
+    uint global_index = dispatch_thread_id.x + start_index;
+    if (global_index < element_count)
     {
-        ++values[globalIndex];
+        ++values[global_index];
     }
 }

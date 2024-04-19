@@ -13,14 +13,14 @@
 class DmlCommandQueue {
  public:
   // Creates a DmlCommandQueue object that wraps an existing D3D12 queue.
-  DmlCommandQueue(ID3D12CommandQueue* existingQueue);
+  DmlCommandQueue(ID3D12CommandQueue* existing_queue);
 
-  D3D12_COMMAND_LIST_TYPE GetType() const { return m_type; }
-  ComPtr<ID3D12Fence> GetFence() const { return m_fence; }
-  uint64_t GetLastFenceValue() const { return m_lastFenceValue; }
+  D3D12_COMMAND_LIST_TYPE GetType() const { return type_; }
+  ComPtr<ID3D12Fence> GetFence() const { return fence_; }
+  uint64_t GetLastFenceValue() const { return last_fence_value_; }
 
-  void ExecuteCommandList(ID3D12CommandList* commandList);
-  void ExecuteCommandLists(std::span<ID3D12CommandList*> commandLists);
+  void ExecuteCommandList(ID3D12CommandList* command_list);
+  void ExecuteCommandLists(std::span<ID3D12CommandList*> command_lists);
 
   // Queues a wait to block the GPU until the specified fence is signaled to a given value.
   void Wait(ID3D12Fence* fence, uint64_t value);
@@ -32,32 +32,23 @@ class DmlCommandQueue {
   // Returns an event that will become signaled after the next ExecuteCommandLists call.
   DmlGpuEvent GetNextCompletionEvent();
 
-  void QueueReference(IUnknown* object, bool waitForUnsubmittedWork);
-
-#ifdef _GAMING_XBOX
-  void QueueReference(IGraphicsUnknown* object, bool waitForUnsubmittedWork) {
-    // TODO(justoeck): consider changing QueuedReference to hold a variant of
-    // ComPtr<IUnknown>, ComPtr<IGraphicsUnknown>.
-    auto wrapper = Microsoft::WRL::Make<GraphicsUnknownWrapper>(object);
-    QueueReference(wrapper.Get(), waitForUnsubmittedWork);
-  }
-#endif
+  void QueueReference(IUnknown* object, bool wait_for_unsubmitted_work);
 
   void Close();
   void ReleaseCompletedReferences();
 
  private:
   struct QueuedReference {
-    uint64_t fenceValue;
+    uint64_t fence_value;
     ComPtr<IUnknown> object;
   };
 
-  std::deque<QueuedReference> m_queuedReferences;
+  std::deque<QueuedReference> queued_references_;
 
-  ComPtr<ID3D12CommandQueue> m_queue;
-  D3D12_COMMAND_LIST_TYPE m_type;
+  ComPtr<ID3D12CommandQueue> queue_;
+  D3D12_COMMAND_LIST_TYPE type_;
 
-  ComPtr<ID3D12Fence> m_fence;
-  uint64_t m_lastFenceValue = 0;
-  bool m_closing = false;
+  ComPtr<ID3D12Fence> fence_;
+  uint64_t last_fence_value_ = 0;
+  bool closing_ = false;
 };
