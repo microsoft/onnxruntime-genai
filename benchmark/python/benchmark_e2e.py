@@ -18,7 +18,7 @@ def generate_prompt(model, tokenizer, prompt_length) -> str:
     prompt = "a"
     tokens = tokenizer.encode(prompt)
     params=og.GeneratorParams(model)
-    params.set_search_options({"do_sample":True, "top_k":5, "temperature":temperature, "max_length":prompt_length, "min_length":prompt_length+1})
+    params.set_search_options(do_sample=True, top_k=5, temperature=temperature, max_length=prompt_length, min_length=prompt_length+1)
     params.input_ids = tokens
     generator=og.Generator(model, params)
     while not generator.is_done():
@@ -68,7 +68,7 @@ def main(args):
 
     params = og.GeneratorParams(model)
     params.input_ids = tokens
-    params.set_search_options({"do_sample":True, "top_k":args.top_k, "top_p":args.top_p, "temperature":temperature, "max_length":max_length, "min_length":max_length})
+    params.set_search_options(do_sample=True, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length)
 
     if args.verbose: print("Running warmup runs...")
     for _ in tqdm(range(args.warmup)):
@@ -99,7 +99,7 @@ def main(args):
         # Prepare run
         params = og.GeneratorParams(model)
         params.input_ids = tokens
-        params.set_search_options({"max_length":max_length, "min_length":max_length})
+        params.set_search_options(max_length=max_length, min_length=max_length)
         generator = og.Generator(model, params)
 
         # Measure prompt processing
