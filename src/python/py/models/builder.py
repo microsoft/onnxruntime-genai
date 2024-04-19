@@ -177,8 +177,6 @@ class Model:
 
         self.past_present_share_buffer = self.attention_attrs["op_type"] == "GroupQueryAttention"
 
-        self.past_present_share_buffer = self.attention_attrs["op_type"] == "GroupQueryAttention"
-
         # MLP-specific variables
         self.mlp_attrs = {
             "use_proj": True,           # Use projection style for MLP (GateProj/UpProj/DownProj)
@@ -253,9 +251,6 @@ class Model:
         print(f"Saving GenAI config in {out_dir}")
         with open(os.path.join(out_dir,"genai_config.json"), "w") as f:
             json.dump(genai_config, f, indent=4)
-
-    def cuda_graph_enabled(self):
-        return self.ep_attrs["cuda"]["enable_cuda_graph"] == '1' or self.ep == "dml"
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
         tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, **extra_kwargs)
