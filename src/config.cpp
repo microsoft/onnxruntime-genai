@@ -121,6 +121,10 @@ struct Inputs_Element : JSON::Element {
       v_.position_ids = value;
     } else if (name == "attention_mask") {
       v_.attention_mask = value;
+    } else if (name == "seqlens_k") {
+      v_.seqlens_k = value;
+    } else if (name == "total_seq_len") {
+      v_.total_sequence_length = value;
     } else if (name == "past_key_names") {
       v_.past_key_names = value;
     } else if (name == "past_value_names") {
@@ -285,6 +289,8 @@ struct Search_Element : JSON::Element {
       v_.diversity_penalty = static_cast<float>(value);
     } else if (name == "length_penalty") {
       v_.length_penalty = static_cast<float>(value);
+    } else if (name == "random_seed") {
+      v_.random_seed = static_cast<int>(value);
     } else
       throw JSON::unknown_value_error{};
   }
@@ -310,6 +316,19 @@ void SetSearchNumber(Config::Search& search, std::string_view name, double value
 
 void SetSearchBool(Config::Search& search, std::string_view name, bool value) {
   Search_Element(search).OnBool(name, value);
+}
+
+bool IsCudaGraphEnabled(Config::SessionOptions& session_options) {
+  for (const auto& provider_options : session_options.provider_options) {
+    if (provider_options.name == "cuda") {
+      for (const auto& value : provider_options.options) {
+        if (value.first == "enable_cuda_graph") {
+          return value.second == "1";
+        }
+      }
+    }
+  }
+  return false;
 }
 
 struct Root_Element : JSON::Element {

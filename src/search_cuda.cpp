@@ -33,7 +33,13 @@ GreedySearch_Cuda::GreedySearch_Cuda(const GeneratorParams& params)
     : Search_Cuda{params} {
   next_tokens_buffer_ = CudaMallocArray<int32_t>(params.batch_size, &next_tokens_);
   cudaMemsetAsync(next_tokens_.data(), 0, next_tokens_.size_bytes(), params_->cuda_stream);
-  samplingdata_ = std::make_unique<cuda::SamplingData>(params_->batch_size, params_->vocab_size, params_->cuda_stream);
+
+  unsigned long long random_seed;
+  if (params_->search.random_seed != -1)
+    random_seed = params_->search.random_seed;
+  else
+    random_seed = std::random_device{}();
+  samplingdata_ = std::make_unique<cuda::SamplingData>(random_seed, params_->batch_size, params_->vocab_size, params_->cuda_stream);
 }
 
 BeamSearch_Cuda::BeamSearch_Cuda(const GeneratorParams& params)
@@ -170,13 +176,24 @@ void GreedySearch_Cuda::CheckForEOS() {
 void GreedySearch_Cuda::AppendNextTokensToSequences() {
   sequences_.AppendNextTokenToSequences(next_tokens_);
 
-  if (sequences_.GetSequenceLength() == params_->search.max_length)
+  if (sequences_.GetSequenceLength() == params_->search.max_length) {
+    if (g_log.enabled && g_log.hit_max_length)
+      Log("hit_max_length", "greedy cuda hit");
     *done_cpu_ = true;
+  }
 }
 
 bool BeamSearch_Cuda::IsDone() const {
   beam_scorer_->IsDone();
-  return beam_scorer_->IsDoneLater() || sequences_.GetSequenceLength() == params_->search.max_length;
+  if (beam_scorer_->IsDoneLater())
+    return true;
+
+  if (sequences_.GetSequenceLength() == params_->search.max_length) {
+    if (g_log.enabled && g_log.hit_max_length)
+      Log("hit_max_length", "beam cuda hit");
+    return true;
+  }
+  return false;
 }
 
 void BeamSearch_Cuda::AppendNextTokensToSequences() {

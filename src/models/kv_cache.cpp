@@ -117,8 +117,11 @@ KV_Cache::KV_Cache(const Model& model, State& state)
     : model_{model},
       state_{state},
       layer_count_{model_.config_->model.decoder.num_hidden_layers},
-      past_present_share_buffer_{state_.params_->search.past_present_share_buffer && state_.params_->search.num_beams == 1 && model_.device_type_ == DeviceType::CUDA},
+      past_present_share_buffer_{state_.params_->search.past_present_share_buffer && state_.params_->search.num_beams == 1 && (model_.device_type_ == DeviceType::CUDA || model_.device_type_ == DeviceType::DML)},
       shape_{state_.params_->BatchBeamSize(), model.config_->model.decoder.num_key_value_heads, 0, model.config_->model.decoder.head_size} {
+  if (g_log.enabled && g_log.warning && past_present_share_buffer_ != state_.params_->search.past_present_share_buffer)
+    Log("warning", "past_present_share_buffer search option set to true, but has been disabled due to the current configuration. See https://aka.ms/generate_config for details");
+
   pasts_.resize(layer_count_ * 2);
   presents_.reserve(layer_count_ * 2);
 
@@ -146,9 +149,19 @@ KV_Cache::KV_Cache(const Model& model, State& state)
   else
     shape_[2] = state_.params_->sequence_length;
 
-  for (int i = 0; i < layer_count_; ++i) {
-    presents_.push_back(OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_));
-    presents_.push_back(OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_));
+  if (model_.device_type_ == DeviceType::CUDA && model_.use_cuda_graph_) {
+    assert(past_present_share_buffer_);
+    size_t max_beam_batch_size = static_cast<size_t>(model_.config_->search.num_beams) * model_.max_batch_size_;
+    sb_kv_caches_.reserve(layer_count_ * 2);
+    for (int i = 0; i < layer_count_ * 2; ++i) {
+      sb_kv_caches_.push_back(std::make_unique<StaticBuffer>(model_.allocator_device_, max_beam_batch_size));
+    }
+  }
+
+  for (int i = 0; i < layer_count_ * 2; ++i) {
+    presents_.push_back(
+        sb_kv_caches_.empty() ? OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_)
+                              : sb_kv_caches_[i]->CreateTensorOnStaticBuffer(shape_, type_));
   }
 }
 
@@ -181,6 +194,7 @@ void KV_Cache::Add() {
 }
 
 void KV_Cache::Update(std::span<const int32_t> beam_indices, int current_length) {
+  // If we're sharing past & present buffers there is nothing to do here, so early exit
   if (past_present_share_buffer_)
     return;
 

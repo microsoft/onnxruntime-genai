@@ -11,7 +11,6 @@
 #include "smartptrs.h"
 #include <cuda_runtime.h>
 #include <cub/cub.cuh>
-#include <curand_kernel.h>
 #include <iostream>
 
 namespace Generators {
@@ -20,7 +19,15 @@ namespace cuda {
 constexpr int kMaxThreads = 1024;
 constexpr int kGPUWarpSize = 32;
 
-SamplingData::SamplingData(int batch_size, int vocab_size, cudaStream_t stream) {
+__global__ void InitCurandStates(unsigned long long seed, curandState* states, int batch_size) {
+  int index = threadIdx.x + blockIdx.x * blockDim.x;
+  if (index >= batch_size)
+    return;
+
+  curand_init(seed, index, 0, &states[index]);
+}
+
+SamplingData::SamplingData(unsigned long long random_seed, int batch_size, int vocab_size, cudaStream_t stream) {
   indices_sorted = CudaMallocArray<int>(vocab_size * batch_size);
   scores_sorted = CudaMallocArray<float>(vocab_size * batch_size);
   scores_softmaxed = CudaMallocArray<float>(vocab_size * batch_size);
@@ -28,10 +35,13 @@ SamplingData::SamplingData(int batch_size, int vocab_size, cudaStream_t stream) 
   thresholds = CudaMallocArray<float>(batch_size);
   indices_in = CudaMallocArray<int>(vocab_size * batch_size);
   offsets = CudaMallocArray<int>(batch_size + 1);
+  curand_states = CudaMallocArray<curandState>(batch_size);
   temp_storage_bytes = 0;
   cub::DeviceSegmentedRadixSort::SortPairsDescending(nullptr, temp_storage_bytes, (float*)nullptr, (float*)nullptr,
     (int*)nullptr, (int*)nullptr, vocab_size*batch_size, batch_size, (int*)nullptr, (int*)nullptr, 0, sizeof(float) * 8, stream);
   temp_buffer = CudaMallocArray<float>(temp_storage_bytes / sizeof(float));
+
+  InitCurandStates<<<int(batch_size / 128) + 1, 128, 0, stream>>>(random_seed, curand_states.get(), batch_size);
 }
 
 // Softmax Kernels and Launchers
@@ -431,37 +441,31 @@ void LaunchGetTopKSubset(cudaStream_t stream, float* scores_in, float* scores_ou
 }
 
 // Sets up random thresholds for top p or top k sampling
-__global__ void RandomThresholdKernelTopPAndK(int seed, float* thresholds, float* prefix_sums, int batch_size, float p, int k) {
+__global__ void RandomThresholdKernelTopPAndK(curandState* curand_states, float* thresholds, float* prefix_sums, int batch_size, float p, int k) {
   int index = threadIdx.x + blockIdx.x * blockDim.x;
-  curandState state;
-  curand_init(seed, index, 0, &state);
 
   float k_prob = prefix_sums[k-1];
   if (index < batch_size) {
     float min_p = fminf(p, k_prob);
-    thresholds[index] = min_p * curand_uniform(&state);
+    thresholds[index] = min_p * curand_uniform(&curand_states[index]);
   }
 }
 
 // Sets up random thresholds for top p or top k sampling
-__global__ void RandomThresholdKernelTopP(int seed, float* thresholds, float* prefix_sums, int batch_size, float p) {
+__global__ void RandomThresholdKernelTopP(curandState* curand_states, float* thresholds, float* prefix_sums, int batch_size, float p) {
   int index = threadIdx.x + blockIdx.x * blockDim.x;
-  curandState state;
-  curand_init(seed, index, 0, &state);
 
   if (index < batch_size) {
-    thresholds[index] = p * curand_uniform(&state);
+    thresholds[index] = p * curand_uniform(&curand_states[index]);
   }
 }
 
 // Sets up random thresholds for top p or top k sampling
-__global__ void RandomThresholdKernelTopK(int seed, float* thresholds, float* prefix_sums, int batch_size, int k) {
+__global__ void RandomThresholdKernelTopK(curandState* curand_states, float* thresholds, float* prefix_sums, int batch_size, int k) {
   int index = threadIdx.x + blockIdx.x * blockDim.x;
-  curandState state;
-  curand_init(seed, index, 0, &state);
 
   if (index < batch_size) {
-    thresholds[index] = prefix_sums[k-1] * curand_uniform(&state);
+    thresholds[index] = prefix_sums[k - 1] * curand_uniform(&curand_states[index]);
   }
 }
 
@@ -502,16 +506,12 @@ void LaunchSampleKernel(SamplingData* data, cudaStream_t stream, float* scores, 
   PrefixSumKernel<256><<<grid, block, 0, stream>>>(scores, prefix_sums.data(), sample_range, batch_size);
   // Random Thresholds for Top P or Top K Sampling
   std::span<float> thresholds{data->thresholds.get(), static_cast<size_t>(batch_size)};
-  std::random_device rd;
-  std::mt19937 eee(rd());
-  std::uniform_int_distribution<int> dist(0, std::numeric_limits<int>::max());
-  int seed = dist(eee);
   if (p > 0.0 && k > 1) {
-    RandomThresholdKernelTopPAndK<<<int(batch_size / 128) + 1, 128, 0, stream>>>(seed, thresholds.data(), prefix_sums.data(), batch_size, p, k);
+    RandomThresholdKernelTopPAndK<<<int(batch_size / 128) + 1, 128, 0, stream>>>(data->curand_states.get(), thresholds.data(), prefix_sums.data(), batch_size, p, k);
   } else if (p > 0.0) {
-    RandomThresholdKernelTopP<<<int(batch_size / 128) + 1, 128, 0, stream>>>(seed, thresholds.data(), prefix_sums.data(), batch_size, p);
+    RandomThresholdKernelTopP<<<int(batch_size / 128) + 1, 128, 0, stream>>>(data->curand_states.get(), thresholds.data(), prefix_sums.data(), batch_size, p);
   } else if (k > 1) {
-    RandomThresholdKernelTopK<<<int(batch_size / 128) + 1, 128, 0, stream>>>(seed, thresholds.data(), prefix_sums.data(), batch_size, k);
+    RandomThresholdKernelTopK<<<int(batch_size / 128) + 1, 128, 0, stream>>>(data->curand_states.get(), thresholds.data(), prefix_sums.data(), batch_size, k);
   }
   SampleKernel<256><<<grid, block, 0, stream>>>(prefix_sums.data(), indices, index_out, sample_range, thresholds.data());
 }

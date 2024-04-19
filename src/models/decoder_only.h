@@ -3,7 +3,7 @@
 #include "input_ids.h"
 #include "logits.h"
 #include "kv_cache.h"
-#include "position_ids.h"
+#include "position_inputs.h"
 
 namespace Generators {
 
@@ -21,14 +21,16 @@ struct DecoderOnly_State : State {
 
  private:
   void UpdateInputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> next_indices, int current_length);
+  int GetGraphAnnotationId() const;
 
   const DecoderOnly_Model& model_;
   bool first_run_{true};
+  int graph_annotation_id_{0};
 
   InputIDs input_ids_{model_, *this};
   Logits logits_{model_, *this};
   KV_Cache kv_cache_{model_, *this};
-  PositionIDs position_ids_;
+  PositionInputs position_inputs_;
 };
 
 }  // namespace Generators

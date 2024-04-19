@@ -50,10 +50,20 @@ See full documentation at [https://onnxruntime.ai/docs/genai].
 
 [Install](https://onnxruntime.ai/docs/genai/howto/install) the onnxruntime-genai Python package.
 
+1. Build the model
+```shell
+python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -e cpu -p int4 -o ./models/phi2
+# You can append --extra_options enable_cuda_graph=1 to build an onnx model that supports using cuda graph in ORT.
+```
+
+2. Run inference
 ```python
+import os
 import onnxruntime_genai as og
 
-model = og.Model(f'models/microsoft/phi-2')
+model_path = os.path.abspath("./models/phi2")
+
+model = og.Model(model_path)
 
 tokenizer = og.Tokenizer(model)
 
@@ -64,8 +74,10 @@ prompt = '''def print_prime(n):
 
 tokens = tokenizer.encode(prompt)
 
-params = og.SearchParams(model)
+params = og.GeneratorParams(model)
 params.set_search_options({"max_length":200})
+# Add the following line to enable cuda graph by passing the maximum batch size.
+# params.try_use_cuda_graph_with_max_batch_size(16)
 params.input_ids = tokens
 
 output_tokens = model.generate(params)
