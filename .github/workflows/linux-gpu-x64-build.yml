@@ -108,7 +108,7 @@ jobs:
           -w /ort_genai_src onnxruntimecudabuildx64 bash -c " \
               ${{ env.PYTHON_EXECUTABLE }} test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models"
 
-      - name: Docker -- Run tests
+      - name: Docker -- Run unit tests
         run: |
           echo "Running docker image onnxruntimecudabuildx64"
           docker run \

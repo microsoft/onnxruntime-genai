@@ -13,6 +13,13 @@ steps:
   path: onnxruntime-genai/manylinux
   submodules: recursive
 
+- script: |
+    set -e -x
+    echo "$(Build.SourcesDirectory)"
+    echo "$(Build.Repository.LocalPath)"
+    ls $(Build.SourcesDirectory) -R
+  displayName: 'List files from SourceDirectory'
+
 - template: utils/set-nightly-build-option-variable.yml
 
 - bash: |
