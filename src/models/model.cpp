@@ -344,7 +344,7 @@ void Model::CreateSessionOptions() {
       ort_options.AppendExecutionProvider_ROCM(ort_provider_options);
 #ifdef USE_DML
     } else if (provider_options.name == "dml") {
-      dml_objects_ = CreateDmlObjects();
+      dml_objects_ = DmlHelpers::CreateDmlObjects();
 
       auto directml_dll = CurrentModulePath() + L"DirectML.dll";
       wil::unique_hmodule smart_directml_dll(LoadLibraryExW(directml_dll.c_str(), nullptr, 0));

@@ -108,7 +108,7 @@ DmlUpdateMaskKernel::DmlUpdateMaskKernel(
 
     uint32_t dispatch_size_x;
 
-    GetNextDispatchSize(
+    DmlHelpers::GetNextDispatchSize(
         pending_element_count,
         256,
         dispatch_size_x,

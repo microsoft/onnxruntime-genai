@@ -32,7 +32,7 @@ RoamingArray<float> Logits::Get() {
   // Convert from float16 to float32 if necessary
   if (type_ == Ort::TypeToTensorType<Ort::Float16_t>::type) {
 #if USE_DML
-    DmlCastInputToOutput(
+    DmlHelpers::DmlCastInputToOutput(
         model_.GetDmlExecutionContext(),
         *model_.allocator_device_,
         *value16_,
