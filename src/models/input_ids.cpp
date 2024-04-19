@@ -5,16 +5,6 @@
 
 namespace Generators {
 
-template <typename NewType, typename OldTypeContainer>
-std::span<NewType> reinterpret_span(OldTypeContainer& oldSpan) {
-  using OldType = decltype(*oldSpan.data());
-  size_t newElementCount = static_cast<size_t>(oldSpan.size()) * sizeof(OldType) / sizeof(NewType);
-  assert(newElementCount * sizeof(NewType) == oldSpan.size() * sizeof(OldType));
-
-  NewType* p = reinterpret_cast<NewType*>(oldSpan.data());
-  return std::span<NewType>(p, p + newElementCount);
-}
-
 InputIDs::InputIDs(const Model& model, State& state)
     : model_{model},
       state_{state} {
