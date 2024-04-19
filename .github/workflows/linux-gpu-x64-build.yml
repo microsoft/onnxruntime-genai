@@ -41,10 +41,13 @@ jobs:
         shell: bash
         run: |
           ls -l
+          ls -l ${{ env.ORT_NIGHTLY_PACKAGE_NAME_L }}/buildtransitive
+        continue-on-error: true
+
       - name: Extra OnnxRuntime library and header files
         run: |
           mkdir -p ort/lib
-          mv ${{ env.ORT_NIGHTLY_PACKAGE_NAME_L }}/build/native/include ort/
+          mv ${{ env.ORT_NIGHTLY_PACKAGE_NAME_L }}/buildtransitive/native/include ort/
           mv ${{ env.ORT_NIGHTLY_PACKAGE_NAME_L }}/runtimes/linux-x64/native/* ort/lib/
 
 
