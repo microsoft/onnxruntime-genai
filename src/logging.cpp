@@ -63,14 +63,19 @@ std::ostream& operator<<(std::ostream& stream, SGR sgr_code) {
   return stream;
 }
 
+// #define SGR_EXAMPLE // Uncomment this line to have it display the color example at launch
+#ifdef SGR_EXAMPLE
 // To show what the ansi tags look like in the terminal, add a call to this function
-void SGRTest(std::ostream& stream) {
+void SGRExample(std::ostream& stream) {
   stream << "\r\nAnsi SGR Color Test:\r\n"
          << SGR::Fg_Black << "Fg_Black" << SGR::Fg_Red << "Fg_Red" << SGR::Fg_Green << "Fg_Green" << SGR::Fg_Yellow << "Fg_Yellow" << SGR::Fg_Blue << "Fg_Blue" << SGR::Fg_Magenta << "Fg_Magenta" << SGR::Fg_Cyan << "Fg_Cyan" << SGR::Fg_White << "Fg_White" << SGR::Reset << "\r\n"
          << SGR::Bg_Black << "Bg_Black" << SGR::Bg_Red << "Bg_Red" << SGR::Bg_Green << "Bg_Green" << SGR::Bg_Yellow << "Bg_Yellow" << SGR::Bg_Blue << "Bg_Blue" << SGR::Bg_Magenta << "Bg_Magenta" << SGR::Bg_Cyan << "Bg_Cyan" << SGR::Bg_White << "Bg_White" << SGR::Reset << "\r\n"
          << "Styles:\r\n"
          << SGR::Bold << "Bold" << SGR::Reset << ' ' << SGR::Faint << "Faint" << SGR::Reset << ' ' << SGR::Underline << "Underline" << SGR::Reset << std::endl;
 }
+
+bool RunExample = (SGRExample(std::cerr), false);
+#endif SGR_EXAMPLE
 
 std::ostream& Log(std::string_view label, std::string_view string) {
   assert(g_log.enabled);
