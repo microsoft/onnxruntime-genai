@@ -168,6 +168,7 @@ DmlGpuEvent DmlPooledUploadHeap::BeginUploadToGpu(
   DmlGpuEvent done_event = execution_context_->GetCurrentCompletionEvent();
 
   execution_context_->Flush();
+  done_event.WaitForSignal();
 
   // Add an allocation entry to the chunk
   chunk->allocations.push_back(Allocation{static_cast<size_t>(src.size()), offset_in_chunk, done_event});

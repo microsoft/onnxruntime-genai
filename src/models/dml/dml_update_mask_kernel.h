@@ -41,7 +41,7 @@ class DmlUpdateMaskKernel {
   ComPtr<ID3D12DescriptorHeap> heap_;
 
   ONNXTensorElementDataType dtype_;
-  ComPtr<ID3D12Resource> m_attention_mask_resource;
+  ComPtr<ID3D12Resource> attention_mask_resource_;
   ComPtr<ID3D12Resource> attention_mask_next_resource_;
   uint32_t total_element_count_;
 
