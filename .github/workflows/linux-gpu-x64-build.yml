@@ -89,7 +89,7 @@ jobs:
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
             -w /ort_genai_src onnxruntimecudabuildx64 bash -c " \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install /ort_genai_src/build/cuda/wheel/onnxruntime_genai*manylinux*.whl --user && \
-              ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/requirements-nightly-cpu.txt --user 
+              ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/requirements-nightly-cpu.txt --user"
 
       - name: Get HuggingFace Token
         run: |
