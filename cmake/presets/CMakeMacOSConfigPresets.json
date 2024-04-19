@@ -6,7 +6,7 @@
   "configurePresets": [
         {
       "name": "macos_default",
-      "generator": "Ninja",
+      "generator": "Unix Makefiles",
       "binaryDir": "${sourceDir}/build/cpu",
       "cacheVariables": {
         "CMAKE_POSITION_INDEPENDENT_CODE": "ON",

@@ -15,10 +15,6 @@ jobs:
         with:
           submodules: true
 
-      - name: Install ninja and jq
-        run: |
-          brew install ninja jq
-
       - name: Get the Latest OnnxRuntime Nightly Version
         run: |
           ORT_NIGHTLY_VERSION=$(curl -s "${{ env.ORT_NIGHTLY_REST_API }}" | jq -r '.value[0].versions[0].normalizedVersion')

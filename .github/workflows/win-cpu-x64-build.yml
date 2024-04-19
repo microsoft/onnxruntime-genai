@@ -32,14 +32,18 @@ jobs:
       with:
         vs-version: '17.5'
 
+    - uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '6.0.x'
+
     - name : Install jq and nuget
       run: |
-        choco install -y jq nuget.commandline curl
+        choco install -y jq curl
 
     - name: Get the Latest OnnxRuntime Nightly Version
-      shell: bash
+      shell: pwsh
       run: |
-        ORT_NIGHTLY_VERSION=$(curl -s "${{ env.ORT_NIGHTLY_REST_API }}" | jq -r '.value[0].versions[0].normalizedVersion')
+        $ORT_NIGHTLY_VERSION = $(curl -s "${{ env.ORT_NIGHTLY_REST_API }}" | jq -r '.value[0].versions[0].normalizedVersion')
         echo "$ORT_NIGHTLY_VERSION" 
         echo "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" >> $GITHUB_ENV
     - name: Download OnnxRuntime Nightly
@@ -50,9 +54,9 @@ jobs:
 
     - name: Extra OnnxRuntime library and header files
       run: |
-        mkdir -p ort/lib
-        mv ${{ env.ORT_NIGHTLY_PACKAGE_NAME }}/build/native/include ort/
-        mv ${{ env.ORT_NIGHTLY_PACKAGE_NAME }}/runtimes/win-x64/native/* ort/lib/
+        mkdir ort/lib
+        move ${{ env.ORT_NIGHTLY_PACKAGE_NAME }}/build/native/include ort/
+        move ${{ env.ORT_NIGHTLY_PACKAGE_NAME }}/runtimes/win-x64/native/* ort/lib/
 
     - name: Initialize CodeQL
       uses: github/codeql-action/init@v3
