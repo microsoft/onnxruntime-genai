@@ -6,7 +6,7 @@ prompt = "Human: What is the lightest element?\nAI:"
 
 prompt = "<|user|>What is the difference between nuclear fission and nuclear fusion?<|end|>\n<|assistant|>"
 
-model=og.Model(r"phi-3")
+model=og.Model(r"cache_models/phi-3")
 
 tokenizer = og.Tokenizer(model)
 

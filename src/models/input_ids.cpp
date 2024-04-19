@@ -84,11 +84,11 @@ void InputIDs::Update(RoamingArray<int32_t> next_tokens_unk) {
             reinterpret_cast<const uint8_t*>(next_tokens_unk.GetCPU().data()),
             next_tokens_unk.GetCPU().size_bytes());
 
-        // model_.GetDmlUploadHeap()->BeginUploadToGpu(
-        //     target_resource.Get(),
-        //     0,
-        //     D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-        //     source);
+        model_.GetDmlUploadHeap()->BeginUploadToGpu(
+            target_resource.Get(),
+            0,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            source);
       } break;
 #endif
       case DeviceType::CPU: {
