@@ -57,7 +57,7 @@ jobs:
     - name: Extra OnnxRuntime library and header files
       run: |
         mkdir ort/lib
-        move ${{ env.ORT_NIGHTLY_PACKAGE_NAME }}/build/native/include ort/
+        move ${{ env.ORT_NIGHTLY_PACKAGE_NAME }}/buildTransitive/native/include ort/
         move ${{ env.ORT_NIGHTLY_PACKAGE_NAME }}/runtimes/win-x64/native/* ort/lib/    
 
     - name: Configure CMake
