@@ -37,7 +37,7 @@ jobs:
       with:
         dotnet-version: '6.0.x'
 
-    - name : Install jq and nuget
+    - name : Install jq and curl
       run: |
         choco install -y jq curl
 
@@ -46,10 +46,10 @@ jobs:
       run: |
         $ORT_NIGHTLY_VERSION=$(curl -s "${{ env.ORT_NIGHTLY_REST_API }}" | jq -r '.value[0].versions[0].normalizedVersion')
         echo "$ORT_NIGHTLY_VERSION" 
-        echo "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" >> $GITHUB_ENV
+        "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
     - name: Download OnnxRuntime Nightly
       run: |
-        nuget install ${{ env.ORT_NIGHTLY_PACKAGE_NAME }} -version ${{ env.ORT_NIGHTLY_VERSION }} -x -NonInteractive
+        nuget install ${{ env.ORT_NIGHTLY_PACKAGE_NAME }} -version ${{ env.ORT_NIGHTLY_VERSION }} -ExcludeVersion -NonInteractive
 
     - run: Get-ChildItem  ${{ env.ORT_NIGHTLY_PACKAGE_NAME }} -Recurse
       continue-on-error: true
