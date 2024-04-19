@@ -1,7 +1,6 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#define NOMINMAX
 #include <stdexcept>
 #include <assert.h>
 #include "dml_execution_context.h"

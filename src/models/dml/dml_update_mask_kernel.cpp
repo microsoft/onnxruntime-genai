@@ -1,31 +1,36 @@
-#define NOMINMAX
 #include <d3dx12.h>
 #include <assert.h>
 #include <wil/result.h>
 #include <stdexcept>
-#include "dml_increment_values_kernel.h"
+#include "dml_update_mask_kernel.h"
 #include "dml_helpers.h"
 
-namespace DmlIncrementValues_Int32 {
-#include "../generated_dml_shaders/increment_values_int32.h"
+namespace DmlUpdateMask_Int32 {
+#include "generated_dml_shaders/update_mask_int32.h"
 }
 
-namespace DmlIncrementValues_Int64 {
-#include "../generated_dml_shaders/increment_values_int64.h"
+namespace DmlUpdateMask_Int64 {
+#include "generated_dml_shaders/update_mask_int64.h"
 }
 
-DmlIncrementValuesKernel::DmlIncrementValuesKernel(
+DmlUpdateMaskKernel::DmlUpdateMaskKernel(
     ID3D12Device* d3d12Device,
     DmlExecutionContext* executionContext,
-    uint32_t elementCount,
+    uint32_t batch_size,
+    uint32_t max_seq_len,
     ONNXTensorElementDataType dtype,
-    ID3D12Resource* values_resource)
+    uint32_t seqLen,
+    ID3D12Resource* attention_mask_resource,
+    ID3D12Resource* attention_mask_next_resource)
     : m_device(d3d12Device),
       m_executionContext(executionContext),
       dtype_(dtype),
-      m_values_resource(values_resource) {
-  m_constants.elementCount = elementCount;
-  m_totalElementCount = elementCount;
+      m_attention_mask_resource(attention_mask_resource),
+      m_attention_mask_next_resource(attention_mask_next_resource) {
+  m_constants.elementCount = batch_size * max_seq_len;
+  m_constants.maxSeqLen = max_seq_len;
+  m_constants.seqLen = seqLen;
+  m_totalElementCount = batch_size * max_seq_len;
 
   // Compute root signature.
   std::vector<CD3DX12_ROOT_PARAMETER1> rootParameters;
@@ -57,9 +62,9 @@ DmlIncrementValuesKernel::DmlIncrementValuesKernel(
   computePsoDesc.pRootSignature = m_rootSignature.Get();
 
   if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
-    computePsoDesc.CS = CD3DX12_SHADER_BYTECODE(DmlIncrementValues_Int32::g_CSMain, sizeof(DmlIncrementValues_Int32::g_CSMain));
+    computePsoDesc.CS = CD3DX12_SHADER_BYTECODE(DmlUpdateMask_Int32::g_CSMain, sizeof(DmlUpdateMask_Int32::g_CSMain));
   } else if (dtype == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
-    computePsoDesc.CS = CD3DX12_SHADER_BYTECODE(DmlIncrementValues_Int64::g_CSMain, sizeof(DmlIncrementValues_Int64::g_CSMain));
+    computePsoDesc.CS = CD3DX12_SHADER_BYTECODE(DmlUpdateMask_Int64::g_CSMain, sizeof(DmlUpdateMask_Int64::g_CSMain));
   } else {
     THROW_HR(E_NOTIMPL);
   }
@@ -90,7 +95,8 @@ DmlIncrementValuesKernel::DmlIncrementValuesKernel(
   // Set the root signature and pipeline state
   m_graphicsCommandList->SetComputeRootSignature(m_rootSignature.Get());
   m_graphicsCommandList->SetPipelineState(m_pipelineState.Get());
-  m_graphicsCommandList->SetComputeRootUnorderedAccessView(0, m_values_resource->GetGPUVirtualAddress());
+  m_graphicsCommandList->SetComputeRootUnorderedAccessView(0, m_attention_mask_resource->GetGPUVirtualAddress());
+  m_graphicsCommandList->SetComputeRootUnorderedAccessView(1, m_attention_mask_next_resource->GetGPUVirtualAddress());
 
   auto pendingElementCount = m_totalElementCount;
   auto constants = m_constants;
@@ -117,6 +123,21 @@ DmlIncrementValuesKernel::DmlIncrementValuesKernel(
     );
 
     m_graphicsCommandList->Dispatch(dispatchSizeX, 1, 1);
+  }
+
+  // Barrier all outputs.
+  std::array<D3D12_RESOURCE_BARRIER, 1> output_barriers = {
+      CD3DX12_RESOURCE_BARRIER::UAV(m_attention_mask_next_resource.Get()),
+  };
+  m_graphicsCommandList->ResourceBarrier(static_cast<uint32_t>(output_barriers.size()), output_barriers.data());
+
+  // Copy the next mask to the current mask for next iteration
+  if (dtype_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
+    m_graphicsCommandList->CopyBufferRegion(m_attention_mask_resource.Get(), 0, m_attention_mask_next_resource.Get(), 0, m_constants.elementCount * sizeof(int32_t));
+  } else if (dtype_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+    m_graphicsCommandList->CopyBufferRegion(m_attention_mask_resource.Get(), 0, m_attention_mask_next_resource.Get(), 0, m_constants.elementCount * sizeof(int64_t));
+  } else {
+    THROW_HR(E_NOTIMPL);
   }
 
   m_graphicsCommandList->Close();

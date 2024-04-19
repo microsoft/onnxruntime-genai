@@ -1,8 +1,6 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#define NOMINMAX
-
 #include <assert.h>
 #include <wil/result.h>
 #include <stdexcept>

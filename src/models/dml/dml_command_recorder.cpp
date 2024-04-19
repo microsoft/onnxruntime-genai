@@ -1,13 +1,12 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#define NOMINMAX
 #include <assert.h>
 #include <stdexcept>
 #include <wil/result.h>
 #include "dml_command_recorder.h"
 #include "dml_command_queue.h"
-#include "onnxruntime_api.h"
+#include "../onnxruntime_api.h"
 
 DmlCommandRecorder::DmlCommandRecorder(
     ID3D12Device* d3dDevice,

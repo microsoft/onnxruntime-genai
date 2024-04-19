@@ -3,8 +3,8 @@
 #include "static_buffer.h"
 
 #if USE_DML
-#include "dml_update_mask_kernel.h"
-#include "dml_increment_values_kernel.h"
+#include "dml/dml_update_mask_kernel.h"
+#include "dml/dml_increment_values_kernel.h"
 #endif
 
 namespace Generators {

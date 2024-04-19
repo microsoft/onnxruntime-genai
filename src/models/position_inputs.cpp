@@ -2,7 +2,10 @@
 #include "model.h"
 #include "position_inputs.h"
 #include "kernels.h"
-#include "dml_update_mask_kernel.h"
+
+#if USE_DML
+#include "dml/dml_update_mask_kernel.h"
+#endif
 
 namespace Generators {
 

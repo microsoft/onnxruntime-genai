@@ -2,7 +2,6 @@
 
 // TODO (pavignol): Refactor
 
-#define NOMINMAX
 #include <wrl/client.h>
 #include <wil/result.h>
 #include <d3d12.h>

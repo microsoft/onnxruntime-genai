@@ -4,11 +4,11 @@
 #endif
 
 #ifdef USE_DML
-#include "dml_helpers.h"
 #include "dml_provider_factory.h"
-#include "dml_execution_context.h"
-#include "dml_pooled_upload_heap.h"
-#include "dml_readback_heap.h"
+#include "dml/dml_helpers.h"
+#include "dml/dml_execution_context.h"
+#include "dml/dml_pooled_upload_heap.h"
+#include "dml/dml_readback_heap.h"
 #endif
 
 namespace Generators {

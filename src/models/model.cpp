@@ -10,11 +10,9 @@
 #include "whisper.h"
 #include "kernels.h"
 #ifdef USE_DML
-//  Because dml_provider_factory includes windows headers that #define min and max, this next line will prevent this from happening
-#define NOMINMAX
 #include <wil/wrl.h>
 #include "dml_provider_factory.h"
-#include "dml_smart_container.h"
+#include "dml/dml_smart_container.h"
 
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
 

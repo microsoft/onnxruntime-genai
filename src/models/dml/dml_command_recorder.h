@@ -3,7 +3,6 @@
 
 #pragma once
 
-#define NOMINMAX
 #include <memory>
 #include <span>
 #include <d3d12.h>
@@ -13,7 +12,7 @@
 #include "dml_command_queue.h"
 #include "dml_descriptor_pool.h"
 #include "dml_provider_factory.h"
-#include "onnxruntime_api.h"
+#include "../onnxruntime_api.h"
 
 class DmlCommandRecorder {
  public:

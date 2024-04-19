@@ -90,6 +90,14 @@ endif()
 if(USE_DML)
   if(WIN32)
     add_compile_definitions(USE_DML=1)
+    add_compile_definitions(NOMINMAX)
+
+    file(GLOB dml_srcs CONFIGURE_DEPENDS
+      "${MODELS_ROOT}/dml/*.h"
+      "${MODELS_ROOT}/dml/*.cpp"
+    )
+
+    list(APPEND generator_srcs ${dml_srcs})
   else()
     message(FATAL_ERROR "USE_DML is ON but this isn't windows.")
   endif()
