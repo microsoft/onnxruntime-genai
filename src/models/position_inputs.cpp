@@ -152,32 +152,20 @@ void PositionInputs::UpdatePositionIDs(int current_length) {
         ComPtr<ID3D12Resource> target_resource;
         Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, position_ids_->GetTensorMutableRawData(), &target_resource));
 
-        // DML doesn't support on-device position ids update yet, so we do it on the CPU
-        if (type_ == Ort::TypeToTensorType<int32_t>::type) {
-          auto* source = position_ids_next_->GetTensorMutableData<int32_t>();
-          for (int i = 0; i < position_ids_shape_[0]; i++) {
-            source[i]++;
-          }
-
-          auto source_bytes = std::span(reinterpret_cast<const uint8_t*>(source), sizeof(int32_t) * position_ids_shape_[0]);
-          model_.GetDmlUploadHeap()->BeginUploadToGpu(
-              target_resource.Get(),
-              0,
-              D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-              source_bytes);
-        } else {
-          auto* source = position_ids_next_->GetTensorMutableData<int64_t>();
-          for (int i = 0; i < position_ids_shape_[0]; i++) {
-            source[i]++;
-          }
-
-          auto source_bytes = std::span(reinterpret_cast<const uint8_t*>(source), sizeof(int64_t) * position_ids_shape_[0]);
-          model_.GetDmlUploadHeap()->BeginUploadToGpu(
-              target_resource.Get(),
-              0,
-              D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-              source_bytes);
+        // Lazily create the kernel only the first time it's needed
+        if (!dml_update_position_ids_kernel_) {
+          dml_update_position_ids_kernel_ = DmlIncrementValuesKernel(
+              model_.GetD3D12Device(),
+              model_.GetDmlExecutionContext(),
+              static_cast<uint32_t>(position_ids_shape_[0]),
+              type_,
+              target_resource.Get());
         }
+
+        // Execute the cached command list
+        ComPtr<ID3D12Fence> fence;
+        uint64_t completion_value;
+        model_.GetDmlExecutionContext()->ExecuteCommandList(dml_update_position_ids_kernel_->GetCommandList(), &fence, &completion_value);
       } break;
 #endif
       case DeviceType::CPU: {

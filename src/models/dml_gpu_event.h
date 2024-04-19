@@ -24,10 +24,7 @@ struct DmlGpuEvent {
       return;  // early-out
 
     while (!IsSignaled()) {
-      // DO nothing
-
 #if defined(_M_AMD64) || defined(__x86_64__)
-      _mm_pause();
 #endif
     }
   }

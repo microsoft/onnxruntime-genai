@@ -8,24 +8,19 @@
 
 using Microsoft::WRL::ComPtr;
 
-class DmlUpdateMaskKernel {
+class DmlIncrementValuesKernel {
  public:
-  DmlUpdateMaskKernel(
+  DmlIncrementValuesKernel(
       ID3D12Device* d3d12Device,
       DmlExecutionContext* executionContext,
-      uint32_t batch_size,
-      uint32_t max_seq_len,
+      uint32_t elementCount,
       ONNXTensorElementDataType dtype,
-      uint32_t seqLen,
-      ID3D12Resource* attention_mask_resource,
-      ID3D12Resource* attention_mask_next_resource);
+      ID3D12Resource* values_resource);
 
   ID3D12GraphicsCommandList* GetCommandList() { return m_graphicsCommandList.Get(); }
 
  private:
   struct Constants {
-    uint32_t maxSeqLen;
-    uint32_t seqLen;
     uint32_t elementCount;
     uint32_t startIndex;
   };
@@ -41,10 +36,9 @@ class DmlUpdateMaskKernel {
   ComPtr<ID3D12DescriptorHeap> m_heap;
 
   ONNXTensorElementDataType dtype_;
-  ComPtr<ID3D12Resource> m_attention_mask_resource;
-  ComPtr<ID3D12Resource> m_attention_mask_next_resource;
+  ComPtr<ID3D12Resource> m_values_resource;
   uint32_t m_totalElementCount;
 
   constexpr static uint32_t m_constantCount = sizeof(Constants) / sizeof(uint32_t);
-  constexpr static uint32_t m_uavCount = 2;
+  constexpr static uint32_t m_uavCount = 1;
 };

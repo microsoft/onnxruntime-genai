@@ -4,6 +4,7 @@
 
 #if USE_DML
 #include "dml_update_mask_kernel.h"
+#include "dml_increment_values_kernel.h"
 #endif
 
 namespace Generators {
@@ -59,6 +60,7 @@ struct PositionInputs {
 #ifdef USE_DML
   std::optional<DmlUpdateMaskKernel> dml_update_mask_kernel_;
   std::unique_ptr<StaticBuffer> sb_attention_mask_next_;
+  std::optional<DmlIncrementValuesKernel> dml_update_position_ids_kernel_;
   bool is_second_mask_update_{false};
 #endif
 };

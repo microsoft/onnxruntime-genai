@@ -24,6 +24,10 @@ struct InputIDs {
 
   // Used for decoding runs with cuda graphs.
   std::unique_ptr<StaticBuffer> sb_input_ids_;
+
+#if USE_DML
+  DmlReusedCommandListState update_input_ids_reusable_command_list_{};
+#endif
 };
 
 }  // namespace Generators

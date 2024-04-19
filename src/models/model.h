@@ -17,17 +17,6 @@ struct Tokenizer;
 
 void ConvertFp16ToFp32(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<OrtValue>& p_out, DeviceType device_type, cudaStream_t stream);
 
-#ifdef USE_DML
-void DmlConvertFp16ToFp32(
-    DmlExecutionContext* execution_context,
-    OrtAllocator& allocator,
-    OrtValue& in,
-    std::unique_ptr<OrtValue>& p_out,
-    IDMLDevice* dml_device,
-    const OrtDmlApi* ort_dml_api,
-    DmlReusedCommandListState& command_list_state);
-#endif
-
 struct State {
   State(const GeneratorParams& params);
   virtual ~State() = default;

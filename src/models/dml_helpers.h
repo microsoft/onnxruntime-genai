@@ -219,3 +219,134 @@ inline ComPtr<IDMLCompiledOperator> CreateCastOperator(
 
   return compiled_cast_op;
 }
+
+inline void GetNextDispatchSize(
+    uint32_t elementCount,
+    uint32_t numThreads,
+    uint32_t& dispatch,
+    uint32_t& pendingElementCount) {
+  // Max threads per workgroup is 2^10 (1024). Max dispatch per dimension is 2^16. Taken together, we can dispatch a maximum of
+  // 2^26 (268,435,456) threads along a single dimension. This should suffice for a majority of the workload. Therefore, even
+  // though it is possible to dispatch up to (2^16)^3 workgroups simultaneously, we stick to the simpler 1D dispatch alternative.
+  assert(numThreads <= D3D12_CS_THREAD_GROUP_MAX_THREADS_PER_GROUP);
+
+  const uint32_t maxThreadsPerDispatch = numThreads * D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION;
+
+  // Compute max dispatchable elements
+  const uint32_t availableThreadCount = std::min(elementCount, maxThreadsPerDispatch);
+
+  // Compute required thread group count
+  uint32_t workGroupCount1D = (availableThreadCount + numThreads - 1) / numThreads;
+
+  // Compute min dispatch size
+  dispatch = workGroupCount1D;
+
+  // With the dispatch size computed, compute the dispatched element count
+  const uint32_t dispatchedElementCount = workGroupCount1D * numThreads;
+
+  // Update the pending element count
+  pendingElementCount = (dispatchedElementCount < elementCount) ? elementCount - dispatchedElementCount : 0;
+}
+
+inline DML_TENSOR_DATA_TYPE OrtToDmlDataType(ONNXTensorElementDataType ort_dtype) {
+  switch (ort_dtype) {
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+      return DML_TENSOR_DATA_TYPE_FLOAT16;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+      return DML_TENSOR_DATA_TYPE_FLOAT32;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
+      return DML_TENSOR_DATA_TYPE_FLOAT64;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
+      return DML_TENSOR_DATA_TYPE_UINT8;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16:
+      return DML_TENSOR_DATA_TYPE_UINT16;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32:
+      return DML_TENSOR_DATA_TYPE_UINT32;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64:
+      return DML_TENSOR_DATA_TYPE_UINT64;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
+      return DML_TENSOR_DATA_TYPE_INT8;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16:
+      return DML_TENSOR_DATA_TYPE_INT16;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
+      return DML_TENSOR_DATA_TYPE_INT32;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
+      return DML_TENSOR_DATA_TYPE_INT64;
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:
+      return DML_TENSOR_DATA_TYPE_UINT8;
+    default:
+      THROW_HR(E_NOTIMPL);
+  }
+}
+
+inline void DmlCastInputToOutput(
+    DmlExecutionContext* execution_context,
+    OrtAllocator& allocator,
+    OrtValue& in,
+    std::unique_ptr<OrtValue>& p_out,
+    IDMLDevice* dml_device,
+    const OrtDmlApi* ort_dml_api,
+    DmlReusedCommandListState& command_list_state) {
+  auto shape_info = in.GetTensorTypeAndShapeInfo();
+  auto shape = shape_info->GetShape();
+  assert(shape_info->GetElementType() == Ort::TypeToTensorType<Ort::Float16_t>::type);
+
+  bool allocate_p_out = p_out == nullptr;
+  if (p_out) {
+    auto out_shape_info = p_out->GetTensorTypeAndShapeInfo();
+    auto out_shape = out_shape_info->GetShape();
+    allocate_p_out = shape != out_shape;
+  }
+
+  if (allocate_p_out) {
+    p_out = OrtValue::CreateTensor<float>(allocator, shape);
+  }
+
+  int element_count = static_cast<int>(shape_info->GetElementCount());
+
+  bool rebind = command_list_state.previousOutput != p_out.get();
+
+  // If the sizes change, we need to recompile the operator and rebuild the command lists. It should only happen
+  // once after the very first iteration.
+  if (rebind) {
+    auto dml_from_type = OrtToDmlDataType(in.GetTensorTypeAndShapeInfo()->GetElementType());
+    auto dml_to_type = OrtToDmlDataType(p_out->GetTensorTypeAndShapeInfo()->GetElementType());
+    auto compiled_cast_operator = CreateCastOperator(dml_device, element_count, dml_from_type, dml_to_type);
+
+    ComPtr<ID3D12Resource> persistent_resource;
+    uint64_t persistent_resource_size = compiled_cast_operator->GetBindingProperties().PersistentResourceSize;
+
+    std::optional<DML_BUFFER_BINDING> persistent_resource_binding;
+
+    if (persistent_resource_size > 0) {
+      std::array<int64_t, 1> persistent_resource_shape = {static_cast<int64_t>(persistent_resource_size)};
+      auto persistent_tensor = OrtValue::CreateTensor(allocator, persistent_resource_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+      Ort::ThrowOnError(ort_dml_api->GetD3D12ResourceFromAllocation(&allocator, persistent_tensor->GetTensorMutableRawData(), &persistent_resource));
+      persistent_resource_binding = DML_BUFFER_BINDING{persistent_resource.Get(), 0, persistent_resource_size};
+    }
+
+    DML_BINDING_DESC persistent_resource_bindingDesc = persistent_resource_binding
+                                                           ? DML_BINDING_DESC{DML_BINDING_TYPE_BUFFER, &*persistent_resource_binding}
+                                                           : DML_BINDING_DESC{DML_BINDING_TYPE_NONE, nullptr};
+
+    DML_BINDING_DESC inputArrayBindingDesc = DML_BINDING_DESC{DML_BINDING_TYPE_NONE, nullptr};
+    execution_context->InitializeOperator(compiled_cast_operator.Get(), persistent_resource_bindingDesc, inputArrayBindingDesc);
+    command_list_state = BuildReusableCommandList(dml_device, compiled_cast_operator.Get(), persistent_resource.Get(), persistent_resource_binding);
+    command_list_state.previousOutput = p_out.get();
+  }
+
+  ComPtr<ID3D12Resource> source_resource;
+  Ort::ThrowOnError(ort_dml_api->GetD3D12ResourceFromAllocation(&allocator, in.GetTensorMutableData<uint8_t>(), &source_resource));
+
+  ComPtr<ID3D12Resource> target_resource;
+  Ort::ThrowOnError(ort_dml_api->GetD3D12ResourceFromAllocation(&allocator, p_out->GetTensorMutableData<uint8_t>(), &target_resource));
+
+  std::array<ID3D12Resource*, 1> input_resources = {source_resource.Get()};
+  std::array<uint64_t, 1> input_sizes = {element_count * sizeof(Ort::Float16_t)};
+
+  std::array<ID3D12Resource*, 1> output_resources = {target_resource.Get()};
+  ;
+  std::array<uint64_t, 1> output_sizes = {element_count * sizeof(float)};
+
+  ExecuteReusableCommandList(execution_context, command_list_state, allocator, ort_dml_api, input_resources, input_sizes, output_resources, output_sizes, rebind);
+}

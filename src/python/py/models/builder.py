@@ -46,7 +46,7 @@ class Model:
             "cuda": {
                 "enable_cuda_graph": enable_cuda_graph
             },  # "1" if the the model is able to enable cuda graph, "0" otherwise.
-            "dml": {},
+            "dml": {"disable_metacommands": True},
         }
 
         self.cache_dir = cache_dir

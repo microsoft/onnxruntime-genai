@@ -239,10 +239,10 @@ bool GreedySearch_Cpu::PadIfAlreadyEOS(size_t batch_id) {
 void GreedySearch_Cpu::SetNextToken(size_t batch_id, int32_t token) {
   next_tokens_[batch_id] = token;
   if (token == params_->eos_token_id) {
-    eos_seen_[batch_id] = true;
-    if (--not_done_count_ == 0) {
-      done_ = true;
-    }
+    // eos_seen_[batch_id] = true;
+    // if (--not_done_count_ == 0) {
+    //   done_ = true;
+    // }
   }
 }
 
