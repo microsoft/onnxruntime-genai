@@ -1,5 +1,6 @@
 #pragma once
 
+#include <list>
 #include <mutex>
 #include <unordered_map>
 #include "static_buffer.h"
