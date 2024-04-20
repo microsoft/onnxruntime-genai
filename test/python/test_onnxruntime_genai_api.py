@@ -10,15 +10,21 @@ import numpy as np
 import onnxruntime_genai as og
 import pytest
 
+devices = ["cpu"]
+
+if og.is_cuda_available():
+    devices.append("cuda")
+
+if og.is_dml_available():
+    devices.append("dml")
+
 # TODO: CUDA pipelines use python3.6 and do not have a way to download models since downloading models
 # requires pytorch and hf transformers. This test should be re-enabled once the pipeline is updated.
 @pytest.mark.skipif(
     sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8,
     reason="Python 3.8 is required for downloading models.",
 )
-@pytest.mark.parametrize(
-    "device", ["cpu", "cuda"] if og.is_cuda_available() else ["cpu"]
-)
+@pytest.mark.parametrize("device", devices)
 def test_batching(device, phi2_for):
     model = og.Model(phi2_for(device))
     tokenizer = og.Tokenizer(model)
@@ -32,6 +38,9 @@ def test_batching(device, phi2_for):
     params = og.GeneratorParams(model)
     params.set_search_options(max_length=20)  # To run faster
     params.input_ids = tokenizer.encode_batch(prompts)
+
+    if device == "dml":
+        params.try_use_cuda_graph_with_max_batch_size(len(prompts))
 
     output_sequences = model.generate(params)
     print(tokenizer.decode_batch(output_sequences))
