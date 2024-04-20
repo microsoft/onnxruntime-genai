@@ -5,7 +5,7 @@
 
 #include <d3d12.h>
 #include <deque>
-#include <span>
+#include "../span.h"
 #include "dml_gpu_event.h"
 
 // Manages a D3D12 command queue and provides a waitable fence which is signaled with a monotonically increasing

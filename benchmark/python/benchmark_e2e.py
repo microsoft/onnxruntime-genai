@@ -70,6 +70,9 @@ def main(args):
     params.input_ids = tokens
     params.set_search_options(do_sample=True, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length)
 
+    if args.use_graph_capture:
+        params.try_use_cuda_graph_with_max_batch_size(batch_size)
+
     if args.verbose: print("Running warmup runs...")
     for _ in tqdm(range(args.warmup)):
         generator = og.Generator(model, params)
@@ -100,6 +103,10 @@ def main(args):
         params = og.GeneratorParams(model)
         params.input_ids = tokens
         params.set_search_options(max_length=max_length, min_length=max_length)
+
+        if args.use_graph_capture:
+            params.try_use_cuda_graph_with_max_batch_size(batch_size)
+
         generator = og.Generator(model, params)
 
         # Measure prompt processing
@@ -199,5 +206,6 @@ if __name__ == "__main__":
     parser.add_argument('-o', '--output', type=str, default='genai_e2e', help='Output CSV file name or path (with .csv extension)')
     parser.add_argument('-v', '--verbose', action='store_true', help='Print extra information')
     parser.add_argument('-mo', '--print_model_output', action='store_true', help='Print model output')
+    parser.add_argument('-gc', '--use_graph_capture', action='store_true', help='Use the graph capture feature for CUDA or')
     args = parser.parse_args()
     main(args)

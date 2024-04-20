@@ -2,7 +2,7 @@
 
 #include <mutex>
 #include <unordered_map>
-#include <span>
+#include "../span.h"
 #include "onnxruntime_api.h"
 #include "static_buffer.h"
 

@@ -4,9 +4,9 @@
 #pragma once
 
 #include <memory>
-#include <span>
 #include <d3d12.h>
 #include <DirectML.h>
+#include "../span.h"
 #include "dml_command_allocator_ring.h"
 #include "dml_descriptor_pool.h"
 #include "dml_command_queue.h"

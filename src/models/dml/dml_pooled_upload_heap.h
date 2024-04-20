@@ -4,10 +4,10 @@
 #pragma once
 
 #include <list>
-#include <span>
 #include <vector>
 #include <optional>
 #include <memory>
+#include "../span.h"
 #include "dml_gpu_event.h"
 #include "dml_execution_context.h"
 
