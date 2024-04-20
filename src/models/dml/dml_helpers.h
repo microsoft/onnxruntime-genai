@@ -16,6 +16,7 @@ struct DmlReusedCommandListState {
   Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> heap;
   Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
   Microsoft::WRL::ComPtr<ID3D12Resource> persistent_resource;
+  OrtValue* previousInput = nullptr;
   OrtValue* previousOutput = nullptr;
 };
 

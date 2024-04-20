@@ -16,6 +16,7 @@ std::unique_ptr<State> Gpt_Model::CreateState(RoamingArray<int32_t> sequence_len
 Gpt_State::Gpt_State(const Gpt_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const GeneratorParams& params)
     : State{params},
       model_{model},
+      captured_graph_info_(model.GetCapturedGraphPool()->ReserveCapturedGraph(params.max_batch_size)),
       position_inputs_{model, *this, sequence_lengths_unk} {
   input_ids_.Add();
   position_inputs_.Add();
@@ -31,6 +32,16 @@ RoamingArray<float> Gpt_State::Run(int current_length, RoamingArray<int32_t> nex
   }
 
   State::Run(*model_.session_decoder_, *model_.run_options_);
+
+  // Set the graph id for the following runs.
+  if (model_.use_cuda_graph_) {
+    int new_batch_size = static_cast<int>(input_ids_.GetShape()[0]);
+    if (new_batch_size != current_batch_size_) {
+      current_batch_size_ = new_batch_size;
+      auto annotation_id = std::to_string(captured_graph_info_->GenerateUniqueAnnotationID(new_batch_size));
+      model_.run_options_->AddConfigEntry("gpu_graph_id", annotation_id.c_str());
+    }
+  }
   return logits_.Get();
 }
 

@@ -51,15 +51,14 @@ PositionInputs::PositionInputs(const Model& model, State& state, RoamingArray<in
   attention_mask_shape_ = shape;
 
   if (model_.use_cuda_graph_ && (model_.device_type_ == DeviceType::CUDA || model_.device_type_ == DeviceType::DML)) {
-    size_t max_beam_batch_size = static_cast<size_t>(model_.config_->search.num_beams) * model_.max_batch_size_;
     if (has_posid_input_) {
-      sb_position_ids_ = std::make_unique<StaticBuffer>(model_.allocator_device_, max_beam_batch_size);
+      sb_position_ids_ = state_.GetCapturedGraphInfo()->sb_position_ids_.get();
     }
     if (has_mask_input_) {
-      sb_attention_mask_ = std::make_unique<StaticBuffer>(model_.allocator_device_, max_beam_batch_size);
+      sb_attention_mask_ = state_.GetCapturedGraphInfo()->sb_attention_mask_.get();
 
 #if USE_DML
-      sb_attention_mask_next_ = std::make_unique<StaticBuffer>(model_.allocator_device_, max_beam_batch_size);
+      sb_attention_mask_next_ = state_.GetCapturedGraphInfo()->sb_attention_mask_next_.get();
 #endif
     }
   }

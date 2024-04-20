@@ -270,6 +270,7 @@ void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
 #endif
 
   session_info_ = std::make_unique<SessionInfo>(session);
+  captured_graph_pool_ = std::make_shared<CapturedGraphPool>(config_.get(), session_info_.get(), allocator_device_);
 }
 
 void Model::CreateSessionOptions() {

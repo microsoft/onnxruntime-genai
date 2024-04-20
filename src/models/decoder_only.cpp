@@ -16,6 +16,7 @@ std::unique_ptr<State> DecoderOnly_Model::CreateState(RoamingArray<int32_t> sequ
 DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const GeneratorParams& params)
     : State{params},
       model_{model},
+      captured_graph_info_(model.GetCapturedGraphPool()->ReserveCapturedGraph(params.max_batch_size)),
       position_inputs_{model, *this, sequence_lengths_unk} {
   input_ids_.Add();
   position_inputs_.Add();
@@ -37,10 +38,11 @@ RoamingArray<float> DecoderOnly_State::Run(int current_length, RoamingArray<int3
 
   // Set the graph id for the following runs.
   if (model_.use_cuda_graph_) {
-    int new_graph_annotation_id = GetGraphAnnotationId();
-    if (new_graph_annotation_id != graph_annotation_id_) {
-      graph_annotation_id_ = new_graph_annotation_id;
-      model_.run_options_->AddConfigEntry("gpu_graph_id", std::to_string(graph_annotation_id_).c_str());
+    int new_batch_size = static_cast<int>(input_ids_.GetShape()[0]);
+    if (new_batch_size != current_batch_size_) {
+      current_batch_size_ = new_batch_size;
+      auto annotation_id = std::to_string(captured_graph_info_->GenerateUniqueAnnotationID(new_batch_size));
+      model_.run_options_->AddConfigEntry("gpu_graph_id", annotation_id.c_str());
     }
   }
   return logits_.Get();
@@ -50,11 +52,6 @@ void DecoderOnly_State::UpdateInputs(const RoamingArray<int32_t>& next_tokens_un
   input_ids_.Update(next_tokens_unk);
   position_inputs_.Update(current_length);
   kv_cache_.Update(beam_indices.GetCPU(), current_length);
-}
-
-int DecoderOnly_State::GetGraphAnnotationId() const {
-  // Here we use the batch size as the graph annotation id.
-  return static_cast<int>(input_ids_.GetShape()[0]);
 }
 
 }  // namespace Generators

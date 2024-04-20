@@ -16,12 +16,11 @@ Logits::Logits(const Model& model, State& state)
     value16_ = std::move(logits_tensor);
 
   if (model_.use_cuda_graph_ && (model_.device_type_ == DeviceType::CUDA || model_.device_type_ == DeviceType::DML)) {
-    size_t max_beam_batch_size = static_cast<size_t>(model_.config_->search.num_beams) * model_.max_batch_size_;
     if (type_ == Ort::TypeToTensorType<float>::type) {
-      sb_logits32_ = std::make_unique<StaticBuffer>(model_.allocator_device_, max_beam_batch_size);
+      sb_logits32_ = state_.GetCapturedGraphInfo()->sb_logits32_.get();
     }
     if (type_ == Ort::TypeToTensorType<Ort::Float16_t>::type) {
-      sb_logits16_ = std::make_unique<StaticBuffer>(model_.allocator_device_, max_beam_batch_size);
+      sb_logits16_ = state_.GetCapturedGraphInfo()->sb_logits16_.get();
     }
   }
 }

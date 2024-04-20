@@ -52,7 +52,7 @@ struct KV_Cache {
   std::vector<std::unique_ptr<OrtValue>> pasts_, presents_;
   std::vector<std::string> input_name_strings_, output_name_strings_;
 
-  std::vector<std::unique_ptr<StaticBuffer>> sb_kv_caches_;
+  std::vector<StaticBuffer*> sb_kv_caches_;
 };
 
 // Very similar to the KV_Cache, but is only created once at the encoder step, then used without modification for every decoder step

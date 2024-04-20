@@ -138,6 +138,25 @@ void ExecuteReusableCommandList(
   execution_context->ExecuteCommandList(command_list_state.graphics_command_list.Get(), fence.GetAddressOf(), &completion_value);
 }
 
+static uint64_t DataTypeSizeInBytes(DML_TENSOR_DATA_TYPE dml_data_type)
+{
+  switch (dml_data_type) {
+    case DML_TENSOR_DATA_TYPE_FLOAT16: return sizeof(Ort::Float16_t);
+      case DML_TENSOR_DATA_TYPE_FLOAT32: return sizeof(float);
+    case DML_TENSOR_DATA_TYPE_FLOAT64: return sizeof(double);
+    case DML_TENSOR_DATA_TYPE_UINT8: return sizeof(uint8_t);
+    case DML_TENSOR_DATA_TYPE_UINT16: return sizeof(uint16_t);
+    case DML_TENSOR_DATA_TYPE_UINT32: return sizeof(uint32_t);
+    case DML_TENSOR_DATA_TYPE_UINT64: return sizeof(uint64_t);
+    case DML_TENSOR_DATA_TYPE_INT8: return sizeof(int8_t);
+    case DML_TENSOR_DATA_TYPE_INT16: return sizeof(int16_t);
+    case DML_TENSOR_DATA_TYPE_INT32: return sizeof(int32_t);
+    case DML_TENSOR_DATA_TYPE_INT64: return sizeof(int64_t);
+    default:
+      THROW_HR(E_NOTIMPL);
+  }
+}
+
 ComPtr<IDMLCompiledOperator> CreateCastOperator(
     IDMLDevice* dml_device,
     uint32_t num_elements,
@@ -148,18 +167,7 @@ ComPtr<IDMLCompiledOperator> CreateCastOperator(
   input_buffer_desc.Sizes = &num_elements;
   input_buffer_desc.DimensionCount = 1;
   input_buffer_desc.DataType = source_data_type;
-
-  switch (source_data_type) {
-    case DML_TENSOR_DATA_TYPE_FLOAT16:
-      input_buffer_desc.TotalTensorSizeInBytes = num_elements * sizeof(Ort::Float16_t);
-      break;
-    case DML_TENSOR_DATA_TYPE_FLOAT32:
-      input_buffer_desc.TotalTensorSizeInBytes = num_elements * sizeof(float);
-      break;
-    default:
-      THROW_HR(E_NOTIMPL);
-  }
-
+  input_buffer_desc.TotalTensorSizeInBytes = num_elements * DataTypeSizeInBytes(source_data_type);
   DML_TENSOR_DESC input_tensor_desc = {DML_TENSOR_TYPE_BUFFER, &input_buffer_desc};
 
   // Create the output tensor desc
@@ -167,18 +175,7 @@ ComPtr<IDMLCompiledOperator> CreateCastOperator(
   output_buffer_desc.Sizes = &num_elements;
   output_buffer_desc.DimensionCount = 1;
   output_buffer_desc.DataType = target_data_type;
-
-  switch (target_data_type) {
-    case DML_TENSOR_DATA_TYPE_FLOAT16:
-      output_buffer_desc.TotalTensorSizeInBytes = num_elements * sizeof(Ort::Float16_t);
-      break;
-    case DML_TENSOR_DATA_TYPE_FLOAT32:
-      output_buffer_desc.TotalTensorSizeInBytes = num_elements * sizeof(float);
-      break;
-    default:
-      THROW_HR(E_NOTIMPL);
-  }
-
+  output_buffer_desc.TotalTensorSizeInBytes = num_elements * DataTypeSizeInBytes(target_data_type);
   DML_TENSOR_DESC output_tensor_desc = {DML_TENSOR_TYPE_BUFFER, &output_buffer_desc};
 
   DML_CAST_OPERATOR_DESC cast_op_desc{};
@@ -264,7 +261,6 @@ void DmlCastInputToOutput(
     DmlReusedCommandListState& command_list_state) {
   auto shape_info = in.GetTensorTypeAndShapeInfo();
   auto shape = shape_info->GetShape();
-  assert(shape_info->GetElementType() == Ort::TypeToTensorType<Ort::Float16_t>::type);
 
   bool allocate_p_out = p_out == nullptr;
   if (p_out) {
@@ -278,14 +274,14 @@ void DmlCastInputToOutput(
   }
 
   int element_count = static_cast<int>(shape_info->GetElementCount());
+  auto dml_from_type = DmlHelpers::OrtToDmlDataType(in.GetTensorTypeAndShapeInfo()->GetElementType());
+  auto dml_to_type = DmlHelpers::OrtToDmlDataType(p_out->GetTensorTypeAndShapeInfo()->GetElementType());
 
   bool rebind = command_list_state.previousOutput != p_out.get();
 
   // If the sizes change, we need to recompile the operator and rebuild the command lists. It should only happen
   // once after the very first iteration.
   if (rebind) {
-    auto dml_from_type = DmlHelpers::OrtToDmlDataType(in.GetTensorTypeAndShapeInfo()->GetElementType());
-    auto dml_to_type = DmlHelpers::OrtToDmlDataType(p_out->GetTensorTypeAndShapeInfo()->GetElementType());
     auto compiled_cast_operator = DmlHelpers::CreateCastOperator(dml_device, element_count, dml_from_type, dml_to_type);
 
     ComPtr<ID3D12Resource> persistent_resource;
@@ -317,11 +313,10 @@ void DmlCastInputToOutput(
   Ort::ThrowOnError(ort_dml_api->GetD3D12ResourceFromAllocation(&allocator, p_out->GetTensorMutableData<uint8_t>(), &target_resource));
 
   std::array<ID3D12Resource*, 1> input_resources = {source_resource.Get()};
-  std::array<uint64_t, 1> input_sizes = {element_count * sizeof(Ort::Float16_t)};
+  std::array<uint64_t, 1> input_sizes = {element_count * DataTypeSizeInBytes(dml_from_type)};
 
   std::array<ID3D12Resource*, 1> output_resources = {target_resource.Get()};
-  ;
-  std::array<uint64_t, 1> output_sizes = {element_count * sizeof(float)};
+  std::array<uint64_t, 1> output_sizes = {element_count * DataTypeSizeInBytes(dml_to_type)};
 
   DmlHelpers::ExecuteReusableCommandList(execution_context, command_list_state, allocator, ort_dml_api, input_resources, input_sizes, output_resources, output_sizes, rebind);
 }
