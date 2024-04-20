@@ -1,3 +1,4 @@
+#include "onnxruntime_c_api.h"
 #include "captured_graph_pool.h"
 #include "../generators.h"
 #include "model.h"

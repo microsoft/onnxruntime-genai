@@ -12,7 +12,12 @@
 #include "dml_command_queue.h"
 #include "dml_descriptor_pool.h"
 #include "dml_provider_factory.h"
-#include "../onnxruntime_api.h"
+
+struct OrtDmlApi;
+
+namespace Ort {
+struct Allocator;
+}
 
 class DmlCommandRecorder {
  public:
