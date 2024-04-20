@@ -24,7 +24,7 @@ struct State {
   virtual ~State() = default;
 
   virtual RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices = {}) = 0;
-  virtual const CapturedGraphInfo* GetCapturedGraphInfo() const = 0;
+  virtual const CapturedGraphInfo* GetCapturedGraphInfo() const { return nullptr; }
 
   std::shared_ptr<const GeneratorParams> params_;
 

@@ -51,7 +51,6 @@ struct KV_Cache {
   std::unique_ptr<OrtValue> empty_past_;
   std::vector<std::unique_ptr<OrtValue>> pasts_, presents_;
   std::vector<std::string> input_name_strings_, output_name_strings_;
-
   std::vector<StaticBuffer*> sb_kv_caches_;
 };
 

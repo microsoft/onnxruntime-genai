@@ -149,7 +149,7 @@ KV_Cache::KV_Cache(const Model& model, State& state)
   else
     shape_[2] = state_.params_->sequence_length;
 
-  if (model_.use_cuda_graph_ && (model_.device_type_ == DeviceType::CUDA || model_.device_type_ == DeviceType::DML)) {
+  if (state_.GetCapturedGraphInfo()) {
     assert(past_present_share_buffer_);
     sb_kv_caches_.reserve(layer_count_ * 2);
     for (int i = 0; i < layer_count_ * 2; ++i) {

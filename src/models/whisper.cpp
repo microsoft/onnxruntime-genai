@@ -17,8 +17,7 @@ std::unique_ptr<State> Whisper_Model::CreateState(RoamingArray<int32_t> sequence
 
 Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const GeneratorParams& params)
     : State{params},
-      model_{model},
-      captured_graph_info_(model.GetCapturedGraphPool()->ReserveCapturedGraph(params.max_batch_size)) {
+      model_{model} {
   auto& inputs = const_cast<GeneratorParams::Whisper&>(std::get<GeneratorParams::Whisper>(params.inputs));
 
   auto encoder_input_ids = model_.ExpandInputs(inputs.input_features, params_->search.num_beams);
@@ -58,17 +57,6 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
     UpdateInputs(next_tokens, next_indices, current_length);
     State::Run(*model_.session_decoder_, *model_.run_options_);
   }
-
-  // Set the graph id for the following runs.
-  if (model_.use_cuda_graph_) {
-    int new_batch_size = static_cast<int>(decoder_input_ids_.GetShape()[0]);
-    if (new_batch_size != current_batch_size_) {
-      current_batch_size_ = new_batch_size;
-      auto annotation_id = std::to_string(captured_graph_info_->GenerateUniqueAnnotationID(new_batch_size));
-      model_.run_options_->AddConfigEntry("gpu_graph_id", annotation_id.c_str());
-    }
-  }
-
   return logits_.Get();
 }
 

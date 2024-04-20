@@ -16,7 +16,7 @@ std::unique_ptr<State> DecoderOnly_Model::CreateState(RoamingArray<int32_t> sequ
 DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const GeneratorParams& params)
     : State{params},
       model_{model},
-      captured_graph_info_(model.GetCapturedGraphPool()->ReserveCapturedGraph(params.max_batch_size)),
+      captured_graph_info_(model.GetCapturedGraphPool()->ReserveCapturedGraph(model, params.max_batch_size)),
       position_inputs_{model, *this, sequence_lengths_unk} {
   input_ids_.Add();
   position_inputs_.Add();

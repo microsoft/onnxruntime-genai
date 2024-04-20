@@ -28,7 +28,7 @@ InputIDs::InputIDs(const Model& model, State& state)
   value_ = model_.ExpandInputs(value_, state_.params_->search.num_beams);
   shape_[0] *= state_.params_->search.num_beams;
 
-  if (model_.use_cuda_graph_ && (model_.device_type_ == DeviceType::CUDA || model_.device_type_ == DeviceType::DML)) {
+  if (state_.GetCapturedGraphInfo()) {
     sb_input_ids_ = state_.GetCapturedGraphInfo()->sb_input_ids_.get();
 
 #if USE_DML

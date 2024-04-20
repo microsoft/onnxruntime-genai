@@ -50,7 +50,7 @@ PositionInputs::PositionInputs(const Model& model, State& state, RoamingArray<in
   position_ids_shape_ = shape;
   attention_mask_shape_ = shape;
 
-  if (model_.use_cuda_graph_ && (model_.device_type_ == DeviceType::CUDA || model_.device_type_ == DeviceType::DML)) {
+  if (state_.GetCapturedGraphInfo()) {
     if (has_posid_input_) {
       sb_position_ids_ = state_.GetCapturedGraphInfo()->sb_position_ids_.get();
     }

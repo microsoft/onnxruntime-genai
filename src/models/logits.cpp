@@ -15,7 +15,7 @@ Logits::Logits(const Model& model, State& state)
   else
     value16_ = std::move(logits_tensor);
 
-  if (model_.use_cuda_graph_ && (model_.device_type_ == DeviceType::CUDA || model_.device_type_ == DeviceType::DML)) {
+  if (state_.GetCapturedGraphInfo()) {
     if (type_ == Ort::TypeToTensorType<float>::type) {
       sb_logits32_ = state_.GetCapturedGraphInfo()->sb_logits32_.get();
     }

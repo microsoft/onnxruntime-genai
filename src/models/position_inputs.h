@@ -51,15 +51,15 @@ struct PositionInputs {
   std::vector<int32_t> initial_sequence_lengths_;
 
   // Used for decoding runs with cuda graphs.
-  StaticBuffer* sb_position_ids_;
-  StaticBuffer* sb_attention_mask_;
+  StaticBuffer* sb_position_ids_ = nullptr;
+  StaticBuffer* sb_attention_mask_ = nullptr;
 
   bool is_first_posid_update_{true};
   bool is_first_mask_update_{true};
 
 #ifdef USE_DML
   std::optional<DmlUpdateMaskKernel> dml_update_mask_kernel_;
-  StaticBuffer* sb_attention_mask_next_;
+  StaticBuffer* sb_attention_mask_next_ = nullptr;
   std::optional<DmlIncrementValuesKernel> dml_update_position_ids_kernel_;
   bool is_second_mask_update_{false};
 #endif

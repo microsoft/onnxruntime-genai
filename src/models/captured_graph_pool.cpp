@@ -19,7 +19,11 @@ void CapturedGraphInfoRecycler::operator()(CapturedGraphInfo* captured_graph_inf
   }
 }
 
-CapturedGraphInfoPtr CapturedGraphPool::ReserveCapturedGraph(int max_batch_size) const {
+CapturedGraphInfoPtr CapturedGraphPool::ReserveCapturedGraph(const Model& model, int max_batch_size) const {
+  if (model.use_cuda_graph_ && (model.device_type_ == DeviceType::CUDA || model.device_type_ == DeviceType::DML)) {
+    return nullptr;
+  }
+
   // Multiple generators can reserve graphs in parallel, so we need to make it thread saf
   std::unique_lock lock(captured_graph_mutex_);
 

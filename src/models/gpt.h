@@ -18,15 +18,12 @@ struct Gpt_Model : Model {
 struct Gpt_State : State {
   Gpt_State(const Gpt_Model& model, RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params);
   RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) override;
-  const CapturedGraphInfo* GetCapturedGraphInfo() const override { return captured_graph_info_.get(); };
 
  private:
   void UpdateInputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> beam_indices, int current_length);
 
   const Gpt_Model& model_;
-  CapturedGraphInfoPtr captured_graph_info_;
   bool first_run_{true};
-  int current_batch_size_{0};
 
   InputIDs input_ids_{model_, *this};
   Logits logits_{model_, *this};

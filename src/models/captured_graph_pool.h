@@ -9,6 +9,7 @@ namespace Generators {
 struct CapturedGraphInfo;
 struct Config;
 struct SessionInfo;
+struct Model;
 
 struct CapturedGraphInfoRecycler {
   void operator()(CapturedGraphInfo* captured_graph_info);
@@ -24,7 +25,7 @@ class CapturedGraphPool : public std::enable_shared_from_this<CapturedGraphPool>
         allocator_device_(allocator_device){};
 
   void AddCapturedGraph(CapturedGraphInfoPtr&& captured_graph) const;
-  CapturedGraphInfoPtr ReserveCapturedGraph(int max_batch_size) const;
+  CapturedGraphInfoPtr ReserveCapturedGraph(const Model& model, int max_batch_size) const;
 
  private:
   // Map from batch_size to a list of captured graphs
