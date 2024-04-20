@@ -20,7 +20,7 @@ void CapturedGraphInfoRecycler::operator()(CapturedGraphInfo* captured_graph_inf
 }
 
 CapturedGraphInfoPtr CapturedGraphPool::ReserveCapturedGraph(const Model& model, int max_batch_size) const {
-  if (model.use_cuda_graph_ && (model.device_type_ == DeviceType::CUDA || model.device_type_ == DeviceType::DML)) {
+  if (!model.use_cuda_graph_ || (model.device_type_ != DeviceType::CUDA && model.device_type_ != DeviceType::DML)) {
     return nullptr;
   }
 
