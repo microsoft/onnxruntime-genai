@@ -46,7 +46,9 @@ void InputIDs::Update(RoamingArray<int32_t> next_tokens_unk) {
   if (shape_[1] != 1) {
     shape_[1] = 1;
     if (!sb_input_ids_) {
-      value_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
+      // DML doesn't support on-device updates of input ids yet, so fall back to the CPU
+      auto& allocator = model_.device_type_ == DeviceType::DML ? model_.allocator_cpu_ : *model_.allocator_device_;
+      value_ = OrtValue::CreateTensor(allocator, shape_, type_);
     } else {
       value_ = sb_input_ids_->CreateTensorOnStaticBuffer(shape_, type_);
     }

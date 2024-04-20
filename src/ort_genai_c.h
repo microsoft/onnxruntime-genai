@@ -48,6 +48,12 @@ typedef struct OgaTokenizerStream OgaTokenizerStream;
 OGA_EXPORT const char* OGA_API_CALL OgaResultGetError(const OgaResult* result);
 
 /*
+ * \param[in] Set logging options, see logging.h 'struct LogItems' for the list of available options
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaSetLogBool(const char* name, bool value);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaSetLogString(const char* name, const char* value);
+
+/*
  * \param[in] result OgaResult to be destroyed.
  */
 OGA_EXPORT void OGA_API_CALL OgaDestroyResult(OgaResult*);

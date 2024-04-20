@@ -94,7 +94,7 @@ struct PyGeneratorParams {
     }
   }
 
-  void SetSearchOptions(const pybind11::dict& dict) {
+  void SetSearchOptions(const pybind11::kwargs& dict) {
     for (auto& entry : dict) {
       auto name = entry.first.cast<std::string>();
       try {
@@ -158,6 +158,22 @@ struct PyGenerator {
   PyRoamingArray<int32_t> py_sequencelengths_;
 };
 
+void SetLogOptions(const pybind11::kwargs& dict) {
+  for (auto& entry : dict) {
+    auto name = entry.first.cast<std::string>();
+    try {
+      if (pybind11::isinstance<pybind11::bool_>(entry.second)) {
+        SetLogBool(name, entry.second.cast<bool>());
+      } else if (pybind11::isinstance<pybind11::str>(entry.second)) {
+        SetLogString(name, entry.second.cast<std::string>());
+      } else
+        throw std::runtime_error("Unknown log option type, can be bool/string:" + name);
+    } catch (JSON::unknown_value_error& e) {
+      throw std::runtime_error("Unknown log option:" + name);
+    }
+  }
+}
+
 PYBIND11_MODULE(onnxruntime_genai, m) {
   m.doc() = R"pbdoc(
         Ort Generators library
@@ -184,7 +200,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_readwrite("input_ids", &PyGeneratorParams::py_input_ids_)
       .def_readwrite("whisper_input_features", &PyGeneratorParams::py_whisper_input_features_)
       .def_readwrite("whisper_decoder_input_ids", &PyGeneratorParams::py_whisper_decoder_input_ids_)
-      .def("set_search_options", &PyGeneratorParams::SetSearchOptions)
+      .def("set_search_options", &PyGeneratorParams::SetSearchOptions)  // See config.h 'struct Search' for the options
       .def("try_use_cuda_graph_with_max_batch_size", &PyGeneratorParams::TryUseCudaGraphWithMaxBatchSize);
 
   // We need to init the OrtApi before we can use it
@@ -227,6 +243,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("generate_next_token", &PyGenerator::GenerateNextToken)
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
       .def("get_sequence", &PyGenerator::GetSequence);
+
+  m.def("set_log_options", &SetLogOptions);
 
   m.def("is_cuda_available", []() {
 #ifdef USE_CUDA

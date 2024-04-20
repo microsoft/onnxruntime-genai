@@ -60,6 +60,11 @@ void Sequences::AppendNextTokenToSequences(std::span<const int32_t> batch_beam_i
 }
 
 void Sequences::AppendNextTokenToSequences(std::span<const int32_t> next_tokens) {
+  if (g_log.enabled && g_log.append_next_tokens) {
+    auto& stream = Log("append_next_tokens");
+    DumpSpan(stream, next_tokens);
+    stream << std::endl;
+  }
   // Append next token to each sequence.
   for (int i = 0; i < batch_beam_size_; i++) {
     sequences_[i * max_length_ + current_length_] = next_tokens[i];

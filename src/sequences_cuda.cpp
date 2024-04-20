@@ -47,6 +47,12 @@ int Sequences_Cuda::GetSequenceLength() const {
 }
 
 void Sequences_Cuda::AppendNextTokenToSequences(std::span<const int32_t> next_tokens) {
+  if (g_log.enabled && g_log.append_next_tokens) {
+    auto& stream = Log("append_next_tokens");
+    DumpCudaSpan(stream, next_tokens);
+    stream << std::endl;
+  }
+
   cuda::Launch_AppendNextTokenToSequences(next_tokens, sequences_, batch_beam_size_, current_length_, max_length_, stream_);
   ++current_length_;
 }
