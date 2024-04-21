@@ -5,6 +5,10 @@
 #include <memory>
 #include "span.h"
 
+#if USE_DML
+#include "models/dml/dml_readback_heap.h"
+#endif
+
 namespace Generators {
 
 template <typename... T>
@@ -194,6 +198,69 @@ struct RoamingArray {
   gpu_span<T> device_;
   cuda_unique_ptr<T> device_owner_;
 };
+#elif USE_DML
+
+template <typename T>
+struct RoamingArray {
+  RoamingArray() = default;
+  RoamingArray(const RoamingArray& v) { Assign(v); }
+
+  RoamingArray(DmlReadbackHeap* readback_heap, ID3D12Resource* gpu_resource, size_t element_count)
+      : readback_heap_(readback_heap),
+        gpu_resource_(gpu_resource),
+        element_count_(element_count) {
+  }
+
+  RoamingArray(cpu_span<T> v) {
+    SetCPU(v);
+  }
+
+  bool empty() const { return cpu_data_.empty() && !gpu_resource_; }
+
+  operator cpu_span<T>() { return GetCPU(); }
+
+  void SetCPU(cpu_span<T> cpu_data) {
+    cpu_data_ = cpu_data;
+  }
+
+  void SetGPU(ID3D12Resource* gpu_resource) {
+    gpu_resource_ = gpu_resource;
+  }
+
+  cpu_span<T> GetCPU() {
+    if (cpu_data_.empty() && gpu_resource_) {
+      owned_cpu_data_.resize(element_count_);
+
+      readback_heap_->ReadbackFromGpu(
+          std::span(reinterpret_cast<uint8_t*>(owned_cpu_data_.data()), element_count_ * sizeof(T)),
+          gpu_resource_.Get(),
+          0,
+          D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+      cpu_data_ = cpu_span<T>{owned_cpu_data_.data(), element_count_};
+    }
+
+    return cpu_data_;
+  }
+
+  ComPtr<ID3D12Resource> GetGPU() {
+    return gpu_resource_;
+  }
+
+  void Assign(const RoamingArray<T>& v) {
+    cpu_data_ = v.cpu_data_;
+    gpu_resource_ = v.gpu_resource_;
+    readback_heap_ = v.readback_heap_;
+    element_count_ = v.element_count_;
+  }
+
+  std::vector<T> owned_cpu_data_;
+  cpu_span<T> cpu_data_;
+  DmlReadbackHeap* readback_heap_;
+  ComPtr<ID3D12Resource> gpu_resource_;
+  size_t element_count_;
+};
+
 #else
 // A roaming array is one that can be in CPU or GPU memory, and will copy the memory as needed to be used from anywhere
 template <typename T>

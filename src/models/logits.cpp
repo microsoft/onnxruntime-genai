@@ -58,11 +58,6 @@ RoamingArray<float> Logits::Get() {
     auto value_next = !sb_logits32_ ? OrtValue::CreateTensor<float>(*model_.allocator_device_, shape_)
                                     : sb_logits32_->CreateTensorOnStaticBuffer(shape_, type_);
 
-#if USE_DML
-    // DML doesn't support on-device scoring yet, so we need to download some data to the CPU
-    value32_cpu_ = OrtValue::CreateTensor<float>(model_.allocator_cpu_, shape_);
-#endif
-
     size_t vocab_index = 0;  // Simpler math to have this index go up by vocab_size for every logit chunk we process
 
     const auto* input_ids = state_.params_->input_ids.data();
@@ -136,21 +131,11 @@ RoamingArray<float> Logits::Get() {
   if (model_.device_type_ == DeviceType::CUDA)
     return gpu_span<float>{value32_->GetTensorMutableData<float>(), element_count};
 #elif USE_DML
-  auto cpu_tensor = value32_cpu_->GetTensorMutableData<float>();
   if (model_.device_type_ == DeviceType::DML) {
-    // DML doesn't support on-device scoring yet, so we transfer the data to the CPU
     ComPtr<ID3D12Resource> gpu_resource;
     Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, value32_->GetTensorMutableRawData(), &gpu_resource));
-
     size_t new_element_count = shape_[0] * shape_[1] * shape_[2];
-
-    model_.GetDmlReadbackHeap()->ReadbackFromGpu(
-        std::span(reinterpret_cast<uint8_t*>(cpu_tensor), new_element_count * sizeof(float)),
-        gpu_resource.Get(),
-        0,
-        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-
-    return cpu_span<float>{cpu_tensor, new_element_count};
+    return RoamingArray<float>(model_.GetDmlReadbackHeap(), gpu_resource.Get(), new_element_count);
   }
 #endif
 

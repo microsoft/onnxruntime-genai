@@ -8,6 +8,13 @@
 
 using Microsoft::WRL::ComPtr;
 
+struct DmlReusedReadbackState {
+    Microsoft::WRL::ComPtr<ID3D12Resource> gpu_resource;
+    Microsoft::WRL::ComPtr<ID3D12Resource> readback_heap;
+    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> graphics_command_list;
+    Microsoft::WRL::ComPtr<ID3D12CommandAllocator> command_allocator;
+};
+
 struct DmlReusedCommandListState {
   // Re-usable command list, supporting descriptor heap, and DML binding table to update that heap.
   Microsoft::WRL::ComPtr<IDMLCompiledOperator> compiled_operator;
@@ -54,12 +61,19 @@ ComPtr<IDMLCompiledOperator> CreateCastOperator(
     DML_TENSOR_DATA_TYPE source_data_type,
     DML_TENSOR_DATA_TYPE target_data_type);
 
+ComPtr<IDMLCompiledOperator> CreateArgMaxOperator(
+    IDMLDevice* dml_device,
+    uint32_t batch_size,
+    uint32_t vocab_size,
+    DML_TENSOR_DATA_TYPE data_type);
+
 void GetNextDispatchSize(
     uint32_t element_count,
     uint32_t num_threads,
     uint32_t& dispatch,
     uint32_t& pending_element_count);
 
+uint64_t DataTypeSizeInBytes(DML_TENSOR_DATA_TYPE dml_data_type);
 DML_TENSOR_DATA_TYPE OrtToDmlDataType(ONNXTensorElementDataType ort_dtype);
 
 void DmlCastInputToOutput(

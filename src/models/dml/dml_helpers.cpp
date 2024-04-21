@@ -138,7 +138,7 @@ void ExecuteReusableCommandList(
   execution_context->ExecuteCommandList(command_list_state.graphics_command_list.Get(), fence.GetAddressOf(), &completion_value);
 }
 
-static uint64_t DataTypeSizeInBytes(DML_TENSOR_DATA_TYPE dml_data_type) {
+uint64_t DataTypeSizeInBytes(DML_TENSOR_DATA_TYPE dml_data_type) {
   switch (dml_data_type) {
     case DML_TENSOR_DATA_TYPE_FLOAT16:
       return sizeof(Ort::Float16_t);
@@ -200,6 +200,48 @@ ComPtr<IDMLCompiledOperator> CreateCastOperator(
   THROW_IF_FAILED(dml_device->CompileOperator(cast_op.Get(), DML_EXECUTION_FLAG_DESCRIPTORS_VOLATILE, IID_PPV_ARGS(&compiled_cast_op)));
 
   return compiled_cast_op;
+}
+
+ComPtr<IDMLCompiledOperator> CreateArgMaxOperator(
+    IDMLDevice* dml_device,
+    uint32_t batch_size,
+    uint32_t vocab_size,
+    DML_TENSOR_DATA_TYPE data_type) {
+  std::array<uint32_t, 2> input_sizes = {batch_size, vocab_size};
+  std::array<uint32_t, 2> output_sizes = {batch_size, 1};
+  std::array<uint32_t, 1> axes = {1};
+
+  // Create the input tensor desc
+  DML_BUFFER_TENSOR_DESC input_buffer_desc{};
+  input_buffer_desc.Sizes = input_sizes.data();
+  input_buffer_desc.DimensionCount = input_sizes.size();
+  input_buffer_desc.DataType = data_type;
+  input_buffer_desc.TotalTensorSizeInBytes = batch_size * vocab_size * DataTypeSizeInBytes(data_type);
+  DML_TENSOR_DESC input_tensor_desc = {DML_TENSOR_TYPE_BUFFER, &input_buffer_desc};
+
+  // Create the output tensor desc
+  DML_BUFFER_TENSOR_DESC output_buffer_desc{};
+  output_buffer_desc.Sizes = output_sizes.data();
+  output_buffer_desc.DimensionCount = output_sizes.size();
+  output_buffer_desc.DataType = data_type;
+  output_buffer_desc.TotalTensorSizeInBytes = batch_size * DataTypeSizeInBytes(data_type);
+  DML_TENSOR_DESC output_tensor_desc = {DML_TENSOR_TYPE_BUFFER, &output_buffer_desc};
+
+  DML_ARGMAX_OPERATOR_DESC argmax_op_desc{};
+  argmax_op_desc.InputTensor = &input_tensor_desc;
+  argmax_op_desc.OutputTensor = &output_tensor_desc;
+  argmax_op_desc.AxisCount = axes.size();
+  argmax_op_desc.Axes = axes.data();
+  argmax_op_desc.AxisDirection = DML_AXIS_DIRECTION_INCREASING;
+  DML_OPERATOR_DESC argmax_op_dml_desc = {DML_OPERATOR_ARGMAX, &argmax_op_desc};
+
+  ComPtr<IDMLOperator> argmax_op;
+  THROW_IF_FAILED(dml_device->CreateOperator(&argmax_op_dml_desc, IID_PPV_ARGS(&argmax_op)));
+
+  ComPtr<IDMLCompiledOperator> compiled_argmax_op;
+  THROW_IF_FAILED(dml_device->CompileOperator(argmax_op.Get(), DML_EXECUTION_FLAG_DESCRIPTORS_VOLATILE, IID_PPV_ARGS(&compiled_argmax_op)));
+
+  return compiled_argmax_op;
 }
 
 void GetNextDispatchSize(
