@@ -13,14 +13,17 @@ import argparse
 from tqdm import tqdm
 
 # Use input model to generate prompt
-def generate_prompt(model, tokenizer, prompt_length) -> str:
+def generate_prompt(model, tokenizer, prompt_length, use_graph_capture) -> str:
     temperature = 1.0
     prompt = "What is the lightest"
     tokens = tokenizer.encode(prompt)
     params=og.GeneratorParams(model)
     params.set_search_options(do_sample=True, top_k=5, temperature=temperature, max_length=prompt_length, min_length=prompt_length+1)
     params.input_ids = tokens
-    params.try_use_cuda_graph_with_max_batch_size(1)
+
+    if use_graph_capture:
+        params.try_use_cuda_graph_with_max_batch_size(1)
+
     generator=og.Generator(model, params)
     while not generator.is_done():
         generator.compute_logits()
@@ -64,7 +67,7 @@ def main(args):
     tokenizer = og.Tokenizer(model)
 
     # Generate prompt
-    prompt = [generate_prompt(model, tokenizer, prompt_length)] * batch_size
+    prompt = [generate_prompt(model, tokenizer, prompt_length, args.use_graph_capture)] * batch_size
     tokens = tokenizer.encode_batch(prompt)
 
     params = og.GeneratorParams(model)
