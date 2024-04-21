@@ -128,8 +128,8 @@ DmlUpdateMaskKernel::DmlUpdateMaskKernel(
   // Barrier before doing the copy
   std::array<D3D12_RESOURCE_BARRIER, 3> before_copy_barriers = {
       CD3DX12_RESOURCE_BARRIER::UAV(attention_mask_next_resource_.Get()),
-      CD3DX12_RESOURCE_BARRIER::Transition(attention_mask_resource_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE),
-      CD3DX12_RESOURCE_BARRIER::Transition(attention_mask_next_resource_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST),
+      CD3DX12_RESOURCE_BARRIER::Transition(attention_mask_resource_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST),
+      CD3DX12_RESOURCE_BARRIER::Transition(attention_mask_next_resource_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE),
   };
   graphics_command_list_->ResourceBarrier(static_cast<uint32_t>(before_copy_barriers.size()), before_copy_barriers.data());
 
@@ -144,8 +144,8 @@ DmlUpdateMaskKernel::DmlUpdateMaskKernel(
 
   // Barrier after doing the copy
   std::array<D3D12_RESOURCE_BARRIER, 2> after_copy_barriers = {
-      CD3DX12_RESOURCE_BARRIER::Transition(attention_mask_resource_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
-      CD3DX12_RESOURCE_BARRIER::Transition(attention_mask_next_resource_.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
+      CD3DX12_RESOURCE_BARRIER::Transition(attention_mask_resource_.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
+      CD3DX12_RESOURCE_BARRIER::Transition(attention_mask_next_resource_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
   };
   graphics_command_list_->ResourceBarrier(static_cast<uint32_t>(after_copy_barriers.size()), after_copy_barriers.data());
 
