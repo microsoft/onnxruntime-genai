@@ -1,8 +1,5 @@
 ﻿import onnxruntime_genai as og
 import argparse
-import time
-import os
-input(os.getpid())
 
 def main(args):
     if args.verbose: print("Loading model...")
