@@ -19,7 +19,11 @@ void CapturedGraphInfoRecycler::operator()(CapturedGraphInfo* captured_graph_inf
   }
 }
 
-CapturedGraphInfoPtr CapturedGraphPool::ReserveCapturedGraph(const Model& model, int max_batch_size) const {
+static std::tuple<int, int, int> MakeKey(int max_batch_size, int max_length, int num_beams) {
+  return std::make_tuple(max_batch_size, max_length, num_beams);
+}
+
+CapturedGraphInfoPtr CapturedGraphPool::ReserveCapturedGraph(const Model& model, const GeneratorParams& params) const {
   if (!model.use_cuda_graph_ || (model.device_type_ != DeviceType::CUDA && model.device_type_ != DeviceType::DML)) {
     return nullptr;
   }
@@ -27,7 +31,8 @@ CapturedGraphInfoPtr CapturedGraphPool::ReserveCapturedGraph(const Model& model,
   // Multiple generators can reserve graphs in parallel, so we need to make it thread saf
   std::unique_lock lock(captured_graph_mutex_);
 
-  auto& captured_graphs = captured_graphs_map_[max_batch_size];
+  auto key = MakeKey(params.max_batch_size, params.search.max_length, params.search.num_beams);
+  auto& captured_graphs = captured_graphs_map_[key];
 
   // If no graphs are available, create a graph with a new ID
   if (captured_graphs.empty()) {
@@ -39,11 +44,13 @@ CapturedGraphInfoPtr CapturedGraphPool::ReserveCapturedGraph(const Model& model,
     // We can unlock the mutex here since we don't access state that is subject to changes after this point
     lock.unlock();
 
-    new_captured_graph->max_batch_size_ = max_batch_size;
+    new_captured_graph->max_batch_size_ = params.max_batch_size;
+    new_captured_graph->max_length_ = params.search.max_length;
+    new_captured_graph->num_beams_ = params.search.num_beams;
     new_captured_graph->pool_ = shared_from_this();
 
     // Create the static buffer for the input ids
-    size_t max_beam_batch_size = static_cast<size_t>(config_->search.num_beams) * max_batch_size;
+    size_t max_beam_batch_size = static_cast<size_t>(params.search.num_beams) * params.max_batch_size;
     new_captured_graph->sb_input_ids_ = std::make_unique<StaticBuffer>(allocator_device_, max_beam_batch_size);
 
 #if USE_DML
@@ -94,6 +101,7 @@ CapturedGraphInfoPtr CapturedGraphPool::ReserveCapturedGraph(const Model& model,
 
 void CapturedGraphPool::AddCapturedGraph(CapturedGraphInfoPtr&& captured_graph) const {
   std::unique_lock lock(captured_graph_mutex_);
-  captured_graphs_map_[captured_graph->max_batch_size_].push_back(std::move(captured_graph));
+  auto key = MakeKey(captured_graph->max_batch_size_, captured_graph->max_length_, captured_graph->num_beams_);
+  captured_graphs_map_[key].push_back(std::move(captured_graph));
 }
 }  // namespace Generators
