@@ -11,8 +11,6 @@ import onnxruntime_genai as og
 import time
 import argparse
 from tqdm import tqdm
-import os
-input(os.getpid())
 
 # Use input model to generate prompt
 def generate_prompt(model, tokenizer, prompt_length, use_graph_capture) -> str:
