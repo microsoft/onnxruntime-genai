@@ -1,8 +1,2 @@
--f https://download.pytorch.org/whl/torch_stable.html
-torch
 numpy
 pytest
-onnx
-onnxruntime_gpu
-transformers
-huggingface_hub[cli]
