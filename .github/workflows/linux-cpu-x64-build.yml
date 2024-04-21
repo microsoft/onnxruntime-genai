@@ -44,8 +44,8 @@ jobs:
       - name: Extra OnnxRuntime library and header files
         run: |
           mkdir -p ort/lib
-          mv ${{ env.ORT_NIGHTLY_PACKAGE_NAME_L }}/buildTransitive/native/include ort/
-          mv ${{ env.ORT_NIGHTLY_PACKAGE_NAME_L }}/runtimes/linux-x64/native/* ort/lib/
+          mv ${{ env.ORT_NIGHTLY_PACKAGE_NAME_L }}/${{ env.ORT_NIGHTLY_VERSION }}/build/native/include ort/
+          mv ${{ env.ORT_NIGHTLY_PACKAGE_NAME_L }}/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/linux-x64/native/* ort/lib/
 
       - name: Build with CMake and GCC
         run: |
