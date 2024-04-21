@@ -206,7 +206,8 @@ ComPtr<IDMLCompiledOperator> CreateArgMaxOperator(
     IDMLDevice* dml_device,
     uint32_t batch_size,
     uint32_t vocab_size,
-    DML_TENSOR_DATA_TYPE data_type) {
+    DML_TENSOR_DATA_TYPE source_type,
+    DML_TENSOR_DATA_TYPE target_type) {
   std::array<uint32_t, 2> input_sizes = {batch_size, vocab_size};
   std::array<uint32_t, 2> output_sizes = {batch_size, 1};
   std::array<uint32_t, 1> axes = {1};
