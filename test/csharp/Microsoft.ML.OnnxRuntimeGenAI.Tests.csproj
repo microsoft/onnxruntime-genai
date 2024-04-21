@@ -16,6 +16,7 @@
     <RootNamespace>Microsoft.ML.OnnxRuntimeGenAI.Tests</RootNamespace>
     <AssemblyName>Microsoft.ML.OnnxRuntimeGenAI.Tests</AssemblyName>
     <RestoreAdditionalProjectSources>https://api.nuget.org/v3/index.json</RestoreAdditionalProjectSources>
+    <RestoreSources>$(RestoreAdditionalProjectSources);$(RestoreSources)</RestoreSources>
   </PropertyGroup>
 
   <PropertyGroup>
