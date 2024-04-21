@@ -38,7 +38,7 @@ jobs:
         shell: bash
         run: |
           ls -l
-          ls -l ${{ env.ORT_NIGHTLY_PACKAGE_NAME_L }}
+          ls -R ${{ env.ORT_NIGHTLY_PACKAGE_NAME_L }}
         continue-on-error: true
 
       - name: Extra OnnxRuntime library and header files
