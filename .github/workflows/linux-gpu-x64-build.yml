@@ -7,8 +7,8 @@ concurrency:
 
 env:
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime.Gpu.Linux&api-version=6.0-preview.1"
-  ORT_NIGHTLY_PACKAGE_NAME: Microsoft.ML.OnnxRuntime.Gpu.Linux
-  ORT_NIGHTLY_PACKAGE_NAME_L: "microsoft.ml.onnxruntime.gpu.linux"
+  ORT_PACKAGE_NAME: Microsoft.ML.OnnxRuntime.Gpu.Linux
+  ORT_PACKAGE_NAME_L: "microsoft.ml.onnxruntime.gpu.linux"
   ORT_NIGHTLY_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
 
 
@@ -35,20 +35,20 @@ jobs:
 
       - name: Download OnnxRuntime Nightly
         run: |
-          dotnet add package "${{ env.ORT_NIGHTLY_PACKAGE_NAME }}" --version "${{ env.ORT_NIGHTLY_VERSION }}" --source "${{ env.ORT_NIGHTLY_SOURCE }}" --package-directory .
+          dotnet add test/csharp/Microsoft.OnnxRuntimeGenAI.Tests.csproj package "${{ env.ORT_PACKAGE_NAME }}" --version "${{ env.ORT_NIGHTLY_VERSION }}" --source "${{ env.ORT_NIGHTLY_SOURCE }}" --package-directory .
         continue-on-error: true
       - name: list files
         shell: bash
         run: |
           ls -l
-          ls -R ${{ env.ORT_NIGHTLY_PACKAGE_NAME_L }}
+          ls -R ${{ env.ORT_PACKAGE_NAME_L }}
         continue-on-error: true
 
       - name: Extra OnnxRuntime library and header files
         run: |
           mkdir -p ort/lib
-          mv ${{ env.ORT_NIGHTLY_PACKAGE_NAME_L }}/${{ env.ORT_NIGHTLY_VERSION }}/buildTransitive/native/include ort/
-          mv ${{ env.ORT_NIGHTLY_PACKAGE_NAME_L }}/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/linux-x64/native/* ort/lib/
+          mv ${{ env.ORT_PACKAGE_NAME_L }}/${{ env.ORT_NIGHTLY_VERSION }}/buildTransitive/native/include ort/
+          mv ${{ env.ORT_PACKAGE_NAME_L }}/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/linux-x64/native/* ort/lib/
 
 
       - name: Download Docker Image

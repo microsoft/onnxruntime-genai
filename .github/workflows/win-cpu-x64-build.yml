@@ -13,7 +13,7 @@ concurrency:
 env:
   binaryDir: 'build/cpu'
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
-  ORT_NIGHTLY_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
+  ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
 
 jobs:
   windows-cpu-x64-build:
@@ -48,16 +48,16 @@ jobs:
         "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
     - name: Download OnnxRuntime Nightly
       run: |
-        nuget install ${{ env.ORT_NIGHTLY_PACKAGE_NAME }} -version ${{ env.ORT_NIGHTLY_VERSION }} -x -NonInteractive
+        nuget install ${{ env.ORT_PACKAGE_NAME }} -version ${{ env.ORT_NIGHTLY_VERSION }} -x -NonInteractive
 
-    - run: Get-ChildItem  ${{ env.ORT_NIGHTLY_PACKAGE_NAME }} -Recurse
+    - run: Get-ChildItem  ${{ env.ORT_PACKAGE_NAME }} -Recurse
       continue-on-error: true
 
     - name: Extra OnnxRuntime library and header files
       run: |
         mkdir ort/lib
-        move ${{ env.ORT_NIGHTLY_PACKAGE_NAME }}/build/native/include ort/
-        move ${{ env.ORT_NIGHTLY_PACKAGE_NAME }}/runtimes/win-x64/native/* ort/lib/
+        move ${{ env.ORT_PACKAGE_NAME }}/build/native/include ort/
+        move ${{ env.ORT_PACKAGE_NAME }}/runtimes/win-x64/native/* ort/lib/
 
     - name: Initialize CodeQL
       uses: github/codeql-action/init@v3

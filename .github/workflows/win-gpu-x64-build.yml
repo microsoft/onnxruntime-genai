@@ -13,7 +13,7 @@ env:
   CUDA_PATH: ${{ github.workspace }}\\cuda_sdk\\v11.8
   binaryDir: 'build/cuda'
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime.Gpu.Windows&api-version=6.0-preview.1"
-  ORT_NIGHTLY_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime.Gpu.Windows"
+  ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime.Gpu.Windows"
 
 jobs:
   windows-gpu-x64-build:
@@ -49,16 +49,16 @@ jobs:
         "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
     - name: Download OnnxRuntime Nightly
       run: |
-        nuget install ${{ env.ORT_NIGHTLY_PACKAGE_NAME }} -version ${{ env.ORT_NIGHTLY_VERSION }} -ExcludeVersion -NonInteractive
+        nuget install ${{ env.ORT_PACKAGE_NAME }} -version ${{ env.ORT_NIGHTLY_VERSION }} -ExcludeVersion -NonInteractive
 
-    - run: Get-ChildItem  ${{ env.ORT_NIGHTLY_PACKAGE_NAME }} -Recurse
+    - run: Get-ChildItem  ${{ env.ORT_PACKAGE_NAME }} -Recurse
       continue-on-error: true
 
     - name: Extra OnnxRuntime library and header files
       run: |
         mkdir ort/lib
-        move ${{ env.ORT_NIGHTLY_PACKAGE_NAME }}/buildTransitive/native/include ort/
-        move ${{ env.ORT_NIGHTLY_PACKAGE_NAME }}/runtimes/win-x64/native/* ort/lib/    
+        move ${{ env.ORT_PACKAGE_NAME }}/buildTransitive/native/include ort/
+        move ${{ env.ORT_PACKAGE_NAME }}/runtimes/win-x64/native/* ort/lib/    
 
     - name: Configure CMake
       run: |
