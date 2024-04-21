@@ -6,8 +6,8 @@ concurrency:
 env:
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
-  ORT_PACKAGE_NAME_L: "microsoft.ml.onnxruntime"
   ORT_NIGHTLY_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
+  NUGET_EXE: "mono /usr/local/bin/nuget.exe"
 jobs:
   linux_cpu_x64:
     runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU" ]
@@ -41,23 +41,21 @@ jobs:
 
       - name: Download OnnxRuntime Nightly
         run: |
-          mono /usr/local/bin/nuget.exe install ${{ env.ORT_PACKAGE_NAME }} -version ${{ env.ORT_NIGHTLY_VERSION }} -x
-#          dotnet add package "${{ env.ORT_PACKAGE_NAME }}" --version "${{ env.ORT_NIGHTLY_VERSION }}" --package-directory .
-#          dotnet add test/csharp/Microsoft.ML.OnnxRuntimeGenAI.Tests.csproj package "${{ env.ORT_PACKAGE_NAME }}" --version "${{ env.ORT_NIGHTLY_VERSION }}" --source "${{ env.ORT_NIGHTLY_SOURCE }}" --package-directory .
+          ${{ env.NUGET_EXE }} install ${{ env.ORT_PACKAGE_NAME }} -version ${{ env.ORT_NIGHTLY_VERSION }} -x
         continue-on-error: true
+
       - name: list files
         shell: bash
         run: |
           ls -l
-          ls -R test/csharp
-          ls -R ${{ env.ORT_PACKAGE_NAME_L }}
+          ls -R ${{ env.ORT_PACKAGE_NAME }}
         continue-on-error: true
 
       - name: Extra OnnxRuntime library and header files
         run: |
           mkdir -p ort/lib
-          mv ${{ env.ORT_PACKAGE_NAME_L }}/${{ env.ORT_NIGHTLY_VERSION }}/build/native/include ort/
-          mv ${{ env.ORT_PACKAGE_NAME_L }}/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/linux-x64/native/* ort/lib/
+          mv ${{ env.ORT_PACKAGE_NAME }}/build/native/include ort/
+          mv ${{ env.ORT_PACKAGE_NAME }}/runtimes/linux-x64/native/* ort/lib/
 
       - name: Build with CMake and GCC
         run: |
