@@ -2,10 +2,22 @@
 # Licensed under the MIT License.
 
 set(model_benchmark_srcs
+  ${CMAKE_CURRENT_SOURCE_DIR}/cpu_utils.h
   ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/options.h
   ${CMAKE_CURRENT_SOURCE_DIR}/options.cpp
 )
+
+# add platform-specific source files
+if(UNIX)
+  list(APPEND model_benchmark_srcs
+       ${CMAKE_CURRENT_SOURCE_DIR}/posix/cpu_utils.cpp
+  )
+elseif(WIN32)
+  list(APPEND model_benchmark_srcs
+       ${CMAKE_CURRENT_SOURCE_DIR}/windows/cpu_utils.cpp
+  )
+endif()
 
 add_executable(model_benchmark ${model_benchmark_srcs})
 
