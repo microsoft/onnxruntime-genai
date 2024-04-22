@@ -10,7 +10,7 @@ namespace Generators {
 Search_Dml::Search_Dml(const GeneratorParams& params, ID3D12Device* d3d12_device)
     : Search(params),
       d3d12_device_(d3d12_device),
-      sequences_{params.input_ids, params.batch_size, params.search.num_beams, params_->search.max_length, params_->cuda_stream} {
+      sequences_{params.input_ids, params.batch_size, params.search.num_beams, params_->search.max_length} {
   auto batch_beam_size = params.BatchBeamSize();
   sequence_lengths_buffer_ = std::make_unique<int32_t[]>(batch_beam_size);
   sequence_lengths_ = cpu_span<int32_t>(sequence_lengths_buffer_.get(), batch_beam_size);
@@ -24,9 +24,6 @@ Search_Dml::Search_Dml(const GeneratorParams& params, ID3D12Device* d3d12_device
       D3D12_RESOURCE_STATE_COMMON,
       nullptr,
       IID_PPV_ARGS(eos_meet_buffer_.GetAddressOf())));
-
-  done_cpu_ = CudaMallocHostArray<bool>(1);
-  *done_cpu_ = false;
 }
 
 GreedySearch_Dml::GreedySearch_Dml(const GeneratorParams& params, ID3D12Device* d3d12_device, IDMLDevice* dml_device, DmlExecutionContext* execution_context, const OrtDmlApi* ort_dml_api)
@@ -124,8 +121,6 @@ void GreedySearch_Dml::AppendNextTokensToSequences() {
   sequences_.AppendNextTokenToSequences(next_tokens_);
 
   if (sequences_.GetSequenceLength() == params_->search.max_length) {
-    if (g_log.enabled && g_log.hit_max_length)
-      Log("hit_max_length", "greedy cuda hit");
     *done_cpu_ = true;
   }
 }

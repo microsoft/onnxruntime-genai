@@ -1,5 +1,5 @@
 #pragma once
-#include "sequences_cuda.h"
+#include "sequences_dml.h"
 
 namespace Generators {
 
@@ -15,7 +15,7 @@ struct Search_Dml : Search {
   void ApplyMinLength(int min_length) override;
   void ApplyRepetitionPenalty(float penalty) override;
 
-  Sequences_Cuda& GetSequences() { return sequences_; }
+  Sequences_Dml& GetSequences() { return sequences_; }
 
   cpu_span<int32_t> sequence_lengths_;  // shape (beam_size*batch_size)
   std::unique_ptr<int32_t[]> sequence_lengths_buffer_;
@@ -29,7 +29,7 @@ struct Search_Dml : Search {
 
   ComPtr<ID3D12Resource> next_token_scores_buffer_;  // shape (beam_size*batch_size, vocab_size)
 
-  Sequences_Cuda sequences_;
+  Sequences_Dml sequences_;
 };
 
 struct GreedySearch_Dml : Search_Dml {
