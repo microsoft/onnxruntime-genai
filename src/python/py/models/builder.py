@@ -882,7 +882,7 @@ class Model:
         outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
         self.make_node(
             "GroupQueryAttention", inputs=inputs, outputs=outputs, name=name, domain="com.microsoft",
-            num_heads=self.num_attn_heads, kv_num_heads=self.num_kv_heads, local_window_size=self.window_size,
+            num_heads=self.num_attn_heads, kv_num_heads=self.num_kv_heads, # local_window_size=self.window_size,  # Disable sliding window attribute temporarily
             do_rotary=self.attention_attrs["use_rotemb_in_attn"], rotary_interleaved=self.rotemb_attrs["interleaved"],
         )
         self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * self.num_attn_heads])
