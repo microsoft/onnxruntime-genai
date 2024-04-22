@@ -172,7 +172,7 @@ class Model:
             self.attention_attrs["op_type"] = "GroupQueryAttention"
             print("GroupQueryAttention (GQA) is used in this model. GQA is currently supported only for INT4 and FP16 on the CUDA and DML execution providers.")
 
-            # DML doesn't support packed Q/K/V for GQA yet
+            # DML doesn't support stacked Q/K/V for GQA yet
             self.attention_attrs["use_packed_matmul"] = self.ep != "dml" and self.num_attn_heads == self.num_kv_heads
 
             # GQA + Rot.Emb. does not require `position ids` as input
@@ -872,7 +872,9 @@ class Model:
         if op_type == "MultiHeadAttention":
             self.make_multi_head_attention(name, add_qk=f"{self.mask_attrs['mask_name']}/output_0", **kwargs)
         elif op_type == "GroupQueryAttention":
-            self.make_group_query_attention(name, seqlens_k=f"{self.mask_attrs['seqlens_k']}/output_0", total_seq_len=f"{self.mask_attrs['total_seq_len']}/output_0", **kwargs)
+            seqlens_k_name = f"{self.mask_attrs['seqlens_k']}/output_0"
+            total_seq_len_name = f"{self.mask_attrs['total_seq_len']}/output_0"
+            self.make_group_query_attention(name, seqlens_k=seqlens_k_name, total_seq_len=total_seq_len_name, **kwargs)
         else:
             raise NotImplementedError(f"The {op_type} op is not currently supported.")
 
