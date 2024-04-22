@@ -93,8 +93,8 @@ if(USE_DML)
     add_compile_definitions(NOMINMAX)
 
     file(GLOB dml_srcs CONFIGURE_DEPENDS
-      "${MODELS_ROOT}/dml/*.h"
-      "${MODELS_ROOT}/dml/*.cpp"
+      "${PROJECT_SOURCE_DIR}/src/dml/*.h"
+      "${PROJECT_SOURCE_DIR}/src/dml/*.cpp"
     )
 
     list(APPEND generator_srcs ${dml_srcs})

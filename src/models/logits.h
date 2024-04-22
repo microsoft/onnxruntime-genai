@@ -21,8 +21,8 @@ struct Logits {
   std::unique_ptr<OrtValue> value16_;  // When model output is fp16
 
   // Used for decoding runs with cuda graphs.
-  StaticBuffer* sb_logits32_ = nullptr;
-  StaticBuffer* sb_logits16_ = nullptr;
+  StaticBuffer* sb_logits32_{};
+  StaticBuffer* sb_logits16_{};
 
 #if USE_DML
   DmlReusedCommandListState logits_cast_command_list_state_{};

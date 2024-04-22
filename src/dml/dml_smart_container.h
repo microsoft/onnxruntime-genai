@@ -6,7 +6,7 @@
 #include <memory>
 #include <wrl/client.h>
 #include <wrl/implements.h>
-#include "onnxruntime_api.h"
+#include "../models/onnxruntime_api.h"
 
 // Allows objects to be added to a D3D12 object via SetPrivateDataInterface and extend its lifetime beyond the life of the model. For
 // example, we can put the DML allocator on the D3D12 device (which is a unique singleton for each adapter) and be sure that the allocator won't be

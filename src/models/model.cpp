@@ -11,7 +11,7 @@
 #ifdef USE_DML
 #include <wil/wrl.h>
 #include "dml_provider_factory.h"
-#include "dml/dml_smart_container.h"
+#include "../dml/dml_smart_container.h"
 
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
 

@@ -4,7 +4,7 @@
 #include "kernels.h"
 
 #if USE_DML
-#include "dml/dml_update_mask_kernel.h"
+#include "../dml/dml_update_mask_kernel.h"
 #endif
 
 namespace Generators {

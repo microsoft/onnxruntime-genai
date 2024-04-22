@@ -99,22 +99,20 @@ RoamingArray<float> Logits::Get() {
           } break;
 #endif
 
-#if USE_CUDA
+          case DeviceType::CPU:
           case DeviceType::CUDA: {
             auto logits = std::span<float>{value32_->GetTensorMutableData<float>(), element_count};
             auto logits_next = gpu_span<float>{value_next->GetTensorMutableData<float>(), element_count};
             auto target = logits_next.subspan(vocab_index, vocab_size);
             std::span<const float> source = logits.subspan(vocab_index * seq_length + token_index * vocab_size, vocab_size);
-            CudaCheck() == cudaMemcpyAsync(target.data(), source.data(), source.size_bytes(), cudaMemcpyDeviceToDevice, state_.params_->cuda_stream);
-
-          } break;
+            if (model_.device_type_ == DeviceType::CUDA)
+#if USE_CUDA
+              CudaCheck() == cudaMemcpyAsync(target.data(), source.data(), source.size_bytes(), cudaMemcpyDeviceToDevice, state_.params_->cuda_stream);
+#else
+              throw std::runtime_error("Unexpected CUDA device usage");
 #endif
-          case DeviceType::CPU: {
-            auto logits = std::span<float>{value32_->GetTensorMutableData<float>(), element_count};
-            auto logits_next = cpu_span<float>{value_next->GetTensorMutableData<float>(), element_count};
-            auto target = logits_next.subspan(vocab_index, vocab_size);
-            std::span<const float> source = logits.subspan(vocab_index * seq_length + token_index * vocab_size, vocab_size);
-            copy(source, target);
+            else
+              copy(source, target);
           } break;
         }
 

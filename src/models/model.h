@@ -7,10 +7,10 @@
 
 #ifdef USE_DML
 #include "dml_provider_factory.h"
-#include "dml/dml_helpers.h"
-#include "dml/dml_execution_context.h"
-#include "dml/dml_pooled_upload_heap.h"
-#include "dml/dml_readback_heap.h"
+#include "../dml/dml_helpers.h"
+#include "../dml/dml_execution_context.h"
+#include "../dml/dml_pooled_upload_heap.h"
+#include "../dml/dml_readback_heap.h"
 #endif
 
 namespace Generators {
@@ -155,7 +155,7 @@ struct Model : std::enable_shared_from_this<Model> {
  private:
 #if USE_DML
   mutable DmlObjects dml_objects_;
-  const OrtDmlApi* p_dml_api_ = nullptr;
+  const OrtDmlApi* p_dml_api_{};
   std::unique_ptr<DmlPooledUploadHeap> dml_pooled_upload_heap_;
   std::unique_ptr<DmlExecutionContext> dml_execution_context_;
   std::unique_ptr<DmlReadbackHeap> dml_readback_heap_;
