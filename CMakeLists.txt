@@ -128,7 +128,7 @@ elseif(APPLE)
 else()
   set(ONNXRUNTIME_LIB "libonnxruntime.so")
   set(ONNXRUNTIME_PROVIDERS_CUDA_LIB "libonnxruntime_providers_cuda.so")
-  set(ONNXRUNTIME_FILES "libonnxruntime*.so*")
+  set(ONNXRUNTIME_FILES "libonnxruntime*.so")
   set(ONNXRUNTIME_EXTENSIONS_LIB "tfmtok_c.so")
 endif()
 
