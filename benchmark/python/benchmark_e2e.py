@@ -15,7 +15,7 @@ from tqdm import tqdm
 # Use input model to generate prompt
 def generate_prompt(model, tokenizer, prompt_length, use_graph_capture) -> str:
     temperature = 1.0
-    prompt = "What is the lightest"
+    prompt = "a"
     tokens = tokenizer.encode(prompt)
     params=og.GeneratorParams(model)
     params.set_search_options(do_sample=True, top_k=5, temperature=temperature, max_length=prompt_length, min_length=prompt_length+1)
