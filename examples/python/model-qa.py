@@ -28,7 +28,7 @@ def main(args):
 
         params = og.GeneratorParams(model)
         params.try_use_cuda_graph_with_max_batch_size(1)
-        params.set_search_options(do_sample=False, max_length=args.max_length, min_length=args.min_length, top_p=args.top_p, top_k=args.top_k, temperature=args.temperature, repetition_penalty=args.repetition_penalty)
+        params.set_search_options(do_sample=args.do_random_sampling, max_length=args.max_length, min_length=args.min_length, top_p=args.top_p, top_k=args.top_k, temperature=args.temperature, repetition_penalty=args.repetition_penalty)
         params.input_ids = input_tokens
         generator = og.Generator(model, params)
         if args.verbose: print("Generator created")
@@ -66,6 +66,7 @@ if __name__ == "__main__":
     parser.add_argument('-m', '--model', type=str, required=True, help='Onnx model folder path (must contain config.json and model.onnx)')
     parser.add_argument('-i', '--min_length', type=int, default=0, help='Min number of tokens to generate including the prompt')
     parser.add_argument('-l', '--max_length', type=int, default=200, help='Max number of tokens to generate including the prompt')
+    parser.add_argument('-ds', '--do_random_sampling', action='store_true', help='Do random sampling. When false, greedy or beam search are used to generate the output. Defaults to false')
     parser.add_argument('-p', '--top_p', type=float, default=0.9, help='Top p probability to sample with')
     parser.add_argument('-k', '--top_k', type=int, default=50, help='Top k tokens to sample from')
     parser.add_argument('-t', '--temperature', type=float, default=1.0, help='Temperature to sample with')
