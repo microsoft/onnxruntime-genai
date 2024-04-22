@@ -4,6 +4,29 @@
 
 namespace Generators {
 
+namespace {
+
+constexpr int32_t PagedCacheBlockTablePadValue = -1;
+constexpr int32_t PagedCacheSlotMappingPadValue = -1;
+constexpr char PagedKeyCacheNamePrefix[] = "key_cache.";
+constexpr char PagedValueCacheNamePrefix[] = "value_cache.";
+constexpr char PagedCacheBlockTablesName[] = "block_tables";
+constexpr char PagedCacheSlotMappingName[] = "slot_mapping";
+constexpr int32_t DefaultBlockSize = 16;
+constexpr float DefaultCacheGPUUtilizationFactor = 0.3f;
+
+CacheOptions MakeCacheOptions(const Model& model, const State& state) {
+  return CacheOptions(model.config_->model.decoder.num_hidden_layers,
+                      model.config_->model.kv_cache.block_size,
+                      model.config_->model.decoder.num_key_value_heads,
+                      model.config_->model.decoder.head_size,
+                      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16,
+                      model.config_->model.kv_cache.num_blocks,
+                      model.config_->model.kv_cache.gpu_utilization_factor);
+}
+
+}  // namespace
+
 KV_Cache_Combined::KV_Cache_Combined(const Model& model, State& state)
     : model_{model},
       state_{state},
@@ -295,6 +318,57 @@ void Cross_Cache::AddInputs() {
     state_.inputs_.push_back(values_[i].get());
     state_.input_names_.push_back(input_name_strings_[i].c_str());
   }
+}
+
+PagedCacheOrchestrator::PagedCacheOrchestrator(const Model& model, State& state)
+    : model_{model},
+      state_{state},
+      paged_cache_(std::make_unique<PagedCacheManager>(MakeCacheOptions(model, state),
+                                                       &model.allocator_cpu_, model.allocator_device_)) {
+}
+
+void PagedCacheOrchestrator::Add() {
+  input_offset_ = state_.inputs_.size();
+
+  auto num_sequences = state_.params_->BatchBeamSize();
+  for (int i = 0; i < num_sequences; ++i) {
+    // TODO (baijumeswani): get the sequence length from the attention mask?
+    paged_cache_->Add(i, state_.params_->sequence_length);
+  }
+
+  for (int i = 0; i < layer_count_; ++i) {
+    auto [key_cache, value_cache] = paged_cache_->Cache(i);
+    state_.input_names_.push_back((PagedKeyCacheNamePrefix + std::to_string(i)).c_str());
+    state_.inputs_.push_back(key_cache);
+    state_.input_names_.push_back((PagedValueCacheNamePrefix + std::to_string(i)).c_str());
+    state_.inputs_.push_back(value_cache);
+  }
+
+  state_.input_names_.push_back(PagedCacheBlockTablesName);
+  state_.inputs_.push_back(paged_cache_->BlockTables());
+  state_.input_names_.push_back(PagedCacheSlotMappingName);
+  state_.inputs_.push_back(paged_cache_->SlotMapping());
+}
+
+void PagedCacheOrchestrator::Update([[maybe_unused]] std::span<const int32_t> beam_indices,
+                                    [[maybe_unused]] int current_length) {
+  auto num_sequences = state_.params_->BatchBeamSize();
+  for (int i = 0; i < num_sequences; ++i) {
+    paged_cache_->AddToken(i);
+  }
+
+  size_t input_offset = state_.inputs_.size();
+
+  state_.inputs_[input_offset_ + layer_count_ * 2] = paged_cache_->BlockTables();
+  state_.inputs_[input_offset_ + layer_count_ * 2 + 1] = paged_cache_->SlotMapping();
+}
+
+std::unique_ptr<CacheManagerInterface> CreateCacheManager(const Model& model, State& state) {
+  if (model.config_->model.kv_cache.paged_cache) {
+    return std::make_unique<PagedCacheOrchestrator>(model, state);
+  }
+
+  return std::make_unique<KV_Cache>(model, state);
 }
 
 }  // namespace Generators

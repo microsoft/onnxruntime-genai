@@ -17,11 +17,12 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, RoamingArra
     : State{params, model},
       model_{model},
       captured_graph_info_(model.GetCapturedGraphPool()->ReserveCapturedGraph(model, params)),
-      position_inputs_{model, *this, sequence_lengths_unk} {
+      position_inputs_{model, *this, sequence_lengths_unk},
+      kv_cache_{CreateCacheManager(model_, *this)} {
   input_ids_.Add();
   position_inputs_.Add();
   logits_.Add();
-  kv_cache_.Add();
+  kv_cache_->Add();
   extra_inputs_.Add();
 }
 
@@ -39,7 +40,7 @@ RoamingArray<float> DecoderOnly_State::Run(int current_length, RoamingArray<int3
 void DecoderOnly_State::UpdateInputs(const RoamingArray<int32_t>& next_tokens_unk, RoamingArray<int32_t> beam_indices, int current_length) {
   input_ids_.Update(next_tokens_unk);
   position_inputs_.Update(current_length);
-  kv_cache_.Update(beam_indices.GetCPU(), current_length);
+  kv_cache_->Update(beam_indices.GetCPU(), current_length);
 }
 
 }  // namespace Generators
