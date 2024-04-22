@@ -171,8 +171,9 @@ class Model:
             self.attention_attrs["use_packed_matmul"] = self.ep != "dml" and self.num_attn_heads == self.num_kv_heads
 
             # GQA + Rot.Emb. does not require `position ids` as input
-            self.attention_attrs["use_rotemb_in_attn"] = True
-            self.input_names.remove("position_ids")
+            if self.ep == "cuda":
+                self.attention_attrs["use_rotemb_in_attn"] = True
+                self.input_names.remove("position_ids")
 
         self.past_present_share_buffer = self.attention_attrs["op_type"] == "GroupQueryAttention"
 
@@ -1220,7 +1221,7 @@ class Model:
         # TODO: add make_position_ids_reformatting() here
 
     def make_attention_mask_reformatting(self):
-        if self.ep_attrs["cuda"]["enable_cuda_graph"] == "1":
+        if self.ep_attrs["cuda"]["enable_cuda_graph"] == "1" or self.ep == "dml":
             # ORT does not allow nodes to be placed on mulitple execution providers
             # with cuda graph enabled. We've only verified it works with GQA and with
             # past_present_share_buffer enabled(so the total_seq_len in GQA is hardcoded

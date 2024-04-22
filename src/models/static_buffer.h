@@ -1,5 +1,12 @@
 #pragma once
 
+#include <memory>
+#include "../span.h"
+
+namespace Ort {
+struct Allocator;
+}
+
 namespace Generators {
 
 struct StaticBuffer {
