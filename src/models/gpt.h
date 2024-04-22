@@ -3,7 +3,7 @@
 #include "input_ids.h"
 #include "logits.h"
 #include "kv_cache.h"
-#include "position_ids.h"
+#include "position_inputs.h"
 
 namespace Generators {
 
@@ -28,6 +28,6 @@ struct Gpt_State : State {
   InputIDs input_ids_{model_, *this};
   Logits logits_{model_, *this};
   KV_Cache_Combined kv_cache_{model_, *this};
-  PositionIDs position_ids_;
+  PositionInputs position_inputs_;
 };
 }  // namespace Generators

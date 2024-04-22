@@ -1,5 +1,5 @@
 include(${CMAKE_SOURCE_DIR}/cmake/cxx_standard.cmake)
-include(${CMAKE_SOURCE_DIR}/cmake/util_func.cmake)
+
 file(GLOB python_srcs CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/*.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
@@ -14,7 +14,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
 
-genai_set_target_compile_options(python)
+if(CMAKE_GENERATOR_TOOLSET MATCHES "Visual Studio")
+  target_link_options(python PRIVATE "/CETCOMPAT")
+  target_compile_options(python PRIVATE "/sdl" PRIVATE "/Qspectre")
+endif()
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   cmake_policy(SET CMP0104 OLD)
@@ -29,6 +32,8 @@ if(BUILD_WHEEL)
   message("Setting up wheel files in : ${WHEEL_FILES_DIR}")
   if(USE_CUDA)
     set(TARGET_NAME "onnxruntime-genai-cuda")
+  elseif(USE_DML)
+    set(TARGET_NAME "onnxruntime-genai-dml")
   else()
     set(TARGET_NAME "onnxruntime-genai")
   endif()

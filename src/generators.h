@@ -29,7 +29,9 @@ using cudaStream_t = void*;
 
 #include "smartptrs.h"
 #include "models/onnxruntime_api.h"
+#include "models/debugging.h"
 #include "config.h"
+#include "logging.h"
 
 namespace Generators {
 struct Model;
@@ -42,6 +44,7 @@ using TokenSequences = std::vector<std::vector<int32_t>>;
 enum struct DeviceType {
   CPU,
   CUDA,
+  DML,
 };
 
 struct GeneratorParams : std::enable_shared_from_this<GeneratorParams> {
@@ -57,6 +60,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams> {
   int context_length{};
 
   int batch_size{1};
+  int max_batch_size{0};
   int sequence_length{};
   int BatchBeamSize() const { return search.num_beams * batch_size; }
 
@@ -74,7 +78,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams> {
 
   struct T5 {
     std::span<const int32_t> encoder_input_ids;  // Array of [batchsize][sequence_length]
-    std::span<const int32_t> decoder_input_ids;  // Array of [batchsize][sequence_length]  
+    std::span<const int32_t> decoder_input_ids;  // Array of [batchsize][sequence_length]
   };
   using Bart=T5;
 

@@ -4,7 +4,6 @@
 #include "../generators.h"
 #include "../search.h"
 #include "model.h"
-#include "debugging.h"
 #include "gpt.h"
 #include "decoder_only.h"
 #include "whisper.h"
@@ -37,22 +36,26 @@ namespace Generators {
 State::State(const GeneratorParams& params) : params_{params.shared_from_this()} {
 }
 
-void State::Run(OrtSession& session) {
-#if 0
-  // To show input values, enable this block (output values will be shapes only at this point)
-  printf("**Inputs:\r\n");
-  DumpTensors(inputs_.data(), input_names_.data(), input_names_.size(), true);
-  printf("**Outputs:\r\n");
-  DumpTensors(outputs_.data(), output_names_.data(), output_names_.size(), false);
-#endif
+void State::Run(OrtSession& session, OrtRunOptions& run_options) {
+  if (g_log.enabled && g_log.model_input_values) {
+    auto& stream = Log("model_input_values");
+    stream << std::endl;
+    DumpTensors(stream, inputs_.data(), input_names_.data(), input_names_.size(), true);
+  }
 
-  session.Run(nullptr, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
+  if (g_log.enabled && g_log.model_output_shapes) {
+    auto& stream = Log("model_output_shapes");
+    stream << std::endl;
+    DumpTensors(stream, outputs_.data(), output_names_.data(), output_names_.size(), false);
+  }
 
-#if 0
-  // To show the output values, enable this block
-  printf("**Outputs:\r\n");
-  DumpTensors(outputs_.data(), output_names_.data(), output_names_.size(), true);
-#endif
+  session.Run(&run_options, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
+
+  if (g_log.enabled && g_log.model_output_values) {
+    auto& stream = Log("model_output_values");
+    stream << std::endl;
+    DumpTensors(stream, outputs_.data(), output_names_.data(), output_names_.size(), true);
+  }
 }
 
 void State::ClearIO() {
@@ -194,6 +197,22 @@ Ort::Allocator* GetCudaAllocator(OrtSession& session) {
 }
 #endif
 
+#if USE_DML
+// Since Python/Others can and will hold onto a generator object past the model object's lifetime we need to ensure
+// the allocator used is not destroyed until last. This keeps the allocator around until exit, after all other memory
+// has been destroyed.
+Ort::Allocator* GetDmlAllocator(OrtSession& session) {
+  static std::unique_ptr<OrtMemoryInfo> memory_info_dml_;
+  static std::unique_ptr<Ort::Allocator> allocator_dml_;
+
+  if (!allocator_dml_) {
+    memory_info_dml_ = OrtMemoryInfo::Create("DML", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+    allocator_dml_ = Ort::Allocator::Create(session, *memory_info_dml_);
+  }
+  return allocator_dml_.get();
+}
+#endif
+
 SessionInfo::SessionInfo(OrtSession& session) {
   auto input_names = session.GetInputNames();
   std::vector<ONNXTensorElementDataType> input_types(input_names.size());
@@ -233,6 +252,9 @@ ONNXTensorElementDataType SessionInfo::GetOutputDataType(const std::string& name
 }
 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
+  // TODO: add function to create run options
+  run_options_ = OrtRunOptions::Create();
+
   CreateSessionOptions();
 }
 
@@ -244,7 +266,12 @@ void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
   if (device_type_ == DeviceType::CUDA) {
     allocator_device_ = GetCudaAllocator(session);
   }
+#elif USE_DML
+  if (device_type_ == DeviceType::DML) {
+    allocator_device_ = GetDmlAllocator(session);
+  }
 #endif
+
   session_info_ = std::make_unique<SessionInfo>(session);
 }
 
@@ -323,6 +350,7 @@ void Model::CreateSessionOptions() {
       ort_options.AppendExecutionProvider_ROCM(ort_provider_options);
 #ifdef USE_DML
     } else if (provider_options.name == "dml") {
+      device_type_ = DeviceType::DML;  // We use a DML allocator for input/output caches, but other tensors will use CPU tensors
       const OrtDmlApi* p_dml_api{};
       Ort::ThrowOnError(Ort::api->GetExecutionProviderApi("DML", ORT_API_VERSION, reinterpret_cast<const void**>(&p_dml_api)));
       if (!p_dml_api)
@@ -383,6 +411,8 @@ void ConvertFp16ToFp32(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<Or
   auto* fp32 = p_out->GetTensorMutableData<float>();
 
   switch (device_type) {
+    case DeviceType::DML:
+      // DML doesn't currently support on-device scoring, so we fall back to the CPU
     case DeviceType::CPU:
       for (int i = 0; i < count; i++)
         fp32[i] = Float16ToFloat32(fp16[i]);
@@ -436,8 +466,9 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
   // Input shape (batch_size, sequence_length). The input is required with data type T.
   // Output shape (batch_size * num_beams, sequence_length)
 
-  // If we're on CUDA, we still want to do the copy to move the data over to CUDA memory where we will read from it later
-  if (num_beams == 1 && device_type_ == DeviceType::CPU) {
+  // If we're on CUDA, we still want to do the copy to move the data over to CUDA memory where we will read from it later.
+  // DML doesn't currently support on-device scoring, so we go the same route as the CPU
+  if (num_beams == 1 && (device_type_ == DeviceType::CPU || device_type_ == DeviceType::DML)) {
     return std::move(input);
   }
 
@@ -450,13 +481,15 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
 
   input_shape[0] *= num_beams;
 
-  auto expanded = OrtValue::CreateTensor(*allocator_device_, input_shape, element_type);
-
+  auto& allocator = device_type_ == DeviceType::DML ? allocator_cpu_ : *allocator_device_;
+  auto expanded = OrtValue::CreateTensor(allocator, input_shape, element_type);
   const auto* input_data = reinterpret_cast<const uint8_t*>(input->GetTensorRawData());
   auto* expanded_data = reinterpret_cast<uint8_t*>(expanded->GetTensorMutableRawData());
   auto* target = expanded_data;
 
   switch (device_type_) {
+    case DeviceType::DML:
+      // DML doesn't currently support on-device scoring, so we use the CPU for non-cache inputs/outputs
     case DeviceType::CPU:
       for (int i = 0; i < batch_size; i++) {
         for (int j = 0; j < num_beams; j++) {
@@ -480,6 +513,27 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
       throw std::runtime_error("ExpandInputs - Unsupported device type");
   }
   return expanded;
+}
+
+void Model::GetMaxBatchSizeFromGeneratorParams(const GeneratorParams& params) {
+  bool is_cuda_graph_enabled = IsCudaGraphEnabled(config_->model.decoder.session_options);
+  max_batch_size_ = params.max_batch_size;
+
+  if (DeviceType::CUDA == device_type_) {
+    if (max_batch_size_ == 0 && is_cuda_graph_enabled) {
+      throw std::runtime_error("CUDA graph is enabled, but max_batch_size is not set.");
+    }
+    if (max_batch_size_ > 0) {
+      if (!is_cuda_graph_enabled) {
+        throw std::runtime_error("CUDA graph is not enabled.");
+      }
+      use_cuda_graph_ = true;
+    }
+  } else {
+    if (is_cuda_graph_enabled || max_batch_size_ > 0) {
+      throw std::runtime_error("CUDA graph is not supported on this device");
+    }
+  }
 }
 
 }  // namespace Generators

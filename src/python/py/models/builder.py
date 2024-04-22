@@ -38,18 +38,21 @@ class Model:
         self.io_dtype = io_dtype      # {'fp16', 'fp32'}
         self.onnx_dtype = onnx_dtype  # {"int4", "fp16", "fp32"}
 
+        enable_cuda_graph = "1" if "enable_cuda_graph" in extra_options and extra_options["enable_cuda_graph"] == "1" else "0"
         # EP-specific variables
         self.ep = ep
         self.ep_attrs = {
             "cpu": {},
-            "cuda": {},
+            "cuda": {
+                "enable_cuda_graph": enable_cuda_graph
+            },  # "1" if the the model is able to enable cuda graph, "0" otherwise.
             "dml": {},
         }
 
         self.cache_dir = cache_dir
         self.filename = extra_options["filename"] if "filename" in extra_options else "model.onnx"
         self.extra_options = extra_options
-        
+
         self.inputs = []
         self.outputs = []
         self.initializers = []
@@ -116,7 +119,7 @@ class Model:
             TensorProto.FLOAT16: "TensorProto.FLOAT16",
             TensorProto.FLOAT: "TensorProto.FLOAT",
         }
-        
+
         # Mask-specific variables
         self.mask_attrs = {
             "mask_name": "",            # Name of node that outputs 4D causal attention mask (used as add_qk in MultiHeadAttention)
@@ -159,16 +162,19 @@ class Model:
             "use_rotemb_in_attn": False,                     # Use rotary embeddings within attention op (instead of a separate RotaryEmbedding op)
             "use_packed_matmul": False,                      # Use packed MatMul (instead of 3 separate MatMuls for Q/K/V)
         }
-        if (self.ep == "cuda" and self.io_dtype == TensorProto.FLOAT16) or (self.ep == "cpu" and self.io_dtype == TensorProto.FLOAT):
+        if (self.ep in {"cuda", "dml"} and self.io_dtype == TensorProto.FLOAT16) or (self.ep == "cpu" and self.io_dtype == TensorProto.FLOAT):
             # Change model settings for GroupQueryAttention
             self.attention_attrs["op_type"] = "GroupQueryAttention"
-            print("GroupQueryAttention (GQA) is used in this model. GQA is currently supported only for INT4 CUDA and FP16 CUDA.")
+            print("GroupQueryAttention (GQA) is used in this model. GQA is currently supported only for INT4 and FP16 on the CUDA and DML execution providers.")
 
-            self.attention_attrs["use_packed_matmul"] = self.num_attn_heads == self.num_kv_heads
+            # DML doesn't support stacked Q/K/V for GQA yet
+            self.attention_attrs["use_packed_matmul"] = self.ep != "dml" and self.num_attn_heads == self.num_kv_heads
 
             # GQA + Rot.Emb. does not require `position ids` as input
             self.attention_attrs["use_rotemb_in_attn"] = True
             self.input_names.remove("position_ids")
+
+        self.past_present_share_buffer = self.attention_attrs["op_type"] == "GroupQueryAttention"
 
         # MLP-specific variables
         self.mlp_attrs = {
@@ -229,7 +235,7 @@ class Model:
                 "no_repeat_ngram_size": config.no_repeat_ngram_size if hasattr(config, "no_repeat_ngram_size") else 0,
                 "num_beams": config.num_beams if hasattr(config, "num_beams") else 1,
                 "num_return_sequences": config.num_return_sequences if hasattr(config, "num_return_sequences") else 1,
-                "past_present_share_buffer": self.attention_attrs["op_type"] == "GroupQueryAttention",
+                "past_present_share_buffer": self.past_present_share_buffer,
                 "repetition_penalty": config.repetition_penalty if hasattr(config, "repetition_penalty") else 1.0,
                 "temperature": config.temperature if hasattr(config, "temperature") else 1.0,
                 "top_k": 1,
@@ -296,7 +302,7 @@ class Model:
         if os.path.exists(data_path):
             print(f"Overwriting {data_path}")
             os.remove(data_path)
-        
+
         save_model(
             model,
             out_path,
@@ -547,7 +553,7 @@ class Model:
     def make_add_bias(self, add, name, root_input, **kwargs):
         bias = name[1:].replace("/", ".") + ".bias"
         self.make_external_tensor(add.astype(self.to_numpy_dtype[self.io_dtype]), bias)
-        
+
         add_bias_inputs = [root_input, bias]
         shape = ['batch_size', 'sequence_length', add.shape[0]]
 
@@ -682,7 +688,7 @@ class Model:
         #                |   present_kv
         #                |
         #        +-------+---------+
-        #        |                 |        
+        #        |                 |
         #        |               Shape
         #        |                 |
         #        |     +-----------+-----------+-----------+
@@ -755,7 +761,7 @@ class Model:
         concat_1_name = f"{basename}/Concat_1"
         concat_1_inputs = [past_kv, f"{transpose_1_name}/output_0"]
         self.make_node("Concat", inputs=concat_1_inputs, outputs=[present_kv], name=concat_1_name, axis=2)
-        
+
         shape_1_name = f"{basename}/Shape_1"
         self.make_shape(shape_1_name, present_kv, shape=[4])
         gather_1_name = f"{basename}/Gather_1"
@@ -844,11 +850,13 @@ class Model:
 
     def make_attention_op(self, name, **kwargs):
         op_type = self.attention_attrs["op_type"]
-        
+
         if op_type == "MultiHeadAttention":
             self.make_multi_head_attention(name, add_qk=f"{self.mask_attrs['mask_name']}/output_0", **kwargs)
         elif op_type == "GroupQueryAttention":
-            self.make_group_query_attention(name, seqlens_k=f"{self.mask_attrs['seqlens_k']}/output_0", total_seq_len=f"{self.mask_attrs['total_seq_len']}/output_0", **kwargs)
+            seqlens_k_name = f"{self.mask_attrs['seqlens_k']}/output_0"
+            total_seq_len_name = f"{self.mask_attrs['total_seq_len']}/output_0"
+            self.make_group_query_attention(name, seqlens_k=seqlens_k_name, total_seq_len=total_seq_len_name, **kwargs)
         else:
             raise NotImplementedError(f"The {op_type} op is not currently supported.")
 
@@ -1026,7 +1034,7 @@ class Model:
         #             Mul
         #              |
         #        DownProjMatMul
-        
+
         # Make MatMul nodes
         gate_name = f"/model/layers.{layer_id}/mlp/gate_proj/MatMul"
         self.make_matmul(mlp.gate_proj.weight.detach().numpy(), gate_name, root_input)
@@ -1164,7 +1172,7 @@ class Model:
             # Load PyTorch model
             extra_kwargs = {"trust_remote_code": True} if os.path.exists(self.model_name_or_path) else {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {"cache_dir": self.cache_dir, "use_auth_token": True}
             model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, **extra_kwargs)
-        
+
         # Loop through model and map each module to ONNX/ORT ops
         self.layer_id = 0
         for module in model.modules():
@@ -1212,8 +1220,17 @@ class Model:
         # TODO: add make_position_ids_reformatting() here
 
     def make_attention_mask_reformatting(self):
+        if self.ep_attrs["cuda"]["enable_cuda_graph"] == "1":
+            # ORT does not allow nodes to be placed on mulitple execution providers
+            # with cuda graph enabled. We've only verified it works with GQA and with
+            # past_present_share_buffer enabled(so the total_seq_len in GQA is hardcoded
+            # to a fixed value by logic).
+            # For other models, we need to check if it works and update the logic here.
+            # This assertion is temporary.
+            assert self.past_present_share_buffer
+
         if self.attention_attrs["op_type"] == "GroupQueryAttention":
-            self.make_attention_mask_reformatting_for_gqa()            
+            self.make_attention_mask_reformatting_for_gqa()
         elif self.attention_attrs["op_type"] == "MultiHeadAttention":
             # Make attention mask reformatting nodes
             #
@@ -1232,9 +1249,9 @@ class Model:
         #            /         \               |
         #         Shape       Shape          Shape
         #          |            |              |
-        #        Gather       Gather         Gather                              
+        #        Gather       Gather         Gather
         #       (idx=0)       (idx=1)        (idx=2)
-        #          |            |    |\      /                                        
+        #          |            |    |\      /
         #          |            |    | \    /
         #          |            |    |   Add                                      attention_mask--------+
         #          |            |    |    |                                       /           \         |
@@ -1371,7 +1388,7 @@ class Model:
         concat_3_name = f"{basename}/Concat_3"
         concat_3_inputs = [f"{unsqueeze_7_name}/output_0", "/model/constants/TensorProto.INT64/1D/1"]
         self.make_concat(concat_3_name, concat_3_inputs, dtype=TensorProto.INT64, shape=[2], axis=0)
-        
+
         # Bottom path
         shape_5_name = f"{basename}/Shape_5"
         self.make_shape(shape_5_name, f"{constant_shape_name}/output_0", shape=[2])
@@ -1447,7 +1464,7 @@ class Model:
         #            /         \
         #         Shape       Shape
         #          |            |
-        #        Gather       Gather                              
+        #        Gather       Gather
         #       (idx=0)       (idx=1)
         #          |            |
         #      Unsqueeze   Unsqueeze   Unsqueeze (unsqueeze_for_concat)
@@ -1495,7 +1512,7 @@ class Model:
         unsqueeze_2_name = f"{basename}/Unsqueeze_2"
         unsqueeze_2_inputs = [f"{gather_2_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
         self.make_unsqueeze(unsqueeze_2_name, unsqueeze_2_inputs, dtype=TensorProto.INT64, shape=[1])
-        
+
         concat_name = f"{basename}/Concat" if not input_ids_subgraph else f"{basename}/Concat_1"
         concat_first_two_inputs = [f"{unsqueeze_1_name}/output_0", "/model/constants/TensorProto.INT64/1D/1"]
         concat_last_two_inputs = [f"{unsqueeze_for_concat}/output_0", f"{unsqueeze_2_name}/output_0"] if not input_ids_subgraph else [f"{unsqueeze_2_name}/output_0", f"{unsqueeze_for_concat}/output_0"]
@@ -1512,7 +1529,7 @@ class Model:
         equal_name = f"{basename}/Equal"
         equal_inputs = [f"{concat_name}/output_0", f"{mul_name}/output_0"]
         self.make_equal(equal_name, equal_inputs, shape=[4])
-        
+
         where_name = f"{basename}/Where_1"
         where_inputs = [f"{equal_name}/output_0", f"{constant_shape_name}/output_0", f"{concat_name}/output_0"]
         self.make_where(where_name, where_inputs, dtype=TensorProto.INT64, shape=[4])
@@ -1523,9 +1540,10 @@ class Model:
         self.make_expand(expand_name, expand_inputs, dtype=expand_dtype, shape=expand_shape)
 
         return expand_name
-    
+
+
     def make_attention_mask_reformatting_for_gqa(self):
-        # Make nodes for the attention mask subgraph that calculates 
+        # Make nodes for the attention mask subgraph that calculates
         # attributes about the 2D attention mask to use in GroupQueryAttention
         #
         #                attention_mask
@@ -1538,7 +1556,6 @@ class Model:
         #              |                |
         #          seqlens_k      total_seq_len
         #            (1D)             (int)
-
         basename = "/model/attn_mask_reformat"
         attn_mask_basename = f"{basename}/attn_mask_subgraph"
 
@@ -1579,7 +1596,7 @@ class Model:
         #                  \       /
         #                   Reshape
         #                      |
-        #      position_ids input for RotaryEmbedding       
+        #      position_ids input for RotaryEmbedding
 
         basename = "/model/pos_ids_reformat"
         shape_name = f"{basename}/Shape"
@@ -1641,7 +1658,7 @@ class PhiModel(Model):
         if layer_id == self.num_layers - 1:
             # Norm after last decoder layer of model (last layer --> norm)
             self.layernorm_attrs["last_layernorm"] = True
-        
+
         # Assign output 0 of residual Add as skip input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = f"{residual_add_name}/output_0"
 
@@ -1658,7 +1675,7 @@ def parse_extra_options(kv_items):
     Parse key value pairs that are separated by '='
     """
     kv_pairs = {}
-    
+
     if kv_items:
         for kv_str in kv_items:
             kv = kv_str.split('=')
@@ -1751,7 +1768,7 @@ def get_args():
         "-e",
         "--execution_provider",
         required=True,
-        choices=["cpu", "cuda"],
+        choices=["cpu", "cuda", "dml"],
         help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU)",
     )
 
@@ -1789,6 +1806,9 @@ def get_args():
                 exclude_lm_head = Remove language modeling head from your ONNX model.
                     Use this option when you want to remove the language modeling head from within your ONNX model.
                     Instead of `logits`, you will have `hidden_states` as the output to your ONNX model.
+                enable_cuda_graph = 1 : The model can use CUDA graph capture for CUDA execution provider. If enabled, all nodes being placed on the CUDA EP
+                    is the prerequisite for the CUDA graph to be used correctly. It is not guaranteed that cuda graph be enabled as it depends on the model
+                    and the graph structure.
             """),
     )
 
