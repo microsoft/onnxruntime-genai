@@ -32,7 +32,9 @@ InputIDs::InputIDs(const Model& model, State& state)
     sb_input_ids_ = state_.GetCapturedGraphInfo()->sb_input_ids_.get();
 
 #if USE_DML
-    sb_input_ids_int32_ = state_.GetCapturedGraphInfo()->sb_input_ids_int32_.get();
+    if (model_.device_type_ == DeviceType::DML) {
+      sb_input_ids_int32_ = state_.GetCapturedGraphInfo()->sb_input_ids_int32_.get();
+    }
 #endif
   }
 }
@@ -52,13 +54,17 @@ void InputIDs::Update(RoamingArray<int32_t> next_tokens_unk) {
       value_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
 
 #if USE_DML
-      value_int32_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
+      if (model_.device_type_ == DeviceType::DML) {
+        value_int32_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
+      }
 #endif
     } else {
       value_ = sb_input_ids_->CreateTensorOnStaticBuffer(shape_, type_);
 
 #if USE_DML
-      value_int32_ = sb_input_ids_int32_->CreateTensorOnStaticBuffer(shape_, Ort::TypeToTensorType<int32_t>::type);
+      if (model_.device_type_ == DeviceType::DML) {
+        value_int32_ = sb_input_ids_int32_->CreateTensorOnStaticBuffer(shape_, Ort::TypeToTensorType<int32_t>::type);
+      }
 #endif
     }
 

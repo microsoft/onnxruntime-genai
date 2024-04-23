@@ -5,7 +5,7 @@
 
 #include "captured_graph_pool.h"
 
-#ifdef USE_DML
+#if USE_DML
 #include "dml_provider_factory.h"
 #include "../dml/dml_helpers.h"
 #include "../dml/dml_execution_context.h"

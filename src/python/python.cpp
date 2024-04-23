@@ -247,18 +247,18 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   m.def("set_log_options", &SetLogOptions);
 
   m.def("is_cuda_available", []() {
-#ifdef USE_CUDA
+#if USE_CUDA
     return true;
 #else
-        return false;
+    return false;
 #endif
   });
 
   m.def("is_dml_available", []() {
-#ifdef USE_DML
+#if USE_DML
     return true;
 #else
-        return false;
+    return false;
 #endif
   });
 
