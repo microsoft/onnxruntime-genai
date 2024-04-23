@@ -32,7 +32,6 @@ stages:
     - template: jobs/py-packaging-job.yml
       parameters:
         arch: 'x64'
-        cuda_version: ${{ parameters.cuda_version }}
         ep: 'directml'
         ort_version: ${{ parameters.ort_version }}
         os: 'win'
