@@ -13,28 +13,6 @@ steps:
 
 #Special case for DML
 - ${{ if ne(parameters.ep, 'directml') }}:
-  - task: DownloadPackage@1
-    inputs:
-      packageType: 'nuget'
-      feed: 'https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json'
-      definition: 'Microsoft.ML.OnnxRuntime.DirectML' # Can also be package name
-      version: '$(ort_version)'
-      extract: false
-      downloadPath: '$(Build.Repository.LocalPath)'
-    displayName: Download $(ort_filename)
-  - task: ExtractFiles@1
-    inputs:
-      archiveFilePatterns: '$(Build.Repository.LocalPath)/$(ort_filename).nupkg'
-      destinationFolder: '$(Build.Repository.LocalPath)'
-      cleanDestinationFolder: false
-      overwriteExistingFiles: true
-    displayName: Unzip OnnxRuntime
-  - task: CopyFiles@2
-    inputs:
-      SourceFolder: '$(Build.Repository.LocalPath)/$(ort_filename)'
-      TargetFolder: '$(Build.Repository.LocalPath)/ort'
-    displayName: Copy OnnxRuntime to ort
-- ${{ else }}:
   - task: DownloadGitHubRelease@0
     inputs:
       connection: 'GitHub - Release'
@@ -47,11 +25,32 @@ steps:
   - task: ExtractFiles@1
     inputs:
       archiveFilePatterns: '$(Build.Repository.LocalPath)/$(ort_filename).${{ parameters.archiveType }}'
+      destinationFolder: '$(Build.Repository.LocalPath)'
+      cleanDestinationFolder: false
+      overwriteExistingFiles: true
+    displayName: Unzip OnnxRuntime
+  - task: CopyFiles@2
+    inputs:
+      SourceFolder: '$(Build.Repository.LocalPath)/$(ort_filename)'
+      TargetFolder: '$(Build.Repository.LocalPath)/ort'
+    displayName: Copy OnnxRuntime to ort
+- ${{ else }}:
+  - task: DownloadPackage@1
+    inputs:
+      packageType: 'nuget'
+      feed: 'https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json'
+      definition: 'Microsoft.ML.OnnxRuntime.DirectML' # Can also be package name
+      version: '$(ort_version)'
+      extract: false
+      downloadPath: '$(Build.Repository.LocalPath)'
+    displayName: Download $(ort_filename)
+  - task: ExtractFiles@1
+    inputs:
+      archiveFilePatterns: '$(Build.Repository.LocalPath)/$(ort_filename).nupkg'
       destinationFolder: '$(Build.Repository.LocalPath)/ort'
       cleanDestinationFolder: false
       overwriteExistingFiles: true
     displayName: Unzip OnnxRuntime
-
   - task: CopyFiles@2
     inputs:
       SourceFolder: '$(Build.Repository.LocalPath)/ort/runtimes/win-x64/native'
