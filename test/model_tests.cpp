@@ -21,7 +21,7 @@ static const std::pair<const char*, const char*> c_tiny_gpt2_model_paths[] = {
 };
 
 // DML doesn't support GPT attention
-#ifndef USE_DML
+#if !USE_DML
 TEST(ModelTests, GreedySearchGptFp32) {
   std::vector<int64_t> input_ids_shape{2, 4};
   std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};

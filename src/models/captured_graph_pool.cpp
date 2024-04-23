@@ -54,7 +54,9 @@ CapturedGraphInfoPtr CapturedGraphPool::ReserveCapturedGraph(const Model& model,
     new_captured_graph->sb_input_ids_ = std::make_unique<StaticBuffer>(allocator_device_, max_beam_batch_size);
 
 #if USE_DML
-    new_captured_graph->sb_input_ids_int32_ = std::make_unique<StaticBuffer>(allocator_device_, max_beam_batch_size);
+    if (model.device_type_ == DeviceType::DML) {
+      new_captured_graph->sb_input_ids_int32_ = std::make_unique<StaticBuffer>(allocator_device_, max_beam_batch_size);
+    }
 #endif
 
     // Create the static buffers for the cache
@@ -76,7 +78,9 @@ CapturedGraphInfoPtr CapturedGraphPool::ReserveCapturedGraph(const Model& model,
 
 #if USE_DML
       // DML currently needs an additional static buffer for the mask
-      new_captured_graph->sb_attention_mask_next_ = std::make_unique<StaticBuffer>(allocator_device_, max_beam_batch_size);
+      if (model.device_type_ == DeviceType::DML) {
+        new_captured_graph->sb_attention_mask_next_ = std::make_unique<StaticBuffer>(allocator_device_, max_beam_batch_size);
+      }
 #endif
     }
 
