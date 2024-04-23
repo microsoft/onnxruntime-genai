@@ -49,15 +49,14 @@ pip install --pre onnxruntime-genai-cuda --index-url=https://aiinfra.pkgs.visual
 
 ## Run the model
 
-Run the model with [model-qa.py](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/model-qa.py).
+Run the model with [this script](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/model-qa.py).
 
 The script accepts a model folder and takes the generation parameters from the config in that model folder. You can also override the parameters on the command line.
 
 This example is using the long context model running with DirectML on Windows.
 
 ```bash
-curl https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/model-qa.py -o model-qa.py
-python model-qa.py -m Phi-3-mini-4k-instruct-onnx/directml/directml-int4-awq-block-128
+python model-qa.py -m models/phi3-mini-128k-instruct-directml-int4-awq-block-128
 ```
 
 Once the script has loaded the model, it will ask you for input in a loop, streaming the output as it is produced the model. For example:
