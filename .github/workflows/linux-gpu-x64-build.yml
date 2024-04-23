@@ -70,6 +70,8 @@ jobs:
           mkdir -p ort/lib
           mv ${{ env.ORT_PACKAGE_NAME }}/buildTransitive/native/include ort/
           mv ${{ env.ORT_PACKAGE_NAME }}/runtimes/linux-x64/native/* ort/lib/
+          ort_version=$(echo ${{ env.ORT_NIGHTLY_VERSION }} | cut -d. -f1-2)
+          cp ort/lib/libonnxruntime.so ort/lib/libonnxruntime.so.$ort_version
 
 
       - name: Get Docker Image
