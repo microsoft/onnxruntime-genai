@@ -38,7 +38,7 @@ steps:
   - task: DownloadPackage@1
     inputs:
       packageType: 'nuget'
-      feed: '2692857e-05ef-43b4-ba9c-ccf1c22c437c'
+      feed: '7982ae20-ed19-4a35-a362-a96ac99897b7'
       definition: 'Microsoft.ML.OnnxRuntime.DirectML' # Can also be package name
       version: '$(ort_version)'
       extract: false
