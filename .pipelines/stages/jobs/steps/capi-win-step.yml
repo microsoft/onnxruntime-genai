@@ -41,8 +41,7 @@ steps:
 - ${{ else }}:
     - bash: |
         azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/tmp/ort/$(os)/$(ep)" '$(Build.Repository.LocalPath)/tmp_ort'
-        displayName: 'Download ONNXRuntime'
-
+      displayName: 'Download ONNXRuntime'
     - task: CopyFiles@2
       inputs:
         SourceFolder: '$(Build.Repository.LocalPath)/tmp_ort/**/lib'
@@ -51,15 +50,6 @@ steps:
       inputs:
         SourceFolder: '$(Build.Repository.LocalPath)/tmp_ort/**/include'
         TargetFolder: '$(Build.Repository.LocalPath)/ort/include'
-
-- ${{ if eq(parameters.ep, 'directml') }}:
-  - powershell: |
-      Invoke-WebRequest -Uri $(dml_url) -OutFile $(dml_zip)
-      Expand-Archive $(dml_zip) -DestinationPath $(dml_dir)
-      Remove-Item -Path $(dml_zip)
-      mv $(dml_dir)\bin\x64-win\DirectML.dll ort\lib
-      mv $(dml_dir)\include\DirectML.h ort\include
-    workingDirectory: '$(Build.Repository.LocalPath)'
 
 - ${{ if eq(parameters.ep, 'directml') }}:
   - powershell: |
