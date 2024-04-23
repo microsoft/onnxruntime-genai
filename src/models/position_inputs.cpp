@@ -303,7 +303,11 @@ void PositionInputs::UpdateAttentionMask(int current_length) {
       throw std::runtime_error("PositionIDs::Update - Unsupported device type");
   }
 
-#if !USE_DML
+#if USE_DML
+  if (model_.device_type_ != DeviceType::DML) {
+    attention_mask_ = std::move(attention_mask_next_);
+  }
+#else
   attention_mask_ = std::move(attention_mask_next_);
 #endif
 
