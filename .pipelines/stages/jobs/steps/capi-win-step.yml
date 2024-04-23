@@ -2,6 +2,8 @@ parameters:
 - name: target
   type: string
   default: 'onnxruntime-genai'
+- name: use_build_in_ort
+  type: boolean
 - name: ep
   type: string
   default: 'cpu'
