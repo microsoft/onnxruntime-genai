@@ -148,7 +148,7 @@
         "windows_release_default",
         "windows_directml_default"
       ],
-      "displayName": "windows x64 cpu release",
+      "displayName": "windows x64 directml release",
       "binaryDir": "${sourceDir}/build/directml"
     },
     {
