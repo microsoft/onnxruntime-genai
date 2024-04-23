@@ -28,7 +28,7 @@ stages:
         ort_version: ${{ parameters.ort_version }}
         os: 'win'
         publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
-  - ${{ if eq(parameters.enable_win_cuda, true) }}:
+  - ${{ if eq(parameters.enable_win_dml, true) }}:
     - template: jobs/py-packaging-job.yml
       parameters:
         arch: 'x64'
