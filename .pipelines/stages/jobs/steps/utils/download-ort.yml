@@ -43,10 +43,6 @@ steps:
       overwriteExistingFiles: true
     displayName: Unzip OnnxRuntime
 
-  - script: |
-      dir $(Build.Repository.LocalPath)/ort
-    continueOnError: true
-
   - task: CopyFiles@2
     inputs:
       SourceFolder: '$(Build.Repository.LocalPath)/ort/runtimes/win-x64/native'
