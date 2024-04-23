@@ -8,7 +8,7 @@
 #include "decoder_only.h"
 #include "whisper.h"
 #include "kernels.h"
-#ifdef USE_DML
+#if USE_DML
 #include <wil/wrl.h>
 #include "dml_provider_factory.h"
 #include "../dml/dml_smart_container.h"
@@ -347,7 +347,7 @@ void Model::CreateSessionOptions() {
 
       Ort::ThrowOnError(Ort::api->UpdateROCMProviderOptions(&ort_provider_options, keys.data(), values.data(), keys.size()));
       ort_options.AppendExecutionProvider_ROCM(ort_provider_options);
-#ifdef USE_DML
+#if USE_DML
     } else if (provider_options.name == "dml") {
       dml_objects_ = DmlHelpers::CreateDmlObjects();
 
@@ -442,7 +442,7 @@ void ConvertFp16ToFp32(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<Or
         fp32[i] = Float16ToFloat32(fp16[i]);
       break;
 
-#ifdef USE_CUDA
+#if USE_CUDA
     case DeviceType::CUDA:
       cuda::LaunchFp16ToFp32(fp16, fp32, count, stream);
       break;

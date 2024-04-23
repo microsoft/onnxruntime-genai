@@ -44,17 +44,18 @@ RoamingArray<float> Logits::Get() {
   // Convert from float16 to float32 if necessary
   if (type_ == Ort::TypeToTensorType<Ort::Float16_t>::type) {
 #if USE_DML
-    DmlHelpers::DmlCastInputToOutput(
-        model_.GetDmlExecutionContext(),
-        *model_.allocator_device_,
-        *value16_,
-        value32_,
-        model_.GetDmlDevice(),
-        model_.GetOrtDmlApi(),
-        logits_cast_command_list_state_);
-#else
-    ConvertFp16ToFp32(*model_.allocator_device_, *value16_, value32_, model_.device_type_, model_.cuda_stream_);
+    if (model_.device_type_ == DeviceType::DML) {
+      DmlHelpers::DmlCastInputToOutput(
+          model_.GetDmlExecutionContext(),
+          *model_.allocator_device_,
+          *value16_,
+          value32_,
+          model_.GetDmlDevice(),
+          model_.GetOrtDmlApi(),
+          logits_cast_command_list_state_);
+    } else
 #endif
+      ConvertFp16ToFp32(*model_.allocator_device_, *value16_, value32_, model_.device_type_, model_.cuda_stream_);
   }
 
   // First iteration? Then copy the logits over to a {batch_beams, 1, vocab_size} tensor
@@ -73,7 +74,9 @@ RoamingArray<float> Logits::Get() {
 
 #if USE_DML
     // DML doesn't support on-device scoring yet, so we need to download some data to the CPU
-    value32_cpu_ = OrtValue::CreateTensor<float>(model_.allocator_cpu_, shape_);
+    if (model_.device_type_ == DeviceType::DML) {
+      value32_cpu_ = OrtValue::CreateTensor<float>(model_.allocator_cpu_, shape_);
+    }
 #endif
 
     size_t vocab_index = 0;  // Simpler math to have this index go up by vocab_size for every logit chunk we process
