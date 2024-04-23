@@ -13,6 +13,8 @@ parameters:
   values:
   - 'linux'
   - 'win'
+- name: use_build_in_ort
+  type: boolean
 - name: publish_to_ado_feed
   type: boolean
 
