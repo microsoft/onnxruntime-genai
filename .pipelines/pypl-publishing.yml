@@ -36,6 +36,11 @@ parameters:
   values:
   - '11.8'
   - '12.2'
+  -
+- name: use_build_in_ort
+  displayName: 'Whether to use the built-in OnnxRuntime package.'
+  type: boolean
+  default: false
 
 - name: publish_to_ado_feed
   displayName: 'Whether to publish the packages to ADO feed.'
@@ -62,3 +67,4 @@ stages:
     ort_version: ${{ parameters.ort_version }}
     cuda_version: ${{ parameters.cuda_version }}
     publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
+    use_build_in_ort: ${{ parameters.use_build_in_ort }}
