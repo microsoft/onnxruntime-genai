@@ -29,7 +29,7 @@ struct Logits {
   StaticBuffer* sb_logits16_{};
 
 #if USE_CUDA
-  cuda_unique_ptr<int32_t> cuda_eos_token_ids_ptr_; // eos_token_ids from params, but in cuda accessible memory
+  cuda_unique_ptr<int32_t> cuda_eos_token_ids_ptr_;  // eos_token_ids from params, but in cuda accessible memory
   gpu_span<int32_t> cuda_eos_token_ids_;
 #endif
 
