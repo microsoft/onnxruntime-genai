@@ -26,6 +26,14 @@
       }
     },
     {
+      "name": "windows_directml_default",
+      "inherits": "windows_cpu_default",
+      "cacheVariables": {
+        "USE_CUDA": "OFF",
+        "USE_DML": "ON"
+      }
+    },
+    {
       "name": "windows_release_default",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
@@ -130,6 +138,15 @@
       "inherits": [
         "windows_release_default",
         "windows_cpu_default"
+      ],
+      "displayName": "windows x64 cpu release",
+      "binaryDir": "${sourceDir}/build/cpu"
+    },
+    {
+      "name": "windows_x64_directml_release",
+      "inherits": [
+        "windows_release_default",
+        "windows_directml_default"
       ],
       "displayName": "windows x64 cpu release",
       "binaryDir": "${sourceDir}/build/cpu"
