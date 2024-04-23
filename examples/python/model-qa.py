@@ -14,6 +14,7 @@ def main(args):
     tokenizer_stream = tokenizer.create_stream()
     if args.verbose: print("Tokenizer created")
     if args.verbose: print()
+    search_options = {name:getattr(args, name) for name in ['do_sample', 'max_length', 'min_length', 'top_p', 'top_k', 'temperature', 'repetition_penalty'] if name in args}
 
     # Keep asking for input prompts in a loop
     while True:
@@ -28,7 +29,7 @@ def main(args):
 
         params = og.GeneratorParams(model)
         params.try_use_cuda_graph_with_max_batch_size(1)
-        params.set_search_options(do_sample=args.do_random_sampling, max_length=args.max_length, min_length=args.min_length, top_p=args.top_p, top_k=args.top_k, temperature=args.temperature, repetition_penalty=args.repetition_penalty)
+        params.set_search_options(**search_options)
         params.input_ids = input_tokens
         generator = og.Generator(model, params)
         if args.verbose: print("Generator created")
@@ -41,17 +42,20 @@ def main(args):
         print()
         print("Output: ", end='', flush=True)
 
-        while not generator.is_done():
-            generator.compute_logits()
-            generator.generate_next_token()
-            if args.timings:
-                if first:
-                    first_token_timestamp = time.time()
-                    first = False
+        try:
+            while not generator.is_done():
+                generator.compute_logits()
+                generator.generate_next_token()
+                if args.timings:
+                    if first:
+                        first_token_timestamp = time.time()
+                        first = False
 
-            new_token = generator.get_next_tokens()[0]
-            print(tokenizer_stream.decode(new_token), end='', flush=True)
-            if args.timings: new_tokens.append(new_token)
+                new_token = generator.get_next_tokens()[0]
+                print(tokenizer_stream.decode(new_token), end='', flush=True)
+                if args.timings: new_tokens.append(new_token)
+        except KeyboardInterrupt:
+            print("  --control+c pressed, aborting generation--")
         print()
         print()
 
@@ -62,17 +66,17 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="End-to-end chat-bot example for gen-ai")
+    parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS, description="End-to-end chat-bot example for gen-ai")
     parser.add_argument('-m', '--model', type=str, required=True, help='Onnx model folder path (must contain config.json and model.onnx)')
-    parser.add_argument('-i', '--min_length', type=int, default=0, help='Min number of tokens to generate including the prompt')
-    parser.add_argument('-l', '--max_length', type=int, default=200, help='Max number of tokens to generate including the prompt')
+    parser.add_argument('-i', '--min_length', type=int, help='Min number of tokens to generate including the prompt')
+    parser.add_argument('-l', '--max_length', type=int, help='Max number of tokens to generate including the prompt')
     parser.add_argument('-ds', '--do_random_sampling', action='store_true', help='Do random sampling. When false, greedy or beam search are used to generate the output. Defaults to false')
-    parser.add_argument('-p', '--top_p', type=float, default=0.9, help='Top p probability to sample with')
-    parser.add_argument('-k', '--top_k', type=int, default=50, help='Top k tokens to sample from')
-    parser.add_argument('-t', '--temperature', type=float, default=1.0, help='Temperature to sample with')
-    parser.add_argument('-r', '--repetition_penalty', type=float, default=1.0, help='Repetition penalty to sample with')
-    parser.add_argument('-v', '--verbose', action='store_true', help='Print verbose output and timing information. Defaults to false')
+    parser.add_argument('-p', '--top_p', type=float, help='Top p probability to sample with')
+    parser.add_argument('-k', '--top_k', type=int, help='Top k tokens to sample from')
+    parser.add_argument('-t', '--temperature', type=float, help='Temperature to sample with')
+    parser.add_argument('-r', '--repetition_penalty', type=float, help='Repetition penalty to sample with')
+    parser.add_argument('-v', '--verbose', action='store_true', default=False, help='Print verbose output and timing information. Defaults to false')
     parser.add_argument('-s', '--system_prompt', type=str, default='', help='Prepend a system prompt to the user input prompt. Defaults to empty')
-    parser.add_argument('-g', '--timings', action='store_true', help='Print timing information for each generation step. Defaults to false')
+    parser.add_argument('-g', '--timings', action='store_true', default=False, help='Print timing information for each generation step. Defaults to false')
     args = parser.parse_args()
     main(args)
