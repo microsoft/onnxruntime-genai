@@ -9,4 +9,4 @@ namespace benchmark::utils {
 
 size_t GetPeakWorkingSetSizeInBytes();
 
-}
+}  // namespace benchmark::utils

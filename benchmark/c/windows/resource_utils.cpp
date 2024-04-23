@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "cpu_utils.h"
+#include "resource_utils.h"
 
 #include <Windows.h>
 #include <psapi.h>
@@ -20,4 +20,4 @@ size_t GetPeakWorkingSetSizeInBytes() {
   return pmc.PeakWorkingSetSize;
 }
 
-}
+}  // namespace benchmark::utils

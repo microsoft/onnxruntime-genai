@@ -13,8 +13,8 @@
 
 #include "ort_genai.h"
 
-#include "cpu_utils.h"
 #include "options.h"
+#include "resource_utils.h"
 
 namespace {
 
