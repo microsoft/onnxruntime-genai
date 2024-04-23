@@ -66,7 +66,7 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS, description="End-to-end chat-bot example for gen-ai")
+    parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS, description="End-to-end AI Question/Answer example for gen-ai")
     parser.add_argument('-m', '--model', type=str, required=True, help='Onnx model folder path (must contain config.json and model.onnx)')
     parser.add_argument('-i', '--min_length', type=int, help='Min number of tokens to generate including the prompt')
     parser.add_argument('-l', '--max_length', type=int, help='Max number of tokens to generate including the prompt')
