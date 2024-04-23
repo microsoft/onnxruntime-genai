@@ -46,7 +46,7 @@ steps:
     displayName: Download $(ort_filename)
   - task: ExtractFiles@1
     inputs:
-      archiveFilePatterns: '$(Build.Repository.LocalPath)/$(ort_filename).nupkg'
+      archiveFilePatterns: '$(Build.Repository.LocalPath)/*.nupkg'
       destinationFolder: '$(Build.Repository.LocalPath)/ort'
       cleanDestinationFolder: false
       overwriteExistingFiles: true
