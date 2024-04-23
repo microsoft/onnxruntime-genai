@@ -61,10 +61,6 @@ jobs:
         mv $env:ort_dir\build\native\include\onnxruntime_c_api.h ort\include
         mv $env:dml_dir\include\DirectML.h ort\include
 
-    - name: Rename OnnxRuntime to ort
-      run: |
-        Rename-Item -Path $env:ort_dir -NewName ort
-
     - name: Configure CMake
       run: |
         cmake --preset windows_x64_directml_release -DTEST_PHI2=False
