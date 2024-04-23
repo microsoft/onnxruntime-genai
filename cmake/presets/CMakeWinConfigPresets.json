@@ -149,7 +149,7 @@
         "windows_directml_default"
       ],
       "displayName": "windows x64 cpu release",
-      "binaryDir": "${sourceDir}/build/cpu"
+      "binaryDir": "${sourceDir}/build/directml"
     },
     {
       "name": "windows_x64_cpu_debug",
