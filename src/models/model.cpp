@@ -9,9 +9,9 @@
 #include "whisper.h"
 #include "kernels.h"
 #ifdef USE_DML
-//  Because dml_provider_factory includes windows headers that #define min and max, this next line will prevent this from happening
-#define NOMINMAX
+#include <wil/wrl.h>
 #include "dml_provider_factory.h"
+#include "../dml/dml_smart_container.h"
 
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
 
@@ -197,22 +197,6 @@ Ort::Allocator* GetCudaAllocator(OrtSession& session) {
 }
 #endif
 
-#if USE_DML
-// Since Python/Others can and will hold onto a generator object past the model object's lifetime we need to ensure
-// the allocator used is not destroyed until last. This keeps the allocator around until exit, after all other memory
-// has been destroyed.
-Ort::Allocator* GetDmlAllocator(OrtSession& session) {
-  static std::unique_ptr<OrtMemoryInfo> memory_info_dml_;
-  static std::unique_ptr<Ort::Allocator> allocator_dml_;
-
-  if (!allocator_dml_) {
-    memory_info_dml_ = OrtMemoryInfo::Create("DML", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-    allocator_dml_ = Ort::Allocator::Create(session, *memory_info_dml_);
-  }
-  return allocator_dml_.get();
-}
-#endif
-
 SessionInfo::SessionInfo(OrtSession& session) {
   auto input_names = session.GetInputNames();
   std::vector<ONNXTensorElementDataType> input_types(input_names.size());
@@ -268,11 +252,25 @@ void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
   }
 #elif USE_DML
   if (device_type_ == DeviceType::DML) {
-    allocator_device_ = GetDmlAllocator(session);
+    static constexpr GUID dml_smart_container_guid = {0x6b7ff369, 0xc805, 0x42cc, {0x8a, 0x5f, 0xb5, 0x5f, 0x67, 0xe5, 0xbd, 0xcc}};
+
+    ComPtr<DmlSmartContainer> smart_container;
+    uint32_t smart_container_ptr_size = static_cast<uint32_t>(sizeof(smart_container.GetAddressOf()));
+
+    // We reuse the allocator assigned to this device if possible; otherwise, we create a new one and store it on the device
+    if (FAILED(dml_objects_.d3d12_device->GetPrivateData(dml_smart_container_guid, &smart_container_ptr_size, smart_container.GetAddressOf()))) {
+      auto memory_info_dml = OrtMemoryInfo::Create("DML", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+      auto allocator_dml = Ort::Allocator::Create(session, *memory_info_dml);
+      smart_container = wil::MakeOrThrow<DmlSmartContainer>(std::move(memory_info_dml), std::move(allocator_dml));
+      THROW_IF_FAILED(dml_objects_.d3d12_device->SetPrivateDataInterface(dml_smart_container_guid, smart_container.Get()));
+    }
+
+    allocator_device_ = smart_container->GetAllocator();
   }
 #endif
 
   session_info_ = std::make_unique<SessionInfo>(session);
+  captured_graph_pool_ = std::make_shared<CapturedGraphPool>(config_.get(), session_info_.get(), allocator_device_);
 }
 
 void Model::CreateSessionOptions() {
@@ -350,15 +348,38 @@ void Model::CreateSessionOptions() {
       ort_options.AppendExecutionProvider_ROCM(ort_provider_options);
 #ifdef USE_DML
     } else if (provider_options.name == "dml") {
-      device_type_ = DeviceType::DML;  // We use a DML allocator for input/output caches, but other tensors will use CPU tensors
-      const OrtDmlApi* p_dml_api{};
-      Ort::ThrowOnError(Ort::api->GetExecutionProviderApi("DML", ORT_API_VERSION, reinterpret_cast<const void**>(&p_dml_api)));
-      if (!p_dml_api)
-        throw std::runtime_error("Unexpected nullptr getting OrtDmlApi");
+      dml_objects_ = DmlHelpers::CreateDmlObjects();
+
       auto directml_dll = CurrentModulePath() + L"DirectML.dll";
-      if (LoadLibraryExW(directml_dll.c_str(), nullptr, 0) == NULL)
+      wil::unique_hmodule smart_directml_dll(LoadLibraryExW(directml_dll.c_str(), nullptr, 0));
+      THROW_LAST_ERROR_IF(!smart_directml_dll);
+
+      if (LoadLibraryExW(directml_dll.c_str(), nullptr, 0) == NULL) {
         throw std::runtime_error("DirectML.dll not found");
-      p_dml_api->SessionOptionsAppendExecutionProvider_DML(&ort_options, 0);
+      }
+
+      auto dml_create_device1_fn = reinterpret_cast<decltype(&DMLCreateDevice1)>(GetProcAddress(smart_directml_dll.get(), "DMLCreateDevice1"));
+      THROW_LAST_ERROR_IF(!dml_create_device1_fn);
+      THROW_IF_FAILED(dml_create_device1_fn(dml_objects_.d3d12_device.Get(), DML_CREATE_DEVICE_FLAG_NONE, DML_FEATURE_LEVEL_5_0, IID_PPV_ARGS(&dml_device_)));
+
+      Ort::ThrowOnError(Ort::api->GetExecutionProviderApi("DML", ORT_API_VERSION, reinterpret_cast<const void**>(&p_dml_api_)));
+      if (!p_dml_api_) {
+        throw std::runtime_error("Unexpected nullptr getting OrtDmlApi");
+      }
+
+      dml_execution_context_ = std::make_unique<DmlExecutionContext>(
+          dml_objects_.d3d12_device.Get(),
+          dml_device_.Get(),
+          dml_objects_.command_queue.Get(),
+          *allocator_device_,
+          p_dml_api_);
+
+      dml_pooled_upload_heap_ = std::make_unique<DmlPooledUploadHeap>(dml_objects_.d3d12_device.Get(), dml_execution_context_.get());
+      dml_readback_heap_ = std::make_unique<DmlReadbackHeap>(dml_objects_.d3d12_device.Get(), dml_execution_context_.get());
+
+      ort_options.AddConfigEntry("ep.dml.enable_graph_capture", "1");
+      p_dml_api_->SessionOptionsAppendExecutionProvider_DML1(&ort_options, dml_device_.Get(), dml_objects_.command_queue.Get());
+      device_type_ = DeviceType::DML;  // We use a DML allocator for input/output caches, but other tensors will use CPU tensors
 #endif
     } else
       throw std::runtime_error("Unknown provider type: " + provider_options.name);
@@ -516,7 +537,7 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
 }
 
 void Model::GetMaxBatchSizeFromGeneratorParams(const GeneratorParams& params) {
-  bool is_cuda_graph_enabled = IsCudaGraphEnabled(config_->model.decoder.session_options);
+  bool is_cuda_graph_enabled = device_type_ == DeviceType::DML || IsCudaGraphEnabled(config_->model.decoder.session_options);
   max_batch_size_ = params.max_batch_size;
 
   if (DeviceType::CUDA == device_type_) {
@@ -529,6 +550,12 @@ void Model::GetMaxBatchSizeFromGeneratorParams(const GeneratorParams& params) {
       }
       use_cuda_graph_ = true;
     }
+  } else if (DeviceType::DML == device_type_) {
+    if (max_batch_size_ == 0) {
+      throw std::runtime_error("max_batch_size needs to be set when using DirectML.");
+    }
+
+    use_cuda_graph_ = true;
   } else {
     if (is_cuda_graph_enabled || max_batch_size_ > 0) {
       throw std::runtime_error("CUDA graph is not supported on this device");

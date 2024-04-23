@@ -1,5 +1,4 @@
 #include "../generators.h"
-#include "../span.h"
 #include "static_buffer.h"
 
 namespace Generators {

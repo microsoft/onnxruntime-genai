@@ -3,6 +3,16 @@
 #include "tfmtok_c.h"
 #endif
 
+#include "captured_graph_pool.h"
+
+#ifdef USE_DML
+#include "dml_provider_factory.h"
+#include "../dml/dml_helpers.h"
+#include "../dml/dml_execution_context.h"
+#include "../dml/dml_pooled_upload_heap.h"
+#include "../dml/dml_readback_heap.h"
+#endif
+
 namespace Generators {
 
 struct Tokenizer;
@@ -14,6 +24,7 @@ struct State {
   virtual ~State() = default;
 
   virtual RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices = {}) = 0;
+  virtual const CapturedGraphInfo* GetCapturedGraphInfo() const { return nullptr; }
 
   std::shared_ptr<const GeneratorParams> params_;
 
@@ -110,6 +121,8 @@ struct Model : std::enable_shared_from_this<Model> {
 
   void GetMaxBatchSizeFromGeneratorParams(const GeneratorParams& params);
 
+  CapturedGraphPool* GetCapturedGraphPool() const { return captured_graph_pool_.get(); }
+
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
   std::unique_ptr<OrtRunOptions> run_options_;
@@ -126,9 +139,30 @@ struct Model : std::enable_shared_from_this<Model> {
   bool use_cuda_graph_{};
   int max_batch_size_{};
 
+#if USE_DML
+  DmlExecutionContext* GetDmlExecutionContext() const { return dml_execution_context_.get(); }
+  DmlReadbackHeap* GetDmlReadbackHeap() const { return dml_readback_heap_.get(); }
+  DmlPooledUploadHeap* GetDmlUploadHeap() const { return dml_pooled_upload_heap_.get(); }
+  const OrtDmlApi* GetOrtDmlApi() const { return p_dml_api_; }
+  IDMLDevice* GetDmlDevice() const { return dml_device_.Get(); }
+  ID3D12Device* GetD3D12Device() const { return dml_objects_.d3d12_device.Get(); }
+#endif
+
  protected:
   void InitDeviceAllocator(OrtSession& session);
   void CreateSessionOptions();
+
+ private:
+#if USE_DML
+  mutable DmlObjects dml_objects_;
+  const OrtDmlApi* p_dml_api_{};
+  std::unique_ptr<DmlPooledUploadHeap> dml_pooled_upload_heap_;
+  std::unique_ptr<DmlExecutionContext> dml_execution_context_;
+  std::unique_ptr<DmlReadbackHeap> dml_readback_heap_;
+  ComPtr<IDMLDevice> dml_device_;
+#endif
+
+  std::shared_ptr<CapturedGraphPool> captured_graph_pool_;
 };
 
 }  // namespace Generators

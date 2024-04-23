@@ -23,7 +23,13 @@ struct InputIDs {
   std::unique_ptr<OrtValue> value_;
 
   // Used for decoding runs with cuda graphs.
-  std::unique_ptr<StaticBuffer> sb_input_ids_;
+  StaticBuffer* sb_input_ids_{};
+
+#if USE_DML
+  std::unique_ptr<OrtValue> value_int32_;
+  StaticBuffer* sb_input_ids_int32_{};
+  DmlReusedCommandListState input_ids_cast_command_list_state_{};
+#endif
 };
 
 }  // namespace Generators
