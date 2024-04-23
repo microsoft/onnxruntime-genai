@@ -130,7 +130,6 @@ pip install *.whl
 
 Run the model with [this script](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/model-qa.py).
 
-
 The script accepts a model folder and takes the generation parameters from the config in that model folder. You can also override the parameters on the command line.
 
 ```bash
@@ -141,11 +140,7 @@ python model-qa.py -m models/phi3-mini-4k-instruct-cpu-int4-rtn-block-32
 Once the script has loaded the model, it will ask you for input in a loop, streaming the output as it is produced the model. For example:
 
 ```bash
-Input: <|user|>Tell me a joke<|end|><|assistant|>
+Input: <|user|>Tell me a joke about creative writing<|end|><|assistant|>
  
-Output:  Why don't scientists trust atoms?
- 
-Because they make up everything!
- 
-This joke plays on the double meaning of "make up." In science, atoms are the fundamental building blocks of matter, literally making up everything. However, in a colloquial sense, "to make up" can mean to fabricate or lie, hence the humor.
+Output:  Why don't writers ever get lost? Because they always follow the plot! 
 ```
