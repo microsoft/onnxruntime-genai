@@ -2,7 +2,10 @@
 
 #include <assert.h>
 #include <stdexcept>
+#include <dxcore.h>
+#include <dxcore_interface.h>
 #include "dml_helpers.h"
+#include "dml_adapter_info.h"
 
 namespace DmlHelpers {
 
@@ -330,4 +333,9 @@ void DmlCastInputToOutput(
 
   DmlHelpers::ExecuteReusableCommandList(execution_context, command_list_state, allocator, ort_dml_api, input_resources, input_sizes, output_resources, output_sizes, rebind);
 }
+
+bool IsIntelDevice(ID3D12Device* d3d12_device) {
+  return AdapterInfo(d3d12_device).IsIntel();
+}
+
 }  // namespace DmlHelpers

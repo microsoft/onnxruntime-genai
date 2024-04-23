@@ -146,6 +146,7 @@ struct Model : std::enable_shared_from_this<Model> {
   const OrtDmlApi* GetOrtDmlApi() const { return p_dml_api_; }
   IDMLDevice* GetDmlDevice() const { return dml_device_.Get(); }
   ID3D12Device* GetD3D12Device() const { return dml_objects_.d3d12_device.Get(); }
+  bool IsIntelDevice() const { return is_intel_device_; }
 #endif
 
  protected:
@@ -160,6 +161,7 @@ struct Model : std::enable_shared_from_this<Model> {
   std::unique_ptr<DmlExecutionContext> dml_execution_context_;
   std::unique_ptr<DmlReadbackHeap> dml_readback_heap_;
   ComPtr<IDMLDevice> dml_device_;
+  bool is_intel_device_{};
 #endif
 
   std::shared_ptr<CapturedGraphPool> captured_graph_pool_;
