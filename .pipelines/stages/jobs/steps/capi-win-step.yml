@@ -2,6 +2,9 @@ parameters:
 - name: target
   type: string
   default: 'onnxruntime-genai'
+- name: ep
+  type: string
+  default: 'cpu'
 steps:
 - bash: |
     echo "##[error]Error: ep and arch are not set"
@@ -32,6 +35,7 @@ steps:
 - template: utils/download-ort.yml
   parameters:
     archiveType: 'zip'
+    ep: ${{ parameters.ep }}
 
 - powershell: |
     azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" 'cuda_sdk'

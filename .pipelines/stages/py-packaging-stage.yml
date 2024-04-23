@@ -3,6 +3,8 @@ parameters:
   type: boolean
 - name: enable_win_cuda
   type: boolean
+- name: enable_win_dml
+  type: boolean
 - name: enable_linux_cpu
   type: boolean
 - name: enable_linux_cuda
@@ -23,6 +25,15 @@ stages:
       parameters:
         arch: 'x64'
         ep: 'cpu'
+        ort_version: ${{ parameters.ort_version }}
+        os: 'win'
+        publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
+  - ${{ if eq(parameters.enable_win_cuda, true) }}:
+    - template: jobs/py-packaging-job.yml
+      parameters:
+        arch: 'x64'
+        cuda_version: ${{ parameters.cuda_version }}
+        ep: 'directml'
         ort_version: ${{ parameters.ort_version }}
         os: 'win'
         publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}

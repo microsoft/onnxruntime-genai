@@ -66,11 +66,15 @@ jobs:
   - name: ort_filename
     ${{ if eq(parameters.ep, 'cpu') }}:
       value: 'onnxruntime-${{ parameters.os }}-${{ parameters.arch }}-${{ parameters.ort_version }}'
-    ${{ else}}:
+    ${{ elseif eq(parameters.ep, 'cuda') }}:
       ${{if eq(parameters.cuda_version, '11.8') }}:
         value: 'onnxruntime-${{ parameters.os }}-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}'
       ${{ else }}:
         value: 'onnxruntime-${{ parameters.os }}-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
+    ${{ elseif eq(parameters.ep, 'directml')}}:
+      value: 'Microsoft.ML.OnnxRuntime.DirectML.${{ parameters.ort_version }}'
+    ${{ else }}:
+      value: 'onnxruntime-${{ parameters.os }}-${{ parameters.arch }}-${{ parameters.ep}}-${{ parameters.ort_version }}'
   steps:
   - task: UsePythonVersion@0
     inputs:
@@ -97,6 +101,7 @@ jobs:
     - template: steps/capi-win-step.yml
       parameters:
         target: 'python'
+        ep: ${{ parameters.ep }}
 
   - ${{ if eq(parameters.publish_to_ado_feed, true)}}:
     - template: steps/py-ado-feed-releasing-step.yml
