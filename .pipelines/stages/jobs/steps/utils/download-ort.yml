@@ -29,6 +29,9 @@ steps:
     overwriteExistingFiles: true
   displayName: Unzip OnnxRuntime
 
+- task: CmdLine@2
+    dir $(Build.Repository.LocalPath)
+
 - task: CopyFiles@2
   inputs:
     SourceFolder: '$(Build.Repository.LocalPath)/$(ort_filename)'
