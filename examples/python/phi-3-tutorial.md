@@ -130,9 +130,11 @@ pip install *.whl
 
 Run the model with [this script](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/model-qa.py).
 
+
 The script accepts a model folder and takes the generation parameters from the config in that model folder. You can also override the parameters on the command line.
 
 ```bash
+pip install numpy
 python model-qa.py -m models/phi3-mini-4k-instruct-cpu-int4-rtn-block-32 
 ```
 
