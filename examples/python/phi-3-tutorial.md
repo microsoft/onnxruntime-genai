@@ -56,7 +56,7 @@ The script accepts a model folder and takes the generation parameters from the c
 This example is using the long context model running with DirectML on Windows.
 
 ```bash
-python model-qa.py -m models/phi3-mini-128k-instruct-directml-int4-awq-block-128
+python model-qa.py -m directml/directml-int4-awq-block-128
 ```
 
 Once the script has loaded the model, it will ask you for input in a loop, streaming the output as it is produced the model. For example:
