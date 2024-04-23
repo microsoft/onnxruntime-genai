@@ -70,4 +70,6 @@ void DmlCastInputToOutput(
     IDMLDevice* dml_device,
     const OrtDmlApi* ort_dml_api,
     DmlReusedCommandListState& command_list_state);
+
+bool IsIntelDevice(ID3D12Device* d3d12_device);
 }  // namespace DmlHelpers
