@@ -33,18 +33,18 @@ jobs:
       Python38:
         PyDotVer: '3.8'
         PyNoDotVer: '38'
-#      Python39:
-#        PyDotVer: '3.9'
-#        PyNoDotVer: '39'
-#      Python310:
-#        PyDotVer: '3.10'
-#        PyNoDotVer: '310'
-#      Python311:
-#        PyDotVer: '3.11'
-#        PyNoDotVer: '311'
-#      Python312:
-#        PyDotVer: '3.12'
-#        PyNoDotVer: '312'
+      Python39:
+        PyDotVer: '3.9'
+        PyNoDotVer: '39'
+      Python310:
+        PyDotVer: '3.10'
+        PyNoDotVer: '310'
+      Python311:
+        PyDotVer: '3.11'
+        PyNoDotVer: '311'
+      Python312:
+        PyDotVer: '3.12'
+        PyNoDotVer: '312'
   timeoutInMinutes: 240
   workspace:
     clean: all
