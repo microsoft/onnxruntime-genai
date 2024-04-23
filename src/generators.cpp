@@ -70,7 +70,11 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
 #if USE_DML
   // Temporary fix to work around overflows for caches that are multiples of 4 on Intel hardware in DirectML
   if (model.device_type_ == DeviceType::DML && model.IsIntelDevice() && params.search.max_length % 4 == 0) {
-    ++const_cast<GeneratorParams&>(params).search.max_length;
+    if (params.search.max_length == model.config_->model.context_length) {
+      --const_cast<GeneratorParams&>(params).search.max_length;
+    } else {
+      ++const_cast<GeneratorParams&>(params).search.max_length;
+    }
   }
 #endif
 
