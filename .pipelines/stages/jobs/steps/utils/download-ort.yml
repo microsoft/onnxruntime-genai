@@ -1,6 +1,9 @@
 parameters:
 - name: archiveType
   type: string
+- name: ep
+  type: string
+  default: cpu
 steps:
 - bash: |
     echo "##[error]Error: ort_version and ort_filename are not set"
@@ -17,20 +20,37 @@ steps:
     itemPattern: '$(ort_filename).${{ parameters.archiveType }}'
     downloadPath: '$(Build.Repository.LocalPath)'
   displayName: Download $(ort_filename)
+#Special case for DML
+- ${{ if ne(parameters.ep, 'directml') }}:
+  - task: ExtractFiles@1
+    inputs:
+      archiveFilePatterns: '$(Build.Repository.LocalPath)/$(ort_filename).${{ parameters.archiveType }}'
+      destinationFolder: '$(Build.Repository.LocalPath)'
+      cleanDestinationFolder: false
+      overwriteExistingFiles: true
+    displayName: Unzip OnnxRuntime
+  - task: CopyFiles@2
+    inputs:
+      SourceFolder: '$(Build.Repository.LocalPath)/$(ort_filename)'
+      TargetFolder: '$(Build.Repository.LocalPath)/ort'
+    displayName: Copy OnnxRuntime to ort
+- ${{ else }}:
+  - task: ExtractFiles@1
+    inputs:
+      archiveFilePatterns: '$(Build.Repository.LocalPath)/$(ort_filename).${{ parameters.archiveType }}'
+      destinationFolder: '$(Build.Repository.LocalPath)/ort'
+      cleanDestinationFolder: false
+      overwriteExistingFiles: true
+    displayName: Unzip OnnxRuntime
 
-- task: ExtractFiles@1
-  inputs:
-    archiveFilePatterns: '$(Build.Repository.LocalPath)/$(ort_filename).${{ parameters.archiveType }}'
-    destinationFolder: '$(Build.Repository.LocalPath)'
-    cleanDestinationFolder: false
-    overwriteExistingFiles: true
-  displayName: Unzip OnnxRuntime
-
-- task: CopyFiles@2
-  inputs:
-    SourceFolder: '$(Build.Repository.LocalPath)/$(ort_filename)'
-    TargetFolder: '$(Build.Repository.LocalPath)/ort'
-  displayName: Copy OnnxRuntime to ort
+  - task: CopyFiles@2
+    inputs:
+      SourceFolder: '$(Build.Repository.LocalPath)/ort/runtimes/win-x64/native'
+      TargetFolder: '$(Build.Repository.LocalPath)/ort/lib'
+  - task: CopyFiles@2
+    inputs:
+      SourceFolder: '$(Build.Repository.LocalPath)/ort/build/native/include'
+      TargetFolder: '$(Build.Repository.LocalPath)/ort/include'
 
 - task: DeleteFiles@1
   inputs:

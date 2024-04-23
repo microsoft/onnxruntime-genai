@@ -2,6 +2,11 @@ parameters:
 - name: target
   type: string
   default: 'onnxruntime-genai'
+- name: use_build_in_ort
+  type: boolean
+- name: ep
+  type: string
+  default: 'cpu'
 steps:
 - bash: |
     echo "##[error]Error: ep and arch are not set"
@@ -28,10 +33,34 @@ steps:
     echo "cuda_version=$(cuda_version)"
     echo "target=${{ parameters.target }}"
   displayName: 'Print Parameters'
+- ${{ if eq(parameters.use_build_in_ort, 'false') }}:
+  - template: utils/download-ort.yml
+    parameters:
+      archiveType: 'zip'
+      ep: ${{ parameters.ep }}
+- ${{ else }}:
+    - bash: |
+        azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/tmp/ort/$(os)/$(ep)" '$(Build.Repository.LocalPath)/tmp_ort'
+      displayName: 'Download ONNXRuntime'
+    - task: CopyFiles@2
+      inputs:
+        SourceFolder: '$(Build.Repository.LocalPath)/tmp_ort/**/lib'
+        TargetFolder: '$(Build.Repository.LocalPath)/ort/lib'
+    - task: CopyFiles@2
+      inputs:
+        SourceFolder: '$(Build.Repository.LocalPath)/tmp_ort/**/include'
+        TargetFolder: '$(Build.Repository.LocalPath)/ort/include'
 
-- template: utils/download-ort.yml
-  parameters:
-    archiveType: 'zip'
+- ${{ if eq(parameters.ep, 'directml') }}:
+  - powershell: |
+      Invoke-WebRequest -Uri $(dml_url) -OutFile $(dml_zip)
+      Expand-Archive $(dml_zip) -DestinationPath $(dml_dir)
+      Remove-Item -Path $(dml_zip)
+      Get-ChildItem -Recurse $(dml_dir)
+      mv $(dml_dir)\bin\x64-win\DirectML.dll ort\lib
+      mv $(dml_dir)\include\DirectML.h ort\include
+    workingDirectory: '$(Build.Repository.LocalPath)'
+    continueOnError: true
 
 - powershell: |
     azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" 'cuda_sdk'

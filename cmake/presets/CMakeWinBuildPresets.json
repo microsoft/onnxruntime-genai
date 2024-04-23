@@ -30,6 +30,11 @@
       "configurePreset": "windows_x64_cpu_release"
     },
     {
+      "name": "windows_x64_directml_release",
+      "configuration": "Release",
+      "configurePreset": "windows_x64_directml_release"
+    },
+    {
       "name": "windows_x64_cpu_debug",
       "configuration": "Debug",
       "configurePreset": "windows_x64_cpu_debug"

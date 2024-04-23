@@ -13,6 +13,8 @@ parameters:
   values:
   - 'linux'
   - 'win'
+- name: use_build_in_ort
+  type: boolean
 - name: publish_to_ado_feed
   type: boolean
 
@@ -66,12 +68,16 @@ jobs:
     - template: steps/capi-linux-step.yml
       parameters:
         target: 'onnxruntime-genai'
+        use_build_in_ort: ${{ parameters.use_build_in_ort }}
+
     # TODO: Add a step to build the linux nuget package
 
   - ${{ if eq(parameters.os, 'win') }}:
     - template: steps/capi-win-step.yml
       parameters:
         target: 'onnxruntime-genai'
+        use_build_in_ort: ${{ parameters.use_build_in_ort }}
+
     - template: steps/nuget-win-step.yml
     - ${{ if eq(parameters.publish_to_ado_feed, true)}}:
       - template: steps/nuget-ado-feed-releasing-step.yml
