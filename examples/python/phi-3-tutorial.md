@@ -1,4 +1,10 @@
-# Run Phi-3 mini models with the ONNX Runtime generate() API
+# Run the Phi-3 Mini models with the ONNX Runtime generate() API
+
+## Steps
+1. [Download Phi-3 Mini](#download-the-model)
+2. [Build ONNX Runtime shared libraries](#build-onnx-runtime-from-source)
+3. [Build generate() API](#build-the-generate-api-from-source)
+4. [Run Phi-3 Mini](#run-the-model)
 
 ## Download the model 
 
