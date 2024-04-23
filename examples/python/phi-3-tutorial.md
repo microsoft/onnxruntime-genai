@@ -3,7 +3,7 @@
 ## Steps
 1. [Download Phi-3 Mini](#download-the-model)
 2. [Install the generate() API](#install-the-generate()-api-package)
-4. [Run Phi-3 Mini](#run-the-model)
+3. [Run Phi-3 Mini](#run-the-model)
 
 ## Download the model 
 
