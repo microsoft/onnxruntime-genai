@@ -12,6 +12,7 @@
 #include <wil/wrl.h>
 #include "dml_provider_factory.h"
 #include "../dml/dml_smart_container.h"
+#include "../dml/dml_helpers.h"
 
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
 
@@ -379,6 +380,8 @@ void Model::CreateSessionOptions() {
 
       ort_options.AddConfigEntry("ep.dml.enable_graph_capture", "1");
       p_dml_api_->SessionOptionsAppendExecutionProvider_DML1(&ort_options, dml_device_.Get(), dml_objects_.command_queue.Get());
+      is_intel_device_ = DmlHelpers::IsIntelDevice(dml_objects_.d3d12_device.Get());
+
       device_type_ = DeviceType::DML;  // We use a DML allocator for input/output caches, but other tensors will use CPU tensors
 #endif
     } else
@@ -395,7 +398,7 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path) {
 
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
-  if (config->model.type == "llama" || config->model.type == "gemma" || config->model.type == "mistral" || config->model.type == "phi")
+  if (config->model.type == "llama" || config->model.type == "gemma" || config->model.type == "mistral" || config->model.type == "phi" || config->model.type == "phi3")
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
   if (config->model.type == "whisper")
     return std::make_shared<Whisper_Model>(std::move(config), ort_env);

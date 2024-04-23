@@ -1,6 +1,9 @@
 parameters:
 - name: archiveType
   type: string
+- name: ep
+  type: string
+  default: cpu
 steps:
 - bash: |
     echo "##[error]Error: ort_version and ort_filename are not set"
@@ -8,29 +11,54 @@ steps:
   displayName: 'Check if variables ort_version and ort_filename are set'
   condition: or( eq (variables['ort_version'], ''), eq (variables['ort_filename'], ''))
 
-- task: DownloadGitHubRelease@0
-  inputs:
-    connection: 'GitHub - Release'
-    userRepository: 'microsoft/onnxruntime'
-    defaultVersionType: 'specificTag'
-    version: 'v$(ort_version)'
-    itemPattern: '$(ort_filename).${{ parameters.archiveType }}'
-    downloadPath: '$(Build.Repository.LocalPath)'
-  displayName: Download $(ort_filename)
-
-- task: ExtractFiles@1
-  inputs:
-    archiveFilePatterns: '$(Build.Repository.LocalPath)/$(ort_filename).${{ parameters.archiveType }}'
-    destinationFolder: '$(Build.Repository.LocalPath)'
-    cleanDestinationFolder: false
-    overwriteExistingFiles: true
-  displayName: Unzip OnnxRuntime
-
-- task: CopyFiles@2
-  inputs:
-    SourceFolder: '$(Build.Repository.LocalPath)/$(ort_filename)'
-    TargetFolder: '$(Build.Repository.LocalPath)/ort'
-  displayName: Copy OnnxRuntime to ort
+#Special case for DML
+- ${{ if ne(parameters.ep, 'directml') }}:
+  - task: DownloadGitHubRelease@0
+    inputs:
+      connection: 'GitHub - Release'
+      userRepository: 'microsoft/onnxruntime'
+      defaultVersionType: 'specificTag'
+      version: 'v$(ort_version)'
+      itemPattern: '$(ort_filename).${{ parameters.archiveType }}'
+      downloadPath: '$(Build.Repository.LocalPath)'
+    displayName: Download $(ort_filename)
+  - task: ExtractFiles@1
+    inputs:
+      archiveFilePatterns: '$(Build.Repository.LocalPath)/$(ort_filename).${{ parameters.archiveType }}'
+      destinationFolder: '$(Build.Repository.LocalPath)'
+      cleanDestinationFolder: false
+      overwriteExistingFiles: true
+    displayName: Unzip OnnxRuntime
+  - task: CopyFiles@2
+    inputs:
+      SourceFolder: '$(Build.Repository.LocalPath)/$(ort_filename)'
+      TargetFolder: '$(Build.Repository.LocalPath)/ort'
+    displayName: Copy OnnxRuntime to ort
+- ${{ else }}:
+  - task: DownloadPackage@1
+    inputs:
+      packageType: 'nuget'
+      feed: '2692857e-05ef-43b4-ba9c-ccf1c22c437c/7982ae20-ed19-4a35-a362-a96ac99897b7'
+      definition: 'Microsoft.ML.OnnxRuntime.DirectML' # Can also be package name
+      version: '$(ort_version)'
+      extract: false
+      downloadPath: '$(Build.Repository.LocalPath)'
+    displayName: Download $(ort_filename)
+  - task: ExtractFiles@1
+    inputs:
+      archiveFilePatterns: '$(Build.Repository.LocalPath)/*.nupkg'
+      destinationFolder: '$(Build.Repository.LocalPath)/ort'
+      cleanDestinationFolder: false
+      overwriteExistingFiles: true
+    displayName: Unzip OnnxRuntime
+  - task: CopyFiles@2
+    inputs:
+      SourceFolder: '$(Build.Repository.LocalPath)/ort/runtimes/win-x64/native'
+      TargetFolder: '$(Build.Repository.LocalPath)/ort/lib'
+  - task: CopyFiles@2
+    inputs:
+      SourceFolder: '$(Build.Repository.LocalPath)/ort/build/native/include'
+      TargetFolder: '$(Build.Repository.LocalPath)/ort/include'
 
 - task: DeleteFiles@1
   inputs:
