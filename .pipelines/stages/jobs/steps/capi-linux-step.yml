@@ -34,19 +34,17 @@ steps:
     parameters:
       archiveType: 'tgz'
 - ${{ else }}:
-  - task: ExtractFiles@1
-    inputs:
-      archiveFilePatterns: 'ort.zip'
-      destinationFolder: '$(Build.Repository.LocalPath)'
-      cleanDestinationFolder: false
-      overwriteExistingFiles: true
+  - bash: |
+      set -e -x
+      azcopy copy --recursive "https://lotusscus.blob.core.windows.net/tmp/ort/$(os)/$(ep)" '$(Build.Repository.LocalPath)/tmp_ort'
+      displayName: 'Download ONNXRuntime'
   - task: CopyFiles@2
     inputs:
-      SourceFolder: '$(Build.Repository.LocalPath)/ort/$(os)/${{ parameters.ep }}/lib'
+      SourceFolder: '$(Build.Repository.LocalPath)/tmp_ort/**/lib'
       TargetFolder: '$(Build.Repository.LocalPath)/ort/lib'
   - task: CopyFiles@2
     inputs:
-      SourceFolder: '$(Build.Repository.LocalPath)/ort/$(os)/${{ parameters.ep }}/include'
+      SourceFolder: '$(Build.Repository.LocalPath)/tmp_ort/**/include'
       TargetFolder: '$(Build.Repository.LocalPath)/ort/include'
 
 - bash: |
