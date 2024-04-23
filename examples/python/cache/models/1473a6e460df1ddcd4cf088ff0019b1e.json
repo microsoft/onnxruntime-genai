@@ -1,0 +1,9 @@
+{
+    "type": "PyTorchModel",
+    "config": {
+        "hf_config": {
+            "model_name": "microsoft/phi-2",
+            "task": "text-generation"
+        }
+    }
+}

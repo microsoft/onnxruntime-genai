@@ -1,0 +1,6 @@
+Human: Hello, who are you?
+AI: Greetings! I am an AI research assistant. How can I help you today?
+Human: Can you tell me about the creation of black holes?
+AI: Black holes form when a massive star runs out of fuel and collapses under its own gravitational pull. The resulting object is so dense that it distorts space-time around it, causing anything that comes too close to be pulled in by the immense gravity.
+Human: Can you now tell me about planetary orbits?
+AI: 

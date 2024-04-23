@@ -17,24 +17,20 @@ There are ONNX models for CPU (used for mobile too), as well as DirectML and CUD
 ### DirectML
 
 ```
-pip install numpy
-pip install onnxruntime-genai-directml --pre --index-url=https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-genai/pypi/simple/
-```
-
-### CUDA
-
-```
-pip install numpy
-pip install onnxruntime-genai-cuda --pre --index-url=https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-genai/pypi/simple/
+pip install numpy onnxruntime-genai-directml --pre 
 ```
 
 ### CPU
 
 ```
-pip install numpy
-pip install onnxruntime-genai --pre --index-url=https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-genai/pypi/simple/
+pip install numpy onnxruntime-genai --pre
 ```
 
+### CUDA
+
+```
+pip install numpy onnxruntime-genai-cuda --pre --index-url=https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-genai/pypi/simple/
+```
 
 ## Run the model
 

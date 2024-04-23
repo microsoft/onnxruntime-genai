@@ -15,14 +15,15 @@ See full documentation at [https://onnxruntime.ai/docs/genai].
 ## Features
 
 * Supported model architectures:
+  * Phi-3
+  * Phi-2
   * Gemma
   * LLaMA
   * Mistral
-  * Phi-2
 * Supported targets:   
-  * CPU
-  * GPU (CUDA)
   * GPU (DirectML)
+  * GPU (CUDA)
+  * CPU
 * Supported sampling features
   * Beam search
   * Greedy search
@@ -46,17 +47,39 @@ See full documentation at [https://onnxruntime.ai/docs/genai].
 * Automatic model download and cache
 * More model architectures
 
+## Installation
+
+### DirectML
+
+```bash
+pip install [--pre] numpy onnxruntime-genai-directml
+```
+
+### CPU
+
+```bash
+pip install [--pre] numpy onnxruntime-genai
+```
+
+### CUDA
+
+```bash
+pip install numpy onnxruntime-genai-cuda --pre --index-url=https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-genai/pypi/simple/
+```
+
 ## Sample code for phi-2 in Python
 
 [Install](https://onnxruntime.ai/docs/genai/howto/install) the onnxruntime-genai Python package.
 
 1. Build the model
+
 ```shell
 python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -e cpu -p int4 -o ./models/phi2
 # You can append --extra_options enable_cuda_graph=1 to build an onnx model that supports using cuda graph in ORT.
 ```
 
 2. Run inference
+
 ```python
 import os
 import onnxruntime_genai as og
@@ -97,11 +120,7 @@ You can bring your own ONNX model or use the model builder utility, included in 
 Install model builder dependencies.
 
 ```bash
-pip install numpy
-pip install transformers
-pip install torch
-pip install onnx
-pip install onnxruntime
+pip install numpy install transformers torch onnx onnxruntime
 ```
 
 Export int4 CPU version 
@@ -109,32 +128,7 @@ Export int4 CPU version
 huggingface-cli login --token <your HuggingFace token>
 python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -p int4 -e cpu -o <model folder>
 ```
-## Getting the latest nightly Onnxruntime build
-By default, onnxruntime-genai uses the latest stable release of onnxruntime. If you want to use the latest nightly build 
-of onnxruntime, you can download the nightly build of onnxruntime from our
-[Azure DevOps Artifacts](https://aiinfra.visualstudio.com/PublicPackages/_artifacts/feed/OnnxRuntime/).
-nuget package can be uncompressed by renaming the extension to `.zip` and extracting the contents.
-The onnxruntime dynamlic libraries and header files are available in the nightly build. You can extract the nuget package
-and copy the dynamic libraries and header files to the `ort/` folder under onnxruntime-genai project root on the same level
-as this `README.md` file. 
 
-The library files are located in the `runtime/$OS-$Arch/native` folder and the header files are located in the
-`build/native/include` folder in the nuget package.
-
-The final folder structure should look like this:
-```
-onnxruntime-genai
-│   README.md
-│   ... 
-│   ort/
-│   │   include/
-│   │   │   coreml_provider_factory.h
-│   │   │   ...
-│   │   │   provider_options.h
-│   │   lib/
-│   │   │   (lib)onnxruntime.(so|dylib|dll)
-│   │   │   (lib)onnxruntime_providers_shared.(so|dylib|dll)
-```
 
 ## Contributing
 
