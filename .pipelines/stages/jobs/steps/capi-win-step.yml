@@ -62,13 +62,13 @@ steps:
     workingDirectory: '$(Build.Repository.LocalPath)'
 
 - ${{ if eq(parameters.ep, 'directml') }}:
-  powershell: |
-    Invoke-WebRequest -Uri $(dml_url) -OutFile $(dml_zip)
-    Expand-Archive $(dml_zip) -DestinationPath $(dml_dir)
-    Remove-Item -Path $(dml_zip)
-    mv $(dml_dir)\bin\x64-win\DirectML.dll ort\lib
-    mv $(dml_dir)\include\DirectML.h ort\include
-  workingDirectory: '$(Build.Repository.LocalPath)'
+  - powershell: |
+      Invoke-WebRequest -Uri $(dml_url) -OutFile $(dml_zip)
+      Expand-Archive $(dml_zip) -DestinationPath $(dml_dir)
+      Remove-Item -Path $(dml_zip)
+      mv $(dml_dir)\bin\x64-win\DirectML.dll ort\lib
+      mv $(dml_dir)\include\DirectML.h ort\include
+    workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
     azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" 'cuda_sdk'
