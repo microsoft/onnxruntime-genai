@@ -1,3 +1,5 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
 #pragma once
 
 namespace Generators {
@@ -31,6 +33,7 @@ struct Config {
 
     int pad_token_id{};            // The id of the padding token.
     int eos_token_id{};            // The id of the end-of-stream token.
+    std::vector<int> eos_token_ids; // If eos_token_id is passed as an array, this is where the values go (eos_token_id gets set to the first entry in the array)
     int bos_token_id{};            // The id of the beginning-of-stream token.
     int sep_token_id{};            // The id of the separation token.
     int decoder_start_token_id{};  // If an encoder-decoder model starts decoding with a different token than bos, the id of that token.
