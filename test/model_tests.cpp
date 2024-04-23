@@ -20,6 +20,8 @@ static const std::pair<const char*, const char*> c_tiny_gpt2_model_paths[] = {
     {MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp16-cuda", "fp16"},
 };
 
+// DML doesn't support GPT attention
+#ifndef USE_DML
 TEST(ModelTests, GreedySearchGptFp32) {
   std::vector<int64_t> input_ids_shape{2, 4};
   std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
@@ -105,6 +107,7 @@ TEST(ModelTests, BeamSearchGptFp32) {
     EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params->search.max_length * sizeof(int32_t)));
   }
 }
+#endif
 
 #if USE_CUDA
 

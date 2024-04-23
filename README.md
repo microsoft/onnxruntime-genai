@@ -22,6 +22,7 @@ See full documentation at [https://onnxruntime.ai/docs/genai].
 * Supported targets:   
   * CPU
   * GPU (CUDA)
+  * GPU (DirectML)
 * Supported sampling features
   * Beam search
   * Greedy search
@@ -33,7 +34,6 @@ See full documentation at [https://onnxruntime.ai/docs/genai].
 
 ## Coming very soon
 
-* Support for DirectML
 * Support for the encoder decoder model architectures, such as whisper, T5 and BART.
 
 ## Coming soon
