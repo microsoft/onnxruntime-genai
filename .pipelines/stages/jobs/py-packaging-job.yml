@@ -22,6 +22,8 @@ jobs:
     pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
   ${{ if eq(parameters.os, 'win') }}:
     pool: 'onnxruntime-Win-CPU-2022'
+  ${{ if eq(parameters.ep, 'directml') }}:
+    pool: 'onnxruntime-Win2022-GPU-dml-A10'
   strategy:
     matrix:
       Python38:
