@@ -44,7 +44,8 @@ steps:
     displayName: Unzip OnnxRuntime
 
   - script: |
-      ls $(Build.Repository.LocalPath)/ort
+      dir $(Build.Repository.LocalPath)/ort
+    continueOnError: true
 
   - task: CopyFiles@2
     inputs:

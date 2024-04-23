@@ -79,6 +79,14 @@ jobs:
       value: 'Microsoft.ML.OnnxRuntime.DirectML.${{ parameters.ort_version }}'
     ${{ else }}:
       value: 'onnxruntime-${{ parameters.os }}-${{ parameters.arch }}-${{ parameters.ep}}-${{ parameters.ort_version }}'
+
+  - name: dml_dir
+    value: 'Microsoft.AI.DirectML.1.14.1'
+  - name: dml_zip
+    value: 'Microsoft.AI.DirectML.1.14.1.zip'
+  - name: dml_url
+    value: "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.14.1"
+
   steps:
   - task: UsePythonVersion@0
     inputs:
