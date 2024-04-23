@@ -38,7 +38,7 @@ steps:
   - task: DownloadPackage@1
     inputs:
       packageType: 'nuget'
-      feed: 'https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json'
+      feed: 'ORT-Nightly'
       definition: 'Microsoft.ML.OnnxRuntime.DirectML' # Can also be package name
       version: '$(ort_version)'
       extract: false
