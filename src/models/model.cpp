@@ -537,7 +537,6 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
 }
 
 void Model::GetMaxBatchSizeFromGeneratorParams(const GeneratorParams& params) {
-#if 0
   bool is_cuda_graph_enabled = device_type_ == DeviceType::DML || IsCudaGraphEnabled(config_->model.decoder.session_options);
   max_batch_size_ = params.max_batch_size;
 
@@ -562,7 +561,6 @@ void Model::GetMaxBatchSizeFromGeneratorParams(const GeneratorParams& params) {
       throw std::runtime_error("CUDA graph is not supported on this device");
     }
   }
-#endif
 }
 
 }  // namespace Generators

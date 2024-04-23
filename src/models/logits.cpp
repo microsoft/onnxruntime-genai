@@ -186,8 +186,11 @@ void Logits::HandleEOSArray(cpu_span<float> batched_logits) {
   for (int index = 0; index < shape_[0]; index++) {
     auto logits = batched_logits.subspan(vocab_index, vocab_size);
     float max = std::numeric_limits<float>::lowest();
-    for (auto id : model_.config_->model.eos_token_ids)
+    for (auto id : model_.config_->model.eos_token_ids) {
       max = std::max(max, logits[id]);
+      logits[id] = std::numeric_limits<float>::lowest();  // Set all EOS token options to never happen (the first will get the max of all)
+    }
+
     logits[model_.config_->model.eos_token_id] = max;  // Set the score of the primary EOS token to the highest of any of the EOS tokens
     vocab_index += vocab_size;
   }
