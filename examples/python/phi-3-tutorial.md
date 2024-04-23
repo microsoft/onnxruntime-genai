@@ -9,27 +9,42 @@
 
 Download either or both of the [short](https://aka.ms/phi3-mini-4k-instruct-onnx) and [long](https://aka.ms/phi3-mini-128k-instruct-onnx) context Phi-3 mini models from Hugging Face.
 
-There are ONNX models for CPU (used for mobile too), as well as DirectML and CUDA.
 
+For the short context model.
+
+```bash
+git clone https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-onnx
+```
+
+For the long context model
+
+```bash
+git clone https://huggingface.co/microsoft/Phi-3-mini-128k-instruct-onnx
+```
+
+These model repositories have models that run with DirectML, CPU and CUDA.
 
 ## Install the generate() API package
 
 ### DirectML
 
 ```
-pip install numpy onnxruntime-genai-directml --pre 
+pip install numpy
+pip install --pre onnxruntime-genai-directml
 ```
 
 ### CPU
 
 ```
-pip install numpy onnxruntime-genai --pre
+pip install numpy
+pip install --pre onnxruntime-genai
 ```
 
 ### CUDA
 
 ```
-pip install numpy onnxruntime-genai-cuda --pre --index-url=https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-genai/pypi/simple/
+pip install numpy
+pip install --pre onnxruntime-genai-cuda --index-url=https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-genai/pypi/simple/
 ```
 
 ## Run the model
