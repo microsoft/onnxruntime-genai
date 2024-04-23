@@ -29,6 +29,11 @@ parameters:
   type: string
   default: '1.17.3'
 
+- name: ort_dml_version
+  displayName: 'OnnxRuntime DirectML version'
+  type: string
+  default: '1.18.0-dev-20240423-0527-c07b8d545d'
+
 - name: cuda_version
   displayName: 'CUDA version'
   type: string
@@ -65,6 +70,7 @@ stages:
     enable_win_cuda: ${{ parameters.enable_win_cuda }}
     enable_win_dml: ${{ parameters.enable_win_dml }}
     ort_version: ${{ parameters.ort_version }}
+    ort_dml_version: ${{ parameters.ort_dml_version }}
     cuda_version: ${{ parameters.cuda_version }}
     publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
     use_build_in_ort: ${{ parameters.use_build_in_ort }}

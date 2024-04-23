@@ -10,12 +10,12 @@ env:
   AZCOPY_MSI_CLIENT_ID: 63b63039-6328-442f-954b-5a64d124e5b4
   ort_dir: "Microsoft.ML.OnnxRuntime.DirectML.1.17.3"
   ort_zip: "Microsoft.ML.OnnxRuntime.DirectML.1.17.3.zip"
-  # TODO: Update with nightly ORT-DML build
-  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/Microsoft.ML.OnnxRuntime.DirectML.1.17.3.zip"
   dml_dir: "Microsoft.AI.DirectML.1.14.1"
   dml_zip: "Microsoft.AI.DirectML.1.14.1.zip"
   dml_url: "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.14.1"
   binaryDir: 'build/directml'
+  ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime.DirectML&api-version=6.0-preview.1"
+  ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime.DirectML"
 
 
 jobs:
@@ -32,18 +32,28 @@ jobs:
         python-version: '3.11.x'
         architecture: 'x64'
 
-    - name: Download OnnxRuntime
+    - uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '6.0.x'
+
+    - name : Install jq and nuget
       run: |
-        Invoke-WebRequest -Uri $env:ort_url -OutFile $env:ort_zip
+        choco install -y jq curl
+
+    - name: Get the Latest OnnxRuntime Nightly Version
+      shell: pwsh
+      run: |
+        $ORT_NIGHTLY_VERSION = $(curl -s "${{ env.ORT_NIGHTLY_REST_API }}" | jq -r '.value[0].versions[0].normalizedVersion')
+        echo "$ORT_NIGHTLY_VERSION"
+        "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+    - name: Download OnnxRuntime Nightly
+      run: |
+        nuget install ${{ env.ORT_PACKAGE_NAME }} -version ${{ env.ORT_NIGHTLY_VERSION }} -x -NonInteractive
 
     - name: Download DirectML
       run: |
         Invoke-WebRequest -Uri $env:dml_url -OutFile $env:dml_zip
-
-    - name: Unzip OnnxRuntime
-      run: |
-        Expand-Archive $env:ort_zip -DestinationPath $env:ort_dir
-        Remove-Item -Path $env:ort_zip
 
     - name: Unzip DirectML
       run: |
@@ -54,11 +64,11 @@ jobs:
       run: |
         mkdir ort/lib
         mkdir ort/include
-        mv $env:ort_dir\runtimes\win-x64\native\onnxruntime.dll ort\lib
-        mv $env:ort_dir\runtimes\win-x64\native\onnxruntime.lib ort\lib
+        mv ${{ env.ORT_PACKAGE_NAME }}\runtimes\win-x64\native\onnxruntime.dll ort\lib
+        mv ${{ env.ORT_PACKAGE_NAME }}\runtimes\win-x64\native\onnxruntime.lib ort\lib
         mv $env:dml_dir\bin\x64-win\DirectML.dll ort\lib
-        mv $env:ort_dir\build\native\include\dml_provider_factory.h ort\include
-        mv $env:ort_dir\build\native\include\onnxruntime_c_api.h ort\include
+        mv ${{ env.ORT_PACKAGE_NAME }}\build\native\include\dml_provider_factory.h ort\include
+        mv ${{ env.ORT_PACKAGE_NAME }}\build\native\include\onnxruntime_c_api.h ort\include
         mv $env:dml_dir\include\DirectML.h ort\include
 
     - name: Configure CMake
