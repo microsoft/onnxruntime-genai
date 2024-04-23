@@ -47,7 +47,7 @@ build.bat --build_shared_lib --skip_tests --parallel --use_dml --config Release
 #### Build ONNX Runtime for CPU on Windows
 
 ```bash
-build.bat --build_shared_lib --skip_tests --parallel [--use_dml | --use_cuda] --config Release
+build.bat --build_shared_lib --skip_tests --parallel --config Release
 ```
 
 #### Build ONNX Runtime for CUDA on Windows
