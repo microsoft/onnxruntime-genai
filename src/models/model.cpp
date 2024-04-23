@@ -544,12 +544,9 @@ void Model::GetMaxBatchSizeFromGeneratorParams(const GeneratorParams& params) {
   max_batch_size_ = params.max_batch_size;
 
   if (DeviceType::CUDA == device_type_) {
-    if (max_batch_size_ == 0 && is_cuda_graph_enabled) {
-      throw std::runtime_error("CUDA graph is enabled, but max_batch_size is not set.");
-    }
-    if (max_batch_size_ > 0) {
-      if (!is_cuda_graph_enabled) {
-        throw std::runtime_error("CUDA graph is not enabled.");
+    if (is_cuda_graph_enabled) {
+      if (max_batch_size_ == 0) {
+        throw std::runtime_error("CUDA graph is enabled, but max_batch_size is not set.");
       }
       use_cuda_graph_ = true;
     }
@@ -559,10 +556,8 @@ void Model::GetMaxBatchSizeFromGeneratorParams(const GeneratorParams& params) {
     }
 
     use_cuda_graph_ = true;
-  } else {
-    if (is_cuda_graph_enabled || max_batch_size_ > 0) {
-      throw std::runtime_error("CUDA graph is not supported on this device");
-    }
+  } else if (is_cuda_graph_enabled) {
+    throw std::runtime_error("CUDA graph is not supported on this device");
   }
 }
 
