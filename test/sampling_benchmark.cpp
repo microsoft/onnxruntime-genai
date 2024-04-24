@@ -176,9 +176,7 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopPCuda) {
 
 TEST(Benchmarks, BenchmarkRandomizedSamplingTopKCuda) {
   std::unique_ptr<OrtEnv> g_ort_env;
-  Ort::InitApi();
-  g_ort_env = OrtEnv::Create();
-  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   int vocab_size = 32000;  // vocab size of llama
   int batch_size = 1;
   int k = 5;
@@ -218,10 +216,7 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopKCuda) {
 }
 
 TEST(Benchmarks, BenchmarkRandomizedSamplingTopPAndKCuda) {
-  std::unique_ptr<OrtEnv> g_ort_env;
-  Ort::InitApi();
-  g_ort_env = OrtEnv::Create();
-  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   int vocab_size = 32000;  // vocab size of llama
   int batch_size = 1;
   float p = 0.95f;
@@ -266,10 +261,7 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopPAndKCuda) {
 }
 
 TEST(Benchmarks, BenchmarkRandomizedSelectTopCuda) {
-  std::unique_ptr<OrtEnv> g_ort_env;
-  Ort::InitApi();
-  g_ort_env = OrtEnv::Create();
-  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   int vocab_size = 32000;  // vocab size of llama
   int batch_size = 12;
   std::vector<int32_t> input_ids{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}; // Needs to match batch_size

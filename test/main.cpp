@@ -12,8 +12,6 @@ int main(int argc, char** argv) {
   std::cout << "Initializing OnnxRuntime... ";
   std::cout.flush();
   try {
-    Ort::InitApi();
-    g_ort_env = OrtEnv::Create();
     std::cout << "done" << std::endl;
     ::testing::InitGoogleTest(&argc, argv);
     int result = RUN_ALL_TESTS();

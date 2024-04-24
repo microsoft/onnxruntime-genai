@@ -194,9 +194,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("set_search_options", &PyGeneratorParams::SetSearchOptions)  // See config.h 'struct Search' for the options
       .def("try_use_cuda_graph_with_max_batch_size", &PyGeneratorParams::TryUseCudaGraphWithMaxBatchSize);
 
-  // We need to init the OrtApi before we can use it
-  Ort::InitApi();
-
   pybind11::class_<TokenizerStream>(m, "TokenizerStream")
       .def("decode", [](TokenizerStream& t, int32_t token) { return t.Decode(token); });
 
