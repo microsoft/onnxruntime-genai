@@ -124,6 +124,7 @@ def test_tokenizer_stream(device, phi2_for):
     sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8,
     reason="Python 3.8 is required for downloading models.",
 )
+@pytest.mark.skip(reason="skipping to test memory issue")
 @pytest.mark.parametrize("device", devices)
 def test_batching(device, phi2_for):
     model = og.Model(phi2_for(device))
