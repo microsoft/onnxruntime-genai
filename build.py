@@ -140,7 +140,8 @@ def build(
         build_dir,
         "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
         "-DUSE_CXX17=ON",
-        "-DUSE_CUDA=ON" if cuda_home else "-DUSE_CUDA=OFF",
+        "-DUSE_CUDA=ON", # if cuda_home else "-DUSE_CUDA=OFF",
+        "-DUSE_DML=ON" if use_dml else "-DUSE_DML=OFF",
         f"-DBUILD_WHEEL={build_wheel}",
     ]
 
@@ -153,7 +154,7 @@ def build(
     cuda_compiler = None
     env = {}
     if cuda_home:
-        cuda_arch = 80
+        cuda_arch = 61 # 80
         env["CUDA_HOME"] = cuda_home
         env["PATH"] = os.path.join(env["CUDA_HOME"], "bin") + os.pathsep + os.environ["PATH"]
         cuda_compiler = os.path.join(env["CUDA_HOME"], "bin", "nvcc")
