@@ -14,13 +14,11 @@
 #define MODEL_PATH "../../test/test_models/"
 #endif
 
-extern std::unique_ptr<OrtEnv> g_ort_env;
-
 // Defined in sampling_tests.cpp
 void CreateRandomLogits(float* logits, int num_large, int vocab_size, int batch_size, std::mt19937& engine);
 
 TEST(Benchmarks, BenchmarkRandomizedSamplingTopPCpu) {
-  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   int vocab_size = 32000;  // vocab size of llama
   int batch_size = 1;
   std::vector<int32_t> input_ids{0, 1, 2, 3, 4};
@@ -54,7 +52,7 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopPCpu) {
 }
 
 TEST(Benchmarks, BenchmarkRandomizedSamplingTopKCpu) {
-  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   int vocab_size = 32000;  // vocab size of llama
   int batch_size = 1;
   int k = 5;
@@ -91,7 +89,7 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopKCpu) {
 }
 
 TEST(Benchmarks, BenchmarkRandomizedSamplingTopPAndKCpu) {
-  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   int vocab_size = 32000;  // vocab size of llama
   int batch_size = 1;
   float p = 0.95f;
@@ -132,7 +130,7 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopPAndKCpu) {
 #include "tests_helper.cuh"
 
 TEST(Benchmarks, BenchmarkRandomizedSamplingTopPCuda) {
-  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   int vocab_size = 32000;  // vocab size of llama
   int batch_size = 1;
   std::vector<int32_t> input_ids{0, 1, 2, 3, 4};
@@ -175,7 +173,6 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopPCuda) {
 }
 
 TEST(Benchmarks, BenchmarkRandomizedSamplingTopKCuda) {
-  std::unique_ptr<OrtEnv> g_ort_env;
   auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   int vocab_size = 32000;  // vocab size of llama
   int batch_size = 1;

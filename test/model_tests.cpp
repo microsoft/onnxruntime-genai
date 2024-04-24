@@ -10,7 +10,6 @@
 #ifndef MODEL_PATH
 #define MODEL_PATH "../../test/test_models/"
 #endif
-std::unique_ptr<OrtEnv> g_ort_env;
 
 // To generate this file:
 // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
@@ -33,7 +32,7 @@ TEST(ModelTests, GreedySearchGptFp32) {
   // To generate this file:
   // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
   // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
-  auto model = Generators::CreateModel(*g_ort_env,
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(),
                                        MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
   auto params = Generators::CreateGeneratorParams(*model);
@@ -74,7 +73,7 @@ TEST(ModelTests, BeamSearchGptFp32) {
   //        --output tiny_gpt2_beamsearch_fp16.onnx --use_gpu --max_length 20
   // (with separate_gpt2_decoder_for_init_run set to False as it is now set to True by default)
 
-  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
   auto params = Generators::CreateGeneratorParams(*model);
   params->batch_size = static_cast<int>(input_ids_shape[0]);
@@ -119,7 +118,7 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
       0, 0, 0, 52, 204, 204, 204, 204, 204, 204,
       0, 0, 195, 731, 731, 114, 114, 114, 114, 114};
 
-  auto model = Generators::CreateModel(*g_ort_env, model_path);
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), model_path);
 
   auto params = Generators::CreateGeneratorParams(*model);
   params->batch_size = static_cast<int>(input_ids_shape[0]);
@@ -164,7 +163,7 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
   // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2
   //        --output tiny_gpt2_beamsearch_fp16.onnx --use_gpu --max_length 20
   // (with separate_gpt2_decoder_for_init_run set to False as it is now set to True by default)
-  auto model = Generators::CreateModel(*g_ort_env, model_path);
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), model_path);
 
   auto params = Generators::CreateGeneratorParams(*model);
   params->batch_size = static_cast<int>(input_ids_shape[0]);
@@ -215,7 +214,7 @@ Print all primes between 1 and n
 
   std::cout << "With prompt:" << prompt << "\r\n";
 
-  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "phi-2");
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "phi-2");
   auto tokenizer = model->CreateTokenizer();
   auto tokens = tokenizer->Encode(prompt);
 
@@ -253,7 +252,7 @@ Print all primes between 1 and n
 
   std::cout << "With prompt:" << prompt << "\r\n";
 
-  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "phi-2");
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "phi-2");
   auto tokenizer = model->CreateTokenizer();
   auto tokens = tokenizer->Encode(prompt);
 
