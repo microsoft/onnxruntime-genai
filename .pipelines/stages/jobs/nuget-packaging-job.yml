@@ -54,11 +54,8 @@ jobs:
       value: ''
     ${{ if eq(parameters.ep, 'cuda') }}:
       value: '.Cuda'
-  - name: ort_nuget_ext
-    ${{ if eq(parameters.ep, 'cpu') }}:
-      value: ''
-    ${{ if eq(parameters.ep, 'cuda') }}:
-      value: '.Gpu'
+  - name: ortHome
+      value: 'ort'
   workspace:
     clean: all
   steps:
