@@ -1,8 +1,6 @@
 # ONNX Runtime Generative AI
 
-[![PyPI version](https://img.shields.io/pypi/v/onnxruntime-genai)](https://pypi.org/project/onnxruntime-genai/)
-[![NuGet version](https://img.shields.io/nuget/v/Microsoft.ML.OnnxRuntimeGenAI.Managed)](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntimeGenAI.Managed)
-[![NuGet pre-release version](https://img.shields.io/nuget/vpre/Microsoft.ML.OnnxRuntimeGenAI.Managed)](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntimeGenAI.Managed)
+[![Latest version](https://img.shields.io/nuget/vpre/Microsoft.ML.OnnxRuntimeGenAI.Managed)](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntimeGenAI)
 
 Run generative AI models with ONNX Runtime.
 
