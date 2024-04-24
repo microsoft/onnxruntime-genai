@@ -187,14 +187,12 @@ std::vector<std::string> Tokenizer::DecodeBatch(std::span<const int32_t> sequenc
 // has been destroyed. Without this, we will crash in the Onnxruntime BFCArena code when deleting tensors due to the
 // arena already being destroyed.
 Ort::Allocator* GetCudaAllocator(OrtSession& session) {
-  static std::unique_ptr<OrtMemoryInfo> memory_info_cuda_;
-  static std::unique_ptr<Ort::Allocator> allocator_cuda_;
-
-  if (!allocator_cuda_) {
-    memory_info_cuda_ = OrtMemoryInfo::Create("Cuda", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-    allocator_cuda_ = Ort::Allocator::Create(session, *memory_info_cuda_);
+  auto& globals = *GetOrtGlobals();
+  if (!globals.allocator_cuda_) {
+    globals.memory_info_cuda_ = OrtMemoryInfo::Create("Cuda", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+    globals.allocator_cuda_ = Ort::Allocator::Create(session, *globals.memory_info_cuda_);
   }
-  return allocator_cuda_.get();
+  return globals.allocator_cuda_.get();
 }
 #endif
 
