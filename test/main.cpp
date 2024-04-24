@@ -13,6 +13,8 @@ int main(int argc, char** argv) {
     std::cout << "done" << std::endl;
     ::testing::InitGoogleTest(&argc, argv);
     int result = RUN_ALL_TESTS();
+    std::cout << "Shutting down OnnxRuntime... ";
+    Generators::Shutdown();
     std::cout << "done" << std::endl;
     return result;
   } catch (const std::exception& e) {

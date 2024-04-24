@@ -177,6 +177,13 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
     )pbdoc";
 
+  // Add a cleanup call to happen before global variables are destroyed
+  static int unused{};  // The capsule needs something to reference
+  pybind11::capsule cleanup(&unused, [](PyObject*) {
+    Generators::Shutdown();
+  });
+  m.add_object("_cleanup", cleanup);
+
   // So that python users can catch OrtExceptions specifically
   pybind11::register_exception<Ort::Exception>(m, "OrtException");
 

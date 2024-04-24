@@ -15,13 +15,17 @@ static bool _ = (Ort::InitApi(), false);
 
 OrtGlobals::OrtGlobals() : env_{OrtEnv::Create()} {}
 
-OrtGlobals& GetOrtGlobals() {
+std::unique_ptr<OrtGlobals>& GetOrtGlobals() {
   static auto globals = std::make_unique<OrtGlobals>();
-  return *globals;
+  return globals;
+}
+
+void Shutdown() {
+  GetOrtGlobals().reset();
 }
 
 OrtEnv& GetOrtEnv() {
-  return *GetOrtGlobals().env_;
+  return *GetOrtGlobals()->env_;
 }
 
 // IEEE 752-2008 binary16 format, 1 sign bit, 5 bit exponent, 10 bit fraction

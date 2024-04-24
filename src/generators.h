@@ -127,7 +127,8 @@ struct OrtGlobals {
   void operator=(const OrtGlobals&) = delete;
 };
 
-OrtGlobals& GetOrtGlobals();
+std::unique_ptr<OrtGlobals>& GetOrtGlobals();
+void Shutdown(); // Do this once at exit, Ort code will fail after this call
 OrtEnv& GetOrtEnv();
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path);
