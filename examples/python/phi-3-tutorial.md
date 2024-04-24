@@ -56,7 +56,7 @@ The script accepts a model folder and takes the generation parameters from the c
 This example is using the long context model running with DirectML on Windows.
 
 ```bash
-curl https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/model-qa.py -o model-qa.py
+curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examples/python/model-qa.py -o model-qa.py
 python model-qa.py -m Phi-3-mini-128k-instruct-onnx/directml/directml-int4-awq-block-128
 ```
 
