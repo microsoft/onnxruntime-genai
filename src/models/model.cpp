@@ -8,7 +8,7 @@
 #include "decoder_only.h"
 #include "whisper.h"
 #include "kernels.h"
-#ifdef USE_DML
+#if USE_DML
 #include <wil/wrl.h>
 #include "dml_provider_factory.h"
 #include "../dml/dml_smart_container.h"
@@ -187,14 +187,12 @@ std::vector<std::string> Tokenizer::DecodeBatch(std::span<const int32_t> sequenc
 // has been destroyed. Without this, we will crash in the Onnxruntime BFCArena code when deleting tensors due to the
 // arena already being destroyed.
 Ort::Allocator* GetCudaAllocator(OrtSession& session) {
-  static std::unique_ptr<OrtMemoryInfo> memory_info_cuda_;
-  static std::unique_ptr<Ort::Allocator> allocator_cuda_;
-
-  if (!allocator_cuda_) {
-    memory_info_cuda_ = OrtMemoryInfo::Create("Cuda", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-    allocator_cuda_ = Ort::Allocator::Create(session, *memory_info_cuda_);
+  auto& globals = *GetOrtGlobals();
+  if (!globals.allocator_cuda_) {
+    globals.memory_info_cuda_ = OrtMemoryInfo::Create("Cuda", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+    globals.allocator_cuda_ = Ort::Allocator::Create(session, *globals.memory_info_cuda_);
   }
-  return allocator_cuda_.get();
+  return globals.allocator_cuda_.get();
 }
 #endif
 
@@ -347,7 +345,7 @@ void Model::CreateSessionOptions() {
 
       Ort::ThrowOnError(Ort::api->UpdateROCMProviderOptions(&ort_provider_options, keys.data(), values.data(), keys.size()));
       ort_options.AppendExecutionProvider_ROCM(ort_provider_options);
-#ifdef USE_DML
+#if USE_DML
     } else if (provider_options.name == "dml") {
       dml_objects_ = DmlHelpers::CreateDmlObjects();
 
@@ -442,7 +440,7 @@ void ConvertFp16ToFp32(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<Or
         fp32[i] = Float16ToFloat32(fp16[i]);
       break;
 
-#ifdef USE_CUDA
+#if USE_CUDA
     case DeviceType::CUDA:
       cuda::LaunchFp16ToFp32(fp16, fp32, count, stream);
       break;

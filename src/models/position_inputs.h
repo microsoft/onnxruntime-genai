@@ -57,7 +57,7 @@ struct PositionInputs {
   bool is_first_posid_update_{true};
   bool is_first_mask_update_{true};
 
-#ifdef USE_DML
+#if USE_DML
   std::optional<DmlUpdateMaskKernel> dml_update_mask_kernel_;
   StaticBuffer* sb_attention_mask_next_{};
   std::optional<DmlIncrementValuesKernel> dml_update_position_ids_kernel_;
