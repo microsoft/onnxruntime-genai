@@ -29,7 +29,7 @@ steps:
     echo "ep=$(ep)"
   displayName: 'Print Parameters'
 
-- ${{ if eq(parameters.use_build_in_ort, 'false') }}:
+- ${{ if eq(parameters.use_build_in_ort, false) }}:
   - template: utils/download-ort.yml
     parameters:
       archiveType: 'tgz'
