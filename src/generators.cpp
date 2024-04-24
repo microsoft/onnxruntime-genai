@@ -11,7 +11,7 @@
 
 namespace Generators {
 
-static bool _=(Ort::InitApi(), false);
+static bool _ = (Ort::InitApi(), false);
 
 OrtGlobals::OrtGlobals() : env_{OrtEnv::Create()} {}
 
