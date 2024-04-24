@@ -1,5 +1,9 @@
 # ONNX Runtime Generative AI
 
+[![PyPI version](https://img.shields.io/pypi/v/onnxruntime-genai)](https://pypi.org/project/onnxruntime-genai/)
+[![NuGet version](https://img.shields.io/nuget/v/Microsoft.ML.OnnxRuntimeGenAI.Managed)](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntimeGenAI.Managed)
+[![NuGet pre-release version](https://img.shields.io/nuget/vpre/Microsoft.ML.OnnxRuntimeGenAI.Managed)](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntimeGenAI.Managed)
+
 Run generative AI models with ONNX Runtime.
 
 This library provides the generative AI loop for ONNX models, including inference with ONNX Runtime, logits processing, search and sampling, and KV cache management.
