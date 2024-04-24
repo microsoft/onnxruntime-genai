@@ -24,15 +24,6 @@ pybind11::array_t<T> ToPython(std::span<T> v) {
 
 namespace Generators {
 
-std::unique_ptr<OrtEnv> g_ort_env;
-
-OrtEnv& GetOrtEnv() {
-  if (!g_ort_env) {
-    g_ort_env = OrtEnv::Create();
-  }
-  return *g_ort_env;
-}
-
 // A roaming array is one that can be in CPU or GPU memory, and will copy the memory as needed to be used from anywhere
 template <typename T>
 struct PyRoamingArray : RoamingArray<T> {

@@ -13,16 +13,6 @@
 
 namespace Generators {
 
-std::unique_ptr<OrtEnv> g_ort_env;
-
-OrtEnv& GetOrtEnv() {
-  if (!g_ort_env) {
-    Ort::InitApi();
-    g_ort_env = OrtEnv::Create();
-  }
-  return *g_ort_env;
-}
-
 struct Result {
   explicit Result(const char* what) : what_{what} {}
   std::string what_;
