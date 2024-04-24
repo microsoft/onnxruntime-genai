@@ -140,7 +140,7 @@ def build(
         build_dir,
         "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
         "-DUSE_CXX17=ON",
-        "-DUSE_CUDA=ON", if cuda_home else "-DUSE_CUDA=OFF",
+        "-DUSE_CUDA=ON" if cuda_home else "-DUSE_CUDA=OFF",
         "-DUSE_DML=ON" if use_dml else "-DUSE_DML=OFF",
         f"-DBUILD_WHEEL={build_wheel}",
     ]
