@@ -44,6 +44,11 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER AND CMAKE_BUILD_TYPE STREQUAL "Debug")
   add_compile_definitions(_DEBUG=1)
 endif()
 
+if(MSVC)
+  # set updated value for __cplusplus macro instead of 199711L
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>)
+endif()
+
 message(STATUS "Adding source files")
 
 file(GLOB generator_srcs CONFIGURE_DEPENDS
@@ -80,6 +85,23 @@ elseif(USE_CUDA)
 else()
   file(GLOB generator_cuda_srcs "${GENERATORS_ROOT}/*_cuda*.*")
   list(REMOVE_ITEM generator_srcs ${generator_cuda_srcs})
+endif()
+
+if(USE_DML)
+  if(WIN32)
+    add_compile_definitions(USE_DML=1)
+    add_compile_definitions(NOMINMAX)
+    add_compile_definitions(DML_TARGET_VERSION_USE_LATEST)
+
+    file(GLOB dml_srcs CONFIGURE_DEPENDS
+      "${PROJECT_SOURCE_DIR}/src/dml/*.h"
+      "${PROJECT_SOURCE_DIR}/src/dml/*.cpp"
+    )
+
+    list(APPEND generator_srcs ${dml_srcs})
+  else()
+    message(FATAL_ERROR "USE_DML is ON but this isn't windows.")
+  endif()
 endif()
 
 if(ENABLE_TESTS AND TEST_PHI2)
@@ -119,6 +141,44 @@ else()
   set(ONNXRUNTIME_EXTENSIONS_LIB "tfmtok_c.so")
 endif()
 
+file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_FILES}")
+if(USE_DML)
+  list(APPEND onnxruntime_libs "${ORT_LIB_DIR}/DirectML.dll")
+  target_include_directories(onnxruntime-genai PRIVATE $<TARGET_PROPERTY:${WIL_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
+  target_include_directories(onnxruntime-genai PRIVATE $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>/directx)
+  target_include_directories(onnxruntime-genai PRIVATE $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
+  target_include_directories(onnxruntime-genai-static PUBLIC $<TARGET_PROPERTY:${WIL_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
+  target_include_directories(onnxruntime-genai-static PUBLIC $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>/directx)
+  target_include_directories(onnxruntime-genai-static PUBLIC $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
+  target_link_libraries(onnxruntime-genai PRIVATE d3d12.lib)
+  target_link_libraries(onnxruntime-genai-static PUBLIC d3d12.lib)
+
+  get_filename_component(PACKAGES_DIR ${CMAKE_CURRENT_BINARY_DIR}/_deps ABSOLUTE)
+  set(DXC_PACKAGE_DIR ${PACKAGES_DIR}/Microsoft.Direct3D.DXC.1.7.2308.12)
+  set(NUGET_CONFIG ${PROJECT_SOURCE_DIR}/nuget.config)
+  set(PACKAGES_CONFIG ${PROJECT_SOURCE_DIR}/packages.config)
+
+  add_custom_command(
+    OUTPUT
+    ${DXC_PACKAGE_DIR}/build/native/bin/x64/dxc.exe
+    DEPENDS
+    ${PACKAGES_CONFIG}
+    ${NUGET_CONFIG}
+    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/nuget/src/nuget restore ${PACKAGES_CONFIG} -PackagesDirectory ${PACKAGES_DIR} -ConfigFile ${NUGET_CONFIG}
+    VERBATIM
+  )
+
+  add_custom_target(
+    RESTORE_PACKAGES ALL
+    DEPENDS
+    ${DXC_PACKAGE_DIR}/build/native/bin/x64/dxc.exe
+  )
+
+  add_dependencies(RESTORE_PACKAGES nuget)
+  add_dependencies(onnxruntime-genai RESTORE_PACKAGES)
+  add_dependencies(onnxruntime-genai-static RESTORE_PACKAGES)
+endif()
+
 if(NO_TOKENIZEROOT)
   add_compile_definitions(NO_TOKENIZER=1)
   message("----------------Tokenizer Disabled------------------")
@@ -140,6 +200,11 @@ if(ENABLE_PYTHON)
   message("------------------Enabling Python Wheel------------------")
 endif()
 
+if(ENABLE_MODEL_BENCHMARK)
+  add_subdirectory("${CMAKE_SOURCE_DIR}/benchmark/c")
+  message("------------------Enabling model benchmark------------------")
+endif()
+
 if(NOT EXISTS "${ORT_LIB_DIR}/${ONNXRUNTIME_LIB}")
   message(FATAL_ERROR "Expected the ONNX Runtime library to be found at ${ORT_LIB_DIR}/${ONNXRUNTIME_LIB}. Actual: Not found.")
 endif()
@@ -150,7 +215,6 @@ if(USE_CUDA AND NOT EXISTS "${ORT_LIB_DIR}/${ONNXRUNTIME_PROVIDERS_CUDA_LIB}")
   message(FATAL_ERROR "Expected the ONNX Runtime providers cuda library to be found at ${ORT_LIB_DIR}/${ONNXRUNTIME_PROVIDERS_CUDA_LIB}. Actual: Not found.")
 endif()
 
-file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_FILES}")
 target_link_directories(onnxruntime-genai PRIVATE ${ORT_LIB_DIR})
 target_link_libraries(onnxruntime-genai PRIVATE ${ONNXRUNTIME_LIB})
 
@@ -174,7 +238,6 @@ if(MSVC)
 endif()
 
 # Copy the onnxruntime binaries into the build folder so it's found on launch
-file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_FILES}")
 foreach(DLL_FILE ${onnxruntime_libs})
   add_custom_command(
     TARGET onnxruntime-genai POST_BUILD

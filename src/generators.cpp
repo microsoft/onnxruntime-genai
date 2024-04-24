@@ -11,6 +11,23 @@
 
 namespace Generators {
 
+static bool _ = (Ort::InitApi(), false);
+
+OrtGlobals::OrtGlobals() : env_{OrtEnv::Create()} {}
+
+std::unique_ptr<OrtGlobals>& GetOrtGlobals() {
+  static auto globals = std::make_unique<OrtGlobals>();
+  return globals;
+}
+
+void Shutdown() {
+  GetOrtGlobals().reset();
+}
+
+OrtEnv& GetOrtEnv() {
+  return *GetOrtGlobals()->env_;
+}
+
 // IEEE 752-2008 binary16 format, 1 sign bit, 5 bit exponent, 10 bit fraction
 float Float16ToFloat32(uint16_t v) {
   // Extract sign, exponent, and fraction from numpy.float16
@@ -66,7 +83,18 @@ std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
   return std::make_unique<GreedySearch_Cpu>(params);
 }
 
-Generator::Generator(const Model& model, const GeneratorParams& params) : model_{model} {
+Generator::Generator(const Model& model, const GeneratorParams& params) : model_{model.shared_from_this()} {
+#if USE_DML
+  // Temporary fix to work around overflows for caches that are multiples of 4 in DirectML
+  if (model.device_type_ == DeviceType::DML && params.search.max_length % 4 == 0) {
+    if (params.search.max_length == model.config_->model.context_length) {
+      --const_cast<GeneratorParams&>(params).search.max_length;
+    } else {
+      ++const_cast<GeneratorParams&>(params).search.max_length;
+    }
+  }
+#endif
+
   if (params.search.max_length == 0)
     throw std::runtime_error("search max_length is 0");
   if (params.search.max_length > model.config_->model.context_length)
@@ -75,8 +103,8 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
     throw std::runtime_error("batch_size must be 1 or greater");
   if (params.vocab_size < 1)
     throw std::runtime_error("vocab_size must be 1 or greater");
-  if (params.input_ids.size()/params.batch_size >= params.search.max_length)
-    throw std::runtime_error("input length is >= max length");
+  if (params.sequence_length >= params.search.max_length)
+    throw std::runtime_error("input sequence_length is >= max_length");
 
   search_ = CreateSearch(params);
   state_ = model.CreateState(search_->GetSequenceLengths(), params);
@@ -84,12 +112,18 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
 
 void Generator::ComputeLogits() {
   if (computed_logits_)
-    throw std::runtime_error("ComputeLogits called again without calling GenerateNextToken* first");
+    throw std::runtime_error("ComputeLogits called again without calling GenerateNextToken first");
 
-  search_->SetLogits(state_->Run(search_->GetSequenceLength(), search_->GetNextTokens(), search_->GetNextIndices()));
+  auto logits = state_->Run(search_->GetSequenceLength(), search_->GetNextTokens(), search_->GetNextIndices());
+  if (g_log.enabled && g_log.model_logits) {
+    auto& stream = Log("model_logits");
+    DumpSpan(stream, logits.GetCPU());
+    stream << std::endl;
+  }
+  search_->SetLogits(logits);
   computed_logits_ = true;
 
-  auto& search = search_->params_.search;
+  auto& search = search_->params_->search;
   search_->ApplyMinLength(search.min_length);
   search_->ApplyRepetitionPenalty(search.repetition_penalty);
 }
@@ -101,44 +135,45 @@ bool Generator::IsDone() const {
   return search_->IsDone();
 }
 
-void Generator::GenerateNextToken_TopK_TopP(int top_k, float top_p, float temperature) {
+void Generator::GenerateNextToken() {
   if (!computed_logits_)
-    throw std::runtime_error("Must call ComputeLogits before GenerateNextToken*");
+    throw std::runtime_error("Must call ComputeLogits before GenerateNextToken");
   computed_logits_ = false;
+  auto& search = search_->params_->search;
 
-  if (top_k == 1) {
+  if (g_log.enabled && g_log.generate_next_token) {
+    auto& stream = Log("generate_next_token");
+    stream << SGR::Fg_Green << "do_sample: " << SGR::Reset << search.do_sample << ' '
+           << SGR::Fg_Green << "top_k: " << SGR::Reset << search.top_k << ' '
+           << SGR::Fg_Green << "top_p: " << SGR::Reset << search.top_p << ' '
+           << SGR::Fg_Green << "temperature: " << SGR::Reset << search.temperature << ' '
+           << SGR::Fg_Cyan << "sequence length: " << SGR::Reset << search_->GetSequenceLength()
+           << std::endl;
+  }
+
+  if (!search.do_sample || search.top_k == 1) {
     search_->SelectTop();
     return;
   }
 
   // The user explicitly called TopK_TopP on a beam search
-  if (search_->params_.search.num_beams != 1)
+  if (search.num_beams != 1)
     throw std::runtime_error("TopK and TopP cannot be used with a beam search");
 
   // Sanity checks
-  if (top_p < 0.0f || top_p > 1.0f)
+  if (search.top_p < 0.0f || search.top_p > 1.0f)
     throw std::runtime_error("top_p must be between 0.0 and 1.0");
-  if (top_k < 0)
+  if (search.top_k < 0)
     throw std::runtime_error("top_k must be 0 or greater");
 
-  if (top_p > 0.0f && top_k > 1) {
-    search_->SampleTopPAndK(top_p, top_k, temperature);
-  } else if (top_k > 1) {
-    search_->SampleTopK(top_k, temperature);
+  if (search.top_p > 0.0f && search.top_p < 1.0f && search.top_k > 1) {
+    search_->SampleTopKTopP(search.top_k, search.top_p, search.temperature);
+  } else if (search.top_k > 1) {
+    search_->SampleTopK(search.top_k, search.temperature);
   } else {
-    assert(top_k == 0);
-    if (top_p == 0.0f)
-      throw std::runtime_error("top_k and top_p cannot both be zero");
-    search_->SampleTopP(top_p, temperature);
+    assert(search.top_k == 0);
+    search_->SampleTopP(search.top_p, search.temperature);
   }
-}
-
-void Generator::GenerateNextToken() {
-  auto& search = search_->params_.search;
-  if (search.do_sample)
-    GenerateNextToken_TopK_TopP(search.top_k, search.top_p, search.temperature);
-  else
-    GenerateNextToken_Top();
 }
 
 RoamingArray<int32_t> Generator::GetSequence(int index) const {

@@ -1,5 +1,4 @@
 #include "../generators.h"
-#include "debugging.h"
 #include <cinttypes>
 
 namespace Generators {
@@ -17,169 +16,153 @@ const char* TypeToString(ONNXTensorElementDataType type) {
       return "float16";
     default:
       assert(false);
-      return "(please add to list)";
+      return "(please add type to list)";
   }
 }
 
-void DumpValues(ONNXTensorElementDataType type, const void* p_values_raw, size_t count) {
+size_t SizeOfType(ONNXTensorElementDataType type) {
+  switch (type) {
+    case Ort::TypeToTensorType<uint8_t>::type:
+      return sizeof(uint8_t);
+    case Ort::TypeToTensorType<int8_t>::type:
+      return sizeof(int8_t);
+    case Ort::TypeToTensorType<uint16_t>::type:
+      return sizeof(uint16_t);
+    case Ort::TypeToTensorType<int16_t>::type:
+      return sizeof(int16_t);
+    case Ort::TypeToTensorType<uint32_t>::type:
+      return sizeof(uint32_t);
+    case Ort::TypeToTensorType<int32_t>::type:
+      return sizeof(int32_t);
+    case Ort::TypeToTensorType<uint64_t>::type:
+      return sizeof(int64_t);
+    case Ort::TypeToTensorType<int64_t>::type:
+      return sizeof(int64_t);
+    case Ort::TypeToTensorType<bool>::type:
+      return sizeof(bool);
+    case Ort::TypeToTensorType<float>::type:
+      return sizeof(float);
+    case Ort::TypeToTensorType<double>::type:
+      return sizeof(double);
+    case Ort::TypeToTensorType<Ort::Float16_t>::type:
+      return sizeof(Ort::Float16_t);
+    case Ort::TypeToTensorType<Ort::BFloat16_t>::type:
+      return sizeof(Ort::BFloat16_t);
+    default:
+      assert(false);
+      break;
+  }
+  return 0;
+}
+
+std::ostream& operator<<(std::ostream& stream, Ort::Float16_t v) {
+  stream << Float16ToFloat32(v);
+  return stream;
+}
+
+template <typename T>
+void DumpSpan(std::ostream& stream, std::span<const T> values) {
+  if (values.size() <= c_value_count) {
+    for (auto v : values)
+      stream << v << ' ';
+  } else {
+    for (size_t i = 0; i < c_value_count / 2; i++)
+      stream << values[i] << ' ';
+    stream << "... ";
+    for (size_t i = values.size() - c_value_count / 2; i < values.size(); i++)
+      stream << values[i] << ' ';
+  }
+}
+
+#if USE_CUDA
+template <typename T>
+void DumpCudaSpan(std::ostream& stream, std::span<const T> data) {
+  auto cpu_copy = std::make_unique<T[]>(data.size());
+  CudaCheck() == cudaMemcpy(cpu_copy.get(), data.data(), data.size_bytes(), cudaMemcpyDeviceToHost);
+
+  DumpSpan(stream, std::span<const T>{cpu_copy.get(), data.size()});
+}
+template void DumpCudaSpan(std::ostream&, std::span<const float>);
+template void DumpCudaSpan(std::ostream&, std::span<const int32_t>);
+#endif
+
+void DumpValues(std::ostream& stream, ONNXTensorElementDataType type, const void* p_values_raw, size_t count) {
   if (count == 0) {
     return;
   }
 
-  printf("Values: ");
+  stream << SGR::Fg_Green << "Values[ " << SGR::Reset;
 
   switch (type) {
-    case Ort::TypeToTensorType<int64_t>::type: {
-      const auto* p_values = reinterpret_cast<const int64_t*>(p_values_raw);
-      for (size_t i = 0; i < count; i++) {
-        printf("%" PRId64 " ", p_values[i]);
-      }
+    case Ort::TypeToTensorType<int64_t>::type:
+      DumpSpan(stream, std::span<const int64_t>{reinterpret_cast<const int64_t*>(p_values_raw), count});
       break;
-    }
 
-    case Ort::TypeToTensorType<int32_t>::type: {
-      const auto* p_values = reinterpret_cast<const int32_t*>(p_values_raw);
-      for (size_t i = 0; i < count; i++) {
-        printf("%d ", p_values[i]);
-      }
+    case Ort::TypeToTensorType<int32_t>::type:
+      DumpSpan(stream, std::span<const int32_t>{reinterpret_cast<const int32_t*>(p_values_raw), count});
       break;
-    }
 
-    case Ort::TypeToTensorType<float>::type: {
-      const auto* p_values = reinterpret_cast<const float*>(p_values_raw);
-      for (size_t i = 0; i < count; i++) {
-        printf("%f ", p_values[i]);
-      }
+    case Ort::TypeToTensorType<float>::type:
+      DumpSpan(stream, std::span<const float>{reinterpret_cast<const float*>(p_values_raw), count});
       break;
-    }
 
-    case Ort::TypeToTensorType<Ort::Float16_t>::type: {
-      const auto* p_values = reinterpret_cast<const Ort::Float16_t*>(p_values_raw);
-      for (size_t i = 0; i < count; i++) {
-        printf("%f ", Float16ToFloat32(p_values[i].value));
-      }
+    case Ort::TypeToTensorType<Ort::Float16_t>::type:
+      DumpSpan(stream, std::span<const Ort::Float16_t>{reinterpret_cast<const Ort::Float16_t*>(p_values_raw), count});
       break;
-    }
 
     default:
-      printf("Unhandled data type");
+      stream << SGR::Fg_Red << "Unhandled data type" << SGR::Reset;
       break;
   }
-  printf("\r\n");
+  stream << SGR::Fg_Green << "]" << SGR::Reset << std::endl;
 }
 
-void DumpTensor(OrtValue* value, bool dump_value) {
+void DumpTensor(std::ostream& stream, OrtValue* value, bool dump_value) {
   auto type_info = value->GetTensorTypeAndShapeInfo();
   auto shape = type_info->GetShape();
-  printf("Shape { ");
+  stream << SGR::Fg_Green << "Shape[ " << SGR::Reset;
   for (auto dim : shape) {
-    printf("%d ", static_cast<int>(dim));
+    stream << static_cast<int>(dim) << ' ';
   }
-  printf("}");
-  printf(" Type: %s", TypeToString(type_info->GetElementType()));
+  stream << SGR::Fg_Green << ']' << SGR::Reset;
+  stream << SGR::Fg_Green << " Type: " << SGR::Reset << TypeToString(type_info->GetElementType());
 
-  size_t element_count = std::min<size_t>(type_info->GetElementCount(), c_value_count);
-  if (!dump_value) {
+  size_t element_count = type_info->GetElementCount();
+  if (!dump_value)
     element_count = 0;
-  }
 
-  printf(" Location: ");
+  stream << SGR::Fg_Green << " Location: " << SGR::Reset;
 
   const auto& memory_info = value->GetTensorMemoryInfo();
   switch (memory_info.GetDeviceType()) {
     case OrtMemoryInfoDeviceType_CPU:
-      printf("CPU\r\n");
-      DumpValues(type_info->GetElementType(), value->GetTensorRawData(), element_count);
+      stream << "CPU\r\n";
+      DumpValues(stream, type_info->GetElementType(), value->GetTensorRawData(), element_count);
       break;
     case OrtMemoryInfoDeviceType_GPU: {
-      printf("GPU\r\n");
+      stream << "GPU\r\n";
 #if USE_CUDA
       auto type = type_info->GetElementType();
-      size_t element_size = 1;
-      switch (type) {
-        case Ort::TypeToTensorType<int64_t>::type:
-          element_size = sizeof(int64_t);
-          break;
-        case Ort::TypeToTensorType<int32_t>::type:
-          element_size = sizeof(int32_t);
-          break;
-        case Ort::TypeToTensorType<float>::type:
-          element_size = sizeof(float);
-          break;
-        case Ort::TypeToTensorType<Ort::Float16_t>::type:
-          element_size = sizeof(Ort::Float16_t);
-          break;
-        default:
-          assert(false);
-          break;
-      }
+      size_t element_size = SizeOfType(type);
       auto cpu_copy = std::make_unique<uint8_t[]>(element_size * element_count);
       CudaCheck() == cudaMemcpy(cpu_copy.get(), value->GetTensorRawData(), element_size * element_count, cudaMemcpyDeviceToHost);
-      DumpValues(type, cpu_copy.get(), element_count);
+      DumpValues(stream, type, cpu_copy.get(), element_count);
 #else
-      printf("Unexpected, using GPU memory but not compiled with CUDA?");
+      stream << "Unexpected, using GPU memory but not compiled with CUDA?";
 #endif
       break;
     }
     default:
-      printf("Unhandled device type");
+      stream << "Unhandled device type";
       break;
   }
 }
 
-void DumpTensors(OrtValue** values, const char** names, size_t count, bool dump_values) {
+void DumpTensors(std::ostream& stream, OrtValue** values, const char** names, size_t count, bool dump_values) {
   for (size_t i = 0; i < count; i++) {
-    printf("%s ", names[i]);
-    DumpTensor(values[i], dump_values);
+    stream << SGR::Fg_Green << "Name: " << SGR::Reset << names[i] << ' ';
+    DumpTensor(stream, values[i], dump_values);
   }
 }
-
-void DumpMemory(const char* name, std::span<const int32_t> data) {
-  printf("%s  ", name);
-  for (auto v : data) {
-    printf("%d ", v);
-  }
-  printf("\r\n");
-}
-
-void DumpMemory(const char* name, std::span<const float> data) {
-  printf("%s  ", name);
-  for (auto v : data) {
-    printf("%f ", v);
-  }
-  printf("\r\n");
-}
-
-void DumpMemory(const char* name, std::span<const Ort::Float16_t> data) {
-  printf("%s  ", name);
-  for (auto v : data) {
-    printf("%f ", Float16ToFloat32(v.value));
-  }
-  printf("\r\n");
-}
-
-#if USE_CUDA
-void DumpCudaMemory(const char* name, std::span<const int32_t> data) {
-  printf("%s  ", name);
-  auto cpu_copy = std::make_unique<int32_t[]>(data.size());
-  CudaCheck() == cudaMemcpy(cpu_copy.get(), data.data(), data.size_bytes(), cudaMemcpyDeviceToHost);
-
-  for (size_t i = 0; i < data.size(); i++) {
-    printf("%d ", cpu_copy[i]);
-  }
-  printf("\r\n");
-}
-
-void DumpCudaMemory(const char* name, std::span<const float> data) {
-  printf("%s  ", name);
-  auto cpu_copy = std::make_unique<float[]>(data.size());
-  CudaCheck() == cudaMemcpy(cpu_copy.get(), data.data(), data.size_bytes(), cudaMemcpyDeviceToHost);
-
-  for (size_t i = 0; i < data.size(); i++) {
-    printf("%f ", cpu_copy[i]);
-  }
-  printf("\r\n");
-}
-#endif
 
 }  // namespace Generators

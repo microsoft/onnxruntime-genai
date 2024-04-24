@@ -1,5 +1,7 @@
 #pragma once
 
+#include "static_buffer.h"
+
 namespace Generators {
 
 struct InputIDs {
@@ -19,6 +21,15 @@ struct InputIDs {
   std::array<int64_t, 2> shape_{};
   ONNXTensorElementDataType type_;
   std::unique_ptr<OrtValue> value_;
+
+  // Used for decoding runs with cuda graphs.
+  StaticBuffer* sb_input_ids_{};
+
+#if USE_DML
+  std::unique_ptr<OrtValue> value_int32_;
+  StaticBuffer* sb_input_ids_int32_{};
+  DmlReusedCommandListState input_ids_cast_command_list_state_{};
+#endif
 };
 
 }  // namespace Generators

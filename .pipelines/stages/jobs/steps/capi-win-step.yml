@@ -27,7 +27,6 @@ steps:
     echo "ep=$(ep)"
     echo "cuda_version=$(cuda_version)"
     echo "target=${{ parameters.target }}"
-    echo "ort_filename=$(ort_filename)"
   displayName: 'Print Parameters'
 
 - template: utils/download-ort.yml
@@ -60,8 +59,9 @@ steps:
 - ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
   - template: compliant/win-esrp-dll-step.yml
     parameters:
-      FolderPath: '$(buildDir)'
+      FolderPath: '$(Build.Repository.LocalPath)\$(buildDir)'
       DisplayName: 'ESRP - Sign C++ dlls'
+      Pattern: '*genai.dll'
 
   - task: BinSkim@4
     displayName: 'Run BinSkim'
@@ -73,9 +73,43 @@ steps:
     parameters:
       archiveType: zip
 
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Artifact: ONNXRuntime Genai capi'
+    inputs:
+      ArtifactName: $(artifactName)-capi
+      PathtoPublish: '$(Build.ArtifactStagingDirectory)/capi'
+
 - ${{ if eq(parameters.target, 'python') }}:
   - task: BinSkim@4
     displayName: 'Run BinSkim'
     inputs:
       AnalyzeTargetGlob: '$(Build.Repository.LocalPath)\**\*.pyd'
     continueOnError: true
+
+  - template: compliant/win-esrp-dll-step.yml
+    parameters:
+      FolderPath: '$(Build.Repository.LocalPath)\build\$(ep)\wheel\onnxruntime_genai'
+      DisplayName: 'ESRP - PYD Sign'
+      DoEsrp: true
+      Pattern: '*.pyd'
+
+  - powershell: |
+      cmake --build --preset windows_$(arch)_$(ep)_release --parallel --PyPackageBuild
+    displayName: 'Build Python Wheel'
+
+  - powershell: |
+      Get-ChildItem -Path $(Build.Repository.LocalPath) -Recurse
+
+  - task: CopyFiles@2
+    displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
+    inputs:
+      SourceFolder: '$(Build.Repository.LocalPath)\build\$(ep)\wheel'
+      Contents: '*.whl'
+      TargetFolder: '$(Build.ArtifactStagingDirectory)\wheel'
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Artifact: ONNXRuntime python wheel'
+    inputs:
+      ArtifactName: $(artifactName)-wheel
+      PathtoPublish: '$(Build.ArtifactStagingDirectory)\wheel'
+

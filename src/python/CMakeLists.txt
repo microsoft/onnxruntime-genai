@@ -32,6 +32,8 @@ if(BUILD_WHEEL)
   message("Setting up wheel files in : ${WHEEL_FILES_DIR}")
   if(USE_CUDA)
     set(TARGET_NAME "onnxruntime-genai-cuda")
+  elseif(USE_DML)
+    set(TARGET_NAME "onnxruntime-genai-directml")
   else()
     set(TARGET_NAME "onnxruntime-genai")
   endif()
@@ -44,7 +46,6 @@ if(BUILD_WHEEL)
   file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/py/" DESTINATION ${WHEEL_TARGET_NAME}/)
   file(COPY "${CMAKE_SOURCE_DIR}/ThirdPartyNotices.txt" DESTINATION ${WHEEL_TARGET_NAME}/)
 
-  file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_FILES}")
   add_custom_command(TARGET python POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy
     ${onnxruntime_libs} $<TARGET_FILE:python>

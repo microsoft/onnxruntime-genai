@@ -19,7 +19,9 @@ def main(args):
     if args.verbose: print("Prompt(s) encoded")
 
     params = og.GeneratorParams(model)
-    params.set_search_options({"max_length": args.max_length, "top_p": args.top_p, "top_k": args.top_k, "temperature": args.temperature, "repetition_penalty": args.repetition_penalty})
+    params.set_search_options(max_length=args.max_length, top_p=args.top_p, top_k=args.top_k, temperature=args.temperature, repetition_penalty=args.repetition_penalty)
+    if args.cuda_graph_with_max_batch_size > 0:
+        params.try_use_cuda_graph_with_max_batch_size(args.cuda_graph_with_max_batch_size)
     params.input_ids = input_tokens
     if args.verbose: print("GeneratorParams created")
 
@@ -33,7 +35,7 @@ def main(args):
         print()
         print(tokenizer.decode(output_tokens[i]))
         print()
-    
+
     print()
     print(f"Tokens: {len(output_tokens[0])} Time: {run_time:.2f} Tokens per second: {len(output_tokens[0])/run_time:.2f}")
     print()
@@ -48,5 +50,6 @@ if __name__ == "__main__":
     parser.add_argument('-t', '--temperature', type=float, default=1.0, help='Temperature to sample with')
     parser.add_argument('-r', '--repetition_penalty', type=float, default=1.0, help='Repetition penalty to sample with')
     parser.add_argument('-v', '--verbose', action='store_true', help='Print verbose output')
+    parser.add_argument('-c', '--cuda_graph_with_max_batch_size', type=int, default=0, help='Max batch size for CUDA graph')
     args = parser.parse_args()
     main(args)

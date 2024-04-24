@@ -20,6 +20,7 @@ Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> s
       model_{model} {
   auto& inputs = const_cast<GeneratorParams::Whisper&>(std::get<GeneratorParams::Whisper>(params.inputs));
 
+  auto encoder_input_ids = model_.ExpandInputs(inputs.input_features, params_->search.num_beams);
 #if USE_CUDA
   // Convert input_features from float32 to float16 if necessary
   if (model_.device_type_ == DeviceType::CUDA && model_.session_info_->GetInputDataType("encoder_input_ids") == Ort::TypeToTensorType<Ort::Float16_t>::type) {
@@ -28,13 +29,12 @@ Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> s
     inputs.input_features = std::move(input_features_32);
   }
 #endif
-
-  auto encoder_input_ids = model_.ExpandInputs(inputs.input_features, params_.search.num_beams);
+  
   encoder_hidden_states_ = OrtValue::CreateTensor<float>(*model_.allocator_device_, std::array<int64_t, 3>{decoder_input_ids_.GetShape()[0], 1500, 384});
 
   auto sequence_lengths = sequence_lengths_unk.GetCPU();
   for (int i = 0; i < decoder_input_ids_.GetShape()[0]; i++) {
-    sequence_lengths[i] = static_cast<int32_t>(params_.sequence_length);
+    sequence_lengths[i] = static_cast<int32_t>(params_->sequence_length);
   }
 
   input_names_.push_back("encoder_input_ids");
@@ -48,7 +48,7 @@ Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> s
   kv_cache_.AddEncoder();
   cross_cache_.AddOutputs();
 
-  State::Run(*model_.session_encoder_);
+  State::Run(*model_.session_encoder_, *model_.run_options_);
 
   ClearIO();
 
@@ -64,7 +64,7 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
     first_run_ = false;
   } else {
     UpdateInputs(next_tokens, next_indices, current_length);
-    State::Run(*model_.session_decoder_);
+    State::Run(*model_.session_decoder_, *model_.run_options_);
   }
   return logits_.Get();
 }

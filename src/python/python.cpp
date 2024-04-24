@@ -24,15 +24,6 @@ pybind11::array_t<T> ToPython(std::span<T> v) {
 
 namespace Generators {
 
-std::unique_ptr<OrtEnv> g_ort_env;
-
-OrtEnv& GetOrtEnv() {
-  if (!g_ort_env) {
-    g_ort_env = OrtEnv::Create();
-  }
-  return *g_ort_env;
-}
-
 // A roaming array is one that can be in CPU or GPU memory, and will copy the memory as needed to be used from anywhere
 template <typename T>
 struct PyRoamingArray : RoamingArray<T> {
@@ -53,26 +44,33 @@ void Declare_DeviceArray(pybind11::module& m, const char* name) {
           "get_array", [](Type& t) -> pybind11::array_t<T> { return t.GetNumpy(); }, pybind11::return_value_policy::reference_internal);
 }
 
-struct PyGeneratorParams : GeneratorParams {
+struct PyGeneratorParams {
+  PyGeneratorParams(const Model& model) : params_{std::make_shared<GeneratorParams>(model)} {
+  }
+
+  operator const GeneratorParams&() const { return *params_; }
+
+  std::shared_ptr<GeneratorParams> params_;
+
   // Turn the python py_input_ids_ into the low level parameters
   void Prepare() {
     // TODO: This will switch to using the variant vs being ifs
     if (py_input_ids_.size() != 0) {
       if (py_input_ids_.ndim() == 1) {  // Just a 1D array
-        batch_size = 1;
-        sequence_length = static_cast<int>(py_input_ids_.shape(0));
+        params_->batch_size = 1;
+        params_->sequence_length = static_cast<int>(py_input_ids_.shape(0));
       } else {
         if (py_input_ids_.ndim() != 2)
           throw std::runtime_error("Input IDs can only be 1 or 2 dimensional");
 
-        batch_size = static_cast<int>(py_input_ids_.shape(0));
-        sequence_length = static_cast<int>(py_input_ids_.shape(1));
+        params_->batch_size = static_cast<int>(py_input_ids_.shape(0));
+        params_->sequence_length = static_cast<int>(py_input_ids_.shape(1));
       }
-      input_ids = ToSpan(py_input_ids_);
+      params_->input_ids = ToSpan(py_input_ids_);
     }
 
     if (py_whisper_input_features_.size() != 0) {
-      GeneratorParams::Whisper& whisper = inputs.emplace<GeneratorParams::Whisper>();
+      GeneratorParams::Whisper& whisper = params_->inputs.emplace<GeneratorParams::Whisper>();
 #ifdef __APPLE__
       std::span shape(reinterpret_cast<const int64_t*>(py_whisper_input_features_.shape()),
                       py_whisper_input_features_.ndim());
@@ -81,28 +79,32 @@ struct PyGeneratorParams : GeneratorParams {
 #endif
       whisper.input_features = OrtValue::CreateTensor<float>(Ort::Allocator::GetWithDefaultOptions().GetInfo(), ToSpan(py_whisper_input_features_), shape);
       whisper.decoder_input_ids = ToSpan(py_whisper_decoder_input_ids_);
-      batch_size = 1;
-      sequence_length = static_cast<int>(py_whisper_decoder_input_ids_.shape(1));
-      input_ids = ToSpan(py_whisper_decoder_input_ids_);
+      params_->batch_size = 1;
+      params_->sequence_length = static_cast<int>(py_whisper_decoder_input_ids_.shape(1));
+      params_->input_ids = ToSpan(py_whisper_decoder_input_ids_);
     }
   }
 
-  void SetSearchOptions(const pybind11::dict& dict) {
+  void SetSearchOptions(const pybind11::kwargs& dict) {
     for (auto& entry : dict) {
       auto name = entry.first.cast<std::string>();
       try {
         if (pybind11::isinstance<pybind11::float_>(entry.second)) {
-          SetSearchNumber(search, name, entry.second.cast<double>());
+          SetSearchNumber(params_->search, name, entry.second.cast<double>());
         } else if (pybind11::isinstance<pybind11::bool_>(entry.second)) {
-          SetSearchBool(search, name, entry.second.cast<bool>());
+          SetSearchBool(params_->search, name, entry.second.cast<bool>());
         } else if (pybind11::isinstance<pybind11::int_>(entry.second)) {
-          SetSearchNumber(search, name, entry.second.cast<int>());
+          SetSearchNumber(params_->search, name, entry.second.cast<int>());
         } else
           throw std::runtime_error("Unknown search option type, can be float/bool/int:" + name);
       } catch (JSON::unknown_value_error& e) {
         throw std::runtime_error("Unknown search option:" + name);
       }
     }
+  }
+
+  void TryUseCudaGraphWithMaxBatchSize(pybind11::int_ max_batch_size) {
+    params_->max_batch_size = max_batch_size.cast<int>();
   }
 
   pybind11::array_t<int32_t> py_input_ids_;
@@ -113,6 +115,7 @@ struct PyGeneratorParams : GeneratorParams {
 struct PyGenerator {
   PyGenerator(Model& model, PyGeneratorParams& params) {
     params.Prepare();
+    model.GetMaxBatchSizeFromGeneratorParams(params);
     generator_ = CreateGenerator(model, params);
   }
 
@@ -128,22 +131,6 @@ struct PyGenerator {
 
   void ComputeLogits() {
     generator_->ComputeLogits();
-  }
-
-  void GenerateNextToken_TopK_TopP(int top_k, float top_p, float temperature) {
-    generator_->GenerateNextToken_TopK_TopP(top_k, top_p, temperature);
-  }
-
-  void GenerateNextToken_TopP(float p, float temperature) {
-    generator_->GenerateNextToken_TopP(p, temperature);
-  }
-
-  void GenerateNextToken_TopK(int k, float temperature) {
-    generator_->GenerateNextToken_TopK(k, temperature);
-  }
-
-  void GenerateNextToken_Top() {
-    generator_->GenerateNextToken_Top();
   }
 
   void GenerateNextToken() {
@@ -162,6 +149,22 @@ struct PyGenerator {
   PyRoamingArray<int32_t> py_sequencelengths_;
 };
 
+void SetLogOptions(const pybind11::kwargs& dict) {
+  for (auto& entry : dict) {
+    auto name = entry.first.cast<std::string>();
+    try {
+      if (pybind11::isinstance<pybind11::bool_>(entry.second)) {
+        SetLogBool(name, entry.second.cast<bool>());
+      } else if (pybind11::isinstance<pybind11::str>(entry.second)) {
+        SetLogString(name, entry.second.cast<std::string>());
+      } else
+        throw std::runtime_error("Unknown log option type, can be bool/string:" + name);
+    } catch (JSON::unknown_value_error& e) {
+      throw std::runtime_error("Unknown log option:" + name);
+    }
+  }
+}
+
 PYBIND11_MODULE(onnxruntime_genai, m) {
   m.doc() = R"pbdoc(
         Ort Generators library
@@ -174,6 +177,14 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
     )pbdoc";
 
+  // Add a cleanup call to happen before global variables are destroyed
+  static int unused{};  // The capsule needs something to reference
+  pybind11::capsule cleanup(
+      &unused, "cleanup", [](PyObject*) {
+        Generators::Shutdown();
+      });
+  m.add_object("_cleanup", cleanup);
+
   // So that python users can catch OrtExceptions specifically
   pybind11::register_exception<Ort::Exception>(m, "OrtException");
 
@@ -182,21 +193,19 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   pybind11::class_<PyGeneratorParams>(m, "GeneratorParams")
       .def(pybind11::init<const Model&>())
-      .def_readonly("pad_token_id", &PyGeneratorParams::pad_token_id)
-      .def_readonly("eos_token_id", &PyGeneratorParams::eos_token_id)
-      .def_readonly("vocab_size", &PyGeneratorParams::vocab_size)
+      .def_property_readonly("pad_token_id", [](const PyGeneratorParams& v) { return v.params_->pad_token_id; })
+      .def_property_readonly("eos_token_id", [](const PyGeneratorParams& v) { return v.params_->eos_token_id; })
+      .def_property_readonly("vocab_size", [](const PyGeneratorParams& v) { return v.params_->vocab_size; })
       .def_readwrite("input_ids", &PyGeneratorParams::py_input_ids_)
       .def_readwrite("whisper_input_features", &PyGeneratorParams::py_whisper_input_features_)
       .def_readwrite("whisper_decoder_input_ids", &PyGeneratorParams::py_whisper_decoder_input_ids_)
-      .def("set_search_options", &PyGeneratorParams::SetSearchOptions);
-
-  // We need to init the OrtApi before we can use it
-  Ort::InitApi();
+      .def("set_search_options", &PyGeneratorParams::SetSearchOptions)  // See config.h 'struct Search' for the options
+      .def("try_use_cuda_graph_with_max_batch_size", &PyGeneratorParams::TryUseCudaGraphWithMaxBatchSize);
 
   pybind11::class_<TokenizerStream>(m, "TokenizerStream")
       .def("decode", [](TokenizerStream& t, int32_t token) { return t.Decode(token); });
 
-  pybind11::class_<Tokenizer>(m, "Tokenizer")
+  pybind11::class_<Tokenizer, std::shared_ptr<Tokenizer>>(m, "Tokenizer")
       .def(pybind11::init([](Model& model) { return model.CreateTokenizer(); }))
       .def("encode", &Tokenizer::Encode)
       .def("decode", [](const Tokenizer& t, pybind11::array_t<int32_t> tokens) { return t.Decode(ToSpan(tokens)); })
@@ -216,18 +225,11 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       })
       .def("create_stream", [](const Tokenizer& t) { return t.CreateStream(); });
 
-  pybind11::class_<Model>(m, "Model")
+  pybind11::class_<Model, std::shared_ptr<Model>>(m, "Model")
       .def(pybind11::init([](const std::string& config_path) {
         return CreateModel(GetOrtEnv(), config_path.c_str());
       }))
-      .def("generate", [](Model& model, PyGeneratorParams& params) { params.Prepare(); return Generate(model, params); })
-      .def("generate_sequence", [](Model& model, pybind11::array_t<int32_t> input_ids, const pybind11::dict& search_options) {
-        PyGeneratorParams params{model};
-        params.SetSearchOptions(search_options);
-        params.py_input_ids_ = input_ids;
-        params.Prepare();
-        return Generate(model, params)[0];
-      })
+      .def("generate", [](Model& model, PyGeneratorParams& params) { params.Prepare(); model.GetMaxBatchSizeFromGeneratorParams(params); return Generate(model, params); })
       .def_property_readonly("device_type", [](const Model& s) { return s.device_type_; });
 
   pybind11::class_<PyGenerator>(m, "Generator")
@@ -235,15 +237,21 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("is_done", &PyGenerator::IsDone)
       .def("compute_logits", &PyGenerator::ComputeLogits)
       .def("generate_next_token", &PyGenerator::GenerateNextToken)
-      .def("generate_next_token_top", &PyGenerator::GenerateNextToken_Top)
-      .def("generate_next_token_top_p", &PyGenerator::GenerateNextToken_TopP)
-      .def("generate_next_token_top_k", &PyGenerator::GenerateNextToken_TopK)
-      .def("generate_next_token_top_k_top_p", &PyGenerator::GenerateNextToken_TopK_TopP)
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
       .def("get_sequence", &PyGenerator::GetSequence);
 
+  m.def("set_log_options", &SetLogOptions);
+
   m.def("is_cuda_available", []() {
-#ifdef USE_CUDA
+#if USE_CUDA
+    return true;
+#else
+        return false;
+#endif
+  });
+
+  m.def("is_dml_available", []() {
+#if USE_DML
     return true;
 #else
         return false;

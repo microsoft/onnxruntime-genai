@@ -8,6 +8,7 @@ using Xunit.Abstractions;
 using Microsoft.ML.OnnxRuntimeGenAI;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection.Emit;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 {
@@ -63,7 +64,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                         while (!generator.IsDone())
                         {
                             generator.ComputeLogits();
-                            generator.GenerateNextTokenTop();
+                            generator.GenerateNextToken();
                         }
 
                         for (ulong i = 0; i < batchSize; i++)
@@ -82,6 +83,134 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                         var expectedSequence = expectedOutput.Skip((int)i * (int)maxLength).Take((int)maxLength);
                         Assert.Equal(expectedSequence, sequences[i].ToArray());
                     }
+                }
+            }
+        }
+
+        [IgnoreOnModelAbsebceFact(DisplayName = "TestTopKSearch")]
+        public void TestTopKSearch()
+        {
+            int topK = 100;
+            float temp = 0.6f;
+            ulong maxLength = 20;
+
+            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
+            using (var model = new Model(modelPath))
+            {
+                Assert.NotNull(model);
+                using (var tokenizer = new Tokenizer(model))
+                {
+                    Assert.NotNull(tokenizer);
+
+                    var strings = new string[] {
+                        "This is a test.",
+                        "Rats are awesome pets!",
+                        "The quick brown fox jumps over the lazy dog."
+                    };
+
+                    var sequences = tokenizer.EncodeBatch(strings);
+                    Assert.NotNull(sequences);
+                    Assert.Equal((ulong)strings.Length, sequences.NumSequences);
+
+                    using GeneratorParams generatorParams = new GeneratorParams(model);
+                    Assert.NotNull(generatorParams);
+
+                    generatorParams.SetInputSequences(sequences);
+                    generatorParams.SetSearchOption("max_length", maxLength);
+                    generatorParams.SetSearchOption("do_sample", true);
+                    generatorParams.SetSearchOption("top_k", topK);
+                    generatorParams.SetSearchOption("temperature", temp);
+                    var outputSequences = model.Generate(generatorParams);
+                    Assert.NotNull(outputSequences);
+
+                    var outputStrings = tokenizer.DecodeBatch(outputSequences);
+                    Assert.NotNull(outputStrings);
+                }
+            }
+        }
+
+        [IgnoreOnModelAbsebceFact(DisplayName = "TestTopPSearch")]
+        public void TestTopPSearch()
+        {
+            float topP = 0.6f;
+            float temp = 0.6f;
+            ulong maxLength = 20;
+
+            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
+            using (var model = new Model(modelPath))
+            {
+                Assert.NotNull(model);
+                using (var tokenizer = new Tokenizer(model))
+                {
+                    Assert.NotNull(tokenizer);
+
+                    var strings = new string[] {
+                        "This is a test.",
+                        "Rats are awesome pets!",
+                        "The quick brown fox jumps over the lazy dog."
+                    };
+
+                    var sequences = tokenizer.EncodeBatch(strings);
+                    Assert.NotNull(sequences);
+                    Assert.Equal((ulong)strings.Length, sequences.NumSequences);
+
+                    using GeneratorParams generatorParams = new GeneratorParams(model);
+                    Assert.NotNull(generatorParams);
+
+                    generatorParams.SetInputSequences(sequences);
+                    generatorParams.SetSearchOption("max_length", maxLength);
+                    generatorParams.SetSearchOption("do_sample", true);
+                    generatorParams.SetSearchOption("top_p", topP);
+                    generatorParams.SetSearchOption("temperature", temp);
+                    var outputSequences = model.Generate(generatorParams);
+                    Assert.NotNull(outputSequences);
+
+                    var outputStrings = tokenizer.DecodeBatch(outputSequences);
+                    Assert.NotNull(outputStrings);
+                }
+            }
+        }
+
+        [IgnoreOnModelAbsebceFact(DisplayName = "TestTopKTopPSearch")]
+        public void TestTopKTopPSearch()
+        {
+            int topK = 100;
+            float topP = 0.6f;
+            float temp = 0.6f;
+            ulong maxLength = 20;
+
+            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
+            using (var model = new Model(modelPath))
+            {
+                Assert.NotNull(model);
+                using (var tokenizer = new Tokenizer(model))
+                {
+                    Assert.NotNull(tokenizer);
+
+                    var strings = new string[] {
+                        "This is a test.",
+                        "Rats are awesome pets!",
+                        "The quick brown fox jumps over the lazy dog."
+                    };
+
+                    var sequences = tokenizer.EncodeBatch(strings);
+                    Assert.NotNull(sequences);
+                    Assert.Equal((ulong)strings.Length, sequences.NumSequences);
+
+                    using GeneratorParams generatorParams = new GeneratorParams(model);
+                    Assert.NotNull(generatorParams);
+
+                    generatorParams.SetInputSequences(sequences);
+                    generatorParams.SetSearchOption("max_length", maxLength);
+                    generatorParams.SetSearchOption("do_sample", true);
+                    generatorParams.SetSearchOption("top_k", topK);
+                    generatorParams.SetSearchOption("top_p", topP);
+                    generatorParams.SetSearchOption("temperature", temp);
+                    var outputSequences = model.Generate(generatorParams);
+                    Assert.NotNull(outputSequences);
+
+                    var outputStrings = tokenizer.DecodeBatch(outputSequences);
+                    Assert.NotNull(outputStrings);
                 }
             }
         }

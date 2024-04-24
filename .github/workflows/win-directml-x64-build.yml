@@ -1,0 +1,85 @@
+name: "Windows DirectML x64 Build"
+on: [ workflow_dispatch, pull_request ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  AZCOPY_AUTO_LOGIN_TYPE: MSI
+  AZCOPY_MSI_CLIENT_ID: 63b63039-6328-442f-954b-5a64d124e5b4
+  ort_dir: "Microsoft.ML.OnnxRuntime.DirectML.1.17.3"
+  ort_zip: "Microsoft.ML.OnnxRuntime.DirectML.1.17.3.zip"
+  # TODO: Update with nightly ORT-DML build
+  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/Microsoft.ML.OnnxRuntime.DirectML.1.17.3.zip"
+  dml_dir: "Microsoft.AI.DirectML.1.14.1"
+  dml_zip: "Microsoft.AI.DirectML.1.14.1.zip"
+  dml_url: "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.14.1"
+  binaryDir: 'build/directml'
+
+
+jobs:
+  windows-directml-x64-build:
+    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Win2022-GPU-A10" ]
+    steps:
+    - name: Checkout OnnxRuntime GenAI repo
+      uses: actions/checkout@v4
+      with:
+        submodules: true
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11.x'
+        architecture: 'x64'
+
+    - name: Download OnnxRuntime
+      run: |
+        Invoke-WebRequest -Uri $env:ort_url -OutFile $env:ort_zip
+
+    - name: Download DirectML
+      run: |
+        Invoke-WebRequest -Uri $env:dml_url -OutFile $env:dml_zip
+
+    - name: Unzip OnnxRuntime
+      run: |
+        Expand-Archive $env:ort_zip -DestinationPath $env:ort_dir
+        Remove-Item -Path $env:ort_zip
+
+    - name: Unzip DirectML
+      run: |
+        Expand-Archive $env:dml_zip -DestinationPath $env:dml_dir
+        Remove-Item -Path $env:dml_zip
+
+    - name: Move the files to the ort directory
+      run: |
+        mkdir ort/lib
+        mkdir ort/include
+        mv $env:ort_dir\runtimes\win-x64\native\onnxruntime.dll ort\lib
+        mv $env:ort_dir\runtimes\win-x64\native\onnxruntime.lib ort\lib
+        mv $env:dml_dir\bin\x64-win\DirectML.dll ort\lib
+        mv $env:ort_dir\build\native\include\dml_provider_factory.h ort\include
+        mv $env:ort_dir\build\native\include\onnxruntime_c_api.h ort\include
+        mv $env:dml_dir\include\DirectML.h ort\include
+
+    - name: Configure CMake
+      run: |
+        cmake --preset windows_x64_directml_release -DTEST_PHI2=False
+
+    - name: Build with CMake
+      run: |
+        cmake --build --preset windows_x64_directml_release --parallel
+
+    - name: Install the Python Wheel and Test Dependencies
+      run: |
+        python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl"))
+        python -m pip install -r test\python\requirements-nightly-cpu.txt
+
+    - name: Verify Build Artifacts
+      if: always()
+      continue-on-error: true
+      run: |
+        Get-ChildItem -Path $env:GITHUB_WORKSPACE\$env:binaryDir -Recurse
+
+    - name: Run tests
+      run: |
+        .\build\directml\test\Release\unit_tests.exe
