@@ -13,6 +13,7 @@ class BinaryDistribution(Distribution):
 setup(
     name='@TARGET_NAME@',
     version='@VERSION_INFO@',
+    description='Generative AI API for ONNX Runtime',
     packages=['onnxruntime_genai', 'onnxruntime_genai.models'],
     include_package_data=True,
     package_data={'': ['*.pyd', '*.dll', '*.so*']},
