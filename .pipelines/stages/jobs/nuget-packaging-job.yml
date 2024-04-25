@@ -22,8 +22,10 @@ jobs:
 - job: nuget_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}_packaging
   ${{ if eq(parameters.os, 'linux') }}:
     pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
-  ${{ if eq(parameters.os, 'win') }}:
-    pool: 'onnxruntime-Win-CPU-2022'
+    ${{ if eq(parameters.ep, 'directml') }}:
+      pool: 'onnxruntime-Win2022-GPU-dml-A10'
+    ${{ else }}:
+      pool: 'onnxruntime-Win-CPU-2022'
   timeoutInMinutes: 180
   #  set variables here to be used in the template and steps
   variables:
@@ -46,21 +48,33 @@ jobs:
   - name: ort_filename
     ${{ if eq(parameters.ep, 'cpu') }}:
       value: 'onnxruntime-${{ parameters.os }}-${{ parameters.arch }}-${{ parameters.ort_version }}'
-    ${{ else}}:
+    ${{ elseif eq(parameters.ep, 'cuda') }}:
       ${{if eq(parameters.cuda_version, '11.8') }}:
         value: 'onnxruntime-${{ parameters.os }}-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}'
       ${{ else }}:
         value: 'onnxruntime-${{ parameters.os }}-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
+    ${{ elseif eq(parameters.ep, 'directml')}}:
+      value: 'Microsoft.ML.OnnxRuntime.DirectML.${{ parameters.ort_version }}'
+    ${{ else }}:
+      value: 'onnxruntime-${{ parameters.os }}-${{ parameters.arch }}-${{ parameters.ep}}-${{ parameters.ort_version }}'
   - name: genai_nuget_ext
     ${{ if eq(parameters.ep, 'cpu') }}:
       value: ''
     ${{ if eq(parameters.ep, 'cuda') }}:
       value: '.Cuda'
+    ${{ if eq(parameters.ep, 'directml') }}:
+      value: '.DirectML'
   - name: ort_nuget_ext
     ${{ if eq(parameters.ep, 'cpu') }}:
       value: ''
     ${{ if eq(parameters.ep, 'cuda') }}:
       value: '.Gpu'
+  - name: dml_dir
+    value: 'Microsoft.AI.DirectML.1.14.1'
+  - name: dml_zip
+    value: 'Microsoft.AI.DirectML.1.14.1.zip'
+  - name: dml_url
+    value: "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.14.1"
   workspace:
     clean: all
   steps:
@@ -76,6 +90,7 @@ jobs:
     - template: steps/capi-win-step.yml
       parameters:
         target: 'onnxruntime-genai'
+        ep: ${{ parameters.ep }}
         use_build_in_ort: ${{ parameters.use_build_in_ort }}
 
     - template: steps/nuget-win-step.yml
