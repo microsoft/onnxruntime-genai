@@ -20,10 +20,9 @@ steps:
     nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.nuspec `
       -Prop version=$VERSION `
       -Prop genai_nuget_ext=$(genai_nuget_ext) `
-      -Prop ort_nuget_ext=$(ort_nuget_ext) `
-      -Prop ort_version=$(ort_version) `
       -Prop configuration=$(buildConfig) `
-      -Prop buildPath=$(buildDir)
+      -Prop buildPath=$(buildDir) `
+      -Prop ortHome=$(ortHome)
     nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec `
       -Prop version=$VERSION `
       -Prop configuration=$(buildConfig)
