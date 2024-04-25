@@ -22,6 +22,7 @@ jobs:
 - job: nuget_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}_packaging
   ${{ if eq(parameters.os, 'linux') }}:
     pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
+  ${{ if eq(parameters.os, 'win') }}:
     ${{ if eq(parameters.ep, 'directml') }}:
       pool: 'onnxruntime-Win2022-GPU-dml-A10'
     ${{ else }}:
