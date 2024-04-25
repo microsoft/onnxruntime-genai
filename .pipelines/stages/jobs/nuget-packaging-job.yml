@@ -65,7 +65,7 @@ jobs:
     ${{ if eq(parameters.ep, 'directml') }}:
       value: '.DirectML'
   - name: ortHome
-      value: 'ort'
+    value: 'ort'
   - name: dml_dir
     value: 'Microsoft.AI.DirectML.1.14.1'
   - name: dml_zip
