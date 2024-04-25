@@ -111,7 +111,7 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyModel(OgaModel* model);
  *             after it is done using the sequences.
  * \return OgaResult containing the error message if the generation failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerate(const OgaModel* model, const OgaGeneratorParams* generator_params, OgaSequences** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerate(OgaModel* model, const OgaGeneratorParams* generator_params, OgaSequences** out);
 
 /*
  * \brief Creates a OgaGeneratorParams from the given model.
@@ -129,6 +129,7 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyGeneratorParams(OgaGeneratorParams* gener
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchNumber(OgaGeneratorParams* generator_params, const char* name, double value);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* generator_params, const char* name, bool value);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGeneratorParams* generator_params, int32_t max_batch_size);
 
 /*
  * \brief Sets the input ids for the generator params. The input ids are used to seed the generation.
@@ -160,7 +161,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperDecoderInputIDs(O
  * \param[out] out The created generator.
  * \return OgaResult containing the error message if the generator creation failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateGenerator(const OgaModel* model, const OgaGeneratorParams* params, OgaGenerator** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateGenerator(OgaModel* model, const OgaGeneratorParams* params, OgaGenerator** out);
 
 /*
  * \brief Destroys the given generator.
