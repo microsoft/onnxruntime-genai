@@ -26,6 +26,13 @@
       }
     },
     {
+      "name": "windows_directml_default",
+      "inherits": "windows_cpu_default",
+      "cacheVariables": {
+        "USE_DML": "ON"
+      }
+    },
+    {
       "name": "windows_release_default",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
@@ -255,6 +262,102 @@
       "binaryDir": "${sourceDir}/build/cuda",
       "cacheVariables": {
         "USE_CUDA": "ON"
+      }
+    },
+    {
+      "name": "windows_x64_directml_release_asan",
+      "inherits": [
+        "windows_release_asan_default",
+        "windows_directml_default"
+      ],
+      "displayName": "windows x64 directml release asan",
+      "binaryDir": "${sourceDir}/build/directml_asan",
+      "cacheVariables": {
+        "USE_DML": "ON"
+      }
+    },
+    {
+      "name": "windows_x64_directml_debug_asan",
+      "inherits": [
+        "windows_debug_asan_default",
+        "windows_directml_default"
+      ],
+      "displayName": "windows x64 directml debug asan",
+      "binaryDir": "${sourceDir}/build/directml_asan",
+      "cacheVariables": {
+        "USE_DML": "ON"
+      }
+    },
+    {
+      "name": "windows_x64_directml_relwithdebinfo_asan",
+      "inherits": [
+        "windows_relwithdebinfo_asan_default",
+        "windows_directml_default"
+      ],
+      "displayName": "windows x64 directml relwithdebinfo asan",
+      "binaryDir": "${sourceDir}/build/directml_asan",
+      "cacheVariables": {
+        "USE_DML": "ON"
+      }
+    },
+    {
+      "name": "windows_x64_directml_minsizerel_asan",
+      "inherits": [
+        "windows_minsizerel_asan_default",
+        "windows_directml_default"
+      ],
+      "displayName": "windows x64 directml minsizerel asan",
+      "binaryDir": "${sourceDir}/build/directml_asan",
+      "cacheVariables": {
+        "USE_DML": "ON"
+      }
+    },
+    {
+      "name": "windows_x64_directml_release",
+      "inherits": [
+        "windows_release_default",
+        "windows_directml_default"
+      ],
+      "displayName": "windows x64 directml release",
+      "binaryDir": "${sourceDir}/build/directml",
+      "cacheVariables": {
+        "USE_DML": "ON"
+      }
+    },
+    {
+      "name": "windows_x64_directml_debug",
+      "inherits": [
+        "windows_debug_default",
+        "windows_directml_default"
+      ],
+      "displayName": "windows x64 directml debug",
+      "binaryDir": "${sourceDir}/build/directml",
+      "cacheVariables": {
+        "USE_DML": "ON"
+      }
+    },
+    {
+      "name": "windows_x64_directml_relwithdebinfo",
+      "inherits": [
+        "windows_relwithdebinfo_default",
+        "windows_directml_default"
+      ],
+      "displayName": "windows x64 directml relwithdebinfo",
+      "binaryDir": "${sourceDir}/build/directml",
+      "cacheVariables": {
+        "USE_DML": "ON"
+      }
+    },
+    {
+      "name": "windows_x64_directml_minsizerel",
+      "inherits": [
+        "windows_minsizerel_default",
+        "windows_directml_default"
+      ],
+      "displayName": "windows x64 directml minsizerel",
+      "binaryDir": "${sourceDir}/build/directml",
+      "cacheVariables": {
+        "USE_DML": "ON"
       }
     },
     {

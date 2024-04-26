@@ -2,6 +2,11 @@
 
 #include "static_buffer.h"
 
+#if USE_DML
+#include "../dml/dml_update_mask_kernel.h"
+#include "../dml/dml_increment_values_kernel.h"
+#endif
+
 namespace Generators {
 
 struct PositionInputs {
@@ -46,11 +51,18 @@ struct PositionInputs {
   std::vector<int32_t> initial_sequence_lengths_;
 
   // Used for decoding runs with cuda graphs.
-  std::unique_ptr<StaticBuffer> sb_position_ids_;
-  std::unique_ptr<StaticBuffer> sb_attention_mask_;
+  StaticBuffer* sb_position_ids_{};
+  StaticBuffer* sb_attention_mask_{};
 
   bool is_first_posid_update_{true};
   bool is_first_mask_update_{true};
+
+#if USE_DML
+  std::optional<DmlUpdateMaskKernel> dml_update_mask_kernel_;
+  StaticBuffer* sb_attention_mask_next_{};
+  std::optional<DmlIncrementValuesKernel> dml_update_position_ids_kernel_;
+  bool is_second_mask_update_{};
+#endif
 };
 
 }  // namespace Generators

@@ -3,6 +3,10 @@
 #include "position_inputs.h"
 #include "kernels.h"
 
+#if USE_DML
+#include "../dml/dml_update_mask_kernel.h"
+#endif
+
 namespace Generators {
 
 PositionInputs::PositionInputs(const Model& model, State& state, RoamingArray<int32_t>& sequence_lengths_unk)
@@ -46,13 +50,18 @@ PositionInputs::PositionInputs(const Model& model, State& state, RoamingArray<in
   position_ids_shape_ = shape;
   attention_mask_shape_ = shape;
 
-  if (model_.device_type_ == DeviceType::CUDA && model_.use_cuda_graph_) {
-    size_t max_beam_batch_size = static_cast<size_t>(model_.config_->search.num_beams) * model_.max_batch_size_;
+  if (state_.GetCapturedGraphInfo()) {
     if (has_posid_input_) {
-      sb_position_ids_ = std::make_unique<StaticBuffer>(model_.allocator_device_, max_beam_batch_size);
+      sb_position_ids_ = state_.GetCapturedGraphInfo()->sb_position_ids_.get();
     }
     if (has_mask_input_) {
-      sb_attention_mask_ = std::make_unique<StaticBuffer>(model_.allocator_device_, max_beam_batch_size);
+      sb_attention_mask_ = state_.GetCapturedGraphInfo()->sb_attention_mask_.get();
+
+#if USE_DML
+      if (model_.device_type_ == DeviceType::DML) {
+        sb_attention_mask_next_ = state_.GetCapturedGraphInfo()->sb_attention_mask_next_.get();
+      }
+#endif
     }
   }
 }
@@ -112,14 +121,57 @@ void PositionInputs::UpdatePositionIDs(int current_length) {
                         cudaMemcpyDeviceToDevice,
                         model_.cuda_stream_);
       }
+#elif USE_DML
+      position_ids_ = sb_position_ids_->CreateTensorOnStaticBuffer(position_ids_shape_, type_);
+      assert(model_.device_type_ == DeviceType::DML);
+
+      ComPtr<ID3D12Resource> target_resource;
+      Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, position_ids_->GetTensorMutableRawData(), &target_resource));
+
+      if (type_ == Ort::TypeToTensorType<int32_t>::type) {
+        auto source = std::span(position_ids_next_->GetTensorData<const uint8_t>(), sizeof(int32_t) * position_ids_shape_[0]);
+
+        model_.GetDmlUploadHeap()->BeginUploadToGpu(
+            target_resource.Get(),
+            0,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            source);
+      } else {
+        auto source = std::span(position_ids_next_->GetTensorData<const uint8_t>(), sizeof(int64_t) * position_ids_shape_[0]);
+
+        model_.GetDmlUploadHeap()->BeginUploadToGpu(
+            target_resource.Get(),
+            0,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            source);
+      }
 #endif
     }
     is_first_posid_update_ = false;
     state_.inputs_[posid_input_index_] = position_ids_.get();
   } else {  // Just incrementing existing position IDs
     switch (model_.device_type_) {
-      case DeviceType::DML:
-        // DML doesn't support on-device position ids update yet, so we fall back to the CPU
+#if USE_DML
+      case DeviceType::DML: {
+        ComPtr<ID3D12Resource> target_resource;
+        Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, position_ids_->GetTensorMutableRawData(), &target_resource));
+
+        // Lazily create the kernel only the first time it's needed
+        if (!dml_update_position_ids_kernel_) {
+          dml_update_position_ids_kernel_ = DmlIncrementValuesKernel(
+              model_.GetD3D12Device(),
+              model_.GetDmlExecutionContext(),
+              static_cast<uint32_t>(position_ids_shape_[0]),
+              type_,
+              target_resource.Get());
+        }
+
+        // Execute the cached command list
+        ComPtr<ID3D12Fence> fence;
+        uint64_t completion_value;
+        model_.GetDmlExecutionContext()->ExecuteCommandList(dml_update_position_ids_kernel_->GetCommandList(), &fence, &completion_value);
+      } break;
+#endif
       case DeviceType::CPU: {
         if (type_ == Ort::TypeToTensorType<int32_t>::type)
           UpdatePositionIDsImpl<int32_t>();
@@ -160,6 +212,10 @@ void PositionInputs::UpdateAttentionMask(int current_length) {
                         model_.cuda_stream_);
       }
     }
+#elif USE_DML
+    attention_mask_shape_[1] = state_.params_->search.max_length;
+    attention_mask_ = sb_attention_mask_->CreateTensorOnStaticBuffer(attention_mask_shape_, type_);
+    attention_mask_next_ = sb_attention_mask_next_->CreateTensorOnStaticBuffer(attention_mask_shape_, type_);
 #endif
   } else {
     // DML doesn't support on-device mask updating yet, so use a CPU allocator
@@ -170,8 +226,44 @@ void PositionInputs::UpdateAttentionMask(int current_length) {
   }
 
   switch (model_.device_type_) {
-    case DeviceType::DML:
-      // DML doesn't support on-device mask updating yet, so we fallback to the CPU
+#if USE_DML
+    case DeviceType::DML: {
+      ComPtr<ID3D12Resource> attention_mask_resource;
+      Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, attention_mask_->GetTensorMutableRawData(), &attention_mask_resource));
+
+      ComPtr<ID3D12Resource> attention_mask_next_resource;
+      Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, attention_mask_next_->GetTensorMutableRawData(), &attention_mask_next_resource));
+
+      if (is_first_mask_update_) {
+        dml_update_mask_kernel_ = DmlUpdateMaskKernel(
+            model_.GetD3D12Device(),
+            model_.GetDmlExecutionContext(),
+            static_cast<uint32_t>(attention_mask_shape_[0]),
+            static_cast<uint32_t>(attention_mask_shape_[1]),
+            type_,
+            current_length,
+            attention_mask_resource.Get(),
+            attention_mask_next_resource.Get());
+        is_second_mask_update_ = true;
+      } else if (is_second_mask_update_) {
+        dml_update_mask_kernel_ = DmlUpdateMaskKernel(
+            model_.GetD3D12Device(),
+            model_.GetDmlExecutionContext(),
+            static_cast<uint32_t>(attention_mask_shape_[0]),
+            static_cast<uint32_t>(attention_mask_shape_[1]),
+            type_,
+            1,
+            attention_mask_resource.Get(),
+            attention_mask_next_resource.Get());
+        is_second_mask_update_ = false;
+      }
+
+      ComPtr<ID3D12Fence> fence;
+      uint64_t completion_value;
+      model_.GetDmlExecutionContext()->ExecuteCommandList(dml_update_mask_kernel_->GetCommandList(), &fence, &completion_value);
+      break;
+    }
+#endif
     case DeviceType::CPU: {
       if (type_ == Ort::TypeToTensorType<int32_t>::type)
         UpdateAttentionMaskImpl(attention_mask_next_->GetTensorMutableData<int32_t>(),
@@ -210,7 +302,15 @@ void PositionInputs::UpdateAttentionMask(int current_length) {
     default:
       throw std::runtime_error("PositionIDs::Update - Unsupported device type");
   }
+
+#if USE_DML
+  if (model_.device_type_ != DeviceType::DML) {
+    attention_mask_ = std::move(attention_mask_next_);
+  }
+#else
   attention_mask_ = std::move(attention_mask_next_);
+#endif
+
   state_.inputs_[mask_input_index_] = attention_mask_.get();
 
   is_first_mask_update_ = false;

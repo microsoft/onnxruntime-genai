@@ -14,6 +14,7 @@
 #include "ort_genai.h"
 
 #include "options.h"
+#include "resource_utils.h"
 
 namespace {
 
@@ -225,6 +226,8 @@ void RunBenchmark(const benchmark::Options& opts) {
     WritePerTokenStats("Token generation", token_gen_stats, opts.batch_size);
     WritePerTokenStats("Token sampling", sampling_stats, opts.batch_size);
     WriteE2EStats("E2E generation (entire generation loop)", e2e_gen_stats);
+
+    std::cout << "Peak working set size (bytes): " << benchmark::utils::GetPeakWorkingSetSizeInBytes() << "\n";
   }
 }
 

@@ -38,17 +38,6 @@ class Model:
         self.io_dtype = io_dtype      # {'fp16', 'fp32'}
         self.onnx_dtype = onnx_dtype  # {"int4", "fp16", "fp32"}
 
-        enable_cuda_graph = "1" if "enable_cuda_graph" in extra_options and extra_options["enable_cuda_graph"] == "1" else "0"
-        # EP-specific variables
-        self.ep = ep
-        self.ep_attrs = {
-            "cpu": {},
-            "cuda": {
-                "enable_cuda_graph": enable_cuda_graph
-            },  # "1" if the the model is able to enable cuda graph, "0" otherwise.
-            "dml": {},
-        }
-
         self.cache_dir = cache_dir
         self.filename = extra_options["filename"] if "filename" in extra_options else "model.onnx"
         self.extra_options = extra_options
@@ -58,6 +47,17 @@ class Model:
         self.initializers = []
         self.value_infos = []
         self.nodes = []
+
+        # EP-specific variables
+        enable_cuda_graph = "1" if "enable_cuda_graph" in extra_options and extra_options["enable_cuda_graph"] == "1" else "0"
+        self.ep = ep
+        self.ep_attrs = {
+            "cpu": {},
+            "cuda": {
+                "enable_cuda_graph": enable_cuda_graph,        # "1" if the the model is able to enable cuda graph, "0" otherwise
+            },
+            "dml": {},
+        }
 
         # Map input names to their types and shapes
         self.input_names = ["input_ids", "attention_mask", "position_ids"]
@@ -99,8 +99,8 @@ class Model:
         if self.exclude_lm_head:
             self.output_names = [name.replace("logits", "hidden_states") for name in self.output_names]
 
-        # Store names of Constant ops already created
-        self.constants = set()
+        # Store names of nodes already created
+        self.node_names = set()
 
         # Map TensorProto dtypes to NumPy dtypes
         self.to_numpy_dtype = {
@@ -129,7 +129,7 @@ class Model:
 
         # Embedding-specific variables
         self.embed_attrs = {
-            "normalize": False,         # Normalize output of Embedding layer
+            "scale": 1,                 # Scale value to multiply output of Embedding layer by
         }
 
         # LayerNorm-specific variables
@@ -145,11 +145,15 @@ class Model:
         }
 
         # RotaryEmbedding-specific variables
+        short_factor = config.rope_scaling["short_factor"] if hasattr(config, "rope_scaling") and config.rope_scaling is not None else []
+        long_factor = config.rope_scaling["long_factor"] if hasattr(config, "rope_scaling") and config.rope_scaling is not None else []
         partial_rotary_factor = config.partial_rotary_factor if hasattr(config, "partial_rotary_factor") else 1.0
         rope_theta = config.rope_theta if hasattr(config, "rope_theta") else 10000
         self.rotemb_attrs = {
             "create_rotary_embedding_caches": True,          # Create cos/sin caches for rotary embeddings
             "theta": rope_theta,                             # Base value if calculating cos/sin caches from scratch
+            "short_factor": short_factor,                    # Short factor for PhiLongRoPE
+            "long_factor": long_factor,                      # Long factor for PhiLongRoPE
             "partial_rotary_factor": partial_rotary_factor,  # Factor for partial rotary embeddings
             "interleaved": 0,                                # Interleave the rotary embeddings (e.g. [0, 0, 0, 1, 1, 1] to [0, 1, 0, 1, 0, 1], RotaryEmbedding kernel expects a default value of 0)
             "num_heads": 0,                                  # For partial rotary embeddings (RotaryEmbedding kernel expects a default value of 0)
@@ -159,6 +163,7 @@ class Model:
         # Attention-specific variables (MHA, GQA, GQA + Rot.Emb., etc.)
         self.attention_attrs = {
             "op_type": "MultiHeadAttention",                 # Attention op to use
+            "scale": 1 / np.sqrt(self.head_size),            # Scale value after calculating Q x K' in attention
             "use_rotemb_in_attn": False,                     # Use rotary embeddings within attention op (instead of a separate RotaryEmbedding op)
             "use_packed_matmul": False,                      # Use packed MatMul (instead of 3 separate MatMuls for Q/K/V)
         }
@@ -167,12 +172,13 @@ class Model:
             self.attention_attrs["op_type"] = "GroupQueryAttention"
             print("GroupQueryAttention (GQA) is used in this model. GQA is currently supported only for INT4 and FP16 on the CUDA and DML execution providers.")
 
-            # DML doesn't support stacked Q/K/V for GQA yet
+            # DML doesn't support packed Q/K/V for GQA yet
             self.attention_attrs["use_packed_matmul"] = self.ep != "dml" and self.num_attn_heads == self.num_kv_heads
 
             # GQA + Rot.Emb. does not require `position ids` as input
-            self.attention_attrs["use_rotemb_in_attn"] = True
-            self.input_names.remove("position_ids")
+            if self.ep == "cuda":
+                self.attention_attrs["use_rotemb_in_attn"] = True
+                self.input_names.remove("position_ids")
 
         self.past_present_share_buffer = self.attention_attrs["op_type"] == "GroupQueryAttention"
 
@@ -348,14 +354,27 @@ class Model:
     def make_node(self, op_type, inputs, outputs, name=None, doc_string=None, domain=None, **kwargs):
         # Save any constants as nodes
         for input_name in inputs:
-            if input_name.startswith("/model/constants") and input_name not in self.constants:
+            if input_name.startswith("/model/constants") and input_name not in self.node_names:
                 self.make_constant(input_name)
 
-        node = helper.make_node(op_type, inputs, outputs, name, doc_string, domain, **kwargs)
-        if doc_string == '':
-            node.doc_string = ''
-        self.order_repeated_field(node.attribute, 'name', kwargs.keys())
-        self.nodes.append(node)
+        # Make node only if it does not already exist
+        if name not in self.node_names:
+            node = helper.make_node(op_type, inputs, outputs, name, doc_string, domain, **kwargs)
+            if doc_string == '':
+                node.doc_string = ''
+            self.order_repeated_field(node.attribute, 'name', kwargs.keys())
+            self.nodes.append(node)
+            self.node_names.add(name)
+
+        # Note:
+        #
+        # The above approach allows functions that make similar subgraphs with the same naming schema
+        # to share existing nodes without needing to know whether the nodes already exist or not
+        # (e.g. attention mask subgraphs).
+        #
+        # This means that the nodes can be created in those functions regardless of their actual
+        # status in the graph. The above checks can then decide whether the proposed node actually
+        # needs to be added into the graph or not.
 
     def make_value_info(self, name, dtype, shape):
         value_info = helper.make_tensor_value_info(name, dtype, shape=shape)
@@ -410,7 +429,7 @@ class Model:
         node_name = name.replace("constants", "constant_nodes")
         self.make_node("Constant", inputs=[], outputs=[name], name=node_name, value=value)
         self.make_value_info(name, onnx_dtype, shape=[])
-        self.constants.add(name)
+        self.node_names.add(name)
 
     def make_gather(self, name, inputs, axis):
         output = f"{name}/output_0"
@@ -450,6 +469,11 @@ class Model:
     def make_equal(self, name, inputs, shape):
         output = f"{name}/output_0"
         self.make_node("Equal", inputs=inputs, outputs=[output], name=name)
+        self.make_value_info(output, TensorProto.BOOL, shape=shape)
+
+    def make_greater(self, name, inputs, shape):
+        output = f"{name}/output_0"
+        self.make_node("Greater", inputs=inputs, outputs=[output], name=name)
         self.make_value_info(output, TensorProto.BOOL, shape=shape)
 
     def make_where(self, name, inputs, dtype, shape):
@@ -492,14 +516,9 @@ class Model:
         self.make_node("Range", inputs=inputs, outputs=[output], name=name)
         self.make_value_info(output, TensorProto.INT64, shape=["unk"])
 
-    def make_slice(self, name, inputs):
+    def make_slice(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Slice", inputs=inputs, outputs=[output], name=name)
-        self.make_value_info(output, TensorProto.INT64, shape=[1])
-
-    def make_sigmoid(self, name, root_input, dtype, shape):
-        output = f"{name}/output_0"
-        self.make_node("Sigmoid", inputs=[root_input], outputs=[output], name=name)
         self.make_value_info(output, dtype, shape=shape)
 
     def make_mul(self, name, inputs, dtype, shape):
@@ -579,15 +598,15 @@ class Model:
         self.make_node('Gather', inputs=[weight, 'input_ids'], outputs=[gather_output], name=gather_name)
         self.make_value_info(gather_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
 
-        if self.embed_attrs["normalize"]:
-            # Normalize the embeddings
-            norm_name = f"{basename}/Mul"
-            norm_inputs = [gather_output, f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{np.round(np.sqrt(self.hidden_size), decimals=2)}"]
-            norm_output = f"{norm_name}/output_0"
-            self.make_node('Mul', inputs=norm_inputs, outputs=[norm_output], name=norm_name)
-            self.make_value_info(norm_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+        if self.embed_attrs["scale"] != 1:
+            # Scale the embeddings
+            mul_name = f"{basename}/Mul"
+            mul_inputs = [gather_output, f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.embed_attrs['scale']}"]
+            mul_output = f"{mul_name}/output_0"
+            self.make_node('Mul', inputs=mul_inputs, outputs=[mul_output], name=mul_name)
+            self.make_value_info(mul_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
 
-            layernorm_attrs_value = norm_output
+            layernorm_attrs_value = mul_output
         else:
             layernorm_attrs_value = gather_output
 
@@ -854,9 +873,7 @@ class Model:
         if op_type == "MultiHeadAttention":
             self.make_multi_head_attention(name, add_qk=f"{self.mask_attrs['mask_name']}/output_0", **kwargs)
         elif op_type == "GroupQueryAttention":
-            seqlens_k_name = f"{self.mask_attrs['seqlens_k']}/output_0"
-            total_seq_len_name = f"{self.mask_attrs['total_seq_len']}/output_0"
-            self.make_group_query_attention(name, seqlens_k=seqlens_k_name, total_seq_len=total_seq_len_name, **kwargs)
+            self.make_group_query_attention(name, seqlens_k=f"{self.mask_attrs['seqlens_k']}/output_0", total_seq_len=f"{self.mask_attrs['total_seq_len']}/output_0", **kwargs)
         else:
             raise NotImplementedError(f"The {op_type} op is not currently supported.")
 
@@ -868,7 +885,10 @@ class Model:
         ]
         output = f"{name}/output_0"
         outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
-        self.make_node("MultiHeadAttention", inputs=inputs, outputs=outputs, name=name, domain="com.microsoft", num_heads=self.num_attn_heads)
+        self.make_node(
+            "MultiHeadAttention", inputs=inputs, outputs=outputs, name=name, domain="com.microsoft",
+            num_heads=self.num_attn_heads, scale=self.attention_attrs["scale"],
+        )
         self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * self.num_attn_heads])
 
     def make_group_query_attention(self, name, **kwargs):
@@ -882,7 +902,7 @@ class Model:
         outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
         self.make_node(
             "GroupQueryAttention", inputs=inputs, outputs=outputs, name=name, domain="com.microsoft",
-            num_heads=self.num_attn_heads, kv_num_heads=self.num_kv_heads, local_window_size=self.window_size,
+            num_heads=self.num_attn_heads, kv_num_heads=self.num_kv_heads, scale=self.attention_attrs["scale"], # local_window_size=self.window_size,  # Disable sliding window attribute temporarily
             do_rotary=self.attention_attrs["use_rotemb_in_attn"], rotary_interleaved=self.rotemb_attrs["interleaved"],
         )
         self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * self.num_attn_heads])
@@ -1170,7 +1190,7 @@ class Model:
             self.layernorm_attrs["add_offset"] = 0  # add offset already done for GGUF models
         else:
             # Load PyTorch model
-            extra_kwargs = {"trust_remote_code": True} if os.path.exists(self.model_name_or_path) else {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {"cache_dir": self.cache_dir, "use_auth_token": True}
+            extra_kwargs = {"trust_remote_code": True} if os.path.exists(self.model_name_or_path) else {"num_hidden_layers": self.num_layers, "trust_remote_code": True} if "num_hidden_layers" in self.extra_options else {"cache_dir": self.cache_dir, "use_auth_token": True, "trust_remote_code": True}
             model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, **extra_kwargs)
 
         # Loop through model and map each module to ONNX/ORT ops
@@ -1220,7 +1240,7 @@ class Model:
         # TODO: add make_position_ids_reformatting() here
 
     def make_attention_mask_reformatting(self):
-        if self.ep_attrs["cuda"]["enable_cuda_graph"] == "1":
+        if self.ep_attrs["cuda"]["enable_cuda_graph"] == "1" or self.ep == "dml":
             # ORT does not allow nodes to be placed on mulitple execution providers
             # with cuda graph enabled. We've only verified it works with GQA and with
             # past_present_share_buffer enabled(so the total_seq_len in GQA is hardcoded
@@ -1239,9 +1259,9 @@ class Model:
             #    attention mask reformatting subgraph
             #                   |
             #         4D causal attention mask
-            self.make_attention_mask_reformatting_2d_to_4d()
+            self.make_attention_mask_reformatting_for_mha()
 
-    def make_attention_mask_reformatting_2d_to_4d(self):
+    def make_attention_mask_reformatting_for_mha(self):
         # Make nodes for the attention mask subgraphs that reformat the
         # 2D attention mask (B, S) to 4D causal attention mask (B, N, S, T)
         #
@@ -1378,7 +1398,7 @@ class Model:
         self.make_shape(shape_4_name, f"{constant_shape_name}/output_0", shape=[2])
         slice_1_name = f"{basename}/Slice_1"
         slice_1_inputs = [f"{shape_4_name}/output_0", "/model/constants/TensorProto.INT64/1D/-1", f"/model/constants/TensorProto.INT64/1D/{np.iinfo(np.int64).max}", "/model/constants/TensorProto.INT64/1D/0"]
-        self.make_slice(slice_1_name, slice_1_inputs)
+        self.make_slice(slice_1_name, slice_1_inputs, dtype=TensorProto.INT64, shape=[1])
         squeeze_1_name = f"{basename}/Squeeze_1"
         squeeze_1_inputs = [f"{slice_1_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
         self.make_squeeze(squeeze_1_name, squeeze_1_inputs)
@@ -1394,7 +1414,7 @@ class Model:
         self.make_shape(shape_5_name, f"{constant_shape_name}/output_0", shape=[2])
         slice_2_name = f"{basename}/Slice_2"
         slice_2_inputs = [f"{shape_5_name}/output_0", "/model/constants/TensorProto.INT64/1D/-1", f"/model/constants/TensorProto.INT64/1D/{np.iinfo(np.int64).max}", "/model/constants/TensorProto.INT64/1D/0"]
-        self.make_slice(slice_2_name, slice_2_inputs)
+        self.make_slice(slice_2_name, slice_2_inputs, dtype=TensorProto.INT64, shape=[1])
         squeeze_2_name = f"{basename}/Squeeze_2"
         squeeze_2_inputs = [f"{slice_2_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
         self.make_squeeze(squeeze_2_name, squeeze_2_inputs)
@@ -1566,7 +1586,7 @@ class Model:
         sub_name = f"{attn_mask_basename}/Sub"
         sub_inputs = [f"{reduce_sum_name}/output_0", "/model/constants/TensorProto.INT64/1D/1"]
         self.make_sub(sub_name, sub_inputs, dtype=TensorProto.INT64, shape=["batch_size", 1])
-        cast_1_name = f"{attn_mask_basename}/Cast_1"
+        cast_1_name = f"{attn_mask_basename}/Sub/Cast"
         self.make_cast(cast_1_name, f"{sub_name}/output_0", dtype=TensorProto.INT32, shape=["batch_size", 1])
 
         # Right path
@@ -1575,7 +1595,7 @@ class Model:
         gather_name = f"{attn_mask_basename}/Gather"
         gather_inputs = [f"{shape_name}/output_0", "/model/constants/TensorProto.INT64/0D/1"]
         self.make_gather(gather_name, gather_inputs, axis=0)
-        cast_2_name = f"{attn_mask_basename}/Cast_2"
+        cast_2_name = f"{attn_mask_basename}/Gather/Cast"
         self.make_cast(cast_2_name, f"{gather_name}/output_0", dtype=TensorProto.INT32, shape=None)
 
         self.mask_attrs["seqlens_k"] = cast_1_name
@@ -1666,8 +1686,154 @@ class PhiModel(Model):
 class GemmaModel(MistralModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        self.embed_attrs["normalize"] = True
+        self.embed_attrs["scale"] = np.round(np.sqrt(self.hidden_size), decimals=2)
         self.layernorm_attrs["add_offset"] = 1
+
+
+class Phi3Mini4KModel(MistralModel):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+    def make_attention(self, layer_id, attention, root_input, **kwargs):
+        q_size = self.num_attn_heads * self.head_size
+        kv_size = self.num_kv_heads * self.head_size
+
+        attention.q_proj = torch.nn.Linear(in_features=q_size, out_features=q_size)
+        attention.q_proj.weight = torch.nn.Parameter(attention.qkv_proj.weight[: q_size, :])
+        attention.q_proj.bias = None if attention.qkv_proj.bias is None else torch.nn.Parameter(attention.qkv_proj.bias[: q_size])
+
+        attention.k_proj = torch.nn.Linear(in_features=q_size, out_features=kv_size)
+        attention.k_proj.weight = torch.nn.Parameter(attention.qkv_proj.weight[q_size : q_size + kv_size, :])
+        attention.k_proj.bias = None if attention.qkv_proj.bias is None else torch.nn.Parameter(attention.qkv_proj.bias[q_size : q_size + kv_size])
+
+        attention.v_proj = torch.nn.Linear(in_features=q_size, out_features=kv_size)
+        attention.v_proj.weight = torch.nn.Parameter(attention.qkv_proj.weight[q_size + kv_size :, :])
+        attention.v_proj.bias = None if attention.qkv_proj.bias is None else torch.nn.Parameter(attention.qkv_proj.bias[q_size + kv_size :])
+
+        del attention.qkv_proj
+        super().make_attention(layer_id, attention, root_input, **kwargs)
+
+    def make_mlp_proj(self, layer_id, mlp, root_input):
+        mlp.gate_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
+        mlp.gate_proj.weight = torch.nn.Parameter(mlp.gate_up_proj.weight[ : self.intermediate_size, :])
+
+        mlp.up_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
+        mlp.up_proj.weight = torch.nn.Parameter(mlp.gate_up_proj.weight[self.intermediate_size :, :])
+
+        del mlp.gate_up_proj
+        super().make_mlp_proj(layer_id, mlp, root_input)
+
+
+class Phi3Mini128KModel(Phi3Mini4KModel):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.original_max_position_embeddings = config.original_max_position_embeddings
+        self.mscale = self.context_length / self.original_max_position_embeddings
+        self.magnitude_scaling_policy = "su"
+        self.make_rotary_embedding_caches_subgraph()
+
+    def calculate_mscale_su(self):
+        if self.mscale <= 1.0:
+            return 1.0
+        return np.sqrt(1 + np.log(self.mscale) / np.log(self.original_max_position_embeddings))
+
+    def calculate_mscale_yarn(self):
+        if self.mscale <= 1.0:
+            return 1.0
+        return 0.1 * np.log(self.mscale) + 1.0
+
+    def calculate_mscale(self):
+        if self.magnitude_scaling_policy == "su":
+            return self.calculate_mscale_su()
+        elif self.magnitude_scaling_policy == "yarn":
+            return self.calculate_mscale_yarn()
+        else:
+            return float(self.mscale)
+
+    def calculate_rotary_embedding_caches(self, t, rescale_factors):
+        # Create cos/sin caches for both cases
+        dim = int(self.rotemb_attrs["partial_rotary_factor"] * self.head_size)
+        inv_freq = 1.0 / (rescale_factors * (self.rotemb_attrs["theta"] ** (torch.arange(0, dim, 2, dtype=torch.int64).float() / dim)))
+        freqs = torch.outer(t, inv_freq)
+        mscale = self.calculate_mscale()
+        emb = torch.cat((freqs, freqs), dim=-1)
+        cos_cache, sin_cache = emb.cos() * mscale, emb.sin() * mscale
+
+        # Reshape cos/sin cache from (M, H) to (M, H/2)
+        hidden_dim = cos_cache.shape[-1]
+        cos_cache = cos_cache.squeeze()[:, : (hidden_dim // 2)].detach().numpy()
+        cos_cache = cos_cache.astype(self.to_numpy_dtype[self.io_dtype])
+        sin_cache = sin_cache.squeeze()[:, : (hidden_dim // 2)].detach().numpy()
+        sin_cache = sin_cache.astype(self.to_numpy_dtype[self.io_dtype])
+
+        return cos_cache, sin_cache
+
+    def make_rotary_embedding_caches_subgraph(self):
+        # Create caches for when sequence_length > self.original_max_position_embeddings
+        t = torch.arange(self.context_length, dtype=torch.float32)
+        rescale_factors = torch.tensor(self.rotemb_attrs["long_factor"], dtype=torch.float32)
+        cos_cache_large_name, sin_cache_large_name = "cos_cache_large", "sin_cache_large"
+        cos_cache_large, sin_cache_large = self.calculate_rotary_embedding_caches(t, rescale_factors)
+
+        # Create caches for when sequence_length <= self.original_max_position_embeddings
+        t = torch.arange(self.original_max_position_embeddings, dtype=torch.float32)
+        rescale_factors = torch.tensor(self.rotemb_attrs["short_factor"], dtype=torch.float32)
+        cos_cache_small_name, sin_cache_small_name = "cos_cache_small", "sin_cache_small"
+        cos_cache_small, sin_cache_small = self.calculate_rotary_embedding_caches(t, rescale_factors)
+
+        self.rotemb_attrs["create_rotary_embedding_caches"] = False
+
+        # Make the following subgraph to decide which cos/sin caches to use in the rotary embeddings
+        #
+        # attention_mask --> Shape --> Gather --> Greater --> If --> (cos_cache, sin_cache)
+        #                             (idx=1)
+        #
+
+        basename = "/model/rotemb_caches_subgraph"
+        gather_name = ""
+        if self.attention_attrs["op_type"] == "GroupQueryAttention":
+            gather_name = "/model/attn_mask_reformat/attn_mask_subgraph/Gather"
+        else:
+            gather_name = "/model/attn_mask_reformat/attn_mask_subgraph/Gather_2"
+
+        greater_name = f"{basename}/Greater"
+        greater_inputs = [f"{gather_name}/output_0", f"/model/constants/TensorProto.INT64/0D/{self.original_max_position_embeddings}"]
+        self.make_greater(greater_name, greater_inputs, shape=[])
+        if_name = f"{basename}/If"
+        if_cos_cache_output, if_sin_cache_output = "cos_cache", "sin_cache"
+        self.make_node(
+            "If", inputs=[f"{greater_name}/output_0"], outputs=[if_cos_cache_output, if_sin_cache_output], name=if_name,
+            then_branch=self.make_graph(
+                name="large_rotemb_caches_graph",
+                inputs=[],
+                outputs=[
+                    helper.make_tensor_value_info(cos_cache_large_name, self.io_dtype, shape=cos_cache_large.shape),
+                    helper.make_tensor_value_info(sin_cache_large_name, self.io_dtype, shape=sin_cache_large.shape),
+                ],
+                initializer=[],
+                value_info=[],
+                nodes=[
+                    helper.make_node("Constant", inputs=[], outputs=[cos_cache_large_name], name="/large/cos_cache/Constant", value=numpy_helper.from_array(cos_cache_large)),
+                    helper.make_node("Constant", inputs=[], outputs=[sin_cache_large_name], name="/large/sin_cache/Constant", value=numpy_helper.from_array(sin_cache_large)),
+                ],
+            ),
+            else_branch=self.make_graph(
+                name="small_rotemb_caches_graph",
+                inputs=[],
+                outputs=[
+                    helper.make_tensor_value_info(cos_cache_small_name, self.io_dtype, shape=cos_cache_small.shape),
+                    helper.make_tensor_value_info(sin_cache_small_name, self.io_dtype, shape=sin_cache_small.shape),
+                ],
+                initializer=[],
+                value_info=[],
+                nodes=[
+                    helper.make_node("Constant", inputs=[], outputs=[cos_cache_small_name], name="/small/cos_cache/Constant", value=numpy_helper.from_array(cos_cache_small)),
+                    helper.make_node("Constant", inputs=[], outputs=[sin_cache_small_name], name="/small/sin_cache/Constant", value=numpy_helper.from_array(sin_cache_small)),
+                ],
+            ),
+        )
+        self.make_value_info(if_cos_cache_output, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
+        self.make_value_info(if_sin_cache_output, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
 
 
 def parse_extra_options(kv_items):
@@ -1691,7 +1857,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
     os.makedirs(cache_dir, exist_ok=True)
 
     # Load model config
-    extra_kwargs = {"trust_remote_code": True} if os.path.isdir(input_path) else {"cache_dir": cache_dir, "use_auth_token": True}
+    extra_kwargs = {"trust_remote_code": True} if os.path.isdir(input_path) else {"cache_dir": cache_dir, "use_auth_token": True, "trust_remote_code": True}
     hf_name = input_path if os.path.isdir(input_path) else model_name
     config = AutoConfig.from_pretrained(hf_name, **extra_kwargs)
 
@@ -1708,6 +1874,10 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             onnx_model = MistralModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "PhiForCausalLM":
             onnx_model = PhiModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings == 4096:
+            onnx_model = Phi3Mini4KModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings == 131072:
+            onnx_model = Phi3Mini128KModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         else:
             raise NotImplementedError(f"The {hf_name} model is not currently supported.")
 
