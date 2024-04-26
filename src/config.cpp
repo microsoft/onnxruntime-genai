@@ -1,3 +1,5 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
 #include "generators.h"
 #include "json.h"
 #include <fstream>
@@ -212,6 +214,29 @@ struct Decoder_Element : JSON::Element {
   Outputs_Element outputs_{v_.outputs};
 };
 
+struct Eos_Array_Element : JSON::Element {
+  explicit Eos_Array_Element(Config::Model& v) : v_{v} {}
+
+  void OnNumber(std::string_view name, double value) override {
+    v_.eos_token_ids.push_back(static_cast<int>(value));
+  }
+
+  void OnComplete(bool empty) {
+    if (v_.eos_token_ids.empty())
+      return;  // Empty array, nothign to do
+
+    // Copy the first eos_token_id into the eos_token_id value, it will be our primary eos token
+    v_.eos_token_id = v_.eos_token_ids.front();
+
+    // If the array is just one value, clear the array and just act like a single value was set
+    if (v_.eos_token_ids.size() == 1)
+      v_.eos_token_ids.clear();
+  }
+
+ private:
+  Config::Model& v_;
+};
+
 struct Model_Element : JSON::Element {
   explicit Model_Element(Config::Model& v) : v_{v} {}
 
@@ -241,6 +266,12 @@ struct Model_Element : JSON::Element {
       throw JSON::unknown_value_error{};
   }
 
+  Element& OnArray(std::string_view name) override {
+    if (name == "eos_token_id")
+      return eos_token_ids_;
+    throw JSON::unknown_value_error{};
+  }
+
   Element& OnObject(std::string_view name) override {
     if (name == "encoder_decoder_init") {
       return encoder_decoder_init_;
@@ -255,6 +286,7 @@ struct Model_Element : JSON::Element {
   Config::Model& v_;
   EncoderDecoderInit_Element encoder_decoder_init_{v_.encoder_decoder_init};
   Decoder_Element decoder_{v_.decoder};
+  Eos_Array_Element eos_token_ids_{v_};
 };
 
 struct Search_Element : JSON::Element {

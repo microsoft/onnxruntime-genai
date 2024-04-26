@@ -89,6 +89,8 @@ TEST(CAPITests, EndToEndPhiBatch) {
 #endif
 }
 
+// DML doesn't support GPT attention
+#if !USE_DML
 TEST(CAPITests, GreedySearchGptFp32CAPI) {
   std::vector<int64_t> input_ids_shape{2, 4};
   std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
@@ -143,6 +145,7 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
     EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
   }
 }
+#endif
 
 #if TEST_PHI2
 

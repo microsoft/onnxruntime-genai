@@ -39,3 +39,11 @@ steps:
     RemoveSourceFolder: false
   displayName: 'Remove tensorrt from lib'
   continueOnError: true
+
+- task: DeleteFiles@1
+  inputs:
+    SourceFolder: '$(Build.Repository.LocalPath)/ort/lib'
+    Contents: '*.pdb'
+    RemoveSourceFolder: false
+  displayName: 'Remove .pdb files from lib'
+  continueOnError: true

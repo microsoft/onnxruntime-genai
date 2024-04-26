@@ -58,7 +58,9 @@ PositionInputs::PositionInputs(const Model& model, State& state, RoamingArray<in
       sb_attention_mask_ = state_.GetCapturedGraphInfo()->sb_attention_mask_.get();
 
 #if USE_DML
-      sb_attention_mask_next_ = state_.GetCapturedGraphInfo()->sb_attention_mask_next_.get();
+      if (model_.device_type_ == DeviceType::DML) {
+        sb_attention_mask_next_ = state_.GetCapturedGraphInfo()->sb_attention_mask_next_.get();
+      }
 #endif
     }
   }
@@ -301,7 +303,11 @@ void PositionInputs::UpdateAttentionMask(int current_length) {
       throw std::runtime_error("PositionIDs::Update - Unsupported device type");
   }
 
-#ifndef USE_DML
+#if USE_DML
+  if (model_.device_type_ != DeviceType::DML) {
+    attention_mask_ = std::move(attention_mask_next_);
+  }
+#else
   attention_mask_ = std::move(attention_mask_next_);
 #endif
 

@@ -8,10 +8,11 @@
 #include "decoder_only.h"
 #include "whisper.h"
 #include "kernels.h"
-#ifdef USE_DML
+#if USE_DML
 #include <wil/wrl.h>
 #include "dml_provider_factory.h"
 #include "../dml/dml_smart_container.h"
+#include "../dml/dml_helpers.h"
 
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
 
@@ -186,14 +187,12 @@ std::vector<std::string> Tokenizer::DecodeBatch(std::span<const int32_t> sequenc
 // has been destroyed. Without this, we will crash in the Onnxruntime BFCArena code when deleting tensors due to the
 // arena already being destroyed.
 Ort::Allocator* GetCudaAllocator(OrtSession& session) {
-  static std::unique_ptr<OrtMemoryInfo> memory_info_cuda_;
-  static std::unique_ptr<Ort::Allocator> allocator_cuda_;
-
-  if (!allocator_cuda_) {
-    memory_info_cuda_ = OrtMemoryInfo::Create("Cuda", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-    allocator_cuda_ = Ort::Allocator::Create(session, *memory_info_cuda_);
+  auto& globals = *GetOrtGlobals();
+  if (!globals.allocator_cuda_) {
+    globals.memory_info_cuda_ = OrtMemoryInfo::Create("Cuda", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+    globals.allocator_cuda_ = Ort::Allocator::Create(session, *globals.memory_info_cuda_);
   }
-  return allocator_cuda_.get();
+  return globals.allocator_cuda_.get();
 }
 #endif
 
@@ -346,7 +345,7 @@ void Model::CreateSessionOptions() {
 
       Ort::ThrowOnError(Ort::api->UpdateROCMProviderOptions(&ort_provider_options, keys.data(), values.data(), keys.size()));
       ort_options.AppendExecutionProvider_ROCM(ort_provider_options);
-#ifdef USE_DML
+#if USE_DML
     } else if (provider_options.name == "dml") {
       dml_objects_ = DmlHelpers::CreateDmlObjects();
 
@@ -379,6 +378,8 @@ void Model::CreateSessionOptions() {
 
       ort_options.AddConfigEntry("ep.dml.enable_graph_capture", "1");
       p_dml_api_->SessionOptionsAppendExecutionProvider_DML1(&ort_options, dml_device_.Get(), dml_objects_.command_queue.Get());
+      is_intel_device_ = DmlHelpers::IsIntelDevice(dml_objects_.d3d12_device.Get());
+
       device_type_ = DeviceType::DML;  // We use a DML allocator for input/output caches, but other tensors will use CPU tensors
 #endif
     } else
@@ -395,7 +396,7 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path) {
 
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
-  if (config->model.type == "llama" || config->model.type == "gemma" || config->model.type == "mistral" || config->model.type == "phi")
+  if (config->model.type == "llama" || config->model.type == "gemma" || config->model.type == "mistral" || config->model.type == "phi" || config->model.type == "phi3")
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
   if (config->model.type == "whisper")
     return std::make_shared<Whisper_Model>(std::move(config), ort_env);
@@ -439,7 +440,7 @@ void ConvertFp16ToFp32(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<Or
         fp32[i] = Float16ToFloat32(fp16[i]);
       break;
 
-#ifdef USE_CUDA
+#if USE_CUDA
     case DeviceType::CUDA:
       cuda::LaunchFp16ToFp32(fp16, fp32, count, stream);
       break;
@@ -541,12 +542,9 @@ void Model::GetMaxBatchSizeFromGeneratorParams(const GeneratorParams& params) {
   max_batch_size_ = params.max_batch_size;
 
   if (DeviceType::CUDA == device_type_) {
-    if (max_batch_size_ == 0 && is_cuda_graph_enabled) {
-      throw std::runtime_error("CUDA graph is enabled, but max_batch_size is not set.");
-    }
-    if (max_batch_size_ > 0) {
-      if (!is_cuda_graph_enabled) {
-        throw std::runtime_error("CUDA graph is not enabled.");
+    if (is_cuda_graph_enabled) {
+      if (max_batch_size_ == 0) {
+        throw std::runtime_error("CUDA graph is enabled, but max_batch_size is not set.");
       }
       use_cuda_graph_ = true;
     }
@@ -556,10 +554,8 @@ void Model::GetMaxBatchSizeFromGeneratorParams(const GeneratorParams& params) {
     }
 
     use_cuda_graph_ = true;
-  } else {
-    if (is_cuda_graph_enabled || max_batch_size_ > 0) {
-      throw std::runtime_error("CUDA graph is not supported on this device");
-    }
+  } else if (is_cuda_graph_enabled) {
+    throw std::runtime_error("CUDA graph is not supported on this device");
   }
 }
 

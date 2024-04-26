@@ -1,6 +1,11 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
 #include "../generators.h"
 #include "model.h"
 #include "logits.h"
+#if USE_CUDA
+#include "kernels.h"
+#endif
 
 namespace Generators {
 
@@ -23,6 +28,14 @@ Logits::Logits(const Model& model, State& state)
       sb_logits16_ = state_.GetCapturedGraphInfo()->sb_logits16_.get();
     }
   }
+
+#if USE_CUDA
+  if (model_.device_type_ == DeviceType::CUDA && !model_.config_->model.eos_token_ids.empty()) {
+    auto& cpu_ids = model_.config_->model.eos_token_ids;
+    cuda_eos_token_ids_ptr_ = CudaMallocArray<int32_t>(cpu_ids.size(), &cuda_eos_token_ids_);
+    cudaMemcpyAsync(cuda_eos_token_ids_.data(), cpu_ids.data(), cpu_ids.size() * sizeof(int32_t), ::cudaMemcpyHostToDevice, model_.cuda_stream_);
+  }
+#endif
 }
 
 RoamingArray<float> Logits::Get() {
@@ -31,17 +44,18 @@ RoamingArray<float> Logits::Get() {
   // Convert from float16 to float32 if necessary
   if (type_ == Ort::TypeToTensorType<Ort::Float16_t>::type) {
 #if USE_DML
-    DmlHelpers::DmlCastInputToOutput(
-        model_.GetDmlExecutionContext(),
-        *model_.allocator_device_,
-        *value16_,
-        value32_,
-        model_.GetDmlDevice(),
-        model_.GetOrtDmlApi(),
-        logits_cast_command_list_state_);
-#else
-    ConvertFp16ToFp32(*model_.allocator_device_, *value16_, value32_, model_.device_type_, model_.cuda_stream_);
+    if (model_.device_type_ == DeviceType::DML) {
+      DmlHelpers::DmlCastInputToOutput(
+          model_.GetDmlExecutionContext(),
+          *model_.allocator_device_,
+          *value16_,
+          value32_,
+          model_.GetDmlDevice(),
+          model_.GetOrtDmlApi(),
+          logits_cast_command_list_state_);
+    } else
 #endif
+      ConvertFp16ToFp32(*model_.allocator_device_, *value16_, value32_, model_.device_type_, model_.cuda_stream_);
   }
 
   // First iteration? Then copy the logits over to a {batch_beams, 1, vocab_size} tensor
@@ -60,7 +74,9 @@ RoamingArray<float> Logits::Get() {
 
 #if USE_DML
     // DML doesn't support on-device scoring yet, so we need to download some data to the CPU
-    value32_cpu_ = OrtValue::CreateTensor<float>(model_.allocator_cpu_, shape_);
+    if (model_.device_type_ == DeviceType::DML) {
+      value32_cpu_ = OrtValue::CreateTensor<float>(model_.allocator_cpu_, shape_);
+    }
 #endif
 
     size_t vocab_index = 0;  // Simpler math to have this index go up by vocab_size for every logit chunk we process
@@ -76,7 +92,7 @@ RoamingArray<float> Logits::Get() {
 
       for (int beam_index = 0; beam_index < num_beams; beam_index++) {
         switch (model_.device_type_) {
-#ifdef USE_DML
+#if USE_DML
           case DeviceType::DML: {
             ComPtr<ID3D12Resource> source_resource;
             Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, value32_->GetTensorMutableRawData(), &source_resource));
@@ -126,33 +142,61 @@ RoamingArray<float> Logits::Get() {
     if (type_ == Ort::TypeToTensorType<Ort::Float16_t>::type)
       value16_ = !sb_logits16_ ? OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_)
                                : sb_logits16_->CreateTensorOnStaticBuffer(shape_, type_);
-
     state_.outputs_[output_index_] = type_ == Ort::TypeToTensorType<float>::type ? value32_.get() : value16_.get();
+    element_count = shape_[0] * shape_[2];  // shape_[1] is now 1, so the element count must be updated
   }
 
+  assert(shape_[1] == 1);
+
 #if USE_CUDA
-  if (model_.device_type_ == DeviceType::CUDA)
-    return gpu_span<float>{value32_->GetTensorMutableData<float>(), element_count};
+  if (model_.device_type_ == DeviceType::CUDA) {
+    auto batched_logits_gpu = gpu_span<float>{value32_->GetTensorMutableData<float>(), element_count};
+    if (cuda_eos_token_ids_ptr_)
+      cuda::LaunchHandleEOSArray(batched_logits_gpu.data(), static_cast<int>(shape_[0]) /* batch_beam_size*/, static_cast<int>(shape_[2]) /* vocab_size */, cuda_eos_token_ids_.data(), static_cast<int>(cuda_eos_token_ids_.size()), model_.cuda_stream_);
+    return batched_logits_gpu;
+  }
 #elif USE_DML
-  auto cpu_tensor = value32_cpu_->GetTensorMutableData<float>();
   if (model_.device_type_ == DeviceType::DML) {
     // DML doesn't support on-device scoring yet, so we transfer the data to the CPU
     ComPtr<ID3D12Resource> gpu_resource;
     Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, value32_->GetTensorMutableRawData(), &gpu_resource));
-
-    size_t new_element_count = shape_[0] * shape_[1] * shape_[2];
+    auto cpu_tensor = value32_cpu_->GetTensorMutableData<float>();
 
     model_.GetDmlReadbackHeap()->ReadbackFromGpu(
-        std::span(reinterpret_cast<uint8_t*>(cpu_tensor), new_element_count * sizeof(float)),
+        std::span(reinterpret_cast<uint8_t*>(cpu_tensor), element_count * sizeof(float)),
         gpu_resource.Get(),
         0,
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-    return cpu_span<float>{cpu_tensor, new_element_count};
+    auto batched_logits_cpu = cpu_span<float>{cpu_tensor, element_count};
+    HandleEOSArray(batched_logits_cpu);
+    return batched_logits_cpu;
   }
 #endif
 
-  return cpu_span<float>{value32_->GetTensorMutableData<float>(), element_count};
+  auto batched_logits_cpu = cpu_span<float>{value32_->GetTensorMutableData<float>(), element_count};
+  HandleEOSArray(batched_logits_cpu);
+  return batched_logits_cpu;
+}
+
+void Logits::HandleEOSArray(cpu_span<float> batched_logits) {
+  if (model_.config_->model.eos_token_ids.empty())
+    return;
+
+  const size_t vocab_size = shape_[2];
+  size_t vocab_index = 0;  // Simpler math to have this index go up by vocab_size for every logit chunk we process
+
+  for (int index = 0; index < shape_[0]; index++) {
+    auto logits = batched_logits.subspan(vocab_index, vocab_size);
+    float max = std::numeric_limits<float>::lowest();
+    for (auto id : model_.config_->model.eos_token_ids) {
+      max = std::max(max, logits[id]);
+      logits[id] = std::numeric_limits<float>::lowest();  // Set all EOS token options to never happen (the first will get the max of all)
+    }
+
+    logits[model_.config_->model.eos_token_id] = max;  // Set the score of the primary EOS token to the highest of any of the EOS tokens
+    vocab_index += vocab_size;
+  }
 }
 
 void Logits::Add() {
