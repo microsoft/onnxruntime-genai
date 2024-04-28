@@ -29,7 +29,6 @@
       "name": "windows_directml_default",
       "inherits": "windows_cpu_default",
       "cacheVariables": {
-        "USE_CUDA": "OFF",
         "USE_DML": "ON"
       }
     },
