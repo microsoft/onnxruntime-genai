@@ -42,11 +42,6 @@ parameters:
   - '12.2'
   default: '11.8'
 
-- name: use_build_in_ort
-  displayName: 'Whether to use the built-in OnnxRuntime package.'
-  type: boolean
-  default: false
-
 - name: publish_to_ado_feed
   displayName: 'Publish to Azure DevOps Feed'
   type: boolean
@@ -73,4 +68,4 @@ stages:
     ort_dml_version: ${{ parameters.ort_dml_version }}
     cuda_version: ${{ parameters.cuda_version }}
     publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
-    use_build_in_ort: ${{ parameters.use_build_in_ort }}
+    

@@ -1,8 +1,6 @@
 parameters:
 - name: target
   type: string
-- name: use_build_in_ort
-  type: boolean
 steps:
 
 - checkout: self
@@ -28,24 +26,9 @@ steps:
     echo "arch=$(arch)"
     echo "ep=$(ep)"
   displayName: 'Print Parameters'
-
-- ${{ if eq(parameters.use_build_in_ort, false) }}:
-  - template: utils/download-ort.yml
-    parameters:
-      archiveType: 'tgz'
-- ${{ else }}:
-  - bash: |
-      set -e -x
-      azcopy copy --recursive "https://lotusscus.blob.core.windows.net/tmp/ort/$(os)/$(ep)" '$(Build.Repository.LocalPath)/tmp_ort'
-      displayName: 'Download ONNXRuntime'
-  - task: CopyFiles@2
-    inputs:
-      SourceFolder: '$(Build.Repository.LocalPath)/tmp_ort/**/lib'
-      TargetFolder: '$(Build.Repository.LocalPath)/ort/lib'
-  - task: CopyFiles@2
-    inputs:
-      SourceFolder: '$(Build.Repository.LocalPath)/tmp_ort/**/include'
-      TargetFolder: '$(Build.Repository.LocalPath)/ort/include'
+- template: utils/download-ort.yml
+  parameters:
+    archiveType: 'tgz'
 
 - bash: |
     set -e -x

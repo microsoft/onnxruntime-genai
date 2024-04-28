@@ -13,8 +13,6 @@ parameters:
   values:
   - 'linux'
   - 'win'
-- name: use_build_in_ort
-  type: boolean
 - name: publish_to_ado_feed
   type: boolean
 
@@ -109,8 +107,6 @@ jobs:
     - template: steps/capi-linux-step.yml
       parameters:
         target: 'python'
-        use_build_in_ort: ${{ parameters.use_build_in_ort }}
-
 
   # Windows job needs to set the python version and install the required packages
   - ${{ if eq(parameters.os, 'win') }}:
@@ -118,8 +114,6 @@ jobs:
       parameters:
         target: 'python'
         ep: ${{ parameters.ep }}
-        use_build_in_ort: ${{ parameters.use_build_in_ort }}
-
 
   - ${{ if eq(parameters.publish_to_ado_feed, true)}}:
     - template: steps/py-ado-feed-releasing-step.yml

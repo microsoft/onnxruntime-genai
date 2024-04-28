@@ -16,8 +16,6 @@ parameters:
 - name: cuda_version
   type: string
   default: ''
-- name: use_build_in_ort
-  type: boolean
 - name: publish_to_ado_feed
   type: boolean
 
@@ -32,7 +30,7 @@ stages:
         ort_version: ${{ parameters.ort_version }}
         os: 'win'
         publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
-        use_build_in_ort: ${{ parameters.use_build_in_ort }}
+        
   - ${{ if eq(parameters.enable_win_dml, true) }}:
     - template: jobs/py-packaging-job.yml
       parameters:
@@ -41,7 +39,7 @@ stages:
         ort_version: ${{ parameters.ort_dml_version }}
         os: 'win'
         publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
-        use_build_in_ort: ${{ parameters.use_build_in_ort }}
+        
   - ${{ if eq(parameters.enable_win_cuda, true) }}:
     - template: jobs/py-packaging-job.yml
       parameters:
@@ -51,7 +49,7 @@ stages:
         ort_version: ${{ parameters.ort_version }}
         os: 'win'
         publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
-        use_build_in_ort: ${{ parameters.use_build_in_ort }}
+        
 
   - ${{ if eq(parameters.enable_linux_cpu, true) }}:
     - template: jobs/py-packaging-job.yml
@@ -61,7 +59,7 @@ stages:
         ort_version: ${{ parameters.ort_version }}
         os: 'linux'
         publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
-        use_build_in_ort: ${{ parameters.use_build_in_ort }}
+        
   - ${{ if eq(parameters.enable_linux_cuda, true) }}:
     - template: jobs/py-packaging-job.yml
       parameters:
@@ -71,4 +69,4 @@ stages:
         ort_version: ${{ parameters.ort_version }}
         os: 'linux'
         publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
-        use_build_in_ort: ${{ parameters.use_build_in_ort }}
+        
