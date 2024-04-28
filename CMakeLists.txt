@@ -178,8 +178,7 @@ if(USE_DML)
   add_dependencies(onnxruntime-genai RESTORE_PACKAGES)
   add_dependencies(onnxruntime-genai-static RESTORE_PACKAGES)
 endif()
-
-if(NO_TOKENIZEROOT)
+if(NO_TOKENIZER)
   add_compile_definitions(NO_TOKENIZER=1)
   message("----------------Tokenizer Disabled------------------")
 else()
@@ -244,6 +243,8 @@ foreach(DLL_FILE ${onnxruntime_libs})
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DLL_FILE} $<TARGET_FILE_DIR:onnxruntime-genai>
   )
 endforeach()
+
+include(cmake/package.cmake)
 
 # Have visual studio put all files into one single folder vs the default split of header files into a separate folder
 source_group(TREE ${GENERATORS_ROOT} FILES ${generator_srcs})
