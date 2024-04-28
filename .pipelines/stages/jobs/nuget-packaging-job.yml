@@ -13,8 +13,6 @@ parameters:
   values:
   - 'linux'
   - 'win'
-- name: publish_to_ado_feed
-  type: boolean
 
 jobs:
 - job: nuget_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}_packaging
@@ -55,7 +53,8 @@ jobs:
     ${{ if eq(parameters.ep, 'cuda') }}:
       value: '.Cuda'
   - name: ortHome
-      value: 'ort'
+    value: 'ort'
+
   workspace:
     clean: all
   steps:
@@ -70,8 +69,6 @@ jobs:
       parameters:
         target: 'onnxruntime-genai'
     - template: steps/nuget-win-step.yml
-    - ${{ if eq(parameters.publish_to_ado_feed, true)}}:
-      - template: steps/nuget-ado-feed-releasing-step.yml
 
   - template: steps/compliant-and-cleanup-step.yml
 

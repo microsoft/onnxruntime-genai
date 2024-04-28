@@ -13,8 +13,7 @@ parameters:
   values:
   - 'linux'
   - 'win'
-- name: publish_to_ado_feed
-  type: boolean
+
 
 jobs:
 - job: python_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}_packaging
@@ -97,9 +96,6 @@ jobs:
     - template: steps/capi-win-step.yml
       parameters:
         target: 'python'
-
-  - ${{ if eq(parameters.publish_to_ado_feed, true)}}:
-    - template: steps/py-ado-feed-releasing-step.yml
 
   - template: steps/compliant-and-cleanup-step.yml
 

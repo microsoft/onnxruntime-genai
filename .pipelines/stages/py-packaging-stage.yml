@@ -12,8 +12,7 @@ parameters:
 - name: cuda_version
   type: string
   default: ''
-- name: publish_to_ado_feed
-  type: boolean
+
 
 stages:
 - stage: python_packaging
@@ -25,7 +24,7 @@ stages:
         ep: 'cpu'
         ort_version: ${{ parameters.ort_version }}
         os: 'win'
-        publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
+        
   - ${{ if eq(parameters.enable_win_cuda, true) }}:
     - template: jobs/py-packaging-job.yml
       parameters:
@@ -34,7 +33,7 @@ stages:
         ep: 'cuda'
         ort_version: ${{ parameters.ort_version }}
         os: 'win'
-        publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
+        
 
   - ${{ if eq(parameters.enable_linux_cpu, true) }}:
     - template: jobs/py-packaging-job.yml
@@ -43,7 +42,7 @@ stages:
         ep: 'cpu'
         ort_version: ${{ parameters.ort_version }}
         os: 'linux'
-        publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
+        
   - ${{ if eq(parameters.enable_linux_cuda, true) }}:
     - template: jobs/py-packaging-job.yml
       parameters:
@@ -52,7 +51,7 @@ stages:
         ep: 'cuda'
         ort_version: ${{ parameters.ort_version }}
         os: 'linux'
-        publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
+        
 
 
 
