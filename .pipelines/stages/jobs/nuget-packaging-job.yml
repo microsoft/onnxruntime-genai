@@ -42,18 +42,21 @@ jobs:
     value: ${{ parameters.ort_version }}
   - name: GDN_CODESIGN_TARGETDIRECTORY
     value: '$(Build.ArtifactStagingDirectory)/nuget'
+  - name: os
+    value: ${{ parameters.os }}
   - name: ort_filename
     ${{ if eq(parameters.ep, 'cpu') }}:
-      value: 'onnxruntime-${{ parameters.os }}-${{ parameters.arch }}-${{ parameters.ort_version }}'
+      value: 'Microsoft.ML.OnnxRuntime'
     ${{ elseif eq(parameters.ep, 'cuda') }}:
-      ${{if eq(parameters.cuda_version, '11.8') }}:
-        value: 'onnxruntime-${{ parameters.os }}-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}'
+      ${{if eq(parameters.os, 'win') }}:
+        value: 'Microsoft.ML.OnnxRuntime.Gpu.Windows'
       ${{ else }}:
-        value: 'onnxruntime-${{ parameters.os }}-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
+        value: 'Microsoft.ML.OnnxRuntime.Gpu.Linux'
     ${{ elseif eq(parameters.ep, 'directml')}}:
-      value: 'Microsoft.ML.OnnxRuntime.DirectML.${{ parameters.ort_version }}'
+      value: 'Microsoft.ML.OnnxRuntime.DirectML'
     ${{ else }}:
-      value: 'onnxruntime-${{ parameters.os }}-${{ parameters.arch }}-${{ parameters.ep}}-${{ parameters.ort_version }}'
+      value: 'Microsoft.ML.OnnxRuntime'
+
   - name: genai_nuget_ext
     ${{ if eq(parameters.ep, 'cpu') }}:
       value: ''
