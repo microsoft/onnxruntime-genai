@@ -26,11 +26,25 @@ These model repositories have models that run with DirectML, CPU and CUDA.
 
 ## Install the generate() API package
 
-### DirectML
+If you don't know which hardware capabilities is available on your device.
+* Windows GPU (use DirectML): [Verify if you have Windows GPU](https://www.microsoft.com/en-us/windows/learning-center/how-to-check-gpu)
+
+* CUDA GPU: [Verify if you have CUDA GPU](https://docs.nvidia.com/cuda/cuda-installation-guide-microsoft-windows/index.html#verify-you-have-a-cuda-capable-gpu)
+
+* CPU and Mobile: For Windows, Mac, Android and other devices use the CPU and Mobile option below
+
+### Windows GPU ( use DirectML)
 
 ```
 pip install numpy
 pip install --pre onnxruntime-genai-directml
+```
+
+### CUDA GPU
+
+```
+pip install numpy
+pip install --pre onnxruntime-genai-cuda --index-url=https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-genai/pypi/simple/
 ```
 
 ### CPU
@@ -38,13 +52,6 @@ pip install --pre onnxruntime-genai-directml
 ```
 pip install numpy
 pip install --pre onnxruntime-genai
-```
-
-### CUDA
-
-```
-pip install numpy
-pip install --pre onnxruntime-genai-cuda --index-url=https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-genai/pypi/simple/
 ```
 
 ## Run the model
