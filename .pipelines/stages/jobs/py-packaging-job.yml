@@ -109,12 +109,15 @@ jobs:
     - template: steps/capi-linux-step.yml
       parameters:
         target: 'python'
+        arch: ${{ parameters.arch }}
+        ep: ${{ parameters.ep }}
 
   # Windows job needs to set the python version and install the required packages
   - ${{ if eq(parameters.os, 'win') }}:
     - template: steps/capi-win-step.yml
       parameters:
         target: 'python'
+        arch: ${{ parameters.arch }}
         ep: ${{ parameters.ep }}
 
   - template: steps/compliant-and-cleanup-step.yml

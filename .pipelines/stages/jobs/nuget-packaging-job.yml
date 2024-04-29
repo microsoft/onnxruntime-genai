@@ -85,12 +85,17 @@ jobs:
     - template: steps/capi-linux-step.yml
       parameters:
         target: 'onnxruntime-genai'
+        arch: ${{ parameters.arch }}
+        ep: ${{ parameters.ep }}
+
     # TODO: Add a step to build the linux nuget package
 
   - ${{ if eq(parameters.os, 'win') }}:
     - template: steps/capi-win-step.yml
       parameters:
         target: 'onnxruntime-genai'
+        arch: ${{ parameters.arch }}
+        ep: ${{ parameters.ep }}
     - template: steps/nuget-win-step.yml
 
   - template: steps/compliant-and-cleanup-step.yml

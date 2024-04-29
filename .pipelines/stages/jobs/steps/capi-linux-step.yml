@@ -1,6 +1,12 @@
 parameters:
 - name: target
   type: string
+- name: ep
+  type: string
+  default: 'cpu'
+- name: arch
+  type: string
+  default: 'x64'
 steps:
 
 - checkout: self
@@ -26,9 +32,16 @@ steps:
     echo "arch=$(arch)"
     echo "ep=$(ep)"
   displayName: 'Print Parameters'
-- template: utils/download-ort.yml
+
+- template: utils/download-ort-build.yml
   parameters:
-    archiveType: 'tgz'
+    ep: ${{ parameters.ep }}
+    arch: ${{ parameters.arch }}
+    os: 'linux'
+
+#- template: utils/download-ort.yml
+#  parameters:
+#    archiveType: 'tgz'
 
 - bash: |
     set -e -x

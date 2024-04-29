@@ -5,6 +5,9 @@ parameters:
 - name: ep
   type: string
   default: 'cpu'
+- name: arch
+  type: string
+  default: 'x64'
 steps:
 - bash: |
     echo "##[error]Error: ep and arch are not set"
@@ -31,10 +34,17 @@ steps:
     echo "cuda_version=$(cuda_version)"
     echo "target=${{ parameters.target }}"
   displayName: 'Print Parameters'
-- template: utils/download-ort.yml
+
+- template: utils/download-ort-build.yml
   parameters:
-    archiveType: 'zip'
     ep: ${{ parameters.ep }}
+    arch: ${{ parameters.arch }}
+    os: 'win'
+
+#- template: utils/download-ort.yml
+#  parameters:
+#    archiveType: 'zip'
+#    ep: ${{ parameters.ep }}
 
 - ${{ if eq(parameters.ep, 'directml') }}:
   - powershell: |

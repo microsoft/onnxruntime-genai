@@ -1,6 +1,4 @@
 parameters:
-- name: archiveType
-  type: string
 - name: ep
   type: string
   default: cpu
@@ -13,7 +11,7 @@ parameters:
 steps:
 
 
-- download: build
+- download: ort_package
   displayName: 'Download Pipeline Artifact from Zip-Nuget-Java-Nodejs Packaging Pipeline'
   ${{ if eq(parameters.ep, 'directml') }}:
     artifact: 'drop-nuget-dml'
