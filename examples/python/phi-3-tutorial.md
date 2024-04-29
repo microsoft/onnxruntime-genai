@@ -28,7 +28,7 @@ These model repositories have models that run with DirectML, CPU and CUDA.
 
 You only need to install one of these packages, depending on your hardware configuration.
 
-### Option 1: Install the DirectML package
+### Option 1: On Windows
 
 Install the DirectML package when you are running a Windows machine with a GPU. If you don't know whether you have a GPU in your  Windows machine, you check with this [guide](https://www.microsoft.com/en-us/windows/learning-center/how-to-check-gpu).
 
@@ -37,16 +37,16 @@ pip install numpy
 pip install --pre onnxruntime-genai-directml
 ```
 
-### Option 2: Install the CUDA package
+### Option 2: Other operating systems with CUDA
 
-Install the CUDA package when you are running a Linux machine with CUDA installed. You can verify whether you have a CUDA capable GPU using this [guide](https://docs.nvidia.com/cuda/cuda-installation-guide-microsoft-windows/index.html#verify-you-have-a-cuda-capable-gpu)
+Install the CUDA package when you have CUDA installed. You can verify whether you have a CUDA capable GPU using this [guide](https://docs.nvidia.com/cuda/cuda-installation-guide-microsoft-windows/index.html#verify-you-have-a-cuda-capable-gpu)
 
 ```
 pip install numpy
 pip install --pre onnxruntime-genai-cuda --index-url=https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-genai/pypi/simple/
 ```
 
-### Option 3: Install the CPU package
+### Option 3: Other configurations
 
 If you are not running on a GPU, use the CPU package.
 
