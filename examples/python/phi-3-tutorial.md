@@ -26,7 +26,17 @@ These model repositories have models that run with DirectML, CPU and CUDA.
 
 ## Install the generate() API package
 
-You only need to install one of these packages, depending on your hardware configuration.
+**Unsure about which installation instructions to follow?** Here's a bit more guidance:
+
+Are you on Windows machine with GPU?
+* I don't know &rarr; Review [this guide](https://www.microsoft.com/en-us/windows/learning-center/how-to-check-gpu) to see whether you have a GPU in your Windows machine.
+* Yes &rarr; Follow the instructions for [DirectML](#directml).
+* No &rarr; Do you have an NVIDIA GPU?
+  * I don't know &rarr; Review [this guide](https://docs.nvidia.com/cuda/cuda-installation-guide-microsoft-windows/index.html#verify-you-have-a-cuda-capable-gpu) to see whether you have a CUDA-capable GPU.
+  * Yes &rarr; Follow the instructions for [NVIDIA CUDA GPU](#nvidia-cuda-gpu).
+  * No &rarr; Follow the instructions for [CPU](#cpu).
+ 
+*Note: Only one package is required based on your hardware.*
 
 ### Option 1: On Windows
 
