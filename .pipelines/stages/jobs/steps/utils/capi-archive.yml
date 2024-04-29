@@ -39,6 +39,7 @@ steps:
     SourceFolder: '$(Build.Repository.LocalPath)/src'
     Contents: |
       ort_genai_c.h
+      ort_genai.h
     TargetFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)/include'
 
 - task: CopyFiles@2
