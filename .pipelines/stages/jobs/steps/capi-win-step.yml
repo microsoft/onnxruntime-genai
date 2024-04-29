@@ -39,16 +39,18 @@ steps:
       archiveType: 'zip'
       ep: ${{ parameters.ep }}
 - ${{ else }}:
-    - bash: |
-        azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/tmp/ort/win/$(ep)" '$(Build.Repository.LocalPath)/tmp_ort'
+    - powershell: |
+        azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/tmp/ort/win/$(ep)" '$(Build.Repository.LocalPath)/tmp_ort/'
+        Get-ChildItem -Recurse $(Build.Repository.LocalPath)/tmp_ort/
       displayName: 'Download ONNXRuntime'
+
     - task: CopyFiles@2
       inputs:
-        SourceFolder: '$(Build.Repository.LocalPath)/tmp_ort/**/lib'
+        SourceFolder: '$(Build.Repository.LocalPath)/tmp_ort/lib'
         TargetFolder: '$(Build.Repository.LocalPath)/ort/lib'
     - task: CopyFiles@2
       inputs:
-        SourceFolder: '$(Build.Repository.LocalPath)/tmp_ort/**/include'
+        SourceFolder: '$(Build.Repository.LocalPath)/tmp_ort/include'
         TargetFolder: '$(Build.Repository.LocalPath)/ort/include'
 
 - ${{ if eq(parameters.ep, 'directml') }}:
