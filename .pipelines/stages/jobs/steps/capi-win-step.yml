@@ -40,7 +40,7 @@ steps:
       ep: ${{ parameters.ep }}
 - ${{ else }}:
     - bash: |
-        azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/tmp/ort/$(os)/$(ep)" '$(Build.Repository.LocalPath)/tmp_ort'
+        azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/tmp/ort/win/$(ep)" '$(Build.Repository.LocalPath)/tmp_ort'
       displayName: 'Download ONNXRuntime'
     - task: CopyFiles@2
       inputs:

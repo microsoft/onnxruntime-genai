@@ -36,7 +36,7 @@ steps:
 - ${{ else }}:
   - bash: |
       set -e -x
-      azcopy copy --recursive "https://lotusscus.blob.core.windows.net/tmp/ort/$(os)/$(ep)" '$(Build.Repository.LocalPath)/tmp_ort'
+      azcopy copy --recursive "https://lotusscus.blob.core.windows.net/tmp/ort/linux/$(ep)" '$(Build.Repository.LocalPath)/tmp_ort'
       displayName: 'Download ONNXRuntime'
   - task: CopyFiles@2
     inputs:
