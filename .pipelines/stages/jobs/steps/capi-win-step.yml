@@ -83,15 +83,16 @@ steps:
       AnalyzeTargetGlob: '$(Build.Repository.LocalPath)\**\*genai.dll'
     continueOnError: true
 
-  - template: utils/capi-archive.yml
-    parameters:
-      archiveType: zip
+  - powershell: |
+      cmake --build --preset windows_$(arch)_$(ep)_release --target package
+    displayName: 'Package C/C++ API'
+    workingDirectory: '$(Build.Repository.LocalPath)'
 
   - task: PublishBuildArtifacts@1
     displayName: 'Publish Artifact: ONNXRuntime Genai capi'
     inputs:
       ArtifactName: $(artifactName)-capi
-      PathtoPublish: '$(Build.ArtifactStagingDirectory)/capi'
+      PathtoPublish: '$(Build.Repository.LocalPath)\build\$(ep)\package'
 
 - ${{ if eq(parameters.target, 'python') }}:
   - task: BinSkim@4

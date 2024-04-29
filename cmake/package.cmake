@@ -4,8 +4,6 @@ set_target_properties(
 )
 install(TARGETS
   onnxruntime-genai
-  onnxruntime-genai-static
-  ARCHIVE
   LIBRARY
   PUBLIC_HEADER
 )
@@ -14,7 +12,7 @@ set(CPACK_PACKAGE_NAME "onnxruntime-genai")
 set(CPACK_RESOURCE_FILE_LICENSE "${PROJECT_SOURCE_DIR}/LICENSE")
 set(CPACK_RESOURCE_FILE_README "${PROJECT_SOURCE_DIR}/README.md")
 set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/microsoft/onnxruntime-genai")
-set(CPACK_OUTPUT_FILE_PREFIX "${CMAKE_CURRENT_BINARY_DIR}/packages")
+set(CPACK_OUTPUT_FILE_PREFIX "${CMAKE_CURRENT_BINARY_DIR}/package")
 set(CPACK_PACKAGE_FILE_NAME "${CPACK_PACKAGE_NAME}-${VERSION_INFO}-${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}")
 if (WIN32)
   set(CPACK_GENERATOR "ZIP")
