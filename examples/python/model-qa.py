@@ -25,7 +25,16 @@ def main(args):
 
         if args.timings: started_timestamp = time.time()
 
-        input_tokens = tokenizer.encode(args.system_prompt + text)
+        # If there is a chat template, use it
+        prompt = text
+        if not args.no_chat_template:
+            # Check that the template is a valid fstring
+            if args.chat_template.count('{') != 1 or args.chat_template.count('}') != 1:
+                print("Error, chat template must have exactly one pair of curly braces")
+                exit(1)
+            prompt = f'{args.chat_template.format(prompt=text)}\n'
+
+        input_tokens = tokenizer.encode(prompt)
 
         params = og.GeneratorParams(model)
         params.try_use_cuda_graph_with_max_batch_size(1)
@@ -76,7 +85,8 @@ if __name__ == "__main__":
     parser.add_argument('-t', '--temperature', type=float, help='Temperature to sample with')
     parser.add_argument('-r', '--repetition_penalty', type=float, help='Repetition penalty to sample with')
     parser.add_argument('-v', '--verbose', action='store_true', default=False, help='Print verbose output and timing information. Defaults to false')
-    parser.add_argument('-s', '--system_prompt', type=str, default='', help='Prepend a system prompt to the user input prompt. Defaults to empty')
     parser.add_argument('-g', '--timings', action='store_true', default=False, help='Print timing information for each generation step. Defaults to false')
+    parser.add_argument('-c', '--chat_template', type=str, default='<|user|>\n {prompt} <|end|>\n<|assistant|>', help='Chat template to use for the conversation. For Phi-3 models, defaults to <|user|>\n {prompt} <|end|>\n<|assistant|>. Otherwise, defaults to the empty string ie the user\'s input is sent to the model raw.')
+    parser.add_argument('-nc', '--no_chat_template', action='store_true', default=False)
     args = parser.parse_args()
     main(args)
