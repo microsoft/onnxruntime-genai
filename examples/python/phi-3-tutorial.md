@@ -47,7 +47,7 @@ pip install numpy
 pip install --pre onnxruntime-genai-directml
 ```
 
-### Option 2: Other operating systems with CUDA
+### NVIDIA CUDA GPU
 
 Install the CUDA package when you have CUDA installed. You can verify whether you have a CUDA capable GPU using this [guide](https://docs.nvidia.com/cuda/cuda-installation-guide-microsoft-windows/index.html#verify-you-have-a-cuda-capable-gpu)
 
