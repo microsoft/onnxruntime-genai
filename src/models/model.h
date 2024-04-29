@@ -1,8 +1,5 @@
 #pragma once
-#ifndef NO_TOKENIZER
 #include "tfmtok_c.h"
-#endif
-
 #include "captured_graph_pool.h"
 
 #if USE_DML
@@ -35,19 +32,6 @@ struct State {
   void Run(OrtSession& session, OrtRunOptions& run_options);  // Uses the inputs below to run
   void ClearIO();                                             // Clear all inputs/outputs
 };
-
-#ifdef NO_TOKENIZER
-struct TokenizerStream {
-  const std::string& Decode(int32_t token);
-};
-
-struct Tokenizer {
-  Tokenizer(Config& config);
-
-  std::vector<int32_t> Encode(const char* text) const;
-  std::string Decode(std::span<int32_t> tokens) const;
-};
-#else
 
 template <typename T>
 struct TfmPtr {
@@ -94,7 +78,6 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer> {
  private:
   int32_t pad_token_id_;
 };
-#endif
 
 struct SessionInfo {
   SessionInfo(OrtSession& session);

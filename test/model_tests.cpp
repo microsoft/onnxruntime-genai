@@ -203,7 +203,6 @@ TEST(ModelTests, BeamSearchGptCuda) {
 
 TEST(ModelTests, TestApiCuda) {
 #if TEST_PHI2
-#ifndef NO_TOKENIZER
 
   auto prompt = R"(
 def print_prime(n):
@@ -234,15 +233,11 @@ Print all primes between 1 and n
   auto result = generator->GetSequence(0);
 
   std::cout << tokenizer->Decode(result.GetCPU()) << "\r\n";
-#else
-  std::cout << "Test skipped - not built with onnxruntime extensions\r\n";
-#endif
 #endif
 }
 
 TEST(ModelTests, TestHighLevelApiCuda) {
 #if TEST_PHI2
-#ifndef NO_TOKENIZER
   auto prompt = R"(
 def print_prime(n):
 '''
@@ -266,9 +261,6 @@ Print all primes between 1 and n
   auto result = Generators::Generate(*model, *params);
 
   std::cout << tokenizer->Decode(result[0]) << "\r\n";
-#else
-  std::cout << "Test skipped - not built with onnxruntime extensions\r\n";
-#endif
 #endif
 }
 
