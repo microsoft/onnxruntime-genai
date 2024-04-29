@@ -27,11 +27,6 @@ parameters:
 - name: ort_version
   displayName: 'OnnxRuntime version'
   type: string
-  default: '1.17.3'
-
-- name: ort_dml_version
-  displayName: 'OnnxRuntime DirectML version'
-  type: string
   default: '1.18.0-dev-20240423-0527-c07b8d545d'
 
 - name: cuda_version
