@@ -5,11 +5,14 @@
 // C++ API Example
 
 void CXX_API(const char* model_path) {
+  std::cout << "Creating model..." << std::endl;
   auto model = OgaModel::Create(model_path);
+  std::cout << "Creating tokenizer..." << std::endl;
   auto tokenizer = OgaTokenizer::Create(*model);
 
   const char* prompt = "def is_prime(num):";
-  std::cout << "Prompt: " << std::endl << prompt << std::endl;
+  std::cout << "Prompt: " << std::endl
+            << prompt << std::endl;
 
   auto sequences = OgaSequences::Create();
   tokenizer->Encode(prompt, *sequences);
@@ -19,16 +22,19 @@ void CXX_API(const char* model_path) {
   params->SetInputSequences(*sequences);
 
   auto output_sequences = model->Generate(*params);
-  auto out_string = tokenizer->Decode(output_sequences->Get(0));
+  const auto output_sequence_length = output_sequences->SequenceCount(0);
+  const auto* output_sequence_data = output_sequences->SequenceData(0);
+  auto out_string = tokenizer->Decode(output_sequence_data, output_sequence_length);
 
-  std::cout << "Output: " << std::endl << out_string << std::endl;
+  std::cout << "Output: " << std::endl
+            << out_string << std::endl;
 }
 
 // C API Example
 
 void CheckResult(OgaResult* result) {
   if (result) {
-    std::string string=OgaResultGetError(result);
+    std::string string = OgaResultGetError(result);
     OgaDestroyResult(result);
     throw std::runtime_error(string);
   }
@@ -36,9 +42,11 @@ void CheckResult(OgaResult* result) {
 
 void C_API(const char* model_path) {
   OgaModel* model;
+  std::cout << "Creating model..." << std::endl;
   OgaCreateModel(model_path, &model);
 
   OgaTokenizer* tokenizer;
+  std::cout << "Creating tokenizer..." << std::endl;
   CheckResult(OgaCreateTokenizer(model, &tokenizer));
 
   const char* prompt = "def is_prime(num):";
@@ -83,7 +91,6 @@ int main(int argc, char** argv) {
     print_usage(argc, argv);
     return -1;
   }
-
 
   std::cout << "-------------" << std::endl;
   std::cout << "Hello, Phi-2!" << std::endl;
