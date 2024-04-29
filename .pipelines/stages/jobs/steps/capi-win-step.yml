@@ -46,11 +46,11 @@ steps:
 
     - task: CopyFiles@2
       inputs:
-        SourceFolder: '$(Build.Repository.LocalPath)/tmp_ort/lib'
+        SourceFolder: '$(Build.Repository.LocalPath)/tmp_ort/$(ep)/lib'
         TargetFolder: '$(Build.Repository.LocalPath)/ort/lib'
     - task: CopyFiles@2
       inputs:
-        SourceFolder: '$(Build.Repository.LocalPath)/tmp_ort/include'
+        SourceFolder: '$(Build.Repository.LocalPath)/tmp_ort/$(ep)/include'
         TargetFolder: '$(Build.Repository.LocalPath)/ort/include'
 
 - ${{ if eq(parameters.ep, 'directml') }}:
