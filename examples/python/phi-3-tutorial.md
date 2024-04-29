@@ -56,8 +56,8 @@ The script accepts a model folder and takes the generation parameters from the c
 This example is using the long context model running with DirectML on Windows.
 
 ```bash
-curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examples/python/model-qa.py -o model-qa.py
-python model-qa.py -m Phi-3-mini-128k-instruct-onnx/directml/directml-int4-awq-block-128 -l 2048
+curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examples/python/phi3-qa.py -o phi3-qa.py
+python phi3-qa.py -m Phi-3-mini-128k-instruct-onnx/directml/directml-int4-awq-block-128 -l 2048
 ```
 
 Once the script has loaded the model, it will ask you for input in a loop, streaming the output as it is produced the model. For example:
