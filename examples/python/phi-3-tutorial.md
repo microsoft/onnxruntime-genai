@@ -30,7 +30,7 @@ You only need to install one of these packages, depending on your hardware confi
 
 ### Option 1: On Windows
 
-Install the DirectML package when you are running a Windows machine with a GPU. If you don't know whether you have a GPU in your  Windows machine, you check with this [guide](https://www.microsoft.com/en-us/windows/learning-center/how-to-check-gpu).
+Install the DirectML package when you are running a Windows machine with a GPU. If you don't know whether you have a GPU in your Windows machine, you can check with this [guide](https://www.microsoft.com/en-us/windows/learning-center/how-to-check-gpu).
 
 ```
 pip install numpy
