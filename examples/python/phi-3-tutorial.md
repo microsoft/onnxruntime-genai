@@ -26,12 +26,14 @@ These model repositories have models that run with DirectML, CPU and CUDA.
 
 ## Install the generate() API package
 
-If you don't know which hardware capabilities is available on your device.
-* Windows GPU (use DirectML): [Verify if you have Windows GPU](https://www.microsoft.com/en-us/windows/learning-center/how-to-check-gpu)
-
+If you don't know which hardware capability is available on your device.
+* Windows with a GPU (use DirectML): [Verify if you have Windows GPU](https://www.microsoft.com/en-us/windows/learning-center/how-to-check-gpu)
+ 
 * CUDA GPU: [Verify if you have CUDA GPU](https://docs.nvidia.com/cuda/cuda-installation-guide-microsoft-windows/index.html#verify-you-have-a-cuda-capable-gpu)
 
 * CPU and Mobile: For Windows, Mac, Android and other devices use the CPU and Mobile option below
+
+Only one package is required based on your hardware.
 
 ### Windows GPU ( use DirectML)
 
@@ -60,7 +62,7 @@ Run the model with [model-qa.py](https://github.com/microsoft/onnxruntime-genai/
 
 The script accepts a model folder and takes the generation parameters from the config in that model folder. You can also override the parameters on the command line.
 
-This example is using the long context model running with DirectML on Windows.
+This example is using the long context model running with DirectML on Windows. The "-l" is the context length needed per model.   
 
 ```bash
 curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examples/python/model-qa.py -o model-qa.py
