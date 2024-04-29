@@ -49,7 +49,7 @@ pip install --pre onnxruntime-genai-cuda --index-url=https://aiinfra.pkgs.visual
 
 ## Run the model
 
-Run the model with [model-qa.py](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/model-qa.py).
+Run the model with [phi3-qa.py](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/phi3-qa.py).
 
 The script accepts a model folder and takes the generation parameters from the config in that model folder. You can also override the parameters on the command line.
 
