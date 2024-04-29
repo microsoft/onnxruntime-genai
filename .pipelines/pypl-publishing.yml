@@ -7,7 +7,7 @@ parameters:
 - name: enable_win_cuda
   displayName: 'Whether Windows CUDA package is built.'
   type: boolean
-  default : true
+  default: true
 
 - name: enable_win_dml
   displayName: 'Whether Windows DirectML package is built.'
@@ -44,7 +44,15 @@ resources:
     endpoint: Microsoft
     name: pypa/manylinux
     ref: 5eda9aded5462201e6310105728d33016e637ea7
-
+  pipelines:
+  - pipeline: ort_package
+    project: 'Lotus'
+    source: 'Zip-Nuget-Java-Nodejs Packaging Pipeline'
+    trigger:
+      branches:
+        include:
+        - main
+    branch: main
 trigger: none
 stages:
 - template: stages/py-packaging-stage.yml

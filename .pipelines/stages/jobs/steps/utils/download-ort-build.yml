@@ -1,0 +1,75 @@
+parameters:
+- name: archiveType
+  type: string
+- name: ep
+  type: string
+  default: cpu
+- name: os
+  type: string
+  default: linux
+- name: arch
+  type: string
+  default: x64
+steps:
+
+
+- download: build
+  displayName: 'Download Pipeline Artifact from Zip-Nuget-Java-Nodejs Packaging Pipeline'
+  ${{ if eq(parameters.ep, 'directml') }}:
+    artifact: 'drop-nuget-dml'
+  ${{ elseif eq(parameters.ep, 'cuda') }}:
+    artifact: 'onnxruntime-${{ parameters.os}}-${{ parameters.ep}}-${{ parameters.arch}}-cuda'
+  ${{ else }}:
+    artifact: 'onnxruntime-${{ parameters.os}}-${{ parameters.ep}}-${{ parameters.arch}}'
+
+- ${{ if eq(parameters.ep, 'directml') }}:
+  - task: ExtractFiles@1
+    inputs:
+      archiveFilePatterns: '$(Pipeline.Workspace)/ort_package/*/*.nupkg'
+      destinationFolder: '$(Build.Repository.LocalPath)/ort'
+      cleanDestinationFolder: false
+      overwriteExistingFiles: true
+    displayName: Unzip OnnxRuntime
+  - task: CopyFiles@2
+    inputs:
+      SourceFolder: '$(Build.Repository.LocalPath)/ort/runtimes/$(os)-$(arch)/native'
+      TargetFolder: '$(Build.Repository.LocalPath)/ort/lib'
+  - task: CopyFiles@2
+    inputs:
+      SourceFolder: '$(Build.Repository.LocalPath)/ort/'
+      Contents: '**/native/include/**'
+      TargetFolder: '$(Build.Repository.LocalPath)/ort/include'
+      flattenFolders: true
+- ${{ elseif eq(parameters.os, 'win') }}:
+  - task: ExtractFiles@1
+    inputs:
+      archiveFilePatterns: '$(Pipeline.Workspace)/ort_package/*/*.zip'
+      destinationFolder: '$(Build.Repository.LocalPath)/ort'
+      cleanDestinationFolder: false
+      overwriteExistingFiles: true
+    displayName: Unzip OnnxRuntime
+- ${{ else }}:
+  - task: ExtractFiles@1
+    inputs:
+      archiveFilePatterns: '$(Pipeline.Workspace)/ort_package/*/*.tgz'
+      destinationFolder: '$(Build.Repository.LocalPath)/ort'
+      cleanDestinationFolder: false
+      overwriteExistingFiles: true
+      displayName: Unzip OnnxRuntime
+
+
+- task: DeleteFiles@1
+  inputs:
+    SourceFolder: '$(Build.Repository.LocalPath)/ort/lib'
+    Contents: '*tensorrt*'
+    RemoveSourceFolder: false
+  displayName: 'Remove tensorrt from lib'
+  continueOnError: true
+
+- task: DeleteFiles@1
+  inputs:
+    SourceFolder: '$(Build.Repository.LocalPath)/ort/lib'
+    Contents: '*.pdb'
+    RemoveSourceFolder: false
+  displayName: 'Remove .pdb files from lib'
+  continueOnError: true

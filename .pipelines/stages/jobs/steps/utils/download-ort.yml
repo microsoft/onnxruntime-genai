@@ -31,6 +31,7 @@ steps:
     SourceFolder: '$(Build.Repository.LocalPath)/ort/'
     Contents: '**/native/include/**'
     TargetFolder: '$(Build.Repository.LocalPath)/ort/include'
+    flattenFolders: true
 
 - task: DeleteFiles@1
   inputs:
