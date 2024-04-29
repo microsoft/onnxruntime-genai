@@ -56,7 +56,7 @@ pip install numpy
 pip install --pre onnxruntime-genai-cuda --index-url=https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-genai/pypi/simple/
 ```
 
-### Option 3: Other configurations
+### CPU
 
 If you are not running on a GPU, use the CPU package.
 
