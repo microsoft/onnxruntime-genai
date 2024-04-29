@@ -4,8 +4,6 @@
 1. [Download Phi-3 Mini](#download-the-model)
 2. [Install the generate() API](#install-the-generate()-api-package)
 3. [Run Phi-3 Mini](#run-the-model)
-2. [Install the generate() API](#install-the-generate()-api-package)
-3. [Run Phi-3 Mini](#run-the-model)
 
 ## Download the model 
 
@@ -59,7 +57,6 @@ pip install --pre onnxruntime-genai
 
 ## Run the model
 
-Run the model with [model-qa.py](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/model-qa.py).
 Run the model with [model-qa.py](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/model-qa.py).
 
 The script accepts a model folder and takes the generation parameters from the config in that model folder. You can also override the parameters on the command line.
