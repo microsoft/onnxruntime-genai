@@ -75,7 +75,7 @@ struct OgaModel : OgaAbstract {
     return std::unique_ptr<OgaModel>(p);
   }
 
-  std::unique_ptr<OgaSequences> Generate(const OgaGeneratorParams& params) const {
+  std::unique_ptr<OgaSequences> Generate(const OgaGeneratorParams& params) {
     OgaSequences* p;
     OgaCheckResult(OgaGenerate(this, &params, &p));
     return std::unique_ptr<OgaSequences>(p);
@@ -193,11 +193,15 @@ struct OgaGeneratorParams : OgaAbstract {
     OgaCheckResult(OgaGeneratorParamsSetInputSequences(this, &sequences));
   }
 
+  void TryGraphCaptureWithMaxBatchSize(int max_batch_size) {
+    OgaCheckResult(OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(this, max_batch_size));
+  }
+
   static void operator delete(void* p) { OgaDestroyGeneratorParams(reinterpret_cast<OgaGeneratorParams*>(p)); }
 };
 
 struct OgaGenerator : OgaAbstract {
-  static std::unique_ptr<OgaGenerator> Create(const OgaModel& model, const OgaGeneratorParams& params) {
+  static std::unique_ptr<OgaGenerator> Create(OgaModel& model, const OgaGeneratorParams& params) {
     OgaGenerator* p;
     OgaCheckResult(OgaCreateGenerator(&model, &params, &p));
     return std::unique_ptr<OgaGenerator>(p);

@@ -105,6 +105,14 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* gene
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGeneratorParams* generator_params, int32_t max_batch_size) {
+  OGA_TRY
+  auto* params = reinterpret_cast<Generators::GeneratorParams*>(generator_params);
+  params->max_batch_size = max_batch_size;
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputIDs(OgaGeneratorParams* oga_params, const int32_t* input_ids, size_t input_ids_count, size_t sequence_length, size_t batch_size) {
   OGA_TRY
   auto& params = *reinterpret_cast<Generators::GeneratorParams*>(oga_params);
@@ -135,17 +143,23 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputSequences(OgaGenera
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGenerate(const OgaModel* model, const OgaGeneratorParams* generator_params, OgaSequences** out) {
+OgaResult* OGA_API_CALL OgaGenerate(OgaModel* model, const OgaGeneratorParams* generator_params, OgaSequences** out) {
   OGA_TRY
-  auto result = Generators::Generate(*reinterpret_cast<const Generators::Model*>(model), *reinterpret_cast<const Generators::GeneratorParams*>(generator_params));
+  auto* model_p = reinterpret_cast<Generators::Model*>(model);
+  auto* params = reinterpret_cast<const Generators::GeneratorParams*>(generator_params);
+  model_p->GetMaxBatchSizeFromGeneratorParams(*params);
+  auto result = Generators::Generate(*model_p, *params);
   *out = reinterpret_cast<OgaSequences*>(std::make_unique<Generators::TokenSequences>(std::move(result)).release());
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OgaCreateGenerator(const OgaModel* model, const OgaGeneratorParams* generator_params, OgaGenerator** out) {
+OgaResult* OgaCreateGenerator(OgaModel* model, const OgaGeneratorParams* generator_params, OgaGenerator** out) {
   OGA_TRY
-  *out = reinterpret_cast<OgaGenerator*>(CreateGenerator(*reinterpret_cast<const Generators::Model*>(model), *reinterpret_cast<const Generators::GeneratorParams*>(generator_params)).release());
+  auto* model_p = reinterpret_cast<Generators::Model*>(model);
+  auto* params = reinterpret_cast<const Generators::GeneratorParams*>(generator_params);
+  model_p->GetMaxBatchSizeFromGeneratorParams(*params);
+  *out = reinterpret_cast<OgaGenerator*>(CreateGenerator(*model_p, *params).release());
   return nullptr;
   OGA_CATCH
 }
