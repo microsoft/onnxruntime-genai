@@ -16,6 +16,8 @@ def main(args):
     if args.verbose: print()
     search_options = {name:getattr(args, name) for name in ['do_sample', 'max_length', 'min_length', 'top_p', 'top_k', 'temperature', 'repetition_penalty'] if name in args}
 
+    og.set_log_options(enabled=True, append_next_tokens=True)
+
     # Keep asking for input prompts in a loop
     while True:
         text = input("Input: ")
@@ -30,6 +32,7 @@ def main(args):
         params = og.GeneratorParams(model)
         params.try_use_cuda_graph_with_max_batch_size(1)
         params.set_search_options(**search_options)
+        params.set_search_options(do_sample=True, random_seed=0)
         params.input_ids = input_tokens
         generator = og.Generator(model, params)
         if args.verbose: print("Generator created")

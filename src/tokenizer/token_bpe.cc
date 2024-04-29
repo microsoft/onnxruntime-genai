@@ -237,15 +237,17 @@ std::vector<tfmTokenId_t> BPETokenizer::Encode(std::string_view sv_input, int64_
       text = text.strip()
     */
     std::u32string str = RemoveConsecutiveSpaces(input);
-    if (IsUnicodeSpace(str.front())) {
-      str.erase(str.begin());
+    if (!str.empty()) {
+      if (IsUnicodeSpace(str.front())) {
+        str.erase(str.begin());
+      }
+      if (IsUnicodeSpace(str.back())) {
+        str.pop_back();
+      }
+      // remove newlines as CLIP ignores them (treats them as whitespace which is then cleaned)
+      str.erase(std::remove(str.begin(), str.end(), U'\n'), str.end());
+      str.erase(std::remove(str.begin(), str.end(), U'\r'), str.end());
     }
-    if (IsUnicodeSpace(str.back())) {
-      str.pop_back();
-    }
-    // remove newlines as CLIP ignores them (treats them as whitespace which is then cleaned)
-    str.erase(std::remove(str.begin(), str.end(), U'\n'), str.end());
-    str.erase(std::remove(str.begin(), str.end(), U'\r'), str.end());
     input = str;
   }
 
@@ -592,6 +594,16 @@ TfmStatus BPETokenizer::Id2Token(tfmTokenId_t id, std::string& token, DecoderSta
         token.push_back(' ');
       }
     }  // end case of whitespace_token_
+
+    if (!bpe_state->incomplete_utf8_.empty()) {
+      token = bpe_state->incomplete_utf8_ + token;
+      bpe_state->incomplete_utf8_.clear();
+    } else {
+      if (!token.empty() && UTF8Len(token.front()) > token.size()) {
+        bpe_state->incomplete_utf8_ = token;
+        token = "";
+      }
+    }
   }
 
   return status;

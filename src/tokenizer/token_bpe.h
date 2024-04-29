@@ -28,6 +28,7 @@ class BPETokenizer : public TokenizerImpl {
     BPEDeocerState() = default;
     ~BPEDeocerState() override = default;
     bool f_special_last;
+    std::string incomplete_utf8_;
   };
 
  public:
@@ -84,6 +85,7 @@ class BPETokenizer : public TokenizerImpl {
   uint32_t bos_token_id_{};
   uint32_t eos_token_id_{};
   uint32_t pad_token_id_{};
+
 
   struct {
     bool add_prefix_space{};
