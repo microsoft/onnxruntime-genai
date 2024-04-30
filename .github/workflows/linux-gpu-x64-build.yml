@@ -31,16 +31,18 @@ jobs:
           clean: true
           path: manylinux
           submodules: true
-      - name: install Mono and Nuget
-        run: |
-          sudo apt install ca-certificates gnupg
-          sudo gpg --homedir /tmp --no-default-keyring --keyring /usr/share/keyrings/mono-official-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 3FA7E0328081BFF6A14DA29AA6A19B38D3D831EF
-          echo "deb [signed-by=/usr/share/keyrings/mono-official-archive-keyring.gpg] https://download.mono-project.com/repo/ubuntu stable-focal main" | sudo tee /etc/apt/sources.list.d/mono-official-stable.list
-          sudo apt update
-          sudo apt install -y mono-devel
-          sudo curl -o /usr/local/bin/nuget.exe https://dist.nuget.org/win-x86-commandline/latest/nuget.exe
-          sudo chmod +x /usr/local/bin/nuget.exe
-
+#      - name: install Mono and Nuget
+#        run: |
+#          sudo apt install ca-certificates gnupg
+#          sudo gpg --homedir /tmp --no-default-keyring --keyring /usr/share/keyrings/mono-official-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 3FA7E0328081BFF6A14DA29AA6A19B38D3D831EF
+#          echo "deb [signed-by=/usr/share/keyrings/mono-official-archive-keyring.gpg] https://download.mono-project.com/repo/ubuntu stable-focal main" | sudo tee /etc/apt/sources.list.d/mono-official-stable.list
+#          sudo apt update
+#          sudo apt install -y mono-devel
+#          sudo curl -o /usr/local/bin/nuget.exe https://dist.nuget.org/win-x86-commandline/latest/nuget.exe
+#          sudo chmod +x /usr/local/bin/nuget.exe
+      - uses: nuget/setup-nuget@v2
+        with:
+          nuget-version: 'latest'
       - name: Install jq and dotnet
         run: |
           wget https://packages.microsoft.com/config/ubuntu/20.04/packages-microsoft-prod.deb -O packages-microsoft-prod.deb
@@ -56,7 +58,7 @@ jobs:
 
       - name: Download OnnxRuntime Nightly
         run: |
-          mono /usr/local/bin/nuget.exe install ${{ env.ORT_PACKAGE_NAME }} -version ${{ env.ORT_NIGHTLY_VERSION }} -x
+          nuget install ${{ env.ORT_PACKAGE_NAME }} -version ${{ env.ORT_NIGHTLY_VERSION }} -x
         continue-on-error: true
       - name: list files
         shell: bash
