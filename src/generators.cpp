@@ -61,7 +61,28 @@ GeneratorParams::GeneratorParams(const Model& model)
       eos_token_id{model.config_->model.eos_token_id},
       vocab_size{model.config_->model.vocab_size},
       device_type{model.device_type_},
-      cuda_stream{model.cuda_stream_} {
+      cuda_stream{model.cuda_stream_},
+      is_cuda_graph_enabled_{IsCudaGraphEnabled(model.config_->model.decoder.session_options)} {
+}
+
+void GeneratorParams::TryGraphCapture(int batch_size) {
+  if (DeviceType::CUDA == device_type) {
+    if (is_cuda_graph_enabled_) {
+      if (batch_size == 0) {
+        throw std::runtime_error("CUDA graph is enabled, but max_batch_size is not set.");
+      }
+      use_cuda_graph = true;
+      max_batch_size = batch_size;
+    }
+  } else if (DeviceType::DML == device_type) {
+    if (batch_size == 0) {
+      throw std::runtime_error("max_batch_size needs to be set when using DirectML.");
+    }
+
+    use_cuda_graph = true;
+  } else if (is_cuda_graph_enabled_) {
+    throw std::runtime_error("CUDA graph is not supported on this device");
+  }
 }
 
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params) {

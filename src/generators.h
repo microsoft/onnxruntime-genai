@@ -61,6 +61,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams> {
 
   int batch_size{1};
   int max_batch_size{0};
+  bool use_cuda_graph{};
   int sequence_length{};
   int BatchBeamSize() const { return search.num_beams * batch_size; }
 
@@ -97,6 +98,11 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams> {
   std::vector<int32_t> input_ids_owner;  // Backing memory of input_ids in some cases
 
   std::shared_ptr<GeneratorParams> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
+
+  void TryGraphCapture(int max_batch_size);
+
+ private:
+  bool is_cuda_graph_enabled_{};
 };
 
 struct Generator {
