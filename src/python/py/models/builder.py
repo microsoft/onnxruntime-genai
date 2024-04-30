@@ -176,7 +176,7 @@ class Model:
             self.attention_attrs["use_packed_matmul"] = self.ep != "dml" and self.num_attn_heads == self.num_kv_heads
 
             # GQA + Rot.Emb. does not require `position ids` as input
-            if self.ep == "cuda":
+            if self.ep == "cuda" or self.ep == "cpu":
                 self.attention_attrs["use_rotemb_in_attn"] = True
                 self.input_names.remove("position_ids")
 
