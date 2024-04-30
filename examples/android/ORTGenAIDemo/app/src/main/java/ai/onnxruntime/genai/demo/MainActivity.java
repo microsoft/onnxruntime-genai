@@ -69,7 +69,7 @@ public class MainActivity extends AppCompatActivity implements GenAIWrapper.Toke
                 new Thread(new Runnable() {
                     @Override
                     public void run() {
-                        genAIWrapper.run(promptQuestion);
+                        genAIWrapper.run(promptQuestion_hacked);
 
                         runOnUiThread(() -> {
                             sendMsgIB.setEnabled(true);
@@ -100,17 +100,11 @@ public class MainActivity extends AppCompatActivity implements GenAIWrapper.Toke
 
         File fd = getFilesDir();
 
-<<<<<<< HEAD
-        genAIWrapper = new GenAIWrapper(fd.getPath() + "/cpu-int4-rtn-block-32-acc-level-4");
-        genAIWrapper.setTokenUpdateListener(this);
-        genAIWrapper.run(question);
-=======
-        String modelDirName = "phi2-int4-cpu-compint8";
-        GenAIWrapper wrapper = new GenAIWrapper(fd.getPath() + "/" + modelDirName);
+        String modelDirName = "cpu-int4-rtn-block-32-acc-level-4/";
+        GenAIWrapper wrapper = new GenAIWrapper("/data/data/ai.onnxruntime.genai.demo/files" + "/" + modelDirName);
         wrapper.setTokenUpdateListener(this);
 
         return wrapper;
->>>>>>> db5dba79e6f9f44792eed0d8096c2e2709cc7e60
     }
 
     @Override
