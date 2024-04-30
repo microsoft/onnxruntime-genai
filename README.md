@@ -51,23 +51,32 @@ See full documentation at [https://onnxruntime.ai/docs/genai].
 
 ## Installation
 
-### DirectML
+If you don't know which hardware capabilities is available on your device.
+* Windows GPU (use DirectML): [Verify if you have Windows GPU](https://www.microsoft.com/en-us/windows/learning-center/how-to-check-gpu)
+
+* CUDA GPU: [Verify if you have CUDA GPU](https://docs.nvidia.com/cuda/cuda-installation-guide-microsoft-windows/index.html#verify-you-have-a-cuda-capable-gpu)
+
+* CPU and Mobile: For Windows, Mac, Android and other devices use the CPU and Mobile option below
+
+### Windows GPU  (DirectML) 
 
 ```bash
 pip install [--pre] numpy onnxruntime-genai-directml
 ```
 
-### CPU
+### CUDA GPU
+
+```bash
+pip install numpy onnxruntime-genai-cuda --pre --index-url=https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-genai/pypi/simple/
+```
+
+
+### CPU and Mobile
 
 ```bash
 pip install [--pre] numpy onnxruntime-genai
 ```
 
-### CUDA
-
-```bash
-pip install numpy onnxruntime-genai-cuda --pre --index-url=https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-genai/pypi/simple/
-```
 
 ## Sample code for phi-2 in Python
 
