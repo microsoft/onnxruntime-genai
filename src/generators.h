@@ -99,7 +99,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams> {
 
   std::shared_ptr<GeneratorParams> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
 
-  void TryGraphCapture(int max_batch_size);
+  void TryGraphCapture(int max_bs);
 
  private:
   bool is_cuda_graph_enabled_{};

@@ -65,21 +65,22 @@ GeneratorParams::GeneratorParams(const Model& model)
       is_cuda_graph_enabled_{IsCudaGraphEnabled(model.config_->model.decoder.session_options)} {
 }
 
-void GeneratorParams::TryGraphCapture(int batch_size) {
+void GeneratorParams::TryGraphCapture(int max_bs) {
   if (DeviceType::CUDA == device_type) {
     if (is_cuda_graph_enabled_) {
-      if (batch_size == 0) {
+      if (max_bs == 0) {
         throw std::runtime_error("CUDA graph is enabled, but max_batch_size is not set.");
       }
       use_cuda_graph = true;
-      max_batch_size = batch_size;
+      max_batch_size = max_bs;
     }
   } else if (DeviceType::DML == device_type) {
-    if (batch_size == 0) {
+    if (max_bs == 0) {
       throw std::runtime_error("max_batch_size needs to be set when using DirectML.");
     }
 
     use_cuda_graph = true;
+    max_batch_size = max_bs;
   } else if (is_cuda_graph_enabled_) {
     throw std::runtime_error("CUDA graph is not supported on this device");
   }
