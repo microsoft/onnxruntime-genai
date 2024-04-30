@@ -54,14 +54,14 @@ public class MainActivity extends AppCompatActivity implements GenAIWrapper.Toke
                 }
 
                 String promptQuestion = userMsgEdt.getText().toString();
-                String promptQuestion_hacked = "<|user|>\n" + promptQuestion + "<|end|>\n<|assistant|>";
-                Log.i("GenAI: prompt question", promptQuestion_hacked);
+                String promptQuestion_formatted = "<|user|>" + promptQuestion + "<|end|><|assistant|>";
+                Log.i("GenAI: prompt question", promptQuestion_formatted);
                 setVisibility();
 
                 // Disable send button while responding to prompt.
                 sendMsgIB.setEnabled(false);
 
-                promptTV.setText(promptQuestion);
+                promptTV.setText(promptQuestion_formatted);
                 // Clear Edit Text or prompt question.
                 userMsgEdt.setText("");
                 generatedTV.setText("");
@@ -69,7 +69,7 @@ public class MainActivity extends AppCompatActivity implements GenAIWrapper.Toke
                 new Thread(new Runnable() {
                     @Override
                     public void run() {
-                        genAIWrapper.run(promptQuestion_hacked);
+                        genAIWrapper.run(promptQuestion_formatted);
 
                         runOnUiThread(() -> {
                             sendMsgIB.setEnabled(true);
@@ -97,8 +97,6 @@ public class MainActivity extends AppCompatActivity implements GenAIWrapper.Toke
         // Debug app to do initial copy
         // In Device Explorer navigate to /data/data/ai.onnxruntime.genai.demo/files
         // Right-click on the files folder an update the phi-int4-cpu folder.
-
-        File fd = getFilesDir();
 
         String modelDirName = "cpu-int4-rtn-block-32-acc-level-4/";
         GenAIWrapper wrapper = new GenAIWrapper("/data/data/ai.onnxruntime.genai.demo/files" + "/" + modelDirName);

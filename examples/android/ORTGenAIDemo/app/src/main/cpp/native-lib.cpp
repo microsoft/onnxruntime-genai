@@ -117,7 +117,7 @@ Java_ai_onnxruntime_genai_demo_GenAIWrapper_run(JNIEnv *env, jobject thiz, jlong
     GeneratorParamsPtr gp_cleanup{generator_params, OgaDestroyGeneratorParams};
 
     // generatorParams.SetSearchOption("max_length", 200);
-    check_result(OgaGeneratorParamsSetSearchNumber(generator_params, "max_length", 80));  // TODO: Rename this API. 'search number' is really opaque
+    check_result(OgaGeneratorParamsSetSearchNumber(generator_params, "max_length", 120));  // TODO: Rename this API. 'search number' is really opaque
     // generatorParams.SetInputSequences(sequences);
     check_result(OgaGeneratorParamsSetInputSequences(generator_params, sequences));
 
@@ -174,13 +174,13 @@ Java_ai_onnxruntime_genai_demo_GenAIWrapper_run(JNIEnv *env, jobject thiz, jlong
             // generator.ComputeLogits();
             // generator.GenerateNextTokenTop();
             check_result(OgaGenerator_ComputeLogits(generator));
-            check_result(OgaGenerator_GenerateNextToken_Top(generator));
+            check_result(OgaGenerator_GenerateNextToken(generator));
 
             // TODO: Do we need to do something to ensure there's only one sequence being generated?
             // TODO: seem to lack a way to get the number of sequences in the generator as there's no equivalent to
             //       OgaSequencesCount
-            const int32_t* seq = OgaGenerator_GetSequence(generator, 0);
-            size_t seq_len = OgaGenerator_GetSequenceLength(generator, 0);  // last token
+            const int32_t* seq = OgaGenerator_GetSequenceData(generator, 0);
+            size_t seq_len = OgaGenerator_GetSequenceCount(generator, 0);  // last token
             const char* token = nullptr;
             check_result(OgaTokenizerStreamDecode(tokenizer_stream, seq[seq_len - 1], &token));
             do_callback(token);
@@ -192,8 +192,8 @@ Java_ai_onnxruntime_genai_demo_GenAIWrapper_run(JNIEnv *env, jobject thiz, jlong
         }
 
         // decode overall
-        const int32_t* tokens = OgaGenerator_GetSequence(generator, 0);
-        size_t num_tokens = OgaGenerator_GetSequenceLength(generator, 0);
+        const int32_t* tokens = OgaGenerator_GetSequenceData(generator, 0);
+        size_t num_tokens = OgaGenerator_GetSequenceCount(generator, 0);
         output_text = decode_tokens(tokens, num_tokens);
     }
 
