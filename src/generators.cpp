@@ -28,31 +28,28 @@ OrtEnv& GetOrtEnv() {
   return *GetOrtGlobals()->env_;
 }
 
+// C++17 compatible version of bit_cast for the code below
+template <typename TTo, typename TFrom>
+TTo bit_cast(TFrom x) {
+  return *reinterpret_cast<TTo*>(&x);
+}
+
+// IEEE-754 16-bit floating-point format (without infinity): 1-5-10, exp-15, +-131008.0, +-6.1035156E-5, +-5.9604645E-8, 3.311 digits
 // IEEE 752-2008 binary16 format, 1 sign bit, 5 bit exponent, 10 bit fraction
-float Float16ToFloat32(uint16_t v) {
-  // Extract sign, exponent, and fraction from numpy.float16
-  int const sign = (v & 0x8000) >> 15;
-  int const exponent = (v & 0x7C00) >> 10;
-  int const fraction = v & 0x03FF;
+float Float16ToFloat32(const uint16_t x) {                                                                                                                     
+  const uint32_t e = (x & 0x7C00) >> 10; // exponent
+  const uint32_t m = (x & 0x03FF) << 13; // mantissa
 
-  // Handle special cases
-  if (exponent == 0) {
-    if (fraction == 0) {
-      // Zero
-      return sign != 0 ? -0.0f : 0.0f;
-    }  // Subnormal number
-    return std::ldexp((sign != 0 ? -1.0f : 1.0f) * static_cast<float>(fraction) / 1024.0f, -14);
-  }
-  if (exponent == 31) {
-    if (fraction == 0) {
-      // Infinity
-      return sign != 0 ? -std::numeric_limits<float>::infinity() : std::numeric_limits<float>::infinity();
-    }  // NaN
-    return std::numeric_limits<float>::quiet_NaN();
-  }
+  const uint32_t v = bit_cast<uint32_t>((float)m) >> 23; // log2 bit hack to count leading zeros in denormalized format
+  return bit_cast<float>((x & 0x8000) << 16 | (e != 0) * ((e + 112) << 23 | m) | ((e == 0) & (m != 0)) * ((v - 37) << 23 | ((m << (150 - v)) & 0x007FE000)));  // sign : normalized : denormalized
+}
 
-  // Normalized number
-  return std::ldexp((sign != 0 ? -1.0f : 1.0f) * (1.0f + static_cast<float>(fraction) / 1024.0f), exponent - 15);
+uint16_t Float32ToFloat16(float v) {
+  const uint32_t b = bit_cast<uint32_t>(v) + 0x00001000; // round-to-nearest-even: add last bit after truncated mantissa
+
+  const uint32_t e = (b & 0x7F800000) >> 23; // exponent
+  const uint32_t m = b & 0x007FFFFF;         // mantissa; in line below: 0x007FF000 = 0x00800000-0x00001000 = decimal indicator flag - initial rounding
+  return static_cast<uint16_t>((b & 0x80000000) >> 16 | (e > 112) * ((((e - 112) << 10) & 0x7C00) | m >> 13) | ((e < 113) & (e > 101)) * ((((0x007FF000 + m) >> (125 - e)) + 1) >> 1) | (e > 143) * 0x7FFF);  // sign : normalized : denormalized : saturate
 }
 
 GeneratorParams::GeneratorParams(const Model& model)

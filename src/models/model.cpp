@@ -451,7 +451,7 @@ void ConvertFp16ToFp32(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<Or
   }
 }
 
-void ConvertFp32ToFp16(OrtAllocator& allocator, cudaStream_t stream, OrtValue& in, std::unique_ptr<OrtValue>& p_out) {
+void ConvertFp32ToFp16(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<OrtValue>& p_out, DeviceType device_type, cudaStream_t stream) {
   auto shape_info = in.GetTensorTypeAndShapeInfo();
   auto shape = shape_info->GetShape();
   assert(shape_info->GetElementType() == Ort::TypeToTensorType<float>::type);
@@ -470,9 +470,24 @@ void ConvertFp32ToFp16(OrtAllocator& allocator, cudaStream_t stream, OrtValue& i
   auto* fp32 = in.GetTensorData<float>();
   auto* fp16 = p_out->GetTensorMutableData<uint16_t>();
 
-  cuda::LaunchFp32ToFp16(fp32, fp16, count, stream);
-}
+  switch (device_type) {
+    case DeviceType::DML:
+      // DML doesn't currently support on-device scoring, so we fall back to the CPU
+    case DeviceType::CPU:
+      for (int i = 0; i < count; i++)
+        fp16[i] = Float32ToFloat16(fp32[i]);
+      break;
+
+#if USE_CUDA
+    case DeviceType::CUDA:
+      cuda::LaunchFp32ToFp16(fp32, fp16, count, stream);
+      break;
 #endif
+
+    default:
+      throw std::runtime_error("ConvertFp32ToFp16 - Unsupported device type");
+  }
+}
 
 size_t GetOrtTypeSize(ONNXTensorElementDataType type) {
   switch (type) {

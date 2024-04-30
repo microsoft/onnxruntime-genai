@@ -133,6 +133,11 @@ struct PyGenerator {
     generator_->ComputeLogits();
   }
 
+  pybind11::array_t<float> GetLogits() {
+    py_logits_.Assign(generator_->search_->GetLogits());
+    return ToPython(py_logits_.GetCPU());
+  }
+
   void GenerateNextToken() {
     generator_->GenerateNextToken();
   }
@@ -147,6 +152,7 @@ struct PyGenerator {
   PyRoamingArray<int32_t> py_indices_;
   PyRoamingArray<int32_t> py_sequence_;
   PyRoamingArray<int32_t> py_sequencelengths_;
+  PyRoamingArray<float> py_logits_;
 };
 
 void SetLogOptions(const pybind11::kwargs& dict) {
@@ -236,6 +242,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def(pybind11::init<Model&, PyGeneratorParams&>())
       .def("is_done", &PyGenerator::IsDone)
       .def("compute_logits", &PyGenerator::ComputeLogits)
+      .def("get_logits", &PyGenerator::GetLogits)
       .def("generate_next_token", &PyGenerator::GenerateNextToken)
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
       .def("get_sequence", &PyGenerator::GetSequence);

@@ -14,6 +14,7 @@ struct Search {
   virtual RoamingArray<int32_t> GetSequenceLengths() = 0;
   virtual int GetSequenceLength() const = 0;
   virtual RoamingArray<int32_t> GetSequence(int index) = 0;
+  virtual RoamingArray<float> GetLogits() = 0;
 
   virtual void SetLogits(RoamingArray<float> logits) = 0;
   virtual bool IsDone() const = 0;
@@ -39,6 +40,7 @@ struct Search_Cpu : Search {
   int GetSequenceLength() const override;
   RoamingArray<int32_t> GetSequenceLengths() override { return sequence_lengths_; }
   RoamingArray<int32_t> GetSequence(int index) override { return sequences_.GetSequence(index); }
+  RoamingArray<float> GetLogits() override { return next_token_scores_; }
 
   bool IsDone() const override { return done_; }
   void SetLogits(RoamingArray<float> logits) override;
@@ -54,7 +56,7 @@ struct Search_Cpu : Search {
 
   cpu_span<int32_t> next_tokens_;  // shape (beam_size*batch_size)
 
-  std::span<float> next_token_scores_;  // shape (beam_size*batch_size, vocab_size)
+  cpu_span<float> next_token_scores_;  // shape (beam_size*batch_size, vocab_size)
 
   Sequences sequences_;
   bool done_{};
