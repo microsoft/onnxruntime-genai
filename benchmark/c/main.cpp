@@ -112,7 +112,7 @@ void WriteE2EStats(std::string_view label,
             << "\n";
 }
 
-std::string GeneratePrompt(size_t num_prompt_tokens, OgaModel& model, const OgaTokenizer& tokenizer) {
+std::string GeneratePrompt(size_t num_prompt_tokens, const OgaModel& model, const OgaTokenizer& tokenizer) {
   const char* const base_prompt = "A";
   auto base_prompt_sequences = OgaSequences::Create();
 
