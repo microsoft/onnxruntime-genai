@@ -81,7 +81,7 @@ python phi3-qa.py -m Phi-3-mini-128k-instruct-onnx/directml/directml-int4-awq-bl
 Once the script has loaded the model, it will ask you for input in a loop, streaming the output as it is produced the model. For example:
 
 ```bash
-Input: <|user|>Tell me a joke about creative writing<|end|><|assistant|>
+Input: Tell me a joke about creative writing
  
 Output:  Why don't writers ever get lost? Because they always follow the plot! 
 ```
