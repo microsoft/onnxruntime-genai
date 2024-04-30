@@ -15,7 +15,7 @@ steps:
     extract: false
     downloadPath: '$(Build.Repository.LocalPath)'
   displayName: Download Onnxruntime file
-- $ {{ if eq(parameters.os, 'win') }}:
+- ${{ if eq(parameters.os, 'win') }}:
   - task: ExtractFiles@1
     inputs:
       archiveFilePatterns: '$(Build.Repository.LocalPath)/*.nupkg'
