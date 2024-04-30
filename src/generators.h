@@ -97,6 +97,14 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams> {
   std::vector<int32_t> input_ids_owner;  // Backing memory of input_ids in some cases
 
   std::shared_ptr<GeneratorParams> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
+
+  struct Input {
+    std::string name;
+    std::unique_ptr<OrtValue> value;
+  };
+
+  // A list of extra model inputs that will be matched at runtime based on name
+  std::vector<Input> extra_inputs;
 };
 
 struct Generator {

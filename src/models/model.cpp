@@ -35,6 +35,12 @@ static std::wstring CurrentModulePath() {
 namespace Generators {
 
 State::State(const GeneratorParams& params) : params_{params.shared_from_this()} {
+
+  // Add extra user inputs
+  for (auto& input : params.extra_inputs) {
+    input_names_.push_back(input.name.c_str());
+    inputs_.push_back(input.value.get());
+  }
 }
 
 void State::Run(OrtSession& session, OrtRunOptions& run_options) {

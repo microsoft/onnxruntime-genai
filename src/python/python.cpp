@@ -22,6 +22,34 @@ pybind11::array_t<T> ToPython(std::span<T> v) {
   return pybind11::array_t<T>(v.size(), v.data());
 }
 
+ONNXTensorElementDataType ToTensorType(const pybind11::dtype& type) {
+  switch (type.num()) {
+    case pybind11::detail::npy_api::NPY_INT32_:
+      Ort::TypeToTensorType<int32_t>::type;
+    case pybind11::detail::npy_api::NPY_UINT32_:
+      Ort::TypeToTensorType<uint32_t>::type;
+    case 23 /*NPY_FLOAT16*/:
+      return Ort::TypeToTensorType<Ort::Float16_t>::type;
+    case pybind11::detail::npy_api::NPY_FLOAT_:
+      Ort::TypeToTensorType<float>::type;
+    case pybind11::detail::npy_api::NPY_DOUBLE_:
+      Ort::TypeToTensorType<double>::type;
+    default:
+      throw std::exception("Unsupported numpy type");
+  }
+}
+
+std::unique_ptr<OrtValue> ToTensor(pybind11::array& v) {
+  auto type = ToTensorType(v.dtype());
+
+  std::vector<int64_t> shape(v.ndim());
+  for (pybind11::ssize_t i = 0; i < v.ndim(); i++)
+    shape[i]=v.shape()[i];
+
+  auto p_memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
+  return OrtValue::CreateTensor(*p_memory_info, v.mutable_data(), v.nbytes(), shape, type);
+}
+
 namespace Generators {
 
 // A roaming array is one that can be in CPU or GPU memory, and will copy the memory as needed to be used from anywhere
@@ -85,6 +113,11 @@ struct PyGeneratorParams {
     }
   }
 
+  void AddExtraInput(const std::string& name, pybind11::array& value) {
+    params_->extra_inputs.emplace_back(name, ToTensor(value));
+    refs_.emplace_back(value);
+  }
+
   void SetSearchOptions(const pybind11::kwargs& dict) {
     for (auto& entry : dict) {
       auto name = entry.first.cast<std::string>();
@@ -110,6 +143,8 @@ struct PyGeneratorParams {
   pybind11::array_t<int32_t> py_input_ids_;
   pybind11::array_t<float> py_whisper_input_features_;
   pybind11::array_t<int32_t> py_whisper_decoder_input_ids_;
+
+  std::vector<pybind11::object> refs_; // References to data we want to ensure doesn't get garbage collected
 };
 
 struct PyGenerator {
@@ -199,6 +234,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_readwrite("input_ids", &PyGeneratorParams::py_input_ids_)
       .def_readwrite("whisper_input_features", &PyGeneratorParams::py_whisper_input_features_)
       .def_readwrite("whisper_decoder_input_ids", &PyGeneratorParams::py_whisper_decoder_input_ids_)
+      .def("add_extra_input", &PyGeneratorParams::AddExtraInput)
       .def("set_search_options", &PyGeneratorParams::SetSearchOptions)  // See config.h 'struct Search' for the options
       .def("try_use_cuda_graph_with_max_batch_size", &PyGeneratorParams::TryUseCudaGraphWithMaxBatchSize);
 
