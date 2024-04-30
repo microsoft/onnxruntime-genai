@@ -71,7 +71,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                                          IntPtr /* const OgaSequences* */ sequences);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaCreateGenerator(IntPtr /* OgaModel* */ model,
+        public static extern IntPtr /* OgaResult* */ OgaCreateGenerator(IntPtr /* const OgaModel* */ model,
                                                                         IntPtr /* const OgaGeneratorParams* */ generatorParams,
                                                                         out IntPtr /* OgaGenerator** */ generator);
 
@@ -129,7 +129,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         // This function is used to generate sequences for the given model using the given generator parameters.
         // The OgaSequences object is an array of sequences, where each sequence is an array of tokens.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaGenerate(IntPtr /* OgaModel* */ model,
+        public static extern IntPtr /* OgaResult* */ OgaGenerate(IntPtr /* const OgaModel* */ model,
                                                                  IntPtr /* const OgaGeneratorParams* */ generatorParams,
                                                                  out IntPtr /* OgaSequences** */ sequences);
 
