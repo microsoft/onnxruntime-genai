@@ -100,7 +100,7 @@ prompt = '''def print_prime(n):
 tokens = tokenizer.encode(prompt)
 
 params = og.GeneratorParams(model)
-params.set_search_options({"max_length":200})
+params.set_search_options(max_length=200)
 # Add the following line to enable cuda graph by passing the maximum batch size.
 # params.try_use_cuda_graph_with_max_batch_size(16)
 params.input_ids = tokens
