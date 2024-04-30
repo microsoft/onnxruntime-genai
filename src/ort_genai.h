@@ -235,3 +235,8 @@ struct OgaGenerator : OgaAbstract {
 
   static void operator delete(void* p) { OgaDestroyGenerator(reinterpret_cast<OgaGenerator*>(p)); }
 };
+
+struct OgaHandle {
+  OgaHandle() = default;
+  ~OgaHandle() { OgaCheckResult(OgaShutdown()); }
+};

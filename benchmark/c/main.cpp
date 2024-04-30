@@ -234,6 +234,7 @@ void RunBenchmark(const benchmark::Options& opts) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  OgaHandle handle;
   try {
     const auto opts = benchmark::ParseOptionsFromCommandLine(argc, argv);
     RunBenchmark(opts);

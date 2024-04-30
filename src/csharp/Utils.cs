@@ -7,6 +7,14 @@ using System.Text;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
+    public class OgaHandle
+    {
+        ~OgaHandle()
+        {
+            Result.VerifySuccess(NativeMethods.OgaShutdown());
+        }
+    }
+
     public class Utils
     {
         public static void SetCurrentGpuDeviceId(int device_id)
