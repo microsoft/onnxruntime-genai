@@ -15,13 +15,25 @@ steps:
     extract: false
     downloadPath: '$(Build.Repository.LocalPath)'
   displayName: Download Onnxruntime file
-- task: ExtractFiles@1
-  inputs:
-    archiveFilePatterns: '$(Build.Repository.LocalPath)/*.nupkg'
-    destinationFolder: '$(Build.Repository.LocalPath)/ort'
-    cleanDestinationFolder: false
-    overwriteExistingFiles: true
-  displayName: Unzip OnnxRuntime
+- $ {{ if eq(parameters.os, 'win') }}:
+  - task: ExtractFiles@1
+    inputs:
+      archiveFilePatterns: '$(Build.Repository.LocalPath)/*.nupkg'
+      destinationFolder: '$(Build.Repository.LocalPath)/ort'
+      cleanDestinationFolder: false
+      overwriteExistingFiles: true
+    displayName: Unzip OnnxRuntime
+- ${{ else }}:
+  - script: |
+      mv $(Build.Repository.LocalPath)/$(ort_filename).nupkg $(Build.Repository.LocalPath)/$(ort_filename).tgz
+    displayName: Rename OnnxRuntime nuget package to tgz
+  - task: ExtractFiles@1
+    inputs:
+      archiveFilePatterns: '$(Build.Repository.LocalPath)/$(ort_filename).tgz'
+      destinationFolder: '$(Build.Repository.LocalPath)/ort'
+      cleanDestinationFolder: false
+      overwriteExistingFiles: true
+    displayName: Unzip OnnxRuntime
 - task: CopyFiles@2
   inputs:
     SourceFolder: '$(Build.Repository.LocalPath)/ort/runtimes/$(os)-$(arch)/native'
