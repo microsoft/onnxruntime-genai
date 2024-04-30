@@ -50,7 +50,8 @@ public class MainActivity extends AppCompatActivity implements GenAIWrapper.Toke
                     return;
                 } else {
                     promptQuestion = userMsgEdt.getText().toString();
-                    Log.i("GenAI: prompt question", promptQuestion);
+                    String promptQuestion_hacked = "<|user|>\n" + promptQuestion + "<|end|>\n<|assistant|>";
+                    Log.i("GenAI: prompt question", promptQuestion_hacked);
                     setVisibility();
                 }
                 new Thread(new Runnable() {
@@ -82,7 +83,7 @@ public class MainActivity extends AppCompatActivity implements GenAIWrapper.Toke
         // Right-click on the files folder an update the phi-int4-cpu folder.
         File fd = getFilesDir();
 
-        genAIWrapper = new GenAIWrapper(fd.getPath() + "/phi2-int4-cpu-compint8/");
+        genAIWrapper = new GenAIWrapper(fd.getPath() + "/cpu-int4-rtn-block-32-acc-level-4");
         genAIWrapper.setTokenUpdateListener(this);
         genAIWrapper.run(question);
     }
