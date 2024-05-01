@@ -528,7 +528,7 @@ class Model:
 
     def make_transpose(self, name, root_input, dtype, shape, perm):
         output = f"{name}/output_0"
-        self.make_node("Transpose", inputs=[root_input], outputs=[output], perm=perm)
+        self.make_node("Transpose", inputs=[root_input], outputs=[output], name=name, perm=perm)
         self.make_value_info(output, dtype, shape=shape)
 
     def make_matmul(self, matmul, name, root_input, **kwargs):

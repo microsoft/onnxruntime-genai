@@ -9,6 +9,29 @@
 
 namespace DmlHelpers {
 
+static ComPtr<IDXCoreAdapter> CreatePerformantAdapter() {
+  ComPtr<IDXCoreAdapterFactory> adapter_factory;
+  THROW_IF_FAILED(DXCoreCreateAdapterFactory(adapter_factory.GetAddressOf()));
+
+  ComPtr<IDXCoreAdapterList> adapter_list;
+  THROW_IF_FAILED(adapter_factory->CreateAdapterList(
+      1,
+      &DXCORE_ADAPTER_ATTRIBUTE_D3D12_CORE_COMPUTE,
+      adapter_list.GetAddressOf()));
+
+  // We prefer the hightest performance adapter
+  std::array<DXCoreAdapterPreference, 1> adapter_list_preferences = {DXCoreAdapterPreference::HighPerformance};
+
+  THROW_IF_FAILED(adapter_list->Sort(
+      static_cast<uint32_t>(adapter_list_preferences.size()),
+      adapter_list_preferences.data()));
+
+  ComPtr<IDXCoreAdapter> performant_adapter;
+  THROW_IF_FAILED(adapter_list->GetAdapter(0, performant_adapter.GetAddressOf()));
+
+  return performant_adapter;
+}
+
 DmlObjects CreateDmlObjects() {
   D3D12_COMMAND_QUEUE_DESC command_queue_description = {
       D3D12_COMMAND_LIST_TYPE_COMPUTE,
@@ -19,7 +42,8 @@ DmlObjects CreateDmlObjects() {
 
   DmlObjects dml_objects;
 
-  THROW_IF_FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&dml_objects.d3d12_device)));
+  auto adapter = CreatePerformantAdapter();
+  THROW_IF_FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&dml_objects.d3d12_device)));
   THROW_IF_FAILED(dml_objects.d3d12_device->CreateCommandQueue(&command_queue_description, IID_PPV_ARGS(&dml_objects.command_queue)));
   THROW_IF_FAILED(dml_objects.d3d12_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&dml_objects.command_allocator)));
   THROW_IF_FAILED(dml_objects.d3d12_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, dml_objects.command_allocator.Get(), nullptr, IID_PPV_ARGS(&dml_objects.command_list)));

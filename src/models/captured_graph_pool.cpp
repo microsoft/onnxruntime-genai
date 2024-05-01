@@ -24,7 +24,7 @@ static std::tuple<int, int, int> MakeKey(int max_batch_size, int max_length, int
 }
 
 CapturedGraphInfoPtr CapturedGraphPool::ReserveCapturedGraph(const Model& model, const GeneratorParams& params) const {
-  if (!model.use_cuda_graph_ || (model.device_type_ != DeviceType::CUDA && model.device_type_ != DeviceType::DML)) {
+  if (!params.use_cuda_graph || (model.device_type_ != DeviceType::CUDA && model.device_type_ != DeviceType::DML)) {
     return nullptr;
   }
 
