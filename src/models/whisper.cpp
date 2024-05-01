@@ -61,13 +61,13 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
       run_state_ = RunState::Decoder;
 
       if (model_.session_info_->HasInput("past_sequence_length")) {
-        past_sequence_length_ = OrtValue::CreateTensor<int32_t>(model_.allocator_cpu_, {});
+        past_sequence_length_ = OrtValue::CreateTensor<int32_t>(model_.allocator_cpu_, std::array<int64_t, 1>{1});
         input_names_.push_back("past_sequence_length");
         inputs_.push_back(past_sequence_length_.get());
       }
 
       if (model_.session_info_->HasInput("beam_width")) {
-        beam_width_ = OrtValue::CreateTensor<int32_t>(model_.allocator_cpu_, {});
+        beam_width_ = OrtValue::CreateTensor<int32_t>(model_.allocator_cpu_, std::array<int64_t, 1>{1});
         input_names_.push_back("beam_width");
         inputs_.push_back(beam_width_.get());
 
