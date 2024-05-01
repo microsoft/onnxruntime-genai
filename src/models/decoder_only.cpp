@@ -27,7 +27,7 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, RoamingArra
 
 RoamingArray<float> DecoderOnly_State::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
   if (first_run_) {
-    if (model_.use_cuda_graph_) {
+    if (params_->use_cuda_graph) {
       model_.run_options_->AddConfigEntry("gpu_graph_id", "-1");
     }
     first_run_ = false;
@@ -38,7 +38,7 @@ RoamingArray<float> DecoderOnly_State::Run(int current_length, RoamingArray<int3
   State::Run(*model_.session_decoder_, *model_.run_options_);
 
   // Set the graph id for the following runs.
-  if (model_.use_cuda_graph_) {
+  if (params_->use_cuda_graph) {
     int new_batch_size = static_cast<int>(input_ids_.GetShape()[0]);
     if (new_batch_size != current_batch_size_) {
       current_batch_size_ = new_batch_size;

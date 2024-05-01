@@ -1,13 +1,19 @@
 name: "Linux CPU x64 Build"
-on: [ workflow_dispatch, pull_request ]
+on:
+  workflow_dispatch:
+  push:
+    branches:
+    - main
+    - rel-*
+  pull_request:
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 env:
-  ort_dir: "onnxruntime-linux-x64-1.17.3"
-  ort_zip: "onnxruntime-linux-x64-1.17.3.tgz"
-  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/onnxruntime-linux-x64-1.17.3.tgz"
-
+  ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
+  ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
+  ORT_NIGHTLY_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
+  NUGET_EXE: "mono /usr/local/bin/nuget.exe"
 jobs:
   linux_cpu_x64:
     runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU" ]
@@ -16,19 +22,49 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: true
-
-      - name: Download OnnxRuntime
+      - name: install Mono and Nuget
         run: |
-          curl -L -o ${{ env.ort_zip }} ${{ env.ort_url }} 
+          sudo apt install ca-certificates gnupg
+          sudo gpg --homedir /tmp --no-default-keyring --keyring /usr/share/keyrings/mono-official-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 3FA7E0328081BFF6A14DA29AA6A19B38D3D831EF
+          echo "deb [signed-by=/usr/share/keyrings/mono-official-archive-keyring.gpg] https://download.mono-project.com/repo/ubuntu stable-focal main" | sudo tee /etc/apt/sources.list.d/mono-official-stable.list
+          sudo apt update
+          sudo apt install -y mono-devel
+          sudo curl -o /usr/local/bin/nuget.exe https://dist.nuget.org/win-x86-commandline/latest/nuget.exe
+          sudo chmod +x /usr/local/bin/nuget.exe
 
-      - name: Unzip OnnxRuntime
+      - name: Install jq and dotnet
         run: |
-          tar -xzf ${{ env.ort_zip }}
-          rm ${{ env.ort_zip }}
+          wget https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb -O packages-microsoft-prod.deb
+          sudo dpkg -i packages-microsoft-prod.deb
+          rm packages-microsoft-prod.deb
+          sudo apt-get update && sudo apt-get install -y dotnet-sdk-8.0 jq
 
-      - name: Rename OnnxRuntime to ort
+      - name: Get the Latest OnnxRuntime Nightly Version
         run: |
-          mv ${{ env.ort_dir }} ort
+          ORT_NIGHTLY_VERSION=$(curl -s "${{ env.ORT_NIGHTLY_REST_API }}" | jq -r '.value[0].versions[0].normalizedVersion')
+          echo "$ORT_NIGHTLY_VERSION" 
+          echo "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" >> $GITHUB_ENV
+
+      - name: Download OnnxRuntime Nightly
+        run: |
+          ${{ env.NUGET_EXE }} install ${{ env.ORT_PACKAGE_NAME }} -version ${{ env.ORT_NIGHTLY_VERSION }} -x
+        continue-on-error: true
+
+      - name: list files
+        shell: bash
+        run: |
+          ls -l
+          ls -R ${{ env.ORT_PACKAGE_NAME }}
+        continue-on-error: true
+
+# TODO: Find out why do we need to to have libonnxruntime.so.$ort_version
+      - name: Extra OnnxRuntime library and header files
+        run: |
+          mkdir -p ort/lib
+          mv ${{ env.ORT_PACKAGE_NAME }}/build/native/include ort/
+          mv ${{ env.ORT_PACKAGE_NAME }}/runtimes/linux-x64/native/* ort/lib/
+          ort_version=$(echo ${{ env.ORT_NIGHTLY_VERSION }} | cut -d- -f1-1)
+          cp ort/lib/libonnxruntime.so ort/lib/libonnxruntime.so.$ort_version
 
       - name: Build with CMake and GCC
         run: |

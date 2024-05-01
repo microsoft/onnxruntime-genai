@@ -137,7 +137,7 @@ struct PyGeneratorParams {
   }
 
   void TryUseCudaGraphWithMaxBatchSize(pybind11::int_ max_batch_size) {
-    params_->max_batch_size = max_batch_size.cast<int>();
+    params_->TryGraphCapture(max_batch_size.cast<int>());
   }
 
   pybind11::array_t<int32_t> py_input_ids_;
@@ -150,7 +150,6 @@ struct PyGeneratorParams {
 struct PyGenerator {
   PyGenerator(Model& model, PyGeneratorParams& params) {
     params.Prepare();
-    model.GetMaxBatchSizeFromGeneratorParams(params);
     generator_ = CreateGenerator(model, params);
   }
 
@@ -265,7 +264,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def(pybind11::init([](const std::string& config_path) {
         return CreateModel(GetOrtEnv(), config_path.c_str());
       }))
-      .def("generate", [](Model& model, PyGeneratorParams& params) { params.Prepare(); model.GetMaxBatchSizeFromGeneratorParams(params); return Generate(model, params); })
+      .def("generate", [](Model& model, PyGeneratorParams& params) { params.Prepare(); return Generate(model, params); })
       .def_property_readonly("device_type", [](const Model& s) { return s.device_type_; });
 
   pybind11::class_<PyGenerator>(m, "Generator")
