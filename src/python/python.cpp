@@ -50,6 +50,7 @@ std::unique_ptr<OrtValue> ToTensor(pybind11::array& v) {
   return OrtValue::CreateTensor(*p_memory_info, v.mutable_data(), v.nbytes(), shape, type);
 }
 
+// If a parameter to a C++ function is an array of float16, this type will let pybind11::array_t<Ort::Float16_t> map to numpy's float16 format
 namespace pybind11 {
 namespace detail {
 template <>
@@ -116,17 +117,7 @@ struct PyGeneratorParams {
 
     if (py_whisper_input_features_.size() != 0) {
       GeneratorParams::Whisper& whisper = params_->inputs.emplace<GeneratorParams::Whisper>();
-#ifdef __APPLE__
-      std::span shape(reinterpret_cast<const int64_t*>(py_whisper_input_features_.shape()),
-                      py_whisper_input_features_.ndim());
-#else
-      std::span<const int64_t> shape(py_whisper_input_features_.shape(), py_whisper_input_features_.ndim());
-#endif
-      whisper.input_features = OrtValue::CreateTensor<Ort::Float16_t>(Ort::Allocator::GetWithDefaultOptions().GetInfo(), ToSpan(py_whisper_input_features_), shape);
-      whisper.decoder_input_ids = ToSpan(py_whisper_decoder_input_ids_);
-      params_->batch_size = 1;
-      params_->sequence_length = static_cast<int>(py_whisper_decoder_input_ids_.shape(1));
-      params_->input_ids = ToSpan(py_whisper_decoder_input_ids_);
+      whisper.input_features = ToTensor(py_whisper_input_features_);
     }
   }
 
@@ -158,8 +149,7 @@ struct PyGeneratorParams {
   }
 
   pybind11::array_t<int32_t> py_input_ids_;
-  pybind11::array_t<Ort::Float16_t> py_whisper_input_features_;
-  pybind11::array_t<int32_t> py_whisper_decoder_input_ids_;
+  pybind11::array py_whisper_input_features_;
 
   std::vector<pybind11::object> refs_;  // References to data we want to ensure doesn't get garbage collected
 };
@@ -186,7 +176,7 @@ struct PyGenerator {
 
   pybind11::array_t<float> GetLogits() {
     py_logits_.Assign(generator_->search_->GetLogits());
-    return ToPython(py_logits_.GetCPU());
+    return ToPython(py_logits_.GetCPU()).reshape({generator_->search_->params_->BatchBeamSize(), generator_->search_->params_->vocab_size});
   }
 
   void GenerateNextToken() {
@@ -255,7 +245,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_property_readonly("vocab_size", [](const PyGeneratorParams& v) { return v.params_->vocab_size; })
       .def_readwrite("input_ids", &PyGeneratorParams::py_input_ids_)
       .def_readwrite("whisper_input_features", &PyGeneratorParams::py_whisper_input_features_)
-      .def_readwrite("whisper_decoder_input_ids", &PyGeneratorParams::py_whisper_decoder_input_ids_)
       .def("add_extra_input", &PyGeneratorParams::AddExtraInput)
       .def("set_search_options", &PyGeneratorParams::SetSearchOptions)  // See config.h 'struct Search' for the options
       .def("try_use_cuda_graph_with_max_batch_size", &PyGeneratorParams::TryUseCudaGraphWithMaxBatchSize);

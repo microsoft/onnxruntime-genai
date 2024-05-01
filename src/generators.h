@@ -90,7 +90,6 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams> {
 
   struct Whisper {
     std::unique_ptr<OrtValue> input_features;  // float32 [batch_size, number_of_mels, something that is 3000]
-    std::span<int32_t> decoder_input_ids;
   };
 
   std::variant<Whisper> inputs;

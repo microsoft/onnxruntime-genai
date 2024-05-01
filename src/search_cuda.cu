@@ -7,24 +7,6 @@
 namespace Generators {
 namespace cuda {
 
-#if 0
-__global__ void SetInputSequence(int32_t* sequences, const int32_t* input_sequences, int batch_size, int num_beams) {
-  // The original inputs are not expanded, this expands them in place into the sequences
-std::span<int32_t> sequences_0 = sequences_space_;
-for (size_t batch = 0; batch < params_.batch_size; batch++) {
-  for (size_t beam = 0; beam < params_.num_beams; beam++) {
-    for (int j = 0; j < params_.sequence_length; j++) {
-      sequences_0[(batch * params_.num_beams + beam) * params_.max_length + j] =
-          static_cast<int32_t>(params_.input_ids[batch * params_.sequence_length + j]);
-    }
-  }
-}
-
-void LaunchSetInputSequence(std::span<int32_t> sequences) {
-
-}
-#endif
-
 __global__ void ArgMax(cub::KeyValuePair<int, float>* argmaxen, int32_t* next_tokens, int batch_size) {
   int batch_index = threadIdx.x;
   next_tokens[batch_index] = argmaxen[batch_index].key;
