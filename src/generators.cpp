@@ -13,7 +13,7 @@ namespace Generators {
 
 static bool _ = (Ort::InitApi(), false);
 
-OrtGlobals::OrtGlobals() : env_{OrtEnv::Create()} {}
+OrtGlobals::OrtGlobals() : env_{OrtEnv::Create(OrtLoggingLevel::ORT_LOGGING_LEVEL_ERROR)} {}
 
 std::unique_ptr<OrtGlobals>& GetOrtGlobals() {
   static auto globals = std::make_unique<OrtGlobals>();
