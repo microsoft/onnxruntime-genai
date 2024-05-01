@@ -11,6 +11,7 @@
 enum class VendorID {
   Undefined = 0,
   Intel = 0x8086,
+  Microsoft = 0x1414,
 };
 
 // Retrieves information from a DXCore or DXGI adapter.
@@ -27,4 +28,5 @@ class AdapterInfo {
   void Initialize(IDXCoreAdapter* adapter);
 
   ::VendorID vendor_id_;
+  uint32_t device_id_;
 };
