@@ -9,6 +9,24 @@
 
 using namespace pybind11::literals;
 
+// If a parameter to a C++ function is an array of float16, this type will let pybind11::array_t<Ort::Float16_t> map to numpy's float16 format
+namespace pybind11 {
+namespace detail {
+template <>
+struct npy_format_descriptor<Ort::Float16_t> {
+  static constexpr auto name = _("float16");
+  static pybind11::dtype dtype() {
+    handle ptr = npy_api::get().PyArray_DescrFromType_(23 /*NPY_FLOAT16*/); /* import numpy as np; print(np.dtype(np.float16).num */
+    return reinterpret_borrow<pybind11::dtype>(ptr);
+  }
+  static std::string format() {
+    // following: https://docs.python.org/3/library/struct.html#format-characters
+    return "e";
+  }
+};
+}  // namespace detail
+}  // namespace pybind11
+
 template <typename T>
 std::span<T> ToSpan(pybind11::array_t<T> v) {
   if constexpr (std::is_const_v<T>)
@@ -39,6 +57,40 @@ ONNXTensorElementDataType ToTensorType(const pybind11::dtype& type) {
   }
 }
 
+int ToNumpyType(ONNXTensorElementDataType type) {
+  switch (type) {
+    case Ort::TypeToTensorType<int32_t>::type:
+      return pybind11::detail::npy_api::NPY_INT32_;
+    case Ort::TypeToTensorType<uint32_t>::type:
+      return pybind11::detail::npy_api::NPY_UINT32_;
+    case Ort::TypeToTensorType<Ort::Float16_t>::type:
+      return 23 /*NPY_FLOAT16*/;
+    case Ort::TypeToTensorType<float>::type:
+      return pybind11::detail::npy_api::NPY_FLOAT_;
+    case Ort::TypeToTensorType<double>::type:
+      return pybind11::detail::npy_api::NPY_DOUBLE_;
+    default:
+      throw std::runtime_error("Unsupported onnx type");
+  }
+}
+
+std::string ToFormatDescriptor(ONNXTensorElementDataType type) {
+  switch (type) {
+    case Ort::TypeToTensorType<int32_t>::type:
+      return pybind11::format_descriptor<int32_t>::format();
+    case Ort::TypeToTensorType<uint32_t>::type:
+      return pybind11::format_descriptor<int32_t>::format();
+    case Ort::TypeToTensorType<Ort::Float16_t>::type:
+      return pybind11::format_descriptor<Ort::Float16_t>::format();
+    case Ort::TypeToTensorType<float>::type:
+      return pybind11::format_descriptor<float>::format();
+    case Ort::TypeToTensorType<double>::type:
+      return pybind11::format_descriptor<double>::format();
+    default:
+      throw std::runtime_error("Unsupported onnx type");
+  }
+}
+
 std::unique_ptr<OrtValue> ToTensor(pybind11::array& v) {
   auto type = ToTensorType(v.dtype());
 
@@ -50,23 +102,46 @@ std::unique_ptr<OrtValue> ToTensor(pybind11::array& v) {
   return OrtValue::CreateTensor(*p_memory_info, v.mutable_data(), v.nbytes(), shape, type);
 }
 
-// If a parameter to a C++ function is an array of float16, this type will let pybind11::array_t<Ort::Float16_t> map to numpy's float16 format
-namespace pybind11 {
-namespace detail {
-template <>
-struct npy_format_descriptor<Ort::Float16_t> {
-  static constexpr auto name = _("float16");
-  static pybind11::dtype dtype() {
-    handle ptr = npy_api::get().PyArray_DescrFromType_(23 /*NPY_FLOAT16*/); /* import numpy as np; print(np.dtype(np.float16).num */
-    return reinterpret_borrow<pybind11::dtype>(ptr);
+pybind11::array ToNumpy(OrtValue* v) {
+  if (!v)
+    return {};
+
+  auto type_info = v->GetTensorTypeAndShapeInfo();
+  auto shape = type_info->GetShape();
+  auto type = type_info->GetElementType();
+  auto element_size = Generators::SizeOfType(type);
+  auto data = v->GetTensorMutableRawData();
+
+#if USE_CUDA
+  std::unique_ptr<uint8_t[]> cpu_copy;
+  if (v->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU) {
+    auto data_size = type_info->GetElementCount() * element_size;
+    cpu_copy = std::make_unique<uint8_t[]>(data_size);
+    Generators::CudaCheck() == cudaMemcpy(cpu_copy.get(), data, data_size, cudaMemcpyDeviceToHost);
+    data = cpu_copy.get();
   }
-  static std::string format() {
-    // following: https://docs.python.org/3/library/struct.html#format-characters
-    return "e";
+#endif
+
+  std::vector<int64_t> strides(shape.size());
+  {
+    auto size = Generators::SizeOfType(type);
+    for (size_t i = strides.size(); i-- > 0;) {
+      strides[i] = size;
+      size *= shape[i];
+    }
   }
-};
-}  // namespace detail
-}  // namespace pybind11
+
+  pybind11::buffer_info bufinfo{
+      data,                                          // Pointer to memory buffer
+      static_cast<pybind11::ssize_t>(element_size),  // Size of underlying scalar type
+      ToFormatDescriptor(type),                      // Python struct-style format descriptor
+      static_cast<pybind11::ssize_t>(shape.size()),  // Number of dimensions
+      shape,                                         // Buffer dimensions
+      strides                                        // Strides (in bytes) for each index
+  };
+
+  return pybind11::array{bufinfo};
+}
 
 namespace Generators {
 
@@ -122,14 +197,6 @@ struct PyGeneratorParams {
   }
 
   void AddExtraInput(const std::string& name, pybind11::array& value) {
-    // Replace an existing input?
-    for (size_t i=0;i<params_->extra_inputs.size();i++) {
-      if (params_->extra_inputs[i].name == name) {
-        refs_[i]=value;
-        params_->extra_inputs[i].value = ToTensor(value);
-        return;
-      }
-    }
     params_->extra_inputs.push_back({name, ToTensor(value)});
     refs_.emplace_back(value);
   }
@@ -185,6 +252,10 @@ struct PyGenerator {
   pybind11::array_t<float> GetLogits() {
     py_logits_.Assign(generator_->search_->GetLogits());
     return ToPython(py_logits_.GetCPU()).reshape({generator_->search_->params_->BatchBeamSize(), generator_->search_->params_->vocab_size});
+  }
+
+  pybind11::array GetOutput(const std::string& name) {
+    return ToNumpy(generator_->state_->GetOutput(name.c_str()));
   }
 
   void GenerateNextToken() {
@@ -292,6 +363,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("is_done", &PyGenerator::IsDone)
       .def("compute_logits", &PyGenerator::ComputeLogits)
       .def("get_logits", &PyGenerator::GetLogits)
+      .def("get_output", &PyGenerator::GetOutput)
       .def("generate_next_token", &PyGenerator::GenerateNextToken)
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
       .def("get_sequence", &PyGenerator::GetSequence);

@@ -24,7 +24,15 @@ struct Whisper_State : State {
   void UpdateInputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> next_indices, int current_length);
 
   const Whisper_Model& model_;
-  bool first_run_{true};
+  enum struct RunState {
+    Encoder_Decoder_Init, // Next Run() will run this
+    Decoder_First,
+    Decoder,
+  };
+
+  RunState run_state_ {RunState::Encoder_Decoder_Init};
+
+  std::unique_ptr<OrtValue> encoder_input_ids_;
 
   InputIDs decoder_input_ids_{model_, *this};
   Logits logits_{model_, *this};

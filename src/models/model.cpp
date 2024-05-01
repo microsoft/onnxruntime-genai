@@ -64,6 +64,15 @@ void State::Run(OrtSession& session, OrtRunOptions& run_options) {
   }
 }
 
+OrtValue* State::GetOutput(const char* name) {
+  for (size_t i = 0; i < output_names_.size(); i++) {
+    if (std::strcmp(output_names_[i], name) == 0) {
+      return outputs_[i];
+    }
+  }
+  return nullptr;
+}
+
 void State::ClearIO() {
   input_names_.clear();
   output_names_.clear();
