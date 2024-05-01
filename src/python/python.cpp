@@ -35,7 +35,7 @@ ONNXTensorElementDataType ToTensorType(const pybind11::dtype& type) {
     case pybind11::detail::npy_api::NPY_DOUBLE_:
       Ort::TypeToTensorType<double>::type;
     default:
-      throw std::exception("Unsupported numpy type");
+      throw std::runtime_error("Unsupported numpy type");
   }
 }
 
@@ -44,7 +44,7 @@ std::unique_ptr<OrtValue> ToTensor(pybind11::array& v) {
 
   std::vector<int64_t> shape(v.ndim());
   for (pybind11::ssize_t i = 0; i < v.ndim(); i++)
-    shape[i]=v.shape()[i];
+    shape[i] = v.shape()[i];
 
   auto p_memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
   return OrtValue::CreateTensor(*p_memory_info, v.mutable_data(), v.nbytes(), shape, type);
@@ -144,7 +144,7 @@ struct PyGeneratorParams {
   pybind11::array_t<float> py_whisper_input_features_;
   pybind11::array_t<int32_t> py_whisper_decoder_input_ids_;
 
-  std::vector<pybind11::object> refs_; // References to data we want to ensure doesn't get garbage collected
+  std::vector<pybind11::object> refs_;  // References to data we want to ensure doesn't get garbage collected
 };
 
 struct PyGenerator {

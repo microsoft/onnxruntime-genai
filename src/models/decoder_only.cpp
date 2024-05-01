@@ -18,7 +18,6 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, RoamingArra
       model_{model},
       captured_graph_info_(model.GetCapturedGraphPool()->ReserveCapturedGraph(model, params)),
       position_inputs_{model, *this, sequence_lengths_unk} {
-
   input_ids_.Add();
   position_inputs_.Add();
   logits_.Add();
