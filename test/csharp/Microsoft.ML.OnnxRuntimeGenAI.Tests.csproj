@@ -12,7 +12,8 @@
     <LangVersion>default</LangVersion>
     <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
     <Configurations>Debug;RelWithDebInfo;Release</Configurations>
-
+    <RestoreAdditionalProjectSources>https://api.nuget.org/v3/index.json</RestoreAdditionalProjectSources>
+    <RestoreSources>$(RestoreAdditionalProjectSources);$(RestoreSources)</RestoreSources>
     <RootNamespace>Microsoft.ML.OnnxRuntimeGenAI.Tests</RootNamespace>
     <AssemblyName>Microsoft.ML.OnnxRuntimeGenAI.Tests</AssemblyName>
   </PropertyGroup>
