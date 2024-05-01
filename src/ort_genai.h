@@ -239,7 +239,6 @@ struct OgaGenerator : OgaAbstract {
 struct OgaHandle {
   OgaHandle() = default;
   ~OgaHandle() noexcept {
-    if (OgaShutdown())
-      terminate();
+    OgaShutdown();
   }
 };

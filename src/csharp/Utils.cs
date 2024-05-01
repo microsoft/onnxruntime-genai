@@ -11,7 +11,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
     {
         ~OgaHandle()
         {
-            Result.VerifySuccess(NativeMethods.OgaShutdown());
+            NativeMethods.OgaShutdown();
         }
     }
 
