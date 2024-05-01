@@ -41,10 +41,8 @@ typedef struct OgaTokenizer OgaTokenizer;
 typedef struct OgaTokenizerStream OgaTokenizerStream;
 
 /* \brief Call this on process exit to cleanly shutdown the genai library & its onnxruntime usage
- * \return Error message contained in the OgaResult. The const char* is owned by the OgaResult
- *         and can will be freed when the OgaResult is destroyed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaShutdown();
+OGA_EXPORT void OGA_API_CALL OgaShutdown();
 
 /*
  * \param[in] result OgaResult that contains the error message.

@@ -29,11 +29,8 @@ extern "C" {
     return reinterpret_cast<OgaResult*>(std::make_unique<Generators::Result>(e.what()).release()); \
   }
 
-OgaResult* OGA_API_CALL OgaShutdown() {
-  OGA_TRY
+void OGA_API_CALL OgaShutdown() {
   Generators::Shutdown();
-  return nullptr;
-  OGA_CATCH
 }
 
 const char* OGA_API_CALL OgaResultGetError(const OgaResult* result) {
