@@ -122,6 +122,14 @@ struct PyGeneratorParams {
   }
 
   void AddExtraInput(const std::string& name, pybind11::array& value) {
+    // Replace an existing input?
+    for (size_t i=0;i<params_->extra_inputs.size();i++) {
+      if (params_->extra_inputs[i].name == name) {
+        refs_[i]=value;
+        params_->extra_inputs[i].value = ToTensor(value);
+        return;
+      }
+    }
     params_->extra_inputs.push_back({name, ToTensor(value)});
     refs_.emplace_back(value);
   }
