@@ -25,15 +25,15 @@ pybind11::array_t<T> ToPython(std::span<T> v) {
 ONNXTensorElementDataType ToTensorType(const pybind11::dtype& type) {
   switch (type.num()) {
     case pybind11::detail::npy_api::NPY_INT32_:
-      Ort::TypeToTensorType<int32_t>::type;
+      return Ort::TypeToTensorType<int32_t>::type;
     case pybind11::detail::npy_api::NPY_UINT32_:
-      Ort::TypeToTensorType<uint32_t>::type;
+      return Ort::TypeToTensorType<uint32_t>::type;
     case 23 /*NPY_FLOAT16*/:
       return Ort::TypeToTensorType<Ort::Float16_t>::type;
     case pybind11::detail::npy_api::NPY_FLOAT_:
-      Ort::TypeToTensorType<float>::type;
+      return Ort::TypeToTensorType<float>::type;
     case pybind11::detail::npy_api::NPY_DOUBLE_:
-      Ort::TypeToTensorType<double>::type;
+      return Ort::TypeToTensorType<double>::type;
     default:
       throw std::runtime_error("Unsupported numpy type");
   }
