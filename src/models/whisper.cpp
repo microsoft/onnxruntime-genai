@@ -47,7 +47,7 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
   switch (run_state_) {
     case RunState::Encoder_Decoder_Init:
       State::Run(*model_.session_encoder_, *model_.run_options_);
-      run_state_=RunState::Decoder_First;
+      run_state_ = RunState::Decoder_First;
       return logits_.Get();
 
     case RunState::Decoder_First:
@@ -59,6 +59,30 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
       kv_cache_.Add();
       cross_cache_.AddInputs();
       run_state_ = RunState::Decoder;
+
+      if (model_.session_info_->HasInput("past_sequence_length")) {
+        past_sequence_length_ = OrtValue::CreateTensor<int32_t>(model_.allocator_cpu_, {});
+        input_names_.push_back("past_sequence_length");
+        inputs_.push_back(past_sequence_length_.get());
+      }
+
+      if (model_.session_info_->HasInput("beam_width")) {
+        beam_width_ = OrtValue::CreateTensor<int32_t>(model_.allocator_cpu_, {});
+        input_names_.push_back("beam_width");
+        inputs_.push_back(beam_width_.get());
+
+        auto data = beam_width_->GetTensorMutableData<int32_t>();
+        *data = 1;
+      }
+
+      if (model_.session_info_->HasInput("cache_indirection")) {
+        cache_indirection_ = OrtValue::CreateTensor<int32_t>(model_.allocator_cpu_, std::array<int64_t, 3>{params_->batch_size, params_->search.num_beams, params_->search.max_length});
+        input_names_.push_back("cache_indirection");
+        inputs_.push_back(cache_indirection_.get());
+
+        auto data = std::span<int32_t>{cache_indirection_->GetTensorMutableData<int32_t>(), static_cast<size_t>(params_->batch_size) * params_->search.num_beams * params_->search.max_length};
+        std::fill(data.begin(), data.end(), 0);
+      }
 
     case RunState::Decoder:
       UpdateInputs(next_tokens, next_indices, current_length);
@@ -72,6 +96,11 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
 void Whisper_State::UpdateInputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> beam_indices, int current_length) {
   decoder_input_ids_.Update(next_tokens);
   kv_cache_.Update(beam_indices.GetCPU(), current_length);
+
+  if (past_sequence_length_) {
+    auto data = past_sequence_length_->GetTensorMutableData<int32_t>();
+    *data = current_length - 1;
+  }
 }
 
 }  // namespace Generators

@@ -39,5 +39,9 @@ struct Whisper_State : State {
   KV_Cache kv_cache_{model_, *this};
   Cross_Cache cross_cache_{model_, *this};
   std::unique_ptr<OrtValue> encoder_hidden_states_;
+
+  std::unique_ptr<OrtValue> past_sequence_length_;
+  std::unique_ptr<OrtValue> beam_width_;
+  std::unique_ptr<OrtValue> cache_indirection_;
 };
 }  // namespace Generators
