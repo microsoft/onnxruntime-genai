@@ -75,7 +75,8 @@ The `-l` argument is the length of output you would like to generate with the mo
 
 ```bash
 curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examples/python/phi3-qa.py -o phi3-qa.py
-python phi3-qa.py -m Phi-3-mini-128k-instruct-onnx/directml/directml-int4-awq-block-128 -l 2048
+model_path="./Phi-3-mini-128k-instruct-onnx/directml/directml-int4-awq-block-128"
+python phi3-qa.py -m $model_path -l 2048
 ```
 
 Once the script has loaded the model, it will ask you for input in a loop, streaming the output as it is produced the model. For example:
