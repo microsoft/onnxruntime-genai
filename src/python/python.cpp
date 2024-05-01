@@ -22,6 +22,27 @@ pybind11::array_t<T> ToPython(std::span<T> v) {
   return pybind11::array_t<T>(v.size(), v.data());
 }
 
+struct float16 {
+  uint16_t v_;
+};
+
+namespace pybind11 {
+namespace detail {
+template <>
+struct npy_format_descriptor<float16> {
+  static constexpr auto name = _("float16");
+  static pybind11::dtype dtype() {
+    handle ptr = npy_api::get().PyArray_DescrFromType_(23 /*NPY_FLOAT16*/); /* import numpy as np; print(np.dtype(np.float16).num */
+    return reinterpret_borrow<pybind11::dtype>(ptr);
+  }
+  static std::string format() {
+    // following: https://docs.python.org/3/library/struct.html#format-characters
+    return "e";
+  }
+};
+}  // namespace detail
+}  // namespace pybind11
+
 namespace Generators {
 
 // A roaming array is one that can be in CPU or GPU memory, and will copy the memory as needed to be used from anywhere
@@ -77,7 +98,7 @@ struct PyGeneratorParams {
 #else
       std::span<const int64_t> shape(py_whisper_input_features_.shape(), py_whisper_input_features_.ndim());
 #endif
-      whisper.input_features = OrtValue::CreateTensor<float>(Ort::Allocator::GetWithDefaultOptions().GetInfo(), ToSpan(py_whisper_input_features_), shape);
+      whisper.input_features = OrtValue::CreateTensor<Ort::Float16_t>(Ort::Allocator::GetWithDefaultOptions().GetInfo(), std::span<Ort::Float16_t>(reinterpret_cast<Ort::Float16_t*>(py_whisper_input_features_.mutable_data()), py_whisper_input_features_.size()), shape);
       whisper.decoder_input_ids = ToSpan(py_whisper_decoder_input_ids_);
       params_->batch_size = 1;
       params_->sequence_length = static_cast<int>(py_whisper_decoder_input_ids_.shape(1));
@@ -108,7 +129,7 @@ struct PyGeneratorParams {
   }
 
   pybind11::array_t<int32_t> py_input_ids_;
-  pybind11::array_t<float> py_whisper_input_features_;
+  pybind11::array_t<float16> py_whisper_input_features_;
   pybind11::array_t<int32_t> py_whisper_decoder_input_ids_;
 };
 
