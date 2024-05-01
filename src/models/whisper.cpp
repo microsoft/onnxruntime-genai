@@ -9,6 +9,7 @@ Whisper_Model::Whisper_Model(std::unique_ptr<Config> config, OrtEnv& ort_env)
   session_encoder_ = OrtSession::Create(ort_env, (config_->config_path / config_->model.encoder_decoder_init.filename).c_str(), session_options_.get());
 
   InitDeviceAllocator(*session_decoder_);
+  session_decoder_info_ = std::make_unique<SessionInfo>(*session_decoder_);
 }
 
 std::unique_ptr<State> Whisper_Model::CreateState(RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params) const {
@@ -22,7 +23,7 @@ Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> s
 
 #if USE_CUDA
   // Convert input_features from float32 to float16 if necessary
-  if (model_.device_type_ == DeviceType::CUDA && model_.session_info_->GetInputDataType("encoder_input_ids") == Ort::TypeToTensorType<Ort::Float16_t>::type) {
+  if (model_.device_type_ == DeviceType::CUDA && model_.session_decoder_info_->GetInputDataType("encoder_input_ids") == Ort::TypeToTensorType<Ort::Float16_t>::type) {
     std::unique_ptr<OrtValue> input_features_32;
     ConvertFp32ToFp16(*model_.allocator_device_, *inputs.input_features, input_features_32, model_.device_type_, model_.cuda_stream_);
     inputs.input_features = std::move(input_features_32);
