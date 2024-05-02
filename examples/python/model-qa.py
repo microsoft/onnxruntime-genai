@@ -19,8 +19,6 @@ def main(args):
         print("Error, chat template must have exactly one pair of curly braces, e.g. '<|user|>\n{input} <|end|>\n<|assistant|>'")
         exit(1)
 
-    og.set_log_options(enabled=True, append_next_tokens=True)
-
     # Keep asking for input prompts in a loop
     while True:
         text = input("Input: ")
@@ -40,7 +38,6 @@ def main(args):
         params = og.GeneratorParams(model)
         params.try_use_cuda_graph_with_max_batch_size(1)
         params.set_search_options(**search_options)
-        params.set_search_options(do_sample=True, random_seed=0)
         params.input_ids = input_tokens
         generator = og.Generator(model, params)
         if args.verbose: print("Generator created")
