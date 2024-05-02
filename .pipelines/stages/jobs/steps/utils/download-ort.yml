@@ -29,7 +29,7 @@ steps:
     displayName: Rename OnnxRuntime nuget package to tgz
   - task: ExtractFiles@1
     inputs:
-      archiveFilePatterns: '$(Build.Repository.LocalPath)/$(ort_filename).tgz'
+      archiveFilePatterns: '$(Build.Repository.LocalPath)/$(ort_filename).zip'
       destinationFolder: '$(Build.Repository.LocalPath)/ort'
       cleanDestinationFolder: false
       overwriteExistingFiles: true
