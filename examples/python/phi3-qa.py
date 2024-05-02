@@ -29,8 +29,6 @@ def main(args):
         # If there is a chat template, use it
         prompt = f'{chat_template.format(input=text)}'
 
-        print(f"Prompt: {prompt}")
-
         input_tokens = tokenizer.encode(prompt)
 
         params = og.GeneratorParams(model)
