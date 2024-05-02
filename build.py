@@ -11,6 +11,17 @@ import sys
 import warnings
 
 
+class BaseError(Exception):
+    """Base class for errors originating from build.py."""
+
+
+class BuildError(BaseError):
+    """Error from running build steps."""
+
+    def __init__(self, *messages):
+        super().__init__("\n".join(messages))
+
+
 def is_windows():
     """Check if the current platform is Windows."""
     return sys.platform.startswith("win")
@@ -108,6 +119,11 @@ def build(
     build_dir: str | bytes | os.PathLike | None = None,
     parallel: bool = False,
     config: str = "RelWithDebInfo",
+    ios: bool | None = None,
+    ios_sysroot: str | None = None,
+    osx_arch: str | None = None,
+    apple_deployment_target: str | None = None,
+    ios_toolchain_file: str | None = None,
 ):
     """Generates the CMake build tree and builds the project.
 
@@ -116,7 +132,7 @@ def build(
     """
     if not is_windows() and not is_linux() and not is_mac():
         raise OSError(f"Unsupported platform {platform()}.")
-    
+
     if cuda_home and not use_cuda:
         use_cuda = True
 
@@ -164,6 +180,42 @@ def build(
         env["PATH"] = os.path.join(env["CUDA_HOME"], "bin") + os.pathsep + os.environ["PATH"]
         cuda_compiler = os.path.join(env["CUDA_HOME"], "bin", "nvcc")
         command += [f"-DCMAKE_CUDA_COMPILER={cuda_compiler}", f"-DCMAKE_CUDA_ARCHITECTURES={cuda_arch}"]
+        
+    # ios build
+    if ios:
+        if is_mac():
+            needed_args = [
+                ios_sysroot,
+                osx_arch,
+                apple_deployment_target,
+            ]
+            arg_names = [
+                "--ios_sysroot          " +
+                "<the location or name of the macOS platform SDK>",
+                "--osx_arch             " +
+                "<the Target specific architectures for iOS>",
+                "--apple_deploy_target  " +
+                "<the minimum version of the target platform>",
+            ]
+            if not all(_ is not None for _ in needed_args):
+                raise BuildError(
+                    "iOS build on MacOS canceled due to missing arguments: " +
+                    ', '.join(
+                        val for val, cond in zip(arg_names, needed_args)
+                        if not cond))
+            command += [
+                "-DCMAKE_SYSTEM_NAME=iOS",
+                "-DENABLE_TESTS=OFF",
+                "-DCMAKE_OSX_SYSROOT=" + ios_sysroot,
+                "-DCMAKE_OSX_ARCHITECTURES=" + osx_arch,
+                "-DCMAKE_OSX_DEPLOYMENT_TARGET=" + apple_deployment_target,
+                "-DENABLE_PYTHON=OFF",
+                "-DCMAKE_TOOLCHAIN_FILE=" + (
+                    ios_toolchain_file if ios_toolchain_file
+                    else "cmake/genai_ios.toolchain.cmake")
+            ]
+        # else:
+            # cross compile for ios on Linux
 
     run_subprocess(command, env=env).check_returncode()
     make_command = ["cmake", "--build", ".", "--config", config]
@@ -173,7 +225,7 @@ def build(
 
     if not skip_csharp:
         if not is_windows():
-            warnings.warn('C# API is only supported on Windows.', UserWarning)
+            warnings.warn("C# API is only supported on Windows.", UserWarning)
             return
 
         dotnet = resolve_executable_path("dotnet")
@@ -186,15 +238,25 @@ def build(
 
         # Build the library
         properties = [configuration, platorm, native_lib_path]
-        csharp_build_command = [dotnet, "build", ".",]
-        run_subprocess(csharp_build_command + properties, cwd=os.path.join("src", "csharp")).check_returncode()
+        csharp_build_command = [
+            dotnet,
+            "build",
+            ".",
+        ]
+        run_subprocess(
+            csharp_build_command + properties, cwd=os.path.join("src", "csharp")
+        ).check_returncode()
 
         # Build the tests and run them
         tests_properties = [configuration, platform_for_tests_csproj, native_lib_path]
         if ort_home:
             tests_properties += [f"/p:OrtHome={ort_home}"]
-        run_subprocess(csharp_build_command + tests_properties, cwd=os.path.join("test", "csharp")).check_returncode()
-        run_subprocess([dotnet, "test"] + tests_properties, cwd=os.path.join("test", "csharp")).check_returncode()
+        run_subprocess(
+            csharp_build_command + tests_properties, cwd=os.path.join("test", "csharp")
+        ).check_returncode()
+        run_subprocess(
+            [dotnet, "test"] + tests_properties, cwd=os.path.join("test", "csharp")
+        ).check_returncode()
 
 
 if __name__ == "__main__":
@@ -231,7 +293,34 @@ if __name__ == "__main__":
         default="RelWithDebInfo",
         type=str,
         choices=["Debug", "MinSizeRel", "Release", "RelWithDebInfo"],
-        help="Configuration(s) to build.")
+        help="Configuration(s) to build.",
+    )
+
+    # iOS build options
+    parser.add_argument("--ios", action="store_true", help="build for ios")
+    parser.add_argument(
+        "--ios_sysroot",
+        default="",
+        help="Specify the location name of the macOS platform SDK to be used",
+    )
+    parser.add_argument(
+        "--ios_toolchain_file",
+        default="",
+        help="Path to ios toolchain file, "
+        "or cmake/genai_ios.toolchain.cmake will be used",
+    )
+    parser.add_argument(
+        "--osx_arch",
+        type=str,
+        help="Specify the Target specific architectures for iOS "
+        "This is only supported on MacOS",
+    )
+    parser.add_argument(
+        "--apple_deployment_target",
+        type=str,
+        help="Specify the minimum version of the target platform "
+        "This is only supported on MacOS",
+    )
     args = parser.parse_args()
 
     update_submodules()
@@ -246,4 +335,9 @@ if __name__ == "__main__":
         build_dir=args.build_dir,
         parallel=args.parallel,
         config=args.config,
+        ios=args.ios,
+        ios_sysroot=args.ios_sysroot,
+        ios_toolchain_file=args.ios_toolchain_file,
+        osx_arch=args.osx_arch,
+        apple_deployment_target=args.apple_deployment_target,
     )
