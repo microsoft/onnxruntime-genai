@@ -596,8 +596,16 @@ TfmStatus BPETokenizer::Id2Token(tfmTokenId_t id, std::string& token, DecoderSta
     }  // end case of whitespace_token_
 
     if (!bpe_state->incomplete_utf8_.empty()) {
-      token = bpe_state->incomplete_utf8_ + token;
-      bpe_state->incomplete_utf8_.clear();
+      bpe_state->incomplete_utf8_ += token;
+      if (UTF8Len(bpe_state->incomplete_utf8_.front()) > bpe_state->incomplete_utf8_.size()) {
+        token = "";
+      } else {
+        token = bpe_state->incomplete_utf8_;
+        bpe_state->incomplete_utf8_.clear();
+        if (!ValidateUTF8(token)) {
+          token = "";
+        }
+      }
     } else {
       if (!token.empty() && UTF8Len(token.front()) > token.size()) {
         bpe_state->incomplete_utf8_ = token;
