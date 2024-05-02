@@ -87,7 +87,7 @@ steps:
       --volume $(Build.Repository.LocalPath):/ort_genai_src \
       -w /ort_genai_src/ onnxruntime$(ep)build$(arch) \
       bash -c " \
-          /usr/bin/cmake --build --preset linux_$(arch)_$(ep)_release --target package"
+          /usr/bin/cmake --build --preset linux_gcc_$(ep)_release --target package"
     displayName: 'Package C/C++ API'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
