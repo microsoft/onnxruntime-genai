@@ -91,6 +91,8 @@ def _parse_args():
              "Used when --use_cuda is specified.",
     )
 
+    parser.add_argument("--use_dml", action="store_true", help="Whether to use DML. Default is to not use DML.")
+
     # Android options
     parser.add_argument("--android", action="store_true", help="Build for Android")
     parser.add_argument(
@@ -316,6 +318,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
         "-DUSE_CXX17=ON",
         "-DUSE_CUDA=ON" if args.use_cuda else "-DUSE_CUDA=OFF",
+        "-DUSE_DML=ON" if args.use_dml else "-DUSE_DML=OFF",
         f"-DBUILD_WHEEL={build_wheel}",
     ]
 
@@ -385,7 +388,7 @@ if __name__ == "__main__":
     _validate_args(args)
     env = _create_env(args)
 
-    if args.update: 
+    if args.update:
         update(args, env)
 
     if args.build:
