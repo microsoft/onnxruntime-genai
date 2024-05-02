@@ -1,6 +1,8 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
+from __future__ import annotations  # for '|' shorthand in type hints
+
 import shlex
 import subprocess
 from pathlib import Path
