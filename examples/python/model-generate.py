@@ -15,6 +15,16 @@ def main(args):
         prompts = ["I like walking my cute dog",
                 "What is the best restaurant in town?",
                 "Hello, how are you today?"]
+<<<<<<< Updated upstream
+=======
+    
+    if args.chat_template:
+        if args.chat_template.count('{') != 1 or args.chat_template.count('}') != 1:
+            print("Error, chat template must have exactly one pair of curly braces, e.g. '<|user|>\n{input} <|end|>\n<|assistant|>'")
+            exit(1)
+        prompts[:] = [f'{args.chat_template.format(input=text)}' for text in prompts]
+        
+>>>>>>> Stashed changes
     input_tokens = tokenizer.encode_batch(prompts)
     if args.verbose: print("Prompt(s) encoded")
 
