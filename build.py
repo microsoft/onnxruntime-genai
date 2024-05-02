@@ -155,10 +155,10 @@ def _validate_build_dir(args: argparse.Namespace):
         if args.android:
             target_sys = "Android"
         elif args.ios:
-            target_sys = "iOS"
+            # target_sys = "iOS"
             raise ValueError("iOS builds are not supported yet.")
         elif args.arm64:
-            target_sys = "arm64"
+            # target_sys = "arm64"
             raise ValueError("Cross-compiling for ARM64 is not supported yet.")
         elif platform.system() == "Darwin":
             # also tweak build directory name for mac builds
