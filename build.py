@@ -53,7 +53,9 @@ def resolve_executable_path(command_or_path: str):
     if command_or_path and command_or_path.strip():
         executable_path = shutil.which(command_or_path)
         if executable_path is None:
-            raise RuntimeError(f"Failed to resolve executable path for '{command_or_path}'.")
+            raise RuntimeError(
+                f"Failed to resolve executable path for '{command_or_path}'."
+            )
         return os.path.abspath(executable_path)
     else:
         return None
@@ -100,9 +102,7 @@ def validate_cuda_home(cuda_home: str | bytes | os.PathLike | None):
     if not cuda_home_valid:
         raise RuntimeError(
             "cuda_home paths must be specified and valid.",
-            "cuda_home='{}' valid={}.".format(
-                cuda_home, cuda_home_valid
-            ),
+            "cuda_home='{}' valid={}.".format(cuda_home, cuda_home_valid),
         )
 
     return validated_cuda_home
@@ -121,9 +121,9 @@ def build(
     config: str = "RelWithDebInfo",
     ios: bool | None = None,
     ios_sysroot: str | None = None,
+    ios_toolchain_file: str | None = None,
     osx_arch: str | None = None,
     apple_deployment_target: str | None = None,
-    ios_toolchain_file: str | None = None,
 ):
     """Generates the CMake build tree and builds the project.
 
@@ -190,19 +190,20 @@ def build(
                 apple_deployment_target,
             ]
             arg_names = [
-                "--ios_sysroot          " +
-                "<the location or name of the macOS platform SDK>",
-                "--osx_arch             " +
-                "<the Target specific architectures for iOS>",
-                "--apple_deploy_target  " +
-                "<the minimum version of the target platform>",
+                "--ios_sysroot          "
+                + "<the location or name of the macOS platform SDK>",
+                "--osx_arch             "
+                + "<the Target specific architectures for iOS>",
+                "--apple_deploy_target  "
+                + "<the minimum version of the target platform>",
             ]
             if not all(_ is not None for _ in needed_args):
                 raise BuildError(
-                    "iOS build on MacOS canceled due to missing arguments: " +
-                    ', '.join(
-                        val for val, cond in zip(arg_names, needed_args)
-                        if not cond))
+                    "iOS build on MacOS canceled due to missing arguments: "
+                    + ", ".join(
+                        val for val, cond in zip(arg_names, needed_args) if not cond
+                    )
+                )
             command += [
                 "-DCMAKE_SYSTEM_NAME=iOS",
                 "-DENABLE_TESTS=OFF",
@@ -210,12 +211,15 @@ def build(
                 "-DCMAKE_OSX_ARCHITECTURES=" + osx_arch,
                 "-DCMAKE_OSX_DEPLOYMENT_TARGET=" + apple_deployment_target,
                 "-DENABLE_PYTHON=OFF",
-                "-DCMAKE_TOOLCHAIN_FILE=" + (
-                    ios_toolchain_file if ios_toolchain_file
-                    else "cmake/genai_ios.toolchain.cmake")
+                "-DCMAKE_TOOLCHAIN_FILE="
+                + (
+                    ios_toolchain_file
+                    if ios_toolchain_file
+                    else "cmake/genai_ios.toolchain.cmake"
+                ),
             ]
         # else:
-            # cross compile for ios on Linux
+        # TODO: cross compile for ios on Linux ?
 
     run_subprocess(command, env=env).check_returncode()
     make_command = ["cmake", "--build", ".", "--config", config]
@@ -335,6 +339,7 @@ if __name__ == "__main__":
         build_dir=args.build_dir,
         parallel=args.parallel,
         config=args.config,
+        # iOS build options below
         ios=args.ios,
         ios_sysroot=args.ios_sysroot,
         ios_toolchain_file=args.ios_toolchain_file,
