@@ -30,3 +30,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 target_link_libraries(tokenizer PUBLIC simdjson)
+
+set_target_properties(tokenizer PROPERTIES FOLDER "Sources")
+source_group(TREE ${PROJECT_SOURCE_DIR} FILES ${tokenizer_srcs})
