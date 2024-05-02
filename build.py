@@ -147,28 +147,22 @@ def _resolve_executable_path(command_or_path: Path, resolution_failure_allowed: 
     return Path(executable_path)
 
 
-def update_submodules():
-    """Update the git submodules."""
-    util.run(["git", "submodule", "update", "--init", "--recursive"])
-
-
 def _validate_build_dir(args: argparse.Namespace):
     if not args.build_dir:
         target_sys = platform.system()
 
         # override if we're cross-compiling
-        # TODO: Assuming we'll add support for the commented out platforms
         if args.android:
             target_sys = "Android"
-        # elif args.ios:
-        #     target_sys = "iOS"
-        # elif args.arm64:
-        #     target_sys = "arm64"
-        # elif platform.system() == "Darwin":
-        #     # also tweak name for mac builds
-        #     target_sys = "macOS"
-        # elif args.wasm:
-        #     target_sys = "wasm"
+        elif args.ios:
+            target_sys = "iOS"
+            raise ValueError("iOS builds are not supported yet.")
+        elif args.arm64:
+            target_sys = "arm64"
+            raise ValueError("Cross-compiling for ARM64 is not supported yet.")
+        elif platform.system() == "Darwin":
+            # also tweak build directory name for mac builds
+            target_sys = "macOS"
 
         args.build_dir = Path("build/" + target_sys)
 
@@ -285,8 +279,11 @@ def _get_csharp_properties(args: argparse.Namespace):
 
 
 def update(args: argparse.Namespace, env: dict[str, str]):
-    update_submodules()
+    """
+    Update the cmake build files.
+    """
 
+    # build the cmake command to create/update the build files
     command = [str(args.cmake_path)]
 
     if args.cmake_generator:
@@ -344,6 +341,9 @@ def update(args: argparse.Namespace, env: dict[str, str]):
 
 
 def build(args: argparse.Namespace, env: dict[str, str]):
+    """
+    Build the targets.
+    """
 
     make_command = [str(args.cmake_path), "--build", str(args.build_dir), "--config", args.config]
 
@@ -363,6 +363,9 @@ def build(args: argparse.Namespace, env: dict[str, str]):
 
 
 def test(args: argparse.Namespace, env: dict[str, str]):
+    """
+    Run the tests.
+    """
     ctest_cmd = [str(args.ctest_path), "--build-config", args.config, "--verbose", "--timeout", "10800"]
     util.run(ctest_cmd, cwd=str(args.build_dir))
 
@@ -374,25 +377,28 @@ def test(args: argparse.Namespace, env: dict[str, str]):
 
 
 def clean(args: argparse.Namespace, env: dict[str, str]):
+    """
+    Clean the build output.
+    """
     log.info("Cleaning targets")
     cmd_args = [str(args.cmake), "--build", str(args.build_dir), "--config", args.config, "--target", "clean"]
     util.run(cmd_args, env=env)
 
 
 if __name__ == "__main__":
-    if not util.is_windows() and not util.is_linux():
+    if not (util.is_windows() or util.is_linux() or util.is_mac()):
         raise OSError(f"Unsupported platform {sys.platform}.")
 
-    args = _parse_args()
+    arguments = _parse_args()
 
-    _validate_args(args)
-    env = _create_env(args)
+    _validate_args(arguments)
+    environment = _create_env(args)
 
-    if args.update:
-        update(args, env)
+    if arguments.update:
+        update(arguments, environment)
 
-    if args.build:
-        build(args, env)
+    if arguments.build:
+        build(arguments, environment)
 
-    if args.test and not args.skip_tests:
-        test(args, env)
+    if arguments.test and not arguments.skip_tests:
+        test(arguments, environment)
