@@ -1,4 +1,4 @@
-﻿import onnxruntime_genai as og
+import onnxruntime_genai as og
 import argparse
 import time
 
@@ -15,11 +15,7 @@ def main(args):
     if args.verbose: print("Tokenizer created")
     if args.verbose: print()
     search_options = {name:getattr(args, name) for name in ['do_sample', 'max_length', 'min_length', 'top_p', 'top_k', 'temperature', 'repetition_penalty'] if name in args}
-    if args.chat_template.count('{') != 1 or args.chat_template.count('}') != 1:
-        print("Error, chat template must have exactly one pair of curly braces, e.g. '<|user|>\n{input} <|end|>\n<|assistant|>'")
-        exit(1)
-
-    og.set_log_options(enabled=True, append_next_tokens=True)
+    chat_template = '<|user|>\n{input} <|end|>\n<|assistant|>'
 
     # Keep asking for input prompts in a loop
     while True:
@@ -31,16 +27,13 @@ def main(args):
         if args.timings: started_timestamp = time.time()
 
         # If there is a chat template, use it
-        prompt = text
-        if args.chat_template:
-            prompt = f'{args.chat_template.format(input=text)}'
+        prompt = f'{chat_template.format(input=text)}'
 
         input_tokens = tokenizer.encode(prompt)
 
         params = og.GeneratorParams(model)
         params.try_use_cuda_graph_with_max_batch_size(1)
         params.set_search_options(**search_options)
-        params.set_search_options(do_sample=True, random_seed=0)
         params.input_ids = input_tokens
         generator = og.Generator(model, params)
         if args.verbose: print("Generator created")
@@ -88,6 +81,5 @@ if __name__ == "__main__":
     parser.add_argument('-r', '--repetition_penalty', type=float, help='Repetition penalty to sample with')
     parser.add_argument('-v', '--verbose', action='store_true', default=False, help='Print verbose output and timing information. Defaults to false')
     parser.add_argument('-g', '--timings', action='store_true', default=False, help='Print timing information for each generation step. Defaults to false')
-    parser.add_argument('-c', '--chat_template', type=str, default='', help='Chat template to use for the prompt. User input will be injected into {input}')
     args = parser.parse_args()
     main(args)

@@ -29,11 +29,8 @@ extern "C" {
     return reinterpret_cast<OgaResult*>(std::make_unique<Generators::Result>(e.what()).release()); \
   }
 
-OgaResult* OGA_API_CALL OgaShutdown() {
-  OGA_TRY
+void OGA_API_CALL OgaShutdown() {
   Generators::Shutdown();
-  return nullptr;
-  OGA_CATCH
 }
 
 const char* OGA_API_CALL OgaResultGetError(const OgaResult* result) {
@@ -101,6 +98,14 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchNumber(OgaGeneratorParams* ge
 OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* generator_params, const char* name, bool value) {
   OGA_TRY
   Generators::SetSearchBool(reinterpret_cast<Generators::GeneratorParams*>(generator_params)->search, name, value);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGeneratorParams* generator_params, int32_t max_batch_size) {
+  OGA_TRY
+  auto* params = reinterpret_cast<Generators::GeneratorParams*>(generator_params);
+  params->TryGraphCapture(max_batch_size);
   return nullptr;
   OGA_CATCH
 }

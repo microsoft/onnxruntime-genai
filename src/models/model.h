@@ -1,8 +1,5 @@
 #pragma once
-#ifndef NO_TOKENIZER
 #include "tfmtok_c.h"
-#endif
-
 #include "captured_graph_pool.h"
 
 #if USE_DML
@@ -18,6 +15,8 @@ namespace Generators {
 struct Tokenizer;
 
 void ConvertFp16ToFp32(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<OrtValue>& p_out, DeviceType device_type, cudaStream_t stream);
+
+size_t GetOrtTypeSize(ONNXTensorElementDataType type);
 
 struct State {
   State(const GeneratorParams& params);
@@ -35,19 +34,6 @@ struct State {
   void Run(OrtSession& session, OrtRunOptions& run_options);  // Uses the inputs below to run
   void ClearIO();                                             // Clear all inputs/outputs
 };
-
-#ifdef NO_TOKENIZER
-struct TokenizerStream {
-  const std::string& Decode(int32_t token);
-};
-
-struct Tokenizer {
-  Tokenizer(Config& config);
-
-  std::vector<int32_t> Encode(const char* text) const;
-  std::string Decode(std::span<int32_t> tokens) const;
-};
-#else
 
 template <typename T>
 struct TfmPtr {
@@ -94,7 +80,6 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer> {
  private:
   int32_t pad_token_id_;
 };
-#endif
 
 struct SessionInfo {
   SessionInfo(OrtSession& session);
@@ -119,8 +104,6 @@ struct Model : std::enable_shared_from_this<Model> {
 
   std::unique_ptr<OrtValue> ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams) const;
 
-  void GetMaxBatchSizeFromGeneratorParams(const GeneratorParams& params);
-
   CapturedGraphPool* GetCapturedGraphPool() const { return captured_graph_pool_.get(); }
 
   std::unique_ptr<Config> config_;
@@ -135,9 +118,6 @@ struct Model : std::enable_shared_from_this<Model> {
   std::unique_ptr<SessionInfo> session_info_;
 
   std::shared_ptr<Model> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
-
-  bool use_cuda_graph_{};
-  int max_batch_size_{};
 
 #if USE_DML
   DmlExecutionContext* GetDmlExecutionContext() const { return dml_execution_context_.get(); }

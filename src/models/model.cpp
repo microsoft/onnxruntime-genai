@@ -35,6 +35,11 @@ static std::wstring CurrentModulePath() {
 namespace Generators {
 
 State::State(const GeneratorParams& params) : params_{params.shared_from_this()} {
+  // Add extra user inputs
+  for (auto& input : params.extra_inputs) {
+    input_names_.push_back(input.name.c_str());
+    inputs_.push_back(input.value.get());
+  }
 }
 
 void State::Run(OrtSession& session, OrtRunOptions& run_options) {
@@ -94,26 +99,6 @@ std::vector<int32_t> PadInputs(std::span<std::span<const int32_t>> sequences, in
   return result;
 }
 
-#ifdef NO_TOKENIZER
-const std::string& TokenizerStream::Decode(int32_t token) {
-  throw std::runtime_error("Tokenizer not enabled");
-}
-
-std::unique_ptr<TokenizerStream> Tokenizer::CreateStream() const {
-  return std::make_unique<TokenizerStream>();
-}
-
-Tokenizer::Tokenizer(Config& config) {
-}
-
-std::vector<int32_t> Tokenizer::Encode(const char* text) const {
-  throw std::runtime_error("Tokenizer not enabled");
-}
-
-std::string Tokenizer::Decode(std::span<int32_t> tokens) const {
-  throw std::runtime_error("Tokenizer not enabled");
-}
-#else
 void CheckResult(tfmError_t error) {
   if (error != kTfmOK)
     throw std::runtime_error(TfmGetLastErrorMessage());
@@ -178,8 +163,6 @@ std::vector<std::string> Tokenizer::DecodeBatch(std::span<const int32_t> sequenc
     strings.emplace_back(Decode(sequences.subspan(sequence_length * i, sequence_length)));
   return strings;
 }
-
-#endif
 
 #if USE_CUDA
 // Since Python/Others can and will hold onto a generator object past the model object's lifetime we need to ensure
@@ -535,28 +518,6 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
       throw std::runtime_error("ExpandInputs - Unsupported device type");
   }
   return expanded;
-}
-
-void Model::GetMaxBatchSizeFromGeneratorParams(const GeneratorParams& params) {
-  bool is_cuda_graph_enabled = device_type_ == DeviceType::DML || IsCudaGraphEnabled(config_->model.decoder.session_options);
-  max_batch_size_ = params.max_batch_size;
-
-  if (DeviceType::CUDA == device_type_) {
-    if (is_cuda_graph_enabled) {
-      if (max_batch_size_ == 0) {
-        throw std::runtime_error("CUDA graph is enabled, but max_batch_size is not set.");
-      }
-      use_cuda_graph_ = true;
-    }
-  } else if (DeviceType::DML == device_type_) {
-    if (max_batch_size_ == 0) {
-      throw std::runtime_error("max_batch_size needs to be set when using DirectML.");
-    }
-
-    use_cuda_graph_ = true;
-  } else if (is_cuda_graph_enabled) {
-    throw std::runtime_error("CUDA graph is not supported on this device");
-  }
 }
 
 }  // namespace Generators

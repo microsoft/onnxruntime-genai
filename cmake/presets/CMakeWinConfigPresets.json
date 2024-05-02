@@ -271,10 +271,7 @@
         "windows_directml_default"
       ],
       "displayName": "windows x64 directml release asan",
-      "binaryDir": "${sourceDir}/build/directml_asan",
-      "cacheVariables": {
-        "USE_DML": "ON"
-      }
+      "binaryDir": "${sourceDir}/build/directml_asan"
     },
     {
       "name": "windows_x64_directml_debug_asan",
@@ -283,10 +280,7 @@
         "windows_directml_default"
       ],
       "displayName": "windows x64 directml debug asan",
-      "binaryDir": "${sourceDir}/build/directml_asan",
-      "cacheVariables": {
-        "USE_DML": "ON"
-      }
+      "binaryDir": "${sourceDir}/build/directml_asan"
     },
     {
       "name": "windows_x64_directml_relwithdebinfo_asan",
@@ -295,10 +289,7 @@
         "windows_directml_default"
       ],
       "displayName": "windows x64 directml relwithdebinfo asan",
-      "binaryDir": "${sourceDir}/build/directml_asan",
-      "cacheVariables": {
-        "USE_DML": "ON"
-      }
+      "binaryDir": "${sourceDir}/build/directml_asan"
     },
     {
       "name": "windows_x64_directml_minsizerel_asan",
@@ -307,10 +298,7 @@
         "windows_directml_default"
       ],
       "displayName": "windows x64 directml minsizerel asan",
-      "binaryDir": "${sourceDir}/build/directml_asan",
-      "cacheVariables": {
-        "USE_DML": "ON"
-      }
+      "binaryDir": "${sourceDir}/build/directml_asan"
     },
     {
       "name": "windows_x64_directml_release",
@@ -319,10 +307,7 @@
         "windows_directml_default"
       ],
       "displayName": "windows x64 directml release",
-      "binaryDir": "${sourceDir}/build/directml",
-      "cacheVariables": {
-        "USE_DML": "ON"
-      }
+      "binaryDir": "${sourceDir}/build/directml"
     },
     {
       "name": "windows_x64_directml_debug",
@@ -331,10 +316,7 @@
         "windows_directml_default"
       ],
       "displayName": "windows x64 directml debug",
-      "binaryDir": "${sourceDir}/build/directml",
-      "cacheVariables": {
-        "USE_DML": "ON"
-      }
+      "binaryDir": "${sourceDir}/build/directml"
     },
     {
       "name": "windows_x64_directml_relwithdebinfo",
@@ -343,10 +325,7 @@
         "windows_directml_default"
       ],
       "displayName": "windows x64 directml relwithdebinfo",
-      "binaryDir": "${sourceDir}/build/directml",
-      "cacheVariables": {
-        "USE_DML": "ON"
-      }
+      "binaryDir": "${sourceDir}/build/directml"
     },
     {
       "name": "windows_x64_directml_minsizerel",
@@ -355,10 +334,7 @@
         "windows_directml_default"
       ],
       "displayName": "windows x64 directml minsizerel",
-      "binaryDir": "${sourceDir}/build/directml",
-      "cacheVariables": {
-        "USE_DML": "ON"
-      }
+      "binaryDir": "${sourceDir}/build/directml"
     },
     {
       "name": "windows_arm64_cpu_relwithdebinfo",

@@ -13,7 +13,7 @@ namespace Generators {
 
 static bool _ = (Ort::InitApi(), false);
 
-OrtGlobals::OrtGlobals() : env_{OrtEnv::Create()} {}
+OrtGlobals::OrtGlobals() : env_{OrtEnv::Create(OrtLoggingLevel::ORT_LOGGING_LEVEL_ERROR)} {}
 
 std::unique_ptr<OrtGlobals>& GetOrtGlobals() {
   static auto globals = std::make_unique<OrtGlobals>();
@@ -61,7 +61,25 @@ GeneratorParams::GeneratorParams(const Model& model)
       eos_token_id{model.config_->model.eos_token_id},
       vocab_size{model.config_->model.vocab_size},
       device_type{model.device_type_},
-      cuda_stream{model.cuda_stream_} {
+      cuda_stream{model.cuda_stream_},
+      is_cuda_graph_enabled_{IsCudaGraphEnabled(model.config_->model.decoder.session_options)} {
+}
+
+void GeneratorParams::TryGraphCapture(int max_bs) {
+  if (!is_cuda_graph_enabled_ || device_type == DeviceType::CPU) {
+    // no-op
+    return;
+  }
+
+  if (DeviceType::CUDA == device_type || DeviceType::DML == device_type) {
+    if (max_bs == 0) {
+      throw std::runtime_error("Graph capture is enabled, but max_batch_size is not set.");
+    }
+    use_cuda_graph = true;
+    max_batch_size = max_bs;
+  } else {
+    throw std::runtime_error("CUDA graph is not supported on this device");
+  }
 }
 
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params) {
