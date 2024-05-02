@@ -9,7 +9,7 @@
 
 Download either or both of the [short](https://aka.ms/phi3-mini-4k-instruct-onnx) and [long](https://aka.ms/phi3-mini-128k-instruct-onnx) context Phi-3 mini models from Hugging Face.
 
-First make sure git-lfs is installed
+To download the Phi-3 mini models, you will need to have git-lfs installed.
 * MacOS: `brew install git-lfs`
 * linux: `apt-get install git-lfs`
 
