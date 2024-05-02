@@ -26,7 +26,7 @@ steps:
 - ${{ else }}:
   - script: |
       mv $(Build.Repository.LocalPath)/$(ort_filename).nupkg $(Build.Repository.LocalPath)/$(ort_filename).zip
-    displayName: Rename OnnxRuntime nuget package to tgz
+    displayName: Rename OnnxRuntime nuget package to zip
   - task: ExtractFiles@1
     inputs:
       archiveFilePatterns: '$(Build.Repository.LocalPath)/$(ort_filename).zip'
