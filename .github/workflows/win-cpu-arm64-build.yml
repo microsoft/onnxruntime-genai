@@ -11,9 +11,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 env:
-  ort_dir: "onnxruntime-win-arm64-1.17.1"
+  ort_dir: "onnxruntime-win-arm64-1.17.3"
   ort_zip: "$(ort_dir).zip"
-  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/$(ort_zip)"
+  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/$(ort_zip)"
   binaryDir: 'build/cpu'
 
 jobs:
@@ -33,7 +33,7 @@ jobs:
 
     - name: Download OnnxRuntime
       run: |
-        $env:ort_url = "https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/onnxruntime-win-arm64-1.17.1.zip"
+        $env:ort_url = "https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/onnxruntime-win-arm64-1.17.3.zip"
         Invoke-WebRequest -Uri $env:ort_url -OutFile $env:ort_zip
 
     - name: Unzip OnnxRuntime
@@ -53,6 +53,11 @@ jobs:
       run: |
         cmake --build --preset windows_arm64_cpu_release --parallel
 
+    - name: Build the C# API and Run the C# Tests
+      run: |
+        cd test\csharp
+        dotnet test /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release"
+
     - name: Install the Python Wheel and Test Dependencies
       run: |
         python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl"))
@@ -62,10 +67,7 @@ jobs:
       run: |
         python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\test_models"
 
-    - name: Build the C# API and Run the C# Tests
-      run: |
-        cd test\csharp
-        dotnet test /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release"
+
 
     - name: Verify Build Artifacts
       if: always()

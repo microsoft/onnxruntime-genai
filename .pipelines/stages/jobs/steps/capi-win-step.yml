@@ -2,6 +2,9 @@ parameters:
 - name: target
   type: string
   default: 'onnxruntime-genai'
+- name: ep
+  type: string
+  default: 'cpu'
 steps:
 - bash: |
     echo "##[error]Error: ep and arch are not set"
@@ -28,10 +31,21 @@ steps:
     echo "cuda_version=$(cuda_version)"
     echo "target=${{ parameters.target }}"
   displayName: 'Print Parameters'
-
 - template: utils/download-ort.yml
   parameters:
     archiveType: 'zip'
+    ep: ${{ parameters.ep }}
+
+- ${{ if eq(parameters.ep, 'directml') }}:
+  - powershell: |
+      Invoke-WebRequest -Uri $(dml_url) -OutFile $(dml_zip)
+      Expand-Archive $(dml_zip) -DestinationPath $(dml_dir)
+      Remove-Item -Path $(dml_zip)
+      Get-ChildItem -Recurse $(dml_dir)
+      mv $(dml_dir)\bin\x64-win\DirectML.dll ort\lib
+      mv $(dml_dir)\include\DirectML.h ort\include
+    workingDirectory: '$(Build.Repository.LocalPath)'
+    continueOnError: true
 
 - powershell: |
     azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" 'cuda_sdk'
@@ -59,7 +73,7 @@ steps:
 - ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
   - template: compliant/win-esrp-dll-step.yml
     parameters:
-      FolderPath: '$(buildDir)'
+      FolderPath: '$(Build.Repository.LocalPath)\$(buildDir)'
       DisplayName: 'ESRP - Sign C++ dlls'
       Pattern: '*genai.dll'
 

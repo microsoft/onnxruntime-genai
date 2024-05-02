@@ -19,11 +19,20 @@ parameters:
   type: boolean
   default: true
 
+- name: enable_win_dml
+  displayName: 'Whether Windows DirectML package is built.'
+  type: boolean
+  default: true
 
 - name: ort_version
   displayName: 'OnnxRuntime version'
   type: string
-  default: '1.17.1'
+  default: '1.17.3'
+
+- name: ort_dml_version
+  displayName: 'OnnxRuntime DirectML version'
+  type: string
+  default: '1.18.0-dev-20240423-0527-c07b8d545d'
 
 - name: cuda_version
   displayName: 'CUDA version'
@@ -35,11 +44,6 @@ parameters:
 
 - name: publish_to_ado_feed
   displayName: 'Publish to Azure DevOps Feed'
-  type: boolean
-  default: false
-
-- name: publish_to_nuget
-  displayName: 'Publish to NuGet.org'
   type: boolean
   default: false
 
@@ -59,7 +63,9 @@ stages:
     enable_win_cuda: ${{ parameters.enable_win_cuda }}
     enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
     enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
+    enable_win_dml: ${{ parameters.enable_win_dml }}
     ort_version: ${{ parameters.ort_version }}
+    ort_dml_version: ${{ parameters.ort_dml_version }}
     cuda_version: ${{ parameters.cuda_version }}
-    publish_to_nuget: ${{ parameters.publish_to_nuget }}
     publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
+    

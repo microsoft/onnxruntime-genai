@@ -1,0 +1,43 @@
+steps:
+- task: NuGetToolInstaller@1
+  inputs:
+    versionSpec: 6.8.x
+
+- powershell: |
+    New-Item -Path $(Agent.TempDirectory) -Name "binfiles" -ItemType "directory"
+    $base_path_name = Join-Path -Path $(Agent.TempDirectory) -ChildPath "binfiles"
+    Get-ChildItem $(GDN_CODESIGN_TARGETDIRECTORY) -Filter *.nupkg |
+        Foreach-Object {
+          $dir_name = Join-Path -Path $base_path_name -ChildPath $_.Basename
+          $cmd = "7z.exe x $($_.FullName) -y -o$dir_name"
+          Write-Output $cmd
+          Invoke-Expression -Command $cmd
+        }
+    dir $(Agent.TempDirectory)
+    tree $(Agent.TempDirectory)
+  workingDirectory: '$(Agent.TempDirectory)'
+
+- task: CodeSign@1
+  displayName: 'Run Codesign Validation'
+
+- task: PublishSecurityAnalysisLogs@3
+  displayName: 'Publish Security Analysis Logs'
+  continueOnError: true
+
+- task: PostAnalysis@2
+  inputs:
+    GdnBreakAllTools: true
+    GdnBreakPolicy: M365
+    GdnBreakPolicyMinSev: Error
+
+- template: utils/get-nuget-package-version-as-variable.yml
+  parameters:
+    packageFolder: '$(GDN_CODESIGN_TARGETDIRECTORY)'
+#This task must be run on a Windows machine
+- task: NuGetCommand@2
+  displayName: 'NuGet push to Azure DevOps Feed'
+  inputs:
+    command: push
+    packagesToPush: '$(GDN_CODESIGN_TARGETDIRECTORY)/*.nupkg'
+    publishVstsFeed: 'PublicPackages/onnxruntime-genai'
+    allowPackageConflicts: true

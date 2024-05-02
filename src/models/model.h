@@ -1,19 +1,29 @@
 #pragma once
-#ifndef NO_TOKENIZER
 #include "tfmtok_c.h"
+#include "captured_graph_pool.h"
+
+#if USE_DML
+#include "dml_provider_factory.h"
+#include "../dml/dml_helpers.h"
+#include "../dml/dml_execution_context.h"
+#include "../dml/dml_pooled_upload_heap.h"
+#include "../dml/dml_readback_heap.h"
 #endif
 
 namespace Generators {
 
 struct Tokenizer;
 
-void ConvertFp16ToFp32(OrtAllocator& allocator, cudaStream_t stream, OrtValue& in, std::unique_ptr<OrtValue>& p_out);
+void ConvertFp16ToFp32(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<OrtValue>& p_out, DeviceType device_type, cudaStream_t stream);
+
+size_t GetOrtTypeSize(ONNXTensorElementDataType type);
 
 struct State {
   State(const GeneratorParams& params);
   virtual ~State() = default;
 
   virtual RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices = {}) = 0;
+  virtual const CapturedGraphInfo* GetCapturedGraphInfo() const { return nullptr; }
 
   std::shared_ptr<const GeneratorParams> params_;
 
@@ -21,22 +31,9 @@ struct State {
   std::vector<OrtValue*> inputs_, outputs_;
 
  protected:
-  void Run(OrtSession& session);  // Uses the inputs below to run
-  void ClearIO();                 // Clear all inputs/outputs
+  void Run(OrtSession& session, OrtRunOptions& run_options);  // Uses the inputs below to run
+  void ClearIO();                                             // Clear all inputs/outputs
 };
-
-#ifdef NO_TOKENIZER
-struct TokenizerStream {
-  const std::string& Decode(int32_t token);
-};
-
-struct Tokenizer {
-  Tokenizer(Config& config);
-
-  std::vector<int32_t> Encode(const char* text) const;
-  std::string Decode(std::span<int32_t> tokens) const;
-};
-#else
 
 template <typename T>
 struct TfmPtr {
@@ -83,10 +80,12 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer> {
  private:
   int32_t pad_token_id_;
 };
-#endif
 
 struct SessionInfo {
   SessionInfo(OrtSession& session);
+
+  bool HasInput(const std::string& name) const;
+  bool HasOutput(const std::string& name) const;
 
   ONNXTensorElementDataType GetInputDataType(const std::string& name) const;
   ONNXTensorElementDataType GetOutputDataType(const std::string& name) const;
@@ -105,8 +104,12 @@ struct Model : std::enable_shared_from_this<Model> {
 
   std::unique_ptr<OrtValue> ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams) const;
 
+  CapturedGraphPool* GetCapturedGraphPool() const { return captured_graph_pool_.get(); }
+
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
+  std::unique_ptr<OrtRunOptions> run_options_;
+
   cuda_stream_holder cuda_stream_;
   DeviceType device_type_{DeviceType::CPU};
   Ort::Allocator& allocator_cpu_{Ort::Allocator::GetWithDefaultOptions()};
@@ -116,9 +119,32 @@ struct Model : std::enable_shared_from_this<Model> {
 
   std::shared_ptr<Model> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
 
+#if USE_DML
+  DmlExecutionContext* GetDmlExecutionContext() const { return dml_execution_context_.get(); }
+  DmlReadbackHeap* GetDmlReadbackHeap() const { return dml_readback_heap_.get(); }
+  DmlPooledUploadHeap* GetDmlUploadHeap() const { return dml_pooled_upload_heap_.get(); }
+  const OrtDmlApi* GetOrtDmlApi() const { return p_dml_api_; }
+  IDMLDevice* GetDmlDevice() const { return dml_device_.Get(); }
+  ID3D12Device* GetD3D12Device() const { return dml_objects_.d3d12_device.Get(); }
+  bool IsIntelDevice() const { return is_intel_device_; }
+#endif
+
  protected:
   void InitDeviceAllocator(OrtSession& session);
   void CreateSessionOptions();
+
+ private:
+#if USE_DML
+  mutable DmlObjects dml_objects_;
+  const OrtDmlApi* p_dml_api_{};
+  std::unique_ptr<DmlPooledUploadHeap> dml_pooled_upload_heap_;
+  std::unique_ptr<DmlExecutionContext> dml_execution_context_;
+  std::unique_ptr<DmlReadbackHeap> dml_readback_heap_;
+  ComPtr<IDMLDevice> dml_device_;
+  bool is_intel_device_{};
+#endif
+
+  std::shared_ptr<CapturedGraphPool> captured_graph_pool_;
 };
 
 }  // namespace Generators

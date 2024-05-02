@@ -1,0 +1,82 @@
+﻿<UserControl x:Class="Genny.Controls.SearchOptionsControl"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" 
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             mc:Ignorable="d"
+             d:DesignWidth="300"
+             Name="UI">
+    <Grid DataContext="{Binding ElementName=UI}">
+        <StackPanel Margin="3">
+            <UniformGrid Columns="2" >
+
+                <StackPanel Margin="0,0,4,0">
+                    <DockPanel>
+                        <Label>TopK</Label>
+                        <TextBlock Text="{Binding ElementName=SliderTopK, Path=Value}" VerticalAlignment="Center" HorizontalAlignment="Right" FontSize="11"/>
+                    </DockPanel>
+                    <Slider Name="SliderTopK" Value="{Binding SearchOptions.TopK}" Minimum="0" Maximum="200" TickFrequency="1" IsSnapToTickEnabled="true"/>
+                </StackPanel>
+                <StackPanel Margin="4,0,0,0">
+                    <DockPanel>
+                        <Label>TopP</Label>
+                        <TextBlock Text="{Binding ElementName=SliderTopP, Path=Value, StringFormat={}{0:N2}}" VerticalAlignment="Center" HorizontalAlignment="Right" FontSize="11"/>
+                    </DockPanel>
+                    <Slider Name="SliderTopP" Value="{Binding SearchOptions.TopP}" Minimum="0" Maximum="1" TickFrequency="0.01" IsSnapToTickEnabled="true"/>
+                </StackPanel>
+
+                <StackPanel Margin="0,0,4,0">
+                    <DockPanel>
+                        <Label>Temperature</Label>
+                        <TextBlock Text="{Binding ElementName=SliderTemperature, Path=Value, StringFormat={}{0:N2}}" VerticalAlignment="Center" HorizontalAlignment="Right" FontSize="11"/>
+                    </DockPanel>
+                    <Slider Name="SliderTemperature" Value="{Binding SearchOptions.Temperature}" Minimum="0" Maximum="5" TickFrequency="0.01" IsSnapToTickEnabled="true"/>
+                </StackPanel>
+                <StackPanel Margin="4,0,0,0">
+                    <DockPanel>
+                        <Label>RepetitionPenalty</Label>
+                        <TextBlock Text="{Binding ElementName=SliderRepetitionPenalty, Path=Value, StringFormat={}{0:N2}}" VerticalAlignment="Center" HorizontalAlignment="Right" FontSize="11"/>
+                    </DockPanel>
+                    <Slider Name="SliderRepetitionPenalty" Value="{Binding SearchOptions.RepetitionPenalty}" Minimum="0" Maximum="5" TickFrequency="0.01" IsSnapToTickEnabled="true"/>
+                </StackPanel>
+
+                <StackPanel Margin="0,0,4,0">
+                    <DockPanel>
+                        <Label>MinLength</Label>
+                        <TextBlock Text="{Binding ElementName=SliderMinLength, Path=Value}" VerticalAlignment="Center" HorizontalAlignment="Right" FontSize="11"/>
+                    </DockPanel>
+                    <Slider Name="SliderMinLength" Value="{Binding SearchOptions.MinLength}" Minimum="0" Maximum="2048" TickFrequency="1" IsSnapToTickEnabled="true"/>
+                </StackPanel>
+                <StackPanel Margin="4,0,0,0">
+                    <DockPanel>
+                        <Label>MaxLength</Label>
+                        <TextBlock Text="{Binding ElementName=SliderMaxLength, Path=Value}" VerticalAlignment="Center" HorizontalAlignment="Right" FontSize="11"/>
+                    </DockPanel>
+                    <Slider Name="SliderMaxLength" Value="{Binding SearchOptions.MaxLength}" Minimum="1" Maximum="2048" TickFrequency="1" IsSnapToTickEnabled="true"/>
+                </StackPanel>
+
+                <StackPanel Margin="0,0,4,0">
+                    <DockPanel>
+                        <Label>LengthPenalty</Label>
+                        <TextBlock Text="{Binding ElementName=SliderLengthPenalty, Path=Value, StringFormat={}{0:N2}}" VerticalAlignment="Center" HorizontalAlignment="Right" FontSize="11"/>
+                    </DockPanel>
+                    <Slider Name="SliderLengthPenalty" Value="{Binding SearchOptions.LengthPenalty}" Minimum="0" Maximum="1" TickFrequency="0.01" IsSnapToTickEnabled="true"/>
+                </StackPanel>
+                <StackPanel Margin="4,0,0,0">
+                    <DockPanel>
+                        <Label>DiversityPenalty</Label>
+                        <TextBlock Text="{Binding ElementName=SliderDiversityPenalty, Path=Value, StringFormat={}{0:N2}}" VerticalAlignment="Center" HorizontalAlignment="Right" FontSize="11"/>
+                    </DockPanel>
+                    <Slider Name="SliderDiversityPenalty" Value="{Binding SearchOptions.DiversityPenalty}" Minimum="0" Maximum="1" TickFrequency="0.01" IsSnapToTickEnabled="true"/>
+                </StackPanel>
+
+            </UniformGrid>
+
+            <StackPanel >
+                <CheckBox Content="DoSample" IsChecked="{Binding SearchOptions.DoSample}" Margin="0,15,0,0"/>
+                <CheckBox Content="EarlyStopping" IsChecked="{Binding SearchOptions.EarlyStopping}" Margin="0,6,0,0"/>
+                <CheckBox Content="PastPresentShareBuffer" IsChecked="{Binding SearchOptions.PastPresentShareBuffer}" Margin="0,6,0,0"/>
+            </StackPanel>
+        </StackPanel>
+    </Grid>
+</UserControl>

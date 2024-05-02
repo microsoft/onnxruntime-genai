@@ -1,3 +1,5 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
 #include "generators.h"
 #include "json.h"
 #include <fstream>
@@ -121,6 +123,10 @@ struct Inputs_Element : JSON::Element {
       v_.position_ids = value;
     } else if (name == "attention_mask") {
       v_.attention_mask = value;
+    } else if (name == "seqlens_k") {
+      v_.seqlens_k = value;
+    } else if (name == "total_seq_len") {
+      v_.total_sequence_length = value;
     } else if (name == "past_key_names") {
       v_.past_key_names = value;
     } else if (name == "past_value_names") {
@@ -208,6 +214,29 @@ struct Decoder_Element : JSON::Element {
   Outputs_Element outputs_{v_.outputs};
 };
 
+struct Eos_Array_Element : JSON::Element {
+  explicit Eos_Array_Element(Config::Model& v) : v_{v} {}
+
+  void OnNumber(std::string_view name, double value) override {
+    v_.eos_token_ids.push_back(static_cast<int>(value));
+  }
+
+  void OnComplete(bool empty) {
+    if (v_.eos_token_ids.empty())
+      return;  // Empty array, nothign to do
+
+    // Copy the first eos_token_id into the eos_token_id value, it will be our primary eos token
+    v_.eos_token_id = v_.eos_token_ids.front();
+
+    // If the array is just one value, clear the array and just act like a single value was set
+    if (v_.eos_token_ids.size() == 1)
+      v_.eos_token_ids.clear();
+  }
+
+ private:
+  Config::Model& v_;
+};
+
 struct Model_Element : JSON::Element {
   explicit Model_Element(Config::Model& v) : v_{v} {}
 
@@ -237,6 +266,12 @@ struct Model_Element : JSON::Element {
       throw JSON::unknown_value_error{};
   }
 
+  Element& OnArray(std::string_view name) override {
+    if (name == "eos_token_id")
+      return eos_token_ids_;
+    throw JSON::unknown_value_error{};
+  }
+
   Element& OnObject(std::string_view name) override {
     if (name == "encoder_decoder_init") {
       return encoder_decoder_init_;
@@ -251,6 +286,7 @@ struct Model_Element : JSON::Element {
   Config::Model& v_;
   EncoderDecoderInit_Element encoder_decoder_init_{v_.encoder_decoder_init};
   Decoder_Element decoder_{v_.decoder};
+  Eos_Array_Element eos_token_ids_{v_};
 };
 
 struct Search_Element : JSON::Element {
@@ -285,6 +321,8 @@ struct Search_Element : JSON::Element {
       v_.diversity_penalty = static_cast<float>(value);
     } else if (name == "length_penalty") {
       v_.length_penalty = static_cast<float>(value);
+    } else if (name == "random_seed") {
+      v_.random_seed = static_cast<int>(value);
     } else
       throw JSON::unknown_value_error{};
   }
@@ -310,6 +348,19 @@ void SetSearchNumber(Config::Search& search, std::string_view name, double value
 
 void SetSearchBool(Config::Search& search, std::string_view name, bool value) {
   Search_Element(search).OnBool(name, value);
+}
+
+bool IsCudaGraphEnabled(Config::SessionOptions& session_options) {
+  for (const auto& provider_options : session_options.provider_options) {
+    if (provider_options.name == "cuda") {
+      for (const auto& value : provider_options.options) {
+        if (value.first == "enable_cuda_graph") {
+          return value.second == "1";
+        }
+      }
+    }
+  }
+  return false;
 }
 
 struct Root_Element : JSON::Element {

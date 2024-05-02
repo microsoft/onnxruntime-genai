@@ -26,10 +26,10 @@ steps:
     echo "arch=$(arch)"
     echo "ep=$(ep)"
   displayName: 'Print Parameters'
-
 - template: utils/download-ort.yml
   parameters:
     archiveType: 'tgz'
+
 - bash: |
     set -e -x
     az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
@@ -93,7 +93,7 @@ steps:
   - task: BinSkim@4
     displayName: 'Run BinSkim'
     inputs:
-      AnalyzeTargetGlob: '$(Build.Repository.LocalPath)/**/*.pyd'
+      AnalyzeTargetGlob: '$(Build.Repository.LocalPath)/build/**/*cpython*.so'
     continueOnError: true
 
   - bash: |

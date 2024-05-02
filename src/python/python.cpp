@@ -22,16 +22,35 @@ pybind11::array_t<T> ToPython(std::span<T> v) {
   return pybind11::array_t<T>(v.size(), v.data());
 }
 
-namespace Generators {
-
-std::unique_ptr<OrtEnv> g_ort_env;
-
-OrtEnv& GetOrtEnv() {
-  if (!g_ort_env) {
-    g_ort_env = OrtEnv::Create();
+ONNXTensorElementDataType ToTensorType(const pybind11::dtype& type) {
+  switch (type.num()) {
+    case pybind11::detail::npy_api::NPY_INT32_:
+      return Ort::TypeToTensorType<int32_t>::type;
+    case pybind11::detail::npy_api::NPY_UINT32_:
+      return Ort::TypeToTensorType<uint32_t>::type;
+    case 23 /*NPY_FLOAT16*/:
+      return Ort::TypeToTensorType<Ort::Float16_t>::type;
+    case pybind11::detail::npy_api::NPY_FLOAT_:
+      return Ort::TypeToTensorType<float>::type;
+    case pybind11::detail::npy_api::NPY_DOUBLE_:
+      return Ort::TypeToTensorType<double>::type;
+    default:
+      throw std::runtime_error("Unsupported numpy type");
   }
-  return *g_ort_env;
 }
+
+std::unique_ptr<OrtValue> ToTensor(pybind11::array& v) {
+  auto type = ToTensorType(v.dtype());
+
+  std::vector<int64_t> shape(v.ndim());
+  for (pybind11::ssize_t i = 0; i < v.ndim(); i++)
+    shape[i] = v.shape()[i];
+
+  auto p_memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
+  return OrtValue::CreateTensor(*p_memory_info, v.mutable_data(), v.nbytes(), shape, type);
+}
+
+namespace Generators {
 
 // A roaming array is one that can be in CPU or GPU memory, and will copy the memory as needed to be used from anywhere
 template <typename T>
@@ -94,7 +113,12 @@ struct PyGeneratorParams {
     }
   }
 
-  void SetSearchOptions(const pybind11::dict& dict) {
+  void AddExtraInput(const std::string& name, pybind11::array& value) {
+    params_->extra_inputs.push_back({name, ToTensor(value)});
+    refs_.emplace_back(value);
+  }
+
+  void SetSearchOptions(const pybind11::kwargs& dict) {
     for (auto& entry : dict) {
       auto name = entry.first.cast<std::string>();
       try {
@@ -112,9 +136,15 @@ struct PyGeneratorParams {
     }
   }
 
+  void TryUseCudaGraphWithMaxBatchSize(pybind11::int_ max_batch_size) {
+    params_->TryGraphCapture(max_batch_size.cast<int>());
+  }
+
   pybind11::array_t<int32_t> py_input_ids_;
   pybind11::array_t<float> py_whisper_input_features_;
   pybind11::array_t<int32_t> py_whisper_decoder_input_ids_;
+
+  std::vector<pybind11::object> refs_;  // References to data we want to ensure doesn't get garbage collected
 };
 
 struct PyGenerator {
@@ -137,22 +167,6 @@ struct PyGenerator {
     generator_->ComputeLogits();
   }
 
-  void GenerateNextToken_TopK_TopP(int top_k, float top_p, float temperature) {
-    generator_->GenerateNextToken_TopK_TopP(top_k, top_p, temperature);
-  }
-
-  void GenerateNextToken_TopP(float p, float temperature) {
-    generator_->GenerateNextToken_TopP(p, temperature);
-  }
-
-  void GenerateNextToken_TopK(int k, float temperature) {
-    generator_->GenerateNextToken_TopK(k, temperature);
-  }
-
-  void GenerateNextToken_Top() {
-    generator_->GenerateNextToken_Top();
-  }
-
   void GenerateNextToken() {
     generator_->GenerateNextToken();
   }
@@ -169,6 +183,22 @@ struct PyGenerator {
   PyRoamingArray<int32_t> py_sequencelengths_;
 };
 
+void SetLogOptions(const pybind11::kwargs& dict) {
+  for (auto& entry : dict) {
+    auto name = entry.first.cast<std::string>();
+    try {
+      if (pybind11::isinstance<pybind11::bool_>(entry.second)) {
+        SetLogBool(name, entry.second.cast<bool>());
+      } else if (pybind11::isinstance<pybind11::str>(entry.second)) {
+        SetLogString(name, entry.second.cast<std::string>());
+      } else
+        throw std::runtime_error("Unknown log option type, can be bool/string:" + name);
+    } catch (JSON::unknown_value_error& e) {
+      throw std::runtime_error("Unknown log option:" + name);
+    }
+  }
+}
+
 PYBIND11_MODULE(onnxruntime_genai, m) {
   m.doc() = R"pbdoc(
         Ort Generators library
@@ -180,6 +210,14 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
            :toctree: _generate
 
     )pbdoc";
+
+  // Add a cleanup call to happen before global variables are destroyed
+  static int unused{};  // The capsule needs something to reference
+  pybind11::capsule cleanup(
+      &unused, "cleanup", [](PyObject*) {
+        Generators::Shutdown();
+      });
+  m.add_object("_cleanup", cleanup);
 
   // So that python users can catch OrtExceptions specifically
   pybind11::register_exception<Ort::Exception>(m, "OrtException");
@@ -195,10 +233,9 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_readwrite("input_ids", &PyGeneratorParams::py_input_ids_)
       .def_readwrite("whisper_input_features", &PyGeneratorParams::py_whisper_input_features_)
       .def_readwrite("whisper_decoder_input_ids", &PyGeneratorParams::py_whisper_decoder_input_ids_)
-      .def("set_search_options", &PyGeneratorParams::SetSearchOptions);
-
-  // We need to init the OrtApi before we can use it
-  Ort::InitApi();
+      .def("add_extra_input", &PyGeneratorParams::AddExtraInput)
+      .def("set_search_options", &PyGeneratorParams::SetSearchOptions)  // See config.h 'struct Search' for the options
+      .def("try_use_cuda_graph_with_max_batch_size", &PyGeneratorParams::TryUseCudaGraphWithMaxBatchSize);
 
   pybind11::class_<TokenizerStream>(m, "TokenizerStream")
       .def("decode", [](TokenizerStream& t, int32_t token) { return t.Decode(token); });
@@ -235,15 +272,21 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("is_done", &PyGenerator::IsDone)
       .def("compute_logits", &PyGenerator::ComputeLogits)
       .def("generate_next_token", &PyGenerator::GenerateNextToken)
-      .def("generate_next_token_top", &PyGenerator::GenerateNextToken_Top)
-      .def("generate_next_token_top_p", &PyGenerator::GenerateNextToken_TopP)
-      .def("generate_next_token_top_k", &PyGenerator::GenerateNextToken_TopK)
-      .def("generate_next_token_top_k_top_p", &PyGenerator::GenerateNextToken_TopK_TopP)
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
       .def("get_sequence", &PyGenerator::GetSequence);
 
+  m.def("set_log_options", &SetLogOptions);
+
   m.def("is_cuda_available", []() {
-#ifdef USE_CUDA
+#if USE_CUDA
+    return true;
+#else
+        return false;
+#endif
+  });
+
+  m.def("is_dml_available", []() {
+#if USE_DML
     return true;
 #else
         return false;

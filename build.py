@@ -265,6 +265,7 @@ def _create_env(args: argparse.Namespace):
 
     return env
 
+
 def _get_csharp_properties(args: argparse.Namespace):
     # Tests folder does not have a sln file. We use the csproj file to build and test.
     # The csproj file requires the platform to be AnyCPU (not "Any CPU")
@@ -299,7 +300,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         else:
             toolset = "host=x64"
             if args.use_cuda:
-                 toolset + ",cuda=" + str(args.cuda_home)
+                toolset + ",cuda=" + str(args.cuda_home)
 
             command += ["-T", toolset]
 
@@ -384,7 +385,7 @@ if __name__ == "__main__":
     _validate_args(args)
     env = _create_env(args)
 
-    if args.update:
+    if args.update: 
         update(args, env)
 
     if args.build:

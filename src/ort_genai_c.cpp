@@ -1,45 +1,54 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-#include "ort_genai_c.h"
 #include <memory>
 #include <onnxruntime_c_api.h>
-#include <exception>
+#include <stdexcept>
 #include <cstdint>
 #include <cstddef>
+#include "span.h"
+#include "ort_genai_c.h"
 #include "generators.h"
 #include "models/model.h"
 #include "search.h"
 
 namespace Generators {
 
-std::unique_ptr<OrtEnv> g_ort_env;
-
-OrtEnv& GetOrtEnv() {
-  if (!g_ort_env) {
-    Ort::InitApi();
-    g_ort_env = OrtEnv::Create();
-  }
-  return *g_ort_env;
-}
+struct Result {
+  explicit Result(const char* what) : what_{what} {}
+  std::string what_;
+};
 
 }  // namespace Generators
 
 extern "C" {
 
 #define OGA_TRY try {
-#define OGA_CATCH                   \
-  }                                 \
-  catch (const std::exception& e) { \
-    return new OgaResult{e.what()}; \
+#define OGA_CATCH                                                                                  \
+  }                                                                                                \
+  catch (const std::exception& e) {                                                                \
+    return reinterpret_cast<OgaResult*>(std::make_unique<Generators::Result>(e.what()).release()); \
   }
 
-struct OgaResult {
-  explicit OgaResult(const char* what) : what_{what} {}
-  std::string what_;
-};
+void OGA_API_CALL OgaShutdown() {
+  Generators::Shutdown();
+}
 
-const char* OGA_API_CALL OgaResultGetError(OgaResult* result) {
-  return result->what_.c_str();
+const char* OGA_API_CALL OgaResultGetError(const OgaResult* result) {
+  return reinterpret_cast<const Generators::Result*>(result)->what_.c_str();
+}
+
+OgaResult* OGA_API_CALL OgaSetLogBool(const char* name, bool value) {
+  OGA_TRY
+  Generators::SetLogBool(name, value);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaSetLogString(const char* name, const char* value) {
+  OGA_TRY
+  Generators::SetLogString(name, value);
+  return nullptr;
+  OGA_CATCH
 }
 
 OgaResult* OGA_API_CALL OgaCreateSequences(OgaSequences** out) {
@@ -89,6 +98,14 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchNumber(OgaGeneratorParams* ge
 OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* generator_params, const char* name, bool value) {
   OGA_TRY
   Generators::SetSearchBool(reinterpret_cast<Generators::GeneratorParams*>(generator_params)->search, name, value);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGeneratorParams* generator_params, int32_t max_batch_size) {
+  OGA_TRY
+  auto* params = reinterpret_cast<Generators::GeneratorParams*>(generator_params);
+  params->TryGraphCapture(max_batch_size);
   return nullptr;
   OGA_CATCH
 }
@@ -156,40 +173,12 @@ OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator) 
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken_Top(OgaGenerator* generator) {
-  OGA_TRY
-  reinterpret_cast<Generators::Generator*>(generator)->GenerateNextToken_Top();
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken_TopK(OgaGenerator* generator, int k, float t) {
-  OGA_TRY
-  reinterpret_cast<Generators::Generator*>(generator)->GenerateNextToken_TopK(k, t);
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken_TopP(OgaGenerator* generator, float p, float t) {
-  OGA_TRY
-  reinterpret_cast<Generators::Generator*>(generator)->GenerateNextToken_TopP(p, t);
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken_TopK_TopP(OgaGenerator* generator, int k, float p, float t) {
-  OGA_TRY
-  reinterpret_cast<Generators::Generator*>(generator)->GenerateNextToken_TopK_TopP(k, p, t);
-  return nullptr;
-  OGA_CATCH
-}
-
-size_t OGA_API_CALL OgaGenerator_GetSequenceLength(const OgaGenerator* oga_generator, size_t index) {
+size_t OGA_API_CALL OgaGenerator_GetSequenceCount(const OgaGenerator* oga_generator, size_t index) {
   auto& generator = *reinterpret_cast<const Generators::Generator*>(oga_generator);
   return generator.GetSequence(static_cast<int>(index)).GetCPU().size();
 }
 
-const int32_t* OGA_API_CALL OgaGenerator_GetSequence(const OgaGenerator* oga_generator, size_t index) {
+const int32_t* OGA_API_CALL OgaGenerator_GetSequenceData(const OgaGenerator* oga_generator, size_t index) {
   auto& generator = *reinterpret_cast<const Generators::Generator*>(oga_generator);
   return generator.GetSequence(static_cast<int>(index)).GetCPU().data();
 }
@@ -259,7 +248,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGetCurrentGpuDeviceId(int* device_id) {
 }
 
 void OGA_API_CALL OgaDestroyResult(OgaResult* p) {
-  delete p;
+  delete reinterpret_cast<Generators::Result*>(p);
 }
 
 void OGA_API_CALL OgaDestroyString(const char* p) {

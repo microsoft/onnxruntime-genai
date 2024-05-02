@@ -13,13 +13,17 @@ import argparse
 from tqdm import tqdm
 
 # Use input model to generate prompt
-def generate_prompt(model, tokenizer, prompt_length) -> str:
+def generate_prompt(model, tokenizer, prompt_length, use_graph_capture) -> str:
     temperature = 1.0
     prompt = "a"
     tokens = tokenizer.encode(prompt)
     params=og.GeneratorParams(model)
-    params.set_search_options({"do_sample":True, "top_k":5, "temperature":temperature, "max_length":prompt_length, "min_length":prompt_length+1})
+    params.set_search_options(do_sample=True, top_k=5, temperature=temperature, max_length=prompt_length, min_length=prompt_length+1)
     params.input_ids = tokens
+
+    if use_graph_capture:
+        params.try_use_cuda_graph_with_max_batch_size(1)
+
     generator=og.Generator(model, params)
     while not generator.is_done():
         generator.compute_logits()
@@ -63,12 +67,15 @@ def main(args):
     tokenizer = og.Tokenizer(model)
 
     # Generate prompt
-    prompt = [generate_prompt(model, tokenizer, prompt_length)] * batch_size
+    prompt = [generate_prompt(model, tokenizer, prompt_length, args.use_graph_capture)] * batch_size
     tokens = tokenizer.encode_batch(prompt)
 
     params = og.GeneratorParams(model)
     params.input_ids = tokens
-    params.set_search_options({"do_sample":True, "top_k":args.top_k, "top_p":args.top_p, "temperature":temperature, "max_length":max_length, "min_length":max_length})
+    params.set_search_options(do_sample=True, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length)
+
+    if args.use_graph_capture:
+        params.try_use_cuda_graph_with_max_batch_size(batch_size)
 
     if args.verbose: print("Running warmup runs...")
     for _ in tqdm(range(args.warmup)):
@@ -99,7 +106,11 @@ def main(args):
         # Prepare run
         params = og.GeneratorParams(model)
         params.input_ids = tokens
-        params.set_search_options({"max_length":max_length, "min_length":max_length})
+        params.set_search_options(max_length=max_length, min_length=max_length)
+
+        if args.use_graph_capture:
+            params.try_use_cuda_graph_with_max_batch_size(batch_size)
+
         generator = og.Generator(model, params)
 
         # Measure prompt processing
@@ -199,5 +210,6 @@ if __name__ == "__main__":
     parser.add_argument('-o', '--output', type=str, default='genai_e2e', help='Output CSV file name or path (with .csv extension)')
     parser.add_argument('-v', '--verbose', action='store_true', help='Print extra information')
     parser.add_argument('-mo', '--print_model_output', action='store_true', help='Print model output')
+    parser.add_argument('-gc', '--use_graph_capture', action='store_true', help='Use the graph capture feature for CUDA or DML')
     args = parser.parse_args()
     main(args)
