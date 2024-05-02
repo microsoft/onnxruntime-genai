@@ -1,6 +1,8 @@
 ﻿// See https://aka.ms/new-console-template for more information
 using Microsoft.ML.OnnxRuntimeGenAI;
 
+OgaHandle ogaHandle = new OgaHandle();
+
 Console.WriteLine("-------------");
 Console.WriteLine("Hello, Phi-2!");
 Console.WriteLine("-------------");
