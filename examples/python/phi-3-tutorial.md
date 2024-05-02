@@ -11,7 +11,7 @@ Download either or both of the [short](https://aka.ms/phi3-mini-4k-instruct-onnx
 
 To download the Phi-3 mini models, you will need to have git-lfs installed.
 * MacOS: `brew install git-lfs`
-* linux: `apt-get install git-lfs`
+* Linux: `apt-get install git-lfs`
 
 Then run `git lfs install`
 
