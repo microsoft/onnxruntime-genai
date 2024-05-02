@@ -25,3 +25,5 @@ examples/python/hf_cache
 !test/test_models/hf-internal-testing/tiny-random-gpt2*/*.onnx
 
 .ipynb_checkpoints/
+/src/java/.gradle
+/src/java/local.properties
