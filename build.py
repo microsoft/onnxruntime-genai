@@ -61,6 +61,9 @@ def _parse_args():
     parser.add_argument("--skip_wheel", action="store_true", help="Skip building the Python wheel.")
     parser.add_argument("--skip_csharp", action="store_true", help="Skip building the C# API.")
 
+    # Default to not building the Java bindings
+    parser.add_argument("--build_java", action="store_true", help="Build Java bindings.")
+
     parser.add_argument("--parallel", action="store_true", help="Enable parallel build.")
 
     # CI's sometimes explicitly set the path to the CMake and CTest executables.
@@ -314,8 +317,9 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         str(args.build_dir),
         "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
         "-DUSE_CXX17=ON",
-        "-DUSE_CUDA=ON" if args.use_cuda else "-DUSE_CUDA=OFF",
-        "-DUSE_DML=ON" if args.use_dml else "-DUSE_DML=OFF",
+        f"-DUSE_CUDA={'ON' if args.use_cuda else 'OFF'}",
+        f"-DUSE_DML={'ON' if args.use_dml else 'OFF'}",
+        f"-DENABLE_JAVA={'ON' if args.build_java else 'OFF'}",
         f"-DBUILD_WHEEL={build_wheel}",
     ]
 
@@ -334,7 +338,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             + str((args.android_ndk_path / "build" / "cmake" / "android.toolchain.cmake").resolve(strict=True)),
             f"-DANDROID_PLATFORM=android-{args.android_api}",
             f"-DANDROID_ABI={args.android_abi}",
-            f"-DENABLE_PYTHON=OFF"
+            "-DENABLE_PYTHON=OFF"
         ]
 
     util.run(command, env=env)

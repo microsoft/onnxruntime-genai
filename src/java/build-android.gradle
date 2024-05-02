@@ -133,7 +133,7 @@ publishing {
 				name = 'onnxruntime-genai'
 				description = defaultDescription
 				// TODO: Setup https://microsoft.github.io/onnxruntime-genai/ for equivalence with ORT?
-				url = 'https://github.com/microsoft/onnxruntime-genai/'  
+				url = 'https://github.com/microsoft/onnxruntime-genai/'
 				licenses {
 					license {
 						name = 'MIT License'

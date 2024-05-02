@@ -8,6 +8,7 @@ project(Generators LANGUAGES C CXX)
 
 # All Options should be defined in cmake/options.cmake
 include(cmake/options.cmake)
+include(cmake/global_properties.cmake)
 include(cmake/external/onnxruntime_external_deps.cmake)
 
 file(READ "VERSION_INFO" ver)
@@ -34,10 +35,12 @@ endif()
 
 include(cmake/cxx_standard.cmake)
 
-set(GENERATORS_ROOT ${PROJECT_SOURCE_DIR}/src)
-set(MODELS_ROOT ${PROJECT_SOURCE_DIR}/src/models)
+set(REPO_ROOT ${CMAKE_SOURCE_DIR})
+set(SRC_ROOT ${SRC_ROOT})
+set(GENERATORS_ROOT ${SRC_ROOT})
+set(MODELS_ROOT ${SRC_ROOT}/models)
 
-set(ORT_HOME ${CMAKE_SOURCE_DIR}/ort CACHE PATH "Path to the onnxruntime root directory.")
+set(ORT_HOME ${REPO_ROOT}/ort CACHE PATH "Path to the onnxruntime root directory.")
 if (ANDROID)
   # Paths are based on the directory structure of the ORT Android AAR.
   set(ORT_HEADER_DIR ${ORT_HOME}/headers)
@@ -103,8 +106,8 @@ if(USE_DML)
     add_compile_definitions(DML_TARGET_VERSION_USE_LATEST)
 
     file(GLOB dml_srcs CONFIGURE_DEPENDS
-      "${PROJECT_SOURCE_DIR}/src/dml/*.h"
-      "${PROJECT_SOURCE_DIR}/src/dml/*.cpp"
+      "${SRC_ROOT}/dml/*.h"
+      "${SRC_ROOT}/dml/*.cpp"
     )
 
     list(APPEND generator_srcs ${dml_srcs})
@@ -192,25 +195,31 @@ if(USE_DML)
   add_dependencies(onnxruntime-genai-static RESTORE_PACKAGES)
 endif()
 
-add_subdirectory("${CMAKE_SOURCE_DIR}/src/tokenizer")
+add_subdirectory("${SRC_ROOT}/tokenizer")
 target_include_directories(onnxruntime-genai PRIVATE ${TOKENIZER_ROOT})
 target_include_directories(onnxruntime-genai-static PUBLIC ${TOKENIZER_ROOT})
 target_link_libraries(onnxruntime-genai PRIVATE tokenizer)
 target_link_libraries(onnxruntime-genai-static PUBLIC tokenizer)
 
 if(ENABLE_TESTS)
-  add_subdirectory("${CMAKE_SOURCE_DIR}/test")
   message("------------------Enabling tests------------------")
+  add_subdirectory("${REPO_ROOT}/test")
 endif()
 
 if(ENABLE_PYTHON)
-  add_subdirectory("${CMAKE_SOURCE_DIR}/src/python")
   message("------------------Enabling Python Wheel------------------")
+  add_subdirectory("${SRC_ROOT}/python")
 endif()
 
+if (ENABLE_JAVA)
+  message("------------------Enabling Java Jar------------------")
+  add_subdirectory("${SRC_ROOT}/java")
+endif()
+
+
 if(ENABLE_MODEL_BENCHMARK)
-  add_subdirectory("${CMAKE_SOURCE_DIR}/benchmark/c")
   message("------------------Enabling model benchmark------------------")
+  add_subdirectory("${REPO_ROOT}/benchmark/c")
 endif()
 
 if(NOT EXISTS "${ORT_LIB_DIR}/${ONNXRUNTIME_LIB}")

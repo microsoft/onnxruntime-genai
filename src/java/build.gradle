@@ -102,9 +102,9 @@ sourceSets.main.java {
 
 sourceSets.test {
 	// add test resource files
-	resources.srcDirs += [
-		"${rootProject.projectDir}/../java/testdata"
-	]
+	// resources.srcDirs += [
+	// 	"${rootProject.projectDir}/../java/testdata"
+	// ]
 	if (cmakeBuildDir != null) {
 		// add compiled native libs
 		resources.srcDirs += [
@@ -122,7 +122,7 @@ if (cmakeBuildDir != null) {
 	task allJar(type: Jar) {
 		manifest {
 			attributes('Automatic-Module-Name': project.group,
-					'Implementation-Title': 'onnxruntime',
+					'Implementation-Title': 'onnxruntime-genai',
 					'Implementation-Version': project.version)
 		}
 		into("META-INF/maven/$project.group/$mavenArtifactId") {
@@ -167,19 +167,12 @@ test {
 	java {
 		dependsOn spotlessJava
 	}
-	// TODO: Is this needed in our usage? 
-	if (System.getProperty("JAVA_FULL_TEST") != null) {
-		// Forces each test class to be run in a separate JVM,
-		// which is necessary for testing the environment thread pool which is ignored if full test is not set.
-		forkEvery 1
-	}
-
 	useJUnitPlatform()
 	if (cmakeBuildDir != null) {
 		workingDir cmakeBuildDir
 	}
 
-	systemProperties System.getProperties().subMap(['USE_CUDA', 'JAVA_FULL_TEST'])
+	systemProperties System.getProperties().subMap(['USE_CUDA'])
 	testLogging {
 		events "passed", "skipped", "failed"
 		showStandardStreams = true
@@ -207,7 +200,7 @@ publishing {
 				name = 'onnxruntime-genai'
 				description = defaultDescription
 				// TODO: Setup https://microsoft.github.io/onnxruntime-genai/ for equivalence with ORT?
-				url = 'https://github.com/microsoft/onnxruntime-genai/'  
+				url = 'https://github.com/microsoft/onnxruntime-genai/'
 				licenses {
 					license {
 						name = 'MIT License'
