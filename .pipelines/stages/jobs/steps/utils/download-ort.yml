@@ -23,6 +23,10 @@ steps:
       cleanDestinationFolder: false
       overwriteExistingFiles: true
     displayName: Unzip OnnxRuntime
+  - task: CopyFiles@2
+    inputs:
+      SourceFolder: '$(Build.Repository.LocalPath)/ort/runtimes/$(os)-$(arch)/native'
+      TargetFolder: '$(Build.Repository.LocalPath)/ort/lib'
 - ${{ else }}:
   - script: |
       mv $(Build.Repository.LocalPath)/$(ort_filename).nupkg $(Build.Repository.LocalPath)/$(ort_filename).zip
@@ -34,19 +38,18 @@ steps:
       cleanDestinationFolder: false
       overwriteExistingFiles: true
     displayName: Unzip OnnxRuntime
-- task: CopyFiles@2
-  inputs:
-    SourceFolder: '$(Build.Repository.LocalPath)/ort/runtimes/$(os)-$(arch)/native'
-    TargetFolder: '$(Build.Repository.LocalPath)/ort/lib'
-
-# TODO: Find out why do we need to to have libonnxruntime.so.ort_stable_version
-- script: |
-    set -e -x
-    ort_stable_version=$(echo $(ort_version) | cut -d- -f1)
-    echo $ort_stable_version
-    cp libonnxruntime.so libonnxruntime.so.$ort_stable_version
-  displayName: Copy libonnxruntime.so to libonnxruntime.so.
-  workingDirectory: '$(Build.Repository.LocalPath)/ort/lib'
+  - task: CopyFiles@2
+    inputs:
+      SourceFolder: '$(Build.Repository.LocalPath)/ort/runtimes/$(os)-$(arch)/native'
+      TargetFolder: '$(Build.Repository.LocalPath)/ort/lib'
+  # TODO: Find out why do we need to to have libonnxruntime.so.ort_stable_version
+  - script: |
+      set -e -x
+      ort_stable_version=$(echo $(ort_version) | cut -d- -f1)
+      echo $ort_stable_version
+      cp libonnxruntime.so libonnxruntime.so.$ort_stable_version
+    displayName: Copy libonnxruntime.so to libonnxruntime.so.
+    workingDirectory: '$(Build.Repository.LocalPath)/ort/lib'
 
 - task: CopyFiles@2
   inputs:
