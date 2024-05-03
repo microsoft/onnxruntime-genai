@@ -30,10 +30,10 @@ TfmStatus CreateBPETokenizer(const std::string& tokenizer_path,
   if (type.empty()) {
     if (BPETokenizer::IsSupportedModel(GetModelName(token_cfg->tokenizer_class_))) {
       type = "BPE";
-    } else if (std::filesystem::exists(tokenizer_path + "/tokenizer.model")) {
+    } /* else if (std::filesystem::exists(tokenizer_path + "/tokenizer.model")) {
       // if 'tokenizer.model exists in the tokenizer_path, then it is a sentencepiece model
       type = "SPM";
-    } else {
+    } */ else {
       status = TfmStatus(kTfmErrorInvalidArgument, "Cannot determine the tokenizer type from tokenizer_path argument");
     }
   }
@@ -43,7 +43,7 @@ TfmStatus CreateBPETokenizer(const std::string& tokenizer_path,
   } /* else if (type == "SPM") {
     token_ptr = std::make_unique<SpmTokenizer>();
   } */ else {
-    status = TfmStatus(kTfmErrorInvalidArgument, "Unknown tokenizer_type, (BPE, SPM, RKWV) are supported.");
+    status = TfmStatus(kTfmErrorInvalidArgument, "Unknown tokenizer_type, (BPE, RKWV) are supported.");
   }
 
   if (status.ok()) {
