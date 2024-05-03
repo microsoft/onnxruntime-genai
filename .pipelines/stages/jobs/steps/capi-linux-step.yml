@@ -33,12 +33,6 @@ steps:
     echo "ep=$(ep)"
   displayName: 'Print Parameters'
 
-#- template: utils/download-ort-build.yml
-#  parameters:
-#    ep: ${{ parameters.ep }}
-#    arch: ${{ parameters.arch }}
-#    os: 'linux'
-
 - template: utils/download-ort.yml
   parameters:
     archiveType: 'tgz'

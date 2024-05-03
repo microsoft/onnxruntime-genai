@@ -35,11 +35,6 @@ steps:
     echo "target=${{ parameters.target }}"
   displayName: 'Print Parameters'
 
-#- template: utils/download-ort-build.yml
-#  parameters:
-#    ep: ${{ parameters.ep }}
-#    arch: ${{ parameters.arch }}
-#    os: 'win'
 
 - template: utils/download-ort.yml
   parameters:
