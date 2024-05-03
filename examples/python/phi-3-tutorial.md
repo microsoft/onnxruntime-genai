@@ -9,6 +9,12 @@
 
 Download either or both of the [short](https://aka.ms/phi3-mini-4k-instruct-onnx) and [long](https://aka.ms/phi3-mini-128k-instruct-onnx) context Phi-3 mini models from Hugging Face.
 
+To download the Phi-3 mini models, you will need to have git-lfs installed.
+* MacOS: `brew install git-lfs`
+* Linux: `apt-get install git-lfs`
+* Windows: `winget install -e --id GitHub.GitLFS` (If you don't have winget, download and run the `exe` from the [official source](https://docs.github.com/en/repositories/working-with-files/managing-large-files/installing-git-large-file-storage?platform=windows))
+
+Then run `git lfs install`
 
 For the short context model.
 
@@ -68,15 +74,14 @@ Run the model with [phi3-qa.py](https://github.com/microsoft/onnxruntime-genai/b
 
 The script accepts a model folder and takes the generation parameters from the config in that model folder. You can also override the parameters on the command line.
 
-This example is using the long context model running with DirectML on Windows.
+<!--This example is using the long context model running with DirectML on Windows.-->
 
 The `-m` argument is the path to the model you downloaded from HuggingFace above.
 The `-l` argument is the length of output you would like to generate with the model.
 
 ```bash
 curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examples/python/phi3-qa.py -o phi3-qa.py
-model_path="./Phi-3-mini-128k-instruct-onnx/directml/directml-int4-awq-block-128"
-python phi3-qa.py -m $model_path -l 2048
+python phi3-qa.py -m *replace your relative model_path here* -l 2048
 ```
 
 Once the script has loaded the model, it will ask you for input in a loop, streaming the output as it is produced the model. For example:

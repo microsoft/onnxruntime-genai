@@ -5,8 +5,9 @@
 #include <assert.h>
 #include <cmath>
 #include <cstring>
-#include <filesystem>
+#include "filesystem.h"
 #include <functional>
+#include <iostream>
 #include "span.h"
 #include <memory>
 #include <numeric>
