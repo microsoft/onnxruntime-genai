@@ -15,7 +15,7 @@
 cache_dir
 example-models
 *.onnx
-*.onnx.
+*.onnx.date
 **/.DS_Store
 __pycache__
 benchmark/python/*.csv
