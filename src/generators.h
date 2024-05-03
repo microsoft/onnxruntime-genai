@@ -5,8 +5,10 @@
 #include <assert.h>
 #include <cmath>
 #include <cstring>
+// TODO(baijumeswani): Remove experimental when packaging pipeline can use GCC > 8
 #include <experimental/filesystem>
 #include <functional>
+#include <iostream>
 #include "span.h"
 #include <memory>
 #include <numeric>

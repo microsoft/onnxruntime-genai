@@ -16,6 +16,9 @@ message("Building onnxruntime-genai for version ${VERSION_INFO}")
 # Checking if CUDA is supported
 include(CheckLanguage)
 add_compile_definitions(BUILDING_ORT_GENAI_C)
+# TODO(baijumeswani): Move to std::filesystem and remove this add_compile_definitions
+add_compile_definitions(_SILENCE_EXPERIMENTAL_FILESYSTEM_DEPRECATION_WARNING)
+
 if(USE_CUDA)
   check_language(CUDA)
   if(CMAKE_CUDA_COMPILER)
