@@ -28,6 +28,7 @@ class BPETokenizer : public TokenizerImpl {
     BPEDeocerState() = default;
     ~BPEDeocerState() override = default;
     bool f_special_last;
+    std::string incomplete_utf8_;
   };
 
  public:

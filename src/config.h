@@ -6,9 +6,9 @@ namespace Generators {
 
 struct Config {
   Config() = default;
-  Config(const std::filesystem::path& path);
+  Config(const fs::path& path);
 
-  std::filesystem::path config_path;  // Path of the config directory
+  fs::path config_path;  // Path of the config directory
 
   using ProviderOption = std::pair<std::string, std::string>;
   struct ProviderOptions {
