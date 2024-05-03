@@ -47,5 +47,8 @@ struct Whisper_State : State {
   // Temporary hack to have different sized outputs from the encoder that we then expand into the decoder buffers
   std::vector<std::unique_ptr<OrtValue>> init_presents_; // Hacked sized encoder_decoder_init presents
   std::vector<OrtValue*> presents_;  // The original present buffers we must resize init_presents_ into after the first run
+
+  std::vector<std::string> output_cross_qk_names_;
+  std::vector<std::unique_ptr<OrtValue>> output_cross_qk_;  // { batch_size, num_heads, 1, seq_len }
 };
 }  // namespace Generators

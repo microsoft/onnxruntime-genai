@@ -63,6 +63,10 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
     case RunState::Encoder_Decoder_Init:
       State::Run(*model_.session_encoder_, *model_.run_options_);
 
+      run_state_ = RunState::Decoder_First;
+      return logits_.Get();
+
+    case RunState::Decoder_First:
       // Copy over the hacked outputs to the real outputs
       {
         auto shape_info = init_presents_[0]->GetTensorTypeAndShapeInfo();
@@ -87,10 +91,6 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
         }
       }
 
-      run_state_ = RunState::Decoder_First;
-      return logits_.Get();
-
-    case RunState::Decoder_First:
       ClearIO();
 
       decoder_input_ids_.name_ = model_.config_->model.decoder.inputs.input_ids.c_str();  // Set back to default name, since we overrode it above in the encoder step
@@ -122,6 +122,21 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
 
         auto data = std::span<int32_t>{cache_indirection_->GetTensorMutableData<int32_t>(), static_cast<size_t>(params_->batch_size) * params_->search.num_beams * params_->search.max_length};
         std::fill(data.begin(), data.end(), 0);
+      }
+
+      if (model_.session_info_->HasOutput("output_cross_qk_0")) {
+        auto layer_count = model_.config_->model.decoder.num_hidden_layers;
+        auto type = model_.session_info_->GetOutputDataType("output_cross_qk_0");
+        std::array<int64_t, 4> shape{params_->BatchBeamSize(), model_.config_->model.decoder.num_key_value_heads, 1, 1500};
+        for (int i = 0; i < layer_count; i++) {
+          char string[64];
+          snprintf(string, std::size(string), "output_cross_qk_%d", i);
+          output_cross_qk_names_.emplace_back(string);
+          output_cross_qk_.emplace_back(OrtValue::CreateTensor(*model_.allocator_device_, shape, type));
+
+          output_names_.emplace_back(output_cross_qk_names_.back().c_str());
+          outputs_.emplace_back(output_cross_qk_.back().get());
+        }
       }
 
     case RunState::Decoder:
