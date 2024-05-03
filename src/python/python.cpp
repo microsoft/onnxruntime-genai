@@ -109,7 +109,7 @@ pybind11::array ToNumpy(OrtValue* v) {
   auto type_info = v->GetTensorTypeAndShapeInfo();
   auto shape = type_info->GetShape();
   auto type = type_info->GetElementType();
-  auto element_size = Generators::SizeOfType(type);
+  auto element_size = Generators::OrtTypeSize(type);
   auto data = v->GetTensorMutableRawData();
 
 #if USE_CUDA
@@ -124,7 +124,7 @@ pybind11::array ToNumpy(OrtValue* v) {
 
   std::vector<int64_t> strides(shape.size());
   {
-    auto size = Generators::SizeOfType(type);
+    auto size = Generators::OrtTypeSize(type);
     for (size_t i = strides.size(); i-- > 0;) {
       strides[i] = size;
       size *= shape[i];

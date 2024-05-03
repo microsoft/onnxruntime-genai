@@ -17,7 +17,7 @@ struct Tokenizer;
 void ConvertFp16ToFp32(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<OrtValue>& p_out, DeviceType device_type, cudaStream_t stream);
 void ConvertFp32ToFp16(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<OrtValue>& p_out, DeviceType device_type, cudaStream_t stream);
 
-size_t GetOrtTypeSize(ONNXTensorElementDataType type);
+size_t OrtTypeSize(ONNXTensorElementDataType type);
 
 struct State {
   State(const GeneratorParams& params);

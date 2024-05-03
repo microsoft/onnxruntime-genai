@@ -43,5 +43,9 @@ struct Whisper_State : State {
   std::unique_ptr<OrtValue> past_sequence_length_;
   std::unique_ptr<OrtValue> beam_width_;
   std::unique_ptr<OrtValue> cache_indirection_;
+
+  // Temporary hack to have different sized outputs from the encoder that we then expand into the decoder buffers
+  std::vector<std::unique_ptr<OrtValue>> init_presents_; // Hacked sized encoder_decoder_init presents
+  std::vector<OrtValue*> presents_;  // The original present buffers we must resize init_presents_ into after the first run
 };
 }  // namespace Generators

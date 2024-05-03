@@ -481,34 +481,34 @@ void ConvertFp32ToFp16(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<Or
   }
 }
 
-size_t GetOrtTypeSize(ONNXTensorElementDataType type) {
+size_t OrtTypeSize(ONNXTensorElementDataType type) {
   switch (type) {
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
-      return sizeof(float);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
-      return sizeof(Ort::Float16_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16:
-      return sizeof(Ort::BFloat16_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
-      return sizeof(double);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
-      return sizeof(int8_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
+    case Ort::TypeToTensorType<uint8_t>::type:
       return sizeof(uint8_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16:
-      return sizeof(int16_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16:
+    case Ort::TypeToTensorType<int8_t>::type:
+      return sizeof(int8_t);
+    case Ort::TypeToTensorType<uint16_t>::type:
       return sizeof(uint16_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
-      return sizeof(int32_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32:
+    case Ort::TypeToTensorType<int16_t>::type:
+      return sizeof(int16_t);
+    case Ort::TypeToTensorType<uint32_t>::type:
       return sizeof(uint32_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
+    case Ort::TypeToTensorType<int32_t>::type:
+      return sizeof(int32_t);
+    case Ort::TypeToTensorType<uint64_t>::type:
       return sizeof(int64_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64:
-      return sizeof(uint64_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:
+    case Ort::TypeToTensorType<int64_t>::type:
+      return sizeof(int64_t);
+    case Ort::TypeToTensorType<bool>::type:
       return sizeof(bool);
+    case Ort::TypeToTensorType<float>::type:
+      return sizeof(float);
+    case Ort::TypeToTensorType<double>::type:
+      return sizeof(double);
+    case Ort::TypeToTensorType<Ort::Float16_t>::type:
+      return sizeof(Ort::Float16_t);
+    case Ort::TypeToTensorType<Ort::BFloat16_t>::type:
+      return sizeof(Ort::BFloat16_t);
     default:
       throw std::runtime_error("Unsupported ONNXTensorElementDataType in GetTypeSize");
   }
@@ -526,7 +526,7 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
 
   auto input_type_info = input->GetTensorTypeAndShapeInfo();
   auto element_type = input_type_info->GetElementType();
-  auto element_size = GetOrtTypeSize(element_type);
+  auto element_size = OrtTypeSize(element_type);
   auto input_shape = input_type_info->GetShape();
   const int64_t batch_size = input_shape[0];
   const int64_t data_size_bytes = input_type_info->GetElementCount() * element_size / batch_size;

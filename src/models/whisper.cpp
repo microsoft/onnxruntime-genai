@@ -1,5 +1,6 @@
 #include "../generators.h"
 #include "whisper.h"
+#include "model.h"
 
 namespace Generators {
 
@@ -39,14 +40,53 @@ Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> s
   logits_.Add();
   output_names_.push_back("encoder_hidden_states");
   outputs_.push_back(encoder_hidden_states_.get());
+
+  auto kv_cache_indices = outputs_.size();
   kv_cache_.AddEncoder();
   cross_cache_.AddOutputs();
+
+  {
+    auto layer_count=model_.config_->model.decoder.num_hidden_layers;
+    std::array<int64_t, 4> shape{params_->BatchBeamSize(), model_.config_->model.decoder.num_key_value_heads, params_->sequence_length, model_.config_->model.decoder.head_size};
+    auto type = model_.session_encoder_info_->GetOutputDataType(output_names_[kv_cache_indices]);
+
+    for (int i = 0; i < layer_count; i++) {
+      init_presents_.emplace_back(OrtValue::CreateTensor(*model_.allocator_device_, shape, type));
+      presents_.emplace_back(outputs_[kv_cache_indices + i]);
+      outputs_[kv_cache_indices + i] = init_presents_.back().get();
+    }
+  }
 }
 
 RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
   switch (run_state_) {
     case RunState::Encoder_Decoder_Init:
       State::Run(*model_.session_encoder_, *model_.run_options_);
+
+      // Copy over the hacked outputs to the real outputs
+      {
+        auto shape_info=init_presents_[0]->GetTensorTypeAndShapeInfo();
+        auto data_size=shape_info->GetElementCount()*OrtTypeSize(shape_info->GetElementType());
+
+        for (int i = 0; i < presents_.size(); i++) {
+          auto src_data=init_presents_[i]->GetTensorRawData();
+          auto dest_data = presents_[i]->GetTensorMutableRawData();
+
+          switch (model_.device_type_) {
+            case DeviceType::CUDA:
+              cudaMemcpyAsync(dest_data, src_data, data_size, cudaMemcpyDeviceToDevice, model_.cuda_stream_);
+              break;
+
+            case DeviceType::CPU:
+              memcpy(dest_data, src_data, data_size);
+              break;
+
+            default:
+              throw std::runtime_error("Unsupported Device Type in Whisper_State::Run");
+          }
+        }
+      }
+
       run_state_ = RunState::Decoder_First;
       return logits_.Get();
 

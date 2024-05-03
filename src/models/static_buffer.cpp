@@ -9,7 +9,7 @@ StaticBuffer::StaticBuffer(Ort::Allocator* allocator, size_t max_beam_batch_size
 
 std::unique_ptr<OrtValue> StaticBuffer::CreateTensorOnStaticBuffer(std::span<const int64_t> shape,
                                                                    ONNXTensorElementDataType type) {
-  size_t new_bytes = GetOrtTypeSize(type) * GetNumElements(shape);
+  size_t new_bytes = OrtTypeSize(type) * GetNumElements(shape);
   if (buffer_ == nullptr) {
     // Assuming the first dimension is the batch size
     bytes_ = new_bytes * (max_beam_batch_size_ / shape[0]);

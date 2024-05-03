@@ -1,4 +1,5 @@
 #include "../generators.h"
+#include "model.h" // For OrtTypeSize
 #include <cinttypes>
 
 namespace Generators {
@@ -18,41 +19,6 @@ const char* TypeToString(ONNXTensorElementDataType type) {
       assert(false);
       return "(please add type to list)";
   }
-}
-
-size_t SizeOfType(ONNXTensorElementDataType type) {
-  switch (type) {
-    case Ort::TypeToTensorType<uint8_t>::type:
-      return sizeof(uint8_t);
-    case Ort::TypeToTensorType<int8_t>::type:
-      return sizeof(int8_t);
-    case Ort::TypeToTensorType<uint16_t>::type:
-      return sizeof(uint16_t);
-    case Ort::TypeToTensorType<int16_t>::type:
-      return sizeof(int16_t);
-    case Ort::TypeToTensorType<uint32_t>::type:
-      return sizeof(uint32_t);
-    case Ort::TypeToTensorType<int32_t>::type:
-      return sizeof(int32_t);
-    case Ort::TypeToTensorType<uint64_t>::type:
-      return sizeof(int64_t);
-    case Ort::TypeToTensorType<int64_t>::type:
-      return sizeof(int64_t);
-    case Ort::TypeToTensorType<bool>::type:
-      return sizeof(bool);
-    case Ort::TypeToTensorType<float>::type:
-      return sizeof(float);
-    case Ort::TypeToTensorType<double>::type:
-      return sizeof(double);
-    case Ort::TypeToTensorType<Ort::Float16_t>::type:
-      return sizeof(Ort::Float16_t);
-    case Ort::TypeToTensorType<Ort::BFloat16_t>::type:
-      return sizeof(Ort::BFloat16_t);
-    default:
-      assert(false);
-      break;
-  }
-  return 0;
 }
 
 std::ostream& operator<<(std::ostream& stream, Ort::Float16_t v) {
@@ -143,7 +109,7 @@ void DumpTensor(std::ostream& stream, OrtValue* value, bool dump_value) {
       stream << "GPU\r\n";
 #if USE_CUDA
       auto type = type_info->GetElementType();
-      size_t element_size = SizeOfType(type);
+      size_t element_size = OrtTypeSize(type);
       auto cpu_copy = std::make_unique<uint8_t[]>(element_size * element_count);
       CudaCheck() == cudaMemcpy(cpu_copy.get(), value->GetTensorRawData(), element_size * element_count, cudaMemcpyDeviceToHost);
       DumpValues(stream, type, cpu_copy.get(), element_count);
