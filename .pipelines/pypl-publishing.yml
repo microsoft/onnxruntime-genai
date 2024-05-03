@@ -73,5 +73,7 @@ stages:
     enable_win_cuda: ${{ parameters.enable_win_cuda }}
     enable_win_dml: ${{ parameters.enable_win_dml }}
     ort_version: ${{ parameters.ort_version }}
+    ort_cuda_version: ${{ parameters.ort_cuda_version }}
+    ort_dml_version: ${{ parameters.ort_dml_version }}
     cuda_version: ${{ parameters.cuda_version }}
 
