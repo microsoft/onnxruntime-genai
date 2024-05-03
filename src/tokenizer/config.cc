@@ -4,7 +4,7 @@
 #include <string>
 #include <fstream>
 #include <streambuf>
-#include <filesystem>
+#include "../filesystem.h"
 
 #include "config.h"
 
@@ -68,8 +68,7 @@ TfmStatus TokenConfig::LoadJson(const std::string& json_path) {
   simdjson::dom::parser parser;
   simdjson::dom::element root;
 
-  if (!std::filesystem::exists(
-          std::filesystem::path(json_path).lexically_normal())) {
+  if (!fs::exists(fs::path(json_path))) {
     return {kTfmErrorInvalidFile, std::string(json_path) + " not found"};
   }
   std::string json_text = PatchJsonText(json_path);
