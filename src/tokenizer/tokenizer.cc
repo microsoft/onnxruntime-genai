@@ -1,7 +1,7 @@
 #include "token_bpe.h"
 #include "token_rwkv.h"
 
-#include <filesystem>
+#include "../filesystem.h"
 #include <memory>
 
 namespace tfm {
@@ -30,7 +30,7 @@ TfmStatus CreateBPETokenizer(const std::string& tokenizer_path,
   if (type.empty()) {
     if (BPETokenizer::IsSupportedModel(GetModelName(token_cfg->tokenizer_class_))) {
       type = "BPE";
-    } /* else if (std::filesystem::exists(tokenizer_path + "/tokenizer.model")) {
+    } /* else if (fs::exists(tokenizer_path + "/tokenizer.model")) {
       // if 'tokenizer.model exists in the tokenizer_path, then it is a sentencepiece model
       type = "SPM";
     } */ else {

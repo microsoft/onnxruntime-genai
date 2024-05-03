@@ -314,7 +314,7 @@ void Model::CreateSessionOptions() {
   }
 
   if (options.enable_profiling.has_value()) {
-    std::filesystem::path profile_file_prefix{options.enable_profiling.value()};
+    fs::path profile_file_prefix{options.enable_profiling.value()};
     ort_options.EnableProfiling(profile_file_prefix.c_str());
   }
 

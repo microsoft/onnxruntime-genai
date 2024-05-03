@@ -16,6 +16,7 @@ message("Building onnxruntime-genai for version ${VERSION_INFO}")
 # Checking if CUDA is supported
 include(CheckLanguage)
 add_compile_definitions(BUILDING_ORT_GENAI_C)
+
 if(USE_CUDA)
   check_language(CUDA)
   if(CMAKE_CUDA_COMPILER)
