@@ -171,7 +171,7 @@ class Model:
         if (self.ep in {"cuda", "dml"} and self.io_dtype == TensorProto.FLOAT16) or (enable_GQA_on_CPU and self.ep == "cpu" and self.io_dtype == TensorProto.FLOAT):
             # Change model settings for GroupQueryAttention
             self.attention_attrs["op_type"] = "GroupQueryAttention"
-            print("GroupQueryAttention (GQA) is used in this model. GQA is currently supported only for INT4 and FP16 on the CUDA and DML execution providers.")
+            print("GroupQueryAttention (GQA) is used in this model.")
 
             # DML doesn't support packed Q/K/V for GQA yet
             self.attention_attrs["use_packed_matmul"] = self.ep != "dml" and self.num_attn_heads == self.num_kv_heads
