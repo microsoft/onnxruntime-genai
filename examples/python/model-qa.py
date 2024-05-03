@@ -14,10 +14,15 @@ def main(args):
     tokenizer_stream = tokenizer.create_stream()
     if args.verbose: print("Tokenizer created")
     if args.verbose: print()
+
     search_options = {name:getattr(args, name) for name in ['do_sample', 'max_length', 'min_length', 'top_p', 'top_k', 'temperature', 'repetition_penalty'] if name in args}
-    if args.chat_template.count('{') != 1 or args.chat_template.count('}') != 1:
-        print("Error, chat template must have exactly one pair of curly braces, e.g. '<|user|>\n{input} <|end|>\n<|assistant|>'")
-        exit(1)
+
+    if args.verbose: print(search_options)
+    
+    if args.chat_template:
+        if args.chat_template.count('{') != 1 or args.chat_template.count('}') != 1:
+            print("Error, chat template must have exactly one pair of curly braces, e.g. '<|user|>\n{input} <|end|>\n<|assistant|>'")
+            exit(1)
 
     # Keep asking for input prompts in a loop
     while True:

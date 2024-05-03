@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 #include <cstdarg>
-#include <filesystem>
+#include "../filesystem.h"
 #include <algorithm>
 
 #include "tfmtok.h"
@@ -117,7 +117,7 @@ tfmError_t TFM_API_CALL TfmCreateTokenizer(TfmTokenizer** tokenizer,
     return kTfmErrorInvalidArgument;
   }
 
-  if (!std::filesystem::is_directory(tokenizer_path)) {
+  if (!fs::is_directory(tokenizer_path)) {
     last_error_message = std::string("Cannot find the directory of ") + tokenizer_path;
     return kTfmErrorInvalidArgument;
   }

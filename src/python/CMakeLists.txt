@@ -64,8 +64,12 @@ if(BUILD_WHEEL)
     "libcufft.so.11"
     "libcurand.so.10"
     "libnvinfer.so.8"
+    "libnvinfer.so.10"
     "libnvinfer_plugin.so.8"
+    "libnvinfer_plugin.so.10"
     "libnvonnxparser.so.8"
+    "libnvonnxparser.so.10"
+
   )
   set(modified_exclude_list)
   foreach(item IN LISTS auditwheel_exclude_list)
