@@ -11,6 +11,10 @@ parameters:
   type: boolean
 - name: ort_version
   type: string
+- name: ort_cuda_version
+  type: string
+- name: ort_dml_version
+  type: string
 - name: cuda_version
   type: string
   default: ''
@@ -32,7 +36,7 @@ stages:
       parameters:
         arch: 'x64'
         ep: 'directml'
-        ort_version: ${{ parameters.ort_version }}
+        ort_version: ${{ parameters.ort_dml_version }}
         os: 'win'
 
   - ${{ if eq(parameters.enable_win_cuda, true) }}:
@@ -41,7 +45,7 @@ stages:
         arch: 'x64'
         cuda_version: ${{ parameters.cuda_version }}
         ep: 'cuda'
-        ort_version: ${{ parameters.ort_version }}
+        ort_version: ${{ parameters.ort_cuda_version }}
         os: 'win'
 
   - ${{ if eq(parameters.enable_linux_cpu, true) }}:
@@ -58,5 +62,5 @@ stages:
         arch: 'x64'
         cuda_version: ${{ parameters.cuda_version }}
         ep: 'cuda'
-        ort_version: ${{ parameters.ort_version }}
+        ort_version: ${{ parameters.ort_cuda_version }}
         os: 'linux'
