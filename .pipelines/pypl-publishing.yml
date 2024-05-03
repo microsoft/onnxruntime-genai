@@ -54,15 +54,7 @@ resources:
     endpoint: Microsoft
     name: pypa/manylinux
     ref: 5eda9aded5462201e6310105728d33016e637ea7
-  pipelines:
-  - pipeline: ort_package
-    project: 'Lotus'
-    source: 'Zip-Nuget-Java-Nodejs Packaging Pipeline'
-    trigger:
-      branches:
-        include:
-        - main
-    branch: main
+
 trigger: none
 stages:
 - template: stages/py-packaging-stage.yml
