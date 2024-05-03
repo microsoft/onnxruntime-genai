@@ -46,11 +46,11 @@ Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> s
   cross_cache_.AddOutputs();
 
   {
-    auto layer_count=model_.config_->model.decoder.num_hidden_layers;
+    auto layer_count = model_.config_->model.decoder.num_hidden_layers;
     std::array<int64_t, 4> shape{params_->BatchBeamSize(), model_.config_->model.decoder.num_key_value_heads, params_->sequence_length, model_.config_->model.decoder.head_size};
     auto type = model_.session_encoder_info_->GetOutputDataType(output_names_[kv_cache_indices]);
 
-    for (int i = 0; i < layer_count; i++) {
+    for (int i = 0; i < layer_count * 2; i++) {
       init_presents_.emplace_back(OrtValue::CreateTensor(*model_.allocator_device_, shape, type));
       presents_.emplace_back(outputs_[kv_cache_indices + i]);
       outputs_[kv_cache_indices + i] = init_presents_.back().get();
@@ -65,11 +65,11 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
 
       // Copy over the hacked outputs to the real outputs
       {
-        auto shape_info=init_presents_[0]->GetTensorTypeAndShapeInfo();
-        auto data_size=shape_info->GetElementCount()*OrtTypeSize(shape_info->GetElementType());
+        auto shape_info = init_presents_[0]->GetTensorTypeAndShapeInfo();
+        auto data_size = shape_info->GetElementCount() * OrtTypeSize(shape_info->GetElementType());
 
         for (int i = 0; i < presents_.size(); i++) {
-          auto src_data=init_presents_[i]->GetTensorRawData();
+          auto src_data = init_presents_[i]->GetTensorRawData();
           auto dest_data = presents_[i]->GetTensorMutableRawData();
 
           switch (model_.device_type_) {
