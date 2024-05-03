@@ -53,7 +53,7 @@ steps:
       --container-registry onnxruntimebuildcache \
       --manylinux-src manylinux \
       --multiple_repos \
-      --repository onnxruntime$(ep)build$(arch)
+      --repository ortgenai$(ep)build$(arch)
   displayName: 'Get Docker Image'
   workingDirectory: '$(Build.Repository.LocalPath)'
 
@@ -63,7 +63,7 @@ steps:
       docker run \
       --rm \
       --volume $(Build.Repository.LocalPath):/ort_genai_src \
-      -w /ort_genai_src/ onnxruntime$(ep)build$(arch) \
+      -w /ort_genai_src/ ortgenai$(ep)build$(arch) \
       bash -c " \
           /usr/bin/cmake --preset linux_gcc_$(ep)_release \
             -DENABLE_TESTS=OFF && \
@@ -85,7 +85,7 @@ steps:
       docker run \
       --rm \
       --volume $(Build.Repository.LocalPath):/ort_genai_src \
-      -w /ort_genai_src/ onnxruntime$(ep)build$(arch) \
+      -w /ort_genai_src/ ortgenai$(ep)build$(arch) \
       bash -c " \
           /usr/bin/cmake --build --preset linux_gcc_$(ep)_release --target package"
     displayName: 'Package C/C++ API'
@@ -103,7 +103,7 @@ steps:
       docker run \
       --rm \
       --volume $(Build.Repository.LocalPath):/ort_genai_src \
-      -w /ort_genai_src/ onnxruntime$(ep)build$(arch) \
+      -w /ort_genai_src/ ortgenai$(ep)build$(arch) \
       bash -c " \
           /usr/bin/cmake --preset linux_gcc_$(ep)_release \
             -DENABLE_TESTS=OFF \
@@ -125,7 +125,7 @@ steps:
       docker run \
       --rm \
       --volume $(Build.Repository.LocalPath):/ort_genai_src \
-      -w /ort_genai_src/ onnxruntime$(ep)build$(arch) \
+      -w /ort_genai_src/ ortgenai$(ep)build$(arch) \
       bash -c " \
           /usr/bin/cmake --build --preset linux_gcc_$(ep)_release \
             -DENABLE_TESTS=OFF \
