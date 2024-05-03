@@ -37,11 +37,11 @@ This tutorial downloads and runs the short context model. If you would like to u
 
 Are you on a Windows machine with GPU?
 * I don't know &rarr; Review [this guide](https://www.microsoft.com/en-us/windows/learning-center/how-to-check-gpu) to see whether you have a GPU in your Windows machine.
-* Yes &rarr; Follow the instructions for [DirectML](#directml).
+* Yes &rarr; Follow the instructions for [DirectML](#run-with-directml).
 * No &rarr; Do you have an NVIDIA GPU?
   * I don't know &rarr; Review [this guide](https://docs.nvidia.com/cuda/cuda-installation-guide-microsoft-windows/index.html#verify-you-have-a-cuda-capable-gpu) to see whether you have a CUDA-capable GPU.
-  * Yes &rarr; Follow the instructions for [NVIDIA CUDA GPU](#nvidia-cuda-gpu).
-  * No &rarr; Follow the instructions for [CPU](#cpu).
+  * Yes &rarr; Follow the instructions for [NVIDIA CUDA GPU](#run-with-nvidia-cuda).
+  * No &rarr; Follow the instructions for [CPU](#run-on-cpu).
  
 **Note: Only one package and model is required based on your hardware. That is, only execute the steps for one of the following sections**
 
@@ -87,7 +87,7 @@ Are you on a Windows machine with GPU?
 1. Download the model
 
    ```bash
-   huggingface-cli download microsoft/Phi-3-mini-4k-instruct-onnx --include cuda/cuda-int4-rtn-block-32 --local-dir .
+   huggingface-cli download microsoft/Phi-3-mini-4k-instruct-onnx --include cuda/cuda-int4-rtn-block-32/* --local-dir .
    ```
 
    This command downloads the model into a folder called `cuda`.
@@ -121,7 +121,7 @@ Are you on a Windows machine with GPU?
 1. Download the model
 
    ```bash
-   huggingface-cli download microsoft/Phi-3-mini-4k-instruct-onnx --include cpu_and_mobile/* --local-dir .
+   huggingface-cli download microsoft/Phi-3-mini-4k-instruct-onnx --include cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/* --local-dir .
    ```
 
 2. Install the generate() API for CPU
