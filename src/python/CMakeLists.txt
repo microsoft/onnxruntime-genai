@@ -65,6 +65,7 @@ if(BUILD_WHEEL)
     "libcurand.so.10"
     "libnvinfer.so.8"
     "libnvinfer_plugin.so.8"
+    "libnvinfer_plugin.so.10"
     "libnvonnxparser.so.8"
   )
   set(modified_exclude_list)
