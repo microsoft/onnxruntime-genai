@@ -2,11 +2,12 @@ parameters:
 - name: target
   type: string
   default: 'onnxruntime-genai'
-- name: use_build_in_ort
-  type: boolean
 - name: ep
   type: string
   default: 'cpu'
+- name: arch
+  type: string
+  default: 'x64'
 steps:
 - bash: |
     echo "##[error]Error: ep and arch are not set"
@@ -33,23 +34,11 @@ steps:
     echo "cuda_version=$(cuda_version)"
     echo "target=${{ parameters.target }}"
   displayName: 'Print Parameters'
-- ${{ if eq(parameters.use_build_in_ort, false) }}:
-  - template: utils/download-ort.yml
-    parameters:
-      archiveType: 'zip'
-      ep: ${{ parameters.ep }}
-- ${{ else }}:
-    - bash: |
-        azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/tmp/ort/$(os)/$(ep)" '$(Build.Repository.LocalPath)/tmp_ort'
-      displayName: 'Download ONNXRuntime'
-    - task: CopyFiles@2
-      inputs:
-        SourceFolder: '$(Build.Repository.LocalPath)/tmp_ort/**/lib'
-        TargetFolder: '$(Build.Repository.LocalPath)/ort/lib'
-    - task: CopyFiles@2
-      inputs:
-        SourceFolder: '$(Build.Repository.LocalPath)/tmp_ort/**/include'
-        TargetFolder: '$(Build.Repository.LocalPath)/ort/include'
+
+- template: utils/download-ort.yml
+  parameters:
+    archiveType: 'zip'
+    ep: ${{ parameters.ep }}
 
 - ${{ if eq(parameters.ep, 'directml') }}:
   - powershell: |
@@ -98,15 +87,16 @@ steps:
       AnalyzeTargetGlob: '$(Build.Repository.LocalPath)\**\*genai.dll'
     continueOnError: true
 
-  - template: utils/capi-archive.yml
-    parameters:
-      archiveType: zip
+  - powershell: |
+      cmake --build --preset windows_$(arch)_$(ep)_release --target package
+    displayName: 'Package C/C++ API'
+    workingDirectory: '$(Build.Repository.LocalPath)'
 
   - task: PublishBuildArtifacts@1
     displayName: 'Publish Artifact: ONNXRuntime Genai capi'
     inputs:
       ArtifactName: $(artifactName)-capi
-      PathtoPublish: '$(Build.ArtifactStagingDirectory)/capi'
+      PathtoPublish: '$(Build.Repository.LocalPath)\build\$(ep)\package'
 
 - ${{ if eq(parameters.target, 'python') }}:
   - task: BinSkim@4

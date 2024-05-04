@@ -20,7 +20,7 @@ steps:
     inputs:
       SourceFolder: '$(Build.Repository.LocalPath)/$(buildDir)'
       Contents: |
-        onnxruntime-genai.so
+        libonnxruntime-genai.so
       TargetFolder: '$(Build.ArtifactStagingDirectory)\$(artifactName)\lib'
 - ${{ else }}:
   - task: CopyFiles@2

@@ -246,5 +246,7 @@ foreach(DLL_FILE ${onnxruntime_libs})
   )
 endforeach()
 
+include(cmake/package.cmake)
+
 # Have visual studio put all files into one single folder vs the default split of header files into a separate folder
 source_group(TREE ${GENERATORS_ROOT} FILES ${generator_srcs})

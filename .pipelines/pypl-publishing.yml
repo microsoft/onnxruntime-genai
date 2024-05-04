@@ -7,7 +7,7 @@ parameters:
 - name: enable_win_cuda
   displayName: 'Whether Windows CUDA package is built.'
   type: boolean
-  default : true
+  default: true
 
 - name: enable_win_dml
   displayName: 'Whether Windows DirectML package is built.'
@@ -27,12 +27,17 @@ parameters:
 - name: ort_version
   displayName: 'OnnxRuntime version'
   type: string
-  default: '1.17.3'
+  default: '1.18.0-dev-20240426-1256-b842effa29'
+
+- name: ort_cuda_version
+  displayName: 'OnnxRuntime GPU version'
+  type: string
+  default: '1.18.0-dev-20240426-0614-b842effa29'
 
 - name: ort_dml_version
-  displayName: 'OnnxRuntime DirectML version'
+  displayName: 'OnnxRuntime DML version'
   type: string
-  default: '1.18.0-dev-20240423-0527-c07b8d545d'
+  default: '1.18.0-dev-20240426-0116-b842effa29'
 
 - name: cuda_version
   displayName: 'CUDA version'
@@ -41,16 +46,6 @@ parameters:
   values:
   - '11.8'
   - '12.2'
-
-- name: use_build_in_ort
-  displayName: 'Whether to use the built-in OnnxRuntime package.'
-  type: boolean
-  default: false
-
-- name: publish_to_ado_feed
-  displayName: 'Whether to publish the packages to ADO feed.'
-  type: boolean
-  default: false
 
 resources:
   repositories:
@@ -70,7 +65,7 @@ stages:
     enable_win_cuda: ${{ parameters.enable_win_cuda }}
     enable_win_dml: ${{ parameters.enable_win_dml }}
     ort_version: ${{ parameters.ort_version }}
+    ort_cuda_version: ${{ parameters.ort_cuda_version }}
     ort_dml_version: ${{ parameters.ort_dml_version }}
     cuda_version: ${{ parameters.cuda_version }}
-    publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
-    use_build_in_ort: ${{ parameters.use_build_in_ort }}
+

@@ -52,7 +52,7 @@ jobs:
         continue-on-error: true
 
 # TODO: Find out why do we need to to have libonnxruntime.so.$ort_version
-      - name: Extra OnnxRuntime library and header files
+      - name: Extract OnnxRuntime library and header files
         run: |
           mkdir -p ort/lib
           mv ${{ env.ORT_PACKAGE_NAME }}/build/native/include ort/
