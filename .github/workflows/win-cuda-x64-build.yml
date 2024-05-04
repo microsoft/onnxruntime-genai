@@ -60,7 +60,7 @@ jobs:
     - run: Get-ChildItem  ${{ env.ORT_PACKAGE_NAME }} -Recurse
       continue-on-error: true
 
-    - name: Extra OnnxRuntime library and header files
+    - name: Extract OnnxRuntime library and header files
       run: |
         mkdir ort/lib
         move ${{ env.ORT_PACKAGE_NAME }}/buildTransitive/native/include ort/

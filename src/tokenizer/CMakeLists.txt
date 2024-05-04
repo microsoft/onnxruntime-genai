@@ -8,11 +8,10 @@ file(GLOB tokenizer_srcs CONFIGURE_DEPENDS
 )
 
 FetchContent_Declare(GSL URL https://github.com/microsoft/GSL/archive/refs/tags/v4.0.0.zip)
-FetchContent_MakeAvailable(GSL)
+onnxruntime_fetchcontent_makeavailable(GSL)
 
 FetchContent_Declare(simdjson URL https://github.com/simdjson/simdjson/archive/refs/tags/v3.6.3.zip URL_HASH SHA1=2b063a2e81f74a5d1cb937fadf3d2fca0f1edb09)
-FetchContent_MakeAvailable(simdjson)
-
+onnxruntime_fetchcontent_makeavailable(simdjson)
 add_library(tokenizer STATIC ${tokenizer_srcs})
 
 message(STATUS "GSL_SOURCE_DIR: ${GSL_SOURCE_DIR}")
