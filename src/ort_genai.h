@@ -75,7 +75,7 @@ struct OgaModel : OgaAbstract {
     return std::unique_ptr<OgaModel>(p);
   }
 
-  std::unique_ptr<OgaSequences> Generate(const OgaGeneratorParams& params) {
+  std::unique_ptr<OgaSequences> Generate(const OgaGeneratorParams& params) const {
     OgaSequences* p;
     OgaCheckResult(OgaGenerate(this, &params, &p));
     return std::unique_ptr<OgaSequences>(p);
@@ -201,7 +201,7 @@ struct OgaGeneratorParams : OgaAbstract {
 };
 
 struct OgaGenerator : OgaAbstract {
-  static std::unique_ptr<OgaGenerator> Create(OgaModel& model, const OgaGeneratorParams& params) {
+  static std::unique_ptr<OgaGenerator> Create(const OgaModel& model, const OgaGeneratorParams& params) {
     OgaGenerator* p;
     OgaCheckResult(OgaCreateGenerator(&model, &params, &p));
     return std::unique_ptr<OgaGenerator>(p);
@@ -234,4 +234,11 @@ struct OgaGenerator : OgaAbstract {
 #endif
 
   static void operator delete(void* p) { OgaDestroyGenerator(reinterpret_cast<OgaGenerator*>(p)); }
+};
+
+struct OgaHandle {
+  OgaHandle() = default;
+  ~OgaHandle() noexcept {
+    OgaShutdown();
+  }
 };

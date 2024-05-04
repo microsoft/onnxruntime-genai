@@ -9,7 +9,8 @@ void CXX_API(const char* model_path) {
   auto tokenizer = OgaTokenizer::Create(*model);
 
   const char* prompt = "def is_prime(num):";
-  std::cout << "Prompt: " << std::endl << prompt << std::endl;
+  std::cout << "Prompt: " << std::endl
+            << prompt << std::endl;
 
   auto sequences = OgaSequences::Create();
   tokenizer->Encode(prompt, *sequences);
@@ -21,14 +22,15 @@ void CXX_API(const char* model_path) {
   auto output_sequences = model->Generate(*params);
   auto out_string = tokenizer->Decode(output_sequences->Get(0));
 
-  std::cout << "Output: " << std::endl << out_string << std::endl;
+  std::cout << "Output: " << std::endl
+            << out_string << std::endl;
 }
 
 // C API Example
 
 void CheckResult(OgaResult* result) {
   if (result) {
-    std::string string=OgaResultGetError(result);
+    std::string string = OgaResultGetError(result);
     OgaDestroyResult(result);
     throw std::runtime_error(string);
   }
@@ -84,6 +86,8 @@ int main(int argc, char** argv) {
     return -1;
   }
 
+  // Responsible for cleaning up the library during shutdown
+  OgaHandle handle;
 
   std::cout << "-------------" << std::endl;
   std::cout << "Hello, Phi-2!" << std::endl;

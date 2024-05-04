@@ -119,8 +119,6 @@ struct Model : std::enable_shared_from_this<Model> {
 
   std::unique_ptr<OrtValue> ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams) const;
 
-  void GetMaxBatchSizeFromGeneratorParams(const GeneratorParams& params);
-
   CapturedGraphPool* GetCapturedGraphPool() const { return captured_graph_pool_.get(); }
 
   std::unique_ptr<Config> config_;
@@ -135,9 +133,6 @@ struct Model : std::enable_shared_from_this<Model> {
   std::unique_ptr<SessionInfo> session_info_;
 
   std::shared_ptr<Model> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
-
-  bool use_cuda_graph_{};
-  int max_batch_size_{};
 
 #if USE_DML
   DmlExecutionContext* GetDmlExecutionContext() const { return dml_execution_context_.get(); }

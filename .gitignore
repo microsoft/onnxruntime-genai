@@ -15,7 +15,8 @@
 cache_dir
 example-models
 *.onnx
-*.onnx.data
+*.onnx.date
+**/.DS_Store
 __pycache__
 benchmark/python/*.csv
 examples/python/genai_models

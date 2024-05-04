@@ -11,15 +11,14 @@ parameters:
   type: boolean
 - name: ort_version
   type: string
+- name: ort_cuda_version
+  type: string
 - name: ort_dml_version
   type: string
 - name: cuda_version
   type: string
   default: ''
-- name: use_build_in_ort
-  type: boolean
-- name: publish_to_ado_feed
-  type: boolean
+
 
 stages:
 - stage: python_packaging
@@ -31,8 +30,7 @@ stages:
         ep: 'cpu'
         ort_version: ${{ parameters.ort_version }}
         os: 'win'
-        publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
-        use_build_in_ort: ${{ parameters.use_build_in_ort }}
+
   - ${{ if eq(parameters.enable_win_dml, true) }}:
     - template: jobs/py-packaging-job.yml
       parameters:
@@ -40,18 +38,16 @@ stages:
         ep: 'directml'
         ort_version: ${{ parameters.ort_dml_version }}
         os: 'win'
-        publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
-        use_build_in_ort: ${{ parameters.use_build_in_ort }}
+
   - ${{ if eq(parameters.enable_win_cuda, true) }}:
     - template: jobs/py-packaging-job.yml
       parameters:
         arch: 'x64'
         cuda_version: ${{ parameters.cuda_version }}
         ep: 'cuda'
-        ort_version: ${{ parameters.ort_version }}
+        ort_version: ${{ parameters.ort_cuda_version }}
         os: 'win'
-        publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
-        use_build_in_ort: ${{ parameters.use_build_in_ort }}
+
 
   - ${{ if eq(parameters.enable_linux_cpu, true) }}:
     - template: jobs/py-packaging-job.yml
@@ -60,15 +56,17 @@ stages:
         ep: 'cpu'
         ort_version: ${{ parameters.ort_version }}
         os: 'linux'
-        publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
-        use_build_in_ort: ${{ parameters.use_build_in_ort }}
+
   - ${{ if eq(parameters.enable_linux_cuda, true) }}:
     - template: jobs/py-packaging-job.yml
       parameters:
         arch: 'x64'
         cuda_version: ${{ parameters.cuda_version }}
         ep: 'cuda'
-        ort_version: ${{ parameters.ort_version }}
+        ort_version: ${{ parameters.ort_cuda_version }}
         os: 'linux'
-        publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
-        use_build_in_ort: ${{ parameters.use_build_in_ort }}
+
+
+
+
+

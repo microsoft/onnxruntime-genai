@@ -24,15 +24,6 @@ pybind11::array_t<T> ToPython(std::span<T> v) {
 
 namespace Generators {
 
-std::unique_ptr<OrtEnv> g_ort_env;
-
-OrtEnv& GetOrtEnv() {
-  if (!g_ort_env) {
-    g_ort_env = OrtEnv::Create();
-  }
-  return *g_ort_env;
-}
-
 // A roaming array is one that can be in CPU or GPU memory, and will copy the memory as needed to be used from anywhere
 template <typename T>
 struct PyRoamingArray : RoamingArray<T> {
@@ -113,7 +104,7 @@ struct PyGeneratorParams {
   }
 
   void TryUseCudaGraphWithMaxBatchSize(pybind11::int_ max_batch_size) {
-    params_->max_batch_size = max_batch_size.cast<int>();
+    params_->TryGraphCapture(max_batch_size.cast<int>());
   }
 
   pybind11::array_t<int32_t> py_input_ids_;
@@ -124,7 +115,6 @@ struct PyGeneratorParams {
 struct PyGenerator {
   PyGenerator(Model& model, PyGeneratorParams& params) {
     params.Prepare();
-    model.GetMaxBatchSizeFromGeneratorParams(params);
     generator_ = CreateGenerator(model, params);
   }
 
@@ -186,6 +176,14 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
     )pbdoc";
 
+  // Add a cleanup call to happen before global variables are destroyed
+  static int unused{};  // The capsule needs something to reference
+  pybind11::capsule cleanup(
+      &unused, "cleanup", [](PyObject*) {
+        Generators::Shutdown();
+      });
+  m.add_object("_cleanup", cleanup);
+
   // So that python users can catch OrtExceptions specifically
   pybind11::register_exception<Ort::Exception>(m, "OrtException");
 
@@ -202,9 +200,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_readwrite("whisper_decoder_input_ids", &PyGeneratorParams::py_whisper_decoder_input_ids_)
       .def("set_search_options", &PyGeneratorParams::SetSearchOptions)  // See config.h 'struct Search' for the options
       .def("try_use_cuda_graph_with_max_batch_size", &PyGeneratorParams::TryUseCudaGraphWithMaxBatchSize);
-
-  // We need to init the OrtApi before we can use it
-  Ort::InitApi();
 
   pybind11::class_<TokenizerStream>(m, "TokenizerStream")
       .def("decode", [](TokenizerStream& t, int32_t token) { return t.Decode(token); });
@@ -233,7 +228,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def(pybind11::init([](const std::string& config_path) {
         return CreateModel(GetOrtEnv(), config_path.c_str());
       }))
-      .def("generate", [](Model& model, PyGeneratorParams& params) { params.Prepare(); model.GetMaxBatchSizeFromGeneratorParams(params); return Generate(model, params); })
+      .def("generate", [](Model& model, PyGeneratorParams& params) { params.Prepare(); return Generate(model, params); })
       .def_property_readonly("device_type", [](const Model& s) { return s.device_type_; });
 
   pybind11::class_<PyGenerator>(m, "Generator")

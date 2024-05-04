@@ -40,6 +40,10 @@ typedef struct OgaSequences OgaSequences;
 typedef struct OgaTokenizer OgaTokenizer;
 typedef struct OgaTokenizerStream OgaTokenizerStream;
 
+/* \brief Call this on process exit to cleanly shutdown the genai library & its onnxruntime usage
+ */
+OGA_EXPORT void OGA_API_CALL OgaShutdown();
+
 /*
  * \param[in] result OgaResult that contains the error message.
  * \return Error message contained in the OgaResult. The const char* is owned by the OgaResult
@@ -111,7 +115,7 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyModel(OgaModel* model);
  *             after it is done using the sequences.
  * \return OgaResult containing the error message if the generation failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerate(OgaModel* model, const OgaGeneratorParams* generator_params, OgaSequences** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerate(const OgaModel* model, const OgaGeneratorParams* generator_params, OgaSequences** out);
 
 /*
  * \brief Creates a OgaGeneratorParams from the given model.
@@ -161,7 +165,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperDecoderInputIDs(O
  * \param[out] out The created generator.
  * \return OgaResult containing the error message if the generator creation failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateGenerator(OgaModel* model, const OgaGeneratorParams* params, OgaGenerator** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateGenerator(const OgaModel* model, const OgaGeneratorParams* params, OgaGenerator** out);
 
 /*
  * \brief Destroys the given generator.

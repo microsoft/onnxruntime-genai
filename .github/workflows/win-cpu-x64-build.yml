@@ -11,10 +11,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 env:
-  ort_dir: "onnxruntime-win-x64-1.17.3"
-  ort_zip: "$(ort_dir).zip"
-  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/$(ort_zip)"
   binaryDir: 'build/cpu'
+  ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
+  ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
 
 jobs:
   windows-cpu-x64-build:
@@ -33,19 +32,32 @@ jobs:
       with:
         vs-version: '17.5'
 
-    - name: Download OnnxRuntime
-      run: |
-        $env:ort_url = "https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/onnxruntime-win-x64-1.17.3.zip"
-        Invoke-WebRequest -Uri $env:ort_url -OutFile $env:ort_zip
+    - uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '6.0.x'
 
-    - name: Unzip OnnxRuntime
+    - name : Install jq and nuget
       run: |
-        Expand-Archive $env:ort_zip -DestinationPath .
-        Remove-Item -Path $env:ort_zip
+        choco install -y jq curl
 
-    - name: Rename OnnxRuntime to ort
+    - name: Get the Latest OnnxRuntime Nightly Version
+      shell: pwsh
       run: |
-        Rename-Item -Path $env:ort_dir -NewName ort
+        $ORT_NIGHTLY_VERSION = $(curl -s "${{ env.ORT_NIGHTLY_REST_API }}" | jq -r '.value[0].versions[0].normalizedVersion')
+        echo "$ORT_NIGHTLY_VERSION" 
+        "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
+    - name: Download OnnxRuntime Nightly
+      run: |
+        nuget install ${{ env.ORT_PACKAGE_NAME }} -version ${{ env.ORT_NIGHTLY_VERSION }} -x -NonInteractive
+
+    - run: Get-ChildItem  ${{ env.ORT_PACKAGE_NAME }} -Recurse
+      continue-on-error: true
+
+    - name: Extract OnnxRuntime library and header files
+      run: |
+        mkdir ort/lib
+        move ${{ env.ORT_PACKAGE_NAME }}/build/native/include ort/
+        move ${{ env.ORT_PACKAGE_NAME }}/runtimes/win-x64/native/* ort/lib/
 
     - name: Initialize CodeQL
       uses: github/codeql-action/init@v3
@@ -59,6 +71,11 @@ jobs:
     - name: Build with CMake
       run: |
         cmake --build --preset windows_x64_cpu_release --parallel
+
+    - name: Build the C# API and Run the C# Tests
+      run: |
+        cd test\csharp
+        dotnet test /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release"
 
     - name: Install the python wheel and test dependencies
       run: |
@@ -76,10 +93,7 @@ jobs:
       run: |
         python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\test_models"
 
-    - name: Build the C# API and Run the C# Tests
-      run: |
-        cd test\csharp
-        dotnet test /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release"
+
 
     - name: Verify Build Artifacts
       if: always()

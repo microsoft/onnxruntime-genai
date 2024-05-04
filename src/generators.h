@@ -5,8 +5,9 @@
 #include <assert.h>
 #include <cmath>
 #include <cstring>
-#include <filesystem>
+#include "filesystem.h"
 #include <functional>
+#include <iostream>
 #include "span.h"
 #include <memory>
 #include <numeric>
@@ -61,6 +62,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams> {
 
   int batch_size{1};
   int max_batch_size{0};
+  bool use_cuda_graph{};
   int sequence_length{};
   int BatchBeamSize() const { return search.num_beams * batch_size; }
 
@@ -97,6 +99,11 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams> {
   std::vector<int32_t> input_ids_owner;  // Backing memory of input_ids in some cases
 
   std::shared_ptr<GeneratorParams> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
+
+  void TryGraphCapture(int max_bs);
+
+ private:
+  bool is_cuda_graph_enabled_{};
 };
 
 struct Generator {
@@ -113,6 +120,23 @@ struct Generator {
   std::unique_ptr<Search> search_;
   bool computed_logits_{};  // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
 };
+
+struct OrtGlobals {
+  OrtGlobals();
+
+  std::unique_ptr<OrtEnv> env_;
+#if USE_CUDA
+  std::unique_ptr<OrtMemoryInfo> memory_info_cuda_;
+  std::unique_ptr<Ort::Allocator> allocator_cuda_;
+#endif
+ private:
+  OrtGlobals(const OrtGlobals&) = delete;
+  void operator=(const OrtGlobals&) = delete;
+};
+
+std::unique_ptr<OrtGlobals>& GetOrtGlobals();
+void Shutdown();  // Do this once at exit, Ort code will fail after this call
+OrtEnv& GetOrtEnv();
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path);
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Model& model);

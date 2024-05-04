@@ -187,14 +187,12 @@ std::vector<std::string> Tokenizer::DecodeBatch(std::span<const int32_t> sequenc
 // has been destroyed. Without this, we will crash in the Onnxruntime BFCArena code when deleting tensors due to the
 // arena already being destroyed.
 Ort::Allocator* GetCudaAllocator(OrtSession& session) {
-  static std::unique_ptr<OrtMemoryInfo> memory_info_cuda_;
-  static std::unique_ptr<Ort::Allocator> allocator_cuda_;
-
-  if (!allocator_cuda_) {
-    memory_info_cuda_ = OrtMemoryInfo::Create("Cuda", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-    allocator_cuda_ = Ort::Allocator::Create(session, *memory_info_cuda_);
+  auto& globals = *GetOrtGlobals();
+  if (!globals.allocator_cuda_) {
+    globals.memory_info_cuda_ = OrtMemoryInfo::Create("Cuda", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+    globals.allocator_cuda_ = Ort::Allocator::Create(session, *globals.memory_info_cuda_);
   }
-  return allocator_cuda_.get();
+  return globals.allocator_cuda_.get();
 }
 #endif
 
@@ -316,7 +314,7 @@ void Model::CreateSessionOptions() {
   }
 
   if (options.enable_profiling.has_value()) {
-    std::filesystem::path profile_file_prefix{options.enable_profiling.value()};
+    fs::path profile_file_prefix{options.enable_profiling.value()};
     ort_options.EnableProfiling(profile_file_prefix.c_str());
   }
 
@@ -537,28 +535,6 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
       throw std::runtime_error("ExpandInputs - Unsupported device type");
   }
   return expanded;
-}
-
-void Model::GetMaxBatchSizeFromGeneratorParams(const GeneratorParams& params) {
-  bool is_cuda_graph_enabled = device_type_ == DeviceType::DML || IsCudaGraphEnabled(config_->model.decoder.session_options);
-  max_batch_size_ = params.max_batch_size;
-
-  if (DeviceType::CUDA == device_type_) {
-    if (is_cuda_graph_enabled) {
-      if (max_batch_size_ == 0) {
-        throw std::runtime_error("CUDA graph is enabled, but max_batch_size is not set.");
-      }
-      use_cuda_graph_ = true;
-    }
-  } else if (DeviceType::DML == device_type_) {
-    if (max_batch_size_ == 0) {
-      throw std::runtime_error("max_batch_size needs to be set when using DirectML.");
-    }
-
-    use_cuda_graph_ = true;
-  } else if (is_cuda_graph_enabled) {
-    throw std::runtime_error("CUDA graph is not supported on this device");
-  }
 }
 
 }  // namespace Generators
