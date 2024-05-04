@@ -358,6 +358,8 @@ bool IsCudaGraphEnabled(Config::SessionOptions& session_options) {
           return value.second == "1";
         }
       }
+    } else if (provider_options.name == "dml") {
+      return true;
     }
   }
   return false;
