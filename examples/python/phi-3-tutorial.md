@@ -77,9 +77,15 @@ Are you on a Windows machine with GPU?
    Once the script has loaded the model, it will ask you for input in a loop, streaming the output as it is produced the model. For example:
 
    ```bash
-   Input: Tell me a joke about creative writing
- 
-   Output:  Why don't writers ever get lost? Because they always follow the plot! 
+   Input: Tell me a joke about GPUs
+
+   Certainly! Here\'s a light-hearted joke about GPUs:
+
+
+   Why did the GPU go to school? Because it wanted to improve its "processing power"!
+
+
+   This joke plays on the double meaning of "processing power," referring both to the computational abilities of a GPU and the idea of a student wanting to improve their academic skills.
    ```
 
 ## Run with NVIDIA CUDA
@@ -113,7 +119,7 @@ Are you on a Windows machine with GPU?
    ```bash
    Input: Tell me a joke about creative writing
  
-   Output:  Why don't writers ever get lost? Because they always follow the plot! 
+   Output:  Why don\'t writers ever get lost? Because they always follow the plot! 
    ```
 
 ## Run on CPU
@@ -123,6 +129,8 @@ Are you on a Windows machine with GPU?
    ```bash
    huggingface-cli download microsoft/Phi-3-mini-4k-instruct-onnx --include cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/* --local-dir .
    ```
+
+   This command downloads the model into a folder called `cpu_and_mobile`
 
 2. Install the generate() API for CPU
    
@@ -143,7 +151,12 @@ Are you on a Windows machine with GPU?
    Once the script has loaded the model, it will ask you for input in a loop, streaming the output as it is produced the model. For example:
 
    ```bash
-   Input: Tell me a joke about creative writing
- 
-   Output:  Why don't writers ever get lost? Because they always follow the plot! 
+   Input: Tell me a joke about generative AI
+
+   Output:  Why did the generative AI go to school?
+
+   To improve its "creativity" algorithm!
+
+
+   This joke plays on the double meaning of "creativity" in the context of AI. Generative AI is often associated with its ability to produce creative content, but in this joke, it\'s humorously suggested that the AI is going to school to enhance its creative skills, as if it were a human student. 
    ```
