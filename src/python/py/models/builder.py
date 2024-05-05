@@ -618,6 +618,9 @@ class Model:
         root_input = self.layernorm_attrs["root_input"]
         skip_input = self.layernorm_attrs["skip_input"]
 
+        # We don't use SkipLayerNorm or SkipSimplifiedLayerNorm for DML since the Add gets fused with the Matmul
+        skip = skip or self.ep == "dml"
+
         weight = f"model.layers.{layer_id}.{location}_layernorm.weight"
         self.make_external_tensor(layernorm.weight.detach().numpy().astype(self.to_numpy_dtype[self.io_dtype]) + self.layernorm_attrs["add_offset"], weight)
         bias = f"model.layers.{layer_id}.{location}_layernorm.bias"
