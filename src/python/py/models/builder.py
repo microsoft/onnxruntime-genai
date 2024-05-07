@@ -372,7 +372,7 @@ class Model:
                 self.make_constant(input_name)
 
         # Make node only if it does not already exist
-        if name is None or name not in self.nodes:
+        if name not in self.nodes:
             input_values = self.names_to_values(inputs)
             node = ir.Node(domain, op_type, input_values, attributes=ir_convenience.convert_attributes(kwargs), num_outputs=len(outputs), name=name, doc_string=doc_string)
             for val, name_ in zip(node.outputs, outputs):
@@ -456,7 +456,8 @@ class Model:
         np_dtype = self.to_numpy_dtype[onnx_dtype]
         value = numpy_helper.from_array(np.array(num if dims == "0D" else list(num) if type(num) == tuple else [num], dtype=np_dtype), name=name.replace("constants", "numpy_helper"))
 
-        node_name = name.replace("constants", "constant_nodes")
+        # node_name = name.replace("constants", "constant_nodes")
+        node_name = name
         self.make_node("Constant", inputs=[], outputs=[name], name=node_name, value=value)
         self.make_value_info(name, onnx_dtype, shape=[])
 
