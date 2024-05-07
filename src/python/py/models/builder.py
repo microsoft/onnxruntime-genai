@@ -7,6 +7,7 @@
 Run this script to create the desired ONNX model.
 """
 
+from typing import Sequence
 from onnx import helper, numpy_helper, TensorProto, external_data_helper, save_model
 from onnxruntime.quantization.matmul_4bits_quantizer import MatMul4BitsQuantizer
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GenerationConfig
@@ -47,8 +48,8 @@ class Model:
         self.inputs = []
         self.outputs = []
         self.initializers = []
-        self.value_infos = []
-        self.nodes = []
+        self.values: dict[str, ir.Value] = {}
+        self.nodes: dict[str, ir.Node] = {}
 
         # EP-specific variables
         enable_cuda_graph = "1" if "enable_cuda_graph" in extra_options and extra_options["enable_cuda_graph"] == "1" else "0"
@@ -267,20 +268,20 @@ class Model:
         gc.collect()
 
         # Create ONNX model
-        model = helper.make_model(
-            opset_imports=[self.clear_field(helper.make_operatorsetid('', 14), 'domain'), helper.make_operatorsetid('com.microsoft', 1)],
+        ir_model = ir.Model(
+            ir.Graph(
+                self.inputs,
+                self.outputs,
+                nodes=self.nodes.values(),
+                initializers=self.initializers,
+                opset_imports={"": 14, "com.microsoft": 1}
+            ),
             ir_version=7,
             producer_name="onnxruntime-genai",
             producer_version="0.0.0",
-            graph=self.make_graph(
-                name="main_graph",
-                inputs=self.inputs,
-                outputs=self.outputs,
-                initializer=self.initializers,
-                value_info=self.value_infos,
-                nodes=self.nodes,
-            )
         )
+
+        model = ir.serde.serialize_model(ir_model)
 
         # Load external data into ONNX model
         external_data_helper.load_external_data_for_model(model, self.cache_dir)
@@ -330,45 +331,37 @@ class Model:
         quant.process()
         return quant.model.model
 
-    def clear_field(self, proto, field):
-        proto.ClearField(field)
-        return proto
-
-    def order_repeated_field(self, repeated_proto, key_name, order):
-        order = list(order)
-        repeated_proto.sort(key=lambda x: order.index(getattr(x, key_name)))
-
     def make_external_tensor(self, np_data, name, **kwargs):
         tensor = numpy_helper.from_array(np_data)
         tensor.name = name
 
         filename = f"{name}.bin"
         external_data_helper.set_external_data(tensor, location=filename)
-        with open(os.path.join(self.cache_dir, filename), "wb") as f:
+        path = os.path.join(self.cache_dir, filename)
+        with open(path, "wb") as f:
             f.write(tensor.raw_data)
         tensor.ClearField("raw_data")
         tensor.data_location = TensorProto.EXTERNAL
 
-        self.initializers.append(tensor)
+        external_tensor = ir.serde.deserialize_tensor(tensor)
+        self.initializers.append(external_tensor)
 
     def make_node(self, op_type: str, inputs: Sequence[ir.Value], outputs: Sequence[str], name: str | None=None, doc_string=None, domain=None, **kwargs):
         # Save any constants as nodes
         for input_name in inputs:
-            if input_name.startswith("/model/constants") and input_name not in self.node_names:
+            if input_name.startswith("/model/constants") and input_name not in self.nodes:
                 self.make_constant(input_name)
 
         # Make node only if it does not already exist
-        if name not in self.node_names:
+        if name not in self.nodes:
             node = ir.Node(domain, op_type, inputs, attributes=ir_convenience.convert_attributes(kwargs), num_outputs=len(outputs), name=name, doc_string=doc_string)
             for val, name in zip(node.output, outputs):
                 val.name = name
+                # Register the value to the model
+                self.values[name] = val
             self.nodes[name] = node
         else:
             node = self.nodes[name]
-
-        if len(node.outputs) == 0:
-            return node.outputs[0]
-        return node.outputs
 
         # Note:
         #
@@ -381,45 +374,54 @@ class Model:
         # needs to be added into the graph or not.
 
     def make_value_info(self, name, dtype, shape):
-        value_info = helper.make_tensor_value_info(name, dtype, shape=shape)
-        self.value_infos.append(value_info)
+        value = self.values[name]
+        value.dtype = dtype
+        value.shape = ir.Shape(shape)
 
-    def make_graph(self, *args, doc_string=None, **kwargs):
-        graph = helper.make_graph(*args, doc_string=doc_string, **kwargs)
-        if doc_string == '':
-            graph.doc_string = ''
-        return graph
+    def make_graph(self, name: str, inputs: Sequence[str], outputs: Sequence[str], initializers:Sequence[ir.TensorProtocol], nodes: Sequence[ir.Node]) -> ir.Graph:
+        input_values = [self.values[name] for name in inputs]
+        output_values = [self.values[name] for name in outputs]
+        return ir.Graph(input_values, output_values, nodes=nodes, initializers=initializers, name=name)
 
-    def make_inputs_and_outputs(self):
+    def make_inputs(self):
         # Add model-specific inputs to list of model inputs
         inputs = []
         for name in self.input_names:
             dtype = self.input_types[name]
             shape = self.input_shapes[name]
-            inputs.append(helper.make_tensor_value_info(name, dtype, shape=shape))
+            if name not in self.values:
+                self.values[name] = ir.Input(name, shape, dtype)
+            inputs.append(name)
 
+        for i in range(self.num_layers):
+            # Add KV cache to inputs
+            key_name = f"past_key_values.{i}.key"
+            self.make_value_info(key_name, self.input_types["past_key_values.key"], shape=self.input_shapes["past_key_values.key"])
+            inputs.append(key_name)
+            value_name = f"past_key_values.{i}.value"
+            self.make_value_info(value_name, self.input_types["past_key_values.value"], shape=self.input_shapes["past_key_values.value"])
+            inputs.append(value_name)
+
+    def make_outputs(self):
         # Add model-specific outputs to list of model outputs
         outputs = []
         for name in self.output_names:
             dtype = self.output_types[name]
             shape = self.output_shapes[name]
-            outputs.append(helper.make_tensor_value_info(name, dtype, shape=shape))
+            output = self.values[name]
+            output.dtype = dtype
+            output.shape = shape
+            outputs.append(name)
 
-        # Add KV cache to inputs and outputs
         for i in range(self.num_layers):
-            # Add KV cache to inputs
-            key_name = f"past_key_values.{i}.key"
-            inputs.append(helper.make_tensor_value_info(key_name, self.input_types["past_key_values.key"], shape=self.input_shapes["past_key_values.key"]))
-            value_name = f"past_key_values.{i}.value"
-            inputs.append(helper.make_tensor_value_info(value_name, self.input_types["past_key_values.value"], shape=self.input_shapes["past_key_values.value"]))
-
             # Add KV cache to outputs
             key_name = f"present.{i}.key"
-            outputs.append(helper.make_tensor_value_info(key_name, self.output_types["present.key"], shape=self.output_shapes["present.key"]))
+            self.make_value_info(key_name, self.output_types["present.key"], self.output_shapes["present.key"])
+            outputs.append(key_name)
             value_name = f"present.{i}.value"
-            outputs.append(helper.make_tensor_value_info(value_name, self.output_types["present.value"], shape=self.output_shapes["present.value"]))
+            self.make_value_info(value_name, self.output_types["present.value"], shape=self.output_shapes["present.value"])
+            outputs.append(value_name)
 
-        self.inputs = inputs
         self.outputs = outputs
 
     def make_constant(self, name):
@@ -433,7 +435,6 @@ class Model:
         node_name = name.replace("constants", "constant_nodes")
         self.make_node("Constant", inputs=[], outputs=[name], name=node_name, value=value)
         self.make_value_info(name, onnx_dtype, shape=[])
-        self.node_names.add(name)
 
     def make_gather(self, name, inputs, axis):
         output = f"{name}/output_0"
@@ -1181,7 +1182,7 @@ class Model:
 
     def make_model(self, input_path):
         # Make inputs and outputs to ONNX model
-        self.make_inputs_and_outputs()
+        self.make_inputs()
 
         # Make pre-processing nodes
         self.make_preprocessing_nodes()
@@ -1229,6 +1230,7 @@ class Model:
                     print("Reading LM head")
                     self.make_lm_head(module)
 
+        self.make_outputs()
         del model
 
     def has_final_norm(self, module, model):
