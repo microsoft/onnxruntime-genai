@@ -9,7 +9,7 @@ Run this script to create the desired ONNX model.
 
 import logging
 from typing import Sequence
-from onnx import helper, numpy_helper, TensorProto, external_data_helper, save_model
+from onnx import numpy_helper, TensorProto, external_data_helper, save_model
 from onnxruntime.quantization.matmul_4bits_quantizer import MatMul4BitsQuantizer
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 import numpy as np
@@ -405,22 +405,22 @@ class Model:
         print("inputs made")
         inputs = []
         for name in self.input_names:
-            dtype = self.input_types[name]
-            shape = self.input_shapes[name]
+            dtype = ir.DataType(self.input_types[name])
+            shape = ir.Shape(self.input_shapes[name])
             if name not in self.values:
-                self.values[name] = ir.Input(name, shape, dtype)
+                self.values[name] = ir.Input(name, shape, ir.TensorType(dtype))
             inputs.append(name)
 
         for i in range(self.num_layers):
             # Add KV cache to inputs
             key_name = f"past_key_values.{i}.key"
             if key_name not in self.values:
-                self.values[key_name] = ir.Input(key_name, shape, ir.TensorType(ir.DataType(dtype)))
+                self.values[key_name] = ir.Input(key_name, None, None)
             inputs.append(key_name)
             self.make_value_info(key_name, self.input_types["past_key_values.key"], shape=self.input_shapes["past_key_values.key"])
             value_name = f"past_key_values.{i}.value"
             if value_name not in self.values:
-                self.values[value_name] = ir.Input(value_name, shape, ir.TensorType(ir.DataType(dtype)))
+                self.values[value_name] = ir.Input(value_name, None, None)
             inputs.append(value_name)
             self.make_value_info(value_name, self.input_types["past_key_values.value"], shape=self.input_shapes["past_key_values.value"])
 
@@ -431,10 +431,10 @@ class Model:
         outputs = []
         for name in self.output_names:
             dtype = ir.DataType(self.output_types[name])
-            shape = self.output_shapes[name]
+            shape = ir.Shape(self.output_shapes[name])
             output = self.values[name]
-            output.dtype = ir.DataType(dtype)
-            output.shape = ir.Shape(shape)
+            output.dtype = dtype
+            output.shape = shape
             outputs.append(name)
 
         for i in range(self.num_layers):
