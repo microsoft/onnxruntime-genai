@@ -1,6 +1,9 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
 #pragma once
 #include "ortx_tokenizer.h"
 #include "captured_graph_pool.h"
+#include "utils.h"
 
 #if USE_DML
 #include "dml_provider_factory.h"
@@ -16,14 +19,14 @@ struct Tokenizer;
 
 void ConvertFp16ToFp32(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<OrtValue>& p_out, DeviceType device_type, cudaStream_t stream);
 
-size_t GetOrtTypeSize(ONNXTensorElementDataType type);
-
 struct State {
   State(const GeneratorParams& params);
   virtual ~State() = default;
 
   virtual RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices = {}) = 0;
   virtual const CapturedGraphInfo* GetCapturedGraphInfo() const { return nullptr; }
+
+  OrtValue* GetOutput(const char* name);
 
   std::shared_ptr<const GeneratorParams> params_;
 

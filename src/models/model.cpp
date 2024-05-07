@@ -1,3 +1,5 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
 #include <algorithm>
 #include <thread>
 
@@ -62,6 +64,15 @@ void State::Run(OrtSession& session, OrtRunOptions& run_options) {
     stream << std::endl;
     DumpTensors(stream, outputs_.data(), output_names_.data(), output_names_.size(), true);
   }
+}
+
+OrtValue* State::GetOutput(const char* name) {
+  for (size_t i = 0; i < output_names_.size(); i++) {
+    if (std::strcmp(output_names_[i], name) == 0) {
+      return outputs_[i];
+    }
+  }
+  return nullptr;
 }
 
 void State::ClearIO() {
@@ -420,7 +431,7 @@ void ConvertFp16ToFp32(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<Or
       // DML doesn't currently support on-device scoring, so we fall back to the CPU
     case DeviceType::CPU:
       for (int i = 0; i < count; i++)
-        fp32[i] = Float16ToFloat32(fp16[i]);
+        fp32[i] = FastFloat16ToFloat32(fp16[i]);
       break;
 
 #if USE_CUDA
@@ -431,39 +442,6 @@ void ConvertFp16ToFp32(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<Or
 
     default:
       throw std::runtime_error("ConvertFp16ToFp32 - Unsupported device type");
-  }
-}
-
-size_t GetOrtTypeSize(ONNXTensorElementDataType type) {
-  switch (type) {
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
-      return sizeof(float);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
-      return sizeof(Ort::Float16_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16:
-      return sizeof(Ort::BFloat16_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
-      return sizeof(double);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
-      return sizeof(int8_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
-      return sizeof(uint8_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16:
-      return sizeof(int16_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16:
-      return sizeof(uint16_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
-      return sizeof(int32_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32:
-      return sizeof(uint32_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
-      return sizeof(int64_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64:
-      return sizeof(uint64_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:
-      return sizeof(bool);
-    default:
-      throw std::runtime_error("Unsupported ONNXTensorElementDataType in GetTypeSize");
   }
 }
 
@@ -479,7 +457,7 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
 
   auto input_type_info = input->GetTensorTypeAndShapeInfo();
   auto element_type = input_type_info->GetElementType();
-  auto element_size = GetOrtTypeSize(element_type);
+  auto element_size = SizeOf(element_type);
   auto input_shape = input_type_info->GetShape();
   const int64_t batch_size = input_shape[0];
   const int64_t data_size_bytes = input_type_info->GetElementCount() * element_size / batch_size;
