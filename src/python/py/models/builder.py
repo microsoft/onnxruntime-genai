@@ -363,6 +363,7 @@ class Model:
 
         external_tensor = ir.serde.deserialize_tensor(tensor)
         self.initializers.append(external_tensor)
+        self.values[name] = ir.Value(None, index=None, name=name, type=ir.TensorType(external_tensor.dtype), shape=external_tensor.shape)
 
     def make_node(self, op_type: str, inputs: Sequence[str], outputs: Sequence[str], name: str | None=None, doc_string=None, domain=None, **kwargs):
         # Save any constants as nodes
@@ -434,8 +435,8 @@ class Model:
             dtype = ir.DataType(self.output_types[name])
             shape = self.output_shapes[name]
             output = self.values[name]
-            output.dtype = dtype
-            output.shape = shape
+            output.dtype = ir.DataType(dtype)
+            output.shape = ir.Shape(shape)
             outputs.append(name)
 
         for i in range(self.num_layers):
@@ -1797,7 +1798,7 @@ class Phi3Mini128KModel(Phi3Mini4KModel):
         sin_cache = sin_cache.astype(self.to_numpy_dtype[self.io_dtype])
 
         return cos_cache, sin_cache
-    
+
     def make_model(self, input_path):
         super().make_model(input_path)
         self.make_rotary_embedding_caches_subgraph()
