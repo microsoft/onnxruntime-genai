@@ -180,11 +180,10 @@ if(USE_DML)
   add_dependencies(onnxruntime-genai-static RESTORE_PACKAGES)
 endif()
 
-add_subdirectory("${CMAKE_SOURCE_DIR}/src/tokenizer")
-target_include_directories(onnxruntime-genai PRIVATE ${TOKENIZER_ROOT})
-target_include_directories(onnxruntime-genai-static PUBLIC ${TOKENIZER_ROOT})
-target_link_libraries(onnxruntime-genai PRIVATE tokenizer)
-target_link_libraries(onnxruntime-genai-static PUBLIC tokenizer)
+target_include_directories(onnxruntime-genai PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/include)
+target_include_directories(onnxruntime-genai-static PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/include)
+target_link_libraries(onnxruntime-genai PRIVATE onnxruntime_extensions)
+target_link_libraries(onnxruntime-genai-static PUBLIC onnxruntime_extensions)
 
 if(ENABLE_TESTS)
   add_subdirectory("${CMAKE_SOURCE_DIR}/test")
@@ -222,6 +221,10 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
     set_target_properties(onnxruntime-genai-static PROPERTIES LINKER_LANGUAGE CUDA)
     target_link_libraries(onnxruntime-genai-static PRIVATE cublasLt cublas curand cufft cudart)
   endif()
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_link_libraries(onnxruntime-genai-static PUBLIC stdc++fs)
 endif()
 
 # Visual C++ - /MP Multiple process build, /WX Warnings as errors

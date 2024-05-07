@@ -94,25 +94,25 @@ std::vector<int32_t> PadInputs(std::span<std::span<const int32_t>> sequences, in
   return result;
 }
 
-void CheckResult(tfmError_t error) {
-  if (error != kTfmOK)
-    throw std::runtime_error(TfmGetLastErrorMessage());
+void CheckResult(extError_t error) {
+  if (error != kOrtxOK)
+    throw std::runtime_error(OrtxGetLastErrorMessage());
 }
 
 TokenizerStream::TokenizerStream(const Tokenizer& tokenizer)
     : tokenizer_{tokenizer.shared_from_this()} {
-  CheckResult(TfmCreate(kTfmKindDetokenizerCache, cache_.Address()));
+  CheckResult(OrtxCreate(kOrtxKindDetokenizerCache, cache_.Address()));
 }
 
 const std::string& TokenizerStream::Decode(int32_t token) {
   const char* string;
-  CheckResult(TfmDetokenizeCached(tokenizer_->tokenizer_, cache_, token, &string));
+  CheckResult(OrtxDetokenizeCached(tokenizer_->tokenizer_, cache_, token, &string));
   chunk_ = string;
   return chunk_;
 }
 
 Tokenizer::Tokenizer(Config& config) : pad_token_id_{config.model.pad_token_id} {
-  CheckResult(TfmCreateTokenizer(tokenizer_.Address(), reinterpret_cast<const char*>(config.config_path.u8string().c_str())));
+  CheckResult(OrtxCreateTokenizer(tokenizer_.Address(), reinterpret_cast<const char*>(config.config_path.u8string().c_str())));
 }
 
 std::unique_ptr<TokenizerStream> Tokenizer::CreateStream() const {
@@ -120,21 +120,21 @@ std::unique_ptr<TokenizerStream> Tokenizer::CreateStream() const {
 }
 
 std::vector<int32_t> Tokenizer::Encode(const char* text) const {
-  TfmPtr<TfmTokenId2DArray> ids;
-  CheckResult(TfmTokenize(tokenizer_, &text, 1, ids.Address()));
+  OrtxPtr<OrtxTokenId2DArray> ids;
+  CheckResult(OrtxTokenize(tokenizer_, &text, 1, ids.Address()));
 
-  const tfmTokenId_t* tokens;
+  const extTokenId_t* tokens;
   size_t count;
-  CheckResult(TfmTokenId2DArrayGetItem(ids, 0, &tokens, &count));
+  CheckResult(OrtxTokenId2DArrayGetItem(ids, 0, &tokens, &count));
   return {tokens, tokens + count};
 }
 
 std::string Tokenizer::Decode(std::span<const int32_t> tokens) const {
-  TfmPtr<TfmStringArray> tfm_string_array;
-  CheckResult(TfmDetokenize1D(tokenizer_, reinterpret_cast<const uint32_t*>(tokens.data()), tokens.size(), tfm_string_array.Address()));
+  OrtxPtr<OrtxStringArray> ortx_string_array;
+  CheckResult(OrtxDetokenize1D(tokenizer_, reinterpret_cast<const uint32_t*>(tokens.data()), tokens.size(), ortx_string_array.Address()));
 
   const char* string;
-  CheckResult(TfmStringArrayGetItem(tfm_string_array, 0, &string));
+  CheckResult(OrtxStringArrayGetItem(ortx_string_array, 0, &string));
   return string;
 }
 
