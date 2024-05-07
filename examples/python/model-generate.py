@@ -9,7 +9,7 @@ def main(args):
     tokenizer = og.Tokenizer(model)
     if args.verbose: print("Tokenizer created")
 
-    if args.prompts is not None:
+    if hasattr(args, 'prompts'):
         prompts = args.prompts
     else:
         prompts = ["I like walking my cute dog",

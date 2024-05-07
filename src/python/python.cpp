@@ -1,3 +1,5 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
@@ -8,6 +10,24 @@
 #include "../models/model.h"
 
 using namespace pybind11::literals;
+
+// If a parameter to a C++ function is an array of float16, this type will let pybind11::array_t<Ort::Float16_t> map to numpy's float16 format
+namespace pybind11 {
+namespace detail {
+template <>
+struct npy_format_descriptor<Ort::Float16_t> {
+  static constexpr auto name = _("float16");
+  static pybind11::dtype dtype() {
+    handle ptr = npy_api::get().PyArray_DescrFromType_(23 /*NPY_FLOAT16*/); /* import numpy as np; print(np.dtype(np.float16).num */
+    return reinterpret_borrow<pybind11::dtype>(ptr);
+  }
+  static std::string format() {
+    // following: https://docs.python.org/3/library/struct.html#format-characters
+    return "e";
+  }
+};
+}  // namespace detail
+}  // namespace pybind11
 
 template <typename T>
 std::span<T> ToSpan(pybind11::array_t<T> v) {
@@ -24,6 +44,8 @@ pybind11::array_t<T> ToPython(std::span<T> v) {
 
 ONNXTensorElementDataType ToTensorType(const pybind11::dtype& type) {
   switch (type.num()) {
+    case pybind11::detail::npy_api::NPY_BOOL_:
+      return Ort::TypeToTensorType<bool>::type;
     case pybind11::detail::npy_api::NPY_UINT8_:
       return Ort::TypeToTensorType<uint8_t>::type;
     case pybind11::detail::npy_api::NPY_INT8_:
@@ -51,6 +73,68 @@ ONNXTensorElementDataType ToTensorType(const pybind11::dtype& type) {
   }
 }
 
+int ToNumpyType(ONNXTensorElementDataType type) {
+  switch (type) {
+    case Ort::TypeToTensorType<bool>::type:
+      return pybind11::detail::npy_api::NPY_BOOL_;
+    case Ort::TypeToTensorType<int8_t>::type:
+      return pybind11::detail::npy_api::NPY_INT8_;
+    case Ort::TypeToTensorType<uint8_t>::type:
+      return pybind11::detail::npy_api::NPY_UINT8_;
+    case Ort::TypeToTensorType<int16_t>::type:
+      return pybind11::detail::npy_api::NPY_INT16_;
+    case Ort::TypeToTensorType<uint16_t>::type:
+      return pybind11::detail::npy_api::NPY_UINT16_;
+    case Ort::TypeToTensorType<int32_t>::type:
+      return pybind11::detail::npy_api::NPY_INT32_;
+    case Ort::TypeToTensorType<uint32_t>::type:
+      return pybind11::detail::npy_api::NPY_UINT32_;
+    case Ort::TypeToTensorType<int64_t>::type:
+      return pybind11::detail::npy_api::NPY_INT64_;
+    case Ort::TypeToTensorType<uint64_t>::type:
+      return pybind11::detail::npy_api::NPY_UINT64_;
+    case Ort::TypeToTensorType<Ort::Float16_t>::type:
+      return 23 /*NPY_FLOAT16*/;
+    case Ort::TypeToTensorType<float>::type:
+      return pybind11::detail::npy_api::NPY_FLOAT_;
+    case Ort::TypeToTensorType<double>::type:
+      return pybind11::detail::npy_api::NPY_DOUBLE_;
+    default:
+      throw std::runtime_error("Unsupported onnx type");
+  }
+}
+
+std::string ToFormatDescriptor(ONNXTensorElementDataType type) {
+  switch (type) {
+    case Ort::TypeToTensorType<bool>::type:
+      return pybind11::format_descriptor<bool>::format();
+    case Ort::TypeToTensorType<int8_t>::type:
+      return pybind11::format_descriptor<int8_t>::format();
+    case Ort::TypeToTensorType<uint8_t>::type:
+      return pybind11::format_descriptor<int8_t>::format();
+    case Ort::TypeToTensorType<int16_t>::type:
+      return pybind11::format_descriptor<int16_t>::format();
+    case Ort::TypeToTensorType<uint16_t>::type:
+      return pybind11::format_descriptor<int16_t>::format();
+    case Ort::TypeToTensorType<int32_t>::type:
+      return pybind11::format_descriptor<int32_t>::format();
+    case Ort::TypeToTensorType<uint32_t>::type:
+      return pybind11::format_descriptor<int32_t>::format();
+    case Ort::TypeToTensorType<int64_t>::type:
+      return pybind11::format_descriptor<int64_t>::format();
+    case Ort::TypeToTensorType<uint64_t>::type:
+      return pybind11::format_descriptor<int64_t>::format();
+    case Ort::TypeToTensorType<Ort::Float16_t>::type:
+      return pybind11::format_descriptor<Ort::Float16_t>::format();
+    case Ort::TypeToTensorType<float>::type:
+      return pybind11::format_descriptor<float>::format();
+    case Ort::TypeToTensorType<double>::type:
+      return pybind11::format_descriptor<double>::format();
+    default:
+      throw std::runtime_error("Unsupported onnx type");
+  }
+}
+
 std::unique_ptr<OrtValue> ToTensor(pybind11::array& v) {
   auto type = ToTensorType(v.dtype());
 
@@ -62,6 +146,51 @@ std::unique_ptr<OrtValue> ToTensor(pybind11::array& v) {
   return OrtValue::CreateTensor(*p_memory_info, v.mutable_data(), v.nbytes(), shape, type);
 }
 
+pybind11::array ToNumpy(OrtValue* v) {
+  if (!v)
+    return {};
+
+  auto type_info = v->GetTensorTypeAndShapeInfo();
+  auto shape = type_info->GetShape();
+  auto type = type_info->GetElementType();
+  auto element_size = Generators::SizeOf(type);
+  auto data = v->GetTensorMutableRawData();
+
+  std::unique_ptr<uint8_t[]> cpu_copy;
+
+#if USE_DML
+  // TODO: DML version of this
+  if (v->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU)
+    throw std::runtime_error("NYI: ToNumpy of a DML memory based tensor");
+#elif USE_CUDA
+  if (v->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU) {
+    auto data_size = type_info->GetElementCount() * element_size;
+    cpu_copy = std::make_unique<uint8_t[]>(data_size);
+    Generators::CudaCheck() == cudaMemcpy(cpu_copy.get(), data, data_size, cudaMemcpyDeviceToHost);
+    data = cpu_copy.get();
+  }
+#endif
+
+  std::vector<int64_t> strides(shape.size());
+  {
+    auto size = Generators::SizeOf(type);
+    for (size_t i = strides.size(); i-- > 0;) {
+      strides[i] = size;
+      size *= shape[i];
+    }
+  }
+
+  pybind11::buffer_info bufinfo{
+      data,                                          // Pointer to memory buffer
+      static_cast<pybind11::ssize_t>(element_size),  // Size of underlying scalar type
+      ToFormatDescriptor(type),                      // Python struct-style format descriptor
+      static_cast<pybind11::ssize_t>(shape.size()),  // Number of dimensions
+      shape,                                         // Buffer dimensions
+      strides                                        // Strides (in bytes) for each index
+  };
+
+  return pybind11::array{bufinfo};
+}
 namespace Generators {
 
 // A roaming array is one that can be in CPU or GPU memory, and will copy the memory as needed to be used from anywhere
@@ -111,17 +240,7 @@ struct PyGeneratorParams {
 
     if (py_whisper_input_features_.size() != 0) {
       GeneratorParams::Whisper& whisper = params_->inputs.emplace<GeneratorParams::Whisper>();
-#ifdef __APPLE__
-      std::span shape(reinterpret_cast<const int64_t*>(py_whisper_input_features_.shape()),
-                      py_whisper_input_features_.ndim());
-#else
-      std::span<const int64_t> shape(py_whisper_input_features_.shape(), py_whisper_input_features_.ndim());
-#endif
-      whisper.input_features = OrtValue::CreateTensor<float>(Ort::Allocator::GetWithDefaultOptions().GetInfo(), ToSpan(py_whisper_input_features_), shape);
-      whisper.decoder_input_ids = ToSpan(py_whisper_decoder_input_ids_);
-      params_->batch_size = 1;
-      params_->sequence_length = static_cast<int>(py_whisper_decoder_input_ids_.shape(1));
-      params_->input_ids = ToSpan(py_whisper_decoder_input_ids_);
+      whisper.input_features = ToTensor(py_whisper_input_features_);
     }
   }
 
@@ -154,7 +273,6 @@ struct PyGeneratorParams {
 
   pybind11::array_t<int32_t> py_input_ids_;
   pybind11::array_t<float> py_whisper_input_features_;
-  pybind11::array_t<int32_t> py_whisper_decoder_input_ids_;
 
   std::vector<pybind11::object> refs_;  // References to data we want to ensure doesn't get garbage collected
 };
@@ -177,6 +295,10 @@ struct PyGenerator {
 
   void ComputeLogits() {
     generator_->ComputeLogits();
+  }
+
+  pybind11::array GetOutput(const std::string& name) {
+    return ToNumpy(generator_->state_->GetOutput(name.c_str()));
   }
 
   void GenerateNextToken() {
@@ -244,7 +366,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_property_readonly("vocab_size", [](const PyGeneratorParams& v) { return v.params_->vocab_size; })
       .def_readwrite("input_ids", &PyGeneratorParams::py_input_ids_)
       .def_readwrite("whisper_input_features", &PyGeneratorParams::py_whisper_input_features_)
-      .def_readwrite("whisper_decoder_input_ids", &PyGeneratorParams::py_whisper_decoder_input_ids_)
       .def("add_extra_input", &PyGeneratorParams::AddExtraInput)
       .def("set_search_options", &PyGeneratorParams::SetSearchOptions)  // See config.h 'struct Search' for the options
       .def("try_use_cuda_graph_with_max_batch_size", &PyGeneratorParams::TryUseCudaGraphWithMaxBatchSize);
@@ -283,6 +404,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def(pybind11::init<Model&, PyGeneratorParams&>())
       .def("is_done", &PyGenerator::IsDone)
       .def("compute_logits", &PyGenerator::ComputeLogits)
+      .def("get_output", &PyGenerator::GetOutput)
       .def("generate_next_token", &PyGenerator::GenerateNextToken)
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
       .def("get_sequence", &PyGenerator::GetSequence);
