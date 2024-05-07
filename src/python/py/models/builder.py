@@ -399,11 +399,6 @@ class Model:
         if shape is not None:
             value.shape = ir.Shape(shape)
 
-    def make_graph(self, name: str, inputs: Sequence[str], outputs: Sequence[str], initializers:Sequence[ir.TensorProtocol], nodes: Sequence[ir.Node]) -> ir.Graph:
-        input_values = [self.values[name] for name in inputs]
-        output_values = [self.values[name] for name in outputs]
-        return ir.Graph(input_values, output_values, nodes=nodes, initializers=initializers, name=name)
-
     def make_inputs(self):
         # Add model-specific inputs to list of model inputs
         print("inputs made")
@@ -1836,35 +1831,27 @@ class Phi3Mini128KModel(Phi3Mini4KModel):
         self.make_greater(greater_name, greater_inputs, shape=[])
         if_name = f"{basename}/If"
         if_cos_cache_output, if_sin_cache_output = "cos_cache", "sin_cache"
+
+        cos_cache_large_node = ir.Node("", "Constant", name="/large/cos_cache/Constant", attributes=[ir.AttrTensor(ir.Tensor(cos_cache_large))])
+        sin_cache_large_node = ir.Node("", "Constant", name="/large/sin_cache/Constant", attributes=[ir.AttrTensor(ir.Tensor(sin_cache_large))])
+        cos_cache_small_node = ir.Node("", "Constant", name="/small/cos_cache/Constant", attributes=[ir.AttrTensor(ir.Tensor(cos_cache_small))])
+        sin_cache_small_node = ir.Node("", "Constant", name="/small/sin_cache/Constant", attributes=[ir.AttrTensor(ir.Tensor(sin_cache_small))])
         self.make_node(
-            "If", inputs=[f"{greater_name}/output_0"], outputs=[if_cos_cache_output, if_sin_cache_output], name=if_name,
-            then_branch=self.make_graph(
+            "If",
+            inputs=[f"{greater_name}/output_0"],
+            outputs=[if_cos_cache_output, if_sin_cache_output],
+            name=if_name,
+            then_branch=ir.Graph(
                 name="large_rotemb_caches_graph",
                 inputs=[],
-                outputs=[
-                    helper.make_tensor_value_info(cos_cache_large_name, self.io_dtype, shape=cos_cache_large.shape),
-                    helper.make_tensor_value_info(sin_cache_large_name, self.io_dtype, shape=sin_cache_large.shape),
-                ],
-                initializer=[],
-                value_info=[],
-                nodes=[
-                    helper.make_node("Constant", inputs=[], outputs=[cos_cache_large_name], name="/large/cos_cache/Constant", value=numpy_helper.from_array(cos_cache_large)),
-                    helper.make_node("Constant", inputs=[], outputs=[sin_cache_large_name], name="/large/sin_cache/Constant", value=numpy_helper.from_array(sin_cache_large)),
-                ],
+                outputs=[*cos_cache_large_node.outputs, *sin_cache_large_node.outputs],
+                nodes=[cos_cache_large_node, sin_cache_large_node],
             ),
-            else_branch=self.make_graph(
+            else_branch=ir.Graph(
                 name="small_rotemb_caches_graph",
                 inputs=[],
-                outputs=[
-                    helper.make_tensor_value_info(cos_cache_small_name, self.io_dtype, shape=cos_cache_small.shape),
-                    helper.make_tensor_value_info(sin_cache_small_name, self.io_dtype, shape=sin_cache_small.shape),
-                ],
-                initializer=[],
-                value_info=[],
-                nodes=[
-                    helper.make_node("Constant", inputs=[], outputs=[cos_cache_small_name], name="/small/cos_cache/Constant", value=numpy_helper.from_array(cos_cache_small)),
-                    helper.make_node("Constant", inputs=[], outputs=[sin_cache_small_name], name="/small/sin_cache/Constant", value=numpy_helper.from_array(sin_cache_small)),
-                ],
+                outputs=[*cos_cache_small_node.outputs, *sin_cache_small_node.outputs],
+                nodes=[cos_cache_small_node, sin_cache_small_node],
             ),
         )
         self.make_value_info(if_cos_cache_output, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
