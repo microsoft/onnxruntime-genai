@@ -1760,6 +1760,7 @@ class Phi3Mini128KModel(Phi3Mini4KModel):
         self.original_max_position_embeddings = config.original_max_position_embeddings
         self.mscale = self.context_length / self.original_max_position_embeddings
         self.magnitude_scaling_policy = "su"
+        self.make_rotary_embedding_caches_subgraph()
 
     def calculate_mscale_su(self):
         if self.mscale <= 1.0:
@@ -1796,10 +1797,6 @@ class Phi3Mini128KModel(Phi3Mini4KModel):
         sin_cache = sin_cache.astype(self.to_numpy_dtype[self.io_dtype])
 
         return cos_cache, sin_cache
-
-    def make_model(self, input_path):
-        super().make_model(input_path)
-        self.make_rotary_embedding_caches_subgraph()
 
     def make_rotary_embedding_caches_subgraph(self):
         # Create caches for when sequence_length > self.original_max_position_embeddings
