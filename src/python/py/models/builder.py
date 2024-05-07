@@ -365,10 +365,26 @@ class Model:
         self.initializers.append(external_tensor)
         self.values[name] = ir.Value(None, index=None, name=name, type=ir.TensorType(external_tensor.dtype), shape=external_tensor.shape)
 
-    def make_node(self, op_type: str, inputs: Sequence[str], outputs: Sequence[str], name: str | None=None, doc_string=None, domain=None, **kwargs):
+    def make_node_subgraph(self, op_type: str, inputs: Sequence[str], outputs: Sequence[str], name: str | None=None, doc_string=None, domain="", **kwargs) -> ir.Node | None:
         # Save any constants as nodes
         for input_name in inputs:
-            if input_name.startswith("/model/constants") and input_name not in self.nodes:
+            if input_name.startswith("/model/constants") and input_name not in self.values:
+                self.make_constant(input_name)
+
+        input_values = self.names_to_values(inputs)
+        node = ir.Node(domain, op_type, input_values, attributes=ir_convenience.convert_attributes(kwargs), num_outputs=len(outputs), name=name, doc_string=doc_string)
+        for val, name_ in zip(node.outputs, outputs):
+            val.name = name_
+            # Register the value to the model
+            self.values[name_] = val
+
+        return node
+
+
+    def make_node(self, op_type: str, inputs: Sequence[str], outputs: Sequence[str], name: str | None=None, doc_string=None, domain="", **kwargs):
+        # Save any constants as nodes
+        for input_name in inputs:
+            if input_name.startswith("/model/constants") and input_name not in self.values:
                 self.make_constant(input_name)
 
         # Make node only if it does not already exist
@@ -456,8 +472,7 @@ class Model:
         np_dtype = self.to_numpy_dtype[onnx_dtype]
         value = numpy_helper.from_array(np.array(num if dims == "0D" else list(num) if type(num) == tuple else [num], dtype=np_dtype), name=name.replace("constants", "numpy_helper"))
 
-        # node_name = name.replace("constants", "constant_nodes")
-        node_name = name
+        node_name = name.replace("constants", "constant_nodes")
         self.make_node("Constant", inputs=[], outputs=[name], name=node_name, value=value)
         self.make_value_info(name, onnx_dtype, shape=[])
 
@@ -1833,10 +1848,19 @@ class Phi3Mini128KModel(Phi3Mini4KModel):
         if_name = f"{basename}/If"
         if_cos_cache_output, if_sin_cache_output = "cos_cache", "sin_cache"
 
-        cos_cache_large_node = ir.Node("", "Constant", [], name="/large/cos_cache/Constant", attributes=[ir.AttrTensor("value", ir.Tensor(cos_cache_large))])
-        sin_cache_large_node = ir.Node("", "Constant", [], name="/large/sin_cache/Constant", attributes=[ir.AttrTensor("value", ir.Tensor(sin_cache_large))])
-        cos_cache_small_node = ir.Node("", "Constant", [], name="/small/cos_cache/Constant", attributes=[ir.AttrTensor("value", ir.Tensor(cos_cache_small))])
-        sin_cache_small_node = ir.Node("", "Constant", [], name="/small/sin_cache/Constant", attributes=[ir.AttrTensor("value", ir.Tensor(sin_cache_small))])
+        cos_cache_large_node = self.make_node_subgraph("Constant", [], [cos_cache_large_name], name="/large/cos_cache/Constant", value = ir.Tensor(cos_cache_large))
+        sin_cache_large_node = self.make_node_subgraph("Constant", [], [sin_cache_large_name], name="/large/sin_cache/Constant", value = ir.Tensor(sin_cache_large))
+        cos_cache_small_node = self.make_node_subgraph("Constant", [], [cos_cache_small_name], name="/small/cos_cache/Constant", value = ir.Tensor(cos_cache_small))
+        sin_cache_small_node = self.make_node_subgraph("Constant", [], [sin_cache_small_name], name="/small/sin_cache/Constant", value = ir.Tensor(sin_cache_small))
+        cos_cache_large_node.outputs[0].dtype = ir.DataType(self.io_dtype)
+        cos_cache_large_node.outputs[0].shape = ir.Shape(cos_cache_large.shape)
+        sin_cache_large_node.outputs[0].dtype = ir.DataType(self.io_dtype)
+        sin_cache_large_node.outputs[0].shape = ir.Shape(sin_cache_large.shape)
+        cos_cache_small_node.outputs[0].dtype = ir.DataType(self.io_dtype)
+        cos_cache_small_node.outputs[0].shape = ir.Shape(cos_cache_small.shape)
+        sin_cache_small_node.outputs[0].dtype = ir.DataType(self.io_dtype)
+        sin_cache_small_node.outputs[0].shape = ir.Shape(sin_cache_small.shape)
+        print(cos_cache_small_node)
         self.make_node(
             "If",
             inputs=[f"{greater_name}/output_0"],
