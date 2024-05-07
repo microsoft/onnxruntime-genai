@@ -13,4 +13,4 @@ float Float16ToFloat32(uint16_t v);
 float FastFloat16ToFloat32(const uint16_t x);
 uint16_t FastFloat32ToFloat16(float v);
 
-}
+}  // namespace Generators
