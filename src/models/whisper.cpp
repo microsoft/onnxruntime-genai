@@ -26,7 +26,8 @@ Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> s
   encoder_input_ids_ = model_.ExpandInputs(inputs.input_features, params_->search.num_beams);
 
   auto hidden_states_type = model_.session_encoder_info_->GetOutputDataType("encoder_hidden_states");
-  encoder_hidden_states_ = OrtValue::CreateTensor(*model_.allocator_device_, std::array<int64_t, 3>{decoder_input_ids_.GetShape()[0], 1500, model_.config_->model.decoder.num_key_value_heads * model_.config_->model.decoder.head_size}, hidden_states_type);
+  auto encoder_hidden_states_shape = std::array<int64_t, 3>{decoder_input_ids_.GetShape()[0], 1500, static_cast<int64_t>(model_.config_->model.decoder.num_key_value_heads) * model_.config_->model.decoder.head_size};
+  encoder_hidden_states_ = OrtValue::CreateTensor(*model_.allocator_device_, encoder_hidden_states_shape, hidden_states_type);
 
   auto sequence_lengths = sequence_lengths_unk.GetCPU();
   for (int i = 0; i < decoder_input_ids_.GetShape()[0]; i++) {
