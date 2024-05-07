@@ -273,8 +273,8 @@ class Model:
         # Create ONNX model
         ir_model = ir.Model(
             ir.Graph(
-                self.inputs,
-                self.outputs,
+                self.names_to_values(self.inputs),
+                self.names_to_values(self.outputs),
                 nodes=self.nodes.values(),
                 initializers=self.initializers,
                 opset_imports={"": 14, "com.microsoft": 1}
@@ -372,14 +372,15 @@ class Model:
                 self.make_constant(input_name)
 
         # Make node only if it does not already exist
-        if name not in self.nodes:
+        if name is None or name not in self.nodes:
             input_values = self.names_to_values(inputs)
             node = ir.Node(domain, op_type, input_values, attributes=ir_convenience.convert_attributes(kwargs), num_outputs=len(outputs), name=name, doc_string=doc_string)
-            for val, name in zip(node.outputs, outputs):
-                val.name = name
+            for val, name_ in zip(node.outputs, outputs):
+                val.name = name_
                 # Register the value to the model
-                self.values[name] = val
-            self.nodes[name] = node
+                self.values[name_] = val
+            if name is not None:
+                self.nodes[name] = node
         else:
             node = self.nodes[name]
 
@@ -422,6 +423,8 @@ class Model:
                 self.values[value_name] = ir.Input(value_name, shape, ir.TensorType(ir.DataType(dtype)))
             inputs.append(value_name)
             self.make_value_info(value_name, self.input_types["past_key_values.value"], shape=self.input_shapes["past_key_values.value"])
+
+        self.inputs = inputs
 
     def make_outputs(self):
         # Add model-specific outputs to list of model outputs
@@ -1832,10 +1835,10 @@ class Phi3Mini128KModel(Phi3Mini4KModel):
         if_name = f"{basename}/If"
         if_cos_cache_output, if_sin_cache_output = "cos_cache", "sin_cache"
 
-        cos_cache_large_node = ir.Node("", "Constant", name="/large/cos_cache/Constant", attributes=[ir.AttrTensor(ir.Tensor(cos_cache_large))])
-        sin_cache_large_node = ir.Node("", "Constant", name="/large/sin_cache/Constant", attributes=[ir.AttrTensor(ir.Tensor(sin_cache_large))])
-        cos_cache_small_node = ir.Node("", "Constant", name="/small/cos_cache/Constant", attributes=[ir.AttrTensor(ir.Tensor(cos_cache_small))])
-        sin_cache_small_node = ir.Node("", "Constant", name="/small/sin_cache/Constant", attributes=[ir.AttrTensor(ir.Tensor(sin_cache_small))])
+        cos_cache_large_node = ir.Node("", "Constant", [], name="/large/cos_cache/Constant", attributes=[ir.AttrTensor("value", ir.Tensor(cos_cache_large))])
+        sin_cache_large_node = ir.Node("", "Constant", [], name="/large/sin_cache/Constant", attributes=[ir.AttrTensor("value", ir.Tensor(sin_cache_large))])
+        cos_cache_small_node = ir.Node("", "Constant", [], name="/small/cos_cache/Constant", attributes=[ir.AttrTensor("value", ir.Tensor(cos_cache_small))])
+        sin_cache_small_node = ir.Node("", "Constant", [], name="/small/sin_cache/Constant", attributes=[ir.AttrTensor("value", ir.Tensor(sin_cache_small))])
         self.make_node(
             "If",
             inputs=[f"{greater_name}/output_0"],
