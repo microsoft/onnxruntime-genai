@@ -198,6 +198,8 @@ class Model:
             }
         }
 
+        self.make_inputs()
+
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
         config = GenerationConfig.from_pretrained(model_name_or_path, **extra_kwargs)
         inputs = dict(zip(self.input_names, self.input_names))
@@ -320,6 +322,15 @@ class Model:
             convert_attribute=False,
         )
 
+    def names_to_values(self, names: Sequence[str]) -> Sequence[ir.Value | None]:
+        values = []
+        for name in names:
+            if name:
+                values.append(self.values[name])
+            else:
+                values.append(None)
+        return values
+
     def to_int4(self, model):
         quant = MatMul4BitsQuantizer(
             model=model,
@@ -346,7 +357,7 @@ class Model:
         external_tensor = ir.serde.deserialize_tensor(tensor)
         self.initializers.append(external_tensor)
 
-    def make_node(self, op_type: str, inputs: Sequence[ir.Value], outputs: Sequence[str], name: str | None=None, doc_string=None, domain=None, **kwargs):
+    def make_node(self, op_type: str, inputs: Sequence[str], outputs: Sequence[str], name: str | None=None, doc_string=None, domain=None, **kwargs):
         # Save any constants as nodes
         for input_name in inputs:
             if input_name.startswith("/model/constants") and input_name not in self.nodes:
@@ -354,8 +365,9 @@ class Model:
 
         # Make node only if it does not already exist
         if name not in self.nodes:
-            node = ir.Node(domain, op_type, inputs, attributes=ir_convenience.convert_attributes(kwargs), num_outputs=len(outputs), name=name, doc_string=doc_string)
-            for val, name in zip(node.output, outputs):
+            input_values = self.names_to_values(inputs)
+            node = ir.Node(domain, op_type, input_values, attributes=ir_convenience.convert_attributes(kwargs), num_outputs=len(outputs), name=name, doc_string=doc_string)
+            for val, name in zip(node.outputs, outputs):
                 val.name = name
                 # Register the value to the model
                 self.values[name] = val
@@ -375,8 +387,9 @@ class Model:
 
     def make_value_info(self, name, dtype, shape):
         value = self.values[name]
-        value.dtype = dtype
-        value.shape = ir.Shape(shape)
+        value.dtype = ir.DataType(dtype)
+        if shape is not None:
+            value.shape = ir.Shape(shape)
 
     def make_graph(self, name: str, inputs: Sequence[str], outputs: Sequence[str], initializers:Sequence[ir.TensorProtocol], nodes: Sequence[ir.Node]) -> ir.Graph:
         input_values = [self.values[name] for name in inputs]
@@ -396,17 +409,21 @@ class Model:
         for i in range(self.num_layers):
             # Add KV cache to inputs
             key_name = f"past_key_values.{i}.key"
-            self.make_value_info(key_name, self.input_types["past_key_values.key"], shape=self.input_shapes["past_key_values.key"])
+            if key_name not in self.values:
+                self.values[key_name] = ir.Input(key_name, shape, ir.TensorType(ir.DataType(dtype)))
             inputs.append(key_name)
+            self.make_value_info(key_name, self.input_types["past_key_values.key"], shape=self.input_shapes["past_key_values.key"])
             value_name = f"past_key_values.{i}.value"
-            self.make_value_info(value_name, self.input_types["past_key_values.value"], shape=self.input_shapes["past_key_values.value"])
+            if value_name not in self.values:
+                self.values[value_name] = ir.Input(value_name, shape, ir.TensorType(ir.DataType(dtype)))
             inputs.append(value_name)
+            self.make_value_info(value_name, self.input_types["past_key_values.value"], shape=self.input_shapes["past_key_values.value"])
 
     def make_outputs(self):
         # Add model-specific outputs to list of model outputs
         outputs = []
         for name in self.output_names:
-            dtype = self.output_types[name]
+            dtype = ir.DataType(self.output_types[name])
             shape = self.output_shapes[name]
             output = self.values[name]
             output.dtype = dtype
@@ -1182,7 +1199,7 @@ class Model:
 
     def make_model(self, input_path):
         # Make inputs and outputs to ONNX model
-        self.make_inputs()
+        # self.make_inputs()
 
         # Make pre-processing nodes
         self.make_preprocessing_nodes()
