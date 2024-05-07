@@ -29,10 +29,6 @@ target_link_libraries(unit_tests PRIVATE
   GTest::gtest_main
 )
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  target_link_libraries(unit_tests PRIVATE stdc++fs)
-endif()
-
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   file(GLOB cuda_test_srcs CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/*.cu"

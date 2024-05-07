@@ -223,6 +223,10 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   endif()
 endif()
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_link_libraries(onnxruntime-genai-static PUBLIC stdc++fs)
+endif()
+
 # Visual C++ - /MP Multiple process build, /WX Warnings as errors
 # Enable:
 #   C5038: data member 'member1' will be initialized after data member 'member2'
