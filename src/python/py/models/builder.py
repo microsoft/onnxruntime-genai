@@ -7,7 +7,6 @@
 Run this script to create the desired ONNX model.
 """
 
-import logging
 from typing import Sequence
 from onnx import numpy_helper, TensorProto, external_data_helper, save_model
 from onnxruntime.quantization.matmul_4bits_quantizer import MatMul4BitsQuantizer
@@ -57,11 +56,11 @@ class Model:
         self.filename = extra_options["filename"] if "filename" in extra_options else "model.onnx"
         self.extra_options = extra_options
 
-        self.inputs = []
-        self.outputs = []
-        self.initializers = []
         self.values: dict[str, ir.Value] = {}
         self.nodes: dict[str, ir.Node] = {}
+        self.graph = ir.Graph(
+            [], [], nodes=[], opset_imports={"": 14, "com.microsoft": 1}
+        )
 
         # EP-specific variables
         enable_cuda_graph = "1" if "enable_cuda_graph" in extra_options and extra_options["enable_cuda_graph"] == "1" else "0"
@@ -210,8 +209,6 @@ class Model:
             }
         }
 
-        self.make_inputs()
-
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
         config = GenerationConfig.from_pretrained(model_name_or_path, **extra_kwargs)
         inputs = dict(zip(self.input_names, self.input_names))
@@ -283,13 +280,7 @@ class Model:
 
         # Create ONNX model
         ir_model = ir.Model(
-            ir.Graph(
-                self.names_to_values(self.inputs),
-                self.names_to_values(self.outputs),
-                nodes=self.nodes.values(),
-                initializers=self.initializers,
-                opset_imports={"": 14, "com.microsoft": 1}
-            ),
+            self.graph,
             ir_version=7,
             producer_name="onnxruntime-genai",
             producer_version="0.0.0",
@@ -334,21 +325,6 @@ class Model:
             convert_attribute=False,
         )
 
-    def names_to_values(self, names: Sequence[str]) -> Sequence[ir.Value | None]:
-        values = []
-        for name in names:
-            if name:
-                if name in self.values:
-                    values.append(self.values[name])
-                else:
-                    logging.warning("%s is not found in values", name)
-                    new_value = make_value(name)
-                    self.values[name] = new_value
-                    values.append(new_value)
-            else:
-                values.append(None)
-        return values
-
     def to_int4(self, model):
         quant = MatMul4BitsQuantizer(
             model=model,
@@ -373,8 +349,22 @@ class Model:
         tensor.data_location = TensorProto.EXTERNAL
 
         external_tensor = ir.serde.deserialize_tensor(tensor)
-        self.initializers.append(external_tensor)
+        self.graph.initializers[name] = external_tensor
         self.values[name] = make_value(name, external_tensor.dtype, external_tensor.shape)
+
+    def names_to_values(self, names: Sequence[str]) -> Sequence[ir.Value | None]:
+        values = []
+        for name in names:
+            if name:
+                if name in self.values:
+                    values.append(self.values[name])
+                else:
+                    new_value = make_value(name)
+                    self.values[name] = new_value
+                    values.append(new_value)
+            else:
+                values.append(None)
+        return values
 
     def make_node_subgraph(self, op_type: str, inputs: Sequence[ir.Value], outputs: Sequence[ir.Value], name: str | None=None, doc_string=None, domain="", **kwargs) -> ir.Node:
         node = ir.Node(domain, op_type, inputs, attributes=ir_convenience.convert_attributes(kwargs), outputs=outputs, name=name, doc_string=doc_string)
@@ -389,15 +379,20 @@ class Model:
         # Make node only if it does not already exist
         if name not in self.nodes:
             input_values = self.names_to_values(inputs)
-            node = ir.Node(domain, op_type, input_values, attributes=ir_convenience.convert_attributes(kwargs), num_outputs=len(outputs), name=name, doc_string=doc_string)
-            for val, name_ in zip(node.outputs, outputs):
-                val.name = name_
-                # Register the value to the model
-                self.values[name_] = val
+            output_values = self.names_to_values(outputs)
+            node = ir.Node(
+                domain,
+                op_type,
+                input_values,
+                attributes=ir_convenience.convert_attributes(kwargs),
+                outputs=output_values,
+                name=name,
+                doc_string=doc_string,
+            )
+
             if name is not None:
                 self.nodes[name] = node
-        else:
-            node = self.nodes[name]
+            self.graph.append(node)
 
         # Note:
         #
@@ -415,53 +410,37 @@ class Model:
         if shape is not None:
             value.shape = ir.Shape(shape)
 
-    def make_inputs(self):
+    def make_inputs_and_outputs(self):
         # Add model-specific inputs to list of model inputs
-        print("inputs made")
-        inputs = []
         for name in self.input_names:
-            dtype = ir.DataType(self.input_types[name])
-            shape = ir.Shape(self.input_shapes[name])
-            if name not in self.values:
-                self.values[name] = ir.Input(name, shape, ir.TensorType(dtype))
-            inputs.append(name)
+            dtype = self.input_types[name]
+            shape = self.input_shapes[name]
+            self.values[name] = make_value(name, dtype, shape=shape)
+            self.graph.inputs.append(self.values[name])
+
+        # Add model-specific outputs to list of model outputs
+        for name in self.output_names:
+            dtype = self.output_types[name]
+            shape = self.output_shapes[name]
+            self.values[name] = make_value(name, dtype, shape=shape)
+            self.graph.outputs.append(self.values[name])
 
         for i in range(self.num_layers):
             # Add KV cache to inputs
             key_name = f"past_key_values.{i}.key"
-            if key_name not in self.values:
-                self.values[key_name] = ir.Input(key_name, None, None)
-            inputs.append(key_name)
-            self.make_value_info(key_name, self.input_types["past_key_values.key"], shape=self.input_shapes["past_key_values.key"])
+            self.values[key_name] = make_value(key_name, self.input_types["past_key_values.key"], shape=self.input_shapes["past_key_values.key"])
+            self.graph.inputs.append(self.values[key_name])
             value_name = f"past_key_values.{i}.value"
-            if value_name not in self.values:
-                self.values[value_name] = ir.Input(value_name, None, None)
-            inputs.append(value_name)
-            self.make_value_info(value_name, self.input_types["past_key_values.value"], shape=self.input_shapes["past_key_values.value"])
+            self.values[value_name] = make_value(value_name, self.input_types["past_key_values.value"], shape=self.input_shapes["past_key_values.value"])
+            self.graph.inputs.append(self.values[value_name])
 
-        self.inputs = inputs
-
-    def make_outputs(self):
-        # Add model-specific outputs to list of model outputs
-        outputs = []
-        for name in self.output_names:
-            dtype = ir.DataType(self.output_types[name])
-            shape = ir.Shape(self.output_shapes[name])
-            output = self.values[name]
-            output.dtype = dtype
-            output.shape = shape
-            outputs.append(name)
-
-        for i in range(self.num_layers):
             # Add KV cache to outputs
             key_name = f"present.{i}.key"
-            self.make_value_info(key_name, self.output_types["present.key"], self.output_shapes["present.key"])
-            outputs.append(key_name)
+            self.values[key_name] = make_value(key_name, self.output_types["present.key"], self.output_shapes["present.key"])
+            self.graph.outputs.append(key_name)
             value_name = f"present.{i}.value"
-            self.make_value_info(value_name, self.output_types["present.value"], shape=self.output_shapes["present.value"])
-            outputs.append(value_name)
-
-        self.outputs = outputs
+            self.values[value_name] = make_value(value_name, self.output_types["present.value"], self.output_shapes["present.value"])
+            self.graph.outputs.append(value_name)
 
     def make_constant(self, name):
         # Make constant ops for 0, 1, 2, 3, etc.
@@ -1221,7 +1200,7 @@ class Model:
 
     def make_model(self, input_path):
         # Make inputs and outputs to ONNX model
-        # self.make_inputs()
+        self.make_inputs_and_outputs()
 
         # Make pre-processing nodes
         self.make_preprocessing_nodes()
@@ -1269,7 +1248,6 @@ class Model:
                     print("Reading LM head")
                     self.make_lm_head(module)
 
-        self.make_outputs()
         del model
 
     def has_final_norm(self, module, model):
@@ -1605,7 +1583,6 @@ class Model:
         self.make_expand(expand_name, expand_inputs, dtype=expand_dtype, shape=expand_shape)
 
         return expand_name
-
 
     def make_attention_mask_reformatting_for_gqa(self):
         # Make nodes for the attention mask subgraph that calculates
