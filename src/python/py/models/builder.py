@@ -454,10 +454,10 @@ class Model:
             # Add KV cache to outputs
             key_name = f"present.{i}.key"
             self.values[key_name] = make_value(key_name, self.output_types["present.key"], self.output_shapes["present.key"])
-            self.graph.outputs.append(key_name)
+            self.graph.outputs.append(self.values[key_name])
             value_name = f"present.{i}.value"
             self.values[value_name] = make_value(value_name, self.output_types["present.value"], self.output_shapes["present.value"])
-            self.graph.outputs.append(value_name)
+            self.graph.outputs.append(self.values[value_name])
 
     def make_constant(self, name):
         # Make constant ops for 0, 1, 2, 3, etc.
