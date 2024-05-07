@@ -18,6 +18,8 @@ import gc
 import json
 import os
 import textwrap
+from onnxscript import ir
+from onnxscript.ir import _convenience as ir_convenience
 
 
 class Model:
@@ -98,9 +100,6 @@ class Model:
         self.exclude_lm_head = "exclude_lm_head" in extra_options
         if self.exclude_lm_head:
             self.output_names = [name.replace("logits", "hidden_states") for name in self.output_names]
-
-        # Store names of nodes already created
-        self.node_names = set()
 
         # Map TensorProto dtypes to NumPy dtypes
         self.to_numpy_dtype = {
@@ -352,7 +351,7 @@ class Model:
 
         self.initializers.append(tensor)
 
-    def make_node(self, op_type, inputs, outputs, name=None, doc_string=None, domain=None, **kwargs):
+    def make_node(self, op_type: str, inputs: Sequence[ir.Value], outputs: Sequence[str], name: str | None=None, doc_string=None, domain=None, **kwargs):
         # Save any constants as nodes
         for input_name in inputs:
             if input_name.startswith("/model/constants") and input_name not in self.node_names:
@@ -360,12 +359,16 @@ class Model:
 
         # Make node only if it does not already exist
         if name not in self.node_names:
-            node = helper.make_node(op_type, inputs, outputs, name, doc_string, domain, **kwargs)
-            if doc_string == '':
-                node.doc_string = ''
-            self.order_repeated_field(node.attribute, 'name', kwargs.keys())
-            self.nodes.append(node)
-            self.node_names.add(name)
+            node = ir.Node(domain, op_type, inputs, attributes=ir_convenience.convert_attributes(kwargs), num_outputs=len(outputs), name=name, doc_string=doc_string)
+            for val, name in zip(node.output, outputs):
+                val.name = name
+            self.nodes[name] = node
+        else:
+            node = self.nodes[name]
+
+        if len(node.outputs) == 0:
+            return node.outputs[0]
+        return node.outputs
 
         # Note:
         #
