@@ -352,7 +352,7 @@ class Model:
         self.graph.initializers[name] = external_tensor
         self.values[name] = make_value(name, external_tensor.dtype, external_tensor.shape)
 
-    def names_to_values(self, names: Sequence[str]) -> Sequence[ir.Value | None]:
+    def input_names_to_values(self, names: Sequence[str]) -> Sequence[ir.Value | None]:
         values = []
         for name in names:
             if name:
@@ -366,11 +366,28 @@ class Model:
                 values.append(None)
         return values
 
+    def output_names_to_values(self, names: Sequence[str | None]) -> Sequence[ir.Value]:
+        values = []
+        for name in names:
+            if name:
+                if name in self.values:
+                    values.append(self.values[name])
+                    break
+            # output value cannot be done
+            if name is None:
+                name = ""
+            new_value = make_value(name)
+            if name:
+                # Only register the value if it has a name, otherwise it is an empty output
+                self.values[name] = new_value
+            values.append(new_value)
+        return values
+
     def make_node_subgraph(self, op_type: str, inputs: Sequence[ir.Value], outputs: Sequence[ir.Value], name: str | None=None, doc_string=None, domain="", **kwargs) -> ir.Node:
         node = ir.Node(domain, op_type, inputs, attributes=ir_convenience.convert_attributes(kwargs), outputs=outputs, name=name, doc_string=doc_string)
         return node
 
-    def make_node(self, op_type: str, inputs: Sequence[str], outputs: Sequence[str], name: str | None=None, doc_string=None, domain="", **kwargs):
+    def make_node(self, op_type: str, inputs: Sequence[str], outputs: Sequence[str | None], name: str | None=None, doc_string=None, domain="", **kwargs):
         # Save any constants as nodes
         for input_name in inputs:
             if input_name.startswith("/model/constants") and input_name not in self.values:
@@ -378,8 +395,8 @@ class Model:
 
         # Make node only if it does not already exist
         if name not in self.nodes:
-            input_values = self.names_to_values(inputs)
-            output_values = self.names_to_values(outputs)
+            input_values = self.input_names_to_values(inputs)
+            output_values = self.output_names_to_values(outputs)
             node = ir.Node(
                 domain,
                 op_type,
