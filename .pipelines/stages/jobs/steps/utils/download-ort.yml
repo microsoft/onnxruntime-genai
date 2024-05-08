@@ -47,7 +47,7 @@ steps:
       set -e -x
       ort_stable_version=$(echo $(ort_version) | cut -d- -f1)
       echo $ort_stable_version
-      cp libonnxruntime.so libonnxruntime.so.$ort_stable_version
+      ln -s libonnxruntime.so libonnxruntime.so.$ort_stable_version
     displayName: Copy libonnxruntime.so to libonnxruntime.so.
     workingDirectory: '$(Build.Repository.LocalPath)/ort/lib'
 
