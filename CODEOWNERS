@@ -1,4 +1,4 @@
-/CODEOWNERS @microsoft/onnxruntime-admin
+/CODEOWNERS @microsoft/onnxruntime-es
 
 # build pipelines and workflows
 .github @microsoft/onnxruntime-es
