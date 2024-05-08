@@ -5,6 +5,7 @@ set_target_properties(
 install(TARGETS
   onnxruntime-genai
   LIBRARY DESTINATION lib
+  RUNTIME DESTINATION lib
   PUBLIC_HEADER DESTINATION include
 )
 set(CPACK_PACKAGE_VENDOR "Microsoft")
