@@ -16,6 +16,7 @@ message("Building onnxruntime-genai for version ${VERSION_INFO}")
 # Checking if CUDA is supported
 include(CheckLanguage)
 add_compile_definitions(BUILDING_ORT_GENAI_C)
+
 if(USE_CUDA)
   check_language(CUDA)
   if(CMAKE_CUDA_COMPILER)
@@ -150,8 +151,8 @@ if(USE_DML)
   target_include_directories(onnxruntime-genai-static PUBLIC $<TARGET_PROPERTY:${WIL_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
   target_include_directories(onnxruntime-genai-static PUBLIC $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>/directx)
   target_include_directories(onnxruntime-genai-static PUBLIC $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
-  target_link_libraries(onnxruntime-genai PRIVATE d3d12.lib)
-  target_link_libraries(onnxruntime-genai-static PUBLIC d3d12.lib)
+  target_link_libraries(onnxruntime-genai PRIVATE d3d12.lib dxcore.lib dxguid.lib dxgi.lib)
+  target_link_libraries(onnxruntime-genai-static PUBLIC d3d12.lib dxcore.lib dxguid.lib dxgi.lib)
 
   get_filename_component(PACKAGES_DIR ${CMAKE_CURRENT_BINARY_DIR}/_deps ABSOLUTE)
   set(DXC_PACKAGE_DIR ${PACKAGES_DIR}/Microsoft.Direct3D.DXC.1.7.2308.12)
@@ -179,16 +180,10 @@ if(USE_DML)
   add_dependencies(onnxruntime-genai-static RESTORE_PACKAGES)
 endif()
 
-if(NO_TOKENIZEROOT)
-  add_compile_definitions(NO_TOKENIZER=1)
-  message("----------------Tokenizer Disabled------------------")
-else()
-  add_subdirectory("${CMAKE_SOURCE_DIR}/src/tokenizer")
-  target_include_directories(onnxruntime-genai PRIVATE ${TOKENIZER_ROOT})
-  target_include_directories(onnxruntime-genai-static PUBLIC ${TOKENIZER_ROOT})
-  target_link_libraries(onnxruntime-genai PRIVATE tokenizer)
-  target_link_libraries(onnxruntime-genai-static PUBLIC tokenizer)
-endif()
+target_include_directories(onnxruntime-genai PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/include)
+target_include_directories(onnxruntime-genai-static PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/include)
+target_link_libraries(onnxruntime-genai PRIVATE onnxruntime_extensions)
+target_link_libraries(onnxruntime-genai-static PUBLIC onnxruntime_extensions)
 
 if(ENABLE_TESTS)
   add_subdirectory("${CMAKE_SOURCE_DIR}/test")
@@ -228,6 +223,10 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   endif()
 endif()
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_link_libraries(onnxruntime-genai-static PUBLIC stdc++fs)
+endif()
+
 # Visual C++ - /MP Multiple process build, /WX Warnings as errors
 # Enable:
 #   C5038: data member 'member1' will be initialized after data member 'member2'
@@ -244,6 +243,8 @@ foreach(DLL_FILE ${onnxruntime_libs})
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DLL_FILE} $<TARGET_FILE_DIR:onnxruntime-genai>
   )
 endforeach()
+
+include(cmake/package.cmake)
 
 # Have visual studio put all files into one single folder vs the default split of header files into a separate folder
 source_group(TREE ${GENERATORS_ROOT} FILES ${generator_srcs})

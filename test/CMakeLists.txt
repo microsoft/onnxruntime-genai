@@ -29,10 +29,6 @@ target_link_libraries(unit_tests PRIVATE
   GTest::gtest_main
 )
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  target_link_libraries(unit_tests PRIVATE stdc++fs)
-endif()
-
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   file(GLOB cuda_test_srcs CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/*.cu"
@@ -43,12 +39,6 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   target_sources(unit_tests PRIVATE ${cuda_test_srcs})
 endif()
 
-if(NO_TOKENIZER)
-  add_compile_definitions(NO_TOKENIZER=1)
-else()
-  target_include_directories(unit_tests PRIVATE ${TOKENIZER_ROOT})
-  target_link_libraries(unit_tests PRIVATE tokenizer)
-endif()
 set(TEST_MODEL_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/test_models/")
 set(TEST_MODEL_DES_DIR "$<TARGET_FILE_DIR:unit_tests>/test_models/")
 add_custom_command(TARGET unit_tests POST_BUILD

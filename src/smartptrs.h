@@ -115,7 +115,7 @@ struct cuda_stream_holder {
 #else
 struct cuda_stream_holder {
   void Create() {
-    assert(false);
+    throw std::runtime_error("Trying to create a cuda stream in a non cuda build");
   }
 
   operator cudaStream_t() const { return v_; }

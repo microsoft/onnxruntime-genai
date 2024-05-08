@@ -232,7 +232,7 @@ class Model:
                     "num_key_value_heads": self.num_kv_heads,
                 },
                 "eos_token_id": config.eos_token_id,
-                "pad_token_id": config.pad_token_id if hasattr(config, "pad_token_id") and config.pad_token_id is not None else config.eos_token_id,
+                "pad_token_id": config.pad_token_id if hasattr(config, "pad_token_id") and config.pad_token_id is not None else config.eos_token_id[0] if isinstance(config.eos_token_id, list) else config.eos_token_id,
                 "type": self.model_type[ : self.model_type.find("For")].lower(),
                 "vocab_size": self.vocab_size,
             },
@@ -533,7 +533,7 @@ class Model:
 
     def make_transpose(self, name, root_input, dtype, shape, perm):
         output = f"{name}/output_0"
-        self.make_node("Transpose", inputs=[root_input], outputs=[output], perm=perm)
+        self.make_node("Transpose", inputs=[root_input], outputs=[output], name=name, perm=perm)
         self.make_value_info(output, dtype, shape=shape)
 
     def make_matmul(self, matmul, name, root_input, **kwargs):
@@ -1986,6 +1986,7 @@ def get_args():
                 enable_cuda_graph = 1 : The model can use CUDA graph capture for CUDA execution provider. If enabled, all nodes being placed on the CUDA EP
                     is the prerequisite for the CUDA graph to be used correctly. It is not guaranteed that cuda graph be enabled as it depends on the model
                     and the graph structure.
+                enable_GQA_on_CPU = Enalbe G(Group)Query(Q)Attention(A) on CPU.
             """),
     )
 

@@ -40,6 +40,10 @@ typedef struct OgaSequences OgaSequences;
 typedef struct OgaTokenizer OgaTokenizer;
 typedef struct OgaTokenizerStream OgaTokenizerStream;
 
+/* \brief Call this on process exit to cleanly shutdown the genai library & its onnxruntime usage
+ */
+OGA_EXPORT void OGA_API_CALL OgaShutdown();
+
 /*
  * \param[in] result OgaResult that contains the error message.
  * \return Error message contained in the OgaResult. The const char* is owned by the OgaResult
@@ -129,6 +133,7 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyGeneratorParams(OgaGeneratorParams* gener
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchNumber(OgaGeneratorParams* generator_params, const char* name, double value);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* generator_params, const char* name, bool value);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGeneratorParams* generator_params, int32_t max_batch_size);
 
 /*
  * \brief Sets the input ids for the generator params. The input ids are used to seed the generation.

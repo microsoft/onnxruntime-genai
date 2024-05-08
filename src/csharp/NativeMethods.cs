@@ -53,6 +53,10 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                                      byte[] /* const char* */ searchOption,
                                                                                      bool value);
 
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(IntPtr /* OgaGeneratorParams* */ generatorParams,
+                                                                                                       int /* int32_t */ maxBatchSize);
+
         // This function is used to set the input IDs for the generator.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern unsafe IntPtr /* OgaResult* */ OgaGeneratorParamsSetInputIDs(IntPtr /* OgaGeneratorParams* */ generatorParams,
@@ -172,5 +176,8 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaGetCurrentGpuDeviceId(out IntPtr /* int32_t */ device_id);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern void OgaShutdown();
     }
 }

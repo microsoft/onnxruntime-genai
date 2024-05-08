@@ -10,3 +10,7 @@ else ()
     message("Test is using C++20")
     set(CMAKE_CXX_STANDARD 20)
 endif ()
+
+if ("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_LESS 9)
+    add_compile_definitions(USE_EXPERIMENTAL_FILESYSTEM)
+endif()
