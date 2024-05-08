@@ -1007,7 +1007,7 @@ class Model:
             self.make_rotary_embedding(attention.rotary_emb, k_rotary_name, root_input=k_input_to_attention, position_ids=kwargs.get("position_ids", "position_ids"))
             k_input_to_attention = f"{k_rotary_name}/output_0"
 
-        # Make repeat KV nodes (TODO: remove once ORT supports GQA for CPU)
+        # Make repeat KV nodes (Note: `repeat_kv` needs to be kept since GroupQueryAttention isn't supported for FP32 CUDA)
         past_k = f"past_key_values.{layer_id}.key"
         past_v = f"past_key_values.{layer_id}.value"
         present_k = f"present.{layer_id}.key"
