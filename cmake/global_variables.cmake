@@ -13,6 +13,14 @@ set(ORT_HOME ${CMAKE_SOURCE_DIR}/ort CACHE PATH "Path to the onnxruntime root di
 set(ORT_HEADER_DIR ${ORT_HOME}/include)
 set(ORT_LIB_DIR ${ORT_HOME}/lib)
 
+if(NOT EXISTS "${ORT_LIB_DIR}/${ONNXRUNTIME_LIB}")
+  message(FATAL_ERROR "Expected the ONNX Runtime library to be found at ${ORT_LIB_DIR}/${ONNXRUNTIME_LIB}. Actual: Not found.")
+endif()
+if(NOT EXISTS "${ORT_HEADER_DIR}/onnxruntime_c_api.h")
+  message(FATAL_ERROR "Expected the ONNX Runtime C API header to be found at \"${ORT_HEADER_DIR}/onnxruntime_c_api.h\". Actual: Not found.")
+endif()
+
+
 # Define the dependency libraries
 
 if(WIN32)

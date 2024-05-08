@@ -1,0 +1,5 @@
+if(ENABLE_TESTS AND TEST_PHI2)
+  add_compile_definitions(TEST_PHI2=1)
+else()
+  add_compile_definitions(TEST_PHI2=0)
+endif()

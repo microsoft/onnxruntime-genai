@@ -13,46 +13,38 @@ include(cmake/global_variables.cmake)
 
 include(cmake/check_cuda.cmake)
 
+include(cmake/check_dml.cmake)
+
 include(cmake/external/onnxruntime_external_deps.cmake)
 
 include(cmake/cxx_standard.cmake)
 
+include(cmake/compile_options.cmake)
+
+include(cmake/compile_definitions.cmake)
 
 add_compile_definitions(BUILDING_ORT_GENAI_C)
-if(MSVC)
-  # set updated value for __cplusplus macro instead of 199711L
-  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>)
-endif()
-
-
-
-if(USE_DML)
-  if(WIN32)
-    add_compile_definitions(USE_DML=1)
-    add_compile_definitions(NOMINMAX)
-    add_compile_definitions(DML_TARGET_VERSION_USE_LATEST)
-
-    file(GLOB dml_srcs CONFIGURE_DEPENDS
-      "${PROJECT_SOURCE_DIR}/src/dml/*.h"
-      "${PROJECT_SOURCE_DIR}/src/dml/*.cpp"
-    )
-
-    list(APPEND generator_srcs ${dml_srcs})
-  else()
-    message(FATAL_ERROR "USE_DML is ON but this isn't windows.")
-  endif()
-endif()
-
-if(ENABLE_TESTS AND TEST_PHI2)
-  add_compile_definitions(TEST_PHI2=1)
-else()
-  add_compile_definitions(TEST_PHI2=0)
-endif()
 
 add_library(onnxruntime-genai SHARED ${generator_srcs})
 add_library(onnxruntime-genai-static STATIC ${generator_srcs})
 target_include_directories(onnxruntime-genai PRIVATE ${ORT_HEADER_DIR})
 target_include_directories(onnxruntime-genai-static PRIVATE ${ORT_HEADER_DIR})
+target_include_directories(onnxruntime-genai PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/include)
+target_include_directories(onnxruntime-genai-static PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/include)
+target_link_libraries(onnxruntime-genai PRIVATE onnxruntime_extensions)
+target_link_libraries(onnxruntime-genai-static PUBLIC onnxruntime_extensions)
+target_link_directories(onnxruntime-genai PRIVATE ${ORT_LIB_DIR})
+target_link_libraries(onnxruntime-genai PRIVATE ${ONNXRUNTIME_LIB})
+
+if(USE_CUDA AND CMAKE_CUDA_COMPILER)
+  set_target_properties(onnxruntime-genai PROPERTIES LINKER_LANGUAGE CUDA)
+  target_link_libraries(onnxruntime-genai PRIVATE cublasLt cublas curand cufft cudart)
+  #  onnxruntime-genai-static is statically linked under Windows
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set_target_properties(onnxruntime-genai-static PROPERTIES LINKER_LANGUAGE CUDA)
+    target_link_libraries(onnxruntime-genai-static PRIVATE cublasLt cublas curand cufft cudart)
+  endif()
+endif()
 
 if(CMAKE_GENERATOR_TOOLSET MATCHES "Visual Studio")
   target_link_options(onnxruntime-genai PRIVATE "/CETCOMPAT")
@@ -61,7 +53,9 @@ endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set_target_properties(onnxruntime-genai-static PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_link_libraries(onnxruntime-genai-static PUBLIC stdc++fs)
 endif()
+
 
 if(USE_DML)
   list(APPEND onnxruntime_libs "${ORT_LIB_DIR}/DirectML.dll")
@@ -100,11 +94,6 @@ if(USE_DML)
   add_dependencies(onnxruntime-genai-static RESTORE_PACKAGES)
 endif()
 
-target_include_directories(onnxruntime-genai PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/include)
-target_include_directories(onnxruntime-genai-static PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/include)
-target_link_libraries(onnxruntime-genai PRIVATE onnxruntime_extensions)
-target_link_libraries(onnxruntime-genai-static PUBLIC onnxruntime_extensions)
-
 if(ENABLE_TESTS)
   add_subdirectory("${CMAKE_SOURCE_DIR}/test")
   message("------------------Enabling tests------------------")
@@ -119,34 +108,6 @@ if(ENABLE_MODEL_BENCHMARK)
   add_subdirectory("${CMAKE_SOURCE_DIR}/benchmark/c")
   message("------------------Enabling model benchmark------------------")
 endif()
-
-if(NOT EXISTS "${ORT_LIB_DIR}/${ONNXRUNTIME_LIB}")
-  message(FATAL_ERROR "Expected the ONNX Runtime library to be found at ${ORT_LIB_DIR}/${ONNXRUNTIME_LIB}. Actual: Not found.")
-endif()
-if(NOT EXISTS "${ORT_HEADER_DIR}/onnxruntime_c_api.h")
-  message(FATAL_ERROR "Expected the ONNX Runtime C API header to be found at \"${ORT_HEADER_DIR}/onnxruntime_c_api.h\". Actual: Not found.")
-endif()
-if(USE_CUDA AND NOT EXISTS "${ORT_LIB_DIR}/${ONNXRUNTIME_PROVIDERS_CUDA_LIB}")
-  message(FATAL_ERROR "Expected the ONNX Runtime providers cuda library to be found at ${ORT_LIB_DIR}/${ONNXRUNTIME_PROVIDERS_CUDA_LIB}. Actual: Not found.")
-endif()
-
-target_link_directories(onnxruntime-genai PRIVATE ${ORT_LIB_DIR})
-target_link_libraries(onnxruntime-genai PRIVATE ${ONNXRUNTIME_LIB})
-
-if(USE_CUDA AND CMAKE_CUDA_COMPILER)
-  set_target_properties(onnxruntime-genai PROPERTIES LINKER_LANGUAGE CUDA)
-  target_link_libraries(onnxruntime-genai PRIVATE cublasLt cublas curand cufft cudart)
-  #  onnxruntime-genai-static is statically linked under Windows
-  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    set_target_properties(onnxruntime-genai-static PROPERTIES LINKER_LANGUAGE CUDA)
-    target_link_libraries(onnxruntime-genai-static PRIVATE cublasLt cublas curand cufft cudart)
-  endif()
-endif()
-
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  target_link_libraries(onnxruntime-genai-static PUBLIC stdc++fs)
-endif()
-
 
 # Copy the onnxruntime binaries into the build folder so it's found on launch
 foreach(DLL_FILE ${onnxruntime_libs})
