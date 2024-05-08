@@ -10,9 +10,9 @@ project(Generators LANGUAGES C CXX)
 include(cmake/options.cmake)
 # All Global variables, including GLOB, for the top level CMakeLists.txt should be defined here
 include(cmake/global_variables.cmake)
-
+# Checking if CUDA is supported
 include(cmake/check_cuda.cmake)
-
+# Checking if DML is supported
 include(cmake/check_dml.cmake)
 
 include(cmake/external/onnxruntime_external_deps.cmake)
