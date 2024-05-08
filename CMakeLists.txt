@@ -8,14 +8,14 @@ project(Generators LANGUAGES C CXX)
 
 # All Options should be defined in cmake/options.cmake This must be included before any other cmake file is included
 include(cmake/options.cmake)
+
+include(cmake/external/onnxruntime_external_deps.cmake)
 # All Global variables, including GLOB, for the top level CMakeLists.txt should be defined here
 include(cmake/global_variables.cmake)
 # Checking if CUDA is supported
 include(cmake/check_cuda.cmake)
 # Checking if DML is supported
 include(cmake/check_dml.cmake)
-
-include(cmake/external/onnxruntime_external_deps.cmake)
 
 include(cmake/cxx_standard.cmake)
 
