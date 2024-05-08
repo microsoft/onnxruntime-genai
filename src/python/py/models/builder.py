@@ -1986,7 +1986,6 @@ def get_args():
                 enable_cuda_graph = 1 : The model can use CUDA graph capture for CUDA execution provider. If enabled, all nodes being placed on the CUDA EP
                     is the prerequisite for the CUDA graph to be used correctly. It is not guaranteed that cuda graph be enabled as it depends on the model
                     and the graph structure.
-                enable_GQA_on_CPU = Enalbe G(Group)Query(Q)Attention(A) on CPU.
             """),
     )
 
