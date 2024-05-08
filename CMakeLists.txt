@@ -5,88 +5,26 @@ cmake_minimum_required(VERSION 3.26)
 include(FetchContent)
 include(CMakeDependentOption)
 project(Generators LANGUAGES C CXX)
-# All Options should be defined in cmake/options.cmake
+
+# All Options should be defined in cmake/options.cmake This must be included before any other cmake file is included
 include(cmake/options.cmake)
+# All Global variables, including GLOB, for the top level CMakeLists.txt should be defined here
+include(cmake/global_variables.cmake)
+
+include(cmake/check_cuda.cmake)
+
 include(cmake/external/onnxruntime_external_deps.cmake)
-
-file(READ "VERSION_INFO" ver)
-set(VERSION_INFO ${ver} CACHE STRING "Set the onnxruntime-genai version info.")
-message("Building onnxruntime-genai for version ${VERSION_INFO}")
-
-# Checking if CUDA is supported
-include(CheckLanguage)
-add_compile_definitions(BUILDING_ORT_GENAI_C)
-
-if(USE_CUDA)
-  check_language(CUDA)
-  if(CMAKE_CUDA_COMPILER)
-    # Don't let cmake set a default value for CMAKE_CUDA_ARCHITECTURES
-    cmake_policy(SET CMP0104 OLD)
-    enable_language(CUDA)
-    message(STATUS "CMAKE_CUDA_COMPILER_VERSION: ${CMAKE_CUDA_COMPILER_VERSION}")
-  else()
-    message(FATAL_ERROR "CUDA is not supported")
-  endif()
-endif()
-if("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_LESS 8)
-  message(FATAL_ERROR "GCC version must be greater than or equal to 8")
-endif()
 
 include(cmake/cxx_standard.cmake)
 
-set(GENERATORS_ROOT ${PROJECT_SOURCE_DIR}/src)
-set(MODELS_ROOT ${PROJECT_SOURCE_DIR}/src/models)
-set(ORT_HOME ${CMAKE_SOURCE_DIR}/ort CACHE PATH "Path to the onnxruntime root directory.")
-set(ORT_HEADER_DIR ${ORT_HOME}/include)
-set(ORT_LIB_DIR ${ORT_HOME}/lib)
-# CUDA Being enabled will make it not a debug build without this option, so all of the C++ headers will complain
-# about a mismatch with the actual debug headers and it'll fail to link. I don't know why this happens, or if this is the best fix.
-if(USE_CUDA AND CMAKE_CUDA_COMPILER AND CMAKE_BUILD_TYPE STREQUAL "Debug")
-  add_compile_definitions(_DEBUG=1)
-endif()
 
+add_compile_definitions(BUILDING_ORT_GENAI_C)
 if(MSVC)
   # set updated value for __cplusplus macro instead of 199711L
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>)
 endif()
 
-message(STATUS "Adding source files")
 
-file(GLOB generator_srcs CONFIGURE_DEPENDS
-  "${GENERATORS_ROOT}/*.h"
-  "${GENERATORS_ROOT}/*.cpp"
-  "${MODELS_ROOT}/*.h"
-  "${MODELS_ROOT}/*.cpp"
-)
-
-if(USE_CUDA AND CMAKE_CUDA_COMPILER)
-  # Don't let cmake set a default value for CMAKE_CUDA_ARCHITECTURES
-  # cmake_policy(SET CMP0104 OLD)
-  # enable_language(CUDA)
-  # message(STATUS "CMAKE_CUDA_COMPILER_VERSION: ${CMAKE_CUDA_COMPILER_VERSION}")
-  # set(CUDA_PROPAGATE_HOST_FLAGS ON)
-  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcudafe --diag_suppress=2803 --expt-relaxed-constexpr")
-  file(GLOB generator_cuda_srcs CONFIGURE_DEPENDS
-    "${GENERATORS_ROOT}/*.cu"
-    "${GENERATORS_ROOT}/*.cuh"
-    "${MODELS_ROOT}/*.cu"
-    "${MODELS_ROOT}/*.cuh"
-  )
-  file(GLOB test_cuda_srcs CONFIGURE_DEPENDS
-    "${TESTS_ROOT}/*.cu"
-    "${TESTS_ROOT}/*.cuh"
-  )
-  list(APPEND test_srcs ${test_cuda_srcs})
-  list(APPEND generator_srcs ${generator_cuda_srcs})
-  add_compile_definitions(USE_CUDA=1)
-  include_directories("${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}")
-elseif(USE_CUDA)
-  # USE_CUDA is true but cmake could not find the cuda compiler
-  message(FATAL_ERROR "USE_CUDA is ON but no cuda compiler was found.")
-else()
-  file(GLOB generator_cuda_srcs "${GENERATORS_ROOT}/*_cuda*.*")
-  list(REMOVE_ITEM generator_srcs ${generator_cuda_srcs})
-endif()
 
 if(USE_DML)
   if(WIN32)
@@ -125,24 +63,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set_target_properties(onnxruntime-genai-static PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
-if(WIN32)
-  set(ONNXRUNTIME_LIB "onnxruntime.dll")
-  set(ONNXRUNTIME_PROVIDERS_CUDA_LIB "onnxruntime_providers_cuda.dll")
-  set(ONNXRUNTIME_FILES "onnxruntime*.dll")
-  set(ONNXRUNTIME_EXTENSIONS_LIB "tfmtok_c.lib")
-  set(ONNXRUNTIME_EXTENSIONS_FILES "tfmtok_c.dll")
-elseif(APPLE)
-  set(ONNXRUNTIME_LIB "libonnxruntime.dylib")
-  set(ONNXRUNTIME_PROVIDERS_CUDA_LIB "libonnxruntime_providers_cuda.dylib")
-  set(ONNXRUNTIME_FILES "libonnxruntime*.dylib")
-else()
-  set(ONNXRUNTIME_LIB "libonnxruntime.so")
-  set(ONNXRUNTIME_PROVIDERS_CUDA_LIB "libonnxruntime_providers_cuda.so")
-  set(ONNXRUNTIME_FILES "libonnxruntime*.so*")
-  set(ONNXRUNTIME_EXTENSIONS_LIB "tfmtok_c.so")
-endif()
-
-file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_FILES}")
 if(USE_DML)
   list(APPEND onnxruntime_libs "${ORT_LIB_DIR}/DirectML.dll")
   target_include_directories(onnxruntime-genai PRIVATE $<TARGET_PROPERTY:${WIL_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
@@ -227,14 +147,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_link_libraries(onnxruntime-genai-static PUBLIC stdc++fs)
 endif()
 
-# Visual C++ - /MP Multiple process build, /WX Warnings as errors
-# Enable:
-#   C5038: data member 'member1' will be initialized after data member 'member2'
-# Disable:
-#   C4100: 'this_': unreferenced formal parameter
-if(MSVC)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /MP /w15038 /wd4100 /W4 /WX")
-endif()
 
 # Copy the onnxruntime binaries into the build folder so it's found on launch
 foreach(DLL_FILE ${onnxruntime_libs})
@@ -244,7 +156,7 @@ foreach(DLL_FILE ${onnxruntime_libs})
   )
 endforeach()
 
-include(cmake/package.cmake)
-
 # Have visual studio put all files into one single folder vs the default split of header files into a separate folder
 source_group(TREE ${GENERATORS_ROOT} FILES ${generator_srcs})
+
+include(cmake/package.cmake)

@@ -4,8 +4,8 @@ set_target_properties(
 )
 install(TARGETS
   onnxruntime-genai
-  LIBRARY
-  PUBLIC_HEADER
+  LIBRARY DESTINATION lib
+  PUBLIC_HEADER DESTINATION include
 )
 set(CPACK_PACKAGE_VENDOR "Microsoft")
 set(CPACK_PACKAGE_NAME "onnxruntime-genai")
@@ -26,4 +26,9 @@ install(FILES
   "${PROJECT_SOURCE_DIR}/SECURITY.md"
   "${PROJECT_SOURCE_DIR}/LICENSE"
   DESTINATION .)
+
+install(FILES
+  ${onnxruntime_libs}
+  DESTINATION lib)
+
 include(CPack)
