@@ -984,7 +984,7 @@ inline size_t OrtValue::GetStringTensorElementLength(size_t element_index) const
 template <typename T>
 inline const T* OrtValue::GetTensorData() const {
   T* out;
-  Ort::ThrowOnError(Ort::api->GetTensorMutableData(const_cast<OrtValue*>(this), (void**)(&out)));
+  Ort::ThrowOnError(Ort::api->GetTensorMutableData(const_cast<OrtValue*>(this), (void**)&out));
   return out;
 }
 
@@ -1078,7 +1078,7 @@ inline void* OrtValue::GetTensorMutableRawData() {
 template <typename T>
 T* OrtValue::GetTensorMutableData() {
   T* out;
-  Ort::ThrowOnError(Ort::api->GetTensorMutableData(this, (void**)(&out)));
+  Ort::ThrowOnError(Ort::api->GetTensorMutableData(this, (void**)&out));
   return out;
 }
 
@@ -1086,7 +1086,7 @@ template <typename T>
 T& OrtValue::At(const std::vector<int64_t>& location) {
   static_assert(!std::is_same<T, std::string>::value, "this api does not support std::string");
   T* out;
-  Ort::ThrowOnError(Ort::api->TensorAt(this, location.data(), location.size(), (void**)(&out)));
+  Ort::ThrowOnError(Ort::api->TensorAt(this, location.data(), location.size(), (void**)&out));
   return *out;
 }
 
