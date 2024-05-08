@@ -19,11 +19,18 @@ include(cmake/external/onnxruntime_external_deps.cmake)
 
 include(cmake/cxx_standard.cmake)
 
-include(cmake/compile_options.cmake)
-
-include(cmake/compile_definitions.cmake)
 
 add_compile_definitions(BUILDING_ORT_GENAI_C)
+if(MSVC)
+  # set updated value for __cplusplus macro instead of 199711L
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>)
+endif()
+if(ENABLE_TESTS AND TEST_PHI2)
+  add_compile_definitions(TEST_PHI2=1)
+else()
+  add_compile_definitions(TEST_PHI2=0)
+endif()
+
 
 add_library(onnxruntime-genai SHARED ${generator_srcs})
 add_library(onnxruntime-genai-static STATIC ${generator_srcs})
