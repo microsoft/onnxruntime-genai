@@ -26,17 +26,17 @@ endif()
 if(WIN32)
   set(ONNXRUNTIME_LIB "onnxruntime.dll")
   set(ONNXRUNTIME_PROVIDERS_CUDA_LIB "onnxruntime_providers_cuda.dll")
-  set(ONNXRUNTIME_FILES "onnxruntime*.dll")
+  set(ONNXRUNTIME_ALL_SHARED_LIBS "onnxruntime*.dll")
   set(ONNXRUNTIME_EXTENSIONS_LIB "tfmtok_c.lib")
   set(ONNXRUNTIME_EXTENSIONS_FILES "tfmtok_c.dll")
 elseif(APPLE)
   set(ONNXRUNTIME_LIB "libonnxruntime.dylib")
   set(ONNXRUNTIME_PROVIDERS_CUDA_LIB "libonnxruntime_providers_cuda.dylib")
-  set(ONNXRUNTIME_FILES "libonnxruntime*.dylib")
+  set(ONNXRUNTIME_ALL_SHARED_LIBS "libonnxruntime*.dylib")
 else()
   set(ONNXRUNTIME_LIB "libonnxruntime.so")
   set(ONNXRUNTIME_PROVIDERS_CUDA_LIB "libonnxruntime_providers_cuda.so")
-  set(ONNXRUNTIME_FILES "libonnxruntime*.so*")
+  set(ONNXRUNTIME_ALL_SHARED_LIBS "libonnxruntime*.so*")
   set(ONNXRUNTIME_EXTENSIONS_LIB "tfmtok_c.so")
 endif()
 
@@ -47,7 +47,7 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
   "${MODELS_ROOT}/*.cpp"
 )
 
-file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_FILES}")
+file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_ALL_SHARED_LIBS}")
 
 
 # TODO: move this to the CMakePresets
