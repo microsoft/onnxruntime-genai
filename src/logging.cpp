@@ -37,6 +37,8 @@ void SetLogBool(std::string_view name, bool value) {
     g_log.model_logits = value;
   else
     throw JSON::unknown_value_error{};
+
+  Log("warning", "Setting a value");
 }
 
 void SetLogString(std::string_view name, std::string_view value) {
@@ -44,7 +46,7 @@ void SetLogString(std::string_view name, std::string_view value) {
     if (value.empty())
       gp_logfile.reset();
     else {
-      std::filesystem::path filename{value};
+      fs::path filename{std::string(value)};
       gp_logfile = std::make_unique<std::ofstream>(filename);
     }
 
@@ -80,7 +82,8 @@ bool RunExample = (SGRExample(std::cerr), false);
 std::ostream& Log(std::string_view label, std::string_view string) {
   assert(g_log.enabled);
 
-  *gp_stream << SGR::Bold << SGR::Bg_Blue << "  " << label << "  " << SGR::Reset << ' ';
+  // Warnings will be yellow, all other labels will be blue
+  *gp_stream << SGR::Bold << (label == "warning" ? SGR::Bg_Yellow : SGR::Bg_Blue) << "  " << label << "  " << SGR::Reset << ' ';
   if (!string.empty())
     *gp_stream << string << std::endl;
   return *gp_stream;

@@ -10,7 +10,6 @@ target_link_directories(python PRIVATE ${ORT_LIB_DIR})
 target_link_libraries(python PRIVATE onnxruntime-genai-static ${ONNXRUNTIME_LIB})
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set_property(TARGET python APPEND_STRING PROPERTY LINK_FLAGS " -Xlinker -rpath=\\$ORIGIN")
-  target_link_libraries(python PRIVATE stdc++fs)
 endif()
 set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
 
@@ -66,8 +65,12 @@ if(BUILD_WHEEL)
     "libcufft.so.11"
     "libcurand.so.10"
     "libnvinfer.so.8"
+    "libnvinfer.so.10"
     "libnvinfer_plugin.so.8"
+    "libnvinfer_plugin.so.10"
     "libnvonnxparser.so.8"
+    "libnvonnxparser.so.10"
+
   )
   set(modified_exclude_list)
   foreach(item IN LISTS auditwheel_exclude_list)

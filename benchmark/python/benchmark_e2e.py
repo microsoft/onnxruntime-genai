@@ -85,6 +85,9 @@ def main(args):
             generator.generate_next_token()
         if args.print_model_output: print(tokenizer.decode(generator.get_sequence(0)))
 
+        # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
+        del generator
+
     tokenize_times = []
     prompt_times = []
     token_gen_times = []
@@ -140,6 +143,9 @@ def main(args):
         wall_clock_end_time = time.time()
         wall_clock_times.append(wall_clock_end_time - wall_clock_start_time)
         if args.print_model_output: print(tokenizer.decode(generator.get_sequence(0)))
+
+        # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
+        del generator
 
     # Calculate tokenization metrics
     avg_tokenization_latency_s = sum(tokenize_times) / len(tokenize_times)

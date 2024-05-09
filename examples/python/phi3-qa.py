@@ -15,6 +15,12 @@ def main(args):
     if args.verbose: print("Tokenizer created")
     if args.verbose: print()
     search_options = {name:getattr(args, name) for name in ['do_sample', 'max_length', 'min_length', 'top_p', 'top_k', 'temperature', 'repetition_penalty'] if name in args}
+    
+    # Set the max length to something sensible by default, unless it is specified by the user,
+    # since otherwise it will be set to the entire context length
+    if 'max_length' not in search_options:
+        search_options['max_length'] = 2048
+
     chat_template = '<|user|>\n{input} <|end|>\n<|assistant|>'
 
     # Keep asking for input prompts in a loop
@@ -62,6 +68,9 @@ def main(args):
             print("  --control+c pressed, aborting generation--")
         print()
         print()
+
+        # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
+        del generator
 
         if args.timings:
             prompt_time = first_token_timestamp - started_timestamp
