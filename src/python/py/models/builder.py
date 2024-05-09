@@ -178,7 +178,7 @@ class Model:
             print("GroupQueryAttention (GQA) is used in this model.")
 
             # DML doesn't support packed Q/K/V for GQA yet
-            self.attention_attrs["use_packed_matmul"] = self.ep != "dml" and self.num_attn_heads == self.num_kv_heads
+            self.attention_attrs["use_packed_matmul"] = self.ep != "dml"
 
             # GQA + Rot.Emb. does not require `position ids` as input
             if self.ep != "dml":
@@ -573,7 +573,7 @@ class Model:
         # apply a transpose before saving
         N_q, H = q_matmul.shape
         N_kv, _ = k_matmul.shape
-        matmul = np.concatenate([q_matmul.transpose(), k_matmul.transpose(), v_matmul.transpose()], axis=1).reshape(H, N_q + N_kv + N_kv).transpose()
+        matmul = np.concatenate([q_matmul, k_matmul, v_matmul], axis=0).reshape(N_q + N_kv + N_kv, H)
         self.make_matmul(matmul, name, root_input, **kwargs)
 
     def make_add_bias(self, add, name, root_input, **kwargs):
