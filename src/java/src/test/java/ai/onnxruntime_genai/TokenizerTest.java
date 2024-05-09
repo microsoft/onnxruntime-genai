@@ -2,7 +2,7 @@
  * Copyright (c) Microsoft Corporation. All rights reserved.
  * Licensed under the MIT License.
  */
-package ai.onnxruntime-genai;
+package ai.onnxruntime_genai;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -13,7 +13,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
-// import ai.onnxruntime-genai.Tokenizer;
+// import ai.onnxruntime_genai.Tokenizer;
 // import java.io.File;
 // import java.io.IOException;
 // import java.nio.ByteBuffer;

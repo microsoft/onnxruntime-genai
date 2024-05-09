@@ -2,29 +2,26 @@
  * Copyright (c) Microsoft Corporation. All rights reserved.
  * Licensed under the MIT License.
  */
-package ai.onnxruntime-genai;
+package ai.onnxruntime_genai;
 
-import java.nio.Buffer;
+import java.nio.IntBuffer;
+import java.io.IOException;
 
-public class GeneratorParams {
-
-}
-
-public class Generator {
-    private long _generatorHandle;
+public class Generator implements AutoCloseable {
+    private long nativeHandle;
 
     public Generator(Model model, GeneratorParams generatorParams)
     {
         // Result.VerifySuccess(NativeMethods.OgaCreateGenerator(model.Handle, generatorParams.Handle, out _generatorHandle));
     }
 
-    public boolean IsDone()
+    public boolean isDone()
     {
         // return NativeMethods.OgaGenerator_IsDone(_generatorHandle);
         return false;
     }
 
-    public void ComputeLogits()
+    public void computeLogits()
     {
         // Result.VerifySuccess(NativeMethods.OgaGenerator_ComputeLogits(_generatorHandle));
     }
@@ -34,7 +31,7 @@ public class Generator {
         // Result.VerifySuccess(NativeMethods.OgaGenerator_GenerateNextToken(_generatorHandle));
     }
 
-    public Buffer GetSequence(long index)
+    public IntBuffer GetSequence(long index)
     {
 //        ulong sequenceLength = NativeMethods.OgaGenerator_GetSequenceCount(_generatorHandle, (UIntPtr)index).ToUInt64();
 //        IntPtr sequencePtr = NativeMethods.OgaGenerator_GetSequenceData(_generatorHandle, (UIntPtr)index);
@@ -42,7 +39,14 @@ public class Generator {
 //        {
 //            return new ReadOnlySpan<int>(sequencePtr.ToPointer(), (int)sequenceLength);
 //        }
-        return new Buffer();
+        IntBuffer.wrap
+        return getSequence(nativeHandle);
     }
 
+    @Override
+    public void close() throws Exception {
+
+    }
+
+    private native IntBuffer getSequence(long nativeHandle);
 }

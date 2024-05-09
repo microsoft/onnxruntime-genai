@@ -12,7 +12,7 @@ allprojects {
 	}
 }
 
-project.group = "com.microsoft.onnxruntime-genai"
+project.group = "com.microsoft.onnxruntime_genai"
 version = rootProject.file('../../VERSION_INFO').text.trim()
 
 // cmake runs will inform us of the build directory of the current run
@@ -65,7 +65,7 @@ spotless {
 	java {
 		removeUnusedImports()
 		googleJavaFormat()
-		// targetExclude "src/test/java/ai/onnxruntime-genai/???.java"
+		// targetExclude "src/test/java/ai/onnxruntime_genai/???.java"
 	}
 	format 'gradle', {
 		target '**/*.gradle'
@@ -122,7 +122,7 @@ if (cmakeBuildDir != null) {
 	task allJar(type: Jar) {
 		manifest {
 			attributes('Automatic-Module-Name': project.group,
-					'Implementation-Title': 'onnxruntime-genai',
+					'Implementation-Title': 'onnxruntime_genai',
 					'Implementation-Version': project.version)
 		}
 		into("META-INF/maven/$project.group/$mavenArtifactId") {
@@ -197,10 +197,10 @@ publishing {
 
 			from components.java
 			pom {
-				name = 'onnxruntime-genai'
+				name = 'onnxruntime_genai'
 				description = defaultDescription
-				// TODO: Setup https://microsoft.github.io/onnxruntime-genai/ for equivalence with ORT?
-				url = 'https://github.com/microsoft/onnxruntime-genai/'
+				// TODO: Setup https://microsoft.github.io/onnxruntime_genai/ for equivalence with ORT?
+				url = 'https://github.com/microsoft/onnxruntime_genai/'
 				licenses {
 					license {
 						name = 'MIT License'
@@ -212,9 +212,9 @@ publishing {
 					url = 'https://www.microsoft.com'
 				}
 				scm {
-					connection = 'scm:git:git://github.com:microsoft/onnxruntime-genai.git'
-					developerConnection = 'scm:git:ssh://github.com/microsoft/onnxruntime-genai.git'
-					url = 'https://github.com/microsoft/onnxruntime-genai'
+					connection = 'scm:git:git://github.com:microsoft/onnxruntime_genai.git'
+					developerConnection = 'scm:git:ssh://github.com/microsoft/onnxruntime_genai.git'
+					url = 'https://github.com/microsoft/onnxruntime_genai'
 				}
 				developers {
 					// TODO: Does this need updating? 

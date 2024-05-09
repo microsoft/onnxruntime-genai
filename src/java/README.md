@@ -30,23 +30,23 @@ The build will generate output in `$REPO_ROOT/build/$OS/$CONFIGURATION/java/buil
 **TODO** Update this list to reflect the actual output.
 * `docs/javadoc/` - HTML javadoc
 * `reports/` - detailed test results and other reports
-* `libs/onnxruntime-genai-VERSION.jar` - JAR with compiled classes, platform-specific JNI shared library, and platform-specific onnxruntime shared library.
+* `libs/onnxruntime_genai-VERSION.jar` - JAR with compiled classes, platform-specific JNI shared library, and platform-specific onnxruntime shared library.
 
 #### Build System Overview
 
 The main CMake build system delegates building and testing to Gradle.
 This allows the CMake system to ensure all of the C/C++ compilation is achieved prior to the Java build.
 The Java build depends on C/C++ onnxruntime shared library and a C JNI shared library (source located in the `src/main/native` directory).
-The JNI shared library is the glue that allows for Java to call functions in onnxruntime-genai shared library.
+The JNI shared library is the glue that allows for Java to call functions in onnxruntime_genai shared library.
 Given the fact that CMake injects native dependencies during CMake builds, some gradle tasks (primarily, `build`, `test`, and `check`) may fail.
 
-When running the build script, CMake will compile the `onnxruntime-genai` target and the JNI glue `onnxruntime-genai4j_jni` target and expose the resulting libraries in a place where Gradle can ingest them.
+When running the build script, CMake will compile the `onnxruntime_genai` target and the JNI glue `onnxruntime_genai4j_jni` target and expose the resulting libraries in a place where Gradle can ingest them.
 Upon successful compilation of those targets, a special Gradle task to build will be executed. The results will be placed in the output directory stated above.
 
 ### Advanced Loading
 
 The default behavior is to load the shared libraries using classpath resources.
-If your use case requires custom loading of the shared libraries, please consult the javadoc in the [package-info.java](src/main/java/ai/onnxruntime-genai/package-info.java) or [OnnxRuntimeGenAI.java](src/main/java/ai/onnxruntime-genai/OnnxRuntimeGenAI.java) files.
+If your use case requires custom loading of the shared libraries, please consult the javadoc in the [package-info.java](src/main/java/ai/onnxruntime_genai/package-info.java) or [OnnxRuntimeGenAI.java](src/main/java/ai/onnxruntime_genai/OnnxRuntimeGenAI.java) files.
 
 ## Development
 
@@ -59,9 +59,9 @@ Misformatted code will raise failures when checks are ran during test run.
 
 ###  JNI Headers
 
-When adding or updating native methods in the Java files, it may be necessary to examine the relevant JNI headers in `build/headers/ai_onnxruntime-genai*.h`.
+When adding or updating native methods in the Java files, it may be necessary to examine the relevant JNI headers in `build/headers/ai_onnxruntime_genai*.h`.
 These files can be manually generated using Gradle's `compileJava` task which will compile the Java and update the header files accordingly.
-Then the corresponding C files in `./src/main/native/ai_onnxruntime-genai*.c` may be updated and the build can be ran.
+Then the corresponding C files in `./src/main/native/ai_onnxruntime_genai*.c` may be updated and the build can be ran.
 
 ### Dependencies
 

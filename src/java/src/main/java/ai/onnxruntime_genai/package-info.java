@@ -11,7 +11,7 @@
  * API.
  *
  * <p>There are two shared libraries required: <code>onnxruntime</code> and <code>onnxruntime4j_jni
- * </code>. The loader is in {@link ai.onnxruntime-genai.OnnxRuntime} and the logic is in this order:
+ * </code>. The loader is in {@link ai.onnxruntime_genai.OnnxRuntime} and the logic is in this order:
  *
  * <ol>
  *   <li>The user may signal to skip loading of a shared library using a property in the form <code>
@@ -44,4 +44,4 @@
  * a classpath resource. This is because these providers are loaded by the ONNX Runtime native
  * library itself and the Java API cannot control the loading location.
  */
-package ai.onnxruntime-genai;
+package ai.onnxruntime_genai;

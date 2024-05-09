@@ -10,4 +10,4 @@
  *
  * <p>This is the Android version of the package.
  */
-package ai.onnxruntime-genai.platform;
+package ai.onnxruntime_genai.platform;
