@@ -193,6 +193,10 @@ struct OgaGeneratorParams : OgaAbstract {
     OgaCheckResult(OgaGeneratorParamsSetInputSequences(this, &sequences));
   }
 
+  void AddExtraInput(const char* name, OgaTensor& tensor) {
+    OgaCheckResult(OgaGeneratorParamsAddExtraInput(this, name, &tensor));
+  }
+
   void TryGraphCaptureWithMaxBatchSize(int max_batch_size) {
     OgaCheckResult(OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(this, max_batch_size));
   }
