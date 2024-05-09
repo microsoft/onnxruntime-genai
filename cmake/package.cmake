@@ -5,7 +5,6 @@ set_target_properties(
 install(TARGETS
   onnxruntime-genai
   LIBRARY
-  RUNTIME
   PUBLIC_HEADER
 )
 
