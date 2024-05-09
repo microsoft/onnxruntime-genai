@@ -3,3 +3,7 @@
  * Licensed under the MIT License.
  */
 package ai.onnxruntime-genai;
+
+public class Model {
+
+}

@@ -4,14 +4,14 @@
  */
 package ai.onnxruntime-genai;
 
-/** An exception which contains the error message and code produced by the native onnxruntime. */
-public class OrtGenAIException extends Exception {
+/** An exception which contains the error message and code produced by the native layer. */
+public class GenAIException extends Exception {
   /**
-   * Creates an OrtGenAIException with the specified message.
+   * Creates an GenAIException with the specified message.
    *
    * @param message The message to use.
    */
-  public OrtGenAIException(String message) {
+  public GenAIException(String message) {
     super(message);
   }
 }
