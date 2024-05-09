@@ -48,7 +48,6 @@ if (WIN32)
 else ()
   set(CPACK_GENERATOR "TGZ")
 endif ()
-
 set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY TRUE)
 install(FILES
   "${PROJECT_SOURCE_DIR}/README.md"
@@ -56,9 +55,4 @@ install(FILES
   "${PROJECT_SOURCE_DIR}/SECURITY.md"
   "${PROJECT_SOURCE_DIR}/LICENSE"
   DESTINATION .)
-
-install(FILES
-  ${onnxruntime_libs}
-  DESTINATION lib)
-
 include(CPack)
