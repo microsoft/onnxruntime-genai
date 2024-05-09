@@ -260,7 +260,7 @@ struct OgaTensor : OgaAbstract {
     size_t size;
     OgaCheckResult(OgaTensorGetShapeSize(this, &size));
     std::vector<int64_t> shape(size);
-    OgaCheckResult(OgaTensorGetShape(this, shape.data(), shape.size());
+    OgaCheckResult(OgaTensorGetShape(this, shape.data(), shape.size()));
     return shape;
   }
 
