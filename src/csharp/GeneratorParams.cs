@@ -12,7 +12,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
     {
         private IntPtr _generatorParamsHandle;
         private bool _disposed = false;
-
         public GeneratorParams(Model model)
         {
             Result.VerifySuccess(NativeMethods.OgaCreateGeneratorParams(model.Handle, out _generatorParamsHandle));
@@ -49,6 +48,11 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public void SetInputSequences(Sequences sequences)
         {
             Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetInputSequences(_generatorParamsHandle, sequences.Handle));
+        }
+
+        public void AddExtraInput(string name, Tensor value)
+        {
+            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsAddExtraInput(_generatorParamsHandle, StringUtils.ToUtf8(name), value.Handle));
         }
 
         ~GeneratorParams()

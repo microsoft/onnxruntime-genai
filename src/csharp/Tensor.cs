@@ -29,14 +29,38 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         private IntPtr _tensorHandle;
         private bool _disposed = false;
 
-        public Tensor()
+        public Tensor(IntPtr data, Int64[] shape, ElementType type)
         {
-            Result.VerifySuccess(NativeMethods.OgaCreateTensorFromBuffer(0, 0, 0, ElementType.float32, out _tensorHandle));
+            unsafe
+            {
+                fixed (long* p = shape)
+                {
+                    Result.VerifySuccess(NativeMethods.OgaCreateTensorFromBuffer(data, p, (UIntPtr)shape.Length, type, out _tensorHandle));
+                }
+            }
         }
+        internal IntPtr Handle { get { return _tensorHandle; } }
+
         ~Tensor()
         {
             Dispose(false);
         }
+
+        Int64[] GetShape()
+        {
+            Result.VerifySuccess(NativeMethods.OgaTensorGetShapeSize(_tensorHandle, out UIntPtr size));
+            Int64[] shape = new Int64[size.ToUInt64()];
+
+            unsafe
+            {
+                fixed (long* p = shape)
+                {
+                    Result.VerifySuccess(NativeMethods.OgaTensorGetShape(_tensorHandle, p, size));
+                }
+            }
+            return shape;
+        }
+
         public void Dispose()
         {
             Dispose(true);
