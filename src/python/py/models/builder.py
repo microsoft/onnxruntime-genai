@@ -1356,7 +1356,7 @@ class Model:
         self.make_add(end_add_name, end_add_inputs, dtype=self.io_dtype, shape=end_add_shape) # Shape of mask is now (B, 1, S, T)
 
         tile_name = f"{basename}/Tile"
-        tile_inputs = [f"{end_add_name}/output_0", f"/model/constants/TensorProto.INT64/1D/1, {self.num_kv_heads}, 1, 1"]
+        tile_inputs = [f"{end_add_name}/output_0", f"/model/constants/TensorProto.INT64/1D/1, {self.num_attn_heads}, 1, 1"]
         tile_shape = ["batch_size", self.num_attn_heads, "source_sequence_length", "target_sequence_length"]
         self.make_tile(tile_name, tile_inputs, dtype=self.io_dtype, shape=tile_shape)
 
