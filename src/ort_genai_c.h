@@ -32,19 +32,19 @@ extern "C" {
 
 typedef enum OgaElementType {
   OgaElementType_undefined,
-  OgaElementType_float32, // maps to c type float
-  OgaElementType_uint8,   // maps to c type uint8_t
-  OgaElementType_int8,    // maps to c type int8_t
-  OgaElementType_uint16,  // maps to c type uint16_t
-  OgaElementType_int16,   // maps to c type int16_t
-  OgaElementType_int32,   // maps to c type int32_t
-  OgaElementType_int64,   // maps to c type int64_t
-  OgaElementType_string,  // string type (not currently supported by Oga)
-  OgaElementType_bool,    // maps to c type bool
-  OgaElementType_float16, // IEEE 752-2008 binary16 format, 1 sign bit, 5 bit exponent, 10 bit fraction
-  OgaElementType_float64, // maps to c type double
-  OgaElementType_uint32,  // maps to c type uint32_t
-  OgaElementType_uint64,  // maps to c type uint64_t
+  OgaElementType_float32,  // maps to c type float
+  OgaElementType_uint8,    // maps to c type uint8_t
+  OgaElementType_int8,     // maps to c type int8_t
+  OgaElementType_uint16,   // maps to c type uint16_t
+  OgaElementType_int16,    // maps to c type int16_t
+  OgaElementType_int32,    // maps to c type int32_t
+  OgaElementType_int64,    // maps to c type int64_t
+  OgaElementType_string,   // string type (not currently supported by Oga)
+  OgaElementType_bool,     // maps to c type bool
+  OgaElementType_float16,  // IEEE 752-2008 binary16 format, 1 sign bit, 5 bit exponent, 10 bit fraction
+  OgaElementType_float64,  // maps to c type double
+  OgaElementType_uint32,   // maps to c type uint32_t
+  OgaElementType_uint64,   // maps to c type uint64_t
 } OgaElementType;
 
 typedef struct OgaResult OgaResult;
