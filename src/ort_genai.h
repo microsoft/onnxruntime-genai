@@ -250,6 +250,26 @@ struct OgaTensor : OgaAbstract {
     return std::unique_ptr<OgaTensor>(p);
   }
 
+  OgaElementType GetType() {
+    OgaElementType type;
+    OgaCheckResult(OgaTensorGetType(this, &type));
+    return type;
+  }
+
+  std::vector<int64_t> GetShape() {
+    size_t size;
+    OgaCheckResult(OgaTensorGetShapeSize(this, &size));
+    std::vector<int64_t> shape(size);
+    OgaCheckResult(OgaTensorGetShape(this, shape.data(), shape.size());
+    return shape;
+  }
+
+  void* GetData() {
+    void* data;
+    OgaCheckResult(OgaTensorGetData(this, &data));
+    return data;
+  }
+
   static void operator delete(void* p) { OgaDestroyTensor(reinterpret_cast<OgaTensor*>(p)); }
 };
 
@@ -273,4 +293,4 @@ int GetCurrentGpuDeviceId() {
   return device_id;
 }
 
-}
+}  // namespace Oga
