@@ -1355,12 +1355,12 @@ class Model:
         end_add_shape = ["batch_size", 1, "source_sequence_length", "target_sequence_length"]
         self.make_add(end_add_name, end_add_inputs, dtype=self.io_dtype, shape=end_add_shape) # Shape of mask is now (B, 1, S, T)
 
-        concat_name = f"{basename}/Concat"
-        concat_inputs = [f"{end_add_name}/output_0", f"/model/constants/TensorProto.INT64/1D/1, {self.num_kv_heads}, 1, 1"]
-        concat_shape = ["batch_size", self.num_attn_heads, "source_sequence_length", "target_sequence_length"]
-        self.make_tile(concat_name, concat_inputs, dtype=self.io_dtype, shape=concat_shape)
+        tile_name = f"{basename}/Tile"
+        tile_inputs = [f"{end_add_name}/output_0", f"/model/constants/TensorProto.INT64/1D/1, {self.num_kv_heads}, 1, 1"]
+        tile_shape = ["batch_size", self.num_attn_heads, "source_sequence_length", "target_sequence_length"]
+        self.make_tile(tile_name, tile_inputs, dtype=self.io_dtype, shape=tile_shape)
 
-        self.mask_attrs["mask_name"] = concat_name
+        self.mask_attrs["mask_name"] = tile_name
 
     def make_past_key_subgraph(self, basename):
         shape_name = f"{basename}/Shape"
@@ -1956,7 +1956,7 @@ def get_args():
         "--execution_provider",
         required=True,
         choices=["cpu", "cuda", "dml", "web"],
-        help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU)",
+        help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU, INT4 WEB)",
     )
 
     parser.add_argument(
