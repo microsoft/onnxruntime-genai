@@ -37,7 +37,7 @@ endif()
 include(cmake/cxx_standard.cmake)
 
 set(REPO_ROOT ${CMAKE_SOURCE_DIR})
-set(SRC_ROOT ${SRC_ROOT})
+set(SRC_ROOT ${REPO_ROOT}/src)
 set(GENERATORS_ROOT ${SRC_ROOT})
 set(MODELS_ROOT ${SRC_ROOT}/models)
 

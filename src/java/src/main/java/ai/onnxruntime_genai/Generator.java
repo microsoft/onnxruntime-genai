@@ -33,13 +33,6 @@ public class Generator implements AutoCloseable {
 
     public IntBuffer GetSequence(long index)
     {
-//        ulong sequenceLength = NativeMethods.OgaGenerator_GetSequenceCount(_generatorHandle, (UIntPtr)index).ToUInt64();
-//        IntPtr sequencePtr = NativeMethods.OgaGenerator_GetSequenceData(_generatorHandle, (UIntPtr)index);
-//        unsafe
-//        {
-//            return new ReadOnlySpan<int>(sequencePtr.ToPointer(), (int)sequenceLength);
-//        }
-        IntBuffer.wrap
         return getSequence(nativeHandle);
     }
 

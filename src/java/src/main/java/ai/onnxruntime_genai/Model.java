@@ -20,7 +20,7 @@ public class Model implements AutoCloseable {
     }
 
     public Sequences Generate(GeneratorParams generatorParams) throws GenAIException {
-        return new Sequences(generate(modelHandle, generatorParams.handle()));
+        return new Sequences(generate(modelHandle, generatorParams.nativeHandle()));
     }
 
     @Override
