@@ -54,12 +54,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             return shape;
         }
 
-        public IntPtr Data()
-        {
-            Result.VerifySuccess(NativeMethods.OgaTensorGetData(_tensorHandle, out IntPtr data));
-            return data;
-        }
-
         public void Dispose()
         {
             Dispose(true);

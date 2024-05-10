@@ -393,7 +393,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             Assert.NotNull(tensor);
 
             Assert.Equal(shape, tensor.Shape());
-            Assert.Equal(data_pointer, tensor.Data());
             Assert.Equal(ElementType.float32, tensor.Type());
 
             generatorParams.SetModelInput("test_input", tensor);
