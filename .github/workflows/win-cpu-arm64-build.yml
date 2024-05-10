@@ -37,15 +37,15 @@ jobs:
       with:
         dotnet-version: '8.0.x'
 
-    - name : Install jq and curl
+    - name : Install jq and nuget
       run: |
-        choco install -y jq curl
+        choco install -y jq nuget
 
     - name: Download OnnxRuntime Nightly
       shell: pwsh
       run: |
         $ORT_NIGHTLY_VERSION=$(Invoke-WebRequest --Uri "${{ env.ORT_NIGHTLY_REST_API }}" | jq -r '.value[0].versions[0].normalizedVersion')
-        nuget.exe install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_NIGHTLY_VERSION -ExcludeVersion -NonInteractive
+        nuget install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_NIGHTLY_VERSION -ExcludeVersion -NonInteractive
 
     - run: Get-ChildItem  ${{ env.ORT_PACKAGE_NAME }} -Recurse
       continue-on-error: true
