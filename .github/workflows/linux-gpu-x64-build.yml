@@ -15,8 +15,7 @@ env:
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime.Gpu.Linux&api-version=6.0-preview.1"
   ORT_PACKAGE_NAME: Microsoft.ML.OnnxRuntime.Gpu.Linux
   ORT_NIGHTLY_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
-  NUGET_EXE: "mono /usr/local/bin/nuget.exe"
-
+  DOTNET_INSTALL_DIR: "${{ github.workspace }}/dotnet"
 
 jobs:
   linux-cuda-x64-build:
@@ -37,22 +36,14 @@ jobs:
           clean: true
           path: manylinux
           submodules: true
-      - name: install Mono and Nuget
-        run: |
-          sudo apt install ca-certificates gnupg
-          sudo gpg --homedir /tmp --no-default-keyring --keyring /usr/share/keyrings/mono-official-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 3FA7E0328081BFF6A14DA29AA6A19B38D3D831EF
-          echo "deb [signed-by=/usr/share/keyrings/mono-official-archive-keyring.gpg] https://download.mono-project.com/repo/ubuntu stable-focal main" | sudo tee /etc/apt/sources.list.d/mono-official-stable.list
-          sudo apt update
-          sudo apt install -y mono-devel
-          sudo curl -o /usr/local/bin/nuget.exe https://dist.nuget.org/win-x86-commandline/latest/nuget.exe
-          sudo chmod +x /usr/local/bin/nuget.exe
 
-      - name: Install jq and dotnet
+      - name: Install jq
         run: |
-          wget https://packages.microsoft.com/config/ubuntu/20.04/packages-microsoft-prod.deb -O packages-microsoft-prod.deb
-          sudo dpkg -i packages-microsoft-prod.deb
-          rm packages-microsoft-prod.deb
-          sudo apt-get update && sudo apt-get install -y dotnet-sdk-8.0 jq
+          sudo apt-get install jq
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
 
       - name: Download OnnxRuntime
         run: |
@@ -62,8 +53,11 @@ jobs:
 
       - name: Download OnnxRuntime Nightly
         run: |
-          mono /usr/local/bin/nuget.exe install ${{ env.ORT_PACKAGE_NAME }} -version ${{ env.ORT_NIGHTLY_VERSION }} -x
+          dotnet new console
+          dotnet add package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_NIGHTLY_VERSION }} --source ${{ env.ORT_NIGHTLY_SOURCE }} --package-directory .
+          dotnet build
         continue-on-error: true
+
       - name: list files
         shell: bash
         run: |
@@ -75,8 +69,8 @@ jobs:
       - name: Extract OnnxRuntime library and header files
         run: |
           mkdir -p ort/lib
-          mv ${{ env.ORT_PACKAGE_NAME }}/buildTransitive/native/include ort/
-          mv ${{ env.ORT_PACKAGE_NAME }}/runtimes/linux-x64/native/* ort/lib/
+          mv microsoft.ml.onnxruntime.gpu.linux/${{ env.ORT_NIGHTLY_VERSION }}/buildTransitive/native/include ort/
+          mv microsoft.ml.onnxruntime.gpu.linux/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/linux-x64/native/* ort/lib/
           ort_version=$(echo ${{ env.ORT_NIGHTLY_VERSION }} | cut -d- -f1-1)
           cp ort/lib/libonnxruntime.so ort/lib/libonnxruntime.so.$ort_version
 
