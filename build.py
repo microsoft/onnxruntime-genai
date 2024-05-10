@@ -159,7 +159,7 @@ def _validate_build_dir(args: argparse.Namespace):
             # also tweak build directory name for mac builds
             target_sys = "macOS"
 
-        args.build_dir = Path("build/" + target_sys)
+        args.build_dir = Path("build") / target_sys
 
     # set to a config specific build dir. it should exist unless we're creating the cmake setup
     is_strict = not args.update
