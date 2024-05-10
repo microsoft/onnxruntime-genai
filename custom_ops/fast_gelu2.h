@@ -25,7 +25,7 @@ struct FastGelu2 {
     }
     const T* bias_data = bias.has_value() ? (*bias)->Data() : nullptr;
     auto bias_length = bias.has_value() ? (*bias)->NumberOfElement() : 0;
-    using TT = typename CudaT<T>::MappedType;
+    using TT = typename contrib::CudaT<T>::MappedType;
     LaunchFastGeluKernel2<TT>(reinterpret_cast<cudaStream_t>(ctx->GetCudaStream()),
                              input_length,
                              bias_length,

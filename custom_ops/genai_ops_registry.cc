@@ -3,7 +3,7 @@
 #include <string>
 #include <vector>
 
-FxLoadCustomOpFactory LoadCustomOpClasses_Contrib2;
+extern FxLoadCustomOpFactory LoadCustomOpClasses_Contrib2;
 
 static int GetOrtVersion(const OrtApiBase* api_base = nullptr) noexcept {
   // the version will be cached after the first call on RegisterCustomOps

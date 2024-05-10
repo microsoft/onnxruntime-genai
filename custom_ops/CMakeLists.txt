@@ -28,7 +28,9 @@ set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcudafe \"--diag_suppress=bad_friend_
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcudafe \"--diag_suppress=unsigned_compare_with_zero\"")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcudafe \"--diag_suppress=expr_has_no_effect\"")
 
-add_library(genai_custom_ops SHARED fast_gelu2.h fast_gelu_impl2.cuh fast_gelu_impl2.cu genai_ops_registry.cc)
+add_compile_definitions(USE_CUDA)
+
+add_library(genai_custom_ops SHARED fast_gelu2.h fast_gelu_impl2.cuh fast_gelu_impl2.cu genai_ops.cc genai_ops_registry.cc)
 
 target_include_directories(genai_custom_ops PUBLIC ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
 target_link_libraries(genai_custom_ops PUBLIC cudart cublas cufft)
