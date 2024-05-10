@@ -69,6 +69,8 @@ jobs:
       value: ''
     ${{ if eq(parameters.ep, 'cuda') }}:
       value: '.Gpu'
+    ${{ if eq(parameters.ep, 'directml') }}:
+      value: '.DirectML'
   - name: ortHome
     value: 'ort'
   - name: dml_dir
