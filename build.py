@@ -47,7 +47,7 @@ def _parse_args():
         default="RelWithDebInfo",
         type=str,
         choices=["Debug", "MinSizeRel", "Release", "RelWithDebInfo"],
-        help="Configuration(s) to build.")
+        help="Configuration to build.")
 
     # Build phases.
     parser.add_argument("--update", action="store_true", help="Update makefiles.")
@@ -155,14 +155,9 @@ def _validate_build_dir(args: argparse.Namespace):
         target_sys = platform.system()
 
         # override if we're cross-compiling
+        # TODO: Add ios and arm64 support
         if args.android:
             target_sys = "Android"
-        elif args.ios:
-            # target_sys = "iOS"
-            raise ValueError("iOS builds are not supported yet.")
-        elif args.arm64:
-            # target_sys = "arm64"
-            raise ValueError("Cross-compiling for ARM64 is not supported yet.")
         elif platform.system() == "Darwin":
             # also tweak build directory name for mac builds
             target_sys = "macOS"
@@ -255,7 +250,7 @@ def _create_env(args: argparse.Namespace):
     env = os.environ.copy()
 
     if args.use_cuda:
-        env["CUDA_HOME"] = args.cuda_home
+        env["CUDA_HOME"] = str(args.cuda_home)
         env["PATH"] = str(args.cuda_home / "bin") + os.pathsep + os.environ["PATH"]
 
     if args.android:
@@ -312,11 +307,10 @@ def update(args: argparse.Namespace, env: dict[str, str]):
 
     command += [
         "-S",
-        ".",
+        str(REPO_ROOT),
         "-B",
         str(args.build_dir),
         "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
-        "-DUSE_CXX17=ON",
         f"-DUSE_CUDA={'ON' if args.use_cuda else 'OFF'}",
         f"-DUSE_DML={'ON' if args.use_dml else 'OFF'}",
         f"-DENABLE_JAVA={'ON' if args.build_java else 'OFF'}",
@@ -396,7 +390,7 @@ if __name__ == "__main__":
     arguments = _parse_args()
 
     _validate_args(arguments)
-    environment = _create_env(args)
+    environment = _create_env(arguments)
 
     if arguments.update:
         update(arguments, environment)

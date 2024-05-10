@@ -358,6 +358,8 @@ bool IsCudaGraphEnabled(Config::SessionOptions& session_options) {
           return value.second == "1";
         }
       }
+    } else if (provider_options.name == "dml") {
+      return true;
     }
   }
   return false;
@@ -397,7 +399,7 @@ struct RootObject_Element : JSON::Element {
   JSON::Element& t_;
 };
 
-void ParseConfig(const std::filesystem::path& filename, Config& config) {
+void ParseConfig(const fs::path& filename, Config& config) {
   std::ifstream file(filename, std::ios::binary | std::ios::ate);
   if (!file.is_open()) {
     throw std::runtime_error("Error opening " + filename.string());
@@ -421,7 +423,7 @@ void ParseConfig(const std::filesystem::path& filename, Config& config) {
   }
 }
 
-Config::Config(const std::filesystem::path& path) : config_path{path} {
+Config::Config(const fs::path& path) : config_path{path} {
   ParseConfig(path / "genai_config.json", *this);
 
   if (model.context_length == 0)
