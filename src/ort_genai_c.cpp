@@ -140,7 +140,7 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputSequences(OgaGeneratorParams* 
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGeneratorParamsAddExtraInput(OgaGeneratorParams* oga_params, const char* name, OgaTensor* tensor) {
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetModelInput(OgaGeneratorParams* oga_params, const char* name, OgaTensor* tensor) {
   OGA_TRY
   auto& params = *reinterpret_cast<Generators::GeneratorParams*>(oga_params);
   params.extra_inputs.push_back({std::string{name}, reinterpret_cast<Generators::Tensor*>(tensor)->shared_from_this()});
@@ -272,18 +272,18 @@ OgaResult* OGA_API_CALL OgaTensorGetType(OgaTensor* tensor, OgaElementType* out)
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaTensorGetShapeSize(OgaTensor* tensor, size_t* out) {
+OgaResult* OGA_API_CALL OgaTensorGetShapeRank(OgaTensor* tensor, size_t* out) {
   OGA_TRY
   *out = reinterpret_cast<Generators::Tensor*>(tensor)->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape().size();
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaTensorGetShape(OgaTensor* tensor, int64_t* shape_dims, size_t shape_dims_count) {
+OgaResult* OGA_API_CALL OgaTensorGetShape(OgaTensor* tensor, int64_t* shape_dims, size_t rank) {
   OGA_TRY
   auto shape = reinterpret_cast<Generators::Tensor*>(tensor)->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape();
-  if (shape_dims_count != shape.size())
-    throw std::runtime_error("shape_dims_count doesn't match result of OgaTensorGetShapeSize");
+  if (rank != shape.size())
+    throw std::runtime_error("shape_dims_count doesn't match result of OgaTensorGetShapeRank");
   std::copy(shape.begin(), shape.end(), shape_dims);
   return nullptr;
   OGA_CATCH

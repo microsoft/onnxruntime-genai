@@ -6,6 +6,7 @@ using System.Runtime.InteropServices;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
+    // The values in this enum must match ONNX Runtime's type values 
     public enum ElementType : long
     {
         undefined,
@@ -31,7 +32,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         public Tensor(IntPtr data, Int64[] shape, ElementType type)
         {
-            Result.VerifySuccess(NativeMethods.OgaCreateTensorFromBuffer(data, shape, (UIntPtr) shape.Length, type, out _tensorHandle));
+            Result.VerifySuccess(NativeMethods.OgaCreateTensorFromBuffer(data, shape, (UIntPtr)shape.Length, type, out _tensorHandle));
         }
         internal IntPtr Handle { get { return _tensorHandle; } }
 
@@ -39,13 +40,24 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         {
             Dispose(false);
         }
-
-        Int64[] GetShape()
+        public ElementType Type()
         {
-            Result.VerifySuccess(NativeMethods.OgaTensorGetShapeSize(_tensorHandle, out UIntPtr size));
+            Result.VerifySuccess(NativeMethods.OgaTensorGetType(_tensorHandle, out ElementType element_type));
+            return element_type;
+        }
+
+        public Int64[] Shape()
+        {
+            Result.VerifySuccess(NativeMethods.OgaTensorGetShapeRank(_tensorHandle, out UIntPtr size));
             Int64[] shape = new Int64[size.ToUInt64()];
             Result.VerifySuccess(NativeMethods.OgaTensorGetShape(_tensorHandle, shape, size));
             return shape;
+        }
+
+        public IntPtr Data()
+        {
+            Result.VerifySuccess(NativeMethods.OgaTensorGetData(_tensorHandle, out IntPtr data));
+            return data;
         }
 
         public void Dispose()

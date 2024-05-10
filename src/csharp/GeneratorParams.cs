@@ -50,9 +50,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetInputSequences(_generatorParamsHandle, sequences.Handle));
         }
 
-        public void AddExtraInput(string name, Tensor value)
+        public void SetModelInput(string name, Tensor value)
         {
-            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsAddExtraInput(_generatorParamsHandle, StringUtils.ToUtf8(name), value.Handle));
+            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetModelInput(_generatorParamsHandle, StringUtils.ToUtf8(name), value.Handle));
         }
 
         ~GeneratorParams()

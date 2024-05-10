@@ -193,8 +193,8 @@ struct OgaGeneratorParams : OgaAbstract {
     OgaCheckResult(OgaGeneratorParamsSetInputSequences(this, &sequences));
   }
 
-  void AddExtraInput(const char* name, OgaTensor& tensor) {
-    OgaCheckResult(OgaGeneratorParamsAddExtraInput(this, name, &tensor));
+  void SetModelInput(const char* name, OgaTensor& tensor) {
+    OgaCheckResult(OgaGeneratorParamsSetModelInput(this, name, &tensor));
   }
 
   void TryGraphCaptureWithMaxBatchSize(int max_batch_size) {
@@ -262,7 +262,7 @@ struct OgaTensor : OgaAbstract {
 
   std::vector<int64_t> Shape() {
     size_t size;
-    OgaCheckResult(OgaTensorGetShapeSize(this, &size));
+    OgaCheckResult(OgaTensorGetShapeRank(this, &size));
     std::vector<int64_t> shape(size);
     OgaCheckResult(OgaTensorGetShape(this, shape.data(), shape.size()));
     return shape;

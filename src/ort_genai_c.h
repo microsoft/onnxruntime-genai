@@ -174,12 +174,13 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputIDs(OgaGeneratorPar
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputSequences(OgaGeneratorParams* generator_params, const OgaSequences* sequences);
 
 /*
- * \brief Add extra model input that genai does not handle. For example, the dynamic model weights for LoRA type models are passed this way
- * \param[in] generator_params The generator params to add the input to
+ * \brief For additional model inputs that genai does not handle, this lets the user set their values. For example LoRA models handle
+ * fine tuning through model inputs. This lets the user supply the fine tuning inputs, while genai handles the standard inputs.
+ * \param[in] generator_params The generator params to set the input on
  * \param[in] name Name of the model input (this must match the model's input name)
  * \param[in] tensor The OgaTensor of the input data
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsAddExtraInput(OgaGeneratorParams* generator_params, const char* name, OgaTensor* tensor);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetModelInput(OgaGeneratorParams* generator_params, const char* name, OgaTensor* tensor);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperInputFeatures(OgaGeneratorParams*, OgaTensor* tensor);
 
@@ -272,10 +273,9 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTensorGetType(OgaTensor*, OgaElementType* 
 
 /* Get the number of dimensions of the OgaTensor's shape, typically used to allocate a buffer of this size then calling OgaTensorGetShape with it
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTensorGetShapeSize(OgaTensor*, size_t* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTensorGetShapeRank(OgaTensor*, size_t* out);
 
-/* Copies the shape dimensions into the shape_dims parameters. shape_dims_count must match the value returned by OgaTensorGetShapeSize
- *
+/* Copies the shape dimensions into the shape_dims parameters. shape_dims_count must match the value returned by OgaTensorGetShapeRank
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTensorGetShape(OgaTensor*, int64_t* shape_dims, size_t shape_dims_count);
 

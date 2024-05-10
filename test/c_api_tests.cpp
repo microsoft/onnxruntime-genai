@@ -106,7 +106,7 @@ TEST(CAPITests, Tensor_And_AddExtraInput) {
   auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
   auto params = OgaGeneratorParams::Create(*model);
-  params->AddExtraInput("test_input", *tensor);
+  params->SetModelInput("test_input", *tensor);
 }
 
 // DML doesn't support GPT attention
