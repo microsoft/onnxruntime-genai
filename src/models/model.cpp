@@ -1,3 +1,5 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
 #include <algorithm>
 #include <thread>
 
@@ -64,6 +66,15 @@ void State::Run(OrtSession& session, OrtRunOptions& run_options) {
   }
 }
 
+OrtValue* State::GetOutput(const char* name) {
+  for (size_t i = 0; i < output_names_.size(); i++) {
+    if (std::strcmp(output_names_[i], name) == 0) {
+      return outputs_[i];
+    }
+  }
+  return nullptr;
+}
+
 void State::ClearIO() {
   input_names_.clear();
   output_names_.clear();
@@ -99,25 +110,25 @@ std::vector<int32_t> PadInputs(std::span<std::span<const int32_t>> sequences, in
   return result;
 }
 
-void CheckResult(tfmError_t error) {
-  if (error != kTfmOK)
-    throw std::runtime_error(TfmGetLastErrorMessage());
+void CheckResult(extError_t error) {
+  if (error != kOrtxOK)
+    throw std::runtime_error(OrtxGetLastErrorMessage());
 }
 
 TokenizerStream::TokenizerStream(const Tokenizer& tokenizer)
     : tokenizer_{tokenizer.shared_from_this()} {
-  CheckResult(TfmCreate(kTfmKindDetokenizerCache, cache_.Address()));
+  CheckResult(OrtxCreate(kOrtxKindDetokenizerCache, cache_.Address()));
 }
 
 const std::string& TokenizerStream::Decode(int32_t token) {
   const char* string;
-  CheckResult(TfmDetokenizeCached(tokenizer_->tokenizer_, cache_, token, &string));
+  CheckResult(OrtxDetokenizeCached(tokenizer_->tokenizer_, cache_, token, &string));
   chunk_ = string;
   return chunk_;
 }
 
 Tokenizer::Tokenizer(Config& config) : pad_token_id_{config.model.pad_token_id} {
-  CheckResult(TfmCreateTokenizer(tokenizer_.Address(), reinterpret_cast<const char*>(config.config_path.u8string().c_str())));
+  CheckResult(OrtxCreateTokenizer(tokenizer_.Address(), reinterpret_cast<const char*>(config.config_path.u8string().c_str())));
 }
 
 std::unique_ptr<TokenizerStream> Tokenizer::CreateStream() const {
@@ -125,21 +136,21 @@ std::unique_ptr<TokenizerStream> Tokenizer::CreateStream() const {
 }
 
 std::vector<int32_t> Tokenizer::Encode(const char* text) const {
-  TfmPtr<TfmTokenId2DArray> ids;
-  CheckResult(TfmTokenize(tokenizer_, &text, 1, ids.Address()));
+  OrtxPtr<OrtxTokenId2DArray> ids;
+  CheckResult(OrtxTokenize(tokenizer_, &text, 1, ids.Address()));
 
-  const tfmTokenId_t* tokens;
+  const extTokenId_t* tokens;
   size_t count;
-  CheckResult(TfmTokenId2DArrayGetItem(ids, 0, &tokens, &count));
+  CheckResult(OrtxTokenId2DArrayGetItem(ids, 0, &tokens, &count));
   return {tokens, tokens + count};
 }
 
 std::string Tokenizer::Decode(std::span<const int32_t> tokens) const {
-  TfmPtr<TfmStringArray> tfm_string_array;
-  CheckResult(TfmDetokenize1D(tokenizer_, reinterpret_cast<const uint32_t*>(tokens.data()), tokens.size(), tfm_string_array.Address()));
+  OrtxPtr<OrtxStringArray> ortx_string_array;
+  CheckResult(OrtxDetokenize1D(tokenizer_, reinterpret_cast<const uint32_t*>(tokens.data()), tokens.size(), ortx_string_array.Address()));
 
   const char* string;
-  CheckResult(TfmStringArrayGetItem(tfm_string_array, 0, &string));
+  CheckResult(OrtxStringArrayGetItem(ortx_string_array, 0, &string));
   return string;
 }
 
@@ -420,7 +431,7 @@ void ConvertFp16ToFp32(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<Or
       // DML doesn't currently support on-device scoring, so we fall back to the CPU
     case DeviceType::CPU:
       for (int i = 0; i < count; i++)
-        fp32[i] = Float16ToFloat32(fp16[i]);
+        fp32[i] = FastFloat16ToFloat32(fp16[i]);
       break;
 
 #if USE_CUDA
@@ -431,39 +442,6 @@ void ConvertFp16ToFp32(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<Or
 
     default:
       throw std::runtime_error("ConvertFp16ToFp32 - Unsupported device type");
-  }
-}
-
-size_t GetOrtTypeSize(ONNXTensorElementDataType type) {
-  switch (type) {
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
-      return sizeof(float);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
-      return sizeof(Ort::Float16_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16:
-      return sizeof(Ort::BFloat16_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
-      return sizeof(double);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
-      return sizeof(int8_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
-      return sizeof(uint8_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16:
-      return sizeof(int16_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16:
-      return sizeof(uint16_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
-      return sizeof(int32_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32:
-      return sizeof(uint32_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
-      return sizeof(int64_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64:
-      return sizeof(uint64_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:
-      return sizeof(bool);
-    default:
-      throw std::runtime_error("Unsupported ONNXTensorElementDataType in GetTypeSize");
   }
 }
 
@@ -479,7 +457,7 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
 
   auto input_type_info = input->GetTensorTypeAndShapeInfo();
   auto element_type = input_type_info->GetElementType();
-  auto element_size = GetOrtTypeSize(element_type);
+  auto element_size = SizeOf(element_type);
   auto input_shape = input_type_info->GetShape();
   const int64_t batch_size = input_shape[0];
   const int64_t data_size_bytes = input_type_info->GetElementCount() * element_size / batch_size;
