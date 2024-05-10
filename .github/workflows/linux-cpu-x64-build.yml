@@ -39,7 +39,6 @@ jobs:
 
       - name: Download OnnxRuntime Nightly
         run: |
-#          ${{ env.NUGET_EXE }} install ${{ env.ORT_PACKAGE_NAME }} -version ${{ env.ORT_NIGHTLY_VERSION }} -x
           dotnet new console
           dotnet add package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_NIGHTLY_VERSION }} --source ${{ env.ORT_NIGHTLY_SOURCE }} --package-directory ${{ env.ORT_PACKAGE_NAME }}
           dotnet build

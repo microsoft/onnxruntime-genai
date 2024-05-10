@@ -51,14 +51,13 @@ jobs:
           echo "$ORT_NIGHTLY_VERSION" 
           echo "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" >> $GITHUB_ENV
 
-
       - name: Download OnnxRuntime Nightly
         run: |
-#          mono /usr/local/bin/nuget.exe install ${{ env.ORT_PACKAGE_NAME }} -version ${{ env.ORT_NIGHTLY_VERSION }} -x
           dotnet new console
           dotnet add package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_NIGHTLY_VERSION }} --source ${{ env.ORT_NIGHTLY_SOURCE }} --package-directory ${{ env.ORT_PACKAGE_NAME }}
           dotnet build
         continue-on-error: true
+
       - name: list files
         shell: bash
         run: |
