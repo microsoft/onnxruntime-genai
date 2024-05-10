@@ -13,7 +13,7 @@ env:
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
   ORT_NIGHTLY_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
-
+  DOTNET_INSTALL_DIR: "${{ github.workspace }}/dotnet"
 jobs:
   linux_cpu_x64:
     runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU" ]
@@ -39,7 +39,10 @@ jobs:
 
       - name: Download OnnxRuntime Nightly
         run: |
-          ${{ env.NUGET_EXE }} install ${{ env.ORT_PACKAGE_NAME }} -version ${{ env.ORT_NIGHTLY_VERSION }} -x
+#          ${{ env.NUGET_EXE }} install ${{ env.ORT_PACKAGE_NAME }} -version ${{ env.ORT_NIGHTLY_VERSION }} -x
+          dotnet new console
+          dotnet add package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_NIGHTLY_VERSION }} --source ${{ env.ORT_NIGHTLY_SOURCE }} --package-directory ${{ env.ORT_PACKAGE_NAME }}
+          dotnet build
         continue-on-error: true
 
       - name: list files
