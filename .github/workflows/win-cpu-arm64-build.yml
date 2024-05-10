@@ -39,11 +39,10 @@ jobs:
 
     - name : Install jq, nuget and curl
       run: |
-        choco install -y jq nuget.commandline curl
+        choco install -y jq nuget.commandline
 
     - name: Download OnnxRuntime Nightly
       run: |
-#        $ORT_NIGHTLY_VERSION=$(curl -Uri "${{ env.ORT_NIGHTLY_REST_API }}" -UseBasicParsing | jq -r '.value[0].versions[0].normalizedVersion')
         $ORT_NIGHTLY_VERSION=$(Invoke-WebRequest -Uri "${{ env.ORT_NIGHTLY_REST_API }}" -UseBasicParsing | jq -r '.value[0].versions[0].normalizedVersion')
         echo "$ORT_NIGHTLY_VERSION"
         nuget install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_NIGHTLY_VERSION -NonInteractive
