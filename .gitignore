@@ -27,3 +27,4 @@ examples/python/hf_cache
 .ipynb_checkpoints/
 /src/java/.gradle
 /src/java/local.properties
+/src/java/build
