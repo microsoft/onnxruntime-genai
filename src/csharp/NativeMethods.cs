@@ -178,7 +178,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                               out IntPtr /* const char** */ outStr);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern unsafe IntPtr /* OgaResult* */ OgaCreateTensorFromBuffer(IntPtr /* data* */ data, long* shape_dims, UIntPtr shape_dims_count, ElementType element_Type,
+        public static extern IntPtr /* OgaResult* */ OgaCreateTensorFromBuffer(IntPtr /* data* */ data, long[] shape_dims, UIntPtr shape_dims_count, ElementType element_Type,
                                                                                       out IntPtr /* OgaTensor** */ tensor);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
@@ -191,7 +191,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public static extern IntPtr /* OgaResult* */ OgaTensorGetShapeSize(IntPtr /* OgaTensor * */ tensor, out UIntPtr size);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern unsafe IntPtr /* OgaResult* */ OgaTensorGetShape(IntPtr /* OgaTensor * */ tensor, long* shape_dims, UIntPtr /* size_t */ shape_dims_count);
+        public static extern IntPtr /* OgaResult* */ OgaTensorGetShape(IntPtr /* OgaTensor * */ tensor, long[] shape_dims, UIntPtr /* size_t */ shape_dims_count);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaTensorGetData(IntPtr /* OgaTensor * */ tensor, out IntPtr /* void* */ data);

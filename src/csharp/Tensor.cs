@@ -31,13 +31,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         public Tensor(IntPtr data, Int64[] shape, ElementType type)
         {
-            unsafe
-            {
-                fixed (long* p = shape)
-                {
-                    Result.VerifySuccess(NativeMethods.OgaCreateTensorFromBuffer(data, p, (UIntPtr)shape.Length, type, out _tensorHandle));
-                }
-            }
+            Result.VerifySuccess(NativeMethods.OgaCreateTensorFromBuffer(data, shape, (UIntPtr)shape.Length, type, out _tensorHandle));
         }
         internal IntPtr Handle { get { return _tensorHandle; } }
 
@@ -50,14 +44,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         {
             Result.VerifySuccess(NativeMethods.OgaTensorGetShapeSize(_tensorHandle, out UIntPtr size));
             Int64[] shape = new Int64[size.ToUInt64()];
-
-            unsafe
-            {
-                fixed (long* p = shape)
-                {
-                    Result.VerifySuccess(NativeMethods.OgaTensorGetShape(_tensorHandle, p, size));
-                }
-            }
+            Result.VerifySuccess(NativeMethods.OgaTensorGetShape(_tensorHandle, shape, size));
             return shape;
         }
 
