@@ -97,7 +97,7 @@ TEST(CAPITests, Tensor_And_AddExtraInput) {
                             20, 21, 22, 23};
   std::vector<int64_t> shape{3, 4}; // Use vector so we can easily compare for equality later
 
-  auto tensor=OgaTensor::Create(data.data(), shape, OgaElementType_float32);
+  auto tensor=OgaTensor::Create(data.data(), shape.data(), shape.size(), OgaElementType_float32);
 
   EXPECT_EQ(tensor->Data(), data.data());
   EXPECT_EQ(tensor->Shape(), shape);
