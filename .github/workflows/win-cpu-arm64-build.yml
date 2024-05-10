@@ -17,6 +17,7 @@ env:
   binaryDir: 'build/cpu'
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
+  ORT_NIGHTLY_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
 
 
 jobs:
@@ -36,20 +37,16 @@ jobs:
     - uses: actions/setup-dotnet@v4
       with:
         dotnet-version: '8.0.x'
-    - name: install pwsh
+
+    - name : Install jq
       run: |
-        dotnet tool install --global PowerShell
-    - name : Install jq, nuget and curl
-      run: |
-        choco install -y jq nuget.commandline
+        choco install -y jq
 
     - name: Download OnnxRuntime Nightly
-      shell: pwsh
       run: |
-        "$PSVersionTable"
-        $ORT_NIGHTLY_VERSION=$(Invoke-WebRequest -Uri "${{ env.ORT_NIGHTLY_REST_API }}" -UseBasicParsing | jq -r '.value[0].versions[0].normalizedVersion')
-        "$ORT_NIGHTLY_VERSION"
-        nuget install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_NIGHTLY_VERSION
+        dotnet new consloe
+        dotnet add package ${{ env.ORT_PACKAGE_NAME }} --source ${{ env.ORT_NIGHTLY_SOURCE }} --package-directory .
+        dotnet build
 
     - run: Get-ChildItem  ${{ env.ORT_PACKAGE_NAME }} -Recurse
       continue-on-error: true
@@ -57,8 +54,8 @@ jobs:
     - name: Extract OnnxRuntime library and header files
       run: |
         mkdir ort/lib
-        move ${{ env.ORT_PACKAGE_NAME }}/buildTransitive/native/include ort/
-        move ${{ env.ORT_PACKAGE_NAME }}/runtimes/win-arm64/native/* ort/lib/   
+        move ${{ env.ORT_PACKAGE_NAME }}*/**/build/native/include ort/
+        move ${{ env.ORT_PACKAGE_NAME }}*//**/runtimes/win-arm64/native/* ort/lib/   
 
     - name: Configure CMake
       run: |
