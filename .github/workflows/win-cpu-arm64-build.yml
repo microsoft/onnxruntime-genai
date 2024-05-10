@@ -45,7 +45,8 @@ jobs:
       shell: pwsh
       run: |
         $ORT_NIGHTLY_VERSION=$(Invoke-WebRequest --Uri "${{ env.ORT_NIGHTLY_REST_API }}" | jq -r '.value[0].versions[0].normalizedVersion')
-        nuget install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_NIGHTLY_VERSION -ExcludeVersion -NonInteractive
+        echo "$ORT_NIGHTLY_VERSION"
+        nuget.exe install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_NIGHTLY_VERSION -ExcludeVersion -NonInteractive
 
     - run: Get-ChildItem  ${{ env.ORT_PACKAGE_NAME }} -Recurse
       continue-on-error: true
