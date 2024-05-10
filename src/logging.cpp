@@ -77,7 +77,7 @@ void SGRExample(std::ostream& stream) {
 }
 
 bool RunExample = (SGRExample(std::cerr), false);
-#endif SGR_EXAMPLE
+#endif
 
 std::ostream& Log(std::string_view label, std::string_view string) {
   assert(g_log.enabled);

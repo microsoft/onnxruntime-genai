@@ -17,12 +17,15 @@
     <dependencies>
       <group targetFramework="NETSTANDARD" >
         <dependency id="Microsoft.ML.OnnxRuntimeGenAI.Managed" version="$version$" />
+        <dependency id="Microsoft.ML.OnnxRuntime$ort_nuget_ext$" version="$ort_version$" />
       </group>
       <group targetFramework="NETCOREAPP" >
         <dependency id="Microsoft.ML.OnnxRuntimeGenAI.Managed" version="$version$" />
+        <dependency id="Microsoft.ML.OnnxRuntime$ort_nuget_ext$" version="$ort_version$" />
       </group>
       <group targetFramework="NETFRAMEWORK" >
         <dependency id="Microsoft.ML.OnnxRuntimeGenAI.Managed" version="$version$" />
+        <dependency id="Microsoft.ML.OnnxRuntime$ort_nuget_ext$" version="$ort_version$" />
       </group>
     </dependencies>
   </metadata>
@@ -34,7 +37,6 @@
     <!-- Windows x64 -->
     <file src="..\$buildPath$\$configuration$\onnxruntime-genai.lib" target="runtimes\win-x64\native" />
     <file src="..\$buildPath$\$configuration$\onnxruntime-genai.dll" target="runtimes\win-x64\native" />
-    <file src="..\$ortHome$\lib\**" target="runtimes\win-x64\native" />
 
 <!--      --><!-- Windows arm64 -->
 <!--     <file src="..\$buildPath$\$configuration$\onnxruntime-genai.lib" target="runtimes\win-arm64\native" /> -->
