@@ -57,6 +57,7 @@ class Model:
                 "enable_cuda_graph": enable_cuda_graph,        # "1" if the the model is able to enable cuda graph, "0" otherwise
             },
             "dml": {},
+            "web": {},
         }
 
         # Map input names to their types and shapes
@@ -184,6 +185,11 @@ class Model:
             if self.ep != "dml":
                 self.attention_attrs["use_rotemb_in_attn"] = True
                 self.input_names.remove("position_ids")
+
+        if self.ep in {"web"}:
+            # ort-web for now wants to use MHA
+            self.attention_attrs["use_packed_matmul"] = False
+            self.attention_attrs["op_type"] = "MultiHeadAttention"
 
         self.past_present_share_buffer = self.attention_attrs["op_type"] == "GroupQueryAttention"
 
@@ -469,6 +475,11 @@ class Model:
     def make_concat(self, name, inputs, dtype, shape, axis=0):
         output = f"{name}/output_0"
         self.make_node("Concat", inputs=inputs, outputs=[output], name=name, axis=axis)
+        self.make_value_info(output, dtype, shape=shape)
+
+    def make_tile(self, name, inputs, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Tile", inputs=inputs, outputs=[output], name=name)
         self.make_value_info(output, dtype, shape=shape)
 
     def make_equal(self, name, inputs, shape):
@@ -1344,13 +1355,12 @@ class Model:
         end_add_shape = ["batch_size", 1, "source_sequence_length", "target_sequence_length"]
         self.make_add(end_add_name, end_add_inputs, dtype=self.io_dtype, shape=end_add_shape) # Shape of mask is now (B, 1, S, T)
 
-        # TODO: replace Concat with Expand for performance gains
-        concat_name = f"{basename}/Concat"
-        concat_inputs = [f"{end_add_name}/output_0" for _ in range(self.num_attn_heads)]
-        concat_shape = ["batch_size", self.num_attn_heads, "source_sequence_length", "target_sequence_length"]
-        self.make_concat(concat_name, concat_inputs, dtype=self.io_dtype, shape=concat_shape, axis=1) # Shape of mask is now (B, N, S, T)
+        tile_name = f"{basename}/Tile"
+        tile_inputs = [f"{end_add_name}/output_0", f"/model/constants/TensorProto.INT64/1D/1, {self.num_attn_heads}, 1, 1"]
+        tile_shape = ["batch_size", self.num_attn_heads, "source_sequence_length", "target_sequence_length"]
+        self.make_tile(tile_name, tile_inputs, dtype=self.io_dtype, shape=tile_shape)
 
-        self.mask_attrs["mask_name"] = concat_name
+        self.mask_attrs["mask_name"] = tile_name
 
     def make_past_key_subgraph(self, basename):
         shape_name = f"{basename}/Shape"
@@ -1869,7 +1879,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
     config = AutoConfig.from_pretrained(hf_name, use_auth_token=True, trust_remote_code=True, **extra_kwargs)
 
     # Set input/output precision of ONNX model
-    io_dtype = TensorProto.FLOAT if precision in {"int8", "fp32"} or (precision == "int4" and execution_provider == "cpu") else TensorProto.FLOAT16
+    io_dtype = TensorProto.FLOAT if precision in {"int8", "fp32"} or (precision == "int4" and execution_provider in ["cpu"]) else TensorProto.FLOAT16
 
     if "config_only" not in extra_options:
         # List architecture options in alphabetical order
@@ -1945,8 +1955,8 @@ def get_args():
         "-e",
         "--execution_provider",
         required=True,
-        choices=["cpu", "cuda", "dml"],
-        help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU)",
+        choices=["cpu", "cuda", "dml", "web"],
+        help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU, INT4 WEB)",
     )
 
     parser.add_argument(
