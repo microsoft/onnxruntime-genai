@@ -58,7 +58,7 @@ jobs:
         run: |
           mkdir -p ort/lib
           mv microsoft.ml.onnxruntime/**/build/native/include ort/
-          mv microsoft.ml.onnxruntime/**/runtimes/linux-x64/native/* ort/lib/
+          mv microsoft.ml.onnxruntime/**/runtimes/linux-arm64/native/* ort/lib/
           ort_version=$(echo ${{ env.ORT_NIGHTLY_VERSION }} | cut -d- -f1-1)
           cp ort/lib/libonnxruntime.so ort/lib/libonnxruntime.so.$ort_version
 
