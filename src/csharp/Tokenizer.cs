@@ -65,7 +65,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public string Decode(ReadOnlySpan<int> sequence)
         {
             IntPtr outStr = IntPtr.Zero;
-            Result.VerifySuccess(NativeMethods.OgaTokenizerDecode(_tokenizerHandle, sequence.ToArray(), (UIntPtr)sequence.Length, out outStr));
+            unsafe
+            {
+                fixed (int* sequencePtr = sequence)
+                {
+                    Result.VerifySuccess(NativeMethods.OgaTokenizerDecode(_tokenizerHandle, sequencePtr, (UIntPtr)sequence.Length, out outStr));
+                }
+            }
             try
             {
                 return StringUtils.FromUtf8(outStr);
