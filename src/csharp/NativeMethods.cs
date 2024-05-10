@@ -59,11 +59,11 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         // This function is used to set the input IDs for the generator.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern unsafe IntPtr /* OgaResult* */ OgaGeneratorParamsSetInputIDs(IntPtr /* OgaGeneratorParams* */ generatorParams,
-                                                                                          int* /* const int32_t* */ inputIDs,
-                                                                                          UIntPtr /* size_t */ inputIDsCount,
-                                                                                          UIntPtr /* size_t */ sequenceLength,
-                                                                                          UIntPtr /* size_t */ batchSize);
+        public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsSetInputIDs(IntPtr /* OgaGeneratorParams* */ generatorParams,
+                                                                                   int[] /* const int32_t* */ inputIDs,
+                                                                                   UIntPtr /* size_t */ inputIDsCount,
+                                                                                   UIntPtr /* size_t */ sequenceLength,
+                                                                                   UIntPtr /* size_t */ batchSize);
 
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
@@ -155,10 +155,10 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         // This function is used to decode the given token into a string. The caller is responsible for freeing the
         // returned string using the OgaDestroyString function when it is no longer needed.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern unsafe IntPtr /* OgaResult* */ OgaTokenizerDecode(IntPtr /* const OgaTokenizer* */ tokenizer,
-                                                                               int* /* const int32_t* */ sequence,
-                                                                               UIntPtr /* size_t */ sequenceLength,
-                                                                               out IntPtr /* const char** */ outStr);
+        public static extern IntPtr /* OgaResult* */ OgaTokenizerDecode(IntPtr /* const OgaTokenizer* */ tokenizer,
+                                                                        int[] /* const int32_t* */ sequence,
+                                                                        UIntPtr /* size_t */ sequenceLength,
+                                                                        out IntPtr /* const char** */ outStr);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern void OgaDestroyString(IntPtr /* const char* */ str);

@@ -36,13 +36,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         public void SetInputIDs(ReadOnlySpan<int> inputIDs, ulong sequenceLength, ulong batchSize)
         {
-            unsafe
-            {
-                fixed (int* inputIDsPtr = inputIDs)
-                {
-                    Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetInputIDs(_generatorParamsHandle, inputIDsPtr, (UIntPtr)inputIDs.Length, (UIntPtr)sequenceLength, (UIntPtr)batchSize));
-                }
-            }
+            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetInputIDs(_generatorParamsHandle, inputIDs.ToArray(), (UIntPtr)inputIDs.Length, (UIntPtr)sequenceLength, (UIntPtr)batchSize));
         }
 
         public void SetInputSequences(Sequences sequences)
