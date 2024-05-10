@@ -19,3 +19,5 @@ steps:
       or(or(and(eq('${{parameters.condition}}', 'ci_only'), and(succeeded(), in(variables['Build.Reason'], 'IndividualCI', 'BatchedCI', 'Scheduled'))),
           and(eq('${{parameters.condition}}', 'always'), always())),
           and(eq('${{parameters.condition}}', 'succeeded'), succeeded()))
+    ignoreDirectories:
+     '$(Build.Repository.LocalPath)/build/cpu/_deps/'
