@@ -16,6 +16,8 @@ env:
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/$(ort_zip)"
   binaryDir: 'build/cpu'
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
+  ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
+
 
 jobs:
   windows-cpu-arm64-build:
