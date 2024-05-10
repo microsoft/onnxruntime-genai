@@ -16,7 +16,7 @@ steps:
     DisplayName: 'ESRP - Sign C# dlls'
     Pattern: '*OnnxRuntimeGenAI*.dll'
 - powershell: |
-    $VERSION = '0.2.0-rc6'
+    $VERSION = '0.2.0-rc7'
     nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.nuspec `
       -Prop version=$VERSION `
       -Prop genai_nuget_ext=$(genai_nuget_ext) `
