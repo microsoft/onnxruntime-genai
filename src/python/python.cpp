@@ -135,7 +135,7 @@ std::string ToFormatDescriptor(ONNXTensorElementDataType type) {
   }
 }
 
-std::unique_ptr<OrtValue> ToTensor(pybind11::array& v) {
+std::unique_ptr<OrtValue> ToOrtValue(pybind11::array& v) {
   auto type = ToTensorType(v.dtype());
 
   std::vector<int64_t> shape(v.ndim());
@@ -240,12 +240,12 @@ struct PyGeneratorParams {
 
     if (py_whisper_input_features_.size() != 0) {
       GeneratorParams::Whisper& whisper = params_->inputs.emplace<GeneratorParams::Whisper>();
-      whisper.input_features = ToTensor(py_whisper_input_features_);
+      whisper.input_features = std::make_shared<Tensor>(ToOrtValue(py_whisper_input_features_));
     }
   }
 
   void AddExtraInput(const std::string& name, pybind11::array& value) {
-    params_->extra_inputs.push_back({name, ToTensor(value)});
+    params_->extra_inputs.push_back({name, std::make_shared<Tensor>(ToOrtValue(value))});
     refs_.emplace_back(value);
   }
 

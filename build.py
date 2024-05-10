@@ -162,7 +162,7 @@ def _validate_build_dir(args: argparse.Namespace):
             # also tweak build directory name for mac builds
             target_sys = "macOS"
 
-        args.build_dir = Path("build/" + target_sys)
+        args.build_dir = Path("build") / target_sys
 
     # set to a config specific build dir. it should exist unless we're creating the cmake setup
     is_strict = not args.update
@@ -356,8 +356,8 @@ def build(args: argparse.Namespace, env: dict[str, str]):
         # Build the library
         csharp_build_command = [dotnet, "build", ".",]
         csharp_build_command += _get_csharp_properties(args)
-        util.run(csharp_build_command, cwd=str(REPO_ROOT / "src" / "csharp"))
-        util.run(csharp_build_command, cwd=str(REPO_ROOT / "test" / "csharp"))
+        util.run(csharp_build_command, cwd=REPO_ROOT / "src" / "csharp")
+        util.run(csharp_build_command, cwd=REPO_ROOT / "test" / "csharp")
 
 
 def test(args: argparse.Namespace, env: dict[str, str]):

@@ -5,6 +5,7 @@ from __future__ import annotations  # for '|' shorthand in type hints
 
 import shlex
 import subprocess
+from os import PathLike
 from pathlib import Path
 from .logger import get_logger
 
@@ -13,7 +14,7 @@ _log = get_logger("util.run")
 
 def run(
     *args,
-    cwd: Path | None = None,
+    cwd: PathLike | str | bytes | None = None,
     input=None,
     capture_stdout: bool = False,
     capture_stderr: bool = False,
@@ -54,7 +55,7 @@ def run(
 
     completed_process = subprocess.run(
         cmd,
-        cwd=str(cwd),
+        cwd=cwd,
         check=check,
         input=input,
         stdout=output(capture_stdout),
