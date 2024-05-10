@@ -40,11 +40,6 @@ jobs:
     - name : Install jq, nuget and curl
       run: |
         choco install -y jq nuget.commandline curl
-    - name: Check jq, nuget and curl
-      run: |
-        jq --version
-        nuget help
-        curl --version
 
     - name: Download OnnxRuntime Nightly
       run: |
