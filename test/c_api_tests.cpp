@@ -99,9 +99,9 @@ TEST(CAPITests, Tensor_And_AddExtraInput) {
 
   auto tensor=OgaTensor::Create(data.data(), shape, OgaElementType_float32);
 
-  EXPECT_EQ(tensor->GetData(), data.data());
-  EXPECT_EQ(tensor->GetShape(), shape);
-  EXPECT_EQ(tensor->GetType(), OgaElementType_float32);
+  EXPECT_EQ(tensor->Data(), data.data());
+  EXPECT_EQ(tensor->Shape(), shape);
+  EXPECT_EQ(tensor->Type(), OgaElementType_float32);
 
   auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 

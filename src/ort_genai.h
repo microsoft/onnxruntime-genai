@@ -254,13 +254,13 @@ struct OgaTensor : OgaAbstract {
     return std::unique_ptr<OgaTensor>(p);
   }
 
-  OgaElementType GetType() {
+  OgaElementType Type() {
     OgaElementType type;
     OgaCheckResult(OgaTensorGetType(this, &type));
     return type;
   }
 
-  std::vector<int64_t> GetShape() {
+  std::vector<int64_t> Shape() {
     size_t size;
     OgaCheckResult(OgaTensorGetShapeSize(this, &size));
     std::vector<int64_t> shape(size);
@@ -268,7 +268,7 @@ struct OgaTensor : OgaAbstract {
     return shape;
   }
 
-  void* GetData() {
+  void* Data() {
     void* data;
     OgaCheckResult(OgaTensorGetData(this, &data));
     return data;
