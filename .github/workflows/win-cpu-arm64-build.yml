@@ -36,15 +36,19 @@ jobs:
     - uses: actions/setup-dotnet@v4
       with:
         dotnet-version: '8.0.x'
-
+    - name: install pwsh
+      run: |
+        dotnet tool install --global PowerShell
     - name : Install jq, nuget and curl
       run: |
         choco install -y jq nuget.commandline
 
     - name: Download OnnxRuntime Nightly
+      shell: pwsh
       run: |
+        "$PSVersionTable"
         $ORT_NIGHTLY_VERSION=$(Invoke-WebRequest -Uri "${{ env.ORT_NIGHTLY_REST_API }}" -UseBasicParsing | jq -r '.value[0].versions[0].normalizedVersion')
-        echo "$ORT_NIGHTLY_VERSION"
+        "$ORT_NIGHTLY_VERSION"
         nuget install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_NIGHTLY_VERSION
 
     - run: Get-ChildItem  ${{ env.ORT_PACKAGE_NAME }} -Recurse
