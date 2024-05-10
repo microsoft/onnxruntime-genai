@@ -591,8 +591,8 @@ class Model:
             self.make_add(name, add_bias_inputs, dtype=self.io_dtype, shape=shape)
 
     def make_packed_add(self, q_add, k_add, v_add, name, root_input, **kwargs):
-        # Combine 3 Adds of shape H into 1 packed Add of shape 3H
-        add = np.stack((q_add, k_add, v_add), axis=0).flatten()
+        # Combine 3 Adds of shape N_q, N_kv, and N_kv into 1 packed Add of shape N_q + N_kv + N_kv
+        add = np.concatenate([q_add, k_add, v_add], axis=0).flatten()
         self.make_add_bias(add, name, root_input, **kwargs)
 
     def make_embedding(self, embedding):
