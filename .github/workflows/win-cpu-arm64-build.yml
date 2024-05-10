@@ -39,7 +39,7 @@ jobs:
 
     - name : Install jq and nuget
       run: |
-        choco install -y jq nuget
+        choco install -y jq nuget.commandline
 
     - name: Download OnnxRuntime Nightly
       shell: pwsh
