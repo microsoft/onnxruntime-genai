@@ -31,7 +31,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         public Tensor(IntPtr data, Int64[] shape, ElementType type)
         {
-            Result.VerifySuccess(NativeMethods.OgaCreateTensorFromBuffer(data, shape, (UIntPtr)shape.Length, type, out _tensorHandle));
+            Result.VerifySuccess(NativeMethods.OgaCreateTensorFromBuffer(data, shape, (UIntPtr) shape.Length, type, out _tensorHandle));
         }
         internal IntPtr Handle { get { return _tensorHandle; } }
 

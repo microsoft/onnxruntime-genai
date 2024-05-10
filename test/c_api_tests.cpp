@@ -89,6 +89,26 @@ TEST(CAPITests, EndToEndPhiBatch) {
 #endif
 }
 
+TEST(CAPITests, Tensor_And_AddExtraInput) {
+
+  // Create a [3 4] shaped tensor
+  std::array<float,12> data{0, 1, 2, 3,
+                            10, 11, 12, 13, 
+                            20, 21, 22, 23};
+  std::vector<int64_t> shape{3, 4}; // Use vector so we can easily compare for equality later
+
+  auto tensor=OgaTensor::Create(data.data(), shape, OgaElementType_float32);
+
+  EXPECT_EQ(tensor->GetData(), data.data());
+  EXPECT_EQ(tensor->GetShape(), shape);
+  EXPECT_EQ(tensor->GetType(), OgaElementType_float32);
+
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+
+  auto params = OgaGeneratorParams::Create(*model);
+  params->AddExtraInput("test_input", *tensor);
+}
+
 // DML doesn't support GPT attention
 #if !USE_DML
 TEST(CAPITests, GreedySearchGptFp32CAPI) {

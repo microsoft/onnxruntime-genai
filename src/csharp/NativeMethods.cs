@@ -179,7 +179,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaCreateTensorFromBuffer(IntPtr /* data* */ data, long[] shape_dims, UIntPtr shape_dims_count, ElementType element_Type,
-                                                                                      out IntPtr /* OgaTensor** */ tensor);
+                                                                               out IntPtr /* OgaTensor** */ tensor);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern void OgaDestroyTensor(IntPtr /* OgaTensor * */ tensor);

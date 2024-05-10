@@ -173,6 +173,12 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputIDs(OgaGeneratorPar
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputSequences(OgaGeneratorParams* generator_params, const OgaSequences* sequences);
 
+/*
+* \brief Add extra model input that genai does not handle. For example, the dynamic model weights for LoRA type models are passed this way
+* \param[in] generator_params The generator params to add the input to
+* \param[in] name Name of the model input (this must match the model's input name)
+* \param[in] tensor The OgaTensor of the input data
+*/
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsAddExtraInput(OgaGeneratorParams* generator_params, const char* name, OgaTensor* tensor);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperInputFeatures(OgaGeneratorParams*, OgaTensor* tensor);
@@ -248,11 +254,33 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizerStream(OgaTokenizerStream*);
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream*, int32_t token, const char** out);
 
+/* Create an OgaTensor from a user owned buffer. The OgaTensor does not own the memory (as it has no way to free it) so
+* the 'data' parameter must be valid for the lifetime of the OgaTensor.
+* 
+* \param[in] data User supplied memory pointer, must remain valid for lifetime of the OgaTensor
+* \param[in] shape_dims Pointer to array of int64_t values that define the tensor shape, example [1 20 30] would be equivalent to a C array of [1][20][30]
+* \param[in] shape_dims_count Count of elements in the shape_dims array
+* \param[in] element_type The data type that 'data' points to.
+* \param[out] out Writes the newly created OgaTensor into this, must be destroyed with OgaDestroyTensor
+*/
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTensorFromBuffer(void* data, const int64_t* shape_dims, size_t shape_dims_count, OgaElementType element_type, OgaTensor** out);
 OGA_EXPORT void OGA_API_CALL OgaDestroyTensor(OgaTensor* tensor);
+
+/* Get the OgaElementType of the data stored in the OgaTensor
+*/
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTensorGetType(OgaTensor*, OgaElementType* out);
+
+/* Get the number of dimensions of the OgaTensor's shape, typically used to allocate a buffer of this size then calling OgaTensorGetShape with it
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTensorGetShapeSize(OgaTensor*, size_t* out);
+
+/* Copies the shape dimensions into the shape_dims parameters. shape_dims_count must match the value returned by OgaTensorGetShapeSize
+*
+*/
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTensorGetShape(OgaTensor*, int64_t* shape_dims, size_t shape_dims_count);
+
+/* A pointer to the tensor data, it is typically cast into the actual data type of the tensor
+*/
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTensorGetData(OgaTensor*, void** out);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaSetCurrentGpuDeviceId(int device_id);

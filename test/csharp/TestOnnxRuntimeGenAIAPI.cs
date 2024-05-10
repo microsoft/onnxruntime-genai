@@ -9,6 +9,7 @@ using Microsoft.ML.OnnxRuntimeGenAI;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection.Emit;
+using System.Runtime.InteropServices;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 {
@@ -369,6 +370,30 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                     Assert.NotNull(outputStrings);
                 }
             }
+        }
+
+        [Fact(DisplayName = "TestTensorAndAddExtraInput")]
+        public void TestTensorAndAddExtraInput()
+        {
+            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "hf-internal-testing", "tiny-random-gpt2-fp32");
+            using var model = new Model(modelPath);
+            Assert.NotNull(model);
+
+            using var generatorParams = new GeneratorParams(model);
+            Assert.NotNull(generatorParams);
+
+            float[] data = { 0, 1, 2, 3, 4, 10, 11, 12, 13, 14, 20, 21, 22, 23, 24 };
+            long[] shape = { 3, 5 };
+
+            // Pin the array to get its pointer
+            GCHandle handle = GCHandle.Alloc(data, GCHandleType.Pinned);
+            IntPtr data_pointer = handle.AddrOfPinnedObject();
+
+            using var tensor = new Tensor(data_pointer, shape, ElementType.float32);
+            Assert.NotNull(tensor);
+            generatorParams.AddExtraInput("test_input", tensor);
+
+            handle.Free();
         }
     }
 }
