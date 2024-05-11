@@ -109,6 +109,13 @@ TEST(CAPITests, Tensor_And_AddExtraInput) {
   params->SetModelInput("test_input", *tensor);
 }
 
+TEST(CAPITests, Logging) {
+  // Trivial test to ensure the API builds properly
+  Oga::SetLogBool("enabled", true);
+  Oga::SetLogString("filename", nullptr); // If we had a filename set, this would stop logging to the file and go back to the console
+  Oga::SetLogBool("enabled", false);
+}
+
 // DML doesn't support GPT attention
 #if !USE_DML
 TEST(CAPITests, GreedySearchGptFp32CAPI) {
