@@ -3,8 +3,7 @@
  * Licensed under the MIT License.
  */
 #include <jni.h>
-#include <stdio.h>
-#include "JniUtil.h"
+#include "utils.h"
 
 jint JNI_OnLoad(JavaVM *vm, void *reserved) {
     // To silence unused-parameter error.
