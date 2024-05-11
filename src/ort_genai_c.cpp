@@ -46,7 +46,8 @@ OgaResult* OGA_API_CALL OgaSetLogBool(const char* name, bool value) {
 
 OgaResult* OGA_API_CALL OgaSetLogString(const char* name, const char* value) {
   OGA_TRY
-  Generators::SetLogString(name, value);
+  // Turn nullptr into an empty std::string (nullptr directly will crash the std::string constructor)
+  Generators::SetLogString(name, value ? value : std::string{});
   return nullptr;
   OGA_CATCH
 }

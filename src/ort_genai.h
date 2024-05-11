@@ -58,16 +58,6 @@ inline void OgaCheckResult(OgaResult* result) {
   }
 }
 
-struct OgaLog {
-  void SetBool(const char* name, bool value) {
-    OgaCheckResult(OgaSetLogBool(name, value));
-  }
-
-  void SetString(const char* name, const char* value) {
-    OgaCheckResult(OgaSetLogString(name, value));
-  }
-};
-
 struct OgaModel : OgaAbstract {
   static std::unique_ptr<OgaModel> Create(const char* config_path) {
     OgaModel* p;
@@ -286,6 +276,14 @@ struct OgaHandle {
 
 // Global Oga functions
 namespace Oga {
+
+void SetLogBool(const char* name, bool value) {
+  OgaCheckResult(OgaSetLogBool(name, value));
+}
+
+void SetLogString(const char* name, const char* value) {
+  OgaCheckResult(OgaSetLogString(name, value));
+}
 
 void SetCurrentGpuDeviceId(int device_id) {
   OgaCheckResult(OgaSetCurrentGpuDeviceId(device_id));
