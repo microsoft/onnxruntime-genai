@@ -3,22 +3,22 @@
 #pragma once
 /*
  * General purpose logging for GenAI
- * 
+ *
  * The two functions to access the log are at the top, SetLogBool and SetLogString.
  * These functions modify the variables in the global LogItems structure.
- * 
+ *
  * For example, to enable logging, just SetLogBool("enabled", true)
  * To dump model run call input tensors, SetLogBool("model_input_values", true)
  *
  * NOTE: The names in LogItems must match the strings in the APIs and the strings displayed for log entries.
  *       This makes it easy to know what option is displaying which data, and to easily know how to turn options off.
- * 
+ *
  * Logging to a file is special: SetLogString("filename", "path") as "filename" is not a string in LogItems
- * 
+ *
  * COLOR: The functions use ANSI SGR terminal codes for color, the 'struct SGR' below makes it easy to add common
  *        options during log options. Just look in the code for examples of how to use it. Note that the colors
  *        may differ in intensity/saturation on different platforms.
- * 
+ *
  *        "warning" messages will appear in yellow, there is a special case in the Log(...) function for this
  *        There is no red for errors, as errors are exceptions.
  */
