@@ -244,7 +244,7 @@ struct PyGeneratorParams {
     }
   }
 
-  void AddExtraInput(const std::string& name, pybind11::array& value) {
+  void SetModelInput(const std::string& name, pybind11::array& value) {
     params_->extra_inputs.push_back({name, std::make_shared<Tensor>(ToOrtValue(value))});
     refs_.emplace_back(value);
   }
@@ -366,7 +366,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_property_readonly("vocab_size", [](const PyGeneratorParams& v) { return v.params_->vocab_size; })
       .def_readwrite("input_ids", &PyGeneratorParams::py_input_ids_)
       .def_readwrite("whisper_input_features", &PyGeneratorParams::py_whisper_input_features_)
-      .def("add_extra_input", &PyGeneratorParams::AddExtraInput)
+      .def("set_model_input", &PyGeneratorParams::SetModelInput)
       .def("set_search_options", &PyGeneratorParams::SetSearchOptions)  // See config.h 'struct Search' for the options
       .def("try_use_cuda_graph_with_max_batch_size", &PyGeneratorParams::TryUseCudaGraphWithMaxBatchSize);
 
