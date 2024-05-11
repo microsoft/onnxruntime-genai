@@ -6,13 +6,12 @@ package ai.onnxruntime_genai;
 
 public class Model implements AutoCloseable {
     private long modelHandle;
-    private long generatorParamsHandle;
     private GeneratorParams generatorParams;
 
     public Model(String modelPath) throws GenAIException
     {
         modelHandle = createModel(modelPath);
-
+        generatorParams = new GeneratorParams(modelHandle);
     }
 
     public GeneratorParams GetParams() {
@@ -20,13 +19,14 @@ public class Model implements AutoCloseable {
     }
 
     public Sequences Generate(GeneratorParams generatorParams) throws GenAIException {
-        return new Sequences(generate(modelHandle, generatorParams.nativeHandle()));
+        long sequencesHandle = generate(modelHandle, generatorParams.nativeHandle());
+        return new Sequences(sequencesHandle);
     }
 
     @Override
     public void close() throws GenAIException {
         if (modelHandle != 0) {
-            releaseModel(modelHandle);
+            destroyModel(modelHandle);
             modelHandle = 0;
         }
     }
@@ -34,13 +34,6 @@ public class Model implements AutoCloseable {
     protected long nativeHandle() {
         return modelHandle;
     }
-
-    /*
-    private native long loadModel(String modelPath);
-    private native long createTokenizer(long nativeModel);
-    private native void releaseTokenizer(long nativeTokenizer);
-    private native String run(long nativeModel, long nativeTokenizer, String prompt, boolean useCallback);
-    */
 
     static {
         try {
@@ -51,7 +44,7 @@ public class Model implements AutoCloseable {
     }
 
     private native long createModel(String modelPath);
-    private native void releaseModel(long modelHandle);
+    private native void destroyModel(long modelHandle);
 
     private native long generate(long modelHandle, long generatorParamsHandle);
 }

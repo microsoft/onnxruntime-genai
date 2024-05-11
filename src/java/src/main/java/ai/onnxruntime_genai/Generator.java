@@ -29,14 +29,14 @@ public class Generator implements AutoCloseable {
     @Override
     public void close() throws Exception {
         if (nativeHandle != 0) {
-            releaseGenerator(nativeHandle);
+            destroyGenerator(nativeHandle);
             nativeHandle = 0;
         }
     }
 
     private native long createGenerator(long modelHandle, long generatorParamsHandle);
 
-    private native void releaseGenerator(long nativeHandle);
+    private native void destroyGenerator(long nativeHandle);
 
     private native boolean isDone(long nativeHandle);
 

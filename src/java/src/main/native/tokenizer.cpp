@@ -4,3 +4,4 @@
  */
 #include <jni.h>
 #include "ort_genai_c.h"
+#include "utils.h"
