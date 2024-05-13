@@ -1,18 +1,32 @@
 package ai.onnxruntime_genai;
 
+/**
+ * The `GeneratorParams` class represents the parameters used for generating sequences with a model.
+ * Set the prompt using setInput, and any other search options using setSearchOption.
+ */
 public class GeneratorParams implements AutoCloseable {
     private long nativeHandle = 0;
 
-    protected GeneratorParams(long modelHandle) {
-        nativeHandle = createGeneratorParams(modelHandle);
+    public GeneratorParams(Model model) {
+        nativeHandle = createGeneratorParams(model.nativeHandle());
     }
 
-    public void SetSearchOption(String searchOption, double value) {
-        setSearchOptionNumber(nativeHandle, searchOption, value);
+    public void setSearchOption(String optionName, double value) {
+        setSearchOptionNumber(nativeHandle, optionName, value);
     }
 
-    public void SetSearchOption(String searchOption, boolean value) {
-        setSearchOptionBool(nativeHandle, searchOption, value);
+    public void setSearchOption(String optionName, boolean value) {
+        setSearchOptionBool(nativeHandle, optionName, value);
+    }
+
+    /**
+     * Sets the prompt/s for model execution. 
+     * The `sequences` are created by using Tokenizer.Encode or EncodeBatch.
+     * 
+     * @param sequences The encoded input prompt/s.
+     */
+    public void setInput(Sequences sequences) {
+        setInputSequences(nativeHandle, sequences.nativeHandle());
     }
 
     @Override
@@ -36,8 +50,13 @@ public class GeneratorParams implements AutoCloseable {
     }
 
     private native long createGeneratorParams(long modelHandle);
+
     private native void destroyGeneratorParams(long nativeHandle);
+
     private native void setSearchOptionNumber(long nativeHandle, String optionName, double value);
+
     private native void setSearchOptionBool(long nativeHandle, String optionName, boolean value);
+
+    private native void setInputSequences(long nativeHandle, long sequencesHandle);
 
 }

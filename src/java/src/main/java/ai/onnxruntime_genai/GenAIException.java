@@ -8,4 +8,8 @@ public class GenAIException extends Exception {
   public GenAIException(String message) {
     super(message);
   }
+
+  public GenAIException(String message, Exception innerException) {
+    super(message, innerException);
+  }
 }
