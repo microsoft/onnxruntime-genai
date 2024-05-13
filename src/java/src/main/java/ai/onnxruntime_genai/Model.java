@@ -18,7 +18,7 @@ public class Model implements AutoCloseable {
      * @param generatorParams The generator parameters.
      * @return The generated sequences.
      */
-    public Sequences generate(GeneratorParams generatorParams) {
+    public Sequences generate(GeneratorParams generatorParams) throws GenAIException {
         long sequencesHandle = generate(modelHandle, generatorParams.nativeHandle());
         return new Sequences(sequencesHandle);
     }

@@ -9,27 +9,27 @@ package ai.onnxruntime_genai;
 public class Tokenizer implements AutoCloseable {
     private long tokenizerHandle;
 
-    public Tokenizer(Model model) {
+    public Tokenizer(Model model) throws GenAIException {
         tokenizerHandle = createTokenizer(model.nativeHandle());
     }
 
     /**
      * Encodes a string into a sequence of token ids.
      * 
-     * @param string
+     * @param string Text to encode as token ids.
      * @return a Sequences object with a single sequence in it.
      */
-    public Sequences Encode(String string) {
+    public Sequences Encode(String string) throws GenAIException {
         return EncodeBatch(new String[] {string});
     }
 
     /**
      * Encodes an array of strings into a sequence of token ids for each input.
      * 
-     * @param strings
+     * @param strings Collection of strings to encode as token ids.
      * @return a Sequences object with one sequence per input string.
      */
-    public Sequences EncodeBatch(String[] strings) {
+    public Sequences EncodeBatch(String[] strings) throws GenAIException {
         long sequencesHandle = tokenizerEncode(tokenizerHandle, strings);
         return new Sequences(sequencesHandle);
     }
@@ -37,10 +37,10 @@ public class Tokenizer implements AutoCloseable {
     /**
      * Decodes a sequence of token ids into text.
      * 
-     * @param sequence
+     * @param sequence Collection of token ids to decode to text.
      * @return The text representation of the sequence.
      */
-    public String Decode(int[] sequence) {
+    public String Decode(int[] sequence) throws GenAIException {
         return tokenizerDecode(tokenizerHandle, sequence);
     }
 
@@ -50,7 +50,7 @@ public class Tokenizer implements AutoCloseable {
      * @param sequences A Sequences object with one or more sequences of token ids.
      * @return An array of strings with the text representation of each sequence.
      */
-    public String[] DecodeBatch(Sequences sequences) {
+    public String[] DecodeBatch(Sequences sequences) throws GenAIException {
         int numSequences = (int) sequences.numSequences();
 
         String[] result = new String[numSequences];
@@ -66,7 +66,7 @@ public class Tokenizer implements AutoCloseable {
      * This is used with Generator class to provide each token as it is generated.
      * @return The new TokenizerStream instance.
      */
-    public TokenizerStream CreateStream() {
+    public TokenizerStream CreateStream() throws GenAIException {
         return new TokenizerStream(createTokenizerStream(tokenizerHandle));
     }
 

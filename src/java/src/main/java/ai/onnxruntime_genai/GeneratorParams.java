@@ -7,15 +7,15 @@ package ai.onnxruntime_genai;
 public class GeneratorParams implements AutoCloseable {
     private long nativeHandle = 0;
 
-    public GeneratorParams(Model model) {
+    public GeneratorParams(Model model) throws GenAIException {
         nativeHandle = createGeneratorParams(model.nativeHandle());
     }
 
-    public void setSearchOption(String optionName, double value) {
+    public void setSearchOption(String optionName, double value) throws GenAIException {
         setSearchOptionNumber(nativeHandle, optionName, value);
     }
 
-    public void setSearchOption(String optionName, boolean value) {
+    public void setSearchOption(String optionName, boolean value) throws GenAIException {
         setSearchOptionBool(nativeHandle, optionName, value);
     }
 
@@ -25,7 +25,7 @@ public class GeneratorParams implements AutoCloseable {
      * 
      * @param sequences The encoded input prompt/s.
      */
-    public void setInput(Sequences sequences) {
+    public void setInput(Sequences sequences) throws GenAIException {
         setInputSequences(nativeHandle, sequences.nativeHandle());
     }
 

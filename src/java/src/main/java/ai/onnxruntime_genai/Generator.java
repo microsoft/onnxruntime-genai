@@ -22,7 +22,7 @@ public class Generator implements AutoCloseable {
      * @param model           The model.
      * @param generatorParams The generator parameters.
      */
-    public Generator(Model model, GeneratorParams generatorParams) {
+    public Generator(Model model, GeneratorParams generatorParams) throws GenAIException {
         nativeHandle = createGenerator(model.nativeHandle(), generatorParams.nativeHandle());
     }
 
@@ -38,14 +38,14 @@ public class Generator implements AutoCloseable {
     /**
      * Computes the logits for the next token in the sequence.
      */
-    public void computeLogits() {
+    public void computeLogits() throws GenAIException {
         computeLogits(nativeHandle);
     }
 
     /**
      * Generates the next token in the sequence.
      */
-    public void generateNextToken() {
+    public void generateNextToken() throws GenAIException {
         generateNextTokenNative(nativeHandle);
     }
 
@@ -55,7 +55,7 @@ public class Generator implements AutoCloseable {
      * @param sequenceIndex The index of the sequence.
      * @return An array of integers with the sequence token ids.
      */
-    public int[] getSequence(long sequenceIndex) {
+    public int[] getSequence(long sequenceIndex) throws GenAIException {
         return getSequenceImpl(sequenceIndex, false);
     }
 
@@ -65,7 +65,7 @@ public class Generator implements AutoCloseable {
      * @param sequenceIndex The index of the sequence.
      * @return The last token in the sequence.
      */
-    public int getLastTokenInSequence(long sequenceIndex) {
+    public int getLastTokenInSequence(long sequenceIndex) throws GenAIException {
         return getSequenceImpl(sequenceIndex, true)[0];
     }
 
@@ -82,7 +82,7 @@ public class Generator implements AutoCloseable {
         }
     }
 
-    private int[] getSequenceImpl(long sequenceIndex, boolean lastTokenOnly) {
+    private int[] getSequenceImpl(long sequenceIndex, boolean lastTokenOnly) throws GenAIException {
         return getSequenceNative(nativeHandle, sequenceIndex, lastTokenOnly);
     }
 

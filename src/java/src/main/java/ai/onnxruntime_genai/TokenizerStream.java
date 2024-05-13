@@ -15,7 +15,7 @@ public class TokenizerStream implements AutoCloseable {
         tokenizerStreamHandle = nativeHandle;
     }
 
-    public String decode(int token) {
+    public String decode(int token) throws GenAIException {
         return tokenizerStreamDecode(tokenizerStreamHandle, token);
     }
 

@@ -2,6 +2,7 @@ package ai.onnxruntime_genai;
 
 /**
  * The `SimpleGenAI` class provides a simple usage example of the GenAI API.
+ * It works with a model that generates text based on a prompt, processing a single prompt at a time.
  * 
  * Usage:
  *  - Create an instance of the class with the path to the model.
@@ -41,7 +42,7 @@ public class SimpleGenAI {
      *
      * @param prompt The prompt text to encode.
      * @return The encoded sequences.
-     * @throws GenAIException
+    *  @throws GenAIException on failure
      */
     GeneratorParams createGeneratorParams(String prompt) throws GenAIException {
         try (Tokenizer tokenizer = new Tokenizer(model);
@@ -65,7 +66,7 @@ public class SimpleGenAI {
      * @param generatorParams The prompt and settings to run the model with.
      * @param listener Optional callback for tokens to be provided as they are generated.
      * @return The generated text.
-     * @throws GenAIException
+     * @throws GenAIException on failure
      */
     public String generate(GeneratorParams generatorParams, TokenUpdateListener listener) throws GenAIException {
         String result = null;

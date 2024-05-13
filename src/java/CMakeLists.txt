@@ -10,7 +10,8 @@ if (NOT ANDROID)
 endif()
 
 set(JAVA_SRC_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
-set(JAVA_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/java)
+# build output dir + src/java (path used with add_subdirectory in root CMakeLists.txt)
+set(JAVA_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR})  
 
 # TODO: Do we need to support onnxruntime_genai and onnxruntime_genai-static?
 # Add dependency on native target
@@ -21,8 +22,9 @@ set(GRADLE_EXECUTABLE "${JAVA_SRC_ROOT}/gradlew")
 file(GLOB_RECURSE genai4j_gradle_files "${JAVA_SRC_ROOT}/*.gradle")
 file(GLOB_RECURSE genai4j_srcs "${JAVA_SRC_ROOT}/src/main/java/ai/onnxruntime_genai/*.java")
 
+# TODO: How is --no-daemon different from org.gradle.daemon.false?
 if(WIN32)
-  set(GRADLE_OPTIONS -Dorg.gradle.daemon=false)
+  set(GRADLE_OPTIONS -Dorg.gradle.daemon=true)  # TODO: testing using `true`. might be better for dev not CI though
 elseif (ANDROID)
   # For Android build, we may run gradle multiple times in same build. Sometimes gradle JVM will run out of memory
   # if we keep the daemon running, so we use no-daemon to avoid that
@@ -55,7 +57,9 @@ add_library(onnxruntime-genai4j_jni SHARED ${genai4j_native_src})
 set_property(TARGET onnxruntime-genai4j_jni PROPERTY CXX_STANDARD 17)
 add_dependencies(onnxruntime-genai4j_jni onnxruntime-genai4j)
 # the JNI headers are generated in the genai4j target
-target_include_directories(onnxruntime-genai4j_jni PRIVATE ${SRC_ROOT} ${JAVA_SRC_ROOT}/build/headers ${JNI_INCLUDE_DIRS})
+target_include_directories(onnxruntime-genai4j_jni PRIVATE ${SRC_ROOT} 
+                                                           ${JAVA_SRC_ROOT}/build/headers 
+                                                           ${JNI_INCLUDE_DIRS})
 target_link_libraries(onnxruntime-genai4j_jni PUBLIC onnxruntime-genai)
 
 set(JAVA_PACKAGE_OUTPUT_DIR ${JAVA_OUTPUT_DIR}/build)
@@ -145,7 +149,7 @@ if (WIN32)
 endif()
 
 # run the build process (this copies the results back into CMAKE_CURRENT_BINARY_DIR)
-set(GRADLE_ARGS --console=plain cmakeBuild -DcmakeBuildDir=${CMAKE_CURRENT_BINARY_DIR})
+set(GRADLE_ARGS --console=plain cmakeBuild -DcmakeBuildDir=${JAVA_OUTPUT_DIR})
 add_custom_command(TARGET onnxruntime-genai4j_jni POST_BUILD
                    COMMAND ${GRADLE_EXECUTABLE} ${GRADLE_OPTIONS} ${GRADLE_ARGS} 
                    WORKING_DIRECTORY ${JAVA_SRC_ROOT})
@@ -199,4 +203,30 @@ if (ANDROID)
                      COMMAND ${GRADLE_EXECUTABLE} clean assembleDebug assembleDebugAndroidTest
                        -DminSdkVer=${ANDROID_MIN_SDK} --stacktrace
                      WORKING_DIRECTORY ${ANDROID_TEST_PACKAGE_DIR})
+endif()
+
+if (ENABLE_TESTS)
+  message(STATUS "Adding Java tests")
+  set(JAVA_NATIVE_TEST_DIR ${JAVA_OUTPUT_DIR}/native-test)
+  # file(MAKE_DIRECTORY ${JAVA_NATIVE_TEST_DIR})
+
+  #   # FILE(TO_NATIVE_PATH ${GRADLE_EXECUTABLE} GRADLE_NATIVE_PATH)
+  #   # FILE(TO_NATIVE_PATH ${BIN_DIR} BINDIR_NATIVE_PATH)
+  if (WIN32)
+    # On windows ctest requires a test to be an .exe(.com) file
+    # With gradle wrapper we get gradlew.bat. We delegate execution to a separate .cmake file
+    # That can handle both .exe and .bat
+    add_test(NAME onnxruntime-genai4j_test 
+             COMMAND ${CMAKE_COMMAND} 
+                -DGRADLE_EXECUTABLE=${GRADLE_EXECUTABLE} 
+                -DBIN_DIR=${JAVA_OUTPUT_DIR} 
+                -DJAVA_SRC_ROOT=${JAVA_SRC_ROOT}
+                -P ${JAVA_SRC_ROOT}/windows-unittests.cmake)
+  else()
+    add_test(NAME onnxruntime-genai4j_test 
+            COMMAND ${GRADLE_EXECUTABLE} cmakeCheck -DcmakeBuildDir=${JAVA_OUTPUT_DIR}
+            WORKING_DIRECTORY ${JAVA_SRC_ROOT})
+  endif()
+
+  set_property(TEST onnxruntime-genai4j_test APPEND PROPERTY DEPENDS onnxruntime-genai4j_jni)
 endif()
