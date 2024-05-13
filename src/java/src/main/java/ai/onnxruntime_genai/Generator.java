@@ -9,7 +9,7 @@ package ai.onnxruntime_genai;
  * The expected usage is to loop until isDone returns false. 
  * Within the loop, call computeLogits followed by generateNextToken.
  * 
- * The newly generated token can be retrieved with getLastTokenInSequence and decoded with Tokenizer.Decode.
+ * The newly generated token can be retrieved with getLastTokenInSequence and decoded with TokenizerStream.Decode.
  * 
  * After the generation process is done, GetSequence can be used to retrieve the complete generated sequence if needed.
  */
