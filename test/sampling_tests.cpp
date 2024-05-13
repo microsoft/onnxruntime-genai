@@ -110,6 +110,7 @@ TEST(SamplingTests, BatchedSamplingTopPAndKCpu) {
 }
 
 void CreateRandomLogits(float* logits, int num_large, int vocab_size, int batch_size, std::mt19937& engine) {
+  assert(num_large < vocab_size / 2);  // num_large should be much smaller than vocab_size
   std::uniform_real_distribution<float> dist(0.0f, 1.0f);
   for (int b = 0; b < batch_size; b++) {
     for (int v = 0; v < vocab_size; v++) {
