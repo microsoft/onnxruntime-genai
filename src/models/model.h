@@ -1,6 +1,9 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
 #pragma once
-#include "tfmtok_c.h"
+#include "ortx_tokenizer.h"
 #include "captured_graph_pool.h"
+#include "utils.h"
 
 #if USE_DML
 #include "dml_provider_factory.h"
@@ -23,6 +26,8 @@ struct State {
   virtual RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices = {}) = 0;
   virtual const CapturedGraphInfo* GetCapturedGraphInfo() const { return nullptr; }
 
+  OrtValue* GetOutput(const char* name);
+
   std::shared_ptr<const GeneratorParams> params_;
 
   std::vector<const char*> input_names_, output_names_;
@@ -34,8 +39,8 @@ struct State {
 };
 
 template <typename T>
-struct TfmPtr {
-  ~TfmPtr() { TfmDispose(&p_); }
+struct OrtxPtr {
+  ~OrtxPtr() { OrtxDispose(&p_); }
   T** Address() {
     assert(!p_);
     return &p_;
@@ -53,7 +58,7 @@ struct TokenizerStream {
 
  private:
   std::shared_ptr<const Tokenizer> tokenizer_;
-  TfmPtr<TfmObject> cache_;
+  OrtxPtr<OrtxObject> cache_;
   std::string chunk_;
 };
 
@@ -72,7 +77,7 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer> {
   std::vector<int32_t> EncodeBatch(std::span<const std::string> strings) const;
   std::vector<std::string> DecodeBatch(std::span<const int32_t> sequences, size_t count) const;
 
-  TfmPtr<TfmTokenizer> tokenizer_;
+  OrtxPtr<OrtxTokenizer> tokenizer_;
   std::shared_ptr<Tokenizer> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
 
  private:
@@ -102,8 +107,6 @@ struct Model : std::enable_shared_from_this<Model> {
 
   std::unique_ptr<OrtValue> ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams) const;
 
-  void GetMaxBatchSizeFromGeneratorParams(const GeneratorParams& params);
-
   CapturedGraphPool* GetCapturedGraphPool() const { return captured_graph_pool_.get(); }
 
   std::unique_ptr<Config> config_;
@@ -118,9 +121,6 @@ struct Model : std::enable_shared_from_this<Model> {
   std::unique_ptr<SessionInfo> session_info_;
 
   std::shared_ptr<Model> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
-
-  bool use_cuda_graph_{};
-  int max_batch_size_{};
 
 #if USE_DML
   DmlExecutionContext* GetDmlExecutionContext() const { return dml_execution_context_.get(); }

@@ -1,5 +1,11 @@
 name: "Windows CUDA x64 Build"
-on: [ workflow_dispatch, pull_request ]
+on:
+  workflow_dispatch:
+  push:
+    branches:
+    - main
+    - rel-*
+  pull_request:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -8,14 +14,12 @@ concurrency:
 env:
   AZCOPY_AUTO_LOGIN_TYPE: MSI
   AZCOPY_MSI_CLIENT_ID: 63b63039-6328-442f-954b-5a64d124e5b4
-  ort_dir: "onnxruntime-win-x64-gpu-1.17.3"
-  ort_zip: "onnxruntime-win-x64-gpu-1.17.3.zip"
-  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/onnxruntime-win-x64-gpu-1.17.3.zip"
   cuda_dir: "${{ github.workspace }}\\cuda_sdk"
   cuda_version: "11.8"
   CUDA_PATH: ${{ github.workspace }}\\cuda_sdk\\v11.8
   binaryDir: 'build/cuda'
-
+  ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime.Gpu.Windows&api-version=6.0-preview.1"
+  ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime.Gpu.Windows"
 
 jobs:
   windows-cuda-x64-build:
@@ -35,17 +39,32 @@ jobs:
       run: |
         azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v${{ env.cuda_version }}" ${{ env.cuda_dir}}
 
-    - name: Download OnnxRuntime
-      run: |
-        Invoke-WebRequest -Uri $env:ort_url -OutFile $env:ort_zip
+    - uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '6.0.x'
 
-    - name: Unzip OnnxRuntime
+    - name : Install jq and curl
       run: |
-        Expand-Archive $env:ort_zip -DestinationPath .
-        Remove-Item -Path $env:ort_zip
-    - name: Rename OnnxRuntime to ort
+        choco install -y jq curl
+
+    - name: Get the Latest OnnxRuntime Nightly Version
+      shell: pwsh
       run: |
-        Rename-Item -Path $env:ort_dir -NewName ort
+        $ORT_NIGHTLY_VERSION=$(curl -s "${{ env.ORT_NIGHTLY_REST_API }}" | jq -r '.value[0].versions[0].normalizedVersion')
+        echo "$ORT_NIGHTLY_VERSION" 
+        "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
+    - name: Download OnnxRuntime Nightly
+      run: |
+        nuget install ${{ env.ORT_PACKAGE_NAME }} -version ${{ env.ORT_NIGHTLY_VERSION }} -ExcludeVersion -NonInteractive
+
+    - run: Get-ChildItem  ${{ env.ORT_PACKAGE_NAME }} -Recurse
+      continue-on-error: true
+
+    - name: Extract OnnxRuntime library and header files
+      run: |
+        mkdir ort/lib
+        move ${{ env.ORT_PACKAGE_NAME }}/buildTransitive/native/include ort/
+        move ${{ env.ORT_PACKAGE_NAME }}/runtimes/win-x64/native/* ort/lib/    
 
     - name: Configure CMake
       run: |
@@ -58,6 +77,11 @@ jobs:
     - name: Add CUDA to PATH
       run: |
         echo "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+    - name: Build the C# API and Run the C# Tests
+      run: |
+        cd test\csharp
+        dotnet test /p:Configuration=release /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release"
 
     - name: Install the Python Wheel and Test Dependencies
       run: |
@@ -75,10 +99,6 @@ jobs:
       run: |
         python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\test_models"
 
-    - name: Build the C# API and Run the C# Tests
-      run: |
-        cd test\csharp
-        dotnet test /p:Configuration=release /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release"
 
     - name: Verify Build Artifacts
       if: always()

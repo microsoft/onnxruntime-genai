@@ -13,7 +13,7 @@ namespace Generators {
 
 static bool _ = (Ort::InitApi(), false);
 
-OrtGlobals::OrtGlobals() : env_{OrtEnv::Create()} {}
+OrtGlobals::OrtGlobals() : env_{OrtEnv::Create(OrtLoggingLevel::ORT_LOGGING_LEVEL_ERROR)} {}
 
 std::unique_ptr<OrtGlobals>& GetOrtGlobals() {
   static auto globals = std::make_unique<OrtGlobals>();
@@ -28,40 +28,31 @@ OrtEnv& GetOrtEnv() {
   return *GetOrtGlobals()->env_;
 }
 
-// IEEE 752-2008 binary16 format, 1 sign bit, 5 bit exponent, 10 bit fraction
-float Float16ToFloat32(uint16_t v) {
-  // Extract sign, exponent, and fraction from numpy.float16
-  int const sign = (v & 0x8000) >> 15;
-  int const exponent = (v & 0x7C00) >> 10;
-  int const fraction = v & 0x03FF;
-
-  // Handle special cases
-  if (exponent == 0) {
-    if (fraction == 0) {
-      // Zero
-      return sign != 0 ? -0.0f : 0.0f;
-    }  // Subnormal number
-    return std::ldexp((sign != 0 ? -1.0f : 1.0f) * static_cast<float>(fraction) / 1024.0f, -14);
-  }
-  if (exponent == 31) {
-    if (fraction == 0) {
-      // Infinity
-      return sign != 0 ? -std::numeric_limits<float>::infinity() : std::numeric_limits<float>::infinity();
-    }  // NaN
-    return std::numeric_limits<float>::quiet_NaN();
-  }
-
-  // Normalized number
-  return std::ldexp((sign != 0 ? -1.0f : 1.0f) * (1.0f + static_cast<float>(fraction) / 1024.0f), exponent - 15);
-}
-
 GeneratorParams::GeneratorParams(const Model& model)
     : search{model.config_->search},
       pad_token_id{model.config_->model.pad_token_id},
       eos_token_id{model.config_->model.eos_token_id},
       vocab_size{model.config_->model.vocab_size},
       device_type{model.device_type_},
-      cuda_stream{model.cuda_stream_} {
+      cuda_stream{model.cuda_stream_},
+      is_cuda_graph_enabled_{IsCudaGraphEnabled(model.config_->model.decoder.session_options)} {
+}
+
+void GeneratorParams::TryGraphCapture(int max_bs) {
+  if (!is_cuda_graph_enabled_ || device_type == DeviceType::CPU) {
+    // no-op
+    return;
+  }
+
+  if (DeviceType::CUDA == device_type || DeviceType::DML == device_type) {
+    if (max_bs == 0) {
+      throw std::runtime_error("Graph capture is enabled, but max_batch_size is not set.");
+    }
+    use_cuda_graph = true;
+    max_batch_size = max_bs;
+  } else {
+    throw std::runtime_error("CUDA graph is not supported on this device");
+  }
 }
 
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params) {
@@ -98,13 +89,13 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
   if (params.search.max_length == 0)
     throw std::runtime_error("search max_length is 0");
   if (params.search.max_length > model.config_->model.context_length)
-    throw std::runtime_error("max_length cannot be greater than model context_length");
+    throw std::runtime_error("max_length (" + std::to_string(params.search.max_length) + ") cannot be greater than model context_length (" + std::to_string(params.search.max_length) + ")");
   if (params.batch_size < 1)
-    throw std::runtime_error("batch_size must be 1 or greater");
+    throw std::runtime_error("batch_size must be 1 or greater, is " + std::to_string(params.batch_size));
   if (params.vocab_size < 1)
-    throw std::runtime_error("vocab_size must be 1 or greater");
+    throw std::runtime_error("vocab_size must be 1 or greater, is " + std::to_string(params.vocab_size));
   if (params.sequence_length >= params.search.max_length)
-    throw std::runtime_error("input sequence_length is >= max_length");
+    throw std::runtime_error("input sequence_length (" + std::to_string(params.sequence_length) + ") is >= max_length (" + std::to_string(params.search.max_length) + ")");
 
   search_ = CreateSearch(params);
   state_ = model.CreateState(search_->GetSequenceLengths(), params);

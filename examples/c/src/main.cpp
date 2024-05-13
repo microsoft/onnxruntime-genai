@@ -92,6 +92,9 @@ int main(int argc, char** argv) {
     return -1;
   }
 
+  // Responsible for cleaning up the library during shutdown
+  OgaHandle handle;
+
   std::cout << "-------------" << std::endl;
   std::cout << "Hello, Phi-2!" << std::endl;
   std::cout << "-------------" << std::endl;

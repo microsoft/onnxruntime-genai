@@ -57,6 +57,7 @@ class Model:
                 "enable_cuda_graph": enable_cuda_graph,        # "1" if the the model is able to enable cuda graph, "0" otherwise
             },
             "dml": {},
+            "web": {},
         }
 
         # Map input names to their types and shapes
@@ -167,18 +168,28 @@ class Model:
             "use_rotemb_in_attn": False,                     # Use rotary embeddings within attention op (instead of a separate RotaryEmbedding op)
             "use_packed_matmul": False,                      # Use packed MatMul (instead of 3 separate MatMuls for Q/K/V)
         }
-        if self.ep in {"cuda", "dml"} and self.io_dtype == TensorProto.FLOAT16:
+        valid_gqa_configurations = [
+            ("cpu", TensorProto.FLOAT),
+            ("cuda", TensorProto.FLOAT16),
+            ("dml", TensorProto.FLOAT16),
+        ]
+        if (self.ep, self.io_dtype) in valid_gqa_configurations:
             # Change model settings for GroupQueryAttention
             self.attention_attrs["op_type"] = "GroupQueryAttention"
-            print("GroupQueryAttention (GQA) is used in this model. GQA is currently supported only for INT4 and FP16 on the CUDA and DML execution providers.")
+            print("GroupQueryAttention (GQA) is used in this model.")
 
             # DML doesn't support packed Q/K/V for GQA yet
-            self.attention_attrs["use_packed_matmul"] = self.ep != "dml" and self.num_attn_heads == self.num_kv_heads
+            self.attention_attrs["use_packed_matmul"] = self.ep != "dml"
 
             # GQA + Rot.Emb. does not require `position ids` as input
-            if self.ep == "cuda":
+            if self.ep != "dml":
                 self.attention_attrs["use_rotemb_in_attn"] = True
                 self.input_names.remove("position_ids")
+
+        if self.ep in {"web"}:
+            # ort-web for now wants to use MHA
+            self.attention_attrs["use_packed_matmul"] = False
+            self.attention_attrs["op_type"] = "MultiHeadAttention"
 
         self.past_present_share_buffer = self.attention_attrs["op_type"] == "GroupQueryAttention"
 
@@ -198,7 +209,7 @@ class Model:
         }
 
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
-        config = GenerationConfig.from_pretrained(model_name_or_path, **extra_kwargs)
+        config = GenerationConfig.from_pretrained(model_name_or_path, use_auth_token=True, trust_remote_code=True, **extra_kwargs)
         inputs = dict(zip(self.input_names, self.input_names))
         inputs.update({
             "past_key_names": "past_key_values.%d.key",
@@ -211,7 +222,7 @@ class Model:
                 "decoder": {
                     "session_options" : {
                         "log_id": "onnxruntime-genai",
-                        "provider_options" : []
+                        "provider_options" : [],
                     },
                     "filename": self.filename,
                     "head_size": self.head_size,
@@ -227,7 +238,7 @@ class Model:
                     "num_key_value_heads": self.num_kv_heads,
                 },
                 "eos_token_id": config.eos_token_id,
-                "pad_token_id": config.pad_token_id if hasattr(config, "pad_token_id") and config.pad_token_id is not None else config.eos_token_id,
+                "pad_token_id": config.pad_token_id if hasattr(config, "pad_token_id") and config.pad_token_id is not None else config.eos_token_id[0] if isinstance(config.eos_token_id, list) else config.eos_token_id,
                 "type": self.model_type[ : self.model_type.find("For")].lower(),
                 "vocab_size": self.vocab_size,
             },
@@ -258,7 +269,7 @@ class Model:
             json.dump(genai_config, f, indent=4)
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
-        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, **extra_kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, use_auth_token=True, trust_remote_code=True, **extra_kwargs)
         print(f"Saving processing files in {out_dir} for GenAI")
         tokenizer.save_pretrained(out_dir)
 
@@ -466,6 +477,11 @@ class Model:
         self.make_node("Concat", inputs=inputs, outputs=[output], name=name, axis=axis)
         self.make_value_info(output, dtype, shape=shape)
 
+    def make_tile(self, name, inputs, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Tile", inputs=inputs, outputs=[output], name=name)
+        self.make_value_info(output, dtype, shape=shape)
+
     def make_equal(self, name, inputs, shape):
         output = f"{name}/output_0"
         self.make_node("Equal", inputs=inputs, outputs=[output], name=name)
@@ -562,11 +578,13 @@ class Model:
     #     self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
 
     def make_packed_matmul(self, q_matmul, k_matmul, v_matmul, name, root_input, **kwargs):
-        # N = num_heads * head_size, H = hidden_size
-        # Combine 3 Matmuls of shape NxH into 1 packed MatMul of shape 3NxH
-        # Note: Packed MatMul is of shape 3NxH instead of Hx3N because `make_matmul` will apply a transpose before saving
-        N, H = q_matmul.shape
-        matmul = np.stack((q_matmul.transpose(), k_matmul.transpose(), v_matmul.transpose()), axis=1).reshape(H, 3*N).transpose()
+        # N_q = num_attention_heads * head_size, N_kv = num_key_value_heads * head_size, H = hidden_size
+        # Combine 3 MatMuls of shape N_q x H, N_kv x H, N_kv x H into 1 packed MatMul of shape (N_q+N_kv+N_kv)xH
+        # Note: Packed MatMul is of shape (N_q+N_kv+N_kv)xH instead of Hx(N_q+N_kv+N_kv) because `make_matmul` will
+        # apply a transpose before saving
+        N_q, H = q_matmul.shape
+        N_kv, _ = k_matmul.shape
+        matmul = np.concatenate([q_matmul, k_matmul, v_matmul], axis=0).reshape(N_q + N_kv + N_kv, H)
         self.make_matmul(matmul, name, root_input, **kwargs)
 
     def make_add_bias(self, add, name, root_input, **kwargs):
@@ -584,8 +602,8 @@ class Model:
             self.make_add(name, add_bias_inputs, dtype=self.io_dtype, shape=shape)
 
     def make_packed_add(self, q_add, k_add, v_add, name, root_input, **kwargs):
-        # Combine 3 Adds of shape H into 1 packed Add of shape 3H
-        add = np.stack((q_add, k_add, v_add), axis=0).flatten()
+        # Combine 3 Adds of shape N_q, N_kv, and N_kv into 1 packed Add of shape N_q + N_kv + N_kv
+        add = np.concatenate([q_add, k_add, v_add], axis=0).flatten()
         self.make_add_bias(add, name, root_input, **kwargs)
 
     def make_embedding(self, embedding):
@@ -1000,7 +1018,7 @@ class Model:
             self.make_rotary_embedding(attention.rotary_emb, k_rotary_name, root_input=k_input_to_attention, position_ids=kwargs.get("position_ids", "position_ids"))
             k_input_to_attention = f"{k_rotary_name}/output_0"
 
-        # Make repeat KV nodes (TODO: remove once ORT supports GQA for CPU)
+        # Make repeat KV nodes (Note: `repeat_kv` needs to be kept since GroupQueryAttention isn't supported for FP32 CUDA)
         past_k = f"past_key_values.{layer_id}.key"
         past_v = f"past_key_values.{layer_id}.value"
         present_k = f"present.{layer_id}.key"
@@ -1190,8 +1208,8 @@ class Model:
             self.layernorm_attrs["add_offset"] = 0  # add offset already done for GGUF models
         else:
             # Load PyTorch model
-            extra_kwargs = {"trust_remote_code": True} if os.path.exists(self.model_name_or_path) else {"num_hidden_layers": self.num_layers, "trust_remote_code": True} if "num_hidden_layers" in self.extra_options else {"cache_dir": self.cache_dir, "use_auth_token": True, "trust_remote_code": True}
-            model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, **extra_kwargs)
+            extra_kwargs = {} if os.path.exists(self.model_name_or_path) else {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {"cache_dir": self.cache_dir}
+            model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, use_auth_token=True, trust_remote_code=True, **extra_kwargs)
 
         # Loop through model and map each module to ONNX/ORT ops
         self.layer_id = 0
@@ -1337,13 +1355,12 @@ class Model:
         end_add_shape = ["batch_size", 1, "source_sequence_length", "target_sequence_length"]
         self.make_add(end_add_name, end_add_inputs, dtype=self.io_dtype, shape=end_add_shape) # Shape of mask is now (B, 1, S, T)
 
-        # TODO: replace Concat with Expand for performance gains
-        concat_name = f"{basename}/Concat"
-        concat_inputs = [f"{end_add_name}/output_0" for _ in range(self.num_attn_heads)]
-        concat_shape = ["batch_size", self.num_attn_heads, "source_sequence_length", "target_sequence_length"]
-        self.make_concat(concat_name, concat_inputs, dtype=self.io_dtype, shape=concat_shape, axis=1) # Shape of mask is now (B, N, S, T)
+        tile_name = f"{basename}/Tile"
+        tile_inputs = [f"{end_add_name}/output_0", f"/model/constants/TensorProto.INT64/1D/1, {self.num_attn_heads}, 1, 1"]
+        tile_shape = ["batch_size", self.num_attn_heads, "source_sequence_length", "target_sequence_length"]
+        self.make_tile(tile_name, tile_inputs, dtype=self.io_dtype, shape=tile_shape)
 
-        self.mask_attrs["mask_name"] = concat_name
+        self.mask_attrs["mask_name"] = tile_name
 
     def make_past_key_subgraph(self, basename):
         shape_name = f"{basename}/Shape"
@@ -1857,12 +1874,12 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
     os.makedirs(cache_dir, exist_ok=True)
 
     # Load model config
-    extra_kwargs = {"trust_remote_code": True} if os.path.isdir(input_path) else {"cache_dir": cache_dir, "use_auth_token": True, "trust_remote_code": True}
+    extra_kwargs = {} if os.path.isdir(input_path) else {"cache_dir": cache_dir}
     hf_name = input_path if os.path.isdir(input_path) else model_name
-    config = AutoConfig.from_pretrained(hf_name, **extra_kwargs)
+    config = AutoConfig.from_pretrained(hf_name, use_auth_token=True, trust_remote_code=True, **extra_kwargs)
 
     # Set input/output precision of ONNX model
-    io_dtype = TensorProto.FLOAT if precision in {"int8", "fp32"} or (precision == "int4" and execution_provider == "cpu") else TensorProto.FLOAT16
+    io_dtype = TensorProto.FLOAT if precision in {"int8", "fp32"} or (precision == "int4" and execution_provider in ["cpu"]) else TensorProto.FLOAT16
 
     if "config_only" not in extra_options:
         # List architecture options in alphabetical order
@@ -1938,8 +1955,8 @@ def get_args():
         "-e",
         "--execution_provider",
         required=True,
-        choices=["cpu", "cuda", "dml"],
-        help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU)",
+        choices=["cpu", "cuda", "dml", "web"],
+        help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU, INT4 WEB)",
     )
 
     parser.add_argument(
@@ -1983,7 +2000,7 @@ def get_args():
     )
 
     args = parser.parse_args()
-    print("Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, INT4 CPU, INT4 CUDA")
+    print("Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, INT4 CPU, INT4 CUDA, INT4 DML")
     return args
 
 if __name__ == '__main__':

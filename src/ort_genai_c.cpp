@@ -29,11 +29,8 @@ extern "C" {
     return reinterpret_cast<OgaResult*>(std::make_unique<Generators::Result>(e.what()).release()); \
   }
 
-OgaResult* OGA_API_CALL OgaShutdown() {
-  OGA_TRY
+void OGA_API_CALL OgaShutdown() {
   Generators::Shutdown();
-  return nullptr;
-  OGA_CATCH
 }
 
 const char* OGA_API_CALL OgaResultGetError(const OgaResult* result) {
@@ -49,7 +46,8 @@ OgaResult* OGA_API_CALL OgaSetLogBool(const char* name, bool value) {
 
 OgaResult* OGA_API_CALL OgaSetLogString(const char* name, const char* value) {
   OGA_TRY
-  Generators::SetLogString(name, value);
+  // Turn nullptr into an empty std::string (nullptr directly will crash the std::string constructor)
+  Generators::SetLogString(name, value ? value : std::string{});
   return nullptr;
   OGA_CATCH
 }
@@ -108,7 +106,7 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* gene
 OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGeneratorParams* generator_params, int32_t max_batch_size) {
   OGA_TRY
   auto* params = reinterpret_cast<Generators::GeneratorParams*>(generator_params);
-  params->max_batch_size = max_batch_size;
+  params->TryGraphCapture(max_batch_size);
   return nullptr;
   OGA_CATCH
 }
@@ -125,7 +123,7 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputIDs(OgaGeneratorParams* oga_pa
   OGA_CATCH
 }
 
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputSequences(OgaGeneratorParams* oga_params, const OgaSequences* p_sequences) {
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputSequences(OgaGeneratorParams* oga_params, const OgaSequences* p_sequences) {
   OGA_TRY
   auto& params = *reinterpret_cast<Generators::GeneratorParams*>(oga_params);
   auto& sequences = *reinterpret_cast<const Generators::TokenSequences*>(p_sequences);
@@ -143,23 +141,34 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputSequences(OgaGenera
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGenerate(OgaModel* model, const OgaGeneratorParams* generator_params, OgaSequences** out) {
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetModelInput(OgaGeneratorParams* oga_params, const char* name, OgaTensor* tensor) {
   OGA_TRY
-  auto* model_p = reinterpret_cast<Generators::Model*>(model);
-  auto* params = reinterpret_cast<const Generators::GeneratorParams*>(generator_params);
-  model_p->GetMaxBatchSizeFromGeneratorParams(*params);
-  auto result = Generators::Generate(*model_p, *params);
+  auto& params = *reinterpret_cast<Generators::GeneratorParams*>(oga_params);
+  params.extra_inputs.push_back({std::string{name}, reinterpret_cast<Generators::Tensor*>(tensor)->shared_from_this()});
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperInputFeatures(OgaGeneratorParams* oga_params, OgaTensor* tensor) {
+  OGA_TRY
+  auto& params = *reinterpret_cast<Generators::GeneratorParams*>(oga_params);
+  Generators::GeneratorParams::Whisper& whisper = params.inputs.emplace<Generators::GeneratorParams::Whisper>();
+  whisper.input_features = reinterpret_cast<Generators::Tensor*>(tensor)->shared_from_this();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaGenerate(const OgaModel* model, const OgaGeneratorParams* generator_params, OgaSequences** out) {
+  OGA_TRY
+  auto result = Generators::Generate(*reinterpret_cast<const Generators::Model*>(model), *reinterpret_cast<const Generators::GeneratorParams*>(generator_params));
   *out = reinterpret_cast<OgaSequences*>(std::make_unique<Generators::TokenSequences>(std::move(result)).release());
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OgaCreateGenerator(OgaModel* model, const OgaGeneratorParams* generator_params, OgaGenerator** out) {
+OgaResult* OgaCreateGenerator(const OgaModel* model, const OgaGeneratorParams* generator_params, OgaGenerator** out) {
   OGA_TRY
-  auto* model_p = reinterpret_cast<Generators::Model*>(model);
-  auto* params = reinterpret_cast<const Generators::GeneratorParams*>(generator_params);
-  model_p->GetMaxBatchSizeFromGeneratorParams(*params);
-  *out = reinterpret_cast<OgaGenerator*>(CreateGenerator(*model_p, *params).release());
+  *out = reinterpret_cast<OgaGenerator*>(CreateGenerator(*reinterpret_cast<const Generators::Model*>(model), *reinterpret_cast<const Generators::GeneratorParams*>(generator_params)).release());
   return nullptr;
   OGA_CATCH
 }
@@ -242,6 +251,52 @@ OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream* p, int32_t 
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaCreateTensorFromBuffer(void* data, const int64_t* shape_dims, size_t shape_dims_count, OgaElementType element_type, OgaTensor** out) {
+  OGA_TRY
+  auto tensor = std::make_shared<Generators::Tensor>();
+  auto p_memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
+  auto ort_element_type = static_cast<ONNXTensorElementDataType>(element_type);
+  size_t byte_count = Generators::SizeOf(ort_element_type);
+  for (size_t i = 0; i < shape_dims_count; i++)
+    byte_count *= shape_dims[i];
+  tensor->ort_tensor_ = OrtValue::CreateTensor(*p_memory_info, data, byte_count, std::span<const int64_t>{shape_dims, shape_dims_count}, ort_element_type);
+  tensor->external_owner_ = tensor;
+  *out = reinterpret_cast<OgaTensor*>(tensor.get());
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTensorGetType(OgaTensor* tensor, OgaElementType* out) {
+  OGA_TRY
+  *out = static_cast<OgaElementType>(reinterpret_cast<Generators::Tensor*>(tensor)->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementType());
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTensorGetShapeRank(OgaTensor* tensor, size_t* out) {
+  OGA_TRY
+  *out = reinterpret_cast<Generators::Tensor*>(tensor)->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape().size();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTensorGetShape(OgaTensor* tensor, int64_t* shape_dims, size_t rank) {
+  OGA_TRY
+  auto shape = reinterpret_cast<Generators::Tensor*>(tensor)->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape();
+  if (rank != shape.size())
+    throw std::runtime_error("shape_dims_count doesn't match result of OgaTensorGetShapeRank");
+  std::copy(shape.begin(), shape.end(), shape_dims);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTensorGetData(OgaTensor* tensor, void** out) {
+  OGA_TRY
+  *out = reinterpret_cast<Generators::Tensor*>(tensor)->ort_tensor_->GetTensorMutableRawData();
+  return nullptr;
+  OGA_CATCH
+}
+
 OGA_EXPORT OgaResult* OGA_API_CALL OgaSetCurrentGpuDeviceId(int device_id) {
   OGA_TRY
   Ort::SetCurrentGpuDeviceId(device_id);
@@ -286,5 +341,9 @@ void OGA_API_CALL OgaDestroyTokenizer(OgaTokenizer* p) {
 
 void OGA_API_CALL OgaDestroyTokenizerStream(OgaTokenizerStream* p) {
   delete reinterpret_cast<Generators::TokenizerStream*>(p);
+}
+
+void OGA_API_CALL OgaDestroyTensor(OgaTensor* p) {
+  reinterpret_cast<Generators::Tensor*>(p)->external_owner_ = nullptr;
 }
 }
