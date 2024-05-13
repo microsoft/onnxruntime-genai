@@ -69,3 +69,13 @@ extern "C" OrtStatus* ORT_API_CALL RegisterCustomOps(OrtSessionOptions* options,
 
   return status;
 }
+
+// Have to implement this function as it is declared in onnxruntime_extensions.h 
+// which is included in op_def_struct.h => ocos.h
+extern "C" int ORT_API_CALL GetActiveOrtAPIVersion() {
+  int ver = 0;
+  OCOS_API_IMPL_BEGIN
+  ver = GetOrtVersion();
+  OCOS_API_IMPL_END
+  return ver;
+}

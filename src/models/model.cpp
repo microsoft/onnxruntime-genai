@@ -269,6 +269,12 @@ void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
 void Model::CreateSessionOptions() {
   session_options_ = OrtSessionOptions::Create();
   auto& ort_options = *session_options_;
+
+  //config_->custom_lib_path = "/home/leca/code/onnxruntime-genai/custom_ops/build/libgenai_custom_ops.so";
+  if (config_->custom_lib_path.length() > 0) {
+    ort_options.RegisterCustomOpsLibrary(config_->custom_lib_path.c_str());
+  }
+
   auto& options = config_->model.decoder.session_options;
 
   // Default to a limit of 16 threads to optimize performance

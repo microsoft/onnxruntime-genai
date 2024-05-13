@@ -93,6 +93,8 @@ struct Config {
     bool past_present_share_buffer{};  // The past/present kv tensors are shared and allocated once to max_length (cuda only)
     int random_seed{-1};               // -1 = Seed with random device, otherwise use value to seed RNG
   } search;
+
+  std::string custom_lib_path;
 };
 
 void SetSearchNumber(Config::Search& search, std::string_view name, double value);
