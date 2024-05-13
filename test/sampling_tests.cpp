@@ -123,8 +123,9 @@ void CreateRandomLogits(float* logits, int num_large, int vocab_size, int batch_
     for (int i = 0; i < num_large; i++) {
       float& value = logits[dist_large(engine) + b * vocab_size];
       if (value == 25.0f)
-        i--;  // We hit the same number twice, so do it again
-      value = 25.0f;
+        i--;  // We hit the same number twice, so do it again to ensure num_large values are set to 25.0f
+      else
+        value = 25.0f;
     }
   }
 }
