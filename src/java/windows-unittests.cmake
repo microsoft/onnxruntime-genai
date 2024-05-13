@@ -12,5 +12,5 @@ execute_process(COMMAND cmd /C ${GRADLE_EXECUTABLE} --console=plain
 
 
 if(HAD_ERROR)
-message(FATAL_ERROR "Java Unitests failed")
+    message(FATAL_ERROR "Java Unitests failed")
 endif()

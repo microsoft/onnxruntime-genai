@@ -6,15 +6,17 @@
 /**
  * A Java interface to the ONNX Runtime GenAI library.
  *
-  * <p>There are two shared libraries required: <code>onnxruntime-genai</code> and <code>onnxruntime-genai4j_jni
+ * <p>There are two shared libraries required: <code>onnxruntime-genai</code> and <code>
+ * onnxruntime-genai4j_jni
  * </code>. The loader is in {@link ai.onnxruntime_genai.GenAI} and the logic is in this order:
  *
  * <ol>
  *   <li>The user may signal to skip loading of a shared library using a property in the form <code>
- *       onnxruntime_genai.native.LIB_NAME.skip</code> with a value of <code>true</code>. This means the
- *       user has decided to load the library by some other means.
+ *       onnxruntime_genai.native.LIB_NAME.skip</code> with a value of <code>true</code>. This means
+ *       the user has decided to load the library by some other means.
  *   <li>The user may specify an explicit location of all native library files using a property in
- *       the form <code>onnxruntime_genai.native.path</code>. This uses {@link java.lang.System#load}.
+ *       the form <code>onnxruntime_genai.native.path</code>. This uses {@link
+ *       java.lang.System#load}.
  *   <li>The user may specify an explicit location of the shared library file using a property in
  *       the form <code>onnxruntime_genai.native.LIB_NAME.path</code>. This uses {@link
  *       java.lang.System#load}.

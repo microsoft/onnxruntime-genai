@@ -8,34 +8,34 @@ package ai.onnxruntime_genai;
  */
 public class TokenizerStream implements AutoCloseable {
 
-    private long tokenizerStreamHandle = 0;
+  private long tokenizerStreamHandle = 0;
 
-    protected TokenizerStream(long nativeHandle) {
-        assert (nativeHandle != 0); // internal usage should never pass an invalid handle
-        tokenizerStreamHandle = nativeHandle;
+  protected TokenizerStream(long nativeHandle) {
+    assert (nativeHandle != 0); // internal usage should never pass an invalid handle
+    tokenizerStreamHandle = nativeHandle;
+  }
+
+  public String decode(int token) throws GenAIException {
+    return tokenizerStreamDecode(tokenizerStreamHandle, token);
+  }
+
+  @Override
+  public void close() throws Exception {
+    if (tokenizerStreamHandle != 0) {
+      destroyTokenizerStream(tokenizerStreamHandle);
+      tokenizerStreamHandle = 0;
     }
+  }
 
-    public String decode(int token) throws GenAIException {
-        return tokenizerStreamDecode(tokenizerStreamHandle, token);
+  static {
+    try {
+      GenAI.init();
+    } catch (Exception e) {
+      throw new RuntimeException("Failed to load onnxruntime-genai native libraries", e);
     }
+  }
 
-    @Override
-    public void close() throws Exception {
-        if (tokenizerStreamHandle != 0) {
-            destroyTokenizerStream(tokenizerStreamHandle);
-            tokenizerStreamHandle = 0;
-        }
-    }
+  private native String tokenizerStreamDecode(long tokenizerStreamHandle, int token);
 
-    static {
-        try {
-            GenAI.init();
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to load onnxruntime-genai native libraries", e);
-        }
-    }
-
-    private native String tokenizerStreamDecode(long tokenizerStreamHandle, int token);
-
-    private native void destroyTokenizerStream(long tokenizerStreamHandle);
+  private native void destroyTokenizerStream(long tokenizerStreamHandle);
 }

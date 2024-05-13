@@ -8,14 +8,13 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.lang.System;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 final class GenAI {
   private static final Logger logger = Logger.getLogger(GenAI.class.getName());
@@ -49,17 +48,17 @@ final class GenAI {
 
   static synchronized void init() throws IOException {
     if (loaded) {
-        return;
+      return;
     }
 
     tempDirectory = isAndroid() ? null : Files.createTempDirectory("onnxruntime-genai-java");
 
     try {
       libraryDirPathProperty = System.getProperty(GENAI_NATIVE_PATH);
-      
+
       load(ONNXRUNTIME_LIBRARY_NAME); // ORT native
-      load(GENAI_LIBRARY_NAME);  // ORT GenAI native
-      load(GENAI_JNI_LIBRARY_NAME);  // GenAI JNI layer
+      load(GENAI_LIBRARY_NAME); // ORT GenAI native
+      load(GENAI_JNI_LIBRARY_NAME); // GenAI JNI layer
       loaded = true;
     } finally {
       if (tempDirectory != null) {
@@ -125,7 +124,7 @@ final class GenAI {
 
     logger.log(Level.FINE, "Deleting " + file + " on exit");
     file.deleteOnExit();
-  }  
+  }
 
   /**
    * Load a shared library by name.
@@ -155,8 +154,12 @@ final class GenAI {
 
     // 2) The user may explicitly specify the path to a directory containing all shared libraries:
     if (libraryDirPathProperty != null) {
-      logger.log(Level.FINE,
-                 "Attempting to load native library '" + library + "' from specified path: " + libraryDirPathProperty);
+      logger.log(
+          Level.FINE,
+          "Attempting to load native library '"
+              + library
+              + "' from specified path: "
+              + libraryDirPathProperty);
 
       // TODO: Switch this to Path.of when the minimum Java version is 11.
       File libraryFile = Paths.get(libraryDirPathProperty, libraryFileName).toFile();
@@ -171,10 +174,15 @@ final class GenAI {
     }
 
     // 3) The user may explicitly specify the path to their shared library:
-    String libraryPathProperty = System.getProperty("onnxruntime_genai.native." + library + ".path");
+    String libraryPathProperty =
+        System.getProperty("onnxruntime_genai.native." + library + ".path");
     if (libraryPathProperty != null) {
-      logger.log(Level.FINE, 
-                 "Attempting to load native library '" + library + "' from specified path: " + libraryPathProperty);
+      logger.log(
+          Level.FINE,
+          "Attempting to load native library '"
+              + library
+              + "' from specified path: "
+              + libraryPathProperty);
       File libraryFile = new File(libraryPathProperty);
       String libraryFilePath = libraryFile.getAbsolutePath();
       if (!libraryFile.exists()) {
@@ -194,7 +202,8 @@ final class GenAI {
       logger.log(Level.FINE, "Loaded native library '" + library + "' from resource path");
     } else {
       // failed to load library from resources, try to load it from the library path
-      logger.log(Level.FINE, "Attempting to load native library '" + library + "' from library path");
+      logger.log(
+          Level.FINE, "Attempting to load native library '" + library + "' from library path");
       System.loadLibrary(library);
       logger.log(Level.FINE, "Loaded native library '" + library + "' from library path");
     }
@@ -219,8 +228,14 @@ final class GenAI {
         return Optional.empty();
       } else {
         // Found in classpath resources, load via temporary file
-        logger.log(Level.FINE, "Attempting to load native library '" + library + "' from resource path " +
-                               resourcePath + " copying to " + tempFile);
+        logger.log(
+            Level.FINE,
+            "Attempting to load native library '"
+                + library
+                + "' from resource path "
+                + resourcePath
+                + " copying to "
+                + tempFile);
 
         byte[] buffer = new byte[4096];
         int readBytes;
