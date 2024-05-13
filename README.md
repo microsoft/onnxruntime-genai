@@ -67,7 +67,7 @@ pip install [--pre] numpy onnxruntime-genai-directml
 ### CUDA GPU
 
 ```bash
-pip install numpy onnxruntime-genai-cuda --pre --index-url=https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-genai/pypi/simple/
+pip install numpy onnxruntime-genai-cuda --pre --extra-index-url=https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-genai/pypi/simple/
 ```
 
 
