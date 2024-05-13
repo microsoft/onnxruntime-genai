@@ -26,8 +26,8 @@ TEST(SamplingTests, BatchedSamplingTopPCpu) {
   int batch_size = 4;
   auto params = Generators::CreateGeneratorParams();
   params->search.max_length = 10;
-  params->search.do_sample=true;
-  params->search.top_p=0.25f;
+  params->search.do_sample = true;
+  params->search.top_p = 0.25f;
   params->batch_size = batch_size;
   params->sequence_length = 1;
   params->vocab_size = vocab_size;
@@ -116,12 +116,15 @@ void CreateRandomLogits(float* logits, int num_large, int vocab_size, int batch_
       logits[v + b * vocab_size] = dist(engine);
     }
   }
+
   // Randomly set num_large elements to be large
   std::uniform_int_distribution<> dist_large(0, vocab_size - 1);
   for (int b = 0; b < batch_size; b++) {
     for (int i = 0; i < num_large; i++) {
-      int index = dist_large(engine);
-      logits[index + b * vocab_size] = 25.0f;
+      float& value = logits[dist_large(engine) + b * vocab_size];
+      if (value == 25.0f)
+        i--;  // We hit the same number twice, so do it again
+      value = 25.0f;
     }
   }
 }
@@ -187,7 +190,7 @@ TEST(SamplingTests, RandomizedSamplingTopKCpu) {
     int num_large = dist(engine);
     auto generator = Generators::CreateGenerator(*model, *params);
     CreateRandomLogits(logits_cpu.data(), num_large, vocab_size, batch_size, engine);
-    auto logits_copy=logits_cpu;
+    auto logits_copy = logits_cpu;
     generator->search_->SetLogits(Generators::cpu_span<float>(logits_copy));
     generator->computed_logits_ = true;
     generator->GenerateNextToken();
