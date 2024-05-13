@@ -1,3 +1,5 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
 #include "../generators.h"
 #include "whisper.h"
 
@@ -9,6 +11,7 @@ Whisper_Model::Whisper_Model(std::unique_ptr<Config> config, OrtEnv& ort_env)
   session_encoder_ = OrtSession::Create(ort_env, (config_->config_path / config_->model.encoder_decoder_init.filename).c_str(), session_options_.get());
 
   InitDeviceAllocator(*session_decoder_);
+  session_encoder_info_ = std::make_unique<SessionInfo>(*session_encoder_);
 }
 
 std::unique_ptr<State> Whisper_Model::CreateState(RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params) const {
@@ -20,8 +23,11 @@ Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> s
       model_{model} {
   auto& inputs = const_cast<GeneratorParams::Whisper&>(std::get<GeneratorParams::Whisper>(params.inputs));
 
-  auto encoder_input_ids = model_.ExpandInputs(inputs.input_features, params_->search.num_beams);
-  encoder_hidden_states_ = OrtValue::CreateTensor<float>(*model_.allocator_device_, std::array<int64_t, 3>{decoder_input_ids_.GetShape()[0], 1500, 384});
+  encoder_input_ids_ = model_.ExpandInputs(inputs.input_features->ort_tensor_, params_->search.num_beams);
+
+  auto hidden_states_type = model_.session_encoder_info_->GetOutputDataType("encoder_hidden_states");
+  auto encoder_hidden_states_shape = std::array<int64_t, 3>{decoder_input_ids_.GetShape()[0], 1500, static_cast<int64_t>(model_.config_->model.decoder.num_key_value_heads) * model_.config_->model.decoder.head_size};
+  encoder_hidden_states_ = OrtValue::CreateTensor(*model_.allocator_device_, encoder_hidden_states_shape, hidden_states_type);
 
   auto sequence_lengths = sequence_lengths_unk.GetCPU();
   for (int i = 0; i < decoder_input_ids_.GetShape()[0]; i++) {
@@ -29,7 +35,7 @@ Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> s
   }
 
   input_names_.push_back("encoder_input_ids");
-  inputs_.push_back(encoder_input_ids.get());
+  inputs_.push_back(encoder_input_ids_.get());
   decoder_input_ids_.name_ = "decoder_input_ids";
   decoder_input_ids_.Add();
 
@@ -38,25 +44,33 @@ Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> s
   outputs_.push_back(encoder_hidden_states_.get());
   kv_cache_.AddEncoder();
   cross_cache_.AddOutputs();
-
-  State::Run(*model_.session_encoder_, *model_.run_options_);
-
-  ClearIO();
-
-  decoder_input_ids_.name_ = model_.config_->model.decoder.inputs.input_ids.c_str();  // Set back to default name, since we overrode it above in the encoder step
-  decoder_input_ids_.Add();
-  logits_.Add();
-  kv_cache_.Add();
-  cross_cache_.AddInputs();
 }
 
 RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
-  if (first_run_) {
-    first_run_ = false;
-  } else {
-    UpdateInputs(next_tokens, next_indices, current_length);
-    State::Run(*model_.session_decoder_, *model_.run_options_);
+  switch (run_state_) {
+    case RunState::Encoder_Decoder_Init:
+      State::Run(*model_.session_encoder_, *model_.run_options_);
+
+      run_state_ = RunState::Decoder_First;
+      return logits_.Get();
+
+    case RunState::Decoder_First:
+      ClearIO();
+
+      decoder_input_ids_.name_ = model_.config_->model.decoder.inputs.input_ids.c_str();  // Set back to default name, since we overrode it above in the encoder step
+      decoder_input_ids_.Add();
+      logits_.Add();
+      kv_cache_.Add();
+      cross_cache_.AddInputs();
+      run_state_ = RunState::Decoder;
+      // Fall through
+
+    case RunState::Decoder:
+      UpdateInputs(next_tokens, next_indices, current_length);
+      break;
   }
+
+  State::Run(*model_.session_decoder_, *model_.run_options_);
   return logits_.Get();
 }
 

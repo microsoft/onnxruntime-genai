@@ -33,6 +33,7 @@ using cudaStream_t = void*;
 #include "models/debugging.h"
 #include "config.h"
 #include "logging.h"
+#include "tensor.h"
 
 namespace Generators {
 struct Model;
@@ -90,8 +91,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams> {
   std::span<const int32_t> input_ids;  // Array of [batchsize][sequence_length]
 
   struct Whisper {
-    std::unique_ptr<OrtValue> input_features;  // float32 [batch_size, number_of_mels, something that is 3000]
-    std::span<int32_t> decoder_input_ids;
+    std::shared_ptr<Tensor> input_features;  // float32 [batch_size, number_of_mels, something that is 3000]
   };
 
   std::variant<Whisper> inputs;
@@ -99,6 +99,14 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams> {
   std::vector<int32_t> input_ids_owner;  // Backing memory of input_ids in some cases
 
   std::shared_ptr<GeneratorParams> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
+
+  struct Input {
+    std::string name;
+    std::shared_ptr<Tensor> tensor;
+  };
+
+  // A list of extra model inputs that will be matched at runtime based on name
+  std::vector<Input> extra_inputs;
 
   void TryGraphCapture(int max_bs);
 
