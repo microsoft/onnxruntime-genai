@@ -328,20 +328,6 @@ def _validate_ios_args(args: argparse.Namespace):
                         val for val, cond in zip(arg_names, needed_args) if not cond
                     )
                 )
-            command += [
-                "-DCMAKE_SYSTEM_NAME=iOS",
-                "-DENABLE_TESTS=OFF",
-                "-DCMAKE_OSX_SYSROOT=" + args.ios_sysroot,
-                "-DCMAKE_OSX_ARCHITECTURES=" + args.osx_arch,
-                "-DCMAKE_OSX_DEPLOYMENT_TARGET=" + args.apple_deployment_target,
-                "-DENABLE_PYTHON=OFF",
-                "-DCMAKE_TOOLCHAIN_FILE="
-                + (
-                    args.ios_toolchain_file
-                    if args.ios_toolchain_file
-                    else "cmake/genai_ios.toolchain.cmake"
-                ),
-            ]
 
 
 def _validate_args(args):
@@ -462,6 +448,22 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             f"-DANDROID_PLATFORM=android-{args.android_api}",
             f"-DANDROID_ABI={args.android_abi}",
             f"-DENABLE_PYTHON=OFF",
+        ]
+
+    if args.ios:
+        command += [
+            "-DCMAKE_SYSTEM_NAME=iOS",
+            "-DENABLE_TESTS=OFF",
+            f"-DCMAKE_OSX_SYSROOT={args.ios_sysroot}",
+            f"-DCMAKE_OSX_ARCHITECTURES={args.osx_arch}",
+            f"-DCMAKE_OSX_DEPLOYMENT_TARGET={args.apple_deployment_target}",
+            "-DENABLE_PYTHON=OFF",
+            "-DCMAKE_TOOLCHAIN_FILE="
+            + (
+                args.ios_toolchain_file
+                if args.ios_toolchain_file
+                else "cmake/genai_ios.toolchain.cmake"
+            ),
         ]
 
     util.run(command, env=env)
