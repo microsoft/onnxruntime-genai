@@ -190,6 +190,63 @@ Ort::Allocator* GetCudaAllocator(OrtSession& session) {
 }
 #endif
 
+#if USE_DML
+struct DmlAllocator : public OrtAllocator {
+  DmlAllocator(const OrtDmlApi* p_dml_api, ID3D12Device* d3d12_device) : p_dml_api_(p_dml_api), d3d12_device_(d3d12_device) {
+    version = ORT_API_VERSION;
+    OrtAllocator::Alloc = AllocImpl;
+    OrtAllocator::Free = FreeImpl;
+    OrtAllocator::Info = InfoImpl;
+
+    Ort::ThrowOnError(Ort::api->CreateMemoryInfo("DML", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault, &memory_info_));
+  }
+
+  ~DmlAllocator() {
+    Ort::api->ReleaseMemoryInfo(memory_info_);
+  }
+
+  void* DmlAlloc(size_t size_in_bytes) {
+    ComPtr<ID3D12Resource> resource;
+    auto buffer = CD3DX12_RESOURCE_DESC::Buffer(size_in_bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    auto heap_props = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+    THROW_IF_FAILED(d3d12_device_->CreateCommittedResource(
+        &heap_props,
+        D3D12_HEAP_FLAG_NONE,
+        &buffer,
+        D3D12_RESOURCE_STATE_COMMON,
+        nullptr,
+        IID_PPV_ARGS(resource.GetAddressOf())));
+
+    void* allocation;
+    Ort::ThrowOnError(p_dml_api_->CreateGPUAllocationFromD3DResource(resource.Get(), &allocation));
+    return allocation;
+  }
+
+  void DmlFree(void* allocation) {
+    Ort::ThrowOnError(p_dml_api_->FreeGPUAllocation(allocation));
+  }
+
+  OrtMemoryInfo* DmlInfo() const {
+    return memory_info_;
+  }
+
+  static void* ORT_API_CALL AllocImpl(struct OrtAllocator* this_, size_t size) {
+    return static_cast<DmlAllocator*>(this_)->DmlAlloc(size);
+  }
+  static void ORT_API_CALL FreeImpl(struct OrtAllocator* this_, void* p) {
+    return static_cast<DmlAllocator*>(this_)->DmlFree(p);
+  }
+  static const struct OrtMemoryInfo* ORT_API_CALL InfoImpl(const struct OrtAllocator* this_) {
+    return static_cast<const DmlAllocator*>(this_)->DmlInfo();
+  }
+
+private:
+  ComPtr<ID3D12Device> d3d12_device_;
+  const OrtDmlApi* p_dml_api_;
+  OrtMemoryInfo* memory_info_;
+};
+#endif
+
 SessionInfo::SessionInfo(OrtSession& session) {
   auto input_names = session.GetInputNames();
   std::vector<ONNXTensorElementDataType> input_types(input_names.size());
@@ -253,12 +310,14 @@ void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
     // We reuse the allocator assigned to this device if possible; otherwise, we create a new one and store it on the device
     if (FAILED(dml_objects_.d3d12_device->GetPrivateData(dml_smart_container_guid, &smart_container_ptr_size, smart_container.GetAddressOf()))) {
       auto memory_info_dml = OrtMemoryInfo::Create("DML", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-      auto allocator_dml = Ort::Allocator::Create(session, *memory_info_dml);
-      smart_container = wil::MakeOrThrow<DmlSmartContainer>(std::move(memory_info_dml), std::move(allocator_dml));
+      auto dml_allocation_decoder = Ort::Allocator::Create(session, *memory_info_dml);
+      auto allocator_dml = std::make_unique<DmlAllocator>(p_dml_api_, dml_objects_.d3d12_device.Get());
+      smart_container = wil::MakeOrThrow<DmlSmartContainer>(std::move(memory_info_dml), std::move(allocator_dml), std::move(dml_allocation_decoder));
       THROW_IF_FAILED(dml_objects_.d3d12_device->SetPrivateDataInterface(dml_smart_container_guid, smart_container.Get()));
     }
 
     allocator_device_ = smart_container->GetAllocator();
+    dml_allocation_decoder_ = smart_container->GetAllocationDecoder();
   }
 #endif
 
@@ -365,6 +424,7 @@ void Model::CreateSessionOptions() {
           dml_device_.Get(),
           dml_objects_.command_queue.Get(),
           *allocator_device_,
+          *dml_allocation_decoder_,
           p_dml_api_);
 
       dml_pooled_upload_heap_ = std::make_unique<DmlPooledUploadHeap>(dml_objects_.d3d12_device.Get(), dml_execution_context_.get());

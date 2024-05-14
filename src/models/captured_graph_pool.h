@@ -38,7 +38,7 @@ using CapturedGraphInfoPtr = std::unique_ptr<CapturedGraphInfo, CapturedGraphInf
 
 class CapturedGraphPool : public std::enable_shared_from_this<CapturedGraphPool> {
  public:
-  CapturedGraphPool(const Config* config, const SessionInfo* session_info, Ort::Allocator* allocator_device)
+  CapturedGraphPool(const Config* config, const SessionInfo* session_info, OrtAllocator* allocator_device)
       : config_(config),
         session_info_(session_info),
         allocator_device_(allocator_device){};
@@ -55,7 +55,7 @@ class CapturedGraphPool : public std::enable_shared_from_this<CapturedGraphPool>
   mutable int current_graph_annotation_id_ = 1;
   const Config* config_;
   const SessionInfo* session_info_;
-  Ort::Allocator* allocator_device_;
+  OrtAllocator* allocator_device_;
 };
 
 struct CapturedGraphInfo {

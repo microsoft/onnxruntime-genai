@@ -10,9 +10,10 @@ DmlExecutionContext::DmlExecutionContext(
     ID3D12Device* d3d12_device,
     IDMLDevice* dml_device,
     ID3D12CommandQueue* queue,
-    Ort::Allocator& device_allocator,
+    OrtAllocator& device_allocator,
+    OrtAllocator& dml_allocation_decoder,
     const OrtDmlApi* ort_dml_api)
-    : queue_(std::make_shared<DmlCommandQueue>(queue)), dml_recorder_(d3d12_device, dml_device, queue_, device_allocator, ort_dml_api) {
+    : queue_(std::make_shared<DmlCommandQueue>(queue)), dml_recorder_(d3d12_device, dml_device, queue_, device_allocator, dml_allocation_decoder, ort_dml_api) {
 }
 
 void DmlExecutionContext::CopyBufferRegion(
