@@ -405,6 +405,10 @@ void DmlCastInputToOutput(
   std::array<ID3D12Resource*, 1> output_resources = {target_resource.Get()};
   std::array<uint64_t, 1> output_sizes = {element_count * DataTypeSizeInBytes(dml_to_type)};
 
+  // Make sure the source and target allocations are kept alive until the operation is done
+  command_list_state.source_resource = std::move(source_resource);
+  command_list_state.target_resource = std::move(target_resource);
+
   DmlHelpers::ExecuteReusableCommandList(
       execution_context,
       command_list_state,
