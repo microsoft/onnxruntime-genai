@@ -25,6 +25,13 @@ public class Generator implements AutoCloseable {
    * @param generatorParams The generator parameters.
    */
   public Generator(Model model, GeneratorParams generatorParams) throws GenAIException {
+    if (model.nativeHandle() == 0) {
+      throw new IllegalStateException("model has been freed and is invalid");
+    }
+    if (generatorParams.nativeHandle() == 0) {
+      throw new IllegalStateException("generatorParams has been freed and is invalid");
+    }
+
     nativeHandle = createGenerator(model.nativeHandle(), generatorParams.nativeHandle());
   }
 
@@ -34,16 +41,28 @@ public class Generator implements AutoCloseable {
    * @return true if the generation process is done, false otherwise.
    */
   public boolean isDone() {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
     return isDone(nativeHandle);
   }
 
   /** Computes the logits for the next token in the sequence. */
   public void computeLogits() throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
     computeLogits(nativeHandle);
   }
 
   /** Generates the next token in the sequence. */
   public void generateNextToken() throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
     generateNextTokenNative(nativeHandle);
   }
 
@@ -81,6 +100,10 @@ public class Generator implements AutoCloseable {
   }
 
   private int[] getSequenceImpl(long sequenceIndex, boolean lastTokenOnly) throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
     return getSequenceNative(nativeHandle, sequenceIndex, lastTokenOnly);
   }
 

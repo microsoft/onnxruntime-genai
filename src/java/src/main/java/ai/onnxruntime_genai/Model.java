@@ -4,10 +4,10 @@
 package ai.onnxruntime_genai;
 
 public class Model implements AutoCloseable {
-  private long modelHandle;
+  private long nativeHandle;
 
   public Model(String modelPath) throws GenAIException {
-    modelHandle = createModel(modelPath);
+    nativeHandle = createModel(modelPath);
   }
 
   /**
@@ -18,20 +18,28 @@ public class Model implements AutoCloseable {
    * @return The generated sequences.
    */
   public Sequences generate(GeneratorParams generatorParams) throws GenAIException {
-    long sequencesHandle = generate(modelHandle, generatorParams.nativeHandle());
+    if (generatorParams.nativeHandle() == 0) {
+      throw new IllegalStateException("generatorParams has been freed and is invalid");
+    }
+
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    long sequencesHandle = generate(nativeHandle, generatorParams.nativeHandle());
     return new Sequences(sequencesHandle);
   }
 
   @Override
   public void close() throws GenAIException {
-    if (modelHandle != 0) {
-      destroyModel(modelHandle);
-      modelHandle = 0;
+    if (nativeHandle != 0) {
+      destroyModel(nativeHandle);
+      nativeHandle = 0;
     }
   }
 
   protected long nativeHandle() {
-    return modelHandle;
+    return nativeHandle;
   }
 
   static {

@@ -6,6 +6,8 @@
 #include "ort_genai_c.h"
 #include "utils.h"
 
+#include <iostream>
+
 using namespace Helpers;
 
 extern "C" JNIEXPORT jlong JNICALL
@@ -34,13 +36,13 @@ Java_ai_onnxruntime_1genai_Generator_computeLogits(JNIEnv* env, jobject thiz, jl
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_ai_onnxruntime_1genai_Generator_ogaGenerateNextToken(JNIEnv* env, jobject thiz, jlong native_handle) {
+Java_ai_onnxruntime_1genai_Generator_generateNextTokenNative(JNIEnv* env, jobject thiz, jlong native_handle) {
   ThrowIfError(env, OgaGenerator_GenerateNextToken(reinterpret_cast<OgaGenerator*>(native_handle)));
 }
 
 extern "C" JNIEXPORT jintArray JNICALL
-Java_ai_onnxruntime_1genai_Generator_ogaGetSequence(JNIEnv* env, jobject thiz, jlong generator, jlong index,
-                                                    jboolean last_token_only) {
+Java_ai_onnxruntime_1genai_Generator_getSequenceNative(JNIEnv* env, jobject thiz, jlong generator, jlong index,
+                                                       jboolean last_token_only) {
   const OgaGenerator* oga_generator = reinterpret_cast<const OgaGenerator*>(generator);
 
   size_t num_tokens = OgaGenerator_GetSequenceCount(oga_generator, index);
@@ -51,8 +53,8 @@ Java_ai_onnxruntime_1genai_Generator_ogaGetSequence(JNIEnv* env, jobject thiz, j
   }
 
   if (last_token_only) {
-    num_tokens = 1;
     tokens = &tokens[num_tokens - 1];
+    num_tokens = 1;
   }
 
   // as there's no 'destroy' function in GenAI C API for the tokens we assume the OgaGenerator owns the memory.

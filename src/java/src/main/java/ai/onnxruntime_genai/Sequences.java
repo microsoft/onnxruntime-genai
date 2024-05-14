@@ -5,13 +5,13 @@ package ai.onnxruntime_genai;
 
 /** Represents a collection of encoded prompts/responses. */
 public class Sequences implements AutoCloseable {
-  private long sequencesHandle;
+  private long nativeHandle;
   private long numSequences;
 
   protected Sequences(long sequencesHandle) {
     assert (sequencesHandle != 0); // internal usage should never pass an invalid handle
 
-    this.sequencesHandle = sequencesHandle;
+    nativeHandle = sequencesHandle;
     numSequences = getSequencesCount(sequencesHandle);
   }
 
@@ -31,19 +31,23 @@ public class Sequences implements AutoCloseable {
    * @return The sequence as an array of integers.
    */
   int[] getSequence(long sequenceIndex) {
-    return getSequenceNative(sequencesHandle, sequenceIndex);
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    return getSequenceNative(nativeHandle, sequenceIndex);
   }
 
   @Override
   public void close() throws Exception {
-    if (sequencesHandle != 0) {
-      destroySequences(sequencesHandle);
-      sequencesHandle = 0;
+    if (nativeHandle != 0) {
+      destroySequences(nativeHandle);
+      nativeHandle = 0;
     }
   }
 
   protected long nativeHandle() {
-    return sequencesHandle;
+    return nativeHandle;
   }
 
   static {

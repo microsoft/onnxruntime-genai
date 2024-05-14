@@ -6,6 +6,8 @@
 #include "ort_genai_c.h"
 #include "utils.h"
 
+#include <iostream>
+
 using namespace Helpers;
 
 extern "C" JNIEXPORT jstring JNICALL
@@ -14,11 +16,12 @@ Java_ai_onnxruntime_1genai_TokenizerStream_tokenizerStreamDecode(JNIEnv* env, jo
   OgaTokenizerStream* tokenizer_stream = reinterpret_cast<OgaTokenizerStream*>(tokenizer_stream_handle);
   const char* decoded_text = nullptr;
 
+  // The const char* returned in decoded_text is the result of calling c_str on a std::string in the tokenizer cache.
+  // The std::string is owned by the tokenizer cache.
+  // Due to that, it is invalid to call `OgaDestroyString(decoded_text)`, and doing so will result in a crash.
   ThrowIfError(env, OgaTokenizerStreamDecode(tokenizer_stream, token, &decoded_text));
 
   jstring result = env->NewStringUTF(decoded_text);
-  OgaDestroyString(decoded_text);
-
   return result;
 }
 

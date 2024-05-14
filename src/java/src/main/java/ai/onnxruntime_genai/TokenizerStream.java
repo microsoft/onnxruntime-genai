@@ -8,22 +8,26 @@ package ai.onnxruntime_genai;
  */
 public class TokenizerStream implements AutoCloseable {
 
-  private long tokenizerStreamHandle = 0;
+  private long nativeHandle = 0;
 
-  protected TokenizerStream(long nativeHandle) {
-    assert (nativeHandle != 0); // internal usage should never pass an invalid handle
-    tokenizerStreamHandle = nativeHandle;
+  protected TokenizerStream(long tokenizerStreamHandle) {
+    assert (tokenizerStreamHandle != 0); // internal usage should never pass an invalid handle
+    nativeHandle = tokenizerStreamHandle;
   }
 
   public String decode(int token) throws GenAIException {
-    return tokenizerStreamDecode(tokenizerStreamHandle, token);
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    return tokenizerStreamDecode(nativeHandle, token);
   }
 
   @Override
   public void close() throws Exception {
-    if (tokenizerStreamHandle != 0) {
-      destroyTokenizerStream(tokenizerStreamHandle);
-      tokenizerStreamHandle = 0;
+    if (nativeHandle != 0) {
+      destroyTokenizerStream(nativeHandle);
+      nativeHandle = 0;
     }
   }
 

@@ -8,14 +8,26 @@ public class GeneratorParams implements AutoCloseable {
   private long nativeHandle = 0;
 
   public GeneratorParams(Model model) throws GenAIException {
+    if (model.nativeHandle() == 0) {
+      throw new IllegalStateException("model has been freed and is invalid");
+    }
+
     nativeHandle = createGeneratorParams(model.nativeHandle());
   }
 
   public void setSearchOption(String optionName, double value) throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
     setSearchOptionNumber(nativeHandle, optionName, value);
   }
 
   public void setSearchOption(String optionName, boolean value) throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
     setSearchOptionBool(nativeHandle, optionName, value);
   }
 
@@ -26,11 +38,19 @@ public class GeneratorParams implements AutoCloseable {
    * @param sequences The encoded input prompt/s.
    */
   public void setInput(Sequences sequences) throws GenAIException {
+    if (sequences.nativeHandle() == 0) {
+      throw new IllegalStateException("sequences has been freed and is invalid");
+    }
+
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
     setInputSequences(nativeHandle, sequences.nativeHandle());
   }
 
   @Override
-  public void close() throws Exception {
+  public void close() {
     if (nativeHandle != 0) {
       destroyGeneratorParams(nativeHandle);
       nativeHandle = 0;

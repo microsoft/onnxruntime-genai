@@ -5,10 +5,14 @@ package ai.onnxruntime_genai;
 
 /** The Tokenizer class is responsible for converting between text and token ids. */
 public class Tokenizer implements AutoCloseable {
-  private long tokenizerHandle;
+  private long nativeHandle;
 
   public Tokenizer(Model model) throws GenAIException {
-    tokenizerHandle = createTokenizer(model.nativeHandle());
+    if (model.nativeHandle() == 0) {
+      throw new IllegalStateException("model has been freed and is invalid");
+    }
+
+    nativeHandle = createTokenizer(model.nativeHandle());
   }
 
   /**
@@ -28,7 +32,11 @@ public class Tokenizer implements AutoCloseable {
    * @return a Sequences object with one sequence per input string.
    */
   public Sequences EncodeBatch(String[] strings) throws GenAIException {
-    long sequencesHandle = tokenizerEncode(tokenizerHandle, strings);
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    long sequencesHandle = tokenizerEncode(nativeHandle, strings);
     return new Sequences(sequencesHandle);
   }
 
@@ -39,7 +47,11 @@ public class Tokenizer implements AutoCloseable {
    * @return The text representation of the sequence.
    */
   public String Decode(int[] sequence) throws GenAIException {
-    return tokenizerDecode(tokenizerHandle, sequence);
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    return tokenizerDecode(nativeHandle, sequence);
   }
 
   /**
@@ -66,14 +78,18 @@ public class Tokenizer implements AutoCloseable {
    * @return The new TokenizerStream instance.
    */
   public TokenizerStream CreateStream() throws GenAIException {
-    return new TokenizerStream(createTokenizerStream(tokenizerHandle));
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    return new TokenizerStream(createTokenizerStream(nativeHandle));
   }
 
   @Override
   public void close() throws Exception {
-    if (tokenizerHandle != 0) {
-      destroyTokenizer(tokenizerHandle);
-      tokenizerHandle = 0;
+    if (nativeHandle != 0) {
+      destroyTokenizer(nativeHandle);
+      nativeHandle = 0;
     }
   }
 

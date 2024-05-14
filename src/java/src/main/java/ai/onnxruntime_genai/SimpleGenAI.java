@@ -44,18 +44,24 @@ public class SimpleGenAI {
    * @throws GenAIException on failure
    */
   GeneratorParams createGeneratorParams(String prompt) throws GenAIException {
+    GeneratorParams generatorParams = null;
     try (Tokenizer tokenizer = new Tokenizer(model);
-        Sequences prompt_sequences = tokenizer.Encode(prompt);
-        GeneratorParams generatorParams = new GeneratorParams(model)) {
+        Sequences prompt_sequences = tokenizer.Encode(prompt)) {
       // add the prompt and set max_length as example usage
+      generatorParams = new GeneratorParams(model);
       generatorParams.setInput(prompt_sequences);
       generatorParams.setSearchOption("max_length", 200);
-
-      return generatorParams;
     } catch (Exception e) {
       e.printStackTrace();
+
+      if (generatorParams != null) {
+        generatorParams.close();
+      }
+
       throw new GenAIException("Prompt encoding failed", e);
     }
+
+    return generatorParams;
   }
 
   /**

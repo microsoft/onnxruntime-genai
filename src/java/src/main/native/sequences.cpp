@@ -8,13 +8,13 @@
 
 extern "C" JNIEXPORT void JNICALL
 Java_ai_onnxruntime_1genai_Sequences_destroySequences(JNIEnv* env, jobject thiz, jlong sequences_handle) {
-  OgaSequences* sequences = reinterpret_cast<OgaSequences*>(sequences);
+  OgaSequences* sequences = reinterpret_cast<OgaSequences*>(sequences_handle);
   OgaDestroySequences(sequences);
 }
 
 extern "C" JNIEXPORT jlong JNICALL
 Java_ai_onnxruntime_1genai_Sequences_getSequencesCount(JNIEnv* env, jobject thiz, jlong sequences_handle) {
-  const OgaSequences* sequences = reinterpret_cast<const OgaSequences*>(sequences);
+  const OgaSequences* sequences = reinterpret_cast<const OgaSequences*>(sequences_handle);
   size_t num_sequences = OgaSequencesCount(sequences);
   return static_cast<jlong>(num_sequences);
 }
@@ -22,7 +22,7 @@ Java_ai_onnxruntime_1genai_Sequences_getSequencesCount(JNIEnv* env, jobject thiz
 extern "C" JNIEXPORT jintArray JNICALL
 Java_ai_onnxruntime_1genai_Sequences_getSequenceNative(JNIEnv* env, jobject thiz, jlong sequences_handle,
                                                        jlong sequence_index) {
-  const OgaSequences* sequences = reinterpret_cast<const OgaSequences*>(sequences);
+  const OgaSequences* sequences = reinterpret_cast<const OgaSequences*>(sequences_handle);
 
   size_t num_tokens = OgaSequencesGetSequenceCount(sequences, (size_t)sequence_index);
   const int32_t* tokens = OgaSequencesGetSequenceData(sequences, (size_t)sequence_index);
