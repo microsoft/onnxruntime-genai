@@ -35,6 +35,7 @@ def save_results(results, filename):
     df = pd.DataFrame(
         results,
         columns=[
+            "Model Path",
             "Batch Size",
             "Prompt Length",
             "Tokenization Throughput (tps)",
@@ -49,20 +50,18 @@ def save_results(results, filename):
             "Wall Clock Time (s)",
         ],
     )
-    df = df.transpose()  # This line swaps the rows and columns
-    df.to_csv(filename, header=False)
+    # df = df.transpose()  # This line swaps the rows and columns
+    df.to_csv(filename, header=True, index=False)
     print(f"Results saved in {filename}!")
 
-def main(args):
+def run_benchmark(args, model_path, batch_size, prompt_length, generation_length, max_length):
     # Get user arguments
     num_repetitions = args.repetitions
-    batch_size, prompt_length, generation_length = args.batch_size, args.prompt_length, args.generation_length
-    max_length = prompt_length + generation_length
     temperature = 1.0
 
     # Get tokenizer, and model
     if args.verbose: print(f"Loading model... ")
-    model=og.Model(f'{args.input_folder}')
+    model=og.Model(f'{model_path}')
     if args.verbose: print("Model loaded")
     tokenizer = og.Tokenizer(model)
 
@@ -128,7 +127,8 @@ def main(args):
         sampling_times.append(sampling_end_time - sampling_start_time)
 
         # Measure token generation
-        while not generator.is_done():
+        i = 1
+        while not generator.is_done() and i < generation_length:
             # Run inference
             token_gen_start_time = time.perf_counter()
             generator.compute_logits()
@@ -140,6 +140,7 @@ def main(args):
             
             token_gen_times.append(token_gen_end_time - token_gen_start_time)
             sampling_times.append(sampling_end_time - sampling_start_time)
+            i += 1
         wall_clock_end_time = time.time()
         wall_clock_times.append(wall_clock_end_time - wall_clock_start_time)
         if args.print_model_output: print(tokenizer.decode(generator.get_sequence(0)))
@@ -182,8 +183,8 @@ def main(args):
     print(f"Average Wall Clock Time: {avg_wall_clock_time} s")
     print(f"Average Wall Clock Throughput: {avg_wall_clock_thrpt} tps")
 
-
-    all_csv_metrics = [[
+    metrics = [
+        model_path,
         batch_size, 
         prompt_length, 
         avg_tokenization_thrpt, 
@@ -196,19 +197,40 @@ def main(args):
         avg_sampling_latency_ms,
         avg_wall_clock_thrpt,
         avg_wall_clock_time,
-    ]]
+    ]
+    return metrics
 
+def main(args):
+    all_csv_metrics = []
+    for model_path in args.input_folders:
+        print("Benchmarking " + model_path)
+        for batch_size in args.batch_sizes:
+            for l, prompt_length in enumerate(args.prompt_lengths):
+                for g, gen_length in enumerate(args.generation_lengths):
+                    if args.max_lengths:
+                        m = l * len(args.generation_lengths) + g
+                        max_length = args.max_lengths[m]
+                    print(f"Args: batch_size = {batch_size}, prompt_length = {prompt_length}, tokens = {gen_length}, max_length = {max_length}")
+                    metrics = run_benchmark(args, model_path, batch_size, prompt_length, gen_length, max_length)
+                    all_csv_metrics.append(metrics)
     # Add metrics to CSV
     if args.verbose: print("Adding results to CSV")
     filename = args.output
     save_results(all_csv_metrics, filename)
 
+def str2intlist(value):
+    return [int(v) for v in value.split(',')]
+
+def str2strlist(value):
+    return [str(v) for v in value.split(',')]
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="End-to-end benchmarking for gen-ai")
-    parser.add_argument('-i', '--input_folder', type=str, required=True, help='Onnx model folder path (must contain config.json and model.onnx)')
-    parser.add_argument('-b', '--batch_size', type=int, default=1, help='Number of sequences to generate in parallel')
-    parser.add_argument('-l', '--prompt_length', type=int, default=16, help='Number of tokens for prompt')
-    parser.add_argument('-g', '--generation_length', type=int, default=256, help='Number of tokens to generate after prompt')
+    parser.add_argument('-i', '--input_folders', type=str2strlist, required=True, help='Onnx model folder paths (must contain config.json and model.onnx)')
+    parser.add_argument('-b', '--batch_sizes', type=str2intlist, default=[1], help='Number of sequences to generate in parallel')
+    parser.add_argument('-l', '--prompt_lengths', type=str2intlist, default=[16], help='Number of tokens for prompt')
+    parser.add_argument('-g', '--generation_lengths', type=str2intlist, default=[256], help='Number of tokens to generate after prompt')
+    parser.add_argument('-m', '--max_lengths', type=str2intlist, default=[], help='Max length buffer sizes... User should supply one for every combination of Prompt and Generation length')
     parser.add_argument('-r', '--repetitions', type=int, default=10, help='Number of times to repeat the benchmark')
     parser.add_argument('-w', '--warmup', type=int, default=5, help='Number of warmup runs before benchmarking')
     parser.add_argument('-k', '--top_k', type=int, default=50, help='Top k tokens to sample from')
