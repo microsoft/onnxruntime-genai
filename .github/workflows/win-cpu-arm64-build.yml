@@ -15,10 +15,6 @@ env:
   ort_zip: "$(ort_dir).zip"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/$(ort_zip)"
   binaryDir: 'build/cpu'
-  ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
-  ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
-  ORT_NIGHTLY_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
-
 
 jobs:
   windows-cpu-arm64-build:
@@ -32,30 +28,22 @@ jobs:
     - name: Setup Visual Studio 2022
       uses: microsoft/setup-msbuild@v1.1
       with:
-        vs-version: '17.5'
+        vs-version: '17.4'
+        msbuild-architecture: arm64
 
-    - uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: '8.0.x'
-
-    - name : Install jq
+    - name: Download OnnxRuntime
       run: |
-        choco install -y jq
+        $env:ort_url = "https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/onnxruntime-win-arm64-1.17.3.zip"
+        Invoke-WebRequest -Uri $env:ort_url -OutFile $env:ort_zip
 
-    - name: Download OnnxRuntime Nightly
+    - name: Unzip OnnxRuntime
       run: |
-        dotnet new consloe
-        dotnet add package ${{ env.ORT_PACKAGE_NAME }} --source ${{ env.ORT_NIGHTLY_SOURCE }} --package-directory .
-        dotnet build
+        Expand-Archive $env:ort_zip -DestinationPath .
+        Remove-Item -Path $env:ort_zip
 
-    - run: Get-ChildItem  ${{ env.ORT_PACKAGE_NAME }} -Recurse
-      continue-on-error: true
-
-    - name: Extract OnnxRuntime library and header files
+    - name: Rename OnnxRuntime to ort
       run: |
-        mkdir ort/lib
-        move ${{ env.ORT_PACKAGE_NAME }}*/**/build/native/include ort/
-        move ${{ env.ORT_PACKAGE_NAME }}*//**/runtimes/win-arm64/native/* ort/lib/   
+        Rename-Item -Path $env:ort_dir -NewName ort
 
     - name: Configure CMake
       run: |
