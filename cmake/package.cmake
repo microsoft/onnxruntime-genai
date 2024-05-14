@@ -6,7 +6,7 @@ install(TARGETS
   onnxruntime-genai
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib
-  PUBLIC_HEADER
+  PUBLIC_HEADER DESTINATION include
 )
 set(CPACK_PACKAGE_VENDOR "Microsoft")
 set(CPACK_PACKAGE_NAME "onnxruntime-genai")
