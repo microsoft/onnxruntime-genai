@@ -16,6 +16,7 @@ REPO_ROOT = Path(__file__).parent
 sys.path.append(str(REPO_ROOT / "tools" / "python"))
 import util  # ./tools/python/util noqa: E402
 
+
 log = util.get_logger("build.py")
 
 
@@ -91,13 +92,12 @@ def _parse_args():
     )
 
     parser.add_argument("--use_dml", action="store_true", help="Whether to use DML. Default is to not use DML.")
-    
 
     # The following options are mutually exclusive (cross compiling options such as android, ios, etc.)
     platform_group = parser.add_mutually_exclusive_group()
     platform_group.add_argument("--android", action="store_true", help="Build for Android")
     platform_group.add_argument("--ios", action="store_true", help="Build for ios")
-    
+
     # Android options
     parser.add_argument(
         "--android_abi",
