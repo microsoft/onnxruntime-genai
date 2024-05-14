@@ -18,24 +18,21 @@ include(cmake/check_dml.cmake)
 
 include(cmake/cxx_standard.cmake)
 
-
-
-if (ANDROID)
-  # Paths are based on the directory structure of the ORT Android AAR.
-  set(ORT_HEADER_DIR ${ORT_HOME}/headers)
-  set(ORT_LIB_DIR ${ORT_HOME}/jni/${ANDROID_ABI})
-else()
-endif()
-
 add_compile_definitions(BUILDING_ORT_GENAI_C)
 if(MSVC)
   # set updated value for __cplusplus macro instead of 199711L
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>)
 endif()
-if(ENABLE_TESTS AND TEST_PHI2)
-  add_compile_definitions(TEST_PHI2=1)
-else()
-  add_compile_definitions(TEST_PHI2=0)
+
+if(ENABLE_TESTS)
+  # call enable_testing so we can add tests from subdirectories (e.g. test and src/java)
+  # it applies recursively to all subdirectories
+  enable_testing()
+  if (TEST_PHI2)
+    add_compile_definitions(TEST_PHI2=1)
+  else()
+    add_compile_definitions(TEST_PHI2=0)
+  endif()
 endif()
 
 

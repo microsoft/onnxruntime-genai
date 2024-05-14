@@ -22,25 +22,31 @@ set(GRADLE_EXECUTABLE "${JAVA_SRC_ROOT}/gradlew")
 file(GLOB_RECURSE genai4j_gradle_files "${JAVA_SRC_ROOT}/*.gradle")
 file(GLOB_RECURSE genai4j_srcs "${JAVA_SRC_ROOT}/src/main/java/ai/onnxruntime_genai/*.java")
 
-# TODO: How is --no-daemon different from org.gradle.daemon.false?
+# set gradle options that are used with multiple gradle commands
 if(WIN32)
-  set(GRADLE_OPTIONS -Dorg.gradle.daemon=true)  # TODO: testing using `true`. might be better for dev not CI though
+  set(GRADLE_OPTIONS --console=plain -Dorg.gradle.daemon=false)
 elseif (ANDROID)
   # For Android build, we may run gradle multiple times in same build. Sometimes gradle JVM will run out of memory
   # if we keep the daemon running, so we use no-daemon to avoid that
-  set(GRADLE_OPTIONS --no-daemon)
+  set(GRADLE_OPTIONS --console=plain --no-daemon)
 endif()
 
 # this jar is solely used to signaling mechanism for dependency management in CMake
 # if any of the Java sources change, the jar (and generated headers) will be regenerated 
 # and the onnxruntime-genai4j_jni target will be rebuilt
+set(JAVA_OUTPUT_JAR ${JAVA_OUTPUT_DIR}/build/libs/onnxruntime_genai.jar)
+set(GRADLE_ARGS clean jar -x test)
+
+# this jar is solely used to signaling mechanism for dependency management in CMake
+# if any of the Java sources change, the jar (and generated headers) will be regenerated 
+# and the onnxruntime-genai4j_jni target will be rebuilt
 set(JAVA_OUTPUT_JAR ${JAVA_SRC_ROOT}/build/libs/onnxruntime_genai.jar)
-set(GRADLE_ARGS --console=plain clean jar -x test)
+set(GRADLE_ARGS clean jar -x test)
 
 add_custom_command(OUTPUT ${JAVA_OUTPUT_JAR} 
                    COMMAND ${GRADLE_EXECUTABLE} ${GRADLE_OPTIONS} ${GRADLE_ARGS} 
                    WORKING_DIRECTORY ${JAVA_SRC_ROOT} 
-                   DEPENDS ${genai4j_gradle_files} ${genai4j_srcs})                   
+                   DEPENDS ${genai4j_gradle_files} ${genai4j_srcs})
 add_custom_target(onnxruntime-genai4j DEPENDS ${JAVA_OUTPUT_JAR})
 
 set_source_files_properties(${JAVA_OUTPUT_JAR} PROPERTIES GENERATED TRUE)
@@ -57,17 +63,16 @@ add_library(onnxruntime-genai4j_jni SHARED ${genai4j_native_src})
 set_property(TARGET onnxruntime-genai4j_jni PROPERTY CXX_STANDARD 17)
 add_dependencies(onnxruntime-genai4j_jni onnxruntime-genai4j)
 # the JNI headers are generated in the genai4j target
-target_include_directories(onnxruntime-genai4j_jni PRIVATE ${SRC_ROOT} 
+target_include_directories(onnxruntime-genai4j_jni PRIVATE ${SRC_ROOT}
                                                            ${JAVA_SRC_ROOT}/build/headers 
                                                            ${JNI_INCLUDE_DIRS})
 target_link_libraries(onnxruntime-genai4j_jni PUBLIC onnxruntime-genai)
 
 set(JAVA_PACKAGE_OUTPUT_DIR ${JAVA_OUTPUT_DIR}/build)
+file(MAKE_DIRECTORY ${JAVA_PACKAGE_OUTPUT_DIR})
 if (ANDROID)
   set(ANDROID_PACKAGE_OUTPUT_DIR ${JAVA_PACKAGE_OUTPUT_DIR}/android)
   file(MAKE_DIRECTORY ${ANDROID_PACKAGE_OUTPUT_DIR})
-else()
-  file(MAKE_DIRECTORY ${JAVA_PACKAGE_OUTPUT_DIR})
 endif()
 
 if (WIN32)
@@ -137,19 +142,26 @@ file(MAKE_DIRECTORY ${JAVA_PACKAGE_LIB_DIR})
 file(MAKE_DIRECTORY ${JAVA_PACKAGE_JNI_DIR})
 
 if (WIN32)
-    # TODO: Are we packaging the onnxruntime library here or not?
-    # Add the native genai library
+    # Add the native genai library to the native-lib dir
     add_custom_command(TARGET onnxruntime-genai4j_jni POST_BUILD
                        COMMAND ${CMAKE_COMMAND} -E copy_if_different 
-                        $<TARGET_FILE:onnxruntime-genai> ${JAVA_PACKAGE_LIB_DIR}/$<TARGET_FILE_NAME:onnxruntime-genai>)
-    # Add the JNI bindings
+                        $<TARGET_FILE:onnxruntime-genai> 
+                          ${JAVA_PACKAGE_LIB_DIR}/$<TARGET_FILE_NAME:onnxruntime-genai>)
+    # also need the onnxruntime libraries in the same directory as onnxruntime-genai.dll has a dependency on it
+    foreach (ort_dll ${onnxruntime_libs})
+      message(STATUS "Copying ${ort_dll} to ${JAVA_PACKAGE_JNI_DIR}")
+      add_custom_command(TARGET onnxruntime-genai4j_jni POST_BUILD
+                         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${ort_dll} ${JAVA_PACKAGE_LIB_DIR})
+    endforeach()
+
+    # Add the JNI bindings to the native-jni dir
     add_custom_command(TARGET onnxruntime-genai4j_jni POST_BUILD
                        COMMAND ${CMAKE_COMMAND} -E copy_if_different 
                          $<TARGET_FILE:onnxruntime-genai4j_jni> ${JAVA_PACKAGE_JNI_DIR}/$<TARGET_FILE_NAME:onnxruntime-genai4j_jni>)
-endif()
+  endif()
 
 # run the build process (this copies the results back into CMAKE_CURRENT_BINARY_DIR)
-set(GRADLE_ARGS --console=plain cmakeBuild -DcmakeBuildDir=${JAVA_OUTPUT_DIR})
+set(GRADLE_ARGS cmakeBuild -DcmakeBuildDir=${JAVA_OUTPUT_DIR})
 add_custom_command(TARGET onnxruntime-genai4j_jni POST_BUILD
                    COMMAND ${GRADLE_EXECUTABLE} ${GRADLE_OPTIONS} ${GRADLE_ARGS} 
                    WORKING_DIRECTORY ${JAVA_SRC_ROOT})
@@ -208,10 +220,10 @@ endif()
 if (ENABLE_TESTS)
   message(STATUS "Adding Java tests")
   set(JAVA_NATIVE_TEST_DIR ${JAVA_OUTPUT_DIR}/native-test)
-  # file(MAKE_DIRECTORY ${JAVA_NATIVE_TEST_DIR})
+  file(MAKE_DIRECTORY ${JAVA_NATIVE_TEST_DIR})
 
-  #   # FILE(TO_NATIVE_PATH ${GRADLE_EXECUTABLE} GRADLE_NATIVE_PATH)
-  #   # FILE(TO_NATIVE_PATH ${BIN_DIR} BINDIR_NATIVE_PATH)
+  # FILE(TO_NATIVE_PATH ${GRADLE_EXECUTABLE} GRADLE_NATIVE_PATH)
+  # FILE(TO_NATIVE_PATH ${BIN_DIR} BINDIR_NATIVE_PATH)
   if (WIN32)
     # On windows ctest requires a test to be an .exe(.com) file
     # With gradle wrapper we get gradlew.bat. We delegate execution to a separate .cmake file

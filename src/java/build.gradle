@@ -19,7 +19,7 @@ version = rootProject.file('../../VERSION_INFO').text.trim()
 def cmakeBuildDir = System.properties['cmakeBuildDir']
 def useCUDA = System.properties['USE_CUDA']
 def cmakeJavaDir = "${cmakeBuildDir}"
-def cmakeBuildOutputDir = "${cmakeJavaDir}/build"
+def cmakeBuildOutputDir = "${cmakeJavaDir}"
 def cmakeNativeLibDir = "${cmakeJavaDir}/native-lib"
 def cmakeNativeJniDir = "${cmakeJavaDir}/native-jni"
 def cmakeNativeTestDir = "${cmakeJavaDir}/native-test"
@@ -29,6 +29,10 @@ def mavenPwd = System.properties['mavenPwd']
 def mavenArtifactId = useCUDA == null ? project.name : project.name + "_gpu"
 
 def defaultDescription = 'ONNX Runtime GenAI is <TODO>'
+
+// TEMPORARY
+logger.warn("cmakeBuildOutputDir:${cmakeBuildOutputDir}")
+logger.warn("project.buildDir:${project.buildDir}")
 
 java {
 	sourceCompatibility = JavaVersion.VERSION_1_8
@@ -64,7 +68,6 @@ spotless {
 	java {
 		removeUnusedImports()
 		googleJavaFormat()
-		// targetExclude "src/test/java/ai/onnxruntime_genai/???.java"
 	}
 	format 'gradle', {
 		target '**/*.gradle'
@@ -75,7 +78,7 @@ spotless {
 
 compileJava {
 	dependsOn spotlessJava
-	// options.compilerArgs += ["-h", "${project.buildDir}/headers/"]
+	options.compilerArgs += ["-h", "${project.buildDir}/headers/"]
 	if (!JavaVersion.current().isJava8()) {
 		// Ensures only methods present in Java 8 are used
 		options.compilerArgs.addAll(['--release', '8'])
@@ -84,7 +87,7 @@ compileJava {
 		java.targetCompatibility = null
 	}
 
-	destinationDirectory=file(cmakeJavaDir)
+	// destinationDirectory=file(cmakeJavaDir)
 }
 
 compileTestJava {
@@ -96,7 +99,7 @@ compileTestJava {
 		java.targetCompatibility = null
 	}
 
-	destinationDirectory=file(cmakeJavaDir)
+	// destinationDirectory=file(cmakeJavaDir)
 }
 
 sourceSets.main.java {

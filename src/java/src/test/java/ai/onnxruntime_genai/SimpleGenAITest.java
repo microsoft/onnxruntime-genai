@@ -28,7 +28,7 @@ public class SimpleGenAITest {
     SimpleGenAI generator =
         new SimpleGenAI("test_models/hf-internal-testing/tiny-random-gpt2-fp32");
     GeneratorParams params = generator.createGeneratorParams("This is a testing prompt");
-    assertThrows(GenAIException.class, params.setSearchOption("invalid", true));
+    assertThrows(GenAIException.class, () -> params.setSearchOption("invalid", true));
     assertFalse(true);
   }
 }
