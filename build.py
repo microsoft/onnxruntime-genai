@@ -392,7 +392,6 @@ def update(args: argparse.Namespace, env: dict[str, str]):
     if args.ios:
         command += [
             "-DCMAKE_SYSTEM_NAME=iOS",
-            "-DENABLE_TESTS=OFF",
             f"-DCMAKE_OSX_SYSROOT={args.ios_sysroot}",
             f"-DCMAKE_OSX_ARCHITECTURES={args.ios_arch}",
             f"-DCMAKE_OSX_DEPLOYMENT_TARGET={args.ios_deployment_target}",
