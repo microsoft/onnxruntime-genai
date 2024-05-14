@@ -74,3 +74,11 @@ steps:
     RemoveSourceFolder: false
   displayName: 'Remove .pdb files from lib'
   continueOnError: true
+
+- task: DeleteFiles@1
+  inputs:
+    SourceFolder: '$(Build.Repository.LocalPath)/ort/lib'
+    Contents: 'tools'
+    RemoveSourceFolder: false
+  displayName: 'Remove tools folder from lib'
+  continueOnError: true
