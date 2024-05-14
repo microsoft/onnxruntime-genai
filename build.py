@@ -12,18 +12,6 @@ import warnings
 
 from pathlib import Path
 
-
-class BaseError(Exception):
-    """Base class for errors originating from build.py."""
-
-
-class BuildError(BaseError):
-    """Error from running build steps."""
-
-    def __init__(self, *messages):
-        super().__init__("\n".join(messages))
-
-
 REPO_ROOT = Path(__file__).parent
 sys.path.append(str(REPO_ROOT / "tools" / "python"))
 import util  # ./tools/python/util noqa: E402
@@ -50,7 +38,7 @@ def _parse_args():
         type=Path,
         # We set the default programmatically as it needs to take into account whether we're cross-compiling
         help="Path to the build directory. Defaults to 'build/<target platform>'. "
-        "The build configuration will be a subdirectory of the build directory. e.g. build/Linux/Debug",
+             "The build configuration will be a subdirectory of the build directory. e.g. build/Linux/Debug",
     )
 
     parser.add_argument(
@@ -58,40 +46,25 @@ def _parse_args():
         default="RelWithDebInfo",
         type=str,
         choices=["Debug", "MinSizeRel", "Release", "RelWithDebInfo"],
-        help="Configuration to build.",
-    )
+        help="Configuration to build.")
 
     # Build phases.
     parser.add_argument("--update", action="store_true", help="Update makefiles.")
     parser.add_argument("--build", action="store_true", help="Build.")
     parser.add_argument("--test", action="store_true", help="Run tests.")
     parser.add_argument(
-        "--clean",
-        action="store_true",
-        help="Run 'cmake --build --target clean' for the selected config/s.",
+        "--clean", action="store_true", help="Run 'cmake --build --target clean' for the selected config/s."
     )
 
-    parser.add_argument(
-        "--skip_tests", action="store_true", help="Skip all tests. Overrides --test."
-    )
-    parser.add_argument(
-        "--skip_wheel", action="store_true", help="Skip building the Python wheel."
-    )
-    parser.add_argument(
-        "--skip_csharp", action="store_true", help="Skip building the C# API."
-    )
+    parser.add_argument("--skip_tests", action="store_true", help="Skip all tests. Overrides --test.")
+    parser.add_argument("--skip_wheel", action="store_true", help="Skip building the Python wheel.")
+    parser.add_argument("--skip_csharp", action="store_true", help="Skip building the C# API.")
 
-    parser.add_argument(
-        "--parallel", action="store_true", help="Enable parallel build."
-    )
+    parser.add_argument("--parallel", action="store_true", help="Enable parallel build.")
 
     # CI's sometimes explicitly set the path to the CMake and CTest executables.
-    parser.add_argument(
-        "--cmake_path", default="cmake", type=Path, help="Path to the CMake program."
-    )
-    parser.add_argument(
-        "--ctest_path", default="ctest", type=Path, help="Path to the CTest program."
-    )
+    parser.add_argument("--cmake_path", default="cmake", type=Path, help="Path to the CMake program.")
+    parser.add_argument("--ctest_path", default="ctest", type=Path, help="Path to the CTest program.")
 
     parser.add_argument(
         "--cmake_generator",
@@ -107,44 +80,34 @@ def _parse_args():
         help="Specify the generator that CMake invokes.",
     )
 
-    parser.add_argument(
-        "--ort_home", default=None, type=Path, help="Root directory of onnxruntime."
-    )
+    parser.add_argument("--ort_home", default=None, type=Path, help="Root directory of onnxruntime.")
 
-    parser.add_argument(
-        "--use_cuda",
-        action="store_true",
-        help="Whether to use CUDA. Default is to not use cuda.",
-    )
+    parser.add_argument("--use_cuda", action="store_true", help="Whether to use CUDA. Default is to not use cuda.")
     parser.add_argument(
         "--cuda_home",
         type=Path,
         help="Path to CUDA home. Read from CUDA_HOME or CUDA_PATH environment variable if not specified."
-        "Used when --use_cuda is specified.",
+             "Used when --use_cuda is specified.",
     )
 
-    parser.add_argument(
-        "--use_dml",
-        action="store_true",
-        help="Whether to use DML. Default is to not use DML.",
-    )
+    parser.add_argument("--use_dml", action="store_true", help="Whether to use DML. Default is to not use DML.")
+    
 
+    # The following options are mutually exclusive (cross compiling options such as android, ios, etc.)
+    platform_group = parser.add_mutually_exclusive_group()
+    platform_group.add_argument("--android", action="store_true", help="Build for Android")
+    platform_group.add_argument("--ios", action="store_true", help="Build for ios")
+    
     # Android options
-    parser.add_argument("--android", action="store_true", help="Build for Android")
     parser.add_argument(
         "--android_abi",
         default="arm64-v8a",
         choices=["armeabi-v7a", "arm64-v8a", "x86", "x86_64"],
         help="Specify the target Android Application Binary Interface (ABI)",
     )
+    parser.add_argument("--android_api", type=int, default=27, help="Android API Level, e.g. 21")
     parser.add_argument(
-        "--android_api", type=int, default=27, help="Android API Level, e.g. 21"
-    )
-    parser.add_argument(
-        "--android_home",
-        type=Path,
-        default=_path_from_env_var("ANDROID_HOME"),
-        help="Path to the Android SDK.",
+        "--android_home", type=Path, default=_path_from_env_var("ANDROID_HOME"), help="Path to the Android SDK."
     )
     parser.add_argument(
         "--android_ndk_path",
@@ -154,7 +117,6 @@ def _parse_args():
     )
 
     # iOS build options
-    parser.add_argument("--ios", action="store_true", help="build for ios")
     parser.add_argument(
         "--ios_sysroot",
         default="",
@@ -167,16 +129,16 @@ def _parse_args():
         "or cmake/genai_ios.toolchain.cmake will be used",
     )
     parser.add_argument(
-        "--osx_arch",
+        "--ios_arch",
         type=str,
         help="Specify the Target specific architectures for iOS "
-        "This is only supported on MacOS",
+        "This is only supported on MacOS host",
     )
     parser.add_argument(
-        "--apple_deployment_target",
+        "--ios_deployment_target",
         type=str,
         help="Specify the minimum version of the target platform "
-        "This is only supported on MacOS",
+        "This is only supported on MacOS host",
     )
 
     # now that all args are added, we can include the full help in the usage message.
@@ -199,9 +161,7 @@ If phases are explicitly specified only those phases will be run.
     return parser.parse_args()
 
 
-def _resolve_executable_path(
-    command_or_path: Path, resolution_failure_allowed: bool = False
-):
+def _resolve_executable_path(command_or_path: Path, resolution_failure_allowed: bool = False):
     """
     Returns the absolute path of an executable.
     If `resolution_failure_allowed` is True, returns None if the executable path cannot be found.
@@ -211,9 +171,7 @@ def _resolve_executable_path(
         if resolution_failure_allowed:
             return None
         else:
-            raise ValueError(
-                f"Failed to resolve executable path for '{command_or_path}'."
-            )
+            raise ValueError(f"Failed to resolve executable path for '{command_or_path}'.")
 
     return Path(executable_path)
 
@@ -226,8 +184,6 @@ def _validate_build_dir(args: argparse.Namespace):
         # TODO: Add ios and arm64 support
         if args.android:
             target_sys = "Android"
-        elif args.ios:
-            target_sys = "iOS"
         elif platform.system() == "Darwin":
             # also tweak build directory name for mac builds
             target_sys = "macOS"
@@ -245,9 +201,7 @@ def _validate_cuda_args(args: argparse.Namespace):
         args.use_cuda = True
 
     if args.use_cuda:
-        cuda_home = (
-            args.cuda_home if args.cuda_home else _path_from_env_var("CUDA_HOME")
-        )
+        cuda_home = args.cuda_home if args.cuda_home else _path_from_env_var("CUDA_HOME")
         if not cuda_home and util.is_windows():
             cuda_home = _path_from_env_var("CUDA_PATH")
 
@@ -278,15 +232,9 @@ def _validate_android_args(args: argparse.Namespace):
         # auto-adjust the cmake generator for cross-compiling Android
         original_cmake_generator = args.cmake_generator
         if original_cmake_generator not in ["Ninja", "Unix Makefiles"]:
-            if (
-                _resolve_executable_path("ninja", resolution_failure_allowed=True)
-                is not None
-            ):
+            if _resolve_executable_path("ninja", resolution_failure_allowed=True) is not None:
                 args.cmake_generator = "Ninja"
-            elif (
-                _resolve_executable_path("make", resolution_failure_allowed=True)
-                is not None
-            ):
+            elif _resolve_executable_path("make", resolution_failure_allowed=True) is not None:
                 args.cmake_generator = "Unix Makefiles"
             else:
                 raise ValueError(
@@ -295,9 +243,7 @@ def _validate_android_args(args: argparse.Namespace):
                 )
 
         if args.cmake_generator != original_cmake_generator:
-            log.info(
-                f"Setting CMake generator to '{args.cmake_generator}' for cross-compiling for Android."
-            )
+            log.info(f"Setting CMake generator to '{args.cmake_generator}' for cross-compiling for Android.")
 
         # no C# on Android so automatically skip
         if not args.skip_csharp:
@@ -306,28 +252,30 @@ def _validate_android_args(args: argparse.Namespace):
 
 def _validate_ios_args(args: argparse.Namespace):
     if args.ios:
-        # TODO: cross compile for iOS on Linux?
-        if util.is_mac():
-            needed_args = [
-                args.ios_sysroot,
-                args.osx_arch,
-                args.apple_deployment_target,
-            ]
-            arg_names = [
-                "--ios_sysroot          "
-                + "<the location or name of the macOS platform SDK>",
-                "--osx_arch             "
-                + "<the Target specific architectures for iOS>",
-                "--apple_deploy_target  "
-                + "<the minimum version of the target platform>",
-            ]
-            if not all(_ is not None for _ in needed_args):
-                raise BuildError(
-                    "iOS build on MacOS canceled due to missing arguments: "
-                    + ", ".join(
-                        val for val, cond in zip(arg_names, needed_args) if not cond
-                    )
+        if not util.is_mac():
+            raise ValueError("A Mac host is required to build for iOS")
+    
+        needed_args = [
+            args.ios_sysroot,
+            args.ios_arch,
+            args.ios_deployment_target,
+        ]
+        arg_names = [
+            "--ios_sysroot          "
+            + "<the location or name of the macOS platform SDK>",
+            "--ios_arch             "
+            + "<the Target specific architectures for iOS>",
+            "--ios_deployment_target  "
+            + "<the minimum version of the target platform>",
+        ]
+        have_required_args = all(_ is not None for _ in needed_args)
+        if not have_required_args:
+            raise ValueError(
+                "iOS build on MacOS canceled due to missing arguments: "
+                + ", ".join(
+                val for val, cond in zip(arg_names, needed_args) if not cond
                 )
+            )
 
 
 def _validate_args(args):
@@ -429,25 +377,16 @@ def update(args: argparse.Namespace, env: dict[str, str]):
     if args.use_cuda:
         cuda_arch = 80
         cuda_compiler = str(args.cuda_home / "bin" / "nvcc")
-        command += [
-            f"-DCMAKE_CUDA_COMPILER={cuda_compiler}",
-            f"-DCMAKE_CUDA_ARCHITECTURES={cuda_arch}",
-        ]
+        command += [f"-DCMAKE_CUDA_COMPILER={cuda_compiler}",
+                    f"-DCMAKE_CUDA_ARCHITECTURES={cuda_arch}"]
 
     if args.android:
         command += [
             "-DCMAKE_TOOLCHAIN_FILE="
-            + str(
-                (
-                    args.android_ndk_path
-                    / "build"
-                    / "cmake"
-                    / "android.toolchain.cmake"
-                ).resolve(strict=True)
-            ),
+            + str((args.android_ndk_path / "build" / "cmake" / "android.toolchain.cmake").resolve(strict=True)),
             f"-DANDROID_PLATFORM=android-{args.android_api}",
             f"-DANDROID_ABI={args.android_abi}",
-            f"-DENABLE_PYTHON=OFF",
+            "-DENABLE_PYTHON=OFF",
         ]
 
     if args.ios:
@@ -455,8 +394,8 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             "-DCMAKE_SYSTEM_NAME=iOS",
             "-DENABLE_TESTS=OFF",
             f"-DCMAKE_OSX_SYSROOT={args.ios_sysroot}",
-            f"-DCMAKE_OSX_ARCHITECTURES={args.osx_arch}",
-            f"-DCMAKE_OSX_DEPLOYMENT_TARGET={args.apple_deployment_target}",
+            f"-DCMAKE_OSX_ARCHITECTURES={args.ios_arch}",
+            f"-DCMAKE_OSX_DEPLOYMENT_TARGET={args.ios_deployment_target}",
             "-DENABLE_PYTHON=OFF",
             "-DCMAKE_TOOLCHAIN_FILE="
             + (
@@ -474,13 +413,7 @@ def build(args: argparse.Namespace, env: dict[str, str]):
     Build the targets.
     """
 
-    make_command = [
-        str(args.cmake_path),
-        "--build",
-        str(args.build_dir),
-        "--config",
-        args.config,
-    ]
+    make_command = [str(args.cmake_path), "--build", str(args.build_dir), "--config", args.config]
 
     if args.parallel:
         make_command.append("--parallel")
@@ -491,11 +424,7 @@ def build(args: argparse.Namespace, env: dict[str, str]):
         dotnet = str(_resolve_executable_path("dotnet"))
 
         # Build the library
-        csharp_build_command = [
-            dotnet,
-            "build",
-            ".",
-        ]
+        csharp_build_command = [dotnet, "build", ".",]
         csharp_build_command += _get_csharp_properties(args)
         util.run(csharp_build_command, cwd=REPO_ROOT / "src" / "csharp")
         util.run(csharp_build_command, cwd=REPO_ROOT / "test" / "csharp")
@@ -505,14 +434,7 @@ def test(args: argparse.Namespace, env: dict[str, str]):
     """
     Run the tests.
     """
-    ctest_cmd = [
-        str(args.ctest_path),
-        "--build-config",
-        args.config,
-        "--verbose",
-        "--timeout",
-        "10800",
-    ]
+    ctest_cmd = [str(args.ctest_path), "--build-config", args.config, "--verbose", "--timeout", "10800"]
     util.run(ctest_cmd, cwd=str(args.build_dir))
 
     if util.is_windows() and not args.skip_csharp:
@@ -527,15 +449,7 @@ def clean(args: argparse.Namespace, env: dict[str, str]):
     Clean the build output.
     """
     log.info("Cleaning targets")
-    cmd_args = [
-        str(args.cmake),
-        "--build",
-        str(args.build_dir),
-        "--config",
-        args.config,
-        "--target",
-        "clean",
-    ]
+    cmd_args = [str(args.cmake), "--build", str(args.build_dir), "--config", args.config, "--target", "clean"]
     util.run(cmd_args, env=env)
 
 
