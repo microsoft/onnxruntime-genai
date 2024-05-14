@@ -19,10 +19,10 @@ version = rootProject.file('../../VERSION_INFO').text.trim()
 def cmakeBuildDir = System.properties['cmakeBuildDir']
 def useCUDA = System.properties['USE_CUDA']
 def cmakeJavaDir = "${cmakeBuildDir}"
-def cmakeBuildOutputDir = "${cmakeJavaDir}"
 def cmakeNativeLibDir = "${cmakeJavaDir}/native-lib"
 def cmakeNativeJniDir = "${cmakeJavaDir}/native-jni"
 def cmakeNativeTestDir = "${cmakeJavaDir}/native-test"
+def cmakeBuildOutputDir = "${cmakeJavaDir}/build"
 
 def mavenUser = System.properties['mavenUser']
 def mavenPwd = System.properties['mavenPwd']
