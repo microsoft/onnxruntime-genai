@@ -45,7 +45,7 @@ class ONNXModel():
             history.clear()
             return self.tokenizer.encode(f'{self.chat_template.format(input=text)}')
 
-    def greedy_search(
+    def search(
         self,
         input_ids,
         max_length: int,
@@ -121,7 +121,7 @@ class ONNXModel():
             "### Assistant:",
         ]
 
-        for x in self.greedy_search(
+        for x in self.search(
             input_ids,
             max_length=max_length_tokens,
             token_printing_step=token_printing_step,
