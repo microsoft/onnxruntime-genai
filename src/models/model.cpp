@@ -386,20 +386,6 @@ void Model::CreateSessionOptions() {
     } else if (provider_options.name == "dml") {
       dml_objects_ = DmlHelpers::CreateDmlObjects();
 
-      static constexpr GUID dml_smart_container_guid = {0x6b7ff369, 0xc805, 0x42cc, {0x8a, 0x5f, 0xb5, 0x5f, 0x67, 0xe5, 0xbd, 0xcc}};
-
-      ComPtr<DmlSmartContainer> smart_container;
-      uint32_t smart_container_ptr_size = static_cast<uint32_t>(sizeof(smart_container.GetAddressOf()));
-
-      // We reuse the allocator assigned to this device if possible; otherwise, we create a new one and store it on the device
-      if (FAILED(dml_objects_.d3d12_device->GetPrivateData(dml_smart_container_guid, &smart_container_ptr_size, smart_container.GetAddressOf()))) {
-        auto memory_info_dml = OrtMemoryInfo::Create("DML", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-        auto allocator_dml = std::make_unique<DmlAllocator>(p_dml_api_, dml_objects_.d3d12_device.Get());
-
-        smart_container = wil::MakeOrThrow<DmlSmartContainer>(std::move(memory_info_dml), std::move(allocator_dml));
-        THROW_IF_FAILED(dml_objects_.d3d12_device->SetPrivateDataInterface(dml_smart_container_guid, smart_container.Get()));
-      }
-
       auto directml_dll = CurrentModulePath() + L"DirectML.dll";
       wil::unique_hmodule smart_directml_dll(LoadLibraryExW(directml_dll.c_str(), nullptr, 0));
       THROW_LAST_ERROR_IF(!smart_directml_dll);
@@ -432,6 +418,21 @@ void Model::CreateSessionOptions() {
       ort_options.AddConfigEntry("ep.dml.enable_graph_capture", "1");
       p_dml_api_->SessionOptionsAppendExecutionProvider_DML1(&ort_options, dml_device_.Get(), dml_objects_.command_queue.Get());
       is_intel_device_ = DmlHelpers::IsIntelDevice(dml_objects_.d3d12_device.Get());
+
+      static constexpr GUID dml_smart_container_guid = {0x6b7ff369, 0xc805, 0x42cc, {0x8a, 0x5f, 0xb5, 0x5f, 0x67, 0xe5, 0xbd, 0xcc}};
+
+      ComPtr<DmlSmartContainer> smart_container;
+      uint32_t smart_container_ptr_size = static_cast<uint32_t>(sizeof(smart_container.GetAddressOf()));
+
+      // We reuse the allocator assigned to this device if possible; otherwise, we create a new one and store it on the device
+      if (FAILED(dml_objects_.d3d12_device->GetPrivateData(dml_smart_container_guid, &smart_container_ptr_size, smart_container.GetAddressOf()))) {
+        auto memory_info_dml = OrtMemoryInfo::Create("DML", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+        auto allocator_dml = std::make_unique<DmlAllocator>(p_dml_api_, dml_objects_.d3d12_device.Get());
+        Ort::ThrowOnError(Ort::api->RegisterAllocator(&GetOrtEnv(), allocator_dml.get()));
+
+        smart_container = wil::MakeOrThrow<DmlSmartContainer>(std::move(memory_info_dml), std::move(allocator_dml));
+        THROW_IF_FAILED(dml_objects_.d3d12_device->SetPrivateDataInterface(dml_smart_container_guid, smart_container.Get()));
+      }
 
       device_type_ = DeviceType::DML;  // We use a DML allocator for input/output caches, but other tensors will use CPU tensors
 #endif
