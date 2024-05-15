@@ -384,6 +384,8 @@ void Model::CreateSessionOptions() {
       ort_options.AppendExecutionProvider_ROCM(ort_provider_options);
 #if USE_DML
     } else if (provider_options.name == "dml") {
+      dml_objects_ = DmlHelpers::CreateDmlObjects();
+
       static constexpr GUID dml_smart_container_guid = {0x6b7ff369, 0xc805, 0x42cc, {0x8a, 0x5f, 0xb5, 0x5f, 0x67, 0xe5, 0xbd, 0xcc}};
 
       ComPtr<DmlSmartContainer> smart_container;
@@ -397,8 +399,6 @@ void Model::CreateSessionOptions() {
         smart_container = wil::MakeOrThrow<DmlSmartContainer>(std::move(memory_info_dml), std::move(allocator_dml));
         THROW_IF_FAILED(dml_objects_.d3d12_device->SetPrivateDataInterface(dml_smart_container_guid, smart_container.Get()));
       }
-
-      dml_objects_ = DmlHelpers::CreateDmlObjects();
 
       auto directml_dll = CurrentModulePath() + L"DirectML.dll";
       wil::unique_hmodule smart_directml_dll(LoadLibraryExW(directml_dll.c_str(), nullptr, 0));
