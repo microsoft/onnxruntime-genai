@@ -40,25 +40,45 @@ public class SimpleGenAI {
    * via the GeneratorParams object prior to running `generate`.
    *
    * @param prompt The prompt text to encode.
-   * @return The encoded sequences.
+   * @return The generator parameters.
    * @throws GenAIException on failure
    */
   GeneratorParams createGeneratorParams(String prompt) throws GenAIException {
     GeneratorParams generatorParams = null;
     try (Tokenizer tokenizer = new Tokenizer(model);
-        Sequences prompt_sequences = tokenizer.Encode(prompt)) {
-      // add the prompt and set max_length as example usage
+        Sequences prompt_sequences = tokenizer.encode(prompt)) {
       generatorParams = new GeneratorParams(model);
       generatorParams.setInput(prompt_sequences);
-      generatorParams.setSearchOption("max_length", 200);
     } catch (Exception e) {
-      e.printStackTrace();
-
       if (generatorParams != null) {
         generatorParams.close();
       }
 
-      throw new GenAIException("Prompt encoding failed", e);
+      throw new GenAIException("Failed to create GeneratorParams with encoded prompt", e);
+    }
+
+    return generatorParams;
+  }
+
+  /**
+   * Create the generator parameters and add the prompt text. The user can set other search options
+   * via the GeneratorParams object prior to running `generate`.
+   *
+   * @return The generator parameters.
+   * @throws GenAIException on failure
+   */
+  GeneratorParams createGeneratorParams(int[] tokenIds, int sequenceLength, int batchSize)
+      throws GenAIException {
+    GeneratorParams generatorParams = null;
+    try {
+      generatorParams = new GeneratorParams(model);
+      generatorParams.setInput(tokenIds, sequenceLength, batchSize);
+    } catch (Exception e) {
+      if (generatorParams != null) {
+        generatorParams.close();
+      }
+
+      throw e;
     }
 
     return generatorParams;
@@ -97,23 +117,18 @@ public class SimpleGenAI {
 
           output_ids = generator.getSequence(0);
         } catch (Exception e) {
-          handleException("Token generation loop failed.", e);
+          throw new GenAIException("Token generation loop failed.", e);
         }
       } else {
         Sequences output_sequences = model.generate(generatorParams);
         output_ids = output_sequences.getSequence(0);
       }
 
-      result = tokenizer.Decode(output_ids);
+      result = tokenizer.decode(output_ids);
     } catch (Exception e) {
-      handleException("Failed to create Tokenizer", e);
+      throw new GenAIException("Failed to create Tokenizer.", e);
     }
 
     return result;
-  }
-
-  private static void handleException(String reason, Exception e) throws GenAIException {
-    e.printStackTrace();
-    throw new GenAIException(reason, e);
   }
 }

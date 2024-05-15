@@ -30,9 +30,8 @@ def mavenArtifactId = useCUDA == null ? project.name : project.name + "_gpu"
 
 def defaultDescription = 'ONNX Runtime GenAI is <TODO>'
 
-// TEMPORARY
-logger.warn("cmakeBuildOutputDir:${cmakeBuildOutputDir}")
-logger.warn("project.buildDir:${project.buildDir}")
+logger.info("cmakeBuildDir:${cmakeBuildDir}")
+logger.info("project.buildDir:${project.buildDir}")
 
 java {
 	sourceCompatibility = JavaVersion.VERSION_1_8
@@ -86,8 +85,6 @@ compileJava {
 		java.sourceCompatibility = null
 		java.targetCompatibility = null
 	}
-
-	// destinationDirectory=file(cmakeJavaDir)
 }
 
 compileTestJava {
@@ -98,8 +95,6 @@ compileTestJava {
 		java.sourceCompatibility = null
 		java.targetCompatibility = null
 	}
-
-	// destinationDirectory=file(cmakeJavaDir)
 }
 
 sourceSets.main.java {
@@ -161,11 +156,6 @@ if (cmakeBuildDir != null) {
 dependencies {
 	testImplementation 'org.junit.jupiter:junit-jupiter-api:5.9.2'
 	testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.9.2'
-}
-
-// TEMPORARY
-processResources {
-	duplicatesStrategy(DuplicatesStrategy.INCLUDE) // allows duplicates in the resources
 }
 
 processTestResources {

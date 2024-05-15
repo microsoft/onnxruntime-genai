@@ -16,6 +16,7 @@ public class Model implements AutoCloseable {
    *
    * @param generatorParams The generator parameters.
    * @return The generated sequences.
+   * @throws GenAIException If the call to GenAI fails.
    */
   public Sequences generate(GeneratorParams generatorParams) throws GenAIException {
     if (generatorParams.nativeHandle() == 0) {

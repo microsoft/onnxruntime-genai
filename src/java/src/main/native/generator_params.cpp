@@ -49,3 +49,15 @@ Java_ai_onnxruntime_1genai_GeneratorParams_setInputSequences(JNIEnv* env, jobjec
 
   ThrowIfError(env, OgaGeneratorParamsSetInputSequences(generator_params, sequences));
 }
+
+extern "C" JNIEXPORT void JNICALL
+Java_ai_onnxruntime_1genai_GeneratorParams_setInputIDs(JNIEnv* env, jobject thiz, jlong native_handle,
+                                                       jintArray tokenIds, jint sequenceLength, jint batchSize) {
+  OgaGeneratorParams* generator_params = reinterpret_cast<OgaGeneratorParams*>(native_handle);
+
+  auto num_tokens = env->GetArrayLength(tokenIds);
+  jint* jtokens = env->GetIntArrayElements(tokenIds, nullptr);
+  const int32_t* tokens = reinterpret_cast<const int32_t*>(jtokens);  // convert between 32-bit types
+
+  ThrowIfError(env, OgaGeneratorParamsSetInputIDs(generator_params, tokens, num_tokens, sequenceLength, batchSize));
+}

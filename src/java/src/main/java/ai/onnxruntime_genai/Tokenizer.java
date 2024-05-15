@@ -20,9 +20,10 @@ public class Tokenizer implements AutoCloseable {
    *
    * @param string Text to encode as token ids.
    * @return a Sequences object with a single sequence in it.
+   * @throws GenAIException If the call to GenAI fails.
    */
-  public Sequences Encode(String string) throws GenAIException {
-    return EncodeBatch(new String[] {string});
+  public Sequences encode(String string) throws GenAIException {
+    return encodeBatch(new String[] {string});
   }
 
   /**
@@ -30,8 +31,9 @@ public class Tokenizer implements AutoCloseable {
    *
    * @param strings Collection of strings to encode as token ids.
    * @return a Sequences object with one sequence per input string.
+   * @throws GenAIException If the call to GenAI fails.
    */
-  public Sequences EncodeBatch(String[] strings) throws GenAIException {
+  public Sequences encodeBatch(String[] strings) throws GenAIException {
     if (nativeHandle == 0) {
       throw new IllegalStateException("Instance has been freed and is invalid");
     }
@@ -45,8 +47,9 @@ public class Tokenizer implements AutoCloseable {
    *
    * @param sequence Collection of token ids to decode to text.
    * @return The text representation of the sequence.
+   * @throws GenAIException If the call to GenAI fails.
    */
-  public String Decode(int[] sequence) throws GenAIException {
+  public String decode(int[] sequence) throws GenAIException {
     if (nativeHandle == 0) {
       throw new IllegalStateException("Instance has been freed and is invalid");
     }
@@ -59,13 +62,14 @@ public class Tokenizer implements AutoCloseable {
    *
    * @param sequences A Sequences object with one or more sequences of token ids.
    * @return An array of strings with the text representation of each sequence.
+   * @throws GenAIException If the call to GenAI fails.
    */
-  public String[] DecodeBatch(Sequences sequences) throws GenAIException {
+  public String[] decodeBatch(Sequences sequences) throws GenAIException {
     int numSequences = (int) sequences.numSequences();
 
     String[] result = new String[numSequences];
     for (int i = 0; i < numSequences; i++) {
-      result[i] = Decode(sequences.getSequence(i));
+      result[i] = decode(sequences.getSequence(i));
     }
 
     return result;
@@ -76,6 +80,7 @@ public class Tokenizer implements AutoCloseable {
    * to provide each token as it is generated.
    *
    * @return The new TokenizerStream instance.
+   * @throws GenAIException If the call to GenAI fails.
    */
   public TokenizerStream CreateStream() throws GenAIException {
     if (nativeHandle == 0) {
@@ -86,7 +91,7 @@ public class Tokenizer implements AutoCloseable {
   }
 
   @Override
-  public void close() throws Exception {
+  public void close() throws GenAIException {
     if (nativeHandle != 0) {
       destroyTokenizer(nativeHandle);
       nativeHandle = 0;

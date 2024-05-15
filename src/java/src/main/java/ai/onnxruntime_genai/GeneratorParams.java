@@ -35,7 +35,8 @@ public class GeneratorParams implements AutoCloseable {
    * Sets the prompt/s for model execution. The `sequences` are created by using Tokenizer.Encode or
    * EncodeBatch.
    *
-   * @param sequences The encoded input prompt/s.
+   * @param sequences Sequences containing the encoded prompt.
+   * @throws GenAIException If the call to GenAI fails.
    */
   public void setInput(Sequences sequences) throws GenAIException {
     if (sequences.nativeHandle() == 0) {
@@ -47,6 +48,28 @@ public class GeneratorParams implements AutoCloseable {
     }
 
     setInputSequences(nativeHandle, sequences.nativeHandle());
+  }
+
+  /**
+   * Sets the prompt/s token ids for model execution. The `tokenIds` are the encoded
+   *
+   * @param tokenIds The token ids of the encoded prompt/s.
+   * @param sequenceLength The length of each sequence.
+   * @param batchSize The batch size
+   * @throws GenAIException If the call to GenAI fails.
+   *     <p>NOTE: All sequences in the batch must be the same length.
+   */
+  public void setInput(int[] tokenIds, int sequenceLength, int batchSize) throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    if (sequenceLength * batchSize != tokenIds.length) {
+      throw new IllegalArgumentException(
+          "tokenIds length must be equal to sequenceLength * batchSize");
+    }
+
+    setInputIDs(nativeHandle, tokenIds, sequenceLength, batchSize);
   }
 
   @Override
@@ -78,4 +101,7 @@ public class GeneratorParams implements AutoCloseable {
   private native void setSearchOptionBool(long nativeHandle, String optionName, boolean value);
 
   private native void setInputSequences(long nativeHandle, long sequencesHandle);
+
+  private native void setInputIDs(
+      long nativeHandle, int[] tokenIds, int sequenceLength, int batchSize);
 }

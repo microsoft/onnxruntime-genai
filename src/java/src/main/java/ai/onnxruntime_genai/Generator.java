@@ -23,6 +23,7 @@ public class Generator implements AutoCloseable {
    *
    * @param model The model.
    * @param generatorParams The generator parameters.
+   * @throws GenAIException If the call to GenAI fails.
    */
   public Generator(Model model, GeneratorParams generatorParams) throws GenAIException {
     if (model.nativeHandle() == 0) {
@@ -48,7 +49,11 @@ public class Generator implements AutoCloseable {
     return isDone(nativeHandle);
   }
 
-  /** Computes the logits for the next token in the sequence. */
+  /**
+   * Computes the logits for the next token in the sequence.
+   *
+   * @throws GenAIException If the call to GenAI fails.
+   */
   public void computeLogits() throws GenAIException {
     if (nativeHandle == 0) {
       throw new IllegalStateException("Instance has been freed and is invalid");
@@ -57,7 +62,11 @@ public class Generator implements AutoCloseable {
     computeLogits(nativeHandle);
   }
 
-  /** Generates the next token in the sequence. */
+  /**
+   * Generates the next token in the sequence.
+   *
+   * @throws GenAIException If the call to GenAI fails.
+   */
   public void generateNextToken() throws GenAIException {
     if (nativeHandle == 0) {
       throw new IllegalStateException("Instance has been freed and is invalid");
@@ -71,6 +80,7 @@ public class Generator implements AutoCloseable {
    *
    * @param sequenceIndex The index of the sequence.
    * @return An array of integers with the sequence token ids.
+   * @throws GenAIException If the call to GenAI fails.
    */
   public int[] getSequence(long sequenceIndex) throws GenAIException {
     return getSequenceImpl(sequenceIndex, false);
@@ -81,6 +91,7 @@ public class Generator implements AutoCloseable {
    *
    * @param sequenceIndex The index of the sequence.
    * @return The last token in the sequence.
+   * @throws GenAIException If the call to GenAI fails.
    */
   public int getLastTokenInSequence(long sequenceIndex) throws GenAIException {
     return getSequenceImpl(sequenceIndex, true)[0];
