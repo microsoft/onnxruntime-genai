@@ -133,10 +133,9 @@ struct OrtGlobals {
   OrtGlobals();
 
   std::unique_ptr<OrtEnv> env_;
-#if USE_CUDA
-  std::unique_ptr<OrtMemoryInfo> memory_info_cuda_;
-  std::unique_ptr<OrtAllocator> allocator_cuda_;
-#endif
+  std::unique_ptr<OrtMemoryInfo> memory_info_device_;
+  std::unique_ptr<OrtAllocator> allocator_device_;
+
  private:
   OrtGlobals(const OrtGlobals&) = delete;
   void operator=(const OrtGlobals&) = delete;

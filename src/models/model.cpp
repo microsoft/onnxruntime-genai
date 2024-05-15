@@ -175,20 +175,18 @@ std::vector<std::string> Tokenizer::DecodeBatch(std::span<const int32_t> sequenc
   return strings;
 }
 
-#if USE_CUDA
 // Since Python/Others can and will hold onto a generator object past the model object's lifetime we need to ensure
 // the allocator used is not destroyed until last. This keeps the allocator around until exit, after all other memory
 // has been destroyed. Without this, we will crash in the Onnxruntime BFCArena code when deleting tensors due to the
 // arena already being destroyed.
-Ort::Allocator* GetCudaAllocator(OrtSession& session) {
+OrtAllocator* GetDeviceAllocator(OrtSession& session, const char* ep) {
   auto& globals = *GetOrtGlobals();
-  if (!globals.allocator_cuda_) {
-    globals.memory_info_cuda_ = OrtMemoryInfo::Create("Cuda", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-    globals.allocator_cuda_ = Ort::Allocator::Create(session, *globals.memory_info_cuda_);
+  if (!globals.allocator_device_) {
+    globals.memory_info_device_ = OrtMemoryInfo::Create(ep, OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+    globals.allocator_device_ = Ort::Allocator::Create(session, *globals.memory_info_device_);
   }
-  return globals.allocator_cuda_.get();
+  return globals.allocator_device_.get();
 }
-#endif
 
 #if USE_DML
 struct DmlAllocator : public OrtAllocator {
@@ -240,7 +238,7 @@ struct DmlAllocator : public OrtAllocator {
     return static_cast<const DmlAllocator*>(this_)->DmlInfo();
   }
 
-private:
+ private:
   ComPtr<ID3D12Device> d3d12_device_;
   const OrtDmlApi* p_dml_api_;
   OrtMemoryInfo* memory_info_;
@@ -298,26 +296,12 @@ void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
   allocator_device_ = &allocator_cpu_;
 #if USE_CUDA
   if (device_type_ == DeviceType::CUDA) {
-    allocator_device_ = GetCudaAllocator(session);
+    allocator_device_ = GetDeviceAllocator(session, "Cuda");
   }
 #elif USE_DML
   if (device_type_ == DeviceType::DML) {
-    static constexpr GUID dml_smart_container_guid = {0x6b7ff369, 0xc805, 0x42cc, {0x8a, 0x5f, 0xb5, 0x5f, 0x67, 0xe5, 0xbd, 0xcc}};
-
-    ComPtr<DmlSmartContainer> smart_container;
-    uint32_t smart_container_ptr_size = static_cast<uint32_t>(sizeof(smart_container.GetAddressOf()));
-
-    // We reuse the allocator assigned to this device if possible; otherwise, we create a new one and store it on the device
-    if (FAILED(dml_objects_.d3d12_device->GetPrivateData(dml_smart_container_guid, &smart_container_ptr_size, smart_container.GetAddressOf()))) {
-      auto memory_info_dml = OrtMemoryInfo::Create("DML", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-      auto dml_allocation_decoder = Ort::Allocator::Create(session, *memory_info_dml);
-      auto allocator_dml = std::make_unique<DmlAllocator>(p_dml_api_, dml_objects_.d3d12_device.Get());
-      smart_container = wil::MakeOrThrow<DmlSmartContainer>(std::move(memory_info_dml), std::move(allocator_dml), std::move(dml_allocation_decoder));
-      THROW_IF_FAILED(dml_objects_.d3d12_device->SetPrivateDataInterface(dml_smart_container_guid, smart_container.Get()));
-    }
-
-    allocator_device_ = smart_container->GetAllocator();
-    dml_allocation_decoder_ = smart_container->GetAllocationDecoder();
+    allocator_device_ = GetDeviceAllocator(session, "DML");
+    dml_allocation_decoder_ = allocator_device_;
   }
 #endif
 
@@ -400,6 +384,20 @@ void Model::CreateSessionOptions() {
       ort_options.AppendExecutionProvider_ROCM(ort_provider_options);
 #if USE_DML
     } else if (provider_options.name == "dml") {
+      static constexpr GUID dml_smart_container_guid = {0x6b7ff369, 0xc805, 0x42cc, {0x8a, 0x5f, 0xb5, 0x5f, 0x67, 0xe5, 0xbd, 0xcc}};
+
+      ComPtr<DmlSmartContainer> smart_container;
+      uint32_t smart_container_ptr_size = static_cast<uint32_t>(sizeof(smart_container.GetAddressOf()));
+
+      // We reuse the allocator assigned to this device if possible; otherwise, we create a new one and store it on the device
+      if (FAILED(dml_objects_.d3d12_device->GetPrivateData(dml_smart_container_guid, &smart_container_ptr_size, smart_container.GetAddressOf()))) {
+        auto memory_info_dml = OrtMemoryInfo::Create("DML", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+        auto allocator_dml = std::make_unique<DmlAllocator>(p_dml_api_, dml_objects_.d3d12_device.Get());
+
+        smart_container = wil::MakeOrThrow<DmlSmartContainer>(std::move(memory_info_dml), std::move(allocator_dml));
+        THROW_IF_FAILED(dml_objects_.d3d12_device->SetPrivateDataInterface(dml_smart_container_guid, smart_container.Get()));
+      }
+
       dml_objects_ = DmlHelpers::CreateDmlObjects();
 
       auto directml_dll = CurrentModulePath() + L"DirectML.dll";
@@ -430,6 +428,7 @@ void Model::CreateSessionOptions() {
       dml_pooled_upload_heap_ = std::make_unique<DmlPooledUploadHeap>(dml_objects_.d3d12_device.Get(), dml_execution_context_.get());
       dml_readback_heap_ = std::make_unique<DmlReadbackHeap>(dml_objects_.d3d12_device.Get(), dml_execution_context_.get());
 
+      ort_options.AddConfigEntry("session.use_env_allocators", "1");
       ort_options.AddConfigEntry("ep.dml.enable_graph_capture", "1");
       p_dml_api_->SessionOptionsAppendExecutionProvider_DML1(&ort_options, dml_device_.Get(), dml_objects_.command_queue.Get());
       is_intel_device_ = DmlHelpers::IsIntelDevice(dml_objects_.d3d12_device.Get());

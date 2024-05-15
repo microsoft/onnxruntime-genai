@@ -117,10 +117,7 @@ struct Model : std::enable_shared_from_this<Model> {
   DeviceType device_type_{DeviceType::CPU};
   Ort::Allocator& allocator_cpu_{Ort::Allocator::GetWithDefaultOptions()};
   OrtAllocator* allocator_device_{};  // Can be CUDA or CPU based on the DeviceType in the model
-
-  // DML currently needs its own internal allocator to convert allocations to D3D12 resources, even when we use our own external allocator.
-  // This forces us to instantiate 2 allocators, but the following one won't actually allocate any memory; it's only used in GetD3D12ResourceFromAllocation.
-  OrtAllocator* dml_allocation_decoder_{};
+  OrtAllocator* dml_allocation_decoder_{};  // Can be CUDA or CPU based on the DeviceType in the model
 
   std::unique_ptr<SessionInfo> session_info_;
 
