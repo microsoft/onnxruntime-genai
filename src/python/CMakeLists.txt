@@ -1,4 +1,4 @@
-include(${CMAKE_SOURCE_DIR}/cmake/cxx_standard.cmake)
+include(${REPO_ROOT}/cmake/cxx_standard.cmake)
 
 file(GLOB python_srcs CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/*.h"

@@ -7,9 +7,11 @@ message("Building onnxruntime-genai for version ${VERSION_INFO}")
 
 
 # Define the project directories
-set(GENERATORS_ROOT ${PROJECT_SOURCE_DIR}/src)
-set(MODELS_ROOT ${PROJECT_SOURCE_DIR}/src/models)
-set(ORT_HOME ${CMAKE_SOURCE_DIR}/ort CACHE PATH "Path to the onnxruntime root directory.")
+set(REPO_ROOT ${PROJECT_SOURCE_DIR})
+set(SRC_ROOT ${REPO_ROOT}/src)
+set(GENERATORS_ROOT ${SRC_ROOT})
+set(MODELS_ROOT ${SRC_ROOT}/models)
+set(ORT_HOME ${REPO_ROOT}/ort CACHE PATH "Path to the onnxruntime root directory.")
 
 if (ANDROID)
   # Paths are based on the directory structure of the ORT Android AAR.
@@ -53,4 +55,26 @@ if(NOT EXISTS "${ORT_LIB_DIR}/${ONNXRUNTIME_LIB}")
 endif()
 if(NOT EXISTS "${ORT_HEADER_DIR}/onnxruntime_c_api.h")
   message(FATAL_ERROR "Expected the ONNX Runtime C API header to be found at \"${ORT_HEADER_DIR}/onnxruntime_c_api.h\". Actual: Not found.")
+endif()
+
+
+# normalize the target platform
+if (MSVC)
+  if (CMAKE_VS_PLATFORM_NAME)
+    # Multi-platform generator
+    set(genai_target_platform ${CMAKE_VS_PLATFORM_NAME})
+  else()
+    set(genai_target_platform ${CMAKE_SYSTEM_PROCESSOR})
+  endif()
+
+  if (genai_target_platform STREQUAL "ARM64")
+    # pass
+  elseif (genai_target_platform STREQUAL "x64" OR 
+          genai_target_platform STREQUAL "x86_64" OR 
+          genai_target_platform STREQUAL "AMD64" OR 
+          CMAKE_GENERATOR MATCHES "Win64")
+    set(genai_target_platform "x64")
+  else()
+    message(FATAL_ERROR "Unknown CMAKE_SYSTEM_PROCESSOR: ${CMAKE_SYSTEM_PROCESSOR}")
+  endif()
 endif()

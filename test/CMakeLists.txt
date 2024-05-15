@@ -1,5 +1,3 @@
-enable_testing()
-
 include(${CMAKE_SOURCE_DIR}/cmake/cxx_standard.cmake)
 
 set(TESTS_ROOT ${CMAKE_CURRENT_SOURCE_DIR} PARENT_SCOPE)
