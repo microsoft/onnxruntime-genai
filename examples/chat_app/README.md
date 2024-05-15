@@ -1,6 +1,8 @@
 # LLM Chat UI <!-- omit in toc -->
 This is a chat demo using the various versions of the LLMs
 
+> The app supports all backend that onnxruntime-genai supports. DirectML is used as an example to showcase how to use it
+
 **Contents**:
 - [set up](#set-up)
 - [Launch the app](#launch-the-app)
