@@ -16,10 +16,8 @@ class ONNXModel():
         self.tokenizer = og.Tokenizer(self.model)
         self.tokenizer_stream = self.tokenizer.create_stream()
         self.model_path = model_path
-        if "phi-2" in self.model_path:
-            self.enable_history_max = 0
-            self.chat_template = "{{{input}}}"
-        elif "phi" in self.model_path:
+        if "phi" in self.model_path:
+            self.template_header = ""
             self.enable_history_max = 10 if "mini" in self.model_path else 2
             self.history_template = "<|user|>{input}<|end|><|assistant|>{response}<|end|>"
             self.chat_template = "<|user|>{input}<|end|><|assistant|>"
@@ -37,7 +35,8 @@ You are a helpful AI assistant.<|eot_id|>"""
             #self.chat_template = llama3_template
         else:
             self.enable_history_max = 2
-            self.history_template = "[INST] {input} [/INST]{response}"
+            self.template_header = "<s>"
+            self.history_template = "[INST] {input} [/INST]{response}</s>"
             self.chat_template = "[INST] {input} [/INST]"
 
     def generate_prompt_with_history(self, text, history, max_length=2048):
@@ -46,18 +45,11 @@ You are a helpful AI assistant.<|eot_id|>"""
         for dialog in history[-self.enable_history_max:]:
             prompt += f'{self.history_template.format(input=dialog[0], response=dialog[1])}'
 
-        if "phi" in self.model_path:
-            pass
-        elif "Llama-3" in self.model_path:
-            prompt = self.template_header + prompt
-        else:
-            prompt = f"<s>{prompt}</s> "
+        prompt = self.template_header + prompt
 
         prompt += f'{self.chat_template.format(input=text)}'
 
-        print (prompt)
         input_ids = self.tokenizer.encode(prompt)
-        print (len(input_ids))
 
         if len(input_ids) <= max_length:
             return input_ids
