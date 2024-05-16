@@ -68,6 +68,7 @@ jobs:
 # TODO: Find out why do we need to to have libonnxruntime.so.$ort_version
       - name: Extract OnnxRuntime library and header files
         run: |
+          set -e -x
           mkdir -p ort/lib
           mv microsoft.ml.onnxruntime.gpu.linux/${{ env.ORT_NIGHTLY_VERSION }}/buildTransitive/native/include ort/
           mv microsoft.ml.onnxruntime.gpu.linux/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/linux-x64/native/* ort/lib/

@@ -294,7 +294,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         else:
             toolset = "host=x64"
             if args.use_cuda:
-                toolset + ",cuda=" + str(args.cuda_home)
+                toolset += ",cuda=" + str(args.cuda_home)
 
             command += ["-T", toolset]
 
