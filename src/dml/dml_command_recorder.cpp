@@ -190,6 +190,8 @@ void DmlCommandRecorder::InitializeOperator(
     auto temp_resource = OrtValue::CreateTensor(device_allocator_, temporary_resource_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
     Ort::ThrowOnError(ort_dml_api_->GetD3D12ResourceFromAllocation(&dml_allocation_decoder_, temp_resource->GetTensorMutableRawData(), &buffer));
 
+    THROW_IF_FAILED(buffer->SetName(L"DmlCommandRecorder::InitializeOperator"));
+
     // Bind the temporary resource.
     DML_BUFFER_BINDING buffer_binding = {buffer.Get(), 0, temporary_resource_size};
     DML_BINDING_DESC binding_desc = {DML_BINDING_TYPE_BUFFER, &buffer_binding};
@@ -255,6 +257,8 @@ void DmlCommandRecorder::ExecuteOperator(
     ComPtr<ID3D12Resource> buffer;
     auto temp_resource = OrtValue::CreateTensor(device_allocator_, temporary_resource_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
     Ort::ThrowOnError(ort_dml_api_->GetD3D12ResourceFromAllocation(&dml_allocation_decoder_, temp_resource->GetTensorMutableRawData(), &buffer));
+
+    THROW_IF_FAILED(buffer->SetName(L"DmlCommandRecorder::ExecuteOperator"));
 
     // Bind the temporary resource.
     DML_BUFFER_BINDING buffer_binding = {buffer.Get(), 0, temporary_resource_size};

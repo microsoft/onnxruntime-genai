@@ -11,6 +11,7 @@
 #include "../dml/dml_execution_context.h"
 #include "../dml/dml_pooled_upload_heap.h"
 #include "../dml/dml_readback_heap.h"
+#include "../dml/dml_allocator.h"
 #endif
 
 namespace Generators {
@@ -146,7 +147,7 @@ struct Model : std::enable_shared_from_this<Model> {
   std::unique_ptr<DmlReadbackHeap> dml_readback_heap_;
   ComPtr<IDMLDevice> dml_device_;
   bool is_intel_device_{};
-  std::unique_ptr<OrtAllocator> dml_allocator_;
+  std::unique_ptr<Ort::Allocator> dml_allocator_wrapper_;
   std::unique_ptr<OrtMemoryInfo> memory_info_device_;
 #endif
 

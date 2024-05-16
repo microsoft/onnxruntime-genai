@@ -86,6 +86,7 @@ void InputIDs::Update(RoamingArray<int32_t> next_tokens_unk) {
       case DeviceType::DML: {
         ComPtr<ID3D12Resource> source_resource;
         Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.dml_allocation_decoder_, value_int32_->GetTensorMutableRawData(), &source_resource));
+        THROW_IF_FAILED(source_resource->SetName(L"InputIDs::Update"));
 
         auto source = std::span<const uint8_t>(
             reinterpret_cast<const uint8_t*>(next_tokens_unk.GetCPU().data()),

@@ -45,6 +45,7 @@ void DmlCommandQueue::QueueReference(IUnknown* object, bool wait_for_unsubmitted
   // for example, an allocation from BucketizedBufferAllocator attempts to queue a reference
   // to its underlying D3D resource when freed. Furthermore, these references are unnecessary
   // since Close() already blocks for scheduled GPU work before clearing queued_references_.
+  wait_for_unsubmitted_work = true;
   if (!closing_) {
     QueuedReference queued_reference = {GetLastFenceValue(), object};
 
