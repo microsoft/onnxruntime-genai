@@ -663,11 +663,6 @@ inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider_OpenVINO(co
   return *this;
 }
 
-inline OrtSessionOptions& OrtSessionOptions::RegisterCustomOpsLibrary(const char* custom_op_lib_path) {
-  Ort::ThrowOnError(Ort::api->RegisterCustomOpsLibrary_V2(this, custom_op_lib_path));
-  return *this;
-}
-
 /// Session
 inline std::unique_ptr<OrtSession> OrtSession::Create(OrtEnv& env, const ORTCHAR_T* model_path, const OrtSessionOptions* options) {
   OrtSession* p;

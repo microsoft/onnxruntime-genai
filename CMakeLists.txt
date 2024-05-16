@@ -111,6 +111,8 @@ else()
   add_compile_definitions(TEST_PHI2=0)
 endif()
 
+list(APPEND generator_srcs src/custom_ops/paged_attention_impl.cu src/custom_ops/genai_ops2.cc)
+
 add_library(onnxruntime-genai SHARED ${generator_srcs})
 add_library(onnxruntime-genai-static STATIC ${generator_srcs})
 target_include_directories(onnxruntime-genai PRIVATE ${ORT_HEADER_DIR})
@@ -182,6 +184,10 @@ endif()
 
 target_include_directories(onnxruntime-genai PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/include)
 target_include_directories(onnxruntime-genai-static PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/include)
+#if(USE_CUDA)
+target_include_directories(onnxruntime-genai PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/operators/cuda)
+target_include_directories(onnxruntime-genai-static PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/operators/cuda)
+#endif()
 target_link_libraries(onnxruntime-genai PRIVATE onnxruntime_extensions)
 target_link_libraries(onnxruntime-genai-static PUBLIC onnxruntime_extensions)
 

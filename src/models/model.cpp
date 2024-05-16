@@ -10,6 +10,7 @@
 #include "decoder_only.h"
 #include "whisper.h"
 #include "kernels.h"
+#include "ocos.h"
 #if USE_DML
 #include <wil/wrl.h>
 #include "dml_provider_factory.h"
@@ -34,6 +35,7 @@ static std::wstring CurrentModulePath() {
 }
 #endif
 
+extern OrtOpLoader genai_op_loader;
 namespace Generators {
 
 State::State(const GeneratorParams& params) : params_{params.shared_from_this()} {
@@ -233,6 +235,13 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   run_options_ = OrtRunOptions::Create();
 
   CreateSessionOptions();
+  if (genai_op_loader.GetCustomOps().size() > 0) {
+    custom_op_domain_ = OrtCustomOpDomain::Create("onnx.genai");
+    for (size_t i = 0; i < genai_op_loader.GetCustomOps().size(); i++) {
+      custom_op_domain_->Add(*(genai_op_loader.GetCustomOps().at(i)));
+    }
+    session_options_->Add(*custom_op_domain_);
+  }
 }
 
 Model::~Model() = default;
@@ -269,12 +278,6 @@ void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
 void Model::CreateSessionOptions() {
   session_options_ = OrtSessionOptions::Create();
   auto& ort_options = *session_options_;
-
-  //config_->custom_lib_path = "/home/leca/code/onnxruntime-genai/custom_ops/build/libgenai_custom_ops.so";
-  if (config_->custom_lib_path.length() > 0) {
-    ort_options.RegisterCustomOpsLibrary(config_->custom_lib_path.c_str());
-  }
-
   auto& options = config_->model.decoder.session_options;
 
   // Default to a limit of 16 threads to optimize performance

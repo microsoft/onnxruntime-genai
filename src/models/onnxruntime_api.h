@@ -400,10 +400,6 @@ struct OrtSessionOptions {
   OrtSessionOptions& SetCustomThreadCreationOptions(void* ort_custom_thread_creation_options);      ///< Wraps OrtApi::SessionOptionsSetCustomThreadCreationOptions
   OrtSessionOptions& SetCustomJoinThreadFn(OrtCustomJoinThreadFn ort_custom_join_thread_fn);        ///< Wraps OrtApi::SessionOptionsSetCustomJoinThreadFn
 
-  // TODO(leca): maybe there is a better way: Just Create an OrtCustomOpDomain object with the desired custom op in it, and leverage OrtSessionOptions::Add(OrtCustomOpDomain&)
-  // why ORT-genai defines another OrtXXX structures?
-  OrtSessionOptions& RegisterCustomOpsLibrary(const char* custom_op_lib_path);
-
   static void operator delete(void* p) { Ort::api->ReleaseSessionOptions(reinterpret_cast<OrtSessionOptions*>(p)); }
   Ort::Abstract make_abstract;
 };
