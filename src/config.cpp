@@ -119,6 +119,8 @@ struct Inputs_Element : JSON::Element {
   void OnString(std::string_view name, std::string_view value) override {
     if (name == "input_ids") {
       v_.input_ids = value;
+    } else if (name == "inputs_embeds") {
+      v_.embeddings = value;
     } else if (name == "position_ids") {
       v_.position_ids = value;
     } else if (name == "attention_mask") {
@@ -214,6 +216,87 @@ struct Decoder_Element : JSON::Element {
   Outputs_Element outputs_{v_.outputs};
 };
 
+struct ImageProcessor_Element : JSON::Element {
+  explicit ImageProcessor_Element(Config::Model::Vision::ImageProcessor& v) : v_{v} {}
+
+  void OnString(std::string_view name, std::string_view value) override {
+    if (name == "processor_config") {
+      v_.processor_config = value;
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
+  void OnNumber(std::string_view name, double value) override {
+    if (name == "num_crops") {
+      v_.num_crops = static_cast<int>(value);
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Vision::ImageProcessor& v_;
+};
+
+struct VisionInputs_Element : JSON::Element {
+  explicit VisionInputs_Element(Config::Model::Vision::Inputs& v) : v_{v} {}
+
+  void OnString(std::string_view name, std::string_view value) override {
+    if (name == "input_ids") {
+      v_.input_ids = value;
+    } else if (name == "pixel_values") {
+      v_.pixel_values = value;
+    } else if (name == "image_sizes") {
+      v_.image_sizes = value;
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Vision::Inputs& v_;
+};
+
+struct VisionOutputs_Element : JSON::Element {
+  explicit VisionOutputs_Element(Config::Model::Vision::Outputs& v) : v_{v} {}
+
+  void OnString(std::string_view name, std::string_view value) override {
+    if (name == "inputs_embeds") {
+      v_.embeddings = value;
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Vision::Outputs& v_;
+};
+
+struct Vision_Element : JSON::Element {
+  explicit Vision_Element(Config::Model::Vision& v) : v_{v} {}
+
+  void OnString(std::string_view name, std::string_view value) override {
+    if (name == "filename") {
+      v_.filename = value;
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "inputs") {
+      return inputs_;
+    } else if (name == "image_processor") {
+      return image_processor_;
+    } else if (name == "outputs") {
+      return outputs_;
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Vision& v_;
+  ImageProcessor_Element image_processor_{v_.image_processor};
+  VisionInputs_Element inputs_{v_.inputs};
+  VisionOutputs_Element outputs_{v_.outputs};
+};
+
 struct Eos_Array_Element : JSON::Element {
   explicit Eos_Array_Element(Config::Model& v) : v_{v} {}
 
@@ -235,6 +318,59 @@ struct Eos_Array_Element : JSON::Element {
 
  private:
   Config::Model& v_;
+};
+
+struct EmbeddingInputs_Element : JSON::Element {
+  explicit EmbeddingInputs_Element(Config::Model::Embedding::Inputs& v) : v_{v} {}
+
+  void OnString(std::string_view name, std::string_view value) override {
+    if (name == "input_ids") {
+      v_.input_ids = value;
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Embedding::Inputs& v_;
+};
+
+struct EmbeddingOutputs_Element : JSON::Element {
+  explicit EmbeddingOutputs_Element(Config::Model::Embedding::Outputs& v) : v_{v} {}
+
+  void OnString(std::string_view name, std::string_view value) override {
+    if (name == "inputs_embeds") {
+      v_.embeddings = value;
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Embedding::Outputs& v_;
+};
+
+struct Embedding_Element : JSON::Element {
+  explicit Embedding_Element(Config::Model::Embedding& v) : v_{v} {}
+
+  void OnString(std::string_view name, std::string_view value) override {
+    if (name == "filename") {
+      v_.filename = value;
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "inputs") {
+      return inputs_;
+    } else if (name == "outputs") {
+      return outputs_;
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Embedding& v_;
+  EmbeddingInputs_Element inputs_{v_.inputs};
+  EmbeddingOutputs_Element outputs_{v_.outputs};
 };
 
 struct Model_Element : JSON::Element {
@@ -279,6 +415,12 @@ struct Model_Element : JSON::Element {
     if (name == "decoder") {
       return decoder_;
     }
+    if (name == "vision") {
+      return vision_;
+    }
+    if (name == "embedding") {
+      return embedding_;
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -287,6 +429,8 @@ struct Model_Element : JSON::Element {
   EncoderDecoderInit_Element encoder_decoder_init_{v_.encoder_decoder_init};
   Decoder_Element decoder_{v_.decoder};
   Eos_Array_Element eos_token_ids_{v_};
+  Vision_Element vision_{v_.vision};
+  Embedding_Element embedding_{v_.embedding};
 };
 
 struct Search_Element : JSON::Element {

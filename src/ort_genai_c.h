@@ -57,6 +57,9 @@ typedef struct OgaSequences OgaSequences;
 typedef struct OgaTokenizer OgaTokenizer;
 typedef struct OgaTokenizerStream OgaTokenizerStream;
 typedef struct OgaTensor OgaTensor;
+typedef struct OgaImages OgaImages;
+typedef struct OgaNamedTensors OgaNamedTensors;
+typedef struct OgaMultiModalProcessor OgaMultiModalProcessor;
 
 /* \brief Call this on process exit to cleanly shutdown the genai library & its onnxruntime usage
  */
@@ -80,6 +83,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaSetLogString(const char* name, const char*
  */
 OGA_EXPORT void OGA_API_CALL OgaDestroyResult(OgaResult*);
 OGA_EXPORT void OGA_API_CALL OgaDestroyString(const char*);
+OGA_EXPORT void OGA_API_CALL OgaDestroyNamedTensors(OgaNamedTensors*);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateSequences(OgaSequences** out);
 
@@ -109,6 +113,12 @@ OGA_EXPORT size_t OGA_API_CALL OgaSequencesGetSequenceCount(const OgaSequences* 
  * \return The pointer to the sequence data at the given index. The pointer is valid until the OgaSequences is destroyed.
  */
 OGA_EXPORT const int32_t* OGA_API_CALL OgaSequencesGetSequenceData(const OgaSequences* sequences, size_t sequence_index);
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadImage(const char* image_path, OgaImages** images);
+
+OGA_EXPORT void OGA_API_CALL OgaDestroyImages(OgaImages* images);
+
+// OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadImages(const char* image_path[], size_t num_images, OgaImages** out);
 
 /*
  * \brief Creates a model from the given configuration directory and device type.
@@ -173,6 +183,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputIDs(OgaGeneratorPar
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputSequences(OgaGeneratorParams* generator_params, const OgaSequences* sequences);
 
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputs(OgaGeneratorParams* generator_params, const OgaNamedTensors* named_tensors);
+
 /*
  * \brief For additional model inputs that genai does not handle, this lets the user set their values. For example LoRA models handle
  * fine tuning through model inputs. This lets the user supply the fine tuning inputs, while genai handles the standard inputs.
@@ -234,14 +246,21 @@ OGA_EXPORT const int32_t* OGA_API_CALL OgaGenerator_GetSequenceData(const OgaGen
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTokenizer(const OgaModel* model, OgaTokenizer** out);
 OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizer(OgaTokenizer*);
 
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateMultiModalProcessor(const OgaModel* model, OgaMultiModalProcessor** out);
+
+OGA_EXPORT void OGA_API_CALL OgaDestroyMultiModalProcessor(OgaMultiModalProcessor* processor);
+
 /* Encodes a single string and adds the encoded sequence of tokens to the OgaSequences. The OgaSequences must be freed with OgaDestroySequences
    when it is no longer needed.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer*, const char* str, OgaSequences* sequences);
 
+OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor*, const char* prompt, OgaImages* images, OgaNamedTensors** input_tensors);
+
 /* Decode a single token sequence and returns a null terminated utf8 string. out_string must be freed with OgaDestroyString
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer*, const int32_t* tokens, size_t token_count, const char** out_string);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorDecode(const OgaMultiModalProcessor*, const int32_t* tokens, size_t token_count, const char** out_string);
 
 /* OgaTokenizerStream is to decoded token strings incrementally, one token at a time.
  */

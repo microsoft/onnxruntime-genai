@@ -42,6 +42,7 @@ namespace Generators {
 struct Model;
 struct State;
 struct Search;
+struct Tokenizer;
 
 // OgaSequences are a vector of int32 vectors
 using TokenSequences = std::vector<std::vector<int32_t>>;
@@ -68,6 +69,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams> {
   int max_batch_size{0};
   bool use_cuda_graph{};
   int sequence_length{};
+  int hidden_size{};
   int BatchBeamSize() const { return search.num_beams * batch_size; }
 
   DeviceType device_type{DeviceType::CPU};

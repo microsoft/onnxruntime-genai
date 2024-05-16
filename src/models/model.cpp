@@ -10,6 +10,7 @@
 #include "decoder_only.h"
 #include "whisper.h"
 #include "kernels.h"
+#include "multi_modal_vision_model.h"
 #if USE_DML
 #include <wil/wrl.h>
 #include "dml_provider_factory.h"
@@ -184,10 +185,17 @@ Ort::Allocator* GetCudaAllocator(OrtSession& session) {
 #endif
 
 SessionInfo::SessionInfo(OrtSession& session) {
+  Add(session);
+}
+
+void SessionInfo::Add(OrtSession& session) {
   auto input_names = session.GetInputNames();
   std::vector<ONNXTensorElementDataType> input_types(input_names.size());
   for (size_t i = 0; i < input_types.size(); i++) {
     auto input_type = session.GetInputTypeInfo(i)->GetTensorTypeAndShapeInfo().GetElementType();
+    auto found_input = inputs_.find(input_names[i]);
+    if (found_input != inputs_.end() && found_input->second != input_type)
+      throw std::runtime_error("Model input type mismatch: " + input_names[i] + " expected " + std::to_string(found_input->second) + " got " + std::to_string(input_type));
     inputs_.emplace(std::make_pair(std::move(input_names[i]), input_type));
   }
 
@@ -367,6 +375,10 @@ std::shared_ptr<Tokenizer> Model::CreateTokenizer() const {
   return std::make_shared<Tokenizer>(*config_);
 }
 
+std::shared_ptr<MultiModalProcessor> Model::CreateMultiModalProcessor() const {
+  return std::make_shared<MultiModalProcessor>(*config_, *session_info_);
+}
+
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path) {
   auto config = std::make_unique<Config>(config_path);
 
@@ -376,6 +388,8 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path) {
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
   if (config->model.type == "whisper")
     return std::make_shared<Whisper_Model>(std::move(config), ort_env);
+  if (config->model.type == "phi3v")
+    return std::make_shared<MultiModalVisionModel>(std::move(config), ort_env);
 
   throw std::runtime_error("Unsupported model_type in config.json: " + config->model.type);
 }
@@ -420,6 +434,44 @@ void ConvertFp16ToFp32(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<Or
     case DeviceType::CUDA:
       cuda::LaunchFp16ToFp32(fp16, fp32, count, stream);
       break;
+#endif
+
+    default:
+      throw std::runtime_error("ConvertFp16ToFp32 - Unsupported device type");
+  }
+}
+
+void ConvertFp32ToFp16(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<OrtValue>& p_out,
+                       DeviceType device_type, cudaStream_t stream) {
+  auto shape_info = in.GetTensorTypeAndShapeInfo();
+  auto shape = shape_info->GetShape();
+  assert(shape_info->GetElementType() == Ort::TypeToTensorType<float>::type);
+
+  bool allocate_p_out = p_out == nullptr;
+  if (p_out) {
+    auto out_shape_info = p_out->GetTensorTypeAndShapeInfo();
+    auto out_shape = out_shape_info->GetShape();
+    allocate_p_out = shape != out_shape;
+  }
+
+  if (allocate_p_out)
+    p_out = OrtValue::CreateTensor<float>(allocator, shape);
+
+  int count = static_cast<int>(shape_info->GetElementCount());
+  auto* fp32 = in.GetTensorData<float>();
+  auto* fp16 = p_out->GetTensorMutableData<uint16_t>();
+
+  switch (device_type) {
+    case DeviceType::DML:
+      // DML doesn't currently support on-device scoring, so we fall back to the CPU
+    case DeviceType::CPU:
+      for (int i = 0; i < count; i++)
+        fp16[i] = FastFloat32ToFloat16(fp32[i]);
+      break;
+
+#if USE_CUDA
+    case DeviceType::CUDA:
+      // TODO: Implement CUDA. For now, fallthrough and report an error.
 #endif
 
     default:
@@ -478,6 +530,13 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
       throw std::runtime_error("ExpandInputs - Unsupported device type");
   }
   return expanded;
+}
+
+MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& session_info)
+    : tokenizer_{std::make_shared<Tokenizer>(config)} {
+  if (!config.model.vision.filename.empty()) {
+    image_processor_ = std::make_shared<ImageProcessor>(config, session_info);
+  }
 }
 
 }  // namespace Generators

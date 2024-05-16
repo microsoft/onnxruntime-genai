@@ -90,14 +90,13 @@ TEST(CAPITests, EndToEndPhiBatch) {
 }
 
 TEST(CAPITests, Tensor_And_AddExtraInput) {
-
   // Create a [3 4] shaped tensor
-  std::array<float,12> data{0, 1, 2, 3,
-                            10, 11, 12, 13, 
-                            20, 21, 22, 23};
-  std::vector<int64_t> shape{3, 4}; // Use vector so we can easily compare for equality later
+  std::array<float, 12> data{0, 1, 2, 3,
+                             10, 11, 12, 13,
+                             20, 21, 22, 23};
+  std::vector<int64_t> shape{3, 4};  // Use vector so we can easily compare for equality later
 
-  auto tensor=OgaTensor::Create(data.data(), shape.data(), shape.size(), OgaElementType_float32);
+  auto tensor = OgaTensor::Create(data.data(), shape.data(), shape.size(), OgaElementType_float32);
 
   EXPECT_EQ(tensor->Data(), data.data());
   EXPECT_EQ(tensor->Shape(), shape);
@@ -112,7 +111,7 @@ TEST(CAPITests, Tensor_And_AddExtraInput) {
 TEST(CAPITests, Logging) {
   // Trivial test to ensure the API builds properly
   Oga::SetLogBool("enabled", true);
-  Oga::SetLogString("filename", nullptr); // If we had a filename set, this would stop logging to the file and go back to the console
+  Oga::SetLogString("filename", nullptr);  // If we had a filename set, this would stop logging to the file and go back to the console
   Oga::SetLogBool("enabled", false);
 }
 
@@ -264,3 +263,57 @@ TEST(CAPITests, TopKTopPCAPI) {
 }
 
 #endif  // TEST_PHI2
+
+void CheckResult(OgaResult* result) {
+  if (result) {
+    std::string string = OgaResultGetError(result);
+    OgaDestroyResult(result);
+    throw std::runtime_error(string);
+  }
+}
+
+TEST(CAPITests, Phi3MiniV) {
+  OgaModel* model;
+  std::cout << "Creating model..." << std::endl;
+  std::string model_path = "C:\\Code\\Phi3MiniV\\model";
+  CheckResult(OgaCreateModel(model_path.c_str(), &model));
+
+  OgaMultiModalProcessor* processor;
+  std::cout << "Creating multimodal processor..." << std::endl;
+  CheckResult(OgaCreateMultiModalProcessor(model, &processor));
+
+  const char* prompt = "<|user|>\n<|image_1|>\nWhat is shown in this image?<|end|>\n<|assistant|>\n";
+  std::cout << "Prompt: " << std::endl
+            << prompt << std::endl;
+
+  OgaImages* images;
+  CheckResult(OgaLoadImage("C:\\Code\\Phi3MiniV\\images\\australia.jpg", &images));
+
+  OgaNamedTensors* input_tensors;
+  CheckResult(OgaProcessorProcessImages(processor, prompt, images, &input_tensors));
+
+  OgaGeneratorParams* params;
+  CheckResult(OgaCreateGeneratorParams(model, &params));
+  CheckResult(OgaGeneratorParamsSetSearchNumber(params, "max_length", 2048));
+  CheckResult(OgaGeneratorParamsSetInputs(params, input_tensors));
+
+  OgaSequences* output_sequences;
+  CheckResult(OgaGenerate(model, params, &output_sequences));
+
+  size_t sequence_length = OgaSequencesGetSequenceCount(output_sequences, 0);
+  const int32_t* sequence = OgaSequencesGetSequenceData(output_sequences, 0);
+
+  const char* out_string;
+  CheckResult(OgaProcessorDecode(processor, sequence, sequence_length, &out_string));
+
+  std::cout << "Output: " << std::endl
+            << out_string << std::endl;
+
+  OgaDestroyString(out_string);
+  OgaDestroySequences(output_sequences);
+  OgaDestroyGeneratorParams(params);
+  OgaDestroyNamedTensors(input_tensors);
+  OgaDestroyImages(images);
+  OgaDestroyMultiModalProcessor(processor);
+  OgaDestroyModel(model);
+}

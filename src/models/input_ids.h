@@ -7,6 +7,8 @@ namespace Generators {
 struct InputIDs {
   InputIDs(const Model& model, State& state);
 
+  InputIDs(InputIDs&& other, State& state);
+
   void Add();
   void Update(RoamingArray<int32_t> next_tokens);
 

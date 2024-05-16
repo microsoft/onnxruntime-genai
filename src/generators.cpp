@@ -33,6 +33,7 @@ GeneratorParams::GeneratorParams(const Model& model)
       pad_token_id{model.config_->model.pad_token_id},
       eos_token_id{model.config_->model.eos_token_id},
       vocab_size{model.config_->model.vocab_size},
+      hidden_size{model.config_->model.decoder.hidden_size},
       device_type{model.device_type_},
       cuda_stream{model.cuda_stream_},
       is_cuda_graph_enabled_{IsCudaGraphEnabled(model.config_->model.decoder.session_options)} {
