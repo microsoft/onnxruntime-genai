@@ -1,14 +1,14 @@
 /*
  * Copyright (c) Microsoft Corporation. All rights reserved. Licensed under the MIT License.
  */
-package ai.onnxruntime_genai;
+package ai.onnxruntime.genai;
 
 /** Represents a collection of encoded prompts/responses. */
 public class Sequences implements AutoCloseable {
   private long nativeHandle;
   private long numSequences;
 
-  protected Sequences(long sequencesHandle) {
+  Sequences(long sequencesHandle) {
     assert (sequencesHandle != 0); // internal usage should never pass an invalid handle
 
     nativeHandle = sequencesHandle;
@@ -39,14 +39,14 @@ public class Sequences implements AutoCloseable {
   }
 
   @Override
-  public void close() throws Exception {
+  public void close() {
     if (nativeHandle != 0) {
       destroySequences(nativeHandle);
       nativeHandle = 0;
     }
   }
 
-  protected long nativeHandle() {
+  long nativeHandle() {
     return nativeHandle;
   }
 

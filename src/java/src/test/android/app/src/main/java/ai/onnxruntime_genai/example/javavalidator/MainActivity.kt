@@ -1,4 +1,4 @@
-package ai.onnxruntime_genai.example.javavalidator
+package ai.onnxruntime.genai.example.javavalidator
 
 import android.os.Bundle
 import androidx.appcompat.app.AppCompatActivity

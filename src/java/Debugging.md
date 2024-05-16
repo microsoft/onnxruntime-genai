@@ -23,7 +23,7 @@ My repo root is D:\src\github\ort.genai, and I was testing a Debug build on Wind
             "D:\\src\\github\\ort.genai\\src\\java\\src\\main\\java",
             "D:\\src\\github\\ort.genai\\src\\java\\src\\test\\java"
         ],
-        "vmArgs": [ "-Djava.library.path=D:\\src\\github\\ort.genai\\build\\Windows\\Debug\\src\\java\\native-lib\\ai\\onnxruntime_genai\\native\\win-x64" ],
+        "vmArgs": [ "-Djava.library.path=D:\\src\\github\\ort.genai\\build\\Windows\\Debug\\src\\java\\native-lib\\ai\\onnxruntime-genai\\native\\win-x64" ],
     },
 ```
 
@@ -36,13 +36,13 @@ CMakeLists.txt has this:
 ```cmake
 if (WIN32)
   # Uncomment the below line if you need to debug unit tests on Windows so that all the native dlls end up in the
-  # one directory. See Debugging.md and test/java/ai/onnxruntime_genai/TestUtils.java.
+  # one directory. See Debugging.md and test/java/ai/onnxruntime-genai/TestUtils.java.
   # set(JAVA_PACKAGE_LIB_DIR ${JAVA_PACKAGE_JNI_DIR})
 ```
 That gets all the dlls in the one directory, and you can add this to a static init in the test code for GenAI Java
 bindings to look there.
 
-See setLocalNativeLibraryPath in src/java/test/java/ai/onnxruntime_genai/TestUtils.java to adjust the build output path.
+See setLocalNativeLibraryPath in src/java/test/java/ai/onnxruntime-genai/TestUtils.java to adjust the build output path.
 Add a static member to the test class you want to debug that calls this to ensure the path is set before the GenAI
 bindings are loaded
 ```java

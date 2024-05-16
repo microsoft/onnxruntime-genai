@@ -1,7 +1,7 @@
 /*
  * Copyright (c) Microsoft Corporation. All rights reserved. Licensed under the MIT License.
  */
-package ai.onnxruntime_genai;
+package ai.onnxruntime.genai;
 
 /**
  * A TokenizerStream is used to convert individual tokens when using Generator.generateNextToken.
@@ -24,7 +24,7 @@ public class TokenizerStream implements AutoCloseable {
   }
 
   @Override
-  public void close() throws Exception {
+  public void close() {
     if (nativeHandle != 0) {
       destroyTokenizerStream(nativeHandle);
       nativeHandle = 0;
@@ -39,7 +39,8 @@ public class TokenizerStream implements AutoCloseable {
     }
   }
 
-  private native String tokenizerStreamDecode(long tokenizerStreamHandle, int token);
+  private native String tokenizerStreamDecode(long tokenizerStreamHandle, int token)
+      throws GenAIException;
 
   private native void destroyTokenizerStream(long tokenizerStreamHandle);
 }

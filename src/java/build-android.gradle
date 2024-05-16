@@ -22,7 +22,7 @@ def static getVersionCode(String version){
 
 project.buildDir = buildDir
 project.version = rootProject.file('../../VERSION_INFO').text.trim()
-project.group = "com.microsoft.onnxruntime_genai"
+project.group = "com.microsoft.onnxruntime-genai"
 
 def mavenArtifactId = project.name + '-android'
 def defaultDescription = 'ONNX Runtime GenAI is ... ' +
@@ -88,7 +88,7 @@ android {
 		}
 	}
 
-	namespace 'ai.onnxruntime_genai'
+	namespace 'ai.onnxruntime.genai'
 }
 
 task sourcesJar(type: Jar) {
@@ -129,10 +129,10 @@ publishing {
 			artifact sourcesJar
 
 			pom {
-				name = 'onnxruntime_genai'
+				name = 'onnxruntime-genai'
 				description = defaultDescription
-				// TODO: Setup https://microsoft.github.io/onnxruntime_genai/ for equivalence with ORT?
-				url = 'https://github.com/microsoft/onnxruntime_genai/'
+				// TODO: Setup https://microsoft.github.io/onnxruntime-genai/ for equivalence with ORT?
+				url = 'https://github.com/microsoft/onnxruntime-genai/'
 				licenses {
 					license {
 						name = 'MIT License'
@@ -144,9 +144,9 @@ publishing {
 					url = 'http://www.microsoft.com'
 				}
 				scm {
-					connection = 'scm:git:git://github.com:microsoft/onnxruntime_genai.git'
-					developerConnection = 'scm:git:ssh://github.com/microsoft/onnxruntime_genai.git'
-					url = 'https://github.com/microsoft/onnxruntime_genai'
+					connection = 'scm:git:git://github.com:microsoft/onnxruntime-genai.git'
+					developerConnection = 'scm:git:ssh://github.com/microsoft/onnxruntime-genai.git'
+					url = 'https://github.com/microsoft/onnxruntime-genai'
 				}
 				developers {
 					// TODO: Does this need updating?

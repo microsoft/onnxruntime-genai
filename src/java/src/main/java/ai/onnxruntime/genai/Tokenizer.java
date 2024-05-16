@@ -1,16 +1,14 @@
 /*
  * Copyright (c) Microsoft Corporation. All rights reserved. Licensed under the MIT License.
  */
-package ai.onnxruntime_genai;
+package ai.onnxruntime.genai;
 
 /** The Tokenizer class is responsible for converting between text and token ids. */
 public class Tokenizer implements AutoCloseable {
   private long nativeHandle;
 
-  public Tokenizer(Model model) throws GenAIException {
-    if (model.nativeHandle() == 0) {
-      throw new IllegalStateException("model has been freed and is invalid");
-    }
+  protected Tokenizer(Model model) throws GenAIException {
+    assert (model.nativeHandle() != 0); // internal code should never pass an invalid model
 
     nativeHandle = createTokenizer(model.nativeHandle());
   }
@@ -20,7 +18,7 @@ public class Tokenizer implements AutoCloseable {
    *
    * @param string Text to encode as token ids.
    * @return a Sequences object with a single sequence in it.
-   * @throws GenAIException If the call to GenAI fails.
+   * @throws GenAIException If the call to the GenAI native API fails.
    */
   public Sequences encode(String string) throws GenAIException {
     return encodeBatch(new String[] {string});
@@ -31,7 +29,7 @@ public class Tokenizer implements AutoCloseable {
    *
    * @param strings Collection of strings to encode as token ids.
    * @return a Sequences object with one sequence per input string.
-   * @throws GenAIException If the call to GenAI fails.
+   * @throws GenAIException If the call to the GenAI native API fails.
    */
   public Sequences encodeBatch(String[] strings) throws GenAIException {
     if (nativeHandle == 0) {
@@ -47,7 +45,7 @@ public class Tokenizer implements AutoCloseable {
    *
    * @param sequence Collection of token ids to decode to text.
    * @return The text representation of the sequence.
-   * @throws GenAIException If the call to GenAI fails.
+   * @throws GenAIException If the call to the GenAI native API fails.
    */
   public String decode(int[] sequence) throws GenAIException {
     if (nativeHandle == 0) {
@@ -62,7 +60,7 @@ public class Tokenizer implements AutoCloseable {
    *
    * @param sequences A Sequences object with one or more sequences of token ids.
    * @return An array of strings with the text representation of each sequence.
-   * @throws GenAIException If the call to GenAI fails.
+   * @throws GenAIException If the call to the GenAI native API fails.
    */
   public String[] decodeBatch(Sequences sequences) throws GenAIException {
     int numSequences = (int) sequences.numSequences();
@@ -80,9 +78,9 @@ public class Tokenizer implements AutoCloseable {
    * to provide each token as it is generated.
    *
    * @return The new TokenizerStream instance.
-   * @throws GenAIException If the call to GenAI fails.
+   * @throws GenAIException If the call to the GenAI native API fails.
    */
-  public TokenizerStream CreateStream() throws GenAIException {
+  public TokenizerStream createStream() throws GenAIException {
     if (nativeHandle == 0) {
       throw new IllegalStateException("Instance has been freed and is invalid");
     }
@@ -91,7 +89,7 @@ public class Tokenizer implements AutoCloseable {
   }
 
   @Override
-  public void close() throws GenAIException {
+  public void close() {
     if (nativeHandle != 0) {
       destroyTokenizer(nativeHandle);
       nativeHandle = 0;
@@ -106,13 +104,13 @@ public class Tokenizer implements AutoCloseable {
     }
   }
 
-  private native long createTokenizer(long modelHandle);
+  private native long createTokenizer(long modelHandle) throws GenAIException;
 
   private native void destroyTokenizer(long tokenizerHandle);
 
-  private native long tokenizerEncode(long tokenizerHandle, String[] strings);
+  private native long tokenizerEncode(long tokenizerHandle, String[] strings) throws GenAIException;
 
-  private native String tokenizerDecode(long tokenizerHandle, int[] sequence);
+  private native String tokenizerDecode(long tokenizerHandle, int[] sequence) throws GenAIException;
 
-  private native long createTokenizerStream(long tokenizerHandle);
+  private native long createTokenizerStream(long tokenizerHandle) throws GenAIException;
 }

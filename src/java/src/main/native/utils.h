@@ -21,7 +21,11 @@ jint JNI_OnLoad(JavaVM* vm, void* reserved);
 namespace Helpers {
 void ThrowException(JNIEnv* env, const char* message);
 
-void ThrowIfError(JNIEnv* env, OgaResult* result);
+/// @brief Throw a GenAIException if the result is an error.
+/// @param env JNI environment
+/// @param result Result from GenAI C API call
+/// @return True if there was an error. JNI code should generally return immediately if this is true.
+bool ThrowIfError(JNIEnv* env, OgaResult* result);
 
 // handle conversion/release of jstring to const char*
 struct CString {

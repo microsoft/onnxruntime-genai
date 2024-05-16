@@ -1,7 +1,7 @@
 /*
  * Copyright (c) Microsoft Corporation. All rights reserved. Licensed under the MIT License.
  */
-package ai.onnxruntime_genai;
+package ai.onnxruntime.genai;
 
 /**
  * The Generator class generates output using a model and generator parameters.
@@ -23,14 +23,15 @@ public class Generator implements AutoCloseable {
    *
    * @param model The model.
    * @param generatorParams The generator parameters.
-   * @throws GenAIException If the call to GenAI fails.
+   * @throws GenAIException If the call to the GenAI native API fails.
    */
   public Generator(Model model, GeneratorParams generatorParams) throws GenAIException {
     if (model.nativeHandle() == 0) {
-      throw new IllegalStateException("model has been freed and is invalid");
+      throw new IllegalArgumentException("model has been freed and is invalid");
     }
+
     if (generatorParams.nativeHandle() == 0) {
-      throw new IllegalStateException("generatorParams has been freed and is invalid");
+      throw new IllegalArgumentException("generatorParams has been freed and is invalid");
     }
 
     nativeHandle = createGenerator(model.nativeHandle(), generatorParams.nativeHandle());
@@ -52,7 +53,7 @@ public class Generator implements AutoCloseable {
   /**
    * Computes the logits for the next token in the sequence.
    *
-   * @throws GenAIException If the call to GenAI fails.
+   * @throws GenAIException If the call to the GenAI native API fails.
    */
   public void computeLogits() throws GenAIException {
     if (nativeHandle == 0) {
@@ -65,7 +66,7 @@ public class Generator implements AutoCloseable {
   /**
    * Generates the next token in the sequence.
    *
-   * @throws GenAIException If the call to GenAI fails.
+   * @throws GenAIException If the call to the GenAI native API fails.
    */
   public void generateNextToken() throws GenAIException {
     if (nativeHandle == 0) {
@@ -80,10 +81,14 @@ public class Generator implements AutoCloseable {
    *
    * @param sequenceIndex The index of the sequence.
    * @return An array of integers with the sequence token ids.
-   * @throws GenAIException If the call to GenAI fails.
+   * @throws GenAIException If the call to the GenAI native API fails.
    */
   public int[] getSequence(long sequenceIndex) throws GenAIException {
-    return getSequenceImpl(sequenceIndex, false);
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    return getSequenceNative(nativeHandle, sequenceIndex);
   }
 
   /**
@@ -91,31 +96,23 @@ public class Generator implements AutoCloseable {
    *
    * @param sequenceIndex The index of the sequence.
    * @return The last token in the sequence.
-   * @throws GenAIException If the call to GenAI fails.
+   * @throws GenAIException If the call to the GenAI native API fails.
    */
   public int getLastTokenInSequence(long sequenceIndex) throws GenAIException {
-    return getSequenceImpl(sequenceIndex, true)[0];
-  }
-
-  /**
-   * Closes the Generator and releases any associated resources.
-   *
-   * @throws Exception if an error occurs while closing the Generator.
-   */
-  @Override
-  public void close() throws Exception {
-    if (nativeHandle != 0) {
-      destroyGenerator(nativeHandle);
-      nativeHandle = 0;
-    }
-  }
-
-  private int[] getSequenceImpl(long sequenceIndex, boolean lastTokenOnly) throws GenAIException {
     if (nativeHandle == 0) {
       throw new IllegalStateException("Instance has been freed and is invalid");
     }
 
-    return getSequenceNative(nativeHandle, sequenceIndex, lastTokenOnly);
+    return getSequenceLastToken(nativeHandle, sequenceIndex);
+  }
+
+  /** Closes the Generator and releases any associated resources. */
+  @Override
+  public void close() {
+    if (nativeHandle != 0) {
+      destroyGenerator(nativeHandle);
+      nativeHandle = 0;
+    }
   }
 
   static {
@@ -126,16 +123,20 @@ public class Generator implements AutoCloseable {
     }
   }
 
-  private native long createGenerator(long modelHandle, long generatorParamsHandle);
+  private native long createGenerator(long modelHandle, long generatorParamsHandle)
+      throws GenAIException;
 
   private native void destroyGenerator(long nativeHandle);
 
   private native boolean isDone(long nativeHandle);
 
-  private native void computeLogits(long nativeHandle);
+  private native void computeLogits(long nativeHandle) throws GenAIException;
 
-  private native void generateNextTokenNative(long nativeHandle);
+  private native void generateNextTokenNative(long nativeHandle) throws GenAIException;
 
-  private native int[] getSequenceNative(
-      long nativeHandle, long sequenceIndex, boolean lastTokenOnly);
+  private native int[] getSequenceNative(long nativeHandle, long sequenceIndex)
+      throws GenAIException;
+
+  private native int getSequenceLastToken(long nativeHandle, long sequenceIndex)
+      throws GenAIException;
 }

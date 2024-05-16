@@ -1,6 +1,6 @@
-package ai.onnxruntime_genai.example.javavalidator
+package ai.onnxruntime.genai.example.javavalidator
 
-import ai.onnxruntime_genai.*
+import ai.onnxruntime.genai.*
 
 import android.os.Build;
 import android.util.Log

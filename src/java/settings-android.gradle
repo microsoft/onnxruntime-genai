@@ -1,2 +1,2 @@
-rootProject.name = 'onnxruntime_genai'
+rootProject.name = 'onnxruntime-genai'
 rootProject.buildFileName = 'build-android.gradle'

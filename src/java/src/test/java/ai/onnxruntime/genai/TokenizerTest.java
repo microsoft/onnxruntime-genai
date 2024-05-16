@@ -1,4 +1,4 @@
-package ai.onnxruntime_genai;
+package ai.onnxruntime.genai;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 

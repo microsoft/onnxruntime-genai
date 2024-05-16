@@ -1,4 +1,6 @@
-package ai.onnxruntime_genai;
+package ai.onnxruntime.genai;
+
+import java.util.function.Consumer;
 
 /**
  * The `SimpleGenAI` class provides a simple usage example of the GenAI API. It works with a model
@@ -15,9 +17,11 @@ package ai.onnxruntime_genai;
  */
 public class SimpleGenAI {
   private Model model;
+  private Tokenizer tokenizer;
 
   public SimpleGenAI(String modelPath) throws GenAIException {
     model = new Model(modelPath);
+    tokenizer = new Tokenizer(model);
   }
 
   /**
@@ -26,14 +30,14 @@ public class SimpleGenAI {
    *
    * <p>WARNING: Generation of the next token will be blocked until the listener returns.
    */
-  public interface TokenUpdateListener {
-    /**
-     * Called when a new token is generated.
-     *
-     * @param token The new token.
-     */
-    void onTokenGenerate(String token);
-  }
+  // public interface TokenUpdateListener {
+  //   /**
+  //    * Called when a new token is generated.
+  //    *
+  //    * @param token The new token.
+  //    */
+  //   void onTokenGenerate(String token);
+  // }
 
   /**
    * Create the generator parameters and add the prompt text. The user can set other search options
@@ -44,17 +48,13 @@ public class SimpleGenAI {
    * @throws GenAIException on failure
    */
   GeneratorParams createGeneratorParams(String prompt) throws GenAIException {
-    GeneratorParams generatorParams = null;
-    try (Tokenizer tokenizer = new Tokenizer(model);
-        Sequences prompt_sequences = tokenizer.encode(prompt)) {
-      generatorParams = new GeneratorParams(model);
-      generatorParams.setInput(prompt_sequences);
-    } catch (Exception e) {
-      if (generatorParams != null) {
-        generatorParams.close();
-      }
+    GeneratorParams generatorParams = model.createGeneratorParams();
 
-      throw new GenAIException("Failed to create GeneratorParams with encoded prompt", e);
+    try (Sequences encodedPrompt = tokenizer.encode(prompt)) {
+      generatorParams.setInput(encodedPrompt);
+    } catch (GenAIException e) {
+      generatorParams.close();
+      throw e;
     }
 
     return generatorParams;
@@ -69,15 +69,11 @@ public class SimpleGenAI {
    */
   GeneratorParams createGeneratorParams(int[] tokenIds, int sequenceLength, int batchSize)
       throws GenAIException {
-    GeneratorParams generatorParams = null;
+    GeneratorParams generatorParams = model.createGeneratorParams();
     try {
-      generatorParams = new GeneratorParams(model);
       generatorParams.setInput(tokenIds, sequenceLength, batchSize);
-    } catch (Exception e) {
-      if (generatorParams != null) {
-        generatorParams.close();
-      }
-
+    } catch (GenAIException e) {
+      generatorParams.close();
       throw e;
     }
 
@@ -91,18 +87,19 @@ public class SimpleGenAI {
    * batch size of 1)
    *
    * @param generatorParams The prompt and settings to run the model with.
-   * @param listener Optional callback for tokens to be provided as they are generated.
+   * @param listener Optional callback for tokens to be provided as they are generated. NOTE: Token
+   *     generation will be blocked until the listener's `accept` method returns.
    * @return The generated text.
    * @throws GenAIException on failure
    */
-  public String generate(GeneratorParams generatorParams, TokenUpdateListener listener)
+  public String generate(GeneratorParams generatorParams, Consumer<String> listener)
       throws GenAIException {
     String result = null;
     try (Tokenizer tokenizer = new Tokenizer(model)) {
       int[] output_ids = null;
 
       if (listener != null) {
-        try (TokenizerStream stream = tokenizer.CreateStream();
+        try (TokenizerStream stream = tokenizer.createStream();
             Generator generator = new Generator(model, generatorParams)) {
           while (!generator.isDone()) {
             // generate next token
@@ -112,7 +109,8 @@ public class SimpleGenAI {
             // decode and call listener
             int token_id = generator.getLastTokenInSequence(0);
             String token = stream.decode(token_id);
-            listener.onTokenGenerate(token);
+            listener.accept(token);
+            // listener.onTokenGenerate(token);
           }
 
           output_ids = generator.getSequence(0);
@@ -125,7 +123,7 @@ public class SimpleGenAI {
       }
 
       result = tokenizer.decode(output_ids);
-    } catch (Exception e) {
+    } catch (GenAIException e) {
       throw new GenAIException("Failed to create Tokenizer.", e);
     }
 

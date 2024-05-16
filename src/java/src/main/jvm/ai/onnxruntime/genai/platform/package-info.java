@@ -11,4 +11,4 @@
  *
  * <p>This is the Java version of the package.
  */
-package ai.onnxruntime_genai.platform;
+package ai.onnxruntime.genai.platform;

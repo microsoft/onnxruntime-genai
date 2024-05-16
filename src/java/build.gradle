@@ -12,16 +12,14 @@ allprojects {
 	}
 }
 
-project.group = "com.microsoft.onnxruntime_genai"
+project.group = "com.microsoft.onnxruntime-genai"
 version = rootProject.file('../../VERSION_INFO').text.trim()
 
 // cmake runs will inform us of the build directory of the current run
 def cmakeBuildDir = System.properties['cmakeBuildDir']
 def useCUDA = System.properties['USE_CUDA']
 def cmakeJavaDir = "${cmakeBuildDir}"
-def cmakeNativeLibDir = "${cmakeJavaDir}/native-lib"
-def cmakeNativeJniDir = "${cmakeJavaDir}/native-jni"
-def cmakeNativeTestDir = "${cmakeJavaDir}/native-test"
+def cmakeNativeLibDir = System.properties['nativeLibDir']
 def cmakeBuildOutputDir = "${cmakeJavaDir}/build"
 
 def mavenUser = System.properties['mavenUser']
@@ -30,8 +28,8 @@ def mavenArtifactId = useCUDA == null ? project.name : project.name + "_gpu"
 
 def defaultDescription = 'ONNX Runtime GenAI is <TODO>'
 
-logger.info("cmakeBuildDir:${cmakeBuildDir}")
-logger.info("project.buildDir:${project.buildDir}")
+logger.lifecycle("cmakeBuildDir:${cmakeBuildDir}")
+logger.lifecycle("cmakeNativeLibDir:${cmakeNativeLibDir}")
 
 java {
 	sourceCompatibility = JavaVersion.VERSION_1_8
@@ -72,6 +70,7 @@ spotless {
 		target '**/*.gradle'
 		trimTrailingWhitespace()
 		indentWithTabs()
+
 	}
 }
 
@@ -108,20 +107,20 @@ sourceSets.test {
 		"../../test/test_models"
 	]
 
-	if (cmakeBuildDir != null) {
+	if (cmakeNativeLibDir != null) {
 		// add compiled native libs
-		resources.srcDirs += [cmakeNativeLibDir, cmakeNativeJniDir, cmakeNativeTestDir]
+		resources.srcDirs += [cmakeNativeLibDir]
 	}
 }
 
-if (cmakeBuildDir != null) {
+if (cmakeNativeLibDir != null) {
 	// generate tasks to be called from cmake
 
 	// Overwrite jar location
 	task allJar(type: Jar) {
 		manifest {
 			attributes('Automatic-Module-Name': project.group,
-					'Implementation-Title': 'onnxruntime_genai',
+					'Implementation-Title': 'onnxruntime-genai',
 					'Implementation-Version': project.version)
 		}
 		into("META-INF/maven/$project.group/$mavenArtifactId") {
@@ -129,7 +128,6 @@ if (cmakeBuildDir != null) {
 			rename ".*", "pom.xml"
 		}
 		from sourceSets.main.output
-		from cmakeNativeJniDir
 		from cmakeNativeLibDir
 	}
 
@@ -171,6 +169,7 @@ test {
 		workingDir cmakeBuildDir
 	}
 
+	systemProperty "java.library.path", cmakeNativeLibDir
 	systemProperties System.getProperties().subMap(['USE_CUDA'])
 	testLogging {
 		events "passed", "skipped", "failed"
@@ -196,10 +195,10 @@ publishing {
 
 			from components.java
 			pom {
-				name = 'onnxruntime_genai'
+				name = 'onnxruntime-genai'
 				description = defaultDescription
-				// TODO: Setup https://microsoft.github.io/onnxruntime_genai/ for equivalence with ORT?
-				url = 'https://github.com/microsoft/onnxruntime_genai/'
+				// TODO: Setup https://microsoft.github.io/onnxruntime-genai/ for equivalence with ORT?
+				url = 'https://github.com/microsoft/onnxruntime-genai/'
 				licenses {
 					license {
 						name = 'MIT License'
@@ -211,9 +210,9 @@ publishing {
 					url = 'https://www.microsoft.com'
 				}
 				scm {
-					connection = 'scm:git:git://github.com:microsoft/onnxruntime_genai.git'
-					developerConnection = 'scm:git:ssh://github.com/microsoft/onnxruntime_genai.git'
-					url = 'https://github.com/microsoft/onnxruntime_genai'
+					connection = 'scm:git:git://github.com:microsoft/onnxruntime-genai.git'
+					developerConnection = 'scm:git:ssh://github.com/microsoft/onnxruntime-genai.git'
+					url = 'https://github.com/microsoft/onnxruntime-genai'
 				}
 				developers {
 					// TODO: Does this need updating?

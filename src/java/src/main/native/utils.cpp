@@ -17,35 +17,25 @@ jint JNI_OnLoad(JavaVM* vm, void* reserved) {
 }
 
 namespace {
-void ThrowException(JNIEnv* env, jstring error_message) {
-  static const char* className = "ai/onnxruntime_genai/GenAIException";
-  jclass exClazz = env->FindClass(className);
-  jmethodID exConstructor = env->GetMethodID(exClazz, "<init>", "(Ljava/lang/String;)V");
-  jobject javaException = env->NewObject(exClazz, exConstructor, error_message);
-  env->Throw(static_cast<jthrowable>(javaException));
-}
-
-void ThrowExceptionFromResult(JNIEnv* env, OgaResult* result) {
-  // copy error so we can release the OgaResult
-  jstring jerr_msg = env->NewStringUTF(OgaResultGetError(result));
-  OgaDestroyResult(result);
-
-  static const char* className = "ai/onnxruntime_genai/GenAIException";
-  jclass exClazz = env->FindClass(className);
-  jmethodID exConstructor = env->GetMethodID(exClazz, "<init>", "(Ljava/lang/String;)V");
-  jobject javaException = env->NewObject(exClazz, exConstructor, jerr_msg);
-  env->Throw(static_cast<jthrowable>(javaException));
+void ThrowExceptionImpl(JNIEnv* env, const char* error_message) {
+  static const char* className = "ai/onnxruntime/genai/GenAIException";
+  env->ThrowNew(env->FindClass(className), error_message);
 }
 }  // namespace
 
 namespace Helpers {
 void ThrowException(JNIEnv* env, const char* message) {
-  jstring jerr_msg = env->NewStringUTF(message);
+  ThrowExceptionImpl(env, message);
 }
 
-void ThrowIfError(JNIEnv* env, OgaResult* result) {
-  if (result != nullptr) {
-    ThrowExceptionFromResult(env, result);
+bool ThrowIfError(JNIEnv* env, OgaResult* result) {
+  bool error = result != nullptr;
+
+  if (error) {
+    ThrowExceptionImpl(env, OgaResultGetError(result));
+    OgaDestroyResult(result);
   }
+
+  return error;
 }
 }  // namespace Helpers

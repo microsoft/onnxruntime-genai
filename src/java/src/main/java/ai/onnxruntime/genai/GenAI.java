@@ -2,7 +2,7 @@
  * Copyright (c) Microsoft Corporation. All rights reserved.
  * Licensed under the MIT License.
  */
-package ai.onnxruntime_genai;
+package ai.onnxruntime.genai;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -23,13 +23,13 @@ final class GenAI {
    * The name of the system property which when set gives the path on disk where the ONNX Runtime
    * native libraries are stored.
    */
-  static final String GENAI_NATIVE_PATH = "onnxruntime_genai.native.path";
+  static final String GENAI_NATIVE_PATH = "onnxruntime-genai.native.path";
 
   /** The short name of the ONNX Runtime GenAI shared library */
   static final String GENAI_LIBRARY_NAME = "onnxruntime-genai";
 
   /** The short name of the ONNX Runtime GenAI JNI shared library */
-  static final String GENAI_JNI_LIBRARY_NAME = "onnxruntime-genai4j_jni";
+  static final String GENAI_JNI_LIBRARY_NAME = "onnxruntime-genai-jni";
 
   /** The short name of the ONNX runtime shared library */
   static final String ONNXRUNTIME_LIBRARY_NAME = "onnxruntime";
@@ -143,7 +143,7 @@ final class GenAI {
     }
 
     // 1) The user may skip loading of this library:
-    String skip = System.getProperty("onnxruntime_genai.native." + library + ".skip");
+    String skip = System.getProperty("onnxruntime-genai.native." + library + ".skip");
     if (Boolean.TRUE.toString().equalsIgnoreCase(skip)) {
       logger.log(Level.FINE, "Skipping load of native library '" + library + "'");
       return;
@@ -175,7 +175,7 @@ final class GenAI {
 
     // 3) The user may explicitly specify the path to their shared library:
     String libraryPathProperty =
-        System.getProperty("onnxruntime_genai.native." + library + ".path");
+        System.getProperty("onnxruntime-genai.native." + library + ".path");
     if (libraryPathProperty != null) {
       logger.log(
           Level.FINE,
@@ -219,7 +219,7 @@ final class GenAI {
    */
   private static Optional<File> extractFromResources(String library) {
     String libraryFileName = mapLibraryName(library);
-    String resourcePath = "/ai/onnxruntime_genai/native/" + OS_ARCH_STR + '/' + libraryFileName;
+    String resourcePath = "/ai/onnxruntime/genai/native/" + OS_ARCH_STR + '/' + libraryFileName;
     File tempFile = tempDirectory.resolve(libraryFileName).toFile();
 
     try (InputStream is = GenAI.class.getResourceAsStream(resourcePath)) {

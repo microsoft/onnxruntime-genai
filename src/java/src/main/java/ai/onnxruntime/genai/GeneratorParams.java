@@ -1,4 +1,4 @@
-package ai.onnxruntime_genai;
+package ai.onnxruntime.genai;
 
 /**
  * The `GeneratorParams` class represents the parameters used for generating sequences with a model.
@@ -7,7 +7,7 @@ package ai.onnxruntime_genai;
 public class GeneratorParams implements AutoCloseable {
   private long nativeHandle = 0;
 
-  public GeneratorParams(Model model) throws GenAIException {
+  GeneratorParams(Model model) throws GenAIException {
     if (model.nativeHandle() == 0) {
       throw new IllegalStateException("model has been freed and is invalid");
     }
@@ -36,11 +36,11 @@ public class GeneratorParams implements AutoCloseable {
    * EncodeBatch.
    *
    * @param sequences Sequences containing the encoded prompt.
-   * @throws GenAIException If the call to GenAI fails.
+   * @throws GenAIException If the call to the GenAI native API fails.
    */
   public void setInput(Sequences sequences) throws GenAIException {
     if (sequences.nativeHandle() == 0) {
-      throw new IllegalStateException("sequences has been freed and is invalid");
+      throw new IllegalArgumentException("sequences has been freed and is invalid");
     }
 
     if (nativeHandle == 0) {
@@ -56,7 +56,7 @@ public class GeneratorParams implements AutoCloseable {
    * @param tokenIds The token ids of the encoded prompt/s.
    * @param sequenceLength The length of each sequence.
    * @param batchSize The batch size
-   * @throws GenAIException If the call to GenAI fails.
+   * @throws GenAIException If the call to the GenAI native API fails.
    *     <p>NOTE: All sequences in the batch must be the same length.
    */
   public void setInput(int[] tokenIds, int sequenceLength, int batchSize) throws GenAIException {
@@ -80,7 +80,7 @@ public class GeneratorParams implements AutoCloseable {
     }
   }
 
-  protected long nativeHandle() {
+  long nativeHandle() {
     return nativeHandle;
   }
 
@@ -92,16 +92,19 @@ public class GeneratorParams implements AutoCloseable {
     }
   }
 
-  private native long createGeneratorParams(long modelHandle);
+  private native long createGeneratorParams(long modelHandle) throws GenAIException;
 
   private native void destroyGeneratorParams(long nativeHandle);
 
-  private native void setSearchOptionNumber(long nativeHandle, String optionName, double value);
+  private native void setSearchOptionNumber(long nativeHandle, String optionName, double value)
+      throws GenAIException;
 
-  private native void setSearchOptionBool(long nativeHandle, String optionName, boolean value);
+  private native void setSearchOptionBool(long nativeHandle, String optionName, boolean value)
+      throws GenAIException;
 
-  private native void setInputSequences(long nativeHandle, long sequencesHandle);
+  private native void setInputSequences(long nativeHandle, long sequencesHandle)
+      throws GenAIException;
 
   private native void setInputIDs(
-      long nativeHandle, int[] tokenIds, int sequenceLength, int batchSize);
+      long nativeHandle, int[] tokenIds, int sequenceLength, int batchSize) throws GenAIException;
 }

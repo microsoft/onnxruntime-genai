@@ -2,12 +2,13 @@
  * Copyright (c) Microsoft Corporation. All rights reserved.
  * Licensed under the MIT License.
  */
-package ai.onnxruntime_genai;
+package ai.onnxruntime.genai;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.File;
+import java.util.function.Consumer;
 import java.util.logging.Logger;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIf;
@@ -18,7 +19,7 @@ import org.junit.jupiter.api.condition.EnabledIf;
 //
 // This indirectly tests the majority of the bindings. Any gaps are covered in the class specific
 // tests.
-public class GenerationTest implements SimpleGenAI.TokenUpdateListener {
+public class GenerationTest {
   private static final Logger logger = Logger.getLogger(GenerationTest.class.getName());
 
   // use to debug locally if all the native libs (genai and onnxruntime) are in one directory
@@ -47,11 +48,6 @@ public class GenerationTest implements SimpleGenAI.TokenUpdateListener {
     return phi2ModelPath() != null;
   }
 
-  @Override
-  public void onTokenGenerate(String token) {
-    logger.info("onTokenGenerate: " + token);
-  }
-
   @Test
   @EnabledIf("havePhi2")
   public void testUsageNoListener() throws GenAIException {
@@ -68,8 +64,10 @@ public class GenerationTest implements SimpleGenAI.TokenUpdateListener {
   public void testUsageWithListener() throws GenAIException {
     SimpleGenAI generator = new SimpleGenAI(phi2ModelPath());
     GeneratorParams params = generator.createGeneratorParams("What's 6 times 7?");
+    // Listener listener = new Listener();
+    Consumer<String> listener = token -> logger.info("onTokenGenerate: " + token);
+    String result = generator.generate(params, listener);
 
-    String result = generator.generate(params, this);
     logger.info("Result: " + result);
     assertTrue(result.indexOf("Answer: 42") != -1);
   }
