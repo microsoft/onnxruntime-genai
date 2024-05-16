@@ -63,7 +63,7 @@ void ExtraInputs::Add() {
       case DeviceType::CUDA: {
         cudaMemcpyAsync(
             extra_inputs_[i]->GetTensorMutableRawData(),
-            state_.params_->extra_inputs[i].value.get(),
+            state_.params_->extra_inputs[i].value->GetTensorMutableRawData(),
             copy_size_in_bytes,
             cudaMemcpyHostToDevice,
             model_.cuda_stream_);
