@@ -7,7 +7,6 @@ from app_modules.utils import convert_to_markdown, is_stop_word_or_prefix, share
 current_dir = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.join(current_dir, "..", "..", ".."))
 
-
 class ONNXModel():
     """A wrapper for OnnxRuntime-GenAI to run ONNX LLM model."""
 
@@ -16,15 +15,30 @@ class ONNXModel():
         self.model = og.Model(f'{model_path}')
         self.tokenizer = og.Tokenizer(self.model)
         self.tokenizer_stream = self.tokenizer.create_stream()
-        self.is_phi = "phi" in model_path
-        if self.is_phi:
-            self.enable_history_max = 10 if "mini" in model_path else 2
+        self.model_path = model_path
+        if "phi-2" in self.model_path:
+            self.enable_history_max = 0
+            self.chat_template = "{{{input}}}"
+        elif "phi" in self.model_path:
+            self.enable_history_max = 10 if "mini" in self.model_path else 2
             self.history_template = "<|user|>{input}<|end|><|assistant|>{response}<|end|>"
             self.chat_template = "<|user|>{input}<|end|><|assistant|>"
+        elif "Llama-3" in self.model_path:
+            self.enable_history_max = 2
+            self.template_header =  """<|start_header_id|>system<|end_header_id|>
+You are a helpful AI assistant.<|eot_id|>"""
+            self.history_template = """<|start_header_id|>user<|end_header_id|>
+{input}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+{response}<|eot_id|>"""
+            
+            self.chat_template = """<|start_header_id|>user<|end_header_id|>
+{input}<|eot_id|><|start_header_id|>assistant<|end_header_id|>"""
+            
+            #self.chat_template = llama3_template
         else:
             self.enable_history_max = 2
-            self.history_template = "[INST]{input}[/INST]{response}"
-            self.chat_template = "[INST]{input}[/INST]"
+            self.history_template = "[INST] {input} [/INST]{response}"
+            self.chat_template = "[INST] {input} [/INST]"
 
     def generate_prompt_with_history(self, text, history, max_length=2048):
         prompt = ""
@@ -32,18 +46,27 @@ class ONNXModel():
         for dialog in history[-self.enable_history_max:]:
             prompt += f'{self.history_template.format(input=dialog[0], response=dialog[1])}'
 
-        if not self.is_phi:
-            prompt = f"<s>{prompt}</s>"
+        if "phi" in self.model_path:
+            pass
+        elif "Llama-3" in self.model_path:
+            prompt = self.template_header + prompt
+        else:
+            prompt = f"<s>{prompt}</s> "
 
         prompt += f'{self.chat_template.format(input=text)}'
 
-        input_ids = self.tokenizer.encode(prompt + f'{self.chat_template.format(input=text)}')
+        print (prompt)
+        input_ids = self.tokenizer.encode(prompt)
+        print (len(input_ids))
 
         if len(input_ids) <= max_length:
             return input_ids
         else:
             history.clear()
-            return self.tokenizer.encode(f'{self.chat_template.format(input=text)}')
+            if "Llama-3" in self.model_path:
+                prompt = self.template_header
+            prompt += f'{self.chat_template.format(input=text)}'
+            return self.tokenizer.encode(prompt)
 
     def search(
         self,
