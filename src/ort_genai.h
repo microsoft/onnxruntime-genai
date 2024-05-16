@@ -58,16 +58,6 @@ inline void OgaCheckResult(OgaResult* result) {
   }
 }
 
-struct OgaLog {
-  void SetBool(const char* name, bool value) {
-    OgaCheckResult(OgaSetLogBool(name, value));
-  }
-
-  void SetString(const char* name, const char* value) {
-    OgaCheckResult(OgaSetLogString(name, value));
-  }
-};
-
 struct OgaModel : OgaAbstract {
   static std::unique_ptr<OgaModel> Create(const char* config_path) {
     OgaModel* p;
@@ -193,6 +183,10 @@ struct OgaGeneratorParams : OgaAbstract {
     OgaCheckResult(OgaGeneratorParamsSetInputSequences(this, &sequences));
   }
 
+  void SetModelInput(const char* name, OgaTensor& tensor) {
+    OgaCheckResult(OgaGeneratorParamsSetModelInput(this, name, &tensor));
+  }
+
   void TryGraphCaptureWithMaxBatchSize(int max_batch_size) {
     OgaCheckResult(OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(this, max_batch_size));
   }
@@ -236,9 +230,69 @@ struct OgaGenerator : OgaAbstract {
   static void operator delete(void* p) { OgaDestroyGenerator(reinterpret_cast<OgaGenerator*>(p)); }
 };
 
+struct OgaTensor : OgaAbstract {
+#if __cplusplus >= 202002L
+  static std::unique_ptr<OgaTensor> Create(void* data, std::span<const int64_t> shape, OgaElementType element_type) {
+    OgaTensor* p;
+    OgaCheckResult(OgaCreateTensorFromBuffer(data, shape.data(), shape.size(), element_type, &p));
+    return std::unique_ptr<OgaTensor>(p);
+  }
+#endif
+  static std::unique_ptr<OgaTensor> Create(void* data, const int64_t* shape_dims, size_t shape_dims_count, OgaElementType element_type) {
+    OgaTensor* p;
+    OgaCheckResult(OgaCreateTensorFromBuffer(data, shape_dims, shape_dims_count, element_type, &p));
+    return std::unique_ptr<OgaTensor>(p);
+  }
+
+  OgaElementType Type() {
+    OgaElementType type;
+    OgaCheckResult(OgaTensorGetType(this, &type));
+    return type;
+  }
+
+  std::vector<int64_t> Shape() {
+    size_t size;
+    OgaCheckResult(OgaTensorGetShapeRank(this, &size));
+    std::vector<int64_t> shape(size);
+    OgaCheckResult(OgaTensorGetShape(this, shape.data(), shape.size()));
+    return shape;
+  }
+
+  void* Data() {
+    void* data;
+    OgaCheckResult(OgaTensorGetData(this, &data));
+    return data;
+  }
+
+  static void operator delete(void* p) { OgaDestroyTensor(reinterpret_cast<OgaTensor*>(p)); }
+};
+
 struct OgaHandle {
   OgaHandle() = default;
   ~OgaHandle() noexcept {
     OgaShutdown();
   }
 };
+
+// Global Oga functions
+namespace Oga {
+
+void SetLogBool(const char* name, bool value) {
+  OgaCheckResult(OgaSetLogBool(name, value));
+}
+
+void SetLogString(const char* name, const char* value) {
+  OgaCheckResult(OgaSetLogString(name, value));
+}
+
+void SetCurrentGpuDeviceId(int device_id) {
+  OgaCheckResult(OgaSetCurrentGpuDeviceId(device_id));
+}
+
+int GetCurrentGpuDeviceId() {
+  int device_id;
+  OgaCheckResult(OgaGetCurrentGpuDeviceId(&device_id));
+  return device_id;
+}
+
+}  // namespace Oga

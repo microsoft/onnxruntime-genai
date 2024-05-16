@@ -37,8 +37,6 @@ void SetLogBool(std::string_view name, bool value) {
     g_log.model_logits = value;
   else
     throw JSON::unknown_value_error{};
-
-  Log("warning", "Setting a value");
 }
 
 void SetLogString(std::string_view name, std::string_view value) {
