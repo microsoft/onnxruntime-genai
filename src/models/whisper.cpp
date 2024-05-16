@@ -43,6 +43,7 @@ Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> s
   output_names_.push_back("encoder_hidden_states");
   outputs_.push_back(encoder_hidden_states_.get());
   kv_cache_.AddEncoder();
+  extra_inputs_.Add();
   cross_cache_.AddOutputs();
 }
 
