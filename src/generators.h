@@ -1,4 +1,7 @@
 ﻿// Copyright (c) Microsoft Corporation. All rights reserved.
+
+#pragma once
+
 // Licensed under the MIT License.
 #include <algorithm>
 #include <array>

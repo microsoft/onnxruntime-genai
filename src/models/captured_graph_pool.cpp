@@ -19,10 +19,6 @@ void CapturedGraphInfoRecycler::operator()(CapturedGraphInfo* captured_graph_inf
   }
 }
 
-static std::tuple<int, int, int> MakeKey(int max_batch_size, int max_length, int num_beams) {
-  return std::make_tuple(max_batch_size, max_length, num_beams);
-}
-
 CapturedGraphInfoPtr CapturedGraphPool::ReserveCapturedGraph(const Model& model, const GeneratorParams& params) const {
   if (!params.use_cuda_graph || (model.device_type_ != DeviceType::CUDA && model.device_type_ != DeviceType::DML)) {
     return nullptr;
@@ -31,8 +27,8 @@ CapturedGraphInfoPtr CapturedGraphPool::ReserveCapturedGraph(const Model& model,
   // Multiple generators can reserve graphs in parallel, so we need to make it thread saf
   std::unique_lock lock(captured_graph_mutex_);
 
-  auto key = MakeKey(params.max_batch_size, params.search.max_length, params.search.num_beams);
-  auto& captured_graphs = captured_graphs_map_[key];
+  auto key = std::make_unique<CapturedGraphKey>(params.max_batch_size, params.search.max_length, params.search.num_beams, params.extra_inputs);
+  auto& captured_graphs = captured_graphs_map_[*key];
 
   // If no graphs are available, create a graph with a new ID
   if (captured_graphs.empty()) {
@@ -94,6 +90,14 @@ CapturedGraphInfoPtr CapturedGraphPool::ReserveCapturedGraph(const Model& model,
       new_captured_graph->sb_logits16_ = std::make_unique<StaticBuffer>(allocator_device_, max_beam_batch_size);
     }
 
+    // Create the extra inputs
+    for (const auto& extra_input : params.extra_inputs) {
+      auto first_dim = extra_input.tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape()[0];
+      new_captured_graph->sb_extra_inputs_[extra_input.name] = std::make_unique<StaticBuffer>(allocator_device_, first_dim);
+    }
+
+    new_captured_graph->key_ = std::move(key);
+
     return new_captured_graph;
   }
 
@@ -105,7 +109,6 @@ CapturedGraphInfoPtr CapturedGraphPool::ReserveCapturedGraph(const Model& model,
 
 void CapturedGraphPool::AddCapturedGraph(CapturedGraphInfoPtr&& captured_graph) const {
   std::unique_lock lock(captured_graph_mutex_);
-  auto key = MakeKey(captured_graph->max_batch_size_, captured_graph->max_length_, captured_graph->num_beams_);
-  captured_graphs_map_[key].push_back(std::move(captured_graph));
+  captured_graphs_map_[*captured_graph->key_].push_back(std::move(captured_graph));
 }
 }  // namespace Generators
