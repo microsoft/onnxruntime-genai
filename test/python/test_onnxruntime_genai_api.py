@@ -144,3 +144,8 @@ def test_batching(device, phi2_for):
 
     output_sequences = model.generate(params)
     print(tokenizer.decode_batch(output_sequences))
+
+def test_logging():
+    og.set_log_options(enabled=True, model_input_values=True, model_output_shapes=True)
+    og.set_log_options(model_input_values=False, model_output_shapes=False)
+    og.set_log_options(enabled=False)

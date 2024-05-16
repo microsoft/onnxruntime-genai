@@ -1,6 +1,6 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
 namespace Generators {
-
-size_t SizeOfType(ONNXTensorElementDataType type);
 
 void DumpTensor(std::ostream& stream, OrtValue* value, bool dump_value);
 void DumpTensors(std::ostream& stream, OrtValue** values, const char** names, size_t count, bool dump_values);

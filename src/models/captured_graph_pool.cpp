@@ -92,7 +92,7 @@ CapturedGraphInfoPtr CapturedGraphPool::ReserveCapturedGraph(const Model& model,
 
     // Create the extra inputs
     for (const auto& extra_input : params.extra_inputs) {
-      auto first_dim = extra_input.value->GetTensorTypeAndShapeInfo()->GetShape()[0];
+      auto first_dim = extra_input.tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape()[0];
       new_captured_graph->sb_extra_inputs_[extra_input.name] = std::make_unique<StaticBuffer>(allocator_device_, first_dim);
     }
 

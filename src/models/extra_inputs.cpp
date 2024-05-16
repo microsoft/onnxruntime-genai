@@ -14,7 +14,7 @@ ExtraInputs::ExtraInputs(const Model& model, State& state)
     owned_extra_inputs_.reserve(state_.params_->extra_inputs.size());
 
     for (int i = 0; i < state_.params_->extra_inputs.size(); ++i) {
-      auto type_and_shape_info = state_.params_->extra_inputs[i].value->GetTensorTypeAndShapeInfo();
+      auto type_and_shape_info = state_.params_->extra_inputs[i].tensor->ort_tensor_->GetTensorTypeAndShapeInfo();
       const auto& input_name = state_.params_->extra_inputs[i].name;
 
       sb_extra_inputs_.emplace(input_name, state_.GetCapturedGraphInfo()->sb_extra_inputs_.at(input_name).get());
@@ -24,7 +24,7 @@ ExtraInputs::ExtraInputs(const Model& model, State& state)
   } else {
     // We don't use graph capture, so simply use the existing pointers
     for (auto& extra_input : state_.params_->extra_inputs) {
-      extra_inputs_.push_back(extra_input.value.get());
+      extra_inputs_.push_back(extra_input.tensor->ort_tensor_.get());
     }
   }
 }
@@ -41,7 +41,7 @@ void ExtraInputs::Add() {
     auto type_and_shape_info = extra_inputs_[i]->GetTensorTypeAndShapeInfo();
     auto shape = type_and_shape_info->GetShape();
     auto element_count = std::accumulate(shape.begin(), shape.end(), 1LL, std::multiplies<int64_t>());
-    auto copy_size_in_bytes = element_count * GetOrtTypeSize(type_and_shape_info->GetElementType());
+    auto copy_size_in_bytes = element_count * SizeOf(type_and_shape_info->GetElementType());
 
     switch (model_.device_type_) {
 #if USE_DML
@@ -49,7 +49,7 @@ void ExtraInputs::Add() {
         ComPtr<ID3D12Resource> target_resource;
         Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, extra_inputs_[i]->GetTensorMutableRawData(), &target_resource));
 
-        auto source = std::span(state_.params_->extra_inputs[i].value->GetTensorData<const uint8_t>(), copy_size_in_bytes);
+        auto source = std::span(state_.params_->extra_inputs[i].tensor->ort_tensor_->GetTensorData<const uint8_t>(), copy_size_in_bytes);
 
         model_.GetDmlUploadHeap()->BeginUploadToGpu(
             target_resource.Get(),
@@ -63,7 +63,7 @@ void ExtraInputs::Add() {
       case DeviceType::CUDA: {
         cudaMemcpyAsync(
             extra_inputs_[i]->GetTensorMutableRawData(),
-            state_.params_->extra_inputs[i].value->GetTensorMutableRawData(),
+            state_.params_->extra_inputs[i].tensor->ort_tensor_->GetTensorMutableRawData(),
             copy_size_in_bytes,
             cudaMemcpyHostToDevice,
             model_.cuda_stream_);

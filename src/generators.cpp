@@ -28,33 +28,6 @@ OrtEnv& GetOrtEnv() {
   return *GetOrtGlobals()->env_;
 }
 
-// IEEE 752-2008 binary16 format, 1 sign bit, 5 bit exponent, 10 bit fraction
-float Float16ToFloat32(uint16_t v) {
-  // Extract sign, exponent, and fraction from numpy.float16
-  int const sign = (v & 0x8000) >> 15;
-  int const exponent = (v & 0x7C00) >> 10;
-  int const fraction = v & 0x03FF;
-
-  // Handle special cases
-  if (exponent == 0) {
-    if (fraction == 0) {
-      // Zero
-      return sign != 0 ? -0.0f : 0.0f;
-    }  // Subnormal number
-    return std::ldexp((sign != 0 ? -1.0f : 1.0f) * static_cast<float>(fraction) / 1024.0f, -14);
-  }
-  if (exponent == 31) {
-    if (fraction == 0) {
-      // Infinity
-      return sign != 0 ? -std::numeric_limits<float>::infinity() : std::numeric_limits<float>::infinity();
-    }  // NaN
-    return std::numeric_limits<float>::quiet_NaN();
-  }
-
-  // Normalized number
-  return std::ldexp((sign != 0 ? -1.0f : 1.0f) * (1.0f + static_cast<float>(fraction) / 1024.0f), exponent - 15);
-}
-
 GeneratorParams::GeneratorParams(const Model& model)
     : search{model.config_->search},
       pad_token_id{model.config_->model.pad_token_id},
@@ -105,13 +78,13 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
   if (params.search.max_length == 0)
     throw std::runtime_error("search max_length is 0");
   if (params.search.max_length > model.config_->model.context_length)
-    throw std::runtime_error("max_length cannot be greater than model context_length");
+    throw std::runtime_error("max_length (" + std::to_string(params.search.max_length) + ") cannot be greater than model context_length (" + std::to_string(params.search.max_length) + ")");
   if (params.batch_size < 1)
-    throw std::runtime_error("batch_size must be 1 or greater");
+    throw std::runtime_error("batch_size must be 1 or greater, is " + std::to_string(params.batch_size));
   if (params.vocab_size < 1)
-    throw std::runtime_error("vocab_size must be 1 or greater");
+    throw std::runtime_error("vocab_size must be 1 or greater, is " + std::to_string(params.vocab_size));
   if (params.sequence_length >= params.search.max_length)
-    throw std::runtime_error("input sequence_length is >= max_length");
+    throw std::runtime_error("input sequence_length (" + std::to_string(params.sequence_length) + ") is >= max_length (" + std::to_string(params.search.max_length) + ")");
 
   search_ = CreateSearch(params);
   state_ = model.CreateState(search_->GetSequenceLengths(), params);

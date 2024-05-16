@@ -36,7 +36,7 @@ struct CapturedGraphKey {
     extra_inputs_.reserve(extra_inputs.size());
 
     for (const auto& extra_input : extra_inputs) {
-      auto type_and_shape_info = extra_input.value->GetTensorTypeAndShapeInfo();
+      auto type_and_shape_info = extra_input.tensor->ort_tensor_->GetTensorTypeAndShapeInfo();
       extra_inputs_.emplace_back(extra_input.name, type_and_shape_info->GetElementType(), type_and_shape_info->GetShape());
     }
 
