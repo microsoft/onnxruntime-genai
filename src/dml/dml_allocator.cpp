@@ -36,36 +36,20 @@ void* DmlAllocator::DmlAlloc(size_t size_in_bytes) {
   void* allocation;
   Ort::ThrowOnError(p_dml_api_->CreateGPUAllocationFromD3DResource(resource.Get(), &allocation));
 
-  if (outstanding_allocs_.size() == 879) {
-    printf("FOUND!\n");
-  }
-
-  outstanding_allocs_.emplace(allocation, static_cast<int>(outstanding_allocs_.size()));
-
-  resource.Detach();
+  resources_.push_back(std::move(resource));
 
   return allocation;
 }
 
 void DmlAllocator::DmlFree(void* allocation) {
   if (allocation) {
-    // Extend the lifetime of the D3D12 resource until the workload is done executing
-    ComPtr<ID3D12Resource> resource;
-    Ort::ThrowOnError(p_dml_api_->GetD3D12ResourceFromAllocation(allocator_wrapper_, allocation, &resource));
-
-    dml_execution_context_->QueueReference(resource.Get());
-    resource->Release();
-
     // We free the allocation itself, even though the D3D12 resource may survive until the GPU is done executing
-    // Ort::ThrowOnError(p_dml_api_->FreeGPUAllocation(allocation));
-
-    outstanding_allocs_.erase(allocation);
-
-    if (outstanding_allocs_.size() < 70) {
-      printf("%d Remaining items\n", static_cast<int>(outstanding_allocs_.size()));
-      PrintOutstandingAllocs();
-    }
+    Ort::ThrowOnError(p_dml_api_->FreeGPUAllocation(allocation));
   }
+}
+
+void DmlAllocator::Destroy() {
+  resources_.clear();
 }
 
 OrtMemoryInfo* DmlAllocator::DmlInfo() const {
@@ -82,17 +66,4 @@ void ORT_API_CALL DmlAllocator::FreeImpl(struct OrtAllocator* this_, void* p) {
 
 const OrtMemoryInfo* ORT_API_CALL DmlAllocator::InfoImpl(const struct OrtAllocator* this_) {
   return static_cast<const DmlAllocator*>(this_)->DmlInfo();
-}
-
-void DmlAllocator::PrintOutstandingAllocs() {
-  for (auto& kvp : outstanding_allocs_) {
-    ComPtr<ID3D12Resource> resource;
-    Ort::ThrowOnError(p_dml_api_->GetD3D12ResourceFromAllocation(allocator_wrapper_, kvp.first, &resource));
-
-    wchar_t name[128] = {};
-    UINT size = sizeof(name);
-    resource->GetPrivateData(WKPDID_D3DDebugObjectNameW, &size, name);
-
-    printf("%ls\n", name);
-  }
 }

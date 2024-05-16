@@ -24,7 +24,7 @@ struct DmlAllocator : public OrtAllocator {
   static void* ORT_API_CALL AllocImpl(struct OrtAllocator* this_, size_t size);
   static void ORT_API_CALL FreeImpl(struct OrtAllocator* this_, void* p);
   static const struct OrtMemoryInfo* ORT_API_CALL InfoImpl(const struct OrtAllocator* this_);
-  void PrintOutstandingAllocs();
+  void Destroy();
 
  private:
   Microsoft::WRL::ComPtr<ID3D12Device> d3d12_device_;
@@ -32,5 +32,5 @@ struct DmlAllocator : public OrtAllocator {
   OrtMemoryInfo* memory_info_{};
   DmlExecutionContext* dml_execution_context_{};
   OrtAllocator* allocator_wrapper_{};
-  std::unordered_map<void*, int> outstanding_allocs_; 
+  std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> resources_;
 };

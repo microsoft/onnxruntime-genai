@@ -15,7 +15,6 @@ std::unique_ptr<OrtValue> StaticBuffer::CreateTensorOnStaticBuffer(std::span<con
   if (buffer_ == nullptr) {
     // Assuming the first dimension is the batch size
     bytes_ = new_bytes * (max_beam_batch_size_ / shape[0]);
-    printf("ALLOC\n");
     fflush(stdout);
     buffer_ = allocator_->Alloc(allocator_, bytes_);
     return OrtValue::CreateTensor(*info_, buffer_, new_bytes, shape, type);
@@ -36,7 +35,6 @@ size_t StaticBuffer::GetNumElements(std::span<const int64_t> shape) {
 
 StaticBuffer::~StaticBuffer() {
   if (buffer_ != nullptr) {
-    printf("FREE\n");
     fflush(stdout);
     allocator_->Free(allocator_, buffer_);
   }

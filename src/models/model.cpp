@@ -233,7 +233,7 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
 }
 
 Model::~Model() {
-  printf("LALALA\n");
+  GetOrtGlobals()->dml_allocator_->Destroy();
 }
 
 void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
