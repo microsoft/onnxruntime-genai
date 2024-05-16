@@ -208,6 +208,8 @@ def main(args):
                 if args.max_lengths:
                     m = l * len(args.generation_lengths) + g
                     max_length = args.max_lengths[m]
+                else:
+                    max_length = prompt_length + gen_length
                 print(f"Args: batch_size = {batch_size}, prompt_length = {prompt_length}, tokens = {gen_length}, max_length = {max_length}")
                 metrics = run_benchmark(args, model, tokenizer, batch_size, prompt_length, gen_length, max_length)
                 all_csv_metrics.append(metrics)
