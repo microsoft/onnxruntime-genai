@@ -75,6 +75,17 @@ std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
 }
 
 Generator::Generator(const Model& model, const GeneratorParams& params) : model_{model.shared_from_this()} {
+#if USE_DML
+  // Temporary fix to work around overflows for caches that are multiples of 4 in DirectML
+  if (model.device_type_ == DeviceType::DML && params.search.max_length % 4 == 0) {
+    if (params.search.max_length == model.config_->model.context_length) {
+      --const_cast<GeneratorParams&>(params).search.max_length;
+    } else {
+      ++const_cast<GeneratorParams&>(params).search.max_length;
+    }
+  }
+#endif
+
   if (params.search.max_length == 0)
     throw std::runtime_error("search max_length is 0");
   if (params.search.max_length > model.config_->model.context_length)
