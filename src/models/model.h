@@ -11,7 +11,6 @@
 #include "../dml/dml_execution_context.h"
 #include "../dml/dml_pooled_upload_heap.h"
 #include "../dml/dml_readback_heap.h"
-#include "../dml/dml_allocator.h"
 #endif
 
 namespace Generators {
@@ -148,7 +147,6 @@ struct Model : std::enable_shared_from_this<Model> {
   bool is_intel_device_{};
   std::unique_ptr<Ort::Allocator> dml_owned_allocator_;
   std::unique_ptr<OrtMemoryInfo> memory_info_device_;
-  std::unique_ptr<DmlAllocator> dml_allocator_;
 #endif
 
   std::shared_ptr<CapturedGraphPool> captured_graph_pool_;
