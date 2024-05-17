@@ -65,8 +65,10 @@ DML_TENSOR_DATA_TYPE OrtToDmlDataType(ONNXTensorElementDataType ort_dtype);
 void DmlCastInputToOutput(
     DmlExecutionContext* execution_context,
     OrtAllocator& allocator,
-    OrtValue& in,
+    ID3D12Resource* input_resource,
     std::unique_ptr<OrtValue>& p_out,
+    std::span<const int64_t> input_shape,
+    ONNXTensorElementDataType input_data_type,
     IDMLDevice* dml_device,
     const OrtDmlApi* ort_dml_api,
     DmlReusedCommandListState& command_list_state);

@@ -49,12 +49,6 @@ CapturedGraphInfoPtr CapturedGraphPool::ReserveCapturedGraph(const Model& model,
     size_t max_beam_batch_size = static_cast<size_t>(params.search.num_beams) * params.max_batch_size;
     new_captured_graph->sb_input_ids_ = std::make_unique<StaticBuffer>(allocator_device_, max_beam_batch_size);
 
-#if USE_DML
-    if (model.device_type_ == DeviceType::DML) {
-      new_captured_graph->sb_input_ids_int32_ = std::make_unique<StaticBuffer>(allocator_device_, max_beam_batch_size);
-    }
-#endif
-
     // Create the static buffers for the cache
     int layer_count = config_->model.decoder.num_hidden_layers;
     new_captured_graph->sb_kv_caches_.reserve(layer_count * 2);

@@ -146,7 +146,6 @@ struct CapturedGraphInfo {
 
 #if USE_DML
   std::unique_ptr<Generators::StaticBuffer> sb_attention_mask_next_;
-  std::unique_ptr<Generators::StaticBuffer> sb_input_ids_int32_;
 #endif
 
   // Generates a unique annotation ID across different captured graph objects. This is necessary because different

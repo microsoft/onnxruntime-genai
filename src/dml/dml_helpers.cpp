@@ -2,6 +2,7 @@
 
 #include <assert.h>
 #include <stdexcept>
+#include <numeric>
 #include <dxcore.h>
 #include <dxcore_interface.h>
 #include <dxgi1_6.h>
@@ -339,27 +340,26 @@ DML_TENSOR_DATA_TYPE OrtToDmlDataType(ONNXTensorElementDataType ort_dtype) {
 void DmlCastInputToOutput(
     DmlExecutionContext* execution_context,
     OrtAllocator& allocator,
-    OrtValue& in,
+    ID3D12Resource* input_resource,
     std::unique_ptr<OrtValue>& p_out,
+    std::span<const int64_t> input_shape,
+    ONNXTensorElementDataType input_data_type,
     IDMLDevice* dml_device,
     const OrtDmlApi* ort_dml_api,
     DmlReusedCommandListState& command_list_state) {
-  auto shape_info = in.GetTensorTypeAndShapeInfo();
-  auto shape = shape_info->GetShape();
-
   bool allocate_p_out = p_out == nullptr;
   if (p_out) {
     auto out_shape_info = p_out->GetTensorTypeAndShapeInfo();
     auto out_shape = out_shape_info->GetShape();
-    allocate_p_out = shape != out_shape;
+    allocate_p_out = !std::equal(input_shape.begin(), input_shape.end(), out_shape.begin());
   }
 
   if (allocate_p_out) {
-    p_out = OrtValue::CreateTensor<float>(allocator, shape);
+    p_out = OrtValue::CreateTensor<float>(allocator, input_shape);
   }
 
-  int element_count = static_cast<int>(shape_info->GetElementCount());
-  auto dml_from_type = DmlHelpers::OrtToDmlDataType(in.GetTensorTypeAndShapeInfo()->GetElementType());
+  int64_t element_count = std::accumulate(input_shape.begin(), input_shape.end(), 1LL, std::multiplies<int64_t>());
+  auto dml_from_type = DmlHelpers::OrtToDmlDataType(input_data_type);
   auto dml_to_type = DmlHelpers::OrtToDmlDataType(p_out->GetTensorTypeAndShapeInfo()->GetElementType());
 
   bool rebind = command_list_state.previousOutput != p_out.get();
@@ -391,13 +391,10 @@ void DmlCastInputToOutput(
     command_list_state.previousOutput = p_out.get();
   }
 
-  ComPtr<ID3D12Resource> source_resource;
-  Ort::ThrowOnError(ort_dml_api->GetD3D12ResourceFromAllocation(&allocator, in.GetTensorMutableData<uint8_t>(), &source_resource));
-
   ComPtr<ID3D12Resource> target_resource;
   Ort::ThrowOnError(ort_dml_api->GetD3D12ResourceFromAllocation(&allocator, p_out->GetTensorMutableData<uint8_t>(), &target_resource));
 
-  std::array<ID3D12Resource*, 1> input_resources = {source_resource.Get()};
+  std::array<ID3D12Resource*, 1> input_resources = {input_resource};
   std::array<uint64_t, 1> input_sizes = {element_count * DataTypeSizeInBytes(dml_from_type)};
 
   std::array<ID3D12Resource*, 1> output_resources = {target_resource.Get()};

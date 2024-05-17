@@ -45,11 +45,20 @@ RoamingArray<float> Logits::Get() {
   if (type_ == Ort::TypeToTensorType<Ort::Float16_t>::type) {
 #if USE_DML
     if (model_.device_type_ == DeviceType::DML) {
+      ComPtr<ID3D12Resource> source_resource;
+      Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, value16_->GetTensorMutableData<uint8_t>(), &source_resource));
+
+      auto input_shape_info = value16_->GetTensorTypeAndShapeInfo();
+      auto input_shape = input_shape_info->GetShape();
+      auto input_data_type = input_shape_info->GetElementType();
+
       DmlHelpers::DmlCastInputToOutput(
           model_.GetDmlExecutionContext(),
           *model_.allocator_device_,
-          *value16_,
+          source_resource.Get(),
           value32_,
+          input_shape,
+          input_data_type,
           model_.GetDmlDevice(),
           model_.GetOrtDmlApi(),
           logits_cast_command_list_state_);
