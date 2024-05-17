@@ -122,7 +122,7 @@ const std::string& TokenizerStream::Decode(int32_t token) {
 }
 
 Tokenizer::Tokenizer(Config& config) : pad_token_id_{config.model.pad_token_id} {
-  CheckResult(OrtxCreateTokenizer(tokenizer_.Address(), reinterpret_cast<const char*>(config.config_path.u8string().c_str())));
+  CheckResult(OrtxCreateTokenizer(tokenizer_.Address(), reinterpret_cast<const char*>(config.config_path.c_str())));
 }
 
 std::unique_ptr<TokenizerStream> Tokenizer::CreateStream() const {
@@ -302,7 +302,7 @@ void Model::CreateSessionOptions() {
   }
 
   if (options.enable_profiling.has_value()) {
-    fs::path profile_file_prefix{options.enable_profiling.value()};
+    path_type profile_file_prefix{options.enable_profiling.value()};
     ort_options.EnableProfiling(profile_file_prefix.c_str());
   }
 
@@ -380,7 +380,7 @@ std::shared_ptr<Tokenizer> Model::CreateTokenizer() const {
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path) {
-  auto config = std::make_unique<Config>(config_path);
+  auto config = std::make_unique<Config>(utf8_to_wide_string(config_path));
 
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);

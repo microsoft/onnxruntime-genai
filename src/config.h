@@ -2,13 +2,16 @@
 // Licensed under the MIT License.
 #pragma once
 
+#include "file_path.h"
+
+
 namespace Generators {
 
 struct Config {
   Config() = default;
-  Config(const fs::path& path);
+  Config(const path_type& path);
 
-  fs::path config_path;  // Path of the config directory
+  path_type config_path;  // Path of the config directory
 
   using ProviderOption = std::pair<std::string, std::string>;
   struct ProviderOptions {
@@ -23,7 +26,7 @@ struct Config {
     std::optional<bool> enable_mem_pattern;
     std::optional<std::string> log_id;
     std::optional<int> log_severity_level;
-    std::optional<std::string> enable_profiling;
+    std::optional<path_type> enable_profiling;
 
     std::vector<ProviderOptions> provider_options;
   };
@@ -42,11 +45,11 @@ struct Config {
 
     // For models like whisper
     struct EncoderDecoderInit {
-      std::string filename;
+      path_type filename;
     } encoder_decoder_init;
 
     struct Decoder {
-      std::string filename;
+      path_type filename;
       SessionOptions session_options;
 
       int hidden_size{};          // Not currently used, potentially useful for embeddings in the future

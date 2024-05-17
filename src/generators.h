@@ -8,7 +8,6 @@
 #include <assert.h>
 #include <cmath>
 #include <cstring>
-#include "filesystem.h"
 #include <functional>
 #include <iostream>
 #include "span.h"

@@ -44,7 +44,11 @@ void SetLogString(std::string_view name, std::string_view value) {
     if (value.empty())
       gp_logfile.reset();
     else {
-      fs::path filename{std::string(value)};
+#ifdef _WIN32
+      path_type filename{utf8_to_wide_string(value)};
+#else
+      path_type filename{value};
+#endif
       gp_logfile = std::make_unique<std::ofstream>(filename);
     }
 

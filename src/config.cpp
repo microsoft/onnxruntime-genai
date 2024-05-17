@@ -63,7 +63,12 @@ struct SessionOptions_Element : JSON::Element {
     if (name == "log_id")
       v_.log_id = value;
     else if (name == "enable_profiling")
+#ifdef _WIN32
+      v_.enable_profiling = utf8_to_wide_string(value);
+#else
       v_.enable_profiling = value;
+#endif
+
     else
       throw JSON::unknown_value_error{};
   }
@@ -104,7 +109,11 @@ struct EncoderDecoderInit_Element : JSON::Element {
 
   void OnString(std::string_view name, std::string_view value) override {
     if (name == "filename") {
+#ifdef _WIN32
+      v_.filename = utf8_to_wide_string(value);
+#else
       v_.filename = value;
+#endif
     } else
       throw JSON::unknown_value_error{};
   }
@@ -174,7 +183,11 @@ struct Decoder_Element : JSON::Element {
 
   void OnString(std::string_view name, std::string_view value) override {
     if (name == "filename") {
+#ifdef _WIN32
+      v_.filename = utf8_to_wide_string(value);
+#else
       v_.filename = value;
+#endif
     } else
       throw JSON::unknown_value_error{};
   }
@@ -399,17 +412,25 @@ struct RootObject_Element : JSON::Element {
   JSON::Element& t_;
 };
 
-void ParseConfig(const fs::path& filename, Config& config) {
+void ParseConfig(const path_type& filename, Config& config) {
   std::ifstream file(filename, std::ios::binary | std::ios::ate);
   if (!file.is_open()) {
-    throw std::runtime_error("Error opening " + filename.string());
+#ifdef _WIN32
+    throw std::runtime_error("Error opening " + wide_string_to_utf8(filename));
+#else
+    throw std::runtime_error("Error opening " + filename)
+#endif
   }
   std::streamsize const size = file.tellg();
   file.seekg(0, std::ios::beg);
 
   std::vector<char> buffer(size);
   if (!file.read(buffer.data(), size)) {
-    throw std::runtime_error("Error reading " + filename.string());
+#ifdef _WIN32
+    throw std::runtime_error("Error reading " + wide_string_to_utf8(filename));
+#else
+    throw std::runtime_error("Error reading " + filename);
+#endif
   }
 
   Root_Element root{config};
@@ -418,14 +439,21 @@ void ParseConfig(const fs::path& filename, Config& config) {
     JSON::Parse(root_object, std::string_view(buffer.data(), buffer.size()));
   } catch (const std::exception& message) {
     std::ostringstream oss;
-    oss << "Error encountered while parsing '" << filename.string() << "' " << message.what();
+#ifdef _WIN32
+    oss << "Error encountered while parsing '" << wide_string_to_utf8(filename) << "' " << message.what();
+#else
+    oss << "Error encountered while parsing '" << filename << "' " << message.what();
+#endif
     throw std::runtime_error(oss.str());
   }
 }
 
-Config::Config(const fs::path& path) : config_path{path} {
-  ParseConfig(path / "genai_config.json", *this);
-
+Config::Config(const path_type& path) : config_path{path} {
+#ifdef _WIN32
+  ParseConfig(concat_file_path(path, L"genai_config.json"), *this);
+#else
+  ParseConfig(concat_file_path(path, "genai_config.json"), *this);
+#endif
   if (model.context_length == 0)
     throw std::runtime_error("model context_length is 0 or was not set. It must be greater than 0");
 

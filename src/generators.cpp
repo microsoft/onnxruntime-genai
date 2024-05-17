@@ -5,6 +5,7 @@
 #include "sequences.h"
 #include "models/model.h"
 #include "search.h"
+#include "file_path.h"
 #if USE_CUDA
 #include "search_cuda.h"
 #endif
