@@ -1,4 +1,7 @@
 ﻿// Copyright (c) Microsoft Corporation. All rights reserved.
+
+#pragma once
+
 // Licensed under the MIT License.
 #include <algorithm>
 #include <array>
@@ -33,6 +36,7 @@ using cudaStream_t = void*;
 #include "models/debugging.h"
 #include "config.h"
 #include "logging.h"
+#include "tensor.h"
 
 namespace Generators {
 struct Model;
@@ -90,7 +94,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams> {
   std::span<const int32_t> input_ids;  // Array of [batchsize][sequence_length]
 
   struct Whisper {
-    std::unique_ptr<OrtValue> input_features;  // float32 [batch_size, number_of_mels, something that is 3000]
+    std::shared_ptr<Tensor> input_features;  // float32 [batch_size, number_of_mels, something that is 3000]
   };
 
   std::variant<Whisper> inputs;
@@ -101,7 +105,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams> {
 
   struct Input {
     std::string name;
-    std::unique_ptr<OrtValue> value;
+    std::shared_ptr<Tensor> tensor;
   };
 
   // A list of extra model inputs that will be matched at runtime based on name

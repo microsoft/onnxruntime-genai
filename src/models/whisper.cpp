@@ -23,7 +23,7 @@ Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> s
       model_{model} {
   auto& inputs = const_cast<GeneratorParams::Whisper&>(std::get<GeneratorParams::Whisper>(params.inputs));
 
-  encoder_input_ids_ = model_.ExpandInputs(inputs.input_features, params_->search.num_beams);
+  encoder_input_ids_ = model_.ExpandInputs(inputs.input_features->ort_tensor_, params_->search.num_beams);
 
   auto hidden_states_type = model_.session_encoder_info_->GetOutputDataType("encoder_hidden_states");
   auto encoder_hidden_states_shape = std::array<int64_t, 3>{decoder_input_ids_.GetShape()[0], 1500, static_cast<int64_t>(model_.config_->model.decoder.num_key_value_heads) * model_.config_->model.decoder.head_size};
@@ -43,6 +43,7 @@ Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> s
   output_names_.push_back("encoder_hidden_states");
   outputs_.push_back(encoder_hidden_states_.get());
   kv_cache_.AddEncoder();
+  extra_inputs_.Add();
   cross_cache_.AddOutputs();
 }
 

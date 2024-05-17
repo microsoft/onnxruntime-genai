@@ -20,6 +20,14 @@ include(cmake/check_dml.cmake)
 include(cmake/cxx_standard.cmake)
 
 
+
+if (ANDROID)
+  # Paths are based on the directory structure of the ORT Android AAR.
+  set(ORT_HEADER_DIR ${ORT_HOME}/headers)
+  set(ORT_LIB_DIR ${ORT_HOME}/jni/${ANDROID_ABI})
+else()
+endif()
+
 add_compile_definitions(BUILDING_ORT_GENAI_C)
 if(MSVC)
   # set updated value for __cplusplus macro instead of 199711L
@@ -42,6 +50,10 @@ target_link_libraries(onnxruntime-genai PRIVATE onnxruntime_extensions)
 target_link_libraries(onnxruntime-genai-static PUBLIC onnxruntime_extensions)
 target_link_directories(onnxruntime-genai PRIVATE ${ORT_LIB_DIR})
 target_link_libraries(onnxruntime-genai PRIVATE ${ONNXRUNTIME_LIB})
+
+set_target_properties(onnxruntime-genai PROPERTIES FOLDER "Sources")
+set_target_properties(onnxruntime-genai-static PROPERTIES FOLDER "Sources")
+source_group(TREE ${PROJECT_SOURCE_DIR} FILES ${generator_srcs})
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   set_target_properties(onnxruntime-genai PROPERTIES LINKER_LANGUAGE CUDA)
