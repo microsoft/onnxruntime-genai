@@ -261,12 +261,9 @@ def _validate_ios_args(args: argparse.Namespace):
             args.ios_deployment_target,
         ]
         arg_names = [
-            "--ios_sysroot          "
-            + "<the location or name of the macOS platform SDK>",
-            "--ios_arch             "
-            + "<the Target specific architectures for iOS>",
-            "--ios_deployment_target  "
-            + "<the minimum version of the target platform>",
+            "--ios_sysroot           <the location or name of the macOS platform SDK>",
+            "--ios_arch              <the Target specific architectures for iOS>",
+            "--ios_deployment_target <the minimum version of the target platform>",
         ]
         have_required_args = all(_ is not None for _ in needed_args)
         if not have_required_args:
