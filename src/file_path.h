@@ -85,11 +85,6 @@ using path_type = std::wstring;
   return out;
 }
 
-[[nodiscard]] inline std::wstring acp_to_wide_string(const std::string_view source) {
-  int cp = GetACP();
-  return ConvertToW(cp, source);
-}
-
 [[nodiscard]] inline std::wstring utf8_to_wide_string(const std::string_view source) {
   return ConvertToW(CP_UTF8, source);
 }
