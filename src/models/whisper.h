@@ -4,6 +4,7 @@
 #include "input_ids.h"
 #include "logits.h"
 #include "kv_cache.h"
+#include "extra_inputs.h"
 
 namespace Generators {
 
@@ -36,6 +37,7 @@ struct Whisper_State : State {
   Logits logits_{model_, *this};
   KV_Cache kv_cache_{model_, *this};
   Cross_Cache cross_cache_{model_, *this};
+  ExtraInputs extra_inputs_{model_, *this};
   std::unique_ptr<OrtValue> encoder_input_ids_;
   std::unique_ptr<OrtValue> encoder_hidden_states_;
 };

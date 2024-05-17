@@ -22,6 +22,7 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, RoamingArra
   position_inputs_.Add();
   logits_.Add();
   kv_cache_.Add();
+  extra_inputs_.Add();
 }
 
 RoamingArray<float> DecoderOnly_State::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
