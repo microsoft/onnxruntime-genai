@@ -8,57 +8,58 @@ This library provides the generative AI loop for ONNX models, including inferenc
 
 Users can call a high level `generate()` method, or run each iteration of the model in a loop.
 
-* Support greedy/beam search and TopP, TopK sampling to generate token sequences
-* Built in logits processing like repetition penalties
-* Easy custom scoring
+- Support greedy/beam search and TopP, TopK sampling to generate token sequences
+- Built in logits processing like repetition penalties
+- Easy custom scoring
 
 See full documentation at [https://onnxruntime.ai/docs/genai].
 
 ## Features
 
-* Supported model architectures:
-  * Phi-3
-  * Phi-2
-  * Gemma
-  * LLaMA
-  * Mistral
-* Supported targets:   
-  * GPU (DirectML)
-  * GPU (CUDA)
-  * CPU
-* Supported sampling features
-  * Beam search
-  * Greedy search
-  * Top P/Top K
-* APIs
-  * Python
-  * C#
-  * C/C++  
+- Supported model architectures:
+  - Phi-3
+  - Phi-2
+  - Gemma
+  - LLaMA
+  - Mistral
+- Supported targets:
+  - GPU (DirectML)
+  - GPU (CUDA)
+  - CPU
+- Supported sampling features
+  - Beam search
+  - Greedy search
+  - Top P/Top K
+- APIs
+  - Python
+  - C#
+  - C/C++
 
 ## Coming very soon
 
-* Support for the encoder decoder model architectures, such as whisper, T5 and BART.
+- Support for the encoder decoder model architectures, such as whisper, T5 and BART.
 
 ## Coming soon
 
-* Support for mobile devices (Android and iOS) with Java and Objective-C bindings
+- Support for mobile devices (Android and iOS) with Java and Objective-C bindings
 
 ## Roadmap
 
-* Stable diffusion pipeline
-* Automatic model download and cache
-* More model architectures
+- Stable diffusion pipeline
+- Automatic model download and cache
+- More model architectures
 
 ## Installation
 
 If you don't know which hardware capabilities is available on your device.
-* Windows GPU (use DirectML): [Verify if you have Windows GPU](https://www.microsoft.com/en-us/windows/learning-center/how-to-check-gpu)
 
-* CUDA GPU: [Verify if you have CUDA GPU](https://docs.nvidia.com/cuda/cuda-installation-guide-microsoft-windows/index.html#verify-you-have-a-cuda-capable-gpu)
+- Windows GPU (use DirectML): [Verify if you have Windows GPU](https://www.microsoft.com/en-us/windows/learning-center/how-to-check-gpu)
 
-* CPU and Mobile: For Windows, Mac, Android and other devices use the CPU and Mobile option below
+- CUDA GPU: [Verify if you have CUDA GPU](https://docs.nvidia.com/cuda/cuda-installation-guide-microsoft-windows/index.html#verify-you-have-a-cuda-capable-gpu)
 
-### Windows GPU  (DirectML) 
+- CPU and Mobile: For Windows, Mac, Android and other devices use the CPU and Mobile option below
+
+### Windows GPU (DirectML)
 
 ```bash
 pip install [--pre] numpy onnxruntime-genai-directml
@@ -70,13 +71,11 @@ pip install [--pre] numpy onnxruntime-genai-directml
 pip install numpy onnxruntime-genai-cuda --pre --index-url=https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-genai/pypi/simple/
 ```
 
-
 ### CPU and Mobile
 
 ```bash
 pip install [--pre] numpy onnxruntime-genai
 ```
-
 
 ## Sample code for phi-2 in Python
 
@@ -111,7 +110,8 @@ tokens = tokenizer.encode(prompt)
 params = og.GeneratorParams(model)
 params.set_search_options(max_length=200)
 # Add the following line to enable cuda graph by passing the maximum batch size.
-# params.try_use_cuda_graph_with_max_batch_size(16)
+# params.use_graph_capture()
+# params.set_max_batch_size(16)
 params.input_ids = tokens
 
 output_tokens = model.generate(params)
@@ -124,9 +124,9 @@ print(text)
 
 ## Model download and export
 
-ONNX models are run from a local folder, via a string supplied to the `Model()` method. 
+ONNX models are run from a local folder, via a string supplied to the `Model()` method.
 
-You can bring your own ONNX model or use the model builder utility, included in this package. 
+You can bring your own ONNX model or use the model builder utility, included in this package.
 
 Install model builder dependencies.
 
@@ -134,16 +134,16 @@ Install model builder dependencies.
 pip install numpy install transformers torch onnx onnxruntime
 ```
 
-Export int4 CPU version 
+Export int4 CPU version
+
 ```bash
 huggingface-cli login --token <your HuggingFace token>
 python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -p int4 -e cpu -o <model folder>
 ```
 
-
 ## Contributing
 
-This project welcomes contributions and suggestions.  Most contributions require you to agree to a
+This project welcomes contributions and suggestions. Most contributions require you to agree to a
 Contributor License Agreement (CLA) declaring that you have the right to, and actually do, grant us
 the rights to use your contribution. For details, visit https://cla.opensource.microsoft.com.
 
@@ -157,8 +157,8 @@ contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additio
 
 ## Trademarks
 
-This project may contain trademarks or logos for projects, products, or services. Authorized use of Microsoft 
-trademarks or logos is subject to and must follow 
+This project may contain trademarks or logos for projects, products, or services. Authorized use of Microsoft
+trademarks or logos is subject to and must follow
 [Microsoft's Trademark & Brand Guidelines](https://www.microsoft.com/en-us/legal/intellectualproperty/trademarks/usage/general).
 Use of Microsoft trademarks or logos in modified versions of this project must not cause confusion or imply Microsoft sponsorship.
 Any use of third-party trademarks or logos are subject to those third-party's policies.

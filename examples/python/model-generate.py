@@ -33,10 +33,11 @@ def main(args):
     if (args.verbose): print(f'Search options: {search_options}')
 
     params.set_search_options(**search_options)
-    # Set the batch size for the CUDA graph to the number of prompts if the user didn't specify a batch size
-    params.try_use_cuda_graph_with_max_batch_size(len(prompts))
+    
+    params.use_graph_capture()
     if args.batch_size_for_cuda_graph:
-        params.try_use_cuda_graph_with_max_batch_size(args.batch_size_for_cuda_graph)
+        params.set_max_batch_size(args.batch_size_for_cuda_graph)
+
     params.input_ids = input_tokens
     if args.verbose: print("GeneratorParams created")
 

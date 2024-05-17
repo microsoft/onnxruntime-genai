@@ -267,7 +267,12 @@ struct PyGeneratorParams {
     }
   }
 
-  void TryUseCudaGraphWithMaxBatchSize(pybind11::int_ max_batch_size) {
+  void TryUseGraphCapture() {
+    constexpr int kMaxBatchSize = 32;
+    params_->TryGraphCapture(kMaxBatchSize);
+  }
+
+  void SetMaxBatchSize(pybind11::int_ max_batch_size) {
     params_->TryGraphCapture(max_batch_size.cast<int>());
   }
 
@@ -368,7 +373,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_readwrite("whisper_input_features", &PyGeneratorParams::py_whisper_input_features_)
       .def("set_model_input", &PyGeneratorParams::SetModelInput)
       .def("set_search_options", &PyGeneratorParams::SetSearchOptions)  // See config.h 'struct Search' for the options
-      .def("try_use_cuda_graph_with_max_batch_size", &PyGeneratorParams::TryUseCudaGraphWithMaxBatchSize);
+      .def("use_graph_capture", &PyGeneratorParams::TryUseGraphCapture)
+      .def("set_max_batch_size", &PyGeneratorParams::SetMaxBatchSize);
 
   pybind11::class_<TokenizerStream>(m, "TokenizerStream")
       .def("decode", [](TokenizerStream& t, int32_t token) { return t.Decode(token); });

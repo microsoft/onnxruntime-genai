@@ -22,7 +22,8 @@ def generate_prompt(model, tokenizer, prompt_length, use_graph_capture) -> str:
     params.input_ids = tokens
 
     if use_graph_capture:
-        params.try_use_cuda_graph_with_max_batch_size(1)
+        params.use_graph_capture()
+        params.set_max_batch_size(1)
 
     generator=og.Generator(model, params)
     while not generator.is_done():
@@ -69,7 +70,8 @@ def run_benchmark(args, model, tokenizer, batch_size, prompt_length, generation_
     params.set_search_options(do_sample=True, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length)
 
     if args.use_graph_capture:
-        params.try_use_cuda_graph_with_max_batch_size(batch_size)
+        params.use_graph_capture()
+        params.set_max_batch_size(batch_size)
 
     if args.verbose: print("Running warmup runs...")
     for _ in tqdm(range(args.warmup)):
@@ -105,7 +107,8 @@ def run_benchmark(args, model, tokenizer, batch_size, prompt_length, generation_
         params.set_search_options(max_length=max_length, min_length=max_length)
 
         if args.use_graph_capture:
-            params.try_use_cuda_graph_with_max_batch_size(batch_size)
+            params.use_graph_capture()
+            params.set_max_batch_size(batch_size)
 
         generator = og.Generator(model, params)
 

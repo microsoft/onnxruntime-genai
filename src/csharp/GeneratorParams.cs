@@ -29,7 +29,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetSearchBool(_generatorParamsHandle, StringUtils.ToUtf8(searchOption), value));
         }
 
-        public void TryGraphCaptureWithMaxBatchSize(int maxBatchSize)
+        public void UseGraphCapture()
+        {
+            const int maxBatchSize = 32;
+            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(_generatorParamsHandle, maxBatchSize));
+        }
+
+        public void SetMaxBatchSize(int maxBatchSize)
         {
             Result.VerifySuccess(NativeMethods.OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(_generatorParamsHandle, maxBatchSize));
         }
