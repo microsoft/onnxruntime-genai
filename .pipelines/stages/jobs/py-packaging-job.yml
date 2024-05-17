@@ -22,6 +22,8 @@ jobs:
   ${{ if eq(parameters.os, 'win') }}:
     ${{ if eq(parameters.ep, 'directml') }}:
       pool: 'onnxruntime-Win2022-GPU-dml-A10'
+    ${{ elseif eq(parameters.arch, 'arm64') }}:
+      pool: 'onnxruntime-qnn-windows-vs-2022-arm64'
     ${{ else }}:
       pool: 'onnxruntime-Win-CPU-2022'
 
@@ -88,6 +90,11 @@ jobs:
     value: 'Microsoft.AI.DirectML.1.14.1.zip'
   - name: dml_url
     value: "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.14.1"
+
+  - name: ort_arm64_zip
+    value: 'onnxruntime-win-arm64-1.17.3.zip'
+  - name: ort_arm64_url
+    value: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/onnxruntime-win-arm64-1.17.3.zip"
 
   steps:
   - task: UsePythonVersion@0
