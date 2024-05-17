@@ -8,7 +8,7 @@
 namespace Generators {
 
 struct Whisper_Model : Model {
-  Whisper_Model(std::unique_ptr<Config> config, OrtEnv& ort_env);
+  Whisper_Model(std::unique_ptr<Config> config, std::shared_ptr<OrtEnv> ort_env);
 
   std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params) const override;
 

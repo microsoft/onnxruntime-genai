@@ -136,13 +136,9 @@ struct Generator {
 struct OrtGlobals {
   OrtGlobals();
 
-  std::unique_ptr<OrtEnv> env_;
+  std::shared_ptr<OrtEnv> env_;
   std::unique_ptr<OrtMemoryInfo> memory_info_device_;
   std::unique_ptr<OrtAllocator> allocator_device_;
-
-#if USE_DML
-  std::unique_ptr<DmlAllocator> dml_allocator_;
-#endif
 
  private:
   OrtGlobals(const OrtGlobals&) = delete;
@@ -151,9 +147,9 @@ struct OrtGlobals {
 
 std::unique_ptr<OrtGlobals>& GetOrtGlobals();
 void Shutdown();  // Do this once at exit, Ort code will fail after this call
-OrtEnv& GetOrtEnv();
+std::shared_ptr<OrtEnv> GetOrtEnv();
 
-std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path);
+std::shared_ptr<Model> CreateModel(std::shared_ptr<OrtEnv> ort_env, const char* config_path);
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Model& model);
 std::shared_ptr<GeneratorParams> CreateGeneratorParams();  // For benchmarking purposes only
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params);

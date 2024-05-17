@@ -24,8 +24,8 @@ void Shutdown() {
   GetOrtGlobals().reset();
 }
 
-OrtEnv& GetOrtEnv() {
-  return *GetOrtGlobals()->env_;
+std::shared_ptr<OrtEnv> GetOrtEnv() {
+  return GetOrtGlobals()->env_;
 }
 
 GeneratorParams::GeneratorParams(const Model& model)

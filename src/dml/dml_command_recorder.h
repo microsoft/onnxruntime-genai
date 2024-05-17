@@ -26,7 +26,6 @@ class DmlCommandRecorder {
       IDMLDevice* dml_device,
       std::shared_ptr<DmlCommandQueue> command_queue,
       OrtAllocator& device_allocator,
-      OrtAllocator& dml_allocation_decoder,
       const OrtDmlApi* ort_dml_api);
 
   void InitializeOperator(
@@ -93,7 +92,6 @@ class DmlCommandRecorder {
   ComPtr<ID3D12GraphicsCommandList> cached_command_list_;
 
   OrtAllocator& device_allocator_;
-  OrtAllocator& dml_allocation_decoder_;
   const OrtDmlApi* ort_dml_api_;
 
   void SetDescriptorHeap(ID3D12DescriptorHeap* descriptor_heap);

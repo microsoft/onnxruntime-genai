@@ -126,7 +126,7 @@ void PositionInputs::UpdatePositionIDs(int current_length) {
       assert(model_.device_type_ == DeviceType::DML);
 
       ComPtr<ID3D12Resource> target_resource;
-      Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.dml_allocation_decoder_, position_ids_->GetTensorMutableRawData(), &target_resource));
+      Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, position_ids_->GetTensorMutableRawData(), &target_resource));
       THROW_IF_FAILED(target_resource->SetName(L"PositionInputs::UpdatePositionIDs target"));
 
       if (type_ == Ort::TypeToTensorType<int32_t>::type) {
@@ -155,7 +155,7 @@ void PositionInputs::UpdatePositionIDs(int current_length) {
 #if USE_DML
       case DeviceType::DML: {
         ComPtr<ID3D12Resource> target_resource;
-        Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.dml_allocation_decoder_, position_ids_->GetTensorMutableRawData(), &target_resource));
+        Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, position_ids_->GetTensorMutableRawData(), &target_resource));
         THROW_IF_FAILED(target_resource->SetName(L"PositionInputs::UpdatePositionIDs target2"));
 
         // Lazily create the kernel only the first time it's needed
@@ -231,11 +231,11 @@ void PositionInputs::UpdateAttentionMask(int current_length) {
 #if USE_DML
     case DeviceType::DML: {
       ComPtr<ID3D12Resource> attention_mask_resource;
-      Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.dml_allocation_decoder_, attention_mask_->GetTensorMutableRawData(), &attention_mask_resource));
+      Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, attention_mask_->GetTensorMutableRawData(), &attention_mask_resource));
       THROW_IF_FAILED(attention_mask_resource->SetName(L"PositionInputs::UpdateAttentionMask attention_mask"));
 
       ComPtr<ID3D12Resource> attention_mask_next_resource;
-      Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.dml_allocation_decoder_, attention_mask_next_->GetTensorMutableRawData(), &attention_mask_next_resource));
+      Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, attention_mask_next_->GetTensorMutableRawData(), &attention_mask_next_resource));
       THROW_IF_FAILED(attention_mask_next_resource->SetName(L"PositionInputs::UpdateAttentionMask attention_mask_next"));
 
       if (is_first_mask_update_) {

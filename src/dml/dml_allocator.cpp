@@ -3,8 +3,11 @@
 
 #include <stdexcept>
 #include <wil/result.h>
+#include <d3dx12.h>
+#include <span>
 #include "dml_allocator.h"
-#include "dml_execution_context.h"
+#include "dml_provider_factory.h"
+#include "../generators.h"
 
 DmlAllocator::DmlAllocator(const OrtDmlApi* p_dml_api, ID3D12Device* d3d12_device)
     : p_dml_api_(p_dml_api),
@@ -22,7 +25,7 @@ DmlAllocator::~DmlAllocator() {
 }
 
 void* DmlAllocator::DmlAlloc(size_t size_in_bytes) {
-  ComPtr<ID3D12Resource> resource;
+  Microsoft::WRL::ComPtr<ID3D12Resource> resource;
   auto buffer = CD3DX12_RESOURCE_DESC::Buffer(size_in_bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
   auto heap_props = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
   THROW_IF_FAILED(d3d12_device_->CreateCommittedResource(
@@ -46,10 +49,6 @@ void DmlAllocator::DmlFree(void* allocation) {
     // We free the allocation itself, even though the D3D12 resource may survive until the GPU is done executing
     Ort::ThrowOnError(p_dml_api_->FreeGPUAllocation(allocation));
   }
-}
-
-void DmlAllocator::Destroy() {
-  resources_.clear();
 }
 
 OrtMemoryInfo* DmlAllocator::DmlInfo() const {

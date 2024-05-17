@@ -43,7 +43,6 @@ void ExecuteReusableCommandList(
     DmlExecutionContext* execution_context,
     DmlReusedCommandListState& command_list_state,
     OrtAllocator& allocator,
-    OrtAllocator& dml_allocation_decoder,
     const OrtDmlApi* ort_dml_api,
     std::span<ID3D12Resource*> input_resources,
     std::span<const uint64_t> input_sizes,
@@ -68,7 +67,6 @@ DML_TENSOR_DATA_TYPE OrtToDmlDataType(ONNXTensorElementDataType ort_dtype);
 void DmlCastInputToOutput(
     DmlExecutionContext* execution_context,
     OrtAllocator& allocator,
-    OrtAllocator& dml_allocation_decoder,
     OrtValue& in,
     std::unique_ptr<OrtValue>& p_out,
     IDMLDevice* dml_device,

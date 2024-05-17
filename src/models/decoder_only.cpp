@@ -2,9 +2,9 @@
 #include "decoder_only.h"
 
 namespace Generators {
-DecoderOnly_Model::DecoderOnly_Model(std::unique_ptr<Config> config, OrtEnv& ort_env)
-    : Model{std::move(config)} {
-  session_decoder_ = OrtSession::Create(ort_env, (config_->config_path / config_->model.decoder.filename).c_str(), session_options_.get());
+DecoderOnly_Model::DecoderOnly_Model(std::unique_ptr<Config> config, std::shared_ptr<OrtEnv> ort_env)
+    : Model{std::move(config), std::move(ort_env)} {
+  session_decoder_ = OrtSession::Create(*ort_env_, (config_->config_path / config_->model.decoder.filename).c_str(), session_options_.get());
 
   InitDeviceAllocator(*session_decoder_);
 }

@@ -174,18 +174,20 @@ std::vector<std::string> Tokenizer::DecodeBatch(std::span<const int32_t> sequenc
   return strings;
 }
 
+#if USE_CUDA
 // Since Python/Others can and will hold onto a generator object past the model object's lifetime we need to ensure
 // the allocator used is not destroyed until last. This keeps the allocator around until exit, after all other memory
 // has been destroyed. Without this, we will crash in the Onnxruntime BFCArena code when deleting tensors due to the
 // arena already being destroyed.
-OrtAllocator* GetDeviceAllocator(OrtSession& session, const char* ep) {
+OrtAllocator* GetCudaAllocator(OrtSession& session, const char* ep) {
   auto& globals = *GetOrtGlobals();
   if (!globals.allocator_device_) {
-    globals.memory_info_device_ = OrtMemoryInfo::Create(ep, OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+    globals.memory_info_device_ = OrtMemoryInfo::Create("Cuda", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
     globals.allocator_device_ = Ort::Allocator::Create(session, *globals.memory_info_device_);
   }
   return globals.allocator_device_.get();
 }
+#endif
 
 SessionInfo::SessionInfo(OrtSession& session) {
   auto input_names = session.GetInputNames();
@@ -225,7 +227,7 @@ ONNXTensorElementDataType SessionInfo::GetOutputDataType(const std::string& name
   return result->second;
 }
 
-Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
+Model::Model(std::unique_ptr<Config> config, std::shared_ptr<OrtEnv> ort_env) : config_{std::move(config)}, ort_env_{std::move(ort_env)} {
   // TODO: add function to create run options
   run_options_ = OrtRunOptions::Create();
 
@@ -233,20 +235,22 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
 }
 
 Model::~Model() {
-  GetOrtGlobals()->dml_allocator_->Destroy();
+#if USE_DML
+  Ort::ThrowOnError(Ort::api->UnregisterAllocator(ort_env_.get(), memory_info_device_.get()));
+#endif
 }
 
 void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
   allocator_device_ = &allocator_cpu_;
 #if USE_CUDA
   if (device_type_ == DeviceType::CUDA) {
-    allocator_device_ = GetDeviceAllocator(session, "Cuda");
+    allocator_device_ = GetCudaAllocator(session, "Cuda");
   }
 #elif USE_DML
   if (device_type_ == DeviceType::DML) {
-    allocator_device_ = GetDeviceAllocator(session, "DML");
-    dml_allocation_decoder_ = allocator_device_;
-    GetOrtGlobals()->dml_allocator_->SetWrapper(allocator_device_);
+    memory_info_device_ = OrtMemoryInfo::Create("DML", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+    dml_owned_allocator_ = Ort::Allocator::Create(session, *memory_info_device_);
+    allocator_device_ = dml_owned_allocator_.get();
   }
 #endif
 
@@ -350,21 +354,15 @@ void Model::CreateSessionOptions() {
 
       auto& globals = GetOrtGlobals();
 
-      if (!globals->dml_allocator_) {
-        globals->dml_allocator_ = std::make_unique<DmlAllocator>(p_dml_api_, dml_objects_.d3d12_device.Get());
-        Ort::ThrowOnError(Ort::api->RegisterAllocator(&GetOrtEnv(), globals->dml_allocator_.get()));
-      }
+      dml_allocator_ = std::make_unique<DmlAllocator>(p_dml_api_, dml_objects_.d3d12_device.Get());
+      Ort::ThrowOnError(Ort::api->RegisterAllocator(ort_env_.get(), dml_allocator_.get()));
 
       dml_execution_context_ = std::make_unique<DmlExecutionContext>(
           dml_objects_.d3d12_device.Get(),
           dml_device_.Get(),
           dml_objects_.command_queue.Get(),
           *allocator_device_,
-          *dml_allocation_decoder_,
           p_dml_api_);
-
-      // Update the execution context
-      globals->dml_allocator_->SetExecutionContext(dml_execution_context_.get());
 
       dml_pooled_upload_heap_ = std::make_unique<DmlPooledUploadHeap>(dml_objects_.d3d12_device.Get(), dml_execution_context_.get());
       dml_readback_heap_ = std::make_unique<DmlReadbackHeap>(dml_objects_.d3d12_device.Get(), dml_execution_context_.get());
@@ -385,15 +383,15 @@ std::shared_ptr<Tokenizer> Model::CreateTokenizer() const {
   return std::make_shared<Tokenizer>(*config_);
 }
 
-std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path) {
+std::shared_ptr<Model> CreateModel(std::shared_ptr<OrtEnv> ort_env, const char* config_path) {
   auto config = std::make_unique<Config>(config_path);
 
   if (config->model.type == "gpt2")
-    return std::make_shared<Gpt_Model>(std::move(config), ort_env);
+    return std::make_shared<Gpt_Model>(std::move(config), std::move(ort_env));
   if (config->model.type == "llama" || config->model.type == "gemma" || config->model.type == "mistral" || config->model.type == "phi" || config->model.type == "phi3")
-    return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
+    return std::make_shared<DecoderOnly_Model>(std::move(config), std::move(ort_env));
   if (config->model.type == "whisper")
-    return std::make_shared<Whisper_Model>(std::move(config), ort_env);
+    return std::make_shared<Whisper_Model>(std::move(config), std::move(ort_env));
 
   throw std::runtime_error("Unsupported model_type in config.json: " + config->model.type);
 }

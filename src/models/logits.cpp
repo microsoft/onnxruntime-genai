@@ -48,7 +48,6 @@ RoamingArray<float> Logits::Get() {
       DmlHelpers::DmlCastInputToOutput(
           model_.GetDmlExecutionContext(),
           *model_.allocator_device_,
-          *model_.dml_allocation_decoder_,
           *value16_,
           value32_,
           model_.GetDmlDevice(),
@@ -96,11 +95,11 @@ RoamingArray<float> Logits::Get() {
 #if USE_DML
           case DeviceType::DML: {
             ComPtr<ID3D12Resource> source_resource;
-            Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.dml_allocation_decoder_, value32_->GetTensorMutableRawData(), &source_resource));
+            Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, value32_->GetTensorMutableRawData(), &source_resource));
             THROW_IF_FAILED(source_resource->SetName(L"Logits::Get source"));
 
             ComPtr<ID3D12Resource> target_resource;
-            Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.dml_allocation_decoder_, value_next->GetTensorMutableRawData(), &target_resource));
+            Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, value_next->GetTensorMutableRawData(), &target_resource));
             THROW_IF_FAILED(target_resource->SetName(L"Logits::Get target"));
 
             uint64_t source_offset = (vocab_index * seq_length + token_index * vocab_size) * sizeof(float);
@@ -162,7 +161,7 @@ RoamingArray<float> Logits::Get() {
   if (model_.device_type_ == DeviceType::DML) {
     // DML doesn't support on-device scoring yet, so we transfer the data to the CPU
     ComPtr<ID3D12Resource> gpu_resource;
-    Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.dml_allocation_decoder_, value32_->GetTensorMutableRawData(), &gpu_resource));
+    Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, value32_->GetTensorMutableRawData(), &gpu_resource));
     auto cpu_tensor = value32_cpu_->GetTensorMutableData<float>();
     THROW_IF_FAILED(gpu_resource->SetName(L"Logits::Get gpu_resource"));
 

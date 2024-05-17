@@ -99,7 +99,7 @@ struct SessionInfo {
 };
 
 struct Model : std::enable_shared_from_this<Model> {
-  Model(std::unique_ptr<Config> config);
+  Model(std::unique_ptr<Config> config, std::shared_ptr<OrtEnv> ort_env);
   virtual ~Model();
 
   std::shared_ptr<Tokenizer> CreateTokenizer() const;
@@ -111,6 +111,7 @@ struct Model : std::enable_shared_from_this<Model> {
   CapturedGraphPool* GetCapturedGraphPool() const { return captured_graph_pool_.get(); }
 
   std::unique_ptr<Config> config_;
+  std::shared_ptr<OrtEnv> ort_env_;
   std::unique_ptr<OrtSessionOptions> session_options_;
   std::unique_ptr<OrtRunOptions> run_options_;
 
@@ -118,7 +119,6 @@ struct Model : std::enable_shared_from_this<Model> {
   DeviceType device_type_{DeviceType::CPU};
   Ort::Allocator& allocator_cpu_{Ort::Allocator::GetWithDefaultOptions()};
   OrtAllocator* allocator_device_{};  // Can be CUDA or CPU based on the DeviceType in the model
-  OrtAllocator* dml_allocation_decoder_{};  // Can be CUDA or CPU based on the DeviceType in the model
 
   std::unique_ptr<SessionInfo> session_info_;
 
@@ -147,8 +147,9 @@ struct Model : std::enable_shared_from_this<Model> {
   std::unique_ptr<DmlReadbackHeap> dml_readback_heap_;
   ComPtr<IDMLDevice> dml_device_;
   bool is_intel_device_{};
-  std::unique_ptr<Ort::Allocator> dml_allocator_wrapper_;
+  std::unique_ptr<Ort::Allocator> dml_owned_allocator_;
   std::unique_ptr<OrtMemoryInfo> memory_info_device_;
+  std::unique_ptr<DmlAllocator> dml_allocator_;
 #endif
 
   std::shared_ptr<CapturedGraphPool> captured_graph_pool_;

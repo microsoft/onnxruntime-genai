@@ -13,7 +13,6 @@ DmlCommandRecorder::DmlCommandRecorder(
     IDMLDevice* dml_device,
     std::shared_ptr<DmlCommandQueue> command_queue,
     OrtAllocator& device_allocator,
-    OrtAllocator& dml_allocation_decoder,
     const OrtDmlApi* ort_dml_api)
     : queue_(std::move(command_queue)),
       d3d_device_(d3d_device),
@@ -21,7 +20,6 @@ DmlCommandRecorder::DmlCommandRecorder(
       descriptor_pool_(d3d_device, 2048),
       command_allocator_ring_(d3d_device, queue_->GetType(), queue_->GetCurrentCompletionEvent()),
       device_allocator_(device_allocator),
-      dml_allocation_decoder_(dml_allocation_decoder),
       ort_dml_api_(ort_dml_api) {
   THROW_IF_FAILED(dml_device->CreateOperatorInitializer(0, nullptr, IID_PPV_ARGS(&initializer_)));
   THROW_IF_FAILED(dml_device->CreateCommandRecorder(IID_PPV_ARGS(&recorder_)));
@@ -188,7 +186,7 @@ void DmlCommandRecorder::InitializeOperator(
 
     ComPtr<ID3D12Resource> buffer;
     auto temp_resource = OrtValue::CreateTensor(device_allocator_, temporary_resource_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
-    Ort::ThrowOnError(ort_dml_api_->GetD3D12ResourceFromAllocation(&dml_allocation_decoder_, temp_resource->GetTensorMutableRawData(), &buffer));
+    Ort::ThrowOnError(ort_dml_api_->GetD3D12ResourceFromAllocation(&device_allocator_, temp_resource->GetTensorMutableRawData(), &buffer));
 
     THROW_IF_FAILED(buffer->SetName(L"DmlCommandRecorder::InitializeOperator"));
 
@@ -256,7 +254,7 @@ void DmlCommandRecorder::ExecuteOperator(
 
     ComPtr<ID3D12Resource> buffer;
     auto temp_resource = OrtValue::CreateTensor(device_allocator_, temporary_resource_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
-    Ort::ThrowOnError(ort_dml_api_->GetD3D12ResourceFromAllocation(&dml_allocation_decoder_, temp_resource->GetTensorMutableRawData(), &buffer));
+    Ort::ThrowOnError(ort_dml_api_->GetD3D12ResourceFromAllocation(&device_allocator_, temp_resource->GetTensorMutableRawData(), &buffer));
 
     THROW_IF_FAILED(buffer->SetName(L"DmlCommandRecorder::ExecuteOperator"));
 
