@@ -96,11 +96,9 @@ RoamingArray<float> Logits::Get() {
           case DeviceType::DML: {
             ComPtr<ID3D12Resource> source_resource;
             Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, value32_->GetTensorMutableRawData(), &source_resource));
-            THROW_IF_FAILED(source_resource->SetName(L"Logits::Get source"));
 
             ComPtr<ID3D12Resource> target_resource;
             Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, value_next->GetTensorMutableRawData(), &target_resource));
-            THROW_IF_FAILED(target_resource->SetName(L"Logits::Get target"));
 
             uint64_t source_offset = (vocab_index * seq_length + token_index * vocab_size) * sizeof(float);
             uint64_t target_offset = vocab_index * sizeof(float);
@@ -163,7 +161,6 @@ RoamingArray<float> Logits::Get() {
     ComPtr<ID3D12Resource> gpu_resource;
     Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, value32_->GetTensorMutableRawData(), &gpu_resource));
     auto cpu_tensor = value32_cpu_->GetTensorMutableData<float>();
-    THROW_IF_FAILED(gpu_resource->SetName(L"Logits::Get gpu_resource"));
 
     model_.GetDmlReadbackHeap()->ReadbackFromGpu(
         std::span(reinterpret_cast<uint8_t*>(cpu_tensor), element_count * sizeof(float)),

@@ -6,7 +6,7 @@
 
 namespace Generators {
 
-StaticBuffer::StaticBuffer(OrtAllocator* allocator, size_t max_beam_batch_size) : allocator_{allocator}, info_{allocator_->Info(allocator_)}, max_beam_batch_size_{max_beam_batch_size} {
+StaticBuffer::StaticBuffer(Ort::Allocator* allocator, size_t max_beam_batch_size) : allocator_{allocator}, info_{allocator_->GetInfo()}, max_beam_batch_size_{max_beam_batch_size} {
 }
 
 std::unique_ptr<OrtValue> StaticBuffer::CreateTensorOnStaticBuffer(std::span<const int64_t> shape,
@@ -15,14 +15,13 @@ std::unique_ptr<OrtValue> StaticBuffer::CreateTensorOnStaticBuffer(std::span<con
   if (buffer_ == nullptr) {
     // Assuming the first dimension is the batch size
     bytes_ = new_bytes * (max_beam_batch_size_ / shape[0]);
-    fflush(stdout);
-    buffer_ = allocator_->Alloc(allocator_, bytes_);
-    return OrtValue::CreateTensor(*info_, buffer_, new_bytes, shape, type);
+    buffer_ = allocator_->Alloc(bytes_);
+    return OrtValue::CreateTensor(info_, buffer_, new_bytes, shape, type);
   }
   if (new_bytes > bytes_) {
     std::runtime_error("StaticBuffer: new_bytes > bytes_");
   }
-  return OrtValue::CreateTensor(*info_, buffer_, new_bytes, shape, type);
+  return OrtValue::CreateTensor(info_, buffer_, new_bytes, shape, type);
 }
 
 size_t StaticBuffer::GetNumElements(std::span<const int64_t> shape) {
@@ -35,8 +34,7 @@ size_t StaticBuffer::GetNumElements(std::span<const int64_t> shape) {
 
 StaticBuffer::~StaticBuffer() {
   if (buffer_ != nullptr) {
-    fflush(stdout);
-    allocator_->Free(allocator_, buffer_);
+    allocator_->Free(buffer_);
   }
 }
 

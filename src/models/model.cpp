@@ -173,13 +173,13 @@ std::vector<std::string> Tokenizer::DecodeBatch(std::span<const int32_t> sequenc
 // the allocator used is not destroyed until last. This keeps the allocator around until exit, after all other memory
 // has been destroyed. Without this, we will crash in the Onnxruntime BFCArena code when deleting tensors due to the
 // arena already being destroyed.
-OrtAllocator* GetCudaAllocator(OrtSession& session, const char* ep) {
+Ort::Allocator* GetCudaAllocator(OrtSession& session) {
   auto& globals = *GetOrtGlobals();
-  if (!globals.allocator_device_) {
-    globals.memory_info_device_ = OrtMemoryInfo::Create("Cuda", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-    globals.allocator_device_ = Ort::Allocator::Create(session, *globals.memory_info_device_);
+  if (!globals.allocator_cuda_) {
+    globals.memory_info_cuda_ = OrtMemoryInfo::Create("Cuda", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+    globals.allocator_cuda_ = Ort::Allocator::Create(session, *globals.memory_info_cuda_);
   }
-  return globals.allocator_device_.get();
+  return globals.allocator_cuda_.get();
 }
 #endif
 
@@ -238,7 +238,7 @@ void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
   allocator_device_ = &allocator_cpu_;
 #if USE_CUDA
   if (device_type_ == DeviceType::CUDA) {
-    allocator_device_ = GetCudaAllocator(session, "Cuda");
+    allocator_device_ = GetCudaAllocator(session);
   }
 #elif USE_DML
   if (device_type_ == DeviceType::DML) {
@@ -345,8 +345,6 @@ void Model::CreateSessionOptions() {
       if (!p_dml_api_) {
         throw std::runtime_error("Unexpected nullptr getting OrtDmlApi");
       }
-
-      auto& globals = GetOrtGlobals();
 
       dml_allocator_ = std::make_unique<DmlAllocator>(p_dml_api_, dml_objects_.d3d12_device.Get());
       Ort::ThrowOnError(Ort::api->RegisterAllocator(ort_env_.get(), dml_allocator_.get()));

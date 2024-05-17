@@ -118,7 +118,7 @@ struct Model : std::enable_shared_from_this<Model> {
   cuda_stream_holder cuda_stream_;
   DeviceType device_type_{DeviceType::CPU};
   Ort::Allocator& allocator_cpu_{Ort::Allocator::GetWithDefaultOptions()};
-  OrtAllocator* allocator_device_{};  // Can be CUDA or CPU based on the DeviceType in the model
+  Ort::Allocator* allocator_device_{};  // Can be CUDA or CPU based on the DeviceType in the model
 
   std::unique_ptr<SessionInfo> session_info_;
 

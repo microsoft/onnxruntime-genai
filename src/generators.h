@@ -38,10 +38,6 @@ using cudaStream_t = void*;
 #include "logging.h"
 #include "tensor.h"
 
-#if USE_DML
-#include "dml/dml_allocator.h"
-#endif
-
 namespace Generators {
 struct Model;
 struct State;
@@ -140,8 +136,10 @@ struct OrtGlobals {
   OrtGlobals();
 
   std::shared_ptr<OrtEnv> env_;
-  std::unique_ptr<OrtMemoryInfo> memory_info_device_;
-  std::unique_ptr<OrtAllocator> allocator_device_;
+#if USE_CUDA
+  std::unique_ptr<OrtMemoryInfo> memory_info_cuda_;
+  std::unique_ptr<Ort::Allocator> allocator_cuda_;
+#endif
 
  private:
   OrtGlobals(const OrtGlobals&) = delete;
