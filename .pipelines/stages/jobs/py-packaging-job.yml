@@ -97,12 +97,21 @@ jobs:
     value: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/onnxruntime-win-arm64-1.17.3.zip"
 
   steps:
+  - ${{ if eq(parameters.arch, 'arm64') }}:
+    - script: |
+        MKDIR $(Agent.ToolsDirectory)\Python\3.11.0\arm64
+        XCOPY /s /y /h /e /c /q "C:\Python\Python311\*.*" $(Agent.ToolsDirectory)\Python\3.11.0\arm64\
+        COPY NUL $(Agent.ToolsDirectory)\Python\3.11.0\arm64.complete
+        DIR $(Agent.ToolsDirectory)\Python
+        DIR $(Agent.ToolsDirectory)\Python\3.11.0
+        DIR $(Agent.ToolsDirectory)\Python\3.11.0\arm64
+      displayName: Copy python 3.11.0 version to agent tools directory
+
   - task: UsePythonVersion@0
     inputs:
       versionSpec: $(PyDotVer)
       addToPath: true
-      architecture: 'x64'
-      # architecture: $(arch)
+      architecture: $(arch)
   - task: PythonScript@0
     inputs:
       scriptSource: inline
