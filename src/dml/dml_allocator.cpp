@@ -25,8 +25,10 @@ DmlAllocator::~DmlAllocator() {
 }
 
 void* DmlAllocator::DmlAlloc(size_t size_in_bytes) {
+  size_t rounded_size_in_bytes = (size_in_bytes + 3) & ~3;
+
   Microsoft::WRL::ComPtr<ID3D12Resource> resource;
-  auto buffer = CD3DX12_RESOURCE_DESC::Buffer(size_in_bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+  auto buffer = CD3DX12_RESOURCE_DESC::Buffer(rounded_size_in_bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
   auto heap_props = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
   THROW_IF_FAILED(d3d12_device_->CreateCommittedResource(
       &heap_props,
