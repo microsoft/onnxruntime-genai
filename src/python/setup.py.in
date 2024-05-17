@@ -1,6 +1,7 @@
 from setuptools import setup, find_packages
 from setuptools.dist import Distribution
 import sys
+from os import path
 
 if sys.version_info < (3, 0):
     sys.exit('Sorry, Python < 3.0 is not supported')
@@ -10,10 +11,18 @@ class BinaryDistribution(Distribution):
     def has_ext_modules(foo):
         return True
 
+long_description_file = './package_description.md'
+
+if not path.exists(long_description_file):
+    raise FileNotFoundError(f'Unable to find {long_description_file} file')
+with open(long_description_file, encoding="utf-8") as fdesc:
+    long_description = fdesc.read()
+
 setup(
     name='@TARGET_NAME@',
     version='@VERSION_INFO@',
-    description='Generative AI API for ONNX Runtime',
+    description='ONNX Runtime generate() API',
+    long_description=long_description,
     packages=['onnxruntime_genai', 'onnxruntime_genai.models'],
     include_package_data=True,
     package_data={'': ['*.pyd', '*.dll', '*.so*']},
