@@ -221,20 +221,14 @@ ONNXTensorElementDataType SessionInfo::GetOutputDataType(const std::string& name
   return result->second;
 }
 
-Model::Model(std::unique_ptr<Config> config, std::shared_ptr<OrtEnv> ort_env) : config_{std::move(config)}, ort_env_{std::move(ort_env)} {
+Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   // TODO: add function to create run options
   run_options_ = OrtRunOptions::Create();
 
   CreateSessionOptions();
 }
 
-Model::~Model() {
-#if USE_DML
-  if (device_type_ == DeviceType::DML) {
-    Ort::ThrowOnError(Ort::api->UnregisterAllocator(ort_env_.get(), memory_info_device_.get()));
-  }
-#endif
-}
+Model::~Model() = default;
 
 void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
   allocator_device_ = &allocator_cpu_;
@@ -348,9 +342,6 @@ void Model::CreateSessionOptions() {
         throw std::runtime_error("Unexpected nullptr getting OrtDmlApi");
       }
 
-      dml_allocator_ = std::make_unique<DmlAllocator>(p_dml_api_, dml_objects_.d3d12_device.Get());
-      Ort::ThrowOnError(Ort::api->RegisterAllocator(ort_env_.get(), dml_allocator_.get()));
-
       dml_execution_context_ = std::make_unique<DmlExecutionContext>(
           dml_objects_.d3d12_device.Get(),
           dml_device_.Get(),
@@ -361,7 +352,6 @@ void Model::CreateSessionOptions() {
       dml_pooled_upload_heap_ = std::make_unique<DmlPooledUploadHeap>(dml_objects_.d3d12_device.Get(), dml_execution_context_.get());
       dml_readback_heap_ = std::make_unique<DmlReadbackHeap>(dml_objects_.d3d12_device.Get(), dml_execution_context_.get());
 
-      ort_options.AddConfigEntry("session.use_env_allocators", "1");
       ort_options.AddConfigEntry("ep.dml.enable_graph_capture", "1");
       p_dml_api_->SessionOptionsAppendExecutionProvider_DML1(&ort_options, dml_device_.Get(), dml_objects_.command_queue.Get());
       is_intel_device_ = DmlHelpers::IsIntelDevice(dml_objects_.d3d12_device.Get());
@@ -377,15 +367,15 @@ std::shared_ptr<Tokenizer> Model::CreateTokenizer() const {
   return std::make_shared<Tokenizer>(*config_);
 }
 
-std::shared_ptr<Model> CreateModel(std::shared_ptr<OrtEnv> ort_env, const char* config_path) {
+std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path) {
   auto config = std::make_unique<Config>(config_path);
 
   if (config->model.type == "gpt2")
-    return std::make_shared<Gpt_Model>(std::move(config), std::move(ort_env));
+    return std::make_shared<Gpt_Model>(std::move(config), ort_env);
   if (config->model.type == "llama" || config->model.type == "gemma" || config->model.type == "mistral" || config->model.type == "phi" || config->model.type == "phi3")
-    return std::make_shared<DecoderOnly_Model>(std::move(config), std::move(ort_env));
+    return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
   if (config->model.type == "whisper")
-    return std::make_shared<Whisper_Model>(std::move(config), std::move(ort_env));
+    return std::make_shared<Whisper_Model>(std::move(config), ort_env);
 
   throw std::runtime_error("Unsupported model_type in config.json: " + config->model.type);
 }

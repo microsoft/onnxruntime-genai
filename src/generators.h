@@ -135,12 +135,11 @@ struct Generator {
 struct OrtGlobals {
   OrtGlobals();
 
-  std::shared_ptr<OrtEnv> env_;
+  std::unique_ptr<OrtEnv> env_;
 #if USE_CUDA
   std::unique_ptr<OrtMemoryInfo> memory_info_cuda_;
   std::unique_ptr<Ort::Allocator> allocator_cuda_;
 #endif
-
  private:
   OrtGlobals(const OrtGlobals&) = delete;
   void operator=(const OrtGlobals&) = delete;
@@ -148,9 +147,9 @@ struct OrtGlobals {
 
 std::unique_ptr<OrtGlobals>& GetOrtGlobals();
 void Shutdown();  // Do this once at exit, Ort code will fail after this call
-std::shared_ptr<OrtEnv> GetOrtEnv();
+OrtEnv& GetOrtEnv();
 
-std::shared_ptr<Model> CreateModel(std::shared_ptr<OrtEnv> ort_env, const char* config_path);
+std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path);
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Model& model);
 std::shared_ptr<GeneratorParams> CreateGeneratorParams();  // For benchmarking purposes only
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params);

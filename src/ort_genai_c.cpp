@@ -73,12 +73,7 @@ const int32_t* OGA_API_CALL OgaSequencesGetSequenceData(const OgaSequences* p, s
 
 OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaModel** out) {
   OGA_TRY
-#if USE_DML
-  auto ort_env = OrtEnv::Create(OrtLoggingLevel::ORT_LOGGING_LEVEL_ERROR);
-#else
-  auto ort_env = Generators::GetOrtEnv();
-#endif
-  auto model = Generators::CreateModel(std::move(ort_env), config_path);
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), config_path);
   model->external_owner_ = model;
   *out = reinterpret_cast<OgaModel*>(model.get());
   return nullptr;

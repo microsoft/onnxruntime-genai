@@ -395,12 +395,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   pybind11::class_<Model, std::shared_ptr<Model>>(m, "Model")
       .def(pybind11::init([](const std::string& config_path) {
-#if USE_DML
-        auto ort_env = OrtEnv::Create(OrtLoggingLevel::ORT_LOGGING_LEVEL_ERROR);
-#else
-        auto ort_env = GetOrtEnv();
-#endif
-        return CreateModel(std::move(ort_env), config_path.c_str());
+        return CreateModel(GetOrtEnv(), config_path.c_str());
       }))
       .def("generate", [](Model& model, PyGeneratorParams& params) { params.Prepare(); return Generate(model, params); })
       .def_property_readonly("device_type", [](const Model& s) { return s.device_type_; });

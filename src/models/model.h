@@ -99,7 +99,7 @@ struct SessionInfo {
 };
 
 struct Model : std::enable_shared_from_this<Model> {
-  Model(std::unique_ptr<Config> config, std::shared_ptr<OrtEnv> ort_env);
+  Model(std::unique_ptr<Config> config);
   virtual ~Model();
 
   std::shared_ptr<Tokenizer> CreateTokenizer() const;
@@ -111,7 +111,6 @@ struct Model : std::enable_shared_from_this<Model> {
   CapturedGraphPool* GetCapturedGraphPool() const { return captured_graph_pool_.get(); }
 
   std::unique_ptr<Config> config_;
-  std::shared_ptr<OrtEnv> ort_env_;
   std::unique_ptr<OrtSessionOptions> session_options_;
   std::unique_ptr<OrtRunOptions> run_options_;
 
