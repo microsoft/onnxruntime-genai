@@ -101,7 +101,8 @@ jobs:
     inputs:
       versionSpec: $(PyDotVer)
       addToPath: true
-      architecture: $(arch)
+      architecture: 'x64'
+      # architecture: $(arch)
   - task: PythonScript@0
     inputs:
       scriptSource: inline
