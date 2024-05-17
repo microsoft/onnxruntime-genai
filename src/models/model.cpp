@@ -230,7 +230,9 @@ Model::Model(std::unique_ptr<Config> config, std::shared_ptr<OrtEnv> ort_env) : 
 
 Model::~Model() {
 #if USE_DML
-  Ort::ThrowOnError(Ort::api->UnregisterAllocator(ort_env_.get(), memory_info_device_.get()));
+  if (device_type_ == DeviceType::DML) {
+    Ort::ThrowOnError(Ort::api->UnregisterAllocator(ort_env_.get(), memory_info_device_.get()));
+  }
 #endif
 }
 
