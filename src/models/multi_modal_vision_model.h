@@ -17,14 +17,13 @@ struct MultiModalVisionModel : Model {
   std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths,
                                      const GeneratorParams& params) const override;
 
-  std::unique_ptr<OrtSession> embedding_session_;  // input_ids -> input_embeds
-  std::unique_ptr<OrtSession> vision_session_;     // input_ids, pixel_values, img_sizes -> input_embeds
-  std::unique_ptr<OrtSession> decoder_session_;    // input_embeds, attention_mask, kv_cache -> logits
+  std::unique_ptr<OrtSession> embedding_session_;  // input_ids -> inputs_embeds
+  std::unique_ptr<OrtSession> vision_session_;     // pixel_values, img_sizes -> visual_features
+  std::unique_ptr<OrtSession> decoder_session_;    // inputs_embeds, attention_mask, kv_cache -> logits
 };
 
 struct EmbeddingState : State {
-  EmbeddingState(const MultiModalVisionModel& model, const GeneratorParams& params,
-                 InputIDs&& input_ids, Embeddings&& embeddings);
+  EmbeddingState(const MultiModalVisionModel& model, const GeneratorParams& params);
 
   RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens,
                           RoamingArray<int32_t> next_indices = {}) override;
@@ -35,8 +34,9 @@ struct EmbeddingState : State {
   void UpdateInputsAndOutputs(RoamingArray<int32_t> next_tokens);
 
   const MultiModalVisionModel& model_;
-  InputIDs input_ids_;       // Model input
-  Embeddings input_embeds_;  // Model output
+  InputIDs input_ids_{model_, *this};                                 // Model input
+  Embeddings inputs_embeds_{model_, *this, Embeddings::Mode::Output,  // Model output
+                            model_.config_->model.embedding.outputs.embeddings};
 };
 
 struct VisionState : State {
@@ -49,9 +49,8 @@ struct VisionState : State {
   friend struct MultiModalPipelineState;
 
   const MultiModalVisionModel& model_;
-  InputIDs input_ids_{model_, *this};                                // Model input
-  Embeddings input_embeds_{model_, *this, Embeddings::Mode::Output,  // Model output
-                           model_.config_->model.vision.outputs.embeddings};
+  std::unique_ptr<OrtValue> visual_features_;  // Model output
+  int32_t num_image_tokens_{};
 };
 
 struct DecoderState : State {
@@ -67,8 +66,8 @@ struct DecoderState : State {
   void UpdateInputs(int current_length, RoamingArray<int32_t> beam_indices);
 
   const MultiModalVisionModel& model_;
-  Embeddings input_embeds_{model_, *this, Embeddings::Mode::Input,  // Model input
-                           model_.config_->model.decoder.inputs.embeddings};
+  Embeddings inputs_embeds_{model_, *this, Embeddings::Mode::Input,  // Model input
+                            model_.config_->model.decoder.inputs.embeddings};
   PositionInputs position_inputs_;    // Model input
   KV_Cache kv_cache_{model_, *this};  // Model input
   Logits logits_{model_, *this};      // Model output

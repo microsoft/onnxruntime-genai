@@ -78,17 +78,6 @@ OgaResult* OGA_API_CALL OgaLoadImage(const char* image_path, OgaImages** images)
   OGA_CATCH
 }
 
-// OgaResult* OGA_API_CALL OgaLoadImages(const char* image_paths[], size_t num_images, OgaImages** out) {
-//   OGA_TRY
-//   auto prompt_images = std::make_unique<Generators::Images>();
-//   for (size_t i = 0; i < num_images; i++) {
-//     // prompt_images->emplace_back(std::vector<float>() /* Generators::LoadImage(image_paths[i]) */);
-//   }
-//   *out = reinterpret_cast<OgaImages*>(prompt_images.release());
-//   return nullptr;
-//   OGA_CATCH
-// }
-
 OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaModel** out) {
   OGA_TRY
   auto model = Generators::CreateModel(Generators::GetOrtEnv(), config_path);
@@ -164,20 +153,8 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputs(OgaGeneratorParams* oga_para
   auto& params = *reinterpret_cast<Generators::GeneratorParams*>(oga_params);
   auto& named_tensors = *reinterpret_cast<const Generators::NamedTensors*>(p_named_tensors);
 
-  auto input_ids_it = named_tensors.find("input_ids");
-  if (input_ids_it != named_tensors.end()) {
-    auto& input_ids = input_ids_it->second;
-    params.input_ids = std::span<const int32_t>(input_ids->ort_tensor_->GetTensorMutableData<int32_t>(),
-                                                input_ids->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount());
-    params.batch_size = static_cast<int>(input_ids->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape()[0]);
-    params.sequence_length = static_cast<int>(params.input_ids.size() / params.batch_size);
-  }
+  params.SetInputs(named_tensors);
 
-  for (const auto& [name, tensor] : named_tensors) {
-    if (name == "input_ids")
-      continue;
-    params.extra_inputs.push_back({name, tensor});
-  }
   return nullptr;
   OGA_CATCH
 }
@@ -379,11 +356,11 @@ OgaResult* OGA_API_CALL OgaCreateMultiModalProcessor(const OgaModel* model, OgaM
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor* p, const char* prompt, OgaImages* images, OgaNamedTensors** input_tensors) {
+OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor* p, const char* prompt, OgaImages* images_p, OgaNamedTensors** input_tensors) {
   OGA_TRY
   auto& processor = *reinterpret_cast<const Generators::MultiModalProcessor*>(p);
-  auto named_tensors = processor.image_processor_->Process(*processor.tokenizer_, prompt,
-                                                           *reinterpret_cast<Generators::Images*>(images));
+  auto* images = images_p ? reinterpret_cast<Generators::Images*>(images_p) : nullptr;
+  auto named_tensors = processor.image_processor_->Process(*processor.tokenizer_, prompt, images);
   *input_tensors = reinterpret_cast<OgaNamedTensors*>(named_tensors.release());
   return nullptr;
   OGA_CATCH

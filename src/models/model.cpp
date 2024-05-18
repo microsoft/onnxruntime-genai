@@ -463,7 +463,6 @@ void ConvertFp32ToFp16(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<Or
 
   switch (device_type) {
     case DeviceType::DML:
-      // DML doesn't currently support on-device scoring, so we fall back to the CPU
     case DeviceType::CPU:
       for (int i = 0; i < count; i++)
         fp16[i] = FastFloat32ToFloat16(fp32[i]);
@@ -471,11 +470,11 @@ void ConvertFp32ToFp16(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<Or
 
 #if USE_CUDA
     case DeviceType::CUDA:
-      // TODO: Implement CUDA. For now, fallthrough and report an error.
+      // TODO: Implement for CUDA. For now, fallthrough and report an error.
 #endif
 
     default:
-      throw std::runtime_error("ConvertFp16ToFp32 - Unsupported device type");
+      throw std::runtime_error("ConvertFp32ToFp16 - Unsupported device type");
   }
 }
 

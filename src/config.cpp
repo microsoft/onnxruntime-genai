@@ -216,34 +216,11 @@ struct Decoder_Element : JSON::Element {
   Outputs_Element outputs_{v_.outputs};
 };
 
-struct ImageProcessor_Element : JSON::Element {
-  explicit ImageProcessor_Element(Config::Model::Vision::ImageProcessor& v) : v_{v} {}
-
-  void OnString(std::string_view name, std::string_view value) override {
-    if (name == "processor_config") {
-      v_.processor_config = value;
-    } else
-      throw JSON::unknown_value_error{};
-  }
-
-  void OnNumber(std::string_view name, double value) override {
-    if (name == "num_crops") {
-      v_.num_crops = static_cast<int>(value);
-    } else
-      throw JSON::unknown_value_error{};
-  }
-
- private:
-  Config::Model::Vision::ImageProcessor& v_;
-};
-
 struct VisionInputs_Element : JSON::Element {
   explicit VisionInputs_Element(Config::Model::Vision::Inputs& v) : v_{v} {}
 
   void OnString(std::string_view name, std::string_view value) override {
-    if (name == "input_ids") {
-      v_.input_ids = value;
-    } else if (name == "pixel_values") {
+    if (name == "pixel_values") {
       v_.pixel_values = value;
     } else if (name == "image_sizes") {
       v_.image_sizes = value;
@@ -259,8 +236,8 @@ struct VisionOutputs_Element : JSON::Element {
   explicit VisionOutputs_Element(Config::Model::Vision::Outputs& v) : v_{v} {}
 
   void OnString(std::string_view name, std::string_view value) override {
-    if (name == "inputs_embeds") {
-      v_.embeddings = value;
+    if (name == "visual_features") {
+      v_.visual_features = value;
     } else
       throw JSON::unknown_value_error{};
   }
@@ -282,8 +259,6 @@ struct Vision_Element : JSON::Element {
   Element& OnObject(std::string_view name) override {
     if (name == "inputs") {
       return inputs_;
-    } else if (name == "image_processor") {
-      return image_processor_;
     } else if (name == "outputs") {
       return outputs_;
     } else
@@ -292,7 +267,6 @@ struct Vision_Element : JSON::Element {
 
  private:
   Config::Model::Vision& v_;
-  ImageProcessor_Element image_processor_{v_.image_processor};
   VisionInputs_Element inputs_{v_.inputs};
   VisionOutputs_Element outputs_{v_.outputs};
 };

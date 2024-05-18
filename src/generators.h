@@ -115,6 +115,8 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams> {
 
   void TryGraphCapture(int max_bs);
 
+  void SetInputs(const NamedTensors& inputs);
+
  private:
   bool is_cuda_graph_enabled_{};
 };

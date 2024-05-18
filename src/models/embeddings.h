@@ -21,6 +21,8 @@ struct Embeddings {
 
   Embeddings& operator=(const Embeddings& other);
 
+  OrtValue* Get() { return embeddings_.get(); }
+
  private:
   const Model& model_;
   State& state_;

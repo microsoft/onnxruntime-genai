@@ -283,13 +283,6 @@ struct PyGeneratorParams {
   std::vector<pybind11::object> refs_;  // References to data we want to ensure doesn't get garbage collected
 };
 
-struct PyImages {
-  PyImages(std::unique_ptr<Images> images) : images_{std::move(images)} {
-  }
-
-  std::unique_ptr<Images> images_;
-};
-
 struct PyNamedTensors {
   PyNamedTensors(std::unique_ptr<NamedTensors> named_tensors) : named_tensors_{std::move(named_tensors)} {
   }
@@ -387,20 +380,10 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_readwrite("input_ids", &PyGeneratorParams::py_input_ids_)
       .def_readwrite("whisper_input_features", &PyGeneratorParams::py_whisper_input_features_)
       .def("set_inputs", [](PyGeneratorParams& generator_params, PyNamedTensors* named_tensors) {
-        auto input_ids_it = named_tensors->named_tensors_->find("input_ids");
-        if (input_ids_it != named_tensors->named_tensors_->end()) {
-          auto& input_ids = input_ids_it->second;
-          generator_params.params_->input_ids = std::span<const int32_t>(input_ids->ort_tensor_->GetTensorMutableData<int32_t>(),
-                                                                         input_ids->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount());
-          generator_params.params_->batch_size = static_cast<int>(input_ids->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape()[0]);
-          generator_params.params_->sequence_length = static_cast<int>(generator_params.params_->input_ids.size() / generator_params.params_->batch_size);
-        }
+        if (!named_tensors || !named_tensors->named_tensors_)
+          throw std::runtime_error("No inputs provided.");
 
-        for (const auto& [name, tensor] : *named_tensors->named_tensors_) {
-          if (name == "input_ids")
-            continue;
-          generator_params.params_->extra_inputs.push_back({name, tensor});
-        }
+        generator_params.params_->SetInputs(*named_tensors->named_tensors_);
       })
       .def("set_model_input", &PyGeneratorParams::SetModelInput)
       .def("set_search_options", &PyGeneratorParams::SetSearchOptions)                                     // See config.h 'struct Search' for the options
@@ -447,7 +430,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
       .def("get_sequence", &PyGenerator::GetSequence);
 
-  pybind11::class_<PyImages>(m, "Images")
+  pybind11::class_<Images>(m, "Images")
       .def_static("open", [](pybind11::args image_paths) {
         if (image_paths.empty())
           throw std::runtime_error("No images provided");
@@ -456,15 +439,15 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           throw std::runtime_error("Loading multiple images is not supported");
 
         auto image_path = image_paths[0].cast<std::string>();
-        return std::make_unique<PyImages>(LoadImage(image_path.c_str()));
+        return LoadImage(image_path.c_str());
       });
 
   pybind11::class_<PyNamedTensors>(m, "NamedTensors");
 
   pybind11::class_<MultiModalProcessor, std::shared_ptr<MultiModalProcessor>>(m, "MultiModalProcessor")
-      .def("__call__", [](MultiModalProcessor& processor, const std::string& prompt, PyImages* images) -> std::unique_ptr<PyNamedTensors> {
+      .def("__call__", [](MultiModalProcessor& processor, const std::string& prompt, Images* images) -> std::unique_ptr<PyNamedTensors> {
         if (processor.image_processor_) {
-          return std::make_unique<PyNamedTensors>(processor.image_processor_->Process(*processor.tokenizer_, prompt, *images->images_));
+          return std::make_unique<PyNamedTensors>(processor.image_processor_->Process(*processor.tokenizer_, prompt, images));
         } else {
           throw std::runtime_error("Image processor is not available.");
         }

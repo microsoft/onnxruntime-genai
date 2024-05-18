@@ -60,19 +60,13 @@ struct Config {
     struct Vision {
       std::string filename;
 
-      struct ImageProcessor {
-        std::string processor_config;
-        int num_crops{};
-      } image_processor;
-
       struct Inputs {
-        std::string input_ids{"input_ids"};
         std::string pixel_values{"pixel_values"};
         std::string image_sizes{"image_sizes"};
       } inputs;
 
       struct Outputs {
-        std::string embeddings{"inputs_embeds"};
+        std::string visual_features{"visual_features"};
       } outputs;
     } vision;
 

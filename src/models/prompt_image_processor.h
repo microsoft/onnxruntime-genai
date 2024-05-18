@@ -23,7 +23,7 @@ struct ImageProcessor {
 
   // Returned NamedTensors own the OrtValue and are not owned by the caller.
   // OrtValue memory will be released when the NamedTensors are destroyed.
-  std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const std::string& prompt, const Images& images);
+  std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const std::string& prompt, const Images* images);
 
  private:
   OrtxPtr<OrtxProcessor> processor_;

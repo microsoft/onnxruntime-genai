@@ -15,6 +15,8 @@ struct InputIDs {
   auto& GetShape() const { return shape_; }
   const char* name_;
 
+  OrtValue* Get() { return value_.get(); }
+
  private:
   const Model& model_;
   State& state_;

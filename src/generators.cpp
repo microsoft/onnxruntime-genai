@@ -60,6 +60,21 @@ void GeneratorParams::TryGraphCapture(int max_bs) {
   }
 }
 
+void GeneratorParams::SetInputs(const NamedTensors& named_tensors) {
+  constexpr std::string_view default_input_ids_name = "input_ids";
+
+  for (const auto& [name, tensor] : named_tensors) {
+    if (name == default_input_ids_name) {
+      input_ids = std::span<const int32_t>(tensor->ort_tensor_->GetTensorMutableData<int32_t>(),
+                                           tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount());
+      batch_size = static_cast<int>(tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape()[0]);
+      sequence_length = static_cast<int>(input_ids.size()) / batch_size;
+    } else {
+      extra_inputs.push_back({name, tensor});
+    }
+  }
+}
+
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params) {
   return std::make_unique<Generator>(model, params);
 }
