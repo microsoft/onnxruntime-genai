@@ -31,7 +31,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         public void UseGraphCapture()
         {
-            const int maxBatchSize = 32;
+            const int maxBatchSize = 1;
             Result.VerifySuccess(NativeMethods.OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(_generatorParamsHandle, maxBatchSize));
         }
 

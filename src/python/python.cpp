@@ -268,7 +268,7 @@ struct PyGeneratorParams {
   }
 
   void TryUseGraphCapture() {
-    constexpr int kMaxBatchSize = 32;
+    constexpr int kMaxBatchSize = 1;
     params_->TryGraphCapture(kMaxBatchSize);
   }
 
