@@ -54,8 +54,11 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                                      bool value);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(IntPtr /* OgaGeneratorParams* */ generatorParams,
-                                                                                                       int /* int32_t */ maxBatchSize);
+        public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsUseGraphCapture(IntPtr /* OgaGeneratorParams* */ generatorParams);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsSetMaxBatchSize(IntPtr /* OgaGeneratorParams* */ generatorParams,
+                                                                                       int /* int32_t */ maxBatchSize);
 
         // This function is used to set the input IDs for the generator.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]

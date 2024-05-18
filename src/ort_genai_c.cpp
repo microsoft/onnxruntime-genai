@@ -103,7 +103,16 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* gene
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGeneratorParams* generator_params, int32_t max_batch_size) {
+OgaResult* OGA_API_CALL OgaGeneratorParamsUseGraphCapture(OgaGeneratorParams* generator_params) {
+  OGA_TRY
+  auto* params = reinterpret_cast<Generators::GeneratorParams*>(generator_params);
+  constexpr int max_batch_size = 1;
+  params->TryGraphCapture(max_batch_size);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetMaxBatchSize(OgaGeneratorParams* generator_params, int32_t max_batch_size) {
   OGA_TRY
   auto* params = reinterpret_cast<Generators::GeneratorParams*>(generator_params);
   params->TryGraphCapture(max_batch_size);

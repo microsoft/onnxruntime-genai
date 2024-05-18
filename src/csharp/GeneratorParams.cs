@@ -31,13 +31,12 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         public void UseGraphCapture()
         {
-            const int maxBatchSize = 1;
-            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(_generatorParamsHandle, maxBatchSize));
+            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsUseGraphCapture(_generatorParamsHandle));
         }
 
         public void SetMaxBatchSize(int maxBatchSize)
         {
-            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(_generatorParamsHandle, maxBatchSize));
+            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetMaxBatchSize(_generatorParamsHandle, maxBatchSize));
         }
 
         public void SetInputIDs(ReadOnlySpan<int> inputIDs, ulong sequenceLength, ulong batchSize)

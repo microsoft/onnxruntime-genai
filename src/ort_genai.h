@@ -188,8 +188,12 @@ struct OgaGeneratorParams : OgaAbstract {
     OgaCheckResult(OgaGeneratorParamsSetModelInput(this, name, &tensor));
   }
 
-  void TryGraphCaptureWithMaxBatchSize(int max_batch_size) {
-    OgaCheckResult(OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(this, max_batch_size));
+  void UseGraphCapture() {
+    OgaCheckResult(OgaGeneratorParamsUseGraphCapture(this));
+  }
+
+  void SetMaxBatchSize(int max_batch_size) {
+    OgaCheckResult(OgaGeneratorParamsSetMaxBatchSize(this, max_batch_size));
   }
 
   static void operator delete(void* p) { OgaDestroyGeneratorParams(reinterpret_cast<OgaGeneratorParams*>(p)); }
