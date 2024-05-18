@@ -66,7 +66,8 @@ See https://onnxruntime.ai/docs/genai/how-to/install
    input_tokens = tokenizer.encode(prompt)
 
    params = og.GeneratorParams(model)
-   params.try_use_cuda_graph_with_max_batch_size(1)
+   params.use_graph_capture()
+   params.set_max_batch_size(1)
    params.set_search_options(**search_options)
    params.input_ids = input_tokens
    generator = og.Generator(model, params)
