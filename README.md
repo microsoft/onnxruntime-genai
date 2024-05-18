@@ -1,16 +1,14 @@
-# ONNX Runtime Generative AI
+# ONNX Runtime generate() API
 
 Run generative AI models with ONNX Runtime.
 
-This library provides the generative AI loop for ONNX models, including inference with ONNX Runtime, logits processing, search and sampling, and KV cache management.
+This API gives you an easy, flexible and performant way of running LLMs on device. 
 
-Users can call a high level `generate()` method, or run each iteration of the model in a loop.
+It implements the generative AI loop for ONNX models, including pre and post processing, inference with ONNX Runtime, logits processing, search and sampling, and KV cache management.
 
-* Support greedy/beam search and TopP, TopK sampling to generate token sequences
-* Built in logits processing like repetition penalties
-* Easy custom scoring
+You can call a high level `generate()` method to generate all of the output at once, or stream the output one token at a time.
 
-See full documentation at [https://onnxruntime.ai/docs/genai].
+See documentation at https://onnxruntime.ai/docs/genai.
 
 ## Features
 
@@ -48,7 +46,13 @@ See full documentation at [https://onnxruntime.ai/docs/genai].
 
 ## Sample code for phi-2 in Python
 
-[Install](https://onnxruntime.ai/docs/genai/howto/install) the onnxruntime-genai Python package.
+   params = og.GeneratorParams(model)
+   params.try_use_cuda_graph_with_max_batch_size(1)
+   params.set_search_options(**search_options)
+   params.input_ids = input_tokens
+   generator = og.Generator(model, params)
+  
+   print("Output: ", end='', flush=True)
 
 1. Build the model
 ```shell
