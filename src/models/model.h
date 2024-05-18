@@ -145,6 +145,8 @@ struct Model : std::enable_shared_from_this<Model> {
   std::unique_ptr<DmlReadbackHeap> dml_readback_heap_;
   ComPtr<IDMLDevice> dml_device_;
   bool is_intel_device_{};
+  std::unique_ptr<Ort::Allocator> dml_owned_allocator_;
+  std::unique_ptr<OrtMemoryInfo> memory_info_device_;
 #endif
 
   std::shared_ptr<CapturedGraphPool> captured_graph_pool_;
