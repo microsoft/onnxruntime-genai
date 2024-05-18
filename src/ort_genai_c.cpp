@@ -120,6 +120,15 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetMaxBatchSize(OgaGeneratorParams* ge
   OGA_CATCH
 }
 
+// TODO: Deprecate this
+OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGeneratorParams* generator_params, int32_t max_batch_size) {
+  OGA_TRY
+  auto* params = reinterpret_cast<Generators::GeneratorParams*>(generator_params);
+  params->TryGraphCapture(max_batch_size);
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputIDs(OgaGeneratorParams* oga_params, const int32_t* input_ids, size_t input_ids_count, size_t sequence_length, size_t batch_size) {
   OGA_TRY
   auto& params = *reinterpret_cast<Generators::GeneratorParams*>(oga_params);

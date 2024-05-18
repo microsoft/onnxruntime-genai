@@ -153,6 +153,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchNumber(OgaGenerato
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* generator_params, const char* name, bool value);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsUseGraphCapture(OgaGeneratorParams* generator_params);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetMaxBatchSize(OgaGeneratorParams* generator_params, int32_t max_batch_size);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGeneratorParams* generator_params, int32_t max_batch_size); // TODO: Deprecate this
 
 /*
  * \brief Sets the input ids for the generator params. The input ids are used to seed the generation.
