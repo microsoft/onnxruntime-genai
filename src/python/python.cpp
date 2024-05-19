@@ -8,6 +8,7 @@
 #include "../json.h"
 #include "../search.h"
 #include "../models/model.h"
+#include "../logging.h"
 
 using namespace pybind11::literals;
 
@@ -268,6 +269,11 @@ struct PyGeneratorParams {
   }
 
   void TryUseCudaGraphWithMaxBatchSize(pybind11::int_ max_batch_size) {
+    Log("warning", "try_use_cuda_graph_with_max_batch_size will be deprecated in release 0.3.0. Please use try_graph_capture_with_max_batch_size instead");
+    params_->TryGraphCapture(max_batch_size.cast<int>());
+  }
+
+  void TryGraphCaptureWithMaxBatchSize(pybind11::int_ max_batch_size) {
     params_->TryGraphCapture(max_batch_size.cast<int>());
   }
 
@@ -368,7 +374,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_readwrite("whisper_input_features", &PyGeneratorParams::py_whisper_input_features_)
       .def("set_model_input", &PyGeneratorParams::SetModelInput)
       .def("set_search_options", &PyGeneratorParams::SetSearchOptions)  // See config.h 'struct Search' for the options
-      .def("try_use_cuda_graph_with_max_batch_size", &PyGeneratorParams::TryUseCudaGraphWithMaxBatchSize);
+      .def("try_use_cuda_graph_with_max_batch_size", &PyGeneratorParams::TryUseCudaGraphWithMaxBatchSize) // will be deprecated
+      .def("try_graph_capture_with_max_batch_size", &PyGeneratorParams::TryGraphCaptureWithMaxBatchSize);
 
   pybind11::class_<TokenizerStream>(m, "TokenizerStream")
       .def("decode", [](TokenizerStream& t, int32_t token) { return t.Decode(token); });
