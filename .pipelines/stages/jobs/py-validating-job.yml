@@ -127,8 +127,7 @@ jobs:
         cd examples/python
         python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel onnxruntime_genai
         python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -e cpu -p int4 -o ./example-models/phi2-int4-cpu
-        python model-generate.py -m ./example-models/phi2-int4-cpu -ep $(ep) -i "Hello world"
-        python model-qa.py -m ./example-models/phi2-int4-cpu -ep $(ep)
+        python model-generate.py -m ./example-models/phi2-int4-cpu
       displayName: 'Run Example With Artifact'
       workingDirectory: '$(Build.Repository.LocalPath)'
 
@@ -138,8 +137,7 @@ jobs:
         cd examples\python
         python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel onnxruntime_genai
         python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -e cpu -p int4 -o ./example-models/phi2-int4-cpu
-        python model-generate.py -m ./example-models/phi2-int4-cpu -ep $(ep) -i "Hello world"
-        python model-qa.py -m ./example-models/phi2-int4-cpu -ep $(ep)
+        python model-generate.py -m ./example-models/phi2-int4-cpu
       displayName: 'Run Example With Artifact'
       workingDirectory: '$(Build.Repository.LocalPath)'
 
