@@ -105,23 +105,23 @@ jobs:
     BuildId: ${{ parameters.BuildId }}
 
   - ${{ if eq(parameters.os, 'linux') }}:
-      - bash: |
-          cd examples/python
-          python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -e cpu -p int4 -o ./example-models/phi2-int4-cpu
-          python model-generate.py -m ./example-models/phi2-int4-cpu -ep ${{ ep }} -i "Hello world"
-          python model-qa.py -m ./example-models/phi2-int4-cpu -ep ${{ ep }}
-        displayName: 'Run Example With Artifact'
-        workingDirectory: '$(Build.Repository.LocalPath)'
+    - bash: |
+        cd examples/python
+        python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -e cpu -p int4 -o ./example-models/phi2-int4-cpu
+        python model-generate.py -m ./example-models/phi2-int4-cpu -ep ${{ ep }} -i "Hello world"
+        python model-qa.py -m ./example-models/phi2-int4-cpu -ep ${{ ep }}
+      displayName: 'Run Example With Artifact'
+      workingDirectory: '$(Build.Repository.LocalPath)'
 
   # Windows job needs to set the python version and install the required packages
   - ${{ if eq(parameters.os, 'win') }}:
-      - powershell: |
-          cd examples\python
-          python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -e cpu -p int4 -o ./example-models/phi2-int4-cpu
-          python model-generate.py -m ./example-models/phi2-int4-cpu -ep ${{ ep }} -i "Hello world"
-          python model-qa.py -m ./example-models/phi2-int4-cpu -ep ${{ ep }}
-        displayName: 'Run Example With Artifact'
-        workingDirectory: '$(Build.Repository.LocalPath)'
+    - powershell: |
+        cd examples\python
+        python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -e cpu -p int4 -o ./example-models/phi2-int4-cpu
+        python model-generate.py -m ./example-models/phi2-int4-cpu -ep ${{ ep }} -i "Hello world"
+        python model-qa.py -m ./example-models/phi2-int4-cpu -ep ${{ ep }}
+      displayName: 'Run Example With Artifact'
+      workingDirectory: '$(Build.Repository.LocalPath)'
 
   - template: steps/compliant-and-cleanup-step.yml
 
