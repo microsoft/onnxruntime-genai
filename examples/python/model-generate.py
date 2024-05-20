@@ -19,9 +19,17 @@ def main(args):
     if args.verbose: print("Prompt(s) encoded")
 
     params = og.GeneratorParams(model)
-    params.set_search_options(max_length=args.max_length, top_p=args.top_p, top_k=args.top_k, temperature=args.temperature, repetition_penalty=args.repetition_penalty)
-    if args.cuda_graph_with_max_batch_size > 0:
-        params.try_use_cuda_graph_with_max_batch_size(args.cuda_graph_with_max_batch_size)
+
+    search_options = {name:getattr(args, name) for name in ['do_sample', 'max_length', 'min_length', 'top_p', 'top_k', 'temperature', 'repetition_penalty'] if name in args} 
+
+    if (args.verbose): print(f'Args: {args}')
+    if (args.verbose): print(f'Search options: {search_options}')
+
+    params.set_search_options(**search_options)
+    # Set the batch size for the CUDA graph to the number of prompts if the user didn't specify a batch size
+    params.try_graph_capture_with_max_batch_size(len(prompts))
+    if args.batch_size_for_cuda_graph:
+        params.try_graph_capture_with_max_batch_size(args.batch_size_for_cuda_graph)
     params.input_ids = input_tokens
     if args.verbose: print("GeneratorParams created")
 
