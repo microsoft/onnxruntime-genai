@@ -140,7 +140,7 @@ def test_batching(device, phi2_for):
     params.input_ids = tokenizer.encode_batch(prompts)
 
     if device == "dml":
-        params.try_use_cuda_graph_with_max_batch_size(len(prompts))
+        params.try_graph_capture_with_max_batch_size(len(prompts))
 
     output_sequences = model.generate(params)
     print(tokenizer.decode_batch(output_sequences))

@@ -28,7 +28,6 @@ def main(args):
         input_tokens = tokenizer.encode(args.system_prompt + text)
 
         params = og.GeneratorParams(model)
-        params.try_use_cuda_graph_with_max_batch_size(1)
         params.set_search_options(**search_options)
         params.input_ids = input_tokens
         generator = og.Generator(model, params)
