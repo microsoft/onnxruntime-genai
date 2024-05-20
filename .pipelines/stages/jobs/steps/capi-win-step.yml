@@ -133,7 +133,7 @@ steps:
       DoEsrp: true
       Pattern: '*.pyd'
 
-  - bash: |
+  - powershell: |
       python -m pip install wheel
     displayName: 'Install wheel'
 
