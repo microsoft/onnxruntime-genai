@@ -57,7 +57,7 @@ steps:
       Invoke-WebRequest -Uri $(ort_arm64_url) -OutFile $(ort_arm64_zip)
       Expand-Archive $(ort_arm64_zip) -DestinationPath .
       Remove-Item -Path $(ort_arm64_zip)
-      Rename-Item -Path $env:ort_dir -NewName ort
+      Rename-Item -Path $(ort_arm64_dir) -NewName ort
     workingDirectory: '$(Build.Repository.LocalPath)'
     continueOnError: false
 
