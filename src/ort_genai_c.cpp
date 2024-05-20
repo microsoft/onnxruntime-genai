@@ -280,6 +280,17 @@ OgaResult* OGA_API_CALL OgaCreateTokenizerStream(const OgaTokenizer* p, OgaToken
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaCreateTokenizerStreamFromProcessor(const OgaMultiModalProcessor* p, OgaTokenizerStream** out) {
+  OGA_TRY
+  *out = reinterpret_cast<OgaTokenizerStream*>(
+      reinterpret_cast<const Generators::MultiModalProcessor*>(
+          p)
+          ->tokenizer_->CreateStream()
+          .release());
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream* p, int32_t token, const char** out) {
   OGA_TRY
   *out = reinterpret_cast<Generators::TokenizerStream*>(p)->Decode(token).c_str();
@@ -356,10 +367,10 @@ OgaResult* OGA_API_CALL OgaCreateMultiModalProcessor(const OgaModel* model, OgaM
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor* p, const char* prompt, OgaImages* images_p, OgaNamedTensors** input_tensors) {
+OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor* p, const char* prompt, const OgaImages* images_p, OgaNamedTensors** input_tensors) {
   OGA_TRY
   auto& processor = *reinterpret_cast<const Generators::MultiModalProcessor*>(p);
-  auto* images = images_p ? reinterpret_cast<Generators::Images*>(images_p) : nullptr;
+  auto* images = images_p ? reinterpret_cast<const Generators::Images*>(images_p) : nullptr;
   auto named_tensors = processor.image_processor_->Process(*processor.tokenizer_, prompt, images);
   *input_tensors = reinterpret_cast<OgaNamedTensors*>(named_tensors.release());
   return nullptr;

@@ -118,8 +118,6 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadImage(const char* image_path, OgaImage
 
 OGA_EXPORT void OGA_API_CALL OgaDestroyImages(OgaImages* images);
 
-// OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadImages(const char* image_path[], size_t num_images, OgaImages** out);
-
 /*
  * \brief Creates a model from the given configuration directory and device type.
  * \param[in] config_path The path to the model configuration directory. The path is expected to be encoded in UTF-8.
@@ -255,7 +253,7 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyMultiModalProcessor(OgaMultiModalProcesso
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer*, const char* str, OgaSequences* sequences);
 
-OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor*, const char* prompt, OgaImages* images, OgaNamedTensors** input_tensors);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor*, const char* prompt, const OgaImages* images, OgaNamedTensors** input_tensors);
 
 /* Decode a single token sequence and returns a null terminated utf8 string. out_string must be freed with OgaDestroyString
  */
@@ -265,6 +263,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorDecode(const OgaMultiModalProcess
 /* OgaTokenizerStream is to decoded token strings incrementally, one token at a time.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTokenizerStream(const OgaTokenizer*, OgaTokenizerStream** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTokenizerStreamFromProcessor(const OgaMultiModalProcessor*, OgaTokenizerStream** out);
 OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizerStream(OgaTokenizerStream*);
 
 /*
