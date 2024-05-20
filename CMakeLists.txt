@@ -69,6 +69,7 @@ endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set_target_properties(onnxruntime-genai-static PROPERTIES POSITION_INDEPENDENT_CODE ON)
   target_link_libraries(onnxruntime-genai-static PUBLIC stdc++fs)
+  target_link_libraries(onnxruntime-genai PUBLIC stdc++fs)
 endif()
 
 

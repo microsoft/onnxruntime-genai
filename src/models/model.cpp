@@ -13,7 +13,6 @@
 #if USE_DML
 #include <wil/wrl.h>
 #include "dml_provider_factory.h"
-#include "../dml/dml_smart_container.h"
 #include "../dml/dml_helpers.h"
 
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
@@ -36,13 +35,7 @@ static std::wstring CurrentModulePath() {
 
 namespace Generators {
 
-State::State(const GeneratorParams& params) : params_{params.shared_from_this()} {
-  // Add extra user inputs
-  for (auto& input : params.extra_inputs) {
-    input_names_.push_back(input.name.c_str());
-    inputs_.push_back(input.tensor->ort_tensor_.get());
-  }
-}
+State::State(const GeneratorParams& params) : params_{params.shared_from_this()} {}
 
 void State::Run(OrtSession& session, OrtRunOptions& run_options) {
   if (g_log.enabled && g_log.model_input_values) {
@@ -245,20 +238,9 @@ void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
   }
 #elif USE_DML
   if (device_type_ == DeviceType::DML) {
-    static constexpr GUID dml_smart_container_guid = {0x6b7ff369, 0xc805, 0x42cc, {0x8a, 0x5f, 0xb5, 0x5f, 0x67, 0xe5, 0xbd, 0xcc}};
-
-    ComPtr<DmlSmartContainer> smart_container;
-    uint32_t smart_container_ptr_size = static_cast<uint32_t>(sizeof(smart_container.GetAddressOf()));
-
-    // We reuse the allocator assigned to this device if possible; otherwise, we create a new one and store it on the device
-    if (FAILED(dml_objects_.d3d12_device->GetPrivateData(dml_smart_container_guid, &smart_container_ptr_size, smart_container.GetAddressOf()))) {
-      auto memory_info_dml = OrtMemoryInfo::Create("DML", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-      auto allocator_dml = Ort::Allocator::Create(session, *memory_info_dml);
-      smart_container = wil::MakeOrThrow<DmlSmartContainer>(std::move(memory_info_dml), std::move(allocator_dml));
-      THROW_IF_FAILED(dml_objects_.d3d12_device->SetPrivateDataInterface(dml_smart_container_guid, smart_container.Get()));
-    }
-
-    allocator_device_ = smart_container->GetAllocator();
+    memory_info_device_ = OrtMemoryInfo::Create("DML", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+    dml_owned_allocator_ = Ort::Allocator::Create(session, *memory_info_device_);
+    allocator_device_ = dml_owned_allocator_.get();
   }
 #endif
 

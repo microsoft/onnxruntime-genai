@@ -1,5 +1,6 @@
 ﻿# Files to tell git to ignore
 
+.DS_Store
 .vscode
 *.vs
 *bin/

@@ -74,11 +74,11 @@ jobs:
   - name: ortHome
     value: 'ort'
   - name: dml_dir
-    value: 'Microsoft.AI.DirectML.1.14.1'
+    value: 'Microsoft.AI.DirectML.1.14.2'
   - name: dml_zip
-    value: 'Microsoft.AI.DirectML.1.14.1.zip'
+    value: 'Microsoft.AI.DirectML.1.14.2.zip'
   - name: dml_url
-    value: "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.14.1"
+    value: "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.14.2"
   workspace:
     clean: all
   steps:
