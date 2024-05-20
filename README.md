@@ -15,11 +15,16 @@ See documentation at https://onnxruntime.ai/docs/genai.
 
 |Support matrix|Supported now|Under development|On the roadmap|
 |-|-|-|-|
-|Models|  Gemma <br/> Llama-2 <br/> Llama-3 <br/> Mistral <br/>Phi-2 <br/> Phi-3 <br/>|Whisper|Stable diffusion|
+|Model architectures|  Gemma <br/> Llama * <br/> Mistral + <br/>Phi <br/>|Whisper|Stable diffusion|
 |API| Python <br/>C# <br/>C/C++ |Java|Objective-C|||
 |Platform| Linux <br/> Windows  | Android | Mac <br/> iOS |||
 |Architecture|x86 <br/> x64 <br/> | Arm64 |||
 |Hardware Acceleration|CUDA<br/>DirectML<br/>|QNN <br/> ROCm |OpenVINO
+
+\* The Llama model architecture also includes CodeLlama models, Yi models and Vicuna models
+
+\+ The Mistral model architecture also includes Zephyr models
+
 
 ## Installation
 
