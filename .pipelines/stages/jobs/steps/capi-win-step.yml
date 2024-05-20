@@ -133,9 +133,9 @@ steps:
       DoEsrp: true
       Pattern: '*.pyd'
 
-  - name: Install wheel
-    run: |
-      python -m pip install wheel
+  - script: |
+    python -m pip install wheel
+  displayName: 'Install wheel'
 
   - powershell: |
       cmake --build --preset windows_$(arch)_$(ep)_release --parallel --PyPackageBuild
