@@ -81,7 +81,7 @@ steps:
 - powershell: |
     cmake --preset windows_$(arch)_$(ep)_release
   displayName: 'Configure CMake C API without CUDA'
-  condition: ne(variables['ep'], 'cuda') && ne(variables['arch'], 'arm64')
+  condition: and(ne(variables['ep'], 'cuda'), ne(variables['arch'], 'arm64'))
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
