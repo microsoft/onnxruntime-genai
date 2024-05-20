@@ -3,7 +3,7 @@
 
 #pragma once
 
-#ifdef  _WIN32
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN  // Exclude rarely-used stuff from Windows headers
 #endif
@@ -93,8 +93,23 @@ using path_type = std::wstring;
   return ConvertToA(CP_UTF8, source);
 }
 
+// std::string_view::ends_with support for C++17.
+template <typename T, typename Traits>
+constexpr bool ends_with(const std::basic_string_view<T, Traits>& str, const std::basic_string_view<T, Traits>& suffix) noexcept {
+#pragma warning(suppress : 26481) // Don't use pointer arithmetic. Use span instead (bounds.1).
+  return str.size() >= suffix.size() && __builtin_memcmp(str.data() + (str.size() - suffix.size()), suffix.data(), suffix.size() * sizeof(T)) == 0;
+}
+
+constexpr bool ends_with(const std::string_view& str, const std::string_view& prefix) noexcept {
+  return ends_with<>(str, prefix);
+}
+
+constexpr bool ends_with(const std::wstring_view& str, const std::wstring_view& prefix) noexcept {
+  return ends_with<>(str, prefix);
+}
+
 [[nodiscard]] inline path_type concat_file_path(const path_type& a, const path_type& b) {
-  if (a.ends_with(L'\\') || a.ends_with(L'/')) {
+  if (ends_with(a, L"\\") || ends_with(a, L"/")) {
     return a + b;
   }
   return a + L"\\" + b;
@@ -105,11 +120,10 @@ using path_type = std::wstring;
 using path_type = std::string;
 
 [[nodiscard]] inline path_type concat_file_path(const path_type& a, const path_type& b) {
-  if (a.ends_with('/')) {
+  if (ends_with(a, "/")) {
     return a + b;
   }
   return a + "/" + b;
 }
-
 
 #endif  //  _WIN32

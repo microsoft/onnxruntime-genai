@@ -4,7 +4,6 @@
 
 #include "file_path.h"
 
-
 namespace Generators {
 
 struct Config {
