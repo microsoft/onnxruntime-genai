@@ -1,11 +1,15 @@
 package ai.onnxruntime.genai;
 
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+
 /**
  * The `GeneratorParams` class represents the parameters used for generating sequences with a model.
  * Set the prompt using setInput, and any other search options using setSearchOption.
  */
-public class GeneratorParams implements AutoCloseable {
+public final class GeneratorParams implements AutoCloseable {
   private long nativeHandle = 0;
+  private ByteBuffer tokenIdsBuffer;
 
   GeneratorParams(Model model) throws GenAIException {
     if (model.nativeHandle() == 0) {
@@ -47,6 +51,7 @@ public class GeneratorParams implements AutoCloseable {
       throw new IllegalStateException("Instance has been freed and is invalid");
     }
 
+    tokenIdsBuffer = null; // free the token ids buffer if previously used.
     setInputSequences(nativeHandle, sequences.nativeHandle());
   }
 
@@ -69,7 +74,13 @@ public class GeneratorParams implements AutoCloseable {
           "tokenIds length must be equal to sequenceLength * batchSize");
     }
 
-    setInputIDs(nativeHandle, tokenIds, sequenceLength, batchSize);
+    // allocate a direct buffer to store the token ids so that they remain valid throughout the
+    // generation process as the GenAI layer does not copy the token ids.
+    tokenIdsBuffer = ByteBuffer.allocateDirect(tokenIds.length * Integer.BYTES);
+    tokenIdsBuffer.order(ByteOrder.nativeOrder());
+    tokenIdsBuffer.asIntBuffer().put(tokenIds);
+
+    setInputIDs(nativeHandle, tokenIdsBuffer, sequenceLength, batchSize);
   }
 
   @Override
@@ -106,5 +117,6 @@ public class GeneratorParams implements AutoCloseable {
       throws GenAIException;
 
   private native void setInputIDs(
-      long nativeHandle, int[] tokenIds, int sequenceLength, int batchSize) throws GenAIException;
+      long nativeHandle, ByteBuffer tokenIds, int sequenceLength, int batchSize)
+      throws GenAIException;
 }

@@ -54,24 +54,11 @@ Java_ai_onnxruntime_genai_GeneratorParams_setInputSequences(JNIEnv* env, jobject
 
 extern "C" JNIEXPORT void JNICALL
 Java_ai_onnxruntime_genai_GeneratorParams_setInputIDs(JNIEnv* env, jobject thiz, jlong native_handle,
-                                                       jintArray token_ids, jint sequence_length, jint batch_size) {
+                                                      jobject token_ids, jint sequence_length, jint batch_size) {
   OgaGeneratorParams* generator_params = reinterpret_cast<OgaGeneratorParams*>(native_handle);
 
-  auto num_tokens = env->GetArrayLength(token_ids);
-  jboolean is_copy = false;
-  jint* jtokens = env->GetIntArrayElements(token_ids, &is_copy);
-  if (is_copy) {
-    // we're dead as GenAI doesn't copy the inputs so the input data address will be invalid
-    // when we go to generate output...
-    // TODO: Figure out how we can pass in the token ids without copying here,
-    // and keep the original int[] valid while running generation.
-    ThrowException(env, "OgaGeneratorParamsSetInputIDs was called with temporary input data.");
-    env->ReleaseIntArrayElements(token_ids, jtokens, JNI_ABORT);
-    return;
-  }
-
-  const int32_t* tokens = reinterpret_cast<const int32_t*>(jtokens);  // convert between 32-bit types
+  auto num_tokens = sequence_length * batch_size;
+  const int32_t* tokens = reinterpret_cast<const int32_t*>(env->GetDirectBufferAddress(token_ids));  
 
   ThrowIfError(env, OgaGeneratorParamsSetInputIDs(generator_params, tokens, num_tokens, sequence_length, batch_size));
-  env->ReleaseIntArrayElements(token_ids, jtokens, JNI_ABORT);
 }

@@ -10,7 +10,7 @@ public class TokenizerStream implements AutoCloseable {
 
   private long nativeHandle = 0;
 
-  protected TokenizerStream(long tokenizerStreamHandle) {
+  TokenizerStream(long tokenizerStreamHandle) {
     assert (tokenizerStreamHandle != 0); // internal usage should never pass an invalid handle
     nativeHandle = tokenizerStreamHandle;
   }

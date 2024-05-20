@@ -3,7 +3,7 @@
  */
 package ai.onnxruntime.genai;
 
-public class Model implements AutoCloseable {
+public final class Model implements AutoCloseable {
   private long nativeHandle;
 
   public Model(String modelPath) throws GenAIException {

@@ -58,16 +58,16 @@ if(NOT EXISTS "${ORT_HEADER_DIR}/onnxruntime_c_api.h")
 endif()
 
 
-# normalize the target platform
+# normalize the target platform to x64 or arm64. additional architectures can be added as needed.
 if (MSVC)
   if (CMAKE_VS_PLATFORM_NAME)
-    # Multi-platform generator
+    # cross-platform generator
     set(genai_target_platform ${CMAKE_VS_PLATFORM_NAME})
   else()
     set(genai_target_platform ${CMAKE_SYSTEM_PROCESSOR})
   endif()
 
-  if (genai_target_platform STREQUAL "ARM64")
+  if (genai_target_platform STREQUAL "arm64")
     # pass
   elseif (genai_target_platform STREQUAL "x64" OR 
           genai_target_platform STREQUAL "x86_64" OR 
@@ -75,6 +75,33 @@ if (MSVC)
           CMAKE_GENERATOR MATCHES "Win64")
     set(genai_target_platform "x64")
   else()
-    message(FATAL_ERROR "Unknown CMAKE_SYSTEM_PROCESSOR: ${CMAKE_SYSTEM_PROCESSOR}")
+    message(FATAL_ERROR "Unsupported architecture. CMAKE_SYSTEM_PROCESSOR: ${CMAKE_SYSTEM_PROCESSOR}")
+  endif()
+elseif(APPLE)
+  if (CMAKE_OSX_ARCHITECTURES STREQUAL "arm64")
+    set(genai_target_platform "arm64")
+  elseif (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64")
+    set(genai_target_platform "x64")
+  else()
+    message(FATAL_ERROR "Unsupported architecture. CMAKE_OSX_ARCHITECTURES: ${CMAKE_OSX_ARCHITECTURES}")
+  endif()
+elseif(ANDROID)
+  if (CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a")
+    set(genai_target_platform "arm64")
+  elseif (CMAKE_ANDROID_ARCH_ABI STREQUAL "x86_64")
+    set(genai_target_platform "x64")
+  else()
+    message(FATAL_ERROR "Unsupported architecture. CMAKE_ANDROID_ARCH_ABI: ${CMAKE_ANDROID_ARCH_ABI}")
+  endif()
+else()
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "^arm64.*")
+    set(genai_target_platform "arm64")
+  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^aarch64.*")
+    set(genai_target_platform "arm64")
+  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64)$")
+    set(genai_target_platform "x64")
+  else()
+    message(FATAL_ERROR "Unsupported architecture. CMAKE_SYSTEM_PROCESSOR: ${CMAKE_SYSTEM_PROCESSOR}")
   endif()
 endif()
+

@@ -60,9 +60,11 @@ Misformatted code will raise failures when checks are ran during test run.
 
 ###  JNI Headers
 
-When adding or updating native methods in the Java files, it may be necessary to examine the relevant JNI headers in `build/headers/ai_onnxruntime-genai*.h`.
-These files can be manually generated using Gradle's `compileJava` task which will compile the Java and update the header files accordingly.
-Then the corresponding C files in `./src/main/native/ai_onnxruntime-genai*.c` may be updated and the build can be ran.
+When adding or updating native methods in the Java files, the auto-generated JNI headers in `build/headers/ai_onnxruntime-genai*.h` can be used to determine the JNI function signature.
+
+These header files can be manually generated using Gradle's `compileJava` task which will compile the Java and update the header files accordingly.
+
+Cut-and-paste the function declaration from the auto-generated .h file to add the implementation in the `./src/main/native/ai_onnxruntime-genai_*.cpp` file.
 
 ### Dependencies
 

@@ -4,7 +4,7 @@
 package ai.onnxruntime.genai;
 
 /** An exception which contains the error message and code produced by the native layer. */
-public class GenAIException extends Exception {
+public final class GenAIException extends Exception {
   public GenAIException(String message) {
     super(message);
   }

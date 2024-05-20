@@ -6,10 +6,16 @@ import java.util.function.Consumer;
  * The `SimpleGenAI` class provides a simple usage example of the GenAI API. It works with a model
  * that generates text based on a prompt, processing a single prompt at a time.
  *
- * <p>Usage: - Create an instance of the class with the path to the model. - Call
- * createGeneratorParams with the prompt text. - Set any other search options via the
- * GeneratorParams object as needed using `setSearchOption`. - Call generate with the
- * GeneratorParams object and an optional listener.
+ * <p>Usage:
+ *
+ * <ul>
+ *   <li>Create an instance of the class with the path to the model. The path should also contain
+ *       the GenAI configuration files.
+ *   <li>Call createGeneratorParams with the prompt text.
+ *   <li>Set any other search options via the GeneratorParams object as needed using
+ *       `setSearchOption`.
+ *   <li>Call generate with the GeneratorParams object and an optional listener.
+ * </ul>
  *
  * <p>The listener is used as a callback mechanism so that tokens can be used as they are generated.
  * Create a class that implements the TokenUpdateListener interface and provide an instance of that
@@ -23,21 +29,6 @@ public class SimpleGenAI {
     model = new Model(modelPath);
     tokenizer = new Tokenizer(model);
   }
-
-  /**
-   * This interface represents a listener for token updates. When a new token is generated, the
-   * listener will be called with the token.
-   *
-   * <p>WARNING: Generation of the next token will be blocked until the listener returns.
-   */
-  // public interface TokenUpdateListener {
-  //   /**
-  //    * Called when a new token is generated.
-  //    *
-  //    * @param token The new token.
-  //    */
-  //   void onTokenGenerate(String token);
-  // }
 
   /**
    * Create the generator parameters and add the prompt text. The user can set other search options
@@ -94,9 +85,9 @@ public class SimpleGenAI {
    */
   public String generate(GeneratorParams generatorParams, Consumer<String> listener)
       throws GenAIException {
-    String result = null;
+    String result;
     try (Tokenizer tokenizer = new Tokenizer(model)) {
-      int[] output_ids = null;
+      int[] output_ids;
 
       if (listener != null) {
         try (TokenizerStream stream = tokenizer.createStream();
@@ -114,7 +105,7 @@ public class SimpleGenAI {
           }
 
           output_ids = generator.getSequence(0);
-        } catch (Exception e) {
+        } catch (GenAIException e) {
           throw new GenAIException("Token generation loop failed.", e);
         }
       } else {

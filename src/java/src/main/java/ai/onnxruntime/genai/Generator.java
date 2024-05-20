@@ -15,7 +15,7 @@ package ai.onnxruntime.genai;
  * <p>After the generation process is done, GetSequence can be used to retrieve the complete
  * generated sequence if needed.
  */
-public class Generator implements AutoCloseable {
+public final class Generator implements AutoCloseable {
   private long nativeHandle = 0;
 
   /**

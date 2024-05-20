@@ -41,6 +41,7 @@ Java_ai_onnxruntime_genai_Tokenizer_tokenizerEncode(JNIEnv* env, jobject thiz, j
     jstring string = static_cast<jstring>(env->GetObjectArrayElement(strings, i));
     CString c_string{env, string};
     if (ThrowIfError(env, OgaTokenizerEncode(tokenizer, c_string, sequences))) {
+      OgaDestroySequences(sequences);
       return 0;
     }
   }

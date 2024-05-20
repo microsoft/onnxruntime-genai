@@ -57,7 +57,7 @@ e.g.
 
 # Debugging native code
 
-Download a junit-platform-console-standalone jar file from https://mvnrepository.com/artifact/org.junit.platform/junit-platform-console-standalone
+Download a junit-platform-console-standalone jar file from https://central.sonatype.com/artifact/org.junit.platform/junit-platform-console-standalone/versions
 
 With that the magic incantation to run the tests from the command line (on Windows at least) is...
 
