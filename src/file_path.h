@@ -5,7 +5,7 @@
 
 #ifdef  _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN             // Exclude rarely-used stuff from Windows headers
+#define WIN32_LEAN_AND_MEAN  // Exclude rarely-used stuff from Windows headers
 #endif
 
 #ifndef NOMINMAX
@@ -14,7 +14,7 @@
 
 // Windows Header Files:
 #include <windows.h>
-#define ENABLE_INTSAFE_SIGNED_FUNCTIONS // Only unsigned intsafe math/casts available without this def
+#define ENABLE_INTSAFE_SIGNED_FUNCTIONS  // Only unsigned intsafe math/casts available without this def
 #include <intsafe.h>
 #include <tchar.h>
 

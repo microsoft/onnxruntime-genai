@@ -418,7 +418,7 @@ void ParseConfig(const path_type& filename, Config& config) {
 #ifdef _WIN32
     throw std::runtime_error("Error opening " + wide_string_to_utf8(filename));
 #else
-    throw std::runtime_error("Error opening " + filename)
+    throw std::runtime_error("Error opening " + filename);
 #endif
   }
   std::streamsize const size = file.tellg();
