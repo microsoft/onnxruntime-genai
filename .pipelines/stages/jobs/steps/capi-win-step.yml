@@ -81,7 +81,13 @@ steps:
 - powershell: |
     cmake --preset windows_$(arch)_$(ep)_release
   displayName: 'Configure CMake C API without CUDA'
-  condition: ne(variables['ep'], 'cuda')
+  condition: ne(variables['ep'], 'cuda') && ne(variables['arch'], 'arm64')
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
+- powershell: |
+    cmake --preset windows_$(arch)_$(ep)_release
+  displayName: 'Configure CMake C API for ARM64 CPU'
+  condition: eq(variables['arch'], 'arm64')
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
@@ -126,6 +132,10 @@ steps:
       DisplayName: 'ESRP - PYD Sign'
       DoEsrp: true
       Pattern: '*.pyd'
+
+  - name: Install wheel
+    run: |
+      python -m pip install wheel
 
   - powershell: |
       cmake --build --preset windows_$(arch)_$(ep)_release --parallel --PyPackageBuild
