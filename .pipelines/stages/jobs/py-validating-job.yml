@@ -1,0 +1,127 @@
+parameters:
+- name: arch
+  type: string
+- name: ep
+  type: string
+- name: ort_version
+  type: string
+- name: cuda_version
+  type: string
+  default: ''
+- name: os
+  type: string
+  values:
+  - 'linux'
+  - 'win'
+
+
+jobs:
+- job: python_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}_packaging
+  ${{ if eq(parameters.os, 'linux') }}:
+    pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
+  ${{ if eq(parameters.os, 'win') }}:
+    ${{ if eq(parameters.ep, 'directml') }}:
+      pool: 'onnxruntime-Win2022-GPU-dml-A10'
+    ${{ else }}:
+      pool: 'onnxruntime-Win-CPU-2022'
+
+  strategy:
+    matrix:
+      Python38:
+        PyDotVer: '3.8'
+        PyNoDotVer: '38'
+      Python39:
+        PyDotVer: '3.9'
+        PyNoDotVer: '39'
+      Python310:
+        PyDotVer: '3.10'
+        PyNoDotVer: '310'
+      Python311:
+        PyDotVer: '3.11'
+        PyNoDotVer: '311'
+      Python312:
+        PyDotVer: '3.12'
+        PyNoDotVer: '312'
+  timeoutInMinutes: 240
+  workspace:
+    clean: all
+  #  set variables here to be used in the template and steps
+  variables:
+  - name: skipComponentGovernanceDetection
+    ${{ if eq(parameters.os, 'linux') }}:
+      value: true
+    ${{ if eq(parameters.os, 'win') }}:
+      value: false
+  - name: arch
+    value: ${{ parameters.arch }}
+  - name: artifactName
+    value: 'onnxruntime-genai-${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.arch }}'
+  - name: buildConfig
+    value: 'Release'
+  - name: buildDir
+    value: 'build/${{ parameters.ep }}'
+  - name: cuda_version
+    value: ${{ parameters.cuda_version }}
+  - name: ep
+    value: ${{ parameters.ep }}
+  - name: ort_version
+    value: ${{ parameters.ort_version }}
+  - name: os
+    value: ${{ parameters.os }}
+
+  - name: ort_filename
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      value: 'Microsoft.ML.OnnxRuntime'
+    ${{ elseif eq(parameters.ep, 'cuda') }}:
+      ${{if eq(parameters.os, 'win') }}:
+        value: 'Microsoft.ML.OnnxRuntime.Gpu.Windows'
+      ${{ else }}:
+        value: 'Microsoft.ML.OnnxRuntime.Gpu.Linux'
+    ${{ elseif eq(parameters.ep, 'directml')}}:
+      value: 'Microsoft.ML.OnnxRuntime.DirectML'
+    ${{ else }}:
+      value: 'Microsoft.ML.OnnxRuntime'
+
+  - name: dml_dir
+    value: 'Microsoft.AI.DirectML.1.14.2'
+  - name: dml_zip
+    value: 'Microsoft.AI.DirectML.1.14.2.zip'
+  - name: dml_url
+    value: "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.14.2"
+
+  steps:
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: $(PyDotVer)
+      addToPath: true
+      architecture: $(arch)
+
+  - template: steps/utils//flex-download-pipeline-artifact.yml
+    parameters:
+    StepName: 'Download Python Wheel Artifacts'
+    ArtifactName: ${{ artifactName }}
+    TargetPath: '$(Build.BinariesDirectory)/wheel'
+    SpecificArtifact: ${{ parameters.specificArtifact }}
+    BuildId: ${{ parameters.BuildId }}
+
+  - ${{ if eq(parameters.os, 'linux') }}:
+      - bash: |
+          cd examples/python
+          python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -e cpu -p int4 -o ./example-models/phi2-int4-cpu
+          python model-generate.py -m ./example-models/phi2-int4-cpu -ep ${{ ep }} -i "Hello world"
+          python model-qa.py -m ./example-models/phi2-int4-cpu -ep ${{ ep }}
+        displayName: 'Run Example With Artifact'
+        workingDirectory: '$(Build.Repository.LocalPath)'
+
+  # Windows job needs to set the python version and install the required packages
+  - ${{ if eq(parameters.os, 'win') }}:
+      - powershell: |
+          cd examples\python
+          python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -e cpu -p int4 -o ./example-models/phi2-int4-cpu
+          python model-generate.py -m ./example-models/phi2-int4-cpu -ep ${{ ep }} -i "Hello world"
+          python model-qa.py -m ./example-models/phi2-int4-cpu -ep ${{ ep }}
+        displayName: 'Run Example With Artifact'
+        workingDirectory: '$(Build.Repository.LocalPath)'
+
+  - template: steps/compliant-and-cleanup-step.yml
+
