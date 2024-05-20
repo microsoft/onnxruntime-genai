@@ -28,14 +28,13 @@ Java_ai_onnxruntime_genai_Model_destroyModel(JNIEnv* env, jobject thiz, jlong mo
 
 extern "C" JNIEXPORT jlong JNICALL
 Java_ai_onnxruntime_genai_Model_generate(JNIEnv* env, jobject thiz, jlong model_handle,
-                                          jlong generator_params_handle) {
+                                         jlong generator_params_handle) {
   const OgaModel* model = reinterpret_cast<const OgaModel*>(model_handle);
   const OgaGeneratorParams* params = reinterpret_cast<const OgaGeneratorParams*>(generator_params_handle);
   OgaSequences* sequences = nullptr;
   if (ThrowIfError(env, OgaGenerate(model, params, &sequences))) {
     return 0;
   }
-
 
   return reinterpret_cast<jlong>(sequences);
 }

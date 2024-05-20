@@ -12,7 +12,7 @@ using namespace Helpers;
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_ai_onnxruntime_genai_TokenizerStream_tokenizerStreamDecode(JNIEnv* env, jobject thiz,
-                                                                 jlong tokenizer_stream_handle, jint token) {
+                                                                jlong tokenizer_stream_handle, jint token) {
   OgaTokenizerStream* tokenizer_stream = reinterpret_cast<OgaTokenizerStream*>(tokenizer_stream_handle);
   const char* decoded_text = nullptr;
 
@@ -29,7 +29,7 @@ Java_ai_onnxruntime_genai_TokenizerStream_tokenizerStreamDecode(JNIEnv* env, job
 
 extern "C" JNIEXPORT void JNICALL
 Java_ai_onnxruntime_genai_TokenizerStream_destroyTokenizerStream(JNIEnv* env, jobject thiz,
-                                                                  jlong tokenizer_stream_handle) {
+                                                                 jlong tokenizer_stream_handle) {
   OgaTokenizerStream* tokenizer_stream = reinterpret_cast<OgaTokenizerStream*>(tokenizer_stream_handle);
   OgaDestroyTokenizerStream(tokenizer_stream);
 }

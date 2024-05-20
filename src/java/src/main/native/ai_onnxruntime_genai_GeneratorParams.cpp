@@ -27,7 +27,7 @@ Java_ai_onnxruntime_genai_GeneratorParams_destroyGeneratorParams(JNIEnv* env, jo
 
 extern "C" JNIEXPORT void JNICALL
 Java_ai_onnxruntime_genai_GeneratorParams_setSearchOptionNumber(JNIEnv* env, jobject thiz, jlong native_handle,
-                                                                 jstring option_name, jdouble value) {
+                                                                jstring option_name, jdouble value) {
   OgaGeneratorParams* generator_params = reinterpret_cast<OgaGeneratorParams*>(native_handle);
   CString name{env, option_name};
 
@@ -36,7 +36,7 @@ Java_ai_onnxruntime_genai_GeneratorParams_setSearchOptionNumber(JNIEnv* env, job
 
 extern "C" JNIEXPORT void JNICALL
 Java_ai_onnxruntime_genai_GeneratorParams_setSearchOptionBool(JNIEnv* env, jobject thiz, jlong native_handle,
-                                                               jstring option_name, jboolean value) {
+                                                              jstring option_name, jboolean value) {
   OgaGeneratorParams* generator_params = reinterpret_cast<OgaGeneratorParams*>(native_handle);
   CString name{env, option_name};
 
@@ -45,7 +45,7 @@ Java_ai_onnxruntime_genai_GeneratorParams_setSearchOptionBool(JNIEnv* env, jobje
 
 extern "C" JNIEXPORT void JNICALL
 Java_ai_onnxruntime_genai_GeneratorParams_setInputSequences(JNIEnv* env, jobject thiz, jlong native_handle,
-                                                             jlong sequences_handle) {
+                                                            jlong sequences_handle) {
   OgaGeneratorParams* generator_params = reinterpret_cast<OgaGeneratorParams*>(native_handle);
   const OgaSequences* sequences = reinterpret_cast<const OgaSequences*>(sequences_handle);
 
@@ -58,7 +58,7 @@ Java_ai_onnxruntime_genai_GeneratorParams_setInputIDs(JNIEnv* env, jobject thiz,
   OgaGeneratorParams* generator_params = reinterpret_cast<OgaGeneratorParams*>(native_handle);
 
   auto num_tokens = sequence_length * batch_size;
-  const int32_t* tokens = reinterpret_cast<const int32_t*>(env->GetDirectBufferAddress(token_ids));  
+  const int32_t* tokens = reinterpret_cast<const int32_t*>(env->GetDirectBufferAddress(token_ids));
 
   ThrowIfError(env, OgaGeneratorParamsSetInputIDs(generator_params, tokens, num_tokens, sequence_length, batch_size));
 }

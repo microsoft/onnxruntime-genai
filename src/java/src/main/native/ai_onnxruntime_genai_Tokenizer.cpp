@@ -28,7 +28,7 @@ Java_ai_onnxruntime_genai_Tokenizer_destroyTokenizer(JNIEnv* env, jobject thiz, 
 
 extern "C" JNIEXPORT jlong JNICALL
 Java_ai_onnxruntime_genai_Tokenizer_tokenizerEncode(JNIEnv* env, jobject thiz, jlong tokenizer_handle,
-                                                     jobjectArray strings) {
+                                                    jobjectArray strings) {
   const OgaTokenizer* tokenizer = reinterpret_cast<const OgaTokenizer*>(tokenizer_handle);
   auto num_strings = env->GetArrayLength(strings);
 
@@ -51,7 +51,7 @@ Java_ai_onnxruntime_genai_Tokenizer_tokenizerEncode(JNIEnv* env, jobject thiz, j
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_ai_onnxruntime_genai_Tokenizer_tokenizerDecode(JNIEnv* env, jobject thiz, jlong tokenizer_handle,
-                                                     jintArray sequence) {
+                                                    jintArray sequence) {
   const OgaTokenizer* tokenizer = reinterpret_cast<const OgaTokenizer*>(tokenizer_handle);
   auto num_tokens = env->GetArrayLength(sequence);
   jint* jtokens = env->GetIntArrayElements(sequence, nullptr);

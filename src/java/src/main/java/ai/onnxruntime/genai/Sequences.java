@@ -4,7 +4,7 @@
 package ai.onnxruntime.genai;
 
 /** Represents a collection of encoded prompts/responses. */
-public class Sequences implements AutoCloseable {
+public final class Sequences implements AutoCloseable {
   private long nativeHandle;
   private long numSequences;
 

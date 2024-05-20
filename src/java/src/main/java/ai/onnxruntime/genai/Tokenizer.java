@@ -7,7 +7,7 @@ package ai.onnxruntime.genai;
 public class Tokenizer implements AutoCloseable {
   private long nativeHandle;
 
-  protected Tokenizer(Model model) throws GenAIException {
+  Tokenizer(Model model) throws GenAIException {
     assert (model.nativeHandle() != 0); // internal code should never pass an invalid model
 
     nativeHandle = createTokenizer(model.nativeHandle());

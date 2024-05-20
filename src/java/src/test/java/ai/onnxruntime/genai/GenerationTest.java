@@ -22,11 +22,6 @@ import org.junit.jupiter.api.condition.EnabledIf;
 public class GenerationTest {
   private static final Logger logger = Logger.getLogger(GenerationTest.class.getName());
 
-  // use to debug locally if all the native libs (genai and onnxruntime) are in one directory
-  // See /src/java/Debugging.md for more details.
-  // Ensure the property is set before any tests run by calling during static initialization.
-  // private static final boolean customPathRegistered = TestUtils.setLocalNativeLibraryPath();
-
   // phi-2 can be used in full end-to-end testing but needs to be manually downloaded.
   // it's also used this way in the C# unit tests.
   private static final String phi2ModelPath() {
@@ -64,7 +59,6 @@ public class GenerationTest {
   public void testUsageWithListener() throws GenAIException {
     SimpleGenAI generator = new SimpleGenAI(phi2ModelPath());
     GeneratorParams params = generator.createGeneratorParams("What's 6 times 7?");
-    // Listener listener = new Listener();
     Consumer<String> listener = token -> logger.info("onTokenGenerate: " + token);
     String result = generator.generate(params, listener);
 

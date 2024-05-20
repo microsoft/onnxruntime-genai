@@ -12,7 +12,7 @@ using namespace Helpers;
 
 extern "C" JNIEXPORT jlong JNICALL
 Java_ai_onnxruntime_genai_Generator_createGenerator(JNIEnv* env, jobject thiz, jlong model_handle,
-                                                     jlong generator_params_handle) {
+                                                    jlong generator_params_handle) {
   const OgaModel* model = reinterpret_cast<const OgaModel*>(model_handle);
   const OgaGeneratorParams* params = reinterpret_cast<const OgaGeneratorParams*>(generator_params_handle);
   OgaGenerator* generator = nullptr;
