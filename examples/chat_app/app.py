@@ -27,7 +27,7 @@ def change_model_listener(new_model_name):
 
     d = available_models[new_model_name]
 
-    if "phi3-mini-v" in new_model_name:
+    if "llava" in new_model_name:
         interface = MultiModal_ONNXModel(
             model_path=d["model_dir"]
         )
@@ -40,7 +40,7 @@ def change_model_listener(new_model_name):
 
     return [
         new_model_name,
-        gr.update(visible="phi3-mini-v" in new_model_name),
+        gr.update(visible="llava" in new_model_name),
         [],
         [],
         gr.update(value=""),
@@ -49,7 +49,7 @@ def change_model_listener(new_model_name):
 
 
 def change_image_visibility(new_model_name):
-    if "phi3-mini-v" in new_model_name:
+    if "llava" in new_model_name:
         return gr.update(visible=True)
 
     return gr.update(visible=False)
