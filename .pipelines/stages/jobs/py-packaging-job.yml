@@ -107,6 +107,7 @@ jobs:
         DIR $(Agent.ToolsDirectory)\Python
         DIR $(Agent.ToolsDirectory)\Python\3.11.0
         DIR $(Agent.ToolsDirectory)\Python\3.11.0\arm64
+        DIR "C:\Python"
       displayName: Copy python 3.11.0 version to agent tools directory
 
   - task: UsePythonVersion@0
