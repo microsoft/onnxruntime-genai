@@ -91,3 +91,5 @@ stages:
       ort_cuda_version: ${{ parameters.ort_cuda_version }}
       ort_dml_version: ${{ parameters.ort_dml_version }}
       cuda_version: ${{ parameters.cuda_version }}
+      SpecificArtifact: ${{ parameters.SpecificArtifact }}
+      BuildId: ${{ parameters.BuildId }}

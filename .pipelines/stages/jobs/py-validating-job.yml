@@ -16,7 +16,7 @@ parameters:
 
 
 jobs:
-- job: python_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}_packaging
+- job: python_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}_validating
   ${{ if eq(parameters.os, 'linux') }}:
     pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
   ${{ if eq(parameters.os, 'win') }}:
@@ -99,7 +99,7 @@ jobs:
   - template: steps/utils//flex-download-pipeline-artifact.yml
     parameters:
       StepName: 'Download Python Wheel Artifacts'
-      ArtifactName: ${{ artifactName }}
+      ArtifactName: $(ArtifactName)
       TargetPath: '$(Build.BinariesDirectory)/wheel'
       SpecificArtifact: ${{ parameters.specificArtifact }}
       BuildId: ${{ parameters.BuildId }}
@@ -108,8 +108,8 @@ jobs:
     - bash: |
         cd examples/python
         python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -e cpu -p int4 -o ./example-models/phi2-int4-cpu
-        python model-generate.py -m ./example-models/phi2-int4-cpu -ep ${{ ep }} -i "Hello world"
-        python model-qa.py -m ./example-models/phi2-int4-cpu -ep ${{ ep }}
+        python model-generate.py -m ./example-models/phi2-int4-cpu -ep $(ep) -i "Hello world"
+        python model-qa.py -m ./example-models/phi2-int4-cpu -ep $(ep)
       displayName: 'Run Example With Artifact'
       workingDirectory: '$(Build.Repository.LocalPath)'
 
@@ -118,8 +118,8 @@ jobs:
     - powershell: |
         cd examples\python
         python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -e cpu -p int4 -o ./example-models/phi2-int4-cpu
-        python model-generate.py -m ./example-models/phi2-int4-cpu -ep ${{ ep }} -i "Hello world"
-        python model-qa.py -m ./example-models/phi2-int4-cpu -ep ${{ ep }}
+        python model-generate.py -m ./example-models/phi2-int4-cpu -ep $(ep) -i "Hello world"
+        python model-qa.py -m ./example-models/phi2-int4-cpu -ep $(ep)
       displayName: 'Run Example With Artifact'
       workingDirectory: '$(Build.Repository.LocalPath)'
 

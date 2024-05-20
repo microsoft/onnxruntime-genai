@@ -30,6 +30,8 @@ stages:
         ep: 'cpu'
         ort_version: ${{ parameters.ort_version }}
         os: 'win'
+        SpecificArtifact: ${{ parameters.SpecificArtifact }}
+        BuildId: ${{ parameters.BuildId }}
 
   - ${{ if eq(parameters.enable_win_dml, true) }}:
     - template: jobs/py-validating-job.yml
@@ -38,6 +40,8 @@ stages:
         ep: 'directml'
         ort_version: ${{ parameters.ort_dml_version }}
         os: 'win'
+        SpecificArtifact: ${{ parameters.SpecificArtifact }}
+        BuildId: ${{ parameters.BuildId }}
 
   - ${{ if eq(parameters.enable_win_cuda, true) }}:
     - template: jobs/py-validating-job.yml
@@ -47,7 +51,8 @@ stages:
         ep: 'cuda'
         ort_version: ${{ parameters.ort_cuda_version }}
         os: 'win'
-
+        SpecificArtifact: ${{ parameters.SpecificArtifact }}
+        BuildId: ${{ parameters.BuildId }}
 
   - ${{ if eq(parameters.enable_linux_cpu, true) }}:
     - template: jobs/py-validating-job.yml
@@ -56,6 +61,8 @@ stages:
         ep: 'cpu'
         ort_version: ${{ parameters.ort_version }}
         os: 'linux'
+        SpecificArtifact: ${{ parameters.SpecificArtifact }}
+        BuildId: ${{ parameters.BuildId }}
 
   - ${{ if eq(parameters.enable_linux_cuda, true) }}:
     - template: jobs/py-validating-job.yml
@@ -65,5 +72,6 @@ stages:
         ep: 'cuda'
         ort_version: ${{ parameters.ort_cuda_version }}
         os: 'linux'
-
+        SpecificArtifact: ${{ parameters.SpecificArtifact }}
+        BuildId: ${{ parameters.BuildId }}
 
