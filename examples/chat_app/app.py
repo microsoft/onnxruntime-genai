@@ -8,6 +8,7 @@ from app_modules.overwrites import postprocess
 from app_modules.presets import description, small_and_beautiful_theme, title
 from app_modules.utils import cancel_outputing, delete_last_conversation, reset_state, reset_textbox, transfer_input
 from interface.hddr_llm_onnx_interface import ONNXModel
+from interface.multimodal_onnx_interface import MultiModal_ONNXModel
 
 top_directory = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 optimized_directory = os.path.join(top_directory, "models")
@@ -25,15 +26,21 @@ def change_model_listener(new_model_name):
         gc.collect()
 
     d = available_models[new_model_name]
-    interface = ONNXModel(
-        model_path=d["model_dir"]
-    )
+
+    if "phi3-mini-v" in new_model_name:
+        interface = MultiModal_ONNXModel(
+            model_path=d["model_dir"]
+        )
+    else:
+        interface = ONNXModel(
+            model_path=d["model_dir"]
+        )
 
     # interface.initialize()
 
     return [
         new_model_name,
-        gr.update(visible="llava" in new_model_name),
+        gr.update(visible="phi3-mini-v" in new_model_name),
         [],
         [],
         gr.update(value=""),
@@ -42,7 +49,7 @@ def change_model_listener(new_model_name):
 
 
 def change_image_visibility(new_model_name):
-    if "llava" in new_model_name:
+    if "phi3-mini-v" in new_model_name:
         return gr.update(visible=True)
 
     return gr.update(visible=False)
@@ -129,7 +136,7 @@ def launch_chat_app(expose_locally: bool = False):
                     label="Token Printing Step",
                 )
 
-                image = gr.Image(type="pil", visible=False)
+                image = gr.Image(type="filepath", visible=False)
                 image.change(
                     reset_state,
                     outputs=[chatbot, history, status_display],
@@ -166,6 +173,7 @@ def launch_chat_app(expose_locally: bool = False):
                 max_length_tokens,
                 max_context_length_tokens,
                 token_printing_step,
+                image
             ],
             "outputs": [chatbot, history, status_display],
             "show_progress": True,
@@ -210,9 +218,9 @@ def launch_chat_app(expose_locally: bool = False):
     demo.title = "LLM Chat UI"
 
     if expose_locally:
-        demo.queue(concurrency_count=1).launch(server_name="0.0.0.0", server_port=7860)
+        demo.queue(concurrency_count=1).launch(server_name="0.0.0.0", server_port=5000)
     else:
-        demo.queue(concurrency_count=1).launch(server_port=7860)
+        demo.queue(concurrency_count=1).launch(share=True, server_port=5000)
 
 
 if __name__ == "__main__":
