@@ -1,6 +1,8 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
+set(JAVA_AWT_LIBRARY NotNeeded)
+set(JAVA_AWT_INCLUDE_PATH NotNeeded)
 include(FindJava)
 find_package(Java REQUIRED)
 include(UseJava)
@@ -106,10 +108,6 @@ set(JAVA_PACKAGE_LIB_DIR ${JAVA_NATIVE_LIB_DIR}/${JAVA_PACKAGE_DIR})
 file(MAKE_DIRECTORY ${JAVA_PACKAGE_LIB_DIR})
 
 if (WIN32)
-  # Uncomment the below line if you need to debug unit tests on Windows so that all the native dlls end up in the
-  # one directory. See Debugging.md and test/java/ai/onnxruntime-genai/TestUtils.java.
-  # set(JAVA_PACKAGE_LIB_DIR ${JAVA_PACKAGE_JNI_DIR})
-
   # Add the native genai library to the native-lib dir
   add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
                      COMMAND ${CMAKE_COMMAND} -E copy_if_different 
@@ -120,7 +118,7 @@ if (WIN32)
     add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
                         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${ort_dll} ${JAVA_PACKAGE_LIB_DIR})
   endforeach()
-
+else()
   # Add the JNI bindings to the native-jni dir
   add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
                      COMMAND ${CMAKE_COMMAND} -E copy_if_different 
