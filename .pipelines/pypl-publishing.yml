@@ -80,8 +80,8 @@ stages:
       ort_dml_version: ${{ parameters.ort_dml_version }}
       cuda_version: ${{ parameters.cuda_version }}
 - ${{ if eq(parameters.SpecificArtifact, true) }}:
-    - template: stages/py-validating-stage.yml
-      parameters:
+  - template: stages/py-validating-stage.yml
+    parameters:
       enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
       enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
       enable_win_cpu: ${{ parameters.enable_win_cpu }}
