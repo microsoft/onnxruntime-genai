@@ -37,7 +37,7 @@ def run(args: argparse.Namespace):
         text = input("Prompt: ")
         prompt += f"{text}<|end|>\n<|assistant|>\n"
         print("Processing image and prompt...")
-        inputs = processor(prompt, image)
+        inputs = processor(prompt, images=image)
 
         print("Generating response...")
         params = og.GeneratorParams(model)
