@@ -112,14 +112,15 @@ std::unique_ptr<Images> LoadImage(const char* image_path) {
   return std::make_unique<Images>(std::move(images), num_images);
 }
 
-ImageProcessor::ImageProcessor(const Config& config, const SessionInfo& session_info)
-    : input_ids_name_{config.model.embedding.inputs.input_ids},
-      pixel_values_name_{config.model.vision.inputs.pixel_values},
-      pixel_values_type_{session_info.GetInputDataType(pixel_values_name_)},
-      image_sizes_name_{config.model.vision.inputs.image_sizes} {
+ImageProcessor::ImageProcessor(Config& config, const SessionInfo& session_info)
+    : pixel_values_type_{session_info.GetInputDataType(config.model.vision.inputs.pixel_values)} {
   constexpr std::string_view default_processor_file_name = "processor_config.json";
   auto processor_config = (config.config_path / default_processor_file_name).u8string();
   CheckResult(OrtxCreateProcessor(processor_.Address(), reinterpret_cast<const char*>(processor_config.c_str())));
+
+  config.AddMapping(std::string(Config::Defaults::InputIdsName), config.model.embedding.inputs.input_ids);
+  config.AddMapping(std::string(Config::Defaults::PixelValuesName), config.model.vision.inputs.pixel_values);
+  config.AddMapping(std::string(Config::Defaults::ImageSizesName), config.model.vision.inputs.image_sizes);
 }
 
 std::unique_ptr<NamedTensors> ImageProcessor::Process(const Tokenizer& tokenizer, const std::string& prompt,
@@ -128,7 +129,7 @@ std::unique_ptr<NamedTensors> ImageProcessor::Process(const Tokenizer& tokenizer
   auto named_tensors = std::make_unique<NamedTensors>();
 
   if (!images) {
-    named_tensors->emplace(input_ids_name_,
+    named_tensors->emplace(Config::Defaults::InputIdsName,
                            std::make_shared<Tensor>(ProcessImagePrompt(tokenizer, prompt, nullptr, allocator)));
     return named_tensors;
   }
@@ -144,11 +145,11 @@ std::unique_ptr<NamedTensors> ImageProcessor::Process(const Tokenizer& tokenizer
     throw std::runtime_error(status.ToString());
   }
 
-  named_tensors->emplace(input_ids_name_,
+  named_tensors->emplace(std::string(Config::Defaults::InputIdsName),
                          std::make_shared<Tensor>(ProcessImagePrompt(tokenizer, prompt, num_img_tokens, allocator)));
-  named_tensors->emplace(pixel_values_name_,
+  named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
                          std::make_shared<Tensor>(ProcessPixelValues(pixel_values, pixel_values_type_, allocator)));
-  named_tensors->emplace(image_sizes_name_,
+  named_tensors->emplace(std::string(Config::Defaults::ImageSizesName),
                          std::make_shared<Tensor>(ProcessImageSizes(image_sizes, allocator)));
 
   processor->ClearOutputs(&result);

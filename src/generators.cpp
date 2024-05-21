@@ -36,7 +36,8 @@ GeneratorParams::GeneratorParams(const Model& model)
       hidden_size{model.config_->model.decoder.hidden_size},
       device_type{model.device_type_},
       cuda_stream{model.cuda_stream_},
-      is_cuda_graph_enabled_{IsCudaGraphEnabled(model.config_->model.decoder.session_options)} {
+      is_cuda_graph_enabled_{IsCudaGraphEnabled(model.config_->model.decoder.session_options)},
+      nominal_names_to_graph_names_{model.config_->nominal_names_to_graph_names_} {
   use_cuda_graph = is_cuda_graph_enabled_;
   if (use_cuda_graph) {
     max_batch_size = 1;  // set it to 1 by default
@@ -61,16 +62,18 @@ void GeneratorParams::TryGraphCapture(int max_bs) {
 }
 
 void GeneratorParams::SetInputs(const NamedTensors& named_tensors) {
-  constexpr std::string_view default_input_ids_name = "input_ids";
-
   for (const auto& [name, tensor] : named_tensors) {
-    if (name == default_input_ids_name) {
+    if (name == Config::Defaults::InputIdsName) {
       input_ids = std::span<const int32_t>(tensor->ort_tensor_->GetTensorMutableData<int32_t>(),
                                            tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount());
       batch_size = static_cast<int>(tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape()[0]);
       sequence_length = static_cast<int>(input_ids.size()) / batch_size;
     } else {
-      extra_inputs.push_back({name, tensor});
+      auto it = nominal_names_to_graph_names_.find(name);
+      // If the nominal name is found in the map, use the graph name.
+      // Else, use the nominal name as the graph name.
+      std::string graph_name = it == nominal_names_to_graph_names_.end() ? name : it->second;
+      extra_inputs.push_back({graph_name, tensor});
     }
   }
 }

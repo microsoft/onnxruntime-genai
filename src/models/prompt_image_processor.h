@@ -19,7 +19,7 @@ struct Images {
 std::unique_ptr<Images> LoadImage(const char* image_path);
 
 struct ImageProcessor {
-  ImageProcessor(const Config& config, const SessionInfo& session_info);
+  ImageProcessor(Config& config, const SessionInfo& session_info);
 
   // Returned NamedTensors own the OrtValue and are not owned by the caller.
   // OrtValue memory will be released when the NamedTensors are destroyed.

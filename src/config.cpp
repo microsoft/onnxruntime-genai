@@ -551,4 +551,22 @@ Config::Config(const fs::path& path) : config_path{path} {
     search.max_length = model.context_length;
 }
 
+void Config::AddMapping(const std::string& nominal_name, const std::string& graph_name) {
+  auto [it, emplaced] = nominal_names_to_graph_names_.emplace(nominal_name, graph_name);
+  if (it->second != graph_name) {
+    std::ostringstream oss;
+    oss << "Duplicate nominal name: " << nominal_name << " with graph names: "
+        << graph_name << " and " << it->second;
+    throw std::runtime_error(oss.str());
+  }
+}
+
+std::pair<std::string, bool> Config::GetGraphName(const std::string& nominal_name) const {
+  auto it = nominal_names_to_graph_names_.find(nominal_name);
+  if (it == nominal_names_to_graph_names_.end()) {
+    return {nominal_name, false};
+  }
+  return {it->second, true};
+}
+
 }  // namespace Generators

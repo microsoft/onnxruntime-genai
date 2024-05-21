@@ -45,8 +45,8 @@ void Select(std::span<const int32_t> input_ids, OrtValue* hidden_states, OrtValu
     case DeviceType::CPU: {
       auto target = cpu_span<float>(hidden_states->GetTensorMutableData<float>(), hidden_states_element_count)
                         .subspan(start_pos, element_count);
-      auto source = visual_features->GetTensorMutableData<float>();
-      std::copy(target.begin(), target.end(), source);
+      auto source = cpu_span<float>(visual_features->GetTensorMutableData<float>(), element_count);
+      std::copy(source.begin(), source.end(), target.begin());
       break;
     }
 #if USE_CUDA

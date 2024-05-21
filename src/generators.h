@@ -119,6 +119,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams> {
 
  private:
   bool is_cuda_graph_enabled_{};
+  const std::unordered_map<std::string, std::string> nominal_names_to_graph_names_;
 };
 
 struct Generator {

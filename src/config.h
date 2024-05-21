@@ -8,6 +8,12 @@ struct Config {
   Config() = default;
   Config(const fs::path& path);
 
+  struct Defaults {
+    static constexpr std::string_view InputIdsName = "input_ids";
+    static constexpr std::string_view PixelValuesName = "pixel_values";
+    static constexpr std::string_view ImageSizesName = "image_sizes";
+  };
+
   fs::path config_path;  // Path of the config directory
 
   using ProviderOption = std::pair<std::string, std::string>;
@@ -49,7 +55,7 @@ struct Config {
       std::string filename;
 
       struct Inputs {
-        std::string input_ids{"input_ids"};
+        std::string input_ids{Defaults::InputIdsName};
       } inputs;
 
       struct Outputs {
@@ -61,8 +67,8 @@ struct Config {
       std::string filename;
 
       struct Inputs {
-        std::string pixel_values{"pixel_values"};
-        std::string image_sizes{"image_sizes"};
+        std::string pixel_values{Defaults::PixelValuesName};
+        std::string image_sizes{Defaults::ImageSizesName};
       } inputs;
 
       struct Outputs {
@@ -81,7 +87,7 @@ struct Config {
       int head_size{};
 
       struct Inputs {
-        std::string input_ids{"input_ids"};
+        std::string input_ids{Defaults::InputIdsName};
         std::string embeddings{"inputs_embeds"};
         std::string position_ids{"position_ids"};
         std::string attention_mask{"attention_mask"};
@@ -119,6 +125,13 @@ struct Config {
     bool past_present_share_buffer{};  // The past/present kv tensors are shared and allocated once to max_length (cuda only)
     int random_seed{-1};               // -1 = Seed with random device, otherwise use value to seed RNG
   } search;
+
+  void AddMapping(const std::string& nominal_name, const std::string& graph_name);
+  // Returns graph name and true if the nominal name is found in the mapping
+  // otherwise returns the nominal name and false
+  std::pair<std::string, bool> GetGraphName(const std::string& nominal_name) const;
+
+  std::unordered_map<std::string, std::string> nominal_names_to_graph_names_;  // Mapping of nominal input/output names to graph input/output names
 };
 
 void SetSearchNumber(Config::Search& search, std::string_view name, double value);
