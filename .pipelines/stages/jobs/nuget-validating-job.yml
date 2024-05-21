@@ -106,8 +106,8 @@ jobs:
 
   - ${{ if eq(parameters.os, 'win') }}:
     - powershell: |
-        Copy-Item -Force -Recurse -Verbose $(Build.BinariesDirectory)/nuget/* -Destination examples\csharp\HelloPhi
-        cd examples\csharp\HelloPhi
+        Copy-Item -Force -Recurse -Verbose $(Build.BinariesDirectory)/nuget/* -Destination examples/csharp/HelloPhi/
+        cd examples/csharp/HelloPhi
         dotnet restore
         dotnet run
       displayName: 'Run Example With Artifact'
