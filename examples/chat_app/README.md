@@ -10,6 +10,7 @@ This is a chat demo using the various versions of the LLMs
 # set up
 
 1. Install **onnxruntime-genai-directml** 
+    > If you want to use CUDA model, you can download `onnxruntime-genai-cuda` package.
    
    ```
    pip install numpy
@@ -43,6 +44,8 @@ This is a chat demo using the various versions of the LLMs
             --meta-llama_Llama-2-7b-chat-hf
             --mistralai_Mistral-7B-Instruct-v0.1
             ...
+        --cuda
+            --phi3-mini-v
     ```
 
 
