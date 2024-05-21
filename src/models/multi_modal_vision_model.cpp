@@ -12,8 +12,8 @@ RoamingArray<float> MakeDummy() {
   return RoamingArray<float>();
 }
 
-void Select(std::span<const int32_t> input_ids, OrtValue* hidden_states, OrtValue* visual_features,
-            int32_t num_img_tokens, int32_t hidden_size, DeviceType device_type,
+void Select(const Model& model, std::span<const int32_t> input_ids, OrtValue* hidden_states,
+            OrtValue* visual_features, int32_t num_img_tokens, int32_t hidden_size, DeviceType device_type,
             cudaStream_t cuda_stream) {
   // Assme batch_size = 1
   constexpr int32_t min_input_id = -1000000000;
@@ -51,6 +51,26 @@ void Select(std::span<const int32_t> input_ids, OrtValue* hidden_states, OrtValu
       auto source = gpu_span<uint16_t>(visual_features->GetTensorMutableData<uint16_t>(), element_count);
       CudaCheck() == cudaMemcpyAsync(target.data(), source.data(), source.size_bytes(),
                                      cudaMemcpyDeviceToDevice, cuda_stream);
+      break;
+    }
+#endif
+
+#if USE_DML
+    case DeviceType::DML: {
+      ComPtr<ID3D12Resource> source_resource;
+      Ort::ThrowOnError(model.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model.allocator_device_, visual_features->GetTensorMutableRawData(), &source_resource));
+
+      ComPtr<ID3D12Resource> target_resource;
+      Ort::ThrowOnError(model.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model.allocator_device_, hidden_states->GetTensorMutableRawData(), &target_resource));
+
+      model.GetDmlExecutionContext()->CopyBufferRegion(
+          target_resource.Get(),
+          start_pos * sizeof(uint16_t),
+          D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+          source_resource.Get(),
+          0,
+          D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+          element_count * sizeof(uint16_t));
       break;
     }
 #endif
@@ -115,10 +135,16 @@ std::unique_ptr<OrtValue> GetVisualFeatures(OrtAllocator& device_allocator, cons
 
 MultiModalVisionModel::MultiModalVisionModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
+  auto* embedding_session_options = embedding_session_options_ ? embedding_session_options_.get() : session_options_.get();
+
   embedding_session_ = OrtSession::Create(
       ort_env, (config_->config_path / config_->model.embedding.filename).c_str(), session_options_.get());
+
+  // User a custom vision session if available; otherwise, fallback to the generic options
+  auto* vision_session_options = vision_session_options_ ? vision_session_options_.get() : session_options_.get();
+
   vision_session_ = OrtSession::Create(
-      ort_env, (config_->config_path / config_->model.vision.filename).c_str(), session_options_.get());
+      ort_env, (config_->config_path / config_->model.vision.filename).c_str(), vision_session_options);
   decoder_session_ = OrtSession::Create(
       ort_env, (config_->config_path / config_->model.decoder.filename).c_str(), session_options_.get());
 
@@ -217,7 +243,7 @@ RoamingArray<float> MultiModalPipelineState::Run(int current_length, RoamingArra
       vision_state_->Run(current_length, next_tokens, next_indices);
 
       // Run the select logic
-      Select(params_->input_ids, embedding_state_->inputs_embeds_.Get(),
+      Select(model_, params_->input_ids, embedding_state_->inputs_embeds_.Get(),
              vision_state_->visual_features_.get(), vision_state_->num_image_tokens_,
              params_->hidden_size, params_->device_type, params_->cuda_stream);
     }
