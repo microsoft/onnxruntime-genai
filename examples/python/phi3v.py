@@ -59,6 +59,6 @@ def run(args: argparse.Namespace):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_path", type=str, required=True, help="Path to the model")
+    parser.add_argument("-m", "--model_path", type=str, required=True, help="Path to the model")
     args = parser.parse_args()
     run(args)

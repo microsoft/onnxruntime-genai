@@ -67,11 +67,15 @@ void C_API(const char* model_path) {
       CheckResult(OgaGenerator_ComputeLogits(generator));
       CheckResult(OgaGenerator_GenerateNextToken(generator));
 
-      int32_t new_token = OgaGenerator_GetSequenceData(generator, 0)[0];
+      const int32_t num_tokens = OgaGenerator_GetSequenceCount(generator, 0);
+      int32_t new_token = OgaGenerator_GetSequenceData(generator, 0)[num_tokens - 1];
       const char* new_token_string;
       CheckResult(OgaTokenizerStreamDecode(tokenizer_stream, new_token, &new_token_string));
-      std::cout << new_token_string;
+      std::cout << new_token_string << std::flush;
     }
+
+    for (int i = 0; i < 3; ++i)
+      std::cout << std::endl;
 
     OgaDestroyGeneratorParams(params);
     OgaDestroyNamedTensors(input_tensors);
