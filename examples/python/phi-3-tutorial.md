@@ -1,4 +1,4 @@
-# Run the Phi-3 Mini models with the ONNX Runtime generate() API
+# Run the Phi-3 models with the ONNX Runtime generate() API
 
 ## Steps
 1. [Setup](#setup)
@@ -9,17 +9,17 @@
 
 ## Introduction
 
-There are two Phi-3 mini models to choose from: the short (4k) context version or the long (128k) context version. The long context version can accept much longer prompts and produce longer output text, but it does consume more memory.
+There are many Phi-3 models to choose from: Phi-3 mini, Phi-3 small, Phi-3 medium, and Phi-3 vision (coming soon). There are short (4K/8K) context versions and long (128K) context versions to choose from. The long context version can accept much longer prompts and produce longer output text, but it does consume more memory.
 
-The Phi-3 ONNX models are hosted on HuggingFace: [short](https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-onnx) and [long](https://huggingface.co/microsoft/Phi-3-mini-128k-instruct-onnx).
+The Phi-3 ONNX models are hosted [here](https://huggingface.co/collections/microsoft/phi-3-6626e15e9585a200d2d761e3) in a collection on Hugging Face.
 
-This tutorial downloads and runs the short context model. If you would like to use the long context model, change the `4k` to `128k` in the instructions below.
+This tutorial downloads and runs the Phi-3 mini short context model. If you would like to use another model, please change the model name in the instructions below.
 
 ## Setup
 
 1. Install the git large file system extension
 
-   HuggingFace uses `git` for version control. To download the ONNX models you need `git lfs` to be installed, if you do not already have it.
+   Hugging Face uses `git` for version control. To download the ONNX models you need `git lfs` to be installed, if you do not already have it.
 
    * Windows: `winget install -e --id GitHub.GitLFS` (If you don't have winget, download and run the `exe` from the [official source](https://docs.github.com/en/repositories/working-with-files/managing-large-files/installing-git-large-file-storage?platform=windows))
    * Linux: `apt-get install git-lfs`
@@ -43,7 +43,7 @@ Are you on a Windows machine with GPU?
   * Yes &rarr; Follow the instructions for [NVIDIA CUDA GPU](#run-with-nvidia-cuda).
   * No &rarr; Follow the instructions for [CPU](#run-on-cpu).
  
-**Note: Only one package and model is required based on your hardware. That is, only execute the steps for one of the following sections**
+**Note: Only one package and model is required based on your hardware. That is, only execute the steps for one of the following sections.**
 
 ## Run with DirectML
 
