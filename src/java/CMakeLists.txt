@@ -107,24 +107,23 @@ set(JAVA_NATIVE_LIB_DIR ${JAVA_OUTPUT_DIR}/native-lib)
 set(JAVA_PACKAGE_LIB_DIR ${JAVA_NATIVE_LIB_DIR}/${JAVA_PACKAGE_DIR})
 file(MAKE_DIRECTORY ${JAVA_PACKAGE_LIB_DIR})
 
-if (WIN32)
-  # Add the native genai library to the native-lib dir
+# Add the native genai library to the native-lib dir
+add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different 
+                      $<TARGET_FILE:onnxruntime-genai> 
+                      ${JAVA_PACKAGE_LIB_DIR}/$<TARGET_FILE_NAME:onnxruntime-genai>)
+                      
+# also need the onnxruntime libraries in the same directory as onnxruntime-genai.dll has a dependency on it
+foreach (ort_dll ${onnxruntime_libs})
   add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
-                     COMMAND ${CMAKE_COMMAND} -E copy_if_different 
-                       $<TARGET_FILE:onnxruntime-genai> 
-                       ${JAVA_PACKAGE_LIB_DIR}/$<TARGET_FILE_NAME:onnxruntime-genai>)
-  # also need the onnxruntime libraries in the same directory as onnxruntime-genai.dll has a dependency on it
-  foreach (ort_dll ${onnxruntime_libs})
-    add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
-                        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${ort_dll} ${JAVA_PACKAGE_LIB_DIR})
-  endforeach()
-else()
-  # Add the JNI bindings to the native-jni dir
-  add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
-                     COMMAND ${CMAKE_COMMAND} -E copy_if_different 
-                       $<TARGET_FILE:onnxruntime-genai-jni> 
-                       ${JAVA_PACKAGE_LIB_DIR}/$<TARGET_FILE_NAME:onnxruntime-genai-jni>)
-endif()
+                      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${ort_dll} ${JAVA_PACKAGE_LIB_DIR})
+endforeach()
+
+# Add the JNI bindings to the native-jni dir
+add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different 
+                      $<TARGET_FILE:onnxruntime-genai-jni> 
+                      ${JAVA_PACKAGE_LIB_DIR}/$<TARGET_FILE_NAME:onnxruntime-genai-jni>)
 
 # run the build process
 set(GRADLE_ARGS cmakeBuild -DcmakeBuildDir=${JAVA_OUTPUT_DIR} -DnativeLibDir=${JAVA_PACKAGE_LIB_DIR})
