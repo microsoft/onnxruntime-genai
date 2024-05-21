@@ -66,3 +66,7 @@ This is a chat demo using the various versions of the LLMs
 
    Then open the local URL in broswer
    ![alt text](image.png)
+
+   For vision model, you will have blow UI interface.
+
+   ![alt text](vision_UI_interface.png)
