@@ -77,6 +77,16 @@ jobs:
   - name: os
     value: ${{ parameters.os }}
 
+  - name: pip_package_name
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      value: 'onnxruntime_genai'
+    ${{ elseif eq(parameters.ep, 'cuda') }}:
+      value: 'onnxruntime_genai_cuda'
+    ${{ elseif eq(parameters.ep, 'directml')}}:
+      value: 'onnxruntime_genai_directml'
+    ${{ else }}:
+      value: 'onnxruntime_genai'
+
   - name: ort_filename
     ${{ if eq(parameters.ep, 'cpu') }}:
       value: 'Microsoft.ML.OnnxRuntime'
@@ -125,7 +135,7 @@ jobs:
     - bash: |
         python -m pip install numpy transformers torch onnx onnxruntime
         cd examples/python
-        python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel onnxruntime_genai
+        python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)
         python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -e cpu -p int4 -o ./example-models/phi2-int4-cpu
         python model-generate.py -m ./example-models/phi2-int4-cpu
       displayName: 'Run Example With Artifact'
@@ -136,7 +146,7 @@ jobs:
     - powershell: |
         python -m pip install numpy transformers torch onnx onnxruntime
         cd examples\python
-        python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel onnxruntime_genai
+        python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)
         python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -e cpu -p int4 -o ./example-models/phi2-int4-cpu
         python model-generate.py -m ./example-models/phi2-int4-cpu
       displayName: 'Run Example With Artifact'
