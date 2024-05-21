@@ -98,8 +98,6 @@ jobs:
     value: "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.14.2"
 
   steps:
-  - env:
-      HF_TOKEN: $(HF_TOKEN)
   - task: UsePythonVersion@0
     inputs:
       versionSpec: $(PyDotVer)
@@ -132,7 +130,8 @@ jobs:
         python model-generate.py -m ./example-models/phi2-int4-cpu
       displayName: 'Run Example With Artifact'
       workingDirectory: '$(Build.Repository.LocalPath)'
-
+      env:
+        HF_TOKEN: $(HF_TOKEN)
   - ${{ if eq(parameters.os, 'win') }}:
     - powershell: |
         python -m pip install numpy transformers torch onnx onnxruntime
@@ -142,6 +141,8 @@ jobs:
         python model-generate.py -m ./example-models/phi2-int4-cpu
       displayName: 'Run Example With Artifact'
       workingDirectory: '$(Build.Repository.LocalPath)'
+      env:
+        HF_TOKEN: $(HF_TOKEN)
 
   - template: steps/compliant-and-cleanup-step.yml
 
