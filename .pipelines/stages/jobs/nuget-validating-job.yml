@@ -1,0 +1,120 @@
+parameters:
+- name: SpecificArtifact
+  displayName: Use Specific Artifact
+  type: boolean
+  default: false
+- name: BuildId
+  displayName: Specific Artifact's BuildId
+  type: string
+  default: '0'
+- name: arch
+  type: string
+- name: ep
+  type: string
+- name: ort_version
+  type: string
+- name: cuda_version
+  type: string
+  default: ''
+- name: os
+  type: string
+  values:
+  - 'linux'
+  - 'win'
+
+jobs:
+- job: nuget_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}_validating
+  ${{ if eq(parameters.os, 'linux') }}:
+    pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
+  ${{ if eq(parameters.os, 'win') }}:
+    ${{ if eq(parameters.ep, 'directml') }}:
+      pool: 'onnxruntime-Win2022-GPU-dml-A10'
+    ${{ else }}:
+      pool: 'onnxruntime-Win-CPU-2022'
+  timeoutInMinutes: 180
+  #  set variables here to be used in the template and steps
+  variables:
+  - name: arch
+    value: ${{ parameters.arch }}
+  - name: artifactName
+    value: 'onnxruntime-genai-${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.arch }}'
+  - name: buildConfig
+    value: 'Release'
+  - name: buildDir
+    value: 'build/${{ parameters.ep }}'
+  - name: cuda_version
+    value: ${{ parameters.cuda_version }}
+  - name: ep
+    value: ${{ parameters.ep }}
+  - name: ort_version
+    value: ${{ parameters.ort_version }}
+  - name: GDN_CODESIGN_TARGETDIRECTORY
+    value: '$(Build.ArtifactStagingDirectory)/nuget'
+  - name: os
+    value: ${{ parameters.os }}
+  - name: ort_filename
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      value: 'Microsoft.ML.OnnxRuntime'
+    ${{ elseif eq(parameters.ep, 'cuda') }}:
+      ${{if eq(parameters.os, 'win') }}:
+        value: 'Microsoft.ML.OnnxRuntime.Gpu.Windows'
+      ${{ else }}:
+        value: 'Microsoft.ML.OnnxRuntime.Gpu.Linux'
+    ${{ elseif eq(parameters.ep, 'directml')}}:
+      value: 'Microsoft.ML.OnnxRuntime.DirectML'
+    ${{ else }}:
+      value: 'Microsoft.ML.OnnxRuntime'
+
+  - name: genai_nuget_ext
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      value: ''
+    ${{ if eq(parameters.ep, 'cuda') }}:
+      value: '.Cuda'
+    ${{ if eq(parameters.ep, 'directml') }}:
+      value: '.DirectML'
+  - name: ort_nuget_ext
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      value: ''
+    ${{ if eq(parameters.ep, 'cuda') }}:
+      value: '.Gpu'
+    ${{ if eq(parameters.ep, 'directml') }}:
+      value: '.DirectML'
+  - name: ortHome
+    value: 'ort'
+  - name: dml_dir
+    value: 'Microsoft.AI.DirectML.1.14.2'
+  - name: dml_zip
+    value: 'Microsoft.AI.DirectML.1.14.2.zip'
+  - name: dml_url
+    value: "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.14.2"
+  workspace:
+    clean: all
+  steps:
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: 3.10
+      addToPath: true
+      architecture: $(arch)
+  - ${{ if eq(parameters.os, 'win') }}:
+    - template: steps/utils//flex-download-pipeline-artifact.yml
+      parameters:
+        StepName: 'Download NuGet Artifacts'
+        ArtifactName: $(ArtifactName)-nuget
+        TargetPath: '$(Build.BinariesDirectory)/nuget'
+        SpecificArtifact: ${{ parameters.specificArtifact }}
+        BuildId: ${{ parameters.BuildId }}
+
+  - ${{ if eq(parameters.os, 'win') }}:
+    - powershell: |
+        Copy-Item -Force -Recursive -Verbose $(Build.BinariesDirectory)/nuget -Destination examples\csharp\HelloPhi
+        cd examples\csharp\HelloPhi
+        dotnet restore
+        dotnet run
+      displayName: 'Run Example With Artifact'
+      workingDirectory: '$(Build.Repository.LocalPath)'
+      env:
+        HF_TOKEN: $(HF_TOKEN)
+
+
+  - template: steps/compliant-and-cleanup-step.yml
+
