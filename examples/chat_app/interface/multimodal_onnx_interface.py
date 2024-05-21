@@ -1,10 +1,8 @@
 import gc
 import os
 import sys
-
 import onnxruntime_genai as og
 from consts import default_prompt, logging
-
 from app_modules.utils import convert_to_markdown, is_stop_word_or_prefix, shared_state
 
 logging.getLogger("interface")
@@ -40,13 +38,9 @@ class MultiModal_ONNXModel():
             history.clear()
             prompt = f'{self.chat_template.format(input=text)}'
 
-        print(prompt, '????????')
-
         logging.info("Loading image ...")
         # self.image = og.Images.open("/home/ruiren/Vision-Model-Demo/RING.jpg")
         self.image = og.Images.open(image)
-        print(self.image)
-        print(type(self.image))
 
         logging.info("Preprocessing image and prompt ...")
         input_ids = self.processor(prompt, self.image)
@@ -70,10 +64,7 @@ class MultiModal_ONNXModel():
             generator.compute_logits()
             generator.generate_next_token()
             next_token = generator.get_next_tokens()[0]
-
             output += self.tokenizer.decode(next_token)
-
-            print(self.tokenizer.decode(next_token), end="", flush=True)
 
         return output
 
@@ -83,8 +74,6 @@ class MultiModal_ONNXModel():
             yield chatbot, history, "Empty context"
             return
 
-        logging.info(f"Here is the image, {args[0]}")
-
         input_ids = self.generate_prompt_with_history(
                 text=text,
                 history=history,
@@ -92,38 +81,11 @@ class MultiModal_ONNXModel():
                 max_length=max_context_length_tokens
         )
 
-        human_tokens = [
-                "[|Human|]",
-                "Human:",
-                "### HUMAN:",
-                "### User:",
-                "USER:",
-                "<|im_start|>user",
-                "<|user|>",
-                "### Instruction:",
-                "GPT4 Correct User:",
-                ]
-
-        ai_tokens = [
-                "[|AI|]",
-                "AI:",
-                "### RESPONSE:",
-                "### Response:",
-                "ASSISTANT:",
-                "<|im_start|>assistant",
-                "<|assistant|>",
-                "GPT4 Correct Assistant:",
-                "### Assistant:",
-                ]
-
         sentence = self.search(
                 input_ids,
                 max_length=max_length_tokens,
                 token_printing_step=token_printing_step,
             )
-
-
-        logging.info(sentence)
 
         sentence = sentence.strip()
         a, b = [[y[0], convert_to_markdown(y[1])] for y in history] + [[text, convert_to_markdown(sentence)]], [
@@ -143,7 +105,6 @@ class MultiModal_ONNXModel():
 
         del input_ids
         gc.collect()
-
 
         try:
             yield a, b, "Generate: Success"
