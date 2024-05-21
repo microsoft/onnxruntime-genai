@@ -27,8 +27,7 @@ namespace fs {
 class path {
  public:
   path() = default;
-  path(const std::string& path) : path_(path)
-  {
+  path(const std::string& path) : path_(path) {
 #ifdef _WIN32
     wpath_ = to_wstring();
 #endif
@@ -81,7 +80,7 @@ class path {
     return wpath_.c_str();
   }
 #else
-  const char* c_str() const
+  const char* c_str() const {
     return path_.c_str();
   }
 #endif
@@ -140,7 +139,7 @@ class path {
     // Return as a string
     return out;
   }
-#endif // _WIN32
+#endif  // _WIN32
 };
 
-}  // namespace ort_extensions
+}  // namespace fs
