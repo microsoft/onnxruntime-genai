@@ -21,7 +21,7 @@ See documentation at https://onnxruntime.ai/docs/genai.
 |Architecture|x86 <br/> x64 <br/> | Arm64 |||
 |Hardware Acceleration|CUDA<br/>DirectML<br/>|QNN <br/> ROCm |OpenVINO
 
-\* The Llama model architecture also includes CodeLlama models, Yi models and Vicuna models
+\* The Llama model architecture supports similar model families such as CodeLlama, Vicuna, Yi, and more.
 
 \+ The Mistral model architecture also includes Zephyr models
 
