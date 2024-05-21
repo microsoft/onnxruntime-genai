@@ -1,9 +1,7 @@
 import gc
-import os
-import sys
 import onnxruntime_genai as og
 from consts import default_prompt, logging
-from app_modules.utils import convert_to_markdown, is_stop_word_or_prefix, shared_state
+from app_modules.utils import convert_to_markdown, shared_state
 
 logging.getLogger("interface")
 
