@@ -1,6 +1,6 @@
 # ONNX Runtime generate() API
 
-![Latest version](https://img.shields.io/nuget/vpre/Microsoft.ML.OnnxRuntimeGenAI.Managed?label=pre-release)
+![Latest version](https://img.shields.io/nuget/vpre/Microsoft.ML.OnnxRuntimeGenAI.Managed?label=latest)
 
 Run Llama, Phi, Gemma, Mistral with ONNX Runtime.
 
