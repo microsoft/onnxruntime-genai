@@ -439,7 +439,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           throw std::runtime_error("Loading multiple images is not supported");
 
         auto image_path = image_paths[0].cast<std::string>();
-        return LoadImage(image_path.c_str());
+        return LoadImageImpl(image_path.c_str());
       });
 
   pybind11::class_<PyNamedTensors>(m, "NamedTensors");

@@ -104,7 +104,7 @@ std::unique_ptr<OrtValue> ProcessImageSizes(ortc::Tensor<int64_t>* image_sizes, 
 
 }  // namespace
 
-std::unique_ptr<Images> LoadImage(const char* image_path) {
+std::unique_ptr<Images> LoadImageImpl(const char* image_path) {
   if (!fs::exists(image_path)) {
     throw std::runtime_error("Image path does not exist: " + std::string(image_path));
   }

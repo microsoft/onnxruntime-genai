@@ -73,7 +73,7 @@ const int32_t* OGA_API_CALL OgaSequencesGetSequenceData(const OgaSequences* p, s
 
 OgaResult* OGA_API_CALL OgaLoadImage(const char* image_path, OgaImages** images) {
   OGA_TRY
-  *images = reinterpret_cast<OgaImages*>(Generators::LoadImage(image_path).release());
+  *images = reinterpret_cast<OgaImages*>(Generators::LoadImageImpl(image_path).release());
   return nullptr;
   OGA_CATCH
 }
