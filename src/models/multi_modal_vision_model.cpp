@@ -12,11 +12,6 @@ RoamingArray<float> MakeDummy() {
   return RoamingArray<float>();
 }
 
-std::unordered_set<std::string> GetInputNames(const OrtSession& session) {
-  const auto input_names = session.GetInputNames();
-  return {input_names.begin(), input_names.end()};
-}
-
 void Select(std::span<const int32_t> input_ids, OrtValue* hidden_states, OrtValue* visual_features,
             int32_t num_img_tokens, int32_t hidden_size, DeviceType device_type,
             cudaStream_t cuda_stream) {
@@ -137,7 +132,7 @@ std::unique_ptr<State> MultiModalVisionModel::CreateState(RoamingArray<int32_t> 
 }
 
 EmbeddingState::EmbeddingState(const MultiModalVisionModel& model, const GeneratorParams& params)
-    : State{params, GetInputNames(*model.embedding_session_)},
+    : State{params},
       model_{model} {
   input_ids_.Add();
   inputs_embeds_.Add();
@@ -157,6 +152,7 @@ RoamingArray<float> EmbeddingState::Run(int current_length, RoamingArray<int32_t
 VisionState::VisionState(const MultiModalVisionModel& model, const GeneratorParams& params)
     : State{params},
       model_{model} {
+  extra_inputs_.Add();
   num_image_tokens_ = GetNumImageTokens(params_->extra_inputs, model_.config_->model.vision.inputs.image_sizes);
   if (num_image_tokens_ > 0) {
     visual_features_ = GetVisualFeatures(*model_.allocator_device_, *model_.session_info_,
@@ -174,7 +170,7 @@ RoamingArray<float> VisionState::Run(int current_length, RoamingArray<int32_t> n
 }
 
 DecoderState::DecoderState(const MultiModalVisionModel& model, RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params)
-    : State{params, GetInputNames(*model.decoder_session_)},
+    : State{params},
       model_{model},
       position_inputs_{model, *this, sequence_lengths} {
   inputs_embeds_.Add();
@@ -197,7 +193,7 @@ void DecoderState::UpdateInputs(int current_length, RoamingArray<int32_t> beam_i
 MultiModalPipelineState::MultiModalPipelineState(const MultiModalVisionModel& model,
                                                  RoamingArray<int32_t> sequence_lengths_unk,
                                                  const GeneratorParams& params)
-    : State{params, {}},
+    : State{params},
       model_{model},
       embedding_state_{std::make_unique<EmbeddingState>(model, params)},
       vision_state_{std::make_unique<VisionState>(model_, params)},

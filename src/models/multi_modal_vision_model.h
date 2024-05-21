@@ -5,6 +5,7 @@
 #include "model.h"
 #include "input_ids.h"
 #include "embeddings.h"
+#include "extra_inputs.h"
 #include "logits.h"
 #include "kv_cache.h"
 #include "position_inputs.h"
@@ -49,6 +50,7 @@ struct VisionState : State {
   friend struct MultiModalPipelineState;
 
   const MultiModalVisionModel& model_;
+  ExtraInputs extra_inputs_{model_, *this};    // Model inputs
   std::unique_ptr<OrtValue> visual_features_;  // Model output
   int32_t num_image_tokens_{};
 };

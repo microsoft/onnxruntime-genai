@@ -25,7 +25,7 @@ void ConvertFp32ToFp16(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<Or
 void CheckResult(extError_t error);
 
 struct State {
-  State(const GeneratorParams& params, const std::optional<std::unordered_set<std::string>>& required_model_inputs = std::nullopt);
+  State(const GeneratorParams& params);
   virtual ~State() = default;
 
   virtual RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices = {}) = 0;
