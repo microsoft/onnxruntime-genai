@@ -198,6 +198,7 @@ RoamingArray<float> VisionState::Run(int current_length, RoamingArray<int32_t> n
 DecoderState::DecoderState(const MultiModalVisionModel& model, RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params)
     : State{params},
       model_{model},
+      captured_graph_info_(model.GetCapturedGraphPool()->ReserveCapturedGraph(model, params)),
       position_inputs_{model, *this, sequence_lengths} {
   inputs_embeds_.Add();
   position_inputs_.Add();
@@ -206,7 +207,24 @@ DecoderState::DecoderState(const MultiModalVisionModel& model, RoamingArray<int3
 }
 
 RoamingArray<float> DecoderState::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
+  if (first_run_) {
+    if (params_->use_cuda_graph) {
+      model_.run_options_->AddConfigEntry("gpu_graph_id", "-1");
+    }
+    first_run_ = false;
+  }
+
   State::Run(*model_.decoder_session_, *model_.run_options_);
+
+  // Set the graph id for the following runs.
+  if (params_->use_cuda_graph) {
+    int new_batch_size = static_cast<int>(inputs_embeds_.GetShape()[0]);
+    if (new_batch_size != current_batch_size_) {
+      current_batch_size_ = new_batch_size;
+      auto annotation_id = std::to_string(captured_graph_info_->GenerateUniqueAnnotationID(new_batch_size));
+      model_.run_options_->AddConfigEntry("gpu_graph_id", annotation_id.c_str());
+    }
+  }
 
   return logits_.Get();
 }

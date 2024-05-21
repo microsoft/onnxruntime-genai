@@ -62,17 +62,22 @@ struct DecoderState : State {
   RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens,
                           RoamingArray<int32_t> next_indices) override;
 
+  const CapturedGraphInfo* GetCapturedGraphInfo() const override { return captured_graph_info_.get(); };
+
  private:
   friend struct MultiModalPipelineState;
 
   void UpdateInputs(int current_length, RoamingArray<int32_t> beam_indices);
 
   const MultiModalVisionModel& model_;
+  CapturedGraphInfoPtr captured_graph_info_;
   Embeddings inputs_embeds_{model_, *this, Embeddings::Mode::Input,  // Model input
                             model_.config_->model.decoder.inputs.embeddings};
   PositionInputs position_inputs_;    // Model input
   KV_Cache kv_cache_{model_, *this};  // Model input
   Logits logits_{model_, *this};      // Model output
+  bool first_run_{true};
+  int current_batch_size_{0};
 };
 
 struct MultiModalPipelineState : State {
