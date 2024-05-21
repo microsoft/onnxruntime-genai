@@ -90,14 +90,13 @@ TEST(CAPITests, EndToEndPhiBatch) {
 }
 
 TEST(CAPITests, Tensor_And_AddExtraInput) {
-
   // Create a [3 4] shaped tensor
-  std::array<float,12> data{0, 1, 2, 3,
-                            10, 11, 12, 13, 
-                            20, 21, 22, 23};
-  std::vector<int64_t> shape{3, 4}; // Use vector so we can easily compare for equality later
+  std::array<float, 12> data{0, 1, 2, 3,
+                             10, 11, 12, 13,
+                             20, 21, 22, 23};
+  std::vector<int64_t> shape{3, 4};  // Use vector so we can easily compare for equality later
 
-  auto tensor=OgaTensor::Create(data.data(), shape.data(), shape.size(), OgaElementType_float32);
+  auto tensor = OgaTensor::Create(data.data(), shape.data(), shape.size(), OgaElementType_float32);
 
   EXPECT_EQ(tensor->Data(), data.data());
   EXPECT_EQ(tensor->Shape(), shape);
@@ -112,7 +111,7 @@ TEST(CAPITests, Tensor_And_AddExtraInput) {
 TEST(CAPITests, Logging) {
   // Trivial test to ensure the API builds properly
   Oga::SetLogBool("enabled", true);
-  Oga::SetLogString("filename", nullptr); // If we had a filename set, this would stop logging to the file and go back to the console
+  Oga::SetLogString("filename", nullptr);  // If we had a filename set, this would stop logging to the file and go back to the console
   Oga::SetLogBool("enabled", false);
 }
 
@@ -264,3 +263,11 @@ TEST(CAPITests, TopKTopPCAPI) {
 }
 
 #endif  // TEST_PHI2
+
+void CheckResult(OgaResult* result) {
+  if (result) {
+    std::string string = OgaResultGetError(result);
+    OgaDestroyResult(result);
+    throw std::runtime_error(string);
+  }
+}
