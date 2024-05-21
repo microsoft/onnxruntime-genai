@@ -18,13 +18,13 @@ def run(args: argparse.Namespace):
     tokenizer_stream = processor.create_stream()
 
     while True:
-        # image_path = input("Image Path (leave empty if no image): ")
         readline.set_completer_delims(' \t\n;')
         readline.parse_and_bind("tab: complete")
         readline.set_completer(_complete)
         image_path = input("Image Path (leave empty if no image): ")
 
         image = None
+        prompt = "<|user|>\n"
         if (len(image_path) == 0):
             print("No image provided")
         else:
@@ -32,9 +32,10 @@ def run(args: argparse.Namespace):
             if not os.path.exists(image_path):
                 raise FileNotFoundError(f"Image file not found: {image_path}")
             image = og.Images.open(image_path)
+            prompt += "<|image_1|>\n"
 
         text = input("Prompt: ")
-        prompt = f"<|user|>\n<|image_1|>\n{text}<|end|>\n<|assistant|>\n"
+        prompt += f"{text}<|end|>\n<|assistant|>\n"
         print("Processing image and prompt...")
         inputs = processor(prompt, image)
 

@@ -94,7 +94,7 @@ int main(int argc, char** argv) {
   }
 
   std::cout << "--------------------" << std::endl;
-  std::cout << "Hello, Phi-3-Mini-V!" << std::endl;
+  std::cout << "Hello, Phi-3-Vision!" << std::endl;
   std::cout << "--------------------" << std::endl;
 
   std::cout << "C API" << std::endl;
