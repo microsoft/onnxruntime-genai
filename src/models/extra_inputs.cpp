@@ -47,7 +47,7 @@ void ExtraInputs::Add() {
 #if USE_DML
       case DeviceType::DML: {
         ComPtr<ID3D12Resource> target_resource;
-        Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, extra_inputs_[i]->GetTensorMutableRawData(), &target_resource));
+        model_.GetDmlAllocator()->GetD3D12ResourceFromAllocation(extra_inputs_[i]->GetTensorMutableRawData(), &target_resource);
 
         auto source = std::span(state_.params_->extra_inputs[i].tensor->ort_tensor_->GetTensorData<const uint8_t>(), copy_size_in_bytes);
 

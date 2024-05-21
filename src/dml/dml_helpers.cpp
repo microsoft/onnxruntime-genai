@@ -7,6 +7,7 @@
 #include <dxgi1_6.h>
 #include "dml_helpers.h"
 #include "dml_adapter_info.h"
+#include "dml_allocator.h"
 
 namespace DmlHelpers {
 
@@ -160,8 +161,7 @@ DmlReusedCommandListState BuildReusableCommandList(
 void ExecuteReusableCommandList(
     DmlExecutionContext* execution_context,
     DmlReusedCommandListState& command_list_state,
-    OrtAllocator& allocator,
-    const OrtDmlApi* ort_dml_api,
+    DmlAllocator& allocator,
     std::span<ID3D12Resource*> input_resources,
     std::span<const uint64_t> input_sizes,
     std::span<ID3D12Resource*> output_resources,
@@ -202,7 +202,7 @@ void ExecuteReusableCommandList(
       ComPtr<ID3D12Resource> temporary_resource;
       std::array<int64_t, 1> persistent_resource_shape = {static_cast<int64_t>(exec_binding_props.TemporaryResourceSize)};
       auto persistent_tensor = OrtValue::CreateTensor(allocator, persistent_resource_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
-      Ort::ThrowOnError(ort_dml_api->GetD3D12ResourceFromAllocation(&allocator, persistent_tensor->GetTensorMutableRawData(), &temporary_resource));
+      allocator.GetD3D12ResourceFromAllocation(persistent_tensor->GetTensorMutableRawData(), &temporary_resource);
     }
   }
 
@@ -338,11 +338,10 @@ DML_TENSOR_DATA_TYPE OrtToDmlDataType(ONNXTensorElementDataType ort_dtype) {
 
 void DmlCastInputToOutput(
     DmlExecutionContext* execution_context,
-    OrtAllocator& allocator,
+    DmlAllocator& allocator,
     OrtValue& in,
     std::unique_ptr<OrtValue>& p_out,
     IDMLDevice* dml_device,
-    const OrtDmlApi* ort_dml_api,
     DmlReusedCommandListState& command_list_state) {
   auto shape_info = in.GetTensorTypeAndShapeInfo();
   auto shape = shape_info->GetShape();
@@ -377,7 +376,7 @@ void DmlCastInputToOutput(
     if (persistent_resource_size > 0) {
       std::array<int64_t, 1> persistent_resource_shape = {static_cast<int64_t>(persistent_resource_size)};
       auto persistent_tensor = OrtValue::CreateTensor(allocator, persistent_resource_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
-      Ort::ThrowOnError(ort_dml_api->GetD3D12ResourceFromAllocation(&allocator, persistent_tensor->GetTensorMutableRawData(), &persistent_resource));
+      allocator.GetD3D12ResourceFromAllocation(persistent_tensor->GetTensorMutableRawData(), &persistent_resource);
       persistent_resource_binding = DML_BUFFER_BINDING{persistent_resource.Get(), 0, persistent_resource_size};
     }
 
@@ -392,10 +391,10 @@ void DmlCastInputToOutput(
   }
 
   ComPtr<ID3D12Resource> source_resource;
-  Ort::ThrowOnError(ort_dml_api->GetD3D12ResourceFromAllocation(&allocator, in.GetTensorMutableData<uint8_t>(), &source_resource));
+  allocator.GetD3D12ResourceFromAllocation(in.GetTensorMutableRawData(), &source_resource);
 
   ComPtr<ID3D12Resource> target_resource;
-  Ort::ThrowOnError(ort_dml_api->GetD3D12ResourceFromAllocation(&allocator, p_out->GetTensorMutableData<uint8_t>(), &target_resource));
+  allocator.GetD3D12ResourceFromAllocation(p_out->GetTensorMutableRawData(), &target_resource);
 
   std::array<ID3D12Resource*, 1> input_resources = {source_resource.Get()};
   std::array<uint64_t, 1> input_sizes = {element_count * DataTypeSizeInBytes(dml_from_type)};
@@ -411,7 +410,6 @@ void DmlCastInputToOutput(
       execution_context,
       command_list_state,
       allocator,
-      ort_dml_api,
       input_resources,
       input_sizes,
       output_resources,

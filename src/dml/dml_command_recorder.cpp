@@ -6,21 +6,20 @@
 #include <wil/result.h>
 #include "dml_command_recorder.h"
 #include "dml_command_queue.h"
+#include "dml_allocator.h"
 #include "../models/onnxruntime_api.h"
 
 DmlCommandRecorder::DmlCommandRecorder(
     ID3D12Device* d3d_device,
     IDMLDevice* dml_device,
     std::shared_ptr<DmlCommandQueue> command_queue,
-    Ort::Allocator& device_allocator,
-    const OrtDmlApi* ort_dml_api)
+    DmlAllocator& dml_allocator)
     : queue_(std::move(command_queue)),
       d3d_device_(d3d_device),
       dml_device_(dml_device),
       descriptor_pool_(d3d_device, 2048),
       command_allocator_ring_(d3d_device, queue_->GetType(), queue_->GetCurrentCompletionEvent()),
-      device_allocator_(device_allocator),
-      ort_dml_api_(ort_dml_api) {
+      dml_allocator_(dml_allocator) {
   THROW_IF_FAILED(dml_device->CreateOperatorInitializer(0, nullptr, IID_PPV_ARGS(&initializer_)));
   THROW_IF_FAILED(dml_device->CreateCommandRecorder(IID_PPV_ARGS(&recorder_)));
 }
@@ -185,8 +184,8 @@ void DmlCommandRecorder::InitializeOperator(
     std::array<int64_t, 1> temporary_resource_shape = {static_cast<int64_t>(temporary_resource_size)};
 
     ComPtr<ID3D12Resource> buffer;
-    auto temp_resource = OrtValue::CreateTensor(device_allocator_, temporary_resource_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
-    Ort::ThrowOnError(ort_dml_api_->GetD3D12ResourceFromAllocation(&device_allocator_, temp_resource->GetTensorMutableRawData(), &buffer));
+    auto temp_resource = OrtValue::CreateTensor(dml_allocator_, temporary_resource_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+    dml_allocator_.GetD3D12ResourceFromAllocation(temp_resource->GetTensorMutableRawData(), &buffer);
 
     // Bind the temporary resource.
     DML_BUFFER_BINDING buffer_binding = {buffer.Get(), 0, temporary_resource_size};
@@ -251,8 +250,8 @@ void DmlCommandRecorder::ExecuteOperator(
     std::array<int64_t, 1> temporary_resource_shape = {static_cast<int64_t>(temporary_resource_size)};
 
     ComPtr<ID3D12Resource> buffer;
-    auto temp_resource = OrtValue::CreateTensor(device_allocator_, temporary_resource_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
-    Ort::ThrowOnError(ort_dml_api_->GetD3D12ResourceFromAllocation(&device_allocator_, temp_resource->GetTensorMutableRawData(), &buffer));
+    auto temp_resource = OrtValue::CreateTensor(dml_allocator_, temporary_resource_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+    dml_allocator_.GetD3D12ResourceFromAllocation(temp_resource->GetTensorMutableRawData(), &buffer);
 
     // Bind the temporary resource.
     DML_BUFFER_BINDING buffer_binding = {buffer.Get(), 0, temporary_resource_size};

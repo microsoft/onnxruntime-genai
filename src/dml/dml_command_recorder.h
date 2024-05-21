@@ -14,6 +14,7 @@
 #include "dml_provider_factory.h"
 
 struct OrtDmlApi;
+struct DmlAllocator;
 
 namespace Ort {
 struct Allocator;
@@ -25,8 +26,7 @@ class DmlCommandRecorder {
       ID3D12Device* d3d_device,
       IDMLDevice* dml_device,
       std::shared_ptr<DmlCommandQueue> command_queue,
-      Ort::Allocator& device_allocator,
-      const OrtDmlApi* ort_dml_api);
+      DmlAllocator& dml_allocator);
 
   void InitializeOperator(
       IDMLCompiledOperator* op,
@@ -91,8 +91,7 @@ class DmlCommandRecorder {
   // A cached command list which may be re-used.
   ComPtr<ID3D12GraphicsCommandList> cached_command_list_;
 
-  Ort::Allocator& device_allocator_;
-  const OrtDmlApi* ort_dml_api_;
+  DmlAllocator& dml_allocator_;
 
   void SetDescriptorHeap(ID3D12DescriptorHeap* descriptor_heap);
 };

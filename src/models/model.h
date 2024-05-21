@@ -11,6 +11,7 @@
 #include "../dml/dml_execution_context.h"
 #include "../dml/dml_pooled_upload_heap.h"
 #include "../dml/dml_readback_heap.h"
+#include "../dml/dml_allocator.h"
 #endif
 
 namespace Generators {
@@ -116,7 +117,7 @@ struct Model : std::enable_shared_from_this<Model> {
   cuda_stream_holder cuda_stream_;
   DeviceType device_type_{DeviceType::CPU};
   Ort::Allocator& allocator_cpu_{Ort::Allocator::GetWithDefaultOptions()};
-  Ort::Allocator* allocator_device_{};  // Can be CUDA or CPU based on the DeviceType in the model
+  OrtAllocator* allocator_device_{};  // Can be CUDA or CPU based on the DeviceType in the model
 
   std::unique_ptr<SessionInfo> session_info_;
 
@@ -130,6 +131,7 @@ struct Model : std::enable_shared_from_this<Model> {
   IDMLDevice* GetDmlDevice() const { return dml_device_.Get(); }
   ID3D12Device* GetD3D12Device() const { return dml_objects_.d3d12_device.Get(); }
   bool IsIntelDevice() const { return is_intel_device_; }
+  DmlAllocator* GetDmlAllocator() const { return dml_allocator_.get(); }
 #endif
 
  protected:
@@ -145,8 +147,7 @@ struct Model : std::enable_shared_from_this<Model> {
   std::unique_ptr<DmlReadbackHeap> dml_readback_heap_;
   ComPtr<IDMLDevice> dml_device_;
   bool is_intel_device_{};
-  std::unique_ptr<Ort::Allocator> dml_owned_allocator_;
-  std::unique_ptr<OrtMemoryInfo> memory_info_device_;
+  std::unique_ptr<DmlAllocator> dml_allocator_;
 #endif
 
   std::shared_ptr<CapturedGraphPool> captured_graph_pool_;

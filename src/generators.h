@@ -138,7 +138,7 @@ struct OrtGlobals {
   std::unique_ptr<OrtEnv> env_;
 #if USE_CUDA
   std::unique_ptr<OrtMemoryInfo> memory_info_cuda_;
-  std::unique_ptr<Ort::Allocator> allocator_cuda_;
+  std::unique_ptr<OrtAllocator> allocator_cuda_;
 #endif
  private:
   OrtGlobals(const OrtGlobals&) = delete;

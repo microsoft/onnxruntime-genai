@@ -47,11 +47,10 @@ RoamingArray<float> Logits::Get() {
     if (model_.device_type_ == DeviceType::DML) {
       DmlHelpers::DmlCastInputToOutput(
           model_.GetDmlExecutionContext(),
-          *model_.allocator_device_,
+          *model_.GetDmlAllocator(),
           *value16_,
           value32_,
           model_.GetDmlDevice(),
-          model_.GetOrtDmlApi(),
           logits_cast_command_list_state_);
     } else
 #endif
@@ -95,10 +94,10 @@ RoamingArray<float> Logits::Get() {
 #if USE_DML
           case DeviceType::DML: {
             ComPtr<ID3D12Resource> source_resource;
-            Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, value32_->GetTensorMutableRawData(), &source_resource));
+            model_.GetDmlAllocator()->GetD3D12ResourceFromAllocation(value32_->GetTensorMutableRawData(), &source_resource);
 
             ComPtr<ID3D12Resource> target_resource;
-            Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, value_next->GetTensorMutableRawData(), &target_resource));
+            model_.GetDmlAllocator()->GetD3D12ResourceFromAllocation(value_next->GetTensorMutableRawData(), &target_resource);
 
             uint64_t source_offset = (vocab_index * seq_length + token_index * vocab_size) * sizeof(float);
             uint64_t target_offset = vocab_index * sizeof(float);
@@ -159,7 +158,7 @@ RoamingArray<float> Logits::Get() {
   if (model_.device_type_ == DeviceType::DML) {
     // DML doesn't support on-device scoring yet, so we transfer the data to the CPU
     ComPtr<ID3D12Resource> gpu_resource;
-    Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, value32_->GetTensorMutableRawData(), &gpu_resource));
+    model_.GetDmlAllocator()->GetD3D12ResourceFromAllocation(value32_->GetTensorMutableRawData(), &gpu_resource);
     auto cpu_tensor = value32_cpu_->GetTensorMutableData<float>();
 
     model_.GetDmlReadbackHeap()->ReadbackFromGpu(

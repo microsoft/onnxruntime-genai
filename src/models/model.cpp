@@ -173,7 +173,7 @@ std::vector<std::string> Tokenizer::DecodeBatch(std::span<const int32_t> sequenc
 // the allocator used is not destroyed until last. This keeps the allocator around until exit, after all other memory
 // has been destroyed. Without this, we will crash in the Onnxruntime BFCArena code when deleting tensors due to the
 // arena already being destroyed.
-Ort::Allocator* GetCudaAllocator(OrtSession& session) {
+OrtAllocator* GetCudaAllocator(OrtSession& session) {
   auto& globals = *GetOrtGlobals();
   if (!globals.allocator_cuda_) {
     globals.memory_info_cuda_ = OrtMemoryInfo::Create("Cuda", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
@@ -238,9 +238,8 @@ void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
   }
 #elif USE_DML
   if (device_type_ == DeviceType::DML) {
-    memory_info_device_ = OrtMemoryInfo::Create("DML", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-    dml_owned_allocator_ = Ort::Allocator::Create(session, *memory_info_device_);
-    allocator_device_ = dml_owned_allocator_.get();
+    dml_allocator_ = std::make_unique<DmlAllocator>(p_dml_api_, dml_objects_.d3d12_device.Get());
+    allocator_device_ = dml_allocator_.get();
   }
 #endif
 
@@ -346,8 +345,7 @@ void Model::CreateSessionOptions() {
           dml_objects_.d3d12_device.Get(),
           dml_device_.Get(),
           dml_objects_.command_queue.Get(),
-          *allocator_device_,
-          p_dml_api_);
+          *dml_allocator_);
 
       dml_pooled_upload_heap_ = std::make_unique<DmlPooledUploadHeap>(dml_objects_.d3d12_device.Get(), dml_execution_context_.get());
       dml_readback_heap_ = std::make_unique<DmlReadbackHeap>(dml_objects_.d3d12_device.Get(), dml_execution_context_.get());
@@ -432,8 +430,7 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
   // Output shape (batch_size * num_beams, sequence_length)
 
   // If we're on CUDA, we still want to do the copy to move the data over to CUDA memory where we will read from it later.
-  // DML doesn't currently support on-device scoring, so we go the same route as the CPU
-  if (num_beams == 1 && (device_type_ == DeviceType::CPU || device_type_ == DeviceType::DML)) {
+  if (num_beams == 1 && device_type_ == DeviceType::CPU) {
     return std::move(input);
   }
 
@@ -446,15 +443,12 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
 
   input_shape[0] *= num_beams;
 
-  auto& allocator = device_type_ == DeviceType::DML ? allocator_cpu_ : *allocator_device_;
-  auto expanded = OrtValue::CreateTensor(allocator, input_shape, element_type);
+  auto expanded = OrtValue::CreateTensor(*allocator_device_, input_shape, element_type);
   const auto* input_data = reinterpret_cast<const uint8_t*>(input->GetTensorRawData());
   auto* expanded_data = reinterpret_cast<uint8_t*>(expanded->GetTensorMutableRawData());
   auto* target = expanded_data;
 
   switch (device_type_) {
-    case DeviceType::DML:
-      // DML doesn't currently support on-device scoring, so we use the CPU for non-cache inputs/outputs
     case DeviceType::CPU:
       for (int i = 0; i < batch_size; i++) {
         for (int j = 0; j < num_beams; j++) {
@@ -463,6 +457,29 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
         }
       }
       break;
+
+#if USE_DML
+    case DeviceType::DML: {
+      int64_t target_offset = 0;
+
+      for (int i = 0; i < batch_size; i++) {
+        for (int j = 0; j < num_beams; j++) {
+          ComPtr<ID3D12Resource> target_resource;
+          dml_allocator_->GetD3D12ResourceFromAllocation(expanded->GetTensorMutableRawData(), &target_resource);
+
+          auto source = std::span(input_data + i * data_size_bytes, data_size_bytes);
+
+          dml_pooled_upload_heap_->BeginUploadToGpu(
+              target_resource.Get(),
+              target_offset,
+              D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+              source);
+
+          target_offset += data_size_bytes;
+        }
+      }
+    } break;
+#endif
 
 #if USE_CUDA
     case DeviceType::CUDA:

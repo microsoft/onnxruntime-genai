@@ -126,25 +126,24 @@ void PositionInputs::UpdatePositionIDs(int current_length) {
       assert(model_.device_type_ == DeviceType::DML);
 
       ComPtr<ID3D12Resource> target_resource;
-      Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, position_ids_->GetTensorMutableRawData(), &target_resource));
+      model_.GetDmlAllocator()->GetD3D12ResourceFromAllocation(position_ids_->GetTensorMutableRawData(), &target_resource);
 
-      if (type_ == Ort::TypeToTensorType<int32_t>::type) {
-        auto source = std::span(position_ids_next_->GetTensorData<const uint8_t>(), sizeof(int32_t) * position_ids_shape_[0]);
+      ComPtr<ID3D12Resource> source_resource;
+      model_.GetDmlAllocator()->GetD3D12ResourceFromAllocation(position_ids_next_->GetTensorMutableRawData(), &source_resource);
 
-        model_.GetDmlUploadHeap()->BeginUploadToGpu(
-            target_resource.Get(),
-            0,
-            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-            source);
-      } else {
-        auto source = std::span(position_ids_next_->GetTensorData<const uint8_t>(), sizeof(int64_t) * position_ids_shape_[0]);
+      const uint64_t size_in_bytes = type_ == Ort::TypeToTensorType<int32_t>::type
+                                         ? (sizeof(int32_t) * position_ids_shape_[0])
+                                         : (sizeof(int64_t) * position_ids_shape_[0]);
 
-        model_.GetDmlUploadHeap()->BeginUploadToGpu(
-            target_resource.Get(),
-            0,
-            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-            source);
-      }
+      model_.GetDmlExecutionContext()->CopyBufferRegion(
+          target_resource.Get(),
+          0,
+          D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+          source_resource.Get(),
+          0,
+          D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+          size_in_bytes);
+
 #endif
     }
     is_first_posid_update_ = false;
@@ -154,7 +153,7 @@ void PositionInputs::UpdatePositionIDs(int current_length) {
 #if USE_DML
       case DeviceType::DML: {
         ComPtr<ID3D12Resource> target_resource;
-        Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, position_ids_->GetTensorMutableRawData(), &target_resource));
+        model_.GetDmlAllocator()->GetD3D12ResourceFromAllocation(position_ids_->GetTensorMutableRawData(), &target_resource);
 
         // Lazily create the kernel only the first time it's needed
         if (!dml_update_position_ids_kernel_) {
@@ -229,10 +228,10 @@ void PositionInputs::UpdateAttentionMask(int current_length) {
 #if USE_DML
     case DeviceType::DML: {
       ComPtr<ID3D12Resource> attention_mask_resource;
-      Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, attention_mask_->GetTensorMutableRawData(), &attention_mask_resource));
+      model_.GetDmlAllocator()->GetD3D12ResourceFromAllocation(attention_mask_->GetTensorMutableRawData(), &attention_mask_resource);
 
       ComPtr<ID3D12Resource> attention_mask_next_resource;
-      Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, attention_mask_next_->GetTensorMutableRawData(), &attention_mask_next_resource));
+      model_.GetDmlAllocator()->GetD3D12ResourceFromAllocation(attention_mask_next_->GetTensorMutableRawData(), &attention_mask_next_resource);
 
       if (is_first_mask_update_) {
         dml_update_mask_kernel_ = DmlUpdateMaskKernel(
