@@ -33,8 +33,8 @@ void Select(std::span<const int32_t> input_ids, OrtValue* hidden_states, OrtValu
   // Replace the positions in the hidden_states tensor that correspond to the image tokens
   // with the visual features tensor.
   const int32_t start_pos = image_position_start * hidden_size;
-  const size_t element_count = num_img_tokens * hidden_size;
-  size_t hidden_states_element_count = sequence_length * hidden_size;
+  const int32_t element_count = num_img_tokens * hidden_size;
+  const int32_t hidden_states_element_count = static_cast<int32_t>(sequence_length) * hidden_size;
 
   switch (device_type) {
     case DeviceType::CPU: {
