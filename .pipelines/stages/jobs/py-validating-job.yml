@@ -98,6 +98,8 @@ jobs:
     value: "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.14.2"
 
   steps:
+  - env:
+      HF_TOKEN: $(HF_TOKEN)
   - task: UsePythonVersion@0
     inputs:
       versionSpec: $(PyDotVer)
