@@ -27,7 +27,7 @@ public class SimpleGenAI {
 
   public SimpleGenAI(String modelPath) throws GenAIException {
     model = new Model(modelPath);
-    tokenizer = new Tokenizer(model);
+    tokenizer = model.createTokenizer();
   }
 
   /**
@@ -38,7 +38,7 @@ public class SimpleGenAI {
    * @return The generator parameters.
    * @throws GenAIException on failure
    */
-  GeneratorParams createGeneratorParams(String prompt) throws GenAIException {
+  public GeneratorParams createGeneratorParams(String prompt) throws GenAIException {
     GeneratorParams generatorParams = model.createGeneratorParams();
 
     try (Sequences encodedPrompt = tokenizer.encode(prompt)) {
@@ -58,7 +58,7 @@ public class SimpleGenAI {
    * @return The generator parameters.
    * @throws GenAIException on failure
    */
-  GeneratorParams createGeneratorParams(int[] tokenIds, int sequenceLength, int batchSize)
+  public GeneratorParams createGeneratorParams(int[] tokenIds, int sequenceLength, int batchSize)
       throws GenAIException {
     GeneratorParams generatorParams = model.createGeneratorParams();
     try {
@@ -86,7 +86,7 @@ public class SimpleGenAI {
   public String generate(GeneratorParams generatorParams, Consumer<String> listener)
       throws GenAIException {
     String result;
-    try (Tokenizer tokenizer = new Tokenizer(model)) {
+    try {
       int[] output_ids;
 
       if (listener != null) {

@@ -387,7 +387,9 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             + str((args.android_ndk_path / "build" / "cmake" / "android.toolchain.cmake").resolve(strict=True)),
             f"-DANDROID_PLATFORM=android-{args.android_api}",
             f"-DANDROID_ABI={args.android_abi}",
+            f"-DANDROID_MIN_SDK={args.android_api}",
             "-DENABLE_PYTHON=OFF",
+            "-DENABLE_TESTS=OFF",
         ]
 
     if args.ios:

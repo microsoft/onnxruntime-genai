@@ -9,13 +9,19 @@ def minSdkVer = System.properties['minSdkVer']
 def targetSdkVer = System.properties['targetSdkVer']
 
 // Since Android requires a higher numbers indicating more recent versions
-// This function assume ORT version number will be in formart of A.B.C such as 1.7.0
+// This function assume the version number will be in formart of A.B.C such as 1.7.0.
+// Optional suffix of '-dev' is also handled
 // We generate version code A[0{0,1}]B[0{0,1}]C,
 // for example '1.7.0' -> 10700, '1.6.15' -> 10615
 def static getVersionCode(String version){
 	String[] codes = version.split('\\.');
+	// Remove '-dev' suffix if it exists
+	if (codes[2].contains('-')) {
+		codes[2] = codes[2].split('-')[0];
+	}
+
 	// This will have problem if we have 3 digit [sub]version number, such as 1.7.199
-	// but it is highly unlikely to happen
+	// but it is highly unlikely to happen	
 	String versionCodeStr = String.format("%d%02d%02d", codes[0] as int, codes[1] as int, codes[2] as int);
 	return versionCodeStr as int;
 }
@@ -83,7 +89,7 @@ android {
 		main {
 			jniLibs.srcDirs = [jniLibsDir]
 			java {
-				srcDirs = ['src/main/java', 'src/main/android']
+				srcDirs = ['src/main/java']
 			}
 		}
 	}
@@ -98,7 +104,7 @@ task sourcesJar(type: Jar) {
 
 task javadoc(type: Javadoc) {
 	source = android.sourceSets.main.java.srcDirs
-	classpath += project.files(android.getBootClasspath().join(File.pathSeparator))
+	classpath += project.files(android.getBootClasspath())
 }
 
 task javadocJar(type: Jar, dependsOn: javadoc) {
@@ -112,6 +118,7 @@ artifacts {
 }
 
 dependencies {
+	implementation 'com.microsoft.onnxruntime:onnxruntime-android:latest.release'
 	testImplementation 'org.junit.jupiter:junit-jupiter-api:5.7.0'
 	testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.7.0'
 }
@@ -179,6 +186,11 @@ tasks.whenTaskAdded { task ->
 }
 
 def addFolderToAar(taskName, aarPath, folderPath, folderPathInAar) {
+	logger.lifecycle("taskName:${taskName}")
+	logger.lifecycle("aarPath:${aarPath}")
+	logger.lifecycle("folderPath:${folderPath}")
+	logger.lifecycle("folderPathInAar:${folderPathInAar}")
+
 	def tmpDir = file("${buildDir}/${taskName}")
 	tmpDir.mkdir()
 	def tmpDirFolder = file("${tmpDir.path}/${folderPathInAar}")
