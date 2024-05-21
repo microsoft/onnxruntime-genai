@@ -45,7 +45,7 @@ void SetLogString(std::string_view name, std::string_view value) {
       gp_logfile.reset();
     else {
       fs::path filename{std::string(value)};
-      gp_logfile = std::make_unique<std::ofstream>(filename);
+      gp_logfile = std::make_unique<std::ofstream>(filename.open_for_write());
     }
 
     if (gp_logfile)

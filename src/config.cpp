@@ -400,7 +400,7 @@ struct RootObject_Element : JSON::Element {
 };
 
 void ParseConfig(const fs::path& filename, Config& config) {
-  std::ifstream file(filename, std::ios::binary | std::ios::ate);
+  std::ifstream file = filename.open(std::ios::binary | std::ios::ate);
   if (!file.is_open()) {
     throw std::runtime_error("Error opening " + filename.string());
   }
