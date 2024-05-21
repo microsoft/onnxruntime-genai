@@ -463,7 +463,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 #if USE_CUDA
     return true;
 #else
-    return false;
+        return false;
 #endif
   });
 
@@ -471,7 +471,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 #if USE_DML
     return true;
 #else
-    return false;
+        return false;
 #endif
   });
 
