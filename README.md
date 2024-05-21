@@ -23,7 +23,7 @@ See documentation at https://onnxruntime.ai/docs/genai.
 
 \* The Llama model architecture supports similar model families such as CodeLlama, Vicuna, Yi, and more.
 
-\+ The Mistral model architecture also includes Zephyr models
+\+ The Mistral model architecture supports similar model families such as Zephyr.
 
 
 ## Installation
