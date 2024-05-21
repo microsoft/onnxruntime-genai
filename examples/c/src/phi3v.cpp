@@ -1,8 +1,70 @@
 #include <iostream>
 #include <string>
 #include <fstream>
+#include <memory>
 
-#include "ort_genai_c.h"
+#include "ort_genai.h"
+
+bool FileExists(const char* path) {
+  return static_cast<bool>(std::ifstream(path));
+}
+
+// C++ API Example
+
+void CXX_API(const char* model_path) {
+  std::cout << "Creating model..." << std::endl;
+  auto model = OgaModel::Create(model_path);
+  std::cout << "Creating multimodal processor..." << std::endl;
+  auto processor = OgaMultiModalProcessor::Create(*model);
+
+  auto tokenizer_stream = OgaTokenizerStream::Create(*processor);
+
+  while (true) {
+    std::string image_path;
+    std::cout << "Image Path (leave empty if no image):" << std::endl;
+    std::getline(std::cin, image_path);
+    std::unique_ptr<OgaImages> images;
+    if (image_path.empty()) {
+      std::cout << "No image provided" << std::endl;
+    } else {
+      std::cout << "Loading image..." << std::endl;
+      if (!FileExists(image_path.c_str())) {
+        throw std::runtime_error(std::string("Image file not found: ") + image_path);
+      }
+      images = OgaImages::Load(image_path.c_str());
+    }
+
+    std::string text;
+    std::cout << "Prompt: " << std::endl;
+    std::getline(std::cin, text);
+    std::string prompt = "<|user|>\n";
+    if (images)
+      prompt += "<|image_1|>\n";
+    prompt += text + "<|end|>\n<|assistant|>\n";
+
+    std::cout << "Processing image and prompt..." << std::endl;
+    auto input_tensors = processor->ProcessImages(prompt.c_str(), images.get());
+
+    std::cout << "Generating response..." << std::endl;
+    auto params = OgaGeneratorParams::Create(*model);
+    params->SetSearchOption("max_length", 3072);
+    params->SetInputs(*input_tensors);
+
+    auto generator = OgaGenerator::Create(*model, *params);
+
+    while (!generator->IsDone()) {
+      generator->ComputeLogits();
+      generator->GenerateNextToken();
+
+      const auto num_tokens = generator->GetSequenceCount(0);
+      const auto new_token = generator->GetSequenceData(0)[num_tokens - 1];
+      std::cout << tokenizer_stream->Decode(new_token) << std::flush;
+    }
+
+    for (int i = 0; i < 3; ++i)
+      std::cout << std::endl;
+  }
+}
 
 // C API Example
 
@@ -12,10 +74,6 @@ void CheckResult(OgaResult* result) {
     OgaDestroyResult(result);
     throw std::runtime_error(string);
   }
-}
-
-bool FileExists(const char* path) {
-  return static_cast<bool>(std::ifstream(path));
 }
 
 void C_API(const char* model_path) {
@@ -48,7 +106,10 @@ void C_API(const char* model_path) {
     std::string text;
     std::cout << "Prompt: " << std::endl;
     std::getline(std::cin, text);
-    const std::string prompt = "<|user|>\n<|image_1|>\n" + text + "<|end|>\n<|assistant|>\n";
+    std::string prompt = "<|user|>\n";
+    if (images)
+      prompt += "<|image_1|>\n";
+    prompt += text + "<|end|>\n<|assistant|>\n";
 
     std::cout << "Processing image and prompt..." << std::endl;
     OgaNamedTensors* input_tensors;
@@ -101,8 +162,13 @@ int main(int argc, char** argv) {
   std::cout << "Hello, Phi-3-Vision!" << std::endl;
   std::cout << "--------------------" << std::endl;
 
+#ifdef USE_CXX
+  std::cout << "C++ API" << std::endl;
+  CXX_API(argv[1]);
+#else
   std::cout << "C API" << std::endl;
   C_API(argv[1]);
+#endif
 
   return 0;
 }

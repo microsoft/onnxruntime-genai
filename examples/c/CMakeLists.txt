@@ -5,6 +5,11 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++2a")
 
 option(USE_CUDA "Build with CUDA support" OFF)
+option(USE_CXX "Invoke the C++ example" ON)
+
+if(USE_CXX)
+  add_compile_definitions(USE_CXX)
+endif()
 
 if(USE_CUDA)
   include(CheckLanguage)
