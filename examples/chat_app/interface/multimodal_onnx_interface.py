@@ -41,7 +41,7 @@ class MultiModal_ONNXModel():
         self.image = og.Images.open(image)
 
         logging.info("Preprocessing image and prompt ...")
-        input_ids = self.processor(prompt, self.image)
+        input_ids = self.processor(prompt, images=self.image)
 
         return input_ids
 
