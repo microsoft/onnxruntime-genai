@@ -103,13 +103,13 @@ jobs:
     displayName: Copy python 3.11.0 version to agent tools directory
     condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'), eq(variables['PyDotVer'], '3.11'))
 
-  ${{ if eq(parameters.arch, 'arm64') }}:
+  - ${{ if eq(parameters.arch, 'arm64') }}:
     - task: UsePythonVersion@0
       inputs:
         versionSpec: 3.11
         addToPath: true
         architecture: $(arch)
-  ${{ else }}:
+  - ${{ else }}:
     - task: UsePythonVersion@0
       inputs:
         versionSpec: 3.10
