@@ -99,50 +99,38 @@ jobs:
     value: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/onnxruntime-win-arm64-1.17.3.zip"
 
   steps:
-  - ${{ if eq(parameters.arch, 'arm64') }}:
-    - powershell: |
-        if ('$(PyDotVer)' -ne '3.12') {
-          Write-Host "PyDotVer is not 3.12, skipping..."
-          exit 0
-        }
-        $url = "https://www.python.org/ftp/python/3.12.3/python-3.12.3-arm64.exe"
-        $output = "python-3.12.3-arm64.exe"
-        Invoke-WebRequest -Uri $url -OutFile $output
-        Start-Process -FilePath $output -ArgumentList "/quiet InstallAllUsers=0 PrependPath=0 Include_test=0 TargetDir=C:\Python\Python312" -Wait
-      displayName: Download and install Python
-      continueOnError: true
+  - powershell: |
+      $url = "https://www.python.org/ftp/python/3.12.3/python-3.12.3-arm64.exe"
+      $output = "python-3.12.3-arm64.exe"
+      Invoke-WebRequest -Uri $url -OutFile $output
+      Start-Process -FilePath $output -ArgumentList "/quiet InstallAllUsers=0 PrependPath=0 Include_test=0 TargetDir=C:\Python\Python312" -Wait
+    displayName: Download and install Python
+    condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'), ne(variables['PyDotVer'], '3.12'))
+    continueOnError: true
 
-  - ${{ if eq(parameters.arch, 'arm64') }}:
-    - script: |
-        if not "%PyDotVer%"=="3.12" (
-          echo PyDotVer is not 3.12, skipping...
-          exit /b 0
-        )
-        MKDIR $(Agent.ToolsDirectory)\Python\3.12.3\arm64 
-        XCOPY /s /y /h /e /c /q "C:\Python\Python312\*.*" $(Agent.ToolsDirectory)\Python\3.12.3\arm64\
-        COPY NUL $(Agent.ToolsDirectory)\Python\3.12.3\arm64.complete
-        DIR $(Agent.ToolsDirectory)\Python
-        DIR $(Agent.ToolsDirectory)\Python\3.12.3
-        DIR $(Agent.ToolsDirectory)\Python\3.12.3\arm64
-        DIR "C:\Python"
-      displayName: Copy python 3.12.3 version to agent tools directory
-      continueOnError: true
-  
-  - ${{ if eq(parameters.arch, 'arm64') }}:
-    - script: |
-        if not "%PyDotVer%"=="3.11" (
-          echo PyDotVer is not 3.11, skipping...
-          exit /b 0
-        )
-        MKDIR $(Agent.ToolsDirectory)\Python\3.11.0\arm64
-        XCOPY /s /y /h /e /c /q "C:\Python\Python311\*.*" $(Agent.ToolsDirectory)\Python\3.11.0\arm64\
-        COPY NUL $(Agent.ToolsDirectory)\Python\3.11.0\arm64.complete
-        DIR $(Agent.ToolsDirectory)\Python
-        DIR $(Agent.ToolsDirectory)\Python\3.11.0
-        DIR $(Agent.ToolsDirectory)\Python\3.11.0\arm64
-        DIR "C:\Python"
-      displayName: Copy python 3.11.0 version to agent tools directory
-      continueOnError: true
+  - script: |
+      MKDIR $(Agent.ToolsDirectory)\Python\3.12.3\arm64 
+      XCOPY /s /y /h /e /c /q "C:\Python\Python312\*.*" $(Agent.ToolsDirectory)\Python\3.12.3\arm64\
+      COPY NUL $(Agent.ToolsDirectory)\Python\3.12.3\arm64.complete
+      DIR $(Agent.ToolsDirectory)\Python
+      DIR $(Agent.ToolsDirectory)\Python\3.12.3
+      DIR $(Agent.ToolsDirectory)\Python\3.12.3\arm64
+      DIR "C:\Python"
+    displayName: Copy python 3.12.3 version to agent tools directory
+    condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'), ne(variables['PyDotVer'], '3.12'))
+    continueOnError: true
+
+  - script: |
+      MKDIR $(Agent.ToolsDirectory)\Python\3.11.0\arm64
+      XCOPY /s /y /h /e /c /q "C:\Python\Python311\*.*" $(Agent.ToolsDirectory)\Python\3.11.0\arm64\
+      COPY NUL $(Agent.ToolsDirectory)\Python\3.11.0\arm64.complete
+      DIR $(Agent.ToolsDirectory)\Python
+      DIR $(Agent.ToolsDirectory)\Python\3.11.0
+      DIR $(Agent.ToolsDirectory)\Python\3.11.0\arm64
+      DIR "C:\Python"
+    displayName: Copy python 3.11.0 version to agent tools directory
+    condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'), ne(variables['PyDotVer'], '3.11'))
+    continueOnError: true
 
   - task: UsePythonVersion@0
     inputs:
