@@ -80,7 +80,7 @@ jobs:
   - name: dml_zip
     value: 'Microsoft.AI.DirectML.1.14.1.zip'
   - name: dml_url
-    value: "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.14.1"
+    value: "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.14.2"
   
   - name: ort_arm64_dir
     value: 'onnxruntime-win-arm64-1.17.3'
