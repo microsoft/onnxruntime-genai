@@ -24,6 +24,11 @@ parameters:
   type: boolean
   default: true
 
+- name: enable_win_arm64_cpu
+  displayName: 'Whether Windows ARM64 package is built.'
+  type: boolean
+  default: true
+
 - name: ort_version
   displayName: 'OnnxRuntime version'
   type: string
