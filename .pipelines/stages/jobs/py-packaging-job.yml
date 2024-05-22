@@ -28,22 +28,32 @@ jobs:
       pool: 'onnxruntime-Win-CPU-2022'
 
   strategy:
-    matrix:
-      # Python38:
-      #   PyDotVer: '3.8'
-      #   PyNoDotVer: '38'
-      # Python39:
-      #   PyDotVer: '3.9'
-      #   PyNoDotVer: '39'
-      # Python310:
-      #   PyDotVer: '3.10'
-      #   PyNoDotVer: '310'
-      Python311:
-        PyDotVer: '3.11'
-        PyNoDotVer: '311'
-      Python312:
-        PyDotVer: '3.12'
-        PyNoDotVer: '312'
+    ${{ if eq(parameters.arch, 'arm64') }}:
+      matrix:
+        Python311:
+          PyDotVer: '3.11'
+          PyNoDotVer: '311'
+        Python312:
+          PyDotVer: '3.12'
+          PyNoDotVer: '312'
+    ${{ else }}:
+      matrix:
+        Python38:
+          PyDotVer: '3.8'
+          PyNoDotVer: '38'
+        Python39:
+          PyDotVer: '3.9'
+          PyNoDotVer: '39'
+        Python310:
+          PyDotVer: '3.10'
+          PyNoDotVer: '310'
+        Python311:
+          PyDotVer: '3.11'
+          PyNoDotVer: '311'
+        Python312:
+          PyDotVer: '3.12'
+          PyNoDotVer: '312'
+    
   timeoutInMinutes: 240
   workspace:
     clean: all
@@ -105,8 +115,7 @@ jobs:
       Invoke-WebRequest -Uri $url -OutFile $output
       Start-Process -FilePath $output -ArgumentList "/quiet InstallAllUsers=0 PrependPath=0 Include_test=0 TargetDir=C:\Python\Python312" -Wait
     displayName: Download and install Python
-    condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'), ne(variables['PyDotVer'], '3.12'))
-    continueOnError: true
+    condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'), eq(variables['PyDotVer'], '3.12'))
 
   - script: |
       MKDIR $(Agent.ToolsDirectory)\Python\3.12.3\arm64 
@@ -117,8 +126,7 @@ jobs:
       DIR $(Agent.ToolsDirectory)\Python\3.12.3\arm64
       DIR "C:\Python"
     displayName: Copy python 3.12.3 version to agent tools directory
-    condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'), ne(variables['PyDotVer'], '3.12'))
-    continueOnError: true
+    condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'), eq(variables['PyDotVer'], '3.12'))
 
   - script: |
       MKDIR $(Agent.ToolsDirectory)\Python\3.11.0\arm64
@@ -129,8 +137,7 @@ jobs:
       DIR $(Agent.ToolsDirectory)\Python\3.11.0\arm64
       DIR "C:\Python"
     displayName: Copy python 3.11.0 version to agent tools directory
-    condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'), ne(variables['PyDotVer'], '3.11'))
-    continueOnError: true
+    condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'), eq(variables['PyDotVer'], '3.11'))
 
   - task: UsePythonVersion@0
     inputs:
