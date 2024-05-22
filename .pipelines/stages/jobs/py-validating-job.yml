@@ -27,7 +27,7 @@ jobs:
 - job: python_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}_validating
   ${{ if eq(parameters.os, 'linux') }}:
     ${{ if eq(parameters.ep, 'cuda') }}:
-      pool: 'onnxruntime-Linux-GPU-T4'
+      pool: 'onnxruntime-genai-Ubuntu2004-T4'
     ${{ else }}:
       pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
   ${{ if eq(parameters.os, 'win') }}:
