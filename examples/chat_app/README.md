@@ -8,7 +8,7 @@ This is a chat demo using the various versions of the LLMs
 - [Setup](#setup)
 - [Launch the app](#launch-the-app)
 
-# Setup
+## Setup
 
 1. Install **onnxruntime-genai-cuda** 
     > If you want to use DirectML model, you can download `onnxruntime-genai-directml` package.
@@ -34,7 +34,8 @@ This is a chat demo using the various versions of the LLMs
     pip install -r requirements.txt
     ```
 
-# Get the model
+
+## Get the model
 
 ```bash
 cd ..
@@ -56,7 +57,7 @@ Folder structure should look as the below:
       --phi-3-vision
 ```
 
-# Launch the app
+## Launch the app
 
 
 ```
