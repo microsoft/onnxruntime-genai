@@ -27,7 +27,7 @@ class SimpleTest {
 
     @Before
     fun Start() {
-        Log.println(Log.INFO, TAG, "SystemABI=" + Build.SUPPORTED_ABIS[0])
+        Log.i(TAG, "SystemABI=" + Build.SUPPORTED_ABIS[0])
     }
 
     @Throws(IOException::class)
@@ -67,17 +67,14 @@ class SimpleTest {
         val buffer = ByteArray(64*1024)
 
         for (filename in files!!) {
-            var srcStream: InputStream? = null
-            var dstStream: OutputStream? = null
             try {
                 val outFile = File(modelTargetPath + File.separator + filename)
                 if (!outFile.exists()) {
-                    val parentExists = outFile.parent?.let { File(it).exists() }
                     outFile.createNewFile()
                 }
 
-                srcStream = assetManager.open("model/$filename")
-                dstStream = FileOutputStream(outFile)
+                var srcStream = assetManager.open("model/$filename")
+                var dstStream = FileOutputStream(outFile)
                 var bytesRead: Int
                 while (srcStream.read(buffer).also { bytesRead = it } != -1) {
                     dstStream.write(buffer, 0, bytesRead)
@@ -125,5 +122,7 @@ class SimpleTest {
                 Assert.assertEquals(outputIds[j], expectedOutput[i * maxLength + j])
             }
         }
+
+        Log.i("runBasicTest", "GenAI output matched expected data.")
     }
 }
