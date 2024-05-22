@@ -10,4 +10,6 @@ struct Tensor : std::enable_shared_from_this<Tensor> {
   std::shared_ptr<Tensor> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
 };
 
+using NamedTensors = std::unordered_map<std::string, std::shared_ptr<Tensor>>;
+
 }  // namespace Generators

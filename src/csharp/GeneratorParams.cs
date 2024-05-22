@@ -55,6 +55,11 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetModelInput(_generatorParamsHandle, StringUtils.ToUtf8(name), value.Handle));
         }
 
+        public void SetInputs(NamedTensors namedTensors)
+        {
+            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetInputs(_generatorParamsHandle, namedTensors.Handle));
+        }
+
         ~GeneratorParams()
         {
             Dispose(false);
