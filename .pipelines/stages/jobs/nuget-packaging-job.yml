@@ -64,13 +64,6 @@ jobs:
       value: '.Cuda'
     ${{ if eq(parameters.ep, 'directml') }}:
       value: '.DirectML'
-  - name: ort_nuget_ext
-    ${{ if eq(parameters.ep, 'cpu') }}:
-      value: ''
-    ${{ if eq(parameters.ep, 'cuda') }}:
-      value: '.Gpu'
-    ${{ if eq(parameters.ep, 'directml') }}:
-      value: '.DirectML'
   - name: ortHome
     value: 'ort'
   - name: dml_dir
