@@ -100,7 +100,7 @@ jobs:
 
   steps:
   - ${{ if eq(parameters.arch, 'arm64') }}:
-    - pwsh: |
+    - powershell: |
         if ('$(PyDotVer)' -ne '3.12') {
           Write-Host "PyDotVer is not 3.12, skipping..."
           exit 0
@@ -110,6 +110,7 @@ jobs:
         Invoke-WebRequest -Uri $url -OutFile $output
         Start-Process -FilePath $output -ArgumentList "/quiet InstallAllUsers=0 PrependPath=0 Include_test=0 TargetDir=C:\Python\Python312" -Wait
       displayName: Download and install Python
+      continueOnError: true
 
   - ${{ if eq(parameters.arch, 'arm64') }}:
     - script: |
@@ -125,6 +126,7 @@ jobs:
         DIR $(Agent.ToolsDirectory)\Python\3.12.3\arm64
         DIR "C:\Python"
       displayName: Copy python 3.12.3 version to agent tools directory
+      continueOnError: true
   
   - ${{ if eq(parameters.arch, 'arm64') }}:
     - script: |
@@ -140,6 +142,7 @@ jobs:
         DIR $(Agent.ToolsDirectory)\Python\3.11.0\arm64
         DIR "C:\Python"
       displayName: Copy python 3.11.0 version to agent tools directory
+      continueOnError: true
 
   - task: UsePythonVersion@0
     inputs:
