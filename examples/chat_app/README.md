@@ -1,79 +1,78 @@
 # LLM Chat UI <!-- omit in toc -->
+
 This is a chat demo using the various versions of the LLMs
 
-> The app supports all backend that onnxruntime-genai supports. DirectML is used as an example to showcase how to use it
+> The app supports all of the CPU, CUDA and DirectML. CUDA is used as an example.
 
 **Contents**:
-- [set up](#set-up)
+- [Setup](#setup)
 - [Launch the app](#launch-the-app)
 
-# set up
+# Setup
 
-1. Install **onnxruntime-genai-directml** 
-    > If you want to use CUDA model, you can download `onnxruntime-genai-cuda` package.
+1. Install **onnxruntime-genai-cuda** 
+    > If you want to use DirectML model, you can download `onnxruntime-genai-directml` package.
    
    ```
    pip install numpy
-   pip install --pre onnxruntime-genai-directml
+   pip install --pre onnxruntime-genai-cuda
    ```
 
-   Or following [Build onnxruntime-genai from source](https://onnxruntime.ai/docs/genai/howto/build-from-source.html#build-onnxruntime-genai-from-source)
+2. Get this example
 
-2. Install the requirements
-    2.1 Locate to `chat_app` folder
-    ```
-    onnxruntime-genai/examples/chat_app
-    ```
+   ```bash
+   git clone -n --depth=1 --filter=tree:0  https://github.com/microsoft/onnxruntime-genai.git
+   cd onnxruntime-genai
+   git sparse-checkout set --no-cone examples/chat_app
+   git checkout
+   cd examples/chat_app
 
-    2.2 Install the dependencies.
-    ```
+
+3. Install the requirements
+
+    ```bash
     pip install -r requirements.txt
     ```
 
+# Get the model
+
+```bash
+cd ..
+huggingface-cli download microsoft/Phi-3-vision-128k-instruct-onnx-cuda --include cuda-int4-rtn-block-32/* --local-dir .
+mkdir -p models/cuda
+mv cuda-int4-rtn-block-32 models/cuda-int4/Phi-3-vision
+```
+
+Folder structure should look as the below:
+```
+--chat_app
+--models
+   --directml
+      --phi-3-vision-directml-int4-awq-block-128
+      --meta-llama_Llama-2-7b-chat-hf
+      --mistralai_Mistral-7B-Instruct-v0.1
+            ...
+   --cuda
+      --phi-3-vision
+```
+
 # Launch the app
 
-1. Create folder named models at the root directory of chat_app.
 
-2. Download models to the created folder, take phi-3-mini directml as example.
+```
+python chat_app/app.py
+```
 
-   > For CUDA model, only need to create a new folder and download model inside, e.g. `microsoft/Phi-3-vision-128k-instruct-onnx-cuda`.
+You should see output from console
+```
+Running on local URL:  http://127.0.0.1:7860
 
-    ```bash
-    huggingface-cli download microsoft/Phi-3-mini-4k-instruct-onnx --include directml/* --local-dir .
-    ```
+To create a public link, set `share=True` in `launch()`.
+```
 
-     File structure should look as the below:
-    ```
-    --chat_app
-    --models
-        --directml
-            --phi-3-mini-directml-int4-awq-block-128
-            --meta-llama_Llama-2-7b-chat-hf
-            --mistralai_Mistral-7B-Instruct-v0.1
-            ...
-        --cuda
-            --phi3-mini-v
-    ```
+Then open the local URL in broswer
+![alt text](image.png)
 
+For vision model, you will have the below UI interface.
 
-
-
-3. Launch the app
-
-    ```
-    python chat_app/app.py
-    ```
-
-    You should see output from console
-    ```
-    Running on local URL:  http://127.0.0.1:7860
-
-        To create a public link, set `share=True` in `launch()`.
-    ```
-
-   Then open the local URL in broswer
-   ![alt text](image.png)
-
-   For vision model, you will have blow UI interface.
-
-   ![alt text](vision_UI_interface.png)
+![alt text](vision_UI_interface.png)
