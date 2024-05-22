@@ -99,7 +99,7 @@ jobs:
     value: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/onnxruntime-win-arm64-1.17.3.zip"
 
   steps:
-  - ${{ if and(eq(parameters.arch, 'arm64'), eq(variables.PyDotVer, '3.12')) }}:
+  - ${{ if and(eq(parameters.arch, 'arm64'), eq(variables['PyDotVer'], '3.12')) }}:
     - script: |
         $url = "https://www.python.org/ftp/python/3.12.3/python-3.12.3-arm64.exe"
         $output = "python-3.12.3-arm64.exe"
@@ -107,7 +107,7 @@ jobs:
         Start-Process -FilePath $output -ArgumentList "/quiet InstallAllUsers=0 PrependPath=0 Include_test=0 TargetDir=C:\Python\Python312" -Wait
       displayName: Download and install Python
 
-  - ${{ if and(eq(parameters.arch, 'arm64'), eq(variables.PyDotVer, '3.12')) }}:
+  - ${{ if and(eq(parameters.arch, 'arm64'), eq(variables['PyDotVer'], '3.12')) }}:
     - script: |
         MKDIR $(Agent.ToolsDirectory)\Python\3.12.3\arm64 
         XCOPY /s /y /h /e /c /q "C:\Python\Python312\*.*" $(Agent.ToolsDirectory)\Python\3.12.3\arm64\
@@ -118,7 +118,7 @@ jobs:
         DIR "C:\Python"
       displayName: Copy python 3.12.3 version to agent tools directory
   
-  - ${{ if and(eq(parameters.arch, 'arm64'), eq(variables.PyDotVer, '3.11')) }}:
+  - ${{ if and(eq(parameters.arch, 'arm64'), eq(variables['PyDotVer'], '3.11')) }}:
     - script: |
         MKDIR $(Agent.ToolsDirectory)\Python\3.11.0\arm64
         XCOPY /s /y /h /e /c /q "C:\Python\Python311\*.*" $(Agent.ToolsDirectory)\Python\3.11.0\arm64\
