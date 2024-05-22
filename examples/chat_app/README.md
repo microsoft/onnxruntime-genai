@@ -20,7 +20,12 @@ This is a chat demo using the various versions of the LLMs
    Or following [Build onnxruntime-genai from source](https://onnxruntime.ai/docs/genai/howto/build-from-source.html#build-onnxruntime-genai-from-source)
 
 2. Install the requirements
+    2.1 Locate to `chat_app` folder
+    ```
+    onnxruntime-genai/examples/chat_app
+    ```
 
+    2.2 Install the dependencies.
     ```
     pip install -r requirements.txt
     ```
@@ -30,6 +35,8 @@ This is a chat demo using the various versions of the LLMs
 1. Create folder named models at the root directory of chat_app.
 
 2. Download models to the created folder, take phi-3-mini directml as example.
+
+   > For CUDA model, only need to create a new folder and download model inside, e.g. `microsoft/Phi-3-vision-128k-instruct-onnx-cuda`.
 
     ```bash
     huggingface-cli download microsoft/Phi-3-mini-4k-instruct-onnx --include directml/* --local-dir .
