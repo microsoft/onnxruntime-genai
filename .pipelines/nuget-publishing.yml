@@ -64,6 +64,7 @@ stages:
     enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
     enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
     enable_win_dml: ${{ parameters.enable_win_dml }}
+    enable_win_arm64_cpu: ${{ parameters.enable_win_arm64_cpu }}
     ort_version: ${{ parameters.ort_version }}
     ort_cuda_version: ${{ parameters.ort_cuda_version }}
     ort_dml_version: ${{ parameters.ort_dml_version }}
