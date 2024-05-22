@@ -6,6 +6,7 @@ This is a chat demo using the various versions of the LLMs
 
 **Contents**:
 - [Setup](#setup)
+- [Get the model](#get-the-model)
 - [Launch the app](#launch-the-app)
 
 ## Setup
@@ -26,7 +27,7 @@ This is a chat demo using the various versions of the LLMs
    git sparse-checkout set --no-cone examples/chat_app
    git checkout
    cd examples/chat_app
-
+   ```
 
 3. Install the requirements
 
