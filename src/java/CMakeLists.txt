@@ -139,16 +139,16 @@ if (ANDROID)
 
   # dirs to assemble the AAR contents in. <build dir>/src/java/android
   set(ANDROID_PACKAGE_DIR ${JAVA_OUTPUT_DIR}/android)
-  set(ANDROID_HEADERS_DIR ${ANDROID_PACKAGE_DIR}/headers)
+  set(ANDROID_PACKAGE_HEADERS_DIR ${ANDROID_PACKAGE_DIR}/headers)
   set(ANDROID_PACKAGE_ABI_DIR ${ANDROID_PACKAGE_DIR}/${ANDROID_ABI})
-  file(MAKE_DIRECTORY ${ANDROID_HEADERS_DIR})
+  file(MAKE_DIRECTORY ${ANDROID_PACKAGE_HEADERS_DIR})
   file(MAKE_DIRECTORY ${ANDROID_PACKAGE_ABI_DIR})
 
   # copy C/C++ API headers to be packed into Android AAR package  
   add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD 
-                     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SRC_ROOT}/ort_genai.h ${ANDROID_HEADERS_DIR})
+                     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SRC_ROOT}/ort_genai.h ${ANDROID_PACKAGE_HEADERS_DIR})
   add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD 
-                     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SRC_ROOT}/ort_genai_c.h ${ANDROID_HEADERS_DIR})
+                     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SRC_ROOT}/ort_genai_c.h ${ANDROID_PACKAGE_HEADERS_DIR})
 
   # Copy onnxruntime-genai.so and onnxruntime-genai-jni.so for building Android AAR package
   add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
@@ -168,29 +168,31 @@ if (ANDROID)
                        build
                        -b build-android.gradle -c settings-android.gradle
                        -DjniLibsDir=${ANDROID_PACKAGE_DIR} -DbuildDir=${ANDROID_PACKAGE_OUTPUT_DIR}
-                       -DminSdkVer=${ANDROID_MIN_SDK} -DheadersDir=${ANDROID_HEADERS_DIR}
+                       -DminSdkVer=${ANDROID_MIN_SDK} -DheadersDir=${ANDROID_PACKAGE_HEADERS_DIR}
                        # --stacktrace
                      WORKING_DIRECTORY ${JAVA_SRC_ROOT})
 
   # unit tests
-  set(ANDROID_TEST_PACKAGE_ROOT ${JAVA_SRC_ROOT}/src/test/android)
-  set(ANDROID_TEST_PACKAGE_DIR ${JAVA_OUTPUT_DIR}/androidtest/android)
+  set(ANDROID_TEST_SRC_ROOT ${JAVA_SRC_ROOT}/src/test/android)
+  set(ANDROID_TEST_PACKAGE_DIR ${JAVA_OUTPUT_DIR}/androidtest)
 
-  # copy the androidtest project into cmake binary directory
-  file(MAKE_DIRECTORY ${JAVA_OUTPUT_DIR}/androidtest)
-  file(COPY ${ANDROID_TEST_PACKAGE_ROOT} DESTINATION ${JAVA_OUTPUT_DIR}/androidtest)
-  set(ANDROID_TEST_PACKAGE_LIB_DIR ${ANDROID_TEST_PACKAGE_DIR}/app/libs)
-  set(ANDROID_TEST_PACKAGE_ASSETS_DIR ${ANDROID_TEST_PACKAGE_DIR}/app/assets)
+  # copy the android test project to the build output so we can assemble all the pieces to build it
+  file(MAKE_DIRECTORY ${ANDROID_TEST_PACKAGE_DIR})
+  file(GLOB android_test_files "${ANDROID_TEST_SRC_ROOT}/*")
+  file(COPY ${android_test_files} DESTINATION ${ANDROID_TEST_PACKAGE_DIR})
+
+  set(ANDROID_TEST_PACKAGE_LIB_DIR ${ANDROID_TEST_PACKAGE_DIR}/app/libs)  
+  set(ANDROID_TEST_PACKAGE_APP_ASSETS_DIR ${ANDROID_TEST_PACKAGE_DIR}/app/src/main/assets)
   file(MAKE_DIRECTORY ${ANDROID_TEST_PACKAGE_LIB_DIR})
-  file(MAKE_DIRECTORY ${ANDROID_TEST_PACKAGE_ASSETS_DIR})
+  file(MAKE_DIRECTORY ${ANDROID_TEST_PACKAGE_APP_ASSETS_DIR})
 
-  # Copy the test model to the assets folder
+  # Copy the test model to the assets folder in the test app
   add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
                      COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different 
                        ${REPO_ROOT}/test/test_models/hf-internal-testing/tiny-random-gpt2-fp32
-                       ${ANDROID_TEST_PACKAGE_ASSETS_DIR}/test_model)
+                       ${ANDROID_TEST_PACKAGE_APP_ASSETS_DIR}/model)
 
-  # Copy the built Android AAR package to libs folder of our test app
+  # Copy the Android AAR package we built to the libs folder of our test app
   add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
                      COMMAND ${CMAKE_COMMAND} -E copy_if_different 
                        ${ANDROID_PACKAGE_OUTPUT_DIR}/outputs/aar/onnxruntime-genai-debug.aar
