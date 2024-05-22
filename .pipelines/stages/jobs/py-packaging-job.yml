@@ -114,6 +114,7 @@ jobs:
       $output = "python-3.12.3-arm64.exe"
       Invoke-WebRequest -Uri $url -OutFile $output
       Start-Process -FilePath $output -ArgumentList "/quiet InstallAllUsers=0 PrependPath=0 Include_test=0 TargetDir=C:\Python\Python312" -Wait
+      Remove-Item -Path $output
     displayName: Download and install Python
     condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'), eq(variables['PyDotVer'], '3.12'))
 
