@@ -10,7 +10,7 @@ This is a chat demo using the various versions of the LLMs
 # set up
 
 1. Install **onnxruntime-genai-directml** 
-    > If you want to use CUDA model, you can download `onnxruntime-genai-cuda` package.
+    > If you want to use a CUDA model, you can download the `onnxruntime-genai-cuda` package.
    
    ```
    pip install numpy
@@ -36,7 +36,7 @@ This is a chat demo using the various versions of the LLMs
 
 2. Download models to the created folder, take phi-3-mini directml as example.
 
-   > For CUDA model, only need to create a new folder and download model inside, e.g. `microsoft/Phi-3-vision-128k-instruct-onnx-cuda`.
+   > For a CUDA model, only need to create a new folder and download the model inside, (e.g. `microsoft/Phi-3-vision-128k-instruct-onnx-cuda`).
 
     ```bash
     huggingface-cli download microsoft/Phi-3-mini-4k-instruct-onnx --include directml/* --local-dir .
@@ -52,7 +52,7 @@ This is a chat demo using the various versions of the LLMs
             --mistralai_Mistral-7B-Instruct-v0.1
             ...
         --cuda
-            --phi3-mini-v
+            --Phi-3-vision-128k-instruct
     ```
 
 
@@ -74,6 +74,6 @@ This is a chat demo using the various versions of the LLMs
    Then open the local URL in broswer
    ![alt text](image.png)
 
-   For vision model, you will have blow UI interface.
+   For a vision model, you will have blow UI interface.
 
    ![alt text](vision_UI_interface.png)

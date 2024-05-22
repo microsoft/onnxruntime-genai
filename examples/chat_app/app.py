@@ -88,7 +88,7 @@ def launch_chat_app(expose_locally: bool = False):
         with gr.Row():
             with gr.Column(scale=5):
                 with gr.Row():
-                    chatbot = gr.Chatbot(elem_id="chuanhu_chatbot", height=900)
+                    chatbot = gr.Chatbot(elem_id="chuanhu_chatbot", height=500)
                 with gr.Row():
                     with gr.Column(scale=12):
                         user_input = gr.Textbox(show_label=False, placeholder="Enter text")

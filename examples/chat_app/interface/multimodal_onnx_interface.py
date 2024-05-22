@@ -37,7 +37,6 @@ class MultiModal_ONNXModel():
             prompt = f'{self.chat_template.format(input=text)}'
 
         logging.info("Loading image ...")
-        # self.image = og.Images.open("/home/ruiren/Vision-Model-Demo/RING.jpg")
         self.image = og.Images.open(image)
 
         logging.info("Preprocessing image and prompt ...")
