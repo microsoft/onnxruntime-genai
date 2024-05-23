@@ -163,10 +163,9 @@ jobs:
         cd examples/python
         python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)
         if [ "$(ep)" = "cuda" ]; then
-            python -m pip install nvidia-pyindex
-            python -m pip install nvidia-cuda-runtime-$(cuda_short_version)
-            python -m pip install nvidia-cublas-$(cuda_short_version)
-            python -m pip install nvidia-cusparse-$(cuda_short_version)
+            python -m pip install nvidia-cuda-runtime-$(cuda_short_version) --extra-index-url https://pypi.ngc.nvidia.com
+            python -m pip install nvidia-cublas-$(cuda_short_version) --extra-index-url https://pypi.ngc.nvidia.com
+            python -m pip install nvidia-cusparse-$(cuda_short_version) --extra-index-url https://pypi.ngc.nvidia.com
         fi
         python model-generate.py -m ./models/$(prebuild_phi3_mini_model_folder)
       displayName: 'Run Example With Artifact'
@@ -179,10 +178,9 @@ jobs:
         cd examples\python
         python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)
         if ("$(ep)" -eq "cuda") {
-            python -m pip install nvidia-pyindex
-            python -m pip install nvidia-cuda-runtime-$(cuda_short_version)
-            python -m pip install nvidia-cublas-$(cuda_short_version)
-            python -m pip install nvidia-cusparse-$(cuda_short_version)
+            python -m pip install nvidia-cuda-runtime-$(cuda_short_version) --extra-index-url https://pypi.ngc.nvidia.com
+            python -m pip install nvidia-cublas-$(cuda_short_version) --extra-index-url https://pypi.ngc.nvidia.com
+            python -m pip install nvidia-cusparse-$(cuda_short_version) --extra-index-url https://pypi.ngc.nvidia.com
         }
         python model-generate.py -m .\models\$(prebuild_phi3_mini_model_folder)
       displayName: 'Run Example With Artifact'
