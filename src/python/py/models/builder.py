@@ -2318,8 +2318,8 @@ def get_args():
         "-e",
         "--execution_provider",
         required=True,
-        choices=["cpu", "cuda", "dml"],
-        help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU)",
+        choices=["cpu", "cuda", "dml", "web"],
+        help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU, INT4 WEB)",
     )
 
     parser.add_argument(
