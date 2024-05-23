@@ -116,11 +116,11 @@ std::unique_ptr<OrtValue> GetVisualFeatures(OrtAllocator& device_allocator, cons
 MultiModalVisionModel::MultiModalVisionModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
   embedding_session_ = OrtSession::Create(
-      ort_env, (config_->config_path / config_->model.embedding.filename).c_str(), session_options_.get());
+      ort_env, (config_->config_path / fs::path(config_->model.embedding.filename)).c_str(), session_options_.get());
   vision_session_ = OrtSession::Create(
-      ort_env, (config_->config_path / config_->model.vision.filename).c_str(), session_options_.get());
+      ort_env, (config_->config_path / fs::path(config_->model.vision.filename)).c_str(), session_options_.get());
   decoder_session_ = OrtSession::Create(
-      ort_env, (config_->config_path / config_->model.decoder.filename).c_str(), session_options_.get());
+      ort_env, (config_->config_path / fs::path(config_->model.decoder.filename)).c_str(), session_options_.get());
 
   InitDeviceAllocator(*decoder_session_);
   session_info_->Add(*embedding_session_);
