@@ -109,7 +109,9 @@ jobs:
     displayName: 'Download NuGet.exe and add to PATH'
     
   - powershell: |
-      nuget.exe pack 
+      $nugetPath = "C:\Python\nuget"
+      $nugetExePath = Join-Path -Path $nugetPath -ChildPath "nuget.exe"
+      & $nugetExePath pack
     displayName: 'Nuget Packaging'
 
   - script: |
