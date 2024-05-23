@@ -26,14 +26,14 @@ jobs:
 - job: python_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}_validating
   ${{ if eq(parameters.os, 'linux') }}:
     ${{ if eq(parameters.ep, 'cuda') }}:
-      pool: 'onnxruntime-Linux-GPU-T4'
+      pool: 'onnxruntime-Linux-GPU-A10'
     ${{ else }}:
       pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
   ${{ if eq(parameters.os, 'win') }}:
     ${{ if eq(parameters.ep, 'directml') }}:
       pool: 'onnxruntime-Win2022-GPU-dml-A10'
     ${{ elseif eq(parameters.ep, 'cuda') }}:
-      pool: 'onnxruntime-Win2022-GPU-T4'
+      pool: 'onnxruntime-Win2022-GPU-A10'
     ${{ else }}:
       pool: 'onnxruntime-Win-CPU-2022'
 
