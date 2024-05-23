@@ -190,7 +190,7 @@ jobs:
         HF_TOKEN: $(HF_TOKEN)
 
   - ${{ if eq(parameters.os, 'win') }}:
-    - template: steps/utils//download_win_gpu_library.yml
+    - template: steps/utils/download-win-gpu-library.yml
       parameters:
         DownloadCUDA: true
         CudaVersion: ${{ parameters.cuda_version }}
