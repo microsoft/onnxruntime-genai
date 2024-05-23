@@ -93,7 +93,8 @@ jobs:
     clean: all
   steps:
   - powershell: |
-      $nugetPath = "$(Pipeline.Workspace)\nuget"
+      $nugetPath = "C:\Python\nuget"
+      New-Item -ItemType Directory -Force -Path $nugetPath
       $nugetExePath = Join-Path -Path $nugetPath -ChildPath "nuget.exe"
       if (-not (Test-Path $nugetExePath)) {
           Write-Host "NuGet.exe does not exist. Downloading..."
