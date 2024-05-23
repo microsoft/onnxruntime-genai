@@ -22,16 +22,6 @@ parameters:
   - 'linux'
   - 'win'
 
-- checkout: self
-  clean: true
-  path: onnxruntime-genai
-  submodules: recursive
-
-- checkout: manylinux
-  clean: true
-  path: onnxruntime-genai/manylinux
-  submodules: recursive
-
 jobs:
 - job: python_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}_validating
   ${{ if eq(parameters.os, 'linux') }}:
@@ -125,6 +115,16 @@ jobs:
     value: "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.14.2"
 
   steps:
+  - checkout: self
+    clean: true
+    path: onnxruntime-genai
+    submodules: recursive
+
+  - checkout: manylinux
+    clean: true
+    path: onnxruntime-genai/manylinux
+    submodules: recursive
+
   - task: UsePythonVersion@0
     inputs:
       versionSpec: $(py_dot_ver)
