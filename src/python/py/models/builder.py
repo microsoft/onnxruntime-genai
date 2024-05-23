@@ -1589,7 +1589,7 @@ class Model:
         tile_shape = ["batch_size", self.num_attn_heads, "source_sequence_length", "target_sequence_length"]
         self.make_tile(tile_name, tile_inputs, dtype=self.io_dtype, shape=tile_shape) # Shape of mask is now (B, N, S, T)
 
-        self.mask_attrs["mask_name"] = concat_name
+        self.mask_attrs["mask_name"] = tile_name
 
     def make_past_key_subgraph(self, basename):
         shape_name = f"{basename}/Shape"
