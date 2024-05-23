@@ -21,6 +21,7 @@ Gpt_State::Gpt_State(const Gpt_Model& model, RoamingArray<int32_t> sequence_leng
   position_inputs_.Add();
   logits_.Add();
   kv_cache_.Add();
+  extra_inputs_.Add();
 }
 
 RoamingArray<float> Gpt_State::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {

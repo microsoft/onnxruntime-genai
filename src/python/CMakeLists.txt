@@ -24,7 +24,9 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   set_target_properties(python PROPERTIES LINKER_LANGUAGE CUDA)
   target_link_libraries(python PRIVATE cublasLt cublas cudnn curand cufft cudart)
 endif()
-source_group("Sources" FILES ${python_srcs})
+
+set_target_properties(python PROPERTIES FOLDER "Sources")
+source_group(TREE ${PROJECT_SOURCE_DIR} FILES ${python_srcs})
 
 if(BUILD_WHEEL)
   set(WHEEL_FILES_DIR "${CMAKE_BINARY_DIR}/wheel")
@@ -43,8 +45,9 @@ if(BUILD_WHEEL)
 
   # Copy over any additional python files
   file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/py/" DESTINATION ${WHEEL_TARGET_NAME}/)
+  file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/package_description.md" DESTINATION ${WHEEL_FILES_DIR}/)
   file(COPY "${CMAKE_SOURCE_DIR}/ThirdPartyNotices.txt" DESTINATION ${WHEEL_TARGET_NAME}/)
-
+  
   add_custom_command(TARGET python POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy
     ${onnxruntime_libs} $<TARGET_FILE:python>

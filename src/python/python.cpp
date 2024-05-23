@@ -8,6 +8,7 @@
 #include "../json.h"
 #include "../search.h"
 #include "../models/model.h"
+#include "../logging.h"
 
 using namespace pybind11::literals;
 
@@ -135,7 +136,7 @@ std::string ToFormatDescriptor(ONNXTensorElementDataType type) {
   }
 }
 
-std::unique_ptr<OrtValue> ToTensor(pybind11::array& v) {
+std::unique_ptr<OrtValue> ToOrtValue(pybind11::array& v) {
   auto type = ToTensorType(v.dtype());
 
   std::vector<int64_t> shape(v.ndim());
@@ -240,12 +241,12 @@ struct PyGeneratorParams {
 
     if (py_whisper_input_features_.size() != 0) {
       GeneratorParams::Whisper& whisper = params_->inputs.emplace<GeneratorParams::Whisper>();
-      whisper.input_features = ToTensor(py_whisper_input_features_);
+      whisper.input_features = std::make_shared<Tensor>(ToOrtValue(py_whisper_input_features_));
     }
   }
 
-  void AddExtraInput(const std::string& name, pybind11::array& value) {
-    params_->extra_inputs.push_back({name, ToTensor(value)});
+  void SetModelInput(const std::string& name, pybind11::array& value) {
+    params_->extra_inputs.push_back({name, std::make_shared<Tensor>(ToOrtValue(value))});
     refs_.emplace_back(value);
   }
 
@@ -268,6 +269,11 @@ struct PyGeneratorParams {
   }
 
   void TryUseCudaGraphWithMaxBatchSize(pybind11::int_ max_batch_size) {
+    Log("warning", "try_use_cuda_graph_with_max_batch_size will be deprecated in release 0.3.0. Please use try_graph_capture_with_max_batch_size instead");
+    params_->TryGraphCapture(max_batch_size.cast<int>());
+  }
+
+  void TryGraphCaptureWithMaxBatchSize(pybind11::int_ max_batch_size) {
     params_->TryGraphCapture(max_batch_size.cast<int>());
   }
 
@@ -275,6 +281,13 @@ struct PyGeneratorParams {
   pybind11::array_t<float> py_whisper_input_features_;
 
   std::vector<pybind11::object> refs_;  // References to data we want to ensure doesn't get garbage collected
+};
+
+struct PyNamedTensors {
+  PyNamedTensors(std::unique_ptr<NamedTensors> named_tensors) : named_tensors_{std::move(named_tensors)} {
+  }
+
+  std::unique_ptr<NamedTensors> named_tensors_;
 };
 
 struct PyGenerator {
@@ -366,9 +379,16 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_property_readonly("vocab_size", [](const PyGeneratorParams& v) { return v.params_->vocab_size; })
       .def_readwrite("input_ids", &PyGeneratorParams::py_input_ids_)
       .def_readwrite("whisper_input_features", &PyGeneratorParams::py_whisper_input_features_)
-      .def("add_extra_input", &PyGeneratorParams::AddExtraInput)
-      .def("set_search_options", &PyGeneratorParams::SetSearchOptions)  // See config.h 'struct Search' for the options
-      .def("try_use_cuda_graph_with_max_batch_size", &PyGeneratorParams::TryUseCudaGraphWithMaxBatchSize);
+      .def("set_inputs", [](PyGeneratorParams& generator_params, PyNamedTensors* named_tensors) {
+        if (!named_tensors || !named_tensors->named_tensors_)
+          throw std::runtime_error("No inputs provided.");
+
+        generator_params.params_->SetInputs(*named_tensors->named_tensors_);
+      })
+      .def("set_model_input", &PyGeneratorParams::SetModelInput)
+      .def("set_search_options", &PyGeneratorParams::SetSearchOptions)                                     // See config.h 'struct Search' for the options
+      .def("try_use_cuda_graph_with_max_batch_size", &PyGeneratorParams::TryUseCudaGraphWithMaxBatchSize)  // will be deprecated
+      .def("try_graph_capture_with_max_batch_size", &PyGeneratorParams::TryGraphCaptureWithMaxBatchSize);
 
   pybind11::class_<TokenizerStream>(m, "TokenizerStream")
       .def("decode", [](TokenizerStream& t, int32_t token) { return t.Decode(token); });
@@ -398,7 +418,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         return CreateModel(GetOrtEnv(), config_path.c_str());
       }))
       .def("generate", [](Model& model, PyGeneratorParams& params) { params.Prepare(); return Generate(model, params); })
-      .def_property_readonly("device_type", [](const Model& s) { return s.device_type_; });
+      .def_property_readonly("device_type", [](const Model& s) { return s.device_type_; })
+      .def("create_multimodal_processor", [](const Model& model) { return model.CreateMultiModalProcessor(); });
 
   pybind11::class_<PyGenerator>(m, "Generator")
       .def(pybind11::init<Model&, PyGeneratorParams&>())
@@ -408,6 +429,37 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("generate_next_token", &PyGenerator::GenerateNextToken)
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
       .def("get_sequence", &PyGenerator::GetSequence);
+
+  pybind11::class_<Images>(m, "Images")
+      .def_static("open", [](pybind11::args image_paths) {
+        if (image_paths.empty())
+          throw std::runtime_error("No images provided");
+
+        if (image_paths.size() > 1U)
+          throw std::runtime_error("Loading multiple images is not supported");
+
+        auto image_path = image_paths[0].cast<std::string>();
+        return LoadImageImpl(image_path.c_str());
+      });
+
+  pybind11::class_<PyNamedTensors>(m, "NamedTensors");
+
+  pybind11::class_<MultiModalProcessor, std::shared_ptr<MultiModalProcessor>>(m, "MultiModalProcessor")
+      .def("__call__", [](MultiModalProcessor& processor, const std::string& prompt, const pybind11::kwargs& kwargs) -> std::unique_ptr<PyNamedTensors> {
+        if (processor.image_processor_) {
+          const Images* images = nullptr;
+          if (kwargs.contains("images")) {
+            images = kwargs["images"].cast<const Images*>();
+          }
+          return std::make_unique<PyNamedTensors>(processor.image_processor_->Process(*processor.tokenizer_, prompt, images));
+        } else {
+          throw std::runtime_error("Image processor is not available.");
+        }
+      })
+      .def("create_stream", [](MultiModalProcessor& processor) { return processor.tokenizer_->CreateStream(); })
+      .def("decode", [](MultiModalProcessor& processor, pybind11::array_t<int32_t> tokens) {
+        return processor.tokenizer_->Decode(ToSpan(tokens));
+      });
 
   m.def("set_log_options", &SetLogOptions);
 

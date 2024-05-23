@@ -4,6 +4,7 @@
 #include "ortx_tokenizer.h"
 #include "captured_graph_pool.h"
 #include "utils.h"
+#include "prompt_image_processor.h"
 
 #if USE_DML
 #include "dml_provider_factory.h"
@@ -18,6 +19,10 @@ namespace Generators {
 struct Tokenizer;
 
 void ConvertFp16ToFp32(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<OrtValue>& p_out, DeviceType device_type, cudaStream_t stream);
+
+void ConvertFp32ToFp16(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<OrtValue>& p_out, DeviceType device_type, cudaStream_t stream);
+
+void CheckResult(extError_t error);
 
 struct State {
   State(const GeneratorParams& params);
@@ -38,19 +43,6 @@ struct State {
   void ClearIO();                                             // Clear all inputs/outputs
 };
 
-template <typename T>
-struct OrtxPtr {
-  ~OrtxPtr() { OrtxDispose(&p_); }
-  T** Address() {
-    assert(!p_);
-    return &p_;
-  }
-  operator T*() { return p_; }
-  operator const T*() const { return p_; }
-
-  T* p_{};
-};
-
 struct TokenizerStream {
   TokenizerStream(const Tokenizer& tokenizer);
 
@@ -64,7 +56,7 @@ struct TokenizerStream {
 
 // Turn an array of ragged token sequences into a 2D input suitable for batching. Handles padding for the model
 // Sequence length is vector.size()/count
-std::vector<int32_t> PadInputs(std::span<std::span<const int32_t> > sequences, int32_t pad_token_id);
+std::vector<int32_t> PadInputs(std::span<std::span<const int32_t>> sequences, int32_t pad_token_id);
 
 struct Tokenizer : std::enable_shared_from_this<Tokenizer> {
   Tokenizer(Config& config);
@@ -84,8 +76,19 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer> {
   int32_t pad_token_id_;
 };
 
+struct MultiModalProcessor : std::enable_shared_from_this<MultiModalProcessor> {
+  MultiModalProcessor(Config& config, const SessionInfo& session_info);
+
+  std::shared_ptr<Tokenizer> tokenizer_;
+  std::shared_ptr<ImageProcessor> image_processor_;
+
+  std::shared_ptr<MultiModalProcessor> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
+};
+
 struct SessionInfo {
   SessionInfo(OrtSession& session);
+
+  void Add(OrtSession& session);
 
   bool HasInput(const std::string& name) const;
   bool HasOutput(const std::string& name) const;
@@ -102,6 +105,8 @@ struct Model : std::enable_shared_from_this<Model> {
   virtual ~Model();
 
   std::shared_ptr<Tokenizer> CreateTokenizer() const;
+
+  std::shared_ptr<MultiModalProcessor> CreateMultiModalProcessor() const;
 
   virtual std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params) const = 0;
 
@@ -146,6 +151,8 @@ struct Model : std::enable_shared_from_this<Model> {
   std::unique_ptr<DmlReadbackHeap> dml_readback_heap_;
   ComPtr<IDMLDevice> dml_device_;
   bool is_intel_device_{};
+  std::unique_ptr<Ort::Allocator> dml_owned_allocator_;
+  std::unique_ptr<OrtMemoryInfo> memory_info_device_;
 #endif
 
   std::shared_ptr<CapturedGraphPool> captured_graph_pool_;

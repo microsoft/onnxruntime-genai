@@ -37,8 +37,6 @@ void SetLogBool(std::string_view name, bool value) {
     g_log.model_logits = value;
   else
     throw JSON::unknown_value_error{};
-
-  Log("warning", "Setting a value");
 }
 
 void SetLogString(std::string_view name, std::string_view value) {
@@ -77,7 +75,7 @@ void SGRExample(std::ostream& stream) {
 }
 
 bool RunExample = (SGRExample(std::cerr), false);
-#endif SGR_EXAMPLE
+#endif
 
 std::ostream& Log(std::string_view label, std::string_view string) {
   assert(g_log.enabled);
