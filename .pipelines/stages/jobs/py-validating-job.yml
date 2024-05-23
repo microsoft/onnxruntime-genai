@@ -22,6 +22,15 @@ parameters:
   - 'linux'
   - 'win'
 
+- checkout: self
+  clean: true
+  path: onnxruntime-genai
+  submodules: recursive
+
+- checkout: manylinux
+  clean: true
+  path: onnxruntime-genai/manylinux
+  submodules: recursive
 
 jobs:
 - job: python_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}_validating
@@ -74,14 +83,6 @@ jobs:
       value: '3.11'
     ${{ else }}:
       value: '3.9'
-
-  - name: cuda_short_version
-    ${{ if startsWith(parameters.cuda_version, '11') }}:
-      value: 'cu11'
-    ${{ elseif startsWith(parameters.cuda_version, '12') }}:
-      value: 'cu12'
-    ${{ else }}:
-      value: 'cu11'
 
   - name: pip_package_name
     ${{ if eq(parameters.ep, 'cpu') }}:
@@ -187,6 +188,13 @@ jobs:
       workingDirectory: '$(Build.Repository.LocalPath)'
       env:
         HF_TOKEN: $(HF_TOKEN)
+
+  - ${{ if eq(parameters.os, 'win') }}:
+    - template: steps/utils//download_win_gpu_library.yml
+      parameters:
+        DownloadCUDA: true
+        CudaVersion: ${{ parameters.cuda_version }}
+
   - ${{ if eq(parameters.os, 'win') }}:
     - powershell: |
         python -m pip install numpy transformers torch onnx onnxruntime
