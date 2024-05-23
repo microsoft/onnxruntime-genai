@@ -56,7 +56,9 @@ Are you on a Windows machine with GPU?
    This command downloads the model into a folder called `directml`.
 
 
-2. Install the generate() API
+2.Make sure you have the needed CUDA [pre-requisites] ([https://shorturl.at/1dPPe](https://onnxruntime.ai/docs/build/eps.html#cuda)) installed
+
+3. Install the generate() API
 
    ```
    pip install numpy
@@ -65,7 +67,7 @@ Are you on a Windows machine with GPU?
 
    You should now see `onnxruntime-genai-directml` in your `pip list`.
 
-3. Run the model
+4. Run the model
 
    Run the model with [phi3-qa.py](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/phi3-qa.py).
 
