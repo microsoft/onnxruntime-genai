@@ -70,4 +70,34 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             _disposed = true;
         }
     }
+
+    public class NamedTensors : IDisposable
+    {
+        private IntPtr _namedTensorsHandle;
+        private bool _disposed = false;
+
+        internal NamedTensors(IntPtr namedTensorsHandle)
+        {
+            _namedTensorsHandle = namedTensorsHandle;
+        }
+
+        internal IntPtr Handle { get { return _namedTensorsHandle; } }
+
+        public void Dispose()
+        {
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+            NativeMethods.OgaDestroyNamedTensors(_namedTensorsHandle);
+            _namedTensorsHandle = IntPtr.Zero;
+            _disposed = true;
+        }
+    }
 }

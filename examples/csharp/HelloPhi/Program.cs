@@ -4,10 +4,10 @@ using Microsoft.ML.OnnxRuntimeGenAI;
 OgaHandle ogaHandle = new OgaHandle();
 
 Console.WriteLine("-------------");
-Console.WriteLine("Hello, Phi-2!");
+Console.WriteLine("Hello, Phi!");
 Console.WriteLine("-------------");
 
-string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "phi-2");
+string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "models\\phi-3");
 using Model model = new Model(modelPath);
 using Tokenizer tokenizer = new Tokenizer(model);
 
@@ -44,7 +44,7 @@ while (true)
         while (!generator.IsDone())
         {
             generator.ComputeLogits();
-            generator.GenerateNextTokenTop();
+            generator.GenerateNextToken();
             Console.Write(tokenizerStream.Decode(generator.GetSequence(0)[^1]));
         }
     }

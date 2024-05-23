@@ -96,14 +96,16 @@ int main(int argc, char** argv) {
   OgaHandle handle;
 
   std::cout << "-------------" << std::endl;
-  std::cout << "Hello, Phi-2!" << std::endl;
+  std::cout << "Hello, Phi-3!" << std::endl;
   std::cout << "-------------" << std::endl;
 
+#ifdef USE_CXX
   std::cout << "C++ API" << std::endl;
   CXX_API(argv[1]);
-
+#else
   std::cout << "C API" << std::endl;
   C_API(argv[1]);
+#endif
 
   return 0;
 }
