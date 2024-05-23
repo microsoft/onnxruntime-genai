@@ -93,7 +93,7 @@ jobs:
     clean: all
   steps:
   - powershell: |
-      $nugetPath = "$(Build.Repository.LocalPath)\nuget"
+      $nugetPath = "$(Pipeline.Workspace)\nuget"
       $nugetExePath = Join-Path -Path $nugetPath -ChildPath "nuget.exe"
       if (-not (Test-Path $nugetExePath)) {
           Write-Host "NuGet.exe does not exist. Downloading..."
@@ -105,13 +105,11 @@ jobs:
       Write-Host "Adding NuGet.exe to the system path..."
       $env:PATH += ";$nugetPath"
       Write-Host "NuGet.exe added to the system path."
-    condition: eq(variables['arch'], 'arm64')
     displayName: 'Download NuGet.exe and add to PATH'
     
   - powershell: |
       nuget.exe pack 
     displayName: 'Nuget Packaging'
-    workingDirectory: '$(Build.Repository.LocalPath)\nuget'
 
   - script: |
       MKDIR $(Agent.ToolsDirectory)\Python\3.11.0\arm64
