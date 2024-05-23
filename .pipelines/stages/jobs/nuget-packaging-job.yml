@@ -92,6 +92,27 @@ jobs:
   workspace:
     clean: all
   steps:
+  - powershell: |
+      $nugetPath = "$(Build.Repository.LocalPath)\nuget"
+      $nugetExePath = Join-Path -Path $nugetPath -ChildPath "nuget.exe"
+      if (-not (Test-Path $nugetExePath)) {
+          Write-Host "NuGet.exe does not exist. Downloading..."
+          Invoke-WebRequest -Uri 'https://dist.nuget.org/win-x86-commandline/latest/nuget.exe' -OutFile $nugetExePath
+          Write-Host "NuGet.exe downloaded successfully."
+      } else {
+          Write-Host "NuGet.exe exists."
+      }
+      Write-Host "Adding NuGet.exe to the system path..."
+      $env:PATH += ";$nugetPath"
+      Write-Host "NuGet.exe added to the system path."
+    condition: eq(variables['arch'], 'arm64')
+    displayName: 'Download NuGet.exe and add to PATH'
+    
+  - powershell: |
+      nuget.exe pack 
+    displayName: 'Nuget Packaging'
+    workingDirectory: '$(Build.Repository.LocalPath)\nuget'
+
   - script: |
       MKDIR $(Agent.ToolsDirectory)\Python\3.11.0\arm64
       XCOPY /s /y /h /e /c /q "C:\Python\Python311\*.*" $(Agent.ToolsDirectory)\Python\3.11.0\arm64\

@@ -20,16 +20,20 @@ steps:
     DisplayName: 'ESRP - Sign C# dlls'
     Pattern: '*OnnxRuntimeGenAI*.dll'
 - powershell: |
-    $nugetPath = "$(Build.Repository.LocalPath)\nuget\nuget.exe"
-    if (-not (Test-Path $nugetPath)) {
-        Write-Host "nuget.exe does not exist. Downloading..."
-        Invoke-WebRequest -Uri 'https://dist.nuget.org/win-x86-commandline/latest/nuget.exe' -OutFile $nugetPath
-        Write-Host "nuget.exe downloaded successfully."
+    $nugetPath = "$(Build.Repository.LocalPath)\nuget"
+    $nugetExePath = Join-Path -Path $nugetPath -ChildPath "nuget.exe"
+    if (-not (Test-Path $nugetExePath)) {
+        Write-Host "NuGet.exe does not exist. Downloading..."
+        Invoke-WebRequest -Uri 'https://dist.nuget.org/win-x86-commandline/latest/nuget.exe' -OutFile $nugetExePath
+        Write-Host "NuGet.exe downloaded successfully."
     } else {
-        Write-Host "nuget.exe exists."
+        Write-Host "NuGet.exe exists."
     }
+    Write-Host "Adding NuGet.exe to the system path..."
+    $env:PATH += ";$nugetPath"
+    Write-Host "NuGet.exe added to the system path."
   condition: eq(variables['arch'], 'arm64')
-  displayName: 'Check NuGet'
+  displayName: 'Download NuGet.exe and add to PATH'
   
 - powershell: |
     $VERSION = '0.4.0-dev'
