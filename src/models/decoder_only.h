@@ -26,8 +26,6 @@ struct DecoderOnly_State : State {
 
   const DecoderOnly_Model& model_;
   CapturedGraphInfoPtr captured_graph_info_;
-  bool first_run_{true};
-  int current_batch_size_{0};
 
   InputIDs input_ids_{model_, *this};
   Logits logits_{model_, *this};

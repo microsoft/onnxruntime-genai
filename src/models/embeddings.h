@@ -23,6 +23,8 @@ struct Embeddings {
 
   OrtValue* Get() { return embeddings_.get(); }
 
+  auto& GetShape() const { return shape_; }
+
  private:
   const Model& model_;
   State& state_;
@@ -32,6 +34,7 @@ struct Embeddings {
   const std::string name_;
   std::unique_ptr<OrtValue> embeddings_;
   size_t index_{};
+  StaticBuffer* sb_embeddings_{};
 };
 
 }  // namespace Generators
