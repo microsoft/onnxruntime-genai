@@ -5,7 +5,6 @@
 #include "ortx_common.h"
 #include "gsl/narrow"
 #include <cuda.h>
-#include <cuda_runtime.h>
 #include <cublas_v2.h>
 
 enum AttentionQkvFormat {
@@ -75,8 +74,8 @@ void paged_attention_v1(
     const float* __restrict__ alibi_slopes,
     const int max_num_blocks_per_seq,
     const int64_t* query_shapes,
-    int num_queries_per_kv,
-    int dtype);
+    int num_queries_per_kv);
+//    int dtype);
 //    const void* kv_quant_params_cache = nullptr,  // [num_blocks, 2, num_kv_heads, head_size / kv_quant_chunk_size, block_size]
 //    int kv_quant_chunk_size = 0,
 //    int kv_quant_param_dtype = 0);
@@ -99,21 +98,19 @@ void paged_attention_v2(
     const float* alibi_slopes,
     const int max_num_blocks_per_seq,
     const int64_t* query_shapes,
-    int num_queries_per_kv,
-    int dtype);
+    int num_queries_per_kv);
+//    int dtype);
 
 void reshape_and_cache(
     const cudaStream_t stream,
     const void* key,          // [num_tokens, num_heads, head_size]
     const void* value,        // [num_tokens, num_heads, head_size]
-    const void* key_cache,    // [num_blocks, num_heads, head_size/x, block_size, x]
+    const void* key_cache,    // [num_blocks, num_heads, head_size, block_size]
     const void* value_cache,  // [num_blocks, num_heads, head_size, block_size]
     const int* slot_mapping,  // [num_tokens]
     const int64_t* key_shapes,
     const int64_t* value_shapes,
-    const int64_t block_size,
-    const int vec_x,
-    int dtype);
+    const int64_t block_size);
 //    void* kv_quant_param = nullptr,  // [num_blocks, 2, num_heads, head_size / kv_quant_chunk_size, block_size]
 //    const int kv_quant_chunk_size = 0,
 //    const int kv_quant_param_dtype = 1);

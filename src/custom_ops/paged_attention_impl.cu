@@ -513,21 +513,16 @@ template <typename scalar_t>
 __global__ void reshape_and_cache_kernel(
     const scalar_t* __restrict__ key,      // [num_tokens, num_heads, head_size]
     const scalar_t* __restrict__ value,    // [num_tokens, num_heads, head_size]
-    scalar_t* __restrict__ key_cache,      // [num_blocks, num_heads, head_size/x, block_size, x]
+    scalar_t* __restrict__ key_cache,      // [num_blocks, num_heads, head_size, block_size]
     scalar_t* __restrict__ value_cache,    // [num_blocks, num_heads, head_size, block_size]
     const int* __restrict__ slot_mapping,  // [num_tokens]
     const int key_stride,
     const int value_stride,
     const int num_heads,
     const int head_size,
-    const int block_size,
-    const int x) {
+    const int block_size) {
   const int token_idx = blockIdx.x;
   const int slot_idx = slot_mapping[token_idx];
-  if (slot_idx < 0) {
-    // Padding token that should be ignored.
-    return;
-  }
   const int block_idx = slot_idx / block_size;
   const int block_offset = slot_idx % block_size;
 
@@ -538,11 +533,9 @@ __global__ void reshape_and_cache_kernel(
 
     const int head_idx = i / head_size;
     const int head_offset = i % head_size;
-    const int x_idx = head_offset / x;
-    const int x_offset = head_offset % x;
 
-    const int tgt_key_idx = block_idx * num_heads * (head_size / x) * block_size * x + head_idx * (head_size / x) * block_size * x + x_idx * block_size * x + block_offset * x + x_offset;
     const int tgt_value_idx = block_idx * num_heads * head_size * block_size + head_idx * head_size * block_size + head_offset * block_size + block_offset;
+    const int tgt_key_idx = tgt_value_idx;
     //{
     //  if (key_cache[tgt_key_idx] - key[src_key_idx] > half(0.1)) {
     //    printf("key error find, %d,%d ", tgt_key_idx, src_key_idx);
@@ -779,17 +772,8 @@ void paged_attention_v1(
     const float* __restrict__ alibi_slopes,
     const int max_num_blocks_per_seq,
     const int64_t* query_shapes,
-    int num_queries_per_kv,
-    int dtype) {
-  if (dtype == 0) {  // Float
-    CALL_V1_LAUNCHER_BLOCK_SIZE(float);
-  } else if (dtype == 1) {  // Half
-    CALL_V1_LAUNCHER_BLOCK_SIZE(uint16_t);
-  } else if (dtype == 2) {  // BFloat16
-    // CALL_V1_LAUNCHER_BLOCK_SIZE(__nv_bfloat16);
-  } else {
-    // TORCH_CHECK(false, "Unsupported data type: ", query.dtype());
-  }
+    int num_queries_per_kv) {
+  CALL_V1_LAUNCHER_BLOCK_SIZE(uint16_t);
 }
 
 #define LAUNCH_PAGED_ATTENTION_V2(HEAD_SIZE)                                             \
@@ -967,17 +951,8 @@ void paged_attention_v2(
     const float* alibi_slopes,
     const int max_num_blocks_per_seq,
     const int64_t* query_shapes,
-    int num_queries_per_kv,
-    int dtype) {
-  if (dtype == 0) {  // Float
-      CALL_V2_LAUNCHER_BLOCK_SIZE(float);
-  } else if (dtype == 1) {  // Half
-      CALL_V2_LAUNCHER_BLOCK_SIZE(uint16_t);
-  } else if (dtype == 2) {  // BFloat16
-    // CALL_V2_LAUNCHER_BLOCK_SIZE(__nv_bfloat16);
-  } else {
-    //TORCH_CHECK(false, "Unsupported data type: ", query.dtype());
-  }
+    int num_queries_per_kv) {
+  CALL_V2_LAUNCHER_BLOCK_SIZE(uint16_t);
 }
 
 void rotary_embedding_neox(
@@ -1042,19 +1017,16 @@ void reshape_and_cache(
     const cudaStream_t stream,
     const void* key,          // [num_tokens, num_heads, head_size]
     const void* value,        // [num_tokens, num_heads, head_size]
-    const void* key_cache,    // [num_blocks, num_heads, head_size/x, block_size, x]
+    const void* key_cache,    // [num_blocks, num_heads, head_size, block_size]
     const void* value_cache,  // [num_blocks, num_heads, head_size, block_size]
     const int* slot_mapping,  // [num_tokens]
     const int64_t* key_shapes,
     const int64_t* value_shapes,
-    const int64_t block_size,
-    const int vec_x,
-    int dtype) {
+    const int64_t block_size) {
   int num_tokens = key_shapes[0];
   int num_heads = key_shapes[1];
   int head_size = key_shapes[2];
   // int block_size = key_cache.size(3);
-  int x = vec_x;
 
   int key_stride = key_shapes[1] * key_shapes[2];
   int value_stride = value_shapes[1] * value_shapes[2];
@@ -1063,21 +1035,18 @@ void reshape_and_cache(
 
   dim3 grid(num_tokens);
   dim3 block(std::min(num_heads * head_size, 512));
-  // if constexpr (std::is_same_v<T, MLFloat16>) {
-  if (dtype == 1) {
-    vllm::reshape_and_cache_kernel<half><<<grid, block, 0, stream>>>(
-        (const half*)key,
-        (const half*)value,
-        (half*)key_cache,
-        (half*)value_cache,
-        slot_mapping,
-        key_stride,
-        value_stride,
-        num_heads,
-        head_size,
-        block_size,
-        x);
-  }
+ 
+  vllm::reshape_and_cache_kernel<half><<<grid, block, 0, stream>>>(
+      (const half*)key,
+      (const half*)value,
+      (half*)key_cache,
+      (half*)value_cache,
+      slot_mapping,
+      key_stride,
+      value_stride,
+      num_heads,
+      head_size,
+      block_size);
 }
 
 #if OCOS_USE_FLASH_ATTENTION
