@@ -22,18 +22,24 @@ steps:
 - powershell: |
     $nugetPath = "$(Build.Repository.LocalPath)\nuget"
     $nugetExePath = Join-Path -Path $nugetPath -ChildPath "nuget.exe"
-    if (-not (Test-Path $nugetExePath)) {
-        Write-Host "NuGet.exe does not exist. Downloading..."
-        Invoke-WebRequest -Uri 'https://dist.nuget.org/win-x86-commandline/latest/nuget.exe' -OutFile $nugetExePath
-        Write-Host "NuGet.exe downloaded successfully."
-    } else {
-        Write-Host "NuGet.exe exists."
-    }
-    Write-Host "Adding NuGet.exe to the system path..."
-    $env:PATH += ";$nugetPath"
-    Write-Host "NuGet.exe added to the system path."
+    Write-Host "NuGet.exe does not exist. Downloading..."
+    Invoke-WebRequest -Uri 'https://dist.nuget.org/win-x86-commandline/latest/nuget.exe' -OutFile $nugetExePath
+    Write-Host "NuGet.exe downloaded successfully."
+
+    $VERSION = '0.4.0-dev'
+    & $nugetExePath pack Microsoft.ML.OnnxRuntimeGenAI.nuspec `
+      -Prop version=$VERSION `
+      -Prop genai_nuget_ext=$(genai_nuget_ext) `
+      -Prop configuration=$(buildConfig) `
+      -Prop buildPath=$(buildDir) `
+      -Prop ort_nuget_ext=$(ort_nuget_ext) `
+      -Prop ort_version=$(ort_version)
+    & $nugetExePath pack Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec `
+      -Prop version=$VERSION `
+      -Prop configuration=$(buildConfig)
   condition: eq(variables['arch'], 'arm64')
-  displayName: 'Download NuGet.exe and add to PATH'
+  displayName: 'Nuget Packaging'
+  workingDirectory: '$(Build.Repository.LocalPath)\nuget'
   
 - powershell: |
     $VERSION = '0.4.0-dev'
@@ -47,6 +53,7 @@ steps:
     nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec `
       -Prop version=$VERSION `
       -Prop configuration=$(buildConfig)
+  condition: ne(variables['arch'], 'arm64')
   displayName: 'Nuget Packaging'
   workingDirectory: '$(Build.Repository.LocalPath)\nuget'
 
