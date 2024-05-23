@@ -88,7 +88,7 @@ class path {
   bool is_directory() const {
 #ifdef _WIN32
     struct _stat64 info;
-    if (_wstat64(to_wstring().c_str(), &info) != 0) {
+    if (_wstat64(wpath_.c_str(), &info) != 0) {
       return false;
     }
 #else
@@ -100,6 +100,14 @@ class path {
     return (info.st_mode & S_IFDIR) != 0;
   }
 
+  bool exists() const {
+#ifdef _WIN32
+    const int ret = GetFileAttributesW(wpath_.c_str());
+    return ret != INVALID_FILE_ATTRIBUTES;
+#else
+    return ifstream(path_).good();
+#endif
+  }
  private:
   std::string path_;
 
