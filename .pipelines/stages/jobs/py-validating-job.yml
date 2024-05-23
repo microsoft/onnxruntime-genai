@@ -193,7 +193,7 @@ jobs:
     - template: steps/utils/download-win-gpu-library.yml
       parameters:
         DownloadCUDA: true
-        CudaVersion: ${{ parameters.cuda_version }}
+        CudaVersion: $(cuda_version)
 
   - ${{ if eq(parameters.os, 'win') }}:
     - powershell: |
