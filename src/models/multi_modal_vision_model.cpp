@@ -71,6 +71,11 @@ void Select(const Model& model, std::span<const int32_t> input_ids, OrtValue* hi
           0,
           D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
           element_count * sizeof(uint16_t));
+
+      // Execute the cached command list
+      ComPtr<ID3D12Fence> fence;
+      uint64_t completion_value;
+      model.GetDmlExecutionContext()->ExecuteCommandList(nullptr, &fence, &completion_value);
       break;
     }
 #endif
@@ -135,8 +140,6 @@ std::unique_ptr<OrtValue> GetVisualFeatures(OrtAllocator& device_allocator, cons
 
 MultiModalVisionModel::MultiModalVisionModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
-  auto* embedding_session_options = embedding_session_options_ ? embedding_session_options_.get() : session_options_.get();
-
   embedding_session_ = OrtSession::Create(
       ort_env, (config_->config_path / config_->model.embedding.filename).c_str(), session_options_.get());
 
@@ -157,9 +160,10 @@ std::unique_ptr<State> MultiModalVisionModel::CreateState(RoamingArray<int32_t> 
   return std::make_unique<MultiModalPipelineState>(*this, sequence_lengths, params);
 }
 
-EmbeddingState::EmbeddingState(const MultiModalVisionModel& model, const GeneratorParams& params)
-    : State{params},
-      model_{model} {
+EmbeddingState::EmbeddingState(const MultiModalVisionModel& model, const GeneratorParams& params, const CapturedGraphInfo* captured_graph_info)
+    : State{params, model},
+      model_{model},
+      captured_graph_info_{captured_graph_info} {
   input_ids_.Add();
   inputs_embeds_.Add();
 }
@@ -170,13 +174,14 @@ void EmbeddingState::UpdateInputsAndOutputs(RoamingArray<int32_t> next_tokens) {
 }
 
 RoamingArray<float> EmbeddingState::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
-  State::Run(*model_.embedding_session_, *model_.run_options_);
+  int batch_size = static_cast<int>(input_ids_.GetShape()[0]);
+  State::Run(*model_.embedding_session_, *model_.run_options_, batch_size);
 
   return MakeDummy();
 }
 
 VisionState::VisionState(const MultiModalVisionModel& model, const GeneratorParams& params)
-    : State{params},
+    : State{params, model},
       model_{model} {
   extra_inputs_.Add();
   num_image_tokens_ = GetNumImageTokens(params_->extra_inputs, model_.config_->model.vision.inputs.image_sizes);
@@ -190,15 +195,15 @@ VisionState::VisionState(const MultiModalVisionModel& model, const GeneratorPara
 }
 
 RoamingArray<float> VisionState::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
-  State::Run(*model_.vision_session_, *model_.run_options_);
+  State::Run(*model_.vision_session_, *model_.run_options_, 1);
 
   return MakeDummy();
 }
 
-DecoderState::DecoderState(const MultiModalVisionModel& model, RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params)
-    : State{params},
+DecoderState::DecoderState(const MultiModalVisionModel& model, RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params, const CapturedGraphInfo* captured_graph_info)
+    : State{params, model},
       model_{model},
-      captured_graph_info_(model.GetCapturedGraphPool()->ReserveCapturedGraph(model, params)),
+      captured_graph_info_{captured_graph_info},
       position_inputs_{model, *this, sequence_lengths} {
   inputs_embeds_.Add();
   position_inputs_.Add();
@@ -207,25 +212,8 @@ DecoderState::DecoderState(const MultiModalVisionModel& model, RoamingArray<int3
 }
 
 RoamingArray<float> DecoderState::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
-  if (first_run_) {
-    if (params_->use_cuda_graph) {
-      model_.run_options_->AddConfigEntry("gpu_graph_id", "-1");
-    }
-    first_run_ = false;
-  }
-
-  State::Run(*model_.decoder_session_, *model_.run_options_);
-
-  // Set the graph id for the following runs.
-  if (params_->use_cuda_graph) {
-    int new_batch_size = static_cast<int>(inputs_embeds_.GetShape()[0]);
-    if (new_batch_size != current_batch_size_) {
-      current_batch_size_ = new_batch_size;
-      auto annotation_id = std::to_string(captured_graph_info_->GenerateUniqueAnnotationID(new_batch_size));
-      model_.run_options_->AddConfigEntry("gpu_graph_id", annotation_id.c_str());
-    }
-  }
-
+  int batch_size = static_cast<int>(inputs_embeds_.GetShape()[0]);
+  State::Run(*model_.decoder_session_, *model_.run_options_, batch_size);
   return logits_.Get();
 }
 
@@ -237,11 +225,12 @@ void DecoderState::UpdateInputs(int current_length, RoamingArray<int32_t> beam_i
 MultiModalPipelineState::MultiModalPipelineState(const MultiModalVisionModel& model,
                                                  RoamingArray<int32_t> sequence_lengths_unk,
                                                  const GeneratorParams& params)
-    : State{params},
+    : State{params, model},
       model_{model},
-      embedding_state_{std::make_unique<EmbeddingState>(model, params)},
+      captured_graph_info_{model.GetCapturedGraphPool()->ReserveCapturedGraph(model, params)},
+      embedding_state_{std::make_unique<EmbeddingState>(model, params, captured_graph_info_.get())},
       vision_state_{std::make_unique<VisionState>(model_, params)},
-      decoder_state_{std::make_unique<DecoderState>(model_, sequence_lengths_unk, params)} {
+      decoder_state_{std::make_unique<DecoderState>(model_, sequence_lengths_unk, params, captured_graph_info_.get())} {
 }
 
 RoamingArray<float> MultiModalPipelineState::Run(int current_length, RoamingArray<int32_t> next_tokens,

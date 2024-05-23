@@ -56,6 +56,8 @@ def run(args: argparse.Namespace):
         for _ in range(3):
             print()
 
+        # Delete the generator to free the captured graph before creating another one
+        del generator
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

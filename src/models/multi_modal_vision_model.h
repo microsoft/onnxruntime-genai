@@ -24,10 +24,12 @@ struct MultiModalVisionModel : Model {
 };
 
 struct EmbeddingState : State {
-  EmbeddingState(const MultiModalVisionModel& model, const GeneratorParams& params);
+  EmbeddingState(const MultiModalVisionModel& model, const GeneratorParams& params, const CapturedGraphInfo* captured_graph_info);
 
   RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens,
                           RoamingArray<int32_t> next_indices = {}) override;
+
+  const CapturedGraphInfo* GetCapturedGraphInfo() const override { return captured_graph_info_; };
 
  private:
   friend struct MultiModalPipelineState;
@@ -35,6 +37,7 @@ struct EmbeddingState : State {
   void UpdateInputsAndOutputs(RoamingArray<int32_t> next_tokens);
 
   const MultiModalVisionModel& model_;
+  const CapturedGraphInfo* captured_graph_info_;
   InputIDs input_ids_{model_, *this};                                 // Model input
   Embeddings inputs_embeds_{model_, *this, Embeddings::Mode::Output,  // Model output
                             model_.config_->model.embedding.outputs.embeddings};
@@ -57,12 +60,12 @@ struct VisionState : State {
 
 struct DecoderState : State {
   DecoderState(const MultiModalVisionModel& model, RoamingArray<int32_t> sequence_lengths,
-               const GeneratorParams& params);
+               const GeneratorParams& params, const CapturedGraphInfo* captured_graph_info);
 
   RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens,
                           RoamingArray<int32_t> next_indices) override;
 
-  const CapturedGraphInfo* GetCapturedGraphInfo() const override { return captured_graph_info_.get(); };
+  const CapturedGraphInfo* GetCapturedGraphInfo() const override { return captured_graph_info_; };
 
  private:
   friend struct MultiModalPipelineState;
@@ -70,14 +73,12 @@ struct DecoderState : State {
   void UpdateInputs(int current_length, RoamingArray<int32_t> beam_indices);
 
   const MultiModalVisionModel& model_;
-  CapturedGraphInfoPtr captured_graph_info_;
+  const CapturedGraphInfo* captured_graph_info_;
   Embeddings inputs_embeds_{model_, *this, Embeddings::Mode::Input,  // Model input
                             model_.config_->model.decoder.inputs.embeddings};
   PositionInputs position_inputs_;    // Model input
   KV_Cache kv_cache_{model_, *this};  // Model input
   Logits logits_{model_, *this};      // Model output
-  bool first_run_{true};
-  int current_batch_size_{0};
 };
 
 struct MultiModalPipelineState : State {
@@ -92,6 +93,7 @@ struct MultiModalPipelineState : State {
                     int current_length);
 
   const MultiModalVisionModel& model_;
+  const CapturedGraphInfoPtr captured_graph_info_;
   std::unique_ptr<EmbeddingState> embedding_state_;
   std::unique_ptr<VisionState> vision_state_;
   std::unique_ptr<DecoderState> decoder_state_;

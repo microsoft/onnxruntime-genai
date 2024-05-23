@@ -14,7 +14,7 @@ std::unique_ptr<State> DecoderOnly_Model::CreateState(RoamingArray<int32_t> sequ
 }
 
 DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const GeneratorParams& params)
-    : State{params},
+    : State{params, model},
       model_{model},
       captured_graph_info_(model.GetCapturedGraphPool()->ReserveCapturedGraph(model, params)),
       position_inputs_{model, *this, sequence_lengths_unk} {
@@ -26,26 +26,13 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, RoamingArra
 }
 
 RoamingArray<float> DecoderOnly_State::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
-  if (first_run_) {
-    if (params_->use_cuda_graph) {
-      model_.run_options_->AddConfigEntry("gpu_graph_id", "-1");
-    }
-    first_run_ = false;
-  } else {
+  if (!first_run_) {
     UpdateInputs(next_tokens, next_indices, current_length);
   }
 
-  State::Run(*model_.session_decoder_, *model_.run_options_);
+  int batch_size = static_cast<int>(input_ids_.GetShape()[0]);
+  State::Run(*model_.session_decoder_, *model_.run_options_, batch_size);
 
-  // Set the graph id for the following runs.
-  if (params_->use_cuda_graph) {
-    int new_batch_size = static_cast<int>(input_ids_.GetShape()[0]);
-    if (new_batch_size != current_batch_size_) {
-      current_batch_size_ = new_batch_size;
-      auto annotation_id = std::to_string(captured_graph_info_->GenerateUniqueAnnotationID(new_batch_size));
-      model_.run_options_->AddConfigEntry("gpu_graph_id", annotation_id.c_str());
-    }
-  }
   return logits_.Get();
 }
 

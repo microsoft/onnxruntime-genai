@@ -14,7 +14,7 @@ std::unique_ptr<State> Gpt_Model::CreateState(RoamingArray<int32_t> sequence_len
 }
 
 Gpt_State::Gpt_State(const Gpt_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const GeneratorParams& params)
-    : State{params},
+    : State{params, model},
       model_{model},
       position_inputs_{model, *this, sequence_lengths_unk} {
   input_ids_.Add();
@@ -25,13 +25,15 @@ Gpt_State::Gpt_State(const Gpt_Model& model, RoamingArray<int32_t> sequence_leng
 }
 
 RoamingArray<float> Gpt_State::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
+  int batch_size = static_cast<int>(input_ids_.GetShape()[0]);
+
   if (first_run_) {
     first_run_ = false;
   } else {
     UpdateInputs(next_tokens, next_indices, current_length);
   }
 
-  State::Run(*model_.session_decoder_, *model_.run_options_);
+  State::Run(*model_.session_decoder_, *model_.run_options_, batch_size);
   return logits_.Get();
 }
 
