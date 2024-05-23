@@ -2251,8 +2251,12 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
         elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings == 131072:
             onnx_model = Phi3Mini128KModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings == 8192:
+            print("WARNING: This model only works for CUDA currently because `SparseAttention` is only supported for CUDA in ONNX Runtime. Setting `--execution_provider cuda` by default.")
+            execution_provider = "cuda"
             onnx_model = Phi3Small8KModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings == 131072:
+            print("WARNING: This model only works for CUDA currently because `SparseAttention` is only supported for CUDA in ONNX Runtime. Setting `--execution_provider cuda` by default.")
+            execution_provider = "cuda"
             onnx_model = Phi3Small128KModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3VForCausalLM":
             print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
