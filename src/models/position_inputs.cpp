@@ -220,7 +220,13 @@ void PositionInputs::UpdateAttentionMask(int current_length) {
   } else {
     assert(attention_mask_shape_[1] == current_length - 1);  // We should always be growing by 1
     attention_mask_shape_[1] = current_length;
-    attention_mask_ = OrtValue::CreateTensor(*model_.allocator_device_, attention_mask_shape_, type_);
+
+#if USE_DML
+    if (model_.device_type_ == DeviceType::DML) {
+      attention_mask_ = OrtValue::CreateTensor(*model_.allocator_device_, attention_mask_shape_, type_);
+    }
+#endif
+
     attention_mask_next_ = OrtValue::CreateTensor(*model_.allocator_device_, attention_mask_shape_, type_);
   }
 
