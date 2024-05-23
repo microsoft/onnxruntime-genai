@@ -132,6 +132,8 @@ jobs:
         arch: ${{ parameters.arch }}
         ep: ${{ parameters.ep }}
     - template: steps/nuget-win-step.yml
+      parameters:
+        arch: ${{ parameters.arch }}
 
   - template: steps/compliant-and-cleanup-step.yml
 

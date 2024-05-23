@@ -1,3 +1,7 @@
+parameters:
+- name: arch
+  type: string
+  default: 'x64'
 steps:
 - powershell: |
     dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(buildConfig)" -p:NativeBuildOutputDir="$(buildDir)\$(buildConfig)"
@@ -15,6 +19,18 @@ steps:
     FolderPath: '$(Build.Repository.LocalPath)\src\csharp\bin\Release\'
     DisplayName: 'ESRP - Sign C# dlls'
     Pattern: '*OnnxRuntimeGenAI*.dll'
+- powershell: |
+    $nugetPath = "$(Build.Repository.LocalPath)\nuget\nuget.exe"
+    if (-not (Test-Path $nugetPath)) {
+        Write-Host "nuget.exe does not exist. Downloading..."
+        Invoke-WebRequest -Uri 'https://dist.nuget.org/win-x86-commandline/latest/nuget.exe' -OutFile $nugetPath
+        Write-Host "nuget.exe downloaded successfully."
+    } else {
+        Write-Host "nuget.exe exists."
+    }
+  condition: eq(variables['arch'], 'arm64')
+  displayName: 'Check NuGet'
+  
 - powershell: |
     $VERSION = '0.4.0-dev'
     nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.nuspec `
