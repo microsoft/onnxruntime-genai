@@ -105,7 +105,7 @@ class path {
     const int ret = GetFileAttributesW(wpath_.c_str());
     return ret != INVALID_FILE_ATTRIBUTES;
 #else
-    return ifstream(path_).good();
+    return std::ifstream(path_).good();
 #endif
   }
  private:
