@@ -9,8 +9,8 @@ parameters:
     type: string
     default: '11.8'
     values:
-      - 11.8
-      - 12.2
+      - '11.8'
+      - '12.2'
   - name: TrtVersion
     type: string
     default: '10.0.1.6'
