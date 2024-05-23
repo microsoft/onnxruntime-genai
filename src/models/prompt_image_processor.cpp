@@ -105,7 +105,7 @@ std::unique_ptr<OrtValue> ProcessImageSizes(ortc::Tensor<int64_t>* image_sizes, 
 }  // namespace
 
 std::unique_ptr<Images> LoadImageImpl(const char* image_path) {
-  if (!fs::exists(image_path)) {
+  if (!fs::path(image_path).exists()) {
     throw std::runtime_error("Image path does not exist: " + std::string(image_path));
   }
   auto [images, num_images] = ort_extensions::LoadRawImages({image_path});
@@ -114,9 +114,9 @@ std::unique_ptr<Images> LoadImageImpl(const char* image_path) {
 
 ImageProcessor::ImageProcessor(Config& config, const SessionInfo& session_info)
     : pixel_values_type_{session_info.GetInputDataType(config.model.vision.inputs.pixel_values)} {
-  constexpr std::string_view default_processor_file_name = "processor_config.json";
-  auto processor_config = (config.config_path / default_processor_file_name).u8string();
-  CheckResult(OrtxCreateProcessor(processor_.Address(), reinterpret_cast<const char*>(processor_config.c_str())));
+  const std::string default_processor_file_name = "processor_config.json";
+  auto processor_config = (config.config_path / fs::path(default_processor_file_name)).string();
+  CheckResult(OrtxCreateProcessor(processor_.Address(), processor_config.c_str()));
 
   config.AddMapping(std::string(Config::Defaults::InputIdsName), config.model.embedding.inputs.input_ids);
   config.AddMapping(std::string(Config::Defaults::PixelValuesName), config.model.vision.inputs.pixel_values);
