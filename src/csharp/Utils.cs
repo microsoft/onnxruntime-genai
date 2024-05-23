@@ -21,6 +21,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         {
             Result.VerifySuccess(NativeMethods.OgaSetCurrentGpuDeviceId(device_id));
         }
+
         public static int GetCurrentGpuDeviceId()
         {
             IntPtr device_id = IntPtr.Zero;
@@ -32,6 +33,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         {
             Result.VerifySuccess(NativeMethods.OgaSetLogBool(StringUtils.ToUtf8(name), value));
         }
+        
         public static void SetLogString(string name, string value)
         {
             Result.VerifySuccess(NativeMethods.OgaSetLogString(StringUtils.ToUtf8(name), StringUtils.ToUtf8(value)));

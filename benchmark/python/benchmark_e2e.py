@@ -22,7 +22,7 @@ def generate_prompt(model, tokenizer, prompt_length, use_graph_capture) -> str:
     params.input_ids = tokens
 
     if use_graph_capture:
-        params.try_use_cuda_graph_with_max_batch_size(1)
+        params.try_graph_capture_with_max_batch_size(1)
 
     generator=og.Generator(model, params)
     while not generator.is_done():
@@ -38,6 +38,7 @@ def save_results(results, filename):
             "Batch Size",
             "Prompt Length",
             "Tokens Generated",
+            "Max Length",
             "Tokenization Throughput (tps)",
             "Tokenization Latency (ms)",
             "Prompt Processing Throughput (tps)",
@@ -68,7 +69,7 @@ def run_benchmark(args, model, tokenizer, batch_size, prompt_length, generation_
     params.set_search_options(do_sample=True, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length)
 
     if args.use_graph_capture:
-        params.try_use_cuda_graph_with_max_batch_size(batch_size)
+        params.try_graph_capture_with_max_batch_size(batch_size)
 
     if args.verbose: print("Running warmup runs...")
     for _ in tqdm(range(args.warmup)):
@@ -104,7 +105,7 @@ def run_benchmark(args, model, tokenizer, batch_size, prompt_length, generation_
         params.set_search_options(max_length=max_length, min_length=max_length)
 
         if args.use_graph_capture:
-            params.try_use_cuda_graph_with_max_batch_size(batch_size)
+            params.try_graph_capture_with_max_batch_size(batch_size)
 
         generator = og.Generator(model, params)
 
@@ -180,6 +181,7 @@ def run_benchmark(args, model, tokenizer, batch_size, prompt_length, generation_
         batch_size, 
         prompt_length,
         generation_length,
+        max_length,
         avg_tokenization_thrpt, 
         avg_tokenization_latency_ms, 
         avg_per_token_prompt_thrpt, 
@@ -208,6 +210,8 @@ def main(args):
                 if args.max_lengths:
                     m = l * len(args.generation_lengths) + g
                     max_length = args.max_lengths[m]
+                else:
+                    max_length = prompt_length + gen_length
                 print(f"Args: batch_size = {batch_size}, prompt_length = {prompt_length}, tokens = {gen_length}, max_length = {max_length}")
                 metrics = run_benchmark(args, model, tokenizer, batch_size, prompt_length, gen_length, max_length)
                 all_csv_metrics.append(metrics)
