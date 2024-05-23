@@ -75,6 +75,14 @@ jobs:
     ${{ else }}:
       value: '3.9'
 
+  - name: cuda_short_version
+    ${{ if startsWith(parameters.cuda_version, '11') }}:
+      value: 'cu11'
+    ${{ elseif startsWith(parameters.cuda_version, '12') }}:
+      value: 'cu12'
+    ${{ else }}:
+      value: 'cu11'
+
   - name: pip_package_name
     ${{ if eq(parameters.ep, 'cpu') }}:
       value: 'onnxruntime_genai'
@@ -154,6 +162,12 @@ jobs:
         python -m pip install numpy transformers torch onnx onnxruntime
         cd examples/python
         python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)
+        if [ "$(ep)" = "cuda" ]; then
+            python -m pip install nvidia-pyindex
+            python -m pip install nvidia-cuda-runtime-$(cuda_short_version)
+            python -m pip install nvidia-cublas-$(cuda_short_version)
+            python -m pip install nvidia-cusparse-$(cuda_short_version)
+        fi
         python model-generate.py -m ./models/$(prebuild_phi3_mini_model_folder)
       displayName: 'Run Example With Artifact'
       workingDirectory: '$(Build.Repository.LocalPath)'
@@ -164,6 +178,12 @@ jobs:
         python -m pip install numpy transformers torch onnx onnxruntime
         cd examples\python
         python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)
+        if ("$(ep)" -eq "cuda") {
+            python -m pip install nvidia-pyindex
+            python -m pip install nvidia-cuda-runtime-$(cuda_short_version)
+            python -m pip install nvidia-cublas-$(cuda_short_version)
+            python -m pip install nvidia-cusparse-$(cuda_short_version)
+        }
         python model-generate.py -m .\models\$(prebuild_phi3_mini_model_folder)
       displayName: 'Run Example With Artifact'
       workingDirectory: '$(Build.Repository.LocalPath)'
@@ -171,4 +191,3 @@ jobs:
         HF_TOKEN: $(HF_TOKEN)
 
   - template: steps/compliant-and-cleanup-step.yml
-
