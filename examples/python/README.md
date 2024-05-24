@@ -19,6 +19,7 @@ To generate the model with model builder:
    ```
 
 2. Choose a model. Examples of supported ones are:
+   - Phi-3 
    - Phi-2
    - Mistral
    - Gemma 2B IT
