@@ -12,6 +12,7 @@ from onnxruntime.quantization.matmul_4bits_quantizer import MatMul4BitsQuantizer
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 import numpy as np
 import torch
+import modelopt
 
 import argparse
 import gc
@@ -41,6 +42,8 @@ class Model:
         self.cache_dir = cache_dir
         self.filename = extra_options["filename"] if "filename" in extra_options else "model.onnx"
         self.extra_options = extra_options
+
+        self.quant_provider = extra_options["quant_provider"] if "filename" in extra_options else "inc"
 
         self.inputs = []
         self.outputs = []
@@ -331,15 +334,19 @@ class Model:
         )
 
     def to_int4(self, model):
-        quant = MatMul4BitsQuantizer(
-            model=model,
-            block_size=self.quant_attrs["int4"]["block_size"],
-            is_symmetric=True,
-            accuracy_level=self.quant_attrs["int4"]["accuracy_level"],
-            nodes_to_exclude=[],
-        )
-        quant.process()
-        return quant.model.model
+        if (self.quant_provider == "inc"):
+            quant = MatMul4BitsQuantizer(
+                model=model,
+                block_size=self.quant_attrs["int4"]["block_size"],
+                is_symmetric=True,
+                accuracy_level=self.quant_attrs["int4"]["accuracy_level"],
+                nodes_to_exclude=[],
+            )
+            quant.process()
+            return quant.model.model
+        else:
+            quant = modelopt.onnx.quantization.int4.quantize_int4("int4_awq_clip", model)
+            return quant
 
     def clear_field(self, proto, field):
         proto.ClearField(field)
@@ -1996,6 +2003,7 @@ def get_args():
                 enable_cuda_graph = 1 : The model can use CUDA graph capture for CUDA execution provider. If enabled, all nodes being placed on the CUDA EP
                     is the prerequisite for the CUDA graph to be used correctly. It is not guaranteed that cuda graph be enabled as it depends on the model
                     and the graph structure.
+                quant_provider = {inc, modelopt} : Quantization provider
             """),
     )
 
