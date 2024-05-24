@@ -100,7 +100,7 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
   if (params.search.max_length == 0)
     throw std::runtime_error("search max_length is 0");
   if (params.search.max_length > model.config_->model.context_length)
-    throw std::runtime_error("max_length (" + std::to_string(params.search.max_length) + ") cannot be greater than model context_length (" + std::to_string(params.search.max_length) + ")");
+    throw std::runtime_error("max_length (" + std::to_string(params.search.max_length) + ") cannot be greater than model context_length (" + std::to_string(model.config_->model.context_length) + ")");
   if (params.batch_size < 1)
     throw std::runtime_error("batch_size must be 1 or greater, is " + std::to_string(params.batch_size));
   if (params.vocab_size < 1)
