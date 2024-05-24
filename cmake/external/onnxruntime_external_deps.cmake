@@ -85,5 +85,5 @@ FetchContent_Declare(
   GIT_REPOSITORY ${DEP_URL_onnxruntime_extensions}
   GIT_TAG ${DEP_SHA1_onnxruntime_extensions}
 )
-set(OCOS_BUILD_PRESET token_api_only)
+set(OCOS_BUILD_PRESET ort_genai)
 onnxruntime_fetchcontent_makeavailable(onnxruntime_extensions)

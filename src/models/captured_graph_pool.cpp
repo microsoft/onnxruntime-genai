@@ -96,6 +96,11 @@ CapturedGraphInfoPtr CapturedGraphPool::ReserveCapturedGraph(const Model& model,
       new_captured_graph->sb_extra_inputs_[extra_input.name] = std::make_unique<StaticBuffer>(allocator_device_, first_dim);
     }
 
+    // Create the input embeddings if needed
+    if (!model.config_->model.embedding.filename.empty()) {
+      new_captured_graph->sb_embeddings_ = std::make_unique<StaticBuffer>(allocator_device_, max_beam_batch_size);
+    }
+
     new_captured_graph->key_ = std::move(key);
 
     return new_captured_graph;
