@@ -159,34 +159,36 @@ jobs:
       os: ${{ parameters.os }}
 
   - ${{ if eq(parameters.os, 'linux') }}:
-    - bash: |
-        set -e -x
-        python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_$(ep) \
-          --context tools/ci_build/github/linux/docker/manylinux \
-          --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
-          --container-registry onnxruntimebuildcache \
-          --manylinux-src manylinux \
-          --multiple_repos \
-          --repository ortgenai$(ep)build$(arch)
+    - template: steps/utils/with-container-registry-steps.yml
+      parameters:
+        Steps:
+          - bash: |
+              set -e -x
+              python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_$(ep) \
+                --context tools/ci_build/github/linux/docker/manylinux \
+                --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
+                --container-registry onnxruntimebuildcache \
+                --manylinux-src manylinux \
+                --multiple_repos \
+                --repository ortgenai$(ep)build$(arch)
 
-        docker run \
-          --gpus all \
-          --rm \
-          --volume $(Build.Repository.LocalPath):/ort_genai_src \
-          --volume $(Build.BinariesDirectory):/ort_genai_binary \
-          -e HF_TOKEN=$HF_TOKEN \
-          -w /ort_genai_src/ ortgenai$(ep)build$(arch) \
-          bash -c " \
-              python -m pip install numpy transformers torch onnx onnxruntime \
-              cd /ort_genai_src/examples/python \
-              python -m pip install --no-index --find-links=/ort_genai_binary/wheel $(pip_package_name) \
-              python model-generate.py -m ./models/$(prebuild_phi3_mini_model_folder)"
-
-      displayName: 'Run Example With Artifact'
-      workingDirectory: '$(Build.Repository.LocalPath)'
-      env:
-        HF_TOKEN: $(HF_TOKEN)
-
+              docker run \
+                --gpus all \
+                --rm \
+                --volume $(Build.Repository.LocalPath):/ort_genai_src \
+                --volume $(Build.BinariesDirectory):/ort_genai_binary \
+                -e HF_TOKEN=$HF_TOKEN \
+                -w /ort_genai_src/ ortgenai$(ep)build$(arch) \
+                bash -c " \
+                  python -m pip install numpy transformers torch onnx onnxruntime \
+                  cd /ort_genai_src/examples/python \
+                  python -m pip install --no-index --find-links=/ort_genai_binary/wheel $(pip_package_name) \
+                  python model-generate.py -m ./models/$(prebuild_phi3_mini_model_folder)"
+            displayName: 'Run Example With Artifact'
+            workingDirectory: '$(Build.Repository.LocalPath)'
+            env:
+              HF_TOKEN: $(HF_TOKEN)
+        ContainerRegistry: onnxruntimebuildcache
   - ${{ if eq(parameters.os, 'win') }}:
     - ${{ if eq(parameters.ep, 'cuda') }}:
       - template: steps/utils/download-win-gpu-library.yml
