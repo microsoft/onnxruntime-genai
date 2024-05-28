@@ -1,4 +1,4 @@
-name: "Linux CUDA x64 Nightly Benchmark"
+name: "Linux CPU x64 Nightly Benchmark"
 
 # Run at 5:30 AM UTC every day
 # 9:30 PM PST
@@ -17,7 +17,7 @@ env:
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.18.0/onnxruntime-linux-x64-gpu-1.18.0.tgz"
 jobs:
   job:
-    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2004-T4" ]
+    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU" ]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v2
@@ -58,10 +58,10 @@ jobs:
           echo "::add-mask::$HF_TOKEN"
           echo "HF_TOKEN=$HF_TOKEN" >> $GITHUB_ENV
 
-      - name: Build phi-2 int-4 model for cuda
+      - name: Build phi-2 int-4 model for cpu
         run: |
-          python3 -m onnxruntime_genai.models.builder -m microsoft/phi-2 -o genai_models/phi2-int4-cuda -p int4 -e cuda -c hf_cache
+          python3 -m onnxruntime_genai.models.builder -m microsoft/phi-2 -o genai_models/phi2-int4-cpu -p int4 -e cpu -c hf_cache
 
-      - name: Run the python benchmark for cuda
+      - name: Run the python benchmark for cpu
         run: |
-          python3 benchmark/python/benchmark_e2e.py --input_folder genai_models/phi2-int4-cuda --output benchmark/python/phi-2-cuda.csv -b 1,16 -l 64,256,1024 -g 128,512 -r 100 -w 5 -k 1  
+          python3 benchmark/python/benchmark_e2e.py --input_folder genai_models/phi2-int4-cpu --output benchmark/python/phi-2-cpu.csv -b 1,2 -l 16,64,256 -g 128,256 -r 100 -w 5 -k 1  
