@@ -7,8 +7,8 @@ namespace Generators {
 
 Whisper_Model::Whisper_Model(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
-  session_decoder_ = OrtSession::Create(ort_env, (config_->config_path / config_->model.decoder.filename).c_str(), session_options_.get());
-  session_encoder_ = OrtSession::Create(ort_env, (config_->config_path / config_->model.encoder_decoder_init.filename).c_str(), session_options_.get());
+  session_decoder_ = OrtSession::Create(ort_env, (config_->config_path / fs::path(config_->model.decoder.filename)).c_str(), session_options_.get());
+  session_encoder_ = OrtSession::Create(ort_env, (config_->config_path / fs::path(config_->model.encoder_decoder_init.filename)).c_str(), session_options_.get());
 
   InitDeviceAllocator(*session_decoder_);
   session_encoder_info_ = std::make_unique<SessionInfo>(*session_encoder_);
@@ -19,7 +19,7 @@ std::unique_ptr<State> Whisper_Model::CreateState(RoamingArray<int32_t> sequence
 }
 
 Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const GeneratorParams& params)
-    : State{params},
+    : State{params, model},
       model_{model} {
   auto& inputs = const_cast<GeneratorParams::Whisper&>(std::get<GeneratorParams::Whisper>(params.inputs));
 
@@ -48,9 +48,11 @@ Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> s
 }
 
 RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
+  int batch_size = static_cast<int>(decoder_input_ids_.GetShape()[0]);
+
   switch (run_state_) {
     case RunState::Encoder_Decoder_Init:
-      State::Run(*model_.session_encoder_, *model_.run_options_);
+      State::Run(*model_.session_encoder_, *model_.run_options_, batch_size);
 
       run_state_ = RunState::Decoder_First;
       return logits_.Get();
@@ -71,7 +73,7 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
       break;
   }
 
-  State::Run(*model_.session_decoder_, *model_.run_options_);
+  State::Run(*model_.session_decoder_, *model_.run_options_, batch_size);
   return logits_.Get();
 }
 
