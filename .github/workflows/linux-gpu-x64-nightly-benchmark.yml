@@ -44,7 +44,7 @@ jobs:
         run: |
           set -e -x
           rm -rf build
-          cmake --preset linux_gcc_cuda_release --CMAKE_CUDA_COMPILER=$CUDA_HOME/bin/nvcc
+          cmake --preset linux_gcc_cuda_release --DCMAKE_CUDA_COMPILER=$CUDA_HOME/bin/nvcc
           cmake --build --preset linux_gcc_cuda_release --parallel
 
       - name: Install the python wheel and test dependencies
