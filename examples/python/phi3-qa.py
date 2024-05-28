@@ -14,6 +14,7 @@ def main(args):
     tokenizer_stream = tokenizer.create_stream()
     if args.verbose: print("Tokenizer created")
     if args.verbose: print()
+    args.do_sample = args.do_random_sampling
     search_options = {name:getattr(args, name) for name in ['do_sample', 'max_length', 'min_length', 'top_p', 'top_k', 'temperature', 'repetition_penalty'] if name in args}
     
     # Set the max length to something sensible by default, unless it is specified by the user,
