@@ -16,6 +16,7 @@ env:
   ort_zip: "onnxruntime-linux-x64-gpu-1.18.0.tgz"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.18.0/onnxruntime-linux-x64-gpu-1.18.0.tgz"
   CUDA_HOME: "/usr/local/cuda"
+  PATH: "/usr/local/cuda/bin:$PATH"
 jobs:
   job:
     runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2004-T4" ]
@@ -44,8 +45,8 @@ jobs:
         run: |
           set -e -x
           rm -rf build
-          cmake --preset linux_gcc_cuda_release
-          cmake --build --preset linux_gcc_cuda_release
+          cmake --preset linux_gcc_cuda_release --CMAKE_CUDA_COMPILER=$CUDA_HOME/bin/nvcc
+          cmake --build --preset linux_gcc_cuda_release --parallel --CMAKE_CUDA_COMPILER=$CUDA_HOME/bin/nvcc
 
       - name: Install the python wheel and test dependencies
         run: |
