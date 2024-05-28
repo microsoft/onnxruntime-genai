@@ -50,6 +50,13 @@ jobs:
         run: |
           python3 -m pip install build/cpu/wheel/onnxruntime_genai*.whl
           python3 -m pip install -r test/python/requirements-nightly-cpu.txt --user
+          cmake --preset linux_gcc_cuda_release
+          cmake --build --preset linux_gcc_cuda_release
+
+      - name: Install the python wheel and test dependencies
+        run: |
+          python3 -m pip install build/cuda/wheel/onnxruntime_genai*.whl
+          python3 -m pip install -r test/python/requirements-cuda.txt --user
 
       - name: Get HuggingFace Token
         run: |
@@ -64,4 +71,12 @@ jobs:
 
       - name: Run the python benchmark for cuda
         run: |
-          python3 benchmark/python/benchmark_e2e.py --input_folder genai_models/phi2-int4-cuda --output benchmark/python/phi-2-cuda.csv -b 1,16 -l 64,256,1024 -g 128,512 -r 100 -w 5 -k 1  
+        
+      - name: Build phi-2 int-4 model for cpu and gpu
+        run: |
+          python3 -m onnxruntime_genai.models.builder -m microsoft/phi-2 -o genai_models/phi2-int4-cpu -p int4 -e cpu -c hf_cache
+          python3 -m onnxruntime_genai.models.builder -m microsoft/phi-2 -o genai_models/phi2-int4-cuda -p int4 -e cuda -c hf_cache
+
+      - name: Run the python benchmark for cpu and gpu
+        run: |
+          python3 benchmark/python/benchmark_e2e.py --input_folder genai_models/phi2-int4-cpu --output benchmark/python/phi-2-cpu.csv -b 1,2 -l 16,64,256 -g 128,256 -r 100 -w 5 -k 1   
