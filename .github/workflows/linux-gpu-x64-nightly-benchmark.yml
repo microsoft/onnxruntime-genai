@@ -16,7 +16,6 @@ env:
   ort_zip: "onnxruntime-linux-x64-gpu-1.18.0.tgz"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.18.0/onnxruntime-linux-x64-gpu-1.18.0.tgz"
   CUDA_HOME: "/usr/local/cuda"
-  PATH: "/usr/local/cuda/bin:$PATH"
 jobs:
   job:
     runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2004-T4" ]
