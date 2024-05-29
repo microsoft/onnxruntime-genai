@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import platform
 import shutil
@@ -120,6 +121,9 @@ def _parse_args():
         default=_path_from_env_var("ANDROID_NDK_HOME"),
         help="Path to the Android NDK. Typically `<Android SDK>/ndk/<ndk_version>`.",
     )
+    parser.add_argument("--android_run_emulator", action="store_true",
+                        help="Create/start an Android emulator to run the test application. "
+                             "Requires --android, --build_java and --android_abi=x86_64.")
 
     # iOS build options
     parser.add_argument(
@@ -333,6 +337,50 @@ def _get_csharp_properties(args: argparse.Namespace):
     return props
 
 
+def _run_android_tests(args, ):    
+    # only run the tests on the emulator for x86_64 currently.
+    # TODO: may also be possible to run on a Mac with an arm64 chip
+    if args.android_abi != "x86_64":
+        log.info("Skipping Android tests as they are only supported on x86_64 currently.")
+        return
+
+    if not args.build_java:
+        # currently we only have an Android test app that we run on the emulator to test the Java bindings.
+        log.warning("Android testing requires --build_java to be set.")
+        return
+
+    sdk_tool_paths = util.android.get_sdk_tool_paths(args.android_home)
+    adb = sdk_tool_paths.adb
+    with contextlib.ExitStack() as context_stack:
+        if args.android_run_emulator:
+            avd_name = "ort_genai_android"
+            system_image = f"system-images;android-{args.android_api};default;{args.android_abi}"
+
+            util.android.create_virtual_device(sdk_tool_paths, system_image, avd_name)
+            emulator_proc = context_stack.enter_context(
+                util.android.start_emulator(
+                    sdk_tool_paths=sdk_tool_paths,
+                    avd_name=avd_name,
+                    extra_args=["-partition-size", "2047", "-wipe-data"],
+                )
+            )
+            context_stack.callback(util.android.stop_emulator, emulator_proc)
+
+        if args.build_java:
+            # use the gradle wrapper under <repo root>/java to run the test app on the emulator.
+            # the test app loads and runs a test model using the GenAI Java bindings
+            gradle_executable = str(REPO_ROOT / "src" / "java" / ("gradlew.bat" if util.is_windows() else "gradlew"))
+            android_test_path = args.build_dir / "src" / "java" / "androidtest"
+            util.run([gradle_executable, "--no-daemon",
+                                         f"-DminSdkVer={args.android_api}",
+                                         "clean",
+                                         "connectedDebugAndroidTest"],
+                     cwd=android_test_path)
+            
+            # Print test log output so we can easily check that the test ran as expected
+            util.run([adb, "logcat", "-s", "-d", "TestRunner:*"])
+
+
 def update(args: argparse.Namespace, env: dict[str, str]):
     """
     Update the cmake build files.
@@ -446,6 +494,9 @@ def test(args: argparse.Namespace, env: dict[str, str]):
         csharp_test_command = [dotnet, "test"]
         csharp_test_command += _get_csharp_properties(args)
         util.run(csharp_test_command, env=env, cwd=str(REPO_ROOT / "test" / "csharp"))
+
+    if args.android:
+        _run_android_tests(args)
 
 
 def clean(args: argparse.Namespace, env: dict[str, str]):
