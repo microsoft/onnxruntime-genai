@@ -17,7 +17,9 @@ env:
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.18.0/onnxruntime-linux-x64-gpu-1.18.0.tgz"
   CUDA_HOME: "/usr/local/cuda"
 jobs:
-  job:
+  linux-cuda-x64-nightly-benchmark:
+    env :
+      PYTHON_EXECUTABLE: "/opt/python/cp38-cp38/bin/python3.8"
     runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2004-T4" ]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
