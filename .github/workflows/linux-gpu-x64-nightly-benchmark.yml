@@ -40,17 +40,42 @@ jobs:
         run: |
           git submodule update --init --recursive
           
-      - name: Build with CMake and clang
+      - name: Get Docker Image
         run: |
           set -e -x
-          rm -rf build
-          cmake --preset linux_gcc_cuda_release -DCMAKE_CUDA_COMPILER="$CUDA_HOME/bin/nvcc" -DCUDA_TOOLKIT_ROOT_DIR="$CUDA_HOME"
-          cmake --build --preset linux_gcc_cuda_release --parallel
+          az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
+          az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
+          python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cuda  \
+            --context tools/ci_build/github/linux/docker/manylinux  \
+            --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
+            --container-registry onnxruntimebuildcache \
+            --manylinux-src manylinux \
+            --multiple_repos \
+            --repository onnxruntimecudabuildx64
 
-      - name: Install the python wheel and test dependencies
+      - name: Config with Cmake in Docker
         run: |
-          python3 -m pip install build/cuda/wheel/onnxruntime_genai*.whl
-          python3 -m pip install -r test/python/requirements-cuda.txt --user
+          set -e -x
+          docker run \
+            --gpus all \
+            --rm \
+            --volume $GITHUB_WORKSPACE:/ort_genai_src \
+            -w /ort_genai_src onnxruntimecudabuildx64 \
+            bash -c " \
+              /usr/bin/cmake --preset linux_gcc_cuda_release \
+                -DMANYLINUX=ON \
+                -DPYTHON_EXECUTABLE=${{ env.PYTHON_EXECUTABLE }} "
+
+      - name: Build with Cmake in Docker
+        run: |
+          set -e -x
+          docker run \
+            --gpus all \
+            --rm \
+            --volume $GITHUB_WORKSPACE:/ort_genai_src \
+            -w /ort_genai_src onnxruntimecudabuildx64 \
+            bash -c " \
+              /usr/bin/cmake --build --preset linux_gcc_cuda_release"
 
       - name: Get HuggingFace Token
         run: |
@@ -59,18 +84,26 @@ jobs:
           echo "::add-mask::$HF_TOKEN"
           echo "HF_TOKEN=$HF_TOKEN" >> $GITHUB_ENV
 
-      - name: Build phi-2 int-4 model for cuda
+      - name: Install the onnxruntime-genai Python wheel and run python test
         run: |
-          python3 -m onnxruntime_genai.models.builder -m microsoft/phi-2 -o genai_models/phi2-int4-cuda -p int4 -e cuda -c hf_cache
+          echo "Installing the onnxruntime-genai Python wheel and running the Python tests"
+          docker run \
+            --gpus all \
+            --rm \
+            --volume $GITHUB_WORKSPACE:/ort_genai_src \
+            -e HF_TOKEN=$HF_TOKEN \
+            -w /ort_genai_src onnxruntimecudabuildx64 bash -c " \
+              ${{ env.PYTHON_EXECUTABLE }} -m pip install /ort_genai_src/build/cuda/wheel/onnxruntime_genai*manylinux*.whl --user && \
+              ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/requirements-cuda.txt --user && \
+              ${{ env.PYTHON_EXECUTABLE }} test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models"
 
-      - name: Run the python benchmark for cuda
+      - name: Build phi-2 int-4 model and run benchmark in Docker
         run: |
-        
-      - name: Build phi-2 int-4 model for cpu and gpu
-        run: |
-          python3 -m onnxruntime_genai.models.builder -m microsoft/phi-2 -o genai_models/phi2-int4-cpu -p int4 -e cpu -c hf_cache
-          python3 -m onnxruntime_genai.models.builder -m microsoft/phi-2 -o genai_models/phi2-int4-cuda -p int4 -e cuda -c hf_cache
-
-      - name: Run the python benchmark for cpu and gpu
-        run: |
-          python3 benchmark/python/benchmark_e2e.py --input_folder genai_models/phi2-int4-cpu --output benchmark/python/phi-2-cpu.csv -b 1,2 -l 16,64,256 -g 128,256 -r 100 -w 5 -k 1   
+          echo "Building phi-2 int-4 model in Docker"
+          docker run \
+            --gpus all \
+            --rm \
+            --volume $GITHUB_WORKSPACE:/ort_genai_src \
+            -w /ort_genai_src onnxruntimecudabuildx64 bash -c " \
+              ${{ env.PYTHON_EXECUTABLE }} -m onnxruntime_genai.models.builder -m microsoft/phi-2 -o genai_models/phi2-int4-cuda -p int4 -e cuda -c hf_cache"
+              ${{ env.PYTHON_EXECUTABLE }} benchmark/python/benchmark_e2e.py --input_folder genai_models/phi2-int4-cuda --output benchmark/python/phi-2-cuda.csv -b 1,4 -l 64,256,1024 -g 256,512 -r 100 -w 5 -k 1
