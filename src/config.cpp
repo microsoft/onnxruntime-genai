@@ -221,7 +221,7 @@ struct Eos_Array_Element : JSON::Element {
     v_.eos_token_ids.push_back(static_cast<int>(value));
   }
 
-  void OnComplete(bool empty) {
+  void OnComplete(bool empty) override {
     if (v_.eos_token_ids.empty())
       return;  // Empty array, nothign to do
 

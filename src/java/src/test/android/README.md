@@ -6,7 +6,7 @@ This directory contains a simple android application for testing the ONNX Runtim
 
 This android application is mainly aimed for testing:
 
-- Model used: TBD - need smallest model GenAI produces some output with
+- Model used: test/test_models/hf-internal-testing/tiny-random-gpt2-fp32
 - Main test file: An android instrumentation test under `app\src\androidtest\java\ai.onnxruntime.genai.example.javavalidator\SimpleTest.kt`
 - The main dependency of this application is `onnxruntime-genai` aar package under `app\libs`.
 - The MainActivity of this application is set to be empty.

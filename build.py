@@ -108,7 +108,9 @@ def _parse_args():
         choices=["armeabi-v7a", "arm64-v8a", "x86", "x86_64"],
         help="Specify the target Android Application Binary Interface (ABI)",
     )
-    parser.add_argument("--android_api", type=int, default=27, help="Android API Level, e.g. 21")
+    parser.add_argument("--android_api", type=int, default=27,
+                        help="Android API Level. Default is 27 (Android 8.1, released in 2017).")
+    
     parser.add_argument(
         "--android_home", type=Path, default=_path_from_env_var("ANDROID_HOME"), help="Path to the Android SDK."
     )

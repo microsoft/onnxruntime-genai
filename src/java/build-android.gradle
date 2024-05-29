@@ -28,7 +28,7 @@ def static getVersionCode(String version){
 
 project.buildDir = buildDir
 project.version = rootProject.file('../../VERSION_INFO').text.trim()
-project.group = "com.microsoft.onnxruntime-genai"
+project.group = "com.microsoft.onnxruntime"
 
 def mavenArtifactId = project.name + '-android'
 def defaultDescription = 'ONNX Runtime GenAI is ... ' +
