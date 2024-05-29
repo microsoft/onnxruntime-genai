@@ -71,6 +71,13 @@ const int32_t* OGA_API_CALL OgaSequencesGetSequenceData(const OgaSequences* p, s
   return (*reinterpret_cast<const Generators::TokenSequences*>(p))[sequence].data();
 }
 
+OgaResult* OGA_API_CALL OgaLoadImage(const char* image_path, OgaImages** images) {
+  OGA_TRY
+  *images = reinterpret_cast<OgaImages*>(Generators::LoadImageImpl(image_path).release());
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaModel** out) {
   OGA_TRY
   auto model = Generators::CreateModel(Generators::GetOrtEnv(), config_path);
@@ -137,6 +144,17 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputSequences(OgaGeneratorParams* 
   params.batch_size = static_cast<int>(sequences.size());
   params.sequence_length = static_cast<int>(params.input_ids_owner.size() / params.batch_size);
   params.input_ids = params.input_ids_owner;
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputs(OgaGeneratorParams* oga_params, const OgaNamedTensors* p_named_tensors) {
+  OGA_TRY
+  auto& params = *reinterpret_cast<Generators::GeneratorParams*>(oga_params);
+  auto& named_tensors = *reinterpret_cast<const Generators::NamedTensors*>(p_named_tensors);
+
+  params.SetInputs(named_tensors);
+
   return nullptr;
   OGA_CATCH
 }
@@ -237,9 +255,38 @@ OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer* p, const int32_t*
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaProcessorDecode(const OgaMultiModalProcessor* p, const int32_t* tokens, size_t token_count, const char** out_string) {
+  OGA_TRY
+  auto& processor = *reinterpret_cast<const Generators::MultiModalProcessor*>(p);
+
+  auto string = processor.tokenizer_->Decode({tokens, token_count});
+  auto length = string.length() + 1;
+  auto cstr_buffer = std::make_unique<char[]>(length);
+#if _MSC_VER
+  strcpy_s(cstr_buffer.get(), length, string.c_str());
+#else
+  strncpy(cstr_buffer.get(), string.c_str(), length);
+  cstr_buffer[length] = 0;
+#endif
+  *out_string = cstr_buffer.release();
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaCreateTokenizerStream(const OgaTokenizer* p, OgaTokenizerStream** out) {
   OGA_TRY
   *out = reinterpret_cast<OgaTokenizerStream*>(reinterpret_cast<const Generators::Tokenizer*>(p)->CreateStream().release());
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaCreateTokenizerStreamFromProcessor(const OgaMultiModalProcessor* p, OgaTokenizerStream** out) {
+  OGA_TRY
+  *out = reinterpret_cast<OgaTokenizerStream*>(
+      reinterpret_cast<const Generators::MultiModalProcessor*>(
+          p)
+          ->tokenizer_->CreateStream()
+          .release());
   return nullptr;
   OGA_CATCH
 }
@@ -311,6 +358,25 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGetCurrentGpuDeviceId(int* device_id) {
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaCreateMultiModalProcessor(const OgaModel* model, OgaMultiModalProcessor** out) {
+  OGA_TRY
+  auto processor = reinterpret_cast<const Generators::Model*>(model)->CreateMultiModalProcessor();
+  processor->external_owner_ = processor;
+  *out = reinterpret_cast<OgaMultiModalProcessor*>(processor.get());
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor* p, const char* prompt, const OgaImages* images_p, OgaNamedTensors** input_tensors) {
+  OGA_TRY
+  auto& processor = *reinterpret_cast<const Generators::MultiModalProcessor*>(p);
+  auto* images = images_p ? reinterpret_cast<const Generators::Images*>(images_p) : nullptr;
+  auto named_tensors = processor.image_processor_->Process(*processor.tokenizer_, prompt, images);
+  *input_tensors = reinterpret_cast<OgaNamedTensors*>(named_tensors.release());
+  return nullptr;
+  OGA_CATCH
+}
+
 void OGA_API_CALL OgaDestroyResult(OgaResult* p) {
   delete reinterpret_cast<Generators::Result*>(p);
 }
@@ -345,5 +411,17 @@ void OGA_API_CALL OgaDestroyTokenizerStream(OgaTokenizerStream* p) {
 
 void OGA_API_CALL OgaDestroyTensor(OgaTensor* p) {
   reinterpret_cast<Generators::Tensor*>(p)->external_owner_ = nullptr;
+}
+
+void OGA_API_CALL OgaDestroyMultiModalProcessor(OgaMultiModalProcessor* p) {
+  reinterpret_cast<Generators::MultiModalProcessor*>(p)->external_owner_ = nullptr;
+}
+
+void OGA_API_CALL OgaDestroyImages(OgaImages* p) {
+  delete reinterpret_cast<Generators::Images*>(p);
+}
+
+void OGA_API_CALL OgaDestroyNamedTensors(OgaNamedTensors* p) {
+  delete reinterpret_cast<Generators::NamedTensors*>(p);
 }
 }

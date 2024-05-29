@@ -33,9 +33,11 @@ GeneratorParams::GeneratorParams(const Model& model)
       pad_token_id{model.config_->model.pad_token_id},
       eos_token_id{model.config_->model.eos_token_id},
       vocab_size{model.config_->model.vocab_size},
+      hidden_size{model.config_->model.decoder.hidden_size},
       device_type{model.device_type_},
       cuda_stream{model.cuda_stream_},
-      is_cuda_graph_enabled_{IsCudaGraphEnabled(model.config_->model.decoder.session_options)} {
+      is_cuda_graph_enabled_{IsCudaGraphEnabled(model.config_->model.decoder.session_options)},
+      config_{model.config_.get()} {
   use_cuda_graph = is_cuda_graph_enabled_;
   if (use_cuda_graph) {
     max_batch_size = 1;  // set it to 1 by default
@@ -56,6 +58,22 @@ void GeneratorParams::TryGraphCapture(int max_bs) {
     max_batch_size = max_bs;
   } else {
     throw std::runtime_error("CUDA graph is not supported on this device");
+  }
+}
+
+void GeneratorParams::SetInputs(const NamedTensors& named_tensors) {
+  for (const auto& [name, tensor] : named_tensors) {
+    if (name == Config::Defaults::InputIdsName) {
+      input_ids = std::span<const int32_t>(tensor->ort_tensor_->GetTensorMutableData<int32_t>(),
+                                           tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount());
+      batch_size = static_cast<int>(tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape()[0]);
+      sequence_length = static_cast<int>(input_ids.size()) / batch_size;
+    } else {
+      // If the nominal name is found in the map, use the graph name.
+      // Else, use the nominal name as the graph name.
+      [[maybe_unused]] const auto [graph_name, found] = config_->GetGraphName(name);
+      extra_inputs.push_back({graph_name, tensor});
+    }
   }
 }
 
@@ -82,7 +100,7 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
   if (params.search.max_length == 0)
     throw std::runtime_error("search max_length is 0");
   if (params.search.max_length > model.config_->model.context_length)
-    throw std::runtime_error("max_length (" + std::to_string(params.search.max_length) + ") cannot be greater than model context_length (" + std::to_string(params.search.max_length) + ")");
+    throw std::runtime_error("max_length (" + std::to_string(params.search.max_length) + ") cannot be greater than model context_length (" + std::to_string(model.config_->model.context_length) + ")");
   if (params.batch_size < 1)
     throw std::runtime_error("batch_size must be 1 or greater, is " + std::to_string(params.batch_size));
   if (params.vocab_size < 1)

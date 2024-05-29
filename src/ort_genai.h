@@ -147,6 +147,12 @@ struct OgaTokenizerStream : OgaAbstract {
     return std::unique_ptr<OgaTokenizerStream>(p);
   }
 
+  static std::unique_ptr<OgaTokenizerStream> Create(const OgaMultiModalProcessor& processor) {
+    OgaTokenizerStream* p;
+    OgaCheckResult(OgaCreateTokenizerStreamFromProcessor(&processor, &p));
+    return std::unique_ptr<OgaTokenizerStream>(p);
+  }
+
   /*
    * Decode a single token in the stream. If this results in a word being generated, it will be returned in 'out'.
    * The caller is responsible for concatenating each chunk together to generate the complete result.
@@ -186,6 +192,10 @@ struct OgaGeneratorParams : OgaAbstract {
 
   void SetModelInput(const char* name, OgaTensor& tensor) {
     OgaCheckResult(OgaGeneratorParamsSetModelInput(this, name, &tensor));
+  }
+
+  void SetInputs(OgaNamedTensors& named_tensors) {
+    OgaCheckResult(OgaGeneratorParamsSetInputs(this, &named_tensors));
   }
 
   void TryGraphCaptureWithMaxBatchSize(int max_batch_size) {
@@ -266,6 +276,50 @@ struct OgaTensor : OgaAbstract {
   }
 
   static void operator delete(void* p) { OgaDestroyTensor(reinterpret_cast<OgaTensor*>(p)); }
+};
+
+struct OgaImages : OgaAbstract {
+  static std::unique_ptr<OgaImages> Load(const char* image_path) {
+    OgaImages* p;
+    OgaCheckResult(OgaLoadImage(image_path, &p));
+    return std::unique_ptr<OgaImages>(p);
+  }
+
+  static void operator delete(void* p) { OgaDestroyImages(reinterpret_cast<OgaImages*>(p)); }
+};
+
+struct OgaNamedTensors : OgaAbstract {
+  static void operator delete(void* p) { OgaDestroyNamedTensors(reinterpret_cast<OgaNamedTensors*>(p)); }
+};
+
+struct OgaMultiModalProcessor : OgaAbstract {
+  static std::unique_ptr<OgaMultiModalProcessor> Create(const OgaModel& model) {
+    OgaMultiModalProcessor* p;
+    OgaCheckResult(OgaCreateMultiModalProcessor(&model, &p));
+    return std::unique_ptr<OgaMultiModalProcessor>(p);
+  }
+
+  std::unique_ptr<OgaNamedTensors> ProcessImages(const char* str, const OgaImages* images = nullptr) const {
+    OgaNamedTensors* p;
+    OgaCheckResult(OgaProcessorProcessImages(this, str, images, &p));
+    return std::unique_ptr<OgaNamedTensors>(p);
+  }
+
+  OgaString Decode(const int32_t* tokens_data, size_t tokens_length) const {
+    const char* p;
+    OgaCheckResult(OgaProcessorDecode(this, tokens_data, tokens_length, &p));
+    return p;
+  }
+
+#if __cplusplus >= 202002L
+  OgaString Decode(std::span<const int32_t> tokens) const {
+    const char* p;
+    OgaCheckResult(OgaProcessorDecode(this, tokens.data(), tokens.size(), &p));
+    return p;
+  }
+#endif
+
+  static void operator delete(void* p) { OgaDestroyMultiModalProcessor(reinterpret_cast<OgaMultiModalProcessor*>(p)); }
 };
 
 struct OgaHandle {

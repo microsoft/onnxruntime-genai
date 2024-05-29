@@ -21,6 +21,7 @@ __pycache__
 benchmark/python/*.csv
 examples/python/genai_models
 examples/python/hf_cache
+examples/csharp/HelloPhi/models
 
 !test/test_models/hf-internal-testing/
 !test/test_models/hf-internal-testing/tiny-random-gpt2*/*.onnx
