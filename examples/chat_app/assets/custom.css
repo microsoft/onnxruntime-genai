@@ -45,17 +45,18 @@ ul:not(.options) {
 }
 
 [data-testid="bot"] {
-    background-color: #FFFFFF !important;
 }
 
 [data-testid="user"] {
-    background-color: #95EC69 !important;
+    background-color: #02C160 !important;
+    color: #F3F3F3 !important;
+    font-size: medium;
 }
 
 /* Dark mode */
 .dark #chuanhu_chatbot {
     background-color: var(--chatbot-color-dark) !important;
-    color: #FFFFFF !important;
+    color: #F3F3F3 !important;
 }
 
 .dark [data-testid="bot"] {
@@ -130,7 +131,7 @@ thead th {
     border-radius: 10px;
     padding: 1.4em 1.2em 0em 1.4em;
     margin: 1.2em 2em 1.2em 0.5em;
-    color: #FFFF;
+    color: #F3F3F3;
     box-shadow: 6px 6px 16px hsla(0, 0%, 0%, 0.2);
 }
 
