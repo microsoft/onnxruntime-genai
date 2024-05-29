@@ -133,12 +133,6 @@ def run_benchmark(args, model, processor, image, generation_length, max_length):
     avg_prompt_latency_s = sum(prompt_times) / len(prompt_times)
     avg_prompt_latency_ms = avg_prompt_latency_s * 1000
     print(f"Average Time to First Token: {avg_prompt_latency_ms} ms")
-    # avg_prompt_latency_s = sum(prompt_times) / len(prompt_times)
-    # avg_prompt_latency_ms = avg_prompt_latency_s * 1000
-    # avg_per_token_prompt_latency_ms = avg_prompt_latency_ms / prompt_length
-    # avg_per_token_prompt_thrpt = batch_size * (1 / (avg_per_token_prompt_latency_ms / 1000))
-    # print(f"Average Prompt Processing Latency (per token): {avg_per_token_prompt_latency_ms} ms")
-    # print(f"Average Prompt Processing Throughput (per token): {avg_per_token_prompt_thrpt} tps")
 
     # Calculate token generation input prep metrics
     avg_token_gen_latency_s = sum(token_gen_times) / len(token_gen_times)
