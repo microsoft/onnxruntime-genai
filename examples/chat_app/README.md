@@ -54,8 +54,8 @@ Folder structure should look as the below:
       --meta-llama_Llama-2-7b-chat-hf
       --mistralai_Mistral-7B-Instruct-v0.1
             ...
-   --cuda
-      --phi-3-vision
+   --cuda-int4
+      --Phi-3-vision
 ```
 
 ## Launch the app
