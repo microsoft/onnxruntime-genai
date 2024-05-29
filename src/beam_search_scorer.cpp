@@ -201,8 +201,8 @@ void BeamSearchScorer::Finalize(Sequences& sequences,
       continue;
     }
 
-    for (int beam_index = 0; beam_index < num_beams_; beam_index++) {
-      int const batch_beam_index = batch_index * num_beams_ + beam_index;
+    for (size_t beam_index = 0; beam_index < num_beams_; beam_index++) {
+      size_t const batch_beam_index = batch_index * num_beams_ + beam_index;
       float const final_score = next_beam_scores_[batch_beam_index];
       auto final_tokens = sequences.GetSequence(batch_beam_index);
       beam_hyp.Add(final_tokens, final_score);

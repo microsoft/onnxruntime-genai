@@ -178,7 +178,7 @@ void Generator::GenerateNextToken() {
   }
 }
 
-RoamingArray<int32_t> Generator::GetSequence(int index) const {
+RoamingArray<int32_t> Generator::GetSequence(size_t index) const {
   return search_->GetSequence(index);
 }
 
