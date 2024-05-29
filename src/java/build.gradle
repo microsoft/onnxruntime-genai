@@ -12,7 +12,7 @@ allprojects {
 	}
 }
 
-project.group = "com.microsoft.onnxruntime-genai"
+project.group = "com.microsoft.onnxruntime"
 version = rootProject.file('../../VERSION_INFO').text.trim()
 
 // cmake runs will inform us of the build directory of the current run
@@ -119,7 +119,7 @@ if (cmakeNativeLibDir != null) {
 	// Overwrite jar location
 	task allJar(type: Jar) {
 		manifest {
-			attributes('Automatic-Module-Name': project.group,
+			attributes('Automatic-Module-Name': "com.microsoft.onnxruntime.genai",
 					'Implementation-Title': 'onnxruntime-genai',
 					'Implementation-Version': project.version)
 		}
