@@ -13,6 +13,13 @@ from interface.multimodal_onnx_interface import MultiModal_ONNXModel
 top_directory = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 optimized_directory = os.path.join(top_directory, "models")
 available_models = {}
+ep_and_models = {
+    "cpu": ["microsoft/Phi-3-medium-128k-instruct-onnx-cpu"],
+    "cuda": ["microsoft/Phi-3-medium-128k-instruct-onnx-cuda"],
+    "dml": ["microsoft/Phi-3-medium-128k-instruct-onnx-directml"]
+}
+existed_models = {}
+
 interface = None
 
 
@@ -76,6 +83,11 @@ def launch_chat_app(expose_locally: bool = False):
     for ep_name in os.listdir(optimized_directory):
         sub_optimized_directory = os.path.join(optimized_directory, ep_name)
         for model_name in os.listdir(sub_optimized_directory):
+            existed_models[model_name] = {"model_dir": os.path.join(sub_optimized_directory, model_name)}
+
+    for ep_name in ep_and_models:
+        sub_optimized_directory = os.path.join(optimized_directory, ep_name)
+        for model_name in ep_and_models[ep_name]:
             available_models[model_name] = {"model_dir": os.path.join(sub_optimized_directory, model_name)}
 
     with gr.Blocks(css=custom_css, theme=small_and_beautiful_theme) as demo:
@@ -105,6 +117,8 @@ def launch_chat_app(expose_locally: bool = False):
             reset_args = {"fn": reset_textbox, "inputs": [], "outputs": [user_input, status_display]}
             with gr.Column(), gr.Column(min_width=50, scale=1), gr.Tab(label="Parameter Setting"):
                 gr.Markdown("# Model")
+                gr.Markdown("### Download below model")
+                gr.Markdown('Please select the model that supported by your machine!')
                 model_name = gr.Dropdown(
                     choices=list(available_models.keys()),
                     label="Model",
@@ -213,14 +227,14 @@ def launch_chat_app(expose_locally: bool = False):
             cancels=[predict_event1, predict_event2, predict_event3],
         )
 
-        demo.load(change_model_listener, inputs=[model_name], outputs=[model_name, image])
+        demo.load(change_model_listener, inputs=[model_name], outputs=[model_name, image], concurrency_limit=1)
 
     demo.title = "LLM Chat UI"
 
     if expose_locally:
-        demo.queue(concurrency_count=1).launch(server_name="0.0.0.0", server_port=5000)
+        demo.launch(server_name="0.0.0.0", server_port=5000)
     else:
-        demo.queue(concurrency_count=1).launch(share=True, server_port=5000)
+        demo.launch(share=True, server_port=5000)
 
 
 if __name__ == "__main__":
