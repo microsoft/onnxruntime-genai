@@ -12,7 +12,6 @@ from onnxruntime.quantization.matmul_4bits_quantizer import MatMul4BitsQuantizer
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 import numpy as np
 import torch
-import modelopt
 
 import argparse
 import gc
@@ -43,7 +42,7 @@ class Model:
         self.filename = extra_options["filename"] if "filename" in extra_options else "model.onnx"
         self.extra_options = extra_options
 
-        self.quant_provider = extra_options["quant_provider"] if "filename" in extra_options else "inc"
+        self.quant_provider = extra_options["quant_provider"] if "quant_provider" in extra_options else "inc"
 
         self.inputs = []
         self.outputs = []
@@ -345,6 +344,7 @@ class Model:
             quant.process()
             return quant.model.model
         else:
+            import modelopt
             quant = modelopt.onnx.quantization.int4.quantize_int4("int4_awq_clip", model)
             return quant
 
@@ -2003,7 +2003,8 @@ def get_args():
                 enable_cuda_graph = 1 : The model can use CUDA graph capture for CUDA execution provider. If enabled, all nodes being placed on the CUDA EP
                     is the prerequisite for the CUDA graph to be used correctly. It is not guaranteed that cuda graph be enabled as it depends on the model
                     and the graph structure.
-                quant_provider = {inc, modelopt} : Quantization provider
+                quant_provider = {inc, modelopt} : Quantization provider - You can choose between Intel's Neural Compressor (default) and NVIDIA's TensorRT
+                    Model Optimizer (ModelOpt). Expect slower processing but better compression when using ModelOpt.
             """),
     )
 
