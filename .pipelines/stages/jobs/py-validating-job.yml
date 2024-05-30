@@ -26,7 +26,7 @@ jobs:
 - job: python_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}_validating
   ${{ if eq(parameters.os, 'linux') }}:
     ${{ if eq(parameters.ep, 'cuda') }}:
-      pool: 'Onnxruntime-Linux-GPU'
+      pool: 'onnxruntime-Linux-GPU-A10'
     ${{ else }}:
       pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
   ${{ if eq(parameters.os, 'win') }}:
@@ -159,33 +159,42 @@ jobs:
       os: ${{ parameters.os }}
 
   - ${{ if eq(parameters.os, 'linux') }}:
-    - bash: |
-        set -e -x
-        python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_$(ep) \
-          --context tools/ci_build/github/linux/docker/manylinux \
-          --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
-          --container-registry onnxruntimebuildcache \
-          --manylinux-src manylinux \
-          --multiple_repos \
-          --repository ortgenai$(ep)build$(arch)
+    - ${{ if eq(parameters.ep, 'cuda') }}:
+      - bash: |
+          set -e -x
+          az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
+          az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
+          python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_$(ep) \
+            --context tools/ci_build/github/linux/docker/manylinux \
+            --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
+            --container-registry onnxruntimebuildcache \
+            --manylinux-src manylinux \
+            --multiple_repos \
+            --repository ortgenai$(ep)build$(arch)
 
-        docker run \
-          --gpus all \
-          --rm \
-          --volume $(Build.Repository.LocalPath):/ort_genai_src \
-          --volume $(Build.BinariesDirectory):/ort_genai_binary \
-          -e HF_TOKEN=$HF_TOKEN \
-          -w /ort_genai_src/ ortgenai$(ep)build$(arch) \
-          bash -c " \
-              python -m pip install numpy transformers torch onnx onnxruntime \
-              cd /ort_genai_src/examples/python \
-              python -m pip install --no-index --find-links=/ort_genai_binary/wheel $(pip_package_name) \
-              python model-generate.py -m ./models/$(prebuild_phi3_mini_model_folder)"
+          docker run \
+            --gpus all \
+            --rm \
+            --volume $(Build.Repository.LocalPath):/ort_genai_src \
+            --volume $(Build.BinariesDirectory):/ort_genai_binary \
+            -e HF_TOKEN=$HF_TOKEN \
+            -w /ort_genai_src/ ortgenai$(ep)build$(arch) \
+            bash -c " \
+                python -m pip install numpy transformers torch onnx onnxruntime \
+                cd /ort_genai_src/examples/python \
+                python -m pip install --no-index --find-links=/ort_genai_binary/wheel $(pip_package_name) \
+                python model-generate.py -m ./models/$(prebuild_phi3_mini_model_folder)"
 
-      displayName: 'Run Example With Artifact'
-      workingDirectory: '$(Build.Repository.LocalPath)'
-      env:
-        HF_TOKEN: $(HF_TOKEN)
+        displayName: 'Run Example With Artifact'
+        workingDirectory: '$(Build.Repository.LocalPath)'
+    ${{ elseif eq(parameters.ep, 'cpu') }}:
+       - bash: |
+           python -m pip install numpy transformers torch onnx onnxruntime
+           cd examples/python
+           python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)
+           python model-generate.py -m ./models/$(prebuild_phi3_mini_model_folder)
+         displayName: 'Run Example With Artifact'
+         workingDirectory: '$(Build.Repository.LocalPath)'
 
   - ${{ if eq(parameters.os, 'win') }}:
     - ${{ if eq(parameters.ep, 'cuda') }}:
@@ -200,7 +209,5 @@ jobs:
         python model-generate.py -m .\models\$(prebuild_phi3_mini_model_folder)
       displayName: 'Run Example With Artifact'
       workingDirectory: '$(Build.Repository.LocalPath)'
-      env:
-        HF_TOKEN: $(HF_TOKEN)
 
   - template: steps/compliant-and-cleanup-step.yml
