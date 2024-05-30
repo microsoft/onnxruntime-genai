@@ -172,12 +172,12 @@ jobs:
             --volume $(Build.Repository.LocalPath):/ort_genai_src \
             --volume $(Build.BinariesDirectory):/ort_genai_binary \
             -e HF_TOKEN=$HF_TOKEN \
-            -w /ort_genai_src/ onnxruntimepackagestest \
+            -w /ort_genai_src/ onnxruntimebuildcache.azurecr.io/onnxruntimepackagestest \
             bash -c " \
-                python -m pip install numpy transformers torch onnx onnxruntime \
+                python3 -m pip install numpy transformers torch onnx onnxruntime \
                 cd /ort_genai_src/examples/python \
-                python -m pip install --no-index --find-links=/ort_genai_binary/wheel $(pip_package_name) \
-                python model-generate.py -m ./models/$(prebuild_phi3_mini_model_folder)"
+                python3 -m pip install --no-index --find-links=/ort_genai_binary/wheel $(pip_package_name) \
+                python3 model-generate.py -m ./models/$(prebuild_phi3_mini_model_folder)"
 
         displayName: 'Run Example With Artifact'
         workingDirectory: '$(Build.Repository.LocalPath)'

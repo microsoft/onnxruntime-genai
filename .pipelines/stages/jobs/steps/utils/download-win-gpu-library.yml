@@ -26,6 +26,7 @@ steps:
       displayName: 'Download CUDA SDK v${{ parameters.CudaVersion }}'
     - powershell: |
         Write-Host "##vso[task.prependpath]$(Agent.TempDirectory)\v${{ parameters.CudaVersion }}\bin;$(Agent.TempDirectory)\v${{ parameters.CudaVersion }}\extras\CUPTI\lib64"
+        $env:CUDA_PATH = "##vso[task.prependpath]$(Agent.TempDirectory)\v${{ parameters.CudaVersion }}"
       displayName: 'Append CUDA SDK Directory to PATH'
 
     - task: CmdLine@2
@@ -33,6 +34,12 @@ steps:
         script: |
           echo %PATH%
       displayName: 'Print PATH after download CUDA SDK'
+
+    - task: CmdLine@2
+      inputs:
+        script: |
+          echo %CUDA_PATH%
+      displayName: 'Print CUDA_PATH'
 
   - ${{ if eq(parameters.DownloadTRT, true) }}:
     - ${{ if eq(parameters.CudaVersion, '11.8') }}:
