@@ -7,11 +7,15 @@ namespace Generators {
 struct InputIDs {
   InputIDs(const Model& model, State& state);
 
+  InputIDs(InputIDs&& other, State& state);
+
   void Add();
   void Update(RoamingArray<int32_t> next_tokens);
 
   auto& GetShape() const { return shape_; }
   const char* name_;
+
+  OrtValue* Get() { return value_.get(); }
 
  private:
   const Model& model_;

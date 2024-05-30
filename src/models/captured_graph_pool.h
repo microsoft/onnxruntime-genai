@@ -142,6 +142,7 @@ struct CapturedGraphInfo {
   std::unique_ptr<Generators::StaticBuffer> sb_position_ids_;
   std::unique_ptr<Generators::StaticBuffer> sb_attention_mask_;
   std::unordered_map<std::string, std::unique_ptr<Generators::StaticBuffer>> sb_extra_inputs_;
+  std::unique_ptr<Generators::StaticBuffer> sb_embeddings_;
   std::unique_ptr<CapturedGraphKey> key_;
 
 #if USE_DML
@@ -152,7 +153,7 @@ struct CapturedGraphInfo {
   // Generates a unique annotation ID across different captured graph objects. This is necessary because different
   // generators could be alive at the same time and run the same batch size but with different static buffers, so
   // they need to have different annotation IDs.
-  int GenerateUniqueAnnotationID(int batch_size) {
+  int GenerateUniqueAnnotationID(int batch_size) const {
     // Keep the upper half (minus 1 for the sign bit) of the bits for the unique ID, and keep the lower half for the batch
     // size. This should give us 32,767 values for the index and 65,535 values for the batch size, which is more than enough.
     int bit_shift = sizeof(int) * 8 / 2;

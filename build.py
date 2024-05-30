@@ -93,8 +93,12 @@ def _parse_args():
 
     parser.add_argument("--use_dml", action="store_true", help="Whether to use DML. Default is to not use DML.")
 
+    # The following options are mutually exclusive (cross compiling options such as android, ios, etc.)
+    platform_group = parser.add_mutually_exclusive_group()
+    platform_group.add_argument("--android", action="store_true", help="Build for Android")
+    platform_group.add_argument("--ios", action="store_true", help="Build for ios")
+
     # Android options
-    parser.add_argument("--android", action="store_true", help="Build for Android")
     parser.add_argument(
         "--android_abi",
         default="arm64-v8a",
@@ -110,6 +114,31 @@ def _parse_args():
         type=Path,
         default=_path_from_env_var("ANDROID_NDK_HOME"),
         help="Path to the Android NDK. Typically `<Android SDK>/ndk/<ndk_version>`.",
+    )
+
+    # iOS build options
+    parser.add_argument(
+        "--ios_sysroot",
+        default="",
+        help="Specify the location name of the macOS platform SDK to be used",
+    )
+    parser.add_argument(
+        "--ios_toolchain_file",
+        default="",
+        help="Path to ios toolchain file, "
+        "or cmake/genai_ios.toolchain.cmake will be used",
+    )
+    parser.add_argument(
+        "--ios_arch",
+        type=str,
+        help="Specify the Target specific architectures for iOS "
+        "This is only supported on MacOS host",
+    )
+    parser.add_argument(
+        "--ios_deployment_target",
+        type=str,
+        help="Specify the minimum version of the target platform "
+        "This is only supported on MacOS host",
     )
 
     # now that all args are added, we can include the full help in the usage message.
@@ -221,6 +250,31 @@ def _validate_android_args(args: argparse.Namespace):
             args.skip_csharp = True
 
 
+def _validate_ios_args(args: argparse.Namespace):
+    if args.ios:
+        if not util.is_mac():
+            raise ValueError("A Mac host is required to build for iOS")
+    
+        needed_args = [
+            args.ios_sysroot,
+            args.ios_arch,
+            args.ios_deployment_target,
+        ]
+        arg_names = [
+            "--ios_sysroot           <the location or name of the macOS platform SDK>",
+            "--ios_arch              <the Target specific architectures for iOS>",
+            "--ios_deployment_target <the minimum version of the target platform>",
+        ]
+        have_required_args = all(_ is not None for _ in needed_args)
+        if not have_required_args:
+            raise ValueError(
+                "iOS build on MacOS canceled due to missing arguments: "
+                + ", ".join(
+                val for val, cond in zip(arg_names, needed_args) if not cond
+                )
+            )
+
+
 def _validate_args(args):
     # default to all 3 stages
     if not args.update and not args.build and not args.test:
@@ -235,6 +289,7 @@ def _validate_args(args):
     _validate_build_dir(args)
     _validate_cuda_args(args)
     _validate_android_args(args)
+    _validate_ios_args(args)
 
     if args.ort_home:
         if not args.ort_home.exists() or not args.ort_home.is_dir():
@@ -328,7 +383,22 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             + str((args.android_ndk_path / "build" / "cmake" / "android.toolchain.cmake").resolve(strict=True)),
             f"-DANDROID_PLATFORM=android-{args.android_api}",
             f"-DANDROID_ABI={args.android_abi}",
-            f"-DENABLE_PYTHON=OFF"
+            "-DENABLE_PYTHON=OFF",
+        ]
+
+    if args.ios:
+        command += [
+            "-DCMAKE_SYSTEM_NAME=iOS",
+            f"-DCMAKE_OSX_SYSROOT={args.ios_sysroot}",
+            f"-DCMAKE_OSX_ARCHITECTURES={args.ios_arch}",
+            f"-DCMAKE_OSX_DEPLOYMENT_TARGET={args.ios_deployment_target}",
+            "-DENABLE_PYTHON=OFF",
+            "-DCMAKE_TOOLCHAIN_FILE="
+            + (
+                args.ios_toolchain_file
+                if args.ios_toolchain_file
+                else "cmake/genai_ios.toolchain.cmake"
+            ),
         ]
 
     util.run(command, env=env)

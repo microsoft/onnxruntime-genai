@@ -10,10 +10,10 @@
 #include "decoder_only.h"
 #include "whisper.h"
 #include "kernels.h"
+#include "multi_modal_vision_model.h"
 #if USE_DML
 #include <wil/wrl.h>
 #include "dml_provider_factory.h"
-#include "../dml/dml_smart_container.h"
 #include "../dml/dml_helpers.h"
 
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
@@ -36,9 +36,23 @@ static std::wstring CurrentModulePath() {
 
 namespace Generators {
 
-State::State(const GeneratorParams& params) : params_{params.shared_from_this()} {}
+State::State(const GeneratorParams& params, const Model& model)
+    : params_{params.shared_from_this()},
+      model_{model} {}
 
-void State::Run(OrtSession& session, OrtRunOptions& run_options) {
+void State::Run(OrtSession& session, OrtRunOptions& run_options, int new_batch_size) {
+  if (first_run_) {
+    if (params_->use_cuda_graph) {
+      model_.run_options_->AddConfigEntry("gpu_graph_id", "-1");
+    }
+    first_run_ = false;
+  } else if (params_->use_cuda_graph && new_batch_size != current_batch_size_) {
+    assert(GetCapturedGraphInfo() != nullptr);
+    current_batch_size_ = new_batch_size;
+    auto annotation_id = std::to_string(GetCapturedGraphInfo()->GenerateUniqueAnnotationID(new_batch_size));
+    model_.run_options_->AddConfigEntry("gpu_graph_id", annotation_id.c_str());
+  }
+
   if (g_log.enabled && g_log.model_input_values) {
     auto& stream = Log("model_input_values");
     stream << std::endl;
@@ -122,7 +136,7 @@ const std::string& TokenizerStream::Decode(int32_t token) {
 }
 
 Tokenizer::Tokenizer(Config& config) : pad_token_id_{config.model.pad_token_id} {
-  CheckResult(OrtxCreateTokenizer(tokenizer_.Address(), reinterpret_cast<const char*>(config.config_path.u8string().c_str())));
+  CheckResult(OrtxCreateTokenizer(tokenizer_.Address(), config.config_path.string().c_str()));
 }
 
 std::unique_ptr<TokenizerStream> Tokenizer::CreateStream() const {
@@ -185,10 +199,17 @@ Ort::Allocator* GetCudaAllocator(OrtSession& session) {
 #endif
 
 SessionInfo::SessionInfo(OrtSession& session) {
+  Add(session);
+}
+
+void SessionInfo::Add(OrtSession& session) {
   auto input_names = session.GetInputNames();
   std::vector<ONNXTensorElementDataType> input_types(input_names.size());
   for (size_t i = 0; i < input_types.size(); i++) {
     auto input_type = session.GetInputTypeInfo(i)->GetTensorTypeAndShapeInfo().GetElementType();
+    auto found_input = inputs_.find(input_names[i]);
+    if (found_input != inputs_.end() && found_input->second != input_type)
+      throw std::runtime_error("Model input type mismatch: " + input_names[i] + " expected " + std::to_string(found_input->second) + " got " + std::to_string(input_type));
     inputs_.emplace(std::make_pair(std::move(input_names[i]), input_type));
   }
 
@@ -239,20 +260,9 @@ void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
   }
 #elif USE_DML
   if (device_type_ == DeviceType::DML) {
-    static constexpr GUID dml_smart_container_guid = {0x6b7ff369, 0xc805, 0x42cc, {0x8a, 0x5f, 0xb5, 0x5f, 0x67, 0xe5, 0xbd, 0xcc}};
-
-    ComPtr<DmlSmartContainer> smart_container;
-    uint32_t smart_container_ptr_size = static_cast<uint32_t>(sizeof(smart_container.GetAddressOf()));
-
-    // We reuse the allocator assigned to this device if possible; otherwise, we create a new one and store it on the device
-    if (FAILED(dml_objects_.d3d12_device->GetPrivateData(dml_smart_container_guid, &smart_container_ptr_size, smart_container.GetAddressOf()))) {
-      auto memory_info_dml = OrtMemoryInfo::Create("DML", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-      auto allocator_dml = Ort::Allocator::Create(session, *memory_info_dml);
-      smart_container = wil::MakeOrThrow<DmlSmartContainer>(std::move(memory_info_dml), std::move(allocator_dml));
-      THROW_IF_FAILED(dml_objects_.d3d12_device->SetPrivateDataInterface(dml_smart_container_guid, smart_container.Get()));
-    }
-
-    allocator_device_ = smart_container->GetAllocator();
+    memory_info_device_ = OrtMemoryInfo::Create("DML", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+    dml_owned_allocator_ = Ort::Allocator::Create(session, *memory_info_device_);
+    allocator_device_ = dml_owned_allocator_.get();
   }
 #endif
 
@@ -364,6 +374,12 @@ void Model::CreateSessionOptions() {
       dml_pooled_upload_heap_ = std::make_unique<DmlPooledUploadHeap>(dml_objects_.d3d12_device.Get(), dml_execution_context_.get());
       dml_readback_heap_ = std::make_unique<DmlReadbackHeap>(dml_objects_.d3d12_device.Get(), dml_execution_context_.get());
 
+      // The vision model doesn't support graph capture because of dynamic shapes, so don't enable graph capture for it
+      if (!config_->model.vision.filename.empty()) {
+        vision_session_options_ = ort_options.Clone();
+        p_dml_api_->SessionOptionsAppendExecutionProvider_DML1(vision_session_options_.get(), dml_device_.Get(), dml_objects_.command_queue.Get());
+      }
+
       ort_options.AddConfigEntry("ep.dml.enable_graph_capture", "1");
       p_dml_api_->SessionOptionsAppendExecutionProvider_DML1(&ort_options, dml_device_.Get(), dml_objects_.command_queue.Get());
       is_intel_device_ = DmlHelpers::IsIntelDevice(dml_objects_.d3d12_device.Get());
@@ -379,15 +395,21 @@ std::shared_ptr<Tokenizer> Model::CreateTokenizer() const {
   return std::make_shared<Tokenizer>(*config_);
 }
 
+std::shared_ptr<MultiModalProcessor> Model::CreateMultiModalProcessor() const {
+  return std::make_shared<MultiModalProcessor>(*config_, *session_info_);
+}
+
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path) {
-  auto config = std::make_unique<Config>(config_path);
+  auto config = std::make_unique<Config>(fs::path(config_path));
 
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
-  if (config->model.type == "llama" || config->model.type == "gemma" || config->model.type == "mistral" || config->model.type == "phi" || config->model.type == "phi3")
+  if (config->model.type == "llama" || config->model.type == "gemma" || config->model.type == "mistral" || config->model.type == "phi" || config->model.type == "phi3" || config->model.type == "phi3small")
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
   if (config->model.type == "whisper")
     return std::make_shared<Whisper_Model>(std::move(config), ort_env);
+  if (config->model.type == "phi3v")
+    return std::make_shared<MultiModalVisionModel>(std::move(config), ort_env);
 
   throw std::runtime_error("Unsupported model_type in config.json: " + config->model.type);
 }
@@ -436,6 +458,43 @@ void ConvertFp16ToFp32(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<Or
 
     default:
       throw std::runtime_error("ConvertFp16ToFp32 - Unsupported device type");
+  }
+}
+
+void ConvertFp32ToFp16(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<OrtValue>& p_out,
+                       DeviceType device_type, cudaStream_t stream) {
+  auto shape_info = in.GetTensorTypeAndShapeInfo();
+  auto shape = shape_info->GetShape();
+  assert(shape_info->GetElementType() == Ort::TypeToTensorType<float>::type);
+
+  bool allocate_p_out = p_out == nullptr;
+  if (p_out) {
+    auto out_shape_info = p_out->GetTensorTypeAndShapeInfo();
+    auto out_shape = out_shape_info->GetShape();
+    allocate_p_out = shape != out_shape;
+  }
+
+  if (allocate_p_out)
+    p_out = OrtValue::CreateTensor<float>(allocator, shape);
+
+  int count = static_cast<int>(shape_info->GetElementCount());
+  auto* fp32 = in.GetTensorData<float>();
+  auto* fp16 = p_out->GetTensorMutableData<uint16_t>();
+
+  switch (device_type) {
+    case DeviceType::DML:
+    case DeviceType::CPU:
+      for (int i = 0; i < count; i++)
+        fp16[i] = FastFloat32ToFloat16(fp32[i]);
+      break;
+
+#if USE_CUDA
+    case DeviceType::CUDA:
+      // TODO: Implement for CUDA. For now, fallthrough and report an error.
+#endif
+
+    default:
+      throw std::runtime_error("ConvertFp32ToFp16 - Unsupported device type");
   }
 }
 
@@ -490,6 +549,13 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
       throw std::runtime_error("ExpandInputs - Unsupported device type");
   }
   return expanded;
+}
+
+MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& session_info)
+    : tokenizer_{std::make_shared<Tokenizer>(config)} {
+  if (!config.model.vision.filename.empty()) {
+    image_processor_ = std::make_shared<ImageProcessor>(config, session_info);
+  }
 }
 
 }  // namespace Generators
