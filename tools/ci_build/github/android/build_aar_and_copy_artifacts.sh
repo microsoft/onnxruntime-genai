@@ -17,15 +17,14 @@ ls /build
 python3 /ort_genai_src/tools/ci_build/github/android/build_aar_package.py \
     --build_dir /build \
     --config $BUILD_CONFIG \
-    --android_sdk_path /android_home \
+    --android_home /android_home \
     --android_ndk_path /ndk_home \
     --ort_home /ort_home \
     /ort_genai_src/tools/ci_build/github/android/default_aar_build_settings.json
 
-# Copy the built artifacts to convenient folder for publishing
-BASE_PATH=/build/aar_out/${BUILD_CONFIG}/com/microsoft/onnxruntime/genai/${PACKAGE_NAME}/${ORT_VERSION}
-mkdir /build/artifacts
-cp ${BASE_PATH}/${PACKAGE_NAME}-${ORT_VERSION}-javadoc.jar  /build/artifacts
-cp ${BASE_PATH}/${PACKAGE_NAME}-${ORT_VERSION}-sources.jar  /build/artifacts
-cp ${BASE_PATH}/${PACKAGE_NAME}-${ORT_VERSION}.aar          /build/artifacts
-cp ${BASE_PATH}/${PACKAGE_NAME}-${ORT_VERSION}.pom          /build/artifacts
+# Copy the built artifacts to the artifacts staging directory
+BASE_PATH=/build/aar_out/${BUILD_CONFIG}/com/microsoft/onnxruntime/genai/${PACKAGE_NAME}/${GENAI_VERSION}
+cp ${BASE_PATH}/${PACKAGE_NAME}-${GENAI_VERSION}-javadoc.jar  /artifacts
+cp ${BASE_PATH}/${PACKAGE_NAME}-${GENAI_VERSION}-sources.jar  /artifacts
+cp ${BASE_PATH}/${PACKAGE_NAME}-${GENAI_VERSION}.aar          /artifacts
+cp ${BASE_PATH}/${PACKAGE_NAME}-${GENAI_VERSION}.pom          /artifacts

@@ -3,17 +3,18 @@
   parameters:
   - name: AndroidNdkVersion
     type: string
-    default: "26.1.10909125"  # LTS version
+    default: "26.3.11579264"
 
+  # TODO: Can the NDK be in the docker image instead of being downloaded?
   steps:
   - bash: |
       set -e
 
-      "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" --install "ndk;${{ parameters.AndroidNdkVersion }}"
+      "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --install "ndk;${{ parameters.AndroidNdkVersion }}"
 
-      NDK_PATH="${ANDROID_SDK_ROOT}/ndk/${{ parameters.AndroidNdkVersion }}"
+      NDK_PATH="${ANDROID_HOME}/ndk/${{ parameters.AndroidNdkVersion }}"
       if [[ ! -d "${NDK_PATH}" ]]; then
-        echo "NDK directory is not in expected location: ${NDK_PATH}"
+        echo "NDK directory was not found: ${NDK_PATH}"
         exit 1
       fi
 

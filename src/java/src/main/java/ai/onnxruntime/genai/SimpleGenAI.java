@@ -92,16 +92,12 @@ public class SimpleGenAI {
       if (listener != null) {
         try (TokenizerStream stream = tokenizer.createStream();
             Generator generator = new Generator(model, generatorParams)) {
-          while (!generator.isDone()) {
-            // generate next token
-            generator.computeLogits();
-            generator.generateNextToken();
-
+          // iterate (which calls computeLogits, generateNextToken, getLastTokenInSequence and
+          // isDone)
+          for (int token_id : generator) {
             // decode and call listener
-            int token_id = generator.getLastTokenInSequence(0);
             String token = stream.decode(token_id);
             listener.accept(token);
-            // listener.onTokenGenerate(token);
           }
 
           output_ids = generator.getSequence(0);

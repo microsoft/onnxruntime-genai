@@ -4,31 +4,10 @@ parameters:
   type: string
   default: 'Release'
 
-- name: buildSettings
-  displayName: Path to the build setting file
-  type: string
-  default: ''
-
-- name: includedOpsConfig
-  displayName: Path to the included ops config file
-  type: string
-  default: ''
-
-- name: artifactName
-  displayName: Artifact Name
-  type: string
-  default: ''
-
-- name: job_name_suffix
-  displayName: Job name
-  type: string
-  default: ''
-
-- name: publish_executables
-  # The executables will only be published if the publish_executables is set to "1"
-  displayName: Publish executables such as onnxruntime_perf_test, ...
-  type: string
-  default: '0'
+# - name: job_name_suffix
+#   displayName: Job name
+#   type: string
+#   default: ''
 
 - name: pool_name
   displayName: Pool name
@@ -36,10 +15,10 @@ parameters:
   default: 'onnxruntime-Ubuntu2204-AMD-CPU'
 
 - name: packageName
-  # now we can build onnxruntime or onnxruntime-mobile for Android, need specify it here
+  # do we need to build onnxruntime-genai and onnxruntime-genai-android?
   displayName: Package Name
   type: string
-  default: 'onnxruntime-android'
+  default: 'onnxruntime-genai-android'
 
 jobs:
 - job: Android_Java_API_AAR_Packaging_${{ parameters.job_name_suffix }}
@@ -48,21 +27,10 @@ jobs:
     clean: all
   pool: ${{parameters.pool_name}}
 
-  variables:
-    artifacts_directory: $(Build.BinariesDirectory)/.artifacts
-
   steps:
   - checkout: self
     clean: true
     submodules: none
-
-  - task: CmdLine@2
-    displayName: Create artifacts directory
-    inputs:
-      script: |
-        # Create a folder for artifacts
-        mkdir -p $(artifacts_directory)
-      workingDirectory: $(Build.BinariesDirectory)
 
   - template: get-docker-image-steps.yml
     parameters:
@@ -80,29 +48,26 @@ jobs:
     inputs:
       script: |
         set -e -x
-        NDK_HOME=$(realpath $ANDROID_NDK_HOME)
-        mkdir $(Build.BinariesDirectory)/.build_settings
-        cp ${{parameters.buildSettings}} $(Build.BinariesDirectory)/.build_settings/build_settings.json
-        [ -f "${{parameters.includedOpsConfig}}" ] && \
-          cp ${{parameters.includedOpsConfig}} $(Build.BinariesDirectory)/.build_settings/include_ops_and_types.config
+        ANDROID_HOME=$(realpath $ANDROID_HOME)
+        ANDROID_NDK_HOME=$(realpath $ANDROID_NDK_HOME)
         docker run --rm \
           --volume $(Build.SourcesDirectory):/onnxruntime_src \
           --volume $(Build.BinariesDirectory):/build \
+          --volume $(Build.ArtifactStagingDirectory):/artifacts \
           --volume $ANDROID_HOME:/android_home \
+          --volume TODO_ORT_HOME:/ort_home \
           --volume $NDK_HOME:/ndk_home \
-          --volume $(artifacts_directory):/home/onnxruntimedev/.artifacts \
-          --volume $(Build.BinariesDirectory)/.build_settings:/home/onnxruntimedev/.build_settings \
           -e NIGHTLY_BUILD \
           -e BUILD_BUILDNUMBER \
           -e BUILD_CONFIG=${{parameters.buildConfig}} \
-          -e ORT_VERSION=$(OnnxRuntimeVersion) \
-          -e PUBLISH_EXECUTABLES=${{parameters.publish_executables}} \
+          -e GENAI_VERSION=$(TODO_GENAI_VERSION) \
           -e PACKAGE_NAME=${{parameters.packageName}} \
           onnxruntimecpubuild \
             /bin/bash /onnxruntime_src/tools/ci_build/github/android/build_aar_and_copy_artifacts.sh
       workingDirectory: $(Build.SourcesDirectory)
 
+  # path should match what 
   - task: PublishBuildArtifacts@1
     inputs:
-      pathtoPublish: '$(artifacts_directory)'
+      pathtoPublish: '$(Build.BinariesDirectory)/artifacts'
       artifactName: '${{parameters.artifactName}}'

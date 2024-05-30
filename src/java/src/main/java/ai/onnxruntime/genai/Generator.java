@@ -15,7 +15,7 @@ package ai.onnxruntime.genai;
  * <p>After the generation process is done, GetSequence can be used to retrieve the complete
  * generated sequence if needed.
  */
-public final class Generator implements AutoCloseable {
+public final class Generator implements AutoCloseable, Iterable<Integer> {
   private long nativeHandle = 0;
 
   /**
@@ -35,6 +35,17 @@ public final class Generator implements AutoCloseable {
     }
 
     nativeHandle = createGenerator(model.nativeHandle(), generatorParams.nativeHandle());
+  }
+
+  /**
+   * Returns an iterator over elements of type {@code Long}. A new token is generated each time
+   * next() is called, by calling computeLogits and generateNextToken.
+   *
+   * @return an Iterator.
+   */
+  @Override
+  public java.util.Iterator<Integer> iterator() {
+    return new Iterator();
   }
 
   /**
@@ -60,7 +71,7 @@ public final class Generator implements AutoCloseable {
       throw new IllegalStateException("Instance has been freed and is invalid");
     }
 
-    computeLogits(nativeHandle);
+    computeLogitsNative(nativeHandle);
   }
 
   /**
@@ -115,6 +126,25 @@ public final class Generator implements AutoCloseable {
     }
   }
 
+  /** The Iterator class for the Generator to simplify usage when streaming tokens. */
+  private class Iterator implements java.util.Iterator<Integer> {
+    @Override
+    public boolean hasNext() {
+      return !isDone();
+    }
+
+    @Override
+    public Integer next() {
+      try {
+        computeLogits();
+        generateNextToken();
+        return getLastTokenInSequence(0);
+      } catch (GenAIException e) {
+        throw new RuntimeException(e);
+      }
+    }
+  }
+
   static {
     try {
       GenAI.init();
@@ -130,7 +160,7 @@ public final class Generator implements AutoCloseable {
 
   private native boolean isDone(long nativeHandle);
 
-  private native void computeLogits(long nativeHandle) throws GenAIException;
+  private native void computeLogitsNative(long nativeHandle) throws GenAIException;
 
   private native void generateNextTokenNative(long nativeHandle) throws GenAIException;
 

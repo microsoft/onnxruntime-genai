@@ -21,7 +21,7 @@ def static getVersionCode(String version){
 	}
 
 	// This will have problem if we have 3 digit [sub]version number, such as 1.7.199
-	// but it is highly unlikely to happen	
+	// but it is highly unlikely to happen
 	String versionCodeStr = String.format("%d%02d%02d", codes[0] as int, codes[1] as int, codes[2] as int);
 	return versionCodeStr as int;
 }

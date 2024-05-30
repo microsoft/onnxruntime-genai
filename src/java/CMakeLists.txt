@@ -214,7 +214,9 @@ if (ENABLE_TESTS)
     # That can handle both .exe and .bat
     add_test(NAME onnxruntime-genai4j_test 
              COMMAND ${CMAKE_COMMAND} 
-               -DGRADLE_EXECUTABLE=${GRADLE_EXECUTABLE} 
+               # We call gradlew with `/cmd` so don't need the 'call' prefix we added to 
+               # ${GRADLE_EXECUTABLE} for usage everywhere else.
+               -DGRADLE_EXECUTABLE="${JAVA_SRC_ROOT}/gradlew"
                -DBIN_DIR=${JAVA_OUTPUT_DIR} 
                -DJAVA_SRC_ROOT=${JAVA_SRC_ROOT}
                -DJAVA_PACKAGE_LIB_DIR=${JAVA_PACKAGE_LIB_DIR}
