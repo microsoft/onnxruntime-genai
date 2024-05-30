@@ -8,7 +8,6 @@ project(Generators LANGUAGES C CXX)
 
 # All Options should be defined in cmake/options.cmake This must be included before any other cmake file is included
 include(cmake/options.cmake)
-
 include(cmake/external/onnxruntime_external_deps.cmake)
 # All Global variables, including GLOB, for the top level CMakeLists.txt should be defined here
 include(cmake/global_variables.cmake)
@@ -19,24 +18,21 @@ include(cmake/check_dml.cmake)
 
 include(cmake/cxx_standard.cmake)
 
-
-
-if (ANDROID)
-  # Paths are based on the directory structure of the ORT Android AAR.
-  set(ORT_HEADER_DIR ${ORT_HOME}/headers)
-  set(ORT_LIB_DIR ${ORT_HOME}/jni/${ANDROID_ABI})
-else()
-endif()
-
 add_compile_definitions(BUILDING_ORT_GENAI_C)
 if(MSVC)
   # set updated value for __cplusplus macro instead of 199711L
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>)
 endif()
-if(ENABLE_TESTS AND TEST_PHI2)
-  add_compile_definitions(TEST_PHI2=1)
-else()
-  add_compile_definitions(TEST_PHI2=0)
+
+if(ENABLE_TESTS)
+  # call enable_testing so we can add tests from subdirectories (e.g. test and src/java)
+  # it applies recursively to all subdirectories
+  enable_testing()
+  if (TEST_PHI2)
+    add_compile_definitions(TEST_PHI2=1)
+  else()
+    add_compile_definitions(TEST_PHI2=0)
+  endif()
 endif()
 
 
@@ -117,18 +113,24 @@ if(USE_DML)
 endif()
 
 if(ENABLE_TESTS)
-  add_subdirectory("${CMAKE_SOURCE_DIR}/test")
   message("------------------Enabling tests------------------")
+  add_subdirectory("${REPO_ROOT}/test")
 endif()
 
 if(ENABLE_PYTHON)
-  add_subdirectory("${CMAKE_SOURCE_DIR}/src/python")
   message("------------------Enabling Python Wheel------------------")
+  add_subdirectory("${SRC_ROOT}/python")
 endif()
 
+if (ENABLE_JAVA)
+  message("------------------Enabling Java Jar------------------")
+  add_subdirectory("${SRC_ROOT}/java")
+endif()
+
+
 if(ENABLE_MODEL_BENCHMARK)
-  add_subdirectory("${CMAKE_SOURCE_DIR}/benchmark/c")
   message("------------------Enabling model benchmark------------------")
+  add_subdirectory("${REPO_ROOT}/benchmark/c")
 endif()
 
 # Copy the onnxruntime binaries into the build folder so it's found on launch
