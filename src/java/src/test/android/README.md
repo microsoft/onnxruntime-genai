@@ -6,7 +6,7 @@ This directory contains a simple android application for testing the ONNX Runtim
 
 This android application is mainly aimed for testing:
 
-- Model used: TBD - need smallest model GenAI produces some output with
+- Model used: test/test_models/hf-internal-testing/tiny-random-gpt2-fp32
 - Main test file: An android instrumentation test under `app\src\androidtest\java\ai.onnxruntime.genai.example.javavalidator\SimpleTest.kt`
 - The main dependency of this application is `onnxruntime-genai` aar package under `app\libs`.
 - The MainActivity of this application is set to be empty.
@@ -28,10 +28,9 @@ Please note that you must set the `--android_abi` value to match the local syste
 
 #### Build Output
 
-The build will generate two apks which is required to run the test application in `$YOUR_BUILD_DIR/java/androidtest/android/app/build/outputs/apk`:
+The build will generate two apks which is required to run the test application in `$YOUR_BUILD_DIR/java/androidtest/app/build/outputs/apk`:
 
-* `androidtest/debug/app-debug-androidtest.apk`
+* `androidTest/debug/app-debug-androidTest.apk`
 * `debug/app-debug.apk`
 
-**TODO**: Update emulator name if it is not `ort_android` once we finishing adding the `android_run_emulator` logic to build.py
-After running the build script, the two apks will be installed on `ort_android` emulator and it will automatically run the test application in an adb shell.
+After running the build script, the two apks will be installed on `ort_genai_android` emulator and it will automatically run the test application in an adb shell.

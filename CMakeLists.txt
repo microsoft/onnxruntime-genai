@@ -112,6 +112,12 @@ if(USE_DML)
   add_dependencies(onnxruntime-genai-static RESTORE_PACKAGES)
 endif()
 
+if(ANDROID)
+  # strip the binary if it's not a build with debug info
+  set_target_properties(onnxruntime-genai PROPERTIES LINK_FLAGS_RELEASE -s)
+  set_target_properties(onnxruntime-genai PROPERTIES LINK_FLAGS_MINSIZEREL -s)
+endif()
+
 if(ENABLE_TESTS)
   message("------------------Enabling tests------------------")
   add_subdirectory("${REPO_ROOT}/test")
