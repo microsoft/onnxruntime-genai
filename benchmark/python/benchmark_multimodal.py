@@ -72,9 +72,6 @@ def run_benchmark(args, model, processor, image, generation_length, max_length):
     for _ in tqdm(range(num_repetitions)):
         wall_clock_start_time = time.time()
 
-        # Prepare run
-        generator = og.Generator(model, params)
-
         # Measure prompt and image processing
         process_start_time = time.perf_counter()
         inputs = processor(prompt, images=image)
