@@ -26,7 +26,7 @@ jobs:
 - job: python_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}_validating
   ${{ if eq(parameters.os, 'linux') }}:
     ${{ if eq(parameters.ep, 'cuda') }}:
-      pool: 'onnxruntime-Linux-GPU-A10'
+      pool: 'Onnxruntime-Linux-GPU'
     ${{ else }}:
       pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
   ${{ if eq(parameters.os, 'win') }}:
@@ -193,8 +193,9 @@ jobs:
   - ${{ if eq(parameters.os, 'win') }}:
     - ${{ if eq(parameters.ep, 'cuda') }}:
       - powershell: |
+          $env:AZCOPY_MSI_CLIENT_ID = "63b63039-6328-442f-954b-5a64d124e5b4";
           azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" 'cuda_sdk'
-          $env:CUDA_PATH = $(Build.BinariesDirectory)/cuda_sdk
+          $env:CUDA_PATH = $(Build.Repository.LocalPath)/cuda_sdk
         workingDirectory: '$(Build.Repository.LocalPath)'
     - powershell: |
         python -m pip install numpy transformers torch onnx onnxruntime
