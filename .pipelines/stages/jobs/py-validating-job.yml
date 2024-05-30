@@ -195,9 +195,11 @@ jobs:
       - powershell: |
           $env:AZCOPY_MSI_CLIENT_ID = "63b63039-6328-442f-954b-5a64d124e5b4";
           azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" 'cuda_sdk'
-          $env:CUDA_PATH = $(Build.Repository.LocalPath)/cuda_sdk
         workingDirectory: '$(Build.Repository.LocalPath)'
     - powershell: |
+        if ("$(ep)" -eq "cuda") {
+          $env:CUDA_PATH = '$(Build.Repository.LocalPath)\cuda_sdk'
+        }
         python -m pip install numpy transformers torch onnx onnxruntime
         cd examples\python
         python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)
