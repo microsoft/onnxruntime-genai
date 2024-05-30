@@ -137,12 +137,15 @@ jobs:
         cd examples/csharp/HelloPhi
         Move-Item models\$(prebuild_phi3_mini_model_folder) models\phi-3
         dotnet restore
-        dotnet run
+        dotnet run -- "def is_prime"
       displayName: 'Run Example With Artifact'
       workingDirectory: '$(Build.Repository.LocalPath)'
-      env:
-        HF_TOKEN: $(HF_TOKEN)
-
-
+  - ${{ else eq(parameters.os, 'linux') }}:
+    - bash: |
+        cp $(Build.BinariesDirectory)/nuget/* examples/csharp/HelloPhi/
+        cd examples/csharp/HelloPhi
+        mv models\$(prebuild_phi3_mini_model_folder) models\phi-3
+        dotnet restore
+        dotnet run -- "def is_prime"
   - template: steps/compliant-and-cleanup-step.yml
 

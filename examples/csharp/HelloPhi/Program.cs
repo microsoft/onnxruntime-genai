@@ -16,7 +16,7 @@ Console.WriteLine("1. Complete Output");
 Console.WriteLine("2. Streaming Output");
 int option = 0;
 
-while (true)
+
 {
     Console.WriteLine("Prompt:");
     string prompt = "def is_prime(num):";
