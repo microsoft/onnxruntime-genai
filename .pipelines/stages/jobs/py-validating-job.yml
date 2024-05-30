@@ -187,7 +187,7 @@ jobs:
 
         displayName: 'Run Example With Artifact'
         workingDirectory: '$(Build.Repository.LocalPath)'
-    ${{ elseif eq(parameters.ep, 'cpu') }}:
+    - ${{ elseif eq(parameters.ep, 'cpu') }}:
       - bash: |
           python -m pip install numpy transformers torch onnx onnxruntime
           cd examples/python
