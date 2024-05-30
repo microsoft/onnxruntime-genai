@@ -187,14 +187,14 @@ jobs:
 
         displayName: 'Run Example With Artifact'
         workingDirectory: '$(Build.Repository.LocalPath)'
-    ${{ else }}:
-       - bash: |
-           python -m pip install numpy transformers torch onnx onnxruntime
-           cd examples/python
-           python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)
-           python model-generate.py -m ./models/$(prebuild_phi3_mini_model_folder)
-         displayName: 'Run Example With Artifact'
-         workingDirectory: '$(Build.Repository.LocalPath)'
+    ${{ elseif eq(parameters.ep, 'cpu') }}:
+      - bash: |
+          python -m pip install numpy transformers torch onnx onnxruntime
+          cd examples/python
+          python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)
+          python model-generate.py -m ./models/$(prebuild_phi3_mini_model_folder)
+        displayName: 'Run Example With Artifact'
+        workingDirectory: '$(Build.Repository.LocalPath)'
 
   - ${{ if eq(parameters.os, 'win') }}:
     - ${{ if eq(parameters.ep, 'cuda') }}:
