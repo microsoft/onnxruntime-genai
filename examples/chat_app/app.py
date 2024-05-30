@@ -28,7 +28,7 @@ def change_model_listener(new_model_name):
 
     d = available_models[new_model_name]
 
-    if "Phi-3-vision" in new_model_name:
+    if "vision" in new_model_name:
         interface = MultiModal_ONNXModel(
             model_path=d["model_dir"]
         )
@@ -41,7 +41,7 @@ def change_model_listener(new_model_name):
 
     return [
         new_model_name,
-        gr.update(visible="Phi-3-vision" in new_model_name),
+        gr.update(visible="vision" in new_model_name),
         [],
         [],
         gr.update(value=""),
@@ -50,7 +50,7 @@ def change_model_listener(new_model_name):
 
 
 def change_image_visibility(new_model_name):
-    if "Phi-3-vision" in new_model_name:
+    if "vision" in new_model_name:
         return gr.update(visible=True)
 
     return gr.update(visible=False)
@@ -72,12 +72,15 @@ def interface_retry(*args):
     yield from res
 
 
-def launch_chat_app(expose_locally: bool = False):
+def launch_chat_app(expose_locally: bool = False, model_name: str = "", model_path: str = ""):
+    if os.path.exists(optimized_directory):
+        for ep_name in os.listdir(optimized_directory):
+            sub_optimized_directory = os.path.join(optimized_directory, ep_name)
+            for model_name in os.listdir(sub_optimized_directory):
+                available_models[model_name] = {"model_dir": os.path.join(sub_optimized_directory, model_name)}
 
-    for ep_name in os.listdir(optimized_directory):
-        sub_optimized_directory = os.path.join(optimized_directory, ep_name)
-        for model_name in os.listdir(sub_optimized_directory):
-            available_models[model_name] = {"model_dir": os.path.join(sub_optimized_directory, model_name)}
+    if model_path:
+        available_models[model_name] = {"model_dir": model_path}
 
     with gr.Blocks(css=custom_css, theme=small_and_beautiful_theme) as demo:
         history = gr.State([])
@@ -227,5 +230,17 @@ def launch_chat_app(expose_locally: bool = False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--expose_locally", action="store_true")
+    parser.add_argument("--model_path", "-p", type=str, required=False, help="The location where your model is located.")
+    parser.add_argument("--model_name", "-n", type=str, required=False, help="The name of your model")
     args = parser.parse_args()
-    launch_chat_app(args.expose_locally)
+    model_path = args.model_path
+    model_name = args.model_name
+
+
+    if not os.path.exists(optimized_directory) and not model_path:
+        raise ValueError("Please download the model into models folder or load the model by passing --model_path")
+
+    if args.model_path:
+        if not args.model_name:
+            raise ValueError("Please input the name of the model!")
+    launch_chat_app(args.expose_locally, model_name, model_path)
