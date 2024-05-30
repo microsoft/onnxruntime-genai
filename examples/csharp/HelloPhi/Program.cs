@@ -14,14 +14,21 @@ using Tokenizer tokenizer = new Tokenizer(model);
 Console.WriteLine("Please enter option number:");
 Console.WriteLine("1. Complete Output");
 Console.WriteLine("2. Streaming Output");
-int.TryParse(Console.ReadLine(), out var option);
+int option = 0;
 
 while (true)
 {
     Console.WriteLine("Prompt:");
-    // Example prompt:
-    // "def is_prime(num):"
-    string prompt = Console.ReadLine();
+    string prompt = "def is_prime(num):";
+    if (args.Length > 0)
+    {
+        prompt = args[0];
+        option = 1;
+    }
+    else
+    {
+        prompt = Console.ReadLine();
+    }
     var sequences = tokenizer.Encode(prompt);
 
     using GeneratorParams generatorParams = new GeneratorParams(model);
