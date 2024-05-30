@@ -122,14 +122,13 @@ jobs:
       HuggingFaceToken: $(HF_TOKEN)
       os: ${{ parameters.os }}
 
-  - ${{ if eq(parameters.os, 'win') }}:
-    - template: steps/utils//flex-download-pipeline-artifact.yml
-      parameters:
-        StepName: 'Download NuGet Artifacts'
-        ArtifactName: $(ArtifactName)-nuget
-        TargetPath: '$(Build.BinariesDirectory)/nuget'
-        SpecificArtifact: ${{ parameters.specificArtifact }}
-        BuildId: ${{ parameters.BuildId }}
+  - template: steps/utils//flex-download-pipeline-artifact.yml
+    parameters:
+      StepName: 'Download NuGet Artifacts'
+      ArtifactName: $(ArtifactName)-nuget
+      TargetPath: '$(Build.BinariesDirectory)/nuget'
+      SpecificArtifact: ${{ parameters.specificArtifact }}
+      BuildId: ${{ parameters.BuildId }}
 
   - ${{ if eq(parameters.os, 'win') }}:
     - powershell: |
@@ -144,7 +143,7 @@ jobs:
     - bash: |
         cp $(Build.BinariesDirectory)/nuget/* examples/csharp/HelloPhi/
         cd examples/csharp/HelloPhi
-        mv models\$(prebuild_phi3_mini_model_folder) models\phi-3
+        mv models/$(prebuild_phi3_mini_model_folder) models/phi-3
         dotnet restore
         dotnet run -- "def is_prime"
   - template: steps/compliant-and-cleanup-step.yml

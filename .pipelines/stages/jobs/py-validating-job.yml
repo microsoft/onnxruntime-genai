@@ -200,7 +200,7 @@ jobs:
     - powershell: |
         if ("$(ep)" -eq "cuda") {
           $env:CUDA_PATH = '$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)'
-          $env:PATH = $env:CUDA_PATH\bin;$env:CUDA_PATH\extras\CUPTI\lib64;$env:PATH
+          $env:PATH = "$env:CUDA_PATH\bin;$env:CUDA_PATH\extras\CUPTI\lib64;$env:PATH"
           Write-Host $env:PATH
         }
         python -m pip install numpy transformers torch onnx onnxruntime
