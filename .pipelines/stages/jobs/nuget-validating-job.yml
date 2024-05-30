@@ -140,7 +140,7 @@ jobs:
         dotnet run -- "def is_prime"
       displayName: 'Run Example With Artifact'
       workingDirectory: '$(Build.Repository.LocalPath)'
-  - ${{ else eq(parameters.os, 'linux') }}:
+  - ${{ elseif eq(parameters.os, 'linux') }}:
     - bash: |
         cp $(Build.BinariesDirectory)/nuget/* examples/csharp/HelloPhi/
         cd examples/csharp/HelloPhi
