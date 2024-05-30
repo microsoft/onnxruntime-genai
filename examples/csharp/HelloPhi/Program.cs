@@ -42,7 +42,6 @@ int option = 0;
 
         Console.WriteLine("Output:");
         Console.WriteLine(outputString);
-        break;
     }
 
     else if (option == 2) //Streaming Output
