@@ -42,6 +42,7 @@ while (true)
 
         Console.WriteLine("Output:");
         Console.WriteLine(outputString);
+        break;
     }
 
     else if (option == 2) //Streaming Output
