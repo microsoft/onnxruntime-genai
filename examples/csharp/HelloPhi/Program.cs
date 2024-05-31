@@ -22,7 +22,7 @@ while (true)
     // Example prompt:
     // "def is_prime(num):"
     string prompt = Console.ReadLine();
-    var sequences = tokenizer.Encode(prompt);
+    var sequences = tokenizer.Encode($"<|user|>{prompt}<|end|><|assistant|>");
 
     using GeneratorParams generatorParams = new GeneratorParams(model);
     generatorParams.SetSearchOption("max_length", 200);
