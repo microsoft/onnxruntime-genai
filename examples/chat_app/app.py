@@ -90,7 +90,7 @@ def launch_chat_app(expose_locally: bool = False, model_name: str = "", model_pa
             status_display = gr.Markdown("Success", elem_id="status_display")
 
         with gr.Row():
-            with gr.Column(scale=5):
+            with gr.Column(scale=4):
                 with gr.Row():
                     chatbot = gr.Chatbot(elem_id="chuanhu_chatbot", height=650)
                 with gr.Row():
@@ -121,7 +121,7 @@ def launch_chat_app(expose_locally: bool = False, model_name: str = "", model_pa
                     value=2048,
                     step=8,
                     interactive=True,
-                    label="Max Generation Tokens",
+                    label="Max Token Length",
                 )
                 max_context_length_tokens = gr.Slider(
                     minimum=0,
@@ -129,7 +129,7 @@ def launch_chat_app(expose_locally: bool = False, model_name: str = "", model_pa
                     value=2048,
                     step=128,
                     interactive=True,
-                    label="Max History Tokens",
+                    label="Max History Token Length",
                 )
                 token_printing_step = gr.Slider(
                     minimum=1,
@@ -138,8 +138,8 @@ def launch_chat_app(expose_locally: bool = False, model_name: str = "", model_pa
                     step=1,
                     interactive=True,
                     label="Token Printing Step",
+                    visible=False
                 )
-
                 image = gr.Image(type="filepath", visible=False)
                 image.change(
                     reset_state,
@@ -241,4 +241,8 @@ if __name__ == "__main__":
 
     if args.model_path:
         model_name = os.path.basename(model_path)
+        # check if genai_config.json in the model foler
+        if "genai_config.json" not in os.listdir(model_path):
+            raise ValueError(f"Your model_path folder do not include 'genai.json' file, please double check your model_path '{model_path}'")
+
     launch_chat_app(args.expose_locally, model_name, model_path)
