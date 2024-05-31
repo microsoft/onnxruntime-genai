@@ -20,21 +20,15 @@ steps:
     DisplayName: 'ESRP - Sign C# dlls'
     Pattern: '*OnnxRuntimeGenAI*.dll'
 - powershell: |
-    $nugetPath = "$(Build.Repository.LocalPath)\nuget"
-    $nugetExePath = Join-Path -Path $nugetPath -ChildPath "nuget.exe"
-    Write-Host "NuGet.exe does not exist. Downloading..."
-    Invoke-WebRequest -Uri 'https://dist.nuget.org/win-x86-commandline/latest/nuget.exe' -OutFile $nugetExePath
-    Write-Host "NuGet.exe downloaded successfully."
-
     $VERSION = '0.4.0-dev'
-    & $nugetExePath pack Microsoft.ML.OnnxRuntimeGenAI.nuspec `
+    nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.nuspec `
       -Prop version=$VERSION `
       -Prop genai_nuget_ext=$(genai_nuget_ext) `
       -Prop configuration=$(buildConfig) `
       -Prop buildPath=$(buildDir) `
       -Prop ort_nuget_ext=$(ort_nuget_ext) `
       -Prop ort_version=$(ort_version)
-    & $nugetExePath pack Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec `
+    nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec `
       -Prop version=$VERSION `
       -Prop configuration=$(buildConfig)
   condition: eq(variables['arch'], 'arm64')

@@ -22,7 +22,7 @@ jobs:
     ${{ if eq(parameters.ep, 'directml') }}:
       pool: 'onnxruntime-Win2022-GPU-dml-A10'
     ${{ elseif eq(parameters.arch, 'arm64') }}:
-      pool: 'onnxruntime-qnn-windows-vs-2022-arm64'
+      pool: 'onnxruntime-genai-windows-vs-2022-arm64'
     ${{ else }}:
       pool: 'onnxruntime-Win-CPU-2022'
   timeoutInMinutes: 180
