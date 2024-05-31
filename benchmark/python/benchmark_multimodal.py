@@ -1,3 +1,9 @@
+# -------------------------------------------------------------------------
+# Copyright (c) Microsoft Corporation.  All rights reserved.
+# Licensed under the MIT License.  See License.txt in the project root for
+# license information.
+# --------------------------------------------------------------------------
+
 # This is an end-to-end benchmarking script for any ONNX model.
 #
 # Prerequisites: 
@@ -203,7 +209,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="End-to-end benchmarking for gen-ai")
     parser.add_argument('-i', '--input_folder', type=str, required=True, help='Onnx model folder path (must contain genai_config.json and model.onnx)')
     parser.add_argument('-im', '--image_path', type=str, required=True, help='Path to the image')
-    # parser.add_argument('-pr', '--prompts', type=str2intlist, default=["<|user|>\n<|image_1|>\nWhat is shown in this image?<|end|>\n<|assistant|>\n"], help='list of prompts to process')
     parser.add_argument('-g', '--generation_lengths', type=str2intlist, default=[256], help='Number of tokens to generate after prompt')
     parser.add_argument('-m', '--max_lengths', type=str2intlist, default=[3072], help='Max length buffer sizes... User should supply one for every Generation length')
     parser.add_argument('-r', '--repetitions', type=int, default=10, help='Number of times to repeat the benchmark')
