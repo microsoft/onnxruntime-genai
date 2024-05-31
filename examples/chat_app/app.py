@@ -230,7 +230,7 @@ def launch_chat_app(expose_locally: bool = False, model_name: str = "", model_pa
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--expose_locally", action="store_true")
-    parser.add_argument("--model_path", "-p", type=str, required=False, help="The location where your model is located.")
+    parser.add_argument("--model_path", "-m", type=str, required=False, help="The location where your model is located.")
     parser.add_argument("--model_name", "-n", type=str, required=False, help="The name of your model")
     args = parser.parse_args()
     model_path = args.model_path
@@ -241,6 +241,5 @@ if __name__ == "__main__":
         raise ValueError("Please download the model into models folder or load the model by passing --model_path")
 
     if args.model_path:
-        if not args.model_name:
-            raise ValueError("Please input the name of the model!")
+        model_name = os.path.basename(model_path)
     launch_chat_app(args.expose_locally, model_name, model_path)

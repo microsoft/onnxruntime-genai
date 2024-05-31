@@ -38,8 +38,8 @@ This is a chat demo using the various versions of the LLMs
 
 ## Get the model
 
-> If you already downloaded your model, you can skip this part and add `--model_path` and `--model_name` arguments when launching the app
-> For example. `python chat_app/app.py -n "Phi-3-vision" -p "/mnt/onnx/Phi-3-vision"`
+> If you already downloaded your model, you can skip this part and add `--model_path` when launching the app
+> For example. `python chat_app/app.py -m "/mnt/onnx/Phi-3-vision"`
 
 ```bash
 cd ..
