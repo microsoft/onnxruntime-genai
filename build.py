@@ -369,7 +369,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         str(args.build_dir),
         "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
         f"-DUSE_CUDA={'ON' if args.use_cuda else 'OFF'}",
-        f"-DUSE_ROCM={'ON' if args.use_cuda else 'OFF'}",
+        f"-DUSE_ROCM={'ON' if args.use_rocm else 'OFF'}",
         f"-DUSE_DML={'ON' if args.use_dml else 'OFF'}",
         f"-DENABLE_JAVA={'ON' if args.build_java else 'OFF'}",
         f"-DBUILD_WHEEL={build_wheel}",
