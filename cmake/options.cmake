@@ -2,6 +2,7 @@ include(CMakeDependentOption)
 
 # features
 option(USE_CUDA "Build with CUDA support" ON)
+option(USE_ROCM "Build with ROCm support" ON)
 option(USE_DML "Build with DML support" OFF)
 
 # bindings
