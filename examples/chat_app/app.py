@@ -236,7 +236,6 @@ if __name__ == "__main__":
     model_path = args.model_path
     model_name = args.model_name
 
-
     if not os.path.exists(optimized_directory) and not model_path:
         raise ValueError("Please download the model into models folder or load the model by passing --model_path")
 
