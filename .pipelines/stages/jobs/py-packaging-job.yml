@@ -109,15 +109,6 @@ jobs:
     value: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/onnxruntime-win-arm64-1.17.3.zip"
 
   steps:
-  # - powershell: |
-  #     $url = "https://www.python.org/ftp/python/3.12.3/python-3.12.3-arm64.exe"
-  #     $output = "python-3.12.3-arm64.exe"
-  #     Invoke-WebRequest -Uri $url -OutFile $output
-  #     Start-Process -FilePath $output -ArgumentList "/quiet InstallAllUsers=0 PrependPath=0 Include_test=0 TargetDir=C:\Python\Python312" -Wait
-  #     Remove-Item -Path $output
-  #   displayName: Download and install Python
-  #   condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'), eq(variables['PyDotVer'], '3.12'))
-
   - script: |
       MKDIR $(Agent.ToolsDirectory)\Python\3.12.3\arm64 
       XCOPY /s /y /h /e /c /q "C:\Python\Python312\*.*" $(Agent.ToolsDirectory)\Python\3.12.3\arm64\
