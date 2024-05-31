@@ -18,16 +18,18 @@ def generate_prompt(model, tokenizer, prompt_length, use_graph_capture) -> str:
     prompt = "a"
     tokens = tokenizer.encode(prompt)
     params=og.GeneratorParams(model)
-    params.set_search_options(do_sample=True, top_k=5, temperature=temperature, max_length=prompt_length, min_length=prompt_length+1)
+    params.set_search_options(do_sample=True, top_k=5, temperature=temperature, max_length=prompt_length+1, min_length=prompt_length+1)
     params.input_ids = tokens
 
     if use_graph_capture:
         params.try_graph_capture_with_max_batch_size(1)
 
     generator=og.Generator(model, params)
-    while not generator.is_done():
+    i = 1
+    while not generator.is_done() and i < prompt_length:
         generator.compute_logits()
         generator.generate_next_token()
+        i += 1
     return tokenizer.decode(generator.get_sequence(0))
 
 def save_results(results, filename):
