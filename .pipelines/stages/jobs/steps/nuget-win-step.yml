@@ -21,7 +21,7 @@ steps:
     Pattern: '*OnnxRuntimeGenAI*.dll'
 - powershell: |
     $VERSION = '0.4.0-dev'
-    $nugetPath = Join-Path $env:ProgramFiles "NuGet\nuget.exe"
+    $nugetPath = Join-Path "C:\Program Files" "NuGet\nuget.exe"
     & $nugetPath pack Microsoft.ML.OnnxRuntimeGenAI.nuspec `
       -Prop version=$VERSION `
       -Prop genai_nuget_ext=$(genai_nuget_ext) `
