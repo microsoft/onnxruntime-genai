@@ -108,4 +108,4 @@ jobs:
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/requirements-cuda.txt --user && \
               mkdir -p genai_models && \
               ${{ env.PYTHON_EXECUTABLE }} src/python/py/models/builder.py -m microsoft/phi-2 -o genai_models/phi2-int4-cuda -p int4 -e cuda -c hf_cache && \
-              ${{ env.PYTHON_EXECUTABLE }} benchmark/python/benchmark_e2e.py --input_folder genai_models/phi2-int4-cuda --output benchmark/python/phi-2-cuda.csv -b 1,4 -l 128,256 -g 128,256 -r 100 -w 5 -k 1"
+              ${{ env.PYTHON_EXECUTABLE }} benchmark/python/benchmark_e2e.py --input_folder genai_models/phi2-int4-cuda --output benchmark/python/phi-2-cuda.csv -b 1,4 -l 64,128 -g 64,128 -r 100 -w 5 -k 1"
