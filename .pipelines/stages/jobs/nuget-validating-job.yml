@@ -108,12 +108,6 @@ jobs:
   workspace:
     clean: all
   steps:
-  - task: UsePythonVersion@0
-    inputs:
-      versionSpec: 3.10
-      addToPath: true
-      architecture: $(arch)
-
   - template: steps/utils/download-huggingface-model.yml
     parameters:
       StepName: 'Download Model from HuggingFace'
