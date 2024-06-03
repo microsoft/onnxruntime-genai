@@ -49,6 +49,11 @@ parameters:
   type: string
   default: '1.18.0-dev-20240426-0116-b842effa29'
 
+- name: ort_rocm_version
+  displayName: 'OnnxRuntime ROCm version'
+  type: string
+  default: '1.19.0-dev-20240602-1103-217b66f'
+
 - name: cuda_version
   displayName: 'CUDA version'
   type: string
@@ -78,6 +83,7 @@ stages:
     enable_win_arm64_cpu: ${{ parameters.enable_win_arm64_cpu }}
     ort_version: ${{ parameters.ort_version }}
     ort_cuda_version: ${{ parameters.ort_cuda_version }}
+    ort_rocm_version: ${{ parameters.ort_rocm_version }}
     ort_dml_version: ${{ parameters.ort_dml_version }}
     cuda_version: ${{ parameters.cuda_version }}
 

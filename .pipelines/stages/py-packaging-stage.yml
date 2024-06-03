@@ -17,6 +17,8 @@ parameters:
   type: string
 - name: ort_cuda_version
   type: string
+- name: ort_rocm_version
+  type: string
 - name: ort_dml_version
   type: string
 - name: cuda_version
@@ -84,7 +86,7 @@ stages:
         arch: 'x64'
         cuda_version: ${{ parameters.cuda_version }}
         ep: 'rocm'
-        ort_version: ${{ parameters.ort_cuda_version }}
+        ort_version: ${{ parameters.ort_rocm_version }}
         os: 'linux'
 
 
