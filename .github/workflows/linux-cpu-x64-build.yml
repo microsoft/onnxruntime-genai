@@ -1,13 +1,19 @@
 name: "Linux CPU x64 Build"
-on: [ workflow_dispatch, pull_request ]
+on:
+  workflow_dispatch:
+  push:
+    branches:
+    - main
+    - rel-*
+  pull_request:
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 env:
-  ort_dir: "onnxruntime-linux-x64-1.17.1"
-  ort_zip: "onnxruntime-linux-x64-1.17.1.tgz"
-  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/onnxruntime-linux-x64-1.17.1.tgz"
-
+  ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
+  ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
+  ORT_NIGHTLY_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
+  DOTNET_INSTALL_DIR: "${{ github.workspace }}/dotnet"
 jobs:
   linux_cpu_x64:
     runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU" ]
@@ -17,18 +23,43 @@ jobs:
         with:
           submodules: true
 
-      - name: Download OnnxRuntime
+      - name: Install jq
         run: |
-          curl -L -o ${{ env.ort_zip }} ${{ env.ort_url }} 
+          sudo apt-get install jq
 
-      - name: Unzip OnnxRuntime
-        run: |
-          tar -xzf ${{ env.ort_zip }}
-          rm ${{ env.ort_zip }}
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
 
-      - name: Rename OnnxRuntime to ort
+      - name: Get the Latest OnnxRuntime Nightly Version
         run: |
-          mv ${{ env.ort_dir }} ort
+          ORT_NIGHTLY_VERSION=$(curl -s "${{ env.ORT_NIGHTLY_REST_API }}" | jq -r '.value[0].versions[0].normalizedVersion')
+          echo "$ORT_NIGHTLY_VERSION" 
+          echo "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" >> $GITHUB_ENV
+
+      - name: Download OnnxRuntime Nightly
+        run: |
+          dotnet new console
+          dotnet add package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_NIGHTLY_VERSION }} --source ${{ env.ORT_NIGHTLY_SOURCE }} --package-directory .
+          dotnet build
+        continue-on-error: true
+
+      - name: list files
+        shell: bash
+        run: |
+          ls -l
+          ls -R ${{ env.ORT_PACKAGE_NAME }}
+        continue-on-error: true
+
+# TODO: Find out why do we need to to have libonnxruntime.so.$ort_version
+      - name: Extract OnnxRuntime library and header files
+        run: |
+          set -e -x
+          mkdir -p ort/lib
+          mv microsoft.ml.onnxruntime/${{ env.ORT_NIGHTLY_VERSION }}/build/native/include ort/
+          mv microsoft.ml.onnxruntime/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/linux-x64/native/* ort/lib/
+          ort_version=$(echo ${{ env.ORT_NIGHTLY_VERSION }} | cut -d- -f1-1)
+          cp ort/lib/libonnxruntime.so ort/lib/libonnxruntime.so.$ort_version
 
       - name: Build with CMake and GCC
         run: |

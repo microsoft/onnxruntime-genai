@@ -1,20 +1,22 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #include "smartptrs.h"
+#include <curand_kernel.h>
 
 namespace Generators {
 namespace cuda {
 
 struct SamplingData {
-  SamplingData(int batch_size, int vocab_size, cudaStream_t stream);
-  std::unique_ptr<int, Generators::CudaDeleter> indices_sorted = nullptr;
-  std::unique_ptr<float, Generators::CudaDeleter> scores_sorted = nullptr;
-  std::unique_ptr<float, Generators::CudaDeleter> scores_softmaxed = nullptr;
-  std::unique_ptr<float, Generators::CudaDeleter> prefix_sums = nullptr;
-  std::unique_ptr<float, Generators::CudaDeleter> thresholds = nullptr;
-  std::unique_ptr<int, Generators::CudaDeleter> indices_in = nullptr;
-  std::unique_ptr<int, Generators::CudaDeleter> offsets = nullptr;
-  std::unique_ptr<float, Generators::CudaDeleter> temp_buffer = nullptr;
+  SamplingData(unsigned long long random_seed, int batch_size, int vocab_size, cudaStream_t stream);
+  cuda_unique_ptr<int> indices_sorted;
+  cuda_unique_ptr<float> scores_sorted;
+  cuda_unique_ptr<float> scores_softmaxed;
+  cuda_unique_ptr<float> prefix_sums;
+  cuda_unique_ptr<float> thresholds;
+  cuda_unique_ptr<int> indices_in;
+  cuda_unique_ptr<int> offsets;
+  cuda_unique_ptr<float> temp_buffer;
+  cuda_unique_ptr<curandState> curand_states;
   size_t temp_storage_bytes = 0;
 };
 

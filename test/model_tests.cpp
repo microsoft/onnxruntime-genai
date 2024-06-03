@@ -10,7 +10,6 @@
 #ifndef MODEL_PATH
 #define MODEL_PATH "../../test/test_models/"
 #endif
-std::unique_ptr<OrtEnv> g_ort_env;
 
 // To generate this file:
 // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
@@ -20,6 +19,8 @@ static const std::pair<const char*, const char*> c_tiny_gpt2_model_paths[] = {
     {MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp16-cuda", "fp16"},
 };
 
+// DML doesn't support GPT attention
+#if !USE_DML
 TEST(ModelTests, GreedySearchGptFp32) {
   std::vector<int64_t> input_ids_shape{2, 4};
   std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
@@ -31,7 +32,7 @@ TEST(ModelTests, GreedySearchGptFp32) {
   // To generate this file:
   // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
   // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
-  auto model = Generators::CreateModel(*g_ort_env,
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(),
                                        MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
   auto params = Generators::CreateGeneratorParams(*model);
@@ -72,7 +73,7 @@ TEST(ModelTests, BeamSearchGptFp32) {
   //        --output tiny_gpt2_beamsearch_fp16.onnx --use_gpu --max_length 20
   // (with separate_gpt2_decoder_for_init_run set to False as it is now set to True by default)
 
-  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
   auto params = Generators::CreateGeneratorParams(*model);
   params->batch_size = static_cast<int>(input_ids_shape[0]);
@@ -105,6 +106,7 @@ TEST(ModelTests, BeamSearchGptFp32) {
     EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params->search.max_length * sizeof(int32_t)));
   }
 }
+#endif
 
 #if USE_CUDA
 
@@ -116,7 +118,7 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
       0, 0, 0, 52, 204, 204, 204, 204, 204, 204,
       0, 0, 195, 731, 731, 114, 114, 114, 114, 114};
 
-  auto model = Generators::CreateModel(*g_ort_env, model_path);
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), model_path);
 
   auto params = Generators::CreateGeneratorParams(*model);
   params->batch_size = static_cast<int>(input_ids_shape[0]);
@@ -161,7 +163,7 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
   // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2
   //        --output tiny_gpt2_beamsearch_fp16.onnx --use_gpu --max_length 20
   // (with separate_gpt2_decoder_for_init_run set to False as it is now set to True by default)
-  auto model = Generators::CreateModel(*g_ort_env, model_path);
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), model_path);
 
   auto params = Generators::CreateGeneratorParams(*model);
   params->batch_size = static_cast<int>(input_ids_shape[0]);
@@ -201,7 +203,6 @@ TEST(ModelTests, BeamSearchGptCuda) {
 
 TEST(ModelTests, TestApiCuda) {
 #if TEST_PHI2
-#ifndef NO_TOKENIZER
 
   auto prompt = R"(
 def print_prime(n):
@@ -212,7 +213,7 @@ Print all primes between 1 and n
 
   std::cout << "With prompt:" << prompt << "\r\n";
 
-  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "phi-2");
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "phi-2");
   auto tokenizer = model->CreateTokenizer();
   auto tokens = tokenizer->Encode(prompt);
 
@@ -232,15 +233,11 @@ Print all primes between 1 and n
   auto result = generator->GetSequence(0);
 
   std::cout << tokenizer->Decode(result.GetCPU()) << "\r\n";
-#else
-  std::cout << "Test skipped - not built with onnxruntime extensions\r\n";
-#endif
 #endif
 }
 
 TEST(ModelTests, TestHighLevelApiCuda) {
 #if TEST_PHI2
-#ifndef NO_TOKENIZER
   auto prompt = R"(
 def print_prime(n):
 '''
@@ -250,7 +247,7 @@ Print all primes between 1 and n
 
   std::cout << "With prompt:" << prompt << "\r\n";
 
-  auto model = Generators::CreateModel(*g_ort_env, MODEL_PATH "phi-2");
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "phi-2");
   auto tokenizer = model->CreateTokenizer();
   auto tokens = tokenizer->Encode(prompt);
 
@@ -264,9 +261,6 @@ Print all primes between 1 and n
   auto result = Generators::Generate(*model, *params);
 
   std::cout << tokenizer->Decode(result[0]) << "\r\n";
-#else
-  std::cout << "Test skipped - not built with onnxruntime extensions\r\n";
-#endif
 #endif
 }
 

@@ -1,36 +1,63 @@
 parameters:
 - name: archiveType
   type: string
+- name: ep
+  type: string
+  default: cpu
 steps:
-- bash: |
-    echo "##[error]Error: ort_version and ort_filename are not set"
-    exit 1
-  displayName: 'Check if variables ort_version and ort_filename are set'
-  condition: or( eq (variables['ort_version'], ''), eq (variables['ort_filename'], ''))
 
-- task: DownloadGitHubRelease@0
+- task: DownloadPackage@1
   inputs:
-    connection: 'GitHub - Release'
-    userRepository: 'microsoft/onnxruntime'
-    defaultVersionType: 'specificTag'
-    version: 'v$(ort_version)'
-    itemPattern: '$(ort_filename).${{ parameters.archiveType }}'
+    packageType: 'nuget'
+    feed: '2692857e-05ef-43b4-ba9c-ccf1c22c437c/7982ae20-ed19-4a35-a362-a96ac99897b7'
+    definition: '$(ort_filename)' # Can also be package name
+    version: '$(ort_version)'
+    extract: false
     downloadPath: '$(Build.Repository.LocalPath)'
-  displayName: Download $(ort_filename)
-
-- task: ExtractFiles@1
-  inputs:
-    archiveFilePatterns: '$(Build.Repository.LocalPath)/$(ort_filename).${{ parameters.archiveType }}'
-    destinationFolder: '$(Build.Repository.LocalPath)'
-    cleanDestinationFolder: false
-    overwriteExistingFiles: true
-  displayName: Unzip OnnxRuntime
+  displayName: Download Onnxruntime file
+- ${{ if eq(parameters.archiveType, 'zip') }}:
+  - task: ExtractFiles@1
+    inputs:
+      archiveFilePatterns: '$(Build.Repository.LocalPath)/*.nupkg'
+      destinationFolder: '$(Build.Repository.LocalPath)/ort'
+      cleanDestinationFolder: false
+      overwriteExistingFiles: true
+    displayName: Unzip OnnxRuntime
+  - task: CopyFiles@2
+    inputs:
+      SourceFolder: '$(Build.Repository.LocalPath)/ort/runtimes/$(os)-$(arch)/native'
+      TargetFolder: '$(Build.Repository.LocalPath)/ort/lib'
+- ${{ else }}:
+  - script: |
+      mv $(Build.Repository.LocalPath)/$(ort_filename).nupkg $(Build.Repository.LocalPath)/$(ort_filename).zip
+    displayName: Rename OnnxRuntime nuget package to zip
+  - task: ExtractFiles@1
+    inputs:
+      archiveFilePatterns: '$(Build.Repository.LocalPath)/$(ort_filename).zip'
+      destinationFolder: '$(Build.Repository.LocalPath)/ort'
+      cleanDestinationFolder: false
+      overwriteExistingFiles: true
+    displayName: Unzip OnnxRuntime
+  - task: CopyFiles@2
+    inputs:
+      SourceFolder: '$(Build.Repository.LocalPath)/ort/runtimes/$(os)-$(arch)/native'
+      TargetFolder: '$(Build.Repository.LocalPath)/ort/lib'
+  # TODO: Find out why do we need to to have libonnxruntime.so.ort_stable_version
+  - script: |
+      set -e -x
+      ort_stable_version=$(echo $(ort_version) | cut -d- -f1)
+      echo $ort_stable_version
+      mv libonnxruntime.so libonnxruntime.so.$ort_stable_version 
+      ln -s libonnxruntime.so.$ort_stable_version libonnxruntime.so
+    displayName: Copy libonnxruntime.so to libonnxruntime.so.
+    workingDirectory: '$(Build.Repository.LocalPath)/ort/lib'
 
 - task: CopyFiles@2
   inputs:
-    SourceFolder: '$(Build.Repository.LocalPath)/$(ort_filename)'
-    TargetFolder: '$(Build.Repository.LocalPath)/ort'
-  displayName: Copy OnnxRuntime to ort
+    SourceFolder: '$(Build.Repository.LocalPath)/ort/'
+    Contents: '**/native/include/**'
+    TargetFolder: '$(Build.Repository.LocalPath)/ort/include'
+    flattenFolders: true
 
 - task: DeleteFiles@1
   inputs:
@@ -38,4 +65,12 @@ steps:
     Contents: '*tensorrt*'
     RemoveSourceFolder: false
   displayName: 'Remove tensorrt from lib'
+  continueOnError: true
+
+- task: DeleteFiles@1
+  inputs:
+    SourceFolder: '$(Build.Repository.LocalPath)/ort/lib'
+    Contents: '*.pdb'
+    RemoveSourceFolder: false
+  displayName: 'Remove .pdb files from lib'
   continueOnError: true

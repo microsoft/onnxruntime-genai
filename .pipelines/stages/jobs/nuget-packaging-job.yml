@@ -10,18 +10,23 @@ parameters:
   default: ''
 - name: os
   type: string
-- name: publish_to_ado_feed
-  type: boolean
-- name: publish_to_nuget
-  type: boolean
+  values:
+  - 'linux'
+  - 'win'
+
 jobs:
 - job: nuget_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}_packaging
   ${{ if eq(parameters.os, 'linux') }}:
     pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
   ${{ if eq(parameters.os, 'win') }}:
-    pool: 'onnxruntime-Win-CPU-2022'
+    ${{ if eq(parameters.ep, 'directml') }}:
+      pool: 'onnxruntime-Win2022-GPU-dml-A10'
+    ${{ elseif eq(parameters.arch, 'arm64') }}:
+      pool: 'onnxruntime-genai-windows-vs-2022-arm64'
+    ${{ else }}:
+      pool: 'onnxruntime-Win-CPU-2022'
   timeoutInMinutes: 180
-#  set variables here to be used in the template and steps
+  #  set variables here to be used in the template and steps
   variables:
   - name: arch
     value: ${{ parameters.arch }}
@@ -39,39 +44,96 @@ jobs:
     value: ${{ parameters.ort_version }}
   - name: GDN_CODESIGN_TARGETDIRECTORY
     value: '$(Build.ArtifactStagingDirectory)/nuget'
+  - name: os
+    value: ${{ parameters.os }}
   - name: ort_filename
     ${{ if eq(parameters.ep, 'cpu') }}:
-      value: 'onnxruntime-${{ parameters.os }}-${{ parameters.arch }}-${{ parameters.ort_version }}'
-    ${{ else}}:
-      ${{if eq(parameters.cuda_version, '11.8') }}:
-        value: 'onnxruntime-${{ parameters.os }}-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}'
+      value: 'Microsoft.ML.OnnxRuntime'
+    ${{ elseif eq(parameters.ep, 'cuda') }}:
+      ${{if eq(parameters.os, 'win') }}:
+        value: 'Microsoft.ML.OnnxRuntime.Gpu.Windows'
       ${{ else }}:
-        value: 'onnxruntime-${{ parameters.os }}-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
+        value: 'Microsoft.ML.OnnxRuntime.Gpu.Linux'
+    ${{ elseif eq(parameters.ep, 'directml')}}:
+      value: 'Microsoft.ML.OnnxRuntime.DirectML'
+    ${{ else }}:
+      value: 'Microsoft.ML.OnnxRuntime'
+
   - name: genai_nuget_ext
     ${{ if eq(parameters.ep, 'cpu') }}:
       value: ''
     ${{ if eq(parameters.ep, 'cuda') }}:
       value: '.Cuda'
+    ${{ if eq(parameters.ep, 'directml') }}:
+      value: '.DirectML'
   - name: ort_nuget_ext
     ${{ if eq(parameters.ep, 'cpu') }}:
       value: ''
     ${{ if eq(parameters.ep, 'cuda') }}:
       value: '.Gpu'
+    ${{ if eq(parameters.ep, 'directml') }}:
+      value: '.DirectML'
+  - name: ortHome
+    value: 'ort'
+  - name: dml_dir
+    value: 'Microsoft.AI.DirectML.1.14.2'
+  - name: dml_zip
+    value: 'Microsoft.AI.DirectML.1.14.2.zip'
+  - name: dml_url
+    value: "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.14.2"
+  
+  - name: ort_arm64_dir
+    value: 'onnxruntime-win-arm64-1.17.3'
+  - name: ort_arm64_zip
+    value: 'onnxruntime-win-arm64-1.17.3.zip'
+  - name: ort_arm64_url
+    value: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/onnxruntime-win-arm64-1.17.3.zip"
+
   workspace:
     clean: all
   steps:
-  - template: steps/capi-${{ parameters.os }}-step.yml
-    parameters:
-      target: 'onnxruntime-genai'
+  - script: |
+      MKDIR $(Agent.ToolsDirectory)\Python\3.11.0\arm64
+      XCOPY /s /y /h /e /c /q "C:\Python\Python311\*.*" $(Agent.ToolsDirectory)\Python\3.11.0\arm64\
+      COPY NUL $(Agent.ToolsDirectory)\Python\3.11.0\arm64.complete
+      DIR $(Agent.ToolsDirectory)\Python
+      DIR $(Agent.ToolsDirectory)\Python\3.11.0
+      DIR $(Agent.ToolsDirectory)\Python\3.11.0\arm64
+      DIR "C:\Python"
+    displayName: Copy python 3.11.0 version to agent tools directory
+    condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'))
 
-# TODO: Add a step to build the linux nuget package
+  - ${{ if eq(parameters.arch, 'arm64') }}:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: 3.11
+        addToPath: true
+        architecture: $(arch)
+  - ${{ else }}:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: 3.10
+        addToPath: true
+        architecture: $(arch)
+
+  - ${{ if eq(parameters.os, 'linux') }}:
+    - template: steps/capi-linux-step.yml
+      parameters:
+        target: 'onnxruntime-genai'
+        arch: ${{ parameters.arch }}
+        ep: ${{ parameters.ep }}
+
+    # TODO: Add a step to build the linux nuget package
+
   - ${{ if eq(parameters.os, 'win') }}:
-    - template: steps/nuget-${{ parameters.os }}-step.yml
-    - ${{ if or(eq(parameters.publish_to_nuget, true), eq(parameters.publish_to_ado_feed, true))}}:
-      - template: steps/nuget-releasing-step.yml
-        parameters:
-          publish_to_ado_feed: ${{ parameters.publish_to_ado_feed }}
-          publish_to_nuget: ${{ parameters.publish_to_nuget }}
+    - template: steps/capi-win-step.yml
+      parameters:
+        target: 'onnxruntime-genai'
+        arch: ${{ parameters.arch }}
+        ep: ${{ parameters.ep }}
+    - template: steps/nuget-win-step.yml
+      parameters:
+        arch: ${{ parameters.arch }}
 
   - template: steps/compliant-and-cleanup-step.yml
 

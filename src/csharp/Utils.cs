@@ -7,17 +7,36 @@ using System.Text;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
+    public class OgaHandle
+    {
+        ~OgaHandle()
+        {
+            NativeMethods.OgaShutdown();
+        }
+    }
+
     public class Utils
     {
         public static void SetCurrentGpuDeviceId(int device_id)
         {
             Result.VerifySuccess(NativeMethods.OgaSetCurrentGpuDeviceId(device_id));
         }
+
         public static int GetCurrentGpuDeviceId()
         {
             IntPtr device_id = IntPtr.Zero;
             Result.VerifySuccess(NativeMethods.OgaGetCurrentGpuDeviceId(out device_id));
             return (int)device_id.ToInt64();
+        }
+
+        public static void SetLogBool(string name, bool value)
+        {
+            Result.VerifySuccess(NativeMethods.OgaSetLogBool(StringUtils.ToUtf8(name), value));
+        }
+        
+        public static void SetLogString(string name, string value)
+        {
+            Result.VerifySuccess(NativeMethods.OgaSetLogString(StringUtils.ToUtf8(name), StringUtils.ToUtf8(value)));
         }
     }
 

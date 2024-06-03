@@ -20,7 +20,7 @@ steps:
     inputs:
       SourceFolder: '$(Build.Repository.LocalPath)/$(buildDir)'
       Contents: |
-        onnxruntime-genai.so
+        libonnxruntime-genai.so
       TargetFolder: '$(Build.ArtifactStagingDirectory)\$(artifactName)\lib'
 - ${{ else }}:
   - task: CopyFiles@2
@@ -39,6 +39,7 @@ steps:
     SourceFolder: '$(Build.Repository.LocalPath)/src'
     Contents: |
       ort_genai_c.h
+      ort_genai.h
     TargetFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)/include'
 
 - task: CopyFiles@2

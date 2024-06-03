@@ -96,7 +96,7 @@ __global__ void SetScoreProcessor(float* next_token_scores, int batch_beam_size,
   if (index >= batch_beam_size)
     return;
 
-  next_token_scores[index*vocab_size+token] = score;
+  next_token_scores[index * vocab_size + token] = score;
 }
 
 void LaunchSetScoreProcessor(float* next_token_scores, int batch_beam_size, int vocab_size, int token, float score, cudaStream_t stream) {

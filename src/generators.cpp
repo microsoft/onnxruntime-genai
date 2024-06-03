@@ -11,31 +11,21 @@
 
 namespace Generators {
 
-// IEEE 752-2008 binary16 format, 1 sign bit, 5 bit exponent, 10 bit fraction
-float Float16ToFloat32(uint16_t v) {
-  // Extract sign, exponent, and fraction from numpy.float16
-  int const sign = (v & 0x8000) >> 15;
-  int const exponent = (v & 0x7C00) >> 10;
-  int const fraction = v & 0x03FF;
+static bool _ = (Ort::InitApi(), false);
 
-  // Handle special cases
-  if (exponent == 0) {
-    if (fraction == 0) {
-      // Zero
-      return sign != 0 ? -0.0f : 0.0f;
-    }  // Subnormal number
-    return std::ldexp((sign != 0 ? -1.0f : 1.0f) * static_cast<float>(fraction) / 1024.0f, -14);
-  }
-  if (exponent == 31) {
-    if (fraction == 0) {
-      // Infinity
-      return sign != 0 ? -std::numeric_limits<float>::infinity() : std::numeric_limits<float>::infinity();
-    }  // NaN
-    return std::numeric_limits<float>::quiet_NaN();
-  }
+OrtGlobals::OrtGlobals() : env_{OrtEnv::Create(OrtLoggingLevel::ORT_LOGGING_LEVEL_ERROR)} {}
 
-  // Normalized number
-  return std::ldexp((sign != 0 ? -1.0f : 1.0f) * (1.0f + static_cast<float>(fraction) / 1024.0f), exponent - 15);
+std::unique_ptr<OrtGlobals>& GetOrtGlobals() {
+  static auto globals = std::make_unique<OrtGlobals>();
+  return globals;
+}
+
+void Shutdown() {
+  GetOrtGlobals().reset();
+}
+
+OrtEnv& GetOrtEnv() {
+  return *GetOrtGlobals()->env_;
 }
 
 GeneratorParams::GeneratorParams(const Model& model)
@@ -43,8 +33,48 @@ GeneratorParams::GeneratorParams(const Model& model)
       pad_token_id{model.config_->model.pad_token_id},
       eos_token_id{model.config_->model.eos_token_id},
       vocab_size{model.config_->model.vocab_size},
+      hidden_size{model.config_->model.decoder.hidden_size},
       device_type{model.device_type_},
-      cuda_stream{model.cuda_stream_} {
+      cuda_stream{model.cuda_stream_},
+      is_cuda_graph_enabled_{IsCudaGraphEnabled(model.config_->model.decoder.session_options)},
+      config_{model.config_.get()} {
+  use_cuda_graph = is_cuda_graph_enabled_;
+  if (use_cuda_graph) {
+    max_batch_size = 1;  // set it to 1 by default
+  }
+}
+
+void GeneratorParams::TryGraphCapture(int max_bs) {
+  if (!is_cuda_graph_enabled_ || device_type == DeviceType::CPU) {
+    // no-op
+    return;
+  }
+
+  if (DeviceType::CUDA == device_type || DeviceType::DML == device_type) {
+    if (max_bs == 0) {
+      throw std::runtime_error("Graph capture is enabled, but max_batch_size is not set.");
+    }
+    use_cuda_graph = true;
+    max_batch_size = max_bs;
+  } else {
+    throw std::runtime_error("CUDA graph is not supported on this device");
+  }
+}
+
+void GeneratorParams::SetInputs(const NamedTensors& named_tensors) {
+  for (const auto& [name, tensor] : named_tensors) {
+    if (name == Config::Defaults::InputIdsName) {
+      input_ids = std::span<const int32_t>(tensor->ort_tensor_->GetTensorMutableData<int32_t>(),
+                                           tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount());
+      batch_size = static_cast<int>(tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape()[0]);
+      sequence_length = static_cast<int>(input_ids.size()) / batch_size;
+    } else {
+      // If the nominal name is found in the map, use the graph name.
+      // Else, use the nominal name as the graph name.
+      [[maybe_unused]] const auto [graph_name, found] = config_->GetGraphName(name);
+      extra_inputs.push_back({graph_name, tensor});
+    }
+  }
 }
 
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params) {
@@ -70,13 +100,13 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
   if (params.search.max_length == 0)
     throw std::runtime_error("search max_length is 0");
   if (params.search.max_length > model.config_->model.context_length)
-    throw std::runtime_error("max_length cannot be greater than model context_length");
+    throw std::runtime_error("max_length (" + std::to_string(params.search.max_length) + ") cannot be greater than model context_length (" + std::to_string(model.config_->model.context_length) + ")");
   if (params.batch_size < 1)
-    throw std::runtime_error("batch_size must be 1 or greater");
+    throw std::runtime_error("batch_size must be 1 or greater, is " + std::to_string(params.batch_size));
   if (params.vocab_size < 1)
-    throw std::runtime_error("vocab_size must be 1 or greater");
+    throw std::runtime_error("vocab_size must be 1 or greater, is " + std::to_string(params.vocab_size));
   if (params.sequence_length >= params.search.max_length)
-    throw std::runtime_error("input sequence_length is >= max_length");
+    throw std::runtime_error("input sequence_length (" + std::to_string(params.sequence_length) + ") is >= max_length (" + std::to_string(params.search.max_length) + ")");
 
   search_ = CreateSearch(params);
   state_ = model.CreateState(search_->GetSequenceLengths(), params);
@@ -86,7 +116,13 @@ void Generator::ComputeLogits() {
   if (computed_logits_)
     throw std::runtime_error("ComputeLogits called again without calling GenerateNextToken first");
 
-  search_->SetLogits(state_->Run(search_->GetSequenceLength(), search_->GetNextTokens(), search_->GetNextIndices()));
+  auto logits = state_->Run(search_->GetSequenceLength(), search_->GetNextTokens(), search_->GetNextIndices());
+  if (g_log.enabled && g_log.model_logits) {
+    auto& stream = Log("model_logits");
+    DumpSpan(stream, logits.GetCPU());
+    stream << std::endl;
+  }
+  search_->SetLogits(logits);
   computed_logits_ = true;
 
   auto& search = search_->params_->search;
@@ -105,8 +141,18 @@ void Generator::GenerateNextToken() {
   if (!computed_logits_)
     throw std::runtime_error("Must call ComputeLogits before GenerateNextToken");
   computed_logits_ = false;
-
   auto& search = search_->params_->search;
+
+  if (g_log.enabled && g_log.generate_next_token) {
+    auto& stream = Log("generate_next_token");
+    stream << SGR::Fg_Green << "do_sample: " << SGR::Reset << search.do_sample << ' '
+           << SGR::Fg_Green << "top_k: " << SGR::Reset << search.top_k << ' '
+           << SGR::Fg_Green << "top_p: " << SGR::Reset << search.top_p << ' '
+           << SGR::Fg_Green << "temperature: " << SGR::Reset << search.temperature << ' '
+           << SGR::Fg_Cyan << "sequence length: " << SGR::Reset << search_->GetSequenceLength()
+           << std::endl;
+  }
+
   if (!search.do_sample || search.top_k == 1) {
     search_->SelectTop();
     return;

@@ -1,102 +1,95 @@
-# ONNX Runtime Generative AI
+# ONNX Runtime generate() API
 
-Run generative AI models with ONNX Runtime.
+![Latest version](https://img.shields.io/nuget/vpre/Microsoft.ML.OnnxRuntimeGenAI.Managed?label=latest)
 
-This library provides the generative AI loop for ONNX models, including inference with ONNX Runtime, logits processing, search and sampling, and KV cache management.
+Run Llama, Phi, Gemma, Mistral with ONNX Runtime.
 
-Users can call a high level `generate()` method, or run each iteration of the model in a loop.
+This API gives you an easy, flexible and performant way of running LLMs on device. 
 
-* Support greedy/beam search and TopP, TopK sampling to generate token sequences
-* Built in logits processing like repetition penalties
-* Easy custom scoring
+It implements the generative AI loop for ONNX models, including pre and post processing, inference with ONNX Runtime, logits processing, search and sampling, and KV cache management.
 
-See full documentation at [https://onnxruntime.ai/docs/genai].
+You can call a high level `generate()` method to generate all of the output at once, or stream the output one token at a time.
 
-## Features
+See documentation at https://onnxruntime.ai/docs/genai.
 
-* Supported model architectures:
-  * Gemma
-  * LLaMA
-  * Mistral
-  * Phi-2
-* Supported targets:   
-  * CPU
-  * GPU (CUDA)
-* Supported sampling features
-  * Beam search
-  * Greedy search
-  * Top P/Top K
-* APIs
-  * Python
-  * C#
-  * C/C++  
+|Support matrix|Supported now|Under development|On the roadmap|
+|-|-|-|-|
+|Model architectures|  Gemma <br/> Llama * <br/> Mistral + <br/>Phi <br/>|Whisper|Stable diffusion|
+|API| Python <br/>C# <br/>C/C++ |Java|Objective-C|||
+|Platform| Linux <br/> Windows  | Android | Mac <br/> iOS |||
+|Architecture|x86 <br/> x64 <br/> | Arm64 |||
+|Hardware Acceleration|CUDA<br/>DirectML<br/>|QNN <br/> ROCm |OpenVINO
 
-## Coming very soon
+\* The Llama model architecture supports similar model families such as CodeLlama, Vicuna, Yi, and more.
 
-* Support for DirectML
-* Support for the encoder decoder model architectures, such as whisper, T5 and BART.
+\+ The Mistral model architecture supports similar model families such as Zephyr.
 
-## Coming soon
 
-* Support for mobile devices (Android and iOS) with Java and Objective-C bindings
+## Installation
 
-## Roadmap
+See https://onnxruntime.ai/docs/genai/howto/install
 
-* Stable diffusion pipeline
-* Automatic model download and cache
-* More model architectures
+## Sample code for Phi-3 in Python
 
-## Sample code for phi-2 in Python
+1. Download the model
 
-[Install](https://onnxruntime.ai/docs/genai/howto/install) the onnxruntime-genai Python package.
+   ```shell
+   huggingface-cli download microsoft/Phi-3-mini-4k-instruct-onnx --include cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/* --local-dir .
+   ```
 
-```python
-import onnxruntime_genai as og
+2. Install the API
+   
+   ```shell
+   pip install numpy
+   pip install --pre onnxruntime-genai
+   ```
 
-model = og.Model(f'models/microsoft/phi-2')
+3. Run the model
 
-tokenizer = og.Tokenizer(model)
+   ```python
+   import onnxruntime_genai as og
 
-prompt = '''def print_prime(n):
-    """
-    Print all primes between 1 and n
-    """'''
+   model = og.Model('cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4')
+   tokenizer = og.Tokenizer(model)
+   tokenizer_stream = tokenizer.create_stream()
+    
+   # Set the max length to something sensible by default,
+   # since otherwise it will be set to the entire context length
+   search_options = {}
+   search_options['max_length'] = 2048
 
-tokens = tokenizer.encode(prompt)
+   chat_template = '<|user|>\n{input} <|end|>\n<|assistant|>'
 
-params = og.SearchParams(model)
-params.set_search_options({"max_length":200})
-params.input_ids = tokens
+   text = input("Input: ")
+   if not text:
+      print("Error, input cannot be empty")
+      exit
 
-output_tokens = model.generate(params)
+   prompt = f'{chat_template.format(input=text)}'
 
-text = tokenizer.decode(output_tokens)
+   input_tokens = tokenizer.encode(prompt)
 
-print("Output:")
-print(text)
-```
+   params = og.GeneratorParams(model)
+   params.set_search_options(**search_options)
+   params.input_ids = input_tokens
+   generator = og.Generator(model, params)
+  
+   print("Output: ", end='', flush=True)
 
-## Model download and export
+   try:
+      while not generator.is_done():
+        generator.compute_logits()
+        generator.generate_next_token()
 
-ONNX models are run from a local folder, via a string supplied to the `Model()` method. 
+        new_token = generator.get_next_tokens()[0]
+        print(tokenizer_stream.decode(new_token), end='', flush=True)
+   except KeyboardInterrupt:
+       print("  --control+c pressed, aborting generation--")
 
-You can bring your own ONNX model or use the model builder utility, included in this package. 
+   print()
+   del generator
+   ```
 
-Install model builder dependencies.
-
-```bash
-pip install numpy
-pip install transformers
-pip install torch
-pip install onnx
-pip install onnxruntime
-```
-
-Export int4 CPU version 
-```bash
-huggingface-cli login --token <your HuggingFace token>
-python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -p int4 -e cpu -o <model folder>
-```
 
 ## Contributing
 

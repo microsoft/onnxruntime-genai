@@ -1,18 +1,21 @@
-#include <cuda_runtime.h>
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
 #include <cuda_fp16.h>
+#include <cuda_runtime.h>
 #include <stdint.h>
+#include <limits>
 
 namespace Generators {
 namespace cuda {
 
-template<typename T>
+template <typename T>
 __global__ void UpdatePositionIds(T* positions, int batch_beam_size) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < batch_beam_size)
     positions[i]++;
 }
 
-template<typename T>
+template <typename T>
 void Launch_UpdatePositionIds(T* positions, int batch_beam_size, cudaStream_t stream) {
   UpdatePositionIds<T><<<(batch_beam_size + 255) / 256, 256, 0, stream>>>(positions, batch_beam_size);
 }
@@ -20,27 +23,64 @@ void Launch_UpdatePositionIds(T* positions, int batch_beam_size, cudaStream_t st
 template void Launch_UpdatePositionIds(int32_t* positions, int batch_beam_size, cudaStream_t stream);
 template void Launch_UpdatePositionIds(int64_t* positions, int batch_beam_size, cudaStream_t stream);
 
-template<typename T>
-__global__ void UpdateAttentionMask(T* mask_data, const T* old_mask_data, int batch_beam_size, int current_length) {
+template <typename T>
+__global__ void CopyAndUpdateAttentionMask(T* mask_data, const T* old_mask_data, int batch_beam_size,
+                                           int current_length, int max_length) {
   int global_index = blockIdx.x * blockDim.x + threadIdx.x;
   int i = global_index / current_length;
   int j = global_index % current_length;
   if (i < batch_beam_size) {
     if (j < current_length - 1) {
-      mask_data[i * current_length + j] = old_mask_data[i * (current_length - 1) + j];
+      mask_data[i * max_length + j] = old_mask_data[i * (current_length - 1) + j];
     } else {
-      mask_data[i * current_length + j] = 1;
+      mask_data[i * max_length + j] = 1;
     }
   }
 }
 
-template<typename T>
-void Launch_UpdateAttentionMask(T* mask_data, const T* old_mask_data, int batch_beam_size, int current_length, cudaStream_t stream) {
-  UpdateAttentionMask<T><<<(batch_beam_size * current_length + 255) / 256, 256, 0, stream>>>(mask_data, old_mask_data, batch_beam_size, current_length);
+template <typename T>
+__global__ void UpdateAttentionMask(T* mask_data, int batch_beam_size, int current_length, int max_length) {
+  int i = blockIdx.x;
+  if (i < batch_beam_size) {
+    mask_data[i * max_length + current_length] = 1;
+  }
 }
 
-template void Launch_UpdateAttentionMask(int32_t* mask_data, const int32_t* old_mask_data, int batch_beam_size, int current_length, cudaStream_t stream);
-template void Launch_UpdateAttentionMask(int64_t* mask_data, const int64_t* old_mask_data, int batch_beam_size, int current_length, cudaStream_t stream);
+template <typename T>
+void Launch_UpdateAttentionMask(T* mask_data, const T* old_mask_data, int batch_beam_size, int current_length,
+                                int max_length, bool update_only, cudaStream_t stream) {
+  if (update_only) {
+    UpdateAttentionMask<T>
+        <<<batch_beam_size, 1, 0, stream>>>(mask_data, batch_beam_size, current_length, max_length);
+  } else {
+    CopyAndUpdateAttentionMask<T><<<(batch_beam_size * max_length + 255) / 256, 256, 0, stream>>>(
+        mask_data, old_mask_data, batch_beam_size, current_length, max_length);
+  }
+}
+
+template void Launch_UpdateAttentionMask(int32_t* mask_data, const int32_t* old_mask_data, int batch_beam_size,
+                                         int current_length, int max_length, bool update_only, cudaStream_t stream);
+template void Launch_UpdateAttentionMask(int64_t* mask_data, const int64_t* old_mask_data, int batch_beam_size,
+                                         int current_length, int max_length, bool update_only, cudaStream_t stream);
+
+__global__ void HandleEOSArray(float* batch_logits, int batch_beam_size, int vocab_size, const int32_t* eos_token_ids, int eos_token_ids_count) {
+  int index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= batch_beam_size)
+    return;
+
+  float* logits = batch_logits + index * vocab_size;
+  float max = std::numeric_limits<float>::lowest();
+  for (int i = 0; i < eos_token_ids_count; i++) {
+    max = std::max(max, logits[eos_token_ids[i]]);
+    logits[eos_token_ids[i]] = std::numeric_limits<float>::lowest();  // Set all EOS token options to never happen (the first will get the max of all)
+  }
+
+  logits[eos_token_ids[0]] = max;  // Set the score of the primary EOS token to the highest of any of the EOS tokens
+}
+
+void LaunchHandleEOSArray(float* batch_logits, int batch_beam_size, int vocab_size, const int32_t* eos_token_ids, int eos_token_ids_count, cudaStream_t stream) {
+  HandleEOSArray<<<(batch_beam_size + 255) / 256, 256, 0, stream>>>(batch_logits, batch_beam_size, vocab_size, eos_token_ids, eos_token_ids_count);
+}
 
 __global__ void ConvertFp16ToFp32(const half* src, float* dst, int count) {
   int idx = threadIdx.x + blockIdx.x * blockDim.x;

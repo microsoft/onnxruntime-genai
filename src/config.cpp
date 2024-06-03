@@ -1,3 +1,5 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
 #include "generators.h"
 #include "json.h"
 #include <fstream>
@@ -117,10 +119,16 @@ struct Inputs_Element : JSON::Element {
   void OnString(std::string_view name, std::string_view value) override {
     if (name == "input_ids") {
       v_.input_ids = value;
+    } else if (name == "inputs_embeds") {
+      v_.embeddings = value;
     } else if (name == "position_ids") {
       v_.position_ids = value;
     } else if (name == "attention_mask") {
       v_.attention_mask = value;
+    } else if (name == "seqlens_k") {
+      v_.seqlens_k = value;
+    } else if (name == "total_seq_len") {
+      v_.total_sequence_length = value;
     } else if (name == "past_key_names") {
       v_.past_key_names = value;
     } else if (name == "past_value_names") {
@@ -208,6 +216,137 @@ struct Decoder_Element : JSON::Element {
   Outputs_Element outputs_{v_.outputs};
 };
 
+struct VisionInputs_Element : JSON::Element {
+  explicit VisionInputs_Element(Config::Model::Vision::Inputs& v) : v_{v} {}
+
+  void OnString(std::string_view name, std::string_view value) override {
+    if (name == "pixel_values") {
+      v_.pixel_values = value;
+    } else if (name == "image_sizes") {
+      v_.image_sizes = value;
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Vision::Inputs& v_;
+};
+
+struct VisionOutputs_Element : JSON::Element {
+  explicit VisionOutputs_Element(Config::Model::Vision::Outputs& v) : v_{v} {}
+
+  void OnString(std::string_view name, std::string_view value) override {
+    if (name == "visual_features") {
+      v_.visual_features = value;
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Vision::Outputs& v_;
+};
+
+struct Vision_Element : JSON::Element {
+  explicit Vision_Element(Config::Model::Vision& v) : v_{v} {}
+
+  void OnString(std::string_view name, std::string_view value) override {
+    if (name == "filename") {
+      v_.filename = value;
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "inputs") {
+      return inputs_;
+    } else if (name == "outputs") {
+      return outputs_;
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Vision& v_;
+  VisionInputs_Element inputs_{v_.inputs};
+  VisionOutputs_Element outputs_{v_.outputs};
+};
+
+struct Eos_Array_Element : JSON::Element {
+  explicit Eos_Array_Element(Config::Model& v) : v_{v} {}
+
+  void OnNumber(std::string_view name, double value) override {
+    v_.eos_token_ids.push_back(static_cast<int>(value));
+  }
+
+  void OnComplete(bool empty) {
+    if (v_.eos_token_ids.empty())
+      return;  // Empty array, nothign to do
+
+    // Copy the first eos_token_id into the eos_token_id value, it will be our primary eos token
+    v_.eos_token_id = v_.eos_token_ids.front();
+
+    // If the array is just one value, clear the array and just act like a single value was set
+    if (v_.eos_token_ids.size() == 1)
+      v_.eos_token_ids.clear();
+  }
+
+ private:
+  Config::Model& v_;
+};
+
+struct EmbeddingInputs_Element : JSON::Element {
+  explicit EmbeddingInputs_Element(Config::Model::Embedding::Inputs& v) : v_{v} {}
+
+  void OnString(std::string_view name, std::string_view value) override {
+    if (name == "input_ids") {
+      v_.input_ids = value;
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Embedding::Inputs& v_;
+};
+
+struct EmbeddingOutputs_Element : JSON::Element {
+  explicit EmbeddingOutputs_Element(Config::Model::Embedding::Outputs& v) : v_{v} {}
+
+  void OnString(std::string_view name, std::string_view value) override {
+    if (name == "inputs_embeds") {
+      v_.embeddings = value;
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Embedding::Outputs& v_;
+};
+
+struct Embedding_Element : JSON::Element {
+  explicit Embedding_Element(Config::Model::Embedding& v) : v_{v} {}
+
+  void OnString(std::string_view name, std::string_view value) override {
+    if (name == "filename") {
+      v_.filename = value;
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "inputs") {
+      return inputs_;
+    } else if (name == "outputs") {
+      return outputs_;
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Embedding& v_;
+  EmbeddingInputs_Element inputs_{v_.inputs};
+  EmbeddingOutputs_Element outputs_{v_.outputs};
+};
+
 struct Model_Element : JSON::Element {
   explicit Model_Element(Config::Model& v) : v_{v} {}
 
@@ -237,12 +376,24 @@ struct Model_Element : JSON::Element {
       throw JSON::unknown_value_error{};
   }
 
+  Element& OnArray(std::string_view name) override {
+    if (name == "eos_token_id")
+      return eos_token_ids_;
+    throw JSON::unknown_value_error{};
+  }
+
   Element& OnObject(std::string_view name) override {
     if (name == "encoder_decoder_init") {
       return encoder_decoder_init_;
     }
     if (name == "decoder") {
       return decoder_;
+    }
+    if (name == "vision") {
+      return vision_;
+    }
+    if (name == "embedding") {
+      return embedding_;
     }
     throw JSON::unknown_value_error{};
   }
@@ -251,6 +402,9 @@ struct Model_Element : JSON::Element {
   Config::Model& v_;
   EncoderDecoderInit_Element encoder_decoder_init_{v_.encoder_decoder_init};
   Decoder_Element decoder_{v_.decoder};
+  Eos_Array_Element eos_token_ids_{v_};
+  Vision_Element vision_{v_.vision};
+  Embedding_Element embedding_{v_.embedding};
 };
 
 struct Search_Element : JSON::Element {
@@ -285,6 +439,8 @@ struct Search_Element : JSON::Element {
       v_.diversity_penalty = static_cast<float>(value);
     } else if (name == "length_penalty") {
       v_.length_penalty = static_cast<float>(value);
+    } else if (name == "random_seed") {
+      v_.random_seed = static_cast<int>(value);
     } else
       throw JSON::unknown_value_error{};
   }
@@ -310,6 +466,21 @@ void SetSearchNumber(Config::Search& search, std::string_view name, double value
 
 void SetSearchBool(Config::Search& search, std::string_view name, bool value) {
   Search_Element(search).OnBool(name, value);
+}
+
+bool IsCudaGraphEnabled(Config::SessionOptions& session_options) {
+  for (const auto& provider_options : session_options.provider_options) {
+    if (provider_options.name == "cuda") {
+      for (const auto& value : provider_options.options) {
+        if (value.first == "enable_cuda_graph") {
+          return value.second == "1";
+        }
+      }
+    } else if (provider_options.name == "dml") {
+      return true;
+    }
+  }
+  return false;
 }
 
 struct Root_Element : JSON::Element {
@@ -346,8 +517,8 @@ struct RootObject_Element : JSON::Element {
   JSON::Element& t_;
 };
 
-void ParseConfig(const std::filesystem::path& filename, Config& config) {
-  std::ifstream file(filename, std::ios::binary | std::ios::ate);
+void ParseConfig(const fs::path& filename, Config& config) {
+  std::ifstream file = filename.open(std::ios::binary | std::ios::ate);
   if (!file.is_open()) {
     throw std::runtime_error("Error opening " + filename.string());
   }
@@ -370,7 +541,7 @@ void ParseConfig(const std::filesystem::path& filename, Config& config) {
   }
 }
 
-Config::Config(const std::filesystem::path& path) : config_path{path} {
+Config::Config(const fs::path& path) : config_path{path} {
   ParseConfig(path / "genai_config.json", *this);
 
   if (model.context_length == 0)
@@ -378,6 +549,24 @@ Config::Config(const std::filesystem::path& path) : config_path{path} {
 
   if (search.max_length == 0)
     search.max_length = model.context_length;
+}
+
+void Config::AddMapping(const std::string& nominal_name, const std::string& graph_name) {
+  auto [it, emplaced] = nominal_names_to_graph_names_.emplace(nominal_name, graph_name);
+  if (it->second != graph_name) {
+    std::ostringstream oss;
+    oss << "Duplicate nominal name: " << nominal_name << " with graph names: "
+        << graph_name << " and " << it->second;
+    throw std::runtime_error(oss.str());
+  }
+}
+
+std::pair<std::string, bool> Config::GetGraphName(const std::string& nominal_name) const {
+  auto it = nominal_names_to_graph_names_.find(nominal_name);
+  if (it == nominal_names_to_graph_names_.end()) {
+    return {nominal_name, false};
+  }
+  return {it->second, true};
 }
 
 }  // namespace Generators

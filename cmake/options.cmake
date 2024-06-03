@@ -1,9 +1,18 @@
 include(CMakeDependentOption)
 
+# features
 option(USE_CUDA "Build with CUDA support" ON)
-option(NO_TOKENIZER "Don't include the Tokenizer" OFF)
+option(USE_DML "Build with DML support" OFF)
+
+# bindings
+option(ENABLE_JAVA "Build the Java API." OFF)
 option(ENABLE_PYTHON "Build the Python API." ON)
+cmake_dependent_option(BUILD_WHEEL "Build the python wheel" ON "ENABLE_PYTHON" OFF)
+
+# testing
 option(ENABLE_TESTS "Enable tests" ON)
 option(TEST_PHI2 "Enable tests for Phi2" OFF)
 
-cmake_dependent_option(BUILD_WHEEL "Build the python wheel" ON "ENABLE_PYTHON" OFF)
+# performance
+option(ENABLE_MODEL_BENCHMARK "Build model benchmark program" ON)
+

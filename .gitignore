@@ -1,5 +1,6 @@
 ﻿# Files to tell git to ignore
 
+.DS_Store
 .vscode
 
 *.vs
@@ -11,7 +12,7 @@
 /test/test_models/*
 /cache_models
 /onnxruntime-linux-x64-*
-/*.csv
+*.csv
 .idea
 cache_dir
 example-models
@@ -24,6 +25,12 @@ models_outputs_cpu
 benchmark/python/output
 examples/python/genai_models
 examples/python/hf_cache
+examples/csharp/HelloPhi/models
 
 !test/test_models/hf-internal-testing/
 !test/test_models/hf-internal-testing/tiny-random-gpt2*/*.onnx
+
+.ipynb_checkpoints/
+/src/java/.gradle
+/src/java/local.properties
+/src/java/build

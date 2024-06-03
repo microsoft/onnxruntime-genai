@@ -1,3 +1,9 @@
+# -------------------------------------------------------------------------
+# Copyright (c) Microsoft Corporation.  All rights reserved.
+# Licensed under the MIT License.  See License.txt in the project root for
+# license information.
+# --------------------------------------------------------------------------
+
 # This is an end-to-end benchmarking script for any ONNX model.
 #
 # Prerequisites: 
@@ -56,13 +62,17 @@ def monitor_cpu_memory():
         time.sleep(0.1)
 
 # Use input model to generate prompt
-def generate_prompt(model, tokenizer, prompt_length) -> str:
+def generate_prompt(model, tokenizer, prompt_length, use_graph_capture) -> str:
     temperature = 1.0
     prompt = "a"
     tokens = tokenizer.encode(prompt)
     params=og.GeneratorParams(model)
-    params.set_search_options({"do_sample":True, "top_k":5, "temperature":temperature, "max_length":prompt_length, "min_length":prompt_length+1})
+    params.set_search_options(do_sample=True, top_k=5, temperature=temperature, max_length=prompt_length, min_length=prompt_length+1)
     params.input_ids = tokens
+
+    if use_graph_capture:
+        params.try_graph_capture_with_max_batch_size(1)
+
     generator=og.Generator(model, params)
     while not generator.is_done():
         generator.compute_logits()
@@ -76,6 +86,8 @@ def save_results(results, filename):
         columns=[
             "Batch Size",
             "Prompt Length",
+            "Tokens Generated",
+            "Max Length",
             "Tokenization Throughput (tps)",
             "Tokenization Latency (ms)",
             "Prompt Processing Throughput (tps)",
@@ -89,11 +101,12 @@ def save_results(results, filename):
             "peak_gpu_memory (GiB)" if IS_NVIDIA_SYSTEM else "peak_cpu_memory(GiB)"
         ],
     )
-    df = df.transpose()  # This line swaps the rows and columns
-    df.to_csv(filename, header=False)
+    # df = df.transpose()  # This line swaps the rows and columns
+    df.to_csv(filename, header=True, index=False)
     print(f"Results saved in {filename}!")
 
-def main(args):
+def run_benchmark(args, model, tokenizer, batch_size, prompt_length, generation_length, max_length):
+
     global stop_monitoring
 
     if IS_NVIDIA_SYSTEM:
@@ -101,11 +114,8 @@ def main(args):
     else:
         monitor_thread = threading.Thread(target=monitor_cpu_memory)
 
-
     # Get user arguments
     num_repetitions = args.repetitions
-    batch_size, prompt_length, generation_length = args.batch_size, args.prompt_length, args.generation_length
-    max_length = prompt_length + generation_length
     temperature = 1.0
 
     # Get tokenizer, and model
@@ -117,12 +127,16 @@ def main(args):
     monitor_thread.start()
  
     # Generate prompt
-    prompt = [generate_prompt(model, tokenizer, prompt_length)] * batch_size
+    prompt = [generate_prompt(model, tokenizer, prompt_length, args.use_graph_capture)] * batch_size
     tokens = tokenizer.encode_batch(prompt)
 
     params = og.GeneratorParams(model)
     params.input_ids = tokens
-    params.set_search_options({"do_sample":True, "top_k":args.top_k, "top_p":args.top_p, "temperature":temperature, "max_length":max_length, "min_length":max_length})
+    do_sample = args.top_k > 1 or (args.top_p != 1.0 and args.top_p > 0.0)
+    params.set_search_options(do_sample=do_sample, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length)
+
+    if args.use_graph_capture:
+        params.try_graph_capture_with_max_batch_size(batch_size)
 
     if args.verbose: print("Running warmup runs...")
     for _ in tqdm(range(args.warmup)):
@@ -131,6 +145,8 @@ def main(args):
             generator.compute_logits()
             generator.generate_next_token()
         if args.print_model_output: print(tokenizer.decode(generator.get_sequence(0)))
+        # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
+        del generator
 
     tokenize_times = []
     prompt_times = []
@@ -153,7 +169,11 @@ def main(args):
         # Prepare run
         params = og.GeneratorParams(model)
         params.input_ids = tokens
-        params.set_search_options({"max_length":max_length, "min_length":max_length})
+        params.set_search_options(do_sample=do_sample, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length)
+
+        if args.use_graph_capture:
+            params.try_graph_capture_with_max_batch_size(batch_size)
+
         generator = og.Generator(model, params)
 
         # Measure prompt processing
@@ -168,7 +188,8 @@ def main(args):
         sampling_times.append(sampling_end_time - sampling_start_time)
 
         # Measure token generation
-        while not generator.is_done():
+        i = 1
+        while not generator.is_done() and i < generation_length:
             # Run inference
             token_gen_start_time = time.perf_counter()
             generator.compute_logits()
@@ -180,9 +201,13 @@ def main(args):
             
             token_gen_times.append(token_gen_end_time - token_gen_start_time)
             sampling_times.append(sampling_end_time - sampling_start_time)
+            i += 1
         wall_clock_end_time = time.time()
         wall_clock_times.append(wall_clock_end_time - wall_clock_start_time)
         if args.print_model_output: print(tokenizer.decode(generator.get_sequence(0)))
+
+        # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
+        del generator
 
     stop_monitoring = True
     monitor_thread.join()
@@ -195,8 +220,9 @@ def main(args):
     # Calculate tokenization metrics
     avg_tokenization_latency_s = sum(tokenize_times) / len(tokenize_times)
     avg_tokenization_latency_ms = avg_tokenization_latency_s * 1000
-    avg_tokenization_thrpt = batch_size * (1 / avg_tokenization_latency_s)
-    print(f"Average Tokenization Latency (per token): {avg_tokenization_latency_ms} ms")
+    avg_per_token_tokenization_latency_ms = avg_tokenization_latency_ms / prompt_length
+    avg_tokenization_thrpt = batch_size * (1 / avg_per_token_tokenization_latency_ms)
+    print(f"Average Tokenization Latency (per token): {avg_per_token_tokenization_latency_ms} ms")
     print(f"Average Tokenization Throughput (per token): {avg_tokenization_thrpt} tps")
 
     # Calculate prompt processing metrics
@@ -227,10 +253,11 @@ def main(args):
     print(f"Average Wall Clock Time: {avg_wall_clock_time} s")
     print(f"Average Wall Clock Throughput: {avg_wall_clock_thrpt} tps")
 
-
-    all_csv_metrics = [[
+    metrics = [
         batch_size, 
-        prompt_length, 
+        prompt_length,
+        generation_length,
+        max_length,
         avg_tokenization_thrpt, 
         avg_tokenization_latency_ms, 
         avg_per_token_prompt_thrpt, 
@@ -241,20 +268,50 @@ def main(args):
         avg_sampling_latency_ms,
         avg_wall_clock_thrpt,
         avg_wall_clock_time,
-        peak_gpu_memory if IS_NVIDIA_SYSTEM else peak_cpu_memory
-    ]]
 
+        peak_gpu_memory if IS_NVIDIA_SYSTEM else peak_cpu_memory
+    ]
+    return metrics
+
+
+def main(args):
+    all_csv_metrics = []
+    # Get tokenizer, and model
+    model_path = args.input_folder
+    if args.verbose: print(f"Loading model... ")
+    model=og.Model(f'{model_path}')
+    if args.verbose: print("Model loaded, loading tokenizer...")
+    tokenizer = og.Tokenizer(model)
+    if args.verbose: print("Tokenizer loaded, starting benchmark...")
+    for batch_size in args.batch_sizes:
+        for l, prompt_length in enumerate(args.prompt_lengths):
+            for g, gen_length in enumerate(args.generation_lengths):
+                if args.max_lengths:
+                    m = l * len(args.generation_lengths) + g
+                    max_length = args.max_lengths[m]
+                else:
+                    max_length = prompt_length + gen_length
+                print(f"Args: batch_size = {batch_size}, prompt_length = {prompt_length}, tokens = {gen_length}, max_length = {max_length}")
+                metrics = run_benchmark(args, model, tokenizer, batch_size, prompt_length, gen_length, max_length)
+                all_csv_metrics.append(metrics)
     # Add metrics to CSV
     if args.verbose: print("Adding results to CSV")
     filename = args.output
     save_results(all_csv_metrics, filename)
 
+def str2intlist(value):
+    return [int(v) for v in value.split(',')]
+
+def str2strlist(value):
+    return [str(v) for v in value.split(',')]
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="End-to-end benchmarking for gen-ai")
-    parser.add_argument('-i', '--input_folder', type=str, required=True, help='Onnx model folder path (must contain config.json and model.onnx)')
-    parser.add_argument('-b', '--batch_size', type=int, default=1, help='Number of sequences to generate in parallel')
-    parser.add_argument('-l', '--prompt_length', type=int, default=16, help='Number of tokens for prompt')
-    parser.add_argument('-g', '--generation_length', type=int, default=256, help='Number of tokens to generate after prompt')
+    parser.add_argument('-i', '--input_folder', type=str, required=True, help='Onnx model folder path (must contain genai_config.json and model.onnx)')
+    parser.add_argument('-b', '--batch_sizes', type=str2intlist, default=[1], help='Number of sequences to generate in parallel')
+    parser.add_argument('-l', '--prompt_lengths', type=str2intlist, default=[16], help='Number of tokens for prompt')
+    parser.add_argument('-g', '--generation_lengths', type=str2intlist, default=[256], help='Number of tokens to generate after prompt')
+    parser.add_argument('-m', '--max_lengths', type=str2intlist, default=[], help='Max length buffer sizes... User should supply one for every combination of Prompt and Generation length')
     parser.add_argument('-r', '--repetitions', type=int, default=10, help='Number of times to repeat the benchmark')
     parser.add_argument('-w', '--warmup', type=int, default=5, help='Number of warmup runs before benchmarking')
     parser.add_argument('-k', '--top_k', type=int, default=50, help='Top k tokens to sample from')
@@ -262,5 +319,6 @@ if __name__ == "__main__":
     parser.add_argument('-o', '--output', type=str, default='genai_e2e', help='Output CSV file name or path (with .csv extension)')
     parser.add_argument('-v', '--verbose', action='store_true', help='Print extra information')
     parser.add_argument('-mo', '--print_model_output', action='store_true', help='Print model output')
+    parser.add_argument('-gc', '--use_graph_capture', action='store_true', help='Use the graph capture feature for CUDA or DML')
     args = parser.parse_args()
     main(args)
