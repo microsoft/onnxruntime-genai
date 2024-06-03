@@ -1,3 +1,9 @@
+# -------------------------------------------------------------------------
+# Copyright (c) Microsoft Corporation.  All rights reserved.
+# Licensed under the MIT License.  See License.txt in the project root for
+# license information.
+# --------------------------------------------------------------------------
+
 # This is an end-to-end benchmarking script for any ONNX model.
 #
 # Prerequisites: 
@@ -66,7 +72,8 @@ def run_benchmark(args, model, tokenizer, batch_size, prompt_length, generation_
 
     params = og.GeneratorParams(model)
     params.input_ids = tokens
-    params.set_search_options(do_sample=True, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length)
+    do_sample = args.top_k > 1 or (args.top_p != 1.0 and args.top_p > 0.0)
+    params.set_search_options(do_sample=do_sample, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length)
 
     if args.use_graph_capture:
         params.try_graph_capture_with_max_batch_size(batch_size)
@@ -102,7 +109,7 @@ def run_benchmark(args, model, tokenizer, batch_size, prompt_length, generation_
         # Prepare run
         params = og.GeneratorParams(model)
         params.input_ids = tokens
-        params.set_search_options(max_length=max_length, min_length=max_length)
+        params.set_search_options(do_sample=do_sample, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length)
 
         if args.use_graph_capture:
             params.try_graph_capture_with_max_batch_size(batch_size)
@@ -145,8 +152,9 @@ def run_benchmark(args, model, tokenizer, batch_size, prompt_length, generation_
     # Calculate tokenization metrics
     avg_tokenization_latency_s = sum(tokenize_times) / len(tokenize_times)
     avg_tokenization_latency_ms = avg_tokenization_latency_s * 1000
-    avg_tokenization_thrpt = batch_size * (1 / avg_tokenization_latency_s)
-    print(f"Average Tokenization Latency (per token): {avg_tokenization_latency_ms} ms")
+    avg_per_token_tokenization_latency_ms = avg_tokenization_latency_ms / prompt_length
+    avg_tokenization_thrpt = batch_size * (1 / avg_per_token_tokenization_latency_ms)
+    print(f"Average Tokenization Latency (per token): {avg_per_token_tokenization_latency_ms} ms")
     print(f"Average Tokenization Throughput (per token): {avg_tokenization_thrpt} tps")
 
     # Calculate prompt processing metrics
@@ -201,9 +209,9 @@ def main(args):
     model_path = args.input_folder
     if args.verbose: print(f"Loading model... ")
     model=og.Model(f'{model_path}')
-    if args.verbose: print("Model loaded")
+    if args.verbose: print("Model loaded, loading tokenizer...")
     tokenizer = og.Tokenizer(model)
-    if args.verbose: print("Benchmarking " + model_path)
+    if args.verbose: print("Tokenizer loaded, starting benchmark...")
     for batch_size in args.batch_sizes:
         for l, prompt_length in enumerate(args.prompt_lengths):
             for g, gen_length in enumerate(args.generation_lengths):
