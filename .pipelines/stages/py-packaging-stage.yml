@@ -11,6 +11,8 @@ parameters:
   type: boolean
 - name: enable_linux_cuda
   type: boolean
+- name: enable_linux_rocm
+  type: boolean
 - name: ort_version
   type: string
 - name: ort_cuda_version
@@ -76,7 +78,14 @@ stages:
         ort_version: ${{ parameters.ort_cuda_version }}
         os: 'linux'
 
-
+  - ${{ if eq(parameters.enable_linux_rocm, true) }}:
+    - template: jobs/py-packaging-job.yml
+      parameters:
+        arch: 'x64'
+        cuda_version: ${{ parameters.cuda_version }}
+        ep: 'rocm'
+        ort_version: ${{ parameters.ort_cuda_version }}
+        os: 'linux'
 
 
 
