@@ -34,6 +34,8 @@ jobs:
       pool: 'onnxruntime-Win2022-GPU-dml-A10'
     ${{ elseif eq(parameters.ep, 'cuda') }}:
       pool: 'onnxruntime-Win2022-GPU-A10'
+    ${{ elseif eq(parameters.arch, 'arm64') }}:
+      pool: 'onnxruntime-genai-windows-vs-2022-arm64'
     ${{ else }}:
       pool: 'onnxruntime-Win-CPU-2022'
 
