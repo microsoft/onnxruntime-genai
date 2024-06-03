@@ -33,6 +33,8 @@ if(BUILD_WHEEL)
   message("Setting up wheel files in : ${WHEEL_FILES_DIR}")
   if(USE_CUDA)
     set(TARGET_NAME "onnxruntime-genai-cuda")
+  elseif(USE_ROCM)
+    set(TARGET_NAME "onnxruntime-genai-rocm")
   elseif(USE_DML)
     set(TARGET_NAME "onnxruntime-genai-directml")
   else()
@@ -80,9 +82,9 @@ if(BUILD_WHEEL)
     "libhipfft.so.0"
     "libhiprtc.so.5"
     "libhsa-runtime64.so.1"
-    "librocfft.so.0"
-    "librocblas.so.3"
     "librccl.so.1"
+    "librocblas.so.3"
+    "librocfft.so.0"
     "libroctracer64.so.4"
     "libMIOpen.so.1"
   )
