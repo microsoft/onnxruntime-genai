@@ -345,9 +345,11 @@ void PagedCacheOrchestrator::Add() {
   }
 
   state_.input_names_.push_back(PagedCacheBlockTablesName);
-  state_.inputs_.push_back(paged_cache_->BlockTables());
+  block_tables_ = paged_cache_->BlockTables();
+  state_.inputs_.push_back(block_tables_.get());
   state_.input_names_.push_back(PagedCacheSlotMappingName);
-  state_.inputs_.push_back(paged_cache_->SlotMapping());
+  slot_mapping_ = paged_cache_->SlotMapping();
+  state_.inputs_.push_back(slot_mapping_.get());
 }
 
 void PagedCacheOrchestrator::Update([[maybe_unused]] std::span<const int32_t> beam_indices,
@@ -359,8 +361,10 @@ void PagedCacheOrchestrator::Update([[maybe_unused]] std::span<const int32_t> be
 
   size_t input_offset = state_.inputs_.size();
 
-  state_.inputs_[input_offset_ + layer_count_ * 2] = paged_cache_->BlockTables();
-  state_.inputs_[input_offset_ + layer_count_ * 2 + 1] = paged_cache_->SlotMapping();
+  block_tables_ = paged_cache_->BlockTables();
+  state_.inputs_[input_offset_ + layer_count_ * 2] = block_tables_.get();
+  slot_mapping_ = paged_cache_->SlotMapping();
+  state_.inputs_[input_offset_ + layer_count_ * 2 + 1] = slot_mapping_.get();
 }
 
 std::unique_ptr<CacheManagerInterface> CreateCacheManager(const Model& model, State& state) {

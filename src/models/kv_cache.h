@@ -100,6 +100,8 @@ struct PagedCacheOrchestrator : public CacheManagerInterface {
 
   std::vector<std::string> input_name_strings_;
   std::unique_ptr<PagedCacheManager> paged_cache_;
+  std::unique_ptr<OrtValue> block_tables_;
+  std::unique_ptr<OrtValue> slot_mapping_;
 };
 
 std::unique_ptr<CacheManagerInterface> CreateCacheManager(const Model& model, State& state);

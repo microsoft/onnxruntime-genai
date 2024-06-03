@@ -54,7 +54,9 @@ class PagedCacheManager {
   // the sequence at index 2 (sequence id 7) has its kv cache stored in blocks with ids [4, 5, 6, 8].
   // -1 is used to pad the block tables to the max blocks per sequence from the given sequences.
   // The order of the block tables is based on the order the sequences were added.
-  OrtValue* BlockTables();
+  std::unique_ptr<OrtValue> BlockTables() const;
+
+  std::unique_ptr<OrtValue> BlockTablesForSequences(const std::vector<size_t>& sequence_ids) const;
 
   // Shape: [num_tokens]
   // Prompt stage:
@@ -88,7 +90,7 @@ class PagedCacheManager {
   // 13 (29 % 16) in block 1, and the sequence with id 7 should fill its KV cache token at slot
   // 12 (12 % 16) in block 0.
   // The order of the slot mapping is based on the order the sequences were added.
-  OrtValue* SlotMapping();
+  std::unique_ptr<OrtValue> SlotMapping() const;
 
   // Removes the allocated blocks for the given sequence_id and makes it available for
   // other sequences.
@@ -159,8 +161,6 @@ class PagedCacheManager {
   std::vector<int32_t> block_refs_;                                                     // List of free blocks
   std::list<BlockInfoPerSequence> block_infos_;                                         // List of block_info for all sequences
   std::unordered_map<size_t, std::list<BlockInfoPerSequence>::iterator> block_tables_;  // Mapping of sequence_id to block_info
-  std::unique_ptr<OrtValue> block_tables_value_;
-  std::unique_ptr<OrtValue> slot_mapping_value_;
 };
 
 }  // namespace Generators

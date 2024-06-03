@@ -187,7 +187,8 @@ void PagedCacheManager::Add(size_t sequence_id, size_t prompt_token_size) {
     }
   }
 
-  block_infos_.emplace_back(sequence_id, true /* is_prompt */, block_ids, slot_ids, prompt_token_size);
+  block_infos_.emplace_back(BlockInfoPerSequence{sequence_id, true /* is_prompt */,
+                                                 block_ids, slot_ids, prompt_token_size});
   block_tables_.emplace(sequence_id, --block_infos_.end());
 }
 
@@ -195,15 +196,15 @@ std::pair<OrtValue*, OrtValue*> PagedCacheManager::Cache(size_t layer_id) {
   return {cache_[layer_id].first.get(), cache_[layer_id].second.get()};
 }
 
-OrtValue* PagedCacheManager::BlockTables() {
+std::unique_ptr<OrtValue> PagedCacheManager::BlockTables() const {
   size_t max_blocks = 0;
   for (const auto& block_info : block_infos_) {
     max_blocks = std::max(max_blocks, block_info.block_ids.size());
   }
 
   std::vector<int64_t> shape = {static_cast<int64_t>(block_infos_.size()), static_cast<int64_t>(max_blocks)};
-  block_tables_value_ = OrtValue::CreateTensor(*cpu_allocator_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
-  auto* block_tables_data = block_tables_value_->GetTensorMutableData<int32_t>();
+  auto block_tables_value = OrtValue::CreateTensor(*cpu_allocator_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+  auto* block_tables_data = block_tables_value->GetTensorMutableData<int32_t>();
   size_t block_info_idx = 0;
   for (const auto& block_info : block_infos_) {
     for (size_t i = 0; i < block_info.block_ids.size(); ++i) {
@@ -215,22 +216,22 @@ OrtValue* PagedCacheManager::BlockTables() {
     ++block_info_idx;
   }
 
-  return block_tables_value_.get();
+  return block_tables_value;
 }
 
-OrtValue* PagedCacheManager::SlotMapping() {
+std::unique_ptr<OrtValue> PagedCacheManager::SlotMapping() const {
   size_t num_tokens = std::accumulate(block_infos_.begin(), block_infos_.end(), num_tokens,
                                       [](size_t acc, const auto& block_info) { return acc + block_info.slot_ids.size(); });
   std::vector<int64_t> shape = {static_cast<int64_t>(num_tokens)};
-  slot_mapping_value_ = OrtValue::CreateTensor(*cpu_allocator_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
-  auto* slot_mapping_data = slot_mapping_value_->GetTensorMutableData<int32_t>();
+  auto slot_mapping_value = OrtValue::CreateTensor(*cpu_allocator_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+  auto* slot_mapping_data = slot_mapping_value->GetTensorMutableData<int32_t>();
   size_t block_info_idx = 0;
   for (const auto& block_info : block_infos_) {
     for (size_t i = 0; i < block_info.slot_ids.size(); ++i) {
       slot_mapping_data[block_info_idx++] = block_info.slot_ids[i];
     }
   }
-  return slot_mapping_value_.get();
+  return slot_mapping_value;
 }
 
 // std::vector<size_t> PagedCacheManager::Order() const {
@@ -255,12 +256,11 @@ void PagedCacheManager::ReorderCache(const std::unordered_map<size_t, size_t>& s
       continue;
     }
     block_refs_[pointee] = block_refs_[pointer];
-
   }
   // std::unordered_set<size_t> retained_sequence_ids(sequence_index_permutation.begin(), sequence_index_permutation.end());
   // for (auto& [sequence_id, block_info] : block_tables_) {
   //   if (retained_sequence_ids.count(sequence_id)) {
-      
+
   //   }
 
   //   // The sequence is missing in the new order. Release the blocks.
@@ -272,7 +272,6 @@ void PagedCacheManager::ReorderCache(const std::unordered_map<size_t, size_t>& s
   // 2. Update the block tables so sequences point to the correct blocks in memory based on the new shape.
 
   // 3. Reorder the cache based on the new order.
-  
 }
 
 }  // namespace Generators
