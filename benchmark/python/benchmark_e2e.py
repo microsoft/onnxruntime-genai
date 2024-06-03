@@ -106,8 +106,8 @@ def save_results(results, filename, print_memory_usage=False):
             columns.append("peak_cpu_memory(GiB)")
 
     df = pd.DataFrame(
-        columns=columns,
         results,
+        columns=columns,
     )
     # df = df.transpose()  # This line swaps the rows and columns
     df.to_csv(filename, header=True, index=False)
@@ -123,6 +123,8 @@ def run_benchmark_memory(arg, model, tokenizer, batch_size, prompt_length, gener
         monitor_thread = threading.Thread(target=monitor_gpu_memory)
     else:
         monitor_thread = threading.Thread(target=monitor_cpu_memory)
+    
+    monitor_thread.start()
 
     metrics = run_benchmark(args, model, tokenizer, batch_size, prompt_length, generation_length, max_length)
 
@@ -148,7 +150,6 @@ def run_benchmark(args, model, tokenizer, batch_size, prompt_length, generation_
     if args.verbose: print("Model loaded")
     tokenizer = og.Tokenizer(model)
 
-    monitor_thread.start()
  
     # Generate prompt
     prompt = [generate_prompt(model, tokenizer, prompt_length, args.use_graph_capture)] * batch_size
