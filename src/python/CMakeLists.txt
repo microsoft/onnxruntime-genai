@@ -72,6 +72,19 @@ if(BUILD_WHEEL)
     "libnvonnxparser.so.8"
     "libnvonnxparser.so.10"
 
+    "libamdhip64.so.5"
+    "libamdhip64.so.6"
+    "libhipblas.so.0"
+    "libhipblas.so.2"
+    "libhipfft.so"
+    "libhipfft.so.0"
+    "libhiprtc.so.5"
+    "libhsa-runtime64.so.1"
+    "librocfft.so.0"
+    "librocblas.so.3"
+    "librccl.so.1"
+    "libroctracer64.so.4"
+    "libMIOpen.so.1"
   )
   set(modified_exclude_list)
   foreach(item IN LISTS auditwheel_exclude_list)
