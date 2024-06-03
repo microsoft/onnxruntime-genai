@@ -64,4 +64,16 @@ jobs:
 
       - name: Run the python benchmark for cpu
         run: |
-          python3 benchmark/python/benchmark_e2e.py --input_folder genai_models/phi2-int4-cpu --output benchmark/python/phi-2-cpu.csv -b 1,2 -l 16,64,256 -g 128,256 -r 100 -w 5 -k 1  
+          mkdir benchmark_results
+          python3 benchmark/python/benchmark_e2e.py --input_folder genai_models/phi2-int4-cpu --output benchmark_results/phi-2-cpu.csv -b 1,2 -l 16,64,256 -g 128,256 -r 100 -w 5 -k 1  
+
+      - name: Verify Benchmark Artifacts
+        if: always()
+        run: |
+          ls -l ${{ github.workspace }}/benchmark_results
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: onnxruntime-genai-linux-cuda-x64-benchmark
+          path: ${{ github.workspace }}/benchmark_results/*.csv
