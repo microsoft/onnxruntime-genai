@@ -73,6 +73,8 @@ jobs:
       value: '3.10'
     ${{ elseif eq(parameters.ep, 'directml')}}:
       value: '3.11'
+    ${{ elseif eq(parameters.arch, 'arm64') }}:
+      value: '3.12'
     ${{ else }}:
       value: '3.9'
 
@@ -160,13 +162,35 @@ jobs:
       HuggingFaceToken: $(HF_TOKEN)
       os: ${{ parameters.os }}
 
+  - script: |
+      MKDIR $(Agent.ToolsDirectory)\Python\3.12.3\arm64
+      XCOPY /s /y /h /e /c /q "C:\Python\Python312\*.*" $(Agent.ToolsDirectory)\Python\3.12.3\arm64\
+      COPY NUL $(Agent.ToolsDirectory)\Python\3.12.3\arm64.complete
+      DIR $(Agent.ToolsDirectory)\Python
+      DIR $(Agent.ToolsDirectory)\Python\3.12.3
+      DIR $(Agent.ToolsDirectory)\Python\3.12.3\arm64
+      DIR "C:\Python"
+    displayName: Copy python 3.12.3 version to agent tools directory
+    condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'), eq(variables['PyDotVer'], '3.12'))
+
+  - script: |
+      MKDIR $(Agent.ToolsDirectory)\Python\3.11.0\arm64
+      XCOPY /s /y /h /e /c /q "C:\Python\Python311\*.*" $(Agent.ToolsDirectory)\Python\3.11.0\arm64\
+      COPY NUL $(Agent.ToolsDirectory)\Python\3.11.0\arm64.complete
+      DIR $(Agent.ToolsDirectory)\Python
+      DIR $(Agent.ToolsDirectory)\Python\3.11.0
+      DIR $(Agent.ToolsDirectory)\Python\3.11.0\arm64
+      DIR "C:\Python"
+    displayName: Copy python 3.11.0 version to agent tools directory
+    condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'), eq(variables['PyDotVer'], '3.11'))
+
   - ${{ if eq(parameters.os, 'linux') }}:
     - ${{ if eq(parameters.ep, 'cuda') }}:
       - bash: |
           set -e -x
           az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
           az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
-          docker pull onnxruntimebuildcache.azurecr.io/onnxruntimepackagestest
+          docker pull onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda11_x64_almalinux8_gcc11
 
           docker run \
             --gpus all \
@@ -174,7 +198,7 @@ jobs:
             --volume $(Build.Repository.LocalPath):/ort_genai_src \
             --volume $(Build.BinariesDirectory):/ort_genai_binary \
             -e HF_TOKEN=$HF_TOKEN \
-            -w /ort_genai_src/ onnxruntimebuildcache.azurecr.io/onnxruntimepackagestest \
+            -w /ort_genai_src/ onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda11_x64_almalinux8_gcc11 \
             bash -c " \
                 python3 -m pip install numpy transformers torch onnx onnxruntime && \
                 cd /ort_genai_src/examples/python && \
