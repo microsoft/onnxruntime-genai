@@ -187,6 +187,7 @@ jobs:
           az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
           az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
           docker pull onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda11_x64_almalinux8_gcc11:20240531.1
+          python_exe=/opt/python/cp310-cp310/bin/python3.10
 
           docker run \
             --gpus all \
@@ -196,7 +197,6 @@ jobs:
             -e HF_TOKEN=$HF_TOKEN \
             -w /ort_genai_src/ onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda11_x64_almalinux8_gcc11:20240531.1 \
             bash -c " \
-                python_exe=/opt/python/cp310-cp310/bin/python3.10 && \
                 $python_exe -m pip install numpy transformers torch onnx onnxruntime && \
                 cd /ort_genai_src/examples/python && \
                 $python_exe -m pip install --no-index --find-links=/ort_genai_binary/wheel $(pip_package_name) && \
