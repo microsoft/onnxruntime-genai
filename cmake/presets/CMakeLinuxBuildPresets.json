@@ -100,6 +100,38 @@
     {
       "name": "linux_gcc_cuda_minsizerel",
       "configurePreset": "linux_gcc_cuda_minsizerel"
+    },
+    {
+      "name": "linux_gcc_rocm_release_asan",
+      "configurePreset": "linux_gcc_rocm_release_asan"
+    },
+    {
+      "name": "linux_gcc_rocm_debug_asan",
+      "configurePreset": "linux_gcc_rocm_debug_asan"
+    },
+    {
+      "name": "linux_gcc_rocm_relwithdebinfo_asan",
+      "configurePreset": "linux_gcc_rocm_relwithdebinfo_asan"
+    },
+    {
+      "name": "linux_gcc_rocm_minsizerel_asan",
+      "configurePreset": "linux_gcc_rocm_minsizerel_asan"
+    },
+    {
+      "name": "linux_gcc_rocm_release",
+      "configurePreset": "linux_gcc_rocm_release"
+    },
+    {
+      "name": "linux_gcc_rocm_debug",
+      "configurePreset": "linux_gcc_rocm_debug"
+    },
+    {
+      "name": "linux_gcc_rocm_relwithdebinfo",
+      "configurePreset": "linux_gcc_rocm_relwithdebinfo"
+    },
+    {
+      "name": "linux_gcc_rocm_minsizerel",
+      "configurePreset": "linux_gcc_rocm_minsizerel"
     }
   ]
 }
