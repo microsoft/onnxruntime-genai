@@ -5,6 +5,8 @@ parameters:
   type: boolean
 - name: enable_win_dml
   type: boolean
+- name: enable_win_arm64_cpu
+  type: boolean
 - name: enable_linux_cpu
   type: boolean
 - name: enable_linux_cuda
@@ -27,6 +29,14 @@ stages:
     - template: jobs/py-packaging-job.yml
       parameters:
         arch: 'x64'
+        ep: 'cpu'
+        ort_version: ${{ parameters.ort_version }}
+        os: 'win'
+
+  - ${{ if eq(parameters.enable_win_arm64_cpu, true) }}:
+    - template: jobs/py-packaging-job.yml
+      parameters:
+        arch: 'arm64'
         ep: 'cpu'
         ort_version: ${{ parameters.ort_version }}
         os: 'win'
