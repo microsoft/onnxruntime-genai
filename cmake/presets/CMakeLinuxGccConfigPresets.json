@@ -155,6 +155,82 @@
         "linux_minsizerel_default"
       ],
       "binaryDir": "${sourceDir}/build/cuda"
+    },
+    {
+      "name": "linux_gcc_rocm_release_asan",
+      "displayName": "linux gcc rocm release asan",
+      "inherits": [
+        "linux_gcc_asan_default",
+        "linux_gcc_rocm_default",
+        "linux_release_default"
+      ],
+      "binaryDir": "${sourceDir}/build/rocm"
+    },
+    {
+      "name": "linux_gcc_rocm_debug_asan",
+      "displayName": "linux gcc rocm debug asan",
+      "inherits": [
+        "linux_gcc_asan_default",
+        "linux_gcc_rocm_default",
+        "linux_debug_default"
+      ],
+      "binaryDir": "${sourceDir}/build/rocm"
+    },
+    {
+      "name": "linux_gcc_rocm_relwithdebinfo_asan",
+      "displayName": "linux gcc rocm relwithdebinfo asan",
+      "inherits": [
+        "linux_gcc_asan_default",
+        "linux_gcc_rocm_default",
+        "linux_relwithdebinfo_default"
+      ],
+      "binaryDir": "${sourceDir}/build/rocm"
+    },
+    {
+      "name": "linux_gcc_rocm_minsizerel_asan",
+      "displayName": "linux gcc rocm minsizerel asan",
+      "inherits": [
+        "linux_gcc_asan_default",
+        "linux_gcc_rocm_default",
+        "linux_minsizerel_default"
+      ],
+      "binaryDir": "${sourceDir}/build/rocm"
+    },
+    {
+      "name": "linux_gcc_rocm_release",
+      "displayName": "linux gcc rocm release",
+      "inherits": [
+        "linux_gcc_rocm_default",
+        "linux_release_default"
+      ],
+      "binaryDir": "${sourceDir}/build/rocm"
+    },
+    {
+      "name": "linux_gcc_rocm_debug",
+      "displayName": "linux gcc rocm debug",
+      "inherits": [
+        "linux_gcc_rocm_default",
+        "linux_debug_default"
+      ],
+      "binaryDir": "${sourceDir}/build/rocm"
+    },
+    {
+      "name": "linux_gcc_rocm_relwithdebinfo",
+      "displayName": "linux gcc rocm relwithdebinfo",
+      "inherits": [
+        "linux_gcc_rocm_default",
+        "linux_relwithdebinfo_default"
+      ],
+      "binaryDir": "${sourceDir}/build/rocm"
+    },
+    {
+      "name": "linux_gcc_rocm_minsizerel",
+      "displayName": "linux gcc rocm minsizerel",
+      "inherits": [
+        "linux_gcc_rocm_default",
+        "linux_minsizerel_default"
+      ],
+      "binaryDir": "${sourceDir}/build/rocm"
     }
   ]
 }

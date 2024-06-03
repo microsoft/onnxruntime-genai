@@ -30,6 +30,13 @@
       }
     },
     {
+      "name": "linux_gcc_rocm_default",
+      "inherits": "linux_gcc_default",
+      "cacheVariables": {
+        "USE_ROCM": "ON"
+      }
+    },
+    {
       "name": "linux_clang_default",
       "inherits": "linux_gcc_default",
       "environment": {
