@@ -79,40 +79,64 @@ def generate_prompt(model, tokenizer, prompt_length, use_graph_capture) -> str:
         generator.generate_next_token()
     return tokenizer.decode(generator.get_sequence(0))
 
-def save_results(results, filename):
+def save_results(results, filename, print_memory_usage=False):
     import pandas as pd
+
+    columns=[
+    "Batch Size",
+    "Prompt Length",
+    "Tokens Generated",
+    "Max Length",
+    "Tokenization Throughput (tps)",
+    "Tokenization Latency (ms)",
+    "Prompt Processing Throughput (tps)",
+    "Prompt Processing Latency (ms)",
+    "Token Generation Throughput (tps)",
+    "Token Generation Latency (ms)",
+    "Sampling Throughput (tps)",
+    "Sampling Latency (ms)",
+    "Wall Clock Throughput (tps)",
+    "Wall Clock Time (s)",
+    ]
+
+    if print_memory_usage:
+        if IS_NVIDIA_SYSTEM:
+            columns.append("peak_gpu_memory (GiB)")
+        else:
+            columns.append("peak_cpu_memory(GiB)")
+
     df = pd.DataFrame(
+        columns=columns,
         results,
-        columns=[
-            "Batch Size",
-            "Prompt Length",
-            "Tokens Generated",
-            "Max Length",
-            "Tokenization Throughput (tps)",
-            "Tokenization Latency (ms)",
-            "Prompt Processing Throughput (tps)",
-            "Prompt Processing Latency (ms)",
-            "Token Generation Throughput (tps)",
-            "Token Generation Latency (ms)",
-            "Sampling Throughput (tps)",
-            "Sampling Latency (ms)",
-            "Wall Clock Throughput (tps)",
-            "Wall Clock Time (s)",
-            "peak_gpu_memory (GiB)" if IS_NVIDIA_SYSTEM else "peak_cpu_memory(GiB)"
-        ],
     )
     # df = df.transpose()  # This line swaps the rows and columns
     df.to_csv(filename, header=True, index=False)
     print(f"Results saved in {filename}!")
 
-def run_benchmark(args, model, tokenizer, batch_size, prompt_length, generation_length, max_length):
-
+def run_benchmark_memory(arg, model, tokenizer, batch_size, prompt_length, generation_length, max_length):
+    """
+    This function is to run benchmark and print the momory usage
+    """
     global stop_monitoring
 
     if IS_NVIDIA_SYSTEM:
         monitor_thread = threading.Thread(target=monitor_gpu_memory)
     else:
         monitor_thread = threading.Thread(target=monitor_cpu_memory)
+
+    metrics = run_benchmark(args, model, tokenizer, batch_size, prompt_length, generation_length, max_length)
+
+    stop_monitoring = True
+    monitor_thread.join()
+
+    if IS_NVIDIA_SYSTEM:
+        metrics.append(peak_gpu_memory)
+    else:
+        metrics.append(peak_cpu_memory)
+    
+    return metrics
+
+def run_benchmark(args, model, tokenizer, batch_size, prompt_length, generation_length, max_length):
 
     # Get user arguments
     num_repetitions = args.repetitions
@@ -209,14 +233,6 @@ def run_benchmark(args, model, tokenizer, batch_size, prompt_length, generation_
         # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
         del generator
 
-    stop_monitoring = True
-    monitor_thread.join()
-
-    if IS_NVIDIA_SYSTEM:
-        print(f"************** Peak GPU Memory Usage: {peak_gpu_memory} GiB ********************")
-    else:
-        print(f"************** Peak CPU Memory Usage: {peak_cpu_memory} GiB ********************")
-
     # Calculate tokenization metrics
     avg_tokenization_latency_s = sum(tokenize_times) / len(tokenize_times)
     avg_tokenization_latency_ms = avg_tokenization_latency_s * 1000
@@ -268,8 +284,6 @@ def run_benchmark(args, model, tokenizer, batch_size, prompt_length, generation_
         avg_sampling_latency_ms,
         avg_wall_clock_thrpt,
         avg_wall_clock_time,
-
-        peak_gpu_memory if IS_NVIDIA_SYSTEM else peak_cpu_memory
     ]
     return metrics
 
@@ -292,12 +306,23 @@ def main(args):
                 else:
                     max_length = prompt_length + gen_length
                 print(f"Args: batch_size = {batch_size}, prompt_length = {prompt_length}, tokens = {gen_length}, max_length = {max_length}")
-                metrics = run_benchmark(args, model, tokenizer, batch_size, prompt_length, gen_length, max_length)
+                if args.print_memory_usage:
+                    metrics = run_benchmark_memory(args, model, tokenizer, batch_size, prompt_length, gen_length, max_length)
+                else:
+                    metrics = run_benchmark(args, model, tokenizer, batch_size, prompt_length, gen_length, max_length)
                 all_csv_metrics.append(metrics)
     # Add metrics to CSV
     if args.verbose: print("Adding results to CSV")
     filename = args.output
-    save_results(all_csv_metrics, filename)
+
+    if args.print_memory_usage:
+        if IS_NVIDIA_SYSTEM:
+            print(f"-------------------* Peak GPU Memory Usage: {peak_gpu_memory} GiB *-------------------")
+        else:
+            print(f"-------------------* Peak CPU Memory Usage: {peak_cpu_memory} GiB *-------------------")
+        save_results(all_csv_metrics, filename, print_memory_usage=True)
+    else:
+        save_results(all_csv_metrics, filename)
 
 def str2intlist(value):
     return [int(v) for v in value.split(',')]
@@ -319,6 +344,7 @@ if __name__ == "__main__":
     parser.add_argument('-o', '--output', type=str, default='genai_e2e', help='Output CSV file name or path (with .csv extension)')
     parser.add_argument('-v', '--verbose', action='store_true', help='Print extra information')
     parser.add_argument('-mo', '--print_model_output', action='store_true', help='Print model output')
+    parser.add_argument('-pm', '--print_memory_usage', default=False, help='Print memory footprint')
     parser.add_argument('-gc', '--use_graph_capture', action='store_true', help='Use the graph capture feature for CUDA or DML')
     args = parser.parse_args()
     main(args)
