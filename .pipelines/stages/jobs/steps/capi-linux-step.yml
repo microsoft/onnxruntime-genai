@@ -48,7 +48,7 @@ steps:
       --manylinux-src manylinux \
       --multiple_repos \
       --repository ortgenai$(ep)build$(arch)
-  displayName: 'Get cuda Docker Image'
+  displayName: 'Get CUDA Docker Image'
   condition: eq(variables['ep'], 'cuda')
   workingDirectory: '$(Build.Repository.LocalPath)'
 
