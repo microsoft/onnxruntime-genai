@@ -145,7 +145,7 @@ def run_benchmark(args, model, tokenizer, batch_size, prompt_length, generation_
     temperature = 1.0
 
     # Get tokenizer, and model
-    if args.verbose: print(f"Loading model... ")
+    if args.verbose: print("Loading model... ")
     model=og.Model(f'{args.input_folder}')
     if args.verbose: print("Model loaded")
     tokenizer = og.Tokenizer(model)
