@@ -82,7 +82,7 @@ jobs:
     value: ${{ parameters.os }}
 
   - name: feed_name
-    ${{ if eq(parameters.cuda_version, '12.2') }}:
+    ${{ if and(eq(parameters.cuda_version, '12.2'), eq(parameters.ep, 'cuda')) }}:
       value: 'ort-cuda-12-nightly'
     ${{ else }}:
       value: '7982ae20-ed19-4a35-a362-a96ac99897b7'
