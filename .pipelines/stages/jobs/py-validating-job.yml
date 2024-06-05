@@ -229,7 +229,14 @@ jobs:
         python -m pip install numpy transformers torch onnx onnxruntime
         cd examples\python
         python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)
-        python model-generate.py -m .\models\$(prebuild_phi3_mini_model_folder)
+        if ("$(ep)" -eq "dml") {
+          python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -e cpu -p int4 -o ./example-models/phi2-int4-cpu
+          python model-generate.py -m ./example-models/phi2-int4-cpu
+        }
+        else {
+          python model-generate.py -m .\models\$(prebuild_phi3_mini_model_folder)
+        }
+
       displayName: 'Run Example With Artifact'
       workingDirectory: '$(Build.Repository.LocalPath)'
 
