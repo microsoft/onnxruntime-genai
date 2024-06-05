@@ -1,5 +1,4 @@
 #include <iostream>
-#include <span>
 #include "ort_genai.h"
 
 // C++ API Example

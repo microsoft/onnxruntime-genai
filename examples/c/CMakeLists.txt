@@ -31,6 +31,7 @@ endif()
 
 add_executable(phi3 ${CMAKE_SOURCE_DIR}/src/main.cpp)
 add_executable(phi3v ${CMAKE_SOURCE_DIR}/src/phi3v.cpp)
+add_executable(engine ${CMAKE_SOURCE_DIR}/src/engine_demo.cpp)
 
 
 target_link_directories(phi3 PRIVATE ${ORT_GENAI_LIB_DIR})
@@ -39,10 +40,14 @@ target_include_directories(phi3 PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_directories(phi3v PRIVATE ${ORT_GENAI_LIB_DIR})
 target_link_libraries(phi3v PRIVATE ${ONNXRUNTIME_GENAI_LIB})
 target_include_directories(phi3v PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_directories(engine PRIVATE ${ORT_GENAI_LIB_DIR})
+target_link_libraries(engine PRIVATE ${ONNXRUNTIME_GENAI_LIB})
+target_include_directories(engine PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
 if(USE_CUDA)
   set_target_properties(phi3 PROPERTIES LINKER_LANGUAGE CUDA)
   set_target_properties(phi3v PROPERTIES LINKER_LANGUAGE CUDA)
+  set_target_properties(engine PROPERTIES LINKER_LANGUAGE CUDA)
 endif()
 
 target_link_libraries(
@@ -52,6 +57,11 @@ target_link_libraries(
         onnxruntime-genai)
 target_link_libraries(
         phi3v
+        PUBLIC
+        cublasLt cublas cudnn curand cufft cudart
+        onnxruntime-genai)
+target_link_libraries(
+        engine
         PUBLIC
         cublasLt cublas cudnn curand cufft cudart
         onnxruntime-genai)

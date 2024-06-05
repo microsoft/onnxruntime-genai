@@ -366,6 +366,8 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         "-DUSE_CUDA=ON" if args.use_cuda else "-DUSE_CUDA=OFF",
         "-DUSE_DML=ON" if args.use_dml else "-DUSE_DML=OFF",
         f"-DBUILD_WHEEL={build_wheel}",
+        "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
+
     ]
 
     if args.ort_home:
