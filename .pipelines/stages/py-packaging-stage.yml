@@ -65,6 +65,7 @@ stages:
       parameters:
         arch: 'x64'
         cuda_version: '11.8'
+        cuda_display_version: '118'
         ep: 'cuda'
         ort_version: ${{ parameters.ort_cuda_118_version }}
         os: 'win'
@@ -82,6 +83,7 @@ stages:
       parameters:
         arch: 'x64'
         cuda_version: '11.8'
+        cuda_display_version: '118'
         ep: 'cuda'
         ort_version: ${{ parameters.ort_cuda_118_version }}
         os: 'linux'
@@ -91,6 +93,7 @@ stages:
       parameters:
         arch: 'x64'
         cuda_version: '12.2'
+        cuda_display_version: '122'
         ep: 'cuda'
         ort_version: ${{ parameters.ort_cuda_122_version }}
         os: 'linux'
