@@ -16,10 +16,14 @@ parameters:
 
 
 jobs:
-- job: ${{ if eq(parameters.ep, 'cuda') }}:
-    value: python_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.cuda_version }}_${{ parameters.arch }}_packaging
+- job: python_packaging
+  variables:
+    job_name: ${{ format('python_{0}_{1}_{2}_packaging', parameters.os, parameters.ep, parameters.arch) }}
+    job_name_with_cuda: ${{ format('python_{0}_{1}_{2}_{3}_packaging', parameters.os, parameters.ep, parameters.cuda_version, parameters.arch) }}
+  displayName: ${{ if eq(parameters.ep, 'cuda') }}:
+    value: ${{ variables.job_name_with_cuda }}
   ${{ else }}:
-    value: python_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}_packaging
+    value: ${{ variables.job_name }}
   ${{ if eq(parameters.os, 'linux') }}:
     pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
   ${{ if eq(parameters.os, 'win') }}:
