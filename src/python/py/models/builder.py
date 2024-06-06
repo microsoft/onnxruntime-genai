@@ -23,6 +23,7 @@ import textwrap
 class Model:
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         self.context_length = config.max_position_embeddings
+        self.original_context_length = config.original_max_position_embeddings if hasattr(config, "original_max_position_embeddings") else config.max_position_embeddings
         self.window_size = config.sliding_window if hasattr(config, "sliding_window") else -1  # default is -1 in GroupQueryAttention kernel
         self.intermediate_size = config.intermediate_size
         self.hidden_size = config.hidden_size
@@ -37,7 +38,6 @@ class Model:
         self.model_type = config.architectures[0]
         self.io_dtype = io_dtype      # {'fp16', 'fp32'}
         self.onnx_dtype = onnx_dtype  # {"int4", "fp16", "fp32"}
-        self.ep = ep
 
         self.cache_dir = cache_dir
         self.filename = extra_options["filename"] if "filename" in extra_options else "model.onnx"
@@ -52,12 +52,14 @@ class Model:
 
         # EP-specific variables
         enable_cuda_graph = "1" if "enable_cuda_graph" in extra_options and extra_options["enable_cuda_graph"] == "1" else "0"
+        self.ep = ep
         self.ep_attrs = {
             "cpu": {},
             "cuda": {
                 "enable_cuda_graph": enable_cuda_graph,        # "1" if the the model is able to enable cuda graph, "0" otherwise
             },
             "dml": {},
+            "web": {},
         }
 
         # Map input names to their types and shapes
@@ -66,8 +68,6 @@ class Model:
             "input_ids": TensorProto.INT64,                                                                      # For standard models
             "attention_mask": TensorProto.INT64,                                                                 # For standard models
             "position_ids": TensorProto.INT64,                                                                   # For standard models
-            "seqlens_k": TensorProto.INT32,                                                                      # For standard models with cuda graph enabled
-            "total_seq_len": TensorProto.INT32,                                                                  # For standard models with cuda graph enabled
             "inputs_embeds": self.io_dtype,                                                                      # For standard models where you want to remove the embedding layer from the model (note that `inputs_embeds` is written this way to match Hugging Face format)
             "past_key_values.key": self.io_dtype,                                                                # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format)
             "past_key_values.value": self.io_dtype,                                                              # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format)
@@ -76,8 +76,6 @@ class Model:
             "input_ids": ["batch_size", "sequence_length"],                                                      # For standard models
             "attention_mask": ["batch_size", "total_sequence_length"],                                           # For standard models
             "position_ids": ["batch_size", "sequence_length"],                                                   # For standard models
-            "seqlens_k": ["batch_size"],                                                                         # For standard models with cuda graph enabled
-            "total_seq_len": [],                                                                                 # For standard models with cuda graph enabled
             "inputs_embeds": ["batch_size", "sequence_length", self.hidden_size],                                # For standard models where you want to remove the embedding layer from the model (note that `inputs_embeds` is written this way to match Hugging Face format)
             "past_key_values.key": ["batch_size", self.num_kv_heads, "past_sequence_length", self.head_size],    # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format)
             "past_key_values.value": ["batch_size", self.num_kv_heads, "past_sequence_length", self.head_size],  # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format)
@@ -85,9 +83,6 @@ class Model:
         self.exclude_embeds = "exclude_embeds" in extra_options
         if self.exclude_embeds:
             self.input_names = [name.replace("input_ids", "inputs_embeds") for name in self.input_names]
-
-        if self.ep_attrs["cuda"]["enable_cuda_graph"] == '1':
-            self.input_names = ["input_ids", "position_ids", "seqlens_k", "total_seq_len"]
 
         # Map output names to their types and shapes
         self.output_names = ["logits"]
@@ -107,8 +102,8 @@ class Model:
         if self.exclude_lm_head:
             self.output_names = [name.replace("logits", "hidden_states") for name in self.output_names]
 
-        # Store names of Constant ops already created
-        self.constants = set()
+        # Store names of nodes already created
+        self.node_names = set()
 
         # Map TensorProto dtypes to NumPy dtypes
         self.to_numpy_dtype = {
@@ -129,15 +124,19 @@ class Model:
         }
 
         # Mask-specific variables
+        # TODO: Reconcile differences between `seqlens_k` and `key_total_seq_lens` in the GroupQueryAttention and SparseAttention implementations. Ideally the same subgraph can be shared for both.
         self.mask_attrs = {
             "mask_name": "",            # Name of node that outputs 4D causal attention mask (used as add_qk in MultiHeadAttention)
             "seqlens_k": "",            # Sum of each row in attention mask - 1 (used as input to GroupQueryAttention)
-            "total_seq_len": "",        # Size of total sequence length in attention mask (used as input to GroupQueryAttention)
+            "total_seq_len": "",        # Size of total sequence length in attention mask (used as input to GroupQueryAttention and SparseAttention)
+            "block_row_indices": "",    # Row indices of CSR format of block mask (used as input to SparseAttention)
+            "block_col_indices": "",    # Col indices of CSR format of block mask (used as input to SparseAttention)
+            "key_total_seq_lens": "",   # Sum of each row in attention mask (used as input to SparseAttention)
         }
 
         # Embedding-specific variables
         self.embed_attrs = {
-            "normalize": False,         # Normalize output of Embedding layer
+            "scale": 1,                 # Scale value to multiply output of Embedding layer by
         }
 
         # LayerNorm-specific variables
@@ -153,33 +152,80 @@ class Model:
         }
 
         # RotaryEmbedding-specific variables
+        position_scale = config.rope_position_scale if hasattr(config, "rope_position_scale") else 1
         partial_rotary_factor = config.partial_rotary_factor if hasattr(config, "partial_rotary_factor") else 1.0
-        rope_theta = config.rope_theta if hasattr(config, "rope_theta") else 10000
+        rope_theta = config.rope_theta if hasattr(config, "rope_theta") else config.rope_embedding_base if hasattr(config, "rope_embedding_base") else 10000
         self.rotemb_attrs = {
             "create_rotary_embedding_caches": True,          # Create cos/sin caches for rotary embeddings
+            "cache_length": self.context_length,             # Cache length to use when creating cos/sin caches for rotary embeddings
             "theta": rope_theta,                             # Base value if calculating cos/sin caches from scratch
             "partial_rotary_factor": partial_rotary_factor,  # Factor for partial rotary embeddings
             "interleaved": 0,                                # Interleave the rotary embeddings (e.g. [0, 0, 0, 1, 1, 1] to [0, 1, 0, 1, 0, 1], RotaryEmbedding kernel expects a default value of 0)
             "num_heads": 0,                                  # For partial rotary embeddings (RotaryEmbedding kernel expects a default value of 0)
             "rotary_embedding_dim": 0,                       # For partial rotary embeddings (RotaryEmbedding kernel expects a default value of 0)
+            "rescale_factors": 1,                            # Rescale factors when calculating `inv_freq` in rotary embeddings
+            "t_dtype": torch.int64,                          # Torch dtype when calculating `t` in rotary embeddings
+            "position_scale": position_scale,                # Scale value when calculating `t` in rotary embeddings
+            "mscale": 1,                                     # Magnitude scaling factor when scaling `emb.cos()/emb.sin()` in rotary embeddings
+            "mscale_policy": "",                             # Magnitude scaling policy when scaling `emb.cos()/emb.sin()` in rotary embeddings
         }
+        if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
+            # For models with multiple rotary embedding caches
+            self.rotemb_attrs["mscale_policy"] = config.rope_scaling["type"]
+            short_factor = torch.tensor(config.rope_scaling["short_factor"], dtype=torch.float32)
+            long_factor = torch.tensor(config.rope_scaling["long_factor"], dtype=torch.float32)
+
+            short_mscale = config.rope_scaling["short_mscale"] if "short_mscale" in config.rope_scaling else 0
+            long_mscale = config.rope_scaling["long_mscale"] if "long_mscale" in config.rope_scaling else 0
+            short_mscale = short_mscale if short_mscale > 0 else self.make_mscale(self.context_length / self.original_context_length)
+            long_mscale = long_mscale if long_mscale > 0 else self.make_mscale(self.context_length / self.original_context_length)
+
+            self.rotemb_attrs["multi_cache"] = {
+                "short_factor": short_factor,                # Short factor when calculating `inv_freq` in rotary embeddings
+                "long_factor": long_factor,                  # Long factor when calculating `inv_freq` in rotary embeddings
+                "short_mscale": short_mscale,                # Magnitude scaling for short factor when scaling `emb.cos()/emb.sin()` in rotary embeddings
+                "long_mscale": long_mscale,                  # Magnitude scaling for long factor when scaling `emb.cos()/emb.sin()` in rotary embeddings
+            }
 
         # Attention-specific variables (MHA, GQA, GQA + Rot.Emb., etc.)
+        # Block-sparse attention-specific variables
+        sparse_block_size = config.blocksparse_block_size if hasattr(config, "blocksparse_block_size") else 0
+        kernel_block_size = config.blocksparse_triton_kernel_block_size if hasattr(config, "blocksparse_triton_kernel_block_size") else 0
+        local_blocks = config.blocksparse_num_local_blocks if hasattr(config, "blocksparse_num_local_blocks") else 0
+        vert_block_stride = config.blocksparse_vert_stride if hasattr(config, "blocksparse_vert_stride") else 0
+        homo_head = config.blocksparse_homo_head_pattern if hasattr(config, "blocksparse_homo_head_pattern") else False
         self.attention_attrs = {
             "op_type": "MultiHeadAttention",                 # Attention op to use
-            "use_rotemb_in_attn": False,                     # Use rotary embeddings within attention op (instead of a separate RotaryEmbedding op)
+            "scale": 1 / np.sqrt(self.head_size),            # Scale value after calculating Q x K' in attention
+            "use_rotemb_in_attn": False,                     # Use rotary embeddings within attention (instead of a separate RotaryEmbedding op)
             "use_packed_matmul": False,                      # Use packed MatMul (instead of 3 separate MatMuls for Q/K/V)
+            "block_sparse": {
+                "sparse_block_size": sparse_block_size,      # Sparse block size for SparseAttention op
+                "kernel_block_size": kernel_block_size,      # Kernel block size for sparse attention
+                "local_blocks": local_blocks,                # Number of local blocks for sparse attention
+                "vert_stride": vert_block_stride,            # Vertical stride to use for sparse attention
+                "homo_head": homo_head,                      # Use homo head pattern for sparse attention
+            }
         }
-        if self.ep == "cuda" and self.io_dtype == TensorProto.FLOAT16:
+        valid_gqa_configurations = [
+            ("cpu", TensorProto.FLOAT),
+            ("cuda", TensorProto.FLOAT16),
+            ("dml", TensorProto.FLOAT16),
+        ]
+        if (self.ep, self.io_dtype) in valid_gqa_configurations:
             # Change model settings for GroupQueryAttention
             self.attention_attrs["op_type"] = "GroupQueryAttention"
-            print("GroupQueryAttention (GQA) is used in this model. GQA is currently supported only for INT4 CUDA and FP16 CUDA.")
+            print("GroupQueryAttention (GQA) is used in this model.")
 
-            self.attention_attrs["use_packed_matmul"] = self.num_attn_heads == self.num_kv_heads and not self.is_quantized
+            # DML doesn't support packed Q/K/V for GQA yet
+            self.attention_attrs["use_packed_matmul"] = self.ep != "dml" and not self.is_quantized
 
             # GQA + Rot.Emb. does not require `position ids` as input
-            self.attention_attrs["use_rotemb_in_attn"] = True
-            self.input_names.remove("position_ids")
+            if self.ep != "dml":
+                self.attention_attrs["use_rotemb_in_attn"] = True
+                self.input_names.remove("position_ids")
+
+        self.past_present_share_buffer = self.attention_attrs["op_type"] == "GroupQueryAttention"
 
         # MLP-specific variables
         self.mlp_attrs = {
@@ -187,6 +233,17 @@ class Model:
             "use_fc": False,            # Use fully-connected style for MLP (FC1/FC2)
             "output_0": "",             # Output 0 for MLP layer
         }
+
+        # LM head-specific variables
+        self.lm_head_attrs = {
+            "scale": 1,                 # Scale value to multiply output of LM head by
+            "mask": None,               # LM head mask for tokens in the vocabulary
+        }
+        if hasattr(config, "dummy_token_indices"):
+            # Create LM head mask for tokens in the vocabulary
+            dummy_tokens_mask = torch.zeros(self.vocab_size).bool()
+            dummy_tokens_mask[config.dummy_token_indices] = True
+            self.lm_head_attrs["mask"] = dummy_tokens_mask
 
         # Quantization-specific variables (INT4, INT8, etc.)
         self.quant_attrs = {
@@ -197,7 +254,7 @@ class Model:
         }
 
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
-        config = GenerationConfig.from_pretrained(model_name_or_path, **extra_kwargs)
+        config = GenerationConfig.from_pretrained(model_name_or_path, use_auth_token=True, trust_remote_code=True, **extra_kwargs)
         inputs = dict(zip(self.input_names, self.input_names))
         inputs.update({
             "past_key_names": "past_key_values.%d.key",
@@ -226,7 +283,7 @@ class Model:
                     "num_key_value_heads": self.num_kv_heads,
                 },
                 "eos_token_id": config.eos_token_id,
-                "pad_token_id": config.pad_token_id if hasattr(config, "pad_token_id") and config.pad_token_id is not None else config.eos_token_id,
+                "pad_token_id": config.pad_token_id if hasattr(config, "pad_token_id") and config.pad_token_id is not None else config.eos_token_id[0] if isinstance(config.eos_token_id, list) else config.eos_token_id,
                 "type": self.model_type[ : self.model_type.find("For")].lower(),
                 "vocab_size": self.vocab_size,
             },
@@ -240,7 +297,7 @@ class Model:
                 "no_repeat_ngram_size": config.no_repeat_ngram_size if hasattr(config, "no_repeat_ngram_size") else 0,
                 "num_beams": config.num_beams if hasattr(config, "num_beams") else 1,
                 "num_return_sequences": config.num_return_sequences if hasattr(config, "num_return_sequences") else 1,
-                "past_present_share_buffer": self.attention_attrs["op_type"] == "GroupQueryAttention",
+                "past_present_share_buffer": self.past_present_share_buffer,
                 "repetition_penalty": config.repetition_penalty if hasattr(config, "repetition_penalty") else 1.0,
                 "temperature": config.temperature if hasattr(config, "temperature") else 1.0,
                 "top_k": 1,
@@ -257,7 +314,7 @@ class Model:
             json.dump(genai_config, f, indent=4)
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
-        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, **extra_kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, use_auth_token=True, trust_remote_code=True, **extra_kwargs)
         print(f"Saving processing files in {out_dir} for GenAI")
         tokenizer.save_pretrained(out_dir)
 
@@ -353,14 +410,27 @@ class Model:
     def make_node(self, op_type, inputs, outputs, name=None, doc_string=None, domain=None, **kwargs):
         # Save any constants as nodes
         for input_name in inputs:
-            if input_name.startswith("/model/constants") and input_name not in self.constants:
+            if input_name.startswith("/model/constants") and input_name not in self.node_names:
                 self.make_constant(input_name)
 
-        node = helper.make_node(op_type, inputs, outputs, name, doc_string, domain, **kwargs)
-        if doc_string == '':
-            node.doc_string = ''
-        self.order_repeated_field(node.attribute, 'name', kwargs.keys())
-        self.nodes.append(node)
+        # Make node only if it does not already exist
+        if name not in self.node_names:
+            node = helper.make_node(op_type, inputs, outputs, name, doc_string, domain, **kwargs)
+            if doc_string == '':
+                node.doc_string = ''
+            self.order_repeated_field(node.attribute, 'name', kwargs.keys())
+            self.nodes.append(node)
+            self.node_names.add(name)
+
+        # Note:
+        #
+        # The above approach allows functions that make similar subgraphs with the same naming schema
+        # to share existing nodes without needing to know whether the nodes already exist or not
+        # (e.g. attention mask subgraphs).
+        #
+        # This means that the nodes can be created in those functions regardless of their actual
+        # status in the graph. The above checks can then decide whether the proposed node actually
+        # needs to be added into the graph or not.
 
     def make_value_info(self, name, dtype, shape):
         value_info = helper.make_tensor_value_info(name, dtype, shape=shape)
@@ -415,7 +485,7 @@ class Model:
         node_name = name.replace("constants", "constant_nodes")
         self.make_node("Constant", inputs=[], outputs=[name], name=node_name, value=value)
         self.make_value_info(name, onnx_dtype, shape=[])
-        self.constants.add(name)
+        self.node_names.add(name)
 
     def make_gather(self, name, inputs, axis):
         output = f"{name}/output_0"
@@ -452,10 +522,30 @@ class Model:
         self.make_node("Concat", inputs=inputs, outputs=[output], name=name, axis=axis)
         self.make_value_info(output, dtype, shape=shape)
 
+    def make_tile(self, name, inputs, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Tile", inputs=inputs, outputs=[output], name=name)
+        self.make_value_info(output, dtype, shape=shape)
+
     def make_equal(self, name, inputs, shape):
         output = f"{name}/output_0"
         self.make_node("Equal", inputs=inputs, outputs=[output], name=name)
         self.make_value_info(output, TensorProto.BOOL, shape=shape)
+
+    def make_greater(self, name, inputs, shape):
+        output = f"{name}/output_0"
+        self.make_node("Greater", inputs=inputs, outputs=[output], name=name)
+        self.make_value_info(output, TensorProto.BOOL, shape=shape)
+
+    def make_isinf(self, name, root_input, shape):
+        output = f"{name}/output_0"
+        self.make_node("IsInf", inputs=[root_input], outputs=[output], name=name)
+        self.make_value_info(output, TensorProto.BOOL, shape=shape)
+
+    def make_clip(self, name, inputs, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Clip", inputs=inputs, outputs=[output], name=name)
+        self.make_value_info(output, dtype, shape=shape)
 
     def make_where(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
@@ -497,14 +587,9 @@ class Model:
         self.make_node("Range", inputs=inputs, outputs=[output], name=name)
         self.make_value_info(output, TensorProto.INT64, shape=["unk"])
 
-    def make_slice(self, name, inputs):
+    def make_slice(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Slice", inputs=inputs, outputs=[output], name=name)
-        self.make_value_info(output, TensorProto.INT64, shape=[1])
-
-    def make_sigmoid(self, name, root_input, dtype, shape):
-        output = f"{name}/output_0"
-        self.make_node("Sigmoid", inputs=[root_input], outputs=[output], name=name)
         self.make_value_info(output, dtype, shape=shape)
 
     def make_mul(self, name, inputs, dtype, shape):
@@ -514,7 +599,7 @@ class Model:
 
     def make_transpose(self, name, root_input, dtype, shape, perm):
         output = f"{name}/output_0"
-        self.make_node("Transpose", inputs=[root_input], outputs=[output], perm=perm)
+        self.make_node("Transpose", inputs=[root_input], outputs=[output], name=name, perm=perm)
         self.make_value_info(output, dtype, shape=shape)
 
     def make_matmul(self, matmul, basename, root_input, **kwargs):
@@ -573,11 +658,13 @@ class Model:
         return name
 
     def make_packed_matmul(self, q_matmul, k_matmul, v_matmul, name, root_input, **kwargs):
-        # N = num_heads * head_size, H = hidden_size
-        # Combine 3 Matmuls of shape NxH into 1 packed MatMul of shape 3NxH
-        # Note: Packed MatMul is of shape 3NxH instead of Hx3N because `make_matmul` will apply a transpose before saving
-        N, H = q_matmul.shape
-        matmul = np.stack((q_matmul.transpose(), k_matmul.transpose(), v_matmul.transpose()), axis=1).reshape(H, 3*N).transpose()
+        # N_q = num_attention_heads * head_size, N_kv = num_key_value_heads * head_size, H = hidden_size
+        # Combine 3 MatMuls of shape N_q x H, N_kv x H, N_kv x H into 1 packed MatMul of shape (N_q+N_kv+N_kv)xH
+        # Note: Packed MatMul is of shape (N_q+N_kv+N_kv)xH instead of Hx(N_q+N_kv+N_kv) because `make_matmul` will
+        # apply a transpose before saving
+        N_q, H = q_matmul.shape
+        N_kv, _ = k_matmul.shape
+        matmul = np.concatenate([q_matmul, k_matmul, v_matmul], axis=0).reshape(N_q + N_kv + N_kv, H)
         new_name = self.make_matmul(matmul, name, root_input, **kwargs)
 
         return new_name
@@ -597,8 +684,8 @@ class Model:
             self.make_add(name, add_bias_inputs, dtype=self.io_dtype, shape=shape)
 
     def make_packed_add(self, q_add, k_add, v_add, name, root_input, **kwargs):
-        # Combine 3 Adds of shape H into 1 packed Add of shape 3H
-        add = np.stack((q_add, k_add, v_add), axis=0).flatten()
+        # Combine 3 Adds of shape N_q, N_kv, and N_kv into 1 packed Add of shape N_q + N_kv + N_kv
+        add = np.concatenate([q_add, k_add, v_add], axis=0).flatten()
         self.make_add_bias(add, name, root_input, **kwargs)
 
     def make_embedding(self, embedding):
@@ -611,15 +698,15 @@ class Model:
         self.make_node('Gather', inputs=[weight, 'input_ids'], outputs=[gather_output], name=gather_name)
         self.make_value_info(gather_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
 
-        if self.embed_attrs["normalize"]:
-            # Normalize the embeddings
-            norm_name = f"{basename}/Mul"
-            norm_inputs = [gather_output, f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{np.round(np.sqrt(self.hidden_size), decimals=2)}"]
-            norm_output = f"{norm_name}/output_0"
-            self.make_node('Mul', inputs=norm_inputs, outputs=[norm_output], name=norm_name)
-            self.make_value_info(norm_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+        if self.embed_attrs["scale"] != 1:
+            # Scale the embeddings
+            mul_name = f"{basename}/Mul"
+            mul_inputs = [gather_output, f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.embed_attrs['scale']}"]
+            mul_output = f"{mul_name}/output_0"
+            self.make_node('Mul', inputs=mul_inputs, outputs=[mul_output], name=mul_name)
+            self.make_value_info(mul_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
 
-            layernorm_attrs_value = norm_output
+            layernorm_attrs_value = mul_output
         else:
             layernorm_attrs_value = gather_output
 
@@ -667,27 +754,61 @@ class Model:
 
         return output_0
 
-    def make_rotary_embedding_caches(self, rotemb):
-        cos_cache_name, sin_cache_name = "cos_cache", "sin_cache"
+    def make_mscale_su(self, mscale):
+        if mscale <= 1.0:
+            return 1.0
+        return np.sqrt(1 + np.log(mscale) / np.log(self.original_context_length))
+
+    def make_mscale_yarn(self, mscale):
+        if mscale <= 1.0:
+            return 1.0
+        return 0.1 * np.log(mscale) + 1.0
+
+    def make_mscale(self, mscale):
+        if self.rotemb_attrs["mscale_policy"] == "su":
+            return self.make_mscale_su(mscale)
+        elif self.rotemb_attrs["mscale_policy"] == "yarn":
+            return self.make_mscale_yarn(mscale)
+        else:
+            return float(mscale)
+
+    def make_rotary_embedding_caches_from_scratch(self):
+        dim = int(self.rotemb_attrs["partial_rotary_factor"] * self.head_size)
+        inv_freq = 1.0 / (self.rotemb_attrs["rescale_factors"] * (self.rotemb_attrs["theta"] ** (torch.arange(0, dim, 2, dtype=torch.int64).float() / dim)))
+
+        position_scale = self.rotemb_attrs["position_scale"] if self.context_length == self.original_context_length else 1
+        t = (torch.arange(self.rotemb_attrs["cache_length"], dtype=self.rotemb_attrs["t_dtype"]) * position_scale).type_as(inv_freq)
+
+        freqs = torch.outer(t, inv_freq)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        cos_cache, sin_cache = emb.cos() * self.rotemb_attrs["mscale"], emb.sin() * self.rotemb_attrs["mscale"]
+        return cos_cache, sin_cache
+
+    def make_rotary_embedding_caches(self, rotemb, **kwargs):
+        cos_cache_name = kwargs.get("cos_cache_name", "cos_cache")
+        sin_cache_name = kwargs.get("sin_cache_name", "sin_cache")
 
         if self.rotemb_attrs["create_rotary_embedding_caches"]:
             if not hasattr(rotemb, "cos_cached"):
                 # Create cos/sin caches if not already created
-                dim = int(self.rotemb_attrs["partial_rotary_factor"] * self.head_size)
-                inv_freq = 1.0 / (self.rotemb_attrs["theta"] ** (torch.arange(0, dim, 2, dtype=torch.int64).float() / dim))
-                t = torch.arange(self.context_length, dtype=torch.int64).type_as(inv_freq)
-                freqs = torch.outer(t, inv_freq)
-                emb = torch.cat((freqs, freqs), dim=-1)
-                cos_cache, sin_cache = emb.cos(), emb.sin()
+                cos_cache, sin_cache = self.make_rotary_embedding_caches_from_scratch()
             else:
                 cos_cache, sin_cache = rotemb.cos_cached, rotemb.sin_cached
 
             # Reshape cos/sin cache from (M, H) to (M, H/2)
             hidden_dim = cos_cache.shape[-1]
             cos_cache = cos_cache.squeeze()[:, : (hidden_dim // 2)].detach().numpy()
-            self.make_external_tensor(cos_cache.astype(self.to_numpy_dtype[self.io_dtype]), cos_cache_name)
+            cos_cache = cos_cache.astype(self.to_numpy_dtype[self.io_dtype])
             sin_cache = sin_cache.squeeze()[:, : (hidden_dim // 2)].detach().numpy()
-            self.make_external_tensor(sin_cache.astype(self.to_numpy_dtype[self.io_dtype]), sin_cache_name)
+            sin_cache = sin_cache.astype(self.to_numpy_dtype[self.io_dtype])
+
+            if "cos_cache_name" not in kwargs and "sin_cache_name" not in kwargs:
+                # Save cos/sin caches to disk
+                self.make_external_tensor(cos_cache, cos_cache_name)
+                self.make_external_tensor(sin_cache, sin_cache_name)
+            else:
+                # Return cos/sin caches since they will be custom-saved
+                return cos_cache, sin_cache
 
             self.rotemb_attrs["create_rotary_embedding_caches"] = False
 
@@ -701,7 +822,78 @@ class Model:
         self.make_node("RotaryEmbedding", inputs=inputs, outputs=[output], name=name, domain="com.microsoft", interleaved=self.rotemb_attrs["interleaved"], **kwargs)
         self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * (self.num_kv_heads if "k_rotary" in name else self.num_attn_heads)])
 
-    # TODO: This function and any corresponding changes to support it are temporary until ORT supports GQA for CPU
+    def make_rotary_embedding_multi_cache(self):
+        # Create dummy rotary embedding class
+        rotemb = type("RotaryEmbedding", (object,), {'content':{}})()
+
+        # Create caches for when sequence_length > self.original_context_length
+        self.rotemb_attrs["rescale_factors"] = self.rotemb_attrs["multi_cache"]["long_factor"]
+        self.rotemb_attrs["cache_length"] = self.context_length
+        self.rotemb_attrs["mscale"] = self.rotemb_attrs["multi_cache"]["long_mscale"]
+        cos_cache_large_name, sin_cache_large_name = "cos_cache_large", "sin_cache_large"
+        cos_cache_large, sin_cache_large = self.make_rotary_embedding_caches(rotemb, cos_cache_name=cos_cache_large_name, sin_cache_name=sin_cache_large_name)
+
+        # Create caches for when sequence_length <= self.original_context_length
+        self.rotemb_attrs["rescale_factors"] = self.rotemb_attrs["multi_cache"]["short_factor"]
+        self.rotemb_attrs["cache_length"] = self.original_context_length
+        self.rotemb_attrs["mscale"] = self.rotemb_attrs["multi_cache"]["short_mscale"]
+        cos_cache_small_name, sin_cache_small_name = "cos_cache_small", "sin_cache_small"
+        cos_cache_small, sin_cache_small = self.make_rotary_embedding_caches(rotemb, cos_cache_name=cos_cache_small_name, sin_cache_name=sin_cache_small_name)
+
+        self.rotemb_attrs["create_rotary_embedding_caches"] = False
+
+        # Make the following subgraph to decide which cos/sin caches to use in the rotary embeddings
+        #
+        # attention_mask --> Shape --> Gather --> Greater --> If --> (cos_cache, sin_cache)
+        #                             (idx=1)
+        #
+
+        basename = "/model/rotemb_caches_subgraph"
+        gather_name = ""
+        if self.attention_attrs["op_type"] == "GroupQueryAttention":
+            gather_name = "/model/attn_mask_reformat/attn_mask_subgraph/Gather"
+        else:
+            gather_name = "/model/attn_mask_reformat/attn_mask_subgraph/Gather_2"
+
+        greater_name = f"{basename}/Greater"
+        greater_inputs = [f"{gather_name}/output_0", f"/model/constants/TensorProto.INT64/0D/{self.original_context_length}"]
+        self.make_greater(greater_name, greater_inputs, shape=[])
+        if_name = f"{basename}/If"
+        if_cos_cache_output, if_sin_cache_output = "cos_cache", "sin_cache"
+        self.make_node(
+            "If", inputs=[f"{greater_name}/output_0"], outputs=[if_cos_cache_output, if_sin_cache_output], name=if_name,
+            then_branch=self.make_graph(
+                name="large_rotemb_caches_graph",
+                inputs=[],
+                outputs=[
+                    helper.make_tensor_value_info(cos_cache_large_name, self.io_dtype, shape=cos_cache_large.shape),
+                    helper.make_tensor_value_info(sin_cache_large_name, self.io_dtype, shape=sin_cache_large.shape),
+                ],
+                initializer=[],
+                value_info=[],
+                nodes=[
+                    helper.make_node("Constant", inputs=[], outputs=[cos_cache_large_name], name="/large/cos_cache/Constant", value=numpy_helper.from_array(cos_cache_large)),
+                    helper.make_node("Constant", inputs=[], outputs=[sin_cache_large_name], name="/large/sin_cache/Constant", value=numpy_helper.from_array(sin_cache_large)),
+                ],
+            ),
+            else_branch=self.make_graph(
+                name="small_rotemb_caches_graph",
+                inputs=[],
+                outputs=[
+                    helper.make_tensor_value_info(cos_cache_small_name, self.io_dtype, shape=cos_cache_small.shape),
+                    helper.make_tensor_value_info(sin_cache_small_name, self.io_dtype, shape=sin_cache_small.shape),
+                ],
+                initializer=[],
+                value_info=[],
+                nodes=[
+                    helper.make_node("Constant", inputs=[], outputs=[cos_cache_small_name], name="/small/cos_cache/Constant", value=numpy_helper.from_array(cos_cache_small)),
+                    helper.make_node("Constant", inputs=[], outputs=[sin_cache_small_name], name="/small/sin_cache/Constant", value=numpy_helper.from_array(sin_cache_small)),
+                ],
+            ),
+        )
+        self.make_value_info(if_cos_cache_output, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
+        self.make_value_info(if_sin_cache_output, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
+
     def make_repeat_kv(self, layer_id, root_input, past_kv, present_kv, **kwargs):
         # Make subgraph that repeats tensor of shape (batch_size, sequence_length, num_kv_heads, head_size)
         # to shape (batch_size, sequence_length, num_attn_heads, head_size) in an interleaved pattern
@@ -886,9 +1078,9 @@ class Model:
         if op_type == "MultiHeadAttention":
             self.make_multi_head_attention(name, add_qk=f"{self.mask_attrs['mask_name']}/output_0", **kwargs)
         elif op_type == "GroupQueryAttention":
-            seqlens_k_name = f"{self.mask_attrs['seqlens_k']}/output_0" if self.ep_attrs["cuda"]["enable_cuda_graph"] == "0" else "seqlens_k"
-            total_seq_len_name = f"{self.mask_attrs['total_seq_len']}/output_0" if self.ep_attrs["cuda"]["enable_cuda_graph"] == "0" else "total_seq_len"
-            self.make_group_query_attention(name, seqlens_k=seqlens_k_name, total_seq_len=total_seq_len_name, **kwargs)
+            self.make_group_query_attention(name, seqlens_k=f"{self.mask_attrs['seqlens_k']}/output_0", total_seq_len=f"{self.mask_attrs['total_seq_len']}/output_0", **kwargs)
+        elif op_type == "SparseAttention":
+            self.make_sparse_attention(name, block_row_indices=self.mask_attrs['block_row_indices'], block_col_indices=self.mask_attrs['block_col_indices'], key_total_seq_lens=f"{self.mask_attrs['key_total_seq_lens']}/output_0", total_seq_len=f"{self.mask_attrs['total_seq_len']}/output_0", **kwargs)
         else:
             raise NotImplementedError(f"The {op_type} op is not currently supported.")
 
@@ -900,7 +1092,10 @@ class Model:
         ]
         output = f"{name}/output_0"
         outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
-        self.make_node("MultiHeadAttention", inputs=inputs, outputs=outputs, name=name, domain="com.microsoft", num_heads=self.num_attn_heads)
+        self.make_node(
+            "MultiHeadAttention", inputs=inputs, outputs=outputs, name=name, domain="com.microsoft",
+            num_heads=self.num_attn_heads, scale=self.attention_attrs["scale"],
+        )
         self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * self.num_attn_heads])
 
     def make_group_query_attention(self, name, **kwargs):
@@ -914,10 +1109,26 @@ class Model:
         outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
         self.make_node(
             "GroupQueryAttention", inputs=inputs, outputs=outputs, name=name, domain="com.microsoft",
-            num_heads=self.num_attn_heads, kv_num_heads=self.num_kv_heads, local_window_size=self.window_size,
+            num_heads=self.num_attn_heads, kv_num_heads=self.num_kv_heads, scale=self.attention_attrs["scale"], # local_window_size=self.window_size,  # Disable sliding window attribute temporarily
             do_rotary=self.attention_attrs["use_rotemb_in_attn"], rotary_interleaved=self.rotemb_attrs["interleaved"],
         )
         self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * self.num_attn_heads])
+
+    def make_sparse_attention(self, name, **kwargs):
+        inputs = [
+            kwargs["q_path"], kwargs["k_path"], kwargs["v_path"],
+            kwargs.get("past_k"), kwargs.get("past_v"),
+            kwargs.get("block_row_indices"), kwargs.get("block_col_indices"),
+            kwargs.get("total_seq_len"), kwargs.get("key_total_seq_lens"),
+            kwargs.get("cos_cache", ""), kwargs.get("sin_cache", ""),
+        ]
+        output = f"{name}/output_0"
+        outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
+        self.make_node(
+            "SparseAttention", inputs=inputs, outputs=outputs, name=name, domain="com.microsoft",
+            num_heads=self.num_attn_heads, kv_num_heads=self.num_kv_heads, scale=self.attention_attrs["scale"], sparse_block_size=self.attention_attrs["block_sparse"]["sparse_block_size"],
+            do_rotary=self.attention_attrs["use_rotemb_in_attn"], rotary_interleaved=self.rotemb_attrs["interleaved"],
+        )
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         # Make nodes for the Attention subgraph
@@ -1012,7 +1223,7 @@ class Model:
             self.make_rotary_embedding(attention.rotary_emb, k_rotary_name, root_input=k_input_to_attention, position_ids=kwargs.get("position_ids", "position_ids"))
             k_input_to_attention = f"{k_rotary_name}/output_0"
 
-        # Make repeat KV nodes (TODO: remove once ORT supports GQA for CPU)
+        # Make repeat KV nodes (Note: `repeat_kv` needs to be kept since GroupQueryAttention isn't supported for FP32 CUDA)
         past_k = f"past_key_values.{layer_id}.key"
         past_v = f"past_key_values.{layer_id}.value"
         present_k = f"present.{layer_id}.key"
@@ -1045,6 +1256,32 @@ class Model:
 
         # Assign output 0 of previous output node as skip input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = f"{o_matmul_name if not o_bias_exists else o_add_name}/output_0"
+
+    def make_attention_unpacked(self, layer_id, attention, root_input, **kwargs):
+        q_size = self.num_attn_heads * self.head_size
+        kv_size = self.num_kv_heads * self.head_size
+
+        qkv_proj = 'qkv_proj' if hasattr(attention, 'qkv_proj') else 'query_key_value'
+        qkv_linear = eval(f"attention.{qkv_proj}")
+
+        attention.q_proj = torch.nn.Linear(in_features=q_size, out_features=q_size)
+        attention.q_proj.weight = torch.nn.Parameter(qkv_linear.weight[: q_size, :])
+        attention.q_proj.bias = None if qkv_linear.bias is None else torch.nn.Parameter(qkv_linear.bias[: q_size])
+
+        attention.k_proj = torch.nn.Linear(in_features=q_size, out_features=kv_size)
+        attention.k_proj.weight = torch.nn.Parameter(qkv_linear.weight[q_size : q_size + kv_size, :])
+        attention.k_proj.bias = None if qkv_linear.bias is None else torch.nn.Parameter(qkv_linear.bias[q_size : q_size + kv_size])
+
+        attention.v_proj = torch.nn.Linear(in_features=q_size, out_features=kv_size)
+        attention.v_proj.weight = torch.nn.Parameter(qkv_linear.weight[q_size + kv_size :, :])
+        attention.v_proj.bias = None if qkv_linear.bias is None else torch.nn.Parameter(qkv_linear.bias[q_size + kv_size :])
+
+        # Delete original packed weights and any references to them (e.g. `del qkv_linear` isn't sufficient)
+        del qkv_linear
+        if hasattr(attention, 'qkv_proj'):
+            del attention.qkv_proj
+        else:
+            del attention.query_key_value
 
     def make_mlp(self, layer_id, mlp, root_input):
         if self.mlp_attrs["use_proj"]:
@@ -1160,19 +1397,42 @@ class Model:
             output_name = self.make_gelu(layer_id, root_input, activation="FastGelu")
         elif self.activation in {"gelu"}:
             output_name = self.make_gelu(layer_id, root_input, activation="Gelu")
+        elif self.activation in {"gegelu", "geglu"}:
+            output_name = self.make_gelu(layer_id, root_input, activation="QuickGelu")
         else:
             raise NotImplementedError(f"The {self.activation} activation function is not currently supported.")
         return output_name
 
     def make_lm_head(self, lm_head):
         bias_exists = lm_head.bias is not None
+        scale_exists = self.lm_head_attrs["scale"] != 1
+        mask_exists = self.lm_head_attrs["mask"] is not None
+
         matmul_basename = "/lm_head/MatMul"
         root_input = self.layernorm_attrs["output_0"]
-        matmul_name = self.make_matmul(lm_head, matmul_basename, root_input, logits=not bias_exists)
+        matmul_name = self.make_matmul(lm_head, matmul_basename, root_input, logits=not bias_exists and not scale_exists)
 
         if bias_exists:
             add_name = "/lm_head/Add"
-            self.make_add_bias(lm_head.bias.detach().numpy(), add_name, root_input=f"{matmul_name}/output_0", logits=True)
+            self.make_add_bias(lm_head.bias.detach().numpy(), add_name, root_input=f"{matmul_name}/output_0", logits=not scale_exists)
+
+        if scale_exists:
+            mul_name = "/lm_head/Mul"
+            mul_inputs = [f"{matmul_name if not bias_exists else add_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.lm_head_attrs['scale']}"]
+            mul_output = "logits" if not mask_exists else f"{mul_name}/output_0"
+            self.make_node('Mul', inputs=mul_inputs, outputs=[mul_output], name=mul_name)
+            self.make_value_info(mul_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
+
+        if mask_exists:
+            # Save logits mask as initializer
+            logits_mask_name = "logits_mask"
+            self.make_external_tensor(self.lm_head_attrs["mask"].detach().numpy(), logits_mask_name)
+
+            where_name = "/lm_head/Where"
+            where_inputs = [logits_mask_name, f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{np.finfo(self.to_numpy_dtype[self.io_dtype]).min}", f"{mul_name}/output_0"]
+            where_output = "logits"
+            self.make_node('Where', inputs=where_inputs, outputs=[where_output], name=where_name)
+            self.make_value_info(where_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
 
     def make_layer(self, layer_id, layer):
         # Each LLM decoder layer is typically defined as:
@@ -1206,8 +1466,8 @@ class Model:
             model = QuantModel.from_pretrained(input_path)
         else:
             # Load PyTorch model
-            extra_kwargs = {"trust_remote_code": True} if os.path.exists(self.model_name_or_path) else {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {"cache_dir": self.cache_dir, "use_auth_token": True}
-            model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, **extra_kwargs)
+            extra_kwargs = {} if os.path.exists(self.model_name_or_path) else {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {"cache_dir": self.cache_dir}
+            model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, use_auth_token=True, trust_remote_code=True, **extra_kwargs)
 
         # Loop through model and map each module to ONNX/ORT ops
         self.layer_id = 0
@@ -1256,14 +1516,17 @@ class Model:
         # TODO: add make_position_ids_reformatting() here
 
     def make_attention_mask_reformatting(self):
-        if self.ep_attrs["cuda"]["enable_cuda_graph"] == "1":
+        if self.ep_attrs["cuda"]["enable_cuda_graph"] == "1" or self.ep == "dml":
             # ORT does not allow nodes to be placed on mulitple execution providers
-            # with cuda graph enabled. Thus the attention mask is deprecated and the
-            # subgraph is replaced with seqlens_k and total_seq_len as the raw
-            # inputs to GroupQueryAttention.
-            return
+            # with cuda graph enabled. We've only verified it works with GQA and with
+            # past_present_share_buffer enabled(so the total_seq_len in GQA is hardcoded
+            # to a fixed value by logic).
+            # For other models, we need to check if it works and update the logic here.
+            # This assertion is temporary.
+            assert self.past_present_share_buffer
+
         if self.attention_attrs["op_type"] == "GroupQueryAttention":
-            self.make_attention_mask_reformatting_for_gqa()            
+            self.make_attention_mask_reformatting_for_gqa()
         elif self.attention_attrs["op_type"] == "MultiHeadAttention":
             # Make attention mask reformatting nodes
             #
@@ -1272,9 +1535,12 @@ class Model:
             #    attention mask reformatting subgraph
             #                   |
             #         4D causal attention mask
-            self.make_attention_mask_reformatting_2d_to_4d()
+            self.make_attention_mask_reformatting_for_mha()
 
-    def make_attention_mask_reformatting_2d_to_4d(self):
+        if self.attention_attrs["block_sparse"]["sparse_block_size"] != 0:
+            self.make_attention_mask_reformatting_for_sparse_attn()
+
+    def make_attention_mask_reformatting_for_mha(self):
         # Make nodes for the attention mask subgraphs that reformat the
         # 2D attention mask (B, S) to 4D causal attention mask (B, N, S, T)
         #
@@ -1350,13 +1616,12 @@ class Model:
         end_add_shape = ["batch_size", 1, "source_sequence_length", "target_sequence_length"]
         self.make_add(end_add_name, end_add_inputs, dtype=self.io_dtype, shape=end_add_shape) # Shape of mask is now (B, 1, S, T)
 
-        # TODO: replace Concat with Expand for performance gains
-        concat_name = f"{basename}/Concat"
-        concat_inputs = [f"{end_add_name}/output_0" for _ in range(self.num_attn_heads)]
-        concat_shape = ["batch_size", self.num_attn_heads, "source_sequence_length", "target_sequence_length"]
-        self.make_concat(concat_name, concat_inputs, dtype=self.io_dtype, shape=concat_shape, axis=1) # Shape of mask is now (B, N, S, T)
+        tile_name = f"{basename}/Tile"
+        tile_inputs = [f"{end_add_name}/output_0", f"/model/constants/TensorProto.INT64/1D/1, {self.num_attn_heads}, 1, 1"]
+        tile_shape = ["batch_size", self.num_attn_heads, "source_sequence_length", "target_sequence_length"]
+        self.make_tile(tile_name, tile_inputs, dtype=self.io_dtype, shape=tile_shape) # Shape of mask is now (B, N, S, T)
 
-        self.mask_attrs["mask_name"] = concat_name
+        self.mask_attrs["mask_name"] = tile_name
 
     def make_past_key_subgraph(self, basename):
         shape_name = f"{basename}/Shape"
@@ -1411,7 +1676,7 @@ class Model:
         self.make_shape(shape_4_name, f"{constant_shape_name}/output_0", shape=[2])
         slice_1_name = f"{basename}/Slice_1"
         slice_1_inputs = [f"{shape_4_name}/output_0", "/model/constants/TensorProto.INT64/1D/-1", f"/model/constants/TensorProto.INT64/1D/{np.iinfo(np.int64).max}", "/model/constants/TensorProto.INT64/1D/0"]
-        self.make_slice(slice_1_name, slice_1_inputs)
+        self.make_slice(slice_1_name, slice_1_inputs, dtype=TensorProto.INT64, shape=[1])
         squeeze_1_name = f"{basename}/Squeeze_1"
         squeeze_1_inputs = [f"{slice_1_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
         self.make_squeeze(squeeze_1_name, squeeze_1_inputs)
@@ -1427,7 +1692,7 @@ class Model:
         self.make_shape(shape_5_name, f"{constant_shape_name}/output_0", shape=[2])
         slice_2_name = f"{basename}/Slice_2"
         slice_2_inputs = [f"{shape_5_name}/output_0", "/model/constants/TensorProto.INT64/1D/-1", f"/model/constants/TensorProto.INT64/1D/{np.iinfo(np.int64).max}", "/model/constants/TensorProto.INT64/1D/0"]
-        self.make_slice(slice_2_name, slice_2_inputs)
+        self.make_slice(slice_2_name, slice_2_inputs, dtype=TensorProto.INT64, shape=[1])
         squeeze_2_name = f"{basename}/Squeeze_2"
         squeeze_2_inputs = [f"{slice_2_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
         self.make_squeeze(squeeze_2_name, squeeze_2_inputs)
@@ -1599,7 +1864,7 @@ class Model:
         sub_name = f"{attn_mask_basename}/Sub"
         sub_inputs = [f"{reduce_sum_name}/output_0", "/model/constants/TensorProto.INT64/1D/1"]
         self.make_sub(sub_name, sub_inputs, dtype=TensorProto.INT64, shape=["batch_size", 1])
-        cast_1_name = f"{attn_mask_basename}/Cast_1"
+        cast_1_name = f"{attn_mask_basename}/Sub/Cast"
         self.make_cast(cast_1_name, f"{sub_name}/output_0", dtype=TensorProto.INT32, shape=["batch_size", 1])
 
         # Right path
@@ -1608,10 +1873,47 @@ class Model:
         gather_name = f"{attn_mask_basename}/Gather"
         gather_inputs = [f"{shape_name}/output_0", "/model/constants/TensorProto.INT64/0D/1"]
         self.make_gather(gather_name, gather_inputs, axis=0)
-        cast_2_name = f"{attn_mask_basename}/Cast_2"
+        cast_2_name = f"{attn_mask_basename}/Gather/Cast"
         self.make_cast(cast_2_name, f"{gather_name}/output_0", dtype=TensorProto.INT32, shape=None)
 
         self.mask_attrs["seqlens_k"] = cast_1_name
+        self.mask_attrs["total_seq_len"] = cast_2_name
+
+    def make_attention_mask_reformatting_for_sparse_attn(self):
+        # Make nodes for the attention mask subgraph that calculates 
+        # attributes about the 2D attention mask to use in SparseAttention
+        #
+        #                attention_mask
+        #               /              \
+        #          ReduceSum          Shape
+        #              |                |
+        #        Cast to int32        Gather
+        #              |                |
+        #      key_total_seq_lens  Cast to int32
+        #            (1D)               |
+        #                          total_seq_len
+        #                             (int)
+
+        basename = "/model/attn_mask_reformat"
+        attn_mask_basename = f"{basename}/attn_mask_subgraph"
+
+        # Left path
+        reduce_sum_name = f"{attn_mask_basename}/ReduceSum"
+        reduce_sum_inputs = ["attention_mask", "/model/constants/TensorProto.INT64/1D/1"]
+        self.make_reduce_sum(reduce_sum_name, reduce_sum_inputs, dtype=TensorProto.INT64, shape=["batch_size", 1])
+        cast_1_name = f"{attn_mask_basename}/ReduceSum/Cast"
+        self.make_cast(cast_1_name, f"{reduce_sum_name}/output_0", dtype=TensorProto.INT32, shape=["batch_size", 1])
+
+        # Right path
+        shape_name = f"{attn_mask_basename}/Shape"
+        self.make_shape(shape_name, "attention_mask", shape=[2])
+        gather_name = f"{attn_mask_basename}/Gather"
+        gather_inputs = [f"{shape_name}/output_0", "/model/constants/TensorProto.INT64/0D/1"]
+        self.make_gather(gather_name, gather_inputs, axis=0)
+        cast_2_name = f"{attn_mask_basename}/Gather/Cast"
+        self.make_cast(cast_2_name, f"{gather_name}/output_0", dtype=TensorProto.INT32, shape=None)
+
+        self.mask_attrs["key_total_seq_lens"] = cast_1_name
         self.mask_attrs["total_seq_len"] = cast_2_name
 
     def make_position_ids_reformatting(self):
@@ -1633,7 +1935,7 @@ class Model:
 
         basename = "/model/pos_ids_reformat"
         shape_name = f"{basename}/Shape"
-        self.make_shape(shape_name, "input_ids", shape=[2])
+        self.make_shape(shape_name, root_input="input_ids" if not self.exclude_embeds else "inputs_embeds", shape=[2] if not self.exclude_embeds else [3])
         gather_name = f"{basename}/Gather"
         gather_inputs = [f"{shape_name}/output_0", "/model/constants/TensorProto.INT64/0D/1"]
         self.make_gather(gather_name, gather_inputs, axis=0)
@@ -1699,8 +2001,243 @@ class PhiModel(Model):
 class GemmaModel(MistralModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        self.embed_attrs["normalize"] = True
+        self.embed_attrs["scale"] = np.round(np.sqrt(self.hidden_size), decimals=2)
         self.layernorm_attrs["add_offset"] = 1
+
+
+class Phi3Mini4KModel(MistralModel):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+    def make_attention(self, layer_id, attention, root_input, **kwargs):
+        super().make_attention_unpacked(layer_id, attention, root_input, **kwargs)
+        super().make_attention(layer_id, attention, root_input, **kwargs)
+
+    def make_mlp_proj(self, layer_id, mlp, root_input):
+        mlp.gate_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
+        mlp.gate_proj.weight = torch.nn.Parameter(mlp.gate_up_proj.weight[ : self.intermediate_size, :])
+
+        mlp.up_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
+        mlp.up_proj.weight = torch.nn.Parameter(mlp.gate_up_proj.weight[self.intermediate_size :, :])
+
+        del mlp.gate_up_proj
+        super().make_mlp_proj(layer_id, mlp, root_input)
+
+
+class Phi3Mini128KModel(Phi3Mini4KModel):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.make_rotary_embedding_multi_cache()
+
+
+class Phi3Small8KModel(Model):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.layernorm_attrs["simple"] = False
+        self.embed_attrs["scale"] = config.mup_embedding_multiplier
+        self.rotemb_attrs["t_dtype"] = torch.float32
+        self.lm_head_attrs["scale"] = 1 / config.mup_width_multiplier
+
+        self.calculate_block_mask()
+        self.dense_attention_every_n_layers = config.dense_attention_every_n_layers
+        if config.mup_use_scaling:
+            self.attention_attrs["scale"] = config.mup_attn_multiplier / self.head_size
+
+        self.clamp_limit = config.gegelu_limit
+
+    def calculate_cdiv(self, a, b):
+        return -(a // -b)
+
+    def calculate_block_mask(self):
+        # Initialize parameters for calculating block dense mask
+        n_heads = self.num_attn_heads
+        q_len = self.context_length
+        N_CTX = self.context_length
+        BLOCK = self.attention_attrs["block_sparse"]["sparse_block_size"]
+        local_blocks = self.attention_attrs["block_sparse"]["local_blocks"]
+        vert_stride = self.attention_attrs["block_sparse"]["vert_stride"]
+        homo_head = self.attention_attrs["block_sparse"]["homo_head"]
+
+        N_BLOCK = self.calculate_cdiv(N_CTX, BLOCK)
+        if homo_head:
+            q_pos = torch.arange(N_BLOCK)[:, None]
+            k_pos = torch.arange(N_BLOCK)[None]
+            mask_vert_strided = (torch.arange(N_BLOCK) + 1) % vert_stride == 0
+            block_mask_dense = ((q_pos >= k_pos) & ((q_pos - k_pos < local_blocks) | mask_vert_strided))
+            N_BLOCK_Q = self.calculate_cdiv(q_len, BLOCK)
+            block_mask_dense_output = block_mask_dense[-N_BLOCK_Q:].contiguous().to_sparse_csr()
+
+            crows = block_mask_dense_output.crow_indices()
+            cols = block_mask_dense_output.col_indices()
+
+            crows = crows[None].expand(n_heads, crows.shape[0])
+            cols = cols[None].expand(n_heads, cols.shape[0])
+        else:
+            q_pos = torch.arange(N_BLOCK)[None, :, None]
+            k_pos = torch.arange(N_BLOCK)[None, None]
+            head_sliding_step = max(1, int(vert_stride / n_heads))  # if vert_stride <= n_heads, rotating the heads
+            mask_vert_strided = [(torch.arange(N_BLOCK) + h * head_sliding_step + 1) % vert_stride == 0 for h in range(n_heads)]
+            mask_vert_strided = torch.vstack(mask_vert_strided).unsqueeze(1)
+            block_mask_dense = ((q_pos >= k_pos) & ((q_pos - k_pos < local_blocks) | mask_vert_strided))
+            N_BLOCK_Q = self.calculate_cdiv(q_len, BLOCK)
+            block_mask_dense_output = block_mask_dense[:, -N_BLOCK_Q:]
+
+            # Dense to crow_col
+            pad = -1
+            dim = block_mask_dense_output.dim()
+            assert dim in (2, 3)
+            if dim == 2:
+                block_mask_dense_output = block_mask_dense_output[None]
+            block_mask_dense_output = [xi.to_sparse_csr() for xi in block_mask_dense_output]
+            crows = torch.vstack([xi.crow_indices() for xi in block_mask_dense_output])
+            cols = [xi.col_indices() for xi in block_mask_dense_output]
+            max_cols = max(len(xi) for xi in cols)
+            cols = [torch.cat([xi, pad + xi.new_zeros(max_cols - xi.shape[0])]) for xi in cols]
+            cols = torch.vstack(cols)
+            if dim == 2:
+                crows = crows[0]
+                cols = cols[0]
+
+        # Create tensors for row indices and col indices
+        crows_name = "block_row_indices"
+        self.make_external_tensor(crows.detach().numpy().astype(np.int32), crows_name)
+        self.mask_attrs["block_row_indices"] = crows_name
+        
+        cols_name = "block_col_indices"
+        self.make_external_tensor(cols.detach().numpy().astype(np.int32), cols_name)
+        self.mask_attrs["block_col_indices"] = cols_name
+
+    def make_attention(self, layer_id, attention, root_input, **kwargs):
+        dense_attention_op = self.attention_attrs["op_type"]
+        sparse_attention_op = "SparseAttention"
+
+        # Use dense attention every n layers and use sparse attention otherwise
+        if (self.layer_id + 1) % self.dense_attention_every_n_layers != 0:
+            # Use sparse attention
+            self.attention_attrs["op_type"] = sparse_attention_op
+
+        q_size = self.num_attn_heads * self.head_size
+        kv_size = self.num_kv_heads * self.head_size
+
+        qkv_weight = attention.query_key_value.weight.T.view(self.hidden_size, self.num_kv_heads, (self.num_attn_heads // self.num_kv_heads) + 2, self.head_size)
+        qkv_bias = attention.query_key_value.bias.view(self.num_kv_heads, (self.num_attn_heads // self.num_kv_heads) + 2, self.head_size)
+
+        attention.q_proj = torch.nn.Linear(in_features=q_size, out_features=q_size)
+        attention.q_proj.weight = torch.nn.Parameter(qkv_weight[:, :, :-2].reshape(q_size, q_size).T)
+        attention.q_proj.bias = None if attention.query_key_value.bias is None else torch.nn.Parameter(qkv_bias[:, :-2].flatten())
+
+        attention.k_proj = torch.nn.Linear(in_features=q_size, out_features=kv_size)
+        attention.k_proj.weight = torch.nn.Parameter(qkv_weight[:, :, [-2]].reshape(q_size, kv_size).T)
+        attention.k_proj.bias = None if attention.query_key_value.bias is None else torch.nn.Parameter(qkv_bias[:, [-2]].flatten())
+
+        attention.v_proj = torch.nn.Linear(in_features=q_size, out_features=kv_size)
+        attention.v_proj.weight = torch.nn.Parameter(qkv_weight[:, :, [-1]].reshape(q_size, kv_size).T)
+        attention.v_proj.bias = None if attention.query_key_value.bias is None else torch.nn.Parameter(qkv_bias[:, [-1]].flatten())
+
+        del qkv_weight
+        del qkv_bias
+        del attention.query_key_value
+
+        super().make_attention(layer_id, attention, root_input, **kwargs)
+        self.attention_attrs["op_type"] = dense_attention_op
+
+    def make_mlp_proj(self, layer_id, mlp, root_input):
+        # Make nodes for the MLP subgraph
+        #
+        #           root_input
+        #               |
+        #          UpProjMatMul
+        #               |
+        #           UpProjAdd
+        #          /          \
+        #         /            \
+        #        /              \
+        #      Slice             Slice
+        #    (even idx)        (odd idx)
+        #    /   |   \         /   |   \
+        #  Cast  |    |      Cast  |    |
+        #   |    |    |       |    |    |
+        # IsInf  |   Clip   IsInf  |   Clip
+        #   |    |    |       |    |    |
+        #    \   |   /         \   |   /
+        #     \  |  /           \  |  /
+        #      Where             Where
+        #        |                 |
+        #    QuickGelu            Add
+        #        |                 |
+        #        +--------+--------+
+        #                 |
+        #                Mul
+        #                 |
+        #           DownProjMatMul
+        #                 |
+        #            DownProjAdd
+        
+        # Make input MatMul and Add nodes
+        up_matmul_name = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
+        self.make_matmul(mlp.up_proj.weight.detach().numpy(), up_matmul_name, root_input)
+        up_add_name = f"/model/layers.{layer_id}/mlp/up_proj/Add"
+        self.make_add_bias(mlp.up_proj.bias.detach().numpy(), up_add_name, f"{up_matmul_name}/output_0")
+
+        # Left path
+        slice_1_name = f"/model/layers.{layer_id}/mlp/gelu/Slice"
+        slice_1_inputs = [f"{up_add_name}/output_0", "/model/constants/TensorProto.INT64/1D/0", f"/model/constants/TensorProto.INT64/1D/{np.iinfo(np.int64).max}", "/model/constants/TensorProto.INT64/1D/-1", "/model/constants/TensorProto.INT64/1D/2"]
+        self.make_slice(slice_1_name, slice_1_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        cast_1_name = f"/model/layers.{layer_id}/mlp/gelu/Cast"
+        self.make_cast(cast_1_name, f"{slice_1_name}/output_0", dtype=TensorProto.FLOAT, shape=["batch_size", "sequence_length", self.intermediate_size])
+        isinf_1_name = f"/model/layers.{layer_id}/mlp/gelu/IsInf"
+        self.make_isinf(isinf_1_name, f"{cast_1_name}/output_0", shape=["batch_size", "sequence_length", self.intermediate_size])
+        clip_1_name = f"/model/layers.{layer_id}/mlp/gelu/Clip"
+        clip_1_inputs = [f"{slice_1_name}/output_0", "", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.clamp_limit}"]
+        self.make_clip(clip_1_name, clip_1_inputs, self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        where_1_name = f"/model/layers.{layer_id}/mlp/gelu/Where"
+        where_1_inputs = [f"{isinf_1_name}/output_0", f"{slice_1_name}/output_0", f"{clip_1_name}/output_0"]
+        self.make_where(where_1_name, where_1_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        # Make activation
+        act_fn_name = self.make_activation(layer_id, root_input=f"{where_1_name}/output_0")
+
+        # Right path
+        slice_2_name = f"/model/layers.{layer_id}/mlp/linear/Slice"
+        slice_2_inputs = [f"{up_add_name}/output_0", "/model/constants/TensorProto.INT64/1D/1", f"/model/constants/TensorProto.INT64/1D/{np.iinfo(np.int64).max}", "/model/constants/TensorProto.INT64/1D/-1", "/model/constants/TensorProto.INT64/1D/2"]
+        self.make_slice(slice_2_name, slice_2_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        cast_2_name = f"/model/layers.{layer_id}/mlp/linear/Cast"
+        self.make_cast(cast_2_name, f"{slice_2_name}/output_0", dtype=TensorProto.FLOAT, shape=["batch_size", "sequence_length", self.intermediate_size])
+        isinf_2_name = f"/model/layers.{layer_id}/mlp/linear/IsInf"
+        self.make_isinf(isinf_2_name, f"{cast_2_name}/output_0", shape=["batch_size", "sequence_length", self.intermediate_size])
+        clip_2_name = f"/model/layers.{layer_id}/mlp/linear/Clip"
+        clip_2_inputs = [f"{slice_2_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/-{self.clamp_limit}", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.clamp_limit}"]
+        self.make_clip(clip_2_name, clip_2_inputs, self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        where_2_name = f"/model/layers.{layer_id}/mlp/linear/Where"
+        where_2_inputs = [f"{isinf_2_name}/output_0", f"{slice_2_name}/output_0", f"{clip_2_name}/output_0"]
+        self.make_where(where_2_name, where_2_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        add_name = f"/model/layers.{layer_id}/mlp/linear/Add"
+        add_inputs = [f"{where_2_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/1"]
+        self.make_add(add_name, add_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+
+        # Make Mul node after activation
+        mul_name = f"/model/layers.{layer_id}/mlp/Mul"
+        mul_inputs = [f"{act_fn_name}/output_0", f"{add_name}/output_0"]
+        self.make_mul(mul_name, mul_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+
+        # Make output MatMul and Add nodes
+        down_matmul_name = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
+        self.make_matmul(mlp.down_proj.weight.detach().numpy(), down_matmul_name, f"{mul_name}/output_0")
+        down_add_name = f"/model/layers.{layer_id}/mlp/down_proj/Add"
+        self.make_add_bias(mlp.down_proj.bias.detach().numpy(), down_add_name, f"{down_matmul_name}/output_0")
+
+        # Assign output 0 of previous MatMul as skip input to next SkipLayerNorm
+        self.layernorm_attrs["skip_input"] = f"{down_add_name}/output_0"
+
+
+class Phi3Small128KModel(Phi3Small8KModel):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.make_rotary_embedding_multi_cache()
+
+
+class Phi3VModel(Phi3Mini128KModel):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
 
 def parse_extra_options(kv_items):
@@ -1724,9 +2261,9 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
     os.makedirs(cache_dir, exist_ok=True)
 
     # Load model config
-    extra_kwargs = {"trust_remote_code": True} if os.path.isdir(input_path) else {"cache_dir": cache_dir, "use_auth_token": True}
+    extra_kwargs = {} if os.path.isdir(input_path) else {"cache_dir": cache_dir}
     hf_name = input_path if os.path.isdir(input_path) else model_name
-    config = AutoConfig.from_pretrained(hf_name, **extra_kwargs)
+    config = AutoConfig.from_pretrained(hf_name, use_auth_token=True, trust_remote_code=True, **extra_kwargs)
 
     # Set input/output precision of ONNX model
     io_dtype = TensorProto.FLOAT if precision in {"int8", "fp32"} or (precision == "int4" and execution_provider == "cpu") else TensorProto.FLOAT16
@@ -1741,6 +2278,22 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             onnx_model = MistralModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "PhiForCausalLM":
             onnx_model = PhiModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings == 4096:
+            onnx_model = Phi3Mini4KModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings == 131072:
+            onnx_model = Phi3Mini128KModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings == 8192:
+            print("WARNING: This model only works for CUDA currently because `SparseAttention` is only supported for CUDA in ONNX Runtime. Setting `--execution_provider cuda` by default.")
+            execution_provider = "cuda"
+            onnx_model = Phi3Small8KModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings == 131072:
+            print("WARNING: This model only works for CUDA currently because `SparseAttention` is only supported for CUDA in ONNX Runtime. Setting `--execution_provider cuda` by default.")
+            execution_provider = "cuda"
+            onnx_model = Phi3Small128KModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "Phi3VForCausalLM":
+            print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+            extra_options["exclude_embeds"] = True
+            onnx_model = Phi3VModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         else:
             raise NotImplementedError(f"The {hf_name} model is not currently supported.")
 
@@ -1801,8 +2354,8 @@ def get_args():
         "-e",
         "--execution_provider",
         required=True,
-        choices=["cpu", "cuda"],
-        help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU)",
+        choices=["cpu", "cuda", "dml", "web"],
+        help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU, INT4 WEB)",
     )
 
     parser.add_argument(
@@ -1839,17 +2392,16 @@ def get_args():
                 exclude_lm_head = Remove language modeling head from your ONNX model.
                     Use this option when you want to remove the language modeling head from within your ONNX model.
                     Instead of `logits`, you will have `hidden_states` as the output to your ONNX model.
-                enable_cuda_graph = 1 : The model can use CUDA graph capture for the CUDA execution provider.
-                    If enabled, raw inputs (seqlens_k and total_seq_len) to the GroupQueryAttention are populated to the graph inputs
-                    to ensure all nodes are placed on the CUDA EP. Currently there's no guarantee that CUDA graph can be enabled as it
-                    depends on the model and the graph structure.
+                enable_cuda_graph = 1 : The model can use CUDA graph capture for CUDA execution provider. If enabled, all nodes being placed on the CUDA EP
+                    is the prerequisite for the CUDA graph to be used correctly. It is not guaranteed that cuda graph be enabled as it depends on the model
+                    and the graph structure.
                 is_quantized = Input model is already quantized.
                     Use this option when your input model is already quantized.
             """),
     )
 
     args = parser.parse_args()
-    print("Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, INT4 CPU, INT4 CUDA")
+    print("Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, INT4 CPU, INT4 CUDA, INT4 DML")
     return args
 
 if __name__ == '__main__':

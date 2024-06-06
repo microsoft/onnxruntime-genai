@@ -44,3 +44,46 @@ FetchContent_Declare(
 
 onnxruntime_fetchcontent_makeavailable(googletest)
 
+if(USE_DML)
+  set(WIL_BUILD_PACKAGING OFF CACHE BOOL "" FORCE)
+  set(WIL_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+
+  FetchContent_Declare(
+    microsoft_wil
+    URL ${DEP_URL_microsoft_wil}
+    URL_HASH SHA1=${DEP_SHA1_microsoft_wil}
+    FIND_PACKAGE_ARGS NAMES wil
+  )
+
+  onnxruntime_fetchcontent_makeavailable(microsoft_wil)
+  set(WIL_TARGET "WIL::WIL")
+
+  FetchContent_Declare(
+    directx_headers
+    URL ${DEP_URL_directx_headers}
+    URL_HASH SHA1=${DEP_SHA1_directx_headers}
+  )
+
+  onnxruntime_fetchcontent_makeavailable(directx_headers)
+  set(DIRECTX_HEADERS_TARGET "DirectX-Headers")
+
+  include(ExternalProject)
+  ExternalProject_Add(nuget
+    PREFIX nuget
+    URL "https://dist.nuget.org/win-x86-commandline/v5.3.0/nuget.exe"
+    DOWNLOAD_NO_EXTRACT 1
+    CONFIGURE_COMMAND ""
+    BUILD_COMMAND ""
+    UPDATE_COMMAND ""
+    INSTALL_COMMAND ""
+  )
+endif()
+
+
+FetchContent_Declare(
+  onnxruntime_extensions
+  GIT_REPOSITORY ${DEP_URL_onnxruntime_extensions}
+  GIT_TAG ${DEP_SHA1_onnxruntime_extensions}
+)
+set(OCOS_BUILD_PRESET ort_genai)
+onnxruntime_fetchcontent_makeavailable(onnxruntime_extensions)

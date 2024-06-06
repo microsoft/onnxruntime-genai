@@ -1,0 +1,113 @@
+# All Global variables for the top level CMakeLists.txt should be defined here
+
+# Define the Version Info
+file(READ "VERSION_INFO" ver)
+set(VERSION_INFO ${ver} CACHE STRING "Set the onnxruntime-genai version info.")
+message("Building onnxruntime-genai for version ${VERSION_INFO}")
+
+
+# Define the project directories
+set(REPO_ROOT ${PROJECT_SOURCE_DIR})
+set(SRC_ROOT ${REPO_ROOT}/src)
+set(GENERATORS_ROOT ${SRC_ROOT})
+set(MODELS_ROOT ${SRC_ROOT}/models)
+set(ORT_HOME ${REPO_ROOT}/ort CACHE PATH "Path to the onnxruntime root directory.")
+
+if (ANDROID)
+  # Paths are based on the directory structure of the ORT Android AAR.
+  set(ORT_HEADER_DIR ${ORT_HOME}/headers)
+  set(ORT_LIB_DIR ${ORT_HOME}/jni/${ANDROID_ABI})
+else()
+  set(ORT_HEADER_DIR ${ORT_HOME}/include)
+  set(ORT_LIB_DIR ${ORT_HOME}/lib)
+endif()
+
+# Define the dependency libraries
+
+if(WIN32)
+  set(ONNXRUNTIME_LIB "onnxruntime.dll")
+  set(ONNXRUNTIME_PROVIDERS_CUDA_LIB "onnxruntime_providers_cuda.dll")
+  set(ONNXRUNTIME_ALL_SHARED_LIBS "onnxruntime*.dll")
+  set(ONNXRUNTIME_EXTENSIONS_LIB "tfmtok_c.lib")
+  set(ONNXRUNTIME_EXTENSIONS_FILES "tfmtok_c.dll")
+elseif(APPLE)
+  set(ONNXRUNTIME_LIB "libonnxruntime.dylib")
+  set(ONNXRUNTIME_PROVIDERS_CUDA_LIB "libonnxruntime_providers_cuda.dylib")
+  set(ONNXRUNTIME_ALL_SHARED_LIBS "libonnxruntime*.dylib")
+else()
+  set(ONNXRUNTIME_LIB "libonnxruntime.so")
+  set(ONNXRUNTIME_PROVIDERS_CUDA_LIB "libonnxruntime_providers_cuda.so")
+  set(ONNXRUNTIME_ALL_SHARED_LIBS "libonnxruntime*.so*")
+  set(ONNXRUNTIME_EXTENSIONS_LIB "tfmtok_c.so")
+endif()
+
+file(GLOB generator_srcs CONFIGURE_DEPENDS
+  "${GENERATORS_ROOT}/*.h"
+  "${GENERATORS_ROOT}/*.cpp"
+  "${MODELS_ROOT}/*.h"
+  "${MODELS_ROOT}/*.cpp"
+)
+
+file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_ALL_SHARED_LIBS}")
+
+if(NOT EXISTS "${ORT_LIB_DIR}/${ONNXRUNTIME_LIB}")
+  message(FATAL_ERROR "Expected the ONNX Runtime library to be found at ${ORT_LIB_DIR}/${ONNXRUNTIME_LIB}. Actual: Not found.")
+endif()
+if(NOT EXISTS "${ORT_HEADER_DIR}/onnxruntime_c_api.h")
+  message(FATAL_ERROR "Expected the ONNX Runtime C API header to be found at \"${ORT_HEADER_DIR}/onnxruntime_c_api.h\". Actual: Not found.")
+endif()
+
+
+# normalize the target platform to x64 or arm64. additional architectures can be added as needed.
+if (MSVC)
+  if (CMAKE_VS_PLATFORM_NAME)
+    # cross-platform generator
+    set(genai_target_platform ${CMAKE_VS_PLATFORM_NAME})
+  else()
+    set(genai_target_platform ${CMAKE_SYSTEM_PROCESSOR})
+  endif()
+
+  if (genai_target_platform STREQUAL "arm64")
+    # pass
+  elseif (genai_target_platform STREQUAL "x64" OR 
+          genai_target_platform STREQUAL "x86_64" OR 
+          genai_target_platform STREQUAL "AMD64" OR 
+          CMAKE_GENERATOR MATCHES "Win64")
+    set(genai_target_platform "x64")
+  else()
+    message(FATAL_ERROR "Unsupported architecture. CMAKE_SYSTEM_PROCESSOR: ${CMAKE_SYSTEM_PROCESSOR}")
+  endif()
+elseif(APPLE)
+  # TODO: do we need to support CMAKE_OSX_ARCHITECTURES having multiple values?
+  set(_apple_target_arch ${CMAKE_OSX_ARCHITECTURES})
+  if (NOT _apple_target_arch)
+    set(_apple_target_arch ${CMAKE_HOST_SYSTEM_PROCESSOR})
+  endif()
+
+  if (_apple_target_arch STREQUAL "arm64")
+    set(genai_target_platform "arm64")
+  elseif (_apple_target_arch STREQUAL "x86_64")
+    set(genai_target_platform "x64")
+  else()
+    message(FATAL_ERROR "Unsupported architecture. ${_apple_target_arch}")
+  endif()
+elseif(ANDROID)
+  if (CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a")
+    set(genai_target_platform "arm64")
+  elseif (CMAKE_ANDROID_ARCH_ABI STREQUAL "x86_64")
+    set(genai_target_platform "x64")
+  else()
+    message(FATAL_ERROR "Unsupported architecture. CMAKE_ANDROID_ARCH_ABI: ${CMAKE_ANDROID_ARCH_ABI}")
+  endif()
+else()
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "^arm64.*")
+    set(genai_target_platform "arm64")
+  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^aarch64.*")
+    set(genai_target_platform "arm64")
+  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64)$")
+    set(genai_target_platform "x64")
+  else()
+    message(FATAL_ERROR "Unsupported architecture. CMAKE_SYSTEM_PROCESSOR: ${CMAKE_SYSTEM_PROCESSOR}")
+  endif()
+endif()
+

@@ -102,7 +102,7 @@ def main():
             "-i",
             str((Path(
                 SCRIPT_DIR) / "github" / "linux" / "docker" / "manylinux" / "manylinux.patch").resolve()),
-            cwd=str(dest),
+            cwd=dest,
         )
 
     if use_container_registry:

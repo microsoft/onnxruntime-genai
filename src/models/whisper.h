@@ -1,7 +1,10 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
 #include "model.h"
 #include "input_ids.h"
 #include "logits.h"
 #include "kv_cache.h"
+#include "extra_inputs.h"
 
 namespace Generators {
 
@@ -12,6 +15,8 @@ struct Whisper_Model : Model {
 
   std::unique_ptr<OrtSession> session_decoder_;  // decoder.onnx
   std::unique_ptr<OrtSession> session_encoder_;  // encoder_decoder_init.onnx
+
+  std::unique_ptr<SessionInfo> session_encoder_info_;
 };
 
 struct Whisper_State : State {
@@ -22,12 +27,18 @@ struct Whisper_State : State {
   void UpdateInputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> next_indices, int current_length);
 
   const Whisper_Model& model_;
-  bool first_run_{true};
+  enum struct RunState {
+    Encoder_Decoder_Init,
+    Decoder_First,
+    Decoder,
+  } run_state_{RunState::Encoder_Decoder_Init};
 
   InputIDs decoder_input_ids_{model_, *this};
   Logits logits_{model_, *this};
   KV_Cache kv_cache_{model_, *this};
   Cross_Cache cross_cache_{model_, *this};
+  ExtraInputs extra_inputs_{model_, *this};
+  std::unique_ptr<OrtValue> encoder_input_ids_;
   std::unique_ptr<OrtValue> encoder_hidden_states_;
 };
 }  // namespace Generators

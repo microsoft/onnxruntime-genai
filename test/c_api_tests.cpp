@@ -89,6 +89,34 @@ TEST(CAPITests, EndToEndPhiBatch) {
 #endif
 }
 
+TEST(CAPITests, Tensor_And_AddExtraInput) {
+  // Create a [3 4] shaped tensor
+  std::array<float, 12> data{0, 1, 2, 3,
+                             10, 11, 12, 13,
+                             20, 21, 22, 23};
+  std::vector<int64_t> shape{3, 4};  // Use vector so we can easily compare for equality later
+
+  auto tensor = OgaTensor::Create(data.data(), shape.data(), shape.size(), OgaElementType_float32);
+
+  EXPECT_EQ(tensor->Data(), data.data());
+  EXPECT_EQ(tensor->Shape(), shape);
+  EXPECT_EQ(tensor->Type(), OgaElementType_float32);
+
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetModelInput("test_input", *tensor);
+}
+
+TEST(CAPITests, Logging) {
+  // Trivial test to ensure the API builds properly
+  Oga::SetLogBool("enabled", true);
+  Oga::SetLogString("filename", nullptr);  // If we had a filename set, this would stop logging to the file and go back to the console
+  Oga::SetLogBool("enabled", false);
+}
+
+// DML doesn't support GPT attention
+#if !USE_DML
 TEST(CAPITests, GreedySearchGptFp32CAPI) {
   std::vector<int64_t> input_ids_shape{2, 4};
   std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
@@ -143,6 +171,7 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
     EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
   }
 }
+#endif
 
 #if TEST_PHI2
 
@@ -234,3 +263,11 @@ TEST(CAPITests, TopKTopPCAPI) {
 }
 
 #endif  // TEST_PHI2
+
+void CheckResult(OgaResult* result) {
+  if (result) {
+    std::string string = OgaResultGetError(result);
+    OgaDestroyResult(result);
+    throw std::runtime_error(string);
+  }
+}

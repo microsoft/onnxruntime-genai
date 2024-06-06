@@ -7,11 +7,15 @@ namespace Generators {
 struct InputIDs {
   InputIDs(const Model& model, State& state);
 
+  InputIDs(InputIDs&& other, State& state);
+
   void Add();
   void Update(RoamingArray<int32_t> next_tokens);
 
   auto& GetShape() const { return shape_; }
   const char* name_;
+
+  OrtValue* Get() { return value_.get(); }
 
  private:
   const Model& model_;
@@ -23,7 +27,13 @@ struct InputIDs {
   std::unique_ptr<OrtValue> value_;
 
   // Used for decoding runs with cuda graphs.
-  std::unique_ptr<StaticBuffer> sb_input_ids_;
+  StaticBuffer* sb_input_ids_{};
+
+#if USE_DML
+  std::unique_ptr<OrtValue> value_int32_;
+  StaticBuffer* sb_input_ids_int32_{};
+  DmlReusedCommandListState input_ids_cast_command_list_state_{};
+#endif
 };
 
 }  // namespace Generators

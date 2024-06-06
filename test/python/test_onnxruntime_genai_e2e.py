@@ -46,8 +46,8 @@ def run_model(model_path: str | bytes | os.PathLike):
 
     sequences = tokenizer.encode_batch(prompts)
     params = og.GeneratorParams(model)
-    params.set_search_options({"max_length": 200})
-    params.try_use_cuda_graph_with_max_batch_size(16)
+    params.set_search_options(max_length=200)
+    params.try_graph_capture_with_max_batch_size(16)
     params.input_ids = sequences
 
     output_sequences = model.generate(params)

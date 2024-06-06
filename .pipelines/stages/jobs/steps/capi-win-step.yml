@@ -2,6 +2,12 @@ parameters:
 - name: target
   type: string
   default: 'onnxruntime-genai'
+- name: ep
+  type: string
+  default: 'cpu'
+- name: arch
+  type: string
+  default: 'x64'
 steps:
 - bash: |
     echo "##[error]Error: ep and arch are not set"
@@ -29,9 +35,36 @@ steps:
     echo "target=${{ parameters.target }}"
   displayName: 'Print Parameters'
 
+
 - template: utils/download-ort.yml
   parameters:
     archiveType: 'zip'
+    ep: ${{ parameters.ep }}
+
+- ${{ if eq(parameters.ep, 'directml') }}:
+  - powershell: |
+      Invoke-WebRequest -Uri $(dml_url) -OutFile $(dml_zip)
+      Expand-Archive $(dml_zip) -DestinationPath $(dml_dir)
+      Remove-Item -Path $(dml_zip)
+      Get-ChildItem -Recurse $(dml_dir)
+      mv $(dml_dir)\bin\x64-win\DirectML.dll ort\lib
+      mv $(dml_dir)\include\DirectML.h ort\include
+    workingDirectory: '$(Build.Repository.LocalPath)'
+    continueOnError: true
+
+- ${{ if eq(parameters.arch, 'arm64') }}:
+  - powershell: |
+      Invoke-WebRequest -Uri $(ort_arm64_url) -OutFile $(ort_arm64_zip)
+      Expand-Archive $(ort_arm64_zip) -DestinationPath .
+      Remove-Item -Path $(ort_arm64_zip)
+      $ort_folder_name = "ort"
+      if (Test-Path -Path $ort_folder_name)
+      {
+          Remove-Item -Path $ort_folder_name -Recurse -Force
+      }
+      Rename-Item -Path $(ort_arm64_dir) -NewName $ort_folder_name
+    workingDirectory: '$(Build.Repository.LocalPath)'
+    continueOnError: false
 
 - powershell: |
     azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" 'cuda_sdk'
@@ -48,7 +81,13 @@ steps:
 - powershell: |
     cmake --preset windows_$(arch)_$(ep)_release
   displayName: 'Configure CMake C API without CUDA'
-  condition: ne(variables['ep'], 'cuda')
+  condition: and(ne(variables['ep'], 'cuda'), ne(variables['arch'], 'arm64'))
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
+- powershell: |
+    cmake --preset windows_$(arch)_$(ep)_release
+  displayName: 'Configure CMake C API for ARM64 CPU'
+  condition: eq(variables['arch'], 'arm64')
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
@@ -69,15 +108,20 @@ steps:
       AnalyzeTargetGlob: '$(Build.Repository.LocalPath)\**\*genai.dll'
     continueOnError: true
 
-  - template: utils/capi-archive.yml
-    parameters:
-      archiveType: zip
+  - powershell: |
+      python -m pip install wheel
+    displayName: 'Install wheel'
+
+  - powershell: |
+      cmake --build --preset windows_$(arch)_$(ep)_release --target package
+    displayName: 'Package C/C++ API'
+    workingDirectory: '$(Build.Repository.LocalPath)'
 
   - task: PublishBuildArtifacts@1
     displayName: 'Publish Artifact: ONNXRuntime Genai capi'
     inputs:
       ArtifactName: $(artifactName)-capi
-      PathtoPublish: '$(Build.ArtifactStagingDirectory)/capi'
+      PathtoPublish: '$(Build.Repository.LocalPath)\build\$(ep)\package'
 
 - ${{ if eq(parameters.target, 'python') }}:
   - task: BinSkim@4
@@ -92,6 +136,10 @@ steps:
       DisplayName: 'ESRP - PYD Sign'
       DoEsrp: true
       Pattern: '*.pyd'
+
+  - powershell: |
+      python -m pip install wheel
+    displayName: 'Install wheel'
 
   - powershell: |
       cmake --build --preset windows_$(arch)_$(ep)_release --parallel --PyPackageBuild

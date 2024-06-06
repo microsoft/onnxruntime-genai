@@ -1,4 +1,13 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
 #pragma once
+
+#include <memory>
+#include "../span.h"
+
+namespace Ort {
+struct Allocator;
+}
 
 namespace Generators {
 
@@ -11,14 +20,13 @@ struct StaticBuffer {
                                                        ONNXTensorElementDataType type);
 
  private:
-  size_t GetElementSize(ONNXTensorElementDataType type);
   size_t GetNumElements(std::span<const int64_t> shape);
 
-  Ort::Allocator* allocator_{nullptr};
+  Ort::Allocator* allocator_{};
   const OrtMemoryInfo& info_;
-  void* buffer_{nullptr};
-  size_t bytes_{0};
-  size_t max_beam_batch_size_{0};
+  void* buffer_{};
+  size_t bytes_{};
+  size_t max_beam_batch_size_{};
 };
 
 }  // namespace Generators

@@ -1,17 +1,12 @@
-# Gen-AI Python Examples
+# Generate() API Python Examples
 
 ## Install the onnxruntime-genai library
 
 Install the python package according to the [installation instructions](https://onnxruntime.ai/docs/genai/howto/install).
 
-  ```bash
-  cd build/wheel
-  pip install onnxruntime_genai-*.whl
-  ```
-
 ## Get the model
 
-You can generate the model using the model builder this library, or bring your own model.
+You can generate the model using the model builder with this library, or bring your own model.
 
 If you bring your own model, you need to provide the configuration. See the [config reference](https://onnxruntime.ai/docs/genai/reference/config).
 
@@ -20,11 +15,7 @@ To generate the model with model builder:
 1. Install the model builder script dependencies
 
    ```bash
-   pip install numpy
-   pip install transformers
-   pip install torch
-   pip install onnx
-   pip install onnxruntime
+   pip install numpy transformers torch onnx onnxruntime
    ```
 
 2. Choose a model. Examples of supported ones are:
@@ -42,10 +33,14 @@ To generate the model with model builder:
 
 ## Run the example model script
 
-See accompanying chat-e2e-example.sh and generate-e2e-example.sh scripts for end-to-end examples of workflow.
+See accompanying qa-e2e-example.sh and generate-e2e-example.sh scripts for end-to-end examples of workflow.
+
+The `model-generate` script generates the output sequence all on one function call.
+
+The `model-qa` script streams the output text token by token.
 
 To run the python examples...
 ```bash
 python model-generate.py -m {path to model folder} -ep {cpu or cuda} -i {string prompt}
-python model-chat.py -m {path to model folder} -ep {cpu or cuda}
+python model-qa.py -m {path to model folder} -ep {cpu or cuda}
 ```

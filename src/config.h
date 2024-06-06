@@ -1,12 +1,20 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
 #pragma once
 
 namespace Generators {
 
 struct Config {
   Config() = default;
-  Config(const std::filesystem::path& path);
+  Config(const fs::path& path);
 
-  std::filesystem::path config_path;  // Path of the config directory
+  struct Defaults {
+    static constexpr std::string_view InputIdsName = "input_ids";
+    static constexpr std::string_view PixelValuesName = "pixel_values";
+    static constexpr std::string_view ImageSizesName = "image_sizes";
+  };
+
+  fs::path config_path;  // Path of the config directory
 
   using ProviderOption = std::pair<std::string, std::string>;
   struct ProviderOptions {
@@ -29,11 +37,12 @@ struct Config {
   struct Model {
     std::string type;
 
-    int pad_token_id{};            // The id of the padding token.
-    int eos_token_id{};            // The id of the end-of-stream token.
-    int bos_token_id{};            // The id of the beginning-of-stream token.
-    int sep_token_id{};            // The id of the separation token.
-    int decoder_start_token_id{};  // If an encoder-decoder model starts decoding with a different token than bos, the id of that token.
+    int pad_token_id{};              // The id of the padding token.
+    int eos_token_id{};              // The id of the end-of-stream token.
+    std::vector<int> eos_token_ids;  // If eos_token_id is passed as an array, this is where the values go (eos_token_id gets set to the first entry in the array)
+    int bos_token_id{};              // The id of the beginning-of-stream token.
+    int sep_token_id{};              // The id of the separation token.
+    int decoder_start_token_id{};    // If an encoder-decoder model starts decoding with a different token than bos, the id of that token.
     int vocab_size{};
     int context_length{};
 
@@ -41,6 +50,31 @@ struct Config {
     struct EncoderDecoderInit {
       std::string filename;
     } encoder_decoder_init;
+
+    struct Embedding {
+      std::string filename;
+
+      struct Inputs {
+        std::string input_ids{Defaults::InputIdsName};
+      } inputs;
+
+      struct Outputs {
+        std::string embeddings{"inputs_embeds"};
+      } outputs;
+    } embedding;
+
+    struct Vision {
+      std::string filename;
+
+      struct Inputs {
+        std::string pixel_values{Defaults::PixelValuesName};
+        std::string image_sizes{Defaults::ImageSizesName};
+      } inputs;
+
+      struct Outputs {
+        std::string visual_features{"visual_features"};
+      } outputs;
+    } vision;
 
     struct Decoder {
       std::string filename;
@@ -53,7 +87,8 @@ struct Config {
       int head_size{};
 
       struct Inputs {
-        std::string input_ids{"input_ids"};
+        std::string input_ids{Defaults::InputIdsName};
+        std::string embeddings{"inputs_embeds"};
         std::string position_ids{"position_ids"};
         std::string attention_mask{"attention_mask"};
         std::string seqlens_k{"seqlens_k"};
@@ -90,6 +125,13 @@ struct Config {
     bool past_present_share_buffer{};  // The past/present kv tensors are shared and allocated once to max_length (cuda only)
     int random_seed{-1};               // -1 = Seed with random device, otherwise use value to seed RNG
   } search;
+
+  void AddMapping(const std::string& nominal_name, const std::string& graph_name);
+  // Returns graph name and true if the nominal name is found in the mapping
+  // otherwise returns the nominal name and false
+  std::pair<std::string, bool> GetGraphName(const std::string& nominal_name) const;
+
+  std::unordered_map<std::string, std::string> nominal_names_to_graph_names_;  // Mapping of nominal input/output names to graph input/output names
 };
 
 void SetSearchNumber(Config::Search& search, std::string_view name, double value);

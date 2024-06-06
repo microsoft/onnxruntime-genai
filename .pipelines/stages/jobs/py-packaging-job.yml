@@ -13,32 +13,47 @@ parameters:
   values:
   - 'linux'
   - 'win'
-- name: publish_to_ado_feed
-  type: boolean
+
 
 jobs:
 - job: python_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}_packaging
   ${{ if eq(parameters.os, 'linux') }}:
     pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
   ${{ if eq(parameters.os, 'win') }}:
-    pool: 'onnxruntime-Win-CPU-2022'
+    ${{ if eq(parameters.ep, 'directml') }}:
+      pool: 'onnxruntime-Win2022-GPU-dml-A10'
+    ${{ elseif eq(parameters.arch, 'arm64') }}:
+      pool: 'onnxruntime-genai-windows-vs-2022-arm64'
+    ${{ else }}:
+      pool: 'onnxruntime-Win-CPU-2022'
+
   strategy:
-    matrix:
-      Python38:
-        PyDotVer: '3.8'
-        PyNoDotVer: '38'
-      Python39:
-        PyDotVer: '3.9'
-        PyNoDotVer: '39'
-      Python310:
-        PyDotVer: '3.10'
-        PyNoDotVer: '310'
-      Python311:
-        PyDotVer: '3.11'
-        PyNoDotVer: '311'
-      Python312:
-        PyDotVer: '3.12'
-        PyNoDotVer: '312'
+    ${{ if eq(parameters.arch, 'arm64') }}:
+      matrix:
+        Python311:
+          PyDotVer: '3.11'
+          PyNoDotVer: '311'
+        Python312:
+          PyDotVer: '3.12'
+          PyNoDotVer: '312'
+    ${{ else }}:
+      matrix:
+        Python38:
+          PyDotVer: '3.8'
+          PyNoDotVer: '38'
+        Python39:
+          PyDotVer: '3.9'
+          PyNoDotVer: '39'
+        Python310:
+          PyDotVer: '3.10'
+          PyNoDotVer: '310'
+        Python311:
+          PyDotVer: '3.11'
+          PyNoDotVer: '311'
+        Python312:
+          PyDotVer: '3.12'
+          PyNoDotVer: '312'
+    
   timeoutInMinutes: 240
   workspace:
     clean: all
@@ -63,15 +78,59 @@ jobs:
     value: ${{ parameters.ep }}
   - name: ort_version
     value: ${{ parameters.ort_version }}
+  - name: os
+    value: ${{ parameters.os }}
+
   - name: ort_filename
     ${{ if eq(parameters.ep, 'cpu') }}:
-      value: 'onnxruntime-${{ parameters.os }}-${{ parameters.arch }}-${{ parameters.ort_version }}'
-    ${{ else}}:
-      ${{if eq(parameters.cuda_version, '11.8') }}:
-        value: 'onnxruntime-${{ parameters.os }}-${{ parameters.arch }}-gpu-${{ parameters.ort_version }}'
+      value: 'Microsoft.ML.OnnxRuntime'
+    ${{ elseif eq(parameters.ep, 'cuda') }}:
+      ${{if eq(parameters.os, 'win') }}:
+        value: 'Microsoft.ML.OnnxRuntime.Gpu.Windows'
       ${{ else }}:
-        value: 'onnxruntime-${{ parameters.os }}-${{ parameters.arch }}-cuda12-${{ parameters.ort_version }}'
+        value: 'Microsoft.ML.OnnxRuntime.Gpu.Linux'
+    ${{ elseif eq(parameters.ep, 'directml')}}:
+      value: 'Microsoft.ML.OnnxRuntime.DirectML'
+    ${{ else }}:
+      value: 'Microsoft.ML.OnnxRuntime'
+
+  - name: dml_dir
+    value: 'Microsoft.AI.DirectML.1.14.2'
+  - name: dml_zip
+    value: 'Microsoft.AI.DirectML.1.14.2.zip'
+  - name: dml_url
+    value: "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.14.2"
+
+  - name: ort_arm64_dir
+    value: 'onnxruntime-win-arm64-1.17.3'
+  - name: ort_arm64_zip
+    value: 'onnxruntime-win-arm64-1.17.3.zip'
+  - name: ort_arm64_url
+    value: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/onnxruntime-win-arm64-1.17.3.zip"
+
   steps:
+  - script: |
+      MKDIR $(Agent.ToolsDirectory)\Python\3.12.3\arm64 
+      XCOPY /s /y /h /e /c /q "C:\Python\Python312\*.*" $(Agent.ToolsDirectory)\Python\3.12.3\arm64\
+      COPY NUL $(Agent.ToolsDirectory)\Python\3.12.3\arm64.complete
+      DIR $(Agent.ToolsDirectory)\Python
+      DIR $(Agent.ToolsDirectory)\Python\3.12.3
+      DIR $(Agent.ToolsDirectory)\Python\3.12.3\arm64
+      DIR "C:\Python"
+    displayName: Copy python 3.12.3 version to agent tools directory
+    condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'), eq(variables['PyDotVer'], '3.12'))
+
+  - script: |
+      MKDIR $(Agent.ToolsDirectory)\Python\3.11.0\arm64
+      XCOPY /s /y /h /e /c /q "C:\Python\Python311\*.*" $(Agent.ToolsDirectory)\Python\3.11.0\arm64\
+      COPY NUL $(Agent.ToolsDirectory)\Python\3.11.0\arm64.complete
+      DIR $(Agent.ToolsDirectory)\Python
+      DIR $(Agent.ToolsDirectory)\Python\3.11.0
+      DIR $(Agent.ToolsDirectory)\Python\3.11.0\arm64
+      DIR "C:\Python"
+    displayName: Copy python 3.11.0 version to agent tools directory
+    condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'), eq(variables['PyDotVer'], '3.11'))
+
   - task: UsePythonVersion@0
     inputs:
       versionSpec: $(PyDotVer)
@@ -91,15 +150,16 @@ jobs:
     - template: steps/capi-linux-step.yml
       parameters:
         target: 'python'
+        arch: ${{ parameters.arch }}
+        ep: ${{ parameters.ep }}
 
   # Windows job needs to set the python version and install the required packages
   - ${{ if eq(parameters.os, 'win') }}:
     - template: steps/capi-win-step.yml
       parameters:
         target: 'python'
-
-  - ${{ if eq(parameters.publish_to_ado_feed, true)}}:
-    - template: steps/py-ado-feed-releasing-step.yml
+        arch: ${{ parameters.arch }}
+        ep: ${{ parameters.ep }}
 
   - template: steps/compliant-and-cleanup-step.yml
 

@@ -1,6 +1,12 @@
 parameters:
 - name: target
   type: string
+- name: ep
+  type: string
+  default: 'cpu'
+- name: arch
+  type: string
+  default: 'x64'
 steps:
 
 - checkout: self
@@ -30,6 +36,7 @@ steps:
 - template: utils/download-ort.yml
   parameters:
     archiveType: 'tgz'
+
 - bash: |
     set -e -x
     az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
@@ -40,7 +47,7 @@ steps:
       --container-registry onnxruntimebuildcache \
       --manylinux-src manylinux \
       --multiple_repos \
-      --repository onnxruntime$(ep)build$(arch)
+      --repository ortgenai$(ep)build$(arch)
   displayName: 'Get Docker Image'
   workingDirectory: '$(Build.Repository.LocalPath)'
 
@@ -50,7 +57,7 @@ steps:
       docker run \
       --rm \
       --volume $(Build.Repository.LocalPath):/ort_genai_src \
-      -w /ort_genai_src/ onnxruntime$(ep)build$(arch) \
+      -w /ort_genai_src/ ortgenai$(ep)build$(arch) \
       bash -c " \
           /usr/bin/cmake --preset linux_gcc_$(ep)_release \
             -DENABLE_TESTS=OFF && \
@@ -58,6 +65,7 @@ steps:
             --target onnxruntime-genai"
     displayName: 'Build GenAi'
     workingDirectory: '$(Build.Repository.LocalPath)'
+
   - task: BinSkim@4
     displayName: 'Run BinSkim'
     inputs:
@@ -66,12 +74,22 @@ steps:
   - template: utils/capi-archive.yml
     parameters:
       archiveType: tar
+  - script: |
+      set -e -x
+      docker run \
+      --rm \
+      --volume $(Build.Repository.LocalPath):/ort_genai_src \
+      -w /ort_genai_src/ ortgenai$(ep)build$(arch) \
+      bash -c " \
+          /usr/bin/cmake --build --preset linux_gcc_$(ep)_release --target package"
+    displayName: 'Package C/C++ API'
+    workingDirectory: '$(Build.Repository.LocalPath)'
 
   - task: PublishBuildArtifacts@1
     displayName: 'Publish Artifact: ONNXRuntime Genai capi'
     inputs:
       ArtifactName: $(artifactName)-capi
-      PathtoPublish: '$(Build.ArtifactStagingDirectory)/capi'
+      PathtoPublish: '$(Build.Repository.LocalPath)/build/$(ep)/package'
 
 - ${{ if eq(parameters.target, 'python') }}:
   - bash: |
@@ -79,7 +97,7 @@ steps:
       docker run \
       --rm \
       --volume $(Build.Repository.LocalPath):/ort_genai_src \
-      -w /ort_genai_src/ onnxruntime$(ep)build$(arch) \
+      -w /ort_genai_src/ ortgenai$(ep)build$(arch) \
       bash -c " \
           /usr/bin/cmake --preset linux_gcc_$(ep)_release \
             -DENABLE_TESTS=OFF \
@@ -101,7 +119,7 @@ steps:
       docker run \
       --rm \
       --volume $(Build.Repository.LocalPath):/ort_genai_src \
-      -w /ort_genai_src/ onnxruntime$(ep)build$(arch) \
+      -w /ort_genai_src/ ortgenai$(ep)build$(arch) \
       bash -c " \
           /usr/bin/cmake --build --preset linux_gcc_$(ep)_release \
             -DENABLE_TESTS=OFF \
