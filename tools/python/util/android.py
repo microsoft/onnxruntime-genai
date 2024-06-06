@@ -15,6 +15,11 @@ from .logger import get_logger
 from .platform_helpers import is_linux, is_windows
 from .run import run
 
+# specify __all__ as we import using a wildcard in util/__init__.py so the function names have an 'android' prefix
+# to make it clear where they came from
+# e.g. usage is `util.android.start_emulator(...)` instead of `util.start_emulator(...)`
+__all__ = ["get_sdk_tool_paths", "create_virtual_device", "start_emulator", "stop_emulator"]
+
 _log = get_logger("util.android")
 
 
