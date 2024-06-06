@@ -99,26 +99,6 @@ jobs:
     ${{ else }}:
       value: 'cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4'
 
-  - name: ort_filename
-    ${{ if eq(parameters.ep, 'cpu') }}:
-      value: 'Microsoft.ML.OnnxRuntime'
-    ${{ elseif eq(parameters.ep, 'cuda') }}:
-      ${{if eq(parameters.os, 'win') }}:
-        value: 'Microsoft.ML.OnnxRuntime.Gpu.Windows'
-      ${{ else }}:
-        value: 'Microsoft.ML.OnnxRuntime.Gpu.Linux'
-    ${{ elseif eq(parameters.ep, 'directml')}}:
-      value: 'Microsoft.ML.OnnxRuntime.DirectML'
-    ${{ else }}:
-      value: 'Microsoft.ML.OnnxRuntime'
-
-  - name: dml_dir
-    value: 'Microsoft.AI.DirectML.1.14.2'
-  - name: dml_zip
-    value: 'Microsoft.AI.DirectML.1.14.2.zip'
-  - name: dml_url
-    value: "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.14.2"
-
   steps:
   - checkout: self
     clean: true
@@ -229,14 +209,8 @@ jobs:
         python -m pip install numpy transformers torch onnx onnxruntime
         cd examples\python
         python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)
-        if ("$(ep)" -eq "directml") {
-          python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -e dml -p int4 -o ./example-models/phi2-int4-dml
-          python model-generate.py -m ./example-models/phi2-int4-dml
-        }
-        else {
-          python model-generate.py -m .\models\$(prebuild_phi3_mini_model_folder)
-        }
 
+        python model-generate.py -m .\models\$(prebuild_phi3_mini_model_folder)
       displayName: 'Run Example With Artifact'
       workingDirectory: '$(Build.Repository.LocalPath)'
 
