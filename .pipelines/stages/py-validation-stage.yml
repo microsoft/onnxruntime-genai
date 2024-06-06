@@ -31,7 +31,7 @@ parameters:
 
 
 stages:
-- stage: python_packaging
+- stage: python_validation
   jobs:
   - ${{ if eq(parameters.enable_win_cpu, true) }}:
     - template: jobs/py-validation-job.yml

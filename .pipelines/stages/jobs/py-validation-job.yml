@@ -23,7 +23,7 @@ parameters:
   - 'win'
 
 jobs:
-- job: python_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}_validating
+- job: python_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}_validation
   ${{ if eq(parameters.os, 'linux') }}:
     ${{ if eq(parameters.ep, 'cuda') }}:
       pool: 'Onnxruntime-Linux-GPU'
