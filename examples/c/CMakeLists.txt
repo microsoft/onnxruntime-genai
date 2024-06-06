@@ -48,12 +48,10 @@ endif()
 target_link_libraries(
         phi3
         PUBLIC
-        cublasLt cublas cudnn curand cufft cudart
         onnxruntime-genai)
 target_link_libraries(
         phi3v
         PUBLIC
-        cublasLt cublas cudnn curand cufft cudart
         onnxruntime-genai)
 
 if(USE_CUDA)
