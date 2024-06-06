@@ -63,10 +63,11 @@ Folder structure should look as the below:
 
 ## Launch the app
 
-
 ```
 python chat_app/app.py
 ```
+
+or launch the app by `python app.py`.
 
 You can also attach your model that is outside of `models` folder to the app by passing arguments of `--model_path` and `--model_name`.
 ```
