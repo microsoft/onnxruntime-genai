@@ -17,7 +17,7 @@ parameters:
 
 jobs:
 # - job: python_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}_packaging
-- job: python_${{ parameters.os }}_${{ parameters.ep }}${{ parameters.ep == 'cuda' ? '_' + parameters.cuda_version : '' }}_${{ parameters.arch }}_packaging
+- job: python_${{ parameters.os }}_${{ parameters.ep }}${{ if eq(parameters.ep, 'cuda') }}_${{ parameters.cuda_version }}${{ endif }}_${{ parameters.arch }}_packaging
   ${{ if eq(parameters.os, 'linux') }}:
     pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
   ${{ if eq(parameters.os, 'win') }}:
