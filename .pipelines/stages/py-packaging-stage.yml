@@ -51,15 +51,6 @@ stages:
         ort_version: ${{ parameters.ort_dml_version }}
         os: 'win'
 
-  - ${{ if eq(parameters.enable_win_cuda, true) }}:
-    - template: jobs/py-packaging-job.yml
-      parameters:
-        arch: 'x64'
-        cuda_version: ${{ parameters.cuda_version }}
-        ep: 'cuda'
-        ort_version: ${{ parameters.ort_cuda_version }}
-        os: 'win'
-
   - ${{ if and(eq(parameters.enable_win_cuda, true), contains(parameters.cuda_versions, '11.8')) }}:
     - template: jobs/py-packaging-job.yml
       parameters:
