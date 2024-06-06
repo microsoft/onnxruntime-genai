@@ -58,7 +58,7 @@ def change_image_visibility(new_model_name):
 
 gr.Chatbot.postprocess = postprocess
 
-with Path("chat_app/assets/custom.css").open() as f:
+with Path(f"{top_directory}/chat_app/assets/custom.css").open() as f:
     custom_css = f.read()
 
 
