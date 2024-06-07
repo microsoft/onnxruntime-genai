@@ -52,6 +52,15 @@ parameters:
   - '11.8'
   - '12.2'
 
+- name: build_config
+  displayName: 'Build Configuration'
+  type: string
+  default: 'release'
+  values:
+  - 'release'
+  - 'relwithdebinfo'
+  - 'debug'
+
 resources:
   repositories:
   - repository: manylinux
@@ -74,4 +83,5 @@ stages:
     ort_cuda_version: ${{ parameters.ort_cuda_version }}
     ort_dml_version: ${{ parameters.ort_dml_version }}
     cuda_version: ${{ parameters.cuda_version }}
+    build_config: ${{ parameters.build_config }}
 

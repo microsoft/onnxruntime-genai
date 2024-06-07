@@ -20,6 +20,9 @@ parameters:
 - name: cuda_version
   type: string
   default: ''
+- name: build_config
+  type: string
+  default: 'release'
 
 
 stages:
