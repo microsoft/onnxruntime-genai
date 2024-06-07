@@ -71,15 +71,8 @@ jobs:
     value: ${{ parameters.arch }}
   - name: artifactName
     value: 'onnxruntime-genai-${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.arch }}'
-  - name: buildConfig
-    ${{ if eq(parameters.build_config, 'release') }}:
-      value: 'Release'
-    ${{ elseif eq(parameters.build_config, 'relwithdebinfo') }}:
-      value: 'RelWithDebInfo'
-    ${{ elseif eq(parameters.build_config, 'debug')}}:
-      value: 'Debug'
-    ${{ else }}:
-      value: 'MinSizeRel'
+  - name: build_config
+    value: ${{ parameters.build_config }}
   - name: buildDir
     value: 'build/${{ parameters.ep }}'
   - name: cuda_version
