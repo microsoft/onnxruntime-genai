@@ -12,7 +12,7 @@ struct Search_Cuda : Search {
 
   int GetSequenceLength() const override;
   RoamingArray<int32_t> GetSequenceLengths() override { return sequence_lengths_; }
-  RoamingArray<int32_t> GetSequence(int index) override { return sequences_.GetSequence(index); }
+  RoamingArray<int32_t> GetSequence(size_t index) override { return sequences_.GetSequence(index); }
 
   bool IsDone() const {
     cudaStreamSynchronize(params_->cuda_stream);
