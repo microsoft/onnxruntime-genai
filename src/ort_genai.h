@@ -123,10 +123,28 @@ struct OgaTokenizer : OgaAbstract {
     OgaCheckResult(OgaTokenizerEncode(this, str, &sequences));
   }
 
+  void EncodeBatch(std::vector<const char*> inputs, OgaSequences& sequences) const {
+    for (auto input : inputs) {
+      OgaCheckResult(OgaTokenizerEncode(this, input, &sequences));
+    }
+  }
+
   OgaString Decode(const int32_t* tokens_data, size_t tokens_length) const {
     const char* p;
     OgaCheckResult(OgaTokenizerDecode(this, tokens_data, tokens_length, &p));
     return p;
+  }
+
+  std::vector<const char*> DecodeBatch(std::unique_ptr<OgaSequences> sequences) const {
+    std::vector<const char*> out;
+    for (int i = 0; i < sequences->Count(); ++i) {
+      const auto sequence_length = sequences->SequenceCount(i);
+      const auto* sequence_data = sequences->SequenceData(i);
+      const char* p;
+      OgaCheckResult(OgaTokenizerDecode(this, sequence_data, sequence_length, &p));
+      out.push_back(p);
+    }
+    return out;
   }
 
 #if __cplusplus >= 202002L

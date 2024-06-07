@@ -37,23 +37,23 @@ std::vector<std::string> OgaEngine::Generate(std::vector<const char*> prompts) {
     unscheduled_prompts_.push(prompt);
   }
 
-  std::vector<std::string> outputs;
+  std::vector<std::string> outputs(prompts.size());
 
   while (!unscheduled_prompts_.empty()) {
     std::vector<const char*> scheduled_prompts = Schedule();
     auto sequences = OgaSequences::Create();
-    for (const char* prompt : scheduled_prompts) {
-      tokenizer_->Encode(prompt, *sequences);
 
-      auto params = OgaGeneratorParams::Create(*model_);
-      params->SetSearchOption("max_length", 200);
-      params->SetInputSequences(*sequences);
+    tokenizer_->EncodeBatch(scheduled_prompts, *sequences);
 
-      auto output_sequences = model_->Generate(*params);
-      const auto output_sequence_length = output_sequences->SequenceCount(0);
-      const auto* output_sequence_data = output_sequences->SequenceData(0);
-      auto out_string = tokenizer_->Decode(output_sequence_data, output_sequence_length);
-      outputs.push_back(std::string{out_string});
+    auto params = OgaGeneratorParams::Create(*model_);
+    params->SetSearchOption("max_length", 200);
+    params->SetInputSequences(*sequences);
+
+    auto output_sequences = model_->Generate(*params);
+
+    auto out_strings = tokenizer_->DecodeBatch(std::move(output_sequences));
+    for (auto out_string : out_strings) {
+      outputs.push_back(std::string(out_string));
     }
   }
   return outputs;
@@ -62,8 +62,8 @@ std::vector<std::string> OgaEngine::Generate(std::vector<const char*> prompts) {
 int64_t OgaEngine::AddRequest(const char* prompt) {
   // Add the request to the queue
   // Return the request ID
-
+  int64_t rid = request_id_;
   unscheduled_prompts_.push(prompt);
   request_id_++;
-  return unscheduled_prompts_.size();
+  return rid;
 }
