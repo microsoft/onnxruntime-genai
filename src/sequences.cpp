@@ -33,7 +33,7 @@ Sequences::Sequences(std::span<const int32_t> input_sequences, int batch_size, i
   }
 }
 
-cpu_span<int32_t> Sequences::GetSequence(int batch_beam_index) {
+cpu_span<int32_t> Sequences::GetSequence(size_t batch_beam_index) {
   auto span = sequences_.subspan(batch_beam_index * max_length_, current_length_);
   return cpu_span<int32_t>{span.data(), span.size()};
 }
