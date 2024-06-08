@@ -8,7 +8,7 @@ __id__ = "@TARGET_NAME@"
 
 try:
     from onnxruntime_genai.@PACKAGE_DIR_NAME@ import *
-except ImportErrora as e:
+except ImportError as e:
     if __id__ == "onnxruntime-genai-cuda":
         # Try importing onnxruntime_genai. If an ImportError is raised,
         # it could be because the cuda dlls could not be found on windows.
