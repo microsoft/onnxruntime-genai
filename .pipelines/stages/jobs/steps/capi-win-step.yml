@@ -131,8 +131,8 @@ steps:
     continueOnError: true
 
   - powershell: |
-      tree $(Build.Repository.LocalPath)\build
-
+      dir  $(Build.Repository.LocalPath)\build\$(ep)\wheel\onnxruntime_genai
+      dir '$(Build.Repository.LocalPath)\build\$(ep)\src\python\Release\'
   - task: PublishSymbols@2
     displayName: 'Publish symbols'
     inputs:
