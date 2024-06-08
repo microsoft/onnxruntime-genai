@@ -134,11 +134,10 @@ steps:
   - task: PublishSymbols@2
     displayName: 'Publish symbols'
     inputs:
-      SymbolsFolder: '$(Build.Repository.LocalPath)\build\$(ep)\wheel\onnxruntime_genai'
+      SymbolsFolder: '$(Build.Repository.LocalPath)\build\$(ep)\src\python\Release\'
       IndexSources: true
       SymbolServerType: TeamServices
       SymbolExpirationInDays: 3650
-      condition: and (succeeded(), or(eq(variables['Build.SourceBranch'], 'refs/heads/main'), startsWith(variables['Build.SourceBranch'], 'refs/heads/rel-')))
 
   - template: compliant/win-esrp-dll-step.yml
     parameters:
