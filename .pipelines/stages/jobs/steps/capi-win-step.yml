@@ -136,7 +136,7 @@ steps:
   - task: PublishSymbols@2
     displayName: 'Publish symbols'
     inputs:
-      SymbolsFolder: '$(Build.Repository.LocalPath)\build\$(ep)\src\python\Release\'
+      SymbolsFolder: '$(Build.Repository.LocalPath)\build\$(ep)\src\python\Release'
       IndexSources: true
       SymbolServerType: TeamServices
       SymbolExpirationInDays: 3650
