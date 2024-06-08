@@ -38,11 +38,11 @@ class Model:
         self.model_type = config.architectures[0]
         self.io_dtype = io_dtype      # {'fp16', 'fp32'}
         self.onnx_dtype = onnx_dtype  # {"int4", "fp16", "fp32"}
+        self.quant_type = config.quantization_config["quant_method"] if hasattr(config, "quantization_config") else None
 
         self.cache_dir = cache_dir
         self.filename = extra_options["filename"] if "filename" in extra_options else "model.onnx"
         self.extra_options = extra_options
-        self.is_quantized = "is_quantized" in extra_options
 
         self.inputs = []
         self.outputs = []
@@ -218,7 +218,7 @@ class Model:
             print("GroupQueryAttention (GQA) is used in this model.")
 
             # DML doesn't support packed Q/K/V for GQA yet
-            self.attention_attrs["use_packed_matmul"] = self.ep != "dml" and not self.is_quantized
+            self.attention_attrs["use_packed_matmul"] = self.ep != "dml" and self.quant_type is None
 
             # GQA + Rot.Emb. does not require `position ids` as input
             if self.ep != "dml":
@@ -252,6 +252,10 @@ class Model:
                 "accuracy_level": int(extra_options["int4_accuracy_level"]) if "int4_accuracy_level" in extra_options else None,
             }
         }
+        if self.quant_type is not None:
+            # Create quantized attributes from quantization config
+            self.quant_attrs["bits"] = config.quantization_config["bits"]
+            self.quant_attrs["group_size"] = config.quantization_config["group_size"]
 
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
         config = GenerationConfig.from_pretrained(model_name_or_path, use_auth_token=True, trust_remote_code=True, **extra_kwargs)
@@ -352,7 +356,7 @@ class Model:
 
         # Quantize ONNX model to desired precision
         # TODO: Replace by quantizing the MatMuls as they are created
-        if self.onnx_dtype == "int4" and not self.is_quantized:
+        if self.onnx_dtype == "int4" and self.quant_type is None:
             model = self.to_int4(model)
 
         # Save ONNX model with only one external data file and delete any existing duplicate copies
@@ -1460,10 +1464,10 @@ class Model:
             from gguf_model import GGUFModel
             model = GGUFModel.from_pretrained(self.model_type, input_path, self.head_size, self.hidden_size, self.intermediate_size, self.num_attn_heads, self.num_kv_heads, self.vocab_size)
             self.layernorm_attrs["add_offset"] = 0  # add offset already done for GGUF models
-        elif os.path.isfile(os.path.join(input_path, "quantize_config.json")):
+        elif self.quant_type is not None:
             # Load quantized PyTorch model
             from quantized_model import QuantModel
-            model = QuantModel.from_pretrained(input_path)
+            model = QuantModel.from_pretrained(self.quant_type, input_path, self.quant_attrs["bits"], self.quant_attrs["group_size"])
         else:
             # Load PyTorch model
             extra_kwargs = {} if os.path.exists(self.model_name_or_path) else {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {"cache_dir": self.cache_dir}
@@ -2395,8 +2399,6 @@ def get_args():
                 enable_cuda_graph = 1 : The model can use CUDA graph capture for CUDA execution provider. If enabled, all nodes being placed on the CUDA EP
                     is the prerequisite for the CUDA graph to be used correctly. It is not guaranteed that cuda graph be enabled as it depends on the model
                     and the graph structure.
-                is_quantized = Input model is already quantized.
-                    Use this option when your input model is already quantized.
             """),
     )
 
