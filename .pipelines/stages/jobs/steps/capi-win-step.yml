@@ -130,6 +130,8 @@ steps:
       AnalyzeTargetGlob: '$(Build.Repository.LocalPath)\**\*.pyd'
     continueOnError: true
 
+  - powershell: |
+      tree $(Build.Repository.LocalPath)\build
 
   - task: PublishSymbols@2
     displayName: 'Publish symbols'
