@@ -8,7 +8,9 @@ install(TARGETS
   RUNTIME DESTINATION lib
   PUBLIC_HEADER DESTINATION include
 )
-install(FILES $<TARGET_PDB_FILE:onnxruntime-genai> DESTINATION lib CONFIGURATIONS RelWithDebInfo)
+if (WIN32)
+  install(FILES $<TARGET_PDB_FILE:onnxruntime-genai> DESTINATION lib CONFIGURATIONS RelWithDebInfo)
+endif()
 set(CPACK_PACKAGE_VENDOR "Microsoft")
 set(CPACK_PACKAGE_NAME "onnxruntime-genai")
 set(CPACK_RESOURCE_FILE_LICENSE "${PROJECT_SOURCE_DIR}/LICENSE")
