@@ -166,3 +166,11 @@ steps:
       ArtifactName: $(artifactName)-wheel
       PathtoPublish: '$(Build.ArtifactStagingDirectory)\wheel'
 
+  - task: PublishSymbols@2
+    displayName: 'Publish Build Symbols'
+    condition: and(succeeded(), eq(variables['build_config'], 'relwithdebinfo'))
+    inputs:
+      SymbolsFolder: '$(Build.Repository.LocalPath)\build\$(ep)\src\python\RelWithDebInfo\'
+      SearchPattern: 'onnxruntime_genai.pdb'
+      SymbolServerType: teamServices
+      SymbolExpirationInDays: 365
