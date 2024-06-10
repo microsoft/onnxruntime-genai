@@ -13,6 +13,9 @@ parameters:
   values:
   - 'linux'
   - 'win'
+- name: build_config
+  type: string
+  default: 'release'
 
 
 jobs:
@@ -68,8 +71,8 @@ jobs:
     value: ${{ parameters.arch }}
   - name: artifactName
     value: 'onnxruntime-genai-${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.arch }}'
-  - name: buildConfig
-    value: 'Release'
+  - name: build_config
+    value: ${{ parameters.build_config }}
   - name: buildDir
     value: 'build/${{ parameters.ep }}'
   - name: cuda_version
@@ -158,6 +161,7 @@ jobs:
         target: 'python'
         arch: ${{ parameters.arch }}
         ep: ${{ parameters.ep }}
+        build_config: ${{ parameters.build_config }}
 
   # Windows job needs to set the python version and install the required packages
   - ${{ if eq(parameters.os, 'win') }}:
@@ -166,6 +170,7 @@ jobs:
         target: 'python'
         arch: ${{ parameters.arch }}
         ep: ${{ parameters.ep }}
+        build_config: ${{ parameters.build_config }}
 
   - template: steps/compliant-and-cleanup-step.yml
 
