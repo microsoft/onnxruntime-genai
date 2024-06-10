@@ -56,6 +56,11 @@ jobs:
     value: '$(Build.ArtifactStagingDirectory)/nuget'
   - name: os
     value: ${{ parameters.os }}
+  - name: feed_name
+    ${{ if and(eq(parameters.cuda_version, '12.2'), eq(parameters.ep, 'cuda')) }}:
+      value: 'ort-cuda-12-nightly'
+    ${{ else }}:
+      value: '7982ae20-ed19-4a35-a362-a96ac99897b7'
   - name: ort_filename
     ${{ if eq(parameters.ep, 'cpu') }}:
       value: 'Microsoft.ML.OnnxRuntime'
