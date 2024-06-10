@@ -27,7 +27,7 @@ See documentation at https://onnxruntime.ai/docs/genai.
 
 ## Installation
 
-See https://onnxruntime.ai/docs/genai/how-to/install
+See https://onnxruntime.ai/docs/genai/howto/install
 
 ## Sample code for Phi-3 in Python
 

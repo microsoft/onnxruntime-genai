@@ -25,7 +25,7 @@ void ConvertFp32ToFp16(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<Or
 void CheckResult(extError_t error);
 
 struct State {
-  State(const GeneratorParams& params);
+  State(const GeneratorParams& params, const Model& model_);
   virtual ~State() = default;
 
   virtual RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices = {}) = 0;
@@ -39,8 +39,13 @@ struct State {
   std::vector<OrtValue*> inputs_, outputs_;
 
  protected:
-  void Run(OrtSession& session, OrtRunOptions& run_options);  // Uses the inputs below to run
-  void ClearIO();                                             // Clear all inputs/outputs
+  void Run(OrtSession& session, OrtRunOptions& run_options, int new_batch_size);  // Uses the inputs below to run
+  void ClearIO();                                                                 // Clear all inputs/outputs
+  bool first_run_{true};
+
+ private:
+  const Model& model_;
+  int current_batch_size_{0};
 };
 
 struct TokenizerStream {
@@ -116,6 +121,7 @@ struct Model : std::enable_shared_from_this<Model> {
 
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
+  std::unique_ptr<OrtSessionOptions> vision_session_options_;
   std::unique_ptr<OrtRunOptions> run_options_;
   std::unique_ptr<OrtCustomOpDomain> custom_op_domain_;
 

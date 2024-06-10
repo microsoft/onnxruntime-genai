@@ -37,7 +37,7 @@ Sequences_Cuda::Sequences_Cuda(std::span<const int32_t> input_sequences, int bat
   cudaStreamSynchronize(stream);  // Until we remove the todo above, wait for this to complete as input_sequences_gpu is on the stack
 }
 
-RoamingArray<int32_t> Sequences_Cuda::GetSequence(int batch_beam_index) {
+RoamingArray<int32_t> Sequences_Cuda::GetSequence(size_t batch_beam_index) {
   auto span = sequences_.subspan(batch_beam_index * max_length_, current_length_);
   return gpu_span<int32_t>{span.data(), span.size()};
 }
