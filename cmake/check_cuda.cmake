@@ -2,7 +2,8 @@
 include(CheckLanguage)
 
 if(USE_CUDA)
-  check_language(CUDA)
+  enable_language(CUDA)
+  message( STATUS "CMAKE_CUDA_COMPILER_VERSION: ${CMAKE_CUDA_COMPILER_VERSION}")
   if(CMAKE_CUDA_COMPILER)
     # Don't let cmake set a default value for CMAKE_CUDA_ARCHITECTURES
     cmake_policy(SET CMP0104 OLD)
