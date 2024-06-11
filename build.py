@@ -83,6 +83,13 @@ def _parse_args():
         default=None,
         help="Specify the generator that CMake invokes.",
     )
+    parser.add_argument(
+        "--cmake_extra_defines",
+        nargs="+",
+        action="append",
+        help="Extra definitions to pass to CMake during build system "
+        "generation. These are just CMake -D options without the leading -D.",
+    )
 
     parser.add_argument("--ort_home", default=None, type=Path, help="Root directory of onnxruntime.")
 
@@ -278,7 +285,12 @@ def _validate_ios_args(args: argparse.Namespace):
             )
 
 
-def _validate_args(args):
+def _validate_cmake_args(args: argparse.Namespace):
+    args.cmake_extra_defines = [i for j in args.cmake_extra_defines for i in j] if args.cmake_extra_defines else []
+    args.cmake_extra_defines = [f"-D{define}" for define in args.cmake_extra_defines]
+
+
+def _validate_args(args: argparse.Namespace):
     # default to all 3 stages
     if not args.update and not args.build and not args.test:
         args.update = True
@@ -293,6 +305,7 @@ def _validate_args(args):
     _validate_cuda_args(args)
     _validate_android_args(args)
     _validate_ios_args(args)
+    _validate_cmake_args(args)
 
     if args.ort_home:
         if not args.ort_home.exists() or not args.ort_home.is_dir():
@@ -376,10 +389,8 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         command += [f"-DORT_HOME={args.ort_home}"]
 
     if args.use_cuda:
-        cuda_arch = 80
         cuda_compiler = str(args.cuda_home / "bin" / "nvcc")
-        command += [f"-DCMAKE_CUDA_COMPILER={cuda_compiler}",
-                    f"-DCMAKE_CUDA_ARCHITECTURES={cuda_arch}"]
+        command += [f"-DCMAKE_CUDA_COMPILER={cuda_compiler}"]
 
     if args.android:
         command += [
@@ -404,6 +415,9 @@ def update(args: argparse.Namespace, env: dict[str, str]):
                 else "cmake/genai_ios.toolchain.cmake"
             ),
         ]
+
+    if args.cmake_extra_defines != []:
+        command += args.cmake_extra_defines
 
     util.run(command, env=env)
 
