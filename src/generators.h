@@ -53,6 +53,8 @@ enum struct DeviceType {
   DML,
 };
 
+std::string to_string(DeviceType device_type);
+
 struct GeneratorParams : std::enable_shared_from_this<GeneratorParams> {
   GeneratorParams() = default;  // This constructor is only used if doing a custom model handler vs built-in
   GeneratorParams(const Model& model);
@@ -130,7 +132,7 @@ struct Generator {
   void ComputeLogits();
   void GenerateNextToken();
 
-  RoamingArray<int32_t> GetSequence(int index) const;
+  RoamingArray<int32_t> GetSequence(size_t index) const;
 
   std::shared_ptr<const Model> model_;
   std::unique_ptr<State> state_;

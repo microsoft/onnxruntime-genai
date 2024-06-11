@@ -26,7 +26,7 @@ steps:
   - task: CopyFiles@2
     displayName: 'Copy Onnxruntime C API dll files to ArtifactStagingDirectory'
     inputs:
-      SourceFolder: '$(Build.Repository.LocalPath)\$(buildDir)\Release'
+      SourceFolder: '$(Build.Repository.LocalPath)\$(buildDir)\$(buildConfig)'
       Contents: |
         onnxruntime-genai.dll
         onnxruntime-genai.lib
