@@ -15,7 +15,6 @@ ONNX Runtime's format no matter where the quantized weights actually come from.
 from safetensors.torch import load_file
 import torch
 
-import json
 import os
 import re
 
