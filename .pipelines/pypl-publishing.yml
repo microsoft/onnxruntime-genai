@@ -34,23 +34,25 @@ parameters:
   type: string
   default: '1.18.0-dev-20240426-1256-b842effa29'
 
-- name: ort_cuda_version
-  displayName: 'OnnxRuntime GPU version'
+- name: ort_cuda_118_version
+  displayName: 'OnnxRuntime GPU version for CUDA 11.8'
   type: string
   default: '1.18.0-dev-20240426-0614-b842effa29'
+
+- name: ort_cuda_122_version
+  displayName: 'OnnxRuntime GPU version for CUDA 12.2'
+  type: string
+  default: '1.19.0-dev-20240530-0257-25ac65375c'
 
 - name: ort_dml_version
   displayName: 'OnnxRuntime DML version'
   type: string
   default: '1.18.0-dev-20240426-0116-b842effa29'
 
-- name: cuda_version
-  displayName: 'CUDA version'
+- name: cuda_versions
+  displayName: 'CUDA versions'
   type: string
-  default: '11.8'
-  values:
-  - '11.8'
-  - '12.2'
+  default: '11.8,12.2'
 
 - name: build_config
   displayName: 'Build Configuration'
@@ -80,8 +82,9 @@ stages:
     enable_win_dml: ${{ parameters.enable_win_dml }}
     enable_win_arm64_cpu: ${{ parameters.enable_win_arm64_cpu }}
     ort_version: ${{ parameters.ort_version }}
-    ort_cuda_version: ${{ parameters.ort_cuda_version }}
+    ort_cuda_118_version: ${{ parameters.ort_cuda_118_version }}
+    ort_cuda_122_version: ${{ parameters.ort_cuda_122_version }}
     ort_dml_version: ${{ parameters.ort_dml_version }}
-    cuda_version: ${{ parameters.cuda_version }}
+    cuda_versions: ${{ parameters.cuda_versions }}
     build_config: ${{ parameters.build_config }}
 
