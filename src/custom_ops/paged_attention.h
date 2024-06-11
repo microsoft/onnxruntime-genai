@@ -5,6 +5,10 @@
 #include "ocos.h"
 #include "cuda_type.h"
 #include "paged_attention_impl.h"
+#include "device_prop.cuh"
+#ifdef OCOS_USE_FLASH_ATTENTION
+#include "attention_lib/flash_attention/flash_api.h"
+#endif
 
 template <typename T>
 using UniquePtrWithDeletor = std::unique_ptr<T, std::function<void(T*)>>;
@@ -19,11 +23,11 @@ inline UniquePtrWithDeletor<T> GetScratchBuffer(void* p, OrtAllocator* allocator
 struct AttnBias {
   typedef struct {
     int64_t seqstart;
-    int64_t max_seqlen;
-    int64_t seqstart_py;
+//    int64_t max_seqlen;
+//    int64_t seqstart_py;
   } block_tables;
   block_tables q_seqinfo;
-  int64_t batchsize;
+//  int64_t batchsize;
 };
 
 struct InputMetadata {
@@ -55,38 +59,41 @@ OrtStatusPtr CheckInputs(const cudaStream_t stream, OrtAllocator* allocator, con
     return OrtW::CreateStatus(MakeString("query shape should equal to num_heads_ * head_size_"), ORT_INVALID_ARGUMENT);
   }
 
+  parameters.batch_size = context_lens.NumberOfElement();
+  parameters.sequence_length = 1;
+  cudaDeviceSynchronize();
   int seq_len = query_shape[0];
   input_metadata.max_num_blocks_per_seq = 0;
   if (prompt_mode) {
       input_metadata.num_prompt_tokens = seq_len;
       input_metadata.num_generation_tokens = 0;
 
-      std::vector<int32_t> seqstart(2, 0);
-      seqstart[1] = input_metadata.num_prompt_tokens;
+      std::vector<int32_t> seqstart(context_lens.NumberOfElement() + 1, 0);
+      for (int64_t i = 0; i < context_lens.NumberOfElement(); i++) {
+        int32_t seqlen_i = *(context_lens.Data()+i);
+        if (seqlen_i > parameters.sequence_length) parameters.sequence_length = seqlen_i;
+        seqstart[i+1] = seqstart[i] + seqlen_i;
+      }
       input_metadata.seqinfo = GetScratchBuffer<int32_t>(allocator->Alloc(allocator, seqstart.size() * sizeof(int32_t)), allocator);
       cudaMemcpy(input_metadata.seqinfo.get(), seqstart.data(), seqstart.size() * sizeof(int32_t), cudaMemcpyHostToDevice);
       input_metadata.attn_bias.q_seqinfo.seqstart = reinterpret_cast<int64_t>(input_metadata.seqinfo.get());
-      input_metadata.attn_bias.q_seqinfo.max_seqlen = input_metadata.num_prompt_tokens;
-      input_metadata.attn_bias.batchsize = 1;
   } else {
-      std::vector<int64_t> positions_host((*positions)->Shape().size());  // TODO(leca): 
+//      std::vector<int64_t> positions_host((*positions)->Shape().size());  // TODO(leca): 
       input_metadata.num_prompt_tokens = 0;
-      input_metadata.num_generation_tokens = seq_len;
-      input_metadata.max_context_len = positions_host.back() + 1;
+      input_metadata.num_generation_tokens = 1;
+//      input_metadata.max_context_len = positions_host.back() + 1;
 
-      int32_t block_size = gsl::narrow<int32_t>(key_cache.Shape()[3]);
-      for (int i = 0; i < positions_host.back() + 1; i += block_size) input_metadata.max_num_blocks_per_seq++;    
+//      int32_t block_size = gsl::narrow<int32_t>(key_cache.Shape()[3]);
+//      for (int i = 0; i < positions_host.back() + 1; i += block_size) input_metadata.max_num_blocks_per_seq++;    
   }
 
   if (!positions.has_value()) { // TODO(leca): only generate position when cos_sin_cache is provided? As position and cos_sin_cache are only used for rotary embeding
-    std::vector<int32_t> context_len_host(context_lens.SizeInBytes() / sizeof(int32_t));
-    //ORTX_RETURN_IF_ERROR(CudaCall(cudaMemcpy(context_len_host.data(), (*context_lens)->DataRaw(), (*context_lens)->SizeInBytes(), cudaMemcpyDeviceToHost)));
-    cudaMemcpy(context_len_host.data(), context_lens.DataRaw(), context_lens.SizeInBytes(), cudaMemcpyDeviceToHost);
     std::vector<int64_t> position_ids;
-    for (size_t i = 0; i < context_len_host.size(); i++) {
-      if (context_len_host[i] == 0)   continue;
-      std::vector<int64_t> position_id(context_len_host[i]);
-      std::iota(position_id.begin(), position_id.end(), 0);   // fill position_id with {0, 1, 2, ...context_len_span[i]-1}
+    for (int64_t i = 0; i < context_lens.NumberOfElement(); i++) {
+      int32_t seqlen_i = *(context_lens.Data()+i);
+      if (seqlen_i == 0) continue;
+      std::vector<int64_t> position_id(seqlen_i);
+      std::iota(position_id.begin(), position_id.end(), 0);   // fill position_id with [0, 1, 2, ...seqlen_i)
       position_ids.insert(position_ids.end(), position_id.begin(), position_id.end());
     }
     input_metadata.position_ids = GetScratchBuffer<int64_t>(allocator->Alloc(allocator, position_ids.size()), allocator);   // TODO(leca): position_ids.size() or position_ids.size() * sizeof(int64_t)?
@@ -95,9 +102,6 @@ OrtStatusPtr CheckInputs(const cudaStream_t stream, OrtAllocator* allocator, con
   }
   input_metadata.num_valid_tokens = seq_len;
 
-  parameters.batch_size = input_metadata.attn_bias.batchsize;
-  parameters.sequence_length = static_cast<int>(input_metadata.attn_bias.q_seqinfo.max_seqlen);
-  parameters.input_hidden_size = -1;
   parameters.token_count = static_cast<int32_t>(input_metadata.num_prompt_tokens);
   parameters.valid_token_count = static_cast<int32_t>(input_metadata.num_valid_tokens);
   parameters.has_relative_position_bias = false;
@@ -109,7 +113,7 @@ OrtStatusPtr CheckInputs(const cudaStream_t stream, OrtAllocator* allocator, con
 template<typename T>
 struct PagedAttention {
   static OrtMemType GetInputMemoryType(size_t input_index) {
-    if (input_index == 8) return OrtMemType::OrtMemTypeCPUInput;  // make is_prompt CPU input
+    if (input_index == 7 || input_index == 8) return OrtMemType::OrtMemTypeCPUInput;  // make context_lens and is_prompt CPU input
     return OrtMemType::OrtMemTypeDefault;
   }
 
@@ -126,7 +130,7 @@ struct PagedAttention {
     head_size_ = static_cast<int32_t>(head_size);
 
     ORTX_RETURN_IF_ERROR(api.KernelInfoGetAttribute_float(&info, "scale", &scale_));
-    assert(scale_ > 0);
+    assert(scale_ >= 0);
 
     num_queries_per_kv_ = num_heads_ / num_kv_heads_;
     std::vector<int32_t> head_mapping_host(num_heads_);
@@ -145,7 +149,7 @@ struct PagedAttention {
   }
 
   OrtStatusPtr RunMultiHeadAttention(Ort::Custom::CUDAKernelContext* ctx, const ortc::Tensor<T>& query, const ortc::Tensor<T>& key, const ortc::Tensor<T>& value,
-                                     T* output, OrtMemoryInfo* mem_info, PackedAttentionParameters& parameters, InputMetadata& input_metadata) const {
+                                     T* output, PackedAttentionParameters& parameters, InputMetadata& input_metadata) const {
     PackedMultiHeadAttentionData<TT> data;
     data.use_flash_attention = false; 
     data.use_memory_efficient_attention = false;
@@ -178,8 +182,7 @@ struct PagedAttention {
 
     size_t workSpaceSize = cuda::GetAttentionWorkspaceSize(sizeof(T), parameters.batch_size, parameters.num_heads, parameters.head_size, parameters.v_head_size,
                                                            parameters.sequence_length, nullptr, data.use_flash_attention, data.use_memory_efficient_attention, true);
-    void* workspace_raw = ctx->GetScratchBufferUnderMultiStream(mem_info, workSpaceSize);
-    UniquePtrWithDeletor<T> workspace_unique = GetScratchBuffer<T>(workspace_raw, allocator_.get());
+    UniquePtrWithDeletor<T> workspace_unique = GetScratchBuffer<T>(allocator_->Alloc(allocator_.get(), workSpaceSize), allocator_.get());
     data.workspace = reinterpret_cast<TT*>(workspace_unique.get());
     data.cumulative_sequence_length = reinterpret_cast<int32_t*>(input_metadata.attn_bias.q_seqinfo.seqstart);
     data.output = reinterpret_cast<TT*>(output);
@@ -228,40 +231,49 @@ struct PagedAttention {
                               key_shape_r, value_shape_r, block_size);
     }
 
-    OrtMemoryInfo* mem_info = nullptr;
-    ORTX_RETURN_IF_ERROR(OrtW::API::CreateOrtMemoryInfo("Cuda", OrtDeviceAllocator, ctx->GetCudaDeviceId(), OrtMemTypeDefault, &mem_info));
     if (prompt_mode) {
-      // TODO(leca): deallocate mem_info
-      return RunMultiHeadAttention(ctx, query, key, value, output_data, mem_info, parameters, input_metadata); // Don't handle prompt with decoding case for now
+      return RunMultiHeadAttention(ctx, query, key, value, output_data, parameters, input_metadata); // Don't handle prompt with decoding case for now
     }
 
-    if (input_metadata.num_generation_tokens > 0) {
-      constexpr int PARTITION_SIZE = 512;
-      int max_num_partitions = (input_metadata.max_context_len + PARTITION_SIZE - 1) / PARTITION_SIZE;
-      bool use_v1 = max_num_partitions == 1 || (query_shape[0] * query_shape[1]) > PARTITION_SIZE;
-      int64_t generation_qeury_shape[3] = {input_metadata.num_valid_tokens, num_heads_, head_size_};
-      if (use_v1) {
-        cuda::paged_attention_v1(reinterpret_cast<cudaStream_t>(ctx->GetCudaStream()), reinterpret_cast<TT*>(output_data), query.DataRaw(),
-                           key_cache.DataRaw(), value_cache.DataRaw(), head_mapping_.get(), scale_, 
-                           block_tables.Data(), context_lens.Data(),
-                           block_size, input_metadata.max_context_len, nullptr,
-                           block_tables.Shape()[1], generation_qeury_shape, num_queries_per_kv_); // TODO(leca): block_tables.Shape()[1] replacing input_metadata.max_num_blocks_per_seq
-      } else {
-        void* tmp_output_raw = ctx->GetScratchBufferUnderMultiStream(mem_info, query_shape.size() * max_num_partitions * sizeof(T));
-        UniquePtrWithDeletor<T> tmp_output = GetScratchBuffer<T>(tmp_output_raw, allocator_.get());   // TODO(leca): should deallocate inside ORT
-        void* exp_sums_raw = ctx->GetScratchBufferUnderMultiStream(mem_info, query_shape[0] * query_shape[1] * num_heads_ * max_num_partitions * sizeof(T));
-        UniquePtrWithDeletor<T> exp_sums = GetScratchBuffer<T>(exp_sums_raw, allocator_.get());
-        void* max_logits_raw = ctx->GetScratchBufferUnderMultiStream(mem_info, query_shape[0] * query_shape[1] * num_heads_ * max_num_partitions * sizeof(T));
-        UniquePtrWithDeletor<T> max_logits = GetScratchBuffer<T>(max_logits_raw, allocator_.get());
-        cuda::paged_attention_v2(reinterpret_cast<cudaStream_t>(ctx->GetCudaStream()), exp_sums_raw, max_logits_raw, tmp_output_raw, reinterpret_cast<TT*>(output_data), query.DataRaw(),
-                           key_cache.DataRaw(), value_cache.DataRaw(), head_mapping_.get(), scale_,
-                           block_tables.Data(), context_lens.Data(),
-                           block_size, input_metadata.max_context_len, nullptr,
-                           block_tables.Shape()[1], generation_qeury_shape, num_queries_per_kv_);
+//#ifdef OCOS_USE_FLASH_ATTENTION
+//    int seqlen_knew = 1;  // TODO(leca): Decoding case, the sequence of k will always be 1?
+//    int max_num_blocks_per_seq = block_tables.Shape()[1];
+//    int seqlen_k = max_num_blocks_per_seq * block_size;
+//    size_t workSpaceSize = cuda::GetAttentionWorkspaceSize(sizeof(T), parameters.batch_size, parameters.num_heads, parameters.head_size, parameters.v_head_size,
+//                                                           seqlen_knew, nullptr, true/*data.use_flash_attention*/, false/*data.use_memory_efficient_attention*/, true);
+//    UniquePtrWithDeletor<T> workspace_unique = GetScratchBuffer<T>(allocator_->Alloc(allocator_.get(), workSpaceSize), allocator_.get()); // for softmax_lse
+//    const cudaDeviceProp& device_prop = DeviceProp::GetCudaDeviceProp();
+//    ORTX_RETURN_IF_ERROR(flash::mha_fwd_kvcache(device_prop, reinterpret_cast<cudaStream_t>(ctx->GetCudaStream()), const_cast<void*>(query.DataRaw()), const_cast<void*>(key_cache.DataRaw()),
+//                                                const_cast<void*>(value_cache.DataRaw()), const_cast<void*>(key.DataRaw()), const_cast<void*>(value.DataRaw()), output_data,
+//                                                workspace_unique.get(), const_cast<void*>(context_lens.DataRaw()), 
+//                                                nullptr, nullptr, // rotary_sin and rotary_cos. TODO(leca): Do we still split the input cos_sin_cache as there is a seperate step to do rotary embedding
+//                                                query_shape[0], num_heads_, num_kv_heads_, head_size_, 1, seqlen_k, seqlen_knew, 1.0f/sqrt(head_size_), parameters.causal, false, true,
+//                                                0, nullptr, nullptr, -1, false, false, const_cast<int32_t*>(block_tables.Data()), max_num_blocks_per_seq, block_size));
+//#endif
 
-      }
-    }
-    OrtW::API::ReleaseMemoryInfo(mem_info);
+//    if (input_metadata.num_generation_tokens > 0) {
+//      constexpr int PARTITION_SIZE = 512;
+//      int max_num_partitions = (input_metadata.max_context_len + PARTITION_SIZE - 1) / PARTITION_SIZE;
+//      bool use_v1 = max_num_partitions == 1 || (query_shape[0] * query_shape[1]) > PARTITION_SIZE;
+//      int64_t generation_qeury_shape[3] = {input_metadata.num_valid_tokens, num_heads_, head_size_};
+//      if (use_v1) {
+//        cuda::paged_attention_v1(reinterpret_cast<cudaStream_t>(ctx->GetCudaStream()), reinterpret_cast<TT*>(output_data), query.DataRaw(),
+//                           key_cache.DataRaw(), value_cache.DataRaw(), head_mapping_.get(), scale_, 
+//                           block_tables.Data(), context_lens.Data(),
+//                           block_size, input_metadata.max_context_len, nullptr,
+//                           block_tables.Shape()[1], generation_qeury_shape, num_queries_per_kv_); // TODO(leca): block_tables.Shape()[1] replacing input_metadata.max_num_blocks_per_seq
+//      } else {
+//        UniquePtrWithDeletor<T> tmp_output = GetScratchBuffer<T>(allocator_->Alloc(allocator_.get(), query_shape.size() * max_num_partitions * sizeof(T)), allocator_.get());
+//        UniquePtrWithDeletor<T> exp_sums = GetScratchBuffer<T>(allocator_->Alloc(allocator_.get(), query_shape[0] * query_shape[1] * num_heads_ * max_num_partitions * sizeof(T)), allocator_.get());
+//        UniquePtrWithDeletor<T> max_logits = GetScratchBuffer<T>(allocator_->Alloc(allocator_.get(), query_shape[0] * query_shape[1] * num_heads_ * max_num_partitions * sizeof(T)), allocator_.get());
+//        cuda::paged_attention_v2(reinterpret_cast<cudaStream_t>(ctx->GetCudaStream()), exp_sums.get(), max_logits.get(), tmp_output.get(), reinterpret_cast<TT*>(output_data), query.DataRaw(),
+//                           key_cache.DataRaw(), value_cache.DataRaw(), head_mapping_.get(), scale_,
+//                           block_tables.Data(), context_lens.Data(),
+//                           block_size, input_metadata.max_context_len, nullptr,
+//                           block_tables.Shape()[1], generation_qeury_shape, num_queries_per_kv_);
+//
+//      }
+//    }
     return nullptr;
   }
 

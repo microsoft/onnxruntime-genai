@@ -9,6 +9,7 @@ import platform
 import shutil
 import sys
 import warnings
+import subprocess
 
 from pathlib import Path
 
@@ -330,6 +331,13 @@ def _get_csharp_properties(args: argparse.Namespace):
 
     return props
 
+def _get_cuda_arch():
+    outputs = subprocess.check_output(
+        ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader,nounits"],
+        stderr=subprocess.STDOUT).decode("utf-8").splitlines()
+    output = outputs[0] if outputs else ""
+    arch = output.strip().replace('.', '')
+    return arch
 
 def update(args: argparse.Namespace, env: dict[str, str]):
     """
@@ -376,10 +384,11 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         command += [f"-DORT_HOME={args.ort_home}"]
 
     if args.use_cuda:
-        cuda_arch = 80
+        cuda_arch = _get_cuda_arch()
         cuda_compiler = str(args.cuda_home / "bin" / "nvcc")
         command += [f"-DCMAKE_CUDA_COMPILER={cuda_compiler}",
-                    f"-DCMAKE_CUDA_ARCHITECTURES={cuda_arch}"]
+                    f"-DCMAKE_CUDA_ARCHITECTURES={cuda_arch}",
+                    "-DOCOS_USE_CUDA=ON"]
 
     if args.android:
         command += [

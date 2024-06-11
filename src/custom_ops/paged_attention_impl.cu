@@ -5,9 +5,9 @@
 #include "paged_dtype_float16.cuh"
 #include "paged_dtype_float32.cuh"
 #include "paged_utils.cuh"
-#ifdef OCOS_USE_FLASH_ATTENTION
+//#ifdef OCOS_USE_FLASH_ATTENTION
 #include "attention_lib/flash_attention/flash_api.h"
-#endif
+//#endif
 #ifdef OCOS_USE_MEMORY_EFFICIENT_ATTENTION
 #include "attention_lib/cutlass_fmha/memory_efficient_attention.h"
 #endif
@@ -1167,13 +1167,11 @@ size_t GetAttentionWorkspaceSize(
   // Note that q, k and v might need alignment for fused attention kernels.
   const size_t qkv_bytes = no_qkv_workspace ? 0 : (element_size * batch_size * num_heads * sequence_length * (qk_head_size + qk_head_size + v_head_size));
 
-#if USE_FLASH_ATTENTION
   // Use portion of workspace for softmax buffer.
   if (use_flash_attention) {
-    size_t flash_buffer_bytes = onnxruntime::flash::get_softmax_lse_size(sequence_length, batch_size, num_heads);
+    size_t flash_buffer_bytes = flash::get_softmax_lse_size(sequence_length, batch_size, num_heads);
     return qkv_bytes + flash_buffer_bytes;
   }
-#endif
 
   if (fused_runner != nullptr) {
     return qkv_bytes;
