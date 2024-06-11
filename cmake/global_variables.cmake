@@ -67,9 +67,10 @@ if (MSVC)
     set(genai_target_platform ${CMAKE_SYSTEM_PROCESSOR})
   endif()
 
-  if (genai_target_platform STREQUAL "arm64" OR
-      genai_target_platform STREQUAL "ARM64")
+  if (genai_target_platform STREQUAL "arm64")
     # pass
+  elseif (genai_target_platform STREQUAL "ARM64")
+    set(genai_target_platform "arm64")
   elseif (genai_target_platform STREQUAL "x64" OR 
           genai_target_platform STREQUAL "x86_64" OR 
           genai_target_platform STREQUAL "AMD64" OR 
