@@ -43,8 +43,10 @@
 <!--     <file src="..\$buildPath$\$configuration$\onnxruntime-genai.dll" target="runtimes\win-arm64\native" /> -->
 
     <!-- Targets -->
-    <file src="targets\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\netstandard2.1\Microsoft.ML.OnnxRuntimeGenAI$genai_nuget_ext$.targets" />
-    <file src="targets\Microsoft.ML.OnnxRuntimeGenAI.props" target="build\netstandard2.1\Microsoft.ML.OnnxRuntimeGenAI$genai_nuget_ext$.props" />
+    <file src="targets\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\netstandard2.0\Microsoft.ML.OnnxRuntimeGenAI$genai_nuget_ext$.targets" />
+    <file src="targets\Microsoft.ML.OnnxRuntimeGenAI.props" target="build\netstandard2.0\Microsoft.ML.OnnxRuntimeGenAI$genai_nuget_ext$.props" />
+    <file src="targets\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\net8.0\Microsoft.ML.OnnxRuntimeGenAI$genai_nuget_ext$.targets" />
+    <file src="targets\Microsoft.ML.OnnxRuntimeGenAI.props" target="build\net8.0\Microsoft.ML.OnnxRuntimeGenAI$genai_nuget_ext$.props" />
 
     <!-- Includes -->
     <file src="..\src\ort_genai_c.h" target="build\native\include" />

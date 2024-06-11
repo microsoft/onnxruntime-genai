@@ -2,7 +2,7 @@
 
 # Define the Version Info
 file(READ "VERSION_INFO" ver)
-set(VERSION_INFO ${ver} CACHE STRING "Set the onnxruntime-genai version info.")
+set(VERSION_INFO ${ver})
 message("Building onnxruntime-genai for version ${VERSION_INFO}")
 
 
