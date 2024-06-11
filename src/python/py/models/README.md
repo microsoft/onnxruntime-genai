@@ -85,7 +85,7 @@ python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p p
 
 ### Quantized PyTorch model
 
-This scenario is where your PyTorch model is one of the currently supported model architectures, has already been quantized, and your model can be loaded in the Hugging Face style via [AutoGPTQ](https://github.com/AutoGPTQ/AutoGPTQ) or [AutoAWQ](https://github.com/casper-hansen/AutoAWQ).
+This scenario is where your PyTorch model is one of the currently supported model architectures, has already been quantized to INT4 precision, and your model can be loaded in the Hugging Face style via [AutoGPTQ](https://github.com/AutoGPTQ/AutoGPTQ) or [AutoAWQ](https://github.com/casper-hansen/AutoAWQ).
 
 ```
 # From wheel:
@@ -94,8 +94,6 @@ python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o p
 # From source:
 python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e execution_provider -c cache_dir_to_store_temp_files
 ```
-
-Currently, only INT4 precision is supported.
 
 ### GGUF Model
 
