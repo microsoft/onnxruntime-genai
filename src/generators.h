@@ -53,6 +53,8 @@ enum struct DeviceType {
   DML,
 };
 
+std::string to_string(DeviceType device_type);
+
 struct GeneratorParams : std::enable_shared_from_this<GeneratorParams> {
   GeneratorParams() = default;  // This constructor is only used if doing a custom model handler vs built-in
   GeneratorParams(const Model& model);
