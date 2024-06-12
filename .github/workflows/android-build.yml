@@ -28,7 +28,13 @@ jobs:
         with:
           java-version: '11'
           distribution: 'temurin'
-          
+          cache: 'gradle'
+          # not sure what's required here or how helpful it is.
+          # based on https://github.com/actions/setup-java?tab=readme-ov-file#caching-gradle-dependencies
+          cache-dependency-path: |
+            'src/java/**/build.gradle'
+            'src/java/**/gradle-wrapper.properties'
+
       # expecting Android SDK and JDK to be pre-installed
       # https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2204-Readme.md
       - name: Check pre-installed requirements
