@@ -667,9 +667,14 @@ class Model:
         # Combine 3 MatMuls of shape N_q x H, N_kv x H, N_kv x H into 1 packed MatMul of shape (N_q+N_kv+N_kv)xH
         # Note: Packed MatMul is of shape (N_q+N_kv+N_kv)xH instead of Hx(N_q+N_kv+N_kv) because `make_matmul` will
         # apply a transpose before saving
-        N_q, H = q_matmul.shape
-        N_kv, _ = k_matmul.shape
-        matmul = np.concatenate([q_matmul, k_matmul, v_matmul], axis=0).reshape(N_q + N_kv + N_kv, H)
+        N_q, H = q_matmul.weight.shape
+        N_kv, _ = k_matmul.weight.shape
+
+        # Create dummy PackedMatMul class
+        class PackedMatMul:
+            def __init__(self):
+                self.weight = torch.concatenate([q_matmul.weight.detach().cpu(), k_matmul.weight.detach().cpu(), v_matmul.weight.detach().cpu()], dim=0).reshape(N_q + N_kv + N_kv, H)
+        matmul = PackedMatMul()
         new_name = self.make_matmul(matmul, name, root_input, **kwargs)
 
         return new_name
@@ -1178,7 +1183,7 @@ class Model:
         if self.attention_attrs["use_packed_matmul"]:
             # Combine 3 MatMuls into 1 packed MatMul
             qkv_matmul_basename = f"/model/layers.{layer_id}/attn/qkv_proj/MatMul"
-            qkv_matmul_name = self.make_packed_matmul(attention.q_proj.weight.detach().numpy(), attention.k_proj.weight.detach().numpy(), attention.v_proj.weight.detach().numpy(), qkv_matmul_basename, root_input)
+            qkv_matmul_name = self.make_packed_matmul(attention.q_proj, attention.k_proj, attention.v_proj, qkv_matmul_basename, root_input)
             q_input_to_attention = f"{qkv_matmul_name}/output_0"
         else:
             q_matmul_basename = f"/model/layers.{layer_id}/attn/q_proj/MatMul"
