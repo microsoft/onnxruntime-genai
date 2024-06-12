@@ -5,6 +5,7 @@ on:
     branches:
     - main
     - rel-*
+    - skottmckay/*
   pull_request:
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -15,7 +16,7 @@ env:
   ORT_NIGHTLY_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
   # DOTNET_INSTALL_DIR: "${{ github.workspace }}/dotnet"
 jobs:
-  linux_cpu_x64:
+  android_x64:
     runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU" ]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
