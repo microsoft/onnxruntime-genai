@@ -35,38 +35,33 @@ jobs:
           echo "ANDROID_NDK_LATEST_HOME=$ANDROID_NDK_LATEST_HOME"
           ls -l $ANDROID_HOME/ndk
 
-      - name: Install jq
-        run: |
-          sudo apt-get install jq
+      # - name: Install jq
+      #   run: |
+      #     sudo apt-get install jq
 
-      - uses: actions/setup-dotnet@v4
+      # - uses: actions/setup-dotnet@v4
+      #   with:
+      #     dotnet-version: '8.0.x'
+
+      - name: Checkout OnnxRuntime GenAI repo
+        uses: actions/checkout@v4
         with:
-          dotnet-version: '8.0.x'
+          submodules: true
 
       - name: Get the Latest OnnxRuntime Nightly Version
         run: |
           ORT_NIGHTLY_VERSION=$(curl -s "${{ env.ORT_NIGHTLY_REST_API }}" | jq -r '.value[0].versions[0].normalizedVersion')
           echo "$ORT_NIGHTLY_VERSION" 
           echo "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" >> $GITHUB_ENV
-
-      - name: Download ONNX Runtime Nightly
+      - name: Download OnnxRuntime Nightly
         run: |
-          dotnet new console
-          dotnet add package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_NIGHTLY_VERSION }} --source ${{ env.ORT_NIGHTLY_SOURCE }} --package-directory .
-          dotnet build
-        continue-on-error: true
+          nuget install ${{ env.ORT_PACKAGE_NAME }} -version ${{ env.ORT_NIGHTLY_VERSION }} -x
 
-      - name: list files
-        shell: bash
-        run: |
-          ls -l
-          ls -R ${{ env.ORT_PACKAGE_NAME }}
-        continue-on-error: true
-
+      # unzip microsoft.ml.onnxruntime/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/android/native/onnxruntime.aar -d ort
       - name: Extract ONNX Runtime AAR
         run: |
           set -e -x
-          unzip microsoft.ml.onnxruntime/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/android/native/onnxruntime.aar -d ort
+          unzip ${{ env.ORT_PACKAGE_NAME }}/runtimes/android/native/onnxruntime.aar -d ort
           ls -lR ort
 
       - name: Create Android build
