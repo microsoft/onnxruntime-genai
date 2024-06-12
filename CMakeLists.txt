@@ -13,6 +13,13 @@ if("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_
   message(FATAL_ERROR  "GCC version must be greater than or equal to 11")
 endif()
 
+if(MSVC)
+  # DLL initialization errors due to old conda msvcp140.dll dll are a result of the new MSVC compiler
+  # See https://developercommunity.visualstudio.com/t/Access-violation-with-std::mutex::lock-a/10664660#T-N10668856
+  # Remove this definition once the conda msvcp140.dll dll is updated.
+  add_compile_definitions(_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
+endif()
+
 include(cmake/external/onnxruntime_external_deps.cmake)
 # All Global variables, including GLOB, for the top level CMakeLists.txt should be defined here
 include(cmake/global_variables.cmake)
