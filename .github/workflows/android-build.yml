@@ -14,7 +14,6 @@ env:
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
   ORT_NIGHTLY_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
-  JAVA_HOME: ${JAVA_HOME_11_arm64}
 jobs:
   android_x64:
     runs-on: macos-latest
@@ -23,6 +22,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: true
+
+      - name: Setup Java 11
+        uses: actions/setup-java@v2
+        with:
+          java-version: '11'
 
       # expecting Android SDK and JDK to be pre-installed
       # https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2204-Readme.md
