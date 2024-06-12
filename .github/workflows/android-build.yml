@@ -27,7 +27,8 @@ jobs:
         uses: actions/setup-java@v2
         with:
           java-version: '11'
-
+          distribution: 'temurin'
+          
       # expecting Android SDK and JDK to be pre-installed
       # https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2204-Readme.md
       - name: Check pre-installed requirements
