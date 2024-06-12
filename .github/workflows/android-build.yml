@@ -73,14 +73,14 @@ jobs:
         run: |
           set -e -x
           rm -rf build
-          ./build.sh --android --android_api=27 --android_ndk_path=${ANDROID_NDK_LATEST_HOME} --config=RelWithDebInfo --android_abi=x86_64 --parallel --cmake_generator=Ninja --build_java --update
+          ./build.sh --android --android_api=27 --android_ndk_path=${ANDROID_NDK_LATEST_HOME} --config=RelWithDebInfo --android_abi=x86_64 --parallel --build_java --update
 
       - name: Run Android build
         run: |
           set -e -x
-          ./build.sh --android --android_api=27 --android_ndk_path=${ANDROID_NDK_LATEST_HOME} --config=RelWithDebInfo --android_abi=x86_64 --parallel --cmake_generator=Ninja --build_java --build
+          ./build.sh --android --android_api=27 --android_ndk_path=${ANDROID_NDK_LATEST_HOME} --config=RelWithDebInfo --android_abi=x86_64 --parallel --build_java --build
 
       - name: Run Android tests
         run: |
           set -e -x
-          ./build.sh --android --android_api=27 --android_ndk_path=${ANDROID_NDK_LATEST_HOME} --config=RelWithDebInfo --android_abi=x86_64 --parallel --cmake_generator=Ninja --build_java --android_run_emulator --test
+          ./build.sh --android --android_api=27 --android_ndk_path=${ANDROID_NDK_LATEST_HOME} --config=RelWithDebInfo --android_abi=x86_64 --parallel --build_java --android_run_emulator --test
