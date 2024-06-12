@@ -17,7 +17,7 @@ env:
   # DOTNET_INSTALL_DIR: "${{ github.workspace }}/dotnet"
 jobs:
   android_x64:
-    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU" ]
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v4
@@ -29,9 +29,9 @@ jobs:
       - name: Check pre-installed requirements
         run: |
           set -e -x
-          echo $JAVA_HOME
-          echo $JAVA_HOME_11_X64
-          echo $ANDROID_NDK_LATEST_HOME
+          echo "JAVA_HOME=$JAVA_HOME"
+          echo "JAVA_HOME_11_X64=$JAVA_HOME_11_X64"
+          echo "ANDROID_NDK_LATEST_HOME=$ANDROID_NDK_LATEST_HOME"
           ls -l $ANDROID_HOME
           ls -l $ANDROID_HOME/ndk
 
