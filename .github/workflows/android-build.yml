@@ -14,6 +14,11 @@ env:
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
   ORT_NIGHTLY_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
+  # set gradle opt to try and avoid Connection Reset error when gradlew is downloading 
+  # https://services.gradle.org/distributions/gradle-8.6-bin.zip. would be nicer if we didn't have to download
+  # when building though. maybe the gradle caching in setup-java will help with that once it successfully downloads.
+  # Params from https://github.com/actions/runner-images/issues/2715#issuecomment-797388909
+  GRADLE_OPTS: "-Dorg.gradle.internal.http.connectionTimeout=60000 -Dorg.gradle.internal.http.socketTimeout=60000 -Dorg.gradle.internal.network.retry.max.attempts=6 -Dorg.gradle.internal.network.retry.initial.backOff=2000"
 jobs:
   android_x64:
     runs-on: macos-latest
