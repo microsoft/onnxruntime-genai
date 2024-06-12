@@ -23,7 +23,7 @@ setup(
     version='@VERSION_INFO@',
     description='ONNX Runtime generate() API',
     long_description=long_description,
-    long_description_content_type='text/markdown'
+    long_description_content_type='text/markdown',
     packages=['onnxruntime_genai', 'onnxruntime_genai.models'],
     include_package_data=True,
     package_data={'': ['*.pyd', '*.dll', '*.so*']},
