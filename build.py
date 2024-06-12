@@ -8,7 +8,6 @@ import os
 import platform
 import shutil
 import sys
-import warnings
 
 from pathlib import Path
 
@@ -80,7 +79,7 @@ def _parse_args():
             "Visual Studio 17 2022",
             "Xcode",
         ],
-        default=None,
+        default=("Visual Studio 17 2022" if util.is_windows() else "Unix Makefiles"),
         help="Specify the generator that CMake invokes.",
     )
     parser.add_argument(
@@ -352,22 +351,25 @@ def update(args: argparse.Namespace, env: dict[str, str]):
     # build the cmake command to create/update the build files
     command = [str(args.cmake_path)]
 
-    if args.cmake_generator:
-        command += ["-G", args.cmake_generator]
+    command += ["-G", args.cmake_generator]
 
     if util.is_windows():
-        if not args.cmake_generator:
-            command += ["-G", "Visual Studio 17 2022", "-A", "x64"]
-
         if args.cmake_generator == "Ninja":
             if args.use_cuda:
                 command += ["-DCUDA_TOOLKIT_ROOT_DIR=" + str(args.cuda_home)]
-        else:
-            toolset = "host=x64"
-            if args.use_cuda:
-                toolset += ",cuda=" + str(args.cuda_home)
 
-            command += ["-T", toolset]
+        elif args.cmake_generator.startswith("Visual Studio"):
+            toolset_options = []
+
+            is_x64_host = platform.machine() == "AMD64"
+            if is_x64_host:
+                toolset_options += ["host=x64"]
+
+            if args.use_cuda:
+                toolset_options += ["cuda=" + str(args.cuda_home)]
+
+            if toolset_options:
+                command += ["-T", ",".join(toolset_options)]
 
     command += [f"-DCMAKE_BUILD_TYPE={args.config}"]
 
