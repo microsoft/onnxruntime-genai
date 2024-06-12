@@ -31,8 +31,8 @@ jobs:
           set -e -x
           echo "JAVA_HOME=$JAVA_HOME"
           echo "JAVA_HOME_11_X64=$JAVA_HOME_11_X64"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
           echo "ANDROID_NDK_LATEST_HOME=$ANDROID_NDK_LATEST_HOME"
-          ls -l $ANDROID_HOME
           ls -l $ANDROID_HOME/ndk
 
       - name: Install jq
@@ -66,23 +66,21 @@ jobs:
       - name: Extract ONNX Runtime AAR
         run: |
           set -e -x
-          mv microsoft.ml.onnxruntime/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/android/native/onnxruntime.aar ort
-          unzip ort/onnxruntime.aar -d ort
-          ls -l ort
-          ort_version=$(echo ${{ env.ORT_NIGHTLY_VERSION }} | cut -d- -f1-1)
+          unzip microsoft.ml.onnxruntime/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/android/native/onnxruntime.aar -d ort
+          ls -lR ort
 
       - name: Create Android build
         run: |
           set -e -x
           rm -rf build
-          ./build --android --android_api=27 --android_ndk_path=${ANDROID_NDK_LATEST} --config=RelWithDebInfo --android_abi=x86_64 --parallel --cmake_generator=Ninja --build_java --update
+          ./build --android --android_api=27 --android_ndk_path=${ANDROID_NDK_LATEST_HOME} --config=RelWithDebInfo --android_abi=x86_64 --parallel --cmake_generator=Ninja --build_java --update
 
       - name: Run Android build
         run: |
           set -e -x
-          ./build --android --android_api=27 --android_ndk_path=${ANDROID_NDK_LATEST} --config=RelWithDebInfo --android_abi=x86_64 --parallel --cmake_generator=Ninja --build_java --build
+          ./build --android --android_api=27 --android_ndk_path=${ANDROID_NDK_LATEST_HOME} --config=RelWithDebInfo --android_abi=x86_64 --parallel --cmake_generator=Ninja --build_java --build
 
       - name: Run Android tests
         run: |
           set -e -x
-          ./build --android --android_api=27 --android_ndk_path=${ANDROID_NDK_LATEST} --config=RelWithDebInfo --android_abi=x86_64 --parallel --cmake_generator=Ninja --build_java --android_run_emulator --test
+          ./build --android --android_api=27 --android_ndk_path=${ANDROID_NDK_LATEST_HOME} --config=RelWithDebInfo --android_abi=x86_64 --parallel --cmake_generator=Ninja --build_java --android_run_emulator --test
