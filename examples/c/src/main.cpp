@@ -1,5 +1,8 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
 #include <iostream>
-#include <span>
+#include <string>
 #include "ort_genai.h"
 
 // C++ API Example
@@ -9,25 +12,37 @@ void CXX_API(const char* model_path) {
   auto model = OgaModel::Create(model_path);
   std::cout << "Creating tokenizer..." << std::endl;
   auto tokenizer = OgaTokenizer::Create(*model);
+  auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
 
-  const char* prompt = "def is_prime(num):";
-  std::cout << "Prompt: " << std::endl
-            << prompt << std::endl;
+  while (true) {
+    std::string text;
+    std::cout << "Prompt: " << std::endl;
+    std::getline(std::cin, text);
 
-  auto sequences = OgaSequences::Create();
-  tokenizer->Encode(prompt, *sequences);
+    const std::string prompt = "<|user|>" + text + "<|end|><|assistant|>";
 
-  auto params = OgaGeneratorParams::Create(*model);
-  params->SetSearchOption("max_length", 200);
-  params->SetInputSequences(*sequences);
+    auto sequences = OgaSequences::Create();
+    tokenizer->Encode(prompt.c_str(), *sequences);
 
-  auto output_sequences = model->Generate(*params);
-  const auto output_sequence_length = output_sequences->SequenceCount(0);
-  const auto* output_sequence_data = output_sequences->SequenceData(0);
-  auto out_string = tokenizer->Decode(output_sequence_data, output_sequence_length);
+    std::cout << "Generating response..." << std::endl;
+    auto params = OgaGeneratorParams::Create(*model);
+    params->SetSearchOption("max_length", 1024);
+    params->SetInputSequences(*sequences);
 
-  std::cout << "Output: " << std::endl
-            << out_string << std::endl;
+    auto generator = OgaGenerator::Create(*model, *params);
+
+    while (!generator->IsDone()) {
+      generator->ComputeLogits();
+      generator->GenerateNextToken();
+
+      const auto num_tokens = generator->GetSequenceCount(0);
+      const auto new_token = generator->GetSequenceData(0)[num_tokens - 1];
+      std::cout << tokenizer_stream->Decode(new_token) << std::flush;
+    }
+
+    for (int i = 0; i < 3; ++i)
+      std::cout << std::endl;
+  }
 }
 
 // C API Example
@@ -49,35 +64,48 @@ void C_API(const char* model_path) {
   std::cout << "Creating tokenizer..." << std::endl;
   CheckResult(OgaCreateTokenizer(model, &tokenizer));
 
-  const char* prompt = "def is_prime(num):";
-  std::cout << "Prompt: " << std::endl
-            << prompt << std::endl;
+  OgaTokenizerStream* tokenizer_stream;
+  CheckResult(OgaCreateTokenizerStream(tokenizer, &tokenizer_stream));
 
-  OgaSequences* sequences;
-  CheckResult(OgaCreateSequences(&sequences));
-  CheckResult(OgaTokenizerEncode(tokenizer, prompt, sequences));
+  while (true) {
+    std::string text;
+    std::cout << "Prompt: " << std::endl;
+    std::getline(std::cin, text);
 
-  OgaGeneratorParams* params;
-  CheckResult(OgaCreateGeneratorParams(model, &params));
-  CheckResult(OgaGeneratorParamsSetSearchNumber(params, "max_length", 200));
-  CheckResult(OgaGeneratorParamsSetInputSequences(params, sequences));
+    const std::string prompt = "<|user|>" + text + "<|end|><|assistant|>";
 
-  OgaSequences* output_sequences;
-  CheckResult(OgaGenerate(model, params, &output_sequences));
+    OgaSequences* sequences;
+    CheckResult(OgaCreateSequences(&sequences));
+    CheckResult(OgaTokenizerEncode(tokenizer, prompt.c_str(), sequences));
 
-  size_t sequence_length = OgaSequencesGetSequenceCount(output_sequences, 0);
-  const int32_t* sequence = OgaSequencesGetSequenceData(output_sequences, 0);
+    std::cout << "Generating response..." << std::endl;
+    OgaGeneratorParams* params;
+    CheckResult(OgaCreateGeneratorParams(model, &params));
+    CheckResult(OgaGeneratorParamsSetSearchNumber(params, "max_length", 1024));
+    CheckResult(OgaGeneratorParamsSetInputSequences(params, sequences));
 
-  const char* out_string;
-  CheckResult(OgaTokenizerDecode(tokenizer, sequence, sequence_length, &out_string));
+    OgaGenerator* generator;
+    CheckResult(OgaCreateGenerator(model, params, &generator));
 
-  std::cout << "Output: " << std::endl
-            << out_string << std::endl;
+    while (!OgaGenerator_IsDone(generator)) {
+      CheckResult(OgaGenerator_ComputeLogits(generator));
+      CheckResult(OgaGenerator_GenerateNextToken(generator));
 
-  OgaDestroyString(out_string);
-  OgaDestroySequences(output_sequences);
-  OgaDestroyGeneratorParams(params);
-  OgaDestroySequences(sequences);
+      const int32_t num_tokens = OgaGenerator_GetSequenceCount(generator, 0);
+      int32_t new_token = OgaGenerator_GetSequenceData(generator, 0)[num_tokens - 1];
+      const char* new_token_string;
+      CheckResult(OgaTokenizerStreamDecode(tokenizer_stream, new_token, &new_token_string));
+      std::cout << new_token_string << std::flush;
+    }
+
+    for (int i = 0; i < 3; ++i)
+      std::cout << std::endl;
+
+    OgaDestroyGeneratorParams(params);
+    OgaDestroySequences(sequences);
+  }
+
+  OgaDestroyTokenizerStream(tokenizer_stream);
   OgaDestroyTokenizer(tokenizer);
   OgaDestroyModel(model);
 }
