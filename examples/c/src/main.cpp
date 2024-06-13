@@ -19,7 +19,7 @@ void CXX_API(const char* model_path) {
     std::cout << "Prompt: " << std::endl;
     std::getline(std::cin, text);
 
-    const std::string prompt = "<|user|>" + text + "<|end|><|assistant|>";
+    const std::string prompt = "<|user|>\n" + text + "<|end|>\n<|assistant|>";
 
     auto sequences = OgaSequences::Create();
     tokenizer->Encode(prompt.c_str(), *sequences);
@@ -72,7 +72,7 @@ void C_API(const char* model_path) {
     std::cout << "Prompt: " << std::endl;
     std::getline(std::cin, text);
 
-    const std::string prompt = "<|user|>" + text + "<|end|><|assistant|>";
+    const std::string prompt = "<|user|>\n" + text + "<|end|>\n<|assistant|>";
 
     OgaSequences* sequences;
     CheckResult(OgaCreateSequences(&sequences));
