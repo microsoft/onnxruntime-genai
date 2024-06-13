@@ -35,23 +35,6 @@ def get_sdk_tool_paths(sdk_root: Path):
         else:
             return name
 
-    # def resolve_path_old(dirnames, basename):
-    #     dirnames.insert(0, "")
-    #     for dirname in dirnames:
-    #         input_path = os.path.join(os.path.expanduser(dirname), basename)
-    #         _log.info(f"Input path: {input_path}")
-    #         path = shutil.which(input_path)
-    #         _log.info(f"Selected path: {path}")
-    #         if path is not None:
-    #             if "tools/emulator" in path and "emulator/emulator" in input_path:
-    #                 _log.info("Using correct emulator path and not the old tools/emulator path")
-    #                 path = input_path
-
-    #             path = os.path.realpath(path)
-    #             _log.debug(f"Found {basename} at {path}")
-    #             return path
-    #     raise FileNotFoundError(f"Failed to resolve path for {basename}")
-    
     return SdkToolPaths(
         # do not use sdk_root/tools/emulator as that is superceeded by sdk_root/emulator/emulator
         emulator=str((sdk_root / "emulator" / filename("emulator", "exe")).resolve(strict=True)),

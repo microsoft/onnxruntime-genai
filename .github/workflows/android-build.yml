@@ -21,7 +21,12 @@ env:
   GRADLE_OPTS: "-Dorg.gradle.internal.http.connectionTimeout=60000 -Dorg.gradle.internal.http.socketTimeout=60000 -Dorg.gradle.internal.network.retry.max.attempts=6 -Dorg.gradle.internal.network.retry.initial.backOff=2000"
 jobs:
   android_x64:
-    runs-on: macos-latest
+    # android emulator doesn't work on macos-14.
+    #  WARNING | FeatureControl is requesting a non existing feature.
+    #  HVF error: HV_UNSUPPORTED
+    #  qemu-system-aarch64: failed to initialize HVF: Invalid argument
+    #  WARNING | QEMU main loop exits abnormally with code 1
+    runs-on: macos-13
     steps:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v4
