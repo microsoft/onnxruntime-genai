@@ -11,6 +11,8 @@ import subprocess
 import time
 import typing
 
+from pathlib import Path
+
 from .logger import get_logger
 from .platform_helpers import is_linux, is_windows
 from .run import run
@@ -26,41 +28,40 @@ _log = get_logger("util.android")
 SdkToolPaths = collections.namedtuple("SdkToolPaths", ["emulator", "adb", "sdkmanager", "avdmanager"])
 
 
-def get_sdk_tool_paths(sdk_root: str):
+def get_sdk_tool_paths(sdk_root: Path):
     def filename(name, windows_extension):
         if is_windows():
             return f"{name}.{windows_extension}"
         else:
             return name
 
-    def resolve_path(dirnames, basename):
-        dirnames.insert(0, "")
-        for dirname in dirnames:
-            input_path = os.path.join(os.path.expanduser(dirname), basename)
-            _log.info(f"Input path: {input_path}")
-            path = shutil.which(input_path)
-            _log.info(f"Selected path: {path}")
-            if path is not None:
-                if path.contains("tools/emulator") and input_path.contains("emulator/emulator"):
-                    _log.info("Using correct emulator path and not the old tools/emulator path")
-                    path = input_path
+    # def resolve_path_old(dirnames, basename):
+    #     dirnames.insert(0, "")
+    #     for dirname in dirnames:
+    #         input_path = os.path.join(os.path.expanduser(dirname), basename)
+    #         _log.info(f"Input path: {input_path}")
+    #         path = shutil.which(input_path)
+    #         _log.info(f"Selected path: {path}")
+    #         if path is not None:
+    #             if "tools/emulator" in path and "emulator/emulator" in input_path:
+    #                 _log.info("Using correct emulator path and not the old tools/emulator path")
+    #                 path = input_path
 
-                path = os.path.realpath(path)
-                _log.debug(f"Found {basename} at {path}")
-                return path
-        raise FileNotFoundError(f"Failed to resolve path for {basename}")
-
+    #             path = os.path.realpath(path)
+    #             _log.debug(f"Found {basename} at {path}")
+    #             return path
+    #     raise FileNotFoundError(f"Failed to resolve path for {basename}")
+    
     return SdkToolPaths(
-        emulator=resolve_path([os.path.join(sdk_root, "emulator")], filename("emulator", "exe")),
-        adb=resolve_path([os.path.join(sdk_root, "platform-tools")], filename("adb", "exe")),
-        sdkmanager=resolve_path(
-            [os.path.join(sdk_root, "cmdline-tools", "latest", "bin")],
-            filename("sdkmanager", "bat"),
-        ),
-        avdmanager=resolve_path(
-            [os.path.join(sdk_root, "cmdline-tools", "latest", "bin")],
-            filename("avdmanager", "bat"),
-        ),
+        # do not use sdk_root/tools/emulator as that is superceeded by sdk_root/emulator/emulator
+        emulator=str((sdk_root / "emulator" / filename("emulator", "exe")).resolve(strict=True)),
+        adb=str((sdk_root / "platform-tools" / filename("adb", "exe")).resolve(strict=True)),
+        sdkmanager=str(
+            (sdk_root / "cmdline-tools" / "latest" / "bin" / filename("sdkmanager", "bat")).resolve(strict=True)
+            ),
+        avdmanager=str(
+            (sdk_root / "cmdline-tools" / "latest" / "bin" / filename("avdmanager", "bat")).resolve(strict=True)
+            )
     )
 
 
