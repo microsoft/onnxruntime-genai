@@ -123,6 +123,7 @@ def start_emulator(
     sdk_tool_paths: SdkToolPaths, avd_name: str, extra_args: typing.Optional[typing.Sequence[str]] = None
 ) -> subprocess.Popen:
     with contextlib.ExitStack() as emulator_stack, contextlib.ExitStack() as waiter_stack:
+        print("Emualtor path: ", sdk_tool_paths.emulator)
         emulator_args = [
             sdk_tool_paths.emulator,
             "-avd",

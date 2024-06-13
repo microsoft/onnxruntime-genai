@@ -350,6 +350,7 @@ def _run_android_tests(args, ):
         return
 
     sdk_tool_paths = util.android.get_sdk_tool_paths(args.android_home)
+    print("SDK Tool Paths: ", sdk_tool_paths)
     adb = sdk_tool_paths.adb
     with contextlib.ExitStack() as context_stack:
         # use API 27 or higher so the emulator is Android 8.1 (2017) or later

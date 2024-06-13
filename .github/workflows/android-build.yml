@@ -102,10 +102,7 @@ jobs:
       - name: Dump emulator info
         run: |
           set -e -x
-          ls -l /Users/runner/Library/Android/sdk/emulator
-          ls -lR /Users/runner/Library/Android/sdk/emulator/qemu/
-          cat /Users/runner/Library/Android/sdk/emulator
-          /Users/runner/Library/Android/sdk/emulator --help
+          /Users/runner/Library/Android/sdk/emulator/emulator --help
 
       - name: Run Android tests
         run: |
