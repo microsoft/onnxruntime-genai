@@ -99,6 +99,14 @@ jobs:
           set -e -x
           ./build.sh --android --android_api=27 --android_ndk_path=${ANDROID_NDK_LATEST_HOME} --config=RelWithDebInfo --android_abi=x86_64 --parallel --build_java --build
 
+      # Try setting up a later Java version for running the tests. 
+      # sdkmanager in the Android SDK is built with a more recent Java version. 
+      - name: Setup Java 17 for running Android tests
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
       - name: Run Android tests
         run: |
           set -e -x
