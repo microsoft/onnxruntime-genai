@@ -218,7 +218,7 @@ class Model:
             print("GroupQueryAttention (GQA) is used in this model.")
 
             # DML doesn't support packed Q/K/V for GQA yet
-            self.attention_attrs["use_packed_matmul"] = self.ep != "dml" and self.quant_type is None
+            self.attention_attrs["use_packed_matmul"] = self.ep != "dml"
 
             # GQA + Rot.Emb. does not require `position ids` as input
             if self.ep != "dml":
@@ -662,7 +662,15 @@ class Model:
 
         return name
 
-    def make_packed_matmul(self, q_matmul, k_matmul, v_matmul, name, root_input, **kwargs):
+    def make_packed_matmul(self, q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs):
+        if self.onnx_dtype in {"fp16", "fp32"}:
+            return self.make_packed_matmul_fp16_or_fp32(q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs)
+        elif self.onnx_dtype == "int4":
+            return self.make_packed_matmul_int4(q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs)
+        else:
+            raise NotImplementedError(f"The {self.onnx_dtype} precision is not currently supported.")
+
+    def make_packed_matmul_fp16_or_fp32(self, q_matmul, k_matmul, v_matmul, name, root_input, **kwargs):
         # N_q = num_attention_heads * head_size, N_kv = num_key_value_heads * head_size, H = hidden_size
         # Combine 3 MatMuls of shape N_q x H, N_kv x H, N_kv x H into 1 packed MatMul of shape (N_q+N_kv+N_kv)xH
         # Note: Packed MatMul is of shape (N_q+N_kv+N_kv)xH instead of Hx(N_q+N_kv+N_kv) because `make_matmul` will
@@ -678,6 +686,56 @@ class Model:
         new_name = self.make_matmul(matmul, name, root_input, **kwargs)
 
         return new_name
+
+    def make_packed_matmul_int4(self, q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs):
+        if not hasattr(q_matmul, "qweight"):
+            # TODO: quantize weights, then save new MatMul numpy weights for onnx model
+            # print(f"Quantizing to {self.onnx_dtype} on-the-fly is not currently supported.")
+            # print(f"Saving as {self.io_dtype} on-the-fly and quantizing to {self.onnx_dtype} at the end.")
+            return self.make_packed_matmul_fp16_or_fp32(q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs)
+
+        name = f"{basename}NBits"
+
+        # Create dummy PackedMatMul class
+        class PackedMatMul:
+            def __init__(self):
+                self.qweight = torch.concatenate([q_matmul.qweight.detach().cpu(), k_matmul.qweight.detach().cpu(), v_matmul.qweight.detach().cpu()], dim=0)
+                self.scales = torch.concatenate([q_matmul.scales.detach().cpu(), k_matmul.scales.detach().cpu(), v_matmul.scales.detach().cpu()], dim=0)
+                self.qzeros = torch.concatenate([q_matmul.qzeros.detach().cpu(), k_matmul.qzeros.detach().cpu(), v_matmul.qzeros.detach().cpu()], dim=0)
+                self.g_idx = q_matmul.g_idx
+
+                self.in_features = q_matmul.in_features
+                self.out_features = q_matmul.out_features + k_matmul.out_features + v_matmul.out_features
+                self.bits = q_matmul.bits
+                self.group_size = q_matmul.group_size
+        matmul = PackedMatMul()
+
+        # Input weights are quantized, save quantized MatMul numpy weights for onnx model
+        weight = name[1:].replace("/", ".") + ".qweight"
+        self.make_external_tensor(matmul.qweight.detach().numpy(), weight)
+        scales = name[1:].replace("/", ".") + ".scales"
+        self.make_external_tensor(matmul.scales.detach().numpy().astype(self.to_numpy_dtype[self.io_dtype]), scales)
+
+        inputs = [root_input, weight, scales]
+
+        if hasattr(matmul, "qzeros") and matmul.qzeros is not None:
+            zeros = name[1:].replace("/", ".") + ".qzeros"
+            self.make_external_tensor(matmul.qzeros.detach().numpy(), zeros)
+            inputs.append(zeros)
+
+        if hasattr(matmul, "g_idx") and matmul.g_idx is not None:
+            g_idx = name[1:].replace("/", ".") + ".g_idx"
+            self.make_external_tensor(matmul.g_idx.detach().numpy().astype(np.int32), g_idx)
+            inputs.append(g_idx)
+
+        output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
+        self.make_node(
+            "MatMulNBits", inputs=inputs, outputs=[output], name=name, domain="com.microsoft",
+            bits=matmul.bits, block_size=matmul.group_size, K=matmul.in_features, N=matmul.out_features,
+        )
+        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', matmul.out_features])
+
+        return name
 
     def make_add_bias(self, add, name, root_input, **kwargs):
         bias = name[1:].replace("/", ".") + ".bias"
@@ -775,7 +833,7 @@ class Model:
         return 0.1 * np.log(mscale) + 1.0
 
     def make_mscale(self, mscale):
-        if self.rotemb_attrs["mscale_policy"] == "su":
+        if self.rotemb_attrs["mscale_policy"] in {"su", "longrope"}:
             return self.make_mscale_su(mscale)
         elif self.rotemb_attrs["mscale_policy"] == "yarn":
             return self.make_mscale_yarn(mscale)
@@ -1197,9 +1255,9 @@ class Model:
             v_input_to_attention = f"{v_matmul_name}/output_0"
 
         # Make Add nodes (if bias exists)
-        q_bias_exists = attention.q_proj.bias is not None
-        k_bias_exists = attention.k_proj.bias is not None
-        v_bias_exists = attention.v_proj.bias is not None
+        q_bias_exists = attention.q_proj.bias is not None and torch.count_nonzero(attention.q_proj.bias) > 0
+        k_bias_exists = attention.k_proj.bias is not None and torch.count_nonzero(attention.k_proj.bias) > 0
+        v_bias_exists = attention.v_proj.bias is not None and torch.count_nonzero(attention.v_proj.bias) > 0
         all_bias_exists = q_bias_exists and k_bias_exists and v_bias_exists
 
         if all_bias_exists and self.attention_attrs["use_packed_matmul"]:
@@ -1300,6 +1358,16 @@ class Model:
             self.make_mlp_fc(layer_id, mlp, root_input)
         else:
             raise NotImplementedError(f"The MLP layer type is not set.")
+
+    def make_mlp_unpacked(self, layer_id, mlp, root_input):
+        mlp.gate_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
+        mlp.gate_proj.weight = torch.nn.Parameter(mlp.gate_up_proj.weight[ : self.intermediate_size, :])
+
+        mlp.up_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
+        mlp.up_proj.weight = torch.nn.Parameter(mlp.gate_up_proj.weight[self.intermediate_size :, :])
+
+        # Delete original packed weights
+        del mlp.gate_up_proj
 
     def make_mlp_proj(self, layer_id, mlp, root_input):
         # Make nodes for the MLP subgraph
@@ -1473,7 +1541,9 @@ class Model:
         elif self.quant_type is not None:
             # Load quantized PyTorch model
             from quantized_model import QuantModel
-            model = QuantModel.from_pretrained(self.quant_type, input_path, self.quant_attrs["bits"], self.quant_attrs["group_size"], self.quant_attrs["use_g_idx"])
+            q_size = self.num_attn_heads * self.head_size
+            kv_size = self.num_kv_heads * self.head_size
+            model = QuantModel.from_pretrained(self.quant_type, input_path, self.quant_attrs["bits"], self.quant_attrs["group_size"], self.quant_attrs["use_g_idx"], q_size, kv_size, self.intermediate_size)
         else:
             # Load PyTorch model
             extra_kwargs = {} if os.path.exists(self.model_name_or_path) else {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {"cache_dir": self.cache_dir}
@@ -2020,17 +2090,13 @@ class Phi3Mini4KModel(MistralModel):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
-        super().make_attention_unpacked(layer_id, attention, root_input, **kwargs)
+        if self.quant_type is None:
+            super().make_attention_unpacked(layer_id, attention, root_input, **kwargs)
         super().make_attention(layer_id, attention, root_input, **kwargs)
 
     def make_mlp_proj(self, layer_id, mlp, root_input):
-        mlp.gate_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
-        mlp.gate_proj.weight = torch.nn.Parameter(mlp.gate_up_proj.weight[ : self.intermediate_size, :])
-
-        mlp.up_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
-        mlp.up_proj.weight = torch.nn.Parameter(mlp.gate_up_proj.weight[self.intermediate_size :, :])
-
-        del mlp.gate_up_proj
+        if self.quant_type is None:
+            super().make_mlp_unpacked(layer_id, mlp, root_input)
         super().make_mlp_proj(layer_id, mlp, root_input)
 
 
