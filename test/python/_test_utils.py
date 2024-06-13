@@ -52,17 +52,22 @@ def run_subprocess(
     return completed_process
 
 
+def get_model_names():
+    model_names = {
+        "llama-2": "meta-llama/Llama-2-7b-hf",
+        "mistral-v0.1": "mistralai/Mistral-7B-v0.1",
+        "phi-2": "microsoft/phi-2",
+        "gemma-2b": "google/gemma-2b",
+        "gemma-7b": "google/gemma-7b",
+        "phi-3-mini": "microsoft/Phi-3-mini-128k-instruct",
+    }
+    return model_names
+
+
 def download_models(download_path, device):
     # python -m onnxruntime_genai.models.builder -m <model_name> -p int4 -e cpu -o <download_path> --extra_options num_hidden_layers=1
-    model_names = {
-        "cpu": {
-            "phi-2": "microsoft/phi-2",
-        },
-        "cuda": {
-            "phi-2": "microsoft/phi-2",
-        },
-    }
-    for model_name, model_identifier in model_names[device].items():
+    model_names = get_model_names()
+    for model_name, model_identifier in model_names.items():
         model_path = os.path.join(download_path, device, model_name)
         if not os.path.exists(model_path):
             command = [

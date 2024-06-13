@@ -1,12 +1,13 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
+from __future__ import annotations
 
 import os
 import sys
 import tempfile
 
 import onnxruntime_genai as og
-from _test_utils import run_subprocess
+from _test_utils import run_subprocess, get_model_names
 
 
 def download_model(
@@ -14,7 +15,7 @@ def download_model(
 ):
     # python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -p int4 -e cpu -o download_path
     # Or with cuda graph enabled:
-    # python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -p int4 -e cuda --extra_options enable_cuda_graph=1 -o download_path
+    # python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -p int4 -e cuda -o download_path --extra_options enable_cuda_graph=1
     command = [
         sys.executable,
         "-m",
@@ -28,7 +29,8 @@ def download_model(
         "-o",
         download_path,
     ]
-    if device == "cuda":
+    models_not_compatible_with_cuda_graph = {"microsoft/Phi-3-mini-128k-instruct"}
+    if device == "cuda" and precision != "fp32" and model_identifier not in models_not_compatible_with_cuda_graph:
         command.append("--extra_options")
         command.append("enable_cuda_graph=1")
     run_subprocess(command).check_returncode()
@@ -56,7 +58,8 @@ def run_model(model_path: str | bytes | os.PathLike):
 
 
 if __name__ == "__main__":
-    for model_name in ["microsoft/phi-2"]:
+    model_names = get_model_names()
+    for model_name in model_names.values():
         for precision in ["int4", "fp32"]:
             with tempfile.TemporaryDirectory() as temp_dir:
                 device = "cuda" if og.is_cuda_available() else "cpu"
