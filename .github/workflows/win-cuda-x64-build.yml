@@ -23,7 +23,7 @@ env:
 
 jobs:
   windows-cuda-x64-build:
-    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Win2022-GPU-A10" ]
+    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Win2022-GPU-A10-beta" ]
     steps:
     - name: Checkout OnnxRuntime GenAI repo
       uses: actions/checkout@v4
@@ -64,17 +64,24 @@ jobs:
         move ${{ env.ORT_PACKAGE_NAME }}/buildTransitive/native/include ort/
         move ${{ env.ORT_PACKAGE_NAME }}/runtimes/win-x64/native/* ort/lib/    
 
-    - name: Configure CMake
-      run: |
-        cmake --preset windows_x64_cuda_release -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} -DTEST_PHI2=False
-
-    - name: Build with CMake
-      run: |
-        cmake --build --preset windows_x64_cuda_release --parallel
-
     - name: Add CUDA to PATH
       run: |
         echo "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+    - name: Configure CMake
+      env:
+          TMPDIR: ${{ runner.temp }}
+      run: |
+        $env:Path = '${{ env.cuda_dir }}\v${{ env.cuda_version }}\bin;' + $env:Path
+        Write-Output (get-command nvcc.exe).Path
+        cmake -B $env:TMPDIR --preset windows_x64_cuda_release -T "cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }}" -DTEST_PHI2=False
+
+    - name: Build with CMake
+      env:
+          TMPDIR: ${{ runner.temp }}
+      run: |
+        cmake -B $env:TMPDIR --build --preset windows_x64_cuda_release --parallel
+
 
     - name: Build the C# API and Run the C# Tests
       run: |
