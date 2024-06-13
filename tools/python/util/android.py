@@ -68,8 +68,6 @@ def create_virtual_device(sdk_tool_paths: SdkToolPaths, system_image_package_nam
         avd_name,
         "--package",
         system_image_package_name,
-        "--abi",
-        "arm64-v8a",
         "--force",
         input=b"no",
     )
