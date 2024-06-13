@@ -39,24 +39,6 @@ InputIDs::InputIDs(const Model& model, State& state)
   }
 }
 
-InputIDs::InputIDs(InputIDs&& other, State& state)
-    : model_{other.model_}, state_{state} {
-  value_ = std::move(other.value_);
-  name_ = other.name_;
-  shape_ = other.shape_;
-  type_ = other.type_;
-
-  sb_input_ids_ = other.sb_input_ids_;
-
-#if USE_DML
-  value_int32_ = std::move(other.value_int32_);
-  sb_input_ids_int32_ = other.sb_input_ids_int32_;
-  input_ids_cast_command_list_state_ = std::move(other.input_ids_cast_command_list_state_);
-#endif
-
-  Add();
-}
-
 void InputIDs::Add() {
   input_index_ = state_.inputs_.size();
 

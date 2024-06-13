@@ -30,16 +30,6 @@ Embeddings::Embeddings(const Model& model, State& state, Embeddings::Mode mode, 
   }
 }
 
-Embeddings::Embeddings(Embeddings&& other, State& state) : model_{other.model_},
-                                                           state_{state},
-                                                           shape_{other.shape_},
-                                                           type_{other.type_},
-                                                           mode_{other.mode_},
-                                                           name_{other.name_},
-                                                           embeddings_{std::move(other.embeddings_)} {
-  Add();
-}
-
 void Embeddings::Add() {
   if (mode_ == Embeddings::Mode::Input) {
     // In case the embeddings are input to a model, they are added
@@ -71,14 +61,14 @@ void Embeddings::UpdateSequenceLength() {
   }
 }
 
-Embeddings& Embeddings::operator=(const Embeddings& other) {
+void Embeddings::ReuseEmbeddingsBuffer(const Embeddings& other) {
   if (mode_ == Embeddings::Mode::Output ||
       other.mode_ == Embeddings::Mode::Input) {
     throw std::runtime_error("Incorrect usage of the embeddings inputs and outputs.");
   }
 
+  // Share the output embeddings OrtValue* from other with the input embedding for this.
   state_.inputs_[index_] = other.state_.outputs_[other.index_];
-  return *this;
 }
 
 }  // namespace Generators
