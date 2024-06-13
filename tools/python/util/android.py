@@ -36,8 +36,15 @@ def get_sdk_tool_paths(sdk_root: str):
     def resolve_path(dirnames, basename):
         dirnames.insert(0, "")
         for dirname in dirnames:
-            path = shutil.which(os.path.join(os.path.expanduser(dirname), basename))
+            input_path = os.path.join(os.path.expanduser(dirname), basename)
+            _log.info(f"Input path: {input_path}")
+            path = shutil.which(input_path)
+            _log.info(f"Selected path: {path}")
             if path is not None:
+                if path.contains("tools/emulator") and input_path.contains("emulator/emulator"):
+                    _log.info("Using correct emulator path and not the old tools/emulator path")
+                    path = input_path
+
                 path = os.path.realpath(path)
                 _log.debug(f"Found {basename} at {path}")
                 return path
@@ -123,7 +130,6 @@ def start_emulator(
     sdk_tool_paths: SdkToolPaths, avd_name: str, extra_args: typing.Optional[typing.Sequence[str]] = None
 ) -> subprocess.Popen:
     with contextlib.ExitStack() as emulator_stack, contextlib.ExitStack() as waiter_stack:
-        print("Emualtor path: ", sdk_tool_paths.emulator)
         emulator_args = [
             sdk_tool_paths.emulator,
             "-avd",
