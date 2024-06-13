@@ -12,14 +12,14 @@ struct Embeddings {
   };
 
   Embeddings(const Model& model, State& state, Embeddings::Mode mode, const std::string& name);
-
-  Embeddings(Embeddings&& other, State& state);
+  Embeddings(const Embeddings&) = delete;
+  Embeddings& operator=(const Embeddings&) = delete;
 
   void Add();
 
   void UpdateSequenceLength();
 
-  Embeddings& operator=(const Embeddings& other);
+  void ReuseEmbeddingsBuffer(const Embeddings& other);
 
   OrtValue* Get() { return embeddings_.get(); }
 
