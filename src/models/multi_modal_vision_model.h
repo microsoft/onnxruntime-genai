@@ -14,6 +14,8 @@ namespace Generators {
 
 struct MultiModalVisionModel : Model {
   MultiModalVisionModel(std::unique_ptr<Config> config, OrtEnv& ort_env);
+  MultiModalVisionModel(const MultiModalVisionModel&) = delete;
+  MultiModalVisionModel& operator=(const MultiModalVisionModel&) = delete;
 
   std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths,
                                      const GeneratorParams& params) const override;
@@ -25,6 +27,8 @@ struct MultiModalVisionModel : Model {
 
 struct EmbeddingState : State {
   EmbeddingState(const MultiModalVisionModel& model, const GeneratorParams& params, const CapturedGraphInfo* captured_graph_info);
+  EmbeddingState(const EmbeddingState&) = delete;
+  EmbeddingState& operator=(const EmbeddingState&) = delete;
 
   RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens,
                           RoamingArray<int32_t> next_indices = {}) override;
@@ -45,6 +49,8 @@ struct EmbeddingState : State {
 
 struct VisionState : State {
   VisionState(const MultiModalVisionModel& model, const GeneratorParams& params);
+  VisionState(const VisionState&) = delete;
+  VisionState& operator=(const VisionState&) = delete;
 
   RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens,
                           RoamingArray<int32_t> next_indices = {}) override;
@@ -61,6 +67,8 @@ struct VisionState : State {
 struct DecoderState : State {
   DecoderState(const MultiModalVisionModel& model, RoamingArray<int32_t> sequence_lengths,
                const GeneratorParams& params, const CapturedGraphInfo* captured_graph_info);
+  DecoderState(const DecoderState&) = delete;
+  DecoderState& operator=(const DecoderState&) = delete;
 
   RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens,
                           RoamingArray<int32_t> next_indices) override;
@@ -84,6 +92,8 @@ struct DecoderState : State {
 struct MultiModalPipelineState : State {
   MultiModalPipelineState(const MultiModalVisionModel& model, RoamingArray<int32_t> sequence_lengths,
                           const GeneratorParams& params);
+  MultiModalPipelineState(const MultiModalPipelineState&) = delete;
+  MultiModalPipelineState& operator=(const MultiModalPipelineState&) = delete;
 
   RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens,
                           RoamingArray<int32_t> next_indices) override;

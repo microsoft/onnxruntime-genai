@@ -255,7 +255,7 @@ RoamingArray<float> MultiModalPipelineState::Run(int current_length, RoamingArra
              params_->hidden_size, params_->device_type, params_->cuda_stream);
     }
 
-    decoder_state_->inputs_embeds_ = embedding_state_->inputs_embeds_;
+    decoder_state_->inputs_embeds_.ReuseEmbeddingsBuffer(embedding_state_->inputs_embeds_);
     auto logits = decoder_state_->Run(current_length, next_tokens, next_indices);
 
     is_prompt_ = false;
@@ -268,7 +268,7 @@ RoamingArray<float> MultiModalPipelineState::Run(int current_length, RoamingArra
   decoder_state_->UpdateInputs(current_length, next_indices);
 
   embedding_state_->Run(current_length, next_tokens, next_indices);
-  decoder_state_->inputs_embeds_ = embedding_state_->inputs_embeds_;
+  decoder_state_->inputs_embeds_.ReuseEmbeddingsBuffer(embedding_state_->inputs_embeds_);
   return decoder_state_->Run(current_length, next_tokens, next_indices);
 }
 
