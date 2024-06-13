@@ -3,7 +3,6 @@
 
 #pragma once
 #include "ortx_common.h"
-#include "gsl/narrow"
 #include <cuda.h>
 #include <cublas_v2.h>
 
