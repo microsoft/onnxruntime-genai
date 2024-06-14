@@ -12,6 +12,8 @@ struct Logits {
   void Add();
   RoamingArray<float> Get();
 
+  void Update();
+
  private:
   void HandleEOSArray(cpu_span<float> logits);
 
@@ -21,8 +23,8 @@ struct Logits {
 
   std::array<int64_t, 3> shape_{};
   ONNXTensorElementDataType type_;
-  std::unique_ptr<OrtValue> value32_;  // Always fp32 values
-  std::unique_ptr<OrtValue> value16_;  // When model output is fp16
+  std::unique_ptr<OrtValue> output_to_search_;  // Logits that will be send to Search for token generation
+  std::unique_ptr<OrtValue> raw_output_; // Raw logits output from model
 
   // Used for decoding runs with cuda graphs.
   StaticBuffer* sb_logits32_{};

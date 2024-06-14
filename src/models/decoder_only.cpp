@@ -28,6 +28,7 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, RoamingArra
 RoamingArray<float> DecoderOnly_State::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
   if (!first_run_) {
     UpdateInputs(next_tokens, next_indices, current_length);
+    logits_.Update();
   }
 
   int batch_size = static_cast<int>(input_ids_.GetShape()[0]);
