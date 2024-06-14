@@ -23,7 +23,8 @@ jobs:
     #  HVF error: HV_UNSUPPORTED
     #  qemu-system-aarch64: failed to initialize HVF: Invalid argument
     #  WARNING | QEMU main loop exits abnormally with code 1
-    runs-on: macos-13
+    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU" ]
+    # runs-on: macos-13
     steps:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v4
@@ -53,13 +54,13 @@ jobs:
           ls -l $ANDROID_HOME/ndk
 
       # Needed for linux
-      # - name: Install jq
-      #   run: |
-      #     sudo apt-get install jq
+      - name: Install jq
+        run: |
+          sudo apt-get install jq
 
-      # - uses: actions/setup-dotnet@v4
-      #   with:
-      #     dotnet-version: '8.0.x'
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
 
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v4
@@ -69,7 +70,7 @@ jobs:
       - name: Get the Latest OnnxRuntime Nightly Version
         run: |
           ORT_NIGHTLY_VERSION=$(curl -s "${{ env.ORT_NIGHTLY_REST_API }}" | jq -r '.value[0].versions[0].normalizedVersion')
-          echo "$ORT_NIGHTLY_VERSION" 
+          echo "$ORT_NIGHTLY_VERSION"
           echo "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" >> $GITHUB_ENV
       - name: Download OnnxRuntime Nightly
         run: |
@@ -77,10 +78,12 @@ jobs:
 
       # linux was:
       #   unzip microsoft.ml.onnxruntime/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/android/native/onnxruntime.aar -d ort
+      # macos
+      #   unzip ${{ env.ORT_PACKAGE_NAME }}/runtimes/android/native/onnxruntime.aar -d ort
       - name: Extract ONNX Runtime AAR
         run: |
           set -e -x
-          unzip ${{ env.ORT_PACKAGE_NAME }}/runtimes/android/native/onnxruntime.aar -d ort
+          unzip microsoft.ml.onnxruntime/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/android/native/onnxruntime.aar -d ort
           ls -lR ort
 
       - name: Create Android build
@@ -93,11 +96,6 @@ jobs:
         run: |
           set -e -x
           ./build.sh --android --android_api=27 --android_ndk_path=${ANDROID_NDK_LATEST_HOME} --config=RelWithDebInfo --android_abi=${{ env.ANDROID_ABI }} --parallel --build_java --build
-
-      - name: Dump emulator info
-        run: |
-          set -e -x
-          /Users/runner/Library/Android/sdk/emulator/emulator --help
 
       - name: Run Android tests
         run: |
