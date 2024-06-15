@@ -61,6 +61,9 @@ jobs:
       # - uses: actions/setup-dotnet@v4
       #   with:
       #     dotnet-version: '8.0.x'
+      - uses: nuget/setup-nuget@v2
+        with:
+          nuget-version: '6.x'
 
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v4
