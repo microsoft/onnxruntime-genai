@@ -18,6 +18,9 @@ if og.is_cuda_available():
 if og.is_dml_available():
     devices.append("dml")
 
+if og.is_rocm_available():
+    devices.append("rocm")
+
 @pytest.mark.parametrize(
     "relative_model_path",
     (
