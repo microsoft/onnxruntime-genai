@@ -96,6 +96,7 @@ stages:
       ort_cuda_118_version: ${{ parameters.ort_cuda_118_version }}
       ort_cuda_122_version: ${{ parameters.ort_cuda_122_version }}
       ort_dml_version: ${{ parameters.ort_dml_version }}
+      build_config: ${{ parameters.build_config }}
       cuda_versions: ${{ parameters.cuda_versions }}
 - ${{ if eq(parameters.SpecificArtifact, true) }}:
   - template: stages/py-validating-stage.yml
@@ -111,6 +112,5 @@ stages:
       ort_cuda_122_version: ${{ parameters.ort_cuda_122_version }}
       ort_dml_version: ${{ parameters.ort_dml_version }}
       cuda_versions: ${{ parameters.cuda_versions }}
-      build_config: ${{ parameters.build_config }}
       SpecificArtifact: ${{ parameters.SpecificArtifact }}
       BuildId: ${{ parameters.BuildId }}
