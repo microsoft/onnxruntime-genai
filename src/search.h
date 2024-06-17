@@ -13,7 +13,7 @@ struct Search {
   virtual RoamingArray<int32_t> GetNextIndices() = 0;
   virtual RoamingArray<int32_t> GetSequenceLengths() = 0;
   virtual int GetSequenceLength() const = 0;
-  virtual RoamingArray<int32_t> GetSequence(int index) = 0;
+  virtual RoamingArray<int32_t> GetSequence(size_t index) = 0;
 
   virtual void SetLogits(RoamingArray<float> logits) = 0;
   virtual bool IsDone() const = 0;
@@ -38,7 +38,7 @@ struct Search_Cpu : Search {
 
   int GetSequenceLength() const override;
   RoamingArray<int32_t> GetSequenceLengths() override { return sequence_lengths_; }
-  RoamingArray<int32_t> GetSequence(int index) override { return sequences_.GetSequence(index); }
+  RoamingArray<int32_t> GetSequence(size_t index) override { return sequences_.GetSequence(index); }
 
   bool IsDone() const override { return done_; }
   void SetLogits(RoamingArray<float> logits) override;

@@ -40,7 +40,6 @@ python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -p int4 -e cpu -o 
 On Windows:
 ```bash
 cmake -G "Visual Studio 17 2022" -A x64 -S . -B build
-cmake ../ -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=80
 cd build
 cmake --build . --config Release
 ```

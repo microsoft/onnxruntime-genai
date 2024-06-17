@@ -84,13 +84,23 @@ stages:
         SpecificArtifact: ${{ parameters.SpecificArtifact }}
         BuildId: ${{ parameters.BuildId }}
 
-  - ${{ if eq(parameters.enable_linux_cuda, true) }}:
+  - ${{ if and(eq(parameters.enable_linux_cuda, true), contains(parameters.cuda_versions, '11.8')) }}:
     - template: jobs/py-validation-job.yml
       parameters:
         arch: 'x64'
-        cuda_version: ${{ parameters.cuda_version }}
+        cuda_version: '11.8'
         ep: 'cuda'
-        ort_version: ${{ parameters.ort_cuda_version }}
+        ort_version: ${{ parameters.ort_cuda_118_version }}
+        os: 'linux'
+        SpecificArtifact: ${{ parameters.SpecificArtifact }}
+        BuildId: ${{ parameters.BuildId }}
+  - ${{ if and(eq(parameters.enable_linux_cuda, true), contains(parameters.cuda_versions, '12.2')) }}:
+    - template: jobs/py-validation-job.yml
+      parameters:
+        arch: 'x64'
+        cuda_version: '12.2'
+        ep: 'cuda'
+        ort_version: ${{ parameters.ort_cuda_122_version }}
         os: 'linux'
         SpecificArtifact: ${{ parameters.SpecificArtifact }}
         BuildId: ${{ parameters.BuildId }}

@@ -8,6 +8,10 @@ parameters:
 - name: arch
   type: string
   default: 'x64'
+- name: build_config
+  type: string
+  default: 'release'
+
 steps:
 - bash: |
     echo "##[error]Error: ep and arch are not set"
@@ -33,6 +37,7 @@ steps:
     echo "ep=$(ep)"
     echo "cuda_version=$(cuda_version)"
     echo "target=${{ parameters.target }}"
+    echo "build_config=${{ parameters.build_config }}"
   displayName: 'Print Parameters'
 
 
@@ -73,25 +78,25 @@ steps:
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
-    cmake --preset windows_$(arch)_$(ep)_release -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)'
+    cmake --preset windows_$(arch)_$(ep)_$(build_config) -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)'
   displayName: 'Configure CMake C API with CUDA'
   condition: eq(variables['ep'], 'cuda')
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
-    cmake --preset windows_$(arch)_$(ep)_release
+    cmake --preset windows_$(arch)_$(ep)_$(build_config)
   displayName: 'Configure CMake C API without CUDA'
   condition: and(ne(variables['ep'], 'cuda'), ne(variables['arch'], 'arm64'))
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
-    cmake --preset windows_$(arch)_$(ep)_release
+    cmake --preset windows_$(arch)_$(ep)_$(build_config)
   displayName: 'Configure CMake C API for ARM64 CPU'
   condition: eq(variables['arch'], 'arm64')
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
-    cmake --build --preset windows_$(arch)_$(ep)_release --parallel --target ${{ parameters.target }}
+    cmake --build --preset windows_$(arch)_$(ep)_$(build_config) --parallel --target ${{ parameters.target }}
   displayName: 'Build C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
 
@@ -113,7 +118,7 @@ steps:
     displayName: 'Install wheel'
 
   - powershell: |
-      cmake --build --preset windows_$(arch)_$(ep)_release --target package
+      cmake --build --preset windows_$(arch)_$(ep)_$(build_config) --target package
     displayName: 'Package C/C++ API'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
@@ -142,7 +147,7 @@ steps:
     displayName: 'Install wheel'
 
   - powershell: |
-      cmake --build --preset windows_$(arch)_$(ep)_release --parallel --PyPackageBuild
+      cmake --build --preset windows_$(arch)_$(ep)_$(build_config) --parallel --PyPackageBuild
     displayName: 'Build Python Wheel'
 
   - powershell: |
@@ -161,3 +166,11 @@ steps:
       ArtifactName: $(artifactName)-wheel
       PathtoPublish: '$(Build.ArtifactStagingDirectory)\wheel'
 
+  - task: PublishSymbols@2
+    displayName: 'Publish Build Symbols'
+    condition: and(succeeded(), eq(variables['build_config'], 'relwithdebinfo'))
+    inputs:
+      SymbolsFolder: '$(Build.Repository.LocalPath)\build\$(ep)\src\python\RelWithDebInfo\'
+      SearchPattern: 'onnxruntime_genai.pdb'
+      SymbolServerType: teamServices
+      SymbolExpirationInDays: 365

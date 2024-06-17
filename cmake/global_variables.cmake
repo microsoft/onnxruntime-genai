@@ -2,7 +2,7 @@
 
 # Define the Version Info
 file(READ "VERSION_INFO" ver)
-set(VERSION_INFO ${ver} CACHE STRING "Set the onnxruntime-genai version info.")
+set(VERSION_INFO ${ver})
 message("Building onnxruntime-genai for version ${VERSION_INFO}")
 
 
@@ -69,6 +69,8 @@ if (MSVC)
 
   if (genai_target_platform STREQUAL "arm64")
     # pass
+  elseif (genai_target_platform STREQUAL "ARM64")
+    set(genai_target_platform "arm64")
   elseif (genai_target_platform STREQUAL "x64" OR 
           genai_target_platform STREQUAL "x86_64" OR 
           genai_target_platform STREQUAL "AMD64" OR 
