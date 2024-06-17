@@ -110,6 +110,7 @@ stages:
         ep: 'rocm'
         ort_version: ${{ parameters.ort_rocm_version }}
         os: 'linux'
+        build_config: ${{ parameters.build_config }}
 
 
 

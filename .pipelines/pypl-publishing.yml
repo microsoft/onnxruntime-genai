@@ -59,9 +59,6 @@ parameters:
   type: string
   default: '1.19.0-dev-20240602-1103-217b66f'
 
-- name: cuda_version
-  displayName: 'CUDA version'
-
 - name: cuda_versions
   displayName: 'CUDA versions'
   type: string
