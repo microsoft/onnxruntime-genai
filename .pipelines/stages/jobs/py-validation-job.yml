@@ -15,6 +15,8 @@ parameters:
   type: string
 - name: cuda_version
   type: string
+- name: cuda_display_version
+  type: string
   default: ''
 - name: os
   type: string
