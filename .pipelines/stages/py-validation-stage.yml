@@ -21,8 +21,9 @@ parameters:
   type: boolean
 - name: ort_version
   type: string
-- name: ort_cuda_version
+- name: ort_cuda_118_version
   type: string
+- name: ort_cuda_122_version
 - name: ort_dml_version
   type: string
 - name: cuda_version
@@ -69,7 +70,7 @@ stages:
         arch: 'x64'
         cuda_version: ${{ parameters.cuda_version }}
         ep: 'cuda'
-        ort_version: ${{ parameters.ort_cuda_version }}
+        ort_version: ${{ parameters.ort_cuda_118_version }}
         os: 'win'
         SpecificArtifact: ${{ parameters.SpecificArtifact }}
         BuildId: ${{ parameters.BuildId }}
