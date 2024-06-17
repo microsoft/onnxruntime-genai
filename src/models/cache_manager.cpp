@@ -196,51 +196,54 @@ std::pair<OrtValue*, OrtValue*> PagedCacheManager::Cache(size_t layer_id) {
   return {cache_[layer_id].first.get(), cache_[layer_id].second.get()};
 }
 
-std::unique_ptr<OrtValue> PagedCacheManager::BlockTables() const {
+std::unique_ptr<OrtValue> PagedCacheManager::BlockTables(const std::vector<size_t>& sequence_ids) const {
   size_t max_blocks = 0;
-  for (const auto& block_info : block_infos_) {
-    max_blocks = std::max(max_blocks, block_info.block_ids.size());
+  for (const auto& sequence_id : sequence_ids) {
+    auto block_info_it = block_tables_.find(sequence_id);
+    if (block_info_it == block_tables_.end()) {
+      throw std::runtime_error("Given sequence id " + std::to_string(sequence_id) + " is not found in the cache.");
+    }
+    max_blocks = std::max(max_blocks, block_info_it->second->block_ids.size());
   }
 
-  std::vector<int64_t> shape = {static_cast<int64_t>(block_infos_.size()), static_cast<int64_t>(max_blocks)};
+  std::vector<int64_t> shape = {static_cast<int64_t>(sequence_ids.size()), static_cast<int64_t>(max_blocks)};
   auto block_tables_value = OrtValue::CreateTensor(*cpu_allocator_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
   auto* block_tables_data = block_tables_value->GetTensorMutableData<int32_t>();
-  size_t block_info_idx = 0;
-  for (const auto& block_info : block_infos_) {
-    for (size_t i = 0; i < block_info.block_ids.size(); ++i) {
-      block_tables_data[block_info_idx * max_blocks + i] = block_info.block_ids[i];
+  for (size_t i = 0; i < sequence_ids.size(); ++i) {
+    auto block_info_it = block_tables_.find(sequence_ids[i]);
+    auto& block_info = block_info_it->second;
+    for (size_t j = 0; j < block_info->block_ids.size(); ++j) {
+      block_tables_data[i * max_blocks + j] = block_info->block_ids[j];
     }
-    for (size_t i = block_info.block_ids.size(); i < max_blocks; ++i) {
-      block_tables_data[block_info_idx * max_blocks + i] = BlockTablePadValue;
+    for (size_t j = block_info->block_ids.size(); j < max_blocks; ++j) {
+      block_tables_data[i * max_blocks + j] = BlockTablePadValue;
     }
-    ++block_info_idx;
   }
 
   return block_tables_value;
 }
 
-std::unique_ptr<OrtValue> PagedCacheManager::SlotMapping() const {
-  size_t num_tokens = std::accumulate(block_infos_.begin(), block_infos_.end(), num_tokens,
-                                      [](size_t acc, const auto& block_info) { return acc + block_info.slot_ids.size(); });
+std::unique_ptr<OrtValue> PagedCacheManager::SlotMapping(const std::vector<size_t>& sequence_ids) const {
+  size_t num_tokens = 0U;
+  for (const auto& sequence_id : sequence_ids) {
+    auto block_info_it = block_tables_.find(sequence_id);
+    if (block_info_it == block_tables_.end()) {
+      throw std::runtime_error("Given sequence id " + std::to_string(sequence_id) + " is not found in the cache.");
+    }
+    num_tokens += block_info_it->second->slot_ids.size();
+  }
   std::vector<int64_t> shape = {static_cast<int64_t>(num_tokens)};
   auto slot_mapping_value = OrtValue::CreateTensor(*cpu_allocator_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
   auto* slot_mapping_data = slot_mapping_value->GetTensorMutableData<int32_t>();
-  size_t block_info_idx = 0;
-  for (const auto& block_info : block_infos_) {
-    for (size_t i = 0; i < block_info.slot_ids.size(); ++i) {
-      slot_mapping_data[block_info_idx++] = block_info.slot_ids[i];
+  for (size_t i = 0; i < sequence_ids.size(); ++i) {
+    auto block_info_it = block_tables_.find(sequence_ids[i]);
+    auto& block_info = block_info_it->second;
+    for (size_t i = 0; i < block_info->slot_ids.size(); ++i) {
+      slot_mapping_data[i] = block_info->slot_ids[i];
     }
   }
   return slot_mapping_value;
 }
-
-// std::vector<size_t> PagedCacheManager::Order() const {
-//   std::vector<size_t> order;
-//   for (const auto& block_info : block_infos_) {
-//     order.push_back(block_info.sequence_id);
-//   }
-//   return order;
-// }
 
 void PagedCacheManager::ReorderCache(const std::unordered_map<size_t, size_t>& sequence_id_mapping) {
   // After reordering the cache, we might have shared resources between sequences.
@@ -270,8 +273,6 @@ void PagedCacheManager::ReorderCache(const std::unordered_map<size_t, size_t>& s
   // std::unordered_set<size_t> missing_sequence_ids;
 
   // 2. Update the block tables so sequences point to the correct blocks in memory based on the new shape.
-
-  // 3. Reorder the cache based on the new order.
 }
 
 }  // namespace Generators

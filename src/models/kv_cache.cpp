@@ -331,8 +331,9 @@ void PagedCacheOrchestrator::Add() {
   input_offset_ = state_.inputs_.size();
 
   auto num_sequences = state_.params_->BatchBeamSize();
+  std::vector<size_t> sequence_ids(num_sequences);
+  std::iota(sequence_ids.begin(), sequence_ids.end(), 0);
   for (int i = 0; i < num_sequences; ++i) {
-    // TODO (baijumeswani): get the sequence length from the attention mask?
     paged_cache_->Add(i, state_.params_->sequence_length);
   }
 
@@ -345,25 +346,27 @@ void PagedCacheOrchestrator::Add() {
   }
 
   state_.input_names_.push_back(PagedCacheBlockTablesName);
-  block_tables_ = paged_cache_->BlockTables();
+  block_tables_ = paged_cache_->BlockTables(sequence_ids);
   state_.inputs_.push_back(block_tables_.get());
   state_.input_names_.push_back(PagedCacheSlotMappingName);
-  slot_mapping_ = paged_cache_->SlotMapping();
+  slot_mapping_ = paged_cache_->SlotMapping(sequence_ids);
   state_.inputs_.push_back(slot_mapping_.get());
 }
 
 void PagedCacheOrchestrator::Update([[maybe_unused]] std::span<const int32_t> beam_indices,
                                     [[maybe_unused]] int current_length) {
   auto num_sequences = state_.params_->BatchBeamSize();
+  std::vector<size_t> sequence_ids(num_sequences);
+  std::iota(sequence_ids.begin(), sequence_ids.end(), 0);
   for (int i = 0; i < num_sequences; ++i) {
     paged_cache_->AddToken(i);
   }
 
   size_t input_offset = state_.inputs_.size();
 
-  block_tables_ = paged_cache_->BlockTables();
+  block_tables_ = paged_cache_->BlockTables(sequence_ids);
   state_.inputs_[input_offset_ + layer_count_ * 2] = block_tables_.get();
-  slot_mapping_ = paged_cache_->SlotMapping();
+  slot_mapping_ = paged_cache_->SlotMapping(sequence_ids);
   state_.inputs_[input_offset_ + layer_count_ * 2 + 1] = slot_mapping_.get();
 }
 

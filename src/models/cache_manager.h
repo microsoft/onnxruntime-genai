@@ -34,8 +34,8 @@ class PagedCacheManager {
   // Returns the K, V cache for the given layer_id.
   std::pair<OrtValue*, OrtValue*> Cache(size_t layer_id);
 
-  // Shape: [num_tokens, max_num_blocks_per_sequence]
-  // Assume the cache contains the blocks for sequences with ids [2, 5, 7]
+  // Shape: [batch_size, max_num_blocks_per_sequence]
+  // Assume that the block tables are requested for sequences with ids [2, 5, 7]
   // Assume the block tables for given sequence ids are:
   // {
   //   2: [0, 1, 2],
@@ -43,20 +43,16 @@ class PagedCacheManager {
   //   7: [4, 5, 6, 8]
   // }
   // Invoking this function will return the block tables as:
-  // [
-  //   [0, 1, 2, -1],
+  // [ [0, 1, 2, -1],
   //   [3, 7, 9, -1],
-  //   [4, 5, 6, 8]
-  // ]
+  //   [4, 5, 6, 8] ]
   //
-  // This implies that the sequence at index 0 (sequence id 2) has its kv cache stored in blocks with ids [0, 1, 2],
-  // the sequence at index 1 (sequence id 5) has its kv cache stored in blocks with ids [3, 7, 9], and and
-  // the sequence at index 2 (sequence id 7) has its kv cache stored in blocks with ids [4, 5, 6, 8].
+  // This implies that the sequence with sequence id 2 has its kv cache stored in blocks with ids [0, 1, 2],
+  // the sequence with sequence id 5 has its kv cache stored in blocks with ids [3, 7, 9], and and
+  // the sequencewith sequence id 7 has its kv cache stored in blocks with ids [4, 5, 6, 8].
   // -1 is used to pad the block tables to the max blocks per sequence from the given sequences.
-  // The order of the block tables is based on the order the sequences were added.
-  std::unique_ptr<OrtValue> BlockTables() const;
-
-  std::unique_ptr<OrtValue> BlockTablesForSequences(const std::vector<size_t>& sequence_ids) const;
+  // The order of the block tables is based on the order the provided sequence_ids.
+  std::unique_ptr<OrtValue> BlockTables(const std::vector<size_t>& sequence_ids) const;
 
   // Shape: [num_tokens]
   // Prompt stage:
@@ -89,8 +85,8 @@ class PagedCacheManager {
   // 11 (43 % 16) in block 2 (43 / 16), the sequence with id 5 should fill its KV cache token at slot
   // 13 (29 % 16) in block 1, and the sequence with id 7 should fill its KV cache token at slot
   // 12 (12 % 16) in block 0.
-  // The order of the slot mapping is based on the order the sequences were added.
-  std::unique_ptr<OrtValue> SlotMapping() const;
+  // The order of the clot mapping is based on the order the provided sequence_ids.
+  std::unique_ptr<OrtValue> SlotMapping(const std::vector<size_t>& sequence_ids) const;
 
   // Removes the allocated blocks for the given sequence_id and makes it available for
   // other sequences.
@@ -106,7 +102,6 @@ class PagedCacheManager {
   void AddToken(size_t sequence_id);
 
   // Reorder the cache based on the given order.
-  // This is needed when the order of the inputs changes due to beam search.
   void ReorderCache(const std::unordered_map<size_t, size_t>& sequence_id_mapping);
 
  private:
