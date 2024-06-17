@@ -27,21 +27,19 @@ Gpt_State::Gpt_State(const Gpt_Model& model, RoamingArray<int32_t> sequence_leng
 RoamingArray<float> Gpt_State::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
   int batch_size = static_cast<int>(input_ids_.GetShape()[0]);
 
-  if (first_run_) {
-    first_run_ = false;
-  } else {
-    UpdateInputs(next_tokens, next_indices, current_length);
-    logits_.Update();
+  if (!first_run_) {
+    UpdateInputsOutputs(next_tokens, next_indices, current_length);
   }
 
   State::Run(*model_.session_decoder_, *model_.run_options_, batch_size);
   return logits_.Get();
 }
 
-void Gpt_State::UpdateInputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> beam_indices, int current_length) {
+void Gpt_State::UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> beam_indices, int current_length) {
   input_ids_.Update(next_tokens);
   position_inputs_.Update(current_length);
   kv_cache_.Update(beam_indices.GetCPU(), current_length);
+  logits_.Update();
 }
 
 }  // namespace Generators

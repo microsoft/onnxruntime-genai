@@ -27,8 +27,7 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, RoamingArra
 
 RoamingArray<float> DecoderOnly_State::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
   if (!first_run_) {
-    UpdateInputs(next_tokens, next_indices, current_length);
-    logits_.Update();
+    UpdateInputsOutputs(next_tokens, next_indices, current_length);
   }
 
   int batch_size = static_cast<int>(input_ids_.GetShape()[0]);
@@ -37,10 +36,11 @@ RoamingArray<float> DecoderOnly_State::Run(int current_length, RoamingArray<int3
   return logits_.Get();
 }
 
-void DecoderOnly_State::UpdateInputs(const RoamingArray<int32_t>& next_tokens_unk, RoamingArray<int32_t> beam_indices, int current_length) {
+void DecoderOnly_State::UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens_unk, RoamingArray<int32_t> beam_indices, int current_length) {
   input_ids_.Update(next_tokens_unk);
   position_inputs_.Update(current_length);
   kv_cache_.Update(beam_indices.GetCPU(), current_length);
+  logits_.Update();
 }
 
 }  // namespace Generators

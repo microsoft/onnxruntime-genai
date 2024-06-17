@@ -78,7 +78,7 @@ struct DecoderState : State {
  private:
   friend struct MultiModalPipelineState;
 
-  void UpdateInputs(int current_length, RoamingArray<int32_t> beam_indices);
+  void UpdateInputsOutputs(int current_length, RoamingArray<int32_t> beam_indices);
 
   const MultiModalVisionModel& model_;
   const CapturedGraphInfo* captured_graph_info_;
@@ -99,7 +99,7 @@ struct MultiModalPipelineState : State {
                           RoamingArray<int32_t> next_indices) override;
 
  private:
-  void UpdateInputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> next_indices,
+  void UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> next_indices,
                     int current_length);
 
   const MultiModalVisionModel& model_;
