@@ -14,7 +14,7 @@ Logits::Logits(const Model& model, State& state)
       state_{state},
       shape_{static_cast<int64_t>(state_.params_->batch_size) * state_.params_->search.num_beams, state_.params_->sequence_length, state_.params_->vocab_size},
       type_{model_.session_info_->GetOutputDataType(model_.config_->model.decoder.outputs.logits)} {
-  raw_output_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
+  output_raw_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
 
   if (state_.GetCapturedGraphInfo()) {
     if (type_ == Ort::TypeToTensorType<float>::type) {
@@ -39,7 +39,7 @@ RoamingArray<float> Logits::Get() {
 
   // First iteration? Then copy the logits over to a {batch_beams, 1, vocab_size} tensor
   // The model's output logits are {batch_size*num_beams, input_seq_len, vocab_size}
-  OrtValue* logits_of_last_token = raw_output_.get();
+  OrtValue* logits_of_last_token = output_raw_.get();
   if (shape_[1] != 1) {
     const size_t seq_length = shape_[1];
     const size_t vocab_size = shape_[2];
@@ -48,9 +48,9 @@ RoamingArray<float> Logits::Get() {
 
     shape_[1] = 1;
 
-    // create new OrtValue for logits_of_last_token and use last_tokens_ to hold it
-    last_tokens_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
-    logits_of_last_token = last_tokens_.get();
+    // create new OrtValue for logits_of_last_token and use output_last_tokens_ to hold it
+    output_last_tokens_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
+    logits_of_last_token = output_last_tokens_.get();
 
     size_t element_size = type_ == Ort::TypeToTensorType<float>::type ? 4 : 2;
     size_t size_in_bytes = vocab_size * element_size;
@@ -70,7 +70,7 @@ RoamingArray<float> Logits::Get() {
 #if USE_DML
           case DeviceType::DML: {
             ComPtr<ID3D12Resource> source_resource;
-            Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, raw_output_->GetTensorMutableRawData(), &source_resource));
+            Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, output_raw_->GetTensorMutableRawData(), &source_resource));
 
             ComPtr<ID3D12Resource> target_resource;
             Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, logits_of_last_token->GetTensorMutableRawData(), &target_resource));
@@ -92,7 +92,7 @@ RoamingArray<float> Logits::Get() {
 
           case DeviceType::CPU:
           case DeviceType::CUDA: {
-            auto logits_raw = std::span<const uint8_t>{raw_output_->GetTensorMutableData<uint8_t>(), element_count * element_size};
+            auto logits_raw = std::span<const uint8_t>{output_raw_->GetTensorMutableData<uint8_t>(), element_count * element_size};
             auto logits_last_tokens = std::span<uint8_t>{logits_of_last_token->GetTensorMutableData<uint8_t>(), element_count_last_token * element_size};
             auto target = logits_last_tokens.subspan(vocab_index * element_size, vocab_size * element_size);
             auto source = logits_raw.subspan((vocab_index * seq_length + token_index * vocab_size) * element_size, vocab_size * element_size);
@@ -133,8 +133,8 @@ RoamingArray<float> Logits::Get() {
 #endif
       ConvertFp16ToFp32(*model_.allocator_device_, *logits_of_last_token, logits_of_last_token_fp32, model_.device_type_, model_.cuda_stream_);
 
-    last_tokens_ = std::move(logits_of_last_token_fp32); // use last_tokens_ to hold the fp32 logits
-    logits_of_last_token = last_tokens_.get();
+    output_last_tokens_ = std::move(logits_of_last_token_fp32); // use output_last_tokens_ to hold the fp32 logits
+    logits_of_last_token = output_last_tokens_.get();
   }
 
 #if USE_DML
@@ -187,14 +187,14 @@ RoamingArray<float> Logits::Get() {
 }
 
 void Logits::Update() {
-  if (raw_output_.get()->GetTensorTypeAndShapeInfo()->GetShape()[1] == 1) {
+  if (output_raw_.get()->GetTensorTypeAndShapeInfo()->GetShape()[1] == 1) {
     return;
   }
 
   StaticBuffer* sb_logits = type_ == Ort::TypeToTensorType<Ort::Float16_t>::type ? sb_logits16_ : sb_logits32_;
-  raw_output_ = !sb_logits ? OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_)
+  output_raw_ = !sb_logits ? OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_)
                            : sb_logits->CreateTensorOnStaticBuffer(shape_, type_);
-  state_.outputs_[output_index_] = raw_output_.get();
+  state_.outputs_[output_index_] = output_raw_.get();
 }
 
 void Logits::HandleEOSArray(cpu_span<float> batched_logits) {
@@ -221,7 +221,7 @@ void Logits::Add() {
   output_index_ = state_.outputs_.size();
 
   state_.output_names_.push_back(model_.config_->model.decoder.outputs.logits.c_str());
-  state_.outputs_.push_back(raw_output_.get());
+  state_.outputs_.push_back(output_raw_.get());
 }
 
 }  // namespace Generators
