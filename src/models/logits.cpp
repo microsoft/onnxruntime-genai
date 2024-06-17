@@ -133,7 +133,7 @@ RoamingArray<float> Logits::Get() {
 #endif
       ConvertFp16ToFp32(*model_.allocator_device_, *logits_of_last_token, logits_of_last_token_fp32, model_.device_type_, model_.cuda_stream_);
 
-    output_last_tokens_ = std::move(logits_of_last_token_fp32); // use output_last_tokens_ to hold the fp32 logits
+    output_last_tokens_ = std::move(logits_of_last_token_fp32);  // use output_last_tokens_ to hold the fp32 logits
     logits_of_last_token = output_last_tokens_.get();
   }
 

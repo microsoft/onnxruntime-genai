@@ -100,7 +100,7 @@ struct MultiModalPipelineState : State {
 
  private:
   void UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> next_indices,
-                    int current_length);
+                           int current_length);
 
   const MultiModalVisionModel& model_;
   const CapturedGraphInfoPtr captured_graph_info_;

@@ -29,7 +29,7 @@ struct Logits {
   // 2. token gen: store the converted fp32 logits if output_raw_ is fp16.
   std::unique_ptr<OrtValue> output_last_tokens_;
 
-  std::unique_ptr<OrtValue> output_raw_; // Raw logits output from model
+  std::unique_ptr<OrtValue> output_raw_;  // Raw logits output from model
 
   // Used for decoding runs with cuda graphs.
   StaticBuffer* sb_logits32_{};

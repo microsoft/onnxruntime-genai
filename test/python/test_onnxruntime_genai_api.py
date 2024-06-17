@@ -192,8 +192,6 @@ def test_get_output(test_data_path, relative_model_path):
         [[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32
     )
     search_params.set_search_options(do_sample=False, max_length=10)
-    input_ids_shape = [2, 4]
-    batch_size = input_ids_shape[0]
 
     generator = og.Generator(model, search_params)
 
