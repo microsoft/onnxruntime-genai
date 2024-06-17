@@ -106,7 +106,6 @@ stages:
     - template: jobs/py-packaging-job.yml
       parameters:
         arch: 'x64'
-        cuda_version: ${{ parameters.cuda_version }}
         ep: 'rocm'
         ort_version: ${{ parameters.ort_rocm_version }}
         os: 'linux'
