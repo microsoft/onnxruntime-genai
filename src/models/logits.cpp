@@ -48,9 +48,9 @@ RoamingArray<float> Logits::Get() {
 
     shape_[1] = 1;
 
-    // create new OrtValue for logits_of_last_token and use output_to_search_ to hold it
-    output_to_search_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
-    logits_of_last_token = output_to_search_.get();
+    // create new OrtValue for logits_of_last_token and use last_tokens_ to hold it
+    last_tokens_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
+    logits_of_last_token = last_tokens_.get();
 
     size_t element_size = type_ == Ort::TypeToTensorType<float>::type ? 4 : 2;
     size_t size_in_bytes = vocab_size * element_size;
@@ -133,8 +133,8 @@ RoamingArray<float> Logits::Get() {
 #endif
       ConvertFp16ToFp32(*model_.allocator_device_, *logits_of_last_token, logits_of_last_token_fp32, model_.device_type_, model_.cuda_stream_);
 
-    output_to_search_ = std::move(logits_of_last_token_fp32); // use output_to_search_ to hold the fp32 logits
-    logits_of_last_token = output_to_search_.get();
+    last_tokens_ = std::move(logits_of_last_token_fp32); // use last_tokens_ to hold the fp32 logits
+    logits_of_last_token = last_tokens_.get();
   }
 
 #if USE_DML

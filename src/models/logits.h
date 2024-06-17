@@ -23,7 +23,12 @@ struct Logits {
 
   std::array<int64_t, 3> shape_{};
   ONNXTensorElementDataType type_;
-  std::unique_ptr<OrtValue> output_to_search_;  // Logits that will be send to Search for token generation
+
+  // Tensor to keep the logits of the last tokens. It is used in the 2 cases below. Otherwhise, it is not used.
+  // 1. prompt: store the last tokens logits from raw_output_
+  // 2. token gen: store the converted fp32 logits if raw_output_ is fp16.
+  std::unique_ptr<OrtValue> last_tokens_;
+
   std::unique_ptr<OrtValue> raw_output_; // Raw logits output from model
 
   // Used for decoding runs with cuda graphs.
