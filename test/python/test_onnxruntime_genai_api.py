@@ -149,3 +149,23 @@ def test_logging():
     og.set_log_options(enabled=True, model_input_values=True, model_output_shapes=True)
     og.set_log_options(model_input_values=False, model_output_shapes=False)
     og.set_log_options(enabled=False)
+
+
+@pytest.mark.parametrize(
+    "relative_model_path",
+    (
+        [
+            (Path("hf-internal-testing") / "tiny-random-gpt2-fp32", "CPU"),
+            (Path("hf-internal-testing") / "tiny-random-gpt2-fp32-cuda", "CUDA"),
+            (Path("hf-internal-testing") / "tiny-random-gpt2-fp16-cuda", "CUDA"),
+        ]
+        if og.is_cuda_available()
+        else [(Path("hf-internal-testing") / "tiny-random-gpt2-fp32", "CPU")]
+    ),
+)
+def test_model_device_type(test_data_path, relative_model_path):
+    model_path = os.fspath(Path(test_data_path) / relative_model_path[0])
+
+    model = og.Model(model_path)
+
+    assert model.device_type == relative_model_path[1]

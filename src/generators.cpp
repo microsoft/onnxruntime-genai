@@ -28,6 +28,18 @@ OrtEnv& GetOrtEnv() {
   return *GetOrtGlobals()->env_;
 }
 
+std::string to_string(DeviceType device_type) {
+  switch (device_type) {
+    case DeviceType::CPU:
+      return "CPU";
+    case DeviceType::CUDA:
+      return "CUDA";
+    case DeviceType::DML:
+      return "DirectML";
+  }
+  throw std::runtime_error("Unknown device type");
+}
+
 GeneratorParams::GeneratorParams(const Model& model)
     : search{model.config_->search},
       pad_token_id{model.config_->model.pad_token_id},
@@ -178,7 +190,7 @@ void Generator::GenerateNextToken() {
   }
 }
 
-RoamingArray<int32_t> Generator::GetSequence(int index) const {
+RoamingArray<int32_t> Generator::GetSequence(size_t index) const {
   return search_->GetSequence(index);
 }
 
