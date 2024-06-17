@@ -418,7 +418,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         return CreateModel(GetOrtEnv(), config_path.c_str());
       }))
       .def("generate", [](Model& model, PyGeneratorParams& params) { params.Prepare(); return Generate(model, params); })
-      .def_property_readonly("device_type", [](const Model& s) { return s.device_type_; })
+      .def_property_readonly(
+          "device_type", [](const Model& model) { return to_string(model.device_type_); }, "The device type the model is running on")
       .def("create_multimodal_processor", [](const Model& model) { return model.CreateMultiModalProcessor(); });
 
   pybind11::class_<PyGenerator>(m, "Generator")
