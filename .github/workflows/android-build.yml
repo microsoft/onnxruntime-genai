@@ -25,8 +25,9 @@ jobs:
     #   WARNING | QEMU main loop exits abnormally with code 1
     # it works on macos-13 but the unit test app can't find libonnxruntime.so. need to be able to repro locally
     # to figure that out.
-    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU" ]
+    # runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU" ]
     # runs-on: macos-13
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v4
