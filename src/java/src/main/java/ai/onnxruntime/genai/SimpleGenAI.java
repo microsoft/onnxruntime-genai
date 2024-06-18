@@ -55,6 +55,9 @@ public class SimpleGenAI {
    * Create the generator parameters and add the prompt text. The user can set other search options
    * via the GeneratorParams object prior to running `generate`.
    *
+   * @param tokenIds The encoded token ids for the prompt/s.
+   * @param sequenceLength The length of each sequence in tokenIds. All sequences must have the same length.
+   * @param batchSize The number of batches in tokenIds.
    * @return The generator parameters.
    * @throws GenAIException on failure
    */
