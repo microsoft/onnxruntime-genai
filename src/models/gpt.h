@@ -21,10 +21,9 @@ struct Gpt_State : State {
   RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) override;
 
  private:
-  void UpdateInputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> beam_indices, int current_length);
+  void UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> beam_indices, int current_length);
 
   const Gpt_Model& model_;
-  bool first_run_{true};
 
   InputIDs input_ids_{model_, *this};
   Logits logits_{model_, *this};

@@ -7,6 +7,10 @@ parameters:
 - name: arch
   type: string
   default: 'x64'
+- name: build_config
+  type: string
+  default: 'release'
+
 steps:
 
 - checkout: self
@@ -31,11 +35,27 @@ steps:
 - bash: |
     echo "arch=$(arch)"
     echo "ep=$(ep)"
+    echo "build_config=$(build_config)"
   displayName: 'Print Parameters'
 
 - template: utils/download-ort.yml
   parameters:
     archiveType: 'tgz'
+
+- bash: |
+    set -e -x
+    az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
+    az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
+    python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_$(ep)_$(cuda_version) \
+      --context tools/ci_build/github/linux/docker/manylinux \
+      --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
+      --container-registry onnxruntimebuildcache \
+      --manylinux-src manylinux \
+      --multiple_repos \
+      --repository ortgenai$(ep)build$(arch)
+  displayName: 'Get CUDA Docker Image'
+  condition: eq(variables['ep'], 'cuda')
+  workingDirectory: '$(Build.Repository.LocalPath)'
 
 - bash: |
     set -e -x
@@ -49,6 +69,7 @@ steps:
       --multiple_repos \
       --repository ortgenai$(ep)build$(arch)
   displayName: 'Get Docker Image'
+  condition: ne(variables['ep'], 'cuda')
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
@@ -59,9 +80,9 @@ steps:
       --volume $(Build.Repository.LocalPath):/ort_genai_src \
       -w /ort_genai_src/ ortgenai$(ep)build$(arch) \
       bash -c " \
-          /usr/bin/cmake --preset linux_gcc_$(ep)_release \
+          /usr/bin/cmake --preset linux_gcc_$(ep)_$(build_config) \
             -DENABLE_TESTS=OFF && \
-          /usr/bin/cmake --build --preset linux_gcc_$(ep)_release \
+          /usr/bin/cmake --build --preset linux_gcc_$(ep)_$(build_config) \
             --target onnxruntime-genai"
     displayName: 'Build GenAi'
     workingDirectory: '$(Build.Repository.LocalPath)'
@@ -81,7 +102,7 @@ steps:
       --volume $(Build.Repository.LocalPath):/ort_genai_src \
       -w /ort_genai_src/ ortgenai$(ep)build$(arch) \
       bash -c " \
-          /usr/bin/cmake --build --preset linux_gcc_$(ep)_release --target package"
+          /usr/bin/cmake --build --preset linux_gcc_$(ep)_$(build_config) --target package"
     displayName: 'Package C/C++ API'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
@@ -99,11 +120,11 @@ steps:
       --volume $(Build.Repository.LocalPath):/ort_genai_src \
       -w /ort_genai_src/ ortgenai$(ep)build$(arch) \
       bash -c " \
-          /usr/bin/cmake --preset linux_gcc_$(ep)_release \
+          /usr/bin/cmake --preset linux_gcc_$(ep)_$(build_config) \
             -DENABLE_TESTS=OFF \
             -DMANYLINUX=ON \
             -DPYTHON_EXECUTABLE=/opt/python/cp$(PyNoDotVer)-cp$(PyNoDotVer)/bin/python$(PyDotVer) && \
-          /usr/bin/cmake --build --preset linux_gcc_$(ep)_release \
+          /usr/bin/cmake --build --preset linux_gcc_$(ep)_$(build_config) \
             --target python"
     displayName: 'Build Python $(PyNoDotVer)'
     workingDirectory: '$(Build.Repository.LocalPath)'
@@ -121,11 +142,11 @@ steps:
       --volume $(Build.Repository.LocalPath):/ort_genai_src \
       -w /ort_genai_src/ ortgenai$(ep)build$(arch) \
       bash -c " \
-          /usr/bin/cmake --build --preset linux_gcc_$(ep)_release \
+          /usr/bin/cmake --build --preset linux_gcc_$(ep)_$(build_config) \
             -DENABLE_TESTS=OFF \
             -DMANYLINUX=ON \
             -DPYTHON_EXECUTABLE=/opt/python/cp$(PyNoDotVer)-cp$(PyNoDotVer)/bin/python$(PyDotVer) && \
-          /usr/bin/cmake --build --preset linux_gcc_$(ep)_release \
+          /usr/bin/cmake --build --preset linux_gcc_$(ep)_$(build_config) \
             --target PyPackageBuild"
     displayName: 'PyPackageBuild $(PyNoDotVer)'
     workingDirectory: '$(Build.Repository.LocalPath)'

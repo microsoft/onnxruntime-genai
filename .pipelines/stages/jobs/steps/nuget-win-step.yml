@@ -1,3 +1,8 @@
+parameters:
+- name: arch
+  type: string
+  default: 'x64'
+
 steps:
 - powershell: |
     dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(buildConfig)" -p:NativeBuildOutputDir="$(buildDir)\$(buildConfig)"
@@ -12,11 +17,11 @@ steps:
 
 - template: compliant/win-esrp-dll-step.yml
   parameters:
-    FolderPath: '$(Build.Repository.LocalPath)\src\csharp\bin\Release\'
+    FolderPath: '$(Build.Repository.LocalPath)\src\csharp\bin\$(buildConfig)\'
     DisplayName: 'ESRP - Sign C# dlls'
     Pattern: '*OnnxRuntimeGenAI*.dll'
 - powershell: |
-    $VERSION = '0.3.0-rc2'
+    $VERSION = '0.3.0'
     nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.nuspec `
       -Prop version=$VERSION `
       -Prop genai_nuget_ext=$(genai_nuget_ext) `
@@ -26,6 +31,7 @@ steps:
     nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec `
       -Prop version=$VERSION `
       -Prop configuration=$(buildConfig)
+  condition: ne(variables['arch'], 'arm64')
   displayName: 'Nuget Packaging'
   workingDirectory: '$(Build.Repository.LocalPath)\nuget'
 

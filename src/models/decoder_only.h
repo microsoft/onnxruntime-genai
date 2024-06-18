@@ -22,7 +22,7 @@ struct DecoderOnly_State : State {
   const CapturedGraphInfo* GetCapturedGraphInfo() const override { return captured_graph_info_.get(); };
 
  private:
-  void UpdateInputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> next_indices, int current_length);
+  void UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> next_indices, int current_length);
 
   const DecoderOnly_Model& model_;
   CapturedGraphInfoPtr captured_graph_info_;
