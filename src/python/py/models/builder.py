@@ -2004,7 +2004,7 @@ def get_args():
                     is the prerequisite for the CUDA graph to be used correctly. It is not guaranteed that cuda graph be enabled as it depends on the model
                     and the graph structure.
                 quant_provider = {inc, modelopt} : Quantization provider - You can choose between Intel's Neural Compressor (default) and NVIDIA's TensorRT
-                    Model Optimizer (ModelOpt). Expect slower processing but better compression when using ModelOpt.
+                    Model Optimizer (ModelOpt).
             """),
     )
 
