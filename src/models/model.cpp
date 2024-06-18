@@ -349,10 +349,10 @@ void Model::CreateSessionOptions() {
       dml_objects_ = DmlHelpers::CreateDmlObjects(current_module_path);
 
       auto directml_dll = current_module_path + "DirectML.dll";
-      wil::unique_hmodule smart_directml_dll(LoadLibraryExA(directml_dll.c_str(), nullptr, 0));
+      wil::unique_hmodule smart_directml_dll(LoadLibraryEx(directml_dll.c_str(), nullptr, 0));
       THROW_LAST_ERROR_IF(!smart_directml_dll);
 
-      if (LoadLibraryExA(directml_dll.c_str(), nullptr, 0) == NULL) {
+      if (LoadLibraryEx(directml_dll.c_str(), nullptr, 0) == NULL) {
         throw std::runtime_error("DirectML.dll not found");
       }
 
