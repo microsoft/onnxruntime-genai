@@ -5,7 +5,7 @@ on:
     branches:
     - main
     - rel-*
-    - skottmckay/*
+    - snnn/*
   pull_request:
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -25,9 +25,10 @@ jobs:
     #   WARNING | QEMU main loop exits abnormally with code 1
     # it works on macos-13 but the unit test app can't find libonnxruntime.so. need to be able to repro locally
     # to figure that out.
-    # runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU" ]
+    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU" ]
     # runs-on: macos-13
-    runs-on: ubuntu-latest
+    env:
+      DOTNET_INSTALL_DIR: ${{ github.workspace }}/nuget
     steps:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v4
@@ -76,16 +77,13 @@ jobs:
           echo "$ORT_NIGHTLY_VERSION"
           echo "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" >> $GITHUB_ENV
 
-      # have to create a dummy project to use `add package`
       - name: Download OnnxRuntime Nightly
         run: |
           dotnet new console
           dotnet add package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_NIGHTLY_VERSION }} --source ${{ env.ORT_NIGHTLY_SOURCE }} --package-directory .
+          find . -name \*onnxruntime\*
+        continue-on-error: true
 
-      # linux:
-      #   unzip microsoft.ml.onnxruntime/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/android/native/onnxruntime.aar -d ort
-      # macos:
-      #   unzip ${{ env.ORT_PACKAGE_NAME }}/runtimes/android/native/onnxruntime.aar -d ort
       - name: Extract ONNX Runtime AAR
         run: |
           set -e -x
