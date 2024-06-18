@@ -19,10 +19,12 @@ env:
 jobs:
   android_x64:
     # android emulator doesn't work on macos-14.
-    #  WARNING | FeatureControl is requesting a non existing feature.
-    #  HVF error: HV_UNSUPPORTED
-    #  qemu-system-aarch64: failed to initialize HVF: Invalid argument
-    #  WARNING | QEMU main loop exits abnormally with code 1
+    #   WARNING | FeatureControl is requesting a non existing feature.
+    #   HVF error: HV_UNSUPPORTED
+    #   qemu-system-aarch64: failed to initialize HVF: Invalid argument
+    #   WARNING | QEMU main loop exits abnormally with code 1
+    # it works on macos-13 but the unit test app can't find libonnxruntime.so. need to be able to repro locally
+    # to figure that out.
     runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU" ]
     # runs-on: macos-13
     steps:
@@ -81,9 +83,9 @@ jobs:
         run: |
           nuget install ${{ env.ORT_PACKAGE_NAME }} -version ${{ env.ORT_NIGHTLY_VERSION }} -x
 
-      # linux was:
+      # linux:
       #   unzip microsoft.ml.onnxruntime/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/android/native/onnxruntime.aar -d ort
-      # macos
+      # macos:
       #   unzip ${{ env.ORT_PACKAGE_NAME }}/runtimes/android/native/onnxruntime.aar -d ort
       - name: Extract ONNX Runtime AAR
         run: |

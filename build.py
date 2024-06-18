@@ -365,7 +365,7 @@ def _run_android_tests(args, ):
                 util.android.start_emulator(
                     sdk_tool_paths=sdk_tool_paths,
                     avd_name=avd_name,
-                    extra_args=["-partition-size", "2047", "-wipe-data"],
+                    extra_args=["-partition-size", "2047", "-wipe-data", "-accel", "off"],
                 )
             )
             context_stack.callback(util.android.stop_emulator, emulator_proc)
