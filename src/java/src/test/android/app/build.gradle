@@ -3,7 +3,7 @@ plugins {
 	id 'kotlin-android'
 }
 
-def minSdkVer = System.properties.get("minSdkVer")?:24
+def minSdkVer = System.properties.get("minSdkVer")?:27
 
 android {
 	compileSdkVersion 32

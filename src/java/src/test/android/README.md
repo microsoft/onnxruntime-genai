@@ -1,4 +1,4 @@
-# Android Test Application for ORT-Mobile
+# Android Test Application for ONNX Runtime GenAI
 
 This directory contains a simple android application for testing the ONNX Runtime GenaI AAR package.
 
@@ -23,9 +23,11 @@ This android application is mainly aimed for testing:
 Build for Android with the additional  `--build_java` and `--android_run_emulator` options.
 
 e.g.
-`./build --android --android_home D:\Android --android_ndk D:\Android\ndk\26.3.11579264\ --android_abi x86_64 --ort_home 'path to unzipped onnxruntime-android.aar from https://mvnrepository.com/artifact/com.microsoft.onnxruntime/onnxruntime-android/<version>' --build_java --android_run_emulator`
+`./build --android --android_home D:\Android --android_ndk_path D:\Android\ndk\26.3.11579264\ --android_abi x86_64 --ort_home 'path to unzipped onnxruntime-android.aar from https://mvnrepository.com/artifact/com.microsoft.onnxruntime/onnxruntime-android/<version>' --build_java --android_run_emulator`
 
 Please note that you must set the `--android_abi` value to match the local system architecture, as the Android instrumentation test is run on an Android emulator on the local system.
+
+See ../../AndroidBuild.md for more information on building for Android.
 
 #### Build Output
 

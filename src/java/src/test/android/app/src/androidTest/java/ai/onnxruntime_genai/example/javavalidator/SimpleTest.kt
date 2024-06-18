@@ -1,10 +1,9 @@
 package ai.onnxruntime.genai.example.javavalidator
 
+import ai.onnxruntime.*
 import ai.onnxruntime.genai.*
-import android.content.res.AssetManager
 import android.os.Build
 import android.util.Log
-import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.rules.ActivityScenarioRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -13,8 +12,6 @@ import org.junit.runner.RunWith
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
-import java.io.InputStream
-import java.io.OutputStream
 import java.util.*
 
 
@@ -26,14 +23,12 @@ class SimpleTest {
     val activityTestRule = ActivityScenarioRule(MainActivity::class.java)
 
     @Before
-    fun Start() {
+    fun start() {
         Log.i(TAG, "SystemABI=" + Build.SUPPORTED_ABIS[0])
-    }
-
-    @Throws(IOException::class)
-    private fun readModel(fileName: String): ByteArray {
-        return InstrumentationRegistry.getInstrumentation().targetContext.assets.open(fileName)
-            .readBytes()
+        val providers = OrtEnvironment.getAvailableProviders()
+        for (provider in providers) {
+            Log.i(TAG, "Providers=$provider.getName()")
+        }
     }
 
     @Throws(IOException::class)
@@ -44,7 +39,7 @@ class SimpleTest {
         // Test context is InstrumentationRegistry.getInstrumentation().targetContext.
         val context = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext
         val assetManager = context.assets
-        var files: Array<String>? = null
+        val files: Array<String>?
         try {
             files = context.assets.list("model")
         } catch (e: IOException) {
@@ -73,8 +68,8 @@ class SimpleTest {
                     outFile.createNewFile()
                 }
 
-                var srcStream = assetManager.open("model/$filename")
-                var dstStream = FileOutputStream(outFile)
+                val srcStream = assetManager.open("model/$filename")
+                val dstStream = FileOutputStream(outFile)
                 var bytesRead: Int
                 while (srcStream.read(buffer).also { bytesRead = it } != -1) {
                     dstStream.write(buffer, 0, bytesRead)

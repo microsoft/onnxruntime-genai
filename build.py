@@ -350,7 +350,6 @@ def _run_android_tests(args, ):
         return
 
     sdk_tool_paths = util.android.get_sdk_tool_paths(args.android_home)
-    print("SDK Tool Paths: ", sdk_tool_paths)
     adb = sdk_tool_paths.adb
     with contextlib.ExitStack() as context_stack:
         # use API 27 or higher so the emulator is Android 8.1 (2017) or later
@@ -365,7 +364,7 @@ def _run_android_tests(args, ):
                 util.android.start_emulator(
                     sdk_tool_paths=sdk_tool_paths,
                     avd_name=avd_name,
-                    extra_args=["-partition-size", "2047", "-wipe-data"],  # , "-accel", "off"],
+                    extra_args=["-partition-size", "2047", "-wipe-data"],
                 )
             )
             context_stack.callback(util.android.stop_emulator, emulator_proc)
@@ -381,6 +380,7 @@ def _run_android_tests(args, ):
                  cwd=android_test_path)
 
         # Print test log output so we can easily check that the test ran as expected
+        util.run([adb, "logcat", "-s", "-d", "ORTGenAIAndroidTest:*"])
         util.run([adb, "logcat", "-s", "-d", "TestRunner:*"])
 
 
