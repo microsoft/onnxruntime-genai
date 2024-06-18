@@ -87,6 +87,7 @@ endif()
 
 if(USE_DML)
   list(APPEND onnxruntime_libs "${ORT_LIB_DIR}/DirectML.dll")
+  list(APPEND onnxruntime_libs "${ORT_LIB_DIR}/D3D12Core.dll")
   target_include_directories(onnxruntime-genai PRIVATE $<TARGET_PROPERTY:${WIL_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
   target_include_directories(onnxruntime-genai PRIVATE $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>/directx)
   target_include_directories(onnxruntime-genai PRIVATE $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
