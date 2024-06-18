@@ -64,11 +64,6 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      # this works, but nuget requires mono which isn't on the machine.
-      - uses: nuget/setup-nuget@v2
-        with:
-          nuget-version: '6.x'
-
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v4
         with:
@@ -81,7 +76,7 @@ jobs:
           echo "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" >> $GITHUB_ENV
       - name: Download OnnxRuntime Nightly
         run: |
-          nuget install ${{ env.ORT_PACKAGE_NAME }} -version ${{ env.ORT_NIGHTLY_VERSION }} -x
+          dotnet add package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_NIGHTLY_VERSION }} --source ${{ env.ORT_NIGHTLY_SOURCE }} --package-directory .
 
       # linux:
       #   unzip microsoft.ml.onnxruntime/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/android/native/onnxruntime.aar -d ort
@@ -90,6 +85,7 @@ jobs:
       - name: Extract ONNX Runtime AAR
         run: |
           set -e -x
+          ls -l
           unzip microsoft.ml.onnxruntime/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/android/native/onnxruntime.aar -d ort
           ls -lR ort
 
