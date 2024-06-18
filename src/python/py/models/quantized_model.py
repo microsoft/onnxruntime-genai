@@ -521,7 +521,7 @@ class QuantizedModel:
 
 
 class AWQModel(QuantizedModel):
-    def __init__(self, quant_type, input_path, bits, group_size, use_g_idx, q_size, kv_size, intermediate_size):
+    def __init__(self, quant_type, input_path, bits, group_size, q_size, kv_size, intermediate_size):
         super().__init__(quant_type, input_path, bits, group_size, q_size, kv_size, intermediate_size)
 
         # Unpack and repack all `QuantizedTensorModule` classes in model
@@ -534,9 +534,8 @@ class AWQModel(QuantizedModel):
                     self.unpack(q_tensors)
                     self.repack(q_tensors)
 
-                    if not use_g_idx:
-                        # Set `g_idx` to None since it's not used in `MatMulNBits`
-                        q_tensors.g_idx = None
+                    # Set `g_idx` to None since it's not used in `MatMulNBits`
+                    q_tensors.g_idx = None
 
             # Unpack and repack all `Quantized TensorModule` classes in MLP
             for name, q_tensors in layer.mlp.__dict__.items():
@@ -544,9 +543,8 @@ class AWQModel(QuantizedModel):
                     self.unpack(q_tensors)
                     self.repack(q_tensors)
 
-                    if not use_g_idx:
-                        # Set `g_idx` to None since it's not used in `MatMulNBits`
-                        q_tensors.g_idx = None
+                    # Set `g_idx` to None since it's not used in `MatMulNBits`
+                    q_tensors.g_idx = None
 
     def unpack_qweight(self, module):
         """
@@ -651,7 +649,7 @@ class QuantModel:
         the quantized weights.
         """
         if quant_type == "awq":
-            model = AWQModel(quant_type, input_path, bits, group_size, use_g_idx, q_size, kv_size, intermediate_size)
+            model = AWQModel(quant_type, input_path, bits, group_size, q_size, kv_size, intermediate_size)
         elif quant_type == "gptq":
             model = GPTQModel(quant_type, input_path, bits, group_size, use_g_idx, q_size, kv_size, intermediate_size)
         else:
