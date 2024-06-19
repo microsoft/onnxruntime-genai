@@ -71,6 +71,7 @@ target_include_directories(onnxruntime-genai-jni PRIVATE ${SRC_ROOT}
 target_link_libraries(onnxruntime-genai-jni PUBLIC onnxruntime-genai)
 
 # TEST add onnxruntime as an explicit dependency even though we don't use it directly in the JNI code.
+target_include_directories(onnxruntime-genai-jni PRIVATE ${ORT_HEADER_DIR})
 target_link_directories(onnxruntime-genai-jni PRIVATE ${ORT_LIB_DIR})
 target_link_libraries(onnxruntime-genai-jni PRIVATE ${ONNXRUNTIME_LIB})
 
@@ -108,19 +109,19 @@ file(MAKE_DIRECTORY ${JAVA_PACKAGE_LIB_DIR})
 
 # Add the native genai library to the native-lib dir
 add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
-                    COMMAND ${CMAKE_COMMAND} -E copy_if_different 
+                    COMMAND ${CMAKE_COMMAND} -E copy
                       $<TARGET_FILE:onnxruntime-genai> 
                       ${JAVA_PACKAGE_LIB_DIR}/$<TARGET_FILE_NAME:onnxruntime-genai>)
                       
 # also need the onnxruntime libraries in the same directory as onnxruntime-genai.dll has a dependency on it
 foreach (ort_dll ${onnxruntime_libs})
   add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
-                      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${ort_dll} ${JAVA_PACKAGE_LIB_DIR})
+                      COMMAND ${CMAKE_COMMAND} -E copy ${ort_dll} ${JAVA_PACKAGE_LIB_DIR})
 endforeach()
 
 # Add the JNI bindings to the native-jni dir
 add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
-                    COMMAND ${CMAKE_COMMAND} -E copy_if_different 
+                    COMMAND ${CMAKE_COMMAND} -E copy
                       $<TARGET_FILE:onnxruntime-genai-jni>
                       ${JAVA_PACKAGE_LIB_DIR}/$<TARGET_FILE_NAME:onnxruntime-genai-jni>)
 
@@ -152,18 +153,18 @@ if (ANDROID)
 
   # copy C/C++ API headers to be packed into Android AAR package  
   add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD 
-                     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SRC_ROOT}/ort_genai.h ${ANDROID_PACKAGE_HEADERS_DIR})
+                     COMMAND ${CMAKE_COMMAND} -E copy ${SRC_ROOT}/ort_genai.h ${ANDROID_PACKAGE_HEADERS_DIR})
   add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD 
-                     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SRC_ROOT}/ort_genai_c.h ${ANDROID_PACKAGE_HEADERS_DIR})
+                     COMMAND ${CMAKE_COMMAND} -E copy ${SRC_ROOT}/ort_genai_c.h ${ANDROID_PACKAGE_HEADERS_DIR})
 
   # Copy onnxruntime-genai.so and onnxruntime-genai-jni.so for building Android AAR package
   add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
-                     COMMAND ${CMAKE_COMMAND} -E copy_if_different 
+                     COMMAND ${CMAKE_COMMAND} -E copy 
                        $<TARGET_FILE:onnxruntime-genai>
                        ${ANDROID_PACKAGE_ABI_DIR}/$<TARGET_LINKER_FILE_NAME:onnxruntime-genai>)
 
   add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
-                     COMMAND ${CMAKE_COMMAND} -E copy_if_different 
+                     COMMAND ${CMAKE_COMMAND} -E copy 
                        $<TARGET_FILE:onnxruntime-genai-jni> 
                        ${ANDROID_PACKAGE_ABI_DIR}/$<TARGET_LINKER_FILE_NAME:onnxruntime-genai-jni>)
 
@@ -199,7 +200,7 @@ if (ANDROID)
 
   # Copy the Android AAR package we built to the libs folder of our test app
   add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
-                     COMMAND ${CMAKE_COMMAND} -E copy_if_different 
+                     COMMAND ${CMAKE_COMMAND} -E copy 
                        ${ANDROID_PACKAGE_OUTPUT_DIR}/outputs/aar/onnxruntime-genai-debug.aar
                        ${ANDROID_TEST_PACKAGE_LIB_DIR}/onnxruntime-genai.aar)
 
