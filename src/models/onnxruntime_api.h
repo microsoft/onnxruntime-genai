@@ -72,6 +72,7 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 
 #if defined(__ANDROID__)
 // TEST need to dlopen to make the symbols from the libonnxruntime.so visible
+#include <android/log.h>
 #include <dlfcn.h>
 #endif
 /** \brief Free functions and a few helpers are defined inside this namespace. Otherwise all types are the C API types
@@ -86,7 +87,8 @@ inline void InitApi() {
 #if defined(__ANDROID__)
   void* ort_lib_handle = dlopen("libonnxruntime.so", RTLD_LAZY);
   if (!ort_lib_handle) {
-    std::cerr << "Failed to load libonnxruntime.so\n";
+    __android_log_print(ANDROID_LOG_ERROR, "GenAI", "Failed to load libonnxruntime.so");
+
     // TODO: This is meaningless as the exception can't cross the C boundary to calling code so the message is lost.
     // All exceptions needs to be caught and returned as an OgaResult
     throw std::runtime_error("Failed to load libonnxruntime.so");
@@ -95,7 +97,7 @@ inline void InitApi() {
   using OrtApiBaseFn = const OrtApiBase* (*)(void);
   auto ort_api_base_fn = (OrtApiBaseFn)dlsym(ort_lib_handle, "OrtGetApiBase");
   if (!ort_api_base_fn) {
-    std::cerr << "OrtGetApiBase not found\n";
+    __android_log_print(ANDROID_LOG_ERROR, "GenAI", "OrtGetApiBase not found");
     throw std::runtime_error("OrtGetApiBase not found");
   }
 

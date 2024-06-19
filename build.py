@@ -382,13 +382,14 @@ def _run_android_tests(args, ):
                           capture_stdout=True,
                           capture_stderr=True,)
 
+        print(f"Subprocess completed. Return code: {result.returncode}")
         print(result.stdout)
         print(result.stderr)
         util.run([adb, "logcat", "-d"])
 
         # Print test log output so we can easily check that the test ran as expected
-        util.run([adb, "logcat", "-s", "-d", "ORTGenAIAndroidTest:*"])
-        util.run([adb, "logcat", "-s", "-d", "TestRunner:*"])
+        # util.run([adb, "logcat", "-s", "-d", "ORTGenAIAndroidTest:*"])
+        # util.run([adb, "logcat", "-s", "-d", "TestRunner:*"])
 
 
 def update(args: argparse.Namespace, env: dict[str, str]):
