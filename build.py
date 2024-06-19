@@ -373,23 +373,30 @@ def _run_android_tests(args, ):
         # the test app loads and runs a test model using the GenAI Java bindings
         gradle_executable = str(REPO_ROOT / "src" / "java" / ("gradlew.bat" if util.is_windows() else "gradlew"))
         android_test_path = args.build_dir / "src" / "java" / "androidtest"
-        result = util.run([gradle_executable, "--no-daemon",
-                           f"-DminSdkVer={android_api}",
-                           "clean",
-                           "connectedDebugAndroidTest"],
-                          cwd=android_test_path,
-                          check=False,
-                          capture_stdout=True,
-                          capture_stderr=True,)
-
-        print(f"Subprocess completed. Return code: {result.returncode}")
-        print(result.stdout)
-        print(result.stderr)
-        util.run([adb, "logcat", "-d"])
+        import subprocess
+        exception = None
+        try:
+            util.run([gradle_executable, "--no-daemon",
+                      f"-DminSdkVer={android_api}",
+                      "clean",
+                      "connectedDebugAndroidTest"],
+                     cwd=android_test_path,
+                     capture_stdout=True,
+                     capture_stderr=True,)
+        except subprocess.CalledProcessError as e:
+            exception = e
+            print(e)
+            print(f"Output:\n{e.output}")
+            print(f"stderr:\n{e.stderr}")
 
         # Print test log output so we can easily check that the test ran as expected
-        # util.run([adb, "logcat", "-s", "-d", "ORTGenAIAndroidTest:*"])
-        # util.run([adb, "logcat", "-s", "-d", "TestRunner:*"])
+        util.run([adb, "logcat", "-s", "-d", "GenAI:*"])
+        util.run([adb, "logcat", "-s", "-d", "ORTGenAIAndroidTest:*"])
+        util.run([adb, "logcat", "-s", "-d", "TestRunner:*"])
+
+        if exception:
+            util.run([adb, "logcat", "-d", "*:E"])
+            raise exception
 
 
 def update(args: argparse.Namespace, env: dict[str, str]):

@@ -85,7 +85,7 @@ inline const OrtApi* api{};
 inline void InitApi() {
   const OrtApiBase* ort_api_base{nullptr};
 #if defined(__ANDROID__)
-  void* ort_lib_handle = dlopen("libonnxruntime.so", RTLD_LAZY);
+  void* ort_lib_handle = dlopen("libonnxruntime.so", RTLD_NOW);
   if (!ort_lib_handle) {
     __android_log_print(ANDROID_LOG_ERROR, "GenAI", "Failed to load libonnxruntime.so");
 
