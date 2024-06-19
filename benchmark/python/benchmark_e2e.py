@@ -136,8 +136,7 @@ def save_results(args, results, filename, print_memory_usage=False):
     
     records = []
     for _, row in df.iterrows():
-        # ToDo: Add precision and Device.
-        record = BenchmarkRecord(args.model_name, None, "onnxruntime-genai", None, genai_package_name, genai_package_version )
+        record = BenchmarkRecord(args.model_name, args.precision, "onnxruntime-genai", args.device, genai_package_name, genai_package_version )
         record.config.batch_size = row["Batch Size"]
         record.config.customized["prompt_length"] = row["Prompt Length"]
         record.config.customized["tokens_generated"] = row["Tokens Generated"]
@@ -395,5 +394,7 @@ if __name__ == "__main__":
     parser.add_argument('-pm', '--print_memory_usage', default=False, help='Print memory footprint')
     parser.add_argument('-gc', '--use_graph_capture', action='store_true', help='Use the graph capture feature for CUDA or DML')
     parser.add_argument('-mn', '--model_name', type=str, default='model_name', help='Model name defined by users')
+    parser.add_argument('-pr', '--precision', type=str, default='fp16', help='Model precision for metrics info')
+    parser.add_argument('-d', '--device', type=str, default='cuda', help='Benchmarking device for metrics info')
     args = parser.parse_args()
     main(args)
