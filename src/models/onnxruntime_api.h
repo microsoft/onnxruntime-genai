@@ -113,14 +113,29 @@ inline void InitApi() {
     __android_log_assert("ort_api_base_fn != nullptr", "GenAI", "OrtGetApiBase not found");
   }
 
+  __android_log_print(ANDROID_LOG_INFO, "GenAI", "Calling OrtGetApiBase");
   ort_api_base = ort_api_base_fn();
+
+  if (ort_api_base == nullptr) {
+    __android_log_assert("ort_api_base != nullptr", "GenAI", "OrtGetApiBase returned nullptr");
+  }
+
+  api = ort_api_base->GetApi(ORT_API_VERSION);
+  if (!api) {
+    __android_log_print(ANDROID_LOG_INFO, "GenAI", "GetApi(18) returned nullptr");
+    api = ort_api_base->GetApi(ORT_API_VERSION - 1);
+  }
+
+  if (!api) {
+    __android_log_assert("api != nullptr", "GenAI", "GetApi returned nullptr");
+  }
+
 #else
   ort_api_base = OrtGetApiBase();
-#endif
-
   api = ort_api_base->GetApi(ORT_API_VERSION);
   if (!api)
     throw std::runtime_error("Onnxruntime is installed but is too old, please install a newer version");
+#endif
 }
 
 /** \brief All C++ methods that can fail will throw an exception of this type
