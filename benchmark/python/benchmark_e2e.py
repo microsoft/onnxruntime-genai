@@ -137,7 +137,7 @@ def save_results(args, results, filename, print_memory_usage=False):
     records = []
     for _, row in df.iterrows():
         # ToDo: Add precision and Device.
-        record = BenchmarkRecord(model_name, None, "onnxruntime-genai", None, genai_package_name, genai_package_version )
+        record = BenchmarkRecord(args.model_name, None, "onnxruntime-genai", None, genai_package_name, genai_package_version )
         record.config.batch_size = row["Batch Size"]
         record.config.customized["prompt_length"] = row["Prompt Length"]
         record.config.customized["tokens_generated"] = row["Tokens Generated"]
