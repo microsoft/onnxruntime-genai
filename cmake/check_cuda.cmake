@@ -2,6 +2,12 @@
 include(CheckLanguage)
 
 if(USE_CUDA)
+  # Temporary add -allow-unsupported-compiler
+  # Do this before enable_cuda
+  if(WIN32 AND NOT CMAKE_CUDA_FLAGS_INIT)
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -allow-unsupported-compiler")
+  endif()
+
   enable_language(CUDA)
   message( STATUS "CMAKE_CUDA_COMPILER_VERSION: ${CMAKE_CUDA_COMPILER_VERSION}")
   if(CMAKE_CUDA_COMPILER)
@@ -30,7 +36,33 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   # enable_language(CUDA)
   # message(STATUS "CMAKE_CUDA_COMPILER_VERSION: ${CMAKE_CUDA_COMPILER_VERSION}")
   # set(CUDA_PROPAGATE_HOST_FLAGS ON)
+
+  if(WIN32 AND NOT CMAKE_CUDA_FLAGS_INIT)
+      set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 
+              -Xcompiler=\"/MP /guard:cf /Qspectre\"")
+  endif()
+
+  if (CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 11)
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -gencode=arch=compute_30,code=sm_30") # K series
+  endif()
+  if (CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 12)
+    # 37, 50 still work in CUDA 11 but are marked deprecated and will be removed in future CUDA version.
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -gencode=arch=compute_37,code=sm_37") # K80
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -gencode=arch=compute_50,code=sm_50") # M series
+  endif()
+  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -gencode=arch=compute_52,code=sm_52") # M60
+  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -gencode=arch=compute_60,code=sm_60") # P series
+  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -gencode=arch=compute_70,code=sm_70") # V series
+  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -gencode=arch=compute_75,code=sm_75") # T series
+  if (CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 11)
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -gencode=arch=compute_80,code=sm_80") # A series
+  endif()
+  if (CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12)
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -gencode=arch=compute_90,code=sm_90") # H series
+  endif()
+
   set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcudafe --diag_suppress=2803 --expt-relaxed-constexpr")
+
   file(GLOB generator_cuda_srcs CONFIGURE_DEPENDS
     "${GENERATORS_ROOT}/*.cu"
     "${GENERATORS_ROOT}/*.cuh"
