@@ -410,13 +410,27 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             f"-DCMAKE_OSX_ARCHITECTURES={args.ios_arch}",
             f"-DCMAKE_OSX_DEPLOYMENT_TARGET={args.ios_deployment_target}",
             "-DENABLE_PYTHON=OFF",
-            "-DCMAKE_TOOLCHAIN_FILE="
-            + (
-                args.ios_toolchain_file
-                if args.ios_toolchain_file
-                else "cmake/genai_ios.toolchain.cmake"
-            ),
         ]
+        if args.ios_sysroot == "iphoneos" or args.ios_sysroot == "iphonesimulator":
+            command += [
+                f"-DIOS_ARCH={args.ios_arch}",
+                f"-DIPHONEOS_DEPLOYMENT_TARGET={args.ios_deployment_target}",
+                "-DCMAKE_TOOLCHAIN_FILE="
+                + (
+                    "cmake/external/Toolchain-iPhoneOS_Xcode.cmake"
+                    if args.ios_sysroot == "iphoneos"
+                    else "cmake/external/Toolchain-iPhoneSimulator_Xcode.cmake"
+                ),
+            ]
+        else:
+            command += [
+                "-DCMAKE_TOOLCHAIN_FILE="
+                + (
+                    args.ios_toolchain_file
+                    if args.ios_toolchain_file
+                    else "cmake/genai_ios.toolchain.cmake"
+                ),
+            ]
 
     if args.cmake_extra_defines != []:
         command += args.cmake_extra_defines
