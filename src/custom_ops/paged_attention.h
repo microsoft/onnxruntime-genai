@@ -235,21 +235,22 @@ struct PagedAttention {
       return RunMultiHeadAttention(ctx, query, key, value, output_data, parameters, input_metadata); // Don't handle prompt with decoding case for now
     }
 
-//#ifdef OCOS_USE_FLASH_ATTENTION
-//    int seqlen_knew = 1;  // TODO(leca): Decoding case, the sequence of k will always be 1?
-//    int max_num_blocks_per_seq = block_tables.Shape()[1];
-//    int seqlen_k = max_num_blocks_per_seq * block_size;
-//    size_t workSpaceSize = cuda::GetAttentionWorkspaceSize(sizeof(T), parameters.batch_size, parameters.num_heads, parameters.head_size, parameters.v_head_size,
-//                                                           seqlen_knew, nullptr, true/*data.use_flash_attention*/, false/*data.use_memory_efficient_attention*/, true);
-//    UniquePtrWithDeletor<T> workspace_unique = GetScratchBuffer<T>(allocator_->Alloc(allocator_.get(), workSpaceSize), allocator_.get()); // for softmax_lse
-//    const cudaDeviceProp& device_prop = DeviceProp::GetCudaDeviceProp();
-//    ORTX_RETURN_IF_ERROR(flash::mha_fwd_kvcache(device_prop, reinterpret_cast<cudaStream_t>(ctx->GetCudaStream()), const_cast<void*>(query.DataRaw()), const_cast<void*>(key_cache.DataRaw()),
-//                                                const_cast<void*>(value_cache.DataRaw()), const_cast<void*>(key.DataRaw()), const_cast<void*>(value.DataRaw()), output_data,
-//                                                workspace_unique.get(), const_cast<void*>(context_lens.DataRaw()), 
-//                                                nullptr, nullptr, // rotary_sin and rotary_cos. TODO(leca): Do we still split the input cos_sin_cache as there is a seperate step to do rotary embedding
-//                                                query_shape[0], num_heads_, num_kv_heads_, head_size_, 1, seqlen_k, seqlen_knew, 1.0f/sqrt(head_size_), parameters.causal, false, true,
-//                                                0, nullptr, nullptr, -1, false, false, const_cast<int32_t*>(block_tables.Data()), max_num_blocks_per_seq, block_size));
-//#endif
+#ifdef OCOS_USE_FLASH_ATTENTION
+    int seqlen_knew = 1;  // TODO(leca): Decoding case, the sequence of k will always be 1?
+    int max_num_blocks_per_seq = block_tables.Shape()[1];
+    int seqlen_k = max_num_blocks_per_seq * block_size;
+    parameters.causal = false;  // flash code: if (seqlen_q == 1 && !alibi_slopes_.has_value()) { is_causal = false; }
+    size_t workSpaceSize = cuda::GetAttentionWorkspaceSize(sizeof(T), parameters.batch_size, parameters.num_heads, parameters.head_size, parameters.v_head_size,
+                                                           seqlen_knew, nullptr, true/*data.use_flash_attention*/, false/*data.use_memory_efficient_attention*/, true);
+    UniquePtrWithDeletor<T> workspace_unique = GetScratchBuffer<T>(allocator_->Alloc(allocator_.get(), workSpaceSize), allocator_.get()); // for softmax_lse
+    const cudaDeviceProp& device_prop = DeviceProp::GetCudaDeviceProp();
+    ORTX_RETURN_IF_ERROR(flash::mha_fwd_kvcache(device_prop, reinterpret_cast<cudaStream_t>(ctx->GetCudaStream()), const_cast<void*>(query.DataRaw()), const_cast<void*>(key_cache.DataRaw()),
+                                                const_cast<void*>(value_cache.DataRaw()), const_cast<void*>(key.DataRaw()), const_cast<void*>(value.DataRaw()), output_data,
+                                                workspace_unique.get(), const_cast<void*>(context_lens.DataRaw()), 
+                                                nullptr, nullptr, // rotary_sin and rotary_cos. TODO(leca): Do we still split the input cos_sin_cache as there is a seperate step to do rotary embedding
+                                                query_shape[0], num_heads_, num_kv_heads_, head_size_, 1, seqlen_k, seqlen_knew, 1.0f/sqrt(head_size_), parameters.causal, false, true,
+                                                0, nullptr, nullptr, -1, false, false, const_cast<int32_t*>(block_tables.Data()), max_num_blocks_per_seq, block_size));
+#endif
 
 //    if (input_metadata.num_generation_tokens > 0) {
 //      constexpr int PARTITION_SIZE = 512;
