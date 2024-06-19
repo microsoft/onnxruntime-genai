@@ -85,21 +85,13 @@ inline const OrtApi* api{};
 inline void InitApi() {
   const OrtApiBase* ort_api_base{nullptr};
 #if defined(__ANDROID__)
+  __android_log_print(ANDROID_LOG_INFO, "GenAI", "Attempting to dlopen libonnxruntime.so");
   void* ort_lib_handle = dlopen("libonnxruntime.so", RTLD_NOW);
-  if (!ort_lib_handle) {
-    __android_log_print(ANDROID_LOG_ERROR, "GenAI", "Failed to load libonnxruntime.so");
-
-    // TODO: This is meaningless as the exception can't cross the C boundary to calling code so the message is lost.
-    // All exceptions needs to be caught and returned as an OgaResult
-    throw std::runtime_error("Failed to load libonnxruntime.so");
-  }
+  __android_log_assert(ort_lib_handle != nullptr, "GenAI", "Failed to load libonnxruntime.so");
 
   using OrtApiBaseFn = const OrtApiBase* (*)(void);
   auto ort_api_base_fn = (OrtApiBaseFn)dlsym(ort_lib_handle, "OrtGetApiBase");
-  if (!ort_api_base_fn) {
-    __android_log_print(ANDROID_LOG_ERROR, "GenAI", "OrtGetApiBase not found");
-    throw std::runtime_error("OrtGetApiBase not found");
-  }
+  __android_log_assert(ort_api_base_fn != nullptr, "GenAI", "OrtGetApiBase not found");
 
   ort_api_base = ort_api_base_fn();
 #else
