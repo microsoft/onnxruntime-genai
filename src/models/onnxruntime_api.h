@@ -85,15 +85,33 @@ inline const OrtApi* api{};
 inline void InitApi() {
   const OrtApiBase* ort_api_base{nullptr};
 #if defined(__ANDROID__)
-  __android_log_print(ANDROID_LOG_INFO, "GenAI", "Attempting to dlopen libonnxruntime.so");
-  void* ort_lib_handle = dlopen("libonnxruntime.so", RTLD_LOCAL);
-  if (ort_lib_handle != nullptr)
-    __android_log_assert("ort_lib_handle != nullptr", "GenAI", "Failed to load libonnxruntime.so");
+  __android_log_print(ANDROID_LOG_INFO, "GenAI", "Attempting to dlopen onnxruntime native library");
+  std::vector<std::string> paths = {"libonnxruntime.so",
+                                    "libonnxruntime4j_jni.so"};
 
   using OrtApiBaseFn = const OrtApiBase* (*)(void);
-  auto ort_api_base_fn = (OrtApiBaseFn)dlsym(ort_lib_handle, "OrtGetApiBase");
-  if (ort_api_base_fn != nullptr)
+  OrtApiBaseFn ort_api_base_fn = nullptr;
+
+  for (const auto& path : paths) {
+    void* ort_lib_handle = dlopen(path.c_str(), RTLD_LOCAL);
+    if (ort_lib_handle != nullptr) {
+      __android_log_print(ANDROID_LOG_INFO, "GenAI", "Loaded %s", path.c_str());
+
+      ort_api_base_fn = (OrtApiBaseFn)dlsym(ort_lib_handle, "OrtGetApiBase");
+      if (ort_api_base_fn != nullptr) {
+        __android_log_print(ANDROID_LOG_INFO, "GenAI", "OrtGetApiBase was found!");
+        break;
+      } else {
+        __android_log_print(ANDROID_LOG_INFO, "GenAI", "OrtGetApiBase not found");
+      }
+    } else {
+      __android_log_print(ANDROID_LOG_INFO, "GenAI", "Failed to load %s", path.c_str());
+    }
+  }
+
+  if (ort_api_base_fn == nullptr) {
     __android_log_assert("ort_api_base_fn != nullptr", "GenAI", "OrtGetApiBase not found");
+  }
 
   ort_api_base = ort_api_base_fn();
 #else

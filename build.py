@@ -386,8 +386,8 @@ def _run_android_tests(args, ):
         except subprocess.CalledProcessError as e:
             exception = e
             print(e)
-            print(f"Output:\n{str(e.output)}")
-            print(f"stderr:\n{str(e.stderr)}")
+            print(f"Output:\n{e.output.decode('utf-8')}")
+            print(f"stderr:\n{e.stderr.decode('utf-8')}")
 
         # Print test log output so we can easily check that the test ran as expected
         util.run([adb, "logcat", "-s", "-d", "GenAI:*"])
