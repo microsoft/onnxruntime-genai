@@ -8,15 +8,6 @@ void PrintUsage()
     Console.WriteLine("  -i (optional): Intereactive mode");
 }
 
-GeneratorParams ConstructGeneratorParam(Model model, Tokenizer tokenizer, string prompt)
-{
-    var sequences = tokenizer.Encode($"<|user|>{prompt}<|end|><|assistant|>");
-    var generatorParams = new GeneratorParams(model);
-    generatorParams.SetSearchOption("max_length", 200);
-    generatorParams.SetInputSequences(sequences);
-    return generatorParams;
-}
-
 OgaHandle ogaHandle = new OgaHandle();
 
 if (args.Length < 1)
@@ -82,7 +73,11 @@ do
     {
         continue;
     }
-    var generatorParams = ConstructGeneratorParam(model, tokenizer, prompt);
+    var sequences = tokenizer.Encode($"<|user|>{prompt}<|end|><|assistant|>");
+
+    using GeneratorParams generatorParams = new GeneratorParams(model);
+    generatorParams.SetSearchOption("max_length", 200);
+    generatorParams.SetInputSequences(sequences);
     if (option == 1) // Complete Output
     {
         var outputSequences = model.Generate(generatorParams);
