@@ -120,13 +120,16 @@ inline void InitApi() {
     __android_log_assert("ort_api_base != nullptr", "GenAI", "OrtGetApiBase returned nullptr");
   }
 
-  api = ort_api_base->GetApi(ORT_API_VERSION);
-  if (!api) {
-    __android_log_print(ANDROID_LOG_INFO, "GenAI", "GetApi(18) returned nullptr");
-    api = ort_api_base->GetApi(ORT_API_VERSION - 1);
+  for (int i = ORT_API_VERSION; i > 15; --i) {
+    api = ort_api_base->GetApi(i);
+    if (!api) {
+      __android_log_print(ANDROID_LOG_INFO, "GenAI", "GetApi(%d) returned nullptr", i);
+      break;
+    }
   }
 
   if (!api) {
+    __android_log_print(ANDROID_LOG_INFO, "GenAI", "GetApi failed");
     __android_log_assert("api != nullptr", "GenAI", "GetApi returned nullptr");
   }
 
