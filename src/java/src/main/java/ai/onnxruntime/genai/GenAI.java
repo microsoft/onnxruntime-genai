@@ -138,8 +138,12 @@ final class GenAI {
   private static void load(String library) throws IOException {
     if (isAndroid()) {
       // On Android, we simply use System.loadLibrary.
-      logger.log(Level.INFO, "Loading native library '" + library + "'");
-      System.loadLibrary(library);
+      // TODO: Explain why we only load one library
+      if (library == GENAI_JNI_LIBRARY_NAME) {
+        logger.log(Level.INFO, "Loading native library '" + library + "'");
+        System.loadLibrary(library);
+      }
+
       return;
     }
 
