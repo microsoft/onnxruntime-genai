@@ -71,9 +71,9 @@ target_include_directories(onnxruntime-genai-jni PRIVATE ${SRC_ROOT}
 target_link_libraries(onnxruntime-genai-jni PUBLIC onnxruntime-genai)
 
 # TEST add onnxruntime as an explicit dependency even though we don't use it directly in the JNI code.
-target_include_directories(onnxruntime-genai-jni PRIVATE ${ORT_HEADER_DIR})
-target_link_directories(onnxruntime-genai-jni PRIVATE ${ORT_LIB_DIR})
-target_link_libraries(onnxruntime-genai-jni PRIVATE ${ONNXRUNTIME_LIB})
+# target_include_directories(onnxruntime-genai-jni PRIVATE ${ORT_HEADER_DIR})
+# target_link_directories(onnxruntime-genai-jni PRIVATE ${ORT_LIB_DIR})
+# target_link_libraries(onnxruntime-genai-jni PRIVATE ${ONNXRUNTIME_LIB})
 
 set(JAVA_PACKAGE_OUTPUT_DIR ${JAVA_OUTPUT_DIR}/build)
 file(MAKE_DIRECTORY ${JAVA_PACKAGE_OUTPUT_DIR})
