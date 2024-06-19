@@ -373,11 +373,18 @@ def _run_android_tests(args, ):
         # the test app loads and runs a test model using the GenAI Java bindings
         gradle_executable = str(REPO_ROOT / "src" / "java" / ("gradlew.bat" if util.is_windows() else "gradlew"))
         android_test_path = args.build_dir / "src" / "java" / "androidtest"
-        util.run([gradle_executable, "--no-daemon",
-                                     f"-DminSdkVer={android_api}",
-                                     "clean",
-                                     "connectedDebugAndroidTest"],
-                 cwd=android_test_path)
+        result = util.run([gradle_executable, "--no-daemon",
+                           f"-DminSdkVer={android_api}",
+                           "clean",
+                           "connectedDebugAndroidTest"],
+                          cwd=android_test_path,
+                          check=False,
+                          capture_stdout=True,
+                          capture_stderr=True,)
+
+        print(result.stdout)
+        print(result.stderr)
+        util.run([adb, "logcat", "-d"])
 
         # Print test log output so we can easily check that the test ran as expected
         util.run([adb, "logcat", "-s", "-d", "ORTGenAIAndroidTest:*"])
