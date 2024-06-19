@@ -155,8 +155,8 @@ def save_results(args, results, filename, print_memory_usage=False):
         records.append(record)
         
     # df.to_csv(filename, header=True, index=False)
-    BenchmarkRecord.save_as_csv(filename + ".csv", records)
-    BenchmarkRecord.save_as_json(filename + ".json", records)
+    BenchmarkRecord.save_as_csv(filename, records)
+    BenchmarkRecord.save_as_json(filename.replace(".csv", ".json"), records)
     print(f"Results saved in {filename}!")
 
 def run_benchmark_memory(args, model, tokenizer, batch_size, prompt_length, generation_length, max_length):
