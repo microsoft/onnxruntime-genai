@@ -86,12 +86,14 @@ inline void InitApi() {
   const OrtApiBase* ort_api_base{nullptr};
 #if defined(__ANDROID__)
   __android_log_print(ANDROID_LOG_INFO, "GenAI", "Attempting to dlopen libonnxruntime.so");
-  void* ort_lib_handle = dlopen("libonnxruntime.so", RTLD_NOW);
-  __android_log_assert(ort_lib_handle != nullptr, "GenAI", "Failed to load libonnxruntime.so");
+  void* ort_lib_handle = dlopen("libonnxruntime.so", RTLD_LOCAL);
+  if (ort_lib_handle != nullptr)
+    __android_log_assert("ort_lib_handle != nullptr", "GenAI", "Failed to load libonnxruntime.so");
 
   using OrtApiBaseFn = const OrtApiBase* (*)(void);
   auto ort_api_base_fn = (OrtApiBaseFn)dlsym(ort_lib_handle, "OrtGetApiBase");
-  __android_log_assert(ort_api_base_fn != nullptr, "GenAI", "OrtGetApiBase not found");
+  if (ort_api_base_fn != nullptr)
+    __android_log_assert("ort_api_base_fn != nullptr", "GenAI", "OrtGetApiBase not found");
 
   ort_api_base = ort_api_base_fn();
 #else
