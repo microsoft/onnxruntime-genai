@@ -1,33 +1,88 @@
 ﻿// See https://aka.ms/new-console-template for more information
 using Microsoft.ML.OnnxRuntimeGenAI;
 
+void PrintUsage()
+{
+    Console.WriteLine("Usage:");
+    Console.WriteLine("  -m model_path");
+    Console.WriteLine("  -i (optional): Intereactive mode");
+}
+
+GeneratorParams ConstructGeneratorParam(Model model, Tokenizer tokenizer, string prompt)
+{
+    var sequences = tokenizer.Encode($"<|user|>{prompt}<|end|><|assistant|>");
+    var generatorParams = new GeneratorParams(model);
+    generatorParams.SetSearchOption("max_length", 200);
+    generatorParams.SetInputSequences(sequences);
+    return generatorParams;
+}
+
 OgaHandle ogaHandle = new OgaHandle();
+
+if (args.Length < 1)
+{
+    PrintUsage();
+    Environment.Exit(-1);
+}
+
+bool intereactive = false;
+string modelPath = string.Empty;
+
+uint i = 0;
+while (i < args.Length)
+{
+    var arg = args[i];
+    if (arg == "-i")
+    {
+        intereactive = true;
+    }
+    else if (arg == "-m")
+    {
+        if (i + 1 < args.Length)
+        {
+            modelPath = Path.Combine(args[i+1]);
+        }
+    }
+    i++;
+}
+
+if (string.IsNullOrEmpty(modelPath))
+{
+    throw new Exception("Model path must be specified");
+}
 
 Console.WriteLine("-------------");
 Console.WriteLine("Hello, Phi!");
 Console.WriteLine("-------------");
 
-string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "models\\phi-3");
+Console.WriteLine("Model path: " + modelPath);
+Console.WriteLine("Intereactive: " + intereactive);
+
 using Model model = new Model(modelPath);
 using Tokenizer tokenizer = new Tokenizer(model);
 
-Console.WriteLine("Please enter option number:");
-Console.WriteLine("1. Complete Output");
-Console.WriteLine("2. Streaming Output");
-int.TryParse(Console.ReadLine(), out var option);
-
-while (true)
+var option = 2;
+if (intereactive)
 {
-    Console.WriteLine("Prompt:");
-    // Example prompt:
-    // "def is_prime(num):"
-    string prompt = Console.ReadLine();
-    var sequences = tokenizer.Encode($"<|user|>{prompt}<|end|><|assistant|>");
+    Console.WriteLine("Please enter option number:");
+    Console.WriteLine("1. Complete Output");
+    Console.WriteLine("2. Streaming Output");
+    int.TryParse(Console.ReadLine(), out option);
+}
 
-    using GeneratorParams generatorParams = new GeneratorParams(model);
-    generatorParams.SetSearchOption("max_length", 200);
-    generatorParams.SetInputSequences(sequences);
-
+do
+{
+    string prompt = "def is_prime(num):"; // Example prompt
+    if (intereactive)
+    {
+        Console.WriteLine("Prompt:");
+        prompt = Console.ReadLine();
+    }
+    if (string.IsNullOrEmpty(prompt))
+    {
+        continue;
+    }
+    var generatorParams = ConstructGeneratorParam(model, tokenizer, prompt);
     if (option == 1) // Complete Output
     {
         var outputSequences = model.Generate(generatorParams);
@@ -47,5 +102,6 @@ while (true)
             generator.GenerateNextToken();
             Console.Write(tokenizerStream.Decode(generator.GetSequence(0)[^1]));
         }
+        Console.WriteLine();
     }
-}
+} while (intereactive);
