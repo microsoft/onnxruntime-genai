@@ -12,6 +12,8 @@ struct Logits {
   void Add();
   RoamingArray<float> Get();
 
+  void Update();
+
  private:
   void HandleEOSArray(cpu_span<float> logits);
 
@@ -21,8 +23,13 @@ struct Logits {
 
   std::array<int64_t, 3> shape_{};
   ONNXTensorElementDataType type_;
-  std::unique_ptr<OrtValue> value32_;  // Always fp32 values
-  std::unique_ptr<OrtValue> value16_;  // When model output is fp16
+
+  // Tensor to keep the logits of the last tokens. It is used in the 2 cases below. Otherwhise, it is not used.
+  // 1. prompt: store the last tokens logits from output_raw_
+  // 2. token gen: store the converted fp32 logits if output_raw_ is fp16.
+  std::unique_ptr<OrtValue> output_last_tokens_;
+
+  std::unique_ptr<OrtValue> output_raw_;  // Raw logits output from model
 
   // Used for decoding runs with cuda graphs.
   StaticBuffer* sb_logits32_{};

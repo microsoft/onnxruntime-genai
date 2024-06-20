@@ -69,7 +69,6 @@ You are a helpful AI assistant.<|eot_id|>"""
         output_tokens = []
 
         params = og.GeneratorParams(self.model)
-        params.try_use_cuda_graph_with_max_batch_size(1)
         params.input_ids = input_ids
 
         search_options = {"max_length" : max_length}

@@ -3,14 +3,18 @@
 
 from onnxruntime_genai import _dll_directory
 
-try:
-    # Try importing onnxruntime_genai. If an ImportError is raised,
-    # it could be because the cuda dlls could not be found on windows.
-    # Try adding the cuda dlls path to the dll search directory
-    # and import onnxruntime_genai again.
-    from onnxruntime_genai.@PACKAGE_DIR_NAME@ import *
-except ImportError:
-    _dll_directory.add_dll_directory()
-    from onnxruntime_genai.@PACKAGE_DIR_NAME@ import *
-
 __version__ = "@VERSION_INFO@"
+__id__ = "@TARGET_NAME@"
+
+try:
+    from onnxruntime_genai.@PACKAGE_DIR_NAME@ import *
+except ImportError as e:
+    if __id__ == "onnxruntime-genai-cuda":
+        # Try importing onnxruntime_genai. If an ImportError is raised,
+        # it could be because the cuda dlls could not be found on windows.
+        # Try adding the cuda dlls path to the dll search directory
+        # and import onnxruntime_genai again.
+        _dll_directory.add_dll_directory()
+        from onnxruntime_genai.@PACKAGE_DIR_NAME@ import *
+    else:
+        raise e

@@ -18,16 +18,16 @@
 
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
 
-static std::wstring CurrentModulePath() {
-  wchar_t path[MAX_PATH];
-  GetModuleFileNameW((HINSTANCE)&__ImageBase, path, _countof(path));
+static std::string CurrentModulePath() {
+  char path[MAX_PATH];
+  GetModuleFileNameA((HINSTANCE)&__ImageBase, path, _countof(path));
 
-  wchar_t absolute_path[MAX_PATH];
-  wchar_t* name;
-  GetFullPathNameW(path, _countof(path), absolute_path, &name);
+  char absolute_path[MAX_PATH];
+  char* name;
+  GetFullPathNameA(path, _countof(path), absolute_path, &name);
 
   auto idx = std::distance(absolute_path, name);
-  auto out_path = std::wstring(absolute_path);
+  auto out_path = std::string(absolute_path);
   out_path.resize(idx);
 
   return out_path;
@@ -345,13 +345,14 @@ void Model::CreateSessionOptions() {
       ort_options.AppendExecutionProvider_ROCM(ort_provider_options);
 #if USE_DML
     } else if (provider_options.name == "dml") {
-      dml_objects_ = DmlHelpers::CreateDmlObjects();
+      auto current_module_path = CurrentModulePath();
+      dml_objects_ = DmlHelpers::CreateDmlObjects(current_module_path);
 
-      auto directml_dll = CurrentModulePath() + L"DirectML.dll";
-      wil::unique_hmodule smart_directml_dll(LoadLibraryExW(directml_dll.c_str(), nullptr, 0));
+      auto directml_dll = current_module_path + "DirectML.dll";
+      wil::unique_hmodule smart_directml_dll(LoadLibraryEx(directml_dll.c_str(), nullptr, 0));
       THROW_LAST_ERROR_IF(!smart_directml_dll);
 
-      if (LoadLibraryExW(directml_dll.c_str(), nullptr, 0) == NULL) {
+      if (LoadLibraryEx(directml_dll.c_str(), nullptr, 0) == NULL) {
         throw std::runtime_error("DirectML.dll not found");
       }
 
@@ -381,6 +382,7 @@ void Model::CreateSessionOptions() {
       }
 
       ort_options.AddConfigEntry("ep.dml.enable_graph_capture", "1");
+      ort_options.AddConfigEntry("ep.dml.disable_memory_arena", "1");
       p_dml_api_->SessionOptionsAppendExecutionProvider_DML1(&ort_options, dml_device_.Get(), dml_objects_.command_queue.Get());
       is_intel_device_ = DmlHelpers::IsIntelDevice(dml_objects_.d3d12_device.Get());
 
