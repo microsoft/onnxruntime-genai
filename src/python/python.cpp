@@ -147,7 +147,7 @@ std::unique_ptr<OrtValue> ToOrtValue(pybind11::array& v) {
   return OrtValue::CreateTensor(*p_memory_info, v.mutable_data(), v.nbytes(), shape, type);
 }
 
-pybind11::array ToNumpy(OrtValue* v) {
+pybind11::array ToNumpy(OrtValue* v, const Generators::Model& model) {
   if (!v)
     return {};
 
@@ -161,10 +161,25 @@ pybind11::array ToNumpy(OrtValue* v) {
 
 #if USE_DML
   // TODO: DML version of this
-  if (v->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU)
-    throw std::runtime_error("NYI: ToNumpy of a DML memory based tensor");
+  if (v->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU && model.device_type_ == Generators::DeviceType::DML) {
+    auto data_size = type_info->GetElementCount() * element_size;
+    cpu_copy = std::make_unique<uint8_t[]>(data_size);
+
+    ComPtr<ID3D12Resource> gpu_resource;
+    Ort::ThrowOnError(model.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(
+        model.allocator_device_,
+        data,
+        &gpu_resource));
+
+    model.GetDmlReadbackHeap()->ReadbackFromGpu(
+        std::span(reinterpret_cast<uint8_t*>(cpu_copy.get()), data_size),
+        gpu_resource.Get(),
+        0,
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    data = cpu_copy.get();
+  }
 #elif USE_CUDA
-  if (v->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU) {
+  if (v->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU && model.device_type_ == Generators::DeviceType::CUDA) {
     auto data_size = type_info->GetElementCount() * element_size;
     cpu_copy = std::make_unique<uint8_t[]>(data_size);
     Generators::CudaCheck() == cudaMemcpy(cpu_copy.get(), data, data_size, cudaMemcpyDeviceToHost);
@@ -311,7 +326,7 @@ struct PyGenerator {
   }
 
   pybind11::array GetOutput(const std::string& name) {
-    return ToNumpy(generator_->state_->GetOutput(name.c_str()));
+    return ToNumpy(generator_->state_->GetOutput(name.c_str()), *(generator_->model_));
   }
 
   void GenerateNextToken() {
@@ -418,7 +433,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         return CreateModel(GetOrtEnv(), config_path.c_str());
       }))
       .def("generate", [](Model& model, PyGeneratorParams& params) { params.Prepare(); return Generate(model, params); })
-      .def_property_readonly("device_type", [](const Model& s) { return s.device_type_; })
+      .def_property_readonly(
+          "device_type", [](const Model& model) { return to_string(model.device_type_); }, "The device type the model is running on")
       .def("create_multimodal_processor", [](const Model& model) { return model.CreateMultiModalProcessor(); });
 
   pybind11::class_<PyGenerator>(m, "Generator")

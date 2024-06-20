@@ -106,6 +106,13 @@ jobs:
   - name: ort_arm64_url
     value: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/onnxruntime-win-arm64-1.17.3.zip"
 
+  - name: d3d12_dir
+    value: 'Microsoft.Direct3D.D3D12.1.614.0'
+  - name: d3d12_zip
+    value: 'Microsoft.Direct3D.D3D12.1.614.0.zip'
+  - name: d3d12_url
+    value: "https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.614.0"
+
   workspace:
     clean: all
   steps:

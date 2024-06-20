@@ -15,6 +15,8 @@ namespace Generators {
 struct StaticBuffer {
   // Add max_beam_batch_size to the constructor
   StaticBuffer(Ort::Allocator* allocator, size_t max_beam_batch_size);
+  StaticBuffer(const StaticBuffer&) = delete;
+  StaticBuffer& operator=(const StaticBuffer&) = delete;
   ~StaticBuffer();
 
   std::unique_ptr<OrtValue> CreateTensorOnStaticBuffer(std::span<const int64_t> shape,

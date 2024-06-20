@@ -217,9 +217,10 @@ RoamingArray<float> DecoderState::Run(int current_length, RoamingArray<int32_t> 
   return logits_.Get();
 }
 
-void DecoderState::UpdateInputs(int current_length, RoamingArray<int32_t> beam_indices) {
+void DecoderState::UpdateInputsOutputs(int current_length, RoamingArray<int32_t> beam_indices) {
   position_inputs_.Update(current_length);
   kv_cache_.Update(beam_indices.GetCPU(), current_length);
+  logits_.Update();
 }
 
 MultiModalPipelineState::MultiModalPipelineState(const MultiModalVisionModel& model,
@@ -255,7 +256,7 @@ RoamingArray<float> MultiModalPipelineState::Run(int current_length, RoamingArra
              params_->hidden_size, params_->device_type, params_->cuda_stream);
     }
 
-    decoder_state_->inputs_embeds_ = embedding_state_->inputs_embeds_;
+    decoder_state_->inputs_embeds_.ReuseEmbeddingsBuffer(embedding_state_->inputs_embeds_);
     auto logits = decoder_state_->Run(current_length, next_tokens, next_indices);
 
     is_prompt_ = false;
@@ -265,10 +266,10 @@ RoamingArray<float> MultiModalPipelineState::Run(int current_length, RoamingArra
   }
 
   embedding_state_->UpdateInputsAndOutputs(next_tokens);
-  decoder_state_->UpdateInputs(current_length, next_indices);
+  decoder_state_->UpdateInputsOutputs(current_length, next_indices);
 
   embedding_state_->Run(current_length, next_tokens, next_indices);
-  decoder_state_->inputs_embeds_ = embedding_state_->inputs_embeds_;
+  decoder_state_->inputs_embeds_.ReuseEmbeddingsBuffer(embedding_state_->inputs_embeds_);
   return decoder_state_->Run(current_length, next_tokens, next_indices);
 }
 

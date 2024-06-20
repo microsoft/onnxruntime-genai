@@ -8,6 +8,9 @@ parameters:
 - name: cuda_version
   type: string
   default: ''
+- name: cuda_display_version
+  type: string
+  default: ''
 - name: os
   type: string
   values:
@@ -19,7 +22,7 @@ parameters:
 
 
 jobs:
-- job: python_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}_packaging
+- job: python_${{ parameters.os }}_${{ parameters.ep }}${{ parameters.cuda_display_version }}_${{ parameters.arch }}_packaging
   ${{ if eq(parameters.os, 'linux') }}:
     pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
   ${{ if eq(parameters.os, 'win') }}:
@@ -116,6 +119,13 @@ jobs:
     value: 'onnxruntime-win-arm64-1.17.3.zip'
   - name: ort_arm64_url
     value: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/onnxruntime-win-arm64-1.17.3.zip"
+
+  - name: d3d12_dir
+    value: 'Microsoft.Direct3D.D3D12.1.614.0'
+  - name: d3d12_zip
+    value: 'Microsoft.Direct3D.D3D12.1.614.0.zip'
+  - name: d3d12_url
+    value: "https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.614.0"
 
   steps:
   - script: |

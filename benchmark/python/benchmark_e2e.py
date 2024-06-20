@@ -238,7 +238,7 @@ def run_benchmark(args, model, tokenizer, batch_size, prompt_length, generation_
     avg_tokenization_latency_s = sum(tokenize_times) / len(tokenize_times)
     avg_tokenization_latency_ms = avg_tokenization_latency_s * 1000
     avg_per_token_tokenization_latency_ms = avg_tokenization_latency_ms / prompt_length
-    avg_tokenization_thrpt = batch_size * (1 / avg_per_token_tokenization_latency_ms)
+    avg_tokenization_thrpt = batch_size * (1000 / avg_per_token_tokenization_latency_ms)
     print(f"Average Tokenization Latency (per token): {avg_per_token_tokenization_latency_ms} ms")
     print(f"Average Tokenization Throughput (per token): {avg_tokenization_thrpt} tps")
 
@@ -246,7 +246,7 @@ def run_benchmark(args, model, tokenizer, batch_size, prompt_length, generation_
     avg_prompt_latency_s = sum(prompt_times) / len(prompt_times)
     avg_prompt_latency_ms = avg_prompt_latency_s * 1000
     avg_per_token_prompt_latency_ms = avg_prompt_latency_ms / prompt_length
-    avg_per_token_prompt_thrpt = batch_size * (1 / (avg_per_token_prompt_latency_ms / 1000))
+    avg_per_token_prompt_thrpt = batch_size * (1000 / avg_per_token_prompt_latency_ms)
     print(f"Average Prompt Processing Latency (per token): {avg_per_token_prompt_latency_ms} ms")
     print(f"Average Prompt Processing Throughput (per token): {avg_per_token_prompt_thrpt} tps")
 
