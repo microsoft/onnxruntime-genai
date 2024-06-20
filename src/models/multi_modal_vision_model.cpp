@@ -17,7 +17,7 @@ void Select(const Model& model, std::span<const int32_t> input_ids, OrtValue* hi
             cudaStream_t cuda_stream) {
   // Assme batch_size = 1
   constexpr int32_t min_input_id = -1000000000;
-  constexpr int64_t expected_batch_size = 1;
+  [[maybe_unused]] constexpr int64_t expected_batch_size = 1;
 
   // Find the position in the input_ids that corresponds to the start of the image tokens.
   // Image tokens are represented by negative values in the input_ids.
@@ -25,7 +25,7 @@ void Select(const Model& model, std::span<const int32_t> input_ids, OrtValue* hi
   int32_t image_position_start{};
   for (int64_t idx = 0; idx < sequence_length; ++idx) {
     if (input_ids[idx] < 0 && input_ids[idx] > min_input_id) {
-      image_position_start = idx;
+      image_position_start = static_cast<int32_t>(idx);
       break;
     }
   }
@@ -184,7 +184,7 @@ VisionState::VisionState(const MultiModalVisionModel& model, const GeneratorPara
     : State{params, model},
       model_{model} {
   extra_inputs_.Add();
-  num_image_tokens_ = GetNumImageTokens(params_->extra_inputs, model_.config_->model.vision.inputs.image_sizes);
+  num_image_tokens_ = static_cast<int32_t>(GetNumImageTokens(params_->extra_inputs, model_.config_->model.vision.inputs.image_sizes));
   if (num_image_tokens_ > 0) {
     visual_features_ = GetVisualFeatures(*model_.allocator_device_, *model_.session_info_,
                                          model_.config_->model.vision.outputs.visual_features,

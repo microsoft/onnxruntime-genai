@@ -60,7 +60,7 @@ std::unique_ptr<OrtValue> ProcessImagePrompt(const Generators::Tokenizer& tokeni
                                     std::to_string(num_images) + ". Actual value: " + std::to_string(image_ids[i]);
         throw std::runtime_error(error_message);
       }
-      for (size_t j = 0; j < num_img_tokens_data[image_ids[i] - 1]; ++j) {
+      for (int64_t j = 0; j < num_img_tokens_data[image_ids[i] - 1]; ++j) {
         input_ids.push_back(-image_ids[i]);
       }
     }
