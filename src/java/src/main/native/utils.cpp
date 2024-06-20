@@ -5,11 +5,6 @@
 #include <jni.h>
 #include "utils.h"
 
-// #include "onnxruntime_c_api.h"
-
-// // create hard dependency on ORT library that must be statically initialized.
-// const OrtApiBase* ort_api_reference = OrtGetApiBase();
-
 jint JNI_OnLoad(JavaVM* vm, void* reserved) {
   // To silence unused-parameter error.
   // This function must exist according to the JNI spec, but the arguments aren't necessary for the library

@@ -52,7 +52,12 @@ target_include_directories(onnxruntime-genai-static PUBLIC ${onnxruntime_extensi
 target_link_libraries(onnxruntime-genai PRIVATE onnxruntime_extensions)
 target_link_libraries(onnxruntime-genai-static PUBLIC onnxruntime_extensions)
 target_link_directories(onnxruntime-genai PRIVATE ${ORT_LIB_DIR})
+
+# we keep the shared libraries disconnected on Android as they will come from separate AARs and we don't want to force
+# the ORT version to match in both.
+if(NOT ANDROID)
 target_link_libraries(onnxruntime-genai PRIVATE ${ONNXRUNTIME_LIB})
+endif()
 
 set_target_properties(onnxruntime-genai PROPERTIES FOLDER "Sources")
 set_target_properties(onnxruntime-genai-static PROPERTIES FOLDER "Sources")
