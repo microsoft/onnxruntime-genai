@@ -12,12 +12,15 @@ RoamingArray<float> MakeDummy() {
   return RoamingArray<float>();
 }
 
+#pragma warning(push)
+#pragma warning(disable : 4189)  // local variable is initialized but not referenced
+
 void Select(const Model& model, std::span<const int32_t> input_ids, OrtValue* hidden_states,
             OrtValue* visual_features, int32_t num_img_tokens, int32_t hidden_size, DeviceType device_type,
             cudaStream_t cuda_stream) {
   // Assme batch_size = 1
   constexpr int32_t min_input_id = -1000000000;
-  [[maybe_unused]] constexpr int64_t expected_batch_size = 1;
+  constexpr int64_t expected_batch_size = 1;
 
   // Find the position in the input_ids that corresponds to the start of the image tokens.
   // Image tokens are represented by negative values in the input_ids.
@@ -83,6 +86,8 @@ void Select(const Model& model, std::span<const int32_t> input_ids, OrtValue* hi
       throw std::runtime_error("Unsupported device type for Select.");
   }
 }
+
+#pragma warning(pop)
 
 int64_t GetNumImageTokens(const std::vector<GeneratorParams::Input>& extra_inputs,
                           const std::string& image_sizes_name) {
