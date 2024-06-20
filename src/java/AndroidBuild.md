@@ -6,7 +6,7 @@ Install the Android SDK and NDK. The ONNX Runtime instructions can be followed.
 
 https://onnxruntime.ai/docs/build/android.html#prerequisites
 
-Use the latest Android NDK available.
+Use the latest release Android NDK available.
 
 
 ## Get the ONNX Runtime Android package

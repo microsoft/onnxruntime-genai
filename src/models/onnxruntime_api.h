@@ -64,17 +64,19 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 */
 
 #pragma once
-#include "onnxruntime_c_api.h"
 #include <memory>
 #include <string>
 #include <vector>
 #include <unordered_map>
 
+#include "onnxruntime_c_api.h"
+#include "../span.h"
+
 #if defined(__ANDROID__)
-// TEST need to dlopen to make the symbols from the libonnxruntime.so visible
 #include <android/log.h>
 #include <dlfcn.h>
 #endif
+
 /** \brief Free functions and a few helpers are defined inside this namespace. Otherwise all types are the C API types
  *
  */
@@ -83,7 +85,6 @@ namespace Ort {
 /// Before using this C++ wrapper API, you MUST call Ort::InitApi to set the below 'api' variable
 inline const OrtApi* api{};
 inline void InitApi() {
-  const OrtApiBase* ort_api_base{nullptr};
 #if defined(__ANDROID__)
   // If the GenAI library links against the onnxruntime library, it will have a dependency on a specific
   // version of OrtGetApiBase.
@@ -98,16 +99,16 @@ inline void InitApi() {
   //                                 "/data/app/<appname>/base.apk!/lib/x86_64/libonnxruntime-genai.so"...
   //
   // In order to be flexible we need to add complexity here by:
-  //   - don't call OrtGetApiBase directly so libonnxruntime-genai.so does not have a dependency
-  //     on libonnxruntime.so
+  //   - don't call OrtGetApiBase directly so libonnxruntime-genai.so does not have a hard dependency
+  //     on libonnxruntime.so for the symbol.
   //   - use dlopen/dysm to manually load the onnxruntime library and get the OrtGetApiBase function pointer.
   //     - assumes the Android app has referenced both the GenAI and ORT Android packages so the library is available.
   //   - iterate between the current ORT version we're aware of, and a minimum required version, so that we work with
   //     any libonnxruntime.so that supports one of those versions.
   //
-  __android_log_print(ANDROID_LOG_INFO, "GenAI", "Attempting to dlopen onnxruntime native library");
 
   const std::string path = "libonnxruntime.so";  // "libonnxruntime4j_jni.so" is also an option if we have issues
+  __android_log_print(ANDROID_LOG_INFO, "GenAI", "Attempting to dlopen %s native library", path.c_str());
 
   using OrtApiBaseFn = const OrtApiBase* (*)(void);
   OrtApiBaseFn ort_api_base_fn = nullptr;
@@ -117,16 +118,14 @@ inline void InitApi() {
     __android_log_assert("ort_lib_handle != nullptr", "GenAI", "Failed to load %s", path.c_str());
   }
 
-  __android_log_print(ANDROID_LOG_INFO, "GenAI", "Loaded %s", path.c_str());
-
   ort_api_base_fn = (OrtApiBaseFn)dlsym(ort_lib_handle, "OrtGetApiBase");
   if (ort_api_base_fn == nullptr) {
     __android_log_assert("ort_api_base_fn != nullptr", "GenAI", "OrtGetApiBase not found");
   }
 
-  ort_api_base = ort_api_base_fn();
+  const OrtApiBase* ort_api_base = ort_api_base_fn();
   if (ort_api_base == nullptr) {
-    __android_log_assert("ort_api_base != nullptr", "GenAI", "OrtGetApiBase returned nullptr");
+    __android_log_assert("ort_api_base != nullptr", "GenAI", "OrtGetApiBase() returned nullptr");
   }
 
   // loop from the ORT version we're build using the headers from down to the minimum ORT version we require.
@@ -135,21 +134,20 @@ inline void InitApi() {
   for (int i = ORT_API_VERSION; i >= genai_min_ort_api_version; --i) {
     api = ort_api_base->GetApi(i);
     if (!api) {
-      __android_log_print(ANDROID_LOG_INFO, "GenAI", "GetApi(%d) returned nullptr", i);
+      __android_log_print(ANDROID_LOG_INFO, "GenAI", "ORT API Version %d was not found.", i);
     } else {
-      __android_log_print(ANDROID_LOG_INFO, "GenAI", "GetApi(%d) was successful", i);
+      __android_log_print(ANDROID_LOG_INFO, "GenAI", "ORT API Version %d was found", i);
       break;
     }
   }
 
   if (!api) {
     __android_log_assert("api != nullptr", "GenAI",
-                         "libonnxruntime.api did not have an API between version (%d) and (%d).",
-                         ORT_API_VERSION, genai_min_ort_api_version);
+                         "%s did not have an ORT API version between %d and %d.",
+                         path.c_str(), ORT_API_VERSION, genai_min_ort_api_version);
   }
 #else
-  ort_api_base = OrtGetApiBase();
-  api = ort_api_base->GetApi(ORT_API_VERSION);
+  api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
   if (!api)
     throw std::runtime_error("Onnxruntime is installed but is too old, please install a newer version");
 #endif

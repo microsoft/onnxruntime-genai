@@ -1,7 +1,5 @@
 package ai.onnxruntime.genai.example.javavalidator
 
-// import ai.onnxruntime.OrtEnvironment
-// import ai.onnxruntime.OrtProvider
 import ai.onnxruntime.genai.*
 import android.os.Build
 import android.util.Log
@@ -26,10 +24,6 @@ class SimpleTest {
     @Before
     fun start() {
         Log.i(TAG, "SystemABI=" + Build.SUPPORTED_ABIS[0])
-        // val providers = OrtEnvironment.getAvailableProviders()
-        // for (provider in providers) {
-        //     Log.i(TAG, "Providers=$provider")
-        // }
     }
 
     @Throws(IOException::class)

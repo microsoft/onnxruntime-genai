@@ -340,9 +340,9 @@ def _get_csharp_properties(args: argparse.Namespace):
 def _run_android_tests(args, ):
     # only run the tests on the emulator for x86_64 currently.
     # TODO: may also be possible to run on a Mac with an arm64 chip
-    # if args.android_abi != "x86_64":
-    #     log.info("Skipping Android tests as they are only supported on x86_64 currently.")
-    #     return
+    if args.android_abi != "x86_64":
+        log.info("Skipping Android tests as they are only supported on x86_64 currently.")
+        return
 
     if not args.build_java:
         # currently we only have an Android test app that we run on the emulator to test the Java bindings.
@@ -395,6 +395,7 @@ def _run_android_tests(args, ):
         util.run([adb, "logcat", "-s", "-d", "TestRunner:*"])
 
         if exception:
+            # uncomment if you need more logcat output in a CI
             # util.run([adb, "logcat", "-d", "*:E"])
             raise exception
 

@@ -11,7 +11,6 @@ jint JNI_OnLoad(JavaVM* vm, void* reserved) {
   // to request a specific version.
   (void)vm;
   (void)reserved;
-
   // Requesting 1.6 to support Android. Will need to be bumped to a later version to call interface default methods
   // from native code, or to access other new Java features.
   return JNI_VERSION_1_6;

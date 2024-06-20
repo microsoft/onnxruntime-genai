@@ -3,6 +3,7 @@
 #pragma once
 
 #include <memory>
+#include "onnxruntime_api.h"
 #include "../span.h"
 
 namespace Ort {
