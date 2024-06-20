@@ -1,0 +1,21 @@
+parameters:
+- name: ort_version
+  displayName: 'OnnxRuntime version'
+  type: string
+  default: '1.18.0-dev-20240426-1256-b842effa29'
+
+- name: build_config
+  displayName: 'Build Configuration'
+  type: string
+  default: 'Release'
+  values:
+  - 'Release'
+  - 'RelWithDebInfo'
+  - 'MinSizeRel'
+
+trigger: none
+stages:
+- template: stages/android-packaging-stage.yml
+  parameters:
+    ort_version: ${{ parameters.ort_version }}
+    build_config: ${{ parameters.build_config }}
