@@ -26,9 +26,9 @@ Build from the root directory of the repository using build.bat or build.sh (whi
   - This will be a subdirectory of the Android SDK's `ndk` directory.
 - Specify the minimum Android API to build for in `--android_api`.
 - Specify the ABI to build for in `--android_abi`. 
-  - If testing using the emulator this should make the host machine architecture. 
-  - If testing on an Android device this should be the device architecture, most likely `arm64-v8a`
-- Specify `--ort_home` to be the unzipped ONNX Runtime AAR. This directory should contain folders called `jni` and `headers`.
+  - If testing using the emulator this should match the host machine architecture. 
+  - If testing on an Android device this should match the device architecture, most likely `arm64-v8a`
+- Specify `--ort_home` to be the path to the unzipped ONNX Runtime AAR. This directory should contain folders called `jni` and `headers`.
 - On Windows, the `--cmake_generator` must be `Ninja`. 
   - This can be installed from [here](https://github.com/ninja-build/ninja/releases) or with  `pip install ninja`.
 

@@ -5,7 +5,6 @@ on:
     branches:
     - main
     - rel-*
-    - skottmckay/*
   pull_request:
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -18,15 +17,10 @@ env:
   ANDROID_ABI: "x86_64"
 jobs:
   android_x64:
-    # android emulator doesn't work on macos-14.
-    #   WARNING | FeatureControl is requesting a non existing feature.
-    #   HVF error: HV_UNSUPPORTED
-    #   qemu-system-aarch64: failed to initialize HVF: Invalid argument
-    #   WARNING | QEMU main loop exits abnormally with code 1
-    # it works on macos-13 but the unit test app can't find libonnxruntime.so. need to be able to repro locally
-    # to figure that out.
-    # runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU" ]
-    # runs-on: macos-13
+    # Note: linux is the only good option for the Android emulator currently.
+    #       it doesn't work on macos-14.
+    #         HVF error: HV_UNSUPPORTED
+    #       it works on macos-13 but with macos-15 being released soon that isn't a long term solution.
     runs-on: ubuntu-latest
     steps:
       - name: Checkout OnnxRuntime GenAI repo
@@ -46,9 +40,8 @@ jobs:
         with:
           gradle-version: '8.6'
 
-      # expecting Android SDK and JDK to be pre-installed
-      # https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2204-Readme.md
-      - name: Check env
+      # Check the NDK that we're using
+      - name: Check Android NDKs
         run: |
           set -e -x
           uname -m
@@ -82,10 +75,6 @@ jobs:
           dotnet new console
           dotnet add package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_NIGHTLY_VERSION }} --source ${{ env.ORT_NIGHTLY_SOURCE }} --package-directory .
 
-      # linux:
-      #   unzip microsoft.ml.onnxruntime/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/android/native/onnxruntime.aar -d ort
-      # macos:
-      #   unzip ${{ env.ORT_PACKAGE_NAME }}/runtimes/android/native/onnxruntime.aar -d ort
       - name: Extract ONNX Runtime AAR
         run: |
           set -e -x
