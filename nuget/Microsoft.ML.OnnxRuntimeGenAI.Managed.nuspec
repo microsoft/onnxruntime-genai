@@ -13,7 +13,8 @@
     <releaseNotes>Introducing the ONNX Runtime GenAI Library.</releaseNotes>
     <tags>ONNX;ONNX Runtime;ONNX Runtime Gen AI;Machine Learning</tags>
     <dependencies>
-      <group targetFramework="net8.0;netstandard2.0" />
+      <group targetFramework="net8.0" />
+      <group targetFramework="netstandard2.0" />
     </dependencies>
   </metadata>
   <files>
