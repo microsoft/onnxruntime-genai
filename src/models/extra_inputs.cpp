@@ -30,9 +30,9 @@ ExtraInputs::ExtraInputs(const Model& model, State& state)
 }
 
 #pragma warning(push)
-#pragma warning(disable : 4065) // switch statement contains 'default' but no 'case' labels
-#pragma warning(disable : 4189) // local variable is initialized but not referenced
-#pragma warning(disable : 4702) // unreachable code
+#pragma warning(disable : 4065)  // switch statement contains 'default' but no 'case' labels
+#pragma warning(disable : 4189)  // local variable is initialized but not referenced
+#pragma warning(disable : 4702)  // unreachable code
 
 void ExtraInputs::Add() {
   // Add extra user inputs
