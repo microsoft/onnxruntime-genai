@@ -132,12 +132,6 @@ def _parse_args():
         help="Specify the location name of the macOS platform SDK to be used",
     )
     parser.add_argument(
-        "--ios_toolchain_file",
-        default="",
-        help="Path to ios toolchain file, "
-        "or cmake/genai_ios.toolchain.cmake will be used",
-    )
-    parser.add_argument(
         "--ios_arch",
         type=str,
         help="Specify the Target specific architectures for iOS "
@@ -404,33 +398,30 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         ]
 
     if args.ios:
+        def _get_opencv_toolchain_file(local_args: argparse.Namespace):
+            if local_args.ios_sysroot == "iphoneos":
+                return (
+                    Path("cmake") / "external" / "opencv" / "platforms" / "iOS" / "cmake" /
+                        "Toolchains" / "Toolchain-iPhoneOS_Xcode.cmake"
+                )
+            else:
+                return (
+                    Path("cmmake") / "external" / "opencv" / "platforms" / "iOS" / "cmake" /
+                        "Toolchains" / "Toolchain-iPhoneSimulator_Xcode.cmake"
+                )
+
+
         command += [
             "-DCMAKE_SYSTEM_NAME=iOS",
             f"-DCMAKE_OSX_SYSROOT={args.ios_sysroot}",
             f"-DCMAKE_OSX_ARCHITECTURES={args.ios_arch}",
             f"-DCMAKE_OSX_DEPLOYMENT_TARGET={args.ios_deployment_target}",
             "-DENABLE_PYTHON=OFF",
+            # The following arguments are specific to the OpenCV toolchain file
+            f"-DIOS_ARCH={args.ios_arch}",
+            f"-DIPHONEOS_DEPLOYMENT_TARGET={args.ios_deployment_target}",
+            f"-DCMAKE_TOOLCHAIN_FILE={_get_opencv_toolchain_file(args)}",
         ]
-        if args.ios_sysroot == "iphoneos" or args.ios_sysroot == "iphonesimulator":
-            command += [
-                f"-DIOS_ARCH={args.ios_arch}",
-                f"-DIPHONEOS_DEPLOYMENT_TARGET={args.ios_deployment_target}",
-                "-DCMAKE_TOOLCHAIN_FILE="
-                + (
-                    "cmake/external/Toolchain-iPhoneOS_Xcode.cmake"
-                    if args.ios_sysroot == "iphoneos"
-                    else "cmake/external/Toolchain-iPhoneSimulator_Xcode.cmake"
-                ),
-            ]
-        else:
-            command += [
-                "-DCMAKE_TOOLCHAIN_FILE="
-                + (
-                    args.ios_toolchain_file
-                    if args.ios_toolchain_file
-                    else "cmake/genai_ios.toolchain.cmake"
-                ),
-            ]
 
     if args.cmake_extra_defines != []:
         command += args.cmake_extra_defines
