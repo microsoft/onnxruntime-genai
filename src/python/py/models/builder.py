@@ -291,7 +291,7 @@ class Model:
                 "pad_token_id": config.pad_token_id if hasattr(config, "pad_token_id") and config.pad_token_id is not None else config.eos_token_id[0] if isinstance(config.eos_token_id, list) else config.eos_token_id,
                 "type": self.model_type[ : self.model_type.find("For")].lower(),
                 "vocab_size": self.vocab_size,
-                "model_name": hf_name,
+                "model_name": model_name_or_path,
                 "precision": precision,
                 "execution_provider" :execution_provider
             },
