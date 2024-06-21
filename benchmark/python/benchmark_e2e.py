@@ -146,10 +146,11 @@ def save_results(args, results, filename, print_memory_usage=False):
     # df = df.transpose()  # This line swaps the rows and columns
     
     genai_package_name, genai_package_version = get_target_pip_package_version(["onnxruntime-genai", "onnxruntime-genai-cuda", "onnxruntime-genai-directml"])
+    model_info = get_model_info_from_genai_config(args.input_folder)
     
     records = []
     for _, row in df.iterrows():
-        record = BenchmarkRecord(args.model_name, args.precision, "onnxruntime-genai", args.device, genai_package_name, genai_package_version )
+        record = BenchmarkRecord(model_info["model_name"], model_info["precision"], "onnxruntime-genai", model_info["execution_provider"], genai_package_name, genai_package_version )
         record.config.batch_size = row["Batch Size"]
         record.config.customized["prompt_length"] = row["Prompt Length"]
         record.config.customized["tokens_generated"] = row["Tokens Generated"]
