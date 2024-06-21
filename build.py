@@ -406,7 +406,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
                 )
             else:
                 return (
-                    Path("cmmake") / "external" / "opencv" / "platforms" / "iOS" / "cmake" /
+                    Path("cmake") / "external" / "opencv" / "platforms" / "iOS" / "cmake" /
                         "Toolchains" / "Toolchain-iPhoneSimulator_Xcode.cmake"
                 )
 
