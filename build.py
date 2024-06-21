@@ -398,15 +398,15 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         ]
 
     if args.ios:
-        def _get_opencv_toolchain_file(local_args: argparse.Namespace):
-            if local_args.ios_sysroot == "iphoneos":
+        def _get_opencv_toolchain_file():
+            if args.ios_sysroot == "iphoneos":
                 return (
-                    Path("cmake") / "external" / "opencv" / "platforms" / "iOS" / "cmake" /
+                    REPO_ROOT / "cmake" / "external" / "opencv" / "platforms" / "iOS" / "cmake" /
                         "Toolchains" / "Toolchain-iPhoneOS_Xcode.cmake"
                 )
             else:
                 return (
-                    Path("cmake") / "external" / "opencv" / "platforms" / "iOS" / "cmake" /
+                    REPO_ROOT / "cmake" / "external" / "opencv" / "platforms" / "iOS" / "cmake" /
                         "Toolchains" / "Toolchain-iPhoneSimulator_Xcode.cmake"
                 )
 
@@ -420,7 +420,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             # The following arguments are specific to the OpenCV toolchain file
             f"-DIOS_ARCH={args.ios_arch}",
             f"-DIPHONEOS_DEPLOYMENT_TARGET={args.ios_deployment_target}",
-            f"-DCMAKE_TOOLCHAIN_FILE={_get_opencv_toolchain_file(args)}",
+            f"-DCMAKE_TOOLCHAIN_FILE={_get_opencv_toolchain_file()}",
         ]
 
     if args.cmake_extra_defines != []:
