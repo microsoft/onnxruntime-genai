@@ -6,6 +6,12 @@ parameters:
   type: string
   default: 'Release'
 
+# resources:
+#   repositories:
+#   - repository: onnxruntime-genai # The name used to reference this repository in the checkout step
+#     type: github
+#     name: microsoft/onnxruntime-genai
+
 stages:
 - stage: Build_Android_AAR
   jobs:

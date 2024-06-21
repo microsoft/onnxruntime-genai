@@ -15,7 +15,9 @@ jobs:
   timeoutInMinutes: 120
   workspace:
     clean: all
-  pool: 'ubuntu-latest'
+  #pool: 'ubuntu-latest'
+  pool: onnxruntime-Ubuntu2204-AMD-CPU
+
 
   steps:
   - checkout: self
