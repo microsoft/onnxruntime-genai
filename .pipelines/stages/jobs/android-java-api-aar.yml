@@ -25,7 +25,7 @@ jobs:
   - template: steps/utils/use-android-ndk.yml
   - template: steps/utils/set-genai-version.yml
 
-  - task: CmdLine#2
+  - task: CmdLine@2
     displayName: Download ORT AAR package
     inputs:
       script: |
