@@ -2,15 +2,16 @@ parameters:
 - name: ort_version
   displayName: 'OnnxRuntime version'
   type: string
-  default: '1.18.0-dev-20240426-1256-b842effa29'
+  default: '1.18.0'
 
 - name: build_config
   displayName: 'Build Configuration'
   type: string
   default: 'Release'
   values:
-  - 'Release'
+  - 'Debug'
   - 'RelWithDebInfo'
+  - 'Release'
   - 'MinSizeRel'
 
 trigger: none

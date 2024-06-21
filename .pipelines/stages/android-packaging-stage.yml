@@ -1,6 +1,7 @@
 parameters:
 - name: ort_version
   type: string
+
 - name: build_config
   type: string
   default: 'Release'
