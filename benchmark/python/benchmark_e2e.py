@@ -20,6 +20,8 @@ from tqdm import tqdm
 import subprocess
 import threading
 import psutil
+import os
+import json
 from metrics import BenchmarkRecord
 
 peak_cpu_memory = 0.0
@@ -100,6 +102,15 @@ def get_target_pip_package_version(target_pip_package_name_list):
         pkg_version = installed_packages_list[0].split("==")[1]
     return pkg_name, pkg_version
 
+def get_model_info_from_genai_config(model_input_folder):
+    genai_config_file_path = os.path.join(model_input_folder, "genai_config.json")
+    genai_config = json.load(genai_config_file_path)
+    model_info = {}  
+    model_info["model_name"] = genai_config["model"]["model_name"]
+    model_info["precision"] = genai_config["model"]["precision"]
+    model_info["execution_provider"] = genai_config["model"]["execution_provider"]  
+    return model_info
+
 def save_results(args, results, filename, print_memory_usage=False):
     import pandas as pd
 
@@ -132,7 +143,7 @@ def save_results(args, results, filename, print_memory_usage=False):
     )
     # df = df.transpose()  # This line swaps the rows and columns
     
-    genai_package_name, genai_package_version = get_target_pip_package_version(["onnxruntime-genai", "onnxruntime-genai-cuda"])
+    genai_package_name, genai_package_version = get_target_pip_package_version(["onnxruntime-genai", "onnxruntime-genai-cuda", "onnxruntime-genai-directml"])
     
     records = []
     for _, row in df.iterrows():
@@ -141,7 +152,7 @@ def save_results(args, results, filename, print_memory_usage=False):
         record.config.customized["prompt_length"] = row["Prompt Length"]
         record.config.customized["tokens_generated"] = row["Tokens Generated"]
         record.config.customized["max_length"] = row["Max Length"]
-        record.metrics.customized["tokenizationthroughput_tps"] = row["Tokenization Throughput (tps)"]
+        record.metrics.customized["tokenization_throughput_tps"] = row["Tokenization Throughput (tps)"]
         record.metrics.customized["tokenization_latency_ms"] = row["Tokenization Latency (ms)"]
         record.metrics.customized["prompt_processing_throughput_tps"] = row["Prompt Processing Throughput (tps)"]
         record.metrics.customized["prompt_processing_latency_ms"] = row["Prompt Processing Latency (ms)"]
@@ -150,7 +161,7 @@ def save_results(args, results, filename, print_memory_usage=False):
         record.metrics.customized["sampling_throughput_tps"] = row["Sampling Throughput (tps)"]
         record.metrics.customized["sampling_latency_ms"] = row["Sampling Latency (ms)"]   
         record.metrics.customized["wall_clock_throughput_tps"] = row["Wall Clock Throughput (tps)"]
-        record.metrics.customized["wall_clocktime_s"] = row["Wall Clock Time (s)"]
+        record.metrics.customized["wall_clock_time_s"] = row["Wall Clock Time (s)"]
         
         records.append(record)
         
@@ -393,8 +404,5 @@ if __name__ == "__main__":
     parser.add_argument('-mo', '--print_model_output', action='store_true', help='Print model output')
     parser.add_argument('-pm', '--print_memory_usage', default=False, help='Print memory footprint')
     parser.add_argument('-gc', '--use_graph_capture', action='store_true', help='Use the graph capture feature for CUDA or DML')
-    parser.add_argument('-mn', '--model_name', type=str, default='model_name', help='Model name defined by users')
-    parser.add_argument('-pr', '--precision', type=str, default='fp16', help='Model precision for metrics info')
-    parser.add_argument('-d', '--device', type=str, default='cuda', help='Benchmarking device for metrics info')
     args = parser.parse_args()
     main(args)
