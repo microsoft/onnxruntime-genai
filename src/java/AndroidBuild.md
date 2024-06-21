@@ -44,7 +44,7 @@ Run the build script with `--help` for further details on all these options.
 
 #### Linux
 
-./build.sh .\build.bat --parallel  --config=Release --build_java --android --android_home=/home/me/Android --android_ndk_path=/home/me/Android/ndk/26.2.11394342 --android_api=27 --android_abi=x86_64 --ort_home=<path to unzipped onnxruntime-android.aar> --android_run_emulator
+./build.sh --parallel  --config=Release --build_java --android --android_home=/home/me/Android --android_ndk_path=/home/me/Android/ndk/26.2.11394342 --android_api=27 --android_abi=x86_64 --ort_home=<path to unzipped onnxruntime-android.aar> --android_run_emulator
 
 ## Build an AAR with the GenAI Java bindings
 

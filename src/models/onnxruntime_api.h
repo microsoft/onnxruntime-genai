@@ -146,11 +146,11 @@ inline void InitApi() {
                          "%s did not have an ORT API version between %d and %d.",
                          path.c_str(), ORT_API_VERSION, genai_min_ort_api_version);
   }
-#else
+#else   // defined(__ANDROID__)
   api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
   if (!api)
     throw std::runtime_error("Onnxruntime is installed but is too old, please install a newer version");
-#endif
+#endif  // defined(__ANDROID__)
 }
 
 /** \brief All C++ methods that can fail will throw an exception of this type
