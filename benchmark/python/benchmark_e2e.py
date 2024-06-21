@@ -103,8 +103,10 @@ def get_target_pip_package_version(target_pip_package_name_list):
     return pkg_name, pkg_version
 
 def get_model_info_from_genai_config(model_input_folder):
+    # NOT WORK!!!!!
     genai_config_file_path = os.path.join(model_input_folder, "genai_config.json")
-    genai_config = json.load(genai_config_file_path)
+    genai_config_file = open(genai_config_file_path)
+    genai_config = json.load(genai_config_file)
     model_info = {}  
     model_info["model_name"] = genai_config["model"]["model_name"]
     model_info["precision"] = genai_config["model"]["precision"]

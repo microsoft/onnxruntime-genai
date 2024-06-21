@@ -59,7 +59,7 @@ class BackendOptions(BaseObject):
 class Config(BaseObject):
     def __init__(
         self,
-        backend: Optional[str] = "onnxruntime",
+        backend: Optional[str] = "onnxruntime-genai",
         batch_size: Optional[int] = 1,
         seq_length: Optional[int] = 0,
         precision: Optional[str] = "fp32",
