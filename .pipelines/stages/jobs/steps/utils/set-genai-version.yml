@@ -9,4 +9,4 @@ steps:
       with open('VERSION_INFO') as vi:
           version = vi.readline().strip()
           print(f"Setting variable: genai_version = '{version}'")
-          print(f"##vso[task.setvariable variable={genai_version}]{version}")
+          print(f"##vso[task.setvariable variable=genai_version]{version}")
