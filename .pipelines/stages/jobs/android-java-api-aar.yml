@@ -49,11 +49,11 @@ jobs:
         export GENAI_VERSION=$(genai_version)
         export PACKAGE_NAME=${{parameters.package_name}}
         export ARTIFACTS_DIR=$(Build.ArtifactStagingDirectory)
-        
+
         /bin/bash tools/ci_build/github/android/build_aar_and_copy_artifacts.sh
       workingDirectory: $(Build.SourcesDirectory)
 
   - task: PublishBuildArtifacts@1
     inputs:
-      pathtoPublish: '$(Build.ArtifactsStagingDirectory)'
-      artifactName: 'drop-android'
+      pathtoPublish: $(Build.ArtifactsStagingDirectory)
+      artifactName: drop-android
