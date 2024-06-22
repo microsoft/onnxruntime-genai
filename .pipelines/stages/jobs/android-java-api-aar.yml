@@ -1,0 +1,59 @@
+parameters:
+- name: build_config
+  type: string
+  default: 'Release'
+
+- name: ort_version
+  type: string
+
+- name: package_name
+  type: string
+  default: 'onnxruntime-genai-android'
+
+jobs:
+- job: Android_AAR_Packaging
+  timeoutInMinutes: 30
+  workspace:
+    clean: all
+  #pool: 'ubuntu-latest'
+  pool: onnxruntime-Ubuntu2204-AMD-CPU
+
+
+  steps:
+  - checkout: self
+    clean: true
+    submodules: none
+
+  - template: steps/utils/use-android-ndk.yml
+  - template: steps/utils/set-genai-version.yml
+
+  - task: CmdLine@2
+    displayName: Download ORT AAR package
+    inputs:
+      script: |
+        set -e -x
+        ORT_VERSION=${{parameters.ort_version}}
+        wget https://repo1.maven.org/maven2/com/microsoft/onnxruntime/onnxruntime-android/$ORT_VERSION/onnxruntime-android-$ORT_VERSION.aar
+        unzip onnxruntime-android-$ORT_VERSION.aar -d ort
+        ls -lR ort
+      workingDirectory: $(Build.SourcesDirectory)
+
+  - task: CmdLine@2
+    displayName: Build Android AAR Packages
+    inputs:
+      script: |
+        set -e -x
+        export BUILD_DIR=$(Build.BinariesDirectory)
+        export BUILD_CONFIG=${{parameters.build_config}}
+        export ORT_VERSION=${{parameters.ort_version}}
+        export GENAI_VERSION=$(genai_version)
+        export PACKAGE_NAME=${{parameters.package_name}}
+        export ARTIFACTS_DIR=$(Build.ArtifactStagingDirectory)
+
+        /bin/bash tools/ci_build/github/android/build_aar_and_copy_artifacts.sh
+      workingDirectory: $(Build.SourcesDirectory)
+
+  - task: PublishBuildArtifacts@1
+    inputs:
+      pathtoPublish: $(Build.ArtifactStagingDirectory)
+      artifactName: drop-android
