@@ -34,8 +34,13 @@ the tests from VS Code.
 You can do a top level build (`./build --build_java --config Debug --build --test ...` from the repo root), 
 or manually run gradlew from the src/java directory.
 
-e.g. the gradlew command line looks something like this to update the tests. Adjust build output path as needed.
-> D:\src\github\ort.genai\src\java>D:/src/github/ort.genai/src/java/gradlew --info test -DcmakeBuildDir="D:\src\github\ort.genai\build\Windows\Debug\src\java" -DnativeLibDir="D:\src\github\ort.genai\build\Windows\Debug\src\java\native-lib\ai\onnxruntime-genai\native\win-x64" -Dorg.gradle.daemon=false
+e.g. the gradlew command to build looks something like this. Adjust build output paths as needed.
+> D:\src\github\ort.genai\src\java>./gradlew cmakeBuild '-DcmakeBuildDir=D:/src/github/ort.genai/build/Windows/Debug/src/java' '-DnativeLibDir=D:\src\github\ort.genai\build\Windows\Debug\src\java\native-lib\ai\onnxruntime\genai\native\win-x64' '-Dorg.gradle.daemon=false' 
+
+e.g. the gradlew command to test looks something like this. Adjust build output path as needed.
+> D:\src\github\ort.genai\src\java>D:/src/github/ort.genai/src/java/gradlew --info cmakeCheck -DcmakeBuildDir="D:\src\github\ort.genai\build\Windows\Debug\src\java" -DnativeLibDir="D:\src\github\ort.genai\build\Windows\Debug\src\java\native-lib\ai\onnxruntime-genai\native\win-x64" -Dorg.gradle.daemon=false
+
+Either of these commands can have ':spotlessApply' appended to them to automatically format the code as per the coding standards.
 
 NOTE: If using the top-level build, the unit test code gets built in the 'test' phase - that's just how the gradle build is setup.
 
@@ -52,8 +57,6 @@ add the values for cmakeBuildDir and nativeLibDir.
 
 e.g.
 `"-DcmakeBuildDir=D:\src\github\ort.genai\build\Windows\Debug\src\java -DnativeLibDir=D:\src\github\ort.genai\build\Windows\Debug\src\java\native-lib\ai\onnxruntime-genai\native\win-x64`
-
------
 
 # Debugging native code
 
@@ -77,5 +80,3 @@ e.g. to debug the `onnxruntime` project (which builds the onnxruntime shared lib
 You can then right-click on the `onnxruntime` project -> Debug -> Start new instance. That should run java.exe and let you break on any exceptions with full symbols for the native code.
 
 To also be able to set breakpoints, make sure a local debug build of the library is in the nativeLibDir so that java.exe is loading that.
-
-
