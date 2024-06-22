@@ -1,4 +1,4 @@
-# Android Test Application for ORT-Mobile
+# Android Test Application for ONNX Runtime GenAI
 
 This directory contains a simple android application for testing the ONNX Runtime GenaI AAR package.
 
@@ -6,9 +6,10 @@ This directory contains a simple android application for testing the ONNX Runtim
 
 This android application is mainly aimed for testing:
 
-- Model used: TBD - need smallest model GenAI produces some output with
+- Model used: test/test_models/hf-internal-testing/tiny-random-gpt2-fp32
 - Main test file: An android instrumentation test under `app\src\androidtest\java\ai.onnxruntime.genai.example.javavalidator\SimpleTest.kt`
 - The main dependency of this application is `onnxruntime-genai` aar package under `app\libs`.
+- The onnxruntime dependency is provided by the latest released onnxruntime-android package.
 - The MainActivity of this application is set to be empty.
 
 ### Requirements
@@ -22,16 +23,17 @@ This android application is mainly aimed for testing:
 Build for Android with the additional  `--build_java` and `--android_run_emulator` options.
 
 e.g.
-`./build --android --android_ndk D:\Android\ndk\26.2.11394342\ --android_abi x86_64 --ort_home 'path to unzipped onnxruntime-android.aar from https://mvnrepository.com/artifact/com.microsoft.onnxruntime/onnxruntime-android/<version>' --build_java --android_run_emulator`
+`./build --android --android_home D:\Android --android_ndk_path D:\Android\ndk\26.3.11579264\ --android_abi x86_64 --ort_home 'path to unzipped onnxruntime-android.aar from https://mvnrepository.com/artifact/com.microsoft.onnxruntime/onnxruntime-android/<version>' --build_java --android_run_emulator`
 
 Please note that you must set the `--android_abi` value to match the local system architecture, as the Android instrumentation test is run on an Android emulator on the local system.
 
+See ../../AndroidBuild.md for more information on building for Android.
+
 #### Build Output
 
-The build will generate two apks which is required to run the test application in `$YOUR_BUILD_DIR/java/androidtest/android/app/build/outputs/apk`:
+The build will generate two apks which is required to run the test application in `$YOUR_BUILD_DIR/src/java/androidtest/app/build/outputs/apk`:
 
-* `androidtest/debug/app-debug-androidtest.apk`
+* `androidTest/debug/app-debug-androidTest.apk`
 * `debug/app-debug.apk`
 
-**TODO**: Update emulator name if it is not `ort_android` once we finishing adding the `android_run_emulator` logic to build.py
-After running the build script, the two apks will be installed on `ort_android` emulator and it will automatically run the test application in an adb shell.
+After running the build script, the two apks will be installed on `ort_genai_android` emulator and it will automatically run the test application in an adb shell.

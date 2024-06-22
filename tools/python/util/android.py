@@ -11,9 +11,16 @@ import subprocess
 import time
 import typing
 
+from pathlib import Path
+
 from .logger import get_logger
 from .platform_helpers import is_linux, is_windows
 from .run import run
+
+# specify __all__ as we import using a wildcard in util/__init__.py so the function names have an 'android' prefix
+# to make it clear where they came from
+# e.g. usage is `util.android.start_emulator(...)` instead of `util.start_emulator(...)`
+__all__ = ["get_sdk_tool_paths", "create_virtual_device", "start_emulator", "stop_emulator"]
 
 _log = get_logger("util.android")
 
@@ -21,34 +28,23 @@ _log = get_logger("util.android")
 SdkToolPaths = collections.namedtuple("SdkToolPaths", ["emulator", "adb", "sdkmanager", "avdmanager"])
 
 
-def get_sdk_tool_paths(sdk_root: str):
+def get_sdk_tool_paths(sdk_root: Path):
     def filename(name, windows_extension):
         if is_windows():
             return f"{name}.{windows_extension}"
         else:
             return name
 
-    def resolve_path(dirnames, basename):
-        dirnames.insert(0, "")
-        for dirname in dirnames:
-            path = shutil.which(os.path.join(os.path.expanduser(dirname), basename))
-            if path is not None:
-                path = os.path.realpath(path)
-                _log.debug(f"Found {basename} at {path}")
-                return path
-        raise FileNotFoundError(f"Failed to resolve path for {basename}")
-
     return SdkToolPaths(
-        emulator=resolve_path([os.path.join(sdk_root, "emulator")], filename("emulator", "exe")),
-        adb=resolve_path([os.path.join(sdk_root, "platform-tools")], filename("adb", "exe")),
-        sdkmanager=resolve_path(
-            [os.path.join(sdk_root, "cmdline-tools", "latest", "bin")],
-            filename("sdkmanager", "bat"),
-        ),
-        avdmanager=resolve_path(
-            [os.path.join(sdk_root, "cmdline-tools", "latest", "bin")],
-            filename("avdmanager", "bat"),
-        ),
+        # do not use sdk_root/tools/emulator as that is superceeded by sdk_root/emulator/emulator
+        emulator=str((sdk_root / "emulator" / filename("emulator", "exe")).resolve(strict=True)),
+        adb=str((sdk_root / "platform-tools" / filename("adb", "exe")).resolve(strict=True)),
+        sdkmanager=str(
+            (sdk_root / "cmdline-tools" / "latest" / "bin" / filename("sdkmanager", "bat")).resolve(strict=True)
+            ),
+        avdmanager=str(
+            (sdk_root / "cmdline-tools" / "latest" / "bin" / filename("avdmanager", "bat")).resolve(strict=True)
+            )
     )
 
 
@@ -72,7 +68,7 @@ _process_creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if is_windows() els
 
 
 def _start_process(*args) -> subprocess.Popen:
-    _log.debug(f"Starting process - args: {[*args]}")
+    _log.info(f"Starting process: {' '.join([*args])}")
     return subprocess.Popen([*args], creationflags=_process_creationflags)
 
 

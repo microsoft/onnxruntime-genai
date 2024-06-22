@@ -27,7 +27,7 @@ public class SimpleGenAI {
 
   public SimpleGenAI(String modelPath) throws GenAIException {
     model = new Model(modelPath);
-    tokenizer = new Tokenizer(model);
+    tokenizer = model.createTokenizer();
   }
 
   /**
@@ -38,7 +38,7 @@ public class SimpleGenAI {
    * @return The generator parameters.
    * @throws GenAIException on failure
    */
-  GeneratorParams createGeneratorParams(String prompt) throws GenAIException {
+  public GeneratorParams createGeneratorParams(String prompt) throws GenAIException {
     GeneratorParams generatorParams = model.createGeneratorParams();
 
     try (Sequences encodedPrompt = tokenizer.encode(prompt)) {
@@ -55,10 +55,13 @@ public class SimpleGenAI {
    * Create the generator parameters and add the prompt text. The user can set other search options
    * via the GeneratorParams object prior to running `generate`.
    *
+   * @param tokenIds The encoded token ids for the prompt/s.
+   * @param sequenceLength The length of each sequence in tokenIds. All sequences must have the same length.
+   * @param batchSize The number of batches in tokenIds.
    * @return The generator parameters.
    * @throws GenAIException on failure
    */
-  GeneratorParams createGeneratorParams(int[] tokenIds, int sequenceLength, int batchSize)
+  public GeneratorParams createGeneratorParams(int[] tokenIds, int sequenceLength, int batchSize)
       throws GenAIException {
     GeneratorParams generatorParams = model.createGeneratorParams();
     try {
@@ -86,22 +89,18 @@ public class SimpleGenAI {
   public String generate(GeneratorParams generatorParams, Consumer<String> listener)
       throws GenAIException {
     String result;
-    try (Tokenizer tokenizer = new Tokenizer(model)) {
+    try {
       int[] output_ids;
 
       if (listener != null) {
         try (TokenizerStream stream = tokenizer.createStream();
             Generator generator = new Generator(model, generatorParams)) {
-          while (!generator.isDone()) {
-            // generate next token
-            generator.computeLogits();
-            generator.generateNextToken();
-
+          // iterate (which calls computeLogits, generateNextToken, getLastTokenInSequence and
+          // isDone)
+          for (int token_id : generator) {
             // decode and call listener
-            int token_id = generator.getLastTokenInSequence(0);
             String token = stream.decode(token_id);
             listener.accept(token);
-            // listener.onTokenGenerate(token);
           }
 
           output_ids = generator.getSequence(0);
