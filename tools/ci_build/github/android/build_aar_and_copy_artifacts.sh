@@ -12,7 +12,7 @@ python3 tools/ci_build/github/android/build_aar_package.py \
     tools/ci_build/github/android/default_aar_build_settings.json
 
 # Copy the built artifacts to the artifacts staging directory
-BASE_PATH=/build/aar_out/${BUILD_CONFIG}/com/microsoft/onnxruntime/${PACKAGE_NAME}/${GENAI_VERSION}
+BASE_PATH=$BUILD_DIR/aar_out/${BUILD_CONFIG}/com/microsoft/onnxruntime/${PACKAGE_NAME}/${GENAI_VERSION}
 cp ${BASE_PATH}/${PACKAGE_NAME}-${GENAI_VERSION}-javadoc.jar  $ARTIFACTS_DIR
 cp ${BASE_PATH}/${PACKAGE_NAME}-${GENAI_VERSION}-sources.jar  $ARTIFACTS_DIR
 cp ${BASE_PATH}/${PACKAGE_NAME}-${GENAI_VERSION}.aar          $ARTIFACTS_DIR
