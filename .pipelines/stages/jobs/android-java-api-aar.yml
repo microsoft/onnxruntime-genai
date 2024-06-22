@@ -55,5 +55,5 @@ jobs:
 
   - task: PublishBuildArtifacts@1
     inputs:
-      pathtoPublish: $(Build.ArtifactsStagingDirectory)
+      pathtoPublish: $(Build.ArtifactStagingDirectory)
       artifactName: drop-android
