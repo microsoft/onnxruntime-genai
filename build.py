@@ -311,6 +311,9 @@ def _validate_args(args: argparse.Namespace):
             raise ValueError(f"{args.ort_home} does not exist or is not a directory.")
 
         args.ort_home = args.ort_home.resolve(strict=True)
+    else:
+        if not os.path.exists(REPO_ROOT / "ort") and util.is_linux():
+            util.download_ort(args.use_cuda, REPO_ROOT / "ort")
 
 
 def _create_env(args: argparse.Namespace):
