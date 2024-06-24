@@ -34,7 +34,7 @@ Java_ai_onnxruntime_genai_Generator_isDone(JNIEnv* env, jobject thiz, jlong nati
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_ai_onnxruntime_genai_Generator_computeLogits(JNIEnv* env, jobject thiz, jlong native_handle) {
+Java_ai_onnxruntime_genai_Generator_computeLogitsNative(JNIEnv* env, jobject thiz, jlong native_handle) {
   ThrowIfError(env, OgaGenerator_ComputeLogits(reinterpret_cast<OgaGenerator*>(native_handle)));
 }
 

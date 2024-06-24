@@ -34,6 +34,9 @@ Logits::Logits(const Model& model, State& state)
 #endif
 }
 
+#pragma warning(push)
+#pragma warning(disable : 4189)  // local variable is initialized but not referenced
+
 RoamingArray<float> Logits::Get() {
   size_t element_count = shape_[0] * shape_[1] * shape_[2];
 
@@ -185,6 +188,8 @@ RoamingArray<float> Logits::Get() {
   HandleEOSArray(batched_logits_cpu);
   return batched_logits_cpu;
 }
+
+#pragma warning(pop)
 
 void Logits::Update() {
   if (output_raw_.get()->GetTensorTypeAndShapeInfo()->GetShape()[1] == 1) {
