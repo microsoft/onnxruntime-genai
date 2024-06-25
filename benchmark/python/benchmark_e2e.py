@@ -103,12 +103,10 @@ def get_target_pip_package_version(target_pip_package_name_list):
     return pkg_name, pkg_version
 
 def get_model_info_from_genai_config(model_input_folder):
-    # NOT WORK!!!!!
     genai_config_file_path = os.path.join(model_input_folder, "genai_config.json")
     genai_config_file = open(genai_config_file_path)
     genai_config = json.load(genai_config_file)
     model_info = {}  
-    model_info["precision"] = genai_config["model"]["precision"]
     model_info["execution_provider"] = "cpu"
     if len(genai_config["model"]["decoder"]["session_options"]["provider_options"]) > 0:
         model_info["execution_provider"] = list(genai_config["model"]["decoder"]["session_options"]["provider_options"][0].keys())[0]
@@ -151,7 +149,7 @@ def save_results(args, results, filename, print_memory_usage=False):
     
     records = []
     for _, row in df.iterrows():
-        record = BenchmarkRecord(args.model_name, model_info["precision"], "onnxruntime-genai", model_info["execution_provider"], genai_package_name, genai_package_version )
+        record = BenchmarkRecord(args.model_name, args.precision, "onnxruntime-genai", model_info["execution_provider"], genai_package_name, genai_package_version )
         record.config.batch_size = row["Batch Size"]
         record.config.customized["prompt_length"] = row["Prompt Length"]
         record.config.customized["tokens_generated"] = row["Tokens Generated"]
@@ -409,5 +407,6 @@ if __name__ == "__main__":
     parser.add_argument('-pm', '--print_memory_usage', default=False, help='Print memory footprint')
     parser.add_argument('-gc', '--use_graph_capture', action='store_true', help='Use the graph capture feature for CUDA or DML')
     parser.add_argument('-mn', '--model_name', type=str, default='model_name', help='Model name defined by users')
+    parser.add_argument('-pr', '--precision', type=str, default='fp16', help='Model precision for metrics info')
     args = parser.parse_args()
     main(args)

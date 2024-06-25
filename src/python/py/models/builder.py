@@ -258,7 +258,7 @@ class Model:
             self.quant_attrs["group_size"] = config.quantization_config["group_size"]
             self.quant_attrs["use_g_idx"] = config.quantization_config["desc_act"] if "desc_act" in config.quantization_config else False
 
-    def make_genai_config(self, model_name_or_path, precision, execution_provider, extra_kwargs, out_dir):
+    def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
         config = GenerationConfig.from_pretrained(model_name_or_path, use_auth_token=True, trust_remote_code=True, **extra_kwargs)
         inputs = dict(zip(self.input_names, self.input_names))
         inputs.update({
@@ -289,7 +289,6 @@ class Model:
                 },
                 "eos_token_id": config.eos_token_id,
                 "pad_token_id": config.pad_token_id if hasattr(config, "pad_token_id") and config.pad_token_id is not None else config.eos_token_id[0] if isinstance(config.eos_token_id, list) else config.eos_token_id,
-                "precision": precision,
                 "type": self.model_type[ : self.model_type.find("For")].lower(),
                 "vocab_size": self.vocab_size
             },
@@ -2383,7 +2382,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
         onnx_model = Model(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
 
     # Make GenAI config
-    onnx_model.make_genai_config(hf_name, precision, execution_provider, extra_kwargs, output_dir)
+    onnx_model.make_genai_config(hf_name, extra_kwargs, output_dir)
 
     # Copy Hugging Face processing files to output folder
     onnx_model.save_processing(hf_name, extra_kwargs, output_dir)
