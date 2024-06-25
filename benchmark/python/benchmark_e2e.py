@@ -110,6 +110,7 @@ def get_model_info_from_genai_config(model_input_folder):
     model_info["execution_provider"] = "cpu"
     if len(genai_config["model"]["decoder"]["session_options"]["provider_options"]) > 0:
         model_info["execution_provider"] = list(genai_config["model"]["decoder"]["session_options"]["provider_options"][0].keys())[0]
+    genai_config_file.close()
     return model_info
 
 def save_results(args, results, filename, print_memory_usage=False):
