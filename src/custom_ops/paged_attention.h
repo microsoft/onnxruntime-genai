@@ -76,16 +76,19 @@ OrtStatusPtr CheckInputs(const cudaStream_t stream, OrtAllocator* allocator, con
       }
       input_metadata.seqinfo = GetScratchBuffer<int32_t>(allocator->Alloc(allocator, seqstart.size() * sizeof(int32_t)), allocator);
       cudaMemcpy(input_metadata.seqinfo.get(), seqstart.data(), seqstart.size() * sizeof(int32_t), cudaMemcpyHostToDevice);
-      input_metadata.attn_bias.q_seqinfo.seqstart = reinterpret_cast<int64_t>(input_metadata.seqinfo.get());
   } else {
 //      std::vector<int64_t> positions_host((*positions)->Shape().size());  // TODO(leca): 
       input_metadata.num_prompt_tokens = 0;
       input_metadata.num_generation_tokens = 1;
+      input_metadata.seqinfo = GetScratchBuffer<int32_t>(allocator->Alloc(allocator, context_lens.SizeInBytes()), allocator);
+      cudaMemcpy(input_metadata.seqinfo.get(), context_lens.DataRaw(), context_lens.SizeInBytes(), cudaMemcpyHostToDevice);
+
 //      input_metadata.max_context_len = positions_host.back() + 1;
 
 //      int32_t block_size = gsl::narrow<int32_t>(key_cache.Shape()[3]);
 //      for (int i = 0; i < positions_host.back() + 1; i += block_size) input_metadata.max_num_blocks_per_seq++;    
   }
+  input_metadata.attn_bias.q_seqinfo.seqstart = reinterpret_cast<int64_t>(input_metadata.seqinfo.get());
 
   if (!positions.has_value()) { // TODO(leca): only generate position when cos_sin_cache is provided? As position and cos_sin_cache are only used for rotary embeding
     std::vector<int64_t> position_ids;
@@ -246,10 +249,10 @@ struct PagedAttention {
     const cudaDeviceProp& device_prop = DeviceProp::GetCudaDeviceProp();
     ORTX_RETURN_IF_ERROR(flash::mha_fwd_kvcache(device_prop, reinterpret_cast<cudaStream_t>(ctx->GetCudaStream()), const_cast<void*>(query.DataRaw()), const_cast<void*>(key_cache.DataRaw()),
                                                 const_cast<void*>(value_cache.DataRaw()), const_cast<void*>(key.DataRaw()), const_cast<void*>(value.DataRaw()), output_data,
-                                                workspace_unique.get(), const_cast<void*>(context_lens.DataRaw()), 
+                                                workspace_unique.get(), reinterpret_cast<int32_t*>(input_metadata.attn_bias.q_seqinfo.seqstart), 
                                                 nullptr, nullptr, // rotary_sin and rotary_cos. TODO(leca): Do we still split the input cos_sin_cache as there is a seperate step to do rotary embedding
-                                                query_shape[0], num_heads_, num_kv_heads_, head_size_, 1, seqlen_k, seqlen_knew, 1.0f/sqrt(head_size_), parameters.causal, false, true,
-                                                0, nullptr, nullptr, -1, false, false, const_cast<int32_t*>(block_tables.Data()), max_num_blocks_per_seq, block_size));
+                                                query_shape[0], num_heads_, num_kv_heads_, head_size_, 1 /*seqlen_q*/, seqlen_k, seqlen_knew, 1.0f/sqrt(head_size_), parameters.causal, false, true,
+                                                1 /*num_splits*/, nullptr, nullptr, -1 /*local_window_size*/, false, false, const_cast<int32_t*>(block_tables.Data()), max_num_blocks_per_seq, block_size));
 #endif
 
 //    if (input_metadata.num_generation_tokens > 0) {

@@ -5,9 +5,9 @@
 #include "paged_dtype_float16.cuh"
 #include "paged_dtype_float32.cuh"
 #include "paged_utils.cuh"
-//#ifdef OCOS_USE_FLASH_ATTENTION
+#ifdef OCOS_USE_FLASH_ATTENTION
 #include "attention_lib/flash_attention/flash_api.h"
-//#endif
+#endif
 #ifdef OCOS_USE_MEMORY_EFFICIENT_ATTENTION
 #include "attention_lib/cutlass_fmha/memory_efficient_attention.h"
 #endif
