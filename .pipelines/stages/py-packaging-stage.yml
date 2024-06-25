@@ -68,6 +68,17 @@ stages:
         os: 'win'
         build_config: ${{ parameters.build_config }}
 
+  - ${{ if and(eq(parameters.enable_win_cuda, true), contains(parameters.cuda_versions, '12.2')) }}:
+    - template: jobs/py-packaging-job.yml
+      parameters:
+        arch: 'x64'
+        cuda_version: '12.2'
+        cuda_display_version: '122'
+        ep: 'cuda'
+        ort_version: ${{ parameters.ort_cuda_122_version }}
+        os: 'win'
+        build_config: ${{ parameters.build_config }}
+
   - ${{ if eq(parameters.enable_linux_cpu, true) }}:
     - template: jobs/py-packaging-job.yml
       parameters:
