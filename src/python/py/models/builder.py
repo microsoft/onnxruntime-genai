@@ -58,6 +58,10 @@ class Model:
             "cuda": {
                 "enable_cuda_graph": enable_cuda_graph,        # "1" if the the model is able to enable cuda graph, "0" otherwise
             },
+            "rocm":{
+                "tunable_op_enable": "1",
+                "tunable_op_tuning_enable": "1"
+            },
             "dml": {},
             "web": {},
         }
@@ -1960,7 +1964,7 @@ class Model:
         self.mask_attrs["total_seq_len"] = cast_2_name
 
     def make_attention_mask_reformatting_for_sparse_attn(self):
-        # Make nodes for the attention mask subgraph that calculates 
+        # Make nodes for the attention mask subgraph that calculates
         # attributes about the 2D attention mask to use in SparseAttention
         #
         #                attention_mask
@@ -2178,7 +2182,7 @@ class Phi3Small8KModel(Model):
         crows_name = "block_row_indices"
         self.make_external_tensor(crows.detach().numpy().astype(np.int32), crows_name)
         self.mask_attrs["block_row_indices"] = crows_name
-        
+
         cols_name = "block_col_indices"
         self.make_external_tensor(cols.detach().numpy().astype(np.int32), cols_name)
         self.mask_attrs["block_col_indices"] = cols_name
@@ -2248,7 +2252,7 @@ class Phi3Small8KModel(Model):
         #           DownProjMatMul
         #                 |
         #            DownProjAdd
-        
+
         # Make input MatMul and Add nodes
         up_matmul_name = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
         self.make_matmul(mlp.up_proj.weight.detach().numpy(), up_matmul_name, root_input)

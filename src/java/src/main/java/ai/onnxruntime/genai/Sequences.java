@@ -30,7 +30,7 @@ public final class Sequences implements AutoCloseable {
    * @param sequenceIndex The index of the sequence.
    * @return The sequence as an array of integers.
    */
-  int[] getSequence(long sequenceIndex) {
+  public int[] getSequence(long sequenceIndex) {
     if (nativeHandle == 0) {
       throw new IllegalStateException("Instance has been freed and is invalid");
     }

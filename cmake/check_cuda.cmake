@@ -2,6 +2,12 @@
 include(CheckLanguage)
 
 if(USE_CUDA)
+  # Temporary add -allow-unsupported-compiler
+  # Do this before enable_cuda
+  if(WIN32 AND NOT CMAKE_CUDA_FLAGS_INIT)
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -allow-unsupported-compiler")
+  endif()
+
   enable_language(CUDA)
   message( STATUS "CMAKE_CUDA_COMPILER_VERSION: ${CMAKE_CUDA_COMPILER_VERSION}")
   if(CMAKE_CUDA_COMPILER)
@@ -30,7 +36,9 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   # enable_language(CUDA)
   # message(STATUS "CMAKE_CUDA_COMPILER_VERSION: ${CMAKE_CUDA_COMPILER_VERSION}")
   # set(CUDA_PROPAGATE_HOST_FLAGS ON)
+
   set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcudafe --diag_suppress=2803 --expt-relaxed-constexpr")
+
   file(GLOB generator_cuda_srcs CONFIGURE_DEPENDS
     "${GENERATORS_ROOT}/*.cu"
     "${GENERATORS_ROOT}/*.cuh"

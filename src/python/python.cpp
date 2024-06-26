@@ -277,7 +277,7 @@ struct PyGeneratorParams {
           SetSearchNumber(params_->search, name, entry.second.cast<int>());
         } else
           throw std::runtime_error("Unknown search option type, can be float/bool/int:" + name);
-      } catch (JSON::unknown_value_error& e) {
+      } catch (JSON::unknown_value_error&) {
         throw std::runtime_error("Unknown search option:" + name);
       }
     }
@@ -355,7 +355,7 @@ void SetLogOptions(const pybind11::kwargs& dict) {
         SetLogString(name, entry.second.cast<std::string>());
       } else
         throw std::runtime_error("Unknown log option type, can be bool/string:" + name);
-    } catch (JSON::unknown_value_error& e) {
+    } catch (JSON::unknown_value_error&) {
       throw std::runtime_error("Unknown log option:" + name);
     }
   }
@@ -489,6 +489,14 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   m.def("is_dml_available", []() {
 #if USE_DML
+    return true;
+#else
+        return false;
+#endif
+  });
+
+  m.def("is_rocm_available", []() {
+#if USE_ROCM
     return true;
 #else
         return false;

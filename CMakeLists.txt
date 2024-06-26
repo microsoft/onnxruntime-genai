@@ -25,6 +25,8 @@ include(cmake/external/onnxruntime_external_deps.cmake)
 include(cmake/global_variables.cmake)
 # Checking if CUDA is supported
 include(cmake/check_cuda.cmake)
+# Checking if ROCm is supported
+include(cmake/check_rocm.cmake)
 # Checking if DML is supported
 include(cmake/check_dml.cmake)
 
@@ -59,7 +61,12 @@ target_include_directories(onnxruntime-genai-static PUBLIC ${onnxruntime_extensi
 target_link_libraries(onnxruntime-genai PRIVATE onnxruntime_extensions)
 target_link_libraries(onnxruntime-genai-static PUBLIC onnxruntime_extensions)
 target_link_directories(onnxruntime-genai PRIVATE ${ORT_LIB_DIR})
+
+# we keep the shared libraries disconnected on Android as they will come from separate AARs and we don't want to force
+# the ORT version to match in both.
+if(NOT ANDROID)
 target_link_libraries(onnxruntime-genai PRIVATE ${ONNXRUNTIME_LIB})
+endif()
 
 set_target_properties(onnxruntime-genai PROPERTIES FOLDER "Sources")
 set_target_properties(onnxruntime-genai-static PROPERTIES FOLDER "Sources")
@@ -121,6 +128,12 @@ if(USE_DML)
   add_dependencies(RESTORE_PACKAGES nuget)
   add_dependencies(onnxruntime-genai RESTORE_PACKAGES)
   add_dependencies(onnxruntime-genai-static RESTORE_PACKAGES)
+endif()
+
+if(ANDROID)
+  # strip the binary if it's not a build with debug info
+  set_target_properties(onnxruntime-genai PROPERTIES LINK_FLAGS_RELEASE -s)
+  set_target_properties(onnxruntime-genai PROPERTIES LINK_FLAGS_MINSIZEREL -s)
 endif()
 
 if(ENABLE_TESTS)

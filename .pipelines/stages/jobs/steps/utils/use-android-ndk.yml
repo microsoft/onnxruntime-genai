@@ -1,0 +1,35 @@
+# Installs the Android NDK and sets environment variables ANDROID_NDK_HOME to refer to it.
+# Typically we'd expect to be using an NDK version that already exists on the CI machine as the general security 
+# guidance is to be using the latest released version.
+parameters:
+- name: AndroidNdkVersion
+  type: string
+  default: "26.3.11579264"
+
+steps:
+- bash: |
+    set -e
+
+    NDK_PATH="${ANDROID_HOME}/ndk/${{ parameters.AndroidNdkVersion }}"
+    if [[ ! -d "${NDK_PATH}" ]]; then
+      "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --install "ndk;${{ parameters.AndroidNdkVersion }}"
+    fi
+
+    if [[ ! -d "${NDK_PATH}" ]]; then
+      echo "NDK directory was not found: ${NDK_PATH}"
+      exit 1
+    fi
+
+    # Do not output ##vso[] commands with `set -x` or they may be parsed again and include a trailing quote.
+    set +x
+
+    set_var() {
+      local VAR_NAME=${1:?}
+      local VAR_VALUE=${2:?}
+      echo "##vso[task.setvariable variable=${VAR_NAME}]${VAR_VALUE}"
+      echo "${VAR_NAME}: ${VAR_VALUE}"
+    }
+
+    set_var "ANDROID_NDK_HOME" "${NDK_PATH}"
+
+  displayName: Use Android NDK ${{ parameters.AndroidNdkVersion }}
