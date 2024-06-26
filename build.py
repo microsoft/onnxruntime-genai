@@ -396,9 +396,7 @@ def _run_android_tests(args, ):
             print(f"stderr:\n{e.stderr.decode('utf-8')}")
 
         # Print test log output so we can easily check that the test ran as expected
-        util.run([adb, "logcat", "-s", "-d", "GenAI:*"])
-        util.run([adb, "logcat", "-s", "-d", "ORTGenAIAndroidTest:*"])
-        util.run([adb, "logcat", "-s", "-d", "TestRunner:*"])
+        util.run([adb, "logcat", "-s", "-d", "GenAI:V ORTGenAIAndroidTest:V TestRunner:V"])
 
         if exception:
             # uncomment if you need more logcat output in a CI
