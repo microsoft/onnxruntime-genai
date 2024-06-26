@@ -17,6 +17,13 @@ struct StaticBuffer {
   StaticBuffer(Ort::Allocator* allocator, size_t max_beam_batch_size);
   StaticBuffer(const StaticBuffer&) = delete;
   StaticBuffer& operator=(const StaticBuffer&) = delete;
+
+  StaticBuffer(StaticBuffer&& o) noexcept : info_(o.info_) {
+    *this = std::move(o);
+  }
+
+  StaticBuffer& operator=(StaticBuffer&& o) noexcept;
+
   ~StaticBuffer();
 
   std::unique_ptr<OrtValue> CreateTensorOnStaticBuffer(std::span<const int64_t> shape,
@@ -26,7 +33,7 @@ struct StaticBuffer {
   size_t GetNumElements(std::span<const int64_t> shape);
 
   Ort::Allocator* allocator_{};
-  const OrtMemoryInfo& info_;
+  std::reference_wrapper<const OrtMemoryInfo> info_;
   void* buffer_{};
   size_t bytes_{};
   size_t max_beam_batch_size_{};

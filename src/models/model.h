@@ -119,6 +119,12 @@ struct Model : std::enable_shared_from_this<Model> {
 
   CapturedGraphPool* GetCapturedGraphPool() const { return captured_graph_pool_.get(); }
 
+  /// <summary>
+  /// Returns device allocator or cpu allocator dedeuced based on the device type
+  /// </summary>
+  /// <returns>Ort::Allocator pointer</returns>
+  Ort::Allocator* GetAllocatorDevice() const { return allocator_device_; }
+
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
   std::unique_ptr<OrtSessionOptions> vision_session_options_;

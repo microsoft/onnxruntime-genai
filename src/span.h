@@ -4,40 +4,92 @@
 #ifndef USE_CXX17
 #include <span>
 #else
-#include <array>
-#include <vector>
-namespace std {
 
+#include <array>
+#include <stdexcept>
+#include <vector>
+#include <initializer_list>
+
+namespace std {
+namespace generators_span {
 template <typename T>
 struct span {
   span() = default;
-  span(T* p, size_t length) : p_{p}, length_{length} {}
+  constexpr span(T* p, size_t length) noexcept : p_{p}, length_{length} {}
+  constexpr span(const span<T>& s) noexcept : p_{s.p_}, length_{s.length_} {}
 
-  span(const span<std::remove_const_t<T> >& s) : p_{const_cast<T*>(s.data())}, length_{s.size()} {}
-  span(const std::vector<std::remove_const_t<T> >& s) : p_{const_cast<T*>(s.data())}, length_{s.size()} {}
+  span(std::vector<T>& s) noexcept : p_{s.data()}, length_{s.size()} {}
   template <size_t N>
-  span(const std::array<std::remove_const_t<T>, N>& s) : p_{const_cast<T*>(s.data())}, length_{s.size()} {}
+  constexpr span(std::array<T, N>& s) noexcept : p_{s.data()}, length_{s.size()} {}
 
-  bool empty() const { return length_ == 0; }
+  constexpr bool empty() const noexcept { return length_ == 0; }
 
-  size_t size() const { return length_; }
-  size_t size_bytes() const { return length_ * sizeof(T); }
+  constexpr size_t size() const noexcept { return length_; }
+  constexpr size_t size_bytes() const noexcept { return length_ * sizeof(T); }
 
-  T* data() { return p_; }
-  const T* data() const { return p_; }
+  constexpr T* data() const noexcept { return p_; }
 
-  T& operator[](size_t index) const { return p_[index]; }
+  constexpr T& operator[](size_t index) const noexcept { return p_[index]; }
 
-  T& back() const { return p_[length_ - 1]; }
+  constexpr T& back() const noexcept { return p_[length_ - 1]; }
 
-  T* begin() const { return p_; }
-  T* end() const { return p_ + length_; }
+  constexpr T* begin() const noexcept { return p_; }
+  constexpr T* end() const noexcept { return p_ + length_; }
 
-  span subspan(size_t index, size_t length) const { return span(p_ + index, length); }
+  span subspan(size_t index, size_t length) const {
+    if (index >= length_ || index + length > length_)
+      throw std::out_of_range("Requested subspan is out of range");
+
+    return span(p_ + index, length);
+  }
 
  private:
   T* p_{};
   size_t length_{};
 };
+
+template <class T>
+struct span<const T> {
+  span() = default;
+  constexpr span(const T* p, size_t length) noexcept : p_{p}, length_{length} {}
+
+  constexpr span(const span<const T>& s) noexcept : p_{s.p_}, length_{s.length_} {}
+  constexpr span(const span<T>& s) noexcept : p_{s.data()}, length_{s.size()} {}
+
+  span(const std::vector<T>& s) noexcept : p_{s.data()}, length_{s.size()} {}
+  template <size_t N>
+  constexpr span(const std::array<T, N>& s) noexcept : p_{s.data()}, length_{s.size()} {}
+  constexpr span(std::initializer_list<T> list) noexcept : p_(&*list.begin()), length_(list.size()) {}
+
+  constexpr bool empty() const noexcept { return length_ == 0; }
+
+  constexpr size_t size() const noexcept { return length_; }
+  constexpr size_t size_bytes() const noexcept { return length_ * sizeof(T); }
+
+  constexpr const T* data() const noexcept { return p_; }
+
+  constexpr const T& operator[](size_t index) const noexcept { return p_[index]; }
+
+  constexpr const T& back() const noexcept { return p_[length_ - 1]; }
+
+  constexpr const T* begin() const noexcept { return p_; }
+  constexpr const T* end() const noexcept { return p_ + length_; }
+
+  span subspan(size_t index, size_t length) const {
+    if (index >= length_ || index + length > length_)
+      throw std::out_of_range("Requested subspan is out of range");
+
+    return span(p_ + index, length);
+  }
+
+ private:
+  const T* p_{};
+  size_t length_{};
+};
+}  // namespace generators_span
+
+using generators_span::span;
+
 }  // namespace std
+
 #endif
