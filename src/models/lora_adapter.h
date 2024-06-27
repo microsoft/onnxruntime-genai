@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "static_buffer.h"
+#include "../generators.h"
 #include "../span.h"
 #include "../tensor.h"
 
@@ -21,11 +22,17 @@ namespace details {
 /// <summary>
 /// A named Lora Parameters pair
 /// </summary>
-struct LoraParam {
-  std::string name_;
-  std::shared_ptr<Tensor> p_;
-  LoraParam(std::string name, std::shared_ptr<Tensor> p) : name_{std::move(name)}, p_{std::move(p)} {}
+struct LoraParam : public GeneratorParams::Input {
+  LoraParam() = default;
+  LoraParam(std::string p_name, std::shared_ptr<Tensor> p) {
+    name = std::move(p_name);
+    tensor = std::move(p);
+  }
 };
+
+std::string LoraCacheKey(std::string_view adapter_name, std::string param_name);
+
+static std::shared_ptr<OrtValue> CreateEmptyInput(ONNXTensorElementDataType type);
 
 /// <summary>
 /// This class represents a collection of named pairs of
@@ -39,7 +46,6 @@ class LoraAdapter {
   /// </summary>
   /// <param name="name">a name. LoraAdapterManagement class would make sure it is unique.</param>
   LoraAdapter() = default;
-
 
   /// <summary>
   /// Returns adapter name
@@ -74,21 +80,18 @@ class LoraAdapter {
   /// Add Lora Parameter to the adapter
   /// </summary>
   /// <param name="parameter"></param>
-  void AddParameter(LoraParam parameter) {
-    if (active_) {
-      throw std::runtime_error("Adapter: " + name_ + " is active can not add parameters");
-    }
-
-    auto p = parameters_.emplace(parameter.name_, std::move(parameter));
+  void AddParameter(std::string param_name, std::shared_ptr<Tensor> tensor) {
+    LoraParam param{param_name, std::move(tensor)};
+    auto p = parameters_.emplace(std::move(param_name), param);
     if (!p.second) {
-      throw std::runtime_error("Adapter: " + name_ + " already has a parameter named: " + parameter.name_);
+      throw std::runtime_error("Adapter: " + name_ + " already has a parameter named: " + param_name);
     }
   }
 
-
  private:
+
   std::string name_;
-  std::unordered_map<std::string_view, LoraParam> parameters_;
+  std::unordered_map<std::string, LoraParam> parameters_;
   bool active_{false};
 };
 
@@ -115,8 +118,11 @@ class LoraAdapaterManagement {
       adapter.SetName(adapter_name);
     }
 
-    details::LoraParam param(std::move(param_name), std::move(p));
-    adapter.AddParameter(std::move(param));
+    if (adapter.IsActive()) {
+      throw std::runtime_error("Adapter: " + adapter_name + " is active can not add parameters");
+    }
+
+    adapter.AddParameter(std::move(param_name), std::move(p));
   }
 
   void RemoveAdapter(const std::string& adapter_name) {
@@ -128,9 +134,6 @@ class LoraAdapaterManagement {
     if (hit->second.IsActive()) {
       throw std::runtime_error("Adapter: " + adapter_name + " is active and can not be deleted");
     }
-
-   // Make sure all cache entries are invalidated
-   // when cache is present
 
     adapters_.erase(hit);
   }
@@ -149,15 +152,15 @@ class LoraAdapaterManagement {
     active_adapters_.push_back(adapter_name);
   }
 
-  std::span<std::string> GetActiveAdapters() const {
+  std::span<const std::string> GetActiveAdapters() const {
     return active_adapters_;
   }
 
  private:
+
   using AdapterMap = std::unordered_map<std::string, details::LoraAdapter>;
   AdapterMap adapters_;
   std::vector<std::string> active_adapters_;
-
 };
 
 }  // namespace Generators

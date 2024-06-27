@@ -89,7 +89,7 @@ void Select(const Model& model, std::span<const int32_t> input_ids, OrtValue* hi
 
 #pragma warning(pop)
 
-int64_t GetNumImageTokens(const std::vector<GeneratorParams::Input>& extra_inputs,
+int64_t GetNumImageTokens(std::span<const GeneratorParams::Input> extra_inputs,
                           const std::string& image_sizes_name) {
   std::shared_ptr<Tensor> image_sizes;
   for (size_t i = 0; i < extra_inputs.size(); ++i) {
@@ -124,7 +124,7 @@ std::unique_ptr<OrtValue> GetVisualFeatures(OrtAllocator& device_allocator, cons
 
   auto type = session_info.GetOutputDataType(visual_features_name);
 
-  std::vector<int64_t> shape = {batch_size, num_image_tokens, hidden_size};
+  const std::array<int64_t, 3> shape = {batch_size, num_image_tokens, hidden_size};
   std::unique_ptr<OrtValue> visual_features;
 
   switch (type) {

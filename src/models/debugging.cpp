@@ -75,23 +75,23 @@ void DumpValues(std::ostream& stream, ONNXTensorElementDataType type, const void
 
   switch (type) {
     case Ort::TypeToTensorType<bool>::type:
-      DumpSpan(stream, std::span<const bool>{reinterpret_cast<const bool*>(p_values_raw), count});
+      DumpSpan(stream, std::span<const bool>(reinterpret_cast<const bool*>(p_values_raw), count));
       break;
 
     case Ort::TypeToTensorType<int8_t>::type:
-      DumpSpan(stream, std::span<const int8_t>{reinterpret_cast<const int8_t*>(p_values_raw), count});
+      DumpSpan(stream, std::span<const int8_t>(reinterpret_cast<const int8_t*>(p_values_raw), count));
       break;
 
     case Ort::TypeToTensorType<uint8_t>::type:
-      DumpSpan(stream, std::span<const uint8_t>{reinterpret_cast<const uint8_t*>(p_values_raw), count});
+      DumpSpan(stream, std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(p_values_raw), count));
       break;
 
     case Ort::TypeToTensorType<int16_t>::type:
-      DumpSpan(stream, std::span<const int16_t>{reinterpret_cast<const int16_t*>(p_values_raw), count});
+      DumpSpan(stream, std::span<const int16_t>(reinterpret_cast<const int16_t*>(p_values_raw), count));
       break;
 
     case Ort::TypeToTensorType<uint16_t>::type:
-      DumpSpan(stream, std::span<const uint16_t>{reinterpret_cast<const uint16_t*>(p_values_raw), count});
+      DumpSpan(stream, std::span<const uint16_t>(reinterpret_cast<const uint16_t*>(p_values_raw), count));
       break;
 
     case Ort::TypeToTensorType<int32_t>::type:
@@ -99,11 +99,11 @@ void DumpValues(std::ostream& stream, ONNXTensorElementDataType type, const void
       break;
 
     case Ort::TypeToTensorType<uint32_t>::type:
-      DumpSpan(stream, std::span<const uint32_t>{reinterpret_cast<const uint32_t*>(p_values_raw), count});
+      DumpSpan(stream, std::span<const uint32_t>(reinterpret_cast<const uint32_t*>(p_values_raw), count));
       break;
 
     case Ort::TypeToTensorType<int64_t>::type:
-      DumpSpan(stream, std::span<const int64_t>{reinterpret_cast<const int64_t*>(p_values_raw), count});
+      DumpSpan(stream, std::span<const int64_t>(reinterpret_cast<const int64_t*>(p_values_raw), count));
       break;
 
     case Ort::TypeToTensorType<uint64_t>::type:
@@ -111,15 +111,15 @@ void DumpValues(std::ostream& stream, ONNXTensorElementDataType type, const void
       break;
 
     case Ort::TypeToTensorType<Ort::Float16_t>::type:
-      DumpSpan(stream, std::span<const Ort::Float16_t>{reinterpret_cast<const Ort::Float16_t*>(p_values_raw), count});
+      DumpSpan(stream, std::span<const Ort::Float16_t>(reinterpret_cast<const Ort::Float16_t*>(p_values_raw), count));
       break;
 
     case Ort::TypeToTensorType<float>::type:
-      DumpSpan(stream, std::span<const float>{reinterpret_cast<const float*>(p_values_raw), count});
+      DumpSpan(stream, std::span<const float>(reinterpret_cast<const float*>(p_values_raw), count));
       break;
 
     case Ort::TypeToTensorType<double>::type:
-      DumpSpan(stream, std::span<const double>{reinterpret_cast<const double*>(p_values_raw), count});
+      DumpSpan(stream, std::span<const double>(reinterpret_cast<const double*>(p_values_raw), count));
       break;
 
     default:
