@@ -11,7 +11,8 @@
       "cacheVariables": {
         "CMAKE_POSITION_INDEPENDENT_CODE": "ON",
         "CMAKE_OSX_ARCHITECTURES": "arm64",
-        "USE_CUDA": "OFF"
+        "USE_CUDA": "OFF",
+        "USE_ROCM": "OFF"
       },
       "environment": {
         "CC": "clang",

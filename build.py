@@ -101,6 +101,8 @@ def _parse_args():
              "Used when --use_cuda is specified.",
     )
 
+    parser.add_argument("--use_rocm", action="store_true", help="Whether to use ROCm. Default is to not use rocm.")
+
     parser.add_argument("--use_dml", action="store_true", help="Whether to use DML. Default is to not use DML.")
 
     # The following options are mutually exclusive (cross compiling options such as android, ios, etc.)
@@ -396,9 +398,7 @@ def _run_android_tests(args, ):
             print(f"stderr:\n{e.stderr.decode('utf-8')}")
 
         # Print test log output so we can easily check that the test ran as expected
-        util.run([adb, "logcat", "-s", "-d", "GenAI:*"])
-        util.run([adb, "logcat", "-s", "-d", "ORTGenAIAndroidTest:*"])
-        util.run([adb, "logcat", "-s", "-d", "TestRunner:*"])
+        util.run([adb, "logcat", "-s", "-d", "GenAI:V ORTGenAIAndroidTest:V TestRunner:V"])
 
         if exception:
             # uncomment if you need more logcat output in a CI
@@ -445,6 +445,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         str(args.build_dir),
         "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
         f"-DUSE_CUDA={'ON' if args.use_cuda else 'OFF'}",
+        f"-DUSE_ROCM={'ON' if args.use_rocm else 'OFF'}",
         f"-DUSE_DML={'ON' if args.use_dml else 'OFF'}",
         f"-DENABLE_JAVA={'ON' if args.build_java else 'OFF'}",
         f"-DBUILD_WHEEL={build_wheel}",

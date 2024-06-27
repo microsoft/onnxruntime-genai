@@ -33,6 +33,8 @@ if(BUILD_WHEEL)
   message("Setting up wheel files in : ${WHEEL_FILES_DIR}")
   if(USE_CUDA)
     set(TARGET_NAME "onnxruntime-genai-cuda")
+  elseif(USE_ROCM)
+    set(TARGET_NAME "onnxruntime-genai-rocm")
   elseif(USE_DML)
     set(TARGET_NAME "onnxruntime-genai-directml")
   else()
@@ -62,6 +64,7 @@ if(BUILD_WHEEL)
     "libcudart.so.11.0"
     "libcudart.so.12"
     "libcudnn.so.8"
+    "libcudnn.so.9"
     "libcufft.so.10"
     "libcufft.so.11"
     "libcurand.so.10"
@@ -72,6 +75,19 @@ if(BUILD_WHEEL)
     "libnvonnxparser.so.8"
     "libnvonnxparser.so.10"
 
+    "libamdhip64.so.5"
+    "libamdhip64.so.6"
+    "libhipblas.so.0"
+    "libhipblas.so.2"
+    "libhipfft.so"
+    "libhipfft.so.0"
+    "libhiprtc.so.5"
+    "libhsa-runtime64.so.1"
+    "librccl.so.1"
+    "librocblas.so.3"
+    "librocfft.so.0"
+    "libroctracer64.so.4"
+    "libMIOpen.so.1"
   )
   set(modified_exclude_list)
   foreach(item IN LISTS auditwheel_exclude_list)

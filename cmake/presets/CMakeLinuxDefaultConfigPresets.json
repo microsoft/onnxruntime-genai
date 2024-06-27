@@ -9,7 +9,8 @@
         "CMAKE_EXE_LINKER_FLAGS_INIT": "-Wl,-z,now",
         "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-z,now",
         "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-z,now",
-        "USE_CUDA": "OFF"
+        "USE_CUDA": "OFF",
+        "USE_ROCM": "OFF"
       },
       "environment": {
         "CC": "gcc",
@@ -27,6 +28,13 @@
       "cacheVariables": {
         "USE_CUDA": "ON",
         "CMAKE_CUDA_ARCHITECTURES": "60;61;70;75;80;86"
+      }
+    },
+    {
+      "name": "linux_gcc_rocm_default",
+      "inherits": "linux_gcc_default",
+      "cacheVariables": {
+        "USE_ROCM": "ON"
       }
     },
     {

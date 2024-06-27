@@ -73,6 +73,8 @@ jobs:
         value: 'Microsoft.ML.OnnxRuntime.Gpu.Linux'
     ${{ elseif eq(parameters.ep, 'directml')}}:
       value: 'Microsoft.ML.OnnxRuntime.DirectML'
+    ${{ elseif eq(parameters.ep, 'rocm')}}:
+      value: 'Microsoft.ML.OnnxRuntime.ROCm'
     ${{ else }}:
       value: 'Microsoft.ML.OnnxRuntime'
 

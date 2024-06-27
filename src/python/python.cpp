@@ -495,6 +495,14 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 #endif
   });
 
+  m.def("is_rocm_available", []() {
+#if USE_ROCM
+    return true;
+#else
+        return false;
+#endif
+  });
+
   m.def("set_current_gpu_device_id", [](int device_id) { Ort::SetCurrentGpuDeviceId(device_id); });
   m.def("get_current_gpu_device_id", []() { return Ort::GetCurrentGpuDeviceId(); });
 }
