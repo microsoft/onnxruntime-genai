@@ -59,7 +59,6 @@ struct span<const T> {
   span(const std::vector<T>& s) noexcept : p_{s.data()}, length_{s.size()} {}
   template <size_t N>
   constexpr span(const std::array<T, N>& s) noexcept : p_{s.data()}, length_{s.size()} {}
-  constexpr span(std::initializer_list<T> list) noexcept : p_(&*list.begin()), length_(list.size()) {}
 
   constexpr bool empty() const noexcept { return length_ == 0; }
 
