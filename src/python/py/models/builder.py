@@ -58,9 +58,9 @@ class Model:
             "cuda": {
                 "enable_cuda_graph": enable_cuda_graph,        # "1" if the the model is able to enable cuda graph, "0" otherwise
             },
-            "rocm":{
+            "rocm": {
                 "tunable_op_enable": "1",
-                "tunable_op_tuning_enable": "1"
+                "tunable_op_tuning_enable": "1",
             },
             "dml": {},
             "web": {},
@@ -1539,12 +1539,18 @@ class Model:
         # Load weights of original model
         if input_path.endswith(".gguf"):
             # Load GGUF model
-            from gguf_model import GGUFModel
+            try:
+                from gguf_model import GGUFModel
+            except:
+                from onnxruntime_genai.models.gguf_model import GGUFModel
             model = GGUFModel.from_pretrained(self.model_type, input_path, self.head_size, self.hidden_size, self.intermediate_size, self.num_attn_heads, self.num_kv_heads, self.vocab_size)
             self.layernorm_attrs["add_offset"] = 0  # add offset already done for GGUF models
         elif self.quant_type is not None:
             # Load quantized PyTorch model
-            from quantized_model import QuantModel
+            try:
+                from quantized_model import QuantModel
+            except:
+                from onnxruntime_genai.models.quantized_model import QuantModel
             q_size = self.num_attn_heads * self.head_size
             kv_size = self.num_kv_heads * self.head_size
             model = QuantModel.from_pretrained(self.quant_type, input_path, self.quant_attrs["bits"], self.quant_attrs["group_size"], self.quant_attrs["use_g_idx"], q_size, kv_size, self.intermediate_size)
