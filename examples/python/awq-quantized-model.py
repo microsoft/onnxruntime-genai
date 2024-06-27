@@ -20,7 +20,7 @@ def parse_args():
         "-q",
         "--quant_path",
         required=True,
-        help="Folder to saved AWQ-quantized PyTorch model and associated files in",
+        help="Folder to save AWQ-quantized PyTorch model and associated files in",
     )
 
     parser.add_argument(
