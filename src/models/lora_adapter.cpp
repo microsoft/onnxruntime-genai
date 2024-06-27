@@ -22,4 +22,58 @@ std::shared_ptr<OrtValue> CreateEmptyInput(Ort::Allocator* allocator, ONNXTensor
 
 }  // namespace details
 
+void LoraAdapaterManagement::AddParameter(const std::string& adapter_name, std::string param_name, std::shared_ptr<Tensor> p) {
+  auto hit = adapters_.find(adapter_name);
+  if (hit == adapters_.end()) {
+    throw std::runtime_error("Adapter: " + adapter_name + " does not exist");
+  }
+
+  auto& adapter = hit->second;
+
+  if (adapter.IsActive()) {
+    throw std::runtime_error("Adapter: " + adapter_name + " is active can not add parameters");
+  }
+
+  adapter.AddParameter(std::move(param_name), std::move(p));
+}
+
+void LoraAdapaterManagement::RemoveAdapter(const std::string& adapter_name) {
+  auto hit = adapters_.find(adapter_name);
+  if (hit == adapters_.end()) {
+    throw std::runtime_error("Adapter: " + adapter_name + " does not exist");
+  }
+
+  if (hit->second.IsActive()) {
+    throw std::runtime_error("Adapter: " + adapter_name + " is active and can not be deleted");
+  }
+
+  adapters_.erase(hit);
+}
+
+void LoraAdapaterManagement::ActivateAdapter(const std::string& adapter_name) {
+  auto hit = adapters_.find(adapter_name);
+  if (hit == adapters_.end()) {
+    throw std::runtime_error("Adapter: " + adapter_name + " does not exist");
+  }
+
+  if (hit->second.IsActive()) {
+    throw std::runtime_error("Adapter: " + adapter_name + " is already active");
+  }
+
+  hit->second.SetActive();
+}
+
+void Generators::LoraAdapaterManagement::DeactiveAdapter(const std::string& adapter_name) {
+  auto hit = adapters_.find(adapter_name);
+  if (hit == adapters_.end()) {
+    throw std::runtime_error("Adapter: " + adapter_name + " does not exist");
+  }
+
+  if (!hit->second.IsActive()) {
+    throw std::runtime_error("Adapter: " + adapter_name + " is not active");
+  }
+
+  hit->second.Deactivate();
+}
+
 }  // namespace Generators

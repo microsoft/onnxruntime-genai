@@ -104,6 +104,21 @@ class LoraAdapaterManagement {
  public:
   LoraAdapaterManagement() = default;
   ~LoraAdapaterManagement() = default;
+  LoraAdapaterManagement(const LoraAdapaterManagement&) = delete;
+  LoraAdapaterManagement& operator=(const LoraAdapaterManagement&) = delete;
+
+  /// <summary>
+  /// Creates a adapter object to which one can add Lora parameters
+  /// </summary>
+  /// <param name="adapter_name"></param>
+  /// <param name="max_beam_batch_size"></param>
+  void CreateAdapter(const std::string& adapter_name) {
+    auto result = adapters_.emplace(adapter_name, details::LoraAdapter{});
+    if (!result.second) {
+      throw std::runtime_error("Adapter: " + adapter_name + " already exist");
+    }
+    result.first->second.SetName(adapter_name);
+  }
 
   /// <summary>
   /// Add named Lora Parameter to the specified adapter
@@ -111,56 +126,27 @@ class LoraAdapaterManagement {
   /// <param name="adapter_name"></param>
   /// <param name="param_name"></param>
   /// <param name="p"></param>
-  void AddParameter(const std::string& adapter_name, std::string param_name, std::shared_ptr<Tensor> p) {
+  void AddParameter(const std::string& adapter_name, std::string param_name, std::shared_ptr<Tensor> p);
 
-    auto& adapter = adapters_[adapter_name];
-    if (adapter.GetName().empty()) {
-      adapter.SetName(adapter_name);
-    }
+  /// <summary>
+  /// Remove Specific Lora adapter and purge device cache if appropriate.
+  /// </summary>
+  /// <param name="adapter_name"></param>
+  void RemoveAdapter(const std::string& adapter_name);
 
-    if (adapter.IsActive()) {
-      throw std::runtime_error("Adapter: " + adapter_name + " is active can not add parameters");
-    }
+  /// <summary>
+  /// Activate specific adapter. More than one adapter can be active at the same time.
+  /// Except for the base scenario.
+  /// </summary>
+  /// <param name="adapter_name"></param>
+  void ActivateAdapter(const std::string& adapter_name);
 
-    adapter.AddParameter(std::move(param_name), std::move(p));
-  }
-
-  void RemoveAdapter(const std::string& adapter_name) {
-    auto hit = adapters_.find(adapter_name);
-    if (hit == adapters_.end()) {
-      throw std::runtime_error("Adapter: " + adapter_name + " does not exist");
-    }
-
-    if (hit->second.IsActive()) {
-      throw std::runtime_error("Adapter: " + adapter_name + " is active and can not be deleted");
-    }
-
-    adapters_.erase(hit);
-  }
-
-  void ActivateAdapter(const std::string& adapter_name) {
-    auto hit = adapters_.find(adapter_name);
-    if (hit == adapters_.end()) {
-      throw std::runtime_error("Adapter: " + adapter_name + " does not exist");
-    }
-
-    if (hit->second.IsActive()) {
-      throw std::runtime_error("Adapter: " + adapter_name + " is already active");
-    }
-
-    hit->second.SetActive();
-    active_adapters_.push_back(adapter_name);
-  }
-
-  std::span<const std::string> GetActiveAdapters() const {
-    return active_adapters_;
-  }
+  void DeactiveAdapter(const std::string& adapter_name);
 
  private:
 
   using AdapterMap = std::unordered_map<std::string, details::LoraAdapter>;
   AdapterMap adapters_;
-  std::vector<std::string> active_adapters_;
 };
 
 }  // namespace Generators
