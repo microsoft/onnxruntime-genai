@@ -68,7 +68,7 @@ $ curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/exampl
 $ python awq-quantized-model.py --model_path /path/to/folder/containing/your/pytorch/model/ --quant_path /path/to/new/folder/to/save/quantized/pytorch/model/in/ --output_path /path/to/new/folder/to/save/quantized/and/optimized/onnx/model/in/
 
 # Example:
-# $ python awq-quantized-model.py --model_path ./phi3-mini-4k-instruct/ --quant_path ./phi3-mini-4k-instruct-awq/ --output_path /phi3-mini-4k-instruct-awq-onnx/
+# $ python awq-quantized-model.py --model_path ./phi3-mini-4k-instruct/ --quant_path ./phi3-mini-4k-instruct-awq/ --output_path ./phi3-mini-4k-instruct-awq-onnx/
 ```
 
 Once the ONNX model has been created and the script has loaded the model, it will ask you for input in a loop, streaming the output as it is produced the model. For example:
