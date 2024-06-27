@@ -152,6 +152,30 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerate(const OgaModel* model, const OgaG
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateGeneratorParams(const OgaModel* model, OgaGeneratorParams** out);
 
 /*
+ * \brief Creates Lora Adapter within a given model that one can add
+ *        parameters to. The adapter_name must be unique within the model.
+ * \param[in] model The model to create adapter with.
+ * \return OgaResult containing the error message if the adapter creation failed.
+ */
+OgaResult* OGA_API_CALL OgaCreateLoraAdapter(OgaModel* model, const char* adapter_name);
+
+/*
+ * \brief Activates Lora Adapter previously created within a given model. Once
+ *        Activated, no more parameters can be added to the adapter.
+ *        When no Lora Adapters are active, GenAI would run inference with base weights.
+ * \param[in] model The model to which the adapter belongs
+ * \return OgaResult containing the error message if the adapter creation failed.
+ */
+OgaResult* OGA_API_CALL OgaActivateLoraAdapter(OgaModel* model, const char* adapter_name);
+
+/*
+ * \brief Removes previously created LoraAdapter by name.
+ * \param[in] model The model from which the adapter is removed.
+ * \return OgaResult containing the error message if the adapter removal failed.
+ */
+OgaResult* OGA_API_CALL OgaRemoveLoraAdapter(OgaModel* model, const char* adapter_name);
+
+/*
  * \brief Destroys the given generator params.
  * \param[in] generator_params The generator params to be destroyed.
  */

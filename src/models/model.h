@@ -5,6 +5,7 @@
 #include "captured_graph_pool.h"
 #include "utils.h"
 #include "prompt_image_processor.h"
+#include "lora_adapter.h"
 
 #if USE_DML
 #include "dml_provider_factory.h"
@@ -119,6 +120,8 @@ struct Model : std::enable_shared_from_this<Model> {
 
   CapturedGraphPool* GetCapturedGraphPool() const { return captured_graph_pool_.get(); }
 
+  LoraAdapaterManagement& GetLoraAdapterManagement() noexcept { return lora_adapters_; }
+
   /// <summary>
   /// Returns device allocator or cpu allocator dedeuced based on the device type
   /// </summary>
@@ -167,6 +170,7 @@ struct Model : std::enable_shared_from_this<Model> {
 #endif
 
   std::shared_ptr<CapturedGraphPool> captured_graph_pool_;
+  LoraAdapaterManagement lora_adapters_;
 };
 
 }  // namespace Generators

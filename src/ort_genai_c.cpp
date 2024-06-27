@@ -88,11 +88,35 @@ OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaModel** out) 
 
 OgaResult* OGA_API_CALL OgaCreateGeneratorParams(const OgaModel* model, OgaGeneratorParams** out) {
   OGA_TRY
-  auto params = std::make_shared<Generators::GeneratorParams>(*reinterpret_cast<const Generators::Model*>(model));
+  auto& params = std::make_shared<Generators::GeneratorParams>(*reinterpret_cast<const Generators::Model*>(model));
   params->external_owner_ = params;
   *out = reinterpret_cast<OgaGeneratorParams*>(params.get());
   return nullptr;
   OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaCreateLoraAdapter(OgaModel* model, const char* adapter_name) {
+  OGA_TRY
+  auto& lora_management = reinterpret_cast<Generators::Model*>(model)->GetLoraAdapterManagement();
+  lora_management.CreateAdapter(adapter_name);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaActivateLoraAdapter(OgaModel* mode, const char* adapter_name) {
+  OGA_TRY
+  auto& lora_management = reinterpret_cast<Generators::Model*>(mode)->GetLoraAdapterManagement();
+  lora_management.ActivateAdapter(adapter_name);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaRemoveLoraAdapter(OgaModel* model, const char* adapter_name) {
+    OGA_TRY
+    auto& lora_management = reinterpret_cast<Generators::Model*>(model)->GetLoraAdapterManagement();
+    lora_management.RemoveAdapter(adapter_name);
+    return nullptr;
+    OGA_CATCH
 }
 
 OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchNumber(OgaGeneratorParams* generator_params, const char* name, double value) {
