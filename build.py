@@ -7,6 +7,7 @@ import argparse
 import contextlib
 import os
 import platform
+import shlex
 import shutil
 import sys
 
@@ -26,7 +27,12 @@ def _path_from_env_var(env_var: str):
 
 
 def _parse_args():
-    parser = argparse.ArgumentParser(
+    class Parser(argparse.ArgumentParser):
+        # override argument file line parsing behavior - allow multiple arguments per line and handle quotes
+        def convert_arg_line_to_args(self, arg_line):
+            return shlex.split(arg_line)
+
+    parser = Parser(
         description="ONNX Runtime GenAI Build Driver.",
         # files containing arguments can be specified on the command line with "@<filename>" and the arguments within
         # will be included at that point
