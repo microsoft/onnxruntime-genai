@@ -155,25 +155,49 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateGeneratorParams(const OgaModel* mode
  * \brief Creates Lora Adapter within a given model that one can add
  *        parameters to. The adapter_name must be unique within the model.
  * \param[in] model The model to create adapter with.
+ * \param[in] adapter_name to be created
  * \return OgaResult containing the error message if the adapter creation failed.
  */
-OgaResult* OGA_API_CALL OgaCreateLoraAdapter(OgaModel* model, const char* adapter_name);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateLoraAdapter(OgaModel* model, const char* adapter_name);
 
 /*
  * \brief Activates Lora Adapter previously created within a given model. Once
  *        Activated, no more parameters can be added to the adapter.
  *        When no Lora Adapters are active, GenAI would run inference with base weights.
  * \param[in] model The model to which the adapter belongs
+ * \param[in] adapter_name to be activated
  * \return OgaResult containing the error message if the adapter creation failed.
  */
-OgaResult* OGA_API_CALL OgaActivateLoraAdapter(OgaModel* model, const char* adapter_name);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaActivateLoraAdapter(OgaModel* model, const char* adapter_name);
+
+/*
+ * \brief Deactivates Lora Adapter previously activated within a given model. Once
+ *        deactivated, it would no longer participate in inference.
+ *        When no Lora Adapters are active, GenAI would run inference with base weights.
+ * \param[in] model The model to which the adapter belongs
+ * \param[in] adapter_name to be deactivated
+ * \return OgaResult containing the error message if the adapter creation failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaDectivateLoraAdapter(OgaModel* model, const char* adapter_name);
 
 /*
  * \brief Removes previously created LoraAdapter by name.
  * \param[in] model The model from which the adapter is removed.
+ * \param[in] adapter_name that is going to be removed
  * \return OgaResult containing the error message if the adapter removal failed.
  */
-OgaResult* OGA_API_CALL OgaRemoveLoraAdapter(OgaModel* model, const char* adapter_name);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRemoveLoraAdapter(OgaModel* model, const char* adapter_name);
+
+/*
+ * \brief Adds a named LoraParameter.
+ * \param[in] model where the adapter is defined
+ * \param[in] adapter_name the adapter to which the parameter is added
+ * \param[in] param_name parameter name
+ * \param[in] tensor Lora parameter data
+ * \return OgaResult containing the error message if the adapter removal failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelAddLoraParameter(OgaModel* model, const char* adapter_name,
+                                                            const char* param_name, const OgaTensor* tensor);
 
 /*
  * \brief Destroys the given generator params.

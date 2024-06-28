@@ -111,12 +111,29 @@ OgaResult* OGA_API_CALL OgaActivateLoraAdapter(OgaModel* mode, const char* adapt
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaDectivateLoraAdapter(OgaModel* model, const char* adapter_name) {
+  OGA_TRY
+  auto& lora_management = reinterpret_cast<Generators::Model*>(model)->GetLoraAdapterManagement();
+  lora_management.DeactiveAdapter(adapter_name);
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaRemoveLoraAdapter(OgaModel* model, const char* adapter_name) {
-    OGA_TRY
-    auto& lora_management = reinterpret_cast<Generators::Model*>(model)->GetLoraAdapterManagement();
-    lora_management.RemoveAdapter(adapter_name);
-    return nullptr;
-    OGA_CATCH
+  OGA_TRY
+  auto& lora_management = reinterpret_cast<Generators::Model*>(model)->GetLoraAdapterManagement();
+  lora_management.RemoveAdapter(adapter_name);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaModelAddLoraParameter(OgaModel* model, const char* adapter_name, const char* param_name, const OgaTensor* tensor) {
+  OGA_TRY
+  auto& lora_management = reinterpret_cast<Generators::Model*>(model)->GetLoraAdapterManagement();
+  lora_management.AddParameter(adapter_name, param_name, 
+    const_cast<Generators::Tensor*>(reinterpret_cast<const Generators::Tensor*>(tensor))->shared_from_this());
+  return nullptr;
+  OGA_CATCH
 }
 
 OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchNumber(OgaGeneratorParams* generator_params, const char* name, double value) {

@@ -22,6 +22,15 @@ std::shared_ptr<OrtValue> CreateEmptyInput(Ort::Allocator* allocator, ONNXTensor
 
 }  // namespace details
 
+void LoraAdapaterManagement::CreateAdapter(const std::string& adapter_name) {
+  auto result = adapters_.emplace(adapter_name, details::LoraAdapter{});
+  if (!result.second) {
+    throw std::runtime_error("Adapter: " + adapter_name + " already exist");
+  }
+  result.first->second.SetName(adapter_name);
+}
+
+
 void LoraAdapaterManagement::AddParameter(const std::string& adapter_name, std::string param_name, std::shared_ptr<Tensor> p) {
   auto hit = adapters_.find(adapter_name);
   if (hit == adapters_.end()) {

@@ -112,13 +112,7 @@ class LoraAdapaterManagement {
   /// </summary>
   /// <param name="adapter_name"></param>
   /// <param name="max_beam_batch_size"></param>
-  void CreateAdapter(const std::string& adapter_name) {
-    auto result = adapters_.emplace(adapter_name, details::LoraAdapter{});
-    if (!result.second) {
-      throw std::runtime_error("Adapter: " + adapter_name + " already exist");
-    }
-    result.first->second.SetName(adapter_name);
-  }
+  void CreateAdapter(const std::string& adapter_name);
 
   /// <summary>
   /// Add named Lora Parameter to the specified adapter
@@ -141,6 +135,10 @@ class LoraAdapaterManagement {
   /// <param name="adapter_name"></param>
   void ActivateAdapter(const std::string& adapter_name);
 
+  /// <summary>
+  /// Deactivates the adapter
+  /// </summary>
+  /// <param name="adapter_name"></param>
   void DeactiveAdapter(const std::string& adapter_name);
 
  private:
