@@ -41,22 +41,19 @@ struct InputMetadata {
   //int64_t slot_mapping;
   int64_t num_generation_tokens = 0;
   AttnBias attn_bias;
-  UniquePtrWithDeletor<int64_t> position_ids; 
+  UniquePtrWithDeletor<int32_t> position_ids; 
   UniquePtrWithDeletor<int32_t> seqinfo;
 };
 
-//// TODO(leca): remove unnecessary parameters, move all cuda call to .cu file and check return value by calling CudaCall().
 template <typename T>
-OrtStatusPtr CheckInputs(const cudaStream_t stream, OrtAllocator* allocator, const ortc::Tensor<T>& query, const ortc::Tensor<T>& key,
-                         const ortc::Tensor<T>& value, const ortc::Tensor<T>& key_cache, const ortc::Tensor<T>& value_cache,
-                         const ortc::Tensor<int32_t>& block_tables, const ortc::Tensor<int32_t>& slot_mappings, const ortc::Tensor<int32_t>& context_lens,
-                         std::optional<const ortc::Tensor<int64_t>*> positions, int32_t num_heads, int32_t head_size, bool prompt_mode, InputMetadata& input_metadata, PackedAttentionParameters& parameters) {
+OrtStatusPtr CheckInputs(const cudaStream_t stream, OrtAllocator* allocator, const ortc::Tensor<T>& query, const ortc::Tensor<int32_t>& context_lens, std::optional<const ortc::Tensor<T>*> cos_sin_cache,
+                         std::optional<const ortc::Tensor<int32_t>*> positions, int32_t num_heads, int32_t head_size, bool prompt_mode, InputMetadata& input_metadata, PackedAttentionParameters& parameters) {
   const std::vector<int64_t>& query_shape = query.Shape();
   if (query_shape.size() < 2 || query_shape.size() > 3) {
     return OrtW::CreateStatus(MakeString("Invalid query shape, expect 2 or 3 dimensions"), ORT_INVALID_ARGUMENT);
   }
   if (query_shape.back() != num_heads * head_size) {
-    return OrtW::CreateStatus(MakeString("query shape should equal to num_heads_ * head_size_"), ORT_INVALID_ARGUMENT);
+    return OrtW::CreateStatus(MakeString("Hidden size should equal to num_heads_ * head_size_"), ORT_INVALID_ARGUMENT);
   }
 
   parameters.batch_size = context_lens.NumberOfElement();
@@ -82,26 +79,24 @@ OrtStatusPtr CheckInputs(const cudaStream_t stream, OrtAllocator* allocator, con
       input_metadata.num_generation_tokens = 1;
       input_metadata.seqinfo = GetScratchBuffer<int32_t>(allocator->Alloc(allocator, context_lens.SizeInBytes()), allocator);
       cudaMemcpy(input_metadata.seqinfo.get(), context_lens.DataRaw(), context_lens.SizeInBytes(), cudaMemcpyHostToDevice);
-
-//      input_metadata.max_context_len = positions_host.back() + 1;
-
-//      int32_t block_size = gsl::narrow<int32_t>(key_cache.Shape()[3]);
-//      for (int i = 0; i < positions_host.back() + 1; i += block_size) input_metadata.max_num_blocks_per_seq++;    
   }
   input_metadata.attn_bias.q_seqinfo.seqstart = reinterpret_cast<int64_t>(input_metadata.seqinfo.get());
 
-  if (!positions.has_value()) { // TODO(leca): only generate position when cos_sin_cache is provided? As position and cos_sin_cache are only used for rotary embeding
-    std::vector<int64_t> position_ids;
-    for (int64_t i = 0; i < context_lens.NumberOfElement(); i++) {
-      int32_t seqlen_i = *(context_lens.Data()+i);
-      if (seqlen_i == 0) continue;
-      std::vector<int64_t> position_id(seqlen_i);
-      std::iota(position_id.begin(), position_id.end(), 0);   // fill position_id with [0, 1, 2, ...seqlen_i)
-      position_ids.insert(position_ids.end(), position_id.begin(), position_id.end());
-    }
-    input_metadata.position_ids = GetScratchBuffer<int64_t>(allocator->Alloc(allocator, position_ids.size()), allocator);   // TODO(leca): position_ids.size() or position_ids.size() * sizeof(int64_t)?
+  if (cos_sin_cache.has_value() && !positions.has_value()) {
+    std::vector<int32_t> position_ids;
+    if (prompt_mode) {
+      for (int64_t i = 0; i < context_lens.NumberOfElement(); i++) {
+        int32_t seqlen_i = *(context_lens.Data()+i);
+        if (seqlen_i == 0) continue;
+        std::vector<int32_t> position_id(seqlen_i);
+        std::iota(position_id.begin(), position_id.end(), 0);   // fill position_id with [0, 1, 2, ...seqlen_i)
+        position_ids.insert(position_ids.end(), position_id.begin(), position_id.end());
+      }
+    } else position_ids.assign(parameters.batch_size, 0);  // TODO(leca): Does decoding case support seqlen_knew > 1?
+  
+    input_metadata.position_ids = GetScratchBuffer<int32_t>(allocator->Alloc(allocator, position_ids.size() * sizeof(int32_t)), allocator);
     //ORTX_RETURN_IF_ERROR(CudaCall(cudaMemcpyAsync(input_metadata.position_ids.get(), position_ids.data(), position_ids.size(), cudaMemcpyHostToDevice, stream)));
-    cudaMemcpy(input_metadata.position_ids.get(), position_ids.data(), position_ids.size() * sizeof(int64_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(input_metadata.position_ids.get(), position_ids.data(), position_ids.size() * sizeof(int32_t), cudaMemcpyHostToDevice);
   }
   input_metadata.num_valid_tokens = seq_len;
 
@@ -199,13 +194,13 @@ struct PagedAttention {
                        const ortc::Tensor<T>& value, const ortc::Tensor<T>& key_cache, const ortc::Tensor<T>& value_cache,
                        const ortc::Tensor<int32_t>& block_tables, const ortc::Tensor<int32_t>& slot_mappings, 
                        const ortc::Tensor<int32_t>& context_lens, const ortc::Tensor<int32_t>& is_prompt,
-                       std::optional<const ortc::Tensor<int64_t>*> positions,
-                       std::optional<const ortc::Tensor<T>*> cos_sin_cache, ortc::Tensor<T>& attn_out) const {
+                       std::optional<const ortc::Tensor<T>*> cos_sin_cache,
+                       std::optional<const ortc::Tensor<int32_t>*> positions, ortc::Tensor<T>& attn_out) const {
     bool prompt_mode = *(is_prompt.Data()) == 1;
     InputMetadata input_metadata;
     PackedAttentionParameters parameters;
-    ORTX_RETURN_IF_ERROR(CheckInputs<T>(reinterpret_cast<cudaStream_t>(ctx->GetCudaStream()), allocator_.get(), query, key, value, 
-                         key_cache, value_cache, block_tables, slot_mappings, context_lens, positions, num_heads_, head_size_, prompt_mode, input_metadata, parameters));
+    ORTX_RETURN_IF_ERROR(CheckInputs<T>(reinterpret_cast<cudaStream_t>(ctx->GetCudaStream()), allocator_.get(), query, 
+                         context_lens, cos_sin_cache, positions, num_heads_, head_size_, prompt_mode, input_metadata, parameters));
     parameters.head_size = head_size_;
     parameters.num_heads = num_heads_;
     parameters.num_kv_heads = num_kv_heads_;
@@ -220,8 +215,8 @@ struct PagedAttention {
     if (cos_sin_cache.has_value()) {
       int64_t rot_dim = (*cos_sin_cache)->Shape()[1];
       assert(rot_dim == head_size_);
-      cuda::rotary_embedding_neox(reinterpret_cast<cudaStream_t>(ctx->GetCudaStream()), (*positions)->Data(), const_cast<void*>(query.DataRaw()), const_cast<void*>(key.DataRaw()), head_size_,
-                            (*cos_sin_cache)->DataRaw(), input_metadata.num_valid_tokens, rot_dim, num_heads_, num_kv_heads_, 1);
+      cuda::rotary_embedding_neox(reinterpret_cast<cudaStream_t>(ctx->GetCudaStream()), positions.has_value() ? (*positions)->Data() : input_metadata.position_ids.get(), 
+                                  const_cast<void*>(query.DataRaw()), const_cast<void*>(key.DataRaw()), head_size_, (*cos_sin_cache)->DataRaw(), input_metadata.num_valid_tokens, rot_dim, num_heads_, num_kv_heads_);
     }
 
     const std::vector<int64_t>& key_cache_shape = key_cache.Shape();
@@ -247,38 +242,13 @@ struct PagedAttention {
                                                            seqlen_knew, nullptr, true/*data.use_flash_attention*/, false/*data.use_memory_efficient_attention*/, true);
     UniquePtrWithDeletor<T> workspace_unique = GetScratchBuffer<T>(allocator_->Alloc(allocator_.get(), workSpaceSize), allocator_.get()); // for softmax_lse
     const cudaDeviceProp& device_prop = DeviceProp::GetCudaDeviceProp();
-    ORTX_RETURN_IF_ERROR(flash::mha_fwd_kvcache(device_prop, reinterpret_cast<cudaStream_t>(ctx->GetCudaStream()), const_cast<void*>(query.DataRaw()), const_cast<void*>(key_cache.DataRaw()),
+    return flash::mha_fwd_kvcache(device_prop, reinterpret_cast<cudaStream_t>(ctx->GetCudaStream()), const_cast<void*>(query.DataRaw()), const_cast<void*>(key_cache.DataRaw()),
                                                 const_cast<void*>(value_cache.DataRaw()), const_cast<void*>(key.DataRaw()), const_cast<void*>(value.DataRaw()), output_data,
                                                 workspace_unique.get(), reinterpret_cast<int32_t*>(input_metadata.attn_bias.q_seqinfo.seqstart), 
                                                 nullptr, nullptr, // rotary_sin and rotary_cos. TODO(leca): Do we still split the input cos_sin_cache as there is a seperate step to do rotary embedding
                                                 query_shape[0], num_heads_, num_kv_heads_, head_size_, 1 /*seqlen_q*/, seqlen_k, seqlen_knew, 1.0f/sqrt(head_size_), parameters.causal, false, true,
-                                                1 /*num_splits*/, nullptr, nullptr, -1 /*local_window_size*/, false, false, const_cast<int32_t*>(block_tables.Data()), max_num_blocks_per_seq, block_size));
+                                                1 /*num_splits*/, nullptr, nullptr, -1 /*local_window_size*/, false, false, const_cast<int32_t*>(block_tables.Data()), max_num_blocks_per_seq, block_size);
 #endif
-
-//    if (input_metadata.num_generation_tokens > 0) {
-//      constexpr int PARTITION_SIZE = 512;
-//      int max_num_partitions = (input_metadata.max_context_len + PARTITION_SIZE - 1) / PARTITION_SIZE;
-//      bool use_v1 = max_num_partitions == 1 || (query_shape[0] * query_shape[1]) > PARTITION_SIZE;
-//      int64_t generation_qeury_shape[3] = {input_metadata.num_valid_tokens, num_heads_, head_size_};
-//      if (use_v1) {
-//        cuda::paged_attention_v1(reinterpret_cast<cudaStream_t>(ctx->GetCudaStream()), reinterpret_cast<TT*>(output_data), query.DataRaw(),
-//                           key_cache.DataRaw(), value_cache.DataRaw(), head_mapping_.get(), scale_, 
-//                           block_tables.Data(), context_lens.Data(),
-//                           block_size, input_metadata.max_context_len, nullptr,
-//                           block_tables.Shape()[1], generation_qeury_shape, num_queries_per_kv_); // TODO(leca): block_tables.Shape()[1] replacing input_metadata.max_num_blocks_per_seq
-//      } else {
-//        UniquePtrWithDeletor<T> tmp_output = GetScratchBuffer<T>(allocator_->Alloc(allocator_.get(), query_shape.size() * max_num_partitions * sizeof(T)), allocator_.get());
-//        UniquePtrWithDeletor<T> exp_sums = GetScratchBuffer<T>(allocator_->Alloc(allocator_.get(), query_shape[0] * query_shape[1] * num_heads_ * max_num_partitions * sizeof(T)), allocator_.get());
-//        UniquePtrWithDeletor<T> max_logits = GetScratchBuffer<T>(allocator_->Alloc(allocator_.get(), query_shape[0] * query_shape[1] * num_heads_ * max_num_partitions * sizeof(T)), allocator_.get());
-//        cuda::paged_attention_v2(reinterpret_cast<cudaStream_t>(ctx->GetCudaStream()), exp_sums.get(), max_logits.get(), tmp_output.get(), reinterpret_cast<TT*>(output_data), query.DataRaw(),
-//                           key_cache.DataRaw(), value_cache.DataRaw(), head_mapping_.get(), scale_,
-//                           block_tables.Data(), context_lens.Data(),
-//                           block_size, input_metadata.max_context_len, nullptr,
-//                           block_tables.Shape()[1], generation_qeury_shape, num_queries_per_kv_);
-//
-//      }
-//    }
-    return nullptr;
   }
 
 private:

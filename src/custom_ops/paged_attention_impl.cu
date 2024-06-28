@@ -580,7 +580,7 @@ inline __device__ void apply_rotary_embedding(
 
 template <typename scalar_t, bool IS_NEOX>
 __global__ void rotary_embedding_kernel(
-    const int64_t* __restrict__ positions,       // [batch_size, seq_len] or [num_tokens]
+    const int32_t* __restrict__ positions,       // [batch_size, seq_len] or [num_tokens]
     scalar_t* __restrict__ query,                // [batch_size, seq_len, num_heads, head_size] or [num_tokens, num_heads, head_size]
     scalar_t* __restrict__ key,                  // [batch_size, seq_len, num_kv_heads, head_size] or [num_tokens, num_kv_heads, head_size]
     const scalar_t* __restrict__ cos_sin_cache,  // [max_position, 2, rot_dim // 2]
@@ -592,7 +592,7 @@ __global__ void rotary_embedding_kernel(
     const int head_size) {
   // Each thread block is responsible for one token.
   const int token_idx = blockIdx.x;
-  int64_t pos = positions[token_idx];
+  int32_t pos = positions[token_idx];
   const scalar_t* cache_ptr = cos_sin_cache + pos * rot_dim;
 
   const int embed_dim = rot_dim / 2;
@@ -957,7 +957,7 @@ void paged_attention_v2(
 
 void rotary_embedding_neox(
     const cudaStream_t stream,
-    const int64_t* positions,  // [num_tokens]
+    const int32_t* positions,  // [num_tokens]
     void* query,               // [num_tokens, num_heads * head_size]
     void* key,                 // [num_tokens, num_kv_heads * head_size]
     int head_size,
@@ -965,8 +965,7 @@ void rotary_embedding_neox(
     int num_tokens,
     int rot_dim,
     int num_heads,
-    int num_kv_heads,
-    int dtype) {  // TODO(leca): only implemented dtype==1 
+    int num_kv_heads) {
   const bool is_neox = true;
   int query_stride = num_heads * head_size;
   int key_stride = num_kv_heads * head_size;
@@ -975,41 +974,32 @@ void rotary_embedding_neox(
   dim3 grid(num_tokens);
   dim3 block(std::min(num_heads * rot_dim / 2, 512));
 
-  if (dtype == 0) {
-    // float
-    // CALL_KERNEL_LAUNCHER_BLOCK_SIZE(float);
-    // } else if constexpr (std::is_same_v<T, MLFloat16>) {
-  } else if (dtype == 1) {
-    // half
-    using scalar_t = half;
-    if (is_neox) {
-      vllm::rotary_embedding_kernel<scalar_t, true><<<grid, block, 0, stream>>>(
-          positions,
-          static_cast<scalar_t*>(query),
-          static_cast<scalar_t*>(key),
-          static_cast<const scalar_t*>(cos_sin_cache),
-          rot_dim,
-          query_stride,
-          key_stride,
-          num_heads,
-          num_kv_heads,
-          head_size);
-    } else {
-      vllm::rotary_embedding_kernel<scalar_t, false><<<grid, block, 0, stream>>>(
-          positions,
-          static_cast<scalar_t*>(query),
-          static_cast<scalar_t*>(key),
-          static_cast<const scalar_t*>(cos_sin_cache),
-          rot_dim,
-          query_stride,
-          key_stride,
-          num_heads,
-          num_kv_heads,
-          head_size);
-    }
-    //} else if constexpr (std::is_same_v<T, BFloat16>) {
-  } else if (dtype == 2) {
-    // CALL_KERNEL_LAUNCHER_BLOCK_SIZE(__nv_bfloat16);
+  // half
+  using scalar_t = half;
+  if (is_neox) {
+    vllm::rotary_embedding_kernel<scalar_t, true><<<grid, block, 0, stream>>>(
+        positions,
+        static_cast<scalar_t*>(query),
+        static_cast<scalar_t*>(key),
+        static_cast<const scalar_t*>(cos_sin_cache),
+        rot_dim,
+        query_stride,
+        key_stride,
+        num_heads,
+        num_kv_heads,
+        head_size);
+  } else {
+    vllm::rotary_embedding_kernel<scalar_t, false><<<grid, block, 0, stream>>>(
+        positions,
+        static_cast<scalar_t*>(query),
+        static_cast<scalar_t*>(key),
+        static_cast<const scalar_t*>(cos_sin_cache),
+        rot_dim,
+        query_stride,
+        key_stride,
+        num_heads,
+        num_kv_heads,
+        head_size);
   }
 }
 

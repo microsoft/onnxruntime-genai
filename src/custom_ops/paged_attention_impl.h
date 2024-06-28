@@ -116,7 +116,7 @@ void reshape_and_cache(
 
 void rotary_embedding_neox(
     const cudaStream_t stream,
-    const int64_t* positions,  // [num_tokens]
+    const int32_t* positions,  // [num_tokens]
     void* query,               // [num_tokens, num_heads * head_size]
     void* key,                 // [num_tokens, num_kv_heads * head_size]
     int head_size,
@@ -124,8 +124,7 @@ void rotary_embedding_neox(
     int num_tokens,
     int rot_dim,
     int num_heads,
-    int num_kv_heads,
-    int dtype);
+    int num_kv_heads);
 
 template <typename T>
 OrtStatusPtr QkvToContext(

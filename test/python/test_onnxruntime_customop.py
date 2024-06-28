@@ -106,10 +106,16 @@ def attention_ref(
         output.masked_fill_(rearrange(~query_padding_mask, "b s -> b s 1 1"), 0.0)
     return output.to(dtype=dtype_og), attention.to(dtype=dtype_og)
 
-def _create_pagedattention_test_model(batch_size, total_seqlen, hidden_size, slot_cnt_per_block, block_cnt_per_layer, block_cnt_needed_by_longest_seq, num_heads=32, num_kv_heads=32, head_size=16, scale=0.0, domain='onnx.genai'):
+def _create_pagedattention_test_model(batch_size, hidden_size, slot_cnt_per_block, block_cnt_per_layer, block_cnt_needed_by_longest_seq, num_heads=32, num_kv_heads=32, head_size=16, scale=0.0, domain='onnx.genai', cos_sin_cache=False, positions=False):
+    #pdb.set_trace()
+    inputs = ['query', 'key', 'value', 'key_cache', 'value_cache', 'block_tables', 'slot_mappings', 'context_lens', 'is_prompt']
+    if cos_sin_cache:
+        inputs += ['cos_sin_cache']
+    if positions:
+        inputs += ['positions']
     nodes = [
         helper.make_node('PagedAttention',  
-            ['query', 'key', 'value', 'key_cache', 'value_cache', 'block_tables', 'slot_mappings', 'context_lens', 'is_prompt'], 
+            inputs, 
             ['attn_out'], 
             domain=domain, num_heads=num_heads, num_kv_heads=num_kv_heads, head_size=head_size, scale=scale)
     ]
@@ -133,8 +139,18 @@ def _create_pagedattention_test_model(batch_size, total_seqlen, hidden_size, slo
         'is_prompt', onnx_proto.TensorProto.INT32, [1])
     attn_out = helper.make_tensor_value_info(
         'attn_out', onnx_proto.TensorProto.FLOAT16, [None, hidden_size])
+    graph_input = [query, key, value, key_cache, value_cache, block_tables, slot_mappings, context_lens, is_prompt]
+    if cos_sin_cache:
+        cos_sin_cache = helper.make_tensor_value_info(
+            'cos_sin_cache', onnx_proto.TensorProto.FLOAT16, [None, None])
+        graph_input += [cos_sin_cache]
+    if positions:
+        positions = helper.make_tensor_value_info(
+            'positions', onnx_proto.TensorProto.INT32, [None])
+        graph_input += [positions]
+
     graph = helper.make_graph(nodes, 'test_paged_attention', 
-                [query, key, value, key_cache, value_cache, block_tables, slot_mappings, context_lens, is_prompt], 
+                graph_input, 
                 [attn_out])
     model = make_onnx_model(graph)
     return model
@@ -142,7 +158,7 @@ def _create_pagedattention_test_model(batch_size, total_seqlen, hidden_size, slo
 def test_cuda_paged_attention3():
     so = _ort.SessionOptions()
     so.register_custom_ops_library('/home/leca/code/onnxruntime-genai/test/custom_ops/build/libgenai_custom_ops_test.so')
-    onnx_model = _create_pagedattention_test_model(3, 381, 512, 16, 32, 8)
+    onnx_model = _create_pagedattention_test_model(3, 512, 16, 32, 8)
     sess = _ort.InferenceSession(onnx_model.SerializeToString(),
                                  so,
                                  providers=['CUDAExecutionProvider'])
@@ -174,7 +190,7 @@ def test_cuda_paged_attention3():
 def test_cuda_paged_attention_prompt_decoding():
     so = _ort.SessionOptions()
     so.register_custom_ops_library('/home/leca/code/onnxruntime-genai/test/custom_ops/build/libgenai_custom_ops_test.so')
-    onnx_model = _create_pagedattention_test_model(3, 381, 512, 16, 32, 8)
+    onnx_model = _create_pagedattention_test_model(3, 512, 16, 32, 8)
     sess = _ort.InferenceSession(onnx_model.SerializeToString(),
                                  so,
                                  providers=['CUDAExecutionProvider'])
@@ -256,7 +272,7 @@ def _generate_block_kvcache(seqlen_k, paged_kv_block_size, batch_size, nheads_k,
 def test_cuda_paged_attention_decoding():
     so = _ort.SessionOptions()
     so.register_custom_ops_library('/home/leca/code/onnxruntime-genai/test/custom_ops/build/libgenai_custom_ops_test.so')
-    onnx_model = _create_pagedattention_test_model(batch_size=2, total_seqlen=0, hidden_size=96, slot_cnt_per_block=256, 
+    onnx_model = _create_pagedattention_test_model(batch_size=2, hidden_size=96, slot_cnt_per_block=256, 
                                                    block_cnt_per_layer=6, block_cnt_needed_by_longest_seq=3, num_heads=6, num_kv_heads=6, head_size=16)
     sess = _ort.InferenceSession(onnx_model.SerializeToString(),
                                  so,
@@ -306,8 +322,72 @@ def test_cuda_paged_attention_decoding():
     print(np.max(np.absolute(y_np - out_np)))
     print(np.allclose(y_np, out_np, rtol=1e-3, atol=1e-3, equal_nan=True))
 
+def test_cuda_paged_attention_prompt_rotary_embedding():
+    so = _ort.SessionOptions()
+    so.register_custom_ops_library('/home/leca/code/onnxruntime-genai/test/custom_ops/build/libgenai_custom_ops_test.so')
+    onnx_model = _create_pagedattention_test_model(batch_size=3, hidden_size=512, slot_cnt_per_block=16, block_cnt_per_layer=32, block_cnt_needed_by_longest_seq=8, cos_sin_cache=True)
+    sess = _ort.InferenceSession(onnx_model.SerializeToString(),
+                                 so,
+                                 providers=['CUDAExecutionProvider'])
+
+    query = np.random.randn(381,512).astype(np.float16) # 381 is the token num of all the sequences (127, 127, 127)
+    key = np.random.randn(381,512).astype(np.float16)
+    value = np.random.randn(381,512).astype(np.float16)
+    key_cache = np.zeros([32,8192]).astype(np.float16)
+    value_cache = np.zeros([32,8192]).astype(np.float16)
+    block_tables = np.array([[0,1,2,3,4,5,6,7],[8,9,10,11,12,13,14,15],[16,17,18,19,20,21,22,23]]).astype(np.int32) # each sequence occupies 8 blocks (127/16)
+    slot1 = np.arange(0, 127, dtype=np.int32)
+    slot2 = np.arange(128, 255, dtype=np.int32)
+    slot3 = np.arange(256, 383, dtype=np.int32)
+    slot_mappings = np.concatenate((slot1, slot2, slot3))
+    context_lens = np.array([127, 127, 127]).astype(np.int32)
+    cos_sin_cache = np.random.uniform(-1, 1, size=[np.max(context_lens), 16]).astype(np.float16)   # uniform distribution in the range [-1, 1) for cos/sin value in the size of [max_seq_len, head_size]
+    is_prompt = np.array([1]).astype(np.int32)
+    y = sess.run(None, {'query':query, 'key':key, 'value':value, 'key_cache':key_cache, 'value_cache':value_cache, 'block_tables':block_tables, 'slot_mappings':slot_mappings, 'context_lens':context_lens, 'is_prompt':is_prompt, 'cos_sin_cache':cos_sin_cache})
+    print(y)
+#    q_pt = torch.from_numpy(query.reshape(3, 127, 32, 16))
+#    k_pt = torch.from_numpy(key.reshape(3, 127, 32, 16))
+#    v_pt = torch.from_numpy(value.reshape(3, 127, 32, 16))
+#    out, attention = attention_ref(q_pt, k_pt, v_pt, causal=True, window_size=[-1, 0])
+#    y_np = np.array(y).reshape(381, 512)
+#    out_np = out.reshape(381, 512).numpy()
+#    #assert np.allclose(y_np, out_np, rtol=1e-3, atol=1e-3, equal_nan=True)
+#    print(np.allclose(y_np, out_np, rtol=1e-3, atol=1e-3, equal_nan=True))
+
+def test_cuda_paged_attention_decode_rotary_embedding():
+    so = _ort.SessionOptions()
+    so.register_custom_ops_library('/home/leca/code/onnxruntime-genai/test/custom_ops/build/libgenai_custom_ops_test.so')
+    onnx_model = _create_pagedattention_test_model(batch_size=2, hidden_size=96, slot_cnt_per_block=256, 
+                                                   block_cnt_per_layer=6, block_cnt_needed_by_longest_seq=3, num_heads=6, num_kv_heads=6, head_size=16, cos_sin_cache=True)
+    sess = _ort.InferenceSession(onnx_model.SerializeToString(),
+                                 so,
+                                 providers=['CUDAExecutionProvider'])
+
+    seqlen_k = 127
+    batch_size = 2
+    nheads = 6
+    d = 16
+    paged_kv_block_size = 256
+    
+    query = np.random.randn(batch_size, nheads*d).astype(np.float16)
+    key = np.random.randn(batch_size, nheads*d).astype(np.float16)
+    value = np.random.randn(batch_size, nheads*d).astype(np.float16)
+    key_cache_6x256x6x16 = np.random.randn(6, paged_kv_block_size, nheads, d).astype(np.float16)
+    value_cache_6x256x6x16 = np.random.randn(6, paged_kv_block_size, nheads, d).astype(np.float16)
+    key_cache = key_cache_6x256x6x16.reshape(6, paged_kv_block_size * nheads * d)
+    value_cache = value_cache_6x256x6x16.reshape(6, paged_kv_block_size * nheads * d)
+    block_tables = np.array([[2,4,1],[5,3,0]]).astype(np.int32)
+    context_lens = np.array([83,65]).astype(np.int32)
+    slot_mappings = np.array([250, 500]).astype(np.int32)
+    cos_sin_cache = np.random.uniform(-1, 1, size=[1, d]).astype(np.float16)
+    is_prompt = np.array([0]).astype(np.int32)
+    y = sess.run(None, {'query':query, 'key':key, 'value':value, 'key_cache':key_cache, 'value_cache':value_cache, 'block_tables':block_tables, 'slot_mappings':slot_mappings, 'context_lens':context_lens, 'is_prompt':is_prompt, 'cos_sin_cache':cos_sin_cache})
+    print(y)
+
 if __name__ == "__main__":
 #    test_cuda_paged_attention3()
 #    test_cuda_paged_attention_prompt_decoding()
 #    _generate_block_kvcache(127, 16, 3, 32, 16, 'cpu', torch.float16)
-    test_cuda_paged_attention_decoding()
+#    test_cuda_paged_attention_decoding()
+#    test_cuda_paged_attention_prompt_rotary_embedding()
+    test_cuda_paged_attention_decode_rotary_embedding()
