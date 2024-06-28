@@ -384,10 +384,119 @@ def test_cuda_paged_attention_decode_rotary_embedding():
     y = sess.run(None, {'query':query, 'key':key, 'value':value, 'key_cache':key_cache, 'value_cache':value_cache, 'block_tables':block_tables, 'slot_mappings':slot_mappings, 'context_lens':context_lens, 'is_prompt':is_prompt, 'cos_sin_cache':cos_sin_cache})
     print(y)
 
+def test_cuda_paged_attention_prompt_check_kvcache():
+    so = _ort.SessionOptions()
+    so.register_custom_ops_library('/home/leca/code/onnxruntime-genai/test/custom_ops/build/libgenai_custom_ops_test.so')
+    onnx_model = _create_pagedattention_test_model(batch_size=3, hidden_size=512, slot_cnt_per_block=16, block_cnt_per_layer=32, block_cnt_needed_by_longest_seq=8)
+    sess = _ort.InferenceSession(onnx_model.SerializeToString(),
+                                 so,
+                                 providers=['CUDAExecutionProvider'])
+    query = np.random.randn(381,512).astype(np.float16) # 381 is the token num of all the sequences (127, 127, 127)
+    key = np.random.randn(381,512).astype(np.float16)
+    value = np.random.randn(381,512).astype(np.float16)
+    key_cache = np.zeros([32,8192]).astype(np.float16)
+    value_cache = np.zeros([32,8192]).astype(np.float16)
+    block_tables = np.array([[0,1,2,3,4,5,6,7],[8,9,10,11,12,13,14,15],[16,17,18,19,20,21,22,23]]).astype(np.int32) # each sequence occupies 8 blocks (127/16)
+    slot1 = np.arange(0, 127, dtype=np.int32)
+    slot2 = np.arange(128, 255, dtype=np.int32)
+    slot3 = np.arange(256, 383, dtype=np.int32)
+    slot_mappings = np.concatenate((slot1, slot2, slot3))
+    context_lens = np.array([127, 127, 127]).astype(np.int32)
+    is_prompt = np.array([1]).astype(np.int32)
+
+    key_cache_ort = _ort.OrtValue.ortvalue_from_numpy(key_cache, "cuda")
+    value_cache_ort = _ort.OrtValue.ortvalue_from_numpy(value_cache, "cuda")
+    block_tables_ort = _ort.OrtValue.ortvalue_from_numpy(block_tables, "cuda")
+    slot_mappings_ort = _ort.OrtValue.ortvalue_from_numpy(slot_mappings, "cuda")
+    context_lens_ort = _ort.OrtValue.ortvalue_from_numpy(context_lens)
+    is_prompt_ort = _ort.OrtValue.ortvalue_from_numpy(is_prompt)
+
+    # prompt case
+    io_binding = sess.io_binding()
+    io_binding.bind_cpu_input("query", query)
+    io_binding.bind_cpu_input("key", key)
+    io_binding.bind_cpu_input("value", value)
+    io_binding.bind_ortvalue_input("key_cache", key_cache_ort)
+    io_binding.bind_ortvalue_input("value_cache", value_cache_ort)
+    io_binding.bind_ortvalue_input("block_tables", block_tables_ort)
+    io_binding.bind_ortvalue_input("slot_mappings", slot_mappings_ort)
+    io_binding.bind_ortvalue_input("context_lens", context_lens_ort)
+    io_binding.bind_ortvalue_input("is_prompt", is_prompt_ort)
+    io_binding.bind_output("attn_out")
+    sess.run_with_iobinding(io_binding)    
+    key_cache_np = key_cache_ort.numpy()
+    value_cache_np = value_cache_ort.numpy()
+    for token_idx in range(key.shape[0]):
+        slot_idx = slot_mappings[token_idx]
+        block_idx = slot_idx // 16 # slot_cnt_per_block
+        block_offset = slot_idx % 16 # slot_cnt_per_block
+        for embed_idx in range(key.shape[1]):
+            if np.abs(key[token_idx][embed_idx] - key_cache_np[block_idx][block_offset * 512 + embed_idx]) > 0.001:
+                print("key value diff!")
+            if np.abs(value[token_idx][embed_idx] - value_cache_np[block_idx][block_offset * 512 + embed_idx]) > 0.001:
+                print("value value diff")
+
+def test_cuda_paged_attention_decoding_check_kvcache():
+    so = _ort.SessionOptions()
+    so.register_custom_ops_library('/home/leca/code/onnxruntime-genai/test/custom_ops/build/libgenai_custom_ops_test.so')
+    onnx_model = _create_pagedattention_test_model(batch_size=2, hidden_size=96, slot_cnt_per_block=256, 
+                                                   block_cnt_per_layer=6, block_cnt_needed_by_longest_seq=3, num_heads=6, num_kv_heads=6, head_size=16)
+    sess = _ort.InferenceSession(onnx_model.SerializeToString(),
+                                 so,
+                                 providers=['CUDAExecutionProvider'])
+
+    seqlen_k = 127
+    batch_size = 2
+    nheads = 6
+    d = 16
+    paged_kv_block_size = 256
+    
+    query = np.random.randn(batch_size, nheads*d).astype(np.float16)
+    key = np.random.randn(batch_size, nheads*d).astype(np.float16)
+    value = np.random.randn(batch_size, nheads*d).astype(np.float16)
+    key_cache_6x256x6x16 = np.random.randn(6, paged_kv_block_size, nheads, d).astype(np.float16)
+    value_cache_6x256x6x16 = np.random.randn(6, paged_kv_block_size, nheads, d).astype(np.float16)
+    key_cache = key_cache_6x256x6x16.reshape(6, paged_kv_block_size * nheads * d)
+    value_cache = value_cache_6x256x6x16.reshape(6, paged_kv_block_size * nheads * d)
+    block_tables = np.array([[2,4,1],[5,3,0]]).astype(np.int32)
+    context_lens = np.array([83,65]).astype(np.int32)
+    slot_mappings = np.array([257, 250]).astype(np.int32)
+    is_prompt = np.array([0]).astype(np.int32)
+
+    key_cache_ort = _ort.OrtValue.ortvalue_from_numpy(key_cache, "cuda")
+    value_cache_ort = _ort.OrtValue.ortvalue_from_numpy(value_cache, "cuda")
+
+    io_binding = sess.io_binding()
+    io_binding.bind_cpu_input("query", query)
+    io_binding.bind_cpu_input("key", key)
+    io_binding.bind_cpu_input("value", value)
+    io_binding.bind_ortvalue_input("key_cache", key_cache_ort)
+    io_binding.bind_ortvalue_input("value_cache", value_cache_ort)
+    io_binding.bind_cpu_input("block_tables", block_tables)
+    io_binding.bind_cpu_input("slot_mappings", slot_mappings)
+    io_binding.bind_cpu_input("context_lens", context_lens)
+    io_binding.bind_cpu_input("is_prompt", is_prompt)
+    io_binding.bind_output("attn_out")
+    sess.run_with_iobinding(io_binding)
+    key_cache_np = key_cache_ort.numpy()
+    value_cache_np = value_cache_ort.numpy()
+        
+    for token_idx in range(key.shape[0]):
+        slot_idx = slot_mappings[token_idx]
+        block_idx = slot_idx // paged_kv_block_size
+        block_offset = slot_idx % paged_kv_block_size
+        for embed_idx in range(key.shape[1]):
+            if np.abs(key[token_idx][embed_idx] - key_cache_np[block_idx][block_offset * nheads * d + embed_idx]) > 0.001:
+                print("key value diff!")
+            if np.abs(value[token_idx][embed_idx] - value_cache_np[block_idx][block_offset * nheads * d + embed_idx]) > 0.001:
+                print("value value diff!")
+
 if __name__ == "__main__":
 #    test_cuda_paged_attention3()
 #    test_cuda_paged_attention_prompt_decoding()
 #    _generate_block_kvcache(127, 16, 3, 32, 16, 'cpu', torch.float16)
 #    test_cuda_paged_attention_decoding()
 #    test_cuda_paged_attention_prompt_rotary_embedding()
-    test_cuda_paged_attention_decode_rotary_embedding()
+#    test_cuda_paged_attention_decode_rotary_embedding()
+#    test_cuda_paged_attention_prompt_check_kvcache()
+    test_cuda_paged_attention_decoding_check_kvcache()
