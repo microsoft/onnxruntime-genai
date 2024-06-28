@@ -8,7 +8,6 @@
 #include <array>
 #include <stdexcept>
 #include <vector>
-#include <initializer_list>
 
 namespace std {
 namespace generators_span {
