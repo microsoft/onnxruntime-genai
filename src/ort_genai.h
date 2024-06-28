@@ -5,6 +5,7 @@
 
 #include <memory>
 #include <stdexcept>
+#include <string_view>
 #include <vector>
 
 #if __cplusplus >= 202002L
@@ -70,6 +71,43 @@ struct OgaModel : OgaAbstract {
     OgaSequences* p;
     OgaCheckResult(OgaGenerate(this, &params, &p));
     return std::unique_ptr<OgaSequences>(p);
+  }
+
+  void CreateLoraAdapter(std::string_view adapter_name) {
+     OgaCheckResult(OgaCreateLoraAdapter(this, adapter_name.data()));
+  }
+
+  void AddLoraAdapterParameter(std::string_view adapter_name, std::string_view param_name, OgaTensor& tensor) {
+    OgaCheckResult(OgaModelAddLoraParameter(this, adapter_name.data(), param_name.data(), &tensor));
+  }
+
+  void ActiveLoraAdapters(const char** adapter_names, size_t num_names) {
+    OgaCheckResult(OgaModelActivateLoraAdapters(this, adapter_names, num_names));
+  }
+
+  std::vector<std::string> GetActiveAdapterNames() { 
+    std::vector<std::string> result;
+    size_t count = 0;
+    OgaCheckResult(OgaModelGetActiveLoraAdaptersCount(this, &count));
+    if (count == 0) return result;
+
+    std::vector<const char*> buffer;
+    buffer.reserve(count);
+    OgaCheckResult(OgaModelGetActiveLoraAdapters(this, buffer.data(), &count));
+
+    result.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+      result.emplace_back(buffer[i]);
+    }
+    return result;
+  }
+
+  void DeactivateAllLoraAdapters() { 
+    OgaCheckResult(OgaModelDeactivateAllLoraAdapters(this));
+  }
+
+  void RemoveLoraAdapter(std::string_view adapter_name) {
+     OgaCheckResult(OgaRemoveLoraAdapter(this, adapter_name.data()));
   }
 
   static void operator delete(void* p) { OgaDestroyModel(reinterpret_cast<OgaModel*>(p)); }

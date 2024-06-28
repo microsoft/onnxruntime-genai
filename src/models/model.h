@@ -121,7 +121,9 @@ struct Model : std::enable_shared_from_this<Model> {
 
   CapturedGraphPool* GetCapturedGraphPool() const { return captured_graph_pool_.get(); }
 
-  LoraAdapaterManagement& GetLoraAdapterManagement() noexcept { return lora_adapters_; }
+  LoraAdapterManagement& GetLoraAdapterManagement() noexcept { return lora_adapters_; }
+
+  const LoraAdapterManagement& GetLoraAdapterManagement() const noexcept { return lora_adapters_; }
 
   /// <summary>
   /// Returns device allocator or cpu allocator dedeuced based on the device type
@@ -171,7 +173,7 @@ struct Model : std::enable_shared_from_this<Model> {
 #endif
 
   std::shared_ptr<CapturedGraphPool> captured_graph_pool_;
-  LoraAdapaterManagement lora_adapters_;
+  LoraAdapterManagement lora_adapters_;
 };
 
 }  // namespace Generators

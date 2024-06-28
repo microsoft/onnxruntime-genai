@@ -28,9 +28,7 @@ extern "C" {
     return reinterpret_cast<OgaResult*>(std::make_unique<Generators::Result>(e.what()).release()); \
   }
 
-void OGA_API_CALL OgaShutdown() {
-  Generators::Shutdown();
-}
+void OGA_API_CALL OgaShutdown() { Generators::Shutdown(); }
 
 const char* OGA_API_CALL OgaResultGetError(const OgaResult* result) {
   return reinterpret_cast<const Generators::Result*>(result)->what_.c_str();
@@ -103,21 +101,58 @@ OgaResult* OGA_API_CALL OgaCreateLoraAdapter(OgaModel* model, const char* adapte
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaActivateLoraAdapter(OgaModel* mode, const char* adapter_name) {
+OgaResult* OGA_API_CALL OgaModelAddLoraParameter(OgaModel* model, const char* adapter_name, const char* param_name,
+                                                 const OgaTensor* tensor) {
   OGA_TRY
-  auto& lora_management = reinterpret_cast<Generators::Model*>(mode)->GetLoraAdapterManagement();
-  lora_management.ActivateAdapter(adapter_name);
+  auto& lora_management = reinterpret_cast<Generators::Model*>(model)->GetLoraAdapterManagement();
+  lora_management.AddParameter(
+      adapter_name, param_name,
+      const_cast<Generators::Tensor*>(reinterpret_cast<const Generators::Tensor*>(tensor))->shared_from_this());
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaDectivateLoraAdapter(OgaModel* model, const char* adapter_name) {
+OgaResult* OGA_API_CALL OgaModelActivateLoraAdapters(OgaModel* model, const char* adapter_names[],
+                                                     size_t num_adapters) {
   OGA_TRY
   auto& lora_management = reinterpret_cast<Generators::Model*>(model)->GetLoraAdapterManagement();
-  lora_management.DeactiveAdapter(adapter_name);
+  std::vector<std::string> names;
+  names.reserve(num_adapters);
+  for (size_t i = 0; i < num_adapters; i++) names.push_back(adapter_names[i]);
+  lora_management.ActivateAdapters(names);
   return nullptr;
   OGA_CATCH
 }
+
+OgaResult* OGA_API_CALL OgaModelDeactivateAllLoraAdapters(OgaModel* model) {
+  OGA_TRY
+  auto& lora_management = reinterpret_cast<Generators::Model*>(model)->GetLoraAdapterManagement();
+  lora_management.DeactiveAllAdapters();
+  return nullptr;
+  OGA_CATCH
+}
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelGetActiveLoraAdaptersCount(const OgaModel* model, size_t* adapter_count) {
+  OGA_TRY
+  auto& lora_management = reinterpret_cast<const Generators::Model*>(model)->GetLoraAdapterManagement();
+  auto names = lora_management.GetActiveAdapterNames();
+  *adapter_count = names.size();
+  return nullptr;
+  OGA_CATCH
+}
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelGetActiveLoraAdapters(const OgaModel* model, const char* adapter_names[],
+                                                                 size_t* names_num) {
+  OGA_TRY
+  auto& lora_management = reinterpret_cast<const Generators::Model*>(model)->GetLoraAdapterManagement();
+  auto names = lora_management.GetActiveAdapterNames();
+  const auto returned_count = std::min(names.size(), *names_num);
+  for (size_t i = 0; i < returned_count; i++) adapter_names[i] = names[i].data();
+  *names_num = returned_count;
+  return nullptr;
+  OGA_CATCH
+}
+
 
 OgaResult* OGA_API_CALL OgaRemoveLoraAdapter(OgaModel* model, const char* adapter_name) {
   OGA_TRY
@@ -127,30 +162,24 @@ OgaResult* OGA_API_CALL OgaRemoveLoraAdapter(OgaModel* model, const char* adapte
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaModelAddLoraParameter(OgaModel* model, const char* adapter_name, const char* param_name, const OgaTensor* tensor) {
-  OGA_TRY
-  auto& lora_management = reinterpret_cast<Generators::Model*>(model)->GetLoraAdapterManagement();
-  lora_management.AddParameter(adapter_name, param_name, 
-    const_cast<Generators::Tensor*>(reinterpret_cast<const Generators::Tensor*>(tensor))->shared_from_this());
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchNumber(OgaGeneratorParams* generator_params, const char* name, double value) {
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchNumber(OgaGeneratorParams* generator_params, const char* name,
+                                                          double value) {
   OGA_TRY
   Generators::SetSearchNumber(reinterpret_cast<Generators::GeneratorParams*>(generator_params)->search, name, value);
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* generator_params, const char* name, bool value) {
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* generator_params, const char* name,
+                                                        bool value) {
   OGA_TRY
   Generators::SetSearchBool(reinterpret_cast<Generators::GeneratorParams*>(generator_params)->search, name, value);
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGeneratorParams* generator_params, int32_t max_batch_size) {
+OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGeneratorParams* generator_params,
+                                                                          int32_t max_batch_size) {
   OGA_TRY
   auto* params = reinterpret_cast<Generators::GeneratorParams*>(generator_params);
   params->TryGraphCapture(max_batch_size);
@@ -158,7 +187,9 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGen
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputIDs(OgaGeneratorParams* oga_params, const int32_t* input_ids, size_t input_ids_count, size_t sequence_length, size_t batch_size) {
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputIDs(OgaGeneratorParams* oga_params, const int32_t* input_ids,
+                                                      size_t input_ids_count, size_t sequence_length,
+                                                      size_t batch_size) {
   OGA_TRY
   auto& params = *reinterpret_cast<Generators::GeneratorParams*>(oga_params);
   params.input_ids = std::span<const int32_t>(input_ids, input_ids_count);
@@ -170,7 +201,8 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputIDs(OgaGeneratorParams* oga_pa
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputSequences(OgaGeneratorParams* oga_params, const OgaSequences* p_sequences) {
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputSequences(OgaGeneratorParams* oga_params,
+                                                            const OgaSequences* p_sequences) {
   OGA_TRY
   auto& params = *reinterpret_cast<Generators::GeneratorParams*>(oga_params);
   auto& sequences = *reinterpret_cast<const Generators::TokenSequences*>(p_sequences);
@@ -188,7 +220,8 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputSequences(OgaGeneratorParams* 
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputs(OgaGeneratorParams* oga_params, const OgaNamedTensors* p_named_tensors) {
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputs(OgaGeneratorParams* oga_params,
+                                                    const OgaNamedTensors* p_named_tensors) {
   OGA_TRY
   auto& params = *reinterpret_cast<Generators::GeneratorParams*>(oga_params);
   auto& named_tensors = *reinterpret_cast<const Generators::NamedTensors*>(p_named_tensors);
@@ -199,7 +232,8 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputs(OgaGeneratorParams* oga_para
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGeneratorParamsSetModelInput(OgaGeneratorParams* oga_params, const char* name, OgaTensor* tensor) {
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetModelInput(OgaGeneratorParams* oga_params, const char* name,
+                                                        OgaTensor* tensor) {
   OGA_TRY
   auto& params = *reinterpret_cast<Generators::GeneratorParams*>(oga_params);
   params.extra_inputs.push_back({std::string{name}, reinterpret_cast<Generators::Tensor*>(tensor)->shared_from_this()});
@@ -216,9 +250,11 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperInputFeatures(OgaGeneratorPa
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGenerate(const OgaModel* model, const OgaGeneratorParams* generator_params, OgaSequences** out) {
+OgaResult* OGA_API_CALL OgaGenerate(const OgaModel* model, const OgaGeneratorParams* generator_params,
+                                    OgaSequences** out) {
   OGA_TRY
-  auto result = Generators::Generate(*reinterpret_cast<const Generators::Model*>(model), *reinterpret_cast<const Generators::GeneratorParams*>(generator_params));
+  auto result = Generators::Generate(*reinterpret_cast<const Generators::Model*>(model),
+                                     *reinterpret_cast<const Generators::GeneratorParams*>(generator_params));
   *out = reinterpret_cast<OgaSequences*>(std::make_unique<Generators::TokenSequences>(std::move(result)).release());
   return nullptr;
   OGA_CATCH
@@ -226,7 +262,10 @@ OgaResult* OGA_API_CALL OgaGenerate(const OgaModel* model, const OgaGeneratorPar
 
 OgaResult* OgaCreateGenerator(const OgaModel* model, const OgaGeneratorParams* generator_params, OgaGenerator** out) {
   OGA_TRY
-  *out = reinterpret_cast<OgaGenerator*>(CreateGenerator(*reinterpret_cast<const Generators::Model*>(model), *reinterpret_cast<const Generators::GeneratorParams*>(generator_params)).release());
+  *out = reinterpret_cast<OgaGenerator*>(
+      CreateGenerator(*reinterpret_cast<const Generators::Model*>(model),
+                      *reinterpret_cast<const Generators::GeneratorParams*>(generator_params))
+          .release());
   return nullptr;
   OGA_CATCH
 }
@@ -277,7 +316,8 @@ OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer* p, const char* st
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer* p, const int32_t* tokens, size_t token_count, const char** out_string) {
+OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer* p, const int32_t* tokens, size_t token_count,
+                                           const char** out_string) {
   OGA_TRY
   auto& tokenizer = *reinterpret_cast<const Generators::Tokenizer*>(p);
 
@@ -295,7 +335,8 @@ OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer* p, const int32_t*
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaProcessorDecode(const OgaMultiModalProcessor* p, const int32_t* tokens, size_t token_count, const char** out_string) {
+OgaResult* OGA_API_CALL OgaProcessorDecode(const OgaMultiModalProcessor* p, const int32_t* tokens, size_t token_count,
+                                           const char** out_string) {
   OGA_TRY
   auto& processor = *reinterpret_cast<const Generators::MultiModalProcessor*>(p);
 
@@ -315,18 +356,17 @@ OgaResult* OGA_API_CALL OgaProcessorDecode(const OgaMultiModalProcessor* p, cons
 
 OgaResult* OGA_API_CALL OgaCreateTokenizerStream(const OgaTokenizer* p, OgaTokenizerStream** out) {
   OGA_TRY
-  *out = reinterpret_cast<OgaTokenizerStream*>(reinterpret_cast<const Generators::Tokenizer*>(p)->CreateStream().release());
+  *out = reinterpret_cast<OgaTokenizerStream*>(
+      reinterpret_cast<const Generators::Tokenizer*>(p)->CreateStream().release());
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaCreateTokenizerStreamFromProcessor(const OgaMultiModalProcessor* p, OgaTokenizerStream** out) {
+OgaResult* OGA_API_CALL OgaCreateTokenizerStreamFromProcessor(const OgaMultiModalProcessor* p,
+                                                              OgaTokenizerStream** out) {
   OGA_TRY
   *out = reinterpret_cast<OgaTokenizerStream*>(
-      reinterpret_cast<const Generators::MultiModalProcessor*>(
-          p)
-          ->tokenizer_->CreateStream()
-          .release());
+      reinterpret_cast<const Generators::MultiModalProcessor*>(p)->tokenizer_->CreateStream().release());
   return nullptr;
   OGA_CATCH
 }
@@ -338,15 +378,16 @@ OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream* p, int32_t 
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaCreateTensorFromBuffer(void* data, const int64_t* shape_dims, size_t shape_dims_count, OgaElementType element_type, OgaTensor** out) {
+OgaResult* OGA_API_CALL OgaCreateTensorFromBuffer(void* data, const int64_t* shape_dims, size_t shape_dims_count,
+                                                  OgaElementType element_type, OgaTensor** out) {
   OGA_TRY
   auto tensor = std::make_shared<Generators::Tensor>();
   auto p_memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
   auto ort_element_type = static_cast<ONNXTensorElementDataType>(element_type);
   size_t byte_count = Generators::SizeOf(ort_element_type);
-  for (size_t i = 0; i < shape_dims_count; i++)
-    byte_count *= shape_dims[i];
-  tensor->ort_tensor_ = OrtValue::CreateTensor(*p_memory_info, data, byte_count, std::span<const int64_t>{shape_dims, shape_dims_count}, ort_element_type);
+  for (size_t i = 0; i < shape_dims_count; i++) byte_count *= shape_dims[i];
+  tensor->ort_tensor_ = OrtValue::CreateTensor(
+      *p_memory_info, data, byte_count, std::span<const int64_t>{shape_dims, shape_dims_count}, ort_element_type);
   tensor->external_owner_ = tensor;
   *out = reinterpret_cast<OgaTensor*>(tensor.get());
   return nullptr;
@@ -355,7 +396,8 @@ OgaResult* OGA_API_CALL OgaCreateTensorFromBuffer(void* data, const int64_t* sha
 
 OgaResult* OGA_API_CALL OgaTensorGetType(OgaTensor* tensor, OgaElementType* out) {
   OGA_TRY
-  *out = static_cast<OgaElementType>(reinterpret_cast<Generators::Tensor*>(tensor)->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementType());
+  *out = static_cast<OgaElementType>(
+      reinterpret_cast<Generators::Tensor*>(tensor)->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementType());
   return nullptr;
   OGA_CATCH
 }
@@ -370,8 +412,7 @@ OgaResult* OGA_API_CALL OgaTensorGetShapeRank(OgaTensor* tensor, size_t* out) {
 OgaResult* OGA_API_CALL OgaTensorGetShape(OgaTensor* tensor, int64_t* shape_dims, size_t rank) {
   OGA_TRY
   auto shape = reinterpret_cast<Generators::Tensor*>(tensor)->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape();
-  if (rank != shape.size())
-    throw std::runtime_error("shape_dims_count doesn't match result of OgaTensorGetShapeRank");
+  if (rank != shape.size()) throw std::runtime_error("shape_dims_count doesn't match result of OgaTensorGetShapeRank");
   std::copy(shape.begin(), shape.end(), shape_dims);
   return nullptr;
   OGA_CATCH
@@ -407,7 +448,8 @@ OgaResult* OGA_API_CALL OgaCreateMultiModalProcessor(const OgaModel* model, OgaM
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor* p, const char* prompt, const OgaImages* images_p, OgaNamedTensors** input_tensors) {
+OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor* p, const char* prompt,
+                                                  const OgaImages* images_p, OgaNamedTensors** input_tensors) {
   OGA_TRY
   auto& processor = *reinterpret_cast<const Generators::MultiModalProcessor*>(p);
   auto* images = images_p ? reinterpret_cast<const Generators::Images*>(images_p) : nullptr;
@@ -417,29 +459,19 @@ OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor* 
   OGA_CATCH
 }
 
-void OGA_API_CALL OgaDestroyResult(OgaResult* p) {
-  delete reinterpret_cast<Generators::Result*>(p);
-}
+void OGA_API_CALL OgaDestroyResult(OgaResult* p) { delete reinterpret_cast<Generators::Result*>(p); }
 
-void OGA_API_CALL OgaDestroyString(const char* p) {
-  delete p;
-}
+void OGA_API_CALL OgaDestroyString(const char* p) { delete p; }
 
-void OGA_API_CALL OgaDestroySequences(OgaSequences* p) {
-  delete reinterpret_cast<Generators::Sequences*>(p);
-}
+void OGA_API_CALL OgaDestroySequences(OgaSequences* p) { delete reinterpret_cast<Generators::Sequences*>(p); }
 
-void OGA_API_CALL OgaDestroyModel(OgaModel* p) {
-  reinterpret_cast<Generators::Model*>(p)->external_owner_ = nullptr;
-}
+void OGA_API_CALL OgaDestroyModel(OgaModel* p) { reinterpret_cast<Generators::Model*>(p)->external_owner_ = nullptr; }
 
 void OGA_API_CALL OgaDestroyGeneratorParams(OgaGeneratorParams* p) {
   reinterpret_cast<Generators::GeneratorParams*>(p)->external_owner_ = nullptr;
 }
 
-void OGA_API_CALL OgaDestroyGenerator(OgaGenerator* p) {
-  delete reinterpret_cast<Generators::Generator*>(p);
-}
+void OGA_API_CALL OgaDestroyGenerator(OgaGenerator* p) { delete reinterpret_cast<Generators::Generator*>(p); }
 
 void OGA_API_CALL OgaDestroyTokenizer(OgaTokenizer* p) {
   reinterpret_cast<Generators::Tokenizer*>(p)->external_owner_ = nullptr;
@@ -457,11 +489,7 @@ void OGA_API_CALL OgaDestroyMultiModalProcessor(OgaMultiModalProcessor* p) {
   reinterpret_cast<Generators::MultiModalProcessor*>(p)->external_owner_ = nullptr;
 }
 
-void OGA_API_CALL OgaDestroyImages(OgaImages* p) {
-  delete reinterpret_cast<Generators::Images*>(p);
-}
+void OGA_API_CALL OgaDestroyImages(OgaImages* p) { delete reinterpret_cast<Generators::Images*>(p); }
 
-void OGA_API_CALL OgaDestroyNamedTensors(OgaNamedTensors* p) {
-  delete reinterpret_cast<Generators::NamedTensors*>(p);
-}
+void OGA_API_CALL OgaDestroyNamedTensors(OgaNamedTensors* p) { delete reinterpret_cast<Generators::NamedTensors*>(p); }
 }

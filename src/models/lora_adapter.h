@@ -30,9 +30,7 @@ struct LoraParam : public GeneratorParams::Input {
   }
 };
 
-std::string LoraCacheKey(std::string_view adapter_name, std::string param_name);
-
-static std::shared_ptr<OrtValue> CreateEmptyInput(ONNXTensorElementDataType type);
+// std::string LoraCacheKey(std::string_view adapter_name, std::string param_name);
 
 /// <summary>
 /// This class represents a collection of named pairs of
@@ -72,9 +70,10 @@ class LoraAdapter {
     // Make sure data is copied to devices as needed
   }
 
-  void Deactivate() {
-    active_ = false;
-  }
+  /// <summary>
+  /// Deactivates the adapter.
+  /// </summary>
+  void Deactivate() { active_ = false; }
 
   /// <summary>
   /// Add Lora Parameter to the adapter
@@ -82,14 +81,13 @@ class LoraAdapter {
   /// <param name="parameter"></param>
   void AddParameter(std::string param_name, std::shared_ptr<Tensor> tensor) {
     LoraParam param{param_name, std::move(tensor)};
-    auto p = parameters_.emplace(std::move(param_name), param);
+    auto p = parameters_.emplace(std::move(param_name), std::move(param));
     if (!p.second) {
       throw std::runtime_error("Adapter: " + name_ + " already has a parameter named: " + param_name);
     }
   }
 
  private:
-
   std::string name_;
   std::unordered_map<std::string, LoraParam> parameters_;
   bool active_{false};
@@ -100,12 +98,12 @@ class LoraAdapter {
 /// <summary>
 /// This class manages the collection of Lora Adapaters
 /// </summary>
-class LoraAdapaterManagement {
+class LoraAdapterManagement {
  public:
-  LoraAdapaterManagement() = default;
-  ~LoraAdapaterManagement() = default;
-  LoraAdapaterManagement(const LoraAdapaterManagement&) = delete;
-  LoraAdapaterManagement& operator=(const LoraAdapaterManagement&) = delete;
+  LoraAdapterManagement();
+  ~LoraAdapterManagement() = default;
+  LoraAdapterManagement(const LoraAdapterManagement&) = delete;
+  LoraAdapterManagement& operator=(const LoraAdapterManagement&) = delete;
 
   /// <summary>
   /// Creates a adapter object to which one can add Lora parameters
@@ -129,19 +127,58 @@ class LoraAdapaterManagement {
   void RemoveAdapter(const std::string& adapter_name);
 
   /// <summary>
-  /// Activate specific adapter. More than one adapter can be active at the same time.
-  /// Except for the base scenario.
+  /// Activate one or more adapter(s). If any of the adapters are already active, an exception is thrown
+  /// and no adapters are activated.
   /// </summary>
-  /// <param name="adapter_name"></param>
-  void ActivateAdapter(const std::string& adapter_name);
+  /// <param name="adapter_names">adapters to activate</param>
+  void ActivateAdapters(std::span<const std::string> adapter_names);
 
   /// <summary>
-  /// Deactivates the adapter
+  /// Deactivates one or more adapter(s) that active.
+  /// No error is reported.
   /// </summary>
-  /// <param name="adapter_name"></param>
-  void DeactiveAdapter(const std::string& adapter_name);
+  /// <param name="adapter_names">adapters to deactivate</param>
+  void DeactiveAllAdapters();
+
+  /// <summary>
+  /// Retrieves names of all active adapters
+  /// </summary>
+  /// <returns>a vector of string views</returns>
+  std::vector<std::string_view> GetActiveAdapterNames() const;
+
+  /// <summary>
+  /// Outputs pointers to names and its corresponding OrtValue params
+  /// for all active adapters.
+  /// </summary>
+  /// <typeparam name="NamesOutputIter"></typeparam>
+  /// <typeparam name="OrtValueOutputIter"></typeparam>
+  /// <param name="names_out">Output Iterator for param C strings</param>
+  /// <param name="ort_values_out">Output Iterator for param OrtValue ptr</param>
+  template <class NamesOutputIter, class OrtValueOutputIter>
+  void OutputAdaptersParameters(NamesOutputIter names_out, OrtValueOutputIter ort_values_out) const {
+    for (const auto& [_, adapter] : adapters_) {
+      /// XXX: We need to generate empty inputs for inactive adapters,
+      // but for that we need different shapes for A and B. And the user would
+      // have to tell us that.
+      // the adapter dimensions (without batch) are
+      // [ hidden_dim, lora_r ] and [ lora_r, hidden_dim ].
+      // the shape we would pass would have Non -
+      // zero hidden_dim which is already a static value.lora_r would be 0
+      if (adapter.IsActive()) {
+        for (const auto& [name, param] : adapter.parameters_) {
+          *names_out = name.c_str();
+          ++names_out;
+          // XXX: This would have to come from cache when we implement one.
+          *ort_values_out = param.tensor->ort_tensor_;
+          ++ort_values_out;
+        }
+      }
+    }
+  }
 
  private:
+
+  std::shared_ptr<Tensor> CreateEmptyInput(const Tensor& tensor);
 
   using AdapterMap = std::unordered_map<std::string, details::LoraAdapter>;
   AdapterMap adapters_;

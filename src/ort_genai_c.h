@@ -110,9 +110,11 @@ OGA_EXPORT size_t OGA_API_CALL OgaSequencesGetSequenceCount(const OgaSequences* 
  * \brief Returns a pointer to the sequence data at the given index. The number of tokens in the sequence
  *        is given by OgaSequencesGetSequenceCount
  * \param[in] sequences
- * \return The pointer to the sequence data at the given index. The pointer is valid until the OgaSequences is destroyed.
+ * \return The pointer to the sequence data at the given index. The pointer is valid until the OgaSequences is
+ * destroyed.
  */
-OGA_EXPORT const int32_t* OGA_API_CALL OgaSequencesGetSequenceData(const OgaSequences* sequences, size_t sequence_index);
+OGA_EXPORT const int32_t* OGA_API_CALL OgaSequencesGetSequenceData(const OgaSequences* sequences,
+                                                                   size_t sequence_index);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadImage(const char* image_path, OgaImages** images);
 
@@ -137,11 +139,12 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyModel(OgaModel* model);
  * \brief Generates an array of token arrays from the model execution based on the given generator params.
  * \param[in] model The model to use for generation.
  * \param[in] generator_params The parameters to use for generation.
- * \param[out] out The generated sequences of tokens. The caller is responsible for freeing the sequences using OgaDestroySequences
- *             after it is done using the sequences.
- * \return OgaResult containing the error message if the generation failed.
+ * \param[out] out The generated sequences of tokens. The caller is responsible for freeing the sequences using
+ * OgaDestroySequences after it is done using the sequences. \return OgaResult containing the error message if the
+ * generation failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerate(const OgaModel* model, const OgaGeneratorParams* generator_params, OgaSequences** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerate(const OgaModel* model, const OgaGeneratorParams* generator_params,
+                                               OgaSequences** out);
 
 /*
  * \brief Creates a OgaGeneratorParams from the given model.
@@ -161,24 +164,59 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateGeneratorParams(const OgaModel* mode
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateLoraAdapter(OgaModel* model, const char* adapter_name);
 
 /*
- * \brief Activates Lora Adapter previously created within a given model. Once
- *        Activated, no more parameters can be added to the adapter.
- *        When no Lora Adapters are active, GenAI would run inference with base weights.
- * \param[in] model The model to which the adapter belongs
- * \param[in] adapter_name to be activated
- * \return OgaResult containing the error message if the adapter creation failed.
+ * \brief Adds a named LoraParameter.
+ * \param[in] model where the adapter is defined
+ * \param[in] adapter_name the adapter to which the parameter is added
+ * \param[in] param_name parameter name
+ * \param[in] tensor Lora parameter data
+ * \return OgaResult containing the error message.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaActivateLoraAdapter(OgaModel* model, const char* adapter_name);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelAddLoraParameter(OgaModel* model, const char* adapter_name,
+                                                            const char* param_name, const OgaTensor* tensor);
 
 /*
- * \brief Deactivates Lora Adapter previously activated within a given model. Once
- *        deactivated, it would no longer participate in inference.
+ * \brief Activates Lora Adapter previously created within a given model. Once
+ *        activated, no more parameters can be added to the adapter.
  *        When no Lora Adapters are active, GenAI would run inference with base weights.
  * \param[in] model The model to which the adapter belongs
- * \param[in] adapter_name to be deactivated
- * \return OgaResult containing the error message if the adapter creation failed.
+ * \param[in] adapter_names array of zero terminated UTF-8 encoded strings.
+ * \param[in] num_adapters number of names in adapter_names array.
+ * \return OgaResult containing error message. If any of the specified adapters do not exist or
+ *         already active, the error message would contain the name of the adapter and the call has no effect.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaDectivateLoraAdapter(OgaModel* model, const char* adapter_name);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelActivateLoraAdapters(OgaModel* model, const char* adapter_names[],
+                                                                size_t num_adapters);
+
+/*
+ * \brief Deactivates one or more Lora Adapter previously activated within a given model. Once
+ *        deactivated, it would no longer participate in inference.
+ * \param[in] model The model to which the adapter belongs
+ * \return OgaResult containing the error message.
+ */
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelDeactivateAllLoraAdapters(OgaModel* model);
+
+
+/*
+ * \brief Returns a  number of currently active adapters
+ * \param[in] model The model
+ * \param[in,out] names_num - currently active adapter count
+ * \return OgaResult containing the error message.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelGetActiveLoraAdaptersCount(const OgaModel* model, size_t* adapter_count);
+
+/*
+ * \brief Returns an array of pointers to internal names of active Lora Adapters.
+ * \param[in] model The model to which the adapter belongs
+ * \param[in,out] adapter_names - pre-allocated array of pointers where strings are returned.
+ *                                to get the number of pointers, call OgaModelGetActiveLoraAdaptersCount().
+ * \param[in,out] names_num - number of pointers to return in the array. On return names_num contains the number
+ *                            of pointers written to adapter_names.
+ * \return OgaResult containing the error message.
+ */
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelGetActiveLoraAdapters(const OgaModel* model, const char* adapter_names[],
+                                                                 size_t* names_num);
 
 /*
  * \brief Removes previously created LoraAdapter by name.
@@ -189,25 +227,17 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaDectivateLoraAdapter(OgaModel* model, cons
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRemoveLoraAdapter(OgaModel* model, const char* adapter_name);
 
 /*
- * \brief Adds a named LoraParameter.
- * \param[in] model where the adapter is defined
- * \param[in] adapter_name the adapter to which the parameter is added
- * \param[in] param_name parameter name
- * \param[in] tensor Lora parameter data
- * \return OgaResult containing the error message if the adapter removal failed.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaModelAddLoraParameter(OgaModel* model, const char* adapter_name,
-                                                            const char* param_name, const OgaTensor* tensor);
-
-/*
  * \brief Destroys the given generator params.
  * \param[in] generator_params The generator params to be destroyed.
  */
 OGA_EXPORT void OGA_API_CALL OgaDestroyGeneratorParams(OgaGeneratorParams* generator_params);
 
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchNumber(OgaGeneratorParams* generator_params, const char* name, double value);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* generator_params, const char* name, bool value);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGeneratorParams* generator_params, int32_t max_batch_size);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchNumber(OgaGeneratorParams* generator_params,
+                                                                     const char* name, double value);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* generator_params,
+                                                                   const char* name, bool value);
+OGA_EXPORT OgaResult* OGA_API_CALL
+OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGeneratorParams* generator_params, int32_t max_batch_size);
 
 /*
  * \brief Sets the input ids for the generator params. The input ids are used to seed the generation.
@@ -218,8 +248,9 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatch
  * \param[in] batch_size The batch size of the input ids.
  * \return OgaResult containing the error message if the setting of the input ids failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputIDs(OgaGeneratorParams* generator_params, const int32_t* input_ids,
-                                                                 size_t input_ids_count, size_t sequence_length, size_t batch_size);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputIDs(OgaGeneratorParams* generator_params,
+                                                                 const int32_t* input_ids, size_t input_ids_count,
+                                                                 size_t sequence_length, size_t batch_size);
 
 /*
  * \brief Sets the input id sequences for the generator params. The input id sequences are used to seed the generation.
@@ -227,18 +258,20 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputIDs(OgaGeneratorPar
  * \param[in] sequences The input id sequences.
  * \return OgaResult containing the error message if the setting of the input id sequences failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputSequences(OgaGeneratorParams* generator_params, const OgaSequences* sequences);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputSequences(OgaGeneratorParams* generator_params,
+                                                                       const OgaSequences* sequences);
 
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputs(OgaGeneratorParams* generator_params, const OgaNamedTensors* named_tensors);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputs(OgaGeneratorParams* generator_params,
+                                                               const OgaNamedTensors* named_tensors);
 
 /*
- * \brief For additional model inputs that genai does not handle, this lets the user set their values. For example LoRA models handle
- * fine tuning through model inputs. This lets the user supply the fine tuning inputs, while genai handles the standard inputs.
- * \param[in] generator_params The generator params to set the input on
- * \param[in] name Name of the model input (this must match the model's input name)
- * \param[in] tensor The OgaTensor of the input data
+ * \brief For additional model inputs that genai does not handle, this lets the user set their values. For example LoRA
+ * models handle fine tuning through model inputs. This lets the user supply the fine tuning inputs, while genai handles
+ * the standard inputs. \param[in] generator_params The generator params to set the input on \param[in] name Name of the
+ * model input (this must match the model's input name) \param[in] tensor The OgaTensor of the input data
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetModelInput(OgaGeneratorParams* generator_params, const char* name, OgaTensor* tensor);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetModelInput(OgaGeneratorParams* generator_params,
+                                                                   const char* name, OgaTensor* tensor);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperInputFeatures(OgaGeneratorParams*, OgaTensor* tensor);
 
@@ -249,7 +282,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperInputFeatures(Oga
  * \param[out] out The created generator.
  * \return OgaResult containing the error message if the generator creation failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateGenerator(const OgaModel* model, const OgaGeneratorParams* params, OgaGenerator** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateGenerator(const OgaModel* model, const OgaGeneratorParams* params,
+                                                      OgaGenerator** out);
 
 /*
  * \brief Destroys the given generator.
@@ -265,9 +299,9 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyGenerator(OgaGenerator* generator);
 OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsDone(const OgaGenerator* generator);
 
 /*
- * \brief Computes the logits from the model based on the input ids and the past state. The computed logits are stored in the generator.
- * \param[in] generator The generator to compute the logits for.
- * \return OgaResult containing the error message if the computation of the logits failed.
+ * \brief Computes the logits from the model based on the input ids and the past state. The computed logits are stored
+ * in the generator. \param[in] generator The generator to compute the logits for. \return OgaResult containing the
+ * error message if the computation of the logits failed.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_ComputeLogits(OgaGenerator* generator);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator);
@@ -296,22 +330,27 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateMultiModalProcessor(const OgaModel* 
 
 OGA_EXPORT void OGA_API_CALL OgaDestroyMultiModalProcessor(OgaMultiModalProcessor* processor);
 
-/* Encodes a single string and adds the encoded sequence of tokens to the OgaSequences. The OgaSequences must be freed with OgaDestroySequences
-   when it is no longer needed.
+/* Encodes a single string and adds the encoded sequence of tokens to the OgaSequences. The OgaSequences must be freed
+   with OgaDestroySequences when it is no longer needed.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer*, const char* str, OgaSequences* sequences);
 
-OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor*, const char* prompt, const OgaImages* images, OgaNamedTensors** input_tensors);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor*, const char* prompt,
+                                                             const OgaImages* images, OgaNamedTensors** input_tensors);
 
-/* Decode a single token sequence and returns a null terminated utf8 string. out_string must be freed with OgaDestroyString
+/* Decode a single token sequence and returns a null terminated utf8 string. out_string must be freed with
+ * OgaDestroyString
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer*, const int32_t* tokens, size_t token_count, const char** out_string);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorDecode(const OgaMultiModalProcessor*, const int32_t* tokens, size_t token_count, const char** out_string);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer*, const int32_t* tokens, size_t token_count,
+                                                      const char** out_string);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorDecode(const OgaMultiModalProcessor*, const int32_t* tokens,
+                                                      size_t token_count, const char** out_string);
 
 /* OgaTokenizerStream is to decoded token strings incrementally, one token at a time.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTokenizerStream(const OgaTokenizer*, OgaTokenizerStream** out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTokenizerStreamFromProcessor(const OgaMultiModalProcessor*, OgaTokenizerStream** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTokenizerStreamFromProcessor(const OgaMultiModalProcessor*,
+                                                                         OgaTokenizerStream** out);
 OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizerStream(OgaTokenizerStream*);
 
 /*
@@ -325,23 +364,27 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream*,
  * the 'data' parameter must be valid for the lifetime of the OgaTensor.
  *
  * \param[in] data User supplied memory pointer, must remain valid for lifetime of the OgaTensor
- * \param[in] shape_dims Pointer to array of int64_t values that define the tensor shape, example [1 20 30] would be equivalent to a C array of [1][20][30]
- * \param[in] shape_dims_count Count of elements in the shape_dims array
+ * \param[in] shape_dims Pointer to array of int64_t values that define the tensor shape, example [1 20 30] would be
+ * equivalent to a C array of [1][20][30] \param[in] shape_dims_count Count of elements in the shape_dims array
  * \param[in] element_type The data type that 'data' points to.
  * \param[out] out Writes the newly created OgaTensor into this, must be destroyed with OgaDestroyTensor
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTensorFromBuffer(void* data, const int64_t* shape_dims, size_t shape_dims_count, OgaElementType element_type, OgaTensor** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTensorFromBuffer(void* data, const int64_t* shape_dims,
+                                                             size_t shape_dims_count, OgaElementType element_type,
+                                                             OgaTensor** out);
 OGA_EXPORT void OGA_API_CALL OgaDestroyTensor(OgaTensor* tensor);
 
 /* Get the OgaElementType of the data stored in the OgaTensor
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTensorGetType(OgaTensor*, OgaElementType* out);
 
-/* Get the number of dimensions of the OgaTensor's shape, typically used to allocate a buffer of this size then calling OgaTensorGetShape with it
+/* Get the number of dimensions of the OgaTensor's shape, typically used to allocate a buffer of this size then calling
+ * OgaTensorGetShape with it
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTensorGetShapeRank(OgaTensor*, size_t* out);
 
-/* Copies the shape dimensions into the shape_dims parameters. shape_dims_count must match the value returned by OgaTensorGetShapeRank
+/* Copies the shape dimensions into the shape_dims parameters. shape_dims_count must match the value returned by
+ * OgaTensorGetShapeRank
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTensorGetShape(OgaTensor*, int64_t* shape_dims, size_t shape_dims_count);
 
