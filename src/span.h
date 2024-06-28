@@ -36,7 +36,7 @@ struct span {
   constexpr T* end() const noexcept { return p_ + length_; }
 
   span subspan(size_t index, size_t length) const {
-    if (index >= length_ || index + length > length_)
+    if (index > length_ || index + length > length_)
       throw std::out_of_range("Requested subspan is out of range");
 
     return span(p_ + index, length);
@@ -74,7 +74,7 @@ struct span<const T> {
   constexpr const T* end() const noexcept { return p_ + length_; }
 
   span subspan(size_t index, size_t length) const {
-    if (index >= length_ || index + length > length_)
+    if (index > length_ || index + length > length_)
       throw std::out_of_range("Requested subspan is out of range");
 
     return span(p_ + index, length);
