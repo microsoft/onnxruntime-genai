@@ -309,6 +309,7 @@ class TestPagedAttentionOp(unittest.TestCase):
         cos_sin_cache = np.random.uniform(-1, 1, size=[np.max(context_lens), 16]).astype(np.float16)   # uniform distribution in the range [-1, 1) for cos/sin value in the size of [max_seq_len, head_size]
         is_prompt = np.array([1]).astype(np.int32)
         y = sess.run(None, {'query':query, 'key':key, 'value':value, 'key_cache':key_cache, 'value_cache':value_cache, 'block_tables':block_tables, 'slot_mappings':slot_mappings, 'context_lens':context_lens, 'is_prompt':is_prompt, 'cos_sin_cache':cos_sin_cache})
+        # TODO: verify embedding
 
     def test_cuda_paged_attention_decode_rotary_embedding(self):
         batch_size, nheads, d, paged_kv_block_size = 2, 6, 16, 256
@@ -328,6 +329,7 @@ class TestPagedAttentionOp(unittest.TestCase):
         cos_sin_cache = np.random.uniform(-1, 1, size=[1, d]).astype(np.float16)
         is_prompt = np.array([0]).astype(np.int32)
         y = sess.run(None, {'query':query, 'key':key, 'value':value, 'key_cache':key_cache, 'value_cache':value_cache, 'block_tables':block_tables, 'slot_mappings':slot_mappings, 'context_lens':context_lens, 'is_prompt':is_prompt, 'cos_sin_cache':cos_sin_cache})
+        # TODO: verify embedding
 
     def test_cuda_paged_attention_prompt_check_kvcache(self):
         sess = create_ort_session('/home/leca/code/onnxruntime-genai/test/custom_ops/build/libgenai_custom_ops_test.so',

@@ -65,8 +65,8 @@ void reshape_and_cache(
     const void* key_cache,    // [num_blocks, block_size, num_heads, head_size]
     const void* value_cache,  // [num_blocks, block_size, num_heads, head_size]
     const int* slot_mapping,  // [num_tokens]
-    const int64_t* key_shapes,
-    const int64_t* value_shapes,
+    const int32_t* key_shapes,
+    const int32_t* value_shapes,
     const int64_t block_size);
 //    void* kv_quant_param = nullptr,  // [num_blocks, 2, num_heads, head_size / kv_quant_chunk_size, block_size]
 //    const int kv_quant_chunk_size = 0,
