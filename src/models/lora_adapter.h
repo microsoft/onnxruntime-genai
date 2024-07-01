@@ -68,6 +68,10 @@ class LoraAdapter {
       throw std::runtime_error("Adapter: " + name_ + " has already been activated");
     }
     // Make sure data is copied to devices as needed
+    if (parameters_.empty()) {
+      throw std::runtime_error("Adapter: " + name_ + " has no parameters");
+    }
+    active_ = true;
   }
 
   /// <summary>
@@ -134,6 +138,14 @@ class LoraAdapterManagement {
   void ActivateAdapters(std::span<const std::string> adapter_names);
 
   /// <summary>
+  /// Deactivate one or more adapters that are active.
+  /// If any of the adapters are not active, the error is not reported,
+  /// and it is a no-op for inactive adapters.
+  /// </summary>
+  /// <param name="adapter_names">adapter names to deactivate</param>
+  void DeactiveAdapters(std::span<const std::string> adapter_names);
+
+  /// <summary>
   /// Deactivates one or more adapter(s) that active.
   /// No error is reported.
   /// </summary>
@@ -151,35 +163,47 @@ class LoraAdapterManagement {
   /// for all active adapters.
   /// </summary>
   /// <typeparam name="NamesOutputIter"></typeparam>
-  /// <typeparam name="OrtValueOutputIter"></typeparam>
+  /// <typeparam name="TensorOutputIter"></typeparam>
   /// <param name="names_out">Output Iterator for param C strings</param>
-  /// <param name="ort_values_out">Output Iterator for param OrtValue ptr</param>
-  template <class NamesOutputIter, class OrtValueOutputIter>
-  void OutputAdaptersParameters(NamesOutputIter names_out, OrtValueOutputIter ort_values_out) const {
+  /// <param name="ort_values_out">Output Iterator for Lora Param Tensor</param>
+  template <class NamesOutputIter, class TensorOutputIter>
+  void OutputAdaptersParameters(NamesOutputIter names_out, TensorOutputIter params_out) const {
     for (const auto& [_, adapter] : adapters_) {
       /// XXX: We need to generate empty inputs for inactive adapters,
-      // but for that we need different shapes for A and B. And the user would
-      // have to tell us that.
-      // the adapter dimensions (without batch) are
-      // [ hidden_dim, lora_r ] and [ lora_r, hidden_dim ].
-      // the shape we would pass would have Non -
-      // zero hidden_dim which is already a static value.lora_r would be 0
       if (adapter.IsActive()) {
         for (const auto& [name, param] : adapter.parameters_) {
           *names_out = name.c_str();
           ++names_out;
-          // XXX: This would have to come from cache when we implement one.
-          *ort_values_out = param.tensor->ort_tensor_;
-          ++ort_values_out;
+          *params_out = param.tensor->ort_tensor_;
+          ++params_out;
+        }
+      } else {
+        for (const auto& [name, param] : adapter.parameters_) {
+          *names_out = name.c_str();
+          ++names_out;
+          *params_out = CreateEmptyInput(*param.tensor)->ort_tensor_;
+          ++params_out;
         }
       }
     }
   }
 
+  /// <summary>
+  /// Creates an empty input tensor for a given Lora parameter.
+  /// It takes the customer supplied Lora parameter, inherits its memory info and
+  /// data type. It the modifies the original shape to denote empty input in the following
+  /// way:
+  ///  The adapter dimensions (without batch) are
+  ///   [hidden_dim, lora_r] and [lora_r, hidden_dim ].
+  ///   The empty input shape we would pass would have lora_r set to 0.
+  ///   To detect lora_r dim we simply zero out the dim of smaller value.
+  ///   The resulting shape would be either [hidden_dim, 0] or [0, hidden_dim].
+  /// </summary>
+  /// <param name="tensor">Tensor supplied by the user for a Lora parameter</param>
+  /// <returns>A Tensor that holds an OrtValue created over a dummy buffer.</returns>
+  static std::shared_ptr<Tensor> CreateEmptyInput(const Tensor& tensor);
+
  private:
-
-  std::shared_ptr<Tensor> CreateEmptyInput(const Tensor& tensor);
-
   using AdapterMap = std::unordered_map<std::string, details::LoraAdapter>;
   AdapterMap adapters_;
 };

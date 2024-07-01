@@ -10,6 +10,7 @@ file(GLOB test_srcs CONFIGURE_DEPENDS
 add_executable(unit_tests
   main.cpp
   c_api_tests.cpp
+  lora_adapter_tests.cpp
   model_tests.cpp
   sampling_tests.cpp
   sampling_benchmark.cpp

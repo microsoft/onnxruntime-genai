@@ -8,31 +8,40 @@
 namespace Generators {
 namespace {
 
-//std::string LoraCacheKey(std::string_view adapter_name, std::string param_name) {
-//  std::string result;
-//  result.reserve(adapter_name.size() + param_name.size() + 1U);
-//  result.append(adapter_name).append(".").append(param_name);
-//  return result;
-//}
-
-std::shared_ptr<OrtValue> CreateEmptyInput(Ort::Allocator* allocator, std::span<const int64_t> shape,
-                                           ONNXTensorElementDataType type) {
-  return OrtValue::CreateTensor(allocator->GetInfo(), nullptr, 0, shape, type);
-}
+// std::string LoraCacheKey(std::string_view adapter_name, std::string param_name) {
+//   std::string result;
+//   result.reserve(adapter_name.size() + param_name.size() + 1U);
+//   result.append(adapter_name).append(".").append(param_name);
+//   return result;
+// }
 
 constexpr double empty_input_buf[] = {0};
-}
+}  // namespace
 
 LoraAdapterManagement::LoraAdapterManagement() = default;
 
-std::shared_ptr<Tensor> Generators::LoraAdapterManagement::CreateEmptyInput(const Tensor& tensor) {
-  const auto& mem_info = tensor.ort_tensor_->GetTensorMemoryInfo();
+std::shared_ptr<Tensor> LoraAdapterManagement::CreateEmptyInput(const Tensor& tensor) {
   auto type_and_shape = tensor.ort_tensor_->GetTensorTypeAndShapeInfo();
   auto shape = type_and_shape->GetShape();
 
-  auto ort_value =  OrtValue::CreateTensor(mem_info, const_cast<double*>(empty_input_buf), 0,
-    shape,
-    type_and_shape->GetElementType());
+  // Modify shape
+  const auto num_dims = shape.size();
+  if (num_dims < 2) {
+    throw std::runtime_error("Shape must have at least 2 dimensions");
+  }
+
+  // Zero out lora_r dim
+  const size_t last_dim = shape[num_dims - 1];
+  const size_t penal_dim = shape[num_dims - 2];
+  if (shape[last_dim] < shape[penal_dim]) {
+    shape[last_dim] = 0;
+  } else {
+    shape[penal_dim] = 0;
+  }
+
+  const auto& mem_info = tensor.ort_tensor_->GetTensorMemoryInfo();
+  auto ort_value = OrtValue::CreateTensor(mem_info, const_cast<double*>(empty_input_buf), 0, shape,
+                                          type_and_shape->GetElementType());
 
   auto result = std::make_shared<Generators::Tensor>();
   result->ort_tensor_ = std::move(ort_value);
@@ -48,7 +57,7 @@ void LoraAdapterManagement::CreateAdapter(const std::string& adapter_name) {
 }
 
 void LoraAdapterManagement::AddParameter(const std::string& adapter_name, std::string param_name,
-                                          std::shared_ptr<Tensor> p) {
+                                         std::shared_ptr<Tensor> p) {
   auto hit = adapters_.find(adapter_name);
   if (hit == adapters_.end()) {
     throw std::runtime_error("Adapter: " + adapter_name + " does not exist");
@@ -90,6 +99,19 @@ void LoraAdapterManagement::ActivateAdapters(std::span<const std::string> adapte
   for (const auto& adapter_name : adapter_names) {
     auto& adapter = adapters_[adapter_name];
     adapter.SetActive();
+  }
+}
+
+void LoraAdapterManagement::DeactiveAdapters(std::span<const std::string> adapter_names) {
+  for (const auto& adapter_name : adapter_names) {
+    auto hit = adapters_.find(adapter_name);
+    if (hit == adapters_.end()) {
+      throw std::runtime_error("Adapter: " + adapter_name + " does not exist");
+    }
+
+    if (hit->second.IsActive()) {
+      hit->second.Deactivate();
+    }
   }
 }
 

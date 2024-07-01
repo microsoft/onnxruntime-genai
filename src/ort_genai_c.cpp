@@ -85,10 +85,11 @@ OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaModel** out) 
 }
 
 OgaResult* OGA_API_CALL OgaCreateGeneratorParams(const OgaModel* model, OgaGeneratorParams** out) {
-  OGA_TRY
-  auto& params = std::make_shared<Generators::GeneratorParams>(*reinterpret_cast<const Generators::Model*>(model));
-  params->external_owner_ = params;
-  *out = reinterpret_cast<OgaGeneratorParams*>(params.get());
+  OGA_TRY 
+  const auto* gen_model = reinterpret_cast<const Generators::Model*>(model);
+  auto gen_params = std::make_shared<Generators::GeneratorParams>(*gen_model);
+  gen_params->external_owner_ = gen_params;
+  *out = reinterpret_cast<OgaGeneratorParams*>(gen_params.get());
   return nullptr;
   OGA_CATCH
 }
