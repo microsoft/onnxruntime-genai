@@ -8,17 +8,23 @@ EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug_Cuda|x64 = Debug_Cuda|x64
+		Debug_DirectML|x64 = Debug_DirectML|x64
 		Debug|x64 = Debug|x64
 		Release_Cuda|x64 = Release_Cuda|x64
+		Release_DirectML|x64 = Release_DirectML|x64
 		Release|x64 = Release|x64
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
 		{831197BD-63C7-4C0F-AD0E-4F6783CBB5C0}.Debug_Cuda|x64.ActiveCfg = Debug_Cuda|x64
 		{831197BD-63C7-4C0F-AD0E-4F6783CBB5C0}.Debug_Cuda|x64.Build.0 = Debug_Cuda|x64
+		{831197BD-63C7-4C0F-AD0E-4F6783CBB5C0}.Debug_DirectML|x64.ActiveCfg = Debug_DirectML|x64
+		{831197BD-63C7-4C0F-AD0E-4F6783CBB5C0}.Debug_DirectML|x64.Build.0 = Debug_DirectML|x64
 		{831197BD-63C7-4C0F-AD0E-4F6783CBB5C0}.Debug|x64.ActiveCfg = Debug|x64
 		{831197BD-63C7-4C0F-AD0E-4F6783CBB5C0}.Debug|x64.Build.0 = Debug|x64
 		{831197BD-63C7-4C0F-AD0E-4F6783CBB5C0}.Release_Cuda|x64.ActiveCfg = Release_Cuda|x64
 		{831197BD-63C7-4C0F-AD0E-4F6783CBB5C0}.Release_Cuda|x64.Build.0 = Release_Cuda|x64
+		{831197BD-63C7-4C0F-AD0E-4F6783CBB5C0}.Release_DirectML|x64.ActiveCfg = Release_DirectML|x64
+		{831197BD-63C7-4C0F-AD0E-4F6783CBB5C0}.Release_DirectML|x64.Build.0 = Release_DirectML|x64
 		{831197BD-63C7-4C0F-AD0E-4F6783CBB5C0}.Release|x64.ActiveCfg = Release|x64
 		{831197BD-63C7-4C0F-AD0E-4F6783CBB5C0}.Release|x64.Build.0 = Release|x64
 	EndGlobalSection
