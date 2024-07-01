@@ -1,13 +1,8 @@
 parameters:
-- name: SpecificArtifact
-  displayName: Use Specific Artifact
+- name: enable_post_packaging_validation
+  displayName: Whether Post Packaging validation is run
   type: boolean
   default: false
-
-- name: BuildId
-  displayName: Specific Artifact's BuildId
-  type: string
-  default: '0'
 
 - name: enable_win_cpu
   displayName: 'Whether Windows CPU package is built.'
@@ -93,24 +88,23 @@ resources:
 
 trigger: none
 stages:
-- ${{ if eq(parameters.SpecificArtifact, false) }}:
-  - template: stages/py-packaging-stage.yml
-    parameters:
-      enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
-      enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
-      enable_linux_rocm: ${{ parameters.enable_linux_rocm }}
-      enable_win_cpu: ${{ parameters.enable_win_cpu }}
-      enable_win_cuda: ${{ parameters.enable_win_cuda }}
-      enable_win_dml: ${{ parameters.enable_win_dml }}
-      enable_win_arm64_cpu: ${{ parameters.enable_win_arm64_cpu }}
-      ort_version: ${{ parameters.ort_version }}
-      ort_cuda_118_version: ${{ parameters.ort_cuda_118_version }}
-      ort_cuda_122_version: ${{ parameters.ort_cuda_122_version }}
-      ort_rocm_version: ${{ parameters.ort_rocm_version }}
-      ort_dml_version: ${{ parameters.ort_dml_version }}
-      cuda_versions: ${{ parameters.cuda_versions }}
-      build_config: ${{ parameters.build_config }}
-- ${{ if eq(parameters.SpecificArtifact, true) }}:
+- template: stages/py-packaging-stage.yml
+  parameters:
+    enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
+    enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
+    enable_linux_rocm: ${{ parameters.enable_linux_rocm }}
+    enable_win_cpu: ${{ parameters.enable_win_cpu }}
+    enable_win_cuda: ${{ parameters.enable_win_cuda }}
+    enable_win_dml: ${{ parameters.enable_win_dml }}
+    enable_win_arm64_cpu: ${{ parameters.enable_win_arm64_cpu }}
+    ort_version: ${{ parameters.ort_version }}
+    ort_cuda_118_version: ${{ parameters.ort_cuda_118_version }}
+    ort_cuda_122_version: ${{ parameters.ort_cuda_122_version }}
+    ort_rocm_version: ${{ parameters.ort_rocm_version }}
+    ort_dml_version: ${{ parameters.ort_dml_version }}
+    cuda_versions: ${{ parameters.cuda_versions }}
+    build_config: ${{ parameters.build_config }}
+- ${{ if eq(parameters.enable_post_packaging_validation, true) }}:
   - template: stages/py-validation-stage.yml
     parameters:
       enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
@@ -125,5 +119,4 @@ stages:
       ort_rocm_version: ${{ parameters.ort_rocm_version }}
       ort_dml_version: ${{ parameters.ort_dml_version }}
       cuda_versions: ${{ parameters.cuda_versions }}
-      SpecificArtifact: ${{ parameters.SpecificArtifact }}
-      BuildId: ${{ parameters.BuildId }}
+      SpecificArtifact: false
