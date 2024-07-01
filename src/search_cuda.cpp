@@ -6,6 +6,7 @@
 #include "beam_search_topk.h"
 #include <queue>
 #include <random>
+#include <iostream>
 
 namespace Generators {
 
@@ -51,6 +52,7 @@ BeamSearch_Cuda::BeamSearch_Cuda(const GeneratorParams& params)
   topk_next_tokens_ = CudaMallocArray<int32_t>(2 * batch_beam_size);
   topk_next_indices_ = CudaMallocArray<int32_t>(2 * batch_beam_size);
   topk_next_scores_ = CudaMallocArray<float>(2 * batch_beam_size);
+  softmax_buffer_ = CudaMallocArray<float>(batch_beam_size * params_->vocab_size);
 
   constexpr size_t max_parts_of_vocab = 128;
   size_t topk_buffer_size = batch_beam_size * (max_parts_of_vocab + 1) * params_->search.num_beams * 2 * 2;
@@ -83,29 +85,85 @@ int Search_Cuda::GetSequenceLength() const {
 }
 
 void BeamSearch_Cuda::SelectTop() {
+  cuda::DispatchBlockwiseSoftmaxForward<true>(const_cast<cudaStream_t*>(&params_->cuda_stream), softmax_buffer_.get(), next_token_scores_.data(), params_->vocab_size, 
+                                        params_->vocab_size, params_->vocab_size, params_->BatchBeamSize());
+
+  CudaCheck() == cudaStreamSynchronize(params_->cuda_stream);
+  // // print softmax buffer
+  // auto softmax_buffer_ptr_ = CudaMallocHostArray<float>(params_->BatchBeamSize() * params_->vocab_size);
+  // cudaMemcpyAsync(softmax_buffer_ptr_.get(), softmax_buffer_.get(), params_->BatchBeamSize() * params_->vocab_size * sizeof(float), cudaMemcpyDeviceToHost, params_->cuda_stream);
+  // cudaStreamSynchronize(params_->cuda_stream);
+  // std::span<float> softmax_buffer{softmax_buffer_ptr_.get(), params_->BatchBeamSize() * params_->vocab_size};
+  // std::cout << "softmax_buffer: ";
+  // for (int i = 0; i < params_->batch_size * params_->vocab_size; i++) {
+  //   if (softmax_buffer[i] < 0.0f) {
+  //     std::cout << i << ": " << softmax_buffer[i] << ", ";
+  //   }
+  // }
+  // std::cout << std::endl;
+
+  // // print next token scores
+  // auto next_token_scores_ptr_ = CudaMallocHostArray<float>(params_->BatchBeamSize() * params_->vocab_size);
+  // cudaMemcpyAsync(next_token_scores_ptr_.get(), next_token_scores_.data(), params_->BatchBeamSize() * params_->vocab_size * sizeof(float), cudaMemcpyDeviceToHost, params_->cuda_stream);
+  // cudaStreamSynchronize(params_->cuda_stream);
+  // std::span<float> next_token_scores{next_token_scores_ptr_.get(), params_->BatchBeamSize() * params_->vocab_size};
+  // std::cout << "next_token_scores pre: ";
+  // for (int i = 0; i < params_->BatchBeamSize() * params_->vocab_size; i++) {
+  //   if (next_token_scores[i] < 0.0f) {
+  //     std::cout << next_token_scores[i] << " ";
+  //   }
+  // }
+  // std::cout << std::endl;
+
   auto beam_scores = beam_scorer_->GetNextScores();
 
   // Add beam score to next token scores. Corresponding python code is like:
   //    next_token_scores = next_token_scores + beam_scores[:, None].expand_as(next_token_scores)
-  cuda::LaunchAddProbsKernel(next_token_scores_.data(), beam_scores.data(),
+  cuda::LaunchAddProbsKernel(softmax_buffer_.get(), beam_scores.data(),
                              params_->batch_size, params_->search.num_beams, params_->vocab_size, params_->cuda_stream);
+  
+  CudaCheck() == cudaStreamSynchronize(params_->cuda_stream);
+
+  // cudaMemcpyAsync(softmax_buffer_ptr_.get(), softmax_buffer_.get(), params_->BatchBeamSize() * params_->vocab_size * sizeof(float), cudaMemcpyDeviceToHost, params_->cuda_stream);
+  // cudaStreamSynchronize(params_->cuda_stream);
+  // std::span<float> softmax_buffer{softmax_buffer_ptr_.get(), params_->BatchBeamSize() * params_->vocab_size};
+  // std::cout << "softmax_buffer: ";
+  // for (int i = 0; i < params_->BatchBeamSize() * params_->vocab_size; i++) {
+  //   if (softmax_buffer[i] > 0.0f) {
+  //     std::cout << softmax_buffer[i] << " ";
+  //   }
+  // }
+  // std::cout << std::endl;
+
+  // TODO(aciddelgado): normalize again here??
+
+  // // print next token scores
+  // cudaMemcpyAsync(next_token_scores_ptr_.get(), next_token_scores_.data(), params_->BatchBeamSize() * params_->vocab_size * sizeof(float), cudaMemcpyDeviceToHost, params_->cuda_stream);
+  // cudaStreamSynchronize(params_->cuda_stream);
+  // std::cout << "next_token_scores post: ";
+  // for (int i = 0; i < params_->BatchBeamSize() * params_->vocab_size; i++) {
+  //   if (next_token_scores[i] < 0.0f) {
+  //     std::cout << next_token_scores[i] << " ";
+  //   }
+  // }
+  // std::cout << std::endl;
 
   // TODO: Write output scores?
 
   if (params_->search.num_beams <= 32) {
     constexpr size_t max_parts_of_vocab = 128;
-    size_t candidate_count = params_->BatchBeamSize() * 2 * params_->search.num_beams;
+    size_t candidate_count = params_->BatchBeamSize() * 2 * params_->search.num_beams; // TODO(aciddelgado): is this right
     float* topk_tmp_buffer = topk_buffer_.get();
     float* topk_scores_1st_stage = topk_tmp_buffer;
     int32_t* topk_tokens_1st_stage = reinterpret_cast<int32_t*>(topk_scores_1st_stage + candidate_count * max_parts_of_vocab);
     float* topk_scores_2nd_stage = reinterpret_cast<float*>(topk_tokens_1st_stage + candidate_count * max_parts_of_vocab);
     int32_t* topk_tokens_2nd_stage = reinterpret_cast<int32_t*>(topk_scores_2nd_stage + candidate_count);
 
-    cuda::BeamSearchTopK(next_token_scores_.data(),
+    cuda::BeamSearchTopK(softmax_buffer_.get(),
                          params_->batch_size,
                          params_->search.num_beams,
                          params_->vocab_size,
-                         2 * params_->search.num_beams,
+                         2 * params_->search.num_beams, // TODO(aciddelgado): why 2 * num_beams?
                          topk_scores_1st_stage,
                          topk_tokens_1st_stage,
                          topk_scores_2nd_stage,
@@ -120,9 +178,36 @@ void BeamSearch_Cuda::SelectTop() {
   CudaCheck() == cudaStreamSynchronize(params_->cuda_stream);
 
   size_t size = params_->BatchBeamSize() * 2;
-  std::span<float> next_scores{topk_next_scores_.get(), size};
-  std::span<int32_t> next_tokens{topk_next_tokens_.get(), size};
+  std::span<float> next_scores{topk_next_scores_.get(), size}; // TODO(aciddelgado): why is scores negative?
+  std::span<int32_t> next_tokens{topk_next_tokens_.get(), size}; // TODO(aciddelgado): difference between tokens and indices?
   std::span<int32_t> next_indices{topk_next_indices_.get(), size};
+
+  // auto next_indices_cpu_ptr_ = CudaMallocHostArray<int32_t>(size);
+  // std::span<int32_t> next_indices_cpu{next_indices_cpu_ptr_.get(), size};
+  // cudaMemcpyAsync(next_indices_cpu.data(), next_indices.data(), size * sizeof(int32_t), cudaMemcpyDeviceToHost, params_->cuda_stream);
+  // cudaStreamSynchronize(params_->cuda_stream);
+  // std::cout << "next_indices_cpu: ";
+  // for (int i = 0; i < size; i++)
+  //   std::cout << next_indices_cpu[i] << " ";
+  // std::cout << std::endl;
+
+  // auto next_tokens_cpu_ptr_ = CudaMallocHostArray<int32_t>(size);
+  // std::span<int32_t> next_tokens_cpu{next_tokens_cpu_ptr_.get(), size};
+  // cudaMemcpyAsync(next_tokens_cpu.data(), next_tokens.data(), size * sizeof(int32_t), cudaMemcpyDeviceToHost, params_->cuda_stream);
+  // cudaStreamSynchronize(params_->cuda_stream);
+  // std::cout << "next_tokens_cpu: ";
+  // for (int i = 0; i < size; i++)
+  //   std::cout << next_tokens_cpu[i] << " ";
+  // std::cout << std::endl;
+
+  // auto next_scores_cpu_ptr_ = CudaMallocHostArray<float>(size);
+  // std::span<float> next_scores_cpu{next_scores_cpu_ptr_.get(), size};
+  // cudaMemcpyAsync(next_scores_cpu.data(), next_scores.data(), size * sizeof(float), cudaMemcpyDeviceToHost, params_->cuda_stream);
+  // cudaStreamSynchronize(params_->cuda_stream);
+  // std::cout << "next_scores_cpu: ";
+  // for (int i = 0; i < size; i++)
+  //   std::cout << next_scores_cpu[i] << " ";
+  // std::cout << std::endl;
 
 #if 0
   DumpCudaMemory("Next Scores", next_scores);
@@ -185,8 +270,9 @@ void GreedySearch_Cuda::AppendNextTokensToSequences() {
 
 bool BeamSearch_Cuda::IsDone() const {
   beam_scorer_->IsDone();
-  if (beam_scorer_->IsDoneLater())
+  if (beam_scorer_->IsDoneLater()) {
     return true;
+  }
 
   if (sequences_.GetSequenceLength() == params_->search.max_length) {
     if (g_log.enabled && g_log.hit_max_length)
@@ -200,8 +286,8 @@ void BeamSearch_Cuda::AppendNextTokensToSequences() {
   sequences_.AfterDeviceAppendedNextToken();
 }
 
-void BeamSearch_Cuda::Finalize(size_t num_return_sequences, RoamingArray<int32_t> output, RoamingArray<float> sequence_scores) {
-  beam_scorer_->Finalize(sequences_, num_return_sequences, output.GetGPU(), sequence_scores.GetGPU());
+void BeamSearch_Cuda::Finalize(size_t num_return_sequences) {
+  beam_scorer_->Finalize(sequences_, num_return_sequences);
 }
 
 #if 0

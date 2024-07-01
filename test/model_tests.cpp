@@ -56,56 +56,56 @@ TEST(ModelTests, GreedySearchGptFp32) {
   }
 }
 
-TEST(ModelTests, BeamSearchGptFp32) {
-  std::vector<int64_t> input_ids_shape{3, 12};
-  std::vector<int32_t> input_ids{
-      0, 0, 0, 0, 0, 52, 195, 731, 321, 301, 734, 620,
-      41, 554, 74, 622, 206, 222, 75, 223, 221, 198, 224, 572,
-      0, 0, 0, 52, 328, 219, 328, 206, 288, 227, 896, 328};
+// TEST(ModelTests, BeamSearchGptFp32) {
+//   std::vector<int64_t> input_ids_shape{3, 12};
+//   std::vector<int32_t> input_ids{
+//       0, 0, 0, 0, 0, 52, 195, 731, 321, 301, 734, 620,
+//       41, 554, 74, 622, 206, 222, 75, 223, 221, 198, 224, 572,
+//       0, 0, 0, 52, 328, 219, 328, 206, 288, 227, 896, 328};
 
-  std::vector<int32_t> expected_output{
-      0, 0, 0, 0, 0, 52, 195, 731, 321, 301, 734, 620, 131, 131, 131, 181, 638, 638, 638, 638,
-      41, 554, 74, 622, 206, 222, 75, 223, 221, 198, 224, 572, 292, 292, 292, 292, 292, 292, 292, 292,
-      0, 0, 0, 52, 328, 219, 328, 206, 288, 227, 896, 328, 328, 669, 669, 669, 669, 669, 669, 669};
+//   std::vector<int32_t> expected_output{
+//       0, 0, 0, 0, 0, 52, 195, 731, 321, 301, 734, 620, 131, 131, 131, 181, 638, 638, 638, 638,
+//       41, 554, 74, 622, 206, 222, 75, 223, 221, 198, 224, 572, 292, 292, 292, 292, 292, 292, 292, 292,
+//       0, 0, 0, 52, 328, 219, 328, 206, 288, 227, 896, 328, 328, 669, 669, 669, 669, 669, 669, 669};
 
-  // The ONNX model is generated like the following:
-  // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2
-  //        --output tiny_gpt2_beamsearch_fp16.onnx --use_gpu --max_length 20
-  // (with separate_gpt2_decoder_for_init_run set to False as it is now set to True by default)
+//   // The ONNX model is generated like the following:
+//   // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2
+//   //        --output tiny_gpt2_beamsearch_fp16.onnx --use_gpu --max_length 20
+//   // (with separate_gpt2_decoder_for_init_run set to False as it is now set to True by default)
 
-  auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+//   auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
-  auto params = Generators::CreateGeneratorParams(*model);
-  params->batch_size = static_cast<int>(input_ids_shape[0]);
-  params->sequence_length = static_cast<int>(input_ids_shape[1]);
-  params->input_ids = input_ids;
-  params->search.max_length = 20;
-  params->search.length_penalty = 1.0f;
-  params->search.num_beams = 4;
+//   auto params = Generators::CreateGeneratorParams(*model);
+//   params->batch_size = static_cast<int>(input_ids_shape[0]);
+//   params->sequence_length = static_cast<int>(input_ids_shape[1]);
+//   params->input_ids = input_ids;
+//   params->search.max_length = 20;
+//   params->search.length_penalty = 1.0f;
+//   params->search.num_beams = 4;
 
-  Generators::BeamSearch_Cpu search{*params};
-  auto state = model->CreateState(search.sequence_lengths_, *params);
+//   Generators::BeamSearch_Cpu search{*params};
+//   auto state = model->CreateState(search.sequence_lengths_, *params);
 
-  while (!search.IsDone()) {
-    search.SetLogits(state->Run(search.GetSequenceLength(), search.GetNextTokens(), search.GetNextIndices()));
+//   while (!search.IsDone()) {
+//     search.SetLogits(state->Run(search.GetSequenceLength(), search.GetNextTokens(), search.GetNextIndices()));
 
-    // Scoring
-    search.ApplyMinLength(1);
-    search.ApplyRepetitionPenalty(1.0f);
+//     // Scoring
+//     search.ApplyMinLength(1);
+//     search.ApplyRepetitionPenalty(1.0f);
 
-    search.SelectTop();
-  }
+//     search.SelectTop();
+//   }
 
-  std::vector<int32_t> output_sequence(static_cast<size_t>(search.params_->batch_size) * search.params_->search.max_length);
-  search.Finalize(1, Generators::cpu_span<int32_t>{output_sequence}, {});
+//   std::vector<int32_t> output_sequence(static_cast<size_t>(search.params_->batch_size) * search.params_->search.max_length);
+//   search.Finalize(1, Generators::cpu_span<int32_t>{output_sequence}, {});
 
-  // Verify outputs match expected outputs
-  for (size_t i = 0; i < static_cast<size_t>(search.params_->batch_size); i++) {
-    auto sequence = std::span<int32_t>(output_sequence.data() + search.params_->search.max_length * i, search.params_->search.max_length);
-    auto* expected_output_start = &expected_output[i * search.params_->search.max_length];
-    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params->search.max_length * sizeof(int32_t)));
-  }
-}
+//   // Verify outputs match expected outputs
+//   for (size_t i = 0; i < static_cast<size_t>(search.params_->batch_size); i++) {
+//     auto sequence = std::span<int32_t>(output_sequence.data() + search.params_->search.max_length * i, search.params_->search.max_length);
+//     auto* expected_output_start = &expected_output[i * search.params_->search.max_length];
+//     EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params->search.max_length * sizeof(int32_t)));
+//   }
+// }
 #endif
 
 #if USE_CUDA

@@ -68,9 +68,10 @@ struct BeamSearch_Cuda : Search_Cuda {
 
   RoamingArray<int32_t> GetNextTokens() override;
   RoamingArray<int32_t> GetNextIndices() override;
+  RoamingArray<int32_t> GetSequence(size_t index) override; // TODO(aciddelgado): implement this
 
   void SelectTop() override;
-  void Finalize(size_t num_return_sequences, RoamingArray<int32_t> output, RoamingArray<float> sequence_scores) override;
+  void Finalize(size_t num_return_sequences) override; // TODO(aciddelgado): remove from interface
 
   bool IsDone() const;
 
@@ -82,6 +83,7 @@ struct BeamSearch_Cuda : Search_Cuda {
   cuda_unique_ptr<int32_t> topk_next_tokens_;
   cuda_unique_ptr<int32_t> topk_next_indices_;
   cuda_unique_ptr<float> topk_next_scores_;
+  cuda_unique_ptr<float> softmax_buffer_;
 
   // temp buffer for topk computation, including:
   // 1st stage needs:

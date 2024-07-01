@@ -7,6 +7,19 @@
 
 namespace Generators {
 
+void SoftMax(std::span<float> scores, float temperature) {
+  float const max_score = *std::max_element(scores.begin(), scores.end());
+
+  // Subtract max score and scale by temperature
+  std::transform(scores.begin(), scores.end(), scores.begin(), [max_score, temperature](float score) { return std::exp((score - max_score) / temperature); });
+
+  // Compute sum of exponentials
+  float const exp_sum = std::accumulate(scores.begin(), scores.end(), 0.0f);
+
+  // Divide each score by the sum of exponentials
+  std::transform(scores.begin(), scores.end(), scores.begin(), [exp_sum](float score) { return score / exp_sum; });
+}
+
 Search_Cpu::Search_Cpu(const GeneratorParams& params)
     : Search{params},
       sequences_{params.input_ids, params.batch_size, params.search.num_beams, params_->search.max_length} {
@@ -62,6 +75,12 @@ int Search_Cpu::GetSequenceLength() const {
 }
 
 void BeamSearch_Cpu::SelectTop() {
+  // TODO(aciddelgado): Normalize the next_token_scores_ here I think
+  for (int i = 0; i < params_->batch_size; i++) {
+    std::span<float> const scores = next_token_scores_.subspan(i * params_->vocab_size, params_->vocab_size);
+    SoftMax(scores, 1.0); // TODO(aciddelgado): should this be log softmax?
+  }
+
   auto beam_scores = beam_scorer_->GetNextScores();
   // Add beam score to next token scores. Corresponding python code is like:
   //    next_token_scores = next_token_scores + beam_scores[:, None].expand_as(next_token_scores)
@@ -86,14 +105,15 @@ void BeamSearch_Cpu::SelectTop() {
     bool operator<(const ScoreIndex& s) const { return score < s.score; }
   };
 
-  auto scores = std::make_unique<float[]>(top_k * params_->batch_size);
-  auto indices = std::make_unique<int32_t[]>(top_k * params_->batch_size);
-  auto tokens = std::make_unique<int32_t[]>(top_k * params_->batch_size);
+  auto scores = std::make_unique<float[]>(top_k * params_->batch_size); // Score of top_k tokens
+  auto indices = std::make_unique<int32_t[]>(top_k * params_->batch_size); // beam index of top_k tokens
+  auto tokens = std::make_unique<int32_t[]>(top_k * params_->batch_size); // token id of top_k tokens
 
   auto next_scores = std::span<float>(scores.get(), top_k * params_->batch_size);
   auto next_indices = std::span<int32_t>(indices.get(), top_k * params_->batch_size);
   auto next_tokens = std::span<int32_t>(tokens.get(), top_k * params_->batch_size);
 
+  // TODO(aciddelgado): This is TopK with priority queue. Can it be optimized with a partial sort? Likely.
   for (size_t batch_index = 0; batch_index < static_cast<size_t>(params_->batch_size); batch_index++) {
     std::priority_queue<ScoreIndex, std::vector<ScoreIndex>> queue;
     auto token_scores_sub = next_token_scores_.subspan(batch_index * params_->search.num_beams * params_->vocab_size, static_cast<size_t>(params_->search.num_beams) * params_->vocab_size);
@@ -123,6 +143,11 @@ void BeamSearch_Cpu::SelectTop() {
   next_tokens_ = beam_scorer_->GetNextTokens();
 
   AppendNextTokensToSequences();
+
+  // if (beam_scorer_->IsDone()) {
+  //   done_ = true;
+  //   beam_scorer_->Finalize(sequences_, params_->search.num_return_sequences, params_->output_ids, params_->sequence_scores);
+  // }
 }
 
 void GreedySearch_Cpu::SelectTop() {
@@ -138,19 +163,6 @@ void GreedySearch_Cpu::SelectTop() {
   }
 
   AppendNextTokensToSequences();
-}
-
-void SoftMax(std::span<float> scores, float temperature) {
-  float const max_score = *std::max_element(scores.begin(), scores.end());
-
-  // Subtract max score and scale by temperature
-  std::transform(scores.begin(), scores.end(), scores.begin(), [max_score, temperature](float score) { return std::exp((score - max_score) / temperature); });
-
-  // Compute sum of exponentials
-  float const exp_sum = std::accumulate(scores.begin(), scores.end(), 0.0f);
-
-  // Divide each score by the sum of exponentials
-  std::transform(scores.begin(), scores.end(), scores.begin(), [exp_sum](float score) { return score / exp_sum; });
 }
 
 void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
@@ -268,8 +280,22 @@ void BeamSearch_Cpu::AppendNextTokensToSequences() {
   }
 }
 
-void BeamSearch_Cpu::Finalize(size_t num_return_sequences, RoamingArray<int32_t> output, RoamingArray<float> sequence_scores) {
-  beam_scorer_->Finalize(sequences_, num_return_sequences, output, sequence_scores);
+void BeamSearch_Cpu::Finalize(size_t num_return_sequences) {
+  beam_scorer_->Finalize(sequences_, num_return_sequences);
+  finalized_ = true;
+}
+
+RoamingArray<int32_t> BeamSearch_Cpu::GetSequence(size_t index) {
+  size_t batch_id = index / params_->search.num_return_sequences;
+  size_t beam_id = index % params_->search.num_return_sequences;
+  std::cout << "batch_id: " << batch_id << ", beam_id: " << beam_id << std::endl;
+  BeamHypotheses beam_hyp = beam_scorer_->GetBeamHypotheses(batch_id);
+  return beam_hyp.GetHypothesis(beam_id);
+}
+
+RoamingArray<int32_t> BeamSearch_Cpu::GetSequence(size_t batch_id, size_t beam_id) {
+  BeamHypotheses beam_hyp = beam_scorer_->GetBeamHypotheses(batch_id);
+  return beam_hyp.GetHypothesis(beam_id);
 }
 
 std::span<float> Search_Cpu::GetScores(int batch_beam_index) const {

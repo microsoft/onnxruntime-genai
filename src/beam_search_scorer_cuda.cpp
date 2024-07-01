@@ -72,14 +72,15 @@ void BeamSearchScorer_Cuda::Process(Sequences_Cuda& sequences,
 
 bool BeamSearchScorer_Cuda::IsDoneLater() const {
   cudaEventSynchronize(event_process_complete_);
+  // std::cout << "cpu not done: " << state_cpu_->not_done_count_ << std::endl;
+  auto temp_state_gpu_ = CudaMallocHostArray<cuda::BeamScorerState>(1);
+  cudaMemcpyAsync(temp_state_gpu_.get(), state_gpu_.get(), sizeof(cuda::BeamScorerState), ::cudaMemcpyDeviceToHost, stream_);
+  // std::cout << "gpu not done: " << temp_state_gpu_->not_done_count_ << std::endl;
   return state_cpu_->not_done_count_ == 0;
 }
 
 void BeamSearchScorer_Cuda::Finalize(Sequences_Cuda& sequences,
-                                     size_t num_return_sequences,
-                                     std::span<int32_t> output,           // Word IDs of each sequence, with shape (batch_size * num_return_sequences, max_sequence_length)
-                                     std::span<float> sequence_scores) {  // Score of each sequence, with shape (batch_size * num_return_sequences).
-  assert(!output.empty());
+                                     size_t num_return_sequences) {
   cuda::LaunchBeamSearchScorer_Finalize(state_cpu_->batch_size_, *state_gpu_, sequences.GetSequences(), sequences.GetSequenceLength(), beam_hyps_, next_beam_scores_, output, sequence_scores, stream_);
 }
 
