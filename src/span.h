@@ -8,7 +8,6 @@
 #include <array>
 #include <stdexcept>
 #include <vector>
-#include <initializer_list>
 
 namespace std {
 namespace generators_span {
@@ -37,7 +36,7 @@ struct span {
   constexpr T* end() const noexcept { return p_ + length_; }
 
   span subspan(size_t index, size_t length) const {
-    if (index >= length_ || index + length > length_)
+    if (index > length_ || length > length_ - index)
       throw std::out_of_range("Requested subspan is out of range");
 
     return span(p_ + index, length);
@@ -59,7 +58,6 @@ struct span<const T> {
   span(const std::vector<T>& s) noexcept : p_{s.data()}, length_{s.size()} {}
   template <size_t N>
   constexpr span(const std::array<T, N>& s) noexcept : p_{s.data()}, length_{s.size()} {}
-  constexpr span(std::initializer_list<T> list) noexcept : p_(&*list.begin()), length_(list.size()) {}
 
   constexpr bool empty() const noexcept { return length_ == 0; }
 
@@ -76,7 +74,7 @@ struct span<const T> {
   constexpr const T* end() const noexcept { return p_ + length_; }
 
   span subspan(size_t index, size_t length) const {
-    if (index >= length_ || index + length > length_)
+    if (index > length_ || length > length_ - index)
       throw std::out_of_range("Requested subspan is out of range");
 
     return span(p_ + index, length);
