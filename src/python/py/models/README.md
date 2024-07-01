@@ -83,7 +83,7 @@ python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o p
 python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files
 ```
 
-### Quantized PyTorch model
+### Quantized PyTorch Model
 
 This scenario is where your PyTorch model is one of the currently supported model architectures, has already been quantized to INT4 precision, and your model can be loaded in the Hugging Face style via [AutoGPTQ](https://github.com/AutoGPTQ/AutoGPTQ) or [AutoAWQ](https://github.com/casper-hansen/AutoAWQ).
 

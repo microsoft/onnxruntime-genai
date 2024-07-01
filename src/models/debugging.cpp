@@ -75,7 +75,7 @@ void DumpValues(std::ostream& stream, ONNXTensorElementDataType type, const void
 
   switch (type) {
     case Ort::TypeToTensorType<bool>::type:
-      DumpSpan(stream, std::span<const bool>{reinterpret_cast<const bool*>(p_values_raw), count});
+      DumpSpan(stream, std::span<const bool>(reinterpret_cast<const bool*>(p_values_raw), count));
       break;
 
     case Ort::TypeToTensorType<int8_t>::type:

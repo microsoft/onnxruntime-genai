@@ -4,7 +4,7 @@
 1. [Setup](#setup)
 2. [Choose your platform](#choose-your-platform)
 3. [Run with DirectML](#run-with-directml)
-4. [Run with NVDIA CUDA](#run-with-nvidia-cuda)
+4. [Run with NVIDIA CUDA](#run-with-nvidia-cuda)
 5. [Run on CPU](#run-on-cpu)
 
 ## Introduction
