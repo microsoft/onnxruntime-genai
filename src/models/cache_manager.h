@@ -6,12 +6,15 @@
 #include <memory>
 #include <vector>
 #include <list>
+#include "block.h"
 
 namespace Generators {
 
 struct CacheOptions {
-  CacheOptions(const int32_t num_layers, const std::optional<int32_t>& block_size,
-               const int32_t num_kv_heads, const int32_t head_size,
+  CacheOptions(const int32_t num_layers,
+               const std::optional<int32_t>& block_size,
+               const int32_t num_kv_heads,
+               const int32_t head_size,
                const ONNXTensorElementDataType dtype,
                const std::optional<int32_t>& num_blocks,
                const std::optional<float>& gpu_utilization_factor);
@@ -20,16 +23,44 @@ struct CacheOptions {
   int32_t block_size_{16};
   int32_t num_kv_heads_{};
   int32_t head_size_{};
-  ONNXTensorElementDataType dtype_{};
+  ONNXTensorElementDataType dtype_{ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT};
   int32_t num_blocks_{};
   float gpu_utilization_factor_{0.3f};
 };
 
-class PagedCacheManager {
+struct BlockTable {
+  size_t sequence_id;
+  std::vector<std::shared_ptr<Block>> blocks;  // List of blocks alloted to the sequence_id
+};
+
+struct CacheManager {
  public:
-  PagedCacheManager(const CacheOptions& cache_options,
-                    Ort::Allocator* cpu_allocator,
-                    Ort::Allocator* gpu_allocator);
+  CacheManager(const CacheOptions& cache_options,
+               Ort::Allocator* cpu_allocator,
+               Ort::Allocator* gpu_allocator);
+
+  CacheManager(const CacheManager&) = delete;
+
+  CacheManager& operator=(const CacheManager&) = delete;
+
+  bool CanAdd(size_t num_tokens) const;
+
+  // Allocates blocks needed to serve the given sequence_id for the given prompt token size.
+  // Cache additions happen one sequence at a time.
+  void Add(const std::vector<size_t>& sequence_ids, size_t num_tokens);
+
+  bool CanAppendTokens(size_t sequence_id, size_t num_tokens) const;
+
+  // Before running a decoding step, the cache needs to allot a new slot for the given sequence_id.
+  // If the block has been completely filled up, a new block will be allocated as well.
+  // This function should be called before each decoding step.
+  void AppendTokens(size_t sequence_id, size_t num_tokens);
+
+  // Removes the allocated blocks for the given sequence_id and makes it available for
+  // other sequences.
+  void Remove(size_t sequence_id);
+
+  void Fork(size_t parent_seq_id, size_t child_seq_id);
 
   // Returns the K, V cache for the given layer_id.
   std::pair<OrtValue*, OrtValue*> Cache(size_t layer_id);
@@ -88,22 +119,6 @@ class PagedCacheManager {
   // The order of the clot mapping is based on the order the provided sequence_ids.
   std::unique_ptr<OrtValue> SlotMapping(const std::vector<size_t>& sequence_ids) const;
 
-  // Removes the allocated blocks for the given sequence_id and makes it available for
-  // other sequences.
-  void Remove(size_t sequence_id);
-
-  // Allocates blocks needed to serve the given sequence_id for the given prompt token size.
-  // Cache additions happen one sequence at a time.
-  void Add(size_t sequence_id, size_t prompt_token_size);
-
-  // Before running a decoding step, the cache needs to allot a new slot for the given sequence_id.
-  // If the block has been completely filled up, a new block will be allocated as well.
-  // This function should be called before each decoding step.
-  void AddToken(size_t sequence_id);
-
-  // Reorder the cache based on the given order.
-  void ReorderCache(const std::unordered_map<size_t, size_t>& sequence_id_mapping);
-
  private:
   using LayerCache = std::unique_ptr<OrtValue>;  // Shape: [num_blocks, block_size * num_kv_heads * head_size]
   /*
@@ -135,27 +150,16 @@ class PagedCacheManager {
 
   */
 
-  struct BlockInfoPerSequence {
-    size_t sequence_id;
-    bool is_prompt;
-    std::vector<size_t> block_ids;  // List of block_ids alloted to the sequence_id
-    std::vector<size_t> slot_ids;   // Slot id of the slot to use for the input token
-    size_t context_length;          // Context length of the sequence.
-                                    // = prompt_tokens.size() for prompt stage
-                                    // = prompt_tokens.size() + generated_tokens() for decoding stage
-  };
-
-  std::vector<size_t> FindAvailableBlocks(size_t num_blocks);
-  void ReserveBlocks(const std::vector<size_t>& block_ids);
-  void ReleaseBlocks(const std::vector<size_t>& block_ids);
+  void Add(size_t sequence_id, size_t num_tokens);
 
   CacheOptions options_;
   Ort::Allocator* cpu_allocator_;
   Ort::Allocator* gpu_allocator_;
-  std::vector<std::pair<LayerCache, LayerCache>> cache_;                                // Pair of key and value caches for all layers
-  std::vector<int32_t> block_refs_;                                                     // List of free blocks
-  std::list<BlockInfoPerSequence> block_infos_;                                         // List of block_info for all sequences
-  std::unordered_map<size_t, std::list<BlockInfoPerSequence>::iterator> block_tables_;  // Mapping of sequence_id to block_info
+  std::vector<std::pair<LayerCache, LayerCache>> cache_;                      // Pair of key and value caches for all layers
+  std::unique_ptr<BlockAllocator> block_allocator_;                           // Allocator for blocks
+  std::list<BlockTable> block_table_pool_;                                    // The pool of all block tables
+  std::unordered_map<size_t, std::list<BlockTable>::iterator> block_tables_;  // Mapping of sequence_id to block_info
+  std::unordered_map<size_t, size_t> copy_on_writes_;                         // Mapping of block ids to copy
 };
 
 }  // namespace Generators

@@ -11,22 +11,14 @@ namespace Generators {
 
 namespace {
 
-constexpr char KeyCacheNamePrefix[] = "key_cache.";
-constexpr char ValueCacheNamePrefix[] = "value_cache.";
-constexpr char BlockTablesName[] = "block_tables";
-constexpr char SlotMappingName[] = "slot_mapping";
-constexpr int32_t BlockTablePadValue = -1;
 constexpr int32_t DefaultBlockSize = 16;
-constexpr int32_t BlockAvailable = 0;
-constexpr float DefaultCacheGPUUtilizationFactor = 0.3f;
 
 std::pair<std::unique_ptr<OrtValue>, std::unique_ptr<OrtValue>> AllocateLayerCache(
     const CacheOptions& options, Ort::Allocator& gpu_allocator) {
-  std::vector<int64_t> shape = {options.num_blocks_, options.block_size_ * options.num_kv_heads_ * options.head_size_};
-  std::unique_ptr<OrtValue> key_cache = OrtValue::CreateTensor(gpu_allocator, shape, options.dtype_);
-  std::unique_ptr<OrtValue> value_cache = OrtValue::CreateTensor(gpu_allocator, shape, options.dtype_);
+  const std::vector<int64_t> shape{options.num_blocks_, options.block_size_ * options.num_kv_heads_ * options.head_size_};
 
-  return {std::move(key_cache), std::move(value_cache)};
+  return {OrtValue::CreateTensor(gpu_allocator, shape, options.dtype_),   // Key cache
+          OrtValue::CreateTensor(gpu_allocator, shape, options.dtype_)};  // Value cache
 }
 
 void ComputeNumBlocks(CacheOptions& options) {
@@ -50,7 +42,7 @@ void ComputeNumBlocks(CacheOptions& options) {
   CudaCheck() == cudaMemGetInfo(&free_bytes, &total_bytes);
 
   constexpr float memory_fragmentation_factor = 0.9f;
-  constexpr size_t num_caches_per_layer = 2;  // K and V caches
+  constexpr size_t num_caches_per_layer = 2;  // 2 for key and value caches
 
   // Use the free memory to compute the number of blocks needed to achieve the given gpu_utilization_factor.
   options.num_blocks_ =
@@ -82,197 +74,190 @@ CacheOptions::CacheOptions(const int32_t num_layers, const std::optional<int32_t
   } else if (num_blocks.has_value()) {
     num_blocks_ = *num_blocks;
   } else {
-    gpu_utilization_factor_ = gpu_utilization_factor.value_or(DefaultCacheGPUUtilizationFactor);
+    constexpr float default_gpu_utilization_factor = 0.3f;
+    gpu_utilization_factor_ = gpu_utilization_factor.value_or(default_gpu_utilization_factor);
   }
 }
 
-PagedCacheManager::PagedCacheManager(const CacheOptions& cache_options,
-                                     Ort::Allocator* cpu_allocator,
-                                     Ort::Allocator* gpu_allocator)
+CacheManager::CacheManager(const CacheOptions& cache_options,
+                           Ort::Allocator* cpu_allocator,
+                           Ort::Allocator* gpu_allocator)
     : options_(cache_options),
       cpu_allocator_(cpu_allocator),
       gpu_allocator_(gpu_allocator) {
   ComputeNumBlocks(options_);
-  block_refs_.resize(options_.num_blocks_, BlockAvailable);
   for (int64_t i = 0; i < options_.num_layers_; ++i) {
     cache_.emplace_back(AllocateLayerCache(options_, *gpu_allocator_));
   }
+  block_allocator_ = std::make_unique<BlockAllocator>(options_.block_size_, options_.num_blocks_);
 }
 
-std::vector<size_t> PagedCacheManager::FindAvailableBlocks(size_t num_blocks_needed) {
-  std::vector<size_t> free_blocks;
-  for (size_t i = 0; i < block_refs_.size(); ++i) {
-    if (block_refs_[i] == BlockAvailable) {
-      free_blocks.push_back(i);
-      if (free_blocks.size() == num_blocks_needed) {
-        break;
-      }
-    }
-  }
+bool CacheManager::CanAdd(size_t num_tokens) const {
+  return block_allocator_->NumFreeBlocks() > block_allocator_->NumBlocksNeeded(num_tokens);
+}
 
-  if (free_blocks.size() != num_blocks_needed) {
+void CacheManager::Add(const std::vector<size_t>& sequence_ids, size_t num_tokens) {
+  if (!CanAdd(num_tokens)) {
     throw std::runtime_error("Not enough free blocks available to serve the request.");
   }
 
-  return free_blocks;
-}
+  // Allocate blocks for the first sequence id in sequence_ids.
+  Add(sequence_ids.front(), num_tokens);
 
-void PagedCacheManager::ReserveBlocks(const std::vector<size_t>& block_ids) {
-  for (size_t block_id : block_ids) {
-    block_refs_[block_id]++;
+  // Fork the blocks for the remaining sequence ids.
+  for (size_t i = 1; i < sequence_ids.size(); ++i) {
+    Fork(sequence_ids.front(), sequence_ids[i]);
   }
 }
 
-void PagedCacheManager::ReleaseBlocks(const std::vector<size_t>& block_ids) {
-  for (size_t block_id : block_ids) {
-    block_refs_[block_id]--;
-    if (block_refs_[block_id] < 0) {
-      // This should never happen.
-      throw std::runtime_error("Block reference count is negative.");
-    }
+void CacheManager::Add(size_t sequence_id, size_t num_tokens) {
+  if (!CanAdd(num_tokens)) {
+    throw std::runtime_error("Not enough free blocks available to serve the request.");
   }
+
+  // Create an empty block table for the sequence id.
+  block_table_pool_.emplace_back(BlockTable{sequence_id, {}});
+  auto block_table = --block_table_pool_.end();
+  block_tables_[sequence_id] = block_table;
+
+  // Allocate blocks for the sequence id.
+  block_table->blocks = block_allocator_->AllocateBlocks(num_tokens);
 }
 
-void PagedCacheManager::AddToken(size_t sequence_id) {
-  auto found_block_info = block_tables_.find(sequence_id);
-  if (found_block_info == block_tables_.end()) {
-    return;
+bool CacheManager::CanAppendTokens(size_t sequence_id, size_t num_tokens) const {
+  const auto block_table = block_tables_.find(sequence_id);
+  if (block_table == block_tables_.end()) {
+    return false;
   }
 
-  auto& block_info = *(found_block_info->second);
-  block_info.is_prompt = false;  // AddToken is only called during decoding stage.
-  block_info.context_length++;   // Increment the context length for the sequence.
-  if ((block_info.slot_ids.back() + 1) % options_.block_size_ == 0) {
-    // The current block is full. Allocate a new block.
-    auto block_ids = FindAvailableBlocks(1U);
-    ReserveBlocks(block_ids);
-    auto block_id = block_ids.front();
+  const size_t num_slots_available = block_table->second->blocks.back()->NumEmptySlots() +
+                                     block_allocator_->NumFreeBlocks() * options_.block_size_;
 
-    block_info.block_ids.push_back(block_id);
-    block_info.slot_ids = {block_id * options_.block_size_};
-  } else {
-    block_info.slot_ids = {block_info.slot_ids.back() + 1};
-  }
+  // TODO: Implement copy on write functionality
+
+  return num_slots_available >= num_tokens;
 }
 
-void PagedCacheManager::Remove(size_t sequence_id) {
-  auto found_block_info = block_tables_.find(sequence_id);
-  if (found_block_info == block_tables_.end()) {
-    return;
+void CacheManager::AppendTokens(size_t sequence_id, size_t num_tokens) {
+  if (!CanAppendTokens(sequence_id, num_tokens)) {
+    throw std::runtime_error("Not enough free slots available to serve the request.");
   }
 
-  ReleaseBlocks(found_block_info->second->block_ids);
-  block_infos_.erase(found_block_info->second);
-  block_tables_.erase(found_block_info);
-}
-
-void PagedCacheManager::Add(size_t sequence_id, size_t prompt_token_size) {
-  if (block_tables_.count(sequence_id)) {
-    // The blocks for the given sequence_id is already allocated.
-    return;
+  auto block_table = block_tables_.find(sequence_id);
+  if (block_table == block_tables_.end()) {
+    throw std::runtime_error("Given sequence id " + std::to_string(sequence_id) + " is not found in the cache.");
   }
 
-  const size_t num_slots_needed = prompt_token_size;
+  if (block_table->second->blocks.back()->RefCount() > 1) {
+    // The last block has multiple references. Copy-on-write is needed.
+    auto src_block = block_table->second->blocks.back();
+    auto dst_block = block_allocator_->AllocateBlock(src_block->NumOccupiedSlots(), src_block->PreviosBlock());
+    src_block->DecrementRefCount();
+    block_table->second->blocks.back() = dst_block;
+    copy_on_writes_.emplace(dst_block->Id(), src_block->Id());
+  }
 
-  size_t num_blocks_needed = (num_slots_needed + options_.block_size_) / options_.block_size_;
-  auto block_ids = FindAvailableBlocks(num_blocks_needed);
-  ReserveBlocks(block_ids);
-  std::vector<size_t> slot_ids(num_slots_needed);
-  size_t token_id = 0;
-  for (const auto& block_id : block_ids) {
-    for (size_t slot_id = block_id * options_.block_size_;
-         slot_id < (block_id + 1) * options_.block_size_ && token_id < num_slots_needed;
-         ++slot_id) {
-      slot_ids[token_id++] = slot_id;
+  if (!block_table->second->blocks.back()->IsFull()) {
+    for (size_t i = 0; i < std::min(num_tokens, block_table->second->blocks.back()->NumEmptySlots()); ++i) {
+      block_table->second->blocks.back()->AddSlot();
+      --num_tokens;
     }
   }
 
-  block_infos_.emplace_back(BlockInfoPerSequence{sequence_id, true /* is_prompt */,
-                                                 block_ids, slot_ids, prompt_token_size});
-  block_tables_.emplace(sequence_id, --block_infos_.end());
+  std::shared_ptr<Block> previous_block = block_table->second->blocks.back();
+  for (int32_t remaining_tokens = static_cast<int32_t>(num_tokens);
+       remaining_tokens > 0;
+       remaining_tokens -= options_.block_size_) {
+    previous_block = block_allocator_->AllocateBlock(std::min(remaining_tokens, options_.block_size_), previous_block);
+    block_table->second->blocks.push_back(previous_block);
+  }
 }
 
-std::pair<OrtValue*, OrtValue*> PagedCacheManager::Cache(size_t layer_id) {
+void CacheManager::Remove(size_t sequence_id) {
+  auto block_table = block_tables_.find(sequence_id);
+  if (block_table == block_tables_.end()) {
+    return;
+  }
+
+  block_allocator_->Free(block_table->second->blocks);
+
+  block_table_pool_.erase(block_table->second);
+  block_tables_.erase(block_table);
+}
+
+void CacheManager::Fork(size_t src_sequence_id, size_t dst_sequence_id) {
+  auto src_block_table = block_tables_.find(src_sequence_id);
+  if (src_block_table == block_tables_.end()) {
+    throw std::runtime_error("Given source sequence id " + std::to_string(src_sequence_id) + " is not found in the cache.");
+  }
+
+  if (block_tables_.find(dst_sequence_id) != block_tables_.end()) {
+    throw std::runtime_error("Given destination sequence id " + std::to_string(dst_sequence_id) + " already exists in the cache.");
+  }
+
+  block_table_pool_.emplace_back(BlockTable{dst_sequence_id, {}});
+  auto dst_block_table = --block_table_pool_.end();
+
+  dst_block_table->blocks = block_allocator_->Fork(src_block_table->second->blocks);
+}
+
+std::pair<OrtValue*, OrtValue*> CacheManager::Cache(size_t layer_id) {
   return {cache_[layer_id].first.get(), cache_[layer_id].second.get()};
 }
 
-std::unique_ptr<OrtValue> PagedCacheManager::BlockTables(const std::vector<size_t>& sequence_ids) const {
+std::unique_ptr<OrtValue> CacheManager::BlockTables(const std::vector<size_t>& sequence_ids) const {
   size_t max_blocks = 0;
   for (const auto& sequence_id : sequence_ids) {
-    auto block_info_it = block_tables_.find(sequence_id);
-    if (block_info_it == block_tables_.end()) {
+    auto block_table = block_tables_.find(sequence_id);
+    if (block_table == block_tables_.end()) {
       throw std::runtime_error("Given sequence id " + std::to_string(sequence_id) + " is not found in the cache.");
     }
-    max_blocks = std::max(max_blocks, block_info_it->second->block_ids.size());
+    max_blocks = std::max(max_blocks, block_table->second->blocks.size());
   }
 
   std::vector<int64_t> shape = {static_cast<int64_t>(sequence_ids.size()), static_cast<int64_t>(max_blocks)};
   auto block_tables_value = OrtValue::CreateTensor(*cpu_allocator_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
   auto* block_tables_data = block_tables_value->GetTensorMutableData<int32_t>();
+
+  constexpr int32_t block_tables_pad_value = -1;
+
   for (size_t i = 0; i < sequence_ids.size(); ++i) {
-    auto block_info_it = block_tables_.find(sequence_ids[i]);
-    auto& block_info = block_info_it->second;
-    for (size_t j = 0; j < block_info->block_ids.size(); ++j) {
-      block_tables_data[i * max_blocks + j] = block_info->block_ids[j];
+    auto block_table = block_tables_.find(sequence_ids[i]);
+    for (size_t j = 0; j < block_table->second->blocks.size(); ++j) {
+      block_tables_data[i * max_blocks + j] = block_table->second->blocks[j]->Id();
     }
-    for (size_t j = block_info->block_ids.size(); j < max_blocks; ++j) {
-      block_tables_data[i * max_blocks + j] = BlockTablePadValue;
+    for (size_t j = block_table->second->blocks.size(); j < max_blocks; ++j) {
+      block_tables_data[i * max_blocks + j] = block_tables_pad_value;
     }
   }
 
   return block_tables_value;
 }
 
-std::unique_ptr<OrtValue> PagedCacheManager::SlotMapping(const std::vector<size_t>& sequence_ids) const {
+std::unique_ptr<OrtValue> CacheManager::SlotMapping(const std::vector<size_t>& sequence_ids) const {
   size_t num_tokens = 0U;
   for (const auto& sequence_id : sequence_ids) {
-    auto block_info_it = block_tables_.find(sequence_id);
-    if (block_info_it == block_tables_.end()) {
+    auto block_table = block_tables_.find(sequence_id);
+    if (block_table == block_tables_.end()) {
       throw std::runtime_error("Given sequence id " + std::to_string(sequence_id) + " is not found in the cache.");
     }
-    num_tokens += block_info_it->second->slot_ids.size();
+    for (const auto& block : block_table->second->blocks) {
+      num_tokens += block->NumOccupiedSlots();
+    }
   }
   std::vector<int64_t> shape = {static_cast<int64_t>(num_tokens)};
   auto slot_mapping_value = OrtValue::CreateTensor(*cpu_allocator_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
   auto* slot_mapping_data = slot_mapping_value->GetTensorMutableData<int32_t>();
   for (size_t i = 0; i < sequence_ids.size(); ++i) {
-    auto block_info_it = block_tables_.find(sequence_ids[i]);
-    auto& block_info = block_info_it->second;
-    for (size_t i = 0; i < block_info->slot_ids.size(); ++i) {
-      slot_mapping_data[i] = block_info->slot_ids[i];
+    auto block_table = block_tables_.find(sequence_ids[i]);
+    for (size_t i = 0, block_id = 0; block_id < block_table->second->blocks.size(); ++block_id) {
+      const auto slot_ids = block_table->second->blocks[block_id]->SlotIds();
+      for (size_t j = 0; j < slot_ids.size(); ++j, ++i) {
+        slot_mapping_data[i] = slot_ids[j];
+      }
     }
   }
   return slot_mapping_value;
-}
-
-void PagedCacheManager::ReorderCache(const std::unordered_map<size_t, size_t>& sequence_id_mapping) {
-  // After reordering the cache, we might have shared resources between sequences.
-  // We need to update the block_refs_ accordingly.
-  // IMP: Remember that the cache may contain sequences that the user may not be interested in.
-  // so, offer a way for the user to specify the mapping from the sequence id to the location in the cache
-
-  // 1. Update the block_refs_ for the new order.
-  // [0, 1, 2, 3]
-  // [2, 1, 1, 3]
-  for (auto& [pointer, pointee] : sequence_id_mapping) {
-    if (pointer == pointee) {
-      continue;
-    }
-    block_refs_[pointee] = block_refs_[pointer];
-  }
-  // std::unordered_set<size_t> retained_sequence_ids(sequence_index_permutation.begin(), sequence_index_permutation.end());
-  // for (auto& [sequence_id, block_info] : block_tables_) {
-  //   if (retained_sequence_ids.count(sequence_id)) {
-
-  //   }
-
-  //   // The sequence is missing in the new order. Release the blocks.
-  //   ReleaseBlocks(block_info->block_ids);
-  //   missing_sequence_ids.insert(sequence_id);
-  // }
-  // std::unordered_set<size_t> missing_sequence_ids;
-
-  // 2. Update the block tables so sequences point to the correct blocks in memory based on the new shape.
 }
 
 }  // namespace Generators

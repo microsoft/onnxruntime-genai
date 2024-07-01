@@ -320,60 +320,60 @@ void Cross_Cache::AddInputs() {
   }
 }
 
-PagedCacheOrchestrator::PagedCacheOrchestrator(const Model& model, State& state)
-    : model_{model},
-      state_{state},
-      paged_cache_(std::make_unique<PagedCacheManager>(MakeCacheOptions(model, state),
-                                                       &model.allocator_cpu_, model.allocator_device_)) {
-}
+// PagedCacheOrchestrator::PagedCacheOrchestrator(const Model& model, State& state)
+//     : model_{model},
+//       state_{state},
+//       paged_cache_(std::make_unique<PagedCacheManager>(MakeCacheOptions(model, state),
+//                                                        &model.allocator_cpu_, model.allocator_device_)) {
+// }
 
-void PagedCacheOrchestrator::Add() {
-  input_offset_ = state_.inputs_.size();
+// void PagedCacheOrchestrator::Add() {
+//   input_offset_ = state_.inputs_.size();
 
-  auto num_sequences = state_.params_->BatchBeamSize();
-  std::vector<size_t> sequence_ids(num_sequences);
-  std::iota(sequence_ids.begin(), sequence_ids.end(), 0);
-  for (int i = 0; i < num_sequences; ++i) {
-    paged_cache_->Add(i, state_.params_->sequence_length);
-  }
+//   auto num_sequences = state_.params_->BatchBeamSize();
+//   std::vector<size_t> sequence_ids(num_sequences);
+//   std::iota(sequence_ids.begin(), sequence_ids.end(), 0);
+//   for (int i = 0; i < num_sequences; ++i) {
+//     paged_cache_->Add(i, state_.params_->sequence_length);
+//   }
 
-  for (int i = 0; i < layer_count_; ++i) {
-    auto [key_cache, value_cache] = paged_cache_->Cache(i);
-    state_.input_names_.push_back((PagedKeyCacheNamePrefix + std::to_string(i)).c_str());
-    state_.inputs_.push_back(key_cache);
-    state_.input_names_.push_back((PagedValueCacheNamePrefix + std::to_string(i)).c_str());
-    state_.inputs_.push_back(value_cache);
-  }
+//   for (int i = 0; i < layer_count_; ++i) {
+//     auto [key_cache, value_cache] = paged_cache_->Cache(i);
+//     state_.input_names_.push_back((PagedKeyCacheNamePrefix + std::to_string(i)).c_str());
+//     state_.inputs_.push_back(key_cache);
+//     state_.input_names_.push_back((PagedValueCacheNamePrefix + std::to_string(i)).c_str());
+//     state_.inputs_.push_back(value_cache);
+//   }
 
-  state_.input_names_.push_back(PagedCacheBlockTablesName);
-  block_tables_ = paged_cache_->BlockTables(sequence_ids);
-  state_.inputs_.push_back(block_tables_.get());
-  state_.input_names_.push_back(PagedCacheSlotMappingName);
-  slot_mapping_ = paged_cache_->SlotMapping(sequence_ids);
-  state_.inputs_.push_back(slot_mapping_.get());
-}
+//   state_.input_names_.push_back(PagedCacheBlockTablesName);
+//   block_tables_ = paged_cache_->BlockTables(sequence_ids);
+//   state_.inputs_.push_back(block_tables_.get());
+//   state_.input_names_.push_back(PagedCacheSlotMappingName);
+//   slot_mapping_ = paged_cache_->SlotMapping(sequence_ids);
+//   state_.inputs_.push_back(slot_mapping_.get());
+// }
 
-void PagedCacheOrchestrator::Update([[maybe_unused]] std::span<const int32_t> beam_indices,
-                                    [[maybe_unused]] int current_length) {
-  auto num_sequences = state_.params_->BatchBeamSize();
-  std::vector<size_t> sequence_ids(num_sequences);
-  std::iota(sequence_ids.begin(), sequence_ids.end(), 0);
-  for (int i = 0; i < num_sequences; ++i) {
-    paged_cache_->AddToken(i);
-  }
+// void PagedCacheOrchestrator::Update([[maybe_unused]] std::span<const int32_t> beam_indices,
+//                                     [[maybe_unused]] int current_length) {
+//   auto num_sequences = state_.params_->BatchBeamSize();
+//   std::vector<size_t> sequence_ids(num_sequences);
+//   std::iota(sequence_ids.begin(), sequence_ids.end(), 0);
+//   for (int i = 0; i < num_sequences; ++i) {
+//     paged_cache_->AddToken(i);
+//   }
 
-  size_t input_offset = state_.inputs_.size();
+//   size_t input_offset = state_.inputs_.size();
 
-  block_tables_ = paged_cache_->BlockTables(sequence_ids);
-  state_.inputs_[input_offset_ + layer_count_ * 2] = block_tables_.get();
-  slot_mapping_ = paged_cache_->SlotMapping(sequence_ids);
-  state_.inputs_[input_offset_ + layer_count_ * 2 + 1] = slot_mapping_.get();
-}
+//   block_tables_ = paged_cache_->BlockTables(sequence_ids);
+//   state_.inputs_[input_offset_ + layer_count_ * 2] = block_tables_.get();
+//   slot_mapping_ = paged_cache_->SlotMapping(sequence_ids);
+//   state_.inputs_[input_offset_ + layer_count_ * 2 + 1] = slot_mapping_.get();
+// }
 
 std::unique_ptr<CacheManagerInterface> CreateCacheManager(const Model& model, State& state) {
-  if (model.config_->model.kv_cache.paged_cache) {
-    return std::make_unique<PagedCacheOrchestrator>(model, state);
-  }
+  // if (model.config_->model.kv_cache.paged_cache) {
+  //   return std::make_unique<PagedCacheOrchestrator>(model, state);
+  // }
 
   return std::make_unique<KV_Cache>(model, state);
 }
