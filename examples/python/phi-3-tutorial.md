@@ -160,3 +160,60 @@ Are you on a Windows machine with GPU?
 
    This joke plays on the double meaning of "creativity" in the context of AI. Generative AI is often associated with its ability to produce creative content, but in this joke, it\'s humorously suggested that the AI is going to school to enhance its creative skills, as if it were a human student. 
    ```
+
+
+## Run in your Code/REPL
+
+If you want to run the model directly, as a script or testing in a jupyter notebook, the following code snippet will help you
+
+```py
+import onnxruntime_genai as og
+
+chat_template = '<|user|>\n{input} <|end|>\n<|assistant|>'
+
+# GPU
+# model_name = "Phi-3-mini-4k-instruct-onnx/cuda/cuda-int4-rtn-block-32 "
+
+# CPU
+model_name = "Phi-3-mini-4k-instruct-onnx/cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4"
+
+# DirectML
+# model_name = "Phi-3-mini-4k-instruct-onnx\directml\directml-int4-awq-block-128"
+
+model = og.Model(model_name)
+tokenizer = og.Tokenizer(model)
+```
+Then, define your predict function
+```py
+def predict(text: str) -> str:
+    # text = "How are you doing today?"
+    tokenizer_stream = tokenizer.create_stream()
+    search_options = {
+        "do_sample": True,
+        "temperature": 0.6,
+        "top_p": 1,
+    }
+    prompt = f'{chat_template.format(input=text)}'
+    
+    input_tokens = tokenizer.encode(prompt)
+    
+    params = og.GeneratorParams(model)
+    params.try_use_cuda_graph_with_max_batch_size(1)
+    params.set_search_options(**search_options)
+    params.input_ids = input_tokens
+    
+    generator = og.Generator(model, params)
+    output = []
+    while not generator.is_done():
+        generator.compute_logits()
+        generator.generate_next_token()
+        new_token = generator.get_next_tokens()[0]
+        decoded = tokenizer_stream.decode(new_token)
+        print(decoded, end='', flush=True)
+        output.append(decoded)
+    return "".join(output)
+```
+Now you can use it, and save the output
+```py
+model_prediction = predict("Can you tell me a joke?")
+```
