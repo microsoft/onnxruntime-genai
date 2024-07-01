@@ -39,6 +39,9 @@ struct LoraParam : public GeneratorParams::Input {
 /// </summary>
 class LoraAdapter {
  public:
+  using ParamContainer = std::unordered_map<std::string, LoraParam>;
+  using param_iterator = ParamContainer::const_iterator;
+
   /// <summary>
   /// Construct a named adapter
   /// </summary>
@@ -77,7 +80,7 @@ class LoraAdapter {
   /// <summary>
   /// Deactivates the adapter.
   /// </summary>
-  void Deactivate() { active_ = false; }
+  void Deactivate() noexcept { active_ = false; }
 
   /// <summary>
   /// Add Lora Parameter to the adapter
@@ -89,6 +92,14 @@ class LoraAdapter {
     if (!p.second) {
       throw std::runtime_error("Adapter: " + name_ + " already has a parameter named: " + param_name);
     }
+  }
+
+  /// <summary>
+  /// Returns iterators to the parameters container
+  /// </summary>
+  /// <returns></returns>
+  const auto& GetParameters() const noexcept { 
+    return parameters_;
   }
 
  private:
@@ -171,17 +182,17 @@ class LoraAdapterManagement {
     for (const auto& [_, adapter] : adapters_) {
       /// XXX: We need to generate empty inputs for inactive adapters,
       if (adapter.IsActive()) {
-        for (const auto& [name, param] : adapter.parameters_) {
+        for (const auto& [name, param] : adapter.GetParameters()) {
           *names_out = name.c_str();
           ++names_out;
-          *params_out = param.tensor->ort_tensor_;
+          *params_out = param.tensor;
           ++params_out;
         }
       } else {
-        for (const auto& [name, param] : adapter.parameters_) {
+        for (const auto& [name, param] : adapter.GetParameters()) {
           *names_out = name.c_str();
           ++names_out;
-          *params_out = CreateEmptyInput(*param.tensor)->ort_tensor_;
+          *params_out = CreateEmptyInput(*param.tensor);
           ++params_out;
         }
       }

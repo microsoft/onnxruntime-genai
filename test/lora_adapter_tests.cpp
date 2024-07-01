@@ -5,6 +5,8 @@
 #include <generators.h>
 #include <models/model.h>
 #include <models/lora_adapter.h>
+
+#include <algorithm>
 #include <iostream>
 
 namespace Generators {
@@ -21,25 +23,64 @@ TEST(GeneratorsTests, LoraAdapterManagementTests) {
 
   lora_adapter_management.CreateAdapter(adapter_name_2);
 
-  const std::array<int64_t, 2> lora_param_shape = {4, 2};
-  // Generate random data for lora param according to the shape above
+  // Try to activate adapters with no parameters, should error out
+  const std::string activate[] = {adapter_name_1};
+  ASSERT_THROW(lora_adapter_management.ActivateAdapters(activate), std::runtime_error);
+
+  // Two shapes with different lora_r placements
+  const std::array<int64_t, 2> lora_param_shape_1 = {4, 2};
+  const std::array<int64_t, 2> lora_param_shape_2 = {2, 4};
+
+  // Lora parameter data
   std::array<float, 8> lora_param = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f};
 
   auto mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
-  auto ort_value_param =
-      OrtValue::CreateTensor(*mem_info, lora_param.data(), lora_param.size() * sizeof(float), lora_param_shape,
+  auto ort_value_param_1 =
+      OrtValue::CreateTensor(*mem_info, lora_param.data(), lora_param.size() * sizeof(float), lora_param_shape_1,
                              ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
 
-  auto param_tensor = std::make_shared<Generators::Tensor>();
-  param_tensor->ort_tensor_ = std::move(ort_value_param);
+  auto param_tensor_1 = std::make_shared<Generators::Tensor>();
+  param_tensor_1->ort_tensor_ = std::move(ort_value_param_1);
 
-  lora_adapter_management.AddParameter(adapter_name_1, "lora_param_1", param_tensor);
-  lora_adapter_management.AddParameter(adapter_name_2, "lora_param_1", param_tensor);
+  lora_adapter_management.AddParameter(adapter_name_1, "lora_param_1", param_tensor_1);
 
-  const std::string activate[] = {adapter_name_1};
+  auto ort_value_param_2 =
+      OrtValue::CreateTensor(*mem_info, lora_param.data(), lora_param.size() * sizeof(float), lora_param_shape_2,
+                             ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+
+  auto param_tensor_2 = std::make_shared<Generators::Tensor>();
+  param_tensor_2->ort_tensor_ = std::move(ort_value_param_2);
+
+  lora_adapter_management.AddParameter(adapter_name_2, "lora_param_2", param_tensor_2);
+
+  {
+    // No adapters are active at this point
+    // Fetch parameters and names, and make sure that all of the parameters returned are empty.
+    std::vector<const char*> param_names;
+    std::vector<std::shared_ptr<Tensor>> params;
+    lora_adapter_management.OutputAdaptersParameters(std::back_inserter(param_names), std::back_inserter(params));
+
+    ASSERT_EQ(param_names.size(), 2U);
+    ASSERT_EQ(params.size(), 2U);
+
+    for (auto& ten : params) {
+      auto& ort_val = ten->ort_tensor_;
+      auto val_type_shape = ort_val->GetTensorTypeAndShapeInfo();
+      ASSERT_EQ(val_type_shape->GetElementType(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+      auto shape = val_type_shape->GetShape();
+      ASSERT_EQ(shape.size(), 2U);
+      if (shape[0] == 4) {
+        ASSERT_EQ(shape[1], 0);
+      } else {
+        ASSERT_EQ(shape[0], 0);
+      }
+    }
+  }
+
+  // Now active only one adapter
   lora_adapter_management.ActivateAdapters(activate);
 
-    // List active adapters
+  // List active adapters
   auto active_names = lora_adapter_management.GetActiveAdapterNames();
   ASSERT_EQ(active_names.size(), 1U);
   ASSERT_EQ(active_names[0], adapter_name_1);
@@ -47,6 +88,35 @@ TEST(GeneratorsTests, LoraAdapterManagementTests) {
   // Can not remove active adapter
   ASSERT_THROW(lora_adapter_management.RemoveAdapter(adapter_name_1), std::runtime_error);
 
+  {
+    // One parameter would be empty, another is not
+    std::vector<const char*> param_names;
+    std::vector<std::shared_ptr<Tensor>> params;
+    lora_adapter_management.OutputAdaptersParameters(std::back_inserter(param_names), std::back_inserter(params));
+
+    ASSERT_EQ(param_names.size(), 2U);
+    ASSERT_EQ(params.size(), 2U);
+
+    for (size_t i = 0; i < params.size(); ++i) {
+      auto& ort_val = params[i]->ort_tensor_;
+      auto val_type_shape = ort_val->GetTensorTypeAndShapeInfo();
+      ASSERT_EQ(val_type_shape->GetElementType(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+      auto shape = val_type_shape->GetShape();
+      ASSERT_EQ(shape.size(), 2U);
+
+      if (0 == strcmp(param_names[i], "lora_param_1")) {
+        ASSERT_EQ(shape[0], 4);
+        ASSERT_EQ(shape[1], 2);
+      } else {
+        // For inactive params shape must contain 1 zero
+        if (shape[0] == 4) {
+          ASSERT_EQ(shape[1], 0);
+        } else {
+          ASSERT_EQ(shape[0], 0);
+        }
+      }
+    }
+  }
 
   // Deactivate two even though only one is active, no error.
   const std::string deactivate[] = {adapter_name_1, adapter_name_1};

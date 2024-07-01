@@ -33,10 +33,10 @@ std::shared_ptr<Tensor> LoraAdapterManagement::CreateEmptyInput(const Tensor& te
   // Zero out lora_r dim
   const size_t last_dim = shape[num_dims - 1];
   const size_t penal_dim = shape[num_dims - 2];
-  if (shape[last_dim] < shape[penal_dim]) {
-    shape[last_dim] = 0;
+  if (last_dim < penal_dim) {
+    shape[num_dims - 1] = 0;
   } else {
-    shape[penal_dim] = 0;
+    shape[num_dims - 2] = 0;
   }
 
   const auto& mem_info = tensor.ort_tensor_->GetTensorMemoryInfo();
