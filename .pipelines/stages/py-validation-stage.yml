@@ -24,6 +24,9 @@ parameters:
 - name: ort_cuda_118_version
   type: string
 - name: ort_cuda_122_version
+  type: string
+- name: ort_rocm_version
+  type: string
 - name: ort_dml_version
   type: string
 - name: cuda_versions
