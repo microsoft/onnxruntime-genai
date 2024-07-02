@@ -7,8 +7,10 @@ import argparse
 import contextlib
 import os
 import platform
+import shlex
 import shutil
 import sys
+import textwrap
 
 from pathlib import Path
 
@@ -26,12 +28,33 @@ def _path_from_env_var(env_var: str):
 
 
 def _parse_args():
-    parser = argparse.ArgumentParser(
+    class Parser(argparse.ArgumentParser):
+        # override argument file line parsing behavior - allow multiple arguments per line and handle quotes
+        def convert_arg_line_to_args(self, arg_line):
+            return shlex.split(arg_line)
+
+    class HelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter):
+        pass
+
+    parser = Parser(
         description="ONNX Runtime GenAI Build Driver.",
+        epilog=textwrap.dedent("""
+            There are 3 phases which can be individually selected.
+
+            The update (--update) phase will run CMake to generate makefiles.
+            The build (--build) phase will build all projects.
+            The test (--test) phase will run all unit tests.
+
+            Default behavior is --update --build --test for native architecture builds.
+            Default behavior is --update --build for cross-compiled builds.
+
+            If phases are explicitly specified only those phases will be run.
+            E.g., run with --build to rebuild without running the update or test phases.
+            """),
         # files containing arguments can be specified on the command line with "@<filename>" and the arguments within
         # will be included at that point
         fromfile_prefix_chars="@",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        formatter_class=HelpFormatter,
     )
 
     parser.add_argument(
@@ -151,23 +174,6 @@ def _parse_args():
         help="Specify the minimum version of the target platform "
         "This is only supported on MacOS host",
     )
-
-    # now that all args are added, we can include the full help in the usage message.
-    parser.usage = f"""
-    {parser.format_help()}
-    
-There are 3 phases which can be individually selected.
-
-The update (--update) phase will run CMake to generate makefiles.
-The build (--build) phase will build all projects.
-The test (--test) phase will run all unit tests.
-
-Default behavior is --update --build --test for native architecture builds.
-Default behavior is --update --build for cross-compiled builds.
-
-If phases are explicitly specified only those phases will be run.
-  e.g. run with `--build` to rebuild without running the update or test phases
-"""
 
     return parser.parse_args()
 

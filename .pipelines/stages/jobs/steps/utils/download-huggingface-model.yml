@@ -1,0 +1,35 @@
+parameters:
+  - name: StepName
+    type: string
+  - name: WorkingDirectory
+    type: string
+  - name: HuggingFaceRepo
+    type: string
+  - name: RepoFolder
+    type: string
+  - name: LocalFolder
+    type: string
+  - name: HuggingFaceToken
+    type: string
+  - name: os
+    type: string
+
+steps:
+  - ${{ if eq(parameters.os, 'linux') }}:
+    - bash: |
+        python -m pip install "huggingface_hub[cli]"
+        huggingface-cli login --token $HF_TOKEN
+        huggingface-cli download ${{ parameters.HuggingFaceRepo }} --include ${{ parameters.RepoFolder }}/* --local-dir ${{ parameters.LocalFolder }}
+      displayName: ${{ parameters.StepName }}
+      workingDirectory: ${{ parameters.WorkingDirectory }}
+      env:
+        HF_TOKEN: ${{ parameters.HuggingFaceToken }}
+  - ${{ if eq(parameters.os, 'win') }}:
+    - powershell: |
+        python -m pip install "huggingface_hub[cli]"
+        huggingface-cli login --token $env:HF_TOKEN
+        huggingface-cli download ${{ parameters.HuggingFaceRepo }} --include ${{ parameters.RepoFolder }}/* --local-dir ${{ parameters.LocalFolder }}
+      displayName: ${{ parameters.StepName }}
+      workingDirectory: ${{ parameters.WorkingDirectory }}
+      env:
+        HF_TOKEN: ${{ parameters.HuggingFaceToken }}
