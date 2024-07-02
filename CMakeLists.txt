@@ -50,8 +50,21 @@ if(ENABLE_TESTS)
 endif()
 
 
-add_library(onnxruntime-genai SHARED ${generator_srcs})
-add_library(onnxruntime-genai-static STATIC ${generator_srcs})
+if(WIN32)
+  add_library(onnxruntime-genai SHARED ${generator_srcs} "${GENERATORS_ROOT}/dll/onnxruntime-genai.rc")
+  target_compile_definitions(onnxruntime-genai PRIVATE VERSION_INFO=\"${VERSION_INFO}\")
+  target_compile_definitions(onnxruntime-genai PRIVATE VERSION_MAJOR=${VERSION_MAJOR})
+  target_compile_definitions(onnxruntime-genai PRIVATE VERSION_MINOR=${VERSION_MINOR})
+  target_compile_definitions(onnxruntime-genai PRIVATE VERSION_PATCH=${VERSION_PATCH})
+  target_compile_definitions(onnxruntime-genai PRIVATE VERSION_SUFFIX=${VERSION_SUFFIX})
+  target_compile_definitions(onnxruntime-genai PRIVATE FILE_NAME=\"onnxruntime-genai.dll\")
+
+  add_library(onnxruntime-genai-static STATIC ${generator_srcs})
+else()
+  add_library(onnxruntime-genai SHARED ${generator_srcs})
+  add_library(onnxruntime-genai-static STATIC ${generator_srcs})
+endif()
+
 target_include_directories(onnxruntime-genai PRIVATE ${ORT_HEADER_DIR})
 target_include_directories(onnxruntime-genai-static PRIVATE ${ORT_HEADER_DIR})
 target_include_directories(onnxruntime-genai PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/include)
