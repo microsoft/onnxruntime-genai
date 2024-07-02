@@ -36,6 +36,13 @@ add_compile_definitions(BUILDING_ORT_GENAI_C)
 if(MSVC)
   # set updated value for __cplusplus macro instead of 199711L
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>)
+
+  add_compile_options(
+      "$<$<COMPILE_LANGUAGE:C,CXX>:/w15038>"
+      "$<$<COMPILE_LANGUAGE:C,CXX>:/wd4100>"
+      "$<$<COMPILE_LANGUAGE:C,CXX>:/W4>"
+      "$<$<COMPILE_LANGUAGE:C,CXX>:/WX>"
+  )
 endif()
 
 if(ENABLE_TESTS)

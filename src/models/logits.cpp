@@ -56,7 +56,6 @@ RoamingArray<float> Logits::Get() {
     logits_of_last_token = output_last_tokens_.get();
 
     size_t element_size = type_ == Ort::TypeToTensorType<float>::type ? 4 : 2;
-    size_t size_in_bytes = vocab_size * element_size;
     size_t vocab_index = 0;  // Simpler math to have this index go up by vocab_size for every logit chunk we process
 
     const auto* input_ids = state_.params_->input_ids.data();
