@@ -188,6 +188,17 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaModelActivateLoraAdapters(OgaModel* model,
                                                                 size_t num_adapters);
 
 /*
+ * \brief Deactivates one or more Lora Adapter previously activated within a given model, and
+ *        specified by adapter_names argument.
+ * \param[in] model The model to which the adapter belongs
+ * \param[in] adapter_names an array of UTF-8 encoded C-strings
+ * \param[in] num_names number of adapters to deactivate
+ * \return OgaResult containing the error message.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelDeactivateLoraAdapters(OgaModel* model, const char* adapter_names[],
+                                                                  size_t num_names);
+
+/*
  * \brief Deactivates one or more Lora Adapter previously activated within a given model. Once
  *        deactivated, it would no longer participate in inference.
  * \param[in] model The model to which the adapter belongs
@@ -195,7 +206,6 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaModelActivateLoraAdapters(OgaModel* model,
  */
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaModelDeactivateAllLoraAdapters(OgaModel* model);
-
 
 /*
  * \brief Returns a  number of currently active adapters
