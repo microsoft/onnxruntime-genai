@@ -23,17 +23,17 @@ parameters:
   - 'win'
 
 jobs:
-- job: nuget_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}_validating
+- job: nuget_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}_validation
   ${{ if eq(parameters.os, 'linux') }}:
     ${{ if eq(parameters.ep, 'cuda') }}:
-      pool: 'onnxruntime-Linux-GPU-A10'
+      pool: 'Onnxruntime-Linux-GPU'
     ${{ else }}:
       pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
   ${{ if eq(parameters.os, 'win') }}:
     ${{ if eq(parameters.ep, 'directml') }}:
       pool: 'onnxruntime-Win2022-GPU-dml-A10'
     ${{ elseif eq(parameters.ep, 'cuda') }}:
-      pool: 'onnxruntime-Win2022-GPU-T4'
+      pool: 'onnxruntime-Win2022-GPU-A10'
     ${{ elseif eq(parameters.arch, 'arm64') }}:
       pool: 'onnxruntime-genai-windows-vs-2022-arm64'
     ${{ else }}:
