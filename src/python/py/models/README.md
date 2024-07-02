@@ -171,6 +171,20 @@ python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o p
 python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options enable_cuda_graph=1
 ```
 
+#### Quantization Provider
+
+This scenario is for when you want to use NVIDIA's [TensorRT Model Optimizer (ModelOpt)](https://github.com/NVIDIA/TensorRT-Model-Optimizer) in place of the default Intel Neural Compressor. Requires prior [installation](https://github.com/NVIDIA/TensorRT-Model-Optimizer?tab=readme-ov-file#installation).
+
+Note: Using ModelOpt can lead to slower processing times but better overall quantization
+
+```
+# From wheel:
+python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options quant_provider=modelopt
+
+# From source:
+python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options quant_provider=modelopt
+```
+
 ### Unit Testing Models
 
 This scenario is where your PyTorch model is already downloaded locally (either in the default Hugging Face cache directory or in a local folder on disk). If it is not already downloaded locally, here is an example of how you can download it.
