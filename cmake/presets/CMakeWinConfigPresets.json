@@ -6,8 +6,6 @@
       "generator": "Visual Studio 17 2022",
       "architecture": "x64",
       "cacheVariables": {
-        "CMAKE_CXX_FLAGS_INIT": "/w15038 /wd4100 /W4 /WX",
-        "CMAKE_C_FLAGS_INIT": "/w15038 /wd4100 /W4 /WX",
         "CMAKE_EXE_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
         "CMAKE_MODULE_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
         "CMAKE_SHARED_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",

@@ -35,10 +35,10 @@ include(cmake/cxx_standard.cmake)
 add_compile_definitions(BUILDING_ORT_GENAI_C)
 if(MSVC)
   # set updated value for __cplusplus macro instead of 199711L
-  SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Zc:__cplusplus")
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>)
 
-  SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /w15038 /wd4100 /W4 /WX")
-  SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /w15038 /wd4100 /W4 /WX")
+  add_compile_options($<$<COMPILE_LANGUAGE:C>:/w15038 /wd4100 /W4 /WX)
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/w15038 /wd4100 /W4 /WX)
 endif()
 
 if(ENABLE_TESTS)
