@@ -15,7 +15,7 @@ namespace {
 //   return result;
 // }
 
-constexpr double empty_input_buf[] = {0};
+int64_t empty_input_buf[] = {0};
 }  // namespace
 
 LoraAdapterManagement::LoraAdapterManagement() = default;
@@ -40,7 +40,7 @@ std::shared_ptr<Tensor> LoraAdapterManagement::CreateEmptyInput(const Tensor& te
   }
 
   const auto& mem_info = tensor.ort_tensor_->GetTensorMemoryInfo();
-  auto ort_value = OrtValue::CreateTensor(mem_info, const_cast<double*>(empty_input_buf), 0, shape,
+  auto ort_value = OrtValue::CreateTensor(mem_info, &empty_input_buf, 0, shape,
                                           type_and_shape->GetElementType());
 
   auto result = std::make_shared<Generators::Tensor>();
