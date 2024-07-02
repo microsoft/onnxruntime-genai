@@ -32,16 +32,14 @@ TEST(CAPITests, TokenizerCAPI) {
 
   // Encode all strings
   {
-    for (auto& string : input_strings)
-      tokenizer->Encode(string, *sequences);
+    for (auto& string : input_strings) tokenizer->Encode(string, *sequences);
   }
 
   // Decode one at a time
   for (size_t i = 0; i < sequences->Count(); i++) {
     auto out_string = tokenizer->Decode(sequences->Get(i));
     std::cout << "Decoded string:" << out_string << std::endl;
-    if (strcmp(input_strings[i], out_string) != 0)
-      throw std::runtime_error("Token decoding mismatch");
+    if (strcmp(input_strings[i], out_string) != 0) throw std::runtime_error("Token decoding mismatch");
   }
 
   // Stream Decode one at a time
@@ -72,8 +70,7 @@ TEST(CAPITests, EndToEndPhiBatch) {
   };
 
   auto input_sequences = OgaSequences::Create();
-  for (auto& string : input_strings)
-    tokenizer->Encode(string, *input_sequences);
+  for (auto& string : input_strings) tokenizer->Encode(string, *input_sequences);
 
   auto params = OgaGeneratorParams::Create(*model);
   params->SetSearchOption("max_length", 20);
@@ -91,9 +88,7 @@ TEST(CAPITests, EndToEndPhiBatch) {
 
 TEST(CAPITests, Tensor_And_AddExtraInput) {
   // Create a [3 4] shaped tensor
-  std::array<float, 12> data{0, 1, 2, 3,
-                             10, 11, 12, 13,
-                             20, 21, 22, 23};
+  std::array<float, 12> data{0, 1, 2, 3, 10, 11, 12, 13, 20, 21, 22, 23};
   std::vector<int64_t> shape{3, 4};  // Use vector so we can easily compare for equality later
 
   auto tensor = OgaTensor::Create(data.data(), shape.data(), shape.size(), OgaElementType_float32);
@@ -108,10 +103,68 @@ TEST(CAPITests, Tensor_And_AddExtraInput) {
   params->SetModelInput("test_input", *tensor);
 }
 
+TEST(CAPITests, LoraManagement) {
+  const std::string adapter_name_1 = "adapter_1";
+  const std::string adapter_name_2 = "adapter_2";
+
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  model->CreateLoraAdapter(adapter_name_1);
+
+  // Creating a duplicate name should throw
+  ASSERT_THROW(model->CreateLoraAdapter(adapter_name_1), std::runtime_error);
+
+  model->CreateLoraAdapter(adapter_name_2);
+
+  // Try to activate adapters with no parameters, should error out
+  const std::vector<std::string> activate = {adapter_name_1};
+  ASSERT_THROW(model->ActivateLoraAdapters(activate), std::runtime_error);
+
+  // Two shapes with different lora_r placements
+  const std::array<int64_t, 2> lora_param_shape_1 = {4, 2};
+  const std::array<int64_t, 2> lora_param_shape_2 = {2, 4};
+
+  // Lora parameter data
+  std::array<float, 8> lora_param = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f};
+
+  auto param_1 = OgaTensor::Create(lora_param.data(), lora_param_shape_1.data(), lora_param_shape_1.size(),
+                                   OgaElementType_float32);
+
+  model->AddLoraAdapterParameter(adapter_name_1, "lora_param_1", *param_1);
+
+  auto param_2 = OgaTensor::Create(lora_param.data(), lora_param_shape_2.data(), lora_param_shape_2.size(),
+                                   OgaElementType_float32);
+
+  model->AddLoraAdapterParameter(adapter_name_2, "lora_param_2", *param_2);
+
+  // Activate one adapter
+  model->ActivateLoraAdapters(activate);
+
+  auto active_adapters = model->GetActiveAdapterNames();
+  ASSERT_EQ(active_adapters.size(), 1U);
+  ASSERT_EQ(active_adapters[0], adapter_name_1);
+
+  // Can not remove active adapter
+  ASSERT_THROW(model->RemoveLoraAdapter(adapter_name_1), std::runtime_error);
+
+  // Deactivatee one active and one inactive. No error.
+  const std::vector<std::string> deactivate = {adapter_name_1, adapter_name_1};
+  ASSERT_NO_THROW(model->DeactivateLoraAdapters(deactivate));
+
+  active_adapters = model->GetActiveAdapterNames();
+  ASSERT_EQ(active_adapters.size(), 0U);
+
+  // No active adapters, this is a no-op no error
+  ASSERT_NO_THROW(model->DeactivateAllLoraAdapters());
+
+  model->RemoveLoraAdapter(adapter_name_1);
+  model->RemoveLoraAdapter(adapter_name_2);
+}
+
 TEST(CAPITests, Logging) {
   // Trivial test to ensure the API builds properly
   Oga::SetLogBool("enabled", true);
-  Oga::SetLogString("filename", nullptr);  // If we had a filename set, this would stop logging to the file and go back to the console
+  Oga::SetLogString(
+      "filename", nullptr);  // If we had a filename set, this would stop logging to the file and go back to the console
   Oga::SetLogBool("enabled", false);
 }
 
@@ -121,17 +174,17 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
   std::vector<int64_t> input_ids_shape{2, 4};
   std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
 
-  std::vector<int32_t> expected_output{
-      0, 0, 0, 52, 204, 204, 204, 204, 204, 204,
-      0, 0, 195, 731, 731, 114, 114, 114, 114, 114};
+  std::vector<int32_t> expected_output{0, 0, 0,   52,  204, 204, 204, 204, 204, 204,
+                                       0, 0, 195, 731, 731, 114, 114, 114, 114, 114};
 
   auto sequence_length = input_ids_shape[1];
   auto batch_size = input_ids_shape[0];
   int max_length = 10;
 
   // To generate this file:
-  // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
-  // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
+  // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output
+  // tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20 And copy the resulting gpt2_init_past_fp32.onnx file
+  // into these two files (as it's the same for gpt2)
 
   auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
@@ -188,8 +241,7 @@ struct Phi2Test {
         "The quick brown fox jumps over the lazy dog.",
     };
 
-    for (auto& string : input_strings)
-      tokenizer_->Encode(string, *input_sequences_);
+    for (auto& string : input_strings) tokenizer_->Encode(string, *input_sequences_);
 
     params_ = OgaGeneratorParams::Create(*model_);
     params_->SetInputSequences(*input_sequences_);

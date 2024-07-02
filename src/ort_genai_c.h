@@ -184,7 +184,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaModelAddLoraParameter(OgaModel* model, con
  * \return OgaResult containing error message. If any of the specified adapters do not exist or
  *         already active, the error message would contain the name of the adapter and the call has no effect.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaModelActivateLoraAdapters(OgaModel* model, const char* adapter_names[],
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelActivateLoraAdapters(OgaModel* model, const char* const* adapter_names,
                                                                 size_t num_adapters);
 
 /*
@@ -195,7 +195,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaModelActivateLoraAdapters(OgaModel* model,
  * \param[in] num_names number of adapters to deactivate
  * \return OgaResult containing the error message.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaModelDeactivateLoraAdapters(OgaModel* model, const char* adapter_names[],
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelDeactivateLoraAdapters(OgaModel* model, const char* const* adapter_names,
                                                                   size_t num_names);
 
 /*

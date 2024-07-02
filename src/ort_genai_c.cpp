@@ -113,7 +113,7 @@ OgaResult* OGA_API_CALL OgaModelAddLoraParameter(OgaModel* model, const char* ad
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaModelActivateLoraAdapters(OgaModel* model, const char* adapter_names[],
+OgaResult* OGA_API_CALL OgaModelActivateLoraAdapters(OgaModel* model, const char* const* adapter_names,
                                                      size_t num_adapters) {
   OGA_TRY
   auto& lora_management = reinterpret_cast<Generators::Model*>(model)->GetLoraAdapterManagement();
@@ -125,7 +125,7 @@ OgaResult* OGA_API_CALL OgaModelActivateLoraAdapters(OgaModel* model, const char
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaModelDeactivateLoraAdapters(OgaModel* model, const char* adapter_names[], size_t num_names) {
+OgaResult* OGA_API_CALL OgaModelDeactivateLoraAdapters(OgaModel* model, const char* const* adapter_names, size_t num_names) {
   OGA_TRY
   auto& lora_management = reinterpret_cast<Generators::Model*>(model)->GetLoraAdapterManagement();
   std::vector<std::string> names;

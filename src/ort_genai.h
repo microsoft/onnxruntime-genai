@@ -73,27 +73,65 @@ struct OgaModel : OgaAbstract {
     return std::unique_ptr<OgaSequences>(p);
   }
 
-  void CreateLoraAdapter(std::string_view adapter_name) {
-     OgaCheckResult(OgaCreateLoraAdapter(this, adapter_name.data()));
+  /// <summary>
+  /// Creates Lora adapter within a given model.
+  /// Initially it has no parameters. Use AddLoraAdapterParameter to add parameters.
+  /// </summary>
+  /// <param name="adapter_name">name of the the adapter to create</param>
+  /// <throws>std::runtime_error if the adapter already exists</throws>
+  void CreateLoraAdapter(const std::string& adapter_name) {
+     OgaCheckResult(OgaCreateLoraAdapter(this, adapter_name.c_str()));
   }
 
-  void AddLoraAdapterParameter(std::string_view adapter_name, std::string_view param_name, OgaTensor& tensor) {
-    OgaCheckResult(OgaModelAddLoraParameter(this, adapter_name.data(), param_name.data(), &tensor));
+  /// <summary>
+  /// Adds a parameter to the Lora adapter that was created using CreateLoraAdapter().
+  /// </summary>
+  /// <param name="adapter_name">Existing adapter name</param>
+  /// <param name="param_name">name of the parameter to be created</param>
+  /// <param name="tensor">OgaTensor that points to a buffer with parameter data</param>
+  /// <throws>std::runtime_error if the adapter does not exist or the parameter already exists</throws>
+  void AddLoraAdapterParameter(const std::string& adapter_name, const std::string& param_name, OgaTensor& tensor) {
+    OgaCheckResult(OgaModelAddLoraParameter(this, adapter_name.c_str(), param_name.c_str(), &tensor));
   }
 
-  void ActiveLoraAdapters(const char** adapter_names, size_t num_names) {
-    OgaCheckResult(OgaModelActivateLoraAdapters(this, adapter_names, num_names));
+  /// <summary>
+  /// Activate specified Lora Adapters
+  /// </summary>
+  /// <param name="adapter_names">a collection of adapter names</param>
+  /// <throws>std::runtime_error if any of the adapters are already active</throws>
+  void ActivateLoraAdapters(const std::vector<std::string>& adapter_names) {
+    std::vector<const char*> adapter_names_ptrs;
+    adapter_names_ptrs.reserve(adapter_names.size());
+    for (const auto& name : adapter_names) {
+      adapter_names_ptrs.emplace_back(name.c_str());
+    }
+    OgaCheckResult(OgaModelActivateLoraAdapters(this, adapter_names_ptrs.data(), adapter_names_ptrs.size()));
   }
 
+  /// <summary>
+  /// Activate specified Lora Adapters
+  /// </summary>
+  /// <param name="adapter_names">a collection of adapter names</param>
+  /// <throws>std::runtime_error if any of the adapters are already active</throws>
+  void ActivateLoraAdapters(const std::vector<const char*>& adapter_names, size_t num_names) {
+    OgaCheckResult(OgaModelActivateLoraAdapters(this, adapter_names.data(), num_names));
+  }
+
+  /// <summary>
+  /// Returns names of all activated adapters
+  /// </summary>
+  /// <returns>a vector of strings</returns>
   std::vector<std::string> GetActiveAdapterNames() { 
     std::vector<std::string> result;
+
     size_t count = 0;
     OgaCheckResult(OgaModelGetActiveLoraAdaptersCount(this, &count));
     if (count == 0) return result;
 
     std::vector<const char*> buffer;
-    buffer.reserve(count);
+    buffer.resize(count);
     OgaCheckResult(OgaModelGetActiveLoraAdapters(this, buffer.data(), &count));
+    buffer.resize(count);
 
     result.reserve(count);
     for (size_t i = 0; i < count; ++i) {
@@ -102,12 +140,45 @@ struct OgaModel : OgaAbstract {
     return result;
   }
 
+  /// <summary>
+  /// Deactivate specified Lora Adapters. No error is reported
+  /// if any of the adapters are not active.
+  /// </summary>
+  /// <param name="adapter_names"></param>
+  void DeactivateLoraAdapters(const std::vector<std::string>& adapter_names) {
+    std::vector<const char*> adapter_names_ptrs;
+    adapter_names_ptrs.reserve(adapter_names.size());
+    for (const auto& name : adapter_names) {
+      adapter_names_ptrs.emplace_back(name.c_str());
+    }
+    OgaCheckResult(OgaModelDeactivateLoraAdapters(this, adapter_names_ptrs.data(), adapter_names_ptrs.size()));
+  }
+
+  /// <summary>
+  /// Deactivate specified Lora Adapters. No error is reported
+  /// if any of the adapters are not active.
+  /// 
+  /// </summary>
+  /// <param name="adapter_names"></param>
+  void DeactivateLoraAdapters(const std::vector<const char*>& adapter_names) {
+    OgaCheckResult(OgaModelDeactivateLoraAdapters(this, adapter_names.data(), adapter_names.size()));
+  }
+
+  /// <summary>
+  /// Deactivates all active lora adapters.
+  /// No error is reported if there is no active adapters.
+  /// </summary>
   void DeactivateAllLoraAdapters() { 
     OgaCheckResult(OgaModelDeactivateAllLoraAdapters(this));
   }
 
-  void RemoveLoraAdapter(std::string_view adapter_name) {
-     OgaCheckResult(OgaRemoveLoraAdapter(this, adapter_name.data()));
+  /// <summary>
+  /// Removes a Lora adapter from the model.
+  /// </summary>
+  /// <param name="adapter_name">name of the adapter</param>
+  /// <throws>std::runtime_error if the adapter is active</throws>
+  void RemoveLoraAdapter(const std::string& adapter_name) {
+     OgaCheckResult(OgaRemoveLoraAdapter(this, adapter_name.c_str()));
   }
 
   static void operator delete(void* p) { OgaDestroyModel(reinterpret_cast<OgaModel*>(p)); }
