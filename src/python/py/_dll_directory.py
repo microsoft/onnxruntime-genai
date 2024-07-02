@@ -14,7 +14,7 @@ def add_onnxruntime_dependency():
     This function is a no-op on non-Windows platforms.
     """
     if _is_windows():
-        import importlib
+        import importlib.util
         ort_package_path = importlib.util.find_spec("onnxruntime").submodule_search_locations[0]
         os.add_dll_directory(os.path.join(ort_package_path, "capi"))
 
