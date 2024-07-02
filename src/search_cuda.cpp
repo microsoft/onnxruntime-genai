@@ -290,6 +290,16 @@ void BeamSearch_Cuda::Finalize(size_t num_return_sequences) {
   beam_scorer_->Finalize(sequences_, num_return_sequences);
 }
 
+RoamingArray<int32_t> BeamSearch_Cuda::GetSequence(size_t index) {
+  size_t batch_id = index / params_->search.num_return_sequences;
+  size_t beam_id = index % params_->search.num_return_sequences;
+  return beam_scorer_->GetBeamHypothesis(batch_id, beam_id);
+}
+
+RoamingArray<int32_t> BeamSearch_Cuda::GetSequence(size_t batch_id, size_t beam_id) {
+  return beam_scorer_->GetBeamHypothesis(batch_id, beam_id);
+}
+
 #if 0
 // Not needed, for greedy can just grab the output sequence directly?
 void GreedySearch::Finalize(size_t num_return_sequences, std::span<int32_t> output, std::span<float> sequence_scores) {

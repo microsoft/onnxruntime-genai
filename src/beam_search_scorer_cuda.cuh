@@ -1,3 +1,5 @@
+#include "smartptrs.h"
+
 namespace Generators {
 namespace cuda {
 
@@ -20,12 +22,17 @@ struct BeamHypotheses {
   // Return true if this beats the worst score in the hypothesis
   __device__ bool CanImprove(float best_sum_logprobs, int current_length) const;
 
+  // RoamingArray<int32_t> GetHypothesis(size_t batch_id, size_t beam_id) const {
+  //   // auto beam_span = std::span<int32_t>(beams_[index].hypothesis, beams_[index].hypothesis_length);
+  //   return gpu_span<int32_t>{const_cast<int32_t*>(beams_[index].hypothesis), beams_[index].hypothesis_length};
+  // }
+
   // Output results
-  __device__ void Output(int top_k,                 // number of sequences to return
-                         int max_length,            // max sequence length
-                         int pad_token_id,          // pad token
-                         int32_t* sequences,        // buffer with pad token, shape (num_return_sequences, max_length)
-                         float* sequences_scores);  // buffer for sequence scores, with shape (num_return_sequences)
+  // __device__ void Output(int top_k,                 // number of sequences to return
+  //                        int max_length,            // max sequence length
+  //                        int pad_token_id,          // pad token
+  //                        int32_t* sequences,        // buffer with pad token, shape (num_return_sequences, max_length)
+  //                        float* sequences_scores);  // buffer for sequence scores, with shape (num_return_sequences)
 };
 
 struct BeamScorerState {
@@ -71,9 +78,16 @@ void LaunchBeamSearchScorer_Finalize(int batch_size,
                                      int sequence_length,
                                      std::span<BeamHypotheses> beam_hyps_,
                                      std::span<const float> final_beam_scores,
-                                     std::span<int32_t> output,
-                                     std::span<float> sequence_scores,
                                      cudaStream_t stream);
+
+// Since we need to index through a couple layers of GPU memory, we need to provide a way to get the pointers
+void LaunchBeamSearchScorer_GetHypothesisPtr(size_t batch_id,
+                                             size_t beam_id,
+                                             gpu_span<BeamHypotheses> beam_hyps,
+                                             int32_t** hypothesis_ptr,
+                                             int* hypothesis_length,
+                                             float* hypothesis_score,
+                                             cudaStream_t stream);
 
 void LaunchInitScoresKernel(float* beam_scores,
                             int batch_size,

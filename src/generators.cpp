@@ -207,7 +207,7 @@ TokenSequences Generate(const Model& model, const GeneratorParams& params) {
 
   TokenSequences result;
 
-  auto& search = generator->search_;
+  // auto& search = generator->search_;
   // TODO(aciddelgado): Awful mess. Refactor.
   // if (params.search.num_beams > 1) {
   //   // Beam search case
@@ -227,6 +227,7 @@ TokenSequences Generate(const Model& model, const GeneratorParams& params) {
   // Sampling case
   for (int i = 0; i < params.batch_size * params.search.num_return_sequences; i++) {
     auto sequence = generator->search_->GetSequence(i);
+    std::cout << "Here" << std::endl;
     auto sequence_cpu = sequence.GetCPU();
 
     auto& v = result.emplace_back();

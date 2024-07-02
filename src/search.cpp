@@ -288,7 +288,6 @@ void BeamSearch_Cpu::Finalize(size_t num_return_sequences) {
 RoamingArray<int32_t> BeamSearch_Cpu::GetSequence(size_t index) {
   size_t batch_id = index / params_->search.num_return_sequences;
   size_t beam_id = index % params_->search.num_return_sequences;
-  std::cout << "batch_id: " << batch_id << ", beam_id: " << beam_id << std::endl;
   BeamHypotheses beam_hyp = beam_scorer_->GetBeamHypotheses(batch_id);
   return beam_hyp.GetHypothesis(beam_id);
 }

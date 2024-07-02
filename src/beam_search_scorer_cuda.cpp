@@ -81,7 +81,16 @@ bool BeamSearchScorer_Cuda::IsDoneLater() const {
 
 void BeamSearchScorer_Cuda::Finalize(Sequences_Cuda& sequences,
                                      size_t num_return_sequences) {
-  cuda::LaunchBeamSearchScorer_Finalize(state_cpu_->batch_size_, *state_gpu_, sequences.GetSequences(), sequences.GetSequenceLength(), beam_hyps_, next_beam_scores_, output, sequence_scores, stream_);
+  cuda::LaunchBeamSearchScorer_Finalize(state_cpu_->batch_size_, *state_gpu_, sequences.GetSequences(), sequences.GetSequenceLength(), beam_hyps_, next_beam_scores_, stream_);
+}
+
+RoamingArray<int32_t> BeamSearchScorer_Cuda::GetBeamHypothesis(size_t batch_id, size_t beam_id) const {
+  cuda_host_unique_ptr<int32_t*> hypothesis_ptr = CudaMallocHostArray<int32_t*>(1);
+  cuda_host_unique_ptr<int> hypothesis_length = CudaMallocHostArray<int>(1);
+  cuda_host_unique_ptr<float> hypothesis_score = CudaMallocHostArray<float>(1);
+  cuda::LaunchBeamSearchScorer_GetHypothesisPtr(batch_id, beam_id, beam_hyps_, hypothesis_ptr.get(), hypothesis_length.get(), hypothesis_score.get(), stream_);
+  std::span<int32_t> hypothesis_span(*hypothesis_ptr.get(), *hypothesis_length.get());
+  return gpu_span<int32_t>{hypothesis_span.data(), hypothesis_span.size()};
 }
 
 }  // namespace Generators

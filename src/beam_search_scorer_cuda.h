@@ -22,6 +22,8 @@ struct BeamSearchScorer_Cuda {
     return next_beam_indices_cpu_;
   }
   gpu_span<int32_t> GetNextIndicesGPU() { return next_beam_indices_; }
+  RoamingArray<int32_t> GetBeamHypothesis(size_t batch_id, size_t beam_id) const;
+  // LEFT OFF WITH ABOVE... RETHINK SO THAT WE CAN JUST GET THE HYPOTHESIS SEQUENCE OF TOKENS WITHOUT INDEXING INTO GPU MEMORY VIA CPU STUPID BS
 
  private:
   mutable cuda_event_holder event_process_complete_;

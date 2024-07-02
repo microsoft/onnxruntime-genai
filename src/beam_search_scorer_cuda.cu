@@ -71,29 +71,29 @@ __device__ bool BeamHypotheses::CanImprove(float best_sum_logprobs, int current_
   return beams_[beams_count_ - 1].score < current_score;
 }
 
-__device__ void BeamHypotheses::Output(
-    int top_k,
-    int max_length,
-    int pad_token_id,
-    int32_t* sequences,       // buffer of shape (num_return_sequences, max_length)
-    float* sequences_scores)  // buffer of shape (num_return_sequences) or empty
-{
-  // Copy the top_k beams into the sequences
-  for (int index = 0; index < top_k; index++) {
-    auto& item = beams_[index];
-    int32_t* target = sequences + index * max_length;
+// __device__ void BeamHypotheses::Output(
+//     int top_k,
+//     int max_length,
+//     int pad_token_id,
+//     int32_t* sequences,       // buffer of shape (num_return_sequences, max_length)
+//     float* sequences_scores)  // buffer of shape (num_return_sequences) or empty
+// {
+//   // Copy the top_k beams into the sequences
+//   for (int index = 0; index < top_k; index++) {
+//     auto& item = beams_[index];
+//     int32_t* target = sequences + index * max_length;
 
-    // Note that word_ids might be less than max_length.
-    for (int i = 0; i < item.hypothesis_length; i++)
-      target[i] = item.hypothesis[i];
-    // Pad remaining values with pad token id
-    for (int i = item.hypothesis_length; i < max_length; i++)
-      target[i] = pad_token_id;
+//     // Note that word_ids might be less than max_length.
+//     for (int i = 0; i < item.hypothesis_length; i++)
+//       target[i] = item.hypothesis[i];
+//     // Pad remaining values with pad token id
+//     for (int i = item.hypothesis_length; i < max_length; i++)
+//       target[i] = pad_token_id;
 
-    if (sequences_scores)
-      sequences_scores[index] = item.score;
-  }
-}
+//     if (sequences_scores)
+//       sequences_scores[index] = item.score;
+//   }
+// }
 
 __global__ void BeamSearchScorer_Process(BeamScorerState& state_cpu,
                                          BeamScorerState& state,
@@ -269,9 +269,7 @@ __global__ void BeamSearchScorer_Finalize(BeamScorerState& state,
                                           const int32_t* sequences_buffer,
                                           int sequence_length,
                                           BeamHypotheses* beam_hyps_,
-                                          const float* final_beam_scores,
-                                          int32_t* output,
-                                          float* sequence_scores) {
+                                          const float* final_beam_scores) {
   int batch_index = blockIdx.x * blockDim.x + threadIdx.x;
   if (batch_index >= state.batch_size_)
     return;
@@ -287,17 +285,17 @@ __global__ void BeamSearchScorer_Finalize(BeamScorerState& state,
     }
   }
 
-  int num_return_sequences = 1;
+  // int num_return_sequences = 1;
 
-  // Select the best hypotheses according to number of sequences to return.
-  auto batch_output = output + batch_index * num_return_sequences * state.max_length_;
+  // // Select the best hypotheses according to number of sequences to return.
+  // auto batch_output = output + batch_index * num_return_sequences * state.max_length_;
 
-  beam_hyp.Output(
-      num_return_sequences,
-      state.max_length_,
-      state.pad_token_id_,
-      batch_output,
-      sequence_scores ? sequence_scores + batch_index * num_return_sequences : nullptr);
+  // beam_hyp.Output(
+  //     num_return_sequences,
+  //     state.max_length_,
+  //     state.pad_token_id_,
+  //     batch_output,
+  //     sequence_scores ? sequence_scores + batch_index * num_return_sequences : nullptr);
 }
 
 void LaunchBeamSearchScorer_Finalize(int batch_size,
@@ -306,16 +304,41 @@ void LaunchBeamSearchScorer_Finalize(int batch_size,
                                      int sequence_length,
                                      std::span<BeamHypotheses> beam_hyps,
                                      std::span<const float> final_beam_scores,
-                                     std::span<int32_t> output,
-                                     std::span<float> sequence_scores,
                                      cudaStream_t stream) {
   BeamSearchScorer_Finalize<<<1, batch_size, 0, stream>>>(state,
                                                           sequences.data(),
                                                           sequence_length,
                                                           beam_hyps.data(),
-                                                          final_beam_scores.data(),
-                                                          output.data(),
-                                                          sequence_scores.data());
+                                                          final_beam_scores.data());
+}
+
+__global__ void BeamSearchScorer_GetHypothesisPtr(size_t batch_id,
+                                                  size_t beam_id,
+                                                  BeamHypotheses* beam_hyps_data,
+                                                  int32_t** hypothesis_ptr,
+                                                  int* hypothesis_length,
+                                                  float* hypothesis_score) {
+  auto& beam_hyp = beam_hyps_data[batch_id];
+  // beam_hyp.Output(1, 1, 0, hypothesis, hypothesis_score);
+  auto& item = beam_hyp.beams_[beam_id];
+  hypothesis_ptr[0] = const_cast<int32_t*>(item.hypothesis);
+  hypothesis_length[0] = item.hypothesis_length;
+  hypothesis_score[0] = item.score;
+}
+
+void LaunchBeamSearchScorer_GetHypothesisPtr(size_t batch_id,
+                                             size_t beam_id,
+                                             gpu_span<BeamHypotheses> beam_hyps,
+                                             int32_t** hypothesis_ptr,
+                                             int* hypothesis_length,
+                                             float* hypothesis_score,
+                                             cudaStream_t stream) {
+  BeamSearchScorer_GetHypothesisPtr<<<1, 1, 0, stream>>>(batch_id,
+                                                         beam_id,
+                                                         beam_hyps.data(),
+                                                         hypothesis_ptr,
+                                                         hypothesis_length,
+                                                         hypothesis_score);
 }
 
 __global__ void InitScoresKernel(float* beam_scores,
