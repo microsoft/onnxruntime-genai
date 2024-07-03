@@ -3,18 +3,22 @@
 
 #pragma once
 
+#include "onnxruntime_api.h"
+
 #include "../span.h"
 #include "../tensor.h"
 
-#include <list>
 #include <memory>
 #include <shared_mutex>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
 namespace Generators {
+
+struct Model;
 
 namespace details {
 
@@ -30,7 +34,7 @@ namespace details {
 ///   The resulting shape would be either [hidden_dim, 0] or [0, hidden_dim].
 /// </summary>
 /// <param name="tensor">Tensor supplied by the user for a Lora parameter</param>
-/// <returns>A Tensor that holds an OrtValue created over a dummy buffer.</returns>
+/// <returns>A OrtValue over a dummy buffer.</returns>
 std::shared_ptr<OrtValue> CreateEmptyInput(const OrtValue& tensor);
 
 
@@ -40,11 +44,11 @@ std::shared_ptr<OrtValue> CreateEmptyInput(const OrtValue& tensor);
 struct LoraParam {
   LoraParam() = default;
   LoraParam(std::string name, const std::shared_ptr<Tensor>& parameter);
+  std::string name_;
   // We need this as a shared_ptr so we can share while inference is running.
   // This can also be a subject of weak caching
   // This is created over the same user supplied buffer as the originally
-  // passed in tensor
-  std::string name_;
+  // passed in tensor.
   std::shared_ptr<OrtValue> ort_user_supplied_value_;
   // Copy on device if needed.
   // XXX: Insert caching logic and convert to weak_ptr
@@ -61,8 +65,9 @@ class LoraAdapter {
   /// <summary>
   /// Construct a named adapter
   /// </summary>
-  /// <param name="name">a name. LoraAdapterManagement class would make sure it is unique.</param>
   LoraAdapter() = default;
+  LoraAdapter(const LoraAdapter&) = delete;
+  LoraAdapter& operator=(const LoraAdapter&) = delete;
 
   /// <summary>
   /// Set name after construction
@@ -81,14 +86,7 @@ class LoraAdapter {
   /// <summary>
   /// Activates the adapter. Once activated, no more parameters can be added.
   /// </summary>
-  void SetActive() {
-    std::unique_lock lock(mutex_);
-    // Make sure data is copied to devices as needed
-    if (parameters_.empty()) {
-      throw std::runtime_error("Adapter: " + name_ + " has no parameters");
-    }
-    active_ = true;
-  }
+  void SetActive(const Model* model);
 
   /// <summary>
   /// Deactivates the adapter.
@@ -116,11 +114,14 @@ class LoraAdapter {
   }
 
   /// <summary>
-  /// Outputs parameters in the order they were added
+  /// Outputs parameters in the order they were added.
   /// </summary>
-  /// <returns></returns>
+  /// <typeparam name="OutNameIter"></typeparam>
+  /// <typeparam name="OutParamIter"></typeparam>
+  /// <param name="out_name"></param>
+  /// <param name="out_param"></param>
   template <typename OutNameIter, typename OutParamIter>
-  void GetParameters(OutNameIter out_name, OutParamIter out_param) const noexcept {
+  void GetParameters(OutNameIter& out_name, OutParamIter& out_param) const noexcept {
     std::shared_lock lock(mutex_);
     // Must return the parameters in the same order they were added
     for (const auto& p : parameters_) {
@@ -150,7 +151,7 @@ class LoraAdapter {
 /// </summary>
 class LoraAdapterManagement {
  public:
-  LoraAdapterManagement();
+  LoraAdapterManagement(const Model* model);
   ~LoraAdapterManagement() = default;
   LoraAdapterManagement(const LoraAdapterManagement&) = delete;
   LoraAdapterManagement& operator=(const LoraAdapterManagement&) = delete;
@@ -221,6 +222,7 @@ class LoraAdapterManagement {
   }
 
  private:
+  const Model* model_; // optional
   mutable std::shared_mutex mutex_;
   using AdapterMap = std::unordered_map<std::string, details::LoraAdapter>;
   AdapterMap adapters_;

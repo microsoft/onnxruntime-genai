@@ -3,6 +3,8 @@
 
 #include "onnxruntime_api.h"
 #include "lora_adapter.h"
+#include "model.h"
+#include "../generators.h"
 #include "../span.h"
 #include "utils.h"
 
@@ -34,9 +36,7 @@ std::shared_ptr<OrtValue> CreateEmptyInput(const OrtValue& original) {
   }
 
   const auto& mem_info = original.GetTensorMemoryInfo();
-  auto ort_value = OrtValue::CreateTensor(mem_info, &empty_input_buf, 0, shape, type_and_shape->GetElementType());
-  std::shared_ptr<OrtValue> result(std::move(ort_value));
-  return result;
+  return OrtValue::CreateTensor(mem_info, &empty_input_buf, 0, shape, type_and_shape->GetElementType());
 }
 
 LoraParam::LoraParam(std::string name, const std::shared_ptr<Tensor>& parameter) : name_(std::move(name)) {
@@ -44,19 +44,102 @@ LoraParam::LoraParam(std::string name, const std::shared_ptr<Tensor>& parameter)
   // we want ort_value to be owned by a shared_ptr so it can be shared
   // We could still the unique_ptr from the original tensor, but that would not
   // be a good practice and the internal ORT OrtValue copy constructor is not public.
-  auto type_and_shape = parameter->ort_tensor_->GetTensorTypeAndShapeInfo();
-  const auto& mem_info = parameter->ort_tensor_->GetTensorMemoryInfo();
+  auto& param_value = parameter->ort_tensor_;
+  auto type_and_shape = param_value->GetTensorTypeAndShapeInfo();
+  const auto& mem_info = param_value->GetTensorMemoryInfo();
   const auto size_in_bytes = SizeOf(type_and_shape->GetElementType()) * type_and_shape->GetElementCount();
-  auto ort_value = OrtValue::CreateTensor(mem_info, parameter->ort_tensor_->GetTensorMutableRawData(),
-                                          size_in_bytes, type_and_shape->GetShape(),
-                                          type_and_shape->GetElementType());
+  auto ort_value = OrtValue::CreateTensor(mem_info, param_value->GetTensorMutableRawData(), size_in_bytes,
+                                          type_and_shape->GetShape(), type_and_shape->GetElementType());
   // Convert it to a shared_ptr
   ort_user_supplied_value_ = std::move(ort_value);
 }
 
+static std::shared_ptr<OrtValue> CopyToDevice(const OrtValue& source, const Model& model) {
+  const auto& mem_info = source.GetTensorMemoryInfo();
+  auto type_and_shape = source.GetTensorTypeAndShapeInfo();
+  auto ort_device_value = OrtValue::CreateTensor(*const_cast<Ort::Allocator*>(model.allocator_device_),
+                                                 type_and_shape->GetShape(), type_and_shape->GetElementType());
+  // Copy the data to the device
+  const auto copy_size_in_bytes = type_and_shape->GetElementCount() * SizeOf(type_and_shape->GetElementType());
+  auto target_data = ort_device_value->GetTensorMutableRawData();
+
+  if (model.device_type_ == DeviceType::DML) {
+#if USE_DML
+    //  Copy to DML device
+    ComPtr<ID3D12Resource> target_resource;
+    Ort::ThrowOnError(
+        model.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model.allocator_device_, target_data, &target_resource));
+
+    auto source_span = std::span(source.GetTensorData<const uint8_t>(), copy_size_in_bytes);
+
+    model.GetDmlUploadHeap()->BeginUploadToGpu(target_resource.Get(), 0, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                               source_span);
+#else
+    throw std::runtime_error("DML is not supported in this build");
+#endif
+  } else if (model.device_type_ == DeviceType::CUDA) {
+#if USE_CUDA
+    cudaMemcpyAsync(target_data, source.GetTensorRawData(), copy_size_in_bytes, cudaMemcpyHostToDevice,
+                    model.cuda_stream_);
+#else
+    throw std::runtime_error("CUDA is not supported in this build");
+#endif
+
+  } else
+    throw std::runtime_error("Unsupported device type detected: " +
+                             std::to_string(static_cast<int>(model.device_type_)));
+
+  return ort_device_value;
+}
+
+void LoraAdapter::SetActive(const Model* model) {
+  std::unique_lock lock(mutex_);
+  // Make sure data is copied to devices as needed
+  if (parameters_.empty()) {
+    throw std::runtime_error("Adapter: " + name_ + " has no parameters");
+  }
+
+  // Check if the target device is not CPU
+  if (model != nullptr && model->device_type_ != DeviceType::CPU) {
+    for (auto& param : parameters_) {
+      // XXX: Adjust for caching when implemented
+      if (!param.ort_device_value_) {
+        // Check if the user has already supplied his buffers on the target device
+        auto& source_value = param.ort_user_supplied_value_;
+        const auto& mem_info = source_value->GetTensorMemoryInfo();
+        auto ort_device_type = mem_info.GetDeviceType();
+
+        switch (model->device_type_) {
+          case DeviceType::CUDA: {
+            if (ort_device_type != OrtMemoryInfoDeviceType::OrtMemoryInfoDeviceType_CPU &&
+                ort_device_type != OrtMemoryInfoDeviceType::OrtMemoryInfoDeviceType_GPU)
+              throw std::runtime_error("Unable to copy user supplied value to GPU");
+            break;
+            case DeviceType::DML:
+              if (ort_device_type != OrtMemoryInfoDeviceType::OrtMemoryInfoDeviceType_CPU)
+                throw std::runtime_error("Unable to copy user supplied value to DML");
+              break;
+            default:
+              throw std::runtime_error("Unsupported device type detected: " +
+                                       std::to_string(static_cast<int>(model->device_type_)));
+          }
+
+            if (ort_device_type == OrtMemoryInfoDeviceType::OrtMemoryInfoDeviceType_CPU) {
+              param.ort_device_value_ = CopyToDevice(*source_value, *model);
+            } else {
+              // Re-use what user has supplied
+              param.ort_user_supplied_value_ = param.ort_user_supplied_value_;
+            }
+        }
+      }
+    }
+  }
+  active_ = true;
+}
+
 }  // namespace details
 
-LoraAdapterManagement::LoraAdapterManagement() = default;
+LoraAdapterManagement::LoraAdapterManagement(const Model* model) : model_(model) {}
 
 void LoraAdapterManagement::CreateAdapter(const std::string& adapter_name) {
   std::unique_lock lock(mutex_);
@@ -113,7 +196,7 @@ void LoraAdapterManagement::ActivateAdapters(std::span<const std::string> adapte
 
   for (const auto& adapter_name : adapter_names) {
     auto& adapter = adapters_[adapter_name];
-    adapter.SetActive();
+    adapter.SetActive(model_);
   }
 }
 

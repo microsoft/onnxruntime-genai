@@ -3,6 +3,12 @@
 
 #pragma once
 
+#include "onnxruntime_api.h"
+
+#include <memory>
+#include <string>
+#include <vector>
+
 namespace Generators {
 
 struct Model;
@@ -10,6 +16,9 @@ struct State;
 
 struct ExtraInputs {
   ExtraInputs(const Model& model, State& state);
+  ExtraInputs(const ExtraInputs&) = delete;
+  ExtraInputs& operator=(const ExtraInputs&) = delete;
+
   void Add();
 
  private:

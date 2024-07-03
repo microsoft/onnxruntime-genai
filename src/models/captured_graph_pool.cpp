@@ -89,12 +89,6 @@ CapturedGraphInfoPtr CapturedGraphPool::ReserveCapturedGraph(const Model& model,
       new_captured_graph->sb_logits16_ = std::make_unique<StaticBuffer>(allocator_device_, max_beam_batch_size);
     }
 
-    // Create the extra inputs
-    for (const auto& extra_input : params.extra_inputs) {
-      auto first_dim = extra_input.tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape()[0];
-      new_captured_graph->sb_extra_inputs_[extra_input.name] = std::make_unique<StaticBuffer>(allocator_device_, first_dim);
-    }
-
     // Create the input embeddings if needed
     if (!model.config_->model.embedding.filename.empty()) {
       new_captured_graph->sb_embeddings_ = std::make_unique<StaticBuffer>(allocator_device_, max_beam_batch_size);

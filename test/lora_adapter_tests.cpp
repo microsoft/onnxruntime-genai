@@ -16,7 +16,7 @@ TEST(GeneratorsTests, LoraAdapterManagementTests) {
   const std::string adapter_name_1 = "adapter_1";
   const std::string adapter_name_2 = "adapter_2";
 
-  LoraAdapterManagement lora_adapter_management;
+  LoraAdapterManagement lora_adapter_management(nullptr);
   lora_adapter_management.CreateAdapter(adapter_name_1);
   // Try creating again should throw
   ASSERT_THROW(lora_adapter_management.CreateAdapter(adapter_name_1), std::runtime_error);
