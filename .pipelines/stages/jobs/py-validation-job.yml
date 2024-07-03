@@ -1,0 +1,220 @@
+parameters:
+- name: SpecificArtifact
+  displayName: Use Specific Artifact
+  type: boolean
+  default: false
+- name: BuildId
+  displayName: Specific Artifact's BuildId
+  type: string
+  default: '0'
+- name: arch
+  type: string
+- name: ep
+  type: string
+- name: ort_version
+  type: string
+- name: cuda_version
+  type: string
+  default: ''
+- name: cuda_display_version
+  type: string
+  default: ''
+- name: os
+  type: string
+  values:
+  - 'linux'
+  - 'win'
+
+jobs:
+- job: python_${{ parameters.os }}_${{ parameters.ep }}${{ parameters.cuda_display_version }}_${{ parameters.arch }}_validation
+  ${{ if eq(parameters.os, 'linux') }}:
+    ${{ if eq(parameters.ep, 'cuda') }}:
+      pool: 'Onnxruntime-Linux-GPU'
+    ${{ else }}:
+      pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
+  ${{ if eq(parameters.os, 'win') }}:
+    ${{ if eq(parameters.ep, 'directml') }}:
+      pool: 'onnxruntime-Win2022-GPU-dml-A10'
+    ${{ elseif eq(parameters.ep, 'cuda') }}:
+      pool: 'onnxruntime-Win2022-GPU-A10'
+    ${{ elseif eq(parameters.arch, 'arm64') }}:
+      pool: 'onnxruntime-genai-windows-vs-2022-arm64'
+    ${{ else }}:
+      pool: 'onnxruntime-Win-CPU-2022'
+
+  timeoutInMinutes: 240
+  workspace:
+    clean: all
+  #  set variables here to be used in the template and steps
+  variables:
+  - name: skipComponentGovernanceDetection
+    ${{ if eq(parameters.os, 'linux') }}:
+      value: true
+    ${{ if eq(parameters.os, 'win') }}:
+      value: false
+  - name: arch
+    value: ${{ parameters.arch }}
+  - name: artifactName
+    value: 'onnxruntime-genai-${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.arch }}'
+  - name: buildConfig
+    value: 'Release'
+  - name: buildDir
+    value: 'build/${{ parameters.ep }}'
+  - name: cuda_version
+    value: ${{ parameters.cuda_version }}
+  - name: ep
+    value: ${{ parameters.ep }}
+  - name: ort_version
+    value: ${{ parameters.ort_version }}
+  - name: os
+    value: ${{ parameters.os }}
+
+  - name: py_dot_ver
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      ${{ if eq(parameters.arch, 'arm64') }}:
+        value: '3.12'
+      ${{ else }}:
+        value: '3.9'
+    ${{ elseif eq(parameters.ep, 'cuda') }}:
+      value: '3.10'
+    ${{ elseif eq(parameters.ep, 'directml')}}:
+      value: '3.11'
+    ${{ else }}:
+      value: '3.9'
+
+  - name: pip_package_name
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      value: 'onnxruntime_genai'
+    ${{ elseif eq(parameters.ep, 'cuda') }}:
+      value: 'onnxruntime_genai_cuda'
+    ${{ elseif eq(parameters.ep, 'directml')}}:
+      value: 'onnxruntime_genai_directml'
+    ${{ else }}:
+      value: 'onnxruntime_genai'
+
+  - name: prebuild_phi3_mini_model_folder
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      value: 'cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4'
+    ${{ elseif eq(parameters.ep, 'cuda') }}:
+      value: 'cuda/cuda-int4-rtn-block-32'
+    ${{ elseif eq(parameters.ep, 'directml')}}:
+      value: 'directml/directml-int4-awq-block-128'
+    ${{ else }}:
+      value: 'cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4'
+
+  steps:
+  - checkout: self
+    clean: true
+    path: onnxruntime-genai
+    submodules: recursive
+
+  - script: |
+      MKDIR $(Agent.ToolsDirectory)\Python\3.12.3\arm64
+      XCOPY /s /y /h /e /c /q "C:\Python\Python312\*.*" $(Agent.ToolsDirectory)\Python\3.12.3\arm64\
+      COPY NUL $(Agent.ToolsDirectory)\Python\3.12.3\arm64.complete
+      DIR $(Agent.ToolsDirectory)\Python
+      DIR $(Agent.ToolsDirectory)\Python\3.12.3
+      DIR $(Agent.ToolsDirectory)\Python\3.12.3\arm64
+      DIR "C:\Python"
+    displayName: Copy python 3.12.3 version to agent tools directory
+    condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'), eq(variables['py_dot_ver'], '3.12'))
+
+  - script: |
+      MKDIR $(Agent.ToolsDirectory)\Python\3.11.0\arm64
+      XCOPY /s /y /h /e /c /q "C:\Python\Python311\*.*" $(Agent.ToolsDirectory)\Python\3.11.0\arm64\
+      COPY NUL $(Agent.ToolsDirectory)\Python\3.11.0\arm64.complete
+      DIR $(Agent.ToolsDirectory)\Python
+      DIR $(Agent.ToolsDirectory)\Python\3.11.0
+      DIR $(Agent.ToolsDirectory)\Python\3.11.0\arm64
+      DIR "C:\Python"
+    displayName: Copy python 3.11.0 version to agent tools directory
+    condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'), eq(variables['py_dot_ver'], '3.11'))
+
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: $(py_dot_ver)
+      addToPath: true
+      architecture: $(arch)
+
+  - ${{ if eq(parameters.os, 'linux') }}:
+    - template: steps/utils/flex-download-pipeline-artifact.yml
+      parameters:
+        StepName: 'Download Python Wheel Artifacts'
+        ArtifactName: $(ArtifactName)
+        TargetPath: '$(Build.BinariesDirectory)/wheel'
+        SpecificArtifact: ${{ parameters.specificArtifact }}
+        BuildId: ${{ parameters.BuildId }}
+  - ${{ if eq(parameters.os, 'win') }}:
+    - template: steps/utils/flex-download-pipeline-artifact.yml
+      parameters:
+        StepName: 'Download Python Wheel Artifacts'
+        ArtifactName: $(ArtifactName)-wheel
+        TargetPath: '$(Build.BinariesDirectory)/wheel'
+        SpecificArtifact: ${{ parameters.specificArtifact }}
+        BuildId: ${{ parameters.BuildId }}
+
+  - template: steps/utils/download-huggingface-model.yml
+    parameters:
+      StepName: 'Download Model from HuggingFace'
+      HuggingFaceRepo: 'microsoft/Phi-3-mini-4k-instruct-onnx'
+      RepoFolder: $(prebuild_phi3_mini_model_folder)
+      LocalFolder: 'models'
+      WorkingDirectory: '$(Build.Repository.LocalPath)/examples/python'
+      HuggingFaceToken: $(HF_TOKEN)
+      os: ${{ parameters.os }}
+
+  - ${{ if eq(parameters.os, 'linux') }}:
+    - ${{ if eq(parameters.ep, 'cuda') }}:
+      - bash: |
+          set -e -x
+          az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
+          az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
+          docker pull onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda11_x64_almalinux8_gcc11:20240531.1
+          python_exe=/opt/python/cp310-cp310/bin/python3.10
+
+          docker run \
+            --gpus all \
+            --rm \
+            --volume $(Build.Repository.LocalPath):/ort_genai_src \
+            --volume $(Build.BinariesDirectory):/ort_genai_binary \
+            -e HF_TOKEN=$HF_TOKEN \
+            -w /ort_genai_src/ onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda11_x64_almalinux8_gcc11:20240531.1 \
+            bash -c " \
+                $python_exe -m pip install numpy transformers torch onnx onnxruntime && \
+                cd /ort_genai_src/examples/python && \
+                $python_exe -m pip install --no-index --find-links=/ort_genai_binary/wheel $(pip_package_name) && \
+                $python_exe model-generate.py -m ./models/$(prebuild_phi3_mini_model_folder)"
+
+        displayName: 'Run Example With Artifact'
+        workingDirectory: '$(Build.Repository.LocalPath)'
+    - ${{ elseif eq(parameters.ep, 'cpu') }}:
+      - bash: |
+          python -m pip install numpy transformers torch onnx onnxruntime
+          cd examples/python
+          python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)
+          python model-generate.py -m ./models/$(prebuild_phi3_mini_model_folder)
+        displayName: 'Run Example With Artifact'
+        workingDirectory: '$(Build.Repository.LocalPath)'
+
+  - ${{ if eq(parameters.os, 'win') }}:
+    - ${{ if eq(parameters.ep, 'cuda') }}:
+      - powershell: |
+          $env:AZCOPY_MSI_CLIENT_ID = "63b63039-6328-442f-954b-5a64d124e5b4";
+          azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" 'cuda_sdk'
+        displayName: 'Download CUDA $(cuda_version)'
+        workingDirectory: '$(Build.Repository.LocalPath)'
+    - powershell: |
+        if ("$(ep)" -eq "cuda") {
+          $env:CUDA_PATH = '$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)'
+          $env:PATH = "$env:CUDA_PATH\bin;$env:CUDA_PATH\extras\CUPTI\lib64;$env:PATH"
+          Write-Host $env:PATH
+        }
+        python -m pip install numpy transformers torch onnx onnxruntime
+        cd examples\python
+        python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)
+
+        python model-generate.py -m .\models\$(prebuild_phi3_mini_model_folder)
+      displayName: 'Run Example With Artifact'
+      workingDirectory: '$(Build.Repository.LocalPath)'
+
+  - template: steps/compliant-and-cleanup-step.yml
