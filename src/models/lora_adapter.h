@@ -3,34 +3,53 @@
 
 #pragma once
 
+#include "../span.h"
+#include "../tensor.h"
+
+#include <list>
 #include <memory>
-#include <optional>
+#include <shared_mutex>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
-
-#include "static_buffer.h"
-#include "../generators.h"
-#include "../span.h"
-#include "../tensor.h"
 
 namespace Generators {
 
 namespace details {
 
 /// <summary>
+/// Creates an empty input tensor for a given Lora parameter.
+/// It takes the customer supplied Lora parameter, inherits its memory info and
+/// data type. It the modifies the original shape to denote empty input in the following
+/// way:
+///  The adapter dimensions (without batch) are
+///   [hidden_dim, lora_r] and [lora_r, hidden_dim ].
+///   The empty input shape we would pass would have lora_r set to 0.
+///   To detect lora_r dim we simply zero out the dim of smaller value.
+///   The resulting shape would be either [hidden_dim, 0] or [0, hidden_dim].
+/// </summary>
+/// <param name="tensor">Tensor supplied by the user for a Lora parameter</param>
+/// <returns>A Tensor that holds an OrtValue created over a dummy buffer.</returns>
+std::shared_ptr<OrtValue> CreateEmptyInput(const OrtValue& tensor);
+
+
+/// <summary>
 /// A named Lora Parameters pair
 /// </summary>
-struct LoraParam : public GeneratorParams::Input {
+struct LoraParam {
   LoraParam() = default;
-  LoraParam(std::string p_name, std::shared_ptr<Tensor> p) {
-    name = std::move(p_name);
-    tensor = std::move(p);
-  }
+  LoraParam(std::string name, const std::shared_ptr<Tensor>& parameter);
+  // We need this as a shared_ptr so we can share while inference is running.
+  // This can also be a subject of weak caching
+  // This is created over the same user supplied buffer as the originally
+  // passed in tensor
+  std::string name_;
+  std::shared_ptr<OrtValue> ort_user_supplied_value_;
+  // Copy on device if needed.
+  // XXX: Insert caching logic and convert to weak_ptr
+  std::shared_ptr<OrtValue> ort_device_value_;
 };
-
-// std::string LoraCacheKey(std::string_view adapter_name, std::string param_name);
 
 /// <summary>
 /// This class represents a collection of named pairs of
@@ -39,9 +58,6 @@ struct LoraParam : public GeneratorParams::Input {
 /// </summary>
 class LoraAdapter {
  public:
-  using ParamContainer = std::unordered_map<std::string, LoraParam>;
-  using param_iterator = ParamContainer::const_iterator;
-
   /// <summary>
   /// Construct a named adapter
   /// </summary>
@@ -49,27 +65,24 @@ class LoraAdapter {
   LoraAdapter() = default;
 
   /// <summary>
-  /// Returns adapter name
-  /// </summary>
-  /// <returns></returns>
-  const std::string& GetName() const noexcept { return name_; }
-
-  /// <summary>
-  /// Assigns a name to the adapter
+  /// Set name after construction
   /// </summary>
   /// <param name="name"></param>
-  void SetName(std::string name) { name_ = std::move(name); }
+  void SetName(const std::string& name) {
+    name_ = name;
+  }
 
   // Returns if the adapter is active
-  bool IsActive() const noexcept { return active_; }
+  bool IsActive() const noexcept {
+    std::shared_lock lock(mutex_);
+    return active_;
+  }
 
   /// <summary>
   /// Activates the adapter. Once activated, no more parameters can be added.
   /// </summary>
   void SetActive() {
-    if (active_) {
-      throw std::runtime_error("Adapter: " + name_ + " has already been activated");
-    }
+    std::unique_lock lock(mutex_);
     // Make sure data is copied to devices as needed
     if (parameters_.empty()) {
       throw std::runtime_error("Adapter: " + name_ + " has no parameters");
@@ -80,38 +93,60 @@ class LoraAdapter {
   /// <summary>
   /// Deactivates the adapter.
   /// </summary>
-  void Deactivate() noexcept { active_ = false; }
+  void Deactivate() noexcept {
+    std::unique_lock lock(mutex_);
+    active_ = false;
+  }
 
   /// <summary>
   /// Add Lora Parameter to the adapter
   /// </summary>
   /// <param name="parameter"></param>
-  void AddParameter(std::string param_name, std::shared_ptr<Tensor> tensor) {
-    LoraParam param{param_name, std::move(tensor)};
-    auto p = parameters_.emplace(std::move(param_name), std::move(param));
-    if (!p.second) {
+  void AddParameter(std::string param_name, const std::shared_ptr<Tensor>& tensor) {
+    std::unique_lock lock(mutex_);
+
+    auto hit =
+        std::find_if(parameters_.begin(), parameters_.end(), [&](const auto& p) { return p.name_ == param_name; });
+
+    if (hit != parameters_.end()) {
       throw std::runtime_error("Adapter: " + name_ + " already has a parameter named: " + param_name);
     }
+
+    parameters_.emplace_back(std::move(param_name), tensor);
   }
 
   /// <summary>
-  /// Returns iterators to the parameters container
+  /// Outputs parameters in the order they were added
   /// </summary>
   /// <returns></returns>
-  const auto& GetParameters() const noexcept { 
-    return parameters_;
+  template <typename OutNameIter, typename OutParamIter>
+  void GetParameters(OutNameIter out_name, OutParamIter out_param) const noexcept {
+    std::shared_lock lock(mutex_);
+    // Must return the parameters in the same order they were added
+    for (const auto& p : parameters_) {
+      *out_name = p.name_;
+      ++out_name;
+      const auto& result_val = (p.ort_device_value_) ? p.ort_device_value_ : p.ort_user_supplied_value_;
+      if (active_) {
+        *out_param = result_val;
+      } else {
+        *out_param = CreateEmptyInput(*result_val);
+      }
+      ++out_param;
+    }
   }
 
  private:
   std::string name_;
-  std::unordered_map<std::string, LoraParam> parameters_;
+  mutable std::shared_mutex mutex_;
+  std::vector<LoraParam> parameters_;
   bool active_{false};
 };
 
 }  // namespace details
 
 /// <summary>
-/// This class manages the collection of Lora Adapaters
+/// This class manages the collection of Lora Adapters
 /// </summary>
 class LoraAdapterManagement {
  public:
@@ -133,7 +168,7 @@ class LoraAdapterManagement {
   /// <param name="adapter_name"></param>
   /// <param name="param_name"></param>
   /// <param name="p"></param>
-  void AddParameter(const std::string& adapter_name, std::string param_name, std::shared_ptr<Tensor> p);
+  void AddParameter(const std::string& adapter_name, std::string param_name, const std::shared_ptr<Tensor>& p);
 
   /// <summary>
   /// Remove Specific Lora adapter and purge device cache if appropriate.
@@ -154,7 +189,7 @@ class LoraAdapterManagement {
   /// and it is a no-op for inactive adapters.
   /// </summary>
   /// <param name="adapter_names">adapter names to deactivate</param>
-  void DeactiveAdapters(std::span<const std::string> adapter_names);
+  void DeactivateAdapters(std::span<const std::string> adapter_names);
 
   /// <summary>
   /// Deactivates one or more adapter(s) that active.
@@ -166,8 +201,8 @@ class LoraAdapterManagement {
   /// <summary>
   /// Retrieves names of all active adapters
   /// </summary>
-  /// <returns>a vector of string views</returns>
-  std::vector<std::string_view> GetActiveAdapterNames() const;
+  /// <returns>a vector of C strings</returns>
+  std::vector<const char*> GetActiveAdapterNames() const;
 
   /// <summary>
   /// Outputs pointers to names and its corresponding OrtValue params
@@ -175,46 +210,18 @@ class LoraAdapterManagement {
   /// </summary>
   /// <typeparam name="NamesOutputIter"></typeparam>
   /// <typeparam name="TensorOutputIter"></typeparam>
-  /// <param name="names_out">Output Iterator for param C strings</param>
-  /// <param name="ort_values_out">Output Iterator for Lora Param Tensor</param>
+  /// <param name="names_out">Output Iterator for std::string</param>
+  /// <param name="ort_values_out">Output Iterator for std::shared_ptr<OrtValue></param>
   template <class NamesOutputIter, class TensorOutputIter>
   void OutputAdaptersParameters(NamesOutputIter names_out, TensorOutputIter params_out) const {
+    std::shared_lock lock(mutex_);
     for (const auto& [_, adapter] : adapters_) {
-      /// XXX: We need to generate empty inputs for inactive adapters,
-      if (adapter.IsActive()) {
-        for (const auto& [name, param] : adapter.GetParameters()) {
-          *names_out = name.c_str();
-          ++names_out;
-          *params_out = param.tensor;
-          ++params_out;
-        }
-      } else {
-        for (const auto& [name, param] : adapter.GetParameters()) {
-          *names_out = name.c_str();
-          ++names_out;
-          *params_out = CreateEmptyInput(*param.tensor);
-          ++params_out;
-        }
-      }
+        adapter.GetParameters(names_out, params_out);
     }
   }
 
-  /// <summary>
-  /// Creates an empty input tensor for a given Lora parameter.
-  /// It takes the customer supplied Lora parameter, inherits its memory info and
-  /// data type. It the modifies the original shape to denote empty input in the following
-  /// way:
-  ///  The adapter dimensions (without batch) are
-  ///   [hidden_dim, lora_r] and [lora_r, hidden_dim ].
-  ///   The empty input shape we would pass would have lora_r set to 0.
-  ///   To detect lora_r dim we simply zero out the dim of smaller value.
-  ///   The resulting shape would be either [hidden_dim, 0] or [0, hidden_dim].
-  /// </summary>
-  /// <param name="tensor">Tensor supplied by the user for a Lora parameter</param>
-  /// <returns>A Tensor that holds an OrtValue created over a dummy buffer.</returns>
-  static std::shared_ptr<Tensor> CreateEmptyInput(const Tensor& tensor);
-
  private:
+  mutable std::shared_mutex mutex_;
   using AdapterMap = std::unordered_map<std::string, details::LoraAdapter>;
   AdapterMap adapters_;
 };

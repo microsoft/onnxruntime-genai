@@ -146,7 +146,7 @@ TEST(CAPITests, LoraManagement) {
   // Can not remove active adapter
   ASSERT_THROW(model->RemoveLoraAdapter(adapter_name_1), std::runtime_error);
 
-  // Deactivatee one active and one inactive. No error.
+  // Deactivate one active and one inactive. No error.
   const std::vector<std::string> deactivate = {adapter_name_1, adapter_name_1};
   ASSERT_NO_THROW(model->DeactivateLoraAdapters(deactivate));
 

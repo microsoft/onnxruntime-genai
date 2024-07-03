@@ -131,7 +131,7 @@ OgaResult* OGA_API_CALL OgaModelDeactivateLoraAdapters(OgaModel* model, const ch
   std::vector<std::string> names;
   names.reserve(num_names);
   for (size_t i = 0; i < num_names; i++) names.push_back(adapter_names[i]);
-  lora_management.DeactiveAdapters(names);
+  lora_management.DeactivateAdapters(names);
   return nullptr;
   OGA_CATCH
 }
@@ -159,7 +159,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaModelGetActiveLoraAdapters(const OgaModel*
   auto& lora_management = reinterpret_cast<const Generators::Model*>(model)->GetLoraAdapterManagement();
   auto names = lora_management.GetActiveAdapterNames();
   const auto returned_count = std::min(names.size(), *names_num);
-  for (size_t i = 0; i < returned_count; i++) adapter_names[i] = names[i].data();
+  for (size_t i = 0; i < returned_count; i++) adapter_names[i] = names[i];
   *names_num = returned_count;
   return nullptr;
   OGA_CATCH

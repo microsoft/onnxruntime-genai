@@ -4,24 +4,18 @@
 #include "onnxruntime_api.h"
 #include "lora_adapter.h"
 #include "../span.h"
+#include "utils.h"
 
 namespace Generators {
 namespace {
 
-// std::string LoraCacheKey(std::string_view adapter_name, std::string param_name) {
-//   std::string result;
-//   result.reserve(adapter_name.size() + param_name.size() + 1U);
-//   result.append(adapter_name).append(".").append(param_name);
-//   return result;
-// }
-
-int64_t empty_input_buf[] = {0};
+uint64_t empty_input_buf[] = {0xdeadbeefbeefdead};
 }  // namespace
 
-LoraAdapterManagement::LoraAdapterManagement() = default;
+namespace details {
 
-std::shared_ptr<Tensor> LoraAdapterManagement::CreateEmptyInput(const Tensor& tensor) {
-  auto type_and_shape = tensor.ort_tensor_->GetTensorTypeAndShapeInfo();
+std::shared_ptr<OrtValue> CreateEmptyInput(const OrtValue& original) {
+  auto type_and_shape = original.GetTensorTypeAndShapeInfo();
   auto shape = type_and_shape->GetShape();
 
   // Modify shape
@@ -39,25 +33,44 @@ std::shared_ptr<Tensor> LoraAdapterManagement::CreateEmptyInput(const Tensor& te
     shape[num_dims - 2] = 0;
   }
 
-  const auto& mem_info = tensor.ort_tensor_->GetTensorMemoryInfo();
-  auto ort_value = OrtValue::CreateTensor(mem_info, &empty_input_buf, 0, shape,
-                                          type_and_shape->GetElementType());
-
-  auto result = std::make_shared<Generators::Tensor>();
-  result->ort_tensor_ = std::move(ort_value);
+  const auto& mem_info = original.GetTensorMemoryInfo();
+  auto ort_value = OrtValue::CreateTensor(mem_info, &empty_input_buf, 0, shape, type_and_shape->GetElementType());
+  std::shared_ptr<OrtValue> result(std::move(ort_value));
   return result;
 }
 
+LoraParam::LoraParam(std::string name, const std::shared_ptr<Tensor>& parameter) : name_(std::move(name)) {
+  // Create a duplicate of the ort_value over the same use supplied buffer
+  // we want ort_value to be owned by a shared_ptr so it can be shared
+  // We could still the unique_ptr from the original tensor, but that would not
+  // be a good practice and the internal ORT OrtValue copy constructor is not public.
+  auto type_and_shape = parameter->ort_tensor_->GetTensorTypeAndShapeInfo();
+  const auto& mem_info = parameter->ort_tensor_->GetTensorMemoryInfo();
+  const auto size_in_bytes = SizeOf(type_and_shape->GetElementType()) * type_and_shape->GetElementCount();
+  auto ort_value = OrtValue::CreateTensor(mem_info, parameter->ort_tensor_->GetTensorMutableRawData(),
+                                          size_in_bytes, type_and_shape->GetShape(),
+                                          type_and_shape->GetElementType());
+  // Convert it to a shared_ptr
+  ort_user_supplied_value_ = std::move(ort_value);
+}
+
+}  // namespace details
+
+LoraAdapterManagement::LoraAdapterManagement() = default;
+
 void LoraAdapterManagement::CreateAdapter(const std::string& adapter_name) {
-  auto result = adapters_.emplace(adapter_name, details::LoraAdapter{});
-  if (!result.second) {
+  std::unique_lock lock(mutex_);
+  auto hit = adapters_.find(adapter_name);
+  if (hit != adapters_.end()) {
     throw std::runtime_error("Adapter: " + adapter_name + " already exist");
   }
-  result.first->second.SetName(adapter_name);
+  auto& adapter = adapters_[adapter_name];
+  adapter.SetName(adapter_name);
 }
 
 void LoraAdapterManagement::AddParameter(const std::string& adapter_name, std::string param_name,
-                                         std::shared_ptr<Tensor> p) {
+                                         const std::shared_ptr<Tensor>& tensor) {
+  std::shared_lock lock(mutex_);
   auto hit = adapters_.find(adapter_name);
   if (hit == adapters_.end()) {
     throw std::runtime_error("Adapter: " + adapter_name + " does not exist");
@@ -69,10 +82,11 @@ void LoraAdapterManagement::AddParameter(const std::string& adapter_name, std::s
     throw std::runtime_error("Adapter: " + adapter_name + " is active can not add parameters");
   }
 
-  adapter.AddParameter(std::move(param_name), std::move(p));
+  adapter.AddParameter(std::move(param_name), tensor);
 }
 
 void LoraAdapterManagement::RemoveAdapter(const std::string& adapter_name) {
+  std::unique_lock lock(mutex_);
   auto hit = adapters_.find(adapter_name);
   if (hit == adapters_.end()) {
     throw std::runtime_error("Adapter: " + adapter_name + " does not exist");
@@ -86,6 +100,7 @@ void LoraAdapterManagement::RemoveAdapter(const std::string& adapter_name) {
 }
 
 void LoraAdapterManagement::ActivateAdapters(std::span<const std::string> adapter_names) {
+  std::shared_lock lock(mutex_);
   for (const auto& adapter_name : adapter_names) {
     auto hit = adapters_.find(adapter_name);
     if (hit == adapters_.end()) {
@@ -102,7 +117,8 @@ void LoraAdapterManagement::ActivateAdapters(std::span<const std::string> adapte
   }
 }
 
-void LoraAdapterManagement::DeactiveAdapters(std::span<const std::string> adapter_names) {
+void LoraAdapterManagement::DeactivateAdapters(std::span<const std::string> adapter_names) {
+  std::shared_lock lock(mutex_);
   for (const auto& adapter_name : adapter_names) {
     auto hit = adapters_.find(adapter_name);
     if (hit == adapters_.end()) {
@@ -116,20 +132,22 @@ void LoraAdapterManagement::DeactiveAdapters(std::span<const std::string> adapte
 }
 
 void LoraAdapterManagement::DeactiveAllAdapters() {
-  // Deactive all adapaters that are active
-  for (auto& [name, adapter] : adapters_) {
+  std::shared_lock lock(mutex_);
+  // Deactivate all adapters that are active
+  for (auto& [_, adapter] : adapters_) {
     if (adapter.IsActive()) {
       adapter.Deactivate();
     }
   }
 }
 
-std::vector<std::string_view> LoraAdapterManagement::GetActiveAdapterNames() const {
-  std::vector<std::string_view> names;
+std::vector<const char*> LoraAdapterManagement::GetActiveAdapterNames() const {
+  std::shared_lock lock(mutex_);
+  std::vector<const char*> names;
   names.reserve(adapters_.size());
   for (const auto& [name, adapter] : adapters_) {
     if (adapter.IsActive()) {
-      names.push_back(name);
+      names.push_back(name.c_str());
     }
   }
   return names;
