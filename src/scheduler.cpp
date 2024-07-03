@@ -1,8 +1,11 @@
 #include "scheduler.h"
 #include <alloca.h>
 #include <algorithm>
+#include <cassert>
+#include <chrono>
 #include <stdexcept>
 #include <tuple>
+#include <unordered_map>
 #include <vector>
 
 namespace engine {
@@ -26,7 +29,7 @@ template <typename T>
 T MergeSeqGroups(std::initializer_list<T> args) {
   T seq_groups;
   for (const auto& arg : args) {
-    seq_groups.resize(seq_groups.size() + arg.size());
+    seq_groups.reserve(seq_groups.size() + arg.size());
   }
   for (const auto& arg : args) {
     seq_groups.insert(seq_groups.end(), arg.begin(), arg.end());
@@ -81,14 +84,14 @@ void Scheduler::AddSeqGroup(SequenceGroup seq_group) {
   waiting_.push_back(seq_group);
 }  // namespace engine
 
-void Scheduler::Schedule() {
+ScheduleResult Scheduler::Schedule() {
   SchedulerBudget budget = SchedulerBudget(scheduler_config_.max_num_bathced_tokens,
                                            scheduler_config_.max_num_seqs);
 
   ScheduledPrefillOutputs scheduled_prefill;
   ScheduledRunningOutputs scheduled_running;
   ScheduledSwappedInOutputs scheduled_swapped_in;
-  for (const auto& seq_group : running_) {
+  for (auto& seq_group : running_) {
     budget.AddNumSeqs(seq_group.request_id, seq_group.GetMaxNumRunningSeqs());
   }
 
@@ -143,6 +146,46 @@ void Scheduler::Schedule() {
                        scheduler_config_.num_lookahead_slots,
                        static_cast<int>(running_.size()),
                        static_cast<int>(scheduled_running.preempted.size())};
+
+  float now = std::chrono::duration_cast<std::chrono::seconds>(
+                  std::chrono::system_clock::now().time_since_epoch())
+                  .count();
+  std::vector<SequenceGroupMetadata> seq_group_metadata_list;
+  seq_group_metadata_list.reserve(scheduled_seq_groups.size());
+  for (auto& scheduled_seq_group : scheduled_seq_groups) {
+    SequenceGroup seq_group = scheduled_seq_group.seq_group;
+    int token_chunk_size = scheduled_seq_group.token_chunk_size;
+    seq_group.MaybeSetFirstScheduledTime(now);
+
+    std::unordered_map<int, SequenceData> seq_datas;
+    std::unordered_map<int, std::vector<int>> block_tables;
+    for (auto& seq : seq_group.GetSeqs(kRunning)) {
+      seq_datas[seq.seq_id] = seq.data;
+      block_tables[seq.seq_id] = block_manager_.GetBlockTable(seq);
+      block_manager_.AccessAllBlocksInSeq(seq, now);
+    }
+    std::vector<int> common_computed_block_nums =
+        block_manager_.GetCommonComputedBlockIDs(seq_group.GetSeqs(kRunning));
+
+    block_manager_.MarkBlocksAsComputed(seq_group);
+
+    bool do_sample = true;
+    if (seq_group.is_prefill) {
+      auto seqs = seq_group.GetSeqs();
+      assert(seqs.size() == 1);
+
+      if (token_chunk_size + seqs[0].data.num_computed_tokens < seqs[0].data.GetLen()) {
+        do_sample = false;
+      }
+    }
+
+    bool is_prompt = seq_group.is_prefill;
+    seq_group_metadata_list.emplace_back(SequenceGroupMetadata{
+        seq_group.request_id, is_prompt, seq_datas, seq_group.sampling_params,
+        block_tables, do_sample, token_chunk_size, common_computed_block_nums});
+  }
+
+  return ScheduleResult{seq_group_metadata_list, scheduler_output};
 }
 
 ScheduledPrefillOutputs Scheduler::SchedulePrefill(SchedulerBudget budget,
@@ -152,7 +195,7 @@ ScheduledPrefillOutputs Scheduler::SchedulePrefill(SchedulerBudget budget,
 
   while (waiting_.size() > 0) {
     SequenceGroup seq_group = waiting_.front();
-    auto& waiting_seqs = seq_group.GetSeqs();
+    auto waiting_seqs = seq_group.GetSeqs();
     if (waiting_seqs.size() > 1) {
       throw std::runtime_error("Waiting sequence should have only one prompt sequence");
     }
@@ -355,4 +398,50 @@ ScheduledSwappedInOutputs Scheduler::ScheduleSwapped(SchedulerBudget budget,
                                    scheduler_config_.num_lookahead_slots,
                                    infeasible_seq_groups};
 }
+
+int SchedulerBudget::RemainingTokenBudget() const {
+  return token_budget_ - num_batched_tokens_;
+}
+
+void SchedulerBudget::AddNumBatchedTokens(std::string req_id, int num_batched_tokens) {
+  if (request_ids_num_batched_tokens_.find(req_id) !=
+      request_ids_num_batched_tokens_.end()) {
+    return;
+  }
+  num_batched_tokens_ += num_batched_tokens;
+  request_ids_num_batched_tokens_.insert(req_id);
+}
+
+void SchedulerBudget::AddNumSeqs(std::string req_id, int num_curr_seqs) {
+  if (request_ids_num_curr_seqs_.find(req_id) != request_ids_num_curr_seqs_.end()) {
+    return;
+  }
+  num_curr_seqs_ += num_curr_seqs;
+  request_ids_num_curr_seqs_.insert(req_id);
+}
+
+void SchedulerBudget::SubtractNumBatchedTokens(std::string req_id,
+                                               int num_batched_tokens) {
+  if (request_ids_num_batched_tokens_.find(req_id) ==
+      request_ids_num_batched_tokens_.end()) {
+    return;
+  }
+  num_batched_tokens_ -= num_batched_tokens;
+  request_ids_num_batched_tokens_.erase(req_id);
+}
+
+void SchedulerBudget::SubtractNumSeqs(std::string req_id, int num_curr_seqs) {
+  if (request_ids_num_curr_seqs_.find(req_id) == request_ids_num_curr_seqs_.end()) {
+    return;
+  }
+  num_curr_seqs_ -= num_curr_seqs;
+  request_ids_num_curr_seqs_.erase(req_id);
+}
+
+bool SchedulerBudget::CanSchedule(int num_new_tokens, int num_new_seqs) {
+  assert(num_new_tokens >= 0 && num_new_seqs >= 0);
+  return num_batched_tokens_ + num_new_tokens <= RemainingTokenBudget() &&
+         num_new_seqs + num_new_seqs <= max_num_seqs_;
+}
+
 }  // namespace engine

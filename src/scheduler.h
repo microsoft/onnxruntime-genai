@@ -1,5 +1,6 @@
 #include <string>
 #include <tuple>
+#include <unordered_set>
 #include <vector>
 #include <deque>
 
@@ -24,8 +25,8 @@ class SchedulerBudget {
       : token_budget_(token_budget), max_num_seqs_(max_num_seqs) {}
   int GetTokenBudget() const { return token_budget_; }
   int GetMaxNumSeqs() const { return max_num_seqs_; }
-  int GetNumBatchedTokens() const;
-  int GetNumCurrSeqs() const;
+  int GetNumBatchedTokens() const { return num_batched_tokens_; };
+  int GetNumCurrSeqs() const { return num_curr_seqs_; };
   int RemainingTokenBudget() const;
   void AddNumBatchedTokens(std::string req_id, int num_batched_tokens);
   void AddNumSeqs(std::string req_id, int num_curr_seqs);
@@ -36,6 +37,10 @@ class SchedulerBudget {
  private:
   int token_budget_;
   int max_num_seqs_;
+  std::unordered_set<std::string> request_ids_num_batched_tokens_;
+  std::unordered_set<std::string> request_ids_num_curr_seqs_;
+  int num_batched_tokens_ = ;
+  int num_curr_seqs_ = 0;
 };
 
 struct ScheduledPrefillOutputs {
@@ -88,6 +93,11 @@ struct SchedulerOutputs {
   int preempted;
 };
 
+struct ScheduleResult {
+  std::vector<SequenceGroupMetadata> seq_group_metadatas;
+  SchedulerOutputs scheduler_outputs;
+}
+
 class Scheduler {
  public:
   Scheduler(SchedulerConfig& scheduler_config, CacheConfig& cache_config);
@@ -98,7 +108,7 @@ class Scheduler {
                                           bool enable_chunking = false);
   ScheduledSwappedInOutputs ScheduleSwapped(SchedulerBudget budget,
                                             bool enable_chunking = false);
-  void Schedule();
+  ScheduleResult Schedule();
   void FreeFinishedRequests();
 
   PreemptionMode Preempt(SequenceGroup& seq_group,
