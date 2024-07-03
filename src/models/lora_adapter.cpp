@@ -57,8 +57,8 @@ LoraParam::LoraParam(std::string name, const std::shared_ptr<Tensor>& parameter)
 static std::shared_ptr<OrtValue> CopyToDevice(const OrtValue& source, const Model& model) {
   const auto& mem_info = source.GetTensorMemoryInfo();
   auto type_and_shape = source.GetTensorTypeAndShapeInfo();
-  auto ort_device_value = OrtValue::CreateTensor(*const_cast<Ort::Allocator*>(model.allocator_device_),
-                                                 type_and_shape->GetShape(), type_and_shape->GetElementType());
+  auto ort_device_value =
+      OrtValue::CreateTensor(*model.GetAllocatorDevice(), type_and_shape->GetShape(), type_and_shape->GetElementType());
   // Copy the data to the device
   const auto copy_size_in_bytes = type_and_shape->GetElementCount() * SizeOf(type_and_shape->GetElementType());
   auto target_data = ort_device_value->GetTensorMutableRawData();

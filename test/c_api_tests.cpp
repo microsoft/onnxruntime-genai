@@ -108,6 +108,9 @@ TEST(CAPITests, LoraManagement) {
   const std::string adapter_name_2 = "adapter_2";
 
   auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+
+  auto params = OgaGeneratorParams::Create(*model);
+
   model->CreateLoraAdapter(adapter_name_1);
 
   // Creating a duplicate name should throw
@@ -145,6 +148,22 @@ TEST(CAPITests, LoraManagement) {
 
   // Can not remove active adapter
   ASSERT_THROW(model->RemoveLoraAdapter(adapter_name_1), std::runtime_error);
+
+  // At this point, all lora_parameters should be copied to the created state.
+  auto generator = OgaGenerator::Create(*model, *params);
+  // Test hack. Verify that the created state has lora params in it.
+  Generators::Generator* gen = reinterpret_cast<Generators::Generator*>(generator.get());
+  auto& input_names = gen->state_->input_names_;
+  ASSERT_EQ(input_names.size(), gen->state_->inputs_.size());
+  auto hit = std::find_if(input_names.begin(), input_names.end(), [&](const std::string& name) {
+    return name == "lora_param_1";
+  });
+
+  ASSERT_NE(input_names.end(), hit);
+  
+  hit = std::find_if(input_names.begin(), input_names.end(),
+                          [&](const std::string& name) { return name == "lora_param_2"; });
+  ASSERT_NE(input_names.end(), hit);
 
   // Deactivate one active and one inactive. No error.
   const std::vector<std::string> deactivate = {adapter_name_1, adapter_name_1};
