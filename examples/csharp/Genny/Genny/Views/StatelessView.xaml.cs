@@ -137,7 +137,7 @@ namespace Genny.Views
 
         private async IAsyncEnumerable<TokenModel> RunInferenceAsync(string prompt, [EnumeratorCancellation] CancellationToken cancellationToken)
         {
-            var sequences = await Tokenizer.EncodeAsync(prompt, cancellationToken);
+            var sequences = await Tokenizer.EncodeAsync($"<|user|>{prompt}<|end|><|assistant|>", cancellationToken);
 
             using var generatorParams = new GeneratorParams(Model);
             generatorParams.ApplySearchOptions(SearchOptions);
