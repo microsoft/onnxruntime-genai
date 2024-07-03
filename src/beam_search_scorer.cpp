@@ -88,7 +88,7 @@ void BeamSearchScorer::Process(Sequences& sequences,
   // It contains word ID of whole sequence generated so far.
   // It is different from subgraph input_ids, which only need one word when past state is not empty.
 
-  const int sequence_length = sequences.GetSequenceLength();
+  size_t sequence_length = static_cast<size_t>(sequences.GetSequenceLength());
 
   assert(next_scores.size() == next_tokens.size());
   assert(next_scores.size() == next_indices.size());
