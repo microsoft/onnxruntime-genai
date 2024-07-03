@@ -32,7 +32,7 @@ class Model:
         self.head_size = config.head_dim if hasattr(config, "head_dim") else config.hidden_size // config.num_attention_heads
         self.num_layers = int(extra_options["num_hidden_layers"]) if "num_hidden_layers" in extra_options else config.num_hidden_layers
         self.vocab_size = config.vocab_size
-        self.activation = config.hidden_act
+        self.activation = config.hidden_activation if hasattr(config, "hidden_activation") else config.hidden_act
 
         self.model_name_or_path = config._name_or_path
         self.model_type = config.architectures[0]
@@ -609,6 +609,16 @@ class Model:
     def make_transpose(self, name, root_input, dtype, shape, perm):
         output = f"{name}/output_0"
         self.make_node("Transpose", inputs=[root_input], outputs=[output], name=name, perm=perm)
+        self.make_value_info(output, dtype, shape=shape)
+
+    def make_div(self, name, inputs, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Div", inputs=inputs, outputs=[output], name=name)
+        self.make_value_info(output, dtype, shape=shape)
+
+    def make_tanh(self, name, root_input, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Tanh", inputs=[root_input], outputs=[output], name=name)
         self.make_value_info(output, dtype, shape=shape)
 
     def make_matmul(self, matmul, basename, root_input, **kwargs):
@@ -1475,7 +1485,7 @@ class Model:
     def make_activation(self, layer_id, root_input):
         if self.activation in {"silu", "swish"}:
             output_name = self.make_activation_with_mul(layer_id, root_input, activation="Sigmoid", domain=None)
-        elif self.activation in {"gelu_new", "gelu_fast"}:
+        elif self.activation in {"gelu_new", "gelu_fast", "gelu_pytorch_tanh"}:
             output_name = self.make_gelu(layer_id, root_input, activation="FastGelu")
         elif self.activation in {"gelu"}:
             output_name = self.make_gelu(layer_id, root_input, activation="Gelu")
@@ -1520,9 +1530,9 @@ class Model:
         # Each LLM decoder layer is typically defined as:
         # input_layernorm --> attention --> MLP --> output_layernorm
         self.make_layernorm(layer_id, layer.input_layernorm, skip=not self.layernorm_attrs["first_layernorm"], simple=self.layernorm_attrs["simple"], location="input")
-        self.make_attention(layer_id, layer.self_attn, self.layernorm_attrs["output_0"])
+        self.make_attention(layer_id, layer.self_attn, root_input=self.layernorm_attrs["output_0"])
         self.make_layernorm(layer_id, layer.post_attention_layernorm, skip=True, simple=self.layernorm_attrs["simple"], location="post_attention")
-        self.make_mlp(layer_id, layer.mlp, self.layernorm_attrs["output_0"])
+        self.make_mlp(layer_id, layer.mlp, root_input=self.layernorm_attrs["output_0"])
 
         self.layernorm_attrs["first_layernorm"] = False
         if layer_id == self.num_layers - 1:
@@ -2072,8 +2082,8 @@ class PhiModel(Model):
         # Each Phi decoder layer is defined as:
         # input_layernorm --> attention --> MLP --> residual_add
         self.make_layernorm(layer_id, layer.input_layernorm, skip=not self.layernorm_attrs["first_layernorm"], simple=self.layernorm_attrs["simple"], location="input")
-        self.make_attention(layer_id, layer.self_attn, self.layernorm_attrs["output_0"])
-        self.make_mlp(layer_id, layer.mlp, self.layernorm_attrs["output_0"])
+        self.make_attention(layer_id, layer.self_attn, root_input=self.layernorm_attrs["output_0"])
+        self.make_mlp(layer_id, layer.mlp, root_input=self.layernorm_attrs["output_0"])
 
         residual_add_name = f"/model/layers.{layer_id}/residual_add/Add"
         residual_add_inputs = [self.layernorm_attrs['skip_input'], self.mlp_attrs["output_0"]]
@@ -2093,6 +2103,70 @@ class GemmaModel(MistralModel):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.embed_attrs["scale"] = np.round(np.sqrt(self.hidden_size), decimals=2)
         self.layernorm_attrs["add_offset"] = 1
+
+
+class Gemma2Model(GemmaModel):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.attention_attrs["scale"] = config.query_pre_attn_scalar ** -0.5
+        self.lm_head_attrs["scale"] = config.final_logit_softcapping
+
+    def make_layer(self, layer_id, layer):
+        # Gemma2 decoder layer is typically defined as:
+        # input_layernorm --> attention --> post_attention_layernorm --> pre_ffn_layernorm --> MLP --> post_ffn_layernorm
+        self.make_layernorm(layer_id, layer.input_layernorm, skip=not self.layernorm_attrs["first_layernorm"], simple=self.layernorm_attrs["simple"], location="input")
+        self.make_attention(layer_id, layer.self_attn, root_input=self.layernorm_attrs["output_0"])
+        
+        # Temporarily set root_input for LayerNorm to skip_input for post_attention_layernorm
+        # Set skip_input to output of post_attention_layernorm
+        original_root_input = self.layernorm_attrs["root_input"]
+        self.layernorm_attrs["root_input"] = self.layernorm_attrs["skip_input"]
+        self.make_layernorm(layer_id, layer.post_attention_layernorm, skip=False, simple=self.layernorm_attrs["simple"], location="post_attention")
+        self.layernorm_attrs["root_input"] = original_root_input
+        self.layernorm_attrs["skip_input"] = self.layernorm_attrs["output_0"]
+        
+        self.make_layernorm(layer_id, layer.pre_feedforward_layernorm, skip=True, simple=self.layernorm_attrs["simple"], location="pre_feedforward")
+        self.make_mlp(layer_id, layer.mlp, root_input=self.layernorm_attrs["output_0"])
+        
+        # Temporarily set root_input for LayerNorm to skip_input for post_feedforward_layernorm
+        # Set skip_input to output of post_ffn_layernorm
+        original_root_input = self.layernorm_attrs["root_input"]
+        self.layernorm_attrs["root_input"] = self.layernorm_attrs["skip_input"]
+        self.make_layernorm(layer_id, layer.post_feedforward_layernorm, skip=False, simple=self.layernorm_attrs["simple"], location="post_feedforward")
+        self.layernorm_attrs["root_input"] = original_root_input
+        self.layernorm_attrs["skip_input"] = self.layernorm_attrs["output_0"]
+
+        self.layernorm_attrs["first_layernorm"] = False
+        if layer_id == self.num_layers - 1:
+            # Norm after last decoder layer of model (last layer --> norm)
+            self.layernorm_attrs["last_layernorm"] = True
+
+    def make_attention(self, layer_id, attention, root_input, **kwargs):
+        original_window_size = self.window_size
+        self.window_size = original_window_size if layer_id % 2 == 1 else -1  # default is -1 in GroupQueryAttention kernel
+        super().make_attention(layer_id, attention, root_input, **kwargs)
+        self.window_size = original_window_size
+
+    def make_lm_head(self, lm_head):
+        bias_exists = lm_head.bias is not None
+
+        matmul_basename = "/lm_head/MatMul"
+        root_input = self.layernorm_attrs["output_0"]
+        matmul_name = self.make_matmul(lm_head, matmul_basename, root_input, logits=False)
+
+        # Add final logit softcapping (Div --> Tanh --> Mul)
+        div_name = "/lm_head/Div"
+        div_inputs = [f"{matmul_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.lm_head_attrs['scale']}"]
+        self.make_div(div_name, div_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.vocab_size])
+
+        tanh_name = "/lm_head/Tanh"
+        self.make_tanh(tanh_name, f"{div_name}/output_0", dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.vocab_size])
+
+        mul_name = "/lm_head/Mul"
+        mul_inputs = [f"{tanh_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.lm_head_attrs['scale']}"]
+        mul_output = "logits"
+        self.make_node('Mul', inputs=mul_inputs, outputs=[mul_output], name=mul_name)
+        self.make_value_info(mul_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
 
 
 class Phi3Mini4KModel(MistralModel):
@@ -2358,6 +2432,8 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
         # List architecture options in alphabetical order
         if config.architectures[0] == "GemmaForCausalLM":
             onnx_model = GemmaModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "Gemma2ForCausalLM":
+            onnx_model = Gemma2Model(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "LlamaForCausalLM":
             onnx_model = LlamaModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "MistralForCausalLM":
