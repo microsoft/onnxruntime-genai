@@ -1,3 +1,7 @@
+/*
+ * Copyright (c) Microsoft Corporation. All rights reserved.
+ * Licensed under the MIT License.
+ */
 package ai.onnxruntime.genai;
 
 import static org.junit.jupiter.api.Assertions.assertThrows;

@@ -20,6 +20,9 @@ from tqdm import tqdm
 import subprocess
 import threading
 import psutil
+import os
+import json
+from metrics import BenchmarkRecord
 
 peak_cpu_memory = 0.0
 peak_gpu_memory = 0.0
@@ -79,7 +82,38 @@ def generate_prompt(model, tokenizer, prompt_length, use_graph_capture) -> str:
         generator.generate_next_token()
     return tokenizer.decode(generator.get_sequence(0))
 
-def save_results(results, filename, print_memory_usage=False):
+def get_target_pip_package_version(target_pip_package_name_list):
+    # get package name and version
+    import pkg_resources
+
+    installed_packages = pkg_resources.working_set
+    installed_packages_list = sorted(
+        [
+            f"{i.key}=={i.version}"
+            for i in installed_packages
+            if i.key in target_pip_package_name_list
+        ]
+    )
+
+    pkg_name = ""
+    pkg_version = ""
+    if installed_packages_list:
+        pkg_name = installed_packages_list[0].split("==")[0]
+        pkg_version = installed_packages_list[0].split("==")[1]
+    return pkg_name, pkg_version
+
+def get_model_info_from_genai_config(model_input_folder):
+    genai_config_file_path = os.path.join(model_input_folder, "genai_config.json")
+    genai_config_file = open(genai_config_file_path)
+    genai_config = json.load(genai_config_file)
+    model_info = {}  
+    model_info["execution_provider"] = "cpu"
+    if len(genai_config["model"]["decoder"]["session_options"]["provider_options"]) > 0:
+        model_info["execution_provider"] = list(genai_config["model"]["decoder"]["session_options"]["provider_options"][0].keys())[0]
+    genai_config_file.close()
+    return model_info
+
+def save_results(args, results, filename, print_memory_usage=False):
     import pandas as pd
 
     columns=[
@@ -110,10 +144,36 @@ def save_results(results, filename, print_memory_usage=False):
         columns=columns,
     )
     # df = df.transpose()  # This line swaps the rows and columns
-    df.to_csv(filename, header=True, index=False)
+    
+    genai_package_name, genai_package_version = get_target_pip_package_version(["onnxruntime-genai", "onnxruntime-genai-cuda", "onnxruntime-genai-directml"])
+    model_info = get_model_info_from_genai_config(args.input_folder)
+    
+    records = []
+    for _, row in df.iterrows():
+        record = BenchmarkRecord(args.model_name, args.precision, "onnxruntime-genai", model_info["execution_provider"], genai_package_name, genai_package_version )
+        record.config.batch_size = row["Batch Size"]
+        record.config.customized["prompt_length"] = row["Prompt Length"]
+        record.config.customized["tokens_generated"] = row["Tokens Generated"]
+        record.config.customized["max_length"] = row["Max Length"]
+        record.metrics.customized["tokenization_throughput_tps"] = row["Tokenization Throughput (tps)"]
+        record.metrics.customized["tokenization_latency_ms"] = row["Tokenization Latency (ms)"]
+        record.metrics.customized["prompt_processing_throughput_tps"] = row["Prompt Processing Throughput (tps)"]
+        record.metrics.customized["prompt_processing_latency_ms"] = row["Prompt Processing Latency (ms)"]
+        record.metrics.customized["token_generation_throughput_tps"] = row["Token Generation Throughput (tps)"]
+        record.metrics.customized["token_generation_latency_ms"] = row["Token Generation Latency (ms)"]
+        record.metrics.customized["sampling_throughput_tps"] = row["Sampling Throughput (tps)"]
+        record.metrics.customized["sampling_latency_ms"] = row["Sampling Latency (ms)"]   
+        record.metrics.customized["wall_clock_throughput_tps"] = row["Wall Clock Throughput (tps)"]
+        record.metrics.customized["wall_clock_time_s"] = row["Wall Clock Time (s)"]
+        
+        records.append(record)
+        
+    # df.to_csv(filename, header=True, index=False)
+    BenchmarkRecord.save_as_csv(filename, records)
+    BenchmarkRecord.save_as_json(filename.replace(".csv", ".json"), records)
     print(f"Results saved in {filename}!")
 
-def run_benchmark_memory(arg, model, tokenizer, batch_size, prompt_length, generation_length, max_length):
+def run_benchmark_memory(args, model, tokenizer, batch_size, prompt_length, generation_length, max_length):
     """
     This function is to run benchmark and print the momory usage
     """
@@ -238,7 +298,7 @@ def run_benchmark(args, model, tokenizer, batch_size, prompt_length, generation_
     avg_tokenization_latency_s = sum(tokenize_times) / len(tokenize_times)
     avg_tokenization_latency_ms = avg_tokenization_latency_s * 1000
     avg_per_token_tokenization_latency_ms = avg_tokenization_latency_ms / prompt_length
-    avg_tokenization_thrpt = batch_size * (1 / avg_per_token_tokenization_latency_ms)
+    avg_tokenization_thrpt = batch_size * (1000 / avg_per_token_tokenization_latency_ms)
     print(f"Average Tokenization Latency (per token): {avg_per_token_tokenization_latency_ms} ms")
     print(f"Average Tokenization Throughput (per token): {avg_tokenization_thrpt} tps")
 
@@ -246,7 +306,7 @@ def run_benchmark(args, model, tokenizer, batch_size, prompt_length, generation_
     avg_prompt_latency_s = sum(prompt_times) / len(prompt_times)
     avg_prompt_latency_ms = avg_prompt_latency_s * 1000
     avg_per_token_prompt_latency_ms = avg_prompt_latency_ms / prompt_length
-    avg_per_token_prompt_thrpt = batch_size * (1 / (avg_per_token_prompt_latency_ms / 1000))
+    avg_per_token_prompt_thrpt = batch_size * (1000 / avg_per_token_prompt_latency_ms)
     print(f"Average Prompt Processing Latency (per token): {avg_per_token_prompt_latency_ms} ms")
     print(f"Average Prompt Processing Throughput (per token): {avg_per_token_prompt_thrpt} tps")
 
@@ -321,9 +381,9 @@ def main(args):
             print(f"-------------------* Peak GPU Memory Usage: {peak_gpu_memory} GiB *-------------------")
         else:
             print(f"-------------------* Peak CPU Memory Usage: {peak_cpu_memory} GiB *-------------------")
-        save_results(all_csv_metrics, filename, print_memory_usage=True)
+        save_results(args, all_csv_metrics, filename, print_memory_usage=True)
     else:
-        save_results(all_csv_metrics, filename)
+        save_results(args, all_csv_metrics, filename)
 
 def str2intlist(value):
     return [int(v) for v in value.split(',')]
@@ -347,5 +407,7 @@ if __name__ == "__main__":
     parser.add_argument('-mo', '--print_model_output', action='store_true', help='Print model output')
     parser.add_argument('-pm', '--print_memory_usage', default=False, help='Print memory footprint')
     parser.add_argument('-gc', '--use_graph_capture', action='store_true', help='Use the graph capture feature for CUDA or DML')
+    parser.add_argument('-mn', '--model_name', type=str, default='model_name', help='Model name defined by users')
+    parser.add_argument('-pr', '--precision', type=str, default='fp16', help='Model precision for metrics info')
     args = parser.parse_args()
     main(args)

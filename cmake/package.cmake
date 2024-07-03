@@ -6,8 +6,12 @@ install(TARGETS
   onnxruntime-genai
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib
+  ARCHIVE DESTINATION lib
   PUBLIC_HEADER DESTINATION include
 )
+if (WIN32)
+  install(FILES $<TARGET_PDB_FILE:onnxruntime-genai> DESTINATION lib CONFIGURATIONS RelWithDebInfo Debug)
+endif()
 set(CPACK_PACKAGE_VENDOR "Microsoft")
 set(CPACK_PACKAGE_NAME "onnxruntime-genai")
 set(CPACK_RESOURCE_FILE_LICENSE "${PROJECT_SOURCE_DIR}/LICENSE")
@@ -34,6 +38,8 @@ elseif (LINUX)
   if (CMAKE_SYSTEM_PROCESSOR STREQUAL "AMD64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "x64")
     if (USE_CUDA)
       set(CPACK_PACKAGE_FILE_NAME "onnxruntime-genai-${VERSION_INFO}-linux-x64-cuda")
+    elseif (USE_ROCM)
+      set(CPACK_PACKAGE_FILE_NAME "onnxruntime-genai-${VERSION_INFO}-linux-x64-rocm")
     else ()
       set(CPACK_PACKAGE_FILE_NAME "onnxruntime-genai-${VERSION_INFO}-linux-x64")
     endif ()

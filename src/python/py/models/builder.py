@@ -38,6 +38,7 @@ class Model:
         self.model_type = config.architectures[0]
         self.io_dtype = io_dtype      # {'fp16', 'fp32'}
         self.onnx_dtype = onnx_dtype  # {"int4", "fp16", "fp32"}
+        self.quant_type = config.quantization_config["quant_method"] if hasattr(config, "quantization_config") else None
 
         self.cache_dir = cache_dir
         self.filename = extra_options["filename"] if "filename" in extra_options else "model.onnx"
@@ -56,6 +57,10 @@ class Model:
             "cpu": {},
             "cuda": {
                 "enable_cuda_graph": enable_cuda_graph,        # "1" if the the model is able to enable cuda graph, "0" otherwise
+            },
+            "rocm": {
+                "tunable_op_enable": "1",
+                "tunable_op_tuning_enable": "1",
             },
             "dml": {},
             "web": {},
@@ -251,6 +256,11 @@ class Model:
                 "accuracy_level": int(extra_options["int4_accuracy_level"]) if "int4_accuracy_level" in extra_options else None,
             }
         }
+        if self.quant_type is not None:
+            # Create quantized attributes from quantization config
+            self.quant_attrs["bits"] = config.quantization_config["bits"]
+            self.quant_attrs["group_size"] = config.quantization_config["group_size"]
+            self.quant_attrs["use_g_idx"] = config.quantization_config["desc_act"] if "desc_act" in config.quantization_config else False
 
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
         config = GenerationConfig.from_pretrained(model_name_or_path, use_auth_token=True, trust_remote_code=True, **extra_kwargs)
@@ -351,7 +361,7 @@ class Model:
 
         # Quantize ONNX model to desired precision
         # TODO: Replace by quantizing the MatMuls as they are created
-        if self.onnx_dtype == "int4":
+        if self.onnx_dtype == "int4" and self.quant_type is None:
             model = self.to_int4(model)
 
         # Save ONNX model with only one external data file and delete any existing duplicate copies
@@ -601,45 +611,135 @@ class Model:
         self.make_node("Transpose", inputs=[root_input], outputs=[output], name=name, perm=perm)
         self.make_value_info(output, dtype, shape=shape)
 
-    def make_matmul(self, matmul, name, root_input, **kwargs):
-        self.make_matmul_fp16_or_fp32(matmul, name, root_input, **kwargs)
-
-        # TODO: add other dtypes
-        # if self.onnx_dtype in {"fp16", "fp32"}:
-        #     self.make_matmul_fp16_or_fp32(matmul, name, root_input, **kwargs)
-        # elif self.onnx_dtype == "int8":
-        #     pass
-        # elif self.onnx_dtype == "int4":
-        #     int4_name = f"{name}NBits"
-        #     self.make_matmul_int4(matmul, int4_name, root_input, **kwargs)
+    def make_matmul(self, matmul, basename, root_input, **kwargs):
+        if self.onnx_dtype in {"fp16", "fp32"}:
+            return self.make_matmul_fp16_or_fp32(matmul, basename, root_input, **kwargs)
+        elif self.onnx_dtype == "int4":
+            return self.make_matmul_int4(matmul, basename, root_input, **kwargs)
+        else:
+            raise NotImplementedError(f"The {self.onnx_dtype} precision is not currently supported.")
 
     def make_matmul_fp16_or_fp32(self, matmul, name, root_input, **kwargs):
         weight = name[1:].replace("/", ".") + ".weight"
-        self.make_external_tensor(matmul.transpose().astype(self.to_numpy_dtype[self.io_dtype]), weight)
+        self.make_external_tensor(matmul.weight.detach().numpy().transpose().astype(self.to_numpy_dtype[self.io_dtype]), weight)
 
-        last_dim = matmul.shape[0]
+        last_dim = matmul.weight.shape[0]
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
         self.make_node("MatMul", inputs=[root_input, weight], outputs=[output], name=name)
         self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', last_dim])
 
-    # TODO: quantize weights, then save new MatMul numpy weights for onnx model
-    # def make_matmul_int4(self, matmul, name, root_input, **kwargs):
-    #     weight = name[1:].replace("/", ".") + ".weight"
-    #     scales = name[1:].replace("/", ".") + ".scales"
+        return name
 
-    #     output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
-    #     self.make_node("MatMulNBits", inputs=[root_input, weight, scales], outputs=[output], name=name)
-    #     self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+    def make_matmul_int4(self, matmul, basename, root_input, **kwargs):
+        if not hasattr(matmul, "qweight"):
+            # TODO: quantize weights, then save new MatMul numpy weights for onnx model
+            # print(f"Quantizing to {self.onnx_dtype} on-the-fly is not currently supported.")
+            # print(f"Saving as {self.io_dtype} on-the-fly and quantizing to {self.onnx_dtype} at the end.")
+            return self.make_matmul_fp16_or_fp32(matmul, basename, root_input, **kwargs)
+        
+        name = f"{basename}NBits"
 
-    def make_packed_matmul(self, q_matmul, k_matmul, v_matmul, name, root_input, **kwargs):
+        # Input weights are quantized, save quantized MatMul numpy weights for onnx model
+        weight = name[1:].replace("/", ".") + ".qweight"
+        self.make_external_tensor(matmul.qweight.detach().numpy(), weight)
+        scales = name[1:].replace("/", ".") + ".scales"
+        self.make_external_tensor(matmul.scales.detach().numpy().astype(self.to_numpy_dtype[self.io_dtype]), scales)
+
+        inputs = [root_input, weight, scales]
+
+        if hasattr(matmul, "qzeros") and matmul.qzeros is not None:
+            zeros = name[1:].replace("/", ".") + ".qzeros"
+            self.make_external_tensor(matmul.qzeros.detach().numpy(), zeros)
+            inputs.append(zeros)
+
+        if hasattr(matmul, "g_idx") and matmul.g_idx is not None:
+            g_idx = name[1:].replace("/", ".") + ".g_idx"
+            self.make_external_tensor(matmul.g_idx.detach().numpy().astype(np.int32), g_idx)
+            inputs.append(g_idx)
+
+        output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
+        self.make_node(
+            "MatMulNBits", inputs=inputs, outputs=[output], name=name, domain="com.microsoft",
+            bits=matmul.bits, block_size=matmul.group_size, K=matmul.in_features, N=matmul.out_features,
+        )
+        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', matmul.out_features])
+
+        return name
+
+    def make_packed_matmul(self, q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs):
+        if self.onnx_dtype in {"fp16", "fp32"}:
+            return self.make_packed_matmul_fp16_or_fp32(q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs)
+        elif self.onnx_dtype == "int4":
+            return self.make_packed_matmul_int4(q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs)
+        else:
+            raise NotImplementedError(f"The {self.onnx_dtype} precision is not currently supported.")
+
+    def make_packed_matmul_fp16_or_fp32(self, q_matmul, k_matmul, v_matmul, name, root_input, **kwargs):
         # N_q = num_attention_heads * head_size, N_kv = num_key_value_heads * head_size, H = hidden_size
         # Combine 3 MatMuls of shape N_q x H, N_kv x H, N_kv x H into 1 packed MatMul of shape (N_q+N_kv+N_kv)xH
         # Note: Packed MatMul is of shape (N_q+N_kv+N_kv)xH instead of Hx(N_q+N_kv+N_kv) because `make_matmul` will
         # apply a transpose before saving
-        N_q, H = q_matmul.shape
-        N_kv, _ = k_matmul.shape
-        matmul = np.concatenate([q_matmul, k_matmul, v_matmul], axis=0).reshape(N_q + N_kv + N_kv, H)
-        self.make_matmul(matmul, name, root_input, **kwargs)
+        N_q, H = q_matmul.weight.shape
+        N_kv, _ = k_matmul.weight.shape
+
+        # Create dummy PackedMatMul class
+        class PackedMatMul:
+            def __init__(self):
+                self.weight = torch.concatenate([q_matmul.weight.detach().cpu(), k_matmul.weight.detach().cpu(), v_matmul.weight.detach().cpu()], dim=0).reshape(N_q + N_kv + N_kv, H)
+        matmul = PackedMatMul()
+        new_name = self.make_matmul(matmul, name, root_input, **kwargs)
+
+        return new_name
+
+    def make_packed_matmul_int4(self, q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs):
+        if not hasattr(q_matmul, "qweight"):
+            # TODO: quantize weights, then save new MatMul numpy weights for onnx model
+            # print(f"Quantizing to {self.onnx_dtype} on-the-fly is not currently supported.")
+            # print(f"Saving as {self.io_dtype} on-the-fly and quantizing to {self.onnx_dtype} at the end.")
+            return self.make_packed_matmul_fp16_or_fp32(q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs)
+
+        name = f"{basename}NBits"
+
+        # Create dummy PackedMatMul class
+        class PackedMatMul:
+            def __init__(self):
+                self.qweight = torch.concatenate([q_matmul.qweight.detach().cpu(), k_matmul.qweight.detach().cpu(), v_matmul.qweight.detach().cpu()], dim=0)
+                self.scales = torch.concatenate([q_matmul.scales.detach().cpu(), k_matmul.scales.detach().cpu(), v_matmul.scales.detach().cpu()], dim=0)
+                self.qzeros = torch.concatenate([q_matmul.qzeros.detach().cpu(), k_matmul.qzeros.detach().cpu(), v_matmul.qzeros.detach().cpu()], dim=0)
+                self.g_idx = q_matmul.g_idx
+
+                self.in_features = q_matmul.in_features
+                self.out_features = q_matmul.out_features + k_matmul.out_features + v_matmul.out_features
+                self.bits = q_matmul.bits
+                self.group_size = q_matmul.group_size
+        matmul = PackedMatMul()
+
+        # Input weights are quantized, save quantized MatMul numpy weights for onnx model
+        weight = name[1:].replace("/", ".") + ".qweight"
+        self.make_external_tensor(matmul.qweight.detach().numpy(), weight)
+        scales = name[1:].replace("/", ".") + ".scales"
+        self.make_external_tensor(matmul.scales.detach().numpy().astype(self.to_numpy_dtype[self.io_dtype]), scales)
+
+        inputs = [root_input, weight, scales]
+
+        if hasattr(matmul, "qzeros") and matmul.qzeros is not None:
+            zeros = name[1:].replace("/", ".") + ".qzeros"
+            self.make_external_tensor(matmul.qzeros.detach().numpy(), zeros)
+            inputs.append(zeros)
+
+        if hasattr(matmul, "g_idx") and matmul.g_idx is not None:
+            g_idx = name[1:].replace("/", ".") + ".g_idx"
+            self.make_external_tensor(matmul.g_idx.detach().numpy().astype(np.int32), g_idx)
+            inputs.append(g_idx)
+
+        output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
+        self.make_node(
+            "MatMulNBits", inputs=inputs, outputs=[output], name=name, domain="com.microsoft",
+            bits=matmul.bits, block_size=matmul.group_size, K=matmul.in_features, N=matmul.out_features,
+        )
+        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', matmul.out_features])
+
+        return name
 
     def make_add_bias(self, add, name, root_input, **kwargs):
         bias = name[1:].replace("/", ".") + ".bias"
@@ -737,7 +837,7 @@ class Model:
         return 0.1 * np.log(mscale) + 1.0
 
     def make_mscale(self, mscale):
-        if self.rotemb_attrs["mscale_policy"] == "su":
+        if self.rotemb_attrs["mscale_policy"] in {"su", "longrope"}:
             return self.make_mscale_su(mscale)
         elif self.rotemb_attrs["mscale_policy"] == "yarn":
             return self.make_mscale_yarn(mscale)
@@ -1144,24 +1244,24 @@ class Model:
         # Make MatMul nodes
         if self.attention_attrs["use_packed_matmul"]:
             # Combine 3 MatMuls into 1 packed MatMul
-            qkv_matmul_name = f"/model/layers.{layer_id}/attn/qkv_proj/MatMul"
-            self.make_packed_matmul(attention.q_proj.weight.detach().numpy(), attention.k_proj.weight.detach().numpy(), attention.v_proj.weight.detach().numpy(), qkv_matmul_name, root_input)
+            qkv_matmul_basename = f"/model/layers.{layer_id}/attn/qkv_proj/MatMul"
+            qkv_matmul_name = self.make_packed_matmul(attention.q_proj, attention.k_proj, attention.v_proj, qkv_matmul_basename, root_input)
             q_input_to_attention = f"{qkv_matmul_name}/output_0"
         else:
-            q_matmul_name = f"/model/layers.{layer_id}/attn/q_proj/MatMul"
-            self.make_matmul(attention.q_proj.weight.detach().numpy(), q_matmul_name, root_input)
+            q_matmul_basename = f"/model/layers.{layer_id}/attn/q_proj/MatMul"
+            q_matmul_name = self.make_matmul(attention.q_proj, q_matmul_basename, root_input)
             q_input_to_attention = f"{q_matmul_name}/output_0"
-            k_matmul_name = f"/model/layers.{layer_id}/attn/k_proj/MatMul"
-            self.make_matmul(attention.k_proj.weight.detach().numpy(), k_matmul_name, root_input)
+            k_matmul_basename = f"/model/layers.{layer_id}/attn/k_proj/MatMul"
+            k_matmul_name = self.make_matmul(attention.k_proj, k_matmul_basename, root_input)
             k_input_to_attention = f"{k_matmul_name}/output_0"
-            v_matmul_name = f"/model/layers.{layer_id}/attn/v_proj/MatMul"
-            self.make_matmul(attention.v_proj.weight.detach().numpy(), v_matmul_name, root_input)
+            v_matmul_basename = f"/model/layers.{layer_id}/attn/v_proj/MatMul"
+            v_matmul_name = self.make_matmul(attention.v_proj, v_matmul_basename, root_input)
             v_input_to_attention = f"{v_matmul_name}/output_0"
 
         # Make Add nodes (if bias exists)
-        q_bias_exists = attention.q_proj.bias is not None
-        k_bias_exists = attention.k_proj.bias is not None
-        v_bias_exists = attention.v_proj.bias is not None
+        q_bias_exists = attention.q_proj.bias is not None and torch.count_nonzero(attention.q_proj.bias) > 0
+        k_bias_exists = attention.k_proj.bias is not None and torch.count_nonzero(attention.k_proj.bias) > 0
+        v_bias_exists = attention.v_proj.bias is not None and torch.count_nonzero(attention.v_proj.bias) > 0
         all_bias_exists = q_bias_exists and k_bias_exists and v_bias_exists
 
         if all_bias_exists and self.attention_attrs["use_packed_matmul"]:
@@ -1215,9 +1315,9 @@ class Model:
 
         # Make MatMul node (output projection weight node)
         o_proj = 'o_proj' if hasattr(attention, 'o_proj') else 'dense'
-        o_matmul_name = f"/model/layers.{layer_id}/attn/o_proj/MatMul"
-        o_weight = eval(f"attention.{o_proj}.weight.detach().numpy()")
-        self.make_matmul(o_weight, o_matmul_name, f"{attn_name}/output_0")
+        o_matmul_basename = f"/model/layers.{layer_id}/attn/o_proj/MatMul"
+        o_weight = eval(f"attention.{o_proj}")
+        o_matmul_name = self.make_matmul(o_weight, o_matmul_basename, f"{attn_name}/output_0")
 
         # Make Add node (output projection bias node if bias exists)
         o_bias_exists = eval(f"attention.{o_proj}.bias") is not None
@@ -1263,6 +1363,16 @@ class Model:
         else:
             raise NotImplementedError(f"The MLP layer type is not set.")
 
+    def make_mlp_unpacked(self, layer_id, mlp, root_input):
+        mlp.gate_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
+        mlp.gate_proj.weight = torch.nn.Parameter(mlp.gate_up_proj.weight[ : self.intermediate_size, :])
+
+        mlp.up_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
+        mlp.up_proj.weight = torch.nn.Parameter(mlp.gate_up_proj.weight[self.intermediate_size :, :])
+
+        # Delete original packed weights
+        del mlp.gate_up_proj
+
     def make_mlp_proj(self, layer_id, mlp, root_input):
         # Make nodes for the MLP subgraph
         #
@@ -1277,10 +1387,10 @@ class Model:
         #        DownProjMatMul
 
         # Make MatMul nodes
-        gate_name = f"/model/layers.{layer_id}/mlp/gate_proj/MatMul"
-        self.make_matmul(mlp.gate_proj.weight.detach().numpy(), gate_name, root_input)
-        up_name = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
-        self.make_matmul(mlp.up_proj.weight.detach().numpy(), up_name, root_input)
+        gate_basename = f"/model/layers.{layer_id}/mlp/gate_proj/MatMul"
+        gate_name = self.make_matmul(mlp.gate_proj, gate_basename, root_input)
+        up_basename = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
+        up_name = self.make_matmul(mlp.up_proj, up_basename, root_input)
 
         # Make activation node(s)
         act_fn_name = self.make_activation(layer_id, root_input=f"{gate_name}/output_0")
@@ -1291,8 +1401,8 @@ class Model:
         self.make_mul(mul_name, mul_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
 
         # Make output MatMul node
-        down_name = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
-        self.make_matmul(mlp.down_proj.weight.detach().numpy(), down_name, f"{mul_name}/output_0")
+        down_basename = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
+        down_name = self.make_matmul(mlp.down_proj, down_basename, f"{mul_name}/output_0")
 
         # Assign output 0 of previous MatMul as skip input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = f"{down_name}/output_0"
@@ -1313,8 +1423,8 @@ class Model:
         #           FC2_Add
 
         # Make first layer of fully connected nodes (FC1)
-        fc1_matmul_name = f"/model/layers.{layer_id}/mlp/fc1/MatMul"
-        self.make_matmul(mlp.fc1.weight.detach().numpy(), fc1_matmul_name, root_input)
+        fc1_matmul_basename = f"/model/layers.{layer_id}/mlp/fc1/MatMul"
+        fc1_matmul_name = self.make_matmul(mlp.fc1, fc1_matmul_basename, root_input)
         fc1_add_name = f"/model/layers.{layer_id}/mlp/fc1/Add"
         self.make_add_bias(mlp.fc1.bias.detach().numpy(), fc1_add_name, root_input=f"{fc1_matmul_name}/output_0")
 
@@ -1322,8 +1432,8 @@ class Model:
         act_fn_name = self.make_activation(layer_id, root_input=f"{fc1_add_name}/output_0")
 
         # Make second layer of fully connected nodes (FC2)
-        fc2_matmul_name = f"/model/layers.{layer_id}/mlp/fc2/MatMul"
-        self.make_matmul(mlp.fc2.weight.detach().numpy(), fc2_matmul_name, root_input=f"{act_fn_name}/output_0")
+        fc2_matmul_basename = f"/model/layers.{layer_id}/mlp/fc2/MatMul"
+        fc2_matmul_name = self.make_matmul(mlp.fc2, fc2_matmul_basename, root_input=f"{act_fn_name}/output_0")
         fc2_add_name = f"/model/layers.{layer_id}/mlp/fc2/Add"
         self.make_add_bias(mlp.fc2.bias.detach().numpy(), fc2_add_name, root_input=f"{fc2_matmul_name}/output_0")
 
@@ -1380,9 +1490,9 @@ class Model:
         scale_exists = self.lm_head_attrs["scale"] != 1
         mask_exists = self.lm_head_attrs["mask"] is not None
 
-        matmul_name = "/lm_head/MatMul"
+        matmul_basename = "/lm_head/MatMul"
         root_input = self.layernorm_attrs["output_0"]
-        self.make_matmul(lm_head.weight.detach().numpy(), matmul_name, root_input, logits=not bias_exists and not scale_exists)
+        matmul_name = self.make_matmul(lm_head, matmul_basename, root_input, logits=not bias_exists and not scale_exists)
 
         if bias_exists:
             add_name = "/lm_head/Add"
@@ -1429,9 +1539,21 @@ class Model:
         # Load weights of original model
         if input_path.endswith(".gguf"):
             # Load GGUF model
-            from gguf_model import GGUFModel
+            try:
+                from gguf_model import GGUFModel
+            except:
+                from onnxruntime_genai.models.gguf_model import GGUFModel
             model = GGUFModel.from_pretrained(self.model_type, input_path, self.head_size, self.hidden_size, self.intermediate_size, self.num_attn_heads, self.num_kv_heads, self.vocab_size)
             self.layernorm_attrs["add_offset"] = 0  # add offset already done for GGUF models
+        elif self.quant_type is not None:
+            # Load quantized PyTorch model
+            try:
+                from quantized_model import QuantModel
+            except:
+                from onnxruntime_genai.models.quantized_model import QuantModel
+            q_size = self.num_attn_heads * self.head_size
+            kv_size = self.num_kv_heads * self.head_size
+            model = QuantModel.from_pretrained(self.quant_type, input_path, self.quant_attrs["bits"], self.quant_attrs["group_size"], self.quant_attrs["use_g_idx"], q_size, kv_size, self.intermediate_size)
         else:
             # Load PyTorch model
             extra_kwargs = {} if os.path.exists(self.model_name_or_path) else {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {"cache_dir": self.cache_dir}
@@ -1451,7 +1573,7 @@ class Model:
                     self.layernorm_attrs["root_input"] = "inputs_embeds"
                     self.layernorm_attrs["skip_input"] = "inputs_embeds"
 
-            elif module.__class__.__name__.endswith("DecoderLayer"):
+            elif module.__class__.__name__.endswith("DecoderLayer") and self.layer_id < self.num_layers:
                 # Each decoder layer of model
                 print(f"Reading decoder layer {self.layer_id}")
                 self.make_layer(self.layer_id, module)
@@ -1848,7 +1970,7 @@ class Model:
         self.mask_attrs["total_seq_len"] = cast_2_name
 
     def make_attention_mask_reformatting_for_sparse_attn(self):
-        # Make nodes for the attention mask subgraph that calculates 
+        # Make nodes for the attention mask subgraph that calculates
         # attributes about the 2D attention mask to use in SparseAttention
         #
         #                attention_mask
@@ -1978,17 +2100,13 @@ class Phi3Mini4KModel(MistralModel):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
-        super().make_attention_unpacked(layer_id, attention, root_input, **kwargs)
+        if self.quant_type is None:
+            super().make_attention_unpacked(layer_id, attention, root_input, **kwargs)
         super().make_attention(layer_id, attention, root_input, **kwargs)
 
     def make_mlp_proj(self, layer_id, mlp, root_input):
-        mlp.gate_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
-        mlp.gate_proj.weight = torch.nn.Parameter(mlp.gate_up_proj.weight[ : self.intermediate_size, :])
-
-        mlp.up_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
-        mlp.up_proj.weight = torch.nn.Parameter(mlp.gate_up_proj.weight[self.intermediate_size :, :])
-
-        del mlp.gate_up_proj
+        if self.quant_type is None:
+            super().make_mlp_unpacked(layer_id, mlp, root_input)
         super().make_mlp_proj(layer_id, mlp, root_input)
 
 
@@ -2070,7 +2188,7 @@ class Phi3Small8KModel(Model):
         crows_name = "block_row_indices"
         self.make_external_tensor(crows.detach().numpy().astype(np.int32), crows_name)
         self.mask_attrs["block_row_indices"] = crows_name
-        
+
         cols_name = "block_col_indices"
         self.make_external_tensor(cols.detach().numpy().astype(np.int32), cols_name)
         self.mask_attrs["block_col_indices"] = cols_name
@@ -2140,7 +2258,7 @@ class Phi3Small8KModel(Model):
         #           DownProjMatMul
         #                 |
         #            DownProjAdd
-        
+
         # Make input MatMul and Add nodes
         up_matmul_name = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
         self.make_matmul(mlp.up_proj.weight.detach().numpy(), up_matmul_name, root_input)

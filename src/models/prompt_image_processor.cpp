@@ -60,7 +60,7 @@ std::unique_ptr<OrtValue> ProcessImagePrompt(const Generators::Tokenizer& tokeni
                                     std::to_string(num_images) + ". Actual value: " + std::to_string(image_ids[i]);
         throw std::runtime_error(error_message);
       }
-      for (size_t j = 0; j < num_img_tokens_data[image_ids[i] - 1]; ++j) {
+      for (int64_t j = 0; j < num_img_tokens_data[image_ids[i] - 1]; ++j) {
         input_ids.push_back(-image_ids[i]);
       }
     }
@@ -76,7 +76,7 @@ std::unique_ptr<OrtValue> ProcessImagePrompt(const Generators::Tokenizer& tokeni
 std::unique_ptr<OrtValue> ProcessPixelValues(ortc::Tensor<float>* pixel_values, ONNXTensorElementDataType expected_type,
                                              Ort::Allocator& allocator) {
   if (!(expected_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT || expected_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16)) {
-    throw std::runtime_error("Expected pixel_values to be of type float or float16. Actual: " + expected_type);
+    throw std::runtime_error("Expected pixel_values to be of type float or float16. Actual: " + std::to_string(expected_type));
   }
   auto pixel_values_value = expected_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT
                                 ? OrtValue::CreateTensor<float>(allocator, pixel_values->Shape())

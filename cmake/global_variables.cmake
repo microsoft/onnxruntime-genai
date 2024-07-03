@@ -2,7 +2,7 @@
 
 # Define the Version Info
 file(READ "VERSION_INFO" ver)
-set(VERSION_INFO ${ver} CACHE STRING "Set the onnxruntime-genai version info.")
+set(VERSION_INFO ${ver})
 message("Building onnxruntime-genai for version ${VERSION_INFO}")
 
 
@@ -27,16 +27,19 @@ endif()
 if(WIN32)
   set(ONNXRUNTIME_LIB "onnxruntime.dll")
   set(ONNXRUNTIME_PROVIDERS_CUDA_LIB "onnxruntime_providers_cuda.dll")
+  set(ONNXRUNTIME_PROVIDERS_ROCM_LIB "onnxruntime_providers_rocm.dll")
   set(ONNXRUNTIME_ALL_SHARED_LIBS "onnxruntime*.dll")
   set(ONNXRUNTIME_EXTENSIONS_LIB "tfmtok_c.lib")
   set(ONNXRUNTIME_EXTENSIONS_FILES "tfmtok_c.dll")
 elseif(APPLE)
   set(ONNXRUNTIME_LIB "libonnxruntime.dylib")
   set(ONNXRUNTIME_PROVIDERS_CUDA_LIB "libonnxruntime_providers_cuda.dylib")
+  set(ONNXRUNTIME_PROVIDERS_ROCM_LIB "libonnxruntime_providers_rocm.dylib")
   set(ONNXRUNTIME_ALL_SHARED_LIBS "libonnxruntime*.dylib")
 else()
   set(ONNXRUNTIME_LIB "libonnxruntime.so")
   set(ONNXRUNTIME_PROVIDERS_CUDA_LIB "libonnxruntime_providers_cuda.so")
+  set(ONNXRUNTIME_PROVIDERS_ROCM_LIB "libonnxruntime_providers_rocm.so")
   set(ONNXRUNTIME_ALL_SHARED_LIBS "libonnxruntime*.so*")
   set(ONNXRUNTIME_EXTENSIONS_LIB "tfmtok_c.so")
 endif()
@@ -69,6 +72,8 @@ if (MSVC)
 
   if (genai_target_platform STREQUAL "arm64")
     # pass
+  elseif (genai_target_platform STREQUAL "ARM64")
+    set(genai_target_platform "arm64")
   elseif (genai_target_platform STREQUAL "x64" OR 
           genai_target_platform STREQUAL "x86_64" OR 
           genai_target_platform STREQUAL "AMD64" OR 

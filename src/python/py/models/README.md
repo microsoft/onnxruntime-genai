@@ -10,6 +10,7 @@ This folder contains the model builder for quickly creating optimized and quanti
   - [Original PyTorch Model from Hugging Face](#original-pytorch-model-from-hugging-face)
   - [Original PyTorch Model from Disk](#original-pytorch-model-from-disk)
   - [Customized or Finetuned PyTorch Model](#customized-or-finetuned-pytorch-model)
+  - [Quantized PyTorch Model](#quantized-pytorch-model)
   - [GGUF Model](#gguf-model)
   - [Extra Options](#extra-options)
     - [Config Only](#config-only)
@@ -80,6 +81,18 @@ python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o p
 
 # From source:
 python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files
+```
+
+### Quantized PyTorch Model
+
+This scenario is where your PyTorch model is one of the currently supported model architectures, has already been quantized to INT4 precision, and your model can be loaded in the Hugging Face style via [AutoGPTQ](https://github.com/AutoGPTQ/AutoGPTQ) or [AutoAWQ](https://github.com/casper-hansen/AutoAWQ).
+
+```
+# From wheel:
+python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e execution_provider -c cache_dir_to_store_temp_files
+
+# From source:
+python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e execution_provider -c cache_dir_to_store_temp_files
 ```
 
 ### GGUF Model

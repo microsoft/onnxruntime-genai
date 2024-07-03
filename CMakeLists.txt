@@ -13,11 +13,20 @@ if("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_
   message(FATAL_ERROR  "GCC version must be greater than or equal to 11")
 endif()
 
+if(MSVC)
+  # DLL initialization errors due to old conda msvcp140.dll dll are a result of the new MSVC compiler
+  # See https://developercommunity.visualstudio.com/t/Access-violation-with-std::mutex::lock-a/10664660#T-N10668856
+  # Remove this definition once the conda msvcp140.dll dll is updated.
+  add_compile_definitions(_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
+endif()
+
 include(cmake/external/onnxruntime_external_deps.cmake)
 # All Global variables, including GLOB, for the top level CMakeLists.txt should be defined here
 include(cmake/global_variables.cmake)
 # Checking if CUDA is supported
 include(cmake/check_cuda.cmake)
+# Checking if ROCm is supported
+include(cmake/check_rocm.cmake)
 # Checking if DML is supported
 include(cmake/check_dml.cmake)
 
@@ -52,7 +61,12 @@ target_include_directories(onnxruntime-genai-static PUBLIC ${onnxruntime_extensi
 target_link_libraries(onnxruntime-genai PRIVATE onnxruntime_extensions)
 target_link_libraries(onnxruntime-genai-static PUBLIC onnxruntime_extensions)
 target_link_directories(onnxruntime-genai PRIVATE ${ORT_LIB_DIR})
+
+# we keep the shared libraries disconnected on Android as they will come from separate AARs and we don't want to force
+# the ORT version to match in both.
+if(NOT ANDROID)
 target_link_libraries(onnxruntime-genai PRIVATE ${ONNXRUNTIME_LIB})
+endif()
 
 set_target_properties(onnxruntime-genai PROPERTIES FOLDER "Sources")
 set_target_properties(onnxruntime-genai-static PROPERTIES FOLDER "Sources")
@@ -80,6 +94,7 @@ endif()
 
 if(USE_DML)
   list(APPEND onnxruntime_libs "${ORT_LIB_DIR}/DirectML.dll")
+  list(APPEND onnxruntime_libs "${ORT_LIB_DIR}/D3D12Core.dll")
   target_include_directories(onnxruntime-genai PRIVATE $<TARGET_PROPERTY:${WIL_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
   target_include_directories(onnxruntime-genai PRIVATE $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>/directx)
   target_include_directories(onnxruntime-genai PRIVATE $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
@@ -113,6 +128,12 @@ if(USE_DML)
   add_dependencies(RESTORE_PACKAGES nuget)
   add_dependencies(onnxruntime-genai RESTORE_PACKAGES)
   add_dependencies(onnxruntime-genai-static RESTORE_PACKAGES)
+endif()
+
+if(ANDROID)
+  # strip the binary if it's not a build with debug info
+  set_target_properties(onnxruntime-genai PROPERTIES LINK_FLAGS_RELEASE -s)
+  set_target_properties(onnxruntime-genai PROPERTIES LINK_FLAGS_MINSIZEREL -s)
 endif()
 
 if(ENABLE_TESTS)

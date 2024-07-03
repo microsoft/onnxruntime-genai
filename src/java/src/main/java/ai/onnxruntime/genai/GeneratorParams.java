@@ -1,3 +1,7 @@
+/*
+ * Copyright (c) Microsoft Corporation. All rights reserved.
+ * Licensed under the MIT License.
+ */
 package ai.onnxruntime.genai;
 
 import java.nio.ByteBuffer;
@@ -83,6 +87,25 @@ public final class GeneratorParams implements AutoCloseable {
     setInputIDs(nativeHandle, tokenIdsBuffer, sequenceLength, batchSize);
   }
 
+  /**
+   * Add a Tensor as a model input.
+   *
+   * @param name Name of the model input the tensor will provide.
+   * @param tensor Tensor to add.
+   * @throws GenAIException
+   */
+  public void setInput(String name, Tensor tensor) throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    if (tensor.nativeHandle() == 0) {
+      throw new IllegalArgumentException("tensor has been freed and is invalid");
+    }
+
+    setModelInput(nativeHandle, name, tensor.nativeHandle());
+  }
+
   @Override
   public void close() {
     if (nativeHandle != 0) {
@@ -114,6 +137,9 @@ public final class GeneratorParams implements AutoCloseable {
       throws GenAIException;
 
   private native void setInputSequences(long nativeHandle, long sequencesHandle)
+      throws GenAIException;
+
+  private native void setModelInput(long nativeHandle, String inputName, long tensorHandle)
       throws GenAIException;
 
   private native void setInputIDs(

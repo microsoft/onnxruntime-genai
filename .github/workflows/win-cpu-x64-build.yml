@@ -27,6 +27,11 @@ jobs:
       with:
         submodules: true
 
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11.x'
+        architecture: 'x64'
+
     - name: Setup Visual Studio 2022
       uses: microsoft/setup-msbuild@v1.1
       with:
