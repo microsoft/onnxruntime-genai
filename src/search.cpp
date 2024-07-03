@@ -91,7 +91,7 @@ void BeamSearch_Cpu::SelectTop() {
   // Normalize next token scores
   for (int i = 0; i < params_->BatchBeamSize(); i++) {
     std::span<float> const scores = next_token_scores_.subspan(i * params_->vocab_size, params_->vocab_size);
-    LogSoftMax(scores, 1.0); // Should this be log softmax?
+    LogSoftMax(scores, 1.0);  // Should this be log softmax?
   }
 
   auto beam_scores = beam_scorer_->GetNextScores();
@@ -118,9 +118,9 @@ void BeamSearch_Cpu::SelectTop() {
     bool operator<(const ScoreIndex& s) const { return score < s.score; }
   };
 
-  auto scores = std::make_unique<float[]>(top_k * params_->batch_size); // Score of top_k tokens
-  auto indices = std::make_unique<int32_t[]>(top_k * params_->batch_size); // beam index of top_k tokens
-  auto tokens = std::make_unique<int32_t[]>(top_k * params_->batch_size); // token id of top_k tokens
+  auto scores = std::make_unique<float[]>(top_k * params_->batch_size);     // Score of top_k tokens
+  auto indices = std::make_unique<int32_t[]>(top_k * params_->batch_size);  // beam index of top_k tokens
+  auto tokens = std::make_unique<int32_t[]>(top_k * params_->batch_size);   // token id of top_k tokens
 
   auto next_scores = std::span<float>(scores.get(), top_k * params_->batch_size);
   auto next_indices = std::span<int32_t>(indices.get(), top_k * params_->batch_size);

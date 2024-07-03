@@ -81,7 +81,7 @@ struct BeamSearch_Cuda : Search_Cuda {
   void Finalize(size_t num_return_sequences);
 
   bool finalized_{};  // To avoid calling Finalize multiple times
-  
+
   std::unique_ptr<BeamSearchScorer_Cuda> beam_scorer_;
 
   cuda_unique_ptr<int32_t> topk_next_tokens_;

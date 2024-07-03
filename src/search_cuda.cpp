@@ -84,8 +84,8 @@ int Search_Cuda::GetSequenceLength() const {
 }
 
 void BeamSearch_Cuda::SelectTop() {
-  cuda::DispatchBlockwiseSoftmaxForward<true>(const_cast<cudaStream_t*>(&params_->cuda_stream), softmax_buffer_.get(), next_token_scores_.data(), params_->vocab_size, 
-                                        params_->vocab_size, params_->vocab_size, params_->BatchBeamSize());
+  cuda::DispatchBlockwiseSoftmaxForward<true>(const_cast<cudaStream_t*>(&params_->cuda_stream), softmax_buffer_.get(), next_token_scores_.data(), params_->vocab_size,
+                                              params_->vocab_size, params_->vocab_size, params_->BatchBeamSize());
 
   // Copy next_token_scores to CPU
   auto next_token_scores_cpu = CudaMallocHostArray<float>(params_->BatchBeamSize() * params_->vocab_size);
@@ -98,10 +98,10 @@ void BeamSearch_Cuda::SelectTop() {
   //    next_token_scores = next_token_scores + beam_scores[:, None].expand_as(next_token_scores)
   cuda::LaunchAddProbsKernel(softmax_buffer_.get(), beam_scores.data(),
                              params_->batch_size, params_->search.num_beams, params_->vocab_size, params_->cuda_stream);
-  
+
   if (params_->search.num_beams <= 32) {
     constexpr size_t max_parts_of_vocab = 128;
-    size_t candidate_count = params_->BatchBeamSize() * 2 * params_->search.num_beams; // TODO: Why is this the candidate count... why 2?
+    size_t candidate_count = params_->BatchBeamSize() * 2 * params_->search.num_beams;  // TODO: Why is this the candidate count... why 2?
     float* topk_tmp_buffer = topk_buffer_.get();
     float* topk_scores_1st_stage = topk_tmp_buffer;
     int32_t* topk_tokens_1st_stage = reinterpret_cast<int32_t*>(topk_scores_1st_stage + candidate_count * max_parts_of_vocab);
@@ -213,7 +213,7 @@ void GreedySearch_Cuda::AppendNextTokensToSequences() {
 
 bool BeamSearch_Cuda::IsDone() const {
   beam_scorer_->IsDone();
-  if (beam_scorer_->IsDoneLater()) 
+  if (beam_scorer_->IsDoneLater())
     return true;
 
   if (sequences_.GetSequenceLength() == params_->search.max_length) {

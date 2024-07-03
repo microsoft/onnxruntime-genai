@@ -102,7 +102,7 @@ struct BeamSearch_Cpu : Search_Cpu {
   void Finalize(size_t num_return_sequences);
 
   bool finalized_{};  // To avoid calling Finalize multiple times
-  
+
   std::unique_ptr<BeamSearchScorer> beam_scorer_;
 };
 
