@@ -87,7 +87,13 @@ void BeamSearch_Cuda::SelectTop() {
   cuda::DispatchBlockwiseSoftmaxForward<true>(const_cast<cudaStream_t*>(&params_->cuda_stream), softmax_buffer_.get(), next_token_scores_.data(), params_->vocab_size, 
                                         params_->vocab_size, params_->vocab_size, params_->BatchBeamSize());
 
+  // Copy next_token_scores to CPU
+  auto next_token_scores_cpu = CudaMallocHostArray<float>(params_->BatchBeamSize() * params_->vocab_size);
+  cudaMemcpyAsync(next_token_scores_cpu.get(), softmax_buffer_.get(), params_->BatchBeamSize() * params_->vocab_size * sizeof(float), cudaMemcpyDeviceToHost, params_->cuda_stream);
+  CudaCheck() == cudaStreamSynchronize(params_->cuda_stream);
+
   auto beam_scores = beam_scorer_->GetNextScores();
+
   // Add beam score to next token scores. Corresponding python code is like:
   //    next_token_scores = next_token_scores + beam_scores[:, None].expand_as(next_token_scores)
   cuda::LaunchAddProbsKernel(softmax_buffer_.get(), beam_scores.data(),
@@ -126,9 +132,30 @@ void BeamSearch_Cuda::SelectTop() {
   std::span<int32_t> next_indices{topk_next_indices_.get(), size};
 
 #if 0
-  DumpCudaMemory("Next Scores", next_scores);
-  DumpCudaMemory("Next Tokens", next_tokens);
-  DumpCudaMemory("Next Indices", next_indices);
+  // Copy next_tokens, next_indices, next_scores to CPU
+  auto next_tokens_cpu = CudaMallocHostArray<int32_t>(size);
+  auto next_indices_cpu = CudaMallocHostArray<int32_t>(size);
+  auto next_scores_cpu = CudaMallocHostArray<float>(size);
+  cudaMemcpyAsync(next_tokens_cpu.get(), next_tokens.data(), size * sizeof(int32_t), cudaMemcpyDeviceToHost, params_->cuda_stream);
+  cudaMemcpyAsync(next_indices_cpu.get(), next_indices.data(), size * sizeof(int32_t), cudaMemcpyDeviceToHost, params_->cuda_stream);
+  cudaMemcpyAsync(next_scores_cpu.get(), next_scores.data(), size * sizeof(float), cudaMemcpyDeviceToHost, params_->cuda_stream);
+  CudaCheck() == cudaStreamSynchronize(params_->cuda_stream);
+  // Print next_tokens_cpu, next_indices_cpu, next_scores_cpu
+  std::span<int32_t> next_tokens_cpu_span{next_tokens_cpu.get(), size};
+  std::span<int32_t> next_indices_cpu_span{next_indices_cpu.get(), size};
+  std::span<float> next_scores_cpu_span{next_scores_cpu.get(), size};
+  std::cout << "next_tokens_cpu: ";
+  for (int i = 0; i < size; i++)
+    std::cout << next_tokens_cpu_span[i] << " ";
+  std::cout << std::endl;
+  std::cout << "next_indices_cpu: ";
+  for (int i = 0; i < size; i++)
+    std::cout << next_indices_cpu_span[i] << " ";
+  std::cout << std::endl;
+  std::cout << "next_scores_cpu: ";
+  for (int i = 0; i < size; i++)
+    std::cout << next_scores_cpu_span[i] << " ";
+  std::cout << std::endl;
 #endif
 
   beam_scorer_->Process(sequences_, next_scores, next_tokens, next_indices);

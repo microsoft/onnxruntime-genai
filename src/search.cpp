@@ -89,12 +89,13 @@ int Search_Cpu::GetSequenceLength() const {
 
 void BeamSearch_Cpu::SelectTop() {
   // Normalize next token scores
-  for (int i = 0; i < params_->batch_size; i++) {
+  for (int i = 0; i < params_->BatchBeamSize(); i++) {
     std::span<float> const scores = next_token_scores_.subspan(i * params_->vocab_size, params_->vocab_size);
     LogSoftMax(scores, 1.0); // Should this be log softmax?
   }
 
   auto beam_scores = beam_scorer_->GetNextScores();
+
   // Add beam score to next token scores. Corresponding python code is like:
   //    next_token_scores = next_token_scores + beam_scores[:, None].expand_as(next_token_scores)
   // TODO(aciddelgado): use thread pool to parallel
@@ -125,7 +126,7 @@ void BeamSearch_Cpu::SelectTop() {
   auto next_indices = std::span<int32_t>(indices.get(), top_k * params_->batch_size);
   auto next_tokens = std::span<int32_t>(tokens.get(), top_k * params_->batch_size);
 
-  // TODO(aciddelgado): Optimize with partial sort
+  // TODO(aciddelgado): Optimize this top k with partial sort
   for (size_t batch_index = 0; batch_index < static_cast<size_t>(params_->batch_size); batch_index++) {
     std::priority_queue<ScoreIndex, std::vector<ScoreIndex>> queue;
     auto token_scores_sub = next_token_scores_.subspan(batch_index * params_->search.num_beams * params_->vocab_size, static_cast<size_t>(params_->search.num_beams) * params_->vocab_size);
@@ -146,9 +147,22 @@ void BeamSearch_Cpu::SelectTop() {
   }
 
 #if 0
-  DumpMemory("Next Scores", next_scores);
-  DumpMemory("Next Tokens", next_tokens);
-  DumpMemory("Next Indices", next_indices);
+  // Print next_tokens, next_indices, next_scores
+  std::cout << "next_tokens: ";
+  for (int i = 0; i < top_k * params_->batch_size; i++) {
+    std::cout << next_tokens[i] << " ";
+  }
+  std::cout << std::endl;
+  std::cout << "next_indices: ";
+  for (int i = 0; i < top_k * params_->batch_size; i++) {
+    std::cout << next_indices[i] << " ";
+  }
+  std::cout << std::endl;
+  std::cout << "next_scores: ";
+  for (int i = 0; i < top_k * params_->batch_size; i++) {
+    std::cout << next_scores[i] << " ";
+  }
+  std::cout << std::endl;
 #endif
 
   beam_scorer_->Process(sequences_, next_scores, next_tokens, next_indices);
