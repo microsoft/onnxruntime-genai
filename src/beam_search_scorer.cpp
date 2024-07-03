@@ -43,28 +43,6 @@ bool BeamHypotheses::CanImprove(float best_sum_logprobs, int current_length) con
   return beams_.back().score < current_score;
 }
 
-// void BeamHypotheses::Output(
-//     size_t top_k,
-//     size_t max_length,
-//     std::span<int32_t> sequences,             // buffer filled with pad token ID, shape (num_return_sequences, max_length)
-//     std::span<float> sequences_scores) const  // buffer of shape (num_return_sequences) or empty
-// {
-//   // Copy the top_k beams into the sequences
-//   assert(top_k <= beams_used_);
-//   for (int index = 0; index < top_k; index++) {
-//     auto& item = beams_[index];
-//     std::span<int32_t> const target = sequences.subspan(index * max_length, max_length);
-
-//     // Note that word_ids might be less than max_length.
-//     // Since the sequences has been filled with pad token ID, so padding is not needed here.
-//     copy(item.hypothesis, target);
-
-//     if (!sequences_scores.empty()) {
-//       sequences_scores[index] = item.score;
-//     }
-//   }
-// }
-
 BeamSearchScorer::BeamSearchScorer(const GeneratorParams& parameters)
     : batch_size_{parameters.batch_size},
       num_beams_{parameters.search.num_beams},
@@ -170,13 +148,11 @@ void BeamSearchScorer::Process(Sequences& sequences,
     assert(beam_idx == num_beams_);
     assert(static_cast<size_t>(hypothesis_buffer_used_) <= hypothesis_buffer_.size());
 
-    // TODO(aciddelgado): I don't understand
     //  Check if we are done so that we can save a pad step if all(done)
     if (static_cast<size_t>(beam_hyp.beams_used_) < num_beams_) {
       continue;
     }
 
-    // TODO(aciddelgado): What is early stopping?
     if (!early_stopping_) {
       std::span<const float> const topk_scores = next_scores.subspan(batch * num_beams_, top_k);
       const auto best_sum_logprobs = std::max_element(topk_scores.begin(), topk_scores.end());
@@ -185,18 +161,13 @@ void BeamSearchScorer::Process(Sequences& sequences,
       }
     }
 
-    // TODO(aciddelgado): when not_done_count_ hits 0, the generator is done returns true.
     beam_hyp.done_ = true;
     not_done_count_--;
   }
 }
 
-// TODO(aciddelgado): Wasteful output buffer. Create GetBeamOutput() to return views into the sequences. Is the open hypothesis finalization necessary?
 void BeamSearchScorer::Finalize(Sequences& sequences,
                                 size_t num_return_sequences) {
-  // output is Word IDs of each sequence, with shape (batch_size * num_return_sequences, max_sequence_length).
-  // sequence_scores is the optional Score of each sequence, with shape (batch_size * num_return_sequences).
-
   // Finalize all open beam hypotheses and add to generated hypotheses.
   for (size_t batch_index = 0; batch_index < batch_size_; batch_index++) {
     BeamHypotheses& beam_hyp = beam_hyps_[batch_index];
@@ -211,25 +182,6 @@ void BeamSearchScorer::Finalize(Sequences& sequences,
       beam_hyp.Add(final_tokens, final_score);
     }
   }
-  
-  // TODO(aciddelgado): pillage the below
-
-  // // Fill output sequences with pad token ID so that we do not need append it later.
-  // std::fill_n(output.data(), output.size(), pad_token_id_);
-
-  // // Select the best hypotheses according to number of sequences to return.
-  // for (size_t batch_index = 0; batch_index < batch_size_; batch_index++) {
-  //   BeamHypotheses& beam_hyp = beam_hyps_[batch_index];
-
-  //   auto batch_output = output.subspan(batch_index * num_return_sequences * max_length_,
-  //                                      num_return_sequences * max_length_);
-  //   std::span<float> sequence_scores_buffer;
-  //   if (!sequence_scores.empty()) {
-  //     sequence_scores_buffer = sequence_scores.subspan(batch_index * num_return_sequences, num_return_sequences);
-  //   }
-
-  //   beam_hyp.Output(num_return_sequences, max_length_, batch_output, sequence_scores_buffer);
-  // }
 }
 
 }  // namespace Generators

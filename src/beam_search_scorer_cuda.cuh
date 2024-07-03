@@ -21,18 +21,6 @@ struct BeamHypotheses {
 
   // Return true if this beats the worst score in the hypothesis
   __device__ bool CanImprove(float best_sum_logprobs, int current_length) const;
-
-  // RoamingArray<int32_t> GetHypothesis(size_t batch_id, size_t beam_id) const {
-  //   // auto beam_span = std::span<int32_t>(beams_[index].hypothesis, beams_[index].hypothesis_length);
-  //   return gpu_span<int32_t>{const_cast<int32_t*>(beams_[index].hypothesis), beams_[index].hypothesis_length};
-  // }
-
-  // Output results
-  // __device__ void Output(int top_k,                 // number of sequences to return
-  //                        int max_length,            // max sequence length
-  //                        int pad_token_id,          // pad token
-  //                        int32_t* sequences,        // buffer with pad token, shape (num_return_sequences, max_length)
-  //                        float* sequences_scores);  // buffer for sequence scores, with shape (num_return_sequences)
 };
 
 struct BeamScorerState {

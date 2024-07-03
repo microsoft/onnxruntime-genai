@@ -14,15 +14,9 @@ struct Search {
   virtual RoamingArray<int32_t> GetSequenceLengths() = 0;
   virtual int GetSequenceLength() const = 0;
   virtual RoamingArray<int32_t> GetSequence(size_t index) = 0;
-  // virtual RoamingArray<int32_t> GetBeamSearchOutputs(size_t /*batch_id*/); // TODO(aciddelgado)
 
   virtual void SetLogits(RoamingArray<float> logits) = 0;
   virtual bool IsDone() const = 0;
-
-  // TODO(aciddelgado): Beam Search only, this should be removed and made automatic. Replace with GetBeamOutputs function
-  virtual void Finalize(size_t /*num_return_sequences*/) { assert(false); }
-  
-  // TODO(aciddelgado): Beam Search get scores function
 
   virtual void SelectTop() = 0;
   virtual void SampleTopP(float /*p*/, float /*temperature*/) { assert(false); }
@@ -43,9 +37,7 @@ struct Search_Cpu : Search {
   RoamingArray<int32_t> GetSequenceLengths() override { return sequence_lengths_; }
   RoamingArray<int32_t> GetSequence(size_t index) override { return sequences_.GetSequence(index); }
 
-  bool IsDone() const override {
-    return done_; 
-  }
+  bool IsDone() const override { return done_; }
   void SetLogits(RoamingArray<float> logits) override;
 
   void ApplyMinLength(int min_length) override;
@@ -101,18 +93,16 @@ struct BeamSearch_Cpu : Search_Cpu {
   RoamingArray<int32_t> GetSequence(size_t index) override;
   RoamingArray<int32_t> GetSequence(size_t batch_id, size_t beam_id);
 
-  bool IsDone() const { 
-    return beam_scorer_->IsDone();
-  }
+  bool IsDone() const { return beam_scorer_->IsDone(); }
 
   void SelectTop() override;
 
-  void Finalize(size_t num_return_sequences) override; // TODO(aciddelgado): remove from interface
-
  private:
   void AppendNextTokensToSequences();
+  void Finalize(size_t num_return_sequences);
 
-  bool finalized_{};
+  bool finalized_{};  // To avoid calling Finalize multiple times
+  
   std::unique_ptr<BeamSearchScorer> beam_scorer_;
 };
 

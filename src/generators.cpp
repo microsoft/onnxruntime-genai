@@ -1,7 +1,6 @@
 ﻿// Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include <iostream>
 #include "generators.h"
 #include "sequences.h"
 #include "models/model.h"
@@ -200,40 +199,17 @@ TokenSequences Generate(const Model& model, const GeneratorParams& params) {
 
   while (!generator->IsDone()) {
     generator->ComputeLogits();
-    // CudaCheck() == cudaStreamSynchronize(params.cuda_stream);
     generator->GenerateNextToken();
-    // CudaCheck() == cudaStreamSynchronize(params.cuda_stream);
   }
 
   TokenSequences result;
-
-  // auto& search = generator->search_;
-  // TODO(aciddelgado): Awful mess. Refactor.
-  // if (params.search.num_beams > 1) {
-  //   // Beam search case
-  //   std::vector<int32_t> output_buffer = std::vector<int32_t>(params.batch_size * params.search.num_return_sequences * search->GetSequenceLength());
-  //   auto output_span = cpu_span<int32_t>(output_buffer.data(), output_buffer.size());
-  //   RoamingArray<int32_t> output{output_span};
-  //   auto score_span = cpu_span<float>{}; // empty so no scores outputted
-  //   RoamingArray<float> scores{score_span};
-  //   search->Finalize(params.search.num_return_sequences, output, scores);
-  //   for (int i = 0; i < params.batch_size * params.search.num_return_sequences; i++) {
-  //     auto sequence = output_span.subspan(i * search->GetSequenceLength(), search->GetSequenceLength());
-
-  //     auto& v = result.emplace_back();
-  //     v.assign(sequence.begin(), sequence.end());
-  //   }
-  // } else {
-  // Sampling case
   for (int i = 0; i < params.batch_size * params.search.num_return_sequences; i++) {
     auto sequence = generator->search_->GetSequence(i);
-    std::cout << "Here" << std::endl;
     auto sequence_cpu = sequence.GetCPU();
 
     auto& v = result.emplace_back();
     v.assign(sequence_cpu.begin(), sequence_cpu.end());
   }
-  // }
   return result;
 }
 

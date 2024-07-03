@@ -1,12 +1,10 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-#include <iostream>
 #include "sequences.h"
 #pragma once
 // The implementation is based on huggingface transformers generation_beam_search.py
 namespace Generators {
 
-// TODO(aciddelgado): I don't like the naming here... a score should not hold a hypothesis
 struct HypothesisScore {
   cpu_span<int32_t> hypothesis;
   float score;
@@ -22,16 +20,9 @@ struct BeamHypotheses {
   // Return true if this beats the worst score in the hypothesis
   bool CanImprove(float best_sum_logprobs, int current_length) const;
 
-  RoamingArray<int32_t> GetHypothesis(size_t index) const {
-    return beams_[index].hypothesis;
-  }
+  RoamingArray<int32_t> GetHypothesis(size_t index) const { return beams_[index].hypothesis; }
 
-  // Output results
-  // TODO(aciddelgado): remove this needless copy function
-  void Output(size_t top_k,                              // number of sequences to return
-              size_t max_length,                         // max sequence length
-              std::span<int32_t> sequences,              // buffer with pad token, shape (num_return_sequences, max_length)
-              std::span<float> sequences_scores) const;  // buffer for sequence scores, with shape (num_return_sequences)
+  // TODO(aciddelgado): Methods to get all hypotheses and scores
 
   std::span<HypothesisScore> beams_;  // Beam width sized array of hypotheses, sorted by highest scoring
   int beams_used_;                    // Number of elements used in beams_
@@ -50,9 +41,7 @@ struct BeamSearchScorer {
   void Finalize(Sequences& sequences,
                 size_t num_return_sequences);
 
-  bool IsDone() const {
-    return not_done_count_ == 0; 
-  }
+  bool IsDone() const { return not_done_count_ == 0; }
 
   cpu_span<float> GetNextScores() { return next_beam_scores_; }
   cpu_span<int32_t> GetNextTokens() { return next_beam_tokens_; }

@@ -71,30 +71,6 @@ __device__ bool BeamHypotheses::CanImprove(float best_sum_logprobs, int current_
   return beams_[beams_count_ - 1].score < current_score;
 }
 
-// __device__ void BeamHypotheses::Output(
-//     int top_k,
-//     int max_length,
-//     int pad_token_id,
-//     int32_t* sequences,       // buffer of shape (num_return_sequences, max_length)
-//     float* sequences_scores)  // buffer of shape (num_return_sequences) or empty
-// {
-//   // Copy the top_k beams into the sequences
-//   for (int index = 0; index < top_k; index++) {
-//     auto& item = beams_[index];
-//     int32_t* target = sequences + index * max_length;
-
-//     // Note that word_ids might be less than max_length.
-//     for (int i = 0; i < item.hypothesis_length; i++)
-//       target[i] = item.hypothesis[i];
-//     // Pad remaining values with pad token id
-//     for (int i = item.hypothesis_length; i < max_length; i++)
-//       target[i] = pad_token_id;
-
-//     if (sequences_scores)
-//       sequences_scores[index] = item.score;
-//   }
-// }
-
 __global__ void BeamSearchScorer_Process(BeamScorerState& state_cpu,
                                          BeamScorerState& state,
                                          const int32_t* sequences_buffer,
@@ -284,18 +260,6 @@ __global__ void BeamSearchScorer_Finalize(BeamScorerState& state,
       beam_hyp.Add(final_tokens, sequence_length, final_score);
     }
   }
-
-  // int num_return_sequences = 1;
-
-  // // Select the best hypotheses according to number of sequences to return.
-  // auto batch_output = output + batch_index * num_return_sequences * state.max_length_;
-
-  // beam_hyp.Output(
-  //     num_return_sequences,
-  //     state.max_length_,
-  //     state.pad_token_id_,
-  //     batch_output,
-  //     sequence_scores ? sequence_scores + batch_index * num_return_sequences : nullptr);
 }
 
 void LaunchBeamSearchScorer_Finalize(int batch_size,
@@ -319,7 +283,6 @@ __global__ void BeamSearchScorer_GetHypothesisPtr(size_t batch_id,
                                                   int* hypothesis_length,
                                                   float* hypothesis_score) {
   auto& beam_hyp = beam_hyps_data[batch_id];
-  // beam_hyp.Output(1, 1, 0, hypothesis, hypothesis_score);
   auto& item = beam_hyp.beams_[beam_id];
   hypothesis_ptr[0] = const_cast<int32_t*>(item.hypothesis);
   hypothesis_length[0] = item.hypothesis_length;
