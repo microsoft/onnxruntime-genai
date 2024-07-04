@@ -65,9 +65,9 @@ Statistics ComputeStats(const std::vector<Duration>& measurements) {
   std::vector<Duration> sorted = measurements;
   std::sort(sorted.begin(), sorted.end());
 
-  stats.p50 = sorted[stats.n * 0.5];
-  stats.p90 = sorted[stats.n * 0.9];
-  stats.p99 = sorted[stats.n * 0.99];
+  stats.p50 = sorted[static_cast<size_t>(stats.n * 0.5)];
+  stats.p90 = sorted[static_cast<size_t>(stats.n * 0.9)];
+  stats.p99 = sorted[static_cast<size_t>(stats.n * 0.99)];
 
   if (stats.n > 1) {
     const float variance =
@@ -119,8 +119,8 @@ std::string GeneratePrompt(size_t num_prompt_tokens, const OgaModel& model, cons
   tokenizer.Encode(base_prompt, *base_prompt_sequences);
 
   auto params = OgaGeneratorParams::Create(model);
-  params->SetSearchOption("max_length", num_prompt_tokens);
-  params->SetSearchOption("min_length", num_prompt_tokens);
+  params->SetSearchOption("max_length", static_cast<double>(num_prompt_tokens));
+  params->SetSearchOption("min_length", static_cast<double>(num_prompt_tokens));
   params->SetInputSequences(*base_prompt_sequences);
 
   auto output_sequences = model.Generate(*params);
@@ -149,8 +149,8 @@ void RunBenchmark(const benchmark::Options& opts) {
 
   auto make_generator_params = [&] {
     auto params = OgaGeneratorParams::Create(*model);
-    params->SetSearchOption("max_length", num_tokens);
-    params->SetSearchOption("min_length", num_tokens);
+    params->SetSearchOption("max_length", static_cast<double>(num_tokens));
+    params->SetSearchOption("min_length", static_cast<double>(num_tokens));
     params->SetInputSequences(*prompt_sequences);
     return params;
   };
