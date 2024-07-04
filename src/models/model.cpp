@@ -316,6 +316,16 @@ void Model::CreateSessionOptions() {
     ort_options.EnableProfiling(profile_file_prefix.c_str());
   }
 
+  const std::vector<std::string_view> available_providers = {
+      "cuda",
+#if USE_DML
+      "dml",
+#endif
+#if USE_ROCM
+      "rocm",
+#endif
+  };
+
   for (auto& provider_options : options.provider_options) {
     if (provider_options.name == "cuda") {
       auto ort_provider_options = OrtCUDAProviderOptionsV2::Create();
@@ -388,8 +398,15 @@ void Model::CreateSessionOptions() {
 
       device_type_ = DeviceType::DML;  // We use a DML allocator for input/output caches, but other tensors will use CPU tensors
 #endif
-    } else
-      throw std::runtime_error("Unknown provider type: " + provider_options.name);
+    } else {
+      std::ostringstream error_msg;
+      error_msg << "Unknown provider type: " << provider_options.name << ". ";
+      error_msg << "Available: ";
+      for (auto p : available_providers) {
+        error_msg << p;
+      }
+      throw std::runtime_error(error_msg.str());
+    }
   }
 }
 
