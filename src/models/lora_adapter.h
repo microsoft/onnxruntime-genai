@@ -37,7 +37,6 @@ namespace details {
 /// <returns>A OrtValue over a dummy buffer.</returns>
 std::shared_ptr<OrtValue> CreateEmptyInput(const OrtValue& tensor);
 
-
 /// <summary>
 /// A named Lora Parameters pair
 /// </summary>
@@ -73,14 +72,20 @@ class LoraAdapter {
   /// Set name after construction
   /// </summary>
   /// <param name="name"></param>
-  void SetName(const std::string& name) {
-    name_ = name;
-  }
+  void SetName(const std::string& name) { name_ = name; }
 
   // Returns if the adapter is active
   bool IsActive() const noexcept {
     std::shared_lock lock(mutex_);
     return active_;
+  }
+
+  /// <summary>
+  /// Returns number of parameters for buffer estimates
+  /// </summary>
+  size_t GetParamNum() const noexcept { 
+    std::shared_lock lock(mutex_);
+    return parameters_.size();
   }
 
   /// <summary>
@@ -217,12 +222,25 @@ class LoraAdapterManagement {
   void OutputAdaptersParameters(NamesOutputIter names_out, TensorOutputIter params_out) const {
     std::shared_lock lock(mutex_);
     for (const auto& [_, adapter] : adapters_) {
-        adapter.GetParameters(names_out, params_out);
+      adapter.GetParameters(names_out, params_out);
     }
   }
 
+  /// <summary>
+  /// Returns total number of parameters across all adapters
+  /// </summary>
+  /// <returns></returns>
+  size_t GetParamNum() const noexcept { 
+    std::shared_lock lock(mutex_);
+    size_t result = 0;
+    for (const auto& [_, adapter] : adapters_) {
+      result += adapter.GetParamNum();
+    }
+    return result;
+  }
+
  private:
-  const Model* model_; // optional
+  const Model* model_;  // optional
   mutable std::shared_mutex mutex_;
   using AdapterMap = std::unordered_map<std::string, details::LoraAdapter>;
   AdapterMap adapters_;

@@ -40,56 +40,11 @@ std::shared_ptr<OrtValue> CreateEmptyInput(const OrtValue& original) {
 }
 
 LoraParam::LoraParam(std::string name, const std::shared_ptr<Tensor>& parameter) : name_(std::move(name)) {
-  // Create a duplicate of the ort_value over the same use supplied buffer
+  // Create a duplicate of the ort_value over the same user supplied buffer
   // we want ort_value to be owned by a shared_ptr so it can be shared
   // We could still the unique_ptr from the original tensor, but that would not
   // be a good practice and the internal ORT OrtValue copy constructor is not public.
-  auto& param_value = parameter->ort_tensor_;
-  auto type_and_shape = param_value->GetTensorTypeAndShapeInfo();
-  const auto& mem_info = param_value->GetTensorMemoryInfo();
-  const auto size_in_bytes = SizeOf(type_and_shape->GetElementType()) * type_and_shape->GetElementCount();
-  auto ort_value = OrtValue::CreateTensor(mem_info, param_value->GetTensorMutableRawData(), size_in_bytes,
-                                          type_and_shape->GetShape(), type_and_shape->GetElementType());
-  // Convert it to a shared_ptr
-  ort_user_supplied_value_ = std::move(ort_value);
-}
-
-static std::shared_ptr<OrtValue> CopyToDevice(const OrtValue& source, const Model& model) {
-  const auto& mem_info = source.GetTensorMemoryInfo();
-  auto type_and_shape = source.GetTensorTypeAndShapeInfo();
-  auto ort_device_value =
-      OrtValue::CreateTensor(*model.GetAllocatorDevice(), type_and_shape->GetShape(), type_and_shape->GetElementType());
-  // Copy the data to the device
-  const auto copy_size_in_bytes = type_and_shape->GetElementCount() * SizeOf(type_and_shape->GetElementType());
-  auto target_data = ort_device_value->GetTensorMutableRawData();
-
-  if (model.device_type_ == DeviceType::DML) {
-#if USE_DML
-    //  Copy to DML device
-    ComPtr<ID3D12Resource> target_resource;
-    Ort::ThrowOnError(
-        model.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model.allocator_device_, target_data, &target_resource));
-
-    auto source_span = std::span(source.GetTensorData<const uint8_t>(), copy_size_in_bytes);
-
-    model.GetDmlUploadHeap()->BeginUploadToGpu(target_resource.Get(), 0, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                                               source_span);
-#else
-    throw std::runtime_error("DML is not supported in this build");
-#endif
-  } else if (model.device_type_ == DeviceType::CUDA) {
-#if USE_CUDA
-    cudaMemcpyAsync(target_data, source.GetTensorRawData(), copy_size_in_bytes, cudaMemcpyHostToDevice,
-                    model.cuda_stream_);
-#else
-    throw std::runtime_error("CUDA is not supported in this build");
-#endif
-
-  } else
-    throw std::runtime_error("Unsupported device type detected: " +
-                             std::to_string(static_cast<int>(model.device_type_)));
-
-  return ort_device_value;
+  ort_user_supplied_value_ = DuplicateOrtValue(*parameter->ort_tensor_);
 }
 
 void LoraAdapter::SetActive(const Model* model) {

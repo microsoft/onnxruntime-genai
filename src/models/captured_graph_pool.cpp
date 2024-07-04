@@ -26,7 +26,8 @@ CapturedGraphInfoPtr CapturedGraphPool::ReserveCapturedGraph(const Model& model,
   // Multiple generators can reserve graphs in parallel, so we need to make it thread saf
   std::unique_lock lock(captured_graph_mutex_);
 
-  auto key = std::make_unique<CapturedGraphKey>(params.max_batch_size, params.search.max_length, params.search.num_beams, params.extra_inputs);
+  auto key = std::make_unique<CapturedGraphKey>(params.max_batch_size, params.search.max_length,
+                                                params.search.num_beams, params.extra_inputs);
   auto& captured_graphs = captured_graphs_map_[*key];
 
   // If no graphs are available, create a graph with a new ID
@@ -59,7 +60,8 @@ CapturedGraphInfoPtr CapturedGraphPool::ReserveCapturedGraph(const Model& model,
     new_captured_graph->sb_kv_caches_.reserve(layer_count * 2);
 
     for (int i = 0; i < layer_count * 2; ++i) {
-      new_captured_graph->sb_kv_caches_.push_back(std::make_unique<StaticBuffer>(allocator_device_, max_beam_batch_size));
+      new_captured_graph->sb_kv_caches_.push_back(
+          std::make_unique<StaticBuffer>(allocator_device_, max_beam_batch_size));
     }
 
     // Create the static buffer for the position ids, if needed
@@ -74,7 +76,8 @@ CapturedGraphInfoPtr CapturedGraphPool::ReserveCapturedGraph(const Model& model,
 #if USE_DML
       // DML currently needs an additional static buffer for the mask
       if (model.device_type_ == DeviceType::DML) {
-        new_captured_graph->sb_attention_mask_next_ = std::make_unique<StaticBuffer>(allocator_device_, max_beam_batch_size);
+        new_captured_graph->sb_attention_mask_next_ =
+            std::make_unique<StaticBuffer>(allocator_device_, max_beam_batch_size);
       }
 #endif
     }
@@ -87,6 +90,13 @@ CapturedGraphInfoPtr CapturedGraphPool::ReserveCapturedGraph(const Model& model,
 
     if (output_type == Ort::TypeToTensorType<Ort::Float16_t>::type) {
       new_captured_graph->sb_logits16_ = std::make_unique<StaticBuffer>(allocator_device_, max_beam_batch_size);
+    }
+
+    // Create the extra inputs
+    for (const auto& extra_input : params.extra_inputs) {
+      auto first_dim = extra_input.tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape()[0];
+      new_captured_graph->sb_extra_inputs_[extra_input.name] =
+          std::make_unique<StaticBuffer>(allocator_device_, first_dim);
     }
 
     // Create the input embeddings if needed

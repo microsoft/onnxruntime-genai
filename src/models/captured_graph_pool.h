@@ -141,6 +141,7 @@ struct CapturedGraphInfo {
   std::unique_ptr<Generators::StaticBuffer> sb_logits32_;
   std::unique_ptr<Generators::StaticBuffer> sb_position_ids_;
   std::unique_ptr<Generators::StaticBuffer> sb_attention_mask_;
+  std::unordered_map<std::string, std::unique_ptr<Generators::StaticBuffer>> sb_extra_inputs_;
   std::unique_ptr<Generators::StaticBuffer> sb_embeddings_;
   std::unique_ptr<CapturedGraphKey> key_;
 
