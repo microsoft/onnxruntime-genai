@@ -897,11 +897,20 @@ class Model:
     def make_rotary_embedding_multi_cache(self):
         # Create dummy rotary embedding class
         rotemb = type("RotaryEmbedding", (object,), {'content':{}})()
+        if_cos_cache_output, if_sin_cache_output = "cos_cache", "sin_cache"
 
         # Create caches for when sequence_length > self.original_context_length
         self.rotemb_attrs["rescale_factors"] = self.rotemb_attrs["multi_cache"]["long_factor"]
         self.rotemb_attrs["cache_length"] = self.context_length
         self.rotemb_attrs["mscale"] = self.rotemb_attrs["multi_cache"]["long_mscale"]
+
+        # DML doesn't support dynamic selection of the cos/sin cache, so we always use the biggest one
+        if self.ep == "dml":
+            self.make_rotary_embedding_caches(rotemb)
+            self.make_value_info(if_cos_cache_output, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
+            self.make_value_info(if_sin_cache_output, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
+            return
+
         cos_cache_large_name, sin_cache_large_name = "cos_cache_large", "sin_cache_large"
         cos_cache_large, sin_cache_large = self.make_rotary_embedding_caches(rotemb, cos_cache_name=cos_cache_large_name, sin_cache_name=sin_cache_large_name)
 
@@ -931,7 +940,6 @@ class Model:
         greater_inputs = [f"{gather_name}/output_0", f"/model/constants/TensorProto.INT64/0D/{self.original_context_length}"]
         self.make_greater(greater_name, greater_inputs, shape=[])
         if_name = f"{basename}/If"
-        if_cos_cache_output, if_sin_cache_output = "cos_cache", "sin_cache"
         self.make_node(
             "If", inputs=[f"{greater_name}/output_0"], outputs=[if_cos_cache_output, if_sin_cache_output], name=if_name,
             then_branch=self.make_graph(
