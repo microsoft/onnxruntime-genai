@@ -127,7 +127,7 @@ jobs:
       DIR $(Agent.ToolsDirectory)\Python\3.12.3\arm64
       DIR "C:\Python"
     displayName: Copy python 3.12.3 version to agent tools directory
-    condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win')))
+    condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'))
 
   - task: UsePythonVersion@0
     inputs:
