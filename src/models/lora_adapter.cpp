@@ -62,29 +62,18 @@ void LoraAdapter::SetActive(const Model* model) {
         // Check if the user has already supplied his buffers on the target device
         auto& source_value = param.ort_user_supplied_value_;
         const auto& mem_info = source_value->GetTensorMemoryInfo();
-        auto ort_device_type = mem_info.GetDeviceType();
+        auto src_device_type = mem_info.GetDeviceType();
 
-        switch (model->device_type_) {
-          case DeviceType::CUDA: {
-            if (ort_device_type != OrtMemoryInfoDeviceType::OrtMemoryInfoDeviceType_CPU &&
-                ort_device_type != OrtMemoryInfoDeviceType::OrtMemoryInfoDeviceType_GPU)
-              throw std::runtime_error("Unable to copy user supplied value to GPU");
-            break;
-            case DeviceType::DML:
-              if (ort_device_type != OrtMemoryInfoDeviceType::OrtMemoryInfoDeviceType_CPU)
-                throw std::runtime_error("Unable to copy user supplied value to DML");
-              break;
-            default:
-              throw std::runtime_error("Unsupported device type detected: " +
-                                       std::to_string(static_cast<int>(model->device_type_)));
-          }
-
-            if (ort_device_type == OrtMemoryInfoDeviceType::OrtMemoryInfoDeviceType_CPU) {
-              param.ort_device_value_ = CopyToDevice(*source_value, *model);
-            } else {
-              // Re-use what user has supplied
-              param.ort_user_supplied_value_ = param.ort_user_supplied_value_;
-            }
+        if ((model->device_type_ == DeviceType::CUDA &&
+             src_device_type == OrtMemoryInfoDeviceType::OrtMemoryInfoDeviceType_GPU)) {
+            // Re-use what user has supplied on GPU
+            param.ort_device_value_ = param.ort_user_supplied_value_;
+        } else if(src_device_type != OrtMemoryInfoDeviceType::OrtMemoryInfoDeviceType_CPU) {
+          // XXX: Can the user supply buffers already on DML?
+          throw std::runtime_error("Loara parameter buffers are on unsupported device: " +
+                                   std::to_string(static_cast<int>(model->device_type_)));
+        } else {
+          param.ort_device_value_ = CopyToDevice(*source_value, *model);
         }
       }
     }

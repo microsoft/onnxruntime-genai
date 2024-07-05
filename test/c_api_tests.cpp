@@ -109,7 +109,15 @@ TEST(CAPITests, LoraManagement) {
 
   auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
+  constexpr std::array<int64_t, 2> input_ids_shape{2, 4};
+  constexpr std::array<int32_t, 8U> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
+  const auto batch_size = input_ids_shape[0];
+  const auto input_sequence_length = input_ids_shape[1];
+  constexpr int max_length = 10;
+
   auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+  params->SetInputIDs(input_ids.data(), input_ids.size(), input_sequence_length, batch_size);
 
   model->CreateLoraAdapter(adapter_name_1);
 

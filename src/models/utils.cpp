@@ -127,7 +127,6 @@ void CopyToDevice(const OrtValue& source, OrtValue& ort_device, DeviceType devic
 }
 
 std::shared_ptr<OrtValue> CopyToDevice(const OrtValue& source, const Model& model) {
-  const auto& mem_info = source.GetTensorMemoryInfo();
   auto type_and_shape = source.GetTensorTypeAndShapeInfo();
   auto ort_device_value =
       OrtValue::CreateTensor(*model.GetAllocatorDevice(), type_and_shape->GetShape(), type_and_shape->GetElementType());
