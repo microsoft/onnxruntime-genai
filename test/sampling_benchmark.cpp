@@ -261,7 +261,7 @@ TEST(Benchmarks, BenchmarkRandomizedSelectTopCuda) {
   auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   int vocab_size = 32000;  // vocab size of llama
   int batch_size = 12;
-  std::vector<int32_t> input_ids{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}; // Needs to match batch_size
+  std::vector<int32_t> input_ids{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};  // Needs to match batch_size
   auto params = Generators::CreateGeneratorParams();
   params->search.max_length = 10;
   params->batch_size = batch_size;
