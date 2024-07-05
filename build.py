@@ -351,7 +351,7 @@ def _get_csharp_properties(args: argparse.Namespace):
     return props
 
 
-def _run_android_tests(args, ):
+def _run_android_tests(args: argparse.Namespace):
     # only run the tests on the emulator for x86_64 currently.
     # TODO: may also be possible to run on a Mac with an arm64 chip
     if args.android_abi != "x86_64":

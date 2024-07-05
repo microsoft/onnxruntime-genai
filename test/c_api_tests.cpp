@@ -196,7 +196,7 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
   std::vector<int32_t> expected_output{0, 0, 0,   52,  204, 204, 204, 204, 204, 204,
                                        0, 0, 195, 731, 731, 114, 114, 114, 114, 114};
 
-  auto sequence_length = input_ids_shape[1];
+  auto input_sequence_length = input_ids_shape[1];
   auto batch_size = input_ids_shape[0];
   int max_length = 10;
 
@@ -209,7 +209,7 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
 
   auto params = OgaGeneratorParams::Create(*model);
   params->SetSearchOption("max_length", max_length);
-  params->SetInputIDs(input_ids.data(), input_ids.size(), sequence_length, batch_size);
+  params->SetInputIDs(input_ids.data(), input_ids.size(), input_sequence_length, batch_size);
 
   auto generator = OgaGenerator::Create(*model, *params);
 

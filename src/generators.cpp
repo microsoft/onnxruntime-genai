@@ -119,6 +119,8 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
     throw std::runtime_error("vocab_size must be 1 or greater, is " + std::to_string(params.vocab_size));
   if (params.sequence_length >= params.search.max_length)
     throw std::runtime_error("input sequence_length (" + std::to_string(params.sequence_length) + ") is >= max_length (" + std::to_string(params.search.max_length) + ")");
+  if (params.input_ids.empty() || params.input_ids.data() == nullptr)
+    throw std::runtime_error("input_ids not set in GeneratorParams");
 
   search_ = CreateSearch(params);
   state_ = model.CreateState(search_->GetSequenceLengths(), params);
