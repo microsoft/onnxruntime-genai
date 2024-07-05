@@ -8,7 +8,9 @@
 #include "../span.h"
 #include "../tensor.h"
 
+#include <algorithm>
 #include <memory>
+#include <mutex>
 #include <shared_mutex>
 #include <stdexcept>
 #include <string>

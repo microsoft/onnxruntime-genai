@@ -23,8 +23,7 @@ ExtraInputs::ExtraInputs(const Model& model, State& state) : model_{model}, stat
           sb_extra->CreateTensorOnStaticBuffer(type_and_shape_info->GetShape(), type_and_shape_info->GetElementType());
 
       // Copy to value created on top of the StaticBuffer
-      CopyToDevice(*state_.params_->extra_inputs[1].tensor->ort_tensor_, *ort_value, model_.device_type_,
-                   model_.cuda_stream_);
+      CopyToDevice(model_, *state_.params_->extra_inputs[1].tensor->ort_tensor_, *ort_value);
 
       extra_input_names_.push_back(input_name);
       extra_inputs_.push_back(std::move(ort_value));

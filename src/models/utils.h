@@ -35,11 +35,10 @@ std::shared_ptr<OrtValue> CopyToDevice(const OrtValue& source, const Model& mode
 /// <summary>
 /// Copies the source OrtValue to ort_device according to the settings
 /// </summary>
+/// <param name="model"></param>
 /// <param name="source"></param>
 /// <param name="ort_device"></param>
-/// <param name="device_type"></param>
-/// <param name="cuda_stream"></param>
-void CopyToDevice(const OrtValue& source, OrtValue& ort_device, DeviceType device_type, cuda_stream_holder cuda_stream);
+void CopyToDevice(const Model& model, const OrtValue& source, OrtValue& ort_device);
 
 /// <summary>
 /// Creates an OrtValue over the same buffer as the source

@@ -95,13 +95,15 @@ uint16_t FastFloat32ToFloat16(float v) {
                                (e > 143) * 0x7FFF);  // sign : normalized : denormalized : saturate
 }
 
-void CopyToDevice(const OrtValue& source, OrtValue& ort_device, DeviceType device_type,
-                  cuda_stream_holder cuda_stream) {
+void CopyToDevice(const Model& model, const OrtValue& source, OrtValue& ort_device) {
   auto type_and_shape = source.GetTensorTypeAndShapeInfo();
-  const auto copy_size_in_bytes = type_and_shape->GetElementCount() * SizeOf(type_and_shape->GetElementType());
+#if defined(USE_DML) || defined(USE_CUDA)
+  const auto copy_size_in_bytes = 
+    type_and_shape->GetElementCount() * SizeOf(type_and_shape->GetElementType());
   auto target_data = ort_device.GetTensorMutableRawData();
+#endif
 
-  if (device_type == DeviceType::DML) {
+  if (model.device_type_ == DeviceType::DML) {
 #if USE_DML
     //  Copy to DML device
     ComPtr<ID3D12Resource> target_resource;
@@ -115,15 +117,17 @@ void CopyToDevice(const OrtValue& source, OrtValue& ort_device, DeviceType devic
 #else
     throw std::runtime_error("DML is not supported in this build");
 #endif
-  } else if (device_type == DeviceType::CUDA) {
+  } else if (model.device_type_ == DeviceType::CUDA) {
 #if USE_CUDA
-    cudaMemcpyAsync(target_data, source.GetTensorRawData(), copy_size_in_bytes, cudaMemcpyHostToDevice, cuda_stream);
+    cudaMemcpyAsync(target_data, source.GetTensorRawData(), copy_size_in_bytes, cudaMemcpyHostToDevice,
+        model.cuda_stream_);
 #else
     throw std::runtime_error("CUDA is not supported in this build");
 #endif
 
   } else
-    throw std::runtime_error("Unsupported device type detected: " + std::to_string(static_cast<int>(device_type)));
+    throw std::runtime_error("Unsupported device type detected: " + 
+      std::to_string(static_cast<int>(model.device_type_)));
 }
 
 std::shared_ptr<OrtValue> CopyToDevice(const OrtValue& source, const Model& model) {
@@ -131,7 +135,7 @@ std::shared_ptr<OrtValue> CopyToDevice(const OrtValue& source, const Model& mode
   auto ort_device_value =
       OrtValue::CreateTensor(*model.GetAllocatorDevice(), type_and_shape->GetShape(), type_and_shape->GetElementType());
 
-  CopyToDevice(source, *ort_device_value, model.device_type_, model.cuda_stream_);
+  CopyToDevice(model, source, *ort_device_value);
   return ort_device_value;
 }
 
