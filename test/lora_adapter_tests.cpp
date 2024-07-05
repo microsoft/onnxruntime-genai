@@ -16,7 +16,7 @@ TEST(GeneratorsTests, LoraAdapterManagementTests) {
   const std::string adapter_name_1 = "adapter_1";
   const std::string adapter_name_2 = "adapter_2";
 
-  LoraAdapterManagement lora_adapter_management;
+  LoraAdapterManagement lora_adapter_management(nullptr);
   lora_adapter_management.CreateAdapter(adapter_name_1);
   // Try creating again should throw
   ASSERT_THROW(lora_adapter_management.CreateAdapter(adapter_name_1), std::runtime_error);
@@ -56,15 +56,14 @@ TEST(GeneratorsTests, LoraAdapterManagementTests) {
   {
     // No adapters are active at this point
     // Fetch parameters and names, and make sure that all of the parameters returned are empty.
-    std::vector<const char*> param_names;
-    std::vector<std::shared_ptr<Tensor>> params;
+    std::vector<std::string> param_names;
+    std::vector<std::shared_ptr<OrtValue>> params;
     lora_adapter_management.OutputAdaptersParameters(std::back_inserter(param_names), std::back_inserter(params));
 
     ASSERT_EQ(param_names.size(), 2U);
     ASSERT_EQ(params.size(), 2U);
 
-    for (auto& ten : params) {
-      auto& ort_val = ten->ort_tensor_;
+    for (auto& ort_val : params) {
       auto val_type_shape = ort_val->GetTensorTypeAndShapeInfo();
       ASSERT_EQ(val_type_shape->GetElementType(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
       auto shape = val_type_shape->GetShape();
@@ -83,28 +82,28 @@ TEST(GeneratorsTests, LoraAdapterManagementTests) {
   // List active adapters
   auto active_names = lora_adapter_management.GetActiveAdapterNames();
   ASSERT_EQ(active_names.size(), 1U);
-  ASSERT_EQ(active_names[0], adapter_name_1);
+  ASSERT_EQ(0, strcmp(active_names[0], adapter_name_1.c_str()));
 
   // Can not remove active adapter
   ASSERT_THROW(lora_adapter_management.RemoveAdapter(adapter_name_1), std::runtime_error);
 
   {
     // One parameter would be empty, another is not
-    std::vector<const char*> param_names;
-    std::vector<std::shared_ptr<Tensor>> params;
+    std::vector<std::string> param_names;
+    std::vector<std::shared_ptr<OrtValue>> params;
     lora_adapter_management.OutputAdaptersParameters(std::back_inserter(param_names), std::back_inserter(params));
 
     ASSERT_EQ(param_names.size(), 2U);
     ASSERT_EQ(params.size(), 2U);
 
     for (size_t i = 0; i < params.size(); ++i) {
-      auto& ort_val = params[i]->ort_tensor_;
+      auto& ort_val = params[i];
       auto val_type_shape = ort_val->GetTensorTypeAndShapeInfo();
       ASSERT_EQ(val_type_shape->GetElementType(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
       auto shape = val_type_shape->GetShape();
       ASSERT_EQ(shape.size(), 2U);
 
-      if (0 == strcmp(param_names[i], "lora_param_1")) {
+      if (param_names[i] == "lora_param_1") {
         ASSERT_EQ(shape[0], 4);
         ASSERT_EQ(shape[1], 2);
       } else {
@@ -120,7 +119,7 @@ TEST(GeneratorsTests, LoraAdapterManagementTests) {
 
   // Deactivate two even though only one is active, no error.
   const std::string deactivate[] = {adapter_name_1, adapter_name_1};
-  ASSERT_NO_THROW(lora_adapter_management.DeactiveAdapters(deactivate));
+  ASSERT_NO_THROW(lora_adapter_management.DeactivateAdapters(deactivate));
   active_names = lora_adapter_management.GetActiveAdapterNames();
   ASSERT_TRUE(active_names.empty());
 

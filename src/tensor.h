@@ -3,6 +3,12 @@
 
 #pragma once
 
+#include "models/onnxruntime_api.h"
+
+#include <memory>
+#include <string>
+#include <unordered_map>
+
 namespace Generators {
 
 struct Tensor : std::enable_shared_from_this<Tensor> {
