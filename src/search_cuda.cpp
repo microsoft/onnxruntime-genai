@@ -6,6 +6,7 @@
 #include "beam_search_topk.h"
 #include <queue>
 #include <random>
+#include <iostream>
 
 namespace Generators {
 
@@ -217,6 +218,8 @@ bool BeamSearch_Cuda::IsDone() const {
     return true;
 
   if (sequences_.GetSequenceLength() == params_->search.max_length) {
+    // TODO(aciddelgado): LEFT OFF figuring out the floating point exception when we hit max length
+    std::cout << "this is a thing" << std::endl;
     if (g_log.enabled && g_log.hit_max_length)
       Log("hit_max_length", "beam cuda hit");
     return true;
