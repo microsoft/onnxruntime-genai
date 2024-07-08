@@ -2148,8 +2148,6 @@ class Gemma2Model(GemmaModel):
         self.window_size = original_window_size
 
     def make_lm_head(self, lm_head):
-        bias_exists = lm_head.bias is not None
-
         matmul_basename = "/lm_head/MatMul"
         root_input = self.layernorm_attrs["output_0"]
         matmul_name = self.make_matmul(lm_head, matmul_basename, root_input, logits=False)
