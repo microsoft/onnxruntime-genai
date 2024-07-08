@@ -38,9 +38,9 @@
     <file src="..\$buildPath$\$configuration$\onnxruntime-genai.lib" target="runtimes\win-x64\native" />
     <file src="..\$buildPath$\$configuration$\onnxruntime-genai.dll" target="runtimes\win-x64\native" />
 
-<!--      --><!-- Windows arm64 -->
-<!--     <file src="..\$buildPath$\$configuration$\onnxruntime-genai.lib" target="runtimes\win-arm64\native" /> -->
-<!--     <file src="..\$buildPath$\$configuration$\onnxruntime-genai.dll" target="runtimes\win-arm64\native" /> -->
+    <!-- Windows arm64 -->
+    <file src="..\$buildPath$\$configuration$\onnxruntime-genai.lib" target="runtimes\win-arm64\native" />
+    <file src="..\$buildPath$\$configuration$\onnxruntime-genai.dll" target="runtimes\win-arm64\native" />
 
     <!-- Targets -->
     <file src="targets\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\netstandard2.0\Microsoft.ML.OnnxRuntimeGenAI$genai_nuget_ext$.targets" />
