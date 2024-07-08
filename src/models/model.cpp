@@ -316,16 +316,6 @@ void Model::CreateSessionOptions() {
     ort_options.EnableProfiling(profile_file_prefix.c_str());
   }
 
-  const std::vector<std::string_view> available_providers = {
-      "cuda",
-#if USE_DML
-      "dml",
-#endif
-#if USE_ROCM
-      "rocm",
-#endif
-  };
-
   for (auto& provider_options : options.provider_options) {
     if (provider_options.name == "cuda") {
       auto ort_provider_options = OrtCUDAProviderOptionsV2::Create();
@@ -356,8 +346,6 @@ void Model::CreateSessionOptions() {
 #if USE_DML
     } else if (provider_options.name == "dml") {
       auto current_module_path = CurrentModulePath();
-      dml_objects_ = DmlHelpers::CreateDmlObjects(current_module_path);
-
       auto directml_dll = current_module_path + "DirectML.dll";
       wil::unique_hmodule smart_directml_dll(LoadLibraryEx(directml_dll.c_str(), nullptr, 0));
       THROW_LAST_ERROR_IF(!smart_directml_dll);
@@ -365,6 +353,8 @@ void Model::CreateSessionOptions() {
       if (LoadLibraryEx(directml_dll.c_str(), nullptr, 0) == NULL) {
         throw std::runtime_error("DirectML.dll not found");
       }
+
+      dml_objects_ = DmlHelpers::CreateDmlObjects(current_module_path);
 
       auto dml_create_device1_fn = reinterpret_cast<decltype(&DMLCreateDevice1)>(GetProcAddress(smart_directml_dll.get(), "DMLCreateDevice1"));
       THROW_LAST_ERROR_IF(!dml_create_device1_fn);
@@ -398,15 +388,8 @@ void Model::CreateSessionOptions() {
 
       device_type_ = DeviceType::DML;  // We use a DML allocator for input/output caches, but other tensors will use CPU tensors
 #endif
-    } else {
-      std::ostringstream error_msg;
-      error_msg << "Unknown provider type: " << provider_options.name << ". ";
-      error_msg << "Available: ";
-      for (auto p : available_providers) {
-        error_msg << p;
-      }
-      throw std::runtime_error(error_msg.str());
-    }
+    } else
+      throw std::runtime_error("Unknown provider type: " + provider_options.name);
   }
 }
 
