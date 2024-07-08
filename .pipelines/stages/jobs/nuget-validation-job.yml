@@ -56,22 +56,8 @@ jobs:
     value: ${{ parameters.ep }}
   - name: ort_version
     value: ${{ parameters.ort_version }}
-  - name: GDN_CODESIGN_TARGETDIRECTORY
-    value: '$(Build.ArtifactStagingDirectory)/nuget'
   - name: os
     value: ${{ parameters.os }}
-  - name: ort_filename
-    ${{ if eq(parameters.ep, 'cpu') }}:
-      value: 'Microsoft.ML.OnnxRuntime'
-    ${{ elseif eq(parameters.ep, 'cuda') }}:
-      ${{if eq(parameters.os, 'win') }}:
-        value: 'Microsoft.ML.OnnxRuntime.Gpu.Windows'
-      ${{ else }}:
-        value: 'Microsoft.ML.OnnxRuntime.Gpu.Linux'
-    ${{ elseif eq(parameters.ep, 'directml')}}:
-      value: 'Microsoft.ML.OnnxRuntime.DirectML'
-    ${{ else }}:
-      value: 'Microsoft.ML.OnnxRuntime'
 
   - name: csproj_configuration
     ${{ if eq(parameters.ep, 'cpu') }}:
@@ -83,14 +69,6 @@ jobs:
     ${{ else }}:
       value: 'Release'
 
-  - name: ortHome
-    value: 'ort'
-  - name: dml_dir
-    value: 'Microsoft.AI.DirectML.1.14.2'
-  - name: dml_zip
-    value: 'Microsoft.AI.DirectML.1.14.2.zip'
-  - name: dml_url
-    value: "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.14.2"
   - name: prebuild_phi3_mini_model_folder
     ${{ if eq(parameters.ep, 'cpu') }}:
       value: 'cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4'
@@ -141,19 +119,21 @@ jobs:
 
   - ${{ if eq(parameters.os, 'win') }}:
     - powershell: |
+        dotnet --info
         Copy-Item -Force -Recurse -Verbose $(Build.BinariesDirectory)/nuget/* -Destination examples/csharp/HelloPhi/
         cd examples/csharp/HelloPhi
         Move-Item models\$(prebuild_phi3_mini_model_folder) models\phi-3
-        dotnet restore --arch $(arch) /property:Configuration=$(csproj_configuration) --source . --verbosity normal
+        dotnet restore --arch $(arch) /property:Configuration=$(csproj_configuration) --source https://api.nuget.org/v3/index.json --source . --verbosity normal
         dotnet run --arch $(arch) --configuration $(csproj_configuration) --no-restore --verbosity normal -- -m ./models/phi-3
       displayName: 'Run Example With Artifact'
       workingDirectory: '$(Build.Repository.LocalPath)'
   - ${{ elseif eq(parameters.os, 'linux') }}:
     - bash: |
+        dotnet --info
         cp $(Build.BinariesDirectory)/nuget/* examples/csharp/HelloPhi/
         cd examples/csharp/HelloPhi
         mv models/$(prebuild_phi3_mini_model_folder) models/phi-3
-        dotnet restore --arch $(arch) /property:Configuration=$(csproj_configuration) --source . --verbosity normal
+        dotnet restore --arch $(arch) /property:Configuration=$(csproj_configuration) --source https://api.nuget.org/v3/index.json --source . --verbosity normal
         dotnet run --arch $(arch) --configuration $(csproj_configuration) --no-restore --verbosity normal -- -m ./models/phi-3
   - template: steps/compliant-and-cleanup-step.yml
 
