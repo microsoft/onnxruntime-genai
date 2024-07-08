@@ -83,20 +83,6 @@ jobs:
     ${{ else }}:
       value: 'Release'
 
-  - name: genai_nuget_ext
-    ${{ if eq(parameters.ep, 'cpu') }}:
-      value: ''
-    ${{ if eq(parameters.ep, 'cuda') }}:
-      value: '.Cuda'
-    ${{ if eq(parameters.ep, 'directml') }}:
-      value: '.DirectML'
-  - name: ort_nuget_ext
-    ${{ if eq(parameters.ep, 'cpu') }}:
-      value: ''
-    ${{ if eq(parameters.ep, 'cuda') }}:
-      value: '.Gpu'
-    ${{ if eq(parameters.ep, 'directml') }}:
-      value: '.DirectML'
   - name: ortHome
     value: 'ort'
   - name: dml_dir
@@ -158,8 +144,8 @@ jobs:
         Copy-Item -Force -Recurse -Verbose $(Build.BinariesDirectory)/nuget/* -Destination examples/csharp/HelloPhi/
         cd examples/csharp/HelloPhi
         Move-Item models\$(prebuild_phi3_mini_model_folder) models\phi-3
-        dotnet restore /property:Configuration=$(csproj_configuration) --source . --verbosity normal
-        dotnet run --configuration $(csproj_configuration) --no-restore --verbosity normal -- -m ./models/phi-3
+        dotnet restore --arch $(arch) /property:Configuration=$(csproj_configuration) --source . --verbosity normal
+        dotnet run --arch $(arch) --configuration $(csproj_configuration) --no-restore --verbosity normal -- -m ./models/phi-3
       displayName: 'Run Example With Artifact'
       workingDirectory: '$(Build.Repository.LocalPath)'
   - ${{ elseif eq(parameters.os, 'linux') }}:
@@ -167,7 +153,7 @@ jobs:
         cp $(Build.BinariesDirectory)/nuget/* examples/csharp/HelloPhi/
         cd examples/csharp/HelloPhi
         mv models/$(prebuild_phi3_mini_model_folder) models/phi-3
-        dotnet restore /property:Configuration=$(csproj_configuration) --source . --verbosity normal
-        dotnet run --configuration $(csproj_configuration) --no-restore --verbosity normal -- -m ./models/phi-3
+        dotnet restore --arch $(arch) /property:Configuration=$(csproj_configuration) --source . --verbosity normal
+        dotnet run --arch $(arch) --configuration $(csproj_configuration) --no-restore --verbosity normal -- -m ./models/phi-3
   - template: steps/compliant-and-cleanup-step.yml
 
