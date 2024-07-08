@@ -135,5 +135,7 @@ jobs:
         mv models/$(prebuild_phi3_mini_model_folder) models/phi-3
         dotnet restore --arch $(arch) /property:Configuration=$(csproj_configuration) --source https://api.nuget.org/v3/index.json --source $PWD --verbosity normal
         dotnet run --arch $(arch) --configuration $(csproj_configuration) --no-restore --verbosity normal -- -m ./models/phi-3
+      displayName: 'Run Example With Artifact'
+      workingDirectory: '$(Build.Repository.LocalPath)'
   - template: steps/compliant-and-cleanup-step.yml
 

@@ -36,7 +36,7 @@ steps:
   condition: eq(variables['arch'], 'arm64')
   displayName: 'Nuget Packaging'
   workingDirectory: '$(Build.Repository.LocalPath)\nuget'
-  
+
 - powershell: |
     $VERSION = '0.4.0-dev'
     nuget.exe pack Microsoft.ML.OnnxRuntimeGenAI.nuspec `
@@ -57,8 +57,6 @@ steps:
     Get-ChildItem -Path $(Build.Repository.LocalPath) -Recurse
   displayName: 'List all files in the repo for'
 
-- powershell: |
-    Get-ChildItem -Path $(Build.Repository.LocalPath) -Recurse
 - task: CopyFiles@2
   displayName: 'Copy Nuget to: $(Build.ArtifactStagingDirectory)'
   inputs:
