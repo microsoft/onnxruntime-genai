@@ -1,4 +1,4 @@
-find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
+find_package(Python3 REQUIRED COMPONENTS Development)
 find_package(pybind11 CONFIG)
 
 include(${REPO_ROOT}/cmake/cxx_standard.cmake)
