@@ -93,7 +93,7 @@ struct BeamSearch_Cpu : Search_Cpu {
   RoamingArray<int32_t> GetSequence(size_t index) override;
   RoamingArray<int32_t> GetSequence(size_t batch_id, size_t beam_id);
 
-  bool IsDone() const { return beam_scorer_->IsDone(); }
+  bool IsDone() const;
 
   void SelectTop() override;
 

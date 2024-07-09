@@ -213,13 +213,10 @@ void GreedySearch_Cuda::AppendNextTokensToSequences() {
 }
 
 bool BeamSearch_Cuda::IsDone() const {
-  beam_scorer_->IsDone();
   if (beam_scorer_->IsDoneLater())
     return true;
 
   if (sequences_.GetSequenceLength() == params_->search.max_length) {
-    // TODO(aciddelgado): LEFT OFF figuring out the floating point exception when we hit max length
-    std::cout << "this is a thing" << std::endl;
     if (g_log.enabled && g_log.hit_max_length)
       Log("hit_max_length", "beam cuda hit");
     return true;
@@ -239,14 +236,14 @@ void BeamSearch_Cuda::Finalize(size_t num_return_sequences) {
 }
 
 RoamingArray<int32_t> BeamSearch_Cuda::GetSequence(size_t index) {
-  // Finalize(params_->search.num_return_sequences);
+  Finalize(params_->search.num_return_sequences);
   size_t batch_id = index / params_->search.num_return_sequences;
   size_t beam_id = index % params_->search.num_return_sequences;
   return beam_scorer_->GetBeamHypothesis(batch_id, beam_id);
 }
 
 RoamingArray<int32_t> BeamSearch_Cuda::GetSequence(size_t batch_id, size_t beam_id) {
-  // Finalize(params_->search.num_return_sequences);
+  Finalize(params_->search.num_return_sequences);
   return beam_scorer_->GetBeamHypothesis(batch_id, beam_id);
 }
 

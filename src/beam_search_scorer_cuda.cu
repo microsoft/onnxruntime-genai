@@ -108,7 +108,7 @@ __global__ void BeamSearchScorer_Process(BeamScorerState& state_cpu,
           continue;
         }
 
-        // Clone the sequence and append to buffer.
+        // Clone the sequence and append to buffer. // TODO(aciddelgado): why???
         const int32_t* src = sequences_buffer + batch_beam_idx * state.max_length_;
         auto clone = hypothesis_buffer_ + atomicAdd(&state.hypothesis_buffer_used_, sequence_length);
 
@@ -214,8 +214,7 @@ void LaunchBeamSearchScorer_AppendNextTokenToSequences(BeamScorerState& state_cp
     block_size.x = batch_beam_size;
     block_size.y = sequence_length;
   } else {
-    if (sequence_length <= max_threads)  // Sequence length fits into thread block, but batch_beam_size does not, so chunk it
-    {
+    if (sequence_length <= max_threads) {  // Sequence length fits into thread block, but batch_beam_size does not, so chunk it
       block_size.x = max_threads / sequence_length;
       block_size.y = sequence_length;
 

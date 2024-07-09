@@ -291,6 +291,17 @@ void GreedySearch_Cpu::AppendNextTokensToSequences() {
   }
 }
 
+bool BeamSearch_Cpu::IsDone() const { 
+  if (beam_scorer_->IsDone()) {
+    return true;
+  } else if (sequences_.GetSequenceLength() == params_->search.max_length) {
+    if (g_log.enabled && g_log.hit_max_length)
+      Log("hit_max_length", "beam cuda hit");
+    return true;
+  }
+  return false;
+}
+
 void BeamSearch_Cpu::AppendNextTokensToSequences() {
   sequences_.AppendNextTokenToSequences(beam_scorer_->GetNextIndicesCPU(), beam_scorer_->GetNextTokens());
 
