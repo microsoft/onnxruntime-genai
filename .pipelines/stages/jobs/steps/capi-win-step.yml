@@ -64,20 +64,6 @@ steps:
     displayName: 'Download DirectML & D3D11 DLLs'
     continueOnError: true
 
-- ${{ if eq(parameters.arch, 'arm64') }}:
-  - powershell: |
-      Invoke-WebRequest -Uri $(ort_arm64_url) -OutFile $(ort_arm64_zip)
-      Expand-Archive $(ort_arm64_zip) -DestinationPath .
-      Remove-Item -Path $(ort_arm64_zip)
-      $ort_folder_name = "ort"
-      if (Test-Path -Path $ort_folder_name)
-      {
-          Remove-Item -Path $ort_folder_name -Recurse -Force
-      }
-      Rename-Item -Path $(ort_arm64_dir) -NewName $ort_folder_name
-    workingDirectory: '$(Build.Repository.LocalPath)'
-    continueOnError: false
-
 - powershell: |
     azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" 'cuda_sdk'
   displayName: 'Download CUDA'
