@@ -78,14 +78,14 @@ stages:
   - ${{ if or(eq(parameters.enable_linux_cpu, true), eq(parameters.enable_win_cpu, true), eq(parameters.enable_win_arm64_cpu, true)) }}:
     - template: jobs/nuget-packaging-job.yml
       parameters:
-      ep: 'cpu'
+        ep: 'cpu'
 
   - ${{ if or(eq(parameters.enable_linux_cuda, true), eq(parameters.enable_win_cuda, true)) }}:
     - template: jobs/nuget-packaging-job.yml
       parameters:
-      ep: 'cuda'
+        ep: 'cuda'
 
   - ${{ if eq(parameters.enable_win_dml, true) }}:
     - template: jobs/nuget-packaging-job.yml
       parameters:
-      ep: 'directml' 
+        ep: 'directml' 
