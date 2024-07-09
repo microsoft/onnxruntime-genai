@@ -164,8 +164,6 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
   auto generator = Generators::CreateGenerator(*model, *params);
   auto result = Generators::Generate(*model, *params);
 
-  // std::cout << "Expected output: " << tokenizer->Decode(expected_output) << "\r\n";
-  // std::cout << "Actual output: " << tokenizer->Decode(result[0]) << "\r\n";
 
   // Verify outputs match expected outputs
   for (int i = 0; i < params->batch_size; i++) {
