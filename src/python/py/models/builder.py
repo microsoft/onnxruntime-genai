@@ -2954,14 +2954,15 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
     hf_token = parse_hf_token(extra_options.get("hf_token", "true"))
 
     is_peft = "adapter_config.json" in os.listdir(input_path)
-    peft_config = {}
+    peft_config = None
     if is_peft:
         from peft import PeftConfig
         peft_config = PeftConfig.from_pretrained(hf_name, use_auth_token=True, trust_remote_code=True, **extra_kwargs)
         hf_name = peft_config.base_model_name_or_path
 
     config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=True, **extra_kwargs)
-    config.update(peft_config.__dict__)
+    if is_peft:
+        config.update(peft_config.__dict__)
 
     # Set input/output precision of ONNX model
     io_dtype = TensorProto.FLOAT if precision in {"int8", "fp32"} or (precision == "int4" and execution_provider == "cpu") else TensorProto.FLOAT16
