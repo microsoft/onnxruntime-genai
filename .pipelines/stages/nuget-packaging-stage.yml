@@ -31,8 +31,7 @@ parameters:
 
 stages:
 - stage: nuget_packaging
-  jobs:
-  - job: download_capi_artifacts
+  steps:
   - ${{ if eq(parameters.enable_win_cpu, true) }}:
     - template: jobs/steps/utils/flex-download-pipeline-artifact.yml
       parameters:
