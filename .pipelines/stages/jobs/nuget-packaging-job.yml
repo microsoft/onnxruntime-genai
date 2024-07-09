@@ -41,7 +41,11 @@ parameters:
 
 jobs:
 - job: nuget_${{ parameters.ep }}_packaging
+  pool: 'onnxruntime-Win-CPU-2022'
   variables:
+  - name: ep
+    value: ${{ parameters.ep }}
+
   - name: ort_version
     value: ${{ parameters.ort_version }}
 
