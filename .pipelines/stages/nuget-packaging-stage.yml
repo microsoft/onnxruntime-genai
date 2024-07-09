@@ -31,6 +31,9 @@ parameters:
 
 - name: ort_version
   type: string
+- name: build_config
+  type: string
+  default: 'release'
 
 stages:
 - stage: nuget_packaging
@@ -85,15 +88,18 @@ stages:
         parameters:
           ep: 'cpu'
           ort_version: ${{ parameters.ort_version }}
+          build_config: ${{ parameters.build_config }}
 
     - ${{ if or(eq(parameters.enable_linux_cuda, true), eq(parameters.enable_win_cuda, true)) }}:
       - template: jobs/nuget-packaging-job.yml
         parameters:
           ep: 'cuda'
           ort_version: ${{ parameters.ort_version }}
+          build_config: ${{ parameters.build_config }}
 
     - ${{ if eq(parameters.enable_win_dml, true) }}:
       - template: jobs/nuget-packaging-job.yml
         parameters:
           ep: 'directml' 
           ort_version: ${{ parameters.ort_version }}
+          build_config: ${{ parameters.build_config }}

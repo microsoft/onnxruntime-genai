@@ -94,3 +94,4 @@ stages:
     enable_win_dml: ${{ parameters.enable_win_dml }}
     enable_win_arm64_cpu: ${{ parameters.enable_win_arm64_cpu }}
     ort_version: ${{ parameters.ort_version }}
+    build_config: ${{ parameters.build_config }}
