@@ -27,7 +27,7 @@ parameters:
   type: boolean
   default: false
 
-- name: enable_win_arm64_cpu
+- name: enable_win_arm64
   displayName: 'Whether Windows ARM64 package is built.'
   type: boolean
   default: false
@@ -89,6 +89,27 @@ jobs:
         ArtifactName: onnxruntime-genai-win-cuda-x64-capi
         TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
 
+  - ${{ if eq(parameters.enable_win_dml, true) }}:
+    - template: steps/utils/flex-download-pipeline-artifact.yml
+      parameters:
+        StepName: 'Download win-directml-x64 capi Artifacts'
+        ArtifactName: onnxruntime-genai-win-directml-x64-capi
+        TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
+
+  - ${{ if eq(parameters.enable_win_arm64, true) }}:
+    - template: steps/utils/flex-download-pipeline-artifact.yml
+      parameters:
+        StepName: 'Download win-cpu-arm64 capi Artifacts'
+        ArtifactName: onnxruntime-genai-win-cpu-arm64-capi
+        TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
+
+  - ${{ if and(eq(parameters.enable_win_arm64, true), eq(parameters.enable_win_dml, true)) }}:
+    - template: steps/utils/flex-download-pipeline-artifact.yml
+      parameters:
+        StepName: 'Download win-directml-arm64 capi Artifacts'
+        ArtifactName: onnxruntime-genai-win-directml-arm64-capi
+        TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
+
   - ${{ if eq(parameters.enable_linux_cpu, true) }}:
     - template: steps/utils/flex-download-pipeline-artifact.yml
       parameters:
@@ -101,20 +122,6 @@ jobs:
       parameters:
         StepName: 'Download linux-cuda-x64 capi Artifacts'
         ArtifactName: onnxruntime-genai-linux-cuda-x64-capi
-        TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
-
-  - ${{ if eq(parameters.enable_win_dml, true) }}:
-    - template: steps/utils/flex-download-pipeline-artifact.yml
-      parameters:
-        StepName: 'Download win-directml-x64 capi Artifacts'
-        ArtifactName: onnxruntime-genai-win-directml-x64-capi
-        TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
-
-  - ${{ if eq(parameters.enable_win_arm64_cpu, true) }}:
-    - template: steps/utils/flex-download-pipeline-artifact.yml
-      parameters:
-        StepName: 'Download win-cpu-arm64 capi Artifacts'
-        ArtifactName: onnxruntime-genai-win-cpu-arm64-capi
         TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
 
   - powershell: |

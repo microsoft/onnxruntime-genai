@@ -357,6 +357,26 @@
       "displayName": "windows arm64 cpu release",
       "binaryDir": "${sourceDir}/build/cpu/win-arm64",
       "architecture": "arm64"
+    },
+    {
+      "name": "windows_arm64_directml_relwithdebinfo",
+      "inherits": [
+        "windows_relwithdebinfo_default",
+        "windows_directml_default"
+      ],
+      "displayName": "windows arm64 directml relwithdebinfo",
+      "binaryDir": "${sourceDir}/build/directml/win-arm64",
+      "architecture": "arm64"
+    },
+    {
+      "name": "windows_arm64_directml_release",
+      "inherits": [
+        "windows_release_default",
+        "windows_directml_default"
+      ],
+      "displayName": "windows arm64 directml release",
+      "binaryDir": "${sourceDir}/build/directml/win-arm64",
+      "architecture": "arm64"
     }
   ]
 }

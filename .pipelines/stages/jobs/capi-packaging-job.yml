@@ -127,8 +127,6 @@ jobs:
         ep: ${{ parameters.ep }}
         build_config: ${{ parameters.build_config }}
 
-    # TODO: Add a step to build the linux nuget package
-
   - ${{ if eq(parameters.os, 'win') }}:
     - template: steps/capi-win-step.yml
       parameters:
