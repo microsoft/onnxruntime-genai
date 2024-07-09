@@ -60,7 +60,7 @@ jobs:
 
     - name: Install the Python Wheel and Test Dependencies
       run: |
-        python -m pip install "numpy<2" coloredlogs flatbuffers packaging protobuf sympy pytest onnx
+        python -m pip install "numpy<2" coloredlogs flatbuffers packaging protobuf sympy pytest
         python -m pip install -i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ ort-nightly-qnn
         python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl"))
 
