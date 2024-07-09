@@ -78,59 +78,64 @@ jobs:
     ${{ if eq(parameters.ep, 'directml') }}:
       value: '.DirectML'
   steps:
-  - ${{ if eq(parameters.enable_win_cpu, true) }}:
+  - ${{ if and(eq(parameters.enable_win_cpu, true), eq(parameters.ep, 'cpu')) }}:
     - template: steps/utils/flex-download-pipeline-artifact.yml
       parameters:
         StepName: 'Download win-cpu-x64 capi Artifacts'
         ArtifactName: onnxruntime-genai-win-cpu-x64-capi
         TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
 
-  - ${{ if eq(parameters.enable_win_cuda, true) }}:
+  - ${{ if and(eq(parameters.enable_win_cuda, true), eq(parameters.ep, 'cuda')) }}:
     - template: steps/utils/flex-download-pipeline-artifact.yml
       parameters:
         StepName: 'Download win-cuda-x64 capi Artifacts'
         ArtifactName: onnxruntime-genai-win-cuda-x64-capi
         TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
 
-  - ${{ if eq(parameters.enable_win_dml, true) }}:
+  - ${{ if and(eq(parameters.enable_win_dml, true), eq(parameters.ep, 'directml') }}:
     - template: steps/utils/flex-download-pipeline-artifact.yml
       parameters:
         StepName: 'Download win-directml-x64 capi Artifacts'
         ArtifactName: onnxruntime-genai-win-directml-x64-capi
         TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
 
-  - ${{ if eq(parameters.enable_win_arm64, true) }}:
+  - ${{ if and(eq(parameters.enable_win_arm64, true), eq(parameters.ep, 'cpu')) }}:
     - template: steps/utils/flex-download-pipeline-artifact.yml
       parameters:
         StepName: 'Download win-cpu-arm64 capi Artifacts'
         ArtifactName: onnxruntime-genai-win-cpu-arm64-capi
         TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
 
-  - ${{ if and(eq(parameters.enable_win_arm64, true), eq(parameters.enable_win_dml, true)) }}:
+  - ${{ if and(eq(parameters.enable_win_arm64, true), eq(parameters.enable_win_dml, true), eq(parameters.ep, 'directml')) }}:
     - template: steps/utils/flex-download-pipeline-artifact.yml
       parameters:
         StepName: 'Download win-directml-arm64 capi Artifacts'
         ArtifactName: onnxruntime-genai-win-directml-arm64-capi
         TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
 
-  - ${{ if eq(parameters.enable_linux_cpu, true) }}:
+  - ${{ if and(eq(parameters.enable_linux_cpu, true), eq(parameters.ep, 'cpu')) }}:
     - template: steps/utils/flex-download-pipeline-artifact.yml
       parameters:
         StepName: 'Download linux-cpu-x64 capi Artifacts'
         ArtifactName: onnxruntime-genai-linux-cpu-x64-capi
         TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
 
-  - ${{ if eq(parameters.enable_linux_cuda, true) }}:
+  - ${{ if and(eq(parameters.enable_linux_cuda, true), eq(parameters.ep, 'cuda')) }}:
     - template: steps/utils/flex-download-pipeline-artifact.yml
       parameters:
         StepName: 'Download linux-cuda-x64 capi Artifacts'
         ArtifactName: onnxruntime-genai-linux-cuda-x64-capi
         TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
 
+  - checkout: self
+    path: onnxruntime-genai
+    clean: true
+    submodules: recursive
+
   - powershell: |
       dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(buildConfig)" -p:NativeBuildOutputDir="$(buildDir)\$(buildConfig)"
-      displayName: 'Build CSharp'
-      workingDirectory: '$(Build.Repository.LocalPath)\src\csharp'
+    displayName: 'Build CSharp'
+    workingDirectory: '$(Build.Repository.LocalPath)\src\csharp'
 
   - task: BinSkim@4
     displayName: 'Run BinSkim'
@@ -196,7 +201,7 @@ jobs:
 
   - powershell: |
       Get-ChildItem -Path $(Build.Repository.LocalPath) -Recurse
-      displayName: 'List all files in the repo for debugging'
+    displayName: 'List all files in the repo for debugging'
 
   - task: CopyFiles@2
     displayName: 'Copy Nuget to: $(Build.ArtifactStagingDirectory)'
