@@ -24,7 +24,7 @@ parameters:
   type: boolean
   default: true
 
-- name: enable_win_arm64_cpu
+- name: enable_win_arm64
   displayName: 'Whether Windows ARM64 package is built.'
   type: boolean
   default: true
@@ -78,7 +78,7 @@ stages:
     enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
     enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
     enable_win_dml: ${{ parameters.enable_win_dml }}
-    enable_win_arm64_cpu: ${{ parameters.enable_win_arm64_cpu }}
+    enable_win_arm64: ${{ parameters.enable_win_arm64 }}
     ort_version: ${{ parameters.ort_version }}
     ort_cuda_version: ${{ parameters.ort_cuda_version }}
     ort_dml_version: ${{ parameters.ort_dml_version }}
@@ -92,6 +92,6 @@ stages:
     enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
     enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
     enable_win_dml: ${{ parameters.enable_win_dml }}
-    enable_win_arm64_cpu: ${{ parameters.enable_win_arm64_cpu }}
+    enable_win_arm64: ${{ parameters.enable_win_arm64 }}
     ort_version: ${{ parameters.ort_version }}
     build_config: ${{ parameters.build_config }}
