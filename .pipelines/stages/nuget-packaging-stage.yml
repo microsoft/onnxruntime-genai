@@ -29,6 +29,9 @@ parameters:
   type: boolean
   default: true
 
+- name: ort_version
+  type: string
+
 stages:
 - stage: nuget_packaging
   jobs:
@@ -81,13 +84,16 @@ stages:
       - template: jobs/nuget-packaging-job.yml
         parameters:
           ep: 'cpu'
+          ort_version: ${{ parameters.ort_version }}
 
     - ${{ if or(eq(parameters.enable_linux_cuda, true), eq(parameters.enable_win_cuda, true)) }}:
       - template: jobs/nuget-packaging-job.yml
         parameters:
           ep: 'cuda'
+          ort_version: ${{ parameters.ort_version }}
 
     - ${{ if eq(parameters.enable_win_dml, true) }}:
       - template: jobs/nuget-packaging-job.yml
         parameters:
           ep: 'directml' 
+          ort_version: ${{ parameters.ort_version }}

@@ -2,9 +2,14 @@ parameters:
 - name: ep
   type: string
 
+- name: ort_version
+  type: string
+
 jobs:
 - job: nuget_${{ parameters.ep }}_packaging
   variables:
+  - name: ort_version
+    value: ${{ parameters.ort_version }}
   - name: genai_nuget_ext
     ${{ if eq(parameters.ep, 'cpu') }}:
       value: ''
