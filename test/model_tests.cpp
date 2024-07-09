@@ -86,8 +86,6 @@ TEST(ModelTests, BeamSearchGptFp32) {
   auto generator = Generators::CreateGenerator(*model, *params);
   auto result = Generators::Generate(*model, *params);
 
-  // std::cout << "Expected output: " << tokenizer->Decode(expected_output) << "\r\n";
-  // std::cout << "Actual output: " << tokenizer->Decode(result[0]) << "\r\n";
 
   // Verify outputs match expected outputs
   for (int i = 0; i < params->batch_size; i++) {
