@@ -92,7 +92,7 @@ TEST(ModelTests, BeamSearchGptFp32) {
   // Verify outputs match expected outputs
   for (int i = 0; i < params->batch_size; i++) {
     auto sequence = std::span<int32_t>(result[i].data(), params->search.max_length);
-    auto* expected_output_start = &expected_output[i * params->search.max_length];
+    auto* expected_output_start = &expected_output[static_cast<size_t>(i) * params->search.max_length];
     EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params->search.max_length * sizeof(int32_t)));
   }
 }
@@ -172,7 +172,7 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
   // Verify outputs match expected outputs
   for (int i = 0; i < params->batch_size; i++) {
     auto sequence = std::span<int32_t>(result[i].data(), params->search.max_length);
-    auto* expected_output_start = &expected_output[i * params->search.max_length];
+    auto* expected_output_start = &expected_output[static_cast<size_t>(i) * params->search.max_length];
     EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params->search.max_length * sizeof(int32_t)));
   }
 }
