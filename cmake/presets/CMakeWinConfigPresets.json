@@ -225,7 +225,7 @@
         "windows_cuda_default"
       ],
       "displayName": "windows x64 cuda release",
-      "binaryDir": "${sourceDir}/build/cuda",
+      "binaryDir": "${sourceDir}/build/cuda/win-x64",
       "cacheVariables": {
         "USE_CUDA": "ON"
       }
@@ -237,7 +237,7 @@
         "windows_cuda_default"
       ],
       "displayName": "windows x64 cuda debug",
-      "binaryDir": "${sourceDir}/build/cuda",
+      "binaryDir": "${sourceDir}/build/cuda/win-x64",
       "cacheVariables": {
         "USE_CUDA": "ON"
       }
@@ -249,7 +249,7 @@
         "windows_cuda_default"
       ],
       "displayName": "windows x64 cuda relwithdebinfo",
-      "binaryDir": "${sourceDir}/build/cuda",
+      "binaryDir": "${sourceDir}/build/cuda/win-x64",
       "cacheVariables": {
         "USE_CUDA": "ON"
       }
@@ -261,7 +261,7 @@
         "windows_cuda_default"
       ],
       "displayName": "windows x64 cuda minsizerel",
-      "binaryDir": "${sourceDir}/build/cuda",
+      "binaryDir": "${sourceDir}/build/cuda/win-x64",
       "cacheVariables": {
         "USE_CUDA": "ON"
       }

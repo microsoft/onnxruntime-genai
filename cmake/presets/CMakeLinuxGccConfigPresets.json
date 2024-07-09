@@ -12,7 +12,7 @@
         "linux_gcc_default",
         "linux_release_default"
       ],
-      "binaryDir": "${sourceDir}/build/cpu/linux/x64"
+      "binaryDir": "${sourceDir}/build/cpu/linux-x64"
     },
     {
       "name": "linux_gcc_cpu_debug_asan",
@@ -22,7 +22,7 @@
         "linux_gcc_default",
         "linux_debug_default"
       ],
-      "binaryDir": "${sourceDir}/build/cpu/linux/x64"
+      "binaryDir": "${sourceDir}/build/cpu/linux-x64"
     },
     {
       "name": "linux_gcc_cpu_relwithdebinfo_asan",
@@ -32,7 +32,7 @@
         "linux_gcc_default",
         "linux_relwithdebinfo_default"
       ],
-      "binaryDir": "${sourceDir}/build/cpu/linux/x64"
+      "binaryDir": "${sourceDir}/build/cpu/linux-x64"
     },
     {
       "name": "linux_gcc_cpu_minsizerel_asan",
@@ -42,7 +42,7 @@
         "linux_gcc_default",
         "linux_minsizerel_default"
       ],
-      "binaryDir": "${sourceDir}/build/cpu/linux/x64"
+      "binaryDir": "${sourceDir}/build/cpu/linux-x64"
     },
     {
       "name": "linux_gcc_cpu_release",
@@ -51,7 +51,7 @@
         "linux_gcc_default",
         "linux_release_default"
       ],
-      "binaryDir": "${sourceDir}/build/cpu/linux/x64"
+      "binaryDir": "${sourceDir}/build/cpu/linux-x64"
     },
     {
       "name": "linux_gcc_cpu_debug",
@@ -60,7 +60,7 @@
         "linux_gcc_default",
         "linux_debug_default"
       ],
-      "binaryDir": "${sourceDir}/build/cpu/linux/x64"
+      "binaryDir": "${sourceDir}/build/cpu/linux-x64"
     },
     {
       "name": "linux_gcc_cpu_relwithdebinfo",
@@ -69,7 +69,7 @@
         "linux_gcc_default",
         "linux_relwithdebinfo_default"
       ],
-      "binaryDir": "${sourceDir}/build/cpu/linux/x64"
+      "binaryDir": "${sourceDir}/build/cpu/linux-x64"
     },
     {
       "name": "linux_gcc_cpu_minsizerel",
@@ -78,7 +78,7 @@
         "linux_gcc_default",
         "linux_minsizerel_default"
       ],
-      "binaryDir": "${sourceDir}/build/cpu/linux/x64"
+      "binaryDir": "${sourceDir}/build/cpu/linux-x64"
     },
     {
       "name": "linux_gcc_cuda_release_asan",
@@ -88,7 +88,7 @@
         "linux_gcc_cuda_default",
         "linux_release_default"
       ],
-      "binaryDir": "${sourceDir}/build/cuda"
+      "binaryDir": "${sourceDir}/build/cuda/linux-x64"
     },
     {
       "name": "linux_gcc_cuda_debug_asan",
@@ -118,7 +118,7 @@
         "linux_gcc_cuda_default",
         "linux_minsizerel_default"
       ],
-      "binaryDir": "${sourceDir}/build/cuda"
+      "binaryDir": "${sourceDir}/build/cuda/linux-x64"
     },
     {
       "name": "linux_gcc_cuda_release",
@@ -127,7 +127,7 @@
         "linux_gcc_cuda_default",
         "linux_release_default"
       ],
-      "binaryDir": "${sourceDir}/build/cuda"
+      "binaryDir": "${sourceDir}/build/cuda/linux-x64"
     },
     {
       "name": "linux_gcc_cuda_debug",
@@ -136,7 +136,7 @@
         "linux_gcc_cuda_default",
         "linux_debug_default"
       ],
-      "binaryDir": "${sourceDir}/build/cuda"
+      "binaryDir": "${sourceDir}/build/cuda/linux-x64"
     },
     {
       "name": "linux_gcc_cuda_relwithdebinfo",
@@ -145,7 +145,7 @@
         "linux_gcc_cuda_default",
         "linux_relwithdebinfo_default"
       ],
-      "binaryDir": "${sourceDir}/build/cuda"
+      "binaryDir": "${sourceDir}/build/cuda/linux-x64"
     },
     {
       "name": "linux_gcc_cuda_minsizerel",
@@ -154,7 +154,7 @@
         "linux_gcc_cuda_default",
         "linux_minsizerel_default"
       ],
-      "binaryDir": "${sourceDir}/build/cuda"
+      "binaryDir": "${sourceDir}/build/cuda/linux-x64"
     },
     {
       "name": "linux_gcc_rocm_release_asan",
@@ -164,7 +164,7 @@
         "linux_gcc_rocm_default",
         "linux_release_default"
       ],
-      "binaryDir": "${sourceDir}/build/rocm"
+      "binaryDir": "${sourceDir}/build/rocm/linux-x64"
     },
     {
       "name": "linux_gcc_rocm_debug_asan",
@@ -174,7 +174,7 @@
         "linux_gcc_rocm_default",
         "linux_debug_default"
       ],
-      "binaryDir": "${sourceDir}/build/rocm"
+      "binaryDir": "${sourceDir}/build/rocm/linux-x64"
     },
     {
       "name": "linux_gcc_rocm_relwithdebinfo_asan",
@@ -184,7 +184,7 @@
         "linux_gcc_rocm_default",
         "linux_relwithdebinfo_default"
       ],
-      "binaryDir": "${sourceDir}/build/rocm"
+      "binaryDir": "${sourceDir}/build/rocm/linux-x64"
     },
     {
       "name": "linux_gcc_rocm_minsizerel_asan",
@@ -194,7 +194,7 @@
         "linux_gcc_rocm_default",
         "linux_minsizerel_default"
       ],
-      "binaryDir": "${sourceDir}/build/rocm"
+      "binaryDir": "${sourceDir}/build/rocm/linux-x64"
     },
     {
       "name": "linux_gcc_rocm_release",
@@ -203,7 +203,7 @@
         "linux_gcc_rocm_default",
         "linux_release_default"
       ],
-      "binaryDir": "${sourceDir}/build/rocm"
+      "binaryDir": "${sourceDir}/build/rocm/linux-x64"
     },
     {
       "name": "linux_gcc_rocm_debug",
@@ -212,7 +212,7 @@
         "linux_gcc_rocm_default",
         "linux_debug_default"
       ],
-      "binaryDir": "${sourceDir}/build/rocm"
+      "binaryDir": "${sourceDir}/build/rocm/linux-x64"
     },
     {
       "name": "linux_gcc_rocm_relwithdebinfo",
@@ -221,7 +221,7 @@
         "linux_gcc_rocm_default",
         "linux_relwithdebinfo_default"
       ],
-      "binaryDir": "${sourceDir}/build/rocm"
+      "binaryDir": "${sourceDir}/build/rocm/linux-x64"
     },
     {
       "name": "linux_gcc_rocm_minsizerel",
@@ -230,7 +230,7 @@
         "linux_gcc_rocm_default",
         "linux_minsizerel_default"
       ],
-      "binaryDir": "${sourceDir}/build/rocm"
+      "binaryDir": "${sourceDir}/build/rocm/linux-x64"
     }
   ]
 }
