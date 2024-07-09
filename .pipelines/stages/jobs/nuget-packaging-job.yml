@@ -49,6 +49,9 @@ jobs:
   - name: ort_version
     value: ${{ parameters.ort_version }}
 
+  - name: buildDir
+    value: 'build/${{ parameters.ep }}'
+
   - name: buildConfig
     ${{ if eq(parameters.build_config, 'release') }}:
       value: 'Release'
@@ -143,21 +146,34 @@ jobs:
 
   - powershell: |
       $artifacts_dir = $(Build.BinariesDirectory)/artifact-downloads
-      Write-Host "List downloade artifacts"
-      Get-ChildItem -Path $artifacts_dir -Recurse
-      $zip_ep = "cpu"
-      if ("$(ep)" -eq "cpu") {
-          $zip_ep = "cpu"
+      Write-Host "List downloaded artifacts"
+      $artifacts = Get-ChildItem -Path $artifacts_dir\* -Include *.zip,*.tar.gz
+      Write-Host $artifacts
+
+      $nativeBuildOutputDir = $(buildDir)\$(buildConfig);
+
+      mkdir -Force $nativeBuildOutputDir
+      foreach ($a in $artifacts) {
+        $rid_match = $a -match 'onnxruntime-genai-0.4.0-dev-(.+)-?(?:cuda|dml)?(\.zip|\.tar\.gz)'
+        if ($rid_match) {
+          $rid = $Matches.1
+        }
+        else {
+          Write-Host "Invalid artifact name" $a
+          return
+        }
+        mkdir -Force $nativeBuildOutputDir\$rid
+
+        if ($a -like "*.zip") {
+          Expand-Archive -Path $a -DestinationPath $nativeBuildOutputDir\$rid
+        }
+        elseif ($a -like "*.tar.gz") {
+          tar -xf $a -C $nativeBuildOutputDir\$rid
+        }
       }
-      elseif ("$(ep)" -eq "directml") {
-          $zip_ep = "dml"
-      }
-      elseif ("$(ep)" -eq "cuda") {
-          $zip_ep = "cuda"
-      }
-      $zips = Get-ChildItem -Path $artifacts_dir -Filter $zip_ep
-      Write-Host "Selected artifacts"
-      Write-Host $zips
+
+      Write-Host "List extracted artifacts"
+      Get-ChildItem -Path $nativeBuildOutputDir -Recurse
 
     displayName: 'Extract Artifacts & Prepare Native Libraries'
     workingDirectory: '$(Build.BinariesDirectory)/artifact-downloads'
