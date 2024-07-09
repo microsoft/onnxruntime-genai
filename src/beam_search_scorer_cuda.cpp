@@ -72,8 +72,6 @@ void BeamSearchScorer_Cuda::Process(Sequences_Cuda& sequences,
 
 bool BeamSearchScorer_Cuda::IsDoneLater() const {
   cudaEventSynchronize(event_process_complete_);
-  // auto temp_state_gpu_ = CudaMallocHostArray<cuda::BeamScorerState>(1);
-  // cudaMemcpyAsync(temp_state_gpu_.get(), state_gpu_.get(), sizeof(cuda::BeamScorerState), ::cudaMemcpyDeviceToHost, stream_);
   return state_cpu_->not_done_count_ == 0;
 }
 

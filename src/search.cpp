@@ -4,7 +4,6 @@
 #include "beam_search_scorer.h"
 #include <queue>
 #include <algorithm>
-#include <iostream>
 
 namespace Generators {
 

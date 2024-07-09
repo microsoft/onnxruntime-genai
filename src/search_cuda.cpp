@@ -6,7 +6,6 @@
 #include "beam_search_topk.h"
 #include <queue>
 #include <random>
-#include <iostream>
 
 namespace Generators {
 
@@ -217,8 +216,8 @@ void BeamSearch_Cuda::Finalize(size_t num_return_sequences) {
 
 RoamingArray<int32_t> BeamSearch_Cuda::GetSequence(size_t index) {
   Finalize(params_->search.num_return_sequences);
-  size_t batch_id = index / params_->search.num_return_sequences;
-  size_t beam_id = index % params_->search.num_return_sequences;
+  const size_t batch_id = index / params_->search.num_return_sequences;
+  const size_t beam_id = index % params_->search.num_return_sequences;
   return beam_scorer_->GetBeamHypothesis(batch_id, beam_id);
 }
 
