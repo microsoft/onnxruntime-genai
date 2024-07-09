@@ -4,6 +4,7 @@
 #include "beam_search_scorer.h"
 #include <queue>
 #include <algorithm>
+#include <iostream>
 
 namespace Generators {
 
@@ -147,22 +148,9 @@ void BeamSearch_Cpu::SelectTop() {
   }
 
 #if 0
-  // Print next_tokens, next_indices, next_scores
-  std::cout << "next_tokens: ";
-  for (int i = 0; i < top_k * params_->batch_size; i++) {
-    std::cout << next_tokens[i] << " ";
-  }
-  std::cout << std::endl;
-  std::cout << "next_indices: ";
-  for (int i = 0; i < top_k * params_->batch_size; i++) {
-    std::cout << next_indices[i] << " ";
-  }
-  std::cout << std::endl;
-  std::cout << "next_scores: ";
-  for (int i = 0; i < top_k * params_->batch_size; i++) {
-    std::cout << next_scores[i] << " ";
-  }
-  std::cout << std::endl;
+  DumpSpan(std::cout, next_tokens);
+  DumpSpan(std::cout, next_indices_);
+  DumpSpan(std::cout, next_scores_);
 #endif
 
   beam_scorer_->Process(sequences_, next_scores, next_tokens, next_indices);

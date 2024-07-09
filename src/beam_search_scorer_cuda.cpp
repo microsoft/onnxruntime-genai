@@ -88,7 +88,6 @@ RoamingArray<int32_t> BeamSearchScorer_Cuda::GetBeamHypothesis(size_t batch_id, 
   cuda_host_unique_ptr<float> hypothesis_score = CudaMallocHostArray<float>(1);
   cuda::LaunchBeamSearchScorer_GetHypothesisPtr(batch_id, beam_id, beam_hyps_, hypothesis_ptr.get(), hypothesis_length.get(), hypothesis_score.get(), stream_);
   CudaCheck() == cudaStreamSynchronize(stream_);
-  // std::cout << "hypothesis length: " << *hypothesis_length.get() << std::endl;
   std::span<int32_t> hypothesis_span(*hypothesis_ptr.get(), *hypothesis_length.get());
   return gpu_span<int32_t>{hypothesis_span.data(), hypothesis_span.size()};
 }

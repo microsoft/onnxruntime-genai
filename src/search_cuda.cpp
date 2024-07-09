@@ -6,6 +6,7 @@
 #include "beam_search_topk.h"
 #include <queue>
 #include <random>
+#include <iostream>
 
 namespace Generators {
 
@@ -132,30 +133,9 @@ void BeamSearch_Cuda::SelectTop() {
   std::span<int32_t> next_indices{topk_next_indices_.get(), size};
 
 #if 0
-  // Copy next_tokens, next_indices, next_scores to CPU
-  auto next_tokens_cpu = CudaMallocHostArray<int32_t>(size);
-  auto next_indices_cpu = CudaMallocHostArray<int32_t>(size);
-  auto next_scores_cpu = CudaMallocHostArray<float>(size);
-  cudaMemcpyAsync(next_tokens_cpu.get(), next_tokens.data(), size * sizeof(int32_t), cudaMemcpyDeviceToHost, params_->cuda_stream);
-  cudaMemcpyAsync(next_indices_cpu.get(), next_indices.data(), size * sizeof(int32_t), cudaMemcpyDeviceToHost, params_->cuda_stream);
-  cudaMemcpyAsync(next_scores_cpu.get(), next_scores.data(), size * sizeof(float), cudaMemcpyDeviceToHost, params_->cuda_stream);
-  CudaCheck() == cudaStreamSynchronize(params_->cuda_stream);
-  // Print next_tokens_cpu, next_indices_cpu, next_scores_cpu
-  std::span<int32_t> next_tokens_cpu_span{next_tokens_cpu.get(), size};
-  std::span<int32_t> next_indices_cpu_span{next_indices_cpu.get(), size};
-  std::span<float> next_scores_cpu_span{next_scores_cpu.get(), size};
-  std::cout << "next_tokens_cpu: ";
-  for (int i = 0; i < size; i++)
-    std::cout << next_tokens_cpu_span[i] << " ";
-  std::cout << std::endl;
-  std::cout << "next_indices_cpu: ";
-  for (int i = 0; i < size; i++)
-    std::cout << next_indices_cpu_span[i] << " ";
-  std::cout << std::endl;
-  std::cout << "next_scores_cpu: ";
-  for (int i = 0; i < size; i++)
-    std::cout << next_scores_cpu_span[i] << " ";
-  std::cout << std::endl;
+  DumpCudaSpan(std::cout, next_scores);
+  DumpCudaSpan(std::cout, next_tokens);
+  DumpCudaSpan(std::cout, next_indices);
 #endif
 
   beam_scorer_->Process(sequences_, next_scores, next_tokens, next_indices);
