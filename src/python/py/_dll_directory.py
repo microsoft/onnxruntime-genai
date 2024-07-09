@@ -19,7 +19,7 @@ def add_onnxruntime_dependency():
         if not ort_package:
             raise ImportError("Could not find the onnxruntime package.")
         ort_package_path = ort_package.submodule_search_locations[0]
-        os.add_dll_directory(os.path.join(ort_package_path[0], "capi"))
+        os.add_dll_directory(os.path.join(ort_package_path, "capi"))
 
 
 def add_cuda_dependency():
