@@ -5,32 +5,32 @@ parameters:
 - name: enable_win_cpu
   displayName: 'Whether Windows CPU package is built.'
   type: boolean
-  default: true
+  default: false
 
 - name: enable_win_cuda
   displayName: 'Whether Windows CUDA package is built.'
   type: boolean
-  default: true
+  default: false
 
 - name: enable_linux_cpu
   displayName: 'Whether Linux CPU package is built.'
   type: boolean
-  default: true
+  default: false
 
 - name: enable_linux_cuda
   displayName: 'Whether Linux CUDA package is built.'
   type: boolean
-  default: true
+  default: false
 
 - name: enable_win_dml
   displayName: 'Whether Windows DirectML package is built.'
   type: boolean
-  default: true
+  default: false
 
 - name: enable_win_arm64_cpu
   displayName: 'Whether Windows ARM64 package is built.'
   type: boolean
-  default: true
+  default: false
 
 - name: ort_version
   type: string
