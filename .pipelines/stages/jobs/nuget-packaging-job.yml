@@ -133,7 +133,7 @@ jobs:
     submodules: recursive
 
   - powershell: |
-      dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(buildConfig)" -p:NativeBuildOutputDir="$(buildDir)\$(buildConfig)"
+      dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(buildConfig)" -p:NativeBuildOutputDir="$(buildDir)\$(buildConfig)" --verbosity normal
     displayName: 'Build CSharp'
     workingDirectory: '$(Build.Repository.LocalPath)\src\csharp'
 
@@ -150,16 +150,17 @@ jobs:
       Pattern: '*OnnxRuntimeGenAI*.dll'
 
   - powershell: |
-      $artifacts_dir = $(Build.BinariesDirectory)/artifact-downloads
+      $VERSION = '0.4.0-dev'
+      $artifacts_dir = '$(Build.BinariesDirectory)/artifact-downloads'
       Write-Host "List downloaded artifacts"
       $artifacts = Get-ChildItem -Path $artifacts_dir\* -Include *.zip,*.tar.gz
       Write-Host $artifacts
 
-      $nativeBuildOutputDir = $(buildDir)\$(buildConfig);
+      $nativeBuildOutputDir = '$(buildDir)\$(buildConfig)'
 
       mkdir -Force $nativeBuildOutputDir
       foreach ($a in $artifacts) {
-        $rid_match = $a -match 'onnxruntime-genai-0.4.0-dev-(.+)-?(?:cuda|dml)?(\.zip|\.tar\.gz)'
+        $rid_match = $a -match 'onnxruntime-genai-$VERSION-(.+)-?(?:cuda|dml)?(\.zip|\.tar\.gz)'
         if ($rid_match) {
           $rid = $Matches.1
         }
