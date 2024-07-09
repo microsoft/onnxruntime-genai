@@ -36,6 +36,7 @@ class Model:
         self.activation = config.hidden_activation if hasattr(config, "hidden_activation") and config.hidden_activation is not None else config.hidden_act
 
         self.model_name_or_path = config._name_or_path
+        # self.base_model_name_or_path = config.base_model_name_or_path if hasattr(config, "base_model_name_or_path") else self.model_name_or_path
         self.model_type = config.architectures[0]
         self.io_dtype = io_dtype      # {'fp16', 'fp32'}
         self.onnx_dtype = onnx_dtype  # {"int4", "fp16", "fp32"}
@@ -54,7 +55,7 @@ class Model:
         self.nodes = []
 
         # EP-specific variables
-        enable_cuda_graph = "1" if "enable_cuda_graph" in extra_options and extra_options["enable_cuda_graph"] == "1" else "0"
+        enable_cuda_graph = "1" if "enable_cuda_graph" in extra_options else "0"
         self.ep = ep
         self.ep_attrs = {
             "cpu": {},
@@ -158,6 +159,14 @@ class Model:
             "add_offset": 0,            # Offset value for LayerNorm weight
         }
 
+        # MatMul-specific variables
+        is_lora = hasattr(config, "peft_type") and config.peft_type == "LORA"
+        self.matmul_attrs = {
+            # "op_type": "MatMul",        # MatMul op to use (MatMul, MatMulNBits, etc)
+            "use_lora": is_lora,        # Use LoRA/QLoRA format
+            "use_qdq": False,           # Use QDQ format
+        }
+
         # RotaryEmbedding-specific variables
         position_scale = config.rope_position_scale if hasattr(config, "rope_position_scale") else 1
         partial_rotary_factor = config.partial_rotary_factor if hasattr(config, "partial_rotary_factor") else 1.0
@@ -213,11 +222,14 @@ class Model:
         vert_block_stride = config.blocksparse_vert_stride if hasattr(config, "blocksparse_vert_stride") else 0
         homo_head = config.blocksparse_homo_head_pattern if hasattr(config, "blocksparse_homo_head_pattern") else False
         self.attention_attrs = {
+            "q_path": "",                                    # Q path to attention
+            "k_path": "",                                    # K path to attention
+            "v_path": "",                                    # V path to attention
             "op_type": "MultiHeadAttention",                 # Attention op to use
             "scale": 1 / np.sqrt(self.head_size),            # Scale value after calculating Q x K' in attention
             "use_rotemb_in_attn": False,                     # Use rotary embeddings within attention (instead of a separate RotaryEmbedding op)
             "use_packed_matmul": False,                      # Use packed MatMul (instead of 3 separate MatMuls for Q/K/V)
-            "block_sparse": {
+            "block_sparse": {                                # Block-sparse attention-specific variables
                 "sparse_block_size": sparse_block_size,      # Sparse block size for SparseAttention op
                 "kernel_block_size": kernel_block_size,      # Kernel block size for sparse attention
                 "local_blocks": local_blocks,                # Number of local blocks for sparse attention
@@ -237,7 +249,8 @@ class Model:
             print("GroupQueryAttention (GQA) is used in this model.")
 
             # DML doesn't support packed Q/K/V for GQA yet
-            self.attention_attrs["use_packed_matmul"] = self.ep != "dml"
+            # Packed MatMul with LoRA/QLoRA is not currently supported
+            self.attention_attrs["use_packed_matmul"] = self.ep != "dml" and not self.matmul_attrs["use_lora"]
 
             # GQA + Rot.Emb. does not require `position ids` as input
             if self.ep != "dml":
@@ -666,6 +679,16 @@ class Model:
         self.make_value_info(output, dtype, shape=shape)
 
     def make_matmul(self, matmul, basename, root_input, **kwargs):
+        if hasattr(matmul, "base_layer"):
+            # For LoRA `MatMul`
+            return self.make_matmul_lora(matmul, basename, root_input, **kwargs)
+        # elif self.matmul_attrs["use_qdq"]:
+        #     return self.make_matmul_qdq(matmul, basename, root_input, **kwargs)
+        else:
+            # For regular `MatMul`
+            return self.make_matmul_op(matmul, basename, root_input, **kwargs)
+    
+    def make_matmul_op(self, matmul, basename, root_input, **kwargs):
         if self.onnx_dtype in {"fp16", "fp32"}:
             return self.make_matmul_fp16_or_fp32(matmul, basename, root_input, **kwargs)
         elif self.onnx_dtype == "int4":
@@ -774,6 +797,42 @@ class Model:
         self.make_value_info(matmul_output, self.io_dtype, shape=['batch_size', 'sequence_length', matmul.out_features])
 
         return matmul_name
+    def make_matmul_lora(self, matmul, basename, root_input, **kwargs):
+        # Make nodes for the MatMul-LoRA subgraph
+        #
+        #            root_input
+        #                |
+        #         +------+------+
+        #         |             |
+        #   MatMul_LoRA_A     MatMul
+        #         |             |
+        #   MatMul_LoRA_B       |
+        #         |             |
+        #         +------+------+
+        #                |
+        #           Add_LoRA_Add
+
+        basename_parts = basename.split("/")
+
+        # Make LoRA MatMul path
+        matmul_A_basename = "/".join(basename_parts[:-1] + ["lora_A"] + basename_parts[-1:])
+        matmul_A_name = self.make_matmul_op(matmul.lora_A.default, matmul_A_basename, root_input=root_input)
+        lora_A = f"{matmul_A_name}/output_0"
+        matmul_B_basename = "/".join(basename_parts[:-1] + ["lora_B"] + basename_parts[-1:])
+        matmul_B_name = self.make_matmul_op(matmul.lora_B.default, matmul_B_basename, root_input=lora_A)
+        lora_B = f"{matmul_B_name}/output_0"
+
+        # Make regular MatMul path
+        last_dim = matmul.base_layer.weight.shape[0]
+        matmul_name = self.make_matmul_op(matmul.base_layer, basename, root_input, **kwargs)
+
+        # Make LoRA Add node
+        add_name = "/".join(basename_parts[:-1] + ["lora", "Add"])
+        add_inputs = [f"{matmul_name}/output_0", lora_B]
+        add_shape = ["batch_size", "sequence_length", last_dim]
+        self.make_add(add_name, add_inputs, dtype=self.io_dtype, shape=add_shape)
+
+        return add_name
 
     def make_packed_matmul(self, q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs):
         if self.onnx_dtype in {"fp16", "fp32"}:
@@ -1378,26 +1437,24 @@ class Model:
         #                    |
         #                  O_Add
 
-        q_input_to_attention = ""
-        k_input_to_attention = ""
-        v_input_to_attention = ""
-
         # Make MatMul nodes
         if self.attention_attrs["use_packed_matmul"]:
             # Combine 3 MatMuls into 1 packed MatMul
             qkv_matmul_basename = f"/model/layers.{layer_id}/attn/qkv_proj/MatMul"
             qkv_matmul_name = self.make_packed_matmul(attention.q_proj, attention.k_proj, attention.v_proj, qkv_matmul_basename, root_input)
-            q_input_to_attention = f"{qkv_matmul_name}/output_0"
+            self.attention_attrs["q_path"] = f"{qkv_matmul_name}/output_0"
         else:
             q_matmul_basename = f"/model/layers.{layer_id}/attn/q_proj/MatMul"
             q_matmul_name = self.make_matmul(attention.q_proj, q_matmul_basename, root_input)
-            q_input_to_attention = f"{q_matmul_name}/output_0"
+            self.attention_attrs["q_path"] = f"{q_matmul_name}/output_0"
             k_matmul_basename = f"/model/layers.{layer_id}/attn/k_proj/MatMul"
             k_matmul_name = self.make_matmul(attention.k_proj, k_matmul_basename, root_input)
-            k_input_to_attention = f"{k_matmul_name}/output_0"
+            self.attention_attrs["k_path"] = f"{k_matmul_name}/output_0"
             v_matmul_basename = f"/model/layers.{layer_id}/attn/v_proj/MatMul"
             v_matmul_name = self.make_matmul(attention.v_proj, v_matmul_basename, root_input)
-            v_input_to_attention = f"{v_matmul_name}/output_0"
+            self.attention_attrs["v_path"] = f"{v_matmul_name}/output_0"
+        
+        # self.make_attention_proj(layer_id, attention, root_input, **kwargs)
 
         # Make Add nodes (if bias exists)
         q_bias_exists = attention.q_proj.bias is not None and torch.count_nonzero(attention.q_proj.bias) > 0
@@ -1408,21 +1465,21 @@ class Model:
         if all_bias_exists and self.attention_attrs["use_packed_matmul"]:
             # Combine 3 Adds into 1 packed Add
             qkv_add_name = f"/model/layers.{layer_id}/attn/qkv_proj/Add"
-            self.make_packed_add(attention.q_proj.bias.detach().numpy(), attention.k_proj.bias.detach().numpy(), attention.v_proj.bias.detach().numpy(), qkv_add_name, root_input=q_input_to_attention)
-            q_input_to_attention = f"{qkv_add_name}/output_0"
+            self.make_packed_add(attention.q_proj.bias.detach().numpy(), attention.k_proj.bias.detach().numpy(), attention.v_proj.bias.detach().numpy(), qkv_add_name, root_input=self.attention_attrs["q_path"])
+            self.attention_attrs["q_path"] = f"{qkv_add_name}/output_0"
         else:
             if q_bias_exists:
                 q_add_name = f"/model/layers.{layer_id}/attn/q_proj/Add"
-                self.make_add_bias(attention.q_proj.bias.detach().numpy(), q_add_name, root_input=q_input_to_attention)
-                q_input_to_attention = f"{q_add_name}/output_0"
+                self.make_add_bias(attention.q_proj.bias.detach().numpy(), q_add_name, root_input=self.attention_attrs["q_path"])
+                self.attention_attrs["q_path"] = f"{q_add_name}/output_0"
             if k_bias_exists:
                 k_add_name = f"/model/layers.{layer_id}/attn/k_proj/Add"
-                self.make_add_bias(attention.k_proj.bias.detach().numpy(), k_add_name, root_input=k_input_to_attention)
-                k_input_to_attention = f"{k_add_name}/output_0"
+                self.make_add_bias(attention.k_proj.bias.detach().numpy(), k_add_name, root_input=self.attention_attrs["k_path"])
+                self.attention_attrs["k_path"] = f"{k_add_name}/output_0"
             if v_bias_exists:
                 v_add_name = f"/model/layers.{layer_id}/attn/v_proj/Add"
-                self.make_add_bias(attention.v_proj.bias.detach().numpy(), v_add_name, root_input=v_input_to_attention)
-                v_input_to_attention = f"{v_add_name}/output_0"
+                self.make_add_bias(attention.v_proj.bias.detach().numpy(), v_add_name, root_input=self.attention_attrs["v_path"])
+                self.attention_attrs["v_path"] = f"{v_add_name}/output_0"
 
         # Make RotaryEmbedding nodes
         cos_cache_name, sin_cache_name = "", ""
@@ -1430,11 +1487,11 @@ class Model:
             cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches(attention.rotary_emb)
         else:
             q_rotary_name = f"/model/layers.{layer_id}/attn/q_rotary/RotaryEmbedding"
-            self.make_rotary_embedding(attention.rotary_emb, q_rotary_name, root_input=q_input_to_attention, position_ids=kwargs.get("position_ids", "position_ids"))
-            q_input_to_attention = f"{q_rotary_name}/output_0"
+            self.make_rotary_embedding(attention.rotary_emb, q_rotary_name, root_input=self.attention_attrs["q_path"], position_ids=kwargs.get("position_ids", "position_ids"))
+            self.attention_attrs["q_path"] = f"{q_rotary_name}/output_0"
             k_rotary_name = f"/model/layers.{layer_id}/attn/k_rotary/RotaryEmbedding"
-            self.make_rotary_embedding(attention.rotary_emb, k_rotary_name, root_input=k_input_to_attention, position_ids=kwargs.get("position_ids", "position_ids"))
-            k_input_to_attention = f"{k_rotary_name}/output_0"
+            self.make_rotary_embedding(attention.rotary_emb, k_rotary_name, root_input=self.attention_attrs["k_path"], position_ids=kwargs.get("position_ids", "position_ids"))
+            self.attention_attrs["k_path"] = f"{k_rotary_name}/output_0"
 
         # Make repeat KV nodes (Note: `repeat_kv` needs to be kept since GroupQueryAttention isn't supported for FP32 CUDA)
         past_k = f"past_key_values.{layer_id}.key"
@@ -1442,14 +1499,14 @@ class Model:
         present_k = f"present.{layer_id}.key"
         present_v = f"present.{layer_id}.value"
         if self.num_attn_heads != self.num_kv_heads and self.attention_attrs["op_type"] == "MultiHeadAttention":
-            k_input_to_attention = self.make_repeat_kv(layer_id, root_input=k_input_to_attention, past_kv=past_k, present_kv=present_k)
-            v_input_to_attention = self.make_repeat_kv(layer_id, root_input=v_input_to_attention, past_kv=past_v, present_kv=present_v)
+            self.attention_attrs["k_path"] = self.make_repeat_kv(layer_id, root_input=self.attention_attrs["k_path"], past_kv=past_k, present_kv=present_k)
+            self.attention_attrs["v_path"] = self.make_repeat_kv(layer_id, root_input=self.attention_attrs["v_path"], past_kv=past_v, present_kv=present_v)
             past_k, past_v, present_k, present_v = "", "", "", ""
 
         # Make attention node (e.g. MultiHeadAttention, GroupQueryAttention, etc.)
         attn_name = f"/model/layers.{layer_id}/attn/{self.attention_attrs['op_type']}"
         self.make_attention_op(
-            attn_name, q_path=q_input_to_attention, k_path=k_input_to_attention, v_path=v_input_to_attention,
+            attn_name, q_path=self.attention_attrs["q_path"], k_path=self.attention_attrs["k_path"], v_path=self.attention_attrs["v_path"],
             past_k=past_k, past_v=past_v, present_k=present_k, present_v=present_v,
             cos_cache=cos_cache_name, sin_cache=sin_cache_name, **kwargs,
         )
@@ -1469,6 +1526,122 @@ class Model:
 
         # Assign output 0 of previous output node as skip input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = f"{o_matmul_name if not o_bias_exists else o_add_name}/output_0"
+
+    # def make_attention_proj(self, layer_id, attention, root_input, **kwargs):
+    #     if self.matmul_attrs["use_lora"]:
+    #         self.make_attention_proj_lora(layer_id, attention, root_input, **kwargs)
+    #     elif self.matmul_attrs["use_qdq"]:
+    #         self.make_attention_proj_qdq(layer_id, attention, root_input, **kwargs)
+    #     else:
+    #         self.make_attention_proj_regular(layer_id, attention, root_input, **kwargs)
+
+    def make_attention_proj_lora(self, layer_id, attention, root_input, **kwargs):
+        # Make nodes for the attention MatMul-LoRA subgraph
+        #
+        #                                           root_input
+        #                                               |
+        #         +--------------+--------------+-------+------+--------------+--------------+
+        #         |              |              |              |              |              |
+        #     Q_MatMul_A     Q_MatMul       K_MatMul_A     K_MatMul       V_MatMul_A     V_MatMul
+        #         |              |              |              |              |              | 
+        #     Q_MatMul_B         |          K_MatMul_B         |          V_MatMul_B         |
+        #         |              |              |              |              |              |
+        #         +-------+------+              +-------+------+              +-------+------+
+        #                 |                             |                             |
+        #             Q_LoRA_Add                    K_LoRA_Add                    V_LoRA_Add
+
+        q_lora_B = ""
+        k_lora_B = ""
+        v_lora_B = ""
+
+        # Make regular MatMul paths
+        self.make_attention_proj_regular(layer_id, attention, root_input, **kwargs)
+
+        # Make LoRA MatMul paths
+        # if self.attention_attrs["use_packed_matmul"]:
+        #     # Combine 3 MatMuls into 1 packed MatMul
+        #     qkv_matmul_A_basename = f"/model/layers.{layer_id}/attn/qkv_proj/lora_A/MatMul"
+        #     qkv_matmul_A_name = self.make_packed_matmul(attention.q_proj.lora_A.default, attention.k_proj.lora_A.default, attention.v_proj.lora_A.default, qkv_matmul_A_basename, root_input=root_input)
+        #     q_lora_A = f"{qkv_matmul_A_name}/output_0"
+
+        #     qkv_matmul_B_basename = f"/model/layers.{layer_id}/attn/qkv_proj/lora_B/MatMul"
+        #     qkv_matmul_B_name = self.make_packed_matmul(attention.q_proj.lora_B.default, attention.k_proj.lora_B.default, attention.v_proj.lora_B.default, qkv_matmul_B_basename, root_input=q_lora_A)
+        #     q_lora_B = f"{qkv_matmul_B_name}/output_0"
+        # else:
+        q_matmul_A_basename = f"/model/layers.{layer_id}/attn/q_proj/lora_A/MatMul"
+        q_matmul_A_name = self.make_matmul(attention.q_proj.lora_A.default, q_matmul_A_basename, root_input=root_input)
+        q_lora_A = f"{q_matmul_A_name}/output_0"
+        q_matmul_B_basename = f"/model/layers.{layer_id}/attn/q_proj/lora_B/MatMul"
+        q_matmul_B_name = self.make_matmul(attention.q_proj.lora_B.default, q_matmul_B_basename, root_input=q_lora_A)
+        q_lora_B = f"{q_matmul_B_name}/output_0"
+
+        k_matmul_A_basename = f"/model/layers.{layer_id}/attn/k_proj/lora_A/MatMul"
+        k_matmul_A_name = self.make_matmul(attention.k_proj.lora_A.default, k_matmul_A_basename, root_input=root_input)
+        k_lora_A = f"{k_matmul_A_name}/output_0"
+        k_matmul_B_basename = f"/model/layers.{layer_id}/attn/k_proj/lora_B/MatMul"
+        k_matmul_B_name = self.make_matmul(attention.k_proj.lora_B.default, k_matmul_B_basename, root_input=k_lora_A)
+        k_lora_B = f"{k_matmul_B_name}/output_0"
+
+        v_matmul_A_basename = f"/model/layers.{layer_id}/attn/v_proj/lora_A/MatMul"
+        v_matmul_A_name = self.make_matmul(attention.v_proj.lora_A.default, v_matmul_A_basename, root_input=root_input)
+        v_lora_A = f"{v_matmul_A_name}/output_0"
+        v_matmul_B_basename = f"/model/layers.{layer_id}/attn/v_proj/lora_B/MatMul"
+        v_matmul_B_name = self.make_matmul(attention.v_proj.lora_B.default, v_matmul_B_basename, root_input=v_lora_A)
+        v_lora_B = f"{v_matmul_B_name}/output_0"
+
+        # Make Add nodes
+        q_size = self.num_attn_heads * self.head_size
+        kv_size = self.num_kv_heads * self.head_size
+        # if self.attention_attrs["use_packed_matmul"]:
+        #     # Combine 3 Adds into 1 packed Add
+        #     qkv_add_name = f"/model/layers.{layer_id}/attn/qkv_proj/lora/Add"
+        #     qkv_add_inputs = [self.attention_attrs["q_path"], q_lora_B]
+        #     qkv_add_shape = ["batch_size", "sequence_length", q_size + kv_size + kv_size]
+        #     self.make_add(qkv_add_name, qkv_add_inputs, dtype=self.io_dtype, shape=qkv_add_shape)
+        #     self.attention_attrs["q_path"] = f"{qkv_add_name}/output_0"
+        # else:
+        q_add_name = f"/model/layers.{layer_id}/attn/q_proj/lora/Add"
+        q_add_inputs = [self.attention_attrs["q_path"], q_lora_B]
+        q_add_shape = ["batch_size", "sequence_length", q_size]
+        self.make_add(q_add_name, q_add_inputs, dtype=self.io_dtype, shape=q_add_shape)
+        self.attention_attrs["q_path"] = f"{q_add_name}/output_0"
+
+        k_add_name = f"/model/layers.{layer_id}/attn/k_proj/lora/Add"
+        k_add_inputs = [self.attention_attrs["k_path"], k_lora_B]
+        k_add_shape = ["batch_size", "sequence_length", kv_size]
+        self.make_add(k_add_name, k_add_inputs, dtype=self.io_dtype, shape=k_add_shape)
+        self.attention_attrs["k_path"] = f"{k_add_name}/output_0"
+
+        v_add_name = f"/model/layers.{layer_id}/attn/v_proj/lora/Add"
+        v_add_inputs = [self.attention_attrs["v_path"], v_lora_B]
+        v_add_shape = ["batch_size", "sequence_length", kv_size]
+        self.make_add(v_add_name, v_add_inputs, dtype=self.io_dtype, shape=v_add_shape)
+        self.attention_attrs["v_path"] = f"{v_add_name}/output_0"
+
+    # def make_attention_proj_regular(self, layer_id, attention, root_input, **kwargs):
+    #     q_proj = 'q_proj.base_layer' if self.matmul_attrs["use_lora"] else 'q_proj'
+    #     q_proj = eval(f"attention.{q_proj}")
+    #     k_proj = 'k_proj.base_layer' if self.matmul_attrs["use_lora"] else 'k_proj'
+    #     k_proj = eval(f"attention.{k_proj}")
+    #     v_proj = 'v_proj.base_layer' if self.matmul_attrs["use_lora"] else 'v_proj'
+    #     v_proj = eval(f"attention.{v_proj}")
+
+    #     # Make MatMul nodes
+    #     if self.attention_attrs["use_packed_matmul"]:
+    #         # Combine 3 MatMuls into 1 packed MatMul
+    #         qkv_matmul_basename = f"/model/layers.{layer_id}/attn/qkv_proj/MatMul"
+    #         qkv_matmul_name = self.make_packed_matmul(q_proj, k_proj, v_proj, qkv_matmul_basename, root_input)
+    #         self.attention_attrs["q_path"] = f"{qkv_matmul_name}/output_0"
+    #     else:
+    #         q_matmul_basename = f"/model/layers.{layer_id}/attn/q_proj/MatMul"
+    #         q_matmul_name = self.make_matmul(q_proj, q_matmul_basename, root_input)
+    #         self.attention_attrs["q_path"] = f"{q_matmul_name}/output_0"
+    #         k_matmul_basename = f"/model/layers.{layer_id}/attn/k_proj/MatMul"
+    #         k_matmul_name = self.make_matmul(k_proj, k_matmul_basename, root_input)
+    #         self.attention_attrs["k_path"] = f"{k_matmul_name}/output_0"
+    #         v_matmul_basename = f"/model/layers.{layer_id}/attn/v_proj/MatMul"
+    #         v_matmul_name = self.make_matmul(v_proj, v_matmul_basename, root_input)
+    #         self.attention_attrs["v_path"] = f"{v_matmul_name}/output_0"
 
     def make_attention_unpacked(self, layer_id, attention, root_input, **kwargs):
         q_size = self.num_attn_heads * self.head_size
@@ -2899,7 +3072,16 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
     extra_kwargs = {} if os.path.isdir(input_path) else {"cache_dir": cache_dir}
     hf_name = input_path if os.path.isdir(input_path) else model_name
     hf_token = parse_hf_token(extra_options.get("hf_token", "true"))
+
+    is_peft = "adapter_config.json" in os.listdir(input_path)
+    peft_config = {}
+    if is_peft:
+        from peft import PeftConfig
+        peft_config = PeftConfig.from_pretrained(hf_name, use_auth_token=True, trust_remote_code=True, **extra_kwargs)
+        hf_name = peft_config.base_model_name_or_path
+
     config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=True, **extra_kwargs)
+    config.update(peft_config.__dict__)
 
     # Set input/output precision of ONNX model
     io_dtype = TensorProto.FLOAT if precision in {"int8", "fp32"} or (precision == "int4" and execution_provider == "cpu") else TensorProto.FLOAT16
