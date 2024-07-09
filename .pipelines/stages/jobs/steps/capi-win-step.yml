@@ -120,6 +120,10 @@ steps:
     continueOnError: true
 
   - powershell: |
+      python -m pip install wheel
+    displayName: 'Install wheel'
+
+  - powershell: |
       cmake --build --preset windows_$(arch)_$(ep)_$(build_config) --target package
     displayName: 'Package C/C++ API'
     workingDirectory: '$(Build.Repository.LocalPath)'
