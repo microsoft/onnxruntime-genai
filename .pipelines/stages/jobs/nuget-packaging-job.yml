@@ -2,7 +2,9 @@ parameters:
 - name: ep
   type: string
 
-variables:
+jobs:
+- job: nuget_${{ parameters.ep }}_packaging
+  variables:
   - name: genai_nuget_ext
     ${{ if eq(parameters.ep, 'cpu') }}:
       value: ''
@@ -17,9 +19,6 @@ variables:
       value: '.Gpu'
     ${{ if eq(parameters.ep, 'directml') }}:
       value: '.DirectML'
-
-jobs:
-- job: nuget_${{ parameters.ep }}_packaging
   steps:
   - powershell: |
       dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(buildConfig)" -p:NativeBuildOutputDir="$(buildDir)\$(buildConfig)"
