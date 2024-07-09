@@ -291,7 +291,7 @@ void GreedySearch_Cpu::AppendNextTokensToSequences() {
   }
 }
 
-bool BeamSearch_Cpu::IsDone() const { 
+bool BeamSearch_Cpu::IsDone() const {
   if (beam_scorer_->IsDone()) {
     return true;
   } else if (sequences_.GetSequenceLength() == params_->search.max_length) {

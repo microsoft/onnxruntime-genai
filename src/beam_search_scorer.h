@@ -1,7 +1,6 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #include "sequences.h"
-#include <iostream>
 #pragma once
 // The implementation is based on huggingface transformers generation_beam_search.py
 namespace Generators {

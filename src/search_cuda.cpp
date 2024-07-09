@@ -6,7 +6,6 @@
 #include "beam_search_topk.h"
 #include <queue>
 #include <random>
-#include <iostream>
 
 namespace Generators {
 
@@ -102,7 +101,7 @@ void BeamSearch_Cuda::SelectTop() {
 
   if (params_->search.num_beams <= 32) {
     constexpr size_t max_parts_of_vocab = 128;
-    size_t candidate_count = params_->BatchBeamSize() * 2 * params_->search.num_beams;  // TODO: Why is this the candidate count... why 2?
+    size_t candidate_count = params_->BatchBeamSize() * 2 * params_->search.num_beams;
     float* topk_tmp_buffer = topk_buffer_.get();
     float* topk_scores_1st_stage = topk_tmp_buffer;
     int32_t* topk_tokens_1st_stage = reinterpret_cast<int32_t*>(topk_scores_1st_stage + candidate_count * max_parts_of_vocab);
@@ -162,6 +161,7 @@ void BeamSearch_Cuda::SelectTop() {
   beam_scorer_->Process(sequences_, next_scores, next_tokens, next_indices);
   next_tokens_ = beam_scorer_->GetNextTokens();
 
+  // TODO(aciddelgado): do we need to keep track of sequences both here and in beam hypotheses?
   AppendNextTokensToSequences();
 }
 

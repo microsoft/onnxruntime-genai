@@ -108,7 +108,7 @@ __global__ void BeamSearchScorer_Process(BeamScorerState& state_cpu,
           continue;
         }
 
-        // Clone the sequence and append to buffer. // TODO(aciddelgado): why???
+        // Clone the sequence and append to buffer. // TODO(aciddelgado): why do we need to clone the sequence here?
         const int32_t* src = sequences_buffer + batch_beam_idx * state.max_length_;
         auto clone = hypothesis_buffer_ + atomicAdd(&state.hypothesis_buffer_used_, sequence_length);
 
