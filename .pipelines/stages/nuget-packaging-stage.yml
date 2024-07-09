@@ -38,68 +38,27 @@ parameters:
 stages:
 - stage: nuget_packaging
   jobs:
-    - job: download_capi_artifacts
-      pool: 'onnxruntime-Win-CPU-2022'
-      steps:
-        - ${{ if eq(parameters.enable_win_cpu, true) }}:
-          - template: jobs/steps/utils/flex-download-pipeline-artifact.yml
-            parameters:
-              StepName: 'Download win-cpu-x64 capi Artifacts'
-              ArtifactName: onnxruntime-genai-win-cpu-x64-capi
-              TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
-
-        - ${{ if eq(parameters.enable_win_cuda, true) }}:
-          - template: jobs/steps/utils/flex-download-pipeline-artifact.yml
-            parameters:
-              StepName: 'Download win-cuda-x64 capi Artifacts'
-              ArtifactName: onnxruntime-genai-win-cuda-x64-capi
-              TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
-
-        - ${{ if eq(parameters.enable_linux_cpu, true) }}:
-          - template: jobs/steps/utils/flex-download-pipeline-artifact.yml
-            parameters:
-              StepName: 'Download linux-cpu-x64 capi Artifacts'
-              ArtifactName: onnxruntime-genai-linux-cpu-x64-capi
-              TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
-
-        - ${{ if eq(parameters.enable_linux_cuda, true) }}:
-          - template: jobs/steps/utils/flex-download-pipeline-artifact.yml
-            parameters:
-              StepName: 'Download linux-cuda-x64 capi Artifacts'
-              ArtifactName: onnxruntime-genai-linux-cuda-x64-capi
-              TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
-
-        - ${{ if eq(parameters.enable_win_dml, true) }}:
-          - template: jobs/steps/utils/flex-download-pipeline-artifact.yml
-            parameters:
-              StepName: 'Download win-directml-x64 capi Artifacts'
-              ArtifactName: onnxruntime-genai-win-directml-x64-capi
-              TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
-
-        - ${{ if eq(parameters.enable_win_arm64_cpu, true) }}:
-          - template: jobs/steps/utils/flex-download-pipeline-artifact.yml
-            parameters:
-              StepName: 'Download win-cpu-arm64 capi Artifacts'
-              ArtifactName: onnxruntime-genai-win-cpu-arm64-capi
-              TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
-
     - ${{ if or(eq(parameters.enable_linux_cpu, true), eq(parameters.enable_win_cpu, true), eq(parameters.enable_win_arm64_cpu, true)) }}:
       - template: jobs/nuget-packaging-job.yml
         parameters:
           ep: 'cpu'
           ort_version: ${{ parameters.ort_version }}
           build_config: ${{ parameters.build_config }}
-
+          enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
+          enable_win_cpu: ${{ parameters.enable_win_cpu }}
+          enable_win_arm64_cpu: ${{ parameters.enable_win_arm64_cpu }}
     - ${{ if or(eq(parameters.enable_linux_cuda, true), eq(parameters.enable_win_cuda, true)) }}:
       - template: jobs/nuget-packaging-job.yml
         parameters:
           ep: 'cuda'
           ort_version: ${{ parameters.ort_version }}
           build_config: ${{ parameters.build_config }}
-
+          enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
+          enable_win_cuda: ${{ parameters.enable_win_cuda }}
     - ${{ if eq(parameters.enable_win_dml, true) }}:
       - template: jobs/nuget-packaging-job.yml
         parameters:
           ep: 'directml' 
           ort_version: ${{ parameters.ort_version }}
           build_config: ${{ parameters.build_config }}
+          enable_win_dml: ${{ parameters.enable_win_dml }}
