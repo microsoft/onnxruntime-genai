@@ -26,10 +26,10 @@ parameters:
 
 
 stages:
-- stage: nuget_packaging
+- stage: capi_packaging
   jobs:
   - ${{ if eq(parameters.enable_win_cpu, true) }}:
-    - template: jobs/nuget-packaging-job.yml
+    - template: jobs/capi-packaging-job.yml
       parameters:
         arch: 'x64'
         ep: 'cpu'
@@ -38,7 +38,7 @@ stages:
         build_config: ${{ parameters.build_config }}
 
   - ${{ if eq(parameters.enable_win_arm64_cpu, true) }}:
-    - template: jobs/nuget-packaging-job.yml
+    - template: jobs/capi-packaging-job.yml
       parameters:
         arch: 'arm64'
         ep: 'cpu'
@@ -47,7 +47,7 @@ stages:
         build_config: ${{ parameters.build_config }}
 
   - ${{ if eq(parameters.enable_win_dml, true) }}:
-    - template: jobs/nuget-packaging-job.yml
+    - template: jobs/capi-packaging-job.yml
       parameters:
         arch: 'x64'
         ep: 'directml'
@@ -56,7 +56,7 @@ stages:
         build_config: ${{ parameters.build_config }}
 
   - ${{ if eq(parameters.enable_win_cuda, true) }}:
-    - template: jobs/nuget-packaging-job.yml
+    - template: jobs/capi-packaging-job.yml
       parameters:
         arch: 'x64'
         cuda_version: ${{ parameters.cuda_version }}
@@ -66,7 +66,7 @@ stages:
         build_config: ${{ parameters.build_config }}
 
   - ${{ if eq(parameters.enable_linux_cpu, true) }}:
-    - template: jobs/nuget-packaging-job.yml
+    - template: jobs/capi-packaging-job.yml
       parameters:
         arch: 'x64'
         ep: 'cpu'
@@ -75,7 +75,7 @@ stages:
         build_config: ${{ parameters.build_config }}
 
   - ${{ if eq(parameters.enable_linux_cuda, true) }}:
-    - template: jobs/nuget-packaging-job.yml
+    - template: jobs/capi-packaging-job.yml
       parameters:
         arch: 'x64'
         cuda_version: ${{ parameters.cuda_version }}
