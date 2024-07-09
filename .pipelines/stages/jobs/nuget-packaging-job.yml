@@ -31,7 +31,7 @@ jobs:
       AnalyzeTargetGlob: '$(Build.Repository.LocalPath)\src\csharp\**\*.dll'
       continueOnError: true
 
-  - template: compliant/win-esrp-dll-step.yml
+  - template: steps/compliant/win-esrp-dll-step.yml
     parameters:
       FolderPath: '$(Build.Repository.LocalPath)\src\csharp\bin\$(buildConfig)\'
       DisplayName: 'ESRP - Sign C# dlls'
@@ -64,7 +64,7 @@ jobs:
       Contents: '*.nupkg'
       TargetFolder: '$(Build.ArtifactStagingDirectory)\nuget'
 
-  - template: compliant/esrp_nuget.yml
+  - template: steps/compliant/esrp_nuget.yml
     parameters:
       DisplayName: 'ESRP - sign NuGet package'
       FolderPath: '$(Build.ArtifactStagingDirectory)\nuget'
