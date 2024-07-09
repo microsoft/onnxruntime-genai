@@ -1,5 +1,3 @@
-find_package(pybind11 CONFIG)
-
 include(${REPO_ROOT}/cmake/cxx_standard.cmake)
 
 file(GLOB python_srcs CONFIGURE_DEPENDS
