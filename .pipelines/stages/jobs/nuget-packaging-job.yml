@@ -196,7 +196,7 @@ jobs:
 
   - powershell: |
       Get-ChildItem -Path $(Build.Repository.LocalPath) -Recurse
-      displayName: 'List all files in the repo for'
+      displayName: 'List all files in the repo for debugging'
 
   - task: CopyFiles@2
     displayName: 'Copy Nuget to: $(Build.ArtifactStagingDirectory)'
