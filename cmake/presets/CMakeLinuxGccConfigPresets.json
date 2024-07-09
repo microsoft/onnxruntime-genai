@@ -12,7 +12,7 @@
         "linux_gcc_default",
         "linux_release_default"
       ],
-      "binaryDir": "${sourceDir}/build/cpu"
+      "binaryDir": "${sourceDir}/build/cpu/linux/x64"
     },
     {
       "name": "linux_gcc_cpu_debug_asan",
@@ -22,7 +22,7 @@
         "linux_gcc_default",
         "linux_debug_default"
       ],
-      "binaryDir": "${sourceDir}/build/cpu"
+      "binaryDir": "${sourceDir}/build/cpu/linux/x64"
     },
     {
       "name": "linux_gcc_cpu_relwithdebinfo_asan",
@@ -32,7 +32,7 @@
         "linux_gcc_default",
         "linux_relwithdebinfo_default"
       ],
-      "binaryDir": "${sourceDir}/build/cpu"
+      "binaryDir": "${sourceDir}/build/cpu/linux/x64"
     },
     {
       "name": "linux_gcc_cpu_minsizerel_asan",
@@ -42,7 +42,7 @@
         "linux_gcc_default",
         "linux_minsizerel_default"
       ],
-      "binaryDir": "${sourceDir}/build/cpu"
+      "binaryDir": "${sourceDir}/build/cpu/linux/x64"
     },
     {
       "name": "linux_gcc_cpu_release",
@@ -51,7 +51,7 @@
         "linux_gcc_default",
         "linux_release_default"
       ],
-      "binaryDir": "${sourceDir}/build/cpu"
+      "binaryDir": "${sourceDir}/build/cpu/linux/x64"
     },
     {
       "name": "linux_gcc_cpu_debug",
@@ -60,7 +60,7 @@
         "linux_gcc_default",
         "linux_debug_default"
       ],
-      "binaryDir": "${sourceDir}/build/cpu"
+      "binaryDir": "${sourceDir}/build/cpu/linux/x64"
     },
     {
       "name": "linux_gcc_cpu_relwithdebinfo",
@@ -69,7 +69,7 @@
         "linux_gcc_default",
         "linux_relwithdebinfo_default"
       ],
-      "binaryDir": "${sourceDir}/build/cpu"
+      "binaryDir": "${sourceDir}/build/cpu/linux/x64"
     },
     {
       "name": "linux_gcc_cpu_minsizerel",
@@ -78,7 +78,7 @@
         "linux_gcc_default",
         "linux_minsizerel_default"
       ],
-      "binaryDir": "${sourceDir}/build/cpu"
+      "binaryDir": "${sourceDir}/build/cpu/linux/x64"
     },
     {
       "name": "linux_gcc_cuda_release_asan",

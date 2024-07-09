@@ -53,7 +53,7 @@
         "linux_clang_default",
         "linux_release_default"
       ],
-      "binaryDir": "${sourceDir}/build/cpu"
+      "binaryDir": "${sourceDir}/build/cpu/linux/x64"
     },
     {
       "name": "linux_clang_cpu_debug",
@@ -80,7 +80,7 @@
         "linux_clang_default",
         "linux_minsizerel_default"
       ],
-      "binaryDir": "${sourceDir}/build/cpu",
+      "binaryDir": "${sourceDir}/build/cpu/linux/x64",
       "cacheVariables": {}
     }
   ]
