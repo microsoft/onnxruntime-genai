@@ -61,6 +61,7 @@ steps:
       Get-ChildItem -Recurse $(d3d12_dir)
       mv $(d3d12_dir)\build\native\bin\$(arch)\D3D12Core.dll ort\lib
     workingDirectory: '$(Build.Repository.LocalPath)'
+    displayName: 'Download DirectML & D3D11 DLLs'
     continueOnError: true
 
 - ${{ if eq(parameters.arch, 'arm64') }}:

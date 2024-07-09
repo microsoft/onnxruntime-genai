@@ -59,7 +59,7 @@ stages:
       - template: jobs/nuget-packaging-job.yml
         parameters:
           ep: 'directml' 
-          ort_version: ${{ parameters.ort_version }}
+          ort_version: ${{ parameters.ort_dml_version }}
           build_config: ${{ parameters.build_config }}
           enable_win_dml: ${{ parameters.enable_win_dml }}
           enable_win_arm64: ${{ parameters.enable_win_arm64 }}
