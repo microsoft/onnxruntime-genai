@@ -162,7 +162,7 @@ steps:
   - task: CopyFiles@2
     displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
     inputs:
-      SourceFolder: '$(Build.Repository.LocalPath)\build\$(ep)\wheel'
+      SourceFolder: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\wheel'
       Contents: '*.whl'
       TargetFolder: '$(Build.ArtifactStagingDirectory)\wheel'
 
