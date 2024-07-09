@@ -48,17 +48,14 @@ if(BUILD_WHEEL)
   endif()
   set(PACKAGE_DIR_NAME "onnxruntime_genai")
   set(WHEEL_TARGET_NAME "${WHEEL_FILES_DIR}/${PACKAGE_DIR_NAME}")
-  set(PACKAGE_DESCRIPTION "${WHEEL_FILES_DIR}/package_description.md")
-  set(ThirdPartyNotices "${WHEEL_TARGET_NAME}/ThirdPartyNotices.txt")
-  set(License "${WHEEL_TARGET_NAME}/LICENSE")
   configure_file(${CMAKE_CURRENT_SOURCE_DIR}/setup.py.in ${WHEEL_FILES_DIR}/setup.py @ONLY)
   configure_file(${CMAKE_CURRENT_SOURCE_DIR}/__init__.py.in ${WHEEL_TARGET_NAME}/__init__.py @ONLY)
 
   # Copy over any additional python files
   file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/py/" DESTINATION ${WHEEL_TARGET_NAME}/)
   file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/package_description.md" DESTINATION ${WHEEL_FILES_DIR}/)
-  file(COPY "${CMAKE_SOURCE_DIR}/ThirdPartyNotices.txt" DESTINATION ${WHEEL_FILES_DIR}/)
-  file(COPY "${CMAKE_SOURCE_DIR}/LICENSE" DESTINATION ${WHEEL_FILES_DIR}/)
+  file(COPY "${CMAKE_SOURCE_DIR}/ThirdPartyNotices.txt" DESTINATION ${WHEEL_TARGET_NAME}/)
+  file(COPY "${CMAKE_SOURCE_DIR}/LICENSE" DESTINATION ${WHEEL_TARGET_NAME}/)
   add_custom_command(TARGET python POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy
     ${ortgenai_embed_libs} $<TARGET_FILE:python>
