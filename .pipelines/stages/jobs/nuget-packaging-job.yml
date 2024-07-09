@@ -92,7 +92,7 @@ jobs:
         ArtifactName: onnxruntime-genai-win-cuda-x64-capi
         TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
 
-  - ${{ if and(eq(parameters.enable_win_dml, true), eq(parameters.ep, 'directml') }}:
+  - ${{ if and(eq(parameters.enable_win_dml, true), eq(parameters.ep, 'directml')) }}:
     - template: steps/utils/flex-download-pipeline-artifact.yml
       parameters:
         StepName: 'Download win-directml-x64 capi Artifacts'
