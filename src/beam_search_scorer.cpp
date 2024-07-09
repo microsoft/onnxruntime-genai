@@ -129,7 +129,7 @@ void BeamSearchScorer::Process(Sequences& sequences,
         cpu_span<int32_t> clone{clone_span.data(), sequence_length};
 
         copy(src, clone);
-        hypothesis_buffer_used_ += sequence_length;
+        hypothesis_buffer_used_ += static_cast<int>(sequence_length);
         beam_hyp.Add(clone, next_score);
       } else {
         // Add next predicted token since it is not eos_token.
@@ -156,7 +156,7 @@ void BeamSearchScorer::Process(Sequences& sequences,
     if (!early_stopping_) {
       std::span<const float> const topk_scores = next_scores.subspan(batch * num_beams_, top_k);
       const auto best_sum_logprobs = std::max_element(topk_scores.begin(), topk_scores.end());
-      if (beam_hyp.CanImprove(*best_sum_logprobs, sequence_length)) {
+      if (beam_hyp.CanImprove(*best_sum_logprobs, static_cast<int>(sequence_length))) {
         continue;
       }
     }
