@@ -18,23 +18,10 @@ if not path.exists(long_description_file):
 with open(long_description_file, encoding="utf-8") as fdesc:
     long_description = fdesc.read()
 
-onnxruntime_dependency = None
-name = '@TARGET_NAME@'
-if name == 'onnxruntime-genai':
-    onnxruntime_dependency = 'onnxruntime'
-elif name == 'onnxruntime-genai-cuda':
-    onnxruntime_dependency = 'onnxruntime-gpu'
-elif name.endswith('-directml'):
-    onnxruntime_dependency = 'onnxruntime-directml'
-elif name.endswith('-rocm'):
-    onnxruntime_dependency = 'onnxruntime-rocm'
-else:
-    sys.exit(f'onnxruntime dependency package for {name} not known. Please configure the onnxruntime dependency.')
-
 extras = ["ThirdPartyNotices.txt", "LICENSE"]
 
 setup(
-    name=name,
+    name='@TARGET_NAME@',
     version='@VERSION_INFO@',
     description='ONNX Runtime generate() API',
     long_description=long_description,
@@ -44,7 +31,6 @@ setup(
     package_data={'': ['*.pyd', '*.dll', '*.so*'] + extras},
     install_requires=[
         'numpy<2',
-        onnxruntime_dependency
     ],
     distclass=BinaryDistribution,
     author="Microsoft Corporation",

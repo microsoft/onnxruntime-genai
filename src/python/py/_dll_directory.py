@@ -15,8 +15,10 @@ def add_onnxruntime_dependency():
     """
     if _is_windows():
         import importlib.util
-        ort_package_path = importlib.util.find_spec("onnxruntime").submodule_search_locations[0]
-        os.add_dll_directory(os.path.join(ort_package_path, "capi"))
+        ort_package_path = importlib.util.find_spec("onnxruntime").submodule_search_locations
+        if not ort_package_path:
+            raise ImportError("Could not find the onnxruntime package.")
+        os.add_dll_directory(os.path.join(ort_package_path[0], "capi"))
 
 
 def add_cuda_dependency():
