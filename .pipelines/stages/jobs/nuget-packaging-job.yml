@@ -133,7 +133,7 @@ jobs:
     submodules: recursive
 
   - powershell: |
-      dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(buildConfig)" -p:NativeBuildOutputDir="$(buildDir)\$(buildConfig)" --verbosity normal
+      dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(buildConfig)" --verbosity normal
     displayName: 'Build CSharp'
     workingDirectory: '$(Build.Repository.LocalPath)\src\csharp'
 
@@ -156,12 +156,13 @@ jobs:
       $artifacts = Get-ChildItem -Path $artifacts_dir/* -Include *.zip,*.tar.gz
       Write-Host $artifacts
 
-      $nativeBuildOutputDir = '$(buildDir)/$(buildConfig)'
+      $outputDir = '$(buildDir)'
 
-      mkdir -Force $nativeBuildOutputDir
+      mkdir -Force $outputDir
       foreach ($file in $artifacts) {
         $a = $file.Name
-        $rid_match = $a -match 'onnxruntime-genai-$VERSION-(.+)-?(?:cuda|dml)?(\.zip|\.tar\.gz)'
+        Write-Host "Extracting " $a
+        $rid_match = $a -match "onnxruntime-genai-${VERSION}-(.+?)-?(?:cuda|dml)?(\.zip|\.tar\.gz)"
         if ($rid_match) {
           $rid = $Matches.1
         }
@@ -169,14 +170,20 @@ jobs:
           Write-Host "Invalid artifact name" $file
           return
         }
-        mkdir -Force $nativeBuildOutputDir/$rid
+        mkdir -Force $outputDir/$rid
 
         if ($a -like "*.zip") {
-          Expand-Archive -Path $file -DestinationPath $nativeBuildOutputDir/$rid
+          Expand-Archive -Path $file -DestinationPath $outputDir/$rid
         }
         elseif ($a -like "*.tar.gz") {
-          tar -xf $file -C $nativeBuildOutputDir/$rid
+          tar -xf $file -C $outputDir/$rid
         }
+
+        mkdir -Force $outputDir/$rid/$(buildConfig)
+        $b = $file.Basename
+        $b = $b -split '.tar'
+        $b = $b[0]
+        Move-Item $outputDir/$rid/$b/lib/* $outputDir/$rid/$(buildConfig) -Force
       }
 
       Write-Host "List extracted artifacts"
