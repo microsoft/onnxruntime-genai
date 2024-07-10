@@ -133,7 +133,6 @@ jobs:
     submodules: recursive
 
   - powershell: |
-      dotnet info
       dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(buildConfig)" --verbosity normal
     displayName: 'Build CSharp'
     workingDirectory: '$(Build.Repository.LocalPath)\src\csharp'
@@ -157,7 +156,7 @@ jobs:
       $artifacts = Get-ChildItem -Path $artifacts_dir/* -Include *.zip,*.tar.gz
       Write-Host $artifacts
 
-      $outputDir = '$(buildDir)'
+      $outputDir = '$(Build.Repository.LocalPath)/$(buildDir)'
 
       mkdir -Force $outputDir
       foreach ($file in $artifacts) {
