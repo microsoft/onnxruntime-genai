@@ -7,8 +7,8 @@ namespace Generators {
 
 Whisper_Model::Whisper_Model(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
-  session_decoder_ = OrtSession::Create(ort_env, (config_->config_path / fs::path(config_->model.decoder.filename)).c_str(), session_options_.get());
   session_encoder_ = OrtSession::Create(ort_env, (config_->config_path / fs::path(config_->model.encoder_decoder_init.filename)).c_str(), session_options_.get());
+  session_decoder_ = OrtSession::Create(ort_env, (config_->config_path / fs::path(config_->model.decoder.filename)).c_str(), session_options_.get());
 
   InitDeviceAllocator(*session_decoder_);
   session_encoder_info_ = std::make_unique<SessionInfo>(*session_encoder_);
@@ -42,9 +42,23 @@ Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> s
   logits_.Add();
   output_names_.push_back("encoder_hidden_states");
   outputs_.push_back(encoder_hidden_states_.get());
+
+  const auto kv_cache_indices = outputs_.size();
   kv_cache_.AddEncoder();
   extra_inputs_.Add();
   cross_cache_.AddOutputs();
+
+  {
+    auto layer_count = model_.config_->model.decoder.num_hidden_layers;
+    std::array<int64_t, 4> shape{params_->BatchBeamSize(), model_.config_->model.decoder.num_key_value_heads, params_->sequence_length, model_.config_->model.decoder.head_size};
+    auto type = model_.session_encoder_info_->GetOutputDataType(output_names_[kv_cache_indices]);
+
+    for (int i = 0; i < layer_count * 2; i++) {
+      init_presents_.emplace_back(OrtValue::CreateTensor(*model_.allocator_device_, shape, type));
+      presents_.emplace_back(outputs_[kv_cache_indices + i]);
+      outputs_[kv_cache_indices + i] = init_presents_.back().get();
+    }
+  }
 }
 
 RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
@@ -58,6 +72,30 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
       return logits_.Get();
 
     case RunState::Decoder_First:
+      // Copy over the hacked outputs to the real outputs
+      {
+        auto shape_info = init_presents_[0]->GetTensorTypeAndShapeInfo();
+        auto data_size = shape_info->GetElementCount() * SizeOf(shape_info->GetElementType());
+
+        for (int i = 0; i < presents_.size(); i++) {
+          auto src_data = init_presents_[i]->GetTensorRawData();
+          auto dest_data = presents_[i]->GetTensorMutableRawData();
+
+          switch (model_.device_type_) {
+            case DeviceType::CUDA:
+              cudaMemcpyAsync(dest_data, src_data, data_size, cudaMemcpyDeviceToDevice, model_.cuda_stream_);
+              break;
+
+            case DeviceType::CPU:
+              memcpy(dest_data, src_data, data_size);
+              break;
+
+            default:
+              throw std::runtime_error("Unsupported Device Type in Whisper_State::Run");
+          }
+        }
+      }
+
       ClearIO();
 
       decoder_input_ids_.name_ = model_.config_->model.decoder.inputs.input_ids.c_str();  // Set back to default name, since we overrode it above in the encoder step
@@ -66,6 +104,46 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
       kv_cache_.Add();
       cross_cache_.AddInputs();
       run_state_ = RunState::Decoder;
+
+      if (model_.session_info_->HasInput("past_sequence_length")) {
+        past_sequence_length_ = OrtValue::CreateTensor<int32_t>(model_.allocator_cpu_, std::array<int64_t, 1>{1});
+        input_names_.push_back("past_sequence_length");
+        inputs_.push_back(past_sequence_length_.get());
+      }
+
+      if (model_.session_info_->HasInput("beam_width")) {
+        beam_width_ = OrtValue::CreateTensor<int32_t>(model_.allocator_cpu_, std::array<int64_t, 1>{1});
+        input_names_.push_back("beam_width");
+        inputs_.push_back(beam_width_.get());
+
+        auto data = beam_width_->GetTensorMutableData<int32_t>();
+        *data = 1;
+      }
+
+      if (model_.session_info_->HasInput("cache_indirection")) {
+        cache_indirection_ = OrtValue::CreateTensor<int32_t>(model_.allocator_cpu_, std::array<int64_t, 3>{params_->batch_size, params_->search.num_beams, params_->search.max_length});
+        input_names_.push_back("cache_indirection");
+        inputs_.push_back(cache_indirection_.get());
+
+        auto data = std::span<int32_t>{cache_indirection_->GetTensorMutableData<int32_t>(), static_cast<size_t>(params_->batch_size) * params_->search.num_beams * params_->search.max_length};
+        std::fill(data.begin(), data.end(), 0);
+      }
+
+      if (model_.session_info_->HasOutput("output_cross_qk_0")) {
+        auto layer_count = model_.config_->model.decoder.num_hidden_layers;
+        auto type = model_.session_info_->GetOutputDataType("output_cross_qk_0");
+        std::array<int64_t, 4> shape{params_->BatchBeamSize(), model_.config_->model.decoder.num_key_value_heads, 1, 1500};
+        for (int i = 0; i < layer_count; i++) {
+          char string[64];
+          snprintf(string, std::size(string), "output_cross_qk_%d", i);
+          output_cross_qk_names_.emplace_back(string);
+          output_cross_qk_.emplace_back(OrtValue::CreateTensor(*model_.allocator_device_, shape, type));
+
+          output_names_.emplace_back(output_cross_qk_names_.back().c_str());
+          outputs_.emplace_back(output_cross_qk_.back().get());
+        }
+      }
+
       // Fall through
 
     case RunState::Decoder:
@@ -81,6 +159,11 @@ void Whisper_State::UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens
   decoder_input_ids_.Update(next_tokens);
   kv_cache_.Update(beam_indices.GetCPU(), current_length);
   logits_.Update();
+
+  if (past_sequence_length_) {
+    auto data = past_sequence_length_->GetTensorMutableData<int32_t>();
+    *data = current_length - 1;
+  }
 }
 
 }  // namespace Generators

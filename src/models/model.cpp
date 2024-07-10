@@ -533,7 +533,7 @@ void ConvertFp32ToFp16(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<Or
 
 #if USE_CUDA
     case DeviceType::CUDA:
-      // TODO: Implement for CUDA. For now, fallthrough and report an error.
+      cuda::LaunchFp32ToFp16(fp32, fp16, count, stream);
 #endif
 
     default:

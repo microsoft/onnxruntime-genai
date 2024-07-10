@@ -293,7 +293,7 @@ struct PyGeneratorParams {
   }
 
   pybind11::array_t<int32_t> py_input_ids_;
-  pybind11::array_t<float> py_whisper_input_features_;
+  pybind11::array py_whisper_input_features_;
 
   std::vector<pybind11::object> refs_;  // References to data we want to ensure doesn't get garbage collected
 };
@@ -483,7 +483,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 #if USE_CUDA
     return true;
 #else
-        return false;
+    return false;
 #endif
   });
 
@@ -491,7 +491,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 #if USE_DML
     return true;
 #else
-        return false;
+    return false;
 #endif
   });
 
@@ -499,7 +499,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 #if USE_ROCM
     return true;
 #else
-        return false;
+    return false;
 #endif
   });
 
