@@ -62,21 +62,21 @@ jobs:
     ${{ else }}:
       value: 'MinSizeRel'
 
-  - name: genai_nuget_ext
+  - name: genai_nuget_package_name
     ${{ if eq(parameters.ep, 'cpu') }}:
-      value: ''
+      value: 'Microsoft.ML.OnnxRuntimeGenAI'
     ${{ if eq(parameters.ep, 'cuda') }}:
-      value: '.Cuda'
+      value: 'Microsoft.ML.OnnxRuntimeGenAI.Cuda'
     ${{ if eq(parameters.ep, 'directml') }}:
-      value: '.DirectML'
+      value: 'Microsoft.ML.OnnxRuntimeGenAI.DirectML'
 
-  - name: ort_nuget_ext
+  - name: ort_nuget_package_name
     ${{ if eq(parameters.ep, 'cpu') }}:
-      value: ''
+      value: 'Microsoft.ML.OnnxRuntime'
     ${{ if eq(parameters.ep, 'cuda') }}:
-      value: '.Gpu'
+      value: 'Microsoft.ML.OnnxRuntime.Gpu'
     ${{ if eq(parameters.ep, 'directml') }}:
-      value: '.DirectML'
+      value: 'Microsoft.ML.OnnxRuntime.DirectML'
   steps:
   - ${{ if and(eq(parameters.enable_win_cpu, true), eq(parameters.ep, 'cpu')) }}:
     - template: steps/utils/flex-download-pipeline-artifact.yml
@@ -192,19 +192,38 @@ jobs:
     displayName: 'Extract Artifacts & Prepare Native Libraries'
     workingDirectory: '$(Build.BinariesDirectory)/artifact-downloads'
 
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: 3.10
+      addToPath: true
+
+  - powershell: |
+      python3.exe $(Build.Repository.LocalPath)\tools\nuget\generate_nuspec_for_native_nuget.py `
+        --package_name $(genai_nuget_package_name) `
+        --package_version 0.4.0-dev `
+        --ort_package_name $(ort_nuget_package_name)  `
+        --ort_package_version $(ort_version) `
+        --build_config $(buildConfig) `
+        --sources_path $(Build.Repository.LocalPath) `
+        --native_build_path $(buildDir) `
+        --nuspec_output_path $(Build.Repository.LocalPath)/nuget/$(genai_nuget_package_name).nuspec
+
+      cat $(Build.Repository.LocalPath)\nuget\$(genai_nuget_package_name).nuspec
+
+    displayName: 'Generate Nuspec for native'
+
   - task: NuGetCommand@2
     displayName: 'Nuget Packaging'
     inputs:
       command: 'pack'
-      packagesToPack: '$(Build.Repository.LocalPath)\nuget\Microsoft.ML.OnnxRuntimeGenAI.nuspec'
-      buildProperties: 'version=0.4.0-dev;genai_nuget_ext=$(genai_nuget_ext);configuration=$(buildConfig);buildPath=$(buildDir);ort_nuget_ext=$(ort_nuget_ext);ort_version=$(ort_version)'
+      packagesToPack: $(Build.Repository.LocalPath)\nuget\$(genai_nuget_package_name).nuspec
       packDestination: $(Build.ArtifactStagingDirectory)\nuget
 
   - task: NuGetCommand@2
     displayName: 'Nuget Managed Packaging'
     inputs:
       command: 'pack'
-      packagesToPack: '$(Build.Repository.LocalPath)\nuget\Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec'
+      packagesToPack: $(Build.Repository.LocalPath)\nuget\Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec
       buildProperties: 'version=0.4.0-dev;configuration=$(buildConfig)'
       packDestination: $(Build.ArtifactStagingDirectory)\nuget
 
