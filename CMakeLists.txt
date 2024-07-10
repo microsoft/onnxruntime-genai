@@ -20,7 +20,26 @@ if(MSVC)
   add_compile_definitions(_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
 endif()
 
+find_package(Patch)
+if (WIN32 AND NOT Patch_FOUND)
+    # work around CI machines missing patch from the git install by falling back to the binary in this repo.
+    # replicate what happens in https://github.com/Kitware/CMake/blob/master/Modules/FindPatch.cmake but without
+    # the hardcoded suffixes in the path to the patch binary.
+    find_program(Patch_EXECUTABLE NAMES patch PATHS ${PROJECT_SOURCE_DIR}/external/git.Win32.2.41.03.patch)
+    if(Patch_EXECUTABLE)
+      set(Patch_FOUND 1)
+      if (NOT TARGET Patch::patch)
+        add_executable(Patch::patch IMPORTED)
+        set_property(TARGET Patch::patch PROPERTY IMPORTED_LOCATION ${Patch_EXECUTABLE})
+      endif()
+    endif()
+endif()
+if(Patch_FOUND)
+  message("Patch found: ${Patch_EXECUTABLE}")
+endif()
+
 include(cmake/external/onnxruntime_external_deps.cmake)
+
 # All Global variables, including GLOB, for the top level CMakeLists.txt should be defined here
 include(cmake/global_variables.cmake)
 # Checking if CUDA is supported
@@ -31,6 +50,8 @@ include(cmake/check_rocm.cmake)
 include(cmake/check_dml.cmake)
 
 include(cmake/cxx_standard.cmake)
+
+include(cmake/external/genai_flatbuffers.cmake)
 
 add_compile_definitions(BUILDING_ORT_GENAI_C)
 if(MSVC)
