@@ -65,7 +65,7 @@ void BeamSearch_Cpu::SelectTop() {
   // Normalize next token scores
   for (int i = 0; i < params_->BatchBeamSize(); i++) {
     std::span<float> const scores = next_token_scores_.subspan(static_cast<size_t>(i) * static_cast<size_t>(params_->vocab_size), params_->vocab_size);
-    LogSoftMax(scores, 1.0); 
+    LogSoftMax(scores, 1.0);
   }
 
   auto beam_scores = beam_scorer_->GetNextScores();
