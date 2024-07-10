@@ -46,7 +46,7 @@ jobs:
   - name: arch
     value: ${{ parameters.arch }}
   - name: artifactName
-    value: 'onnxruntime-genai-${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.arch }}'
+    value: 'onnxruntime-genai-${{ parameters.ep }}'
   - name: buildConfig
     value: 'Release'
   - name: buildDir
@@ -113,7 +113,7 @@ jobs:
   - template: steps/utils//flex-download-pipeline-artifact.yml
     parameters:
       StepName: 'Download NuGet Artifacts'
-      ArtifactName: $(ArtifactName)-nuget
+      ArtifactName: $(artifactName)-nuget
       TargetPath: '$(Build.BinariesDirectory)/nuget'
       SpecificArtifact: ${{ parameters.specificArtifact }}
       BuildId: ${{ parameters.BuildId }}

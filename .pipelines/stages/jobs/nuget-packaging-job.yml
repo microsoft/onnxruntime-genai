@@ -62,6 +62,9 @@ jobs:
     ${{ else }}:
       value: 'MinSizeRel'
 
+  - name: artifactName
+    value: 'onnxruntime-genai-${{ parameters.ep }}'
+
   - name: genai_nuget_package_name
     ${{ if eq(parameters.ep, 'cpu') }}:
       value: 'Microsoft.ML.OnnxRuntimeGenAI'
