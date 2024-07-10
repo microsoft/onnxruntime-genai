@@ -18,7 +18,7 @@ env:
 
 jobs:
   windows-cpu-arm64-build:
-    runs-on: [ "self-hosted", "onnxruntime-qnn-windows-2022-arm64-managed" ]
+    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-qnn-windows-vs-2022-arm64" ]
     steps:
     - name: Checkout OnnxRuntime GenAI repo
       uses: actions/checkout@v4
