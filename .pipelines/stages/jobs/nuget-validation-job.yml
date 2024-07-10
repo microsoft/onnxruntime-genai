@@ -35,6 +35,8 @@ jobs:
     ${{ if eq(parameters.arch, 'x64') }}:
       ${{ if eq(parameters.ep, 'directml') }}:
         pool: 'onnxruntime-Win2022-GPU-dml-A10'
+      ${{ elseif eq(parameters.ep, 'cuda') }}:
+        pool: 'onnxruntime-Win2022-GPU-A10'
       ${{ else }}:
         pool: 'onnxruntime-Win-CPU-2022'
     ${{ elseif eq(parameters.arch, 'arm64') }}:
