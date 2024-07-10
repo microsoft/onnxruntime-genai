@@ -110,7 +110,7 @@ steps:
     displayName: 'Publish Artifact: ONNXRuntime Genai capi'
     inputs:
       ArtifactName: $(artifactName)-capi
-      PathtoPublish: '$(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package'
+      PathtoPublish: '$(Build.Repository.LocalPath)/build/$(ep)/package'
 
 - ${{ if eq(parameters.target, 'python') }}:
   - bash: |
@@ -154,7 +154,7 @@ steps:
   - task: CopyFiles@2
     displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
     inputs:
-      SourceFolder: '$(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/wheel'
+      SourceFolder: '$(Build.Repository.LocalPath)/build/$(ep)/wheel'
       Contents: '*manylinux*.whl'
       TargetFolder: '$(Build.ArtifactStagingDirectory)/wheel'
 
