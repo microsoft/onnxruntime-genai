@@ -1,0 +1,96 @@
+parameters:
+- name: SpecificArtifact
+  displayName: Use Specific Artifact
+  type: boolean
+  default: false
+- name: BuildId
+  displayName: Specific Artifact's BuildId
+  type: string
+  default: '0'
+- name: enable_win_cpu
+  type: boolean
+- name: enable_win_cuda
+  type: boolean
+- name: enable_win_dml
+  type: boolean
+- name: enable_win_arm64_cpu
+  type: boolean
+- name: enable_linux_cpu
+  type: boolean
+- name: enable_linux_cuda
+  type: boolean
+- name: ort_version
+  type: string
+- name: ort_cuda_version
+  type: string
+- name: ort_dml_version
+  type: string
+- name: cuda_version
+  type: string
+  default: ''
+
+
+stages:
+- stage: nuget_validation
+  jobs:
+  - ${{ if eq(parameters.enable_win_cpu, true) }}:
+    - template: jobs/nuget-validation-job.yml
+      parameters:
+        arch: 'x64'
+        ep: 'cpu'
+        ort_version: ${{ parameters.ort_version }}
+        os: 'win'
+        SpecificArtifact: ${{ parameters.SpecificArtifact }}
+        BuildId: ${{ parameters.BuildId }}
+
+  - ${{ if eq(parameters.enable_win_arm64_cpu, true) }}:
+    - template: jobs/nuget-validation-job.yml
+      parameters:
+        arch: 'arm64'
+        ep: 'cpu'
+        ort_version: ${{ parameters.ort_version }}
+        os: 'win'
+        SpecificArtifact: ${{ parameters.SpecificArtifact }}
+        BuildId: ${{ parameters.BuildId }}
+
+  - ${{ if eq(parameters.enable_win_dml, true) }}:
+    - template: jobs/nuget-validation-job.yml
+      parameters:
+        arch: 'x64'
+        ep: 'directml'
+        ort_version: ${{ parameters.ort_dml_version }}
+        os: 'win'
+        SpecificArtifact: ${{ parameters.SpecificArtifact }}
+        BuildId: ${{ parameters.BuildId }}
+
+  - ${{ if eq(parameters.enable_win_cuda, true) }}:
+    - template: jobs/nuget-validation-job.yml
+      parameters:
+        arch: 'x64'
+        cuda_version: ${{ parameters.cuda_version }}
+        ep: 'cuda'
+        ort_version: ${{ parameters.ort_cuda_version }}
+        os: 'win'
+        SpecificArtifact: ${{ parameters.SpecificArtifact }}
+        BuildId: ${{ parameters.BuildId }}
+
+  - ${{ if eq(parameters.enable_linux_cpu, true) }}:
+    - template: jobs/nuget-validation-job.yml
+      parameters:
+        arch: 'x64'
+        ep: 'cpu'
+        ort_version: ${{ parameters.ort_version }}
+        os: 'linux'
+        SpecificArtifact: ${{ parameters.SpecificArtifact }}
+        BuildId: ${{ parameters.BuildId }}
+
+  - ${{ if eq(parameters.enable_linux_cuda, true) }}:
+    - template: jobs/nuget-validation-job.yml
+      parameters:
+        arch: 'x64'
+        cuda_version: ${{ parameters.cuda_version }}
+        ep: 'cuda'
+        ort_version: ${{ parameters.ort_cuda_version }}
+        os: 'linux'
+        SpecificArtifact: ${{ parameters.SpecificArtifact }}
+        BuildId: ${{ parameters.BuildId }}
