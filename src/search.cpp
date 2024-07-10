@@ -7,32 +7,6 @@
 
 namespace Generators {
 
-void SoftMax(std::span<float> scores, float temperature) {
-  float const max_score = *std::max_element(scores.begin(), scores.end());
-
-  // Subtract max score and scale by temperature
-  std::transform(scores.begin(), scores.end(), scores.begin(), [max_score, temperature](float score) { return std::exp((score - max_score) / temperature); });
-
-  // Compute sum of exponentials
-  float const exp_sum = std::accumulate(scores.begin(), scores.end(), 0.0f);
-
-  // Divide each score by the sum of exponentials
-  std::transform(scores.begin(), scores.end(), scores.begin(), [exp_sum](float score) { return score / exp_sum; });
-}
-
-void LogSoftMax(std::span<float> scores, float temperature) {
-  float const max_score = *std::max_element(scores.begin(), scores.end());
-
-  // Subtract max score and scale by temperature
-  std::transform(scores.begin(), scores.end(), scores.begin(), [max_score, temperature](float score) { return (score - max_score) / temperature; });
-
-  // Compute sum of exponentials
-  float const exp_sum = std::accumulate(scores.begin(), scores.end(), 0.0f, [](float a, float b) { return a + std::exp(b); });
-
-  // Subtract log of sum of exponentials from each score
-  std::transform(scores.begin(), scores.end(), scores.begin(), [exp_sum](float score) { return score - std::log(exp_sum); });
-}
-
 Search_Cpu::Search_Cpu(const GeneratorParams& params)
     : Search{params},
       sequences_{params.input_ids, params.batch_size, params.search.num_beams, params_->search.max_length} {
@@ -91,7 +65,7 @@ void BeamSearch_Cpu::SelectTop() {
   // Normalize next token scores
   for (int i = 0; i < params_->BatchBeamSize(); i++) {
     std::span<float> const scores = next_token_scores_.subspan(static_cast<size_t>(i) * static_cast<size_t>(params_->vocab_size), params_->vocab_size);
-    LogSoftMax(scores, 1.0);  // Should this be log softmax?
+    LogSoftMax(scores, 1.0); 
   }
 
   auto beam_scores = beam_scorer_->GetNextScores();
@@ -282,8 +256,6 @@ bool BeamSearch_Cpu::IsDone() const {
   if (beam_scorer_->IsDone()) {
     return true;
   } else if (sequences_.GetSequenceLength() == params_->search.max_length) {
-    if (g_log.enabled && g_log.hit_max_length)
-      Log("hit_max_length", "beam cuda hit");
     return true;
   }
   return false;
