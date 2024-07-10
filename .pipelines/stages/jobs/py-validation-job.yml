@@ -30,6 +30,8 @@ jobs:
   ${{ if eq(parameters.os, 'linux') }}:
     ${{ if eq(parameters.ep, 'cuda') }}:
       pool: 'Onnxruntime-Linux-GPU'
+    ${{ elseif eq(parameters.arch, 'arm64') }}:
+      pool: 'onnxruntime-genai-Ubuntu2004-ARM-CPU'
     ${{ else }}:
       pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
   ${{ if eq(parameters.os, 'win') }}:

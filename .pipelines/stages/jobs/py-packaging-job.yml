@@ -24,7 +24,12 @@ parameters:
 jobs:
 - job: python_${{ parameters.os }}_${{ parameters.ep }}${{ parameters.cuda_display_version }}_${{ parameters.arch }}_packaging
   ${{ if eq(parameters.os, 'linux') }}:
-    pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
+    ${{ if eq(parameters.arch, 'x64') }}:
+      pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
+    ${{ elseif eq(parameters.arch, 'arm64') }}:
+      pool: 'onnxruntime-genai-Ubuntu2004-ARM-CPU'
+    ${{ else }}:
+      pool: 'nnxruntime-Ubuntu2204-AMD-CPU'
   ${{ if eq(parameters.os, 'win') }}:
     ${{ if eq(parameters.arch, 'x64') }}:
       ${{ if eq(parameters.ep, 'directml') }}:
