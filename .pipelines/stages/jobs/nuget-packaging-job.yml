@@ -159,22 +159,23 @@ jobs:
       $nativeBuildOutputDir = '$(buildDir)/$(buildConfig)'
 
       mkdir -Force $nativeBuildOutputDir
-      foreach ($a in $artifacts) {
+      foreach ($file in $artifacts) {
+        $a = $file.Name
         $rid_match = $a -match 'onnxruntime-genai-$VERSION-(.+)-?(?:cuda|dml)?(\.zip|\.tar\.gz)'
         if ($rid_match) {
           $rid = $Matches.1
         }
         else {
-          Write-Host "Invalid artifact name" $a
+          Write-Host "Invalid artifact name" $file
           return
         }
         mkdir -Force $nativeBuildOutputDir/$rid
 
         if ($a -like "*.zip") {
-          Expand-Archive -Path $a -DestinationPath $nativeBuildOutputDir/$rid
+          Expand-Archive -Path $file -DestinationPath $nativeBuildOutputDir/$rid
         }
         elseif ($a -like "*.tar.gz") {
-          tar -xf $a -C $nativeBuildOutputDir/$rid
+          tar -xf $file -C $nativeBuildOutputDir/$rid
         }
       }
 
