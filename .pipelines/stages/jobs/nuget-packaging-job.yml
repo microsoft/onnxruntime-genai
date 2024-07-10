@@ -133,6 +133,7 @@ jobs:
     submodules: recursive
 
   - powershell: |
+      dotnet info
       dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(buildConfig)" --verbosity normal
     displayName: 'Build CSharp'
     workingDirectory: '$(Build.Repository.LocalPath)\src\csharp'
@@ -192,32 +193,21 @@ jobs:
     displayName: 'Extract Artifacts & Prepare Native Libraries'
     workingDirectory: '$(Build.BinariesDirectory)/artifact-downloads'
 
-  - powershell: |
-      $VERSION = '0.4.0-dev'
-      $nugetPath = Join-Path "C:\Program Files" "NuGet\nuget.exe"
-      & $nugetPath pack Microsoft.ML.OnnxRuntimeGenAI.nuspec `
-        -Prop version=$VERSION `
-        -Prop genai_nuget_ext=$(genai_nuget_ext) `
-        -Prop configuration=$(buildConfig) `
-        -Prop buildPath=$(buildDir) `
-        -Prop ort_nuget_ext=$(ort_nuget_ext) `
-        -Prop ort_version=$(ort_version)
-      & $nugetPath pack Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec `
-        -Prop version=$VERSION `
-        -Prop configuration=$(buildConfig)
-      displayName: 'Nuget Packaging'
-      workingDirectory: '$(Build.Repository.LocalPath)\nuget'
-
-  - powershell: |
-      Get-ChildItem -Path $(Build.Repository.LocalPath) -Recurse
-    displayName: 'List all files in the repo for debugging'
-
-  - task: CopyFiles@2
-    displayName: 'Copy Nuget to: $(Build.ArtifactStagingDirectory)'
+  - task: NuGetCommand@2
+    displayName: 'Nuget Packaging'
     inputs:
-      SourceFolder: '$(Build.Repository.LocalPath)\nuget'
-      Contents: '*.nupkg'
-      TargetFolder: '$(Build.ArtifactStagingDirectory)\nuget'
+      command: 'pack'
+      packagesToPack: '$(Build.Repository.LocalPath)\nuget\Microsoft.ML.OnnxRuntimeGenAI.nuspec'
+      buildProperties: 'version=0.4.0-dev;genai_nuget_ext=$(genai_nuget_ext);configuration=$(buildConfig);buildPath=$(buildDir);ort_nuget_ext=$(ort_nuget_ext);ort_version=$(ort_version)'
+      packDestination: $(Build.ArtifactStagingDirectory)\nuget
+
+  - task: NuGetCommand@2
+    displayName: 'Nuget Managed Packaging'
+    inputs:
+      command: 'pack'
+      packagesToPack: '$(Build.Repository.LocalPath)\nuget\Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec'
+      buildProperties: 'version=0.4.0-dev;configuration=$(buildConfig)'
+      packDestination: $(Build.ArtifactStagingDirectory)\nuget
 
   - template: steps/compliant/esrp_nuget.yml
     parameters:
