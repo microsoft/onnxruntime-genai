@@ -41,8 +41,7 @@ jobs:
         $ORT_NIGHTLY_VERSION = $resp.value[0].versions[0].normalizedVersion
         Write-Host "$ORT_NIGHTLY_VERSION"
         "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
-        $nugetPath = Join-Path "C:\Program Files" "NuGet\nuget.exe"
-        & $nugetPath  install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_NIGHTLY_VERSION -x -NonInteractive
+        nuget install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_NIGHTLY_VERSION -x -NonInteractive
 
     - run: Get-ChildItem  ${{ env.ORT_PACKAGE_NAME }} -Recurse
       continue-on-error: true
