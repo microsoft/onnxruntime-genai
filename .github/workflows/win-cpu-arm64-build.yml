@@ -30,6 +30,10 @@ jobs:
         vs-version: '17.4'
         msbuild-architecture: arm64
 
+    - uses: nuget/setup-nuget@v2
+      with:
+        nuget-version: '5.x'
+
     - name: Download OnnxRuntime Nightly
       shell: powershell
       run: |
