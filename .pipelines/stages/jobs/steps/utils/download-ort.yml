@@ -42,6 +42,15 @@ steps:
     inputs:
       SourceFolder: '$(Build.Repository.LocalPath)/ort/runtimes/$(os)-$(arch)/native'
       TargetFolder: '$(Build.Repository.LocalPath)/ort/lib'
+  # TODO: Find out why do we need to to have libonnxruntime.so.ort_stable_version
+  - script: |
+      set -e -x
+      ort_stable_version=$(echo $(ort_version) | cut -d- -f1)
+      echo $ort_stable_version
+      mv libonnxruntime.so libonnxruntime.so.$ort_stable_version 
+      ln -s libonnxruntime.so.$ort_stable_version libonnxruntime.so
+    displayName: Copy libonnxruntime.so to libonnxruntime.so.
+    workingDirectory: '$(Build.Repository.LocalPath)/ort/lib'
 
 - task: CopyFiles@2
   inputs:

@@ -44,9 +44,6 @@ if(MSVC)
       "$<$<COMPILE_LANGUAGE:C,CXX>:/WX>"
   )
 endif()
-if(LINUX)
-  set(CMAKE_BUILD_RPATH_USE_ORIGIN TRUE)
-endif()
 
 if(ENABLE_TESTS)
   # call enable_testing so we can add tests from subdirectories (e.g. test and src/java)
