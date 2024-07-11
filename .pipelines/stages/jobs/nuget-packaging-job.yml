@@ -135,6 +135,8 @@ jobs:
     clean: true
     submodules: recursive
 
+  - template: steps/utils/set-genai-version.yml
+
   - powershell: |
       dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(buildConfig)" --verbosity normal
     displayName: 'Build CSharp'
@@ -153,7 +155,6 @@ jobs:
       Pattern: '*OnnxRuntimeGenAI*.dll'
 
   - powershell: |
-      $VERSION = '0.4.0-dev'
       $artifacts_dir = '$(Build.BinariesDirectory)/artifact-downloads'
       Write-Host "List downloaded artifacts"
       $artifacts = Get-ChildItem -Path $artifacts_dir/* -Include *.zip,*.tar.gz
@@ -165,7 +166,7 @@ jobs:
       foreach ($file in $artifacts) {
         $a = $file.Name
         Write-Host "Extracting " $a
-        $rid_match = $a -match "onnxruntime-genai-${VERSION}-(.+?)-?(?:cuda|dml)?(\.zip|\.tar\.gz)"
+        $rid_match = $a -match "onnxruntime-genai-$(genai_version)-(.+?)-?(?:cuda|dml)?(\.zip|\.tar\.gz)"
         if ($rid_match) {
           $rid = $Matches.1
         }
@@ -203,7 +204,7 @@ jobs:
   - powershell: |
       python3.exe $(Build.Repository.LocalPath)\tools\nuget\generate_nuspec_for_native_nuget.py `
         --package_name $(genai_nuget_package_name) `
-        --package_version 0.4.0-dev `
+        --package_version $(genai_version)`
         --ort_package_name $(ort_nuget_package_name)  `
         --ort_package_version $(ort_version) `
         --build_config $(buildConfig) `
@@ -227,7 +228,7 @@ jobs:
     inputs:
       command: 'pack'
       packagesToPack: $(Build.Repository.LocalPath)\nuget\Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec
-      buildProperties: 'version=0.4.0-dev;configuration=$(buildConfig)'
+      buildProperties: 'version=$(genai_version);configuration=$(buildConfig)'
       packDestination: $(Build.ArtifactStagingDirectory)\nuget
 
   - template: steps/compliant/esrp_nuget.yml
