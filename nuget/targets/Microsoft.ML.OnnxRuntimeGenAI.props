@@ -1,28 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <!-- win-x64 -->
+    <!-- x64 -->
     <None Include="$(MSBuildThisFileDirectory)..\..\runtimes\win-x64\native\onnxruntime-genai.dll"
-          Condition="'$(RuntimeIdentifier)' == 'win-x64' OR ('$(PlatformTarget)' == 'AnyCPU' AND '$(Prefer32Bit)' != 'true')">
+          Condition="'$(PlatformTarget)' == 'x64' OR ('$(PlatformTarget)' == 'AnyCPU' AND '$(Prefer32Bit)' != 'true')">
       <Link>onnxruntime-genai.dll</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
     </None>
 
-    <!-- win-arm64 -->
+    <!-- arm64 -->
     <None Include="$(MSBuildThisFileDirectory)..\..\runtimes\win-arm64\native\onnxruntime-genai.dll"
-          Condition="'$(RuntimeIdentifier)' == 'win-arm64'">
+          Condition="'$(PlatformTarget)' == 'ARM64'">
       <Link>onnxruntime-genai.dll</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
-    </None>
-
-    <!-- linux-x64 -->
-    <None Include="$(MSBuildThisFileDirectory)..\..\runtimes\linux-x64\native\libonnxruntime-genai.so"
-        Condition="'$(RuntimeIdentifier)' == 'linux-x64'">
-        <Link>libonnxruntime-genai.so</Link>
-        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-        <Visible>false</Visible>
     </None>
   </ItemGroup>
 </Project>
