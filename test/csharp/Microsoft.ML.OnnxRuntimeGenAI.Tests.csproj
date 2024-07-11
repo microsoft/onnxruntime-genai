@@ -54,11 +54,11 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
     </None>
-    <None Condition="Exists('$(OnnxruntimeLibDirectory)\onnxruntime_providers_shared.so')" Include="$(OnnxruntimeLibDirectory)\onnxruntime_providers_shared.so">
+    <None Condition="Exists('$(OnnxruntimeLibDirectory)\libonnxruntime_providers_shared.so')" Include="$(OnnxruntimeLibDirectory)\libonnxruntime_providers_shared.so">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
     </None>
-    <None Condition="Exists('$(OnnxruntimeLibDirectory)\onnxruntime_providers_cuda.so')" Include="$(OnnxruntimeLibDirectory)\onnxruntime_providers_cuda.so">
+    <None Condition="Exists('$(OnnxruntimeLibDirectory)\libonnxruntime_providers_cuda.so')" Include="$(OnnxruntimeLibDirectory)\libonnxruntime_providers_cuda.so">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
     </None>

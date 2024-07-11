@@ -93,7 +93,7 @@ jobs:
       - name: Build the C# API and Run the C# Tests
         run: |
           cd test/csharp
-          dotnet test /p:NativeBuildOutputDir="${{ github.workspace }}/build/cpu"
+          dotnet test /p:NativeBuildOutputDir="../../build/cpu/"
 
       - name: Verify Build Artifacts
         if: always()
