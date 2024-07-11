@@ -82,10 +82,11 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
           auto dest_data = presents_[i]->GetTensorMutableRawData();
 
           switch (model_.device_type_) {
+#if USE_CUDA
             case DeviceType::CUDA:
               cudaMemcpyAsync(dest_data, src_data, data_size, cudaMemcpyDeviceToDevice, model_.cuda_stream_);
               break;
-
+#endif
             case DeviceType::CPU:
               memcpy(dest_data, src_data, data_size);
               break;
