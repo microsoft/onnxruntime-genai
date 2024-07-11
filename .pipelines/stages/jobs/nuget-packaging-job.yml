@@ -204,7 +204,7 @@ jobs:
   - powershell: |
       python3.exe $(Build.Repository.LocalPath)\tools\nuget\generate_nuspec_for_native_nuget.py `
         --package_name $(genai_nuget_package_name) `
-        --package_version $(genai_version)`
+        --package_version $(genai_version) `
         --ort_package_name $(ort_nuget_package_name)  `
         --ort_package_version $(ort_version) `
         --build_config $(buildConfig) `
