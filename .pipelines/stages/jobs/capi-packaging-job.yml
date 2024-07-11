@@ -28,10 +28,7 @@ jobs:
       pool: 'nnxruntime-Ubuntu2204-AMD-CPU'
   ${{ if eq(parameters.os, 'win') }}:
     ${{ if eq(parameters.arch, 'x64') }}:
-      ${{ if eq(parameters.ep, 'directml') }}:
-        pool: 'onnxruntime-Win2022-GPU-dml-A10'
-      ${{ else }}:
-        pool: 'onnxruntime-Win-CPU-2022'
+      pool: 'onnxruntime-Win-CPU-2022'
     ${{ elseif eq(parameters.arch, 'arm64') }}:
       pool: 'onnxruntime-genai-windows-vs-2022-arm64'
     ${{ else }}:
