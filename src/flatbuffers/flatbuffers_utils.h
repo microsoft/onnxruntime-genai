@@ -39,7 +39,7 @@ void LoadStringFromLoraFormat(std::string& dst, const flatbuffers::String* fbs_s
 void SaveLoraParameter(flatbuffers::FlatBufferBuilder& flat_builder, std::string_view name,
                        Generators::lora_parameters::TensorDataType data_type,
                        std::span<const int64_t> shape, std::span<const uint8_t> data,
-                       flatbuffers::Offset<Generators::lora_parameters::Tensor>& fbs_tensor);
+                       flatbuffers::Offset<Generators::lora_parameters::Param>& fbs_tensor);
 
 /// <summary>
 /// Create an OrtValue on top of the flatbuffer tensor
@@ -51,7 +51,7 @@ void SaveLoraParameter(flatbuffers::FlatBufferBuilder& flat_builder, std::string
 /// <param name="tensor"></param>
 /// <returns></returns>
 std::pair<std::string, std::unique_ptr<OrtValue>> CreateOrtValueOverFlatBufferLoraParameter(
-    const Generators::lora_parameters::Tensor& tensor);
+    const Generators::lora_parameters::Param& tensor);
 
 // check if bytes has fileidentifier for lora parameters
 bool IsGenAiLoraFormatModelBytes(const void* bytes, size_t num_bytes);

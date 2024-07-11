@@ -31,7 +31,7 @@ enum TensorDataType : int32 {
 // For simplicity, we will have only have one data field
 // - raw_data for all primitive types.
 // We do not foresee strings as parameters.
-table Tensor {
+table Param {
   name:string;
 
   dims:[int64];
@@ -42,7 +42,7 @@ table Tensor {
 
 table Parameters {
   version:int;
-  parameters:[Tensor];
+  parameters:[Param];
 }
 
 root_type Parameters;

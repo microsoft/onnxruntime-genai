@@ -30,17 +30,17 @@ TEST(LoraParameters, FlatbuffersTest) {
 
   // We serialize 100 tensors
   constexpr size_t const tensor_count = 100;
-  std::vector<flatbuffers::Offset<Tensor>> tensors;
-  tensors.reserve(tensor_count);
+  std::vector<flatbuffers::Offset<Param>> params;
+  params.reserve(tensor_count);
   for (size_t i = 0; i < tensor_count; ++i) {
     std::string numeric_name = "lora_param_" + std::to_string(i);
-    flatbuffers::Offset<Tensor> fbs_tensor;
+    flatbuffers::Offset<Param> fbs_tensor;
     utils::SaveLoraParameter(builder, numeric_name, TensorDataType::FLOAT, lora_param_shape,
       byte_span, fbs_tensor);
-    tensors.push_back(fbs_tensor);
+    params.push_back(fbs_tensor);
   }
 
-  auto parameters = CreateParameters(builder, kLoraFormatVersion, builder.CreateVector(tensors));
+  auto parameters = CreateParameters(builder, kLoraFormatVersion, builder.CreateVector(params));
   builder.Finish(parameters, ParametersIdentifier());
 
   std::string serialized;

@@ -16,8 +16,8 @@ static_assert(FLATBUFFERS_VERSION_MAJOR == 23 &&
 namespace Generators {
 namespace lora_parameters {
 
-struct Tensor;
-struct TensorBuilder;
+struct Param;
+struct ParamBuilder;
 
 struct Parameters;
 struct ParametersBuilder;
@@ -109,8 +109,8 @@ inline const char *EnumNameTensorDataType(TensorDataType e) {
   return EnumNamesTensorDataType()[index];
 }
 
-struct Tensor FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
-  typedef TensorBuilder Builder;
+struct Param FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef ParamBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_NAME = 4,
     VT_DIMS = 6,
@@ -142,40 +142,40 @@ struct Tensor FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   }
 };
 
-struct TensorBuilder {
-  typedef Tensor Table;
+struct ParamBuilder {
+  typedef Param Table;
   ::flatbuffers::FlatBufferBuilder &fbb_;
   ::flatbuffers::uoffset_t start_;
   void add_name(::flatbuffers::Offset<::flatbuffers::String> name) {
-    fbb_.AddOffset(Tensor::VT_NAME, name);
+    fbb_.AddOffset(Param::VT_NAME, name);
   }
   void add_dims(::flatbuffers::Offset<::flatbuffers::Vector<int64_t>> dims) {
-    fbb_.AddOffset(Tensor::VT_DIMS, dims);
+    fbb_.AddOffset(Param::VT_DIMS, dims);
   }
   void add_data_type(Generators::lora_parameters::TensorDataType data_type) {
-    fbb_.AddElement<int32_t>(Tensor::VT_DATA_TYPE, static_cast<int32_t>(data_type), 0);
+    fbb_.AddElement<int32_t>(Param::VT_DATA_TYPE, static_cast<int32_t>(data_type), 0);
   }
   void add_raw_data(::flatbuffers::Offset<::flatbuffers::Vector<uint8_t>> raw_data) {
-    fbb_.AddOffset(Tensor::VT_RAW_DATA, raw_data);
+    fbb_.AddOffset(Param::VT_RAW_DATA, raw_data);
   }
-  explicit TensorBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+  explicit ParamBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
   }
-  ::flatbuffers::Offset<Tensor> Finish() {
+  ::flatbuffers::Offset<Param> Finish() {
     const auto end = fbb_.EndTable(start_);
-    auto o = ::flatbuffers::Offset<Tensor>(end);
+    auto o = ::flatbuffers::Offset<Param>(end);
     return o;
   }
 };
 
-inline ::flatbuffers::Offset<Tensor> CreateTensor(
+inline ::flatbuffers::Offset<Param> CreateParam(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     ::flatbuffers::Offset<::flatbuffers::String> name = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<int64_t>> dims = 0,
     Generators::lora_parameters::TensorDataType data_type = Generators::lora_parameters::TensorDataType::UNDEFINED,
     ::flatbuffers::Offset<::flatbuffers::Vector<uint8_t>> raw_data = 0) {
-  TensorBuilder builder_(_fbb);
+  ParamBuilder builder_(_fbb);
   builder_.add_raw_data(raw_data);
   builder_.add_data_type(data_type);
   builder_.add_dims(dims);
@@ -183,7 +183,7 @@ inline ::flatbuffers::Offset<Tensor> CreateTensor(
   return builder_.Finish();
 }
 
-inline ::flatbuffers::Offset<Tensor> CreateTensorDirect(
+inline ::flatbuffers::Offset<Param> CreateParamDirect(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     const char *name = nullptr,
     const std::vector<int64_t> *dims = nullptr,
@@ -192,7 +192,7 @@ inline ::flatbuffers::Offset<Tensor> CreateTensorDirect(
   auto name__ = name ? _fbb.CreateString(name) : 0;
   auto dims__ = dims ? _fbb.CreateVector<int64_t>(*dims) : 0;
   auto raw_data__ = raw_data ? _fbb.CreateVector<uint8_t>(*raw_data) : 0;
-  return Generators::lora_parameters::CreateTensor(
+  return Generators::lora_parameters::CreateParam(
       _fbb,
       name__,
       dims__,
@@ -209,8 +209,8 @@ struct Parameters FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   int32_t version() const {
     return GetField<int32_t>(VT_VERSION, 0);
   }
-  const ::flatbuffers::Vector<::flatbuffers::Offset<Generators::lora_parameters::Tensor>> *parameters() const {
-    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<Generators::lora_parameters::Tensor>> *>(VT_PARAMETERS);
+  const ::flatbuffers::Vector<::flatbuffers::Offset<Generators::lora_parameters::Param>> *parameters() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<Generators::lora_parameters::Param>> *>(VT_PARAMETERS);
   }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
@@ -229,7 +229,7 @@ struct ParametersBuilder {
   void add_version(int32_t version) {
     fbb_.AddElement<int32_t>(Parameters::VT_VERSION, version, 0);
   }
-  void add_parameters(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<Generators::lora_parameters::Tensor>>> parameters) {
+  void add_parameters(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<Generators::lora_parameters::Param>>> parameters) {
     fbb_.AddOffset(Parameters::VT_PARAMETERS, parameters);
   }
   explicit ParametersBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
@@ -246,7 +246,7 @@ struct ParametersBuilder {
 inline ::flatbuffers::Offset<Parameters> CreateParameters(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     int32_t version = 0,
-    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<Generators::lora_parameters::Tensor>>> parameters = 0) {
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<Generators::lora_parameters::Param>>> parameters = 0) {
   ParametersBuilder builder_(_fbb);
   builder_.add_parameters(parameters);
   builder_.add_version(version);
@@ -256,8 +256,8 @@ inline ::flatbuffers::Offset<Parameters> CreateParameters(
 inline ::flatbuffers::Offset<Parameters> CreateParametersDirect(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     int32_t version = 0,
-    const std::vector<::flatbuffers::Offset<Generators::lora_parameters::Tensor>> *parameters = nullptr) {
-  auto parameters__ = parameters ? _fbb.CreateVector<::flatbuffers::Offset<Generators::lora_parameters::Tensor>>(*parameters) : 0;
+    const std::vector<::flatbuffers::Offset<Generators::lora_parameters::Param>> *parameters = nullptr) {
+  auto parameters__ = parameters ? _fbb.CreateVector<::flatbuffers::Offset<Generators::lora_parameters::Param>>(*parameters) : 0;
   return Generators::lora_parameters::CreateParameters(
       _fbb,
       version,

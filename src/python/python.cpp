@@ -10,16 +10,23 @@
 #include "../models/model.h"
 #include "../logging.h"
 
+#include "../flatbuffers/flatbuffers_utils.h"
+#include "../flatbuffers/lora_format_version.h"
+
+#include <fstream>
+
 using namespace pybind11::literals;
 
-// If a parameter to a C++ function is an array of float16, this type will let pybind11::array_t<Ort::Float16_t> map to numpy's float16 format
+// If a parameter to a C++ function is an array of float16, this type will let pybind11::array_t<Ort::Float16_t> map to
+// numpy's float16 format
 namespace pybind11 {
 namespace detail {
 template <>
 struct npy_format_descriptor<Ort::Float16_t> {
   static constexpr auto name = _("float16");
   static pybind11::dtype dtype() {
-    handle ptr = npy_api::get().PyArray_DescrFromType_(23 /*NPY_FLOAT16*/); /* import numpy as np; print(np.dtype(np.float16).num */
+    handle ptr = npy_api::get().PyArray_DescrFromType_(
+        23 /*NPY_FLOAT16*/); /* import numpy as np; print(np.dtype(np.float16).num */
     return reinterpret_borrow<pybind11::dtype>(ptr);
   }
   static std::string format() {
@@ -140,16 +147,14 @@ std::unique_ptr<OrtValue> ToOrtValue(pybind11::array& v) {
   auto type = ToTensorType(v.dtype());
 
   std::vector<int64_t> shape(v.ndim());
-  for (pybind11::ssize_t i = 0; i < v.ndim(); i++)
-    shape[i] = v.shape()[i];
+  for (pybind11::ssize_t i = 0; i < v.ndim(); i++) shape[i] = v.shape()[i];
 
   auto p_memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
   return OrtValue::CreateTensor(*p_memory_info, v.mutable_data(), v.nbytes(), shape, type);
 }
 
 pybind11::array ToNumpy(OrtValue* v, const Generators::Model& model) {
-  if (!v)
-    return {};
+  if (!v) return {};
 
   auto type_info = v->GetTensorTypeAndShapeInfo();
   auto shape = type_info->GetShape();
@@ -161,25 +166,22 @@ pybind11::array ToNumpy(OrtValue* v, const Generators::Model& model) {
 
 #if USE_DML
   // TODO: DML version of this
-  if (v->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU && model.device_type_ == Generators::DeviceType::DML) {
+  if (v->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU &&
+      model.device_type_ == Generators::DeviceType::DML) {
     auto data_size = type_info->GetElementCount() * element_size;
     cpu_copy = std::make_unique<uint8_t[]>(data_size);
 
     ComPtr<ID3D12Resource> gpu_resource;
-    Ort::ThrowOnError(model.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(
-        model.allocator_device_,
-        data,
-        &gpu_resource));
+    Ort::ThrowOnError(
+        model.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model.allocator_device_, data, &gpu_resource));
 
-    model.GetDmlReadbackHeap()->ReadbackFromGpu(
-        std::span(reinterpret_cast<uint8_t*>(cpu_copy.get()), data_size),
-        gpu_resource.Get(),
-        0,
-        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    model.GetDmlReadbackHeap()->ReadbackFromGpu(std::span(reinterpret_cast<uint8_t*>(cpu_copy.get()), data_size),
+                                                gpu_resource.Get(), 0, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     data = cpu_copy.get();
   }
 #elif USE_CUDA
-  if (v->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU && model.device_type_ == Generators::DeviceType::CUDA) {
+  if (v->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU &&
+      model.device_type_ == Generators::DeviceType::CUDA) {
     auto data_size = type_info->GetElementCount() * element_size;
     cpu_copy = std::make_unique<uint8_t[]>(data_size);
     Generators::CudaCheck() == cudaMemcpy(cpu_copy.get(), data, data_size, cudaMemcpyDeviceToHost);
@@ -224,14 +226,13 @@ struct PyRoamingArray : RoamingArray<T> {
 template <typename T>
 void Declare_DeviceArray(pybind11::module& m, const char* name) {
   using Type = PyRoamingArray<T>;
-  pybind11::class_<Type>(m, name)
-      .def(
-          "get_array", [](Type& t) -> pybind11::array_t<T> { return t.GetNumpy(); }, pybind11::return_value_policy::reference_internal);
+  pybind11::class_<Type>(m, name).def(
+      "get_array", [](Type& t) -> pybind11::array_t<T> { return t.GetNumpy(); },
+      pybind11::return_value_policy::reference_internal);
 }
 
 struct PyGeneratorParams {
-  PyGeneratorParams(const Model& model) : params_{std::make_shared<GeneratorParams>(model)} {
-  }
+  PyGeneratorParams(const Model& model) : params_{std::make_shared<GeneratorParams>(model)} {}
 
   operator const GeneratorParams&() const { return *params_; }
 
@@ -245,8 +246,7 @@ struct PyGeneratorParams {
         params_->batch_size = 1;
         params_->sequence_length = static_cast<int>(py_input_ids_.shape(0));
       } else {
-        if (py_input_ids_.ndim() != 2)
-          throw std::runtime_error("Input IDs can only be 1 or 2 dimensional");
+        if (py_input_ids_.ndim() != 2) throw std::runtime_error("Input IDs can only be 1 or 2 dimensional");
 
         params_->batch_size = static_cast<int>(py_input_ids_.shape(0));
         params_->sequence_length = static_cast<int>(py_input_ids_.shape(1));
@@ -284,7 +284,9 @@ struct PyGeneratorParams {
   }
 
   void TryUseCudaGraphWithMaxBatchSize(pybind11::int_ max_batch_size) {
-    Log("warning", "try_use_cuda_graph_with_max_batch_size will be deprecated in release 0.3.0. Please use try_graph_capture_with_max_batch_size instead");
+    Log("warning",
+        "try_use_cuda_graph_with_max_batch_size will be deprecated in release 0.3.0. Please use "
+        "try_graph_capture_with_max_batch_size instead");
     params_->TryGraphCapture(max_batch_size.cast<int>());
   }
 
@@ -299,8 +301,7 @@ struct PyGeneratorParams {
 };
 
 struct PyNamedTensors {
-  PyNamedTensors(std::unique_ptr<NamedTensors> named_tensors) : named_tensors_{std::move(named_tensors)} {
-  }
+  PyNamedTensors(std::unique_ptr<NamedTensors> named_tensors) : named_tensors_{std::move(named_tensors)} {}
 
   std::unique_ptr<NamedTensors> named_tensors_;
 };
@@ -321,21 +322,15 @@ struct PyGenerator {
     return ToPython(py_sequence_.GetCPU());
   }
 
-  void ComputeLogits() {
-    generator_->ComputeLogits();
-  }
+  void ComputeLogits() { generator_->ComputeLogits(); }
 
   pybind11::array GetOutput(const std::string& name) {
     return ToNumpy(generator_->state_->GetOutput(name.c_str()), *(generator_->model_));
   }
 
-  void GenerateNextToken() {
-    generator_->GenerateNextToken();
-  }
+  void GenerateNextToken() { generator_->GenerateNextToken(); }
 
-  bool IsDone() const {
-    return generator_->IsDone();
-  }
+  bool IsDone() const { return generator_->IsDone(); }
 
  private:
   std::unique_ptr<Generator> generator_;
@@ -375,10 +370,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   // Add a cleanup call to happen before global variables are destroyed
   static int unused{};  // The capsule needs something to reference
-  pybind11::capsule cleanup(
-      &unused, "cleanup", [](PyObject*) {
-        Generators::Shutdown();
-      });
+  pybind11::capsule cleanup(&unused, "cleanup", [](PyObject*) { Generators::Shutdown(); });
   m.add_object("_cleanup", cleanup);
 
   // So that python users can catch OrtExceptions specifically
@@ -394,47 +386,53 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_property_readonly("vocab_size", [](const PyGeneratorParams& v) { return v.params_->vocab_size; })
       .def_readwrite("input_ids", &PyGeneratorParams::py_input_ids_)
       .def_readwrite("whisper_input_features", &PyGeneratorParams::py_whisper_input_features_)
-      .def("set_inputs", [](PyGeneratorParams& generator_params, PyNamedTensors* named_tensors) {
-        if (!named_tensors || !named_tensors->named_tensors_)
-          throw std::runtime_error("No inputs provided.");
+      .def("set_inputs",
+           [](PyGeneratorParams& generator_params, PyNamedTensors* named_tensors) {
+             if (!named_tensors || !named_tensors->named_tensors_) throw std::runtime_error("No inputs provided.");
 
-        generator_params.params_->SetInputs(*named_tensors->named_tensors_);
-      })
+             generator_params.params_->SetInputs(*named_tensors->named_tensors_);
+           })
       .def("set_model_input", &PyGeneratorParams::SetModelInput)
-      .def("set_search_options", &PyGeneratorParams::SetSearchOptions)                                     // See config.h 'struct Search' for the options
-      .def("try_use_cuda_graph_with_max_batch_size", &PyGeneratorParams::TryUseCudaGraphWithMaxBatchSize)  // will be deprecated
+      .def("set_search_options", &PyGeneratorParams::SetSearchOptions)  // See config.h 'struct Search' for the options
+      .def("try_use_cuda_graph_with_max_batch_size",
+           &PyGeneratorParams::TryUseCudaGraphWithMaxBatchSize)  // will be deprecated
       .def("try_graph_capture_with_max_batch_size", &PyGeneratorParams::TryGraphCaptureWithMaxBatchSize);
 
-  pybind11::class_<TokenizerStream>(m, "TokenizerStream")
-      .def("decode", [](TokenizerStream& t, int32_t token) { return t.Decode(token); });
+  pybind11::class_<TokenizerStream>(m, "TokenizerStream").def("decode", [](TokenizerStream& t, int32_t token) {
+    return t.Decode(token);
+  });
 
   pybind11::class_<Tokenizer, std::shared_ptr<Tokenizer>>(m, "Tokenizer")
       .def(pybind11::init([](Model& model) { return model.CreateTokenizer(); }))
       .def("encode", &Tokenizer::Encode)
       .def("decode", [](const Tokenizer& t, pybind11::array_t<int32_t> tokens) { return t.Decode(ToSpan(tokens)); })
-      .def("encode_batch", [](const Tokenizer& t, std::vector<std::string> strings) {
-        auto result = t.EncodeBatch(strings);
-        return pybind11::array_t<int32_t>({strings.size(), result.size() / strings.size()}, result.data());
-      })
-      .def("decode_batch", [](const Tokenizer& t, pybind11::array_t<int32_t> tokens) {
-        if (tokens.ndim() == 1) {  // Just a 1D array
-          return t.DecodeBatch(ToSpan(tokens), 1);
-        } else {
-          if (tokens.ndim() != 2)
-            throw std::runtime_error("token shape can only be 1 or 2 dimensional");
+      .def("encode_batch",
+           [](const Tokenizer& t, std::vector<std::string> strings) {
+             auto result = t.EncodeBatch(strings);
+             return pybind11::array_t<int32_t>({strings.size(), result.size() / strings.size()}, result.data());
+           })
+      .def("decode_batch",
+           [](const Tokenizer& t, pybind11::array_t<int32_t> tokens) {
+             if (tokens.ndim() == 1) {  // Just a 1D array
+               return t.DecodeBatch(ToSpan(tokens), 1);
+             } else {
+               if (tokens.ndim() != 2) throw std::runtime_error("token shape can only be 1 or 2 dimensional");
 
-          return t.DecodeBatch(ToSpan(tokens), tokens.shape(0));
-        }
-      })
+               return t.DecodeBatch(ToSpan(tokens), tokens.shape(0));
+             }
+           })
       .def("create_stream", [](const Tokenizer& t) { return t.CreateStream(); });
 
   pybind11::class_<Model, std::shared_ptr<Model>>(m, "Model")
-      .def(pybind11::init([](const std::string& config_path) {
-        return CreateModel(GetOrtEnv(), config_path.c_str());
-      }))
-      .def("generate", [](Model& model, PyGeneratorParams& params) { params.Prepare(); return Generate(model, params); })
+      .def(pybind11::init([](const std::string& config_path) { return CreateModel(GetOrtEnv(), config_path.c_str()); }))
+      .def("generate",
+           [](Model& model, PyGeneratorParams& params) {
+             params.Prepare();
+             return Generate(model, params);
+           })
       .def_property_readonly(
-          "device_type", [](const Model& model) { return to_string(model.device_type_); }, "The device type the model is running on")
+          "device_type", [](const Model& model) { return to_string(model.device_type_); },
+          "The device type the model is running on")
       .def("create_multimodal_processor", [](const Model& model) { return model.CreateMultiModalProcessor(); });
 
   pybind11::class_<PyGenerator>(m, "Generator")
@@ -446,32 +444,32 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
       .def("get_sequence", &PyGenerator::GetSequence);
 
-  pybind11::class_<Images>(m, "Images")
-      .def_static("open", [](pybind11::args image_paths) {
-        if (image_paths.empty())
-          throw std::runtime_error("No images provided");
+  pybind11::class_<Images>(m, "Images").def_static("open", [](pybind11::args image_paths) {
+    if (image_paths.empty()) throw std::runtime_error("No images provided");
 
-        if (image_paths.size() > 1U)
-          throw std::runtime_error("Loading multiple images is not supported");
+    if (image_paths.size() > 1U) throw std::runtime_error("Loading multiple images is not supported");
 
-        auto image_path = image_paths[0].cast<std::string>();
-        return LoadImageImpl(image_path.c_str());
-      });
+    auto image_path = image_paths[0].cast<std::string>();
+    return LoadImageImpl(image_path.c_str());
+  });
 
   pybind11::class_<PyNamedTensors>(m, "NamedTensors");
 
   pybind11::class_<MultiModalProcessor, std::shared_ptr<MultiModalProcessor>>(m, "MultiModalProcessor")
-      .def("__call__", [](MultiModalProcessor& processor, const std::string& prompt, const pybind11::kwargs& kwargs) -> std::unique_ptr<PyNamedTensors> {
-        if (processor.image_processor_) {
-          const Images* images = nullptr;
-          if (kwargs.contains("images")) {
-            images = kwargs["images"].cast<const Images*>();
-          }
-          return std::make_unique<PyNamedTensors>(processor.image_processor_->Process(*processor.tokenizer_, prompt, images));
-        } else {
-          throw std::runtime_error("Image processor is not available.");
-        }
-      })
+      .def("__call__",
+           [](MultiModalProcessor& processor, const std::string& prompt,
+              const pybind11::kwargs& kwargs) -> std::unique_ptr<PyNamedTensors> {
+             if (processor.image_processor_) {
+               const Images* images = nullptr;
+               if (kwargs.contains("images")) {
+                 images = kwargs["images"].cast<const Images*>();
+               }
+               return std::make_unique<PyNamedTensors>(
+                   processor.image_processor_->Process(*processor.tokenizer_, prompt, images));
+             } else {
+               throw std::runtime_error("Image processor is not available.");
+             }
+           })
       .def("create_stream", [](MultiModalProcessor& processor) { return processor.tokenizer_->CreateStream(); })
       .def("decode", [](MultiModalProcessor& processor, pybind11::array_t<int32_t> tokens) {
         return processor.tokenizer_->Decode(ToSpan(tokens));
@@ -505,6 +503,44 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   m.def("set_current_gpu_device_id", [](int device_id) { Ort::SetCurrentGpuDeviceId(device_id); });
   m.def("get_current_gpu_device_id", []() { return Ort::GetCurrentGpuDeviceId(); });
+
+  /// Save numpy array containing tensor in a flatbuffer lora_parameter format so
+  /// it can be loaded by a C++ code.
+  m.def("save_array_as_lora_parameter", [](pybind11::array& v, const std::string& param_name,
+                                           const std::string& file_name) {
+    std::ofstream file(file_name, std::ios::binary);
+    if (file.fail()) {
+      throw std::runtime_error("Failed to open file:" + file_name + " for writing.");
+    }
+
+    auto type = ToTensorType(v.dtype());
+
+    std::span<const int64_t> shape_span{reinterpret_cast<const int64_t*>(v.shape()), static_cast<size_t>(v.ndim())};
+    std::span<const uint8_t> data_span{reinterpret_cast<const uint8_t*>(v.data()), static_cast<size_t>(v.nbytes())};
+
+    flatbuffers::FlatBufferBuilder builder;
+    flatbuffers::Offset<Generators::lora_parameters::Param> fbs_param;
+    Generators::lora_parameters::utils::SaveLoraParameter(
+        builder, param_name, static_cast<Generators::lora_parameters::TensorDataType>(type), shape_span, data_span,
+        fbs_param);
+
+    std::vector<flatbuffers::Offset<Generators::lora_parameters::Param>> fbs_params;
+    fbs_params.push_back(fbs_param);
+
+    auto parameters = Generators::lora_parameters::CreateParameters(
+        builder, Generators::lora_parameters::kLoraFormatVersion, builder.CreateVector(fbs_params));
+    builder.Finish(parameters, Generators::lora_parameters::ParametersIdentifier());
+
+    if (file.write(reinterpret_cast<const char*>(builder.GetBufferPointer()), builder.GetSize()).fail()) {
+      throw std::runtime_error("Failed to write :" + std::to_string(builder.GetSize()) + " bytes to " + file_name);
+    }
+
+    if (file.flush().fail()) {
+      throw std::runtime_error("Failed to flush " + file_name);
+    }
+
+    file.close();
+  });
 }
 
 }  // namespace Generators

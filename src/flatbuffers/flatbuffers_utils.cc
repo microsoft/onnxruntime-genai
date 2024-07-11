@@ -33,31 +33,27 @@ void LoadStringFromLoraFormat(std::string& dst, const flatbuffers::String* fbs_s
 void SaveLoraParameter(flatbuffers::FlatBufferBuilder& flat_builder, std::string_view name,
                        Generators::lora_parameters::TensorDataType data_type, std::span<const int64_t> shape,
                        std::span<const uint8_t> data,
-                       flatbuffers::Offset<Generators::lora_parameters::Tensor>& fbs_tensor) {
+                       flatbuffers::Offset<Generators::lora_parameters::Param>& fbs_tensor) {
   auto name_str = (name.empty()) ? 0 : flat_builder.CreateString(name.data(), name.size());
   auto shape_vec = flat_builder.CreateVector(shape.data(), shape.size());
   auto data_vec = flat_builder.CreateVector(data.data(), data.size());
 
-  fbs_tensor = CreateTensor(flat_builder, name_str, shape_vec, data_type, data_vec);
+  fbs_tensor = CreateParam(flat_builder, name_str, shape_vec, data_type, data_vec);
 }
 
 std::pair<std::string, std::unique_ptr<OrtValue>> CreateOrtValueOverFlatBufferLoraParameter(
-    const Generators::lora_parameters::Tensor& tensor) {
+    const Generators::lora_parameters::Param& tensor) {
   std::string name;
   LoadStringFromLoraFormat(name, tensor.name());
 
   const auto data_type = tensor.data_type();
 
-  std::vector<int64_t> dims;
-  dims.reserve(tensor.dims()->size());
-  for (auto d : *tensor.dims()) {
-    dims.push_back(d);
-  }
+  std::span<const int64_t> shape_span(tensor.dims()->data(), tensor.dims()->size());
 
   auto mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
   auto ort_value =
       OrtValue::CreateTensor(*mem_info, const_cast<uint8_t*>(tensor.raw_data()->data()),
-                             static_cast<size_t>(tensor.raw_data()->size()), dims,
+                             static_cast<size_t>(tensor.raw_data()->size()), shape_span,
                              static_cast<ONNXTensorElementDataType>(data_type));
   return std::make_pair(std::move(name), std::move(ort_value));
 }
