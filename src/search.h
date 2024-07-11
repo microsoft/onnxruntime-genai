@@ -1,9 +1,9 @@
 #include "sequences.h"
 #include <random>
+#include "beam_search_scorer.h"
+#pragma once
 
 namespace Generators {
-
-struct BeamSearchScorer;
 
 struct Search {
   Search(const GeneratorParams& params) : params_{params.shared_from_this()} {}
@@ -17,9 +17,6 @@ struct Search {
 
   virtual void SetLogits(RoamingArray<float> logits) = 0;
   virtual bool IsDone() const = 0;
-
-  // TODO: Beam Search only, this should be removed and made automatic
-  virtual void Finalize(size_t /*num_return_sequences*/, RoamingArray<int32_t> /*output*/, RoamingArray<float> /*sequence_scores*/) { assert(false); }
 
   virtual void SelectTop() = 0;
   virtual void SampleTopP(float /*p*/, float /*temperature*/) { assert(false); }
@@ -92,13 +89,19 @@ struct BeamSearch_Cpu : Search_Cpu {
 
   RoamingArray<int32_t> GetNextTokens() override;
   RoamingArray<int32_t> GetNextIndices() override;
+  // In Beam Search there are batch_size * num_beams sequences. Index is batch_id * num_beams + beam_id... Easier to use the other version.
+  RoamingArray<int32_t> GetSequence(size_t index) override;
+  RoamingArray<int32_t> GetSequence(size_t batch_id, size_t beam_id);
+
+  bool IsDone() const;
 
   void SelectTop() override;
 
-  void Finalize(size_t num_return_sequences, RoamingArray<int32_t> output, RoamingArray<float> sequence_scores) override;
-
  private:
   void AppendNextTokensToSequences();
+  void Finalize(size_t num_return_sequences);
+
+  bool finalized_{};  // To avoid calling Finalize multiple times
 
   std::unique_ptr<BeamSearchScorer> beam_scorer_;
 };

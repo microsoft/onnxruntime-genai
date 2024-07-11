@@ -205,8 +205,7 @@ TokenSequences Generate(const Model& model, const GeneratorParams& params) {
   }
 
   TokenSequences result;
-
-  for (int i = 0; i < params.batch_size; i++) {
+  for (int i = 0; i < params.batch_size * params.search.num_return_sequences; i++) {
     auto sequence = generator->search_->GetSequence(i);
     auto sequence_cpu = sequence.GetCPU();
 

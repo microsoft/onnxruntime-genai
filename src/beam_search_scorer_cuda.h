@@ -9,9 +9,7 @@ struct BeamSearchScorer_Cuda {
                std::span<const int32_t> next_indices);
 
   void Finalize(Sequences_Cuda& sequences,
-                size_t num_return_sequences,
-                std::span<int32_t> output_sequences,
-                std::span<float> output_sequence_scores);
+                size_t num_return_sequences);
 
   bool IsDone() const { return false; }  // For CUDA we speculatively run the next step while we wait for the GPU to report status. We use 'IsDoneLater()' for this
   bool IsDoneLater() const;
@@ -24,6 +22,7 @@ struct BeamSearchScorer_Cuda {
     return next_beam_indices_cpu_;
   }
   gpu_span<int32_t> GetNextIndicesGPU() { return next_beam_indices_; }
+  RoamingArray<int32_t> GetBeamHypothesis(size_t batch_id, size_t beam_id) const;
 
  private:
   mutable cuda_event_holder event_process_complete_;
