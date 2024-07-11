@@ -43,15 +43,12 @@ jobs:
       with:
         dotnet-version: '8.0.x'
 
-    - name : Install jq and curl
-      run: |
-        choco install -y jq curl
-
     - name: Download OnnxRuntime Nightly
       shell: pwsh
       run: |
-        $ORT_NIGHTLY_VERSION=$(curl -s "${{ env.ORT_NIGHTLY_REST_API }}" | jq -r '.value[0].versions[0].normalizedVersion')
-        echo "$ORT_NIGHTLY_VERSION" 
+        $resp = Invoke-RestMethod "${{ env.ORT_NIGHTLY_REST_API }}"
+        $ORT_NIGHTLY_VERSION = $resp.value[0].versions[0].normalizedVersion
+        Write-Host "$ORT_NIGHTLY_VERSION"
         "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
         nuget install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_NIGHTLY_VERSION -ExcludeVersion -NonInteractive
 
@@ -109,4 +106,4 @@ jobs:
       run: |
         $env:PATH = "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin;" + $env:PATH 
         echo "Current PATH variable is: $env:PATH" 
-        .\build\cuda\test\Release\unit_tests.exe
+        & .\$env:binaryDir\test\Release\unit_tests.exe

@@ -87,4 +87,4 @@ jobs:
 
     - name: Run tests
       run: |
-        .\$env:binaryDir\test\Release\unit_tests.exe
+        & .\$env:binaryDir\test\Release\unit_tests.exe
