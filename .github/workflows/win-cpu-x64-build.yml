@@ -41,15 +41,12 @@ jobs:
       with:
         dotnet-version: '8.0.x'
 
-    - name : Install jq and curl
-      run: |
-        choco install -y jq curl
-
     - name: Download OnnxRuntime Nightly
       shell: pwsh
       run: |
-        $ORT_NIGHTLY_VERSION = $(curl -s "${{ env.ORT_NIGHTLY_REST_API }}" | jq -r '.value[0].versions[0].normalizedVersion')
-        echo "$ORT_NIGHTLY_VERSION"
+        $resp = Invoke-RestMethod "${{ env.ORT_NIGHTLY_REST_API }}"
+        $ORT_NIGHTLY_VERSION = $resp.value[0].versions[0].normalizedVersion
+        Write-Host "$ORT_NIGHTLY_VERSION"
         "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
         nuget install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_NIGHTLY_VERSION -x -NonInteractive
 
@@ -107,7 +104,7 @@ jobs:
 
     - name: Run tests
       run: |
-        .\build\cpu\test\Release\unit_tests.exe
+        .\$env:binaryDir\test\Release\unit_tests.exe
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v3
