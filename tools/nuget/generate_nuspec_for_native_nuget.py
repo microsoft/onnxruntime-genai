@@ -156,6 +156,7 @@ def parse_arguments():
 
 def main():
     args = parse_arguments()
+    print(args)
     # Generate nuspec
     lines = generate_nuspec(args)
 
