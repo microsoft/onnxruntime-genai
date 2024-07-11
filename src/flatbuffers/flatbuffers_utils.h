@@ -3,8 +3,8 @@
 
 #pragma once
 
-#include "../src/flatbuffers.h"
-#include "../src/span.h"
+#include "../flatbuffers.h"
+#include "../span.h"
 
 #include "schema/genai_lora.fbs.h"
 
@@ -36,16 +36,22 @@ void LoadStringFromLoraFormat(std::string& dst, const flatbuffers::String* fbs_s
 /// <param name="shape"></param>
 /// <param name="data"></param>
 /// <param name="fbs_tensor">output offset</param>
-void SaveLoraParameter(flatbuffers::FlatBufferBuilder& flat_builder, std::string_view name, std::string_view doc,
-                       TensorDataType data_type, std::span<const int64_t> shape, std::span<const uint8_t> data,
-                       flatbuffers::Offset<Tensor>& fbs_tensor);
+void SaveLoraParameter(flatbuffers::FlatBufferBuilder& flat_builder, std::string_view name,
+                       Generators::lora_parameters::TensorDataType data_type,
+                       std::span<const int64_t> shape, std::span<const uint8_t> data,
+                       flatbuffers::Offset<Generators::lora_parameters::Tensor>& fbs_tensor);
 
 /// <summary>
-/// Creates an OrtValue on top of the flatbuffer tensor
+/// Create an OrtValue on top of the flatbuffer tensor
+/// No copying of data is done here. The caller is responsible for managing the lifetime of flatbuffer
+/// structures.
+///
+/// In this scenario, one can memory map the entire flatbuffer tensor data into OrtValue without copying.
 /// </summary>
 /// <param name="tensor"></param>
-/// <param name="ort_value"></param>
-void LoadLoraParameter(const Tensor& tensor, std::unique_ptr<OrtValue>& ort_value);
+/// <returns></returns>
+std::pair<std::string, std::unique_ptr<OrtValue>> CreateOrtValueOverFlatBufferLoraParameter(
+    const Generators::lora_parameters::Tensor& tensor);
 
 // check if bytes has fileidentifier for lora parameters
 bool IsGenAiLoraFormatModelBytes(const void* bytes, size_t num_bytes);
@@ -53,4 +59,3 @@ bool IsGenAiLoraFormatModelBytes(const void* bytes, size_t num_bytes);
 }  // namespace utils
 }  // namespace lora_parameters
 }  // namespace Generators
-

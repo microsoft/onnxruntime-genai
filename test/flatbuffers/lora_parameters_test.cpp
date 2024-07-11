@@ -11,33 +11,11 @@
 #include "../src/flatbuffers/flatbuffers_utils.h"
 #include "../src/flatbuffers/schema/genai_lora.fbs.h"
 
+#include "../src/models/onnxruntime_api.h"
+
 
 namespace Generators {
 namespace lora_parameters {
-namespace utils {
-
-void LoadLoraParameter(const Tensor& tensor, std::unique_ptr<OrtValue>& tensor) {
-  std::string name, doc_string;
-  LoadStringFromLoraFormat(name, tensor.name());
-  LoadStringFromLoraFormat(doc_string, tensor.doc_string());
-
-  std::vector<int64_t> dims;
-  dims.reserve(tensor.dims()->size());
-  for (auto d : *tensor.dims()) {
-    dims.push_back(d);
-  }
-
-  std::vector<uint8_t> data;
-  data.reserve(tensor.raw_data()->size());
-  // We may need to do a copy
-  for (auto d : *tensor.raw_data()) {
-    data.push_back(d);
-  }
-}
-
-}  // namespace utils
-
-
 namespace test {
 TEST(LoraParameters, FlatbuffersTest) {
 
@@ -56,10 +34,10 @@ TEST(LoraParameters, FlatbuffersTest) {
   tensors.reserve(tensor_count);
   for (size_t i = 0; i < tensor_count; ++i) {
     std::string numeric_name = "lora_param_" + std::to_string(i);
-    flatbuffers::Offset<Tensor> tensor;
-    utils::SaveLoraParameter(builder, numeric_name, numeric_name,
-                             TensorDataType::FLOAT, lora_param_shape, byte_span, tensor);
-    tensors.push_back(tensor);
+    flatbuffers::Offset<Tensor> fbs_tensor;
+    utils::SaveLoraParameter(builder, numeric_name, TensorDataType::FLOAT, lora_param_shape,
+      byte_span, fbs_tensor);
+    tensors.push_back(fbs_tensor);
   }
 
   auto parameters = CreateParameters(builder, kLoraFormatVersion, builder.CreateVector(tensors));
@@ -73,6 +51,7 @@ TEST(LoraParameters, FlatbuffersTest) {
     serialized = stream.str();
   }
 
+  // Verify the buffer first
   std::span<const uint8_t> serialized_span(reinterpret_cast<const uint8_t*>(serialized.data()), serialized.size());
   utils::IsGenAiLoraFormatModelBytes(serialized_span.data(), serialized_span.size());
 
@@ -84,6 +63,56 @@ TEST(LoraParameters, FlatbuffersTest) {
 
   ASSERT_TRUE(IsLoraFormatVersionSupported(fbs_parameters->version())) << "Format version mismatch";
 
+  // Run some checks
+  for (const auto* fbs_tensor : *fbs_parameters->parameters()) {
+    ASSERT_NE(nullptr, fbs_tensor) << "Tensor is null";
+
+    std::string name;
+    utils::LoadStringFromLoraFormat(name, fbs_tensor->name());
+    ASSERT_FALSE(name.empty()) << "Name is empty";
+
+    const auto data_type = fbs_tensor->data_type();
+    ASSERT_EQ(TensorDataType::FLOAT, data_type) << "Data type mismatch";
+
+    std::vector<int64_t> dims;
+    dims.reserve(fbs_tensor->dims()->size());
+    for (auto d : *fbs_tensor->dims()) {
+      dims.push_back(d);
+    }
+
+    ASSERT_EQ(lora_param_shape.size(), dims.size()) << "Shape size mismatch";
+    for (size_t i = 0; i < lora_param_shape.size(); ++i) {
+      ASSERT_EQ(lora_param_shape[i], dims[i]) << "Shape mismatch";
+    }
+
+    const auto* raw_data = fbs_tensor->raw_data();
+    ASSERT_NE(nullptr, raw_data) << "Raw data is null";
+    ASSERT_EQ(byte_span.size_bytes(), raw_data->size()) << "Raw data size mismatch";
+    for (size_t i = 0; i < byte_span.size_bytes(); ++i) {
+      ASSERT_EQ(byte_span[i], raw_data->data()[i]) << "Raw data mismatch";
+    }
+  }
+
+  // Now invoke the utils
+  for (const auto* fbs_tensor : *fbs_parameters->parameters()) {
+    const auto& [name, ort_value] = utils::CreateOrtValueOverFlatBufferLoraParameter(*fbs_tensor);
+    ASSERT_FALSE(name.empty()) << "Name is empty";
+    ASSERT_NE(nullptr, ort_value) << "OrtValue is null";
+
+    const auto type_and_shape = ort_value->GetTensorTypeAndShapeInfo();
+    auto shape = type_and_shape->GetShape();
+    ASSERT_EQ(lora_param_shape.size(), shape.size()) << "Shape size mismatch";
+    for (size_t i = 0; i < lora_param_shape.size(); ++i) {
+      ASSERT_EQ(lora_param_shape[i], shape[i]) << "Shape mismatch";
+    }
+
+    ASSERT_EQ(ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, type_and_shape->GetElementType());
+    ASSERT_EQ(lora_param.size(), type_and_shape->GetElementCount());
+    const auto* data = ort_value->GetTensorMutableData<float>();
+    for (size_t i = 0, lim = lora_param.size(); i < lim; ++i) {
+      ASSERT_EQ(lora_param[i], data[i]) << "Data mismatch";
+    }
+  }
 }
 
 }   // namespace test

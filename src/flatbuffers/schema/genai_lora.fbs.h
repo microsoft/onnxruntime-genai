@@ -113,16 +113,12 @@ struct Tensor FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   typedef TensorBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_NAME = 4,
-    VT_DOC_STRING = 6,
-    VT_DIMS = 8,
-    VT_DATA_TYPE = 10,
-    VT_RAW_DATA = 12
+    VT_DIMS = 6,
+    VT_DATA_TYPE = 8,
+    VT_RAW_DATA = 10
   };
   const ::flatbuffers::String *name() const {
     return GetPointer<const ::flatbuffers::String *>(VT_NAME);
-  }
-  const ::flatbuffers::String *doc_string() const {
-    return GetPointer<const ::flatbuffers::String *>(VT_DOC_STRING);
   }
   const ::flatbuffers::Vector<int64_t> *dims() const {
     return GetPointer<const ::flatbuffers::Vector<int64_t> *>(VT_DIMS);
@@ -137,8 +133,6 @@ struct Tensor FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     return VerifyTableStart(verifier) &&
            VerifyOffset(verifier, VT_NAME) &&
            verifier.VerifyString(name()) &&
-           VerifyOffset(verifier, VT_DOC_STRING) &&
-           verifier.VerifyString(doc_string()) &&
            VerifyOffset(verifier, VT_DIMS) &&
            verifier.VerifyVector(dims()) &&
            VerifyField<int32_t>(verifier, VT_DATA_TYPE, 4) &&
@@ -154,9 +148,6 @@ struct TensorBuilder {
   ::flatbuffers::uoffset_t start_;
   void add_name(::flatbuffers::Offset<::flatbuffers::String> name) {
     fbb_.AddOffset(Tensor::VT_NAME, name);
-  }
-  void add_doc_string(::flatbuffers::Offset<::flatbuffers::String> doc_string) {
-    fbb_.AddOffset(Tensor::VT_DOC_STRING, doc_string);
   }
   void add_dims(::flatbuffers::Offset<::flatbuffers::Vector<int64_t>> dims) {
     fbb_.AddOffset(Tensor::VT_DIMS, dims);
@@ -181,7 +172,6 @@ struct TensorBuilder {
 inline ::flatbuffers::Offset<Tensor> CreateTensor(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     ::flatbuffers::Offset<::flatbuffers::String> name = 0,
-    ::flatbuffers::Offset<::flatbuffers::String> doc_string = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<int64_t>> dims = 0,
     Generators::lora_parameters::TensorDataType data_type = Generators::lora_parameters::TensorDataType::UNDEFINED,
     ::flatbuffers::Offset<::flatbuffers::Vector<uint8_t>> raw_data = 0) {
@@ -189,7 +179,6 @@ inline ::flatbuffers::Offset<Tensor> CreateTensor(
   builder_.add_raw_data(raw_data);
   builder_.add_data_type(data_type);
   builder_.add_dims(dims);
-  builder_.add_doc_string(doc_string);
   builder_.add_name(name);
   return builder_.Finish();
 }
@@ -197,18 +186,15 @@ inline ::flatbuffers::Offset<Tensor> CreateTensor(
 inline ::flatbuffers::Offset<Tensor> CreateTensorDirect(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     const char *name = nullptr,
-    const char *doc_string = nullptr,
     const std::vector<int64_t> *dims = nullptr,
     Generators::lora_parameters::TensorDataType data_type = Generators::lora_parameters::TensorDataType::UNDEFINED,
     const std::vector<uint8_t> *raw_data = nullptr) {
   auto name__ = name ? _fbb.CreateString(name) : 0;
-  auto doc_string__ = doc_string ? _fbb.CreateString(doc_string) : 0;
   auto dims__ = dims ? _fbb.CreateVector<int64_t>(*dims) : 0;
   auto raw_data__ = raw_data ? _fbb.CreateVector<uint8_t>(*raw_data) : 0;
   return Generators::lora_parameters::CreateTensor(
       _fbb,
       name__,
-      doc_string__,
       dims__,
       data_type,
       raw_data__);

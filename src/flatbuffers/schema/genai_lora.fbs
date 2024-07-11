@@ -33,7 +33,6 @@ enum TensorDataType : int32 {
 // We do not foresee strings as parameters.
 table Tensor {
   name:string;
-  doc_string:string;
 
   dims:[int64];
   data_type:TensorDataType;

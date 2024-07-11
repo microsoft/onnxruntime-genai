@@ -51,7 +51,7 @@ include(cmake/check_dml.cmake)
 
 include(cmake/cxx_standard.cmake)
 
-include(cmake/external/genai_flatbuffers.cmake)
+include(cmake/genai_flatbuffers.cmake)
 
 add_compile_definitions(BUILDING_ORT_GENAI_C)
 if(MSVC)
