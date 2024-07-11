@@ -44,6 +44,9 @@ if(MSVC)
       "$<$<COMPILE_LANGUAGE:C,CXX>:/WX>"
   )
 endif()
+if(LINUX)
+  set(CMAKE_BUILD_RPATH_USE_ORIGIN TRUE)
+endif()
 
 if(ENABLE_TESTS)
   # call enable_testing so we can add tests from subdirectories (e.g. test and src/java)
@@ -109,8 +112,6 @@ endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set_target_properties(onnxruntime-genai-static PROPERTIES POSITION_INDEPENDENT_CODE ON)
-
-  set_property(TARGET onnxruntime-genai APPEND_STRING PROPERTY LINK_FLAGS " -Xlinker -rpath=\\$ORIGIN")
 endif()
 
 
