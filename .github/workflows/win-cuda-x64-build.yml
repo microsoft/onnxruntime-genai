@@ -17,7 +17,7 @@ env:
   cuda_dir: "${{ github.workspace }}\\cuda_sdk"
   cuda_version: "11.8"
   CUDA_PATH: ${{ github.workspace }}\\cuda_sdk\\v11.8
-  binaryDir: 'build/cuda'
+  binaryDir: 'build/cuda/win-x64'
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime.Gpu.Windows&api-version=6.0-preview.1"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime.Gpu.Windows"
 
