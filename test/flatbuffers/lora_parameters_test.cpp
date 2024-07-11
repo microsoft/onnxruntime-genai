@@ -13,20 +13,18 @@
 
 #include "../src/models/onnxruntime_api.h"
 
-
 namespace Generators {
 namespace lora_parameters {
 namespace test {
 TEST(LoraParameters, FlatbuffersTest) {
-
   // Create a flatbuffer
   flatbuffers::FlatBufferBuilder builder;
 
   const std::array<int64_t, 2> lora_param_shape = {4, 2};
   const std::array<float, 8> lora_param = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f};
   std::span<const float> float_span = lora_param;
-  auto byte_span = std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(float_span.data()), float_span.size_bytes());
-
+  auto byte_span =
+      std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(float_span.data()), float_span.size_bytes());
 
   // We serialize 100 tensors
   constexpr size_t const tensor_count = 100;
@@ -35,8 +33,7 @@ TEST(LoraParameters, FlatbuffersTest) {
   for (size_t i = 0; i < tensor_count; ++i) {
     std::string numeric_name = "lora_param_" + std::to_string(i);
     flatbuffers::Offset<Param> fbs_tensor;
-    utils::SaveLoraParameter(builder, numeric_name, TensorDataType::FLOAT, lora_param_shape,
-      byte_span, fbs_tensor);
+    utils::SaveLoraParameter(builder, numeric_name, TensorDataType::FLOAT, lora_param_shape, byte_span, fbs_tensor);
     params.push_back(fbs_tensor);
   }
 
@@ -115,6 +112,50 @@ TEST(LoraParameters, FlatbuffersTest) {
   }
 }
 
-}   // namespace test
+TEST(LoraParameters, LoadPythonGeneratedFile) {
+  const std::string file_path = MODEL_PATH "lora_parameters.fb";
+
+  constexpr std::array<float, 10U> expected_dat = 
+      { 0.29694548f, 0.00955007f, 0.0430819f, 0.10063869f, 0.0437237f,
+        0.27329233f, 0.00841076f, -0.1060291f, 0.11328877f, 0.13369876f };
+
+  std::ifstream file(file_path, std::ios::binary);
+  ASSERT_TRUE(file) << "Failed to open file: " << file_path;
+
+  std::string serialized;
+  {
+    std::stringstream stream;
+    stream << file.rdbuf();
+    ASSERT_TRUE(stream);
+    serialized = stream.str();
+  }
+
+  file.close();
+
+  std::span<const uint8_t> serialized_span(reinterpret_cast<const uint8_t*>(serialized.data()), serialized.size());
+  utils::IsGenAiLoraFormatModelBytes(serialized_span.data(), serialized_span.size());
+
+  flatbuffers::Verifier verifier(serialized_span.data(), serialized_span.size());
+  ASSERT_TRUE(VerifyParametersBuffer(verifier));
+
+  const auto* fbs_parameters = GetParameters(serialized_span.data());
+  ASSERT_NE(nullptr, fbs_parameters) << "Parameters are null";
+
+  ASSERT_TRUE(IsLoraFormatVersionSupported(fbs_parameters->version())) << "Format version mismatch";
+  auto* fbs_param = fbs_parameters->parameters()->Get(0);
+  ASSERT_EQ(TensorDataType::FLOAT, fbs_param->data_type());
+  std::span<const int64_t> shape_span(fbs_param->dims()->data(), fbs_param->dims()->size());
+  ASSERT_EQ(2, shape_span.size());
+  ASSERT_EQ(2, shape_span[0]);
+  ASSERT_EQ(5, shape_span[2]);
+
+  std::span<const float> data_span(reinterpret_cast<const float*>(fbs_param->raw_data()->data()),
+                                   fbs_param->raw_data()->size() / sizeof(float));
+
+  ASSERT_EQ(expected_dat.size(), data_span.size());
+  ASSERT_TRUE(std::equal(expected_dat.begin(), expected_dat.end(), data_span.begin()));
+}
+
+}  // namespace test
 }  // namespace lora_parameters
 }  // namespace Generators
