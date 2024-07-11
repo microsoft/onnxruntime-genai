@@ -18,17 +18,12 @@ env:
 
 jobs:
   windows-cpu-arm64-build:
-    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-win11-arm64" ]
+    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Win11-ARM-CPU" ]
     steps:
     - name: Checkout OnnxRuntime GenAI repo
       uses: actions/checkout@v4
       with:
         submodules: true
-
-    - uses: actions/setup-python@v5
-      with:
-        python-version: '3.11.x'
-        architecture: 'arm64'
 
     - name: Setup Visual Studio 2022
       uses: microsoft/setup-msbuild@v1.1
