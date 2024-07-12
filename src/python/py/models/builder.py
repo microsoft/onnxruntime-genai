@@ -18,6 +18,7 @@ import gc
 import json
 import os
 import textwrap
+import ctypes
 
 
 class Model:
@@ -118,6 +119,16 @@ class Model:
             TensorProto.FLOAT: np.float32,
         }
 
+        # Map TensorProto dtypes to PyTorch dtypes
+        self.to_torch_dtypes = {
+            TensorProto.INT8: torch.int8,
+            TensorProto.INT32: torch.int32,
+            TensorProto.INT64: torch.int64,
+            TensorProto.FLOAT16: torch.float16,
+            TensorProto.FLOAT: torch.float,
+            TensorProto.BFLOAT16: torch.bfloat16,
+        }
+
         # Map TensorProto dtypes to string dtypes
         self.to_str_dtype = {
             TensorProto.INT8: "TensorProto.INT8",
@@ -125,6 +136,7 @@ class Model:
             TensorProto.INT64: "TensorProto.INT64",
             TensorProto.FLOAT16: "TensorProto.FLOAT16",
             TensorProto.FLOAT: "TensorProto.FLOAT",
+            TensorProto.BFLOAT16: "TensorProto.BFLOAT16",
         }
 
         # Mask-specific variables
@@ -214,6 +226,7 @@ class Model:
         valid_gqa_configurations = [
             ("cpu", TensorProto.FLOAT),
             ("cuda", TensorProto.FLOAT16),
+            ("cuda", TensorProto.BFLOAT16),
             ("dml", TensorProto.FLOAT16),
         ]
         if (self.ep, self.io_dtype) in valid_gqa_configurations:
@@ -402,6 +415,32 @@ class Model:
     def order_repeated_field(self, repeated_proto, key_name, order):
         order = list(order)
         repeated_proto.sort(key=lambda x: order.index(getattr(x, key_name)))
+
+    def make_tensor_from_torch(self, tensor, onnx_dtype, name, **kwargs):
+        tensor = tensor.to(self.to_torch_dtypes[onnx_dtype])
+        raw_data = bytes(
+            (ctypes.c_ubyte * tensor.element_size() * tensor.numel()).from_address(
+                tensor.data_ptr()
+            )
+        )
+        return helper.make_tensor(
+            name=name,
+            data_type=onnx_dtype,
+            dims=tensor.shape,
+            vals=raw_data,
+            raw=True,
+        )
+
+    def make_external_tensor_from_torch(self, tensor, onnx_dtype, name, **kwargs):
+        tensor = self.make_tensor_from_torch(tensor, onnx_dtype, name, **kwargs)
+        filename = f"{name}.bin"
+        external_data_helper.set_external_data(tensor, location=filename)
+        with open(os.path.join(self.cache_dir, filename), "wb") as f:
+            f.write(tensor.raw_data)
+        tensor.ClearField("raw_data")
+        tensor.data_location = TensorProto.EXTERNAL
+
+        self.initializers.append(tensor)
 
     def make_external_tensor(self, np_data, name, **kwargs):
         tensor = numpy_helper.from_array(np_data)
@@ -622,16 +661,20 @@ class Model:
         self.make_value_info(output, dtype, shape=shape)
 
     def make_matmul(self, matmul, basename, root_input, **kwargs):
-        if self.onnx_dtype in {"fp16", "fp32"}:
-            return self.make_matmul_fp16_or_fp32(matmul, basename, root_input, **kwargs)
+        if self.onnx_dtype in {"fp16", "fp32", "bf16"}:
+            return self.make_matmul_floating_point(
+                matmul, basename, root_input, **kwargs
+            )
         elif self.onnx_dtype == "int4":
             return self.make_matmul_int4(matmul, basename, root_input, **kwargs)
         else:
             raise NotImplementedError(f"The {self.onnx_dtype} precision is not currently supported.")
 
-    def make_matmul_fp16_or_fp32(self, matmul, name, root_input, **kwargs):
+    def make_matmul_floating_point(self, matmul, name, root_input, **kwargs):
         weight = name[1:].replace("/", ".") + ".weight"
-        self.make_external_tensor(matmul.weight.detach().numpy().transpose().astype(self.to_numpy_dtype[self.io_dtype]), weight)
+        self.make_external_tensor_from_torch(
+            matmul.weight.detach().cpu().transpose(0, 1), self.io_dtype, weight
+        )
 
         last_dim = matmul.weight.shape[0]
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
@@ -645,8 +688,10 @@ class Model:
             # TODO: quantize weights, then save new MatMul numpy weights for onnx model
             # print(f"Quantizing to {self.onnx_dtype} on-the-fly is not currently supported.")
             # print(f"Saving as {self.io_dtype} on-the-fly and quantizing to {self.onnx_dtype} at the end.")
-            return self.make_matmul_fp16_or_fp32(matmul, basename, root_input, **kwargs)
-        
+            return self.make_matmul_floating_point(
+                matmul, basename, root_input, **kwargs
+            )
+
         name = f"{basename}NBits"
 
         # Input weights are quantized, save quantized MatMul numpy weights for onnx model
@@ -677,14 +722,18 @@ class Model:
         return name
 
     def make_packed_matmul(self, q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs):
-        if self.onnx_dtype in {"fp16", "fp32"}:
-            return self.make_packed_matmul_fp16_or_fp32(q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs)
+        if self.onnx_dtype in {"fp16", "fp32", "bf16"}:
+            return self.make_packed_matmul_floating_point(
+                q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs
+            )
         elif self.onnx_dtype == "int4":
             return self.make_packed_matmul_int4(q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs)
         else:
             raise NotImplementedError(f"The {self.onnx_dtype} precision is not currently supported.")
 
-    def make_packed_matmul_fp16_or_fp32(self, q_matmul, k_matmul, v_matmul, name, root_input, **kwargs):
+    def make_packed_matmul_floating_point(
+        self, q_matmul, k_matmul, v_matmul, name, root_input, **kwargs
+    ):
         # N_q = num_attention_heads * head_size, N_kv = num_key_value_heads * head_size, H = hidden_size
         # Combine 3 MatMuls of shape N_q x H, N_kv x H, N_kv x H into 1 packed MatMul of shape (N_q+N_kv+N_kv)xH
         # Note: Packed MatMul is of shape (N_q+N_kv+N_kv)xH instead of Hx(N_q+N_kv+N_kv) because `make_matmul` will
@@ -706,7 +755,9 @@ class Model:
             # TODO: quantize weights, then save new MatMul numpy weights for onnx model
             # print(f"Quantizing to {self.onnx_dtype} on-the-fly is not currently supported.")
             # print(f"Saving as {self.io_dtype} on-the-fly and quantizing to {self.onnx_dtype} at the end.")
-            return self.make_packed_matmul_fp16_or_fp32(q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs)
+            return self.make_packed_matmul_floating_point(
+                q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs
+            )
 
         name = f"{basename}NBits"
 
@@ -753,7 +804,7 @@ class Model:
 
     def make_add_bias(self, add, name, root_input, **kwargs):
         bias = name[1:].replace("/", ".") + ".bias"
-        self.make_external_tensor(add.astype(self.to_numpy_dtype[self.io_dtype]), bias)
+        self.make_external_tensor_from_torch(add, self.io_dtype, bias)
 
         add_bias_inputs = [root_input, bias]
         shape = ['batch_size', 'sequence_length', add.shape[0]]
@@ -767,12 +818,12 @@ class Model:
 
     def make_packed_add(self, q_add, k_add, v_add, name, root_input, **kwargs):
         # Combine 3 Adds of shape N_q, N_kv, and N_kv into 1 packed Add of shape N_q + N_kv + N_kv
-        add = np.concatenate([q_add, k_add, v_add], axis=0).flatten()
+        add = torch.cat([q_add, k_add, v_add], axis=0).flatten()
         self.make_add_bias(add, name, root_input, **kwargs)
 
     def make_embedding(self, embedding):
         weight = "model.embed_tokens.weight"
-        self.make_external_tensor(embedding.astype(self.to_numpy_dtype[self.io_dtype]), weight)
+        self.make_external_tensor_from_torch(embedding, self.io_dtype, weight)
 
         basename = "/model/embed_tokens"
         gather_name = f"{basename}/Gather"
@@ -800,10 +851,10 @@ class Model:
         skip_input = self.layernorm_attrs["skip_input"]
 
         weight = f"model.layers.{layer_id}.{location}_layernorm.weight"
-        self.make_external_tensor(layernorm.weight.detach().numpy().astype(self.to_numpy_dtype[self.io_dtype]) + self.layernorm_attrs["add_offset"], weight)
+        self.make_external_tensor_from_torch(layernorm.weight.detach().cpu() + self.layernorm_attrs["add_offset"], self.io_dtype, weight)
         bias = f"model.layers.{layer_id}.{location}_layernorm.bias"
         if not simple:
-            self.make_external_tensor(layernorm.bias.detach().numpy().astype(self.to_numpy_dtype[self.io_dtype]), bias)
+            self.make_external_tensor_from_torch(layernorm.bias.detach().cpu(), self.io_dtype, bias)
 
         inputs = [root_input, skip_input, weight] if skip else [root_input, weight]
         if not simple:
@@ -879,15 +930,13 @@ class Model:
 
             # Reshape cos/sin cache from (M, H) to (M, H/2)
             hidden_dim = cos_cache.shape[-1]
-            cos_cache = cos_cache.squeeze()[:, : (hidden_dim // 2)].detach().numpy()
-            cos_cache = cos_cache.astype(self.to_numpy_dtype[self.io_dtype])
-            sin_cache = sin_cache.squeeze()[:, : (hidden_dim // 2)].detach().numpy()
-            sin_cache = sin_cache.astype(self.to_numpy_dtype[self.io_dtype])
+            cos_cache = cos_cache.squeeze()[:, : (hidden_dim // 2)].detach().cpu()
+            sin_cache = sin_cache.squeeze()[:, : (hidden_dim // 2)].detach().cpu()
 
             if "cos_cache_name" not in kwargs and "sin_cache_name" not in kwargs:
                 # Save cos/sin caches to disk
-                self.make_external_tensor(cos_cache, cos_cache_name)
-                self.make_external_tensor(sin_cache, sin_cache_name)
+                self.make_external_tensor_from_torch(cos_cache, self.io_dtype, cos_cache_name)
+                self.make_external_tensor_from_torch(sin_cache, self.io_dtype, sin_cache_name)
             else:
                 # Return cos/sin caches since they will be custom-saved
                 return cos_cache, sin_cache
@@ -962,8 +1011,15 @@ class Model:
                 initializer=[],
                 value_info=[],
                 nodes=[
-                    helper.make_node("Constant", inputs=[], outputs=[cos_cache_large_name], name="/large/cos_cache/Constant", value=numpy_helper.from_array(cos_cache_large)),
-                    helper.make_node("Constant", inputs=[], outputs=[sin_cache_large_name], name="/large/sin_cache/Constant", value=numpy_helper.from_array(sin_cache_large)),
+                    # TODO: Update this. cannot create bf16 from `from_array`.
+                    helper.make_node(
+                        "Constant", inputs=[], outputs=[cos_cache_large_name], name="/large/cos_cache/Constant",
+                        value=self.make_tensor_from_torch(cos_cache_large, self.io_dtype, cos_cache_large_name),
+                    ),
+                    helper.make_node(
+                        "Constant", inputs=[], outputs=[sin_cache_large_name], name="/large/sin_cache/Constant",
+                        value=self.make_tensor_from_torch(sin_cache_large, self.io_dtype, sin_cache_large_name),
+                    ),
                 ],
             ),
             else_branch=self.make_graph(
@@ -976,8 +1032,15 @@ class Model:
                 initializer=[],
                 value_info=[],
                 nodes=[
-                    helper.make_node("Constant", inputs=[], outputs=[cos_cache_small_name], name="/small/cos_cache/Constant", value=numpy_helper.from_array(cos_cache_small)),
-                    helper.make_node("Constant", inputs=[], outputs=[sin_cache_small_name], name="/small/sin_cache/Constant", value=numpy_helper.from_array(sin_cache_small)),
+                    # TODO: Update this. cannot create bf16 from `from_array`.
+                    helper.make_node(
+                        "Constant", inputs=[], outputs=[cos_cache_small_name], name="/small/cos_cache/Constant",
+                        value=self.make_tensor_from_torch(cos_cache_small, self.io_dtype, cos_cache_small_name),
+                    ),
+                    helper.make_node(
+                        "Constant", inputs=[], outputs=[sin_cache_small_name], name="/small/sin_cache/Constant",
+                        value=self.make_tensor_from_torch(sin_cache_small, self.io_dtype, sin_cache_small_name),
+                    ),
                 ],
             ),
         )
@@ -1285,20 +1348,20 @@ class Model:
         if all_bias_exists and self.attention_attrs["use_packed_matmul"]:
             # Combine 3 Adds into 1 packed Add
             qkv_add_name = f"/model/layers.{layer_id}/attn/qkv_proj/Add"
-            self.make_packed_add(attention.q_proj.bias.detach().numpy(), attention.k_proj.bias.detach().numpy(), attention.v_proj.bias.detach().numpy(), qkv_add_name, root_input=q_input_to_attention)
+            self.make_packed_add(attention.q_proj.bias.detach().cpu(), attention.k_proj.bias.detach().cpu(), attention.v_proj.bias.detach().cpu(), qkv_add_name, root_input=q_input_to_attention)
             q_input_to_attention = f"{qkv_add_name}/output_0"
         else:
             if q_bias_exists:
                 q_add_name = f"/model/layers.{layer_id}/attn/q_proj/Add"
-                self.make_add_bias(attention.q_proj.bias.detach().numpy(), q_add_name, root_input=q_input_to_attention)
+                self.make_add_bias(attention.q_proj.bias.detach().cpu(), q_add_name, root_input=q_input_to_attention)
                 q_input_to_attention = f"{q_add_name}/output_0"
             if k_bias_exists:
                 k_add_name = f"/model/layers.{layer_id}/attn/k_proj/Add"
-                self.make_add_bias(attention.k_proj.bias.detach().numpy(), k_add_name, root_input=k_input_to_attention)
+                self.make_add_bias(attention.k_proj.bias.detach().cpu(), k_add_name, root_input=k_input_to_attention)
                 k_input_to_attention = f"{k_add_name}/output_0"
             if v_bias_exists:
                 v_add_name = f"/model/layers.{layer_id}/attn/v_proj/Add"
-                self.make_add_bias(attention.v_proj.bias.detach().numpy(), v_add_name, root_input=v_input_to_attention)
+                self.make_add_bias(attention.v_proj.bias.detach().cpu(), v_add_name, root_input=v_input_to_attention)
                 v_input_to_attention = f"{v_add_name}/output_0"
 
         # Make RotaryEmbedding nodes
@@ -1341,7 +1404,7 @@ class Model:
         o_bias_exists = eval(f"attention.{o_proj}.bias") is not None
         if o_bias_exists:
             o_add_name = f"/model/layers.{layer_id}/attn/o_proj/Add"
-            o_bias = eval(f"attention.{o_proj}.bias.detach().numpy()")
+            o_bias = eval(f"attention.{o_proj}.bias.detach().cpu()")
             self.make_add_bias(o_bias, o_add_name, root_input=f"{o_matmul_name}/output_0")
 
         # Assign output 0 of previous output node as skip input to next SkipLayerNorm
@@ -1444,7 +1507,7 @@ class Model:
         fc1_matmul_basename = f"/model/layers.{layer_id}/mlp/fc1/MatMul"
         fc1_matmul_name = self.make_matmul(mlp.fc1, fc1_matmul_basename, root_input)
         fc1_add_name = f"/model/layers.{layer_id}/mlp/fc1/Add"
-        self.make_add_bias(mlp.fc1.bias.detach().numpy(), fc1_add_name, root_input=f"{fc1_matmul_name}/output_0")
+        self.make_add_bias(mlp.fc1.bias.detach().cpu(), fc1_add_name, root_input=f"{fc1_matmul_name}/output_0")
 
         # Make activation function
         act_fn_name = self.make_activation(layer_id, root_input=f"{fc1_add_name}/output_0")
@@ -1453,7 +1516,7 @@ class Model:
         fc2_matmul_basename = f"/model/layers.{layer_id}/mlp/fc2/MatMul"
         fc2_matmul_name = self.make_matmul(mlp.fc2, fc2_matmul_basename, root_input=f"{act_fn_name}/output_0")
         fc2_add_name = f"/model/layers.{layer_id}/mlp/fc2/Add"
-        self.make_add_bias(mlp.fc2.bias.detach().numpy(), fc2_add_name, root_input=f"{fc2_matmul_name}/output_0")
+        self.make_add_bias(mlp.fc2.bias.detach().cpu(), fc2_add_name, root_input=f"{fc2_matmul_name}/output_0")
 
         # Assign output 0 of MLP layer as output of last layer
         self.mlp_attrs["output_0"] = f"{fc2_add_name}/output_0"
@@ -1514,7 +1577,7 @@ class Model:
 
         if bias_exists:
             add_name = "/lm_head/Add"
-            self.make_add_bias(lm_head.bias.detach().numpy(), add_name, root_input=f"{matmul_name}/output_0", logits=not scale_exists)
+            self.make_add_bias(lm_head.bias.detach().cpu(), add_name, root_input=f"{matmul_name}/output_0", logits=not scale_exists)
 
         if scale_exists:
             mul_name = "/lm_head/Mul"
@@ -1585,7 +1648,7 @@ class Model:
                 if not self.exclude_embeds:
                     # Embedding layer
                     print("Reading embedding layer")
-                    self.make_embedding(module.weight.detach().numpy())
+                    self.make_embedding(module.weight.detach().cpu())
                 else:
                     # Exclude embedding layer from model
                     self.layernorm_attrs["root_input"] = "inputs_embeds"
@@ -1946,7 +2009,6 @@ class Model:
         self.make_expand(expand_name, expand_inputs, dtype=expand_dtype, shape=expand_shape)
 
         return expand_name
-
 
     def make_attention_mask_reformatting_for_gqa(self):
         # Make nodes for the attention mask subgraph that calculates
@@ -2343,7 +2405,7 @@ class Phi3Small8KModel(Model):
         up_matmul_name = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
         self.make_matmul(mlp.up_proj.weight.detach().numpy(), up_matmul_name, root_input)
         up_add_name = f"/model/layers.{layer_id}/mlp/up_proj/Add"
-        self.make_add_bias(mlp.up_proj.bias.detach().numpy(), up_add_name, f"{up_matmul_name}/output_0")
+        self.make_add_bias(mlp.up_proj.bias.detach().cpu(), up_add_name, f"{up_matmul_name}/output_0")
 
         # Left path
         slice_1_name = f"/model/layers.{layer_id}/mlp/gelu/Slice"
@@ -2389,7 +2451,7 @@ class Phi3Small8KModel(Model):
         down_matmul_name = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
         self.make_matmul(mlp.down_proj.weight.detach().numpy(), down_matmul_name, f"{mul_name}/output_0")
         down_add_name = f"/model/layers.{layer_id}/mlp/down_proj/Add"
-        self.make_add_bias(mlp.down_proj.bias.detach().numpy(), down_add_name, f"{down_matmul_name}/output_0")
+        self.make_add_bias(mlp.down_proj.bias.detach().cpu(), down_add_name, f"{down_matmul_name}/output_0")
 
         # Assign output 0 of previous MatMul as skip input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = f"{down_add_name}/output_0"
@@ -2432,7 +2494,14 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
     config = AutoConfig.from_pretrained(hf_name, use_auth_token=True, trust_remote_code=True, **extra_kwargs)
 
     # Set input/output precision of ONNX model
-    io_dtype = TensorProto.FLOAT if precision in {"int8", "fp32"} or (precision == "int4" and execution_provider == "cpu") else TensorProto.FLOAT16
+    if precision in {"int8", "fp32"} or (
+        precision == "int4" and execution_provider == "cpu"
+    ):
+        io_dtype = TensorProto.FLOAT
+    elif precision in {"bf16"}:
+        io_dtype = TensorProto.BFLOAT16
+    else:
+        io_dtype = TensorProto.FLOAT16
 
     if "config_only" not in extra_options:
         # List architecture options in alphabetical order
@@ -2514,7 +2583,7 @@ def get_args():
         "-p",
         "--precision",
         required=True,
-        choices=["int4", "fp16", "fp32"],
+        choices=["bf16", "int4", "fp16", "fp32"],
         help="Precision of model",
     )
 
@@ -2567,7 +2636,9 @@ def get_args():
     )
 
     args = parser.parse_args()
-    print("Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, INT4 CPU, INT4 CUDA, INT4 DML")
+    print(
+        "Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, INT4 CPU, INT4 CUDA, INT4 DML, BF16 CUDA"
+    )
     return args
 
 if __name__ == '__main__':
