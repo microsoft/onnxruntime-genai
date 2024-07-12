@@ -25,6 +25,12 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   target_link_libraries(python PRIVATE cublasLt cublas cudnn curand cufft cudart)
 endif()
 
+# Avoid warning of Calling FetchContent_Populate(Lib) is deprecated temporarily
+# TODO: find a better way to handle the header-only 3rd party deps
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.30.0")
+  cmake_policy(SET CMP0169 OLD)
+endif()
+
 set_target_properties(python PROPERTIES FOLDER "Sources")
 source_group(TREE ${PROJECT_SOURCE_DIR} FILES ${python_srcs})
 

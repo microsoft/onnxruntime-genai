@@ -31,6 +31,12 @@ void copy(std::span<const T> source, std::span<T> dest) {
 }
 
 template <typename T>
+void copy(cpu_span<const T> source, cpu_span<T> dest) {
+  assert(source.size() == dest.size());
+  std::copy(source.begin(), source.end(), dest.begin());
+}
+
+template <typename T>
 std::unique_ptr<T[]> AllocateArray(size_t count, std::span<T>* p_span = nullptr) {
   T* p = new T[count];
   if (p_span)
