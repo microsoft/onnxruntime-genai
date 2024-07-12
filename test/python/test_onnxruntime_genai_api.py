@@ -223,10 +223,13 @@ def test_get_output(test_data_path, relative_model_path):
     generator.generate_next_token()
 
 def test_save_lora_param():
+    # CPP test LoraParameters.LoadPythonGeneratedFile
+    # reads the below data and verifies it. If changed make sure you change
+    # both names.
     # shape(2, 5)
     lora_param = np.array([[ 0.29694548,  0.00955007,  0.0430819,  0.10063869,  0.0437237 ],
                             [ 0.27329233,  0.00841076, -0.1060291,  0.11328877,  0.13369876],
-                            ]).astype(float).reshape(2,5)
+                            ]).astype(np.float32).reshape(2,5)
     file_name = "test_lora_param.fb"
     og.save_array_as_lora_parameter(lora_param, "test_lora_param", file_name)
     print("test_save_lora_param completed")
