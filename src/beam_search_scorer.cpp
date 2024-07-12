@@ -16,7 +16,7 @@ void BeamHypotheses::Init(float length_penalty, std::span<HypothesisScore> beams
   done_ = false;
 }
 
-void BeamHypotheses::Add(std::span<const int32_t> hypothesis, float sum_logprobs) {
+void BeamHypotheses::Add(cpu_span<int32_t> hypothesis, float sum_logprobs) {
   auto length = hypothesis.size();
   float const score = sum_logprobs / std::pow(static_cast<float>(length), length_penalty_);
 
@@ -41,28 +41,6 @@ void BeamHypotheses::Add(std::span<const int32_t> hypothesis, float sum_logprobs
 bool BeamHypotheses::CanImprove(float best_sum_logprobs, int current_length) const {
   float const current_score = best_sum_logprobs / std::pow(static_cast<float>(current_length), length_penalty_);
   return beams_.back().score < current_score;
-}
-
-void BeamHypotheses::Output(
-    size_t top_k,
-    size_t max_length,
-    std::span<int32_t> sequences,             // buffer filled with pad token ID, shape (num_return_sequences, max_length)
-    std::span<float> sequences_scores) const  // buffer of shape (num_return_sequences) or empty
-{
-  // Copy the top_k beams into the sequences
-  assert(top_k <= beams_used_);
-  for (int index = 0; index < top_k; index++) {
-    auto& item = beams_[index];
-    std::span<int32_t> const target = sequences.subspan(index * max_length, max_length);
-
-    // Note that word_ids might be less than max_length.
-    // Since the sequences has been filled with pad token ID, so padding is not needed here.
-    copy(item.hypothesis, target);
-
-    if (!sequences_scores.empty()) {
-      sequences_scores[index] = item.score;
-    }
-  }
 }
 
 BeamSearchScorer::BeamSearchScorer(const GeneratorParams& parameters)
@@ -110,7 +88,7 @@ void BeamSearchScorer::Process(Sequences& sequences,
   // It contains word ID of whole sequence generated so far.
   // It is different from subgraph input_ids, which only need one word when past state is not empty.
 
-  const int sequence_length = sequences.GetSequenceLength();
+  size_t sequence_length = static_cast<size_t>(sequences.GetSequenceLength());
 
   assert(next_scores.size() == next_tokens.size());
   assert(next_scores.size() == next_indices.size());
@@ -146,11 +124,12 @@ void BeamSearchScorer::Process(Sequences& sequences,
         }
 
         // Clone the sequence and append to buffer.
-        std::span<const int32_t> const src = sequences.GetSequence(batch_beam_idx);
-        auto clone = hypothesis_buffer_.subspan(static_cast<size_t>(hypothesis_buffer_used_), sequence_length);
+        cpu_span<const int32_t> const src{sequences.GetSequence(batch_beam_idx)};
+        auto clone_span = hypothesis_buffer_.subspan(static_cast<size_t>(hypothesis_buffer_used_), sequence_length);
+        cpu_span<int32_t> clone{clone_span.data(), sequence_length};
 
         copy(src, clone);
-        hypothesis_buffer_used_ += sequence_length;
+        hypothesis_buffer_used_ += static_cast<int>(sequence_length);
         beam_hyp.Add(clone, next_score);
       } else {
         // Add next predicted token since it is not eos_token.
@@ -177,7 +156,7 @@ void BeamSearchScorer::Process(Sequences& sequences,
     if (!early_stopping_) {
       std::span<const float> const topk_scores = next_scores.subspan(batch * num_beams_, top_k);
       const auto best_sum_logprobs = std::max_element(topk_scores.begin(), topk_scores.end());
-      if (beam_hyp.CanImprove(*best_sum_logprobs, sequence_length)) {
+      if (beam_hyp.CanImprove(*best_sum_logprobs, static_cast<int>(sequence_length))) {
         continue;
       }
     }
@@ -188,12 +167,7 @@ void BeamSearchScorer::Process(Sequences& sequences,
 }
 
 void BeamSearchScorer::Finalize(Sequences& sequences,
-                                size_t num_return_sequences,
-                                cpu_span<int32_t> output,
-                                cpu_span<float> sequence_scores) {
-  // output is Word IDs of each sequence, with shape (batch_size * num_return_sequences, max_sequence_length).
-  // sequence_scores is the optional Score of each sequence, with shape (batch_size * num_return_sequences).
-
+                                size_t num_return_sequences) {
   // Finalize all open beam hypotheses and add to generated hypotheses.
   for (size_t batch_index = 0; batch_index < batch_size_; batch_index++) {
     BeamHypotheses& beam_hyp = beam_hyps_[batch_index];
@@ -207,23 +181,6 @@ void BeamSearchScorer::Finalize(Sequences& sequences,
       auto final_tokens = sequences.GetSequence(batch_beam_index);
       beam_hyp.Add(final_tokens, final_score);
     }
-  }
-
-  // Fill output sequences with pad token ID so that we do not need append it later.
-  std::fill_n(output.data(), output.size(), pad_token_id_);
-
-  // Select the best hypotheses according to number of sequences to return.
-  for (size_t batch_index = 0; batch_index < batch_size_; batch_index++) {
-    BeamHypotheses& beam_hyp = beam_hyps_[batch_index];
-
-    auto batch_output = output.subspan(batch_index * num_return_sequences * max_length_,
-                                       num_return_sequences * max_length_);
-    std::span<float> sequence_scores_buffer;
-    if (!sequence_scores.empty()) {
-      sequence_scores_buffer = sequence_scores.subspan(batch_index * num_return_sequences, num_return_sequences);
-    }
-
-    beam_hyp.Output(num_return_sequences, max_length_, batch_output, sequence_scores_buffer);
   }
 }
 
