@@ -49,7 +49,8 @@ GeneratorParams::GeneratorParams(const Model& model)
       device_type{model.device_type_},
       cuda_stream{model.cuda_stream_},
       is_cuda_graph_enabled_{IsCudaGraphEnabled(model.config_->model.decoder.session_options)},
-      config_{model.config_.get()} {
+      config_{model.config_.get()},
+      model_(&model) {
   use_cuda_graph = is_cuda_graph_enabled_;
   if (use_cuda_graph) {
     max_batch_size = 1;  // set it to 1 by default

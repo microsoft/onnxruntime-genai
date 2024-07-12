@@ -23,10 +23,6 @@ TEST(GeneratorsTests, LoraAdapterManagementTests) {
 
   lora_adapter_management.CreateAdapter(adapter_name_2);
 
-  // Try to activate adapters with no parameters, should error out
-  const std::string activate[] = {adapter_name_1};
-  ASSERT_THROW(lora_adapter_management.ActivateAdapters(activate), std::runtime_error);
-
   // Two shapes with different lora_r placements
   const std::array<int64_t, 2> lora_param_shape_1 = {4, 2};
   const std::array<int64_t, 2> lora_param_shape_2 = {2, 4};
@@ -55,10 +51,12 @@ TEST(GeneratorsTests, LoraAdapterManagementTests) {
 
   {
     // No adapters are active at this point
+    std::set<std::string> active_adapters;
     // Fetch parameters and names, and make sure that all of the parameters returned are empty.
     std::vector<std::string> param_names;
     std::vector<std::shared_ptr<OrtValue>> params;
-    lora_adapter_management.OutputAdaptersParameters(std::back_inserter(param_names), std::back_inserter(params));
+    lora_adapter_management.OutputAdaptersParameters(active_adapters, std::back_inserter(param_names),
+                                                     std::back_inserter(params));
 
     ASSERT_EQ(param_names.size(), 2U);
     ASSERT_EQ(params.size(), 2U);
@@ -76,22 +74,13 @@ TEST(GeneratorsTests, LoraAdapterManagementTests) {
     }
   }
 
-  // Now active only one adapter
-  lora_adapter_management.ActivateAdapters(activate);
-
-  // List active adapters
-  auto active_names = lora_adapter_management.GetActiveAdapterNames();
-  ASSERT_EQ(active_names.size(), 1U);
-  ASSERT_EQ(0, strcmp(active_names[0], adapter_name_1.c_str()));
-
-  // Can not remove active adapter
-  ASSERT_THROW(lora_adapter_management.RemoveAdapter(adapter_name_1), std::runtime_error);
-
   {
     // One parameter would be empty, another is not
+    const std::set<std::string> active_adapters = {adapter_name_1};
     std::vector<std::string> param_names;
     std::vector<std::shared_ptr<OrtValue>> params;
-    lora_adapter_management.OutputAdaptersParameters(std::back_inserter(param_names), std::back_inserter(params));
+    lora_adapter_management.OutputAdaptersParameters(active_adapters, std::back_inserter(param_names),
+                                                     std::back_inserter(params));
 
     ASSERT_EQ(param_names.size(), 2U);
     ASSERT_EQ(params.size(), 2U);
@@ -116,15 +105,6 @@ TEST(GeneratorsTests, LoraAdapterManagementTests) {
       }
     }
   }
-
-  // Deactivate two even though only one is active, no error.
-  const std::string deactivate[] = {adapter_name_1, adapter_name_1};
-  ASSERT_NO_THROW(lora_adapter_management.DeactivateAdapters(deactivate));
-  active_names = lora_adapter_management.GetActiveAdapterNames();
-  ASSERT_TRUE(active_names.empty());
-
-  // No active adapters, no error reported.
-  ASSERT_NO_THROW(lora_adapter_management.DeactiveAllAdapters());
 
   lora_adapter_management.RemoveAdapter(adapter_name_1);
   lora_adapter_management.RemoveAdapter(adapter_name_2);

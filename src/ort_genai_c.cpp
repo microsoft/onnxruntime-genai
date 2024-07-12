@@ -94,81 +94,38 @@ OgaResult* OGA_API_CALL OgaCreateGeneratorParams(const OgaModel* model, OgaGener
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaCreateLoraAdapter(OgaModel* model, const char* adapter_name) {
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGetLoraManager(OgaModel* model, OgaLoraManagerInternal** lora_manager) {
   OGA_TRY
-  auto& lora_management = reinterpret_cast<Generators::Model*>(model)->GetLoraAdapterManagement();
+  auto* gen_model = reinterpret_cast<Generators::Model*>(model);
+  auto& lora_management = gen_model->GetLoraAdapterManagement();
+  *lora_manager = reinterpret_cast<OgaLoraManagerInternal*>(&lora_management);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaCreateLoraAdapter(OgaLoraManagerInternal* lora_manager, const char* adapter_name) {
+  OGA_TRY
+  auto& lora_management = *reinterpret_cast<Generators::LoraAdapterManagement*>(lora_manager);
   lora_management.CreateAdapter(adapter_name);
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaModelAddLoraParameter(OgaModel* model, const char* adapter_name, const char* param_name,
-                                                 const OgaTensor* tensor) {
+OgaResult* OGA_API_CALL OgaRemoveLoraAdapter(OgaLoraManagerInternal* lora_manager, const char* adapter_name) {
   OGA_TRY
-  auto& lora_management = reinterpret_cast<Generators::Model*>(model)->GetLoraAdapterManagement();
+  auto& lora_management = *reinterpret_cast<Generators::LoraAdapterManagement*>(lora_manager);
+  lora_management.RemoveAdapter(adapter_name);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaAddLoraParameter(OgaLoraManagerInternal* lora_manager, const char* adapter_name,
+                                            const char* param_name, const OgaTensor* tensor) {
+  OGA_TRY
+  auto& lora_management = *reinterpret_cast<Generators::LoraAdapterManagement*>(lora_manager);
   lora_management.AddParameter(
       adapter_name, param_name,
       const_cast<Generators::Tensor*>(reinterpret_cast<const Generators::Tensor*>(tensor))->shared_from_this());
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaModelActivateLoraAdapters(OgaModel* model, const char* const* adapter_names,
-                                                     size_t num_adapters) {
-  OGA_TRY
-  auto& lora_management = reinterpret_cast<Generators::Model*>(model)->GetLoraAdapterManagement();
-  std::vector<std::string> names;
-  names.reserve(num_adapters);
-  for (size_t i = 0; i < num_adapters; i++) names.push_back(adapter_names[i]);
-  lora_management.ActivateAdapters(names);
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaModelDeactivateLoraAdapters(OgaModel* model, const char* const* adapter_names, size_t num_names) {
-  OGA_TRY
-  auto& lora_management = reinterpret_cast<Generators::Model*>(model)->GetLoraAdapterManagement();
-  std::vector<std::string> names;
-  names.reserve(num_names);
-  for (size_t i = 0; i < num_names; i++) names.push_back(adapter_names[i]);
-  lora_management.DeactivateAdapters(names);
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaModelDeactivateAllLoraAdapters(OgaModel* model) {
-  OGA_TRY
-  auto& lora_management = reinterpret_cast<Generators::Model*>(model)->GetLoraAdapterManagement();
-  lora_management.DeactiveAllAdapters();
-  return nullptr;
-  OGA_CATCH
-}
-
-OGA_EXPORT OgaResult* OGA_API_CALL OgaModelGetActiveLoraAdaptersCount(const OgaModel* model, size_t* adapter_count) {
-  OGA_TRY
-  auto& lora_management = reinterpret_cast<const Generators::Model*>(model)->GetLoraAdapterManagement();
-  auto names = lora_management.GetActiveAdapterNames();
-  *adapter_count = names.size();
-  return nullptr;
-  OGA_CATCH
-}
-
-OGA_EXPORT OgaResult* OGA_API_CALL OgaModelGetActiveLoraAdapters(const OgaModel* model, const char* adapter_names[],
-                                                                 size_t* names_num) {
-  OGA_TRY
-  auto& lora_management = reinterpret_cast<const Generators::Model*>(model)->GetLoraAdapterManagement();
-  auto names = lora_management.GetActiveAdapterNames();
-  const auto returned_count = std::min(names.size(), *names_num);
-  for (size_t i = 0; i < returned_count; i++) adapter_names[i] = names[i];
-  *names_num = returned_count;
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaRemoveLoraAdapter(OgaModel* model, const char* adapter_name) {
-  OGA_TRY
-  auto& lora_management = reinterpret_cast<Generators::Model*>(model)->GetLoraAdapterManagement();
-  lora_management.RemoveAdapter(adapter_name);
   return nullptr;
   OGA_CATCH
 }
@@ -257,6 +214,26 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperInputFeatures(OgaGeneratorPa
   auto& params = *reinterpret_cast<Generators::GeneratorParams*>(oga_params);
   Generators::GeneratorParams::Whisper& whisper = params.inputs.emplace<Generators::GeneratorParams::Whisper>();
   whisper.input_features = reinterpret_cast<Generators::Tensor*>(tensor)->shared_from_this();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetActiveAdapters(OgaGeneratorParams* params, const char* const* adapters,
+                                                            size_t count) {
+  OGA_TRY
+  auto& generator_params = *reinterpret_cast<Generators::GeneratorParams*>(params);
+  const auto* model = generator_params.GetModel();
+  const auto* lora_manager = (model) ? &model->GetLoraAdapterManagement() : nullptr;
+
+  std::vector<std::string> names;
+  names.reserve(count);
+  for (size_t i = 0; i < count; i++) {
+    auto& s = names.emplace_back(adapters[i]);
+    if (lora_manager && !lora_manager->HasAdapter(s)) {
+      throw std::runtime_error("Trying to active non-existent adapter: " + s);
+    }
+  }
+  generator_params.lora_settings.active_lora_adapters.swap(names);
   return nullptr;
   OGA_CATCH
 }
