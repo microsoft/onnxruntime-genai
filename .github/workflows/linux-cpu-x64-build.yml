@@ -100,4 +100,5 @@ jobs:
       - name: Run tests
         run: |
           set -e -x
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$GITHUB_WORKSPACE/build/cpu/
           ./build/cpu/test/unit_tests

@@ -22,7 +22,7 @@ extras = ["ThirdPartyNotices.txt", "LICENSE"]
 package_name = '@TARGET_NAME@'
 
 
-def _onnxruntime_dependency():
+def _onnxruntime_dependency() -> str:
     dependency = None
     if package_name == "onnxruntime-genai":
         dependency = "onnxruntime"
@@ -34,6 +34,8 @@ def _onnxruntime_dependency():
         dependency = "onnxruntime-rocm"
     else:
         raise ValueError(f'Unable to determine the onnxruntime dependency for {package_name}.')
+
+    return dependency
 
 
 setup(
