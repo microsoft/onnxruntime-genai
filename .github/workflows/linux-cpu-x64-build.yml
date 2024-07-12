@@ -81,6 +81,10 @@ jobs:
           echo "::add-mask::$HF_TOKEN"
           echo "HF_TOKEN=$HF_TOKEN" >> $GITHUB_ENV
 
+      - name: Remove the ort lib and header files
+        run: |
+          rm -rf ort
+
       # This will also download all the test models to the test/test_models directory
       # These models are used by the python tests as well as C#, C++ and others.
       - name: Run the python tests

@@ -19,9 +19,25 @@ with open(long_description_file, encoding="utf-8") as fdesc:
     long_description = fdesc.read()
 
 extras = ["ThirdPartyNotices.txt", "LICENSE"]
+package_name = '@TARGET_NAME@'
+
+
+def _onnxruntime_dependency():
+    dependency = None
+    if package_name == "onnxruntime-genai":
+        dependency = "onnxruntime"
+    elif package_name == "onnxruntime-genai-cuda":
+        dependency = "onnxruntime-gpu"
+    elif package_name == "onnxruntime-genai-directml":
+        dependency = "onnxruntime-directml"
+    elif package_name == "onnxruntime-genai-rocm":
+        dependency = "onnxruntime-rocm"
+    else:
+        raise ValueError(f'Unable to determine the onnxruntime dependency for {package_name}.')
+
 
 setup(
-    name='@TARGET_NAME@',
+    name=package_name,
     version='@VERSION_INFO@',
     description='ONNX Runtime generate() API',
     long_description=long_description,
@@ -31,6 +47,7 @@ setup(
     package_data={'': ['*.pyd', '*.dll', '*.so*'] + extras},
     install_requires=[
         'numpy<2',
+        # _onnxruntime_dependency(), # Uncomment this when the onnxruntime stable release contains the ort shared lib
     ],
     distclass=BinaryDistribution,
     author="Microsoft Corporation",
