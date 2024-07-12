@@ -227,5 +227,13 @@ def test_save_lora_param():
     lora_param = np.array([[ 0.29694548,  0.00955007,  0.0430819,  0.10063869,  0.0437237 ],
                             [ 0.27329233,  0.00841076, -0.1060291,  0.11328877,  0.13369876],
                             ]).astype(float).reshape(2,5)
-    og.save_array_as_lora_parameter(lora_param, "test_lora_param", "test_lora_param.fb")
+    file_name = "test_lora_param.fb"
+    og.save_array_as_lora_parameter(lora_param, "test_lora_param", file_name)
     print("test_save_lora_param completed")
+    file_path = Path(file_name).absolute()
+    assert file_path.exists()
+    file_path.unlink()
+
+    
+    
+
