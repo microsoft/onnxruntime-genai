@@ -6,6 +6,7 @@
 #include "onnxruntime_api.h"
 
 #include "../tensor.h"
+#include <mutex>
 #include <memory>
 #include <set>
 #include <shared_mutex>
