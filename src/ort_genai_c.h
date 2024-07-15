@@ -185,7 +185,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRemoveLoraAdapter(OgaLoraManagerInternal* 
  * \brief Adds a named LoraParameter.
  * \param[in] lora_manager where the adapter is defined
  * \param[in] adapter_name the adapter to which the parameter is added
- * \param[in] param_name parameter name
+ * \param[in] param_name a UTF-8 encoded C string for the Lora Parameter name being added.
+ *            This must be a unique name in the scope of the model.
  * \param[in] tensor Lora parameter data
  * \return OgaResult containing the error message.
  */
