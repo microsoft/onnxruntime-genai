@@ -71,7 +71,7 @@ struct OgaLoraManager {
   /// </summary>
   /// <param name="adapter_name">name of the the adapter to create</param>
   /// <throws>std::runtime_error if the adapter already exists</throws>
-  void CreateLoraAdapter(const std::string& adapter_name) {
+  void CreateAdapter(const std::string& adapter_name) {
     OgaCheckResult(OgaCreateLoraAdapter(internal_, adapter_name.c_str()));
   }
 
@@ -80,7 +80,7 @@ struct OgaLoraManager {
   /// </summary>
   /// <param name="adapter_name">name of the adapter</param>
   /// <throws>std::runtime_error if the adapter is active</throws>
-  void RemoveLoraAdapter(const std::string& adapter_name) {
+  void RemoveAdapter(const std::string& adapter_name) {
     OgaCheckResult(OgaRemoveLoraAdapter(internal_, adapter_name.c_str()));
   }
 

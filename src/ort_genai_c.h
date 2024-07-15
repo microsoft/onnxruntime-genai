@@ -180,7 +180,6 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateLoraAdapter(OgaLoraManagerInternal* 
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRemoveLoraAdapter(OgaLoraManagerInternal* lora_manager, const char* adapter_name);
 
-
 /*
  * \brief Adds a named LoraParameter.
  * \param[in] lora_manager where the adapter is defined
@@ -243,11 +242,14 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetModelInput(OgaGeneratorP
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperInputFeatures(OgaGeneratorParams*, OgaTensor* tensor);
 
 /// <summary>
-/// Set active adapter names for the give params instance
+/// Set active adapter names for the give params instance. The specified adapter names
+/// replace any previously set names.
+/// This call has no effect on any Generator instances created before this call is made.
 /// </summary>
 /// <param name="">a valid params ptr</param>
-/// <param name="adapters">an array of valid adapter names (UTF-8 encoded C strings)</param>
-/// <param name="count">size of the names array</param>
+/// <param name="adapters">an array of valid adapter names (UTF-8 encoded C strings). This array replaces
+///                        any previously set active adapters within GeneratorParams.</param>
+/// <param name="count">size of the names array. Passing zero removes any previously set adapters.</param>
 /// <returns>Returns an error if a non-existent adapter name is submitted</returns>
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetActiveAdapters(OgaGeneratorParams* params,
                                                                        const char* const* adapters, size_t count);

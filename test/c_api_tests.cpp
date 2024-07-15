@@ -125,12 +125,12 @@ TEST(CAPITests, LoraManagement) {
 
   auto lora_manager = model->GetLoraManager();
 
-  lora_manager.CreateLoraAdapter(adapter_name_1);
+  lora_manager.CreateAdapter(adapter_name_1);
 
   // Creating a duplicate name should throw
-  ASSERT_THROW(lora_manager.CreateLoraAdapter(adapter_name_1), std::runtime_error);
+  ASSERT_THROW(lora_manager.CreateAdapter(adapter_name_1), std::runtime_error);
 
-  lora_manager.CreateLoraAdapter(adapter_name_2);
+  lora_manager.CreateAdapter(adapter_name_2);
 
   // Now we can activate it
   ASSERT_NO_THROW(params->SetActiveAdapterNames(adapter));
@@ -169,8 +169,8 @@ TEST(CAPITests, LoraManagement) {
   ASSERT_NE(input_names.end(), hit);
 
   // Removing adapters while is in use is also OK
-  lora_manager.RemoveLoraAdapter(adapter_name_1);
-  lora_manager.RemoveLoraAdapter(adapter_name_2);
+  lora_manager.RemoveAdapter(adapter_name_1);
+  lora_manager.RemoveAdapter(adapter_name_2);
 }
 
 TEST(CAPITests, Logging) {
