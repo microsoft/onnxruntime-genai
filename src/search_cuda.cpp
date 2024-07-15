@@ -51,6 +51,7 @@ BeamSearch_Cuda::BeamSearch_Cuda(const GeneratorParams& params)
   topk_next_tokens_ = CudaMallocArray<int32_t>(2 * batch_beam_size);
   topk_next_indices_ = CudaMallocArray<int32_t>(2 * batch_beam_size);
   topk_next_scores_ = CudaMallocArray<float>(2 * batch_beam_size);
+  softmax_buffer_ = CudaMallocArray<float>(batch_beam_size * params_->vocab_size);
 
   constexpr size_t max_parts_of_vocab = 128;
   size_t topk_buffer_size = batch_beam_size * (max_parts_of_vocab + 1) * params_->search.num_beams * 2 * 2;
@@ -83,14 +84,20 @@ int Search_Cuda::GetSequenceLength() const {
 }
 
 void BeamSearch_Cuda::SelectTop() {
+  cuda::DispatchBlockwiseSoftmaxForward<true>(const_cast<cudaStream_t*>(&params_->cuda_stream), softmax_buffer_.get(), next_token_scores_.data(), params_->vocab_size,
+                                              params_->vocab_size, params_->vocab_size, params_->BatchBeamSize());
+
+  // Copy next_token_scores to CPU
+  auto next_token_scores_cpu = CudaMallocHostArray<float>(params_->BatchBeamSize() * params_->vocab_size);
+  cudaMemcpyAsync(next_token_scores_cpu.get(), softmax_buffer_.get(), params_->BatchBeamSize() * params_->vocab_size * sizeof(float), cudaMemcpyDeviceToHost, params_->cuda_stream);
+  CudaCheck() == cudaStreamSynchronize(params_->cuda_stream);
+
   auto beam_scores = beam_scorer_->GetNextScores();
 
   // Add beam score to next token scores. Corresponding python code is like:
   //    next_token_scores = next_token_scores + beam_scores[:, None].expand_as(next_token_scores)
-  cuda::LaunchAddProbsKernel(next_token_scores_.data(), beam_scores.data(),
+  cuda::LaunchAddProbsKernel(softmax_buffer_.get(), beam_scores.data(),
                              params_->batch_size, params_->search.num_beams, params_->vocab_size, params_->cuda_stream);
-
-  // TODO: Write output scores?
 
   if (params_->search.num_beams <= 32) {
     constexpr size_t max_parts_of_vocab = 128;
@@ -101,7 +108,7 @@ void BeamSearch_Cuda::SelectTop() {
     float* topk_scores_2nd_stage = reinterpret_cast<float*>(topk_tokens_1st_stage + candidate_count * max_parts_of_vocab);
     int32_t* topk_tokens_2nd_stage = reinterpret_cast<int32_t*>(topk_scores_2nd_stage + candidate_count);
 
-    cuda::BeamSearchTopK(next_token_scores_.data(),
+    cuda::BeamSearchTopK(softmax_buffer_.get(),
                          params_->batch_size,
                          params_->search.num_beams,
                          params_->vocab_size,
@@ -125,14 +132,15 @@ void BeamSearch_Cuda::SelectTop() {
   std::span<int32_t> next_indices{topk_next_indices_.get(), size};
 
 #if 0
-  DumpCudaMemory("Next Scores", next_scores);
-  DumpCudaMemory("Next Tokens", next_tokens);
-  DumpCudaMemory("Next Indices", next_indices);
+  DumpCudaSpan(std::cout, next_scores);
+  DumpCudaSpan(std::cout, next_tokens);
+  DumpCudaSpan(std::cout, next_indices);
 #endif
 
   beam_scorer_->Process(sequences_, next_scores, next_tokens, next_indices);
   next_tokens_ = beam_scorer_->GetNextTokens();
 
+  // TODO(aciddelgado): do we need to keep track of sequences both here and in beam hypotheses?
   AppendNextTokensToSequences();
 }
 
@@ -184,7 +192,6 @@ void GreedySearch_Cuda::AppendNextTokensToSequences() {
 }
 
 bool BeamSearch_Cuda::IsDone() const {
-  beam_scorer_->IsDone();
   if (beam_scorer_->IsDoneLater())
     return true;
 
@@ -200,8 +207,23 @@ void BeamSearch_Cuda::AppendNextTokensToSequences() {
   sequences_.AfterDeviceAppendedNextToken();
 }
 
-void BeamSearch_Cuda::Finalize(size_t num_return_sequences, RoamingArray<int32_t> output, RoamingArray<float> sequence_scores) {
-  beam_scorer_->Finalize(sequences_, num_return_sequences, output.GetGPU(), sequence_scores.GetGPU());
+void BeamSearch_Cuda::Finalize(size_t num_return_sequences) {
+  if (finalized_)
+    return;
+  beam_scorer_->Finalize(sequences_, num_return_sequences);
+  finalized_ = true;
+}
+
+RoamingArray<int32_t> BeamSearch_Cuda::GetSequence(size_t index) {
+  Finalize(params_->search.num_return_sequences);
+  const size_t batch_id = index / params_->search.num_return_sequences;
+  const size_t beam_id = index % params_->search.num_return_sequences;
+  return beam_scorer_->GetBeamHypothesis(batch_id, beam_id);
+}
+
+RoamingArray<int32_t> BeamSearch_Cuda::GetSequence(size_t batch_id, size_t beam_id) {
+  Finalize(params_->search.num_return_sequences);
+  return beam_scorer_->GetBeamHypothesis(batch_id, beam_id);
 }
 
 #if 0

@@ -68,20 +68,26 @@ struct BeamSearch_Cuda : Search_Cuda {
 
   RoamingArray<int32_t> GetNextTokens() override;
   RoamingArray<int32_t> GetNextIndices() override;
+  // In Beam Search there are batch_size * num_beams sequences. Index is batch_id * num_beams + beam_id... Easier to use the other version.
+  RoamingArray<int32_t> GetSequence(size_t index) override;
+  RoamingArray<int32_t> GetSequence(size_t batch_id, size_t beam_id);
 
   void SelectTop() override;
-  void Finalize(size_t num_return_sequences, RoamingArray<int32_t> output, RoamingArray<float> sequence_scores) override;
 
   bool IsDone() const;
 
  private:
   void AppendNextTokensToSequences();
+  void Finalize(size_t num_return_sequences);
+
+  bool finalized_{};  // To avoid calling Finalize multiple times
 
   std::unique_ptr<BeamSearchScorer_Cuda> beam_scorer_;
 
   cuda_unique_ptr<int32_t> topk_next_tokens_;
   cuda_unique_ptr<int32_t> topk_next_indices_;
   cuda_unique_ptr<float> topk_next_scores_;
+  cuda_unique_ptr<float> softmax_buffer_;
 
   // temp buffer for topk computation, including:
   // 1st stage needs:

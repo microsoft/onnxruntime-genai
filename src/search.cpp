@@ -62,10 +62,17 @@ int Search_Cpu::GetSequenceLength() const {
 }
 
 void BeamSearch_Cpu::SelectTop() {
+  // Normalize next token scores
+  for (int i = 0; i < params_->BatchBeamSize(); i++) {
+    std::span<float> const scores = next_token_scores_.subspan(static_cast<size_t>(i) * static_cast<size_t>(params_->vocab_size), params_->vocab_size);
+    LogSoftMax(scores, 1.0);
+  }
+
   auto beam_scores = beam_scorer_->GetNextScores();
+
   // Add beam score to next token scores. Corresponding python code is like:
   //    next_token_scores = next_token_scores + beam_scores[:, None].expand_as(next_token_scores)
-  // TODO(tianleiwu): use thread pool to parallel
+  // TODO(aciddelgado): use thread pool to parallel
   int offset = 0;
   int batch_beam_index = 0;
   for (int i = 0; i < params_->batch_size; i++) {
@@ -76,7 +83,6 @@ void BeamSearch_Cpu::SelectTop() {
     }
   }
 
-  // TODO: Write output scores?
   const size_t top_k = 2 * params_->search.num_beams;
 
   struct ScoreIndex {
@@ -86,14 +92,15 @@ void BeamSearch_Cpu::SelectTop() {
     bool operator<(const ScoreIndex& s) const { return score < s.score; }
   };
 
-  auto scores = std::make_unique<float[]>(top_k * params_->batch_size);
-  auto indices = std::make_unique<int32_t[]>(top_k * params_->batch_size);
-  auto tokens = std::make_unique<int32_t[]>(top_k * params_->batch_size);
+  auto scores = std::make_unique<float[]>(top_k * params_->batch_size);     // Score of top_k tokens
+  auto indices = std::make_unique<int32_t[]>(top_k * params_->batch_size);  // beam index of top_k tokens
+  auto tokens = std::make_unique<int32_t[]>(top_k * params_->batch_size);   // token id of top_k tokens
 
   auto next_scores = std::span<float>(scores.get(), top_k * params_->batch_size);
   auto next_indices = std::span<int32_t>(indices.get(), top_k * params_->batch_size);
   auto next_tokens = std::span<int32_t>(tokens.get(), top_k * params_->batch_size);
 
+  // TODO(aciddelgado): Optimize this top k with partial sort
   for (size_t batch_index = 0; batch_index < static_cast<size_t>(params_->batch_size); batch_index++) {
     std::priority_queue<ScoreIndex, std::vector<ScoreIndex>> queue;
     auto token_scores_sub = next_token_scores_.subspan(batch_index * params_->search.num_beams * params_->vocab_size, static_cast<size_t>(params_->search.num_beams) * params_->vocab_size);
@@ -114,9 +121,9 @@ void BeamSearch_Cpu::SelectTop() {
   }
 
 #if 0
-  DumpMemory("Next Scores", next_scores);
-  DumpMemory("Next Tokens", next_tokens);
-  DumpMemory("Next Indices", next_indices);
+  DumpSpan(std::cout, next_tokens);
+  DumpSpan(std::cout, next_indices_);
+  DumpSpan(std::cout, next_scores_);
 #endif
 
   beam_scorer_->Process(sequences_, next_scores, next_tokens, next_indices);
@@ -138,19 +145,6 @@ void GreedySearch_Cpu::SelectTop() {
   }
 
   AppendNextTokensToSequences();
-}
-
-void SoftMax(std::span<float> scores, float temperature) {
-  float const max_score = *std::max_element(scores.begin(), scores.end());
-
-  // Subtract max score and scale by temperature
-  std::transform(scores.begin(), scores.end(), scores.begin(), [max_score, temperature](float score) { return std::exp((score - max_score) / temperature); });
-
-  // Compute sum of exponentials
-  float const exp_sum = std::accumulate(scores.begin(), scores.end(), 0.0f);
-
-  // Divide each score by the sum of exponentials
-  std::transform(scores.begin(), scores.end(), scores.begin(), [exp_sum](float score) { return score / exp_sum; });
 }
 
 void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
@@ -258,6 +252,15 @@ void GreedySearch_Cpu::AppendNextTokensToSequences() {
   }
 }
 
+bool BeamSearch_Cpu::IsDone() const {
+  if (beam_scorer_->IsDone()) {
+    return true;
+  } else if (sequences_.GetSequenceLength() == params_->search.max_length) {
+    return true;
+  }
+  return false;
+}
+
 void BeamSearch_Cpu::AppendNextTokensToSequences() {
   sequences_.AppendNextTokenToSequences(beam_scorer_->GetNextIndicesCPU(), beam_scorer_->GetNextTokens());
 
@@ -268,8 +271,26 @@ void BeamSearch_Cpu::AppendNextTokensToSequences() {
   }
 }
 
-void BeamSearch_Cpu::Finalize(size_t num_return_sequences, RoamingArray<int32_t> output, RoamingArray<float> sequence_scores) {
-  beam_scorer_->Finalize(sequences_, num_return_sequences, output, sequence_scores);
+void BeamSearch_Cpu::Finalize(size_t num_return_sequences) {
+  if (finalized_)
+    return;
+  beam_scorer_->Finalize(sequences_, num_return_sequences);
+  finalized_ = true;
+}
+
+RoamingArray<int32_t> BeamSearch_Cpu::GetSequence(size_t index) {
+  size_t batch_id = index / params_->search.num_return_sequences;
+  size_t beam_id = index % params_->search.num_return_sequences;
+  Finalize(params_->search.num_return_sequences);
+  BeamHypotheses beam_hyp = beam_scorer_->GetBeamHypotheses(batch_id);
+  return beam_hyp.GetHypothesis(beam_id);
+}
+
+// TODO(aciddelgado): my question is, should this return copy or reference?
+RoamingArray<int32_t> BeamSearch_Cpu::GetSequence(size_t batch_id, size_t beam_id) {
+  Finalize(params_->search.num_return_sequences);
+  BeamHypotheses beam_hyp = beam_scorer_->GetBeamHypotheses(batch_id);
+  return beam_hyp.GetHypothesis(beam_id);
 }
 
 std::span<float> Search_Cpu::GetScores(int batch_beam_index) const {

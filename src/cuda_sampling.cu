@@ -299,7 +299,7 @@ __global__ void SoftmaxBlockForward(outscalar_t* output, scalar_t* input, int cl
 
 template <bool is_log_softmax>
 void DispatchBlockwiseSoftmaxForward(cudaStream_t* stream, float* output, const float* input, int softmax_elements,
-                                          int input_stride, int output_stride, int batch_count, float temperature=1.0) {
+                                          int input_stride, int output_stride, int batch_count, float temperature) {
   dim3 grid(batch_count);
   constexpr int ILP = sizeof(float4) / sizeof(float);
   dim3 block = SoftmaxGetBlockSize(ILP, softmax_elements);
@@ -313,6 +313,7 @@ void DispatchBlockwiseSoftmaxForward(cudaStream_t* stream, float* output, const 
                                                            softmax_elements, input_stride, output_stride, temperature);
   }
 }
+template void DispatchBlockwiseSoftmaxForward<true>(cudaStream_t*, float*, const float*, int, int, int, int, float);
 
 // Populate Kernels and Launchers
 
