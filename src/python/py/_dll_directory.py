@@ -8,7 +8,21 @@ def _is_windows():
     return sys.platform.startswith("win")
 
 
-def add_dll_directory():
+def add_onnxruntime_dependency():
+    """Add the onnxruntime DLL directory to the DLL search path.
+    
+    This function is a no-op on non-Windows platforms.
+    """
+    if _is_windows():
+        import importlib.util
+        ort_package = importlib.util.find_spec("onnxruntime")
+        if not ort_package:
+            raise ImportError("Could not find the onnxruntime package.")
+        ort_package_path = ort_package.submodule_search_locations[0]
+        os.add_dll_directory(os.path.join(ort_package_path, "capi"))
+
+
+def add_cuda_dependency():
     """Add the CUDA DLL directory to the DLL search path.
     
     This function is a no-op on non-Windows platforms.
