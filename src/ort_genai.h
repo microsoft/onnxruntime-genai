@@ -332,19 +332,19 @@ struct OgaHandle {
 // Global Oga functions
 namespace Oga {
 
-void SetLogBool(const char* name, bool value) {
+inline void SetLogBool(const char* name, bool value) {
   OgaCheckResult(OgaSetLogBool(name, value));
 }
 
-void SetLogString(const char* name, const char* value) {
+inline void SetLogString(const char* name, const char* value) {
   OgaCheckResult(OgaSetLogString(name, value));
 }
 
-void SetCurrentGpuDeviceId(int device_id) {
+inline void SetCurrentGpuDeviceId(int device_id) {
   OgaCheckResult(OgaSetCurrentGpuDeviceId(device_id));
 }
 
-int GetCurrentGpuDeviceId() {
+inline int GetCurrentGpuDeviceId() {
   int device_id;
   OgaCheckResult(OgaGetCurrentGpuDeviceId(&device_id));
   return device_id;
