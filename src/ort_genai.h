@@ -16,7 +16,8 @@
 
 // GenAI C++ API
 //
-// This is a zero cost wrapper around the C API, and provides for a set of C++ classes with automatic resource management
+// This is a zero cost wrapper around the C API, and provides for a set of C++ classes with automatic resource
+// management
 
 /* A simple end to end example of how to generate an answer from a prompt:
  *
@@ -60,6 +61,44 @@ inline void OgaCheckResult(OgaResult* result) {
   }
 }
 
+struct OgaLoraManager {
+ public:
+  explicit OgaLoraManager(OgaLoraManagerInternal* internal) noexcept : internal_(internal) {}
+
+  /// <summary>
+  /// Creates Lora adapter within a given model.
+  /// Initially it has no parameters. Use AddLoraAdapterParameter to add parameters.
+  /// </summary>
+  /// <param name="adapter_name">name of the the adapter to create</param>
+  /// <throws>std::runtime_error if the adapter already exists</throws>
+  void CreateAdapter(const std::string& adapter_name) {
+    OgaCheckResult(OgaCreateLoraAdapter(internal_, adapter_name.c_str()));
+  }
+
+  /// <summary>
+  /// Removes a Lora adapter from the model.
+  /// </summary>
+  /// <param name="adapter_name">name of the adapter</param>
+  /// <throws>std::runtime_error if the adapter is active</throws>
+  void RemoveAdapter(const std::string& adapter_name) {
+    OgaCheckResult(OgaRemoveLoraAdapter(internal_, adapter_name.c_str()));
+  }
+
+  /// <summary>
+  /// Adds a parameter to the Lora adapter that was created using CreateLoraAdapter().
+  /// </summary>
+  /// <param name="adapter_name">Existing adapter name</param>
+  /// <param name="param_name">name of the parameter to be created</param>
+  /// <param name="tensor">OgaTensor that points to a buffer with parameter data</param>
+  /// <throws>std::runtime_error if the adapter does not exist or the parameter already exists</throws>
+  void AddLoraAdapterParameter(const std::string& adapter_name, const std::string& param_name, OgaTensor& tensor) {
+    OgaCheckResult(OgaAddLoraParameter(internal_, adapter_name.c_str(), param_name.c_str(), &tensor));
+  }
+
+ private:
+  OgaLoraManagerInternal* internal_;
+};
+
 struct OgaModel : OgaAbstract {
   static std::unique_ptr<OgaModel> Create(const char* config_path) {
     OgaModel* p;
@@ -74,111 +113,13 @@ struct OgaModel : OgaAbstract {
   }
 
   /// <summary>
-  /// Creates Lora adapter within a given model.
-  /// Initially it has no parameters. Use AddLoraAdapterParameter to add parameters.
+  /// Obtains a handle to a LoraManager class, that is owned by the model.
   /// </summary>
-  /// <param name="adapter_name">name of the the adapter to create</param>
-  /// <throws>std::runtime_error if the adapter already exists</throws>
-  void CreateLoraAdapter(const std::string& adapter_name) {
-     OgaCheckResult(OgaCreateLoraAdapter(this, adapter_name.c_str()));
-  }
-
-  /// <summary>
-  /// Adds a parameter to the Lora adapter that was created using CreateLoraAdapter().
-  /// </summary>
-  /// <param name="adapter_name">Existing adapter name</param>
-  /// <param name="param_name">name of the parameter to be created</param>
-  /// <param name="tensor">OgaTensor that points to a buffer with parameter data</param>
-  /// <throws>std::runtime_error if the adapter does not exist or the parameter already exists</throws>
-  void AddLoraAdapterParameter(const std::string& adapter_name, const std::string& param_name, OgaTensor& tensor) {
-    OgaCheckResult(OgaModelAddLoraParameter(this, adapter_name.c_str(), param_name.c_str(), &tensor));
-  }
-
-  /// <summary>
-  /// Activate specified Lora Adapters
-  /// </summary>
-  /// <param name="adapter_names">a collection of adapter names</param>
-  /// <throws>std::runtime_error if any of the adapters are already active</throws>
-  void ActivateLoraAdapters(const std::vector<std::string>& adapter_names) {
-    std::vector<const char*> adapter_names_ptrs;
-    adapter_names_ptrs.reserve(adapter_names.size());
-    for (const auto& name : adapter_names) {
-      adapter_names_ptrs.emplace_back(name.c_str());
-    }
-    OgaCheckResult(OgaModelActivateLoraAdapters(this, adapter_names_ptrs.data(), adapter_names_ptrs.size()));
-  }
-
-  /// <summary>
-  /// Activate specified Lora Adapters
-  /// </summary>
-  /// <param name="adapter_names">a collection of adapter names</param>
-  /// <throws>std::runtime_error if any of the adapters are already active</throws>
-  void ActivateLoraAdapters(const std::vector<const char*>& adapter_names, size_t num_names) {
-    OgaCheckResult(OgaModelActivateLoraAdapters(this, adapter_names.data(), num_names));
-  }
-
-  /// <summary>
-  /// Returns names of all activated adapters
-  /// </summary>
-  /// <returns>a vector of strings</returns>
-  std::vector<std::string> GetActiveAdapterNames() { 
-    std::vector<std::string> result;
-
-    size_t count = 0;
-    OgaCheckResult(OgaModelGetActiveLoraAdaptersCount(this, &count));
-    if (count == 0) return result;
-
-    std::vector<const char*> buffer;
-    buffer.resize(count);
-    OgaCheckResult(OgaModelGetActiveLoraAdapters(this, buffer.data(), &count));
-    buffer.resize(count);
-
-    result.reserve(count);
-    for (size_t i = 0; i < count; ++i) {
-      result.emplace_back(buffer[i]);
-    }
-    return result;
-  }
-
-  /// <summary>
-  /// Deactivate specified Lora Adapters. No error is reported
-  /// if any of the adapters are not active.
-  /// </summary>
-  /// <param name="adapter_names"></param>
-  void DeactivateLoraAdapters(const std::vector<std::string>& adapter_names) {
-    std::vector<const char*> adapter_names_ptrs;
-    adapter_names_ptrs.reserve(adapter_names.size());
-    for (const auto& name : adapter_names) {
-      adapter_names_ptrs.emplace_back(name.c_str());
-    }
-    OgaCheckResult(OgaModelDeactivateLoraAdapters(this, adapter_names_ptrs.data(), adapter_names_ptrs.size()));
-  }
-
-  /// <summary>
-  /// Deactivate specified Lora Adapters. No error is reported
-  /// if any of the adapters are not active.
-  /// 
-  /// </summary>
-  /// <param name="adapter_names"></param>
-  void DeactivateLoraAdapters(const std::vector<const char*>& adapter_names) {
-    OgaCheckResult(OgaModelDeactivateLoraAdapters(this, adapter_names.data(), adapter_names.size()));
-  }
-
-  /// <summary>
-  /// Deactivates all active lora adapters.
-  /// No error is reported if there is no active adapters.
-  /// </summary>
-  void DeactivateAllLoraAdapters() { 
-    OgaCheckResult(OgaModelDeactivateAllLoraAdapters(this));
-  }
-
-  /// <summary>
-  /// Removes a Lora adapter from the model.
-  /// </summary>
-  /// <param name="adapter_name">name of the adapter</param>
-  /// <throws>std::runtime_error if the adapter is active</throws>
-  void RemoveLoraAdapter(const std::string& adapter_name) {
-     OgaCheckResult(OgaRemoveLoraAdapter(this, adapter_name.c_str()));
+  /// <returns></returns>
+  OgaLoraManager GetLoraManager() {
+    OgaLoraManagerInternal* manager;
+    OgaCheckResult(OgaGetLoraManager(this, &manager));
+    return OgaLoraManager(manager);
   }
 
   static void operator delete(void* p) { OgaDestroyModel(reinterpret_cast<OgaModel*>(p)); }
@@ -200,22 +141,14 @@ struct OgaSequences : OgaAbstract {
     return std::unique_ptr<OgaSequences>(p);
   }
 
-  size_t Count() const {
-    return OgaSequencesCount(this);
-  }
+  size_t Count() const { return OgaSequencesCount(this); }
 
-  size_t SequenceCount(size_t index) const {
-    return OgaSequencesGetSequenceCount(this, index);
-  }
+  size_t SequenceCount(size_t index) const { return OgaSequencesGetSequenceCount(this, index); }
 
-  const int32_t* SequenceData(size_t index) const {
-    return OgaSequencesGetSequenceData(this, index);
-  }
+  const int32_t* SequenceData(size_t index) const { return OgaSequencesGetSequenceData(this, index); }
 
 #if __cplusplus >= 202002L
-  std::span<const int32_t> Get(size_t index) const {
-    return {SequenceData(index), SequenceCount(index)};
-  }
+  std::span<const int32_t> Get(size_t index) const { return {SequenceData(index), SequenceCount(index)}; }
 #endif
 
   static void operator delete(void* p) { OgaDestroySequences(reinterpret_cast<OgaSequences*>(p)); }
@@ -303,12 +236,33 @@ struct OgaGeneratorParams : OgaAbstract {
     OgaCheckResult(OgaGeneratorParamsSetModelInput(this, name, &tensor));
   }
 
-  void SetInputs(OgaNamedTensors& named_tensors) {
-    OgaCheckResult(OgaGeneratorParamsSetInputs(this, &named_tensors));
-  }
+  void SetInputs(OgaNamedTensors& named_tensors) { OgaCheckResult(OgaGeneratorParamsSetInputs(this, &named_tensors)); }
 
   void TryGraphCaptureWithMaxBatchSize(int max_batch_size) {
     OgaCheckResult(OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(this, max_batch_size));
+  }
+
+  /// <summary>
+  /// Sets active adapters
+  /// </summary>
+  void SetActiveAdapterNames(const std::vector<std::string>& adapters) {
+    std::vector<const char*> adapter_names;
+    for (const auto& adapter : adapters) {
+      adapter_names.push_back(adapter.c_str());
+    }
+    OgaCheckResult(OgaGeneratorParamsSetActiveAdapters(this, adapter_names.data(), adapter_names.size()));
+  }
+
+  /// <summary>
+  /// Sets active adapters
+  /// </summary>
+  void SetActiveAdapterNames(const std::vector<const char*>& adapter_names) {
+    OgaCheckResult(OgaGeneratorParamsSetActiveAdapters(this, adapter_names.data(), adapter_names.size()));
+  }
+
+  template <typename T, size_t N>
+  void SetActiveAdapterNames(T (&adapter_names)[N]) {
+    OgaCheckResult(OgaGeneratorParamsSetActiveAdapters(this, adapter_names, N));
   }
 
   static void operator delete(void* p) { OgaDestroyGeneratorParams(reinterpret_cast<OgaGeneratorParams*>(p)); }
@@ -321,30 +275,18 @@ struct OgaGenerator : OgaAbstract {
     return std::unique_ptr<OgaGenerator>(p);
   }
 
-  bool IsDone() const {
-    return OgaGenerator_IsDone(this);
-  }
+  bool IsDone() const { return OgaGenerator_IsDone(this); }
 
-  void ComputeLogits() {
-    OgaCheckResult(OgaGenerator_ComputeLogits(this));
-  }
+  void ComputeLogits() { OgaCheckResult(OgaGenerator_ComputeLogits(this)); }
 
-  void GenerateNextToken() {
-    OgaCheckResult(OgaGenerator_GenerateNextToken(this));
-  }
+  void GenerateNextToken() { OgaCheckResult(OgaGenerator_GenerateNextToken(this)); }
 
-  size_t GetSequenceCount(size_t index) const {
-    return OgaGenerator_GetSequenceCount(this, index);
-  }
+  size_t GetSequenceCount(size_t index) const { return OgaGenerator_GetSequenceCount(this, index); }
 
-  const int32_t* GetSequenceData(size_t index) const {
-    return OgaGenerator_GetSequenceData(this, index);
-  }
+  const int32_t* GetSequenceData(size_t index) const { return OgaGenerator_GetSequenceData(this, index); }
 
 #if __cplusplus >= 202002L
-  std::span<const int32_t> GetSequence(size_t index) const {
-    return {GetSequenceData(index), GetSequenceCount(index)};
-  }
+  std::span<const int32_t> GetSequence(size_t index) const { return {GetSequenceData(index), GetSequenceCount(index)}; }
 #endif
 
   static void operator delete(void* p) { OgaDestroyGenerator(reinterpret_cast<OgaGenerator*>(p)); }
@@ -358,7 +300,8 @@ struct OgaTensor : OgaAbstract {
     return std::unique_ptr<OgaTensor>(p);
   }
 #endif
-  static std::unique_ptr<OgaTensor> Create(void* data, const int64_t* shape_dims, size_t shape_dims_count, OgaElementType element_type) {
+  static std::unique_ptr<OgaTensor> Create(void* data, const int64_t* shape_dims, size_t shape_dims_count,
+                                           OgaElementType element_type) {
     OgaTensor* p;
     OgaCheckResult(OgaCreateTensorFromBuffer(data, shape_dims, shape_dims_count, element_type, &p));
     return std::unique_ptr<OgaTensor>(p);
@@ -433,25 +376,17 @@ struct OgaMultiModalProcessor : OgaAbstract {
 
 struct OgaHandle {
   OgaHandle() = default;
-  ~OgaHandle() noexcept {
-    OgaShutdown();
-  }
+  ~OgaHandle() noexcept { OgaShutdown(); }
 };
 
 // Global Oga functions
 namespace Oga {
 
-void SetLogBool(const char* name, bool value) {
-  OgaCheckResult(OgaSetLogBool(name, value));
-}
+void SetLogBool(const char* name, bool value) { OgaCheckResult(OgaSetLogBool(name, value)); }
 
-void SetLogString(const char* name, const char* value) {
-  OgaCheckResult(OgaSetLogString(name, value));
-}
+void SetLogString(const char* name, const char* value) { OgaCheckResult(OgaSetLogString(name, value)); }
 
-void SetCurrentGpuDeviceId(int device_id) {
-  OgaCheckResult(OgaSetCurrentGpuDeviceId(device_id));
-}
+void SetCurrentGpuDeviceId(int device_id) { OgaCheckResult(OgaSetCurrentGpuDeviceId(device_id)); }
 
 int GetCurrentGpuDeviceId() {
   int device_id;

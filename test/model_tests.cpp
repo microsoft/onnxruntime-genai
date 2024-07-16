@@ -83,26 +83,14 @@ TEST(ModelTests, BeamSearchGptFp32) {
   params->search.length_penalty = 1.0f;
   params->search.num_beams = 4;
 
-  Generators::BeamSearch_Cpu search{*params};
-  auto state = model->CreateState(search.sequence_lengths_, *params);
+  auto generator = Generators::CreateGenerator(*model, *params);
+  auto result = Generators::Generate(*model, *params);
 
-  while (!search.IsDone()) {
-    search.SetLogits(state->Run(search.GetSequenceLength(), search.GetNextTokens(), search.GetNextIndices()));
-
-    // Scoring
-    search.ApplyMinLength(1);
-    search.ApplyRepetitionPenalty(1.0f);
-
-    search.SelectTop();
-  }
-
-  std::vector<int32_t> output_sequence(static_cast<size_t>(search.params_->batch_size) * search.params_->search.max_length);
-  search.Finalize(1, Generators::cpu_span<int32_t>{output_sequence}, {});
 
   // Verify outputs match expected outputs
-  for (size_t i = 0; i < static_cast<size_t>(search.params_->batch_size); i++) {
-    auto sequence = std::span<int32_t>(output_sequence.data() + search.params_->search.max_length * i, search.params_->search.max_length);
-    auto* expected_output_start = &expected_output[i * search.params_->search.max_length];
+  for (int i = 0; i < params->batch_size; i++) {
+    auto sequence = std::span<int32_t>(result[i].data(), params->search.max_length);
+    auto* expected_output_start = &expected_output[static_cast<size_t>(i) * params->search.max_length];
     EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params->search.max_length * sizeof(int32_t)));
   }
 }
@@ -174,24 +162,13 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
   params->search.length_penalty = 1.0f;
 
   auto generator = Generators::CreateGenerator(*model, *params);
+  auto result = Generators::Generate(*model, *params);
 
-  while (!generator->IsDone()) {
-    generator->ComputeLogits();
-    generator->GenerateNextToken();
-  }
-
-  size_t sequence_length = params->batch_size * params->search.max_length;
-  auto output_sequence_cuda = Generators::CudaMallocArray<int32_t>(sequence_length);
-  auto output_sequence_cpu = std::make_unique<int32_t[]>(sequence_length);
-
-  generator->search_->Finalize(1, Generators::gpu_span<int32_t>(output_sequence_cuda.get(), sequence_length), {});
-  cudaMemcpyAsync(output_sequence_cpu.get(), output_sequence_cuda.get(), sequence_length * sizeof(int32_t), cudaMemcpyDeviceToHost, params->cuda_stream);
-  cudaStreamSynchronize(params->cuda_stream);
 
   // Verify outputs match expected outputs
   for (int i = 0; i < params->batch_size; i++) {
-    auto sequence = std::span<int32_t>(output_sequence_cpu.get() + params->search.max_length * i, params->search.max_length);
-    auto* expected_output_start = &expected_output[i * params->search.max_length];
+    auto sequence = std::span<int32_t>(result[i].data(), params->search.max_length);
+    auto* expected_output_start = &expected_output[static_cast<size_t>(i) * params->search.max_length];
     EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params->search.max_length * sizeof(int32_t)));
   }
 }

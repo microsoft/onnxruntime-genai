@@ -1,4 +1,8 @@
 parameters:
+- name: enable_post_packaging_validation
+  displayName: Whether Post Packaging validation is run
+  type: boolean
+  default: false
 - name: enable_win_cpu
   displayName: 'Whether Windows CPU package is built.'
   type: boolean
@@ -84,3 +88,17 @@ stages:
     ort_dml_version: ${{ parameters.ort_dml_version }}
     cuda_version: ${{ parameters.cuda_version }}
     build_config: ${{ parameters.build_config }}
+- ${{ if eq(parameters.enable_post_packaging_validation, true) }}:
+  - template: stages/nuget-validation-stage.yml
+    parameters:
+      enable_win_cpu: ${{ parameters.enable_win_cpu }}
+      enable_win_cuda: ${{ parameters.enable_win_cuda }}
+      enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
+      enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
+      enable_win_dml: ${{ parameters.enable_win_dml }}
+      enable_win_arm64_cpu: ${{ parameters.enable_win_arm64_cpu }}
+      ort_version: ${{ parameters.ort_version }}
+      ort_cuda_version: ${{ parameters.ort_cuda_version }}
+      ort_dml_version: ${{ parameters.ort_dml_version }}
+      cuda_version: ${{ parameters.cuda_version }}
+      SpecificArtifact: false

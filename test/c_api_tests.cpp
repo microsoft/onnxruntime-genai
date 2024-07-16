@@ -115,20 +115,25 @@ TEST(CAPITests, LoraManagement) {
   const auto input_sequence_length = input_ids_shape[1];
   constexpr int max_length = 10;
 
+  const char* const adapter[] = {adapter_name_1.c_str()};
   auto params = OgaGeneratorParams::Create(*model);
   params->SetSearchOption("max_length", max_length);
   params->SetInputIDs(input_ids.data(), input_ids.size(), input_sequence_length, batch_size);
 
-  model->CreateLoraAdapter(adapter_name_1);
+  // Set active non-existing adapters show throw
+  ASSERT_THROW(params->SetActiveAdapterNames(adapter), std::runtime_error);
+
+  auto lora_manager = model->GetLoraManager();
+
+  lora_manager.CreateAdapter(adapter_name_1);
 
   // Creating a duplicate name should throw
-  ASSERT_THROW(model->CreateLoraAdapter(adapter_name_1), std::runtime_error);
+  ASSERT_THROW(lora_manager.CreateAdapter(adapter_name_1), std::runtime_error);
 
-  model->CreateLoraAdapter(adapter_name_2);
+  lora_manager.CreateAdapter(adapter_name_2);
 
-  // Try to activate adapters with no parameters, should error out
-  const std::vector<std::string> activate = {adapter_name_1};
-  ASSERT_THROW(model->ActivateLoraAdapters(activate), std::runtime_error);
+  // Now we can activate it
+  ASSERT_NO_THROW(params->SetActiveAdapterNames(adapter));
 
   // Two shapes with different lora_r placements
   const std::array<int64_t, 2> lora_param_shape_1 = {4, 2};
@@ -140,22 +145,12 @@ TEST(CAPITests, LoraManagement) {
   auto param_1 = OgaTensor::Create(lora_param.data(), lora_param_shape_1.data(), lora_param_shape_1.size(),
                                    OgaElementType_float32);
 
-  model->AddLoraAdapterParameter(adapter_name_1, "lora_param_1", *param_1);
+  lora_manager.AddLoraAdapterParameter(adapter_name_1, "lora_param_1", *param_1);
 
   auto param_2 = OgaTensor::Create(lora_param.data(), lora_param_shape_2.data(), lora_param_shape_2.size(),
                                    OgaElementType_float32);
 
-  model->AddLoraAdapterParameter(adapter_name_2, "lora_param_2", *param_2);
-
-  // Activate one adapter
-  model->ActivateLoraAdapters(activate);
-
-  auto active_adapters = model->GetActiveAdapterNames();
-  ASSERT_EQ(active_adapters.size(), 1U);
-  ASSERT_EQ(active_adapters[0], adapter_name_1);
-
-  // Can not remove active adapter
-  ASSERT_THROW(model->RemoveLoraAdapter(adapter_name_1), std::runtime_error);
+  lora_manager.AddLoraAdapterParameter(adapter_name_2, "lora_param_2", *param_2);
 
   // At this point, all lora_parameters should be copied to the created state.
   auto generator = OgaGenerator::Create(*model, *params);
@@ -173,18 +168,9 @@ TEST(CAPITests, LoraManagement) {
                           [&](const std::string& name) { return name == "lora_param_2"; });
   ASSERT_NE(input_names.end(), hit);
 
-  // Deactivate one active and one inactive. No error.
-  const std::vector<std::string> deactivate = {adapter_name_1, adapter_name_1};
-  ASSERT_NO_THROW(model->DeactivateLoraAdapters(deactivate));
-
-  active_adapters = model->GetActiveAdapterNames();
-  ASSERT_EQ(active_adapters.size(), 0U);
-
-  // No active adapters, this is a no-op no error
-  ASSERT_NO_THROW(model->DeactivateAllLoraAdapters());
-
-  model->RemoveLoraAdapter(adapter_name_1);
-  model->RemoveLoraAdapter(adapter_name_2);
+  // Removing adapters while is in use is also OK
+  lora_manager.RemoveAdapter(adapter_name_1);
+  lora_manager.RemoveAdapter(adapter_name_2);
 }
 
 TEST(CAPITests, Logging) {
