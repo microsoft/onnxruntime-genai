@@ -34,7 +34,6 @@ NS_ASSUME_NONNULL_BEGIN
 @interface OGASequences : NSObject
 
 - (instancetype)init NS_UNAVAILABLE;
-- (nullable)initWithError:(NSError **)error NS_DESIGNATED_INITIALIZER;
 
 - (size_t)count;
 - (nullable NSData *)sequenceAtIndex:(size_t)index;

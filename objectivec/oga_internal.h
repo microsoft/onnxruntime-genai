@@ -19,6 +19,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface OGASequences ()
 
+- (nullable)initWithError:(NSError **)error;
 - (instancetype)initWithNativeSeqquences:(std::unique_ptr<OgaSequences>)ptr;
 
 - (OgaSequences&)CXXAPIOgaSequences;

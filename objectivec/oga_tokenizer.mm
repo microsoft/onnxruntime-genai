@@ -24,11 +24,14 @@
 - (nullable OGASequences *)encode:(NSString *)str
                             error:(NSError **)error {
     OGASequences *sequences = [[OGASequences alloc] initWithError:error];
-    if (error) {
+    if (*error) {
         return nil;
     }
-    _tokenizer->Encode([str UTF8String], [sequences CXXAPIOgaSequences]);
-    return sequences;
+    try {
+        _tokenizer->Encode([str UTF8String], [sequences CXXAPIOgaSequences]);
+        return sequences;
+    }
+    OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }
 
 - (nullable NSString *)decode:(NSData *)data
