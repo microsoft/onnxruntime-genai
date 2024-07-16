@@ -504,28 +504,34 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   m.def("set_current_gpu_device_id", [](int device_id) { Ort::SetCurrentGpuDeviceId(device_id); });
   m.def("get_current_gpu_device_id", []() { return Ort::GetCurrentGpuDeviceId(); });
 
-  /// Save numpy array containing tensor in a flatbuffer lora_parameter format so
-  /// it can be loaded by a C++ code.
-  m.def("save_array_as_lora_parameter", [](pybind11::array& v, const std::string& param_name,
-                                           const std::string& file_name) {
+
+  // Save a dictionary with Lora Parameters to a flatbuffer file that we can load in C++ code.
+  // This is useful in python code when we have an .npz file and we would like to load it in C++ code or
+  // other language bindings.
+  m.def("save_lora_parameters_to_flatbuffers", [](const std::string& file_name, pybind11::dict& lora_parameters) {
     std::ofstream file(file_name, std::ios::binary);
     if (file.fail()) {
       throw std::runtime_error("Failed to open file:" + file_name + " for writing.");
     }
 
-    auto type = ToTensorType(v.dtype());
-
-    std::span<const int64_t> shape_span{reinterpret_cast<const int64_t*>(v.shape()), static_cast<size_t>(v.ndim())};
-    std::span<const uint8_t> data_span{reinterpret_cast<const uint8_t*>(v.data()), static_cast<size_t>(v.nbytes())};
-
     flatbuffers::FlatBufferBuilder builder;
-    flatbuffers::Offset<Generators::lora_parameters::Param> fbs_param;
-    Generators::lora_parameters::utils::SaveLoraParameter(
-        builder, param_name, static_cast<Generators::lora_parameters::TensorDataType>(type), shape_span, data_span,
-        fbs_param);
-
     std::vector<flatbuffers::Offset<Generators::lora_parameters::Param>> fbs_params;
-    fbs_params.push_back(fbs_param);
+    fbs_params.reserve(lora_parameters.size());
+
+    for (const auto& [n, arr] : lora_parameters) {
+      const std::string name = pybind11::str(n);
+      pybind11::array v = arr.cast<pybind11::array>();
+      auto type = ToTensorType(v.dtype());
+
+      std::span<const int64_t> shape_span{reinterpret_cast<const int64_t*>(v.shape()), static_cast<size_t>(v.ndim())};
+      std::span<const uint8_t> data_span{reinterpret_cast<const uint8_t*>(v.data()), static_cast<size_t>(v.nbytes())};
+
+      flatbuffers::Offset<Generators::lora_parameters::Param> fbs_param;
+      Generators::lora_parameters::utils::SaveLoraParameter(
+          builder, name,
+          static_cast<Generators::lora_parameters::TensorDataType>(type), shape_span, data_span, fbs_param);
+      fbs_params.push_back(fbs_param);
+    }
 
     auto parameters = Generators::lora_parameters::CreateParameters(
         builder, Generators::lora_parameters::kLoraFormatVersion, builder.CreateVector(fbs_params));

@@ -222,21 +222,18 @@ def test_get_output(test_data_path, relative_model_path):
     assert np.allclose(logits[:,:,::200], expected_sampled_logits_token_gen, atol=1e-3)
     generator.generate_next_token()
 
-def test_save_lora_param():
-    # CPP test LoraParameters.LoadPythonGeneratedFile
-    # reads the below data and verifies it. If changed make sure you change
-    # both names.
-    # shape(2, 5)
-    lora_param = np.array([[ 0.29694548,  0.00955007,  0.0430819,  0.10063869,  0.0437237 ],
-                            [ 0.27329233,  0.00841076, -0.1060291,  0.11328877,  0.13369876],
-                            ]).astype(np.float32).reshape(2,5)
-    file_name = "test_lora_param.fb"
-    og.save_array_as_lora_parameter(lora_param, "test_lora_param", file_name)
-    print("test_save_lora_param completed")
-    file_path = Path(file_name).absolute()
-    assert file_path.exists()
-    file_path.unlink()
+def test_save_lora_params(test_data_path):
+    # We convert npz file into flatbuffers file
+    npz_file_path = os.fspath(Path(test_data_path) / 'two_lora_params_param.npz')
+    fb_file = os.fspath(Path(test_data_path) / 'two_lora_params_param.fb')
 
-    
-    
+    with np.load(npz_file_path) as data:
+        to_save = {}
+        for k, v in data.items():
+            to_save[k] = v
 
+        og.save_lora_parameters_to_flatbuffers(fb_file, to_save)
+
+    fb_file_path = Path(fb_file).absolute()
+    assert fb_file_path.exists()
+    fb_file_path.unlink()
