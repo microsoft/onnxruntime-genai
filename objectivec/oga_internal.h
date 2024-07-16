@@ -17,6 +17,16 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
+@interface OGASpan ()
+
+- (nullable)initWithRawPointer:(const int32_t *) pointer
+                          size:(size_t)size;
+
+- (const int32_t *)pointer;
+- (size_t)size;
+
+@end
+
 @interface OGASequences ()
 
 - (nullable)initWithError:(NSError **)error;

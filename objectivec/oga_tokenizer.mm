@@ -34,10 +34,10 @@
     OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }
 
-- (nullable NSString *)decode:(NSData *)data
+- (nullable NSString *)decode:(OGASpan *) data
                         error:(NSError **)error {
     try {
-        OgaString result = _tokenizer->Decode((const int32_t *)[data bytes], [data length]);
+        OgaString result = _tokenizer->Decode(data.pointer, data.size);
         return [NSString stringWithUTF8String:result];
     }
     OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
@@ -45,6 +45,33 @@
 
 - (const OgaTokenizer&)CXXAPIOgaTokenizer {
     return *(_tokenizer.get());
+}
+
+@end
+
+@implementation OGATokenizerStream {
+    std::unique_ptr<OgaTokenizerStream> _stream;
+}
+
+- (nullable)initWithTokenizer:(OGATokenizer *)tokenizer
+                        error:(NSError **)error {
+    if ((self = [super init]) == nil) {
+        return nil;
+    }
+
+    try {
+        _stream = OgaTokenizerStream::Create([tokenizer CXXAPIOgaTokenizer]);
+        return self;
+    }
+    OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
+}
+
+- (nullable NSString *)decode:(int32_t)token
+                        error:(NSError **)error {
+    try {
+        return [NSString stringWithUTF8String:_stream->Decode(token)];
+    }
+    OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }
 
 @end

@@ -2,6 +2,32 @@
 #import "error_utils.h"
 #import "oga_internal.h"
 
+@implementation OGASpan {
+    const int32_t * _ptr;
+    size_t _size;
+}
+
+- (nullable)initWithRawPointer:(const int32_t * )pointer
+                          size:(size_t)size {
+    _ptr = pointer;
+    _size = size;
+    return [self init];
+}
+
+- (const int32_t * )pointer {
+    return _ptr;
+}
+
+- (size_t)size {
+    return _size;
+}
+
+- (int32_t)last {
+    return *(_ptr + (_size - 1));
+}
+
+@end
+
 @implementation OGASequences {
     std::unique_ptr<OgaSequences> _sequences;
 }
@@ -27,13 +53,13 @@
     return _sequences->Count();
 }
 
-- (nullable NSData *)sequenceAtIndex:(size_t) index {
+- (nullable OGASpan *)sequenceAtIndex:(size_t) index {
     if (index >= [self count]) {
         return nil;
     }
     size_t sequenceLength = _sequences->SequenceCount(index);
     const int32_t* data = _sequences->SequenceData(index);
-    return [[NSData alloc] initWithBytes:data length:sequenceLength];
+    return [[OGASpan alloc] initWithRawPointer:data size: sequenceLength];
 }
 
 - (OgaSequences&) CXXAPIOgaSequences {

@@ -3,8 +3,12 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+
+@class OGASpan;
 @class OGASequences;
 @class OGAGeneratorParams;
+@class OGATokenizerStream;
+
 
 @interface OGAModel : NSObject
 
@@ -27,8 +31,27 @@ NS_ASSUME_NONNULL_BEGIN
 - (nullable OGASequences *)encode:(NSString *)str
                             error:(NSError **)error;
 
-- (nullable NSString *)decode:(NSData *)data
+- (nullable NSString *)decode:(OGASpan *)data
                         error:(NSError **)error;
+
+@end
+
+@interface OGATokenizerStream: NSObject
+- (instancetype)init NS_UNAVAILABLE;
+- (nullable)initWithTokenizer:(OGATokenizer *)tokenizer
+                        error:(NSError **)error NS_DESIGNATED_INITIALIZER;
+
+- (nullable NSString *)decode:(int32_t)token
+                        error:(NSError **)error;
+@end;
+
+
+@interface OGASpan : NSObject
+
+- (instancetype)init NS_UNAVAILABLE;
+
+- (int32_t)last;
+
 @end
 
 @interface OGASequences : NSObject
@@ -36,7 +59,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (instancetype)init NS_UNAVAILABLE;
 
 - (size_t)count;
-- (nullable NSData *)sequenceAtIndex:(size_t)index;
+- (nullable OGASpan *)sequenceAtIndex:(size_t)index;
 
 @end
 
@@ -55,6 +78,19 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)setSearchOption:(NSString *)key
               boolValue:(BOOL)value
                   error:(NSError **)error;
+@end
+
+@interface OGAGenerator : NSObject
+- (instancetype)init NS_UNAVAILABLE;
+- (nullable)initWithModel:(OGAModel *)model
+                   params:(OGAGeneratorParams *)params
+                    error:(NSError **)error NS_DESIGNATED_INITIALIZER;
+
+- (BOOL)isDone;
+- (void)ComputeLogits;
+- (void)GenerateNextToken;
+
+- (nullable OGASpan *)sequenceAtIndex:(size_t) index;
 @end
 
 NS_ASSUME_NONNULL_END
