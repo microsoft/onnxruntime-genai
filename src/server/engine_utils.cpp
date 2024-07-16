@@ -1,4 +1,6 @@
+
 #include "engine_utils.h"
+#include <utility>
 #include <vector>
 
 namespace engine {
@@ -49,15 +51,15 @@ void Sequence::ResetStateForRecompute() { data.ResetStateForRecompute(); }
 
 SequenceGroup::SequenceGroup(std::string request_id, std::vector<Sequence> seqs,
                              float arrival_time, SamplingParams sampling_params,
-                             std::vector<float> embeddings, Sequence encoder_seq)
+                             std::vector<float> embeddings,
+                             std::unique_ptr<Sequence> encoder_seq)
     : request_id(request_id),
       arrival_time(arrival_time),
       sampling_params(sampling_params),
       embeddings(embeddings),
-      encoder_seq(encoder_seq) {
-  is_prefill = seqs[0].IsPrefill();
+      encoder_seq(std::move(encoder_seq)) {
   for (auto& seq : seqs) {
-    seqs_dict[seq.seq_id] = seq;
+    seqs_dict[seq.seq_id] = std::move(seq);
   }
   metrics = RequestMetrics{arrival_time, arrival_time};
 }
@@ -98,6 +100,8 @@ std::vector<Sequence> SequenceGroup::GetSeqs(SequenceStatus status) {
   }
   return seqs;
 }
+
+bool SequenceGroup::IsPrefill() { return GetSeqs()[0].IsPrefill(); }
 
 void SequenceGroup::MaybeSetFirstScheduledTime(float time) {
   if (metrics.first_scheduled_time == -1) {

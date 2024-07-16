@@ -47,7 +47,6 @@ PreemptionMode Scheduler::Preempt(
   PreemptionMode preemption_mode = kRecompute;
   if (seq_group.GetMaxNumRunningSeqs() == 1) {
     preemption_mode = kRecompute;
-
   } else {
     preemption_mode = kSwap;
   }
@@ -170,7 +169,7 @@ ScheduleResult Scheduler::Schedule() {
     block_manager_.MarkBlocksAsComputed(seq_group);
 
     bool do_sample = true;
-    if (seq_group.is_prefill) {
+    if (seq_group.IsPrefill()) {
       auto seqs = seq_group.GetSeqs();
       assert(seqs.size() == 1);
 
@@ -179,7 +178,7 @@ ScheduleResult Scheduler::Schedule() {
       }
     }
 
-    bool is_prompt = seq_group.is_prefill;
+    bool is_prompt = seq_group.IsPrefill();
     seq_group_metadata_list.emplace_back(SequenceGroupMetadata{
         seq_group.request_id, is_prompt, seq_datas, seq_group.sampling_params,
         block_tables, do_sample, token_chunk_size, common_computed_block_nums});
@@ -268,7 +267,7 @@ ScheduledRunningOutputs Scheduler::ScheduleRunning(SchedulerBudget budget,
             });
 
   while (running_.size() > 0) {
-    SequenceGroup seq_group = running_.front();
+    auto seq_group = running_.front();
     int num_running_tokens =
         GetNumNewTokens(seq_group, kRunning, enable_chunking, budget);
     if (num_running_tokens == 0) {
@@ -309,7 +308,7 @@ ScheduledRunningOutputs Scheduler::ScheduleRunning(SchedulerBudget budget,
             block_manager_.AppendSlots(seq, scheduler_config_.num_lookahead_slots);
         blocks_to_copy.insert(blocks_to_copy.end(), cows.begin(), cows.end());
       }
-      if (seq_group.is_prefill) {
+      if (seq_group.IsPrefill()) {
         prefill_seq_groups.emplace_back(
             ScheduledSequenceGroup{seq_group, num_running_tokens});
       } else {
@@ -346,7 +345,7 @@ ScheduledSwappedInOutputs Scheduler::ScheduleSwapped(SchedulerBudget budget,
 
   while (swapped_.size() > 0) {
     SequenceGroup seq_group = swapped_.front();
-    bool is_prefill = seq_group.is_prefill;
+    bool is_prefill = seq_group.IsPrefill();
     AllocateStatus alloc_status =
         block_manager_.CanSwapIn(seq_group, scheduler_config_.num_lookahead_slots);
     if (alloc_status == kLater) {

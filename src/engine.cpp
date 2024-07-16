@@ -1,17 +1,19 @@
 #include <iostream>
 #include <vector>
-#include "ort_genai.h"
+#include "chrono"
+#include "server/engine_utils.h"
 
 #include "engine.h"
+namespace engine {
 
 OgaEngine::OgaEngine(const char* config_path) {
   // Load the configuration file
   // Initialize the engine
 
   std::cout << "Creating model..." << std::endl;
-  model_ = OgaModel::Create(config_path);
-  std::cout << "Creating tokenizer..." << std::endl;
-  tokenizer_ = OgaTokenizer::Create(*model_);
+  model_ = Generators::CreateModel(Generators::GetOrtEnv(), config_path) std::cout
+           << "Creating tokenizer..." << std::endl;
+  tokenizer_ = model_->CreateTokenizer();
 }
 
 std::vector<const char*> OgaEngine::Schedule() {
@@ -59,11 +61,35 @@ std::vector<std::string> OgaEngine::Generate(std::vector<const char*> prompts) {
   return outputs;
 }
 
-int64_t OgaEngine::AddRequest(const char* prompt) {
-  // Add the request to the queue
-  // Return the request ID
-  int64_t rid = request_id_;
-  unscheduled_prompts_.push(prompt);
-  request_id_++;
-  return rid;
+
+
+void OgaEngine::AddRequest(std::string request_id, std::string inputs,
+                           SamplingParams params, float arrival_time) {
+  if (arrival_time == 0) {
+    arrival_time = std::chrono::duration_cast<std::chrono::seconds>(
+                       std::chrono::system_clock::now().time_since_epoch())
+                       .count();
+  }
+
+  std::vector<int32_t> token_ids = tokenizer_->Encode(inputs.c_str());
+
+  // TODO: get block_size
+  Sequence seq{seq_count_, LLMInputs{token_ids, inputs}, 1024,
+               tokenizer_->GetEosTokenId()};
+  seq_count_++;
+
+  SequenceGroup seq_group{request_id, {seq}, arrival_time, params, {}, nullptr};
+
+  scheduler_->AddSeqGroup(std::move(seq_group));
 }
+ 
+std::vector<RequestOutput> OgaEngine::Step() {
+  ScheduleResult schedule_result = scheduler_.Schedule();
+  // build model executor input
+
+  // process model outputs
+
+  return {};
+}
+
+}  // namespace engine

@@ -1,6 +1,11 @@
+#pragma once
+
+#include <cstdint>
+#include <memory>
 #include <unordered_map>
 #include <vector>
 #include <string>
+#include "../ort_genai.h"
 
 namespace engine {
 enum SequenceStage { kPrefill = 0, kDecode };
@@ -57,7 +62,7 @@ struct SequenceData {
 };
 
 struct LLMInputs {
-  std::vector<int> prompt_tokens_ids;
+  std::vector<int32_t> prompt_tokens_ids;
   std::string prompt;
 };
 
@@ -94,19 +99,20 @@ struct SequenceGroup {
   float arrival_time;
   SamplingParams sampling_params;
   std::vector<float> embeddings;
-  Sequence encoder_seq;
-  bool is_prefill;
+  std::shared_ptr<Sequence> encoder_seq;
   RequestMetrics metrics;
 
   SequenceGroup(std::string request_id, std::vector<Sequence> seqs, float arrival_time,
                 SamplingParams sampling_params, std::vector<float> embeddings,
-                Sequence encoder_seq);
+                std::unique_ptr<Sequence> encoder_seq);
 
   int GetMaxNumRunningSeqs();
   std::vector<Sequence> GetSeqs();
   std::vector<Sequence> GetSeqs(SequenceStatus status);
 
   void MaybeSetFirstScheduledTime(float time);
+
+  bool IsPrefill();
 };
 
 struct SequenceGroupMetadata {
@@ -118,6 +124,6 @@ struct SequenceGroupMetadata {
   bool do_sample = true;
   int token_chunk_size;
   std::vector<int> computed_block_nums;
-
 };
+
 }  // namespace engine

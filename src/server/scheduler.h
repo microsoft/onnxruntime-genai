@@ -1,3 +1,5 @@
+#pragma once
+
 #include <string>
 #include <tuple>
 #include <unordered_set>
@@ -39,7 +41,7 @@ class SchedulerBudget {
   int max_num_seqs_;
   std::unordered_set<std::string> request_ids_num_batched_tokens_;
   std::unordered_set<std::string> request_ids_num_curr_seqs_;
-  int num_batched_tokens_ = ;
+  int num_batched_tokens_ = 0;
   int num_curr_seqs_ = 0;
 };
 
@@ -96,7 +98,7 @@ struct SchedulerOutputs {
 struct ScheduleResult {
   std::vector<SequenceGroupMetadata> seq_group_metadatas;
   SchedulerOutputs scheduler_outputs;
-}
+};
 
 class Scheduler {
  public:
