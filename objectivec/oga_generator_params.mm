@@ -23,6 +23,20 @@
     OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }
 
+
+- (nullable)initWithTokenizer:(OGAMultiModalProcessor *)processor
+                        error:(NSError **) {
+    if ((self = [super init]) == nil) {
+        return nil;
+    }
+
+    try {
+        _generatorParams = OgaGeneratorParams::Create([processor CXXAPIOgaMultiModalProcessor]);
+        return self;
+    }
+    OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
+}
+
 - (BOOL)setInputs:(OGANamedTensors *)namedTensors
             error:(NSError **)error {
     try {

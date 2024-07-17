@@ -59,6 +59,9 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 - (nullable)initWithTokenizer:(OGATokenizer *)tokenizer
                         error:(NSError **)error NS_DESIGNATED_INITIALIZER;
 
+- (nullable)initWithTokenizer:(OGAMultiModalProcessor *)processor
+                        error:(NSError **)error NS_DESIGNATED_INITIALIZER;
+
 - (nullable NSString *)decode:(int32_t)token
                         error:(NSError **)error;
 @end;
