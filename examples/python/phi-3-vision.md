@@ -9,7 +9,7 @@
 
 ## 0. Pre-requisites
 
-Please ensure you have the following `pip` packages installed to create the ONNX models.
+Please ensure you have the following Python packages installed to create the ONNX models.
 
 - `huggingface_hub[cli]`
 - `numpy`
