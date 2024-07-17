@@ -18,7 +18,7 @@ env:
 
 jobs:
   windows-cpu-arm64-build:
-    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Win11-ARM-CPU" ]
+    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-win11-arm64-cpu" ]
     steps:
     - name: Checkout OnnxRuntime GenAI repo
       uses: actions/checkout@v4
