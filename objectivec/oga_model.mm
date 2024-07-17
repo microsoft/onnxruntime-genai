@@ -7,12 +7,12 @@
 }
 
 
-- (nullable)initWithConfigPath:(NSString *)path
-                         error:(NSError **)error {
+- (nullable)initWithPath:(NSString *)path
+                   error:(NSError **)error {
     if ((self = [super init]) == nil) {
         return nil;
     }
-    
+
     try {
         _model = OgaModel::Create(path.UTF8String);
         return self;

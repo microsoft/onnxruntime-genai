@@ -27,10 +27,37 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
+@implementation OGASpan {
+    const int32_t * _ptr;
+    size_t _size;
+}
+
+- (nullable)initWithRawPointer:(const int32_t * )pointer
+                          size:(size_t)size {
+    _ptr = pointer;
+    _size = size;
+    return [self init];
+}
+
+- (const int32_t * )pointer {
+    return _ptr;
+}
+
+- (size_t)size {
+    return _size;
+}
+
+- (int32_t)last {
+    return *(_ptr + (_size - 1));
+}
+
+@end
+
+
 @interface OGASequences ()
 
 - (nullable)initWithError:(NSError **)error;
-- (instancetype)initWithNativeSeqquences:(std::unique_ptr<OgaSequences>)ptr;
+- (instancetype)initWithNativePointer:(std::unique_ptr<OgaSequences>)ptr;
 
 - (OgaSequences&)CXXAPIOgaSequences;
 
@@ -39,6 +66,30 @@ NS_ASSUME_NONNULL_BEGIN
 @interface OGAGeneratorParams ()
 
 - (OgaGeneratorParams&)CXXAPIOgaGeneratorParams;
+
+@end
+
+@interface OGAImages ()
+
+- (OgaImages *)CXXAPIOgaImages;
+
+@end
+
+@interface OGATensor ()
+
+- (OGATensor&)CXXAPIOgaTensor;
+
+@end
+
+@interface OGANamedTensors ()
+
+- (OgaNamedTensor&)CXXAPIOgaNamedTensors;
+
+@end
+
+@interface OGAMultiModalProcessor ()
+
+- (const OgaMultiModalProcessor&)CXXAPIOgaMultiModalProcessor;
 
 @end
 

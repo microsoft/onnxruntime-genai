@@ -23,10 +23,12 @@
 - (BOOL)isDone {
     return _generator->IsDone();
 }
-- (void)ComputeLogits {
+
+- (void)computeLogits {
     _generator->ComputeLogits();
 }
-- (void)GenerateNextToken {
+
+- (void)generateNextToken {
     _generator->GenerateNextToken();
 }
 
