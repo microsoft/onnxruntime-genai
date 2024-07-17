@@ -816,6 +816,8 @@ class Model:
         matmul_A_basename = "/".join(basename_parts[:-1] + ["lora_A"] + basename_parts[-1:])
         matmul_A_name = self.make_matmul_op(matmul.lora_A.default, matmul_A_basename, root_input=root_input)
         lora_A = f"{matmul_A_name}/output_0"
+
+        matmul.lora_B.default.weight *= matmul.scaling["default"]
         matmul_B_basename = "/".join(basename_parts[:-1] + ["lora_B"] + basename_parts[-1:])
         matmul_B_name = self.make_matmul_op(matmul.lora_B.default, matmul_B_basename, root_input=lora_A)
         lora_B = f"{matmul_B_name}/output_0"
