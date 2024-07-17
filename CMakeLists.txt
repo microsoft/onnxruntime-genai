@@ -93,6 +93,15 @@ else()
   add_library(onnxruntime-genai-static STATIC ${generator_srcs})
 endif()
 
+target_link_libraries(onnxruntime-genai PRIVATE FlatBuffers::FlatBuffers)
+target_include_directories(onnxruntime-genai PRIVATE FlatBuffers::FlatBuffers)
+target_link_libraries(onnxruntime-genai PRIVATE genai_flatbuffers)
+
+target_link_libraries(onnxruntime-genai-static PRIVATE FlatBuffers::FlatBuffers)
+target_link_libraries(onnxruntime-genai-static PRIVATE FlatBuffers::FlatBuffers)
+target_link_libraries(onnxruntime-genai-static PRIVATE genai_flatbuffers)
+
+
 target_include_directories(onnxruntime-genai PRIVATE ${ORT_HEADER_DIR})
 target_include_directories(onnxruntime-genai-static PRIVATE ${ORT_HEADER_DIR})
 target_include_directories(onnxruntime-genai PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/include)

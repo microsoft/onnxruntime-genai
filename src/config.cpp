@@ -460,6 +460,19 @@ struct Search_Element : JSON::Element {
   Config::Search& v_;
 };
 
+class LoraAdapters_Element : JSON::Element {
+ public:
+  explicit LoraAdapters_Element(Config::LoraAdapters& v) noexcept : v_{v} {}
+
+ private:
+
+  void OnString(std::string_view name, std::string_view path) override {
+    v_.adapters.emplace(name, path);
+  }
+
+  Config::LoraAdapters& v_;
+};
+
 void SetSearchNumber(Config::Search& search, std::string_view name, double value) {
   Search_Element(search).OnNumber(name, value);
 }
@@ -505,6 +518,7 @@ struct Root_Element : JSON::Element {
   Config& config_;
   Model_Element model_element_{config_.model};
   Search_Element search_element_{config_.search};
+  LoraAdapters_Element lora_adapters_element_{config_.lora_adapters};
 };
 
 struct RootObject_Element : JSON::Element {

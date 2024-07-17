@@ -61,44 +61,6 @@ inline void OgaCheckResult(OgaResult* result) {
   }
 }
 
-struct OgaLoraManager {
- public:
-  explicit OgaLoraManager(OgaLoraManagerInternal* internal) noexcept : internal_(internal) {}
-
-  /// <summary>
-  /// Creates Lora adapter within a given model.
-  /// Initially it has no parameters. Use AddLoraAdapterParameter to add parameters.
-  /// </summary>
-  /// <param name="adapter_name">name of the the adapter to create</param>
-  /// <throws>std::runtime_error if the adapter already exists</throws>
-  void CreateAdapter(const std::string& adapter_name) {
-    OgaCheckResult(OgaCreateLoraAdapter(internal_, adapter_name.c_str()));
-  }
-
-  /// <summary>
-  /// Removes a Lora adapter from the model.
-  /// </summary>
-  /// <param name="adapter_name">name of the adapter</param>
-  /// <throws>std::runtime_error if the adapter is active</throws>
-  void RemoveAdapter(const std::string& adapter_name) {
-    OgaCheckResult(OgaRemoveLoraAdapter(internal_, adapter_name.c_str()));
-  }
-
-  /// <summary>
-  /// Adds a parameter to the Lora adapter that was created using CreateLoraAdapter().
-  /// </summary>
-  /// <param name="adapter_name">Existing adapter name</param>
-  /// <param name="param_name">name of the parameter to be created</param>
-  /// <param name="tensor">OgaTensor that points to a buffer with parameter data</param>
-  /// <throws>std::runtime_error if the adapter does not exist or the parameter already exists</throws>
-  void AddLoraAdapterParameter(const std::string& adapter_name, const std::string& param_name, OgaTensor& tensor) {
-    OgaCheckResult(OgaAddLoraParameter(internal_, adapter_name.c_str(), param_name.c_str(), &tensor));
-  }
-
- private:
-  OgaLoraManagerInternal* internal_;
-};
-
 struct OgaModel : OgaAbstract {
   static std::unique_ptr<OgaModel> Create(const char* config_path) {
     OgaModel* p;
@@ -110,16 +72,6 @@ struct OgaModel : OgaAbstract {
     OgaSequences* p;
     OgaCheckResult(OgaGenerate(this, &params, &p));
     return std::unique_ptr<OgaSequences>(p);
-  }
-
-  /// <summary>
-  /// Obtains a handle to a LoraManager class, that is owned by the model.
-  /// </summary>
-  /// <returns></returns>
-  OgaLoraManager GetLoraManager() {
-    OgaLoraManagerInternal* manager;
-    OgaCheckResult(OgaGetLoraManager(this, &manager));
-    return OgaLoraManager(manager);
   }
 
   static void operator delete(void* p) { OgaDestroyModel(reinterpret_cast<OgaModel*>(p)); }

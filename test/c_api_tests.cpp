@@ -104,9 +104,9 @@ TEST(CAPITests, Tensor_And_AddExtraInput) {
 }
 
 TEST(CAPITests, LoraManagement) {
-  const std::string adapter_name_1 = "adapter_1";
-  const std::string adapter_name_2 = "adapter_2";
+  const std::string adapter_name = "guanaco";
 
+  // This should load Lora adapters as configured in the genai_config.json
   auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
   constexpr std::array<int64_t, 2> input_ids_shape{2, 4};
@@ -115,62 +115,31 @@ TEST(CAPITests, LoraManagement) {
   const auto input_sequence_length = input_ids_shape[1];
   constexpr int max_length = 10;
 
-  const char* const adapter[] = {adapter_name_1.c_str()};
+  const char* const adapter[] = {adapter_name.c_str()};
   auto params = OgaGeneratorParams::Create(*model);
   params->SetSearchOption("max_length", max_length);
   params->SetInputIDs(input_ids.data(), input_ids.size(), input_sequence_length, batch_size);
 
-  // Set active non-existing adapters show throw
-  ASSERT_THROW(params->SetActiveAdapterNames(adapter), std::runtime_error);
-
-  auto lora_manager = model->GetLoraManager();
-
-  lora_manager.CreateAdapter(adapter_name_1);
-
-  // Creating a duplicate name should throw
-  ASSERT_THROW(lora_manager.CreateAdapter(adapter_name_1), std::runtime_error);
-
-  lora_manager.CreateAdapter(adapter_name_2);
-
   // Now we can activate it
   ASSERT_NO_THROW(params->SetActiveAdapterNames(adapter));
 
-  // Two shapes with different lora_r placements
-  const std::array<int64_t, 2> lora_param_shape_1 = {4, 2};
-  const std::array<int64_t, 2> lora_param_shape_2 = {2, 4};
-
-  // Lora parameter data
-  std::array<float, 8> lora_param = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f};
-
-  auto param_1 = OgaTensor::Create(lora_param.data(), lora_param_shape_1.data(), lora_param_shape_1.size(),
-                                   OgaElementType_float32);
-
-  lora_manager.AddLoraAdapterParameter(adapter_name_1, "lora_param_1", *param_1);
-
-  auto param_2 = OgaTensor::Create(lora_param.data(), lora_param_shape_2.data(), lora_param_shape_2.size(),
-                                   OgaElementType_float32);
-
-  lora_manager.AddLoraAdapterParameter(adapter_name_2, "lora_param_2", *param_2);
-
   // At this point, all lora_parameters should be copied to the created state.
   auto generator = OgaGenerator::Create(*model, *params);
+
   // Test hack. Verify that the created state has lora params in it.
   Generators::Generator* gen = reinterpret_cast<Generators::Generator*>(generator.get());
   auto& input_names = gen->state_->input_names_;
   ASSERT_EQ(input_names.size(), gen->state_->inputs_.size());
-  auto hit = std::find_if(input_names.begin(), input_names.end(), [&](const std::string& name) {
-    return name == "lora_param_1";
+
+  // Verify that we have lora parameters among the input names
+  constexpr std::string_view const lora_param_substr = "proj.lora";
+
+  auto count = std::count_if(input_names.begin(), input_names.end(), [&](const std::string& name) {
+    return std::string::npos != name.find(lora_param_substr);
   });
 
-  ASSERT_NE(input_names.end(), hit);
-  
-  hit = std::find_if(input_names.begin(), input_names.end(),
-                          [&](const std::string& name) { return name == "lora_param_2"; });
-  ASSERT_NE(input_names.end(), hit);
-
-  // Removing adapters while is in use is also OK
-  lora_manager.RemoveAdapter(adapter_name_1);
-  lora_manager.RemoveAdapter(adapter_name_2);
+  // We are expecting 2 lora parameters
+  ASSERT_EQ(2, count);
 }
 
 TEST(CAPITests, Logging) {

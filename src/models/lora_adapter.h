@@ -5,8 +5,11 @@
 
 #include "onnxruntime_api.h"
 
+#include "../filesystem.h"
 #include "../tensor.h"
+
 #include <algorithm>
+#include <iosfwd>
 #include <mutex>
 #include <memory>
 #include <set>
@@ -18,6 +21,12 @@
 #include <vector>
 
 namespace Generators {
+
+struct Config;
+
+namespace lora_parameters {
+struct Parameters;
+} // namespace lora_parameters
 
 struct Model;
 
@@ -44,16 +53,44 @@ std::shared_ptr<OrtValue> CreateEmptyInput(const OrtValue& tensor);
 struct LoraParam {
   LoraParam() = default;
   LoraParam(std::string name, const std::shared_ptr<Tensor>& parameter);
+  LoraParam(std::string name, std::shared_ptr<OrtValue> parameter);
+
   std::string name_;
   // We need this as a shared_ptr so we can share while inference is running.
-  // This can also be a subject of weak caching
   // This is created over the same user supplied buffer as the originally
   // passed in tensor.
   std::shared_ptr<OrtValue> ort_user_supplied_value_;
   // Copy on device if needed.
-  // XXX: Insert caching logic and convert to weak_ptr
+  // XXX: Insert caching logic and convert to weak_ptr when cache is implemented
   std::shared_ptr<OrtValue> ort_device_value_;
 };
+
+// This class takes hold of the serialized parameters that
+// are either loaded from disk or mapped from disk (coming in the future)
+// This data is always in host memory.
+class BinaryFormatHolder {
+ public:
+  BinaryFormatHolder() = default;
+  BinaryFormatHolder(const BinaryFormatHolder&) = delete;
+  BinaryFormatHolder& operator=(const BinaryFormatHolder&) = delete;
+
+  /// <summary>
+  /// Load parameters from a flatbuffer file.
+  /// </summary>
+  /// <param name="file_name">file name that can be opened</param>
+  void Load(const std::string& file_name);
+
+  // Get the buffer
+  const lora_parameters::Parameters* GetParameters() const noexcept { return parameters_; }
+
+  // Get the size of the buffer
+  size_t GetSize() const noexcept { return buffer_.size(); }
+
+ private:
+  std::vector<uint8_t> buffer_;
+  const lora_parameters::Parameters* parameters_;
+};
+
 
 /// <summary>
 /// This class represents a collection of named pairs of
@@ -76,6 +113,12 @@ class LoraAdapter {
   void SetName(const std::string& name) { name_ = name; }
 
   /// <summary>
+  /// Loads parameters from flatbuffer format.
+  /// </summary>
+  /// <param name="file_name"></param>
+  void LoadParametersFromFlatBuffer(const std::string& file_name);
+
+  /// <summary>
   /// Returns number of parameters for buffer estimates
   /// </summary>
   size_t GetParamNum() const noexcept {
@@ -83,11 +126,7 @@ class LoraAdapter {
     return parameters_.size();
   }
 
-  /// <summary>
-  /// Add Lora Parameter to the adapter
-  /// </summary>
-  /// <param name="parameter"></param>
-  void AddParameter(const Model* model, std::string param_name, const std::shared_ptr<Tensor>& tensor) {
+  void AddParameter(std::string param_name, std::shared_ptr<OrtValue> ort_value) {
     std::unique_lock lock(mutex_);
 
     auto hit =
@@ -97,10 +136,7 @@ class LoraAdapter {
       throw std::runtime_error("Adapter: " + name_ + " already has a parameter named: " + param_name);
     }
 
-    auto& param = parameters_.emplace_back(std::move(param_name), tensor);
-    if (model != nullptr) {
-      MakeDeviceCopyIfNeeded(*model, param);
-    }
+    parameters_.emplace_back(std::move(param_name), std::move(ort_value));
   }
 
   /// <summary>
@@ -135,7 +171,6 @@ class LoraAdapter {
   template <typename OutNameIter, typename OutParamIter>
   void GetEmptyParameters(OutNameIter& out_name, OutParamIter& out_param) const {
     std::shared_lock lock(mutex_);
-    // Must return the parameters in the same order they were added
     for (const auto& p : parameters_) {
       *out_name = p.name_;
       ++out_name;
@@ -156,6 +191,7 @@ class LoraAdapter {
 
   std::string name_;
   mutable std::shared_mutex mutex_;
+  BinaryFormatHolder format_holder_;
   std::vector<LoraParam> parameters_;
 };
 
@@ -172,6 +208,13 @@ class LoraAdapterManagement {
   LoraAdapterManagement& operator=(const LoraAdapterManagement&) = delete;
 
   /// <summary>
+  /// This API loads the Lora Adapters as specified in the configuration
+  /// </summary>
+  /// <param name="config_path">path to where model and lora weights are expected</param>
+  /// <param name="config">configuration settings</param>
+  void LoadAdaptersFromConfig(const fs::path& model_path, const Config& config);
+
+  /// <summary>
   /// Creates a adapter object to which one can add Lora parameters
   /// </summary>
   /// <param name="adapter_name"></param>
@@ -184,13 +227,7 @@ class LoraAdapterManagement {
   /// <param name="adapter_name"></param>
   /// <param name="param_name"></param>
   /// <param name="p"></param>
-  void AddParameter(const std::string& adapter_name, std::string param_name, const std::shared_ptr<Tensor>& p);
-
-  /// <summary>
-  /// Remove Specific Lora adapter and purge device cache if appropriate.
-  /// </summary>
-  /// <param name="adapter_name"></param>
-  void RemoveAdapter(const std::string& adapter_name);
+  void AddParameter(const std::string& adapter_name, std::string param_name, std::shared_ptr<OrtValue> p);
 
   /// <summary>
   /// Outputs pointers to names and its corresponding OrtValue params
@@ -242,6 +279,7 @@ class LoraAdapterManagement {
  private:
   const Model* model_;  // optional
   mutable std::shared_mutex mutex_;
+
   using AdapterMap = std::unordered_map<std::string, details::LoraAdapter>;
   AdapterMap adapters_;
 };

@@ -60,7 +60,6 @@ typedef struct OgaTensor OgaTensor;
 typedef struct OgaImages OgaImages;
 typedef struct OgaNamedTensors OgaNamedTensors;
 typedef struct OgaMultiModalProcessor OgaMultiModalProcessor;
-struct OgaLoraManagerInternal;
 
 /* \brief Call this on process exit to cleanly shutdown the genai library & its onnxruntime usage
  */
@@ -147,14 +146,6 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyModel(OgaModel* model);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerate(const OgaModel* model, const OgaGeneratorParams* generator_params,
                                                OgaSequences** out);
 
-/// <summary>
-/// GetLoraAdapterManager returns the LoraManager instance associated with the given model.
-///
-/// </summary>
-/// <param name="model"></param>
-/// <param name="lora_manager">out parameter to internal structure. Do not free or de-allocate this ptr</param>
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGetLoraManager(OgaModel* model, OgaLoraManagerInternal** lora_manager);
-
 /*
  * \brief Creates a OgaGeneratorParams from the given model.
  * \param[in] model The model to use for generation.
@@ -162,35 +153,6 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGetLoraManager(OgaModel* model, OgaLoraMan
  * \return OgaResult containing the error message if the generator params creation failed.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateGeneratorParams(const OgaModel* model, OgaGeneratorParams** out);
-
-/*
- * \brief Creates Lora Adapter within a given model that one can add
- *        parameters to. The adapter_name must be unique within the model.
- * \param[in] lora_manager where to create the adapter
- * \param[in] adapter_name to be created
- * \return OgaResult containing the error message if the adapter creation failed.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateLoraAdapter(OgaLoraManagerInternal* lora_manager, const char* adapter_name);
-
-/*
- * \brief Removes previously created LoraAdapter by name.
- * \param[in] lora_manager of the model from which the adapter is removed.
- * \param[in] adapter_name that is going to be removed
- * \return OgaResult containing the error message if the adapter removal failed.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaRemoveLoraAdapter(OgaLoraManagerInternal* lora_manager, const char* adapter_name);
-
-/*
- * \brief Adds a named LoraParameter.
- * \param[in] lora_manager where the adapter is defined
- * \param[in] adapter_name the adapter to which the parameter is added
- * \param[in] param_name a UTF-8 encoded C string for the Lora Parameter name being added.
- *            This must be a unique name in the scope of the model.
- * \param[in] tensor Lora parameter data
- * \return OgaResult containing the error message.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaAddLoraParameter(OgaLoraManagerInternal* lora_manager, const char* adapter_name,
-                                                       const char* param_name, const OgaTensor* tensor);
 
 /*
  * \brief Destroys the given generator params.

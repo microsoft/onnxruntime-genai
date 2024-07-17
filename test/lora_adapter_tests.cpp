@@ -31,23 +31,17 @@ TEST(GeneratorsTests, LoraAdapterManagementTests) {
   std::array<float, 8> lora_param = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f};
 
   auto mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
-  auto ort_value_param_1 =
+  std::shared_ptr<OrtValue> ort_value_param_1 =
       OrtValue::CreateTensor(*mem_info, lora_param.data(), lora_param.size() * sizeof(float), lora_param_shape_1,
                              ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
 
-  auto param_tensor_1 = std::make_shared<Generators::Tensor>();
-  param_tensor_1->ort_tensor_ = std::move(ort_value_param_1);
+  lora_adapter_management.AddParameter(adapter_name_1, "lora_param_1", ort_value_param_1);
 
-  lora_adapter_management.AddParameter(adapter_name_1, "lora_param_1", param_tensor_1);
-
-  auto ort_value_param_2 =
+  std::shared_ptr<OrtValue> ort_value_param_2 =
       OrtValue::CreateTensor(*mem_info, lora_param.data(), lora_param.size() * sizeof(float), lora_param_shape_2,
                              ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
 
-  auto param_tensor_2 = std::make_shared<Generators::Tensor>();
-  param_tensor_2->ort_tensor_ = std::move(ort_value_param_2);
-
-  lora_adapter_management.AddParameter(adapter_name_2, "lora_param_2", param_tensor_2);
+  lora_adapter_management.AddParameter(adapter_name_2, "lora_param_2", ort_value_param_2);
 
   {
     // No adapters are active at this point
@@ -105,9 +99,6 @@ TEST(GeneratorsTests, LoraAdapterManagementTests) {
       }
     }
   }
-
-  lora_adapter_management.RemoveAdapter(adapter_name_1);
-  lora_adapter_management.RemoveAdapter(adapter_name_2);
 }
 
 }  // namespace tests
