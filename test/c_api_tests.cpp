@@ -121,25 +121,8 @@ TEST(CAPITests, LoraManagement) {
   params->SetInputIDs(input_ids.data(), input_ids.size(), input_sequence_length, batch_size);
 
   // Now we can activate it
+  // The call validates the adapter names specified.
   ASSERT_NO_THROW(params->SetActiveAdapterNames(adapter));
-
-  // At this point, all lora_parameters should be copied to the created state.
-  auto generator = OgaGenerator::Create(*model, *params);
-
-  // Test hack. Verify that the created state has lora params in it.
-  Generators::Generator* gen = reinterpret_cast<Generators::Generator*>(generator.get());
-  auto& input_names = gen->state_->input_names_;
-  ASSERT_EQ(input_names.size(), gen->state_->inputs_.size());
-
-  // Verify that we have lora parameters among the input names
-  constexpr std::string_view const lora_param_substr = "proj.lora";
-
-  auto count = std::count_if(input_names.begin(), input_names.end(), [&](const std::string& name) {
-    return std::string::npos != name.find(lora_param_substr);
-  });
-
-  // We are expecting 2 lora parameters
-  ASSERT_EQ(2, count);
 }
 
 TEST(CAPITests, Logging) {

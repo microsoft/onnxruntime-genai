@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <cmath>
 #include <fstream>
 #include <iostream>
 
@@ -147,7 +148,7 @@ TEST(LoraParameters, LoadPythonGeneratedFile) {
                                      fbs_param->raw_data()->size() / sizeof(float));
 
     for (size_t i = 0; i < data_span.size(); ++i) {
-      ASSERT_TRUE(isfinite(data_span[i]));
+      ASSERT_TRUE(std::isfinite(data_span[i]));
     }
   }
 }

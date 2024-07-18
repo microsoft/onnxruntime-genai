@@ -7,10 +7,14 @@
 #include <models/lora_adapter.h>
 
 #include <algorithm>
+#include <cmath>
 #include <iostream>
 
 namespace Generators {
 namespace tests {
+
+// We do not initialize device specifics in this test.
+#if !defined(USE_CUDA) && !defined(USE_DML)
 
 class TestState : public State {
  public:
@@ -100,6 +104,8 @@ TEST(GeneratorsTests, LoraAdapterContainerTests) {
     }
   }
 }
+
+#endif
 
 }  // namespace tests
 }  // namespace Generators
