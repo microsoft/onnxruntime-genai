@@ -3,7 +3,6 @@
 
 #pragma once
 #if defined(__GNUC__)
-#include "onnxruntime_config.h"
 #pragma GCC diagnostic push
 
 #ifdef HAS_SHORTEN_64_TO_32
