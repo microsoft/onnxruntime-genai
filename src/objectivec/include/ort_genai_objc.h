@@ -36,18 +36,17 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 
 
 - (nullable OGASequences*)generate:(OGAGeneratorParams*)params
-                            error:(NSError**)error;
+                             error:(NSError**)error;
 
 @end
-
 
 @interface OGATokenizer : NSObject
 - (instancetype)init NS_UNAVAILABLE;
 - (nullable)initWithModel:(OGAModel*)model
                     error:(NSError**)error NS_DESIGNATED_INITIALIZER;
 
-- (nullable OGASequences *)encode:(NSString*)str
-                            error:(NSError**)error;
+- (nullable OGASequences*)encode:(NSString*)str
+                           error:(NSError**)error;
 
 - (nullable NSString*)decode:(OGAInt32Span*)data
                        error:(NSError**)error;
@@ -65,7 +64,6 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 - (nullable NSString*)decode:(int32_t)token
                        error:(NSError**)error;
 @end;
-
 
 @interface OGAInt32Span : NSObject
 
