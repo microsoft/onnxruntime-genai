@@ -20,10 +20,8 @@ void OGASaveExceptionToError(const std::exception& e, NSError** error);
     return (failure_return_value);                           \
   }
 
-#define OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error) \
-  OGA_OBJC_API_IMPL_CATCH(error, NO)
+#define OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error) OGA_OBJC_API_IMPL_CATCH(error, NO)
 
-#define OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error) \
-  OGA_OBJC_API_IMPL_CATCH(error, nil)
+#define OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error) OGA_OBJC_API_IMPL_CATCH(error, nil)
 
 NS_ASSUME_NONNULL_END
