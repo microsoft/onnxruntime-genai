@@ -4,11 +4,13 @@
 NS_ASSUME_NONNULL_BEGIN
 
 
-@class OGASpan;
+@class OGAInt32Span;
 @class OGATensor;
 @class OGASequences;
+@class OGANamedTensors;
 @class OGAGeneratorParams;
 @class OGATokenizerStream;
+@class OGAMultiModalProcessor;
 
 typedef NS_ENUM(NSInteger, OGAElementType) {
   OGAElementTypeUndefined,
@@ -49,7 +51,7 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 - (nullable OGASequences *)encode:(NSString *)str
                             error:(NSError **)error;
 
-- (nullable NSString *)decode:(OGASpan *)data
+- (nullable NSString *)decode:(OGAInt32Span *)data
                         error:(NSError **)error;
 
 @end
@@ -59,19 +61,27 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 - (nullable)initWithTokenizer:(OGATokenizer *)tokenizer
                         error:(NSError **)error NS_DESIGNATED_INITIALIZER;
 
-- (nullable)initWithTokenizer:(OGAMultiModalProcessor *)processor
-                        error:(NSError **)error NS_DESIGNATED_INITIALIZER;
+- (nullable)initWithMultiModalProcessor:(OGAMultiModalProcessor *)processor
+                                  error:(NSError **)error NS_DESIGNATED_INITIALIZER;
 
 - (nullable NSString *)decode:(int32_t)token
                         error:(NSError **)error;
 @end;
 
 
-@interface OGASpan : NSObject
+@interface OGAInt32Span : NSObject
 
 - (instancetype)init NS_UNAVAILABLE;
 
 - (int32_t)last;
+
+@end
+
+@interface OGAInt64Span : NSObject
+
+- (instancetype)init NS_UNAVAILABLE;
+
+- (int64_t)last;
 
 @end
 
@@ -80,7 +90,7 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 - (instancetype)init NS_UNAVAILABLE;
 
 - (size_t)count;
-- (nullable OGASpan *)sequenceAtIndex:(size_t)index;
+- (nullable OGAInt32Span *)sequenceAtIndex:(size_t)index;
 
 @end
 
@@ -96,7 +106,7 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
                     error:(NSError **)error;
 
 - (BOOL)setModelInput:(NSString *)name
-               tensor:(OGATensor* tensor)
+               tensor:(OGATensor*)tensor
                 error:(NSError **)error;
 
 - (BOOL)setSearchOption:(NSString *)key
@@ -119,7 +129,17 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 - (void)computeLogits;
 - (void)generateNextToken;
 
-- (nullable OGASpan *)sequenceAtIndex:(size_t) index;
+- (nullable OGAInt32Span *)sequenceAtIndex:(size_t) index;
+
+@end
+
+@interface OGATensor : NSObject
+
+@end
+
+@interface OGANamedTensors : NSObject
+
+- (instancetype)init NS_UNAVAILABLE;
 
 @end
 
@@ -128,6 +148,10 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 - (instancetype)init NS_UNAVAILABLE;
 - (nullable)initWithPath:(NSString *)path
                    error:(NSError **)error NS_DESIGNATED_INITIALIZER;
+
+@end
+
+@interface OGAMultiModalProcessor : NSObject
 
 @end
 

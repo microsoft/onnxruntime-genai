@@ -17,7 +17,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
-@interface OGASpan ()
+@interface OGAInt32Span ()
 
 - (nullable)initWithRawPointer:(const int32_t *) pointer
                           size:(size_t)size;
@@ -27,29 +27,13 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
-@implementation OGASpan {
-    const int32_t * _ptr;
-    size_t _size;
-}
+@interface OGAInt64Span ()
 
-- (nullable)initWithRawPointer:(const int32_t * )pointer
-                          size:(size_t)size {
-    _ptr = pointer;
-    _size = size;
-    return [self init];
-}
+- (nullable)initWithRawPointer:(const int64_t *) pointer
+                          size:(size_t)size;
 
-- (const int32_t * )pointer {
-    return _ptr;
-}
-
-- (size_t)size {
-    return _size;
-}
-
-- (int32_t)last {
-    return *(_ptr + (_size - 1));
-}
+- (const int64_t *)pointer;
+- (size_t)size;
 
 @end
 
@@ -77,13 +61,14 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface OGATensor ()
 
-- (OGATensor&)CXXAPIOgaTensor;
+- (OgaTensor&)CXXAPIOgaTensor;
 
 @end
 
 @interface OGANamedTensors ()
 
-- (OgaNamedTensor&)CXXAPIOgaNamedTensors;
+- (instancetype)initWithNativePointer:(std::unique_ptr<OgaNamedTensors>)ptr NS_DESIGNATED_INITIALIZER;
+- (OgaNamedTensors&)CXXAPIOgaNamedTensors;
 
 @end
 

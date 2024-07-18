@@ -36,7 +36,7 @@
     OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }
 
-- (nullable NSString *)decode:(OGASpan *) data
+- (nullable NSString *)decode:(OGAInt32Span *) data
                         error:(NSError **)error {
     try {
         OgaString result = _tokenizer->Decode(data.pointer, data.size);
@@ -63,6 +63,19 @@
 
     try {
         _stream = OgaTokenizerStream::Create([tokenizer CXXAPIOgaTokenizer]);
+        return self;
+    }
+    OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
+}
+
+- (nullable)initWithMultiModalProcessor:(OGAMultiModalProcessor *)processor
+                                  error:(NSError **)error{
+    if ((self = [super init]) == nil) {
+        return nil;
+    }
+
+    try {
+        _stream = OgaTokenizerStream::Create([processor CXXAPIOgaMultiModalProcessor]);
         return self;
     }
     OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)

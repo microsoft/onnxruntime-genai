@@ -11,7 +11,7 @@
 
 
 - (nullable)initWithDataPointer:(void *)data
-                          shape:(OGASpan)shape
+                          shape:(OGAInt64Span *)shape
                            type:(OGAElementType)elementType
                           error:(NSError **)error {
     if ((self = [super init]) == nil) {
@@ -19,21 +19,21 @@
     }
 
     try {
-        _model = OgaTensor::Create(data, shape.pointer, shape.size, elementType);
+        _tensor = OgaTensor::Create(data, shape.pointer, shape.size, static_cast<OgaElementType>(elementType));
         return self;
     }
     OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }
 
 - (OGAElementType)type {
-    return _tensor->Type();
+    return OGAElementType(_tensor->Type());
 }
 
 - (void *)data {
     return _tensor->Data();
 }
 
-- (OgaModel&)CXXAPIOgaTensor {
+- (OgaTensor&)CXXAPIOgaTensor {
     return *(_tensor.get());
 }
 

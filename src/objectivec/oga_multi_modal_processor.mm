@@ -5,7 +5,7 @@
 #import "error_utils.h"
 #import "oga_internal.h"
 
-@implementation OgaMultiModalProcessor {
+@implementation OGAMultiModalProcessor {
     std::unique_ptr<OgaMultiModalProcessor> _processor;
 }
 
@@ -23,17 +23,17 @@
     OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }
 
-- (nullable OGANamedTensor *)processImages:(NSString *)prompt
+- (nullable OGANamedTensors *)processImages:(NSString *)prompt
                                   images:(OGAImages *)images
                                    error:(NSError **)error {
     try {
-        OGANamedTensor *result = [OGANamedTensor alloc] initWithNativePointer:_processor->ProcessImages([prompt UTF8String], [images CXXAPIOgaImages])];
+        OGANamedTensors *result = [[OGANamedTensors alloc] initWithNativePointer:_processor->ProcessImages([prompt UTF8String], [images CXXAPIOgaImages])];
         return result;
     }
     OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }
 
-- (nullable NSString *)decode:(OGASpan *) data
+- (nullable NSString *)decode:(OGAInt32Span *) data
                         error:(NSError **)error {
     try {
         OgaString result = _processor->Decode(data.pointer, data.size);
@@ -45,3 +45,5 @@
 - (const OgaMultiModalProcessor&)CXXAPIOgaMultiModalProcessor {
     return *(_processor.get());
 }
+
+@end

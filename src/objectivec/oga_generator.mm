@@ -35,10 +35,10 @@
     _generator->GenerateNextToken();
 }
 
-- (nullable OGASpan *)sequenceAtIndex:(size_t) index {
+- (nullable OGAInt32Span *)sequenceAtIndex:(size_t) index {
     size_t sequenceLength = _generator->GetSequenceCount(index);
     const int32_t* data = _generator->GetSequenceData(index);
-    return [[OGASpan alloc] initWithRawPointer:data size:sequenceLength];
+    return [[OGAInt32Span alloc] initWithRawPointer:data size:sequenceLength];
 }
 
 @end

@@ -27,7 +27,7 @@
                               error:(NSError **)error {
     try {
         std::unique_ptr<OgaSequences> output_sequences =  _model->Generate([params CXXAPIOgaGeneratorParams]);
-        return [[OGASequences alloc] initWithNativeSeqquences:std::move(output_sequences)];
+        return [[OGASequences alloc] initWithNativePointer:std::move(output_sequences)];
     }
     OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }

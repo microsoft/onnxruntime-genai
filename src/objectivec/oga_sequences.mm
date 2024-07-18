@@ -30,13 +30,13 @@
     return _sequences->Count();
 }
 
-- (nullable OGASpan *)sequenceAtIndex:(size_t) index {
+- (nullable OGAInt32Span *)sequenceAtIndex:(size_t) index {
     if (index >= [self count]) {
         return nil;
     }
     size_t sequenceLength = _sequences->SequenceCount(index);
     const int32_t* data = _sequences->SequenceData(index);
-    return [[OGASpan alloc] initWithRawPointer:data size: sequenceLength];
+    return [[OGAInt32Span alloc] initWithRawPointer:data size: sequenceLength];
 }
 
 - (OgaSequences&) CXXAPIOgaSequences {
