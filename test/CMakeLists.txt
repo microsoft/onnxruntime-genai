@@ -4,24 +4,25 @@ set(TESTS_ROOT ${CMAKE_CURRENT_SOURCE_DIR} PARENT_SCOPE)
 file(GLOB test_srcs CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/*.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/flatbuffers/*.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/flatbuffers/*.cpp"
 )
 
 # google unit test
-add_executable(unit_tests
-  main.cpp
-  c_api_tests.cpp
-  lora_adapter_tests.cpp
-  model_tests.cpp
-  sampling_tests.cpp
-  sampling_benchmark.cpp
-)
+add_executable(unit_tests ${test_srcs})
 
 target_include_directories(unit_tests PRIVATE
   ${ORT_HEADER_DIR}
   ${CMAKE_SOURCE_DIR}/src
 )
 
+target_link_libraries(unit_tests PRIVATE genai_flatbuffers)
+target_link_libraries(unit_tests PRIVATE FlatBuffers::FlatBuffers)
+target_include_directories(unit_tests PRIVATE FlatBuffers::FlatBuffers)
+
+target_include_directories(unit_tests PRIVATE ${ORT_HEADER_DIR})
 target_link_directories(unit_tests PRIVATE ${ORT_LIB_DIR})
+
 target_link_libraries(unit_tests PRIVATE
   onnxruntime-genai-static
   ${ONNXRUNTIME_LIB}

@@ -221,3 +221,19 @@ def test_get_output(test_data_path, relative_model_path):
     logits = generator.get_output('logits')
     assert np.allclose(logits[:,:,::200], expected_sampled_logits_token_gen, atol=1e-3)
     generator.generate_next_token()
+
+def test_save_lora_params(test_data_path):
+    # We convert npz file into flatbuffers file
+    npz_file_path = os.fspath(Path(test_data_path) / 'two_lora_params.npz')
+    fb_file = os.fspath(Path(test_data_path) / 'two_lora_params.fb')
+
+    with np.load(npz_file_path) as data:
+        to_save = {}
+        for k, v in data.items():
+            to_save[k] = v
+
+        og.save_lora_parameters_to_flatbuffers(fb_file, to_save)
+
+    fb_file_path = Path(fb_file).absolute()
+    assert fb_file_path.exists()
+    fb_file_path.unlink()

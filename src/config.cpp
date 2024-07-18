@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 #include "generators.h"
 #include "json.h"
+
 #include <fstream>
 #include <sstream>
 
@@ -460,6 +461,32 @@ struct Search_Element : JSON::Element {
   Config::Search& v_;
 };
 
+class LoraAdapters_Element : public JSON::Element {
+ public:
+  explicit LoraAdapters_Element(Config::LoraAdapters& v) noexcept : v_{v} {}
+
+ private:
+
+  JSON::Element& OnObject(std::string_view name) override {
+    if (current_adapter_ != name) {
+      current_adapter_ = name;
+      return *this;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+  void OnString(std::string_view name, std::string_view path) override {
+    if (name == "weights") {
+      v_.adapters.emplace(current_adapter_, path);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Config::LoraAdapters& v_;
+  std::string current_adapter_;
+};
+
 void SetSearchNumber(Config::Search& search, std::string_view name, double value) {
   Search_Element(search).OnNumber(name, value);
 }
@@ -499,12 +526,16 @@ struct Root_Element : JSON::Element {
     if (name == "search") {
       return search_element_;
     }
+    if (name == "adapters") {
+      return lora_adapters_element_;
+    }
     throw JSON::unknown_value_error{};
   }
 
   Config& config_;
   Model_Element model_element_{config_.model};
   Search_Element search_element_{config_.search};
+  LoraAdapters_Element lora_adapters_element_{config_.lora_adapters};
 };
 
 struct RootObject_Element : JSON::Element {

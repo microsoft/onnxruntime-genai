@@ -94,42 +94,6 @@ OgaResult* OGA_API_CALL OgaCreateGeneratorParams(const OgaModel* model, OgaGener
   OGA_CATCH
 }
 
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGetLoraManager(OgaModel* model, OgaLoraManagerInternal** lora_manager) {
-  OGA_TRY
-  auto* gen_model = reinterpret_cast<Generators::Model*>(model);
-  auto& lora_management = gen_model->GetLoraAdapterManagement();
-  *lora_manager = reinterpret_cast<OgaLoraManagerInternal*>(&lora_management);
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaCreateLoraAdapter(OgaLoraManagerInternal* lora_manager, const char* adapter_name) {
-  OGA_TRY
-  auto& lora_management = *reinterpret_cast<Generators::LoraAdapterManagement*>(lora_manager);
-  lora_management.CreateAdapter(adapter_name);
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaRemoveLoraAdapter(OgaLoraManagerInternal* lora_manager, const char* adapter_name) {
-  OGA_TRY
-  auto& lora_management = *reinterpret_cast<Generators::LoraAdapterManagement*>(lora_manager);
-  lora_management.RemoveAdapter(adapter_name);
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaAddLoraParameter(OgaLoraManagerInternal* lora_manager, const char* adapter_name,
-                                            const char* param_name, const OgaTensor* tensor) {
-  OGA_TRY
-  auto& lora_management = *reinterpret_cast<Generators::LoraAdapterManagement*>(lora_manager);
-  lora_management.AddParameter(
-      adapter_name, param_name,
-      const_cast<Generators::Tensor*>(reinterpret_cast<const Generators::Tensor*>(tensor))->shared_from_this());
-  return nullptr;
-  OGA_CATCH
-}
-
 OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchNumber(OgaGeneratorParams* generator_params, const char* name,
                                                           double value) {
   OGA_TRY
@@ -223,7 +187,7 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetActiveAdapters(OgaGeneratorParams* 
   OGA_TRY
   auto& generator_params = *reinterpret_cast<Generators::GeneratorParams*>(params);
   const auto* model = generator_params.GetModel();
-  const auto* lora_manager = (model) ? &model->GetLoraAdapterManagement() : nullptr;
+  const auto* lora_manager = (model) ? &model->GetLoraAdapterContainer() : nullptr;
 
   std::vector<std::string> names;
   names.reserve(count);
