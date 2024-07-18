@@ -4,7 +4,6 @@
 
 import argparse
 import pathlib
-import shutil
 import subprocess
 
 SCRIPT_DIR = pathlib.Path(__file__).parent.resolve()

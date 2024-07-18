@@ -6,7 +6,7 @@
 
 
 import argparse
-import pathlib
+
 import sys
 from util import save_lora_params_to_flatbuffers
 from util import add_adapters_to_genai_config
@@ -26,6 +26,7 @@ def main():
     save_lora_params_to_flatbuffers(args.npz_file_path, args.fb_file_path)
     adapters = {args.adapter_name: {"weights": args.fb_file_path}}
     add_adapters_to_genai_config(args.genai_file_path, args.genai_file_path_modified, adapters)
+    return 0
 
 if __name__ == "__main__":
     sys.exit(main())

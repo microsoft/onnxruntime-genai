@@ -4,7 +4,6 @@
 import json
 import numpy as np
 import onnxruntime_genai as og
-import pathlib
 
 def save_lora_params_to_flatbuffers(npz_file_path, fb_file_path):
     '''The function converts lora parameters in npz to flatbuffers file
@@ -25,10 +24,10 @@ def add_adapters_to_genai_config(json_file_path : str,
        Supported format:
         adapters = {
             "guanaco": {
-                "weights": "models/exported/guanaco_qlora.npz",
+                "weights": "models/exported/guanaco_qlora.fb",
             },
             "tiny-codes": {
-                "weights": "models/tiny-codes-qlora/qlora-conversion-transformers_optimization-extract-metadata/gpu-cuda_model/adapter_weights.npz",
+                "weights": "models/tiny-codes-qlora/qlora-conversion-transformers_optimization-extract-metadata/gpu-cuda_model/adapter_weights.fb",
             }
         }       
     '''
