@@ -466,7 +466,6 @@ class LoraAdapters_Element : public JSON::Element {
   explicit LoraAdapters_Element(Config::LoraAdapters& v) noexcept : v_{v} {}
 
  private:
-
   JSON::Element& OnObject(std::string_view name) override {
     if (current_adapter_ != name) {
       current_adapter_ = name;

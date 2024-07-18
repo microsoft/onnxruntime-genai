@@ -154,7 +154,6 @@ class LoraAdapter {
     parameters_.emplace_back(std::move(param_name), std::move(ort_value));
   }
 
-
   using ParamContainer = std::vector<LoraParam>;
   using ParamIterator = ParamContainer::const_iterator;
 
@@ -167,7 +166,6 @@ class LoraAdapter {
   }
 
  private:
-
   std::string name_;
   BinaryFormatHolder format_holder_;
   ParamContainer parameters_;
@@ -206,7 +204,6 @@ class LoraAdapterContainer {
   /// <param name="param_name"></param>
   /// <param name="p"></param>
   void AddParameter(const std::string& adapter_name, std::string param_name, std::shared_ptr<OrtValue> p);
-
 
   /// <summary>
   /// Returns total number of parameters across all adapters

@@ -127,7 +127,6 @@ void LoraAdapter::LoadParametersFromFlatBuffer(const std::string& file_name) {
 }  // namespace details
 
 void LoraAdapterContainer::LoadAdaptersFromConfig(const fs::path& model_path, const Config& config) {
-
   AdapterMap adapters;
   for (const auto& [adapter_name, file_name] : config.lora_adapters.adapters) {
     auto hit = adapters.find(adapter_name);
@@ -152,7 +151,7 @@ void LoraAdapterContainer::CreateAdapter(const std::string& adapter_name) {
 }
 
 void LoraAdapterContainer::AddParameter(const std::string& adapter_name, std::string param_name,
-                                         std::shared_ptr<OrtValue> ort_value) {
+                                        std::shared_ptr<OrtValue> ort_value) {
   auto hit = adapters_.find(adapter_name);
   if (hit == adapters_.end()) {
     throw std::runtime_error("Adapter: " + adapter_name + " does not exist");

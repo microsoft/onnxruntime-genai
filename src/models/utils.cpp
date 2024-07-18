@@ -88,8 +88,8 @@ uint16_t FastFloat32ToFloat16(float v) {
       bit_cast<uint32_t>(v) + 0x00001000;  // round-to-nearest-even: add last bit after truncated mantissa
 
   const uint32_t e = (b & 0x7F800000) >> 23;  // exponent
-  const uint32_t m = b & 0x007FFFFF;  // mantissa; in line below: 0x007FF000 = 0x00800000-0x00001000 = decimal indicator
-                                      // flag - initial rounding
+  const uint32_t m = b & 0x007FFFFF;          // mantissa; in line below: 0x007FF000 = 0x00800000-0x00001000 = decimal indicator
+                                              // flag - initial rounding
   return static_cast<uint16_t>((b & 0x80000000) >> 16 | (e > 112) * ((((e - 112) << 10) & 0x7C00) | m >> 13) |
                                ((e < 113) & (e > 101)) * ((((0x007FF000 + m) >> (125 - e)) + 1) >> 1) |
                                (e > 143) * 0x7FFF);  // sign : normalized : denormalized : saturate
@@ -98,8 +98,8 @@ uint16_t FastFloat32ToFloat16(float v) {
 void CopyToDevice(const Model& model, const OrtValue& source, OrtValue& ort_device) {
   auto type_and_shape = source.GetTensorTypeAndShapeInfo();
 #if defined(USE_DML) || defined(USE_CUDA)
-  const auto copy_size_in_bytes = 
-    type_and_shape->GetElementCount() * SizeOf(type_and_shape->GetElementType());
+  const auto copy_size_in_bytes =
+      type_and_shape->GetElementCount() * SizeOf(type_and_shape->GetElementType());
   auto target_data = ort_device.GetTensorMutableRawData();
 #endif
 
@@ -120,14 +120,14 @@ void CopyToDevice(const Model& model, const OrtValue& source, OrtValue& ort_devi
   } else if (model.device_type_ == DeviceType::CUDA) {
 #if USE_CUDA
     cudaMemcpyAsync(target_data, source.GetTensorRawData(), copy_size_in_bytes, cudaMemcpyHostToDevice,
-        model.cuda_stream_);
+                    model.cuda_stream_);
 #else
     throw std::runtime_error("CUDA is not supported in this build");
 #endif
 
   } else
-    throw std::runtime_error("Unsupported device type detected: " + 
-      std::to_string(static_cast<int>(model.device_type_)));
+    throw std::runtime_error("Unsupported device type detected: " +
+                             std::to_string(static_cast<int>(model.device_type_)));
 }
 
 std::shared_ptr<OrtValue> CopyToDevice(const OrtValue& source, const Model& model) {
