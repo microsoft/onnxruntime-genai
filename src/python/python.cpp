@@ -504,7 +504,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   m.def("set_current_gpu_device_id", [](int device_id) { Ort::SetCurrentGpuDeviceId(device_id); });
   m.def("get_current_gpu_device_id", []() { return Ort::GetCurrentGpuDeviceId(); });
 
-
   // Save a dictionary with Lora Parameters to a flatbuffer file that we can load in C++ code.
   // This is useful in python code when we have an .npz file and we would like to load it in C++ code or
   // other language bindings.
