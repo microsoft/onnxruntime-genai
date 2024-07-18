@@ -1,2 +1,10 @@
+coloredlogs
+flatbuffers
 numpy<2
+packaging
+protobuf
+sympy
 pytest
+onnx
+transformers
+huggingface_hub[cli]

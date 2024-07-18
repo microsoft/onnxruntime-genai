@@ -18,7 +18,7 @@ env:
 
 jobs:
   windows-cpu-arm64-build:
-    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Win11-ARM-CPU" ]
+    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-win11-arm64-cpu" ]
     steps:
     - name: Checkout OnnxRuntime GenAI repo
       uses: actions/checkout@v4
@@ -47,6 +47,7 @@ jobs:
 
     - name: Configure CMake
       run: |
+        python -m pip install wheel
         cmake --preset windows_arm64_cpu_release
 
     - name: Build with CMake
@@ -60,14 +61,15 @@ jobs:
 
     - name: Install the Python Wheel and Test Dependencies
       run: |
+        python -c "import platform; print(platform.machine()); print(platform.version()); print(platform.platform()); print(platform.system()); print(platform.processor()); print(platform.architecture())"
+        python -c "import sys; print(sys.version)"
+        python -m pip install "numpy<2" coloredlogs flatbuffers packaging protobuf sympy pytest
+        python -m pip install -i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ ort-nightly-qnn
         python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl"))
-        python -m pip install -r test\python\requirements.txt
 
     - name: Run the Python Tests
       run: |
         python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\test_models"
-
-
 
     - name: Verify Build Artifacts
       if: always()
