@@ -35,10 +35,13 @@
   _generator->GenerateNextToken();
 }
 
-- (nullable OGAInt32Span*)sequenceAtIndex:(size_t)index {
-  size_t sequenceLength = _generator->GetSequenceCount(index);
-  const int32_t* data = _generator->GetSequenceData(index);
-  return [[OGAInt32Span alloc] initWithRawPointer:data size:sequenceLength];
+- (nullable OGAInt32Span*)sequenceAtIndex:(size_t)index error:(NSError**)error {
+  try {
+    size_t sequenceLength = _generator->GetSequenceCount(index);
+    const int32_t* data = _generator->GetSequenceData(index);
+    return [[OGAInt32Span alloc] initWithRawPointer:data size:sequenceLength];
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }
 
 @end

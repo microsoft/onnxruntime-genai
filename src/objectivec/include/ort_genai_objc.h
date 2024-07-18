@@ -129,7 +129,8 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 - (void)computeLogits;
 - (void)generateNextToken;
 
-- (nullable OGAInt32Span *)sequenceAtIndex:(size_t) index;
+- (nullable OGAInt32Span *)sequenceAtIndex:(size_t) index
+                                     error:(NSError **)error;
 
 @end
 
