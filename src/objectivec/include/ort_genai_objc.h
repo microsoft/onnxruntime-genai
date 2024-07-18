@@ -140,6 +140,8 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
                           shape:(OGAInt64Span*)shape
                            type:(OGAElementType)elementType
                           error:(NSError**)error;
+- (OGAElementType)type;
+
 @end
 
 @interface OGANamedTensors : NSObject
@@ -158,6 +160,13 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 
 @interface OGAMultiModalProcessor : NSObject
 
+- (instancetype)init NS_UNAVAILABLE;
+- (nullable)initWithModel:(OGAModel*)model
+                    error:(NSError**)error NS_DESIGNATED_INITIALIZER;
+
+- (nullable OGANamedTensors*)processImages:(NSString*)prompt
+                                    images:(OGAImages*)images
+                                     error:(NSError**)error;
 @end
 
 NS_ASSUME_NONNULL_END
