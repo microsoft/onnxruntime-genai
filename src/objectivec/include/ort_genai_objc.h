@@ -135,6 +135,11 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 
 @interface OGATensor : NSObject
 
+- (instancetype)init NS_UNAVAILABLE;
+- (nullable)initWithDataPointer:(void*)data
+                          shape:(OGAInt64Span*)shape
+                           type:(OGAElementType)elementType
+                          error:(NSError**)error;
 @end
 
 @interface OGANamedTensors : NSObject
