@@ -2955,7 +2955,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
     hf_name = input_path if os.path.isdir(input_path) else model_name
     hf_token = parse_hf_token(extra_options.get("hf_token", "true"))
 
-    is_peft = "adapter_config.json" in os.listdir(input_path)
+    is_peft = os.path.isdir(input_path) and "adapter_config.json" in os.listdir(input_path)
     peft_config = None
     if is_peft:
         from peft import PeftConfig
