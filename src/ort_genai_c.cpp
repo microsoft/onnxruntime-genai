@@ -187,7 +187,7 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetActiveAdapters(OgaGeneratorParams* 
   OGA_TRY
   auto& generator_params = *reinterpret_cast<Generators::GeneratorParams*>(params);
   const auto* model = generator_params.GetModel();
-  const auto* lora_manager = (model) ? &model->GetLoraAdapterManagement() : nullptr;
+  const auto* lora_manager = (model) ? &model->GetLoraAdapterContainer() : nullptr;
 
   std::vector<std::string> names;
   names.reserve(count);

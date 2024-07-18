@@ -21,7 +21,8 @@ uint64_t empty_input_buf[] = {0xdeadbeefbeefdead};
 
 namespace details {
 
-std::shared_ptr<OrtValue> CreateEmptyInput(const OrtValue& original) {
+std::shared_ptr<OrtValue> CreateEmptyInput(const Model& model, const OrtValue& original) {
+  const auto& requested_mem_info = model.allocator_device_->GetInfo();
   auto type_and_shape = original.GetTensorTypeAndShapeInfo();
   auto shape = type_and_shape->GetShape();
 
@@ -40,8 +41,7 @@ std::shared_ptr<OrtValue> CreateEmptyInput(const OrtValue& original) {
     shape[num_dims - 2] = 0;
   }
 
-  const auto& mem_info = original.GetTensorMemoryInfo();
-  return OrtValue::CreateTensor(mem_info, &empty_input_buf, 0, shape, type_and_shape->GetElementType());
+  return OrtValue::CreateTensor(requested_mem_info, &empty_input_buf, 0, shape, type_and_shape->GetElementType());
 }
 
 void BinaryFormatHolder::Load(const std::string& file_name) {
@@ -82,27 +82,32 @@ LoraParam::LoraParam(std::string name, std::shared_ptr<OrtValue> ort_value)
     : name_(std::move(name)), ort_user_supplied_value_(std::move(ort_value)) {
 }
 
-void LoraAdapter::MakeDeviceCopyIfNeeded(const Model& model, LoraParam& param) {
+std::shared_ptr<OrtValue> MakeDeviceCopyIfNeeded(const Model& model, const LoraParam& param) {
+  std::shared_ptr<OrtValue> result;
+  const auto& src_value = param.ort_user_supplied_value_;
+
   // Check if the target device is not CPU
   // XXX: Adjust for caching when implemented
-  if (!param.ort_device_value_ && model.device_type_ != DeviceType::CPU) {
+  if (model.device_type_ != DeviceType::CPU) {
     // Check if the user has already supplied his buffers on the target device
-    auto& source_value = param.ort_user_supplied_value_;
-    const auto& mem_info = source_value->GetTensorMemoryInfo();
+    const auto& mem_info = src_value->GetTensorMemoryInfo();
     auto src_device_type = mem_info.GetDeviceType();
 
     if ((model.device_type_ == DeviceType::CUDA &&
          src_device_type == OrtMemoryInfoDeviceType::OrtMemoryInfoDeviceType_GPU)) {
       // Re-use what user has supplied on GPU
-      param.ort_device_value_ = param.ort_user_supplied_value_;
+      result = src_value;
     } else if (src_device_type != OrtMemoryInfoDeviceType::OrtMemoryInfoDeviceType_CPU) {
       // XXX: Can the user supply buffers already on DML?
       throw std::runtime_error("Lora parameter buffers are on unsupported device: " +
                                std::to_string(static_cast<int>(model.device_type_)));
     } else {
-      param.ort_device_value_ = CopyToDevice(*source_value, model);
+      result = CopyToDevice(*src_value, model);
     }
+  } else {
+    result = src_value;
   }
+  return result;
 }
 
 void LoraAdapter::LoadParametersFromFlatBuffer(const std::string& file_name) {
@@ -121,10 +126,23 @@ void LoraAdapter::LoadParametersFromFlatBuffer(const std::string& file_name) {
 
 }  // namespace details
 
-LoraAdapterManagement::LoraAdapterManagement(const Model* model) : model_(model) {}
+void LoraAdapterContainer::LoadAdaptersFromConfig(const fs::path& model_path, const Config& config) {
 
-void LoraAdapterManagement::CreateAdapter(const std::string& adapter_name) {
-  std::unique_lock lock(mutex_);
+  AdapterMap adapters;
+  for (const auto& [adapter_name, file_name] : config.lora_adapters.adapters) {
+    auto hit = adapters.find(adapter_name);
+    if (hit != adapters.end()) {
+      throw std::runtime_error("Adapter: " + adapter_name + " already exist");
+    }
+    auto& adapter = adapters[adapter_name];
+    adapter.SetName(adapter_name);
+    auto full_path = model_path / file_name;
+    adapter.LoadParametersFromFlatBuffer(full_path.string());
+  }
+  adapters_.swap(adapters);
+}
+
+void LoraAdapterContainer::CreateAdapter(const std::string& adapter_name) {
   auto hit = adapters_.find(adapter_name);
   if (hit != adapters_.end()) {
     throw std::runtime_error("Adapter: " + adapter_name + " already exist");
@@ -133,23 +151,8 @@ void LoraAdapterManagement::CreateAdapter(const std::string& adapter_name) {
   adapter.SetName(adapter_name);
 }
 
-void LoraAdapterManagement::LoadAdaptersFromConfig(const fs::path& model_path, const Config& config) {
-
-  for (const auto& [adapter_name, file_name] : config.lora_adapters.adapters) {
-    auto hit = adapters_.find(adapter_name);
-    if (hit != adapters_.end()) {
-      throw std::runtime_error("Adapter: " + adapter_name + " already exist");
-    }
-    auto& adapter = adapters_[adapter_name];
-    adapter.SetName(adapter_name);
-    auto full_path = model_path / file_name;
-    adapter.LoadParametersFromFlatBuffer(full_path.string());
-  }
-}
-
-void LoraAdapterManagement::AddParameter(const std::string& adapter_name, std::string param_name,
+void LoraAdapterContainer::AddParameter(const std::string& adapter_name, std::string param_name,
                                          std::shared_ptr<OrtValue> ort_value) {
-  std::shared_lock lock(mutex_);
   auto hit = adapters_.find(adapter_name);
   if (hit == adapters_.end()) {
     throw std::runtime_error("Adapter: " + adapter_name + " does not exist");

@@ -224,8 +224,8 @@ def test_get_output(test_data_path, relative_model_path):
 
 def test_save_lora_params(test_data_path):
     # We convert npz file into flatbuffers file
-    npz_file_path = os.fspath(Path(test_data_path) / 'two_lora_params_param.npz')
-    fb_file = os.fspath(Path(test_data_path) / 'two_lora_params_param.fb')
+    npz_file_path = os.fspath(Path(test_data_path) / 'two_lora_params.npz')
+    fb_file = os.fspath(Path(test_data_path) / 'two_lora_params.fb')
 
     with np.load(npz_file_path) as data:
         to_save = {}

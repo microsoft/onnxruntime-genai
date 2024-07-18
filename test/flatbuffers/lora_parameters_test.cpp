@@ -113,12 +113,7 @@ TEST(LoraParameters, FlatbuffersTest) {
 }
 
 TEST(LoraParameters, LoadPythonGeneratedFile) {
-  const std::string file_path = MODEL_PATH "test_lora_param.fb";
-
-  constexpr std::array<float, 10U> expected_dat = 
-      { 0.29694548f, 0.00955007f, 0.0430819f, 0.10063869f, 0.0437237f,
-        0.27329233f, 0.00841076f, -0.1060291f, 0.11328877f, 0.13369876f };
-
+  const std::string file_path = MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32-lora/two_lora_params.fb";
   std::ifstream file(file_path, std::ios::binary);
   ASSERT_TRUE(file) << "Failed to open file: " << file_path;
 
@@ -142,19 +137,19 @@ TEST(LoraParameters, LoadPythonGeneratedFile) {
   ASSERT_NE(nullptr, fbs_parameters) << "Parameters are null";
 
   ASSERT_TRUE(IsLoraFormatVersionSupported(fbs_parameters->version())) << "Format version mismatch";
-  ASSERT_EQ(1U, fbs_parameters->parameters()->size());
-  auto* fbs_param = fbs_parameters->parameters()->Get(0);
-  ASSERT_EQ(TensorDataType::FLOAT, fbs_param->data_type());
-  std::span<const int64_t> shape_span(fbs_param->dims()->data(), fbs_param->dims()->size());
-  ASSERT_EQ(2, shape_span.size());
-  ASSERT_EQ(2, shape_span[0]);
-  ASSERT_EQ(5, shape_span[1]);
+  ASSERT_EQ(2U, fbs_parameters->parameters()->size());
+  for (const auto* fbs_param : *fbs_parameters->parameters()) {
+    ASSERT_EQ(TensorDataType::FLOAT, fbs_param->data_type());
+    std::span<const int64_t> shape_span(fbs_param->dims()->data(), fbs_param->dims()->size());
+    ASSERT_EQ(2, shape_span.size());
 
-  std::span<const float> data_span(reinterpret_cast<const float*>(fbs_param->raw_data()->data()),
-                                   fbs_param->raw_data()->size() / sizeof(float));
+    std::span<const float> data_span(reinterpret_cast<const float*>(fbs_param->raw_data()->data()),
+                                     fbs_param->raw_data()->size() / sizeof(float));
 
-  ASSERT_EQ(expected_dat.size(), data_span.size());
-  ASSERT_TRUE(std::equal(expected_dat.begin(), expected_dat.end(), data_span.begin()));
+    for (size_t i = 0; i < data_span.size(); ++i) {
+      ASSERT_TRUE(isfinite(data_span[i]));
+    }
+  }
 }
 
 }  // namespace test

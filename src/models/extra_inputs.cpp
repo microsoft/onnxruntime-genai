@@ -12,8 +12,8 @@ namespace Generators {
 ExtraInputs::ExtraInputs(const Model& model, State& state) : model_{model}, state_{state} {
   auto& params = *state_.params_;
 
-  const auto& lora_management = model_.GetLoraAdapterManagement();
-  const auto total_inputs = params.extra_inputs.size() + lora_management.GetParamNum();
+  const auto& lora_container = model_.GetLoraAdapterContainer();
+  const auto total_inputs = params.extra_inputs.size() + lora_container.GetParamNum();
   extra_input_names_.reserve(total_inputs);
   extra_inputs_.reserve(total_inputs);
 
@@ -44,8 +44,8 @@ ExtraInputs::ExtraInputs(const Model& model, State& state) : model_{model}, stat
   // Add Lora Parameters
   const std::set<std::string> adapter_names(params.lora_settings.active_lora_adapters.begin(),
                                             params.lora_settings.active_lora_adapters.end());
-  lora_management.OutputAdaptersParameters(adapter_names, std::back_inserter(extra_input_names_),
-                                           std::back_inserter(extra_inputs_));
+  OutputAdaptersParameters(model, lora_container, adapter_names, std::back_inserter(extra_input_names_),
+                           std::back_inserter(extra_inputs_));
 }
 
 void ExtraInputs::Add() {

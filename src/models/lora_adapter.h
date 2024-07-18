@@ -18,6 +18,7 @@
 #include <string>
 #include <type_traits>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace Generators {
@@ -26,11 +27,20 @@ struct Config;
 
 namespace lora_parameters {
 struct Parameters;
-} // namespace lora_parameters
+}  // namespace lora_parameters
 
 struct Model;
 
 namespace details {
+
+template <class Iter>
+struct Range : std::pair<Iter, Iter> {
+  using Base = std::pair<Iter, Iter>;
+  using Base::Base;
+
+  Iter begin() const { return this->first; }
+  Iter end() const { return this->second; }
+};
 
 /// <summary>
 /// Creates an empty input tensor for a given Lora parameter.
@@ -44,8 +54,9 @@ namespace details {
 ///   The resulting shape would be either [hidden_dim, 0] or [0, hidden_dim].
 /// </summary>
 /// <param name="tensor">Tensor supplied by the user for a Lora parameter</param>
+/// <param name="requested_mem_info">memory location where the empty tensor is to be created</param>
 /// <returns>A OrtValue over a dummy buffer.</returns>
-std::shared_ptr<OrtValue> CreateEmptyInput(const OrtValue& tensor);
+std::shared_ptr<OrtValue> CreateEmptyInput(const Model& model, const OrtValue& tensor);
 
 /// <summary>
 /// A named Lora Parameters pair
@@ -64,6 +75,14 @@ struct LoraParam {
   // XXX: Insert caching logic and convert to weak_ptr when cache is implemented
   std::shared_ptr<OrtValue> ort_device_value_;
 };
+
+/// <summary>
+/// Copy parameter to a device according to the model's settings
+/// </summary>
+/// <param name="model"></param>
+/// <param name="param"></param>
+/// <returns></returns>
+std::shared_ptr<OrtValue> MakeDeviceCopyIfNeeded(const Model& model, const LoraParam& param);
 
 // This class takes hold of the serialized parameters that
 // are either loaded from disk or mapped from disk (coming in the future)
@@ -90,7 +109,6 @@ class BinaryFormatHolder {
   std::vector<uint8_t> buffer_;
   const lora_parameters::Parameters* parameters_;
 };
-
 
 /// <summary>
 /// This class represents a collection of named pairs of
@@ -122,13 +140,10 @@ class LoraAdapter {
   /// Returns number of parameters for buffer estimates
   /// </summary>
   size_t GetParamNum() const noexcept {
-    std::shared_lock lock(mutex_);
     return parameters_.size();
   }
 
   void AddParameter(std::string param_name, std::shared_ptr<OrtValue> ort_value) {
-    std::unique_lock lock(mutex_);
-
     auto hit =
         std::find_if(parameters_.begin(), parameters_.end(), [&](const auto& p) { return p.name_ == param_name; });
 
@@ -139,60 +154,23 @@ class LoraAdapter {
     parameters_.emplace_back(std::move(param_name), std::move(ort_value));
   }
 
-  /// <summary>
-  /// Outputs OrtValues for all of the parameters.
-  /// If the model is not on CPU, it will copy the user supplied buffers to the target device
-  /// if not already done so.
-  /// </summary>
-  /// <typeparam name="OutNameIter"></typeparam>
-  /// <typeparam name="OutParamIter"></typeparam>
-  /// <param name="model"></param>
-  /// <param name="out_name"></param>
-  /// <param name="out_param"></param>
-  template <typename OutNameIter, typename OutParamIter>
-  void GetParameters(const Model* model, OutNameIter& out_name, OutParamIter& out_param) const {
-    std::shared_lock lock(mutex_);
-    for (const auto& p : parameters_) {
-      *out_name = p.name_;
-      ++out_name;
-      const auto& result_val = (p.ort_device_value_) ? p.ort_device_value_ : p.ort_user_supplied_value_;
-      *out_param = result_val;
-      ++out_param;
-    }
-  }
+
+  using ParamContainer = std::vector<LoraParam>;
+  using ParamIterator = ParamContainer::const_iterator;
 
   /// <summary>
-  /// Returns empty parameters for all the parameters in the adapter.
+  /// Gets access to adapter parameters
   /// </summary>
-  /// <typeparam name="OutNameIter"></typeparam>
-  /// <typeparam name="OutParamIter"></typeparam>
-  /// <param name="out_name"></param>
-  /// <param name="out_param"></param>
-  template <typename OutNameIter, typename OutParamIter>
-  void GetEmptyParameters(OutNameIter& out_name, OutParamIter& out_param) const {
-    std::shared_lock lock(mutex_);
-    for (const auto& p : parameters_) {
-      *out_name = p.name_;
-      ++out_name;
-      const auto& result_val = (p.ort_device_value_) ? p.ort_device_value_ : p.ort_user_supplied_value_;
-      *out_param = CreateEmptyInput(*result_val);
-      ++out_param;
-    }
+  /// <returns></returns>
+  Range<ParamIterator> GetParameters() const noexcept {
+    return Range<ParamIterator>(parameters_.cbegin(), parameters_.cend());
   }
-
 
  private:
-  /// <summary>
-  /// Create a copy if the parameter on device if not already done so.
-  /// </summary>
-  /// <param name="model"></param>
-  /// <param name="param"></param>
-  void MakeDeviceCopyIfNeeded(const Model& model, LoraParam& param);
 
   std::string name_;
-  mutable std::shared_mutex mutex_;
   BinaryFormatHolder format_holder_;
-  std::vector<LoraParam> parameters_;
+  ParamContainer parameters_;
 };
 
 }  // namespace details
@@ -200,12 +178,12 @@ class LoraAdapter {
 /// <summary>
 /// This class manages the collection of Lora Adapters
 /// </summary>
-class LoraAdapterManagement {
+class LoraAdapterContainer {
  public:
-  LoraAdapterManagement(const Model* model);
-  ~LoraAdapterManagement() = default;
-  LoraAdapterManagement(const LoraAdapterManagement&) = delete;
-  LoraAdapterManagement& operator=(const LoraAdapterManagement&) = delete;
+  LoraAdapterContainer() = default;
+  ~LoraAdapterContainer() = default;
+  LoraAdapterContainer(const LoraAdapterContainer&) = delete;
+  LoraAdapterContainer& operator=(const LoraAdapterContainer&) = delete;
 
   /// <summary>
   /// This API loads the Lora Adapters as specified in the configuration
@@ -229,29 +207,6 @@ class LoraAdapterManagement {
   /// <param name="p"></param>
   void AddParameter(const std::string& adapter_name, std::string param_name, std::shared_ptr<OrtValue> p);
 
-  /// <summary>
-  /// Outputs pointers to names and its corresponding OrtValue params
-  /// for all active adapters.
-  /// </summary>
-  /// <typeparam name="NamesOutputIter"></typeparam>
-  /// <typeparam name="TensorOutputIter"></typeparam>
-  /// <param name="active_adapters">Set of active adapter names for this generator</param>
-  /// <param name="names_out">Output Iterator for std::string</param>
-  /// <param name="ort_values_out">Output Iterator for std::shared_ptr of OrtValue</param>
-  template <class NamesOutputIter, class TensorOutputIter>
-  void OutputAdaptersParameters(const std::set<std::string>& adapter_names, NamesOutputIter names_out,
-                                TensorOutputIter params_out) const {
-    std::shared_lock lock(mutex_);
-    // Output Parameters for adapters in adapter_names
-    // otherwise output empty parameters
-    for (const auto& [name, adapter] : adapters_) {
-      if (adapter_names.find(name) == adapter_names.end()) {
-        adapter.GetEmptyParameters(names_out, params_out);
-      } else {
-        adapter.GetParameters(model_, names_out, params_out);
-      }
-    }
-  }
 
   /// <summary>
   /// Returns total number of parameters across all adapters
@@ -259,11 +214,21 @@ class LoraAdapterManagement {
   /// <returns></returns>
   size_t GetParamNum() const noexcept {
     size_t result = 0;
-    std::shared_lock lock(mutex_);
     for (const auto& [_, adapter] : adapters_) {
       result += adapter.GetParamNum();
     }
     return result;
+  }
+
+  using AdapterMap = std::unordered_map<std::string, details::LoraAdapter>;
+  using AdapterIterator = AdapterMap::const_iterator;
+
+  /// <summary>
+  /// Returns iterators to the adapters
+  /// </summary>
+  /// <returns></returns>
+  details::Range<AdapterIterator> GetAdapters() const noexcept {
+    return {adapters_.cbegin(), adapters_.cend()};
   }
 
   /// <summary>
@@ -272,16 +237,37 @@ class LoraAdapterManagement {
   /// <param name="adapter_name"></param>
   /// <returns>true if so</returns>
   bool HasAdapter(const std::string& adapter_name) const noexcept {
-    std::shared_lock lock(mutex_);
     return adapters_.find(adapter_name) != adapters_.end();
   }
 
  private:
-  const Model* model_;  // optional
-  mutable std::shared_mutex mutex_;
-
-  using AdapterMap = std::unordered_map<std::string, details::LoraAdapter>;
   AdapterMap adapters_;
 };
+
+template <class NamesOutputIter, class TensorOutputIter>
+void OutputAdaptersParameters(const Model& model,
+                              const LoraAdapterContainer& lora_container,
+                              const std::set<std::string>& adapter_names,
+                              NamesOutputIter names_out,
+                              TensorOutputIter params_out) {
+  for (const auto& [name, adapter] : lora_container.GetAdapters()) {
+    if (adapter_names.find(name) == adapter_names.end()) {
+      for (const auto& lora_param : adapter.GetParameters()) {
+        // Output empty values for inactive adapters
+        *names_out = lora_param.name_;
+        ++names_out;
+        *params_out = details::CreateEmptyInput(model, *lora_param.ort_user_supplied_value_);
+        ++params_out;
+      }
+    } else {
+      for (const auto& lora_param : adapter.GetParameters()) {
+        *names_out = lora_param.name_;
+        ++names_out;
+        *params_out = details::MakeDeviceCopyIfNeeded(model, lora_param);
+        ++params_out;
+      }
+    }
+  }
+}
 
 }  // namespace Generators

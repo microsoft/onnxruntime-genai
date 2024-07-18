@@ -243,11 +243,13 @@ ONNXTensorElementDataType SessionInfo::GetOutputDataType(const std::string& name
   return result->second;
 }
 
-Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)}, lora_adapters_(this) {
+Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)}{
   // TODO: add function to create run options
   run_options_ = OrtRunOptions::Create();
 
   CreateSessionOptions();
+
+  lora_adapters_.LoadAdaptersFromConfig(config_->config_path, *config_);
 }
 
 Model::~Model() = default;

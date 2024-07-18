@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 #include "generators.h"
 #include "json.h"
+
 #include <fstream>
 #include <sstream>
 
@@ -460,17 +461,30 @@ struct Search_Element : JSON::Element {
   Config::Search& v_;
 };
 
-class LoraAdapters_Element : JSON::Element {
+class LoraAdapters_Element : public JSON::Element {
  public:
   explicit LoraAdapters_Element(Config::LoraAdapters& v) noexcept : v_{v} {}
 
  private:
 
+  JSON::Element& OnObject(std::string_view name) override {
+    if (current_adapter_ != name) {
+      current_adapter_ = name;
+      return *this;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
   void OnString(std::string_view name, std::string_view path) override {
-    v_.adapters.emplace(name, path);
+    if (name == "weights") {
+      v_.adapters.emplace(current_adapter_, path);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
   }
 
   Config::LoraAdapters& v_;
+  std::string current_adapter_;
 };
 
 void SetSearchNumber(Config::Search& search, std::string_view name, double value) {
@@ -511,6 +525,9 @@ struct Root_Element : JSON::Element {
     }
     if (name == "search") {
       return search_element_;
+    }
+    if (name == "adapters") {
+      return lora_adapters_element_;
     }
     throw JSON::unknown_value_error{};
   }
