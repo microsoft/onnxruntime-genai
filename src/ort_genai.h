@@ -202,6 +202,29 @@ struct OgaGeneratorParams : OgaAbstract {
     OgaCheckResult(OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(this, max_batch_size));
   }
 
+  /// <summary>
+  /// Sets active adapters
+  /// </summary>
+  void SetActiveAdapterNames(const std::vector<std::string>& adapters) {
+    std::vector<const char*> adapter_names;
+    for (const auto& adapter : adapters) {
+      adapter_names.push_back(adapter.c_str());
+    }
+    OgaCheckResult(OgaGeneratorParamsSetActiveAdapters(this, adapter_names.data(), adapter_names.size()));
+  }
+
+  /// <summary>
+  /// Sets active adapters
+  /// </summary>
+  void SetActiveAdapterNames(const std::vector<const char*>& adapter_names) {
+    OgaCheckResult(OgaGeneratorParamsSetActiveAdapters(this, adapter_names.data(), adapter_names.size()));
+  }
+
+  template <typename T, size_t N>
+  void SetActiveAdapterNames(T (&adapter_names)[N]) {
+    OgaCheckResult(OgaGeneratorParamsSetActiveAdapters(this, adapter_names, N));
+  }
+
   static void operator delete(void* p) { OgaDestroyGeneratorParams(reinterpret_cast<OgaGeneratorParams*>(p)); }
 };
 
