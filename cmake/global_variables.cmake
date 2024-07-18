@@ -66,6 +66,7 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
 )
 
 file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_ALL_SHARED_LIBS}")
+set(ortgenai_embed_libs "") # shared libs that will be embedded inside the onnxruntime-genai package
 
 if(NOT EXISTS "${ORT_LIB_DIR}/${ONNXRUNTIME_LIB}")
   message(FATAL_ERROR "Expected the ONNX Runtime library to be found at ${ORT_LIB_DIR}/${ONNXRUNTIME_LIB}. Actual: Not found.")
