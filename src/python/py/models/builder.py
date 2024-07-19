@@ -1526,23 +1526,18 @@ class Model:
         self.layernorm_attrs["skip_input"] = f"{o_matmul_name if not o_bias_exists else o_add_name}/output_0"
 
     def make_attention_unpacked(self, layer_id, attention, root_input, **kwargs):
-        q_size = self.num_attn_heads * self.head_size
-        kv_size = self.num_kv_heads * self.head_size
+        # q_size = self.num_attn_heads * self.head_size
+        # kv_size = self.num_kv_heads * self.head_size
 
         qkv_proj = 'qkv_proj' if hasattr(attention, 'qkv_proj') else 'query_key_value'
         qkv_linear = eval(f"attention.{qkv_proj}")
 
-        attention.q_proj = torch.nn.Linear(in_features=q_size, out_features=q_size)
-        attention.q_proj.weight = torch.nn.Parameter(qkv_linear.weight[: q_size, :])
-        attention.q_proj.bias = None if qkv_linear.bias is None else torch.nn.Parameter(qkv_linear.bias[: q_size])
-
-        attention.k_proj = torch.nn.Linear(in_features=q_size, out_features=kv_size)
-        attention.k_proj.weight = torch.nn.Parameter(qkv_linear.weight[q_size : q_size + kv_size, :])
-        attention.k_proj.bias = None if qkv_linear.bias is None else torch.nn.Parameter(qkv_linear.bias[q_size : q_size + kv_size])
-
-        attention.v_proj = torch.nn.Linear(in_features=q_size, out_features=kv_size)
-        attention.v_proj.weight = torch.nn.Parameter(qkv_linear.weight[q_size + kv_size :, :])
-        attention.v_proj.bias = None if qkv_linear.bias is None else torch.nn.Parameter(qkv_linear.bias[q_size + kv_size :])
+        if hasattr(qkv_linear, "base_layer"):
+            # For LoRA packed `MatMul`
+            return self.make_attention_unpacked_lora(layer_id, attention, qkv_linear, root_input, **kwargs)
+        else:
+            # For regular packed `MatMul`
+            return self.make_attention_unpacked_regular(layer_id, attention, qkv_linear, root_input, **kwargs)
 
         # Delete original packed weights and any references to them (e.g. `del qkv_linear` isn't sufficient)
         del qkv_linear
@@ -1550,6 +1545,72 @@ class Model:
             del attention.qkv_proj
         else:
             del attention.query_key_value
+
+    def make_attention_unpacked_lora(self, layer_id, attention, qkv_linear, root_input, **kwargs):
+        from peft.tuners.lora.layer import LoraLayer
+
+        q_size = self.num_attn_heads * self.head_size
+        kv_size = self.num_kv_heads * self.head_size
+
+        # Create Q/K/V base layers
+        q_proj = torch.nn.Linear(in_features=q_size, out_features=q_size)
+        q_proj.weight = torch.nn.Parameter(qkv_linear.weight[: q_size, :], requires_grad=False)
+        q_proj.bias = None if qkv_linear.bias is None else torch.nn.Parameter(qkv_linear.bias[: q_size], requires_grad=False)
+
+        k_proj = torch.nn.Linear(in_features=q_size, out_features=kv_size)
+        k_proj.weight = torch.nn.Parameter(qkv_linear.weight[q_size : q_size + kv_size, :], requires_grad=False)
+        k_proj.bias = None if qkv_linear.bias is None else torch.nn.Parameter(qkv_linear.bias[q_size : q_size + kv_size], requires_grad=False)
+
+        v_proj = torch.nn.Linear(in_features=q_size, out_features=kv_size)
+        v_proj.weight = torch.nn.Parameter(qkv_linear.weight[q_size + kv_size :, :], requires_grad=False)
+        v_proj.bias = None if qkv_linear.bias is None else torch.nn.Parameter(qkv_linear.bias[q_size + kv_size :], requires_grad=False)
+
+        # Create Q/K/V lora_B layers
+        lora_B = qkv_linear.lora_B.default
+
+        q_lora_B = torch.nn.Linear(in_features=q_size, out_features=q_size)
+        q_lora_B.weight = torch.nn.Parameter(lora_B.weight[: q_size, :], requires_grad=False)
+        q_lora_B.bias = None if lora_B.bias is None else torch.nn.Parameter(lora_B.bias[: q_size], requires_grad=False)
+
+        k_lora_B = torch.nn.Linear(in_features=q_size, out_features=kv_size)
+        k_lora_B.weight = torch.nn.Parameter(lora_B.weight[q_size : q_size + kv_size, :], requires_grad=False)
+        k_lora_B.bias = None if lora_B.bias is None else torch.nn.Parameter(lora_B.bias[q_size : q_size + kv_size], requires_grad=False)
+
+        v_lora_B = torch.nn.Linear(in_features=q_size, out_features=kv_size)
+        v_lora_B.weight = torch.nn.Parameter(lora_B.weight[q_size + kv_size :, :], requires_grad=False)
+        v_lora_B.bias = None if lora_B.bias is None else torch.nn.Parameter(lora_B.bias[q_size + kv_size :], requires_grad=False)
+
+        # Create Q/K/V LoRA layers
+        attention.q_proj = LoraLayer(q_proj)
+        attention.q_proj.lora_A = qkv_linear.lora_A
+        attention.q_proj.lora_B.default = q_lora_B
+        attention.q_proj.scaling = qkv_linear.scaling
+
+        attention.k_proj = LoraLayer(k_proj)
+        attention.k_proj.lora_A = qkv_linear.lora_A
+        attention.k_proj.lora_B.default = k_lora_B
+        attention.k_proj.scaling = qkv_linear.scaling
+
+        attention.v_proj = LoraLayer(v_proj)
+        attention.v_proj.lora_A = qkv_linear.lora_A
+        attention.v_proj.lora_B.default = v_lora_B
+        attention.v_proj.scaling = qkv_linear.scaling
+
+    def make_attention_unpacked_regular(self, layer_id, attention, qkv_linear, root_input, **kwargs):
+        q_size = self.num_attn_heads * self.head_size
+        kv_size = self.num_kv_heads * self.head_size
+
+        attention.q_proj = torch.nn.Linear(in_features=q_size, out_features=q_size)
+        attention.q_proj.weight = torch.nn.Parameter(qkv_linear.weight[: q_size, :], requires_grad=False)
+        attention.q_proj.bias = None if qkv_linear.bias is None else torch.nn.Parameter(qkv_linear.bias[: q_size], requires_grad=False)
+
+        attention.k_proj = torch.nn.Linear(in_features=q_size, out_features=kv_size)
+        attention.k_proj.weight = torch.nn.Parameter(qkv_linear.weight[q_size : q_size + kv_size, :], requires_grad=False)
+        attention.k_proj.bias = None if qkv_linear.bias is None else torch.nn.Parameter(qkv_linear.bias[q_size : q_size + kv_size], requires_grad=False)
+
+        attention.v_proj = torch.nn.Linear(in_features=q_size, out_features=kv_size)
+        attention.v_proj.weight = torch.nn.Parameter(qkv_linear.weight[q_size + kv_size :, :], requires_grad=False)
+        attention.v_proj.bias = None if qkv_linear.bias is None else torch.nn.Parameter(qkv_linear.bias[q_size + kv_size :], requires_grad=False)
 
     def make_mlp(self, layer_id, mlp, root_input):
         if self.mlp_attrs["use_proj"]:
@@ -1560,15 +1621,89 @@ class Model:
             raise NotImplementedError(f"The MLP layer type is not set.")
 
     def make_mlp_unpacked(self, layer_id, mlp, root_input):
+        if hasattr(mlp, "base_layer"):
+            # For LoRA packed `MatMul`
+            return self.make_mlp_unpacked_lora(layer_id, mlp, root_input)
+        else:
+            # For regular packed `MatMul`
+            return self.make_mlp_unpacked_regular(layer_id, mlp, root_input)
+
+    def make_mlp_unpacked_lora(self, layer_id, mlp, root_input):
+        from peft.tuners.lora.layer import LoraLayer
+
+        # Create GateProj/UpProj base layers
+        gate_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
+        gate_proj.weight = torch.nn.Parameter(mlp.gate_up_proj.weight[ : self.intermediate_size, :], requires_grad=False)
+
+        up_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
+        up_proj.weight = torch.nn.Parameter(mlp.gate_up_proj.weight[self.intermediate_size :, :], requires_grad=False)
+
+        # Create GateProj/UpProj lora_B layers
+        lora_B = mlp.lora_B.default
+
+        gate_proj_lora_B = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
+        gate_proj_lora_B.weight = torch.nn.Parameter(lora_B.weight[ : self.intermediate_size, :], requires_grad=False)
+
+        up_proj_lora_B = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
+        up_proj_lora_B.weight = torch.nn.Parameter(lora_B.weight[self.intermediate_size :, :], requires_grad=False)
+
+        # Create GateProj/UpProj LoRA layers
+        mlp.gate_proj = LoraLayer(q_proj)
+        mlp.gate_proj.lora_A = mlp.gate_up_proj.lora_A
+        mlp.gate_proj.lora_B.default = gate_proj_lora_B
+        mlp.gate_proj.scaling = mlp.gate_up_proj.scaling
+
+        mlp.up_proj = LoraLayer(k_proj)
+        mlp.up_proj.lora_A = mlp.gate_up_proj.lora_A
+        mlp.up_proj.lora_B.default = up_proj_lora_B
+        mlp.up_proj.scaling = mlp.gate_up_proj.scaling
+
+    def make_mlp_unpacked_regular(self, layer_id, mlp, root_input):
         packed_proj = getattr(mlp, "gate_up_proj", None) or getattr(mlp, "dense_h_to_4h", None)
         mlp.gate_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
         mlp.gate_proj.weight = torch.nn.Parameter(packed_proj.weight[: self.intermediate_size, :])
 
         mlp.up_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
         mlp.up_proj.weight = torch.nn.Parameter(packed_proj.weight[self.intermediate_size :, :])
-
         # Delete original packed weights
         del packed_proj
+
+    def make_mlp_unpacked_lora(self, layer_id, mlp, root_input):
+        from peft.tuners.lora.layer import LoraLayer
+
+        # Create GateProj/UpProj base layers
+        gate_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
+        gate_proj.weight = torch.nn.Parameter(mlp.gate_up_proj.weight[ : self.intermediate_size, :], requires_grad=False)
+
+        up_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
+        up_proj.weight = torch.nn.Parameter(mlp.gate_up_proj.weight[self.intermediate_size :, :], requires_grad=False)
+
+        # Create GateProj/UpProj lora_B layers
+        lora_B = mlp.lora_B.default
+
+        gate_proj_lora_B = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
+        gate_proj_lora_B.weight = torch.nn.Parameter(lora_B.weight[ : self.intermediate_size, :], requires_grad=False)
+
+        up_proj_lora_B = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
+        up_proj_lora_B.weight = torch.nn.Parameter(lora_B.weight[self.intermediate_size :, :], requires_grad=False)
+
+        # Create GateProj/UpProj LoRA layers
+        mlp.gate_proj = LoraLayer(q_proj)
+        mlp.gate_proj.lora_A = mlp.gate_up_proj.lora_A
+        mlp.gate_proj.lora_B.default = gate_proj_lora_B
+        mlp.gate_proj.scaling = mlp.gate_up_proj.scaling
+
+        mlp.up_proj = LoraLayer(k_proj)
+        mlp.up_proj.lora_A = mlp.gate_up_proj.lora_A
+        mlp.up_proj.lora_B.default = up_proj_lora_B
+        mlp.up_proj.scaling = mlp.gate_up_proj.scaling
+
+    def make_mlp_unpacked_regular(self, layer_id, mlp, root_input):
+        mlp.gate_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
+        mlp.gate_proj.weight = torch.nn.Parameter(mlp.gate_up_proj.weight[ : self.intermediate_size, :], requires_grad=False)
+
+        mlp.up_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
+        mlp.up_proj.weight = torch.nn.Parameter(mlp.gate_up_proj.weight[self.intermediate_size :, :], requires_grad=False)
 
     def make_mlp_proj(self, layer_id, mlp, root_input):
         # Make nodes for the MLP subgraph
@@ -2729,16 +2864,16 @@ class Phi3Small8KModel(Model):
         qkv_bias = attention.query_key_value.bias.view(self.num_kv_heads, (self.num_attn_heads // self.num_kv_heads) + 2, self.head_size)
 
         attention.q_proj = torch.nn.Linear(in_features=q_size, out_features=q_size)
-        attention.q_proj.weight = torch.nn.Parameter(qkv_weight[:, :, :-2].reshape(q_size, q_size).T)
-        attention.q_proj.bias = None if attention.query_key_value.bias is None else torch.nn.Parameter(qkv_bias[:, :-2].flatten())
+        attention.q_proj.weight = torch.nn.Parameter(qkv_weight[:, :, :-2].reshape(q_size, q_size).T, requires_grad=False)
+        attention.q_proj.bias = None if attention.query_key_value.bias is None else torch.nn.Parameter(qkv_bias[:, :-2].flatten(), requires_grad=False)
 
         attention.k_proj = torch.nn.Linear(in_features=q_size, out_features=kv_size)
-        attention.k_proj.weight = torch.nn.Parameter(qkv_weight[:, :, [-2]].reshape(q_size, kv_size).T)
-        attention.k_proj.bias = None if attention.query_key_value.bias is None else torch.nn.Parameter(qkv_bias[:, [-2]].flatten())
+        attention.k_proj.weight = torch.nn.Parameter(qkv_weight[:, :, [-2]].reshape(q_size, kv_size).T, requires_grad=False)
+        attention.k_proj.bias = None if attention.query_key_value.bias is None else torch.nn.Parameter(qkv_bias[:, [-2]].flatten(), requires_grad=False)
 
         attention.v_proj = torch.nn.Linear(in_features=q_size, out_features=kv_size)
-        attention.v_proj.weight = torch.nn.Parameter(qkv_weight[:, :, [-1]].reshape(q_size, kv_size).T)
-        attention.v_proj.bias = None if attention.query_key_value.bias is None else torch.nn.Parameter(qkv_bias[:, [-1]].flatten())
+        attention.v_proj.weight = torch.nn.Parameter(qkv_weight[:, :, [-1]].reshape(q_size, kv_size).T, requires_grad=False)
+        attention.v_proj.bias = None if attention.query_key_value.bias is None else torch.nn.Parameter(qkv_bias[:, [-1]].flatten(), requires_grad=False)
 
         del qkv_weight
         del qkv_bias
