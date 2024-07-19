@@ -143,17 +143,6 @@ class LoraAdapter {
     return parameters_.size();
   }
 
-  void AddParameter(std::string param_name, std::shared_ptr<OrtValue> ort_value) {
-    auto hit =
-        std::find_if(parameters_.begin(), parameters_.end(), [&](const auto& p) { return p.name_ == param_name; });
-
-    if (hit != parameters_.end()) {
-      throw std::runtime_error("Adapter: " + name_ + " already has a parameter named: " + param_name);
-    }
-
-    parameters_.emplace_back(std::move(param_name), std::move(ort_value));
-  }
-
   using ParamContainer = std::vector<LoraParam>;
   using ParamIterator = ParamContainer::const_iterator;
 
@@ -189,21 +178,6 @@ class LoraAdapterContainer {
   /// <param name="config_path">path to where model and lora weights are expected</param>
   /// <param name="config">configuration settings</param>
   void LoadAdaptersFromConfig(const fs::path& model_path, const Config& config);
-
-  /// <summary>
-  /// Creates a adapter object to which one can add Lora parameters
-  /// </summary>
-  /// <param name="adapter_name"></param>
-  /// <param name="max_beam_batch_size"></param>
-  void CreateAdapter(const std::string& adapter_name);
-
-  /// <summary>
-  /// Add named Lora Parameter to the specified adapter
-  /// </summary>
-  /// <param name="adapter_name"></param>
-  /// <param name="param_name"></param>
-  /// <param name="p"></param>
-  void AddParameter(const std::string& adapter_name, std::string param_name, std::shared_ptr<OrtValue> p);
 
   /// <summary>
   /// Returns total number of parameters across all adapters

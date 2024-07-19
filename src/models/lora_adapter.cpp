@@ -141,25 +141,4 @@ void LoraAdapterContainer::LoadAdaptersFromConfig(const fs::path& model_path, co
   adapters_.swap(adapters);
 }
 
-void LoraAdapterContainer::CreateAdapter(const std::string& adapter_name) {
-  auto hit = adapters_.find(adapter_name);
-  if (hit != adapters_.end()) {
-    throw std::runtime_error("Adapter: " + adapter_name + " already exist");
-  }
-  auto& adapter = adapters_[adapter_name];
-  adapter.SetName(adapter_name);
-}
-
-void LoraAdapterContainer::AddParameter(const std::string& adapter_name, std::string param_name,
-                                        std::shared_ptr<OrtValue> ort_value) {
-  auto hit = adapters_.find(adapter_name);
-  if (hit == adapters_.end()) {
-    throw std::runtime_error("Adapter: " + adapter_name + " does not exist");
-  }
-
-  auto& adapter = hit->second;
-
-  adapter.AddParameter(std::move(param_name), std::move(ort_value));
-}
-
 }  // namespace Generators
