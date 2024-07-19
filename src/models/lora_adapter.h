@@ -63,7 +63,6 @@ std::shared_ptr<OrtValue> CreateEmptyInput(const Model& model, const OrtValue& t
 /// </summary>
 struct LoraParam {
   LoraParam() = default;
-  LoraParam(std::string name, const std::shared_ptr<Tensor>& parameter);
   LoraParam(std::string name, std::shared_ptr<OrtValue> parameter);
 
   std::string name_;
@@ -71,9 +70,6 @@ struct LoraParam {
   // This is created over the same user supplied buffer as the originally
   // passed in tensor.
   std::shared_ptr<OrtValue> ort_user_supplied_value_;
-  // Copy on device if needed.
-  // XXX: Insert caching logic and convert to weak_ptr when cache is implemented
-  std::shared_ptr<OrtValue> ort_device_value_;
 };
 
 /// <summary>

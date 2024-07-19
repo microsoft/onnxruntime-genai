@@ -220,6 +220,11 @@ struct OgaGeneratorParams : OgaAbstract {
     OgaCheckResult(OgaGeneratorParamsSetActiveAdapters(this, adapter_names.data(), adapter_names.size()));
   }
 
+  template<size_t N>
+  void SetActiveAdapterNames(const std::array<const char*, N>& adapter_names) {
+    OgaCheckResult(OgaGeneratorParamsSetActiveAdapters(this, adapter_names.data(), adapter_names.size()));
+  }
+
   template <typename T, size_t N>
   void SetActiveAdapterNames(T (&adapter_names)[N]) {
     OgaCheckResult(OgaGeneratorParamsSetActiveAdapters(this, adapter_names, N));

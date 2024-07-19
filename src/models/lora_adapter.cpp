@@ -35,7 +35,7 @@ std::shared_ptr<OrtValue> CreateEmptyInput(const Model& model, const OrtValue& o
   // Zero out lora_r dim
   const size_t last_dim = shape[num_dims - 1];
   const size_t penal_dim = shape[num_dims - 2];
-  if (last_dim < penal_dim) {
+  if (last_dim < penal_dim) { 
     shape[num_dims - 1] = 0;
   } else {
     shape[num_dims - 2] = 0;
@@ -68,14 +68,6 @@ void BinaryFormatHolder::Load(const std::string& file_name) {
 
   parameters_ = lora_parameters::GetParameters(buffer_.data());
   lora_parameters::IsLoraFormatVersionSupported(parameters_->version());
-}
-
-LoraParam::LoraParam(std::string name, const std::shared_ptr<Tensor>& parameter) : name_(std::move(name)) {
-  // Create a duplicate of the ort_value over the same user supplied buffer
-  // we want ort_value to be owned by a shared_ptr so it can be shared
-  // We could still the unique_ptr from the original tensor, but that would not
-  // be a good practice and the internal ORT OrtValue copy constructor is not public.
-  ort_user_supplied_value_ = DuplicateOrtValue(*parameter->ort_tensor_);
 }
 
 LoraParam::LoraParam(std::string name, std::shared_ptr<OrtValue> ort_value)
