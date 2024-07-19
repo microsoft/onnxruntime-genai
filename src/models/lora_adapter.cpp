@@ -35,7 +35,7 @@ std::shared_ptr<OrtValue> CreateEmptyInput(const Model& model, const OrtValue& o
   // Zero out lora_r dim
   const size_t last_dim = shape[num_dims - 1];
   const size_t penal_dim = shape[num_dims - 2];
-  if (last_dim < penal_dim) { 
+  if (last_dim < penal_dim) {
     shape[num_dims - 1] = 0;
   } else {
     shape[num_dims - 2] = 0;
@@ -62,12 +62,19 @@ void BinaryFormatHolder::Load(const std::string& file_name) {
 
   is.close();
 
-  lora_parameters::utils::IsGenAiLoraFormatModelBytes(reinterpret_cast<const uint8_t*>(buffer_.data()), file_size);
+  if (!lora_parameters::utils::IsGenAiLoraFormatModelBytes(reinterpret_cast<const uint8_t*>(buffer_.data()), file_size)) {
+    throw std::runtime_error(file_name + ": does not appear to be a valid lora parameter format");
+  }
+
   flatbuffers::Verifier verifier(buffer_.data(), file_size);
-  lora_parameters::VerifyParametersBuffer(verifier);
+  if (!lora_parameters::VerifyParametersBuffer(verifier)) {
+    throw std::runtime_error(file_name + ": fails flatbuffers format verification");
+  }
 
   parameters_ = lora_parameters::GetParameters(buffer_.data());
-  lora_parameters::IsLoraFormatVersionSupported(parameters_->version());
+  if (!lora_parameters::IsLoraFormatVersionSupported(parameters_->version())) {
+    throw std::runtime_error(file_name + ": unsupported lora format version");
+  }
 }
 
 LoraParam::LoraParam(std::string name, std::shared_ptr<OrtValue> ort_value)

@@ -51,7 +51,7 @@ TEST(LoraParameters, FlatbuffersTest) {
 
   // Verify the buffer first
   std::span<const uint8_t> serialized_span(reinterpret_cast<const uint8_t*>(serialized.data()), serialized.size());
-  utils::IsGenAiLoraFormatModelBytes(serialized_span.data(), serialized_span.size());
+  ASSERT_TRUE(utils::IsGenAiLoraFormatModelBytes(serialized_span.data(), serialized_span.size()));
 
   flatbuffers::Verifier verifier(serialized_span.data(), serialized_span.size());
   ASSERT_TRUE(VerifyParametersBuffer(verifier));
@@ -129,7 +129,7 @@ TEST(LoraParameters, LoadPythonGeneratedFile) {
   file.close();
 
   std::span<const uint8_t> serialized_span(reinterpret_cast<const uint8_t*>(serialized.data()), serialized.size());
-  utils::IsGenAiLoraFormatModelBytes(serialized_span.data(), serialized_span.size());
+  ASSERT_TRUE(utils::IsGenAiLoraFormatModelBytes(serialized_span.data(), serialized_span.size()));
 
   flatbuffers::Verifier verifier(serialized_span.data(), serialized_span.size());
   ASSERT_TRUE(VerifyParametersBuffer(verifier));
