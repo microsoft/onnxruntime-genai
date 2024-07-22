@@ -598,6 +598,8 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
     : tokenizer_{std::make_shared<Tokenizer>(config)} {
   if (config.model.type == "phi3v") {
     image_processor_ = std::make_shared<ImageProcessor>(config, session_info);
+  } else if (config.model.type == "whisper") {
+    audio_processor_ = std::make_shared<AudioProcessor>(config, session_info);
   } else {
     throw std::runtime_error("MultiModalProcessor cannot be created. Expected a multimodal model. Actual: " + config.model.type);
   }

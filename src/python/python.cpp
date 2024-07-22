@@ -458,6 +458,18 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         return LoadImageImpl(image_path.c_str());
       });
 
+  pybind11::class_<Audios>(m, "Audios")
+      .def_static("open", [](pybind11::args audio_paths) {
+        if (audio_paths.empty())
+          throw std::runtime_error("No audios provided");
+
+        if (audio_paths.size() > 1U)
+          throw std::runtime_error("Loading multiple audios is not supported");
+
+        auto audio_path = audio_paths[0].cast<std::string>();
+        return LoadAudioImpl(audio_path.c_str());
+      });
+
   pybind11::class_<PyNamedTensors>(m, "NamedTensors");
 
   pybind11::class_<MultiModalProcessor, std::shared_ptr<MultiModalProcessor>>(m, "MultiModalProcessor")
@@ -468,8 +480,11 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           }
           const Images* images = kwargs["images"].cast<const Images*>();
           return std::make_unique<PyNamedTensors>(processor.image_processor_->Process(*processor.tokenizer_, prompt, images));
+        } else if (kwargs.contains("audios")) {
+          const Audios* audios = kwargs["audios"].cast<const Audios*>();
+          return std::make_unique<PyNamedTensors>(processor.audio_processor_->Process(audios));
         } else {
-          throw std::runtime_error("MultiModalProcessor cannot process this request. Nothing to process.");
+          throw std::runtime_error("Nothing to process.");
         }
       })
       .def("create_stream", [](MultiModalProcessor& processor) { return processor.tokenizer_->CreateStream(); })

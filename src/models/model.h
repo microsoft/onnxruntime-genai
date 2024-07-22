@@ -5,6 +5,7 @@
 #include "captured_graph_pool.h"
 #include "utils.h"
 #include "prompt_image_processor.h"
+#include "audio_processor.h"
 
 #if USE_DML
 #include "dml_provider_factory.h"
@@ -86,6 +87,7 @@ struct MultiModalProcessor : std::enable_shared_from_this<MultiModalProcessor> {
 
   std::shared_ptr<Tokenizer> tokenizer_;
   std::shared_ptr<ImageProcessor> image_processor_;
+  std::shared_ptr<AudioProcessor> audio_processor_;
 
   std::shared_ptr<MultiModalProcessor> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
 };

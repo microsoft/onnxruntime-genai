@@ -20,7 +20,6 @@ void Select(const Model& model, std::span<const int32_t> input_ids, OrtValue* hi
             cudaStream_t cuda_stream) {
   // Assme batch_size = 1
   constexpr int32_t min_input_id = -1000000000;
-  constexpr int64_t expected_batch_size = 1;
 
   // Find the position in the input_ids that corresponds to the start of the image tokens.
   // Image tokens are represented by negative values in the input_ids.

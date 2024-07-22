@@ -11,7 +11,7 @@ Whisper_Model::Whisper_Model(std::unique_ptr<Config> config, OrtEnv& ort_env)
   session_decoder_ = OrtSession::Create(ort_env, (config_->config_path / fs::path(config_->model.decoder.filename)).c_str(), session_options_.get());
 
   InitDeviceAllocator(*session_decoder_);
-  session_encoder_info_ = std::make_unique<SessionInfo>(*session_encoder_);
+  session_info_->Add(*session_encoder_);
 }
 
 std::unique_ptr<State> Whisper_Model::CreateState(RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params) const {
@@ -23,9 +23,19 @@ Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> s
       model_{model} {
   auto& inputs = const_cast<GeneratorParams::Whisper&>(std::get<GeneratorParams::Whisper>(params.inputs));
 
-  encoder_input_ids_ = model_.ExpandInputs(inputs.input_features->ort_tensor_, params_->search.num_beams);
+  for (const auto& [name, value] : params.extra_inputs) {
+    if (name == "encoder_input_ids") {
+      encoder_input_ids_ = model_.ExpandInputs(value->ort_tensor_, params_->search.num_beams);
+    }
+  }
+  if (encoder_input_ids_ == nullptr) {
+    encoder_input_ids_ = model_.ExpandInputs(inputs.input_features->ort_tensor_, params_->search.num_beams);
+  }
 
-  auto hidden_states_type = model_.session_encoder_info_->GetOutputDataType("encoder_hidden_states");
+  if (encoder_input_ids_ == nullptr)
+    throw std::runtime_error("encoder_input_ids must be provided in the extra inputs");
+
+  auto hidden_states_type = model_.session_info_->GetOutputDataType("encoder_hidden_states");
   auto encoder_hidden_states_shape = std::array<int64_t, 3>{decoder_input_ids_.GetShape()[0], 1500, static_cast<int64_t>(model_.config_->model.decoder.num_key_value_heads) * model_.config_->model.decoder.head_size};
   encoder_hidden_states_ = OrtValue::CreateTensor(*model_.allocator_device_, encoder_hidden_states_shape, hidden_states_type);
 
@@ -45,13 +55,12 @@ Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> s
 
   const auto kv_cache_indices = outputs_.size();
   kv_cache_.AddEncoder();
-  extra_inputs_.Add();
   cross_cache_.AddOutputs();
 
   {
     auto layer_count = model_.config_->model.decoder.num_hidden_layers;
     std::array<int64_t, 4> shape{params_->BatchBeamSize(), model_.config_->model.decoder.num_key_value_heads, params_->sequence_length, model_.config_->model.decoder.head_size};
-    auto type = model_.session_encoder_info_->GetOutputDataType(output_names_[kv_cache_indices]);
+    auto type = model_.session_info_->GetOutputDataType(output_names_[kv_cache_indices]);
 
     for (int i = 0; i < layer_count * 2; i++) {
       init_presents_.emplace_back(OrtValue::CreateTensor(*model_.allocator_device_, shape, type));

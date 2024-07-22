@@ -12,6 +12,7 @@ struct Config {
     static constexpr std::string_view InputIdsName = "input_ids";
     static constexpr std::string_view PixelValuesName = "pixel_values";
     static constexpr std::string_view ImageSizesName = "image_sizes";
+    static constexpr std::string_view InputFeaturesName = "encoder_input_ids";
   };
 
   fs::path config_path;  // Path of the config directory
@@ -55,6 +56,10 @@ struct Config {
     // For models like whisper
     struct EncoderDecoderInit {
       std::string filename;
+
+      struct Inputs {
+        std::string input_features{Defaults::InputFeaturesName};
+      } inputs;
     } encoder_decoder_init;
 
     struct Embedding {
