@@ -10,8 +10,6 @@ import numpy as np
 import onnxruntime_genai as og
 
 import sys
-from util import save_lora_params_to_flatbuffers
-from util import add_adapters_to_genai_config
 
 def get_args() -> argparse:
     parser = argparse.ArgumentParser()
