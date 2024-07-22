@@ -79,5 +79,5 @@ Java_ai_onnxruntime_genai_GeneratorParams_setInputs(JNIEnv* env, jobject thiz, j
   OgaGeneratorParams* generator_params = reinterpret_cast<OgaGeneratorParams*>(native_handle);
   OgaNamedTensors* input_tensor = reinterpret_cast<OgaNamedTensors*>(namedTensors);
 
-  ThrowIfError(env, OgaGeneratorParamsSetModelInput(generator_params, input_tensor));
+  ThrowIfError(env, OgaGeneratorParamsSetInputs(generator_params, input_tensor));
 }

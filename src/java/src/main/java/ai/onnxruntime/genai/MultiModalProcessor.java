@@ -14,13 +14,14 @@ public class MultiModalProcessor implements AutoCloseable {
   }
 
   /**
-   * Encodes a string into a sequence of token ids.
+   * Encodes a string and image into a NamedTensor.
    *
    * @param string Text to encode as token ids.
-   * @return a Sequences object with a single sequence in it.
+   * @param images image input.
+   * @return NamedTensors object.
    * @throws GenAIException If the call to the GenAI native API fails.
    */
-  public Sequences processImages(String prompt, Images images) throws GenAIException {
+  public NamedTensors processImages(String prompt, Images images) throws GenAIException {
     long imagesHandle = (images == null) ? 0 : images.nativeHandle();
     long namedTensorsHandle = processorProcessImages(nativeHandle, prompt, imagesHandle);
 
@@ -59,7 +60,7 @@ public class MultiModalProcessor implements AutoCloseable {
   @Override
   public void close() {
     if (nativeHandle != 0) {
-      destroyMultiModalProcessor(nativeHandle);(nativeHandle);
+      destroyMultiModalProcessor(nativeHandle);
       nativeHandle = 0;
     }
   }

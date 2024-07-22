@@ -32,7 +32,7 @@ Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessImages(JNIEnv* env
   const OgaMultiModalProcessor* processor = reinterpret_cast<const OgaMultiModalProcessor*>(processor_handle);
 
   const char* prompt_str = env->GetStringUTFChars(prompt, nullptr);
-  OgaImages* images = reinterpret_cast<OgaImages>(images_handle);
+  OgaImages* images = reinterpret_cast<OgaImages*>(images_handle);
 
   OgaNamedTensors* named_tensors = nullptr;
   if (ThrowIfError(env, OgaProcessorProcessImages(processor, prompt_str, images, &named_tensors))) {
@@ -51,7 +51,7 @@ Java_ai_onnxruntime_genai_MultiModalProcessor_processorDecode(JNIEnv* env, jobje
   const int32_t* tokens = reinterpret_cast<const int32_t*>(jtokens);  // convert between 32-bit types
   const char* decoded_text = nullptr;
 
-  bool error = ThrowIfError(env, OgaProcessorDecode(tokenizer, tokens, num_tokens, &decoded_text));
+  bool error = ThrowIfError(env, OgaProcessorDecode(processor, tokens, num_tokens, &decoded_text));
   env->ReleaseIntArrayElements(sequence, jtokens, JNI_ABORT);
 
   if (error) {
