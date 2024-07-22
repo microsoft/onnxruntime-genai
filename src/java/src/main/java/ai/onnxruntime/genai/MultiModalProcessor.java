@@ -16,7 +16,7 @@ public class MultiModalProcessor implements AutoCloseable {
   /**
    * Encodes a string and image into a NamedTensor.
    *
-   * @param string Text to encode as token ids.
+   * @param prompt Text to encode as token ids.
    * @param images image input.
    * @return NamedTensors object.
    * @throws GenAIException If the call to the GenAI native API fails.
