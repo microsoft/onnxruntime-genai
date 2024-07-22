@@ -7,8 +7,7 @@ The format supports multiple Lora Parameters per file.
 
 [The GenAi Lora Parameter file format schema](genai_lora.fbs) uses the [FlatBuffers](https://github.com/google/flatbuffers) serialization library.
 
-Please do not directly modify the generated C++ header file for [The GenAi Lora Parameter file format]((genai_lora.fbs.h))
-or [the generated Python binding files](../genai_flatbuffers_py).
+Please do not directly modify the generated C++ header file for [The GenAi Lora Parameter file format]((genai_lora.fbs.h)).
 
 The binary from Onnxruntime build can be re-used for the purpose.
 

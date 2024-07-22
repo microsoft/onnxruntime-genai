@@ -18,8 +18,6 @@ namespace Generators {
 namespace lora_parameters {
 namespace utils {
 
-constexpr auto kInvalidLoraFormatModelMessage = "Invalid Lora Parameter Format";
-
 // Will only create string in flatbuffers when has_string is true
 flatbuffers::Offset<flatbuffers::String> SaveStringToLoraFormat(flatbuffers::FlatBufferBuilder& builder,
                                                                 bool has_string, const std::string& src);

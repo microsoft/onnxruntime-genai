@@ -113,46 +113,6 @@ TEST(LoraParameters, FlatbuffersTest) {
   }
 }
 
-TEST(LoraParameters, LoadPythonGeneratedFile) {
-  const std::string file_path = MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32-lora/two_lora_params.fb";
-  std::ifstream file(file_path, std::ios::binary);
-  ASSERT_TRUE(file) << "Failed to open file: " << file_path;
-
-  std::string serialized;
-  {
-    std::stringstream stream;
-    stream << file.rdbuf();
-    ASSERT_TRUE(stream);
-    serialized = stream.str();
-  }
-
-  file.close();
-
-  std::span<const uint8_t> serialized_span(reinterpret_cast<const uint8_t*>(serialized.data()), serialized.size());
-  ASSERT_TRUE(utils::IsGenAiLoraFormatModelBytes(serialized_span.data(), serialized_span.size()));
-
-  flatbuffers::Verifier verifier(serialized_span.data(), serialized_span.size());
-  ASSERT_TRUE(VerifyParametersBuffer(verifier));
-
-  const auto* fbs_parameters = GetParameters(serialized_span.data());
-  ASSERT_NE(nullptr, fbs_parameters) << "Parameters are null";
-
-  ASSERT_TRUE(IsLoraFormatVersionSupported(fbs_parameters->version())) << "Format version mismatch";
-  ASSERT_EQ(2U, fbs_parameters->parameters()->size());
-  for (const auto* fbs_param : *fbs_parameters->parameters()) {
-    ASSERT_EQ(TensorDataType::FLOAT, fbs_param->data_type());
-    std::span<const int64_t> shape_span(fbs_param->dims()->data(), fbs_param->dims()->size());
-    ASSERT_EQ(2, shape_span.size());
-
-    std::span<const float> data_span(reinterpret_cast<const float*>(fbs_param->raw_data()->data()),
-                                     fbs_param->raw_data()->size() / sizeof(float));
-
-    for (size_t i = 0; i < data_span.size(); ++i) {
-      ASSERT_TRUE(std::isfinite(data_span[i]));
-    }
-  }
-}
-
 }  // namespace test
 }  // namespace lora_parameters
 }  // namespace Generators
