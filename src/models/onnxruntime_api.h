@@ -146,6 +146,11 @@ inline void InitApi() {
                          "%s did not have an ORT API version between %d and %d.",
                          path.c_str(), ORT_API_VERSION, genai_min_ort_api_version);
   }
+
+  std::stringstream path;
+  path << "/system/lib/rfsa/adsp;/system/vendor/lib/rfsa/adsp;/dsp";
+  setenv("ADSP_LIBRARY_PATH", path.str().c_str(), 1 /*override*/) == 0;
+
 #else   // defined(__ANDROID__)
   api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
   if (!api)
