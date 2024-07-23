@@ -107,9 +107,12 @@ TEST(CAPITests, Tensor_And_AddExtraInput) {
 #define IS_MS_ARM 1
 #endif
 
+#ifndef IS_MS_ARM
 TEST(CAPITests, LoraManagement) {
-#if defined(USE_CUDA) || defined(USE_DML) || defined(IS_MS_ARM)
+#if defined(USE_CUDA)
   const std::string model_folder = MODEL_PATH "hf-internal-testing/tiny-random-llama-lora-fp16";
+#elif defined(USE_DML)
+  const std::string model_folder = MODEL_PATH "hf-internal-testing/tiny-random-llama-lora-fp16-dml";
 #else
   const std::string model_folder = MODEL_PATH "hf-internal-testing/tiny-random-llama-lora";
 #endif
@@ -153,8 +156,10 @@ TEST(CAPITests, LoraManagement) {
 }
 
 TEST(CAPITests, LoraManagementEndToEnd) {
-#if defined(USE_CUDA) || defined(USE_DML) || defined(IS_MS_ARM)
+#if defined(USE_CUDA)
   const std::string model_folder = MODEL_PATH "hf-internal-testing/tiny-random-llama-lora-fp16";
+#elif defined(USE_DML)
+  const std::string model_folder = MODEL_PATH "hf-internal-testing/tiny-random-llama-lora-fp16-dml";
 #else
   const std::string model_folder = MODEL_PATH "hf-internal-testing/tiny-random-llama-lora";
 #endif
@@ -204,6 +209,8 @@ TEST(CAPITests, LoraManagementEndToEnd) {
     generator->GenerateNextToken();
   }
 }
+
+#endif  // IS_MS_ARM
 
 TEST(CAPITests, Logging) {
   // Trivial test to ensure the API builds properly
