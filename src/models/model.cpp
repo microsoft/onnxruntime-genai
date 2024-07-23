@@ -396,6 +396,12 @@ void Model::CreateSessionOptions() {
       }
 
       Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider(&ort_options, "QNN", keys.data(), values.data(), keys.size()));
+#if defined(__ANDROID__)
+      // From https://developer.qualcomm.com/sites/default/files/docs/snpe/dsp_runtime.html
+      std::stringstream path;
+      path << nativeLibPath << ";/system/lib/rfsa/adsp;/system/vendor/lib/rfsa/adsp;/dsp";
+      setenv("ADSP_LIBRARY_PATH", path.str().c_str(), 1 /*override*/) == 0;
+#endif
     } else
       throw std::runtime_error("Unknown provider type: " + provider_options.name);
   }
