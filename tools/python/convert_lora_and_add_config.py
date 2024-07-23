@@ -8,6 +8,7 @@ import argparse
 import json
 import numpy as np
 import onnxruntime_genai as og
+import os
 
 import sys
 
@@ -65,7 +66,7 @@ def add_adapters_to_genai_config(json_file_path : str,
 def main() -> int:
     args = get_args()
     save_lora_params_to_flatbuffers(args.npz_file_path, args.fb_file_path)
-    adapters = {args.adapter_name: {"weights": args.fb_file_path}}
+    adapters = {args.adapter_name: {"weights": os.path.basename(args.fb_file_path)}}
     add_adapters_to_genai_config(args.genai_config_path, args.genai_config_path_modified, adapters)
     return 0
 

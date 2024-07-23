@@ -112,7 +112,6 @@ TEST(LoraParameters, FlatbuffersTest) {
     }
   }
 }
-
 }  // namespace test
 }  // namespace lora_parameters
 }  // namespace Generators

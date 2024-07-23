@@ -107,7 +107,7 @@ TEST(CAPITests, LoraManagement) {
   const std::string adapter_name = "guanaco";
 
   // This should load Lora adapters as configured in the genai_config.json
-  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32-lora");
+  auto model = OgaModel::Create(MODEL_PATH "tiny-random-llama-lora");
 
   constexpr std::array<int64_t, 2> input_ids_shape{2, 4};
   constexpr std::array<int32_t, 8U> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
@@ -125,6 +125,7 @@ TEST(CAPITests, LoraManagement) {
   ASSERT_NO_THROW(params->SetActiveAdapterNames(adapter));
 
   // Try to active a non-existing adapter throws, but preserves the previously set adapters
+
   constexpr const std::array<const char*, 1> nonexisting_adapter = {"nonexistingadapter"};
   ASSERT_THROW(params->SetActiveAdapterNames(nonexisting_adapter), std::runtime_error);
 
@@ -161,6 +162,10 @@ TEST(CAPITests, LoraManagement) {
 //   const char* const adapter[] = {"guanaco"};
 //   ASSERT_NO_THROW(params->SetActiveAdapterNames(adapter));
 //
+//  // Try to active a non-existing adapter throws, but preserves the previously set adapters
+//  constexpr char* const nonexisting_adapter[] = {"nonexistingadapter"};
+//  ASSERT_THROW(params->SetActiveAdapterNames(nonexisting_adapter), std::runtime_error);
+//
 //   auto generator = OgaGenerator::Create(*model, *params);
 //   ASSERT_NE(nullptr, generator);
 //
@@ -183,7 +188,7 @@ TEST(CAPITests, LoraManagement) {
 //     generator->GenerateNextToken();
 //   }
 // }
-
+//
 TEST(CAPITests, Logging) {
   // Trivial test to ensure the API builds properly
   Oga::SetLogBool("enabled", true);
