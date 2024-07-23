@@ -135,7 +135,7 @@ TEST(CAPITests, LoraManagement) {
   generator.reset();
 
   // Reset adapters to base
-  constexpr std::array<const char*, 0> base_adapter;
+  constexpr std::array<const char*, 0> base_adapter = {};
   params->SetActiveAdapterNames(base_adapter);
 
   generator = OgaGenerator::Create(*model, *params);
@@ -177,7 +177,7 @@ TEST(CAPITests, LoraManagementEndToEnd) {
   generator.reset();
 
   // Reset adapters to base
-  constexpr std::array<const char*, 0> base_adapter;
+  constexpr std::array<const char*, 0> base_adapter = {};
   params->SetActiveAdapterNames(base_adapter);
 
   generator = OgaGenerator::Create(*model, *params);
