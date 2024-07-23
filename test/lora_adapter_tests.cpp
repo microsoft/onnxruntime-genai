@@ -13,11 +13,16 @@
 namespace Generators {
 namespace tests {
 
-// We do not initialize device specifics in this test.
- #if !defined(USE_DML)
-
 TEST(GeneratorsTests, LoraAdapterContainerTests) {
+#if defined(USE_CUDA) || defined(USE_DML)
+  const std::string model_folder = MODEL_PATH "hf-internal-testing/tiny-random-llama-lora-fp16";
+  const auto expected_data_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
+  using ExpectedCppType = Ort::Float16_t;
+#else
   const std::string model_folder = MODEL_PATH "hf-internal-testing/tiny-random-llama-lora";
+  const auto expected_data_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
+  using ExpectedCppType = float;
+#endif
   auto model = CreateModel(GetOrtEnv(), model_folder.c_str());
 
   LoraAdapterContainer& lora_adapter_container = model->GetLoraAdapterContainer();
@@ -39,7 +44,7 @@ TEST(GeneratorsTests, LoraAdapterContainerTests) {
     // No active adapters, all params are empty
     for (auto& ort_val : params) {
       auto val_type_shape = ort_val->GetTensorTypeAndShapeInfo();
-      ASSERT_EQ(val_type_shape->GetElementType(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+      ASSERT_EQ(val_type_shape->GetElementType(), expected_data_type);
       auto shape = val_type_shape->GetShape();
       ASSERT_EQ(shape.size(), 2U);
       ASSERT_TRUE(shape[0] != 0 || shape[1] != 0);
@@ -61,23 +66,20 @@ TEST(GeneratorsTests, LoraAdapterContainerTests) {
     for (size_t i = 0, lim = params.size(); i < lim; ++i) {
       auto& ort_val = params[i];
       auto val_type_shape = ort_val->GetTensorTypeAndShapeInfo();
-      ASSERT_EQ(val_type_shape->GetElementType(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+      ASSERT_EQ(val_type_shape->GetElementType(), expected_data_type);
       auto shape = val_type_shape->GetShape();
       ASSERT_EQ(shape.size(), 2U);
 
       // Let's make sure we can read all the data
       const auto element_num = val_type_shape->GetElementCount();
-      const auto* data = ort_val->GetTensorData<float>();
+      const auto* data = ort_val->GetTensorData<ExpectedCppType>();
       for (size_t j = 0; j < element_num; ++j) {
         // Do some silly op
-        ASSERT_TRUE(std::isfinite(data[j]));
+        ASSERT_TRUE(std::isfinite(static_cast<float>(data[j])));
       }
-
     }
   }
 }
-
-#endif
 
 }  // namespace tests
 }  // namespace Generators

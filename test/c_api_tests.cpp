@@ -104,10 +104,16 @@ TEST(CAPITests, Tensor_And_AddExtraInput) {
 }
 
 TEST(CAPITests, LoraManagement) {
+#if defined(USE_CUDA) || defined(USE_DML)
+  const std::string model_folder = MODEL_PATH "hf-internal-testing/tiny-random-llama-lora-fp16";
+#else
+  const std::string model_folder = MODEL_PATH "hf-internal-testing/tiny-random-llama-lora";
+#endif
+
   const std::string adapter_name = "guanaco";
 
   // This should load Lora adapters as configured in the genai_config.json
-  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-llama-lora");
+  auto model = OgaModel::Create(model_folder.c_str());
 
   constexpr std::array<int64_t, 2> input_ids_shape{2, 4};
   constexpr std::array<int32_t, 8U> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
@@ -143,8 +149,14 @@ TEST(CAPITests, LoraManagement) {
 }
 
 TEST(CAPITests, LoraManagementEndToEnd) {
+#if defined(USE_CUDA) || defined(USE_DML)
+  const std::string model_folder = MODEL_PATH "hf-internal-testing/tiny-random-llama-lora-fp16";
+#else
+  const std::string model_folder = MODEL_PATH "hf-internal-testing/tiny-random-llama-lora";
+#endif
+
   // This should load Lora adapters as configured in the genai_config.json
-  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-llama-lora");
+  auto model = OgaModel::Create(model_folder.c_str());
 
   constexpr std::array<int64_t, 2> input_ids_shape{2, 4};
   constexpr std::array<int32_t, 8> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
