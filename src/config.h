@@ -105,6 +105,17 @@ struct Config {
         std::string cross_present_key_names, cross_present_value_names;
       } outputs;
 
+      struct PipelineModel {
+        std::string model_id;
+        std::string filename;
+        std::optional<SessionOptions> session_options;
+
+        std::vector<std::string> inputs;
+        std::vector<std::string> outputs;
+      };
+
+      std::vector<PipelineModel> pipeline;
+
     } decoder;
   } model;
 

@@ -171,6 +171,78 @@ struct Outputs_Element : JSON::Element {
   Config::Model::Decoder::Outputs& v_;
 };
 
+struct StringArray_Element : JSON::Element {
+  explicit StringArray_Element(std::vector<std::string>& v) : v_{v} {}
+
+  void OnString(std::string_view name, std::string_view value) override {
+    v_.push_back(std::string(value));
+  }
+
+ private:
+  std::vector<std::string>& v_;
+};
+
+struct PipelineModel_Element : JSON::Element {
+  explicit PipelineModel_Element(Config::Model::Decoder::PipelineModel& v) : v_{v} {}
+
+  void OnString(std::string_view name, std::string_view value) override {
+    if (name == "filename") {
+      v_.filename = value;
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
+  JSON::Element& OnObject(std::string_view name) override {
+    if (name == "session_options") {
+      v_.session_options = Config::SessionOptions{};
+      session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
+      return *session_options_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+  Element& OnArray(std::string_view name) override {
+    if (name == "inputs")
+      return inputs_;
+    else if (name == "outputs")
+      return outputs_;
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Decoder::PipelineModel& v_;
+  std::unique_ptr<SessionOptions_Element> session_options_;
+  StringArray_Element inputs_{v_.inputs};
+  StringArray_Element outputs_{v_.outputs};
+};
+
+struct PipelineModelObject_Element : JSON::Element {
+  explicit PipelineModelObject_Element(std::vector<Config::Model::Decoder::PipelineModel>& v) : v_{v} {}
+
+  Element& OnObject(std::string_view name) override {
+    auto& model = v_.emplace_back();
+    model.model_id = name;
+    pipeline_model_elements_.push_back(PipelineModel_Element(model));
+    return pipeline_model_elements_.back();
+  }
+
+ private:
+  std::vector<Config::Model::Decoder::PipelineModel>& v_;
+  std::vector<PipelineModel_Element> pipeline_model_elements_;
+};
+
+struct Pipeline_Element : JSON::Element {
+  explicit Pipeline_Element(std::vector<Config::Model::Decoder::PipelineModel>& v) : v_{v} {}
+
+  Element& OnObject(std::string_view name) override {
+    return object_;
+  }
+
+ private:
+  std::vector<Config::Model::Decoder::PipelineModel>& v_;
+  PipelineModelObject_Element object_{v_};
+};
+
 struct Decoder_Element : JSON::Element {
   explicit Decoder_Element(Config::Model::Decoder& v) : v_{v} {}
 
@@ -209,11 +281,18 @@ struct Decoder_Element : JSON::Element {
     throw JSON::unknown_value_error{};
   }
 
+  Element& OnArray(std::string_view name) override {
+    if (name == "pipeline")
+      return pipeline_;
+    throw JSON::unknown_value_error{};
+  }
+
  private:
   Config::Model::Decoder& v_;
   SessionOptions_Element session_options_{v_.session_options};
   Inputs_Element inputs_{v_.inputs};
   Outputs_Element outputs_{v_.outputs};
+  Pipeline_Element pipeline_{v_.pipeline};
 };
 
 struct VisionInputs_Element : JSON::Element {
