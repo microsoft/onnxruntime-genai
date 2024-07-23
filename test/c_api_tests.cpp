@@ -103,8 +103,12 @@ TEST(CAPITests, Tensor_And_AddExtraInput) {
   params->SetModelInput("test_input", *tensor);
 }
 
+#if (defined _MSC_VER) && (defined _M_ARM || defined _M_ARM64 || defined _M_ARM64EC)
+#define IS_MS_ARM 1
+#endif
+
 TEST(CAPITests, LoraManagement) {
-#if defined(USE_CUDA) || defined(USE_DML)
+#if defined(USE_CUDA) || defined(USE_DML) || defined(IS_MS_ARM)
   const std::string model_folder = MODEL_PATH "hf-internal-testing/tiny-random-llama-lora-fp16";
 #else
   const std::string model_folder = MODEL_PATH "hf-internal-testing/tiny-random-llama-lora";
@@ -149,7 +153,7 @@ TEST(CAPITests, LoraManagement) {
 }
 
 TEST(CAPITests, LoraManagementEndToEnd) {
-#if defined(USE_CUDA) || defined(USE_DML)
+#if defined(USE_CUDA) || defined(USE_DML) || defined(IS_MS_ARM)
   const std::string model_folder = MODEL_PATH "hf-internal-testing/tiny-random-llama-lora-fp16";
 #else
   const std::string model_folder = MODEL_PATH "hf-internal-testing/tiny-random-llama-lora";
