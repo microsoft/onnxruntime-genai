@@ -66,6 +66,7 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #pragma once
 #include <memory>
 #include <string>
+#include <sstream>
 #include <vector>
 #include <unordered_map>
 
@@ -107,6 +108,13 @@ inline void InitApi() {
   //     any libonnxruntime.so that supports one of those versions.
   //
 
+  std::stringstream adsp_library_path;
+  adsp_library_path << "/system/lib/rfsa/adsp;/system/vendor/lib/rfsa/adsp;/dsp";
+  const int ret = setenv("ADSP_LIBRARY_PATH", adsp_library_path.str().c_str(), 1 /*override*/);
+  if (!ret) {
+    __android_log_print(ANDROID_LOG_INFO, "GenAI", "Failed to set ADSP_LIBRARY_PATH env var");
+  }
+
   const std::string path = "libonnxruntime.so";  // "libonnxruntime4j_jni.so" is also an option if we have issues
   __android_log_print(ANDROID_LOG_INFO, "GenAI", "Attempting to dlopen %s native library", path.c_str());
 
@@ -147,12 +155,6 @@ inline void InitApi() {
                          path.c_str(), ORT_API_VERSION, genai_min_ort_api_version);
   }
 
-  std::stringstream adsp_library_path;
-  adsp_library_path << "/system/lib/rfsa/adsp;/system/vendor/lib/rfsa/adsp;/dsp";
-  const ret = setenv("ADSP_LIBRARY_PATH", adsp_library_path.str().c_str(), 1 /*override*/);
-  if (!ret) {
-    __android_log_print(ANDROID_LOG_INFO, "GenAI", "Failed to set ADSP_LIBRARY_PATH env var");
-  }
 #else   // defined(__ANDROID__)
   api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
   if (!api)
