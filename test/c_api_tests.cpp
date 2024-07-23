@@ -107,7 +107,7 @@ TEST(CAPITests, LoraManagement) {
   const std::string adapter_name = "guanaco";
 
   // This should load Lora adapters as configured in the genai_config.json
-  auto model = OgaModel::Create(MODEL_PATH "tiny-random-llama-lora");
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-llama-lora");
 
   constexpr std::array<int64_t, 2> input_ids_shape{2, 4};
   constexpr std::array<int32_t, 8U> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
@@ -144,7 +144,7 @@ TEST(CAPITests, LoraManagement) {
 
 TEST(CAPITests, LoraManagementEndToEnd) {
   // This should load Lora adapters as configured in the genai_config.json
-  auto model = OgaModel::Create(MODEL_PATH "tiny-random-llama-lora");
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-llama-lora");
 
   constexpr std::array<int64_t, 2> input_ids_shape{2, 4};
   constexpr std::array<int32_t, 8> input_ids{0, 0, 0, 52, 0, 0, 195, 731};

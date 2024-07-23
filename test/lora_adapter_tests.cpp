@@ -17,7 +17,7 @@ namespace tests {
  #if !defined(USE_DML)
 
 TEST(GeneratorsTests, LoraAdapterContainerTests) {
-  const std::string model_folder = MODEL_PATH "tiny-random-llama-lora";
+  const std::string model_folder = MODEL_PATH "hf-internal-testing/tiny-random-llama-lora";
   auto model = CreateModel(GetOrtEnv(), model_folder.c_str());
 
   LoraAdapterContainer& lora_adapter_container = model->GetLoraAdapterContainer();
