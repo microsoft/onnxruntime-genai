@@ -147,10 +147,12 @@ inline void InitApi() {
                          path.c_str(), ORT_API_VERSION, genai_min_ort_api_version);
   }
 
-  std::stringstream path;
-  path << "/system/lib/rfsa/adsp;/system/vendor/lib/rfsa/adsp;/dsp";
-  setenv("ADSP_LIBRARY_PATH", path.str().c_str(), 1 /*override*/) == 0;
-
+  std::stringstream adsp_library_path;
+  adsp_library_path << "/system/lib/rfsa/adsp;/system/vendor/lib/rfsa/adsp;/dsp";
+  const ret = setenv("ADSP_LIBRARY_PATH", adsp_library_path.str().c_str(), 1 /*override*/);
+  if (!ret) {
+    __android_log_print(ANDROID_LOG_INFO, "GenAI", "Failed to set ADSP_LIBRARY_PATH env var");
+  }
 #else   // defined(__ANDROID__)
   api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
   if (!api)
