@@ -23,7 +23,7 @@ import textwrap
 class Model:
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         self.context_length = config.max_position_embeddings
-        self.original_context_length = config.original_max_position_embeddings if hasattr(config, "original_max_position_embeddings") else config.max_position_embeddings
+        self.original_context_length = config.original_max_position_embeddings if hasattr(config, "original_max_position_embeddings") else config.rope_scaling["original_max_position_embeddings"] if hasattr(config, "rope_scaling") and hasattr(config.rope_scaling, "original_max_position_embeddings") else config.max_position_embeddings
         self.window_size = config.sliding_window if hasattr(config, "sliding_window") else -1  # default is -1 in GroupQueryAttention kernel
         self.intermediate_size = config.intermediate_size
         self.hidden_size = config.hidden_size
@@ -174,22 +174,34 @@ class Model:
             "mscale_policy": "",                             # Magnitude scaling policy when scaling `emb.cos()/emb.sin()` in rotary embeddings
         }
         if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
-            # For models with multiple rotary embedding caches
-            self.rotemb_attrs["mscale_policy"] = config.rope_scaling["type"]
-            short_factor = torch.tensor(config.rope_scaling["short_factor"], dtype=torch.float32)
-            long_factor = torch.tensor(config.rope_scaling["long_factor"], dtype=torch.float32)
+            if "short_factor" in config.rope_scaling:
+                # For models with multiple rotary embedding caches (e.g. Phi-3 mini 128K)
+                self.rotemb_attrs["mscale_policy"] = config.rope_scaling["type"]
+                short_factor = torch.tensor(config.rope_scaling["short_factor"], dtype=torch.float32)
+                long_factor = torch.tensor(config.rope_scaling["long_factor"], dtype=torch.float32)
 
-            short_mscale = config.rope_scaling["short_mscale"] if "short_mscale" in config.rope_scaling else 0
-            long_mscale = config.rope_scaling["long_mscale"] if "long_mscale" in config.rope_scaling else 0
-            short_mscale = short_mscale if short_mscale > 0 else self.make_mscale(self.context_length / self.original_context_length)
-            long_mscale = long_mscale if long_mscale > 0 else self.make_mscale(self.context_length / self.original_context_length)
+                short_mscale = config.rope_scaling["short_mscale"] if "short_mscale" in config.rope_scaling else 0
+                long_mscale = config.rope_scaling["long_mscale"] if "long_mscale" in config.rope_scaling else 0
+                short_mscale = short_mscale if short_mscale > 0 else self.make_mscale(self.context_length / self.original_context_length)
+                long_mscale = long_mscale if long_mscale > 0 else self.make_mscale(self.context_length / self.original_context_length)
 
-            self.rotemb_attrs["multi_cache"] = {
-                "short_factor": short_factor,                # Short factor when calculating `inv_freq` in rotary embeddings
-                "long_factor": long_factor,                  # Long factor when calculating `inv_freq` in rotary embeddings
-                "short_mscale": short_mscale,                # Magnitude scaling for short factor when scaling `emb.cos()/emb.sin()` in rotary embeddings
-                "long_mscale": long_mscale,                  # Magnitude scaling for long factor when scaling `emb.cos()/emb.sin()` in rotary embeddings
-            }
+                self.rotemb_attrs["multi_cache"] = {
+                    "short_factor": short_factor,                # Short factor when calculating `inv_freq` in rotary embeddings
+                    "long_factor": long_factor,                  # Long factor when calculating `inv_freq` in rotary embeddings
+                    "short_mscale": short_mscale,                # Magnitude scaling for short factor when scaling `emb.cos()/emb.sin()` in rotary embeddings
+                    "long_mscale": long_mscale,                  # Magnitude scaling for long factor when scaling `emb.cos()/emb.sin()` in rotary embeddings
+                }
+            elif "low_freq_factor" in config.rope_scaling:
+                # For models that rescale `inv_freq` using `low_freq_factor` and `high_freq_factor` (e.g. LLaMA-3.1)
+                factor = config.rope_scaling["factor"] if "factor" in config.rope_scaling else 0
+                low_freq_factor = config.rope_scaling["low_freq_factor"] if "low_freq_factor" in config.rope_scaling else 0
+                high_freq_factor = config.rope_scaling["high_freq_factor"] if "high_freq_factor" in config.rope_scaling else 0
+                self.rotemb_attrs["rescale_inv_freq"] = {
+                    "factor": factor,
+                    "low_freq_factor": low_freq_factor,
+                    "high_freq_factor": high_freq_factor,
+                }
+                print(self.rotemb_attrs["rescale_inv_freq"])
 
         # Attention-specific variables (MHA, GQA, GQA + Rot.Emb., etc.)
         # Block-sparse attention-specific variables
@@ -857,9 +869,32 @@ class Model:
         else:
             return float(mscale)
 
+    def make_inv_freq_rescaled(self, inv_freq):
+        scale_factor = self.rotemb_attrs["rescale_inv_freq"]["factor"]
+        low_freq_factor = self.rotemb_attrs["rescale_inv_freq"]["low_freq_factor"]
+        high_freq_factor = self.rotemb_attrs["rescale_inv_freq"]["high_freq_factor"]
+        old_context_len = self.original_context_length
+
+        low_freq_wavelen = old_context_len / low_freq_factor
+        high_freq_wavelen = old_context_len / high_freq_factor
+        new_freqs = []
+        for freq in inv_freq:
+            wavelen = 2 * torch.pi / freq
+            if wavelen < high_freq_wavelen:
+                new_freqs.append(freq)
+            elif wavelen > low_freq_wavelen:
+                new_freqs.append(freq / scale_factor)
+            else:
+                smooth = (old_context_len / wavelen - low_freq_factor) / (high_freq_factor - low_freq_factor)
+                new_freqs.append((1 - smooth) * freq / scale_factor + smooth * freq)
+
+        return torch.tensor(new_freqs, dtype=inv_freq.dtype)
+
     def make_rotary_embedding_caches_from_scratch(self):
         dim = int(self.rotemb_attrs["partial_rotary_factor"] * self.head_size)
         inv_freq = 1.0 / (self.rotemb_attrs["rescale_factors"] * (self.rotemb_attrs["theta"] ** (torch.arange(0, dim, 2, dtype=torch.int64).float() / dim)))
+        if "rescale_inv_freq" in self.rotemb_attrs:
+            inv_freq = self.make_inv_freq_rescaled(inv_freq)
 
         position_scale = self.rotemb_attrs["position_scale"] if self.context_length == self.original_context_length else 1
         t = (torch.arange(self.rotemb_attrs["cache_length"], dtype=self.rotemb_attrs["t_dtype"]) * position_scale).type_as(inv_freq)
