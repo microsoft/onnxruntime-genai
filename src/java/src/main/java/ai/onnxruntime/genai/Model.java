@@ -83,6 +83,7 @@ public final class Model implements AutoCloseable {
       throw new RuntimeException("Failed to load onnxruntime-genai native libraries", e);
     }
   }
+  public native int setupQnnEnv(AssetManager mgr, String path);
 
   private native long createModel(String modelPath) throws GenAIException;
 

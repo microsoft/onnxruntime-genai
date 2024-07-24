@@ -107,14 +107,6 @@ inline void InitApi() {
   //   - iterate between the current ORT version we're aware of, and a minimum required version, so that we work with
   //     any libonnxruntime.so that supports one of those versions.
   //
-
-  std::stringstream adsp_library_path;
-  adsp_library_path << "/system/lib/rfsa/adsp;/system/vendor/lib/rfsa/adsp;/dsp";
-  const int ret = setenv("ADSP_LIBRARY_PATH", adsp_library_path.str().c_str(), 1 /*override*/);
-  if (!ret) {
-    __android_log_print(ANDROID_LOG_INFO, "GenAI", "Failed to set ADSP_LIBRARY_PATH env var");
-  }
-
   const std::string path = "libonnxruntime.so";  // "libonnxruntime4j_jni.so" is also an option if we have issues
   __android_log_print(ANDROID_LOG_INFO, "GenAI", "Attempting to dlopen %s native library", path.c_str());
 
