@@ -24,7 +24,7 @@ env:
   d3d12_dir: "Microsoft.Direct3D.D3D12.1.614.0"
   d3d12_zip: "Microsoft.Direct3D.D3D12.1.614.0.zip"
   d3d12_url: "https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.614.0"
-  binaryDir: 'build/directml'
+  binaryDir: 'build/directml/win-x64'
 
 
 jobs:
@@ -102,4 +102,4 @@ jobs:
 
     - name: Run tests
       run: |
-        .\build\directml\test\Release\unit_tests.exe
+        & .\$env:binaryDir\test\Release\unit_tests.exe

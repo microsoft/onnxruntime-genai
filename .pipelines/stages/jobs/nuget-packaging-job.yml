@@ -1,40 +1,57 @@
 parameters:
-- name: arch
-  type: string
 - name: ep
   type: string
+
+- name: enable_win_cpu
+  displayName: 'Whether Windows CPU package is built.'
+  type: boolean
+  default: false
+
+- name: enable_win_cuda
+  displayName: 'Whether Windows CUDA package is built.'
+  type: boolean
+  default: false
+
+- name: enable_linux_cpu
+  displayName: 'Whether Linux CPU package is built.'
+  type: boolean
+  default: false
+
+- name: enable_linux_cuda
+  displayName: 'Whether Linux CUDA package is built.'
+  type: boolean
+  default: false
+
+- name: enable_win_dml
+  displayName: 'Whether Windows DirectML package is built.'
+  type: boolean
+  default: false
+
+- name: enable_win_arm64
+  displayName: 'Whether Windows ARM64 package is built.'
+  type: boolean
+  default: false
+
 - name: ort_version
   type: string
-- name: cuda_version
-  type: string
-  default: ''
-- name: os
-  type: string
-  values:
-  - 'linux'
-  - 'win'
+
 - name: build_config
   type: string
   default: 'release'
 
 jobs:
-- job: nuget_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}_packaging
-  ${{ if eq(parameters.os, 'linux') }}:
-    pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
-  ${{ if eq(parameters.os, 'win') }}:
-    ${{ if eq(parameters.ep, 'directml') }}:
-      pool: 'onnxruntime-Win2022-GPU-dml-A10'
-    ${{ elseif eq(parameters.arch, 'arm64') }}:
-      pool: 'onnxruntime-genai-windows-vs-2022-arm64'
-    ${{ else }}:
-      pool: 'onnxruntime-Win-CPU-2022'
-  timeoutInMinutes: 180
-  #  set variables here to be used in the template and steps
+- job: nuget_${{ parameters.ep }}_packaging
+  pool: 'onnxruntime-Win-CPU-2022'
   variables:
-  - name: arch
-    value: ${{ parameters.arch }}
-  - name: artifactName
-    value: 'onnxruntime-genai-${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.arch }}'
+  - name: ep
+    value: ${{ parameters.ep }}
+
+  - name: ort_version
+    value: ${{ parameters.ort_version }}
+
+  - name: buildDir
+    value: 'build/${{ parameters.ep }}'
+
   - name: buildConfig
     ${{ if eq(parameters.build_config, 'release') }}:
       value: 'Release'
@@ -44,125 +61,184 @@ jobs:
       value: 'Debug'
     ${{ else }}:
       value: 'MinSizeRel'
-  - name: build_config
-    value: ${{ parameters.build_config }}
-  - name: buildDir
-    value: 'build/${{ parameters.ep }}'
-  - name: cuda_version
-    value: ${{ parameters.cuda_version }}
-  - name: ep
-    value: ${{ parameters.ep }}
-  - name: ort_version
-    value: ${{ parameters.ort_version }}
-  - name: GDN_CODESIGN_TARGETDIRECTORY
-    value: '$(Build.ArtifactStagingDirectory)/nuget'
-  - name: os
-    value: ${{ parameters.os }}
-  - name: feed_name
-    ${{ if and(eq(parameters.cuda_version, '12.2'), eq(parameters.ep, 'cuda')) }}:
-      value: 'ort-cuda-12-nightly'
-    ${{ else }}:
-      value: '7982ae20-ed19-4a35-a362-a96ac99897b7'
-  - name: ort_filename
+
+  - name: artifactName
+    value: 'onnxruntime-genai-${{ parameters.ep }}'
+
+  - name: genai_nuget_package_name
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      value: 'Microsoft.ML.OnnxRuntimeGenAI'
+    ${{ if eq(parameters.ep, 'cuda') }}:
+      value: 'Microsoft.ML.OnnxRuntimeGenAI.Cuda'
+    ${{ if eq(parameters.ep, 'directml') }}:
+      value: 'Microsoft.ML.OnnxRuntimeGenAI.DirectML'
+
+  - name: ort_nuget_package_name
     ${{ if eq(parameters.ep, 'cpu') }}:
       value: 'Microsoft.ML.OnnxRuntime'
-    ${{ elseif eq(parameters.ep, 'cuda') }}:
-      ${{if eq(parameters.os, 'win') }}:
-        value: 'Microsoft.ML.OnnxRuntime.Gpu.Windows'
-      ${{ else }}:
-        value: 'Microsoft.ML.OnnxRuntime.Gpu.Linux'
-    ${{ elseif eq(parameters.ep, 'directml')}}:
+    ${{ if eq(parameters.ep, 'cuda') }}:
+      value: 'Microsoft.ML.OnnxRuntime.Gpu'
+    ${{ if eq(parameters.ep, 'directml') }}:
       value: 'Microsoft.ML.OnnxRuntime.DirectML'
-    ${{ elseif eq(parameters.ep, 'rocm')}}:
-      value: 'Microsoft.ML.OnnxRuntime.ROCm'
-    ${{ else }}:
-      value: 'Microsoft.ML.OnnxRuntime'
-
-  - name: genai_nuget_ext
-    ${{ if eq(parameters.ep, 'cpu') }}:
-      value: ''
-    ${{ if eq(parameters.ep, 'cuda') }}:
-      value: '.Cuda'
-    ${{ if eq(parameters.ep, 'directml') }}:
-      value: '.DirectML'
-  - name: ort_nuget_ext
-    ${{ if eq(parameters.ep, 'cpu') }}:
-      value: ''
-    ${{ if eq(parameters.ep, 'cuda') }}:
-      value: '.Gpu'
-    ${{ if eq(parameters.ep, 'directml') }}:
-      value: '.DirectML'
-  - name: ortHome
-    value: 'ort'
-  - name: dml_dir
-    value: 'Microsoft.AI.DirectML.1.14.2'
-  - name: dml_zip
-    value: 'Microsoft.AI.DirectML.1.14.2.zip'
-  - name: dml_url
-    value: "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.14.2"
-  
-  - name: ort_arm64_dir
-    value: 'onnxruntime-win-arm64-1.17.3'
-  - name: ort_arm64_zip
-    value: 'onnxruntime-win-arm64-1.17.3.zip'
-  - name: ort_arm64_url
-    value: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/onnxruntime-win-arm64-1.17.3.zip"
-
-  - name: d3d12_dir
-    value: 'Microsoft.Direct3D.D3D12.1.614.0'
-  - name: d3d12_zip
-    value: 'Microsoft.Direct3D.D3D12.1.614.0.zip'
-  - name: d3d12_url
-    value: "https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.614.0"
-
-  workspace:
-    clean: all
   steps:
-  - script: |
-      MKDIR $(Agent.ToolsDirectory)\Python\3.11.0\arm64
-      XCOPY /s /y /h /e /c /q "C:\Python\Python311\*.*" $(Agent.ToolsDirectory)\Python\3.11.0\arm64\
-      COPY NUL $(Agent.ToolsDirectory)\Python\3.11.0\arm64.complete
-      DIR $(Agent.ToolsDirectory)\Python
-      DIR $(Agent.ToolsDirectory)\Python\3.11.0
-      DIR $(Agent.ToolsDirectory)\Python\3.11.0\arm64
-      DIR "C:\Python"
-    displayName: Copy python 3.11.0 version to agent tools directory
-    condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'))
-
-  - ${{ if eq(parameters.arch, 'arm64') }}:
-    - task: UsePythonVersion@0
-      inputs:
-        versionSpec: 3.11
-        addToPath: true
-        architecture: $(arch)
-  - ${{ else }}:
-    - task: UsePythonVersion@0
-      inputs:
-        versionSpec: 3.10
-        addToPath: true
-        architecture: $(arch)
-
-  - ${{ if eq(parameters.os, 'linux') }}:
-    - template: steps/capi-linux-step.yml
+  - ${{ if and(eq(parameters.enable_win_cpu, true), eq(parameters.ep, 'cpu')) }}:
+    - template: steps/utils/flex-download-pipeline-artifact.yml
       parameters:
-        target: 'onnxruntime-genai'
-        arch: ${{ parameters.arch }}
-        ep: ${{ parameters.ep }}
-        build_config: ${{ parameters.build_config }}
+        StepName: 'Download win-cpu-x64 capi Artifacts'
+        ArtifactName: onnxruntime-genai-win-cpu-x64-capi
+        TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
 
-    # TODO: Add a step to build the linux nuget package
-
-  - ${{ if eq(parameters.os, 'win') }}:
-    - template: steps/capi-win-step.yml
+  - ${{ if and(eq(parameters.enable_win_cuda, true), eq(parameters.ep, 'cuda')) }}:
+    - template: steps/utils/flex-download-pipeline-artifact.yml
       parameters:
-        target: 'onnxruntime-genai'
-        arch: ${{ parameters.arch }}
-        ep: ${{ parameters.ep }}
-        build_config: ${{ parameters.build_config }}
+        StepName: 'Download win-cuda-x64 capi Artifacts'
+        ArtifactName: onnxruntime-genai-win-cuda-x64-capi
+        TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
 
-    - template: steps/nuget-win-step.yml
+  - ${{ if and(eq(parameters.enable_win_dml, true), eq(parameters.ep, 'directml')) }}:
+    - template: steps/utils/flex-download-pipeline-artifact.yml
       parameters:
-        arch: ${{ parameters.arch }}
+        StepName: 'Download win-directml-x64 capi Artifacts'
+        ArtifactName: onnxruntime-genai-win-directml-x64-capi
+        TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
 
-  - template: steps/compliant-and-cleanup-step.yml
+  - ${{ if and(eq(parameters.enable_win_arm64, true), eq(parameters.ep, 'cpu')) }}:
+    - template: steps/utils/flex-download-pipeline-artifact.yml
+      parameters:
+        StepName: 'Download win-cpu-arm64 capi Artifacts'
+        ArtifactName: onnxruntime-genai-win-cpu-arm64-capi
+        TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
 
+  - ${{ if and(eq(parameters.enable_win_arm64, true), eq(parameters.enable_win_dml, true), eq(parameters.ep, 'directml')) }}:
+    - template: steps/utils/flex-download-pipeline-artifact.yml
+      parameters:
+        StepName: 'Download win-directml-arm64 capi Artifacts'
+        ArtifactName: onnxruntime-genai-win-directml-arm64-capi
+        TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
+
+  - ${{ if and(eq(parameters.enable_linux_cpu, true), eq(parameters.ep, 'cpu')) }}:
+    - template: steps/utils/flex-download-pipeline-artifact.yml
+      parameters:
+        StepName: 'Download linux-cpu-x64 capi Artifacts'
+        ArtifactName: onnxruntime-genai-linux-cpu-x64-capi
+        TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
+
+  - ${{ if and(eq(parameters.enable_linux_cuda, true), eq(parameters.ep, 'cuda')) }}:
+    - template: steps/utils/flex-download-pipeline-artifact.yml
+      parameters:
+        StepName: 'Download linux-cuda-x64 capi Artifacts'
+        ArtifactName: onnxruntime-genai-linux-cuda-x64-capi
+        TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
+
+  - checkout: self
+    path: onnxruntime-genai
+    clean: true
+    submodules: recursive
+
+  - template: steps/utils/set-genai-version.yml
+
+  - powershell: |
+      dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(buildConfig)" --verbosity normal
+    displayName: 'Build CSharp'
+    workingDirectory: '$(Build.Repository.LocalPath)\src\csharp'
+
+  - task: BinSkim@4
+    displayName: 'Run BinSkim'
+    inputs:
+      AnalyzeTargetGlob: '$(Build.Repository.LocalPath)\src\csharp\**\*.dll'
+      continueOnError: true
+
+  - template: steps/compliant/win-esrp-dll-step.yml
+    parameters:
+      FolderPath: '$(Build.Repository.LocalPath)\src\csharp\bin\$(buildConfig)\'
+      DisplayName: 'ESRP - Sign C# dlls'
+      Pattern: '*OnnxRuntimeGenAI*.dll'
+
+  - powershell: |
+      $artifacts_dir = '$(Build.BinariesDirectory)/artifact-downloads'
+      Write-Host "List downloaded artifacts"
+      $artifacts = Get-ChildItem -Path $artifacts_dir/* -Include *.zip,*.tar.gz
+      Write-Host $artifacts
+
+      $outputDir = '$(Build.Repository.LocalPath)/$(buildDir)'
+
+      mkdir -Force $outputDir
+      foreach ($file in $artifacts) {
+        $a = $file.Name
+        Write-Host "Extracting " $a
+        $rid_match = $a -match "onnxruntime-genai-$(genai_version)-(.+?)-?(?:cuda|dml)?(\.zip|\.tar\.gz)"
+        if ($rid_match) {
+          $rid = $Matches.1
+        }
+        else {
+          Write-Host "Invalid artifact name" $file
+          return
+        }
+        mkdir -Force $outputDir/$rid
+
+        if ($a -like "*.zip") {
+          Expand-Archive -Path $file -DestinationPath $outputDir/$rid
+        }
+        elseif ($a -like "*.tar.gz") {
+          tar -xf $file -C $outputDir/$rid
+        }
+
+        mkdir -Force $outputDir/$rid/$(buildConfig)
+        $b = $file.Basename
+        $b = $b -split '.tar'
+        $b = $b[0]
+        Move-Item $outputDir/$rid/$b/lib/* $outputDir/$rid/$(buildConfig) -Force
+      }
+
+      Write-Host "List extracted artifacts"
+      Get-ChildItem -Path $nativeBuildOutputDir -Recurse
+
+    displayName: 'Extract Artifacts & Prepare Native Libraries'
+    workingDirectory: '$(Build.BinariesDirectory)/artifact-downloads'
+
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: 3.10
+      addToPath: true
+
+  - powershell: |
+      python.exe $(Build.Repository.LocalPath)\tools\nuget\generate_nuspec_for_native_nuget.py `
+        --package_name $(genai_nuget_package_name) `
+        --package_version $(genai_version) `
+        --ort_package_name $(ort_nuget_package_name)  `
+        --ort_package_version $(ort_version) `
+        --build_config $(buildConfig) `
+        --sources_path $(Build.Repository.LocalPath) `
+        --native_build_path $(buildDir) `
+        --nuspec_output_path $(Build.Repository.LocalPath)/nuget/$(genai_nuget_package_name).nuspec
+
+      cat $(Build.Repository.LocalPath)\nuget\$(genai_nuget_package_name).nuspec
+
+    displayName: 'Generate Nuspec for native'
+
+  - task: NuGetCommand@2
+    displayName: 'Nuget Packaging'
+    inputs:
+      command: 'pack'
+      packagesToPack: $(Build.Repository.LocalPath)\nuget\$(genai_nuget_package_name).nuspec
+      packDestination: $(Build.ArtifactStagingDirectory)\nuget
+
+  - task: NuGetCommand@2
+    displayName: 'Nuget Managed Packaging'
+    inputs:
+      command: 'pack'
+      packagesToPack: $(Build.Repository.LocalPath)\nuget\Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec
+      buildProperties: 'version=$(genai_version);configuration=$(buildConfig)'
+      packDestination: $(Build.ArtifactStagingDirectory)\nuget
+
+  - template: steps/compliant/esrp_nuget.yml
+    parameters:
+      DisplayName: 'ESRP - sign NuGet package'
+      FolderPath: '$(Build.ArtifactStagingDirectory)\nuget'
+      DoEsrp: 'true'
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Artifact: ONNXRuntime Genai NuGet'
+    inputs:
+      PathtoPublish: '$(Build.ArtifactStagingDirectory)\nuget'
+      ArtifactName: $(artifactName)-nuget

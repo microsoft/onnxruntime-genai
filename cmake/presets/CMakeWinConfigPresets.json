@@ -141,7 +141,7 @@
         "windows_cpu_default"
       ],
       "displayName": "windows x64 cpu release",
-      "binaryDir": "${sourceDir}/build/cpu"
+      "binaryDir": "${sourceDir}/build/cpu/win-x64"
     },
     {
       "name": "windows_x64_cpu_debug",
@@ -150,7 +150,7 @@
         "windows_cpu_default"
       ],
       "displayName": "windows x64 cpu debug",
-      "binaryDir": "${sourceDir}/build/cpu"
+      "binaryDir": "${sourceDir}/build/cpu/win-x64"
     },
     {
       "name": "windows_x64_cpu_relwithdebinfo",
@@ -159,7 +159,7 @@
         "windows_cpu_default"
       ],
       "displayName": "windows x64 cpu relwithdebinfo",
-      "binaryDir": "${sourceDir}/build/cpu"
+      "binaryDir": "${sourceDir}/build/cpu/win-x64"
     },
     {
       "name": "windows_x64_cpu_minsizerel",
@@ -168,7 +168,7 @@
         "windows_cpu_default"
       ],
       "displayName": "windows x64 cpu minsizerel",
-      "binaryDir": "${sourceDir}/build/cpu"
+      "binaryDir": "${sourceDir}/build/cpu/win-x64"
     },
     {
       "name": "windows_x64_cuda_release_asan",
@@ -225,7 +225,7 @@
         "windows_cuda_default"
       ],
       "displayName": "windows x64 cuda release",
-      "binaryDir": "${sourceDir}/build/cuda",
+      "binaryDir": "${sourceDir}/build/cuda/win-x64",
       "cacheVariables": {
         "USE_CUDA": "ON"
       }
@@ -237,7 +237,7 @@
         "windows_cuda_default"
       ],
       "displayName": "windows x64 cuda debug",
-      "binaryDir": "${sourceDir}/build/cuda",
+      "binaryDir": "${sourceDir}/build/cuda/win-x64",
       "cacheVariables": {
         "USE_CUDA": "ON"
       }
@@ -249,7 +249,7 @@
         "windows_cuda_default"
       ],
       "displayName": "windows x64 cuda relwithdebinfo",
-      "binaryDir": "${sourceDir}/build/cuda",
+      "binaryDir": "${sourceDir}/build/cuda/win-x64",
       "cacheVariables": {
         "USE_CUDA": "ON"
       }
@@ -261,7 +261,7 @@
         "windows_cuda_default"
       ],
       "displayName": "windows x64 cuda minsizerel",
-      "binaryDir": "${sourceDir}/build/cuda",
+      "binaryDir": "${sourceDir}/build/cuda/win-x64",
       "cacheVariables": {
         "USE_CUDA": "ON"
       }
@@ -309,7 +309,7 @@
         "windows_directml_default"
       ],
       "displayName": "windows x64 directml release",
-      "binaryDir": "${sourceDir}/build/directml"
+      "binaryDir": "${sourceDir}/build/directml/win-x64"
     },
     {
       "name": "windows_x64_directml_debug",
@@ -318,7 +318,7 @@
         "windows_directml_default"
       ],
       "displayName": "windows x64 directml debug",
-      "binaryDir": "${sourceDir}/build/directml"
+      "binaryDir": "${sourceDir}/build/directml/win-x64"
     },
     {
       "name": "windows_x64_directml_relwithdebinfo",
@@ -327,7 +327,7 @@
         "windows_directml_default"
       ],
       "displayName": "windows x64 directml relwithdebinfo",
-      "binaryDir": "${sourceDir}/build/directml"
+      "binaryDir": "${sourceDir}/build/directml/win-x64"
     },
     {
       "name": "windows_x64_directml_minsizerel",
@@ -336,18 +336,46 @@
         "windows_directml_default"
       ],
       "displayName": "windows x64 directml minsizerel",
-      "binaryDir": "${sourceDir}/build/directml"
+      "binaryDir": "${sourceDir}/build/directml/win-x64"
     },
     {
       "name": "windows_arm64_cpu_relwithdebinfo",
-      "inherits": "windows_x64_cpu_relwithdebinfo",
+      "inherits": [
+        "windows_relwithdebinfo_default",
+        "windows_cpu_default"
+      ],
       "displayName": "windows arm64 cpu relwithdebinfo",
+      "binaryDir": "${sourceDir}/build/cpu/win-arm64",
       "architecture": "arm64"
     },
     {
       "name": "windows_arm64_cpu_release",
-      "inherits": "windows_x64_cpu_release",
+      "inherits": [
+        "windows_release_default",
+        "windows_cpu_default"
+      ],
       "displayName": "windows arm64 cpu release",
+      "binaryDir": "${sourceDir}/build/cpu/win-arm64",
+      "architecture": "arm64"
+    },
+    {
+      "name": "windows_arm64_directml_relwithdebinfo",
+      "inherits": [
+        "windows_relwithdebinfo_default",
+        "windows_directml_default"
+      ],
+      "displayName": "windows arm64 directml relwithdebinfo",
+      "binaryDir": "${sourceDir}/build/directml/win-arm64",
+      "architecture": "arm64"
+    },
+    {
+      "name": "windows_arm64_directml_release",
+      "inherits": [
+        "windows_release_default",
+        "windows_directml_default"
+      ],
+      "displayName": "windows arm64 directml release",
+      "binaryDir": "${sourceDir}/build/directml/win-arm64",
       "architecture": "arm64"
     }
   ]
