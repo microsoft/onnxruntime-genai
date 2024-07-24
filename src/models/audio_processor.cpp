@@ -61,6 +61,10 @@ AudioProcessor::AudioProcessor(Config& config, const SessionInfo& session_info)
 }
 
 std::unique_ptr<NamedTensors> AudioProcessor::Process(const Audios* audios) const {
+  if (!audios || !audios->audios_) {
+    throw std::runtime_error("No audios provided to process.");
+  }
+
   Ort::Allocator& allocator{Ort::Allocator::GetWithDefaultOptions()};
   auto named_tensors = std::make_unique<NamedTensors>();
 

@@ -473,20 +473,22 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   pybind11::class_<PyNamedTensors>(m, "NamedTensors");
 
   pybind11::class_<MultiModalProcessor, std::shared_ptr<MultiModalProcessor>>(m, "MultiModalProcessor")
-      .def("__call__", [](MultiModalProcessor& processor, const std::string& prompt, const pybind11::kwargs& kwargs) -> std::unique_ptr<PyNamedTensors> {
-        if (kwargs.contains("images")) {
-          if (processor.image_processor_ == nullptr) {
-            throw std::runtime_error("Image processor is not available for this model.");
-          }
-          const Images* images = kwargs["images"].cast<const Images*>();
-          return std::make_unique<PyNamedTensors>(processor.image_processor_->Process(*processor.tokenizer_, prompt, images));
-        } else if (kwargs.contains("audios")) {
-          const Audios* audios = kwargs["audios"].cast<const Audios*>();
-          return std::make_unique<PyNamedTensors>(processor.audio_processor_->Process(audios));
-        } else {
-          throw std::runtime_error("Nothing to process.");
-        }
-      })
+      .def(
+          "__call__", [](MultiModalProcessor& processor, const std::optional<std::string>& prompt, const pybind11::kwargs& kwargs) -> std::unique_ptr<PyNamedTensors> {
+            if (kwargs.contains("images")) {
+              if (processor.image_processor_ == nullptr) {
+                throw std::runtime_error("Image processor is not available for this model.");
+              }
+              const Images* images = kwargs["images"].cast<const Images*>();
+              return std::make_unique<PyNamedTensors>(processor.image_processor_->Process(*processor.tokenizer_, prompt, images));
+            } else if (kwargs.contains("audios")) {
+              const Audios* audios = kwargs["audios"].cast<const Audios*>();
+              return std::make_unique<PyNamedTensors>(processor.audio_processor_->Process(audios));
+            } else {
+              throw std::runtime_error("Nothing to process.");
+            }
+          },
+          pybind11::arg("prompt") = pybind11::none())
       .def("create_stream", [](MultiModalProcessor& processor) { return processor.tokenizer_->CreateStream(); })
       .def("decode", [](MultiModalProcessor& processor, pybind11::array_t<int32_t> tokens) {
         return processor.tokenizer_->Decode(ToSpan(tokens));

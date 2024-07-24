@@ -38,7 +38,7 @@ def run(args: argparse.Namespace):
         audio = og.Audios.open(audio_path)
 
         print("Processing audio...")
-        inputs = processor(prompt="", audios=audio)
+        inputs = processor(audios=audio)
 
         params = og.GeneratorParams(model)
         params.set_search_options(

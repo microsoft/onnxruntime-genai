@@ -77,6 +77,13 @@ OgaResult* OGA_API_CALL OgaLoadImage(const char* image_path, OgaImages** images)
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaLoadAudio(const char* audio_path, OgaAudios** audios) {
+  OGA_TRY
+  *audios = reinterpret_cast<OgaAudios*>(Generators::LoadAudioImpl(audio_path).release());
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaModel** out) {
   OGA_TRY
   auto model = Generators::CreateModel(Generators::GetOrtEnv(), config_path);
@@ -379,6 +386,21 @@ OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor* 
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaProcessorProcessAudios(const OgaMultiModalProcessor* p, const OgaAudios* audios_p, OgaNamedTensors** input_tensors) {
+  OGA_TRY
+  auto& processor = *reinterpret_cast<const Generators::MultiModalProcessor*>(p);
+  auto* audios = reinterpret_cast<const Generators::Audios*>(audios_p);
+
+  if (!processor.audio_processor_)
+    throw std::runtime_error("Audio processor not available for this model.");
+
+  auto named_tensors = processor.audio_processor_->Process(audios);
+  *input_tensors = reinterpret_cast<OgaNamedTensors*>(named_tensors.release());
+
+  return nullptr;
+  OGA_CATCH
+}
+
 void OGA_API_CALL OgaDestroyResult(OgaResult* p) {
   delete reinterpret_cast<Generators::Result*>(p);
 }
@@ -421,6 +443,10 @@ void OGA_API_CALL OgaDestroyMultiModalProcessor(OgaMultiModalProcessor* p) {
 
 void OGA_API_CALL OgaDestroyImages(OgaImages* p) {
   delete reinterpret_cast<Generators::Images*>(p);
+}
+
+void OGA_API_CALL OgaDestroyAudios(OgaAudios* p) {
+  delete reinterpret_cast<Generators::Audios*>(p);
 }
 
 void OGA_API_CALL OgaDestroyNamedTensors(OgaNamedTensors* p) {
