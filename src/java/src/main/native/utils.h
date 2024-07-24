@@ -31,7 +31,7 @@ bool ThrowIfError(JNIEnv* env, OgaResult* result);
 // handle conversion/release of jstring to const char*
 struct CString {
   CString(JNIEnv* env, jstring str)
-      : env_{env}, str_{str}, cstr{env->GetStringUTFChars(str, /* isCopy */ nullptr)}, len_{env->GetStringLength(str)} {
+      : env_{env}, str_{str}, cstr{env->GetStringUTFChars(str, /* isCopy */ nullptr)}, len_{env->GetStringUTFLength(str)} {
   }
 
   const char* cstr;
@@ -39,9 +39,7 @@ struct CString {
   operator const char*() const { return cstr; }
 
   std::string utf8String() {
-    std::u16string u16_string(cstr, len_);
-    return std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t>{}
-            .to_bytes(u16_string);
+    return {cstr, len_};
   }
 
   ~CString() {
