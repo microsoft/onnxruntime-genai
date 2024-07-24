@@ -13,10 +13,10 @@ Java_ai_onnxruntime_genai_Model_setupQnnEnv(JNIEnv* env, jobject thiz, jstring j
   CString path = {env, jpath};
   std::string utf8Path = path.utf8String();
   setenv("LD_LIBRARY_PATH",
-         (cxxPath + ":/vendor/dsp/cdsp:/vendor/lib64:/vendor/dsp/dsp:/vendor/dsp/images").c_str(),
+         (utf8Path + ":/vendor/dsp/cdsp:/vendor/lib64:/vendor/dsp/dsp:/vendor/dsp/images").c_str(),
          1 /*overwrite*/);
   setenv("ADSP_LIBRARY_PATH",
-         (cxxPath + ";/vendor/dsp/cdsp;/vendor/lib/rfsa/adsp;/system/lib/rfsa/adsp;/vendor/dsp/dsp;/vendor/dsp/images;/dsp").c_str(),
+         (utf8Path + ";/vendor/dsp/cdsp;/vendor/lib/rfsa/adsp;/system/lib/rfsa/adsp;/vendor/dsp/dsp;/vendor/dsp/images;/dsp").c_str(),
          1 /*overwrite*/);
   return 0;
 }

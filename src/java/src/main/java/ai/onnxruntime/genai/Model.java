@@ -6,6 +6,11 @@ package ai.onnxruntime.genai;
 public final class Model implements AutoCloseable {
   private long nativeHandle;
 
+  public Model(String modelPath, String qnnLibPath) {
+    setupQnnEnv(qnnLibPath);
+    this(modelPath);
+  }
+
   public Model(String modelPath) throws GenAIException {
     nativeHandle = createModel(modelPath);
   }
@@ -83,7 +88,8 @@ public final class Model implements AutoCloseable {
       throw new RuntimeException("Failed to load onnxruntime-genai native libraries", e);
     }
   }
-  public native long setupQnnEnv(String path);
+
+  private native long setupQnnEnv(String path);
 
   private native long createModel(String modelPath) throws GenAIException;
 
