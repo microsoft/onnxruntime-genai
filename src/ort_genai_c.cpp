@@ -405,6 +405,9 @@ OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor* 
   OGA_TRY
   auto& processor = *reinterpret_cast<const Generators::MultiModalProcessor*>(p);
   auto* images = images_p ? reinterpret_cast<const Generators::Images*>(images_p) : nullptr;
+  if (processor.image_processor_ == nullptr)
+    throw std::runtime_error("Image processor is not available for this model.");
+
   auto named_tensors = processor.image_processor_->Process(*processor.tokenizer_, prompt, images);
   *input_tensors = reinterpret_cast<OgaNamedTensors*>(named_tensors.release());
   return nullptr;
