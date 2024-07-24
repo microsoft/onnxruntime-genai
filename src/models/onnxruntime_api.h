@@ -66,7 +66,6 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #pragma once
 #include <memory>
 #include <string>
-#include <sstream>
 #include <vector>
 #include <unordered_map>
 
