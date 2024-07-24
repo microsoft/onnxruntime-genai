@@ -197,9 +197,9 @@ class Model:
                 low_freq_factor = config.rope_scaling["low_freq_factor"] if "low_freq_factor" in config.rope_scaling else 0
                 high_freq_factor = config.rope_scaling["high_freq_factor"] if "high_freq_factor" in config.rope_scaling else 0
                 self.rotemb_attrs["rescale_inv_freq"] = {
-                    "factor": factor,
-                    "low_freq_factor": low_freq_factor,
-                    "high_freq_factor": high_freq_factor,
+                    "factor": factor,                            # Scale factor when calculating `new_freq` in rotary embeddings
+                    "low_freq_factor": low_freq_factor,          # Low freq factor when calculating `low_freq_wavelen` in rotary embeddings
+                    "high_freq_factor": high_freq_factor,        # High freq factor when calculating `high_freq_wavelen` in rotary embeddings
                 }
 
         # Attention-specific variables (MHA, GQA, GQA + Rot.Emb., etc.)
