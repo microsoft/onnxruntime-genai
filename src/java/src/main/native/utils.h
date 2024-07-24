@@ -39,11 +39,11 @@ struct CString {
   operator const char*() const { return cstr; }
 
   std::string utf8String() {
-    return {cstr, len_};
+    return {cstr, static_cast<size_t>(len_)};
   }
 
   ~CString() {
-    env_->ReleaseStringUTFChars(str_, static_cast<size_t>(cstr));
+    env_->ReleaseStringUTFChars(str_, cstr);
   }
 
  private:
