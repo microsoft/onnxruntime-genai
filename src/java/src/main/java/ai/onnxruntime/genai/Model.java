@@ -6,9 +6,9 @@ package ai.onnxruntime.genai;
 public final class Model implements AutoCloseable {
   private long nativeHandle;
 
-  public Model(String modelPath, String qnnLibPath) throws GenAIException {
-    this(modelPath);
-    setupQnnEnv(qnnLibPath);
+  public Model(String modelPath, String qnnLibSearchPath) throws GenAIException {
+    setupQnnEnv(qnnLibSearchPath);
+    nativeHandle = createModel(modelPath);
   }
 
   public Model(String modelPath) throws GenAIException {
