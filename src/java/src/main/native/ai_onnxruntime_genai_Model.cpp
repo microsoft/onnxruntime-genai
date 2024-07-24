@@ -12,12 +12,11 @@ extern "C" JNIEXPORT jlong JNICALL
 Java_ai_onnxruntime_genai_Model_setupQnnEnv(JNIEnv* env, jobject thiz, jstring jpath) {
   CString path = {env, jpath};
   std::string utf8Path = path.utf8String();
-  setenv("LD_LIBRARY_PATH",
-         (utf8Path + ":/vendor/dsp/cdsp:/vendor/lib64:/vendor/dsp/dsp:/vendor/dsp/images").c_str(),
-         1 /*overwrite*/);
+#ifdef __ANDROID__
   setenv("ADSP_LIBRARY_PATH",
          (utf8Path + ";/vendor/dsp/cdsp;/vendor/lib/rfsa/adsp;/system/lib/rfsa/adsp;/vendor/dsp/dsp;/vendor/dsp/images;/dsp").c_str(),
          1 /*overwrite*/);
+#endif
   return 0;
 }
 

@@ -107,6 +107,7 @@ inline void InitApi() {
   //   - iterate between the current ORT version we're aware of, and a minimum required version, so that we work with
   //     any libonnxruntime.so that supports one of those versions.
   //
+
   const std::string path = "libonnxruntime.so";  // "libonnxruntime4j_jni.so" is also an option if we have issues
   __android_log_print(ANDROID_LOG_INFO, "GenAI", "Attempting to dlopen %s native library", path.c_str());
 
@@ -146,7 +147,6 @@ inline void InitApi() {
                          "%s did not have an ORT API version between %d and %d.",
                          path.c_str(), ORT_API_VERSION, genai_min_ort_api_version);
   }
-
 #else   // defined(__ANDROID__)
   api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
   if (!api)
