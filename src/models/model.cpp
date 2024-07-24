@@ -316,6 +316,12 @@ void Model::CreateSessionOptions() {
     ort_options.EnableProfiling(profile_file_prefix.c_str());
   }
 
+  if (options.disable_cpu_ep_fallback.has_value()) {
+    if (options.disable_cpu_ep_fallback.value()) {
+      ort_options.DisableCpuEpFallback();
+    }
+  }
+
   for (auto& provider_options : options.provider_options) {
     if (provider_options.name == "cuda") {
       auto ort_provider_options = OrtCUDAProviderOptionsV2::Create();

@@ -431,6 +431,8 @@ struct OrtSessionOptions {
   OrtSessionOptions& EnableCpuMemArena();   ///< Wraps OrtApi::EnableCpuMemArena
   OrtSessionOptions& DisableCpuMemArena();  ///< Wraps OrtApi::DisableCpuMemArena
 
+  OrtSessionOptions& DisableCpuEpFallback();
+
   OrtSessionOptions& SetOptimizedModelFilePath(const ORTCHAR_T* optimized_model_file);  ///< Wraps OrtApi::SetOptimizedModelFilePath
 
   OrtSessionOptions& EnableProfiling(const ORTCHAR_T* profile_file_prefix);  ///< Wraps OrtApi::EnableProfiling

@@ -534,6 +534,10 @@ inline OrtSessionOptions& OrtSessionOptions::DisableCpuMemArena() {
   return *this;
 }
 
+inline OrtSessionOptions& OrtSessionOptions::DisableCpuEpFallback() {
+  return AddConfigEntry("session.disable_cpu_ep_fallback", "1");
+}
+
 inline OrtSessionOptions& OrtSessionOptions::SetExecutionMode(ExecutionMode execution_mode) {
   Ort::ThrowOnError(Ort::api->SetSessionExecutionMode(this, execution_mode));
   return *this;
