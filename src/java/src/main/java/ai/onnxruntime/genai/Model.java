@@ -7,7 +7,7 @@ public final class Model implements AutoCloseable {
   private long nativeHandle;
 
   public Model(String modelPath, String qnnLibSearchPath) throws GenAIException {
-    if(str != null && !str.trim().isEmpty()) {
+    if(qnnLibSearchPath != null && !qnnLibSearchPath.trim().isEmpty()) {
       setupQnnEnv(qnnLibSearchPath);
     }
     nativeHandle = createModel(modelPath);
