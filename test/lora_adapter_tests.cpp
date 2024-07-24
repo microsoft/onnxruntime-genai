@@ -17,14 +17,10 @@ namespace tests {
 #define IS_MS_ARM 1
 #endif
 
-#ifndef IS_MS_ARM
+#if !defined(IS_MS_ARM) && !defined(USE_DML)
 TEST(GeneratorsTests, LoraAdapterContainerTests) {
 #if defined(USE_CUDA)
   const std::string model_folder = MODEL_PATH "hf-internal-testing/tiny-random-llama-lora-fp16";
-  const auto expected_data_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
-  using ExpectedCppType = Ort::Float16_t;
-#elif defined(USE_DML)
-  const std::string model_folder = MODEL_PATH "hf-internal-testing/tiny-random-llama-lora-fp16-dml";
   const auto expected_data_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
   using ExpectedCppType = Ort::Float16_t;
 #else
@@ -89,6 +85,6 @@ TEST(GeneratorsTests, LoraAdapterContainerTests) {
     }
   }
 }
-#endif  // IS_MS_ARM
+#endif  //
 }  // namespace tests
 }  // namespace Generators

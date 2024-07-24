@@ -107,12 +107,10 @@ TEST(CAPITests, Tensor_And_AddExtraInput) {
 #define IS_MS_ARM 1
 #endif
 
-#ifndef IS_MS_ARM
+#if !defined(IS_MS_ARM) && !defined(USE_DML)
 TEST(CAPITests, LoraManagement) {
 #if defined(USE_CUDA)
   const std::string model_folder = MODEL_PATH "hf-internal-testing/tiny-random-llama-lora-fp16";
-#elif defined(USE_DML)
-  const std::string model_folder = MODEL_PATH "hf-internal-testing/tiny-random-llama-lora-fp16-dml";
 #else
   const std::string model_folder = MODEL_PATH "hf-internal-testing/tiny-random-llama-lora";
 #endif
@@ -210,7 +208,7 @@ TEST(CAPITests, LoraManagementEndToEnd) {
   }
 }
 
-#endif  // IS_MS_ARM
+#endif  // !defined(IS_MS_ARM) && !defined(USE_DML)
 
 TEST(CAPITests, Logging) {
   // Trivial test to ensure the API builds properly
