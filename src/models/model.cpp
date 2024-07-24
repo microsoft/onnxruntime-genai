@@ -395,13 +395,12 @@ void Model::CreateSessionOptions() {
       device_type_ = DeviceType::DML;  // We use a DML allocator for input/output caches, but other tensors will use CPU tensors
 #endif
     } else if (provider_options.name == "qnn") {
-      std::vector<const char*> keys, values;
+      std::unordered_map<std::string, std::string> options;
       for (auto& option : provider_options.options) {
-        keys.emplace_back(option.first.c_str());
-        values.emplace_back(option.second.c_str());
+        options.emplace(option.first, option.second);
       }
 
-      Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider(&ort_options, "QNN", keys.data(), values.data(), keys.size()));
+      ort_options.AppendExecutionProvider("QNN", options);
     } else
       throw std::runtime_error("Unknown provider type: " + provider_options.name);
   }
