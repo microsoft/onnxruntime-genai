@@ -534,8 +534,28 @@ inline OrtSessionOptions& OrtSessionOptions::DisableCpuMemArena() {
   return *this;
 }
 
+inline OrtSessionOptions& OrtSessionOptions::EnableCpuEpFallback() {
+  return AddConfigEntry("session.disable_cpu_ep_fallback", "0");
+}
+
 inline OrtSessionOptions& OrtSessionOptions::DisableCpuEpFallback() {
   return AddConfigEntry("session.disable_cpu_ep_fallback", "1");
+}
+
+inline OrtSessionOptions& OrtSessionOptions::EnableQuantQdq() {
+  return AddConfigEntry("session.disable_quant_qdq", "0");
+}
+
+inline OrtSessionOptions& OrtSessionOptions::DisableQuantQdq() {
+  return AddConfigEntry("session.disable_quant_qdq", "1");
+}
+
+inline OrtSessionOptions& OrtSessionOptions::EnableQuantQdqCleanup() {
+  return AddConfigEntry("session.enable_quant_qdq_cleanup", "1");
+}
+
+inline OrtSessionOptions& OrtSessionOptions::DisableQuantQdqCleanup() {
+  return AddConfigEntry("session.enable_quant_qdq_cleanup", "0");
 }
 
 inline OrtSessionOptions& OrtSessionOptions::SetExecutionMode(ExecutionMode execution_mode) {

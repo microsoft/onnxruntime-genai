@@ -86,6 +86,8 @@ struct SessionOptions_Element : JSON::Element {
       v_.enable_mem_pattern = value;
     else if (name == "disable_cpu_ep_fallback")
       v_.disable_cpu_ep_fallback = value;
+    else if (name == "disable_quant_qdq")
+      v_.disable_quant_qdq = value;
     else
       throw JSON::unknown_value_error{};
   }

@@ -28,6 +28,7 @@ struct Config {
     std::optional<bool> enable_cpu_mem_arena;
     std::optional<bool> enable_mem_pattern;
     std::optional<bool> disable_cpu_ep_fallback;
+    std::optional<bool> disable_quant_qdq;
     std::optional<std::string> log_id;
     std::optional<int> log_severity_level;
     std::optional<std::string> enable_profiling;

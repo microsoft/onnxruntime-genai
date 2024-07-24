@@ -317,9 +317,17 @@ void Model::CreateSessionOptions() {
   }
 
   if (options.disable_cpu_ep_fallback.has_value()) {
-    if (options.disable_cpu_ep_fallback.value()) {
+    if (options.disable_cpu_ep_fallback.value())
       ort_options.DisableCpuEpFallback();
-    }
+    else
+      ort_options.EnableCpuEpFallback();
+  }
+
+  if (options.disable_quant_qdq.has_value()) {
+    if (options.disable_quant_qdq.value())
+      ort_options.DisableQuantQdq();
+    else
+      ort_options.EnableQuantQdq();
   }
 
   for (auto& provider_options : options.provider_options) {

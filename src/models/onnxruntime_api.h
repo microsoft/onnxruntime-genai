@@ -431,7 +431,14 @@ struct OrtSessionOptions {
   OrtSessionOptions& EnableCpuMemArena();   ///< Wraps OrtApi::EnableCpuMemArena
   OrtSessionOptions& DisableCpuMemArena();  ///< Wraps OrtApi::DisableCpuMemArena
 
+  OrtSessionOptions& EnableCpuEpFallback();
   OrtSessionOptions& DisableCpuEpFallback();
+
+  OrtSessionOptions& EnableQuantQdq();
+  OrtSessionOptions& DisableQuantQdq();
+
+  OrtSessionOptions& EnableQuantQdqCleanup();
+  OrtSessionOptions& DisableQuantQdqCleanup();
 
   OrtSessionOptions& SetOptimizedModelFilePath(const ORTCHAR_T* optimized_model_file);  ///< Wraps OrtApi::SetOptimizedModelFilePath
 
