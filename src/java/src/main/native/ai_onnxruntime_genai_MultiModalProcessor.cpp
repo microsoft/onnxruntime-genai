@@ -65,7 +65,7 @@ Java_ai_onnxruntime_genai_MultiModalProcessor_processorDecode(JNIEnv* env, jobje
 }
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_ai_onnxruntime_genai_Tokenizer_createTokenizerStreamFromProcessor(JNIEnv* env, jobject thiz, jlong processor_handle) {
+Java_ai_onnxruntime_genai_MultiModalProcessor_createTokenizerStreamFromProcessor(JNIEnv* env, jobject thiz, jlong processor_handle) {
   const OgaMultiModalProcessor* processor = reinterpret_cast<const OgaMultiModalProcessor*>(processor_handle);
   OgaTokenizerStream* tokenizer_stream = nullptr;
 
