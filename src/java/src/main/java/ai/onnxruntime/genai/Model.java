@@ -7,8 +7,8 @@ public final class Model implements AutoCloseable {
   private long nativeHandle;
 
   public Model(String modelPath, String qnnLibPath) {
-    setupQnnEnv(qnnLibPath);
     this(modelPath);
+    setupQnnEnv(qnnLibPath);
   }
 
   public Model(String modelPath) throws GenAIException {
