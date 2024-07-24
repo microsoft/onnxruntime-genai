@@ -555,8 +555,10 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
 
 MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& session_info)
     : tokenizer_{std::make_shared<Tokenizer>(config)} {
-  if (!config.model.vision.filename.empty()) {
+  if (config.model.type == "phi3v") {
     image_processor_ = std::make_shared<ImageProcessor>(config, session_info);
+  } else {
+    throw std::runtime_error("MultiModalProcessor cannot be created. Expected a multimodal model. Actual: " + config.model.type);
   }
 }
 
