@@ -43,12 +43,12 @@ struct CString {
   }
 
   ~CString() {
-    env_->ReleaseStringUTFChars(str_, cstr);
+    env_->ReleaseStringUTFChars(str_, static_cast<size_t>(cstr));
   }
 
  private:
   JNIEnv* env_;
   jstring str_;
-  int len_;
+  jsize len_;
 };
 }  // namespace Helpers
