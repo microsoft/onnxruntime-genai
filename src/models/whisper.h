@@ -15,8 +15,6 @@ struct Whisper_Model : Model {
 
   std::unique_ptr<OrtSession> session_encoder_;  // encoder_decoder_init.onnx
   std::unique_ptr<OrtSession> session_decoder_;  // decoder.onnx
-
-  std::unique_ptr<SessionInfo> session_encoder_info_;
 };
 
 struct Whisper_State : State {
