@@ -480,7 +480,10 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
                 throw std::runtime_error("Image processor is not available for this model.");
               }
               const Images* images = kwargs["images"].cast<const Images*>();
-              return std::make_unique<PyNamedTensors>(processor.image_processor_->Process(*processor.tokenizer_, prompt, images));
+              if (!prompt.has_value()) {
+                throw std::runtime_error("Prompt is required for processing the image.");
+              }
+              return std::make_unique<PyNamedTensors>(processor.image_processor_->Process(*processor.tokenizer_, *prompt, images));
             } else if (kwargs.contains("audios")) {
               const Audios* audios = kwargs["audios"].cast<const Audios*>();
               return std::make_unique<PyNamedTensors>(processor.audio_processor_->Process(audios));
