@@ -7,14 +7,14 @@ package ai.onnxruntime.genai;
 public class MultiModalProcessor implements AutoCloseable {
   private long nativeHandle;
 
-  MultiModalProcessor(Model model) throws GenAIException {
+  public MultiModalProcessor(Model model) throws GenAIException {
     assert (model.nativeHandle() != 0); // internal code should never pass an invalid model
 
     nativeHandle = createMultiModalProcessor(model.nativeHandle());
   }
 
   /**
-   * Encodes a string and image into a NamedTensor.
+   * Processes a string and image into a NamedTensor.
    *
    * @param prompt Text to encode as token ids.
    * @param images image input.
