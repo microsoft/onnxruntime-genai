@@ -201,7 +201,6 @@ class Model:
                     "low_freq_factor": low_freq_factor,
                     "high_freq_factor": high_freq_factor,
                 }
-                print(self.rotemb_attrs["rescale_inv_freq"])
 
         # Attention-specific variables (MHA, GQA, GQA + Rot.Emb., etc.)
         # Block-sparse attention-specific variables
