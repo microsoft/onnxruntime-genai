@@ -5,6 +5,7 @@
 #include "json.h"
 #include <iostream>
 #include <fstream>
+#include <cstdarg>
 
 namespace Generators {
 
