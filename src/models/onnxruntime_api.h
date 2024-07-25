@@ -89,13 +89,17 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #endif
 
 #if defined(__linux__)
+#include <dlfcn.h>
 
-#define LOG_DEBUG(...) Log("debug", __VA_ARGS__)
-#define LOG_INFO(...) Log("info", __VA_ARGS__)
-#define LOG_WARN(...) Log("warning", __VA_ARGS__)
-#define LOG_ERROR(...) Log("error", __VA_ARGS__)
-#define LOG_FATAL(...) Log("fatal", __VA_ARGS__)
-#define LOG_ASSERT(CONDITION, ...) ()
+#define CONDITION(cond) (__builtin_expect((cond) != 0, 0))
+
+#define LOG_DEBUG(...) Generators::Log("debug", __VA_ARGS__)
+#define LOG_INFO(...) Generators::Log("info", __VA_ARGS__)
+#define LOG_WARN(...) Generators::Log("warning", __VA_ARGS__)
+#define LOG_ERROR(...) Generators::Log("error", __VA_ARGS__)
+#define LOG_FATAL(...) Generators::Log("fatal", __VA_ARGS__)
+
+#define LOG_ASSERT(cond, ...)  ( (CONDITION(cond)) ? LOG_INFO(__VA_ARGS__) : (void)0 )
 
 #endif
 
@@ -107,7 +111,7 @@ namespace Ort {
 /// Before using this C++ wrapper API, you MUST call Ort::InitApi to set the below 'api' variable
 inline const OrtApi* api{};
 inline void InitApi() {
-#if defined(__ANDROID__) or defined(__linux__)
+#if defined(__ANDROID__) || defined(__linux__)
   // If the GenAI library links against the onnxruntime library, it will have a dependency on a specific
   // version of OrtGetApiBase.
   //
