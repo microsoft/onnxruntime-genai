@@ -46,7 +46,7 @@ target_include_directories(genai_custom_ops_test PUBLIC ${CMAKE_CUDA_TOOLKIT_INC
 target_link_libraries(genai_custom_ops_test PUBLIC cudart cublas cufft)
 
 target_include_directories(genai_custom_ops_test PUBLIC 
-    "~/ort_pkg_19_cuda118/include"
+    "/home/yingxiong/projects/onnxruntime-genai/ort/include"
     "../../build/Linux/Debug/_deps/onnxruntime_extensions-src/base"
     "../../build/Linux/Debug/_deps/onnxruntime_extensions-src/include"
     "../../build/Linux/Debug/_deps/onnxruntime_extensions-src/include/custom_op"
@@ -54,4 +54,4 @@ target_include_directories(genai_custom_ops_test PUBLIC
     "../../build/Linux/Debug/_deps/cutlass-src/include"
     "../../build/Linux/Debug/_deps/cutlass-src/examples")
 
-target_link_libraries(genai_custom_ops_test PUBLIC "~/ort_pkg_19_cuda118/lib/libonnxruntime.so")
+target_link_libraries(genai_custom_ops_test PUBLIC "/home/yingxiong/projects/onnxruntime-genai/ort/lib/libonnxruntime.so")
