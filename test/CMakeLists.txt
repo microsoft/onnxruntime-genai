@@ -17,7 +17,6 @@ target_include_directories(unit_tests PRIVATE
 )
 
 target_link_libraries(unit_tests PRIVATE genai_flatbuffers)
-target_include_directories(unit_tests PRIVATE FlatBuffers::FlatBuffers)
 
 target_include_directories(unit_tests PRIVATE ${ORT_HEADER_DIR})
 target_link_directories(unit_tests PRIVATE ${ORT_LIB_DIR})
