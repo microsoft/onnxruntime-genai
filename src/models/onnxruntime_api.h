@@ -139,7 +139,7 @@ inline void InitApi() {
   using OrtApiBaseFn = const OrtApiBase* (*)(void);
   OrtApiBaseFn ort_api_base_fn = nullptr;
 
-  void* ort_lib_handle = dlopen(path.c_str(), RTLD_LOCAL);
+  void* ort_lib_handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
   if (ort_lib_handle == nullptr) {
     LOG_ASSERT("ort_lib_handle != nullptr", "Failed to load %s: %s", path.c_str(), dlerror());
     exit(EXIT_FAILURE);

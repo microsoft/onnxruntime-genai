@@ -100,7 +100,7 @@ std::ostream& Log(std::string_view label, const char* fmt, ...) {
   std::unique_ptr<char[]> buf(new char[len]);
   vsnprintf(buf.get(), len + 1, fmt, args);
   va_end(args);
-  return Log(label, std::string(buf.get(), buf.get() + len - 1));
+  return Log(label, std::string(buf.get(), buf.get() + len));
 }
 
 }  // namespace Generators
