@@ -87,13 +87,16 @@ std::ostream& Log(std::string_view label, std::string_view string) {
   return *gp_stream;
 }
 
-std::ostream& Log(std::string_view label, const char* fmt, va_list ap) {
+std::ostream& Log(std::string_view label, const char* fmt, ...) {
   std::string message;
-  va_list ap_copy;
-  va_copy(ap_copy, ap);
-  size_t len = vsnprintf(0, 0, fmt, ap_copy);
+  va_list args;
+  va_start(args, fmt);
+  va_list args_copy;
+  va_copy(args_copy, args);
+  size_t len = vsnprintf(0, 0, fmt, args_copy);
   message.resize(len + 1);
-  vsnprintf(&message[0], len + 1, fmt, ap);
+  vsnprintf(&message[0], len + 1, fmt, args);
+  va_end(args);
   message.resize(len);
   return Log(label, message);
 }
