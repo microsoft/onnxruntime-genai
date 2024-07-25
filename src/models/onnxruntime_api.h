@@ -103,7 +103,7 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 
 #if defined(__ANDROID__) || defined(__linux__)
 
-static OrtApiBase* ort_api_base = nullptr;
+static const OrtApiBase* ort_api_base = nullptr;
 
 __attribute__((constructor)) static void initialize_ort_api_base() {
   // If the GenAI library links against the onnxruntime library, it will have a dependency on a specific
@@ -183,8 +183,8 @@ inline void InitApi() {
 
   if (!api) {
     LOG_ASSERT("api != nullptr",
-               "%s did not have an ORT API version between %d and %d.",
-               path.c_str(), ORT_API_VERSION, genai_min_ort_api_version);
+               "The expected ORT API version is between %d and %d.",
+               ORT_API_VERSION, genai_min_ort_api_version);
   }
 #else   // defined(__ANDROID__)
   api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
