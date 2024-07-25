@@ -84,7 +84,6 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #define LOG_WARN(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
 #define LOG_ERROR(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 #define LOG_FATAL(...) __android_log_print(ANDROID_LOG_FATAL, TAG, __VA_ARGS__)
-#define LOG_ASSERT(CONDITION, ...) __android_log_assert(CONDITION, TAG, __VA_ARGS__);
 
 #elif defined(__linux__)
 #include <dlfcn.h>
@@ -97,10 +96,7 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #define LOG_ERROR(...) Generators::Log("error", __VA_ARGS__)
 #define LOG_FATAL(...) Generators::Log("fatal", __VA_ARGS__)
 
-#define LOG_ASSERT(cond, ...) ((CONDITION(cond)) ? (void)LOG_ERROR(__VA_ARGS__) : (void)0)
-
 #endif
-
 
 /** \brief Free functions and a few helpers are defined inside this namespace. Otherwise all types are the C API types
  *
@@ -145,7 +141,7 @@ inline void InitApi() {
 
   void* ort_lib_handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
   if (ort_lib_handle == nullptr) {
-    LOG_ASSERT("ort_lib_handle != nullptr", "Failed to load %s: %s", path.c_str(), dlerror());
+    LOG_FATAL("Failed to load %s: %s", path.c_str(), dlerror());
     exit(EXIT_FAILURE);
   }
 
@@ -157,13 +153,13 @@ inline void InitApi() {
 
   ort_api_base_fn = (OrtApiBaseFn)dlsym(ort_lib_handle, "OrtGetApiBase");
   if (ort_api_base_fn == nullptr) {
-    LOG_ASSERT("ort_api_base_fn != nullptr", "OrtGetApiBase not found");
+    LOG_FATAL("OrtGetApiBase not found");
     exit(EXIT_FAILURE);
   }
 
   const OrtApiBase* ort_api_base = ort_api_base_fn();
   if (ort_api_base == nullptr) {
-    LOG_ASSERT("ort_api_base != nullptr", "OrtGetApiBase() returned nullptr");
+    LOG_FATAL("OrtGetApiBase() returned nullptr");
     exit(EXIT_FAILURE);
   }
 
