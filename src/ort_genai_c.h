@@ -94,6 +94,7 @@ OGA_EXPORT void OGA_API_CALL OgaDestroySequences(OgaSequences* sequences);
 
 /*
  * \brief Returns the number of sequences in the OgaSequences
+ * 
  * \param[in] sequences
  * \return The number of sequences in the OgaSequences
  */
@@ -101,6 +102,7 @@ OGA_EXPORT size_t OGA_API_CALL OgaSequencesCount(const OgaSequences* sequences);
 
 /*
  * \brief Returns the number of tokens in the sequence at the given index
+ * 
  * \param[in] sequences
  * \return The number of tokens in the sequence at the given index
  */
@@ -109,6 +111,7 @@ OGA_EXPORT size_t OGA_API_CALL OgaSequencesGetSequenceCount(const OgaSequences* 
 /*
  * \brief Returns a pointer to the sequence data at the given index. The number of tokens in the sequence
  *        is given by OgaSequencesGetSequenceCount
+ * 
  * \param[in] sequences
  * \return The pointer to the sequence data at the given index. The pointer is valid until the OgaSequences is
  * destroyed.
@@ -122,6 +125,7 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyImages(OgaImages* images);
 
 /*
  * \brief Creates a model from the given configuration directory and device type.
+ * 
  * \param[in] config_path The path to the model configuration directory. The path is expected to be encoded in UTF-8.
  * \param[in] device_type The device type to use for the model.
  * \param[out] out The created model.
@@ -131,23 +135,26 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaMo
 
 /*
  * \brief Destroys the given model.
+ * 
  * \param[in] model The model to be destroyed.
  */
 OGA_EXPORT void OGA_API_CALL OgaDestroyModel(OgaModel* model);
 
 /*
  * \brief Generates an array of token arrays from the model execution based on the given generator params.
+ * 
  * \param[in] model The model to use for generation.
  * \param[in] generator_params The parameters to use for generation.
  * \param[out] out The generated sequences of tokens. The caller is responsible for freeing the sequences using
- * OgaDestroySequences after it is done using the sequences. \return OgaResult containing the error message if the
- * generation failed.
+ *            OgaDestroySequences after it is done using the sequences.
+ * \return OgaResult containing the error message if the generation failed.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerate(const OgaModel* model, const OgaGeneratorParams* generator_params,
                                                OgaSequences** out);
 
 /*
  * \brief Creates a OgaGeneratorParams from the given model.
+ * 
  * \param[in] model The model to use for generation.
  * \param[out] out The created generator params.
  * \return OgaResult containing the error message if the generator params creation failed.
@@ -156,6 +163,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateGeneratorParams(const OgaModel* mode
 
 /*
  * \brief Destroys the given generator params.
+ * 
  * \param[in] generator_params The generator params to be destroyed.
  */
 OGA_EXPORT void OGA_API_CALL OgaDestroyGeneratorParams(OgaGeneratorParams* generator_params);
@@ -169,6 +177,7 @@ OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGeneratorParams* generator_
 
 /*
  * \brief Sets the input ids for the generator params. The input ids are used to seed the generation.
+ * 
  * \param[in] generator_params The generator params to set the input ids on.
  * \param[in] input_ids The input ids array of size input_ids_count = batch_size * sequence_length.
  * \param[in] input_ids_count The total number of input ids.
@@ -182,6 +191,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputIDs(OgaGeneratorPar
 
 /*
  * \brief Sets the input id sequences for the generator params. The input id sequences are used to seed the generation.
+ * 
  * \param[in] generator_params The generator params to set the input ids on.
  * \param[in] sequences The input id sequences.
  * \return OgaResult containing the error message if the setting of the input id sequences failed.
@@ -193,31 +203,34 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputs(OgaGeneratorParam
                                                                const OgaNamedTensors* named_tensors);
 
 /*
- * \brief For additional model inputs that genai does not handle, this lets the user set their values. For example LoRA
- * models handle fine tuning through model inputs. This lets the user supply the fine tuning inputs, while genai handles
- * the standard inputs. \param[in] generator_params The generator params to set the input on \param[in] name Name of the
- * model input (this must match the model's input name) \param[in] tensor The OgaTensor of the input data
+ * \brief For additional model inputs that genai does not handle, this lets the user set their values.
+ * 
+ * \param[in] generator_params The generator params to set the input on
+ * \param[in] name Name of the model input (this must match the model's input name)
+ * \param[in] tensor The OgaTensor of the input data
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetModelInput(OgaGeneratorParams* generator_params,
                                                                    const char* name, OgaTensor* tensor);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperInputFeatures(OgaGeneratorParams*, OgaTensor* tensor);
 
-/// <summary>
-/// Set active adapter names for the give params instance. The specified adapter names
-/// replace any previously set names.
-/// This call has no effect on any Generator instances created before this call is made.
-/// </summary>
-/// <param name="">a valid params ptr</param>
-/// <param name="adapters">an array of valid adapter names (UTF-8 encoded C strings). This array replaces
-///                        any previously set active adapters within GeneratorParams.</param>
-/// <param name="count">size of the names array. Passing zero removes any previously set adapters.</param>
-/// <returns>Returns an error if a non-existent adapter name is submitted</returns>
+/** \brief Set active adapter names for the give params instance. The specified adapter names
+ *         replace any previously set names.
+ *         This call has no effect on any Generator instances created before this call is made.
+ *
+ * \param[in/out] params a valid instance of GeneratorParams
+ * \param[in] adapters an array of valid adapter names (UTF-8 encoded C strings). This array replaces
+ *                     any previously set active adapters within GeneratorParams. In case of error,
+ *                     the previous active adapters are retained.
+ * \param[in] count size of the names array. Passing zero removes any previously set adapters.</param>
+ * \returns Returns an error if a non-existent adapter name is submitted
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetActiveAdapters(OgaGeneratorParams* params,
                                                                        const char* const* adapters, size_t count);
 
 /*
  * \brief Creates a generator from the given model and generator params.
+ * 
  * \param[in] model The model to use for generation.
  * \param[in] params The parameters to use for generation.
  * \param[out] out The created generator.
@@ -228,12 +241,14 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateGenerator(const OgaModel* model, con
 
 /*
  * \brief Destroys the given generator.
+ * 
  * \param[in] generator The generator to be destroyed.
  */
 OGA_EXPORT void OGA_API_CALL OgaDestroyGenerator(OgaGenerator* generator);
 
 /*
  * \brief Returns true if the generator has finished generating all the sequences.
+ * 
  * \param[in] generator The generator to check if it is done with generating all sequences.
  * \return True if the generator has finished generating all the sequences, false otherwise.
  */
@@ -241,14 +256,17 @@ OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsDone(const OgaGenerator* generator);
 
 /*
  * \brief Computes the logits from the model based on the input ids and the past state. The computed logits are stored
- * in the generator. \param[in] generator The generator to compute the logits for. \return OgaResult containing the
- * error message if the computation of the logits failed.
+ *        in the generator. 
+ *
+ * \param[in] generator The generator to compute the logits for.
+ * \return OgaResult containing the error message if the computation of the logits failed.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_ComputeLogits(OgaGenerator* generator);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator);
 
 /*
  * \brief Returns the number of tokens in the sequence at the given index.
+ * 
  * \param[in] generator The generator to get the count of the tokens for the sequence at the given index.
  * \return The number tokens in the sequence at the given index.
  */
@@ -257,6 +275,7 @@ OGA_EXPORT size_t OGA_API_CALL OgaGenerator_GetSequenceCount(const OgaGenerator*
 /*
  * \brief Returns a pointer to the sequence data at the given index. The number of tokens in the sequence
  *        is given by OgaGenerator_GetSequenceCount
+ * 
  * \param[in] generator The generator to get the sequence data for the sequence at the given index.
  * \return The pointer to the sequence data at the given index. The sequence data is owned by the OgaGenerator
  *         and will be freed when the OgaGenerator is destroyed. The caller must copy the data if it needs to
@@ -306,7 +325,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream*,
  *
  * \param[in] data User supplied memory pointer, must remain valid for lifetime of the OgaTensor
  * \param[in] shape_dims Pointer to array of int64_t values that define the tensor shape, example [1 20 30] would be
- * equivalent to a C array of [1][20][30] \param[in] shape_dims_count Count of elements in the shape_dims array
+ *            equivalent to a C array of [1][20][30] \param[in] shape_dims_count Count of elements in the shape_dims array
  * \param[in] element_type The data type that 'data' points to.
  * \param[out] out Writes the newly created OgaTensor into this, must be destroyed with OgaDestroyTensor
  */

@@ -62,7 +62,6 @@ install(FILES
   "${PROJECT_SOURCE_DIR}/ThirdPartyNotices.txt"
   "${PROJECT_SOURCE_DIR}/SECURITY.md"
   "${PROJECT_SOURCE_DIR}/LICENSE"
-  "${PROJECT_SOURCE_DIR}/tools/python/convert_lora_and_add_config.py"
   DESTINATION .)
 
 install(FILES
