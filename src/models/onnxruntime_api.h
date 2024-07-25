@@ -88,7 +88,7 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 
 #endif
 
-#if defined(__linux__)
+#elif defined(__linux__)
 #include <dlfcn.h>
 
 #define CONDITION(cond) (__builtin_expect((cond) != 0, 0))
@@ -99,7 +99,7 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #define LOG_ERROR(...) Generators::Log("error", __VA_ARGS__)
 #define LOG_FATAL(...) Generators::Log("fatal", __VA_ARGS__)
 
-#define LOG_ASSERT(cond, ...)  ( (CONDITION(cond)) ? (void)LOG_INFO(__VA_ARGS__) : (void)0 )
+#define LOG_ASSERT(cond, ...) ((CONDITION(cond)) ? (void)LOG_INFO(__VA_ARGS__) : (void)0)
 
 #endif
 
@@ -145,9 +145,11 @@ inline void InitApi() {
     exit(EXIT_FAILURE);
   }
 
+#if !defined(__ANDROID__) // RTLD_DI_ORIGIN not available on Android
   char pathname[PATH_MAX];
   dlinfo((void *)ort_lib_handle, RTLD_DI_ORIGIN, &pathname);
   LOG_INFO("Loaded native library at %s", pathname);
+#endif
 
   ort_api_base_fn = (OrtApiBaseFn)dlsym(ort_lib_handle, "OrtGetApiBase");
   if (ort_api_base_fn == nullptr) {
