@@ -9,6 +9,7 @@ import platform
 import shutil
 import sys
 import warnings
+import subprocess
 
 from pathlib import Path
 
@@ -60,6 +61,9 @@ def _parse_args():
     parser.add_argument("--skip_tests", action="store_true", help="Skip all tests. Overrides --test.")
     parser.add_argument("--skip_wheel", action="store_true", help="Skip building the Python wheel.")
     parser.add_argument("--skip_csharp", action="store_true", help="Skip building the C# API.")
+
+    # Default to not building the Java bindings
+    parser.add_argument("--build_java", action="store_true", help="Build Java bindings.")
 
     parser.add_argument("--parallel", action="store_true", help="Enable parallel build.")
 
@@ -327,6 +331,13 @@ def _get_csharp_properties(args: argparse.Namespace):
 
     return props
 
+def _get_cuda_arch():
+    outputs = subprocess.check_output(
+        ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader,nounits"],
+        stderr=subprocess.STDOUT).decode("utf-8").splitlines()
+    output = outputs[0] if outputs else ""
+    arch = output.strip().replace('.', '')
+    return arch
 
 def update(args: argparse.Namespace, env: dict[str, str]):
     """
@@ -363,8 +374,9 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         "-B",
         str(args.build_dir),
         "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
-        "-DUSE_CUDA=ON" if args.use_cuda else "-DUSE_CUDA=OFF",
-        "-DUSE_DML=ON" if args.use_dml else "-DUSE_DML=OFF",
+        f"-DUSE_CUDA={'ON' if args.use_cuda else 'OFF'}",
+        f"-DUSE_DML={'ON' if args.use_dml else 'OFF'}",
+        f"-DENABLE_JAVA={'ON' if args.build_java else 'OFF'}",
         f"-DBUILD_WHEEL={build_wheel}",
         "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
 
@@ -374,10 +386,11 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         command += [f"-DORT_HOME={args.ort_home}"]
 
     if args.use_cuda:
-        cuda_arch = 80
+        cuda_arch = _get_cuda_arch()
         cuda_compiler = str(args.cuda_home / "bin" / "nvcc")
         command += [f"-DCMAKE_CUDA_COMPILER={cuda_compiler}",
-                    f"-DCMAKE_CUDA_ARCHITECTURES={cuda_arch}"]
+                    f"-DCMAKE_CUDA_ARCHITECTURES={cuda_arch}",
+                    "-DOCOS_USE_CUDA=ON"]
 
     if args.android:
         command += [

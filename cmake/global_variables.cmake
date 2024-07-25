@@ -2,14 +2,16 @@
 
 # Define the Version Info
 file(READ "VERSION_INFO" ver)
-set(VERSION_INFO ${ver} CACHE STRING "Set the onnxruntime-genai version info.")
+set(VERSION_INFO ${ver})
 message("Building onnxruntime-genai for version ${VERSION_INFO}")
 
 
 # Define the project directories
-set(GENERATORS_ROOT ${PROJECT_SOURCE_DIR}/src)
-set(MODELS_ROOT ${PROJECT_SOURCE_DIR}/src/models)
-set(ORT_HOME ${CMAKE_SOURCE_DIR}/ort CACHE PATH "Path to the onnxruntime root directory.")
+set(REPO_ROOT ${PROJECT_SOURCE_DIR})
+set(SRC_ROOT ${REPO_ROOT}/src)
+set(GENERATORS_ROOT ${SRC_ROOT})
+set(MODELS_ROOT ${SRC_ROOT}/models)
+set(ORT_HOME ${REPO_ROOT}/ort CACHE PATH "Path to the onnxruntime root directory.")
 
 if (ANDROID)
   # Paths are based on the directory structure of the ORT Android AAR.
@@ -54,3 +56,58 @@ endif()
 if(NOT EXISTS "${ORT_HEADER_DIR}/onnxruntime_c_api.h")
   message(FATAL_ERROR "Expected the ONNX Runtime C API header to be found at \"${ORT_HEADER_DIR}/onnxruntime_c_api.h\". Actual: Not found.")
 endif()
+
+
+# normalize the target platform to x64 or arm64. additional architectures can be added as needed.
+if (MSVC)
+  if (CMAKE_VS_PLATFORM_NAME)
+    # cross-platform generator
+    set(genai_target_platform ${CMAKE_VS_PLATFORM_NAME})
+  else()
+    set(genai_target_platform ${CMAKE_SYSTEM_PROCESSOR})
+  endif()
+
+  if (genai_target_platform STREQUAL "arm64")
+    # pass
+  elseif (genai_target_platform STREQUAL "x64" OR 
+          genai_target_platform STREQUAL "x86_64" OR 
+          genai_target_platform STREQUAL "AMD64" OR 
+          CMAKE_GENERATOR MATCHES "Win64")
+    set(genai_target_platform "x64")
+  else()
+    message(FATAL_ERROR "Unsupported architecture. CMAKE_SYSTEM_PROCESSOR: ${CMAKE_SYSTEM_PROCESSOR}")
+  endif()
+elseif(APPLE)
+  # TODO: do we need to support CMAKE_OSX_ARCHITECTURES having multiple values?
+  set(_apple_target_arch ${CMAKE_OSX_ARCHITECTURES})
+  if (NOT _apple_target_arch)
+    set(_apple_target_arch ${CMAKE_HOST_SYSTEM_PROCESSOR})
+  endif()
+
+  if (_apple_target_arch STREQUAL "arm64")
+    set(genai_target_platform "arm64")
+  elseif (_apple_target_arch STREQUAL "x86_64")
+    set(genai_target_platform "x64")
+  else()
+    message(FATAL_ERROR "Unsupported architecture. ${_apple_target_arch}")
+  endif()
+elseif(ANDROID)
+  if (CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a")
+    set(genai_target_platform "arm64")
+  elseif (CMAKE_ANDROID_ARCH_ABI STREQUAL "x86_64")
+    set(genai_target_platform "x64")
+  else()
+    message(FATAL_ERROR "Unsupported architecture. CMAKE_ANDROID_ARCH_ABI: ${CMAKE_ANDROID_ARCH_ABI}")
+  endif()
+else()
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "^arm64.*")
+    set(genai_target_platform "arm64")
+  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^aarch64.*")
+    set(genai_target_platform "arm64")
+  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64)$")
+    set(genai_target_platform "x64")
+  else()
+    message(FATAL_ERROR "Unsupported architecture. CMAKE_SYSTEM_PROCESSOR: ${CMAKE_SYSTEM_PROCESSOR}")
+  endif()
+endif()
+

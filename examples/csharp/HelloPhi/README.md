@@ -9,7 +9,7 @@ huggingface-cli download microsoft/Phi-3-mini-4k-instruct-onnx --include cpu_and
 move models\cpu_and_mobile\cpu-int4-rtn-block-32-acc-level-4 models\phi-3
 ```
 
-Alternatively you can build a model yourself using the model builder tool. See https://onnxruntime.ai/docs/genai/howto/build-models for details.
+Alternatively you can build a model yourself using the model builder tool. See [Generate models using Model Builder](https://onnxruntime.ai/docs/genai/howto/build-model.html) for more details.
 
 
 ## Run the model

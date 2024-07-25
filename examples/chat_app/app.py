@@ -8,10 +8,12 @@ from app_modules.overwrites import postprocess
 from app_modules.presets import description, small_and_beautiful_theme, title
 from app_modules.utils import cancel_outputing, delete_last_conversation, reset_state, reset_textbox, transfer_input
 from interface.hddr_llm_onnx_interface import ONNXModel
+from interface.multimodal_onnx_interface import MultiModal_ONNXModel
 
 top_directory = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 optimized_directory = os.path.join(top_directory, "models")
 available_models = {}
+
 interface = None
 
 
@@ -25,15 +27,21 @@ def change_model_listener(new_model_name):
         gc.collect()
 
     d = available_models[new_model_name]
-    interface = ONNXModel(
-        model_path=d["model_dir"]
-    )
+
+    if "vision" in new_model_name:
+        interface = MultiModal_ONNXModel(
+            model_path=d["model_dir"]
+        )
+    else:
+        interface = ONNXModel(
+            model_path=d["model_dir"]
+        )
 
     # interface.initialize()
 
     return [
         new_model_name,
-        gr.update(visible="llava" in new_model_name),
+        gr.update(visible="vision" in new_model_name),
         [],
         [],
         gr.update(value=""),
@@ -42,7 +50,7 @@ def change_model_listener(new_model_name):
 
 
 def change_image_visibility(new_model_name):
-    if "llava" in new_model_name:
+    if "vision" in new_model_name:
         return gr.update(visible=True)
 
     return gr.update(visible=False)
@@ -50,7 +58,7 @@ def change_image_visibility(new_model_name):
 
 gr.Chatbot.postprocess = postprocess
 
-with Path("chat_app/assets/custom.css").open() as f:
+with Path(f"{top_directory}/chat_app/assets/custom.css").open() as f:
     custom_css = f.read()
 
 
@@ -64,12 +72,15 @@ def interface_retry(*args):
     yield from res
 
 
-def launch_chat_app(expose_locally: bool = False):
+def launch_chat_app(expose_locally: bool = False, model_name: str = "", model_path: str = ""):
+    if os.path.exists(optimized_directory):
+        for ep_name in os.listdir(optimized_directory):
+            sub_optimized_directory = os.path.join(optimized_directory, ep_name)
+            for model_name in os.listdir(sub_optimized_directory):
+                available_models[model_name] = {"model_dir": os.path.join(sub_optimized_directory, model_name)}
 
-    for ep_name in os.listdir(optimized_directory):
-        sub_optimized_directory = os.path.join(optimized_directory, ep_name)
-        for model_name in os.listdir(sub_optimized_directory):
-            available_models[model_name] = {"model_dir": os.path.join(sub_optimized_directory, model_name)}
+    if model_path:
+        available_models[model_name] = {"model_dir": model_path}
 
     with gr.Blocks(css=custom_css, theme=small_and_beautiful_theme) as demo:
         history = gr.State([])
@@ -79,9 +90,9 @@ def launch_chat_app(expose_locally: bool = False):
             status_display = gr.Markdown("Success", elem_id="status_display")
 
         with gr.Row():
-            with gr.Column(scale=5):
+            with gr.Column(scale=4):
                 with gr.Row():
-                    chatbot = gr.Chatbot(elem_id="chuanhu_chatbot", height=900)
+                    chatbot = gr.Chatbot(elem_id="chuanhu_chatbot", height=650)
                 with gr.Row():
                     with gr.Column(scale=12):
                         user_input = gr.Textbox(show_label=False, placeholder="Enter text")
@@ -110,7 +121,7 @@ def launch_chat_app(expose_locally: bool = False):
                     value=2048,
                     step=8,
                     interactive=True,
-                    label="Max Generation Tokens",
+                    label="Max Token Length",
                 )
                 max_context_length_tokens = gr.Slider(
                     minimum=0,
@@ -118,7 +129,7 @@ def launch_chat_app(expose_locally: bool = False):
                     value=2048,
                     step=128,
                     interactive=True,
-                    label="Max History Tokens",
+                    label="Max History Token Length",
                 )
                 token_printing_step = gr.Slider(
                     minimum=1,
@@ -127,9 +138,9 @@ def launch_chat_app(expose_locally: bool = False):
                     step=1,
                     interactive=True,
                     label="Token Printing Step",
+                    visible=False
                 )
-
-                image = gr.Image(type="pil", visible=False)
+                image = gr.Image(type="filepath", visible=False)
                 image.change(
                     reset_state,
                     outputs=[chatbot, history, status_display],
@@ -166,6 +177,7 @@ def launch_chat_app(expose_locally: bool = False):
                 max_length_tokens,
                 max_context_length_tokens,
                 token_printing_step,
+                image
             ],
             "outputs": [chatbot, history, status_display],
             "show_progress": True,
@@ -205,18 +217,32 @@ def launch_chat_app(expose_locally: bool = False):
             cancels=[predict_event1, predict_event2, predict_event3],
         )
 
-        demo.load(change_model_listener, inputs=[model_name], outputs=[model_name, image])
+        demo.load(change_model_listener, inputs=[model_name], outputs=[model_name, image], concurrency_limit=1)
 
     demo.title = "LLM Chat UI"
 
     if expose_locally:
-        demo.queue(concurrency_count=1).launch(server_name="0.0.0.0", server_port=7860)
+        demo.launch(server_name="0.0.0.0", server_port=5000)
     else:
-        demo.queue(concurrency_count=1).launch(server_port=7860)
+        demo.launch(share=True, server_port=5000)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--expose_locally", action="store_true")
+    parser.add_argument("--model_path", "-m", type=str, required=False, help="The location where your model is located.")
+    parser.add_argument("--model_name", "-n", type=str, required=False, help="The name of your model")
     args = parser.parse_args()
-    launch_chat_app(args.expose_locally)
+    model_path = args.model_path
+    model_name = args.model_name
+
+    if not os.path.exists(optimized_directory) and not model_path:
+        raise ValueError("Please download the model into models folder or load the model by passing --model_path")
+
+    if args.model_path:
+        model_name = os.path.basename(model_path)
+        # check if genai_config.json in the model foler
+        if "genai_config.json" not in os.listdir(model_path):
+            raise ValueError(f"Your model_path folder do not include 'genai.json' file, please double check your model_path '{model_path}'")
+
+    launch_chat_app(args.expose_locally, model_name, model_path)

@@ -21,8 +21,13 @@ Embeddings::Embeddings(const Model& model, State& state, Embeddings::Mode mode, 
   // They are never the user provided/requested model inputs/outputs
   // So only create the transient output and reuse that ortvalue for subsequent
   // steps in the pipeline.
-  if (mode == Embeddings::Mode::Output)
+  if (mode == Embeddings::Mode::Output) {
+    if (state_.GetCapturedGraphInfo()) {
+      sb_embeddings_ = state_.GetCapturedGraphInfo()->sb_embeddings_.get();
+    }
+
     embeddings_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
+  }
 }
 
 Embeddings::Embeddings(Embeddings&& other, State& state) : model_{other.model_},
@@ -51,10 +56,18 @@ void Embeddings::Add() {
 }
 
 void Embeddings::UpdateSequenceLength() {
-  shape_[1] = 1;
-  if (mode_ == Embeddings::Mode::Output) {
-    embeddings_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
-    state_.outputs_[index_] = embeddings_.get();
+  if (shape_[1] != 1) {
+    shape_[1] = 1;
+
+    if (mode_ == Embeddings::Mode::Output) {
+      if (!sb_embeddings_) {
+        embeddings_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
+      } else {
+        embeddings_ = sb_embeddings_->CreateTensorOnStaticBuffer(shape_, type_);
+      }
+
+      state_.outputs_[index_] = embeddings_.get();
+    }
   }
 }
 
