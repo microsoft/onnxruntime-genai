@@ -22,7 +22,7 @@ def get_args() -> argparse:
     return parser.parse_args()
 
 
-def save_lora_params_to_flatbuffers(npz_file_path : str, fb_file_path : str):
+def export_lora_parameters(npz_file_path : str, fb_file_path : str):
     '''The function converts lora parameters in npz to flatbuffers file
     '''
     with np.load(npz_file_path) as data:
@@ -65,7 +65,7 @@ def add_adapters_to_genai_config(json_file_path : str,
 
 def main() -> int:
     args = get_args()
-    save_lora_params_to_flatbuffers(args.npz_file_path, args.fb_file_path)
+    export_lora_parameters(args.npz_file_path, args.fb_file_path)
     adapters = {args.adapter_name: {"weights": os.path.basename(args.fb_file_path)}}
     add_adapters_to_genai_config(args.genai_config_path, args.genai_config_path_modified, adapters)
     return 0
