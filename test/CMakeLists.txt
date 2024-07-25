@@ -26,7 +26,7 @@ target_link_libraries(unit_tests PRIVATE
   GTest::gtest_main
 )
 
-if(NOT (ANDROID OR LINUX))
+if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux"))
 target_link_libraries(unit_tests PRIVATE ${ONNXRUNTIME_LIB})
 endif()
 
