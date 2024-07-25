@@ -101,11 +101,21 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 
 #endif
 
+
+/** \brief Free functions and a few helpers are defined inside this namespace. Otherwise all types are the C API types
+ *
+ */
+namespace Ort {
+
+/// Before using this C++ wrapper API, you MUST call Ort::InitApi to set the below 'api' variable
+inline const OrtApi* api{};
+inline void InitApi() {
+  if (api) {
+    // api was already set.
+    return;
+  }
+
 #if defined(__ANDROID__) || defined(__linux__)
-
-static const OrtApiBase* ort_api_base = nullptr;
-
-__attribute__((constructor)) static void initialize_ort_api_base() {
   // If the GenAI library links against the onnxruntime library, it will have a dependency on a specific
   // version of OrtGetApiBase.
   //
@@ -151,23 +161,12 @@ __attribute__((constructor)) static void initialize_ort_api_base() {
     exit(EXIT_FAILURE);
   }
 
-  ort_api_base = ort_api_base_fn();
+  const OrtApiBase* ort_api_base = ort_api_base_fn();
   if (ort_api_base == nullptr) {
     LOG_ASSERT("ort_api_base != nullptr", "OrtGetApiBase() returned nullptr");
     exit(EXIT_FAILURE);
   }
-}
-#endif
 
-/** \brief Free functions and a few helpers are defined inside this namespace. Otherwise all types are the C API types
- *
- */
-namespace Ort {
-
-/// Before using this C++ wrapper API, you MUST call Ort::InitApi to set the below 'api' variable
-inline const OrtApi* api{};
-inline void InitApi() {
-#if defined(__ANDROID__) || defined(__linux__)
   // loop from the ORT version GenAI was built with, down to the minimum ORT version we require.
   // as long as the libonnxruntime.so we loaded supports one of those we're good.
   constexpr int genai_min_ort_api_version = 18;  // GenAI was first released around the time of ORT 1.18 so use that
@@ -183,8 +182,8 @@ inline void InitApi() {
 
   if (!api) {
     LOG_ASSERT("api != nullptr",
-               "The expected ORT API version is between %d and %d.",
-               ORT_API_VERSION, genai_min_ort_api_version);
+               "%s did not have an ORT API version between %d and %d.",
+               path.c_str(), ORT_API_VERSION, genai_min_ort_api_version);
   }
 #else   // defined(__ANDROID__)
   api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
