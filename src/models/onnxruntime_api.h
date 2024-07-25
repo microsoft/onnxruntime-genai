@@ -99,7 +99,7 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #define LOG_ERROR(...) Generators::Log("error", __VA_ARGS__)
 #define LOG_FATAL(...) Generators::Log("fatal", __VA_ARGS__)
 
-#define LOG_ASSERT(cond, ...)  ( (CONDITION(cond)) ? LOG_INFO(__VA_ARGS__) : (void)0 )
+#define LOG_ASSERT(cond, ...)  ( (CONDITION(cond)) ? (void)LOG_INFO(__VA_ARGS__) : (void)0 )
 
 #endif
 
