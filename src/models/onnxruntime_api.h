@@ -175,7 +175,7 @@ inline void InitApi() {
     if (!api) {
       LOG_INFO("ORT API Version %d was not found.", i);
     } else {
-      LOG_INFO("ORT API Version %d was found and loaded.", i);
+      LOG_INFO("ORT API Version %d was found.", i);
       break;
     }
   }
