@@ -145,6 +145,10 @@ inline void InitApi() {
     exit(EXIT_FAILURE);
   }
 
+  char pathname[PATH_MAX];
+  dlinfo((void *)ort_lib_handle, RTLD_DI_ORIGIN, &pathname);
+  LOG_INFO("Loaded native library at %s", pathname);
+
   ort_api_base_fn = (OrtApiBaseFn)dlsym(ort_lib_handle, "OrtGetApiBase");
   if (ort_api_base_fn == nullptr) {
     LOG_ASSERT("ort_api_base_fn != nullptr", "OrtGetApiBase not found");
@@ -165,7 +169,7 @@ inline void InitApi() {
     if (!api) {
       LOG_INFO("ORT API Version %d was not found.", i);
     } else {
-      LOG_INFO("ORT API Version %d was found", i);
+      LOG_INFO("ORT API Version %d was found and loaded.", i);
       break;
     }
   }
