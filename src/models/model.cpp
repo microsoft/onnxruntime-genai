@@ -410,12 +410,12 @@ void Model::CreateSessionOptions() {
       device_type_ = DeviceType::DML;  // We use a DML allocator for input/output caches, but other tensors will use CPU tensors
 #endif
     } else if (provider_options.name == "qnn") {
-      std::unordered_map<std::string, std::string> options;
+      std::unordered_map<std::string, std::string> opts;
       for (auto& option : provider_options.options) {
-        options.emplace(option.first, option.second);
+        opts.emplace(option.first, option.second);
       }
 
-      ort_options.AppendExecutionProvider("QNN", options);
+      ort_options.AppendExecutionProvider("QNN", opts);
     } else
       throw std::runtime_error("Unknown provider type: " + provider_options.name);
   }
