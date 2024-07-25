@@ -88,6 +88,10 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #elif defined(__linux__)
 #include <dlfcn.h>
 
+#ifndef PATH_MAX
+#define PATH_MAX (4096)
+#endif
+
 #define CONDITION(cond) (__builtin_expect((cond) != 0, 0))
 
 #define LOG_DEBUG(...) Generators::Log("debug", __VA_ARGS__)
