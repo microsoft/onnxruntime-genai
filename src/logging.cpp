@@ -97,7 +97,7 @@ std::ostream& Log(std::string_view label, const char* fmt, ...) {
   if (len <= 0) {
     throw std::runtime_error("Invalid format");
   }
-  std::unique_ptr<char[]> buf(new char[len]);
+  std::unique_ptr<char[]> buf(new char[len + 1]);
   vsnprintf(buf.get(), len + 1, fmt, args);
   va_end(args);
   return Log(label, std::string(buf.get(), buf.get() + len));
