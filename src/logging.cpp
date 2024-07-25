@@ -89,17 +89,18 @@ std::ostream& Log(std::string_view label, std::string_view string) {
 }
 
 std::ostream& Log(std::string_view label, const char* fmt, ...) {
-  std::string message;
   va_list args;
   va_start(args, fmt);
   va_list args_copy;
   va_copy(args_copy, args);
   size_t len = vsnprintf(0, 0, fmt, args_copy);
-  message.resize(len + 1);
-  vsnprintf(&message[0], len + 1, fmt, args);
+  if (len <= 0) {
+    throw std::runtime_error("Invalid format");
+  }
+  std::unique_ptr<char[]> buf(new char[len]);
+  vsnprintf(buf.get(), len + 1, fmt, args);
   va_end(args);
-  message.resize(len);
-  return Log(label, message);
+  return Log(label, std::string(buf.get(), buf.get() + len - 1));
 }
 
 }  // namespace Generators
