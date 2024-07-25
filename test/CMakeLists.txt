@@ -23,9 +23,12 @@ target_include_directories(unit_tests PRIVATE
 target_link_directories(unit_tests PRIVATE ${ORT_LIB_DIR})
 target_link_libraries(unit_tests PRIVATE
   onnxruntime-genai-static
-  ${ONNXRUNTIME_LIB}
   GTest::gtest_main
 )
+
+if(NOT (ANDROID OR LINUX))
+target_link_libraries(unit_tests PRIVATE ${ONNXRUNTIME_LIB})
+endif()
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   file(GLOB cuda_test_srcs CONFIGURE_DEPENDS
