@@ -97,7 +97,7 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #define LOG_ERROR(...) Generators::Log("error", __VA_ARGS__)
 #define LOG_FATAL(...) Generators::Log("fatal", __VA_ARGS__)
 
-#define LOG_ASSERT(cond, ...) ((CONDITION(cond)) ? (void)LOG_INFO(__VA_ARGS__) : (void)0)
+#define LOG_ASSERT(cond, ...) ((CONDITION(cond)) ? (void)LOG_ERROR(__VA_ARGS__) : (void)0)
 
 #endif
 
@@ -181,9 +181,8 @@ inline void InitApi() {
   }
 
   if (!api) {
-    LOG_ASSERT("api != nullptr",
-               "%s did not have an ORT API version between %d and %d.",
-               path.c_str(), ORT_API_VERSION, genai_min_ort_api_version);
+    LOG_WARN("%s did not have an ORT API version between %d and %d.",
+             path.c_str(), ORT_API_VERSION, genai_min_ort_api_version);
   }
 #else   // defined(__ANDROID__)
   api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
