@@ -330,6 +330,13 @@ void Model::CreateSessionOptions() {
       ort_options.EnableQuantQdq();
   }
 
+  if (options.enable_quant_qdq_cleanup.has_value()) {
+    if (options.enable_quant_qdq_cleanup.value())
+      ort_options.EnableQuantQdqCleanup();
+    else
+      ort_options.DisableQuantQdqCleanup();
+  }
+
   for (auto& provider_options : options.provider_options) {
     if (provider_options.name == "cuda") {
       auto ort_provider_options = OrtCUDAProviderOptionsV2::Create();

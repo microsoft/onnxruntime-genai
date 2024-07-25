@@ -88,6 +88,8 @@ struct SessionOptions_Element : JSON::Element {
       v_.disable_cpu_ep_fallback = value;
     else if (name == "disable_quant_qdq")
       v_.disable_quant_qdq = value;
+    else if (name == "enable_quant_qdq_cleanup")
+      v_.enable_quant_qdq_cleanup = value;
     else
       throw JSON::unknown_value_error{};
   }
