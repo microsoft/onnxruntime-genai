@@ -30,7 +30,7 @@ def save_lora_params_to_flatbuffers(npz_file_path : str, fb_file_path : str):
         for k, v in data.items():
             to_save[k] = v
 
-        og.save_lora_parameters_to_flatbuffers(fb_file_path, to_save)
+        og.export_lora_parameters(fb_file_path, to_save)
 
 
 def add_adapters_to_genai_config(json_file_path : str,

@@ -506,7 +506,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   // Save a dictionary with Lora Parameters to a flatbuffer file that we can load in C++ code.
   // This is useful in python code when we have an .npz file and we would like to load it in C++ code or
   // other language bindings.
-  m.def("save_lora_parameters_to_flatbuffers", [](const std::string& file_name, pybind11::dict& lora_parameters) {
+  m.def("export_lora_parameters", [](const std::string& file_name, pybind11::dict& lora_parameters) {
     std::ofstream file(file_name, std::ios::binary);
     if (file.fail()) {
       throw std::runtime_error("Failed to open file:" + file_name + " for writing.");

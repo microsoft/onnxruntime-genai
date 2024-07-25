@@ -232,7 +232,7 @@ def test_save_lora_params(test_data_path):
         for k, v in data.items():
             to_save[k] = v
 
-        og.save_lora_parameters_to_flatbuffers(fb_file, to_save)
+        og.export_lora_parameters(fb_file, to_save)
 
     fb_file_path = Path(fb_file).absolute()
     assert fb_file_path.exists()
