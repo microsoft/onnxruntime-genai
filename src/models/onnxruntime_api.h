@@ -86,8 +86,6 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #define LOG_FATAL(...) __android_log_print(ANDROID_LOG_FATAL, TAG, __VA_ARGS__)
 #define LOG_ASSERT(CONDITION, ...) __android_log_assert(CONDITION, TAG, __VA_ARGS__);
 
-#endif
-
 #elif defined(__linux__)
 #include <dlfcn.h>
 
@@ -103,15 +101,11 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 
 #endif
 
-/** \brief Free functions and a few helpers are defined inside this namespace. Otherwise all types are the C API types
- *
- */
-namespace Ort {
-
-/// Before using this C++ wrapper API, you MUST call Ort::InitApi to set the below 'api' variable
-inline const OrtApi* api{};
-inline void InitApi() {
 #if defined(__ANDROID__) || defined(__linux__)
+
+static OrtApiBase* ort_api_base = nullptr;
+
+__attribute__((constructor)) static void initialize_ort_api_base() {
   // If the GenAI library links against the onnxruntime library, it will have a dependency on a specific
   // version of OrtGetApiBase.
   //
@@ -145,9 +139,9 @@ inline void InitApi() {
     exit(EXIT_FAILURE);
   }
 
-#if !defined(__ANDROID__) // RTLD_DI_ORIGIN not available on Android
+#if !defined(__ANDROID__)  // RTLD_DI_ORIGIN not available on Android
   char pathname[PATH_MAX];
-  dlinfo((void *)ort_lib_handle, RTLD_DI_ORIGIN, &pathname);
+  dlinfo((void*)ort_lib_handle, RTLD_DI_ORIGIN, &pathname);
   LOG_INFO("Loaded native library at %s", pathname);
 #endif
 
@@ -157,12 +151,23 @@ inline void InitApi() {
     exit(EXIT_FAILURE);
   }
 
-  const OrtApiBase* ort_api_base = ort_api_base_fn();
+  ort_api_base = ort_api_base_fn();
   if (ort_api_base == nullptr) {
     LOG_ASSERT("ort_api_base != nullptr", "OrtGetApiBase() returned nullptr");
     exit(EXIT_FAILURE);
   }
+}
+#endif
 
+/** \brief Free functions and a few helpers are defined inside this namespace. Otherwise all types are the C API types
+ *
+ */
+namespace Ort {
+
+/// Before using this C++ wrapper API, you MUST call Ort::InitApi to set the below 'api' variable
+inline const OrtApi* api{};
+inline void InitApi() {
+#if defined(__ANDROID__) || defined(__linux__)
   // loop from the ORT version GenAI was built with, down to the minimum ORT version we require.
   // as long as the libonnxruntime.so we loaded supports one of those we're good.
   constexpr int genai_min_ort_api_version = 18;  // GenAI was first released around the time of ORT 1.18 so use that
