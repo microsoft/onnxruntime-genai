@@ -218,12 +218,14 @@ inline void InitApi() {
       }
     }
 
-    // Search for pip installation
-    for (const std::string& lib_name : target_libraries) {
-      std::string pip_path{current_module_dir + "/../onnxruntime/capi/" + lib_name};
-      ort_lib_handle = LoadDynamicLibraryIfExists(pip_path);
-      if (ort_lib_handle != nullptr) {
-        break;
+    if (ort_lib_handle == nullptr) {
+      // Search for pip installation
+      for (const std::string& lib_name : target_libraries) {
+        std::string pip_path{current_module_dir + "/../onnxruntime/capi/" + lib_name};
+        ort_lib_handle = LoadDynamicLibraryIfExists(pip_path);
+        if (ort_lib_handle != nullptr) {
+          break;
+        }
       }
     }
   }
