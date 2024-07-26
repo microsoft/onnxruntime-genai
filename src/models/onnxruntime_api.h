@@ -112,6 +112,65 @@ using OrtApiBaseFn = const OrtApiBase* (*)(void);
 
 /// Before using this C++ wrapper API, you MUST call Ort::InitApi to set the below 'api' variable
 inline const OrtApi* api{};
+
+#if defined(__linux__)
+inline void* LoadDynamicLibraryIfExists(const std::string& path) {
+  LOG_INFO("Attempting to dlopen %s native library", path.c_str());
+  void* ort_lib_handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+  if (ort_lib_handle == nullptr) {
+    return nullptr;
+  }
+
+#if !defined(__ANDROID__)  // RTLD_DI_ORIGIN not available on Android
+  char pathname[PATH_MAX];
+  dlinfo((void*)ort_lib_handle, RTLD_DI_ORIGIN, &pathname);
+  LOG_INFO("Loaded native library at %s", pathname);
+#endif
+  return ort_lib_handle;
+}
+
+inline std::string GetCurrentModuleDir() {
+  Dl_info dl_info;
+  dladdr((void*)InitApi, &dl_info);
+  std::string module_name(dl_info.dli_fname);
+  std::string module_directory{};
+
+  const size_t last_slash_idx = module_name.rfind('/');
+  if (std::string::npos != last_slash_idx) {
+    module_directory = module_name.substr(0, last_slash_idx);
+  }
+  return module_directory;
+}
+
+inline void InitApiWithDynamicFn(OrtApiBaseFn ort_api_base_fn) {
+  if (ort_api_base_fn == nullptr) {
+    throw std::runtime_error("OrtGetApiBase not found");
+  }
+
+  const OrtApiBase* ort_api_base = ort_api_base_fn();
+  if (ort_api_base == nullptr) {
+    throw std::runtime_error("OrtGetApiBase() returned nullptr");
+  }
+
+  // loop from the ORT version GenAI was built with, down to the minimum ORT version we require.
+  // as long as the libonnxruntime.so we loaded supports one of those we're good.
+  constexpr int genai_min_ort_api_version = 18;  // GenAI was first released around the time of ORT 1.18 so use that
+  for (int i = ORT_API_VERSION; i >= genai_min_ort_api_version; --i) {
+    api = ort_api_base->GetApi(i);
+    if (api) {
+      LOG_INFO("ORT API Version %d was found.", i);
+      break;
+    }
+  }
+
+  if (!api) {
+    LOG_WARN("The loaded library did not have an ORT API version between %d and %d.",
+             ORT_API_VERSION, genai_min_ort_api_version);
+    throw std::runtime_error("Failed to load onnxruntime. Please make sure you installed the correct version");
+  }
+}
+#endif
+
 inline void InitApi() {
   if (api) {
     // api was already set.
@@ -119,62 +178,6 @@ inline void InitApi() {
   }
 
 #if defined(__ANDROID__) || defined(__linux__)
-  inline void* LoadDynamicLibraryIfExists(const std::string& path) {
-    LOG_INFO("Attempting to dlopen %s native library", path.c_str());
-    void* ort_lib_handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
-    if (ort_lib_handle == nullptr) {
-      return nullptr;
-    }
-
-#if !defined(__ANDROID__)  // RTLD_DI_ORIGIN not available on Android
-    char pathname[PATH_MAX];
-    dlinfo((void*)ort_lib_handle, RTLD_DI_ORIGIN, &pathname);
-    LOG_INFO("Loaded native library at %s", pathname);
-#endif
-    return ort_lib_handle;
-  }
-
-  inline std::string GetCurrentModuleDir() {
-    Dl_info dl_info;
-    dladdr((void*)InitApi, &dl_info);
-    std::string module_name(dl_info.dli_fname);
-    std::string module_directory{};
-
-    const size_t last_slash_idx = module_name.rfind('/');
-    if (std::string::npos != last_slash_idx) {
-      module_directory = module_name.substr(0, last_slash_idx);
-    }
-    return module_directory;
-  }
-
-  inline void InitApiWithDynamicFn(OrtApiBaseFn ort_api_base_fn) {
-    if (ort_api_base_fn == nullptr) {
-      throw std::runtime_error("OrtGetApiBase not found");
-    }
-
-    const OrtApiBase* ort_api_base = ort_api_base_fn();
-    if (ort_api_base == nullptr) {
-      throw std::runtime_error("OrtGetApiBase() returned nullptr");
-    }
-
-    // loop from the ORT version GenAI was built with, down to the minimum ORT version we require.
-    // as long as the libonnxruntime.so we loaded supports one of those we're good.
-    constexpr int genai_min_ort_api_version = 18;  // GenAI was first released around the time of ORT 1.18 so use that
-    for (int i = ORT_API_VERSION; i >= genai_min_ort_api_version; --i) {
-      api = ort_api_base->GetApi(i);
-      if (api) {
-        LOG_INFO("ORT API Version %d was found.", i);
-        break;
-      }
-    }
-
-    if (!api) {
-      LOG_WARN("The loaded library did not have an ORT API version between %d and %d.",
-               ORT_API_VERSION, genai_min_ort_api_version);
-      throw std::runtime_error("Failed to load onnxruntime. Please make sure you installed the correct version");
-    }
-  }
-
   // If the GenAI library links against the onnxruntime library, it will have a dependency on a specific
   // version of OrtGetApiBase.
   //
