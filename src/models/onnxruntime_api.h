@@ -139,36 +139,42 @@ inline void InitApi() {
 
   std::string path{};
 
-  Dl_info dl_info;
-  dladdr((void *)InitApi, &dl_info);
-  std::string module_name(dl_info.dli_fname);
-  std::string module_directory;
-  const size_t last_slash_idx = module_name.rfind('/');
-  if (std::string::npos != last_slash_idx)
-  {
-    module_directory = module_name.substr(0, last_slash_idx);
-  }
-
   // "libonnxruntime4j_jni.so" is also an option if we have issues
   const std::array<std::string, 3> target_libraries = {
       std::string("libonnxruntime.so"),
       std::string("libonnxruntime.so.1.19.0"),
-      std::string("libonnxruntime.so.1.18.0")
-  };
+      std::string("libonnxruntime.so.1.18.0")};
 
-  for (const std::string& lib_path : target_libraries) {
-    const fs::path file_path{module_directory + "/" + lib_path};
-    LOG_INFO("Attempting to dlopen %s native library", file_path.c_str());
-    if (file_path.exists()) {
-      path = file_path.string();
-    }
+  Dl_info dl_info;
+  dladdr((void*)InitApi, &dl_info);
+  std::string module_name(dl_info.dli_fname);
+  std::string module_directory;
+
+  const size_t last_slash_idx = module_name.rfind('/');
+  if (std::string::npos != last_slash_idx) {
+    module_directory = module_name.substr(0, last_slash_idx);
   }
 
   for (const std::string& lib_path : target_libraries) {
-    const fs::path file_path{module_directory + "/../onnxruntime/capi/" + lib_path};
-    LOG_INFO("Attempting to dlopen %s from pip installation", file_path.c_str());
-    if (file_path.exists()) {
-      path = file_path.string();
+    const fs::path system_path{lib_path};
+    LOG_INFO("Attempting to dlopen %s", system_path.c_str());
+    if (system_path.exists()) {
+      path = system_path.string();
+      break;
+    }
+
+    const fs::path local_path{module_directory + "/" + lib_path};
+    LOG_INFO("Attempting to dlopen %s", local_path.c_str());
+    if (local_path.exists()) {
+      path = local_path.string();
+      break;
+    }
+
+    const fs::path pip_path{module_directory + "/../onnxruntime/capi/" + lib_path};
+    LOG_INFO("Attempting to dlopen %s", pip_path.c_str());
+    if (pip_path.exists()) {
+      path = pip_path.string();
+      break;
     }
   }
 
