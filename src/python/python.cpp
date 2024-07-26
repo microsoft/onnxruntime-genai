@@ -284,7 +284,7 @@ struct PyGeneratorParams {
   }
 
   void TryUseCudaGraphWithMaxBatchSize(pybind11::int_ max_batch_size) {
-    Log("warning", "try_use_cuda_graph_with_max_batch_size will be deprecated in release 0.3.0. Please use try_graph_capture_with_max_batch_size instead");
+    Log(LOG_LABEL_WARN, "try_use_cuda_graph_with_max_batch_size will be deprecated in release 0.3.0. Please use try_graph_capture_with_max_batch_size instead");
     params_->TryGraphCapture(max_batch_size.cast<int>());
   }
 

@@ -78,11 +78,21 @@ void SGRExample(std::ostream& stream) {
 bool RunExample = (SGRExample(std::cerr), false);
 #endif
 
+// Warnings will be yellow, errors will be red, all other labels will be blue
+static SGR LabelToSgr(std::string_view label) {
+  if (label == LOG_LABEL_INFO || label == LOG_LABEL_DEBUG)
+    return SGR::Bg_Blue;
+  else if (label == LOG_LABEL_WARN)
+    return SGR::Bg_Yellow;
+  else if (label == LOG_LABEL_ERROR || label == LOG_LABEL_FATAL)
+    return SGR::Bg_Red;
+  return SGR::Bg_Blue;
+}
+
 std::ostream& Log(std::string_view label, std::string_view string) {
   assert(g_log.enabled);
 
-  // Warnings will be yellow, all other labels will be blue
-  *gp_stream << SGR::Bold << (label == "warning" ? SGR::Bg_Yellow : SGR::Bg_Blue) << "  " << label << "  " << SGR::Reset << ' ';
+  *gp_stream << SGR::Bold << LabelToSgr(label) << "  " << label << "  " << SGR::Reset << ' ';
   if (!string.empty())
     *gp_stream << string << std::endl;
   return *gp_stream;

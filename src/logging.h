@@ -24,6 +24,12 @@
  */
 namespace Generators {
 
+static constexpr std::string_view LOG_LABEL_DEBUG = "debug";
+static constexpr std::string_view LOG_LABEL_INFO = "info";
+static constexpr std::string_view LOG_LABEL_WARN = "warning";
+static constexpr std::string_view LOG_LABEL_ERROR = "error";
+static constexpr std::string_view LOG_LABEL_FATAL = "fatal";
+
 void SetLogBool(std::string_view name, bool value);
 void SetLogString(std::string_view name, std::string_view value);
 

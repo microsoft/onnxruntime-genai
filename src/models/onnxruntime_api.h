@@ -72,6 +72,7 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #include "onnxruntime_c_api.h"
 #include "../span.h"
 #include "../logging.h"
+#include "../filesystem.h"
 
 #if defined(__ANDROID__)
 #include <android/log.h>
@@ -88,19 +89,17 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #elif defined(__linux__)
 #include <dlfcn.h>
 
+#endif
+
 #ifndef PATH_MAX
 #define PATH_MAX (4096)
 #endif
 
-#define CONDITION(cond) (__builtin_expect((cond) != 0, 0))
-
-#define LOG_DEBUG(...) Generators::Log("debug", __VA_ARGS__)
-#define LOG_INFO(...) Generators::Log("info", __VA_ARGS__)
-#define LOG_WARN(...) Generators::Log("warning", __VA_ARGS__)
-#define LOG_ERROR(...) Generators::Log("error", __VA_ARGS__)
-#define LOG_FATAL(...) Generators::Log("fatal", __VA_ARGS__)
-
-#endif
+#define LOG_DEBUG(...) Generators::Log(Generators::LOG_LABEL_DEBUG, __VA_ARGS__)
+#define LOG_INFO(...) Generators::Log(Generators::LOG_LABEL_INFO, __VA_ARGS__)
+#define LOG_WARN(...) Generators::Log(Generators::LOG_LABEL_WARN, __VA_ARGS__)
+#define LOG_ERROR(...) Generators::Log(Generators::LOG_LABEL_ERROR, __VA_ARGS__)
+#define LOG_FATAL(...) Generators::Log(Generators::LOG_LABEL_FATAL, __VA_ARGS__)
 
 /** \brief Free functions and a few helpers are defined inside this namespace. Otherwise all types are the C API types
  *
@@ -137,16 +136,30 @@ inline void InitApi() {
   //     any libonnxruntime.so that supports one of those versions.
   //
 
-  const std::string path = "libonnxruntime.so";  // "libonnxruntime4j_jni.so" is also an option if we have issues
-  LOG_INFO("Attempting to dlopen %s native library", path.c_str());
+  const char* path = nullptr;
+
+  const fs::path default_path = "libonnxruntime.so";  // "libonnxruntime4j_jni.so" is also an option if we have issues
+  if (default_path.exists()) {
+    LOG_INFO("Attempting to dlopen %s native library", default_path.c_str());
+    path = default_path.c_str();
+  } else {
+    const fs::path pip_package_path = "../onnxruntime/capi/libonnxruntime.so";
+    if (pip_package_path.exists()) {
+      LOG_INFO("Attempting to dlopen %s from pip installation", default_path.c_str());
+      path = pip_package_path.c_str();
+    }
+  }
+
+  if (path == nullptr) {
+    throw std::runtime_error("Failed to find onnxruntime. Please make sure you have onnxruntime installed");
+  }
 
   using OrtApiBaseFn = const OrtApiBase* (*)(void);
   OrtApiBaseFn ort_api_base_fn = nullptr;
 
   void* ort_lib_handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
   if (ort_lib_handle == nullptr) {
-    LOG_FATAL("Failed to load %s: %s", path.c_str(), dlerror());
-    exit(EXIT_FAILURE);
+    throw std::runtime_error("Failed to load " + path + ": " + dlerror());
   }
 
 #if !defined(__ANDROID__)  // RTLD_DI_ORIGIN not available on Android
@@ -157,14 +170,12 @@ inline void InitApi() {
 
   ort_api_base_fn = (OrtApiBaseFn)dlsym(ort_lib_handle, "OrtGetApiBase");
   if (ort_api_base_fn == nullptr) {
-    LOG_FATAL("OrtGetApiBase not found");
-    exit(EXIT_FAILURE);
+    throw std::runtime_error("OrtGetApiBase not found");
   }
 
   const OrtApiBase* ort_api_base = ort_api_base_fn();
   if (ort_api_base == nullptr) {
-    LOG_FATAL("OrtGetApiBase() returned nullptr");
-    exit(EXIT_FAILURE);
+    throw std::runtime_error("OrtGetApiBase() returned nullptr");
   }
 
   // loop from the ORT version GenAI was built with, down to the minimum ORT version we require.
@@ -172,9 +183,7 @@ inline void InitApi() {
   constexpr int genai_min_ort_api_version = 18;  // GenAI was first released around the time of ORT 1.18 so use that
   for (int i = ORT_API_VERSION; i >= genai_min_ort_api_version; --i) {
     api = ort_api_base->GetApi(i);
-    if (!api) {
-      LOG_INFO("ORT API Version %d was not found.", i);
-    } else {
+    if (api) {
       LOG_INFO("ORT API Version %d was found.", i);
       break;
     }
@@ -183,12 +192,13 @@ inline void InitApi() {
   if (!api) {
     LOG_WARN("%s did not have an ORT API version between %d and %d.",
              path.c_str(), ORT_API_VERSION, genai_min_ort_api_version);
+    throw std::runtime_error("Failed to load onnxruntime. Please make sure you installed the correct version");
   }
-#else   // defined(__ANDROID__)
+#else   // defined(__ANDROID__) || defined(__linux__)
   api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
   if (!api)
     throw std::runtime_error("Onnxruntime is installed but is too old, please install a newer version");
-#endif  // defined(__ANDROID__)
+#endif  // defined(__ANDROID__) || defined(__linux__)
 }
 
 /** \brief All C++ methods that can fail will throw an exception of this type
