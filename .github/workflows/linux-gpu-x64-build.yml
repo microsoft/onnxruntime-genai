@@ -133,7 +133,6 @@ jobs:
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
             -e HF_TOKEN=$HF_TOKEN \
             -w /ort_genai_src onnxruntimecudabuildx64 bash -c " \
-              export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/ort_genai_src/build/cuda/ && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/requirements.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/requirements-cuda.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install /ort_genai_src/build/cuda/wheel/onnxruntime_genai*manylinux*.whl --user && \

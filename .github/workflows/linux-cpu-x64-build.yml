@@ -89,8 +89,6 @@ jobs:
       # These models are used by the python tests as well as C#, C++ and others.
       - name: Run the python tests
         run: |
-          set -e -x
-          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$GITHUB_WORKSPACE/build/cpu/
           python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models
 
       - name: Verify Build Artifacts
