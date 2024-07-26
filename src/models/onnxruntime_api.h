@@ -93,8 +93,6 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #define PATH_MAX (4096)
 #endif
 
-#define CONDITION(cond) (__builtin_expect((cond) != 0, 0))
-
 #define LOG_DEBUG(...) Generators::Log("debug", __VA_ARGS__)
 #define LOG_INFO(...) Generators::Log("info", __VA_ARGS__)
 #define LOG_WARN(...) Generators::Log("warning", __VA_ARGS__)
@@ -177,7 +175,7 @@ inline void InitApi() {
     return;
   }
 
-#if defined(__ANDROID__) || defined(__linux__)
+#if defined(__linux__)
   // If the GenAI library links against the onnxruntime library, it will have a dependency on a specific
   // version of OrtGetApiBase.
   //
@@ -214,7 +212,7 @@ inline void InitApi() {
     std::string current_module_dir = GetCurrentModuleDir();
     for (const std::string& lib_name : target_libraries) {
       std::string pip_path{current_module_dir + "/../onnxruntime/capi/" + lib_name};
-      void* ort_lib_handle = LoadDynamicLibraryIfExists(path);
+      ort_lib_handle = LoadDynamicLibraryIfExists(pip_path);
       if (ort_lib_handle != nullptr) {
         break;
       }
@@ -232,11 +230,11 @@ inline void InitApi() {
   }
 
   InitApiWithDynamicFn(ort_api_base_fn);
-#else   // defined(__ANDROID__)
+#else   // defined(__linux__)
   api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
   if (!api)
     throw std::runtime_error("Onnxruntime is installed but is too old, please install a newer version");
-#endif  // defined(__ANDROID__)
+#endif  // defined(__linux__)
 }
 
 /** \brief All C++ methods that can fail will throw an exception of this type
