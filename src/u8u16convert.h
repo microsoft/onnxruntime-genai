@@ -19,17 +19,21 @@
 #include <intsafe.h>
 #include <tchar.h>
 
-
 inline std::string u16u8(const std::wstring_view& in) {
   // If there's nothing to convert, bail early.
   if (in.empty()) {
     return {};
   }
-  int lengthIn = static_cast<int>(in.size());
-  const int lengthOut = WideCharToMultiByte(CP_UTF8, 0ul, in.data(), lengthIn, nullptr, 0, nullptr, nullptr);
+  int iSource;
+  SizeTToInt(in.size(), &iSource);
+
+  const int iTarget = WideCharToMultiByte(CP_UTF8, 0ul, in.data(), iSource, nullptr, 0, nullptr, nullptr);
+  size_t cchNeeded;
+  IntToSizeT(iTarget, &cchNeeded);
+
   std::string out{};
-  out.resize(lengthOut);
-  WideCharToMultiByte(CP_UTF8, 0ul, in.data(), lengthOut, out.data(), lengthOut, NULL, NULL);
+  out.resize(cchNeeded);
+  WideCharToMultiByte(CP_UTF8, 0ul, in.data(), iSource, out.data(), iTarget, nullptr, nullptr);
   return out;
 }
 

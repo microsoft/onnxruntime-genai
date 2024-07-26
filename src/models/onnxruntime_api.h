@@ -186,8 +186,7 @@ inline void InitApi() {
       std::string("libonnxruntime.so"),
       std::string("libonnxruntime.so.1.18.0"),
       std::string("libonnxruntime.so.1.19.0"),
-      std::string("libonnxruntime.so.1.20.0")
-  };
+      std::string("libonnxruntime.so.1.20.0")};
 
   Dl_info dl_info;
   dladdr((void*)InitApi, &dl_info);
@@ -245,13 +244,12 @@ inline void InitApi() {
   std::wstring path{};
 
   const std::array<std::wstring, 1> target_libraries = {
-      std::wstring(L"onnxruntime.dll")
-  };
+      std::wstring(L"onnxruntime.dll")};
 
   HMODULE this_dll = NULL;
   WCHAR buffer[PATH_MAX];
   GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                    (LPCWSTR)&InitApi, &this_dll);
+                     (LPCWSTR)&InitApi, &this_dll);
   GetModuleFileNameW(this_dll, (LPWSTR)(&buffer), PATH_MAX);
 
   std::wstring module_name{buffer};
@@ -261,7 +259,7 @@ inline void InitApi() {
     module_directory = module_name.substr(0, last_slash_idx);
   }
 
- for (const std::wstring& lib_path : target_libraries) {
+  for (const std::wstring& lib_path : target_libraries) {
     const fs::path system_path{lib_path};
     LOG_INFO_W(L"Attempting to LoadLibrary %s", system_path.c_str());
     if (system_path.exists()) {
@@ -275,6 +273,10 @@ inline void InitApi() {
       path = pip_path.wstring();
       break;
     }
+  }
+
+  if (path.empty()) {
+    throw std::runtime_error("Failed to find onnxruntime. Please make sure you have onnxruntime installed");
   }
 
   AddDllDirectory((module_directory + L"/../onnxruntime/capi/").c_str());
@@ -292,6 +294,10 @@ inline void InitApi() {
   }
 
   HMODULE ort_dll = LoadLibraryExW(path.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+  if (ort_dll == nullptr) {
+    throw std::runtime_error(std::string("Failed to load DLL: " + GetLastError()));
+  }
+
   OrtApiBaseFn ort_api_base_fn = (OrtApiBaseFn)GetProcAddress(ort_dll, "OrtGetApiBase");
   InitApiWithDynamicFn(ort_api_base_fn);
 #else   // defined(__ANDROID__) || defined(__linux__)

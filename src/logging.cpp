@@ -91,7 +91,7 @@ static SGR LabelToSgr(std::string_view label) {
 }
 
 std::ostream& Log(std::string_view label, std::string_view string) {
-  //assert(g_log.enabled);
+  if (!g_log.enabled) return *gp_stream;
 
   *gp_stream << SGR::Bold << LabelToSgr(label) << "  " << label << "  " << SGR::Reset << ' ';
   if (!string.empty())
