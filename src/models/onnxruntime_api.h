@@ -68,6 +68,7 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <array>
 
 #include "onnxruntime_c_api.h"
 #include "../span.h"
@@ -197,6 +198,27 @@ inline void InitApi() {
 
   const std::string path = "libonnxruntime.so";  // "libonnxruntime4j_jni.so" is also an option if we have issues
   void* ort_lib_handle = LoadDynamicLibraryIfExists(path);
+
+#if !defined(__ANDROID__)
+  // Search for pip installation
+  if (ort_lib_handle == nullptr) {
+    const std::array<std::string, 4> target_libraries = {
+        std::string("libonnxruntime.so"),
+        std::string("libonnxruntime.so.1.18.0"),
+        std::string("libonnxruntime.so.1.19.0"),
+        std::string("libonnxruntime.so.1.20.0")};
+
+    std::string current_module_dir = GetCurrentModuleDir();
+    for (const std::string& lib_name : target_libraries) {
+      std::string pip_path{current_module_dir + "/../onnxruntime/capi/" + lib_name};
+      void* ort_lib_handle = LoadDynamicLibraryIfExists(path);
+      if (ort_lib_handle != nullptr) {
+        break;
+      }
+    }
+  }
+#endif
+
   if (ort_lib_handle == nullptr) {
     throw std::runtime_error(std::string("Failed to load ") + path.c_str() + ": " + dlerror());
   }
