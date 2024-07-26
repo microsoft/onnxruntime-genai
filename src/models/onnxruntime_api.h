@@ -182,7 +182,7 @@ inline void InitApi() {
   std::string path{};
 
   // "libonnxruntime4j_jni.so" is also an option if we have issues
-  const std::array<std::string, 3> target_libraries = {
+  const std::array<std::string, 4> target_libraries = {
       std::string("libonnxruntime.so"),
       std::string("libonnxruntime.so.1.18.0"),
       std::string("libonnxruntime.so.1.19.0"),
