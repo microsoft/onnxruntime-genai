@@ -231,13 +231,13 @@ inline void InitApi() {
 
   if (ort_lib_handle == nullptr) {
     char* err = dlerror();
-    throw std::runtime_error(std::string("Failed to load ") + path.c_str() + ": " + err != nullptr ? err : "Unknown");
+    throw std::runtime_error(std::string("Failed to load ") + path.c_str() + ": " + (err != nullptr ? err : "Unknown"));
   }
 
   OrtApiBaseFn ort_api_base_fn = (OrtApiBaseFn)dlsym(ort_lib_handle, "OrtGetApiBase");
   if (ort_api_base_fn == nullptr) {
     char* err = dlerror();
-    throw std::runtime_error(std::string("Failed to load symbol OrtGetApiBase: ") + err != nullptr ? err : "Unknown");
+    throw std::runtime_error(std::string("Failed to load symbol OrtGetApiBase: ") + (err != nullptr ? err : "Unknown"));
   }
 
   InitApiWithDynamicFn(ort_api_base_fn);
