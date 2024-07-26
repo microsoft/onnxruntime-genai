@@ -113,7 +113,7 @@ inline const OrtApi* api{};
 
 #if defined(__linux__)
 inline void* LoadDynamicLibraryIfExists(const std::string& path) {
-  LOG_INFO("Attempting to dlopen %s native library", path.c_str());
+  LOG_INFO("Attempting to dlopen %s", path.c_str());
   void* ort_lib_handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
   if (ort_lib_handle == nullptr) {
     return nullptr;
@@ -201,7 +201,6 @@ inline void InitApi() {
   void* ort_lib_handle = LoadDynamicLibraryIfExists(path);
 
 #if !defined(__ANDROID__)
-  // Search for pip installation
   if (ort_lib_handle == nullptr) {
     const std::array<std::string, 4> target_libraries = {
         std::string("libonnxruntime.so"),
@@ -209,6 +208,17 @@ inline void InitApi() {
         std::string("libonnxruntime.so.1.19.0"),
         std::string("libonnxruntime.so.1.20.0")};
 
+    // Search parent directory
+    std::string current_module_dir = GetCurrentModuleDir();
+    for (const std::string& lib_name : target_libraries) {
+      std::string pip_path{current_module_dir + "/" + lib_name};
+      ort_lib_handle = LoadDynamicLibraryIfExists(pip_path);
+      if (ort_lib_handle != nullptr) {
+        break;
+      }
+    }
+
+    // Search for pip installation
     std::string current_module_dir = GetCurrentModuleDir();
     for (const std::string& lib_name : target_libraries) {
       std::string pip_path{current_module_dir + "/../onnxruntime/capi/" + lib_name};
@@ -221,12 +231,14 @@ inline void InitApi() {
 #endif
 
   if (ort_lib_handle == nullptr) {
-    throw std::runtime_error(std::string("Failed to load ") + path.c_str() + ": " + dlerror());
+    char* err = dlerror();
+    throw std::runtime_error(std::string("Failed to load ") + path.c_str() + ": " + err != nullptr ? err : "Unknown");
   }
 
   OrtApiBaseFn ort_api_base_fn = (OrtApiBaseFn)dlsym(ort_lib_handle, "OrtGetApiBase");
   if (ort_api_base_fn == nullptr) {
-    throw std::runtime_error(std::string("Failed to load symbol OrtGetApiBase: ") + dlerror());
+    char* err = dlerror();
+    throw std::runtime_error(std::string("Failed to load symbol OrtGetApiBase: ") + err != nullptr ? err : "Unknown");
   }
 
   InitApiWithDynamicFn(ort_api_base_fn);
