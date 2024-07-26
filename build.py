@@ -298,7 +298,7 @@ def _validate_cmake_args(args: argparse.Namespace):
 
 
 def _validate_args(args: argparse.Namespace):
-    # Clean just updates and cleans
+    # Clean disables the other tasks
     if args.clean:
         args.update = False
         args.build = False
