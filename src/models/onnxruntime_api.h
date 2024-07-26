@@ -131,7 +131,7 @@ inline void* LoadDynamicLibraryIfExists(const std::string& path) {
 
 inline std::string GetCurrentModuleDir() {
   Dl_info dl_info;
-  dladdr((void*)InitApi, &dl_info);
+  dladdr((void*)GetCurrentModuleDir, &dl_info);
   std::string module_name(dl_info.dli_fname);
   std::string module_directory{};
 
