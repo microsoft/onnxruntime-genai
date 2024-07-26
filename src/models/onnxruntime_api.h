@@ -67,6 +67,7 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #include <memory>
 #include <string>
 #include <vector>
+#include <array>
 #include <unordered_map>
 
 #include "onnxruntime_c_api.h"
@@ -140,9 +141,9 @@ inline void InitApi() {
 
   // "libonnxruntime4j_jni.so" is also an option if we have issues
   const std::array<std::string_view> target_libraries = {
-      "libonnxruntime.so"s,
-      "libonnxruntime.so.1.19.0"s,
-      "libonnxruntime.so.1.18.0"s
+      std::string_view("libonnxruntime.so"),
+      std::string_view("libonnxruntime.so.1.19.0"),
+      std::string_view("libonnxruntime.so.1.18.0")
   };
 
   for (const string_view& lib : target_libraries) {
