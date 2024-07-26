@@ -1,22 +1,8 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License
 
-from onnxruntime_genai import _dll_directory
-
 __version__ = "@VERSION_INFO@"
 __id__ = "@TARGET_NAME@"
 
-_dll_directory.add_onnxruntime_dependency()
+from onnxruntime_genai.@PACKAGE_DIR_NAME@ import *
 
-try:
-    from onnxruntime_genai.@PACKAGE_DIR_NAME@ import *
-except ImportError as e:
-    if __id__ == "onnxruntime-genai-cuda":
-        # Try importing onnxruntime_genai. If an ImportError is raised,
-        # it could be because the cuda dlls could not be found on windows.
-        # Try adding the cuda dlls path to the dll search directory
-        # and import onnxruntime_genai again.
-        _dll_directory.add_cuda_dependency()
-        from onnxruntime_genai.@PACKAGE_DIR_NAME@ import *
-    else:
-        raise e

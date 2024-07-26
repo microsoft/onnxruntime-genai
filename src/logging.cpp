@@ -3,6 +3,7 @@
 
 #include "generators.h"
 #include "json.h"
+#include "u8u16convert.h"
 #include <iostream>
 #include <fstream>
 #include <cstdarg>
@@ -90,7 +91,7 @@ static SGR LabelToSgr(std::string_view label) {
 }
 
 std::ostream& Log(std::string_view label, std::string_view string) {
-  assert(g_log.enabled);
+  //assert(g_log.enabled);
 
   *gp_stream << SGR::Bold << LabelToSgr(label) << "  " << label << "  " << SGR::Reset << ' ';
   if (!string.empty())
@@ -113,4 +114,24 @@ std::ostream& Log(std::string_view label, const char* fmt, ...) {
   return Log(label, std::string(buf.get(), buf.get() + len));
 }
 
+#ifdef _WIN32
+std::ostream& Log(std::wstring_view label, std::wstring_view string) {
+  return Log(u16u8(label), u16u8(string));
+}
+
+std::ostream& Log(std::wstring_view label, const wchar_t* fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  va_list args_copy;
+  va_copy(args_copy, args);
+  size_t len = vswprintf(0, 0, fmt, args_copy);
+  if (len <= 0) {
+    throw std::runtime_error("Invalid format");
+  }
+  std::unique_ptr<wchar_t[]> buf(new wchar_t[len + 1]);
+  vswprintf(buf.get(), len + 1, fmt, args);
+  va_end(args);
+  return Log(label, std::wstring(buf.get(), buf.get() + len));
+}
+#endif
 }  // namespace Generators

@@ -75,6 +75,10 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #include "../logging.h"
 #include "../filesystem.h"
 
+#ifndef PATH_MAX
+#define PATH_MAX (4096)
+#endif
+
 #if defined(__ANDROID__)
 #include <android/log.h>
 #include <dlfcn.h>
@@ -92,8 +96,14 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 
 #endif
 
-#ifndef PATH_MAX
-#define PATH_MAX (4096)
+#ifdef _WIN32
+
+#define LOG_DEBUG_W(...) Generators::Log(Generators::LOG_LABEL_DEBUG_W, __VA_ARGS__)
+#define LOG_INFO_W(...) Generators::Log(Generators::LOG_LABEL_INFO_W, __VA_ARGS__)
+#define LOG_WARN_W(...) Generators::Log(Generators::LOG_LABEL_WARN_W, __VA_ARGS__)
+#define LOG_ERROR_W(...) Generators::Log(Generators::LOG_LABEL_ERROR_W, __VA_ARGS__)
+#define LOG_FATAL_W(...) Generators::Log(Generators::LOG_LABEL_FATAL_W, __VA_ARGS__)
+
 #endif
 
 #define LOG_DEBUG(...) Generators::Log(Generators::LOG_LABEL_DEBUG, __VA_ARGS__)
@@ -102,13 +112,45 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #define LOG_ERROR(...) Generators::Log(Generators::LOG_LABEL_ERROR, __VA_ARGS__)
 #define LOG_FATAL(...) Generators::Log(Generators::LOG_LABEL_FATAL, __VA_ARGS__)
 
+
 /** \brief Free functions and a few helpers are defined inside this namespace. Otherwise all types are the C API types
  *
  */
 namespace Ort {
 
+using OrtApiBaseFn = const OrtApiBase* (*)(void);
+
 /// Before using this C++ wrapper API, you MUST call Ort::InitApi to set the below 'api' variable
 inline const OrtApi* api{};
+
+inline void InitApiWithDynamicFn(OrtApiBaseFn ort_api_base_fn) {
+  if (ort_api_base_fn == nullptr) {
+    throw std::runtime_error("OrtGetApiBase not found");
+  }
+
+  const OrtApiBase* ort_api_base = ort_api_base_fn();
+  if (ort_api_base == nullptr) {
+    throw std::runtime_error("OrtGetApiBase() returned nullptr");
+  }
+
+  // loop from the ORT version GenAI was built with, down to the minimum ORT version we require.
+  // as long as the libonnxruntime.so we loaded supports one of those we're good.
+  constexpr int genai_min_ort_api_version = 18;  // GenAI was first released around the time of ORT 1.18 so use that
+  for (int i = ORT_API_VERSION; i >= genai_min_ort_api_version; --i) {
+    api = ort_api_base->GetApi(i);
+    if (api) {
+      LOG_INFO("ORT API Version %d was found.", i);
+      break;
+    }
+  }
+
+  if (!api) {
+    LOG_WARN("The loaded library did not have an ORT API version between %d and %d.",
+             ORT_API_VERSION, genai_min_ort_api_version);
+    throw std::runtime_error("Failed to load onnxruntime. Please make sure you installed the correct version");
+  }
+}
+
 inline void InitApi() {
   if (api) {
     // api was already set.
@@ -142,8 +184,10 @@ inline void InitApi() {
   // "libonnxruntime4j_jni.so" is also an option if we have issues
   const std::array<std::string, 3> target_libraries = {
       std::string("libonnxruntime.so"),
+      std::string("libonnxruntime.so.1.18.0"),
       std::string("libonnxruntime.so.1.19.0"),
-      std::string("libonnxruntime.so.1.18.0")};
+      std::string("libonnxruntime.so.1.20.0")
+  };
 
   Dl_info dl_info;
   dladdr((void*)InitApi, &dl_info);
@@ -182,7 +226,6 @@ inline void InitApi() {
     throw std::runtime_error("Failed to find onnxruntime. Please make sure you have onnxruntime installed");
   }
 
-  using OrtApiBaseFn = const OrtApiBase* (*)(void);
   OrtApiBaseFn ort_api_base_fn = nullptr;
 
   void* ort_lib_handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
@@ -197,31 +240,60 @@ inline void InitApi() {
 #endif
 
   ort_api_base_fn = (OrtApiBaseFn)dlsym(ort_lib_handle, "OrtGetApiBase");
-  if (ort_api_base_fn == nullptr) {
-    throw std::runtime_error("OrtGetApiBase not found");
+  InitApiWithDynamicFn(ort_api_base_fn);
+#elif defined(_WIN32)
+  std::wstring path{};
+
+  const std::array<std::wstring, 1> target_libraries = {
+      std::wstring(L"onnxruntime.dll")
+  };
+
+  HMODULE this_dll = NULL;
+  WCHAR buffer[PATH_MAX];
+  GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                    (LPCWSTR)&InitApi, &this_dll);
+  GetModuleFileNameW(this_dll, (LPWSTR)(&buffer), PATH_MAX);
+
+  std::wstring module_name{buffer};
+  std::wstring module_directory{};
+  const size_t last_slash_idx = module_name.rfind('\\');
+  if (std::string::npos != last_slash_idx) {
+    module_directory = module_name.substr(0, last_slash_idx);
   }
 
-  const OrtApiBase* ort_api_base = ort_api_base_fn();
-  if (ort_api_base == nullptr) {
-    throw std::runtime_error("OrtGetApiBase() returned nullptr");
-  }
+ for (const std::wstring& lib_path : target_libraries) {
+    const fs::path system_path{lib_path};
+    LOG_INFO_W(L"Attempting to LoadLibrary %s", system_path.c_str());
+    if (system_path.exists()) {
+      path = system_path.wstring();
+      break;
+    }
 
-  // loop from the ORT version GenAI was built with, down to the minimum ORT version we require.
-  // as long as the libonnxruntime.so we loaded supports one of those we're good.
-  constexpr int genai_min_ort_api_version = 18;  // GenAI was first released around the time of ORT 1.18 so use that
-  for (int i = ORT_API_VERSION; i >= genai_min_ort_api_version; --i) {
-    api = ort_api_base->GetApi(i);
-    if (api) {
-      LOG_INFO("ORT API Version %d was found.", i);
+    const fs::path pip_path{module_directory + L"/../onnxruntime/capi/" + lib_path};
+    LOG_INFO_W(L"Attempting to LoadLibrary %s", pip_path.c_str());
+    if (pip_path.exists()) {
+      path = pip_path.wstring();
       break;
     }
   }
 
-  if (!api) {
-    LOG_WARN("%s did not have an ORT API version between %d and %d.",
-             path, ORT_API_VERSION, genai_min_ort_api_version);
-    throw std::runtime_error("Failed to load onnxruntime. Please make sure you installed the correct version");
+  AddDllDirectory((module_directory + L"/../onnxruntime/capi/").c_str());
+
+  WCHAR cuda_path[PATH_MAX];
+  if (GetEnvironmentVariableW(L"CUDA_PATH", (LPWSTR)&cuda_path, PATH_MAX)) {
+    std::wstring cuda_path_string{cuda_path};
+    AddDllDirectory((cuda_path_string + L"/bin").c_str());
   }
+
+  WCHAR cuda_home[PATH_MAX];
+  if (GetEnvironmentVariableW(L"CUDA_HOME", (LPWSTR)&cuda_home, PATH_MAX)) {
+    std::wstring cuda_home_string{cuda_home};
+    AddDllDirectory((cuda_home_string + L"/bin").c_str());
+  }
+
+  HMODULE ort_dll = LoadLibraryExW(path.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+  OrtApiBaseFn ort_api_base_fn = (OrtApiBaseFn)GetProcAddress(ort_dll, "OrtGetApiBase");
+  InitApiWithDynamicFn(ort_api_base_fn);
 #else   // defined(__ANDROID__) || defined(__linux__)
   api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
   if (!api)

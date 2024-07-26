@@ -30,6 +30,16 @@ static constexpr std::string_view LOG_LABEL_WARN = "warning";
 static constexpr std::string_view LOG_LABEL_ERROR = "error";
 static constexpr std::string_view LOG_LABEL_FATAL = "fatal";
 
+#ifdef _WIN32
+
+static constexpr std::wstring_view LOG_LABEL_DEBUG_W = L"debug";
+static constexpr std::wstring_view LOG_LABEL_INFO_W = L"info";
+static constexpr std::wstring_view LOG_LABEL_WARN_W = L"warning";
+static constexpr std::wstring_view LOG_LABEL_ERROR_W = L"error";
+static constexpr std::wstring_view LOG_LABEL_FATAL_W = L"fatal";
+
+#endif
+
 void SetLogBool(std::string_view name, bool value);
 void SetLogString(std::string_view name, std::string_view value);
 
@@ -83,4 +93,12 @@ std::ostream& operator<<(std::ostream& stream, SGR sgr_code);
 std::ostream& Log(std::string_view label, std::string_view text = {});
 
 std::ostream& Log(std::string_view label, const char* fmt, ...);
+
+#ifdef _WIN32
+
+std::ostream& Log(std::wstring_view label, std::wstring_view text = {});
+
+std::ostream& Log(std::wstring_view label, const wchar_t* fmt, ...);
+
+#endif
 }  // namespace Generators

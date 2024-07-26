@@ -10,12 +10,9 @@ target_link_directories(python PRIVATE ${ORT_LIB_DIR})
 target_link_libraries(python PRIVATE onnxruntime-genai-static)
 
 if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux"))
-target_link_libraries(python PRIVATE ${ONNXRUNTIME_LIB})
+  target_link_libraries(python PRIVATE ${ONNXRUNTIME_LIB})
 endif()
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  set_property(TARGET python APPEND_STRING PROPERTY LINK_FLAGS " -Xlinker -rpath=\\$ORIGIN/../onnxruntime/capi/")
-endif()
 set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
 
 if(CMAKE_GENERATOR_TOOLSET MATCHES "Visual Studio")

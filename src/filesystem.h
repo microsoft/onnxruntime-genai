@@ -3,24 +3,12 @@
 
 #pragma once
 
-#ifdef _WIN32
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN  // Exclude rarely-used stuff from Windows headers
-#endif
-
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <Windows.h>
-#define ENABLE_INTSAFE_SIGNED_FUNCTIONS  // Only unsigned intsafe math/casts available without this def
-#include <intsafe.h>
-#include <tchar.h>
-#endif  // _WIN32
-
 #include <sys/stat.h>
 
 #include <string>
 #include <fstream>
+
+#include "u8u16convert.h"
 
 namespace fs {
 
@@ -32,6 +20,11 @@ class path {
     wpath_ = to_wstring();
 #endif
   };
+
+#ifdef _WIN32
+  path(const std::wstring& path) : wpath_(path) {
+  };
+#endif
 
   static constexpr char separator =
 #ifdef _WIN32
@@ -58,6 +51,12 @@ class path {
     return std::ofstream(path_, mode);
 #endif  // _WIN32
   }
+
+#ifdef _WIN32
+  const std::wstring& wstring() const {
+    return wpath_;
+  }
+#endif
 
   const std::string& string() const {
     return path_;
@@ -114,37 +113,7 @@ class path {
   std::wstring wpath_;
 
   std::wstring to_wstring() const {
-    // If there's nothing to convert, bail early.
-    if (path_.empty()) {
-      return {};
-    }
-
-    int codePage = CP_UTF8;
-    int iSource;  // convert to int because Mb2Wc requires it.
-    SizeTToInt(path_.size(), &iSource);
-
-    // Ask how much space we will need.
-    // In certain codepages, Mb2Wc will "successfully" produce zero characters (like in CP50220, where a SHIFT-IN character
-    // is consumed but not transformed into anything) without explicitly failing. When it does this, GetLastError will return
-    // the last error encountered by the last function that actually did have an error.
-    // This is arguably correct (as the documentation says "The function returns 0 if it does not succeed"). There is a
-    // difference that we **don't actually care about** between failing and successfully producing zero characters.,
-    // Anyway: we need to clear the last error so that we can fail out and IGNORE_BAD_GLE after it inevitably succeed-fails.
-    SetLastError(0);
-    const auto iTarget = MultiByteToWideChar(codePage, 0, path_.data(), iSource, nullptr, 0);
-
-    size_t cchNeeded;
-    IntToSizeT(iTarget, &cchNeeded);
-
-    // Allocate ourselves some space
-    std::wstring out;
-    out.resize(cchNeeded);
-
-    // Attempt conversion for real.
-    MultiByteToWideChar(codePage, 0, path_.data(), iSource, out.data(), iTarget);
-
-    // Return as a string
-    return out;
+    return u8u16(path_);
   }
 #endif  // _WIN32
 };
