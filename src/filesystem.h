@@ -22,7 +22,7 @@ class path {
   };
 
 #ifdef _WIN32
-  path(const std::wstring& path) : wpath_(path) {};
+  path(const std::wstring& path) : wpath_(path){};
 #endif
 
   static constexpr char separator =

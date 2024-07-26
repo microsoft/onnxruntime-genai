@@ -112,7 +112,6 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #define LOG_ERROR(...) Generators::Log(Generators::LOG_LABEL_ERROR, __VA_ARGS__)
 #define LOG_FATAL(...) Generators::Log(Generators::LOG_LABEL_FATAL, __VA_ARGS__)
 
-
 /** \brief Free functions and a few helpers are defined inside this namespace. Otherwise all types are the C API types
  *
  */
@@ -188,22 +187,23 @@ inline void InitApi() {
       std::string("libonnxruntime.so.1.19.0"),
       std::string("libonnxruntime.so.1.20.0")};
 
-  Dl_info dl_info;
-  dladdr((void*)InitApi, &dl_info);
-  std::string module_name(dl_info.dli_fname);
-  std::string module_directory;
-
-  const size_t last_slash_idx = module_name.rfind('/');
-  if (std::string::npos != last_slash_idx) {
-    module_directory = module_name.substr(0, last_slash_idx);
-  }
-
   for (const std::string& lib_path : target_libraries) {
     const fs::path system_path{lib_path};
     LOG_INFO("Attempting to dlopen %s", system_path.c_str());
     if (system_path.exists()) {
       path = system_path.string();
       break;
+    }
+
+#if !defined(__ANDROID__)
+    Dl_info dl_info;
+    dladdr((void*)InitApi, &dl_info);
+    std::string module_name(dl_info.dli_fname);
+    std::string module_directory;
+
+    const size_t last_slash_idx = module_name.rfind('/');
+    if (std::string::npos != last_slash_idx) {
+      module_directory = module_name.substr(0, last_slash_idx);
     }
 
     const fs::path local_path{module_directory + "/" + lib_path};
@@ -219,6 +219,7 @@ inline void InitApi() {
       path = pip_path.string();
       break;
     }
+#endif
   }
 
   if (path.empty()) {
@@ -267,6 +268,13 @@ inline void InitApi() {
       break;
     }
 
+    const fs::path local_path{module_directory + L"/" + lib_path};
+    LOG_INFO("Attempting to LoadLibrary %s", local_path.c_str());
+    if (local_path.exists()) {
+      path = local_path.wstring();
+      break;
+    }
+
     const fs::path pip_path{module_directory + L"/../onnxruntime/capi/" + lib_path};
     LOG_INFO_W(L"Attempting to LoadLibrary %s", pip_path.c_str());
     if (pip_path.exists()) {
@@ -279,6 +287,7 @@ inline void InitApi() {
     throw std::runtime_error("Failed to find onnxruntime. Please make sure you have onnxruntime installed");
   }
 
+  AddDllDirectory(module_directory.c_str());
   AddDllDirectory((module_directory + L"/../onnxruntime/capi/").c_str());
 
   WCHAR cuda_path[PATH_MAX];
