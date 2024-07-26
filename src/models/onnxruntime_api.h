@@ -219,7 +219,6 @@ inline void InitApi() {
     }
 
     // Search for pip installation
-    std::string current_module_dir = GetCurrentModuleDir();
     for (const std::string& lib_name : target_libraries) {
       std::string pip_path{current_module_dir + "/../onnxruntime/capi/" + lib_name};
       ort_lib_handle = LoadDynamicLibraryIfExists(pip_path);
