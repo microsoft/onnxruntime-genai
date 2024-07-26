@@ -107,7 +107,7 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
  */
 namespace Ort {
 
-  using OrtApiBaseFn = const OrtApiBase* (*)(void);
+using OrtApiBaseFn = const OrtApiBase* (*)(void);
 
 /// Before using this C++ wrapper API, you MUST call Ort::InitApi to set the below 'api' variable
 inline const OrtApi* api{};
@@ -118,6 +118,34 @@ inline void InitApi() {
   }
 
 #if defined(__ANDROID__) || defined(__linux__)
+  inline void* LoadDynamicLibraryIfExists(const std::string& path) {
+    LOG_INFO("Attempting to dlopen %s native library", path.c_str());
+    void* ort_lib_handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (ort_lib_handle == nullptr) {
+      return nullptr;
+    }
+
+#if !defined(__ANDROID__)  // RTLD_DI_ORIGIN not available on Android
+    char pathname[PATH_MAX];
+    dlinfo((void*)ort_lib_handle, RTLD_DI_ORIGIN, &pathname);
+    LOG_INFO("Loaded native library at %s", pathname);
+#endif
+    return ort_lib_handle;
+  }
+
+  inline std::string GetCurrentModuleDir() {
+    Dl_info dl_info;
+    dladdr((void*)InitApi, &dl_info);
+    std::string module_name(dl_info.dli_fname);
+    std::string module_directory{};
+
+    const size_t last_slash_idx = module_name.rfind('/');
+    if (std::string::npos != last_slash_idx) {
+      module_directory = module_name.substr(0, last_slash_idx);
+    }
+    return module_directory;
+  }
+
   inline void InitApiWithDynamicFn(OrtApiBaseFn ort_api_base_fn) {
     if (ort_api_base_fn == nullptr) {
       throw std::runtime_error("OrtGetApiBase not found");
@@ -168,24 +196,14 @@ inline void InitApi() {
   //
 
   const std::string path = "libonnxruntime.so";  // "libonnxruntime4j_jni.so" is also an option if we have issues
-  LOG_INFO("Attempting to dlopen %s native library", path.c_str());
-
-  OrtApiBaseFn ort_api_base_fn = nullptr;
-
-  void* ort_lib_handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+  void* ort_lib_handle = LoadDynamicLibraryIfExists(path);
   if (ort_lib_handle == nullptr) {
     throw std::runtime_error(std::string("Failed to load ") + path.c_str() + ": " + dlerror());
   }
 
-#if !defined(__ANDROID__)  // RTLD_DI_ORIGIN not available on Android
-  char pathname[PATH_MAX];
-  dlinfo((void*)ort_lib_handle, RTLD_DI_ORIGIN, &pathname);
-  LOG_INFO("Loaded native library at %s", pathname);
-#endif
-
-  ort_api_base_fn = (OrtApiBaseFn)dlsym(ort_lib_handle, "OrtGetApiBase");
+  OrtApiBaseFn ort_api_base_fn = (OrtApiBaseFn)dlsym(ort_lib_handle, "OrtGetApiBase");
   if (ort_api_base_fn == nullptr) {
-    throw std::runtime_error("OrtGetApiBase not found");
+    throw std::runtime_error(std::string("Failed to load symbol OrtGetApiBase: ") + dlerror());
   }
 
   InitApiWithDynamicFn(ort_api_base_fn);
