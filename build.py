@@ -298,8 +298,14 @@ def _validate_cmake_args(args: argparse.Namespace):
 
 
 def _validate_args(args: argparse.Namespace):
-    # default to all 3 stages
-    if not args.update and not args.build and not args.test and not args.clean:
+    # Clean just updates and cleans
+    if args.clean:
+        args.update = False
+        args.build = False
+        args.test = False
+
+    # If no tasks are specified, default to all tasks
+    elif not args.update and not args.build and not args.test:
         args.update = True
         args.build = True
         args.test = True
@@ -550,10 +556,13 @@ def clean(args: argparse.Namespace, env: dict[str, str]):
     """
     Clean the build output.
     """
-    log.info("Cleaning targets")
+    log.info("Cleaning cmake targets")
     cmd_args = [str(args.cmake_path), "--build", str(args.build_dir), "--config", args.config, "--target", "clean"]
     util.run(cmd_args, env=env)
 
+    # Remove the build directory
+    log.info(f"Removing build dir {args.build_dir}")
+    shutil.rmtree(args.build_dir, ignore_errors=True)
 
 if __name__ == "__main__":
     if not (util.is_windows() or util.is_linux() or util.is_mac()):
