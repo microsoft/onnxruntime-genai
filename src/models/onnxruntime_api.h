@@ -137,41 +137,51 @@ inline void InitApi() {
   //     any libonnxruntime.so that supports one of those versions.
   //
 
-  const char* path = nullptr;
+  std::string path{};
+
+  Dl_info dl_info;
+  dladdr((void *)InitApi, &dl_info);
+  std::string module_name(dl_info.dli_fname);
+  std::string module_directory;
+  const size_t last_slash_idx = module_name.rfind('/');
+  if (std::string::npos != last_slash_idx)
+  {
+    module_directory = module_name.substr(0, last_slash_idx);
+  }
 
   // "libonnxruntime4j_jni.so" is also an option if we have issues
-  const std::array<std::string_view> target_libraries = {
-      std::string_view("libonnxruntime.so"),
-      std::string_view("libonnxruntime.so.1.19.0"),
-      std::string_view("libonnxruntime.so.1.18.0")
+  const std::array<std::string, 3> target_libraries = {
+      std::string("libonnxruntime.so"),
+      std::string("libonnxruntime.so.1.19.0"),
+      std::string("libonnxruntime.so.1.18.0")
   };
 
-  for (const string_view& lib : target_libraries) {
-    const fs::path file_path{lib_path};
+  for (const std::string& lib_path : target_libraries) {
+    const fs::path file_path{module_directory + "/" + lib_path};
     LOG_INFO("Attempting to dlopen %s native library", file_path.c_str());
     if (file_path.exists()) {
-      path = file_path.c_str();
+      path = file_path.string();
     }
   }
 
-  for (const string_view& lib : target_libraries) {
-    const fs::path file_path{"../onnxruntime/capi/" + lib_path};
+  for (const std::string& lib_path : target_libraries) {
+    const fs::path file_path{module_directory + "/../onnxruntime/capi/" + lib_path};
     LOG_INFO("Attempting to dlopen %s from pip installation", file_path.c_str());
     if (file_path.exists()) {
-      path = file_path.c_str();
+      path = file_path.string();
     }
   }
 
-  if (path == nullptr) {
+  if (path.empty()) {
     throw std::runtime_error("Failed to find onnxruntime. Please make sure you have onnxruntime installed");
   }
 
   using OrtApiBaseFn = const OrtApiBase* (*)(void);
   OrtApiBaseFn ort_api_base_fn = nullptr;
 
-  void* ort_lib_handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+  void* ort_lib_handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
   if (ort_lib_handle == nullptr) {
-    throw std::runtime_error(std::string("Failed to load ") + path + ": " + dlerror());
+    throw std::runtime_error(std::string("Failed to load ") + path.c_str() + ": " + dlerror());
   }
 
 #if !defined(__ANDROID__)  // RTLD_DI_ORIGIN not available on Android
