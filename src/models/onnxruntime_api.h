@@ -138,15 +138,26 @@ inline void InitApi() {
 
   const char* path = nullptr;
 
-  const fs::path default_path = "libonnxruntime.so";  // "libonnxruntime4j_jni.so" is also an option if we have issues
-  if (default_path.exists()) {
-    LOG_INFO("Attempting to dlopen %s native library", default_path.c_str());
-    path = default_path.c_str();
-  } else {
-    const fs::path pip_package_path = "../onnxruntime/capi/libonnxruntime.so";
-    if (pip_package_path.exists()) {
-      LOG_INFO("Attempting to dlopen %s from pip installation", default_path.c_str());
-      path = pip_package_path.c_str();
+  // "libonnxruntime4j_jni.so" is also an option if we have issues
+  const std::array<std::string_view> target_libraries = {
+      "libonnxruntime.so"s,
+      "libonnxruntime.so.1.19.0"s,
+      "libonnxruntime.so.1.18.0"s
+  };
+
+  for (const string_view& lib : target_libraries) {
+    const fs::path file_path{lib_path};
+    LOG_INFO("Attempting to dlopen %s native library", file_path.c_str());
+    if (file_path.exists()) {
+      path = file_path.c_str();
+    }
+  }
+
+  for (const string_view& lib : target_libraries) {
+    const fs::path file_path{"../onnxruntime/capi/" + lib_path};
+    LOG_INFO("Attempting to dlopen %s from pip installation", file_path.c_str());
+    if (file_path.exists()) {
+      path = file_path.c_str();
     }
   }
 
@@ -157,9 +168,9 @@ inline void InitApi() {
   using OrtApiBaseFn = const OrtApiBase* (*)(void);
   OrtApiBaseFn ort_api_base_fn = nullptr;
 
-  void* ort_lib_handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+  void* ort_lib_handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
   if (ort_lib_handle == nullptr) {
-    throw std::runtime_error("Failed to load " + path + ": " + dlerror());
+    throw std::runtime_error(std::string("Failed to load ") + path + ": " + dlerror());
   }
 
 #if !defined(__ANDROID__)  // RTLD_DI_ORIGIN not available on Android
@@ -191,7 +202,7 @@ inline void InitApi() {
 
   if (!api) {
     LOG_WARN("%s did not have an ORT API version between %d and %d.",
-             path.c_str(), ORT_API_VERSION, genai_min_ort_api_version);
+             path, ORT_API_VERSION, genai_min_ort_api_version);
     throw std::runtime_error("Failed to load onnxruntime. Please make sure you installed the correct version");
   }
 #else   // defined(__ANDROID__) || defined(__linux__)
