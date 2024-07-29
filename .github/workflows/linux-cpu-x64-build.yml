@@ -51,12 +51,14 @@ jobs:
           ls -R ${{ env.ORT_PACKAGE_NAME }}
         continue-on-error: true
 
+# TODO: Find out why do we need to to have libonnxruntime.so.$ort_version
       - name: Extract OnnxRuntime library and header files
         run: |
           set -e -x
           mkdir -p ort/lib
           mv microsoft.ml.onnxruntime/${{ env.ORT_NIGHTLY_VERSION }}/build/native/include ort/
           mv microsoft.ml.onnxruntime/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/linux-x64/native/* ort/lib/
+          cp ort/lib/libonnxruntime.so ort/lib/libonnxruntime.so.1
 
       - name: Build with CMake and GCC
         run: |
