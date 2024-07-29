@@ -106,6 +106,13 @@ struct Config {
       } outputs;
 
     } decoder;
+
+    struct KVCache {
+      bool paged_cache{};
+      std::optional<int32_t> block_size;
+      std::optional<int32_t> num_blocks;
+      std::optional<float> gpu_utilization_factor;
+    } kv_cache;
   } model;
 
   struct Search {

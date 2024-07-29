@@ -81,8 +81,15 @@ def _parse_args():
             "Visual Studio 17 2022",
             "Xcode",
         ],
-        default=None,
+        default=("Visual Studio 17 2022" if util.is_windows() else "Unix Makefiles"),
         help="Specify the generator that CMake invokes.",
+    )
+    parser.add_argument(
+        "--cmake_extra_defines",
+        nargs="+",
+        action="append",
+        help="Extra definitions to pass to CMake during build system "
+        "generation. These are just CMake -D options without the leading -D.",
     )
 
     parser.add_argument("--ort_home", default=None, type=Path, help="Root directory of onnxruntime.")
@@ -279,7 +286,12 @@ def _validate_ios_args(args: argparse.Namespace):
             )
 
 
-def _validate_args(args):
+def _validate_cmake_args(args: argparse.Namespace):
+    args.cmake_extra_defines = [i for j in args.cmake_extra_defines for i in j] if args.cmake_extra_defines else []
+    args.cmake_extra_defines = [f"-D{define}" for define in args.cmake_extra_defines]
+
+
+def _validate_args(args: argparse.Namespace):
     # default to all 3 stages
     if not args.update and not args.build and not args.test:
         args.update = True
@@ -294,12 +306,16 @@ def _validate_args(args):
     _validate_cuda_args(args)
     _validate_android_args(args)
     _validate_ios_args(args)
+    _validate_cmake_args(args)
 
     if args.ort_home:
         if not args.ort_home.exists() or not args.ort_home.is_dir():
             raise ValueError(f"{args.ort_home} does not exist or is not a directory.")
 
         args.ort_home = args.ort_home.resolve(strict=True)
+    else:
+        if not os.path.exists(REPO_ROOT / "ort") and util.is_linux():
+            util.download_ort(args.use_cuda, REPO_ROOT / "ort")
 
 
 def _create_env(args: argparse.Namespace):
@@ -347,22 +363,25 @@ def update(args: argparse.Namespace, env: dict[str, str]):
     # build the cmake command to create/update the build files
     command = [str(args.cmake_path)]
 
-    if args.cmake_generator:
-        command += ["-G", args.cmake_generator]
+    command += ["-G", args.cmake_generator]
 
     if util.is_windows():
-        if not args.cmake_generator:
-            command += ["-G", "Visual Studio 17 2022", "-A", "x64"]
-
         if args.cmake_generator == "Ninja":
             if args.use_cuda:
                 command += ["-DCUDA_TOOLKIT_ROOT_DIR=" + str(args.cuda_home)]
-        else:
-            toolset = "host=x64"
-            if args.use_cuda:
-                toolset += ",cuda=" + str(args.cuda_home)
 
-            command += ["-T", toolset]
+        elif args.cmake_generator.startswith("Visual Studio"):
+            toolset_options = []
+
+            is_x64_host = platform.machine() == "AMD64"
+            if is_x64_host:
+                toolset_options += ["host=x64"]
+
+            if args.use_cuda:
+                toolset_options += ["cuda=" + str(args.cuda_home)]
+
+            if toolset_options:
+                command += ["-T", ",".join(toolset_options)]
 
     command += [f"-DCMAKE_BUILD_TYPE={args.config}"]
 
@@ -415,6 +434,9 @@ def update(args: argparse.Namespace, env: dict[str, str]):
                 else "cmake/genai_ios.toolchain.cmake"
             ),
         ]
+
+    if args.cmake_extra_defines != []:
+        command += args.cmake_extra_defines
 
     util.run(command, env=env)
 

@@ -16,7 +16,7 @@ inline void hash_combine(size_t& seed, T const& v) {
 struct InputKey {
   InputKey(std::string name, ONNXTensorElementDataType tensor_type, std::vector<int64_t> tensor_shape)
       : name_(std::move(name)),
-        tensor_type_(tensor_type_),
+        tensor_type_(tensor_type),
         tensor_shape_(std::move(tensor_shape)) {}
 
   bool operator==(const InputKey& other) const {
