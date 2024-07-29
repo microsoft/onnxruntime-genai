@@ -18,6 +18,10 @@ struct span {
   constexpr span(const span<T>& s) noexcept : p_{s.p_}, length_{s.length_} {}
 
   span(std::vector<T>& s) noexcept : p_{s.data()}, length_{s.size()} {}
+
+  template <size_t N>
+  constexpr span(T (&arr)[N]) noexcept : p_(arr), length_(N) {}
+
   template <size_t N>
   constexpr span(std::array<T, N>& s) noexcept : p_{s.data()}, length_{s.size()} {}
 
@@ -56,6 +60,10 @@ struct span<const T> {
   constexpr span(const span<T>& s) noexcept : p_{s.data()}, length_{s.size()} {}
 
   span(const std::vector<T>& s) noexcept : p_{s.data()}, length_{s.size()} {}
+
+  template <size_t N>
+  constexpr span(const T (&arr)[N]) noexcept : p_(arr), length_(N) {}
+
   template <size_t N>
   constexpr span(const std::array<T, N>& s) noexcept : p_{s.data()}, length_{s.size()} {}
 

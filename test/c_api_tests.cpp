@@ -32,16 +32,14 @@ TEST(CAPITests, TokenizerCAPI) {
 
   // Encode all strings
   {
-    for (auto& string : input_strings)
-      tokenizer->Encode(string, *sequences);
+    for (auto& string : input_strings) tokenizer->Encode(string, *sequences);
   }
 
   // Decode one at a time
   for (size_t i = 0; i < sequences->Count(); i++) {
     auto out_string = tokenizer->Decode(sequences->Get(i));
     std::cout << "Decoded string:" << out_string << std::endl;
-    if (strcmp(input_strings[i], out_string) != 0)
-      throw std::runtime_error("Token decoding mismatch");
+    if (strcmp(input_strings[i], out_string) != 0) throw std::runtime_error("Token decoding mismatch");
   }
 
   // Stream Decode one at a time
@@ -72,8 +70,7 @@ TEST(CAPITests, EndToEndPhiBatch) {
   };
 
   auto input_sequences = OgaSequences::Create();
-  for (auto& string : input_strings)
-    tokenizer->Encode(string, *input_sequences);
+  for (auto& string : input_strings) tokenizer->Encode(string, *input_sequences);
 
   auto params = OgaGeneratorParams::Create(*model);
   params->SetSearchOption("max_length", 20);
@@ -91,9 +88,7 @@ TEST(CAPITests, EndToEndPhiBatch) {
 
 TEST(CAPITests, Tensor_And_AddExtraInput) {
   // Create a [3 4] shaped tensor
-  std::array<float, 12> data{0, 1, 2, 3,
-                             10, 11, 12, 13,
-                             20, 21, 22, 23};
+  std::array<float, 12> data{0, 1, 2, 3, 10, 11, 12, 13, 20, 21, 22, 23};
   std::vector<int64_t> shape{3, 4};  // Use vector so we can easily compare for equality later
 
   auto tensor = OgaTensor::Create(data.data(), shape.data(), shape.size(), OgaElementType_float32);
@@ -108,10 +103,118 @@ TEST(CAPITests, Tensor_And_AddExtraInput) {
   params->SetModelInput("test_input", *tensor);
 }
 
+#if (defined _MSC_VER) && (defined _M_ARM || defined _M_ARM64 || defined _M_ARM64EC)
+#define IS_MS_ARM 1
+#endif
+
+#if !defined(IS_MS_ARM) && !defined(USE_DML)
+TEST(CAPITests, LoraManagement) {
+#if defined(USE_CUDA)
+  const std::string model_folder = MODEL_PATH "hf-internal-testing/tiny-random-llama-lora-fp16";
+#else
+  const std::string model_folder = MODEL_PATH "hf-internal-testing/tiny-random-llama-lora";
+#endif
+
+  const std::string adapter_name = "guanaco";
+
+  // This should load Lora adapters as configured in the genai_config.json
+  auto model = OgaModel::Create(model_folder.c_str());
+
+  constexpr std::array<int64_t, 2> input_ids_shape{2, 4};
+  constexpr std::array<int32_t, 8U> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
+  const auto batch_size = input_ids_shape[0];
+  const auto input_sequence_length = input_ids_shape[1];
+  constexpr int max_length = 10;
+
+  const char* const adapter[] = {adapter_name.c_str()};
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+  params->SetInputIDs(input_ids.data(), input_ids.size(), input_sequence_length, batch_size);
+
+  // Now we can activate it
+  // The call validates the adapter names specified.
+  ASSERT_NO_THROW(params->SetActiveAdapterNames(adapter));
+
+  // Try to active a non-existing adapter throws, but preserves the previously set adapters
+
+  constexpr const std::array<const char*, 1> nonexisting_adapter = {"nonexistingadapter"};
+  ASSERT_THROW(params->SetActiveAdapterNames(nonexisting_adapter), std::runtime_error);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  ASSERT_NE(nullptr, generator);
+
+  generator.reset();
+
+  // Reset adapters to base
+  constexpr std::array<const char*, 0> base_adapter = {};
+  params->SetActiveAdapterNames(base_adapter);
+
+  generator = OgaGenerator::Create(*model, *params);
+  ASSERT_NE(nullptr, generator);
+}
+
+TEST(CAPITests, LoraManagementEndToEnd) {
+#if defined(USE_CUDA)
+  const std::string model_folder = MODEL_PATH "hf-internal-testing/tiny-random-llama-lora-fp16";
+#elif defined(USE_DML)
+  const std::string model_folder = MODEL_PATH "hf-internal-testing/tiny-random-llama-lora-fp16-dml";
+#else
+  const std::string model_folder = MODEL_PATH "hf-internal-testing/tiny-random-llama-lora";
+#endif
+
+  // This should load Lora adapters as configured in the genai_config.json
+  auto model = OgaModel::Create(model_folder.c_str());
+
+  constexpr std::array<int64_t, 2> input_ids_shape{2, 4};
+  constexpr std::array<int32_t, 8> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
+
+  auto params = OgaGeneratorParams::Create(*model);
+
+  constexpr int max_length = 10;
+  const auto batch_size = input_ids_shape[0];
+  const auto input_sequence_length = input_ids_shape[1];
+  params->SetSearchOption("max_length", max_length);
+  params->SetInputIDs(input_ids.data(), input_ids.size(), input_sequence_length, batch_size);
+
+  // Now we can activate it
+  // The call validates the adapter names specified.
+  constexpr const std::array<const char*, 1> adapter = {"guanaco"};
+  ASSERT_NO_THROW(params->SetActiveAdapterNames(adapter));
+
+  // Try to active a non-existing adapter throws, but preserves the previously set adapters
+  constexpr const std::array<const char*, 1> nonexisting_adapter = {"nonexistingadapter"};
+  ASSERT_THROW(params->SetActiveAdapterNames(nonexisting_adapter), std::runtime_error);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  ASSERT_NE(nullptr, generator);
+
+  while (!generator->IsDone()) {
+    generator->ComputeLogits();
+    generator->GenerateNextToken();
+  }
+
+  generator.reset();
+
+  // Reset adapters to base
+  constexpr std::array<const char*, 0> base_adapter = {};
+  params->SetActiveAdapterNames(base_adapter);
+
+  generator = OgaGenerator::Create(*model, *params);
+  ASSERT_NE(nullptr, generator);
+
+  while (!generator->IsDone()) {
+    generator->ComputeLogits();
+    generator->GenerateNextToken();
+  }
+}
+
+#endif  // !defined(IS_MS_ARM) && !defined(USE_DML)
+
 TEST(CAPITests, Logging) {
   // Trivial test to ensure the API builds properly
   Oga::SetLogBool("enabled", true);
-  Oga::SetLogString("filename", nullptr);  // If we had a filename set, this would stop logging to the file and go back to the console
+  Oga::SetLogString(
+      "filename", nullptr);  // If we had a filename set, this would stop logging to the file and go back to the console
   Oga::SetLogBool("enabled", false);
 }
 
@@ -121,17 +224,17 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
   std::vector<int64_t> input_ids_shape{2, 4};
   std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
 
-  std::vector<int32_t> expected_output{
-      0, 0, 0, 52, 204, 204, 204, 204, 204, 204,
-      0, 0, 195, 731, 731, 114, 114, 114, 114, 114};
+  std::vector<int32_t> expected_output{0, 0, 0, 52, 204, 204, 204, 204, 204, 204,
+                                       0, 0, 195, 731, 731, 114, 114, 114, 114, 114};
 
   auto input_sequence_length = input_ids_shape[1];
   auto batch_size = input_ids_shape[0];
   int max_length = 10;
 
   // To generate this file:
-  // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
-  // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
+  // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output
+  // tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20 And copy the resulting gpt2_init_past_fp32.onnx file
+  // into these two files (as it's the same for gpt2)
 
   auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
@@ -188,8 +291,7 @@ struct Phi2Test {
         "The quick brown fox jumps over the lazy dog.",
     };
 
-    for (auto& string : input_strings)
-      tokenizer_->Encode(string, *input_sequences_);
+    for (auto& string : input_strings) tokenizer_->Encode(string, *input_sequences_);
 
     params_ = OgaGeneratorParams::Create(*model_);
     params_->SetInputSequences(*input_sequences_);

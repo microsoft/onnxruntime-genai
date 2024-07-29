@@ -19,6 +19,38 @@ endforeach()
 
 message("Loading Dependencies ...")
 
+
+# Flatbuffers
+# We do not need to build flatc for iOS or Android Cross Compile
+if (CMAKE_SYSTEM_NAME STREQUAL "iOS" OR CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
+  set(FLATBUFFERS_BUILD_FLATC OFF CACHE BOOL "FLATBUFFERS_BUILD_FLATC" FORCE)
+endif()
+set(FLATBUFFERS_BUILD_TESTS OFF CACHE BOOL "FLATBUFFERS_BUILD_TESTS" FORCE)
+set(FLATBUFFERS_INSTALL OFF CACHE BOOL "FLATBUFFERS_INSTALL" FORCE)
+set(FLATBUFFERS_BUILD_FLATHASH OFF CACHE BOOL "FLATBUFFERS_BUILD_FLATHASH" FORCE)
+set(FLATBUFFERS_BUILD_FLATLIB ON CACHE BOOL "FLATBUFFERS_BUILD_FLATLIB" FORCE)
+
+if(NOT WIN32)
+  if(Patch_FOUND)
+    set(GENAI_FLATBUFFERS_PATCH_COMMAND ${Patch_EXECUTABLE} --binary --ignore-whitespace -p1 < 
+        ${CMAKE_SOURCE_DIR}/cmake/patches/flatbuffers/flatbuffers.patch)
+  else()
+   set(GENAI_FLATBUFFERS_PATCH_COMMAND "")
+  endif()
+else()
+  set(GENAI_FLATBUFFERS_PATCH_COMMAND "")
+endif()
+
+FetchContent_Declare(
+    flatbuffers
+    URL ${DEP_URL_flatbuffers}
+    URL_HASH SHA1=${DEP_SHA1_flatbuffers}
+    PATCH_COMMAND ${GENAI_FLATBUFFERS_PATCH_COMMAND}
+    FIND_PACKAGE_ARGS 23.5.9 NAMES Flatbuffers
+)
+
+onnxruntime_fetchcontent_makeavailable(flatbuffers)
+
 if(ENABLE_PYTHON)
   FetchContent_Declare(
     pybind11_project

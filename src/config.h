@@ -126,6 +126,11 @@ struct Config {
     int random_seed{-1};               // -1 = Seed with random device, otherwise use value to seed RNG
   } search;
 
+  struct LoraAdapters {
+    // Stores adapter name to file name mapping
+    std::unordered_map<std::string, std::string> adapters;
+  } lora_adapters;
+
   void AddMapping(const std::string& nominal_name, const std::string& graph_name);
   // Returns graph name and true if the nominal name is found in the mapping
   // otherwise returns the nominal name and false

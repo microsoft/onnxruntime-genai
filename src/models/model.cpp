@@ -248,6 +248,8 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   run_options_ = OrtRunOptions::Create();
 
   CreateSessionOptions();
+
+  lora_adapters_.LoadAdaptersFromConfig(config_->config_path, *config_);
 }
 
 Model::~Model() = default;

@@ -1,19 +1,31 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
 #pragma once
 
-#include "static_buffer.h"
+#include "onnxruntime_api.h"
+
+#include <memory>
+#include <string>
+#include <vector>
 
 namespace Generators {
 
+struct Model;
+struct State;
+
 struct ExtraInputs {
   ExtraInputs(const Model& model, State& state);
+  ExtraInputs(const ExtraInputs&) = delete;
+  ExtraInputs& operator=(const ExtraInputs&) = delete;
+
   void Add();
 
  private:
   const Model& model_;
   State& state_;
-  std::vector<OrtValue*> extra_inputs_;
-  std::vector<std::unique_ptr<OrtValue>> owned_extra_inputs_;
-  std::unordered_map<std::string, StaticBuffer*> sb_extra_inputs_;
+  std::vector<std::string> extra_input_names_;
+  std::vector<std::shared_ptr<OrtValue>> extra_inputs_;
 };
 
 }  // namespace Generators

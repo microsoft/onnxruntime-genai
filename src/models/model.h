@@ -1,10 +1,12 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #pragma once
-#include "ortx_tokenizer.h"
+
 #include "captured_graph_pool.h"
-#include "utils.h"
+#include "lora_adapter.h"
+#include "ortx_tokenizer.h"
 #include "prompt_image_processor.h"
+#include "utils.h"
 
 #if USE_DML
 #include "dml_provider_factory.h"
@@ -119,6 +121,15 @@ struct Model : std::enable_shared_from_this<Model> {
 
   CapturedGraphPool* GetCapturedGraphPool() const { return captured_graph_pool_.get(); }
 
+  const LoraAdapterContainer& GetLoraAdapterContainer() const noexcept { return lora_adapters_; }
+  LoraAdapterContainer& GetLoraAdapterContainer() noexcept { return lora_adapters_; }
+
+  /// <summary>
+  /// Returns device allocator or cpu allocator dedeuced based on the device type
+  /// </summary>
+  /// <returns>Ort::Allocator pointer</returns>
+  Ort::Allocator* GetAllocatorDevice() const { return allocator_device_; }
+
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
   std::unique_ptr<OrtSessionOptions> vision_session_options_;
@@ -161,6 +172,7 @@ struct Model : std::enable_shared_from_this<Model> {
 #endif
 
   std::shared_ptr<CapturedGraphPool> captured_graph_pool_;
+  LoraAdapterContainer lora_adapters_;
 };
 
 }  // namespace Generators

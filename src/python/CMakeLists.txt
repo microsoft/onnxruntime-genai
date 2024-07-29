@@ -8,6 +8,8 @@ pybind11_add_module(python ${python_srcs})
 target_include_directories(python PRIVATE ${ORT_HEADER_DIR})
 target_link_directories(python PRIVATE ${ORT_LIB_DIR})
 target_link_libraries(python PRIVATE onnxruntime-genai-static ${ONNXRUNTIME_LIB})
+target_link_libraries(python PRIVATE genai_flatbuffers)
+
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set_property(TARGET python APPEND_STRING PROPERTY LINK_FLAGS " -Xlinker -rpath=\\$ORIGIN/../onnxruntime/capi/")
 endif()
@@ -56,7 +58,7 @@ if(BUILD_WHEEL)
   file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/package_description.md" DESTINATION ${WHEEL_FILES_DIR}/)
   file(COPY "${CMAKE_SOURCE_DIR}/ThirdPartyNotices.txt" DESTINATION ${WHEEL_TARGET_NAME}/)
   file(COPY "${CMAKE_SOURCE_DIR}/LICENSE" DESTINATION ${WHEEL_TARGET_NAME}/)
-  add_custom_command(TARGET python POST_BUILD
+    add_custom_command(TARGET python POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy
     ${ortgenai_embed_libs} $<TARGET_FILE:python>
     ${WHEEL_TARGET_NAME}
