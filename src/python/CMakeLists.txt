@@ -13,9 +13,6 @@ if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linu
 target_link_libraries(python PRIVATE ${ONNXRUNTIME_LIB})
 endif()
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  set_property(TARGET python APPEND_STRING PROPERTY LINK_FLAGS " -Xlinker -rpath=\\$ORIGIN/../onnxruntime/capi/")
-endif()
 set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
 
 if(CMAKE_GENERATOR_TOOLSET MATCHES "Visual Studio")

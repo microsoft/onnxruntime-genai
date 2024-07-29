@@ -8,6 +8,10 @@ def _is_windows():
     return sys.platform.startswith("win")
 
 
+def _is_linux():
+    return sys.platform.startswith("linux")
+
+
 def add_onnxruntime_dependency():
     """Add the onnxruntime DLL directory to the DLL search path.
     
@@ -20,6 +24,20 @@ def add_onnxruntime_dependency():
             raise ImportError("Could not find the onnxruntime package.")
         ort_package_path = ort_package.submodule_search_locations[0]
         os.add_dll_directory(os.path.join(ort_package_path, "capi"))
+    elif _is_linux():
+        import importlib.util
+        import ctypes
+        import glob
+
+        ort_package = importlib.util.find_spec("onnxruntime")
+        if not ort_package:
+            raise ImportError("Could not find the onnxruntime package.")
+        
+        # Load the onnxruntime shared library here since we can find the path in python with ease.
+        # This avoids needing to know the exact path of the shared library from native code.
+        ort_package_path = ort_package.submodule_search_locations[0]
+        ort_lib_path = glob.glob(os.path.join(ort_package_path, "capi", "libonnxruntime.so*"))[0]
+        _ = ctypes.CDLL(ort_lib_path)
 
 
 def add_cuda_dependency():
