@@ -38,6 +38,9 @@ def add_onnxruntime_dependency():
         ort_package_path = ort_package.submodule_search_locations[0]
         ort_lib_path = glob.glob(os.path.join(ort_package_path, "capi", "libonnxruntime.so*"))[0]
         _ = ctypes.CDLL(ort_lib_path)
+        providers_lib_path = glob.glob(os.path.join(ort_package_path, "capi", "libonnxruntime_providers_shared.so*"))
+        if providers_lib_path:
+            _ = [ctypes.CDLL(providers_lib_path[i]) for i in range(len(providers_lib_path))]
 
 
 def add_cuda_dependency():
