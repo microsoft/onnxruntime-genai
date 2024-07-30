@@ -145,4 +145,5 @@ jobs:
             --gpus all \
             --rm \
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
-            -w /ort_genai_src onnxruntimecudabuildx64 bash -c "LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/ort_genai_src/build/cuda/ /ort_genai_src/build/cuda/test/unit_tests"
+            -w /ort_genai_src onnxruntimecudabuildx64 bash -c "ls /ort_genai_src/build/cuda/ && \
+              LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/ort_genai_src/build/cuda/ /ort_genai_src/build/cuda/test/unit_tests"
