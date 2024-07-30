@@ -119,43 +119,69 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
     throw std::runtime_error("vocab_size must be 1 or greater, is " + std::to_string(params.vocab_size));
   if (params.sequence_length >= params.search.max_length)
     throw std::runtime_error("input sequence_length (" + std::to_string(params.sequence_length) + ") is >= max_length (" + std::to_string(params.search.max_length) + ")");
-  if (params.input_ids.empty() || params.input_ids.data() == nullptr)
-    throw std::runtime_error("input_ids not set in GeneratorParams");
+  // if (params.input_ids.empty() || params.input_ids.data() == nullptr)
+  //   throw std::runtime_error("input_ids not set in GeneratorParams");
 
   search_ = CreateSearch(params);
   state_ = model.CreateState(search_->GetSequenceLengths(), params);
 }
 
-void Generator::ComputeLogits() {
-  if (computed_logits_)
+void Generator::Compute() {
+  if (ran_compute_)
     throw std::runtime_error("ComputeLogits called again without calling GenerateNextToken first");
-
-  auto logits = state_->Run(search_->GetSequenceLength(), search_->GetNextTokens(), search_->GetNextIndices());
+  
+  auto logits = state_->Run(search_->GetSequenceLength(), search_->GetNextTokens(), search_->GetNextIndices()); // TODO(aciddelgado): Update this to fit the new API
   if (g_log.enabled && g_log.model_logits) {
     auto& stream = Log("model_logits");
     DumpSpan(stream, logits.GetCPU());
     stream << std::endl;
   }
-  search_->SetLogits(logits);
-  computed_logits_ = true;
+  ran_compute_ = true;
 
-  auto& search = search_->params_->search;
-  search_->ApplyMinLength(search.min_length);
-  search_->ApplyRepetitionPenalty(search.repetition_penalty);
+  search_->SetLogits(logits);
+}
+
+void Generator::ComputeLogits() {
+  Generator::Compute();
+  // if (computed_logits_)
+  //   throw std::runtime_error("ComputeLogits called again without calling GenerateNextToken first");
+
+  // auto logits = state_->Run(search_->GetSequenceLength(), search_->GetNextTokens(), search_->GetNextIndices());
+  // if (g_log.enabled && g_log.model_logits) {
+  //   auto& stream = Log("model_logits");
+  //   DumpSpan(stream, logits.GetCPU());
+  //   stream << std::endl;
+  // }
+  // search_->SetLogits(logits);
+  // computed_logits_ = true;
+
+  // auto& search = search_->params_->search;
+  // search_->ApplyMinLength(search.min_length);
+  // search_->ApplyRepetitionPenalty(search.repetition_penalty);
 }
 
 bool Generator::IsDone() const {
-  if (computed_logits_)
-    throw std::runtime_error("IsDone() can't be called in the middle of processing logits");
+  if (ran_compute_)
+    throw std::runtime_error("IsDone() must be called after GenerateNextToken");
 
   return search_->IsDone();
 }
 
+void Generator::AppendTokens(RoamingArray<int32_t> next_tokens) {
+  if (!ran_compute_)
+    throw std::runtime_error("Must call ComputeLogits before AppendTokens");
+  ran_compute_ = false;
+  search_->AppendNextTokenToSequences(next_tokens);
+
+}
+
 void Generator::GenerateNextToken() {
-  if (!computed_logits_)
+  if (!ran_compute_)
     throw std::runtime_error("Must call ComputeLogits before GenerateNextToken");
-  computed_logits_ = false;
+  ran_compute_ = false;
   auto& search = search_->params_->search;
+  search_->ApplyMinLength(search.min_length);
+  search_->ApplyRepetitionPenalty(search.repetition_penalty);
 
   if (g_log.enabled && g_log.generate_next_token) {
     auto& stream = Log("generate_next_token");

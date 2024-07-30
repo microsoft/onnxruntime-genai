@@ -129,6 +129,7 @@ struct Generator {
   Generator(const Model& model, const GeneratorParams& params);
 
   bool IsDone() const;
+  void Compute();
   void ComputeLogits();
   void GenerateNextToken();
 
@@ -137,7 +138,8 @@ struct Generator {
   std::shared_ptr<const Model> model_;
   std::unique_ptr<State> state_;
   std::unique_ptr<Search> search_;
-  bool computed_logits_{};  // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
+  bool ran_compute_{};  // Set to true after Compute() is called and false after AppendToken() or GenerateNextToken() is called
+  // bool computed_logits_{};  // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
 };
 
 struct OrtGlobals {

@@ -48,6 +48,7 @@ void InputIDs::Add() {
 
 void InputIDs::Update(RoamingArray<int32_t> next_tokens_unk) {
   // Resize input_ids shape once if it doesn't match the decoder shape
+  // TODO(aciddelgado): Assumes prompt and token. Remove this assumption.
   if (shape_[1] != 1) {
     shape_[1] = 1;
     if (!sb_input_ids_) {
