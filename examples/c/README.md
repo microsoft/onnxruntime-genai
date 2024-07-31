@@ -1,52 +1,57 @@
-# Gen-AI C Phi-2 Example
+# ONNX Runtime generate() API C Example
 
-## Install the onnxruntime-genai library
+## Download a model
 
-* Install the python package
-
-  ```bash
-  pip install onnxruntime-genai
-  ```
-
-## Get the model
-
-Install the model builder script dependencies
+These example uses the [Phi-3 mini model](https://huggingface.co/microsoft/Phi-3-mini-4k-instruct) and the [Phi-3 vision model](https://huggingface.co/microsoft/Phi-3-mini-4k-instruct) optimized to run on CPU. You can clone this entire model repository or download individual model variants. To download individual variants, you need to install the HuggingFace CLI. For example:
 
 ```bash
-pip install numpy
-pip install transformers
-pip install torch
-pip install onnx
-pip install onnxruntime
+huggingface-cli download microsoft/Phi-3-mini-4k-instruct-onnx --include cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/* --local-dir .
 ```
 
-Run the model builder script to export, optimize, and quantize the model. More details can be found [here](../../src/python/py/models/README.md)
+## Install the onnxruntime and onnxruntime-genai binaries
 
-```bash
-cd examples\\phi2\\c
-python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -p int4 -e cpu -o phi-2\
+The examples below download the CPU binaries. To run with DirectML or CUDA, choose the appropriate binaries from GitHub.
+
+### Windows
+
+```
+curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.18.1/onnxruntime-win-x64-1.18.1.zip -o onnxruntime-win-x64-1.18.1.zip
+tar xvf onnxruntime-win-x64-1.18.1.zip
+copy onnxruntime-win-x64-1.18.1\include\* include
+copy onnxruntime-win-x64-1.18.1\lib\* lib
+curl -L https://github.com/microsoft/onnxruntime-genai/releases/download/v0.3.0/onnxruntime-genai-0.3.0-win-x64.zip -o onnxruntime-genai-0.3.0-win-x64.zip
+tar xvf onnxruntime-genai-0.3.0-win-x64.zip
+copy onnxruntime-genai-0.3.0-win-x64\include\* include
+copy onnxruntime-genai-0.3.0-win-x64\lib\* lib
+``` 
+
+### Linux
+
+```
+curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.18.1/onnxruntime-linux-x64-gpu-1.18.1.tgz -o onnxruntime-linux-x64-gpu-1.18.1.tgz
+tar xvzf onnxruntime-linux-x64-gpu-1.18.1.tgz
+cp onnxruntime-linux-x64-gpu-1.18.1/include/* include
+cp onnxruntime-linux-x64-gpu-1.18.1/lib/* lib
+curl -L https://github.com/microsoft/onnxruntime-genai/releases/download/v0.3.0/onnxruntime-genai-0.3.0-linux-x64.tar.gz -o onnxruntime-genai-0.3.0-linux-x64.tar.gz
+tar xvzf onnxruntime-genai-0.3.0-linux-x64.tar.gz
+cp onnxruntime-genai-0.3.0-linux-x64/include/* include
+cp onnxruntime-genai-0.3.0-linux-x64/lib/* lib
 ```
 
-## Build the CMake Project
+## Build this sample
 
-1. Copy over all the dlls and libs over to the [lib](lib) directory.
-  - onnxruntime.dll
-  - onnxruntime_providers_shared.dll
-  - onnxruntime_providers_cuda.dll
-  - onnxruntime-genai.dll
-  - onnxruntime-genai.lib
-2. Copy over the `ort_genai.h` and `ort_genai_c.h` header files to the [include](include) directory.
+### Windows
 
-On Windows:
 ```bash
 cmake -G "Visual Studio 17 2022" -A x64 -S . -B build
 cd build
 cmake --build . --config Release
 ```
 
-On Linux:
+### Linux
 
 Build with CUDA:
+
 ```bash
 mkdir build
 cd build
@@ -54,7 +59,8 @@ cmake ../ -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DCMAKE_CUDA_ARCHITECTU
 cmake --build . --config Release
 ```
 
-Build with CPU:
+Build for CPU:
+
 ```bash
 mkdir build
 cd build
@@ -62,9 +68,19 @@ cmake ../
 cmake --build . --config Release
 ```
 
-## Run the Phi-2 Model
+## Run the sample
+
+### Run the language model
 
 ```bash
 cd build\\Release
-.\phi2.exe path_to_model
+.\phi3.exe path_to_model
 ```
+
+### Run the vision model
+
+```bash
+cd build\\Release
+.\phi3v.exe path_to_model
+```
+
