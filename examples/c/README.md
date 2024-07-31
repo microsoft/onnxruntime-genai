@@ -2,7 +2,7 @@
 
 ## Download a model
 
-These example uses the [Phi-3 mini model](https://huggingface.co/microsoft/Phi-3-mini-4k-instruct) and the [Phi-3 vision model](https://huggingface.co/microsoft/Phi-3-mini-4k-instruct) optimized to run on CPU. You can clone this entire model repository or download individual model variants. To download individual variants, you need to install the HuggingFace CLI. For example:
+This example uses the [Phi-3 mini model](https://huggingface.co/microsoft/Phi-3-mini-4k-instruct) and the [Phi-3 vision model](https://huggingface.co/microsoft/Phi-3-mini-4k-instruct) optimized to run on CPU. You can clone this entire model repository or download individual model variants. To download individual variants, you need to install the HuggingFace CLI. For example:
 
 ```bash
 huggingface-cli download microsoft/Phi-3-mini-4k-instruct-onnx --include cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/* --local-dir .
