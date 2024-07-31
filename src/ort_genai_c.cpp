@@ -280,6 +280,15 @@ OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer* p, const char* st
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaSequencesPadSequence(OgaSequences* sequences, int32_t pad_token_id, size_t sequence_length, size_t sequence_index) {
+  OGA_TRY
+  auto& token_sequences = *reinterpret_cast<Generators::TokenSequences*>(sequences);
+  for (size_t i = token_sequences[sequence_index].size(); i < sequence_length; i++)
+    token_sequences[sequence_index].push_back(pad_token_id);
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer* p, const int32_t* tokens, size_t token_count, const char** out_string) {
   OGA_TRY
   auto& tokenizer = *reinterpret_cast<const Generators::Tokenizer*>(p);
