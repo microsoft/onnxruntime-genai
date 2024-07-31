@@ -76,4 +76,5 @@ std::ostream& operator<<(std::ostream& stream, SGR sgr_code);
 
 std::ostream& Log(std::string_view label, std::string_view text = {});
 
+std::ostream& Log(std::string_view label, const char* fmt, ...);
 }  // namespace Generators

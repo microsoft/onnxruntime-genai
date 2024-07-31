@@ -68,13 +68,37 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <array>
 
 #include "onnxruntime_c_api.h"
 #include "../span.h"
+#include "../logging.h"
 
 #if defined(__ANDROID__)
 #include <android/log.h>
 #include <dlfcn.h>
+
+#define TAG "GenAI"
+
+#define LOG_DEBUG(...) __android_log_print(ANDROID_LOG_DEBUG, TAG, __VA_ARGS__)
+#define LOG_INFO(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
+#define LOG_WARN(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
+#define LOG_ERROR(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
+#define LOG_FATAL(...) __android_log_print(ANDROID_LOG_FATAL, TAG, __VA_ARGS__)
+
+#elif defined(__linux__)
+#include <dlfcn.h>
+
+#ifndef PATH_MAX
+#define PATH_MAX (4096)
+#endif
+
+#define LOG_DEBUG(...) Generators::Log("debug", __VA_ARGS__)
+#define LOG_INFO(...) Generators::Log("info", __VA_ARGS__)
+#define LOG_WARN(...) Generators::Log("warning", __VA_ARGS__)
+#define LOG_ERROR(...) Generators::Log("error", __VA_ARGS__)
+#define LOG_FATAL(...) Generators::Log("fatal", __VA_ARGS__)
+
 #endif
 
 /** \brief Free functions and a few helpers are defined inside this namespace. Otherwise all types are the C API types
@@ -82,10 +106,76 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
  */
 namespace Ort {
 
+using OrtApiBaseFn = const OrtApiBase* (*)(void);
+
 /// Before using this C++ wrapper API, you MUST call Ort::InitApi to set the below 'api' variable
 inline const OrtApi* api{};
+
+#if defined(__linux__)
+inline void* LoadDynamicLibraryIfExists(const std::string& path) {
+  LOG_INFO("Attempting to dlopen %s", path.c_str());
+  void* ort_lib_handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+  if (ort_lib_handle == nullptr) {
+    return nullptr;
+  }
+
+#if !defined(__ANDROID__)  // RTLD_DI_ORIGIN not available on Android
+  char pathname[PATH_MAX];
+  dlinfo((void*)ort_lib_handle, RTLD_DI_ORIGIN, &pathname);
+  LOG_INFO("Loaded native library at %s", pathname);
+#endif
+  return ort_lib_handle;
+}
+
+inline std::string GetCurrentModuleDir() {
+  Dl_info dl_info;
+  dladdr((void*)GetCurrentModuleDir, &dl_info);
+  std::string module_name(dl_info.dli_fname);
+  std::string module_directory{};
+
+  const size_t last_slash_idx = module_name.rfind('/');
+  if (std::string::npos != last_slash_idx) {
+    module_directory = module_name.substr(0, last_slash_idx);
+  }
+  return module_directory;
+}
+
+inline void InitApiWithDynamicFn(OrtApiBaseFn ort_api_base_fn) {
+  if (ort_api_base_fn == nullptr) {
+    throw std::runtime_error("OrtGetApiBase not found");
+  }
+
+  const OrtApiBase* ort_api_base = ort_api_base_fn();
+  if (ort_api_base == nullptr) {
+    throw std::runtime_error("OrtGetApiBase() returned nullptr");
+  }
+
+  // loop from the ORT version GenAI was built with, down to the minimum ORT version we require.
+  // as long as the libonnxruntime.so we loaded supports one of those we're good.
+  constexpr int genai_min_ort_api_version = 18;  // GenAI was first released around the time of ORT 1.18 so use that
+  for (int i = ORT_API_VERSION; i >= genai_min_ort_api_version; --i) {
+    api = ort_api_base->GetApi(i);
+    if (api) {
+      LOG_INFO("ORT API Version %d was found.", i);
+      break;
+    }
+  }
+
+  if (!api) {
+    LOG_WARN("The loaded library did not have an ORT API version between %d and %d.",
+             ORT_API_VERSION, genai_min_ort_api_version);
+    throw std::runtime_error("Failed to load onnxruntime. Please make sure you installed the correct version");
+  }
+}
+#endif
+
 inline void InitApi() {
-#if defined(__ANDROID__)
+  if (api) {
+    // api was already set.
+    return;
+  }
+
+#if defined(__linux__)
   // If the GenAI library links against the onnxruntime library, it will have a dependency on a specific
   // version of OrtGetApiBase.
   //
@@ -108,49 +198,56 @@ inline void InitApi() {
   //
 
   const std::string path = "libonnxruntime.so";  // "libonnxruntime4j_jni.so" is also an option if we have issues
-  __android_log_print(ANDROID_LOG_INFO, "GenAI", "Attempting to dlopen %s native library", path.c_str());
+  void* ort_lib_handle = LoadDynamicLibraryIfExists(path);
 
-  using OrtApiBaseFn = const OrtApiBase* (*)(void);
-  OrtApiBaseFn ort_api_base_fn = nullptr;
-
-  void* ort_lib_handle = dlopen(path.c_str(), RTLD_LOCAL);
+#if !defined(__ANDROID__)
   if (ort_lib_handle == nullptr) {
-    __android_log_assert("ort_lib_handle != nullptr", "GenAI", "Failed to load %s", path.c_str());
-  }
+    const std::array<std::string, 4> target_libraries = {
+        std::string("libonnxruntime.so"),
+        std::string("libonnxruntime.so.1.18.0"),
+        std::string("libonnxruntime.so.1.19.0"),
+        std::string("libonnxruntime.so.1.20.0")};
 
-  ort_api_base_fn = (OrtApiBaseFn)dlsym(ort_lib_handle, "OrtGetApiBase");
-  if (ort_api_base_fn == nullptr) {
-    __android_log_assert("ort_api_base_fn != nullptr", "GenAI", "OrtGetApiBase not found");
-  }
+    // Search parent directory
+    std::string current_module_dir = GetCurrentModuleDir();
+    for (const std::string& lib_name : target_libraries) {
+      std::string pip_path{current_module_dir + "/" + lib_name};
+      ort_lib_handle = LoadDynamicLibraryIfExists(pip_path);
+      if (ort_lib_handle != nullptr) {
+        break;
+      }
+    }
 
-  const OrtApiBase* ort_api_base = ort_api_base_fn();
-  if (ort_api_base == nullptr) {
-    __android_log_assert("ort_api_base != nullptr", "GenAI", "OrtGetApiBase() returned nullptr");
-  }
-
-  // loop from the ORT version GenAI was built with, down to the minimum ORT version we require.
-  // as long as the libonnxruntime.so we loaded supports one of those we're good.
-  constexpr int genai_min_ort_api_version = 18;  // GenAI was first released around the time of ORT 1.18 so use that
-  for (int i = ORT_API_VERSION; i >= genai_min_ort_api_version; --i) {
-    api = ort_api_base->GetApi(i);
-    if (!api) {
-      __android_log_print(ANDROID_LOG_INFO, "GenAI", "ORT API Version %d was not found.", i);
-    } else {
-      __android_log_print(ANDROID_LOG_INFO, "GenAI", "ORT API Version %d was found", i);
-      break;
+    if (ort_lib_handle == nullptr) {
+      // Search for pip installation
+      for (const std::string& lib_name : target_libraries) {
+        std::string pip_path{current_module_dir + "/../onnxruntime/capi/" + lib_name};
+        ort_lib_handle = LoadDynamicLibraryIfExists(pip_path);
+        if (ort_lib_handle != nullptr) {
+          break;
+        }
+      }
     }
   }
+#endif
 
-  if (!api) {
-    __android_log_assert("api != nullptr", "GenAI",
-                         "%s did not have an ORT API version between %d and %d.",
-                         path.c_str(), ORT_API_VERSION, genai_min_ort_api_version);
+  if (ort_lib_handle == nullptr) {
+    char* err = dlerror();
+    throw std::runtime_error(std::string("Failed to load ") + path.c_str() + ": " + (err != nullptr ? err : "Unknown"));
   }
-#else   // defined(__ANDROID__)
+
+  OrtApiBaseFn ort_api_base_fn = (OrtApiBaseFn)dlsym(ort_lib_handle, "OrtGetApiBase");
+  if (ort_api_base_fn == nullptr) {
+    char* err = dlerror();
+    throw std::runtime_error(std::string("Failed to load symbol OrtGetApiBase: ") + (err != nullptr ? err : "Unknown"));
+  }
+
+  InitApiWithDynamicFn(ort_api_base_fn);
+#else   // defined(__linux__)
   api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
   if (!api)
     throw std::runtime_error("Onnxruntime is installed but is too old, please install a newer version");
-#endif  // defined(__ANDROID__)
+#endif  // defined(__linux__)
 }
 
 /** \brief All C++ methods that can fail will throw an exception of this type

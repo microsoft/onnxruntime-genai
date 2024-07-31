@@ -7,7 +7,12 @@ file(GLOB python_srcs CONFIGURE_DEPENDS
 pybind11_add_module(python ${python_srcs})
 target_include_directories(python PRIVATE ${ORT_HEADER_DIR})
 target_link_directories(python PRIVATE ${ORT_LIB_DIR})
-target_link_libraries(python PRIVATE onnxruntime-genai-static ${ONNXRUNTIME_LIB})
+target_link_libraries(python PRIVATE onnxruntime-genai-static)
+
+if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux"))
+target_link_libraries(python PRIVATE ${ONNXRUNTIME_LIB})
+endif()
+
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set_property(TARGET python APPEND_STRING PROPERTY LINK_FLAGS " -Xlinker -rpath=\\$ORIGIN/../onnxruntime/capi/")
 endif()
