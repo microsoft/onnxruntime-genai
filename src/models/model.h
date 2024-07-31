@@ -33,7 +33,7 @@ struct State {
 
   OrtValue* GetInput(const char* name);
 
-  OrtValue* GetOutput(const char* name);
+  virtual OrtValue* GetOutput(const char* name);
 
   void ClearIO();  // Clear all inputs/outputs
 

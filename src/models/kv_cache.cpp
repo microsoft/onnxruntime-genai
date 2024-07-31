@@ -113,6 +113,12 @@ void KV_Cache_Combined::PickPastState(std::span<const int32_t> beam_indices, int
   }
 }
 
+bool KV_Cache::IsCacheNeeded(const Model& model) {
+  char past_key_name[64];
+  snprintf(past_key_name, std::size(past_key_name), model.config_->model.decoder.inputs.past_key_names.c_str(), 0);
+  return model.session_info_->HasInput(past_key_name);
+}
+
 KV_Cache::KV_Cache(const Model& model, State& state)
     : model_{model},
       state_{state},

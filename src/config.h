@@ -12,6 +12,8 @@ struct Config {
     static constexpr std::string_view InputIdsName = "input_ids";
     static constexpr std::string_view PixelValuesName = "pixel_values";
     static constexpr std::string_view ImageSizesName = "image_sizes";
+    static constexpr std::string_view CurrentSequenceLengthName = "curr_seq_len";
+    static constexpr std::string_view PastSequenceLengthName = "past_seq_len";
   };
 
   fs::path config_path;  // Path of the config directory
@@ -96,6 +98,8 @@ struct Config {
         std::string past_key_names{"past_key_values.%d.key"}, past_value_names{"past_key_values.%d.value"};
         std::string past_names;  // When key/value pairs are combined
         std::string cross_past_key_names, cross_past_value_names;
+        std::string curr_seq_length{Defaults::CurrentSequenceLengthName};
+        std::string past_seq_length{Defaults::PastSequenceLengthName};
       } inputs;
 
       struct Outputs {
@@ -112,6 +116,9 @@ struct Config {
 
         std::vector<std::string> inputs;
         std::vector<std::string> outputs;
+        std::unordered_map<std::string, std::string> output_names_forwarder;
+        bool run_on_first_token_generation{true};
+        bool run_on_nth_token_generation{true};
       };
 
       std::vector<PipelineModel> pipeline;

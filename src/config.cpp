@@ -139,6 +139,10 @@ struct Inputs_Element : JSON::Element {
       v_.cross_past_key_names = value;
     } else if (name == "cross_past_value_names") {
       v_.cross_past_value_names = value;
+    } else if (name == "curr_seq_length") {
+      v_.curr_seq_length = value;
+    } else if (name == "past_seq_length") {
+      v_.past_seq_length = value;
     } else
       throw JSON::unknown_value_error{};
   }
@@ -182,6 +186,17 @@ struct StringArray_Element : JSON::Element {
   std::vector<std::string>& v_;
 };
 
+struct StringStringMap_Element : JSON::Element {
+  explicit StringStringMap_Element(std::unordered_map<std::string, std::string>& v) : v_{v} {}
+
+  void OnString(std::string_view name, std::string_view value) override {
+    v_[std::string(name)] = std::string(value);
+  }
+
+ private:
+  std::unordered_map<std::string, std::string>& v_;
+};
+
 struct PipelineModel_Element : JSON::Element {
   explicit PipelineModel_Element(Config::Model::Decoder::PipelineModel& v) : v_{v} {}
 
@@ -192,11 +207,22 @@ struct PipelineModel_Element : JSON::Element {
       throw JSON::unknown_value_error{};
   }
 
+  void OnBool(std::string_view name, bool value) override {
+    if (name == "run_on_first_token_generation") {
+      v_.run_on_first_token_generation = value;
+    } else if (name == "run_on_nth_token_generation") {
+      v_.run_on_nth_token_generation = value;
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
   JSON::Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
       v_.session_options = Config::SessionOptions{};
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
       return *session_options_;
+    } else if (name == "output_names_forwarder") {
+      return output_names_forwarder_;
     }
     throw JSON::unknown_value_error{};
   }
@@ -214,6 +240,7 @@ struct PipelineModel_Element : JSON::Element {
   std::unique_ptr<SessionOptions_Element> session_options_;
   StringArray_Element inputs_{v_.inputs};
   StringArray_Element outputs_{v_.outputs};
+  StringStringMap_Element output_names_forwarder_{v_.output_names_forwarder};
 };
 
 struct PipelineModelObject_Element : JSON::Element {
