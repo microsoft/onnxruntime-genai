@@ -6,7 +6,7 @@ Clone this repo and change into the examples/c folder.
 
 ```bash
 git clone https://github.com/microsoft/onnxruntime-genai.git
-cd examples/c
+cd onnxruntime-genai/examples/c
 ```
 
 ## Download a model
