@@ -84,7 +84,7 @@ DmlObjects CreateDmlObjects(const std::string& current_module_path) {
   D3D12_COMMAND_QUEUE_DESC command_queue_description = {
       D3D12_COMMAND_LIST_TYPE_COMPUTE,
       0,
-      D3D12_COMMAND_QUEUE_FLAG_NONE,
+      D3D12_COMMAND_QUEUE_FLAG_DISABLE_GPU_TIMEOUT,
       0,
   };
 
@@ -108,8 +108,8 @@ DmlObjects CreateDmlObjects(const std::string& current_module_path) {
   }
 
   THROW_IF_FAILED(dml_objects.d3d12_device->CreateCommandQueue(&command_queue_description, IID_PPV_ARGS(&dml_objects.command_queue)));
-  THROW_IF_FAILED(dml_objects.d3d12_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&dml_objects.command_allocator)));
-  THROW_IF_FAILED(dml_objects.d3d12_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, dml_objects.command_allocator.Get(), nullptr, IID_PPV_ARGS(&dml_objects.command_list)));
+  THROW_IF_FAILED(dml_objects.d3d12_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE, IID_PPV_ARGS(&dml_objects.command_allocator)));
+  THROW_IF_FAILED(dml_objects.d3d12_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COMPUTE, dml_objects.command_allocator.Get(), nullptr, IID_PPV_ARGS(&dml_objects.command_list)));
   return dml_objects;
 }
 
