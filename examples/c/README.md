@@ -1,5 +1,14 @@
 # ONNX Runtime generate() API C Example
 
+## Setup
+
+Clone this repo and change into the examples/c folder.
+
+```bash
+git clone https://github.com/microsoft/onnxruntime-genai.git
+cd examples/c
+```
+
 ## Download a model
 
 These example uses the [Phi-3 mini model](https://huggingface.co/microsoft/Phi-3-mini-4k-instruct) and the [Phi-3 vision model](https://huggingface.co/microsoft/Phi-3-mini-4k-instruct) optimized to run on CPU. You can clone this entire model repository or download individual model variants. To download individual variants, you need to install the HuggingFace CLI. For example:
@@ -9,8 +18,6 @@ huggingface-cli download microsoft/Phi-3-mini-4k-instruct-onnx --include cpu_and
 ```
 
 ## Install the onnxruntime and onnxruntime-genai binaries
-
-The examples below download the CPU binaries. To run with DirectML or CUDA, choose the appropriate binaries from GitHub.
 
 ### Windows
 
