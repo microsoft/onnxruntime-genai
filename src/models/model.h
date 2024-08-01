@@ -75,6 +75,9 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer> {
   std::vector<int32_t> EncodeBatch(std::span<const std::string> strings) const;
   std::vector<std::string> DecodeBatch(std::span<const int32_t> sequences, size_t count) const;
 
+  std::vector<int32_t> GetDecoderPromptIds(size_t batch_size, const std::string& language,
+                                           const std::string& task, int32_t no_timestamps) const;
+
   OrtxPtr<OrtxTokenizer> tokenizer_;
   std::shared_ptr<Tokenizer> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
 

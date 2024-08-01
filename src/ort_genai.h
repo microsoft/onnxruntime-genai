@@ -315,9 +315,10 @@ struct OgaMultiModalProcessor : OgaAbstract {
     return std::unique_ptr<OgaNamedTensors>(p);
   }
 
-  std::unique_ptr<OgaNamedTensors> ProcessAudios(const OgaAudios* audios) const {
+  std::unique_ptr<OgaNamedTensors> ProcessAudios(const OgaAudios* audios, const std::string& language,
+                                                 const std::string& task, int32_t no_timestamps) const {
     OgaNamedTensors* p;
-    OgaCheckResult(OgaProcessorProcessAudios(this, audios, &p));
+    OgaCheckResult(OgaProcessorProcessAudios(this, audios, language.c_str(), task.c_str(), no_timestamps, &p));
     return std::unique_ptr<OgaNamedTensors>(p);
   }
 

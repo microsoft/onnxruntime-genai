@@ -483,10 +483,24 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
               if (!prompt.has_value()) {
                 throw std::runtime_error("Prompt is required for processing the image.");
               }
-              return std::make_unique<PyNamedTensors>(processor.image_processor_->Process(*processor.tokenizer_, *prompt, images));
+              return std::make_unique<PyNamedTensors>(
+                  processor.image_processor_->Process(*processor.tokenizer_, *prompt, images));
             } else if (kwargs.contains("audios")) {
               const Audios* audios = kwargs["audios"].cast<const Audios*>();
-              return std::make_unique<PyNamedTensors>(processor.audio_processor_->Process(audios));
+              std::string language = "en";
+              if (kwargs.contains("language")) {
+                language = kwargs["lang"].cast<std::string>();
+              }
+              std::string task = "transcribe";
+              if (kwargs.contains("task")) {
+                task = kwargs["task"].cast<std::string>();
+              }
+              int32_t no_timestamps = 1;
+              if (kwargs.contains("no_timestamps")) {
+                no_timestamps = kwargs["no_timestamps"].cast<int32_t>();
+              }
+              return std::make_unique<PyNamedTensors>(
+                  processor.audio_processor_->Process(*processor.tokenizer_, audios, language, task, no_timestamps));
             } else {
               throw std::runtime_error("Nothing to process.");
             }

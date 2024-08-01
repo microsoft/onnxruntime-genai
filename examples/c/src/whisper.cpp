@@ -33,7 +33,7 @@ void CXX_API(const char* model_path, int32_t num_beams) {
     std::unique_ptr<OgaAudios> audios = OgaAudios::Load(audio_path.c_str());
 
     std::cout << "Processing audio..." << std::endl;
-    auto input_tensors = processor->ProcessAudios(audios.get());
+    auto input_tensors = processor->ProcessAudios(audios.get(), "english", "transcribe", 1);
 
     std::cout << "Generating response..." << std::endl;
     auto params = OgaGeneratorParams::Create(*model);
@@ -41,8 +41,6 @@ void CXX_API(const char* model_path, int32_t num_beams) {
     params->SetSearchOption("num_beams", num_beams);
     params->SetSearchOption("num_return_sequences", 4);
     params->SetInputs(*input_tensors);
-    const std::array<int32_t, 3> input_ids = {50258, 50259, 50359};
-    params->SetInputIDs(input_ids.data(), input_ids.size(), input_ids.size(), 1);
 
     auto generator = OgaGenerator::Create(*model, *params);
 

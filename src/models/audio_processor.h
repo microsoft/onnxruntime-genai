@@ -28,7 +28,9 @@ struct AudioProcessor {
   AudioProcessor(const AudioProcessor&) = delete;
   AudioProcessor& operator=(const AudioProcessor&) = delete;
 
-  std::unique_ptr<NamedTensors> Process(const Audios* audios) const;
+  std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Audios* audios,
+                                        const std::string& language, const std::string& task,
+                                        int32_t no_timestamps) const;
 
  private:
   ort_extensions::OrtxObjectPtr<OrtxFeatureExtractor> processor_;

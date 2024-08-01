@@ -60,7 +60,9 @@ AudioProcessor::AudioProcessor(Config& config, const SessionInfo& session_info)
   config.AddMapping(std::string(Config::Defaults::InputFeaturesName), config.model.encoder_decoder_init.inputs.input_features);
 }
 
-std::unique_ptr<NamedTensors> AudioProcessor::Process(const Audios* audios) const {
+std::unique_ptr<NamedTensors> AudioProcessor::Process(const Tokenizer& tokenizer, const Audios* audios,
+                                                      const std::string& language, const std::string& task,
+                                                      int32_t no_timestamps) const {
   if (!audios || !audios->audios_) {
     throw std::runtime_error("No audios provided to process.");
   }
@@ -76,6 +78,18 @@ std::unique_ptr<NamedTensors> AudioProcessor::Process(const Audios* audios) cons
 
   named_tensors->emplace(std::string(Config::Defaults::InputFeaturesName),
                          std::make_shared<Tensor>(ProcessMel(mel, input_features_type_, allocator)));
+
+  // TOO: This needs the start of transcription token to be added to the prompt.
+  // It makes sense to add that to the tokenizer if possible.
+  const auto prompt_token_ids = tokenizer.GetDecoderPromptIds(audios->num_audios_, language, task, no_timestamps);
+
+  const std::array<int64_t, 2> shape{static_cast<int64_t>(audios->num_audios_),
+                                     static_cast<int64_t>(prompt_token_ids.size())};
+  auto decoder_input_ids = OrtValue::CreateTensor<int32_t>(allocator, shape);
+  std::copy(prompt_token_ids.begin(), prompt_token_ids.end(), decoder_input_ids->GetTensorMutableData<int32_t>());
+
+  named_tensors->emplace(std::string(Config::Defaults::InputIdsName),
+                         std::make_shared<Tensor>(std::move(decoder_input_ids)));
 
   return named_tensors;
 }
