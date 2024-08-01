@@ -7,7 +7,7 @@
     <owners>Microsoft</owners>
     <description>ONNX Runtime Generative AI Managed Package</description>
     <license type="file">LICENSE</license>
-    <readme>README.md</readme>
+    <readme>PACKAGE.md</readme>
     <copyright>© Microsoft Corporation. All rights reserved.</copyright>
     <projectUrl>https://github.com/microsoft/onnxruntime-genai/</projectUrl>
     <releaseNotes>Introducing the ONNX Runtime GenAI Library.</releaseNotes>
@@ -19,7 +19,7 @@
   </metadata>
   <files>
     <file src="..\LICENSE" target="LICENSE" />
-    <file src="..\README.md" target="README.md" />
+    <file src="PACKAGE.md" target="PACKAGE.md" />
     <file src="..\ThirdPartyNotices.txt" target="ThirdPartyNotices.txt" />
 
     <file src="..\src\csharp\bin\$configuration$\netstandard2.0\Microsoft.ML.OnnxRuntimeGenAI.dll" target="lib\netstandard2.0" />
