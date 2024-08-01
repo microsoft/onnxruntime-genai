@@ -30,6 +30,7 @@ The tool currently supports the following model architectures.
 - LLaMA
 - Mistral
 - Phi
+- Qwen
 
 It is intended for supporting the latest, popular state-of-the-art models.
 

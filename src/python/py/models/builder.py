@@ -263,7 +263,10 @@ class Model:
             self.quant_attrs["use_g_idx"] = config.quantization_config["desc_act"] if "desc_act" in config.quantization_config else False
 
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
-        config = GenerationConfig.from_pretrained(model_name_or_path, use_auth_token=True, trust_remote_code=True, **extra_kwargs)
+        try:
+            config = GenerationConfig.from_pretrained(model_name_or_path, use_auth_token=True, trust_remote_code=True, **extra_kwargs)
+        except:
+            config = AutoConfig.from_pretrained(model_name_or_path, use_auth_token=True, trust_remote_code=True, **extra_kwargs)
         inputs = dict(zip(self.input_names, self.input_names))
         inputs.update({
             "past_key_names": "past_key_values.%d.key",
@@ -646,7 +649,7 @@ class Model:
             # print(f"Quantizing to {self.onnx_dtype} on-the-fly is not currently supported.")
             # print(f"Saving as {self.io_dtype} on-the-fly and quantizing to {self.onnx_dtype} at the end.")
             return self.make_matmul_fp16_or_fp32(matmul, basename, root_input, **kwargs)
-        
+
         name = f"{basename}NBits"
 
         # Input weights are quantized, save quantized MatMul numpy weights for onnx model
@@ -1947,7 +1950,6 @@ class Model:
 
         return expand_name
 
-
     def make_attention_mask_reformatting_for_gqa(self):
         # Make nodes for the attention mask subgraph that calculates
         # attributes about the 2D attention mask to use in GroupQueryAttention
@@ -2072,6 +2074,11 @@ class MistralModel(Model):
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         super().make_attention(layer_id, attention, root_input, position_ids=self.position_ids_name, **kwargs)
+
+
+class QwenModel(MistralModel):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
 
 class PhiModel(Model):
@@ -2341,7 +2348,7 @@ class Phi3Small8KModel(Model):
 
         # Make input MatMul and Add nodes
         up_matmul_name = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
-        self.make_matmul(mlp.up_proj.weight.detach().numpy(), up_matmul_name, root_input)
+        self.make_matmul(mlp.up_proj, up_matmul_name, root_input)
         up_add_name = f"/model/layers.{layer_id}/mlp/up_proj/Add"
         self.make_add_bias(mlp.up_proj.bias.detach().numpy(), up_add_name, f"{up_matmul_name}/output_0")
 
@@ -2387,7 +2394,7 @@ class Phi3Small8KModel(Model):
 
         # Make output MatMul and Add nodes
         down_matmul_name = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
-        self.make_matmul(mlp.down_proj.weight.detach().numpy(), down_matmul_name, f"{mul_name}/output_0")
+        self.make_matmul(mlp.down_proj, down_matmul_name, f"{mul_name}/output_0")
         down_add_name = f"/model/layers.{layer_id}/mlp/down_proj/Add"
         self.make_add_bias(mlp.down_proj.bias.detach().numpy(), down_add_name, f"{down_matmul_name}/output_0")
 
@@ -2451,17 +2458,15 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
         elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings == 131072:
             onnx_model = Phi3Mini128KModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings == 8192:
-            print("WARNING: This model only works for CUDA currently because `SparseAttention` is only supported for CUDA in ONNX Runtime. Setting `--execution_provider cuda` by default.")
-            execution_provider = "cuda"
             onnx_model = Phi3Small8KModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings == 131072:
-            print("WARNING: This model only works for CUDA currently because `SparseAttention` is only supported for CUDA in ONNX Runtime. Setting `--execution_provider cuda` by default.")
-            execution_provider = "cuda"
             onnx_model = Phi3Small128KModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3VForCausalLM":
             print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
             extra_options["exclude_embeds"] = True
             onnx_model = Phi3VModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "Qwen2ForCausalLM":
+            onnx_model = QwenModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         else:
             raise NotImplementedError(f"The {hf_name} model is not currently supported.")
 

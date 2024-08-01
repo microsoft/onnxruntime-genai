@@ -8,9 +8,6 @@ parameters:
 - name: cuda_version
   type: string
   default: ''
-- name: cuda_display_version
-  type: string
-  default: ''
 - name: os
   type: string
   values:
@@ -20,9 +17,8 @@ parameters:
   type: string
   default: 'release'
 
-
 jobs:
-- job: python_${{ parameters.os }}_${{ parameters.ep }}${{ parameters.cuda_display_version }}_${{ parameters.arch }}_packaging
+- job: capi_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}_packaging
   ${{ if eq(parameters.os, 'linux') }}:
     ${{ if eq(parameters.arch, 'x64') }}:
       pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
@@ -37,44 +33,9 @@ jobs:
       pool: 'onnxruntime-genai-windows-vs-2022-arm64'
     ${{ else }}:
       pool: 'onnxruntime-Win-CPU-2022'
-
-  strategy:
-    ${{ if eq(parameters.arch, 'arm64') }}:
-      matrix:
-        Python311:
-          PyDotVer: '3.11'
-          PyNoDotVer: '311'
-        Python312:
-          PyDotVer: '3.12'
-          PyNoDotVer: '312'
-    ${{ else }}:
-      matrix:
-        Python38:
-          PyDotVer: '3.8'
-          PyNoDotVer: '38'
-        Python39:
-          PyDotVer: '3.9'
-          PyNoDotVer: '39'
-        Python310:
-          PyDotVer: '3.10'
-          PyNoDotVer: '310'
-        Python311:
-          PyDotVer: '3.11'
-          PyNoDotVer: '311'
-        Python312:
-          PyDotVer: '3.12'
-          PyNoDotVer: '312'
-    
-  timeoutInMinutes: 240
-  workspace:
-    clean: all
+  timeoutInMinutes: 180
   #  set variables here to be used in the template and steps
   variables:
-  - name: skipComponentGovernanceDetection
-    ${{ if eq(parameters.os, 'linux') }}:
-      value: true
-    ${{ if eq(parameters.os, 'win') }}:
-      value: false
   - name: arch
     value: ${{ parameters.arch }}
   - name: artifactName
@@ -89,15 +50,15 @@ jobs:
     value: ${{ parameters.ep }}
   - name: ort_version
     value: ${{ parameters.ort_version }}
+  - name: GDN_CODESIGN_TARGETDIRECTORY
+    value: '$(Build.ArtifactStagingDirectory)/nuget'
   - name: os
     value: ${{ parameters.os }}
-
   - name: feed_name
     ${{ if and(eq(parameters.cuda_version, '12.2'), eq(parameters.ep, 'cuda')) }}:
       value: 'ort-cuda-12-nightly'
     ${{ else }}:
       value: '7982ae20-ed19-4a35-a362-a96ac99897b7'
-
   - name: ort_filename
     ${{ if eq(parameters.ep, 'cpu') }}:
       value: 'Microsoft.ML.OnnxRuntime'
@@ -113,12 +74,14 @@ jobs:
     ${{ else }}:
       value: 'Microsoft.ML.OnnxRuntime'
 
+  - name: ortHome
+    value: 'ort'
   - name: dml_dir
-    value: 'Microsoft.AI.DirectML.1.14.2'
+    value: 'Microsoft.AI.DirectML.1.15.0'
   - name: dml_zip
-    value: 'Microsoft.AI.DirectML.1.14.2.zip'
+    value: 'Microsoft.AI.DirectML.1.15.0.zip'
   - name: dml_url
-    value: "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.14.2"
+    value: "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.15.0"
 
   - name: d3d12_dir
     value: 'Microsoft.Direct3D.D3D12.1.614.0'
@@ -127,18 +90,9 @@ jobs:
   - name: d3d12_url
     value: "https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.614.0"
 
+  workspace:
+    clean: all
   steps:
-  - script: |
-      MKDIR $(Agent.ToolsDirectory)\Python\3.12.3\arm64 
-      XCOPY /s /y /h /e /c /q "C:\Python\Python312\*.*" $(Agent.ToolsDirectory)\Python\3.12.3\arm64\
-      COPY NUL $(Agent.ToolsDirectory)\Python\3.12.3\arm64.complete
-      DIR $(Agent.ToolsDirectory)\Python
-      DIR $(Agent.ToolsDirectory)\Python\3.12.3
-      DIR $(Agent.ToolsDirectory)\Python\3.12.3\arm64
-      DIR "C:\Python"
-    displayName: Copy python 3.12.3 version to agent tools directory
-    condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'), eq(variables['PyDotVer'], '3.12'))
-
   - script: |
       MKDIR $(Agent.ToolsDirectory)\Python\3.11.0\arm64
       XCOPY /s /y /h /e /c /q "C:\Python\Python311\*.*" $(Agent.ToolsDirectory)\Python\3.11.0\arm64\
@@ -148,39 +102,35 @@ jobs:
       DIR $(Agent.ToolsDirectory)\Python\3.11.0\arm64
       DIR "C:\Python"
     displayName: Copy python 3.11.0 version to agent tools directory
-    condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'), eq(variables['PyDotVer'], '3.11'))
+    condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'))
 
-  - task: UsePythonVersion@0
-    inputs:
-      versionSpec: $(PyDotVer)
-      addToPath: true
-      architecture: $(arch)
-  - task: PythonScript@0
-    inputs:
-      scriptSource: inline
-      script: |
-        import sys
-        import subprocess
-        subprocess.call(['pip', 'install', '-q', 'setuptools', 'wheel', 'build', 'packaging', 'twine'])
-      workingDirectory: '$(Build.BinariesDirectory)'
-      displayName: 'Install python modules'
+  - ${{ if eq(parameters.arch, 'arm64') }}:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: 3.11
+        addToPath: true
+        architecture: $(arch)
+  - ${{ else }}:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: 3.10
+        addToPath: true
+        architecture: $(arch)
 
   - ${{ if eq(parameters.os, 'linux') }}:
     - template: steps/capi-linux-step.yml
       parameters:
-        target: 'python'
+        target: 'onnxruntime-genai'
         arch: ${{ parameters.arch }}
         ep: ${{ parameters.ep }}
         build_config: ${{ parameters.build_config }}
 
-  # Windows job needs to set the python version and install the required packages
   - ${{ if eq(parameters.os, 'win') }}:
     - template: steps/capi-win-step.yml
       parameters:
-        target: 'python'
+        target: 'onnxruntime-genai'
         arch: ${{ parameters.arch }}
         ep: ${{ parameters.ep }}
         build_config: ${{ parameters.build_config }}
 
   - template: steps/compliant-and-cleanup-step.yml
-

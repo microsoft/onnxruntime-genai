@@ -406,7 +406,7 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path) {
 
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
-  if (config->model.type == "llama" || config->model.type == "gemma" || config->model.type == "gemma2" || config->model.type == "mistral" || config->model.type == "phi" || config->model.type == "phi3" || config->model.type == "phi3small")
+  if (config->model.type == "llama" || config->model.type == "gemma" || config->model.type == "gemma2" || config->model.type == "mistral" || config->model.type == "phi" || config->model.type == "phi3" || config->model.type == "phi3small" || config->model.type == "qwen2")
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
   if (config->model.type == "whisper")
     return std::make_shared<Whisper_Model>(std::move(config), ort_env);
@@ -555,8 +555,10 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
 
 MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& session_info)
     : tokenizer_{std::make_shared<Tokenizer>(config)} {
-  if (!config.model.vision.filename.empty()) {
+  if (config.model.type == "phi3v") {
     image_processor_ = std::make_shared<ImageProcessor>(config, session_info);
+  } else {
+    throw std::runtime_error("MultiModalProcessor cannot be created. Expected a multimodal model. Actual: " + config.model.type);
   }
 }
 

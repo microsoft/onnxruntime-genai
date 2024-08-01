@@ -27,13 +27,18 @@ jobs:
   ${{ if eq(parameters.os, 'linux') }}:
     ${{ if eq(parameters.ep, 'cuda') }}:
       pool: 'Onnxruntime-Linux-GPU'
+    ${{ elseif eq(parameters.arch, 'arm64') }}:
+      pool: 'onnxruntime-genai-Ubuntu2004-ARM-CPU'
     ${{ else }}:
       pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
   ${{ if eq(parameters.os, 'win') }}:
-    ${{ if eq(parameters.ep, 'directml') }}:
-      pool: 'onnxruntime-Win2022-GPU-dml-A10'
-    ${{ elseif eq(parameters.ep, 'cuda') }}:
-      pool: 'onnxruntime-Win2022-GPU-A10'
+    ${{ if eq(parameters.arch, 'x64') }}:
+      ${{ if eq(parameters.ep, 'directml') }}:
+        pool: 'onnxruntime-Win2022-GPU-dml-A10'
+      ${{ elseif eq(parameters.ep, 'cuda') }}:
+        pool: 'onnxruntime-Win2022-GPU-A10'
+      ${{ else }}:
+        pool: 'onnxruntime-Win-CPU-2022'
     ${{ elseif eq(parameters.arch, 'arm64') }}:
       pool: 'onnxruntime-genai-windows-vs-2022-arm64'
     ${{ else }}:
@@ -45,7 +50,7 @@ jobs:
   - name: arch
     value: ${{ parameters.arch }}
   - name: artifactName
-    value: 'onnxruntime-genai-${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.arch }}'
+    value: 'onnxruntime-genai-${{ parameters.ep }}'
   - name: buildConfig
     value: 'Release'
   - name: buildDir
@@ -112,13 +117,24 @@ jobs:
   - template: steps/utils//flex-download-pipeline-artifact.yml
     parameters:
       StepName: 'Download NuGet Artifacts'
-      ArtifactName: $(ArtifactName)-nuget
+      ArtifactName: $(artifactName)-nuget
       TargetPath: '$(Build.BinariesDirectory)/nuget'
       SpecificArtifact: ${{ parameters.specificArtifact }}
       BuildId: ${{ parameters.BuildId }}
 
   - ${{ if eq(parameters.os, 'win') }}:
+    - ${{ if eq(parameters.ep, 'cuda') }}:
+      - powershell: |
+          $env:AZCOPY_MSI_CLIENT_ID = "63b63039-6328-442f-954b-5a64d124e5b4";
+          azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" 'cuda_sdk'
+        displayName: 'Download CUDA $(cuda_version)'
+        workingDirectory: '$(Build.Repository.LocalPath)'
     - powershell: |
+        if ("$(ep)" -eq "cuda") {
+          $env:CUDA_PATH = '$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)'
+          $env:PATH = "$env:CUDA_PATH\bin;$env:CUDA_PATH\extras\CUPTI\lib64;$env:PATH"
+          Write-Host $env:PATH
+        }
         dotnet --info
         Copy-Item -Force -Recurse -Verbose $(Build.BinariesDirectory)/nuget/* -Destination examples/csharp/HelloPhi/
         cd examples/csharp/HelloPhi
