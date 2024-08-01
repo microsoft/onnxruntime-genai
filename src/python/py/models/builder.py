@@ -649,7 +649,7 @@ class Model:
             # print(f"Quantizing to {self.onnx_dtype} on-the-fly is not currently supported.")
             # print(f"Saving as {self.io_dtype} on-the-fly and quantizing to {self.onnx_dtype} at the end.")
             return self.make_matmul_fp16_or_fp32(matmul, basename, root_input, **kwargs)
-        
+
         name = f"{basename}NBits"
 
         # Input weights are quantized, save quantized MatMul numpy weights for onnx model
@@ -1950,7 +1950,6 @@ class Model:
 
         return expand_name
 
-
     def make_attention_mask_reformatting_for_gqa(self):
         # Make nodes for the attention mask subgraph that calculates
         # attributes about the 2D attention mask to use in GroupQueryAttention
@@ -2075,6 +2074,11 @@ class MistralModel(Model):
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         super().make_attention(layer_id, attention, root_input, position_ids=self.position_ids_name, **kwargs)
+
+
+class QwenModel(MistralModel):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
 
 class PhiModel(Model):
@@ -2461,6 +2465,8 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
             extra_options["exclude_embeds"] = True
             onnx_model = Phi3VModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "Qwen2ForCausalLM":
+            onnx_model = QwenModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         else:
             raise NotImplementedError(f"The {hf_name} model is not currently supported.")
 
