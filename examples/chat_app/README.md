@@ -49,7 +49,7 @@ mkdir -p models/cuda
 mv cuda-int4-rtn-block-32 models/cuda-int4/Phi-3-vision
 ```
 
-If you would like the app to discover your models, please create the following folder structure should look as the below:
+If you would like the app to discover your models, please create the following folder structure, with the `models` folder at the same level as `chat_app`, one folder containing a set of models, and the actual models below this.
 
 ```
 --chat_app
@@ -84,7 +84,7 @@ Running on local URL:  http://127.0.0.1:7860
 To create a public link, set `share=True` in `launch()`.
 ```
 
-Then open the local URL in broswer
+Then open the local URL in browser
 ![alt text](image.png)
 
 For vision model, you will have the below UI interface.
