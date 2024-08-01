@@ -224,9 +224,9 @@ def launch_chat_app(expose_locally: bool = False, model_name: str = "", model_pa
     demo.title = "Local Model UI"
 
     if expose_locally:
-        demo.launch(server_name="0.0.0.0", server_port=5001)
+        demo.launch(server_name="0.0.0.0", server_port=5000)
     else:
-        demo.launch(share=True, server_port=5001)
+        demo.launch(share=True, server_port=5000)
 
 
 if __name__ == "__main__":
