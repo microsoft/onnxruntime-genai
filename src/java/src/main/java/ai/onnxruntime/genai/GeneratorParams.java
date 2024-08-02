@@ -106,7 +106,7 @@ public final class GeneratorParams implements AutoCloseable {
     setModelInput(nativeHandle, name, tensor.nativeHandle());
   }
 
-    /**
+  /**
    * Add a NamedTensors as a model input.
    *
    * @param namedTensors NamedTensors to add.
