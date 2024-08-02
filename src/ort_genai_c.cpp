@@ -208,6 +208,15 @@ OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator) 
   OGA_CATCH
 }
 
+OgaResult* OgaGenerator_GetOutput OgaGenerator_GetOutput(const OgaGenerator* generator, const char* name, OgaTensor** out) {
+  OGA_TRY
+  auto& generator = *reinterpret_cast<const Generators::Generator*>(generator);
+  auto* OrtValue = generator.State.GetOutput(name);
+  *out = reinterpret_cast<OgaTensor*>(OrtValue);
+  return nullptr;
+  OGA_CATCH
+}
+
 size_t OGA_API_CALL OgaGenerator_GetSequenceCount(const OgaGenerator* oga_generator, size_t index) {
   auto& generator = *reinterpret_cast<const Generators::Generator*>(oga_generator);
   return generator.GetSequence(static_cast<int>(index)).GetCPU().size();
