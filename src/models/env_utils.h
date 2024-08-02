@@ -5,6 +5,6 @@
 
 namespace Generators {
 
-std::string GetEnvironmentVariable(const char* var);
+std::string GetEnvironmentVariable(const char* var_name);
 
 }

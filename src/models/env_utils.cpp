@@ -3,9 +3,13 @@
 
 #include "env_utils.h"
 
+#if _MSC_VER
+#include <Windows.h>
+#endif
+
 namespace Generators {
 
-std::string GetEnvironmentVariable(const char* var) {
+std::string GetEnvironmentVariable(const char* var_name) {
 #if _MSC_VER
   // Why getenv() should be avoided on Windows:
   // https://docs.microsoft.com/en-us/cpp/c-runtime-library/reference/getenv-wgetenv
@@ -20,7 +24,7 @@ std::string GetEnvironmentVariable(const char* var) {
   // The last argument is the size of the buffer pointed to by the lpBuffer parameter, including the null-terminating character, in characters.
   // If the function succeeds, the return value is the number of characters stored in the buffer pointed to by lpBuffer, not including the terminating null character.
   // Therefore, If the function succeeds, kBufferSize should be larger than char_count.
-  auto char_count = GetEnvironmentVariableA(var_name.c_str(), buffer.data(), kBufferSize);
+  auto char_count = ::GetEnvironmentVariableA(var_name, buffer.data(), kBufferSize);
 
   if (kBufferSize > char_count) {
     buffer.resize(char_count);
@@ -29,7 +33,7 @@ std::string GetEnvironmentVariable(const char* var) {
 
   return std::string();
 #else
-  const char* val = getenv(var);
+  const char* val = getenv(var_name);
   return val == nullptr ? "" : std::string(val);
 #endif  // _MSC_VER
 }
