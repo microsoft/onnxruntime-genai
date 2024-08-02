@@ -178,6 +178,13 @@ inline void InitApi() {
     return;
   }
 
+  char* ort_lib;
+  ort_lib = std::getenv("ORTGENAI_LOG_ORT_LIB");
+  if (ort_lib != nullptr && (std::string(ort_lib) == "1" || std::string(ort_lib) == "true")) {
+    Generators::SetLogBool("enabled", true);
+    Generators::SetLogBool("ort_lib", true);
+  }
+
 #if defined(__linux__)
   // If the GenAI library links against the onnxruntime library, it will have a dependency on a specific
   // version of OrtGetApiBase.
