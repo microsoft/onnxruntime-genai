@@ -297,12 +297,4 @@ void Cross_Cache::AddInputs() {
   }
 }
 
-// int Cross_Cache::GetSize() {
-//   return values_.size();
-// }
-
-// std::vector<std::unique_ptr<OrtValue>> Cross_Cache::GetCache() {
-//   return values_;
-// }
-
 }  // namespace Generators
