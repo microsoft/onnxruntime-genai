@@ -14,14 +14,23 @@ public class MultiModalProcessorTest {
     public void testBatchEncodeDecode() throws GenAIException {
         try (Model model = new Model(TestUtils.testModelPath());
         MultiModalProcessor multiModalProcessor = new MultiModalProcessor(model)) {
-            String[] inputs = new String[] {"This is a test", "This is another test"};
+            TokenizerStream stream = multiModalProcessor.createStream();
+            GeneratorParams generatorParams = model.createGeneratorParams();
+            String inputs = new String("This is a test");
             Images image = new Images("/src/java/src/test/java/ai/onnxruntime/genai/landscape.jpg");
-            Sequences processImages = MultiModalProcessor.processImages(inputs, image);
-            String[] decoded = MultiModalProcessor.decode(processImages);
+            NamedTensors processed = multiModalProcessor.processImages(inputs, image);
+            generatorParams.setInput(processed);
 
-            assertEquals(inputs.length, decoded.length);
-            for (int i = 0; i < inputs.length; i++) {
-                assert inputs[i].equals(decoded[i]);
+            Generator generator = new Generator(model, generatorParams);
+
+            String fullAnswer = new String();
+            while (!generator.isDone()) {
+                generator.computeLogits();
+                generator.generateNextToken();
+                 
+                int token = generator.getLastTokenInSequence(0);
+                 
+                fullAnswer += stream.decode(token);
             }
         }
     }
