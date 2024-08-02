@@ -2,6 +2,9 @@
 // Licensed under the MIT License.
 #include "../generators.h"
 #include "whisper.h"
+#include <vector>
+#include "utils.h"
+#include "kernels.h"
 
 namespace Generators {
 
@@ -36,7 +39,7 @@ Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> s
     throw std::runtime_error("encoder_input_ids must be provided in the extra inputs");
 
   auto hidden_states_type = model_.session_info_->GetOutputDataType("encoder_hidden_states");
-  auto encoder_hidden_states_shape = std::array<int64_t, 3>{decoder_input_ids_.GetShape()[0], 1500, static_cast<int64_t>(model_.config_->model.decoder.num_key_value_heads) * model_.config_->model.decoder.head_size};
+  auto encoder_hidden_states_shape = std::array<int64_t, 3>{decoder_input_ids_.GetShape()[0], 1500, static_cast<int64_t>(model_.config_->model.decoder.num_attention_heads) * model_.config_->model.decoder.head_size};
   encoder_hidden_states_ = OrtValue::CreateTensor(*model_.allocator_device_, encoder_hidden_states_shape, hidden_states_type);
 
   auto sequence_lengths = sequence_lengths_unk.GetCPU();
@@ -59,7 +62,7 @@ Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> s
 
   {
     auto layer_count = model_.config_->model.decoder.num_hidden_layers;
-    std::array<int64_t, 4> shape{params_->BatchBeamSize(), model_.config_->model.decoder.num_key_value_heads, params_->sequence_length, model_.config_->model.decoder.head_size};
+    std::array<int64_t, 4> shape{params_->BatchBeamSize(), model_.config_->model.decoder.num_attention_heads, params_->sequence_length, model_.config_->model.decoder.head_size};
     auto type = model_.session_info_->GetOutputDataType(output_names_[kv_cache_indices]);
 
     for (int i = 0; i < layer_count * 2; i++) {
@@ -68,6 +71,36 @@ Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> s
       outputs_[kv_cache_indices + i] = init_presents_.back().get();
     }
   }
+}
+
+template <typename T>
+void Whisper_State::TransposeKCacheForDMMHA(T* dest_data,
+                                            T* temp_buffer,
+                                            std::vector<int64_t>& dest_dims,
+                                            int dest_data_size,
+                                            int dest_element_size) {
+  // Treat the 'K' caches as if they are of shape [B, N, max_length, head_size / x, x]
+  // and transpose each 'K' cache into [B, N, head_size / x, max_length, x], where x = 16 / sizeof(T)
+  int chunk_size = static_cast<int>(16 / dest_element_size);
+  if (chunk_size != 4 && chunk_size != 8) {
+    throw std::runtime_error("ReorderPastStatesKernelLauncher only supports float32 or float16 precision");
+  }
+
+  // Copy the original 'K' caches to a temporary buffer in order to
+  // use the destination buffer to store the transposed 'K' caches
+  std::cout << "Copying K cache to temp buffer" << std::endl;
+  cudaMemcpyAsync(temp_buffer, dest_data, dest_data_size, cudaMemcpyDeviceToDevice, model_.cuda_stream_);
+
+  // Transpose each 'K' cache
+  std::cout << "Running K cache transpose" << std::endl;
+  cuda::ReorderPastStatesKernelLauncher(dest_data,
+                                        temp_buffer,
+                                        dest_dims[0],
+                                        dest_dims[1],
+                                        dest_dims[2],
+                                        dest_dims[3],
+                                        chunk_size,
+                                        model_.cuda_stream_);
 }
 
 RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
@@ -81,29 +114,276 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
       return logits_.Get();
 
     case RunState::Decoder_First:
-      // Copy over the hacked outputs to the real outputs
-      {
-        auto shape_info = init_presents_[0]->GetTensorTypeAndShapeInfo();
-        auto data_size = shape_info->GetElementCount() * SizeOf(shape_info->GetElementType());
+//       // Copy over the hacked outputs to the real outputs
+//       {
+//         // Allocate temporary buffer for when CUDA EP + FP16 precision is used because
+//         // we need to reformat the `KV` caches for `DecoderMaskedMultiHeadAttention` 
+//         // and we need some extra memory to do so.
+//         //
+//         // Since the self attention KV caches are of size (batch_size, num_heads, past_sequence_length, head_size) with type 'float16',
+//         // the cross attention KV caches are of size (batch_size, num_heads, 1500, head_size) with type 'float32', and
+//         // past_sequence_length <= 448 < 1500, we will allocate a temporary buffer that is the
+//         // size of a cross attention KV cache. This lets us use the same temporary buffer for both
+//         // the self attention and cross attention KV caches.
+// #if USE_CUDA
+//         std::unique_ptr<OrtValue> temp_buffer;
+//         auto self_attn_kv_cache_element_type = init_presents_[0]->GetTensorTypeAndShapeInfo()->GetElementType(); // should be `float16`
+//         if (self_attn_kv_cache_element_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 && model_.device_type_ == DeviceType::CUDA) {
+//           auto num_layers = model_.config_->model.decoder.num_hidden_layers;
+//           auto cross_attn_dims = init_presents_[2 * num_layers]->GetTensorTypeAndShapeInfo()->GetShape();
+//           auto cross_attn_kv_cache_element_type = outputs_[outputs_.size() - 1]->GetTensorTypeAndShapeInfo()->GetElementType(); // should be `float32`
 
+//           std::cout << "Initializing temporary buffer of size " << cross_attn_dims[0] << ", " << cross_attn_dims[1] << ", " << cross_attn_dims[2] << ", " << cross_attn_dims[3] << std::endl;
+//           temp_buffer = OrtValue::CreateTensor(*model_.allocator_device_, cross_attn_dims, cross_attn_kv_cache_element_type);
+//         }
+// #endif
+
+//         std::cout << "presents_.size() is " << presents_.size() << std::endl;
+
+//         for (int i = 0; i < presents_.size(); i++) {
+//           auto src_shape_info = init_presents_[i]->GetTensorTypeAndShapeInfo();
+//           auto src_data = init_presents_[i]->GetTensorRawData();
+//           auto src_dims = src_shape_info->GetShape();
+//           std::cout << "src_dims is " << src_dims[0] << ", " << src_dims[1] << ", " << src_dims[2] << ", " << src_dims[3] << std::endl;
+
+//           auto element_type = src_shape_info->GetElementType();
+//           auto element_size = SizeOf(element_type);
+//           auto data_size = src_shape_info->GetElementCount() * element_size;
+
+//           auto dest_shape_info = presents_[i]->GetTensorTypeAndShapeInfo();
+//           auto dest_data = presents_[i]->GetTensorMutableRawData();
+//           auto dest_dims = dest_shape_info->GetShape();
+//           std::cout << "dest_dims is " << dest_dims[0] << ", " << dest_dims[1] << ", " << dest_dims[2] << ", " << dest_dims[3] << std::endl;
+
+//           switch (model_.device_type_) {
+// #if USE_CUDA
+//             case DeviceType::CUDA:
+//               if (element_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+//                 // CUDA EP + FP16 precision == `DecoderMaskedMultiHeadAttention` op is used
+//                 // This also means `past-present buffer sharing = true`
+
+//                 int beam_width = src_dims[0] / batch_size;
+//                 int num_heads = src_dims[1];
+//                 int sequence_length = src_dims[2];
+//                 int max_sequence_length = dest_dims[2];
+//                 int head_size = src_dims[3];
+
+//                 // Copy data from init_presents_[i] to presents_[i]
+//                 std::cout << "Running expansion kernel" << std::endl;
+//                 cuda::CacheExpansionKernelLauncher(src_data,
+//                                                    dest_data,
+//                                                    batch_size,
+//                                                    beam_width,
+//                                                    num_heads,
+//                                                    sequence_length,
+//                                                    max_sequence_length,
+//                                                    head_size,
+//                                                    model_.cuda_stream_);
+                
+//                 if (i % 2 == 0) {
+//                   // Treat the 'K' caches as if they are of shape [B, N, max_length, head_size / x, x]
+//                   // and transpose each 'K' cache into [B, N, head_size / x, max_length, x], where x = 16 / sizeof(T)
+//                   int chunk_size = static_cast<int>(16 / element_size);
+//                   if (chunk_size != 4 && chunk_size != 8) {
+//                     throw std::runtime_error("ReorderPastStatesKernelLauncher only supports float32 or float16 precision");
+//                   }
+
+//                   // Copy the original 'K' caches to a temporary buffer in order to
+//                   // use the destination buffer to store the transposed 'K' caches
+//                   std::cout << "Copying K cache at idx " << i << " to temp buffer" << std::endl;
+//                   cudaMemcpyAsync(temp_buffer->GetTensorMutableRawData(), dest_data, data_size, cudaMemcpyDeviceToDevice, model_.cuda_stream_);
+
+//                   // Transpose each 'K' cache
+//                   std::cout << "Running K cache transpose" << std::endl;
+//                   cuda::ReorderPastStatesKernelLauncher(dest_data,
+//                                                         temp_buffer->GetTensorRawData(),
+//                                                         batch_size,
+//                                                         num_heads,
+//                                                         max_sequence_length,
+//                                                         head_size,
+//                                                         chunk_size,
+//                                                         model_.cuda_stream_);
+//                 }
+//               } else {
+//                 cudaMemcpyAsync(dest_data, src_data, data_size, cudaMemcpyDeviceToDevice, model_.cuda_stream_);
+//               }
+//               break;
+// #endif
+//             case DeviceType::CPU:
+//               memcpy(dest_data, src_data, data_size);
+//               break;
+
+//             default:
+//               throw std::runtime_error("Unsupported Device Type in Whisper_State::Run");
+//           }
+//         }
+//       }
+
+      // Wrap below code in {} to avoid `note: crosses initialization of` warnings during compilation
+      // that arise because variables are created in a switch statement
+      {
+        auto src_shape_info = init_presents_[0]->GetTensorTypeAndShapeInfo();
+        auto src_dims = src_shape_info->GetShape();
+        auto src_element_type = src_shape_info->GetElementType();
+        auto src_element_size = SizeOf(src_element_type);
+        auto src_data_size = src_shape_info->GetElementCount() * src_element_size;
+
+        auto dest_shape_info = presents_[0]->GetTensorTypeAndShapeInfo();
+        auto dest_dims = dest_shape_info->GetShape();
+        auto dest_element_type = dest_shape_info->GetElementType();
+        auto dest_element_size = SizeOf(dest_element_type);
+        auto dest_data_size = dest_shape_info->GetElementCount() * dest_element_size;
+        
+        auto copy_data_size = src_dims[2] * src_dims[3] * src_element_size;
+
+        std::cout << "outputs_.size() is " << outputs_.size() << std::endl;
+        // std::cout << "init_presents_ shape is " << src_dims[0] << ", " << src_dims[1] << ", " << src_dims[2] << ", " << src_dims[3] << std::endl;
+        // std::cout << "presents_ shape is " << dest_dims[0] << ", " << dest_dims[1] << ", " << dest_dims[2] << ", " << dest_dims[3] << std::endl;
+        std::cout << "init_presents_.size() is " << init_presents_.size() << std::endl;
+        std::cout << "presents_.size() is " << presents_.size() << std::endl;
+        // std::cout << "data size to copy is " << data_size << std::endl;
+
+#if USE_CUDA
+        // Allocate temporary buffer for when CUDA EP + FP16 precision is used because
+        // we need to reformat the `K` caches for `DecoderMaskedMultiHeadAttention` 
+        // and we need some extra memory to do so.
+        //
+        // Since the self attention K caches are of size (batch_size, num_heads, past_sequence_length, head_size) with type 'float16',
+        // the cross attention K caches are of size (batch_size, num_heads, 1500, head_size) with type 'float32', and
+        // past_sequence_length <= 448 < 1500, we will allocate a temporary buffer that is the
+        // size of a cross attention K cache. This lets us use the same temporary buffer for both
+        // the self attention and cross attention K caches.
+
+        std::unique_ptr<OrtValue> temp_buffer;
+        auto self_attn_kv_cache_element_type = src_element_type; // should be `float16` for the below case
+        if (self_attn_kv_cache_element_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 && model_.device_type_ == DeviceType::CUDA) {
+          auto num_layers = model_.config_->model.decoder.num_hidden_layers;
+          auto cross_attn_shape_info = outputs_[outputs_.size() - 1]->GetTensorTypeAndShapeInfo();
+          auto cross_attn_dims = cross_attn_shape_info->GetShape();
+          auto cross_attn_kv_cache_element_type = cross_attn_shape_info->GetElementType(); // should be `float32` for this case
+
+          std::cout << "Initializing temporary buffer of size " << cross_attn_dims[0] << ", " << cross_attn_dims[1] << ", " << cross_attn_dims[2] << ", " << cross_attn_dims[3] << std::endl;
+          temp_buffer = OrtValue::CreateTensor(*model_.allocator_device_, cross_attn_dims, cross_attn_kv_cache_element_type);
+        }
+#endif
+
+        // Copy over the hacked outputs to the real outputs
         for (int i = 0; i < presents_.size(); i++) {
           auto src_data = init_presents_[i]->GetTensorRawData();
           auto dest_data = presents_[i]->GetTensorMutableRawData();
 
+          // // Dump dest data before copy
+          // std::vector<uint16_t> presents_i_dest_(dest_shape_info->GetElementCount());
+          // std::vector<float> presents_i_dest_fp32_(dest_shape_info->GetElementCount());
+
+          // cudaMemcpy(presents_i_dest_.data(), dest_data, dest_data_size, cudaMemcpyDeviceToHost);
+          // for (int j = 0; j < dest_shape_info->GetElementCount(); j++) {
+          //   presents_i_dest_fp32_[j] = FastFloat16ToFloat32(presents_i_dest_[j]);
+          // }
+          
+          // std::cout << "Dumping dest data before copy at iteration " << i << std::endl;
+          // for (int j = 0; j < 64 * 10; j++) {
+          //   if (j != 0 && j % 64 == 0) std::cout << std::endl;
+          //   std::cout << presents_i_dest_fp32_[j] << ", ";
+          // }
+          // std::cout << std::endl;
+          // std::cout << "Finished dumping dest data before copy at iteration " << i << std::endl;
+
           switch (model_.device_type_) {
 #if USE_CUDA
             case DeviceType::CUDA:
-              cudaMemcpyAsync(dest_data, src_data, data_size, cudaMemcpyDeviceToDevice, model_.cuda_stream_);
+              if (self_attn_kv_cache_element_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+                // CUDA EP + FP16 precision == `DecoderMaskedMultiHeadAttention` op is used
+                // This also means `past-present buffer sharing = true`
+
+                // Copy data from init_presents_[i] to presents_[i]
+                // from (batch_size, num_heads, past_sequence_length, head_size)
+                // to (batch_size, num_heads, max_sequence_length, head_size)
+                //
+                // Implemented as:
+                // real[:batch_size, :num_heads, :past_sequence_length, :head_size] = hacked
+                for (int b = 0; b < dest_dims[0] * dest_dims[1]; b++) {
+                  auto src_offset = b * src_dims[2] * src_dims[3];
+                  auto dest_offset = b * dest_dims[2] * dest_dims[3];
+
+                  // std::cout << "src_offset is " << src_offset << std::endl;
+                  // std::cout << "dest_offset is " << dest_offset << std::endl;
+
+                  src_offset *= src_element_size;
+                  dest_offset *= dest_element_size;
+                  cudaMemcpyAsync(dest_data + dest_offset, src_data + src_offset, copy_data_size, cudaMemcpyDeviceToDevice, model_.cuda_stream_);
+                }
+
+                // Transpose self attention K caches for `DecoderMaskedMultiHeadAttention`
+                if (i % 2 == 0) {
+                  TransposeKCacheForDMMHA(dest_data, temp_buffer->GetTensorMutableRawData(), dest_dims, dest_data_size, dest_element_size);
+                }
+              } else {
+                cudaMemcpyAsync(dest_data, src_data, copy_data_size, cudaMemcpyDeviceToDevice, model_.cuda_stream_);
+              }
               break;
 #endif
             case DeviceType::CPU:
-              memcpy(dest_data, src_data, data_size);
+              memcpy(dest_data, src_data, copy_data_size);
               break;
 
             default:
               throw std::runtime_error("Unsupported Device Type in Whisper_State::Run");
           }
+
+          // // Dump src data
+          // std::vector<uint16_t> presents_i_src(src_shape_info->GetElementCount());
+          // std::vector<float> presents_i_src_fp32(src_shape_info->GetElementCount());
+
+          // cudaMemcpy(presents_i_src.data(), src_data, src_data_size, cudaMemcpyDeviceToHost);
+          // for (int j = 0; j < src_shape_info->GetElementCount(); j++) {
+          //   presents_i_src_fp32[j] = FastFloat16ToFloat32(presents_i_src[j]);
+          // }
+          
+          // std::cout << "Dumping src data at iteration " << i << std::endl;
+          // for (int j = 0; j < 64 * 10; j++) {
+          //   if (j != 0 && j % 64 == 0) std::cout << std::endl;
+          //   std::cout << presents_i_src_fp32[j] << ", ";
+          // }
+          // std::cout << std::endl;
+          // std::cout << "Finished dumping src data at iteration " << i << std::endl;
+
+          // // Dump dest data
+          // std::vector<uint16_t> presents_i_dest(dest_shape_info->GetElementCount());
+          // std::vector<float> presents_i_dest_fp32(dest_shape_info->GetElementCount());
+
+          // cudaMemcpy(presents_i_dest.data(), dest_data, dest_data_size, cudaMemcpyDeviceToHost);
+          // for (int j = 0; j < dest_shape_info->GetElementCount(); j++) {
+          //   presents_i_dest_fp32[j] = FastFloat16ToFloat32(presents_i_dest[j]);
+          // }
+          
+          // std::cout << "Dumping dest data at iteration " << i << std::endl;
+          // for (int j = 0; j < 64 * 10; j++) {
+          //   if (j != 0 && j % 64 == 0) std::cout << std::endl;
+          //   std::cout << presents_i_dest_fp32[j] << ", ";
+          // }
+          // std::cout << std::endl;
+          // std::cout << "Finished dumping dest data at iteration " << i << std::endl;        
         }
+
+#if USE_CUDA
+        if (self_attn_kv_cache_element_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 && model_.device_type_ == DeviceType::CUDA) {
+          // Transpose cross attention K caches for `DecoderMaskedMultiHeadAttention`
+
+          // Add +2 to start of loop to account for `logits` and `encoder_hidden_states` outputs
+          for (int i = 2 + init_presents_.size(); i < outputs_.size(); i += 2) {
+            std::cout << "Accessing output " << i << " in outputs_" << std::endl;
+            auto dest_data = outputs_[i]->GetTensorMutableRawData();
+            dest_shape_info = outputs_[i]->GetTensorTypeAndShapeInfo();
+            dest_dims = dest_shape_info->GetShape();
+            dest_element_type = dest_shape_info->GetElementType();
+            dest_element_size = SizeOf(dest_element_type);
+            dest_data_size = dest_shape_info->GetElementCount() * dest_element_size;
+
+            TransposeKCacheForDMMHA(dest_data, temp_buffer->GetTensorMutableRawData(), dest_dims, dest_data_size, dest_element_size);
+          }
+        }
+#endif
       }
 
       ClearIO();
@@ -127,7 +407,7 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
         inputs_.push_back(beam_width_.get());
 
         auto data = beam_width_->GetTensorMutableData<int32_t>();
-        *data = 1;
+        *data = params_->search.num_beams;
       }
 
       if (model_.session_info_->HasInput("cache_indirection")) {
@@ -142,7 +422,7 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
       if (model_.session_info_->HasOutput("output_cross_qk_0")) {
         auto layer_count = model_.config_->model.decoder.num_hidden_layers;
         auto type = model_.session_info_->GetOutputDataType("output_cross_qk_0");
-        std::array<int64_t, 4> shape{params_->BatchBeamSize(), model_.config_->model.decoder.num_key_value_heads, 1, 1500};
+        std::array<int64_t, 4> shape{params_->BatchBeamSize(), model_.config_->model.decoder.num_attention_heads, 1, 1500};
         for (int i = 0; i < layer_count; i++) {
           char string[64];
           snprintf(string, std::size(string), "output_cross_qk_%d", i);
@@ -153,7 +433,6 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
           outputs_.emplace_back(output_cross_qk_.back().get());
         }
       }
-
       // Fall through
 
     case RunState::Decoder:

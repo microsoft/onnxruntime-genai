@@ -60,6 +60,8 @@ struct Cross_Cache {
 
   void AddOutputs();
   void AddInputs();
+  // int GetSize();
+  // std::vector<std::unique_ptr<OrtValue>> GetCache();
 
  private:
   const Model& model_;
