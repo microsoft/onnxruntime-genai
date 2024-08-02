@@ -36,6 +36,8 @@ void SetLogBool(std::string_view name, bool value) {
     g_log.model_output_values = value;
   else if (name == "model_logits")
     g_log.model_logits = value;
+  else if (name == "ort_lib")
+    g_log.ort_lib = value;
   else
     throw JSON::unknown_value_error{};
 }
