@@ -235,7 +235,7 @@ struct OgaGenerator : OgaAbstract {
   OgaTensor* GetOutput(const char* name) {
     OgaTensor* out;
     OgaCheckResult(OgaGenerator_GetOutput(this, name, &out));
-    return std::unique_ptr<OgaTensor>(out);
+    return out;
   }
 
 #if __cplusplus >= 202002L
