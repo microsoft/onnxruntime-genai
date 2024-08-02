@@ -73,6 +73,7 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #include "onnxruntime_c_api.h"
 #include "../span.h"
 #include "../logging.h"
+#include "env_utils.h"
 
 #if defined(__ANDROID__)
 #include <android/log.h>
@@ -178,9 +179,8 @@ inline void InitApi() {
     return;
   }
 
-  char* ort_lib;
-  ort_lib = std::getenv("ORTGENAI_LOG_ORT_LIB");
-  if (ort_lib != nullptr && (std::string(ort_lib) == "1" || std::string(ort_lib) == "true")) {
+  const std::string ort_lib = Generators::GetEnvironmentVariable("ORTGENAI_LOG_ORT_LIB");
+  if (ort_lib == "1" || ort_lib == "true") {
     Generators::SetLogBool("enabled", true);
     Generators::SetLogBool("ort_lib", true);
   }
