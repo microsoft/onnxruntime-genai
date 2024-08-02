@@ -42,6 +42,7 @@ struct LogItems {
   bool model_output_shapes{};  // Before the model runs there are only the output shapes, no values in them. Useful for pre Session::Run debugging
   bool model_output_values{};  // After the model runs the output tensor values can be displayed
   bool model_logits{};         // Same as model_output_values but only for the logits
+  bool speculative_decoding{};  // Log speculative decoding steps.
 };
 
 extern LogItems g_log;

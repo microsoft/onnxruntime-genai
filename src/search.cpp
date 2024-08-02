@@ -49,6 +49,10 @@ RoamingArray<int32_t> GreedySearch_Cpu::GetNextTokens() {
   return next_tokens_;
 }
 
+RoamingArray<int32_t> SpeculativeGreedySearch_Cpu::GetNextTokens() {
+  return next_accepted_tokens_;
+}
+
 RoamingArray<int32_t> BeamSearch_Cpu::GetNextTokens() {
   return beam_scorer_->GetNextTokens();
 }
@@ -249,6 +253,96 @@ void GreedySearch_Cpu::AppendNextTokensToSequences() {
     if (g_log.enabled && g_log.hit_max_length)
       Log("hit_max_length", "greedy cpu hit");
     done_ = true;
+  }
+}
+
+void GreedySearch_Cpu::SetNextTokens(RoamingArray<int32_t> next_tokens) {
+  auto next_tokens_cpu = next_tokens.GetCPU();
+  auto batch_size = params_->batch_size;
+  auto tokens_count_per_batch = next_tokens_cpu.size() / batch_size;
+  for (size_t j = 0; j < tokens_count_per_batch; j++) {
+    for (size_t i = 0; i < batch_size; i++) {
+      SetNextToken(i, next_tokens_cpu[i * tokens_count_per_batch + j]);
+    }
+    AppendNextTokensToSequences();
+  }
+}
+
+void GreedySearch_Cpu::DropLastTokens(size_t num_tokens) {
+  auto sequences_cpu = sequences_.GetSequences();
+  auto new_sequence_length = sequences_.GetSequenceLength() - num_tokens;
+  for (size_t i = 0; i < params_->batch_size; ++i) {
+    if (!eos_seen_[i])
+      continue;
+    auto sequence_cpu = sequences_cpu.subspan(i * params_->search.max_length + new_sequence_length, num_tokens);
+    for (size_t j = 0; j < num_tokens; ++j) {
+      if (sequence_cpu[j] == params_->eos_token_id) {
+        not_done_count_++;
+        done_ = false;
+        eos_seen_[i] = false;
+        if (g_log.enabled && g_log.hit_eos)
+          Log("hit_eos", "Reverted EOS seen on batch " + std::to_string(i));
+      }
+    }
+  }
+  sequences_.DropLastTokens({num_tokens});
+}
+
+RoamingArray<int32_t> SpeculativeGreedySearch_Cpu::CheckCandidates(RoamingArray<int32_t> sequence, int candidate_length) {
+  if (params_->batch_size != 1)
+    throw std::runtime_error("Speculative search only supports batch size 1");
+  auto sequence_cpu = sequence.GetCPU();
+  auto prev_sequence_length = sequence_cpu.size() - candidate_length;
+  auto candidate_tokens_cpu = sequence.GetCPU().subspan(prev_sequence_length, candidate_length);
+  int logit_index = 0;
+  for (; logit_index < candidate_length + 1; logit_index++) {
+    ApplyMinLength(params_->search.min_length, logit_index);
+    ApplyRepetitionPenalty(params_->search.repetition_penalty, logit_index);
+    std::span<float> const scores = next_token_scores_.subspan(logit_index * params_->vocab_size, params_->vocab_size);
+
+    if (g_log.enabled && g_log.model_logits) {
+      auto& stream = Log("speculative_decoding");
+      stream << "model_logits of logit_index=" << logit_index << std::endl;
+      DumpSpan(stream, scores);
+      stream << std::endl;
+    }
+
+    auto const token = static_cast<int32_t>(std::distance(scores.begin(), std::max_element(scores.begin(), scores.end())));
+    SetNextToken(0, token);
+    AppendNextTokensToSequences();
+    if (done_ || logit_index == candidate_length || candidate_tokens_cpu[logit_index] != token) {
+      break;
+    }
+  }
+  auto next_tokens = sequences_.GetSequence(0).subspan(prev_sequence_length, logit_index + 1);
+  next_accepted_tokens_ = cpu_span<int32_t>{next_tokens.data(), next_tokens.size()};
+  return next_accepted_tokens_;
+}
+
+void SpeculativeGreedySearch_Cpu::ApplyMinLength(int min_length, size_t token_idx) {
+  if (sequences_.GetSequenceLength() >= min_length) {
+    return;
+  }
+
+  std::span<float> const scores = next_token_scores_.subspan(token_idx * params_->vocab_size, params_->vocab_size);
+  scores[params_->eos_token_id] = std::numeric_limits<float>::lowest();
+}
+
+void SpeculativeGreedySearch_Cpu::ApplyRepetitionPenalty(float penalty, size_t token_idx) {
+  if (penalty == 1.0f)
+    return;
+
+  std::span<float> const scores = next_token_scores_.subspan(token_idx * params_->vocab_size, params_->vocab_size);
+  std::span<const int32_t> const sequence = sequences_.GetSequence(token_idx);
+
+  std::unordered_set<int32_t> unique_word_ids;
+  for (const auto& word_id : sequence) {
+    unique_word_ids.insert(word_id);
+  }
+
+  for (const int32_t word_id : unique_word_ids) {
+    float const score = scores[word_id];
+    scores[word_id] = (score < 0 ? score * penalty : score / penalty);
   }
 }
 

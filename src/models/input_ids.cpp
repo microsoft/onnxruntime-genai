@@ -126,4 +126,36 @@ void InputIDs::Update(RoamingArray<int32_t> next_tokens_unk) {
   }
 }
 
+void InputIDs::Update(RoamingArray<int32_t> next_tokens, size_t start, size_t token_count) {
+  switch (model_.device_type_) {
+    case DeviceType::CPU: {
+      break;
+    }
+    default:
+      throw std::runtime_error("Update with token count not supported for device type " + to_string(model_.device_type_));
+  }
+  if (shape_[0] != 1) {
+    throw std::runtime_error("Update with token count only supported for batch size 1, got " + std::to_string(shape_[0]));
+  }
+  shape_[1] = token_count;
+
+  if (!sb_input_ids_) {
+    value_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
+  } else {
+    value_ = sb_input_ids_->CreateTensorOnStaticBuffer(shape_, type_);
+  }
+  state_.inputs_[input_index_] = value_.get();
+  if (type_ == Ort::TypeToTensorType<int64_t>::type) {
+    auto* data = value_->GetTensorMutableData<int64_t>();
+    auto next_tokens_cpu = next_tokens.GetCPU();
+    assert(next_tokens_cpu.size() >= start + token_count);
+    for (int i = 0; i < token_count; i++) {
+      data[i] = next_tokens_cpu[start + i];
+    }
+  } else {
+    auto* data = value_->GetTensorMutableData<int32_t>() + start;
+    memcpy(data, next_tokens.GetCPU().data(), shape_[0] * token_count * sizeof(int32_t));
+  }
+}
+
 }  // namespace Generators

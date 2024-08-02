@@ -73,4 +73,9 @@ void Sequences::AppendNextTokenToSequences(std::span<const int32_t> next_tokens)
   ++current_length_;
 }
 
+void Sequences::DropLastTokens(size_t num_tokens) {
+  current_length_ -= static_cast<int>(num_tokens);
+  assert(current_length_ >= 0);
+}
+
 }  // namespace Generators

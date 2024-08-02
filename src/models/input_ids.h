@@ -9,8 +9,14 @@ struct InputIDs {
   InputIDs(const InputIDs&) = delete;
   InputIDs& operator=(const InputIDs&) = delete;
 
+  // Register input_ids as ORT session input.
+  // Called only once during initialization of state.
   void Add();
+  // Resize input_ids to [1], update value with next_tokens.
+  // next_tokens is assumed to have length 1.
   void Update(RoamingArray<int32_t> next_tokens);
+  // Resize input_ids to [token_count], update value with next_tokens[start:start + token_count].
+  void Update(RoamingArray<int32_t> next_tokens, size_t start, size_t token_count);
 
   auto& GetShape() const { return shape_; }
   const char* name_;

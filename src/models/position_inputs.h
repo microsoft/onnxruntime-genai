@@ -14,6 +14,7 @@ struct PositionInputs {
 
   void Add();
   void Update(int current_length);
+  void Update(int current_length, int past_length);
 
  private:
   void AddAttentionMask();
@@ -21,6 +22,9 @@ struct PositionInputs {
 
   void UpdatePositionIDs(int current_length);
   void UpdateAttentionMask(int current_length);
+  // Used by speculative decoding.
+  void UpdatePositionIDs(int current_length, int past_length);
+  void UpdateAttentionMask(int current_length, int past_length);
 
   template <typename T>
   void InitializeTensors(std::array<int64_t, 2> shape, cpu_span<int32_t> sequence_lengths);
@@ -29,6 +33,12 @@ struct PositionInputs {
   void UpdatePositionIDsImpl();
   template <typename T>
   void UpdateAttentionMaskImpl(T* data, const T* old_data, int current_length);
+
+  // Used by speculative decoding
+  template <typename T>
+  void UpdatePositionIDsImpl(int current_length, int past_length);
+  template <typename T>
+  void UpdateAttentionMaskImpl(T* data, int current_length, int past_length);
 
   const Model& model_;
   State& state_;

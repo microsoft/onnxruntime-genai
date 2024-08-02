@@ -43,4 +43,42 @@ void DecoderOnly_State::UpdateInputsOutputs(const RoamingArray<int32_t>& next_to
   logits_.Update();
 }
 
+RoamingArray<float> SpeculativeDecodingDecoderOnly_State::Run(RoamingArray<int32_t> sequence, int next_token_length, int past_length, int return_last_logit_count) {
+  int batch_size = static_cast<int>(input_ids_.GetShape()[0]);
+  if (batch_size != 1)
+    throw std::runtime_error("Speculative decoding only supports batch size 1, got " + std::to_string(batch_size));
+
+  auto total_length = past_length + next_token_length;
+  auto total_logits = first_run_ ? total_length : next_token_length;
+  // NB(bowenbao): workaround gqa limitation on token phase.
+  // if (next_token_length > 1) {
+  //   total_logits = total_length;
+  // }
+  UpdateInputsOutputsFromSequence(sequence, next_token_length, past_length);
+  State::Run(*model_.session_decoder_, *model_.run_options_, batch_size);
+
+  return logits_.Get(total_logits - return_last_logit_count, return_last_logit_count);
+}
+
+void SpeculativeDecodingDecoderOnly_State::UpdateInputsOutputsFromSequence(const RoamingArray<int32_t>& sequence, size_t next_token_length, int past_length) {
+  auto total_length = past_length + next_token_length;
+  if (g_log.enabled && g_log.speculative_decoding) {
+    auto& stream = Log("speculative_decoding");
+    stream << "UpdateInputsOutputsFromSequence: past_length=" << past_length << ", next_token_length=" << next_token_length << ", total_length=" << total_length << std::endl;
+  }
+  if (first_run_) {
+    // First run input ids includes prompt tokens.
+    input_ids_.Update(sequence, 0, total_length);
+    position_inputs_.Update(total_length, 0);
+    kv_cache_.UpdatePresent(total_length);
+    logits_.Update(total_length);
+  } else {
+    // Subsequent runs input ids only include candidate tokens.
+    input_ids_.Update(sequence, past_length, next_token_length);
+    position_inputs_.Update(total_length, past_length);
+    kv_cache_.UpdateAndResize(total_length, past_length);
+    logits_.Update(next_token_length);
+  }
+}
+
 }  // namespace Generators

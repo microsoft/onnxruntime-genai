@@ -21,7 +21,7 @@ struct DecoderOnly_State : State {
   RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) override;
   const CapturedGraphInfo* GetCapturedGraphInfo() const override { return captured_graph_info_.get(); };
 
- private:
+ protected:
   void UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> next_indices, int current_length);
 
   const DecoderOnly_Model& model_;
@@ -32,6 +32,14 @@ struct DecoderOnly_State : State {
   KV_Cache kv_cache_{model_, *this};
   PositionInputs position_inputs_;
   ExtraInputs extra_inputs_{model_, *this};
+};
+
+struct SpeculativeDecodingDecoderOnly_State : DecoderOnly_State {
+  SpeculativeDecodingDecoderOnly_State(const DecoderOnly_Model& model, RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params) : DecoderOnly_State{model, sequence_lengths, params} {};
+  RoamingArray<float> Run(RoamingArray<int32_t> sequence, int next_token_length, int past_length, int return_last_logit_count) override;
+
+ protected:
+  void UpdateInputsOutputsFromSequence(const RoamingArray<int32_t>& sequence, size_t next_token_length, int past_length);
 };
 
 }  // namespace Generators

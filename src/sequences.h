@@ -19,6 +19,9 @@ struct Sequences {
   // Used by Greedy search:
   void AppendNextTokenToSequences(std::span<const int32_t> next_tokens);
 
+  // Used by Speculative search:
+  void DropLastTokens(size_t num_tokens);
+
  private:
   std::unique_ptr<int32_t[]> sequences_buffer_;
 

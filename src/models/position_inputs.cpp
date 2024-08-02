@@ -84,6 +84,15 @@ void PositionInputs::Update(int current_length) {
   }
 }
 
+void PositionInputs::Update(int current_length, int past_length) {
+  if (has_posid_input_) {
+    UpdatePositionIDs(current_length, past_length);
+  }
+  if (has_mask_input_) {
+    UpdateAttentionMask(current_length, past_length);
+  }
+}
+
 void PositionInputs::AddAttentionMask() {
   mask_input_index_ = state_.inputs_.size();
 
@@ -191,6 +200,21 @@ void PositionInputs::UpdatePositionIDs(int current_length) {
         throw std::runtime_error("PositionIDs::Update - Unsupported device type");
     }
   }
+}
+
+void PositionInputs::UpdatePositionIDs(int current_length, int past_length) {
+  if (model_.device_type_ != DeviceType::CPU)
+    throw std::runtime_error("PositionInputs::UpdatePositionIDs - past_length only supported on CPU.");
+  if (position_ids_shape_[0] != 1)
+    throw std::runtime_error("PositionInputs::UpdatePositionIDs - past_length only supported for batch_size=1.");
+  assert(current_length > past_length);
+  position_ids_shape_[1] = current_length - past_length;
+  position_ids_ = OrtValue::CreateTensor(*model_.allocator_device_, position_ids_shape_, type_);
+  if (type_ == Ort::TypeToTensorType<int32_t>::type)
+    UpdatePositionIDsImpl<int32_t>(current_length, past_length);
+  else
+    UpdatePositionIDsImpl<int64_t>(current_length, past_length);
+  state_.inputs_[posid_input_index_] = position_ids_.get();
 }
 
 void PositionInputs::UpdateAttentionMask(int current_length) {
@@ -321,6 +345,22 @@ void PositionInputs::UpdateAttentionMask(int current_length) {
   is_first_mask_update_ = false;
 }
 
+void PositionInputs::UpdateAttentionMask(int current_length, int past_length) {
+  if (model_.device_type_ != DeviceType::CPU)
+    throw std::runtime_error("PositionInputs::UpdateAttentionMask - past_length only supported on CPU.");
+  if (attention_mask_shape_[0] != 1)
+    throw std::runtime_error("PositionInputs::UpdateAttentionMask - past_length only supported for batch_size=1.");
+  attention_mask_shape_[1] = current_length;
+  attention_mask_next_ = OrtValue::CreateTensor(*model_.allocator_device_, attention_mask_shape_, type_);
+  if (type_ == Ort::TypeToTensorType<int32_t>::type)
+    UpdateAttentionMaskImpl(attention_mask_next_->GetTensorMutableData<int32_t>(), current_length, past_length);
+  else
+    UpdateAttentionMaskImpl(attention_mask_next_->GetTensorMutableData<int64_t>(), current_length, past_length);
+  attention_mask_ = std::move(attention_mask_next_);
+  state_.inputs_[mask_input_index_] = attention_mask_.get();
+  is_first_mask_update_ = false;
+}
+
 template <typename T>
 void PositionInputs::InitializeTensors(std::array<int64_t, 2> shape, cpu_span<int32_t> sequence_lengths) {
   // Set attention mask to be 0 for pad tokens, and 1 for all other tokens.
@@ -361,12 +401,27 @@ void PositionInputs::UpdatePositionIDsImpl() {
 };
 
 template <typename T>
+void PositionInputs::UpdatePositionIDsImpl(int current_length, int past_length) {
+  auto* data = position_ids_->GetTensorMutableData<T>();
+  for (int i = 0; i < current_length - past_length; i++) {
+    data[i] = i + past_length;
+  }
+};
+
+template <typename T>
 void PositionInputs::UpdateAttentionMaskImpl(T* data, const T* old_data, int current_length) {
   for (int i = 0; i < attention_mask_shape_[0]; i++) {
     for (int j = 0; j < current_length - 1; j++) {
       data[i * current_length + j] = old_data[i * (current_length - 1) + j];
     }
     data[i * current_length + current_length - 1] = 1;
+  }
+};
+
+template <typename T>
+void PositionInputs::UpdateAttentionMaskImpl(T* data, int current_length, int past_length) {
+  for (int i = 0; i < current_length; i++) {
+    data[i] = 1;
   }
 };
 

@@ -213,6 +213,54 @@ void KV_Cache::Update(std::span<const int32_t> beam_indices, int current_length)
   }
 }
 
+void KV_Cache::UpdatePresent(int current_length) {
+  // Used for speculative decoding main generator.
+  // This can be later refactored to merge with tensor allocation during initialization.
+  if (shape_[2] == current_length)
+    return;
+  shape_[2] = current_length;
+  // If we're sharing past & present buffers there is nothing to do here, so early exit
+  if (past_present_share_buffer_)
+    return;
+  for (int i = 0; i < layer_count_ * 2; i++) {
+    presents_[i] = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
+    state_.outputs_[output_index_ + i] = presents_[i].get();
+  }
+}
+
+void KV_Cache::UpdateAndResize(int current_length, int past_length) {
+  // If we're sharing past & present buffers there is nothing to do here, so early exit
+  if (past_present_share_buffer_)
+    return;
+  if (shape_[0] != 1)
+    throw std::runtime_error("KV_Cache::Update(int current_length, int past_length) only supports batch size 1, got " + std::to_string(shape_[0]));
+  if (model_.device_type_ != DeviceType::CPU)
+    throw std::runtime_error("KV_Cache::Update(int current_length, int past_length) only supports CPU");
+
+  auto element_type = presents_[0]->GetTensorTypeAndShapeInfo()->GetElementType();
+  auto element_size = SizeOf(element_type);
+  auto new_shape = std::array<int64_t, 4>({1, shape_[1], past_length, shape_[3]});
+  if (shape_[2] != past_length) {
+    for (int i = 0; i < layer_count_ * 2; i++) {
+      auto new_present = OrtValue::CreateTensor(*model_.allocator_device_, new_shape, type_);
+      const auto* present_data = reinterpret_cast<const uint8_t*>(presents_[i]->GetTensorRawData());
+      auto* new_present_data = reinterpret_cast<uint8_t*>(new_present->GetTensorMutableRawData());
+
+      // Copy past_length kv-cache
+      for (int j = 0; j < shape_[1]; j++) {
+        memcpy(
+            new_present_data + j * past_length * shape_[3] * element_size,
+            present_data + j * shape_[2] * shape_[3] * element_size,
+            past_length * shape_[3] * element_size);
+      }
+
+      presents_[i] = std::move(new_present);
+    }
+  }
+
+  Update({}, current_length);
+}
+
 // Copy present state to past state reordered by the beam_indices
 template <typename ScoreType>
 void KV_Cache::PickPastState(std::span<const int32_t> beam_indices, int index) {

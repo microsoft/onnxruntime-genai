@@ -605,10 +605,10 @@ class Model:
         self.make_node("Less", inputs=inputs, outputs=[output], name=name)
         self.make_value_info(output, TensorProto.BOOL, shape=None)
 
-    def make_range(self, name, inputs):
+    def make_range(self, name, inputs, shape):
         output = f"{name}/output_0"
         self.make_node("Range", inputs=inputs, outputs=[output], name=name)
-        self.make_value_info(output, TensorProto.INT64, shape=["unk"])
+        self.make_value_info(output, TensorProto.INT64, shape=shape)
 
     def make_slice(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
@@ -633,6 +633,18 @@ class Model:
     def make_tanh(self, name, root_input, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Tanh", inputs=[root_input], outputs=[output], name=name)
+        self.make_value_info(output, dtype, shape=shape)
+
+    def make_trilu(self, name, inputs, upper: int, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node(
+            "Trilu",
+            inputs=inputs,
+            outputs=[output],
+            name=name,
+            upper=upper,
+            domain="com.microsoft",
+        )
         self.make_value_info(output, dtype, shape=shape)
 
     def make_matmul(self, matmul, basename, root_input, **kwargs):
@@ -1809,61 +1821,79 @@ class Model:
         unsqueeze_6_name = f"{basename}/Unsqueeze_6"  # shared unsqueeze for input_ids and attention_mask
         self.make_unsqueeze(unsqueeze_6_name, unsqueeze_inputs, dtype=TensorProto.INT64, shape=[1])
         concat_2_name = f"{basename}/Concat_2"
-        concat_inputs = [f"{unsqueeze_4_name}/output_0", f"{unsqueeze_5_name}/output_0"]
+        concat_inputs = [f"{unsqueeze_4_name}/output_0", f"{unsqueeze_3_name}/output_0"]
         self.make_concat(concat_2_name, concat_inputs, dtype=TensorProto.INT64, shape=[2], axis=0)
         constant_shape_name = f"{basename}/ConstantOfShape_2"
         constant_shape_numpy_dtype = self.to_numpy_dtype[self.io_dtype]
         constant_shape_value = numpy_helper.from_array(np.array([np.finfo(constant_shape_numpy_dtype).min], dtype=constant_shape_numpy_dtype))
-        self.make_constant_of_shape(constant_shape_name, f"{concat_2_name}/output_0", value=constant_shape_value, dtype=self.io_dtype, shape=['unk', 'unk'])
+        self.make_constant_of_shape(
+            constant_shape_name,
+            f"{concat_2_name}/output_0",
+            value=constant_shape_value,
+            dtype=self.io_dtype,
+            shape=["sequence_length", "total_sequence_length"],
+        )
 
         # Top path
-        shape_4_name = f"{basename}/Shape_4"
-        self.make_shape(shape_4_name, f"{constant_shape_name}/output_0", shape=[2])
-        slice_1_name = f"{basename}/Slice_1"
-        slice_1_inputs = [f"{shape_4_name}/output_0", "/model/constants/TensorProto.INT64/1D/-1", f"/model/constants/TensorProto.INT64/1D/{np.iinfo(np.int64).max}", "/model/constants/TensorProto.INT64/1D/0"]
-        self.make_slice(slice_1_name, slice_1_inputs, dtype=TensorProto.INT64, shape=[1])
-        squeeze_1_name = f"{basename}/Squeeze_1"
-        squeeze_1_inputs = [f"{slice_1_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
-        self.make_squeeze(squeeze_1_name, squeeze_1_inputs)
-        unsqueeze_7_name = f"{basename}/output_0"
-        unsqueeze_7_inputs = [f"{squeeze_1_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
-        self.make_unsqueeze(unsqueeze_7_name, unsqueeze_7_inputs, dtype=TensorProto.INT64, shape=[1])
         concat_3_name = f"{basename}/Concat_3"
-        concat_3_inputs = [f"{unsqueeze_7_name}/output_0", "/model/constants/TensorProto.INT64/1D/1"]
+        concat_3_inputs = [
+            f"{unsqueeze_4_name}/output_0",
+            "/model/constants/TensorProto.INT64/1D/1",
+        ]
         self.make_concat(concat_3_name, concat_3_inputs, dtype=TensorProto.INT64, shape=[2], axis=0)
 
         # Bottom path
-        shape_5_name = f"{basename}/Shape_5"
-        self.make_shape(shape_5_name, f"{constant_shape_name}/output_0", shape=[2])
-        slice_2_name = f"{basename}/Slice_2"
-        slice_2_inputs = [f"{shape_5_name}/output_0", "/model/constants/TensorProto.INT64/1D/-1", f"/model/constants/TensorProto.INT64/1D/{np.iinfo(np.int64).max}", "/model/constants/TensorProto.INT64/1D/0"]
-        self.make_slice(slice_2_name, slice_2_inputs, dtype=TensorProto.INT64, shape=[1])
-        squeeze_2_name = f"{basename}/Squeeze_2"
-        squeeze_2_inputs = [f"{slice_2_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
-        self.make_squeeze(squeeze_2_name, squeeze_2_inputs)
         range_name = f"{basename}/Range"
-        range_inputs = ["/model/constants/TensorProto.INT64/0D/0", f"{squeeze_2_name}/output_0", "/model/constants/TensorProto.INT64/0D/1"]
-        self.make_range(range_name, range_inputs)
+        range_inputs = [
+            "/model/constants/TensorProto.INT64/0D/0",
+            f"{basename}/Gather_2/output_0",
+            "/model/constants/TensorProto.INT64/0D/1",
+        ]
+        self.make_range(range_name, range_inputs, shape=["sequence_length"])
         add_2_name = f"{basename}/Add_2"
-        add_inputs = [f"{range_name}/output_0", "/model/constants/TensorProto.INT64/0D/1"]
-        self.make_add(add_2_name, add_inputs, dtype=TensorProto.INT64, shape=["unk"])
+        add_inputs = [f"{range_name}/output_0", f"{past_key_gather_name}/output_0"]
+        self.make_add(
+            add_2_name, add_inputs, dtype=TensorProto.INT64, shape=["sequence_length"]
+        )
+        range_2_name = f"{basename}/Range_2"
+        range_2_inputs = [
+            "/model/constants/TensorProto.INT64/0D/0",
+            f"{shared_add_name}/output_0",
+            "/model/constants/TensorProto.INT64/0D/1",
+        ]
+        self.make_range(range_2_name, range_2_inputs, shape=["total_sequence_length"])
 
         # Merged path
         reshape_name = f"{basename}/Reshape"
         reshape_inputs = [f"{add_2_name}/output_0", f"{concat_3_name}/output_0"]
         self.make_reshape(reshape_name, reshape_inputs, dtype=TensorProto.INT64, shape=None)
         less_name = f"{basename}/Less"
-        less_inputs = [f"{range_name}/output_0", f"{reshape_name}/output_0"]
+        less_inputs = [f"{reshape_name}/output_0", f"{range_2_name}/output_0"]
         self.make_less(less_name, less_inputs)
         where_2_name = f"{basename}/Where_2"
-        where_2_inputs = [f"{less_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/0", f"{constant_shape_name}/output_0"]
+        where_2_inputs = [
+            f"{less_name}/output_0",
+            f"{constant_shape_name}/output_0",
+            f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/0",
+        ]
         self.make_where(where_2_name, where_2_inputs, dtype=self.io_dtype, shape=None)
+
         unsqueeze_8_name = f"{basename}/Unsqueeze_8"
         unsqueeze_8_inputs = [f"{where_2_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
-        self.make_unsqueeze(unsqueeze_8_name, unsqueeze_8_inputs, dtype=self.io_dtype, shape=None)
+        self.make_unsqueeze(
+            unsqueeze_8_name,
+            unsqueeze_8_inputs,
+            dtype=self.io_dtype,
+            shape=[1, "sequence_length", "total_sequence_length"],
+        )
         unsqueeze_9_name = f"{basename}/Unsqueeze_9"
         unsqueeze_9_inputs = [f"{unsqueeze_8_name}/output_0", "/model/constants/TensorProto.INT64/1D/1"]
-        self.make_unsqueeze(unsqueeze_9_name, unsqueeze_9_inputs, dtype=self.io_dtype, shape=None)
+        self.make_unsqueeze(
+            unsqueeze_9_name,
+            unsqueeze_9_inputs,
+            dtype=self.io_dtype,
+            shape=[1, 1, "sequence_length", "total_sequence_length"],
+        )
 
         expand_name = self.make_common_mask_reformat_subgraph(basename, root_input="input_ids" if not self.exclude_embeds else "inputs_embeds", unsqueeze_for_concat=unsqueeze_3_name, unsqueeze_for_expand=unsqueeze_9_name, input_ids_subgraph=True)
         return unsqueeze_6_name, expand_name

@@ -190,11 +190,54 @@ RoamingArray<float> Logits::Get() {
 
 #pragma warning(pop)
 
+RoamingArray<float> Logits::Get(size_t start, size_t size) {
+  const size_t num_beams = state_.params_->search.num_beams;
+  if (num_beams != 1)
+    throw std::runtime_error("Get with start and size not supported for num_beams != 1, got " + std::to_string(num_beams));
+  if (shape_[0] != 1)
+    throw std::runtime_error("Get with start and size not supported for batch size != 1, got " + std::to_string(shape_[0]));
+
+  size_t element_count = shape_[1] * shape_[2];
+  size_t element_size = type_ == Ort::TypeToTensorType<float>::type ? 4 : 2;
+  size_t selected_element_count = size * shape_[2];
+
+  output_last_tokens_ = OrtValue::CreateTensor(*model_.allocator_device_, std::array<int64_t, 3>({1, static_cast<int64_t>(size), shape_[2]}), type_);
+  OrtValue* logits_of_selected_tokens = output_last_tokens_.get();
+
+  auto logits_raw = std::span<const uint8_t>{output_raw_->GetTensorMutableData<uint8_t>(), element_count * element_size};
+  auto logits_of_selected_tokens_raw = std::span<uint8_t>{logits_of_selected_tokens->GetTensorMutableData<uint8_t>(), selected_element_count * element_size};
+  auto source = logits_raw.subspan(start * shape_[2] * element_size, selected_element_count * element_size);
+  copy(source, logits_of_selected_tokens_raw);
+
+  if (type_ == Ort::TypeToTensorType<Ort::Float16_t>::type) {
+    std::unique_ptr<OrtValue> logits_of_selected_tokens_fp32;
+    ConvertFp16ToFp32(*model_.allocator_device_, *logits_of_selected_tokens, logits_of_selected_tokens_fp32, model_.device_type_, model_.cuda_stream_);
+    output_last_tokens_ = std::move(logits_of_selected_tokens_fp32);
+    logits_of_selected_tokens = output_last_tokens_.get();
+  }
+
+  auto batched_logits_cpu = cpu_span<float>{logits_of_selected_tokens->GetTensorMutableData<float>(), selected_element_count};
+  HandleEOSArray(batched_logits_cpu);
+  return batched_logits_cpu;
+}
+
 void Logits::Update() {
   if (output_raw_.get()->GetTensorTypeAndShapeInfo()->GetShape()[1] == 1) {
     return;
   }
 
+  StaticBuffer* sb_logits = type_ == Ort::TypeToTensorType<Ort::Float16_t>::type ? sb_logits16_ : sb_logits32_;
+  output_raw_ = !sb_logits ? OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_)
+                           : sb_logits->CreateTensorOnStaticBuffer(shape_, type_);
+  state_.outputs_[output_index_] = output_raw_.get();
+}
+
+void Logits::Update(size_t token_count) {
+  if (output_raw_.get()->GetTensorTypeAndShapeInfo()->GetShape()[1] == token_count) {
+    return;
+  }
+
+  shape_[1] = token_count;
   StaticBuffer* sb_logits = type_ == Ort::TypeToTensorType<Ort::Float16_t>::type ? sb_logits16_ : sb_logits32_;
   output_raw_ = !sb_logits ? OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_)
                            : sb_logits->CreateTensorOnStaticBuffer(shape_, type_);

@@ -32,8 +32,16 @@ struct KV_Cache {
   KV_Cache(const Model& model, State& state);
 
   void AddEncoder();  // If model has an initial encoder step, this is used
+  // Register input_ids as ORT session input.
+  // Called only once during initialization of state.
   void Add();
+  // Move present to past. Prepare present output for next generation iteration.
   void Update(std::span<const int32_t> beam_indices, int current_length);
+  // Used by speculative decoding
+  // Resize present to new sequence length.
+  void UpdatePresent(int current_length);
+  // Resize past to new sequence length, and drop past that is > past_length.
+  void UpdateAndResize(int current_length, int past_length);
   template <typename ScoreType>
   void PickPastState(std::span<const int32_t> beam_indices, int index);
   void PickPastState(std::span<const int32_t> beam_indices, int index);
