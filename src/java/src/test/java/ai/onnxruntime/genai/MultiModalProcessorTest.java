@@ -15,7 +15,7 @@ public class MultiModalProcessorTest {
         try (Model model = new Model(TestUtils.testModelPath());
         MultiModalProcessor multiModalProcessor = new MultiModalProcessor(model)) {
             String[] inputs = new String[] {"This is a test", "This is another test"};
-            Images image = new Images("\src\java\src\test\java\ai\onnxruntime\genai\landscape.jpg");
+            Images image = new Images("/src/java/src/test/java/ai/onnxruntime/genai/landscape.jpg");
             Sequences processImages = MultiModalProcessor.processImages(inputs, image);
             String[] decoded = MultiModalProcessor.decode(processImages);
 
