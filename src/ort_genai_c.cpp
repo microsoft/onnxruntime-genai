@@ -208,7 +208,7 @@ OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator) 
   OGA_CATCH
 }
 
-OgaResult* OgaGenerator_GetOutput OgaGenerator_GetOutput(const OgaGenerator* generator, const char* name, OgaTensor** out) {
+OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* generator, const char* name, OgaTensor** out) {
   OGA_TRY
   auto& generator = *reinterpret_cast<const Generators::Generator*>(generator);
   auto* OrtValue = generator.State.GetOutput(name);
