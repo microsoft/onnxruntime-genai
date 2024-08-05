@@ -58,6 +58,18 @@ OgaResult* OGA_API_CALL OgaCreateSequences(OgaSequences** out) {
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaAppendTokenSequence(const int32_t * token_ptr, int32_t token_cnt, OgaSequences* sequence) {
+  OGA_TRY
+  Generators::TokenSequences* toks = reinterpret_cast<Generators::TokenSequences*>(sequence);
+  std::vector<int32_t> tmp(token_cnt);
+  for (size_t i = 0; i < token_cnt; i++) {
+    tmp[i] = (token_ptr[i]);
+  }
+  toks->emplace_back(std::move(tmp));
+  return nullptr;
+  OGA_CATCH
+}
+
 size_t OGA_API_CALL OgaSequencesCount(const OgaSequences* p) {
   return reinterpret_cast<const Generators::TokenSequences*>(p)->size();
 }
