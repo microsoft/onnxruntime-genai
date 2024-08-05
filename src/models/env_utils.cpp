@@ -3,6 +3,8 @@
 
 #include "env_utils.h"
 
+#include <stdexcept>
+
 #if _MSC_VER
 #include <Windows.h>
 #endif
@@ -31,11 +33,25 @@ std::string GetEnvironmentVariable(const char* var_name) {
     return buffer;
   }
 
-  return std::string();
+  return {};
 #else
   const char* val = getenv(var_name);
   return val == nullptr ? "" : std::string(val);
 #endif  // _MSC_VER
+}
+
+void GetEnvironmentVariable(const char* var_name, bool& value) {
+  std::string str_value = GetEnvironmentVariable(var_name);
+  if (str_value == "1" || str_value == "true") {
+    value = true;
+  } else if (str_value == "0" || str_value == "false") {
+    value = false;
+  } else if (!str_value.empty()) {
+    throw std::invalid_argument("Invalid value for environment variable " + std::string(var_name) + ": " + str_value +
+                                ". Expected '1' or 'true' for true, '0' or 'false' for false.");
+  }
+
+  // Otherwise, value will not be modified.
 }
 
 }  // namespace Generators

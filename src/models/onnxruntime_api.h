@@ -179,8 +179,9 @@ inline void InitApi() {
     return;
   }
 
-  const std::string ort_lib = Generators::GetEnvironmentVariable("ORTGENAI_LOG_ORT_LIB");
-  if (ort_lib == "1" || ort_lib == "true") {
+  bool ort_lib = false;
+  Generators::GetEnvironmentVariable("ORTGENAI_LOG_ORT_LIB", ort_lib);
+  if (ort_lib) {
     Generators::SetLogBool("enabled", true);
     Generators::SetLogBool("ort_lib", true);
   }
