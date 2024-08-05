@@ -8,11 +8,6 @@
 
 using namespace Helpers;
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-
 /*
  * Class:     ai_onnxruntime_genai_NamedTensors
  * Method:    destroyNamedTensors
@@ -22,7 +17,3 @@ JNIEXPORT
 void JNICALL Java_ai_onnxruntime_genai_NamedTensors_destroyNamedTensors(JNIEnv* env, jobject thiz, jlong native_handle) {
   OgaDestroyNamedTensors(reinterpret_cast<OgaNamedTensors*>(native_handle));
 }
-
-#ifdef __cplusplus
-}
-#endif

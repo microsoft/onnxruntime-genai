@@ -8,10 +8,6 @@
 
 using namespace Helpers;
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 
 /*
  * Class:     ai_onnxruntime_genai_Images
@@ -39,7 +35,3 @@ JNIEXPORT
 void JNICALL Java_ai_onnxruntime_genai_Images_destroyImages(JNIEnv* env, jobject thiz, jlong native_handle) {
   OgaDestroyImages(reinterpret_cast<OgaImages*>(native_handle));
 }
-
-#ifdef __cplusplus
-}
-#endif
