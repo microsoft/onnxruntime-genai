@@ -73,6 +73,7 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #include "onnxruntime_c_api.h"
 #include "../span.h"
 #include "../logging.h"
+#include "env_utils.h"
 
 #if defined(__ANDROID__)
 #include <android/log.h>
@@ -93,11 +94,14 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #define PATH_MAX (4096)
 #endif
 
-#define LOG_DEBUG(...) Generators::Log("debug", __VA_ARGS__)
-#define LOG_INFO(...) Generators::Log("info", __VA_ARGS__)
-#define LOG_WARN(...) Generators::Log("warning", __VA_ARGS__)
-#define LOG_ERROR(...) Generators::Log("error", __VA_ARGS__)
-#define LOG_FATAL(...) Generators::Log("fatal", __VA_ARGS__)
+#define LOG_WHEN_ENABLED(LOG_FUNC) \
+  if (Generators::g_log.enabled && Generators::g_log.ort_lib) LOG_FUNC
+
+#define LOG_DEBUG(...) LOG_WHEN_ENABLED(Generators::Log("debug", __VA_ARGS__))
+#define LOG_INFO(...) LOG_WHEN_ENABLED(Generators::Log("info", __VA_ARGS__))
+#define LOG_WARN(...) LOG_WHEN_ENABLED(Generators::Log("warning", __VA_ARGS__))
+#define LOG_ERROR(...) LOG_WHEN_ENABLED(Generators::Log("error", __VA_ARGS__))
+#define LOG_FATAL(...) LOG_WHEN_ENABLED(Generators::Log("fatal", __VA_ARGS__))
 
 #endif
 
@@ -173,6 +177,13 @@ inline void InitApi() {
   if (api) {
     // api was already set.
     return;
+  }
+
+  bool ort_lib = false;
+  Generators::GetEnvironmentVariable("ORTGENAI_LOG_ORT_LIB", ort_lib);
+  if (ort_lib) {
+    Generators::SetLogBool("enabled", true);
+    Generators::SetLogBool("ort_lib", true);
   }
 
 #if defined(__linux__)
