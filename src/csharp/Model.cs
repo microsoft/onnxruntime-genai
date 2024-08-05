@@ -42,8 +42,11 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             {
                 return;
             }
-            NativeMethods.OgaDestroyModel(_modelHandle);
-            _modelHandle = IntPtr.Zero;
+            if (_modelHandle != IntPtr.Zero)
+            {
+                NativeMethods.OgaDestroyModel(_modelHandle);
+                _modelHandle = IntPtr.Zero;
+            }
             _disposed = true;
         }
     }
