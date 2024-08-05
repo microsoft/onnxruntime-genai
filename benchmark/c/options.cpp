@@ -23,7 +23,7 @@ namespace {
   s << "Usage: " << program_name << " -i <model path> <other options>\n"
     << "  Options:\n"
     << "    -i,--input_folder <path>\n"
-    << "      Path to the ONNX model directory to benchmark, compatible with onnxruntime-genai.\n "
+    << "      Path to the ONNX model directory to benchmark, compatible with onnxruntime-genai.\n"
     << "    -b,--batch_size <number>\n"
     << "      Number of sequences to generate in parallel. Default: " << defaults.batch_size << "\n"
     << "    -l,--prompt_length <number>\n"

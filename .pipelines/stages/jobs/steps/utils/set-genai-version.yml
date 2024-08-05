@@ -1,12 +1,10 @@
 steps:
-- task: PythonScript@0
+- task: PowerShell@2
   displayName: 'Set genai_version variable from VERSION_INFO'
   inputs:
-    pythonInterpreter: '/usr/bin/python3'
     workingDirectory: $(Build.SourcesDirectory)
-    scriptSource: inline
+    targetType: inline
     script: |
-      with open('VERSION_INFO') as vi:
-          version = vi.readline().strip()
-          print(f"Setting variable: genai_version = '{version}'")
-          print(f"##vso[task.setvariable variable=genai_version]{version}")
+      $version = (Get-Content -Path .\VERSION_INFO).Trim()
+      Write-Host "Setting variable: genai_version = ${version}"
+      Write-Host "##vso[task.setvariable variable=genai_version]${version}"

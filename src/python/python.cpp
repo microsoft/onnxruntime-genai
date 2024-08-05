@@ -462,14 +462,14 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   pybind11::class_<MultiModalProcessor, std::shared_ptr<MultiModalProcessor>>(m, "MultiModalProcessor")
       .def("__call__", [](MultiModalProcessor& processor, const std::string& prompt, const pybind11::kwargs& kwargs) -> std::unique_ptr<PyNamedTensors> {
-        if (processor.image_processor_) {
-          const Images* images = nullptr;
-          if (kwargs.contains("images")) {
-            images = kwargs["images"].cast<const Images*>();
+        if (kwargs.contains("images")) {
+          if (processor.image_processor_ == nullptr) {
+            throw std::runtime_error("Image processor is not available for this model.");
           }
+          const Images* images = kwargs["images"].cast<const Images*>();
           return std::make_unique<PyNamedTensors>(processor.image_processor_->Process(*processor.tokenizer_, prompt, images));
         } else {
-          throw std::runtime_error("Image processor is not available.");
+          throw std::runtime_error("MultiModalProcessor cannot process this request. Nothing to process.");
         }
       })
       .def("create_stream", [](MultiModalProcessor& processor) { return processor.tokenizer_->CreateStream(); })

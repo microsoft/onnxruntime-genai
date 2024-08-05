@@ -5,6 +5,7 @@
 #include "json.h"
 #include <iostream>
 #include <fstream>
+#include <cstdarg>
 
 namespace Generators {
 
@@ -85,6 +86,21 @@ std::ostream& Log(std::string_view label, std::string_view string) {
   if (!string.empty())
     *gp_stream << string << std::endl;
   return *gp_stream;
+}
+
+std::ostream& Log(std::string_view label, const char* fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  va_list args_copy;
+  va_copy(args_copy, args);
+  size_t len = vsnprintf(0, 0, fmt, args_copy);
+  if (len <= 0) {
+    throw std::runtime_error("Invalid format");
+  }
+  std::unique_ptr<char[]> buf(new char[len + 1]);
+  vsnprintf(buf.get(), len + 1, fmt, args);
+  va_end(args);
+  return Log(label, std::string(buf.get(), buf.get() + len));
 }
 
 }  // namespace Generators
