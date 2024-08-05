@@ -77,7 +77,7 @@ static std::vector<ComPtr<IDXGIAdapter1>> EnumerateAdapters() {
 
 static ComPtr<IDXGIAdapter1> CreatePerformantAdapter() {
   auto filtered_adapters = EnumerateAdapters();
-  if(filtered_adapters.empty()) {
+  if (filtered_adapters.empty()) {
     throw std::runtime_error("No adapter is available for DML.");
   }
   return filtered_adapters.front();
