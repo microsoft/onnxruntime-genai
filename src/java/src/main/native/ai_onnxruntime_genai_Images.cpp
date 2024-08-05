@@ -4,10 +4,6 @@
  */
 #include <jni.h>
 #include "ort_genai_c.h"
-#include "utils.h"
-
-using namespace Helpers;
-
 
 /*
  * Class:     ai_onnxruntime_genai_Images
