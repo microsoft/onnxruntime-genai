@@ -4,6 +4,7 @@
  */
 #include <jni.h>
 #include "ort_genai_c.h"
+#include "utils.h"
 
 /*
  * Class:     ai_onnxruntime_genai_Images
