@@ -107,5 +107,4 @@ jobs:
       run: |
         $env:PATH = "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin;" + $env:PATH 
         echo "Current PATH variable is: $env:PATH" 
-        Get-ChildItem "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin"
         & .\$env:binaryDir\test\Release\unit_tests.exe
