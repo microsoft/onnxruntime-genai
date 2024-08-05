@@ -213,32 +213,7 @@ inline void InitApi() {
 
 #if !defined(__ANDROID__)
   if (ort_lib_handle == nullptr) {
-    const std::array<std::string, 4> target_libraries = {
-        std::string("libonnxruntime.so"),
-        std::string("libonnxruntime.so.1.18.0"),
-        std::string("libonnxruntime.so.1.19.0"),
-        std::string("libonnxruntime.so.1.20.0")};
-
-    // Search parent directory
-    std::string current_module_dir = GetCurrentModuleDir();
-    for (const std::string& lib_name : target_libraries) {
-      std::string pip_path{current_module_dir + "/" + lib_name};
-      ort_lib_handle = LoadDynamicLibraryIfExists(pip_path);
-      if (ort_lib_handle != nullptr) {
-        break;
-      }
-    }
-
-    if (ort_lib_handle == nullptr) {
-      // Search for pip installation
-      for (const std::string& lib_name : target_libraries) {
-        std::string pip_path{current_module_dir + "/../onnxruntime/capi/" + lib_name};
-        ort_lib_handle = LoadDynamicLibraryIfExists(pip_path);
-        if (ort_lib_handle != nullptr) {
-          break;
-        }
-      }
-    }
+    ort_lib_handle = LoadDynamicLibraryIfExists("libonnxruntime.so.1");
   }
 #endif
 
