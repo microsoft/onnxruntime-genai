@@ -224,7 +224,9 @@ OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* oga_generator
     cudaMemcpy(ortvalue_clone->GetTensorMutableRawData(), ortvalue_output->GetTensorMutableRawData(), data_size, cudaMemcpyDeviceToHost);
   }
 #else
-    std::copy(ortvalue_output->GetTensorMutableRawData(), ortvalue_output->GetTensorMutableRawData() + data_size, ortvalue_clone->GetTensorMutableRawData());
+  std::copy(static_cast<char*>(ortvalue_output->GetTensorMutableRawData()),
+            static_cast<char*>(ortvalue_output->GetTensorMutableRawData()) + data_size,
+            static_cast<char*>(ortvalue_clone->GetTensorMutableRawData()));
 #endif
 
   auto tensor = std::make_shared<Generators::Tensor>(std::move(ortvalue_clone));
