@@ -6,7 +6,7 @@ from onnxruntime_genai import _dll_directory
 __version__ = "@VERSION_INFO@"
 __id__ = "@TARGET_NAME@"
 
-_dll_directory.add_onnxruntime_dependency()
+_dll_directory.add_onnxruntime_dependency(__id__)
 
 try:
     from onnxruntime_genai.@PACKAGE_DIR_NAME@ import *
