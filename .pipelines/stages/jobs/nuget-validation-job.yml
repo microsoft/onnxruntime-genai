@@ -98,6 +98,8 @@ jobs:
     displayName: Copy python 3.12.3 version to agent tools directory
     condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'))
 
+  - task: NuGetAuthenticate@1
+
   - task: UsePythonVersion@0
     inputs:
       versionSpec: 3.12
@@ -145,6 +147,7 @@ jobs:
       workingDirectory: '$(Build.Repository.LocalPath)'
   - ${{ elseif eq(parameters.os, 'linux') }}:
     - bash: |
+        export ORTGENAI_LOG_ORT_LIB=1
         dotnet --info
         cp $(Build.BinariesDirectory)/nuget/* examples/csharp/HelloPhi/
         cd examples/csharp/HelloPhi

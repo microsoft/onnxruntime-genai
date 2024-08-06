@@ -191,6 +191,7 @@ jobs:
             -e HF_TOKEN=$HF_TOKEN \
             -w /ort_genai_src/ $(cuda_docker_image) \
             bash -c " \
+                export ORTGENAI_LOG_ORT_LIB=1 && \
                 $python_exe -m pip install -r /ort_genai_src/test/python/requirements.txt && \
                 $python_exe -m pip install -r /ort_genai_src/test/python/requirements-cuda.txt && \
                 cd /ort_genai_src/examples/python && \
@@ -201,6 +202,7 @@ jobs:
         workingDirectory: '$(Build.Repository.LocalPath)'
     - ${{ elseif eq(parameters.ep, 'cpu') }}:
       - bash: |
+          export ORTGENAI_LOG_ORT_LIB=1
           python -m pip install -r test/python/requirements.txt
           python -m pip install -r test/python/requirements-cpu.txt
           cd examples/python
