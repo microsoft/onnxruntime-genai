@@ -52,7 +52,7 @@ parameters:
 - name: ort_cuda_122_version
   displayName: 'OnnxRuntime GPU version for CUDA 12.2'
   type: string
-  default: '1.19.0-dev-20240805-0903-88c811b6'
+  default: '1.19.0-dev-20240805-0337-88c811b638'
 
 - name: ort_dml_version
   displayName: 'OnnxRuntime DML version'
@@ -62,7 +62,7 @@ parameters:
 - name: ort_rocm_version
   displayName: 'OnnxRuntime ROCm version'
   type: string
-  default: '1.19.0-dev-20240805-0903-88c811b6'
+  default: '1.19.0-dev-20240805-0337-88c811b638'
 
 - name: cuda_versions
   displayName: 'CUDA versions'
