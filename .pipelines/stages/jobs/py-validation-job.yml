@@ -191,8 +191,8 @@ jobs:
             -e HF_TOKEN=$HF_TOKEN \
             -w /ort_genai_src/ $(cuda_docker_image) \
             bash -c " \
-                $python_exe -m pip install -r /ort_genai_src/test/python/requirements.txt  && \
-                $python_exe -m pip install -r /ort_genai_src/test/python/requirements-cuda.txt  && \
+                $python_exe -m pip install -r /ort_genai_src/test/python/requirements.txt && \
+                $python_exe -m pip install -r /ort_genai_src/test/python/requirements-cuda.txt && \
                 cd /ort_genai_src/examples/python && \
                 $python_exe -m pip install --no-index --find-links=/ort_genai_binary/wheel $(pip_package_name) && \
                 $python_exe model-generate.py -m ./models/$(prebuild_phi3_mini_model_folder)"
