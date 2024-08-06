@@ -42,6 +42,7 @@ struct Logits {
 
 #if USE_DML
   DmlReusedCommandListState logits_cast_command_list_state_{};
+  std::unique_ptr<OrtValue> logits_of_last_token_fp32_;
   std::unique_ptr<OrtValue> value32_cpu_;
 #endif
 };
