@@ -160,7 +160,7 @@ jobs:
         import subprocess
         subprocess.call(['pip', 'install', '-q', 'setuptools', 'wheel', 'build', 'packaging', 'twine'])
       workingDirectory: '$(Build.BinariesDirectory)'
-      displayName: 'Install python modules'
+    displayName: 'Install python modules'
 
   - ${{ if eq(parameters.os, 'linux') }}:
     - template: steps/capi-linux-step.yml

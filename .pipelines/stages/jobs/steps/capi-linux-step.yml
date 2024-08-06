@@ -34,8 +34,11 @@ steps:
 
 - bash: |
     echo "arch=$(arch)"
+    echo "ort_version=$(ort_version)"
     echo "ep=$(ep)"
-    echo "build_config=$(build_config)"
+    echo "cuda_version=$(cuda_version)"
+    echo "target=${{ parameters.target }}"
+    echo "build_config=${{ parameters.build_config }}"
   displayName: 'Print Parameters'
 
 - template: utils/download-ort.yml
