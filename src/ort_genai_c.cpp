@@ -215,15 +215,14 @@ OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* oga_generator
   auto type_info = ortvalue_output->GetTensorTypeAndShapeInfo();
   std::unique_ptr<OrtValue> ortvalue_clone = OrtValue::CreateTensor(generator.model_->allocator_device_,
                                                                     type_info->GetShape(),
-                                                                    type_info->ElementType());
+                                                                    type_info->GetElementType());
   // Copy data to ortvalue_clone
   auto element_size = Generators::SizeOf(type_info->GetElementType());
   auto data_size = type_info->GetElementCount() * element_size;
-
-  if (ortvalue_output->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU && generator.model_.device_type_ == Generators::DeviceType::CUDA) {
-    Generators::CudaCheck() == cudaMemcpy(ortvalue_clone.get(), ortvalue_output->GetTensorMutableRawData(), data_size, cudaMemcpyDeviceToHost);
-  } else{
-    std::copy(ortvalue_output->GetTensorMutableRawData(), ortvalue_output->GetTensorMutableRawData() + data_size, ortvalue_clone.get());
+  if (ortvalue_output->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU && generator.model_->device_type_ == Generators::DeviceType::CUDA) {
+    cudaMemcpy(ortvalue_clone->GetTensorMutableRawData(), ortvalue_output->GetTensorMutableRawData(), data_size, cudaMemcpyDeviceToHost);
+  } else {
+    std::copy(ortvalue_output->GetTensorMutableRawData(), ortvalue_output->GetTensorMutableRawData() + data_size, ortvalue_clone->GetTensorMutableRawData());
   }
 
   auto tensor = std::make_shared<Generators::Tensor>(std::move(ortvalue_clone));
