@@ -139,10 +139,6 @@ struct Inputs_Element : JSON::Element {
       v_.cross_past_key_names = value;
     } else if (name == "cross_past_value_names") {
       v_.cross_past_value_names = value;
-    } else if (name == "curr_seq_length") {
-      v_.curr_seq_length = value;
-    } else if (name == "past_seq_length") {
-      v_.past_seq_length = value;
     } else
       throw JSON::unknown_value_error{};
   }
