@@ -232,10 +232,10 @@ struct OgaGenerator : OgaAbstract {
     return OgaGenerator_GetSequenceData(this, index);
   }
 
-  OgaTensor* GetOutput(const char* name) {
+  std::unique_ptr<OgaTensor> GetOutput(const char* name) {
     OgaTensor* out;
     OgaCheckResult(OgaGenerator_GetOutput(this, name, &out));
-    return out;
+    return std::unique_ptr<OgaTensor>(out);
   }
 
 #if __cplusplus >= 202002L
