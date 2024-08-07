@@ -6,7 +6,7 @@ package ai.onnxruntime.genai;
 public class Images implements AutoCloseable{
     private long nativeHandle;
 
-    public Images(String imagesPath) throws GenAIException {
+    public Images(String imagePath) throws GenAIException {
         nativeHandle = loadImages(imagesPath);
     }
 
