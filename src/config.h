@@ -27,6 +27,12 @@ struct Config {
     std::optional<int> inter_op_num_threads;
     std::optional<bool> enable_cpu_mem_arena;
     std::optional<bool> enable_mem_pattern;
+    std::optional<bool> disable_cpu_ep_fallback;
+    std::optional<bool> disable_quant_qdq;
+    std::optional<bool> enable_quant_qdq_cleanup;
+    std::optional<bool> ep_context_enable;
+    std::optional<std::string> ep_context_embed_mode;
+    std::optional<std::string> ep_context_file_path;
     std::optional<std::string> log_id;
     std::optional<int> log_severity_level;
     std::optional<std::string> enable_profiling;
