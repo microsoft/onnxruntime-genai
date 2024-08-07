@@ -443,7 +443,7 @@ void Model::CreateSessionOptions() {
           opts.emplace(option.first, option.second);
         }
 
-        ort_options.AppendExecutionProvider("QNN", opts);
+        session_options.AppendExecutionProvider("QNN", opts);
       } else
         throw std::runtime_error("Unknown provider type: " + provider_options.name);
     }
