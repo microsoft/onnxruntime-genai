@@ -7,7 +7,7 @@ public class Images implements AutoCloseable{
     private long nativeHandle;
 
     public Images(String imagePath) throws GenAIException {
-        nativeHandle = loadImages(imagesPath);
+        nativeHandle = loadImages(imagePath);
     }
 
     @Override
@@ -30,7 +30,7 @@ public class Images implements AutoCloseable{
         }
     }
 
-    private native long loadImages(String imagesPath) throws GenAIException;
+    private native long loadImages(String imagePath) throws GenAIException;
 
     private native void destroyImages(long imageshandle);
 }
