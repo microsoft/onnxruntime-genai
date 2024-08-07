@@ -102,6 +102,8 @@ def generate_dependencies(xml_text, package_version, ort_package_name, ort_packa
         xml_text.append(f'<group targetFramework="{framework}">')
         xml_text.append(f'<dependency id="Microsoft.ML.OnnxRuntimeGenAI.Managed" version="{package_version}" />')
         xml_text.append(f'<dependency id="{ort_package_name}" version="{ort_package_version}" />')
+        if ort_package_name.endswith("DirectML"):
+            xml_text.append(f'<dependency id="Microsoft.AI.DirectML" version="1.15.0" />')
         xml_text.append("</group>")
 
     xml_text.append("</dependencies>")
@@ -125,6 +127,7 @@ def generate_files(lines, args):
       if runtime.startswith("win"):
           add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai.lib")
           add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai.dll")
+          add_native_artifact_if_exists(lines, runtime, "d3d12core.dll")
       if runtime.startswith("linux"):
           add_native_artifact_if_exists(lines, runtime, "libonnxruntime-genai.so")
 
