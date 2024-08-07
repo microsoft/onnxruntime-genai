@@ -316,6 +316,40 @@ void Model::CreateSessionOptions() {
     ort_options.EnableProfiling(profile_file_prefix.c_str());
   }
 
+  if (options.disable_cpu_ep_fallback.has_value()) {
+    if (options.disable_cpu_ep_fallback.value())
+      ort_options.DisableCpuEpFallback();
+    else
+      ort_options.EnableCpuEpFallback();
+  }
+
+  if (options.disable_quant_qdq.has_value()) {
+    if (options.disable_quant_qdq.value())
+      ort_options.DisableQuantQdq();
+    else
+      ort_options.EnableQuantQdq();
+  }
+
+  if (options.enable_quant_qdq_cleanup.has_value()) {
+    if (options.enable_quant_qdq_cleanup.value())
+      ort_options.EnableQuantQdqCleanup();
+    else
+      ort_options.DisableQuantQdqCleanup();
+  }
+
+  if (options.ep_context_enable.has_value()) {
+    if (options.ep_context_enable.value())
+      ort_options.SetEpContextEnable();
+  }
+
+  if (options.ep_context_embed_mode.has_value()) {
+    ort_options.SetEpContextEmbedMode(options.ep_context_embed_mode.value().c_str());
+  }
+
+  if (options.ep_context_file_path.has_value()) {
+    ort_options.SetEpContextFilePath(options.ep_context_file_path.value().c_str());
+  }
+
   for (auto& provider_options : options.provider_options) {
     if (provider_options.name == "cuda") {
       auto ort_provider_options = OrtCUDAProviderOptionsV2::Create();
@@ -388,6 +422,13 @@ void Model::CreateSessionOptions() {
 
       device_type_ = DeviceType::DML;  // We use a DML allocator for input/output caches, but other tensors will use CPU tensors
 #endif
+    } else if (provider_options.name == "qnn") {
+      std::unordered_map<std::string, std::string> opts;
+      for (auto& option : provider_options.options) {
+        opts.emplace(option.first, option.second);
+      }
+
+      ort_options.AppendExecutionProvider("QNN", opts);
     } else
       throw std::runtime_error("Unknown provider type: " + provider_options.name);
   }
