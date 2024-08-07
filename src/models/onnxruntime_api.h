@@ -116,6 +116,19 @@ using OrtApiBaseFn = const OrtApiBase* (*)(void);
 inline const OrtApi* api{};
 
 #if defined(__linux__)
+inline std::string GetCurrentModuleDir() {
+  Dl_info dl_info;
+  dladdr((void*)GetCurrentModuleDir, &dl_info);
+  std::string module_name(dl_info.dli_fname);
+  std::string module_directory{};
+
+  const size_t last_slash_idx = module_name.rfind('/');
+  if (std::string::npos != last_slash_idx) {
+    module_directory = module_name.substr(0, last_slash_idx);
+  }
+  return module_directory;
+}
+
 inline void* LoadDynamicLibraryIfExists(const std::string& path) {
   LOG_INFO("Attempting to dlopen %s", path.c_str());
   void* ort_lib_handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
@@ -139,19 +152,6 @@ inline void* LoadDynamicLibraryIfExists(const std::string& path) {
     LOG_WARN("Error while dlopen: %s", (err != nullptr ? err : "Unknown"));
   }
   return ort_lib_handle;
-}
-
-inline std::string GetCurrentModuleDir() {
-  Dl_info dl_info;
-  dladdr((void*)GetCurrentModuleDir, &dl_info);
-  std::string module_name(dl_info.dli_fname);
-  std::string module_directory{};
-
-  const size_t last_slash_idx = module_name.rfind('/');
-  if (std::string::npos != last_slash_idx) {
-    module_directory = module_name.substr(0, last_slash_idx);
-  }
-  return module_directory;
 }
 
 inline void InitApiWithDynamicFn(OrtApiBaseFn ort_api_base_fn) {
@@ -228,7 +228,7 @@ inline void InitApi() {
 #endif
 
   if (ort_lib_handle == nullptr) {
-    throw std::runtime_error(std::string("Failed to load onnxruntime. Set ORTGENAI_LOG_ORT_LIB envvar to enable detailed logging.");
+    throw std::runtime_error(std::string("Failed to load onnxruntime. Set ORTGENAI_LOG_ORT_LIB envvar to enable detailed logging."));
   }
 
   OrtApiBaseFn ort_api_base_fn = (OrtApiBaseFn)dlsym(ort_lib_handle, "OrtGetApiBase");
