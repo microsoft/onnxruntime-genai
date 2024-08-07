@@ -6,7 +6,6 @@
 
 #include <jni.h>
 #include <stdlib.h>
-#include <string>
 #include "ort_genai_c.h"
 
 #ifdef __cplusplus
@@ -31,16 +30,12 @@ bool ThrowIfError(JNIEnv* env, OgaResult* result);
 // handle conversion/release of jstring to const char*
 struct CString {
   CString(JNIEnv* env, jstring str)
-      : env_{env}, str_{str}, cstr{env->GetStringUTFChars(str, /* isCopy */ nullptr)}, len_{env->GetStringUTFLength(str)} {
+      : env_{env}, str_{str}, cstr{env->GetStringUTFChars(str, /* isCopy */ nullptr)} {
   }
 
   const char* cstr;
 
   operator const char*() const { return cstr; }
-
-  std::string utf8String() {
-    return {cstr, static_cast<size_t>(len_)};
-  }
 
   ~CString() {
     env_->ReleaseStringUTFChars(str_, cstr);
@@ -49,6 +44,5 @@ struct CString {
  private:
   JNIEnv* env_;
   jstring str_;
-  jsize len_;
 };
 }  // namespace Helpers

@@ -9,21 +9,6 @@
 using namespace Helpers;
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_ai_onnxruntime_genai_Model_setupQnnEnv(JNIEnv* env, jobject thiz, jstring jpath) {
-  CString path = {env, jpath};
-  std::string utf8Path = path.utf8String();
-#ifdef __ANDROID__
-  // From https://developer.qualcomm.com/sites/default/files/docs/snpe/dsp_runtime.html
-  // This will prioritize the path users provided over system paths.
-  // Without this, libraries with mismatched versions can be loaded from different places.
-  setenv("ADSP_LIBRARY_PATH",
-         (utf8Path + ";/vendor/dsp/cdsp;/vendor/lib/rfsa/adsp;/system/lib/rfsa/adsp;/vendor/dsp/dsp;/vendor/dsp/images;/dsp").c_str(),
-         1 /*overwrite*/);
-#endif
-  return 0;
-}
-
-extern "C" JNIEXPORT jlong JNICALL
 Java_ai_onnxruntime_genai_Model_createModel(JNIEnv* env, jobject thiz, jstring model_path) {
   CString path{env, model_path};
 
