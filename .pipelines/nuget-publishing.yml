@@ -41,7 +41,7 @@ parameters:
 - name: ort_cuda_version
   displayName: 'OnnxRuntime GPU version'
   type: string
-  default: '1.18.0-dev-20240426-0614-b842effa29'
+  default: '1.19.0-dev-20240805-0337-88c811b638'
 
 - name: ort_dml_version
   displayName: 'OnnxRuntime DML version'
@@ -98,6 +98,7 @@ stages:
     enable_win_dml: ${{ parameters.enable_win_dml }}
     enable_win_arm64: ${{ parameters.enable_win_arm64 }}
     ort_version: ${{ parameters.ort_version }}
+    ort_cuda_version: ${{ parameters.ort_cuda_version }}
     ort_dml_version: ${{ parameters.ort_dml_version }}
     build_config: ${{ parameters.build_config }}
 
