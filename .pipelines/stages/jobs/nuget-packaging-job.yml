@@ -137,10 +137,6 @@ jobs:
 
   - template: steps/utils/set-genai-version.yml
 
-  - task: UseDotNet@2
-    inputs:
-      version: '6.x'
-
   - powershell: |
       dotnet --info
       dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(buildConfig)" --verbosity normal
