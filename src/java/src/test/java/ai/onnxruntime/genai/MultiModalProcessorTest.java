@@ -19,7 +19,7 @@ public class MultiModalProcessorTest {
             String inputs = new String("This is a test");
             Images image = new Images("/src/java/src/test/java/ai/onnxruntime/genai/landscape.jpg");
             NamedTensors processed = multiModalProcessor.processImages(inputs, image);
-            generatorParams.setInput(processed);
+            generatorParams.setInputs(processed);
 
             Generator generator = new Generator(model, generatorParams);
 
