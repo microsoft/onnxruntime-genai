@@ -26,14 +26,27 @@ from metrics import BenchmarkRecord
 
 peak_cpu_memory = 0.0
 peak_gpu_memory = 0.0
+idle_gpu_memory = 0.0
 peak_memory_lock = threading.Lock()
 stop_monitoring = False
+
+SAMPLE_PROMPT = "Analyze the ethical implications of using artificial intelligence in decision-making processes within critical sectors such as healthcare, criminal justice, and employment. Discuss how AI can both enhance and complicate fairness, accountability, and transparency in these areas. Consider the role of data bias, algorithmic transparency, and the potential for AI to perpetuate or mitigate social inequalities. Provide examples of current AI applications in these sectors and evaluate their impacts on individual rights and societal norms. Additionally, explore the regulatory measures that could be implemented to ensure that the deployment of AI technologies promotes ethical outcomes and aligns with human values. Conclude with recommendations for future AI research and policy initiatives that could help in achieving a balance between technological advancement and ethical governance."
 
 try:
     subprocess.run(["nvidia-smi"], check=True)
     IS_NVIDIA_SYSTEM = True
 except Exception:
     IS_NVIDIA_SYSTEM = False
+
+def get_gpu_memory():
+    """returns memory in MB"""
+    command = "nvidia-smi --query-gpu=memory.used --format=csv"
+    memory_free_info = subprocess.check_output(command.split()).decode('ascii').split('\n')[:-1][1:]
+    memory_free_values = [int(x.split()[0]) for i, x in enumerate(memory_free_info)]
+    return memory_free_values
+
+if IS_NVIDIA_SYSTEM:
+    idle_gpu_memory = get_gpu_memory()[0] / 1000.0
 
 # Monitor the GPU memory usage
 def monitor_gpu_memory():
@@ -44,7 +57,7 @@ def monitor_gpu_memory():
 
         memory_usage = result.stdout.splitlines()
 
-        if len(memory_usage) > 1:
+        if len(memory_usage) >= 1:
             gpu_memory = [float(line) for line in memory_usage]
             current_peak = round(max(gpu_memory) / 1024, 2)
             with peak_memory_lock:
@@ -65,22 +78,32 @@ def monitor_cpu_memory():
         time.sleep(0.1)
 
 # Use input model to generate prompt
-def generate_prompt(model, tokenizer, prompt_length, use_graph_capture) -> str:
-    temperature = 1.0
-    prompt = "a"
-    tokens = tokenizer.encode(prompt)
-    params=og.GeneratorParams(model)
-    params.set_search_options(do_sample=True, top_k=5, temperature=temperature, max_length=prompt_length, min_length=prompt_length+1)
-    params.input_ids = tokens
+def generate_prompt_tokens(tokenizer, prompt_length, pad_token) -> str:
+    # temperature = 1.0
+    # prompt = "a"
+    # tokens = tokenizer.encode(prompt)
+    # params=og.GeneratorParams(model)
+    # params.set_search_options(do_sample=True, top_k=5, temperature=temperature, max_length=prompt_length, min_length=prompt_length)
+    # params.input_ids = tokens
 
-    if use_graph_capture:
-        params.try_graph_capture_with_max_batch_size(1)
+    # if use_graph_capture:
+    #     params.try_graph_capture_with_max_batch_size(1)
 
-    generator=og.Generator(model, params)
-    while not generator.is_done():
-        generator.compute_logits()
-        generator.generate_next_token()
-    return tokenizer.decode(generator.get_sequence(0))
+    # generator=og.Generator(model, params)
+    # while not generator.is_done():
+    #     generator.compute_logits()
+    #     generator.generate_next_token()
+    # return tokenizer.decode(generator.get_sequence(0)[:prompt_length])
+
+    # random
+    tokens = tokenizer.encode(SAMPLE_PROMPT)
+    if len(tokens)>=prompt_length:
+        return tokens[:prompt_length]
+
+    for i in range(prompt_length-len(tokens)):
+        tokens.append(pad_token)
+    return tokens
+
 
 def get_target_pip_package_version(target_pip_package_name_list):
     # get package name and version
@@ -135,9 +158,9 @@ def save_results(args, results, filename, print_memory_usage=False):
 
     if print_memory_usage:
         if IS_NVIDIA_SYSTEM:
-            columns.append("peak_gpu_memory (GiB)")
+            columns.append("Peak GPU Memory (GiB)")
         else:
-            columns.append("peak_cpu_memory(GiB)")
+            columns.append("Peak CPU Memory (GiB)")
 
     df = pd.DataFrame(
         results,
@@ -165,6 +188,9 @@ def save_results(args, results, filename, print_memory_usage=False):
         record.metrics.customized["sampling_latency_ms"] = row["Sampling Latency (ms)"]   
         record.metrics.customized["wall_clock_throughput_tps"] = row["Wall Clock Throughput (tps)"]
         record.metrics.customized["wall_clock_time_s"] = row["Wall Clock Time (s)"]
+
+        if print_memory_usage:
+            record.metrics.customized["peak_gpu_memory_gb"] = row["Peak GPU Memory (GiB)"]
         
         records.append(record)
         
@@ -192,7 +218,7 @@ def run_benchmark_memory(args, batch_size, prompt_length, generation_length, max
     monitor_thread.join()
 
     if IS_NVIDIA_SYSTEM:
-        metrics.append(peak_gpu_memory)
+        metrics.append(peak_gpu_memory - idle_gpu_memory)
     else:
         metrics.append(peak_cpu_memory)
     
@@ -210,12 +236,11 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     if args.verbose: print("Model loaded")
     tokenizer = og.Tokenizer(model)
 
- 
-    # Generate prompt
-    prompt = [generate_prompt(model, tokenizer, prompt_length, args.use_graph_capture)] * batch_size
-    tokens = tokenizer.encode_batch(prompt)
-
     params = og.GeneratorParams(model)
+
+    # Generate prompt
+    tokens = [generate_prompt_tokens(tokenizer, prompt_length, params.pad_token_id)] * batch_size
+
     params.input_ids = tokens
     do_sample = args.top_k > 1 or (args.top_p != 1.0 and args.top_p > 0.0)
     params.set_search_options(do_sample=do_sample, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length)
@@ -246,6 +271,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         generator = og.Generator(model, params)
 
         # Measure tokenization
+        prompt = [tokenizer.decode(tokens[0])]*batch_size
         tokenize_start_time = time.perf_counter()
         tokens = tokenizer.encode_batch(prompt)
         tokenize_end_time = time.perf_counter()
@@ -293,6 +319,9 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
 
         # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
         del generator
+
+    print(f"Model: {args.model_name}")
+    print(f"Args: batch_size = {batch_size}, prompt_length = {prompt_length}, tokens = {generation_length}, max_length = {max_length}")
 
     # Calculate tokenization metrics
     avg_tokenization_latency_s = sum(tokenize_times) / len(tokenize_times)
@@ -372,7 +401,7 @@ def main(args):
 
     if args.print_memory_usage:
         if IS_NVIDIA_SYSTEM:
-            print(f"-------------------* Peak GPU Memory Usage: {peak_gpu_memory} GiB *-------------------")
+            print(f"-------------------* Peak GPU Memory Usage: {peak_gpu_memory - idle_gpu_memory} GiB *-------------------")
         else:
             print(f"-------------------* Peak CPU Memory Usage: {peak_cpu_memory} GiB *-------------------")
         save_results(args, all_csv_metrics, filename, print_memory_usage=True)
