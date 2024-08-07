@@ -380,7 +380,7 @@ void DmlCastInputToOutput(
   auto dml_from_type = DmlHelpers::OrtToDmlDataType(in.GetTensorTypeAndShapeInfo()->GetElementType());
   auto dml_to_type = DmlHelpers::OrtToDmlDataType(p_out->GetTensorTypeAndShapeInfo()->GetElementType());
 
-  bool rebind = command_list_state.previousOutput != p_out.get();
+  bool rebind = command_list_state.previousInput != &in || command_list_state.previousOutput != p_out.get();
 
   // If the sizes change, we need to recompile the operator and rebuild the command lists. It should only happen
   // once after the very first iteration.
@@ -406,6 +406,7 @@ void DmlCastInputToOutput(
     DML_BINDING_DESC input_array_binding_desc = DML_BINDING_DESC{DML_BINDING_TYPE_NONE, nullptr};
     execution_context->InitializeOperator(compiled_cast_operator.Get(), persistent_resource_bindingDesc, input_array_binding_desc);
     command_list_state = DmlHelpers::BuildReusableCommandList(dml_device, compiled_cast_operator.Get(), persistent_resource.Get(), persistent_resource_binding);
+    command_list_state.previousInput = &in;
     command_list_state.previousOutput = p_out.get();
   }
 
