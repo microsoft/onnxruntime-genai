@@ -84,7 +84,7 @@ target_link_directories(onnxruntime-genai PRIVATE ${ORT_LIB_DIR})
 
 # we keep the shared libraries disconnected on Android as they will come from separate AARs and we don't want to force
 # the ORT version to match in both.
-if(NOT ANDROID)
+if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux"))
 target_link_libraries(onnxruntime-genai PRIVATE ${ONNXRUNTIME_LIB})
 endif()
 
@@ -115,7 +115,7 @@ endif()
 if(USE_DML)
   list(APPEND onnxruntime_libs "${ORT_LIB_DIR}/DirectML.dll")
   list(APPEND onnxruntime_libs "${ORT_LIB_DIR}/D3D12Core.dll")
-  list(APPEND ortgenai_embed_libs "${ORT_LIB_DIR}/DirectML.dll" "${ORT_LIB_DIR}/D3D12Core.dll")
+  list(APPEND ortgenai_embed_libs "${ORT_LIB_DIR}/D3D12Core.dll")
   target_include_directories(onnxruntime-genai PRIVATE $<TARGET_PROPERTY:${WIL_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
   target_include_directories(onnxruntime-genai PRIVATE $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>/directx)
   target_include_directories(onnxruntime-genai PRIVATE $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)

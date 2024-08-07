@@ -42,6 +42,7 @@ struct LogItems {
   bool model_output_shapes{};  // Before the model runs there are only the output shapes, no values in them. Useful for pre Session::Run debugging
   bool model_output_values{};  // After the model runs the output tensor values can be displayed
   bool model_logits{};         // Same as model_output_values but only for the logits
+  bool ort_lib{};              // Log the onnxruntime library loading and api calls.
 };
 
 extern LogItems g_log;
@@ -76,4 +77,5 @@ std::ostream& operator<<(std::ostream& stream, SGR sgr_code);
 
 std::ostream& Log(std::string_view label, std::string_view text = {});
 
+std::ostream& Log(std::string_view label, const char* fmt, ...);
 }  // namespace Generators

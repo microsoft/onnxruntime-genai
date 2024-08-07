@@ -11,10 +11,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 env:
-  ort_dir: "onnxruntime-win-arm64-1.17.3"
-  ort_zip: "$(ort_dir).zip"
-  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/$(ort_zip)"
-  binaryDir: 'build/cpu'
+  binaryDir: 'build/cpu/win-arm64'
+  ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
+  ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
 
 jobs:
   windows-cpu-arm64-build:
@@ -31,19 +30,27 @@ jobs:
         vs-version: '17.4'
         msbuild-architecture: arm64
 
-    - name: Download OnnxRuntime
-      run: |
-        $env:ort_url = "https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/onnxruntime-win-arm64-1.17.3.zip"
-        Invoke-WebRequest -Uri $env:ort_url -OutFile $env:ort_zip
+    - uses: nuget/setup-nuget@v2
+      with:
+        nuget-version: '5.x'
 
-    - name: Unzip OnnxRuntime
+    - name: Download OnnxRuntime Nightly
+      shell: powershell
       run: |
-        Expand-Archive $env:ort_zip -DestinationPath .
-        Remove-Item -Path $env:ort_zip
+        $resp = Invoke-RestMethod "${{ env.ORT_NIGHTLY_REST_API }}"
+        $ORT_NIGHTLY_VERSION = $resp.value[0].versions[0].normalizedVersion
+        Write-Host "$ORT_NIGHTLY_VERSION"
+        "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
+        nuget install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_NIGHTLY_VERSION -x -NonInteractive
 
-    - name: Rename OnnxRuntime to ort
+    - run: Get-ChildItem  ${{ env.ORT_PACKAGE_NAME }} -Recurse
+      continue-on-error: true
+
+    - name: Extract OnnxRuntime library and header files
       run: |
-        Rename-Item -Path $env:ort_dir -NewName ort
+        mkdir ort/lib
+        move ${{ env.ORT_PACKAGE_NAME }}/build/native/include ort/
+        move ${{ env.ORT_PACKAGE_NAME }}/runtimes/win-arm64/native/* ort/lib/
 
     - name: Configure CMake
       run: |
@@ -80,4 +87,4 @@ jobs:
 
     - name: Run tests
       run: |
-        .\build\cpu\test\Release\unit_tests.exe
+        & .\$env:binaryDir\test\Release\unit_tests.exe

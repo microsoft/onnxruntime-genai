@@ -58,8 +58,7 @@ jobs:
           mkdir -p ort/lib
           mv microsoft.ml.onnxruntime/${{ env.ORT_NIGHTLY_VERSION }}/build/native/include ort/
           mv microsoft.ml.onnxruntime/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/linux-x64/native/* ort/lib/
-          ort_version=$(echo ${{ env.ORT_NIGHTLY_VERSION }} | cut -d- -f1-1)
-          cp ort/lib/libonnxruntime.so ort/lib/libonnxruntime.so.$ort_version
+          cp ort/lib/libonnxruntime.so ort/lib/libonnxruntime.so.1
 
       - name: Build with CMake and GCC
         run: |
