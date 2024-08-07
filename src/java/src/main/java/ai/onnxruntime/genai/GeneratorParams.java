@@ -112,7 +112,7 @@ public final class GeneratorParams implements AutoCloseable {
    * @param namedTensors NamedTensors to add.
    * @throws GenAIException
    */
-  public void setInput(NamedTensors namedTensors) throws GenAIException {
+  public void setInputs(NamedTensors namedTensors) throws GenAIException {
     if (nativeHandle == 0) {
       throw new IllegalStateException("Instance has been freed and is invalid");
     }
