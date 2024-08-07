@@ -106,6 +106,10 @@ jobs:
       addToPath: true
       architecture: $(arch)
 
+  - task: UseDotNet@2
+    inputs:
+      version: '6.x'
+
   - template: steps/utils/download-huggingface-model.yml
     parameters:
       StepName: 'Download Model from HuggingFace'

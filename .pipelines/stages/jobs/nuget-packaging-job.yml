@@ -137,7 +137,12 @@ jobs:
 
   - template: steps/utils/set-genai-version.yml
 
+  - task: UseDotNet@2
+    inputs:
+      version: '8.x'
+
   - powershell: |
+      dotnet --info
       dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(buildConfig)" --verbosity normal
     displayName: 'Build CSharp'
     workingDirectory: '$(Build.Repository.LocalPath)\src\csharp'
