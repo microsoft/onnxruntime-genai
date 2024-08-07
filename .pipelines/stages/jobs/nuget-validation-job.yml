@@ -149,6 +149,9 @@ jobs:
         dotnet run --arch $(arch) --configuration $(csproj_configuration) --no-restore --verbosity normal -- -m ./models/phi-3
       displayName: 'Run Example With Artifact'
       workingDirectory: '$(Build.Repository.LocalPath)'
+      env:
+        NUGET_PLUGIN_HANDSHAKE_TIMEOUT_IN_SECONDS: 180
+        NUGET_PLUGIN_REQUEST_TIMEOUT_IN_SECONDS: 180
   - ${{ elseif eq(parameters.os, 'linux') }}:
     - bash: |
         export ORTGENAI_LOG_ORT_LIB=1
@@ -160,5 +163,8 @@ jobs:
         dotnet run --arch $(arch) --configuration $(csproj_configuration) --no-restore --verbosity normal -- -m ./models/phi-3
       displayName: 'Run Example With Artifact'
       workingDirectory: '$(Build.Repository.LocalPath)'
+      env:
+        NUGET_PLUGIN_HANDSHAKE_TIMEOUT_IN_SECONDS: 180
+        NUGET_PLUGIN_REQUEST_TIMEOUT_IN_SECONDS: 180
   - template: steps/compliant-and-cleanup-step.yml
 
