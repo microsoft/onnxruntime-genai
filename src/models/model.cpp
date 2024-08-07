@@ -337,6 +337,19 @@ void Model::CreateSessionOptions() {
       ort_options.DisableQuantQdqCleanup();
   }
 
+  if (options.ep_context_enable.has_value()) {
+    if (options.ep_context_enable.value())
+      ort_options.SetEpContextEnable();
+  }
+
+  if (options.ep_context_embed_mode.has_value()) {
+    ort_options.SetEpContextEmbedMode(options.ep_context_embed_mode.value().c_str());
+  }
+
+  if (options.ep_context_file_path.has_value()) {
+    ort_options.SetEpContextFilePath(options.ep_context_file_path.value().c_str());
+  }
+
   for (auto& provider_options : options.provider_options) {
     if (provider_options.name == "cuda") {
       auto ort_provider_options = OrtCUDAProviderOptionsV2::Create();

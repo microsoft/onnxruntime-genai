@@ -558,6 +558,18 @@ inline OrtSessionOptions& OrtSessionOptions::DisableQuantQdqCleanup() {
   return AddConfigEntry("session.enable_quant_qdq_cleanup", "0");
 }
 
+inline OrtSessionOptions& OrtSessionOptions::SetEpContextEnable() {
+  return AddConfigEntry("ep.context_enable", "1");
+}
+
+inline OrtSessionOptions& OrtSessionOptions::SetEpContextEmbedMode(const char* mode) {
+  return AddConfigEntry("ep.context_embed_mode", mode);
+}
+
+inline OrtSessionOptions& OrtSessionOptions::SetEpContextFilePath(const char* file_path) {
+  return AddConfigEntry("ep.context_file_path", file_path);
+}
+
 inline OrtSessionOptions& OrtSessionOptions::SetExecutionMode(ExecutionMode execution_mode) {
   Ort::ThrowOnError(Ort::api->SetSessionExecutionMode(this, execution_mode));
   return *this;

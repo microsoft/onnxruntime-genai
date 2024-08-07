@@ -522,6 +522,10 @@ struct OrtSessionOptions {
   OrtSessionOptions& EnableQuantQdqCleanup();
   OrtSessionOptions& DisableQuantQdqCleanup();
 
+  OrtSessionOptions& SetEpContextEnable();
+  OrtSessionOptions& SetEpContextEmbedMode(const char* mode);
+  OrtSessionOptions& SetEpContextFilePath(const char* file_path);
+
   OrtSessionOptions& SetOptimizedModelFilePath(const ORTCHAR_T* optimized_model_file);  ///< Wraps OrtApi::SetOptimizedModelFilePath
 
   OrtSessionOptions& EnableProfiling(const ORTCHAR_T* profile_file_prefix);  ///< Wraps OrtApi::EnableProfiling
