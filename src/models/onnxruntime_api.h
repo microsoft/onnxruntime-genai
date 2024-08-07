@@ -120,14 +120,24 @@ inline void* LoadDynamicLibraryIfExists(const std::string& path) {
   LOG_INFO("Attempting to dlopen %s", path.c_str());
   void* ort_lib_handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
   if (ort_lib_handle == nullptr) {
-    return nullptr;
+    char* err = dlerror();
+    LOG_WARN("Error while dlopen: %s", (err != nullptr ? err : "Unknown"));
+    // Trying current dir
+    std::string current_module_dir = GetCurrentModuleDir();
+    std::string local_path{current_module_dir + "/" + path};
+    LOG_INFO("Attempting to dlopen %s", local_path.c_str());
+    ort_lib_handle = dlopen(local_path.c_str(), RTLD_NOW | RTLD_LOCAL);
   }
-
+  if (ort_lib_handle) {
 #if !defined(__ANDROID__)  // RTLD_DI_ORIGIN not available on Android
-  char pathname[PATH_MAX];
-  dlinfo((void*)ort_lib_handle, RTLD_DI_ORIGIN, &pathname);
-  LOG_INFO("Loaded native library at %s", pathname);
+    char pathname[PATH_MAX];
+    dlinfo((void*)ort_lib_handle, RTLD_DI_ORIGIN, &pathname);
+    LOG_INFO("Loaded native library at %s", pathname);
 #endif
+  } else {
+    char* err = dlerror();
+    LOG_WARN("Error while dlopen: %s", (err != nullptr ? err : "Unknown"));
+  }
   return ort_lib_handle;
 }
 
@@ -218,8 +228,7 @@ inline void InitApi() {
 #endif
 
   if (ort_lib_handle == nullptr) {
-    char* err = dlerror();
-    throw std::runtime_error(std::string("Failed to load ") + path.c_str() + ": " + (err != nullptr ? err : "Unknown"));
+    throw std::runtime_error(std::string("Failed to load onnxruntime. Set ORTGENAI_LOG_ORT_LIB envvar to enable detailed logging.");
   }
 
   OrtApiBaseFn ort_api_base_fn = (OrtApiBaseFn)dlsym(ort_lib_handle, "OrtGetApiBase");
