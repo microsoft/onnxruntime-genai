@@ -108,7 +108,7 @@ jobs:
 
   - task: UseDotNet@2
     inputs:
-      version: '6.x'
+      version: '8.x'
 
   - template: steps/utils/download-huggingface-model.yml
     parameters:
