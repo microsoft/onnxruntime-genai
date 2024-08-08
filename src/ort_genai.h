@@ -288,6 +288,16 @@ struct OgaImages : OgaAbstract {
   static void operator delete(void* p) { OgaDestroyImages(reinterpret_cast<OgaImages*>(p)); }
 };
 
+struct OgaAudios : OgaAbstract {
+  static std::unique_ptr<OgaAudios> Load(const char* audio_path) {
+    OgaAudios* p;
+    OgaCheckResult(OgaLoadAudio(audio_path, &p));
+    return std::unique_ptr<OgaAudios>(p);
+  }
+
+  static void operator delete(void* p) { OgaDestroyAudios(reinterpret_cast<OgaAudios*>(p)); }
+};
+
 struct OgaNamedTensors : OgaAbstract {
   static void operator delete(void* p) { OgaDestroyNamedTensors(reinterpret_cast<OgaNamedTensors*>(p)); }
 };
@@ -302,6 +312,13 @@ struct OgaMultiModalProcessor : OgaAbstract {
   std::unique_ptr<OgaNamedTensors> ProcessImages(const char* str, const OgaImages* images = nullptr) const {
     OgaNamedTensors* p;
     OgaCheckResult(OgaProcessorProcessImages(this, str, images, &p));
+    return std::unique_ptr<OgaNamedTensors>(p);
+  }
+
+  std::unique_ptr<OgaNamedTensors> ProcessAudios(const OgaAudios* audios, const std::string& language,
+                                                 const std::string& task, int32_t no_timestamps) const {
+    OgaNamedTensors* p;
+    OgaCheckResult(OgaProcessorProcessAudios(this, audios, language.c_str(), task.c_str(), no_timestamps, &p));
     return std::unique_ptr<OgaNamedTensors>(p);
   }
 

@@ -51,7 +51,7 @@ struct Search_Cpu : Search {
 
   cpu_span<int32_t> next_tokens_;  // shape (beam_size*batch_size)
 
-  std::span<float> next_token_scores_;  // shape (beam_size*batch_size, vocab_size)
+  cpu_span<float> next_token_scores_;  // shape (beam_size*batch_size, vocab_size)
 
   Sequences sequences_;
   bool done_{};

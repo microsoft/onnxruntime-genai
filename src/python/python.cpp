@@ -293,7 +293,7 @@ struct PyGeneratorParams {
   }
 
   pybind11::array_t<int32_t> py_input_ids_;
-  pybind11::array_t<float> py_whisper_input_features_;
+  pybind11::array py_whisper_input_features_;
 
   std::vector<pybind11::object> refs_;  // References to data we want to ensure doesn't get garbage collected
 };
@@ -458,20 +458,54 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         return LoadImageImpl(image_path.c_str());
       });
 
+  pybind11::class_<Audios>(m, "Audios")
+      .def_static("open", [](pybind11::args audio_paths) {
+        if (audio_paths.empty())
+          throw std::runtime_error("No audios provided");
+
+        if (audio_paths.size() > 1U)
+          throw std::runtime_error("Loading multiple audios is not supported");
+
+        auto audio_path = audio_paths[0].cast<std::string>();
+        return LoadAudioImpl(audio_path.c_str());
+      });
+
   pybind11::class_<PyNamedTensors>(m, "NamedTensors");
 
   pybind11::class_<MultiModalProcessor, std::shared_ptr<MultiModalProcessor>>(m, "MultiModalProcessor")
-      .def("__call__", [](MultiModalProcessor& processor, const std::string& prompt, const pybind11::kwargs& kwargs) -> std::unique_ptr<PyNamedTensors> {
-        if (kwargs.contains("images")) {
-          if (processor.image_processor_ == nullptr) {
-            throw std::runtime_error("Image processor is not available for this model.");
-          }
-          const Images* images = kwargs["images"].cast<const Images*>();
-          return std::make_unique<PyNamedTensors>(processor.image_processor_->Process(*processor.tokenizer_, prompt, images));
-        } else {
-          throw std::runtime_error("MultiModalProcessor cannot process this request. Nothing to process.");
-        }
-      })
+      .def(
+          "__call__", [](MultiModalProcessor& processor, const std::optional<std::string>& prompt, const pybind11::kwargs& kwargs) -> std::unique_ptr<PyNamedTensors> {
+            if (kwargs.contains("images")) {
+              if (processor.image_processor_ == nullptr) {
+                throw std::runtime_error("Image processor is not available for this model.");
+              }
+              const Images* images = kwargs["images"].cast<const Images*>();
+              if (!prompt.has_value()) {
+                throw std::runtime_error("Prompt is required for processing the image.");
+              }
+              return std::make_unique<PyNamedTensors>(
+                  processor.image_processor_->Process(*processor.tokenizer_, *prompt, images));
+            } else if (kwargs.contains("audios")) {
+              const Audios* audios = kwargs["audios"].cast<const Audios*>();
+              std::string language = "en";
+              if (kwargs.contains("language")) {
+                language = kwargs["lang"].cast<std::string>();
+              }
+              std::string task = "transcribe";
+              if (kwargs.contains("task")) {
+                task = kwargs["task"].cast<std::string>();
+              }
+              int32_t no_timestamps = 1;
+              if (kwargs.contains("no_timestamps")) {
+                no_timestamps = kwargs["no_timestamps"].cast<int32_t>();
+              }
+              return std::make_unique<PyNamedTensors>(
+                  processor.audio_processor_->Process(*processor.tokenizer_, audios, language, task, no_timestamps));
+            } else {
+              throw std::runtime_error("Nothing to process.");
+            }
+          },
+          pybind11::arg("prompt") = pybind11::none())
       .def("create_stream", [](MultiModalProcessor& processor) { return processor.tokenizer_->CreateStream(); })
       .def("decode", [](MultiModalProcessor& processor, pybind11::array_t<int32_t> tokens) {
         return processor.tokenizer_->Decode(ToSpan(tokens));

@@ -183,6 +183,25 @@ std::vector<std::string> Tokenizer::DecodeBatch(std::span<const int32_t> sequenc
   return strings;
 }
 
+std::vector<int32_t> Tokenizer::GetDecoderPromptIds(size_t batch_size, const std::string& language,
+                                                    const std::string& task, int32_t no_timestamps) const {
+  ort_extensions::OrtxObjectPtr<OrtxTokenId2DArray> prompt_ids;
+  CheckResult(OrtxGetDecoderPromptIds(tokenizer_, batch_size, language.c_str(),
+                                      task.c_str(), no_timestamps, ort_extensions::ptr(prompt_ids)));
+
+  std::vector<std::vector<int32_t>> tokens_vector;
+  std::vector<std::span<const int32_t>> span_sequences;
+  for (size_t i = 0; i < batch_size; i++) {
+    const extTokenId_t* tokens = nullptr;
+    size_t token_count = 0;
+    CheckResult(OrtxTokenId2DArrayGetItem(prompt_ids.get(), i, &tokens, &token_count));
+    tokens_vector.emplace_back(tokens, tokens + token_count);
+    span_sequences.emplace_back(tokens_vector.back());
+  }
+
+  return PadInputs(span_sequences, pad_token_id_);
+}
+
 #if USE_CUDA
 // Since Python/Others can and will hold onto a generator object past the model object's lifetime we need to ensure
 // the allocator used is not destroyed until last. This keeps the allocator around until exit, after all other memory
@@ -533,7 +552,7 @@ void ConvertFp32ToFp16(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<Or
 
 #if USE_CUDA
     case DeviceType::CUDA:
-      // TODO: Implement for CUDA. For now, fallthrough and report an error.
+      cuda::LaunchFp32ToFp16(fp32, fp16, count, stream);
 #endif
 
     default:
@@ -598,6 +617,8 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
     : tokenizer_{std::make_shared<Tokenizer>(config)} {
   if (config.model.type == "phi3v") {
     image_processor_ = std::make_shared<ImageProcessor>(config, session_info);
+  } else if (config.model.type == "whisper") {
+    audio_processor_ = std::make_shared<AudioProcessor>(config, session_info);
   } else {
     throw std::runtime_error("MultiModalProcessor cannot be created. Expected a multimodal model. Actual: " + config.model.type);
   }
