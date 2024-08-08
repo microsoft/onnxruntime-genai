@@ -123,6 +123,7 @@ steps:
       --rm \
       --volume $(Build.Repository.LocalPath):/ort_genai_src \
       -w /ort_genai_src/ ortgenai$(ep)build$(arch) \
+      -e ONNXRUNTIME_VERSION=$(ONNXRUNTIME_VERSION) \
       bash -c " \
           /usr/bin/cmake --preset linux_gcc_$(ep)_$(build_config) \
             -DENABLE_TESTS=OFF \
@@ -145,6 +146,7 @@ steps:
       --rm \
       --volume $(Build.Repository.LocalPath):/ort_genai_src \
       -w /ort_genai_src/ ortgenai$(ep)build$(arch) \
+      -e ONNXRUNTIME_VERSION=$(ONNXRUNTIME_VERSION) \
       bash -c " \
           /usr/bin/cmake --build --preset linux_gcc_$(ep)_$(build_config) \
             -DENABLE_TESTS=OFF \
