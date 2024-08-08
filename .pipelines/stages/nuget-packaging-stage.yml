@@ -31,6 +31,8 @@ parameters:
 
 - name: ort_version
   type: string
+- name: ort_cuda_version
+  type: string
 - name: ort_dml_version
   type: string
 - name: build_config
@@ -53,7 +55,7 @@ stages:
       - template: jobs/nuget-packaging-job.yml
         parameters:
           ep: 'cuda'
-          ort_version: ${{ parameters.ort_version }}
+          ort_version: ${{ parameters.ort_cuda_version }}
           build_config: ${{ parameters.build_config }}
           enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
           enable_win_cuda: ${{ parameters.enable_win_cuda }}

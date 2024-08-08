@@ -107,6 +107,12 @@ jobs:
     ${{ else }}:
       value: 'cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4'
 
+  - name: cuda_docker_image
+    ${{ if eq(parameters.cuda_version, '11.8') }}:
+      value: onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda11_x64_almalinux8_gcc11:20240531.1
+    ${{ else }}:
+      value: onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda12_x64_ubi8_gcc12:20240610.1
+
   steps:
   - checkout: self
     clean: true
@@ -174,7 +180,7 @@ jobs:
           set -e -x
           az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
           az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
-          docker pull onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda11_x64_almalinux8_gcc11:20240531.1
+          docker pull $(cuda_docker_image)
           python_exe=/opt/python/cp310-cp310/bin/python3.10
 
           docker run \
@@ -183,21 +189,25 @@ jobs:
             --volume $(Build.Repository.LocalPath):/ort_genai_src \
             --volume $(Build.BinariesDirectory):/ort_genai_binary \
             -e HF_TOKEN=$HF_TOKEN \
-            -w /ort_genai_src/ onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda11_x64_almalinux8_gcc11:20240531.1 \
+            -w /ort_genai_src/ $(cuda_docker_image) \
             bash -c " \
-                $python_exe -m pip install numpy transformers torch onnx onnxruntime && \
+                export ORTGENAI_LOG_ORT_LIB=1 && \
+                $python_exe -m pip install -r /ort_genai_src/test/python/requirements.txt && \
+                $python_exe -m pip install -r /ort_genai_src/test/python/requirements-cuda.txt && \
                 cd /ort_genai_src/examples/python && \
                 $python_exe -m pip install --no-index --find-links=/ort_genai_binary/wheel $(pip_package_name) && \
-                $python_exe model-generate.py -m ./models/$(prebuild_phi3_mini_model_folder)"
+                $python_exe model-generate.py -m ./models/$(prebuild_phi3_mini_model_folder) --min_length 25 --max_length 50 --verbose"
 
         displayName: 'Run Example With Artifact'
         workingDirectory: '$(Build.Repository.LocalPath)'
     - ${{ elseif eq(parameters.ep, 'cpu') }}:
       - bash: |
-          python -m pip install numpy transformers torch onnx onnxruntime
+          export ORTGENAI_LOG_ORT_LIB=1
+          python -m pip install -r test/python/requirements.txt
+          python -m pip install -r test/python/requirements-cpu.txt
           cd examples/python
           python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)
-          python model-generate.py -m ./models/$(prebuild_phi3_mini_model_folder)
+          python model-generate.py -m ./models/$(prebuild_phi3_mini_model_folder) --min_length 25 --max_length 50 --verbose
         displayName: 'Run Example With Artifact'
         workingDirectory: '$(Build.Repository.LocalPath)'
 
@@ -209,16 +219,23 @@ jobs:
         displayName: 'Download CUDA $(cuda_version)'
         workingDirectory: '$(Build.Repository.LocalPath)'
     - powershell: |
+        python -m pip install -r test/python/requirements.txt
         if ("$(ep)" -eq "cuda") {
           $env:CUDA_PATH = '$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)'
           $env:PATH = "$env:CUDA_PATH\bin;$env:CUDA_PATH\extras\CUPTI\lib64;$env:PATH"
           Write-Host $env:PATH
+          python -m pip install -r test/python/requirements-cuda.txt
         }
-        python -m pip install numpy transformers torch onnx onnxruntime
+        elseif ("$(ep)" -eq "directml") {
+          python -m pip install -r test/python/requirements-directml.txt
+        }
+        else {
+          python -m pip install -r test/python/requirements-cpu.txt
+        }
         cd examples\python
         python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)
 
-        python model-generate.py -m .\models\$(prebuild_phi3_mini_model_folder)
+        python model-generate.py -m .\models\$(prebuild_phi3_mini_model_folder) --min_length 25 --max_length 50 --verbose
       displayName: 'Run Example With Artifact'
       workingDirectory: '$(Build.Repository.LocalPath)'
 
