@@ -23,7 +23,6 @@ struct Whisper_State : State {
 
  private:
   void UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> next_indices, int current_length);
-  template <typename T> void TransposeKCacheForDMMHA(T* dest_data, T* temp_buffer, std::vector<int64_t>& dest_dims, int dest_data_size, int dest_element_size);
 
   const Whisper_Model& model_;
   enum struct RunState {

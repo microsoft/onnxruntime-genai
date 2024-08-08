@@ -6,7 +6,6 @@ import glob
 import os
 import readline
 
-import numpy as np
 import onnxruntime_genai as og
 
 

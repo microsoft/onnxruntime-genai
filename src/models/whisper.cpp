@@ -72,12 +72,14 @@ Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> s
   }
 }
 
+#if USE_CUDA
 template <typename T>
-void Whisper_State::TransposeKCacheForDMMHA(T* dest_data,
-                                            T* temp_buffer,
-                                            std::vector<int64_t>& dest_dims,
-                                            int dest_data_size,
-                                            int dest_element_size) {
+void TransposeKCacheForDMMHA(T* dest_data,
+                             T* temp_buffer,
+                             std::vector<int64_t>& dest_dims,
+                             int dest_data_size,
+                             int dest_element_size,
+                             cudaStream_t stream) {
   // Treat the 'K' caches as if they are of shape [B, N, max_length, head_size / x, x]
   // and transpose each 'K' cache into [B, N, head_size / x, max_length, x], where x = 16 / sizeof(T)
   int chunk_size = static_cast<int>(16 / dest_element_size);
@@ -87,7 +89,7 @@ void Whisper_State::TransposeKCacheForDMMHA(T* dest_data,
 
   // Copy the original 'K' caches to a temporary buffer in order to
   // use the destination buffer to store the transposed 'K' caches
-  cudaMemcpyAsync(temp_buffer, dest_data, dest_data_size, cudaMemcpyDeviceToDevice, model_.cuda_stream_);
+  cudaMemcpyAsync(temp_buffer, dest_data, dest_data_size, cudaMemcpyDeviceToDevice, stream);
 
   // Transpose each 'K' cache
   cuda::ReorderPastStatesKernelLauncher(dest_data,
@@ -97,8 +99,9 @@ void Whisper_State::TransposeKCacheForDMMHA(T* dest_data,
                                         dest_dims[2],
                                         dest_dims[3],
                                         chunk_size,
-                                        model_.cuda_stream_);
+                                        stream);
 }
+#endif
 
 RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
   int batch_size = static_cast<int>(decoder_input_ids_.GetShape()[0]);
@@ -125,12 +128,13 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
         auto dest_element_type = dest_shape_info->GetElementType();
         auto dest_element_size = SizeOf(dest_element_type);
         auto dest_data_size = dest_shape_info->GetElementCount() * dest_element_size;
-        
+
         auto copy_data_size = src_dims[2] * src_dims[3] * src_element_size;
+        const auto copy_data_size_all = src_shape_info->GetElementCount() * SizeOf(src_shape_info->GetElementType());
 
 #if USE_CUDA
         // Allocate temporary buffer for when CUDA EP + FP16 precision is used because
-        // we need to reformat the `K` caches for `DecoderMaskedMultiHeadAttention` 
+        // we need to reformat the `K` caches for `DecoderMaskedMultiHeadAttention`
         // and we need some extra memory to do so.
         //
         // Since the self attention K caches are of size (batch_size, num_heads, past_sequence_length, head_size) with type 'float16',
@@ -140,12 +144,12 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
         // the self attention and cross attention K caches.
 
         std::unique_ptr<OrtValue> temp_buffer;
-        auto self_attn_kv_cache_element_type = src_element_type; // should be `float16` for the below case
+        auto self_attn_kv_cache_element_type = src_element_type;  // should be `float16` for the below case
         if (self_attn_kv_cache_element_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 && model_.device_type_ == DeviceType::CUDA) {
           auto num_layers = model_.config_->model.decoder.num_hidden_layers;
           auto cross_attn_shape_info = outputs_[outputs_.size() - 1]->GetTensorTypeAndShapeInfo();
           auto cross_attn_dims = cross_attn_shape_info->GetShape();
-          auto cross_attn_kv_cache_element_type = cross_attn_shape_info->GetElementType(); // should be `float32` for this case
+          auto cross_attn_kv_cache_element_type = cross_attn_shape_info->GetElementType();  // should be `float32` for this case
 
           temp_buffer = OrtValue::CreateTensor(*model_.allocator_device_, cross_attn_dims, cross_attn_kv_cache_element_type);
         }
@@ -180,20 +184,22 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
 
                 // Transpose self attention K caches for `DecoderMaskedMultiHeadAttention`
                 if (i % 2 == 0) {
-                  TransposeKCacheForDMMHA(dest_data, temp_buffer->GetTensorMutableRawData(), dest_dims, dest_data_size, dest_element_size);
+                  TransposeKCacheForDMMHA(dest_data, temp_buffer->GetTensorMutableRawData(), dest_dims,
+                                          dest_data_size, dest_element_size, model_.cuda_stream_);
                 }
               } else {
-                cudaMemcpyAsync(dest_data, src_data, copy_data_size, cudaMemcpyDeviceToDevice, model_.cuda_stream_);
+                cudaMemcpyAsync(dest_data, src_data, copy_data_size_all, cudaMemcpyDeviceToDevice, model_.cuda_stream_);
               }
               break;
 #endif
-            case DeviceType::CPU:
-              memcpy(dest_data, src_data, copy_data_size);
+            case DeviceType::CPU: {
+              memcpy(dest_data, src_data, copy_data_size_all);
               break;
+            }
 
             default:
               throw std::runtime_error("Unsupported Device Type in Whisper_State::Run");
-          }   
+          }
         }
 
 #if USE_CUDA
@@ -209,7 +215,8 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
             dest_element_size = SizeOf(dest_element_type);
             dest_data_size = dest_shape_info->GetElementCount() * dest_element_size;
 
-            TransposeKCacheForDMMHA(dest_data, temp_buffer->GetTensorMutableRawData(), dest_dims, dest_data_size, dest_element_size);
+            TransposeKCacheForDMMHA(dest_data, temp_buffer->GetTensorMutableRawData(), dest_dims,
+                                    dest_data_size, dest_element_size, model_.cuda_stream_);
           }
         }
 #endif
