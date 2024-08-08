@@ -118,10 +118,13 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
       // that arise because variables are created in a switch statement
       {
         auto src_shape_info = init_presents_[0]->GetTensorTypeAndShapeInfo();
-        auto src_dims = src_shape_info->GetShape();
-        auto src_element_type = src_shape_info->GetElementType();
-        auto src_element_size = SizeOf(src_element_type);
-        auto src_data_size = src_shape_info->GetElementCount() * src_element_size;
+
+        const auto copy_data_size_all = src_shape_info->GetElementCount() * SizeOf(src_shape_info->GetElementType());
+
+#if USE_CUDA
+        const auto src_dims = src_shape_info->GetShape();
+        const auto src_element_type = src_shape_info->GetElementType();
+        const auto src_element_size = SizeOf(src_element_type);
 
         auto dest_shape_info = presents_[0]->GetTensorTypeAndShapeInfo();
         auto dest_dims = dest_shape_info->GetShape();
@@ -129,10 +132,8 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
         auto dest_element_size = SizeOf(dest_element_type);
         auto dest_data_size = dest_shape_info->GetElementCount() * dest_element_size;
 
-        auto copy_data_size = src_dims[2] * src_dims[3] * src_element_size;
-        const auto copy_data_size_all = src_shape_info->GetElementCount() * SizeOf(src_shape_info->GetElementType());
+        const auto copy_data_size = src_dims[2] * src_dims[3] * src_element_size;
 
-#if USE_CUDA
         // Allocate temporary buffer for when CUDA EP + FP16 precision is used because
         // we need to reformat the `K` caches for `DecoderMaskedMultiHeadAttention`
         // and we need some extra memory to do so.
