@@ -165,8 +165,8 @@ jobs:
        cp $(Build.BinariesDirectory)/nuget/* examples/csharp/HelloPhi/
        cd examples/csharp/HelloPhi
        mv models/$(prebuild_phi3_mini_model_folder) models/phi-3
-       dotnet restore --arch $(arch) /property:Configuration=$(csproj_configuration) --source https://api.nuget.org/v3/index.json --source https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json --source $PWD --disable-parallel --verbosity
-      displayName: 'dotnet restore'
+       dotnet restore --arch $(arch) /property:Configuration=$(csproj_configuration) --source https://api.nuget.org/v3/index.json --source https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json --source $PWD --disable-parallel --verbosity detailed
+      displayName: 'Perform dotnet restore'
       workingDirectory: '$(Build.Repository.LocalPath)'
       env:
         NUGET_PLUGIN_HANDSHAKE_TIMEOUT_IN_SECONDS: 180
@@ -190,6 +190,9 @@ jobs:
                 export ORTGENAI_LOG_ORT_LIB=1 && \
                 cd /ort_genai_src/examples/csharp/HelloPhi && \
                 dotnet run --arch $(arch) --configuration $(csproj_configuration) --no-restore --verbosity normal -- -m ./models/phi-3
+
+        displayName: 'Run Example With Artifact'
+        workingDirectory: '$(Build.Repository.LocalPath)'
 
     - ${{ elseif eq(parameters.ep, 'cpu') }}:
       - bash: |
