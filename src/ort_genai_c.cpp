@@ -238,9 +238,9 @@ OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* oga_generator
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
   }
 #else
-  std::copy(static_cast<char*>(ortvalue_output->GetTensorMutableRawData()),
-            static_cast<char*>(ortvalue_output->GetTensorMutableRawData()) + data_size,
-            static_cast<char*>(ortvalue_clone->GetTensorMutableRawData()));
+  std::copy(static_cast<uint8_t*>(ortvalue_output->GetTensorMutableRawData()),
+            static_cast<uint8_t*>(ortvalue_output->GetTensorMutableRawData()) + data_size,
+            static_cast<uint8_t*>(ortvalue_clone->GetTensorMutableRawData()));
 #endif
 
   auto tensor = std::make_shared<Generators::Tensor>(std::move(ortvalue_clone));

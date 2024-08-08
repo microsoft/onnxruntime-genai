@@ -193,7 +193,7 @@ TEST(CAPITests, GetOutputCAPI) {
 
   auto generator = OgaGenerator::Create(*model, *params);
   generator->ComputeLogits();
-  auto prompt_logits = generator->GetOutput('logits');
+  auto prompt_logits = generator->GetOutput("logits");
 
   // check prompt
   // full logits has shape [2, 4, 1000]. Sample 1 for every 200 tokens and the expected sampled logits has shape [2, 4, 5]
@@ -215,7 +215,7 @@ TEST(CAPITests, GetOutputCAPI) {
   }
 
   generator->GenerateNextToken();
-  auto token_gen_logits = generator->GetOutput('logits');
+  auto token_gen_logits = generator->GetOutput("logits");
 
   // check for the 1st token generation
   // full logits has shape [2, 1, 1000]. Sample 1 for every 200 tokens and the expected sampled logits has shape [2, 1, 5]
