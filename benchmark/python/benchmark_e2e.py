@@ -173,7 +173,7 @@ def save_results(args, results, filename, print_memory_usage=False):
     BenchmarkRecord.save_as_json(filename.replace(".csv", ".json"), records)
     print(f"Results saved in {filename}!")
 
-def run_benchmark_memory(args, model, tokenizer, batch_size, prompt_length, generation_length, max_length):
+def run_benchmark_memory(args, batch_size, prompt_length, generation_length, max_length):
     """
     This function is to run benchmark and print the momory usage
     """
@@ -186,7 +186,7 @@ def run_benchmark_memory(args, model, tokenizer, batch_size, prompt_length, gene
     
     monitor_thread.start()
 
-    metrics = run_benchmark(args, model, tokenizer, batch_size, prompt_length, generation_length, max_length)
+    metrics = run_benchmark(args, batch_size, prompt_length, generation_length, max_length)
 
     stop_monitoring = True
     monitor_thread.join()
@@ -198,7 +198,7 @@ def run_benchmark_memory(args, model, tokenizer, batch_size, prompt_length, gene
     
     return metrics
 
-def run_benchmark(args, model, tokenizer, batch_size, prompt_length, generation_length, max_length):
+def run_benchmark(args, batch_size, prompt_length, generation_length, max_length):
 
     # Get user arguments
     num_repetitions = args.repetitions
@@ -351,13 +351,7 @@ def run_benchmark(args, model, tokenizer, batch_size, prompt_length, generation_
 
 def main(args):
     all_csv_metrics = []
-    # Get tokenizer, and model
-    model_path = args.input_folder
-    if args.verbose: print(f"Loading model... ")
-    model=og.Model(f'{model_path}')
-    if args.verbose: print("Model loaded, loading tokenizer...")
-    tokenizer = og.Tokenizer(model)
-    if args.verbose: print("Tokenizer loaded, starting benchmark...")
+
     for batch_size in args.batch_sizes:
         for l, prompt_length in enumerate(args.prompt_lengths):
             for g, gen_length in enumerate(args.generation_lengths):
@@ -368,9 +362,9 @@ def main(args):
                     max_length = prompt_length + gen_length
                 print(f"Args: batch_size = {batch_size}, prompt_length = {prompt_length}, tokens = {gen_length}, max_length = {max_length}")
                 if args.print_memory_usage:
-                    metrics = run_benchmark_memory(args, model, tokenizer, batch_size, prompt_length, gen_length, max_length)
+                    metrics = run_benchmark_memory(args, batch_size, prompt_length, gen_length, max_length)
                 else:
-                    metrics = run_benchmark(args, model, tokenizer, batch_size, prompt_length, gen_length, max_length)
+                    metrics = run_benchmark(args, batch_size, prompt_length, gen_length, max_length)
                 all_csv_metrics.append(metrics)
     # Add metrics to CSV
     if args.verbose: print("Adding results to CSV")
