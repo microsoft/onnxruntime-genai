@@ -173,6 +173,61 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
 }
 #endif
 
+TEST(CAPITests, GetOutputCAPI) {
+  std::vector<int64_t> input_ids_shape{2, 4};
+  std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
+
+  auto input_sequence_length = input_ids_shape[1];
+  auto batch_size = input_ids_shape[0];
+  int max_length = 10;
+
+  // To generate this file:
+  // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
+  // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
+
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+  params->SetInputIDs(input_ids.data(), input_ids.size(), input_sequence_length, batch_size);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->ComputeLogits();
+  auto prompt_logits = generator->GetOutput('logits');
+
+  // check prompt
+  // full logits has shape [2, 4, 1000]. Sample 1 for every 200 tokens and the expected sampled logits has shape [2, 4, 5]
+  std::vector<float> expected_sampled_logits_prompt{0.29694548,  0.00955007,  0.0430819,  0.10063869,  0.0437237,
+                                                    0.27329233,  0.00841076, -0.1060291,  0.11328877,  0.13369876,
+                                                    0.30323744,  0.0545997,   0.03894716, 0.11702324,  0.0410665,
+                                                    -0.12675379, -0.04443946,  0.14492269, 0.03021223, -0.03212897,
+                                                    0.29694548,  0.00955007,  0.0430819,  0.10063869,  0.0437237,
+                                                    0.27329233,  0.00841076, -0.1060291,  0.11328877,  0.13369876,
+                                                    -0.04699047,  0.17915794,  0.20838135, 0.10888482, -0.00277808,
+                                                    0.2938929,  -0.10538938, -0.00226692, 0.12050669, -0.10622668};
+
+  int num_prompt_outputs_to_check = 40;
+  int sample_size = 200;
+  float tolerance = 0.001;
+  // Verify outputs match expected outputs
+  for (int i = 0; i < num_prompt_outputs_to_check; i++) {
+    EXPECT_NEAR(expected_sampled_logits_prompt[i], prompt_logits[i*sample_size], tolerance);
+  }
+
+  generator->GenerateNextToken();
+  auto token_gen_logits = generator->GetOutput('logits');
+
+  // check for the 1st token generation
+  // full logits has shape [2, 1, 1000]. Sample 1 for every 200 tokens and the expected sampled logits has shape [2, 1, 5]
+  std::vector<float> expected_sampled_logits_token_gen{0.03742531, -0.05752287,  0.14159015, 0.04210977, -0.1484456,
+                                                        0.3041716,  -0.08701379, -0.03778192, 0.07471392, -0.02049096};
+  int num_token_gen_outputs_to_check = 10;
+
+  for (int i = 0; i < num_token_gen_outputs_to_check; i++) {
+    EXPECT_NEAR(expected_sampled_logits_token_gen[i], token_gen_logits[i*sample_size], tolerance);
+  }
+}
+
 #if TEST_PHI2
 
 struct Phi2Test {
