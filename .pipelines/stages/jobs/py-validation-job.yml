@@ -196,7 +196,7 @@ jobs:
                 $python_exe -m pip install -r /ort_genai_src/test/python/requirements-cuda.txt && \
                 cd /ort_genai_src/examples/python && \
                 $python_exe -m pip install --no-index --find-links=/ort_genai_binary/wheel $(pip_package_name) && \
-                $python_exe model-generate.py -m ./models/$(prebuild_phi3_mini_model_folder)" --max_length 50 --verbose
+                $python_exe model-generate.py -m ./models/$(prebuild_phi3_mini_model_folder)" --min_length 25 --max_length 50 --verbose
 
         displayName: 'Run Example With Artifact'
         workingDirectory: '$(Build.Repository.LocalPath)'
@@ -207,7 +207,7 @@ jobs:
           python -m pip install -r test/python/requirements-cpu.txt
           cd examples/python
           python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)
-          python model-generate.py -m ./models/$(prebuild_phi3_mini_model_folder) --max_length 50 --verbose
+          python model-generate.py -m ./models/$(prebuild_phi3_mini_model_folder) --min_length 25 --max_length 50 --verbose
         displayName: 'Run Example With Artifact'
         workingDirectory: '$(Build.Repository.LocalPath)'
 
@@ -235,7 +235,7 @@ jobs:
         cd examples\python
         python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)
 
-        python model-generate.py -m .\models\$(prebuild_phi3_mini_model_folder) --max_length 50 --verbose
+        python model-generate.py -m .\models\$(prebuild_phi3_mini_model_folder) --min_length 25 --max_length 50 --verbose
       displayName: 'Run Example With Artifact'
       workingDirectory: '$(Build.Repository.LocalPath)'
 
