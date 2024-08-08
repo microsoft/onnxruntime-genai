@@ -104,10 +104,6 @@ jobs:
       addToPath: true
       architecture: $(arch)
 
-  - template: utils/download-ort.yml
-    parameters:
-      archiveType: 'tgz'
-
   - task: UseDotNet@2
     inputs:
       version: '8.x'
