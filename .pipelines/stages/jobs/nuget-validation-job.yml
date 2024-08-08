@@ -98,13 +98,15 @@ jobs:
     displayName: Copy python 3.12.3 version to agent tools directory
     condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'))
 
-  - task: NuGetAuthenticate@1
-
   - task: UsePythonVersion@0
     inputs:
       versionSpec: 3.12
       addToPath: true
       architecture: $(arch)
+
+  - template: utils/download-ort.yml
+    parameters:
+      archiveType: 'tgz'
 
   - task: UseDotNet@2
     inputs:
@@ -145,7 +147,7 @@ jobs:
         Copy-Item -Force -Recurse -Verbose $(Build.BinariesDirectory)/nuget/* -Destination examples/csharp/HelloPhi/
         cd examples/csharp/HelloPhi
         Move-Item models\$(prebuild_phi3_mini_model_folder) models\phi-3
-        dotnet restore --arch $(arch) /property:Configuration=$(csproj_configuration) --source https://api.nuget.org/v3/index.json --source https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json --source $PWD --verbosity detailed
+        dotnet restore --arch $(arch) /property:Configuration=$(csproj_configuration) --source https://api.nuget.org/v3/index.json --source $(Build.Repository.LocalPath) --source $PWD --disable-parallel --verbosity detailed
         dotnet run --arch $(arch) --configuration $(csproj_configuration) --no-restore --verbosity detailed -- -m ./models/phi-3
       displayName: 'Run Example With Artifact'
       workingDirectory: '$(Build.Repository.LocalPath)'
@@ -159,7 +161,7 @@ jobs:
         cp $(Build.BinariesDirectory)/nuget/* examples/csharp/HelloPhi/
         cd examples/csharp/HelloPhi
         mv models/$(prebuild_phi3_mini_model_folder) models/phi-3
-        dotnet restore --arch $(arch) /property:Configuration=$(csproj_configuration) --source https://api.nuget.org/v3/index.json --source https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json --source $PWD --verbosity detailed
+        dotnet restore --arch $(arch) /property:Configuration=$(csproj_configuration) --source https://api.nuget.org/v3/index.json --source $(Build.Repository.LocalPath) --source $PWD --disable-parallel --verbosity detailed
         dotnet run --arch $(arch) --configuration $(csproj_configuration) --no-restore --verbosity detailed -- -m ./models/phi-3
       displayName: 'Run Example With Artifact'
       workingDirectory: '$(Build.Repository.LocalPath)'
