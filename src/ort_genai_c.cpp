@@ -213,7 +213,7 @@ OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* oga_generator
   auto& generator = *reinterpret_cast<const Generators::Generator*>(oga_generator);
   auto* ortvalue_output = generator.state_->GetOutput(name);
   auto type_info = ortvalue_output->GetTensorTypeAndShapeInfo();
-  std::unique_ptr<OrtValue> ortvalue_clone = OrtValue::CreateTensor(*generator.model_->allocator_cpu_,
+  std::unique_ptr<OrtValue> ortvalue_clone = OrtValue::CreateTensor(generator.model_->allocator_cpu_,
                                                                     type_info->GetShape(),
                                                                     type_info->GetElementType());
   // Copy data to ortvalue_clone
@@ -224,7 +224,7 @@ OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* oga_generator
     cudaMemcpy(ortvalue_clone->GetTensorMutableRawData(), ortvalue_output->GetTensorMutableRawData(), data_size, cudaMemcpyDeviceToHost);
   }
 #elif USE_DML
-  if (*generator.model_->device_type_ == DeviceType::DML) {
+  if (ortvalue_output->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU && *generator.model_->device_type_ == DeviceType::DML) {
     ComPtr<ID3D12Resource> gpu_resource;
     Ort::ThrowOnError(generator.model_->GetOrtDmlApi()->GetD3D12ResourceFromAllocation(
         *generator.model_->allocator_device_,
