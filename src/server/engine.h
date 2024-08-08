@@ -9,7 +9,7 @@
 #include "server/scheduler.h"
 #include "models/model.h"
 
-namespace engine {
+namespace Generators {
 
 struct CompletionOutput {
   int index;

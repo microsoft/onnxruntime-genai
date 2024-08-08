@@ -7,8 +7,9 @@
 #include <string>
 #include "../ort_genai.h"
 
-namespace engine {
-enum SequenceStage { kPrefill = 0, kDecode };
+namespace Generators {
+enum SequenceStage { kPrefill = 0,
+                     kDecode };
 enum SequenceStatus {
   kWaiting = 0,
   kRunning,
@@ -19,7 +20,9 @@ enum SequenceStatus {
   kFinishedIgnored
 };
 
-enum AllocateStatus { kOK = 0, kLater, kNever };
+enum AllocateStatus { kOK = 0,
+                      kLater,
+                      kNever };
 
 struct SamplingParams {
   int n = 1;
@@ -126,4 +129,20 @@ struct SequenceGroupMetadata {
   std::vector<int> computed_block_nums;
 };
 
+struct ExecuteModelRequest {
+  std::vector<SequenceGroupMetadata> seq_group_metadata_list;
+  std::vector<std::tuple<int, int>> blocks_to_swap_in;
+  std::vector<std::tuple<int, int>> blocks_to_swap_out;
+  std::vector<std::tuple<int, int>> blocks_to_swap_copy;
+  int num_lookahead_slots;
+  int running_queue_size;
+};
+
+struct SequenceOutput {
+  int output_token;
+};
+
+struct CompletionSequenceGroupOutput {
+  std::vector<SequenceOutput> samples;
+};
 }  // namespace engine

@@ -4,7 +4,7 @@
 #include "server/engine_utils.h"
 
 #include "engine.h"
-namespace engine {
+namespace Generators {
 
 OgaEngine::OgaEngine(const char* config_path) {
   // Load the configuration file

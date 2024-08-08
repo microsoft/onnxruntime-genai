@@ -10,7 +10,7 @@
 
 using RequestIDType = int64_t;
 
-namespace engine {
+namespace Generators {
 
 enum PreemptionMode {
   kSwap = 0,

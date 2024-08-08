@@ -9,7 +9,7 @@
 #include "../search.h"
 #include "../models/model.h"
 #include "../logging.h"
-#include "../engine.h"
+// #include "../engine.h"
 
 using namespace pybind11::literals;
 
@@ -484,28 +484,28 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   m.def("set_current_gpu_device_id", [](int device_id) { Ort::SetCurrentGpuDeviceId(device_id); });
   m.def("get_current_gpu_device_id", []() { return Ort::GetCurrentGpuDeviceId(); });
 
-  pybind11::class_<engine::CompletionOutput>(m, "CompletionOutput")
-      .def(pybind11::init<>())
-      .def_readonly("index", &engine::CompletionOutput::index)
-      .def_readonly("text", &engine::CompletionOutput::text)
-      .def_readonly("token_ids", &engine::CompletionOutput::token_ids)
-      .def_readonly("cumulative_logprob",
-                     &engine::CompletionOutput::cumulative_logprob)
-      .def_readonly("finish_reason", &engine::CompletionOutput::finish_reason)
-      .def_readonly("stop_reason", &engine::CompletionOutput::stop_reason);
+  // pybind11::class_<engine::CompletionOutput>(m, "CompletionOutput")
+  //     .def(pybind11::init<>())
+  //     .def_readonly("index", &engine::CompletionOutput::index)
+  //     .def_readonly("text", &engine::CompletionOutput::text)
+  //     .def_readonly("token_ids", &engine::CompletionOutput::token_ids)
+  //     .def_readonly("cumulative_logprob",
+  //                    &engine::CompletionOutput::cumulative_logprob)
+  //     .def_readonly("finish_reason", &engine::CompletionOutput::finish_reason)
+  //     .def_readonly("stop_reason", &engine::CompletionOutput::stop_reason);
 
-  pybind11::class_<engine::RequestOutput>(m, "RequestOutput")
-      .def(pybind11::init<>())
-      .def_readonly("request_id", &engine::RequestOutput::request_id)
-      .def_readonly("output", &engine::RequestOutput::output)
-      .def_readonly("prompt_token_ids", &engine::RequestOutput::prompt_token_ids)
-      .def_readonly("outputs", &engine::RequestOutput::outputs)
-      .def_readonly("finished", &engine::RequestOutput::finished);
+  // pybind11::class_<engine::RequestOutput>(m, "RequestOutput")
+  //     .def(pybind11::init<>())
+  //     .def_readonly("request_id", &engine::RequestOutput::request_id)
+  //     .def_readonly("output", &engine::RequestOutput::output)
+  //     .def_readonly("prompt_token_ids", &engine::RequestOutput::prompt_token_ids)
+  //     .def_readonly("outputs", &engine::RequestOutput::outputs)
+  //     .def_readonly("finished", &engine::RequestOutput::finished);
 
-  pybind11::class_<engine::OgaEngine>(m, "Engine")
-      .def(pybind11::init<const char*>())
-      .def("add_request", &engine::OgaEngine::AddRequest)
-      .def("step", &engine::OgaEngine::Step);
+  // pybind11::class_<engine::OgaEngine>(m, "Engine")
+  //     .def(pybind11::init<const char*>())
+  //     .def("add_request", &engine::OgaEngine::AddRequest)
+  //     .def("step", &engine::OgaEngine::Step);
 }
 
 }  // namespace Generators

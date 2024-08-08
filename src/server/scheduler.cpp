@@ -8,7 +8,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace engine {
+namespace Generators {
 
 int GetNumNewTokens(SequenceGroup seq_group, SequenceStatus status,
                     bool enable_chunking, SchedulerBudget& budget) {

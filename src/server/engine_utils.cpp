@@ -3,7 +3,7 @@
 #include <utility>
 #include <vector>
 
-namespace engine {
+namespace Generators {
 
 bool IsFinished(SequenceStatus status) {
   switch (status) {
