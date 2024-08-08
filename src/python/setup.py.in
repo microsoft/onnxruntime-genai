@@ -39,7 +39,7 @@ def _onnxruntime_dependency() -> str:
     elif package_name == "onnxruntime-genai-cuda":
         dependency = "onnxruntime-gpu" if not is_nightly else "ort-nightly-gpu"
     elif package_name == "onnxruntime-genai-directml":
-        dependency = "onnxruntime-directml" if not is_nightly else "ort_nightly-directml"
+        dependency = "onnxruntime-directml" if not is_nightly else "ort-nightly-directml"
     elif package_name == "onnxruntime-genai-rocm":
         dependency = "onnxruntime-rocm" if not is_nightly else "ort-nightly-rocm"
     else:
