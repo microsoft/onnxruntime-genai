@@ -60,6 +60,56 @@ TEST(CAPITests, TokenizerCAPI) {
 #endif
 }
 
+TEST(CAPITests, AppendTokensToSequence) {
+  #if TEST_PHI2
+  auto model = OgaModel::Create(MODEL_PATH "phi-2");
+  auto tokenizer = OgaTokenizer::Create(*model);
+
+  const char* input_strings[] = {
+      "This is a test.",
+      "Rats are awesome pets!",
+      "The quick brown fox jumps over the lazy dog.",
+  };
+
+  auto sequences = OgaSequences::Create();
+  auto appended_sequences = OgaSequences::Create();
+
+  // Encode all strings
+  {
+    for (auto& string : input_strings)
+      tokenizer->Encode(string, *sequences);
+  }
+
+  // Append token sequence to another sequence
+  // Basically create a copy
+  for (size_t i = 0; i < sequences->Count(); i++) {
+    std::span<const int32_t> sequence = sequences->Get(i);
+    appended_sequences->append(sequence.data(), sequence.size());
+  }
+  // All sequences should be copied
+  if(appended_sequences->Count() != sequences->Count()) {
+    throw std::runtime_error("Appending Token sequence failed!");
+  }
+
+  // Compare each token in each sequence
+  for {int i = 0; i< sequences->Count();i++} {
+    std::span<const int32_t> sequence = sequences->Get(i);
+    std::span<const int32_t> appended_sequence = appended_sequences->Get(i);
+
+    if(sequence.size() != appended_sequence.size()) {
+      throw std::runtime_error("Appended token count mismatch!");
+    }
+
+    
+    for {int j = 0; j < sequence.size();j++} {
+      if(sequence[j] != appended_sequence[j]) {
+        throw std::runtime_error("Appended token mismatch!");
+      }
+    }
+  }
+#endifdc
+}
+
 TEST(CAPITests, EndToEndPhiBatch) {
 #if TEST_PHI2
   auto model = OgaModel::Create(MODEL_PATH "phi-2");
