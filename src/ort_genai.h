@@ -103,9 +103,18 @@ struct OgaSequences : OgaAbstract {
     return OgaSequencesGetSequenceData(this, index);
   }
 
+  void Append(const int32_t* tokens, uint32_t token_cnt) {
+    OgaCheckResult(OgaAppendTokenSequence(tokens, token_cnt, this));
+  }
 #if __cplusplus >= 202002L
   std::span<const int32_t> Get(size_t index) const {
     return {SequenceData(index), SequenceCount(index)};
+  }
+  void Append(const std::span<const int32_t>& sequence) {
+    OgaCheckResult(OgaAppendTokenSequence(sequence.data(), sequence.size(), this));
+  }
+  void Append(const std::vector<const int32_t>& sequence) {
+    OgaCheckResult(OgaAppendTokenSequence(sequence.data(), sequence.size(), this));
   }
 #endif
 
