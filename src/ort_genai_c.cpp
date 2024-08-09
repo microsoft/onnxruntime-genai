@@ -220,13 +220,14 @@ OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* oga_generator
   auto element_size = Generators::SizeOf(type_info->GetElementType());
   auto data_size = type_info->GetElementCount() * element_size;
   std::cout << "Data count:" << type_info->GetElementCount() << " size:" << element_size << std::endl;
-#if USE_CUDA
   if (ortvalue_output->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU && generator.model_->device_type_ == Generators::DeviceType::CUDA) {
+#if USE_CUDA
     std::cout << "OrtValue Output on CUDA device" << std::endl;
     cudaMemcpy(ortvalue_clone->GetTensorMutableRawData(), ortvalue_output->GetTensorMutableRawData(), data_size, cudaMemcpyDeviceToHost);
+#endif
   }
-#elif USE_DML
-  if (ortvalue_output->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU && generator.model_->device_type_ == Generators::DeviceType::DML) {
+  else if (ortvalue_output->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU && generator.model_->device_type_ == Generators::DeviceType::DML) {
+if USE_DML
     std::cout << "OrtValue Output on DML device" << std::endl;
     ComPtr<ID3D12Resource> gpu_resource;
     Ort::ThrowOnError(generator.model_->GetOrtDmlApi()->GetD3D12ResourceFromAllocation(
@@ -239,15 +240,15 @@ OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* oga_generator
         gpu_resource.Get(),
         0,
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-  }
 #endif
-
-  if (ortvalue_output->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_CPU) {
+  } else if (ortvalue_output->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_CPU) {
     std::cout << "OrtValue Output on CPU device" << std::endl;
     std::copy(static_cast<uint8_t*>(ortvalue_output->GetTensorMutableRawData()),
               static_cast<uint8_t*>(ortvalue_output->GetTensorMutableRawData()) + data_size,
               static_cast<uint8_t*>(ortvalue_clone->GetTensorMutableRawData()));
   }
+
+  // Add else statement for no recognized device found above
 
   std::cout << "Data type:" << type_info->GetElementType() << std::endl;
   auto tensor = std::make_shared<Generators::Tensor>(std::move(ortvalue_clone));

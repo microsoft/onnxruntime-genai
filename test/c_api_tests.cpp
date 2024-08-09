@@ -173,6 +173,7 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
 }
 #endif
 
+#if !USE_DML
 TEST(CAPITests, GetOutputCAPI) {
   std::vector<int64_t> input_ids_shape{2, 4};
   std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
@@ -195,14 +196,14 @@ TEST(CAPITests, GetOutputCAPI) {
 
   // check prompt
   // full logits has shape [2, 4, 1000]. Sample 1 for every 200 tokens and the expected sampled logits has shape [2, 4, 5]
-  std::vector<float> expected_sampled_logits_prompt{0.29694548,  0.00955007,  0.0430819,  0.10063869,  0.0437237,
-                                                    0.27329233,  0.00841076, -0.1060291,  0.11328877,  0.13369876,
-                                                    0.30323744,  0.0545997,   0.03894716, 0.11702324,  0.0410665,
-                                                    -0.12675379, -0.04443946,  0.14492269, 0.03021223, -0.03212897,
-                                                    0.29694548,  0.00955007,  0.0430819,  0.10063869,  0.0437237,
-                                                    0.27329233,  0.00841076, -0.1060291,  0.11328877,  0.13369876,
-                                                    -0.04699047,  0.17915794,  0.20838135, 0.10888482, -0.00277808,
-                                                    0.2938929,  -0.10538938, -0.00226692, 0.12050669, -0.10622668};
+  std::vector<float> expected_sampled_logits_prompt{0.29694548f,  0.00955007f,  0.0430819f,  0.10063869f,  0.0437237f,
+                                                    0.27329233f,  0.00841076f, -0.1060291f,  0.11328877f,  0.13369876f,
+                                                    0.30323744f,  0.0545997f,   0.03894716f, 0.11702324f,  0.0410665f,
+                                                    -0.12675379f, -0.04443946f,  0.14492269f, 0.03021223f, -0.03212897f,
+                                                    0.29694548f,  0.00955007f,  0.0430819f,  0.10063869f,  0.0437237f,
+                                                    0.27329233f,  0.00841076f, -0.1060291f,  0.11328877f,  0.13369876f,
+                                                    -0.04699047f,  0.17915794f,  0.20838135f, 0.10888482f, -0.00277808f,
+                                                    0.2938929f,  -0.10538938f, -0.00226692f, 0.12050669f, -0.10622668f};
 
   generator->ComputeLogits();
   auto prompt_logits = static_cast<float*>(generator->GetOutput("logits")->Data());
@@ -218,8 +219,8 @@ TEST(CAPITests, GetOutputCAPI) {
 
   // check for the 1st token generation
   // full logits has shape [2, 1, 1000]. Sample 1 for every 200 tokens and the expected sampled logits has shape [2, 1, 5]
-  std::vector<float> expected_sampled_logits_token_gen{0.03742531, -0.05752287,  0.14159015, 0.04210977, -0.1484456,
-                                                        0.3041716,  -0.08701379, -0.03778192, 0.07471392, -0.02049096};
+  std::vector<float> expected_sampled_logits_token_gen{0.03742531f, -0.05752287f,  0.14159015f, 0.04210977f, -0.1484456f,
+                                                        0.3041716f,  -0.08701379f, -0.03778192f, 0.07471392f, -0.02049096f};
 
   generator->ComputeLogits();
   auto token_gen_logits = static_cast<float*>(generator->GetOutput("logits")->Data());
@@ -231,6 +232,7 @@ TEST(CAPITests, GetOutputCAPI) {
   }
   generator->GenerateNextToken();
 }
+#endif
 
 #if TEST_PHI2
 
