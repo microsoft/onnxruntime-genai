@@ -192,8 +192,6 @@ TEST(CAPITests, GetOutputCAPI) {
   params->SetInputIDs(input_ids.data(), input_ids.size(), input_sequence_length, batch_size);
 
   auto generator = OgaGenerator::Create(*model, *params);
-  generator->ComputeLogits();
-  auto prompt_logits = static_cast<float*>(generator->GetOutput("logits")->Data());
 
   // check prompt
   // full logits has shape [2, 4, 1000]. Sample 1 for every 200 tokens and the expected sampled logits has shape [2, 4, 5]
@@ -206,6 +204,8 @@ TEST(CAPITests, GetOutputCAPI) {
                                                     -0.04699047,  0.17915794,  0.20838135, 0.10888482, -0.00277808,
                                                     0.2938929,  -0.10538938, -0.00226692, 0.12050669, -0.10622668};
 
+  generator->ComputeLogits();
+  auto prompt_logits = static_cast<float*>(generator->GetOutput("logits")->Data());
   int num_prompt_outputs_to_check = 40;
   int sample_size = 200;
   float tolerance = 0.001;
@@ -214,14 +214,15 @@ TEST(CAPITests, GetOutputCAPI) {
     std::cout << "Output:" << i << "exp:" << expected_sampled_logits_prompt[i] << " act:" << prompt_logits[i*sample_size] << std::endl;
     EXPECT_NEAR(expected_sampled_logits_prompt[i], prompt_logits[i*sample_size], tolerance);
   }
-
   generator->GenerateNextToken();
-  auto token_gen_logits = static_cast<float*>(generator->GetOutput("logits")->Data());
 
   // check for the 1st token generation
   // full logits has shape [2, 1, 1000]. Sample 1 for every 200 tokens and the expected sampled logits has shape [2, 1, 5]
   std::vector<float> expected_sampled_logits_token_gen{0.03742531, -0.05752287,  0.14159015, 0.04210977, -0.1484456,
                                                         0.3041716,  -0.08701379, -0.03778192, 0.07471392, -0.02049096};
+
+  generator->ComputeLogits();
+  auto token_gen_logits = static_cast<float*>(generator->GetOutput("logits")->Data());
   int num_token_gen_outputs_to_check = 10;
 
   for (int i = 0; i < num_token_gen_outputs_to_check; i++) {
