@@ -32,7 +32,8 @@ This is a chat demo using the various versions of the LLMs
 3. Install the requirements
 
     ```bash
-    pip install -r requirements.txt
+    pip install huggingface-hub mdtex2html
+    pip install gradio==4.36.0 # Gradio 3.47 breaks the UI and versions between 3.42 and 3.47 haven't been tested
     ```
 
 
@@ -48,7 +49,8 @@ mkdir -p models/cuda
 mv cuda-int4-rtn-block-32 models/cuda-int4/Phi-3-vision
 ```
 
-Folder structure should look as the below:
+If you would like the app to discover your models, please create the following folder structure, with the `models` folder at the same level as `chat_app`, one folder containing a set of models, and the actual models below this.
+
 ```
 --chat_app
 --models
@@ -61,16 +63,17 @@ Folder structure should look as the below:
       --Phi-3-vision
 ```
 
+If there is the word `vision` in the folder name containing the model files, the app will create a UI that processes images. If not, it will create a UI that processes language only.
+
 ## Launch the app
 
 ```
-python chat_app/app.py
+python app.py
 ```
-
-or launch the app by `python app.py`.
 
 You can also attach your model that is outside of `models` folder to the app by passing arguments of `--model_path` and `--model_name`.
-```
+
+```bash
 python chat_app/app.py --model_name "Phi-3-vision" --model_path "/mnt/onnx/Phi-3-vision"
 ```
 
@@ -81,7 +84,7 @@ Running on local URL:  http://127.0.0.1:7860
 To create a public link, set `share=True` in `launch()`.
 ```
 
-Then open the local URL in broswer
+Then open the local URL in browser
 ![alt text](image.png)
 
 For vision model, you will have the below UI interface.

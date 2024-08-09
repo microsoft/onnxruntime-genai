@@ -30,7 +30,7 @@ bool ThrowIfError(JNIEnv* env, OgaResult* result);
 // handle conversion/release of jstring to const char*
 struct CString {
   CString(JNIEnv* env, jstring str)
-      : env_{env}, str_{str}, cstr{env->GetStringUTFChars(str, /* isCopy */ nullptr)} {
+      : cstr{env->GetStringUTFChars(str, /* isCopy */ nullptr)}, env_{env}, str_{str} {
   }
 
   const char* cstr;

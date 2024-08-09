@@ -18,16 +18,16 @@
 
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
 
-static std::wstring CurrentModulePath() {
-  wchar_t path[MAX_PATH];
-  GetModuleFileNameW((HINSTANCE)&__ImageBase, path, _countof(path));
+static std::string CurrentModulePath() {
+  char path[MAX_PATH];
+  GetModuleFileNameA((HINSTANCE)&__ImageBase, path, _countof(path));
 
-  wchar_t absolute_path[MAX_PATH];
-  wchar_t* name;
-  GetFullPathNameW(path, _countof(path), absolute_path, &name);
+  char absolute_path[MAX_PATH];
+  char* name;
+  GetFullPathNameA(path, _countof(path), absolute_path, &name);
 
   auto idx = std::distance(absolute_path, name);
-  auto out_path = std::wstring(absolute_path);
+  auto out_path = std::string(absolute_path);
   out_path.resize(idx);
 
   return out_path;
@@ -316,6 +316,40 @@ void Model::CreateSessionOptions() {
     ort_options.EnableProfiling(profile_file_prefix.c_str());
   }
 
+  if (options.disable_cpu_ep_fallback.has_value()) {
+    if (options.disable_cpu_ep_fallback.value())
+      ort_options.DisableCpuEpFallback();
+    else
+      ort_options.EnableCpuEpFallback();
+  }
+
+  if (options.disable_quant_qdq.has_value()) {
+    if (options.disable_quant_qdq.value())
+      ort_options.DisableQuantQdq();
+    else
+      ort_options.EnableQuantQdq();
+  }
+
+  if (options.enable_quant_qdq_cleanup.has_value()) {
+    if (options.enable_quant_qdq_cleanup.value())
+      ort_options.EnableQuantQdqCleanup();
+    else
+      ort_options.DisableQuantQdqCleanup();
+  }
+
+  if (options.ep_context_enable.has_value()) {
+    if (options.ep_context_enable.value())
+      ort_options.SetEpContextEnable();
+  }
+
+  if (options.ep_context_embed_mode.has_value()) {
+    ort_options.SetEpContextEmbedMode(options.ep_context_embed_mode.value().c_str());
+  }
+
+  if (options.ep_context_file_path.has_value()) {
+    ort_options.SetEpContextFilePath(options.ep_context_file_path.value().c_str());
+  }
+
   for (auto& provider_options : options.provider_options) {
     if (provider_options.name == "cuda") {
       auto ort_provider_options = OrtCUDAProviderOptionsV2::Create();
@@ -345,13 +379,14 @@ void Model::CreateSessionOptions() {
       ort_options.AppendExecutionProvider_ROCM(ort_provider_options);
 #if USE_DML
     } else if (provider_options.name == "dml") {
-      dml_objects_ = DmlHelpers::CreateDmlObjects();
+      auto current_module_path = CurrentModulePath();
+      dml_objects_ = DmlHelpers::CreateDmlObjects(current_module_path);
 
-      auto directml_dll = CurrentModulePath() + L"DirectML.dll";
-      wil::unique_hmodule smart_directml_dll(LoadLibraryExW(directml_dll.c_str(), nullptr, 0));
+      constexpr auto directml_dll = "DirectML.dll";
+      wil::unique_hmodule smart_directml_dll(LoadLibraryEx(directml_dll, nullptr, 0));
       THROW_LAST_ERROR_IF(!smart_directml_dll);
 
-      if (LoadLibraryExW(directml_dll.c_str(), nullptr, 0) == NULL) {
+      if (LoadLibraryEx(directml_dll, nullptr, 0) == NULL) {
         throw std::runtime_error("DirectML.dll not found");
       }
 
@@ -387,6 +422,13 @@ void Model::CreateSessionOptions() {
 
       device_type_ = DeviceType::DML;  // We use a DML allocator for input/output caches, but other tensors will use CPU tensors
 #endif
+    } else if (provider_options.name == "qnn") {
+      std::unordered_map<std::string, std::string> opts;
+      for (auto& option : provider_options.options) {
+        opts.emplace(option.first, option.second);
+      }
+
+      ort_options.AppendExecutionProvider("QNN", opts);
     } else
       throw std::runtime_error("Unknown provider type: " + provider_options.name);
   }
@@ -405,7 +447,7 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path) {
 
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
-  if (config->model.type == "llama" || config->model.type == "gemma" || config->model.type == "mistral" || config->model.type == "phi" || config->model.type == "phi3" || config->model.type == "phi3small")
+  if (config->model.type == "llama" || config->model.type == "gemma" || config->model.type == "gemma2" || config->model.type == "mistral" || config->model.type == "phi" || config->model.type == "phi3" || config->model.type == "phi3small" || config->model.type == "qwen2")
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
   if (config->model.type == "whisper")
     return std::make_shared<Whisper_Model>(std::move(config), ort_env);
@@ -554,8 +596,10 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
 
 MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& session_info)
     : tokenizer_{std::make_shared<Tokenizer>(config)} {
-  if (!config.model.vision.filename.empty()) {
+  if (config.model.type == "phi3v") {
     image_processor_ = std::make_shared<ImageProcessor>(config, session_info);
+  } else {
+    throw std::runtime_error("MultiModalProcessor cannot be created. Expected a multimodal model. Actual: " + config.model.type);
   }
 }
 

@@ -15,9 +15,9 @@ env:
   AZCOPY_AUTO_LOGIN_TYPE: MSI
   AZCOPY_MSI_CLIENT_ID: 63b63039-6328-442f-954b-5a64d124e5b4
   cuda_dir: "${{ github.workspace }}\\cuda_sdk"
-  cuda_version: "11.8"
-  CUDA_PATH: ${{ github.workspace }}\\cuda_sdk\\v11.8
-  binaryDir: 'build/cuda'
+  cuda_version: "12.2"
+  CUDA_PATH: ${{ github.workspace }}\\cuda_sdk\\v12.2
+  binaryDir: 'build/cuda/win-x64'
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime.Gpu.Windows&api-version=6.0-preview.1"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime.Gpu.Windows"
 
@@ -43,15 +43,12 @@ jobs:
       with:
         dotnet-version: '8.0.x'
 
-    - name : Install jq and curl
-      run: |
-        choco install -y jq curl
-
     - name: Download OnnxRuntime Nightly
       shell: pwsh
       run: |
-        $ORT_NIGHTLY_VERSION=$(curl -s "${{ env.ORT_NIGHTLY_REST_API }}" | jq -r '.value[0].versions[0].normalizedVersion')
-        echo "$ORT_NIGHTLY_VERSION" 
+        $resp = Invoke-RestMethod "${{ env.ORT_NIGHTLY_REST_API }}"
+        $ORT_NIGHTLY_VERSION = $resp.value[0].versions[0].normalizedVersion
+        Write-Host "$ORT_NIGHTLY_VERSION"
         "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
         nuget install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_NIGHTLY_VERSION -ExcludeVersion -NonInteractive
 
@@ -83,8 +80,9 @@ jobs:
 
     - name: Install the Python Wheel and Test Dependencies
       run: |
+        python -m pip install -r test\python\requirements.txt
+        python -m pip install -r test\python\requirements-cuda.txt
         python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl"))
-        python -m pip install -r test\python\requirements-nightly-cpu.txt
 
     - name: Get HuggingFace Token
       run: |
@@ -109,4 +107,4 @@ jobs:
       run: |
         $env:PATH = "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin;" + $env:PATH 
         echo "Current PATH variable is: $env:PATH" 
-        .\build\cuda\test\Release\unit_tests.exe
+        & .\$env:binaryDir\test\Release\unit_tests.exe

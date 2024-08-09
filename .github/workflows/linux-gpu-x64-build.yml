@@ -72,8 +72,7 @@ jobs:
           mkdir -p ort/lib
           mv microsoft.ml.onnxruntime.gpu.linux/${{ env.ORT_NIGHTLY_VERSION }}/buildTransitive/native/include ort/
           mv microsoft.ml.onnxruntime.gpu.linux/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/linux-x64/native/* ort/lib/
-          ort_version=$(echo ${{ env.ORT_NIGHTLY_VERSION }} | cut -d- -f1-1)
-          cp ort/lib/libonnxruntime.so ort/lib/libonnxruntime.so.$ort_version
+          cp ort/lib/libonnxruntime.so ort/lib/libonnxruntime.so.1
 
 
       - name: Get Docker Image
@@ -81,7 +80,7 @@ jobs:
           set -e -x
           az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
           az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
-          python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cuda_11.8  \
+          python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cuda_12.2  \
             --context tools/ci_build/github/linux/docker/manylinux  \
             --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
             --container-registry onnxruntimebuildcache \
@@ -120,6 +119,10 @@ jobs:
           echo "::add-mask::$HF_TOKEN"
           echo "HF_TOKEN=$HF_TOKEN" >> $GITHUB_ENV
 
+      - name: Remove the ort lib and header files
+        run: |
+          rm -rf ort
+
       - name: Install the onnxruntime-genai Python wheel and run python test
         run: |
           echo "Installing the onnxruntime-genai Python wheel and running the Python tests"
@@ -129,8 +132,9 @@ jobs:
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
             -e HF_TOKEN=$HF_TOKEN \
             -w /ort_genai_src onnxruntimecudabuildx64 bash -c " \
-              ${{ env.PYTHON_EXECUTABLE }} -m pip install /ort_genai_src/build/cuda/wheel/onnxruntime_genai*manylinux*.whl --user && \
+              ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/requirements.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/requirements-cuda.txt --user && \
+              ${{ env.PYTHON_EXECUTABLE }} -m pip install /ort_genai_src/build/cuda/wheel/onnxruntime_genai*manylinux*.whl --user && \
               ${{ env.PYTHON_EXECUTABLE }} test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models"
 
       - name: Docker -- Run unit tests
@@ -140,4 +144,4 @@ jobs:
             --gpus all \
             --rm \
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
-            -w /ort_genai_src onnxruntimecudabuildx64 bash -c "/ort_genai_src/build/cuda/test/unit_tests"
+            -w /ort_genai_src onnxruntimecudabuildx64 bash -c "LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/ort_genai_src/build/cuda/ /ort_genai_src/build/cuda/test/unit_tests"

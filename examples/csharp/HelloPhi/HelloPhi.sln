@@ -7,12 +7,24 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "HelloPhi", "HelloPhi.csproj
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug_Cuda|Any CPU = Debug_Cuda|Any CPU
+		Debug_DirectML|Any CPU = Debug_DirectML|Any CPU
 		Debug|Any CPU = Debug|Any CPU
+		Release_Cuda|Any CPU = Release_Cuda|Any CPU
+		Release_DirectML|Any CPU = Release_DirectML|Any CPU
 		Release|Any CPU = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{89932021-18FC-490C-8675-73F2AD1DEB2A}.Debug_Cuda|Any CPU.ActiveCfg = Debug_Cuda|Any CPU
+		{89932021-18FC-490C-8675-73F2AD1DEB2A}.Debug_Cuda|Any CPU.Build.0 = Debug_Cuda|Any CPU
+		{89932021-18FC-490C-8675-73F2AD1DEB2A}.Debug_DirectML|Any CPU.ActiveCfg = Debug_DirectML|Any CPU
+		{89932021-18FC-490C-8675-73F2AD1DEB2A}.Debug_DirectML|Any CPU.Build.0 = Debug_DirectML|Any CPU
 		{89932021-18FC-490C-8675-73F2AD1DEB2A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{89932021-18FC-490C-8675-73F2AD1DEB2A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{89932021-18FC-490C-8675-73F2AD1DEB2A}.Release_Cuda|Any CPU.ActiveCfg = Release_Cuda|Any CPU
+		{89932021-18FC-490C-8675-73F2AD1DEB2A}.Release_Cuda|Any CPU.Build.0 = Release_Cuda|Any CPU
+		{89932021-18FC-490C-8675-73F2AD1DEB2A}.Release_DirectML|Any CPU.ActiveCfg = Release_DirectML|Any CPU
+		{89932021-18FC-490C-8675-73F2AD1DEB2A}.Release_DirectML|Any CPU.Build.0 = Release_DirectML|Any CPU
 		{89932021-18FC-490C-8675-73F2AD1DEB2A}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{89932021-18FC-490C-8675-73F2AD1DEB2A}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection

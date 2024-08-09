@@ -2,7 +2,6 @@ cmake_minimum_required(VERSION 3.18.1)
 
 project(ortgenaiapp)
 set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++2a")
 
 option(USE_CUDA "Build with CUDA support" OFF)
 option(USE_CXX "Invoke the C++ example" ON)

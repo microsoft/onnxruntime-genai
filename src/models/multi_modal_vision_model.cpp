@@ -12,6 +12,9 @@ RoamingArray<float> MakeDummy() {
   return RoamingArray<float>();
 }
 
+#pragma warning(push)
+#pragma warning(disable : 4189)  // local variable is initialized but not referenced
+
 void Select(const Model& model, std::span<const int32_t> input_ids, OrtValue* hidden_states,
             OrtValue* visual_features, int32_t num_img_tokens, int32_t hidden_size, DeviceType device_type,
             cudaStream_t cuda_stream) {
@@ -25,7 +28,7 @@ void Select(const Model& model, std::span<const int32_t> input_ids, OrtValue* hi
   int32_t image_position_start{};
   for (int64_t idx = 0; idx < sequence_length; ++idx) {
     if (input_ids[idx] < 0 && input_ids[idx] > min_input_id) {
-      image_position_start = idx;
+      image_position_start = static_cast<int32_t>(idx);
       break;
     }
   }
@@ -83,6 +86,8 @@ void Select(const Model& model, std::span<const int32_t> input_ids, OrtValue* hi
       throw std::runtime_error("Unsupported device type for Select.");
   }
 }
+
+#pragma warning(pop)
 
 int64_t GetNumImageTokens(const std::vector<GeneratorParams::Input>& extra_inputs,
                           const std::string& image_sizes_name) {
@@ -184,7 +189,7 @@ VisionState::VisionState(const MultiModalVisionModel& model, const GeneratorPara
     : State{params, model},
       model_{model} {
   extra_inputs_.Add();
-  num_image_tokens_ = GetNumImageTokens(params_->extra_inputs, model_.config_->model.vision.inputs.image_sizes);
+  num_image_tokens_ = static_cast<int32_t>(GetNumImageTokens(params_->extra_inputs, model_.config_->model.vision.inputs.image_sizes));
   if (num_image_tokens_ > 0) {
     visual_features_ = GetVisualFeatures(*model_.allocator_device_, *model_.session_info_,
                                          model_.config_->model.vision.outputs.visual_features,
@@ -217,9 +222,10 @@ RoamingArray<float> DecoderState::Run(int current_length, RoamingArray<int32_t> 
   return logits_.Get();
 }
 
-void DecoderState::UpdateInputs(int current_length, RoamingArray<int32_t> beam_indices) {
+void DecoderState::UpdateInputsOutputs(int current_length, RoamingArray<int32_t> beam_indices) {
   position_inputs_.Update(current_length);
   kv_cache_.Update(beam_indices.GetCPU(), current_length);
+  logits_.Update();
 }
 
 MultiModalPipelineState::MultiModalPipelineState(const MultiModalVisionModel& model,
@@ -255,7 +261,7 @@ RoamingArray<float> MultiModalPipelineState::Run(int current_length, RoamingArra
              params_->hidden_size, params_->device_type, params_->cuda_stream);
     }
 
-    decoder_state_->inputs_embeds_ = embedding_state_->inputs_embeds_;
+    decoder_state_->inputs_embeds_.ReuseEmbeddingsBuffer(embedding_state_->inputs_embeds_);
     auto logits = decoder_state_->Run(current_length, next_tokens, next_indices);
 
     is_prompt_ = false;
@@ -265,10 +271,10 @@ RoamingArray<float> MultiModalPipelineState::Run(int current_length, RoamingArra
   }
 
   embedding_state_->UpdateInputsAndOutputs(next_tokens);
-  decoder_state_->UpdateInputs(current_length, next_indices);
+  decoder_state_->UpdateInputsOutputs(current_length, next_indices);
 
   embedding_state_->Run(current_length, next_tokens, next_indices);
-  decoder_state_->inputs_embeds_ = embedding_state_->inputs_embeds_;
+  decoder_state_->inputs_embeds_.ReuseEmbeddingsBuffer(embedding_state_->inputs_embeds_);
   return decoder_state_->Run(current_length, next_tokens, next_indices);
 }
 

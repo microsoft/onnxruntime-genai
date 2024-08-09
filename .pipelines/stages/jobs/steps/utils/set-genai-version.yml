@@ -1,0 +1,10 @@
+steps:
+- task: PowerShell@2
+  displayName: 'Set genai_version variable from VERSION_INFO'
+  inputs:
+    workingDirectory: $(Build.SourcesDirectory)
+    targetType: inline
+    script: |
+      $version = (Get-Content -Path .\VERSION_INFO).Trim()
+      Write-Host "Setting variable: genai_version = ${version}"
+      Write-Host "##vso[task.setvariable variable=genai_version]${version}"

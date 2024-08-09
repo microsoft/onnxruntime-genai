@@ -1,9 +1,11 @@
-<Project Sdk="MSBuild.Sdk.Extras/3.0.22">
+﻿<Project Sdk="MSBuild.Sdk.Extras/3.0.22">
   <PropertyGroup>
     <TargetFrameworks>net8.0;netstandard2.0</TargetFrameworks>
     <Platforms>AnyCPU</Platforms>
     <LangVersion>default</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <SignAssembly>true</SignAssembly>
+    <AssemblyOriginatorKeyFile>onnxruntime-genai.snk</AssemblyOriginatorKeyFile>
 
     <!--internal build related properties-->
     <SrcRoot>$(ProjectDir)..\..\src</SrcRoot>
@@ -26,7 +28,39 @@
   <PropertyGroup Condition="'$(IsWindowsBuild)'=='true'">
       <OnnxRuntimeGenAIBuildDirectory>$(CsharpSrcRoot)\..\..\build</OnnxRuntimeGenAIBuildDirectory>
       <NativeBuildOutputDir>$(OnnxRuntimeGenAIBuildDirectory)\$(Configuration)\</NativeBuildOutputDir>
+      <VersionInfoFile>$(CsharpSrcRoot)\..\..\VERSION_INFO</VersionInfoFile>
   </PropertyGroup>
+
+  <Target Name="ReadVersionFromFile" BeforeTargets="CoreCompile" DependsOnTargets="PrepareForBuild">
+    <ReadLinesFromFile File="$(VersionInfoFile)">
+      <Output TaskParameter="Lines" PropertyName="VersionInfoStr" />
+    </ReadLinesFromFile>
+
+    <PropertyGroup>
+      <VersionInfo>$(VersionInfoStr.Split(-)[0])</VersionInfo>
+      <VersionSuffix>$(VersionInfoStr.Split(-)[1])</VersionSuffix>
+    </PropertyGroup>
+  </Target>
+
+  <Target Name="WriteAssemblyInfo" BeforeTargets="CoreCompile" DependsOnTargets="PrepareForBuild;ReadVersionFromFile">
+    <ItemGroup>
+      <AssemblyInfoLines Include="// Copyright (c) Microsoft Corporation. All rights reserved." />
+      <AssemblyInfoLines Include="// Licensed under the MIT License." />
+      <AssemblyInfoLines Include="using System.Reflection%3B;" />
+      <AssemblyInfoLines Include="[assembly: AssemblyTitle(&quot;ONNX Runtime GenAI&quot;)]" />
+      <AssemblyInfoLines Include="[assembly: AssemblyProduct(&quot;ONNX Runtime GenAI&quot;)]" />
+      <AssemblyInfoLines Include="[assembly: AssemblyCompany(&quot;Microsoft Corporation&quot;)]" />
+      <AssemblyInfoLines Include="[assembly: AssemblyVersion(&quot;0.4.0&quot;)]" />
+      <AssemblyInfoLines Include="[assembly: AssemblyFileVersion(&quot;0.4.0&quot;)]" />
+      <AssemblyInfoLines Include="[assembly: AssemblyCopyright(&quot;© Microsoft Corporation. All rights reserved.&quot;)]" />
+    </ItemGroup>
+
+    <WriteLinesToFile
+      File="AssemblyInfo.cs"
+      Lines="@(AssemblyInfoLines)"
+      Overwrite="true">
+    </WriteLinesToFile>
+  </Target>
 
   <ItemGroup>
     <None Include="$(NativeBuildOutputDir)\onnxruntime-genai.lib" Condition="Exists('$(NativeBuildOutputDir)\onnxruntime-genai.lib')" PackagePath="" Pack="false" CopyToOutputDirectory="Never" Visible="false" />

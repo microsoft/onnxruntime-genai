@@ -6,6 +6,7 @@
 *.vs
 *bin/
 *obj/
+src/csharp/AssemblyInfo.cs
 /ort
 /build
 /build_*

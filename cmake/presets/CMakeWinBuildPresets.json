@@ -133,6 +133,16 @@
       "name": "windows_arm64_cpu_release",
       "configuration": "Release",
       "configurePreset": "windows_arm64_cpu_release"
+    },
+    {
+      "name": "windows_arm64_directml_relwithdebinfo",
+      "configuration": "RelWithDebInfo",
+      "configurePreset": "windows_arm64_directml_relwithdebinfo"
+    },
+    {
+      "name": "windows_arm64_directml_release",
+      "configuration": "Release",
+      "configurePreset": "windows_arm64_directml_release"
     }
   ]
 }

@@ -77,24 +77,42 @@ static std::vector<ComPtr<IDXGIAdapter1>> EnumerateAdapters() {
 
 static ComPtr<IDXGIAdapter1> CreatePerformantAdapter() {
   auto filtered_adapters = EnumerateAdapters();
+  if (filtered_adapters.empty()) {
+    throw std::runtime_error("No adapter is available for DML.");
+  }
   return filtered_adapters.front();
 }
 
-DmlObjects CreateDmlObjects() {
+DmlObjects CreateDmlObjects(const std::string& current_module_path) {
   D3D12_COMMAND_QUEUE_DESC command_queue_description = {
       D3D12_COMMAND_LIST_TYPE_COMPUTE,
       0,
-      D3D12_COMMAND_QUEUE_FLAG_NONE,
+      D3D12_COMMAND_QUEUE_FLAG_DISABLE_GPU_TIMEOUT,
       0,
   };
 
   DmlObjects dml_objects;
 
   auto adapter = CreatePerformantAdapter();
-  THROW_IF_FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&dml_objects.d3d12_device)));
+
+  ComPtr<ID3D12SDKConfiguration1> d3d12_sdk_config;
+  ComPtr<ID3D12DeviceFactory> d3d12_factory;
+
+  // Get the version from https://devblogs.microsoft.com/directx/directx12agility/. We are currently using 1.614.0.
+  constexpr uint32_t agility_sdk_version = 614;
+
+  if (SUCCEEDED(D3D12GetInterface(CLSID_D3D12SDKConfiguration, IID_PPV_ARGS(&d3d12_sdk_config))) &&
+      SUCCEEDED(d3d12_sdk_config->CreateDeviceFactory(agility_sdk_version, current_module_path.c_str(), IID_PPV_ARGS(&d3d12_factory)))) {
+    THROW_IF_FAILED(d3d12_factory->CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&dml_objects.d3d12_device)));
+  } else {
+    printf("Warning: Unable to create a device from version 1.614.0 of the DirectX 12 Agility SDK. You can still use this library, but some scenarios may not work.\n");
+    printf("The given module path: %s", current_module_path.c_str());
+    THROW_IF_FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&dml_objects.d3d12_device)));
+  }
+
   THROW_IF_FAILED(dml_objects.d3d12_device->CreateCommandQueue(&command_queue_description, IID_PPV_ARGS(&dml_objects.command_queue)));
-  THROW_IF_FAILED(dml_objects.d3d12_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&dml_objects.command_allocator)));
-  THROW_IF_FAILED(dml_objects.d3d12_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, dml_objects.command_allocator.Get(), nullptr, IID_PPV_ARGS(&dml_objects.command_list)));
+  THROW_IF_FAILED(dml_objects.d3d12_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE, IID_PPV_ARGS(&dml_objects.command_allocator)));
+  THROW_IF_FAILED(dml_objects.d3d12_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COMPUTE, dml_objects.command_allocator.Get(), nullptr, IID_PPV_ARGS(&dml_objects.command_list)));
   return dml_objects;
 }
 
@@ -362,7 +380,7 @@ void DmlCastInputToOutput(
   auto dml_from_type = DmlHelpers::OrtToDmlDataType(in.GetTensorTypeAndShapeInfo()->GetElementType());
   auto dml_to_type = DmlHelpers::OrtToDmlDataType(p_out->GetTensorTypeAndShapeInfo()->GetElementType());
 
-  bool rebind = command_list_state.previousOutput != p_out.get();
+  bool rebind = command_list_state.previousInput != &in || command_list_state.previousOutput != p_out.get();
 
   // If the sizes change, we need to recompile the operator and rebuild the command lists. It should only happen
   // once after the very first iteration.
@@ -388,6 +406,7 @@ void DmlCastInputToOutput(
     DML_BINDING_DESC input_array_binding_desc = DML_BINDING_DESC{DML_BINDING_TYPE_NONE, nullptr};
     execution_context->InitializeOperator(compiled_cast_operator.Get(), persistent_resource_bindingDesc, input_array_binding_desc);
     command_list_state = DmlHelpers::BuildReusableCommandList(dml_device, compiled_cast_operator.Get(), persistent_resource.Get(), persistent_resource_binding);
+    command_list_state.previousInput = &in;
     command_list_state.previousOutput = p_out.get();
   }
 

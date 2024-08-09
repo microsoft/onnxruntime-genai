@@ -1,7 +1,6 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #include <memory>
-#include <onnxruntime_c_api.h>
 #include <stdexcept>
 #include <cstdint>
 #include <cstddef>
@@ -371,6 +370,9 @@ OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor* 
   OGA_TRY
   auto& processor = *reinterpret_cast<const Generators::MultiModalProcessor*>(p);
   auto* images = images_p ? reinterpret_cast<const Generators::Images*>(images_p) : nullptr;
+  if (processor.image_processor_ == nullptr)
+    throw std::runtime_error("Image processor is not available for this model.");
+
   auto named_tensors = processor.image_processor_->Process(*processor.tokenizer_, prompt, images);
   *input_tensors = reinterpret_cast<OgaNamedTensors*>(named_tensors.release());
   return nullptr;

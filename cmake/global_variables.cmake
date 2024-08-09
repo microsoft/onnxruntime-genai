@@ -3,7 +3,21 @@
 # Define the Version Info
 file(READ "VERSION_INFO" ver)
 set(VERSION_INFO ${ver})
-message("Building onnxruntime-genai for version ${VERSION_INFO}")
+
+# Example:
+# VERSION_INFO: 0.4.0-dev
+# VERSION_STR: 0.4.0
+# VERSION_SUFFIX: dev
+# VERSION_MAJOR: 0
+# VERSION_MINOR: 4
+# VERSION_PATCH: 0
+string(REPLACE "-" ";" VERSION_LIST ${VERSION_INFO})
+list(GET VERSION_LIST 0 VERSION_STR)
+list(GET VERSION_LIST 1 VERSION_SUFFIX)
+string(REPLACE "." ";" VERSION_LIST ${VERSION_STR})
+list(GET VERSION_LIST 0 VERSION_MAJOR)
+list(GET VERSION_LIST 1 VERSION_MINOR)
+list(GET VERSION_LIST 2 VERSION_PATCH)
 
 
 # Define the project directories
@@ -27,16 +41,19 @@ endif()
 if(WIN32)
   set(ONNXRUNTIME_LIB "onnxruntime.dll")
   set(ONNXRUNTIME_PROVIDERS_CUDA_LIB "onnxruntime_providers_cuda.dll")
+  set(ONNXRUNTIME_PROVIDERS_ROCM_LIB "onnxruntime_providers_rocm.dll")
   set(ONNXRUNTIME_ALL_SHARED_LIBS "onnxruntime*.dll")
   set(ONNXRUNTIME_EXTENSIONS_LIB "tfmtok_c.lib")
   set(ONNXRUNTIME_EXTENSIONS_FILES "tfmtok_c.dll")
 elseif(APPLE)
   set(ONNXRUNTIME_LIB "libonnxruntime.dylib")
   set(ONNXRUNTIME_PROVIDERS_CUDA_LIB "libonnxruntime_providers_cuda.dylib")
+  set(ONNXRUNTIME_PROVIDERS_ROCM_LIB "libonnxruntime_providers_rocm.dylib")
   set(ONNXRUNTIME_ALL_SHARED_LIBS "libonnxruntime*.dylib")
 else()
   set(ONNXRUNTIME_LIB "libonnxruntime.so")
   set(ONNXRUNTIME_PROVIDERS_CUDA_LIB "libonnxruntime_providers_cuda.so")
+  set(ONNXRUNTIME_PROVIDERS_ROCM_LIB "libonnxruntime_providers_rocm.so")
   set(ONNXRUNTIME_ALL_SHARED_LIBS "libonnxruntime*.so*")
   set(ONNXRUNTIME_EXTENSIONS_LIB "tfmtok_c.so")
 endif()
@@ -49,6 +66,7 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
 )
 
 file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_ALL_SHARED_LIBS}")
+set(ortgenai_embed_libs "") # shared libs that will be embedded inside the onnxruntime-genai package
 
 if(NOT EXISTS "${ORT_LIB_DIR}/${ONNXRUNTIME_LIB}")
   message(FATAL_ERROR "Expected the ONNX Runtime library to be found at ${ORT_LIB_DIR}/${ONNXRUNTIME_LIB}. Actual: Not found.")
@@ -112,4 +130,3 @@ else()
     message(FATAL_ERROR "Unsupported architecture. CMAKE_SYSTEM_PROCESSOR: ${CMAKE_SYSTEM_PROCESSOR}")
   endif()
 endif()
-

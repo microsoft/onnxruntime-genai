@@ -33,6 +33,7 @@ steps:
 
 - script: |
     echo "arch=$(arch)"
+    echo "ort_filename=$(ort_filename)"
     echo "ort_version=$(ort_version)"
     echo "ep=$(ep)"
     echo "cuda_version=$(cuda_version)"
@@ -52,28 +53,21 @@ steps:
       Expand-Archive $(dml_zip) -DestinationPath $(dml_dir)
       Remove-Item -Path $(dml_zip)
       Get-ChildItem -Recurse $(dml_dir)
-      mv $(dml_dir)\bin\x64-win\DirectML.dll ort\lib
+      mv $(dml_dir)\bin\$(arch)-win\DirectML.dll ort\lib
       mv $(dml_dir)\include\DirectML.h ort\include
-    workingDirectory: '$(Build.Repository.LocalPath)'
-    continueOnError: true
 
-- ${{ if eq(parameters.arch, 'arm64') }}:
-  - powershell: |
-      Invoke-WebRequest -Uri $(ort_arm64_url) -OutFile $(ort_arm64_zip)
-      Expand-Archive $(ort_arm64_zip) -DestinationPath .
-      Remove-Item -Path $(ort_arm64_zip)
-      $ort_folder_name = "ort"
-      if (Test-Path -Path $ort_folder_name)
-      {
-          Remove-Item -Path $ort_folder_name -Recurse -Force
-      }
-      Rename-Item -Path $(ort_arm64_dir) -NewName $ort_folder_name
+      Invoke-WebRequest -Uri $(d3d12_url) -OutFile $(d3d12_zip)
+      Expand-Archive $(d3d12_zip) -DestinationPath $(d3d12_dir)
+      Remove-Item -Path $(d3d12_zip)
+      Get-ChildItem -Recurse $(d3d12_dir)
+      mv $(d3d12_dir)\build\native\bin\$(arch)\D3D12Core.dll ort\lib
     workingDirectory: '$(Build.Repository.LocalPath)'
-    continueOnError: false
+    displayName: 'Download DirectML & Direct3D DLLs'
+    continueOnError: true
 
 - powershell: |
     azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" 'cuda_sdk'
-  displayName: 'Download CUDA'
+  displayName: 'Download CUDA $(cuda_version)'
   condition: eq(variables['ep'], 'cuda')
   workingDirectory: '$(Build.Repository.LocalPath)'
 
@@ -86,13 +80,7 @@ steps:
 - powershell: |
     cmake --preset windows_$(arch)_$(ep)_$(build_config)
   displayName: 'Configure CMake C API without CUDA'
-  condition: and(ne(variables['ep'], 'cuda'), ne(variables['arch'], 'arm64'))
-  workingDirectory: '$(Build.Repository.LocalPath)'
-
-- powershell: |
-    cmake --preset windows_$(arch)_$(ep)_$(build_config)
-  displayName: 'Configure CMake C API for ARM64 CPU'
-  condition: eq(variables['arch'], 'arm64')
+  condition: ne(variables['ep'], 'cuda')
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
@@ -126,7 +114,7 @@ steps:
     displayName: 'Publish Artifact: ONNXRuntime Genai capi'
     inputs:
       ArtifactName: $(artifactName)-capi
-      PathtoPublish: '$(Build.Repository.LocalPath)\build\$(ep)\package'
+      PathtoPublish: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\package'
 
 - ${{ if eq(parameters.target, 'python') }}:
   - task: BinSkim@4
@@ -137,7 +125,7 @@ steps:
 
   - template: compliant/win-esrp-dll-step.yml
     parameters:
-      FolderPath: '$(Build.Repository.LocalPath)\build\$(ep)\wheel\onnxruntime_genai'
+      FolderPath: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\wheel\onnxruntime_genai'
       DisplayName: 'ESRP - PYD Sign'
       DoEsrp: true
       Pattern: '*.pyd'
@@ -152,11 +140,12 @@ steps:
 
   - powershell: |
       Get-ChildItem -Path $(Build.Repository.LocalPath) -Recurse
+    displayName: 'List all files in the repo for debugging'
 
   - task: CopyFiles@2
     displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
     inputs:
-      SourceFolder: '$(Build.Repository.LocalPath)\build\$(ep)\wheel'
+      SourceFolder: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\wheel'
       Contents: '*.whl'
       TargetFolder: '$(Build.ArtifactStagingDirectory)\wheel'
 
@@ -170,7 +159,7 @@ steps:
     displayName: 'Publish Build Symbols'
     condition: and(succeeded(), eq(variables['build_config'], 'relwithdebinfo'))
     inputs:
-      SymbolsFolder: '$(Build.Repository.LocalPath)\build\$(ep)\src\python\RelWithDebInfo\'
+      SymbolsFolder: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\src\python\RelWithDebInfo\'
       SearchPattern: 'onnxruntime_genai.pdb'
       SymbolServerType: teamServices
       SymbolExpirationInDays: 365

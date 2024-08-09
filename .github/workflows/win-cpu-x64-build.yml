@@ -11,7 +11,7 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 env:
-  binaryDir: 'build/cpu'
+  binaryDir: 'build/cpu/win-x64'
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
 
@@ -27,6 +27,11 @@ jobs:
       with:
         submodules: true
 
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11.x'
+        architecture: 'x64'
+
     - name: Setup Visual Studio 2022
       uses: microsoft/setup-msbuild@v1.1
       with:
@@ -36,15 +41,12 @@ jobs:
       with:
         dotnet-version: '8.0.x'
 
-    - name : Install jq and curl
-      run: |
-        choco install -y jq curl
-
     - name: Download OnnxRuntime Nightly
       shell: pwsh
       run: |
-        $ORT_NIGHTLY_VERSION = $(curl -s "${{ env.ORT_NIGHTLY_REST_API }}" | jq -r '.value[0].versions[0].normalizedVersion')
-        echo "$ORT_NIGHTLY_VERSION"
+        $resp = Invoke-RestMethod "${{ env.ORT_NIGHTLY_REST_API }}"
+        $ORT_NIGHTLY_VERSION = $resp.value[0].versions[0].normalizedVersion
+        Write-Host "$ORT_NIGHTLY_VERSION"
         "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
         nuget install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_NIGHTLY_VERSION -x -NonInteractive
 
@@ -77,8 +79,9 @@ jobs:
 
     - name: Install the python wheel and test dependencies
       run: |
+        python3 -m pip install -r test\python\requirements.txt --user
+        python3 -m pip install -r test\python\requirements-cpu.txt --user
         python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl"))
-        python -m pip install -r test\python\requirements-nightly-cpu.txt
 
     - name: Get HuggingFace Token
       run: |
@@ -102,7 +105,7 @@ jobs:
 
     - name: Run tests
       run: |
-        .\build\cpu\test\Release\unit_tests.exe
+        & .\$env:binaryDir\test\Release\unit_tests.exe
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v3

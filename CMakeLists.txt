@@ -25,6 +25,8 @@ include(cmake/external/onnxruntime_external_deps.cmake)
 include(cmake/global_variables.cmake)
 # Checking if CUDA is supported
 include(cmake/check_cuda.cmake)
+# Checking if ROCm is supported
+include(cmake/check_rocm.cmake)
 # Checking if DML is supported
 include(cmake/check_dml.cmake)
 
@@ -34,6 +36,13 @@ add_compile_definitions(BUILDING_ORT_GENAI_C)
 if(MSVC)
   # set updated value for __cplusplus macro instead of 199711L
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>)
+
+  add_compile_options(
+      "$<$<COMPILE_LANGUAGE:C,CXX>:/w15038>"
+      "$<$<COMPILE_LANGUAGE:C,CXX>:/wd4100>"
+      "$<$<COMPILE_LANGUAGE:C,CXX>:/W4>"
+      "$<$<COMPILE_LANGUAGE:C,CXX>:/WX>"
+  )
 endif()
 
 if(ENABLE_TESTS)
@@ -48,8 +57,21 @@ if(ENABLE_TESTS)
 endif()
 
 
-add_library(onnxruntime-genai SHARED ${generator_srcs})
-add_library(onnxruntime-genai-static STATIC ${generator_srcs})
+if(WIN32)
+  add_library(onnxruntime-genai SHARED ${generator_srcs} "${GENERATORS_ROOT}/dll/onnxruntime-genai.rc")
+  target_compile_definitions(onnxruntime-genai PRIVATE VERSION_INFO=\"${VERSION_INFO}\")
+  target_compile_definitions(onnxruntime-genai PRIVATE VERSION_MAJOR=${VERSION_MAJOR})
+  target_compile_definitions(onnxruntime-genai PRIVATE VERSION_MINOR=${VERSION_MINOR})
+  target_compile_definitions(onnxruntime-genai PRIVATE VERSION_PATCH=${VERSION_PATCH})
+  target_compile_definitions(onnxruntime-genai PRIVATE VERSION_SUFFIX=${VERSION_SUFFIX})
+  target_compile_definitions(onnxruntime-genai PRIVATE FILE_NAME=\"onnxruntime-genai.dll\")
+
+  add_library(onnxruntime-genai-static STATIC ${generator_srcs})
+else()
+  add_library(onnxruntime-genai SHARED ${generator_srcs})
+  add_library(onnxruntime-genai-static STATIC ${generator_srcs})
+endif()
+
 target_include_directories(onnxruntime-genai PRIVATE ${ORT_HEADER_DIR})
 target_include_directories(onnxruntime-genai-static PRIVATE ${ORT_HEADER_DIR})
 target_include_directories(onnxruntime-genai PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/include)
@@ -59,7 +81,12 @@ target_include_directories(onnxruntime-genai-static PUBLIC ${onnxruntime_extensi
 target_link_libraries(onnxruntime-genai PRIVATE onnxruntime_extensions)
 target_link_libraries(onnxruntime-genai-static PUBLIC onnxruntime_extensions)
 target_link_directories(onnxruntime-genai PRIVATE ${ORT_LIB_DIR})
+
+# we keep the shared libraries disconnected on Android as they will come from separate AARs and we don't want to force
+# the ORT version to match in both.
+if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux"))
 target_link_libraries(onnxruntime-genai PRIVATE ${ONNXRUNTIME_LIB})
+endif()
 
 set_target_properties(onnxruntime-genai PROPERTIES FOLDER "Sources")
 set_target_properties(onnxruntime-genai-static PROPERTIES FOLDER "Sources")
@@ -87,6 +114,8 @@ endif()
 
 if(USE_DML)
   list(APPEND onnxruntime_libs "${ORT_LIB_DIR}/DirectML.dll")
+  list(APPEND onnxruntime_libs "${ORT_LIB_DIR}/D3D12Core.dll")
+  list(APPEND ortgenai_embed_libs "${ORT_LIB_DIR}/D3D12Core.dll")
   target_include_directories(onnxruntime-genai PRIVATE $<TARGET_PROPERTY:${WIL_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
   target_include_directories(onnxruntime-genai PRIVATE $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>/directx)
   target_include_directories(onnxruntime-genai PRIVATE $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
@@ -120,6 +149,12 @@ if(USE_DML)
   add_dependencies(RESTORE_PACKAGES nuget)
   add_dependencies(onnxruntime-genai RESTORE_PACKAGES)
   add_dependencies(onnxruntime-genai-static RESTORE_PACKAGES)
+endif()
+
+if(ANDROID)
+  # strip the binary if it's not a build with debug info
+  set_target_properties(onnxruntime-genai PROPERTIES LINK_FLAGS_RELEASE -s)
+  set_target_properties(onnxruntime-genai PROPERTIES LINK_FLAGS_MINSIZEREL -s)
 endif()
 
 if(ENABLE_TESTS)

@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import platform
+import shlex
 import shutil
 import sys
+import textwrap
 
 from pathlib import Path
 
@@ -25,12 +28,33 @@ def _path_from_env_var(env_var: str):
 
 
 def _parse_args():
-    parser = argparse.ArgumentParser(
+    class Parser(argparse.ArgumentParser):
+        # override argument file line parsing behavior - allow multiple arguments per line and handle quotes
+        def convert_arg_line_to_args(self, arg_line):
+            return shlex.split(arg_line)
+
+    class HelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter):
+        pass
+
+    parser = Parser(
         description="ONNX Runtime GenAI Build Driver.",
+        epilog=textwrap.dedent("""
+            There are 3 phases which can be individually selected.
+
+            The update (--update) phase will run CMake to generate makefiles.
+            The build (--build) phase will build all projects.
+            The test (--test) phase will run all unit tests.
+
+            Default behavior is --update --build --test for native architecture builds.
+            Default behavior is --update --build for cross-compiled builds.
+
+            If phases are explicitly specified only those phases will be run.
+            E.g., run with --build to rebuild without running the update or test phases.
+            """),
         # files containing arguments can be specified on the command line with "@<filename>" and the arguments within
         # will be included at that point
         fromfile_prefix_chars="@",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        formatter_class=HelpFormatter,
     )
 
     parser.add_argument(
@@ -100,6 +124,8 @@ def _parse_args():
              "Used when --use_cuda is specified.",
     )
 
+    parser.add_argument("--use_rocm", action="store_true", help="Whether to use ROCm. Default is to not use rocm.")
+
     parser.add_argument("--use_dml", action="store_true", help="Whether to use DML. Default is to not use DML.")
 
     # The following options are mutually exclusive (cross compiling options such as android, ios, etc.)
@@ -114,7 +140,9 @@ def _parse_args():
         choices=["armeabi-v7a", "arm64-v8a", "x86", "x86_64"],
         help="Specify the target Android Application Binary Interface (ABI)",
     )
-    parser.add_argument("--android_api", type=int, default=27, help="Android API Level, e.g. 21")
+    parser.add_argument("--android_api", type=int, default=27,
+                        help="Android API Level. Default is 27 (Android 8.1, released in 2017).")
+    
     parser.add_argument(
         "--android_home", type=Path, default=_path_from_env_var("ANDROID_HOME"), help="Path to the Android SDK."
     )
@@ -124,18 +152,15 @@ def _parse_args():
         default=_path_from_env_var("ANDROID_NDK_HOME"),
         help="Path to the Android NDK. Typically `<Android SDK>/ndk/<ndk_version>`.",
     )
+    parser.add_argument("--android_run_emulator", action="store_true",
+                        help="Create/start an Android emulator to run the test application. "
+                             "Requires --android, --build_java and --android_abi=x86_64.")
 
     # iOS build options
     parser.add_argument(
         "--ios_sysroot",
         default="",
         help="Specify the location name of the macOS platform SDK to be used",
-    )
-    parser.add_argument(
-        "--ios_toolchain_file",
-        default="",
-        help="Path to ios toolchain file, "
-        "or cmake/genai_ios.toolchain.cmake will be used",
     )
     parser.add_argument(
         "--ios_arch",
@@ -149,23 +174,6 @@ def _parse_args():
         help="Specify the minimum version of the target platform "
         "This is only supported on MacOS host",
     )
-
-    # now that all args are added, we can include the full help in the usage message.
-    parser.usage = f"""
-    {parser.format_help()}
-    
-There are 3 phases which can be individually selected.
-
-The update (--update) phase will run CMake to generate makefiles.
-The build (--build) phase will build all projects.
-The test (--test) phase will run all unit tests.
-
-Default behavior is --update --build --test for native architecture builds.
-Default behavior is --update --build for cross-compiled builds.
-
-If phases are explicitly specified only those phases will be run.
-  e.g. run with `--build` to rebuild without running the update or test phases
-"""
 
     return parser.parse_args()
 
@@ -343,6 +351,67 @@ def _get_csharp_properties(args: argparse.Namespace):
     return props
 
 
+def _run_android_tests(args: argparse.Namespace):
+    # only run the tests on the emulator for x86_64 currently.
+    # TODO: may also be possible to run on a Mac with an arm64 chip
+    if args.android_abi != "x86_64":
+        log.info("Skipping Android tests as they are only supported on x86_64 currently.")
+        return
+
+    if not args.build_java:
+        # currently we only have an Android test app that we run on the emulator to test the Java bindings.
+        log.warning("Android testing requires --build_java to be set.")
+        return
+
+    sdk_tool_paths = util.android.get_sdk_tool_paths(args.android_home)
+    adb = sdk_tool_paths.adb
+    with contextlib.ExitStack() as context_stack:
+        # use API 27 or higher so the emulator is Android 8.1 (2017) or later
+        android_api = max(args.android_api, 27)
+
+        if args.android_run_emulator:
+            avd_name = "ort_genai_android"
+            system_image = f"system-images;android-{android_api};default;{args.android_abi}"
+
+            util.android.create_virtual_device(sdk_tool_paths, system_image, avd_name)
+            emulator_proc = context_stack.enter_context(
+                util.android.start_emulator(
+                    sdk_tool_paths=sdk_tool_paths,
+                    avd_name=avd_name,
+                    extra_args=["-partition-size", "2047", "-wipe-data"],
+                )
+            )
+            context_stack.callback(util.android.stop_emulator, emulator_proc)
+
+        # use the gradle wrapper under <repo root>/java to run the test app on the emulator.
+        # the test app loads and runs a test model using the GenAI Java bindings
+        gradle_executable = str(REPO_ROOT / "src" / "java" / ("gradlew.bat" if util.is_windows() else "gradlew"))
+        android_test_path = args.build_dir / "src" / "java" / "androidtest"
+        import subprocess
+        exception = None
+        try:
+            util.run([gradle_executable, "--no-daemon",
+                      f"-DminSdkVer={android_api}",
+                      "clean",
+                      "connectedDebugAndroidTest"],
+                     cwd=android_test_path,
+                     capture_stdout=True,
+                     capture_stderr=True,)
+        except subprocess.CalledProcessError as e:
+            exception = e
+            print(e)
+            print(f"Output:\n{e.output.decode('utf-8')}")
+            print(f"stderr:\n{e.stderr.decode('utf-8')}")
+
+        # Print test log output so we can easily check that the test ran as expected
+        util.run([adb, "logcat", "-s", "-d", "GenAI:V ORTGenAIAndroidTest:V TestRunner:V"])
+
+        if exception:
+            # uncomment if you need more logcat output in a CI
+            # util.run([adb, "logcat", "-d", "*:E"])
+            raise exception
+
+
 def update(args: argparse.Namespace, env: dict[str, str]):
     """
     Update the cmake build files.
@@ -382,6 +451,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         str(args.build_dir),
         "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
         f"-DUSE_CUDA={'ON' if args.use_cuda else 'OFF'}",
+        f"-DUSE_ROCM={'ON' if args.use_rocm else 'OFF'}",
         f"-DUSE_DML={'ON' if args.use_dml else 'OFF'}",
         f"-DENABLE_JAVA={'ON' if args.build_java else 'OFF'}",
         f"-DBUILD_WHEEL={build_wheel}",
@@ -400,22 +470,35 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             + str((args.android_ndk_path / "build" / "cmake" / "android.toolchain.cmake").resolve(strict=True)),
             f"-DANDROID_PLATFORM=android-{args.android_api}",
             f"-DANDROID_ABI={args.android_abi}",
+            f"-DANDROID_MIN_SDK={args.android_api}",
             "-DENABLE_PYTHON=OFF",
+            "-DENABLE_TESTS=OFF",
         ]
 
     if args.ios:
+        def _get_opencv_toolchain_file():
+            if args.ios_sysroot == "iphoneos":
+                return (
+                    REPO_ROOT / "cmake" / "external" / "opencv" / "platforms" / "iOS" / "cmake" /
+                        "Toolchains" / "Toolchain-iPhoneOS_Xcode.cmake"
+                )
+            else:
+                return (
+                    REPO_ROOT / "cmake" / "external" / "opencv" / "platforms" / "iOS" / "cmake" /
+                        "Toolchains" / "Toolchain-iPhoneSimulator_Xcode.cmake"
+                )
+
+
         command += [
             "-DCMAKE_SYSTEM_NAME=iOS",
             f"-DCMAKE_OSX_SYSROOT={args.ios_sysroot}",
             f"-DCMAKE_OSX_ARCHITECTURES={args.ios_arch}",
             f"-DCMAKE_OSX_DEPLOYMENT_TARGET={args.ios_deployment_target}",
             "-DENABLE_PYTHON=OFF",
-            "-DCMAKE_TOOLCHAIN_FILE="
-            + (
-                args.ios_toolchain_file
-                if args.ios_toolchain_file
-                else "cmake/genai_ios.toolchain.cmake"
-            ),
+            # The following arguments are specific to the OpenCV toolchain file
+            f"-DIOS_ARCH={args.ios_arch}",
+            f"-DIPHONEOS_DEPLOYMENT_TARGET={args.ios_deployment_target}",
+            f"-DCMAKE_TOOLCHAIN_FILE={_get_opencv_toolchain_file()}",
         ]
 
     if args.cmake_extra_defines != []:
@@ -458,6 +541,9 @@ def test(args: argparse.Namespace, env: dict[str, str]):
         csharp_test_command = [dotnet, "test"]
         csharp_test_command += _get_csharp_properties(args)
         util.run(csharp_test_command, env=env, cwd=str(REPO_ROOT / "test" / "csharp"))
+
+    if args.android:
+        _run_android_tests(args)
 
 
 def clean(args: argparse.Namespace, env: dict[str, str]):

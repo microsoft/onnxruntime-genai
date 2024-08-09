@@ -4,12 +4,12 @@
 1. [Setup](#setup)
 2. [Choose your platform](#choose-your-platform)
 3. [Run with DirectML](#run-with-directml)
-4. [Run with NVDIA CUDA](#run-with-nvidia-cuda)
+4. [Run with NVIDIA CUDA](#run-with-nvidia-cuda)
 5. [Run on CPU](#run-on-cpu)
 
 ## Introduction
 
-There are many Phi-3 models to choose from: Phi-3 mini, Phi-3 small, Phi-3 medium, and Phi-3 vision (coming soon). With the Phi-3 models, there are also short (4K/8K) context versions and long (128K) context versions to choose from. The long context version can accept much longer prompts and produce longer output text, but it does consume more memory.
+There are many Phi-3 models to choose from: Phi-3 mini, Phi-3 small, Phi-3 medium, and Phi-3 vision. With the Phi-3 models, there are also short (4K/8K) context versions and long (128K) context versions to choose from. The long context version can accept much longer prompts and produce longer output text, but it does consume more memory.
 
 The Phi-3 ONNX models are hosted [here](https://huggingface.co/collections/microsoft/phi-3-6626e15e9585a200d2d761e3) in a collection on Hugging Face.
 

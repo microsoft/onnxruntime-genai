@@ -147,7 +147,7 @@ std::unique_ptr<OrtValue> ToOrtValue(pybind11::array& v) {
   return OrtValue::CreateTensor(*p_memory_info, v.mutable_data(), v.nbytes(), shape, type);
 }
 
-pybind11::array ToNumpy(OrtValue* v) {
+pybind11::array ToNumpy(OrtValue* v, const Generators::Model& model) {
   if (!v)
     return {};
 
@@ -161,10 +161,25 @@ pybind11::array ToNumpy(OrtValue* v) {
 
 #if USE_DML
   // TODO: DML version of this
-  if (v->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU)
-    throw std::runtime_error("NYI: ToNumpy of a DML memory based tensor");
+  if (v->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU && model.device_type_ == Generators::DeviceType::DML) {
+    auto data_size = type_info->GetElementCount() * element_size;
+    cpu_copy = std::make_unique<uint8_t[]>(data_size);
+
+    ComPtr<ID3D12Resource> gpu_resource;
+    Ort::ThrowOnError(model.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(
+        model.allocator_device_,
+        data,
+        &gpu_resource));
+
+    model.GetDmlReadbackHeap()->ReadbackFromGpu(
+        std::span(reinterpret_cast<uint8_t*>(cpu_copy.get()), data_size),
+        gpu_resource.Get(),
+        0,
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    data = cpu_copy.get();
+  }
 #elif USE_CUDA
-  if (v->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU) {
+  if (v->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU && model.device_type_ == Generators::DeviceType::CUDA) {
     auto data_size = type_info->GetElementCount() * element_size;
     cpu_copy = std::make_unique<uint8_t[]>(data_size);
     Generators::CudaCheck() == cudaMemcpy(cpu_copy.get(), data, data_size, cudaMemcpyDeviceToHost);
@@ -262,7 +277,7 @@ struct PyGeneratorParams {
           SetSearchNumber(params_->search, name, entry.second.cast<int>());
         } else
           throw std::runtime_error("Unknown search option type, can be float/bool/int:" + name);
-      } catch (JSON::unknown_value_error& e) {
+      } catch (JSON::unknown_value_error&) {
         throw std::runtime_error("Unknown search option:" + name);
       }
     }
@@ -311,7 +326,7 @@ struct PyGenerator {
   }
 
   pybind11::array GetOutput(const std::string& name) {
-    return ToNumpy(generator_->state_->GetOutput(name.c_str()));
+    return ToNumpy(generator_->state_->GetOutput(name.c_str()), *(generator_->model_));
   }
 
   void GenerateNextToken() {
@@ -340,7 +355,7 @@ void SetLogOptions(const pybind11::kwargs& dict) {
         SetLogString(name, entry.second.cast<std::string>());
       } else
         throw std::runtime_error("Unknown log option type, can be bool/string:" + name);
-    } catch (JSON::unknown_value_error& e) {
+    } catch (JSON::unknown_value_error&) {
       throw std::runtime_error("Unknown log option:" + name);
     }
   }
@@ -418,7 +433,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         return CreateModel(GetOrtEnv(), config_path.c_str());
       }))
       .def("generate", [](Model& model, PyGeneratorParams& params) { params.Prepare(); return Generate(model, params); })
-      .def_property_readonly("device_type", [](const Model& s) { return to_string(s.device_type_); })
+      .def_property_readonly(
+          "device_type", [](const Model& model) { return to_string(model.device_type_); }, "The device type the model is running on")
       .def("create_multimodal_processor", [](const Model& model) { return model.CreateMultiModalProcessor(); });
 
   pybind11::class_<PyGenerator>(m, "Generator")
@@ -446,14 +462,14 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   pybind11::class_<MultiModalProcessor, std::shared_ptr<MultiModalProcessor>>(m, "MultiModalProcessor")
       .def("__call__", [](MultiModalProcessor& processor, const std::string& prompt, const pybind11::kwargs& kwargs) -> std::unique_ptr<PyNamedTensors> {
-        if (processor.image_processor_) {
-          const Images* images = nullptr;
-          if (kwargs.contains("images")) {
-            images = kwargs["images"].cast<const Images*>();
+        if (kwargs.contains("images")) {
+          if (processor.image_processor_ == nullptr) {
+            throw std::runtime_error("Image processor is not available for this model.");
           }
+          const Images* images = kwargs["images"].cast<const Images*>();
           return std::make_unique<PyNamedTensors>(processor.image_processor_->Process(*processor.tokenizer_, prompt, images));
         } else {
-          throw std::runtime_error("Image processor is not available.");
+          throw std::runtime_error("MultiModalProcessor cannot process this request. Nothing to process.");
         }
       })
       .def("create_stream", [](MultiModalProcessor& processor) { return processor.tokenizer_->CreateStream(); })
@@ -473,6 +489,14 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   m.def("is_dml_available", []() {
 #if USE_DML
+    return true;
+#else
+        return false;
+#endif
+  });
+
+  m.def("is_rocm_available", []() {
+#if USE_ROCM
     return true;
 #else
         return false;

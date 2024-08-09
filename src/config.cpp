@@ -64,6 +64,10 @@ struct SessionOptions_Element : JSON::Element {
       v_.log_id = value;
     else if (name == "enable_profiling")
       v_.enable_profiling = value;
+    else if (name == "ep_context_embed_mode")
+      v_.ep_context_embed_mode = value;
+    else if (name == "ep_context_file_path")
+      v_.ep_context_file_path = value;
     else
       throw JSON::unknown_value_error{};
   }
@@ -84,6 +88,14 @@ struct SessionOptions_Element : JSON::Element {
       v_.enable_cpu_mem_arena = value;
     else if (name == "enable_mem_pattern")
       v_.enable_mem_pattern = value;
+    else if (name == "disable_cpu_ep_fallback")
+      v_.disable_cpu_ep_fallback = value;
+    else if (name == "disable_quant_qdq")
+      v_.disable_quant_qdq = value;
+    else if (name == "enable_quant_qdq_cleanup")
+      v_.enable_quant_qdq_cleanup = value;
+    else if (name == "ep_context_enable")
+      v_.ep_context_enable = value;
     else
       throw JSON::unknown_value_error{};
   }
@@ -278,7 +290,7 @@ struct Eos_Array_Element : JSON::Element {
     v_.eos_token_ids.push_back(static_cast<int>(value));
   }
 
-  void OnComplete(bool empty) {
+  void OnComplete(bool empty) override {
     if (v_.eos_token_ids.empty())
       return;  // Empty array, nothign to do
 

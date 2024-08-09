@@ -11,14 +11,13 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 env:
-  ort_dir: "onnxruntime-win-arm64-1.17.3"
-  ort_zip: "$(ort_dir).zip"
-  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/$(ort_zip)"
-  binaryDir: 'build/cpu'
+  binaryDir: 'build/cpu/win-arm64'
+  ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
+  ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
 
 jobs:
   windows-cpu-arm64-build:
-    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Win11-ARM-CPU" ]
+    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-win11-arm64-cpu" ]
     steps:
     - name: Checkout OnnxRuntime GenAI repo
       uses: actions/checkout@v4
@@ -31,22 +30,31 @@ jobs:
         vs-version: '17.4'
         msbuild-architecture: arm64
 
-    - name: Download OnnxRuntime
-      run: |
-        $env:ort_url = "https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/onnxruntime-win-arm64-1.17.3.zip"
-        Invoke-WebRequest -Uri $env:ort_url -OutFile $env:ort_zip
+    - uses: nuget/setup-nuget@v2
+      with:
+        nuget-version: '5.x'
 
-    - name: Unzip OnnxRuntime
+    - name: Download OnnxRuntime Nightly
+      shell: powershell
       run: |
-        Expand-Archive $env:ort_zip -DestinationPath .
-        Remove-Item -Path $env:ort_zip
+        $resp = Invoke-RestMethod "${{ env.ORT_NIGHTLY_REST_API }}"
+        $ORT_NIGHTLY_VERSION = $resp.value[0].versions[0].normalizedVersion
+        Write-Host "$ORT_NIGHTLY_VERSION"
+        "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
+        nuget install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_NIGHTLY_VERSION -x -NonInteractive
 
-    - name: Rename OnnxRuntime to ort
+    - run: Get-ChildItem  ${{ env.ORT_PACKAGE_NAME }} -Recurse
+      continue-on-error: true
+
+    - name: Extract OnnxRuntime library and header files
       run: |
-        Rename-Item -Path $env:ort_dir -NewName ort
+        mkdir ort/lib
+        move ${{ env.ORT_PACKAGE_NAME }}/build/native/include ort/
+        move ${{ env.ORT_PACKAGE_NAME }}/runtimes/win-arm64/native/* ort/lib/
 
     - name: Configure CMake
       run: |
+        python -m pip install wheel
         cmake --preset windows_arm64_cpu_release
 
     - name: Build with CMake
@@ -60,14 +68,15 @@ jobs:
 
     - name: Install the Python Wheel and Test Dependencies
       run: |
+        python -c "import platform; print(platform.machine()); print(platform.version()); print(platform.platform()); print(platform.system()); print(platform.processor()); print(platform.architecture())"
+        python -c "import sys; print(sys.version)"
+        python -m pip install "numpy<2" coloredlogs flatbuffers packaging protobuf sympy pytest
+        python -m pip install -i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ ort-nightly-qnn
         python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl"))
-        python -m pip install -r test\python\requirements.txt
 
     - name: Run the Python Tests
       run: |
         python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\test_models"
-
-
 
     - name: Verify Build Artifacts
       if: always()
@@ -78,4 +87,4 @@ jobs:
 
     - name: Run tests
       run: |
-        .\build\cpu\test\Release\unit_tests.exe
+        & .\$env:binaryDir\test\Release\unit_tests.exe

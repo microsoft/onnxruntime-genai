@@ -1,6 +1,6 @@
 # ONNX Runtime generate() API
 
-![Latest version](https://img.shields.io/nuget/vpre/Microsoft.ML.OnnxRuntimeGenAI.Managed?label=latest)
+[![Latest version](https://img.shields.io/nuget/vpre/Microsoft.ML.OnnxRuntimeGenAI.Managed?label=latest)](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntimeGenAI.Managed/absoluteLatest)
 
 Run Llama, Phi, Gemma, Mistral with ONNX Runtime.
 
@@ -14,16 +14,18 @@ See documentation at https://onnxruntime.ai/docs/genai.
 
 |Support matrix|Supported now|Under development|On the roadmap|
 |-|-|-|-|
-|Model architectures|  Gemma <br/> Llama * <br/> Mistral + <br/>Phi <br/>|Whisper|Stable diffusion|
-|API| Python <br/>C# <br/>C/C++ |Java|Objective-C|||
-|Platform| Linux <br/> Windows  | Android | Mac <br/> iOS |||
-|Architecture|x86 <br/> x64 <br/> | Arm64 |||
-|Hardware Acceleration|CUDA<br/>DirectML<br/>|QNN <br/> ROCm |OpenVINO
+|Model architectures|  Gemma <br/> Llama * <br/> Mistral + <br/>Phi (language + vision)<br/>Qwen <br/>|Whisper|Stable diffusion|
+|API| Python <br/>C# <br/>C/C++ <br/> Java ^ |Objective-C||
+|Platform| Linux <br/> Windows <br/>Mac ^ <br/>Android ^  ||iOS |||
+|Architecture|x86 <br/> x64 <br/> Arm64 ^||||
+|Hardware Acceleration|CUDA<br/>DirectML<br/>|QNN <br/> ROCm |OpenVINO|
+|Features|| Interactive decoding <br/> Customization (fine-tuning)| Speculative decoding |
 
 \* The Llama model architecture supports similar model families such as CodeLlama, Vicuna, Yi, and more.
 
 \+ The Mistral model architecture supports similar model families such as Zephyr.
 
+\^ Requires build from source
 
 ## Installation
 
@@ -89,6 +91,10 @@ See https://onnxruntime.ai/docs/genai/howto/install
    print()
    del generator
    ```
+
+## Roadmap
+
+See the [Discussions](https://github.com/microsoft/onnxruntime-genai/discussions) to request new features and up-vote existing requests.
 
 
 ## Contributing
