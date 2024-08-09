@@ -107,7 +107,7 @@ TEST(CAPITests, AppendTokensToSequence) {
       }
     }
   }
-#endifdc
+#endif
 }
 
 TEST(CAPITests, EndToEndPhiBatch) {
