@@ -189,8 +189,8 @@ jobs:
             bash -c " \
                 export ORTGENAI_LOG_ORT_LIB=1 && \
                 cd /ort_genai_src/examples/csharp/HelloPhi && \
-                chmod +x ./bin/Release/net6.0/linux-x64/HelloPhi.dll
-                ./bin/Release/net6.0/linux-x64/HelloPhi.dll -m ./models/phi-3"
+                chmod +x ./bin/Release_Cuda/net6.0/linux-x64/HelloPhi.dll
+                ./bin/Release_Cuda/net6.0/linux-x64/HelloPhi.dll -m ./models/phi-3"
 
         displayName: 'Run Example With Artifact'
         workingDirectory: '$(Build.Repository.LocalPath)'
