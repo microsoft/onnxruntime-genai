@@ -188,7 +188,6 @@ jobs:
             -w /ort_genai_src/ $(cuda_docker_image) \
             bash -c " \
                 export ORTGENAI_LOG_ORT_LIB=1 && \
-                dotnet --info && \
                 cd /ort_genai_src/examples/csharp/HelloPhi && \
                 chmod +x ./bin/Release/net6.0/linux-x64/HelloPhi.dll
                 ./bin/Release/net6.0/linux-x64/HelloPhi.dll -m ./models/phi-3"
