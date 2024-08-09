@@ -211,6 +211,7 @@ TEST(CAPITests, GetOutputCAPI) {
   float tolerance = 0.001;
   // Verify outputs match expected outputs
   for (int i = 0; i < num_prompt_outputs_to_check; i++) {
+    std::cout << "Output:" << i << "exp:" << expected_sampled_logits_prompt[i] << " act:" << prompt_logits[i*sample_size] << std:endl;
     EXPECT_NEAR(expected_sampled_logits_prompt[i], prompt_logits[i*sample_size], tolerance);
   }
 
@@ -224,8 +225,10 @@ TEST(CAPITests, GetOutputCAPI) {
   int num_token_gen_outputs_to_check = 10;
 
   for (int i = 0; i < num_token_gen_outputs_to_check; i++) {
+    std::cout << "Output:" << i << "exp:" << expected_sampled_logits_token_gen[i] << " act:" << token_gen_logits[i*sample_size] << std:endl;
     EXPECT_NEAR(expected_sampled_logits_token_gen[i], token_gen_logits[i*sample_size], tolerance);
   }
+  generator->GenerateNextToken();
 }
 
 #if TEST_PHI2
