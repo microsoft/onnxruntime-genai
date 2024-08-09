@@ -190,7 +190,8 @@ jobs:
                 export ORTGENAI_LOG_ORT_LIB=1 && \
                 dotnet --info && \
                 cd /ort_genai_src/examples/csharp/HelloPhi && \
-                dotnet run -r $(os)-$(arch) --configuration $(csproj_configuration) --no-build --verbosity normal -- -m ./models/phi-3"
+                chmod +x ./bin/Release/net6.0/linux-x64/HelloPhi.dll
+                ./bin/Release/net6.0/linux-x64/HelloPhi.dll -m ./models/phi-3"
 
         displayName: 'Run Example With Artifact'
         workingDirectory: '$(Build.Repository.LocalPath)'
