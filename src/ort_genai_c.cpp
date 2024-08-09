@@ -224,6 +224,13 @@ OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* oga_generator
   if (ortvalue_output->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU && generator.model_->device_type_ == Generators::DeviceType::CUDA) {
     std::cout << "OrtValue Output on CUDA device" << std::endl;
     cudaMemcpy(ortvalue_clone->GetTensorMutableRawData(), ortvalue_output->GetTensorMutableRawData(), data_size, cudaMemcpyDeviceToHost);
+  } else if (ortvalue_output->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_CPU) {
+    std::cout << "OrtValue Output on GPU and CPU device" << std::endl;
+    std::copy(static_cast<uint8_t*>(ortvalue_output->GetTensorMutableRawData()),
+              static_cast<uint8_t*>(ortvalue_output->GetTensorMutableRawData()) + data_size,
+              static_cast<uint8_t*>(ortvalue_clone->GetTensorMutableRawData()));
+  } else {
+    std::cout << "OrtValue Output on Unknown USE_CUDA device" << std::endl;
   }
 #elif USE_DML
   if (ortvalue_output->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU && generator.model_->device_type_ == Generators::DeviceType::DML) {
@@ -239,6 +246,13 @@ OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* oga_generator
         gpu_resource.Get(),
         0,
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  } else if (ortvalue_output->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_CPU) {
+    std::cout << "OrtValue Output on DML and CPU device" << std::endl;
+    std::copy(static_cast<uint8_t*>(ortvalue_output->GetTensorMutableRawData()),
+              static_cast<uint8_t*>(ortvalue_output->GetTensorMutableRawData()) + data_size,
+              static_cast<uint8_t*>(ortvalue_clone->GetTensorMutableRawData()));
+  } else {
+    std::cout << "OrtValue Output on Unknown USE_DML device" << std::endl;
   }
 #else
   if (ortvalue_output->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_CPU) {
@@ -247,9 +261,9 @@ OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* oga_generator
               static_cast<uint8_t*>(ortvalue_output->GetTensorMutableRawData()) + data_size,
               static_cast<uint8_t*>(ortvalue_clone->GetTensorMutableRawData()));
   }
-  std::cout << "Data type:" << type_info->GetElementType() << std::endl;
 #endif
 
+  std::cout << "Data type:" << type_info->GetElementType() << std::endl;
   auto tensor = std::make_shared<Generators::Tensor>(std::move(ortvalue_clone));
   tensor->external_owner_ = tensor;
   *out = reinterpret_cast<OgaTensor*>(tensor.get());
