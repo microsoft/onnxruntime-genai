@@ -111,6 +111,20 @@ struct Config {
         std::string cross_present_key_names, cross_present_value_names;
       } outputs;
 
+      struct PipelineModel {
+        std::string model_id;
+        std::string filename;
+        std::optional<SessionOptions> session_options;
+
+        std::vector<std::string> inputs;
+        std::vector<std::string> outputs;
+        std::unordered_map<std::string, std::string> output_names_forwarder;
+        bool run_on_first_token_generation{true};
+        bool run_on_nth_token_generation{true};
+      };
+
+      std::vector<PipelineModel> pipeline;
+
     } decoder;
   } model;
 
