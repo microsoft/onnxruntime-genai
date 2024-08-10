@@ -127,6 +127,7 @@ jobs:
         run: |
           ls -al /data/
           ls -al /data/ortgenai_pytorch_models/
+          ls -al /data/ortgenai_pytorch_models/Llama-2-7B-Chat-GPTQ/
 
       - name: Install the onnxruntime-genai Python wheel and run python test
         run: |

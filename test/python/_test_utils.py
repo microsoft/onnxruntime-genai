@@ -60,6 +60,12 @@ def get_model_paths():
     }
 
     ci_data_path = os.path.join("/", "data", "ortgenai_pytorch_models")
+    llama2_data_path = os.path.join(ci_data_path, "Llama-2-7B-Chat-GPTQ")
+    print(f"CI data path is: {ci_data_path}")
+    print(f"Does CI data path exist? {os.path.exists(ci_data_path)}")
+    print(f"LLaMA 2 data path is: {llama2_data_path}")
+    print(f"Does LLaMA 2 data path exist? {os.path.exists(llama2_data_path)}")
+
     if not os.path.exists(ci_data_path):
         return {}, hf_paths
 
