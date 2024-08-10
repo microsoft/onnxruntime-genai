@@ -55,7 +55,6 @@ def run_subprocess(
 def get_model_paths():
     hf_paths = {
         "phi-2": "microsoft/phi-2",
-        "gemma-2b": "google/gemma-1.1-2b-it",
         "phi-3-mini": "microsoft/Phi-3-mini-128k-instruct",
     }
 
@@ -73,10 +72,10 @@ def get_model_paths():
     # to `ci_paths` instead of `hf_paths` to reduce file size and testing time.
     ci_paths = {
         "llama-2": os.path.join(ci_data_path, "Llama-2-7B-Chat-GPTQ"),
-        # "mistral-v0.2": os.path.join(ci_data_path, "Mistral-7B-Instruct-v0.2-GPTQ"),
+        "mistral-v0.2": os.path.join(ci_data_path, "Mistral-7B-Instruct-v0.2-GPTQ"),
         # "phi-2": os.path.join(ci_data_path, "phi2"),
         # "gemma-2b": os.path.join(ci_data_path, "gemma-1.1-2b-it"),
-        # "gemma-7b": os.path.join(ci_data_path, "gemma-7b-it-awq"),
+        "gemma-7b": os.path.join(ci_data_path, "gemma-7b-it-awq"),
         # "phi-3-mini": os.path.join(ci_data_path, "phi3-mini-128k-instruct"),
     }
 
