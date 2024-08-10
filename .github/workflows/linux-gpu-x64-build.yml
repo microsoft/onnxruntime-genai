@@ -123,15 +123,15 @@ jobs:
         run: |
           rm -rf ort
 
-      - name: Set permissions in /data/ path
-        run: |
-          ls -al /data/ortgenai_pytorch_models/
-          ls -al /data/ortgenai_pytorch_models/Llama-2-7B-Chat-GPTQ/
-          cat /data/ortgenai_pytorch_models/Llama-2-7B-Chat-GPTQ/config.json
-          sudo chmod -R 777 /data/ortgenai_pytorch_models/
-          ls -al /data/ortgenai_pytorch_models/
-          ls -al /data/ortgenai_pytorch_models/Llama-2-7B-Chat-GPTQ/
-          cat /data/ortgenai_pytorch_models/Llama-2-7B-Chat-GPTQ/config.json
+      # - name: Set permissions in /data/ path
+      #   run: |
+      #     ls -al /data/ortgenai_pytorch_models/
+      #     ls -al /data/ortgenai_pytorch_models/Llama-2-7B-Chat-GPTQ/
+      #     cat /data/ortgenai_pytorch_models/Llama-2-7B-Chat-GPTQ/config.json
+      #     sudo chmod -R 777 /data/ortgenai_pytorch_models/
+      #     ls -al /data/ortgenai_pytorch_models/
+      #     ls -al /data/ortgenai_pytorch_models/Llama-2-7B-Chat-GPTQ/
+      #     cat /data/ortgenai_pytorch_models/Llama-2-7B-Chat-GPTQ/config.json
 
       - name: Install the onnxruntime-genai Python wheel and run python test
         run: |
@@ -139,6 +139,7 @@ jobs:
           docker run \
             --gpus all \
             --rm \
+            --volume /data/ortgenai_pytorch_models:/data/ortgenai_pytorch_models \
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
             -e HF_TOKEN=$HF_TOKEN \
             -w /ort_genai_src onnxruntimecudabuildx64 bash -c " \
@@ -153,5 +154,6 @@ jobs:
           docker run \
             --gpus all \
             --rm \
+            --volume /data/ortgenai_pytorch_models:/data/ortgenai_pytorch_models \
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
             -w /ort_genai_src onnxruntimecudabuildx64 bash -c "LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/ort_genai_src/build/cuda/ /ort_genai_src/build/cuda/test/unit_tests"
