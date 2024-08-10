@@ -55,15 +55,20 @@ def run_subprocess(
 def get_model_paths():
     hf_paths = {
         "phi-2": "microsoft/phi-2",
-        "phi-3-mini": "microsoft/Phi-3-mini-128k-instruct",
+        # "phi-3-mini": "microsoft/Phi-3-mini-128k-instruct",
     }
 
     ci_data_path = os.path.join("/", "data", "ortgenai_pytorch_models")
     llama2_data_path = os.path.join(ci_data_path, "Llama-2-7B-Chat-GPTQ")
     print(f"CI data path is: {ci_data_path}")
     print(f"Does CI data path exist? {os.path.exists(ci_data_path)}")
+    print(f"Is CI data path accessible? {os.access(ci_data_path, os.R_OK)}")
+    print(f"CI data path stat: {os.stat(ci_data_path)}")
+
     print(f"LLaMA 2 data path is: {llama2_data_path}")
     print(f"Does LLaMA 2 data path exist? {os.path.exists(llama2_data_path)}")
+    print(f"Is LLaMA 2 data path accessible? {os.access(llama2_data_path, os.R_OK)}")
+    print(f"LLaMA 2 data path stat: {os.stat(llama2_data_path)}")
 
     if not os.path.exists(ci_data_path):
         return {}, hf_paths
