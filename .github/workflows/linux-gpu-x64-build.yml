@@ -123,6 +123,11 @@ jobs:
         run: |
           rm -rf ort
 
+      - name: Print info in /data/ path
+        run: |
+          ls -al /data/
+          ls -al /data/ortgenai_pytorch_models/
+
       - name: Install the onnxruntime-genai Python wheel and run python test
         run: |
           echo "Installing the onnxruntime-genai Python wheel and running the Python tests"

@@ -90,11 +90,14 @@ jobs:
         Write-Output "::add-mask::$HF_TOKEN"
         Add-Content -Path $env:GITHUB_ENV -Value "HF_TOKEN=$HF_TOKEN"
 
+    - name: Print info in /data/ path
+      run: |
+        Get-ChildItem -Path "C:\data"
+        Get-ChildItem -Path "C:\data\ortgenai_pytorch_models\"
+
     - name: Run the Python Tests
       run: |
         python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\test_models"
-
-
 
     - name: Verify Build Artifacts
       if: always()

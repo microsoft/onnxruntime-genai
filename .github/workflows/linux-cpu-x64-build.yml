@@ -84,6 +84,11 @@ jobs:
         run: |
           rm -rf ort
 
+      - name: Print info in /data/ path
+        run: |
+          ls -al /data/
+          ls -al /data/ortgenai_pytorch_models/
+
       # This will also download all the test models to the test/test_models directory
       # These models are used by the python tests as well as C#, C++ and others.
       - name: Run the python tests
