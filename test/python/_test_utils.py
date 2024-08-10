@@ -52,37 +52,48 @@ def run_subprocess(
     return completed_process
 
 
-def get_model_names():
-    model_names = {
-        "llama-2": "meta-llama/Llama-2-7b-hf",
-        "mistral-v0.1": "mistralai/Mistral-7B-v0.1",
-        "phi-2": "microsoft/phi-2",
-        "gemma-2b": "google/gemma-2b",
-        "gemma-7b": "google/gemma-7b",
+def get_model_paths():
+    model_paths = {
+        # "llama-2": "meta-llama/Llama-2-7b-hf",
+        # "mistral-v0.1": "mistralai/Mistral-7B-v0.1",
+        # "phi-2": "microsoft/phi-2",
+        # "gemma-2b": "google/gemma-2b",
+        # "gemma-7b": "google/gemma-7b",
         "phi-3-mini": "microsoft/Phi-3-mini-128k-instruct",
     }
-    return model_names
+    return model_paths
 
 
-def download_models(download_path, device):
-    # python -m onnxruntime_genai.models.builder -m <model_name> -p int4 -e cpu -o <download_path> --extra_options num_hidden_layers=1
-    model_names = get_model_names()
-    for model_name, model_identifier in model_names.items():
-        model_path = os.path.join(download_path, device, model_name)
-        if not os.path.exists(model_path):
-            command = [
-                sys.executable,
-                "-m",
-                "onnxruntime_genai.models.builder",
-                "-m",
-                model_identifier,
-                "-p",
-                "int4",
-                "-e",
-                device,
-                "-o",
-                model_path,
-                "--extra_options",
-                "num_hidden_layers=1",
-            ]
-            run_subprocess(command).check_returncode()
+def download_model(input_path, output_path, precision, device):
+    # python -m onnxruntime_genai.models.builder -i <input_path> -o <output_path> -p <precision> -e <device>
+    command = [
+        sys.executable,
+        "-m",
+        "onnxruntime_genai.models.builder",
+        "-i",
+        input_path,
+        "-o",
+        output_path,
+        "-p",
+        precision,
+        "-e",
+        device,
+    ]
+    if device == "cpu" and precision == "int4":
+        command += ["--extra_options", "int4_accuracy_level=4"]
+
+    run_subprocess(command).check_returncode()
+
+
+def download_models(download_path, precision, device):
+    # python -m onnxruntime_genai.models.builder -i <input_path> -o <output_path> -p <precision> -e <device>
+    model_paths = get_model_paths()
+    output_paths = []
+    
+    for model_name, input_path in model_paths.items():
+        output_path = os.path.join(download_path, model_name, precision, device)
+        if not os.path.exists(output_path):
+            download_model(input_path, output_path, precision, device)
+            output_paths.append(output_path)
+
+    return output_paths

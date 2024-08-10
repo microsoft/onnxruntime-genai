@@ -2,38 +2,40 @@
 # Licensed under the MIT License.
 from __future__ import annotations
 
+import argparse
+import json
 import os
-import sys
-import tempfile
+# import sys
+# import tempfile
 
 import onnxruntime_genai as og
-from _test_utils import run_subprocess, get_model_names
+# from _test_utils import download_models
 
 
-def download_model(
-    download_path: str | bytes | os.PathLike, device: str, model_identifier: str, precision: str
-):
-    # python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -p int4 -e cpu -o download_path
-    # Or with cuda graph enabled:
-    # python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -p int4 -e cuda -o download_path --extra_options enable_cuda_graph=1
-    command = [
-        sys.executable,
-        "-m",
-        "onnxruntime_genai.models.builder",
-        "-m",
-        model_identifier,
-        "-p",
-        precision,
-        "-e",
-        device,
-        "-o",
-        download_path,
-    ]
-    models_not_compatible_with_cuda_graph = {"microsoft/Phi-3-mini-128k-instruct"}
-    if device == "cuda" and precision != "fp32" and model_identifier not in models_not_compatible_with_cuda_graph:
-        command.append("--extra_options")
-        command.append("enable_cuda_graph=1")
-    run_subprocess(command).check_returncode()
+# def download_model(
+#     download_path: str | bytes | os.PathLike, device: str, model_path: str, precision: str
+# ):
+#     # python -m onnxruntime_genai.models.builder -i input_path -p int4 -e cpu -o download_path
+#     # Or with cuda graph enabled:
+#     # python -m onnxruntime_genai.models.builder -i input_path -p int4 -e cuda -o download_path --extra_options enable_cuda_graph=1
+#     command = [
+#         sys.executable,
+#         "-m",
+#         "onnxruntime_genai.models.builder",
+#         "-i",
+#         model_path,
+#         "-o",
+#         download_path,
+#         "-p",
+#         precision,
+#         "-e",
+#         device,
+#     ]
+#     models_not_compatible_with_cuda_graph = {"microsoft/Phi-3-mini-128k-instruct"}
+#     if device == "cuda" and precision != "fp32" and model_path not in models_not_compatible_with_cuda_graph:
+#         command.append("--extra_options")
+#         command.append("enable_cuda_graph=1")
+#     run_subprocess(command).check_returncode()
 
 
 def run_model(model_path: str | bytes | os.PathLike):
@@ -57,11 +59,23 @@ def run_model(model_path: str | bytes | os.PathLike):
     assert output
 
 
+def get_args():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "-m",
+        "--models",
+        type=str,
+        required=True,
+        help="List of model paths to run. Pass as `json.dumps(model_paths)` to this argument.",
+    )
+
+    args = parser.parse_args()
+    args.models = json.loads(args.models)
+    return args
+
+
 if __name__ == "__main__":
-    model_names = get_model_names()
-    for model_name in model_names.values():
-        for precision in ["int4", "fp32"]:
-            with tempfile.TemporaryDirectory() as temp_dir:
-                device = "cuda" if og.is_cuda_available() else "cpu"
-                download_model(temp_dir, device, model_name, precision)
-                run_model(temp_dir)
+    args = get_args()
+    for model_path in args.models:
+        run_model(model_path)
