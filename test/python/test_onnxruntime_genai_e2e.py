@@ -5,37 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
-# import sys
-# import tempfile
 
 import onnxruntime_genai as og
-# from _test_utils import download_models
-
-
-# def download_model(
-#     download_path: str | bytes | os.PathLike, device: str, model_path: str, precision: str
-# ):
-#     # python -m onnxruntime_genai.models.builder -i input_path -p int4 -e cpu -o download_path
-#     # Or with cuda graph enabled:
-#     # python -m onnxruntime_genai.models.builder -i input_path -p int4 -e cuda -o download_path --extra_options enable_cuda_graph=1
-#     command = [
-#         sys.executable,
-#         "-m",
-#         "onnxruntime_genai.models.builder",
-#         "-i",
-#         model_path,
-#         "-o",
-#         download_path,
-#         "-p",
-#         precision,
-#         "-e",
-#         device,
-#     ]
-#     models_not_compatible_with_cuda_graph = {"microsoft/Phi-3-mini-128k-instruct"}
-#     if device == "cuda" and precision != "fp32" and model_path not in models_not_compatible_with_cuda_graph:
-#         command.append("--extra_options")
-#         command.append("enable_cuda_graph=1")
-#     run_subprocess(command).check_returncode()
 
 
 def run_model(model_path: str | bytes | os.PathLike):

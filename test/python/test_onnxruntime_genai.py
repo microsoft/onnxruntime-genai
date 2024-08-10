@@ -1,6 +1,5 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
-
 import argparse
 import json
 import logging
@@ -8,7 +7,7 @@ import os
 import pathlib
 import sys
 import sysconfig
-from typing import Union
+from typing import Union, List
 
 import onnxruntime_genai as og
 from _test_utils import download_models, run_subprocess
