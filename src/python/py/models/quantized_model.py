@@ -88,12 +88,12 @@ class QuantizedModel:
         self.embedding = TensorModule()
         self.final_norm = TensorModule()
         self.lm_head = TensorModule()
-        self.layers = []
+        self.layers = {}
 
         layer_id = 0
         for weight_file in os.listdir(input_path):
             if weight_file.endswith(".safetensors"):
-                module = QuantizedDecoderLayer(layer_id, bits, group_size)
+                module = self.layers.setdefault(layer_id, QuantizedDecoderLayer(layer_id, bits, group_size))
                 weights = load_file(os.path.join(input_path, weight_file))
 
                 # Map weights to modules
@@ -115,10 +115,9 @@ class QuantizedModel:
                     else:
                         curr_layer_id = int(name.split(".")[2])
                         if curr_layer_id != layer_id:
-                            # Add layer to list of modules
-                            self.layers.append(module)
+                            # Switch layer module used
                             layer_id = curr_layer_id
-                            module = QuantizedDecoderLayer(layer_id, bits, group_size)
+                            module = self.layers.setdefault(layer_id, QuantizedDecoderLayer(layer_id, bits, group_size))
 
                         # Map weights and biases of norm, attention, and feed-forward network
                         # Graph order is input_layernorm --> q_proj/k_proj/v_proj --> o_proj --> post_attention_layernorm --> gate_proj/up_proj --> down_proj
@@ -288,11 +287,7 @@ class QuantizedModel:
                             module.mlp.up_proj.g_idx = tensor
                         else:
                             raise NotImplementedError(f"{name} in your quantized model is not recognized.")
-                
-                if not module.is_empty():
-                    # Append final layer to list of layers
-                    self.layers.append(module)
-        
+
         # Set LM head weights + biases if not already set
         if self.lm_head.weight is None:
             # Embedding and LM head share same weights + biases (lm_head.weight == embedding.weight and lm_head.bias == embedding.bias)
@@ -301,6 +296,7 @@ class QuantizedModel:
                 self.lm_head.bias = self.embedding.bias
     
         # Sort list of layers by layer id
+        self.layers = list(self.layers.values())
         self.layers.sort(key=lambda m: m.layer_id)
 
         # Set properties of each layer based on quantization type

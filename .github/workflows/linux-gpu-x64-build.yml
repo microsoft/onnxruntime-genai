@@ -123,16 +123,6 @@ jobs:
         run: |
           rm -rf ort
 
-      # - name: Set permissions in /data/ path
-      #   run: |
-      #     ls -al /data/ortgenai_pytorch_models/
-      #     ls -al /data/ortgenai_pytorch_models/Llama-2-7B-Chat-GPTQ/
-      #     cat /data/ortgenai_pytorch_models/Llama-2-7B-Chat-GPTQ/config.json
-      #     sudo chmod -R 777 /data/ortgenai_pytorch_models/
-      #     ls -al /data/ortgenai_pytorch_models/
-      #     ls -al /data/ortgenai_pytorch_models/Llama-2-7B-Chat-GPTQ/
-      #     cat /data/ortgenai_pytorch_models/Llama-2-7B-Chat-GPTQ/config.json
-
       - name: Install the onnxruntime-genai Python wheel and run python test
         run: |
           echo "Installing the onnxruntime-genai Python wheel and running the Python tests"

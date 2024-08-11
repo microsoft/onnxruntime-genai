@@ -32,7 +32,7 @@ class Model:
         self.head_size = config.head_dim if hasattr(config, "head_dim") else config.hidden_size // config.num_attention_heads
         self.num_layers = int(extra_options["num_hidden_layers"]) if "num_hidden_layers" in extra_options else config.num_hidden_layers
         self.vocab_size = config.vocab_size
-        self.activation = config.hidden_activation if hasattr(config, "hidden_activation") else config.hidden_act
+        self.activation = config.hidden_activation if hasattr(config, "hidden_activation") and config.hidden_activation is not None else config.hidden_act
 
         self.model_name_or_path = config._name_or_path
         self.model_type = config.architectures[0]

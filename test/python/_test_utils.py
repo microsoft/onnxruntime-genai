@@ -59,17 +59,6 @@ def get_model_paths():
     }
 
     ci_data_path = os.path.join("/", "data", "ortgenai_pytorch_models")
-    llama2_data_path = os.path.join(ci_data_path, "Llama-2-7B-Chat-GPTQ")
-    print(f"CI data path is: {ci_data_path}")
-    print(f"Does CI data path exist? {os.path.exists(ci_data_path)}")
-    print(f"Is CI data path accessible? {os.access(ci_data_path, os.R_OK)}")
-    print(f"CI data path stat: {os.stat(ci_data_path)}")
-
-    print(f"LLaMA 2 data path is: {llama2_data_path}")
-    print(f"Does LLaMA 2 data path exist? {os.path.exists(llama2_data_path)}")
-    print(f"Is LLaMA 2 data path accessible? {os.access(llama2_data_path, os.R_OK)}")
-    print(f"LLaMA 2 data path stat: {os.stat(llama2_data_path)}")
-
     if not os.path.exists(ci_data_path):
         return {}, hf_paths
 
@@ -77,6 +66,7 @@ def get_model_paths():
     # to `ci_paths` instead of `hf_paths` to reduce file size and testing time.
     ci_paths = {
         "llama-2": os.path.join(ci_data_path, "Llama-2-7B-Chat-GPTQ"),
+        "llama-3": os.path.join(ci_data_path, "Meta-Llama-3-8B-AWQ"),
         "mistral-v0.2": os.path.join(ci_data_path, "Mistral-7B-Instruct-v0.2-GPTQ"),
         # "phi-2": os.path.join(ci_data_path, "phi2"),
         # "gemma-2b": os.path.join(ci_data_path, "gemma-1.1-2b-it"),
