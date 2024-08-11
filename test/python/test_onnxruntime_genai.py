@@ -85,8 +85,8 @@ def main():
         sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8
     ):
         output_paths += download_models(os.path.abspath(args.test_models), "int4", "cpu")
-        # if og.is_cuda_available():
-        #     output_paths += download_models(os.path.abspath(args.test_models), "int4", "cuda")
+        if og.is_cuda_available():
+            output_paths += download_models(os.path.abspath(args.test_models), "int4", "cuda")
 
     # Run ONNX Runtime GenAI tests
     if args.e2e:
