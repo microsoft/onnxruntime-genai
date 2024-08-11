@@ -5,8 +5,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import logging
 
 import onnxruntime_genai as og
+
+logging.basicConfig(
+    format="%(asctime)s %(name)s [%(levelname)s] - %(message)s", level=logging.DEBUG
+)
+log = logging.getLogger("onnxruntime-genai-tests")
 
 
 def run_model(model_path: str | bytes | os.PathLike):
@@ -49,4 +55,9 @@ def get_args():
 if __name__ == "__main__":
     args = get_args()
     for model_path in args.models:
-        run_model(model_path)
+        try:
+            log.info(f"Running {model_path}")
+            run_model(model_path)
+        except Exception as e:
+            log.error(e)
+            log.error(f"Failed to run {model_path}", exc_info=True)
