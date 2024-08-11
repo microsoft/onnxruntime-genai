@@ -83,12 +83,13 @@ class QuantizedDecoderLayer:
 
 
 class QuantizedModel:
-    def __init__(self, quant_type, input_path, bits, group_size, q_size, kv_size, intermediate_size):
+    def __init__(self, quant_type, input_path, bits, group_size, q_size, kv_size, intermediate_size, num_layers):
         self.quant_type = quant_type
         self.embedding = TensorModule()
         self.final_norm = TensorModule()
         self.lm_head = TensorModule()
         self.layers = {}
+        self.num_layers = num_layers
 
         layer_id = 0
         for weight_file in os.listdir(input_path):
@@ -517,11 +518,13 @@ class QuantizedModel:
 
 
 class AWQModel(QuantizedModel):
-    def __init__(self, quant_type, input_path, bits, group_size, q_size, kv_size, intermediate_size):
-        super().__init__(quant_type, input_path, bits, group_size, q_size, kv_size, intermediate_size)
+    def __init__(self, quant_type, input_path, bits, group_size, q_size, kv_size, intermediate_size, num_layers):
+        super().__init__(quant_type, input_path, bits, group_size, q_size, kv_size, intermediate_size, num_layers)
 
         # Unpack and repack all `QuantizedTensorModule` classes in model
         for i, layer in enumerate(self.layers):
+            if i >= self.num_layers:
+                break
             print(f"Unpacking and repacking layer {i}")
 
             # Unpack and repack all `QuantizedTensorModule` classes in attention
@@ -582,14 +585,16 @@ class AWQModel(QuantizedModel):
 
 
 class GPTQModel(QuantizedModel):
-    def __init__(self, quant_type, input_path, bits, group_size, use_g_idx, q_size, kv_size, intermediate_size):
-        super().__init__(quant_type, input_path, bits, group_size, q_size, kv_size, intermediate_size)
+    def __init__(self, quant_type, input_path, bits, group_size, use_g_idx, q_size, kv_size, intermediate_size, num_layers):
+        super().__init__(quant_type, input_path, bits, group_size, q_size, kv_size, intermediate_size, num_layers)
 
         # Unpack and repack all `QuantizedTensorModule` classes in model
         for i, layer in enumerate(self.layers):
+            if i >= self.num_layers:
+                break
             print(f"Unpacking and repacking layer {i}")
-            # Unpack and repack all `QuantizedTensorModule` classes in attention
 
+            # Unpack and repack all `QuantizedTensorModule` classes in attention
             for name, q_tensors in layer.self_attn.__dict__.items():
                 if isinstance(q_tensors, QuantizedTensorModule) and q_tensors.qweight is not None:
                     self.handle_qzeros(q_tensors)
@@ -638,16 +643,16 @@ class GPTQModel(QuantizedModel):
 
 class QuantModel:
     @staticmethod
-    def from_pretrained(quant_type, input_path, bits, group_size, use_g_idx, q_size, kv_size, intermediate_size):
+    def from_pretrained(quant_type, input_path, bits, group_size, use_g_idx, q_size, kv_size, intermediate_size, num_layers):
         """
         Unpack quantized weights in PyTorch models, store them in a standard format, and repack them
         into ONNX Runtime's format. Also performs any pre-processing and post-processing when unpacking
         the quantized weights.
         """
         if quant_type == "awq":
-            model = AWQModel(quant_type, input_path, bits, group_size, q_size, kv_size, intermediate_size)
+            model = AWQModel(quant_type, input_path, bits, group_size, q_size, kv_size, intermediate_size, num_layers)
         elif quant_type == "gptq":
-            model = GPTQModel(quant_type, input_path, bits, group_size, use_g_idx, q_size, kv_size, intermediate_size)
+            model = GPTQModel(quant_type, input_path, bits, group_size, use_g_idx, q_size, kv_size, intermediate_size, num_layers)
         else:
             raise NotImplementedError(f"The {quant_type} quantized model is not currently supported.")
 
