@@ -55,7 +55,7 @@ def run_subprocess(
 def get_model_paths():
     hf_paths = {
         "phi-2": "microsoft/phi-2",
-        "phi-3-mini": "microsoft/Phi-3-mini-128k-instruct",
+        # "phi-3-mini": "microsoft/Phi-3-mini-128k-instruct",
     }
 
     ci_data_path = os.path.join("/", "data", "ortgenai_pytorch_models")
@@ -77,7 +77,7 @@ def get_model_paths():
     return ci_paths, hf_paths
 
 
-def download_model(model_name, input_path, output_path, precision, device):
+def download_model(model_name, input_path, output_path, precision, device, one_layer=True):
     command = [
         sys.executable,
         "-m",
@@ -103,8 +103,11 @@ def download_model(model_name, input_path, output_path, precision, device):
         "-e",
         device,
     ]
+
     if device == "cpu" and precision == "int4":
         command += ["--extra_options", "int4_accuracy_level=4"]
+    if one_layer:
+        command += ["--extra_options", "num_hidden_layers=1"]
 
     run_subprocess(command).check_returncode()
 
