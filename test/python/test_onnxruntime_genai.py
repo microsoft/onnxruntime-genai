@@ -89,10 +89,9 @@ def main():
             output_paths += download_models(os.path.abspath(args.test_models), "int4", "cuda")
 
     # Run ONNX Runtime GenAI tests
+    run_onnxruntime_genai_api_tests(os.path.abspath(args.cwd), log, os.path.abspath(args.test_models))
     if args.e2e:
         run_onnxruntime_genai_e2e_tests(os.path.abspath(args.cwd), log, output_paths)
-    else:
-        run_onnxruntime_genai_api_tests(os.path.abspath(args.cwd), log, os.path.abspath(args.test_models))
 
     return 0
 
