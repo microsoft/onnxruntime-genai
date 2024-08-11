@@ -104,10 +104,13 @@ def download_model(model_name, input_path, output_path, precision, device, one_l
         device,
     ]
 
+    extra_options = ["--extra_options"]
     if device == "cpu" and precision == "int4":
-        command += ["--extra_options", "int4_accuracy_level=4"]
+        extra_options += ["int4_accuracy_level=4"]
     if one_layer:
-        command += ["--extra_options", "num_hidden_layers=1"]
+        extra_options += ["num_hidden_layers=1"]
+    if len(extra_options) > 1:
+        command += extra_options
 
     run_subprocess(command).check_returncode()
 
