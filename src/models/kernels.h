@@ -22,6 +22,16 @@ void LaunchHandleEOSArray(float* batch_logits, int batch_beam_size, int vocab_si
 void LaunchFp16ToFp32(const uint16_t* fp16, float* fp32, int count, cudaStream_t stream);
 void LaunchFp32ToFp16(const float* fp32, uint16_t* fp16, int count, cudaStream_t stream);
 void LaunchInt32ToInt64(const int32_t* src, int64_t* dst, int count, cudaStream_t stream);
+
+void UpdateDecoderMaskedMultiHeadAttentionCacheIndirection(int32_t* tgt_indir_cache,
+                                                           const int32_t* src_indir_cache,
+                                                           const int32_t* beam_ids,
+                                                           int batch_size,
+                                                           int beam_width,
+                                                           int input_seq_length,
+                                                           int max_seq_length,
+                                                           int current_length,
+                                                           cudaStream_t stream);
 }  // namespace cuda
 
 }  // namespace Generators

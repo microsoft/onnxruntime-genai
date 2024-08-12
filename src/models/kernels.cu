@@ -178,5 +178,65 @@ void LaunchInt32ToInt64(const int32_t* src, int64_t* dst, int count, cudaStream_
   ConvertInt32ToInt64<<<num_blocks, block_size, 0, stream>>>(src, dst, count);
 }
 
+__global__ void UpdateDecoderMaskedMultiHeadAttentionCacheIndirectionKernel(int32_t* tgt_indir_cache,
+                                                                            const int32_t* src_indir_cache,
+                                                                            const int32_t* beam_ids,
+                                                                            int batch_size,
+                                                                            int beam_width,
+                                                                            int input_seq_length,
+                                                                            int max_seq_length,
+                                                                            int current_length) {
+  int time_step = threadIdx.x + blockIdx.x * blockDim.x;
+  int bb_id = threadIdx.y + blockIdx.y * blockDim.y;
+  const int batch_id = bb_id / beam_width;
+  const int beam_id = bb_id % beam_width;
+
+  if (bb_id >= beam_width * batch_size || time_step >= current_length) {
+    return;
+  }
+
+  const int src_beam = beam_ids[batch_id * beam_width + beam_id] % beam_width;
+
+  const int tgt_offset = batch_id * beam_width * max_seq_length + beam_id * max_seq_length + time_step;
+
+  if (time_step < input_seq_length) {
+    // For time steps that correspond to the input sequence,
+    // the beam that it comes from is always 0.
+    tgt_indir_cache[tgt_offset] = static_cast<int32_t>(0);
+  } else if (time_step == (current_length - 1)) {
+    // For the final (newly generated) time step,
+    // the beam that it comes from is always the beam that we
+    // are currently processing (i.e.) from this point on, these time-steps
+    // form the new beams.
+    tgt_indir_cache[tgt_offset] = static_cast<int32_t>(beam_id);
+  } else {
+    // For all other time-steps, we look up the source indirection, to
+    // see which beam it came from based on the `src_beam`.
+    const int src_offset = batch_id * beam_width * max_seq_length + src_beam * max_seq_length + time_step;
+    tgt_indir_cache[tgt_offset] = src_indir_cache[src_offset];
+  }
+}
+
+void UpdateDecoderMaskedMultiHeadAttentionCacheIndirection(int32_t* tgt_indir_cache,
+                                                           const int32_t* src_indir_cache,
+                                                           const int32_t* beam_ids,
+                                                           int batch_size,
+                                                           int beam_width,
+                                                           int input_seq_length,
+                                                           int max_seq_length,
+                                                           int current_length,
+                                                           cudaStream_t stream) {
+  const dim3 block(32);
+  const dim3 grid((current_length + block.x - 1) / block.x, batch_size * beam_width);
+  UpdateDecoderMaskedMultiHeadAttentionCacheIndirectionKernel<<<grid, block, 0, stream>>>(tgt_indir_cache,
+                                                                                          src_indir_cache,
+                                                                                          beam_ids,
+                                                                                          batch_size,
+                                                                                          beam_width,
+                                                                                          input_seq_length,
+                                                                                          max_seq_length,
+                                                                                          current_length);
+}
+
 }  // namespace cuda
 }  // namespace Generators

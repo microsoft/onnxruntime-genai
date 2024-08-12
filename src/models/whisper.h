@@ -48,5 +48,7 @@ struct Whisper_State : State {
 
   std::vector<std::string> output_cross_qk_names_;
   std::vector<std::unique_ptr<OrtValue>> output_cross_qk_;  // { batch_size, num_heads, 1, seq_len }
+
+  size_t cache_indirection_index_{~0U};
 };
 }  // namespace Generators

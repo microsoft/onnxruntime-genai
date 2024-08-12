@@ -248,12 +248,14 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
       }
 
       if (model_.session_info_->HasInput("cache_indirection")) {
-        cache_indirection_ = OrtValue::CreateTensor<int32_t>(model_.allocator_cpu_, std::array<int64_t, 3>{params_->batch_size, params_->search.num_beams, params_->search.max_length});
+        cache_indirection_ = OrtValue::CreateTensor<int32_t>(*model_.allocator_device_, std::array<int64_t, 3>{params_->batch_size, params_->search.num_beams, params_->search.max_length});
+        cache_indirection_index_ = inputs_.size();
         input_names_.push_back("cache_indirection");
         inputs_.push_back(cache_indirection_.get());
 
-        auto data = std::span<int32_t>{cache_indirection_->GetTensorMutableData<int32_t>(), static_cast<size_t>(params_->batch_size) * params_->search.num_beams * params_->search.max_length};
-        std::fill(data.begin(), data.end(), 0);
+        auto data = gpu_span<int32_t>{cache_indirection_->GetTensorMutableData<int32_t>(),
+                                      static_cast<size_t>(params_->batch_size) * params_->search.num_beams * params_->search.max_length};
+        cudaMemsetAsync(data.data(), 0, data.size_bytes(), params_->cuda_stream);
       }
 
       if (model_.session_info_->HasOutput("output_cross_qk_0")) {
@@ -290,6 +292,32 @@ void Whisper_State::UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens
   if (past_sequence_length_) {
     auto data = past_sequence_length_->GetTensorMutableData<int32_t>();
     *data = current_length - 1;
+  }
+
+  if (cache_indirection_) {
+#if USE_CUDA
+    auto old_cache_indirection = gpu_span<int32_t>{cache_indirection_->GetTensorMutableData<int32_t>(),
+                                                   static_cast<size_t>(params_->batch_size) *
+                                                       params_->search.num_beams * params_->search.max_length};
+    auto new_cache_indirection = OrtValue::CreateTensor<int32_t>(*model_.allocator_device_,
+                                                                 cache_indirection_->GetTensorTypeAndShapeInfo()->GetShape());
+    auto cache_indirection = gpu_span<int32_t>{new_cache_indirection->GetTensorMutableData<int32_t>(),
+                                               static_cast<size_t>(params_->batch_size) * params_->search.num_beams *
+                                                   params_->search.max_length};
+
+    cuda::UpdateDecoderMaskedMultiHeadAttentionCacheIndirection(cache_indirection.data(),
+                                                                old_cache_indirection.data(),
+                                                                beam_indices.GetGPU().data(),
+                                                                params_->batch_size,
+                                                                params_->search.num_beams,
+                                                                params_->sequence_length,
+                                                                params_->search.max_length,
+                                                                current_length,
+                                                                model_.cuda_stream_);
+
+    cache_indirection_ = std::move(new_cache_indirection);
+    inputs_[cache_indirection_index_] = cache_indirection_.get();
+#endif
   }
 }
 
