@@ -249,9 +249,11 @@ OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* oga_generator
 
   // Add else statement for no recognized device found above
 
+  ortvalue_output->GetTensorMutableData()
+
   for (int i =0; i < 10; i++) {
-    std::cout << "ORTValue Output:" << i << "act:" << ortvalue_output[i*200] << std::endl;
-    std::cout << "Copied Output:" << i << "act:" << ortvalue_clone[i*200] << std::endl;
+    std::cout << "ORTValue Output:" << i << "act:" << static_cast<float*>(ortvalue_output->GetTensorMutableData())[i*200] << std::endl;
+    std::cout << "Copied Output:" << i << "act:" << static_cast<float*>(ortvalue_clone->GetTensorMutableData())[i*200] << std::endl;
   }
 
   std::cout << "Data type:" << type_info->GetElementType() << std::endl;
