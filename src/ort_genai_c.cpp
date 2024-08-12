@@ -249,6 +249,11 @@ OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* oga_generator
 
   // Add else statement for no recognized device found above
 
+  for (int i =0; i < 10; i++) {
+    std::cout << "ORTValue Output:" << i << "act:" << ortvalue_output[i*200] << std::endl;
+    std::cout << "Copied Output:" << i << "act:" << ortvalue_clone[i*200] << std::endl;
+  }
+
   std::cout << "Data type:" << type_info->GetElementType() << std::endl;
   auto tensor = std::make_shared<Generators::Tensor>(std::move(ortvalue_clone));
   tensor->external_owner_ = tensor;
