@@ -84,27 +84,19 @@ TEST(CAPITests, AppendTokensToSequence) {
   // Basically create a copy
   for (size_t i = 0; i < sequences->Count(); i++) {
     std::span<const int32_t> sequence = sequences->Get(i);
-    appended_sequences->append(sequence.data(), sequence.size());
+    appended_sequences->Append(sequence.data(), sequence.size());
   }
   // All sequences should be copied
-  if (appended_sequences->Count() != sequences->Count()) {
-    throw std::runtime_error("Appending Token sequence failed!");
-  }
+  EXPECT_EQ(appended_sequences->Count() != sequences->Count());
 
   // Compare each token in each sequence
   for (int i = 0; i< sequences->Count(); i++) {
     std::span<const int32_t> sequence = sequences->Get(i);
     std::span<const int32_t> appended_sequence = appended_sequences->Get(i);
-
-    if (sequence.size() != appended_sequence.size()) {
-      throw std::runtime_error("Appended token count mismatch!");
-    }
-
+    EXPECT_EQ(sequence.size(), appended_sequence.size());
     
     for (int j = 0; j < sequence.size(); j++) {
-      if(sequence[j] != appended_sequence[j]) {
-        throw std::runtime_error("Appended token mismatch!");
-      }
+      EXPECT_EQ(sequence[j], appended_sequence[j])
     }
   }
 #endif
