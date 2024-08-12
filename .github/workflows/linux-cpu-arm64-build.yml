@@ -72,7 +72,7 @@ jobs:
           --container-registry onnxruntimebuildcache \
           --repository ort_genai_linux_arm64_gha
 
-      - name: Doker -- Configure with CMake and GCC
+      - name: Docker -- Configure with CMake and GCC
         run: |
           docker run --rm \
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
@@ -84,7 +84,7 @@ jobs:
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
           -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "/usr/bin/cmake --build --preset linux_gcc_cpu_release"
 
-      - name: Dokcer -- check test directory
+      - name: Docker -- Check test directory
         run: |
           docker run --rm \
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \

@@ -1,37 +1,18 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
+from __future__ import annotations
 
+import argparse
+import json
 import os
-import sys
-import tempfile
+import logging
 
 import onnxruntime_genai as og
-from _test_utils import run_subprocess
 
-
-def download_model(
-    download_path: str | bytes | os.PathLike, device: str, model_identifier: str, precision: str
-):
-    # python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -p int4 -e cpu -o download_path
-    # Or with cuda graph enabled:
-    # python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -p int4 -e cuda --extra_options enable_cuda_graph=1 -o download_path
-    command = [
-        sys.executable,
-        "-m",
-        "onnxruntime_genai.models.builder",
-        "-m",
-        model_identifier,
-        "-p",
-        precision,
-        "-e",
-        device,
-        "-o",
-        download_path,
-    ]
-    if device == "cuda":
-        command.append("--extra_options")
-        command.append("enable_cuda_graph=1")
-    run_subprocess(command).check_returncode()
+logging.basicConfig(
+    format="%(asctime)s %(name)s [%(levelname)s] - %(message)s", level=logging.DEBUG
+)
+log = logging.getLogger("onnxruntime-genai-tests")
 
 
 def run_model(model_path: str | bytes | os.PathLike):
@@ -47,7 +28,7 @@ def run_model(model_path: str | bytes | os.PathLike):
     sequences = tokenizer.encode_batch(prompts)
     params = og.GeneratorParams(model)
     params.set_search_options(max_length=200)
-    params.try_graph_capture_with_max_batch_size(16)
+    params.try_graph_capture_with_max_batch_size(4)
     params.input_ids = sequences
 
     output_sequences = model.generate(params)
@@ -55,10 +36,28 @@ def run_model(model_path: str | bytes | os.PathLike):
     assert output
 
 
+def get_args():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "-m",
+        "--models",
+        type=str,
+        required=True,
+        help="List of model paths to run. Pass as `json.dumps(model_paths)` to this argument.",
+    )
+
+    args = parser.parse_args()
+    args.models = json.loads(args.models)
+    return args
+
+
 if __name__ == "__main__":
-    for model_name in ["microsoft/phi-2"]:
-        for precision in ["int4", "fp32"]:
-            with tempfile.TemporaryDirectory() as temp_dir:
-                device = "cuda" if og.is_cuda_available() else "cpu"
-                download_model(temp_dir, device, model_name, precision)
-                run_model(temp_dir)
+    args = get_args()
+    for model_path in args.models:
+        try:
+            log.info(f"Running {model_path}")
+            run_model(model_path)
+        except Exception as e:
+            log.error(e)
+            log.error(f"Failed to run {model_path}", exc_info=True)
