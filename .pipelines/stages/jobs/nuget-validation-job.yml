@@ -188,9 +188,9 @@ jobs:
             -w /ort_genai_src/ $(cuda_docker_image) \
             bash -c " \
                 export ORTGENAI_LOG_ORT_LIB=1 && \
-                dotnet --info && \
                 cd /ort_genai_src/examples/csharp/HelloPhi && \
-                dotnet run -r $(os)-$(arch) --configuration $(csproj_configuration) --no-build --verbosity normal -- -m ./models/phi-3"
+                chmod +x ./bin/Release_Cuda/net6.0/linux-x64/HelloPhi && \
+                ./bin/Release_Cuda/net6.0/linux-x64/HelloPhi -m ./models/phi-3"
 
         displayName: 'Run Example With Artifact'
         workingDirectory: '$(Build.Repository.LocalPath)'
