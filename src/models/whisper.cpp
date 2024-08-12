@@ -248,6 +248,7 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
       }
 
       if (model_.session_info_->HasInput("cache_indirection")) {
+#if USE_CUDA
         cache_indirection_ = OrtValue::CreateTensor<int32_t>(*model_.allocator_device_, std::array<int64_t, 3>{params_->batch_size, params_->search.num_beams, params_->search.max_length});
         cache_indirection_index_ = inputs_.size();
         input_names_.push_back("cache_indirection");
@@ -256,6 +257,7 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
         auto data = gpu_span<int32_t>{cache_indirection_->GetTensorMutableData<int32_t>(),
                                       static_cast<size_t>(params_->batch_size) * params_->search.num_beams * params_->search.max_length};
         cudaMemsetAsync(data.data(), 0, data.size_bytes(), params_->cuda_stream);
+#endif
       }
 
       if (model_.session_info_->HasOutput("output_cross_qk_0")) {
