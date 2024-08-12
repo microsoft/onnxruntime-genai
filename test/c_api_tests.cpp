@@ -206,28 +206,28 @@ TEST(CAPITests, GetOutputCAPI) {
                                                     0.2938929f,  -0.10538938f, -0.00226692f, 0.12050669f, -0.10622668f};
 
   generator->ComputeLogits();
-  auto prompt_logits = static_cast<float*>(generator->GetOutput("logits")->Data());
+  auto prompt_logits_ptr = generator->GetOutput("logits");
+  auto prompt_logits = static_cast<float*>(prompt_logits_ptr->Data());
   int num_prompt_outputs_to_check = 40;
   int sample_size = 200;
   float tolerance = 0.001;
   // Verify outputs match expected outputs
   for (int i = 0; i < num_prompt_outputs_to_check; i++) {
-    std::cout << "Output:" << i << "exp:" << expected_sampled_logits_prompt[i] << " act:" << prompt_logits[i*sample_size] << std::endl;
     EXPECT_NEAR(expected_sampled_logits_prompt[i], prompt_logits[i*sample_size], tolerance);
   }
-  generator->GenerateNextToken();
 
+  generator->GenerateNextToken();
   // check for the 1st token generation
   // full logits has shape [2, 1, 1000]. Sample 1 for every 200 tokens and the expected sampled logits has shape [2, 1, 5]
   std::vector<float> expected_sampled_logits_token_gen{0.03742531f, -0.05752287f,  0.14159015f, 0.04210977f, -0.1484456f,
                                                         0.3041716f,  -0.08701379f, -0.03778192f, 0.07471392f, -0.02049096f};
 
   generator->ComputeLogits();
-  auto token_gen_logits = static_cast<float*>(generator->GetOutput("logits")->Data());
+  auto token_gen_logits_ptr = generator->GetOutput("logits");
+  auto token_gen_logits = static_cast<float*>(token_gen_logits_ptr->Data());
   int num_token_gen_outputs_to_check = 10;
 
   for (int i = 0; i < num_token_gen_outputs_to_check; i++) {
-    std::cout << "Output:" << i << "exp:" << expected_sampled_logits_token_gen[i] << " act:" << token_gen_logits[i*sample_size] << std::endl;
     EXPECT_NEAR(expected_sampled_logits_token_gen[i], token_gen_logits[i*sample_size], tolerance);
   }
   generator->GenerateNextToken();
