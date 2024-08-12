@@ -210,7 +210,7 @@ TEST(CAPITests, GetOutputCAPI) {
   auto prompt_logits = static_cast<float*>(prompt_logits_ptr->Data());
   int num_prompt_outputs_to_check = 40;
   int sample_size = 200;
-  float tolerance = 0.001;
+  float tolerance = 0.001f;
   // Verify outputs match expected outputs
   for (int i = 0; i < num_prompt_outputs_to_check; i++) {
     EXPECT_NEAR(expected_sampled_logits_prompt[i], prompt_logits[i*sample_size], tolerance);
