@@ -103,7 +103,7 @@ struct OgaSequences : OgaAbstract {
     return OgaSequencesGetSequenceData(this, index);
   }
 
-  void Append(const int32_t* tokens, uint32_t token_cnt) {
+  void Append(const int32_t* tokens, size_t token_cnt) {
     OgaCheckResult(OgaAppendTokenSequence(tokens, token_cnt, this));
   }
 #if __cplusplus >= 202002L
