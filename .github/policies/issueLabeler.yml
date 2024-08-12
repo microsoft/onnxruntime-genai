@@ -1,6 +1,9 @@
+id:
 name: Issue Triage
 description: Assign label to issues 
+owner:
 resource: repository
+where:
 configuration:
   resourceManagementConfiguration:
     eventResponderTasks:
@@ -79,3 +82,5 @@ configuration:
             then:
               - addLabel:
                   label: model:transformer
+onFailure:
+onSuccess:
