@@ -33,10 +33,10 @@ def run_model(model_path: str | bytes | os.PathLike):
     params.input_ids = sequences
 
     output_sequences = model.generate(params)
-    print(output_sequences)
+    log.info(output_sequences)
     for row in output_sequences:
         for token_id in row:
-            print(f"Attemtping to de-tokenize {token_id}")
+            log.info(f"Attemtping to de-tokenize {token_id}")
             output = tokenizer.decode_batch(np.array([token_id]))
 
     output = tokenizer.decode_batch(output_sequences)
