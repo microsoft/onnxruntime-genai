@@ -224,6 +224,11 @@ OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsDone(const OgaGenerator* generator);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_ComputeLogits(OgaGenerator* generator);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator);
 
+/*
+ * \brief Runs GetOutput on the name provided and copies the data in another tensor and creates OgaTensor for it
+ * \param[in] generator The generator to run the GetOutput on the name provided and the out pointer to store the output
+ * \return OgaResult containing the error message if the computation failed.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* oga_generator, const char* name, OgaTensor** out);
 
 /*
