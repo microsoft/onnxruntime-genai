@@ -8,7 +8,6 @@ import os
 import logging
 
 import onnxruntime_genai as og
-import numpy as np
 
 logging.basicConfig(
     format="%(asctime)s %(name)s [%(levelname)s] - %(message)s", level=logging.DEBUG
@@ -33,12 +32,6 @@ def run_model(model_path: str | bytes | os.PathLike):
     params.input_ids = sequences
 
     output_sequences = model.generate(params)
-    log.info(output_sequences)
-    for row in output_sequences:
-        for token_id in row:
-            log.info(f"Attemtping to de-tokenize {token_id}")
-            output = tokenizer.decode_batch(np.array([token_id]))
-
     output = tokenizer.decode_batch(output_sequences)
     assert output
 
