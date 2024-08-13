@@ -111,11 +111,11 @@ jobs:
       value: 'Microsoft.ML.OnnxRuntime'
 
   - name: dml_dir
-    value: 'Microsoft.AI.DirectML.1.15.0'
+    value: 'Microsoft.AI.DirectML.1.15.1'
   - name: dml_zip
-    value: 'Microsoft.AI.DirectML.1.15.0.zip'
+    value: 'Microsoft.AI.DirectML.1.15.1.zip'
   - name: dml_url
-    value: "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.15.0"
+    value: "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.15.1"
 
   - name: d3d12_dir
     value: 'Microsoft.Direct3D.D3D12.1.614.0'
