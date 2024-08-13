@@ -451,11 +451,32 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         if (image_paths.empty())
           throw std::runtime_error("No images provided");
 
-        if (image_paths.size() > 1U)
-          throw std::runtime_error("Loading multiple images is not supported");
+        std::vector<std::string> image_paths_string;
+        std::vector<const char*> image_paths_vector;
+        for (auto image_path : image_paths) {
+          if (!pybind11::isinstance<pybind11::str>(image_path))
+            throw std::runtime_error("Image paths must be strings.");
+          image_paths_string.push_back(image_path.cast<std::string>());
+          image_paths_vector.push_back(image_paths_string.back().c_str());
+        }
 
-        auto image_path = image_paths[0].cast<std::string>();
-        return LoadImageImpl(image_path.c_str());
+        return LoadImages(image_paths_vector);
+      })
+      .def_static("open_bytes", [](pybind11::args image_datas) {
+        if (image_datas.empty())
+          throw std::runtime_error("No images provided");
+
+        std::unique_ptr<ort_extensions::ImageRawData[]> image_raw_data = std::make_unique<ort_extensions::ImageRawData[]>(image_datas.size());
+        for (size_t i = 0; i < image_datas.size(); ++i) {
+          if (!pybind11::isinstance<pybind11::bytes>(image_datas[i]))
+            throw std::runtime_error("Image data must be bytes.");
+          auto bytes = image_datas[i].cast<pybind11::bytes>();
+          pybind11::buffer_info info(pybind11::buffer(bytes).request());
+          uint8_t* data = reinterpret_cast<uint8_t*>(info.ptr);
+          image_raw_data[i] = ort_extensions::ImageRawData(data, data + info.size);
+        }
+
+        return std::make_unique<Images>(std::move(image_raw_data), image_datas.size());
       });
 
   pybind11::class_<PyNamedTensors>(m, "NamedTensors");
