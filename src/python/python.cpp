@@ -479,29 +479,9 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   m.def("set_log_options", &SetLogOptions);
 
-  m.def("is_cuda_available", []() {
-#if USE_CUDA
-    return true;
-#else
-        return false;
-#endif
-  });
-
-  m.def("is_dml_available", []() {
-#if USE_DML
-    return true;
-#else
-        return false;
-#endif
-  });
-
-  m.def("is_rocm_available", []() {
-#if USE_ROCM
-    return true;
-#else
-        return false;
-#endif
-  });
+  m.def("is_cuda_available", []() { return USE_CUDA != 0; });
+  m.def("is_dml_available", []() { return USE_DML != 0; });
+  m.def("is_rocm_available", []() { return USE_ROCM != 0; });
 
   m.def("set_current_gpu_device_id", [](int device_id) { Ort::SetCurrentGpuDeviceId(device_id); });
   m.def("get_current_gpu_device_id", []() { return Ort::GetCurrentGpuDeviceId(); });

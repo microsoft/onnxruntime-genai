@@ -34,8 +34,12 @@ steps:
 
 - bash: |
     echo "arch=$(arch)"
+    echo "ort_filename=$(ort_filename)"
+    echo "ort_version=$(ort_version)"
     echo "ep=$(ep)"
-    echo "build_config=$(build_config)"
+    echo "cuda_version=$(cuda_version)"
+    echo "target=${{ parameters.target }}"
+    echo "build_config=${{ parameters.build_config }}"
   displayName: 'Print Parameters'
 
 - template: utils/download-ort.yml
@@ -118,7 +122,9 @@ steps:
       docker run \
       --rm \
       --volume $(Build.Repository.LocalPath):/ort_genai_src \
-      -w /ort_genai_src/ ortgenai$(ep)build$(arch) \
+      -w /ort_genai_src/ \
+      -e ONNXRUNTIME_VERSION=$(ONNXRUNTIME_VERSION) \
+      ortgenai$(ep)build$(arch) \
       bash -c " \
           /usr/bin/cmake --preset linux_gcc_$(ep)_$(build_config) \
             -DENABLE_TESTS=OFF \
@@ -140,7 +146,9 @@ steps:
       docker run \
       --rm \
       --volume $(Build.Repository.LocalPath):/ort_genai_src \
-      -w /ort_genai_src/ ortgenai$(ep)build$(arch) \
+      -w /ort_genai_src/ \
+      -e ONNXRUNTIME_VERSION=$(ONNXRUNTIME_VERSION) \
+      ortgenai$(ep)build$(arch) \
       bash -c " \
           /usr/bin/cmake --build --preset linux_gcc_$(ep)_$(build_config) \
             -DENABLE_TESTS=OFF \

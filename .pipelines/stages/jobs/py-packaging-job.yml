@@ -93,10 +93,7 @@ jobs:
     value: ${{ parameters.os }}
 
   - name: feed_name
-    ${{ if and(eq(parameters.cuda_version, '12.2'), eq(parameters.ep, 'cuda')) }}:
-      value: 'ort-cuda-12-nightly'
-    ${{ else }}:
-      value: '7982ae20-ed19-4a35-a362-a96ac99897b7'
+    value: '7982ae20-ed19-4a35-a362-a96ac99897b7'
 
   - name: ort_filename
     ${{ if eq(parameters.ep, 'cpu') }}:
@@ -114,11 +111,11 @@ jobs:
       value: 'Microsoft.ML.OnnxRuntime'
 
   - name: dml_dir
-    value: 'Microsoft.AI.DirectML.1.15.0'
+    value: 'Microsoft.AI.DirectML.1.15.1'
   - name: dml_zip
-    value: 'Microsoft.AI.DirectML.1.15.0.zip'
+    value: 'Microsoft.AI.DirectML.1.15.1.zip'
   - name: dml_url
-    value: "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.15.0"
+    value: "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.15.1"
 
   - name: d3d12_dir
     value: 'Microsoft.Direct3D.D3D12.1.614.0'
@@ -163,7 +160,7 @@ jobs:
         import subprocess
         subprocess.call(['pip', 'install', '-q', 'setuptools', 'wheel', 'build', 'packaging', 'twine'])
       workingDirectory: '$(Build.BinariesDirectory)'
-      displayName: 'Install python modules'
+    displayName: 'Install python modules'
 
   - ${{ if eq(parameters.os, 'linux') }}:
     - template: steps/capi-linux-step.yml
