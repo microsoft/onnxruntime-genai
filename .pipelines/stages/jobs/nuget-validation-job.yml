@@ -183,8 +183,6 @@ jobs:
             --gpus all \
             --rm \
             --volume $(Build.Repository.LocalPath):/ort_genai_src \
-            --volume $(Build.BinariesDirectory):/ort_genai_binary \
-            -e HF_TOKEN=$HF_TOKEN \
             -w /ort_genai_src/ $(cuda_docker_image) \
             bash -c " \
                 export ORTGENAI_LOG_ORT_LIB=1 && \
