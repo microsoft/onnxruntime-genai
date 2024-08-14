@@ -221,3 +221,8 @@ def test_get_output(test_data_path, relative_model_path):
     logits = generator.get_output('logits')
     assert np.allclose(logits[:,:,::200], expected_sampled_logits_token_gen, atol=1e-3)
     generator.generate_next_token()
+
+
+@pytest.mark.parametrize("relative_model_path", [Path("hf-internal-testing") / "tiny-random-gpt2-fp32"])
+def test_pipeline_model():
+    pass
