@@ -1,0 +1,35 @@
+{
+  "processor": {
+    "name": "image_processing",
+    "transforms": [
+      {
+        "operation": {
+          "name": "decode_image",
+          "domain": "com.microsoft.extensions",
+          "type": "DecodeImage",
+          "attrs": {
+            "color_space": "BGR"
+          }
+        }
+      },
+      {
+        "operation": {
+          "name": "convert_to_rgb",
+          "domain": "com.microsoft.extensions",
+          "type": "ConvertRGB"
+        }
+      },
+      {
+        "operation": {
+          "name": "phi3_image_transform",
+          "domain": "com.microsoft.extensions",
+          "type": "Phi3ImageTransform",
+          "attrs": {
+            "num_crops": 16,
+            "num_img_tokens": 144
+          }
+        }
+      }
+    ]
+  }
+}
