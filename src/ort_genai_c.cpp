@@ -70,6 +70,14 @@ const int32_t* OGA_API_CALL OgaSequencesGetSequenceData(const OgaSequences* p, s
   return (*reinterpret_cast<const Generators::TokenSequences*>(p))[sequence].data();
 }
 
+OgaResult* OGA_API_CALL OgaLoadImage(const char* image_path, OgaImages** images) {
+  OGA_TRY
+  const std::vector<const char*> image_paths_vector{image_path};
+  *images = reinterpret_cast<OgaImages*>(Generators::LoadImages(image_paths_vector).release());
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaLoadImages(const OgaStringArray* image_paths, OgaImages** images) {
   OGA_TRY
   const auto& image_paths_vector = *reinterpret_cast<const std::vector<std::string>*>(image_paths);

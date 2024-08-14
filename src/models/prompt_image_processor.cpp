@@ -111,7 +111,7 @@ std::unique_ptr<Images> LoadImages(const std::span<const char* const>& image_pat
     }
   }
   auto [images, num_images] = ort_extensions::LoadRawData<const char* const*, ort_extensions::ImageRawData>(
-      image_paths.begin(), image_paths.end());
+      image_paths.data(), image_paths.data() + image_paths.size());
   return std::make_unique<Images>(std::move(images), num_images);
 }
 
