@@ -225,7 +225,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_ComputeLogits(OgaGenerator* gene
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator);
 
 /*
- * \brief Runs GetOutput on the name provided and copies the data in another tensor and creates OgaTensor for it
+ * \brief Returns a copy of the model output identified by the given name as an OgaTensor on CPU
  * \param[in] generator The generator to run the GetOutput on the name provided and the out pointer to store the output
  * \return OgaResult containing the error message if the computation failed.
  */
@@ -280,10 +280,9 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizerStream(OgaTokenizerStream*);
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream*, int32_t token, const char** out);
 
-/* Create an OgaTensor from a user owned buffer. The OgaTensor does not own the memory (as it has no way to free it) so
- * the 'data' parameter must be valid for the lifetime of the OgaTensor.
+/* Create an OgaTensor from a user owned buffer.
  *
- * \param[in] data User supplied memory pointer, must remain valid for lifetime of the OgaTensor
+ * \param[in] data Pointer to store the data
  * \param[in] shape_dims Pointer to array of int64_t values that define the tensor shape, example [1 20 30] would be equivalent to a C array of [1][20][30]
  * \param[in] shape_dims_count Count of elements in the shape_dims array
  * \param[in] element_type The data type that 'data' points to.
