@@ -2,13 +2,14 @@
  * Copyright (c) Microsoft Corporation. All rights reserved.
  * Licensed under the MIT License.
  */
-#include <jni.h>
+#include "ai_onnxruntime_genai_GeneratorParams.h"
+
 #include "ort_genai_c.h"
 #include "utils.h"
 
 using namespace Helpers;
 
-extern "C" JNIEXPORT jlong JNICALL
+JNIEXPORT jlong JNICALL
 Java_ai_onnxruntime_genai_GeneratorParams_createGeneratorParams(JNIEnv* env, jobject thiz, jlong model_handle) {
   const OgaModel* model = reinterpret_cast<const OgaModel*>(model_handle);
   OgaGeneratorParams* generator_params = nullptr;
@@ -19,13 +20,13 @@ Java_ai_onnxruntime_genai_GeneratorParams_createGeneratorParams(JNIEnv* env, job
   return reinterpret_cast<jlong>(generator_params);
 }
 
-extern "C" JNIEXPORT void JNICALL
+JNIEXPORT void JNICALL
 Java_ai_onnxruntime_genai_GeneratorParams_destroyGeneratorParams(JNIEnv* env, jobject thiz, jlong native_handle) {
   OgaGeneratorParams* generator_params = reinterpret_cast<OgaGeneratorParams*>(native_handle);
   OgaDestroyGeneratorParams(generator_params);
 }
 
-extern "C" JNIEXPORT void JNICALL
+JNIEXPORT void JNICALL
 Java_ai_onnxruntime_genai_GeneratorParams_setSearchOptionNumber(JNIEnv* env, jobject thiz, jlong native_handle,
                                                                 jstring option_name, jdouble value) {
   OgaGeneratorParams* generator_params = reinterpret_cast<OgaGeneratorParams*>(native_handle);
@@ -34,7 +35,7 @@ Java_ai_onnxruntime_genai_GeneratorParams_setSearchOptionNumber(JNIEnv* env, job
   ThrowIfError(env, OgaGeneratorParamsSetSearchNumber(generator_params, name, value));
 }
 
-extern "C" JNIEXPORT void JNICALL
+JNIEXPORT void JNICALL
 Java_ai_onnxruntime_genai_GeneratorParams_setSearchOptionBool(JNIEnv* env, jobject thiz, jlong native_handle,
                                                               jstring option_name, jboolean value) {
   OgaGeneratorParams* generator_params = reinterpret_cast<OgaGeneratorParams*>(native_handle);
@@ -43,7 +44,7 @@ Java_ai_onnxruntime_genai_GeneratorParams_setSearchOptionBool(JNIEnv* env, jobje
   ThrowIfError(env, OgaGeneratorParamsSetSearchBool(generator_params, name, value));
 }
 
-extern "C" JNIEXPORT void JNICALL
+JNIEXPORT void JNICALL
 Java_ai_onnxruntime_genai_GeneratorParams_setInputSequences(JNIEnv* env, jobject thiz, jlong native_handle,
                                                             jlong sequences_handle) {
   OgaGeneratorParams* generator_params = reinterpret_cast<OgaGeneratorParams*>(native_handle);
@@ -52,7 +53,7 @@ Java_ai_onnxruntime_genai_GeneratorParams_setInputSequences(JNIEnv* env, jobject
   ThrowIfError(env, OgaGeneratorParamsSetInputSequences(generator_params, sequences));
 }
 
-extern "C" JNIEXPORT void JNICALL
+JNIEXPORT void JNICALL
 Java_ai_onnxruntime_genai_GeneratorParams_setInputIDs(JNIEnv* env, jobject thiz, jlong native_handle,
                                                       jobject token_ids, jint sequence_length, jint batch_size) {
   OgaGeneratorParams* generator_params = reinterpret_cast<OgaGeneratorParams*>(native_handle);
@@ -63,7 +64,7 @@ Java_ai_onnxruntime_genai_GeneratorParams_setInputIDs(JNIEnv* env, jobject thiz,
   ThrowIfError(env, OgaGeneratorParamsSetInputIDs(generator_params, tokens, num_tokens, sequence_length, batch_size));
 }
 
-extern "C" JNIEXPORT void JNICALL
+JNIEXPORT void JNICALL
 Java_ai_onnxruntime_genai_GeneratorParams_setModelInput(JNIEnv* env, jobject thiz, jlong native_handle,
                                                         jstring input_name, jlong tensor) {
   OgaGeneratorParams* generator_params = reinterpret_cast<OgaGeneratorParams*>(native_handle);
@@ -73,7 +74,7 @@ Java_ai_onnxruntime_genai_GeneratorParams_setModelInput(JNIEnv* env, jobject thi
   ThrowIfError(env, OgaGeneratorParamsSetModelInput(generator_params, name, input_tensor));
 }
 
-extern "C" JNIEXPORT void JNICALL
+JNIEXPORT void JNICALL
 Java_ai_onnxruntime_genai_GeneratorParams_setInputs(JNIEnv* env, jobject thiz, jlong native_handle,
                                                     jlong namedTensors) {
   OgaGeneratorParams* generator_params = reinterpret_cast<OgaGeneratorParams*>(native_handle);

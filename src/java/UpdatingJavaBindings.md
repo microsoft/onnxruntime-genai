@@ -75,6 +75,10 @@ A header file for each class with the JNI function signatures will be generated 
 To create/update the .cpp file that implements the JNI function (which will be located in src/main/native), 
 cut-and-paste the relevant parts of the header into the .cpp file.
 
+If creating the .cpp file, add a `#include` for the corresponding generated header file.
+While not strictly necessary, doing so allows us to not have to explicitly specify the correct language linkage
+(`extern "C"`) for the JNI functions as the linkage is inherited from the earlier declarations in the header.
+
 Update the first 2 parameters of each new function to be meaningful by adding the parameter names
     Generated:  `JNIEnv*, jobject`
     Meaningful: `JNIEnv* env, jobject thiz`
