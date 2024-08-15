@@ -105,7 +105,7 @@ struct SessionInfo {
   std::unordered_map<std::string, ONNXTensorElementDataType> inputs_, outputs_;
 };
 
-struct Model : std::enable_shared_from_this<Model> {
+struct Model : std::enable_shared_from_this<Model>, TrackedResource {
   Model(std::unique_ptr<Config> config);
   virtual ~Model();
 

@@ -55,7 +55,17 @@ enum struct DeviceType {
 
 std::string to_string(DeviceType device_type);
 
-struct GeneratorParams : std::enable_shared_from_this<GeneratorParams> {
+struct TrackedResource {
+  TrackedResource() { count_++; }
+  ~TrackedResource() { count_--; }
+
+  static int Count() { return count_; }
+
+ private:
+  static std::atomic<int> count_;
+};
+
+struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, TrackedResource {
   GeneratorParams() = default;  // This constructor is only used if doing a custom model handler vs built-in
   GeneratorParams(const Model& model);
 
@@ -125,7 +135,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams> {
                                    // The model outlives the GeneratorParams
 };
 
-struct Generator {
+struct Generator : TrackedResource {
   Generator(const Model& model, const GeneratorParams& params);
 
   bool IsDone() const;

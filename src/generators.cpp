@@ -15,7 +15,24 @@ static bool _ = (Ort::InitApi(), false);
 
 OrtGlobals::OrtGlobals() : env_{OrtEnv::Create(OrtLoggingLevel::ORT_LOGGING_LEVEL_ERROR)} {}
 
-std::unique_ptr<OrtGlobals>& GetOrtGlobals() {
+std::atomic<int> TrackedResource::count_{};
+
+// Validate process exit conditions, as this is done atexit, we print errors to stderr and throw an exception to stop the process
+void ValidateShutdown() {
+  if (GetOrtGlobals()) {
+    std::cerr << "Shutdown must be called before process exit, please check the documentation for the proper API to call to ensure clean shutdown." << std::endl;
+    std::abort();
+  }
+  if (TrackedResource::Count()) {
+    std::cerr << "Resources leaked: " + std::to_string(TrackedResource::Count()) + " All Oga resources must be cleaned up before shutdown." << std::endl;
+    std::abort();
+  }
+}
+
+static bool _1 = (std::atexit(ValidateShutdown), false);  // Call ValidateShutdown at exit
+
+std::unique_ptr<OrtGlobals>&
+GetOrtGlobals() {
   static auto globals = std::make_unique<OrtGlobals>();
   return globals;
 }
