@@ -2,13 +2,14 @@
  * Copyright (c) Microsoft Corporation. All rights reserved.
  * Licensed under the MIT License.
  */
-#include <jni.h>
+#include "ai_onnxruntime_genai_Model.h"
+
 #include "ort_genai_c.h"
 #include "utils.h"
 
 using namespace Helpers;
 
-extern "C" JNIEXPORT jlong JNICALL
+JNIEXPORT jlong JNICALL
 Java_ai_onnxruntime_genai_Model_createModel(JNIEnv* env, jobject thiz, jstring model_path) {
   CString path{env, model_path};
 
@@ -20,13 +21,13 @@ Java_ai_onnxruntime_genai_Model_createModel(JNIEnv* env, jobject thiz, jstring m
   return reinterpret_cast<jlong>(model);
 }
 
-extern "C" JNIEXPORT void JNICALL
+JNIEXPORT void JNICALL
 Java_ai_onnxruntime_genai_Model_destroyModel(JNIEnv* env, jobject thiz, jlong model_handle) {
   OgaModel* model = reinterpret_cast<OgaModel*>(model_handle);
   OgaDestroyModel(model);
 }
 
-extern "C" JNIEXPORT jlong JNICALL
+JNIEXPORT jlong JNICALL
 Java_ai_onnxruntime_genai_Model_generate(JNIEnv* env, jobject thiz, jlong model_handle,
                                          jlong generator_params_handle) {
   const OgaModel* model = reinterpret_cast<const OgaModel*>(model_handle);
