@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <assert.h>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include "filesystem.h"
@@ -59,7 +60,7 @@ struct TrackedResource {
   TrackedResource() { ++count_; }
   ~TrackedResource() { --count_; }
 
-  static int Count() { return count_.load(); }
+  static int Count() { return count_; }
 
  private:
   static std::atomic<int> count_;
