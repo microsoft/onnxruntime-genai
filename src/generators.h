@@ -56,10 +56,10 @@ enum struct DeviceType {
 std::string to_string(DeviceType device_type);
 
 struct TrackedResource {
-  TrackedResource() { count_++; }
-  ~TrackedResource() { count_--; }
+  TrackedResource() { ++count_; }
+  ~TrackedResource() { --count_; }
 
-  static int Count() { return count_; }
+  static int Count() { return count_.load(); }
 
  private:
   static std::atomic<int> count_;

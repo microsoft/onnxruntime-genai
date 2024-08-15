@@ -20,11 +20,11 @@ std::atomic<int> TrackedResource::count_{};
 // Validate process exit conditions, as this is done atexit, we print errors to stderr and throw an exception to stop the process
 void ValidateShutdown() {
   if (GetOrtGlobals()) {
-    std::cerr << "Shutdown must be called before process exit, please check the documentation for the proper API to call to ensure clean shutdown." << std::endl;
+    std::cerr << "OGA Error: Shutdown must be called before process exit, please check the documentation for the proper API to call to ensure clean shutdown." << std::endl;
     std::abort();
   }
   if (TrackedResource::Count()) {
-    std::cerr << "Resources leaked: " + std::to_string(TrackedResource::Count()) + " All Oga resources must be cleaned up before shutdown." << std::endl;
+    std::cerr << "OGA Error: " + std::to_string(TrackedResource::Count()) + " resources leaked. All Oga resources must be cleaned up before shutdown." << std::endl;
     std::abort();
   }
 }
