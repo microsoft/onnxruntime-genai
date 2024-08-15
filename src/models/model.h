@@ -107,7 +107,7 @@ struct SessionInfo {
 
 struct Model : std::enable_shared_from_this<Model> {
   Model(std::unique_ptr<Config> config);
-  virtual ~Model();
+  virtual ~Model() = default;
 
   std::shared_ptr<Tokenizer> CreateTokenizer() const;
 
