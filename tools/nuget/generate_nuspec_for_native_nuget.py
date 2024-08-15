@@ -74,7 +74,7 @@ def generate_license(line_list):
     line_list.append('<license type="file">LICENSE</license>')
 
 def generate_readme(line_list):
-    line_list.append('<readme>README.md</readme>')
+    line_list.append('<readme>nuget/PACKAGE.md</readme>')
 
 def generate_project_url(line_list, project_url):
     line_list.append("<projectUrl>" + project_url + "</projectUrl>")
