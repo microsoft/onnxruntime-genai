@@ -173,7 +173,6 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
 }
 #endif
 
-#if !USE_DML
 TEST(CAPITests, GetOutputCAPI) {
   std::vector<int64_t> input_ids_shape{2, 4};
   std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
@@ -232,7 +231,6 @@ TEST(CAPITests, GetOutputCAPI) {
   }
   generator->GenerateNextToken();
 }
-#endif
 
 #if TEST_PHI2
 
