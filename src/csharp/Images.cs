@@ -20,13 +20,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         public static Images Load(string[] imagePaths)
         {
-            Result.VerifySuccess(NativeMethods.CreateStringArray(out IntPtr stringArray));
+            Result.VerifySuccess(NativeMethods.OgaCreateStringArray(out IntPtr stringArray));
             foreach (string imagePath in imagePaths)
             {
                 Result.VerifySuccess(NativeMethods.OgaStringArrayAddString(stringArray, StringUtils.ToUtf8(imagePath)));
             }
-            Result.VerifySuccess(NativeMethods.OgaLoadImages(imagePaths.Length, StringUtils.ToUtf8(imagePaths), out IntPtr imagesHandle));
-            OgaDestroyStringArray(stringArray);
+            Result.VerifySuccess(NativeMethods.OgaLoadImages(stringArray, out IntPtr imagesHandle));
+            NativeMethods.OgaDestroyStringArray(stringArray);
             return new Images(imagesHandle);
         }
 
