@@ -2,15 +2,14 @@
  * Copyright (c) Microsoft Corporation. All rights reserved.
  * Licensed under the MIT License.
  */
-#include <jni.h>
+#include "ai_onnxruntime_genai_Generator.h"
+
 #include "ort_genai_c.h"
 #include "utils.h"
 
-#include <iostream>
-
 using namespace Helpers;
 
-extern "C" JNIEXPORT jlong JNICALL
+JNIEXPORT jlong JNICALL
 Java_ai_onnxruntime_genai_Generator_createGenerator(JNIEnv* env, jobject thiz, jlong model_handle,
                                                     jlong generator_params_handle) {
   const OgaModel* model = reinterpret_cast<const OgaModel*>(model_handle);
@@ -23,27 +22,27 @@ Java_ai_onnxruntime_genai_Generator_createGenerator(JNIEnv* env, jobject thiz, j
   return reinterpret_cast<jlong>(generator);
 }
 
-extern "C" JNIEXPORT void JNICALL
+JNIEXPORT void JNICALL
 Java_ai_onnxruntime_genai_Generator_destroyGenerator(JNIEnv* env, jobject thiz, jlong native_handle) {
   OgaDestroyGenerator(reinterpret_cast<OgaGenerator*>(native_handle));
 }
 
-extern "C" JNIEXPORT jboolean JNICALL
+JNIEXPORT jboolean JNICALL
 Java_ai_onnxruntime_genai_Generator_isDone(JNIEnv* env, jobject thiz, jlong native_handle) {
   return OgaGenerator_IsDone(reinterpret_cast<OgaGenerator*>(native_handle));
 }
 
-extern "C" JNIEXPORT void JNICALL
+JNIEXPORT void JNICALL
 Java_ai_onnxruntime_genai_Generator_computeLogitsNative(JNIEnv* env, jobject thiz, jlong native_handle) {
   ThrowIfError(env, OgaGenerator_ComputeLogits(reinterpret_cast<OgaGenerator*>(native_handle)));
 }
 
-extern "C" JNIEXPORT void JNICALL
+JNIEXPORT void JNICALL
 Java_ai_onnxruntime_genai_Generator_generateNextTokenNative(JNIEnv* env, jobject thiz, jlong native_handle) {
   ThrowIfError(env, OgaGenerator_GenerateNextToken(reinterpret_cast<OgaGenerator*>(native_handle)));
 }
 
-extern "C" JNIEXPORT jintArray JNICALL
+JNIEXPORT jintArray JNICALL
 Java_ai_onnxruntime_genai_Generator_getSequenceNative(JNIEnv* env, jobject thiz, jlong generator, jlong index) {
   const OgaGenerator* oga_generator = reinterpret_cast<const OgaGenerator*>(generator);
 
@@ -65,7 +64,7 @@ Java_ai_onnxruntime_genai_Generator_getSequenceNative(JNIEnv* env, jobject thiz,
   return java_int_array;
 }
 
-extern "C" JNIEXPORT jint JNICALL
+JNIEXPORT jint JNICALL
 Java_ai_onnxruntime_genai_Generator_getSequenceLastToken(JNIEnv* env, jobject thiz, jlong generator, jlong index) {
   const OgaGenerator* oga_generator = reinterpret_cast<const OgaGenerator*>(generator);
 

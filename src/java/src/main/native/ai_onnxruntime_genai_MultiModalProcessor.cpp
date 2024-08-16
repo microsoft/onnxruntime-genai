@@ -2,13 +2,14 @@
  * Copyright (c) Microsoft Corporation. All rights reserved.
  * Licensed under the MIT License.
  */
-#include <jni.h>
+#include "ai_onnxruntime_genai_MultiModalProcessor.h"
+
 #include "ort_genai_c.h"
 #include "utils.h"
 
 using namespace Helpers;
 
-extern "C" JNIEXPORT jlong JNICALL
+JNIEXPORT jlong JNICALL
 Java_ai_onnxruntime_genai_MultiModalProcessor_createMultiModalProcessor(JNIEnv* env, jobject thiz, jlong model_handle) {
   const OgaModel* model = reinterpret_cast<const OgaModel*>(model_handle);
   OgaMultiModalProcessor* processor = nullptr;
@@ -20,13 +21,13 @@ Java_ai_onnxruntime_genai_MultiModalProcessor_createMultiModalProcessor(JNIEnv* 
   return reinterpret_cast<jlong>(processor);
 }
 
-extern "C" JNIEXPORT void JNICALL
+JNIEXPORT void JNICALL
 Java_ai_onnxruntime_genai_MultiModalProcessor_destroyMultiModalProcessor(JNIEnv* env, jobject thiz, jlong processor_handle) {
   OgaMultiModalProcessor* processor = reinterpret_cast<OgaMultiModalProcessor*>(processor_handle);
   OgaDestroyMultiModalProcessor(processor);
 }
 
-extern "C" JNIEXPORT jlong JNICALL
+JNIEXPORT jlong JNICALL
 Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessImages(JNIEnv* env, jobject thiz, jlong processor_handle,
                                                                      jstring prompt, jlong images_handle) {
   const OgaMultiModalProcessor* processor = reinterpret_cast<const OgaMultiModalProcessor*>(processor_handle);
@@ -42,7 +43,7 @@ Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessImages(JNIEnv* env
   return reinterpret_cast<jlong>(named_tensors);
 }
 
-extern "C" JNIEXPORT jstring JNICALL
+JNIEXPORT jstring JNICALL
 Java_ai_onnxruntime_genai_MultiModalProcessor_processorDecode(JNIEnv* env, jobject thiz, jlong processor_handle,
                                                               jintArray sequence) {
   const OgaMultiModalProcessor* processor = reinterpret_cast<const OgaMultiModalProcessor*>(processor_handle);
@@ -64,7 +65,7 @@ Java_ai_onnxruntime_genai_MultiModalProcessor_processorDecode(JNIEnv* env, jobje
   return result;
 }
 
-extern "C" JNIEXPORT jlong JNICALL
+JNIEXPORT jlong JNICALL
 Java_ai_onnxruntime_genai_MultiModalProcessor_createTokenizerStreamFromProcessor(JNIEnv* env, jobject thiz, jlong processor_handle) {
   const OgaMultiModalProcessor* processor = reinterpret_cast<const OgaMultiModalProcessor*>(processor_handle);
   OgaTokenizerStream* tokenizer_stream = nullptr;
