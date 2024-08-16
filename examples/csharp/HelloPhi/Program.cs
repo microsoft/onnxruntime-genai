@@ -8,7 +8,7 @@ void PrintUsage()
     Console.WriteLine("  -i (optional): Intereactive mode");
 }
 
-OgaHandle ogaHandle = new OgaHandle();
+using OgaHandle ogaHandle = new OgaHandle();
 
 if (args.Length < 1)
 {

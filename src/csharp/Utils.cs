@@ -7,11 +7,33 @@ using System.Text;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
-    public class OgaHandle
+    public class OgaHandle: IDisposable
     {
+        private bool _disposed = false;
+
+        public OgaHandle()
+        {
+        }
+
         ~OgaHandle()
         {
+            Dispose(false);
+        }
+
+        public void Dispose()
+        {
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
+            if (_disposed)
+            {
+                return;
+            }
             NativeMethods.OgaShutdown();
+            _disposed = true;
         }
     }
 
