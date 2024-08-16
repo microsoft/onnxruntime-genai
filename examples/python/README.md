@@ -41,6 +41,6 @@ The `model-qa` script streams the output text token by token.
 
 To run the python examples...
 ```bash
-python model-generate.py -m {path to model folder} -pr {input prompt in quotes}
+python model-generate.py -m {path to model folder} -pr {input prompt}
 python model-qa.py -m {path to model folder}
 ```
