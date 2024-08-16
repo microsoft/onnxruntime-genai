@@ -40,10 +40,13 @@ using cudaStream_t = void*;
 #include "tensor.h"
 
 namespace Generators {
+struct GeneratorParams;
+struct Generator;
 struct Model;
 struct State;
 struct Search;
 struct Tokenizer;
+struct TokenizerStream;
 
 // OgaSequences are a vector of int32 vectors
 using TokenSequences = std::vector<std::vector<int32_t>>;
@@ -56,17 +59,29 @@ enum struct DeviceType {
 
 std::string to_string(DeviceType device_type);
 
-struct TrackedResource {
-  TrackedResource() { ++count_; }
-  ~TrackedResource() { --count_; }
+template<typename... Types>
+struct LeakTypeList {
+  template<typename T>
+  static constexpr bool is_tracked = (std::is_same_v<T, Types> || ...);
+  static bool Dump();
+};
+
+using LeakTypes = LeakTypeList<GeneratorParams, Generator, Model, Search, Tokenizer, TokenizerStream>;
+
+template<typename T>
+struct LeakChecked {
+  static_assert(LeakTypes::is_tracked<T>, "Please add this type to 'TrackedTypes' above");
+
+  LeakChecked() { ++count_; }
+  ~LeakChecked() { --count_; }
 
   static int Count() { return count_; }
 
  private:
-  static std::atomic<int> count_;
+  static inline std::atomic<int> count_;
 };
 
-struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, TrackedResource {
+struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChecked<GeneratorParams> {
   GeneratorParams() = default;  // This constructor is only used if doing a custom model handler vs built-in
   GeneratorParams(const Model& model);
 
@@ -136,7 +151,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, TrackedR
                                    // The model outlives the GeneratorParams
 };
 
-struct Generator : TrackedResource {
+struct Generator : LeakChecked<Generator> {
   Generator(const Model& model, const GeneratorParams& params);
 
   bool IsDone() const;

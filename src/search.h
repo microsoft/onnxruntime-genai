@@ -5,7 +5,7 @@
 
 namespace Generators {
 
-struct Search {
+struct Search : LeakChecked<Search> {
   Search(const GeneratorParams& params) : params_{params.shared_from_this()} {}
   virtual ~Search() = default;
 

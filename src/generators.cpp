@@ -15,7 +15,11 @@ static bool _ = (Ort::InitApi(), false);
 
 OrtGlobals::OrtGlobals() : env_{OrtEnv::Create(OrtLoggingLevel::ORT_LOGGING_LEVEL_ERROR)} {}
 
-std::atomic<int> TrackedResource::count_{};
+template <typename... Types>
+bool LeakTypeList<Types...>::Dump() {
+  ((LeakChecked<Types>::Count() != 0 ? std::cerr << "OGA Error: " << LeakChecked<Types>::Count() << " instances of " << typeid(Types).name() << " were leaked." << std::endl : void()), ...);
+  return ((LeakChecked<Types>::Count() != 0) || ...);
+}
 
 // Validate process exit conditions, as this is done atexit, we print errors to stderr and throw an exception to stop the process
 void ValidateShutdown() {
@@ -23,10 +27,8 @@ void ValidateShutdown() {
     std::cerr << "OGA Error: Shutdown must be called before process exit, please check the documentation for the proper API to call to ensure clean shutdown." << std::endl;
     std::abort();
   }
-  if (TrackedResource::Count()) {
-    std::cerr << "OGA Error: " + std::to_string(TrackedResource::Count()) + " resources leaked. All Oga resources must be cleaned up before shutdown." << std::endl;
+  if (LeakTypes::Dump())
     std::abort();
-  }
 }
 
 static bool _1 = (std::atexit(ValidateShutdown), false);  // Call ValidateShutdown at exit
