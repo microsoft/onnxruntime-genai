@@ -15,39 +15,37 @@ static bool _ = (Ort::InitApi(), false);
 
 OrtGlobals::OrtGlobals() : env_{OrtEnv::Create(OrtLoggingLevel::ORT_LOGGING_LEVEL_ERROR)} {}
 
+// Ensure Shutdown() has been called before process exit
+struct ValidateShutdown {
+  ~ValidateShutdown() {
+    if (GetOrtGlobals()) {
+      std::cerr << "OGA Error: Shutdown must be called before process exit, please check the documentation for the proper API to call to ensure clean shutdown." << std::endl;
+      std::abort();
+    }
+  }
+};
+
+std::unique_ptr<OrtGlobals>&
+GetOrtGlobals() {
+  static auto globals = std::make_unique<OrtGlobals>();
+  static auto validate = std::make_unique<ValidateShutdown>();  // Must be after the above line so the destructor runs before the above destructor
+  return globals;
+}
+
+// Used by Shutdown() to display the counts and types of any leaked objects
 template <typename... Types>
 bool LeakTypeList<Types...>::Dump() {
   ((LeakChecked<Types>::Count() != 0 ? std::cerr << "OGA Error: " << LeakChecked<Types>::Count() << " instances of " << typeid(Types).name() << " were leaked." << std::endl : std::cerr), ...);
   return ((LeakChecked<Types>::Count() != 0) || ...);
 }
 
-// Validate process exit conditions, as this is done atexit, we print errors to stderr and throw an exception to stop the process
-void ValidateShutdown() {
-  if (GetOrtGlobals()) {
-    std::cerr << "OGA Error: Shutdown must be called before process exit, please check the documentation for the proper API to call to ensure clean shutdown." << std::endl;
-    std::abort();
-  }
-}
-
-static bool _1 = (std::atexit(ValidateShutdown), false);  // Call ValidateShutdown at exit
-
-std::unique_ptr<OrtGlobals>&
-GetOrtGlobals() {
-  static auto globals = std::make_unique<OrtGlobals>();
-  return globals;
-}
-
 void Shutdown() {
-  auto& globals = GetOrtGlobals();
-  if (!globals)
-    return;
-
   if (LeakTypes::Dump()) {
     std::cerr << "    Please see the documentation for the API being used to ensure proper cleanup." << std::endl;
     std::abort();
   }
 
-  globals.reset();  // Delete now because on process exit is too late
+  GetOrtGlobals().reset();  // Delete now because on process exit is too late
 }
 
 OrtEnv& GetOrtEnv() {
