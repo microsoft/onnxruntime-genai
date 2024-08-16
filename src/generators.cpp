@@ -27,10 +27,6 @@ void ValidateShutdown() {
     std::cerr << "OGA Error: Shutdown must be called before process exit, please check the documentation for the proper API to call to ensure clean shutdown." << std::endl;
     std::abort();
   }
-  if (LeakTypes::Dump()) {
-    std::cerr << "    Please see the documentation for the API being used to ensure proper cleanup." << std::endl;
-    std::abort();
-  }
 }
 
 static bool _1 = (std::atexit(ValidateShutdown), false);  // Call ValidateShutdown at exit
@@ -42,7 +38,16 @@ GetOrtGlobals() {
 }
 
 void Shutdown() {
-  GetOrtGlobals().reset();
+  auto& globals = GetOrtGlobals();
+  if (!globals)
+    return;
+
+  if (LeakTypes::Dump()) {
+    std::cerr << "    Please see the documentation for the API being used to ensure proper cleanup." << std::endl;
+    std::abort();
+  }
+
+  globals.reset();  // Delete now because on process exit is too late
 }
 
 OrtEnv& GetOrtEnv() {
