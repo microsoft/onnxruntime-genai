@@ -1,6 +1,8 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License
 
+from __future__ import annotations
+
 import os
 import sys
 import sysconfig
@@ -9,7 +11,10 @@ from pathlib import Path
 import numpy as np
 import onnxruntime_genai as og
 import pytest
-import onnx
+
+if not sysconfig.get_platform().endswith("arm64"):
+    # Skip importing onnx if running on ARM64
+    import onnx
 
 devices = ["cpu"]
 
