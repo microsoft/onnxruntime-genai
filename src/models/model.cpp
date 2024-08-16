@@ -250,6 +250,8 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
 }
 
+Model::~Model() = default;
+
 void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
   allocator_device_ = &allocator_cpu_;
 #if USE_CUDA
