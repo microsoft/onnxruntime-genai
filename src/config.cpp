@@ -257,7 +257,7 @@ struct PipelineModelObject_Element : JSON::Element {
   Element& OnObject(std::string_view name) override {
     auto& model = v_.emplace_back();
     model.model_id = name;
-    pipeline_model_elements_.push_back(PipelineModel_Element(model));
+    pipeline_model_elements_.emplace_back(model);
     return pipeline_model_elements_.back();
   }
 

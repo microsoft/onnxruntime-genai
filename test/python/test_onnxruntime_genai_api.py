@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import onnxruntime_genai as og
 import pytest
+import onnx
 
 devices = ["cpu"]
 
@@ -223,6 +224,85 @@ def test_get_output(test_data_path, relative_model_path):
     generator.generate_next_token()
 
 
-@pytest.mark.parametrize("relative_model_path", [Path("hf-internal-testing") / "tiny-random-gpt2-fp32"])
-def test_pipeline_model():
-    pass
+@pytest.mark.skipif(
+    not og.is_cuda_available(), reason="Pipeline model uses a mix of CPU and CUDA EP."
+)
+@pytest.mark.parametrize("relative_model_path", [Path("pipeline-model")])
+def test_pipeline_model(test_data_path, phi2_for, relative_model_path):
+    def _extract_subgraph(
+        input_path: os.PathLike,
+        output_path: os.PathLike,
+        input_names: list[str],
+        output_names: list[str],
+    ):
+        """Extract a subgraph from the input model and save it to the output path"""
+
+        model = onnx.load(input_path)
+
+        e = onnx.utils.Extractor(model)
+        extracted = e.extract_model(input_names, output_names)
+
+        onnx.save(
+            extracted,
+            output_path,
+            save_as_external_data=True,
+            location=f"{Path(output_path).name}.data",
+        )
+
+    def _split(onnx_model_path: os.PathLike, output_dir: os.PathLike):
+        """Split the model into three models: embedding model, transformer model, and lm_head model."""
+        num_layers = 1
+        inputs_and_outputs = [
+            (["input_ids"], ["/model/embed_tokens/Gather/output_0"]),
+            (
+                ["/model/embed_tokens/Gather/output_0", "attention_mask"]
+                + [
+                    f"past_key_values.{i}.{kv}"
+                    for kv in ["key", "value"]
+                    for i in range(num_layers)
+                ],
+                [f"/model/layers.{num_layers}/final_norm_layernorm/output_0"]
+                + [
+                    f"present.{i}.{kv}"
+                    for kv in ["key", "value"]
+                    for i in range(num_layers)
+                ],
+            ),
+            ([f"/model/layers.{num_layers}/final_norm_layernorm/output_0"], ["logits"]),
+        ]
+
+        for i, split_name in enumerate(["embeds", "transformer", "lm_head"]):
+            split_model_path = output_dir / f"{split_name}.onnx"
+            _extract_subgraph(
+                onnx_model_path,
+                split_model_path,
+                inputs_and_outputs[i][0],
+                inputs_and_outputs[i][1],
+            )
+
+    _split(
+        Path(phi2_for("cuda")) / "model.onnx",
+        Path(test_data_path) / relative_model_path,
+    )
+
+    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+    model = og.Model(model_path)
+    tokenizer = og.Tokenizer(model)
+
+    prompts = [
+        "This is a test.",
+        "Rats are awesome pets!",
+        "The quick brown fox jumps over the lazy dog.",
+    ]
+
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=20)
+    params.input_ids = tokenizer.encode_batch(prompts)
+
+    output_sequences = model.generate(params)
+    expected_output = [
+        'This is a test.\n        # TOD import * doct proofingrad',
+        'Rats are awesome pets!\n    """\n\n',
+        'The quick brown fox jumps over the lazy dog.\n    """\n\n'
+    ]
+    assert tokenizer.decode_batch(output_sequences) == expected_output

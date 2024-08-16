@@ -25,7 +25,7 @@ DecoderOnlyPipelineModel::DecoderOnlyPipelineModel(std::unique_ptr<Config> confi
 
   if (!device_allocator_created) {
     // If the device allocator has not been created, it implies all
-    // sessions are configured torun on CPU.
+    // sessions are configured to run on CPU.
     // Pick any session to create the device allocator.
     // Device allocator is guaranteed to be the cpu allocator.
     InitDeviceAllocator(*sessions_.front());
