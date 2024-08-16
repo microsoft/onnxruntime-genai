@@ -170,8 +170,6 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
     const auto* expected_output_start = &expected_output[i * max_length];
     EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
   }
-
-  model.release();
 }
 #endif
 

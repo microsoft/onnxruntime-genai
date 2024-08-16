@@ -1,6 +1,12 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+// This file will track the number of instances of each type that are created and destroyed. This is useful for
+// debugging memory leaks. To use this, just add the type to the LeakTypeList in this file. Then have that type
+// inherit from LeakChecked<(itself)>.
+//
+// On process exit, ValidateShutdown() will call LeakTypeList::Dump() and print out any types that have leaked.
+
 namespace Generators {
 struct GeneratorParams;
 struct Generator;
@@ -32,4 +38,4 @@ struct LeakChecked {
   static inline std::atomic<int> count_;
 };
 
-} // namespace Generators
+}  // namespace Generators
