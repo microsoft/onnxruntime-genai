@@ -5,7 +5,7 @@ void PrintUsage()
 {
     Console.WriteLine("Usage:");
     Console.WriteLine("  -m model_path");
-    Console.WriteLine("  -i (optional): Intereactive mode");
+    Console.WriteLine("  -i (optional): Interactive mode");
 }
 
 using OgaHandle ogaHandle = new OgaHandle();
@@ -16,7 +16,7 @@ if (args.Length < 1)
     Environment.Exit(-1);
 }
 
-bool intereactive = false;
+bool interactive = false;
 string modelPath = string.Empty;
 
 uint i = 0;
@@ -25,7 +25,7 @@ while (i < args.Length)
     var arg = args[i];
     if (arg == "-i")
     {
-        intereactive = true;
+        interactive = true;
     }
     else if (arg == "-m")
     {
@@ -47,13 +47,13 @@ Console.WriteLine("Hello, Phi!");
 Console.WriteLine("-------------");
 
 Console.WriteLine("Model path: " + modelPath);
-Console.WriteLine("Intereactive: " + intereactive);
+Console.WriteLine("Interactive: " + interactive);
 
 using Model model = new Model(modelPath);
 using Tokenizer tokenizer = new Tokenizer(model);
 
 var option = 2;
-if (intereactive)
+if (interactive)
 {
     Console.WriteLine("Please enter option number:");
     Console.WriteLine("1. Complete Output");
@@ -64,7 +64,7 @@ if (intereactive)
 do
 {
     string prompt = "def is_prime(num):"; // Example prompt
-    if (intereactive)
+    if (interactive)
     {
         Console.WriteLine("Prompt:");
         prompt = Console.ReadLine();
@@ -99,4 +99,4 @@ do
         }
         Console.WriteLine();
     }
-} while (intereactive);
+} while (interactive);
