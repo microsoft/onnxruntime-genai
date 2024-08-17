@@ -38,7 +38,7 @@
 
     <PropertyGroup>
       <VersionInfo>$(VersionInfoStr.Split(-)[0])</VersionInfo>
-      <VersionSuffix>$([System.String]::new('$(VersionInfoStr)').Contains('-') ? $(VersionInfoStr.Split('-')[1]) : '')</VersionSuffix>
+      <VersionSuffix>$([System.String]::new($(VersionInfoStr)).Contains('-') ? $(VersionInfoStr.Split('-')[1]) : '')</VersionSuffix>
     </PropertyGroup>
   </Target>
 
