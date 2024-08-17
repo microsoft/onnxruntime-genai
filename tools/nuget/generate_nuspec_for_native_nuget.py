@@ -168,7 +168,7 @@ def main():
     with open(args.nuspec_output_path, "w") as f:
         for line in lines:
             # Uncomment the printing of the line if you need to debug what's produced on a CI machine
-            # print(line)
+            print(line)
             f.write(line)
             f.write("\n")
 
