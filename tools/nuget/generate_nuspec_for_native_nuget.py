@@ -75,8 +75,8 @@ def generate_license(line_list):
 
 def generate_readme(line_list, args):
     print("Current directory:", os.getcwd())
-    package_path = f"{args.sources_path}\\nuget\\PACKAGE.md"
-    line_list.append(f'<readme>"{package_path}"</readme>')
+    # package_path = f"{args.sources_path}\\nuget\\PACKAGE.md"
+    line_list.append('<readme>nuget/PACKAGE.md</readme>')
 
 def generate_project_url(line_list, project_url):
     line_list.append("<projectUrl>" + project_url + "</projectUrl>")
@@ -170,7 +170,7 @@ def main():
     with open(args.nuspec_output_path, "w") as f:
         for line in lines:
             # Uncomment the printing of the line if you need to debug what's produced on a CI machine
-            # print(line)
+            print(line)
             f.write(line)
             f.write("\n")
 
