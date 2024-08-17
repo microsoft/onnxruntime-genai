@@ -74,10 +74,7 @@ def generate_license(line_list):
     line_list.append('<license type="file">LICENSE</license>')
 
 def generate_readme(line_list, args):
-    import subprocess
     print("Current directory:", os.getcwd())
-    result = subprocess.run(['ls'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    print("Current directory ls:", result.stdout)
     package_path = f"{args.sources_path}\\nuget\\PACKAGE.md"
     line_list.append(f'<readme>"{package_path}"</readme>')
 
