@@ -76,7 +76,7 @@ def generate_license(line_list):
 def generate_readme(line_list, args):
     print("Current directory:", os.getcwd())
     # package_path = f"{args.sources_path}\\nuget\\PACKAGE.md"
-    line_list.append('<readme>nuget/PACKAGE.md</readme>')
+    line_list.append('<readme>PACKAGE.md</readme>')
 
 def generate_project_url(line_list, project_url):
     line_list.append("<projectUrl>" + project_url + "</projectUrl>")
@@ -114,7 +114,8 @@ def generate_files(lines, args):
     lines.append('<files>')
 
     lines.append(f'<file src="{args.sources_path}\LICENSE" target="LICENSE" />')
-    lines.append(f'<file src="{args.sources_path}\README.md" target="README.md" />')
+    # lines.append(f'<file src="{args.sources_path}\README.md" target="README.md" />')
+    lines.append(f'<file src="{args.sources_path}\\nuget\PACKAGE.md" target="PACKAGE.md" />')
     lines.append(f'<file src="{args.sources_path}\ThirdPartyNotices.txt" target="ThirdPartyNotices.txt" />')
 
     def add_native_artifact_if_exists(xml_lines, runtime, artifact):
