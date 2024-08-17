@@ -36,10 +36,16 @@
       <Output TaskParameter="Lines" PropertyName="VersionInfoStr" />
     </ReadLinesFromFile>
 
-    <PropertyGroup>
-      <VersionInfo>$(VersionInfoStr.Split(-)[0])</VersionInfo>
-      <VersionSuffix>$([System.String]::new($(VersionInfoStr)).Contains('-') ? $(VersionInfoStr.Split('-')[1]) : '')</VersionSuffix>
+    <PropertyGroup Condition=" '$(VersionInfoStr.Contains('-'))' == 'true' ">
+      <VersionInfo>$([System.String]::new('$(VersionInfoStr)').Split('-')[0])</VersionInfo>
+      <VersionSuffix>$([System.String]::new('$(VersionInfoStr)').Split('-')[1])</VersionSuffix>
     </PropertyGroup>
+
+    <PropertyGroup Condition=" '$(VersionInfoStr.Contains('-'))' == 'false' ">
+      <VersionInfo>$(VersionInfoStr)</VersionInfo>
+      <VersionSuffix></VersionSuffix>
+    </PropertyGroup>
+
   </Target>
 
   <Target Name="WriteAssemblyInfo" BeforeTargets="CoreCompile" DependsOnTargets="PrepareForBuild;ReadVersionFromFile">
