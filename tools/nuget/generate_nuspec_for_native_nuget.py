@@ -27,7 +27,7 @@ def generate_metadata(line_list, args):
     generate_owners(metadata_list, "Microsoft")
     generate_description(metadata_list, args.package_name)
     generate_license(metadata_list)
-    generate_readme(metadata_list)
+    generate_readme(metadata_list, args)
     generate_copyright(metadata_list, "\xc2\xa9 " + "Microsoft Corporation. All rights reserved.")
     generate_project_url(metadata_list, "https://github.com/microsoft/onnxruntime-genai")
     generate_release_notes(metadata_list)
@@ -73,8 +73,13 @@ def generate_icon(line_list, icon_file):
 def generate_license(line_list):
     line_list.append('<license type="file">LICENSE</license>')
 
-def generate_readme(line_list):
-    line_list.append('<readme>"..\..\nuget\PACKAGE.md"</readme>')
+def generate_readme(line_list, args):
+    import subprocess
+    print("Current directory:", os.getcwd())
+    result = subprocess.run(['ls'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    print("Current directory ls:", result.stdout)
+    package_path = f"{args.sources_path}\\nuget\\PACKAGE.md"
+    line_list.append(f'<readme>"{package_path}"</readme>')
 
 def generate_project_url(line_list, project_url):
     line_list.append("<projectUrl>" + project_url + "</projectUrl>")
