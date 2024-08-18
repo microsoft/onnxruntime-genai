@@ -36,9 +36,14 @@
       <Output TaskParameter="Lines" PropertyName="VersionInfoStr" />
     </ReadLinesFromFile>
 
-    <PropertyGroup>
+    <PropertyGroup Condition=" '$(VersionInfoStr.Contains(-))' == 'true' ">
       <VersionInfo>$(VersionInfoStr.Split(-)[0])</VersionInfo>
       <VersionSuffix>$(VersionInfoStr.Split(-)[1])</VersionSuffix>
+    </PropertyGroup>
+
+    <PropertyGroup Condition=" '$(VersionInfoStr.Contains(-))' == 'false' ">
+      <VersionInfo>$(VersionInfoStr)</VersionInfo>
+      <VersionSuffix></VersionSuffix>
     </PropertyGroup>
   </Target>
 
