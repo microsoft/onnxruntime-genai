@@ -18,9 +18,9 @@ env:
   ort_zip: "Microsoft.ML.OnnxRuntime.DirectML.1.17.3.zip"
   # TODO: Update with nightly ORT-DML build
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/Microsoft.ML.OnnxRuntime.DirectML.1.17.3.zip"
-  dml_dir: "Microsoft.AI.DirectML.1.15.0"
-  dml_zip: "Microsoft.AI.DirectML.1.15.0.zip"
-  dml_url: "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.15.0"
+  dml_dir: "Microsoft.AI.DirectML.1.15.1"
+  dml_zip: "Microsoft.AI.DirectML.1.15.1.zip"
+  dml_url: "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.15.1"
   d3d12_dir: "Microsoft.Direct3D.D3D12.1.614.0"
   d3d12_zip: "Microsoft.Direct3D.D3D12.1.614.0.zip"
   d3d12_url: "https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.614.0"

@@ -2,15 +2,14 @@
  * Copyright (c) Microsoft Corporation. All rights reserved.
  * Licensed under the MIT License.
  */
-#include <jni.h>
+#include "ai_onnxruntime_genai_TokenizerStream.h"
+
 #include "ort_genai_c.h"
 #include "utils.h"
 
-#include <iostream>
-
 using namespace Helpers;
 
-extern "C" JNIEXPORT jstring JNICALL
+JNIEXPORT jstring JNICALL
 Java_ai_onnxruntime_genai_TokenizerStream_tokenizerStreamDecode(JNIEnv* env, jobject thiz,
                                                                 jlong tokenizer_stream_handle, jint token) {
   OgaTokenizerStream* tokenizer_stream = reinterpret_cast<OgaTokenizerStream*>(tokenizer_stream_handle);
@@ -27,7 +26,7 @@ Java_ai_onnxruntime_genai_TokenizerStream_tokenizerStreamDecode(JNIEnv* env, job
   return result;
 }
 
-extern "C" JNIEXPORT void JNICALL
+JNIEXPORT void JNICALL
 Java_ai_onnxruntime_genai_TokenizerStream_destroyTokenizerStream(JNIEnv* env, jobject thiz,
                                                                  jlong tokenizer_stream_handle) {
   OgaTokenizerStream* tokenizer_stream = reinterpret_cast<OgaTokenizerStream*>(tokenizer_stream_handle);

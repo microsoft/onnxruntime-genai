@@ -94,8 +94,6 @@ jobs:
       run: |
         python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\test_models"
 
-
-
     - name: Verify Build Artifacts
       if: always()
       continue-on-error: true

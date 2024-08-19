@@ -129,13 +129,14 @@ jobs:
           docker run \
             --gpus all \
             --rm \
+            --volume /data/ortgenai_pytorch_models:/data/ortgenai_pytorch_models \
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
             -e HF_TOKEN=$HF_TOKEN \
             -w /ort_genai_src onnxruntimecudabuildx64 bash -c " \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/requirements.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/requirements-cuda.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install /ort_genai_src/build/cuda/wheel/onnxruntime_genai*manylinux*.whl --user && \
-              ${{ env.PYTHON_EXECUTABLE }} test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models"
+              ${{ env.PYTHON_EXECUTABLE }} test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models --e2e"
 
       - name: Docker -- Run unit tests
         run: |
@@ -143,5 +144,6 @@ jobs:
           docker run \
             --gpus all \
             --rm \
+            --volume /data/ortgenai_pytorch_models:/data/ortgenai_pytorch_models \
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
             -w /ort_genai_src onnxruntimecudabuildx64 bash -c "LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/ort_genai_src/build/cuda/ /ort_genai_src/build/cuda/test/unit_tests"
