@@ -188,6 +188,7 @@ jobs:
             -w /ort_genai_src/ $(cuda_docker_image) \
             bash -c " \
                 export ORTGENAI_LOG_ORT_LIB=1 && \
+                dotnet nuget add source https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json --name ORT-Nightly && \
                 cd /ort_genai_src/examples/csharp/HelloPhi && \
                 chmod +x ./bin/Release_Cuda/net6.0/linux-x64/HelloPhi && \
                 ./bin/Release_Cuda/net6.0/linux-x64/HelloPhi -m ./models/phi-3"
