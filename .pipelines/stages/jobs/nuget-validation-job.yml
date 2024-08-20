@@ -154,7 +154,8 @@ jobs:
         dotnet restore -r $(os)-$(arch) /property:Configuration=$(csproj_configuration) --source https://api.nuget.org/v3/index.json --source https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json --source $PWD --disable-parallel --verbosity detailed
         if ("$(arch)" -eq "arm64") {
           echo "Not running test for ARM64 as it is currently a known failure"
-        } else {
+        }
+        else {
           dotnet run -r $(os)-$(arch) --configuration $(csproj_configuration) --no-restore --verbosity normal -- -m ./models/phi-3
         }
       displayName: 'Run Example With Artifact'
