@@ -8,7 +8,6 @@
       "name": "macos_default",
       "generator": "Unix Makefiles",
       "binaryDir": "${sourceDir}/build/cpu",
-      "architecture": "arm64",
       "cacheVariables": {
         "CMAKE_POSITION_INDEPENDENT_CODE": "ON",
         "USE_CUDA": "OFF",
@@ -91,22 +90,24 @@
     {
       "name": "macos_x64_cpu_release",
       "inherits": [
-        "macos_release_default",
-        "macos_default"
+        "macos_cpu_release"
       ],
-      "architecture": "x64",
+      "cacheVariables": {
+        "CMAKE_OSX_ARCHITECTURES": "x64"
+      },
       "displayName": "macos x64 cpu release",
       "binaryDir": "${sourceDir}/build/cpu/osx-x64"
     },
     {
       "name": "macos_arm64_cpu_release",
       "inherits": [
-        "macos_release_default",
-        "macos_default"
+        "macos_cpu_release"
       ],
-      "architecture": "arm64",
+      "cacheVariables": {
+        "CMAKE_OSX_ARCHITECTURES": "arm64"
+      },
       "displayName": "macos x64 cpu release",
-      "binaryDir": "${sourceDir}/build/cpu/osx-x64"
+      "binaryDir": "${sourceDir}/build/cpu/osx-arm64"
     }
   ]
 }
