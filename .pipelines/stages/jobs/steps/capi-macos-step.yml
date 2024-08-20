@@ -98,10 +98,12 @@ steps:
   - powershell: |
       cmake --build --preset macos_$(arch)_$(ep)_$(build_config) --parallel --PyPackageBuild
     displayName: 'Build Python Wheel'
+    workingDirectory: '$(Build.Repository.LocalPath)'
 
   - powershell: |
       Get-ChildItem -Path $(Build.Repository.LocalPath) -Recurse
     displayName: 'List all files in the repo for debugging'
+    workingDirectory: '$(Build.Repository.LocalPath)'
 
   - task: CopyFiles@2
     displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
@@ -115,12 +117,3 @@ steps:
     inputs:
       ArtifactName: $(artifactName)-wheel
       PathtoPublish: '$(Build.ArtifactStagingDirectory)\wheel'
-
-  - task: PublishSymbols@2
-    displayName: 'Publish Build Symbols'
-    condition: and(succeeded(), eq(variables['build_config'], 'relwithdebinfo'))
-    inputs:
-      SymbolsFolder: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\src\python\RelWithDebInfo\'
-      SearchPattern: 'onnxruntime_genai.pdb'
-      SymbolServerType: teamServices
-      SymbolExpirationInDays: 365
