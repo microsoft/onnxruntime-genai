@@ -108,12 +108,12 @@ steps:
   - task: CopyFiles@2
     displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
     inputs:
-      SourceFolder: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\wheel'
+      SourceFolder: '$(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/wheel'
       Contents: '*.whl'
-      TargetFolder: '$(Build.ArtifactStagingDirectory)\wheel'
+      TargetFolder: '$(Build.ArtifactStagingDirectory)/wheel'
 
   - task: PublishBuildArtifacts@1
     displayName: 'Publish Artifact: ONNXRuntime python wheel'
     inputs:
       ArtifactName: $(artifactName)-wheel
-      PathtoPublish: '$(Build.ArtifactStagingDirectory)\wheel'
+      PathtoPublish: '$(Build.ArtifactStagingDirectory)/wheel'
