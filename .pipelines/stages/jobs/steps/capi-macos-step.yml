@@ -35,6 +35,7 @@ steps:
     archiveType: 'zip'
 
 - powershell: |
+    $env:MACOSX_DEPLOYMENT_TARGET = "12.0" # Monterey
     cmake --preset macos_$(arch)_$(ep)_$(build_config)
   displayName: 'Configure CMake C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
