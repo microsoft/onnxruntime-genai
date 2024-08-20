@@ -93,7 +93,7 @@
         "macos_cpu_release"
       ],
       "cacheVariables": {
-        "CMAKE_OSX_ARCHITECTURES": "x64"
+        "CMAKE_OSX_ARCHITECTURES": "x86_64"
       },
       "displayName": "macos x64 cpu release",
       "binaryDir": "${sourceDir}/build/cpu/osx-x64"
