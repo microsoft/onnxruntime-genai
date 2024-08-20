@@ -1,0 +1,133 @@
+parameters:
+- name: target
+  type: string
+- name: ep
+  type: string
+  default: 'cpu'
+- name: arch
+  type: string
+  default: 'x64'
+- name: build_config
+  type: string
+  default: 'release'
+
+steps:
+
+- checkout: self
+  clean: true
+  path: onnxruntime-genai
+  submodules: recursive
+
+- checkout: manylinux
+  clean: true
+  path: onnxruntime-genai/manylinux
+  submodules: recursive
+
+- script: |
+    set -e -x
+    echo "$(Build.SourcesDirectory)"
+    echo "$(Build.Repository.LocalPath)"
+    ls $(Build.SourcesDirectory) -R
+  displayName: 'List files from SourceDirectory'
+
+- template: utils/set-nightly-build-option-variable.yml
+
+- bash: |
+    echo "arch=$(arch)"
+    echo "ort_filename=$(ort_filename)"
+    echo "ort_version=$(ort_version)"
+    echo "ep=$(ep)"
+    echo "cuda_version=$(cuda_version)"
+    echo "target=${{ parameters.target }}"
+    echo "build_config=${{ parameters.build_config }}"
+  displayName: 'Print Parameters'
+
+- template: utils/download-ort.yml
+  parameters:
+    archiveType: 'tgz'
+
+- powershell: |
+    cmake --preset macos_$(arch)_$(ep)_$(build_config)
+  displayName: 'Configure CMake C API'
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
+- powershell: |
+    cmake --build --preset macos_$(arch)_$(ep)_$(build_config) --parallel --target ${{ parameters.target }}
+  displayName: 'Build C API'
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
+- ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
+  - template: compliant/win-esrp-dll-step.yml
+    parameters:
+      FolderPath: '$(Build.Repository.LocalPath)\$(buildDir)'
+      DisplayName: 'ESRP - Sign C++ dlls'
+      Pattern: '*genai.dll'
+
+  - task: BinSkim@4
+    displayName: 'Run BinSkim'
+    inputs:
+      AnalyzeTargetGlob: '$(Build.Repository.LocalPath)\**\*genai.dll'
+    continueOnError: true
+
+  - powershell: |
+      python -m pip install wheel
+    displayName: 'Install wheel'
+
+  - powershell: |
+      cmake --build --preset macos_$(arch)_$(ep)_$(build_config) --target package
+    displayName: 'Package C/C++ API'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Artifact: ONNXRuntime Genai capi'
+    inputs:
+      ArtifactName: $(artifactName)-capi
+      PathtoPublish: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\package'
+
+- ${{ if eq(parameters.target, 'python') }}:
+  - task: BinSkim@4
+    displayName: 'Run BinSkim'
+    inputs:
+      AnalyzeTargetGlob: '$(Build.Repository.LocalPath)\**\*.pyd'
+    continueOnError: true
+
+  - template: compliant/win-esrp-dll-step.yml
+    parameters:
+      FolderPath: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\wheel\onnxruntime_genai'
+      DisplayName: 'ESRP - PYD Sign'
+      DoEsrp: true
+      Pattern: '*.pyd'
+
+  - powershell: |
+      python -m pip install wheel
+    displayName: 'Install wheel'
+
+  - powershell: |
+      cmake --build --preset macos_$(arch)_$(ep)_$(build_config) --parallel --PyPackageBuild
+    displayName: 'Build Python Wheel'
+
+  - powershell: |
+      Get-ChildItem -Path $(Build.Repository.LocalPath) -Recurse
+    displayName: 'List all files in the repo for debugging'
+
+  - task: CopyFiles@2
+    displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
+    inputs:
+      SourceFolder: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\wheel'
+      Contents: '*.whl'
+      TargetFolder: '$(Build.ArtifactStagingDirectory)\wheel'
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Artifact: ONNXRuntime python wheel'
+    inputs:
+      ArtifactName: $(artifactName)-wheel
+      PathtoPublish: '$(Build.ArtifactStagingDirectory)\wheel'
+
+  - task: PublishSymbols@2
+    displayName: 'Publish Build Symbols'
+    condition: and(succeeded(), eq(variables['build_config'], 'relwithdebinfo'))
+    inputs:
+      SymbolsFolder: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\src\python\RelWithDebInfo\'
+      SearchPattern: 'onnxruntime_genai.pdb'
+      SymbolServerType: teamServices
+      SymbolExpirationInDays: 365

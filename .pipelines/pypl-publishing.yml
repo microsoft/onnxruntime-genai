@@ -39,6 +39,11 @@ parameters:
   type: boolean
   default: true
 
+- name: enable_macos_cpu
+  displayName: 'Whether MacOS CPU package is built.'
+  type: boolean
+  default: true
+
 - name: ort_version
   displayName: 'OnnxRuntime version'
   type: string
@@ -90,6 +95,7 @@ trigger: none
 stages:
 - template: stages/py-packaging-stage.yml
   parameters:
+    enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
     enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
     enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
     enable_linux_rocm: ${{ parameters.enable_linux_rocm }}
