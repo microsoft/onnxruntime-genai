@@ -43,7 +43,7 @@ jobs:
       vmImage: 'macOS-latest'
 
   strategy:
-    ${{ if eq(parameters.arch, 'arm64') }}:
+    ${{ if and(eq(parameters.os, 'win'), eq(parameters.arch, 'arm64')) }}: # Older Python versions don't have official win-arm64 build.
       matrix:
         Python311:
           PyDotVer: '3.11'
