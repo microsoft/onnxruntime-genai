@@ -37,7 +37,7 @@ steps:
 
 - template: utils/download-ort.yml
   parameters:
-    archiveType: 'tgz'
+    archiveType: 'zip'
 
 - powershell: |
     cmake --preset macos_$(arch)_$(ep)_$(build_config)
