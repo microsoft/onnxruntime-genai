@@ -107,6 +107,6 @@ do
         var runTimeInSeconds = watch.Elapsed.TotalSeconds;
         var outputSequence = generator.GetSequence(0);
         var totalTokens = outputSequence.Length;
-        Console.WriteLine($"Tokens: {totalTokens} Time: {runTimeInSeconds:0.00} Tokens per second: {totalTokens / runTimeInSeconds:0.00}");
+        Console.WriteLine($"Streaming Tokens: {totalTokens} Time: {runTimeInSeconds:0.00} Tokens per second: {totalTokens / runTimeInSeconds:0.00}");
     }
 } while (interactive);
