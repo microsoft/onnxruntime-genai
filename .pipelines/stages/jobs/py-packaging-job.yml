@@ -39,7 +39,8 @@ jobs:
     ${{ else }}:
       pool: 'onnxruntime-Win-CPU-2022'
   ${{ if eq(parameters.os, 'osx')}}:
-    pool: 'macOS-latest'
+    pool:
+      vmImage: 'macOS-latest'
 
   strategy:
     ${{ if eq(parameters.arch, 'arm64') }}:
