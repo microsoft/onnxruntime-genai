@@ -101,7 +101,7 @@ OGA_EXPORT size_t OGA_API_CALL OgaSequencesCount(const OgaSequences* sequences);
 
 /*
  * \brief Appends token_cnt number of tokens from token_ptr to sequence
- * \param[in] token_ptr constant pointer to int32 tokens 
+ * \param[in] token_ptr constant pointer to int32 tokens
  * \param[in] token_cnt number of tokens to read from token_ptr
  * \param[in] sequences OgaSequences object to append the tokens to
  * \return OgaResult containing the error message when tokens could not been added, else nullptr.
