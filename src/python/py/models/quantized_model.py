@@ -484,7 +484,7 @@ class QuantizedModel:
         Pack `scales`, `qzeros`, and `qweight` to ORT format
         """
         if module.bits != 4:
-            raise NotImplementedError(f"{modue.bits}-bit quantization in ORT is not currently supported by this tool.")
+            raise NotImplementedError(f"{module.bits}-bit quantization in ORT is not currently supported by this tool.")
         
         intzeros_pt = module.qzeros.T if module.qzeros.dtype == module.scales.dtype else module.qzeros.T.byte()
         intweight_pt = intweight.byte()
