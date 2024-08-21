@@ -164,7 +164,7 @@ jobs:
         SpecificArtifact: ${{ parameters.specificArtifact }}
         BuildId: ${{ parameters.BuildId }}
 
-  - ${{ if and(eq(parameters.os, 'win'), ne(parameters.arch, 'arm64')) }}:
+  - ${{ if ne(parameters.arch, 'arm64') }}:
     - template: steps/utils/download-huggingface-model.yml
       parameters:
         StepName: 'Download Model from HuggingFace'
@@ -212,7 +212,7 @@ jobs:
         displayName: 'Run Example With Artifact'
         workingDirectory: '$(Build.Repository.LocalPath)'
 
-  - ${{ if and(eq(parameters.os, 'win'), ne(parameters.arch, 'arm64')) }}:
+  - ${{ if and(eq(parameters.os, 'win'), ne(parameters.arch, 'arm64'), ne(parameters.ep, 'directml')) }}:
     - ${{ if eq(parameters.ep, 'cuda') }}:
       - powershell: |
           $env:AZCOPY_MSI_CLIENT_ID = "63b63039-6328-442f-954b-5a64d124e5b4";
@@ -236,12 +236,7 @@ jobs:
         cd examples\python
         python -m pip install --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)
 
-        if ("$(ep)" -eq "directml") {
-          echo "Not running model generate for Win Directml as it is a known failure"
-        }
-        else {
-          python model-generate.py -m .\models\$(prebuild_phi3_mini_model_folder) --min_length 25 --max_length 50 --verbose
-        }
+        python model-generate.py -m .\models\$(prebuild_phi3_mini_model_folder) --min_length 25 --max_length 50 --verbose
       displayName: 'Run Example With Artifact'
       workingDirectory: '$(Build.Repository.LocalPath)'
 
