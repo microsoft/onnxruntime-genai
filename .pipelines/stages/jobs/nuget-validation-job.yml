@@ -116,7 +116,7 @@ jobs:
     inputs:
       version: '8.x'
 
-  - ${{ if eq(parameters.arch, 'arm64') }}:
+  - ${{ if ne(parameters.arch, 'arm64') }}:
     - template: steps/utils/download-huggingface-model.yml
       parameters:
         StepName: 'Download Model from HuggingFace'
