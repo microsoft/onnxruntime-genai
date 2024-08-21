@@ -46,18 +46,6 @@ steps:
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
-  - template: compliant/win-esrp-dll-step.yml
-    parameters:
-      FolderPath: '$(Build.Repository.LocalPath)\$(buildDir)'
-      DisplayName: 'ESRP - Sign C++ dlls'
-      Pattern: '*genai.dll'
-
-  - task: BinSkim@4
-    displayName: 'Run BinSkim'
-    inputs:
-      AnalyzeTargetGlob: '$(Build.Repository.LocalPath)\**\*genai.dll'
-    continueOnError: true
-
   - powershell: |
       python -m pip install wheel
     displayName: 'Install wheel'
@@ -74,19 +62,6 @@ steps:
       PathtoPublish: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\package'
 
 - ${{ if eq(parameters.target, 'python') }}:
-  - task: BinSkim@4
-    displayName: 'Run BinSkim'
-    inputs:
-      AnalyzeTargetGlob: '$(Build.Repository.LocalPath)\**\*.pyd'
-    continueOnError: true
-
-  - template: compliant/win-esrp-dll-step.yml
-    parameters:
-      FolderPath: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\wheel\onnxruntime_genai'
-      DisplayName: 'ESRP - PYD Sign'
-      DoEsrp: true
-      Pattern: '*.pyd'
-
   - powershell: |
       python -m pip install wheel
     displayName: 'Install wheel'
