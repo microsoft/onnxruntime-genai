@@ -212,7 +212,7 @@ jobs:
         displayName: 'Run Example With Artifact'
         workingDirectory: '$(Build.Repository.LocalPath)'
 
-  - ${{ if eq(parameters.os, 'win') }}:
+  - ${{ if and(eq(parameters.os, 'win'), ne(parameters.arch, 'arm64')) }}:
     - ${{ if eq(parameters.ep, 'cuda') }}:
       - powershell: |
           $env:AZCOPY_MSI_CLIENT_ID = "63b63039-6328-442f-954b-5a64d124e5b4";
@@ -238,9 +238,6 @@ jobs:
 
         if ("$(ep)" -eq "directml") {
           echo "Not running model generate for Win Directml as it is a known failure"
-        }
-        elseif ("$(arch)" -eq "arm64") {
-          echo "Not running model generate for Win CPU ARM64 as it is a known failure"
         }
         else {
           python model-generate.py -m .\models\$(prebuild_phi3_mini_model_folder) --min_length 25 --max_length 50 --verbose
