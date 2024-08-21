@@ -52,32 +52,85 @@ def run_subprocess(
     return completed_process
 
 
-def download_models(download_path, device):
-    # python -m onnxruntime_genai.models.builder -m <model_name> -p int4 -e cpu -o <download_path> --extra_options num_hidden_layers=1
-    model_names = {
-        "cpu": {
-            "phi-2": "microsoft/phi-2",
-        },
-        "cuda": {
-            "phi-2": "microsoft/phi-2",
-        },
+def get_model_paths():
+    hf_paths = {
+        "phi-2": "microsoft/phi-2",
+        # "phi-3-mini": "microsoft/Phi-3-mini-128k-instruct",
     }
-    for model_name, model_identifier in model_names[device].items():
-        model_path = os.path.join(download_path, device, model_name)
-        if not os.path.exists(model_path):
-            command = [
-                sys.executable,
-                "-m",
-                "onnxruntime_genai.models.builder",
-                "-m",
-                model_identifier,
-                "-p",
-                "int4",
-                "-e",
-                device,
-                "-o",
-                model_path,
-                "--extra_options",
-                "num_hidden_layers=1",
-            ]
-            run_subprocess(command).check_returncode()
+
+    ci_data_path = os.path.join("/", "data", "ortgenai_pytorch_models")
+    if not os.path.exists(ci_data_path):
+        return {}, hf_paths
+
+    # Note: If a model has over 4B parameters, please add a quantized version
+    # to `ci_paths` instead of `hf_paths` to reduce file size and testing time.
+    ci_paths = {
+        "llama-2": os.path.join(ci_data_path, "Llama-2-7B-Chat-GPTQ"),
+        "llama-3": os.path.join(ci_data_path, "Meta-Llama-3-8B-AWQ"),
+        "mistral-v0.2": os.path.join(ci_data_path, "Mistral-7B-Instruct-v0.2-GPTQ"),
+        # "phi-2": os.path.join(ci_data_path, "phi2"),
+        # "gemma-2b": os.path.join(ci_data_path, "gemma-1.1-2b-it"),
+        "gemma-7b": os.path.join(ci_data_path, "gemma-7b-it-awq"),
+        # "phi-3-mini": os.path.join(ci_data_path, "phi3-mini-128k-instruct"),
+    }
+
+    return ci_paths, hf_paths
+
+
+def download_model(model_name, input_path, output_path, precision, device, one_layer=True):
+    command = [
+        sys.executable,
+        "-m",
+        "onnxruntime_genai.models.builder",
+    ]
+
+    if model_name is not None:
+        # If model_name is provided:
+        # python -m onnxruntime_genai.models.builder -m <model_name> -o <output_path> -p <precision> -e <device>
+        command += ["-m", model_name]
+    elif input_path != "":
+        # If input_path is provided:
+        # python -m onnxruntime_genai.models.builder -i <input_path> -o <output_path> -p <precision> -e <device>
+        command += ["-i", input_path]
+    else:
+        raise Exception("Either `model_name` or `input_path` can be provided for PyTorch models, not both.")
+
+    command += [
+        "-o",
+        output_path,
+        "-p",
+        precision,
+        "-e",
+        device,
+    ]
+
+    extra_options = ["--extra_options"]
+    if device == "cpu" and precision == "int4":
+        extra_options += ["int4_accuracy_level=4"]
+    if one_layer:
+        extra_options += ["num_hidden_layers=1"]
+    if len(extra_options) > 1:
+        command += extra_options
+
+    run_subprocess(command).check_returncode()
+
+
+def download_models(download_path, precision, device):
+    ci_paths, hf_paths = get_model_paths()
+    output_paths = []
+    
+    # python -m onnxruntime_genai.models.builder -i <input_path> -o <output_path> -p <precision> -e <device>
+    for model_name, input_path in ci_paths.items():
+        output_path = os.path.join(download_path, model_name, precision, device)
+        if not os.path.exists(output_path):
+            download_model(None, input_path, output_path, precision, device)
+            output_paths.append(output_path)
+
+    # python -m onnxruntime_genai.models.builder -m <model_name> -o <output_path> -p <precision> -e <device>
+    for model_name, hf_name in hf_paths.items():
+        output_path = os.path.join(download_path, model_name, precision, device)
+        if not os.path.exists(output_path):
+            download_model(hf_name, "", output_path, precision, device)
+            output_paths.append(output_path)
+
+    return output_paths
