@@ -106,7 +106,7 @@ void KV_Cache_Combined::PickPastState(std::span<const int32_t> beam_indices, int
 }
 
 void KV_Cache_Combined::PickPastState(std::span<const int32_t> beam_indices, int index) {
-  if (type_ == Ort::TypeToTensorType<float>::type) {
+  if (type_ == Ort::TypeToTensorType<float>) {
     PickPastState<float>(beam_indices, index);
   } else {
     PickPastState<Ort::Float16_t>(beam_indices, index);
@@ -247,7 +247,7 @@ void KV_Cache::PickPastState(std::span<const int32_t> beam_indices, int index) {
 }
 
 void KV_Cache::PickPastState(std::span<const int32_t> beam_indices, int index) {
-  if (type_ == Ort::TypeToTensorType<float>::type) {
+  if (type_ == Ort::TypeToTensorType<float>) {
     PickPastState<float>(beam_indices, index);
   } else {
     PickPastState<Ort::Float16_t>(beam_indices, index);

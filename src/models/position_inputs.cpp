@@ -15,7 +15,7 @@ PositionInputs::PositionInputs(const Model& model, State& state, RoamingArray<in
   has_mask_input_ = model_.session_info_->HasInput(model_.config_->model.decoder.inputs.attention_mask);
   has_posid_input_ = model_.session_info_->HasInput(model_.config_->model.decoder.inputs.position_ids);
 
-  type_ = Ort::TypeToTensorType<int32_t>::type;
+  type_ = Ort::TypeToTensorType<int32_t>;
   if (has_mask_input_) {
     type_ = model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.attention_mask);
   }
@@ -28,7 +28,7 @@ PositionInputs::PositionInputs(const Model& model, State& state, RoamingArray<in
     type_ = model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.position_ids);
   }
 
-  if (type_ != Ort::TypeToTensorType<int32_t>::type && type_ != Ort::TypeToTensorType<int64_t>::type)
+  if (type_ != Ort::TypeToTensorType<int32_t> && type_ != Ort::TypeToTensorType<int64_t>)
     throw std::runtime_error("position_ids & attention_mask only support int32 or int64 types");
 
   std::array<int64_t, 2> shape{state_.params_->batch_size, state_.params_->sequence_length};  // Only batch_size initially, as we haven't expanded over the beams yet
@@ -38,7 +38,7 @@ PositionInputs::PositionInputs(const Model& model, State& state, RoamingArray<in
 
   initial_sequence_lengths_.resize(state_.params_->BatchBeamSize());
 
-  if (type_ == Ort::TypeToTensorType<int32_t>::type)
+  if (type_ == Ort::TypeToTensorType<int32_t>)
     InitializeTensors<int32_t>(shape, sequence_lengths_unk);
   else
     InitializeTensors<int64_t>(shape, sequence_lengths_unk);
@@ -108,7 +108,7 @@ void PositionInputs::UpdatePositionIDs(int current_length) {
 #if USE_CUDA
       position_ids_ = sb_position_ids_->CreateTensorOnStaticBuffer(position_ids_shape_, type_);
       assert(model_.device_type_ == DeviceType::CUDA);
-      if (type_ == Ort::TypeToTensorType<int32_t>::type) {
+      if (type_ == Ort::TypeToTensorType<int32_t>) {
         cudaMemcpyAsync(position_ids_->GetTensorMutableRawData(),
                         position_ids_next_->GetTensorData<int32_t>(),
                         sizeof(int32_t) * position_ids_shape_[0],
@@ -128,7 +128,7 @@ void PositionInputs::UpdatePositionIDs(int current_length) {
       ComPtr<ID3D12Resource> target_resource;
       Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, position_ids_->GetTensorMutableRawData(), &target_resource));
 
-      if (type_ == Ort::TypeToTensorType<int32_t>::type) {
+      if (type_ == Ort::TypeToTensorType<int32_t>) {
         auto source = std::span(position_ids_next_->GetTensorData<const uint8_t>(), sizeof(int32_t) * position_ids_shape_[0]);
 
         model_.GetDmlUploadHeap()->BeginUploadToGpu(
@@ -173,7 +173,7 @@ void PositionInputs::UpdatePositionIDs(int current_length) {
       } break;
 #endif
       case DeviceType::CPU: {
-        if (type_ == Ort::TypeToTensorType<int32_t>::type)
+        if (type_ == Ort::TypeToTensorType<int32_t>)
           UpdatePositionIDsImpl<int32_t>();
         else
           UpdatePositionIDsImpl<int64_t>();
@@ -181,7 +181,7 @@ void PositionInputs::UpdatePositionIDs(int current_length) {
       }
 #if USE_CUDA
       case DeviceType::CUDA:
-        if (type_ == Ort::TypeToTensorType<int32_t>::type)
+        if (type_ == Ort::TypeToTensorType<int32_t>)
           cuda::Launch_UpdatePositionIds(position_ids_->GetTensorMutableData<int32_t>(), static_cast<int>(position_ids_shape_[0]), model_.cuda_stream_);
         else
           cuda::Launch_UpdatePositionIds(position_ids_->GetTensorMutableData<int64_t>(), static_cast<int>(position_ids_shape_[0]), model_.cuda_stream_);
@@ -200,7 +200,7 @@ void PositionInputs::UpdateAttentionMask(int current_length) {
     attention_mask_shape_[1] = state_.params_->search.max_length;
     attention_mask_next_ = sb_attention_mask_->CreateTensorOnStaticBuffer(attention_mask_shape_, type_);
     if (is_first_mask_update_) {
-      if (type_ == Ort::TypeToTensorType<int32_t>::type) {
+      if (type_ == Ort::TypeToTensorType<int32_t>) {
         cudaMemsetAsync(attention_mask_next_->GetTensorMutableRawData(),
                         0,
                         sizeof(int32_t) * attention_mask_shape_[0] * attention_mask_shape_[1],
@@ -270,7 +270,7 @@ void PositionInputs::UpdateAttentionMask(int current_length) {
     }
 #endif
     case DeviceType::CPU: {
-      if (type_ == Ort::TypeToTensorType<int32_t>::type)
+      if (type_ == Ort::TypeToTensorType<int32_t>)
         UpdateAttentionMaskImpl(attention_mask_next_->GetTensorMutableData<int32_t>(),
                                 attention_mask_->GetTensorData<int32_t>(),
                                 current_length);
@@ -284,7 +284,7 @@ void PositionInputs::UpdateAttentionMask(int current_length) {
     case DeviceType::CUDA: {
       int max_seq_len = sb_attention_mask_ ? state_.params_->search.max_length : current_length;
       bool update_only = sb_attention_mask_ && !is_first_mask_update_;
-      if (type_ == Ort::TypeToTensorType<int32_t>::type) {
+      if (type_ == Ort::TypeToTensorType<int32_t>) {
         cuda::Launch_UpdateAttentionMask(attention_mask_next_->GetTensorMutableData<int32_t>(),
                                          attention_mask_->GetTensorData<int32_t>(),
                                          static_cast<int>(attention_mask_shape_[0]),
