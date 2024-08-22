@@ -131,7 +131,7 @@ def generate_files(lines, args):
       if runtime.startswith("linux"):
           add_native_artifact_if_exists(lines, runtime, "libonnxruntime-genai.so")
       if runtime.startswith("osx"):
-         add_native_artifact_if_exists(lines, runtime, "libonnxruntime-genai.dylib")
+          add_native_artifact_if_exists(lines, runtime, "libonnxruntime-genai.dylib")
 
     # targets
     for dotnet in ["netstandard2.0", "net8.0", "native"]:
