@@ -29,6 +29,11 @@ parameters:
   type: boolean
   default: true
 
+- name: enable_macos_cpu
+  displayName: 'Whether MacOS CPU package is built.'
+  type: boolean
+  default: true
+
 - name: ort_version
   type: string
 - name: ort_cuda_version
