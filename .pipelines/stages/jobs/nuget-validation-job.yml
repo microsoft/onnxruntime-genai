@@ -21,6 +21,7 @@ parameters:
   values:
   - 'linux'
   - 'win'
+  - 'osx'
 
 jobs:
 - job: nuget_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}_validation

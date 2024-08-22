@@ -24,6 +24,7 @@ parameters:
   values:
   - 'linux'
   - 'win'
+  - 'osx'
 
 jobs:
 - job: python_${{ parameters.os }}_${{ parameters.ep }}${{ parameters.cuda_display_version }}_${{ parameters.arch }}_validation
