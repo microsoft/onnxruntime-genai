@@ -43,6 +43,9 @@ jobs:
       pool: 'onnxruntime-genai-windows-vs-2022-arm64'
     ${{ else }}:
       pool: 'onnxruntime-Win-CPU-2022'
+  ${{ if eq(parameters.os, 'osx') }}:
+    pool:
+      vmImage: 'macOS-latest'
 
   timeoutInMinutes: 180
   #  set variables here to be used in the template and steps
@@ -158,7 +161,7 @@ jobs:
       env:
         NUGET_PLUGIN_HANDSHAKE_TIMEOUT_IN_SECONDS: 180
         NUGET_PLUGIN_REQUEST_TIMEOUT_IN_SECONDS: 180
-  - ${{ elseif eq(parameters.os, 'linux') }}:
+  - ${{ elseif or(eq(parameters.os, 'linux'), eq(parameters.os, 'osx')) }}:
     - bash: |
        dotnet --info
        cp $(Build.BinariesDirectory)/nuget/* examples/csharp/HelloPhi/

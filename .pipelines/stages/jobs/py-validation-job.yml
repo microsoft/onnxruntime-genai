@@ -46,6 +46,9 @@ jobs:
       pool: 'onnxruntime-genai-windows-vs-2022-arm64'
     ${{ else }}:
       pool: 'onnxruntime-Win-CPU-2022'
+  ${{ if eq(parameters.os, 'osx') }}:
+    pool:
+      vmImage: 'macOS-latest'
 
   timeoutInMinutes: 240
   workspace:
@@ -147,22 +150,13 @@ jobs:
       addToPath: true
       architecture: $(arch)
 
-  - ${{ if eq(parameters.os, 'linux') }}:
-    - template: steps/utils/flex-download-pipeline-artifact.yml
-      parameters:
-        StepName: 'Download Python Wheel Artifacts'
-        ArtifactName: $(ArtifactName)
-        TargetPath: '$(Build.BinariesDirectory)/wheel'
-        SpecificArtifact: ${{ parameters.specificArtifact }}
-        BuildId: ${{ parameters.BuildId }}
-  - ${{ if eq(parameters.os, 'win') }}:
-    - template: steps/utils/flex-download-pipeline-artifact.yml
-      parameters:
-        StepName: 'Download Python Wheel Artifacts'
-        ArtifactName: $(ArtifactName)-wheel
-        TargetPath: '$(Build.BinariesDirectory)/wheel'
-        SpecificArtifact: ${{ parameters.specificArtifact }}
-        BuildId: ${{ parameters.BuildId }}
+  - template: steps/utils/flex-download-pipeline-artifact.yml
+    parameters:
+      StepName: 'Download Python Wheel Artifacts'
+      ArtifactName: $(ArtifactName)-wheel
+      TargetPath: '$(Build.BinariesDirectory)/wheel'
+      SpecificArtifact: ${{ parameters.specificArtifact }}
+      BuildId: ${{ parameters.BuildId }}
 
   - template: steps/utils/download-huggingface-model.yml
     parameters:
@@ -174,7 +168,7 @@ jobs:
       HuggingFaceToken: $(HF_TOKEN)
       os: ${{ parameters.os }}
 
-  - ${{ if eq(parameters.os, 'linux') }}:
+  - ${{ if or(eq(parameters.os, 'linux'), eq(parameters.os, 'osx')) }}:
     - ${{ if eq(parameters.ep, 'cuda') }}:
       - bash: |
           set -e -x
