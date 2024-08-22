@@ -186,10 +186,12 @@ void RunBenchmark(const benchmark::Options& opts) {
     {
       Timing e2e_gen_timing{e2e_gen_times};
 
+#if 0
       {
         Timing prompt_processing_timing{prompt_processing_times};
         generator->ComputeLogits();
       }
+#endif
 
       {
         Timing sampling_timing{sampling_times};
@@ -197,10 +199,12 @@ void RunBenchmark(const benchmark::Options& opts) {
       }
 
       while (!generator->IsDone()) {
+#if 0
         {
           Timing token_gen_timing{token_gen_times};
           generator->ComputeLogits();
         }
+#endif
 
         {
           Timing sampling_timing{sampling_times};

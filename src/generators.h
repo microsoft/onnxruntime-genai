@@ -129,7 +129,6 @@ struct Generator {
   Generator(const Model& model, const GeneratorParams& params);
 
   bool IsDone() const;
-  void ComputeLogits();
   void GenerateNextToken();
 
   RoamingArray<int32_t> GetSequence(size_t index) const;
@@ -138,6 +137,9 @@ struct Generator {
   std::unique_ptr<State> state_;
   std::unique_ptr<Search> search_;
   bool computed_logits_{};  // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
+
+private:
+  void ComputeLogits();
 };
 
 struct OrtGlobals {

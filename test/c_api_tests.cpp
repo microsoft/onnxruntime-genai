@@ -142,7 +142,6 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
   auto generator = OgaGenerator::Create(*model, *params);
 
   while (!generator->IsDone()) {
-    generator->ComputeLogits();
     generator->GenerateNextToken();
   }
 

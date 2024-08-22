@@ -196,8 +196,7 @@ bool OGA_API_CALL OgaGenerator_IsDone(const OgaGenerator* generator) {
 
 OgaResult* OGA_API_CALL OgaGenerator_ComputeLogits(OgaGenerator* generator) {
   OGA_TRY
-  reinterpret_cast<Generators::Generator*>(generator)->ComputeLogits();
-  return nullptr;
+  throw std::runtime_error("TODO: Remove this function");
   OGA_CATCH
 }
 

@@ -88,7 +88,7 @@ struct OgaSequences : OgaAbstract {
   static std::unique_ptr<OgaSequences> Create() {
     OgaSequences* p;
     OgaCheckResult(OgaCreateSequences(&p));
-    return std::unique_ptr<OgaSequences>(p);
+    return {p};
   }
 
   size_t Count() const {
@@ -214,10 +214,6 @@ struct OgaGenerator : OgaAbstract {
 
   bool IsDone() const {
     return OgaGenerator_IsDone(this);
-  }
-
-  void ComputeLogits() {
-    OgaCheckResult(OgaGenerator_ComputeLogits(this));
   }
 
   void GenerateNextToken() {

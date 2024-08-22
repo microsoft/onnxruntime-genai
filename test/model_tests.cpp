@@ -44,7 +44,6 @@ TEST(ModelTests, GreedySearchGptFp32) {
   auto generator = Generators::CreateGenerator(*model, *params);
 
   while (!generator->IsDone()) {
-    generator->ComputeLogits();
     generator->GenerateNextToken();
   }
 
@@ -117,7 +116,6 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
   auto generator = Generators::CreateGenerator(*model, *params);
 
   while (!generator->IsDone()) {
-    generator->ComputeLogits();
     generator->GenerateNextToken();
   }
 

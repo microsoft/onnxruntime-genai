@@ -128,7 +128,7 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
 
 void Generator::ComputeLogits() {
   if (computed_logits_)
-    throw std::runtime_error("ComputeLogits called again without calling GenerateNextToken first");
+    return;
 
   auto logits = state_->Run(search_->GetSequenceLength(), search_->GetNextTokens(), search_->GetNextIndices());
   if (g_log.enabled && g_log.model_logits) {
@@ -152,8 +152,7 @@ bool Generator::IsDone() const {
 }
 
 void Generator::GenerateNextToken() {
-  if (!computed_logits_)
-    throw std::runtime_error("Must call ComputeLogits before GenerateNextToken");
+  ComputeLogits();
   computed_logits_ = false;
   auto& search = search_->params_->search;
 
@@ -200,7 +199,6 @@ TokenSequences Generate(const Model& model, const GeneratorParams& params) {
   auto generator = CreateGenerator(model, params);
 
   while (!generator->IsDone()) {
-    generator->ComputeLogits();
     generator->GenerateNextToken();
   }
 

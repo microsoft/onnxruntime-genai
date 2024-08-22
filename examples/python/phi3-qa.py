@@ -53,7 +53,6 @@ def main(args):
 
         try:
             while not generator.is_done():
-                generator.compute_logits()
                 generator.generate_next_token()
                 if args.timings:
                     if first:
