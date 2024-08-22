@@ -225,6 +225,14 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_ComputeLogits(OgaGenerator* gene
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator);
 
 /*
+ * \brief Returns a copy of the model output identified by the given name as an OgaTensor on CPU. The buffer is owned by returned OgaTensor
+ *       and will be released when the OgaTensor is destroyed
+ * \param[in] generator The generator to run the GetOutput on the name provided and the out pointer to store the output
+ * \return OgaResult containing the error message if the computation failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* oga_generator, const char* name, OgaTensor** out);
+
+/*
  * \brief Returns the number of tokens in the sequence at the given index.
  * \param[in] generator The generator to get the count of the tokens for the sequence at the given index.
  * \return The number tokens in the sequence at the given index.

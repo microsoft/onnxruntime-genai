@@ -53,6 +53,13 @@ RoamingArray<float> Logits::Get() {
 
     // create new OrtValue for logits_of_last_token and use output_last_tokens_ to hold it
     output_last_tokens_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
+
+#if USE_DML
+    if (type_ == Ort::TypeToTensorType<Ort::Float16_t>::type) {
+      logits_of_last_token_fp32_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+    }
+#endif
+
     logits_of_last_token = output_last_tokens_.get();
 
     size_t element_size = type_ == Ort::TypeToTensorType<float>::type ? 4 : 2;
@@ -120,23 +127,26 @@ RoamingArray<float> Logits::Get() {
 
   // Convert from float16 to float32 if necessary
   if (type_ == Ort::TypeToTensorType<Ort::Float16_t>::type) {
-    std::unique_ptr<OrtValue> logits_of_last_token_fp32;
 #if USE_DML
     if (model_.device_type_ == DeviceType::DML) {
       DmlHelpers::DmlCastInputToOutput(
           model_.GetDmlExecutionContext(),
           *model_.allocator_device_,
           *logits_of_last_token,
-          logits_of_last_token_fp32,
+          logits_of_last_token_fp32_,
           model_.GetDmlDevice(),
           model_.GetOrtDmlApi(),
           logits_cast_command_list_state_);
+
+      logits_of_last_token = logits_of_last_token_fp32_.get();
     } else
 #endif
+    {
+      std::unique_ptr<OrtValue> logits_of_last_token_fp32;
       ConvertFp16ToFp32(*model_.allocator_device_, *logits_of_last_token, logits_of_last_token_fp32, model_.device_type_, model_.cuda_stream_);
-
-    output_last_tokens_ = std::move(logits_of_last_token_fp32);  // use output_last_tokens_ to hold the fp32 logits
-    logits_of_last_token = output_last_tokens_.get();
+      output_last_tokens_ = std::move(logits_of_last_token_fp32);  // use output_last_tokens_ to hold the fp32 logits
+      logits_of_last_token = output_last_tokens_.get();
+    }
   }
 
 #if USE_DML

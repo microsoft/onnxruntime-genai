@@ -1,6 +1,7 @@
 from setuptools import setup, find_packages
 from setuptools.dist import Distribution
 import sys
+import os
 from os import path
 
 if sys.version_info < (3, 0):
@@ -24,18 +25,27 @@ package_name = '@TARGET_NAME@'
 
 def _onnxruntime_dependency() -> str:
     dependency = None
+    # Use dev version as default since CI tests use nightly version for testing
+    ort_version = os.environ.get("ONNXRUNTIME_VERSION", "1.19.0.dev20240805002")
+    is_nightly = True if "dev" in ort_version else False
+
     if package_name == "onnxruntime-genai":
-        dependency = "onnxruntime"
+        dependency = "onnxruntime" if not is_nightly else "ort-nightly"
+
+        import platform
+        # win arm64 whls are only available in onnxruntime-qnn
+        if platform.machine() == "ARM64" and sys.platform.startswith("win"):
+            dependency = "onnxruntime-qnn" if not is_nightly else "ort-nightly-qnn"
     elif package_name == "onnxruntime-genai-cuda":
-        dependency = "onnxruntime-gpu"
+        dependency = "onnxruntime-gpu" if not is_nightly else "ort-nightly-gpu"
     elif package_name == "onnxruntime-genai-directml":
-        dependency = "onnxruntime-directml"
+        dependency = "onnxruntime-directml" if not is_nightly else "ort-nightly-directml"
     elif package_name == "onnxruntime-genai-rocm":
-        dependency = "onnxruntime-rocm"
+        dependency = "onnxruntime-rocm" if not is_nightly else "ort-nightly-rocm"
     else:
         raise ValueError(f'Unable to determine the onnxruntime dependency for {package_name}.')
 
-    return dependency
+    return dependency if not ort_version else dependency + ">=" + ort_version
 
 
 setup(
@@ -48,8 +58,8 @@ setup(
     include_package_data=True,
     package_data={'': ['*.pyd', '*.dll', '*.so*'] + extras},
     install_requires=[
-        'numpy<2',
-        # _onnxruntime_dependency(), # Uncomment this when the onnxruntime stable release contains the ort shared lib
+        'numpy>=1.21.6',
+        _onnxruntime_dependency(),
     ],
     distclass=BinaryDistribution,
     author="Microsoft Corporation",

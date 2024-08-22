@@ -29,10 +29,12 @@ def change_model_listener(new_model_name):
     d = available_models[new_model_name]
 
     if "vision" in new_model_name:
+        print("Configuring for multi-modal model")
         interface = MultiModal_ONNXModel(
             model_path=d["model_dir"]
         )
     else:
+        print("Configuring for language-only model")
         interface = ONNXModel(
             model_path=d["model_dir"]
         )
@@ -219,7 +221,7 @@ def launch_chat_app(expose_locally: bool = False, model_name: str = "", model_pa
 
         demo.load(change_model_listener, inputs=[model_name], outputs=[model_name, image], concurrency_limit=1)
 
-    demo.title = "LLM Chat UI"
+    demo.title = "Local Model UI"
 
     if expose_locally:
         demo.launch(server_name="0.0.0.0", server_port=5000)
@@ -234,7 +236,6 @@ if __name__ == "__main__":
     parser.add_argument("--model_name", "-n", type=str, required=False, help="The name of your model")
     args = parser.parse_args()
     model_path = args.model_path
-    model_name = args.model_name
 
     if not os.path.exists(optimized_directory) and not model_path:
         raise ValueError("Please download the model into models folder or load the model by passing --model_path")
@@ -244,5 +245,8 @@ if __name__ == "__main__":
         # check if genai_config.json in the model foler
         if "genai_config.json" not in os.listdir(model_path):
             raise ValueError(f"Your model_path folder do not include 'genai.json' file, please double check your model_path '{model_path}'")
+        
+    if args.model_name:
+        model_name = args.model_name
 
     launch_chat_app(args.expose_locally, model_name, model_path)
