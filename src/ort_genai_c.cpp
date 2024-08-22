@@ -242,7 +242,7 @@ OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* oga_generator
               static_cast<uint8_t*>(ortvalue_output->GetTensorMutableRawData()) + data_size,
               static_cast<uint8_t*>(ortvalue_clone->GetTensorMutableRawData()));
   } else {
-    throw std::runtime_error("Unsupported Device type: " + ortvalue_output->GetTensorMemoryInfo().GetDeviceType());
+    throw std::runtime_error("Unsupported Device type: " + std::to_string(ortvalue_output->GetTensorMemoryInfo().GetDeviceType()));
   }
 
   auto tensor = std::make_shared<Generators::Tensor>(std::move(ortvalue_clone));
