@@ -75,10 +75,11 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #include "../logging.h"
 #include "env_utils.h"
 
-#if defined(__ANDROID__)
-#include <android/log.h>
+#if defined(__linux__)
 #include <dlfcn.h>
 
+#if defined(__ANDROID__)
+#include <android/log.h>
 #define TAG "GenAI"
 
 #define LOG_DEBUG(...) __android_log_print(ANDROID_LOG_DEBUG, TAG, __VA_ARGS__)
@@ -86,9 +87,8 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #define LOG_WARN(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
 #define LOG_ERROR(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 #define LOG_FATAL(...) __android_log_print(ANDROID_LOG_FATAL, TAG, __VA_ARGS__)
+#endif
 
-#elif defined(__linux__)
-#include <dlfcn.h>
 #elif defined(__APPLE__)
 #include "TargetConditionals.h"
   #if TARGET_OS_MAC

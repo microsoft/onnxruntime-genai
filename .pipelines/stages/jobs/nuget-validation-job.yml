@@ -203,7 +203,6 @@ jobs:
     - ${{ elseif eq(parameters.ep, 'cpu') }}:
       - bash: |
           export ORTGENAI_LOG_ORT_LIB=1
-          export DYLD_PRINT_LIBRARIES=1
           cd examples/csharp/HelloPhi
           dotnet run -r $(os)-$(arch) --configuration $(csproj_configuration) --no-build --verbosity normal -- -m ./models/phi-3
         displayName: 'Run Example With Artifact'
