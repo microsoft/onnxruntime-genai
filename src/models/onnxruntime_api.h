@@ -89,6 +89,12 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 
 #elif defined(__linux__)
 #include <dlfcn.h>
+#elif defined(__APPLE__)
+#include "TargetConditionals.h"
+  #if TARGET_OS_MAC
+  #include <dlfcn.h>
+  #endif
+#endif
 
 #ifndef PATH_MAX
 #define PATH_MAX (4096)
@@ -103,7 +109,6 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #define LOG_ERROR(...) LOG_WHEN_ENABLED(Generators::Log("error", __VA_ARGS__))
 #define LOG_FATAL(...) LOG_WHEN_ENABLED(Generators::Log("fatal", __VA_ARGS__))
 
-#endif
 
 /** \brief Free functions and a few helpers are defined inside this namespace. Otherwise all types are the C API types
  *
@@ -115,7 +120,7 @@ using OrtApiBaseFn = const OrtApiBase* (*)(void);
 /// Before using this C++ wrapper API, you MUST call Ort::InitApi to set the below 'api' variable
 inline const OrtApi* api{};
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(TARGET_OS_MAC)
 inline std::string GetCurrentModuleDir() {
   Dl_info dl_info;
   dladdr((void*)GetCurrentModuleDir, &dl_info);
@@ -142,7 +147,7 @@ inline void* LoadDynamicLibraryIfExists(const std::string& path) {
     ort_lib_handle = dlopen(local_path.c_str(), RTLD_NOW | RTLD_LOCAL);
   }
   if (ort_lib_handle) {
-#if !defined(__ANDROID__)  // RTLD_DI_ORIGIN not available on Android
+#if !defined(__ANDROID__) && !defined(TARGET_OS_MAC)  // RTLD_DI_ORIGIN not available on Android/Darwin
     char pathname[PATH_MAX];
     dlinfo((void*)ort_lib_handle, RTLD_DI_ORIGIN, &pathname);
     LOG_INFO("Loaded native library at %s", pathname);
@@ -196,7 +201,7 @@ inline void InitApi() {
     Generators::SetLogBool("ort_lib", true);
   }
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(TARGET_OS_MAC)
   // If the GenAI library links against the onnxruntime library, it will have a dependency on a specific
   // version of OrtGetApiBase.
   //
@@ -218,13 +223,19 @@ inline void InitApi() {
   //     any libonnxruntime.so that supports one of those versions.
   //
 
+#if defined(__linux__)
   const std::string path = "libonnxruntime.so";  // "libonnxruntime4j_jni.so" is also an option if we have issues
   void* ort_lib_handle = LoadDynamicLibraryIfExists(path);
-
 #if !defined(__ANDROID__)
   if (ort_lib_handle == nullptr) {
     ort_lib_handle = LoadDynamicLibraryIfExists("libonnxruntime.so.1");
   }
+#endif
+#endif
+
+#if defined(TARGET_OS_MAC)
+  const std::string path = "libonnxruntime.dylib";
+  void* ort_lib_handle = LoadDynamicLibraryIfExists(path);
 #endif
 
   if (ort_lib_handle == nullptr) {
