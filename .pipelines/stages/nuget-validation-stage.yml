@@ -110,7 +110,7 @@ stages:
   - ${{ if eq(parameters.enable_macos_cpu, true) }}:
     - template: jobs/nuget-validation-job.yml
       parameters:
-        arch: 'arm64'
+        arch: 'x64'
         ep: 'cpu'
         ort_version: ${{ parameters.ort_version }}
         os: 'osx'
