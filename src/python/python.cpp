@@ -106,17 +106,6 @@ int ToNumpyType(ONNXTensorElementDataType type) {
 }
 
 template <typename... Types>
-const char* TypeToString(ONNXTensorElementDataType type, Ort::TypeList<Types...>) {
-  const char* name = "(please add type to list)";
-  ((type == Ort::TypeToTensorType<Types> ? name = typeid(Types).name(), true : false) || ...);
-  return name;
-}
-
-const char* TypeToString(ONNXTensorElementDataType type) {
-  return TypeToString(type, Ort::TensorTypes{});
-}
-
-template <typename... Types>
 std::string ToFormatDescriptor(ONNXTensorElementDataType type, Ort::TypeList<Types...>) {
   std::string result;
   ((type == Ort::TypeToTensorType<Types> ? result = pybind11::format_descriptor<Types>::format(), true : false) || ...);

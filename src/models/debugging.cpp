@@ -8,10 +8,10 @@ namespace Generators {
 static constexpr size_t c_value_count = 10;  // Dump this many values from the start of a tensor
 
 template <typename... Types>
-const char *TypeToString(ONNXTensorElementDataType type, Ort::TypeList<Types...>) {
+const char* TypeToString(ONNXTensorElementDataType type, Ort::TypeList<Types...>) {
   const char* name = "(please add type to list)";
-  ((type == Ort::TypeToTensorType<Types> ? name=typeid(Types).name(), true : false) || ...);
-  return name; 
+  ((type == Ort::TypeToTensorType<Types> ? name = typeid(Types).name(), true : false) || ...);
+  return name;
 }
 
 const char* TypeToString(ONNXTensorElementDataType type) {
@@ -24,7 +24,7 @@ std::ostream& operator<<(std::ostream& stream, Ort::Float16_t v) {
 }
 
 std::ostream& operator<<(std::ostream& stream, Ort::BFloat16_t v) {
-  stream << v.value;
+  stream << "BF16:" << v.value;  // TODO: implement conversion when useful
   return stream;
 }
 
