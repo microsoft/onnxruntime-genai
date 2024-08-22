@@ -6,31 +6,31 @@ namespace Generators {
 
 size_t SizeOf(ONNXTensorElementDataType type) {
   switch (type) {
-    case Ort::TypeToTensorType<uint8_t>::type:
+    case Ort::TypeToTensorType<uint8_t>:
       return sizeof(uint8_t);
-    case Ort::TypeToTensorType<int8_t>::type:
+    case Ort::TypeToTensorType<int8_t>:
       return sizeof(int8_t);
-    case Ort::TypeToTensorType<uint16_t>::type:
+    case Ort::TypeToTensorType<uint16_t>:
       return sizeof(uint16_t);
-    case Ort::TypeToTensorType<int16_t>::type:
+    case Ort::TypeToTensorType<int16_t>:
       return sizeof(int16_t);
-    case Ort::TypeToTensorType<uint32_t>::type:
+    case Ort::TypeToTensorType<uint32_t>:
       return sizeof(uint32_t);
-    case Ort::TypeToTensorType<int32_t>::type:
+    case Ort::TypeToTensorType<int32_t>:
       return sizeof(int32_t);
-    case Ort::TypeToTensorType<uint64_t>::type:
+    case Ort::TypeToTensorType<uint64_t>:
       return sizeof(int64_t);
-    case Ort::TypeToTensorType<int64_t>::type:
+    case Ort::TypeToTensorType<int64_t>:
       return sizeof(int64_t);
-    case Ort::TypeToTensorType<bool>::type:
+    case Ort::TypeToTensorType<bool>:
       return sizeof(bool);
-    case Ort::TypeToTensorType<float>::type:
+    case Ort::TypeToTensorType<float>:
       return sizeof(float);
-    case Ort::TypeToTensorType<double>::type:
+    case Ort::TypeToTensorType<double>:
       return sizeof(double);
-    case Ort::TypeToTensorType<Ort::Float16_t>::type:
+    case Ort::TypeToTensorType<Ort::Float16_t>:
       return sizeof(Ort::Float16_t);
-    case Ort::TypeToTensorType<Ort::BFloat16_t>::type:
+    case Ort::TypeToTensorType<Ort::BFloat16_t>:
       return sizeof(Ort::BFloat16_t);
     default:
       throw std::runtime_error("Unsupported ONNXTensorElementDataType in GetTypeSize");

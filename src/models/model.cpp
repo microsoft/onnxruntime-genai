@@ -469,7 +469,7 @@ std::shared_ptr<GeneratorParams> CreateGeneratorParams() {
 void ConvertFp16ToFp32(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<OrtValue>& p_out, DeviceType device_type, cudaStream_t stream) {
   auto shape_info = in.GetTensorTypeAndShapeInfo();
   auto shape = shape_info->GetShape();
-  assert(shape_info->GetElementType() == Ort::TypeToTensorType<Ort::Float16_t>::type);
+  assert(shape_info->GetElementType() == Ort::TypeToTensorType<Ort::Float16_t>);
 
   bool allocate_p_out = p_out == nullptr;
   if (p_out) {
@@ -508,7 +508,7 @@ void ConvertFp32ToFp16(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<Or
                        DeviceType device_type, cudaStream_t stream) {
   auto shape_info = in.GetTensorTypeAndShapeInfo();
   auto shape = shape_info->GetShape();
-  assert(shape_info->GetElementType() == Ort::TypeToTensorType<float>::type);
+  assert(shape_info->GetElementType() == Ort::TypeToTensorType<float>);
 
   bool allocate_p_out = p_out == nullptr;
   if (p_out) {

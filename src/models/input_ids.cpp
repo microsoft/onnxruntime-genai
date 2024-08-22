@@ -13,14 +13,14 @@ InputIDs::InputIDs(const Model& model, State& state)
   type_ = model_.session_info_->GetInputDataType(name_);
 
   // If 64-bit, convert from 32-bit to 64-bit
-  if (type_ == Ort::TypeToTensorType<int64_t>::type) {
+  if (type_ == Ort::TypeToTensorType<int64_t>) {
     value_ = OrtValue::CreateTensor(model.allocator_cpu_, shape_, type_);
     auto* p_data = value_->GetTensorMutableData<int64_t>();
     for (auto v : state_.params_->input_ids) {
       *p_data++ = v;
     }
   } else {
-    if (type_ != Ort::TypeToTensorType<int32_t>::type)
+    if (type_ != Ort::TypeToTensorType<int32_t>)
       throw std::runtime_error("InputIDs must be int64 or int32");
     value_ = OrtValue::CreateTensor<int32_t>(model.allocator_cpu_.GetInfo(), std::span<int32_t>(const_cast<int32_t*>(state_.params_->input_ids.data()), shape_[0] * shape_[1]), shape_);
   }
@@ -63,7 +63,7 @@ void InputIDs::Update(RoamingArray<int32_t> next_tokens_unk) {
 
 #if USE_DML
       if (model_.device_type_ == DeviceType::DML) {
-        value_int32_ = sb_input_ids_int32_->CreateTensorOnStaticBuffer(shape_, Ort::TypeToTensorType<int32_t>::type);
+        value_int32_ = sb_input_ids_int32_->CreateTensorOnStaticBuffer(shape_, Ort::TypeToTensorType<int32_t>);
       }
 #endif
     }
@@ -72,7 +72,7 @@ void InputIDs::Update(RoamingArray<int32_t> next_tokens_unk) {
   }
 
   // Update input_ids with next tokens, converting from 32-bit to 64-bit
-  if (type_ == Ort::TypeToTensorType<int64_t>::type) {
+  if (type_ == Ort::TypeToTensorType<int64_t>) {
     switch (model_.device_type_) {
 #if USE_CUDA
       case DeviceType::CUDA: {
