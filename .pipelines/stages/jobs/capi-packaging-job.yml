@@ -130,4 +130,12 @@ jobs:
         ep: ${{ parameters.ep }}
         build_config: ${{ parameters.build_config }}
 
+  - ${{ if eq(parameters.os, 'osx') }}:
+    - template: steps/capi-macos-step.yml
+      parameters:
+        target: 'onnxruntime-genai'
+        arch: ${{ parameters.arch }}
+        ep: ${{ parameters.ep }}
+        build_config: ${{ parameters.build_config }}
+
   - template: steps/compliant-and-cleanup-step.yml
