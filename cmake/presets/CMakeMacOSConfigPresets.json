@@ -106,7 +106,7 @@
       "cacheVariables": {
         "CMAKE_OSX_ARCHITECTURES": "arm64"
       },
-      "displayName": "macos x64 cpu release",
+      "displayName": "macos arm64 cpu release",
       "binaryDir": "${sourceDir}/build/cpu/osx-arm64"
     }
   ]
