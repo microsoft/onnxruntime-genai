@@ -64,33 +64,33 @@ using TensorTypes = TypeList<bool, int8_t, uint8_t, int16_t, uint16_t, int32_t, 
 
 // Variable templates to convert a C++ type into it's ONNXTensorElementDataType
 template <typename T>
-constexpr ONNXTensorElementDataType TypeToTensorType = T::Unsupported_Type;  // Force a compile error if hit, please add specialized version if type is valid
+inline constexpr ONNXTensorElementDataType TypeToTensorType = T::Unsupported_Type;  // Force a compile error if hit, please add specialized version if type is valid
 template <>
-constexpr ONNXTensorElementDataType TypeToTensorType<bool> = ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL;
+inline constexpr ONNXTensorElementDataType TypeToTensorType<bool> = ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL;
 template <>
-constexpr ONNXTensorElementDataType TypeToTensorType<int8_t> = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8;
+inline constexpr ONNXTensorElementDataType TypeToTensorType<int8_t> = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8;
 template <>
-constexpr ONNXTensorElementDataType TypeToTensorType<uint8_t> = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8;
+inline constexpr ONNXTensorElementDataType TypeToTensorType<uint8_t> = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8;
 template <>
-constexpr ONNXTensorElementDataType TypeToTensorType<int16_t> = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16;
+inline constexpr ONNXTensorElementDataType TypeToTensorType<int16_t> = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16;
 template <>
-constexpr ONNXTensorElementDataType TypeToTensorType<uint16_t> = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16;
+inline constexpr ONNXTensorElementDataType TypeToTensorType<uint16_t> = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16;
 template <>
-constexpr ONNXTensorElementDataType TypeToTensorType<int32_t> = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32;
+inline constexpr ONNXTensorElementDataType TypeToTensorType<int32_t> = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32;
 template <>
-constexpr ONNXTensorElementDataType TypeToTensorType<uint32_t> = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32;
+inline constexpr ONNXTensorElementDataType TypeToTensorType<uint32_t> = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32;
 template <>
-constexpr ONNXTensorElementDataType TypeToTensorType<int64_t> = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;
+inline constexpr ONNXTensorElementDataType TypeToTensorType<int64_t> = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;
 template <>
-constexpr ONNXTensorElementDataType TypeToTensorType<uint64_t> = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64;
+inline constexpr ONNXTensorElementDataType TypeToTensorType<uint64_t> = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64;
 template <>
-constexpr ONNXTensorElementDataType TypeToTensorType<float> = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
+inline constexpr ONNXTensorElementDataType TypeToTensorType<float> = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
 template <>
-constexpr ONNXTensorElementDataType TypeToTensorType<double> = ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE;
+inline constexpr ONNXTensorElementDataType TypeToTensorType<double> = ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE;
 template <>
-constexpr ONNXTensorElementDataType TypeToTensorType<Float16_t> = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
+inline constexpr ONNXTensorElementDataType TypeToTensorType<Float16_t> = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
 template <>
-constexpr ONNXTensorElementDataType TypeToTensorType<BFloat16_t> = ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16;
+inline constexpr ONNXTensorElementDataType TypeToTensorType<BFloat16_t> = ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16;
 
 inline std::vector<std::string> GetAvailableProviders() {
   int len;
