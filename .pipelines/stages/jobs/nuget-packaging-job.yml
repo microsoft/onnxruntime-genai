@@ -135,7 +135,7 @@ jobs:
         ArtifactName: onnxruntime-genai-linux-cuda-x64-capi
         TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
 
-  - ${{ if and(eq(parameters.enable_macos_cpu, true)) }}:
+  - ${{ if eq(parameters.enable_macos_cpu, true) }}:
     - template: steps/utils/flex-download-pipeline-artifact.yml
       parameters:
         StepName: 'Download osx-cpu-x64 capi Artifacts'
