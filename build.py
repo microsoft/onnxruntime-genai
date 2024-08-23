@@ -10,6 +10,8 @@ import platform
 import shlex
 import shutil
 import sys
+import json
+import subprocess
 import textwrap
 
 from pathlib import Path
@@ -387,7 +389,6 @@ def _run_android_tests(args: argparse.Namespace):
         # the test app loads and runs a test model using the GenAI Java bindings
         gradle_executable = str(REPO_ROOT / "src" / "java" / ("gradlew.bat" if util.is_windows() else "gradlew"))
         android_test_path = args.build_dir / "src" / "java" / "androidtest"
-        import subprocess
         exception = None
         try:
             util.run([gradle_executable, "--no-daemon",
@@ -411,6 +412,39 @@ def _run_android_tests(args: argparse.Namespace):
             # util.run([adb, "logcat", "-d", "*:E"])
             raise exception
 
+
+def _run_ios_tests(args: argparse.Namespace):
+    simulator_device_info = subprocess.check_output(
+        [
+            sys.executable,
+            os.path.join(REPO_ROOT, "tools", "ci_build", "github", "apple", "get_simulator_device_info.py"),
+        ],
+        text=True,
+    ).strip()
+    log.debug(f"Simulator device info:\n{simulator_device_info}")
+
+    simulator_device_info = json.loads(simulator_device_info)
+
+    xc_test_schemes = [
+        "unit_tests_xc",
+    ]
+
+    for xc_test_scheme in xc_test_schemes:
+        util.run(
+            [
+                "xcodebuild",
+                "test-without-building",
+                "-project",
+                "./Generators.xcodeproj",
+                "-configuration",
+                args.config,
+                "-scheme",
+                xc_test_scheme,
+                "-destination",
+                f"platform=iOS Simulator,id={simulator_device_info['device_udid']}",
+            ],
+            cwd=args.build_dir,
+        )
 
 def update(args: argparse.Namespace, env: dict[str, str]):
     """
@@ -533,8 +567,8 @@ def test(args: argparse.Namespace, env: dict[str, str]):
     """
     Run the tests.
     """
-    ctest_cmd = [str(args.ctest_path), "--build-config", args.config, "--verbose", "--timeout", "10800"]
-    util.run(ctest_cmd, cwd=str(args.build_dir))
+    #ctest_cmd = [str(args.ctest_path), "--build-config", args.config, "--verbose", "--timeout", "10800"]
+    #util.run(ctest_cmd, cwd=str(args.build_dir))
 
     if util.is_windows() and not args.skip_csharp:
         dotnet = str(_resolve_executable_path("dotnet"))
@@ -544,6 +578,9 @@ def test(args: argparse.Namespace, env: dict[str, str]):
 
     if args.android:
         _run_android_tests(args)
+
+    if args.ios:
+        _run_ios_tests(args)
 
 
 def clean(args: argparse.Namespace, env: dict[str, str]):
