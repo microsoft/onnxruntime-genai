@@ -76,37 +76,9 @@ struct OgaString {
   const char* p_;
 };
 
-struct OgaSequences : OgaAbstract {
-  static std::unique_ptr<OgaSequences> Create() {
-    OgaSequences* p;
-    OgaCheckResult(OgaCreateSequences(&p));
-    return std::unique_ptr<OgaSequences>(p);
-  }
-
-  size_t Count() const {
-    return OgaSequencesCount(this);
-  }
-
-  size_t SequenceCount(size_t index) const {
-    return OgaSequencesGetSequenceCount(this, index);
-  }
-
-  const int32_t* SequenceData(size_t index) const {
-    return OgaSequencesGetSequenceData(this, index);
-  }
-
-#if __cplusplus >= 202002L
-  std::span<const int32_t> Get(size_t index) const {
-    return {SequenceData(index), SequenceCount(index)};
-  }
-#endif
-
-  static void operator delete(void* p) { OgaDestroySequences(reinterpret_cast<OgaSequences*>(p)); }
-};
-
 struct OgaTokenizer : OgaAbstract {
-  void Encode(const char* str, OgaSequences& sequences) const {
-    OgaCheckResult(OgaTokenizerEncode(this, str, &sequences));
+  std::unique_ptr<OgaTensor> Encode(const char* str) const {
+    OgaCheckResult(OgaTokenizerEncode(this, str));
   }
 
   OgaString Decode(const int32_t* tokens_data, size_t tokens_length) const {
