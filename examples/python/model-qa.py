@@ -10,14 +10,13 @@ def main(args):
 
     model = og.Model(f'{args.model}')
     if args.verbose: print("Model loaded")
-    tokenizer = og.Tokenizer(model)
-    tokenizer_stream = tokenizer.create_stream()
+    tokenizer_stream = model.tokenizer.create_stream()
     if args.verbose: print("Tokenizer created")
     if args.verbose: print()
 
     search_options = {name:getattr(args, name) for name in ['do_sample', 'max_length', 'min_length', 'top_p', 'top_k', 'temperature', 'repetition_penalty'] if name in args}
 
-    if args.verbose: print(search_options)
+        if args.verbose: print(search_options)
     
     if args.chat_template:
         if args.chat_template.count('{') != 1 or args.chat_template.count('}') != 1:
@@ -38,12 +37,10 @@ def main(args):
         if args.chat_template:
             prompt = f'{args.chat_template.format(input=text)}'
 
-        input_tokens = tokenizer.encode(prompt)
-
         params = og.GeneratorParams(model)
         params.set_search_options(**search_options)
-        params.input_ids = input_tokens
-        generator = og.Generator(model, params)
+        generator = og.Generator(params)
+        generator.add_text(prompt)
         if args.verbose: print("Generator created")
 
         if args.verbose: print("Running generation loop ...")
@@ -56,7 +53,6 @@ def main(args):
 
         try:
             while not generator.is_done():
-                generator.compute_logits()
                 generator.generate_next_token()
                 if args.timings:
                     if first:

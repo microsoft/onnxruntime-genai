@@ -39,8 +39,8 @@ def main(args):
 
         params = og.GeneratorParams(model)
         params.set_search_options(**search_options)
-        params.input_ids = input_tokens
-        generator = og.Generator(model, params)
+        generator = og.Generator(params)
+        generator.add_tokens(input_tokens)
         if args.verbose: print("Generator created")
 
         if args.verbose: print("Running generation loop ...")
