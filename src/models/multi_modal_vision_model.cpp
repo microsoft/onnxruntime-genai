@@ -117,14 +117,13 @@ int64_t GetNumImageTokens(const std::vector<GeneratorParams::Input>& extra_input
 std::unique_ptr<OrtValue> GetVisualFeatures(OrtAllocator& device_allocator, const SessionInfo& session_info,
                                             const std::string& visual_features_name, int32_t hidden_size,
                                             int64_t num_image_tokens) {
-  constexpr int32_t batch_size = 1;
   if (!session_info.HasOutput(visual_features_name)) {
     throw std::runtime_error("Visual features output not found in the model");
   }
 
   auto type = session_info.GetOutputDataType(visual_features_name);
 
-  std::vector<int64_t> shape = {batch_size, num_image_tokens, hidden_size};
+  std::vector<int64_t> shape = {num_image_tokens, hidden_size};
   std::unique_ptr<OrtValue> visual_features;
 
   switch (type) {
