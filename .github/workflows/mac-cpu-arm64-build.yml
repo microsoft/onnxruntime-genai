@@ -14,7 +14,7 @@ env:
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
 jobs:
   mac-cpu-arm64-build:
-    runs-on: macos-latest
+    runs-on: macos-latest # arm64
     steps:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v4
@@ -36,7 +36,6 @@ jobs:
           mv ${{ env.ORT_PACKAGE_NAME }}/build/native/include ort/
           mv ${{ env.ORT_PACKAGE_NAME }}/runtimes/osx-arm64/native/* ort/lib/
 
-
       - name: Configure CMake
         run: |
           cmake --preset macos_arm64_cpu_release
@@ -46,11 +45,40 @@ jobs:
           cmake --build --preset macos_arm64_cpu_release --parallel
         continue-on-error: false
 
+      - name: Install the python wheel and test dependencies
+        run: |
+          python3 -m pip install -r test/python/requirements.txt --user
+          python3 -m pip install -r test/python/requirements-cpu.txt --user
+          python3 -m pip install build/cpu/wheel/onnxruntime_genai*.whl --user
+
+      - name: Get HuggingFace Token
+        run: |
+          az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
+          HF_TOKEN=$(az keyvault secret show --vault-name anubissvcsecret --name ANUBIS-HUGGINGFACE-TOKEN --query value)
+          echo "::add-mask::$HF_TOKEN"
+          echo "HF_TOKEN=$HF_TOKEN" >> $GITHUB_ENV
+
+      - name: Remove the ort lib and header files
+        run: |
+          rm -rf ort
+
+      # This will also download all the test models to the test/test_models directory
+      # These models are used by the python tests as well as C#, C++ and others.
+      - name: Run the python tests
+        run: |
+          python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models
+
       - name: Verify Build Artifacts
         if: always()
         continue-on-error: true
         run: |
-          ls -l ${{ github.workspace }}/build
+          ls -l ${{ github.workspace }}/build/cpu
+
+      - name: Run tests
+        run: |
+          set -e -x
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$GITHUB_WORKSPACE/build/cpu/
+          ./build/cpu/osx-arm64/test/unit_tests
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v3
