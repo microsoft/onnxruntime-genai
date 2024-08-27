@@ -49,9 +49,9 @@ jobs:
         run: |
           python3 -m venv genai-macos-venv
           source genai-macos-venv/bin/activate
-          python3 -m pip install -r test/python/requirements.txt --user
-          python3 -m pip install -r test/python/requirements-cpu.txt --user
-          python3 -m pip install build/cpu/wheel/onnxruntime_genai*.whl --user
+          python3 -m pip install -r test/python/requirements.txt
+          python3 -m pip install -r test/python/requirements-cpu.txt
+          python3 -m pip install build/cpu/wheel/onnxruntime_genai*.whl
 
       - name: Get HuggingFace Token
         run: |
