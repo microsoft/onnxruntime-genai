@@ -61,6 +61,7 @@ jobs:
       # These models are used by the python tests as well as C#, C++ and others.
       - name: Run the python tests
         run: |
+          source genai-macos-venv/bin/activate
           python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models
 
       - name: Verify Build Artifacts
@@ -74,11 +75,3 @@ jobs:
           set -e -x
           export DYLD_LIBRARY_PATH=$DYLD_LIBRARY_PATH:$GITHUB_WORKSPACE/build/cpu/osx-arm64
           ./build/cpu/osx-arm64/test/unit_tests
-
-      - name: Upload Build Artifacts
-        uses: actions/upload-artifact@v3
-        with:
-          name: onnxruntime-genai-mac-cpu-arm64
-          path: ${{ github.workspace }}/build/**/*.a
-
-
