@@ -1,4 +1,3 @@
 -f https://download.pytorch.org/whl/torch_stable.html
--i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/
 torch==2.2.1+cu121
-onnxruntime-gpu==1.19.0
+onnxruntime-gpu==1.19
