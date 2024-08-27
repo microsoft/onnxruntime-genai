@@ -65,7 +65,6 @@ jobs:
           ls -R ${{ env.ORT_PACKAGE_NAME }}
         continue-on-error: true
 
-# TODO: Find out why do we need to to have libonnxruntime.so.$ort_version
       - name: Extract OnnxRuntime library and header files
         run: |
           set -e -x
@@ -137,6 +136,17 @@ jobs:
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/requirements-cuda.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install /ort_genai_src/build/cuda/wheel/onnxruntime_genai*manylinux*.whl --user && \
               ${{ env.PYTHON_EXECUTABLE }} test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models --e2e"
+
+      # TODO: Enable this by adding dotnet to the docker image
+      # - name: Build the C# API and Run the C# Tests
+      #   run: |
+      #     echo "Building the C# API and running the C# tests"
+      #     docker run \
+      #       --gpus all \
+      #       --rm \
+      #       --volume $GITHUB_WORKSPACE:/ort_genai_src \
+      #       -w /ort_genai_src/test/csharp onnxruntimecudabuildx64 bash -c " \
+      #         dotnet test /p:NativeBuildOutputDir='/ort_genai_src/build/cuda/'"
 
       - name: Docker -- Run unit tests
         run: |
