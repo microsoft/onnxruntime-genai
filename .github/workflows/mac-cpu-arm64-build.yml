@@ -39,11 +39,11 @@ jobs:
 
       - name: Configure CMake
         run: |
-          cmake --preset macos_cpu_release
+          cmake --preset macos_arm64_cpu_release
 
       - name: Build with CMake
         run: |
-          cmake --build --preset macos_cpu_release --parallel
+          cmake --build --preset macos_arm64_cpu_release --parallel
         continue-on-error: false
 
       - name: Verify Build Artifacts

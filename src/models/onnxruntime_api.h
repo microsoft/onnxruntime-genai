@@ -91,9 +91,9 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 
 #elif defined(__APPLE__)
 #include "TargetConditionals.h"
-  #if TARGET_OS_MAC
-  #include <dlfcn.h>
-  #endif
+#if TARGET_OS_OSX
+#include <dlfcn.h>
+#endif
 #endif
 
 #ifndef PATH_MAX
@@ -120,7 +120,7 @@ using OrtApiBaseFn = const OrtApiBase* (*)(void);
 /// Before using this C++ wrapper API, you MUST call Ort::InitApi to set the below 'api' variable
 inline const OrtApi* api{};
 
-#if defined(__linux__) || defined(TARGET_OS_MAC)
+#if defined(__linux__) || TARGET_OS_OSX
 inline std::string GetCurrentModuleDir() {
   Dl_info dl_info;
   dladdr((void*)GetCurrentModuleDir, &dl_info);
@@ -147,7 +147,7 @@ inline void* LoadDynamicLibraryIfExists(const std::string& path) {
     ort_lib_handle = dlopen(local_path.c_str(), RTLD_NOW | RTLD_LOCAL);
   }
   if (ort_lib_handle) {
-#if !defined(__ANDROID__) && !defined(TARGET_OS_MAC)  // RTLD_DI_ORIGIN not available on Android/Darwin
+#if !defined(__ANDROID__) && !defined(__APPLE__)  // RTLD_DI_ORIGIN not available on Android & Darwin
     char pathname[PATH_MAX];
     dlinfo((void*)ort_lib_handle, RTLD_DI_ORIGIN, &pathname);
     LOG_INFO("Loaded native library at %s", pathname);
@@ -201,7 +201,7 @@ inline void InitApi() {
     Generators::SetLogBool("ort_lib", true);
   }
 
-#if defined(__linux__) || defined(TARGET_OS_MAC)
+#if defined(__linux__) || TARGET_OS_OSX
   // If the GenAI library links against the onnxruntime library, it will have a dependency on a specific
   // version of OrtGetApiBase.
   //
@@ -226,6 +226,7 @@ inline void InitApi() {
 #if defined(__linux__)
   const std::string path = "libonnxruntime.so";  // "libonnxruntime4j_jni.so" is also an option if we have issues
   void* ort_lib_handle = LoadDynamicLibraryIfExists(path);
+
 #if !defined(__ANDROID__)
   if (ort_lib_handle == nullptr) {
     ort_lib_handle = LoadDynamicLibraryIfExists("libonnxruntime.so.1");
@@ -233,7 +234,7 @@ inline void InitApi() {
 #endif
 #endif
 
-#if defined(TARGET_OS_MAC)
+#if TARGET_OS_OSX
   const std::string path = "libonnxruntime.dylib";
   void* ort_lib_handle = LoadDynamicLibraryIfExists(path);
 #endif
@@ -249,11 +250,11 @@ inline void InitApi() {
   }
 
   InitApiWithDynamicFn(ort_api_base_fn);
-#else   // defined(__linux__)
+#else   // defined(__linux__) || TARGET_OS_OSX
   api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
   if (!api)
     throw std::runtime_error("Onnxruntime is installed but is too old, please install a newer version");
-#endif  // defined(__linux__)
+#endif  // defined(__linux__) || TARGET_OS_OSX
 }
 
 /** \brief All C++ methods that can fail will throw an exception of this type
