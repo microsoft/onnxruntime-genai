@@ -45,12 +45,15 @@ struct BlockAllocator {
   BlockAllocator& operator=(const BlockAllocator&) = delete;
 
   size_t NumFreeBlocks() const;
+  size_t GetNumFreeBlocks() const;
   size_t NumAllocatedBlocks() const;
   size_t NumBlocks() const;
 
+  std::shared_ptr<Block> Allocate();
   std::shared_ptr<Block> AllocateBlock(size_t num_slots, std::shared_ptr<Block> previous_block);
   std::vector<std::shared_ptr<Block>> AllocateBlocks(size_t num_slots);
   void Free(const std::vector<std::shared_ptr<Block>>& blocks);
+  void Free(const std::shared_ptr<Block>& block);
   std::vector<std::shared_ptr<Block>> Fork(const std::vector<std::shared_ptr<Block>>& blocks);
 
   size_t NumBlocksNeeded(size_t num_slots);
@@ -59,6 +62,7 @@ struct BlockAllocator {
   const size_t block_size_;
   const size_t num_blocks_;
   std::vector<std::shared_ptr<Block>> blocks_{num_blocks_, nullptr};
+  std::vector<std::shared_ptr<Block>> free_blocks_{num_blocks_, nullptr};
 };
 
 }  // namespace Generators

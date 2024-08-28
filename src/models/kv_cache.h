@@ -86,23 +86,30 @@ struct Cross_Cache {
   std::vector<std::string> input_name_strings_, output_name_strings_;
 };
 
-// struct PagedCacheOrchestrator : public CacheManagerInterface {
-//   PagedCacheOrchestrator(const Model& model, State& state);
+struct PagedCacheOrchestrator : public CacheManagerInterface {
+  PagedCacheOrchestrator(const Model& model, State& state);
 
-//   void Add() override;
-//   void Update(std::span<const int32_t> beam_indices, int current_length) override;
+  void Add() override;
+  void Update(std::span<const int32_t> beam_indices, int current_length) override;
 
-//  private:
-//   const Model& model_;
-//   State& state_;
-//   int layer_count_;
-//   size_t input_offset_{~0U};
+ private:
+  const Model& model_;
+  State& state_;
+  int layer_count_;
+  size_t input_offset_{~0U};
 
-//   std::vector<std::string> input_name_strings_;
-//   std::unique_ptr<PagedCacheManager> paged_cache_;
-//   std::unique_ptr<OrtValue> block_tables_;
-//   std::unique_ptr<OrtValue> slot_mapping_;
-// };
+  std::array<int64_t, 2> shape_;
+  ONNXTensorElementDataType type_;
+
+
+  std::vector<std::string> input_name_strings_;
+  // std::unique_ptr<PagedCacheManager> paged_cache_;
+  // std::unique_ptr<OrtValue> block_tables_;
+  // std::unique_ptr<OrtValue> slot_mapping_;
+  std::vector<std::unique_ptr<OrtValue>> key_caches_;
+  std::vector<std::unique_ptr<OrtValue>> value_caches_;
+
+};
 
 std::unique_ptr<CacheManagerInterface> CreateCacheManager(const Model& model, State& state);
 

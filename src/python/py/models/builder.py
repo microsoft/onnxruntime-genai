@@ -231,11 +231,11 @@ class Model:
                 "position_ids": ["num_tokens"],
                 "key_cache": ["num_blocks", "block_size"],
                 "value_cache": ["num_blocks", "block_size"],
-                "block_tables": ["batch_size", "max_blocks_per_sequence"],
-                "slot_mappings": ["num_tokens"],
+                # "block_tables": ["batch_size", "max_blocks_per_sequence"],
+                # "slot_mappings": ["num_tokens"],
             }
 
-            self.input_names.extend(["block_tables", "slot_mappings"])
+            # self.input_names.extend(["block_tables", "slot_mappings"])
 
             self.output_shapes = {
                 "logits": ["num_tokens", self.vocab_size], # For standard models

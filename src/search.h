@@ -1,6 +1,7 @@
 #include "sequences.h"
 #include <random>
 
+#pragma once
 namespace Generators {
 
 struct BeamSearchScorer;

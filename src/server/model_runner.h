@@ -1,21 +1,24 @@
+#pragma once
 #include <vector>
 #include "../models/model.h"
 #include "../generators.h"
+#include "../search.h"
 #include "engine_utils.h"
 #include "scheduler.h"
+#include "../models/cache_manager.h"
 
 namespace Generators {
 class ModelRunner {
  public:
-  ModelRunner(const Generators::Model& model);
-  std::vector<CompletionSequenceGroupOutput> ExecuteModel(ExecuteModelRequest request);
+  ModelRunner(std::shared_ptr<Generators::Model> model,
+              const CacheOptions& cache_config);
+  std::vector<CompletionSequenceGroupOutput> ExecuteModel(
+      const ExecuteModelRequest& request);
 
  private:
-  const Generators::Model& model_;
-  const SchedulerConfig& scheduler_config_;
-  const CacheConfig& cache_config_;
+  std::shared_ptr<Generators::Model> model_;
+  CacheOptions cache_config_;
 
-
-  std::vector<std::vector<int32_t>> RunGenerator(const Generators::GeneratorParams& params);
+  std::vector<int32_t> RunGenerator(const GeneratorParams& params);
 };
-};  // namespace engine
+};  // namespace Generators

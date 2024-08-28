@@ -5,24 +5,21 @@
 #include <unordered_map>
 #include <vector>
 #include <string>
-#include "../ort_genai.h"
 
 namespace Generators {
-enum SequenceStage { kPrefill = 0,
-                     kDecode };
-enum SequenceStatus {
-  kWaiting = 0,
+enum class SequenceStage { kPrefill, kDecode };
+enum class SequenceStatus {
+  kWaiting,
   kRunning,
   kSwapped,
   kFinishedStopped,
   kFinishedLengthCapped,
   kFinishedAborted,
   kFinishedIgnored
+
 };
 
-enum AllocateStatus { kOK = 0,
-                      kLater,
-                      kNever };
+enum class AllocateStatus { kOK, kLater, kNever };
 
 struct SamplingParams {
   int n = 1;
@@ -49,6 +46,7 @@ struct SamplingParams {
   bool skip_special_tokens = true;
   bool spaces_between_special_tokens = true;
 };
+
 struct SequenceData {
   std::vector<int> prompt_tokens_ids;
   std::vector<int> output_token_ids;
@@ -56,7 +54,7 @@ struct SequenceData {
   int num_computed_tokens = 0;
   SequenceStage stage = SequenceStage::kPrefill;
 
-  SequenceData(std::vector<int> prompt_tokens_ids)
+  SequenceData(std::vector<int> const& prompt_tokens_ids)
       : prompt_tokens_ids(prompt_tokens_ids) {}
 
   int GetLen() const;
@@ -69,6 +67,21 @@ struct LLMInputs {
   std::string prompt;
 };
 
+struct LogicalTokenBlock {
+  int block_number;
+  int block_size;
+  std::vector<int> token_ids;
+  int num_tokens;
+  LogicalTokenBlock(int block_number, int block_size)
+      : block_number(block_number), block_size(block_size) {
+    token_ids.reserve(block_size);
+    for (int i = 0; i < block_size; i++) {
+      token_ids.push_back(-1);
+    }
+    num_tokens = 0;
+  }
+};
+
 struct Sequence {
   int seq_id;
   LLMInputs inputs;
@@ -76,8 +89,11 @@ struct Sequence {
   int eos_token_id;
   SequenceData data;
   SequenceStatus status;
+  std::vector<LogicalTokenBlock> logical_token_blocks = {};
+  std::string output_text = "";
 
-  Sequence(int seq_id, LLMInputs inputs, int block_size, int eos_token_id);
+  Sequence(int seq_id, const LLMInputs& inputs, int block_size,
+           int eos_token_id);
 
   int GetNumNewTokens() const;
   int GetLen() const;
@@ -85,6 +101,8 @@ struct Sequence {
   bool IsFinished() const;
   void SetStatus(SequenceStatus status);
   void ResetStateForRecompute();
+  void AppendTokenId(int token_id);
+  void AppendTokensToBlocks(std::vector<int> const& tokens);
 };
 
 struct RequestMetrics {
@@ -105,17 +123,22 @@ struct SequenceGroup {
   std::shared_ptr<Sequence> encoder_seq;
   RequestMetrics metrics;
 
-  SequenceGroup(std::string request_id, std::vector<Sequence> seqs, float arrival_time,
-                SamplingParams sampling_params, std::vector<float> embeddings,
+  SequenceGroup(std::string& request_id, std::vector<Sequence>& seqs,
+                float arrival_time, const SamplingParams& sampling_params,
+                std::vector<float>& embeddings,
                 std::unique_ptr<Sequence> encoder_seq);
 
   int GetMaxNumRunningSeqs();
-  std::vector<Sequence> GetSeqs();
-  std::vector<Sequence> GetSeqs(SequenceStatus status);
+  std::vector<Sequence> GetSeqs() const;
+  std::vector<Sequence> GetSeqs(SequenceStatus status) const;
 
+  void Add(Sequence& seq);
   void MaybeSetFirstScheduledTime(float time);
+  void MaybeSetFirstTokenTime(float time);
+  void UpdateNumComputedTokens(int num_new_computed_tokens);
 
-  bool IsPrefill();
+  bool IsPrefill() const;
+  bool IsFinished() const;
 };
 
 struct SequenceGroupMetadata {
@@ -140,9 +163,10 @@ struct ExecuteModelRequest {
 
 struct SequenceOutput {
   int output_token;
+  int parent_seq_id;
 };
 
 struct CompletionSequenceGroupOutput {
   std::vector<SequenceOutput> samples;
 };
-}  // namespace engine
+}  // namespace Generators

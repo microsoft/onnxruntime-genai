@@ -69,6 +69,7 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <span>
 
 /** \brief Free functions and a few helpers are defined inside this namespace. Otherwise all types are the C API types
  *

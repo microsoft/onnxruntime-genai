@@ -11,6 +11,7 @@ set(REPO_ROOT ${PROJECT_SOURCE_DIR})
 set(SRC_ROOT ${REPO_ROOT}/src)
 set(GENERATORS_ROOT ${SRC_ROOT})
 set(MODELS_ROOT ${SRC_ROOT}/models)
+set(SERVER_ROOT ${SRC_ROOT}/server)
 set(ORT_HOME ${REPO_ROOT}/ort CACHE PATH "Path to the onnxruntime root directory.")
 
 if (ANDROID)
@@ -46,6 +47,8 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
   "${GENERATORS_ROOT}/*.cpp"
   "${MODELS_ROOT}/*.h"
   "${MODELS_ROOT}/*.cpp"
+  "${SERVER_ROOT}/*.h"
+  "${SERVER_ROOT}/*.cpp"
 )
 
 file(GLOB onnxruntime_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_ALL_SHARED_LIBS}")

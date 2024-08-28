@@ -6,6 +6,8 @@
 #include <vector>
 #include <deque>
 
+#include "../models/cache_manager.h"
+#include "../models/model.h"
 #include "engine_utils.h"
 
 using RequestIDType = int64_t;
@@ -71,8 +73,8 @@ struct ScheduledSwappedInOutputs {
 };
 
 struct SchedulerConfig {
-  int max_num_bathced_tokens;
-  int max_num_seqs;
+  int max_num_bathced_tokens=2048;
+  int max_num_seqs=256;
   int max_model_len;
   bool use_v2_block_manager = false;
   int num_lookahead_slots = 0;
@@ -102,28 +104,30 @@ struct ScheduleResult {
 
 class Scheduler {
  public:
-  Scheduler(SchedulerConfig& scheduler_config, CacheConfig& cache_config);
+  Scheduler(const SchedulerConfig& scheduler_config,
+            std::unique_ptr<CacheManager> block_manager);
   void AddSeqGroup(SequenceGroup seq_group);
-  ScheduledPrefillOutputs SchedulePrefill(SchedulerBudget budget,
+  ScheduledPrefillOutputs SchedulePrefill(SchedulerBudget& budget,
                                           bool enable_chunking = false);
-  ScheduledRunningOutputs ScheduleRunning(SchedulerBudget budget,
+  ScheduledRunningOutputs ScheduleRunning(SchedulerBudget& budget,
                                           bool enable_chunking = false);
-  ScheduledSwappedInOutputs ScheduleSwapped(SchedulerBudget budget,
+  ScheduledSwappedInOutputs ScheduleSwapped(SchedulerBudget& budget,
                                             bool enable_chunking = false);
   ScheduleResult Schedule();
-  void FreeFinishedRequests();
+  void ForkSeq(const Sequence& parent_seq, const Sequence& child_seq);
+  void FreeFinishedSeqGroups();
+  void FreeSeq(const Sequence& seq);
 
   PreemptionMode Preempt(SequenceGroup& seq_group,
                          std::vector<std::tuple<int, int>>& blocks_to_swap_out);
 
  private:
   SchedulerConfig scheduler_config_;
-  CacheConfig cache_config_;
   std::deque<SequenceGroup> waiting_;
   std::deque<SequenceGroup> running_;
   std::deque<SequenceGroup> swapped_;
 
-  BlockManager block_manager_;
+  std::unique_ptr<CacheManager> block_manager_;
   int num_cumulative_preemption_ = 0;
 };
-}  // namespace engine
+}  // namespace Generators

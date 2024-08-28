@@ -121,7 +121,9 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
     throw std::runtime_error("input sequence_length (" + std::to_string(params.sequence_length) + ") is >= max_length (" + std::to_string(params.search.max_length) + ")");
 
   search_ = CreateSearch(params);
+  printf("search created\n");
   state_ = model.CreateState(search_->GetSequenceLengths(), params);
+  printf("state created\n");
 }
 
 void Generator::ComputeLogits() {
