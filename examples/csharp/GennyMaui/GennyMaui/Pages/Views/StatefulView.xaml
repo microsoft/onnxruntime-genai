@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentView xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             xmlns:toolkit="http://schemas.microsoft.com/dotnet/2022/maui/toolkit"
+             xmlns:vm="clr-namespace:GennyMaui.ViewModels"
+             x:Class="GennyMaui.Pages.Views.StatefulView">
+    <ContentView.BindingContext>
+        <vm:StatefulChatViewModel/>
+    </ContentView.BindingContext>
+    
+    <toolkit:DockLayout>
+
+        <!--Input Controls-->
+        <toolkit:DockLayout toolkit:DockLayout.DockPosition="Bottom" HeightRequest="100" Margin="8">
+            <!--Buttons-->
+            <toolkit:DockLayout toolkit:DockLayout.DockPosition="Right">
+                <toolkit:DockLayout>
+                    <toolkit:UniformItemsLayout toolkit:DockLayout.DockPosition="Bottom" HeightRequest="30" WidthRequest="100">
+                        <Button Text="Clear" Command="{Binding ClearCommand}"/>
+                        <Button Text="Cancel" Command="{Binding CancelCommand}"/>
+                    </toolkit:UniformItemsLayout>
+                    <Button Text="Send" Command="{Binding GenerateCommand}" />
+                </toolkit:DockLayout>
+            </toolkit:DockLayout>
+
+            <!--Prompt-->
+            <Entry Text="{Binding Prompt, Mode=TwoWay}" TextChanged="PromptTextChanged" />
+
+        </toolkit:DockLayout>
+
+        <!--Result List-->
+        <Border StrokeThickness="1" toolkit:DockLayout.DockPosition="Top" x:Name="Container" HorizontalOptions="FillAndExpand">
+            <ListView ItemsSource="{Binding ResultHistory}" HasUnevenRows="True">
+                <ListView.ItemTemplate>
+                    <DataTemplate>
+                        <ViewCell>
+                            <Border StrokeThickness="1" Margin="2">
+                                <VerticalStackLayout>
+                                    <HorizontalStackLayout>
+                                        <Border StrokeThickness="1" Margin="2" VerticalOptions="Start">
+                                            <Image WidthRequest="60" HeightRequest="60">
+                                                <Image.Style>
+                                                    <Style TargetType="{x:Type Image}">
+                                                        <Setter Property="Source" Value="{StaticResource ImageAvatarRobot}" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger TargetType="Image" Binding="{Binding IsUserInput}" Value="True">
+                                                                <Setter Property="Source" Value="{StaticResource ImageAvatarUser}" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </Image.Style>
+                                            </Image>
+                                        </Border>
+                                        <Label Text="{Binding Content}"
+                                               LineBreakMode="CharacterWrap"
+                                               MaximumWidthRequest="{Binding Source={x:Reference Container}, Path=Width, ConverterParameter=x-64, Converter={toolkit:MathExpressionConverter}}"/>
+                                    </HorizontalStackLayout>
+                                    <Label Text="{Binding Timestamp}" />
+                                </VerticalStackLayout>
+                            </Border>
+                        </ViewCell>
+                    </DataTemplate>
+                </ListView.ItemTemplate>
+            </ListView>
+        </Border>
+    </toolkit:DockLayout>
+</ContentView>

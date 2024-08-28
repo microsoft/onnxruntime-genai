@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentView xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             xmlns:toolkit="http://schemas.microsoft.com/dotnet/2022/maui/toolkit"
+             xmlns:vm="clr-namespace:GennyMaui.ViewModels"
+             x:Class="GennyMaui.Pages.Views.SearchOptionView">
+
+    <StackLayout Margin="3">
+        <toolkit:UniformItemsLayout MaxColumns="2">
+            <StackLayout Margin="8">
+                <FlexLayout>
+                    <Label FlexLayout.Grow="1">TopK</Label>
+                    <Label FlexLayout.Grow="1" Text="{Binding Source={x:Reference SliderTopK}, Path=Value, StringFormat='{0:N2}'}" VerticalOptions="Center" HorizontalOptions="End"/>
+                </FlexLayout>
+                <Slider x:Name="SliderTopK" Value="{Binding TopK}" Minimum="0" Maximum="200"/>
+            </StackLayout>
+
+            <StackLayout Margin="8">
+                <FlexLayout>
+                    <Label FlexLayout.Grow="1">TopP</Label>
+                    <Label FlexLayout.Grow="1" Text="{Binding Source={x:Reference SliderTopP}, Path=Value, StringFormat='{0:N2}'}" VerticalOptions="Center" HorizontalOptions="End"/>
+                </FlexLayout>
+                <Slider x:Name="SliderTopP" Value="{Binding TopP}" Minimum="0" Maximum="1"/>
+            </StackLayout>
+
+            <StackLayout Margin="8">
+                <FlexLayout>
+                    <Label FlexLayout.Grow="1">Temperature</Label>
+                    <Label FlexLayout.Grow="1" Text="{Binding Source={x:Reference SliderTemperature}, Path=Value, StringFormat='{0:N2}'}" VerticalOptions="Center" HorizontalOptions="End"/>
+                </FlexLayout>
+                <Slider x:Name="SliderTemperature" Value="{Binding Temperature}" Minimum="0" Maximum="5"/>
+            </StackLayout>
+
+            <StackLayout Margin="8">
+                <FlexLayout>
+                    <Label FlexLayout.Grow="1">RepetitionPenalty</Label>
+                    <Label FlexLayout.Grow="1" Text="{Binding Source={x:Reference SliderRepetitionPenalty}, Path=Value, StringFormat='{0:N2}'}" VerticalOptions="Center" HorizontalOptions="End"/>
+                </FlexLayout>
+                <Slider x:Name="SliderRepetitionPenalty" Value="{Binding RepetitionPenalty}" Minimum="0" Maximum="5"/>
+            </StackLayout>
+
+            <StackLayout Margin="8">
+                <FlexLayout>
+                    <Label FlexLayout.Grow="1">MinLength</Label>
+                    <Label FlexLayout.Grow="1" Text="{Binding Source={x:Reference SliderMinLength}, Path=Value}" VerticalOptions="Center" HorizontalOptions="End"/>
+                </FlexLayout>
+                <Slider x:Name="SliderMinLength" Value="{Binding MinLength}" Minimum="0" Maximum="2048"/>
+            </StackLayout>
+            
+            <StackLayout Margin="8">
+                <FlexLayout>
+                    <Label FlexLayout.Grow="1">MaxLength</Label>
+                    <Label FlexLayout.Grow="1" Text="{Binding Source={x:Reference SliderMaxLength}, Path=Value}" VerticalOptions="Center" HorizontalOptions="End"/>
+                </FlexLayout>
+                <Slider x:Name="SliderMaxLength" Value="{Binding MaxLength}" Minimum="1" Maximum="2048"/>
+            </StackLayout>
+
+            <StackLayout Margin="8">
+                <FlexLayout>
+                    <Label FlexLayout.Grow="1">LengthPenalty</Label>
+                    <Label FlexLayout.Grow="1" Text="{Binding Source={x:Reference SliderLengthPenalty}, Path=Value, StringFormat='{0:N2}'}" VerticalOptions="Center" HorizontalOptions="End"/>
+                </FlexLayout>
+                <Slider x:Name="SliderLengthPenalty" Value="{Binding LengthPenalty}" Minimum="0" Maximum="1"/>
+            </StackLayout>
+
+            <StackLayout Margin="8">
+                <FlexLayout>
+                    <Label FlexLayout.Grow="1">DiversityPenalty</Label>
+                    <Label FlexLayout.Grow="1" Text="{Binding Source={x:Reference SliderDiversityPenalty}, Path=Value, StringFormat='{0:N2}'}" VerticalOptions="Center" HorizontalOptions="End"/>
+                </FlexLayout>
+                <Slider x:Name="SliderDiversityPenalty" Value="{Binding DiversityPenalty}" Minimum="0" Maximum="1"/>
+            </StackLayout>
+
+        </toolkit:UniformItemsLayout>
+
+        <StackLayout Margin="8">
+            <HorizontalStackLayout>
+                <CheckBox IsChecked="{Binding DoSample}"/>
+                <Label Text="DoSample" VerticalOptions="Center" />
+            </HorizontalStackLayout>
+            <HorizontalStackLayout>
+                <CheckBox IsChecked="{Binding EarlyStopping}"/>
+                <Label Text="EarlyStopping" VerticalOptions="Center" />
+            </HorizontalStackLayout>
+            <HorizontalStackLayout>
+                <CheckBox IsChecked="{Binding PastPresentShareBuffer}"/>
+                <Label Text="PastPresentShareBuffer" VerticalOptions="Center" />
+            </HorizontalStackLayout>
+        </StackLayout>
+    </StackLayout>
+</ContentView>

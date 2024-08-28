@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentView xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             xmlns:toolkit="http://schemas.microsoft.com/dotnet/2022/maui/toolkit"
+             xmlns:views="clr-namespace:GennyMaui.Pages.Views"
+             xmlns:vm="clr-namespace:GennyMaui.ViewModels"
+             x:Class="GennyMaui.Pages.Views.ModelConfigView">
+    <ContentView.BindingContext>
+        <vm:LoadableModel/>
+    </ContentView.BindingContext>
+
+    <StackLayout>
+
+        <toolkit:DockLayout>
+            <toolkit:UniformItemsLayout toolkit:DockLayout.DockPosition="Bottom">
+                <Button Text="Load Model" Margin="8" Command="{Binding LoadModelCommand}" />
+            </toolkit:UniformItemsLayout>
+            <toolkit:DockLayout Margin="8">
+                <Button toolkit:DockLayout.DockPosition="Right" Margin="8" Text="Choose Model Path" Command="{Binding OpenModelCommand}"/>
+                <ActivityIndicator IsRunning="{Binding IsModelLoading}" toolkit:DockLayout.DockPosition="Right" HeightRequest="30" WidthRequest="30" />
+                <Entry Text="{Binding ModelPath}" Margin="8" IsReadOnly="True" MinimumWidthRequest="240" MaximumWidthRequest="240"/>
+            </toolkit:DockLayout>
+        </toolkit:DockLayout>
+
+        <views:SearchOptionView BindingContext="{Binding Configuration.SearchOptions}">
+
+        </views:SearchOptionView>
+    </StackLayout>
+</ContentView>
