@@ -51,25 +51,6 @@ namespace GennyMaui.ViewModels
             {
                 _modelOptions = m.NewValue.ModelOptions;
             });
-
-            ResultHistory.Add(new ResultModel
-            {
-                Content = "Hello",
-                IsUserInput = true,
-            });
-
-
-            ResultHistory.Add(new ResultModel
-            {
-                Content = "Hello how are you?",
-                IsUserInput = false
-            });
-
-            ResultHistory.Add(new ResultModel()
-            {
-                Content = "The .NET Multi-platform App UI (.NET MAUI) ListView displays a scrollable vertical list of selectable data items. While ListView manages the appearance of the list, the appearance of each item in the list is defined by a DataTemplate that uses a Cell to display items. .NET MAUI includes cell types to display combinations of text and images, and you can also define custom cells that display any content you want. ListView also includes support for displaying headers and footers, grouped data, pull-to-refresh, and context menu items.",
-                IsUserInput = false
-            });
         }
 
         public ResultModel CurrentResult { get; set; }

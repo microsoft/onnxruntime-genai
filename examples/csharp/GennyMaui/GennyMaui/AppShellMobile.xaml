@@ -7,5 +7,13 @@
     Shell.FlyoutBehavior="Disabled"
     Title="GennyMaui">
 
+    <ShellContent
+        Title="Genny"
+        ContentTemplate="{DataTemplate pages:AppMainPageMobile}"
+        Route="main" />
 
+    <ShellContent
+        Title="Chat"
+        ContentTemplate="{DataTemplate pages:ChatPageMobile}"
+        Route="chat" />
 </Shell>

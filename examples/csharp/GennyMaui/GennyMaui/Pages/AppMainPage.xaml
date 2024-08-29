@@ -3,8 +3,7 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
              x:Class="GennyMaui.Pages.AppMainPage"
              xmlns:views="clr-namespace:GennyMaui.Pages.Views"
-
-             Title="AppMainPage">
+             Title="OnnxRuntime GenAI">
     <FlexLayout>
         <views:ModelConfigView FlexLayout.Grow="1"></views:ModelConfigView>
         <views:StatefulView FlexLayout.Grow="2"></views:StatefulView>

@@ -11,22 +11,21 @@
     <toolkit:DockLayout>
 
         <!--Input Controls-->
-        <toolkit:DockLayout toolkit:DockLayout.DockPosition="Bottom" HeightRequest="100" Margin="8">
+        <VerticalStackLayout toolkit:DockLayout.DockPosition="Bottom" HeightRequest="100" Margin="8">
             <!--Buttons-->
-            <toolkit:DockLayout toolkit:DockLayout.DockPosition="Right">
-                <toolkit:DockLayout>
-                    <toolkit:UniformItemsLayout toolkit:DockLayout.DockPosition="Bottom" HeightRequest="30" WidthRequest="100">
-                        <Button Text="Clear" Command="{Binding ClearCommand}"/>
-                        <Button Text="Cancel" Command="{Binding CancelCommand}"/>
-                    </toolkit:UniformItemsLayout>
-                    <Button Text="Send" Command="{Binding GenerateCommand}" />
-                </toolkit:DockLayout>
-            </toolkit:DockLayout>
-
             <!--Prompt-->
             <Entry Text="{Binding Prompt, Mode=TwoWay}" TextChanged="PromptTextChanged" />
-
-        </toolkit:DockLayout>
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="3*" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Button Grid.Column="0" Text="Send" Command="{Binding GenerateCommand}" Margin="4"/>
+                <Button Grid.Column="1" Text="Clear" Command="{Binding ClearCommand}" Margin="4"/>
+                <Button Grid.Column="2" Text="Cancel" Command="{Binding CancelCommand}" Margin="4"/>
+            </Grid>
+        </VerticalStackLayout>
 
         <!--Result List-->
         <Border StrokeThickness="1" toolkit:DockLayout.DockPosition="Top" x:Name="Container" HorizontalOptions="FillAndExpand">
@@ -34,26 +33,25 @@
                 <ListView.ItemTemplate>
                     <DataTemplate>
                         <ViewCell>
-                            <Border StrokeThickness="1" Margin="2">
+                            <Border StrokeThickness="1"
+                                    Margin="4">
                                 <VerticalStackLayout>
                                     <HorizontalStackLayout>
-                                        <Border StrokeThickness="1" Margin="2" VerticalOptions="Start">
-                                            <Image WidthRequest="60" HeightRequest="60">
-                                                <Image.Style>
-                                                    <Style TargetType="{x:Type Image}">
-                                                        <Setter Property="Source" Value="{StaticResource ImageAvatarRobot}" />
-                                                        <Style.Triggers>
-                                                            <DataTrigger TargetType="Image" Binding="{Binding IsUserInput}" Value="True">
-                                                                <Setter Property="Source" Value="{StaticResource ImageAvatarUser}" />
-                                                            </DataTrigger>
-                                                        </Style.Triggers>
-                                                    </Style>
-                                                </Image.Style>
-                                            </Image>
-                                        </Border>
+                                        <Image WidthRequest="60" HeightRequest="60">
+                                            <Image.Style>
+                                                <Style TargetType="{x:Type Image}">
+                                                    <Setter Property="Source" Value="{StaticResource ImageAvatarRobot}" />
+                                                    <Style.Triggers>
+                                                        <DataTrigger TargetType="Image" Binding="{Binding IsUserInput}" Value="True">
+                                                            <Setter Property="Source" Value="{StaticResource ImageAvatarUser}" />
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Image.Style>
+                                        </Image>
                                         <Label Text="{Binding Content}"
                                                LineBreakMode="CharacterWrap"
-                                               MaximumWidthRequest="{Binding Source={x:Reference Container}, Path=Width, ConverterParameter=x-64, Converter={toolkit:MathExpressionConverter}}"/>
+                                               MaximumWidthRequest="{Binding Source={x:Reference Container}, Path=Width, ConverterParameter=x-80, Converter={toolkit:MathExpressionConverter}}"/>
                                     </HorizontalStackLayout>
                                     <Label Text="{Binding Timestamp}" />
                                 </VerticalStackLayout>
