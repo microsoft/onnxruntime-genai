@@ -93,15 +93,16 @@ namespace GennyMaui.ViewModels
             await UnloadModelAsync();
             try
             {
+                var currentModelPath = CurrentSelectedModelPath();
                 IsModelLoading = true;
-                Configuration = await LoadConfigAsync(ModelPath);
+                Configuration = await LoadConfigAsync(currentModelPath);
 
                 WeakReferenceMessenger.Default.Send(new PropertyChangedMessage<ConfigurationModel>(this, nameof(Configuration), null, Configuration));
                 WeakReferenceMessenger.Default.Send(new PropertyChangedMessage<SearchOptionsModel>(this, nameof(SearchOptionsModel), null, Configuration.SearchOptions));
 
                 await Task.Run(() =>
                 {
-                    Model = new Model(ModelPath);
+                    Model = new Model(currentModelPath);
                     Tokenizer = new Tokenizer(Model);
                 });
                 IsModelLoaded = true;
@@ -154,6 +155,7 @@ namespace GennyMaui.ViewModels
             {
                 hfModel.IsDownloading = false;
                 hfModel.RefreshStatus();
+                LoadModelCommand.NotifyCanExecuteChanged();
             }
         }
 
