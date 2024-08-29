@@ -1,30 +1,40 @@
 #include "../generators.h"
 #include "model.h"
 #include "input_ids.h"
+#include <cstdio>
 #include "kernels.h"
 
 namespace Generators {
 
 InputIDs::InputIDs(const Model& model, State& state)
-    : model_{model},
-      state_{state} {
+    : model_{model}, state_{state} {
   name_ = model_.config_->model.decoder.inputs.input_ids.c_str();
-  shape_ = {state_.params_->batch_size, state_.params_->sequence_length};
-  type_ = model_.session_info_->GetInputDataType(name_);
 
+  shape_ = {state_.params_->input_ids.size()};
+  type_ = model_.session_info_->GetInputDataType(name_);
+  printf("shape_: %d\n", shape_[0]);
+  printf("input_ids size: %d\n", state_.params_->input_ids.size());
   // If 64-bit, convert from 32-bit to 64-bit
+  int test_count = 0;
   if (type_ == Ort::TypeToTensorType<int64_t>::type) {
     value_ = OrtValue::CreateTensor(model.allocator_cpu_, shape_, type_);
     auto* p_data = value_->GetTensorMutableData<int64_t>();
     for (auto v : state_.params_->input_ids) {
       *p_data++ = v;
+      test_count++;
     }
   } else {
     if (type_ != Ort::TypeToTensorType<int32_t>::type)
       throw std::runtime_error("InputIDs must be int64 or int32");
-    value_ = OrtValue::CreateTensor<int32_t>(model.allocator_cpu_.GetInfo(), std::span<int32_t>(const_cast<int32_t*>(state_.params_->input_ids.data()), shape_[0] * shape_[1]), shape_);
+    value_ = OrtValue::CreateTensor<int32_t>(
+        model.allocator_cpu_.GetInfo(),
+        std::span<int32_t>(
+            const_cast<int32_t*>(state_.params_->input_ids.data()),
+            shape_[0] * shape_[1]),
+        shape_);
   }
 
+  printf("TEST\n");
   value_ = model_.ExpandInputs(value_, state_.params_->search.num_beams);
   shape_[0] *= state_.params_->search.num_beams;
 
@@ -33,9 +43,15 @@ InputIDs::InputIDs(const Model& model, State& state)
 
 #if USE_DML
     if (model_.device_type_ == DeviceType::DML) {
-      sb_input_ids_int32_ = state_.GetCapturedGraphInfo()->sb_input_ids_int32_.get();
+      sb_input_ids_int32_ =
+          state_.GetCapturedGraphInfo()->sb_input_ids_int32_.get();
     }
 #endif
+
+    is_prompt_ = OrtValue::CreateTensor(model.allocator_cpu_, is_prompt_shape_,
+                                        Ort::TypeToTensorType<int32_t>::type);
+    auto* is_prompt_data = is_prompt_->GetTensorMutableData<int32_t>();
+    *is_prompt_data = 1;
   }
 }
 
@@ -44,6 +60,8 @@ void InputIDs::Add() {
 
   state_.inputs_.push_back(value_.get());
   state_.input_names_.push_back(name_);
+  // state_.inputs_.push_back(is_prompt_.get());
+  // state_.input_names_.push_back("is_prompt");
 }
 
 void InputIDs::Update(RoamingArray<int32_t> next_tokens_unk) {
@@ -55,7 +73,8 @@ void InputIDs::Update(RoamingArray<int32_t> next_tokens_unk) {
 
 #if USE_DML
       if (model_.device_type_ == DeviceType::DML) {
-        value_int32_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
+        value_int32_ =
+            OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
       }
 #endif
     } else {
@@ -63,7 +82,8 @@ void InputIDs::Update(RoamingArray<int32_t> next_tokens_unk) {
 
 #if USE_DML
       if (model_.device_type_ == DeviceType::DML) {
-        value_int32_ = sb_input_ids_int32_->CreateTensorOnStaticBuffer(shape_, Ort::TypeToTensorType<int32_t>::type);
+        value_int32_ = sb_input_ids_int32_->CreateTensorOnStaticBuffer(
+            shape_, Ort::TypeToTensorType<int32_t>::type);
       }
 #endif
     }
@@ -78,32 +98,30 @@ void InputIDs::Update(RoamingArray<int32_t> next_tokens_unk) {
       case DeviceType::CUDA: {
         auto* data = value_->GetTensorMutableData<int64_t>();
         auto next_tokens = next_tokens_unk.GetGPU();
-        cuda::LaunchInt32ToInt64(next_tokens.data(), data, static_cast<int>(next_tokens.size()), model_.cuda_stream_);
+        cuda::LaunchInt32ToInt64(next_tokens.data(), data,
+                                 static_cast<int>(next_tokens.size()),
+                                 model_.cuda_stream_);
       } break;
 #endif
 
 #if USE_DML
       case DeviceType::DML: {
         ComPtr<ID3D12Resource> source_resource;
-        Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, value_int32_->GetTensorMutableRawData(), &source_resource));
+        Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(
+            model_.allocator_device_, value_int32_->GetTensorMutableRawData(),
+            &source_resource));
 
         auto source = std::span<const uint8_t>(
             reinterpret_cast<const uint8_t*>(next_tokens_unk.GetCPU().data()),
             next_tokens_unk.GetCPU().size_bytes());
 
         model_.GetDmlUploadHeap()->BeginUploadToGpu(
-            source_resource.Get(),
-            0,
-            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            source_resource.Get(), 0, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
             source);
 
         DmlHelpers::DmlCastInputToOutput(
-            model_.GetDmlExecutionContext(),
-            *model_.allocator_device_,
-            *value_int32_,
-            value_,
-            model_.GetDmlDevice(),
-            model_.GetOrtDmlApi(),
+            model_.GetDmlExecutionContext(), *model_.allocator_device_,
+            *value_int32_, value_, model_.GetDmlDevice(), model_.GetOrtDmlApi(),
             input_ids_cast_command_list_state_);
       } break;
 #endif
@@ -119,10 +137,13 @@ void InputIDs::Update(RoamingArray<int32_t> next_tokens_unk) {
     auto* data = value_->GetTensorMutableData<int32_t>();
 #if USE_CUDA
     if (model_.device_type_ == DeviceType::CUDA)
-      cudaMemcpyAsync(data, next_tokens_unk.GetGPU().data(), shape_[0] * sizeof(int32_t), cudaMemcpyDeviceToDevice, model_.cuda_stream_);
+      cudaMemcpyAsync(data, next_tokens_unk.GetGPU().data(),
+                      shape_[0] * sizeof(int32_t), cudaMemcpyDeviceToDevice,
+                      model_.cuda_stream_);
     else
 #endif
-      memcpy(data, next_tokens_unk.GetCPU().data(), shape_[0] * sizeof(int32_t));
+      memcpy(data, next_tokens_unk.GetCPU().data(),
+             shape_[0] * sizeof(int32_t));
   }
 }
 

@@ -22,9 +22,12 @@ struct InputIDs {
   State& state_;
   size_t input_index_{~0U};
 
-  std::array<int64_t, 2> shape_{};
+  std::array<int64_t, 1> shape_{};
   ONNXTensorElementDataType type_;
   std::unique_ptr<OrtValue> value_;
+  std::unique_ptr<OrtValue> is_prompt_;
+  std::vector<int32_t> is_prompt_data_{1};
+  std::array<int64_t, 1> is_prompt_shape_{1};
 
   // Used for decoding runs with cuda graphs.
   StaticBuffer* sb_input_ids_{};

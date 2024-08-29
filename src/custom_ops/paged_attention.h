@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #pragma once
+#include <cstdio>
 #include "ocos.h"
 #include "cuda_type.h"
 #include "paged_attention_impl.h"
@@ -24,12 +25,18 @@ template <typename T>
 OrtStatusPtr CheckInputs(const cudaStream_t stream, OrtAllocator* allocator, const ortc::Tensor<T>& query, const ortc::Tensor<int32_t>& context_lens, 
                          int32_t num_heads, int32_t num_kv_heads, int32_t head_size, float scale, bool prompt_mode, PackedAttentionParameters& parameters) {
   const std::vector<int64_t>& query_shape = query.Shape();
+  for(const auto& d :  query_shape) {
+    printf("query_shape: %ld\n", d);
+  }
   if (query_shape.size() < 2 || query_shape.size() > 3) {
     return OrtW::CreateStatus(MakeString("Invalid query shape, expect 2 or 3 dimensions"), ORT_INVALID_ARGUMENT);
   }
+    printf("TEST3 PagedAttention Compute\n");
   if (query_shape.back() != num_heads * head_size) {
+
     return OrtW::CreateStatus(MakeString("Hidden size should equal to num_heads_ * head_size_"), ORT_INVALID_ARGUMENT);
   }
+    printf("TEST4 PagedAttention Compute\n");
 
   parameters.batch_size = context_lens.NumberOfElement();
   parameters.sequence_length = 1;
@@ -55,11 +62,13 @@ struct PagedAttention {
 
   using TT = typename contrib::CudaT<T>::MappedType;
   OrtStatusPtr OnModelAttach(const OrtApi& api, const OrtKernelInfo& info) {
-    int64_t num_heads = 0, head_size = 0;
+    int64_t num_heads = 0, head_size = 0, num_kv_heads=0;
     ORTX_RETURN_IF_ERROR(api.KernelInfoGetAttribute_int64(&info, "num_heads", &num_heads));
     assert(num_heads > 0);
     num_heads_ = static_cast<int32_t>(num_heads);
-    num_kv_heads_ = static_cast<int32_t>(OrtW::GetOpAttributeOrDefault<int64_t>(info, "num_kv_heads", num_heads));
+    // num_kv_heads_ = static_cast<int32_t>(OrtW::GetOpAttributeOrDefault<int64_t>(info, "num_kv_heads", num_heads));
+    ORTX_RETURN_IF_ERROR(api.KernelInfoGetAttribute_int64(&info, "num_kv_heads", &num_kv_heads));
+    num_kv_heads_ = static_cast<int32_t>(num_kv_heads);
     
     ORTX_RETURN_IF_ERROR(api.KernelInfoGetAttribute_int64(&info, "head_size", &head_size));
     assert(head_size > 0);
@@ -125,10 +134,18 @@ struct PagedAttention {
                        const ortc::Tensor<int32_t>& context_lens, const ortc::Tensor<int32_t>& is_prompt,
                        std::optional<const ortc::Tensor<T>*> cos_sin_cache,
                        std::optional<const ortc::Tensor<int32_t>*> positions, ortc::Tensor<T>& attn_out) const {
+
+    printf("is_prompt data: %d\n", reinterpret_cast<const int32_t*>(is_prompt.DataRaw())[0]);
+    printf("context_lens data: %d\n", reinterpret_cast<const int32_t*>(context_lens.DataRaw())[0]);
+    printf("context_lens address: %p\n", context_lens.Data());
+
     bool prompt_mode = *(is_prompt.Data()) == 1;
+    // bool prompt_mode=true;
+    printf("prompt_mode: %d\n", prompt_mode);
     PackedAttentionParameters parameters;
     ORTX_RETURN_IF_ERROR(CheckInputs<T>(reinterpret_cast<cudaStream_t>(ctx->GetCudaStream()), allocator_.get(), query, 
                          context_lens, num_heads_, num_kv_heads_, head_size_, scale_, prompt_mode, parameters));
+    printf("PagedAttention checkinputs Compute\n");
 
     UniquePtrWithDeletor<int32_t> seqinfo;
     UniquePtrWithDeletor<int32_t> position_ids;
@@ -137,6 +154,8 @@ struct PagedAttention {
   
         std::vector<int32_t> seqstart(context_lens.NumberOfElement() + 1, 0);
         for (int64_t i = 0; i < context_lens.NumberOfElement(); i++) {
+    printf("TEST context_len\n");
+
           int32_t seqlen_i = *(context_lens.Data()+i);
           if (seqlen_i > parameters.sequence_length) parameters.sequence_length = seqlen_i;
           seqstart[i+1] = seqstart[i] + seqlen_i;
@@ -147,6 +166,7 @@ struct PagedAttention {
         seqinfo = GetScratchBuffer<int32_t>(allocator_.get()->Alloc(allocator_.get(), context_lens.SizeInBytes()), allocator_.get());
         cudaMemcpy(seqinfo.get(), context_lens.DataRaw(), context_lens.SizeInBytes(), cudaMemcpyHostToDevice);
     }
+    printf("TEST finish prompt mode\n");
   
     if (cos_sin_cache.has_value() && !positions.has_value()) {
       std::vector<int32_t> position_ids_host;
@@ -183,6 +203,7 @@ struct PagedAttention {
       cuda::reshape_and_cache(reinterpret_cast<cudaStream_t>(ctx->GetCudaStream()), key.DataRaw(), value.DataRaw(), key_cache.DataRaw(), value_cache.DataRaw(), slot_mappings.Data(),
                               key_shape_r, value_shape_r, block_size);
     }
+    printf("TEST finish reshape_and_cache\n");
 
     if (prompt_mode) {
       return RunMultiHeadAttention(ctx, query, key, value, output_data, parameters, seqinfo.get()); // Don't handle prompt with decoding case for now

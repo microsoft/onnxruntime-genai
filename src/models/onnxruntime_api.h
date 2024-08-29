@@ -296,7 +296,7 @@ struct OrtCustomOpDomain {
   static std::unique_ptr<OrtCustomOpDomain> Create(const char* domain);
 
   // This does not take ownership of the op, simply registers it.
-  void Add(const OrtCustomOp& op);  ///< Wraps CustomOpDomain_Add
+  void Add(const OrtCustomOp* op);  ///< Wraps CustomOpDomain_Add
 
   static void operator delete(void* p) { Ort::api->ReleaseCustomOpDomain(reinterpret_cast<OrtCustomOpDomain*>(p)); }
   Ort::Abstract make_abstract;
@@ -376,7 +376,7 @@ struct OrtSessionOptions {
   OrtSessionOptions& SetLogId(const char* logid);     ///< Wraps OrtApi::SetSessionLogId
   OrtSessionOptions& SetLogSeverityLevel(int level);  ///< Wraps OrtApi::SetSessionLogSeverityLevel
 
-  OrtSessionOptions& Add(OrtCustomOpDomain& custom_op_domain);  ///< Wraps OrtApi::AddCustomOpDomain
+  OrtSessionOptions& Add(OrtCustomOpDomain* custom_op_domain);  ///< Wraps OrtApi::AddCustomOpDomain
 
   OrtSessionOptions& DisablePerSessionThreads();  ///< Wraps OrtApi::DisablePerSessionThreads
 
@@ -400,6 +400,10 @@ struct OrtSessionOptions {
   OrtSessionOptions& SetCustomCreateThreadFn(OrtCustomCreateThreadFn ort_custom_create_thread_fn);  ///< Wraps OrtApi::SessionOptionsSetCustomCreateThreadFn
   OrtSessionOptions& SetCustomThreadCreationOptions(void* ort_custom_thread_creation_options);      ///< Wraps OrtApi::SessionOptionsSetCustomThreadCreationOptions
   OrtSessionOptions& SetCustomJoinThreadFn(OrtCustomJoinThreadFn ort_custom_join_thread_fn);        ///< Wraps OrtApi::SessionOptionsSetCustomJoinThreadFn
+
+  // TODO(leca): maybe there is a better way: Just Create an OrtCustomOpDomain object with the desired custom op in it, and leverage OrtSessionOptions::Add(OrtCustomOpDomain&)
+  // why ORT-genai defines another OrtXXX structures?
+  OrtSessionOptions& RegisterCustomOpsLibrary(const char* custom_op_lib_path);
 
   static void operator delete(void* p) { Ort::api->ReleaseSessionOptions(reinterpret_cast<OrtSessionOptions*>(p)); }
   Ort::Abstract make_abstract;

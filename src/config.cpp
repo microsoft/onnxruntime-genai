@@ -139,6 +139,14 @@ struct Inputs_Element : JSON::Element {
       v_.cross_past_key_names = value;
     } else if (name == "cross_past_value_names") {
       v_.cross_past_value_names = value;
+    } else if (name == "block_tables") {
+      v_.block_tables = value;
+    } else if (name == "slot_mapping") {
+      v_.slot_mapping = value;
+    } else if (name == "context_lens") {
+      v_.context_lens = value;
+    } else if (name == "is_prompt") {
+      v_.is_prompt = value;
     } else
       throw JSON::unknown_value_error{};
   }

@@ -12,7 +12,7 @@ namespace Generators {
 Logits::Logits(const Model& model, State& state)
     : model_{model},
       state_{state},
-      shape_{static_cast<int64_t>(state_.params_->batch_size) * state_.params_->search.num_beams, state_.params_->sequence_length, state_.params_->vocab_size},
+      shape_{state_.params_->input_ids.size(), state_.params_->vocab_size},
       type_{model_.session_info_->GetOutputDataType(model_.config_->model.decoder.outputs.logits)} {
   auto logits_tensor = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
   if (type_ == Ort::TypeToTensorType<float>::type)

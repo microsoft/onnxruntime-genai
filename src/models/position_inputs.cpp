@@ -32,6 +32,7 @@ PositionInputs::PositionInputs(const Model& model, State& state, RoamingArray<in
     throw std::runtime_error("position_ids & attention_mask only support int32 or int64 types");
 
   std::array<int64_t, 2> shape{state_.params_->batch_size, state_.params_->sequence_length};  // Only batch_size initially, as we haven't expanded over the beams yet
+  
   position_ids_ = OrtValue::CreateTensor(model.allocator_cpu_, shape, type_);
   position_ids_next_ = OrtValue::CreateTensor(model.allocator_cpu_, std::array<int64_t, 2>{shape[0], 1}, type_);
   attention_mask_ = OrtValue::CreateTensor(model.allocator_cpu_, shape, type_);

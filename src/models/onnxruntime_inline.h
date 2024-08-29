@@ -395,8 +395,8 @@ inline std::unique_ptr<OrtCustomOpDomain> OrtCustomOpDomain::Create(const char* 
   return std::unique_ptr<OrtCustomOpDomain>{p};
 }
 
-inline void OrtCustomOpDomain::Add(const OrtCustomOp& op) {
-  Ort::ThrowOnError(Ort::api->CustomOpDomain_Add(this, &op));
+inline void OrtCustomOpDomain::Add(const OrtCustomOp* op) {
+  Ort::ThrowOnError(Ort::api->CustomOpDomain_Add(this, op));
 }
 
 inline std::unique_ptr<OrtRunOptions> OrtRunOptions::Create() {
@@ -549,8 +549,8 @@ inline OrtSessionOptions& OrtSessionOptions::SetLogSeverityLevel(int level) {
   return *this;
 }
 
-inline OrtSessionOptions& OrtSessionOptions::Add(OrtCustomOpDomain& custom_op_domain) {
-  Ort::ThrowOnError(Ort::api->AddCustomOpDomain(this, &custom_op_domain));
+inline OrtSessionOptions& OrtSessionOptions::Add(OrtCustomOpDomain* custom_op_domain) {
+  Ort::ThrowOnError(Ort::api->AddCustomOpDomain(this, custom_op_domain));
   return *this;
 }
 
@@ -660,6 +660,11 @@ inline OrtSessionOptions& OrtSessionOptions::SetCustomJoinThreadFn(OrtCustomJoin
 
 inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider_OpenVINO(const OrtOpenVINOProviderOptions& provider_options) {
   Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider_OpenVINO(this, &provider_options));
+  return *this;
+}
+
+inline OrtSessionOptions& OrtSessionOptions::RegisterCustomOpsLibrary(const char* custom_op_lib_path) {
+  Ort::ThrowOnError(Ort::api->RegisterCustomOpsLibrary_V2(this, custom_op_lib_path));
   return *this;
 }
 

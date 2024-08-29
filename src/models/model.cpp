@@ -8,6 +8,7 @@
 #include "model.h"
 #include "gpt.h"
 #include "decoder_only.h"
+#include "onnxruntime_api.h"
 #include "whisper.h"
 #include "kernels.h"
 #include "ocos.h"
@@ -250,13 +251,16 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   run_options_ = OrtRunOptions::Create();
 
   CreateSessionOptions();
-  if (genai_op_loader.GetCustomOps().size() > 0) {
-    custom_op_domain_ = OrtCustomOpDomain::Create("onnx.genai");
-    for (size_t i = 0; i < genai_op_loader.GetCustomOps().size(); i++) {
-      custom_op_domain_->Add(*(genai_op_loader.GetCustomOps().at(i)));
-    }
-    session_options_->Add(*custom_op_domain_);
-  }
+
+  // register custom ops
+  // OrtW::API::instance(Ort::api);
+  // if (!genai_op_loader.GetCustomOps().empty()) {
+  //   custom_op_domain_ = OrtCustomOpDomain::Create("onnx.genai");
+  //   for (size_t i = 0; i < genai_op_loader.GetCustomOps().size(); i++) {
+  //     custom_op_domain_->Add(genai_op_loader.GetCustomOps().at(i));
+  //   }
+  //   session_options_->Add(custom_op_domain_.get());
+  // }
 }
 
 Model::~Model() = default;
@@ -283,6 +287,24 @@ void Model::CreateSessionOptions() {
   session_options_ = OrtSessionOptions::Create();
   auto& ort_options = *session_options_;
   auto& options = config_->model.decoder.session_options;
+
+    //config_->custom_lib_path = "/home/leca/code/onnxruntime-genai/custom_ops/build/libgenai_custom_ops.so";
+  // if (config_->custom_lib_path.length() > 0) {
+    ort_options.RegisterCustomOpsLibrary("/raid/yingxiong/projects/onnxruntime-genai/test/custom_ops/build/libgenai_custom_ops_test.so");
+  // }
+  // auto ver = GetOrtVersion(api);
+  // const OrtApi* ortApi = Ort::api;
+  // OrtW::API::instance(ortApi);
+
+  // OrtCustomOpDomain* domain = nullptr;
+
+  // Ort::ThrowOnError(ortApi->CreateCustomOpDomain("onnx.genai", &domain));
+
+  // for (size_t i = 0; i < genai_op_loader.GetCustomOps().size(); i++) {
+  //   Ort::ThrowOnError(ortApi->CustomOpDomain_Add(domain, genai_op_loader.GetCustomOps().at(i)));
+  // }
+  
+  // Ort::ThrowOnError(ortApi->AddCustomOpDomain(session_options_.get(), domain));
 
   // Default to a limit of 16 threads to optimize performance
   constexpr int min_thread_nums = 1;

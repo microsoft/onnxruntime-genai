@@ -1,5 +1,6 @@
 #pragma once
 
+#include <vector>
 #include "static_buffer.h"
 #include "cache_manager.h"
 
@@ -106,6 +107,8 @@ struct PagedCacheOrchestrator : public CacheManagerInterface {
   // std::unique_ptr<PagedCacheManager> paged_cache_;
   // std::unique_ptr<OrtValue> block_tables_;
   // std::unique_ptr<OrtValue> slot_mapping_;
+  std::vector<std::string> key_cache_names_;
+  std::vector<std::string> value_cache_names_;
   std::vector<std::unique_ptr<OrtValue>> key_caches_;
   std::vector<std::unique_ptr<OrtValue>> value_caches_;
 

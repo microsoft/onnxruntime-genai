@@ -1,5 +1,4 @@
 #include "model_runner.h"
-#include "../tensor.h"
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -85,14 +84,13 @@ std::vector<CompletionSequenceGroupOutput> ModelRunner::ExecuteModel(
   params->input_ids = input_tokens;
   params->batch_size = 1;
   params->sequence_length = input_tokens.size();
-  auto named_tensors = std::make_unique<NamedTensors>();
+  named_tensors_ = std::make_unique<NamedTensors>();
   std::vector<int64_t> context_lens_shape = {context_lens.size()};
-  named_tensors->emplace(
-      "context_lens",
-      std::make_shared<Tensor>(OrtValue::CreateTensor<int32_t>(
-          model_->allocator_cpu_.GetInfo(), std::span<int32_t>(context_lens),
-          std::span<const int64_t>(context_lens_shape.data(),
-                                   context_lens_shape.size()))));
+  context_lens_ = std::make_shared<Tensor>(OrtValue::CreateTensor<int32_t>(
+      model_->allocator_cpu_.GetInfo(), std::span<int32_t>(context_lens),
+      std::span<const int64_t>(context_lens_shape.data(),
+                               context_lens_shape.size())));
+  named_tensors_->emplace("context_lens", context_lens_);
 
   PadVector(block_tables, 0);
   std::vector<int64_t> block_tables_shape = {block_tables.size(),
@@ -102,30 +100,35 @@ std::vector<CompletionSequenceGroupOutput> ModelRunner::ExecuteModel(
     flat_block_tables.insert(flat_block_tables.end(), block_table.begin(),
                              block_table.end());
   }
-  named_tensors->emplace(
-      "block_tables", std::make_shared<Tensor>(OrtValue::CreateTensor<int32_t>(
-                          model_->allocator_cpu_.GetInfo(),
-                          std::span<int32_t>(flat_block_tables),
-                          std::span<const int64_t>(block_tables_shape))));
+  block_tables_ = std::make_shared<Tensor>(OrtValue::CreateTensor<int32_t>(
+      model_->allocator_cpu_.GetInfo(), std::span<int32_t>(flat_block_tables),
+      std::span<const int64_t>(block_tables_shape)));
+  named_tensors_->emplace("block_tables", block_tables_);
 
   std::vector<int64_t> slot_mapping_shape = {slot_mapping.size()};
-  named_tensors->emplace(
-      "slot_mapping",
-      std::make_shared<Tensor>(OrtValue::CreateTensor<int32_t>(
-          model_->allocator_cpu_.GetInfo(), std::span<int32_t>(slot_mapping),
-          std::span<const int64_t>(slot_mapping_shape.data(),
-                                   slot_mapping_shape.size()))));
+  slot_mapping_ = std::make_shared<Tensor>(OrtValue::CreateTensor<int32_t>(
+      model_->allocator_cpu_.GetInfo(), std::span<int32_t>(slot_mapping),
+      std::span<const int64_t>(slot_mapping_shape.data(),
+                               slot_mapping_shape.size())));
+  named_tensors_->emplace("slot_mapping", slot_mapping_);
 
   std::vector<int32_t> is_span_data{1};
   std::vector<int64_t> is_span_shape{1};
 
-  named_tensors->emplace(
-      "is_prompt",
-      std::make_shared<Tensor>(OrtValue::CreateTensor<int32_t>(
-          model_->allocator_cpu_.GetInfo(), std::span<int32_t>(is_span_data),
-          std::span<int64_t>(is_span_shape))));
+  // is_prompt_ = std::make_shared<Tensor>(OrtValue::CreateTensor<int32_t>(
+  //     model_->allocator_cpu_.GetInfo(), std::span<int32_t>(is_span_data),
+  //     std::span<int64_t>(is_span_shape)));
+  is_prompt_ = std::make_shared<Tensor>(
+      OrtValue::CreateTensor<int32_t>(model_->allocator_cpu_, is_span_shape));
+  std::copy(is_span_data.begin(), is_span_data.end(), is_prompt_->ort_tensor_->GetTensorMutableData<int32_t>());
+  printf("is_prompt_ address: %p\n", is_span_data.data());
+  printf("is_prompt_ address: %p\n",
+         is_prompt_->ort_tensor_->GetTensorMutableRawData());
+  printf("is_prompt_: %d\n",
+         is_prompt_->ort_tensor_->GetTensorMutableData<int32_t>()[0]);
+  named_tensors_->emplace("is_prompt", is_prompt_);
 
-  params->SetInputs(*named_tensors);
+  params->SetInputs(*named_tensors_);
   auto output_tokens = RunGenerator(*params);
   std::vector<CompletionSequenceGroupOutput> outputs;
 
@@ -147,7 +150,7 @@ std::vector<CompletionSequenceGroupOutput> ModelRunner::ExecuteModel(
 std::vector<int32_t> ModelRunner::RunGenerator(const GeneratorParams& params) {
   printf("before create generator\n");
   auto generator = Generators::CreateGenerator(*model_, params);
-  printf("before ort running\n");
+  printf("generator created\n");
 
   generator->ComputeLogits();
   printf("logits finish\n");

@@ -94,6 +94,10 @@ struct Config {
         std::string seqlens_k{"seqlens_k"};
         std::string total_sequence_length{"total_seq_len"};
         std::string past_key_names{"past_key_values.%d.key"}, past_value_names{"past_key_values.%d.value"};
+        std::string block_tables{"block_tables"};
+        std::string slot_mapping{"slot_mapping"};
+        std::string context_lens{"context_lens"};
+        std::string is_prompt{"is_prompt"};
         std::string past_names;  // When key/value pairs are combined
         std::string cross_past_key_names, cross_past_value_names;
       } inputs;

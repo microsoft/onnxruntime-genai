@@ -8,6 +8,7 @@ Run this script to create the desired ONNX model.
 """
 
 from onnx import helper, numpy_helper, TensorProto, external_data_helper, save_model
+from onnx.checker import check_model
 from onnxruntime.quantization.matmul_4bits_quantizer import MatMul4BitsQuantizer
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 import numpy as np
@@ -73,7 +74,9 @@ class Model:
             "key_cache": self.io_dtype,                                                                         # For PagedAttention
             "value_cache": self.io_dtype,                                                                       # For PagedAttention
             "block_tables": TensorProto.INT32,                                                                  # For PagedAttention
-            "slot_mappings": TensorProto.INT32,                                                                 # For PagedAttention
+            "slot_mapping": TensorProto.INT32,                                                                 # For PagedAttention
+            "context_lens":TensorProto.INT32,
+            "is_prompt":TensorProto.INT32,
         }
         self.input_shapes = {
             "input_ids": ["batch_size", "sequence_length"],                                                      # For standard models
@@ -85,7 +88,8 @@ class Model:
             "key_cache": ["num_blocks", "block_size"],                                                           # For PagedAttention
             "value_cache": ["num_blocks", "block_size"],                                                         # For PagedAttention
             "block_tables": ["batch_size", "max_blocks_per_sequence"],                                           # For PagedAttention
-            "slot_mappings": ["batch_size", "sequence_length"],                                                  # For PagedAttention
+            "slot_mapping": ["batch_size", "sequence_length"],                                                  # For PagedAttention
+            "is_prompt":[1],        
         }
         self.exclude_embeds = "exclude_embeds" in extra_options
         if self.exclude_embeds:
@@ -224,18 +228,23 @@ class Model:
             self.attention_attrs["op_type"] = "PagedAttention"
             self.attention_attrs["use_rotemb_in_attn"] = True
             print("PagedAttention is used in this model. PagedAttention requires the block based KV cache.")
-
+            
+            self.input_names.remove("attention_mask")
+            self.input_names.remove("position_ids")
+            
             self.input_shapes = {
                 "input_ids": ["num_tokens"],
                 "attention_mask": ["batch_size", "total_sequence_length"],
                 "position_ids": ["num_tokens"],
                 "key_cache": ["num_blocks", "block_size"],
                 "value_cache": ["num_blocks", "block_size"],
-                # "block_tables": ["batch_size", "max_blocks_per_sequence"],
-                # "slot_mappings": ["num_tokens"],
+                "block_tables": ["batch_size", "max_blocks_per_sequence"],
+                "slot_mapping": ["num_tokens"],
+                "context_lens": ["num_tokens"],
+                "is_prompt":[1],
             }
 
-            # self.input_names.extend(["block_tables", "slot_mappings"])
+            self.input_names.extend(["block_tables", "slot_mapping", "context_lens", "is_prompt"])
 
             self.output_shapes = {
                 "logits": ["num_tokens", self.vocab_size], # For standard models
@@ -316,6 +325,7 @@ class Model:
                 "vocab_size": self.vocab_size,
                 "kv_cache": {
                     "paged_cache": self.attention_attrs["op_type"] == "PagedAttention",
+                    "num_blocks": 1024,
                 }
             },
             "search": {
@@ -395,7 +405,6 @@ class Model:
         if os.path.exists(data_path):
             print(f"Overwriting {data_path}")
             os.remove(data_path)
-
         save_model(
             model,
             out_path,
@@ -1161,16 +1170,15 @@ class Model:
         inputs = [
             kwargs["q_path"], kwargs["k_path"], kwargs["v_path"],
             kwargs["key_cache"], kwargs["value_cache"],
-            kwargs["block_tables"], kwargs["slot_mappings"],
-            kwargs["seqlens_k"], kwargs["total_seq_len"],
-            kwargs["cos_cache"], kwargs["sin_cache"],
+            kwargs["block_tables"], kwargs["slot_mapping"],
+            kwargs["context_lens"], kwargs["is_prompt"],
         ]
         output = f"{name}/output_0"
         outputs = [output]
         self.make_node(
-            "PagedAttention", inputs=inputs, outputs=outputs, name=name, domain="com.microsoft",
-            num_heads=self.num_attn_heads, kv_num_heads=self.num_kv_heads, local_window_size=self.window_size,
-            do_rotary=self.attention_attrs["use_rotemb_in_attn"], rotary_interleaved=self.rotemb_attrs["interleaved"],
+            "PagedAttention", inputs=inputs, outputs=outputs, name=name, domain="onnx.genai",
+            num_heads=self.num_attn_heads, num_kv_heads=self.num_kv_heads, head_size=self.head_size, 
+            scale=self.attention_attrs["scale"],
         )
         self.make_value_info(output, self.io_dtype, shape=['num_tokens', self.head_size * self.num_attn_heads])
 
@@ -1214,7 +1222,7 @@ class Model:
         #
         #               root_input
         #              /     |     \
-        #       Q_MatMul  K_MatMul  V_MatMul  seqlens_k  total_seq_len  key_cache  value_cache   block_tables   slot_mappings
+        #       Q_MatMul  K_MatMul  V_MatMul  seqlens_k  total_seq_len  key_cache  value_cache   block_tables   slot_mapping
         #           |        |         |          |            |           |          |             |                |
         #         Q_Add    K_Add     V_Add        +------------+-----------+----------+-------------+----------------+
         #           |        |         |                       |
@@ -1297,7 +1305,9 @@ class Model:
             kwargs["key_cache"] = f"key_cache.{layer_id}"
             kwargs["value_cache"] = f"value_cache.{layer_id}"
             kwargs["block_tables"] = "block_tables"
-            kwargs["slot_mappings"] = "slot_mappings"
+            kwargs["slot_mapping"] = "slot_mapping"
+            kwargs["context_lens"] = "context_lens"
+            kwargs["is_prompt"] = "is_prompt"
 
         # Make attention node (e.g. MultiHeadAttention, GroupQueryAttention, etc.)
         attn_name = f"/model/layers.{layer_id}/attn/{self.attention_attrs['op_type']}"
@@ -1604,7 +1614,7 @@ class Model:
             # This assertion is temporary.
             assert self.past_present_share_buffer
 
-        if self.attention_attrs["op_type"] == "GroupQueryAttention" or self.attention_attrs["op_type"] == "PagedAttention":
+        if self.attention_attrs["op_type"] == "GroupQueryAttention" :
             self.make_attention_mask_reformatting_for_gqa()            
         elif self.attention_attrs["op_type"] == "MultiHeadAttention":
             # Make attention mask reformatting nodes
