@@ -33,12 +33,19 @@ namespace GennyMaui.ViewModels
         [RelayCommand]
         private async Task OpenModelAsync()
         {
+#if ANDROID
+#else
             var result = await FolderPicker.Default.PickAsync();
 
             if (result.IsSuccessful)
             {
                 ModelPath = result.Folder.Path;
             }
+            else
+            {
+                await Application.Current.MainPage.DisplayAlert("Folder Open Error", result.Exception.Message, "OK");
+            }
+#endif
         }
 
         [RelayCommand(CanExecute = "CanExecuteLoadModel")]
@@ -50,8 +57,8 @@ namespace GennyMaui.ViewModels
                 IsModelLoading = true;
                 Configuration = await LoadConfigAsync(ModelPath);
 
-                WeakReferenceMessenger.Default.Send(new PropertyChangedMessage<ConfigurationModel>(this, "Configuration", null, Configuration));
-                WeakReferenceMessenger.Default.Send(new PropertyChangedMessage<SearchOptionsModel>(this, "SearchOptionsModel", null, Configuration.SearchOptions));
+                WeakReferenceMessenger.Default.Send(new PropertyChangedMessage<ConfigurationModel>(this, nameof(Configuration), null, Configuration));
+                WeakReferenceMessenger.Default.Send(new PropertyChangedMessage<SearchOptionsModel>(this, nameof(SearchOptionsModel), null, Configuration.SearchOptions));
 
                 await Task.Run(() =>
                 {
@@ -60,8 +67,8 @@ namespace GennyMaui.ViewModels
                 });
                 IsModelLoaded = true;
 
-                WeakReferenceMessenger.Default.Send(new PropertyChangedMessage<Model>(this, "Model", null, Model));
-                WeakReferenceMessenger.Default.Send(new PropertyChangedMessage<Tokenizer>(this, "Tokenizer", null, Tokenizer));
+                WeakReferenceMessenger.Default.Send(new PropertyChangedMessage<Model>(this, nameof(Model), null, Model));
+                WeakReferenceMessenger.Default.Send(new PropertyChangedMessage<Tokenizer>(this, nameof(Tokenizer), null, Tokenizer));
             }
             catch (Exception ex)
             {
