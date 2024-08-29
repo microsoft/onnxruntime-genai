@@ -4,8 +4,12 @@
              x:Class="GennyMaui.Pages.AppMainPage"
              xmlns:views="clr-namespace:GennyMaui.Pages.Views"
              Title="OnnxRuntime GenAI">
-    <FlexLayout>
-        <views:ModelConfigView FlexLayout.Grow="1"></views:ModelConfigView>
-        <views:StatefulView FlexLayout.Grow="2"></views:StatefulView>
-    </FlexLayout>
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"></ColumnDefinition>
+            <ColumnDefinition Width="2*"></ColumnDefinition>
+        </Grid.ColumnDefinitions>
+        <views:ModelConfigView Grid.Column="0"></views:ModelConfigView>
+        <views:StatefulView Grid.Column="1"></views:StatefulView>
+    </Grid>
 </ContentPage>

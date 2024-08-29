@@ -14,9 +14,14 @@
         <VerticalStackLayout>
             <Label VerticalOptions="Center" Margin="4">Local Model:</Label>
             <HorizontalStackLayout Margin="4">
-                <CheckBox HorizontalOptions="Center" VerticalOptions="Center" IsChecked="{Binding IsLocalModelSelected}"></CheckBox>
-                <Entry VerticalOptions="Center" Text="{Binding ModelPath}" IsReadOnly="True" MinimumWidthRequest="220" MaximumWidthRequest="220"/>
-                <Button VerticalOptions="Center" Margin="4" Text="Choose Model Path" Command="{Binding OpenModelCommand}"/>
+                <CheckBox HorizontalOptions="Center"
+                          VerticalOptions="Center"
+                          IsChecked="{Binding IsLocalModelSelected}"
+                          CheckedChanged="LocalModelCheckBox_CheckedChanged"/>
+                <Entry VerticalOptions="Center"
+                       Text="{Binding ModelPath}"
+                       IsReadOnly="True"
+                       WidthRequest="{Binding Source={x:Reference Container}, Path=Width, ConverterParameter=x-20, Converter={toolkit:MathExpressionConverter}}" />
             </HorizontalStackLayout>
         </VerticalStackLayout>
 
@@ -32,7 +37,7 @@
                             <HorizontalStackLayout Margin="4">
                                 <CheckBox Grid.Column="0"
                                           IsChecked="{Binding IsChecked}"
-                                          CheckedChanged="CheckBox_CheckedChanged"
+                                          CheckedChanged="RemoteModelCheckBox_CheckedChanged"
                                           HorizontalOptions="Center"></CheckBox>
                                 <Label Grid.Column="1"
                                        Text="{Binding RepoId}"

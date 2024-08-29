@@ -10,7 +10,7 @@ using CommunityToolkit.Mvvm.Messaging;
 
 namespace GennyMaui.ViewModels
 {
-    public partial class LoadableModel: ObservableObject
+    public partial class LoadableModel : ObservableObject
     {
         [ObservableProperty]
         private Model? _model;
@@ -30,31 +30,12 @@ namespace GennyMaui.ViewModels
         [ObservableProperty]
         private bool _isModelLoading;
 
+        [ObservableProperty]
         private bool _isLocalModelSelected;
-
-        public bool IsLocalModelSelected
-        {
-            get
-            {
-                return _isLocalModelSelected;
-            }
-            set
-            {
-                SetProperty(ref _isLocalModelSelected, value);
-                if (value)
-                {
-                    foreach (var item in RemoteModels)
-                    {
-                        item.IsChecked = false;
-                    }
-                }
-                LoadModelCommand.NotifyCanExecuteChanged();
-            }
-        }
 
         public List<HuggingFaceModel> RemoteModels { get; } =
         [
-            new() 
+            new()
             {
                 RepoId = "microsoft/Phi-3-mini-4k-instruct-onnx",
                 Include = "cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/*",
@@ -68,21 +49,22 @@ namespace GennyMaui.ViewModels
             }
         ];
 
-        [RelayCommand]
-        private async Task OpenModelAsync()
+        private async Task<bool> OpenModelAsync()
         {
 #if ANDROID
+            return false;
 #else
             var result = await FolderPicker.Default.PickAsync();
 
             if (result.IsSuccessful)
             {
                 ModelPath = result.Folder.Path;
-                LoadModelCommand.NotifyCanExecuteChanged();
+                return true;
             }
             else
             {
                 await Application.Current.MainPage.DisplayAlert("Folder Open Error", result.Exception.Message, "OK");
+                return false;
             }
 #endif
         }
@@ -114,7 +96,7 @@ namespace GennyMaui.ViewModels
             {
                 await Application.Current.MainPage.DisplayAlert("Model Load Error", ex.Message, "OK");
             }
-            finally 
+            finally
             {
                 IsModelLoading = false;
             }
@@ -174,6 +156,35 @@ namespace GennyMaui.ViewModels
             }
 
             return string.Empty;
+        }
+
+        internal void ToggleLocalModel(bool ischecked)
+        {
+            if (!ischecked)
+            {
+                LoadModelCommand.NotifyCanExecuteChanged();
+                return;
+            }
+
+            foreach (var item in RemoteModels)
+            {
+                item.IsChecked = false;
+            }
+
+            OpenModelAsync().ContinueWith(t =>
+            {
+                if (t.Result)
+                {
+                    App.Current.Dispatcher.Dispatch(() =>
+                    {
+                        LoadModelCommand.NotifyCanExecuteChanged();
+                    });
+                }
+                else
+                {
+                    IsLocalModelSelected = false;
+                }
+            });
         }
 
         internal void ToggleHuggingfaceModel(HuggingFaceModel hfModel, bool ischecked)

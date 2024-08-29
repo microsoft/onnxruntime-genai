@@ -5,9 +5,9 @@ namespace GennyMaui.Pages.Views;
 
 public partial class ModelConfigView : ContentView
 {
-	public ModelConfigView()
-	{
-		InitializeComponent();
+    public ModelConfigView()
+    {
+        InitializeComponent();
 
         var parentContext = (LoadableModel)this.BindingContext;
         foreach (var item in parentContext.RemoteModels)
@@ -16,10 +16,16 @@ public partial class ModelConfigView : ContentView
         }
     }
 
-    private void CheckBox_CheckedChanged(object sender, CheckedChangedEventArgs e)
+    private void LocalModelCheckBox_CheckedChanged(object sender, CheckedChangedEventArgs e)
     {
-		var context = (HuggingFaceModel)((CheckBox)sender).BindingContext;
-		var parentContext = (LoadableModel)this.BindingContext;
+        var parentContext = (LoadableModel)this.BindingContext;
+        parentContext.ToggleLocalModel(e.Value);
+    }
+
+    private void RemoteModelCheckBox_CheckedChanged(object sender, CheckedChangedEventArgs e)
+    {
+        var context = (HuggingFaceModel)((CheckBox)sender).BindingContext;
+        var parentContext = (LoadableModel)this.BindingContext;
         parentContext.ToggleHuggingfaceModel(context, e.Value);
     }
 }
