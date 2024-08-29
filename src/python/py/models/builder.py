@@ -1507,6 +1507,25 @@ class Model:
         self.mlp_attrs["output_0"] = f"{fc2_add_name}/output_0"
 
     def make_block_sparse_moe(self, layer_id, bsm, root_input):
+        # Make nodes for the MoE subgraph
+        #
+        #                  root_input
+        #                 /       \
+        #         router_MatMul    |
+        #             /     \      |
+        #         Shape      |     |
+        #           |        |     |
+        #         Gather     |     |
+        #           |        |     |
+        #       Unsqueeze    |     |
+        #           |        |    /
+        #        Concat     /    /
+        #             \    /    /
+        #             Reshape  /
+        #                 \   /
+        #                  MoE
+        #                   |
+        #                 output
         num_experts = self.moe_attrs["num_experts"]
         top_k = self.moe_attrs["top_k"]
         activation_type = self.moe_attrs["activation_type"]
