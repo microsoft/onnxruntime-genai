@@ -74,7 +74,7 @@ def generate_license(line_list):
     line_list.append('<license type="file">LICENSE</license>')
 
 def generate_readme(line_list):
-    line_list.append('<readme>README.md</readme>')
+    line_list.append('<readme>PACKAGE.md</readme>')
 
 def generate_project_url(line_list, project_url):
     line_list.append("<projectUrl>" + project_url + "</projectUrl>")
@@ -102,6 +102,8 @@ def generate_dependencies(xml_text, package_version, ort_package_name, ort_packa
         xml_text.append(f'<group targetFramework="{framework}">')
         xml_text.append(f'<dependency id="Microsoft.ML.OnnxRuntimeGenAI.Managed" version="{package_version}" />')
         xml_text.append(f'<dependency id="{ort_package_name}" version="{ort_package_version}" />')
+        if ort_package_name.endswith("DirectML"):
+            xml_text.append(f'<dependency id="Microsoft.AI.DirectML" version="1.15.1" />')
         xml_text.append("</group>")
 
     xml_text.append("</dependencies>")
@@ -110,7 +112,7 @@ def generate_files(lines, args):
     lines.append('<files>')
 
     lines.append(f'<file src="{args.sources_path}\LICENSE" target="LICENSE" />')
-    lines.append(f'<file src="{args.sources_path}\README.md" target="README.md" />')
+    lines.append(f'<file src="{args.sources_path}\\nuget\PACKAGE.md" target="PACKAGE.md" />')
     lines.append(f'<file src="{args.sources_path}\ThirdPartyNotices.txt" target="ThirdPartyNotices.txt" />')
 
     def add_native_artifact_if_exists(xml_lines, runtime, artifact):
@@ -125,6 +127,7 @@ def generate_files(lines, args):
       if runtime.startswith("win"):
           add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai.lib")
           add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai.dll")
+          add_native_artifact_if_exists(lines, runtime, "d3d12core.dll")
       if runtime.startswith("linux"):
           add_native_artifact_if_exists(lines, runtime, "libonnxruntime-genai.so")
 

@@ -57,11 +57,11 @@ if(USE_CUDA)
   target_link_libraries(
         phi3
         PUBLIC
-        cublasLt cublas cudnn curand cufft cudart)
+        cublas curand cudart)
   target_link_libraries(
         phi3v
         PUBLIC
-        cublasLt cublas cudnn curand cufft cudart)
+        cublas curand cudart)
 endif()
 
 file(GLOB ort_genai_libs "${CMAKE_SOURCE_DIR}/lib/${ONNXRUNTIME_GENAI_DEPENDENCY}")

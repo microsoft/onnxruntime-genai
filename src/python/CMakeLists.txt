@@ -13,9 +13,6 @@ if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linu
 target_link_libraries(python PRIVATE ${ONNXRUNTIME_LIB})
 endif()
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  set_property(TARGET python APPEND_STRING PROPERTY LINK_FLAGS " -Xlinker -rpath=\\$ORIGIN/../onnxruntime/capi/")
-endif()
 set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
 
 if(CMAKE_GENERATOR_TOOLSET MATCHES "Visual Studio")
@@ -27,7 +24,7 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   cmake_policy(SET CMP0104 OLD)
   enable_language(CUDA)
   set_target_properties(python PROPERTIES LINKER_LANGUAGE CUDA)
-  target_link_libraries(python PRIVATE cublasLt cublas cudnn curand cufft cudart)
+  target_link_libraries(python PRIVATE cublas curand cudart)
 endif()
 
 # Avoid warning of Calling FetchContent_Populate(Lib) is deprecated temporarily

@@ -73,6 +73,7 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #include "onnxruntime_c_api.h"
 #include "../span.h"
 #include "../logging.h"
+#include "env_utils.h"
 
 #if defined(__ANDROID__)
 #include <android/log.h>
@@ -93,11 +94,14 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #define PATH_MAX (4096)
 #endif
 
-#define LOG_DEBUG(...) Generators::Log("debug", __VA_ARGS__)
-#define LOG_INFO(...) Generators::Log("info", __VA_ARGS__)
-#define LOG_WARN(...) Generators::Log("warning", __VA_ARGS__)
-#define LOG_ERROR(...) Generators::Log("error", __VA_ARGS__)
-#define LOG_FATAL(...) Generators::Log("fatal", __VA_ARGS__)
+#define LOG_WHEN_ENABLED(LOG_FUNC) \
+  if (Generators::g_log.enabled && Generators::g_log.ort_lib) LOG_FUNC
+
+#define LOG_DEBUG(...) LOG_WHEN_ENABLED(Generators::Log("debug", __VA_ARGS__))
+#define LOG_INFO(...) LOG_WHEN_ENABLED(Generators::Log("info", __VA_ARGS__))
+#define LOG_WARN(...) LOG_WHEN_ENABLED(Generators::Log("warning", __VA_ARGS__))
+#define LOG_ERROR(...) LOG_WHEN_ENABLED(Generators::Log("error", __VA_ARGS__))
+#define LOG_FATAL(...) LOG_WHEN_ENABLED(Generators::Log("fatal", __VA_ARGS__))
 
 #endif
 
@@ -112,21 +116,6 @@ using OrtApiBaseFn = const OrtApiBase* (*)(void);
 inline const OrtApi* api{};
 
 #if defined(__linux__)
-inline void* LoadDynamicLibraryIfExists(const std::string& path) {
-  LOG_INFO("Attempting to dlopen %s", path.c_str());
-  void* ort_lib_handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
-  if (ort_lib_handle == nullptr) {
-    return nullptr;
-  }
-
-#if !defined(__ANDROID__)  // RTLD_DI_ORIGIN not available on Android
-  char pathname[PATH_MAX];
-  dlinfo((void*)ort_lib_handle, RTLD_DI_ORIGIN, &pathname);
-  LOG_INFO("Loaded native library at %s", pathname);
-#endif
-  return ort_lib_handle;
-}
-
 inline std::string GetCurrentModuleDir() {
   Dl_info dl_info;
   dladdr((void*)GetCurrentModuleDir, &dl_info);
@@ -138,6 +127,31 @@ inline std::string GetCurrentModuleDir() {
     module_directory = module_name.substr(0, last_slash_idx);
   }
   return module_directory;
+}
+
+inline void* LoadDynamicLibraryIfExists(const std::string& path) {
+  LOG_INFO("Attempting to dlopen %s", path.c_str());
+  void* ort_lib_handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+  if (ort_lib_handle == nullptr) {
+    char* err = dlerror();
+    LOG_WARN("Error while dlopen: %s", (err != nullptr ? err : "Unknown"));
+    // Trying current dir
+    std::string current_module_dir = GetCurrentModuleDir();
+    std::string local_path{current_module_dir + "/" + path};
+    LOG_INFO("Attempting to dlopen %s", local_path.c_str());
+    ort_lib_handle = dlopen(local_path.c_str(), RTLD_NOW | RTLD_LOCAL);
+  }
+  if (ort_lib_handle) {
+#if !defined(__ANDROID__)  // RTLD_DI_ORIGIN not available on Android
+    char pathname[PATH_MAX];
+    dlinfo((void*)ort_lib_handle, RTLD_DI_ORIGIN, &pathname);
+    LOG_INFO("Loaded native library at %s", pathname);
+#endif
+  } else {
+    char* err = dlerror();
+    LOG_WARN("Error while dlopen: %s", (err != nullptr ? err : "Unknown"));
+  }
+  return ort_lib_handle;
 }
 
 inline void InitApiWithDynamicFn(OrtApiBaseFn ort_api_base_fn) {
@@ -175,6 +189,13 @@ inline void InitApi() {
     return;
   }
 
+  bool ort_lib = false;
+  Generators::GetEnvironmentVariable("ORTGENAI_LOG_ORT_LIB", ort_lib);
+  if (ort_lib) {
+    Generators::SetLogBool("enabled", true);
+    Generators::SetLogBool("ort_lib", true);
+  }
+
 #if defined(__linux__)
   // If the GenAI library links against the onnxruntime library, it will have a dependency on a specific
   // version of OrtGetApiBase.
@@ -202,38 +223,12 @@ inline void InitApi() {
 
 #if !defined(__ANDROID__)
   if (ort_lib_handle == nullptr) {
-    const std::array<std::string, 4> target_libraries = {
-        std::string("libonnxruntime.so"),
-        std::string("libonnxruntime.so.1.18.0"),
-        std::string("libonnxruntime.so.1.19.0"),
-        std::string("libonnxruntime.so.1.20.0")};
-
-    // Search parent directory
-    std::string current_module_dir = GetCurrentModuleDir();
-    for (const std::string& lib_name : target_libraries) {
-      std::string pip_path{current_module_dir + "/" + lib_name};
-      ort_lib_handle = LoadDynamicLibraryIfExists(pip_path);
-      if (ort_lib_handle != nullptr) {
-        break;
-      }
-    }
-
-    if (ort_lib_handle == nullptr) {
-      // Search for pip installation
-      for (const std::string& lib_name : target_libraries) {
-        std::string pip_path{current_module_dir + "/../onnxruntime/capi/" + lib_name};
-        ort_lib_handle = LoadDynamicLibraryIfExists(pip_path);
-        if (ort_lib_handle != nullptr) {
-          break;
-        }
-      }
-    }
+    ort_lib_handle = LoadDynamicLibraryIfExists("libonnxruntime.so.1");
   }
 #endif
 
   if (ort_lib_handle == nullptr) {
-    char* err = dlerror();
-    throw std::runtime_error(std::string("Failed to load ") + path.c_str() + ": " + (err != nullptr ? err : "Unknown"));
+    throw std::runtime_error(std::string("Failed to load onnxruntime. Set ORTGENAI_LOG_ORT_LIB envvar to enable detailed logging."));
   }
 
   OrtApiBaseFn ort_api_base_fn = (OrtApiBaseFn)dlsym(ort_lib_handle, "OrtGetApiBase");
@@ -526,6 +521,19 @@ struct OrtSessionOptions {
 
   OrtSessionOptions& EnableCpuMemArena();   ///< Wraps OrtApi::EnableCpuMemArena
   OrtSessionOptions& DisableCpuMemArena();  ///< Wraps OrtApi::DisableCpuMemArena
+
+  OrtSessionOptions& EnableCpuEpFallback();
+  OrtSessionOptions& DisableCpuEpFallback();
+
+  OrtSessionOptions& EnableQuantQdq();
+  OrtSessionOptions& DisableQuantQdq();
+
+  OrtSessionOptions& EnableQuantQdqCleanup();
+  OrtSessionOptions& DisableQuantQdqCleanup();
+
+  OrtSessionOptions& SetEpContextEnable();
+  OrtSessionOptions& SetEpContextEmbedMode(const char* mode);
+  OrtSessionOptions& SetEpContextFilePath(const char* file_path);
 
   OrtSessionOptions& SetOptimizedModelFilePath(const ORTCHAR_T* optimized_model_file);  ///< Wraps OrtApi::SetOptimizedModelFilePath
 

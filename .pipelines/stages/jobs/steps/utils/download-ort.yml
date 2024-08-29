@@ -9,7 +9,7 @@ steps:
 - task: DownloadPackage@1
   inputs:
     packageType: 'nuget'
-    feed: '2692857e-05ef-43b4-ba9c-ccf1c22c437c/$(feed_name)'
+    feed: '2692857e-05ef-43b4-ba9c-ccf1c22c437c/$(feed_name)' # projectID/feedID
     definition: '$(ort_filename)' # Can also be package name
     version: '$(ort_version)'
     extract: false

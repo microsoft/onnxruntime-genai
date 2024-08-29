@@ -51,7 +51,7 @@ struct State {
   int current_batch_size_{0};
 };
 
-struct TokenizerStream {
+struct TokenizerStream : LeakChecked<TokenizerStream> {
   TokenizerStream(const Tokenizer& tokenizer);
 
   const std::string& Decode(int32_t token);
@@ -66,7 +66,7 @@ struct TokenizerStream {
 // Sequence length is vector.size()/count
 std::vector<int32_t> PadInputs(std::span<std::span<const int32_t>> sequences, int32_t pad_token_id);
 
-struct Tokenizer : std::enable_shared_from_this<Tokenizer> {
+struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenizer> {
   Tokenizer(Config& config);
 
   std::unique_ptr<TokenizerStream> CreateStream() const;
@@ -108,7 +108,7 @@ struct SessionInfo {
   std::unordered_map<std::string, ONNXTensorElementDataType> inputs_, outputs_;
 };
 
-struct Model : std::enable_shared_from_this<Model> {
+struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
   Model(std::unique_ptr<Config> config);
   virtual ~Model();
 

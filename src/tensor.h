@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 namespace Generators {
 
-struct Tensor : std::enable_shared_from_this<Tensor> {
+struct Tensor : std::enable_shared_from_this<Tensor>, LeakChecked<Tensor> {
   Tensor() = default;
   Tensor(std::unique_ptr<OrtValue> ort_tensor) : ort_tensor_{std::move(ort_tensor)} {}
 
