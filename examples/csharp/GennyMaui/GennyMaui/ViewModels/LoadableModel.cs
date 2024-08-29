@@ -6,7 +6,7 @@ using CommunityToolkit.Maui.Storage;
 using System.Text.Json;
 using CommunityToolkit.Mvvm.Messaging.Messages;
 using CommunityToolkit.Mvvm.Messaging;
-using CommunityToolkit.Maui.Alerts;
+using Microsoft.Maui.Controls;
 
 namespace GennyMaui.ViewModels
 {
@@ -43,7 +43,7 @@ namespace GennyMaui.ViewModels
             }
             else
             {
-                Toast.Make("Folder Open Error: " + result.Exception.Message);
+                await Application.Current.MainPage.DisplayAlert("Folder Open Error", result.Exception.Message, "OK");
             }
 #endif
         }
