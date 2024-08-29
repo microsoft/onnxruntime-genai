@@ -298,6 +298,12 @@ void Whisper_State::UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens
 
   if (cache_indirection_) {
 #if USE_CUDA
+    gpu_span<int32_t> beam_indices_gpu = beam_indices.GetGPU();
+    cuda_unique_ptr<int32_t> beam_indices_ptr;
+    if (beam_indices_gpu.empty()) {
+      beam_indices_ptr = CudaMallocArray<int32_t>(params_->batch_size, &beam_indices_gpu);
+      cudaMemsetAsync(beam_indices_gpu.data(), 0, beam_indices_gpu.size_bytes(), model_.cuda_stream_);
+    }
     auto old_cache_indirection = gpu_span<int32_t>{cache_indirection_->GetTensorMutableData<int32_t>(),
                                                    static_cast<size_t>(params_->batch_size) *
                                                        params_->search.num_beams * params_->search.max_length};
@@ -309,7 +315,7 @@ void Whisper_State::UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens
 
     cuda::UpdateDecoderMaskedMultiHeadAttentionCacheIndirection(cache_indirection.data(),
                                                                 old_cache_indirection.data(),
-                                                                beam_indices.GetGPU().data(),
+                                                                beam_indices_gpu.data(),
                                                                 params_->batch_size,
                                                                 params_->search.num_beams,
                                                                 params_->sequence_length,
