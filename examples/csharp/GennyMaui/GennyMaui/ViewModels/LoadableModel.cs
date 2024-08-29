@@ -147,7 +147,7 @@ namespace GennyMaui.ViewModels
                 hfModel.IsDownloading = true;
                 await HuggingfaceHub.HFDownloader.DownloadSnapshotAsync(
                     hfModel.RepoId,
-                    allowPatterns: [],
+                    allowPatterns: [hfModel.Include],
                     localDir: hfModel.DownloadPath
                     );
             }
