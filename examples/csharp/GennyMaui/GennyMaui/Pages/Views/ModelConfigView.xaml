@@ -12,8 +12,8 @@
     <StackLayout>
 
         <VerticalStackLayout>
-            <Label VerticalOptions="Center" Margin="8">Local Model:</Label>
-            <HorizontalStackLayout Margin="8">
+            <Label VerticalOptions="Center" Margin="4">Local Model:</Label>
+            <HorizontalStackLayout Margin="4">
                 <CheckBox HorizontalOptions="Center" VerticalOptions="Center" IsChecked="{Binding IsLocalModelSelected}"></CheckBox>
                 <Entry VerticalOptions="Center" Text="{Binding ModelPath}" IsReadOnly="True" MinimumWidthRequest="220" MaximumWidthRequest="220"/>
                 <Button VerticalOptions="Center" Margin="4" Text="Choose Model Path" Command="{Binding OpenModelCommand}"/>
@@ -21,7 +21,7 @@
         </VerticalStackLayout>
 
         <VerticalStackLayout x:Name="Container">
-            <Label VerticalOptions="Center" Margin="8">Remote Model:</Label>
+            <Label VerticalOptions="Center" Margin="4">Remote Model:</Label>
 
             <ListView ItemsSource="{Binding RemoteModels}"
                       MaximumWidthRequest="{Binding Source={x:Reference Container}, Path=Width}"
@@ -29,7 +29,7 @@
                 <ListView.ItemTemplate>
                     <DataTemplate>
                         <ViewCell>
-                            <HorizontalStackLayout>
+                            <HorizontalStackLayout Margin="4">
                                 <CheckBox Grid.Column="0"
                                           IsChecked="{Binding IsChecked}"
                                           CheckedChanged="CheckBox_CheckedChanged"
@@ -42,7 +42,8 @@
                                 <Label Grid.Column="2"
                                        IsVisible="{Binding IsDownloading, Converter={toolkit:InvertedBoolConverter}}"
                                        VerticalOptions="Center"
-                                       Text="Ready">
+                                       HorizontalTextAlignment="End"
+                                       Text="{Binding StatusString}">
                                 </Label>
                                 <ActivityIndicator
                                     Grid.Column="2"
@@ -56,7 +57,7 @@
                 </ListView.ItemTemplate>
             </ListView>
         </VerticalStackLayout>
-        <Button IsVisible="{Binding IsModelLoading, Converter={toolkit:InvertedBoolConverter}}" Text="Load Model" Margin="8" Command="{Binding LoadModelCommand}" />
+        <Button IsVisible="{Binding IsModelLoading, Converter={toolkit:InvertedBoolConverter}}" Text="Load Model" Margin="4" Command="{Binding LoadModelCommand}" />
         <ActivityIndicator VerticalOptions="Center" IsVisible="{Binding IsModelLoading}" IsRunning="{Binding IsModelLoading}" />
         <views:SearchOptionView BindingContext="{Binding Configuration.SearchOptions}">
 

@@ -12,33 +12,22 @@ namespace GennyMaui.Models
         [ObservableProperty]
         private string statusString = string.Empty;
 
+        [ObservableProperty]
         private bool _isDownloading = false;
-
-        public bool IsDownloading
-        {
-            get
-            {
-                return _isDownloading;
-            }
-            set
-            {
-                SetProperty(ref _isDownloading, value);
-                if (Exists)
-                {
-                    StatusString = "Ready";
-                }
-                else
-                {
-                    StatusString = "Downloadable";
-                }
-            }
-        }
 
         public string RepoId { get; set; }
 
         public string Include { get; set; }
 
         public string Subpath { get; set; }
+
+        public string DownloadPath
+        {
+            get {
+                var mainDir = FileSystem.Current.AppDataDirectory;
+                return Path.Combine(mainDir, RepoId);
+            }
+        }
 
         public string ModelPath { 
             get
@@ -56,5 +45,17 @@ namespace GennyMaui.Models
         }
 
         public bool Exists => Path.Exists(ModelPath);
+
+        public void RefreshStatus()
+        {
+            if (Exists)
+            {
+                StatusString = "(✅Ready)";
+            }
+            else
+            {
+                StatusString = "(🔽Downloadable)";
+            }
+        }
     }
 }

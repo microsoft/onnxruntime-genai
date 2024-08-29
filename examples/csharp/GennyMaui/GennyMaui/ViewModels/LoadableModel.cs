@@ -6,9 +6,7 @@ using CommunityToolkit.Maui.Storage;
 using System.Text.Json;
 using CommunityToolkit.Mvvm.Messaging.Messages;
 using CommunityToolkit.Mvvm.Messaging;
-using Microsoft.Maui.Controls;
-using System.Collections.ObjectModel;
-using System;
+
 
 namespace GennyMaui.ViewModels
 {
@@ -24,7 +22,7 @@ namespace GennyMaui.ViewModels
         private ConfigurationModel? _configuration;
 
         [ObservableProperty]
-        private string _modelPath = "D:\\Repositories\\phi2_onnx";
+        private string _modelPath;
 
         [ObservableProperty]
         private bool _isModelLoaded;
@@ -50,6 +48,7 @@ namespace GennyMaui.ViewModels
                         item.IsChecked = false;
                     }
                 }
+                LoadModelCommand.NotifyCanExecuteChanged();
             }
         }
 
@@ -79,6 +78,7 @@ namespace GennyMaui.ViewModels
             if (result.IsSuccessful)
             {
                 ModelPath = result.Folder.Path;
+                LoadModelCommand.NotifyCanExecuteChanged();
             }
             else
             {
@@ -121,7 +121,7 @@ namespace GennyMaui.ViewModels
 
         private bool CanExecuteLoadModel()
         {
-            return !string.IsNullOrWhiteSpace(ModelPath);
+            return !string.IsNullOrWhiteSpace(CurrentSelectedModelPath());
         }
 
         private Task UnloadModelAsync()
@@ -147,34 +147,53 @@ namespace GennyMaui.ViewModels
                 await HuggingfaceHub.HFDownloader.DownloadSnapshotAsync(
                     hfModel.RepoId,
                     allowPatterns: [],
-                    localDir: hfModel.ModelPath
+                    localDir: hfModel.DownloadPath
                     );
             }
             finally
             {
                 hfModel.IsDownloading = false;
+                hfModel.RefreshStatus();
             }
+        }
+
+        private string CurrentSelectedModelPath()
+        {
+            if (IsLocalModelSelected)
+            {
+                return ModelPath;
+            }
+            foreach (var item in RemoteModels)
+            {
+                if (item.IsChecked && item.Exists)
+                {
+                    return item.ModelPath;
+                }
+            }
+
+            return string.Empty;
         }
 
         internal void ToggleHuggingfaceModel(HuggingFaceModel hfModel, bool ischecked)
         {
             if (!ischecked)
             {
+                LoadModelCommand.NotifyCanExecuteChanged();
                 return;
+            }
+
+            IsLocalModelSelected = false;
+            foreach (var item in RemoteModels)
+            {
+                if (item.RepoId != hfModel.RepoId)
+                {
+                    item.IsChecked = false;
+                }
             }
 
             if (hfModel.Exists)
             {
-                IsLocalModelSelected = false;
-                foreach (var item in RemoteModels)
-                {
-                    if (item.RepoId != hfModel.RepoId)
-                    {
-                        item.IsChecked = false;
-                    }
-                }
-
-                ModelPath = hfModel.ModelPath;
+                LoadModelCommand.NotifyCanExecuteChanged();
                 return;
             }
             else
