@@ -521,13 +521,16 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         ]
 
     if args.arm64:
-        command = ["-A", "ARM64"]
+        command += ["-A", "ARM64"]
         if args.buildasx:
             command += ["-D", "BUILD_AS_ARM64X=ARM64"]
     elif args.arm64ec:
-        command = ["-A", "ARM64EC"]
+        command += ["-A", "ARM64EC"]
         if args.buildasx:
             command += ["-D", "BUILD_AS_ARM64X=ARM64EC"]
+
+    if args.arm64 or args.arm64ec:
+        command += ["-DOPENCV_SKIP_SYSTEM_PROCESSOR_DETECTION=ON"]
 
     if args.cmake_extra_defines != []:
         command += args.cmake_extra_defines
