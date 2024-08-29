@@ -21,7 +21,10 @@
                 <Entry VerticalOptions="Center"
                        Text="{Binding ModelPath}"
                        IsReadOnly="True"
-                       WidthRequest="{Binding Source={x:Reference Container}, Path=Width, ConverterParameter=x-20, Converter={toolkit:MathExpressionConverter}}" />
+                       WidthRequest="{Binding Source={x:Reference Container}, Path=Width, ConverterParameter=x-180, Converter={toolkit:MathExpressionConverter}}" />
+                <Label Text="{Binding LocalModelStatusString}"
+                       VerticalOptions="Center"
+                       HorizontalOptions="Start"/>
             </HorizontalStackLayout>
         </VerticalStackLayout>
 

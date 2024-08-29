@@ -10,10 +10,8 @@ public partial class ModelConfigView : ContentView
         InitializeComponent();
 
         var parentContext = (LoadableModel)this.BindingContext;
-        foreach (var item in parentContext.RemoteModels)
-        {
-            item.RefreshStatus();
-        }
+        parentContext.RefreshLocalModelStatus();
+        parentContext.RefreshRemoteModelStatus();
     }
 
     private void LocalModelCheckBox_CheckedChanged(object sender, CheckedChangedEventArgs e)

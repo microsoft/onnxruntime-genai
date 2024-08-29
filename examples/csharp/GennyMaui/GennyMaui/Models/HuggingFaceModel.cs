@@ -45,17 +45,5 @@ namespace GennyMaui.Models
         }
 
         public bool Exists => Path.Exists(ModelPath);
-
-        public void RefreshStatus()
-        {
-            if (Exists)
-            {
-                StatusString = "(✅Ready)";
-            }
-            else
-            {
-                StatusString = "(🔽Downloadable)";
-            }
-        }
     }
 }

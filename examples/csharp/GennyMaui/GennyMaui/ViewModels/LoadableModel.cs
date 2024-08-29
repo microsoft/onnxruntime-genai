@@ -33,6 +33,9 @@ namespace GennyMaui.ViewModels
         [ObservableProperty]
         private bool _isLocalModelSelected;
 
+        [ObservableProperty]
+        private string _localModelStatusString = string.Empty;
+
         public List<HuggingFaceModel> RemoteModels { get; } =
         [
             new()
@@ -89,6 +92,8 @@ namespace GennyMaui.ViewModels
                 });
                 IsModelLoaded = true;
 
+                RefreshLocalModelStatus();
+
                 WeakReferenceMessenger.Default.Send(new PropertyChangedMessage<Model>(this, nameof(Model), null, Model));
                 WeakReferenceMessenger.Default.Send(new PropertyChangedMessage<Tokenizer>(this, nameof(Tokenizer), null, Tokenizer));
             }
@@ -136,8 +141,7 @@ namespace GennyMaui.ViewModels
             finally
             {
                 hfModel.IsDownloading = false;
-                hfModel.RefreshStatus();
-                LoadModelCommand.NotifyCanExecuteChanged();
+                RefreshRemoteModelStatus();
             }
         }
 
@@ -147,6 +151,7 @@ namespace GennyMaui.ViewModels
             {
                 return ModelPath;
             }
+
             foreach (var item in RemoteModels)
             {
                 if (item.IsChecked && item.Exists)
@@ -162,7 +167,19 @@ namespace GennyMaui.ViewModels
         {
             if (!ischecked)
             {
-                LoadModelCommand.NotifyCanExecuteChanged();
+                if (IsModelLoaded)
+                {
+                    UnloadModelAsync().ContinueWith(t =>
+                    {
+                        if (t.IsCompleted)
+                        {
+                            App.Current.Dispatcher.Dispatch(() =>
+                            {
+                                RefreshLocalModelStatus();
+                            });
+                        }
+                    });
+                }
                 return;
             }
 
@@ -171,13 +188,19 @@ namespace GennyMaui.ViewModels
                 item.IsChecked = false;
             }
 
+            if (Path.Exists(ModelPath))
+            {
+                RefreshLocalModelStatus();
+                return;
+            }
+
             OpenModelAsync().ContinueWith(t =>
             {
                 if (t.Result)
                 {
                     App.Current.Dispatcher.Dispatch(() =>
                     {
-                        LoadModelCommand.NotifyCanExecuteChanged();
+                        RefreshLocalModelStatus();
                     });
                 }
                 else
@@ -191,7 +214,19 @@ namespace GennyMaui.ViewModels
         {
             if (!ischecked)
             {
-                LoadModelCommand.NotifyCanExecuteChanged();
+                if (IsModelLoaded)
+                {
+                    UnloadModelAsync().ContinueWith(t =>
+                    {
+                        if (t.IsCompleted)
+                        {
+                            App.Current.Dispatcher.Dispatch(() =>
+                            {
+                                RefreshRemoteModelStatus();
+                            });
+                        }
+                    });
+                }
                 return;
             }
 
@@ -213,6 +248,48 @@ namespace GennyMaui.ViewModels
             {
                 DownloadHuggingFaceModel(hfModel);
             }
+        }
+
+        internal void RefreshLocalModelStatus()
+        {
+            if (!IsModelLoaded && !Path.Exists(ModelPath))
+            {
+                LocalModelStatusString = "(❌Not available)";
+            }
+
+            if (Path.Exists(ModelPath))
+            {
+                LocalModelStatusString = "(⚡Ready to load)";
+            }
+            if (IsModelLoaded)
+            {
+                LocalModelStatusString = "(✅Loaded)";
+            }
+
+            LoadModelCommand.NotifyCanExecuteChanged();
+        }
+
+        internal void RefreshRemoteModelStatus()
+        {
+            foreach (var item in RemoteModels)
+            {
+                if (IsModelLoaded && CurrentSelectedModelPath() == item.ModelPath)
+                {
+                    item.StatusString = "(✅Loaded)";
+                    continue;
+                }
+
+                if (item.Exists)
+                {
+                    item.StatusString = "(⚡Ready to load)";
+                }
+                else
+                {
+                    item.StatusString = "(🔽Downloadable)";
+                }
+            }
+
+            LoadModelCommand.NotifyCanExecuteChanged();
         }
     }
 }
