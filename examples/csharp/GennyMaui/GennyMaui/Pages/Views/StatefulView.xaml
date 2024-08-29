@@ -29,7 +29,7 @@
 
         <!--Result List-->
         <Border StrokeThickness="1" toolkit:DockLayout.DockPosition="Top" x:Name="Container" HorizontalOptions="FillAndExpand">
-            <ListView ItemsSource="{Binding ResultHistory}" HasUnevenRows="True">
+            <ListView ItemsSource="{Binding ResultHistory}" HasUnevenRows="True" SelectionMode="None">
                 <ListView.ItemTemplate>
                     <DataTemplate>
                         <ViewCell>

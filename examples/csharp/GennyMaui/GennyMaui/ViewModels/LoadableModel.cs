@@ -7,6 +7,8 @@ using System.Text.Json;
 using CommunityToolkit.Mvvm.Messaging.Messages;
 using CommunityToolkit.Mvvm.Messaging;
 using Microsoft.Maui.Controls;
+using System.Collections.ObjectModel;
+using System;
 
 namespace GennyMaui.ViewModels
 {
@@ -29,6 +31,43 @@ namespace GennyMaui.ViewModels
 
         [ObservableProperty]
         private bool _isModelLoading;
+
+        private bool _isLocalModelSelected;
+
+        public bool IsLocalModelSelected
+        {
+            get
+            {
+                return _isLocalModelSelected;
+            }
+            set
+            {
+                SetProperty(ref _isLocalModelSelected, value);
+                if (value)
+                {
+                    foreach (var item in RemoteModels)
+                    {
+                        item.IsChecked = false;
+                    }
+                }
+            }
+        }
+
+        public List<HuggingFaceModel> RemoteModels { get; } =
+        [
+            new() 
+            {
+                RepoId = "microsoft/Phi-3-mini-4k-instruct-onnx",
+                Include = "cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/*",
+                Subpath = "cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4"
+            },
+            new ()
+            {
+                RepoId = "microsoft/mistral-7b-instruct-v0.2-ONNX",
+                Include = "onnx/cpu_and_mobile/mistral-7b-instruct-v0.2-cpu-int4-rtn-block-32-acc-level-4/*",
+                Subpath = "onnx/cpu_and_mobile/mistral-7b-instruct-v0.2-cpu-int4-rtn-block-32-acc-level-4"
+            }
+        ];
 
         [RelayCommand]
         private async Task OpenModelAsync()
@@ -98,6 +137,50 @@ namespace GennyMaui.ViewModels
             var configPath = Path.Combine(modelPath, "genai_config.json");
             var configJson = await File.ReadAllTextAsync(configPath);
             return JsonSerializer.Deserialize<ConfigurationModel>(configJson);
+        }
+
+        private async Task DownloadHuggingFaceModel(HuggingFaceModel hfModel)
+        {
+            try
+            {
+                hfModel.IsDownloading = true;
+                await HuggingfaceHub.HFDownloader.DownloadSnapshotAsync(
+                    hfModel.RepoId,
+                    allowPatterns: [],
+                    localDir: hfModel.ModelPath
+                    );
+            }
+            finally
+            {
+                hfModel.IsDownloading = false;
+            }
+        }
+
+        internal void ToggleHuggingfaceModel(HuggingFaceModel hfModel, bool ischecked)
+        {
+            if (!ischecked)
+            {
+                return;
+            }
+
+            if (hfModel.Exists)
+            {
+                IsLocalModelSelected = false;
+                foreach (var item in RemoteModels)
+                {
+                    if (item.RepoId != hfModel.RepoId)
+                    {
+                        item.IsChecked = false;
+                    }
+                }
+
+                ModelPath = hfModel.ModelPath;
+                return;
+            }
+            else
+            {
+                DownloadHuggingFaceModel(hfModel);
+            }
         }
     }
 }
