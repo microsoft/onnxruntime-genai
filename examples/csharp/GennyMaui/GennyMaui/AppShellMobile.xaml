@@ -4,13 +4,12 @@
     xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
     xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
     xmlns:pages="clr-namespace:GennyMaui.Pages"
-    Shell.FlyoutBehavior="Disabled"
     Title="GennyMaui">
 
     <ShellContent
-        Title="Genny"
-        ContentTemplate="{DataTemplate pages:AppMainPageMobile}"
-        Route="main" />
+                Title="Model Config"
+                ContentTemplate="{DataTemplate pages:AppMainPageMobile}"
+                Route="main" />
 
     <ShellContent
         Title="Chat"

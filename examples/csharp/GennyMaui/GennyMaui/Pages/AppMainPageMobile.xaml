@@ -3,10 +3,8 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
              x:Class="GennyMaui.Pages.AppMainPageMobile"
              xmlns:views="clr-namespace:GennyMaui.Pages.Views"
-             Title="OnnxRuntime GenAI">
-    <VerticalStackLayout>
+             Title="GenAI Model">
+    <ScrollView>
         <views:ModelConfigView></views:ModelConfigView>
-        <Button Text="Chat" Margin="8" Clicked="ChatButton_Clicked"/>
-        <Button Text="Tokenize" Margin="8" Clicked="TokenizeButton_Clicked"/>
-    </VerticalStackLayout>
+    </ScrollView>
 </ContentPage>
