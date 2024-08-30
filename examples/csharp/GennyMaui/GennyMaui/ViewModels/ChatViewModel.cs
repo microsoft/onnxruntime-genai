@@ -11,7 +11,7 @@ using CommunityToolkit.Mvvm.Messaging.Messages;
 
 namespace GennyMaui.ViewModels
 {
-    public partial class StatefulChatViewModel : ObservableRecipient
+    public partial class ChatViewModel : ObservableRecipient
     {
         private readonly List<int> _pastTokens = new List<int>();
 
@@ -28,7 +28,7 @@ namespace GennyMaui.ViewModels
         [ObservableProperty]
         private string _prompt;
 
-        public StatefulChatViewModel()
+        public ChatViewModel()
         {
             WeakReferenceMessenger.Default.Register<PropertyChangedMessage<Model>>(this, (r, m) =>
             {

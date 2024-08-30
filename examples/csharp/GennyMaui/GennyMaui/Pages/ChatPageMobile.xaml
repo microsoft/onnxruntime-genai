@@ -4,5 +4,5 @@
              x:Class="GennyMaui.Pages.ChatPageMobile"
              xmlns:views="clr-namespace:GennyMaui.Pages.Views"
              Title="Chat">
-    <views:StatefulView FlexLayout.Grow="2"></views:StatefulView>
+    <views:ChatView FlexLayout.Grow="2"></views:ChatView>
 </ContentPage>

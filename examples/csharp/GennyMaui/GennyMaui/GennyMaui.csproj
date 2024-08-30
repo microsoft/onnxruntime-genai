@@ -75,6 +75,9 @@
 	  <Compile Update="AppShellMobile.xaml.cs">
 	    <DependentUpon>AppShellMobile.xaml</DependentUpon>
 	  </Compile>
+	  <Compile Update="Pages\Views\ChatView.xaml.cs">
+	    <DependentUpon>ChatView.xaml</DependentUpon>
+	  </Compile>
 	</ItemGroup>
 
 	<ItemGroup>
@@ -96,7 +99,7 @@
 	  <MauiXaml Update="Pages\Views\SearchOptionView.xaml">
 	    <Generator>MSBuild:Compile</Generator>
 	  </MauiXaml>
-	  <MauiXaml Update="Pages\Views\StatefulView.xaml">
+	  <MauiXaml Update="Pages\Views\ChatView.xaml">
 	    <Generator>MSBuild:Compile</Generator>
 	  </MauiXaml>
 	</ItemGroup>

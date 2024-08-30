@@ -10,6 +10,6 @@
             <ColumnDefinition Width="2*"></ColumnDefinition>
         </Grid.ColumnDefinitions>
         <views:ModelConfigView Grid.Column="0"></views:ModelConfigView>
-        <views:StatefulView Grid.Column="1"></views:StatefulView>
+        <views:ChatView Grid.Column="1"></views:ChatView>
     </Grid>
 </ContentPage>

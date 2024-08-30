@@ -2,15 +2,15 @@ using GennyMaui.ViewModels;
 
 namespace GennyMaui.Pages.Views;
 
-public partial class StatefulView : ContentView
+public partial class ChatView : ContentView
 {
-    public StatefulView()
+    public ChatView()
     {
         InitializeComponent();
     }
 
     public void PromptTextChanged(object sender, TextChangedEventArgs e)
     {
-        ((StatefulChatViewModel)BindingContext).GenerateCommand.NotifyCanExecuteChanged();
+        ((ChatViewModel)BindingContext).GenerateCommand.NotifyCanExecuteChanged();
     }
 }
