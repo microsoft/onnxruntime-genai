@@ -78,7 +78,7 @@
 
         </toolkit:UniformItemsLayout>
 
-        <StackLayout Margin="8">
+        <StackLayout Margin="4">
             <HorizontalStackLayout>
                 <CheckBox IsChecked="{Binding DoSample}"/>
                 <Label Text="DoSample" VerticalOptions="Center" />

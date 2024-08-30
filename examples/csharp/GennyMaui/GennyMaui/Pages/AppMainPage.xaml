@@ -10,6 +10,13 @@
             <ColumnDefinition Width="2*"></ColumnDefinition>
         </Grid.ColumnDefinitions>
         <views:ModelConfigView Grid.Column="0"></views:ModelConfigView>
-        <views:ChatView Grid.Column="1"></views:ChatView>
+        <Grid Grid.Column="1">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="2*" />
+            </Grid.RowDefinitions>
+            <views:TokenizeLandscapeView Grid.Row="0" />
+            <views:ChatView Grid.Row="1" />
+        </Grid>
     </Grid>
 </ContentPage>

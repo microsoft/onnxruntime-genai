@@ -6,10 +6,21 @@ using CommunityToolkit.Maui.Storage;
 using System.Text.Json;
 using CommunityToolkit.Mvvm.Messaging.Messages;
 using CommunityToolkit.Mvvm.Messaging;
+using System.Text;
 
 
 namespace GennyMaui.ViewModels
 {
+    internal enum ModelStatus {
+        NotAvailble,
+
+        ReadyToLoad,
+
+        Loaded,
+
+        Downloadable
+    }
+
     public partial class LoadableModel : ObservableObject
     {
         [ObservableProperty]
@@ -47,6 +58,11 @@ namespace GennyMaui.ViewModels
             {
                 RepoId = "microsoft/mistral-7b-instruct-v0.2-ONNX",
                 Subpath = "onnx/cpu_and_mobile/mistral-7b-instruct-v0.2-cpu-int4-rtn-block-32-acc-level-4"
+            },
+            new ()
+            {
+                RepoId = "microsoft/Phi-3-small-8k-instruct-onnx-cuda",
+                Subpath = "cuda-int4-rtn-block-32"
             }
         ];
 
@@ -279,17 +295,17 @@ namespace GennyMaui.ViewModels
         {
             if (!IsModelLoaded && !Path.Exists(ModelPath))
             {
-                LocalModelStatusString = "(❌Not available)";
+                LocalModelStatusString = ModelStatusToString(ModelStatus.NotAvailble);
             }
 
             if (Path.Exists(ModelPath))
             {
-                LocalModelStatusString = "(⚡Ready to load)";
+                LocalModelStatusString = ModelStatusToString(ModelStatus.ReadyToLoad);
             }
 
             if (IsModelLoaded && IsLocalModelSelected)
             {
-                LocalModelStatusString = "(✅Loaded)";
+                LocalModelStatusString = ModelStatusToString(ModelStatus.Loaded);
             }
 
             LoadModelCommand.NotifyCanExecuteChanged();
@@ -301,21 +317,45 @@ namespace GennyMaui.ViewModels
             {
                 if (IsModelLoaded && CurrentSelectedModelPath() == item.ModelPath)
                 {
-                    item.StatusString = "(✅Loaded)";
+                    item.StatusString = ModelStatusToString(ModelStatus.Loaded);
                     continue;
                 }
 
                 if (item.Exists)
                 {
-                    item.StatusString = "(⚡Ready to load)";
+                    item.StatusString = ModelStatusToString(ModelStatus.ReadyToLoad);
                 }
                 else
                 {
-                    item.StatusString = "(🔽Downloadable)";
+                    item.StatusString = ModelStatusToString(ModelStatus.Downloadable);
                 }
             }
 
             LoadModelCommand.NotifyCanExecuteChanged();
+        }
+
+        internal string ModelStatusToString(ModelStatus status)
+        {
+            StringBuilder sb = new();
+
+            switch (status)
+            {
+                case ModelStatus.NotAvailble:
+                    sb.Append('❌');
+                    break;
+                case ModelStatus.Downloadable:
+                    sb.Append("🔽");
+                    break;
+                case ModelStatus.ReadyToLoad:
+                    sb.Append('⚡');
+                    break;
+                case ModelStatus.Loaded:
+                    sb.Append('✅');
+                    break;
+            }
+
+            return sb.ToString();
+
         }
     }
 }

@@ -13,21 +13,28 @@
 
         <VerticalStackLayout>
             <Label VerticalOptions="Center" Margin="4">Local Model:</Label>
-            <HorizontalStackLayout Margin="4">
-                <CheckBox HorizontalOptions="Center"
+            <Grid Margin="4">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="8*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <CheckBox Grid.Column="0"
+                          HorizontalOptions="Center"
                           VerticalOptions="Center"
                           IsChecked="{Binding IsLocalModelSelected}"
                           CheckedChanged="LocalModelCheckBox_CheckedChanged"/>
-                <Entry VerticalOptions="Center"
+                <Entry Grid.Column="1"
+                       VerticalOptions="Center"
                        Text="{Binding ModelPath}"
                        Placeholder="Select to choose local model path"
                        ClearButtonVisibility="WhileEditing"
-                       TextChanged="LocalModelPathEntry_TextChanged"
-                       WidthRequest="{Binding Source={x:Reference Container}, Path=Width, ConverterParameter=x-180, Converter={toolkit:MathExpressionConverter}}" />
-                <Label Text="{Binding LocalModelStatusString}"
-                       VerticalOptions="Center"
-                       HorizontalOptions="Start"/>
-            </HorizontalStackLayout>
+                       TextChanged="LocalModelPathEntry_TextChanged" />
+                <Label Grid.Column="2"
+                       Text="{Binding LocalModelStatusString}"
+                        VerticalOptions="Center"
+                       HorizontalOptions="Center"/>
+            </Grid>
         </VerticalStackLayout>
 
         <VerticalStackLayout x:Name="Container">
@@ -35,24 +42,39 @@
 
             <ListView ItemsSource="{Binding RemoteModels}"
                       MaximumWidthRequest="{Binding Source={x:Reference Container}, Path=Width}"
+                      HasUnevenRows="True"
                       SelectionMode="None">
                 <ListView.ItemTemplate>
                     <DataTemplate>
                         <ViewCell>
-                            <HorizontalStackLayout Margin="4">
+                            <Grid Margin="4">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="8*" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
                                 <CheckBox Grid.Column="0"
                                           IsChecked="{Binding IsChecked}"
                                           CheckedChanged="RemoteModelCheckBox_CheckedChanged"
                                           HorizontalOptions="Center"></CheckBox>
-                                <Label Grid.Column="1"
+                                <VerticalStackLayout VerticalOptions="Center" Grid.Column="1">
+                                    <Label
                                        Text="{Binding RepoId}"
                                        VerticalOptions="Center"
-                                       MaximumWidthRequest="{Binding Source={x:Reference Container}, Path=Width, ConverterParameter=x-100, Converter={toolkit:MathExpressionConverter}}"
+                                       FontSize="12"
                                        FontAttributes="Bold" />
+                                    <Label
+                                       Text="{Binding Subpath}"
+                                       VerticalOptions="Center"
+                                       FontSize="9" />
+                                </VerticalStackLayout>
+
                                 <Label Grid.Column="2"
                                        IsVisible="{Binding IsDownloading, Converter={toolkit:InvertedBoolConverter}}"
                                        VerticalOptions="Center"
-                                       HorizontalTextAlignment="End"
+                                       HorizontalOptions="Center"
+                                       Margin="2"
+                                       FontSize="14"
                                        Text="{Binding StatusString}">
                                 </Label>
                                 <ActivityIndicator
@@ -61,13 +83,13 @@
                                     VerticalOptions="Center"
                                     IsVisible="{Binding IsDownloading}"
                                     IsRunning="{Binding IsDownloading}" />
-                            </HorizontalStackLayout>
+                            </Grid>
                         </ViewCell>
                     </DataTemplate>
                 </ListView.ItemTemplate>
             </ListView>
         </VerticalStackLayout>
-        <Button IsVisible="{Binding IsModelLoading, Converter={toolkit:InvertedBoolConverter}}" Text="Load Model" Margin="4" Command="{Binding LoadModelCommand}" />
+        <Button IsVisible="{Binding IsModelLoading, Converter={toolkit:InvertedBoolConverter}}" Text="⚡Load Model⚡" Margin="4" Command="{Binding LoadModelCommand}" />
         <ActivityIndicator VerticalOptions="Center" IsVisible="{Binding IsModelLoading}" IsRunning="{Binding IsModelLoading}" />
         <views:SearchOptionView BindingContext="{Binding Configuration.SearchOptions}">
 

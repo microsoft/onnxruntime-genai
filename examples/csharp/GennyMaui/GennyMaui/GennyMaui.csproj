@@ -105,6 +105,9 @@
 	  <MauiXaml Update="Pages\Views\ChatView.xaml">
 	    <Generator>MSBuild:Compile</Generator>
 	  </MauiXaml>
+	  <MauiXaml Update="Pages\Views\TokenizeLandscapeView.xaml">
+	    <Generator>MSBuild:Compile</Generator>
+	  </MauiXaml>
 	  <MauiXaml Update="Pages\Views\TokenizeView.xaml">
 	    <Generator>MSBuild:Compile</Generator>
 	  </MauiXaml>
