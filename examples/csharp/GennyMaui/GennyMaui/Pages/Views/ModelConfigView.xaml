@@ -37,11 +37,9 @@
             </Grid>
         </VerticalStackLayout>
 
-        <VerticalStackLayout x:Name="Container">
+        <VerticalStackLayout>
             <Label VerticalOptions="Center" Margin="4">Remote Model:</Label>
-
             <ListView ItemsSource="{Binding RemoteModels}"
-                      MaximumWidthRequest="{Binding Source={x:Reference Container}, Path=Width}"
                       HasUnevenRows="True"
                       SelectionMode="None">
                 <ListView.ItemTemplate>
@@ -89,8 +87,18 @@
                 </ListView.ItemTemplate>
             </ListView>
         </VerticalStackLayout>
-        <Button IsVisible="{Binding IsModelLoading, Converter={toolkit:InvertedBoolConverter}}" Text="⚡Load Model⚡" Margin="4" Command="{Binding LoadModelCommand}" />
-        <ActivityIndicator VerticalOptions="Center" IsVisible="{Binding IsModelLoading}" IsRunning="{Binding IsModelLoading}" />
+        <Button x:Name="LoadModelButton"
+                IsVisible="{Binding IsModelLoading, Converter={toolkit:InvertedBoolConverter}}"
+                Text="⚡Load Model⚡"
+                Margin="4"
+                Command="{Binding LoadModelCommand}" />
+        <ActivityIndicator
+            VerticalOptions="Center"
+            WidthRequest="{Binding Source={x:Reference LoadModelButton}, Path=Height}"
+            HeightRequest="{Binding Source={x:Reference LoadModelButton}, Path=Height}"
+            Margin="4"
+            IsVisible="{Binding IsModelLoading}"
+            IsRunning="{Binding IsModelLoading}" />
         <views:SearchOptionView BindingContext="{Binding Configuration.SearchOptions}">
 
         </views:SearchOptionView>
