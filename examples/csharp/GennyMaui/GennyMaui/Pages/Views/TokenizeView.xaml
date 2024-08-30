@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentView xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             xmlns:views="clr-namespace:GennyMaui.Pages.Views"
+             xmlns:vm="clr-namespace:GennyMaui.ViewModels"
+             x:Class="GennyMaui.Pages.Views.TokenizeView">
+
+    <ContentView.BindingContext>
+        <vm:TokenizeViewModel/>
+    </ContentView.BindingContext>
+
+    <Grid Margin="8">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="2*" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="2*" />
+        </Grid.RowDefinitions>
+        <Editor Grid.Row="0" Text="{Binding DecodeResult, Mode=TwoWay}">
+
+        </Editor>
+        <FlexLayout Grid.Row="1" AlignItems="Center" Direction="Column" AlignContent="Center" JustifyContent="Center">
+            <Button WidthRequest="150" Margin="4" Text="Encode⬇️" FontAttributes="Bold" Command="{Binding EncodeCommand}" CommandParameter="{Binding DecodeResult}"/>
+            <Button WidthRequest="150" Margin="4" Text="⬆️Decode" FontAttributes="Bold" Command="{Binding DecodeCommand}" CommandParameter="{Binding EncodeResult}"/>
+        </FlexLayout>
+
+        <Editor Grid.Row="2" Text="{Binding EncodeResult, Mode=TwoWay}" />
+    </Grid>
+</ContentView>

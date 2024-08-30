@@ -26,6 +26,9 @@
     <MauiXaml Update="Pages\ChatPageMobile.xaml">
       <SubType>Designer</SubType>
     </MauiXaml>
+    <MauiXaml Update="Pages\TokenizePageMobile.xaml">
+      <SubType>Designer</SubType>
+    </MauiXaml>
     <MauiXaml Update="Pages\Views\ModelConfigView.xaml">
       <SubType>Designer</SubType>
     </MauiXaml>
@@ -33,6 +36,9 @@
       <SubType>Designer</SubType>
     </MauiXaml>
     <MauiXaml Update="Pages\Views\ChatView.xaml">
+      <SubType>Designer</SubType>
+    </MauiXaml>
+    <MauiXaml Update="Pages\Views\TokenizeView.xaml">
       <SubType>Designer</SubType>
     </MauiXaml>
   </ItemGroup>

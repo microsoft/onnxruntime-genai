@@ -15,4 +15,9 @@
         Title="Chat"
         ContentTemplate="{DataTemplate pages:ChatPageMobile}"
         Route="chat" />
+
+    <ShellContent
+        Title="Tokenize"
+        ContentTemplate="{DataTemplate pages:TokenizePageMobile}"
+        Route="tokenize" />
 </Shell>
