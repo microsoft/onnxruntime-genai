@@ -108,7 +108,8 @@ namespace GennyMaui.ViewModels
 
         private bool CanExecuteLoadModel()
         {
-            return !string.IsNullOrWhiteSpace(CurrentSelectedModelPath());
+            var path = CurrentSelectedModelPath();
+            return !string.IsNullOrWhiteSpace(path) && Path.Exists(path);
         }
 
         private Task UnloadModelAsync()
@@ -179,6 +180,10 @@ namespace GennyMaui.ViewModels
                         }
                     });
                 }
+                else
+                {
+                    RefreshLocalModelStatus();
+                }
                 return;
             }
 
@@ -187,7 +192,7 @@ namespace GennyMaui.ViewModels
                 item.IsChecked = false;
             }
 
-            if (Path.Exists(ModelPath))
+            if (!string.IsNullOrWhiteSpace(ModelPath) || Path.Exists(ModelPath))
             {
                 RefreshLocalModelStatus();
                 return;
@@ -225,6 +230,10 @@ namespace GennyMaui.ViewModels
                             });
                         }
                     });
+                }
+                else
+                {
+                    RefreshRemoteModelStatus();
                 }
                 return;
             }

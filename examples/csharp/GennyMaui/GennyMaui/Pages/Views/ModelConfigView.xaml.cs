@@ -26,4 +26,10 @@ public partial class ModelConfigView : ContentView
         var parentContext = (LoadableModel)this.BindingContext;
         parentContext.ToggleHuggingfaceModel(context, e.Value);
     }
+
+    private void LocalModelPathEntry_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        var parentContext = (LoadableModel)this.BindingContext;
+        parentContext.RefreshLocalModelStatus();
+    }
 }
