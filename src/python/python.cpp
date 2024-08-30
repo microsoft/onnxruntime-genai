@@ -257,6 +257,9 @@ struct PyGeneratorParams {
     if (py_whisper_input_features_.size() != 0) {
       GeneratorParams::Whisper& whisper = params_->inputs.emplace<GeneratorParams::Whisper>();
       whisper.input_features = std::make_shared<Tensor>(ToOrtValue(py_whisper_input_features_));
+      if (py_alignment_heads_.size() != 0) {
+        whisper.alignment_heads = std::make_shared<Tensor>(ToOrtValue(py_alignment_heads_));
+      }
     }
   }
 
@@ -294,6 +297,7 @@ struct PyGeneratorParams {
 
   pybind11::array_t<int32_t> py_input_ids_;
   pybind11::array py_whisper_input_features_;
+  pybind11::array py_alignment_heads_;
 
   std::vector<pybind11::object> refs_;  // References to data we want to ensure doesn't get garbage collected
 };
@@ -394,6 +398,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_property_readonly("vocab_size", [](const PyGeneratorParams& v) { return v.params_->vocab_size; })
       .def_readwrite("input_ids", &PyGeneratorParams::py_input_ids_)
       .def_readwrite("whisper_input_features", &PyGeneratorParams::py_whisper_input_features_)
+      .def_readwrite("alignment_heads", &PyGeneratorParams::py_alignment_heads_)
       .def("set_inputs", [](PyGeneratorParams& generator_params, PyNamedTensors* named_tensors) {
         if (!named_tensors || !named_tensors->named_tensors_)
           throw std::runtime_error("No inputs provided.");

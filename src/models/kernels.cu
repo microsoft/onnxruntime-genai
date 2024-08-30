@@ -4,6 +4,8 @@
 #include <cuda_runtime.h>
 #include <stdint.h>
 #include <limits>
+#include <assert.h>
+#include <stdio.h>
 
 namespace Generators {
 namespace cuda {
@@ -62,6 +64,62 @@ template void Launch_UpdateAttentionMask(int32_t* mask_data, const int32_t* old_
                                          int current_length, int max_length, bool update_only, cudaStream_t stream);
 template void Launch_UpdateAttentionMask(int64_t* mask_data, const int64_t* old_mask_data, int batch_beam_size,
                                          int current_length, int max_length, bool update_only, cudaStream_t stream);
+
+__global__ void HandleEOSArray(float* batch_logits, int batch_beam_size, int vocab_size, const int32_t* eos_token_ids, int eos_token_ids_count) {
+  int index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= batch_beam_size)
+    return;
+
+  float* logits = batch_logits + index * vocab_size;
+  float max = std::numeric_limits<float>::lowest();
+  for (int i = 0; i < eos_token_ids_count; i++) {
+    max = std::max(max, logits[eos_token_ids[i]]);
+    logits[eos_token_ids[i]] = std::numeric_limits<float>::lowest();  // Set all EOS token options to never happen (the first will get the max of all)
+  }
+
+  logits[eos_token_ids[0]] = max;  // Set the score of the primary EOS token to the highest of any of the EOS tokens
+}
+
+void LaunchHandleEOSArray(float* batch_logits, int batch_beam_size, int vocab_size, const int32_t* eos_token_ids, int eos_token_ids_count, cudaStream_t stream) {
+  HandleEOSArray<<<(batch_beam_size + 255) / 256, 256, 0, stream>>>(batch_logits, batch_beam_size, vocab_size, eos_token_ids, eos_token_ids_count);
+}
+
+__global__ void ConvertFp16ToFp32(const half* src, float* dst, int count) {
+  int idx = threadIdx.x + blockIdx.x * blockDim.x;
+  if (idx < count)
+    dst[idx] = __half2float(src[idx]);
+}
+
+void LaunchFp16ToFp32(const uint16_t* fp16, float* fp32, int count, cudaStream_t stream) {
+  int block_size = 256;
+  int num_blocks = (count + block_size - 1) / block_size;
+  ConvertFp16ToFp32<<<num_blocks, block_size, 0, stream>>>(reinterpret_cast<const half*>(fp16), fp32, count);
+}
+
+__global__ void ConvertFp32ToFp16(const float* src, half* dst, int count) {
+  int idx = threadIdx.x + blockIdx.x * blockDim.x;
+  if (idx < count)
+    dst[idx] = __float2half(src[idx]);
+}
+
+void LaunchFp32ToFp16(const float* fp32, uint16_t* fp16, int count, cudaStream_t stream) {
+  int block_size = 256;
+  int num_blocks = (count + block_size - 1) / block_size;
+  ConvertFp32ToFp16<<<num_blocks, block_size, 0, stream>>>(fp32, reinterpret_cast<half*>(fp16), count);
+}
+
+__global__ void ConvertInt32ToInt64(const int32_t* src, int64_t* dst, int count) {
+  int idx = threadIdx.x + blockIdx.x * blockDim.x;
+  if (idx < count) {
+    dst[idx] = src[idx];
+  }
+}
+
+void LaunchInt32ToInt64(const int32_t* src, int64_t* dst, int count, cudaStream_t stream) {
+  int block_size = 256;
+  int num_blocks = (count + block_size - 1) / block_size;
+  ConvertInt32ToInt64<<<num_blocks, block_size, 0, stream>>>(src, dst, count);
+}
 
 // Support head_size up to 128
 constexpr unsigned int kTileSize = 32;
@@ -122,70 +180,14 @@ void ReorderPastStatesKernelLauncher(void* out_buffer,
   }
 }
 
-__global__ void HandleEOSArray(float* batch_logits, int batch_beam_size, int vocab_size, const int32_t* eos_token_ids, int eos_token_ids_count) {
-  int index = blockIdx.x * blockDim.x + threadIdx.x;
-  if (index >= batch_beam_size)
-    return;
-
-  float* logits = batch_logits + index * vocab_size;
-  float max = std::numeric_limits<float>::lowest();
-  for (int i = 0; i < eos_token_ids_count; i++) {
-    max = std::max(max, logits[eos_token_ids[i]]);
-    logits[eos_token_ids[i]] = std::numeric_limits<float>::lowest();  // Set all EOS token options to never happen (the first will get the max of all)
-  }
-
-  logits[eos_token_ids[0]] = max;  // Set the score of the primary EOS token to the highest of any of the EOS tokens
-}
-
-void LaunchHandleEOSArray(float* batch_logits, int batch_beam_size, int vocab_size, const int32_t* eos_token_ids, int eos_token_ids_count, cudaStream_t stream) {
-  HandleEOSArray<<<(batch_beam_size + 255) / 256, 256, 0, stream>>>(batch_logits, batch_beam_size, vocab_size, eos_token_ids, eos_token_ids_count);
-}
-
-__global__ void ConvertFp16ToFp32(const half* src, float* dst, int count) {
-  int idx = threadIdx.x + blockIdx.x * blockDim.x;
-  if (idx < count)
-    dst[idx] = __half2float(src[idx]);
-}
-
-void LaunchFp16ToFp32(const uint16_t* fp16, float* fp32, int count, cudaStream_t stream) {
-  int block_size = 256;
-  int num_blocks = (count + block_size - 1) / block_size;
-  ConvertFp16ToFp32<<<num_blocks, block_size, 0, stream>>>(reinterpret_cast<const half*>(fp16), fp32, count);
-}
-
-__global__ void ConvertFp32ToFp16(const float* src, half* dst, int count) {
-  int idx = threadIdx.x + blockIdx.x * blockDim.x;
-  if (idx < count)
-    dst[idx] = __float2half(src[idx]);
-}
-
-void LaunchFp32ToFp16(const float* fp32, uint16_t* fp16, int count, cudaStream_t stream) {
-  int block_size = 256;
-  int num_blocks = (count + block_size - 1) / block_size;
-  ConvertFp32ToFp16<<<num_blocks, block_size, 0, stream>>>(fp32, reinterpret_cast<half*>(fp16), count);
-}
-
-__global__ void ConvertInt32ToInt64(const int32_t* src, int64_t* dst, int count) {
-  int idx = threadIdx.x + blockIdx.x * blockDim.x;
-  if (idx < count) {
-    dst[idx] = src[idx];
-  }
-}
-
-void LaunchInt32ToInt64(const int32_t* src, int64_t* dst, int count, cudaStream_t stream) {
-  int block_size = 256;
-  int num_blocks = (count + block_size - 1) / block_size;
-  ConvertInt32ToInt64<<<num_blocks, block_size, 0, stream>>>(src, dst, count);
-}
-
-__global__ void UpdateDecoderMaskedMultiHeadAttentionCacheIndirectionKernel(int32_t* tgt_indir_cache,
-                                                                            const int32_t* src_indir_cache,
-                                                                            const int32_t* beam_ids,
-                                                                            int batch_size,
-                                                                            int beam_width,
-                                                                            int input_seq_length,
-                                                                            int max_seq_length,
-                                                                            int current_length) {
+__global__ void UpdateCacheIndirectionKernel(int32_t* tgt_indir_cache,
+                                             const int32_t* src_indir_cache,
+                                             const int32_t* beam_ids,
+                                             int batch_size,
+                                             int beam_width,
+                                             int input_seq_length,
+                                             int max_seq_length,
+                                             int current_length) {
   int time_step = threadIdx.x + blockIdx.x * blockDim.x;
   int bb_id = threadIdx.y + blockIdx.y * blockDim.y;
   const int batch_id = bb_id / beam_width;
@@ -195,48 +197,237 @@ __global__ void UpdateDecoderMaskedMultiHeadAttentionCacheIndirectionKernel(int3
     return;
   }
 
+  // printf("batch_id = %d, beam_width = %d, beam_id = %d, max_seq_length = %d, time_step = %d\n", batch_id, beam_width, beam_id, max_seq_length, time_step);
+  
+  // printf("Can I access src_beam?\n");
   const int src_beam = beam_ids[batch_id * beam_width + beam_id] % beam_width;
+  // printf("I can access src_beam\n");
 
   const int tgt_offset = batch_id * beam_width * max_seq_length + beam_id * max_seq_length + time_step;
 
   if (time_step < input_seq_length) {
     // For time steps that correspond to the input sequence,
     // the beam that it comes from is always 0.
+    // printf("time_step < input_seq_length\n");
+    // printf("Can I access tgt_indir_cache?\n");
+    // printf("%d\n", tgt_indir_cache[tgt_offset]);
+    // printf("I can access tgt_indir_cache\n");
+
     tgt_indir_cache[tgt_offset] = static_cast<int32_t>(0);
   } else if (time_step == (current_length - 1)) {
     // For the final (newly generated) time step,
     // the beam that it comes from is always the beam that we
     // are currently processing (i.e.) from this point on, these time-steps
     // form the new beams.
+    // printf("time_step == (current_length - 1)\n");
+    // printf("Can I access tgt_indir_cache?\n");
+    // printf("%d\n", tgt_indir_cache[tgt_offset]);
+    // printf("I can access tgt_indir_cache\n");
+
     tgt_indir_cache[tgt_offset] = static_cast<int32_t>(beam_id);
   } else {
     // For all other time-steps, we look up the source indirection, to
     // see which beam it came from based on the `src_beam`.
+    // printf("else branch\n");
     const int src_offset = batch_id * beam_width * max_seq_length + src_beam * max_seq_length + time_step;
+
+    // printf("Can I access src_indir_cache?\n");
+    // printf("%d\n", src_indir_cache[src_offset]);
+    // printf("I can access src_indir_cache\n");
+
+    // printf("Can I access tgt_indir_cache?\n");
+    // printf("%d\n", tgt_indir_cache[tgt_offset]);
+    // printf("I can access tgt_indir_cache\n");
+
     tgt_indir_cache[tgt_offset] = src_indir_cache[src_offset];
   }
 }
 
-void UpdateDecoderMaskedMultiHeadAttentionCacheIndirection(int32_t* tgt_indir_cache,
-                                                           const int32_t* src_indir_cache,
-                                                           const int32_t* beam_ids,
-                                                           int batch_size,
-                                                           int beam_width,
-                                                           int input_seq_length,
-                                                           int max_seq_length,
-                                                           int current_length,
-                                                           cudaStream_t stream) {
+void UpdateCacheIndirectionKernelLauncher(int32_t* tgt_indir_cache,
+                                          const int32_t* src_indir_cache,
+                                          const int32_t* beam_ids,
+                                          int batch_size,
+                                          int beam_width,
+                                          int input_seq_length,
+                                          int max_seq_length,
+                                          int current_length,
+                                          cudaStream_t stream) {
   const dim3 block(32);
   const dim3 grid((current_length + block.x - 1) / block.x, batch_size * beam_width);
-  UpdateDecoderMaskedMultiHeadAttentionCacheIndirectionKernel<<<grid, block, 0, stream>>>(tgt_indir_cache,
-                                                                                          src_indir_cache,
-                                                                                          beam_ids,
-                                                                                          batch_size,
-                                                                                          beam_width,
-                                                                                          input_seq_length,
-                                                                                          max_seq_length,
-                                                                                          current_length);
+  UpdateCacheIndirectionKernel<<<grid, block, 0, stream>>>(tgt_indir_cache,
+                                                           src_indir_cache,
+                                                           beam_ids,
+                                                           batch_size,
+                                                           beam_width,
+                                                           input_seq_length,
+                                                           max_seq_length,
+                                                           current_length);
 }
+
+template <typename T>
+__global__ void CopyCrossQKSingleDecodeStepKernel(T* target, // shape [batch_beam_size, num_alignment_heads, max_length, frame]
+                                                  T** qk_layer_pointers,
+                                                  int token_index,
+                                                  int num_layers,
+                                                  int num_heads,
+                                                  const int* alignment_heads,
+                                                  int frames,
+                                                  int max_length) {
+  // printf("qk_layer_pointers = %p\n", qk_layer_pointers);
+  // printf("qk_layer_pointers[0] = %p\n", qk_layer_pointers[0]);
+  // printf("qk_layer_pointers[1] = %p\n", qk_layer_pointers[1]);
+  // printf("qk_layer_pointers[2] = %p\n", qk_layer_pointers[2]);
+  // printf("qk_layer_pointers[3] = %p\n", qk_layer_pointers[3]);
+
+  const int pair = blockIdx.x;
+  const int num_alignment_heads = gridDim.x;
+  const int bbm = blockIdx.y;
+  // printf("Moving alignment heads ptr\n");
+  alignment_heads += (pair * 2);
+  // printf("Getting layer ptr\n");
+  const int layer = *alignment_heads;
+  // printf("Getting layer head ptr\n");
+  const int head = *(alignment_heads + 1);
+
+  // printf("bbm = %d, num_alignment_heads = %d, pair = %d, max_length = %d, frames = %d, token_index = %d\n", bbm, num_alignment_heads, pair, max_length, frames, token_index);
+
+  // printf("Getting target address\n");
+  target += ((int64_t)bbm * num_alignment_heads + pair) * max_length * frames + ((int64_t)token_index * frames);
+  // printf("Can I access qk_layer_pointers?\n");
+  T* src = qk_layer_pointers[layer] + ((int64_t)bbm * num_heads + head) * frames;
+  // printf("%f\n", src[0]);
+  // printf("I can access qk_layer_pointers\n");
+
+  for (int tid = threadIdx.x; tid < frames; tid += blockDim.x) {
+    // printf("Can I access src[tid]?\n");
+    // printf("%f\n", src[tid]);
+    // printf("I can access src[tid]\n");
+
+    // printf("Can I access target[tid]?\n");
+    // printf("%f\n", target[tid]);
+    // printf("I can access target[tid]\n");
+
+    target[tid] = src[tid]; // use vectorized read write in future if needed
+  }
+}
+
+template <typename T>
+void LaunchCopyCrossQKSingleDecodeStep(cudaStream_t stream,
+                                       T* cross_qk_buffer_data,
+                                       T** qk_layer_pointers,
+                                       int token_index,
+                                       int batch_beam_size,
+                                       int num_layers,
+                                       int num_heads,
+                                       int num_alignment_heads,
+                                       const int* alignment_heads,
+                                       int frames,
+                                       int max_length) {
+  dim3 block(512);
+  dim3 grid(num_alignment_heads, batch_beam_size);
+
+  CopyCrossQKSingleDecodeStepKernel<<<grid, block, 0, stream>>>(cross_qk_buffer_data,
+                                                                qk_layer_pointers,
+                                                                token_index,
+                                                                num_layers,
+                                                                num_heads,
+                                                                alignment_heads,
+                                                                frames,
+                                                                max_length);
+}
+
+template void LaunchCopyCrossQKSingleDecodeStep(cudaStream_t stream,
+                                                float* cross_qk_buffer_data,
+                                                float** qk_layer_pointers,
+                                                int token_index,
+                                                int batch_beam_size,
+                                                int num_layers,
+                                                int num_heads,
+                                                int num_alignment_heads,
+                                                const int* alignment_heads,
+                                                int frames,
+                                                int max_length);
+
+template <typename T>
+__global__ void CopyDecoderCrossQKAllStepsKernel(int context_decoding_len,
+                                                 int num_beams,
+                                                 int num_return_sequences,
+                                                 int max_length,
+                                                 int frames_of_k,
+                                                 const T* cross_qk_buffer_data, // [batch, num_beams, num_alignment_heads, max_length, frames]
+                                                 T* cross_qk_output, // [batch, num_return_sequences, num_alignment_heads, total_decoding_length, frames]
+                                                 const int* cache_indir_data) { // [batch, num_beams, max_length]
+  const int pair = blockIdx.y;
+  const int num_alignment_heads = gridDim.y;
+  const int total_decoding_length = gridDim.x;
+  const int token_decoding_index = blockIdx.x;
+  const int br = blockIdx.z;
+  const int batch = br / num_return_sequences;
+  const int ret_seq_id = br % num_return_sequences;
+
+  const int64_t offset_in_cache = ((int64_t)batch * num_return_sequences + ret_seq_id) * max_length + token_decoding_index + context_decoding_len;
+  // printf("Can I access cache_indir_data[offset_in_cache]?\n");
+  int bi_src = batch * num_beams + cache_indir_data[offset_in_cache];
+  // printf("I can access cache_indir_data[offset_in_cache]\n");
+
+  T* target    = cross_qk_output      + (((int64_t)br     * num_alignment_heads + (int64_t)pair) * total_decoding_length + token_decoding_index) * frames_of_k;
+  const T* src = cross_qk_buffer_data + (((int64_t)bi_src * num_alignment_heads + (int64_t)pair) * max_length            + token_decoding_index) * frames_of_k;
+  for (int tid = threadIdx.x; tid < frames_of_k; tid += blockDim.x) {
+    // printf("Can I access target[tid]?\n");
+    // printf("%f\n", target[tid]);
+    // printf("I can access target[tid]\n");
+
+    // printf("Can I access src[tid]?\n");
+    // printf("%f\n", src[tid]);
+    // printf("I can access src[tid]\n");
+
+    target[tid] = src[tid]; // use vectorized read write in future if needed
+  }
+}
+
+template <typename T>
+void LaunchFinalizeCrossQK(cudaStream_t stream,
+                           int iteration_number,
+                           int context_decoding_len,
+                           int batch_size,
+                           int num_beams,
+                           int max_length,
+                           int num_alignment_heads,
+                           int frames_of_k,
+                           const T* cross_qk_buffer_data,
+                           T* cross_qk_output,
+                           int num_return_sequences,
+                           const int* cache_indir_data) {
+  int64_t br = (int64_t)batch_size * num_return_sequences;
+  assert(br < 65536L && num_alignment_heads < 65536);
+  
+  const int total_decoding_length = iteration_number - 1;
+  dim3 block(512);
+  dim3 grid(total_decoding_length, num_alignment_heads, (unsigned)br);
+
+  CopyDecoderCrossQKAllStepsKernel<<<grid, block, 0, stream>>>(context_decoding_len,
+                                                               num_beams,
+                                                               num_return_sequences,
+                                                               max_length,
+                                                               frames_of_k,
+                                                               cross_qk_buffer_data,
+                                                               cross_qk_output,
+                                                               cache_indir_data);
+}
+
+template void LaunchFinalizeCrossQK(cudaStream_t stream,
+                                    int iteration_number,
+                                    int context_decoding_len,
+                                    int batch_size,
+                                    int num_beams,
+                                    int max_length,
+                                    int num_alignment_heads,
+                                    int frames_of_k,
+                                    const float* cross_qk_buffer_data,
+                                    float* cross_qk_output,
+                                    int num_return_sequences,
+                                    const int* cache_indir_data);
+
 
 }  // namespace cuda
 }  // namespace Generators

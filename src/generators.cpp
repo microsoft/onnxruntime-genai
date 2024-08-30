@@ -148,7 +148,12 @@ bool Generator::IsDone() const {
   if (computed_logits_)
     throw std::runtime_error("IsDone() can't be called in the middle of processing logits");
 
-  return search_->IsDone();
+  bool is_done = search_->IsDone();
+  if (is_done) {
+    state_->Finalize();
+  }
+
+  return is_done;
 }
 
 void Generator::GenerateNextToken() {
