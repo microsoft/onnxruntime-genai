@@ -290,7 +290,7 @@ void Model::CreateSessionOptions() {
 
     //config_->custom_lib_path = "/home/leca/code/onnxruntime-genai/custom_ops/build/libgenai_custom_ops.so";
   // if (config_->custom_lib_path.length() > 0) {
-    ort_options.RegisterCustomOpsLibrary("/raid/yingxiong/projects/onnxruntime-genai/test/custom_ops/build/libgenai_custom_ops_test.so");
+    ort_options.RegisterCustomOpsLibrary("/home/yingxiong/projects/onnxruntime-genai/test/custom_ops/build/libgenai_custom_ops_test.so");
   // }
   // auto ver = GetOrtVersion(api);
   // const OrtApi* ortApi = Ort::api;

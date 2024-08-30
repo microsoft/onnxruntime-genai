@@ -37,8 +37,10 @@ std::vector<CompletionSequenceGroupOutput> ModelRunner::ExecuteModel(
   std::vector<std::vector<int>> group_seq_ids;
 
   int batch_size = 0;
+  bool is_prompt = false;
   for (const auto& seq_group_metadata : request.seq_group_metadata_list) {
     std::vector<int> seq_ids;
+    is_prompt = seq_group_metadata.is_prompt;
     for (const auto& [seq_id, seq_data] : seq_group_metadata.seq_data) {
       int context_len;
       std::vector<int> block_table;
@@ -82,7 +84,7 @@ std::vector<CompletionSequenceGroupOutput> ModelRunner::ExecuteModel(
   printf("finish batching!\n");
 
   params->input_ids = input_tokens;
-  params->batch_size = 1;
+  params->batch_size = batch_size;
   params->sequence_length = input_tokens.size();
   named_tensors_ = std::make_unique<NamedTensors>();
   std::vector<int64_t> context_lens_shape = {context_lens.size()};
@@ -112,24 +114,16 @@ std::vector<CompletionSequenceGroupOutput> ModelRunner::ExecuteModel(
                                slot_mapping_shape.size())));
   named_tensors_->emplace("slot_mapping", slot_mapping_);
 
-  std::vector<int32_t> is_span_data{1};
-  std::vector<int64_t> is_span_shape{1};
+  std::vector<int32_t> is_prompt_data{is_prompt ? 1 : 0};
+  std::vector<int64_t> is_prompt_shape{1};
 
-  // is_prompt_ = std::make_shared<Tensor>(OrtValue::CreateTensor<int32_t>(
-  //     model_->allocator_cpu_.GetInfo(), std::span<int32_t>(is_span_data),
-  //     std::span<int64_t>(is_span_shape)));
   is_prompt_ = std::make_shared<Tensor>(
-      OrtValue::CreateTensor<int32_t>(model_->allocator_cpu_, is_span_shape));
-  std::copy(is_span_data.begin(), is_span_data.end(), is_prompt_->ort_tensor_->GetTensorMutableData<int32_t>());
-  printf("is_prompt_ address: %p\n", is_span_data.data());
-  printf("is_prompt_ address: %p\n",
-         is_prompt_->ort_tensor_->GetTensorMutableRawData());
-  printf("is_prompt_: %d\n",
-         is_prompt_->ort_tensor_->GetTensorMutableData<int32_t>()[0]);
+      OrtValue::CreateTensor<int32_t>(model_->allocator_cpu_, is_prompt_shape));
+  std::copy(is_prompt_data.begin(), is_prompt_data.end(), is_prompt_->ort_tensor_->GetTensorMutableData<int32_t>());
   named_tensors_->emplace("is_prompt", is_prompt_);
 
   params->SetInputs(*named_tensors_);
-  auto output_tokens = RunGenerator(*params);
+  auto output_tokens = RunGenerator(*params, context_lens);
   std::vector<CompletionSequenceGroupOutput> outputs;
 
   int offset = 0;
@@ -147,9 +141,10 @@ std::vector<CompletionSequenceGroupOutput> ModelRunner::ExecuteModel(
   return outputs;
 }
 
-std::vector<int32_t> ModelRunner::RunGenerator(const GeneratorParams& params) {
+std::vector<int32_t> ModelRunner::RunGenerator(const GeneratorParams& params, std::vector<int32_t>& seq_lens) {
   printf("before create generator\n");
   auto generator = Generators::CreateGenerator(*model_, params);
+  generator->state_->seq_lens_ = seq_lens;
   printf("generator created\n");
 
   generator->ComputeLogits();

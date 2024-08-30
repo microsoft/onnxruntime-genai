@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 #pragma once
 
+#include <vector>
 #include "static_buffer.h"
 
 namespace Generators {
@@ -11,6 +12,7 @@ struct Logits {
 
   void Add();
   RoamingArray<float> Get();
+
 
  private:
   void HandleEOSArray(cpu_span<float> logits);
@@ -27,6 +29,9 @@ struct Logits {
   // Used for decoding runs with cuda graphs.
   StaticBuffer* sb_logits32_{};
   StaticBuffer* sb_logits16_{};
+
+  std::vector<int32_t> seq_lens_;
+  bool is_prompt_{true};
 
 #if USE_CUDA
   cuda_unique_ptr<int32_t> cuda_eos_token_ids_ptr_;  // eos_token_ids from params, but in cuda accessible memory

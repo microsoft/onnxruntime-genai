@@ -3,6 +3,7 @@
 #include "../generators.h"
 #include "model.h"
 #include "logits.h"
+#include <vector>
 #if USE_CUDA
 #include "kernels.h"
 #endif
@@ -39,7 +40,7 @@ Logits::Logits(const Model& model, State& state)
 }
 
 RoamingArray<float> Logits::Get() {
-  size_t element_count = shape_[0] * shape_[1] * shape_[2];
+  size_t element_count = std::accumulate(shape_.begin(), shape_.end(), 1, std::multiplies<int>());
 
   // Convert from float16 to float32 if necessary
   if (type_ == Ort::TypeToTensorType<Ort::Float16_t>::type) {
@@ -61,15 +62,16 @@ RoamingArray<float> Logits::Get() {
   // First iteration? Then copy the logits over to a {batch_beams, 1, vocab_size} tensor
   // We'll reuse this tensor for all future iterations
   // The model's output logits are {batch_size*num_beams, input_seq_len, vocab_size}
-  if (shape_[1] != 1) {
-    const size_t seq_length = shape_[1];
-    const size_t vocab_size = shape_[2];
+  if (state_.is_prompt_) {
+    // const size_t seq_length = shape_[1];
+    const size_t vocab_size = shape_[1];
     const size_t num_beams = state_.params_->search.num_beams;
 
-    shape_[1] = 1;
+    // shape_[1] = 1;
 
     // bugbug: not done yet
-    auto value_next = !sb_logits32_ ? OrtValue::CreateTensor<float>(*model_.allocator_device_, shape_)
+    std::vector<int64_t> last_logits_shape = {state_.params_->batch_size, vocab_size};
+    auto value_next = !sb_logits32_ ? OrtValue::CreateTensor<float>(*model_.allocator_device_, last_logits_shape)
                                     : sb_logits32_->CreateTensorOnStaticBuffer(shape_, type_);
 
 #if USE_DML
@@ -80,11 +82,11 @@ RoamingArray<float> Logits::Get() {
 #endif
 
     size_t vocab_index = 0;  // Simpler math to have this index go up by vocab_size for every logit chunk we process
-
+    size_t source_start = 0;
     const auto* input_ids = state_.params_->input_ids.data();
     for (int batch_index = 0; batch_index < state_.params_->batch_size; batch_index++) {
       // Find the first non pad token from the end
-      size_t token_index = seq_length;
+      size_t token_index = state_.seq_lens_[batch_index];
       while (token_index-- > 0) {
         if (input_ids[token_index] != state_.params_->pad_token_id)
           break;
@@ -120,7 +122,7 @@ RoamingArray<float> Logits::Get() {
             auto logits = std::span<float>{value32_->GetTensorMutableData<float>(), element_count};
             auto logits_next = gpu_span<float>{value_next->GetTensorMutableData<float>(), element_count};
             auto target = logits_next.subspan(vocab_index, vocab_size);
-            std::span<const float> source = logits.subspan(vocab_index * seq_length + token_index * vocab_size, vocab_size);
+            std::span<const float> source = logits.subspan(source_start + token_index * vocab_size, vocab_size);
             if (model_.device_type_ == DeviceType::CUDA)
 #if USE_CUDA
               CudaCheck() == cudaMemcpyAsync(target.data(), source.data(), source.size_bytes(), cudaMemcpyDeviceToDevice, state_.params_->cuda_stream);
@@ -135,18 +137,19 @@ RoamingArray<float> Logits::Get() {
         vocab_index += vocab_size;
       }
 
-      input_ids += seq_length;
+      input_ids += state_.seq_lens_[batch_index];
+      source_start += state_.seq_lens_[batch_index] * vocab_size;
     }
 
     value32_ = std::move(value_next);
     if (type_ == Ort::TypeToTensorType<Ort::Float16_t>::type)
-      value16_ = !sb_logits16_ ? OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_)
-                               : sb_logits16_->CreateTensorOnStaticBuffer(shape_, type_);
+      value16_ = !sb_logits16_ ? OrtValue::CreateTensor(*model_.allocator_device_, last_logits_shape, type_)
+                               : sb_logits16_->CreateTensorOnStaticBuffer(last_logits_shape, type_);
     state_.outputs_[output_index_] = type_ == Ort::TypeToTensorType<float>::type ? value32_.get() : value16_.get();
-    element_count = shape_[0] * shape_[2];  // shape_[1] is now 1, so the element count must be updated
+    element_count = last_logits_shape[0] *last_logits_shape[1];  // shape_[1] is now 1, so the element count must be updated
   }
 
-  assert(shape_[1] == 1);
+  // assert(shape_[1] == 1);
 
 #if USE_CUDA
   if (model_.device_type_ == DeviceType::CUDA) {

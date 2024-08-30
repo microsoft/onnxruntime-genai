@@ -9,7 +9,6 @@
 #include "../models/cache_manager.h"
 #include "../tensor.h"
 
-
 namespace Generators {
 class ModelRunner {
  public:
@@ -28,6 +27,6 @@ class ModelRunner {
   std::shared_ptr<Tensor> is_prompt_;
   std::unique_ptr<NamedTensors> named_tensors_;
 
-  std::vector<int32_t> RunGenerator(const GeneratorParams& params);
+  std::vector<int32_t> RunGenerator(const GeneratorParams& params, std::vector<int32_t>& seq_lens);
 };
 };  // namespace Generators

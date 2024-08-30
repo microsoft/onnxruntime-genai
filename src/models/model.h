@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #pragma once
+#include <cstdint>
+#include <vector>
 #include "ortx_tokenizer.h"
 #include "captured_graph_pool.h"
 #include "utils.h"
@@ -33,10 +35,16 @@ struct State {
 
   OrtValue* GetOutput(const char* name);
 
+  virtual void SetSeqLens(const std::vector<int32_t>& seq_lens){};
+  virtual void SetIsPrompt(bool is_prompt){};
+
   std::shared_ptr<const GeneratorParams> params_;
 
   std::vector<const char*> input_names_, output_names_;
   std::vector<OrtValue*> inputs_, outputs_;
+
+  std::vector<int32_t> seq_lens_;
+  bool is_prompt_{true};
 
  protected:
   void Run(OrtSession& session, OrtRunOptions& run_options, int new_batch_size);  // Uses the inputs below to run

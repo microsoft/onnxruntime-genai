@@ -113,6 +113,7 @@ ScheduleResult Scheduler::Schedule() {
     //   scheduled_swapped_in = ScheduleSwapped(budget);
     // }
   }
+  printf("sheduled_runnning size: %d\n", scheduled_running.decode_seq_groups.size());
 
   if (budget.GetNumBatchedTokens() > scheduler_config_.max_num_bathced_tokens ||
       budget.GetNumCurrSeqs() > scheduler_config_.max_num_seqs) {
@@ -290,7 +291,7 @@ ScheduledRunningOutputs Scheduler::ScheduleRunning(SchedulerBudget& budget,
             [](const SequenceGroup& a, const SequenceGroup& b) {
               return a.arrival_time < b.arrival_time;
             });
-
+  printf("running_.size(): %d\n", running_.size());
   while (running_.size() > 0) {
     auto seq_group = running_.front();
     int num_running_tokens = GetNumNewTokens(
@@ -298,10 +299,11 @@ ScheduledRunningOutputs Scheduler::ScheduleRunning(SchedulerBudget& budget,
     if (num_running_tokens == 0) {
       break;
     }
-
+    printf("num_running_tokens: %d\n", num_running_tokens);
     running_.pop_front();
     while (!block_manager_->CanAppendSlots(
         seq_group, scheduler_config_.num_lookahead_slots)) {
+          printf("preempt SequenceGroup\n");
       budget.SubtractNumBatchedTokens(seq_group.request_id, num_running_tokens);
       int num_running_seqs = seq_group.GetMaxNumRunningSeqs();
       budget.SubtractNumSeqs(seq_group.request_id, num_running_seqs);
@@ -330,6 +332,7 @@ ScheduledRunningOutputs Scheduler::ScheduleRunning(SchedulerBudget& budget,
 
     if (block_manager_->CanAppendSlots(seq_group,
                                        scheduler_config_.num_lookahead_slots)) {
+      printf("AppendSlots\n");
       for (auto& seq : seq_group.GetSeqs(SequenceStatus::kRunning)) {
         std::vector<std::tuple<int, int>> cows = block_manager_->AppendSlots(
             seq, scheduler_config_.num_lookahead_slots);

@@ -12,8 +12,6 @@ InputIDs::InputIDs(const Model& model, State& state)
 
   shape_ = {state_.params_->input_ids.size()};
   type_ = model_.session_info_->GetInputDataType(name_);
-  printf("shape_: %d\n", shape_[0]);
-  printf("input_ids size: %d\n", state_.params_->input_ids.size());
   // If 64-bit, convert from 32-bit to 64-bit
   int test_count = 0;
   if (type_ == Ort::TypeToTensorType<int64_t>::type) {
@@ -34,7 +32,6 @@ InputIDs::InputIDs(const Model& model, State& state)
         shape_);
   }
 
-  printf("TEST\n");
   value_ = model_.ExpandInputs(value_, state_.params_->search.num_beams);
   shape_[0] *= state_.params_->search.num_beams;
 

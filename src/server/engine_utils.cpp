@@ -148,7 +148,7 @@ std::vector<Sequence> SequenceGroup::GetSeqs(SequenceStatus status) const {
   return seqs;
 }
 
-bool SequenceGroup::IsPrefill() const { return GetSeqs()[0].IsPrefill(); }
+bool SequenceGroup::IsPrefill() const { return seqs_dict.at(GetSeqs()[0].seq_id).IsPrefill(); }
 
 bool SequenceGroup::IsFinished() const {
   return std::all_of(seqs_dict.begin(), seqs_dict.end(),

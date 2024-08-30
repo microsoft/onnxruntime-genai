@@ -43,4 +43,5 @@ void DecoderOnly_State::UpdateInputs(const RoamingArray<int32_t>& next_tokens_un
   kv_cache_->Update(beam_indices.GetCPU(), current_length);
 }
 
+
 }  // namespace Generators
