@@ -17,9 +17,9 @@ namespace GennyMaui.Models
 
         public string RepoId { get; set; }
 
-        public string Include { get; set; }
-
         public string Subpath { get; set; }
+
+        public string Include => $"{Subpath}/*";
 
         public string DownloadPath
         {

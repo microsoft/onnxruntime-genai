@@ -41,13 +41,11 @@ namespace GennyMaui.ViewModels
             new()
             {
                 RepoId = "microsoft/Phi-3-mini-4k-instruct-onnx",
-                Include = "cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/*",
                 Subpath = "cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4"
             },
             new ()
             {
                 RepoId = "microsoft/mistral-7b-instruct-v0.2-ONNX",
-                Include = "onnx/cpu_and_mobile/mistral-7b-instruct-v0.2-cpu-int4-rtn-block-32-acc-level-4/*",
                 Subpath = "onnx/cpu_and_mobile/mistral-7b-instruct-v0.2-cpu-int4-rtn-block-32-acc-level-4"
             }
         ];
