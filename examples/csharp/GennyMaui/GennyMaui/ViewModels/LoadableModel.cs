@@ -138,6 +138,10 @@ namespace GennyMaui.ViewModels
                     localDir: hfModel.DownloadPath
                     );
             }
+            catch (Exception ex)
+            {
+                await Application.Current.MainPage.DisplayAlert("Model Download Error", ex.Message, "OK");
+            }
             finally
             {
                 hfModel.IsDownloading = false;
