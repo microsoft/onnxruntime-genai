@@ -14,14 +14,19 @@
             <RowDefinition Height="*" />
             <RowDefinition Height="2*" />
         </Grid.RowDefinitions>
-        <Editor Grid.Row="0" Text="{Binding DecodeResult, Mode=TwoWay}">
-
-        </Editor>
+        <Border Grid.Row="0"
+                StrokeThickness="1"
+                Margin="4">
+            <Editor Text="{Binding DecodeResult, Mode=TwoWay}" />
+        </Border>
         <FlexLayout Grid.Row="1" AlignItems="Center" Direction="Column" AlignContent="Center" JustifyContent="Center">
             <Button WidthRequest="150" Margin="4" Text="Encode⬇️" FontAttributes="Bold" Command="{Binding EncodeCommand}" CommandParameter="{Binding DecodeResult}"/>
             <Button WidthRequest="150" Margin="4" Text="⬆️Decode" FontAttributes="Bold" Command="{Binding DecodeCommand}" CommandParameter="{Binding EncodeResult}"/>
         </FlexLayout>
-
-        <Editor Grid.Row="2" Text="{Binding EncodeResult, Mode=TwoWay}" />
+        <Border Grid.Row="2"
+                StrokeThickness="1"
+                Margin="4">
+            <Editor Text="{Binding EncodeResult, Mode=TwoWay}" />
+        </Border>
     </Grid>
 </ContentView>
