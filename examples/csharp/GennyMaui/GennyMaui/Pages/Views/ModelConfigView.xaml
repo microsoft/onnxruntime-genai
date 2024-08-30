@@ -87,11 +87,24 @@
                 </ListView.ItemTemplate>
             </ListView>
         </VerticalStackLayout>
-        <Button x:Name="LoadModelButton"
-                IsVisible="{Binding IsModelLoading, Converter={toolkit:InvertedBoolConverter}}"
-                Text="⚡Load Model⚡"
-                Margin="4"
-                Command="{Binding LoadModelCommand}" />
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <Button x:Name="LoadModelButton"
+                    Grid.Column="0"
+                    IsVisible="{Binding IsModelLoading, Converter={toolkit:InvertedBoolConverter}}"
+                    Text="⚡Load Model"
+                    Margin="4"
+                    Command="{Binding LoadModelCommand}" />
+            <Button Grid.Column="1"
+                    IsVisible="{Binding IsModelLoading, Converter={toolkit:InvertedBoolConverter}}"
+                    Text="ℹ️ORT Info"
+                    Margin="4"
+                    Command="{Binding ShowOrtInfoCommand}" />
+        </Grid>
+
         <ActivityIndicator
             VerticalOptions="Center"
             WidthRequest="{Binding Source={x:Reference LoadModelButton}, Path=Height}"

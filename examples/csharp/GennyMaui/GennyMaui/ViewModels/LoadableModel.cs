@@ -7,6 +7,9 @@ using System.Text.Json;
 using CommunityToolkit.Mvvm.Messaging.Messages;
 using CommunityToolkit.Mvvm.Messaging;
 using System.Text;
+using Microsoft.ML.OnnxRuntime;
+using System.Collections.ObjectModel;
+using System.Linq;
 
 
 namespace GennyMaui.ViewModels
@@ -33,7 +36,7 @@ namespace GennyMaui.ViewModels
         private ConfigurationModel? _configuration;
 
         [ObservableProperty]
-        private string _modelPath;
+        private string _modelPath = string.Empty;
 
         [ObservableProperty]
         private bool _isModelLoaded;
@@ -46,6 +49,24 @@ namespace GennyMaui.ViewModels
 
         [ObservableProperty]
         private string _localModelStatusString = string.Empty;
+
+        [ObservableProperty]
+        private string _ortVersionString = string.Empty;
+
+        public ObservableCollection<string> OrtEps { get; } = new ObservableCollection<string>();
+
+        public LoadableModel()
+        {
+            var ortEnv = OrtEnv.Instance();
+            _ortVersionString = ortEnv.GetVersionString();
+            var providers = ortEnv.GetAvailableProviders();
+            foreach (var provider in providers)
+            {
+                OrtEps.Add(provider);
+            }
+
+            ortEnv.Dispose();
+        }
 
         public List<HuggingFaceModel> RemoteModels { get; } =
         [
@@ -120,6 +141,21 @@ namespace GennyMaui.ViewModels
             {
                 IsModelLoading = false;
             }
+        }
+
+        [RelayCommand]
+        private async Task ShowOrtInfoAsync()
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.Append("ORT Version: ");
+            sb.Append(_ortVersionString);
+            sb.Append('\n');
+
+            sb.Append("Providers: ");
+            sb.Append(string.Join(",", OrtEps));
+            sb.Append('\n');
+
+            await Application.Current.MainPage.DisplayAlert("ORT Info", sb.ToString(), "OK");
         }
 
         private bool CanExecuteLoadModel()

@@ -28,6 +28,10 @@ namespace GennyMaui.ViewModels
         [ObservableProperty]
         private string _prompt;
 
+        public ResultModel CurrentResult { get; set; }
+
+        public ObservableCollection<ResultModel> ResultHistory { get; } = new ObservableCollection<ResultModel>();
+
         public ChatViewModel()
         {
             WeakReferenceMessenger.Default.Register<PropertyChangedMessage<Model>>(this, (r, m) =>
@@ -52,10 +56,6 @@ namespace GennyMaui.ViewModels
                 _modelOptions = m.NewValue.ModelOptions;
             });
         }
-
-        public ResultModel CurrentResult { get; set; }
-
-        public ObservableCollection<ResultModel> ResultHistory { get; } = new ObservableCollection<ResultModel>();
 
         [RelayCommand(CanExecute = "CanExecuteGenerate")]
         private async Task GenerateAsync()
