@@ -54,8 +54,6 @@ struct Whisper_State : State {
   // Buffers for calculating word-level timestamps
   cuda_unique_ptr<float*> cross_qk_ptrs_buffer_;            // To create and hold a reference to the GPU memory so it isn't freed
   gpu_span<float*> output_cross_qk_ptrs_gpu_;               // To use for copying the CPU vector of float* pointers into
-
-  // OrtValue* alignment_heads_{};                             // { num_alignment_heads, 2 }
   std::unique_ptr<OrtValue> alignment_heads_;               // { num_alignment_heads, 2 }
   std::unique_ptr<OrtValue> cross_qk_search_buffer_;        // { batch_beam_size, num_alignment_heads, max_length, 1500 }
   std::unique_ptr<OrtValue> cross_qk_final_;                // { batch_size, num_return_sequences, num_alignment_heads, decoded_length, 1500 }
