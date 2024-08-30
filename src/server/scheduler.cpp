@@ -303,7 +303,7 @@ ScheduledRunningOutputs Scheduler::ScheduleRunning(SchedulerBudget& budget,
     running_.pop_front();
     while (!block_manager_->CanAppendSlots(
         seq_group, scheduler_config_.num_lookahead_slots)) {
-          printf("preempt SequenceGroup\n");
+      printf("preempt SequenceGroup\n");
       budget.SubtractNumBatchedTokens(seq_group.request_id, num_running_tokens);
       int num_running_seqs = seq_group.GetMaxNumRunningSeqs();
       budget.SubtractNumSeqs(seq_group.request_id, num_running_seqs);
@@ -492,6 +492,10 @@ bool SchedulerBudget::CanSchedule(int num_new_tokens, int num_new_seqs) {
   assert(num_new_tokens >= 0 && num_new_seqs >= 0);
   return num_batched_tokens_ + num_new_tokens <= RemainingTokenBudget() &&
          num_new_seqs + num_new_seqs <= max_num_seqs_;
+}
+
+SequenceGroup& Scheduler::GetRunning(size_t idx) {
+  return running_[idx];
 }
 
 }  // namespace Generators

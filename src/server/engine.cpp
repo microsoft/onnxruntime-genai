@@ -126,7 +126,9 @@ std::vector<RequestOutput> OgaEngine::Step() {
 
   for (int i = 0; i < scheduled_seq_groups.size(); i++) {
     auto& seq_group = scheduled_seq_groups[i].seq_group;
+    auto& queued_seq_group = scheduler_->GetRunning(i);
     seq_group.UpdateNumComputedTokens(scheduled_seq_groups[i].token_chunk_size);
+    queued_seq_group.UpdateNumComputedTokens(scheduled_seq_groups[i].token_chunk_size);
 
     auto& seq_group_metadata = seq_group_metadatas[i];
     // process output
@@ -143,8 +145,10 @@ std::vector<RequestOutput> OgaEngine::Step() {
         auto& child_samples = parent_child_dict[parent.seq_id];
 
         if (child_samples.empty()) {
-          parent.status = SequenceStatus::kFinishedAborted;
+          seq_group.seqs_dict.at(parent.seq_id).status = SequenceStatus::kFinishedAborted;
           seq_group.seqs_dict.erase(parent.seq_id);
+          queued_seq_group.seqs_dict.at(parent.seq_id).status = SequenceStatus::kFinishedAborted;
+          queued_seq_group.seqs_dict.erase(parent.seq_id);
           scheduler_->FreeSeq(parent);
           continue;
         }
@@ -160,7 +164,8 @@ std::vector<RequestOutput> OgaEngine::Step() {
         }
 
         auto& last_child_sample = child_samples.back();
-        parent.AppendTokenId(last_child_sample.output_token);
+        seq_group.seqs_dict.at(parent.seq_id).AppendTokenId(last_child_sample.output_token);
+        queued_seq_group.seqs_dict.at(parent.seq_id).AppendTokenId(last_child_sample.output_token);
         child_seqs.emplace_back(parent, parent);
       }
 
@@ -210,6 +215,7 @@ std::vector<RequestOutput> OgaEngine::Step() {
       for (auto& [seq, parent_seq] : child_seqs) {
         if (seq.seq_id != parent_seq.seq_id) {
           seq_group.Add(seq);
+          queued_seq_group.Add(seq);
           if (!seq.IsFinished()) {
             scheduler_->ForkSeq(parent_seq, seq);
           }

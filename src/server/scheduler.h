@@ -118,6 +118,8 @@ class Scheduler {
   void FreeFinishedSeqGroups();
   void FreeSeq(const Sequence& seq);
 
+  SequenceGroup& GetRunning(size_t idx);
+
   PreemptionMode Preempt(SequenceGroup& seq_group,
                          std::vector<std::tuple<int, int>>& blocks_to_swap_out);
 
