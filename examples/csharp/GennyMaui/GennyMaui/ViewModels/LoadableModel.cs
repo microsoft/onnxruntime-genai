@@ -127,12 +127,12 @@ namespace GennyMaui.ViewModels
             return JsonSerializer.Deserialize<ConfigurationModel>(configJson);
         }
 
-        private async Task DownloadHuggingFaceModel(HuggingFaceModel hfModel)
+        private async Task<string> DownloadHuggingFaceModel(HuggingFaceModel hfModel)
         {
             try
             {
                 hfModel.IsDownloading = true;
-                await HuggingfaceHub.HFDownloader.DownloadSnapshotAsync(
+                return await HuggingfaceHub.HFDownloader.DownloadSnapshotAsync(
                     hfModel.RepoId,
                     allowPatterns: [hfModel.Include],
                     localDir: hfModel.DownloadPath
@@ -141,11 +141,11 @@ namespace GennyMaui.ViewModels
             catch (Exception ex)
             {
                 await Application.Current.MainPage.DisplayAlert("Model Download Error", ex.Message, "OK");
+                return string.Empty;
             }
             finally
             {
                 hfModel.IsDownloading = false;
-                RefreshRemoteModelStatus();
             }
         }
 
@@ -204,17 +204,14 @@ namespace GennyMaui.ViewModels
 
             OpenModelAsync().ContinueWith(t =>
             {
-                if (t.Result)
-                {
-                    App.Current.Dispatcher.Dispatch(() =>
-                    {
-                        RefreshLocalModelStatus();
-                    });
-                }
-                else
+                if (!t.Result)
                 {
                     IsLocalModelSelected = false;
                 }
+                App.Current.Dispatcher.Dispatch(() =>
+                {
+                    RefreshLocalModelStatus();
+                });
             });
         }
 
@@ -258,7 +255,23 @@ namespace GennyMaui.ViewModels
             }
             else
             {
-                DownloadHuggingFaceModel(hfModel);
+                DownloadHuggingFaceModel(hfModel).ContinueWith(t =>
+                    {
+                        if (string.IsNullOrEmpty(t.Result))
+                        {
+                            foreach (var item in RemoteModels)
+                            {
+                                if (item.RepoId == hfModel.RepoId)
+                                {
+                                    item.IsChecked = false;
+                                }
+                            }
+                        }
+                        App.Current.Dispatcher.Dispatch(() =>
+                        {
+                            RefreshRemoteModelStatus();
+                        });
+                    }); ;
             }
         }
 
