@@ -93,6 +93,7 @@ namespace GennyMaui.ViewModels
                 IsModelLoaded = true;
 
                 RefreshLocalModelStatus();
+                RefreshRemoteModelStatus();
 
                 WeakReferenceMessenger.Default.Send(new PropertyChangedMessage<Model>(this, nameof(Model), null, Model));
                 WeakReferenceMessenger.Default.Send(new PropertyChangedMessage<Tokenizer>(this, nameof(Tokenizer), null, Tokenizer));
@@ -241,7 +242,7 @@ namespace GennyMaui.ViewModels
 
             if (hfModel.Exists)
             {
-                LoadModelCommand.NotifyCanExecuteChanged();
+                RefreshRemoteModelStatus();
                 return;
             }
             else
@@ -261,7 +262,8 @@ namespace GennyMaui.ViewModels
             {
                 LocalModelStatusString = "(⚡Ready to load)";
             }
-            if (IsModelLoaded)
+
+            if (IsModelLoaded && IsLocalModelSelected)
             {
                 LocalModelStatusString = "(✅Loaded)";
             }

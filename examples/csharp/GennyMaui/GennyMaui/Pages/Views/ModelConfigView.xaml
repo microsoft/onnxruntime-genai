@@ -20,6 +20,7 @@
                           CheckedChanged="LocalModelCheckBox_CheckedChanged"/>
                 <Entry VerticalOptions="Center"
                        Text="{Binding ModelPath}"
+                       Placeholder="Select to choose local model path"
                        IsReadOnly="True"
                        WidthRequest="{Binding Source={x:Reference Container}, Path=Width, ConverterParameter=x-180, Converter={toolkit:MathExpressionConverter}}" />
                 <Label Text="{Binding LocalModelStatusString}"
