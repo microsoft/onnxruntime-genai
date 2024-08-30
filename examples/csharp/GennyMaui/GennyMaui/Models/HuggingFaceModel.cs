@@ -25,7 +25,7 @@ namespace GennyMaui.Models
         {
             get {
                 var mainDir = FileSystem.Current.AppDataDirectory;
-                return Path.Combine(mainDir, RepoId);
+                return Path.GetFullPath(Path.Combine(mainDir, RepoId));
             }
         }
 
@@ -35,11 +35,11 @@ namespace GennyMaui.Models
                 var mainDir = FileSystem.Current.AppDataDirectory;
                 if (string.IsNullOrWhiteSpace(Subpath))
                 {
-                    return Path.Combine(mainDir, RepoId);
+                    return Path.GetFullPath(Path.Combine(mainDir, RepoId));
                 }
                 else
                 {
-                    return Path.Combine(mainDir, RepoId, Subpath);
+                    return Path.GetFullPath(Path.Combine(mainDir, RepoId, Subpath));
                 }
             }
         }
