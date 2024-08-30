@@ -197,48 +197,25 @@ __global__ void UpdateCacheIndirectionKernel(int32_t* tgt_indir_cache,
     return;
   }
 
-  // printf("batch_id = %d, beam_width = %d, beam_id = %d, max_seq_length = %d, time_step = %d\n", batch_id, beam_width, beam_id, max_seq_length, time_step);
-  
-  // printf("Can I access src_beam?\n");
   const int src_beam = beam_ids[batch_id * beam_width + beam_id] % beam_width;
-  // printf("I can access src_beam\n");
 
   const int tgt_offset = batch_id * beam_width * max_seq_length + beam_id * max_seq_length + time_step;
 
   if (time_step < input_seq_length) {
     // For time steps that correspond to the input sequence,
     // the beam that it comes from is always 0.
-    // printf("time_step < input_seq_length\n");
-    // printf("Can I access tgt_indir_cache?\n");
-    // printf("%d\n", tgt_indir_cache[tgt_offset]);
-    // printf("I can access tgt_indir_cache\n");
-
     tgt_indir_cache[tgt_offset] = static_cast<int32_t>(0);
   } else if (time_step == (current_length - 1)) {
     // For the final (newly generated) time step,
     // the beam that it comes from is always the beam that we
     // are currently processing (i.e.) from this point on, these time-steps
     // form the new beams.
-    // printf("time_step == (current_length - 1)\n");
-    // printf("Can I access tgt_indir_cache?\n");
-    // printf("%d\n", tgt_indir_cache[tgt_offset]);
-    // printf("I can access tgt_indir_cache\n");
-
     tgt_indir_cache[tgt_offset] = static_cast<int32_t>(beam_id);
   } else {
     // For all other time-steps, we look up the source indirection, to
     // see which beam it came from based on the `src_beam`.
     // printf("else branch\n");
     const int src_offset = batch_id * beam_width * max_seq_length + src_beam * max_seq_length + time_step;
-
-    // printf("Can I access src_indir_cache?\n");
-    // printf("%d\n", src_indir_cache[src_offset]);
-    // printf("I can access src_indir_cache\n");
-
-    // printf("Can I access tgt_indir_cache?\n");
-    // printf("%d\n", tgt_indir_cache[tgt_offset]);
-    // printf("I can access tgt_indir_cache\n");
-
     tgt_indir_cache[tgt_offset] = src_indir_cache[src_offset];
   }
 }
@@ -273,40 +250,17 @@ __global__ void CopyCrossQKSingleDecodeStepKernel(T* target, // shape [batch_bea
                                                   const int* alignment_heads,
                                                   int frames,
                                                   int max_length) {
-  // printf("qk_layer_pointers = %p\n", qk_layer_pointers);
-  // printf("qk_layer_pointers[0] = %p\n", qk_layer_pointers[0]);
-  // printf("qk_layer_pointers[1] = %p\n", qk_layer_pointers[1]);
-  // printf("qk_layer_pointers[2] = %p\n", qk_layer_pointers[2]);
-  // printf("qk_layer_pointers[3] = %p\n", qk_layer_pointers[3]);
-
   const int pair = blockIdx.x;
   const int num_alignment_heads = gridDim.x;
   const int bbm = blockIdx.y;
-  // printf("Moving alignment heads ptr\n");
   alignment_heads += (pair * 2);
-  // printf("Getting layer ptr\n");
   const int layer = *alignment_heads;
-  // printf("Getting layer head ptr\n");
   const int head = *(alignment_heads + 1);
 
-  // printf("bbm = %d, num_alignment_heads = %d, pair = %d, max_length = %d, frames = %d, token_index = %d\n", bbm, num_alignment_heads, pair, max_length, frames, token_index);
-
-  // printf("Getting target address\n");
   target += ((int64_t)bbm * num_alignment_heads + pair) * max_length * frames + ((int64_t)token_index * frames);
-  // printf("Can I access qk_layer_pointers?\n");
   T* src = qk_layer_pointers[layer] + ((int64_t)bbm * num_heads + head) * frames;
-  // printf("%f\n", src[0]);
-  // printf("I can access qk_layer_pointers\n");
 
   for (int tid = threadIdx.x; tid < frames; tid += blockDim.x) {
-    // printf("Can I access src[tid]?\n");
-    // printf("%f\n", src[tid]);
-    // printf("I can access src[tid]\n");
-
-    // printf("Can I access target[tid]?\n");
-    // printf("%f\n", target[tid]);
-    // printf("I can access target[tid]\n");
-
     target[tid] = src[tid]; // use vectorized read write in future if needed
   }
 }
@@ -366,21 +320,11 @@ __global__ void CopyDecoderCrossQKAllStepsKernel(int context_decoding_len,
   const int ret_seq_id = br % num_return_sequences;
 
   const int64_t offset_in_cache = ((int64_t)batch * num_return_sequences + ret_seq_id) * max_length + token_decoding_index + context_decoding_len;
-  // printf("Can I access cache_indir_data[offset_in_cache]?\n");
   int bi_src = batch * num_beams + cache_indir_data[offset_in_cache];
-  // printf("I can access cache_indir_data[offset_in_cache]\n");
 
   T* target    = cross_qk_output      + (((int64_t)br     * num_alignment_heads + (int64_t)pair) * total_decoding_length + token_decoding_index) * frames_of_k;
   const T* src = cross_qk_buffer_data + (((int64_t)bi_src * num_alignment_heads + (int64_t)pair) * max_length            + token_decoding_index) * frames_of_k;
   for (int tid = threadIdx.x; tid < frames_of_k; tid += blockDim.x) {
-    // printf("Can I access target[tid]?\n");
-    // printf("%f\n", target[tid]);
-    // printf("I can access target[tid]\n");
-
-    // printf("Can I access src[tid]?\n");
-    // printf("%f\n", src[tid]);
-    // printf("I can access src[tid]\n");
-
     target[tid] = src[tid]; // use vectorized read write in future if needed
   }
 }

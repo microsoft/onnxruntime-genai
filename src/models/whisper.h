@@ -61,6 +61,5 @@ struct Whisper_State : State {
   std::unique_ptr<OrtValue> cross_qk_final_;                // { batch_size, num_return_sequences, num_alignment_heads, decoded_length, 1500 }
 
   size_t cache_indirection_index_{~0U};
-  // int iteration_number_{0};
 };
 }  // namespace Generators
