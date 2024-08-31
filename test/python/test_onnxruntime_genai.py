@@ -84,6 +84,8 @@ def main():
     if not (
         sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8
     ):
+        log.debug(f"{os.path.abspath('test')} is writable: {os.access(os.path.abspath('test'), os.W_OK)}")
+        log.debug(f"{os.path.abspath('build')} is writable: {os.access(os.path.abspath('build'), os.W_OK)}")
         output_paths += download_models(os.path.abspath(args.test_models), "int4", "cpu")
         if og.is_cuda_available():
             output_paths += download_models(os.path.abspath(args.test_models), "int4", "cuda")
