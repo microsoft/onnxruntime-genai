@@ -35,6 +35,9 @@ void CXX_API(const char* model_path) {
       generator->ComputeLogits();
       generator->GenerateNextToken();
 
+      // Show usage of GetOutput
+      std::unique_ptr<OgaTensor> output_logits = generator->GetOutput("logits");
+
       const auto num_tokens = generator->GetSequenceCount(0);
       const auto new_token = generator->GetSequenceData(0)[num_tokens - 1];
       std::cout << tokenizer_stream->Decode(new_token) << std::flush;
