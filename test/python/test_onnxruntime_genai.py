@@ -86,6 +86,8 @@ def main():
     ):
         log.debug(f"{os.path.abspath('test')} is writable: {os.access(os.path.abspath('test'), os.W_OK)}")
         log.debug(f"{os.path.abspath('build')} is writable: {os.access(os.path.abspath('build'), os.W_OK)}")
+        log.debug(f"{os.path.abspath('test/test_models/phi-2/int4/')} is writable: {os.access(os.path.abspath('test/test_models/phi-2/int4/'), os.W_OK)}")
+        log.debug(f"{os.path.abspath('test/test_models/phi-2/int4/cpu')} is writable: {os.access(os.path.abspath('test/test_models/phi-2/int4/cpu'), os.W_OK)}")
         output_paths += download_models(os.path.abspath(args.test_models), "int4", "cpu")
         if og.is_cuda_available():
             output_paths += download_models(os.path.abspath(args.test_models), "int4", "cuda")
