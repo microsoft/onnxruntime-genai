@@ -91,7 +91,8 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 
 #elif defined(__APPLE__)
 #include "TargetConditionals.h"
-#if TARGET_OS_OSX
+#if TARGET_OS_OSX && ENABLE_PYTHON
+#define MACOS_USE_DLOPEN
 #include <dlfcn.h>
 #endif
 #endif
@@ -119,7 +120,7 @@ using OrtApiBaseFn = const OrtApiBase* (*)(void);
 /// Before using this C++ wrapper API, you MUST call Ort::InitApi to set the below 'api' variable
 inline const OrtApi* api{};
 
-#if defined(__linux__) || TARGET_OS_OSX
+#if defined(__linux__) || defined(MACOS_USE_DLOPEN)
 inline std::string GetCurrentModuleDir() {
   Dl_info dl_info;
   dladdr((void*)GetCurrentModuleDir, &dl_info);
@@ -200,7 +201,7 @@ inline void InitApi() {
     Generators::SetLogBool("ort_lib", true);
   }
 
-#if defined(__linux__) || TARGET_OS_OSX
+#if defined(__linux__) || defined(MACOS_USE_DLOPEN)
   // If the GenAI library links against the onnxruntime library, it will have a dependency on a specific
   // version of OrtGetApiBase.
   //
@@ -233,7 +234,7 @@ inline void InitApi() {
 #endif
 #endif
 
-#if TARGET_OS_OSX
+#if MACOS_USE_DLOPEN
   const std::string path = "libonnxruntime.dylib";
   void* ort_lib_handle = LoadDynamicLibraryIfExists(path);
 #endif
@@ -249,11 +250,11 @@ inline void InitApi() {
   }
 
   InitApiWithDynamicFn(ort_api_base_fn);
-#else   // defined(__linux__) || TARGET_OS_OSX
+#else   // defined(__linux__) || defined(MACOS_USE_DLOPEN)
   api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
   if (!api)
     throw std::runtime_error("Onnxruntime is installed but is too old, please install a newer version");
-#endif  // defined(__linux__) || TARGET_OS_OSX
+#endif  // defined(__linux__) || defined(MACOS_USE_DLOPEN)
 }
 
 /** \brief All C++ methods that can fail will throw an exception of this type
