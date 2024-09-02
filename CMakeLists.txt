@@ -86,6 +86,8 @@ target_link_directories(onnxruntime-genai PRIVATE ${ORT_LIB_DIR})
 # the ORT version to match in both.
 if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR (CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND ENABLE_PYTHON)))
 target_link_libraries(onnxruntime-genai PRIVATE ${ONNXRUNTIME_LIB})
+else()
+add_compile_definitions(_ORT_GENAI_USE_DLOPEN)
 endif()
 
 set_target_properties(onnxruntime-genai PROPERTIES FOLDER "Sources")

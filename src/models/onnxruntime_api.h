@@ -91,7 +91,7 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 
 #elif defined(__APPLE__)
 #include "TargetConditionals.h"
-#if TARGET_OS_OSX && ENABLE_PYTHON
+#if TARGET_OS_OSX && _ORT_GENAI_USE_DLOPEN
 #define MACOS_USE_DLOPEN
 #include <dlfcn.h>
 #endif
@@ -234,7 +234,7 @@ inline void InitApi() {
 #endif
 #endif
 
-#if MACOS_USE_DLOPEN
+#if defined(MACOS_USE_DLOPEN)
   const std::string path = "libonnxruntime.dylib";
   void* ort_lib_handle = LoadDynamicLibraryIfExists(path);
 #endif
