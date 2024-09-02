@@ -41,7 +41,7 @@ Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> s
   if (inputs.alignment_heads != nullptr) {
 #if USE_CUDA
     auto alignment_heads_type_and_shape_info = inputs.alignment_heads->ort_tensor_->GetTensorTypeAndShapeInfo();
-    auto alignment_heads_type = alignment_heads_type_and_shape_info->GetElementType(); // ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32
+    auto alignment_heads_type = alignment_heads_type_and_shape_info->GetElementType();  // ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32
     auto alignment_heads_shape = alignment_heads_type_and_shape_info->GetShape();
     alignment_heads_ = OrtValue::CreateTensor(*model_.allocator_device_, alignment_heads_shape, alignment_heads_type);
 
@@ -307,12 +307,10 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
       }
       break;
 
-    case RunState::Decoder:
-      {
-        bool search_buffers = true;
-        UpdateInputsOutputs(next_tokens, next_indices, current_length, search_buffers);
-      }
-      break;
+    case RunState::Decoder: {
+      bool search_buffers = true;
+      UpdateInputsOutputs(next_tokens, next_indices, current_length, search_buffers);
+    } break;
   }
 
   State::Run(*model_.session_decoder_, *model_.run_options_, batch_size);
@@ -364,7 +362,7 @@ void Whisper_State::UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens
 #endif
   }
 
-  if (output_cross_qk_.size() && !alignment_heads_) {
+  if (output_cross_qk_.size() && alignment_heads_) {
 #if USE_CUDA
     // Collect a GPU array of float* pointers from the vector of OrtValues to pass to the kernel
     std::vector<float*> output_cross_qk_ptrs{output_cross_qk_.size(), nullptr};
@@ -390,7 +388,7 @@ void Whisper_State::UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens
 }
 
 void Whisper_State::Finalize() {
-  if (output_cross_qk_.size() && !alignment_heads_) {
+  if (output_cross_qk_.size() && alignment_heads_) {
 #if USE_CUDA
     int decoded_length = *(past_sequence_length_->GetTensorMutableData<int32_t>()) + 1;
     auto output_cross_qk_dims = output_cross_qk_[0]->GetTensorTypeAndShapeInfo()->GetShape();

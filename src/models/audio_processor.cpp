@@ -79,24 +79,16 @@ std::unique_ptr<NamedTensors> AudioProcessor::Process(const Tokenizer& tokenizer
   named_tensors->emplace(std::string(Config::Defaults::InputFeaturesName),
                          std::make_shared<Tensor>(ProcessMel(mel, input_features_type_, allocator)));
 
-  // TODO: Encoding "<|startoftranscript|>" should return a single token.
-  // Right now, it returns 3. Need to have ort extensions address this.
   constexpr auto start_of_transcript = "<|startoftranscript|>";
-  const auto start_of_transcript_token_ids = tokenizer.Encode(start_of_transcript);
-  // if (start_of_transcript_token_id.size() != 1) {
-  //   throw std::runtime_error("Expected start of transcript token to be a single token. Actual: " +
-  //                            std::to_string(start_of_transcript_token_id.size()) + ". Please fix the tokenizer config.");
-  // }
-
+  const int32_t start_of_transcript_token_id = tokenizer.TokenToTokenId(start_of_transcript);
   const auto prompt_token_ids = tokenizer.GetDecoderPromptIds(audios->num_audios_, language, task, no_timestamps);
 
   const std::array<int64_t, 2> shape{static_cast<int64_t>(audios->num_audios_),
-                                     static_cast<int64_t>(start_of_transcript_token_ids.size() + prompt_token_ids.size())};
+                                     static_cast<int64_t>(1U + prompt_token_ids.size())};
   auto decoder_input_ids = OrtValue::CreateTensor<int32_t>(allocator, shape);
-  std::copy(start_of_transcript_token_ids.begin(), start_of_transcript_token_ids.end(),
-            decoder_input_ids->GetTensorMutableData<int32_t>());
+  decoder_input_ids->GetTensorMutableData<int32_t>()[0] = start_of_transcript_token_id;
   std::copy(prompt_token_ids.begin(), prompt_token_ids.end(),
-            decoder_input_ids->GetTensorMutableData<int32_t>() + start_of_transcript_token_ids.size());
+            decoder_input_ids->GetTensorMutableData<int32_t>() + 1);
 
   named_tensors->emplace(std::string(Config::Defaults::InputIdsName),
                          std::make_shared<Tensor>(std::move(decoder_input_ids)));

@@ -202,6 +202,12 @@ std::vector<int32_t> Tokenizer::GetDecoderPromptIds(size_t batch_size, const std
   return PadInputs(span_sequences, pad_token_id_);
 }
 
+int32_t Tokenizer::TokenToTokenId(const char* token) const {
+  extTokenId_t token_id;
+  CheckResult(OrtxConvertTokenToId(tokenizer_, token, &token_id));
+  return token_id;
+}
+
 #if USE_CUDA
 // Since Python/Others can and will hold onto a generator object past the model object's lifetime we need to ensure
 // the allocator used is not destroyed until last. This keeps the allocator around until exit, after all other memory

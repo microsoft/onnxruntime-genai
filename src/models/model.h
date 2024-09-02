@@ -31,7 +31,7 @@ struct State {
 
   virtual RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices = {}) = 0;
   virtual const CapturedGraphInfo* GetCapturedGraphInfo() const { return nullptr; }
-  virtual void Finalize() { }
+  virtual void Finalize() {}
 
   virtual OrtValue* GetOutput(const char* name);
 
@@ -78,6 +78,8 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer> {
 
   std::vector<int32_t> GetDecoderPromptIds(size_t batch_size, const std::string& language,
                                            const std::string& task, int32_t no_timestamps) const;
+
+  int32_t TokenToTokenId(const char* token) const;
 
   OrtxPtr<OrtxTokenizer> tokenizer_;
   std::shared_ptr<Tokenizer> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
