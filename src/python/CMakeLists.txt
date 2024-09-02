@@ -24,7 +24,7 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   cmake_policy(SET CMP0104 OLD)
   enable_language(CUDA)
   set_target_properties(python PROPERTIES LINKER_LANGUAGE CUDA)
-  target_link_libraries(python PRIVATE cublasLt cublas cudnn curand cufft cudart)
+  target_link_libraries(python PRIVATE cublas curand cudart)
 endif()
 
 # Avoid warning of Calling FetchContent_Populate(Lib) is deprecated temporarily
