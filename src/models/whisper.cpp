@@ -330,7 +330,8 @@ void Whisper_State::UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens
   if (!search_buffers) {
     // No need to update cache indirection and cross QK search buffers
     // when preparing to run decoder for the first time.
-    inputs_[cache_indirection_index_] = cache_indirection_.get();
+    if (cache_indirection_)
+      inputs_[cache_indirection_index_] = cache_indirection_.get();
     return;
   }
 
