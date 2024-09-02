@@ -120,4 +120,3 @@ steps:
           exit 0
       }
     workingDirectory: ${{ parameters.FolderPath }}
-    
