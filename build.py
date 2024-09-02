@@ -341,7 +341,7 @@ def _get_csharp_properties(args: argparse.Namespace):
     configuration = f"/p:Configuration={args.config}"
     platform = "/p:Platform=Any CPU"
     # need an extra config on windows as the actual build output is in the original build dir / config / config
-    native_lib_path = f"/p:NativeBuildOutputDir={str(args.build_dir / args.config)}"
+    native_lib_path = f"/p:NativeBuildOutputDir={str(args.build_dir / args.config) if util.is_windows() else str(args.build_dir)}"
 
     props = [configuration, platform, native_lib_path]
 
@@ -519,7 +519,7 @@ def build(args: argparse.Namespace, env: dict[str, str]):
 
     util.run(make_command, env=env)
 
-    if util.is_windows() and not args.skip_csharp:
+    if not args.skip_csharp:
         dotnet = str(_resolve_executable_path("dotnet"))
 
         # Build the library
@@ -536,7 +536,7 @@ def test(args: argparse.Namespace, env: dict[str, str]):
     ctest_cmd = [str(args.ctest_path), "--build-config", args.config, "--verbose", "--timeout", "10800"]
     util.run(ctest_cmd, cwd=str(args.build_dir))
 
-    if util.is_windows() and not args.skip_csharp:
+    if not args.skip_csharp:
         dotnet = str(_resolve_executable_path("dotnet"))
         csharp_test_command = [dotnet, "test"]
         csharp_test_command += _get_csharp_properties(args)

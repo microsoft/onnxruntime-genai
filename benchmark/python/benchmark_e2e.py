@@ -66,11 +66,10 @@ def monitor_cpu_memory():
 
 # Use input model to generate prompt
 def generate_prompt(model, tokenizer, prompt_length, use_graph_capture) -> str:
-    temperature = 1.0
     prompt = "a"
     tokens = tokenizer.encode(prompt)
     params=og.GeneratorParams(model)
-    params.set_search_options(do_sample=True, top_k=5, temperature=temperature, max_length=prompt_length, min_length=prompt_length+1)
+    params.set_search_options(max_length=prompt_length, min_length=prompt_length)
     params.input_ids = tokens
 
     if use_graph_capture:
@@ -108,7 +107,8 @@ def get_model_info_from_genai_config(model_input_folder):
     genai_config = json.load(genai_config_file)
     model_info = {}  
     model_info["execution_provider"] = "cpu"
-    if len(genai_config["model"]["decoder"]["session_options"]["provider_options"]) > 0:
+    provider_options = genai_config["model"]["decoder"]["session_options"]["provider_options"]
+    if len(provider_options) > 0 and len(provider_options[0].keys()) > 0:
         model_info["execution_provider"] = list(genai_config["model"]["decoder"]["session_options"]["provider_options"][0].keys())[0]
     genai_config_file.close()
     return model_info
@@ -226,9 +226,8 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     if args.verbose: print("Running warmup runs...")
     for _ in tqdm(range(args.warmup)):
         generator = og.Generator(model, params)
-        while not generator.is_done():
-            generator.compute_logits()
-            generator.generate_next_token()
+        generator.compute_logits()
+        generator.generate_next_token()
         if args.print_model_output: print(tokenizer.decode(generator.get_sequence(0)))
         # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
         del generator
@@ -357,7 +356,7 @@ def main(args):
             for g, gen_length in enumerate(args.generation_lengths):
                 if args.max_lengths:
                     m = l * len(args.generation_lengths) + g
-                    max_length = args.max_lengths[m]
+                    max_length = args.max_lengths[0] if len(args.max_lengths) == 1 else args.max_lengths[m]
                 else:
                     max_length = prompt_length + gen_length
                 print(f"Args: batch_size = {batch_size}, prompt_length = {prompt_length}, tokens = {gen_length}, max_length = {max_length}")
@@ -391,7 +390,7 @@ if __name__ == "__main__":
     parser.add_argument('-b', '--batch_sizes', type=str2intlist, default=[1], help='Number of sequences to generate in parallel')
     parser.add_argument('-l', '--prompt_lengths', type=str2intlist, default=[16], help='Number of tokens for prompt')
     parser.add_argument('-g', '--generation_lengths', type=str2intlist, default=[256], help='Number of tokens to generate after prompt')
-    parser.add_argument('-m', '--max_lengths', type=str2intlist, default=[], help='Max length buffer sizes... User should supply one for every combination of Prompt and Generation length')
+    parser.add_argument('-m', '--max_lengths', type=str2intlist, default=[], help='Max length is either a combination of prompt and generation length or one value broadcasting for all.')
     parser.add_argument('-r', '--repetitions', type=int, default=10, help='Number of times to repeat the benchmark')
     parser.add_argument('-w', '--warmup', type=int, default=5, help='Number of warmup runs before benchmarking')
     parser.add_argument('-k', '--top_k', type=int, default=50, help='Top k tokens to sample from')
@@ -404,4 +403,8 @@ if __name__ == "__main__":
     parser.add_argument('-mn', '--model_name', type=str, default='model_name', help='Model name defined by users')
     parser.add_argument('-pr', '--precision', type=str, default='fp16', help='Model precision for metrics info')
     args = parser.parse_args()
+
+    # check max_lengths
+    is_max_lengths_valid = not args.max_lengths or len(args.max_lengths) == 1 or len(args.max_lengths) == len(args.prompt_lengths) * len(args.generation_lengths)
+    assert is_max_lengths_valid, "len(args.max_lengths) is either a combination of args.prompt_lengths and args.generation_lengths or 1 that broadcasts for all"
     main(args)
