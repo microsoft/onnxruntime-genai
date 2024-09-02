@@ -188,12 +188,6 @@ def _parse_args():
         "CMake setup. Delete CMakeCache.txt if needed",
     )
 
-    parser.add_argument(
-        "--buildasx",
-        action="store_true",
-        help="[cross-compiling] Create ARM64X Binary.",
-    )
-
     return parser.parse_args()
 
 
@@ -522,15 +516,21 @@ def update(args: argparse.Namespace, env: dict[str, str]):
 
     if args.arm64:
         command += ["-A", "ARM64"]
-        if args.buildasx:
-            command += ["-D", "BUILD_AS_ARM64X=ARM64"]
     elif args.arm64ec:
         command += ["-A", "ARM64EC"]
-        if args.buildasx:
-            command += ["-D", "BUILD_AS_ARM64X=ARM64EC"]
 
     if args.arm64 or args.arm64ec:
+        # Build zlib from source. Otherwise zlib from Python might be used.
+        # And architecture mismatch will happen.
+        command += ["-D", "BUILD_ZLIB=ON"]
         command += ["-DOPENCV_SKIP_SYSTEM_PROCESSOR_DETECTION=ON"]
+
+        if args.test:
+            log.warning(
+                "Cannot test on host build machine for cross-compiled "
+                "ARM64 builds. Will skip test running after build."
+            )
+            args.test = False
 
     if args.cmake_extra_defines != []:
         command += args.cmake_extra_defines
