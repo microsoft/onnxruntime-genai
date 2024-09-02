@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 from typing import Dict, List, Optional, Union
+from onnxruntime_genai.models.builder import create_model
 
 
 def is_windows():
@@ -102,17 +103,28 @@ def download_model(model_name, input_path, output_path, precision, device, one_l
         precision,
         "-e",
         device,
+        "-xyz",
     ]
 
-    extra_options = ["--extra_options"]
+    extra_options = {}
     if device == "cpu" and precision == "int4":
-        extra_options += ["int4_accuracy_level=4"]
+        extra_options["int4_accuracy_level"] = 4
     if one_layer:
-        extra_options += ["num_hidden_layers=1"]
-    if len(extra_options) > 1:
-        command += extra_options
+        extra_options["num_hidden_layers"] = 1
 
-    run_subprocess(command).check_returncode()
+    create_model(model_name, input_path, output_path, precision, device, os.path.join(".", "cache_dir"), extra_options = extra_options)
+
+'''
+    print("**************************")
+    try:
+        completed_process = run_subprocess(command)
+        print(completed_process.returncode)
+        if completed_process.returncode:
+            print(completed_process.stderr)
+    except subprocess.CalledProcessError as e:
+        print("####################")
+        print(e.stderr)
+'''    
 
 
 def download_models(download_path, precision, device):
