@@ -147,12 +147,12 @@ namespace GennyMaui.ViewModels
         private async Task ShowOrtInfoAsync()
         {
             StringBuilder sb = new StringBuilder();
-            sb.Append("ORT Version: ");
+            sb.Append("Version: ");
             sb.Append(_ortVersionString);
             sb.Append('\n');
 
             sb.Append("Providers: ");
-            sb.Append(string.Join(",", OrtEps));
+            sb.Append(string.Join(", ", OrtEps));
             sb.Append('\n');
 
             await Application.Current.MainPage.DisplayAlert("ORT Info", sb.ToString(), "OK");
