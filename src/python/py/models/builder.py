@@ -376,7 +376,9 @@ class Model:
         # Quantize ONNX model to desired precision
         # TODO: Replace by quantizing the MatMuls as they are created
         if self.onnx_dtype == "int4" and self.quant_type is None:
+            print("quantize to int4")
             model = self.to_int4(model)
+            print("quantization done...")
 
         # Save ONNX model with only one external data file and delete any existing duplicate copies
         out_path = os.path.join(out_dir, self.filename)
@@ -388,6 +390,7 @@ class Model:
             print(f"Overwriting {data_path}")
             os.remove(data_path)
 
+        print("saving model...")
         save_model(
             model,
             out_path,
