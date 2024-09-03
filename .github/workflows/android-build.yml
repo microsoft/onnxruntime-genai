@@ -68,6 +68,7 @@ jobs:
           ORT_NIGHTLY_VERSION=$(curl -s "${{ env.ORT_NIGHTLY_REST_API }}" | jq -r '.value[0].versions[0].normalizedVersion')
           echo "$ORT_NIGHTLY_VERSION"
           echo "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" >> $GITHUB_ENV
+          $ONNXRUNTIME_VERSION = ${{ env.ORT_NIGHTLY_VERSION }}
 
       # have to create a dummy project to use `add package`
       - name: Download OnnxRuntime Nightly
