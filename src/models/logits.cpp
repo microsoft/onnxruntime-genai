@@ -208,7 +208,7 @@ RoamingArray<float> Logits::Get(size_t start, size_t size) {
     throw std::runtime_error("Get with start and size not supported for batch size != 1, got " + std::to_string(shape_[0]));
 
   size_t element_count = shape_[1] * shape_[2];
-  size_t element_size = type_ == Ort::TypeToTensorType<float>::type ? 4 : 2;
+  size_t element_size = type_ == Ort::TypeToTensorType<float> ? 4 : 2;
   size_t selected_element_count = size * shape_[2];
 
   output_last_tokens_ = OrtValue::CreateTensor(*model_.allocator_device_, std::array<int64_t, 3>({1, static_cast<int64_t>(size), shape_[2]}), type_);
@@ -219,7 +219,7 @@ RoamingArray<float> Logits::Get(size_t start, size_t size) {
   auto source = logits_raw.subspan(start * shape_[2] * element_size, selected_element_count * element_size);
   copy(source, logits_of_selected_tokens_raw);
 
-  if (type_ == Ort::TypeToTensorType<Ort::Float16_t>::type) {
+  if (type_ == Ort::TypeToTensorType<Ort::Float16_t>) {
     std::unique_ptr<OrtValue> logits_of_selected_tokens_fp32;
     ConvertFp16ToFp32(*model_.allocator_device_, *logits_of_selected_tokens, logits_of_selected_tokens_fp32, model_.device_type_, model_.cuda_stream_);
     output_last_tokens_ = std::move(logits_of_selected_tokens_fp32);
@@ -248,7 +248,7 @@ void Logits::Update(size_t token_count) {
   }
 
   shape_[1] = token_count;
-  StaticBuffer* sb_logits = type_ == Ort::TypeToTensorType<Ort::Float16_t>::type ? sb_logits16_ : sb_logits32_;
+  StaticBuffer* sb_logits = type_ == Ort::TypeToTensorType<Ort::Float16_t> ? sb_logits16_ : sb_logits32_;
   output_raw_ = !sb_logits ? OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_)
                            : sb_logits->CreateTensorOnStaticBuffer(shape_, type_);
   state_.outputs_[output_index_] = output_raw_.get();

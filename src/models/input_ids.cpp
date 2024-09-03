@@ -145,7 +145,7 @@ void InputIDs::Update(RoamingArray<int32_t> next_tokens, size_t start, size_t to
     value_ = sb_input_ids_->CreateTensorOnStaticBuffer(shape_, type_);
   }
   state_.inputs_[input_index_] = value_.get();
-  if (type_ == Ort::TypeToTensorType<int64_t>::type) {
+  if (type_ == Ort::TypeToTensorType<int64_t>) {
     auto* data = value_->GetTensorMutableData<int64_t>();
     auto next_tokens_cpu = next_tokens.GetCPU();
     assert(next_tokens_cpu.size() >= start + token_count);

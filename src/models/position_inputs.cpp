@@ -210,7 +210,7 @@ void PositionInputs::UpdatePositionIDs(int current_length, int past_length) {
   assert(current_length > past_length);
   position_ids_shape_[1] = current_length - past_length;
   position_ids_ = OrtValue::CreateTensor(*model_.allocator_device_, position_ids_shape_, type_);
-  if (type_ == Ort::TypeToTensorType<int32_t>::type)
+  if (type_ == Ort::TypeToTensorType<int32_t>)
     UpdatePositionIDsImpl<int32_t>(current_length, past_length);
   else
     UpdatePositionIDsImpl<int64_t>(current_length, past_length);
@@ -352,7 +352,7 @@ void PositionInputs::UpdateAttentionMask(int current_length, int past_length) {
     throw std::runtime_error("PositionInputs::UpdateAttentionMask - past_length only supported for batch_size=1.");
   attention_mask_shape_[1] = current_length;
   attention_mask_next_ = OrtValue::CreateTensor(*model_.allocator_device_, attention_mask_shape_, type_);
-  if (type_ == Ort::TypeToTensorType<int32_t>::type)
+  if (type_ == Ort::TypeToTensorType<int32_t>)
     UpdateAttentionMaskImpl(attention_mask_next_->GetTensorMutableData<int32_t>(), current_length, past_length);
   else
     UpdateAttentionMaskImpl(attention_mask_next_->GetTensorMutableData<int64_t>(), current_length, past_length);
