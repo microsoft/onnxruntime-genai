@@ -1,7 +1,7 @@
 ﻿# Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
-cmake_minimum_required(VERSION 3.26)
+cmake_minimum_required(VERSION 3.28)
 include(FetchContent)
 include(CMakeDependentOption)
 project(Generators LANGUAGES C CXX)
@@ -11,6 +11,12 @@ include(cmake/options.cmake)
 
 if("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_LESS 11)
   message(FATAL_ERROR  "GCC version must be greater than or equal to 11")
+endif()
+
+# Avoid warning of Calling FetchContent_Populate(Lib) is deprecated temporarily
+# TODO: find a better way to handle the header-only 3rd party deps
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.30.0")
+  cmake_policy(SET CMP0169 OLD)
 endif()
 
 if(MSVC)
@@ -88,9 +94,18 @@ if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linu
 target_link_libraries(onnxruntime-genai PRIVATE ${ONNXRUNTIME_LIB})
 endif()
 
+if(APPLE)
+target_link_libraries(onnxruntime-genai PRIVATE "-framework Foundation" "-framework CoreML")
+endif()
+
 set_target_properties(onnxruntime-genai PROPERTIES FOLDER "Sources")
 set_target_properties(onnxruntime-genai-static PROPERTIES FOLDER "Sources")
 source_group(TREE ${PROJECT_SOURCE_DIR} FILES ${generator_srcs})
+
+set(ONNXRUNTIME_GENAI_PUBLIC_HEADERS
+  ${SRC_ROOT}/ort_genai.h
+  ${SRC_ROOT}/ort_genai_c.h
+)
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   set_target_properties(onnxruntime-genai PROPERTIES LINKER_LANGUAGE CUDA)
@@ -151,6 +166,36 @@ if(USE_DML)
   add_dependencies(onnxruntime-genai-static RESTORE_PACKAGES)
 endif()
 
+if (BUILD_APPLE_FRAMEWORK)
+  # create Info.plist for the framework and podspec for CocoaPods (optional)
+  set(MACOSX_FRAMEWORK_NAME "onnxruntime-genai")
+  set(MACOSX_FRAMEWORK_IDENTIFIER "com.microsoft.onnxruntime-genai")
+  # Need to include CoreML as a weaklink for CocoaPods package if the EP is enabled
+  if(USE_COREML)
+    set(APPLE_WEAK_FRAMEWORK "\\\"CoreML\\\"")
+  endif()
+  set(INFO_PLIST_PATH "${CMAKE_CURRENT_BINARY_DIR}/Info.plist")
+  configure_file(${REPO_ROOT}/cmake/Info.plist.in ${INFO_PLIST_PATH})
+  configure_file(
+    ${REPO_ROOT}/tools/ci_build/github/apple/framework_info.json.template
+    ${CMAKE_CURRENT_BINARY_DIR}/framework_info.json)
+
+  set_target_properties(onnxruntime-genai PROPERTIES
+    FRAMEWORK TRUE
+    FRAMEWORK_VERSION A
+    MACOSX_FRAMEWORK_INFO_PLIST ${INFO_PLIST_PATH}
+    PUBLIC_HEADER "${ONNXRUNTIME_GENAI_PUBLIC_HEADERS}"
+  )
+
+  if (${CMAKE_SYSTEM_NAME} STREQUAL "iOS")
+    set_target_properties(onnxruntime-genai PROPERTIES
+      MACOSX_RPATH TRUE
+    )
+  else()
+    set_target_properties(onnxruntime-genai PROPERTIES INSTALL_RPATH "@loader_path")
+  endif()
+endif()
+
 if(ANDROID)
   # strip the binary if it's not a build with debug info
   set_target_properties(onnxruntime-genai PROPERTIES LINK_FLAGS_RELEASE -s)
@@ -185,6 +230,89 @@ foreach(DLL_FILE ${onnxruntime_libs})
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DLL_FILE} $<TARGET_FILE_DIR:onnxruntime-genai>
   )
 endforeach()
+
+# Assemble the Apple static framework (iOS and macOS)
+if(BUILD_APPLE_FRAMEWORK)
+  # when building for mac catalyst, the CMAKE_OSX_SYSROOT is set to MacOSX as well, to avoid duplication,
+  # we specify as `-macabi` in the name of the output static apple framework directory.
+  if (PLATFORM_NAME STREQUAL "macabi")
+    set(STATIC_FRAMEWORK_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_BUILD_TYPE}-macabi)
+  else()
+    set(STATIC_FRAMEWORK_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_BUILD_TYPE}-${CMAKE_OSX_SYSROOT})
+  endif()
+
+  # Setup the various directories required. Remove any existing ones so we start with a clean directory.
+  set(STATIC_LIB_DIR ${CMAKE_CURRENT_BINARY_DIR}/static_libraries)
+  set(STATIC_LIB_TEMP_DIR ${STATIC_LIB_DIR}/temp)
+  add_custom_command(TARGET onnxruntime-genai PRE_BUILD COMMAND ${CMAKE_COMMAND} -E rm -rf ${STATIC_LIB_DIR})
+  add_custom_command(TARGET onnxruntime-genai PRE_BUILD COMMAND ${CMAKE_COMMAND} -E make_directory ${STATIC_LIB_DIR})
+  add_custom_command(TARGET onnxruntime-genai PRE_BUILD COMMAND ${CMAKE_COMMAND} -E make_directory ${STATIC_LIB_TEMP_DIR})
+
+  set(STATIC_FRAMEWORK_DIR ${STATIC_FRAMEWORK_OUTPUT_DIR}/static_framework/onnxruntime-genai.framework)
+  add_custom_command(TARGET onnxruntime-genai PRE_BUILD COMMAND ${CMAKE_COMMAND} -E rm -rf ${STATIC_FRAMEWORK_DIR})
+  add_custom_command(TARGET onnxruntime-genai PRE_BUILD COMMAND ${CMAKE_COMMAND} -E make_directory ${STATIC_FRAMEWORK_DIR})
+
+  set(INTERNAL_LIBRARIES)
+  list(APPEND INTERNAL_LIBRARIES onnxruntime-genai-static)
+
+  # If it's an onnxruntime library, extract .o files from the original cmake build path to a separate directory for
+  # each library to avoid any clashes with filenames (e.g. utils.o)
+  foreach(_LIB ${INTERNAL_LIBRARIES} )
+    GET_TARGET_PROPERTY(_LIB_TYPE ${_LIB} TYPE)
+    if(_LIB_TYPE STREQUAL "STATIC_LIBRARY")
+      set(CUR_STATIC_LIB_OBJ_DIR ${STATIC_LIB_TEMP_DIR}/$<TARGET_LINKER_FILE_BASE_NAME:${_LIB}>)
+      add_custom_command(TARGET onnxruntime-genai POST_BUILD
+                         COMMAND ${CMAKE_COMMAND} -E make_directory ${CUR_STATIC_LIB_OBJ_DIR})
+      if (PLATFORM_NAME STREQUAL "macabi")
+        # There exists several duplicate names for source files under different subdirectories within
+        # each onnxruntime library. (e.g. onnxruntime/contrib_ops/cpu/element_wise_ops.o
+        # vs. onnxruntime/providers/core/cpu/math/element_wise_ops.o)
+        # In that case, using 'ar ARGS -x' to extract the .o files from .a lib would possibly cause duplicate naming files being overwritten
+        # and lead to missing undefined symbol error in the generated binary.
+        # So we use the below python script as a sanity check to do a recursive find of all .o files in ${CUR_TARGET_CMAKE_SOURCE_LIB_DIR}
+        # and verifies that matches the content of the .a, and then copy from the source dir.
+        # TODO: The copying action here isn't really necessary. For future fix, consider using the script extracts from the ar with the rename to potentially
+        # make both maccatalyst and other builds do the same thing.
+        set(CUR_TARGET_CMAKE_SOURCE_LIB_DIR ${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/${_LIB}.dir)
+        add_custom_command(TARGET onnxruntime-genai POST_BUILD
+                          COMMAND ar -t $<TARGET_FILE:${_LIB}> | grep "\.o$"  > ${_LIB}.object_file_list.txt
+                          COMMAND ${CMAKE_COMMAND} -E env python3 ${CMAKE_CURRENT_SOURCE_DIR}/maccatalyst_prepare_objects_for_prelink.py ${CUR_TARGET_CMAKE_SOURCE_LIB_DIR} ${CUR_STATIC_LIB_OBJ_DIR} ${CUR_STATIC_LIB_OBJ_DIR}/${_LIB}.object_file_list.txt
+                          WORKING_DIRECTORY ${CUR_STATIC_LIB_OBJ_DIR})
+      else()
+        add_custom_command(TARGET onnxruntime-genai POST_BUILD
+        COMMAND ar ARGS -x $<TARGET_FILE:${_LIB}>
+        WORKING_DIRECTORY ${CUR_STATIC_LIB_OBJ_DIR})
+      endif()
+    endif()
+  endforeach()
+
+  # do the pre-link with `ld -r` to create a single relocatable object with correct symbol visibility
+  add_custom_command(TARGET onnxruntime-genai POST_BUILD
+                     COMMAND ld ARGS -r -o ${STATIC_LIB_DIR}/prelinked_objects.o */*.o
+                     WORKING_DIRECTORY ${STATIC_LIB_TEMP_DIR})
+
+  # create the static library
+  add_custom_command(TARGET onnxruntime-genai POST_BUILD
+                     COMMAND libtool -static -o ${STATIC_FRAMEWORK_DIR}/onnxruntime-genai prelinked_objects.o
+                     WORKING_DIRECTORY ${STATIC_LIB_DIR})
+
+    # Assemble the other pieces of the static framework
+  add_custom_command(TARGET onnxruntime-genai POST_BUILD
+                     COMMAND ${CMAKE_COMMAND} -E
+                     copy_if_different ${INFO_PLIST_PATH} ${STATIC_FRAMEWORK_DIR}/Info.plist)
+
+  # add the framework header files
+  set(STATIC_FRAMEWORK_HEADER_DIR ${STATIC_FRAMEWORK_DIR}/Headers)
+  file(MAKE_DIRECTORY ${STATIC_FRAMEWORK_HEADER_DIR})
+
+  foreach(h_ ${ONNXRUNTIME_GENAI_PUBLIC_HEADERS})
+  get_filename_component(HEADER_NAME_ ${h_} NAME)
+  add_custom_command(TARGET onnxruntime-genai POST_BUILD
+                     COMMAND ${CMAKE_COMMAND} -E
+                     copy_if_different ${h_} ${STATIC_FRAMEWORK_HEADER_DIR}/${HEADER_NAME_})
+  endforeach()
+
+endif()
 
 # Have visual studio put all files into one single folder vs the default split of header files into a separate folder
 source_group(TREE ${GENERATORS_ROOT} FILES ${generator_srcs})
