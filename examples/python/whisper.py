@@ -27,14 +27,15 @@ def run(args: argparse.Namespace):
         readline.set_completer_delims(" \t\n;")
         readline.parse_and_bind("tab: complete")
         readline.set_completer(_complete)
-        audio_path = input("Audio Path: ")
-        if len(audio_path) == 0:
+        audio_paths = [audio_path.strip() for audio_path in input("Audio Paths (comma separated): ").split(",")]
+        if len(audio_paths) == 0:
             raise ValueError("No audio provided.")
 
         print("Loading audio...")
-        if not os.path.exists(audio_path):
-            raise FileNotFoundError(f"Audio file not found: {audio_path}")
-        audio = og.Audios.open(audio_path)
+        for audio_path in audio_paths:
+            if not os.path.exists(audio_path):
+                raise FileNotFoundError(f"Audio file not found: {audio_path}")
+        audio = og.Audios.open(*audio_paths)
 
         print("Processing audio...")
         inputs = processor(audios=audio, lang="en", task="transcribe")
@@ -47,7 +48,7 @@ def run(args: argparse.Namespace):
             max_length=256,
         )
 
-        batch_size = 1
+        batch_size = len(audio_paths)
         params.set_inputs(inputs)
 
         generator = og.Generator(model, params)

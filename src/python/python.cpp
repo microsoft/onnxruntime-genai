@@ -468,11 +468,17 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         if (audio_paths.empty())
           throw std::runtime_error("No audios provided");
 
-        if (audio_paths.size() > 1U)
-          throw std::runtime_error("Loading multiple audios is not supported");
+        std::vector<std::string> audio_paths_string;
+        std::vector<const char*> audio_paths_vector;
 
-        auto audio_path = audio_paths[0].cast<std::string>();
-        return LoadAudioImpl(audio_path.c_str());
+        for (const auto& audio_path : audio_paths) {
+          if (!pybind11::isinstance<pybind11::str>(audio_path))
+            throw std::runtime_error("Audio paths must be strings.");
+          audio_paths_string.push_back(audio_path.cast<std::string>());
+          audio_paths_vector.push_back(audio_paths_string.back().c_str());
+        }
+
+        return LoadAudios(audio_paths_vector);
       });
 
   pybind11::class_<PyNamedTensors>(m, "NamedTensors");

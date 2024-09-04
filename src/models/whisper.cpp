@@ -341,7 +341,11 @@ void Whisper_State::UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens
     cuda_unique_ptr<int32_t> beam_indices_ptr;
     if (beam_indices_gpu.empty()) {
       beam_indices_ptr = CudaMallocArray<int32_t>(params_->batch_size, &beam_indices_gpu);
-      cudaMemsetAsync(beam_indices_gpu.data(), 0, beam_indices_gpu.size_bytes(), model_.cuda_stream_);
+      std::vector<int32_t> beam_indices_cpu(params_->batch_size, 0);
+      std::iota(beam_indices_cpu.begin(), beam_indices_cpu.end(), 0);
+      CudaCheck() == cudaMemcpyAsync(beam_indices_gpu.data(), beam_indices_cpu.data(),
+                                     beam_indices_cpu.size() * sizeof(int32_t),
+                                     cudaMemcpyHostToDevice, model_.cuda_stream_);
     }
     std::unique_ptr<OrtValue> new_cache_indirection;
     auto cache_indirection_type = model_.session_info_->GetInputDataType("cache_indirection");

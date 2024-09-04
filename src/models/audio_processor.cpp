@@ -40,15 +40,16 @@ std::unique_ptr<OrtValue> ProcessMel(ort_extensions::OrtxObjectPtr<OrtxTensor>& 
 
 }  // namespace
 
-std::unique_ptr<Audios> LoadAudioImpl(const char* audio_path) {
-  if (!fs::path(audio_path).exists()) {
-    throw std::runtime_error("Audio path does not exist: " + std::string(audio_path));
+std::unique_ptr<Audios> LoadAudios(const std::span<const char* const>& audio_paths) {
+  for (const char* audio_path : audio_paths) {
+    if (!fs::path(audio_path).exists()) {
+      throw std::runtime_error("Audio path does not exist: " + std::string(audio_path));
+    }
   }
   ort_extensions::OrtxObjectPtr<OrtxRawAudios> audios;
-  const char* audios_paths[] = {audio_path};
-  CheckResult(OrtxLoadAudios(ort_extensions::ptr(audios), audios_paths, 1));
+  CheckResult(OrtxLoadAudios(ort_extensions::ptr(audios), audio_paths.data(), audio_paths.size()));
 
-  return std::make_unique<Audios>(std::move(audios), 1);
+  return std::make_unique<Audios>(std::move(audios), audio_paths.size());
 }
 
 AudioProcessor::AudioProcessor(Config& config, const SessionInfo& session_info)
@@ -86,9 +87,12 @@ std::unique_ptr<NamedTensors> AudioProcessor::Process(const Tokenizer& tokenizer
   const std::array<int64_t, 2> shape{static_cast<int64_t>(audios->num_audios_),
                                      static_cast<int64_t>(1U + prompt_token_ids.size())};
   auto decoder_input_ids = OrtValue::CreateTensor<int32_t>(allocator, shape);
-  decoder_input_ids->GetTensorMutableData<int32_t>()[0] = start_of_transcript_token_id;
-  std::copy(prompt_token_ids.begin(), prompt_token_ids.end(),
-            decoder_input_ids->GetTensorMutableData<int32_t>() + 1);
+  for (int64_t i = 0; i < audios->num_audios_; ++i) {
+    auto decoder_input_ids_span = std::span<int32_t>(decoder_input_ids->GetTensorMutableData<int32_t>() + i * shape[1],
+                                                     shape[1]);
+    decoder_input_ids_span[0] = start_of_transcript_token_id;
+    std::copy(prompt_token_ids.begin(), prompt_token_ids.end(), decoder_input_ids_span.data() + 1);
+  }
 
   named_tensors->emplace(std::string(Config::Defaults::InputIdsName),
                          std::make_shared<Tensor>(std::move(decoder_input_ids)));

@@ -79,7 +79,8 @@ OgaResult* OGA_API_CALL OgaLoadImage(const char* image_path, OgaImages** images)
 
 OgaResult* OGA_API_CALL OgaLoadAudio(const char* audio_path, OgaAudios** audios) {
   OGA_TRY
-  *audios = reinterpret_cast<OgaAudios*>(Generators::LoadAudioImpl(audio_path).release());
+  const std::vector<const char*> audio_paths_vector{audio_path};
+  *audios = reinterpret_cast<OgaAudios*>(Generators::LoadAudios(audio_paths_vector).release());
   return nullptr;
   OGA_CATCH
 }
