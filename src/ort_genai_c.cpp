@@ -503,7 +503,6 @@ void OGA_API_CALL OgaDestroyStringArray(OgaStringArray* string_array) {
   delete reinterpret_cast<std::vector<std::string>*>(string_array);
 }
 
->>>>>>> e503a2bd9420bc02d1b48c14acc7d8c2011bc21f
 void OGA_API_CALL OgaDestroyResult(OgaResult* p) {
   delete reinterpret_cast<Generators::Result*>(p);
 }
