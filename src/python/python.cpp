@@ -379,6 +379,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_property_readonly("eos_token_id", [](const PyGeneratorParams& v) { return v.params_->eos_token_id; })
       .def_property_readonly("vocab_size", [](const PyGeneratorParams& v) { return v.params_->vocab_size; })
       .def_readwrite("input_ids", &PyGeneratorParams::py_input_ids_)
+      // TODO(baijumeswani): Rename/redesign the whisper_input_features to be more generic
       .def_readwrite("whisper_input_features", &PyGeneratorParams::py_whisper_input_features_)
       .def_readwrite("alignment_heads", &PyGeneratorParams::py_alignment_heads_)
       .def("set_inputs", [](PyGeneratorParams& generator_params, PyNamedTensors* named_tensors) {
