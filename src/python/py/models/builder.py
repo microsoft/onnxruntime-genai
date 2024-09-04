@@ -250,15 +250,15 @@ class Model:
         }
 
         # MoE-specific variables
+        num_experts = config.num_experts if hasattr(config, "num_experts") else 1
         self.moe_attrs = {
-            "top_k": 1,                             # Number of experts to select in MoE layer
-            "activation_type": "relu",              # Activation function for MoE layer
-            "normalize_routing_weights": False,     # Normalize routing weights in MoE layer
-            "use_sparse_mixer": False,              # Use SparseMixer in MoE layer. Used in Phi3 MoE
-            "use_int4": True,                       # Use INT4 quantization in MoE layer, otherwise use INT8
+            "num_experts": num_experts,                       # Number of experts in MoE layer
+            "top_k": 1,                                       # Number of experts to select in MoE layer
+            "activation_type": "relu",                        # Activation function for MoE layer
+            "normalize_routing_weights": False,               # Normalize routing weights in MoE layer
+            "use_sparse_mixer": False,                        # Use SparseMixer in MoE layer. Used in Phi3 MoE
+            "use_int4": True,                                 # Use INT4 quantization in MoE layer, otherwise use INT8
         }
-        if hasattr(config, "num_experts"):
-            self.moe_attrs["num_experts"] = config.num_experts
 
         # LM head-specific variables
         self.lm_head_attrs = {
@@ -1533,36 +1533,39 @@ class Model:
         use_sparse_mixer = self.moe_attrs["use_sparse_mixer"]
         use_int4 = self.moe_attrs["use_int4"]
 
-        gate_ops_base = f"/model/layers.{layer_id}/moe/gate/"
         moe_name = f"/model/layers.{layer_id}/moe"
+        gate_ops_base = f"{moe_name}/gate"
 
         # Make MoE nodes
-        gate_name = gate_ops_base + "MatMul"
+        gate_name = f"{gate_ops_base}/MatMul"
         self.make_matmul(bsm.gate, gate_name, root_input)
 
-        shape_name = gate_ops_base + "Shape"
+        shape_name = f"{gate_ops_base}/Shape"
         self.make_shape(shape_name, f"{gate_name}/output_0", shape=[3])
 
-        gather_name = gate_ops_base + "Gather"
+        gather_name = f"{gate_ops_base}/Gather"
         self.make_gather(gather_name, [f"{shape_name}/output_0", "/model/constants/TensorProto.INT64/0D/2"], axis=0)
 
-        unsqueeze_name = gate_ops_base + "Unsqueeze"
+        unsqueeze_name = f"{gate_ops_base}/Unsqueeze"
         self.make_unsqueeze(unsqueeze_name, [f"{gather_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"], dtype=TensorProto.INT64, shape=[1])
 
-        concat_name = gate_ops_base + "Concat"
+        concat_name = f"{gate_ops_base}/Concat"
         self.make_concat(concat_name, ["/model/constants/TensorProto.INT64/1D/-1", f"{unsqueeze_name}/output_0"], dtype=TensorProto.INT64, shape=[2], axis=0)
 
-        gate_reshape_name = gate_ops_base + "Reshape"
+        gate_reshape_name = f"{gate_ops_base}/Reshape"
         self.make_reshape(gate_reshape_name, [f"{gate_name}/output_0", f"{concat_name}/output_0"], dtype=self.io_dtype, shape=['num_rows', num_experts])
 
         def quant_dequant(weights, quant_mode: bool = True):
             type = torch.quint4x2 if quant_mode else torch.int8
-            # The following line is needed use torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix()
-            import tensorrt_llm
 
-            _, processed_q_weight, torch_weight_scales = (
-                torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix(weights.T.cpu().contiguous(), type)
-            )
+            try:
+                import tensorrt_llm
+
+                _, processed_q_weight, torch_weight_scales = (
+                    torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix(weights.T.cpu().contiguous(), type)
+                )
+            except:
+                print("import tensorrt_llm is needed to use torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix()")
 
             return torch_weight_scales.to(torch.float16), processed_q_weight
 
@@ -2582,8 +2585,6 @@ class Phi3MoE128KModel(MistralModel):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         assert io_dtype == TensorProto.FLOAT16, "This model only supports float16 io type."
 
-        self.rotemb_attrs["rotemb_name"] = "rotary_emb"
-
         self.layernorm_attrs["simple"] = False
 
         self.moe_attrs["num_experts"] = 16
@@ -2609,6 +2610,14 @@ class Phi3MoE128KModel(MistralModel):
             self.layernorm_attrs["last_layernorm"] = True
 
 
+def check_extra_options(kv_pairs):
+    if "use_8bits_moe" in kv_pairs:
+        assert(kv_pairs["use_8bits_moe"] == "1" or kv_pairs["use_8bits_moe"] == "0"), "use_8bits_moe must be 0 or 1."
+
+    if "enable_cuda_graph" in kv_pairs:
+        assert(kv_pairs["enable_cuda_graph"] == "1" or kv_pairs["enable_cuda_graph"] == "0"), "enable_cuda_graph must be 0 or 1."
+
+
 def parse_extra_options(kv_items):
     """
     Parse key value pairs that are separated by '='
@@ -2621,6 +2630,7 @@ def parse_extra_options(kv_items):
             kv_pairs[kv[0].strip()] = kv[1].strip()
 
     print(f"Extra options: {kv_pairs}")
+    check_extra_options(kv_pairs)
     return kv_pairs
 
 
