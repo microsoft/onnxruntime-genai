@@ -46,15 +46,24 @@ Note: You can try to install AutoAWQ directly with `pip install autoawq`. Howeve
 
 ## 3. Install the generate() API
 
-Currently, this feature is brand new and requires building the generate() API [from source](https://onnxruntime.ai/docs/genai/howto/build-from-source.html).
+Based on your desired hardware target, pick from one of the following options to install ONNX Runtime GenAI.
 
-<!-- Uncomment below once new RC is built and published -->
-<!-- ```bash
-$ pip install numpy
-$ pip install --pre onnxruntime-genai-cuda --index-url=https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-genai/pypi/simple/
+### CPU
+```bash
+$ pip install onnxruntime-genai
 ```
 
-You should now see `onnxruntime-genai-cuda` in your `pip list`. -->
+### CUDA
+```bash
+$ pip install onnxruntime-genai-cuda
+```
+
+### DirectML
+```bash
+$ pip install onnxruntime-genai-directml
+```
+
+You should now see `onnxruntime-genai` in your `pip list`.
 
 ## 4. Run example script
 
