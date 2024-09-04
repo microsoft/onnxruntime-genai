@@ -141,42 +141,6 @@ struct Generator : LeakChecked<Generator> {
   bool computed_logits_{};  // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
 };
 
-struct AssistantGenerator : Generator {
-  AssistantGenerator(const Model& model, const GeneratorParams& params);
-
-  void ComputeLogits() override;
-  void GenerateNextToken() override;
-
-  void AcceptCandidateTokens(RoamingArray<int32_t> next_tokens);
-  RoamingArray<int32_t> GetCandidateTokens() const;
-
-  int candidate_length_{};       // Set to the number of generated candiates in ComputeLogits() and number of selected candidates after GenerateNextTokens().
-  int max_candidate_length_{5};  // TODO: Move to param config.
-
- protected:
-  void ComputeLogits(RoamingArray<int32_t> next_tokens);
-
- private:
-  bool first_run_in_assist_{true};  // Set to false in ComputeLogits() and true after AcceptCandidateTokens().
-};
-
-// TODO: Inherit from Generator?
-struct SpeculativeDecodingGenerator {
-  SpeculativeDecodingGenerator(const Model& model, const Model& assistant_model, const GeneratorParams& params);
-
-  bool IsDone() const;
-  void ComputeLogits();
-  void GenerateNextToken();
-
-  std::unique_ptr<AssistantGenerator> assistant_generator_;
-  std::shared_ptr<const Model> model_;
-  std::unique_ptr<State> state_;
-  std::unique_ptr<Search> search_;
-  bool computed_logits_{};       // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
-  int candidate_length_{};       // Set to the number of generated candiates in ComputeLogits() and number of selected candidates after GenerateNextTokens().
-  int max_candidate_length_{5};  // TODO: Move to param config.
-};
-
 struct OrtGlobals {
   OrtGlobals();
 
@@ -198,9 +162,7 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path);
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Model& model);
 std::shared_ptr<GeneratorParams> CreateGeneratorParams();  // For benchmarking purposes only
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params);
-std::unique_ptr<SpeculativeDecodingGenerator> CreateSpeculativeDecodingGenerator(const Model& model, const Model& assistant_model, const GeneratorParams& params);
 std::vector<std::vector<int32_t>> Generate(const Model& model, const GeneratorParams& params);  // Uses CreateGenerator and a simple loop to return the entire sequence
-std::vector<std::vector<int32_t>> Generate(const Model& model, const Model& assistant_model, const GeneratorParams& params);
 
 float Float16ToFloat32(uint16_t v);  // v is a IEEE 752-2008 binary16 format, 1 sign bit, 5 bit exponent, 10 bit fraction
 void top_k_indices(std::span<int32_t> top_k, std::span<const float> inputs);

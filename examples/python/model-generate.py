@@ -2,15 +2,9 @@ import onnxruntime_genai as og
 import argparse
 import time
 
-
 def main(args):
     if args.verbose: print("Loading model...")
     model = og.Model(f'{args.model}')
-    assistant_model = (
-        og.Model(f"{args.assistant_model}")
-        if hasattr(args, "assistant_model")
-        else None
-    )
     if args.verbose: print("Model loaded")
     tokenizer = og.Tokenizer(model)
     if args.verbose: print("Tokenizer created")
@@ -21,13 +15,13 @@ def main(args):
         prompts = ["I like walking my cute dog",
                    "What is the best restaurant in town?",
                    "Hello, how are you today?"]
-
+    
     if args.chat_template:
         if args.chat_template.count('{') != 1 or args.chat_template.count('}') != 1:
             print("Error, chat template must have exactly one pair of curly braces, e.g. '<|user|>\n{input} <|end|>\n<|assistant|>'")
             exit(1)
         prompts[:] = [f'{args.chat_template.format(input=text)}' for text in prompts]
-
+        
     input_tokens = tokenizer.encode_batch(prompts)
     if args.verbose: print(f'Prompt(s) encoded: {prompts}')
 
@@ -48,10 +42,7 @@ def main(args):
 
     if args.verbose: print("Generating tokens ...\n")
     start_time = time.time()
-    if assistant_model is None:
-        output_tokens = model.generate(params)
-    else:
-        output_tokens = model.generate_with_assist(assistant_model, params)
+    output_tokens = model.generate(params)
     run_time = time.time() - start_time
 
     for i in range(len(prompts)):
@@ -65,16 +56,9 @@ def main(args):
     print(f"Tokens: {total_tokens} Time: {run_time:.2f} Tokens per second: {total_tokens/run_time:.2f}")
     print()
 
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS, description="End-to-end token generation loop example for gen-ai")
     parser.add_argument('-m', '--model', type=str, required=True, help='Onnx model folder path (must contain config.json and model.onnx)')
-    parser.add_argument(
-        "-a",
-        "--assistant_model",
-        type=str,
-        help="Assistant onnx model folder path (must contain config.json and model.onnx)",
-    )
     parser.add_argument('-pr', '--prompts', nargs='*', required=False, help='Input prompts to generate tokens from. Provide this parameter multiple times to batch multiple prompts')
     parser.add_argument('-i', '--min_length', type=int, help='Min number of tokens to generate including the prompt')
     parser.add_argument('-l', '--max_length', type=int, help='Max number of tokens to generate including the prompt')

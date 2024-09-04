@@ -327,38 +327,6 @@ struct PyGenerator {
   PyRoamingArray<int32_t> py_sequencelengths_;
 };
 
-// TODO(bowenbao): merge with PyGenerator?
-struct PySpeculativeDecodingGenerator {
-  PySpeculativeDecodingGenerator(Model& model, Model& assistant_model, PyGeneratorParams& params) {
-    params.Prepare();
-    generator_ = CreateSpeculativeDecodingGenerator(model, assistant_model, params);
-  }
-
-  pybind11::array_t<int32_t> GetNextTokens() {
-    py_tokens_.Assign(generator_->search_->GetNextTokens());
-    return ToPython(py_tokens_.GetCPU());
-  }
-
-  void ComputeLogits() {
-    generator_->ComputeLogits();
-  }
-
-  void GenerateNextToken() {
-    generator_->GenerateNextToken();
-  }
-
-  bool IsDone() const {
-    return generator_->IsDone();
-  }
-
- private:
-  std::unique_ptr<SpeculativeDecodingGenerator> generator_;
-  PyRoamingArray<int32_t> py_tokens_;
-  PyRoamingArray<int32_t> py_indices_;
-  PyRoamingArray<int32_t> py_sequence_;
-  PyRoamingArray<int32_t> py_sequencelengths_;
-};
-
 void SetLogOptions(const pybind11::kwargs& dict) {
   for (auto& entry : dict) {
     auto name = entry.first.cast<std::string>();
@@ -447,7 +415,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         return CreateModel(GetOrtEnv(), config_path.c_str());
       }))
       .def("generate", [](Model& model, PyGeneratorParams& params) { params.Prepare(); return Generate(model, params); })
-      .def("generate_with_assist", [](Model& model, const Model& assistant_model, PyGeneratorParams& params) { params.Prepare(); return Generate(model, assistant_model, params); })
       .def_property_readonly(
           "device_type", [](const Model& model) { return to_string(model.device_type_); }, "The device type the model is running on")
       .def("create_multimodal_processor", [](const Model& model) { return model.CreateMultiModalProcessor(); });
@@ -460,13 +427,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("generate_next_token", &PyGenerator::GenerateNextToken)
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
       .def("get_sequence", &PyGenerator::GetSequence);
-
-  pybind11::class_<PySpeculativeDecodingGenerator>(m, "SpeculativeDecodingGenerator")
-      .def(pybind11::init<Model&, Model&, PyGeneratorParams&>())
-      .def("is_done", &PySpeculativeDecodingGenerator::IsDone)
-      .def("compute_logits", &PySpeculativeDecodingGenerator::ComputeLogits)
-      .def("generate_next_token", &PySpeculativeDecodingGenerator::GenerateNextToken)
-      .def("get_next_tokens", &PySpeculativeDecodingGenerator::GetNextTokens);
 
   pybind11::class_<Images>(m, "Images")
       .def_static("open", [](pybind11::args image_paths) {

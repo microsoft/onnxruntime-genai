@@ -27,10 +27,9 @@ struct Search : LeakChecked<Search> {
   virtual void ApplyMinLength(int min_length) = 0;
   virtual void ApplyRepetitionPenalty(float penalty) = 0;
 
-  // Used by Speculative search
+  // Used by Continuous Decoding
   virtual void DropLastTokens(size_t num_tokens) { assert(false); };
   virtual void SetNextTokens(RoamingArray<int32_t> next_tokens) { assert(false); };
-  virtual RoamingArray<int32_t> CheckCandidates(RoamingArray<int32_t> sequence, int candidate_length) { assert(false); };
 
   std::shared_ptr<const GeneratorParams> params_;
 };
@@ -56,7 +55,7 @@ struct Search_Cpu : Search {
 
   cpu_span<int32_t> next_tokens_;  // shape (beam_size*batch_size)
 
-  std::span<float> next_token_scores_;  // shape (beam_size*batch_size, vocab_size) or shape(candidate_tokens_count, vocab_size) for speculative search
+  std::span<float> next_token_scores_;  // shape (beam_size*batch_size, vocab_size)
 
   Sequences sequences_;
   bool done_{};
@@ -73,7 +72,7 @@ struct GreedySearch_Cpu : Search_Cpu {
   void SampleTopP(float p, float temperature) override;
   void SampleTopKTopP(int /*k*/, float /*p*/, float /*temperature*/) override;
 
-  // Used by Speculative search.
+  // Used by continuous decoding search.
   void SetNextTokens(RoamingArray<int32_t> next_tokens) override;
   void DropLastTokens(size_t num_tokens) override;
 
@@ -115,20 +114,6 @@ struct BeamSearch_Cpu : Search_Cpu {
   bool finalized_{};  // To avoid calling Finalize multiple times
 
   std::unique_ptr<BeamSearchScorer> beam_scorer_;
-};
-
-struct SpeculativeGreedySearch_Cpu : GreedySearch_Cpu {
-  SpeculativeGreedySearch_Cpu(const GeneratorParams& params) : GreedySearch_Cpu(params) {};
-  RoamingArray<int32_t> CheckCandidates(RoamingArray<int32_t> sequence, int candidate_length);
-
-  RoamingArray<int32_t> GetNextTokens() override;
-
- protected:
-  void ApplyMinLength(int min_length, size_t token_idx);
-  void ApplyRepetitionPenalty(float penalty, size_t token_idx);
-
- private:
-  cpu_span<int32_t> next_accepted_tokens_;  // shape(accepted_token_counts) for speculative search
 };
 
 }  // namespace Generators

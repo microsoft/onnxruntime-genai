@@ -15,16 +15,10 @@ def main(args):
     if args.verbose: print("Tokenizer created")
     if args.verbose: print()
 
-    assistant_model = None
-    if hasattr(args, "assistant_model"):
-        assistant_model = og.Model(args.assistant_model)
-        if args.verbose:
-            print("Assistant model loaded")
-
     search_options = {name:getattr(args, name) for name in ['do_sample', 'max_length', 'min_length', 'top_p', 'top_k', 'temperature', 'repetition_penalty'] if name in args}
 
     if args.verbose: print(search_options)
-
+    
     if args.chat_template:
         if args.chat_template.count('{') != 1 or args.chat_template.count('}') != 1:
             print("Error, chat template must have exactly one pair of curly braces, e.g. '<|user|>\n{input} <|end|>\n<|assistant|>'")
@@ -49,16 +43,13 @@ def main(args):
         params = og.GeneratorParams(model)
         params.set_search_options(**search_options)
         params.input_ids = input_tokens
-        if assistant_model is not None:
-            generator = og.SpeculativeDecodingGenerator(model, assistant_model, params)
-        else:
-            generator = og.Generator(model, params)
+        generator = og.Generator(model, params)
         if args.verbose: print("Generator created")
 
         if args.verbose: print("Running generation loop ...")
         if args.timings:
             first = True
-            generated_tokens = []
+            new_tokens = []
 
         print()
         print("Output: ", end='', flush=True)
@@ -72,11 +63,9 @@ def main(args):
                         first_token_timestamp = time.time()
                         first = False
 
-                new_tokens = generator.get_next_tokens()
-                for new_token in new_tokens:
-                    print(tokenizer_stream.decode(new_token), end="", flush=True)
-                if args.timings:
-                    generated_tokens.extend(new_tokens)
+                new_token = generator.get_next_tokens()[0]
+                print(tokenizer_stream.decode(new_token), end='', flush=True)
+                if args.timings: new_tokens.append(new_token)
         except KeyboardInterrupt:
             print("  --control+c pressed, aborting generation--")
         print()
@@ -88,20 +77,12 @@ def main(args):
         if args.timings:
             prompt_time = first_token_timestamp - started_timestamp
             run_time = time.time() - first_token_timestamp
-            print(
-                f"Prompt length: {len(input_tokens)}, New tokens: {len(generated_tokens)}, Time to first: {(prompt_time):.2f}s, Prompt tokens per second: {len(input_tokens)/prompt_time:.2f} tps, New tokens per second: {len(generated_tokens)/run_time:.2f} tps"
-            )
+            print(f"Prompt length: {len(input_tokens)}, New tokens: {len(new_tokens)}, Time to first: {(prompt_time):.2f}s, Prompt tokens per second: {len(input_tokens)/prompt_time:.2f} tps, New tokens per second: {len(new_tokens)/run_time:.2f} tps")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS, description="End-to-end AI Question/Answer example for gen-ai")
     parser.add_argument('-m', '--model', type=str, required=True, help='Onnx model folder path (must contain config.json and model.onnx)')
-    parser.add_argument(
-        "-a",
-        "--assistant_model",
-        type=str,
-        help="Assistant onnx model folder path (must contain config.json and model.onnx)",
-    )
     parser.add_argument('-i', '--min_length', type=int, help='Min number of tokens to generate including the prompt')
     parser.add_argument('-l', '--max_length', type=int, help='Max number of tokens to generate including the prompt')
     parser.add_argument('-ds', '--do_random_sampling', action='store_true', help='Do random sampling. When false, greedy or beam search are used to generate the output. Defaults to false')

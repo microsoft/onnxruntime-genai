@@ -22,7 +22,7 @@ struct PositionInputs {
 
   void UpdatePositionIDs(int current_length);
   void UpdateAttentionMask(int current_length);
-  // Used by speculative decoding.
+  // Used by continuous decoding.
   void UpdatePositionIDs(int current_length, int past_length);
   void UpdateAttentionMask(int current_length, int past_length);
 
@@ -34,7 +34,7 @@ struct PositionInputs {
   template <typename T>
   void UpdateAttentionMaskImpl(T* data, const T* old_data, int current_length);
 
-  // Used by speculative decoding
+  // Used by continuous decoding
   template <typename T>
   void UpdatePositionIDsImpl(int current_length, int past_length);
   template <typename T>

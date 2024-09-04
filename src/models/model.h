@@ -33,7 +33,6 @@ struct State {
 
   OrtValue* GetOutput(const char* name);
 
-  // Used by speculative search
   virtual RoamingArray<float> Run(RoamingArray<int32_t> sequence, int next_token_length, int past_length, int return_last_logit_count) { throw std::runtime_error("Not implemented"); };
 
   std::shared_ptr<const GeneratorParams> params_;

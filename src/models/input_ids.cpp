@@ -126,6 +126,7 @@ void InputIDs::Update(RoamingArray<int32_t> next_tokens_unk) {
   }
 }
 
+// TODO(aciddelgado): Is this ok? add cuda support
 void InputIDs::Update(RoamingArray<int32_t> next_tokens, size_t start, size_t token_count) {
   switch (model_.device_type_) {
     case DeviceType::CPU: {
