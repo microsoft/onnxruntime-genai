@@ -87,9 +87,9 @@ std::unique_ptr<NamedTensors> AudioProcessor::Process(const Tokenizer& tokenizer
   const std::array<int64_t, 2> shape{static_cast<int64_t>(audios->num_audios_),
                                      static_cast<int64_t>(1U + prompt_token_ids.size())};
   auto decoder_input_ids = OrtValue::CreateTensor<int32_t>(allocator, shape);
-  for (int64_t i = 0; i < audios->num_audios_; ++i) {
-    auto decoder_input_ids_span = std::span<int32_t>(decoder_input_ids->GetTensorMutableData<int32_t>() + i * shape[1],
-                                                     shape[1]);
+  for (size_t i = 0; i < audios->num_audios_; ++i) {
+    auto decoder_input_ids_span = std::span<int32_t>(decoder_input_ids->GetTensorMutableData<int32_t>() + i * static_cast<size_t>(shape[1]),
+                                                     static_cast<size_t>(shape[1]));
     decoder_input_ids_span[0] = start_of_transcript_token_id;
     std::copy(prompt_token_ids.begin(), prompt_token_ids.end(), decoder_input_ids_span.data() + 1);
   }
