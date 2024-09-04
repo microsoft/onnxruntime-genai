@@ -5,10 +5,10 @@ void PrintUsage()
 {
     Console.WriteLine("Usage:");
     Console.WriteLine("  -m model_path");
-    Console.WriteLine("  -i (optional): Intereactive mode");
+    Console.WriteLine("  -i (optional): Interactive mode");
 }
 
-OgaHandle ogaHandle = new OgaHandle();
+using OgaHandle ogaHandle = new OgaHandle();
 
 if (args.Length < 1)
 {
@@ -16,7 +16,7 @@ if (args.Length < 1)
     Environment.Exit(-1);
 }
 
-bool intereactive = false;
+bool interactive = false;
 string modelPath = string.Empty;
 
 uint i = 0;
@@ -25,7 +25,7 @@ while (i < args.Length)
     var arg = args[i];
     if (arg == "-i")
     {
-        intereactive = true;
+        interactive = true;
     }
     else if (arg == "-m")
     {
@@ -47,13 +47,13 @@ Console.WriteLine("Hello, Phi!");
 Console.WriteLine("-------------");
 
 Console.WriteLine("Model path: " + modelPath);
-Console.WriteLine("Intereactive: " + intereactive);
+Console.WriteLine("Interactive: " + interactive);
 
 using Model model = new Model(modelPath);
 using Tokenizer tokenizer = new Tokenizer(model);
 
 var option = 2;
-if (intereactive)
+if (interactive)
 {
     Console.WriteLine("Please enter option number:");
     Console.WriteLine("1. Complete Output");
@@ -64,7 +64,7 @@ if (intereactive)
 do
 {
     string prompt = "def is_prime(num):"; // Example prompt
-    if (intereactive)
+    if (interactive)
     {
         Console.WriteLine("Prompt:");
         prompt = Console.ReadLine();
@@ -80,17 +80,22 @@ do
     generatorParams.SetInputSequences(sequences);
     if (option == 1) // Complete Output
     {
+        var watch = System.Diagnostics.Stopwatch.StartNew();
         var outputSequences = model.Generate(generatorParams);
         var outputString = tokenizer.Decode(outputSequences[0]);
-
+        watch.Stop();
+        var runTimeInSeconds = watch.Elapsed.TotalSeconds;
         Console.WriteLine("Output:");
         Console.WriteLine(outputString);
+        var totalTokens = outputSequences[0].Length;
+        Console.WriteLine($"Tokens: {totalTokens} Time: {runTimeInSeconds:0.00} Tokens per second: {totalTokens / runTimeInSeconds:0.00}");
     }
 
     else if (option == 2) //Streaming Output
     {
         using var tokenizerStream = tokenizer.CreateStream();
         using var generator = new Generator(model, generatorParams);
+        var watch = System.Diagnostics.Stopwatch.StartNew();
         while (!generator.IsDone())
         {
             generator.ComputeLogits();
@@ -98,5 +103,10 @@ do
             Console.Write(tokenizerStream.Decode(generator.GetSequence(0)[^1]));
         }
         Console.WriteLine();
+        watch.Stop();
+        var runTimeInSeconds = watch.Elapsed.TotalSeconds;
+        var outputSequence = generator.GetSequence(0);
+        var totalTokens = outputSequence.Length;
+        Console.WriteLine($"Streaming Tokens: {totalTokens} Time: {runTimeInSeconds:0.00} Tokens per second: {totalTokens / runTimeInSeconds:0.00}");
     }
-} while (intereactive);
+} while (interactive);

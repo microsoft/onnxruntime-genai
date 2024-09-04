@@ -17,10 +17,10 @@ Logits::Logits(const Model& model, State& state)
   output_raw_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
 
   if (state_.GetCapturedGraphInfo()) {
-    if (type_ == Ort::TypeToTensorType<float>::type) {
+    if (type_ == Ort::TypeToTensorType<float>) {
       sb_logits32_ = state_.GetCapturedGraphInfo()->sb_logits32_.get();
     }
-    if (type_ == Ort::TypeToTensorType<Ort::Float16_t>::type) {
+    if (type_ == Ort::TypeToTensorType<Ort::Float16_t>) {
       sb_logits16_ = state_.GetCapturedGraphInfo()->sb_logits16_.get();
     }
   }
@@ -55,14 +55,14 @@ RoamingArray<float> Logits::Get() {
     output_last_tokens_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
 
 #if USE_DML
-    if (type_ == Ort::TypeToTensorType<Ort::Float16_t>::type) {
+    if (type_ == Ort::TypeToTensorType<Ort::Float16_t>) {
       logits_of_last_token_fp32_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
     }
 #endif
 
     logits_of_last_token = output_last_tokens_.get();
 
-    size_t element_size = type_ == Ort::TypeToTensorType<float>::type ? 4 : 2;
+    size_t element_size = type_ == Ort::TypeToTensorType<float> ? 4 : 2;
     size_t vocab_index = 0;  // Simpler math to have this index go up by vocab_size for every logit chunk we process
 
     const auto* input_ids = state_.params_->input_ids.data();
@@ -126,7 +126,7 @@ RoamingArray<float> Logits::Get() {
   }
 
   // Convert from float16 to float32 if necessary
-  if (type_ == Ort::TypeToTensorType<Ort::Float16_t>::type) {
+  if (type_ == Ort::TypeToTensorType<Ort::Float16_t>) {
 #if USE_DML
     if (model_.device_type_ == DeviceType::DML) {
       DmlHelpers::DmlCastInputToOutput(
@@ -205,7 +205,7 @@ void Logits::Update() {
     return;
   }
 
-  StaticBuffer* sb_logits = type_ == Ort::TypeToTensorType<Ort::Float16_t>::type ? sb_logits16_ : sb_logits32_;
+  StaticBuffer* sb_logits = type_ == Ort::TypeToTensorType<Ort::Float16_t> ? sb_logits16_ : sb_logits32_;
   output_raw_ = !sb_logits ? OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_)
                            : sb_logits->CreateTensorOnStaticBuffer(shape_, type_);
   state_.outputs_[output_index_] = output_raw_.get();

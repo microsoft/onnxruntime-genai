@@ -7,36 +7,24 @@
 namespace Generators {
 static constexpr size_t c_value_count = 10;  // Dump this many values from the start of a tensor
 
+template <typename... Types>
+const char* TypeToString(ONNXTensorElementDataType type, Ort::TypeList<Types...>) {
+  const char* name = "(please add type to list)";
+  ((type == Ort::TypeToTensorType<Types> ? name = typeid(Types).name(), true : false) || ...);
+  return name;
+}
+
 const char* TypeToString(ONNXTensorElementDataType type) {
-  switch (type) {
-    case Ort::TypeToTensorType<bool>::type:
-      return "bool";
-    case Ort::TypeToTensorType<int8_t>::type:
-      return "int8";
-    case Ort::TypeToTensorType<uint8_t>::type:
-      return "uint8";
-    case Ort::TypeToTensorType<int16_t>::type:
-      return "int16";
-    case Ort::TypeToTensorType<uint16_t>::type:
-      return "uint16";
-    case Ort::TypeToTensorType<int32_t>::type:
-      return "int32";
-    case Ort::TypeToTensorType<int64_t>::type:
-      return "int64";
-    case Ort::TypeToTensorType<Ort::Float16_t>::type:
-      return "float16";
-    case Ort::TypeToTensorType<float>::type:
-      return "float32";
-    case Ort::TypeToTensorType<double>::type:
-      return "float64";
-    default:
-      assert(false);
-      return "(please add type to list)";
-  }
+  return TypeToString(type, Ort::TensorTypes{});
 }
 
 std::ostream& operator<<(std::ostream& stream, Ort::Float16_t v) {
   stream << Float16ToFloat32(v);
+  return stream;
+}
+
+std::ostream& operator<<(std::ostream& stream, Ort::BFloat16_t v) {
+  stream << "BF16:" << v.value;  // TODO: implement conversion when useful
   return stream;
 }
 
@@ -66,66 +54,20 @@ template void DumpCudaSpan(std::ostream&, std::span<const float>);
 template void DumpCudaSpan(std::ostream&, std::span<const int32_t>);
 #endif
 
+template <typename... Types>
+bool DumpSpan(std::ostream& stream, ONNXTensorElementDataType type, const void* p_values_raw, size_t count, Ort::TypeList<Types...>) {
+  return ((type == Ort::TypeToTensorType<Types> && (DumpSpan(stream, std::span<const Types>{reinterpret_cast<const Types*>(p_values_raw), count}), true)) || ...);
+}
+
 void DumpValues(std::ostream& stream, ONNXTensorElementDataType type, const void* p_values_raw, size_t count) {
   if (count == 0) {
     return;
   }
 
   stream << SGR::Fg_Green << "Values[ " << SGR::Reset;
+  if (!DumpSpan(stream, type, p_values_raw, count, Ort::TensorTypes{}))
+    stream << SGR::Fg_Red << "Unhandled data type" << SGR::Reset;
 
-  switch (type) {
-    case Ort::TypeToTensorType<bool>::type:
-      DumpSpan(stream, std::span<const bool>(reinterpret_cast<const bool*>(p_values_raw), count));
-      break;
-
-    case Ort::TypeToTensorType<int8_t>::type:
-      DumpSpan(stream, std::span<const int8_t>{reinterpret_cast<const int8_t*>(p_values_raw), count});
-      break;
-
-    case Ort::TypeToTensorType<uint8_t>::type:
-      DumpSpan(stream, std::span<const uint8_t>{reinterpret_cast<const uint8_t*>(p_values_raw), count});
-      break;
-
-    case Ort::TypeToTensorType<int16_t>::type:
-      DumpSpan(stream, std::span<const int16_t>{reinterpret_cast<const int16_t*>(p_values_raw), count});
-      break;
-
-    case Ort::TypeToTensorType<uint16_t>::type:
-      DumpSpan(stream, std::span<const uint16_t>{reinterpret_cast<const uint16_t*>(p_values_raw), count});
-      break;
-
-    case Ort::TypeToTensorType<int32_t>::type:
-      DumpSpan(stream, std::span<const int32_t>{reinterpret_cast<const int32_t*>(p_values_raw), count});
-      break;
-
-    case Ort::TypeToTensorType<uint32_t>::type:
-      DumpSpan(stream, std::span<const uint32_t>{reinterpret_cast<const uint32_t*>(p_values_raw), count});
-      break;
-
-    case Ort::TypeToTensorType<int64_t>::type:
-      DumpSpan(stream, std::span<const int64_t>{reinterpret_cast<const int64_t*>(p_values_raw), count});
-      break;
-
-    case Ort::TypeToTensorType<uint64_t>::type:
-      DumpSpan(stream, std::span<const uint64_t>{reinterpret_cast<const uint64_t*>(p_values_raw), count});
-      break;
-
-    case Ort::TypeToTensorType<Ort::Float16_t>::type:
-      DumpSpan(stream, std::span<const Ort::Float16_t>{reinterpret_cast<const Ort::Float16_t*>(p_values_raw), count});
-      break;
-
-    case Ort::TypeToTensorType<float>::type:
-      DumpSpan(stream, std::span<const float>{reinterpret_cast<const float*>(p_values_raw), count});
-      break;
-
-    case Ort::TypeToTensorType<double>::type:
-      DumpSpan(stream, std::span<const double>{reinterpret_cast<const double*>(p_values_raw), count});
-      break;
-
-    default:
-      stream << SGR::Fg_Red << "Unhandled data type" << SGR::Reset;
-      break;
-  }
   stream << SGR::Fg_Green << "]" << SGR::Reset << std::endl;
 }
 
