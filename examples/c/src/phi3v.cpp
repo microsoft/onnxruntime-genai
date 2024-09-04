@@ -12,6 +12,15 @@ bool FileExists(const char* path) {
   return static_cast<bool>(std::ifstream(path));
 }
 
+std::string trim(const std::string& str) {
+  const size_t first = str.find_first_not_of(' ');
+  if (std::string::npos == first) {
+    return str;
+  }
+  const size_t last = str.find_last_not_of(' ');
+  return str.substr(first, (last - first + 1));
+}
+
 // C++ API Example
 
 void CXX_API(const char* model_path) {
@@ -30,7 +39,7 @@ void CXX_API(const char* model_path) {
     std::vector<std::string> image_paths;
     for (size_t start = 0, end = 0; end < image_paths_str.size(); start = end + 1) {
       end = image_paths_str.find(',', start);
-      image_paths.push_back(image_paths_str.substr(start, end - start));
+      image_paths.push_back(trim(image_paths_str.substr(start, end - start)));
     }
     if (image_paths.empty()) {
       std::cout << "No image provided" << std::endl;
@@ -110,7 +119,7 @@ void C_API(const char* model_path) {
     std::vector<std::string> image_paths;
     for (size_t start = 0, end = 0; end < image_paths_str.size(); start = end + 1) {
       end = image_paths_str.find(',', start);
-      image_paths.push_back(image_paths_str.substr(start, end - start));
+      image_paths.push_back(trim(image_paths_str.substr(start, end - start)));
     }
     if (image_paths.empty()) {
       std::cout << "No image provided" << std::endl;

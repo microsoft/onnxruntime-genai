@@ -23,9 +23,13 @@ def run(args: argparse.Namespace):
         readline.set_completer_delims(" \t\n;")
         readline.parse_and_bind("tab: complete")
         readline.set_completer(_complete)
-        image_paths = input(
-            "Image Path (comma separated; leave empty if no image): "
-        ).split(",")
+        image_paths = [
+            image_path.strip()
+            for image_path in input(
+                "Image Path (comma separated; leave empty if no image): "
+            ).split(",")
+        ]
+        print(image_paths)
 
         image = None
         prompt = "<|user|>\n"

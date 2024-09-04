@@ -15,7 +15,7 @@ class Program
         while (true)
         {
             Console.WriteLine("Image Path (comma separated; leave empty if no image):");
-            string[] imagePaths = Console.ReadLine().Split(',').ToList<string>().Select(i => i.ToString()).ToArray();
+            string[] imagePaths = Console.ReadLine().Split(',').ToList<string>().Select(i => i.ToString().Trim()).ToArray();
 
             Images images = null;
             if (imagePaths.Length == 0)
