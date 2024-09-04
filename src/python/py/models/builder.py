@@ -1566,7 +1566,7 @@ class Model:
                     torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix(weights.T.cpu().contiguous(), type)
                 )
             except:
-                raise RuntimeError("import tensorrt_llm is needed to use torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix()")
+                raise RuntimeError("tensorrt_llm is needed to use torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix()")
 
             return torch_weight_scales.to(torch.float16), processed_q_weight
 
@@ -2666,8 +2666,9 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             onnx_model = Phi3Mini128KModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "PhiMoEForCausalLM" and config.max_position_embeddings == 131072:
             print("WARNING: This model only works for CUDA currently because `MoE` is only supported for CUDA in ONNX Runtime. Setting `--execution_provider cuda` by default.")
-            print("WARNING: This model currently only supports quantized version.")
+            print("WARNING: This model currently only supports quantized version. Setting `--precision int4` by default.")
             execution_provider = "cuda"
+            precision = "int4"
             onnx_model = Phi3MoE128KModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings == 8192:
             onnx_model = Phi3Small8KModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
