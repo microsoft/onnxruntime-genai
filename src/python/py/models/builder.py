@@ -403,15 +403,20 @@ class Model:
         print("saved onnx model", flush=True)
 
     def to_int4(self, model):
-        quant = MatMul4BitsQuantizer(
-            model=model,
-            block_size=self.quant_attrs["int4"]["block_size"],
-            is_symmetric=True,
-            accuracy_level=self.quant_attrs["int4"]["accuracy_level"],
-            nodes_to_exclude=[],
-        )
-        quant.process()
-        return quant.model.model
+        try:
+            quant = MatMul4BitsQuantizer(
+                model=model,
+                block_size=self.quant_attrs["int4"]["block_size"],
+                is_symmetric=True,
+                accuracy_level=self.quant_attrs["int4"]["accuracy_level"],
+                nodes_to_exclude=[],
+            )
+            quant.process()
+            return quant.model.model
+        except Exception as e:
+            import traceback
+            print(traceback.format_exc())
+            exit(1)
 
     def clear_field(self, proto, field):
         proto.ClearField(field)
