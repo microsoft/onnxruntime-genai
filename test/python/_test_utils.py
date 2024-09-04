@@ -112,11 +112,11 @@ def download_model(model_name, input_path, output_path, precision, device, one_l
     if one_layer:
         extra_options["num_hidden_layers"] = 1
 
-    log.info(f"Preparing to run model builder for {input_path}...")
-    log.info(f"{os.path.abspath(input_path)} exists: {os.path.exists(os.path.abspath(input_path))}")
-    log.info(f"{os.path.abspath(input_path)} is writable: {os.access(os.path.abspath(input_path), os.W_OK)}")
-    log.info(f"{os.path.abspath(output_path)} exists: {os.path.exists(os.path.abspath(output_path))}")
-    log.info(f"{os.path.abspath(output_path)} is writable: {os.access(os.path.abspath(output_path), os.W_OK)}")
+    print(f"Preparing to run model builder for {input_path}...", flush=True)
+    print(f"{os.path.abspath(input_path)} exists: {os.path.exists(os.path.abspath(input_path))}", flush=True)
+    print(f"{os.path.abspath(input_path)} is writable: {os.access(os.path.abspath(input_path), os.W_OK)}", flush=True)
+    print(f"{os.path.abspath(output_path)} exists: {os.path.exists(os.path.abspath(output_path))}", flush=True)
+    print(f"{os.path.abspath(output_path)} is writable: {os.access(os.path.abspath(output_path), os.W_OK)}", flush=True)
     create_model(model_name, input_path, output_path, precision, device, os.path.join(".", "cache_dir"), **extra_options)
 
 '''
