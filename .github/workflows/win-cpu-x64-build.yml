@@ -76,7 +76,7 @@ jobs:
       run: |
         python3 -m pip install -r test\python\requirements.txt --user
         python3 -m pip install -r test\python\requirements-cpu.txt --user
-        python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl"))
+        python3 -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
 
     - name: Get HuggingFace Token
       run: |
