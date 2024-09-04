@@ -410,8 +410,12 @@ class Model:
             accuracy_level=self.quant_attrs["int4"]["accuracy_level"],
             nodes_to_exclude=[],
         )
-        quant.process()
-        return quant.model.model
+        try:
+            quant.process()
+            return quant.model.model
+        except:
+            import traceback
+            print(traceback.format_exc(), flush=True)
 
     def clear_field(self, proto, field):
         proto.ClearField(field)
@@ -2512,12 +2516,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
         onnx_model.make_model(input_path)
 
         # Save ONNX model
-        try:
-            onnx_model.save_model(output_dir)
-        except Exception as e:
-            import traceback
-            print(e, flush=True)
-            print(traceback.format_exc(), flush=True)
+        onnx_model.save_model(output_dir)
     else:
         onnx_model = Model(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
 
