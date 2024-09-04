@@ -17,6 +17,7 @@ This folder contains the model builder for quickly creating optimized and quanti
     - [Exclude Embedding Layer](#exclude-embedding-layer)
     - [Exclude Language Modeling Head](#exclude-language-modeling-head)
     - [Enable Cuda Graph](#enable-cuda-graph)
+    - [Use 8 Bits Quantization in QMoE](#use-8-bits-quantization-in-qmoe)
   - [Unit Testing Models](#unit-testing-models)
     - [Option 1: Use the model builder directly](#option-1-use-the-model-builder-directly)
     - [Option 2: Edit the config.json file](#option-2-edit-the-configjson-file-on-disk-and-then-run-the-model-builder)

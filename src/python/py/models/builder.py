@@ -1507,7 +1507,7 @@ class Model:
         self.mlp_attrs["output_0"] = f"{fc2_add_name}/output_0"
 
     def make_block_sparse_moe(self, layer_id, bsm, root_input):
-        # Make nodes for the MoE subgraph
+        # Make nodes for the QMoE subgraph
         #
         #                  root_input
         #                 /       \
@@ -1523,7 +1523,7 @@ class Model:
         #             \    /    /
         #             Reshape  /
         #                 \   /
-        #                  MoE
+        #                  QMoE
         #                   |
         #                 output
         num_experts = self.moe_attrs["num_experts"]
@@ -1557,7 +1557,8 @@ class Model:
 
         def quant_dequant(weights, quant_mode: bool = True):
             type = torch.quint4x2 if quant_mode else torch.int8
-
+            processed_q_weight = None
+            torch_weight_scales = None
             try:
                 import tensorrt_llm
 
