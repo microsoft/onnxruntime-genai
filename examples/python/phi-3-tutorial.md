@@ -58,9 +58,8 @@ Are you on a Windows machine with GPU?
 
 2. Install the generate() API
 
-   ```
-   pip install numpy
-   pip install --pre onnxruntime-genai-directml
+   ```bash
+   pip install onnxruntime-genai-directml
    ```
 
    You should now see `onnxruntime-genai-directml` in your `pip list`.
@@ -69,7 +68,7 @@ Are you on a Windows machine with GPU?
 
    Run the model with [phi3-qa.py](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/phi3-qa.py).
 
-   ```cmd
+   ```bash
    curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examples/python/phi3-qa.py -o phi3-qa.py
    python phi3-qa.py -m directml\directml-int4-awq-block-128
    ```
@@ -100,9 +99,8 @@ Are you on a Windows machine with GPU?
 
 2. Install the generate() API
 
-   ```
-   pip install numpy
-   pip install --pre onnxruntime-genai-cuda --index-url=https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-genai/pypi/simple/
+   ```bash
+   pip install onnxruntime-genai-cuda
    ```
 
 3. Run the model
@@ -134,9 +132,8 @@ Are you on a Windows machine with GPU?
 
 2. Install the generate() API for CPU
    
-   ```
-   pip install numpy
-   pip install --pre onnxruntime-genai
+   ```bash
+   pip install onnxruntime-genai
    ```
 
 3. Run the model
