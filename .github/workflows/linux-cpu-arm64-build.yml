@@ -36,7 +36,6 @@ jobs:
           $ORT_NIGHTLY_VERSION = $resp.value[0].versions[0].normalizedVersion
           Write-Host "$ORT_NIGHTLY_VERSION"
           "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
-          $ONNXRUNTIME_VERSION = ${{ env.ORT_NIGHTLY_VERSION }}
 
       - name: Download OnnxRuntime Nightly
         run: |
