@@ -16,7 +16,7 @@ struct Images {
   size_t num_images_{};
 };
 
-std::unique_ptr<Images> LoadImageImpl(const char* image_path);
+std::unique_ptr<Images> LoadImages(const std::span<const char* const>& image_paths);
 
 struct ImageProcessor {
   ImageProcessor(Config& config, const SessionInfo& session_info);
