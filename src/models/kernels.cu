@@ -242,7 +242,7 @@ void UpdateCacheIndirectionKernelLauncher(int32_t* tgt_indir_cache,
 }
 
 template <typename T>
-__global__ void CopyCrossQKSingleDecodeStepKernel(T* target, // shape [batch_beam_size, num_alignment_heads, max_length, frame]
+__global__ void CopyCrossQKSingleDecodeStepKernel(T* target, // shape [batch_beam_size, num_alignment_heads, max_length, frames]
                                                   T** qk_layer_pointers,
                                                   int token_index,
                                                   int num_layers,
