@@ -1,0 +1,24 @@
+id:
+name: Issue Triage
+description: Assign label to issues
+owner:
+resource: repository
+where:
+configuration:
+  resourceManagementConfiguration:
+    eventResponderTasks:
+      - if:
+          - payloadType: Issues
+          - isOpen
+        then:
+          - if:
+              - or:
+                  - titleContains:
+                      pattern: shark
+                  - bodyContains:
+                      pattern: strawberry
+            then:
+              - addLabel:
+                  label: wontfix 
+onFailure:
+onSuccess:

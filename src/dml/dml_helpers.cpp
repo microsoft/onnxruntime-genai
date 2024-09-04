@@ -231,33 +231,61 @@ void ExecuteReusableCommandList(
   execution_context->ExecuteCommandList(command_list_state.graphics_command_list.Get(), fence.GetAddressOf(), &completion_value);
 }
 
-static uint64_t DataTypeSizeInBytes(DML_TENSOR_DATA_TYPE dml_data_type) {
-  switch (dml_data_type) {
-    case DML_TENSOR_DATA_TYPE_FLOAT16:
-      return sizeof(Ort::Float16_t);
+// Copied from https://learn.microsoft.com/en-us/windows/ai/directml/dml-helper-functions#dmlcalcbuffertensorsize
+static UINT64 DMLCalcBufferTensorSize(
+    DML_TENSOR_DATA_TYPE dataType,
+    UINT dimensionCount,
+    _In_reads_(dimensionCount) const UINT* sizes,
+    _In_reads_opt_(dimensionCount) const UINT* strides) {
+  UINT elementSizeInBytes = 0;
+  switch (dataType) {
     case DML_TENSOR_DATA_TYPE_FLOAT32:
-      return sizeof(float);
-    case DML_TENSOR_DATA_TYPE_FLOAT64:
-      return sizeof(double);
-    case DML_TENSOR_DATA_TYPE_UINT8:
-      return sizeof(uint8_t);
-    case DML_TENSOR_DATA_TYPE_UINT16:
-      return sizeof(uint16_t);
     case DML_TENSOR_DATA_TYPE_UINT32:
-      return sizeof(uint32_t);
-    case DML_TENSOR_DATA_TYPE_UINT64:
-      return sizeof(uint64_t);
-    case DML_TENSOR_DATA_TYPE_INT8:
-      return sizeof(int8_t);
-    case DML_TENSOR_DATA_TYPE_INT16:
-      return sizeof(int16_t);
     case DML_TENSOR_DATA_TYPE_INT32:
-      return sizeof(int32_t);
+      elementSizeInBytes = 4;
+      break;
+
+    case DML_TENSOR_DATA_TYPE_FLOAT16:
+    case DML_TENSOR_DATA_TYPE_UINT16:
+    case DML_TENSOR_DATA_TYPE_INT16:
+      elementSizeInBytes = 2;
+      break;
+
+    case DML_TENSOR_DATA_TYPE_UINT8:
+    case DML_TENSOR_DATA_TYPE_INT8:
+      elementSizeInBytes = 1;
+      break;
+
+    case DML_TENSOR_DATA_TYPE_FLOAT64:
+    case DML_TENSOR_DATA_TYPE_UINT64:
     case DML_TENSOR_DATA_TYPE_INT64:
-      return sizeof(int64_t);
+      elementSizeInBytes = 8;
+      break;
+
     default:
-      THROW_HR(E_NOTIMPL);
+      return 0;  // Invalid data type
   }
+
+  UINT64 minimumImpliedSizeInBytes = 0;
+  if (!strides) {
+    minimumImpliedSizeInBytes = sizes[0];
+    for (UINT i = 1; i < dimensionCount; ++i) {
+      minimumImpliedSizeInBytes *= sizes[i];
+    }
+    minimumImpliedSizeInBytes *= elementSizeInBytes;
+  } else {
+    UINT indexOfLastElement = 0;
+    for (UINT i = 0; i < dimensionCount; ++i) {
+      indexOfLastElement += (sizes[i] - 1) * strides[i];
+    }
+
+    minimumImpliedSizeInBytes = (static_cast<UINT64>(indexOfLastElement) + 1) * elementSizeInBytes;
+  }
+
+  // Round up to the nearest 4 bytes.
+  minimumImpliedSizeInBytes = (minimumImpliedSizeInBytes + 3) & ~3ull;
+
+  return minimumImpliedSizeInBytes;
 }
 
 ComPtr<IDMLCompiledOperator> CreateCastOperator(
@@ -270,7 +298,7 @@ ComPtr<IDMLCompiledOperator> CreateCastOperator(
   input_buffer_desc.Sizes = &num_elements;
   input_buffer_desc.DimensionCount = 1;
   input_buffer_desc.DataType = source_data_type;
-  input_buffer_desc.TotalTensorSizeInBytes = num_elements * DataTypeSizeInBytes(source_data_type);
+  input_buffer_desc.TotalTensorSizeInBytes = DMLCalcBufferTensorSize(source_data_type, 1, &num_elements, NULL);
   DML_TENSOR_DESC input_tensor_desc = {DML_TENSOR_TYPE_BUFFER, &input_buffer_desc};
 
   // Create the output tensor desc
@@ -278,7 +306,7 @@ ComPtr<IDMLCompiledOperator> CreateCastOperator(
   output_buffer_desc.Sizes = &num_elements;
   output_buffer_desc.DimensionCount = 1;
   output_buffer_desc.DataType = target_data_type;
-  output_buffer_desc.TotalTensorSizeInBytes = num_elements * DataTypeSizeInBytes(target_data_type);
+  output_buffer_desc.TotalTensorSizeInBytes = DMLCalcBufferTensorSize(target_data_type, 1, &num_elements, NULL);
   DML_TENSOR_DESC output_tensor_desc = {DML_TENSOR_TYPE_BUFFER, &output_buffer_desc};
 
   DML_CAST_OPERATOR_DESC cast_op_desc{};
@@ -417,10 +445,10 @@ void DmlCastInputToOutput(
   Ort::ThrowOnError(ort_dml_api->GetD3D12ResourceFromAllocation(&allocator, p_out->GetTensorMutableData<uint8_t>(), &target_resource));
 
   std::array<ID3D12Resource*, 1> input_resources = {source_resource.Get()};
-  std::array<uint64_t, 1> input_sizes = {element_count * DataTypeSizeInBytes(dml_from_type)};
+  std::array<uint64_t, 1> input_sizes = {DMLCalcBufferTensorSize(dml_from_type, 1, (uint32_t*)&element_count, NULL)};
 
   std::array<ID3D12Resource*, 1> output_resources = {target_resource.Get()};
-  std::array<uint64_t, 1> output_sizes = {element_count * DataTypeSizeInBytes(dml_to_type)};
+  std::array<uint64_t, 1> output_sizes = {DMLCalcBufferTensorSize(dml_to_type, 1, (uint32_t*)&element_count, NULL)};
 
   // Make sure the source and target allocations are kept alive until the operation is done
   command_list_state.source_resource = std::move(source_resource);

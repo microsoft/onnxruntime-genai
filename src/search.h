@@ -5,7 +5,7 @@
 
 namespace Generators {
 
-struct Search {
+struct Search : LeakChecked<Search> {
   Search(const GeneratorParams& params) : params_{params.shared_from_this()} {}
   virtual ~Search() = default;
 
@@ -93,7 +93,7 @@ struct BeamSearch_Cpu : Search_Cpu {
   RoamingArray<int32_t> GetSequence(size_t index) override;
   RoamingArray<int32_t> GetSequence(size_t batch_id, size_t beam_id);
 
-  bool IsDone() const;
+  bool IsDone() const override;
 
   void SelectTop() override;
 
