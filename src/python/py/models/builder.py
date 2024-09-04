@@ -1566,7 +1566,7 @@ class Model:
                     torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix(weights.T.cpu().contiguous(), type)
                 )
             except:
-                print("import tensorrt_llm is needed to use torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix()")
+                raise RuntimeError("import tensorrt_llm is needed to use torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix()")
 
             return torch_weight_scales.to(torch.float16), processed_q_weight
 
