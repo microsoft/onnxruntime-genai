@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using Microsoft.ML.OnnxRuntimeGenAI;
+using System.Linq;
 
 class Program
 {
@@ -13,21 +14,25 @@ class Program
 
         while (true)
         {
-            Console.WriteLine("Image Path (leave empty if no image):");
-            string imagePath = Console.ReadLine();
+            Console.WriteLine("Image Path (comma separated; leave empty if no image):");
+            string[] imagePaths = Console.ReadLine().Split(',').ToList<string>().Select(i => i.ToString().Trim()).ToArray();
 
             Images images = null;
-            if (imagePath == String.Empty)
+            if (imagePaths.Length == 0)
             {
                 Console.WriteLine("No image provided");
             }
             else
             {
-                if (!File.Exists(imagePath))
+                for (int i = 0; i < imagePaths.Length; i++)
                 {
-                    throw new Exception("Image file not found: " +  imagePath);
+                    string imagePath = imagePaths[i].Trim();
+                    if (!File.Exists(imagePath))
+                    {
+                        throw new Exception("Image file not found: " +  imagePath);
+                    }
                 }
-                images = Images.Load(imagePath);
+                images = Images.Load(imagePaths);
             }
 
             Console.WriteLine("Prompt:");
@@ -35,7 +40,10 @@ class Program
             string prompt = "<|user|>\n";
             if (images != null)
             {
-                prompt += "<|image_1|>\n";
+                for (int i = 0; i < imagePaths.Length; i++)
+                {
+                    prompt += "<|image_" + (i + 1) + "|>\n";
+                }
             }
             prompt += text + "<|end|>\n<|assistant|>\n";
 
@@ -44,7 +52,7 @@ class Program
 
             Console.WriteLine("Generating response...");
             using GeneratorParams generatorParams = new GeneratorParams(model);
-            generatorParams.SetSearchOption("max_length", 3072);
+            generatorParams.SetSearchOption("max_length", 7680);
             generatorParams.SetInputs(inputTensors);
 
             using var generator = new Generator(model, generatorParams);

@@ -12,6 +12,15 @@ bool FileExists(const char* path) {
   return static_cast<bool>(std::ifstream(path));
 }
 
+std::string trim(const std::string& str) {
+  const size_t first = str.find_first_not_of(' ');
+  if (std::string::npos == first) {
+    return str;
+  }
+  const size_t last = str.find_last_not_of(' ');
+  return str.substr(first, (last - first + 1));
+}
+
 // C++ API Example
 
 void CXX_API(const char* model_path) {
@@ -23,34 +32,45 @@ void CXX_API(const char* model_path) {
   auto tokenizer_stream = OgaTokenizerStream::Create(*processor);
 
   while (true) {
-    std::string image_path;
-    std::cout << "Image Path (leave empty if no image):" << std::endl;
-    std::getline(std::cin, image_path);
+    std::string image_paths_str;
+    std::cout << "Image Path (comma separated; leave empty if no image):" << std::endl;
+    std::getline(std::cin, image_paths_str);
     std::unique_ptr<OgaImages> images;
-    if (image_path.empty()) {
+    std::vector<std::string> image_paths;
+    for (size_t start = 0, end = 0; end < image_paths_str.size(); start = end + 1) {
+      end = image_paths_str.find(',', start);
+      image_paths.push_back(trim(image_paths_str.substr(start, end - start)));
+    }
+    if (image_paths.empty()) {
       std::cout << "No image provided" << std::endl;
     } else {
-      std::cout << "Loading image..." << std::endl;
-      if (!FileExists(image_path.c_str())) {
-        throw std::runtime_error(std::string("Image file not found: ") + image_path);
+      std::cout << "Loading images..." << std::endl;
+      for (const auto& image_path : image_paths) {
+        if (!FileExists(image_path.c_str())) {
+          throw std::runtime_error(std::string("Image file not found: ") + image_path);
+        }
       }
-      images = OgaImages::Load(image_path.c_str());
+      std::vector<const char*> image_paths_c;
+      for (const auto& image_path : image_paths) image_paths_c.push_back(image_path.c_str());
+      images = OgaImages::Load(image_paths_c);
     }
 
     std::string text;
     std::cout << "Prompt: " << std::endl;
     std::getline(std::cin, text);
     std::string prompt = "<|user|>\n";
-    if (images)
-      prompt += "<|image_1|>\n";
+    if (images) {
+      for (size_t i = 0; i < image_paths.size(); ++i)
+        prompt += "<|image_" + std::to_string(i + 1) + "|>\n";
+    }
     prompt += text + "<|end|>\n<|assistant|>\n";
 
-    std::cout << "Processing image and prompt..." << std::endl;
+    std::cout << "Processing images and prompt..." << std::endl;
     auto input_tensors = processor->ProcessImages(prompt.c_str(), images.get());
 
     std::cout << "Generating response..." << std::endl;
     auto params = OgaGeneratorParams::Create(*model);
-    params->SetSearchOption("max_length", 3072);
+    params->SetSearchOption("max_length", 7680);
     params->SetInputs(*input_tensors);
 
     auto generator = OgaGenerator::Create(*model, *params);
@@ -92,36 +112,49 @@ void C_API(const char* model_path) {
   CheckResult(OgaCreateTokenizerStreamFromProcessor(processor, &tokenizer_stream));
 
   while (true) {
-    std::string image_path;
-    std::cout << "Image Path (leave empty if no image):" << std::endl;
-    std::getline(std::cin, image_path);
+    std::string image_paths_str;
+    std::cout << "Image Path (comma separated; leave empty if no image):" << std::endl;
+    std::getline(std::cin, image_paths_str);
     OgaImages* images = nullptr;
-    if (image_path.empty()) {
+    std::vector<std::string> image_paths;
+    for (size_t start = 0, end = 0; end < image_paths_str.size(); start = end + 1) {
+      end = image_paths_str.find(',', start);
+      image_paths.push_back(trim(image_paths_str.substr(start, end - start)));
+    }
+    if (image_paths.empty()) {
       std::cout << "No image provided" << std::endl;
     } else {
-      std::cout << "Loading image..." << std::endl;
-      if (!FileExists(image_path.c_str())) {
-        throw std::runtime_error(std::string("Image file not found: ") + image_path);
+      std::cout << "Loading images..." << std::endl;
+      for (const auto& image_path : image_paths) {
+        if (!FileExists(image_path.c_str())) {
+          throw std::runtime_error(std::string("Image file not found: ") + image_path);
+        }
       }
-      CheckResult(OgaLoadImage(image_path.c_str(), &images));
+      std::vector<const char*> image_paths_c;
+      for (const auto& image_path : image_paths) image_paths_c.push_back(image_path.c_str());
+      OgaStringArray* image_paths_string_array;
+      CheckResult(OgaCreateStringArrayFromStrings(image_paths_c.data(), image_paths_c.size(), &image_paths_string_array));
+      CheckResult(OgaLoadImages(image_paths_string_array, &images));
     }
 
     std::string text;
     std::cout << "Prompt: " << std::endl;
     std::getline(std::cin, text);
     std::string prompt = "<|user|>\n";
-    if (images)
-      prompt += "<|image_1|>\n";
+    if (images) {
+      for (size_t i = 0; i < image_paths.size(); ++i)
+        prompt += "<|image_" + std::to_string(i + 1) + "|>\n";
+    }
     prompt += text + "<|end|>\n<|assistant|>\n";
 
-    std::cout << "Processing image and prompt..." << std::endl;
+    std::cout << "Processing images and prompt..." << std::endl;
     OgaNamedTensors* input_tensors;
     CheckResult(OgaProcessorProcessImages(processor, prompt.c_str(), images, &input_tensors));
 
     std::cout << "Generating response..." << std::endl;
     OgaGeneratorParams* params;
     CheckResult(OgaCreateGeneratorParams(model, &params));
-    CheckResult(OgaGeneratorParamsSetSearchNumber(params, "max_length", 3072));
+    CheckResult(OgaGeneratorParamsSetSearchNumber(params, "max_length", 7680));
     CheckResult(OgaGeneratorParamsSetInputs(params, input_tensors));
 
     OgaGenerator* generator;
