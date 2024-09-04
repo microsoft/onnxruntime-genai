@@ -103,8 +103,8 @@ template <typename T>
 void TransposeKCacheForDMMHA(T* dest_data,
                              T* temp_buffer,
                              std::vector<int64_t>& dest_dims,
-                             int dest_data_size,
-                             int dest_element_size,
+                             size_t dest_data_size,
+                             size_t dest_element_size,
                              cudaStream_t stream) {
   // Treat the 'K' caches as if they are of shape [B, N, max_length, head_size / x, x]
   // and transpose each 'K' cache into [B, N, head_size / x, max_length, x], where x = 16 / sizeof(T)
@@ -120,10 +120,10 @@ void TransposeKCacheForDMMHA(T* dest_data,
   // Transpose each 'K' cache
   cuda::ReorderPastStatesKernelLauncher(dest_data,
                                         temp_buffer,
-                                        dest_dims[0],
-                                        dest_dims[1],
-                                        dest_dims[2],
-                                        dest_dims[3],
+                                        static_cast<int32_t>(dest_dims[0]),
+                                        static_cast<int32_t>(dest_dims[1]),
+                                        static_cast<int32_t>(dest_dims[2]),
+                                        static_cast<int32_t>(dest_dims[3]),
                                         chunk_size,
                                         stream);
 }
@@ -173,7 +173,6 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
         std::unique_ptr<OrtValue> temp_buffer;
         auto self_attn_kv_cache_element_type = src_element_type;  // should be `float16` for the below case
         if (self_attn_kv_cache_element_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 && model_.device_type_ == DeviceType::CUDA) {
-          auto num_layers = model_.config_->model.decoder.num_hidden_layers;
           auto cross_attn_shape_info = outputs_[outputs_.size() - 1]->GetTensorTypeAndShapeInfo();
           auto cross_attn_dims = cross_attn_shape_info->GetShape();
           auto cross_attn_kv_cache_element_type = cross_attn_shape_info->GetElementType();  // should be `float32` for this case
@@ -234,7 +233,7 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
           // Transpose cross attention K caches for `DecoderMaskedMultiHeadAttention`
 
           // Add +2 to start of loop to account for `logits` and `encoder_hidden_states` outputs
-          for (int i = 2 + init_presents_.size(); i < outputs_.size(); i += 2) {
+          for (size_t i = 2 + init_presents_.size(); i < outputs_.size(); i += 2) {
             auto dest_data = outputs_[i]->GetTensorMutableRawData();
             dest_shape_info = outputs_[i]->GetTensorTypeAndShapeInfo();
             dest_dims = dest_shape_info->GetShape();
@@ -383,10 +382,10 @@ void Whisper_State::UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens
                                             current_length - params_->sequence_length,
                                             params_->BatchBeamSize(),
                                             model_.config_->model.decoder.num_hidden_layers,
-                                            output_cross_qk_dims[1],
-                                            alignment_heads_->GetTensorTypeAndShapeInfo()->GetShape()[0],
+                                            static_cast<int32_t>(output_cross_qk_dims[1]),
+                                            static_cast<int32_t>(alignment_heads_->GetTensorTypeAndShapeInfo()->GetShape()[0]),
                                             alignment_heads_->GetTensorData<int32_t>(),
-                                            output_cross_qk_dims[3],
+                                            static_cast<int32_t>(output_cross_qk_dims[3]),
                                             params_->search.max_length);
 #endif
   }
@@ -407,11 +406,11 @@ void Whisper_State::Finalize() {
     cuda::LaunchFinalizeCrossQK(model_.cuda_stream_,
                                 decoded_length - params_->sequence_length,
                                 decoded_length,
-                                output_cross_qk_dims[0],
+                                static_cast<int32_t>(output_cross_qk_dims[0]),
                                 params_->search.num_beams,
                                 params_->search.max_length,
-                                alignment_heads_->GetTensorTypeAndShapeInfo()->GetShape()[0],
-                                output_cross_qk_dims[3],
+                                static_cast<int32_t>(alignment_heads_->GetTensorTypeAndShapeInfo()->GetShape()[0]),
+                                static_cast<int32_t>(output_cross_qk_dims[3]),
                                 cross_qk_search_buffer_->GetTensorData<float>(),
                                 cross_qk_final_->GetTensorMutableData<float>(),
                                 params_->search.num_return_sequences,
