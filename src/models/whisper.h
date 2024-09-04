@@ -45,18 +45,20 @@ struct Whisper_State : State {
   std::unique_ptr<OrtValue> cache_indirection_;
 
   // Temporary hack to have different sized outputs from the encoder that we then expand into the decoder buffers
-  std::vector<std::unique_ptr<OrtValue>> init_presents_;    // Hacked sized encoder_decoder_init presents
-  std::vector<OrtValue*> presents_;                         // The original present buffers we must resize init_presents_ into after the first run
+  std::vector<std::unique_ptr<OrtValue>> init_presents_;  // Hacked sized encoder_decoder_init presents
+  std::vector<OrtValue*> presents_;                       // The original present buffers we must resize init_presents_ into after the first run
 
   std::vector<std::string> output_cross_qk_names_;
   std::vector<std::unique_ptr<OrtValue>> output_cross_qk_;  // { batch_size, num_heads, 1, 1500 }
-  
+
+#if USE_CUDA
   // Buffers for calculating word-level timestamps
-  cuda_unique_ptr<float*> cross_qk_ptrs_buffer_;            // To create and hold a reference to the GPU memory so it isn't freed
-  gpu_span<float*> output_cross_qk_ptrs_gpu_;               // To use for copying the CPU vector of float* pointers into
-  std::unique_ptr<OrtValue> alignment_heads_;               // { num_alignment_heads, 2 }
-  std::unique_ptr<OrtValue> cross_qk_search_buffer_;        // { batch_beam_size, num_alignment_heads, max_length, 1500 }
-  std::unique_ptr<OrtValue> cross_qk_final_;                // { batch_size, num_return_sequences, num_alignment_heads, decoded_length, 1500 }
+  cuda_unique_ptr<float*> cross_qk_ptrs_buffer_;  // To create and hold a reference to the GPU memory so it isn't freed
+  gpu_span<float*> output_cross_qk_ptrs_gpu_;     // To use for copying the CPU vector of float* pointers into
+#endif
+  std::unique_ptr<OrtValue> alignment_heads_;         // { num_alignment_heads, 2 }
+  std::unique_ptr<OrtValue> cross_qk_search_buffer_;  // { batch_beam_size, num_alignment_heads, max_length, 1500 }
+  std::unique_ptr<OrtValue> cross_qk_final_;          // { batch_size, num_return_sequences, num_alignment_heads, decoded_length, 1500 }
 
   size_t cache_indirection_index_{~0U};
 };

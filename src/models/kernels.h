@@ -60,6 +60,5 @@ void LaunchFinalizeCrossQK(cudaStream_t stream,
                            int num_return_sequences,
                            const int* cache_indir_data);
 
-
 }  // namespace cuda
 }  // namespace Generators

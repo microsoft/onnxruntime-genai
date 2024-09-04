@@ -50,9 +50,6 @@ Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> s
     auto alignment_heads_element_size = SizeOf(alignment_heads_type);
     auto alignment_heads_data_size = alignment_heads_elements * alignment_heads_element_size;
     cudaMemcpyAsync(alignment_heads_->GetTensorMutableRawData(), inputs.alignment_heads->ort_tensor_->GetTensorRawData(), alignment_heads_data_size, cudaMemcpyHostToDevice, model_.cuda_stream_);
-#else
-    alignment_heads_ = std::move(inputs.alignment_heads->ort_tensor_);
-#endif
 
     auto cross_qk_type = model_.session_info_->GetOutputDataType("output_cross_qk_0");
     auto cross_qk_shape = std::array<int64_t, 4>{params_->BatchBeamSize(), alignment_heads_->GetTensorTypeAndShapeInfo()->GetShape()[0], params_->search.max_length, 1500};
@@ -61,6 +58,9 @@ Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> s
     // Allocate GPU buffer for storing output_cross_qk_{i} pointers
     cross_qk_ptrs_buffer_ = CudaMallocArray<float*>(model_.config_->model.decoder.num_hidden_layers);
     output_cross_qk_ptrs_gpu_ = gpu_span<float*>(cross_qk_ptrs_buffer_.get(), model_.config_->model.decoder.num_hidden_layers);
+#else
+    alignment_heads_ = std::move(inputs.alignment_heads->ort_tensor_);
+#endif
   }
 
   auto hidden_states_type = model_.session_info_->GetOutputDataType("encoder_hidden_states");
