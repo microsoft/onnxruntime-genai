@@ -142,7 +142,6 @@ def _parse_args():
     )
     parser.add_argument("--android_api", type=int, default=27,
                         help="Android API Level. Default is 27 (Android 8.1, released in 2017).")
-    
     parser.add_argument(
         "--android_home", type=Path, default=_path_from_env_var("ANDROID_HOME"), help="Path to the Android SDK."
     )
@@ -173,6 +172,20 @@ def _parse_args():
         type=str,
         help="Specify the minimum version of the target platform "
         "This is only supported on MacOS host",
+    )
+
+    parser.add_argument(
+        "--arm64",
+        action="store_true",
+        help="[cross-compiling] Create ARM64 makefiles. Requires --update and no existing cache "
+        "CMake setup. Delete CMakeCache.txt if needed",
+    )
+
+    parser.add_argument(
+        "--arm64ec",
+        action="store_true",
+        help="[cross-compiling] Create ARM64EC makefiles. Requires --update and no existing cache "
+        "CMake setup. Delete CMakeCache.txt if needed",
     )
 
     return parser.parse_args()
@@ -270,7 +283,7 @@ def _validate_ios_args(args: argparse.Namespace):
     if args.ios:
         if not util.is_mac():
             raise ValueError("A Mac host is required to build for iOS")
-    
+
         needed_args = [
             args.ios_sysroot,
             args.ios_arch,
@@ -499,6 +512,24 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             f"-DIPHONEOS_DEPLOYMENT_TARGET={args.ios_deployment_target}",
             f"-DCMAKE_TOOLCHAIN_FILE={_get_opencv_toolchain_file()}",
         ]
+
+    if args.arm64:
+        command += ["-A", "ARM64"]
+    elif args.arm64ec:
+        command += ["-A", "ARM64EC"]
+
+    if args.arm64 or args.arm64ec:
+        # Build zlib from source. Otherwise zlib from Python might be used.
+        # And architecture mismatch will happen.
+        command += ["-D", "BUILD_ZLIB=ON"]
+        command += ["-DOPENCV_SKIP_SYSTEM_PROCESSOR_DETECTION=ON"]
+
+        if args.test:
+            log.warning(
+                "Cannot test on host build machine for cross-compiled "
+                "ARM64 builds. Will skip test running after build."
+            )
+            args.test = False
 
     if args.cmake_extra_defines != []:
         command += args.cmake_extra_defines
