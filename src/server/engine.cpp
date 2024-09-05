@@ -197,9 +197,9 @@ std::vector<RequestOutput> OgaEngine::Step() {
         std::string full_text = tokenizer_->Decode(
             all_ids_span.subspan(start, all_ids_span.size() - start));
         std::string new_text = full_text.substr(prefix_text.size());
+
         seq.output_text = seq.output_text + new_text;
-        queued_seq_group.seqs_dict.at(seq.seq_id).output_text = seq.output_text + new_text;
-        std::cout << "seq.output_text = " << seq.output_text << std::endl;
+        queued_seq_group.seqs_dict.at(seq.seq_id).output_text = seq.output_text;
 
         // stop check
         size_t new_char_count = new_text.size();
