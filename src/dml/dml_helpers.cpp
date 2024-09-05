@@ -83,7 +83,29 @@ static ComPtr<IDXGIAdapter1> CreatePerformantAdapter() {
   return filtered_adapters.front();
 }
 
-DmlObjects CreateDmlObjects(const std::string& current_module_path) {
+ComPtr<ID3D12Device> CreateD3d12Device(const std::string& current_module_path) {
+  ComPtr<ID3D12Device> d3d12_device;
+  ComPtr<ID3D12SDKConfiguration1> d3d12_sdk_config;
+  ComPtr<ID3D12DeviceFactory> d3d12_factory;
+
+  auto adapter = CreatePerformantAdapter();
+
+  // Get the version from https://devblogs.microsoft.com/directx/directx12agility/. We are currently using 1.614.0.
+  constexpr uint32_t agility_sdk_version = 614;
+
+  if (SUCCEEDED(D3D12GetInterface(CLSID_D3D12SDKConfiguration, IID_PPV_ARGS(&d3d12_sdk_config))) &&
+      SUCCEEDED(d3d12_sdk_config->CreateDeviceFactory(agility_sdk_version, current_module_path.c_str(), IID_PPV_ARGS(&d3d12_factory)))) {
+    THROW_IF_FAILED(d3d12_factory->CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&d3d12_device)));
+  } else {
+    printf("Warning: Unable to create a device from version 1.614.0 of the DirectX 12 Agility SDK. You can still use this library, but some scenarios may not work.\n");
+    printf("The given module path: %s", current_module_path.c_str());
+    THROW_IF_FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&d3d12_device)));
+  }
+
+  return d3d12_device;
+}
+
+DmlObjects CreateDmlObjects(ID3D12Device* d3d12_device) {
   D3D12_COMMAND_QUEUE_DESC command_queue_description = {
       D3D12_COMMAND_LIST_TYPE_COMPUTE,
       0,
@@ -92,23 +114,7 @@ DmlObjects CreateDmlObjects(const std::string& current_module_path) {
   };
 
   DmlObjects dml_objects;
-
-  auto adapter = CreatePerformantAdapter();
-
-  ComPtr<ID3D12SDKConfiguration1> d3d12_sdk_config;
-  ComPtr<ID3D12DeviceFactory> d3d12_factory;
-
-  // Get the version from https://devblogs.microsoft.com/directx/directx12agility/. We are currently using 1.614.0.
-  constexpr uint32_t agility_sdk_version = 614;
-
-  if (SUCCEEDED(D3D12GetInterface(CLSID_D3D12SDKConfiguration, IID_PPV_ARGS(&d3d12_sdk_config))) &&
-      SUCCEEDED(d3d12_sdk_config->CreateDeviceFactory(agility_sdk_version, current_module_path.c_str(), IID_PPV_ARGS(&d3d12_factory)))) {
-    THROW_IF_FAILED(d3d12_factory->CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&dml_objects.d3d12_device)));
-  } else {
-    printf("Warning: Unable to create a device from version 1.614.0 of the DirectX 12 Agility SDK. You can still use this library, but some scenarios may not work.\n");
-    printf("The given module path: %s", current_module_path.c_str());
-    THROW_IF_FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&dml_objects.d3d12_device)));
-  }
+  dml_objects.d3d12_device = d3d12_device;
 
   THROW_IF_FAILED(dml_objects.d3d12_device->CreateCommandQueue(&command_queue_description, IID_PPV_ARGS(&dml_objects.command_queue)));
   THROW_IF_FAILED(dml_objects.d3d12_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE, IID_PPV_ARGS(&dml_objects.command_allocator)));

@@ -15,6 +15,7 @@
 #include <wil/wrl.h>
 #include "dml_provider_factory.h"
 #include "../dml/dml_helpers.h"
+#include "../dml/dml_allocator.h"
 
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
 
@@ -198,6 +199,22 @@ Ort::Allocator* GetCudaAllocator(OrtSession& session) {
 }
 #endif
 
+#if USE_DML
+DmlAllocator* GetDmlAllocator() {
+  auto& globals = *GetOrtGlobals();
+  if (!globals.allocator_dml_) {
+    const OrtDmlApi* p_dml_api{};
+    Ort::ThrowOnError(Ort::api->GetExecutionProviderApi("DML", ORT_API_VERSION, reinterpret_cast<const void**>(&p_dml_api)));
+
+    globals.d3d12_device_ = DmlHelpers::CreateD3d12Device(CurrentModulePath());
+    globals.memory_info_dml_ = OrtMemoryInfo::Create("DML", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+    globals.allocator_dml_ = std::make_unique<DmlAllocator>(p_dml_api, globals.d3d12_device_.Get(), globals.memory_info_dml_.get());
+    Ort::ThrowOnError(Ort::api->RegisterAllocator(&GetOrtEnv(), globals.allocator_dml_.get()));
+  }
+  return globals.allocator_dml_.get();
+}
+#endif
+
 SessionInfo::SessionInfo(OrtSession& session) {
   Add(session);
 }
@@ -257,12 +274,6 @@ void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
 #if USE_CUDA
   if (device_type_ == DeviceType::CUDA) {
     allocator_device_ = GetCudaAllocator(session);
-  }
-#elif USE_DML
-  if (device_type_ == DeviceType::DML) {
-    memory_info_device_ = OrtMemoryInfo::Create("DML", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-    dml_owned_allocator_ = Ort::Allocator::Create(session, *memory_info_device_);
-    allocator_device_ = dml_owned_allocator_.get();
   }
 #endif
 
@@ -379,8 +390,8 @@ void Model::CreateSessionOptions() {
       ort_options.AppendExecutionProvider_ROCM(ort_provider_options);
 #if USE_DML
     } else if (provider_options.name == "dml") {
-      auto current_module_path = CurrentModulePath();
-      dml_objects_ = DmlHelpers::CreateDmlObjects(current_module_path);
+      allocator_device_ = GetDmlAllocator();
+      dml_objects_ = DmlHelpers::CreateDmlObjects(GetOrtGlobals()->d3d12_device_.Get());
 
       constexpr auto directml_dll = "DirectML.dll";
       wil::unique_hmodule smart_directml_dll(LoadLibraryEx(directml_dll, nullptr, 0));
@@ -416,7 +427,8 @@ void Model::CreateSessionOptions() {
       }
 
       ort_options.AddConfigEntry("ep.dml.enable_graph_capture", "1");
-      ort_options.AddConfigEntry("ep.dml.disable_memory_arena", "1");
+      ort_options.AddConfigEntry("session.use_env_allocators", "1");
+
       p_dml_api_->SessionOptionsAppendExecutionProvider_DML1(&ort_options, dml_device_.Get(), dml_objects_.command_queue.Get());
       is_intel_device_ = DmlHelpers::IsIntelDevice(dml_objects_.d3d12_device.Get());
 

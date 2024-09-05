@@ -31,6 +31,10 @@
 using cudaStream_t = void*;
 #endif
 
+#if USE_DML
+#include "dml/dml_allocator.h"
+#endif
+
 #include "leakcheck.h"
 #include "smartptrs.h"
 #include "models/onnxruntime_api.h"
@@ -149,6 +153,13 @@ struct OrtGlobals {
   std::unique_ptr<OrtMemoryInfo> memory_info_cuda_;
   std::unique_ptr<Ort::Allocator> allocator_cuda_;
 #endif
+
+#if USE_DML
+  std::unique_ptr<OrtMemoryInfo> memory_info_dml_;
+  Microsoft::WRL::ComPtr<ID3D12Device> d3d12_device_;
+  std::unique_ptr<DmlAllocator> allocator_dml_;
+#endif
+
  private:
   OrtGlobals(const OrtGlobals&) = delete;
   void operator=(const OrtGlobals&) = delete;

@@ -127,7 +127,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
   cuda_stream_holder cuda_stream_;
   DeviceType device_type_{DeviceType::CPU};
   Ort::Allocator& allocator_cpu_{Ort::Allocator::GetWithDefaultOptions()};
-  Ort::Allocator* allocator_device_{};  // Can be CUDA or CPU based on the DeviceType in the model
+  OrtAllocator* allocator_device_{};  // Can be CUDA or CPU based on the DeviceType in the model
 
   std::unique_ptr<SessionInfo> session_info_;
 
@@ -156,8 +156,6 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
   std::unique_ptr<DmlReadbackHeap> dml_readback_heap_;
   ComPtr<IDMLDevice> dml_device_;
   bool is_intel_device_{};
-  std::unique_ptr<Ort::Allocator> dml_owned_allocator_;
-  std::unique_ptr<OrtMemoryInfo> memory_info_device_;
 #endif
 
   std::shared_ptr<CapturedGraphPool> captured_graph_pool_;

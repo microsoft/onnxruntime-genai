@@ -31,7 +31,8 @@ struct DmlObjects {
 };
 
 namespace DmlHelpers {
-DmlObjects CreateDmlObjects(const std::string& current_module_path);
+ComPtr<ID3D12Device> CreateD3d12Device(const std::string& current_module_path);
+DmlObjects CreateDmlObjects(ID3D12Device* d3d12_device);
 
 DmlReusedCommandListState BuildReusableCommandList(
     IDMLDevice* dml_device,

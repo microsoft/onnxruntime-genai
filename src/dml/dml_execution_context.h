@@ -20,7 +20,7 @@ class DmlExecutionContext {
       ID3D12Device* d3d12_device,
       IDMLDevice* dml_device,
       ID3D12CommandQueue* queue,
-      Ort::Allocator& device_allocator,
+      OrtAllocator& device_allocator,
       const OrtDmlApi* ort_dml_api);
 
   // Waits for flushed work, discards unflushed work, and discards associated references to

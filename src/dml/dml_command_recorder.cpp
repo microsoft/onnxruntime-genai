@@ -12,7 +12,7 @@ DmlCommandRecorder::DmlCommandRecorder(
     ID3D12Device* d3d_device,
     IDMLDevice* dml_device,
     std::shared_ptr<DmlCommandQueue> command_queue,
-    Ort::Allocator& device_allocator,
+    OrtAllocator& device_allocator,
     const OrtDmlApi* ort_dml_api)
     : queue_(std::move(command_queue)),
       d3d_device_(d3d_device),
