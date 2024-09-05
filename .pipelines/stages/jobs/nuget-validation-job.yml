@@ -165,7 +165,7 @@ jobs:
        cd examples/csharp/HelloPhi
        mv models/$(prebuild_phi3_mini_model_folder) models/phi-3
        dotnet restore -r $(os)-$(arch) /property:Configuration=$(csproj_configuration) --source https://api.nuget.org/v3/index.json --source https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json --source $PWD --disable-parallel --verbosity detailed
-       dotnet build ./HelloPhi.csproj -r $(os)-$(arch) /property:Configuration=$(csproj_configuration)
+       dotnet build ./HelloPhi.csproj -r $(os)-$(arch) /property:Configuration=$(csproj_configuration) --no-restore --self-contained
       displayName: 'Perform dotnet restore & build'
       workingDirectory: '$(Build.Repository.LocalPath)'
       env:

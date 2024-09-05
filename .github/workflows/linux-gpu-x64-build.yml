@@ -37,19 +37,17 @@ jobs:
           path: manylinux
           submodules: true
 
-      - name: Install jq
-        run: |
-          sudo apt-get install jq
-
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
 
-      - name: Download OnnxRuntime
+      - name: Get the Latest OnnxRuntime Nightly Version
+        shell: pwsh
         run: |
-          ORT_NIGHTLY_VERSION=$(curl -s "${{ env.ORT_NIGHTLY_REST_API }}" | jq -r '.value[0].versions[0].normalizedVersion')
-          echo "$ORT_NIGHTLY_VERSION" 
-          echo "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" >> $GITHUB_ENV
+          $resp = Invoke-RestMethod "${{ env.ORT_NIGHTLY_REST_API }}"
+          $ORT_NIGHTLY_VERSION = $resp.value[0].versions[0].normalizedVersion
+          Write-Host "$ORT_NIGHTLY_VERSION"
+          "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Download OnnxRuntime Nightly
         run: |
@@ -65,7 +63,6 @@ jobs:
           ls -R ${{ env.ORT_PACKAGE_NAME }}
         continue-on-error: true
 
-# TODO: Find out why do we need to to have libonnxruntime.so.$ort_version
       - name: Extract OnnxRuntime library and header files
         run: |
           set -e -x
@@ -135,8 +132,19 @@ jobs:
             -w /ort_genai_src onnxruntimecudabuildx64 bash -c " \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/requirements.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/requirements-cuda.txt --user && \
-              ${{ env.PYTHON_EXECUTABLE }} -m pip install /ort_genai_src/build/cuda/wheel/onnxruntime_genai*manylinux*.whl --user && \
+              ${{ env.PYTHON_EXECUTABLE }} -m pip install /ort_genai_src/build/cuda/wheel/onnxruntime_genai*manylinux*.whl --no-deps --user && \
               ${{ env.PYTHON_EXECUTABLE }} test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models --e2e"
+
+      # TODO: Enable this by adding dotnet to the docker image
+      # - name: Build the C# API and Run the C# Tests
+      #   run: |
+      #     echo "Building the C# API and running the C# tests"
+      #     docker run \
+      #       --gpus all \
+      #       --rm \
+      #       --volume $GITHUB_WORKSPACE:/ort_genai_src \
+      #       -w /ort_genai_src/test/csharp onnxruntimecudabuildx64 bash -c " \
+      #         dotnet test /p:NativeBuildOutputDir='/ort_genai_src/build/cuda/'"
 
       - name: Docker -- Run unit tests
         run: |

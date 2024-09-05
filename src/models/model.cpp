@@ -447,7 +447,7 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path) {
 
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
-  if (config->model.type == "llama" || config->model.type == "gemma" || config->model.type == "gemma2" || config->model.type == "mistral" || config->model.type == "phi" || config->model.type == "phi3" || config->model.type == "phi3small" || config->model.type == "qwen2")
+  if (config->model.type == "llama" || config->model.type == "gemma" || config->model.type == "gemma2" || config->model.type == "mistral" || config->model.type == "phi" || config->model.type == "phi3" || config->model.type == "phi3small" || config->model.type == "phimoe" || config->model.type == "qwen2")
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
   if (config->model.type == "whisper")
     return std::make_shared<Whisper_Model>(std::move(config), ort_env);
@@ -469,7 +469,7 @@ std::shared_ptr<GeneratorParams> CreateGeneratorParams() {
 void ConvertFp16ToFp32(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<OrtValue>& p_out, DeviceType device_type, cudaStream_t stream) {
   auto shape_info = in.GetTensorTypeAndShapeInfo();
   auto shape = shape_info->GetShape();
-  assert(shape_info->GetElementType() == Ort::TypeToTensorType<Ort::Float16_t>::type);
+  assert(shape_info->GetElementType() == Ort::TypeToTensorType<Ort::Float16_t>);
 
   bool allocate_p_out = p_out == nullptr;
   if (p_out) {
@@ -508,7 +508,7 @@ void ConvertFp32ToFp16(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<Or
                        DeviceType device_type, cudaStream_t stream) {
   auto shape_info = in.GetTensorTypeAndShapeInfo();
   auto shape = shape_info->GetShape();
-  assert(shape_info->GetElementType() == Ort::TypeToTensorType<float>::type);
+  assert(shape_info->GetElementType() == Ort::TypeToTensorType<float>);
 
   bool allocate_p_out = p_out == nullptr;
   if (p_out) {

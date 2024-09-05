@@ -92,7 +92,7 @@ jobs:
       run: |
         python -m pip install -r test\python\requirements.txt
         python -m pip install -r test\python\requirements-directml.txt
-        python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl"))
+        python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
 
     - name: Verify Build Artifacts
       if: always()
