@@ -27,13 +27,14 @@ OgaEngine::OgaEngine(const char* config_path) {
   tokenizer_ = model_->CreateTokenizer();
   CacheOptions cache_config{
       model_->config_->model.decoder.num_hidden_layers,
-      std::nullopt,
+      256,
       model_->config_->model.decoder.num_key_value_heads,
       model_->config_->model.decoder.head_size,
       std::nullopt,
-      1024,
+      64,
       std::nullopt,
   };
+  block_size_ = cache_config.block_size_;
   model_runner_ = std::make_unique<ModelRunner>(model_, cache_config);
   SchedulerConfig scheduler_config;
   scheduler_config.max_model_len = model_->config_->model.context_length;
@@ -67,22 +68,29 @@ void OgaEngine::AddRequest(std::string request_id, const std::string& inputs,
   }
 
   std::vector<int32_t> token_ids = tokenizer_->Encode(inputs.c_str());
-
+  auto llm_inputs = LLMInputs{token_ids, inputs};
+  std::cout << "create sequence start\n";
   // TODO: get block_size
-  Sequence seq{seq_count_++, LLMInputs{token_ids, inputs}, 16,
+  Sequence seq{seq_count_++, llm_inputs, block_size_,
                model_->config_->model.eos_token_id};
+  std::cout << "finish sequence start\n";
 
   std::vector<Sequence> seqs{seq};
   std::vector<float> embeddings;
 
-  SequenceGroup seq_group{request_id, seqs,       arrival_time,
-                          params,     embeddings, nullptr};
+  SequenceGroup seq_group{request_id, seqs, arrival_time,
+                          params, embeddings, nullptr};
 
   scheduler_->AddSeqGroup(std::move(seq_group));
 }
 
 std::vector<RequestOutput> OgaEngine::Step() {
   auto [seq_group_metadatas, scheduler_outputs] = scheduler_->Schedule();
+
+  if (seq_group_metadatas.empty()) {
+    return {};
+  }
+
   std::cout << "Scheduled " << scheduler_outputs.scheduled_seq_groups.size()
             << " seq groups" << std::endl;
 
@@ -117,6 +125,7 @@ std::vector<RequestOutput> OgaEngine::Step() {
                                 scheduler_outputs.num_lookahead_slots,
                                 scheduler_outputs.running_queue_size};
   auto outputs = model_runner_->ExecuteModel(model_req);
+  std::cout << "outputs.size() = " << outputs.size() << std::endl;
   // process model outputs
   float now = std::chrono::duration_cast<std::chrono::seconds>(
                   std::chrono::system_clock::now().time_since_epoch())
@@ -124,9 +133,10 @@ std::vector<RequestOutput> OgaEngine::Step() {
 
   auto& scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups;
 
+  size_t queue_offset = scheduler_->GetRunningSize() - scheduled_seq_groups.size();
   for (int i = 0; i < scheduled_seq_groups.size(); i++) {
     auto& seq_group = scheduled_seq_groups[i].seq_group;
-    auto& queued_seq_group = scheduler_->GetRunning(i);
+    auto& queued_seq_group = scheduler_->GetRunning(queue_offset + i);
     seq_group.UpdateNumComputedTokens(scheduled_seq_groups[i].token_chunk_size);
     queued_seq_group.UpdateNumComputedTokens(scheduled_seq_groups[i].token_chunk_size);
 
@@ -180,7 +190,6 @@ std::vector<RequestOutput> OgaEngine::Step() {
                              seq.data.output_token_ids.begin(),
                              seq.data.output_token_ids.end());
         int token_generated = all_input_ids.back();
-
         std::span all_ids_span{all_input_ids.data(), all_input_ids.size()};
         size_t start = std::max(all_input_ids.size() - 5, size_t{0});
         std::string prefix_text = tokenizer_->Decode(
@@ -189,6 +198,8 @@ std::vector<RequestOutput> OgaEngine::Step() {
             all_ids_span.subspan(start, all_ids_span.size() - start));
         std::string new_text = full_text.substr(prefix_text.size());
         seq.output_text = seq.output_text + new_text;
+        queued_seq_group.seqs_dict.at(seq.seq_id).output_text = seq.output_text + new_text;
+        std::cout << "seq.output_text = " << seq.output_text << std::endl;
 
         // stop check
         size_t new_char_count = new_text.size();
@@ -200,15 +211,21 @@ std::vector<RequestOutput> OgaEngine::Step() {
         if (!sampling_params.ignore_eos &&
             token_generated == model_->config_->model.eos_token_id) {
           seq.status = SequenceStatus::kFinishedStopped;
+          seq_group.seqs_dict.at(seq.seq_id).status = SequenceStatus::kFinishedStopped;
+          queued_seq_group.seqs_dict.at(seq.seq_id).status = SequenceStatus::kFinishedStopped;
         }
 
         if (seq.GetLen() > model_->config_->model.context_length) {
           seq.status = SequenceStatus::kFinishedLengthCapped;
+          seq_group.seqs_dict.at(seq.seq_id).status = SequenceStatus::kFinishedLengthCapped;
+          queued_seq_group.seqs_dict.at(seq.seq_id).status = SequenceStatus::kFinishedLengthCapped;
         }
 
         if (sampling_params.max_tokens > 0 &&
             seq.data.output_token_ids.size() >= sampling_params.max_tokens) {
           seq.status = SequenceStatus::kFinishedLengthCapped;
+          seq_group.seqs_dict.at(seq.seq_id).status = SequenceStatus::kFinishedLengthCapped;
+          queued_seq_group.seqs_dict.at(seq.seq_id).status = SequenceStatus::kFinishedLengthCapped;
         }
       }
 
@@ -249,7 +266,7 @@ std::vector<RequestOutput> OgaEngine::Step() {
     std::vector<CompletionOutput> outs;
     for (auto& seq : topn_seqs) {
       outs.emplace_back(CompletionOutput{seq.seq_id, seq.output_text,
-                                         seq.data.output_token_ids, 0, "", ""});
+                                         seq.data.output_token_ids, 0, 0, GetFinishReason(seq.status), ""});
     }
     if (seq_group.IsFinished()) {
       seq_group.metrics.finished_time = now;

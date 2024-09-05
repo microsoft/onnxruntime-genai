@@ -27,6 +27,11 @@ class ModelRunner {
   std::shared_ptr<Tensor> is_prompt_;
   std::unique_ptr<NamedTensors> named_tensors_;
 
-  std::vector<int32_t> RunGenerator(const GeneratorParams& params, std::vector<int32_t>& seq_lens);
+  std::vector<std::string> key_cache_names_;
+  std::vector<std::string> value_cache_names_;
+  std::vector<std::unique_ptr<OrtValue>> key_caches_;
+  std::vector<std::unique_ptr<OrtValue>> value_caches_;
+
+  std::vector<int32_t> RunGenerator(const GeneratorParams& params, std::vector<int32_t>& seq_lens, bool is_prompt);
 };
 };  // namespace Generators

@@ -19,6 +19,8 @@ enum class SequenceStatus {
 
 };
 
+std::string GetFinishReason(SequenceStatus status);
+
 enum class AllocateStatus { kOK, kLater, kNever };
 
 struct SamplingParams {
@@ -38,13 +40,16 @@ struct SamplingParams {
   std::vector<int> stop_token_ids;
   bool include_stop_str_in_output = false;
   bool ignore_eos = false;
-  int max_tokens = 16;
+  int max_tokens = 256;
   int min_tokens = 0;
   int logprobs = 0;
   int prompt_logprobs = 0;
   bool detokenize = true;
   bool skip_special_tokens = true;
   bool spaces_between_special_tokens = true;
+
+  SamplingParams() = default;
+  
 };
 
 struct SequenceData {

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <cstddef>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -496,6 +497,10 @@ bool SchedulerBudget::CanSchedule(int num_new_tokens, int num_new_seqs) {
 
 SequenceGroup& Scheduler::GetRunning(size_t idx) {
   return running_[idx];
+}
+
+size_t Scheduler::GetRunningSize() {
+  return running_.size();
 }
 
 }  // namespace Generators

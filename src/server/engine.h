@@ -17,13 +17,14 @@ struct CompletionOutput {
   std::string text;
   std::vector<int> token_ids;
   float cumulative_logprob;
+  float logprobs;
   std::string finish_reason;
   std::string stop_reason;
 };
 
 struct RequestOutput {
   std::string request_id;
-  std::string output;
+  std::string prompt;
   std::vector<int> prompt_token_ids;
   std::vector<CompletionOutput> outputs;
   bool finished;
@@ -53,5 +54,6 @@ class OgaEngine {
   std::shared_ptr<Tokenizer> tokenizer_;
   std::unique_ptr<Scheduler> scheduler_;
   std::queue<const char*> unscheduled_prompts_;
+  int block_size_;
 };
 }  // namespace Generators

@@ -1,15 +1,37 @@
-#include "model_runner.h"
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <vector>
+
 #include "engine_utils.h"
+#include "model_runner.h"
 
 namespace Generators {
 
+constexpr char PagedKeyCacheNamePrefix[] = "key_cache.";
+constexpr char PagedValueCacheNamePrefix[] = "value_cache.";
+
 ModelRunner::ModelRunner(std::shared_ptr<Generators::Model> model,
                          const CacheOptions& cache_config)
-    : model_(model), cache_config_(cache_config) {}
+    : model_(model), cache_config_(cache_config) {
+  std::array<int64_t, 2> shape = {cache_config.num_blocks_, cache_config.block_size_ *
+                                                                cache_config.head_size_ *
+                                                                cache_config.num_kv_heads_};
+  for (int i = 0; i < model_->config_->model.decoder.num_hidden_layers; ++i) {
+    key_caches_.push_back(
+        OrtValue::CreateTensor(*model_->allocator_device_, shape,
+                               ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16));
+
+    key_cache_names_.push_back(
+        (std::string(PagedKeyCacheNamePrefix) + std::to_string(i)).c_str());
+    value_caches_.push_back(
+        OrtValue::CreateTensor(*model_->allocator_device_, shape,
+                               ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16));
+    value_cache_names_.push_back(
+        (std::string(PagedValueCacheNamePrefix) + std::to_string(i)).c_str());
+  }
+}
 
 void PadVector(std::vector<std::vector<int32_t>>& tensor,
                int32_t pad_token_id) {
@@ -82,6 +104,7 @@ std::vector<CompletionSequenceGroupOutput> ModelRunner::ExecuteModel(
   }
 
   printf("finish batching!\n");
+  printf("is_prompt: %d\n", is_prompt);
 
   params->input_ids = input_tokens;
   params->batch_size = batch_size;
@@ -123,7 +146,7 @@ std::vector<CompletionSequenceGroupOutput> ModelRunner::ExecuteModel(
   named_tensors_->emplace("is_prompt", is_prompt_);
 
   params->SetInputs(*named_tensors_);
-  auto output_tokens = RunGenerator(*params, context_lens);
+  auto output_tokens = RunGenerator(*params, context_lens, is_prompt);
   std::vector<CompletionSequenceGroupOutput> outputs;
 
   int offset = 0;
@@ -141,10 +164,17 @@ std::vector<CompletionSequenceGroupOutput> ModelRunner::ExecuteModel(
   return outputs;
 }
 
-std::vector<int32_t> ModelRunner::RunGenerator(const GeneratorParams& params, std::vector<int32_t>& seq_lens) {
+std::vector<int32_t> ModelRunner::RunGenerator(const GeneratorParams& params, std::vector<int32_t>& seq_lens, bool is_prompt) {
   printf("before create generator\n");
   auto generator = Generators::CreateGenerator(*model_, params);
   generator->state_->seq_lens_ = seq_lens;
+  generator->state_->is_prompt_ = is_prompt;
+  for (int i = 0; i < model_->config_->model.decoder.num_hidden_layers; ++i) {
+    generator->state_->input_names_.push_back(key_cache_names_[i].c_str());
+    generator->state_->inputs_.push_back(key_caches_[i].get());
+    generator->state_->input_names_.push_back(value_cache_names_[i].c_str());
+    generator->state_->inputs_.push_back(value_caches_[i].get());
+  }
   printf("generator created\n");
 
   generator->ComputeLogits();

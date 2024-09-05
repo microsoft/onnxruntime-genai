@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <string>
 #include <tuple>
 #include <unordered_set>
@@ -119,6 +120,7 @@ class Scheduler {
   void FreeSeq(const Sequence& seq);
 
   SequenceGroup& GetRunning(size_t idx);
+  size_t GetRunningSize();
 
   PreemptionMode Preempt(SequenceGroup& seq_group,
                          std::vector<std::tuple<int, int>>& blocks_to_swap_out);

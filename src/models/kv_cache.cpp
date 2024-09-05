@@ -408,22 +408,22 @@ PagedCacheOrchestrator::PagedCacheOrchestrator(const Model& model, State& state)
 
   printf("kvcache shape_: %d, %d\n", shape_[0], shape_[1]);
 
-  key_caches_.reserve(layer_count_);
-  value_caches_.reserve(layer_count_);
+  // key_caches_.reserve(layer_count_);
+  // value_caches_.reserve(layer_count_);
 
-  for (int i = 0; i < layer_count_; ++i) {
-    key_caches_.push_back(
-        OrtValue::CreateTensor(*model_.allocator_device_, shape_,
-                               ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16));
+  // for (int i = 0; i < layer_count_; ++i) {
+  //   key_caches_.push_back(
+  //       OrtValue::CreateTensor(*model_.allocator_device_, shape_,
+  //                              ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16));
 
-    key_cache_names_.push_back(
-        (std::string(PagedKeyCacheNamePrefix) + std::to_string(i)).c_str());
-    value_caches_.push_back(
-        OrtValue::CreateTensor(*model_.allocator_device_, shape_,
-                               ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16));
-    value_cache_names_.push_back(
-        (std::string(PagedValueCacheNamePrefix) + std::to_string(i)).c_str());
-  }
+  //   key_cache_names_.push_back(
+  //       (std::string(PagedKeyCacheNamePrefix) + std::to_string(i)).c_str());
+  //   value_caches_.push_back(
+  //       OrtValue::CreateTensor(*model_.allocator_device_, shape_,
+  //                              ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16));
+  //   value_cache_names_.push_back(
+  //       (std::string(PagedValueCacheNamePrefix) + std::to_string(i)).c_str());
+  // }
 }
 
 void PagedCacheOrchestrator::Add() {
@@ -436,14 +436,14 @@ void PagedCacheOrchestrator::Add() {
   //   paged_cache_->Add(i, state_.params_->sequence_length);
   // }
 
-  for (int i = 0; i < layer_count_; ++i) {
-    // auto [key_cache, value_cache] = paged_cache_->Cache(i);
+  // for (int i = 0; i < layer_count_; ++i) {
+  //   // auto [key_cache, value_cache] = paged_cache_->Cache(i);
 
-    state_.input_names_.push_back(key_cache_names_[i].c_str());
-    state_.inputs_.push_back(key_caches_[i].get());
-    state_.input_names_.push_back(value_cache_names_[i].c_str());
-    state_.inputs_.push_back(value_caches_[i].get());
-  }
+  //   state_.input_names_.push_back(key_cache_names_[i].c_str());
+  //   state_.inputs_.push_back(key_caches_[i].get());
+  //   state_.input_names_.push_back(value_cache_names_[i].c_str());
+  //   state_.inputs_.push_back(value_caches_[i].get());
+  // }
 
   // state_.input_names_.push_back(PagedCacheBlockTablesName);
   // block_tables_ = paged_cache_->BlockTables(sequence_ids);

@@ -20,7 +20,7 @@ namespace Generators {
 
 namespace {
 
-constexpr int32_t DefaultBlockSize = 16;
+constexpr int32_t DefaultBlockSize = 256;
 
 std::pair<std::unique_ptr<OrtValue>, std::unique_ptr<OrtValue>>
 AllocateLayerCache(const CacheOptions& options, Ort::Allocator& gpu_allocator) {
@@ -110,7 +110,9 @@ CacheManager::CacheManager(const CacheOptions& cache_options,
 AllocateStatus CacheManager::CanAllocate(const SequenceGroup& seq_group) const {
   int required_blocks = seq_group.GetSeqs(SequenceStatus::kWaiting)[0]
                             .logical_token_blocks.size();
-  int free_gpu_blocks = block_allocator_->NumFreeBlocks();
+  int free_gpu_blocks = block_allocator_->GetNumFreeBlocks();
+  std::cout << "required_blocks: " << required_blocks << std::endl;
+  std::cout << "free_gpu_blocks: " << free_gpu_blocks << std::endl;
   int watermark_blocks =
       static_cast<int>(options_.watermark * options_.num_blocks_);
   if (options_.num_blocks_ - required_blocks < watermark_blocks) {

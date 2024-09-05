@@ -141,7 +141,7 @@ void GreedySearch_Cuda::SelectTop() {
   cuda::GetSample(samplingdata_.get(), params_->cuda_stream, next_tokens_.data(), scores.data(), int(scores.size() / params_->batch_size),
                   params_->batch_size, 1, 0.0, 1.0);
   CheckForEOS();
-  AppendNextTokensToSequences();
+  // AppendNextTokensToSequences();
 }
 
 void GreedySearch_Cuda::SampleTopP(float p, float temperature) {

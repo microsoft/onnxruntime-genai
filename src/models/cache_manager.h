@@ -25,7 +25,7 @@ struct CacheOptions {
                const std::optional<float>& gpu_utilization_factor);
 
   int32_t num_layers_{};
-  int32_t block_size_{16};
+  int32_t block_size_{256};
   int32_t num_kv_heads_{};
   int32_t head_size_{};
   ONNXTensorElementDataType dtype_{ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT};

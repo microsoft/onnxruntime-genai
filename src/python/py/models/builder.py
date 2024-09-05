@@ -325,7 +325,7 @@ class Model:
                 "vocab_size": self.vocab_size,
                 "kv_cache": {
                     "paged_cache": self.attention_attrs["op_type"] == "PagedAttention",
-                    "num_blocks": 1024,
+                    "num_blocks": 64,
                 }
             },
             "search": {
@@ -817,9 +817,10 @@ class Model:
         cos_cache, sin_cache = emb.cos() * self.rotemb_attrs["mscale"], emb.sin() * self.rotemb_attrs["mscale"]
         return cos_cache, sin_cache
 
-    def make_rotary_embedding_caches(self, rotemb, **kwargs):
+    def make_rotary_embedding_caches(self, rotemb, merge=False, **kwargs):
         cos_cache_name = kwargs.get("cos_cache_name", "cos_cache")
         sin_cache_name = kwargs.get("sin_cache_name", "sin_cache")
+        cos_sin_cache_name = kwargs.get("cos_sin_cache_name", "cos_sin_cache")
 
         if self.rotemb_attrs["create_rotary_embedding_caches"]:
             if not hasattr(rotemb, "cos_cached"):
@@ -834,6 +835,15 @@ class Model:
             cos_cache = cos_cache.astype(self.to_numpy_dtype[self.io_dtype])
             sin_cache = sin_cache.squeeze()[:, : (hidden_dim // 2)].detach().numpy()
             sin_cache = sin_cache.astype(self.to_numpy_dtype[self.io_dtype])
+            
+            cos_sin_cache = np.concatenate([cos_cache, sin_cache], axis=-1)
+            if merge:
+                if "cos_sin_cache" not in kwargs:
+                    # Save cos/sin caches to disk
+                    self.make_external_tensor(cos_sin_cache, cos_sin_cache_name)
+                else:
+                    # Return cos/sin caches since they will be custom-saved
+                    return cos_sin_cache
 
             if "cos_cache_name" not in kwargs and "sin_cache_name" not in kwargs:
                 # Save cos/sin caches to disk
@@ -845,7 +855,7 @@ class Model:
 
             self.rotemb_attrs["create_rotary_embedding_caches"] = False
 
-        return cos_cache_name, sin_cache_name
+        return cos_cache_name, sin_cache_name if not merge else cos_sin_cache_name
 
     def make_rotary_embedding(self, rotemb, name, root_input, **kwargs):
         cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches(rotemb)
@@ -1171,7 +1181,7 @@ class Model:
             kwargs["q_path"], kwargs["k_path"], kwargs["v_path"],
             kwargs["key_cache"], kwargs["value_cache"],
             kwargs["block_tables"], kwargs["slot_mapping"],
-            kwargs["context_lens"], kwargs["is_prompt"],
+            kwargs["context_lens"], kwargs["is_prompt"], kwargs["cos_sin_cache"]
         ]
         output = f"{name}/output_0"
         outputs = [output]
@@ -1282,6 +1292,8 @@ class Model:
         # Make RotaryEmbedding nodes
         cos_cache_name, sin_cache_name = "", ""
         if self.attention_attrs["use_rotemb_in_attn"]:
+            if self.attention_attrs["op_type"] == "PagedAttention":
+                cos_sin_cache_name = self.make_rotary_embedding_caches(attention.rotary_emb, merge=True)
             cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches(attention.rotary_emb)
         else:
             q_rotary_name = f"/model/layers.{layer_id}/attn/q_rotary/RotaryEmbedding"
@@ -1308,6 +1320,7 @@ class Model:
             kwargs["slot_mapping"] = "slot_mapping"
             kwargs["context_lens"] = "context_lens"
             kwargs["is_prompt"] = "is_prompt"
+            kwargs["cos_sin_cache"] = "cos_sin_cache"
 
         # Make attention node (e.g. MultiHeadAttention, GroupQueryAttention, etc.)
         attn_name = f"/model/layers.{layer_id}/attn/{self.attention_attrs['op_type']}"

@@ -131,7 +131,6 @@ struct PagedAttention {
 
 
     bool prompt_mode = *(is_prompt.Data()) == 1;
-    // bool prompt_mode=true;
     PackedAttentionParameters parameters;
     ORTX_RETURN_IF_ERROR(CheckInputs<T>(reinterpret_cast<cudaStream_t>(ctx->GetCudaStream()), allocator_.get(), query, 
                          context_lens, num_heads_, num_kv_heads_, head_size_, scale_, prompt_mode, parameters));

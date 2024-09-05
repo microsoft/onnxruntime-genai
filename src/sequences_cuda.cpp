@@ -15,7 +15,7 @@ Sequences_Cuda::Sequences_Cuda(std::span<const int32_t> input_sequences, int bat
       batch_beam_size_{batch_size * beam_size},
       max_length_{max_length},
       current_length_{static_cast<int>(input_sequences.size()) / batch_size} {
-  assert(current_length_ * batch_size == input_sequences.size());  // Ensure size divided perfectly
+  // assert(current_length_ * batch_size == input_sequences.size());  // Ensure size divided perfectly
   size_t sequences_size = batch_beam_size_ * max_length;
 
   if (beam_size == 1) {

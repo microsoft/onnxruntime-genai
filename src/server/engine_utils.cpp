@@ -1,5 +1,6 @@
 
 #include <algorithm>
+#include <iostream>
 #include <cstdio>
 #include <utility>
 #include <vector>
@@ -22,6 +23,22 @@ bool IsFinished(SequenceStatus status) {
       return false;
   }
 }
+
+std::string GetFinishReason(SequenceStatus status) {
+  switch (status) {
+    case SequenceStatus::kFinishedIgnored:
+      return "length";
+    case SequenceStatus::kFinishedAborted:
+      return "abort";
+    case SequenceStatus::kFinishedLengthCapped:
+      return "length";
+    case SequenceStatus::kFinishedStopped:
+      return "stop";
+    default:
+      return "";
+  }
+}
+
 int SequenceData::GetLen() const {
   return output_token_ids.size() + prompt_tokens_ids.size();
 }
@@ -42,15 +59,17 @@ int Sequence::GetNumNewTokens() const {
   return data.GetNumUncomputedTokens();
 }
 
-Sequence::Sequence(int seq_id, const LLMInputs& inputs, int block_size,
+Sequence::Sequence(int seq_id, const LLMInputs& inp, int block_size,
                    int eos_token_id)
     : seq_id(seq_id),
-      inputs(inputs),
+      inputs(inp),
       block_size(block_size),
       eos_token_id(eos_token_id),
-      data(inputs.prompt_tokens_ids) {
+      data(inp.prompt_tokens_ids) {
   status = SequenceStatus::kWaiting;
-  AppendTokensToBlocks(inputs.prompt_tokens_ids);
+  std::cout << "start append tokens to blocks\n";
+  AppendTokensToBlocks(inp.prompt_tokens_ids);
+  std::cout << "finish append tokens to blocks\n";
 }
 
 int Sequence::GetLen() const { return data.GetLen(); }
@@ -70,24 +89,26 @@ void Sequence::AppendTokenId(int token_id) {
   data.output_token_ids.push_back(token_id);
 }
 
-void Sequence::AppendTokensToBlocks(std::vector<int> const& tokens) {
+void Sequence::AppendTokensToBlocks(const std::vector<int>& tokens) {
   int cursur = 0;
   while (cursur < tokens.size()) {
     if (logical_token_blocks.empty()) {
       logical_token_blocks.emplace_back(
-          LogicalTokenBlock{logical_token_blocks.size(), block_size});
+          LogicalTokenBlock{0, block_size});
     }
     auto& last_block = logical_token_blocks.back();
     if (last_block.num_tokens == block_size) {
+      auto new_block_num = logical_token_blocks.size();
       logical_token_blocks.emplace_back(
-          LogicalTokenBlock{logical_token_blocks.size(), block_size});
-      last_block = logical_token_blocks.back();
+          LogicalTokenBlock{new_block_num, block_size});
     }
-    int empty_slots = block_size - last_block.num_tokens;
+    auto& new_last_block = logical_token_blocks.back();
+
+    int empty_slots = block_size - new_last_block.num_tokens;
     for (auto it = tokens.begin() + cursur; it != tokens.end(); ++it) {
-      last_block.token_ids[last_block.num_tokens] = *it;
-      last_block.num_tokens++;
-      if (last_block.num_tokens == block_size) {
+      new_last_block.token_ids[new_last_block.num_tokens] = *it;
+      new_last_block.num_tokens++;
+      if (new_last_block.num_tokens == block_size) {
         break;
       }
     }
