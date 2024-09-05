@@ -82,9 +82,9 @@ def _parse_args():
 
     parser.add_argument("--skip_tests", action="store_true", help="Skip all tests. Overrides --test.")
     parser.add_argument("--skip_wheel", action="store_true", help="Skip building the Python wheel.")
-    parser.add_argument("--skip_csharp", action="store_true", help="Skip building the C# API.")
 
-    # Default to not building the Java bindings
+    # Default to not building the language bindings
+    parser.add_argument("--build_csharp", action="store_true", help="Build the C# API.")
     parser.add_argument("--build_java", action="store_true", help="Build Java bindings.")
 
     parser.add_argument("--parallel", action="store_true", help="Enable parallel build.")
@@ -276,8 +276,7 @@ def _validate_android_args(args: argparse.Namespace):
             log.info(f"Setting CMake generator to '{args.cmake_generator}' for cross-compiling for Android.")
 
         # no C# on Android so automatically skip
-        if not args.skip_csharp:
-            args.skip_csharp = True
+        args.build_csharp = False
 
 
 def _validate_ios_args(args: argparse.Namespace):
@@ -550,7 +549,7 @@ def build(args: argparse.Namespace, env: dict[str, str]):
 
     util.run(make_command, env=env)
 
-    if not args.skip_csharp:
+    if args.build_csharp:
         dotnet = str(_resolve_executable_path("dotnet"))
 
         # Build the library
@@ -567,7 +566,7 @@ def test(args: argparse.Namespace, env: dict[str, str]):
     ctest_cmd = [str(args.ctest_path), "--build-config", args.config, "--verbose", "--timeout", "10800"]
     util.run(ctest_cmd, cwd=str(args.build_dir))
 
-    if not args.skip_csharp:
+    if args.build_csharp:
         dotnet = str(_resolve_executable_path("dotnet"))
         csharp_test_command = [dotnet, "test"]
         csharp_test_command += _get_csharp_properties(args)

@@ -60,6 +60,7 @@ typedef struct OgaTensor OgaTensor;
 typedef struct OgaImages OgaImages;
 typedef struct OgaNamedTensors OgaNamedTensors;
 typedef struct OgaMultiModalProcessor OgaMultiModalProcessor;
+typedef struct OgaStringArray OgaStringArray;
 
 /* \brief Call this on process exit to cleanly shutdown the genai library & its onnxruntime usage
  */
@@ -100,6 +101,15 @@ OGA_EXPORT void OGA_API_CALL OgaDestroySequences(OgaSequences* sequences);
 OGA_EXPORT size_t OGA_API_CALL OgaSequencesCount(const OgaSequences* sequences);
 
 /*
+ * \brief Appends token_cnt number of tokens from token_ptr to sequence
+ * \param[in] token_ptr constant pointer to int32 tokens
+ * \param[in] token_cnt number of tokens to read from token_ptr
+ * \param[in] sequences OgaSequences object to append the tokens to
+ * \return OgaResult containing the error message when tokens could not been added, else nullptr.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaAppendTokenSequence(const int32_t* token_ptr, size_t token_cnt, OgaSequences* sequence);
+
+/*
  * \brief Returns the number of tokens in the sequence at the given index
  * \param[in] sequences
  * \return The number of tokens in the sequence at the given index
@@ -115,6 +125,8 @@ OGA_EXPORT size_t OGA_API_CALL OgaSequencesGetSequenceCount(const OgaSequences* 
 OGA_EXPORT const int32_t* OGA_API_CALL OgaSequencesGetSequenceData(const OgaSequences* sequences, size_t sequence_index);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadImage(const char* image_path, OgaImages** images);
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadImages(const OgaStringArray* image_paths, OgaImages** images);
 
 OGA_EXPORT void OGA_API_CALL OgaDestroyImages(OgaImages* images);
 
@@ -311,6 +323,38 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTensorGetData(OgaTensor*, void** out);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaSetCurrentGpuDeviceId(int device_id);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGetCurrentGpuDeviceId(int* device_id);
+
+/*
+ * \brief Creates an object of type OgaStringArray.
+ * \return The result of the operation. If the operation is successful, a nullptr is returned.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateStringArray(OgaStringArray** out);
+
+/*
+ * \brief Creates an object of type OgaStringArray from the given strings.
+ * \return The result of the operation. If the operation is successful, a nullptr is returned.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateStringArrayFromStrings(const char* const* strs, size_t count, OgaStringArray** out);
+
+/*
+ * \brief Destroys OgaStringArray.
+ */
+OGA_EXPORT void OGA_API_CALL OgaDestroyStringArray(OgaStringArray* string_array);
+
+/*
+ * \brief Adds the given string to the string_array.
+ * \param[inout] string_array The string array to which the string is to be added
+ * \param[in] str The string to be added to the string_array.
+ * \return The result of the operation. If the operation is successful, a nullptr is returned.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStringArrayAddString(OgaStringArray* string_array, const char* str);
+
+/*
+ * \brief Gets the number of strings in the string_array.
+ * \param[in] string_array The OgaStringArray object to get the count of the strings.
+ * \return The number of strings in the string_array.
+ */
+OGA_EXPORT size_t OGA_API_CALL OgaStringArrayGetCount(const OgaStringArray* string_array);
 
 #ifdef __cplusplus
 }
