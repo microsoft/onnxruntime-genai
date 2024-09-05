@@ -275,7 +275,7 @@ class Model:
         self.quant_attrs = {
             "int4": {
                 "block_size": int(extra_options["int4_block_size"]) if "int4_block_size" in extra_options else 32,
-                "accuracy_level": int(extra_options["int4_accuracy_level"]) if "int4_accuracy_level" in extra_options else None,
+                "accuracy_level": int(extra_options["int4_accuracy_level"]) if "int4_accuracy_level" in extra_options else 0,   # Default is 0 for non-QDQ formats, default is 4 for QDQ formats
             }
         }
         if self.quant_type is not None:
