@@ -231,23 +231,22 @@ inline void InitApi() {
     ort_lib_handle = LoadDynamicLibraryIfExists(ort_lib_path);
   }
 
-#if defined(__ANDROID__)
+#if defined(__linux__)
   if (ort_lib_handle == nullptr) {
+    // For Android and NuGet Linux package, the file name is libonnxruntime.so
     // "libonnxruntime4j_jni.so" is also an option on Android if we have issues
     ort_lib_handle = LoadDynamicLibraryIfExists("libonnxruntime.so");
   }
-#endif
 
-#if defined(__linux__)
   if (ort_lib_handle == nullptr) {
-    // On Linux it's just `.1`. See: https://github.com/microsoft/onnxruntime/pull/21339
+    // On Linux it can also be `libonnxruntime.so.1`. See: https://github.com/microsoft/onnxruntime/pull/21339
     ort_lib_handle = LoadDynamicLibraryIfExists("libonnxruntime.so.1");
   }
 #endif
 
 #if defined(MACOS_USE_DLOPEN)
   if (ort_lib_handle == nullptr) {
-    void* ort_lib_handle = LoadDynamicLibraryIfExists("libonnxruntime.dylib");
+    ort_lib_handle = LoadDynamicLibraryIfExists("libonnxruntime.dylib");
   }
 #endif
 
