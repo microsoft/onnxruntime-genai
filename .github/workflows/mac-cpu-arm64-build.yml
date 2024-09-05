@@ -71,6 +71,12 @@ jobs:
           export ORTGENAI_LOG_ORT_LIB=1
           python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models
 
+      - name: Build the C# API and Run the C# Tests
+        run: |
+          export ORTGENAI_LOG_ORT_LIB=1
+          cd test/csharp
+          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="../../build/cpu/osx-arm64"
+
       - name: Run tests
         run: |
           set -e -x
