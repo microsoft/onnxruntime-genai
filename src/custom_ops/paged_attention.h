@@ -148,10 +148,10 @@ struct PagedAttention {
           seqstart[i+1] = seqstart[i] + seqlen_i;
         }
         seqinfo = GetScratchBuffer<int32_t>(allocator_.get()->Alloc(allocator_.get(), seqstart.size() * sizeof(int32_t)), allocator_.get());
-        cudaMemcpy(seqinfo.get(), seqstart.data(), seqstart.size() * sizeof(int32_t), cudaMemcpyHostToDevice);
+        cudaMemcpyAsync(seqinfo.get(), seqstart.data(), seqstart.size() * sizeof(int32_t), cudaMemcpyHostToDevice, reinterpret_cast<cudaStream_t>(ctx->GetCudaStream()));
     } else {
         seqinfo = GetScratchBuffer<int32_t>(allocator_.get()->Alloc(allocator_.get(), context_lens.SizeInBytes()), allocator_.get());
-        cudaMemcpy(seqinfo.get(), context_lens.DataRaw(), context_lens.SizeInBytes(), cudaMemcpyHostToDevice);
+        cudaMemcpyAsync(seqinfo.get(), context_lens.DataRaw(), context_lens.SizeInBytes(), cudaMemcpyHostToDevice, reinterpret_cast<cudaStream_t>(ctx->GetCudaStream()));
     }
   
     if (cos_sin_cache.has_value() && !positions.has_value()) {
@@ -167,7 +167,7 @@ struct PagedAttention {
       } else position_ids_host.assign(parameters.batch_size, 0);  // TODO(leca): Does decoding case support seqlen_knew > 1?
     
       position_ids = GetScratchBuffer<int32_t>(allocator_.get()->Alloc(allocator_.get(), position_ids_host.size() * sizeof(int32_t)), allocator_.get());
-      cudaMemcpy(position_ids.get(), position_ids_host.data(), position_ids_host.size() * sizeof(int32_t), cudaMemcpyHostToDevice);
+      cudaMemcpyAsync(position_ids.get(), position_ids_host.data(), position_ids_host.size() * sizeof(int32_t), cudaMemcpyHostToDevice, reinterpret_cast<cudaStream_t>(ctx->GetCudaStream()));
     }
 
     const std::vector<int64_t>& query_shape = query.Shape();

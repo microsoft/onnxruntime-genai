@@ -107,11 +107,11 @@ std::vector<RequestOutput> OgaEngine::Step() {
             << seq_group_metadatas.at(0).block_tables.size() << std::endl;
   for (const auto& [key, value] : seq_group_metadatas.at(0).block_tables) {
     std::cout << "key = " << key << std::endl;
-    std::cout << "value.size() = " << value.size() << std::endl;
+    std::cout << "value.size() = " << value.size();
     for (const auto& v : value) {
       std::cout << v << " ";
-      std::cout << std::endl;
     }
+      std::cout << std::endl;
   }
   std::cout << "seq_group_metadatas.at(0).computed_block_nums.size() = "
             << seq_group_metadatas.at(0).computed_block_nums.size()
@@ -196,10 +196,12 @@ std::vector<RequestOutput> OgaEngine::Step() {
             all_ids_span.subspan(start, all_ids_span.size() - 1 - start));
         std::string full_text = tokenizer_->Decode(
             all_ids_span.subspan(start, all_ids_span.size() - start));
+
         std::string new_text = full_text.substr(prefix_text.size());
 
         seq.output_text = seq.output_text + new_text;
         queued_seq_group.seqs_dict.at(seq.seq_id).output_text = seq.output_text;
+        std::cout << "seq.output_text = " << seq.output_text << std::endl;
 
         // stop check
         size_t new_char_count = new_text.size();

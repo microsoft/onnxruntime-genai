@@ -486,23 +486,23 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   pybind11::class_<Generators::CompletionOutput>(m, "CompletionOutput")
       .def(pybind11::init<>())
-      .def_readonly("index", &Generators::CompletionOutput::index)
-      .def_readonly("text", &Generators::CompletionOutput::text)
-      .def_readonly("token_ids", &Generators::CompletionOutput::token_ids)
-      .def_readonly("logprobs",
+      .def_readwrite("index", &Generators::CompletionOutput::index)
+      .def_readwrite("text", &Generators::CompletionOutput::text)
+      .def_readwrite("token_ids", &Generators::CompletionOutput::token_ids)
+      .def_readwrite("logprobs",
                      &Generators::CompletionOutput::logprobs)
-      .def_readonly("cumulative_logprob",
+      .def_readwrite("cumulative_logprob",
                      &Generators::CompletionOutput::cumulative_logprob)
-      .def_readonly("finish_reason", &Generators::CompletionOutput::finish_reason)
-      .def_readonly("stop_reason", &Generators::CompletionOutput::stop_reason);
+      .def_readwrite("finish_reason", &Generators::CompletionOutput::finish_reason)
+      .def_readwrite("stop_reason", &Generators::CompletionOutput::stop_reason);
 
   pybind11::class_<Generators::RequestOutput>(m, "RequestOutput")
       .def(pybind11::init<>())
-      .def_readonly("request_id", &Generators::RequestOutput::request_id)
-      .def_readonly("prompt", &Generators::RequestOutput::prompt)
-      .def_readonly("prompt_token_ids", &Generators::RequestOutput::prompt_token_ids)
-      .def_readonly("outputs", &Generators::RequestOutput::outputs)
-      .def_readonly("finished", &Generators::RequestOutput::finished);
+      .def_readwrite("request_id", &Generators::RequestOutput::request_id)
+      .def_readwrite("prompt", &Generators::RequestOutput::prompt)
+      .def_readwrite("prompt_token_ids", &Generators::RequestOutput::prompt_token_ids)
+      .def_readwrite("outputs", &Generators::RequestOutput::outputs)
+      .def_readwrite("finished", &Generators::RequestOutput::finished);
   
   pybind11::class_<Generators::SamplingParams>(m, "SamplingParams")
       .def(pybind11::init<>())
