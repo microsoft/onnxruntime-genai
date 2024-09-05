@@ -696,6 +696,7 @@ class Model:
         self.make_node(
             "MatMulNBits", inputs=inputs, outputs=[output], name=name, domain="com.microsoft",
             bits=matmul.bits, block_size=matmul.group_size, K=matmul.in_features, N=matmul.out_features,
+            accuracy_level=self.quant_attrs["int4"]["accuracy_level"],
         )
         self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', matmul.out_features])
 
@@ -771,6 +772,7 @@ class Model:
         self.make_node(
             "MatMulNBits", inputs=inputs, outputs=[output], name=name, domain="com.microsoft",
             bits=matmul.bits, block_size=matmul.group_size, K=matmul.in_features, N=matmul.out_features,
+            accuracy_level=self.quant_attrs["int4"]["accuracy_level"],
         )
         self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', matmul.out_features])
 
