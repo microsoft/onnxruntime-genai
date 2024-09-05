@@ -140,7 +140,7 @@ inline void* LoadDynamicLibraryIfExists(const std::string& path) {
   if (ort_lib_handle == nullptr) {
     char* err = dlerror();
     LOG_WARN("Error while dlopen: %s", (err != nullptr ? err : "Unknown"));
-    if (!path.starts_with("/")) {
+    if (path.front() != '/') {
       // If not absolute path, try search for current dir
       std::string current_module_dir = GetCurrentModuleDir();
       std::string local_path{current_module_dir + "/" + path};
@@ -247,7 +247,7 @@ inline void InitApi() {
 
 #if defined(MACOS_USE_DLOPEN)
   if (ort_lib_handle == nullptr) {
-    void* ort_lib_handle = LoadDynamicLibraryIfExists("libonnxruntime.dylib);
+    void* ort_lib_handle = LoadDynamicLibraryIfExists("libonnxruntime.dylib");
   }
 #endif
 
