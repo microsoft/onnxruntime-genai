@@ -199,7 +199,12 @@ jobs:
       - bash: |
           export ORTGENAI_LOG_ORT_LIB=1
           python -m pip install -r test/python/requirements.txt
-          python -m pip install -r test/python/requirements-cpu.txt
+          if [[ "$(os)" == "linux" ]]; then
+            python -m pip install -r test/python/requirements-cpu.txt
+          fi
+          if [[ "$(os)" == "osx" ]]; then
+            python -m pip install -r test/python/requirements-macos.txt
+          fi
           cd examples/python
           python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)
           python model-generate.py -m ./models/$(prebuild_phi3_mini_model_folder) --min_length 25 --max_length 50 --verbose
