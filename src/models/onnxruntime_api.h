@@ -140,11 +140,13 @@ inline void* LoadDynamicLibraryIfExists(const std::string& path) {
   if (ort_lib_handle == nullptr) {
     char* err = dlerror();
     LOG_WARN("Error while dlopen: %s", (err != nullptr ? err : "Unknown"));
-    // Trying current dir
-    std::string current_module_dir = GetCurrentModuleDir();
-    std::string local_path{current_module_dir + "/" + path};
-    LOG_INFO("Attempting to dlopen %s", local_path.c_str());
-    ort_lib_handle = dlopen(local_path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (!path.starts_with("/")) {
+      // If not absolute path, try search for current dir
+      std::string current_module_dir = GetCurrentModuleDir();
+      std::string local_path{current_module_dir + "/" + path};
+      LOG_INFO("Attempting to dlopen %s", local_path.c_str());
+      ort_lib_handle = dlopen(local_path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    }
   }
   if (ort_lib_handle) {
 #if !defined(__ANDROID__) && !defined(__APPLE__)  // RTLD_DI_ORIGIN not available on Android & Darwin
@@ -223,20 +225,30 @@ inline void InitApi() {
   //     any libonnxruntime.so that supports one of those versions.
   //
 
-#if defined(__linux__)
-  const std::string path = "libonnxruntime.so";  // "libonnxruntime4j_jni.so" is also an option if we have issues
-  void* ort_lib_handle = LoadDynamicLibraryIfExists(path);
+  void* ort_lib_handle = nullptr;
+  const char *ort_lib_path = std::getenv("ORT_LIB_PATH");
+  if (ort_lib_path) {
+    ort_lib_handle = LoadDynamicLibraryIfExists(ort_lib_path);
+  }
 
-#if !defined(__ANDROID__)
+#if defined(__ANDROID__)
   if (ort_lib_handle == nullptr) {
+    // "libonnxruntime4j_jni.so" is also an option on Android if we have issues
+    ort_lib_handle = LoadDynamicLibraryIfExists("libonnxruntime.so");
+  }
+#endif
+
+#if defined(__linux__)
+  if (ort_lib_handle == nullptr) {
+    // On Linux it's just `.1`. See: https://github.com/microsoft/onnxruntime/pull/21339
     ort_lib_handle = LoadDynamicLibraryIfExists("libonnxruntime.so.1");
   }
 #endif
-#endif
 
 #if defined(MACOS_USE_DLOPEN)
-  const std::string path = "libonnxruntime.dylib";
-  void* ort_lib_handle = LoadDynamicLibraryIfExists(path);
+  if (ort_lib_handle == nullptr) {
+    void* ort_lib_handle = LoadDynamicLibraryIfExists("libonnxruntime.dylib);
+  }
 #endif
 
   if (ort_lib_handle == nullptr) {

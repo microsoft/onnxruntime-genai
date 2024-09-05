@@ -61,7 +61,10 @@ def add_onnxruntime_dependency(package_id: str):
         if not ort_lib_path:
             raise ImportError("Could not find the onnxruntime shared library.")
 
-        _ = ctypes.CDLL(ort_lib_path[0])
+        target_lib_path = ort_lib_path[0]
+        os.environ["ORT_LIB_PATH"] = target_lib_path
+
+        _ = ctypes.CDLL(target_lib_path)
 
 
 def add_cuda_dependency():
