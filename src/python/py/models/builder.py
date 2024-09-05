@@ -32,7 +32,7 @@ class Model:
         self.head_size = config.head_dim if hasattr(config, "head_dim") else config.hidden_size // config.num_attention_heads
         self.num_layers = int(extra_options["num_hidden_layers"]) if "num_hidden_layers" in extra_options else config.num_hidden_layers
         self.vocab_size = config.vocab_size
-        self.activation = config.hidden_activation if hasattr(config, "hidden_activation") else config.hidden_act
+        self.activation = config.hidden_activation if hasattr(config, "hidden_activation") and config.hidden_activation is not None else config.hidden_act
 
         self.model_name_or_path = config._name_or_path
         self.model_type = config.architectures[0]
@@ -252,6 +252,17 @@ class Model:
             "use_proj": True,           # Use projection style for MLP (GateProj/UpProj/DownProj)
             "use_fc": False,            # Use fully-connected style for MLP (FC1/FC2)
             "output_0": "",             # Output 0 for MLP layer
+        }
+
+        # MoE-specific variables
+        num_experts = config.num_experts if hasattr(config, "num_experts") else 1
+        self.moe_attrs = {
+            "num_experts": num_experts,                       # Number of experts in MoE layer
+            "top_k": 1,                                       # Number of experts to select in MoE layer
+            "activation_type": "relu",                        # Activation function for MoE layer
+            "normalize_routing_weights": False,               # Normalize routing weights in MoE layer
+            "use_sparse_mixer": False,                        # Use SparseMixer in MoE layer. Used in Phi3 MoE
+            "use_int4": True,                                 # Use INT4 quantization in MoE layer, otherwise use INT8
         }
 
         # LM head-specific variables
@@ -1500,6 +1511,129 @@ class Model:
         # Assign output 0 of MLP layer as output of last layer
         self.mlp_attrs["output_0"] = f"{fc2_add_name}/output_0"
 
+    def make_block_sparse_moe(self, layer_id, bsm, root_input):
+        # Make nodes for the QMoE subgraph
+        #
+        #                  root_input
+        #                 /       \
+        #         router_MatMul    |
+        #             /     \      |
+        #         Shape      |     |
+        #           |        |     |
+        #         Gather     |     |
+        #           |        |     |
+        #       Unsqueeze    |     |
+        #           |        |    /
+        #        Concat     /    /
+        #             \    /    /
+        #             Reshape  /
+        #                 \   /
+        #                  QMoE
+        #                   |
+        #                 output
+        num_experts = self.moe_attrs["num_experts"]
+        top_k = self.moe_attrs["top_k"]
+        activation_type = self.moe_attrs["activation_type"]
+        normalize_routing_weights = self.moe_attrs["normalize_routing_weights"]
+        use_sparse_mixer = self.moe_attrs["use_sparse_mixer"]
+        use_int4 = self.moe_attrs["use_int4"]
+
+        moe_name = f"/model/layers.{layer_id}/moe"
+        gate_ops_base = f"{moe_name}/gate"
+
+        # Make MoE nodes
+        gate_name = f"{gate_ops_base}/MatMul"
+        self.make_matmul(bsm.gate, gate_name, root_input)
+
+        shape_name = f"{gate_ops_base}/Shape"
+        self.make_shape(shape_name, f"{gate_name}/output_0", shape=[3])
+
+        gather_name = f"{gate_ops_base}/Gather"
+        self.make_gather(gather_name, [f"{shape_name}/output_0", "/model/constants/TensorProto.INT64/0D/2"], axis=0)
+
+        unsqueeze_name = f"{gate_ops_base}/Unsqueeze"
+        self.make_unsqueeze(unsqueeze_name, [f"{gather_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"], dtype=TensorProto.INT64, shape=[1])
+
+        concat_name = f"{gate_ops_base}/Concat"
+        self.make_concat(concat_name, ["/model/constants/TensorProto.INT64/1D/-1", f"{unsqueeze_name}/output_0"], dtype=TensorProto.INT64, shape=[2], axis=0)
+
+        gate_reshape_name = f"{gate_ops_base}/Reshape"
+        self.make_reshape(gate_reshape_name, [f"{gate_name}/output_0", f"{concat_name}/output_0"], dtype=self.io_dtype, shape=['num_rows', num_experts])
+
+        def quant_dequant(weights, quant_mode: bool = True):
+            type = torch.quint4x2 if quant_mode else torch.int8
+            processed_q_weight = None
+            torch_weight_scales = None
+            try:
+                import tensorrt_llm
+
+                _, processed_q_weight, torch_weight_scales = (
+                    torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix(weights.T.cpu().contiguous(), type)
+                )
+            except:
+                raise RuntimeError("tensorrt_llm is needed to use torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix()")
+
+            return torch_weight_scales.to(torch.float16), processed_q_weight
+
+        w1_list = []
+        w2_list = []
+        w3_list = []
+        w1_scale_list = []
+        w2_scale_list = []
+        w3_scale_list = []
+
+        for i in range(num_experts):
+            # Quantize the weights with uint8
+            w1_scale, pre_qweight1= quant_dequant(bsm.experts[i].w1.weight, use_int4)
+            w2_scale, pre_qweight2= quant_dequant(bsm.experts[i].w2.weight, use_int4)
+            w3_scale, pre_qweight3= quant_dequant(bsm.experts[i].w3.weight, use_int4)
+
+            w1_list.append(pre_qweight1)
+            w2_list.append(pre_qweight2)
+            w3_list.append(pre_qweight3)
+
+            w1_scale_list.append(w1_scale)
+            w2_scale_list.append(w2_scale)
+            w3_scale_list.append(w3_scale)
+
+        moe_expert_weight_1_name = f"model.layers.{layer_id}.moe.weight_1"
+        moe_expert_weight_2_name = f"model.layers.{layer_id}.moe.weight_2"
+        moe_expert_weight_3_name = f"model.layers.{layer_id}.moe.weight_3"
+
+        moe_expert_scales_1_name = f"model.layers.{layer_id}.moe.scales_1"
+        moe_expert_scales_2_name = f"model.layers.{layer_id}.moe.scales_2"
+        moe_expert_scales_3_name = f"model.layers.{layer_id}.moe.scales_3"
+
+        def make_moe_external_tensor(w_list, moe_expert_name, numpy_type):
+            moe_experts_weight = torch.stack(w_list, dim=0).detach().numpy()
+            self.make_external_tensor(moe_experts_weight.astype(numpy_type), moe_expert_name)
+
+        make_moe_external_tensor(w1_list, moe_expert_weight_1_name, np.uint8)
+        make_moe_external_tensor(w2_list, moe_expert_weight_2_name, np.uint8)
+        make_moe_external_tensor(w3_list, moe_expert_weight_3_name, np.uint8)
+
+        # Currently we don't expect QMoE to be used with distributed inference
+        make_moe_external_tensor(w1_scale_list, moe_expert_scales_1_name, self.to_numpy_dtype[self.io_dtype])
+        make_moe_external_tensor(w2_scale_list, moe_expert_scales_2_name, self.to_numpy_dtype[self.io_dtype])
+        make_moe_external_tensor(w3_scale_list, moe_expert_scales_3_name, self.to_numpy_dtype[self.io_dtype])
+
+        bias_ph = "" # Placeholder for bias
+        inputs = [root_input, f"{gate_reshape_name}/output_0", \
+                  moe_expert_weight_1_name, moe_expert_scales_1_name, bias_ph, \
+                  moe_expert_weight_2_name, moe_expert_scales_2_name, bias_ph, \
+                  moe_expert_weight_3_name, moe_expert_scales_3_name]
+        output = f"{moe_name}/output_0"
+
+        op_type = "QMoE"
+        self.make_node(op_type, inputs=inputs, outputs=[output], name=moe_name, domain="com.microsoft",
+                       k=top_k, activation_type=activation_type, normalize_routing_weights=normalize_routing_weights,
+                       use_sparse_mixer=use_sparse_mixer, expert_weight_bits=(4 if use_int4 else 8))
+
+        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+
+        # Assign output 0 of previous MoE as root input to next SkipLayerNorm
+        self.layernorm_attrs["skip_input"] = output
+
     def make_activation_with_mul(self, layer_id, root_input, activation, domain):
         # Make nodes for this activation subgraph
         #
@@ -1613,11 +1747,11 @@ class Model:
                 from onnxruntime_genai.models.quantized_model import QuantModel
             q_size = self.num_attn_heads * self.head_size
             kv_size = self.num_kv_heads * self.head_size
-            model = QuantModel.from_pretrained(self.quant_type, input_path, self.quant_attrs["bits"], self.quant_attrs["group_size"], self.quant_attrs["use_g_idx"], q_size, kv_size, self.intermediate_size)
+            model = QuantModel.from_pretrained(self.quant_type, input_path, self.quant_attrs["bits"], self.quant_attrs["group_size"], self.quant_attrs["use_g_idx"], q_size, kv_size, self.intermediate_size, self.num_layers)
         else:
             # Load PyTorch model
-            extra_kwargs = {} if os.path.exists(self.model_name_or_path) else {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {"cache_dir": self.cache_dir}
-            model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, use_auth_token=True, trust_remote_code=True, **extra_kwargs)
+            extra_kwargs = {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {}
+            model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, cache_dir=self.cache_dir, use_auth_token=True, trust_remote_code=True, **extra_kwargs)
 
         # Loop through model and map each module to ONNX/ORT ops
         self.layer_id = 0
@@ -2170,7 +2304,7 @@ class Gemma2Model(GemmaModel):
         # input_layernorm --> attention --> post_attention_layernorm --> pre_ffn_layernorm --> MLP --> post_ffn_layernorm
         self.make_layernorm(layer_id, layer.input_layernorm, skip=not self.layernorm_attrs["first_layernorm"], simple=self.layernorm_attrs["simple"], location="input")
         self.make_attention(layer_id, layer.self_attn, root_input=self.layernorm_attrs["output_0"])
-        
+
         # Temporarily set root_input for LayerNorm to skip_input for post_attention_layernorm
         # Set skip_input to output of post_attention_layernorm
         original_root_input = self.layernorm_attrs["root_input"]
@@ -2178,10 +2312,10 @@ class Gemma2Model(GemmaModel):
         self.make_layernorm(layer_id, layer.post_attention_layernorm, skip=False, simple=self.layernorm_attrs["simple"], location="post_attention")
         self.layernorm_attrs["root_input"] = original_root_input
         self.layernorm_attrs["skip_input"] = self.layernorm_attrs["output_0"]
-        
+
         self.make_layernorm(layer_id, layer.pre_feedforward_layernorm, skip=True, simple=self.layernorm_attrs["simple"], location="pre_feedforward")
         self.make_mlp(layer_id, layer.mlp, root_input=self.layernorm_attrs["output_0"])
-        
+
         # Temporarily set root_input for LayerNorm to skip_input for post_feedforward_layernorm
         # Set skip_input to output of post_ffn_layernorm
         original_root_input = self.layernorm_attrs["root_input"]
@@ -2452,6 +2586,44 @@ class Phi3VModel(Phi3Mini128KModel):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
 
+class Phi3MoE128KModel(MistralModel):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        assert io_dtype == TensorProto.FLOAT16, "This model only supports float16 io type."
+
+        self.layernorm_attrs["simple"] = False
+
+        self.moe_attrs["num_experts"] = 16
+        self.moe_attrs["top_k"] = 2
+        self.moe_attrs["activation_type"] = "silu"
+        self.moe_attrs["normalize_routing_weights"] = 0
+        self.moe_attrs["use_sparse_mixer"] = 1
+        self.moe_attrs["use_int4"] = 0 if "use_8bits_moe" in extra_options and extra_options["use_8bits_moe"] == "1" else 1
+
+        self.make_rotary_embedding_multi_cache()
+
+    def make_layer(self, layer_id, layer):
+        # Each LLM decoder layer is typically defined as:
+        # input_layernorm --> attention --> MLP --> output_layernorm
+        self.make_layernorm(layer_id, layer.input_layernorm, skip=not self.layernorm_attrs["first_layernorm"], simple=self.layernorm_attrs["simple"], location="input")
+        self.make_attention(layer_id, layer.self_attn, root_input=self.layernorm_attrs["output_0"])
+        self.make_layernorm(layer_id, layer.post_attention_layernorm, skip=True, simple=self.layernorm_attrs["simple"], location="post_attention")
+        self.make_block_sparse_moe(layer_id, layer.block_sparse_moe, root_input=self.layernorm_attrs["output_0"])
+
+        self.layernorm_attrs["first_layernorm"] = False
+        if layer_id == self.num_layers - 1:
+            # Norm after last decoder layer of model (last layer --> norm)
+            self.layernorm_attrs["last_layernorm"] = True
+
+
+def check_extra_options(kv_pairs):
+    if "use_8bits_moe" in kv_pairs:
+        assert(kv_pairs["use_8bits_moe"] == "1" or kv_pairs["use_8bits_moe"] == "0"), "use_8bits_moe must be 0 or 1."
+
+    if "enable_cuda_graph" in kv_pairs:
+        assert(kv_pairs["enable_cuda_graph"] == "1" or kv_pairs["enable_cuda_graph"] == "0"), "enable_cuda_graph must be 0 or 1."
+
+
 def parse_extra_options(kv_items):
     """
     Parse key value pairs that are separated by '='
@@ -2464,6 +2636,7 @@ def parse_extra_options(kv_items):
             kv_pairs[kv[0].strip()] = kv[1].strip()
 
     print(f"Extra options: {kv_pairs}")
+    check_extra_options(kv_pairs)
     return kv_pairs
 
 
@@ -2496,6 +2669,12 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             onnx_model = Phi3Mini4KModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings == 131072:
             onnx_model = Phi3Mini128KModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "PhiMoEForCausalLM" and config.max_position_embeddings == 131072:
+            print("WARNING: This model only works for CUDA currently because `MoE` is only supported for CUDA in ONNX Runtime. Setting `--execution_provider cuda` by default.")
+            print("WARNING: This model currently only supports quantized version. Setting `--precision int4` by default.")
+            execution_provider = "cuda"
+            precision = "int4"
+            onnx_model = Phi3MoE128KModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings == 8192:
             onnx_model = Phi3Small8KModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings == 131072:
@@ -2607,6 +2786,7 @@ def get_args():
                 enable_cuda_graph = 1 : The model can use CUDA graph capture for CUDA execution provider. If enabled, all nodes being placed on the CUDA EP
                     is the prerequisite for the CUDA graph to be used correctly. It is not guaranteed that cuda graph be enabled as it depends on the model
                     and the graph structure.
+                use_8bits_moe = 1 : Use 8-bit quantization for MoE layers. Default is using 4-bit quantization.
             """),
     )
 

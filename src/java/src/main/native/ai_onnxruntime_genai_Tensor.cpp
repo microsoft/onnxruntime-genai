@@ -2,24 +2,21 @@
  * Copyright (c) Microsoft Corporation. All rights reserved.
  * Licensed under the MIT License.
  */
-#include <jni.h>
+#include "ai_onnxruntime_genai_Tensor.h"
+
 #include "ort_genai_c.h"
 #include "utils.h"
 
 using namespace Helpers;
-
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 /*
  * Class:     ai_onnxruntime_genai_Tensor
  * Method:    createTensor
  * Signature: (Ljava/nio/ByteBuffer;[JI)J
  */
-JNIEXPORT
-jlong JNICALL Java_ai_onnxruntime_genai_Tensor_createTensor(JNIEnv* env, jobject thiz, jobject tensor_data,
-                                                            jlongArray shape_dims_in, jint element_type_in) {
+JNIEXPORT jlong JNICALL
+Java_ai_onnxruntime_genai_Tensor_createTensor(JNIEnv* env, jobject thiz, jobject tensor_data,
+                                              jlongArray shape_dims_in, jint element_type_in) {
   void* data = env->GetDirectBufferAddress(tensor_data);
   const int64_t* shape_dims = env->GetLongArrayElements(shape_dims_in, /*isCopy*/ 0);
   size_t shape_dims_count = env->GetArrayLength(shape_dims_in);
@@ -38,11 +35,7 @@ jlong JNICALL Java_ai_onnxruntime_genai_Tensor_createTensor(JNIEnv* env, jobject
  * Method:    destroyTensor
  * Signature: (J)V
  */
-JNIEXPORT
-void JNICALL Java_ai_onnxruntime_genai_Tensor_destroyTensor(JNIEnv* env, jobject thiz, jlong native_handle) {
+JNIEXPORT void JNICALL
+Java_ai_onnxruntime_genai_Tensor_destroyTensor(JNIEnv* env, jobject thiz, jlong native_handle) {
   OgaDestroyTensor(reinterpret_cast<OgaTensor*>(native_handle));
 }
-
-#ifdef __cplusplus
-}
-#endif

@@ -19,7 +19,7 @@
   </metadata>
   <files>
     <file src="..\LICENSE" target="LICENSE" />
-    <file src="..\src\csharp\README.md" target="README.md" />
+    <file src="MANAGED_PACKAGE.md" target="README.md" />
     <file src="..\ThirdPartyNotices.txt" target="ThirdPartyNotices.txt" />
 
     <file src="..\src\csharp\bin\$configuration$\netstandard2.0\Microsoft.ML.OnnxRuntimeGenAI.dll" target="lib\netstandard2.0" />

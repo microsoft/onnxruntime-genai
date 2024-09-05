@@ -165,7 +165,7 @@ jobs:
        cd examples/csharp/HelloPhi
        mv models/$(prebuild_phi3_mini_model_folder) models/phi-3
        dotnet restore -r $(os)-$(arch) /property:Configuration=$(csproj_configuration) --source https://api.nuget.org/v3/index.json --source https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json --source $PWD --disable-parallel --verbosity detailed
-       dotnet build ./HelloPhi.csproj -r $(os)-$(arch) /property:Configuration=$(csproj_configuration)
+       dotnet build ./HelloPhi.csproj -r $(os)-$(arch) /property:Configuration=$(csproj_configuration) --no-restore --self-contained
       displayName: 'Perform dotnet restore & build'
       workingDirectory: '$(Build.Repository.LocalPath)'
       env:
@@ -188,9 +188,9 @@ jobs:
             -w /ort_genai_src/ $(cuda_docker_image) \
             bash -c " \
                 export ORTGENAI_LOG_ORT_LIB=1 && \
-                dotnet --info && \
                 cd /ort_genai_src/examples/csharp/HelloPhi && \
-                dotnet run -r $(os)-$(arch) --configuration $(csproj_configuration) --no-build --verbosity normal -- -m ./models/phi-3"
+                chmod +x ./bin/Release_Cuda/net6.0/linux-x64/HelloPhi && \
+                ./bin/Release_Cuda/net6.0/linux-x64/HelloPhi -m ./models/phi-3"
 
         displayName: 'Run Example With Artifact'
         workingDirectory: '$(Build.Repository.LocalPath)'

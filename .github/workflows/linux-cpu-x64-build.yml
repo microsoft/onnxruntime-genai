@@ -23,19 +23,17 @@ jobs:
         with:
           submodules: true
 
-      - name: Install jq
-        run: |
-          sudo apt-get install jq
-
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
 
       - name: Get the Latest OnnxRuntime Nightly Version
+        shell: pwsh
         run: |
-          ORT_NIGHTLY_VERSION=$(curl -s "${{ env.ORT_NIGHTLY_REST_API }}" | jq -r '.value[0].versions[0].normalizedVersion')
-          echo "$ORT_NIGHTLY_VERSION" 
-          echo "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" >> $GITHUB_ENV
+          $resp = Invoke-RestMethod "${{ env.ORT_NIGHTLY_REST_API }}"
+          $ORT_NIGHTLY_VERSION = $resp.value[0].versions[0].normalizedVersion
+          Write-Host "$ORT_NIGHTLY_VERSION"
+          "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Download OnnxRuntime Nightly
         run: |
@@ -71,7 +69,7 @@ jobs:
         run: |
           python3 -m pip install -r test/python/requirements.txt --user
           python3 -m pip install -r test/python/requirements-cpu.txt --user
-          python3 -m pip install build/cpu/wheel/onnxruntime_genai*.whl --user
+          python3 -m pip install build/cpu/wheel/onnxruntime_genai*.whl --user --no-deps
 
       - name: Get HuggingFace Token
         run: |
@@ -89,6 +87,11 @@ jobs:
       - name: Run the python tests
         run: |
           python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models
+
+      - name: Build the C# API and Run the C# Tests
+        run: |
+          cd test/csharp
+          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="../../build/cpu/"
 
       - name: Verify Build Artifacts
         if: always()

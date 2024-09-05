@@ -2,26 +2,27 @@
  * Copyright (c) Microsoft Corporation. All rights reserved.
  * Licensed under the MIT License.
  */
-#include <jni.h>
+#include "ai_onnxruntime_genai_Sequences.h"
+
 #include "ort_genai_c.h"
 #include "utils.h"
 
 using namespace Helpers;
 
-extern "C" JNIEXPORT void JNICALL
+JNIEXPORT void JNICALL
 Java_ai_onnxruntime_genai_Sequences_destroySequences(JNIEnv* env, jobject thiz, jlong sequences_handle) {
   OgaSequences* sequences = reinterpret_cast<OgaSequences*>(sequences_handle);
   OgaDestroySequences(sequences);
 }
 
-extern "C" JNIEXPORT jlong JNICALL
+JNIEXPORT jlong JNICALL
 Java_ai_onnxruntime_genai_Sequences_getSequencesCount(JNIEnv* env, jobject thiz, jlong sequences_handle) {
   const OgaSequences* sequences = reinterpret_cast<const OgaSequences*>(sequences_handle);
   size_t num_sequences = OgaSequencesCount(sequences);
   return static_cast<jlong>(num_sequences);
 }
 
-extern "C" JNIEXPORT jintArray JNICALL
+JNIEXPORT jintArray JNICALL
 Java_ai_onnxruntime_genai_Sequences_getSequenceNative(JNIEnv* env, jobject thiz, jlong sequences_handle,
                                                       jlong sequence_index) {
   const OgaSequences* sequences = reinterpret_cast<const OgaSequences*>(sequences_handle);
