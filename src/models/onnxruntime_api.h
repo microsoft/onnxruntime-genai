@@ -226,7 +226,7 @@ inline void InitApi() {
   //
 
   void* ort_lib_handle = nullptr;
-  const char *ort_lib_path = std::getenv("ORT_LIB_PATH");
+  const char* ort_lib_path = std::getenv("ORT_LIB_PATH");
   if (ort_lib_path) {
     ort_lib_handle = LoadDynamicLibraryIfExists(ort_lib_path);
   }

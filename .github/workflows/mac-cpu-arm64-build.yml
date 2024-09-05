@@ -57,6 +57,12 @@ jobs:
         run: |
           rm -rf ort
 
+      - name: Verify Build Artifacts
+        if: always()
+        continue-on-error: true
+        run: |
+          ls -l ${{ github.workspace }}/build/cpu/osx-arm64
+
       # This will also download all the test models to the test/test_models directory
       # These models are used by the python tests as well as C#, C++ and others.
       - name: Run the python tests
@@ -64,12 +70,6 @@ jobs:
           source genai-macos-venv/bin/activate
           export ORTGENAI_LOG_ORT_LIB=1
           python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models
-
-      - name: Verify Build Artifacts
-        if: always()
-        continue-on-error: true
-        run: |
-          ls -l ${{ github.workspace }}/build/cpu/osx-arm64
 
       - name: Run tests
         run: |
