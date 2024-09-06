@@ -123,9 +123,11 @@ void LaunchInt32ToInt64(const int32_t* src, int64_t* dst, int count, cudaStream_
 
 namespace {
 
-// Support head_size up to 128
-constexpr unsigned int kTileSize = 32;
-constexpr unsigned int kSeqTileSize = 16;
+struct ReorderPastStateParams {
+  // Support head_size up to 128
+  constexpr static unsigned int kTileSize = 32;
+  constexpr static unsigned int kSeqTileSize = 16;
+};
 
 }  // namespace
 
@@ -135,11 +137,11 @@ __global__ void ReorderPastStatesKernel(float4* out_buffer,
                                         int num_heads,
                                         int max_length,
                                         int chunked_head_size) {
-  __shared__ float4 tile[kSeqTileSize][kTileSize + 1];
+  __shared__ float4 tile[ReorderPastStateParams::kSeqTileSize][ReorderPastStateParams::kTileSize + 1];
 
   const int b = blockIdx.z;
   const int n = blockIdx.y;
-  const int s_base = blockIdx.x * kSeqTileSize;
+  const int s_base = blockIdx.x * ReorderPastStateParams::kSeqTileSize;
   const int s = s_base + threadIdx.y;
   const int base_offset = (b * num_heads + n) * max_length * chunked_head_size;
 
@@ -151,8 +153,8 @@ __global__ void ReorderPastStatesKernel(float4* out_buffer,
   __syncthreads();
 
   const int tidx = threadIdx.x + threadIdx.y * chunked_head_size;
-  const int tidx_x = tidx % kSeqTileSize;
-  const int tidx_y = tidx / kSeqTileSize;
+  const int tidx_x = tidx % ReorderPastStateParams::kSeqTileSize;
+  const int tidx_y = tidx / ReorderPastStateParams::kSeqTileSize;
 
   const int s2 = s_base + tidx_x;
 
@@ -172,8 +174,8 @@ void ReorderPastStatesKernelLauncher(void* out_buffer,
                                      cudaStream_t stream) {
   // [B, N, max_length, H2(head_size/chunk_size), equv_chunk_size] -> [B, N, H2(head_size/chunk_size), max_length, equv_chunk_size]
   const int chunked_head_size = head_size / chunk_size;
-  const dim3 block(chunked_head_size, kSeqTileSize);
-  const dim3 grid((max_length + kSeqTileSize - 1) / kSeqTileSize, num_heads, batch_size);
+  const dim3 block(chunked_head_size, ReorderPastStateParams::kSeqTileSize);
+  const dim3 grid((max_length + ReorderPastStateParams::kSeqTileSize - 1) / ReorderPastStateParams::kSeqTileSize, num_heads, batch_size);
   if (chunk_size == 4 || chunk_size == 8) {
     ReorderPastStatesKernel<<<grid, block, 0, stream>>>(reinterpret_cast<float4*>(out_buffer),
                                                         reinterpret_cast<const float4*>(in_buffer),
