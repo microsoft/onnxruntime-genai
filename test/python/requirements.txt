@@ -2,7 +2,7 @@ coloredlogs
 flatbuffers
 numpy<2
 packaging
-protobuf
+protobuf==5.27
 sympy
 pytest
 onnx

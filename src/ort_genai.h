@@ -294,11 +294,25 @@ struct OgaTensor : OgaAbstract {
 };
 
 struct OgaImages : OgaAbstract {
-  static std::unique_ptr<OgaImages> Load(const char* image_path) {
+  static std::unique_ptr<OgaImages> Load(const std::vector<const char*>& image_paths) {
     OgaImages* p;
-    OgaCheckResult(OgaLoadImage(image_path, &p));
+    OgaStringArray* strs;
+    OgaCheckResult(OgaCreateStringArrayFromStrings(image_paths.data(), image_paths.size(), &strs));
+    OgaCheckResult(OgaLoadImages(strs, &p));
+    OgaDestroyStringArray(strs);
     return std::unique_ptr<OgaImages>(p);
   }
+
+#if __cplusplus >= 202002L
+  static std::unique_ptr<OgaImages> Load(std::span<const char* const> image_paths) {
+    OgaImages* p;
+    OgaStringArray* strs;
+    OgaCheckResult(OgaCreateStringArrayFromStrings(image_paths.data(), image_paths.size(), &strs));
+    OgaCheckResult(OgaLoadImages(strs, &p));
+    OgaDestroyStringArray(strs);
+    return std::unique_ptr<OgaImages>(p);
+  }
+#endif
 
   static void operator delete(void* p) { OgaDestroyImages(reinterpret_cast<OgaImages*>(p)); }
 };
