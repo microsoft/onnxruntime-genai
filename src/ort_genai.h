@@ -103,9 +103,18 @@ struct OgaSequences : OgaAbstract {
     return OgaSequencesGetSequenceData(this, index);
   }
 
+  void Append(const int32_t* tokens, size_t token_cnt) {
+    OgaCheckResult(OgaAppendTokenSequence(tokens, token_cnt, this));
+  }
 #if __cplusplus >= 202002L
   std::span<const int32_t> Get(size_t index) const {
     return {SequenceData(index), SequenceCount(index)};
+  }
+  void Append(const std::span<const int32_t>& sequence) {
+    OgaCheckResult(OgaAppendTokenSequence(sequence.data(), sequence.size(), this));
+  }
+  void Append(const std::vector<int32_t>& sequence) {
+    OgaCheckResult(OgaAppendTokenSequence(sequence.data(), sequence.size(), this));
   }
 #endif
 
@@ -285,11 +294,25 @@ struct OgaTensor : OgaAbstract {
 };
 
 struct OgaImages : OgaAbstract {
-  static std::unique_ptr<OgaImages> Load(const char* image_path) {
+  static std::unique_ptr<OgaImages> Load(const std::vector<const char*>& image_paths) {
     OgaImages* p;
-    OgaCheckResult(OgaLoadImage(image_path, &p));
+    OgaStringArray* strs;
+    OgaCheckResult(OgaCreateStringArrayFromStrings(image_paths.data(), image_paths.size(), &strs));
+    OgaCheckResult(OgaLoadImages(strs, &p));
+    OgaDestroyStringArray(strs);
     return std::unique_ptr<OgaImages>(p);
   }
+
+#if __cplusplus >= 202002L
+  static std::unique_ptr<OgaImages> Load(std::span<const char* const> image_paths) {
+    OgaImages* p;
+    OgaStringArray* strs;
+    OgaCheckResult(OgaCreateStringArrayFromStrings(image_paths.data(), image_paths.size(), &strs));
+    OgaCheckResult(OgaLoadImages(strs, &p));
+    OgaDestroyStringArray(strs);
+    return std::unique_ptr<OgaImages>(p);
+  }
+#endif
 
   static void operator delete(void* p) { OgaDestroyImages(reinterpret_cast<OgaImages*>(p)); }
 };
