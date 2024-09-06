@@ -17,6 +17,7 @@ Embeddings::Embeddings(const Model& model, State& state, Embeddings::Mode mode, 
                 : model_.session_info_->GetOutputDataType(name)},
       mode_{mode},
       name_{name} {
+  
   // Embeddings are only transient inputs and outputs.
   // They are never the user provided/requested model inputs/outputs
   // So only create the transient output and reuse that ortvalue for subsequent
