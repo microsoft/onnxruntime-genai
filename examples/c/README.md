@@ -95,11 +95,12 @@ cd build\\Release
 
 ### Download model
 
-This example uses the [Phi-3 vision model](https://huggingface.co/microsoft/Phi-3-vision-128k-instruct-onnx) optimized to run on CPU. You can clone this entire model repository or download individual model variants. To download individual variants, you need to install the HuggingFace CLI.
-
-```bash
-huggingface-cli download microsoft/Phi-3-vision-128k-instruct-onnx --include cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/* --local-dir .
-```
+You can use one of the following models for this sample:
+* [Phi-3 vision model for CPU](https://huggingface.co/microsoft/Phi-3-vision-128k-instruct-onnx-cpu)
+* [Phi-3 vision model for CUDA](https://huggingface.co/microsoft/Phi-3-vision-128k-instruct-onnx-cuda)
+* [Phi-3 vision model for DirectML](https://huggingface.co/microsoft/Phi-3-vision-128k-instruct-onnx-directml)
+  
+Clone one of the models above.
 
 ### Run on Windows
 
@@ -110,6 +111,7 @@ Change into the onnxruntime-genai folder.
 1. Install onnxruntime
    
 ```cmd
+cd examples\c
 curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.19.0/onnxruntime-win-x64-1.19.0.zip -o onnxruntime-win-x64-1.19.0.zip
 tar xvf onnxruntime-win-x64-1.19.0.zip
 copy onnxruntime-win-x64-1.19.0\include\* include
@@ -121,11 +123,12 @@ copy onnxruntime-win-x64-1.19.0\lib\* lib
 This example requires onnxruntime-genai to be built from source.
 
 ```cmd
-cd onnxruntime-genai
+cd ..\..
 python build.py --config Release --ort_home examples\c
 copy src\ort_genai.h examples\c\include
 copy src\ort_genai_c.h examples\c\include
 copy build\Windows\Release\Release\*.dll examples\c\lib
+cd examples\c
 ```
 
 #### Build this sample
@@ -151,7 +154,7 @@ Change into the onnxruntime-genai directory.
 
 1. Install onnxruntime
 
-```
+```bash
 cd examples/c
 curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.19.0/onnxruntime-linux-x64-1.19.0.tgz -o onnxruntime-linux-x64-1.19.0.tgz
 tar xvzf onnxruntime-linux-x64-1.19.0.tgz
@@ -165,7 +168,10 @@ cd ../..
 ```bash
 # This should be run from the root of the onnxruntime-genai folder
 python build.py --config Release --ort_home examples\c
-copy 
+cp src/ort_genai.h examples/c/include
+cp src/ort_genai_c.h examples/c/include
+cp build/Linux/release cd libonnxruntime-genai.so examples/c/lib
+cd examples/c
 ```
 
 #### Build this sample
