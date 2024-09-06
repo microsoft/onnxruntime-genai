@@ -64,6 +64,31 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   GeneratorParams() = default;  // This constructor is only used if doing a custom model handler vs built-in
   GeneratorParams(const Model& model);
 
+  std::shared_ptr<GeneratorParams> Clone() const {
+    auto other = std::make_shared<GeneratorParams>();
+    other->search = search;
+    other->pad_token_id = pad_token_id;
+    other->eos_token_id = eos_token_id;
+    other->vocab_size = vocab_size;
+    other->context_length = context_length;
+    other->batch_size = batch_size;
+    other->max_batch_size = max_batch_size;
+    other->use_cuda_graph = use_cuda_graph;
+    other->sequence_length = sequence_length;
+    other->hidden_size = hidden_size;
+    other->device_type = device_type;
+    other->cuda_stream = cuda_stream;
+    other->input_ids = input_ids;
+    other->inputs = inputs;
+    other->input_ids_owner = input_ids_owner;
+    other->external_owner_ = external_owner_;
+    other->extra_inputs = extra_inputs;
+    other->is_cuda_graph_enabled_ = is_cuda_graph_enabled_;
+    other->config_ = config_;
+
+    return other;
+  }
+
   Config::Search search;
 
   // Read only values copied from model

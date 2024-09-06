@@ -19,7 +19,27 @@ DmlAllocator::DmlAllocator(const OrtDmlApi* p_dml_api, ID3D12Device* d3d12_devic
   OrtAllocator::Info = InfoImpl;
 }
 
+void DmlAllocator::SetState(DmlAllocatorState new_state) {
+  state_ = new_state;
+
+  if (new_state == DmlAllocatorState::AllocatingPromptActivations) {
+    prompt_resource_index_ = 0;
+    resources_.clear();
+  }
+}
+
 void* DmlAllocator::DmlAlloc(size_t size_in_bytes) {
+  if (state_ == DmlAllocatorState::ReusingPromptActivations) {
+    assert(resources_[prompt_resource_index_]->GetDesc().Width == size_in_bytes);
+
+    void* allocation;
+    Ort::ThrowOnError(p_dml_api_->CreateGPUAllocationFromD3DResource(resources_[prompt_resource_index_].Get(), &allocation));
+
+    prompt_resource_index_ = (prompt_resource_index_ + 1) % resources_.size();
+
+    return allocation;
+  }
+
   size_t rounded_size_in_bytes = (size_in_bytes + 3) & ~3;
 
   Microsoft::WRL::ComPtr<ID3D12Resource> resource;
@@ -33,19 +53,27 @@ void* DmlAllocator::DmlAlloc(size_t size_in_bytes) {
       nullptr,
       IID_PPV_ARGS(resource.GetAddressOf())));
 
+  if (state_ == DmlAllocatorState::AllocatingPromptActivations) {
+    resources_.push_back(resource);
+  }
+
   void* allocation;
   Ort::ThrowOnError(p_dml_api_->CreateGPUAllocationFromD3DResource(resource.Detach(), &allocation));
-
-  // resources_.push_back(std::move(resource));
 
   return allocation;
 }
 
 void DmlAllocator::DmlFree(void* allocation) {
+  /*
   // if (allocation) {
-  //   // We free the allocation itself, even though the D3D12 resource may survive until the GPU is done executing
-  //   Ort::ThrowOnError(p_dml_api_->FreeGPUAllocation(allocation));
-  // }
+  //  We free the allocation itself, even though the D3D12 resource may survive until the GPU is done executing
+  Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+  Ort::ThrowOnError(p_dml_api_->GetD3D12ResourceFromAllocation(this, allocation, resource.GetAddressOf()));
+
+  resource->Release();
+  Ort::ThrowOnError(p_dml_api_->FreeGPUAllocation(allocation));
+  //}
+  */
 }
 
 OrtMemoryInfo* DmlAllocator::DmlInfo() const {

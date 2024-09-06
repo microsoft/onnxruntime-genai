@@ -148,6 +148,17 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
 
   search_ = CreateSearch(params);
   state_ = model.CreateState(search_->GetSequenceLengths(), params);
+
+#if USE_DML
+  auto dummy_generator_params = params.Clone();
+  dummy_generator_params->batch_size = dummy_generator_params->max_batch_size;
+  dummy_generator_params->sequence_length = dummy_generator_params->search.max_length;
+  dummy_generator_params->input_ids_owner = std::vector<int32_t>(dummy_generator_params->max_batch_size * dummy_generator_params->search.max_length);
+  dummy_generator_params->input_ids = dummy_generator_params->input_ids_owner;
+  auto dummy_state = model.CreateState(search_->GetSequenceLengths(), *dummy_generator_params);
+
+  dummy_state->Run(search_->GetSequenceLength(), search_->GetNextTokens(), search_->GetNextIndices());
+#endif
 }
 
 void Generator::ComputeLogits() {
