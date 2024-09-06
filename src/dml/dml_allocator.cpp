@@ -34,18 +34,18 @@ void* DmlAllocator::DmlAlloc(size_t size_in_bytes) {
       IID_PPV_ARGS(resource.GetAddressOf())));
 
   void* allocation;
-  Ort::ThrowOnError(p_dml_api_->CreateGPUAllocationFromD3DResource(resource.Get(), &allocation));
+  Ort::ThrowOnError(p_dml_api_->CreateGPUAllocationFromD3DResource(resource.Detach(), &allocation));
 
-  resources_.push_back(std::move(resource));
+  // resources_.push_back(std::move(resource));
 
   return allocation;
 }
 
 void DmlAllocator::DmlFree(void* allocation) {
-  if (allocation) {
-    // We free the allocation itself, even though the D3D12 resource may survive until the GPU is done executing
-    Ort::ThrowOnError(p_dml_api_->FreeGPUAllocation(allocation));
-  }
+  // if (allocation) {
+  //   // We free the allocation itself, even though the D3D12 resource may survive until the GPU is done executing
+  //   Ort::ThrowOnError(p_dml_api_->FreeGPUAllocation(allocation));
+  // }
 }
 
 OrtMemoryInfo* DmlAllocator::DmlInfo() const {

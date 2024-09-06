@@ -277,6 +277,12 @@ void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
   }
 #endif
 
+#if USE_DML
+  if (device_type_ == DeviceType::DML) {
+    allocator_device_ = GetDmlAllocator();
+  }
+#endif
+
   session_info_ = std::make_unique<SessionInfo>(session);
   captured_graph_pool_ = std::make_shared<CapturedGraphPool>(config_.get(), session_info_.get(), allocator_device_);
 }
