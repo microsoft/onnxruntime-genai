@@ -504,7 +504,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
               const Audios* audios = kwargs["audios"].cast<const Audios*>();
               std::string language = "en";
               if (kwargs.contains("language")) {
-                language = kwargs["lang"].cast<std::string>();
+                language = kwargs["language"].cast<std::string>();
               }
               std::string task = "transcribe";
               if (kwargs.contains("task")) {
