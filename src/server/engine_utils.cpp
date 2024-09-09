@@ -67,9 +67,7 @@ Sequence::Sequence(int seq_id, const LLMInputs& inp, int block_size,
       eos_token_id(eos_token_id),
       data(inp.prompt_tokens_ids) {
   status = SequenceStatus::kWaiting;
-  std::cout << "start append tokens to blocks\n";
   AppendTokensToBlocks(inp.prompt_tokens_ids);
-  std::cout << "finish append tokens to blocks\n";
 }
 
 int Sequence::GetLen() const { return data.GetLen(); }

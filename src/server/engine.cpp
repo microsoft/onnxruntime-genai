@@ -69,11 +69,11 @@ void OgaEngine::AddRequest(std::string request_id, const std::string& inputs,
 
   std::vector<int32_t> token_ids = tokenizer_->Encode(inputs.c_str());
   auto llm_inputs = LLMInputs{token_ids, inputs};
-  std::cout << "create sequence start\n";
+  // std::cout << "create sequence start\n";
   // TODO: get block_size
   Sequence seq{seq_count_++, llm_inputs, block_size_,
                model_->config_->model.eos_token_id};
-  std::cout << "finish sequence start\n";
+  // std::cout << "finish sequence start\n";
 
   std::vector<Sequence> seqs{seq};
   std::vector<float> embeddings;
@@ -91,31 +91,31 @@ std::vector<RequestOutput> OgaEngine::Step() {
     return {};
   }
 
-  std::cout << "Scheduled " << scheduler_outputs.scheduled_seq_groups.size()
-            << " seq groups" << std::endl;
+  // std::cout << "Scheduled " << scheduler_outputs.scheduled_seq_groups.size()
+  //           << " seq groups" << std::endl;
 
-  std::cout << "seq_group_metadatas.size() = " << seq_group_metadatas.size()
-            << std::endl;
+  // std::cout << "seq_group_metadatas.size() = " << seq_group_metadatas.size()
+  //           << std::endl;
 
-  std::cout << "seq_group_metadatas[0].seq_data.size() = "
-            << seq_group_metadatas.at(0).seq_data.size() << std::endl;
+  // std::cout << "seq_group_metadatas[0].seq_data.size() = "
+  //           << seq_group_metadatas.at(0).seq_data.size() << std::endl;
 
-  for (const auto& [id, seq_data] : seq_group_metadatas.at(0).seq_data) {
-    std::cout << "seq_data.GetLen() = " << seq_data.GetLen() << std::endl;
-  }
-  std::cout << "seq_group_metadatas.at(0).block_tables.size() = "
-            << seq_group_metadatas.at(0).block_tables.size() << std::endl;
-  for (const auto& [key, value] : seq_group_metadatas.at(0).block_tables) {
-    std::cout << "key = " << key << std::endl;
-    std::cout << "value.size() = " << value.size();
-    for (const auto& v : value) {
-      std::cout << v << " ";
-    }
-      std::cout << std::endl;
-  }
-  std::cout << "seq_group_metadatas.at(0).computed_block_nums.size() = "
-            << seq_group_metadatas.at(0).computed_block_nums.size()
-            << std::endl;
+  // for (const auto& [id, seq_data] : seq_group_metadatas.at(0).seq_data) {
+  //   std::cout << "seq_data.GetLen() = " << seq_data.GetLen() << std::endl;
+  // }
+  // std::cout << "seq_group_metadatas.at(0).block_tables.size() = "
+  //           << seq_group_metadatas.at(0).block_tables.size() << std::endl;
+  // for (const auto& [key, value] : seq_group_metadatas.at(0).block_tables) {
+  //   std::cout << "key = " << key << std::endl;
+  //   std::cout << "value.size() = " << value.size();
+  //   for (const auto& v : value) {
+  //     std::cout << v << " ";
+  //   }
+  //     std::cout << std::endl;
+  // }
+  // std::cout << "seq_group_metadatas.at(0).computed_block_nums.size() = "
+  //           << seq_group_metadatas.at(0).computed_block_nums.size()
+  //           << std::endl;
 
   // build model executor input
   ExecuteModelRequest model_req{seq_group_metadatas,
@@ -125,7 +125,7 @@ std::vector<RequestOutput> OgaEngine::Step() {
                                 scheduler_outputs.num_lookahead_slots,
                                 scheduler_outputs.running_queue_size};
   auto outputs = model_runner_->ExecuteModel(model_req);
-  std::cout << "outputs.size() = " << outputs.size() << std::endl;
+  // std::cout << "outputs.size() = " << outputs.size() << std::endl;
   // process model outputs
   float now = std::chrono::duration_cast<std::chrono::seconds>(
                   std::chrono::system_clock::now().time_since_epoch())

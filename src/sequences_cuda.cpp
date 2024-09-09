@@ -34,7 +34,7 @@ Sequences_Cuda::Sequences_Cuda(std::span<const int32_t> input_sequences, int bat
   cudaMemcpyAsync(input_sequences_gpu.data(), input_sequences.data(), input_sequences.size_bytes(), cudaMemcpyHostToDevice, stream);
 
   cuda::Launch_ExpandInputSequences(input_sequences_gpu, sequences_, batch_size, beam_size, current_length_, max_length, stream_);
-  cudaStreamSynchronize(stream);  // Until we remove the todo above, wait for this to complete as input_sequences_gpu is on the stack
+  // cudaStreamSynchronize(stream);  // Until we remove the todo above, wait for this to complete as input_sequences_gpu is on the stack
 }
 
 RoamingArray<int32_t> Sequences_Cuda::GetSequence(size_t batch_beam_index) {

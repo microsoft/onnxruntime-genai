@@ -406,7 +406,7 @@ PagedCacheOrchestrator::PagedCacheOrchestrator(const Model& model, State& state)
                                           cache_config.head_size_ *
                                           cache_config.num_kv_heads_};
 
-  printf("kvcache shape_: %d, %d\n", shape_[0], shape_[1]);
+  // printf("kvcache shape_: %d, %d\n", shape_[0], shape_[1]);
 
   // key_caches_.reserve(layer_count_);
   // value_caches_.reserve(layer_count_);

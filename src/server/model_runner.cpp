@@ -103,8 +103,8 @@ std::vector<CompletionSequenceGroupOutput> ModelRunner::ExecuteModel(
     group_seq_ids.push_back(seq_ids);
   }
 
-  printf("finish batching!\n");
-  printf("is_prompt: %d\n", is_prompt);
+  // printf("finish batching!\n");
+  // printf("is_prompt: %d\n", is_prompt);
 
   params->input_ids = input_tokens;
   params->batch_size = batch_size;
@@ -165,7 +165,7 @@ std::vector<CompletionSequenceGroupOutput> ModelRunner::ExecuteModel(
 }
 
 std::vector<int32_t> ModelRunner::RunGenerator(const GeneratorParams& params, std::vector<int32_t>& seq_lens, bool is_prompt) {
-  printf("before create generator\n");
+  // printf("before create generator\n");
   auto generator = Generators::CreateGenerator(*model_, params);
   generator->state_->seq_lens_ = seq_lens;
   generator->state_->is_prompt_ = is_prompt;
@@ -175,12 +175,12 @@ std::vector<int32_t> ModelRunner::RunGenerator(const GeneratorParams& params, st
     generator->state_->input_names_.push_back(value_cache_names_[i].c_str());
     generator->state_->inputs_.push_back(value_caches_[i].get());
   }
-  printf("generator created\n");
+  // printf("generator created\n");
 
   generator->ComputeLogits();
-  printf("logits finish\n");
+  // printf("logits finish\n");
   generator->GenerateNextToken();
-  printf("next token finish\n");
+  // printf("next token finish\n");
 
   auto result = generator->search_->GetNextTokens().GetCPU();
   return std::vector<int32_t>(result.begin(), result.end());

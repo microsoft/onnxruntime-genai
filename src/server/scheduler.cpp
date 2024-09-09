@@ -114,7 +114,7 @@ ScheduleResult Scheduler::Schedule() {
     //   scheduled_swapped_in = ScheduleSwapped(budget);
     // }
   }
-  printf("sheduled_runnning size: %d\n", scheduled_running.decode_seq_groups.size());
+  // printf("sheduled_runnning size: %d\n", scheduled_running.decode_seq_groups.size());
 
   if (budget.GetNumBatchedTokens() > scheduler_config_.max_num_bathced_tokens ||
       budget.GetNumCurrSeqs() > scheduler_config_.max_num_seqs) {
@@ -208,7 +208,7 @@ ScheduledPrefillOutputs Scheduler::SchedulePrefill(SchedulerBudget& budget,
   while (!waiting_.empty()) {
     SequenceGroup& seq_group = waiting_.front();
     auto waiting_seqs = seq_group.GetSeqs();
-    std::cout << "waiting_seqs.size(): " << waiting_seqs.size() << std::endl;
+    // std::cout << "waiting_seqs.size(): " << waiting_seqs.size() << std::endl;
     if (waiting_seqs.size() > 1) {
       throw std::runtime_error(
           "Waiting sequence should have only one prompt sequence");
@@ -217,7 +217,7 @@ ScheduledPrefillOutputs Scheduler::SchedulePrefill(SchedulerBudget& budget,
     int num_new_tokens = GetNumNewTokens(seq_group, SequenceStatus::kWaiting,
                                          enable_chunking, budget);
 
-    std::cout << "num_new_tokens: " << num_new_tokens << std::endl;
+    // std::cout << "num_new_tokens: " << num_new_tokens << std::endl;
 
     if (!enable_chunking && waiting_seqs[0].GetLen() != num_new_tokens) {
       throw std::runtime_error(
@@ -243,8 +243,8 @@ ScheduledPrefillOutputs Scheduler::SchedulePrefill(SchedulerBudget& budget,
     }
 
     AllocateStatus can_allocate = block_manager_->CanAllocate(seq_group);
-    std::cout << "can_allocate: " << (can_allocate == AllocateStatus::kOK)
-              << std::endl;
+    // std::cout << "can_allocate: " << (can_allocate == AllocateStatus::kOK)
+    //           << std::endl;
     if (can_allocate == AllocateStatus::kLater) {
       break;
     } else if (can_allocate == AllocateStatus::kNever) {
@@ -292,7 +292,7 @@ ScheduledRunningOutputs Scheduler::ScheduleRunning(SchedulerBudget& budget,
             [](const SequenceGroup& a, const SequenceGroup& b) {
               return a.arrival_time < b.arrival_time;
             });
-  printf("running_.size(): %d\n", running_.size());
+  // printf("running_.size(): %d\n", running_.size());
   while (running_.size() > 0) {
     auto seq_group = running_.front();
     int num_running_tokens = GetNumNewTokens(
@@ -300,11 +300,11 @@ ScheduledRunningOutputs Scheduler::ScheduleRunning(SchedulerBudget& budget,
     if (num_running_tokens == 0) {
       break;
     }
-    printf("num_running_tokens: %d\n", num_running_tokens);
+    // printf("num_running_tokens: %d\n", num_running_tokens);
     running_.pop_front();
     while (!block_manager_->CanAppendSlots(
         seq_group, scheduler_config_.num_lookahead_slots)) {
-      printf("preempt SequenceGroup\n");
+      // printf("preempt SequenceGroup\n");
       budget.SubtractNumBatchedTokens(seq_group.request_id, num_running_tokens);
       int num_running_seqs = seq_group.GetMaxNumRunningSeqs();
       budget.SubtractNumSeqs(seq_group.request_id, num_running_seqs);
@@ -333,7 +333,7 @@ ScheduledRunningOutputs Scheduler::ScheduleRunning(SchedulerBudget& budget,
 
     if (block_manager_->CanAppendSlots(seq_group,
                                        scheduler_config_.num_lookahead_slots)) {
-      printf("AppendSlots\n");
+      // printf("AppendSlots\n");
       for (auto& seq : seq_group.GetSeqs(SequenceStatus::kRunning)) {
         std::vector<std::tuple<int, int>> cows = block_manager_->AppendSlots(
             seq, scheduler_config_.num_lookahead_slots);

@@ -111,8 +111,8 @@ AllocateStatus CacheManager::CanAllocate(const SequenceGroup& seq_group) const {
   int required_blocks = seq_group.GetSeqs(SequenceStatus::kWaiting)[0]
                             .logical_token_blocks.size();
   int free_gpu_blocks = block_allocator_->GetNumFreeBlocks();
-  std::cout << "required_blocks: " << required_blocks << std::endl;
-  std::cout << "free_gpu_blocks: " << free_gpu_blocks << std::endl;
+  // std::cout << "required_blocks: " << required_blocks << std::endl;
+  // std::cout << "free_gpu_blocks: " << free_gpu_blocks << std::endl;
   int watermark_blocks =
       static_cast<int>(options_.watermark * options_.num_blocks_);
   if (options_.num_blocks_ - required_blocks < watermark_blocks) {
