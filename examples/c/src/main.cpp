@@ -35,6 +35,19 @@ void CXX_API(const char* model_path) {
       generator->ComputeLogits();
       generator->GenerateNextToken();
 
+      // Show usage of GetOutput
+      std::unique_ptr<OgaTensor> output_logits = generator->GetOutput("logits");
+
+      // Assuming output_logits.Type() is float as it's logits
+      // Assuming shape is 1 dimensional with shape[0] being the size
+      auto logits = reinterpret_cast<float*>(output_logits->Data());
+
+      // Print out the logits using the following snippet, if needed
+      //auto shape = output_logits->Shape();
+      //for (size_t i=0; i < shape[0]; i++)
+      //   std::cout << logits[i] << " ";
+      //std::cout << std::endl;
+
       const auto num_tokens = generator->GetSequenceCount(0);
       const auto new_token = generator->GetSequenceData(0)[num_tokens - 1];
       std::cout << tokenizer_stream->Decode(new_token) << std::flush;
