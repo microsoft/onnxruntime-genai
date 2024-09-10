@@ -45,7 +45,7 @@ struct EmbeddingState : State {
   const CapturedGraphInfo* captured_graph_info_;
   int64_t num_image_tokens_;
 
-  InputIDs input_ids_{model_, *this};  // Model input
+  InputIDs input_ids_{model_, *this};                                       // Model input
   ImageFeatures image_features_{model_, *this, ImageFeatures::Mode::Input,  // Optional model input
                                 model_.config_->model.embedding.inputs.image_features,
                                 num_image_tokens_};
@@ -66,7 +66,7 @@ struct VisionState : State {
 
   const MultiModalVisionModel& model_;
   int64_t num_image_tokens_;
-  ExtraInputs extra_inputs_{model_, *this};  // Model inputs
+  ExtraInputs extra_inputs_{model_, *this};                                  // Model inputs
   ImageFeatures image_features_{model_, *this, ImageFeatures::Mode::Output,  // Model output
                                 model_.config_->model.vision.outputs.image_features,
                                 num_image_tokens_};

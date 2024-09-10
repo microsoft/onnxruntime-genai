@@ -13,7 +13,6 @@ ImageFeatures::ImageFeatures(const Model& model, State& state, ImageFeatures::Mo
                 : model_.session_info_->GetOutputDataType(name)},
       mode_{mode},
       name_{name} {
-
   // There are four cases for ImageFeatures:
   // 1) Created as an output for vision model (num_image_tokens > 0)
   //    The tensor needs to be pre-allocated to store the output.
