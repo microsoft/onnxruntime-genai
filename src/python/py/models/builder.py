@@ -225,6 +225,7 @@ class Model:
         valid_gqa_configurations = [
             ("cpu", TensorProto.FLOAT),
             ("cuda", TensorProto.FLOAT16),
+            ("rocm", TensorProto.FLOAT16),
             ("dml", TensorProto.FLOAT16),
         ]
         if (self.ep, self.io_dtype) in valid_gqa_configurations:
@@ -2742,7 +2743,7 @@ def get_args():
         "-e",
         "--execution_provider",
         required=True,
-        choices=["cpu", "cuda", "dml", "web"],
+        choices=["cpu", "cuda", "rocm", "dml", "web"],
         help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU, INT4 WEB)",
     )
 
