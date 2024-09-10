@@ -8,7 +8,6 @@ import glob
 
 import onnxruntime_genai as og
 
-
 def _complete(text, state):
     return (glob.glob(text + "*") + [None])[state]
 
@@ -29,9 +28,10 @@ def run(args: argparse.Namespace):
                 "Image Path (comma separated; leave empty if no image): "
             ).split(",")
         ]
+        image_paths = [image_path for image_path in image_paths if len(image_path)]
         print(image_paths)
 
-        image = None
+        images = None
         prompt = "<|user|>\n"
         if len(image_paths) == 0:
             print("No image provided")

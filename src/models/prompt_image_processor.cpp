@@ -15,7 +15,7 @@ std::unique_ptr<OrtValue> ProcessImagePrompt(const Generators::Tokenizer& tokeni
   const size_t num_images = num_img_tokens ? num_img_tokens->NumberOfElement() : 0U;
   auto* num_img_tokens_data = num_img_tokens ? num_img_tokens->Data() : nullptr;
 
-  // Split the prompt string based on the occurrences of the pattern "<|image_<numder>|>"
+  // Split the prompt string based on the occurrences of the pattern "<|image_<number>|>"
   // Here the <number> represents the image id.
   const std::regex pattern("<\\|image_\\d+\\|>");
   const std::vector<std::string> prompt_chunks(
