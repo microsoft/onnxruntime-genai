@@ -33,8 +33,8 @@ ImageFeatures::ImageFeatures(const Model& model, State& state, ImageFeatures::Mo
 
 void ImageFeatures::Add() {
   if (mode_ == ImageFeatures::Mode::Input) {
-    // In case the input_features are an input to a model, they are added
-    // as a nullptr to reserve a slot in the inputs. The input_features
+    // In case the image_features are an input to a model, they are added
+    // as a nullptr to reserve a slot in the inputs. The image_features
     // input will be overwritten when ReuseImageFeaturesBuffer is invoked.
     index_ = state_.inputs_.size();
     state_.inputs_.push_back(nullptr);
