@@ -28,7 +28,8 @@
         "embedding": {
             "filename": "dummy.onnx",
             "inputs": {
-                "input_ids": "input_ids"
+                "input_ids": "input_ids",
+                "image_features": "image_features"
             },
             "outputs": {
                 "inputs_embeds": "inputs_embeds"
@@ -37,11 +38,11 @@
         "vision": {
             "filename": "dummy.onnx",
             "inputs": {
-                "pixel_values": "past_0",
+                "pixel_values": "pixel_values",
                 "image_sizes": "image_sizes"
             },
             "outputs": {
-                "visual_features": "visual_features"
+                "image_features": "image_features"
             }
         },
         "eos_token_id": [
