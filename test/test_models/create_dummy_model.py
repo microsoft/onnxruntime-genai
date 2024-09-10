@@ -38,7 +38,7 @@ def get_args():
     parser.add_argument(
         "-o",
         "--outputs",
-        metavar="(NAME, DTYPE, SHAPE)",
+        metavar="(NAME; DTYPE; SHAPE)",
         nargs='+',
         help="Outputs of the form '(output_name; output_dtype; output_shape)' for model"
     )
