@@ -25,14 +25,15 @@ struct ImageFeatures {
  private:
   const Model& model_;
   State& state_;
-  size_t index_{~0U};
+
+  std::array<int64_t, 2> shape_{};   // [num_image_tokens, hidden_size]
+  ONNXTensorElementDataType type_;
 
   const Mode mode_{};
   const std::string name_;
 
-  std::array<int64_t, 2> shape_{};   // [num_image_tokens, hidden_size]
-  ONNXTensorElementDataType type_;
   std::unique_ptr<OrtValue> image_features_;
+  size_t index_{~0U};
 };
 
 }  // namespace Generators
