@@ -88,6 +88,10 @@ if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linu
 target_link_libraries(onnxruntime-genai PRIVATE ${ONNXRUNTIME_LIB})
 endif()
 
+if(APPLE)
+target_link_libraries(onnxruntime-genai PRIVATE "-framework Foundation" "-framework CoreML")
+endif()
+
 set_target_properties(onnxruntime-genai PROPERTIES FOLDER "Sources")
 set_target_properties(onnxruntime-genai-static PROPERTIES FOLDER "Sources")
 source_group(TREE ${PROJECT_SOURCE_DIR} FILES ${generator_srcs})
