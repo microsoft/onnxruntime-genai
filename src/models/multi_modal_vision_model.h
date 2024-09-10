@@ -111,12 +111,12 @@ struct MultiModalPipelineState : State {
                            int current_length);
 
   const MultiModalVisionModel& model_;
+  int64_t num_image_tokens_{0};
   const CapturedGraphInfoPtr captured_graph_info_;
   std::unique_ptr<EmbeddingState> embedding_state_;
   std::unique_ptr<VisionState> vision_state_;
   std::unique_ptr<DecoderState> decoder_state_;
   bool is_prompt_{true};
-  int64_t num_image_tokens_{0};
 };
 
 }  // namespace Generators
