@@ -30,9 +30,16 @@ int64_t GetNumImageTokens(const std::vector<GeneratorParams::Input>& extra_input
     return 0;
   }
 
+  auto image_sizes_shape = image_sizes->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape();
   auto num_images = pixel_values->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape()[0];
-  if (image_sizes->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape() != std::vector<int64_t>{num_images, 2}) {
-    throw std::runtime_error("image_sizes tensor must be of shape (num_images, 2)");
+  if (image_sizes_shape != std::vector<int64_t>{num_images, 2}) {
+    std::string wrong_image_sizes_shape = "(";
+    for (int i = 0; i < image_sizes_shape.size(); i++) {
+      wrong_image_sizes_shape += std::to_string(image_sizes_shape[i]);
+      std::string eos = (i != image_sizes_shape.size() - 1) ? ", " : ")";
+      wrong_image_sizes_shape += eos;
+    }
+    throw std::runtime_error("image_sizes tensor must be of shape (num_images, 2), got " + wrong_image_sizes_shape);
   }
 
   auto image_sizes_data = image_sizes->ort_tensor_->GetTensorMutableData<int64_t>();
@@ -40,7 +47,7 @@ int64_t GetNumImageTokens(const std::vector<GeneratorParams::Input>& extra_input
   for (int i = 0; i < num_images; i++) {
     int64_t h = image_sizes_data[i * num_images] / 336;
     int64_t w = image_sizes_data[i * num_images + 1] / 336;
-    num_image_tokens += static_cast<int64_t>((h * w + 1) * 144) + 1 + ((h + 1) * 12);
+    num_image_tokens += ((h * w + 1) * 144) + 1 + ((h + 1) * 12);
   }
   return num_image_tokens;
 }
@@ -101,7 +108,7 @@ VisionState::VisionState(const MultiModalVisionModel& model, const GeneratorPara
 }
 
 RoamingArray<float> VisionState::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
-  int num_images = static_cast<int>(inputs_[0]->GetTensorTypeAndShapeInfo()->GetShape()[0]);
+  const int num_images = static_cast<int>(inputs_[0]->GetTensorTypeAndShapeInfo()->GetShape()[0]);
   State::Run(*model_.vision_session_, *model_.run_options_, num_images);
 
   return MakeDummy();

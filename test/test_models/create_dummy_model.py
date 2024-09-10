@@ -4,7 +4,9 @@
 # license information.
 # --------------------------------------------------------------------------
 """
-Create dummy ONNX models that contain only inputs and outputs
+Create dummy ONNX models that contain only inputs and outputs.
+This is helpful for creating ONNX models to run simple API tests (e.g. pre-processing)
+where the contents of the ONNX models don't matter.
 
 Example usage:
 1) python3 create_dummy_model.py \

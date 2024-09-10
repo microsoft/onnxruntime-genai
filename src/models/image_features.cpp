@@ -1,3 +1,5 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
 #include "../generators.h"
 #include "model.h"
 #include "image_features.h"
@@ -45,7 +47,8 @@ void ImageFeatures::Add() {
 }
 
 void ImageFeatures::Update() {
-  // Initialize empty image_features tensor for no-image or after-prompt input scenarios
+  // Initialize empty image_features tensor for after-prompt input scenarios
+  // num_image_tokens will be 0 when no image is provided
   if (shape_[0] > 0) {  // if num_image_tokens > 0
     shape_[0] = 0;
     image_features_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
