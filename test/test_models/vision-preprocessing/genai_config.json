@@ -7,7 +7,7 @@
                 "log_id": "onnxruntime-genai",
                 "provider_options": []
             },
-            "filename": "dummy.onnx",
+            "filename": "dummy_text.onnx",
             "head_size": 96,
             "hidden_size": 3072,
             "inputs": {
@@ -22,11 +22,11 @@
                 "present_value_names": "present.%d.value"
             },
             "num_attention_heads": 32,
-            "num_hidden_layers": 32,
+            "num_hidden_layers": 1,
             "num_key_value_heads": 32
         },
         "embedding": {
-            "filename": "dummy.onnx",
+            "filename": "dummy_embedding.onnx",
             "inputs": {
                 "input_ids": "input_ids",
                 "image_features": "image_features"
@@ -36,7 +36,7 @@
             }
         },
         "vision": {
-            "filename": "dummy.onnx",
+            "filename": "dummy_vision.onnx",
             "inputs": {
                 "pixel_values": "pixel_values",
                 "image_sizes": "image_sizes"
@@ -45,12 +45,7 @@
                 "image_features": "image_features"
             }
         },
-        "eos_token_id": [
-            2,
-            32000,
-            32001,
-            32007
-        ],
+        "eos_token_id": 32007,
         "pad_token_id": 32000,
         "type": "phi3v",
         "vocab_size": 32064

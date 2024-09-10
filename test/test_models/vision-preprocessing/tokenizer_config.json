@@ -1,6 +1,7 @@
 {
   "add_bos_token": true,
   "add_eos_token": false,
+  "add_prefix_space": null,
   "added_tokens_decoder": {
     "0": {
       "content": "<unk>",
@@ -115,7 +116,7 @@
       "special": true
     },
     "32011": {
-      "content": "<|step|>",
+      "content": "<|placeholder7|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": true,
@@ -123,7 +124,7 @@
       "special": true
     },
     "32012": {
-      "content": "<|function_output|>",
+      "content": "<|placeholder8|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": true,
@@ -131,7 +132,7 @@
       "special": true
     },
     "32013": {
-      "content": "<|tag|>",
+      "content": "<|placeholder9|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": true,
@@ -139,7 +140,7 @@
       "special": true
     },
     "32014": {
-      "content": "<|function_call|>",
+      "content": "<|placeholder10|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": true,
@@ -147,7 +148,7 @@
       "special": true
     },
     "32015": {
-      "content": "<|raw|>",
+      "content": "<|placeholder11|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": true,
@@ -155,7 +156,7 @@
       "special": true
     },
     "32016": {
-      "content": "<|continue|>",
+      "content": "<|placeholder12|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": true,
@@ -163,7 +164,7 @@
       "special": true
     },
     "32017": {
-      "content": "<|function_list|>",
+      "content": "<|placeholder13|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": true,
@@ -171,7 +172,7 @@
       "special": true
     },
     "32018": {
-      "content": "<|calc|>",
+      "content": "<|placeholder14|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": true,
@@ -179,7 +180,7 @@
       "special": true
     },
     "32019": {
-      "content": "<|code|>",
+      "content": "<|placeholder15|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": true,
@@ -187,7 +188,7 @@
       "special": true
     },
     "32020": {
-      "content": "<|/code|>",
+      "content": "<|placeholder16|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": true,
@@ -195,7 +196,7 @@
       "special": true
     },
     "32021": {
-      "content": "<|summary|>",
+      "content": "<|placeholder17|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": true,
@@ -203,7 +204,7 @@
       "special": true
     },
     "32022": {
-      "content": "<|resource|>",
+      "content": "<|placeholder18|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": true,
@@ -211,7 +212,7 @@
       "special": true
     },
     "32023": {
-      "content": "<|assistant_mask|>",
+      "content": "<|placeholder19|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": true,
@@ -219,7 +220,7 @@
       "special": true
     },
     "32024": {
-      "content": "<|start|>",
+      "content": "<|placeholder20|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": true,
@@ -227,7 +228,7 @@
       "special": true
     },
     "32025": {
-      "content": "<|message|>",
+      "content": "<|placeholder21|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": true,
@@ -235,7 +236,7 @@
       "special": true
     },
     "32026": {
-      "content": "<|fim_prefix|>",
+      "content": "<|placeholder22|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": true,
@@ -243,7 +244,7 @@
       "special": true
     },
     "32027": {
-      "content": "<|fim_middle|>",
+      "content": "<|placeholder23|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": true,
@@ -251,7 +252,7 @@
       "special": true
     },
     "32028": {
-      "content": "<|fim_suffix|>",
+      "content": "<|placeholder24|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": true,
@@ -259,7 +260,7 @@
       "special": true
     },
     "32029": {
-      "content": "<|meta_start|>",
+      "content": "<|placeholder25|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": true,
@@ -267,7 +268,7 @@
       "special": true
     },
     "32030": {
-      "content": "<|ipynb_marker|>",
+      "content": "<|placeholder26|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": true,
@@ -275,7 +276,7 @@
       "special": true
     },
     "32031": {
-      "content": "<|diff_marker|>",
+      "content": "<|placeholder27|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": true,
@@ -283,7 +284,7 @@
       "special": true
     },
     "32032": {
-      "content": "<|ghissue|>",
+      "content": "<|placeholder28|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": true,
@@ -291,7 +292,7 @@
       "special": true
     },
     "32033": {
-      "content": "<|ghreview|>",
+      "content": "<|placeholder29|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": true,
@@ -299,7 +300,7 @@
       "special": true
     },
     "32034": {
-      "content": "<|disc_start|>",
+      "content": "<|placeholder30|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": true,
@@ -307,7 +308,7 @@
       "special": true
     },
     "32035": {
-      "content": "<|disc_sep|>",
+      "content": "<|placeholder31|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": true,
@@ -315,7 +316,7 @@
       "special": true
     },
     "32036": {
-      "content": "<|disc_thread|><|query|>",
+      "content": "<|placeholder32|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": true,
@@ -323,7 +324,7 @@
       "special": true
     },
     "32037": {
-      "content": "<|/query|>",
+      "content": "<|placeholder33|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": true,
@@ -331,7 +332,7 @@
       "special": true
     },
     "32038": {
-      "content": "<|data|>",
+      "content": "<|placeholder34|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": true,
@@ -339,7 +340,7 @@
       "special": true
     },
     "32039": {
-      "content": "<|/data|>",
+      "content": "<|placeholder35|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": true,
@@ -347,7 +348,7 @@
       "special": true
     },
     "32040": {
-      "content": "<|sys|>",
+      "content": "<|placeholder36|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": true,
@@ -355,7 +356,7 @@
       "special": true
     },
     "32041": {
-      "content": "<|/sys|>",
+      "content": "<|placeholder37|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": true,
@@ -363,7 +364,7 @@
       "special": true
     },
     "32042": {
-      "content": "<|inst|>",
+      "content": "<|placeholder38|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": true,
@@ -371,7 +372,7 @@
       "special": true
     },
     "32043": {
-      "content": "<|/inst|>",
+      "content": "<|placeholder39|>",
       "lstrip": false,
       "normalized": false,
       "rstrip": true,
@@ -393,13 +394,18 @@
     "<|user|>",
     "<|end|>"
   ],
+  "auto_map": {
+    "AutoProcessor": "processing_phi3_v.Phi3VProcessor"
+  },
   "bos_token": "<s>",
   "chat_template": "{% for message in messages %}{{'<|' + message['role'] + '|>' + '\n' + message['content'] + '<|end|>\n' }}{% endfor %}{% if add_generation_prompt and messages[-1]['role'] != 'assistant' %}{{- '<|assistant|>\n' -}}{% endif %}",
   "clean_up_tokenization_spaces": false,
   "eos_token": "<|endoftext|>",
+  "legacy": false,
   "model_max_length": 131072,
   "pad_token": "<|endoftext|>",
   "padding_side": "right",
+  "processor_class": "Phi3VProcessor",
   "sp_model_kwargs": {},
   "tokenizer_class": "LlamaTokenizer",
   "unk_token": "<unk>",
