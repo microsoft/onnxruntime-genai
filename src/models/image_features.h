@@ -26,7 +26,7 @@ struct ImageFeatures {
   const Model& model_;
   State& state_;
 
-  std::array<int64_t, 2> shape_{};   // [num_image_tokens, hidden_size]
+  std::array<int64_t, 2> shape_{};  // [num_image_tokens, hidden_size]
   ONNXTensorElementDataType type_;
 
   const Mode mode_{};
