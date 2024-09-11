@@ -225,6 +225,7 @@ class Model:
         valid_gqa_configurations = [
             ("cpu", TensorProto.FLOAT),
             ("cuda", TensorProto.FLOAT16),
+            ("rocm", TensorProto.FLOAT16),
             ("dml", TensorProto.FLOAT16),
         ]
         if (self.ep, self.io_dtype) in valid_gqa_configurations:
@@ -275,7 +276,7 @@ class Model:
         self.quant_attrs = {
             "int4": {
                 "block_size": int(extra_options["int4_block_size"]) if "int4_block_size" in extra_options else 32,
-                "accuracy_level": int(extra_options["int4_accuracy_level"]) if "int4_accuracy_level" in extra_options else None,
+                "accuracy_level": int(extra_options["int4_accuracy_level"]) if "int4_accuracy_level" in extra_options else 0,   # Default is 0 for non-QDQ formats, default is 4 for QDQ formats
             }
         }
         if self.quant_type is not None:
@@ -695,6 +696,7 @@ class Model:
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
         self.make_node(
             "MatMulNBits", inputs=inputs, outputs=[output], name=name, domain="com.microsoft",
+            accuracy_level=self.quant_attrs["int4"]["accuracy_level"],
             bits=matmul.bits, block_size=matmul.group_size, K=matmul.in_features, N=matmul.out_features,
         )
         self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', matmul.out_features])
@@ -770,6 +772,7 @@ class Model:
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
         self.make_node(
             "MatMulNBits", inputs=inputs, outputs=[output], name=name, domain="com.microsoft",
+            accuracy_level=self.quant_attrs["int4"]["accuracy_level"],
             bits=matmul.bits, block_size=matmul.group_size, K=matmul.in_features, N=matmul.out_features,
         )
         self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', matmul.out_features])
@@ -2740,7 +2743,7 @@ def get_args():
         "-e",
         "--execution_provider",
         required=True,
-        choices=["cpu", "cuda", "dml", "web"],
+        choices=["cpu", "cuda", "rocm", "dml", "web"],
         help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU, INT4 WEB)",
     )
 
