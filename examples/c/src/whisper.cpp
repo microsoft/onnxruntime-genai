@@ -63,7 +63,7 @@ void CXX_API(const char* model_path, int32_t num_beams) {
     const size_t batch_size = audio_paths.size();
     for (size_t i = 0; i < batch_size; ++i) {
       for (const auto& token : prompt_tokens) {
-        tokenizer->ToTokenId(token, *input_ids, i);
+        input_ids->Append(tokenizer->ToTokenId(token), i);
       }
     }
 
@@ -155,7 +155,9 @@ void C_API(const char* model_path, int32_t num_beams) {
     const size_t batch_size = audio_paths.size();
     for (size_t i = 0; i < batch_size; ++i) {
       for (const auto& token : prompt_tokens) {
-        CheckResult(OgaTokenizerToTokenId(tokenizer, token, input_ids, i));
+        int32_t token_id;
+        CheckResult(OgaTokenizerToTokenId(tokenizer, token, &token_id));
+        CheckResult(OgaAppendTokenToSequence(token_id, input_ids, i));
       }
     }
 

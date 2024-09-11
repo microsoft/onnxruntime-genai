@@ -41,7 +41,6 @@ def run(args: argparse.Namespace):
         print("Processing audio...")
         mel = processor(audios=audios)
         decoder_prompt_tokens = ["<|startoftranscript|>", "<|en|>", "<|transcribe|>", "<|notimestamps|>"]
-        print([tokenizer.to_token_id(token) for token in decoder_prompt_tokens])
 
         params = og.GeneratorParams(model)
         params.set_search_options(

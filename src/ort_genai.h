@@ -106,6 +106,11 @@ struct OgaSequences : OgaAbstract {
   void Append(const int32_t* tokens, size_t token_cnt) {
     OgaCheckResult(OgaAppendTokenSequence(tokens, token_cnt, this));
   }
+
+  void Append(int32_t token, size_t sequence_index) {
+    OgaCheckResult(OgaAppendTokenToSequence(token, this, sequence_index));
+  }
+
 #if __cplusplus >= 202002L
   std::span<const int32_t> Get(size_t index) const {
     return {SequenceData(index), SequenceCount(index)};
@@ -132,8 +137,10 @@ struct OgaTokenizer : OgaAbstract {
     OgaCheckResult(OgaTokenizerEncode(this, str, &sequences));
   }
 
-  void ToTokenId(const char* str, OgaSequences& sequences, size_t sequence_idx) const {
-    OgaCheckResult(OgaTokenizerToTokenId(this, str, &sequences, sequence_idx));
+  int32_t ToTokenId(const char* str) const {
+    int32_t token_id;
+    OgaCheckResult(OgaTokenizerToTokenId(this, str, &token_id));
+    return token_id;
   }
 
   OgaString Decode(const int32_t* tokens_data, size_t tokens_length) const {

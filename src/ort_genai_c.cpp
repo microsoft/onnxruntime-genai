@@ -70,6 +70,22 @@ OgaResult* OGA_API_CALL OgaAppendTokenSequence(const int32_t* token_ptr, size_t 
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaAppendTokenToSequence(int32_t token, OgaSequences* sequences, size_t sequence_index) {
+  OGA_TRY
+  Generators::TokenSequences* toks = reinterpret_cast<Generators::TokenSequences*>(sequences);
+  if (sequence_index > toks->size()) {
+    throw std::runtime_error("sequence index out of bounds");
+  }
+  if (sequence_index == toks->size()) {
+    toks->emplace_back();
+  }
+
+  toks->at(sequence_index).push_back(token);
+
+  return nullptr;
+  OGA_CATCH
+}
+
 size_t OGA_API_CALL OgaSequencesCount(const OgaSequences* p) {
   return reinterpret_cast<const Generators::TokenSequences*>(p)->size();
 }
@@ -321,18 +337,10 @@ OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer* p, const char* st
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaTokenizerToTokenId(const OgaTokenizer* p, const char* str, OgaSequences* sequences, size_t sequence_idx) {
+OgaResult* OGA_API_CALL OgaTokenizerToTokenId(const OgaTokenizer* p, const char* str, int32_t* token_id) {
   OGA_TRY
   auto& tokenizer = *reinterpret_cast<const Generators::Tokenizer*>(p);
-  auto& token_sequences = *reinterpret_cast<Generators::TokenSequences*>(sequences);
-  if (sequence_idx > token_sequences.size())
-    throw std::runtime_error("sequence_idx is out of bounds");
-
-  if (sequence_idx == token_sequences.size())
-    token_sequences.push_back({});
-
-  token_sequences[sequence_idx].push_back(tokenizer.TokenToTokenId(str));
-
+  *token_id = tokenizer.TokenToTokenId(str);
   return nullptr;
   OGA_CATCH
 }

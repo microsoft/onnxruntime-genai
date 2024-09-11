@@ -111,6 +111,17 @@ OGA_EXPORT size_t OGA_API_CALL OgaSequencesCount(const OgaSequences* sequences);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaAppendTokenSequence(const int32_t* token_ptr, size_t token_cnt, OgaSequences* sequence);
 
 /*
+ * \brief Appends the given token to the sequence at the given index.
+          If the sequence at the given index does not exist, a new sequence is
+          created at the given index if sequence_idx is equal to the current sequences count.
+ * \param[in] token token to append to the sequence
+ * \param[in] sequences OgaSequences object to append the token to
+ * \param[in] sequence_index index of the sequence to append the token to
+ * \return OgaResult containing the error message when tokens could not been added, else nullptr.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaAppendTokenToSequence(int32_t token, OgaSequences* sequence, size_t sequence_index);
+
+/*
  * \brief Returns the number of tokens in the sequence at the given index
  * \param[in] sequences
  * \return The number of tokens in the sequence at the given index
@@ -281,15 +292,13 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyMultiModalProcessor(OgaMultiModalProcesso
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer*, const char* str, OgaSequences* sequences);
 
 /*
- * \brief Converts the given string to a single token id and adds it to the end of the sequence at the given index.
-          If the sequence does not exist, a new sequence is created at the given index if sequence_idx is equal to the current sequences count.
+ * \brief Converts the given string to a single token id.
  * \param[in] tokenizer The tokenizer to use to convert the string to a token id.
  * \param[in] str The string to convert to a token id.
- * \param[in] sequences The OgaSequences to add the token id to.
- * \param[in] sequence_idx The index of the sequence to add the token id to.
+ * \param[in] token_id The converted token id.
  * \return OgaResult containing the error message if the conversion of the string to a token id failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerToTokenId(const OgaTokenizer* tokenizer, const char* str, OgaSequences* sequences, size_t sequence_idx);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerToTokenId(const OgaTokenizer* tokenizer, const char* str, int32_t* token_id);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor*, const char* prompt, const OgaImages* images, OgaNamedTensors** input_tensors);
 
