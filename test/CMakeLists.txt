@@ -57,8 +57,14 @@ set(TEST_MODEL_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/test_models/")
 set(TEST_MODEL_DES_DIR "$<TARGET_FILE_DIR:unit_tests>/test_models/")
 add_custom_command(TARGET unit_tests POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_directory ${TEST_MODEL_SRC_DIR} ${TEST_MODEL_DES_DIR}
-  COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} $<TARGET_FILE_DIR:unit_tests>
 )
+
+if (NOT IOS)
+  # On iOS static xcframework is used
+  add_custom_command(TARGET unit_tests POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} $<TARGET_FILE_DIR:unit_tests>
+  )
+endif()
 
 add_compile_definitions(MODEL_PATH="${TEST_MODEL_DES_DIR}")
 set_target_properties(unit_tests PROPERTIES FOLDER "Tests")
