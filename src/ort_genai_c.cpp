@@ -108,6 +108,16 @@ OgaResult* OGA_API_CALL OgaLoadAudio(const char* audio_path, OgaAudios** audios)
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaLoadAudios(const OgaStringArray* audio_paths, OgaAudios** audios) {
+  OGA_TRY
+  const auto& audio_paths_vector = *reinterpret_cast<const std::vector<std::string>*>(audio_paths);
+  std::vector<const char*> audio_paths_vector_c;
+  for (const auto& audio_path : audio_paths_vector) audio_paths_vector_c.push_back(audio_path.c_str());
+  *audios = reinterpret_cast<OgaAudios*>(Generators::LoadAudios(audio_paths_vector_c).release());
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaModel** out) {
   OGA_TRY
   auto model = Generators::CreateModel(Generators::GetOrtEnv(), config_path);

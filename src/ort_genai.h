@@ -322,11 +322,25 @@ struct OgaImages : OgaAbstract {
 };
 
 struct OgaAudios : OgaAbstract {
-  static std::unique_ptr<OgaAudios> Load(const char* audio_path) {
+  static std::unique_ptr<OgaAudios> Load(const std::vector<const char*>& audio_paths) {
     OgaAudios* p;
-    OgaCheckResult(OgaLoadAudio(audio_path, &p));
+    OgaStringArray* strs;
+    OgaCheckResult(OgaCreateStringArrayFromStrings(audio_paths.data(), audio_paths.size(), &strs));
+    OgaCheckResult(OgaLoadAudios(strs, &p));
+    OgaDestroyStringArray(strs);
     return std::unique_ptr<OgaAudios>(p);
   }
+
+#if __cplusplus >= 202002L
+  static std::unique_ptr<OgaAudios> Load(std::span<const char* const> audio_paths) {
+    OgaAudios* p;
+    OgaStringArray* strs;
+    OgaCheckResult(OgaCreateStringArrayFromStrings(audio_paths.data(), audio_paths.size(), &strs));
+    OgaCheckResult(OgaLoadAudios(strs, &p));
+    OgaDestroyStringArray(strs);
+    return std::unique_ptr<OgaAudios>(p);
+  }
+#endif
 
   static void operator delete(void* p) { OgaDestroyAudios(reinterpret_cast<OgaAudios*>(p)); }
 };

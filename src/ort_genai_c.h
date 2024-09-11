@@ -133,6 +133,8 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyImages(OgaImages* images);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadAudio(const char* audio_path, OgaAudios** audios);
 
+OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadAudios(const OgaStringArray* audio_paths, OgaAudios** audios);
+
 OGA_EXPORT void OGA_API_CALL OgaDestroyAudios(OgaAudios* audios);
 
 /*

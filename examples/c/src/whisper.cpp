@@ -12,6 +12,15 @@ bool FileExists(const char* path) {
   return static_cast<bool>(std::ifstream(path));
 }
 
+std::string trim(const std::string& str) {
+  const size_t first = str.find_first_not_of(' ');
+  if (std::string::npos == first) {
+    return str;
+  }
+  const size_t last = str.find_last_not_of(' ');
+  return str.substr(first, (last - first + 1));
+}
+
 // C++ API Example
 
 void CXX_API(const char* model_path, int32_t num_beams) {
@@ -23,24 +32,39 @@ void CXX_API(const char* model_path, int32_t num_beams) {
   auto tokenizer = OgaTokenizer::Create(*model);
 
   while (true) {
-    std::string audio_path;
-    std::cout << "Audio Path:" << std::endl;
-    std::getline(std::cin, audio_path);
-    std::cout << "Loading audio..." << std::endl;
-    if (audio_path.empty()) {
-      throw std::runtime_error("Audio file not provided.");
-    } else if (!FileExists(audio_path.c_str())) {
-      throw std::runtime_error(std::string("Audio file not found: ") + audio_path);
+    std::string audio_paths_str;
+    std::cout << "Audio Paths (comma separated):" << std::endl;
+    std::getline(std::cin, audio_paths_str);
+    std::unique_ptr<OgaAudios> audios;
+    std::vector<std::string> audio_paths;
+    for (size_t start = 0, end = 0; end < audio_paths_str.size(); start = end + 1) {
+      end = audio_paths_str.find(',', start);
+      audio_paths.push_back(trim(audio_paths_str.substr(start, end - start)));
     }
-    std::unique_ptr<OgaAudios> audios = OgaAudios::Load(audio_path.c_str());
+    if (audio_paths.empty()) {
+      throw std::runtime_error("No audio file provided.");
+    } else {
+      std::cout << "Loading audios..." << std::endl;
+      for (const auto& audio_path : audio_paths) {
+        if (!FileExists(audio_path.c_str())) {
+          throw std::runtime_error(std::string("Audio file not found: ") + audio_path);
+        }
+      }
+      std::vector<const char*> audio_paths_c;
+      for (const auto& audio_path : audio_paths) audio_paths_c.push_back(audio_path.c_str());
+      audios = OgaAudios::Load(audio_paths_c);
+    }
 
     std::cout << "Processing audio..." << std::endl;
     auto mel = processor->ProcessAudios(audios.get());
     const std::array<const char*, 4> prompt_tokens = {"<|startoftranscript|>", "<|en|>", "<|transcribe|>",
                                                       "<|notimestamps|>"};
     auto input_ids = OgaSequences::Create();
-    for (const auto& token : prompt_tokens) {
-      tokenizer->ToTokenId(token, *input_ids, 0);
+    const size_t batch_size = audio_paths.size();
+    for (size_t i = 0; i < batch_size; ++i) {
+      for (const auto& token : prompt_tokens) {
+        tokenizer->ToTokenId(token, *input_ids, i);
+      }
     }
 
     std::cout << "Generating response..." << std::endl;
@@ -59,11 +83,11 @@ void CXX_API(const char* model_path, int32_t num_beams) {
       generator->GenerateNextToken();
     }
 
-    std::cout << "Transcription:" << std::endl;
-    for (size_t beam = 0; beam < static_cast<size_t>(num_beams); ++beam) {
-      std::cout << "    Beam " << beam << ":";
-      const auto num_tokens = generator->GetSequenceCount(beam);
-      const auto tokens = generator->GetSequenceData(beam);
+    for (size_t i = 0; i < static_cast<size_t>(num_beams * batch_size); ++i) {
+      std::cout << "Transcription:" << std::endl;
+      std::cout << "    batch " << i / num_beams << ", beam " << i % num_beams << ":";
+      const auto num_tokens = generator->GetSequenceCount(i);
+      const auto tokens = generator->GetSequenceData(i);
       std::cout << processor->Decode(tokens, num_tokens) << std::endl;
     }
 
@@ -95,17 +119,31 @@ void C_API(const char* model_path, int32_t num_beams) {
   CheckResult(OgaCreateTokenizer(model, &tokenizer));
 
   while (true) {
-    std::string audio_path;
-    std::cout << "Audio Path:" << std::endl;
-    std::getline(std::cin, audio_path);
-    std::cout << "Loading audio..." << std::endl;
-    if (audio_path.empty()) {
-      throw std::runtime_error("Audio file not provided.");
-    } else if (!FileExists(audio_path.c_str())) {
-      throw std::runtime_error(std::string("Audio file not found: ") + audio_path);
-    }
+    std::string audio_paths_str;
+    std::cout << "Audio Paths (comma separated):" << std::endl;
+    std::getline(std::cin, audio_paths_str);
     OgaAudios* audios = nullptr;
-    CheckResult(OgaLoadAudio(audio_path.c_str(), &audios));
+    std::vector<std::string> audio_paths;
+    for (size_t start = 0, end = 0; end < audio_paths_str.size(); start = end + 1) {
+      end = audio_paths_str.find(',', start);
+      audio_paths.push_back(trim(audio_paths_str.substr(start, end - start)));
+    }
+    if (audio_paths.empty()) {
+      throw std::runtime_error("No audio file provided.");
+    } else {
+      std::cout << "Loading audios..." << std::endl;
+      for (const auto& audio_path : audio_paths) {
+        if (!FileExists(audio_path.c_str())) {
+          throw std::runtime_error(std::string("Audio file not found: ") + audio_path);
+        }
+        std::vector<const char*> audio_paths_c;
+        for (const auto& audio_path : audio_paths) audio_paths_c.push_back(audio_path.c_str());
+        OgaStringArray* audio_paths_string_array;
+        CheckResult(OgaCreateStringArrayFromStrings(audio_paths_c.data(), audio_paths_c.size(), &audio_paths_string_array));
+        CheckResult(OgaLoadAudios(audio_paths_string_array, &audios));
+        OgaDestroyStringArray(audio_paths_string_array);
+      }
+    }
 
     std::cout << "Processing audio..." << std::endl;
     OgaNamedTensors* mel;
@@ -114,8 +152,11 @@ void C_API(const char* model_path, int32_t num_beams) {
                                                       "<|notimestamps|>"};
     OgaSequences* input_ids;
     CheckResult(OgaCreateSequences(&input_ids));
-    for (const auto& token : prompt_tokens) {
-      CheckResult(OgaTokenizerToTokenId(tokenizer, token, input_ids, 0));
+    const size_t batch_size = audio_paths.size();
+    for (size_t i = 0; i < batch_size; ++i) {
+      for (const auto& token : prompt_tokens) {
+        CheckResult(OgaTokenizerToTokenId(tokenizer, token, input_ids, i));
+      }
     }
 
     std::cout << "Generating response..." << std::endl;
@@ -136,11 +177,11 @@ void C_API(const char* model_path, int32_t num_beams) {
       CheckResult(OgaGenerator_GenerateNextToken(generator));
     }
 
-    std::cout << "Transcription:" << std::endl;
-    for (size_t beam = 0; beam < static_cast<size_t>(num_beams); ++beam) {
-      std::cout << "    Beam " << beam << ":";
-      const int32_t num_tokens = OgaGenerator_GetSequenceCount(generator, beam);
-      const int32_t* tokens = OgaGenerator_GetSequenceData(generator, beam);
+    for (size_t i = 0; i < static_cast<size_t>(num_beams * batch_size); ++i) {
+      std::cout << "Transcription:" << std::endl;
+      std::cout << "    batch " << i / num_beams << ", beam " << i % num_beams << ":";
+      const int32_t num_tokens = OgaGenerator_GetSequenceCount(generator, i);
+      const int32_t* tokens = OgaGenerator_GetSequenceData(generator, i);
 
       const char* str;
       CheckResult(OgaProcessorDecode(processor, tokens, num_tokens, &str));
