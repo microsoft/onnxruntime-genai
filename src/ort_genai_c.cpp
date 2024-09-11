@@ -311,6 +311,22 @@ OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer* p, const char* st
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaTokenizerToTokenId(const OgaTokenizer* p, const char* str, OgaSequences* sequences, size_t sequence_idx) {
+  OGA_TRY
+  auto& tokenizer = *reinterpret_cast<const Generators::Tokenizer*>(p);
+  auto& token_sequences = *reinterpret_cast<Generators::TokenSequences*>(sequences);
+  if (sequence_idx > token_sequences.size())
+    throw std::runtime_error("sequence_idx is out of bounds");
+
+  if (sequence_idx == token_sequences.size())
+    token_sequences.push_back({});
+
+  token_sequences[sequence_idx].push_back(tokenizer.TokenToTokenId(str));
+
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer* p, const int32_t* tokens, size_t token_count, const char** out_string) {
   OGA_TRY
   auto& tokenizer = *reinterpret_cast<const Generators::Tokenizer*>(p);
@@ -454,8 +470,7 @@ OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor* 
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaProcessorProcessAudios(const OgaMultiModalProcessor* p, const OgaAudios* audios_p, const char* language,
-                                                  const char* task, int32_t no_timestamp, OgaNamedTensors** input_tensors) {
+OgaResult* OGA_API_CALL OgaProcessorProcessAudios(const OgaMultiModalProcessor* p, const OgaAudios* audios_p, OgaNamedTensors** input_tensors) {
   OGA_TRY
   auto& processor = *reinterpret_cast<const Generators::MultiModalProcessor*>(p);
   auto* audios = reinterpret_cast<const Generators::Audios*>(audios_p);
@@ -463,8 +478,7 @@ OgaResult* OGA_API_CALL OgaProcessorProcessAudios(const OgaMultiModalProcessor* 
   if (!processor.audio_processor_)
     throw std::runtime_error("Audio processor not available for this model.");
 
-  auto named_tensors = processor.audio_processor_->Process(*processor.tokenizer_, audios,
-                                                           language, task, no_timestamp);
+  auto named_tensors = processor.audio_processor_->Process(audios);
   *input_tensors = reinterpret_cast<OgaNamedTensors*>(named_tensors.release());
 
   return nullptr;

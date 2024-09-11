@@ -132,6 +132,10 @@ struct OgaTokenizer : OgaAbstract {
     OgaCheckResult(OgaTokenizerEncode(this, str, &sequences));
   }
 
+  void ToTokenId(const char* str, OgaSequences& sequences, size_t sequence_idx) const {
+    OgaCheckResult(OgaTokenizerToTokenId(this, str, &sequences, sequence_idx));
+  }
+
   OgaString Decode(const int32_t* tokens_data, size_t tokens_length) const {
     const char* p;
     OgaCheckResult(OgaTokenizerDecode(this, tokens_data, tokens_length, &p));
@@ -344,10 +348,9 @@ struct OgaMultiModalProcessor : OgaAbstract {
     return std::unique_ptr<OgaNamedTensors>(p);
   }
 
-  std::unique_ptr<OgaNamedTensors> ProcessAudios(const OgaAudios* audios, const std::string& language,
-                                                 const std::string& task, int32_t no_timestamps) const {
+  std::unique_ptr<OgaNamedTensors> ProcessAudios(const OgaAudios* audios) const {
     OgaNamedTensors* p;
-    OgaCheckResult(OgaProcessorProcessAudios(this, audios, language.c_str(), task.c_str(), no_timestamps, &p));
+    OgaCheckResult(OgaProcessorProcessAudios(this, audios, &p));
     return std::unique_ptr<OgaNamedTensors>(p);
   }
 

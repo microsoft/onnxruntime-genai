@@ -19,6 +19,8 @@ void CXX_API(const char* model_path, int32_t num_beams) {
   auto model = OgaModel::Create(model_path);
   std::cout << "Creating multimodal processor..." << std::endl;
   auto processor = OgaMultiModalProcessor::Create(*model);
+  std::cout << "Creating tokenizer..." << std::endl;
+  auto tokenizer = OgaTokenizer::Create(*model);
 
   while (true) {
     std::string audio_path;
@@ -33,14 +35,22 @@ void CXX_API(const char* model_path, int32_t num_beams) {
     std::unique_ptr<OgaAudios> audios = OgaAudios::Load(audio_path.c_str());
 
     std::cout << "Processing audio..." << std::endl;
-    auto input_tensors = processor->ProcessAudios(audios.get(), "english", "transcribe", 1);
+    auto mel = processor->ProcessAudios(audios.get());
+    const std::array<const char*, 4> prompt_tokens = {"<|startoftranscript|>", "<|en|>", "<|transcribe|>",
+                                                      "<|notimestamps|>"};
+    auto input_ids = OgaSequences::Create();
+    for (const auto& token : prompt_tokens) {
+      tokenizer->ToTokenId(token, *input_ids, 0);
+    }
 
     std::cout << "Generating response..." << std::endl;
     auto params = OgaGeneratorParams::Create(*model);
     params->SetSearchOption("max_length", 256);
+    params->SetSearchOptionBool("do_sample", false);
     params->SetSearchOption("num_beams", num_beams);
-    params->SetSearchOption("num_return_sequences", 4);
-    params->SetInputs(*input_tensors);
+    params->SetSearchOption("num_return_sequences", num_beams);
+    params->SetInputs(*mel);
+    params->SetInputSequences(*input_ids);
 
     auto generator = OgaGenerator::Create(*model, *params);
 
@@ -80,6 +90,9 @@ void C_API(const char* model_path, int32_t num_beams) {
   OgaMultiModalProcessor* processor;
   std::cout << "Creating multimodal processor..." << std::endl;
   CheckResult(OgaCreateMultiModalProcessor(model, &processor));
+  OgaTokenizer* tokenizer;
+  std::cout << "Creating tokenizer..." << std::endl;
+  CheckResult(OgaCreateTokenizer(model, &tokenizer));
 
   while (true) {
     std::string audio_path;
@@ -95,18 +108,25 @@ void C_API(const char* model_path, int32_t num_beams) {
     CheckResult(OgaLoadAudio(audio_path.c_str(), &audios));
 
     std::cout << "Processing audio..." << std::endl;
-    OgaNamedTensors* input_tensors;
-    CheckResult(OgaProcessorProcessAudios(processor, audios, &input_tensors));
+    OgaNamedTensors* mel;
+    CheckResult(OgaProcessorProcessAudios(processor, audios, &mel));
+    const std::array<const char*, 4> prompt_tokens = {"<|startoftranscript|>", "<|en|>", "<|transcribe|>",
+                                                      "<|notimestamps|>"};
+    OgaSequences* input_ids;
+    CheckResult(OgaCreateSequences(&input_ids));
+    for (const auto& token : prompt_tokens) {
+      CheckResult(OgaTokenizerToTokenId(tokenizer, token, input_ids, 0));
+    }
 
     std::cout << "Generating response..." << std::endl;
     OgaGeneratorParams* params;
     CheckResult(OgaCreateGeneratorParams(model, &params));
     CheckResult(OgaGeneratorParamsSetSearchNumber(params, "max_length", 256));
+    CheckResult(OgaGeneratorParamsSetSearchBool(params, "do_sample", false));
     CheckResult(OgaGeneratorParamsSetSearchNumber(params, "num_beams", num_beams));
     CheckResult(OgaGeneratorParamsSetSearchNumber(params, "num_return_sequences", num_beams));
-    CheckResult(OgaGeneratorParamsSetInputs(params, input_tensors));
-    const std::array<int32_t, 3> input_ids = {50258, 50259, 50359};
-    CheckResult(OgaGeneratorParamsSetInputIDs(params, input_ids.data(), input_ids.size(), input_ids.size(), 1));
+    CheckResult(OgaGeneratorParamsSetInputs(params, mel));
+    CheckResult(OgaGeneratorParamsSetInputSequences(params, input_ids));
 
     OgaGenerator* generator;
     CheckResult(OgaCreateGenerator(model, params, &generator));
@@ -130,11 +150,14 @@ void C_API(const char* model_path, int32_t num_beams) {
     for (int i = 0; i < 3; ++i)
       std::cout << std::endl;
 
+    OgaDestroyGenerator(generator);
     OgaDestroyGeneratorParams(params);
-    OgaDestroyNamedTensors(input_tensors);
+    OgaDestroySequences(input_ids);
+    OgaDestroyNamedTensors(mel);
     OgaDestroyAudios(audios);
   }
 
+  OgaDestroyTokenizer(tokenizer);
   OgaDestroyMultiModalProcessor(processor);
   OgaDestroyModel(model);
 }

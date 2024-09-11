@@ -61,9 +61,7 @@ AudioProcessor::AudioProcessor(Config& config, const SessionInfo& session_info)
   config.AddMapping(std::string(Config::Defaults::InputFeaturesName), config.model.encoder_decoder_init.inputs.input_features);
 }
 
-std::unique_ptr<NamedTensors> AudioProcessor::Process(const Tokenizer& tokenizer, const Audios* audios,
-                                                      const std::string& language, const std::string& task,
-                                                      int32_t no_timestamps) const {
+std::unique_ptr<NamedTensors> AudioProcessor::Process(const Audios* audios) const {
   if (!audios || !audios->audios_) {
     throw std::runtime_error("No audios provided to process.");
   }
@@ -79,23 +77,6 @@ std::unique_ptr<NamedTensors> AudioProcessor::Process(const Tokenizer& tokenizer
 
   named_tensors->emplace(std::string(Config::Defaults::InputFeaturesName),
                          std::make_shared<Tensor>(ProcessMel(mel, input_features_type_, allocator)));
-
-  constexpr auto start_of_transcript = "<|startoftranscript|>";
-  const int32_t start_of_transcript_token_id = tokenizer.TokenToTokenId(start_of_transcript);
-  const auto prompt_token_ids = tokenizer.GetDecoderPromptIds(audios->num_audios_, language, task, no_timestamps);
-
-  const std::array<int64_t, 2> shape{static_cast<int64_t>(audios->num_audios_),
-                                     static_cast<int64_t>(1U + prompt_token_ids.size())};
-  auto decoder_input_ids = OrtValue::CreateTensor<int32_t>(allocator, shape);
-  for (size_t i = 0; i < audios->num_audios_; ++i) {
-    auto decoder_input_ids_span = std::span<int32_t>(decoder_input_ids->GetTensorMutableData<int32_t>() + i * static_cast<size_t>(shape[1]),
-                                                     static_cast<size_t>(shape[1]));
-    decoder_input_ids_span[0] = start_of_transcript_token_id;
-    std::copy(prompt_token_ids.begin(), prompt_token_ids.end(), decoder_input_ids_span.data() + 1);
-  }
-
-  named_tensors->emplace(std::string(Config::Defaults::InputIdsName),
-                         std::make_shared<Tensor>(std::move(decoder_input_ids)));
 
   return named_tensors;
 }

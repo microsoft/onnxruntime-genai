@@ -278,9 +278,20 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyMultiModalProcessor(OgaMultiModalProcesso
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer*, const char* str, OgaSequences* sequences);
 
+/*
+ * \brief Converts the given string to a single token id and adds it to the end of the sequence at the given index.
+          If the sequence does not exist, a new sequence is created at the given index if sequence_idx is equal to the current sequences count.
+ * \param[in] tokenizer The tokenizer to use to convert the string to a token id.
+ * \param[in] str The string to convert to a token id.
+ * \param[in] sequences The OgaSequences to add the token id to.
+ * \param[in] sequence_idx The index of the sequence to add the token id to.
+ * \return OgaResult containing the error message if the conversion of the string to a token id failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerToTokenId(const OgaTokenizer* tokenizer, const char* str, OgaSequences* sequences, size_t sequence_idx);
+
 OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor*, const char* prompt, const OgaImages* images, OgaNamedTensors** input_tensors);
 
-OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessAudios(const OgaMultiModalProcessor*, const OgaAudios* audios, const char* language, const char* task, int32_t no_timestamp, OgaNamedTensors** input_tensors);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessAudios(const OgaMultiModalProcessor*, const OgaAudios* audios, OgaNamedTensors** input_tensors);
 
 /* Decode a single token sequence and returns a null terminated utf8 string. out_string must be freed with OgaDestroyString
  */

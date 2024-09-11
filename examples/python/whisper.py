@@ -22,6 +22,7 @@ def run(args: argparse.Namespace):
     print("Loading model...")
     model = og.Model(args.model_path)
     processor = model.create_multimodal_processor()
+    tokenizer = og.Tokenizer(model)
 
     while True:
         readline.set_completer_delims(" \t\n;")
@@ -35,10 +36,12 @@ def run(args: argparse.Namespace):
         for audio_path in audio_paths:
             if not os.path.exists(audio_path):
                 raise FileNotFoundError(f"Audio file not found: {audio_path}")
-        audio = og.Audios.open(*audio_paths)
+        audios = og.Audios.open(*audio_paths)
 
         print("Processing audio...")
-        inputs = processor(audios=audio, lang="en", task="transcribe")
+        mel = processor(audios=audios)
+        decoder_prompt_tokens = ["<|startoftranscript|>", "<|en|>", "<|transcribe|>", "<|notimestamps|>"]
+        print([tokenizer.to_token_id(token) for token in decoder_prompt_tokens])
 
         params = og.GeneratorParams(model)
         params.set_search_options(
@@ -49,7 +52,8 @@ def run(args: argparse.Namespace):
         )
 
         batch_size = len(audio_paths)
-        params.set_inputs(inputs)
+        params.set_inputs(mel)
+        params.input_ids = [[tokenizer.to_token_id(token) for token in decoder_prompt_tokens]] * batch_size
 
         generator = og.Generator(model, params)
 

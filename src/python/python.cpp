@@ -399,6 +399,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   pybind11::class_<Tokenizer, std::shared_ptr<Tokenizer>>(m, "Tokenizer")
       .def(pybind11::init([](Model& model) { return model.CreateTokenizer(); }))
       .def("encode", &Tokenizer::Encode)
+      .def("to_token_id", &Tokenizer::TokenToTokenId)
       .def("decode", [](const Tokenizer& t, pybind11::array_t<int32_t> tokens) { return t.Decode(ToSpan(tokens)); })
       .def("encode_batch", [](const Tokenizer& t, std::vector<std::string> strings) {
         auto result = t.EncodeBatch(strings);
@@ -502,20 +503,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
                   processor.image_processor_->Process(*processor.tokenizer_, *prompt, images));
             } else if (kwargs.contains("audios")) {
               const Audios* audios = kwargs["audios"].cast<const Audios*>();
-              std::string language = "en";
-              if (kwargs.contains("language")) {
-                language = kwargs["lang"].cast<std::string>();
-              }
-              std::string task = "transcribe";
-              if (kwargs.contains("task")) {
-                task = kwargs["task"].cast<std::string>();
-              }
-              int32_t no_timestamps = 1;
-              if (kwargs.contains("no_timestamps")) {
-                no_timestamps = kwargs["no_timestamps"].cast<int32_t>();
-              }
               return std::make_unique<PyNamedTensors>(
-                  processor.audio_processor_->Process(*processor.tokenizer_, audios, language, task, no_timestamps));
+                  processor.audio_processor_->Process(audios));
             } else {
               throw std::runtime_error("Nothing to process.");
             }
