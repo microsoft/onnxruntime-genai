@@ -93,7 +93,8 @@ if (MSVC)
 
   if (genai_target_platform STREQUAL "arm64")
     # pass
-  elseif (genai_target_platform STREQUAL "ARM64")
+  elseif (genai_target_platform STREQUAL "ARM64" OR
+          genai_target_platform STREQUAL "ARM64EC")
     set(genai_target_platform "arm64")
   elseif (genai_target_platform STREQUAL "x64" OR 
           genai_target_platform STREQUAL "x86_64" OR 

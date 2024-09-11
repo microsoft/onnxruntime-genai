@@ -4,6 +4,7 @@
 #pragma once
 #include "model.h"
 #include "input_ids.h"
+#include "image_features.h"
 #include "embeddings.h"
 #include "extra_inputs.h"
 #include "logits.h"
@@ -20,13 +21,13 @@ struct MultiModalVisionModel : Model {
   std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths,
                                      const GeneratorParams& params) const override;
 
-  std::unique_ptr<OrtSession> embedding_session_;  // input_ids -> inputs_embeds
-  std::unique_ptr<OrtSession> vision_session_;     // pixel_values, img_sizes -> visual_features
+  std::unique_ptr<OrtSession> vision_session_;     // pixel_values, image_sizes -> image_features
+  std::unique_ptr<OrtSession> embedding_session_;  // input_ids, image_features -> inputs_embeds
   std::unique_ptr<OrtSession> decoder_session_;    // inputs_embeds, attention_mask, kv_cache -> logits
 };
 
 struct EmbeddingState : State {
-  EmbeddingState(const MultiModalVisionModel& model, const GeneratorParams& params, const CapturedGraphInfo* captured_graph_info);
+  EmbeddingState(const MultiModalVisionModel& model, const GeneratorParams& params, const CapturedGraphInfo* captured_graph_info, const int64_t num_image_tokens);
   EmbeddingState(const EmbeddingState&) = delete;
   EmbeddingState& operator=(const EmbeddingState&) = delete;
 
@@ -42,13 +43,18 @@ struct EmbeddingState : State {
 
   const MultiModalVisionModel& model_;
   const CapturedGraphInfo* captured_graph_info_;
-  InputIDs input_ids_{model_, *this};                                 // Model input
+  int64_t num_image_tokens_;
+
+  InputIDs input_ids_{model_, *this};                                       // Model input
+  ImageFeatures image_features_{model_, *this, ImageFeatures::Mode::Input,  // Optional model input
+                                model_.config_->model.embedding.inputs.image_features,
+                                num_image_tokens_};
   Embeddings inputs_embeds_{model_, *this, Embeddings::Mode::Output,  // Model output
                             model_.config_->model.embedding.outputs.embeddings};
 };
 
 struct VisionState : State {
-  VisionState(const MultiModalVisionModel& model, const GeneratorParams& params);
+  VisionState(const MultiModalVisionModel& model, const GeneratorParams& params, const int64_t num_image_tokens);
   VisionState(const VisionState&) = delete;
   VisionState& operator=(const VisionState&) = delete;
 
@@ -59,9 +65,11 @@ struct VisionState : State {
   friend struct MultiModalPipelineState;
 
   const MultiModalVisionModel& model_;
-  ExtraInputs extra_inputs_{model_, *this};    // Model inputs
-  std::unique_ptr<OrtValue> visual_features_;  // Model output
-  int32_t num_image_tokens_{};
+  int64_t num_image_tokens_;
+  ExtraInputs extra_inputs_{model_, *this};                                  // Model inputs
+  ImageFeatures image_features_{model_, *this, ImageFeatures::Mode::Output,  // Model output
+                                model_.config_->model.vision.outputs.image_features,
+                                num_image_tokens_};
 };
 
 struct DecoderState : State {
@@ -103,6 +111,7 @@ struct MultiModalPipelineState : State {
                            int current_length);
 
   const MultiModalVisionModel& model_;
+  int64_t num_image_tokens_{0};
   const CapturedGraphInfoPtr captured_graph_info_;
   std::unique_ptr<EmbeddingState> embedding_state_;
   std::unique_ptr<VisionState> vision_state_;
