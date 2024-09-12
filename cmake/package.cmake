@@ -68,8 +68,4 @@ install(FILES
   "${PROJECT_SOURCE_DIR}/LICENSE"
   DESTINATION .)
 
-install(FILES
-  ${onnxruntime_libs}
-  DESTINATION lib)
-
 include(CPack)

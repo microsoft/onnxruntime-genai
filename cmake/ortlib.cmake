@@ -1,0 +1,77 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+
+if(ORT_HOME)
+  # If ORT_HOME is specified at build time, use ORT_HOME to get the onnxruntime headers and libraries
+  message(STATUS "Using ONNX Runtime from ${ORT_HOME}")
+  set(ORT_HEADER_DIR ${ORT_HOME}/include)
+  set(ORT_LIB_DIR ${ORT_HOME}/lib)
+else()
+  # If ORT_HOME is not specified, download the onnxruntime headers and libraries from the nightly feed
+  set(ORT_VERSION "1.19.2")
+  set(ORT_FEED_ORG_NAME "aiinfra")
+  set(ORT_FEED_PROJECT "2692857e-05ef-43b4-ba9c-ccf1c22c437c")
+  set(ORT_NIGHTLY_FEED_ID "7982ae20-ed19-4a35-a362-a96ac99897b7")
+
+  if(USE_CUDA)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+      set(ORT_PACKAGE_NAME "Microsoft.ML.OnnxRuntime.Gpu.Linux")
+    elseif(WIN32)
+      set(ORT_PACKAGE_NAME "Microsoft.ML.OnnxRuntime.Gpu.Windows")
+    else()
+      message(FATAL_ERROR "Unsupported platform for CUDA")
+    endif()
+  elseif(USE_DML)
+    set(ORT_PACKAGE_NAME "Microsoft.ML.OnnxRuntime.DirectML")
+  elseif(USE_ROCM)
+    set(ORT_PACKAGE_NAME "Microsoft.ML.OnnxRuntime.Rocm")
+  else()
+    set(ORT_PACKAGE_NAME "Microsoft.ML.OnnxRuntime")
+  endif()
+
+  set(ORT_FETCH_URL "https://pkgs.dev.azure.com/${ORT_FEED_ORG_NAME}/${ORT_FEED_PROJECT}/_apis/packaging/feeds/${ORT_NIGHTLY_FEED_ID}/nuget/packages/${ORT_PACKAGE_NAME}/versions/${ORT_VERSION}/content?api-version=6.0-preview.1")
+
+  message(STATUS "Using ONNX Runtime package ${ORT_PACKAGE_NAME} version ${ORT_VERSION}")
+
+  FetchContent_Declare(
+    ortlib
+    URL ${ORT_FETCH_URL}
+  )
+  FetchContent_makeAvailable(ortlib)
+
+  if(USE_CUDA)
+    set(ORT_HEADER_DIR ${ortlib_SOURCE_DIR}/buildTransitive/native/include)
+  else()
+    set(ORT_HEADER_DIR ${ortlib_SOURCE_DIR}/build/native/include)
+  endif()
+
+  if(ANDROID)
+    file(ARCHIVE_EXTRACT INPUT ${ortlib_SOURCE_DIR}/runtimes/android/native/onnxruntime.aar DESTINATION ${ortlib_SOURCE_DIR}/runtimes/android/native/)
+    set(ORT_LIB_DIR ${ortlib_SOURCE_DIR}/runtimes/android/native/jni/${ANDROID_ABI})
+    message(FATAL_ERROR "Auto download ONNX Runtime for this android platform is not supported.")
+  else()
+    set(ORT_BINARY_PLATFORM "x64")
+    if (APPLE)
+      if(CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
+        set(ORT_BINARY_PLATFORM "arm64")
+      endif()
+      set(ORT_LIB_DIR ${ortlib_SOURCE_DIR}/runtimes/osx-${ORT_BINARY_PLATFORM}/native)
+    elseif(WIN32)
+      if (CMAKE_GENERATOR_PLATFORM)
+        if (CMAKE_GENERATOR_PLATFORM STREQUAL "ARM64" OR CMAKE_GENERATOR_PLATFORM STREQUAL "ARM64EC")
+          set(ORT_BINARY_PLATFORM "arm64")
+        endif()
+      elseif (CMAKE_SYSTEM_PROCESSOR STREQUAL "ARM64")
+        set(ORT_BINARY_PLATFORM "arm64")
+      endif()
+      set(ORT_LIB_DIR ${ortlib_SOURCE_DIR}/runtimes/win-${ORT_BINARY_PLATFORM}/native)
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+      if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
+        set(ORT_BINARY_PLATFORM "arm64")
+      endif()
+      set(ORT_LIB_DIR ${ortlib_SOURCE_DIR}/runtimes/linux-${ORT_BINARY_PLATFORM}/native)
+    else()
+      message(FATAL_ERROR "Auto download ONNX Runtime for this platform is not supported.")
+    endif()
+  endif()
+endif()

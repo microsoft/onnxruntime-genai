@@ -107,12 +107,6 @@ add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
                     COMMAND ${CMAKE_COMMAND} -E copy_if_different 
                       $<TARGET_FILE:onnxruntime-genai> 
                       ${JAVA_PACKAGE_LIB_DIR}/$<TARGET_FILE_NAME:onnxruntime-genai>)
-                      
-# also need the onnxruntime libraries in the same directory as onnxruntime-genai.dll has a dependency on it
-foreach (ort_dll ${onnxruntime_libs})
-  add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
-                      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${ort_dll} ${JAVA_PACKAGE_LIB_DIR})
-endforeach()
 
 # Add the JNI bindings to the native-jni dir
 add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
