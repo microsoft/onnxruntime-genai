@@ -24,6 +24,7 @@ parameters:
   values:
   - 'linux'
   - 'win'
+  - 'osx'
 
 jobs:
 - job: python_${{ parameters.os }}_${{ parameters.ep }}${{ parameters.cuda_display_version }}_${{ parameters.arch }}_validation
@@ -46,6 +47,9 @@ jobs:
       pool: 'onnxruntime-genai-windows-vs-2022-arm64'
     ${{ else }}:
       pool: 'onnxruntime-Win-CPU-2022'
+  ${{ if eq(parameters.os, 'osx') }}:
+    pool:
+      vmImage: 'macOS-latest'
 
   timeoutInMinutes: 240
   workspace:
@@ -147,22 +151,13 @@ jobs:
       addToPath: true
       architecture: $(arch)
 
-  - ${{ if eq(parameters.os, 'linux') }}:
-    - template: steps/utils/flex-download-pipeline-artifact.yml
-      parameters:
-        StepName: 'Download Python Wheel Artifacts'
-        ArtifactName: $(ArtifactName)
-        TargetPath: '$(Build.BinariesDirectory)/wheel'
-        SpecificArtifact: ${{ parameters.specificArtifact }}
-        BuildId: ${{ parameters.BuildId }}
-  - ${{ if eq(parameters.os, 'win') }}:
-    - template: steps/utils/flex-download-pipeline-artifact.yml
-      parameters:
-        StepName: 'Download Python Wheel Artifacts'
-        ArtifactName: $(ArtifactName)-wheel
-        TargetPath: '$(Build.BinariesDirectory)/wheel'
-        SpecificArtifact: ${{ parameters.specificArtifact }}
-        BuildId: ${{ parameters.BuildId }}
+  - template: steps/utils/flex-download-pipeline-artifact.yml
+    parameters:
+      StepName: 'Download Python Wheel Artifacts'
+      ArtifactName: $(ArtifactName)-wheel
+      TargetPath: '$(Build.BinariesDirectory)/wheel'
+      SpecificArtifact: ${{ parameters.specificArtifact }}
+      BuildId: ${{ parameters.BuildId }}
 
   - template: steps/utils/download-huggingface-model.yml
     parameters:
@@ -174,7 +169,7 @@ jobs:
       HuggingFaceToken: $(HF_TOKEN)
       os: ${{ parameters.os }}
 
-  - ${{ if eq(parameters.os, 'linux') }}:
+  - ${{ if or(eq(parameters.os, 'linux'), eq(parameters.os, 'osx')) }}:
     - ${{ if eq(parameters.ep, 'cuda') }}:
       - bash: |
           set -e -x
@@ -204,7 +199,12 @@ jobs:
       - bash: |
           export ORTGENAI_LOG_ORT_LIB=1
           python -m pip install -r test/python/requirements.txt
-          python -m pip install -r test/python/requirements-cpu.txt
+          if [[ "$(os)" == "linux" ]]; then
+            python -m pip install -r test/python/requirements-cpu.txt
+          fi
+          if [[ "$(os)" == "osx" ]]; then
+            python -m pip install -r test/python/requirements-macos.txt
+          fi
           cd examples/python
           python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)
           python model-generate.py -m ./models/$(prebuild_phi3_mini_model_folder) --min_length 25 --max_length 50 --verbose

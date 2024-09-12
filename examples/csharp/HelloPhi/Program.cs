@@ -76,6 +76,7 @@ do
     var sequences = tokenizer.Encode($"<|user|>{prompt}<|end|><|assistant|>");
 
     using GeneratorParams generatorParams = new GeneratorParams(model);
+    generatorParams.SetSearchOption("min_length", 50);
     generatorParams.SetSearchOption("max_length", 200);
     generatorParams.SetInputSequences(sequences);
     if (option == 1) // Complete Output

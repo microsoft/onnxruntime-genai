@@ -84,8 +84,10 @@ target_link_directories(onnxruntime-genai PRIVATE ${ORT_LIB_DIR})
 
 # we keep the shared libraries disconnected on Android as they will come from separate AARs and we don't want to force
 # the ORT version to match in both.
-if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux"))
-target_link_libraries(onnxruntime-genai PRIVATE ${ONNXRUNTIME_LIB})
+if(CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR (CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND (NOT BUILD_APPLE_FRAMEWORK)))
+  add_compile_definitions(_ORT_GENAI_USE_DLOPEN)
+else()
+  target_link_libraries(onnxruntime-genai PRIVATE ${ONNXRUNTIME_LIB})
 endif()
 
 set_target_properties(onnxruntime-genai PROPERTIES FOLDER "Sources")

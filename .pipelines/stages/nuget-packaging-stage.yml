@@ -29,6 +29,11 @@ parameters:
   type: boolean
   default: true
 
+- name: enable_macos_cpu
+  displayName: 'Whether MacOS CPU package is built.'
+  type: boolean
+  default: true
+
 - name: ort_version
   type: string
 - name: ort_cuda_version
@@ -42,7 +47,7 @@ parameters:
 stages:
 - stage: nuget_packaging
   jobs:
-    - ${{ if or(eq(parameters.enable_linux_cpu, true), eq(parameters.enable_win_cpu, true)) }}:
+    - ${{ if or(eq(parameters.enable_linux_cpu, true), eq(parameters.enable_win_cpu, true), eq(parameters.enable_macos_cpu, true)) }}:
       - template: jobs/nuget-packaging-job.yml
         parameters:
           ep: 'cpu'
@@ -51,6 +56,7 @@ stages:
           enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
           enable_win_cpu: ${{ parameters.enable_win_cpu }}
           enable_win_arm64: ${{ parameters.enable_win_arm64 }}
+          enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
     - ${{ if or(eq(parameters.enable_linux_cuda, true), eq(parameters.enable_win_cuda, true)) }}:
       - template: jobs/nuget-packaging-job.yml
         parameters:
