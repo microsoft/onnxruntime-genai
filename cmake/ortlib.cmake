@@ -48,7 +48,6 @@ else()
   if(ANDROID)
     file(ARCHIVE_EXTRACT INPUT ${ortlib_SOURCE_DIR}/runtimes/android/native/onnxruntime.aar DESTINATION ${ortlib_SOURCE_DIR}/runtimes/android/native/)
     set(ORT_LIB_DIR ${ortlib_SOURCE_DIR}/runtimes/android/native/jni/${ANDROID_ABI})
-    message(FATAL_ERROR "Auto download ONNX Runtime for this android platform is not supported.")
   else()
     set(ORT_BINARY_PLATFORM "x64")
     if (APPLE)
@@ -75,3 +74,45 @@ else()
     endif()
   endif()
 endif()
+
+# Download DML headers and libraries
+if(USE_DML)
+  set(DML_VERSION "1.15.2")
+  set(DML_PACKAGE_NAME "Microsoft.AI.DirectML")
+  set(DML_FETCH_URL "https://www.nuget.org/api/v2/package/${DML_PACKAGE_NAME}/${DML_VERSION}")
+
+  FetchContent_Declare(
+    dmllib
+    URL ${DML_FETCH_URL}
+  )
+  FetchContent_makeAvailable(dmllib)
+  set(DML_HEADER_DIR ${dmllib_SOURCE_DIR}/build/native/include)
+
+  set(DML_BINARY_PLATFORM "x64")
+  if (CMAKE_GENERATOR_PLATFORM)
+    if (CMAKE_GENERATOR_PLATFORM STREQUAL "ARM64")
+      set(DML_BINARY_PLATFORM "arm64")
+    elseif(CMAKE_GENERATOR_PLATFORM STREQUAL "ARM64EC")
+      set(DML_BINARY_PLATFORM "arm64ec")
+    endif()
+  elseif (CMAKE_SYSTEM_PROCESSOR STREQUAL "ARM64")
+    set(DML_BINARY_PLATFORM "arm64")
+  endif()
+
+  set(DML_LIB_DIR ${dmllib_SOURCE_DIR}/runtimes/bin/${DML_BINARY_PLATFORM}-win/native)
+
+  set(D3D12_VERSION "1.614.1")
+  set(D3D12_PACKAGE_NAME "Microsoft.Direct3D.D3D12")
+  set(D3D12_FETCH_URL "https://www.nuget.org/api/v2/package/${D3D12_PACKAGE_NAME}/${D3D12_VERSION}")
+  FetchContent_Declare(
+    d3d12lib
+    URL ${D3D12_FETCH_URL}
+  )
+  FetchContent_makeAvailable(d3d12lib)
+  set(D3D12_HEADER_DIR ${d3d12lib_SOURCE_DIR}/build/native/include)
+
+  set(D3D12_LIB_DIR ${d3d12lib_SOURCE_DIR}/build/native/bin/${DML_BINARY_PLATFORM})
+endif()
+
+message(STATUS "ORT_HEADER_DIR: ${ORT_HEADER_DIR}")
+message(STATUS "ORT_LIB_DIR: ${ORT_LIB_DIR}")
