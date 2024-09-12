@@ -934,7 +934,8 @@ class Model:
         if self.rotemb_attrs["create_rotary_embedding_caches"]:
             if not hasattr(rotemb, "cos_cached"):
                 # Create cos/sin caches if not already created
-                if self.ep == "dml":
+                if self.ep == "dml" and type(self).__name__ == "Phi3Mini128KModel":
+                    # concate 4k and 128k cos/sin caches for phi3/phi3.5 and dml EP only
                     cos_cache_large, sin_cache_large = self.make_rotary_embedding_caches_from_scratch()
                     self.rotemb_attrs["rescale_factors"] = self.rotemb_attrs["multi_cache"]["short_factor"]
                     self.rotemb_attrs["cache_length"] = self.original_context_length
@@ -2413,6 +2414,7 @@ class Phi3Mini4KModel(MistralModel):
 class Phi3Mini128KModel(Phi3Mini4KModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.concat_cache = self.ep == "dml"
         self.make_rotary_embedding_multi_cache()
 
 
