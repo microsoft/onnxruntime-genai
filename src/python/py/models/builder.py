@@ -934,17 +934,7 @@ class Model:
         if self.rotemb_attrs["create_rotary_embedding_caches"]:
             if not hasattr(rotemb, "cos_cached"):
                 # Create cos/sin caches if not already created
-                if self.ep == "dml" and type(self).__name__ == "Phi3Mini128KModel":
-                    # concate 4k and 128k cos/sin caches for phi3/phi3.5 and dml EP only
-                    cos_cache_large, sin_cache_large = self.make_rotary_embedding_caches_from_scratch()
-                    self.rotemb_attrs["rescale_factors"] = self.rotemb_attrs["multi_cache"]["short_factor"]
-                    self.rotemb_attrs["cache_length"] = self.original_context_length
-                    self.rotemb_attrs["mscale"] = self.rotemb_attrs["multi_cache"]["short_mscale"]
-                    cos_cache_small, sin_cache_small = self.make_rotary_embedding_caches_from_scratch()
-                    cos_cache = torch.cat((cos_cache_small, cos_cache_large), dim=0)
-                    sin_cache = torch.cat((sin_cache_small, sin_cache_large), dim=0)
-                else:
-                    cos_cache, sin_cache = self.make_rotary_embedding_caches_from_scratch()
+                cos_cache, sin_cache = self.make_rotary_embedding_caches_from_scratch()
             else:
                 cos_cache, sin_cache = rotemb.cos_cached, rotemb.sin_cached
 
@@ -2236,44 +2226,22 @@ class Model:
 
         basename = "/model/pos_ids_reformat"
 
-        if self.ep == "dml":
-            reduce_max_name = f"{basename}/ReduceMax"
-            reduce_max_inputs = ["position_ids"]
-            self.make_reduce_max(reduce_max_name, reduce_max_inputs, dtype=TensorProto.INT64, shape=[1])
+        shape_name = f"{basename}/Shape"
+        self.make_shape(shape_name, root_input="input_ids" if not self.exclude_embeds else "inputs_embeds", shape=[2] if not self.exclude_embeds else [3])
+        gather_name = f"{basename}/Gather"
+        gather_inputs = [f"{shape_name}/output_0", "/model/constants/TensorProto.INT64/0D/1"]
+        self.make_gather(gather_name, gather_inputs, axis=0)
+        unsqueeze_name = f"{basename}/Unsqueeze"
+        unsqueeze_inputs = [f"{gather_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
+        self.make_unsqueeze(unsqueeze_name, unsqueeze_inputs, dtype=TensorProto.INT64, shape=[1])
+        concat_name = f"{basename}/Concat"
+        concat_inputs = ["/model/constants/TensorProto.INT64/1D/-1", f"{unsqueeze_name}/output_0"]
+        self.make_concat(concat_name, concat_inputs, dtype=TensorProto.INT64, shape=[2], axis=0)
+        reshape_name = f"{basename}/Reshape"
+        reshape_inputs = ["position_ids", f"{concat_name}/output_0"]
+        self.make_reshape(reshape_name, reshape_inputs, dtype=TensorProto.INT64, shape=None)
 
-            greater_or_equal_name = f"{basename}/GreaterOrEqual"
-            greater_or_equal_inputs = [f"{reduce_max_name}/output_0", f"/model/constants/TensorProto.INT64/0D/{self.original_context_length}"]
-            self.make_greater_or_equal(greater_or_equal_name, greater_or_equal_inputs, shape=[])
-
-            cast_name = f"{basename}/Cast"
-            self.make_cast(cast_name, f"{greater_or_equal_name}/output_0", dtype=TensorProto.INT64, shape=None)
-
-            mul_name = f"{basename}/Mul"
-            mul_inputs = [f"{cast_name}/output_0", f"/model/constants/TensorProto.INT64/0D/{self.original_context_length}"]
-            self.make_mul(mul_name, mul_inputs, dtype=TensorProto.INT64, shape=None)
-
-            add_1_name = f"{basename}/Add_1"
-            add_1_inputs = [f"{mul_name}/output_0", "position_ids"]
-            self.make_add(add_1_name, add_1_inputs, dtype=TensorProto.INT64, shape=["batch_size", "sequence_length"])
-
-            return add_1_name
-        else:
-            shape_name = f"{basename}/Shape"
-            self.make_shape(shape_name, root_input="input_ids" if not self.exclude_embeds else "inputs_embeds", shape=[2] if not self.exclude_embeds else [3])
-            gather_name = f"{basename}/Gather"
-            gather_inputs = [f"{shape_name}/output_0", "/model/constants/TensorProto.INT64/0D/1"]
-            self.make_gather(gather_name, gather_inputs, axis=0)
-            unsqueeze_name = f"{basename}/Unsqueeze"
-            unsqueeze_inputs = [f"{gather_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
-            self.make_unsqueeze(unsqueeze_name, unsqueeze_inputs, dtype=TensorProto.INT64, shape=[1])
-            concat_name = f"{basename}/Concat"
-            concat_inputs = ["/model/constants/TensorProto.INT64/1D/-1", f"{unsqueeze_name}/output_0"]
-            self.make_concat(concat_name, concat_inputs, dtype=TensorProto.INT64, shape=[2], axis=0)
-            reshape_name = f"{basename}/Reshape"
-            reshape_inputs = [f"position_ids", f"{concat_name}/output_0"]
-            self.make_reshape(reshape_name, reshape_inputs, dtype=TensorProto.INT64, shape=None)
-
-            return reshape_name
+        return reshape_name
 
 
 class LlamaModel(Model):
@@ -2414,9 +2382,72 @@ class Phi3Mini4KModel(MistralModel):
 class Phi3Mini128KModel(Phi3Mini4KModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        self.concat_cache = self.ep == "dml"
         self.make_rotary_embedding_multi_cache()
+   
+    def make_position_ids_reformatting(self):
+        if self.ep != "dml":
+            super().make_position_ids_reformatting()
+            return
 
+        basename = "/model/pos_ids_reformat"
+        reduce_max_name = f"{basename}/ReduceMax"
+        reduce_max_inputs = ["position_ids"]
+        self.make_reduce_max(reduce_max_name, reduce_max_inputs, dtype=TensorProto.INT64, shape=[1])
+        greater_or_equal_name = f"{basename}/GreaterOrEqual"
+        greater_or_equal_inputs = [f"{reduce_max_name}/output_0", f"/model/constants/TensorProto.INT64/0D/{self.original_context_length}"]
+        self.make_greater_or_equal(greater_or_equal_name, greater_or_equal_inputs, shape=[])
+        cast_name = f"{basename}/Cast"
+        self.make_cast(cast_name, f"{greater_or_equal_name}/output_0", dtype=TensorProto.INT64, shape=None)
+        mul_name = f"{basename}/Mul"
+        mul_inputs = [f"{cast_name}/output_0", f"/model/constants/TensorProto.INT64/0D/{self.original_context_length}"]
+        self.make_mul(mul_name, mul_inputs, dtype=TensorProto.INT64, shape=None)
+        add_1_name = f"{basename}/Add_1"
+        add_1_inputs = [f"{mul_name}/output_0", "position_ids"]
+        self.make_add(add_1_name, add_1_inputs, dtype=TensorProto.INT64, shape=["batch_size", "sequence_length"])
+
+        return add_1_name
+        
+    def make_rotary_embedding_caches(self, rotemb, **kwargs):
+        if self.ep != "dml":
+            super().make_rotary_embedding_caches(rotemb, **kwargs)
+            return
+
+        # Now you can make all the DML specific changes here
+        cos_cache_name = kwargs.get("cos_cache_name", "cos_cache")
+        sin_cache_name = kwargs.get("sin_cache_name", "sin_cache")
+
+        if self.rotemb_attrs["create_rotary_embedding_caches"]:
+            if not hasattr(rotemb, "cos_cached"):
+                # Create cos/sin caches if not already created
+                # concate 4k and 128k cos/sin caches for phi3/phi3.5 and dml EP only
+                cos_cache_large, sin_cache_large = self.make_rotary_embedding_caches_from_scratch()
+                self.rotemb_attrs["rescale_factors"] = self.rotemb_attrs["multi_cache"]["short_factor"]
+                self.rotemb_attrs["cache_length"] = self.original_context_length
+                self.rotemb_attrs["mscale"] = self.rotemb_attrs["multi_cache"]["short_mscale"]
+                cos_cache_small, sin_cache_small = self.make_rotary_embedding_caches_from_scratch()
+                cos_cache = torch.cat((cos_cache_small, cos_cache_large), dim=0)
+                sin_cache = torch.cat((sin_cache_small, sin_cache_large), dim=0)
+            else:
+                cos_cache, sin_cache = rotemb.cos_cached, rotemb.sin_cached
+
+            # Reshape cos/sin cache from (M, H) to (M, H/2)
+            hidden_dim = cos_cache.shape[-1]
+            cos_cache = cos_cache.squeeze()[:, : (hidden_dim // 2)].detach().numpy()
+            cos_cache = cos_cache.astype(self.to_numpy_dtype[self.io_dtype])
+            sin_cache = sin_cache.squeeze()[:, : (hidden_dim // 2)].detach().numpy()
+            sin_cache = sin_cache.astype(self.to_numpy_dtype[self.io_dtype])
+
+            if "cos_cache_name" not in kwargs and "sin_cache_name" not in kwargs:
+                # Save cos/sin caches to disk
+                self.make_external_tensor(cos_cache, cos_cache_name)
+                self.make_external_tensor(sin_cache, sin_cache_name)
+            else:
+                # Return cos/sin caches since they will be custom-saved
+                return cos_cache, sin_cache
+
+            self.rotemb_attrs["create_rotary_embedding_caches"] = False
+
+        return cos_cache_name, sin_cache_name
 
 class Phi3Small8KModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
