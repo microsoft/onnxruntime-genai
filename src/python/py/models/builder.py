@@ -28,6 +28,10 @@ class Model:
         self.intermediate_size = config.intermediate_size
         self.hidden_size = config.hidden_size
         self.num_kv_heads = config.num_key_value_heads if hasattr(config, "num_key_value_heads") else config.num_attention_heads
+        self.num_kv_heads = config.multi_query_group_num if hasattr(config, "multi_query_group_num") else self.num_kv_heads
+        self.kv_channels = config.kv_channels if hasattr(config, "kv_channels") else self.num_kv_heads
+        self.multi_query_attention = config.multi_query_attention if hasattr(config, "multi_query_attention") else False
+        # self.multi_query_group_num = config.multi_query_group_num if hasattr(config, "multi_query_group_num") else 1 # group_num as 1 is vanilla Multi-query attention https://arxiv.org/pdf/2305.13245
         self.num_attn_heads = config.num_attention_heads
         self.head_size = config.head_dim if hasattr(config, "head_dim") else config.hidden_size // config.num_attention_heads
         self.num_layers = int(extra_options["num_hidden_layers"]) if "num_hidden_layers" in extra_options else config.num_hidden_layers
@@ -525,6 +529,14 @@ class Model:
         output = f"{name}/output_0"
         self.make_node("Gather", inputs=inputs, outputs=[output], name=name, axis=axis)
         self.make_value_info(output, TensorProto.INT64, shape=[])
+
+    def make_split(self, name, inputs, dtype, shape, axis, num_splits):
+        # Splits the input tensor into num_splits based on the axis
+        outputs = [f"{name}/output_{i}" for i in range(num_splits)]
+        split = [num_splits for i in range(num_splits)]
+        self.make_node("Split", inputs=[inputs], outputs=outputs, name=name, axis=axis, split = split)
+        for output in outputs:
+            self.make_value_info(output, dtype, shape=shape)
 
     def make_reshape(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
@@ -1663,8 +1675,51 @@ class Model:
 
         return gelu_name
 
+    def make_swiglu(self, layer_id, root_input, activation, domain):
+        # Make nodes for this activation subgraph
+        #
+        #       root_input (GateProjMatMul)
+        #            /      \
+        #   split/output_0  split/output_1        
+        #         /  |      |
+        #   ActFunc  |      |
+        #          \ |      |
+        #           Mul     |
+        #             \     |
+        #              \    |
+        #                Mul
+        act_name = f"/model/layers.{layer_id}/mlp/act_fn"
+        
+        # Split the input into two parts along the last dimension
+        # When using swiglu the MLP projects to 2 times the intermediate_size
+        split_act_name = f"{act_name}/split"
+        num_splits = 2
+        self.make_split(split_act_name, root_input, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size], axis = -1, num_splits=num_splits)
+        split_act_out_name_0 = f"{split_act_name}/output_0"        
+        split_act_out_name_1 = f"{split_act_name}/output_1"   
+
+        act_name = f"{split_act_name}/{activation}"
+        act_func_output = f"{act_name}/output_0"
+        self.make_node(activation, inputs=[split_act_out_name_0], outputs=[act_func_output], name=act_name, domain=domain)
+        self.make_value_info(act_func_output, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+
+        mul_act_name_0 = f"{act_name}/Mul_0"
+        mul_act_inputs_0 = [split_act_out_name_0, act_func_output]
+        self.make_mul(mul_act_name_0, mul_act_inputs_0, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+
+        mul_act_name_1 = f"{act_name}/Mul_1"
+        mul_0_output = f"{mul_act_name_0}/output_0"
+        mul_act_inputs_1 = [split_act_out_name_1, mul_0_output]
+        self.make_mul(mul_act_name_1, mul_act_inputs_1, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+
+        return mul_act_name_1
+
+
     def make_activation(self, layer_id, root_input):
-        if self.activation in {"silu", "swish"}:
+
+        if self.activation in {"swiglu"}:
+            output_name = self.make_swiglu(layer_id, root_input, activation="Sigmoid", domain=None)
+        elif self.activation in {"silu", "swish"}:
             output_name = self.make_activation_with_mul(layer_id, root_input, activation="Sigmoid", domain=None)
         elif self.activation in {"gelu_new", "gelu_fast", "gelu_pytorch_tanh"}:
             output_name = self.make_gelu(layer_id, root_input, activation="FastGelu")
@@ -1752,7 +1807,10 @@ class Model:
 
         # Loop through model and map each module to ONNX/ORT ops
         self.layer_id = 0
+        model_name = "ChatGLM" if "ChatGLM" in model.__class__.__name__ else ""
         for module in model.modules():
+            print("##########")
+            print(module)
             if isinstance(module, torch.nn.Embedding) or (hasattr(model, "embedding") and module == model.embedding):
                 # Checks (Hugging Face logic) or (GGUF logic)
                 if not self.exclude_embeds:
@@ -1770,10 +1828,15 @@ class Model:
                 self.make_layer(self.layer_id, module)
                 self.layer_id += 1
 
-            elif self.layer_id == self.num_layers and self.has_final_norm(module, model):
+            elif module.__class__.__name__.endswith("GLMBlock") and self.layer_id < self.num_layers:
+                print(f"Reading decoder layer {self.layer_id}")
+                self.make_layer(self.layer_id, module)
+                self.layer_id += 1
+            
+            elif self.layer_id == self.num_layers and self.has_final_norm(module, model, model_name):
                 # SkipLayerNorm after last decoder layer (MatMul --> SkipLayerNorm)
                 print("Reading final norm")
-                self.make_layernorm(self.layer_id, module, skip=True, simple=self.layernorm_attrs["simple"], location="final_norm")
+                # self.make_layernorm(self.layer_id, module, skip=True, simple=self.layernorm_attrs["simple"], location="final_norm")
 
             elif (isinstance(module, torch.nn.Linear) and module.out_features == self.vocab_size) or (hasattr(model, "lm_head") and module == model.lm_head):
                 # Checks (Hugging Face logic) or (GGUF logic)
@@ -1784,10 +1847,14 @@ class Model:
 
         del model
 
-    def has_final_norm(self, module, model):
+    def has_final_norm(self, module, model, model_name):
         # Hugging Face names
         hf_norm = hasattr(model, "model") and hasattr(model.model, "norm") and module == model.model.norm
-        hf_final_layernorm = hasattr(model, "model") and hasattr(model.model, "final_layernorm") and module == model.model.final_layernorm
+        if(model_name == "ChatGLM"):
+            hf_final_layernorm = hasattr(model, "transformer") and hasattr(model.transformer, "encoder") and hasattr(model.transformer.encoder, "final_layernorm") and module == model.transformer.encoder.final_layernorm
+        else:
+            hf_final_layernorm = hasattr(model, "model") and hasattr(model.model, "final_layernorm") and module == model.model.final_layernorm
+        
         # GGUF names
         gguf_final_norm = hasattr(model, "final_norm") and module == model.final_norm
         return hf_norm or hf_final_layernorm or gguf_final_norm
@@ -2613,6 +2680,158 @@ class Phi3MoE128KModel(MistralModel):
             self.layernorm_attrs["last_layernorm"] = True
 
 
+class ChatGLMModel(Model):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        # self.input_shapes["position_ids"] = [1]  # Note: This is optional and only needed if you want position_ids to be an int instead of a 2D tensor
+        # self.layernorm_attrs["first_layernorm"] = False # Manually use Residuals to no SkipLayerNorms
+        self.layernorm_attrs["simple"] = True # RMSNorm in ChatGLM
+        self.rotemb_attrs["num_heads"] = self.num_attn_heads
+        self.rotemb_attrs["rotary_embedding_dim"] = int(self.head_size * self.rotemb_attrs["partial_rotary_factor"])
+        self.mlp_attrs["use_proj"], self.mlp_attrs["use_fc"] = True, False
+        self.attention_attrs["op_type"] = "GroupQueryAttention" if self.multi_query_attention else self.attention_attrs["op_type"]
+        
+    def make_rotary_embedding(self, rotemb, name, root_input, **kwargs):
+        super().make_rotary_embedding(rotemb, name, root_input, num_heads=self.rotemb_attrs["num_heads"], rotary_embedding_dim=self.rotemb_attrs["rotary_embedding_dim"], **kwargs)
+    
+    
+    def make_attention(self, layer_id, attention, root_input, **kwargs):
+        #Designed from SelfAttention function of medeling_chatglm.py
+        hidden_size = self.hidden_size
+        num_attention_heads = self.num_attn_heads
+        kv_channels = self.kv_channels
+        head_size = self.head_size
+
+        projection_size = kv_channels * num_attention_heads
+        hidden_size_per_attention_head = projection_size // num_attention_heads
+
+        multi_query_attention = self.attention_attrs["op_type"] == "GroupQueryAttention"
+        multi_query_group_num = self.num_kv_heads if multi_query_attention else num_attention_heads
+
+        if multi_query_attention:
+            qkv_hidden_size = projection_size + 2 * hidden_size_per_attention_head * multi_query_group_num
+        else:
+            qkv_hidden_size = 3 * projection_size
+
+        # Reshape the QKV weight
+        qkv_weight = attention.query_key_value.weight.T
+        
+        if multi_query_attention:
+            q_weight, k_weight, v_weight = qkv_weight.split(
+                [
+                    num_attention_heads * hidden_size_per_attention_head,
+                    multi_query_group_num * hidden_size_per_attention_head,
+                    multi_query_group_num * hidden_size_per_attention_head,
+                ],
+                dim=1
+            )
+        else:
+            q_weight, k_weight, v_weight = qkv_weight.chunk(3, dim=1)
+
+        # Reshape the QKV bias if it exists
+        if attention.query_key_value.bias is not None:
+            qkv_bias = attention.query_key_value.bias
+            if multi_query_attention:
+                q_bias, k_bias, v_bias = qkv_bias.split(
+                    [
+                        num_attention_heads * hidden_size_per_attention_head,
+                        multi_query_group_num * hidden_size_per_attention_head,
+                        multi_query_group_num * hidden_size_per_attention_head,
+                    ]
+                )
+            else:
+                q_bias, k_bias, v_bias = qkv_bias.chunk(3)
+        else:
+            q_bias = k_bias = v_bias = None
+
+        # Create separate Q, K, V projections
+        attention.q_proj = torch.nn.Linear(hidden_size, num_attention_heads * hidden_size_per_attention_head, bias=q_bias is not None)
+        attention.q_proj.weight = torch.nn.Parameter(q_weight.T)
+        if q_bias is not None:
+            attention.q_proj.bias = torch.nn.Parameter(q_bias)
+
+        kv_size = multi_query_group_num * hidden_size_per_attention_head
+
+        attention.k_proj = torch.nn.Linear(hidden_size, kv_size, bias=k_bias is not None)
+        attention.k_proj.weight = torch.nn.Parameter(k_weight.T)
+        if k_bias is not None:
+            attention.k_proj.bias = torch.nn.Parameter(k_bias)
+
+        attention.v_proj = torch.nn.Linear(hidden_size, kv_size, bias=v_bias is not None)
+        attention.v_proj.weight = torch.nn.Parameter(v_weight.T)
+        if v_bias is not None:
+            attention.v_proj.bias = torch.nn.Parameter(v_bias)
+
+        # Remove the original combined QKV projection
+        del attention.query_key_value
+        del qkv_weight
+        del qkv_bias
+        # Add dummy rotary_emb attribute
+        attention.rotary_emb = type("RotaryEmbedding", (object,), {'content':{}})()
+
+        super().make_attention(layer_id, attention, root_input, **kwargs)
+
+    def make_mlp_proj(self, layer_id, mlp, root_input):
+        # Make nodes for the MLP subgraph
+        #
+        #           root_input
+        #              |   
+        #         dense_h_to_4h    
+        #              |
+        #           Activation
+        #              |
+        #        dense_4h_to_h  
+        # Make MatMul nodes
+        # gate_basename = f"/model/layers.{layer_id}/mlp/gate_proj/MatMul"
+        # gate_name = self.make_matmul(mlp.gate_proj, gate_basename, root_input)
+        up_basename = f"/model/layers.{layer_id}/mlp/dense_h_to_4h/MatMul"
+        up_name = self.make_matmul(mlp.dense_h_to_4h, up_basename, root_input)  
+        # Make activation node(s)
+        act_fn_name = self.make_activation(layer_id, root_input=f"{up_name}/output_0")  
+        # # Make Mul node after activation
+        # mul_name = f"/model/layers.{layer_id}/mlp/Mul"
+        # mul_inputs = [f"{act_fn_name}/output_0", f"{up_name}/output_0"]
+        # self.make_mul(mul_name, mul_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size]) 
+        # Make output MatMul node
+        down_basename = f"/model/layers.{layer_id}/mlp/dense_4h_to_h/MatMul"
+        down_name = self.make_matmul(mlp.dense_4h_to_h, down_basename, f"{act_fn_name}/output_0")   
+        # Assign output 0 of previous MatMul as skip input to next SkipLayerNorm
+        self.layernorm_attrs["skip_input"] = f"{down_name}/output_0"
+       
+
+    def make_layer(self, layer_id, layer):
+        # Each GLM encoder is defined as follows all LayerNorms are RMSNorms:
+        # input_layernorm  --> self_attention --> residual_add_pre_input_layernorm --> layernorm --> dense --> residual_add_pre_last_layernorm
+        #TODO: @amd-sudo-sh Add the conditional statement for different residual configuration.
+        root_input = self.layernorm_attrs["root_input"]
+        self.make_layernorm(layer_id, layer.input_layernorm, skip=False, simple=self.layernorm_attrs["simple"], location="input")
+        self.make_attention(layer_id, layer.self_attention, root_input=self.layernorm_attrs["output_0"])
+        
+        residual_add_name_0 = f"/model/layers.{layer_id}/residual_add/Add_0"
+        residual_add_inputs_0 = [self.layernorm_attrs['skip_input'], root_input]
+        next_residual_input = self.layernorm_attrs['skip_input']
+        self.make_add(residual_add_name_0, residual_add_inputs_0, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+        
+        self.layernorm_attrs["root_input"] = f"{residual_add_name_0}/output_0"
+        self.make_layernorm(layer_id, layer.input_layernorm, skip=False, simple=self.layernorm_attrs["simple"], location="middle")
+
+        self.make_mlp(layer_id, layer.mlp, root_input=self.layernorm_attrs["output_0"]) #modifies the self.layernorm_attrs['skip_input']
+
+        residual_add_name_1 = f"/model/layers.{layer_id}/residual_add/Add_1"
+        residual_add_inputs_1 = [self.layernorm_attrs['skip_input'], next_residual_input]
+        self.make_add(residual_add_name_1, residual_add_inputs_1, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+
+        self.layernorm_attrs["root_input"] = f"{residual_add_name_1}/output_0"
+        
+        if layer_id == self.num_layers - 1:
+            # Norm after last decoder layer of model (last layer --> norm)
+            self.layernorm_attrs["last_layernorm"] = True
+
+        # Assign output 0 of residual Add as skip input to next SkipLayerNorm
+        self.layernorm_attrs["skip_input"] = f"{residual_add_name_1}/output_0"
+
+
+
 def check_extra_options(kv_pairs):
     if "use_8bits_moe" in kv_pairs:
         assert(kv_pairs["use_8bits_moe"] == "1" or kv_pairs["use_8bits_moe"] == "0"), "use_8bits_moe must be 0 or 1."
@@ -2682,6 +2901,13 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             onnx_model = Phi3VModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Qwen2ForCausalLM":
             onnx_model = QwenModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "ChatGLMModel":
+            #TODO: @amd-sudo-sh: Encapsulate the config parsing in a better way
+            config.max_position_embeddings = config.seq_length # Max sequence length a model can handle
+            config.intermediate_size = config.ffn_hidden_size # Size of feed-forward network's hidden layer
+            config.num_hidden_layers = config.num_layers 
+            config.hidden_act = "swiglu"
+            onnx_model = ChatGLMModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         else:
             raise NotImplementedError(f"The {hf_name} model is not currently supported.")
 
