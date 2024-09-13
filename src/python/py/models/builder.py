@@ -2387,7 +2387,7 @@ class Phi3Mini128KModel(Phi3Mini4KModel):
     def make_position_ids_reformatting(self):
         if self.ep != "dml":
             super().make_position_ids_reformatting()
-            return
+            return None
 
         basename = "/model/pos_ids_reformat"
         reduce_max_name = f"{basename}/ReduceMax"
@@ -2410,7 +2410,7 @@ class Phi3Mini128KModel(Phi3Mini4KModel):
     def make_rotary_embedding_caches(self, rotemb, **kwargs):
         if self.ep != "dml":
             super().make_rotary_embedding_caches(rotemb, **kwargs)
-            return
+            return None
 
         # Now you can make all the DML specific changes here
         cos_cache_name = kwargs.get("cos_cache_name", "cos_cache")

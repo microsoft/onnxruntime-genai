@@ -34,7 +34,7 @@ def parse_args():
         "-e",
         "--execution_provider",
         default="cuda",
-        help="target execution provider to apply quanization. e.g. dml, cuda",
+        help="Target execution provider to apply quantization (e.g. dml, cuda)",
     )
 
     args = parser.parse_args()
