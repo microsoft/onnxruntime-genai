@@ -109,6 +109,10 @@ struct OgaSequences : OgaAbstract {
   }
 #endif
 
+  void PadSequence(int32_t pad_token_id, size_t seq_length, size_t sequence_index) {
+    OgaCheckResult(OgaSequencesPadSequence(this, pad_token_id, seq_length, sequence_index));
+  }
+
   static void operator delete(void* p) { OgaDestroySequences(reinterpret_cast<OgaSequences*>(p)); }
 };
 

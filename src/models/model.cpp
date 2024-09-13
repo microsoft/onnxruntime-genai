@@ -438,6 +438,7 @@ void Model::CreateSessionOptions() {
           device_type_ = DeviceType::DML;  // We use a DML allocator for input/output caches, but other tensors will use CPU tensors
 #endif
       } else if (provider_options.name == "qnn") {
+        session_options.AddConfigEntry("ep.share_ep_contexts", "1");
         std::unordered_map<std::string, std::string> opts;
         for (auto& option : provider_options.options) {
           opts.emplace(option.first, option.second);
