@@ -68,11 +68,9 @@ jobs:
 
     - name: Install the Python Wheel and Test Dependencies
       run: |
-        python -c "import platform; print(platform.machine()); print(platform.version()); print(platform.platform()); print(platform.system()); print(platform.processor()); print(platform.architecture())"
-        python -c "import sys; print(sys.version)"
         python -m pip install "numpy<2" coloredlogs flatbuffers packaging protobuf sympy pytest
         python -m pip install -i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ ort-nightly-qnn
-        python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl"))
+        python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
 
     - name: Run the Python Tests
       run: |

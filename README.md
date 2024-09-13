@@ -17,7 +17,7 @@ See documentation at https://onnxruntime.ai/docs/genai.
 |Model architectures|  Gemma <br/> Llama * <br/> Mistral + <br/>Phi (language + vision)<br/>Qwen <br/>|Whisper|Stable diffusion|
 |API| Python <br/>C# <br/>C/C++ <br/> Java ^ |Objective-C||
 |Platform| Linux <br/> Windows <br/>Mac ^ <br/>Android ^  ||iOS |||
-|Architecture|x86 <br/> x64 <br/> Arm64 ^||||
+|Architecture|x86 <br/> x64 <br/> Arm64 ~ ||||
 |Hardware Acceleration|CUDA<br/>DirectML<br/>|QNN <br/> ROCm |OpenVINO|
 |Features|| Interactive decoding <br/> Customization (fine-tuning)| Speculative decoding |
 
@@ -26,6 +26,8 @@ See documentation at https://onnxruntime.ai/docs/genai.
 \+ The Mistral model architecture supports similar model families such as Zephyr.
 
 \^ Requires build from source
+
+\~ Windows builds available, requires build from source for other platforms
 
 ## Installation
 

@@ -12,6 +12,10 @@ def _is_linux():
     return sys.platform.startswith("linux")
 
 
+def _is_macos():
+    return sys.platform.startswith("darwin")
+
+
 def add_onnxruntime_dependency(package_id: str):
     """Add the onnxruntime shared library dependency.
     
@@ -38,7 +42,7 @@ def add_onnxruntime_dependency(package_id: str):
             import ctypes
             _ = ctypes.CDLL(dml_path)
 
-    elif _is_linux():
+    elif _is_linux() or _is_macos():
         import importlib.util
         import ctypes
         import glob
@@ -50,11 +54,17 @@ def add_onnxruntime_dependency(package_id: str):
         # Load the onnxruntime shared library here since we can find the path in python with ease.
         # This avoids needing to know the exact path of the shared library from native code.
         ort_package_path = ort_package.submodule_search_locations[0]
-        ort_lib_path = glob.glob(os.path.join(ort_package_path, "capi", "libonnxruntime.so*"))
+        if _is_linux():
+            ort_lib_path = glob.glob(os.path.join(ort_package_path, "capi", "libonnxruntime.so*"))
+        elif _is_macos():
+            ort_lib_path = glob.glob(os.path.join(ort_package_path, "capi", "libonnxruntime*.dylib"))
         if not ort_lib_path:
             raise ImportError("Could not find the onnxruntime shared library.")
 
-        _ = ctypes.CDLL(ort_lib_path[0])
+        target_lib_path = ort_lib_path[0]
+        os.environ["ORT_LIB_PATH"] = target_lib_path
+
+        _ = ctypes.CDLL(target_lib_path)
 
 
 def add_cuda_dependency():

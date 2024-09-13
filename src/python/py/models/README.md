@@ -17,6 +17,7 @@ This folder contains the model builder for quickly creating optimized and quanti
     - [Exclude Embedding Layer](#exclude-embedding-layer)
     - [Exclude Language Modeling Head](#exclude-language-modeling-head)
     - [Enable Cuda Graph](#enable-cuda-graph)
+    - [Use 8 Bits Quantization in QMoE](#use-8-bits-quantization-in-qmoe)
   - [Unit Testing Models](#unit-testing-models)
     - [Option 1: Use the model builder directly](#option-1-use-the-model-builder-directly)
     - [Option 2: Edit the config.json file](#option-2-edit-the-configjson-file-on-disk-and-then-run-the-model-builder)
@@ -170,6 +171,18 @@ python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o p
 
 # From source:
 python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options enable_cuda_graph=1
+```
+
+#### Use 8 Bits Quantization in QMoE
+
+This scenario is for when you want to use 8-bit quantization for MoE layers. Default is using 4-bit quantization.
+
+```
+# From wheel:
+python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options use_8bits_moe=1
+
+# From source:
+python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options use_8bits_moe=1
 ```
 
 ### Unit Testing Models
