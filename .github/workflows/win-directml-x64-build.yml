@@ -74,14 +74,8 @@ jobs:
 
     - name: Move the files to the ort directory
       run: |
-        mkdir ort/lib
-        mkdir ort/include
-        mv $env:ort_dir\runtimes\win-x64\native\onnxruntime.dll ort\lib
-        mv $env:ort_dir\runtimes\win-x64\native\onnxruntime.lib ort\lib
         mv $env:dml_dir\bin\x64-win\DirectML.dll ort\lib
         mv $env:d3d12_dir\build\native\bin\x64\D3D12Core.dll ort\lib
-        mv $env:ort_dir\build\native\include\dml_provider_factory.h ort\include
-        mv $env:ort_dir\build\native\include\onnxruntime_c_api.h ort\include
         mv $env:dml_dir\include\DirectML.h ort\include
 
     - name: Configure CMake
