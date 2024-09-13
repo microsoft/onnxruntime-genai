@@ -531,10 +531,11 @@ class Model:
         self.make_value_info(output, TensorProto.INT64, shape=[])
 
     def make_split(self, name, inputs, dtype, shape, axis, num_splits):
+        #TODO: @amd-sudo-sh: Currently it supports num_splits = 2
         # Splits the input tensor into num_splits based on the axis
         outputs = [f"{name}/output_{i}" for i in range(num_splits)]
-        split = [num_splits for i in range(num_splits)]
-        self.make_node("Split", inputs=[inputs], outputs=outputs, name=name, axis=axis, split = split)
+        # split = [num_splits for i in range(num_splits)]
+        self.make_node("Split", inputs=[inputs], outputs=outputs, name=name, axis=axis)
         for output in outputs:
             self.make_value_info(output, dtype, shape=shape)
 
@@ -1836,12 +1837,15 @@ class Model:
             elif self.layer_id == self.num_layers and self.has_final_norm(module, model, model_name):
                 # SkipLayerNorm after last decoder layer (MatMul --> SkipLayerNorm)
                 print("Reading final norm")
-                # self.make_layernorm(self.layer_id, module, skip=True, simple=self.layernorm_attrs["simple"], location="final_norm")
-
+                print(self.layernorm_attrs["root_input"])
+                self.make_layernorm(self.layer_id, module, skip=False, simple=self.layernorm_attrs["simple"], location="final_norm")
+                self.layernorm_attrs["root_input"] = self.layernorm_attrs["output_0"]
+                print(self.layernorm_attrs["root_input"])
             elif (isinstance(module, torch.nn.Linear) and module.out_features == self.vocab_size) or (hasattr(model, "lm_head") and module == model.lm_head):
                 # Checks (Hugging Face logic) or (GGUF logic)
                 if not self.exclude_lm_head:
                     # Language modeling head (SkipLayerNorm --> logits)
+                    print(self.layernorm_attrs["root_input"])
                     print("Reading LM head")
                     self.make_lm_head(module)
 
@@ -2687,8 +2691,11 @@ class ChatGLMModel(Model):
         # self.layernorm_attrs["first_layernorm"] = False # Manually use Residuals to no SkipLayerNorms
         self.layernorm_attrs["simple"] = True # RMSNorm in ChatGLM
         self.rotemb_attrs["num_heads"] = self.num_attn_heads
+        self.rotemb_attrs["partial_rotary_factor"] = 0.5 # Line 755 of modeling_chatglm.py check self.rotary_pos_emb declaration
         self.rotemb_attrs["rotary_embedding_dim"] = int(self.head_size * self.rotemb_attrs["partial_rotary_factor"])
         self.mlp_attrs["use_proj"], self.mlp_attrs["use_fc"] = True, False
+        self.attention_attrs["use_rotemb_in_attn"] = True
+        self.attention_attrs["use_packed_matmul"] = True
         self.attention_attrs["op_type"] = "GroupQueryAttention" if self.multi_query_attention else self.attention_attrs["op_type"]
         
     def make_rotary_embedding(self, rotemb, name, root_input, **kwargs):
@@ -2700,7 +2707,7 @@ class ChatGLMModel(Model):
         hidden_size = self.hidden_size
         num_attention_heads = self.num_attn_heads
         kv_channels = self.kv_channels
-        head_size = self.head_size
+        # head_size = self.head_size
 
         projection_size = kv_channels * num_attention_heads
         hidden_size_per_attention_head = projection_size // num_attention_heads
@@ -2723,10 +2730,10 @@ class ChatGLMModel(Model):
                     multi_query_group_num * hidden_size_per_attention_head,
                     multi_query_group_num * hidden_size_per_attention_head,
                 ],
-                dim=1
+                dim=-1
             )
         else:
-            q_weight, k_weight, v_weight = qkv_weight.chunk(3, dim=1)
+            q_weight, k_weight, v_weight = qkv_weight.chunk(3, dim=-1)
 
         # Reshape the QKV bias if it exists
         if attention.query_key_value.bias is not None:
@@ -2782,17 +2789,12 @@ class ChatGLMModel(Model):
         #              |
         #        dense_4h_to_h  
         # Make MatMul nodes
-        # gate_basename = f"/model/layers.{layer_id}/mlp/gate_proj/MatMul"
-        # gate_name = self.make_matmul(mlp.gate_proj, gate_basename, root_input)
+        
         up_basename = f"/model/layers.{layer_id}/mlp/dense_h_to_4h/MatMul"
         up_name = self.make_matmul(mlp.dense_h_to_4h, up_basename, root_input)  
         # Make activation node(s)
         act_fn_name = self.make_activation(layer_id, root_input=f"{up_name}/output_0")  
-        # # Make Mul node after activation
-        # mul_name = f"/model/layers.{layer_id}/mlp/Mul"
-        # mul_inputs = [f"{act_fn_name}/output_0", f"{up_name}/output_0"]
-        # self.make_mul(mul_name, mul_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size]) 
-        # Make output MatMul node
+
         down_basename = f"/model/layers.{layer_id}/mlp/dense_4h_to_h/MatMul"
         down_name = self.make_matmul(mlp.dense_4h_to_h, down_basename, f"{act_fn_name}/output_0")   
         # Assign output 0 of previous MatMul as skip input to next SkipLayerNorm
@@ -2813,7 +2815,7 @@ class ChatGLMModel(Model):
         self.make_add(residual_add_name_0, residual_add_inputs_0, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
         
         self.layernorm_attrs["root_input"] = f"{residual_add_name_0}/output_0"
-        self.make_layernorm(layer_id, layer.input_layernorm, skip=False, simple=self.layernorm_attrs["simple"], location="middle")
+        self.make_layernorm(layer_id, layer.input_layernorm, skip=False, simple=self.layernorm_attrs["simple"], location="post_attention")
 
         self.make_mlp(layer_id, layer.mlp, root_input=self.layernorm_attrs["output_0"]) #modifies the self.layernorm_attrs['skip_input']
 
