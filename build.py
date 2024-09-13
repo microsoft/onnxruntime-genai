@@ -554,11 +554,6 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         command += ["-A", "ARM64EC"]
 
     if args.arm64 or args.arm64ec:
-        # Build zlib from source. Otherwise zlib from Python might be used.
-        # And architecture mismatch will happen.
-        command += ["-D", "BUILD_ZLIB=ON"]
-        command += ["-DOPENCV_SKIP_SYSTEM_PROCESSOR_DETECTION=ON"]
-
         if args.test:
             log.warning(
                 "Cannot test on host build machine for cross-compiled "
