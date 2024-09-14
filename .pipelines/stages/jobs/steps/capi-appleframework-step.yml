@@ -10,6 +10,8 @@ steps:
   path: onnxruntime-genai
   submodules: recursive
 
+- template: utils/set-genai-version.yml
+
 - template: utils/set-nightly-build-option-variable.yml
 
 - template: utils/download-ort.yml
