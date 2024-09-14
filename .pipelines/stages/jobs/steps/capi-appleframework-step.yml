@@ -12,13 +12,9 @@ steps:
 
 - template: utils/set-nightly-build-option-variable.yml
 
-- powershell: |
-    New-Item -ItemType Directory -Path $(Build.Repository.LocalPath)\ort\lib -Force
-    $tmp = New-TemporaryFile
-    Invoke-WebRequest -Uri 'https://download.onnxruntime.ai/pod-archive-onnxruntime-c-1.19.2.zip'
-    $tmp | Expand-Archive -DestinationPath $(Build.Repository.LocalPath)\ort\lib
-  displayName: 'Download ORT xcframework'
-  workingDirectory: '$(Build.Repository.LocalPath)'
+- template: utils/download-ort.yml
+  parameters:
+    archiveType: 'zip'
 
 - script: |
     python3 tools/ci_build/github/apple/build_apple_framework.py \

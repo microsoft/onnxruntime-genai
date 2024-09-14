@@ -37,6 +37,11 @@ parameters:
   type: boolean
   default: false
 
+- name: enable_apple_framework
+  displayName: 'Whether Apple framework for iOS & macOS is built.'
+  type: boolean
+  default: false
+
 - name: ort_version
   type: string
 

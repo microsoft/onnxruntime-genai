@@ -14,6 +14,7 @@ parameters:
   - 'linux'
   - 'win'
   - 'osx'
+  - 'ios'
 - name: build_config
   type: string
   default: 'release'
@@ -141,6 +142,11 @@ jobs:
         target: 'onnxruntime-genai'
         arch: ${{ parameters.arch }}
         ep: ${{ parameters.ep }}
+        build_config: ${{ parameters.build_config }}
+
+  - ${{ if eq(parameters.os, 'ios') }}:
+    - template: steps/capi-appleframework-step.yml
+      parameters:
         build_config: ${{ parameters.build_config }}
 
   - template: steps/compliant-and-cleanup-step.yml

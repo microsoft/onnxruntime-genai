@@ -34,6 +34,11 @@ parameters:
   type: boolean
   default: true
 
+- name: enable_apple_framework
+  displayName: 'Whether Apple framework for iOS & macOS is built.'
+  type: boolean
+  default: false
+
 - name: ort_version
   type: string
 - name: ort_cuda_version
@@ -57,6 +62,7 @@ stages:
           enable_win_cpu: ${{ parameters.enable_win_cpu }}
           enable_win_arm64: ${{ parameters.enable_win_arm64 }}
           enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
+          enable_apple_framework: ${{ parameters.enable_apple_framework }}
     - ${{ if or(eq(parameters.enable_linux_cuda, true), eq(parameters.enable_win_cuda, true)) }}:
       - template: jobs/nuget-packaging-job.yml
         parameters:

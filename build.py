@@ -536,7 +536,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
 
     if args.macos == "Catalyst":
         macabi_target = f"{args.osx_arch}-apple-ios{args.apple_deploy_target}-macabi"
-        cmake_args += [
+        command += [
             "-DCMAKE_CXX_COMPILER_TARGET=" + macabi_target,
             "-DCMAKE_C_COMPILER_TARGET=" + macabi_target,
             "-DCMAKE_CC_COMPILER_TARGET=" + macabi_target,

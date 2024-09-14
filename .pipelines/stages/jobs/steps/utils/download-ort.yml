@@ -4,6 +4,16 @@ parameters:
 - name: ep
   type: string
   default: cpu
+
+variables:
+- name: ort_native_package_name
+  ${{ if eq(parameters.os, 'ios') }}:
+    value: 'ios'
+  ${{ if eq(parameters.os, 'android') }}:
+      value: 'android'
+  ${{ else }}:
+      value: $(os)-$(arch)
+
 steps:
 
 - task: DownloadPackage@1
@@ -25,7 +35,7 @@ steps:
     displayName: Unzip OnnxRuntime
   - task: CopyFiles@2
     inputs:
-      SourceFolder: '$(Build.Repository.LocalPath)/ort/runtimes/$(os)-$(arch)/native'
+      SourceFolder: '$(Build.Repository.LocalPath)/ort/runtimes/$(ort_native_package_name)/native'
       TargetFolder: '$(Build.Repository.LocalPath)/ort/lib'
 - ${{ else }}:
   - script: |

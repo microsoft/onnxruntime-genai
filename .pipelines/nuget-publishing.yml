@@ -38,6 +38,11 @@ parameters:
   type: boolean
   default: true
 
+- name: enable_apple_framework
+  displayName: 'Whether Apple framework for iOS & macOS is built.'
+  type: boolean
+  default: false
+
 - name: ort_version
   displayName: 'OnnxRuntime version'
   type: string
@@ -89,6 +94,7 @@ stages:
     enable_win_dml: ${{ parameters.enable_win_dml }}
     enable_win_arm64: ${{ parameters.enable_win_arm64 }}
     enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
+    enable_apple_framework: ${{ parameters.enable_apple_framework }}
     ort_version: ${{ parameters.ort_version }}
     ort_cuda_version: ${{ parameters.ort_cuda_version }}
     ort_dml_version: ${{ parameters.ort_dml_version }}
@@ -104,6 +110,7 @@ stages:
     enable_win_dml: ${{ parameters.enable_win_dml }}
     enable_win_arm64: ${{ parameters.enable_win_arm64 }}
     enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
+    enable_apple_framework: ${{ parameters.enable_apple_framework }}
     ort_version: ${{ parameters.ort_version }}
     ort_cuda_version: ${{ parameters.ort_cuda_version }}
     ort_dml_version: ${{ parameters.ort_dml_version }}
