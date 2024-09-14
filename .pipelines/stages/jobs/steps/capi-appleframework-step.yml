@@ -1,0 +1,43 @@
+parameters:
+- name: build_config
+  type: string
+  default: 'release'
+
+steps:
+
+- checkout: self
+  clean: true
+  path: onnxruntime-genai
+  submodules: recursive
+
+- template: utils/set-nightly-build-option-variable.yml
+
+- powershell: |
+    New-Item -ItemType Directory -Path $(Build.Repository.LocalPath)\ort\lib -Force
+    $tmp = New-TemporaryFile
+    Invoke-WebRequest -Uri 'https://download.onnxruntime.ai/pod-archive-onnxruntime-c-1.19.2.zip'
+    $tmp | Expand-Archive -DestinationPath $(Build.Repository.LocalPath)\ort\lib
+  displayName: 'Download ORT xcframework'
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
+- script: |
+    python3 tools/ci_build/github/apple/build_apple_framework.py \
+          --build_dir "$(Build.BinariesDirectory)/apple_framework" \
+          tools/ci_build/github/apple/default_full_ios_framework_build_settings.json
+
+    mkdir $(Build.BinariesDirectory)/artifacts
+    mkdir -p $(Build.BinariesDirectory)/artifacts_staging/onnxruntime-genai-xcframework-$(genai_version)
+    cp -R $(Build.BinariesDirectory)/apple_framework/framework_out/onnxruntime-genai.xcframework \
+          $(Build.BinariesDirectory)/artifacts_staging/onnxruntime-genai-xcframework-$(genai_version)
+    pushd $(Build.BinariesDirectory)/artifacts_staging
+    zip -vr $(Build.BinariesDirectory)/artifacts/onnxruntime_xcframework.zip \
+          onnxruntime-genai-xcframework-$(genai_version)
+    popd
+  displayName: 'Build Apple XCFramework'
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
+- task: PublishBuildArtifacts@1
+  displayName: 'Publish Artifact: ONNXRuntime XCFramework'
+  inputs:
+    ArtifactName: capi-onnxruntime-genai-xcframework
+    PathtoPublish: '$(Build.ArtifactStagingDirectory)/artifacts'
