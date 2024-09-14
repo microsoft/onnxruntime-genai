@@ -19,7 +19,7 @@ steps:
 - script: |
     python3 tools/ci_build/github/apple/build_apple_framework.py \
           --build_dir "$(Build.BinariesDirectory)/apple_framework" \
-          tools/ci_build/github/apple/default_full_ios_framework_build_settings.json
+          tools/ci_build/github/apple/default_full_apple_framework_build_settings.json
 
     mkdir $(Build.BinariesDirectory)/artifacts
     mkdir -p $(Build.BinariesDirectory)/artifacts_staging/onnxruntime-genai-xcframework-$(genai_version)

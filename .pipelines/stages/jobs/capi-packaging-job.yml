@@ -104,6 +104,7 @@ jobs:
   workspace:
     clean: all
   steps:
+  - template: steps/utils/set-genai-version.yml
   - script: |
       MKDIR $(Agent.ToolsDirectory)\Python\3.11.0\arm64
       XCOPY /s /y /h /e /c /q "C:\Python\Python311\*.*" $(Agent.ToolsDirectory)\Python\3.11.0\arm64\
