@@ -118,5 +118,7 @@ stages:
     - template: jobs/capi-packaging-job.yml
       parameters:
         os: 'ios'
+        ep: 'cpu'
+        arch: 'arm64'
         ort_version: ${{ parameters.ort_version }}
         build_config: ${{ parameters.build_config }}
