@@ -13,6 +13,8 @@ parameters:
   type: boolean
 - name: enable_macos_cpu
   type: boolean
+- name: enable_apple_framework
+  type: boolean
 - name: ort_version
   type: string
 - name: ort_cuda_version
@@ -112,7 +114,7 @@ stages:
         os: 'osx'
         build_config: ${{ parameters.build_config }}
 
-  - ${{ if eq(parameters.enable_macos_cpu, true) }}:
+  - ${{ if eq(parameters.enable_apple_framework, true) }}:
     - template: jobs/capi-packaging-job.yml
       parameters:
         os: 'ios'
