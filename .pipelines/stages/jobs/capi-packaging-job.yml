@@ -80,7 +80,7 @@ jobs:
   - name: ort_native_package_path
     ${{ if eq(parameters.os, 'ios') }}:
       value: 'ios'
-    ${{ if eq(parameters.os, 'android') }}:
+    ${{ elseif eq(parameters.os, 'android') }}:
       value: 'android'
     ${{ else }}:
       value: ${{ parameters.os }}-${{ parameters.arch }}
