@@ -6,6 +6,7 @@ from __future__ import annotations
 import platform
 import shutil
 from os import PathLike, listdir
+from os.path import isfile
 from pathlib import Path
 
 import requests
@@ -22,7 +23,7 @@ def _download_ort(
     def _lib_path():
         plat = "linux" if is_linux() else "win" if is_windows() else "osx"
         mach = None
-        if platform.machine() == "x86_64":
+        if platform.machine() == "x86_64" or platform.machine() == "AMD64":
             mach = "x64"
         elif platform.machine() == "aarch64" or platform.machine() == "arm64":
             mach = "arm64"
@@ -31,7 +32,7 @@ def _download_ort(
                 f"Unsupported machine architecture: {platform.machine()}"
             )
 
-        return destination_dir / "runtimes" / (plat + "-" + mach) / "native"
+        return destination_dir / "ort" / "runtimes" / (plat + "-" + mach) / "native"
 
     package_name = None
     if use_cuda:
@@ -68,7 +69,8 @@ def _download_ort(
     with open(package_path, "wb") as f:
         f.write(requests.get(package_url).content)
 
-    shutil.unpack_archive(package_path, destination_dir)
+    unpacked_dir = destination_dir / "ort"
+    shutil.unpack_archive(package_path, unpacked_dir)
 
     return _lib_path()
 
@@ -76,7 +78,7 @@ def _download_ort(
 def _download_dml(destination_dir: PathLike):
     def _lib_path():
         mach = None
-        if platform.machine() == "x86_64":
+        if platform.machine() == "x86_64" or platform.machine() == "AMD64":
             mach = "x64"
         elif platform.machine() == "aarch64" or platform.machine() == "arm64":
             mach = "arm64"
@@ -85,14 +87,7 @@ def _download_dml(destination_dir: PathLike):
                 f"Unsupported machine architecture: {platform.machine()}"
             )
 
-        return (
-            destination_dir
-            / "bin"
-            / "native"
-            / "bin"
-            / (mach + "-win")
-            / "DirectML.dll"
-        )
+        return destination_dir / "dml" / "bin" / (mach + "-win") / "DirectML.dll"
 
     dml_version = "1.15.2"
     dml_package_name = "Microsoft.AI.DirectML"
@@ -108,14 +103,33 @@ def _download_dml(destination_dir: PathLike):
     with open(package_path, "wb") as f:
         f.write(requests.get(dml_package_url).content)
 
-    shutil.unpack_archive(package_path, destination_dir)
+    unpacked_dir = destination_dir / "dml"
+    shutil.unpack_archive(package_path, unpacked_dir)
 
     return _lib_path()
 
 
 def _download_d3d12(destination_dir: PathLike):
     def _lib_path():
-        return destination_dir / "build" / "Direct3D" / "lib" / "x64"
+        mach = None
+        if platform.machine() == "x86_64" or platform.machine() == "AMD64":
+            mach = "x64"
+        elif platform.machine() == "aarch64" or platform.machine() == "arm64":
+            mach = "arm64"
+        else:
+            raise NotImplementedError(
+                f"Unsupported machine architecture: {platform.machine()}"
+            )
+
+        return (
+            destination_dir
+            / "d3d12"
+            / "build"
+            / "native"
+            / "bin"
+            / mach
+            / "D3D12Core.dll"
+        )
 
     d3d12_version = "1.614.1"
     d3d12_package_name = "Microsoft.Direct3D.D3D12"
@@ -131,7 +145,8 @@ def _download_d3d12(destination_dir: PathLike):
     with open(package_path, "wb") as f:
         f.write(requests.get(d3d12_package_url).content)
 
-    shutil.unpack_archive(package_path, destination_dir)
+    unpacked_dir = destination_dir / "d3d12"
+    shutil.unpack_archive(package_path, unpacked_dir)
 
     return _lib_path()
 
@@ -146,7 +161,8 @@ def download_dependencies(
     ort_lib_dir = _download_ort(use_cuda, use_rocm, use_dml, dependencies_dir)
     libs = listdir(ort_lib_dir)
     for file_name in libs:
-        shutil.copy(Path(ort_lib_dir) / file_name, destination_dir)
+        if isfile(Path(ort_lib_dir) / file_name):
+            shutil.copy(Path(ort_lib_dir) / file_name, destination_dir)
 
     if use_dml:
         dml_lib_path = _download_dml(dependencies_dir)
