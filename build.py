@@ -347,18 +347,16 @@ def _create_env(args: argparse.Namespace):
     return env
 
 
-def _get_csharp_properties(args: argparse.Namespace):
+def _get_csharp_properties(args: argparse.Namespace, ort_lib_dir: Path):
     # Tests folder does not have a sln file. We use the csproj file to build and test.
     # The csproj file requires the platform to be AnyCPU (not "Any CPU")
     configuration = f"/p:Configuration={args.config}"
     platform = "/p:Platform=Any CPU"
     # need an extra config on windows as the actual build output is in the original build dir / config / config
     native_lib_path = f"/p:NativeBuildOutputDir={str(args.build_dir / args.config) if util.is_windows() else str(args.build_dir)}"
+    ort_lib_path = f"/p:OrtLibDir={ort_lib_dir}"
 
-    props = [configuration, platform, native_lib_path]
-
-    if args.ort_home:
-        props.append(f"/p:OrtHome={args.ort_home}")
+    props = [configuration, platform, native_lib_path, ort_lib_path]
 
     return props
 
@@ -549,12 +547,18 @@ def build(args: argparse.Namespace, env: dict[str, str]):
 
     util.run(make_command, env=env)
 
+    lib_dir = args.build_dir
+    if not args.ort_home:
+        _ = util.download_dependencies(args.use_cuda, args.use_rocm, args.use_dml, lib_dir)
+    else:
+        lib_dir = args.ort_home / "lib"
+
     if args.build_csharp:
         dotnet = str(_resolve_executable_path("dotnet"))
 
         # Build the library
         csharp_build_command = [dotnet, "build", ".",]
-        csharp_build_command += _get_csharp_properties(args)
+        csharp_build_command += _get_csharp_properties(args, ort_lib_dir=lib_dir)
         util.run(csharp_build_command, cwd=REPO_ROOT / "src" / "csharp")
         util.run(csharp_build_command, cwd=REPO_ROOT / "test" / "csharp")
 
@@ -563,13 +567,19 @@ def test(args: argparse.Namespace, env: dict[str, str]):
     """
     Run the tests.
     """
+    lib_dir = args.build_dir / "test"
+    if not args.ort_home:
+        _ = util.download_dependencies(args.use_cuda, args.use_rocm, args.use_dml, lib_dir)
+    else:
+        lib_dir = args.ort_home / "lib"
+
     ctest_cmd = [str(args.ctest_path), "--build-config", args.config, "--verbose", "--timeout", "10800"]
-    util.run(ctest_cmd, cwd=str(args.build_dir))
+    util.run(ctest_cmd, cwd=str(args.build_dir / "test"))
 
     if args.build_csharp:
         dotnet = str(_resolve_executable_path("dotnet"))
         csharp_test_command = [dotnet, "test"]
-        csharp_test_command += _get_csharp_properties(args)
+        csharp_test_command += _get_csharp_properties(args, ort_lib_dir=lib_dir)
         util.run(csharp_test_command, env=env, cwd=str(REPO_ROOT / "test" / "csharp"))
 
     if args.android:
