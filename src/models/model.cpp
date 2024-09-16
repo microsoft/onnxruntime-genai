@@ -183,25 +183,6 @@ std::vector<std::string> Tokenizer::DecodeBatch(std::span<const int32_t> sequenc
   return strings;
 }
 
-std::vector<int32_t> Tokenizer::GetDecoderPromptIds(size_t batch_size, const std::string& language,
-                                                    const std::string& task, int32_t no_timestamps) const {
-  ort_extensions::OrtxObjectPtr<OrtxTokenId2DArray> prompt_ids;
-  CheckResult(OrtxGetDecoderPromptIds(tokenizer_, batch_size, language.c_str(),
-                                      task.c_str(), no_timestamps, ort_extensions::ptr(prompt_ids)));
-
-  std::vector<std::vector<int32_t>> tokens_vector;
-  std::vector<std::span<const int32_t>> span_sequences;
-  for (size_t i = 0; i < batch_size; i++) {
-    const extTokenId_t* tokens = nullptr;
-    size_t token_count = 0;
-    CheckResult(OrtxTokenId2DArrayGetItem(prompt_ids.get(), i, &tokens, &token_count));
-    tokens_vector.emplace_back(tokens, tokens + token_count);
-    span_sequences.emplace_back(tokens_vector.back());
-  }
-
-  return PadInputs(span_sequences, pad_token_id_);
-}
-
 int32_t Tokenizer::TokenToTokenId(const char* token) const {
   extTokenId_t token_id;
   CheckResult(OrtxConvertTokenToId(tokenizer_, token, &token_id));
