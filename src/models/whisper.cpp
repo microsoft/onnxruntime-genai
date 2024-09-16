@@ -416,6 +416,8 @@ void Whisper_State::Finalize() {
 }
 
 OrtValue* Whisper_State::GetOutput(const char* name) {
+  // cross_qk_final_ is an onnxruntime-genai maintained buffer that
+  // is not part of the model's outputs, so we need to check for it here.
   if (std::strcmp("cross_qk", name) == 0) {
     return cross_qk_final_.get();
   }
