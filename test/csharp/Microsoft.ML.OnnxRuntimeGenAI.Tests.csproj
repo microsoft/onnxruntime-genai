@@ -22,8 +22,7 @@
     <!--internal build related properties for Windows -->
     <OnnxRuntimeGenAIBuildDirectory>$(TestsSrcRoot)\..\build</OnnxRuntimeGenAIBuildDirectory>
     <NativeBuildOutputDir>$(OnnxRuntimeGenAIBuildDirectory)\$(Configuration)</NativeBuildOutputDir>
-    <OrtHome>$(TestsSrcRoot)\..\ort</OrtHome>
-    <OnnxruntimeLibDirectory>$(OrtHome)\lib</OnnxruntimeLibDirectory>
+    <OrtLibDir></OrtLibDir>
   </PropertyGroup>
 
   <ItemGroup>
@@ -32,15 +31,15 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
     </None>
-    <None Condition="Exists('$(NativeBuildOutputDir)\onnxruntime.dll')" Include="$(NativeBuildOutputDir)\onnxruntime.dll">
+    <None Condition="Exists('$(OrtLibDir)\onnxruntime.dll')" Include="$(OrtLibDir)\onnxruntime.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
     </None>
-    <None Condition="Exists('$(NativeBuildOutputDir)\onnxruntime_providers_shared.dll')" Include="$(NativeBuildOutputDir)\onnxruntime_providers_shared.dll">
+    <None Condition="Exists('$(OrtLibDir)\onnxruntime_providers_shared.dll')" Include="$(OrtLibDir)\onnxruntime_providers_shared.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
     </None>
-    <None Condition="Exists('$(NativeBuildOutputDir)\onnxruntime_providers_cuda.dll')" Include="$(NativeBuildOutputDir)\onnxruntime_providers_cuda.dll">
+    <None Condition="Exists('$(OrtLibDir)\onnxruntime_providers_cuda.dll')" Include="$(OrtLibDir)\onnxruntime_providers_cuda.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
     </None>
@@ -54,13 +53,23 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
     </None>
-    <None Condition="Exists('$(NativeBuildOutputDir)\libonnxruntime_providers_shared.so')" Include="$(NativeBuildOutputDir)\libonnxruntime_providers_shared.so">
+    <None Condition="Exists('$(OrtLibDir)\libonnxruntime_providers_shared.so')" Include="$(OrtLibDir)\libonnxruntime_providers_shared.so">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
     </None>
-    <None Condition="Exists('$(NativeBuildOutputDir)\libonnxruntime_providers_cuda.so')" Include="$(NativeBuildOutputDir)\libonnxruntime_providers_cuda.so">
+    <None Condition="Exists('$(OrtLibDir)\libonnxruntime_providers_cuda.so')" Include="$(OrtLibDir)\libonnxruntime_providers_cuda.so">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
+    </None>
+
+    <!-- macOS -->
+    <None Condition="Exists('$(NativeBuildOutputDir)\libonnxruntime-genai.dylib')" Include="$(NativeBuildOutputDir)\libonnxruntime-genai.dylib">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        <Visible>false</Visible>
+    </None>
+    <None Condition="Exists('$(OrtLibDir)\libonnxruntime.dylib')" Include="$(OrtLibDir)\libonnxruntime.dylib">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        <Visible>false</Visible>
     </None>
 
     <None Include="$(TestsSrcRoot)\test_models\**">

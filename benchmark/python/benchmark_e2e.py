@@ -59,9 +59,9 @@ def monitor_cpu_memory():
     global peak_cpu_memory
 
     while not stop_monitoring:
-        current_used_memory = psutil.virtual_memory().used
+        current_used_memory = round(psutil.virtual_memory().used / 1024**3, 2)
         with peak_memory_lock:
-            peak_cpu_memory = round(max(peak_cpu_memory, current_used_memory) / 1024**3, 2)
+            peak_cpu_memory = max(peak_cpu_memory, current_used_memory)
         time.sleep(0.1)
 
 # Use input model to generate prompt

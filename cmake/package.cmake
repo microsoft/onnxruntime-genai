@@ -47,7 +47,11 @@ elseif (LINUX)
     set(CPACK_PACKAGE_FILE_NAME "onnxruntime-genai-${VERSION_INFO}-linux-arm64")
   endif ()
 elseif (APPLE)
-  set(CPACK_PACKAGE_FILE_NAME "onnxruntime-genai-${VERSION_INFO}-osx-arm64")
+  if (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64")
+    set(CPACK_PACKAGE_FILE_NAME "onnxruntime-genai-${VERSION_INFO}-osx-x64")
+  else ()
+    set(CPACK_PACKAGE_FILE_NAME "onnxruntime-genai-${VERSION_INFO}-osx-arm64")
+  endif()
 endif ()
 
 if (WIN32)
@@ -63,9 +67,5 @@ install(FILES
   "${PROJECT_SOURCE_DIR}/SECURITY.md"
   "${PROJECT_SOURCE_DIR}/LICENSE"
   DESTINATION .)
-
-install(FILES
-  ${onnxruntime_libs}
-  DESTINATION lib)
 
 include(CPack)

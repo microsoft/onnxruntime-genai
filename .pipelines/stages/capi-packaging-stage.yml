@@ -11,6 +11,8 @@ parameters:
   type: boolean
 - name: enable_linux_cuda
   type: boolean
+- name: enable_macos_cpu
+  type: boolean
 - name: ort_version
   type: string
 - name: ort_cuda_version
@@ -91,4 +93,21 @@ stages:
         ep: 'cuda'
         ort_version: ${{ parameters.ort_cuda_version }}
         os: 'linux'
+        build_config: ${{ parameters.build_config }}
+
+  - ${{ if eq(parameters.enable_macos_cpu, true) }}:
+    - template: jobs/capi-packaging-job.yml
+      parameters:
+        arch: 'x64'
+        ep: 'cpu'
+        ort_version: ${{ parameters.ort_version }}
+        os: 'osx'
+        build_config: ${{ parameters.build_config }}
+
+    - template: jobs/capi-packaging-job.yml
+      parameters:
+        arch: 'arm64'
+        ep: 'cpu'
+        ort_version: ${{ parameters.ort_version }}
+        os: 'osx'
         build_config: ${{ parameters.build_config }}
