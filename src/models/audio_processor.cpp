@@ -4,7 +4,6 @@
 #include "../generators.h"
 #include "model.h"
 
-
 namespace Generators {
 
 namespace {
