@@ -220,7 +220,6 @@ __global__ void UpdateCacheIndirectionKernel(int32_t* tgt_indir_cache,
   } else {
     // For all other time-steps, we look up the source indirection, to
     // see which beam it came from based on the `src_beam`.
-    // printf("else branch\n");
     const int src_offset = batch_id * beam_width * max_seq_length + src_beam * max_seq_length + time_step;
     tgt_indir_cache[tgt_offset] = src_indir_cache[src_offset];
   }
