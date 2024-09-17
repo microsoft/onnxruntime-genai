@@ -222,10 +222,11 @@ RoamingArray<float> DecoderState::Run(int current_length, RoamingArray<int32_t> 
   return logits_.Get();
 }
 
-void DecoderState::UpdateInputsOutputs(int current_length, RoamingArray<int32_t> beam_indices) {
-  position_inputs_.Update(current_length);
-  kv_cache_.Update(beam_indices.GetCPU(), current_length);
-  logits_.Update();
+void DecoderState::UpdateInputsOutputs(int total_length, RoamingArray<int32_t> beam_indices) {
+  size_t new_length = input_ids_.GetShape()[1];
+  position_inputs_.Update(total_length, new_length);
+  kv_cache_.Update(beam_indices.GetCPU(), total_length);
+  logits_.Update(new_length);
 }
 
 MultiModalPipelineState::MultiModalPipelineState(const MultiModalVisionModel& model,
@@ -256,7 +257,10 @@ RoamingArray<float> MultiModalPipelineState::Run(int current_length, RoamingArra
       vision_state_->Run(current_length, next_tokens, next_indices);
 
       // Run the select logic
-      Select(model_, params_->input_ids, embedding_state_->inputs_embeds_.Get(),
+      // TODO(aciddelgado): this may not work logically, done to get it to compile for decoder_only
+      const auto* input_ids = decoder_state_->input_ids_.Get()->GetTensorData<int>();
+      auto input_ids_span = std::span<const int32_t>(input_ids, decoder_state_->input_ids_.GetShape()[1]);
+      Select(model_, input_ids_span, embedding_state_->inputs_embeds_.Get(),
              vision_state_->visual_features_.get(), vision_state_->num_image_tokens_,
              params_->hidden_size, params_->device_type, params_->cuda_stream);
     }

@@ -4,6 +4,7 @@
 
 namespace Generators {
 
+// TODO(aciddelgado): fix alternative kv cache implementations
 KV_Cache_Combined::KV_Cache_Combined(const Model& model, State& state)
     : model_{model},
       state_{state},
@@ -25,7 +26,8 @@ KV_Cache_Combined::KV_Cache_Combined(const Model& model, State& state)
   type_ = model_.session_info_->GetInputDataType(input_name_strings_[0]);
 
   empty_past_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
-  shape_[3] = state_.params_->sequence_length;
+  // shape_[3] = state_.params_->sequence_length;
+  shape_[3] = 0;
 
   for (int i = 0; i < layer_count_; ++i) {
     presents_.push_back(OrtValue::CreateTensor(*model.allocator_device_, shape_, type_));
@@ -144,23 +146,24 @@ KV_Cache::KV_Cache(const Model& model, State& state)
   empty_past_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
 
   // Set the size after empty_past_ has been created with 0 for this field
-  if (past_present_share_buffer_)
+  if (past_present_share_buffer_) {
     shape_[2] = state_.params_->search.max_length;
-  else
-    shape_[2] = state_.params_->sequence_length;
+  // else
+  //   shape_[2] = state_.params_->sequence_length;
 
-  if (state_.GetCapturedGraphInfo()) {
-    assert(past_present_share_buffer_);
-    sb_kv_caches_.reserve(layer_count_ * 2);
-    for (int i = 0; i < layer_count_ * 2; ++i) {
-      sb_kv_caches_.push_back(state_.GetCapturedGraphInfo()->sb_kv_caches_[i].get());
+    if (state_.GetCapturedGraphInfo()) {
+      sb_kv_caches_.reserve(layer_count_ * 2);
+      for (int i = 0; i < layer_count_ * 2; ++i) {
+        sb_kv_caches_.push_back(state_.GetCapturedGraphInfo()->sb_kv_caches_[i].get());
+      }
     }
-  }
 
-  for (int i = 0; i < layer_count_ * 2; ++i) {
-    presents_.push_back(
-        sb_kv_caches_.empty() ? OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_)
-                              : sb_kv_caches_[i]->CreateTensorOnStaticBuffer(shape_, type_));
+    // THIS USED TO BE DONE EVEN WITHOUT PAST_PRESENT_SHARE_BUFFER, MEANING DO IT ON FIRST UPDATE
+    for (int i = 0; i < layer_count_ * 2; ++i) {
+      presents_.push_back(
+          sb_kv_caches_.empty() ? OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_)
+                                : sb_kv_caches_[i]->CreateTensorOnStaticBuffer(shape_, type_));
+    }
   }
 }
 
@@ -192,74 +195,79 @@ void KV_Cache::Add() {
   }
 }
 
-void KV_Cache::Update(std::span<const int32_t> beam_indices, int current_length) {
+// TODO(aciddelgado): consider 0-initializing pasts somewhere
+void KV_Cache::Update(std::span<const int32_t> beam_indices, int total_length) {
   // If we're sharing past & present buffers there is nothing to do here, so early exit
   if (past_present_share_buffer_)
     return;
 
-  for (int i = 0; i < layer_count_ * 2; i++) {
-    if (beam_indices.empty()) {
-      pasts_[i] = std::move(presents_[i]);
-    } else {
-      PickPastState(beam_indices, i);
-    }
-    state_.inputs_[input_index_ + i] = pasts_[i].get();
-  }
-
-  shape_[2] = current_length;
-  for (int i = 0; i < layer_count_ * 2; i++) {
-    presents_[i] = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
-    state_.outputs_[output_index_ + i] = presents_[i].get();
-  }
-}
-
-void KV_Cache::UpdatePresent(int current_length) {
-  // Used for speculative decoding main generator.
-  // This can be later refactored to merge with tensor allocation during initialization.
-  if (shape_[2] == current_length)
-    return;
-  shape_[2] = current_length; // TODO(aciddelgado): is it ok to set this if past_present_share_buffer_ is true?
-  // If we're sharing past & present buffers there is nothing to do here, so early exit
-  if (past_present_share_buffer_)
-    return;
-  for (int i = 0; i < layer_count_ * 2; i++) {
-    presents_[i] = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
-    state_.outputs_[output_index_ + i] = presents_[i].get();
-  }
-}
-
-void KV_Cache::UpdateAndResize(int current_length, int past_length) {
-  // If we're sharing past & present buffers there is nothing to do here, so early exit
-  if (past_present_share_buffer_)
-    return;
-  if (shape_[0] != 1)
-    throw std::runtime_error("KV_Cache::Update(int current_length, int past_length) only supports batch size 1, got " + std::to_string(shape_[0]));
-  if (model_.device_type_ != DeviceType::CPU)
-    throw std::runtime_error("KV_Cache::Update(int current_length, int past_length) only supports CPU");
-
-  auto element_type = presents_[0]->GetTensorTypeAndShapeInfo()->GetElementType();
-  auto element_size = SizeOf(element_type);
-  auto new_shape = std::array<int64_t, 4>({1, shape_[1], past_length, shape_[3]});
-  if (shape_[2] != past_length) {
+  if (!is_first_update_) {
     for (int i = 0; i < layer_count_ * 2; i++) {
-      auto new_present = OrtValue::CreateTensor(*model_.allocator_device_, new_shape, type_);
-      const auto* present_data = reinterpret_cast<const uint8_t*>(presents_[i]->GetTensorRawData());
-      auto* new_present_data = reinterpret_cast<uint8_t*>(new_present->GetTensorMutableRawData());
-
-      // Copy past_length kv-cache
-      for (int j = 0; j < shape_[1]; j++) {
-        memcpy(
-            new_present_data + j * past_length * shape_[3] * element_size,
-            present_data + j * shape_[2] * shape_[3] * element_size,
-            past_length * shape_[3] * element_size);
+      if (beam_indices.empty()) {
+        pasts_[i] = std::move(presents_[i]);
+      } else {
+        PickPastState(beam_indices, i);
       }
-
-      presents_[i] = std::move(new_present);
+      state_.inputs_[input_index_ + i] = pasts_[i].get();
     }
   }
 
-  Update({}, current_length);
+  shape_[2] = total_length;
+  for (int i = 0; i < layer_count_ * 2; i++) {
+    presents_[i] = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
+    state_.outputs_[output_index_ + i] = presents_[i].get();
+  }
+
+  is_first_update_ = false;
 }
+
+// void KV_Cache::UpdatePresent(int current_length) {
+//   // Used for speculative decoding main generator.
+//   // This can be later refactored to merge with tensor allocation during initialization.
+//   if (shape_[2] == current_length)
+//     return;
+//   shape_[2] = current_length; // TODO(aciddelgado): is it ok to set this if past_present_share_buffer_ is true?
+//   // If we're sharing past & present buffers there is nothing to do here, so early exit
+//   if (past_present_share_buffer_)
+//     return;
+//   for (int i = 0; i < layer_count_ * 2; i++) {
+//     presents_[i] = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
+//     state_.outputs_[output_index_ + i] = presents_[i].get();
+//   }
+// }
+
+// void KV_Cache::UpdateAndResize(int current_length, int past_length) {
+//   // If we're sharing past & present buffers there is nothing to do here, so early exit
+//   if (past_present_share_buffer_)
+//     return;
+//   if (shape_[0] != 1)
+//     throw std::runtime_error("KV_Cache::Update(int current_length, int past_length) only supports batch size 1, got " + std::to_string(shape_[0]));
+//   if (model_.device_type_ != DeviceType::CPU)
+//     throw std::runtime_error("KV_Cache::Update(int current_length, int past_length) only supports CPU");
+
+//   auto element_type = presents_[0]->GetTensorTypeAndShapeInfo()->GetElementType();
+//   auto element_size = SizeOf(element_type);
+//   auto new_shape = std::array<int64_t, 4>({1, shape_[1], past_length, shape_[3]});
+//   if (shape_[2] != past_length) {
+//     for (int i = 0; i < layer_count_ * 2; i++) {
+//       auto new_present = OrtValue::CreateTensor(*model_.allocator_device_, new_shape, type_);
+//       const auto* present_data = reinterpret_cast<const uint8_t*>(presents_[i]->GetTensorRawData());
+//       auto* new_present_data = reinterpret_cast<uint8_t*>(new_present->GetTensorMutableRawData());
+
+//       // Copy past_length kv-cache
+//       for (int j = 0; j < shape_[1]; j++) {
+//         memcpy(
+//             new_present_data + j * past_length * shape_[3] * element_size,
+//             present_data + j * shape_[2] * shape_[3] * element_size,
+//             past_length * shape_[3] * element_size);
+//       }
+
+//       presents_[i] = std::move(new_present);
+//     }
+//   }
+
+//   Update({}, current_length);
+// }
 
 // TODO(aciddelgado): RewindTo function
 // void KV_Cache::RewindTo(int new_length) {

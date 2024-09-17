@@ -101,10 +101,10 @@ void GeneratorParams::TryGraphCapture(int max_bs) {
 void GeneratorParams::SetInputs(const NamedTensors& named_tensors) {
   for (const auto& [name, tensor] : named_tensors) {
     if (name == Config::Defaults::InputIdsName) {
-      input_ids = std::span<const int32_t>(tensor->ort_tensor_->GetTensorMutableData<int32_t>(),
-                                           tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount());
-      batch_size = static_cast<int>(tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape()[0]);
-      sequence_length = static_cast<int>(input_ids.size()) / batch_size;
+      // input_ids = std::span<const int32_t>(tensor->ort_tensor_->GetTensorMutableData<int32_t>(),
+      //                                      tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount());
+      // batch_size = static_cast<int>(tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape()[0]);
+      // sequence_length = static_cast<int>(input_ids.size()) / batch_size;
     } else {
       // If the nominal name is found in the map, use the graph name.
       // Else, use the nominal name as the graph name.
@@ -142,20 +142,39 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
     throw std::runtime_error("batch_size must be 1 or greater, is " + std::to_string(params.batch_size));
   if (params.vocab_size < 1)
     throw std::runtime_error("vocab_size must be 1 or greater, is " + std::to_string(params.vocab_size));
-  if (params.sequence_length >= params.search.max_length)
-    throw std::runtime_error("input sequence_length (" + std::to_string(params.sequence_length) + ") is >= max_length (" + std::to_string(params.search.max_length) + ")");
-  if (params.input_ids.empty() || params.input_ids.data() == nullptr)
-    throw std::runtime_error("input_ids not set in GeneratorParams");
 
   search_ = CreateSearch(params);
-  state_ = model.CreateState(search_->GetSequenceLengths(), params);
+  state_ = model.CreateState(search_->GetSequenceLengths(), params); // Search sequence lengths set when creating state
 }
 
-void Generator::ComputeLogits() {
-  if (computed_logits_)
-    throw std::runtime_error("ComputeLogits called again without calling GenerateNextToken first");
+// void Generator::AddInput(const std::string& name, const std::shared_ptr<Tensor>& tensor) {
+//   search_->AddInput(name, tensor);
+// }
 
-  auto logits = state_->Run(search_->GetSequenceLength(), search_->GetNextTokens(), search_->GetNextIndices());
+void Generator::AddTokens(cpu_span<int32_t> input_ids) {
+  // TODO(aciddelgado): check for first call after reset
+  search_->SetNextTokens(input_ids);
+  // state_->AddInputTokens(input_ids); // Do this in Run instead
+  
+  if (g_log.enabled && g_log.add_tokens) {
+    auto& stream = Log("add_tokens");
+    stream << "input_ids: ";
+    for (auto token : input_ids) {
+      stream << token << ' ';
+    }
+    stream << std::endl;
+  }
+
+  computed_logits_ = false;
+  ComputeLogits(input_ids);
+}
+
+void Generator::ComputeLogits(const RoamingArray<int32_t>& next_tokens) {
+  if (computed_logits_)
+    throw std::runtime_error("ComputeLogits called again without calling AddTokens or GenerateNextToken first");
+
+  // auto logits = state_->Run(candidate_sequence, candidate_length_ + 1, search_->GetSequenceLength() - 1, candidate_length_ + 1);
+  auto logits = state_->Run(search_->GetSequenceLength(), next_tokens, search_->GetNextIndices());
   if (g_log.enabled && g_log.model_logits) {
     auto& stream = Log("model_logits");
     DumpSpan(stream, logits.GetCPU());
@@ -164,9 +183,9 @@ void Generator::ComputeLogits() {
   search_->SetLogits(logits);
   computed_logits_ = true;
 
-  auto& search = search_->params_->search;
-  search_->ApplyMinLength(search.min_length);
-  search_->ApplyRepetitionPenalty(search.repetition_penalty);
+  // auto& search = search_->params_->search;
+  // search_->ApplyMinLength(search.min_length);
+  // search_->ApplyRepetitionPenalty(search.repetition_penalty);
 }
 
 bool Generator::IsDone() const {
@@ -177,10 +196,14 @@ bool Generator::IsDone() const {
 }
 
 void Generator::GenerateNextToken() {
-  if (!computed_logits_)
-    throw std::runtime_error("Must call ComputeLogits before GenerateNextToken");
+  // TODO(aciddelgado): check that AddTokens has been called
+  if (!computed_logits_) {
+    ComputeLogits(search_->GetNextTokens());
+  }
   computed_logits_ = false;
   auto& search = search_->params_->search;
+  search_->ApplyMinLength(search.min_length);
+  search_->ApplyRepetitionPenalty(search.repetition_penalty);
 
   if (g_log.enabled && g_log.generate_next_token) {
     auto& stream = Log("generate_next_token");
@@ -223,9 +246,9 @@ RoamingArray<int32_t> Generator::GetSequence(size_t index) const {
 
 TokenSequences Generate(const Model& model, const GeneratorParams& params) {
   auto generator = CreateGenerator(model, params);
+  // generator->AddTokens(params.search.input_ids);
 
   while (!generator->IsDone()) {
-    generator->ComputeLogits();
     generator->GenerateNextToken();
   }
 

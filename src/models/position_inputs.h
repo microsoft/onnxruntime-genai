@@ -11,23 +11,31 @@ namespace Generators {
 
 struct PositionInputs {
   PositionInputs(const Model& model, State& state, RoamingArray<int32_t>& sequence_lengths);
+  PositionInputs(const Model& model, State& state);
 
   void Add();
-  void Update(int current_length);
-  void Update(int current_length, int past_length);
+  // void Update(int current_length);
+  void Update(int total_length, int new_length);
 
  private:
   void AddAttentionMask();
   void AddPositionIDs();
 
-  void UpdatePositionIDs(int current_length);
-  void UpdateAttentionMask(int current_length);
+  // Batch size > 1 case
+  void UpdatePositionIDs();
+  void UpdateAttentionMask(int total_length);
   // Used by continuous decoding.
-  void UpdatePositionIDs(int current_length, int past_length);
-  void UpdateAttentionMask(int current_length, int past_length);
+  void UpdatePositionIDs(int total_length, int new_length);
+  void UpdateAttentionMask(int total_length, int new_length);
 
+  // template <typename T>
+  // void InitializeTensors(std::array<int64_t, 2> shape/*, cpu_span<int32_t> sequence_lengths*/);
   template <typename T>
-  void InitializeTensors(std::array<int64_t, 2> shape, cpu_span<int32_t> sequence_lengths);
+  void InitializeSequenceLengths(std::array<int64_t, 2> shape, cpu_span<int32_t> sequence_lengths_unk);
+  template <typename T>
+  void CreateAndInitializePositionIDs(std::array<int64_t, 2> shape);
+  template <typename T>
+  void CreateAndInitializeAttentionMask(std::array<int64_t, 2> shape);
 
   template <typename T>
   void UpdatePositionIDsImpl();
@@ -36,9 +44,9 @@ struct PositionInputs {
 
   // Used by continuous decoding
   template <typename T>
-  void UpdatePositionIDsImpl(int current_length, int past_length);
+  void UpdatePositionIDsImpl(int total_length, int new_kv_length);
   template <typename T>
-  void UpdateAttentionMaskImpl(T* data, int current_length, int past_length);
+  void UpdateAttentionMaskImpl(T* data, int total_length);
 
   const Model& model_;
   State& state_;
@@ -58,7 +66,7 @@ struct PositionInputs {
 
   std::unique_ptr<OrtValue> position_ids_next_;    // Replaces position_ids_ after the first Run() call
   std::unique_ptr<OrtValue> attention_mask_next_;  // Replaces attention_mask_ after the first Run() call
-  std::vector<int32_t> initial_sequence_lengths_;
+  // std::vector<int32_t> initial_sequence_lengths_;
 
   // Used for decoding runs with cuda graphs.
   StaticBuffer* sb_position_ids_{};
@@ -66,6 +74,7 @@ struct PositionInputs {
 
   bool is_first_posid_update_{true};
   bool is_first_mask_update_{true};
+  bool is_first_update_{true};
 
 #if USE_DML
   std::optional<DmlUpdateMaskKernel> dml_update_mask_kernel_;

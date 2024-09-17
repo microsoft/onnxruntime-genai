@@ -31,7 +31,7 @@ Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> s
 
   auto sequence_lengths = sequence_lengths_unk.GetCPU();
   for (int i = 0; i < decoder_input_ids_.GetShape()[0]; i++) {
-    sequence_lengths[i] = static_cast<int32_t>(params_->sequence_length);
+    sequence_lengths[i] = 0; // TODO(aciddelgado): what? static_cast<int32_t>(params_->sequence_length);
   }
 
   input_names_.push_back("encoder_input_ids");
@@ -80,7 +80,8 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
 void Whisper_State::UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> beam_indices, int current_length) {
   decoder_input_ids_.Update(next_tokens);
   kv_cache_.Update(beam_indices.GetCPU(), current_length);
-  logits_.Update();
+  size_t new_length = input_ids_.GetShape()[1];
+  logits_.Update(new_length);
 }
 
 }  // namespace Generators

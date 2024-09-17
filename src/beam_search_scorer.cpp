@@ -65,7 +65,10 @@ BeamSearchScorer::BeamSearchScorer(const GeneratorParams& parameters)
   next_beam_indices_ptr_ = AllocateArray<int32_t>(batch_beam_size, &next_beam_indices_);
 
   // Space to store intermediate sequence with length sequence_length, sequence_length + 1, ..., max_sequence_length.
-  size_t const per_beam = (max_length_ * (max_length_ + 1) - (parameters.sequence_length - 1) * parameters.sequence_length) / 2;
+  // TODO(aciddelgado): Initialize in first update function type thing.
+  // size_t const per_beam = (max_length_ * (max_length_ + 1) - (parameters.sequence_length - 1) * parameters.sequence_length) / 2;
+  size_t const per_beam = (max_length_ * (max_length_ + 1)) / 2;
+
   hypothesis_buffer_ptr_ = AllocateArray<int32_t>(batch_beam_size * per_beam, &hypothesis_buffer_);
 
   memset(next_beam_scores_.data(), 0, next_beam_scores_.size_bytes());

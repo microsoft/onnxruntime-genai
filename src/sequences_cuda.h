@@ -3,7 +3,7 @@ namespace Generators {
 
 // This class keeps track of sequences generated.
 struct Sequences_Cuda {
-  Sequences_Cuda(std::span<const int32_t> input_sequences, int batch_size, int beam_size, int max_length, cudaStream_t stream);
+  Sequences_Cuda(/*std::span<const int32_t> input_sequences,*/ int batch_size, int beam_size, int max_length, cudaStream_t stream);
 
   // Returns a sequence of word IDs for a given beam index ( beam_index < batch_beam_size).
   RoamingArray<int32_t> GetSequence(size_t batch_beam_index);

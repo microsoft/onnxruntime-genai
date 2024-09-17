@@ -5,6 +5,7 @@
 #include "captured_graph_pool.h"
 #include "utils.h"
 #include "prompt_image_processor.h"
+#include "input_ids.h"
 
 #if USE_DML
 #include "dml_provider_factory.h"
@@ -29,20 +30,25 @@ struct State {
   virtual ~State() = default;
 
   virtual RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices = {}) = 0;
+  // Used by continuous decoding
+  virtual RoamingArray<float> Run(RoamingArray<int32_t> sequence, int next_token_length, int past_length, int return_last_logit_count) { throw std::runtime_error("Not implemented"); };
+  // virtual void AddInputTokens(const RoamingArray<int32_t>& tokens) { throw std::runtime_error("Not implemented"); };
+
   virtual const CapturedGraphInfo* GetCapturedGraphInfo() const { return nullptr; }
 
   OrtValue* GetOutput(const char* name);
-
-  virtual RoamingArray<float> Run(RoamingArray<int32_t> sequence, int next_token_length, int past_length, int return_last_logit_count) { throw std::runtime_error("Not implemented"); };
 
   std::shared_ptr<const GeneratorParams> params_;
 
   std::vector<const char*> input_names_, output_names_;
   std::vector<OrtValue*> inputs_, outputs_;
 
+  InputIDs input_ids_{model_, *this}; // TODO(aciddelgado): is this ok here?
+
  protected:
   void Run(OrtSession& session, OrtRunOptions& run_options, int new_batch_size);  // Uses the inputs below to run
   void ClearIO();                                                                 // Clear all inputs/outputs
+
   bool first_run_{true};
 
  private:
@@ -116,6 +122,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
   std::shared_ptr<MultiModalProcessor> CreateMultiModalProcessor() const;
 
   virtual std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params) const = 0;
+  // virtual std::unique_ptr<State> CreateState(const GeneratorParams& params) const = 0;
 
   std::unique_ptr<OrtValue> ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams) const;
 

@@ -4,6 +4,7 @@ namespace Generators {
 // This class keeps track of sequences generated.
 struct Sequences {
   Sequences(std::span<const int32_t> input_sequence, int batch_size, int beam_size, int max_length);
+  Sequences(int batch_size, int beam_size, int max_length);
 
   // Returns a sequence of word IDs for a given beam index ( beam_index < batch_beam_size).
   cpu_span<int32_t> GetSequence(size_t batch_beam_index);

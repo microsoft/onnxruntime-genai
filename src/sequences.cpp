@@ -33,6 +33,22 @@ Sequences::Sequences(std::span<const int32_t> input_sequences, int batch_size, i
   }
 }
 
+Sequences::Sequences(int batch_size, int beam_size, int max_length)
+    : batch_beam_size_{batch_size * beam_size},
+      max_length_{max_length},
+      current_length_{0} {
+  const size_t sequences_size = static_cast<size_t>(batch_beam_size_) * max_length;
+
+  if (beam_size == 1) {
+    sequences_buffer_ = std::make_unique<int32_t[]>(sequences_size);
+    sequences_ = cpu_span<int32_t>(sequences_buffer_.get(), sequences_size);
+  } else {
+    sequences_buffer_ = std::make_unique<int32_t[]>(2 * sequences_size);
+    sequences_ = cpu_span<int32_t>(sequences_buffer_.get(), sequences_size);
+    sequences_next_ = cpu_span<int32_t>(sequences_buffer_.get() + sequences_size, sequences_size);
+  }
+}
+
 cpu_span<int32_t> Sequences::GetSequence(size_t batch_beam_index) {
   auto span = sequences_.subspan(batch_beam_index * max_length_, current_length_);
   return cpu_span<int32_t>{span.data(), span.size()};

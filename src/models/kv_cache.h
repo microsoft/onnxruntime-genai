@@ -36,12 +36,12 @@ struct KV_Cache {
   // Called only once during initialization of state.
   void Add();
   // Move present to past. Prepare present output for next generation iteration.
-  void Update(std::span<const int32_t> beam_indices, int current_length);
+  void Update(std::span<const int32_t> beam_indices, int total_length);
   // Used by speculative decoding
   // Resize present to new sequence length.
-  void UpdatePresent(int current_length);
+  // void UpdatePresent(int current_length);
   // Resize past to new sequence length, and drop past that is > past_length.
-  void UpdateAndResize(int current_length, int past_length);
+  // void UpdateAndResize(int current_length, int past_length);
   // Rewind cache to new_length.
   // void RewindTo(int new_length);
   template <typename ScoreType>
@@ -54,6 +54,8 @@ struct KV_Cache {
   int layer_count_;
   size_t input_index_{~0U}, output_index_{~0U};
   bool past_present_share_buffer_;  // True if model.decoder.past_present_share_buffer is set to true, and we're using cuda, and not beam search
+
+  bool is_first_update_{true};
 
   std::array<int64_t, 4> shape_;
   ONNXTensorElementDataType type_;

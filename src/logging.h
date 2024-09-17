@@ -43,6 +43,7 @@ struct LogItems {
   bool model_output_values{};  // After the model runs the output tensor values can be displayed
   bool model_logits{};         // Same as model_output_values but only for the logits
   bool continuous_decoding{};  // Log continuous decoding steps.
+  bool add_tokens{};           // Log the addition of tokens to the input.
   bool ort_lib{};              // Log the onnxruntime library loading and api calls.
 };
 
