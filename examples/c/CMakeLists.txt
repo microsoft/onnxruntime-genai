@@ -30,6 +30,7 @@ endif()
 
 add_executable(phi3 ${CMAKE_SOURCE_DIR}/src/main.cpp)
 add_executable(phi3v ${CMAKE_SOURCE_DIR}/src/phi3v.cpp)
+add_executable(llama ${CMAKE_SOURCE_DIR}/src/llama.cpp)
 
 
 target_link_directories(phi3 PRIVATE ${ORT_GENAI_LIB_DIR})
@@ -38,10 +39,15 @@ target_include_directories(phi3 PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_directories(phi3v PRIVATE ${ORT_GENAI_LIB_DIR})
 target_link_libraries(phi3v PRIVATE ${ONNXRUNTIME_GENAI_LIB})
 target_include_directories(phi3v PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_directories(llama PRIVATE ${ORT_GENAI_LIB_DIR})
+target_link_libraries(llama PRIVATE ${ONNXRUNTIME_GENAI_LIB})
+target_include_directories(llama PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
 
 if(USE_CUDA)
   set_target_properties(phi3 PROPERTIES LINKER_LANGUAGE CUDA)
   set_target_properties(phi3v PROPERTIES LINKER_LANGUAGE CUDA)
+  set_target_properties(llama PROPERTIES LINKER_LANGUAGE CUDA)
 endif()
 
 target_link_libraries(
@@ -53,6 +59,11 @@ target_link_libraries(
         PUBLIC
         onnxruntime-genai)
 
+target_link_libraries(
+        llama
+        PUBLIC
+        onnxruntime-genai)
+
 if(USE_CUDA)
   target_link_libraries(
         phi3
@@ -60,6 +71,10 @@ if(USE_CUDA)
         cublas curand cudart)
   target_link_libraries(
         phi3v
+        PUBLIC
+        cublas curand cudart)
+  target_link_libraries(
+        llama
         PUBLIC
         cublas curand cudart)
 endif()
@@ -73,6 +88,10 @@ foreach(DLL_FILE ${ort_genai_libs})
   )
   add_custom_command(
     TARGET phi3v POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DLL_FILE} $<TARGET_FILE_DIR:phi3v>
+  )
+  add_custom_command(
+    TARGET llama POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DLL_FILE} $<TARGET_FILE_DIR:phi3v>
   )
 endforeach()
