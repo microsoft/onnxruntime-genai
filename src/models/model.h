@@ -5,6 +5,7 @@
 #include "captured_graph_pool.h"
 #include "utils.h"
 #include "prompt_image_processor.h"
+#include "audio_processor.h"
 
 #if USE_DML
 #include "dml_provider_factory.h"
@@ -30,8 +31,9 @@ struct State {
 
   virtual RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices = {}) = 0;
   virtual const CapturedGraphInfo* GetCapturedGraphInfo() const { return nullptr; }
+  virtual void Finalize() {}
 
-  OrtValue* GetOutput(const char* name);
+  virtual OrtValue* GetOutput(const char* name);
 
   std::shared_ptr<const GeneratorParams> params_;
 
@@ -74,6 +76,8 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
   std::vector<int32_t> EncodeBatch(std::span<const std::string> strings) const;
   std::vector<std::string> DecodeBatch(std::span<const int32_t> sequences, size_t count) const;
 
+  int32_t TokenToTokenId(const char* token) const;
+
   OrtxPtr<OrtxTokenizer> tokenizer_;
   std::shared_ptr<Tokenizer> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
 
@@ -86,6 +90,7 @@ struct MultiModalProcessor : std::enable_shared_from_this<MultiModalProcessor> {
 
   std::shared_ptr<Tokenizer> tokenizer_;
   std::shared_ptr<ImageProcessor> image_processor_;
+  std::shared_ptr<AudioProcessor> audio_processor_;
 
   std::shared_ptr<MultiModalProcessor> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
 };

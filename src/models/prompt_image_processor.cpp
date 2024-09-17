@@ -127,7 +127,7 @@ ImageProcessor::ImageProcessor(Config& config, const SessionInfo& session_info)
 }
 
 std::unique_ptr<NamedTensors> ImageProcessor::Process(const Tokenizer& tokenizer, const std::string& prompt,
-                                                      const Images* images) {
+                                                      const Images* images) const {
   Ort::Allocator& allocator{Ort::Allocator::GetWithDefaultOptions()};
   auto named_tensors = std::make_unique<NamedTensors>();
 

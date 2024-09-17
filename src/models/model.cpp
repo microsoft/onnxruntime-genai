@@ -183,6 +183,12 @@ std::vector<std::string> Tokenizer::DecodeBatch(std::span<const int32_t> sequenc
   return strings;
 }
 
+int32_t Tokenizer::TokenToTokenId(const char* token) const {
+  extTokenId_t token_id;
+  CheckResult(OrtxConvertTokenToId(tokenizer_, token, &token_id));
+  return token_id;
+}
+
 #if USE_CUDA
 // Since Python/Others can and will hold onto a generator object past the model object's lifetime we need to ensure
 // the allocator used is not destroyed until last. This keeps the allocator around until exit, after all other memory
@@ -533,7 +539,7 @@ void ConvertFp32ToFp16(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<Or
 
 #if USE_CUDA
     case DeviceType::CUDA:
-      // TODO: Implement for CUDA. For now, fallthrough and report an error.
+      cuda::LaunchFp32ToFp16(fp32, fp16, count, stream);
 #endif
 
     default:
@@ -598,6 +604,8 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
     : tokenizer_{std::make_shared<Tokenizer>(config)} {
   if (config.model.type == "phi3v") {
     image_processor_ = std::make_shared<ImageProcessor>(config, session_info);
+  } else if (config.model.type == "whisper") {
+    audio_processor_ = std::make_shared<AudioProcessor>(config, session_info);
   } else {
     throw std::runtime_error("MultiModalProcessor cannot be created. Expected a multimodal model. Actual: " + config.model.type);
   }

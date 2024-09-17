@@ -106,6 +106,11 @@ struct OgaSequences : OgaAbstract {
   void Append(const int32_t* tokens, size_t token_cnt) {
     OgaCheckResult(OgaAppendTokenSequence(tokens, token_cnt, this));
   }
+
+  void Append(int32_t token, size_t sequence_index) {
+    OgaCheckResult(OgaAppendTokenToSequence(token, this, sequence_index));
+  }
+
 #if __cplusplus >= 202002L
   std::span<const int32_t> Get(size_t index) const {
     return {SequenceData(index), SequenceCount(index)};
@@ -130,6 +135,12 @@ struct OgaTokenizer : OgaAbstract {
 
   void Encode(const char* str, OgaSequences& sequences) const {
     OgaCheckResult(OgaTokenizerEncode(this, str, &sequences));
+  }
+
+  int32_t ToTokenId(const char* str) const {
+    int32_t token_id;
+    OgaCheckResult(OgaTokenizerToTokenId(this, str, &token_id));
+    return token_id;
   }
 
   OgaString Decode(const int32_t* tokens_data, size_t tokens_length) const {
@@ -317,6 +328,30 @@ struct OgaImages : OgaAbstract {
   static void operator delete(void* p) { OgaDestroyImages(reinterpret_cast<OgaImages*>(p)); }
 };
 
+struct OgaAudios : OgaAbstract {
+  static std::unique_ptr<OgaAudios> Load(const std::vector<const char*>& audio_paths) {
+    OgaAudios* p;
+    OgaStringArray* strs;
+    OgaCheckResult(OgaCreateStringArrayFromStrings(audio_paths.data(), audio_paths.size(), &strs));
+    OgaCheckResult(OgaLoadAudios(strs, &p));
+    OgaDestroyStringArray(strs);
+    return std::unique_ptr<OgaAudios>(p);
+  }
+
+#if __cplusplus >= 202002L
+  static std::unique_ptr<OgaAudios> Load(std::span<const char* const> audio_paths) {
+    OgaAudios* p;
+    OgaStringArray* strs;
+    OgaCheckResult(OgaCreateStringArrayFromStrings(audio_paths.data(), audio_paths.size(), &strs));
+    OgaCheckResult(OgaLoadAudios(strs, &p));
+    OgaDestroyStringArray(strs);
+    return std::unique_ptr<OgaAudios>(p);
+  }
+#endif
+
+  static void operator delete(void* p) { OgaDestroyAudios(reinterpret_cast<OgaAudios*>(p)); }
+};
+
 struct OgaNamedTensors : OgaAbstract {
   static void operator delete(void* p) { OgaDestroyNamedTensors(reinterpret_cast<OgaNamedTensors*>(p)); }
 };
@@ -331,6 +366,12 @@ struct OgaMultiModalProcessor : OgaAbstract {
   std::unique_ptr<OgaNamedTensors> ProcessImages(const char* str, const OgaImages* images = nullptr) const {
     OgaNamedTensors* p;
     OgaCheckResult(OgaProcessorProcessImages(this, str, images, &p));
+    return std::unique_ptr<OgaNamedTensors>(p);
+  }
+
+  std::unique_ptr<OgaNamedTensors> ProcessAudios(const OgaAudios* audios) const {
+    OgaNamedTensors* p;
+    OgaCheckResult(OgaProcessorProcessAudios(this, audios, &p));
     return std::unique_ptr<OgaNamedTensors>(p);
   }
 
