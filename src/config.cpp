@@ -137,10 +137,6 @@ struct Inputs_Element : JSON::Element {
       v_.position_ids = value;
     } else if (name == "attention_mask") {
       v_.attention_mask = value;
-    } else if (name == "seqlens_k") {
-      v_.seqlens_k = value;
-    } else if (name == "total_seq_len") {
-      v_.total_sequence_length = value;
     } else if (name == "past_key_names") {
       v_.past_key_names = value;
     } else if (name == "past_value_names") {
@@ -350,8 +346,8 @@ struct VisionOutputs_Element : JSON::Element {
   explicit VisionOutputs_Element(Config::Model::Vision::Outputs& v) : v_{v} {}
 
   void OnString(std::string_view name, std::string_view value) override {
-    if (name == "visual_features") {
-      v_.visual_features = value;
+    if (name == "image_features") {
+      v_.image_features = value;
     } else
       throw JSON::unknown_value_error{};
   }
@@ -414,6 +410,8 @@ struct EmbeddingInputs_Element : JSON::Element {
   void OnString(std::string_view name, std::string_view value) override {
     if (name == "input_ids") {
       v_.input_ids = value;
+    } else if (name == "image_features") {
+      v_.image_features = value;
     } else
       throw JSON::unknown_value_error{};
   }

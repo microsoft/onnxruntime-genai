@@ -15,13 +15,37 @@ static bool _ = (Ort::InitApi(), false);
 
 OrtGlobals::OrtGlobals() : env_{OrtEnv::Create(OrtLoggingLevel::ORT_LOGGING_LEVEL_ERROR)} {}
 
-std::unique_ptr<OrtGlobals>& GetOrtGlobals() {
+// Ensure Shutdown() has been called before process exit
+struct ValidateShutdown {
+  ~ValidateShutdown() {
+    if (GetOrtGlobals()) {
+      std::cerr << "OGA Error: Shutdown must be called before process exit, please check the documentation for the proper API to call to ensure clean shutdown." << std::endl;
+      std::abort();
+    }
+  }
+};
+
+std::unique_ptr<OrtGlobals>&
+GetOrtGlobals() {
   static auto globals = std::make_unique<OrtGlobals>();
+  static auto validate = std::make_unique<ValidateShutdown>();  // Must be after the above line so the destructor runs before the above destructor
   return globals;
 }
 
+// Used by Shutdown() to display the counts and types of any leaked objects
+template <typename... Types>
+bool LeakTypeList<Types...>::Dump() {
+  ((LeakChecked<Types>::Count() != 0 ? std::cerr << "OGA Error: " << LeakChecked<Types>::Count() << " instances of " << typeid(Types).name() << " were leaked." << std::endl : std::cerr), ...);
+  return ((LeakChecked<Types>::Count() != 0) || ...);
+}
+
 void Shutdown() {
-  GetOrtGlobals().reset();
+  if (LeakTypes::Dump()) {
+    std::cerr << "    Please see the documentation for the API being used to ensure proper cleanup." << std::endl;
+    std::abort();
+  }
+
+  GetOrtGlobals().reset();  // Delete now because on process exit is too late
 }
 
 OrtEnv& GetOrtEnv() {
@@ -148,7 +172,12 @@ bool Generator::IsDone() const {
   if (computed_logits_)
     throw std::runtime_error("IsDone() can't be called in the middle of processing logits");
 
-  return search_->IsDone();
+  bool is_done = search_->IsDone();
+  if (is_done) {
+    state_->Finalize();
+  }
+
+  return is_done;
 }
 
 void Generator::GenerateNextToken() {

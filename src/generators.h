@@ -1,11 +1,11 @@
 ﻿// Copyright (c) Microsoft Corporation. All rights reserved.
-
+// Licensed under the MIT License.
 #pragma once
 
-// Licensed under the MIT License.
 #include <algorithm>
 #include <array>
 #include <assert.h>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include "filesystem.h"
@@ -31,6 +31,7 @@
 using cudaStream_t = void*;
 #endif
 
+#include "leakcheck.h"
 #include "smartptrs.h"
 #include "models/onnxruntime_api.h"
 #include "models/debugging.h"
@@ -55,7 +56,7 @@ enum struct DeviceType {
 
 std::string to_string(DeviceType device_type);
 
-struct GeneratorParams : std::enable_shared_from_this<GeneratorParams> {
+struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChecked<GeneratorParams> {
   GeneratorParams() = default;  // This constructor is only used if doing a custom model handler vs built-in
   GeneratorParams(const Model& model);
 
@@ -98,7 +99,8 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams> {
   std::span<const int32_t> input_ids;  // Array of [batchsize][sequence_length]
 
   struct Whisper {
-    std::shared_ptr<Tensor> input_features;  // float32 [batch_size, number_of_mels, something that is 3000]
+    std::shared_ptr<Tensor> input_features;   // float32 [batch_size, number_of_mels, number_of_frames]
+    std::shared_ptr<Tensor> alignment_heads;  // int32 [num_alignment_heads, 2]
   };
 
   std::variant<Whisper> inputs;
@@ -125,7 +127,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams> {
                                    // The model outlives the GeneratorParams
 };
 
-struct Generator {
+struct Generator : LeakChecked<Generator> {
   Generator(const Model& model, const GeneratorParams& params);
 
   bool IsDone() const;

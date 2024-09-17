@@ -76,13 +76,13 @@ jobs:
     - name: Build the C# API and Run the C# Tests
       run: |
         cd test\csharp
-        dotnet test /p:Configuration=release /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release"
+        dotnet test /p:Configuration=release /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release" /p:OrtLibDir="$env:GITHUB_WORKSPACE\ort\lib"
 
     - name: Install the Python Wheel and Test Dependencies
       run: |
         python -m pip install -r test\python\requirements.txt
         python -m pip install -r test\python\requirements-cuda.txt
-        python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl"))
+        python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
 
     - name: Get HuggingFace Token
       run: |
@@ -106,4 +106,5 @@ jobs:
       run: |
         $env:PATH = "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin;" + $env:PATH 
         echo "Current PATH variable is: $env:PATH" 
+        copy $env:GITHUB_WORKSPACE\ort\lib\* .\$env:binaryDir\test\Release
         & .\$env:binaryDir\test\Release\unit_tests.exe

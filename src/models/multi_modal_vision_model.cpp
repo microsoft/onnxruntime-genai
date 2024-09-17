@@ -12,90 +12,16 @@ RoamingArray<float> MakeDummy() {
   return RoamingArray<float>();
 }
 
-#pragma warning(push)
-#pragma warning(disable : 4189)  // local variable is initialized but not referenced
-
-void Select(const Model& model, std::span<const int32_t> input_ids, OrtValue* hidden_states,
-            OrtValue* visual_features, int32_t num_img_tokens, int32_t hidden_size, DeviceType device_type,
-            cudaStream_t cuda_stream) {
-  // Assme batch_size = 1
-  constexpr int32_t min_input_id = -1000000000;
-  constexpr int64_t expected_batch_size = 1;
-
-  // Find the position in the input_ids that corresponds to the start of the image tokens.
-  // Image tokens are represented by negative values in the input_ids.
-  const int64_t sequence_length = input_ids.size();
-  int32_t image_position_start{};
-  for (int64_t idx = 0; idx < sequence_length; ++idx) {
-    if (input_ids[idx] < 0 && input_ids[idx] > min_input_id) {
-      image_position_start = static_cast<int32_t>(idx);
-      break;
-    }
-  }
-
-  // Replace the positions in the hidden_states tensor that correspond to the image tokens
-  // with the visual features tensor.
-  const int32_t start_pos = image_position_start * hidden_size;
-  const int32_t element_count = num_img_tokens * hidden_size;
-  const int32_t hidden_states_element_count = static_cast<int32_t>(sequence_length) * hidden_size;
-
-  switch (device_type) {
-    case DeviceType::CPU: {
-      auto target = cpu_span<float>(hidden_states->GetTensorMutableData<float>(), hidden_states_element_count)
-                        .subspan(start_pos, element_count);
-      auto source = cpu_span<float>(visual_features->GetTensorMutableData<float>(), element_count);
-      std::copy(source.begin(), source.end(), target.begin());
-      break;
-    }
-#if USE_CUDA
-    case DeviceType::CUDA: {
-      auto target = gpu_span<uint16_t>(hidden_states->GetTensorMutableData<uint16_t>(), hidden_states_element_count)
-                        .subspan(start_pos, element_count);
-      auto source = gpu_span<uint16_t>(visual_features->GetTensorMutableData<uint16_t>(), element_count);
-      CudaCheck() == cudaMemcpyAsync(target.data(), source.data(), source.size_bytes(),
-                                     cudaMemcpyDeviceToDevice, cuda_stream);
-      break;
-    }
-#endif
-
-#if USE_DML
-    case DeviceType::DML: {
-      ComPtr<ID3D12Resource> source_resource;
-      Ort::ThrowOnError(model.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model.allocator_device_, visual_features->GetTensorMutableRawData(), &source_resource));
-
-      ComPtr<ID3D12Resource> target_resource;
-      Ort::ThrowOnError(model.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model.allocator_device_, hidden_states->GetTensorMutableRawData(), &target_resource));
-
-      model.GetDmlExecutionContext()->CopyBufferRegion(
-          target_resource.Get(),
-          start_pos * sizeof(uint16_t),
-          D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-          source_resource.Get(),
-          0,
-          D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-          element_count * sizeof(uint16_t));
-
-      // Execute the cached command list
-      ComPtr<ID3D12Fence> fence;
-      uint64_t completion_value;
-      model.GetDmlExecutionContext()->ExecuteCommandList(nullptr, &fence, &completion_value);
-      break;
-    }
-#endif
-    default:
-      throw std::runtime_error("Unsupported device type for Select.");
-  }
-}
-
-#pragma warning(pop)
-
 int64_t GetNumImageTokens(const std::vector<GeneratorParams::Input>& extra_inputs,
+                          const std::string& pixel_values_name,
                           const std::string& image_sizes_name) {
+  std::shared_ptr<Tensor> pixel_values;
   std::shared_ptr<Tensor> image_sizes;
   for (size_t i = 0; i < extra_inputs.size(); ++i) {
-    if (extra_inputs[i].name == image_sizes_name) {
+    if (extra_inputs[i].name == pixel_values_name) {
+      pixel_values = extra_inputs[i].tensor;
+    } else if (extra_inputs[i].name == image_sizes_name) {
       image_sizes = extra_inputs[i].tensor;
-      break;
     }
   }
 
@@ -104,41 +30,26 @@ int64_t GetNumImageTokens(const std::vector<GeneratorParams::Input>& extra_input
     return 0;
   }
 
-  if (image_sizes->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape() != std::vector<int64_t>{1, 2}) {
-    throw std::runtime_error("image_sizes tensor must have 2 elements");
+  auto image_sizes_shape = image_sizes->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape();
+  auto num_images = pixel_values->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape()[0];
+  if (image_sizes_shape != std::vector<int64_t>{num_images, 2}) {
+    std::string wrong_image_sizes_shape = "(";
+    for (int i = 0; i < image_sizes_shape.size(); i++) {
+      wrong_image_sizes_shape += std::to_string(image_sizes_shape[i]);
+      std::string eos = (i != image_sizes_shape.size() - 1) ? ", " : ")";
+      wrong_image_sizes_shape += eos;
+    }
+    throw std::runtime_error("image_sizes tensor must be of shape (num_images, 2), got " + wrong_image_sizes_shape);
   }
 
   auto image_sizes_data = image_sizes->ort_tensor_->GetTensorMutableData<int64_t>();
-  const int64_t h = image_sizes_data[0] / 336;
-  const int64_t w = image_sizes_data[1] / 336;
-  return ((h * w + 1) * 144) + 1 + ((h + 1) * 12);
-}
-
-std::unique_ptr<OrtValue> GetVisualFeatures(OrtAllocator& device_allocator, const SessionInfo& session_info,
-                                            const std::string& visual_features_name, int32_t hidden_size,
-                                            int64_t num_image_tokens) {
-  constexpr int32_t batch_size = 1;
-  if (!session_info.HasOutput(visual_features_name)) {
-    throw std::runtime_error("Visual features output not found in the model");
+  int64_t num_image_tokens = 0;
+  for (int i = 0; i < num_images; i++) {
+    int64_t h = image_sizes_data[i * num_images] / 336;
+    int64_t w = image_sizes_data[i * num_images + 1] / 336;
+    num_image_tokens += ((h * w + 1) * 144) + 1 + ((h + 1) * 12);
   }
-
-  auto type = session_info.GetOutputDataType(visual_features_name);
-
-  std::vector<int64_t> shape = {batch_size, num_image_tokens, hidden_size};
-  std::unique_ptr<OrtValue> visual_features;
-
-  switch (type) {
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
-      visual_features = OrtValue::CreateTensor<float>(device_allocator, shape);
-      break;
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
-      visual_features = OrtValue::CreateTensor<Ort::Float16_t>(device_allocator, shape);
-      break;
-    default:
-      throw std::runtime_error("Unsupported data type for visual features: " + std::to_string(type));
-  }
-
-  return visual_features;
+  return num_image_tokens;
 }
 
 }  // namespace
@@ -165,16 +76,19 @@ std::unique_ptr<State> MultiModalVisionModel::CreateState(RoamingArray<int32_t> 
   return std::make_unique<MultiModalPipelineState>(*this, sequence_lengths, params);
 }
 
-EmbeddingState::EmbeddingState(const MultiModalVisionModel& model, const GeneratorParams& params, const CapturedGraphInfo* captured_graph_info)
+EmbeddingState::EmbeddingState(const MultiModalVisionModel& model, const GeneratorParams& params, const CapturedGraphInfo* captured_graph_info, const int64_t num_image_tokens)
     : State{params, model},
       model_{model},
-      captured_graph_info_{captured_graph_info} {
+      captured_graph_info_{captured_graph_info},
+      num_image_tokens_{num_image_tokens} {
   input_ids_.Add();
+  image_features_.Add();
   inputs_embeds_.Add();
 }
 
 void EmbeddingState::UpdateInputsAndOutputs(RoamingArray<int32_t> next_tokens) {
   input_ids_.Update(next_tokens);
+  image_features_.Update();
   inputs_embeds_.UpdateSequenceLength();
 }
 
@@ -185,22 +99,17 @@ RoamingArray<float> EmbeddingState::Run(int current_length, RoamingArray<int32_t
   return MakeDummy();
 }
 
-VisionState::VisionState(const MultiModalVisionModel& model, const GeneratorParams& params)
+VisionState::VisionState(const MultiModalVisionModel& model, const GeneratorParams& params, const int64_t num_image_tokens)
     : State{params, model},
-      model_{model} {
+      model_{model},
+      num_image_tokens_{num_image_tokens} {
   extra_inputs_.Add();
-  num_image_tokens_ = static_cast<int32_t>(GetNumImageTokens(params_->extra_inputs, model_.config_->model.vision.inputs.image_sizes));
-  if (num_image_tokens_ > 0) {
-    visual_features_ = GetVisualFeatures(*model_.allocator_device_, *model_.session_info_,
-                                         model_.config_->model.vision.outputs.visual_features,
-                                         params_->hidden_size, num_image_tokens_);
-    output_names_.push_back(model_.config_->model.vision.outputs.visual_features.c_str());
-    outputs_.push_back(visual_features_.get());
-  }
+  image_features_.Add();
 }
 
 RoamingArray<float> VisionState::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
-  State::Run(*model_.vision_session_, *model_.run_options_, 1);
+  const int num_images = static_cast<int>(inputs_[0]->GetTensorTypeAndShapeInfo()->GetShape()[0]);
+  State::Run(*model_.vision_session_, *model_.run_options_, num_images);
 
   return MakeDummy();
 }
@@ -233,33 +142,29 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalVisionModel& mo
                                                  const GeneratorParams& params)
     : State{params, model},
       model_{model},
-      captured_graph_info_{model.GetCapturedGraphPool()->ReserveCapturedGraph(model, params)},
-      embedding_state_{std::make_unique<EmbeddingState>(model, params, captured_graph_info_.get())},
-      vision_state_{std::make_unique<VisionState>(model_, params)},
-      decoder_state_{std::make_unique<DecoderState>(model_, sequence_lengths_unk, params, captured_graph_info_.get())} {
+      num_image_tokens_{GetNumImageTokens(params_->extra_inputs, model_.config_->model.vision.inputs.pixel_values, model_.config_->model.vision.inputs.image_sizes)},
+      captured_graph_info_{model.GetCapturedGraphPool()->ReserveCapturedGraph(model, params)} {
+  embedding_state_ = std::make_unique<EmbeddingState>(model, params, captured_graph_info_.get(), num_image_tokens_);
+  vision_state_ = std::make_unique<VisionState>(model_, params, num_image_tokens_);
+  decoder_state_ = std::make_unique<DecoderState>(model_, sequence_lengths_unk, params, captured_graph_info_.get());
 }
 
 RoamingArray<float> MultiModalPipelineState::Run(int current_length, RoamingArray<int32_t> next_tokens,
                                                  RoamingArray<int32_t> next_indices) {
   // Pipeline state defines the pipeline of the execution of the models
   // Prompt stage:
-  //   - input_ids -> |embeddings_model| -> |inputs_embeds|
-  //   - pixel_values, img_sizes -> |vision_model| -> |inputs_embeds|
-  //   - inputs_embeds, visual_features -> |Select| -> |inputs_embeds|
-  //   - inputs_embeds -> |decoder_model| -> |logits|
+  //   - pixel_values, image_sizes -> |vision_model| -> image_features
+  //   - input_ids, image_features -> |embeddings_model| -> inputs_embeds
+  //   - inputs_embeds -> |decoder_model| -> logits
   // Generation stage:
-  //   - input_ids -> |embeddings_model| -> |inputs_embeds|
-  //   - inputs_embeds -> |decoder_model| -> |logits|
+  //   - input_ids, image_features -> |embeddings_model| -> inputs_embeds
+  //   - inputs_embeds -> |decoder_model| -> logits
   if (is_prompt_) {
-    embedding_state_->Run(current_length, next_tokens, next_indices);
-    if (vision_state_->num_image_tokens_ > 0) {
+    if (num_image_tokens_ > 0) {
       vision_state_->Run(current_length, next_tokens, next_indices);
-
-      // Run the select logic
-      Select(model_, params_->input_ids, embedding_state_->inputs_embeds_.Get(),
-             vision_state_->visual_features_.get(), vision_state_->num_image_tokens_,
-             params_->hidden_size, params_->device_type, params_->cuda_stream);
     }
+    embedding_state_->image_features_.ReuseImageFeaturesBuffer(vision_state_->image_features_);
+    embedding_state_->Run(current_length, next_tokens, next_indices);
 
     decoder_state_->inputs_embeds_.ReuseEmbeddingsBuffer(embedding_state_->inputs_embeds_);
     auto logits = decoder_state_->Run(current_length, next_tokens, next_indices);

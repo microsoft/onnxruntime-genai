@@ -5,7 +5,7 @@
 
 namespace Generators {
 
-struct Search {
+struct Search : LeakChecked<Search> {
   Search(const GeneratorParams& params) : params_{params.shared_from_this()} {}
   virtual ~Search() = default;
 
@@ -51,7 +51,7 @@ struct Search_Cpu : Search {
 
   cpu_span<int32_t> next_tokens_;  // shape (beam_size*batch_size)
 
-  std::span<float> next_token_scores_;  // shape (beam_size*batch_size, vocab_size)
+  cpu_span<float> next_token_scores_;  // shape (beam_size*batch_size, vocab_size)
 
   Sequences sequences_;
   bool done_{};
@@ -93,7 +93,7 @@ struct BeamSearch_Cpu : Search_Cpu {
   RoamingArray<int32_t> GetSequence(size_t index) override;
   RoamingArray<int32_t> GetSequence(size_t batch_id, size_t beam_id);
 
-  bool IsDone() const;
+  bool IsDone() const override;
 
   void SelectTop() override;
 

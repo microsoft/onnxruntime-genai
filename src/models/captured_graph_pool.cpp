@@ -81,11 +81,11 @@ CapturedGraphInfoPtr CapturedGraphPool::ReserveCapturedGraph(const Model& model,
 
     auto output_type = session_info_->GetOutputDataType(config_->model.decoder.outputs.logits);
 
-    if (output_type == Ort::TypeToTensorType<float>::type) {
+    if (output_type == Ort::TypeToTensorType<float>) {
       new_captured_graph->sb_logits32_ = std::make_unique<StaticBuffer>(allocator_device_, max_beam_batch_size);
     }
 
-    if (output_type == Ort::TypeToTensorType<Ort::Float16_t>::type) {
+    if (output_type == Ort::TypeToTensorType<Ort::Float16_t>) {
       new_captured_graph->sb_logits16_ = std::make_unique<StaticBuffer>(allocator_device_, max_beam_batch_size);
     }
 

@@ -12,6 +12,8 @@ struct Config {
     static constexpr std::string_view InputIdsName = "input_ids";
     static constexpr std::string_view PixelValuesName = "pixel_values";
     static constexpr std::string_view ImageSizesName = "image_sizes";
+    static constexpr std::string_view InputFeaturesName = "encoder_input_ids";
+    static constexpr std::string_view ImageFeaturesName = "image_features";
   };
 
   fs::path config_path;  // Path of the config directory
@@ -55,6 +57,10 @@ struct Config {
     // For models like whisper
     struct EncoderDecoderInit {
       std::string filename;
+
+      struct Inputs {
+        std::string input_features{Defaults::InputFeaturesName};
+      } inputs;
     } encoder_decoder_init;
 
     struct Embedding {
@@ -62,6 +68,7 @@ struct Config {
 
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};
+        std::string image_features{Defaults::ImageFeaturesName};
       } inputs;
 
       struct Outputs {
@@ -78,7 +85,7 @@ struct Config {
       } inputs;
 
       struct Outputs {
-        std::string visual_features{"visual_features"};
+        std::string image_features{Defaults::ImageFeaturesName};
       } outputs;
     } vision;
 
@@ -97,8 +104,6 @@ struct Config {
         std::string embeddings{"inputs_embeds"};
         std::string position_ids{"position_ids"};
         std::string attention_mask{"attention_mask"};
-        std::string seqlens_k{"seqlens_k"};
-        std::string total_sequence_length{"total_seq_len"};
         std::string past_key_names{"past_key_values.%d.key"}, past_value_names{"past_key_values.%d.value"};
         std::string past_names;  // When key/value pairs are combined
         std::string cross_past_key_names, cross_past_value_names;

@@ -30,7 +30,7 @@ endif()
 
 add_executable(phi3 ${CMAKE_SOURCE_DIR}/src/main.cpp)
 add_executable(phi3v ${CMAKE_SOURCE_DIR}/src/phi3v.cpp)
-
+add_executable(whisper ${CMAKE_SOURCE_DIR}/src/whisper.cpp)
 
 target_link_directories(phi3 PRIVATE ${ORT_GENAI_LIB_DIR})
 target_link_libraries(phi3 PRIVATE ${ONNXRUNTIME_GENAI_LIB})
@@ -38,10 +38,14 @@ target_include_directories(phi3 PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_directories(phi3v PRIVATE ${ORT_GENAI_LIB_DIR})
 target_link_libraries(phi3v PRIVATE ${ONNXRUNTIME_GENAI_LIB})
 target_include_directories(phi3v PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_directories(whisper PRIVATE ${ORT_GENAI_LIB_DIR})
+target_link_libraries(whisper PRIVATE ${ONNXRUNTIME_GENAI_LIB})
+target_include_directories(whisper PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
 if(USE_CUDA)
   set_target_properties(phi3 PROPERTIES LINKER_LANGUAGE CUDA)
   set_target_properties(phi3v PROPERTIES LINKER_LANGUAGE CUDA)
+  set_target_properties(whisper PROPERTIES LINKER_LANGUAGE CUDA)
 endif()
 
 target_link_libraries(
@@ -52,16 +56,24 @@ target_link_libraries(
         phi3v
         PUBLIC
         onnxruntime-genai)
+target_link_libraries(
+        whisper
+        PUBLIC
+        onnxruntime-genai)
 
 if(USE_CUDA)
   target_link_libraries(
         phi3
         PUBLIC
-        cublasLt cublas cudnn curand cufft cudart)
+        cublas curand cudart)
   target_link_libraries(
         phi3v
         PUBLIC
-        cublasLt cublas cudnn curand cufft cudart)
+        cublas curand cudart)
+  target_link_libraries(
+        whisper
+        PUBLIC
+        cublas curand cudart)
 endif()
 
 file(GLOB ort_genai_libs "${CMAKE_SOURCE_DIR}/lib/${ONNXRUNTIME_GENAI_DEPENDENCY}")
@@ -74,5 +86,9 @@ foreach(DLL_FILE ${ort_genai_libs})
   add_custom_command(
     TARGET phi3v POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DLL_FILE} $<TARGET_FILE_DIR:phi3v>
+  )
+  add_custom_command(
+    TARGET whisper POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DLL_FILE} $<TARGET_FILE_DIR:whisper>
   )
 endforeach()
