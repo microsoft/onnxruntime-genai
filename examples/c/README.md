@@ -28,13 +28,18 @@ You can clone this entire model repository or download individual model variants
 huggingface-cli download microsoft/Phi-3-mini-4k-instruct-onnx --include cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/* --local-dir .
 ```
 
-### Install the onnxruntime and onnxruntime-genai binaries
+### Windows x64
 
-#### Windows
+#### Install the onnxruntime and onnxruntime-genai binaries
 
 Change into the onnxruntime-genai folder.
 
 1. Install onnxruntime
+
+   This example is for `win-x64`. Other architectures include:
+   * `win-arm64` 
+   * `win-x64-gpu`
+   * `win-x84`
    
    ```cmd
    curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-win-x64-1.19.2.zip -o onnxruntime-win-x64-1.19.2.zip
@@ -57,7 +62,70 @@ Change into the onnxruntime-genai folder.
    cd examples\c
    ```
 
-#### Linux
+#### Build this sample
+
+```bash
+cmake -A x64 -S . -B build
+cd build
+cmake --build . --config Release
+```
+
+#### Run the sample
+
+```bash
+cd Release
+.\phi3.exe path_to_model
+```
+
+### Windows arm64
+
+#### Install the onnxruntime and onnxruntime-genai binaries
+
+Change into the onnxruntime-genai folder.
+
+1. Install onnxruntime
+
+   This example is for `win-arm64`. Other architectures include:
+   
+   ```cmd
+   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-win-arm64-1.19.2.zip -o onnxruntime-win-arm64-1.19.2.zip
+   tar xvf onnxruntime-win-arm64-1.19.2.zip
+   copy onnxruntime-win-arm64-1.19.2\include\* include
+   copy onnxruntime-win-arm64-1.19.2\lib\* lib
+   ```
+
+2. Install onnxruntime-genai
+
+   This example requires onnxruntime-genai to be built from source.
+
+   ```cmd
+   cd ..\..
+   python build.py --arm64 --config Release --skip_wheel --parallel --cmake_extra_defines ENABLE_PYTHON=OFF
+   copy src\ort_genai.h examples\c\include
+   copy src\ort_genai_c.h examples\c\include
+   copy build\Windows\Release\Release\*.dll examples\c\lib
+   copy build\Windows\Release\Release\*.lib examples\c\lib
+   cd examples\c
+   ```
+
+#### Build this sample
+
+```bash
+cmake -A arm64 -S . -B build
+cd build
+cmake --build . --config Release
+```
+
+#### Run the sample
+
+```bash
+cd Release
+.\phi3.exe path_to_model
+```
+
+### Linux
+
+#### Install the onnxruntime and onnxruntime-genai binaries
 
 Change into the onnxruntime-genai directory.
 
@@ -85,17 +153,7 @@ Change into the onnxruntime-genai directory.
    cd examples/c
    ```
 
-### Build this sample
-
-#### Windows
-
-```bash
-cmake -A x64 -S . -B build
-cd build
-cmake --build . --config Release
-```
-
-#### Linux
+#### Build this sample
 
 Build with CUDA:
 
@@ -114,11 +172,11 @@ cd build
 cmake --build . --config Release
 ```
 
-### Run the sample
+#### Run the sample
 
 ```bash
 cd Release
-.\phi3.exe path_to_model
+./phi3 path_to_model
 ```
 
 ## Phi-3 vision
