@@ -1810,13 +1810,13 @@ class Model:
         self.layer_id = 0
         model_name = "ChatGLM" if "ChatGLM" in model.__class__.__name__ else ""
         for module in model.modules():
-            print("##########")
-            print(module)
+            # print("##########")
+            # print(module)
             if isinstance(module, torch.nn.Embedding) or (hasattr(model, "embedding") and module == model.embedding):
                 # Checks (Hugging Face logic) or (GGUF logic)
                 if not self.exclude_embeds:
                     # Embedding layer
-                    print("Reading embedding layer")
+                    # print("Reading embedding layer")
                     self.make_embedding(module.weight.detach().numpy())
                 else:
                     # Exclude embedding layer from model
@@ -1837,15 +1837,15 @@ class Model:
             elif self.layer_id == self.num_layers and self.has_final_norm(module, model, model_name):
                 # SkipLayerNorm after last decoder layer (MatMul --> SkipLayerNorm)
                 print("Reading final norm")
-                print(self.layernorm_attrs["root_input"])
-                self.make_layernorm(self.layer_id, module, skip=False, simple=self.layernorm_attrs["simple"], location="final_norm")
-                self.layernorm_attrs["root_input"] = self.layernorm_attrs["output_0"]
-                print(self.layernorm_attrs["root_input"])
+                # print(self.layernorm_attrs["root_input"])
+                self.make_layernorm(self.layer_id, module, skip=True, simple=self.layernorm_attrs["simple"], location="final_norm")
+                # self.layernorm_attrs["root_input"] = self.layernorm_attrs["output_0"]
+                # print(self.layernorm_attrs["root_input"])
             elif (isinstance(module, torch.nn.Linear) and module.out_features == self.vocab_size) or (hasattr(model, "lm_head") and module == model.lm_head):
                 # Checks (Hugging Face logic) or (GGUF logic)
                 if not self.exclude_lm_head:
                     # Language modeling head (SkipLayerNorm --> logits)
-                    print(self.layernorm_attrs["root_input"])
+                    # print(self.layernorm_attrs["root_input"])
                     print("Reading LM head")
                     self.make_lm_head(module)
 
@@ -2688,11 +2688,11 @@ class ChatGLMModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         # self.input_shapes["position_ids"] = [1]  # Note: This is optional and only needed if you want position_ids to be an int instead of a 2D tensor
-        # self.layernorm_attrs["first_layernorm"] = False # Manually use Residuals to no SkipLayerNorms
         self.layernorm_attrs["simple"] = True # RMSNorm in ChatGLM
         self.rotemb_attrs["num_heads"] = self.num_attn_heads
         self.rotemb_attrs["partial_rotary_factor"] = 0.5 # Line 755 of modeling_chatglm.py check self.rotary_pos_emb declaration
         self.rotemb_attrs["rotary_embedding_dim"] = int(self.head_size * self.rotemb_attrs["partial_rotary_factor"])
+        self.rotemb_attrs["interleaved"] = 1
         self.mlp_attrs["use_proj"], self.mlp_attrs["use_fc"] = True, False
         self.attention_attrs["use_rotemb_in_attn"] = True
         self.attention_attrs["use_packed_matmul"] = True
@@ -2783,11 +2783,12 @@ class ChatGLMModel(Model):
         #
         #           root_input
         #              |   
-        #         dense_h_to_4h    
+        #         dense_h_to_4h    #Misnomer, it is increased to 2h instead of 4h
         #              |
         #           Activation
         #              |
         #        dense_4h_to_h  
+        #
         # Make MatMul nodes
         
         up_basename = f"/model/layers.{layer_id}/mlp/dense_h_to_4h/MatMul"
@@ -2802,36 +2803,16 @@ class ChatGLMModel(Model):
        
 
     def make_layer(self, layer_id, layer):
-        # Each GLM encoder is defined as follows all LayerNorms are RMSNorms:
-        # input_layernorm  --> self_attention --> residual_add_pre_input_layernorm --> layernorm --> dense --> residual_add_pre_last_layernorm
-        #TODO: @amd-sudo-sh Add the conditional statement for different residual configuration.
-        root_input = self.layernorm_attrs["root_input"]
-        self.make_layernorm(layer_id, layer.input_layernorm, skip=False, simple=self.layernorm_attrs["simple"], location="input")
+        # Each GLM encoder is defined as follows all LayerNorms are RMSNorms (Residual and Norm order same as LLama Model):
+        self.make_layernorm(layer_id, layer.input_layernorm, skip=not self.layernorm_attrs["first_layernorm"], simple=self.layernorm_attrs["simple"], location="input")
         self.make_attention(layer_id, layer.self_attention, root_input=self.layernorm_attrs["output_0"])
-        
-        residual_add_name_0 = f"/model/layers.{layer_id}/residual_add/Add_0"
-        residual_add_inputs_0 = [self.layernorm_attrs['skip_input'], root_input]
-        next_residual_input = self.layernorm_attrs['skip_input']
-        self.make_add(residual_add_name_0, residual_add_inputs_0, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
-        
-        self.layernorm_attrs["root_input"] = f"{residual_add_name_0}/output_0"
-        self.make_layernorm(layer_id, layer.input_layernorm, skip=False, simple=self.layernorm_attrs["simple"], location="post_attention")
+        self.make_layernorm(layer_id, layer.post_attention_layernorm, skip=True, simple=self.layernorm_attrs["simple"], location="post_attention")
+        self.make_mlp(layer_id, layer.mlp, root_input=self.layernorm_attrs["output_0"])
 
-        self.make_mlp(layer_id, layer.mlp, root_input=self.layernorm_attrs["output_0"]) #modifies the self.layernorm_attrs['skip_input']
-
-        residual_add_name_1 = f"/model/layers.{layer_id}/residual_add/Add_1"
-        residual_add_inputs_1 = [self.layernorm_attrs['skip_input'], next_residual_input]
-        self.make_add(residual_add_name_1, residual_add_inputs_1, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
-
-        self.layernorm_attrs["root_input"] = f"{residual_add_name_1}/output_0"
-        
+        self.layernorm_attrs["first_layernorm"] = False
         if layer_id == self.num_layers - 1:
             # Norm after last decoder layer of model (last layer --> norm)
             self.layernorm_attrs["last_layernorm"] = True
-
-        # Assign output 0 of residual Add as skip input to next SkipLayerNorm
-        self.layernorm_attrs["skip_input"] = f"{residual_add_name_1}/output_0"
-
 
 
 def check_extra_options(kv_pairs):
