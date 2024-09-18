@@ -128,8 +128,8 @@ struct Config {
         std::vector<std::string> inputs;
         std::vector<std::string> outputs;
         std::unordered_map<std::string, std::string> output_names_forwarder;
-        bool run_on_first_token_generation{true};
-        bool run_on_nth_token_generation{true};
+        bool run_on_prompt{true};
+        bool run_on_token_gen{true};
       };
 
       std::vector<PipelineModel> pipeline;

@@ -113,9 +113,9 @@ RoamingArray<float> DecoderOnlyPipelineState::Run(int current_length, RoamingArr
   }
 
   for (auto& pipeline_state : pipeline_states_) {
-    if (first_run_ && !model_.config_->model.decoder.pipeline[pipeline_state->id_].run_on_first_token_generation) {
+    if (first_run_ && !model_.config_->model.decoder.pipeline[pipeline_state->id_].run_on_prompt) {
       continue;
-    } else if (!first_run_ && !model_.config_->model.decoder.pipeline[pipeline_state->id_].run_on_nth_token_generation) {
+    } else if (!first_run_ && !model_.config_->model.decoder.pipeline[pipeline_state->id_].run_on_token_gen) {
       continue;
     }
 

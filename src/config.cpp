@@ -216,10 +216,10 @@ struct PipelineModel_Element : JSON::Element {
   }
 
   void OnBool(std::string_view name, bool value) override {
-    if (name == "run_on_first_token_generation") {
-      v_.run_on_first_token_generation = value;
-    } else if (name == "run_on_nth_token_generation") {
-      v_.run_on_nth_token_generation = value;
+    if (name == "run_on_prompt") {
+      v_.run_on_prompt = value;
+    } else if (name == "run_on_token_gen") {
+      v_.run_on_token_gen = value;
     } else
       throw JSON::unknown_value_error{};
   }
