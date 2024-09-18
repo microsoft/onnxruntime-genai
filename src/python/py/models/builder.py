@@ -42,7 +42,7 @@ class Model:
 
         self.cache_dir = cache_dir
         self.filename = extra_options["filename"] if "filename" in extra_options else "model.onnx"
-        self.hf_token=extra_options["hf_token"] if "hf_token" in extra_options else True
+        self.hf_token=parse_hf_token(extra_options["hf_token"])  if "hf_token" in extra_options else True
         self.extra_options = extra_options
 
         self.inputs = []
@@ -2713,6 +2713,14 @@ def parse_extra_options(kv_items):
     return kv_pairs
 
 
+def parse_hf_token(hf_token : str):
+    if hf_token.lower() in ["true", "false"]:
+        # Convert string to boolean
+        return hf_token.lower() == "true"
+    # Return as string
+    return hf_token
+
+
 def create_model(model_name, input_path, output_dir, precision, execution_provider, cache_dir, **extra_options):
     # Create cache and output directories
     os.makedirs(output_dir, exist_ok=True)
@@ -2721,7 +2729,8 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
     # Load model config
     extra_kwargs = {} if os.path.isdir(input_path) else {"cache_dir": cache_dir}
     hf_name = input_path if os.path.isdir(input_path) else model_name
-    config = AutoConfig.from_pretrained(hf_name, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
+    hf_token=parse_hf_token(extra_options["hf_token"]) if "hf_token" in extra_options else True
+    config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=True, **extra_kwargs)
 
     # Set input/output precision of ONNX model
     io_dtype = TensorProto.FLOAT if precision in {"int8", "fp32"} or (precision == "int4" and execution_provider == "cpu") else TensorProto.FLOAT16
