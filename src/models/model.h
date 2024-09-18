@@ -157,6 +157,10 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
   void CreateSessionOptions();
 
  private:
+  void CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
+                                      OrtSessionOptions& session_options,
+                                      bool is_primary_session_options);
+
 #if USE_DML
   mutable DmlObjects dml_objects_;
   const OrtDmlApi* p_dml_api_{};

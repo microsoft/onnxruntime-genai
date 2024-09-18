@@ -8,22 +8,20 @@ namespace Generators {
 
 DecoderOnlyPipelineModel::DecoderOnlyPipelineModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
-  bool device_allocator_created = false;
   for (const auto& model : config_->model.decoder.pipeline) {
     sessions_.emplace_back(OrtSession::Create(ort_env, (config_->config_path / fs::path(model.filename)).c_str(),
                                               GetSessionOptions(model.model_id)));
 
-    if (!device_allocator_created && model.session_options.has_value()) {
+    if (!allocator_device_ && model.session_options.has_value()) {
       const auto& provider_options = (*model.session_options).provider_options;
       if (std::any_of(provider_options.begin(), provider_options.end(),
                       [](const auto& elem) { return !elem.name.empty(); })) {
         InitDeviceAllocator(*sessions_.back());
-        device_allocator_created = true;
       }
     }
   }
 
-  if (!device_allocator_created) {
+  if (!allocator_device_) {
     // If the device allocator has not been created, it implies all
     // sessions are configured to run on CPU.
     // Pick any session to create the device allocator.
@@ -48,21 +46,15 @@ IntermediatePipelineState::IntermediatePipelineState(const DecoderOnlyPipelineMo
       model_{model} {}
 
 bool IntermediatePipelineState::HasInput(std::string_view name) const {
-  for (const auto& input : model_.config_->model.decoder.pipeline[id_].inputs) {
-    if (input == name) {
-      return true;
-    }
-  }
-  return false;
+  return std::any_of(model_.config_->model.decoder.pipeline[id_].inputs.begin(),
+                     model_.config_->model.decoder.pipeline[id_].inputs.end(),
+                     [&name](const std::string& elem) { return elem == name; });
 }
 
 bool IntermediatePipelineState::HasOutput(std::string_view name) const {
-  for (const auto& output : model_.config_->model.decoder.pipeline[id_].outputs) {
-    if (output == name) {
-      return true;
-    }
-  }
-  return false;
+  return std::any_of(model_.config_->model.decoder.pipeline[id_].outputs.begin(),
+                     model_.config_->model.decoder.pipeline[id_].outputs.end(),
+                     [&name](const std::string& elem) { return elem == name; });
 }
 
 bool IntermediatePipelineState::SupportsPrimaryDevice() const {
@@ -73,8 +65,8 @@ bool IntermediatePipelineState::SupportsPrimaryDevice() const {
       // No session options, so this session uses the default session options.
       // Default session options supports the cuda device type.
       return true;
-    } else if (std::any_of((*model_.config_->model.decoder.pipeline[id_].session_options).provider_options.begin(),
-                           (*model_.config_->model.decoder.pipeline[id_].session_options).provider_options.end(),
+    } else if (auto& provider_options = (*model_.config_->model.decoder.pipeline[id_].session_options).provider_options;
+               std::any_of(provider_options.begin(), provider_options.end(),
                            [](const Config::ProviderOptions& elem) { return elem.name == "cuda"; })) {
       // cuda is listed as one of the providers. This session supports the cuda device type.
       return true;
