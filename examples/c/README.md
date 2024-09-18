@@ -36,10 +36,7 @@ Change into the onnxruntime-genai folder.
 
 1. Install onnxruntime
 
-   This example is for `win-x64`. Other architectures include:
-   * `win-arm64` 
-   * `win-x64-gpu`
-   * `win-x84`
+   This example is for `win-x64`. 
    
    ```cmd
    curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-win-x64-1.19.2.zip -o onnxruntime-win-x64-1.19.2.zip
