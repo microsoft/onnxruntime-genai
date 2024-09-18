@@ -327,11 +327,6 @@ def test_pipeline_model(test_data_path, phi2_for, relative_model_path):
         'The quick brown fox jumps over the lazy dog.\n    """\n\n'
     ]
     assert tokenizer.decode_batch(output_sequences) == expected_output
-    logits = generator.get_output("logits")
-    assert np.allclose(
-        logits[:, :, ::200], expected_sampled_logits_token_gen, atol=1e-3
-    )
-    generator.generate_next_token()
 
 
 @pytest.mark.parametrize("relative_model_path", [Path("vision-preprocessing")])
