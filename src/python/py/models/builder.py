@@ -2357,15 +2357,15 @@ class PhiModel(Model):
 
 
 class GemmaModel(MistralModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options)
         self.embed_attrs["scale"] = np.round(np.sqrt(self.hidden_size), decimals=2)
         self.layernorm_attrs["add_offset"] = 1
 
 
 class Gemma2Model(GemmaModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options)
         self.attention_attrs["scale"] = config.query_pre_attn_scalar ** -0.5
         self.lm_head_attrs["scale"] = config.final_logit_softcapping
 
@@ -2709,19 +2709,19 @@ class Phi3Small8KModel(Model):
 
 
 class Phi3Small128KModel(Phi3Small8KModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options)
         self.make_rotary_embedding_multi_cache()
 
 
 class Phi3VModel(Phi3Mini128KModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options)
 
 
 class Phi3MoE128KModel(MistralModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options)
         assert io_dtype == TensorProto.FLOAT16, "This model only supports float16 io type."
 
         self.layernorm_attrs["simple"] = False
