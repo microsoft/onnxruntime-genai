@@ -62,7 +62,7 @@ Change into the onnxruntime-genai folder.
 #### Build this sample
 
 ```bash
-cmake -A x64 -S . -B build
+cmake -A x64 -S . -B build -DPHI3=ON
 cd build
 cmake --build . --config Release
 ```
@@ -82,7 +82,7 @@ Change into the onnxruntime-genai folder.
 
 1. Install onnxruntime
 
-   This example is for `win-arm64`. Other architectures include:
+   This example is for `win-arm64`.
    
    ```cmd
    curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-win-arm64-1.19.2.zip -o onnxruntime-win-arm64-1.19.2.zip
