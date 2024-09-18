@@ -90,7 +90,7 @@ Change into the onnxruntime-genai directory.
 #### Windows
 
 ```bash
-cmake -A x64 -S . -B build
+cmake -A x64 -S . -B build -DPHI3=ON
 cd build
 cmake --build . --config Release
 ```
@@ -102,14 +102,14 @@ Build with CUDA:
 ```bash
 mkdir build
 cd build
-cmake ../ -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=80 -DUSE_CUDA=ON
+cmake ../ -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=80 -DUSE_CUDA=ON -DPHI3=ON
 cmake --build . --config Release
 ```
 
 Build for CPU:
 
 ```bash
-cmake .
+cmake . -DPHI3=ON
 cd build
 cmake --build . --config Release
 ```
@@ -165,7 +165,7 @@ Change into the onnxruntime-genai folder.
 #### Build this sample
 
 ```bash
-cmake -G "Visual Studio 17 2022" -A x64 -S . -B build
+cmake -G "Visual Studio 17 2022" -A x64 -S . -B build -DPHI3V=ON
 cd build
 cmake --build . --config Release
 ```
@@ -212,7 +212,7 @@ Change into the onnxruntime-genai directory.
 Build to run with CUDA:
 
 ```bash
-cmake . -B build -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=80 -DUSE_CUDA=ON
+cmake . -B build -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=80 -DUSE_CUDA=ON -DPHI3V=ON
 cd build
 cmake --build . --config Release
 ```
@@ -220,7 +220,7 @@ cmake --build . --config Release
 Build for CPU:
 
 ```bash
-cmake . -B build
+cmake . -B build -DPHI3V=ON
 cd build
 cmake --build . --config Release
 ```
