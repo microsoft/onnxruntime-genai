@@ -50,24 +50,24 @@ InputIDs::InputIDs(const Model& model, State& state)
     return seq_length;
   };
 
-  if (model_.session_info_->HasInput(model_.config_->model.decoder.inputs.curr_seq_length) &&
-      model_.session_info_->HasInput(model_.config_->model.decoder.inputs.past_seq_length)) {
+  if (model_.session_info_->HasInput(model_.config_->model.decoder.inputs.current_sequence_length) &&
+      model_.session_info_->HasInput(model_.config_->model.decoder.inputs.past_sequence_length)) {
     if (state_.params_->BatchBeamSize() != 1) {
-      throw std::runtime_error("Batch size must be 1 for curr_seq_length and past_seq_length inputs");
+      throw std::runtime_error("Batch size must be 1 for current_sequence_length and past_sequence_length inputs");
     }
-    const int32_t curr_seq_length = get_unpadded_sequence_length(state_.params_->input_ids, state_.params_->pad_token_id);
-    const std::array<int64_t, 1> curr_seq_length_shape{1};
-    const std::array<int64_t, 2> past_seq_length_shape{1, 1};
+    const int32_t current_sequence_length = get_unpadded_sequence_length(state_.params_->input_ids, state_.params_->pad_token_id);
+    const std::array<int64_t, 1> current_sequence_length_shape{1};
+    const std::array<int64_t, 2> past_sequence_length_shape{1, 1};
 
-    if (model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.curr_seq_length) != Ort::TypeToTensorType<int32_t> ||
-        model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.past_seq_length) != Ort::TypeToTensorType<int32_t>)
-      throw std::runtime_error("curr_seq_length and past_seq_length must be int32");
+    if (model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.current_sequence_length) != Ort::TypeToTensorType<int32_t> ||
+        model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.past_sequence_length) != Ort::TypeToTensorType<int32_t>)
+      throw std::runtime_error("current_sequence_length and past_sequence_length must be int32");
 
-    curr_seq_length_ = OrtValue::CreateTensor(model_.allocator_cpu_, curr_seq_length_shape, model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.curr_seq_length));
-    *curr_seq_length_->GetTensorMutableData<int32_t>() = curr_seq_length;
+    current_sequence_length_ = OrtValue::CreateTensor(model_.allocator_cpu_, current_sequence_length_shape, model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.current_sequence_length));
+    *current_sequence_length_->GetTensorMutableData<int32_t>() = current_sequence_length;
 
-    past_seq_length_ = OrtValue::CreateTensor(*model_.allocator_device_, past_seq_length_shape, model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.past_seq_length));
-    *past_seq_length_->GetTensorMutableData<int32_t>() = curr_seq_length - 1;
+    past_sequence_length_ = OrtValue::CreateTensor(*model_.allocator_device_, past_sequence_length_shape, model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.past_sequence_length));
+    *past_sequence_length_->GetTensorMutableData<int32_t>() = current_sequence_length - 1;
   }
 }
 
@@ -77,11 +77,11 @@ void InputIDs::Add() {
   state_.inputs_.push_back(value_.get());
   state_.input_names_.push_back(name_);
 
-  if (curr_seq_length_ && past_seq_length_) {
-    state_.input_names_.push_back(model_.config_->model.decoder.inputs.curr_seq_length.c_str());
-    state_.inputs_.push_back(curr_seq_length_.get());
-    state_.input_names_.push_back(model_.config_->model.decoder.inputs.past_seq_length.c_str());
-    state_.inputs_.push_back(past_seq_length_.get());
+  if (current_sequence_length_ && past_sequence_length_) {
+    state_.input_names_.push_back(model_.config_->model.decoder.inputs.current_sequence_length.c_str());
+    state_.inputs_.push_back(current_sequence_length_.get());
+    state_.input_names_.push_back(model_.config_->model.decoder.inputs.past_sequence_length.c_str());
+    state_.inputs_.push_back(past_sequence_length_.get());
   }
 }
 
@@ -164,9 +164,9 @@ void InputIDs::Update(RoamingArray<int32_t> next_tokens_unk) {
       memcpy(data, next_tokens_unk.GetCPU().data(), shape_[0] * sizeof(int32_t));
   }
 
-  if (curr_seq_length_ && past_seq_length_) {
-    *curr_seq_length_->GetTensorMutableData<int32_t>() += 1;
-    *past_seq_length_->GetTensorMutableData<int32_t>() += 1;
+  if (current_sequence_length_ && past_sequence_length_) {
+    *current_sequence_length_->GetTensorMutableData<int32_t>() += 1;
+    *past_sequence_length_->GetTensorMutableData<int32_t>() += 1;
   }
 }
 

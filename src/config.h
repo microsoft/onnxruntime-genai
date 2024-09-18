@@ -14,8 +14,8 @@ struct Config {
     static constexpr std::string_view ImageSizesName = "image_sizes";
     static constexpr std::string_view InputFeaturesName = "encoder_input_ids";
     static constexpr std::string_view ImageFeaturesName = "image_features";
-    static constexpr std::string_view CurrentSequenceLengthName = "curr_seq_len";
-    static constexpr std::string_view PastSequenceLengthName = "past_seq_len";
+    static constexpr std::string_view CurrentSequenceLengthName = "current_sequence_length";
+    static constexpr std::string_view PastSequenceLengthName = "past_sequence_length";
   };
 
   fs::path config_path;  // Path of the config directory
@@ -109,8 +109,8 @@ struct Config {
         std::string past_key_names{"past_key_values.%d.key"}, past_value_names{"past_key_values.%d.value"};
         std::string past_names;  // When key/value pairs are combined
         std::string cross_past_key_names, cross_past_value_names;
-        std::string curr_seq_length{Defaults::CurrentSequenceLengthName};
-        std::string past_seq_length{Defaults::PastSequenceLengthName};
+        std::string current_sequence_length{Defaults::CurrentSequenceLengthName};
+        std::string past_sequence_length{Defaults::PastSequenceLengthName};
       } inputs;
 
       struct Outputs {

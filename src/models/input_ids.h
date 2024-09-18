@@ -35,8 +35,8 @@ struct InputIDs {
   DmlReusedCommandListState input_ids_cast_command_list_state_{};
 #endif
 
-  std::unique_ptr<OrtValue> curr_seq_length_;
-  std::unique_ptr<OrtValue> past_seq_length_;
+  std::unique_ptr<OrtValue> current_sequence_length_;
+  std::unique_ptr<OrtValue> past_sequence_length_;
 };
 
 }  // namespace Generators
