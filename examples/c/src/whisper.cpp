@@ -57,8 +57,8 @@ void CXX_API(const char* model_path, int32_t num_beams) {
 
     std::cout << "Processing audio..." << std::endl;
     auto mel = processor->ProcessAudios(audios.get());
-    const std::array<const char*, 4> prompt_tokens = {"<|startoftranscript|>", "<|en|>", "<|transcribe|>",
-                                                      "<|notimestamps|>"};
+    const std::vector<const char*> prompt_tokens = {"<|startoftranscript|>", "<|en|>", "<|transcribe|>",
+                                                    "<|notimestamps|>"};
     auto input_ids = OgaSequences::Create();
     const size_t batch_size = audio_paths.size();
     for (size_t i = 0; i < batch_size; ++i) {
@@ -148,8 +148,8 @@ void C_API(const char* model_path, int32_t num_beams) {
     std::cout << "Processing audio..." << std::endl;
     OgaNamedTensors* mel;
     CheckResult(OgaProcessorProcessAudios(processor, audios, &mel));
-    const std::array<const char*, 4> prompt_tokens = {"<|startoftranscript|>", "<|en|>", "<|transcribe|>",
-                                                      "<|notimestamps|>"};
+    const std::vector<const char*> prompt_tokens = {"<|startoftranscript|>", "<|en|>", "<|transcribe|>",
+                                                    "<|notimestamps|>"};
     OgaSequences* input_ids;
     CheckResult(OgaCreateSequences(&input_ids));
     const size_t batch_size = audio_paths.size();
