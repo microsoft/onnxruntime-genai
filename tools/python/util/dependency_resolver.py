@@ -23,9 +23,9 @@ def _download_ort(
     def _lib_path():
         plat = "linux" if is_linux() else "win" if is_windows() else "osx"
         mach = None
-        if platform.machine() == "x86_64" or platform.machine() == "AMD64":
+        if platform.machine().lower() == "x86_64" or platform.machine().lower() == "AMD64":
             mach = "x64"
-        elif platform.machine() == "aarch64" or platform.machine() == "arm64":
+        elif platform.machine().lower() == "aarch64" or platform.machine().lower() == "arm64":
             mach = "arm64"
         else:
             raise NotImplementedError(
@@ -78,9 +78,9 @@ def _download_ort(
 def _download_dml(destination_dir: PathLike):
     def _lib_path():
         mach = None
-        if platform.machine() == "x86_64" or platform.machine() == "AMD64":
+        if platform.machine().lower() == "x86_64" or platform.machine().lower() == "AMD64":
             mach = "x64"
-        elif platform.machine() == "aarch64" or platform.machine() == "arm64":
+        elif platform.machine().lower() == "aarch64" or platform.machine().lower() == "arm64":
             mach = "arm64"
         else:
             raise NotImplementedError(
@@ -112,9 +112,9 @@ def _download_dml(destination_dir: PathLike):
 def _download_d3d12(destination_dir: PathLike):
     def _lib_path():
         mach = None
-        if platform.machine() == "x86_64" or platform.machine() == "AMD64":
+        if platform.machine().lower() == "x86_64" or platform.machine().lower() == "AMD64":
             mach = "x64"
-        elif platform.machine() == "aarch64" or platform.machine() == "arm64":
+        elif platform.machine().lower() == "aarch64" or platform.machine().lower() == "arm64":
             mach = "arm64"
         else:
             raise NotImplementedError(
