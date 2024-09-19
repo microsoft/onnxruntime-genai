@@ -2881,10 +2881,6 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
         elif config.architectures[0] == "Qwen2ForCausalLM":
             onnx_model = QwenModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "ChatGLMModel":
-            # #TODO: @amd-sudo-sh: Encapsulate the config parsing in a better way
-            # config.max_position_embeddings = config.seq_length # Max sequence length a model can handle
-            # config.intermediate_size = config.ffn_hidden_size # Size of feed-forward network's hidden layer
-            # config.num_hidden_layers = config.num_layers 
             config.hidden_act = "swiglu"
             onnx_model = ChatGLMModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         else:
