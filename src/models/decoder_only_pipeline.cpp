@@ -6,6 +6,17 @@
 
 namespace Generators {
 
+namespace {
+
+void DumpStore(const std::unordered_map<std::string, std::unique_ptr<OrtValue>>& store) {
+  for (const auto& [name, ort_value] : store) {
+    std::cout << name << " ";
+  }
+  std::cout << std::endl;
+}
+
+}  // namespace
+
 DecoderOnlyPipelineModel::DecoderOnlyPipelineModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
   for (const auto& model : config_->model.decoder.pipeline) {
@@ -217,6 +228,21 @@ RoamingArray<float> DecoderOnlyPipelineState::Run(int current_length, RoamingArr
       }
     }
   }
+
+  if (!first_run_) {
+    for (auto& pipeline_state : pipeline_states_) {
+      if (!model_.config_->model.decoder.pipeline[pipeline_state->id_].run_on_token_gen) {
+        // Clear the ortvalue store.
+        for (const auto& output_name : pipeline_state->output_names_) {
+          if (auto iter = ortvalue_store_.find(output_name); iter != ortvalue_store_.end()) {
+            ortvalue_store_.erase(iter);
+          }
+        }
+      }
+    }
+  }
+
+  // DumpStore(ortvalue_store_);
 
   first_run_ = false;
 
