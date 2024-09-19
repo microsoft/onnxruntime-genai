@@ -38,9 +38,9 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--no_contrib_ops",
+        "--use_qdq",
         action="store_true",
-        help="If this option is provided, the model isn't allowed to have contrib ops",
+        help="Use the QDQ decomposition for quantized MatMul instead of the MatMulNBits operator",
     )
 
     args = parser.parse_args()
@@ -122,10 +122,13 @@ def main():
     output_folder = args.output_path
     precision = "int4"
     execution_provider = args.execution_provider
-    no_contrib_ops = args.no_contrib_ops
     cache_dir = os.path.join(".", "cache_dir")
 
-    create_model(model_name, input_folder, output_folder, precision, no_contrib_ops, execution_provider, cache_dir)
+    extra_options = {
+        "use_qdq": args.use_qdq,
+    }
+
+    create_model(model_name, input_folder, output_folder, precision, execution_provider, cache_dir, **extra_options)
 
     # Run ONNX model
     if args.execution_provider != "dml":

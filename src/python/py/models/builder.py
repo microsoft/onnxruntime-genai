@@ -21,7 +21,7 @@ import textwrap
 
 
 class Model:
-    def __init__(self, config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         self.context_length = config.max_position_embeddings
         self.original_context_length = config.original_max_position_embeddings if hasattr(config, "original_max_position_embeddings") else config.rope_scaling["original_max_position_embeddings"] if hasattr(config, "rope_scaling") and hasattr(config.rope_scaling, "original_max_position_embeddings") else config.max_position_embeddings
         self.window_size = config.sliding_window if hasattr(config, "sliding_window") else -1  # default is -1 in GroupQueryAttention kernel
@@ -38,7 +38,7 @@ class Model:
         self.model_type = config.architectures[0]
         self.io_dtype = io_dtype      # {'fp16', 'fp32'}
         self.onnx_dtype = onnx_dtype  # {"int4", "fp16", "fp32"}
-        self.no_contrib_ops = no_contrib_ops
+        self.use_qdq = extra_options.get("use_qdq", False)
         self.quant_type = config.quantization_config["quant_method"] if hasattr(config, "quantization_config") else None
 
         self.cache_dir = cache_dir
@@ -360,7 +360,7 @@ class Model:
 
         # Create ONNX model
         model = helper.make_model(
-            opset_imports=[self.clear_field(helper.make_operatorsetid('', 21 if self.no_contrib_ops else 14), 'domain'), helper.make_operatorsetid('com.microsoft', 1)],
+            opset_imports=[self.clear_field(helper.make_operatorsetid('', 21 if self.use_qdq else 14), 'domain'), helper.make_operatorsetid('com.microsoft', 1)],
             ir_version=7,
             producer_name="onnxruntime-genai",
             producer_version="0.0.0",
@@ -418,7 +418,7 @@ class Model:
             is_symmetric=True,
             accuracy_level=self.quant_attrs["int4"]["accuracy_level"],
             nodes_to_exclude=[],
-            quant_format=QuantFormat.QDQ if self.no_contrib_ops else QuantFormat.QOperator,
+            quant_format=QuantFormat.QDQ if self.use_qdq else QuantFormat.QOperator,
         )
         quant.process()
         return quant.model.model
@@ -667,7 +667,7 @@ class Model:
         if self.onnx_dtype in {"fp16", "fp32"}:
             return self.make_matmul_fp16_or_fp32(matmul, basename, root_input, **kwargs)
         elif self.onnx_dtype == "int4":
-            if self.no_contrib_ops:
+            if self.use_qdq:
                 return self.make_matmul_int4_qdq(matmul, basename, root_input, **kwargs)
             else:
                 return self.make_matmul_int4(matmul, basename, root_input, **kwargs)
@@ -2306,13 +2306,13 @@ class Model:
 
 
 class LlamaModel(Model):
-    def __init__(self, config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
 
 class MistralModel(Model):
-    def __init__(self, config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.position_ids_name = f"{self.make_position_ids_reformatting()}/output_0" if not self.attention_attrs["use_rotemb_in_attn"] else "position_ids"
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
@@ -2320,13 +2320,13 @@ class MistralModel(Model):
 
 
 class QwenModel(MistralModel):
-    def __init__(self, config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
 
 class PhiModel(Model):
-    def __init__(self, config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         # self.input_shapes["position_ids"] = [1]  # Note: This is optional and only needed if you want position_ids to be an int instead of a 2D tensor
         self.layernorm_attrs["simple"] = False
         self.rotemb_attrs["num_heads"] = self.num_attn_heads
@@ -2357,15 +2357,15 @@ class PhiModel(Model):
 
 
 class GemmaModel(MistralModel):
-    def __init__(self, config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.embed_attrs["scale"] = np.round(np.sqrt(self.hidden_size), decimals=2)
         self.layernorm_attrs["add_offset"] = 1
 
 
 class Gemma2Model(GemmaModel):
-    def __init__(self, config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.attention_attrs["scale"] = config.query_pre_attn_scalar ** -0.5
         self.lm_head_attrs["scale"] = config.final_logit_softcapping
 
@@ -2426,8 +2426,8 @@ class Gemma2Model(GemmaModel):
 
 
 class Phi3Mini4KModel(MistralModel):
-    def __init__(self, config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         if self.quant_type is None:
@@ -2441,8 +2441,8 @@ class Phi3Mini4KModel(MistralModel):
 
 
 class Phi3Mini128KModel(Phi3Mini4KModel):
-    def __init__(self, config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.make_rotary_embedding_multi_cache()
    
     def make_position_ids_reformatting(self):
@@ -2510,8 +2510,8 @@ class Phi3Mini128KModel(Phi3Mini4KModel):
         return cos_cache_name, sin_cache_name
 
 class Phi3Small8KModel(Model):
-    def __init__(self, config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.layernorm_attrs["simple"] = False
         self.embed_attrs["scale"] = config.mup_embedding_multiplier
         self.rotemb_attrs["t_dtype"] = torch.float32
@@ -2709,19 +2709,19 @@ class Phi3Small8KModel(Model):
 
 
 class Phi3Small128KModel(Phi3Small8KModel):
-    def __init__(self, config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.make_rotary_embedding_multi_cache()
 
 
 class Phi3VModel(Phi3Mini128KModel):
-    def __init__(self, config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
 
 class Phi3MoE128KModel(MistralModel):
-    def __init__(self, config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, no_contrib_ops, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         assert io_dtype == TensorProto.FLOAT16, "This model only supports float16 io type."
 
         self.layernorm_attrs["simple"] = False
@@ -2773,7 +2773,7 @@ def parse_extra_options(kv_items):
     return kv_pairs
 
 
-def create_model(model_name, input_path, output_dir, precision, no_contrib_ops, execution_provider, cache_dir, **extra_options):
+def create_model(model_name, input_path, output_dir, precision, execution_provider, cache_dir, **extra_options):
     # Create cache and output directories
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(cache_dir, exist_ok=True)
@@ -2789,35 +2789,35 @@ def create_model(model_name, input_path, output_dir, precision, no_contrib_ops, 
     if "config_only" not in extra_options:
         # List architecture options in alphabetical order
         if config.architectures[0] == "GemmaForCausalLM":
-            onnx_model = GemmaModel(config, io_dtype, precision, no_contrib_ops, execution_provider, cache_dir, extra_options)
+            onnx_model = GemmaModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Gemma2ForCausalLM":
-            onnx_model = Gemma2Model(config, io_dtype, precision, no_contrib_ops, execution_provider, cache_dir, extra_options)
+            onnx_model = Gemma2Model(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "LlamaForCausalLM":
-            onnx_model = LlamaModel(config, io_dtype, precision, no_contrib_ops, execution_provider, cache_dir, extra_options)
+            onnx_model = LlamaModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "MistralForCausalLM":
-            onnx_model = MistralModel(config, io_dtype, precision, no_contrib_ops, execution_provider, cache_dir, extra_options)
+            onnx_model = MistralModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "PhiForCausalLM":
-            onnx_model = PhiModel(config, io_dtype, precision, no_contrib_ops, execution_provider, cache_dir, extra_options)
+            onnx_model = PhiModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings == 4096:
-            onnx_model = Phi3Mini4KModel(config, io_dtype, precision, no_contrib_ops, execution_provider, cache_dir, extra_options)
+            onnx_model = Phi3Mini4KModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings == 131072:
-            onnx_model = Phi3Mini128KModel(config, io_dtype, precision, no_contrib_ops, execution_provider, cache_dir, extra_options)
+            onnx_model = Phi3Mini128KModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "PhiMoEForCausalLM" and config.max_position_embeddings == 131072:
             print("WARNING: This model only works for CUDA currently because `MoE` is only supported for CUDA in ONNX Runtime. Setting `--execution_provider cuda` by default.")
             print("WARNING: This model currently only supports quantized version. Setting `--precision int4` by default.")
             execution_provider = "cuda"
             precision = "int4"
-            onnx_model = Phi3MoE128KModel(config, io_dtype, precision, no_contrib_ops, execution_provider, cache_dir, extra_options)
+            onnx_model = Phi3MoE128KModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings == 8192:
-            onnx_model = Phi3Small8KModel(config, io_dtype, precision, no_contrib_ops, execution_provider, cache_dir, extra_options)
+            onnx_model = Phi3Small8KModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings == 131072:
-            onnx_model = Phi3Small128KModel(config, io_dtype, precision, no_contrib_ops, execution_provider, cache_dir, extra_options)
+            onnx_model = Phi3Small128KModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3VForCausalLM":
             print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
             extra_options["exclude_embeds"] = True
-            onnx_model = Phi3VModel(config, io_dtype, precision, no_contrib_ops, execution_provider, cache_dir, extra_options)
+            onnx_model = Phi3VModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Qwen2ForCausalLM":
-            onnx_model = QwenModel(config, io_dtype, precision, no_contrib_ops, execution_provider, cache_dir, extra_options)
+            onnx_model = QwenModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         else:
             raise NotImplementedError(f"The {hf_name} model is not currently supported.")
 
@@ -2827,7 +2827,7 @@ def create_model(model_name, input_path, output_dir, precision, no_contrib_ops, 
         # Save ONNX model
         onnx_model.save_model(output_dir)
     else:
-        onnx_model = Model(config, io_dtype, precision, no_contrib_ops, execution_provider, cache_dir, extra_options)
+        onnx_model = Model(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
 
     # Make GenAI config
     onnx_model.make_genai_config(hf_name, extra_kwargs, output_dir)
@@ -2872,12 +2872,6 @@ def get_args():
         required=True,
         choices=["int4", "fp16", "fp32"],
         help="Precision of model",
-    )
-
-    parser.add_argument(
-        "--no_contrib_ops",
-        action="store_true",
-        help="If this option is provided, the model isn't allowed to have contrib ops",
     )
 
     parser.add_argument(
@@ -2926,6 +2920,7 @@ def get_args():
                     is the prerequisite for the CUDA graph to be used correctly. It is not guaranteed that cuda graph be enabled as it depends on the model
                     and the graph structure.
                 use_8bits_moe = 1 : Use 8-bit quantization for MoE layers. Default is using 4-bit quantization.
+                use_qdq = 1 : Use the QDQ decomposition for quantized MatMul instead of the MatMulNBits operator.
             """),
     )
 
@@ -2936,4 +2931,4 @@ def get_args():
 if __name__ == '__main__':
     args = get_args()
     extra_options = parse_extra_options(args.extra_options)
-    create_model(args.model_name, args.input, args.output, args.precision, args.no_contrib_ops, args.execution_provider, args.cache_dir, **extra_options)
+    create_model(args.model_name, args.input, args.output, args.precision, args.execution_provider, args.cache_dir, **extra_options)
