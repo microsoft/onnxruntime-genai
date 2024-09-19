@@ -2,7 +2,7 @@
 
 ## Setup
 
-Clone this repo and change into the examples/c folder.
+Clone this repo and change into the `examples/c` folder.
 
 ```bash
 git clone https://github.com/microsoft/onnxruntime-genai.git
@@ -32,7 +32,7 @@ huggingface-cli download microsoft/Phi-3-mini-4k-instruct-onnx --include cpu_and
 
 #### Install the onnxruntime and onnxruntime-genai binaries
 
-Change into the onnxruntime-genai folder.
+Change into the `onnxruntime-genai\examples\c` folder.
 
 1. Install onnxruntime
    
@@ -74,7 +74,7 @@ cd Release
 
 #### Install the onnxruntime and onnxruntime-genai binaries
 
-Change into the onnxruntime-genai folder.
+Change into the `onnxruntime-genai\examples\c` folder.
 
 1. Install onnxruntime
    
@@ -119,7 +119,7 @@ cd Release
 
 #### Install the onnxruntime and onnxruntime-genai binaries
 
-Change into the onnxruntime-genai folder.
+Change into the `onnxruntime-genai\examples\c` folder.
 
 1. Install onnxruntime
    
@@ -161,7 +161,7 @@ cd Release
 
 #### Install the onnxruntime and onnxruntime-genai binaries
 
-Change into the onnxruntime-genai folder.
+Change into the `onnxruntime-genai\examples\c` folder.
 
 1. Install onnxruntime
    
