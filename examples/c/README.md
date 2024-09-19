@@ -97,7 +97,7 @@ Change into the onnxruntime-genai folder.
 
    ```cmd
    cd ..\..
-   python build.py --arm64 --config Release --skip_wheel --parallel --cmake_extra_defines ENABLE_PYTHON=OFF
+   python build.py --arm64 --config Release --skip_wheel --parallel --cmake_extra_defines ENABLE_PYTHON=OFF --ort_home examples\c
    copy src\ort_genai.h examples\c\include
    copy src\ort_genai_c.h examples\c\include
    copy build\Windows\Release\Release\*.dll examples\c\lib
