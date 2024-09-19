@@ -120,6 +120,11 @@ RoamingArray<float> DecoderOnlyPipelineState::Run(int current_length, RoamingArr
     }
 
     // Clear the intermediate pipeline state from previous runs.
+    for (const auto& output_name : pipeline_state->output_names_) {
+      if (auto iter = ortvalue_store_.find(output_name); iter != ortvalue_store_.end()) {
+        ortvalue_store_.erase(iter);
+      }
+    }
     pipeline_state->ClearIO();
 
     // Managed inputs and outputs are those inputs and outputs that the
@@ -143,10 +148,10 @@ RoamingArray<float> DecoderOnlyPipelineState::Run(int current_length, RoamingArr
     }
 
     // Add outputs from the previous pipeline states to the current pipeline state
-    for (auto& [name, ortvalue] : ortvalue_pool_) {
+    for (auto& [name, ortvalue] : ortvalue_store_) {
       if (pipeline_state->HasInput(name)) {
         pipeline_state->input_names_.push_back(name.c_str());
-        pipeline_state->inputs_.push_back(ortvalue);
+        pipeline_state->inputs_.push_back(ortvalue.get());
       }
     }
 
@@ -167,6 +172,23 @@ RoamingArray<float> DecoderOnlyPipelineState::Run(int current_length, RoamingArr
       }
     }
 
+    // Output of pipeline models could also be managed inputs for the subsequent pipeline model.
+    for (const auto& input_name : input_names_) {
+      if (pipeline_state->HasOutput(input_name)) {
+        if (!pipeline_state->SupportsPrimaryDevice()) {
+          std::ostringstream oss;
+          oss << "Managed input " << input_name << " resides on the primary device type ("
+              << to_string(model_.device_type_) << "). "
+              << "But the pipeline model "
+              << model_.config_->model.decoder.pipeline[pipeline_state->id_].model_id
+              << " is expecting it to reside elsewhere.";
+          throw std::runtime_error(oss.str());
+        }
+        pipeline_state->output_names_.push_back(input_name);
+        pipeline_state->outputs_.push_back(State::GetInput(input_name));
+      }
+    }
+
     // Add all the remaining outputs for the intermediate pipeline state
     for (const auto& output_name : model_.config_->model.decoder.pipeline[pipeline_state->id_].outputs) {
       if (std::none_of(pipeline_state->output_names_.begin(), pipeline_state->output_names_.end(),
@@ -183,12 +205,14 @@ RoamingArray<float> DecoderOnlyPipelineState::Run(int current_length, RoamingArr
     // All non managed outputs are assumed to be on CPU
     for (size_t i = 0; i < pipeline_state->output_names_.size(); ++i) {
       if (std::none_of(output_names_.begin(), output_names_.end(),
+                       [&](const std::string& elem) { return elem == pipeline_state->output_names_[i]; }) &&
+          std::none_of(input_names_.begin(), input_names_.end(),
                        [&](const std::string& elem) { return elem == pipeline_state->output_names_[i]; })) {
         auto forwarded_output = model_.config_->model.decoder.pipeline[pipeline_state->id_].output_names_forwarder.find(pipeline_state->output_names_[i]);
         if (forwarded_output != model_.config_->model.decoder.pipeline[pipeline_state->id_].output_names_forwarder.end()) {
-          ortvalue_pool_[forwarded_output->second] = pipeline_state->outputs_[i];
+          ortvalue_store_[forwarded_output->second] = std::unique_ptr<OrtValue>(pipeline_state->outputs_[i]);
         } else {
-          ortvalue_pool_[pipeline_state->output_names_[i]] = pipeline_state->outputs_[i];
+          ortvalue_store_[pipeline_state->output_names_[i]] = std::unique_ptr<OrtValue>(pipeline_state->outputs_[i]);
         }
       }
     }
@@ -209,9 +233,9 @@ void DecoderOnlyPipelineState::UpdateInputsOutputs(const RoamingArray<int32_t>& 
 
 OrtValue* DecoderOnlyPipelineState::GetOutput(const char* name) {
   // Check the ortvalue pool to search if name is one of the non-managed output.
-  auto it = ortvalue_pool_.find(name);
-  if (it != ortvalue_pool_.end()) {
-    return it->second;
+  auto it = ortvalue_store_.find(name);
+  if (it != ortvalue_store_.end()) {
+    return it->second.get();
   }
 
   // Search managed outputs saved in this State.
