@@ -177,8 +177,6 @@ Change into the onnxruntime-genai folder.
 
 2. Install onnxruntime-genai
 
-   This example requires onnxruntime-genai to be built from source.
-
    ```cmd
    curl -L https://github.com/microsoft/onnxruntime-genai/releases/download/v0.4.0/onnxruntime-genai-win-directml-arm64-capi.zip -o onnxruntime-genai-win-directml-arm64-capi.zip
    tar xvf onnxruntime-genai-win-directml-arm64-capi.zip
