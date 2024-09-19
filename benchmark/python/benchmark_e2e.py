@@ -239,8 +239,9 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     if args.verbose: print("Running warmup runs...")
     for _ in tqdm(range(args.warmup)):
         generator = og.Generator(model, params)
-        generator.compute_logits()
-        generator.generate_next_token()
+        while not generator.is_done():
+            generator.compute_logits()
+            generator.generate_next_token()
         if args.print_model_output: print(tokenizer.decode(generator.get_sequence(0)))
         # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
         del generator
