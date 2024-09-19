@@ -253,9 +253,6 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     if args.verbose: print(f"Running benchmark for batch size = {batch_size}, prompt length = {prompt_length}")
     for _ in tqdm(range(num_repetitions)):
         wall_clock_start_time = time.time()
-        
-        # Prepare run
-        generator = og.Generator(model, params)
 
         # Measure tokenization
         tokenize_start_time = time.perf_counter()
