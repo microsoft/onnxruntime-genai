@@ -431,7 +431,7 @@ class Model:
         order = list(order)
         repeated_proto.sort(key=lambda x: order.index(getattr(x, key_name)))
 
-    def make_external_tensor(self, np_data, name, unpack_int4=False):
+    def make_external_tensor(self, np_data, name, unpack_int4=False, **kwargs):
         tensor = numpy_helper.from_array(np_data)
         tensor.name = name
 
