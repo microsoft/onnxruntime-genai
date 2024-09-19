@@ -35,8 +35,6 @@ huggingface-cli download microsoft/Phi-3-mini-4k-instruct-onnx --include cpu_and
 Change into the onnxruntime-genai folder.
 
 1. Install onnxruntime
-
-   This example is for `win-x64`, which builds for CPU. For DirectML use `win-x64-gpu` instead.  
    
    ```cmd
    curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-win-x64-1.19.2.zip -o onnxruntime-win-x64-1.19.2.zip
@@ -47,17 +45,10 @@ Change into the onnxruntime-genai folder.
 
 2. Install onnxruntime-genai
 
-   This example is for `win-cpu-x64`. For DirectML, use `win-directml-x64`.
-
    ```cmd
    curl -L https://github.com/microsoft/onnxruntime-genai/releases/download/v0.4.0/onnxruntime-genai-win-cpu-x64-capi.zip -o onnxruntime-genai-win-cpu-x64-capi.zip
    tar xvf onnxruntime-genai-win-cpu-x64-capi.zip
    cd onnxruntime-genai-win-cpu-x64-capi
-   ```
-
-   For DirectML, change `win-x64` to `win-x64-dml`.
-
-   ```cmd
    tar xvf onnxruntime-genai-0.4.0-win-x64.zip
    copy onnxruntime-genai-0.4.0-win-x64\include\* ..\include
    copy onnxruntime-genai-0.4.0-win-x64\lib\* ..\lib
@@ -86,8 +77,6 @@ cd Release
 Change into the onnxruntime-genai folder.
 
 1. Install onnxruntime
-
-   This example is for `win-x64`, which builds for CPU. For DirectML use `win-x64-gpu` instead.  
    
    ```cmd
    mkdir onnxruntime-win-x64-directml
@@ -101,17 +90,10 @@ Change into the onnxruntime-genai folder.
 
 2. Install onnxruntime-genai
 
-   This example is for `win-cpu-x64`. For DirectML, use `win-directml-x64`.
-
    ```cmd
    curl -L https://github.com/microsoft/onnxruntime-genai/releases/download/v0.4.0/onnxruntime-genai-win-directml-x64-capi.zip -o onnxruntime-genai-win-directml-x64-capi.zip
    tar xvf onnxruntime-genai-win-directml-x64-capi.zip
    cd onnxruntime-genai-win-directml-x64-capi
-   ```
-
-   For DirectML, change `win-x64` to `win-x64-dml`.
-
-   ```cmd
    tar xvf onnxruntime-genai-0.4.0-win-x64-dml.zip
    copy onnxruntime-genai-0.4.0-win-x64-dml\include\* ..\include
    copy onnxruntime-genai-0.4.0-win-x64-dml\lib\* ..\lib
