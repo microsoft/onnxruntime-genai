@@ -226,8 +226,12 @@ struct OgaGenerator : OgaAbstract {
     return OgaGenerator_IsDone(this);
   }
 
-  void AddInputTokens(const OgaSequences& sequences) {
-    OgaCheckResult(OgaGenerator_AddInputTokens(this, &sequences));
+  void AddInputSequences(const OgaSequences& sequences) {
+    OgaCheckResult(OgaGenerator_AddInputSequences(this, &sequences));
+  }
+
+  void AddInputTokens(int32_t* input_ids, size_t input_ids_count) {
+    OgaCheckResult(OgaGenerator_AddInputTokens(this, input_ids, input_ids_count));
   }
 
   void ComputeLogits() {

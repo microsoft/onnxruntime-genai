@@ -470,6 +470,7 @@ void PositionInputs::UpdateAttentionMask(int total_length, int new_kv_length) {
   // attention_mask_ = std::move(attention_mask_next_);
 // #endif
 
+  // LEFT OFF: state_.inputs_[mask_input_index_] = attention_mask_.get(); not working
   state_.inputs_[mask_input_index_] = attention_mask_.get();
 
   is_first_mask_update_ = false;
@@ -643,9 +644,10 @@ void PositionInputs::CreateAndInitializePositionIDs(std::array<int64_t, 2> shape
   }
   
   // Move tensors to appropriate device and expand by num_beams
-  model_.ExpandInputs(position_ids_, state_.params_->search.num_beams);
-  model_.ExpandInputs(position_ids_next_, state_.params_->search.num_beams);
+  position_ids_ = model_.ExpandInputs(position_ids_, state_.params_->search.num_beams);
+  position_ids_next_ = model_.ExpandInputs(position_ids_next_, state_.params_->search.num_beams);
   position_ids_shape_[0] *= state_.params_->search.num_beams;
+  state_.inputs_[posid_input_index_] = position_ids_.get();
 }
 
 template <typename T>
@@ -670,8 +672,9 @@ void PositionInputs::CreateAndInitializeAttentionMask(std::array<int64_t, 2> sha
   }
 
   // Move tensors to appropriate device and expand by num_beams
-  model_.ExpandInputs(attention_mask_, state_.params_->search.num_beams);
+  attention_mask_ = model_.ExpandInputs(attention_mask_, state_.params_->search.num_beams);
   attention_mask_shape_[0] *= state_.params_->search.num_beams;
+  state_.inputs_[mask_input_index_] = attention_mask_.get();
 }
 
 // template <typename T>

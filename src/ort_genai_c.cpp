@@ -9,6 +9,7 @@
 #include "generators.h"
 #include "models/model.h"
 #include "search.h"
+#include "smartptrs.h"
 
 namespace Generators {
 
@@ -206,7 +207,7 @@ bool OGA_API_CALL OgaGenerator_IsDone(const OgaGenerator* generator) {
   return reinterpret_cast<const Generators::Generator*>(generator)->IsDone();
 }
 
-OgaResult* OGA_API_CALL OgaGenerator_AddInputTokens(OgaGenerator* oga_generator, const OgaSequences* p_sequences) {
+OgaResult* OGA_API_CALL OgaGenerator_AddInputSequences(OgaGenerator* oga_generator, const OgaSequences* p_sequences) {
   OGA_TRY
   auto& generator = *reinterpret_cast<Generators::Generator*>(oga_generator);
   auto& params = *generator.state_->params_;
@@ -223,10 +224,10 @@ OgaResult* OGA_API_CALL OgaGenerator_AddInputTokens(OgaGenerator* oga_generator,
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGenerator_AddInputTokens(OgaGenerator* oga_generator, const int32_t* input_ids, size_t input_ids_count) {
+OgaResult* OGA_API_CALL OgaGenerator_AddInputTokens(OgaGenerator* oga_generator, int32_t* input_ids, size_t input_ids_count) {
   OGA_TRY
   auto& generator = *reinterpret_cast<Generators::Generator*>(oga_generator);
-  generator.AddTokens(std::span<const int32_t>(input_ids, input_ids_count));
+  generator.AddTokens(Generators::cpu_span<int32_t>(input_ids, input_ids_count));
   return nullptr;
   OGA_CATCH
 }

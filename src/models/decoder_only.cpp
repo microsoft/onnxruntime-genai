@@ -1,5 +1,6 @@
 #include "../generators.h"
 #include "decoder_only.h"
+#include <iostream>
 
 namespace Generators {
 DecoderOnly_Model::DecoderOnly_Model(std::unique_ptr<Config> config, OrtEnv& ort_env)

@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 #include <algorithm>
 #include <thread>
+#include <iostream>
 
 #include "../generators.h"
 #include "../search.h"
@@ -38,7 +39,8 @@ namespace Generators {
 
 State::State(const GeneratorParams& params, const Model& model)
     : params_{params.shared_from_this()},
-      model_{model} {}
+      model_{model},
+      input_ids_{model, *this} {}
 
 void State::Run(OrtSession& session, OrtRunOptions& run_options, int new_batch_size) {
   if (first_run_) {

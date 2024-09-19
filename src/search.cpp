@@ -26,6 +26,7 @@ GreedySearch_Cpu::GreedySearch_Cpu(const GeneratorParams& params)
     gen_.seed(seq);
   }
 
+  // TODO(aciddelgado): the reason we don't use next tokens for user input is that we'd have to allocate a new buffer for different input sizes and it would be a useless copy.
   next_tokens_buffer_ = AllocateArray<int32_t>(params.batch_size, &next_tokens_);
   memset(next_tokens_.data(), 0, next_tokens_.size_bytes());
 
@@ -253,6 +254,12 @@ void GreedySearch_Cpu::AppendNextTokensToSequences() {
 }
 
 void GreedySearch_Cpu::SetNextTokens(RoamingArray<int32_t> next_tokens) {
+  // Reset done count/state
+  done_ = false;
+  not_done_count_ = params_->batch_size;
+  memset(eos_seen_.data(), 0, eos_seen_.size_bytes());
+
+  // Set user-defined next tokens
   auto next_tokens_cpu = next_tokens.GetCPU();
   auto batch_size = params_->batch_size;
   auto tokens_count_per_batch = next_tokens_cpu.size() / batch_size;

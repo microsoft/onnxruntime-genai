@@ -27,12 +27,13 @@ void CXX_API(const char* model_path) {
     std::cout << "Generating response..." << std::endl;
     auto params = OgaGeneratorParams::Create(*model);
     params->SetSearchOption("max_length", 1024);
-    params->SetInputSequences(*sequences);
+    // params->SetInputSequences(*sequences);
 
     auto generator = OgaGenerator::Create(*model, *params);
+    generator->AddInputSequences(*sequences);
 
     while (!generator->IsDone()) {
-      generator->ComputeLogits();
+      // generator->ComputeLogits();
       generator->GenerateNextToken();
 
       const auto num_tokens = generator->GetSequenceCount(0);
@@ -82,13 +83,14 @@ void C_API(const char* model_path) {
     OgaGeneratorParams* params;
     CheckResult(OgaCreateGeneratorParams(model, &params));
     CheckResult(OgaGeneratorParamsSetSearchNumber(params, "max_length", 1024));
-    CheckResult(OgaGeneratorParamsSetInputSequences(params, sequences));
+    // CheckResult(OgaGeneratorParamsSetInputSequences(params, sequences));
 
     OgaGenerator* generator;
     CheckResult(OgaCreateGenerator(model, params, &generator));
+    CheckResult(OgaGenerator_AddInputSequences(generator, sequences));
 
     while (!OgaGenerator_IsDone(generator)) {
-      CheckResult(OgaGenerator_ComputeLogits(generator));
+      // CheckResult(OgaGenerator_ComputeLogits(generator));
       CheckResult(OgaGenerator_GenerateNextToken(generator));
 
       const int32_t num_tokens = OgaGenerator_GetSequenceCount(generator, 0);

@@ -232,8 +232,8 @@ OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsDone(const OgaGenerator* generator);
  * \param[in] p_sequences The input id sequences.
  * \return OgaResult containing the error message if the setting of the input ids failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AddInputTokens(OgaGenerator* oga_generator, const OgaSequences* p_sequences);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AddInputTokens(OgaGenerator* oga_generator, const int32_t* input_ids, size_t input_ids_count);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AddInputSequences(OgaGenerator* oga_generator, const OgaSequences* p_sequences);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AddInputTokens(OgaGenerator* oga_generator, int32_t* input_ids, size_t input_ids_count);
 
 /*
  * \brief Computes the logits from the model based on the input ids and the past state. The computed logits are stored in the generator.

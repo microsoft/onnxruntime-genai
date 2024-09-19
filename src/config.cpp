@@ -431,6 +431,8 @@ struct Search_Element : JSON::Element {
       v_.min_length = static_cast<int>(value);
     } else if (name == "max_length") {
       v_.max_length = static_cast<int>(value);
+    } else if (name == "batch_size") {
+      v_.batch_size = static_cast<int>(value);
     } else if (name == "num_beams") {
       v_.num_beams = static_cast<int>(value);
     } else if (name == "num_return_sequences") {
@@ -555,7 +557,7 @@ void ParseConfig(const fs::path& filename, Config& config) {
 
 Config::Config(const fs::path& path) : config_path{path} {
   ParseConfig(path / "genai_config.json", *this);
-
+  
   if (model.context_length == 0)
     throw std::runtime_error("model context_length is 0 or was not set. It must be greater than 0");
 

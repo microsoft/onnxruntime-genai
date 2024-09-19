@@ -7,6 +7,7 @@
 #include <models/model.h>
 #include <iostream>
 #include <random>
+#include <smartptrs.h>
 #ifndef MODEL_PATH
 #define MODEL_PATH "../../test/test_models/"
 #endif
@@ -38,13 +39,14 @@ TEST(ModelTests, GreedySearchGptFp32) {
   auto params = Generators::CreateGeneratorParams(*model);
   params->search.max_length = 10;
   params->batch_size = static_cast<int>(input_ids_shape[0]);
-  params->sequence_length = static_cast<int>(input_ids_shape[1]);
-  params->input_ids = input_ids;
+  // params->sequence_length = static_cast<int>(input_ids_shape[1]);
+  // params->input_ids = input_ids;
 
   auto generator = Generators::CreateGenerator(*model, *params);
+  generator->AddTokens(Generators::cpu_span<int>(input_ids.data(), input_ids.size()));
 
   while (!generator->IsDone()) {
-    generator->ComputeLogits();
+    // generator->ComputeLogits();
     generator->GenerateNextToken();
   }
 
@@ -77,19 +79,24 @@ TEST(ModelTests, BeamSearchGptFp32) {
 
   auto params = Generators::CreateGeneratorParams(*model);
   params->batch_size = static_cast<int>(input_ids_shape[0]);
-  params->sequence_length = static_cast<int>(input_ids_shape[1]);
-  params->input_ids = input_ids;
+  // params->sequence_length = static_cast<int>(input_ids_shape[1]);
+  // params->input_ids = input_ids;
   params->search.max_length = 20;
   params->search.length_penalty = 1.0f;
   params->search.num_beams = 4;
 
   auto generator = Generators::CreateGenerator(*model, *params);
-  auto result = Generators::Generate(*model, *params);
+  generator->AddTokens(Generators::cpu_span<int>(input_ids.data(), input_ids.size()));
+  // auto result = Generators::Generate(*model, *params);
+  while (!generator->IsDone()) {
+    // generator->ComputeLogits();
+    generator->GenerateNextToken();
+  }
 
 
   // Verify outputs match expected outputs
   for (int i = 0; i < params->batch_size; i++) {
-    auto sequence = std::span<int32_t>(result[i].data(), params->search.max_length);
+    auto sequence = generator->GetSequence(i).GetCPU();
     auto* expected_output_start = &expected_output[static_cast<size_t>(i) * params->search.max_length];
     EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params->search.max_length * sizeof(int32_t)));
   }
@@ -110,14 +117,15 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
 
   auto params = Generators::CreateGeneratorParams(*model);
   params->batch_size = static_cast<int>(input_ids_shape[0]);
-  params->sequence_length = static_cast<int>(input_ids_shape[1]);
+  // params->sequence_length = static_cast<int>(input_ids_shape[1]);
   params->search.max_length = 10;
-  params->input_ids = input_ids;
+  // params->input_ids = input_ids;
 
   auto generator = Generators::CreateGenerator(*model, *params);
+  generator->AddTokens(Generators::cpu_span<int>(input_ids.data(), input_ids.size()));
 
   while (!generator->IsDone()) {
-    generator->ComputeLogits();
+    // generator->ComputeLogits();
     generator->GenerateNextToken();
   }
 
@@ -155,19 +163,24 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
 
   auto params = Generators::CreateGeneratorParams(*model);
   params->batch_size = static_cast<int>(input_ids_shape[0]);
-  params->sequence_length = static_cast<int>(input_ids_shape[1]);
-  params->input_ids = input_ids;
+  // params->sequence_length = static_cast<int>(input_ids_shape[1]);
+  // params->input_ids = input_ids;
   params->search.max_length = 20;
   params->search.num_beams = 4;
   params->search.length_penalty = 1.0f;
 
   auto generator = Generators::CreateGenerator(*model, *params);
-  auto result = Generators::Generate(*model, *params);
+  generator->AddTokens(Generators::cpu_span<int>(input_ids.data(), input_ids.size()));
+  // auto result = Generators::Generate(*model, *params);
+  while (!generator->IsDone()) {
+    // generator->ComputeLogits();
+    generator->GenerateNextToken();
+  }
 
 
   // Verify outputs match expected outputs
   for (int i = 0; i < params->batch_size; i++) {
-    auto sequence = std::span<int32_t>(result[i].data(), params->search.max_length);
+    auto sequence = generator->GetSequence(i).GetCPU();
     auto* expected_output_start = &expected_output[static_cast<size_t>(i) * params->search.max_length];
     EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params->search.max_length * sizeof(int32_t)));
   }
@@ -196,14 +209,15 @@ Print all primes between 1 and n
 
   auto params = Generators::CreateGeneratorParams(*model);
   params->batch_size = 1;
-  params->sequence_length = static_cast<int>(tokens.size());
-  params->input_ids = tokens;
+  // params->sequence_length = static_cast<int>(tokens.size());
+  // params->input_ids = tokens;
   params->search.max_length = 128;
 
   // Generator version
   auto generator = Generators::CreateGenerator(*model, *params);
+  generator->AddInputTokens(Generators::cpu_span<int>(tokens.data(), tokens.size()));
   while (!generator->IsDone()) {
-    generator->ComputeLogits();
+    // generator->ComputeLogits();
     generator->GenerateNextToken();
   }
 
@@ -213,32 +227,32 @@ Print all primes between 1 and n
 #endif
 }
 
-TEST(ModelTests, TestHighLevelApiCuda) {
-#if TEST_PHI2
-  auto prompt = R"(
-def print_prime(n):
-'''
-Print all primes between 1 and n
-'''
-)";
+// TEST(ModelTests, TestHighLevelApiCuda) {
+// #if TEST_PHI2
+//   auto prompt = R"(
+// def print_prime(n):
+// '''
+// Print all primes between 1 and n
+// '''
+// )";
 
-  std::cout << "With prompt:" << prompt << "\r\n";
+//   std::cout << "With prompt:" << prompt << "\r\n";
 
-  auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "phi-2");
-  auto tokenizer = model->CreateTokenizer();
-  auto tokens = tokenizer->Encode(prompt);
+//   auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "phi-2");
+//   auto tokenizer = model->CreateTokenizer();
+//   auto tokens = tokenizer->Encode(prompt);
 
-  auto params = Generators::CreateGeneratorParams(*model);
-  params->batch_size = 1;
-  params->sequence_length = static_cast<int>(tokens.size());
-  params->input_ids = tokens;
-  params->search.max_length = 128;
+//   auto params = Generators::CreateGeneratorParams(*model);
+//   params->batch_size = 1;
+//   params->sequence_length = static_cast<int>(tokens.size());
+//   params->input_ids = tokens;
+//   params->search.max_length = 128;
 
-  // High level version
-  auto result = Generators::Generate(*model, *params);
+//   // High level version
+//   auto result = Generators::Generate(*model, *params);
 
-  std::cout << tokenizer->Decode(result[0]) << "\r\n";
-#endif
-}
+//   std::cout << tokenizer->Decode(result[0]) << "\r\n";
+// #endif
+// }
 
 #endif

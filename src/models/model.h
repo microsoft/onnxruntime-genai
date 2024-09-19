@@ -43,7 +43,8 @@ struct State {
   std::vector<const char*> input_names_, output_names_;
   std::vector<OrtValue*> inputs_, outputs_;
 
-  InputIDs input_ids_{model_, *this}; // TODO(aciddelgado): is this ok here?
+  // InputIDs input_ids_{model_, *this}; // TODO(aciddelgado): is this ok here?
+  InputIDs input_ids_; // TODO(aciddelgado): is this ok here?
 
  protected:
   void Run(OrtSession& session, OrtRunOptions& run_options, int new_batch_size);  // Uses the inputs below to run

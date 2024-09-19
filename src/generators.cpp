@@ -10,6 +10,8 @@
 #include "search_cuda.h"
 #endif
 
+#include <iostream>
+
 namespace Generators {
 
 static bool _ = (Ort::InitApi(), false);
@@ -98,6 +100,7 @@ void GeneratorParams::TryGraphCapture(int max_bs) {
   }
 }
 
+// TODO(aciddelgado): Almost certainly broken at this point but who knows
 void GeneratorParams::SetInputs(const NamedTensors& named_tensors) {
   for (const auto& [name, tensor] : named_tensors) {
     if (name == Config::Defaults::InputIdsName) {
@@ -189,8 +192,11 @@ void Generator::ComputeLogits(const RoamingArray<int32_t>& next_tokens) {
 }
 
 bool Generator::IsDone() const {
-  if (computed_logits_)
-    throw std::runtime_error("IsDone() can't be called in the middle of processing logits");
+  // TODO(aciddelgado): how do we deal with this now that it's addtokens and computelogits isn't in api
+  if (computed_logits_) {
+    return false;
+  }
+    // throw std::runtime_error("IsDone() can't be called in the middle of processing logits");
 
   return search_->IsDone();
 }

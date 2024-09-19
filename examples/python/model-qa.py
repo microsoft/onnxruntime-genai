@@ -16,6 +16,7 @@ def main(args):
     if args.verbose: print()
 
     search_options = {name:getattr(args, name) for name in ['do_sample', 'max_length', 'min_length', 'top_p', 'top_k', 'temperature', 'repetition_penalty'] if name in args}
+    search_options['batch_size'] = 1
 
     if args.verbose: print(search_options)
     
@@ -23,6 +24,10 @@ def main(args):
         if args.chat_template.count('{') != 1 or args.chat_template.count('}') != 1:
             print("Error, chat template must have exactly one pair of curly braces, e.g. '<|user|>\n{input} <|end|>\n<|assistant|>'")
             exit(1)
+
+    params = og.GeneratorParams(model)
+    params.set_search_options(**search_options)
+    generator = og.Generator(model, params)
 
     # Keep asking for input prompts in a loop
     while True:
@@ -39,11 +44,8 @@ def main(args):
             prompt = f'{args.chat_template.format(input=text)}'
 
         input_tokens = tokenizer.encode(prompt)
-
-        params = og.GeneratorParams(model)
-        params.set_search_options(**search_options)
-        params.input_ids = input_tokens
-        generator = og.Generator(model, params)
+        
+        generator.add_input_tokens(input_tokens)
         if args.verbose: print("Generator created")
 
         if args.verbose: print("Running generation loop ...")
@@ -56,7 +58,7 @@ def main(args):
 
         try:
             while not generator.is_done():
-                generator.compute_logits()
+                # generator.compute_logits()
                 generator.generate_next_token()
                 if args.timings:
                     if first:
@@ -64,6 +66,7 @@ def main(args):
                         first = False
 
                 new_token = generator.get_next_tokens()[0]
+                # print(new_token, end=' ')
                 print(tokenizer_stream.decode(new_token), end='', flush=True)
                 if args.timings: new_tokens.append(new_token)
         except KeyboardInterrupt:
@@ -71,8 +74,10 @@ def main(args):
         print()
         print()
 
+        # print(generator.get_sequence(0))
+
         # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
-        del generator
+        # del generator
 
         if args.timings:
             prompt_time = first_token_timestamp - started_timestamp
