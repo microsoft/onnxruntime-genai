@@ -531,10 +531,8 @@ class Model:
         self.make_value_info(output, TensorProto.INT64, shape=[])
 
     def make_split(self, name, inputs, dtype, shape, axis, num_splits):
-        #TODO: @amd-sudo-sh: Currently it supports num_splits = 2
-        # Splits the input tensor into num_splits based on the axis
+        # Splits the input tensor into num_splits based on the axis and shape
         outputs = [f"{name}/output_{i}" for i in range(num_splits)]
-        # split = [num_splits for i in range(num_splits)]
         self.make_node("Split", inputs=[inputs], outputs=outputs, name=name, axis=axis)
         for output in outputs:
             self.make_value_info(output, dtype, shape=shape)
@@ -1836,7 +1834,6 @@ class Model:
                 # SkipLayerNorm after last decoder layer (MatMul --> SkipLayerNorm)
                 print("Reading final norm")
                 self.make_layernorm(self.layer_id, module, skip=True, simple=self.layernorm_attrs["simple"], location="final_norm")
-            
             elif (isinstance(module, torch.nn.Linear) and module.out_features == self.vocab_size) or (hasattr(model, "lm_head") and module == model.lm_head):
                 # Checks (Hugging Face logic) or (GGUF logic)
                 if not self.exclude_lm_head:
@@ -1849,9 +1846,7 @@ class Model:
     def has_final_norm(self, module, model):
         # Hugging Face names
         hf_norm = hasattr(model, "model") and hasattr(model.model, "norm") and module == model.model.norm
-        
         hf_final_layernorm = hasattr(model, "model") and hasattr(model.model, "final_layernorm") and module == model.model.final_layernorm
-        
         # GGUF names
         gguf_final_norm = hasattr(model, "final_norm") and module == model.final_norm
         return hf_norm or hf_final_layernorm or gguf_final_norm
@@ -2708,11 +2703,8 @@ class ChatGLMModel(Model):
         hidden_size = self.hidden_size
         num_attention_heads = self.num_attn_heads
         kv_channels = self.kv_channels
-        # head_size = self.head_size
-
         projection_size = kv_channels * num_attention_heads
         hidden_size_per_attention_head = projection_size // num_attention_heads
-
         multi_query_attention = self.attention_attrs["op_type"] == "GroupQueryAttention"
         multi_query_group_num = self.num_kv_heads if multi_query_attention else num_attention_heads
 
