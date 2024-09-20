@@ -2,7 +2,7 @@
 
 ## Setup
 
-Clone this repo and change into the examples/c folder.
+Clone this repo and change into the `examples/c` folder.
 
 ```bash
 git clone https://github.com/microsoft/onnxruntime-genai.git
@@ -28,15 +28,13 @@ You can clone this entire model repository or download individual model variants
 huggingface-cli download microsoft/Phi-3-mini-4k-instruct-onnx --include cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/* --local-dir .
 ```
 
-### Windows x64
+### Windows x64 CPU
 
 #### Install the onnxruntime and onnxruntime-genai binaries
 
-Change into the onnxruntime-genai folder.
+Change into the `onnxruntime-genai\examples\c` folder.
 
 1. Install onnxruntime
-
-   This example is for `win-x64`. 
    
    ```cmd
    curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-win-x64-1.19.2.zip -o onnxruntime-win-x64-1.19.2.zip
@@ -47,16 +45,14 @@ Change into the onnxruntime-genai folder.
 
 2. Install onnxruntime-genai
 
-   This example requires onnxruntime-genai to be built from source.
-
    ```cmd
-   cd ..\..
-   python build.py --config Release --ort_home examples\c
-   copy src\ort_genai.h examples\c\include
-   copy src\ort_genai_c.h examples\c\include
-   copy build\Windows\Release\Release\*.dll examples\c\lib
-   copy build\Windows\Release\Release\*.lib examples\c\lib
-   cd examples\c
+   curl -L https://github.com/microsoft/onnxruntime-genai/releases/download/v0.4.0/onnxruntime-genai-win-cpu-x64-capi.zip -o onnxruntime-genai-win-cpu-x64-capi.zip
+   tar xvf onnxruntime-genai-win-cpu-x64-capi.zip
+   cd onnxruntime-genai-win-cpu-x64-capi
+   tar xvf onnxruntime-genai-0.4.0-win-x64.zip
+   copy onnxruntime-genai-0.4.0-win-x64\include\* ..\include
+   copy onnxruntime-genai-0.4.0-win-x64\lib\* ..\lib
+   cd ..
    ```
 
 #### Build this sample
@@ -74,15 +70,58 @@ cd Release
 .\phi3.exe path_to_model
 ```
 
-### Windows arm64
+### Windows x64 DirectML
 
 #### Install the onnxruntime and onnxruntime-genai binaries
 
-Change into the onnxruntime-genai folder.
+Change into the `onnxruntime-genai\examples\c` folder.
 
 1. Install onnxruntime
+   
+   ```cmd
+   mkdir onnxruntime-win-x64-directml
+   cd onnxruntime-win-x64-directml
+   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/Microsoft.ML.OnnxRuntime.DirectML.1.19.2.nupkg -o Microsoft.ML.OnnxRuntime.DirectML.1.19.2.nupkg
+   tar xvf Microsoft.ML.OnnxRuntime.DirectML.1.19.2.nupkg
+   copy build\native\include\* ..\include
+   copy runtimes\win-x64\native\* ..\lib
+   cd ..
+   ```
 
-   This example is for `win-arm64`.
+2. Install onnxruntime-genai
+
+   ```cmd
+   curl -L https://github.com/microsoft/onnxruntime-genai/releases/download/v0.4.0/onnxruntime-genai-win-directml-x64-capi.zip -o onnxruntime-genai-win-directml-x64-capi.zip
+   tar xvf onnxruntime-genai-win-directml-x64-capi.zip
+   cd onnxruntime-genai-win-directml-x64-capi
+   tar xvf onnxruntime-genai-0.4.0-win-x64-dml.zip
+   copy onnxruntime-genai-0.4.0-win-x64-dml\include\* ..\include
+   copy onnxruntime-genai-0.4.0-win-x64-dml\lib\* ..\lib
+   cd ..
+   ```
+
+#### Build this sample
+
+```bash
+cmake -A x64 -S . -B build -DPHI3=ON
+cd build
+cmake --build . --config Release
+```
+
+#### Run the sample
+
+```bash
+cd Release
+.\phi3.exe path_to_model
+```
+
+### Windows arm64 CPU
+
+#### Install the onnxruntime and onnxruntime-genai binaries
+
+Change into the `onnxruntime-genai\examples\c` folder.
+
+1. Install onnxruntime
    
    ```cmd
    curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-win-arm64-1.19.2.zip -o onnxruntime-win-arm64-1.19.2.zip
@@ -93,16 +132,59 @@ Change into the onnxruntime-genai folder.
 
 2. Install onnxruntime-genai
 
-   This example requires onnxruntime-genai to be built from source.
+   ```cmd
+   curl -L https://github.com/microsoft/onnxruntime-genai/releases/download/v0.4.0/onnxruntime-genai-win-cpu-arm64-capi.zip -o onnxruntime-genai-win-cpu-arm64-capi.zip
+   tar xvf onnxruntime-genai-win-cpu-arm64-capi.zip
+   cd onnxruntime-genai-win-cpu-arm64-capi
+   tar xvf onnxruntime-genai-0.4.0-win-arm64.zip
+   copy onnxruntime-genai-0.4.0-win-arm64\include\* ..\include
+   copy onnxruntime-genai-0.4.0-win-arm64\lib\* ..\lib
+   cd ..
+   ```
+
+#### Build this sample
+
+```bash
+cmake -A arm64 -S . -B build -DPHI3=ON
+cd build
+cmake --build . --config Release
+```
+
+#### Run the sample
+
+```bash
+cd Release
+.\phi3.exe path_to_model
+```
+
+### Windows arm64 DirectML
+
+#### Install the onnxruntime and onnxruntime-genai binaries
+
+Change into the `onnxruntime-genai\examples\c` folder.
+
+1. Install onnxruntime
+   
+   ```cmd
+   mkdir onnxruntime-win-arm64-directml
+   cd onnxruntime-win-arm64-directml
+   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/Microsoft.ML.OnnxRuntime.DirectML.1.19.2.nupkg -o Microsoft.ML.OnnxRuntime.DirectML.1.19.2.nupkg
+   tar xvf Microsoft.ML.OnnxRuntime.DirectML.1.19.2.nupkg
+   copy build\native\include\* ..\include
+   copy runtimes\win-arm64\native\* ..\lib
+   cd ..
+   ```
+
+2. Install onnxruntime-genai
 
    ```cmd
-   cd ..\..
-   python build.py --arm64 --config Release --skip_wheel --parallel --cmake_extra_defines ENABLE_PYTHON=OFF --ort_home examples\c
-   copy src\ort_genai.h examples\c\include
-   copy src\ort_genai_c.h examples\c\include
-   copy build\Windows\Release\Release\*.dll examples\c\lib
-   copy build\Windows\Release\Release\*.lib examples\c\lib
-   cd examples\c
+   curl -L https://github.com/microsoft/onnxruntime-genai/releases/download/v0.4.0/onnxruntime-genai-win-directml-arm64-capi.zip -o onnxruntime-genai-win-directml-arm64-capi.zip
+   tar xvf onnxruntime-genai-win-directml-arm64-capi.zip
+   cd onnxruntime-genai-win-directml-arm64-capi
+   tar xvf onnxruntime-genai-0.4.0-win-arm64-dml.zip
+   copy onnxruntime-genai-0.4.0-win-arm64-dml\include\* ..\include
+   copy onnxruntime-genai-0.4.0-win-arm64-dml\lib\* ..\lib
+   cd ..
    ```
 
 #### Build this sample
