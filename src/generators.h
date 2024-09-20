@@ -146,6 +146,7 @@ struct OrtGlobals {
   OrtGlobals();
 
   std::unique_ptr<OrtEnv> env_;
+  std::unique_ptr<OrtArenaCfg> arena_config_;
 #if USE_CUDA
   std::unique_ptr<OrtMemoryInfo> memory_info_cuda_;
   std::unique_ptr<Ort::Allocator> allocator_cuda_;
