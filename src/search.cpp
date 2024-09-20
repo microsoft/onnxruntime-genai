@@ -9,7 +9,7 @@ namespace Generators {
 
 Search_Cpu::Search_Cpu(const GeneratorParams& params)
     : Search{params},
-      sequences_{/*params.input_ids,*/ params.batch_size, params.search.num_beams, params_->search.max_length} {
+      sequences_{params.batch_size, params.search.num_beams, params_->search.max_length} {
   auto batch_beam_size = params.BatchBeamSize();
   sequence_lengths_buffer_ = AllocateArray<int32_t>(batch_beam_size, &sequence_lengths_);
 }
@@ -26,7 +26,6 @@ GreedySearch_Cpu::GreedySearch_Cpu(const GeneratorParams& params)
     gen_.seed(seq);
   }
 
-  // TODO(aciddelgado): the reason we don't use next tokens for user input is that we'd have to allocate a new buffer for different input sizes and it would be a useless copy.
   next_tokens_buffer_ = AllocateArray<int32_t>(params.batch_size, &next_tokens_);
   memset(next_tokens_.data(), 0, next_tokens_.size_bytes());
 

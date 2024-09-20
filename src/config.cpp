@@ -557,7 +557,7 @@ void ParseConfig(const fs::path& filename, Config& config) {
 
 Config::Config(const fs::path& path) : config_path{path} {
   ParseConfig(path / "genai_config.json", *this);
-  
+
   if (model.context_length == 0)
     throw std::runtime_error("model context_length is 0 or was not set. It must be greater than 0");
 

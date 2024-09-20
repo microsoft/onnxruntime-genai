@@ -37,167 +37,6 @@ Logits::Logits(const Model& model, State& state)
 #pragma warning(push)
 #pragma warning(disable : 4189)  // local variable is initialized but not referenced
 
-// RoamingArray<float> Logits::Get() {
-//   size_t element_count = shape_[0] * shape_[1] * shape_[2];
-
-//   // First iteration? Then copy the logits over to a {batch_beams, 1, vocab_size} tensor
-//   // The model's output logits are {batch_size*num_beams, input_seq_len, vocab_size}
-//   OrtValue* logits_of_last_token = output_raw_.get();
-//   if (shape_[1] != 1) {
-//     const size_t seq_length = shape_[1];
-//     const size_t vocab_size = shape_[2];
-//     const size_t num_beams = state_.params_->search.num_beams;
-//     const size_t element_count_last_token = shape_[0] * shape_[2];
-
-//     shape_[1] = 1;
-
-//     // create new OrtValue for logits_of_last_token and use output_last_tokens_ to hold it
-//     output_last_tokens_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
-
-// #if USE_DML
-//     if (type_ == Ort::TypeToTensorType<Ort::Float16_t>) {
-//       logits_of_last_token_fp32_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-//     }
-// #endif
-
-//     logits_of_last_token = output_last_tokens_.get();
-
-//     size_t element_size = type_ == Ort::TypeToTensorType<float> ? 4 : 2;
-//     size_t vocab_index = 0;  // Simpler math to have this index go up by vocab_size for every logit chunk we process
-
-//     const auto* input_ids = state_.params_->input_ids.data();
-//     for (int batch_index = 0; batch_index < state_.params_->batch_size; batch_index++) {
-//       // Find the first non pad token from the end
-//       size_t token_index = seq_length;
-//       while (token_index-- > 0) {
-//         if (input_ids[token_index] != state_.params_->pad_token_id)
-//           break;
-//       }
-
-//       for (int beam_index = 0; beam_index < num_beams; beam_index++) {
-//         switch (model_.device_type_) {
-// #if USE_DML
-//           case DeviceType::DML: {
-//             ComPtr<ID3D12Resource> source_resource;
-//             Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, output_raw_->GetTensorMutableRawData(), &source_resource));
-
-//             ComPtr<ID3D12Resource> target_resource;
-//             Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, logits_of_last_token->GetTensorMutableRawData(), &target_resource));
-
-//             uint64_t source_offset = (vocab_index * seq_length + token_index * vocab_size) * element_size;
-//             uint64_t target_offset = vocab_index * element_size;
-//             uint64_t size_in_bytes = vocab_size * element_size;
-
-//             model_.GetDmlExecutionContext()->CopyBufferRegion(
-//                 target_resource.Get(),
-//                 target_offset,
-//                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-//                 source_resource.Get(),
-//                 source_offset,
-//                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-//                 size_in_bytes);
-//           } break;
-// #endif
-
-//           case DeviceType::CPU:
-//           case DeviceType::CUDA: {
-//             auto logits_raw = std::span<const uint8_t>{output_raw_->GetTensorMutableData<uint8_t>(), element_count * element_size};
-//             auto logits_last_tokens = std::span<uint8_t>{logits_of_last_token->GetTensorMutableData<uint8_t>(), element_count_last_token * element_size};
-//             auto target = logits_last_tokens.subspan(vocab_index * element_size, vocab_size * element_size);
-//             auto source = logits_raw.subspan((vocab_index * seq_length + token_index * vocab_size) * element_size, vocab_size * element_size);
-//             if (model_.device_type_ == DeviceType::CUDA)
-// #if USE_CUDA
-//               CudaCheck() == cudaMemcpyAsync(target.data(), source.data(), source.size_bytes(), cudaMemcpyDeviceToDevice, state_.params_->cuda_stream);
-// #else
-//               throw std::runtime_error("Unexpected CUDA device usage");
-// #endif
-//             else
-//               copy(source, target);
-//           } break;
-//         }
-
-//         vocab_index += vocab_size;
-//       }
-
-//       input_ids += seq_length;
-//     }
-
-//     element_count = shape_[0] * shape_[2];  // shape_[1] is now 1, so the element count must be updated
-//   }
-
-//   // Convert from float16 to float32 if necessary
-//   if (type_ == Ort::TypeToTensorType<Ort::Float16_t>) {
-// #if USE_DML
-//     if (model_.device_type_ == DeviceType::DML) {
-//       DmlHelpers::DmlCastInputToOutput(
-//           model_.GetDmlExecutionContext(),
-//           *model_.allocator_device_,
-//           *logits_of_last_token,
-//           logits_of_last_token_fp32_,
-//           model_.GetDmlDevice(),
-//           model_.GetOrtDmlApi(),
-//           logits_cast_command_list_state_);
-
-//       logits_of_last_token = logits_of_last_token_fp32_.get();
-//     } else
-// #endif
-//     {
-//       std::unique_ptr<OrtValue> logits_of_last_token_fp32;
-//       ConvertFp16ToFp32(*model_.allocator_device_, *logits_of_last_token, logits_of_last_token_fp32, model_.device_type_, model_.cuda_stream_);
-//       output_last_tokens_ = std::move(logits_of_last_token_fp32);  // use output_last_tokens_ to hold the fp32 logits
-//       logits_of_last_token = output_last_tokens_.get();
-//     }
-//   }
-
-// #if USE_DML
-//   // DML doesn't support on-device scoring yet, so we need to download some data to the CPU
-//   if (model_.device_type_ == DeviceType::DML) {
-//     value32_cpu_ = OrtValue::CreateTensor<float>(model_.allocator_cpu_, shape_);
-//   }
-// #endif
-
-//   assert(shape_[1] == 1);
-
-// #if USE_CUDA
-//   if (model_.device_type_ == DeviceType::CUDA) {
-//     auto batched_logits_gpu = gpu_span<float>{logits_of_last_token->GetTensorMutableData<float>(), element_count};
-//     if (cuda_eos_token_ids_ptr_)
-//       cuda::LaunchHandleEOSArray(
-//           batched_logits_gpu.data(),
-//           static_cast<int>(shape_[0]) /* batch_beam_size*/,
-//           static_cast<int>(shape_[2]) /* vocab_size */,
-//           cuda_eos_token_ids_.data(),
-//           static_cast<int>(cuda_eos_token_ids_.size()),
-//           model_.cuda_stream_);
-//     return batched_logits_gpu;
-//   }
-// #elif USE_DML
-//   if (model_.device_type_ == DeviceType::DML) {
-//     // DML doesn't support on-device scoring yet, so we transfer the data to the CPU
-//     ComPtr<ID3D12Resource> gpu_resource;
-//     Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(
-//         model_.allocator_device_,
-//         logits_of_last_token->GetTensorMutableData<float>(),
-//         &gpu_resource));
-//     auto cpu_tensor = value32_cpu_->GetTensorMutableData<float>();
-
-//     model_.GetDmlReadbackHeap()->ReadbackFromGpu(
-//         std::span(reinterpret_cast<uint8_t*>(cpu_tensor), element_count * sizeof(float)),
-//         gpu_resource.Get(),
-//         0,
-//         D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-
-//     auto batched_logits_cpu = cpu_span<float>{cpu_tensor, element_count};
-//     HandleEOSArray(batched_logits_cpu);
-//     return batched_logits_cpu;
-//   }
-// #endif
-
-//   auto batched_logits_cpu = cpu_span<float>{logits_of_last_token->GetTensorMutableData<float>(), element_count};
-//   HandleEOSArray(batched_logits_cpu);
-//   return batched_logits_cpu;
-// }
-
 RoamingArray<float> Logits::Get() {
   size_t element_count = shape_[0] * shape_[1] * shape_[2];
 
@@ -209,8 +48,6 @@ RoamingArray<float> Logits::Get() {
     const size_t vocab_size = shape_[2];
     const size_t num_beams = state_.params_->search.num_beams;
     const size_t element_count_last_token = shape_[0] * shape_[2];
-
-    // shape_[1] = 1;
 
     // create new OrtValue for logits_of_last_token and use output_last_tokens_ to hold it
     output_last_tokens_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_last, type_);
@@ -226,8 +63,7 @@ RoamingArray<float> Logits::Get() {
     size_t element_size = type_ == Ort::TypeToTensorType<float> ? 4 : 2;
     size_t vocab_index = 0;  // Simpler math to have this index go up by vocab_size for every logit chunk we process
 
-    // const auto* input_ids = state_.params_->input_ids.data();
-    const auto* input_ids = state_.input_ids_.Get()->GetTensorData<int>(); // TODO(aciddelgado): make sure on CPU
+    const auto* input_ids = state_.input_ids_.Get()->GetTensorData<int>();
     for (int batch_index = 0; batch_index < state_.params_->batch_size; batch_index++) {
       // Find the first non pad token from the end
       size_t token_index = seq_length;
@@ -362,37 +198,6 @@ RoamingArray<float> Logits::Get() {
 
 #pragma warning(pop)
 
-// RoamingArray<float> Logits::Get(size_t start, size_t size) {
-//   const size_t num_beams = state_.params_->search.num_beams;
-//   if (num_beams != 1)
-//     throw std::runtime_error("Get with start and size not supported for num_beams != 1, got " + std::to_string(num_beams));
-//   if (shape_[0] != 1)
-//     throw std::runtime_error("Get with start and size not supported for batch size != 1, got " + std::to_string(shape_[0]));
-
-//   size_t element_count = shape_[1] * shape_[2];
-//   size_t element_size = type_ == Ort::TypeToTensorType<float> ? 4 : 2;
-//   size_t selected_element_count = size * shape_[2];
-
-//   output_last_tokens_ = OrtValue::CreateTensor(*model_.allocator_device_, std::array<int64_t, 3>({1, static_cast<int64_t>(size), shape_[2]}), type_);
-//   OrtValue* logits_of_selected_tokens = output_last_tokens_.get();
-
-//   auto logits_raw = std::span<const uint8_t>{output_raw_->GetTensorMutableData<uint8_t>(), element_count * element_size};
-//   auto logits_of_selected_tokens_raw = std::span<uint8_t>{logits_of_selected_tokens->GetTensorMutableData<uint8_t>(), selected_element_count * element_size};
-//   auto source = logits_raw.subspan(start * shape_[2] * element_size, selected_element_count * element_size);
-//   copy(source, logits_of_selected_tokens_raw);
-
-//   if (type_ == Ort::TypeToTensorType<Ort::Float16_t>) {
-//     std::unique_ptr<OrtValue> logits_of_selected_tokens_fp32;
-//     ConvertFp16ToFp32(*model_.allocator_device_, *logits_of_selected_tokens, logits_of_selected_tokens_fp32, model_.device_type_, model_.cuda_stream_);
-//     output_last_tokens_ = std::move(logits_of_selected_tokens_fp32);
-//     logits_of_selected_tokens = output_last_tokens_.get();
-//   }
-
-//   auto batched_logits_cpu = cpu_span<float>{logits_of_selected_tokens->GetTensorMutableData<float>(), selected_element_count};
-//   HandleEOSArray(batched_logits_cpu);
-//   return batched_logits_cpu;
-// }
-
 void Logits::Update(int new_kv_length) {
   if (output_raw_.get()->GetTensorTypeAndShapeInfo()->GetShape()[1] == new_kv_length) {
     return;
@@ -404,17 +209,6 @@ void Logits::Update(int new_kv_length) {
                            : sb_logits->CreateTensorOnStaticBuffer(shape_, type_);
   state_.outputs_[output_index_] = output_raw_.get();
 }
-
-// void Logits::Update() {
-//   if (output_raw_.get()->GetTensorTypeAndShapeInfo()->GetShape()[1] == 1) {
-//     return;
-//   }
-
-//   StaticBuffer* sb_logits = type_ == Ort::TypeToTensorType<Ort::Float16_t> ? sb_logits16_ : sb_logits32_;
-//   output_raw_ = !sb_logits ? OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_)
-//                            : sb_logits->CreateTensorOnStaticBuffer(shape_, type_);
-//   state_.outputs_[output_index_] = output_raw_.get();
-// }
 
 void Logits::HandleEOSArray(cpu_span<float> batched_logits) {
   if (model_.config_->model.eos_token_ids.empty())

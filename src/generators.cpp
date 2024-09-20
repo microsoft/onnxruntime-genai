@@ -10,8 +10,6 @@
 #include "search_cuda.h"
 #endif
 
-#include <iostream>
-
 namespace Generators {
 
 static bool _ = (Ort::InitApi(), false);
@@ -100,15 +98,10 @@ void GeneratorParams::TryGraphCapture(int max_bs) {
   }
 }
 
-// TODO(aciddelgado): Almost certainly broken at this point but who knows
+// TODO(aciddelgado): Does this work?
 void GeneratorParams::SetInputs(const NamedTensors& named_tensors) {
   for (const auto& [name, tensor] : named_tensors) {
-    if (name == Config::Defaults::InputIdsName) {
-      // input_ids = std::span<const int32_t>(tensor->ort_tensor_->GetTensorMutableData<int32_t>(),
-      //                                      tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount());
-      // batch_size = static_cast<int>(tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape()[0]);
-      // sequence_length = static_cast<int>(input_ids.size()) / batch_size;
-    } else {
+    if (name != Config::Defaults::InputIdsName) {
       // If the nominal name is found in the map, use the graph name.
       // Else, use the nominal name as the graph name.
       [[maybe_unused]] const auto [graph_name, found] = config_->GetGraphName(name);
@@ -150,14 +143,9 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
   state_ = model.CreateState(search_->GetSequenceLengths(), params); // Search sequence lengths set when creating state
 }
 
-// void Generator::AddInput(const std::string& name, const std::shared_ptr<Tensor>& tensor) {
-//   search_->AddInput(name, tensor);
-// }
-
 void Generator::AddTokens(cpu_span<int32_t> input_ids) {
-  // TODO(aciddelgado): check for first call after reset
+  // TODO(aciddelgado): batch_size > 1 requires full rewind
   search_->SetNextTokens(input_ids);
-  // state_->AddInputTokens(input_ids); // Do this in Run instead
   
   if (g_log.enabled && g_log.add_tokens) {
     auto& stream = Log("add_tokens");
@@ -176,7 +164,6 @@ void Generator::ComputeLogits(const RoamingArray<int32_t>& next_tokens) {
   if (computed_logits_)
     throw std::runtime_error("ComputeLogits called again without calling AddTokens or GenerateNextToken first");
 
-  // auto logits = state_->Run(candidate_sequence, candidate_length_ + 1, search_->GetSequenceLength() - 1, candidate_length_ + 1);
   auto logits = state_->Run(search_->GetSequenceLength(), next_tokens, search_->GetNextIndices());
   if (g_log.enabled && g_log.model_logits) {
     auto& stream = Log("model_logits");
@@ -185,24 +172,19 @@ void Generator::ComputeLogits(const RoamingArray<int32_t>& next_tokens) {
   }
   search_->SetLogits(logits);
   computed_logits_ = true;
-
-  // auto& search = search_->params_->search;
-  // search_->ApplyMinLength(search.min_length);
-  // search_->ApplyRepetitionPenalty(search.repetition_penalty);
 }
 
 bool Generator::IsDone() const {
-  // TODO(aciddelgado): how do we deal with this now that it's addtokens and computelogits isn't in api
+  // TODO(aciddelgado): Is this the correct approach to handling computed_logits_ now?
   if (computed_logits_) {
     return false;
   }
-    // throw std::runtime_error("IsDone() can't be called in the middle of processing logits");
 
   return search_->IsDone();
 }
 
 void Generator::GenerateNextToken() {
-  // TODO(aciddelgado): check that AddTokens has been called
+  // TODO(aciddelgado): check that AddTokens has been called at least once
   if (!computed_logits_) {
     ComputeLogits(search_->GetNextTokens());
   }
@@ -248,25 +230,6 @@ void Generator::GenerateNextToken() {
 
 RoamingArray<int32_t> Generator::GetSequence(size_t index) const {
   return search_->GetSequence(index);
-}
-
-TokenSequences Generate(const Model& model, const GeneratorParams& params) {
-  auto generator = CreateGenerator(model, params);
-  // generator->AddTokens(params.search.input_ids);
-
-  while (!generator->IsDone()) {
-    generator->GenerateNextToken();
-  }
-
-  TokenSequences result;
-  for (int i = 0; i < params.batch_size * params.search.num_return_sequences; i++) {
-    auto sequence = generator->search_->GetSequence(i);
-    auto sequence_cpu = sequence.GetCPU();
-
-    auto& v = result.emplace_back();
-    v.assign(sequence_cpu.begin(), sequence_cpu.end());
-  }
-  return result;
 }
 
 }  // namespace Generators

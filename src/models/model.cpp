@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 #include <algorithm>
 #include <thread>
-#include <iostream>
 
 #include "../generators.h"
 #include "../search.h"

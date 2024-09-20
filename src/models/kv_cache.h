@@ -37,13 +37,6 @@ struct KV_Cache {
   void Add();
   // Move present to past. Prepare present output for next generation iteration.
   void Update(std::span<const int32_t> beam_indices, int total_length);
-  // Used by speculative decoding
-  // Resize present to new sequence length.
-  // void UpdatePresent(int current_length);
-  // Resize past to new sequence length, and drop past that is > past_length.
-  // void UpdateAndResize(int current_length, int past_length);
-  // Rewind cache to new_length.
-  // void RewindTo(int new_length);
   template <typename ScoreType>
   void PickPastState(std::span<const int32_t> beam_indices, int index);
   void PickPastState(std::span<const int32_t> beam_indices, int index);

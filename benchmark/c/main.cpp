@@ -121,9 +121,7 @@ std::string GeneratePrompt(size_t num_prompt_tokens, const OgaModel& model, cons
   auto params = OgaGeneratorParams::Create(model);
   params->SetSearchOption("max_length", static_cast<double>(num_prompt_tokens));
   params->SetSearchOption("min_length", static_cast<double>(num_prompt_tokens));
-  // params->SetInputSequences(*base_prompt_sequences);
 
-  // auto output_sequences = model.Generate(*params);
   auto generator = OgaGenerator::Create(model, *params);
   generator->AddInputSequences(*base_prompt_sequences);
   while (!generator->IsDone()) {
@@ -157,7 +155,6 @@ void RunBenchmark(const benchmark::Options& opts) {
     auto params = OgaGeneratorParams::Create(*model);
     params->SetSearchOption("max_length", static_cast<double>(num_tokens));
     params->SetSearchOption("min_length", static_cast<double>(num_tokens));
-    // params->SetInputSequences(*prompt_sequences);
     return params;
   };
 
@@ -166,7 +163,6 @@ void RunBenchmark(const benchmark::Options& opts) {
   // warmup
   if (opts.verbose) std::cout << "Running warmup iterations (" << opts.num_warmup_iterations << ")...\n";
   for (size_t i = 0; i < opts.num_warmup_iterations; ++i) {
-    // auto output_sequences = model->Generate(*generator_params);
     auto generator = OgaGenerator::Create(*model, *generator_params);
     generator->AddInputSequences(*prompt_sequences);
     while (!generator->IsDone()) {
@@ -212,11 +208,6 @@ void RunBenchmark(const benchmark::Options& opts) {
           Timing token_gen_timing{token_gen_times};
           generator->GenerateNextToken();
         }
-
-        // {
-        //   Timing sampling_timing{sampling_times};
-        //   generator->GenerateNextToken();
-        // }
       }
     }
   }

@@ -14,7 +14,6 @@ struct PositionInputs {
   PositionInputs(const Model& model, State& state);
 
   void Add();
-  // void Update(int current_length);
   void Update(int total_length, int new_length);
 
  private:
@@ -24,12 +23,10 @@ struct PositionInputs {
   // Batch size > 1 case
   void UpdatePositionIDs();
   void UpdateAttentionMask(int total_length);
-  // Used by continuous decoding.
+  // Batch size == 1 case.
   void UpdatePositionIDs(int total_length, int new_length);
   void UpdateAttentionMask(int total_length, int new_length);
 
-  // template <typename T>
-  // void InitializeTensors(std::array<int64_t, 2> shape/*, cpu_span<int32_t> sequence_lengths*/);
   template <typename T>
   void InitializeSequenceLengths(std::array<int64_t, 2> shape, cpu_span<int32_t> sequence_lengths_unk);
   template <typename T>
@@ -42,7 +39,6 @@ struct PositionInputs {
   template <typename T>
   void UpdateAttentionMaskImpl(T* data, const T* old_data, int current_length);
 
-  // Used by continuous decoding
   template <typename T>
   void UpdatePositionIDsImpl(int total_length, int new_kv_length);
   template <typename T>
@@ -59,14 +55,13 @@ struct PositionInputs {
   bool has_mask_input_{false};
   bool has_posid_input_{false};
 
-  std::array<int64_t, 2> position_ids_shape_{};  // {params.batch_size*params.beam_size, params.sequence_length}
+  std::array<int64_t, 2> position_ids_shape_{};
   std::unique_ptr<OrtValue> position_ids_;
-  std::array<int64_t, 2> attention_mask_shape_{};  // {params.batch_size*params.beam_size, params.sequence_length}
+  std::array<int64_t, 2> attention_mask_shape_{};
   std::unique_ptr<OrtValue> attention_mask_;
 
   std::unique_ptr<OrtValue> position_ids_next_;    // Replaces position_ids_ after the first Run() call
   std::unique_ptr<OrtValue> attention_mask_next_;  // Replaces attention_mask_ after the first Run() call
-  // std::vector<int32_t> initial_sequence_lengths_;
 
   // Used for decoding runs with cuda graphs.
   StaticBuffer* sb_position_ids_{};

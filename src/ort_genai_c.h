@@ -170,26 +170,6 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchNumber(OgaGenerato
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* generator_params, const char* name, bool value);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGeneratorParams* generator_params, int32_t max_batch_size);
 
-/*
- * \brief Sets the input ids for the generator params. The input ids are used to seed the generation.
- * \param[in] generator_params The generator params to set the input ids on.
- * \param[in] input_ids The input ids array of size input_ids_count = batch_size * sequence_length.
- * \param[in] input_ids_count The total number of input ids.
- * \param[in] sequence_length The sequence length of the input ids.
- * \param[in] batch_size The batch size of the input ids.
- * \return OgaResult containing the error message if the setting of the input ids failed.
- */
-// OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputIDs(OgaGeneratorParams* generator_params, const int32_t* input_ids,
-//                                                                  size_t input_ids_count, size_t sequence_length, size_t batch_size);
-
-/*
- * \brief Sets the input id sequences for the generator params. The input id sequences are used to seed the generation.
- * \param[in] generator_params The generator params to set the input ids on.
- * \param[in] sequences The input id sequences.
- * \return OgaResult containing the error message if the setting of the input id sequences failed.
- */
-// OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputSequences(OgaGeneratorParams* generator_params, const OgaSequences* sequences);
-
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputs(OgaGeneratorParams* generator_params, const OgaNamedTensors* named_tensors);
 
 /*
@@ -227,12 +207,19 @@ OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsDone(const OgaGenerator* generator);
 
 /*
  * \brief Adds the input ids to the generator. The input ids are used to seed the generation.
- * \param[in] oga_params The generator params to get the pad token id.
  * \param[in] oga_generator The generator to add the input ids to.
  * \param[in] p_sequences The input id sequences.
  * \return OgaResult containing the error message if the setting of the input ids failed.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AddInputSequences(OgaGenerator* oga_generator, const OgaSequences* p_sequences);
+
+/*
+ * \brief Adds the input ids to the generator. The input ids are used to seed the generation.
+ * \param[in] oga_generator The generator to add the input ids to.
+ * \param[in] input_ids The input ids to add.
+ * \param[in] input_ids_count The number of input ids to add (batch_size * sequence_length).
+ * \return OgaResult containing the error message if the setting of the input ids failed.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AddInputTokens(OgaGenerator* oga_generator, int32_t* input_ids, size_t input_ids_count);
 
 /*

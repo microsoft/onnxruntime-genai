@@ -25,7 +25,6 @@ struct Gpt_State : State {
 
   const Gpt_Model& model_;
 
-  // InputIDs input_ids_{model_, *this};
   Logits logits_{model_, *this};
   KV_Cache_Combined kv_cache_{model_, *this};
   PositionInputs position_inputs_;

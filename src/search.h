@@ -14,7 +14,6 @@ struct Search : LeakChecked<Search> {
   virtual RoamingArray<int32_t> GetSequenceLengths() = 0;
   virtual int GetSequenceLength() const = 0;
   virtual RoamingArray<int32_t> GetSequence(size_t index) = 0;
-  // TODO(aciddelgado): do we want a GetSequences() API?
 
   virtual void SetLogits(RoamingArray<float> logits) = 0;
   virtual bool IsDone() const = 0;
@@ -28,9 +27,10 @@ struct Search : LeakChecked<Search> {
   virtual void ApplyMinLength(int min_length) = 0;
   virtual void ApplyRepetitionPenalty(float penalty) = 0;
 
-  // Used by Continuous Decoding
-  virtual void DropLastTokens(size_t num_tokens) { assert(false); };
+  // Set user input tokens
   virtual void SetNextTokens(RoamingArray<int32_t> next_tokens) { assert(false); };
+  // To be used for rewind
+  virtual void DropLastTokens(size_t num_tokens) { assert(false); };
 
   std::shared_ptr<const GeneratorParams> params_;
 };

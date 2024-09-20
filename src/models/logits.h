@@ -12,15 +12,10 @@ struct Logits {
   // Register input_ids as ORT session input.
   void Add();
   // For first iteration, find last token of each beam and store it in output_last_tokens_.
-  // Also resizes logits to [bz, 1, vocab_size] for subsequent calls.
   RoamingArray<float> Get();
-  // Retrieves logits[:, start:start + size, :].
-  RoamingArray<float> Get(size_t start, size_t size);  // batch_size x size x vocab_size
 
-  // void Update();
+  // Resize logits to [bz, token_count, vocab_size] if necessary.
   void Update(int new_kv_length);
-  // Resize logits to [bz, token_count, vocab_size].
-  // void Update(size_t token_count);
 
  private:
   void HandleEOSArray(cpu_span<float> logits);

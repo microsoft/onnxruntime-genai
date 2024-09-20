@@ -71,7 +71,6 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   int batch_size{1};
   int max_batch_size{0};
   bool use_cuda_graph{};
-  // int sequence_length{};
   int hidden_size{};
   int BatchBeamSize() const { return search.num_beams * batch_size; }
 
@@ -95,16 +94,11 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
 
 #endif
 
-  // TODO: Move this to a separate GPT struct
-  // std::span<const int32_t> input_ids;  // Array of [batchsize][sequence_length]
-
   struct Whisper {
     std::shared_ptr<Tensor> input_features;  // float32 [batch_size, number_of_mels, something that is 3000]
   };
 
   std::variant<Whisper> inputs;
-
-  std::vector<int32_t> input_ids_owner;  // Backing memory of input_ids in some cases
 
   std::shared_ptr<GeneratorParams> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
 
@@ -130,9 +124,7 @@ struct Generator : LeakChecked<Generator> {
   Generator(const Model& model, const GeneratorParams& params);
 
   bool IsDone() const;
-  // virtual void ComputeLogits();
-  // TODO(aciddelgado): Make this function work with batched inputs
-  virtual void AddTokens(cpu_span<int32_t> input_ids); // Add tokens to the input_ids
+  virtual void AddTokens(cpu_span<int32_t> input_ids);
   virtual void GenerateNextToken();
 
   RoamingArray<int32_t> GetSequence(size_t index) const;

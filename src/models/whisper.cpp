@@ -3,6 +3,8 @@
 #include "../generators.h"
 #include "whisper.h"
 
+// TODO(aciddelgado): update whisper to new paradigm
+
 namespace Generators {
 
 Whisper_Model::Whisper_Model(std::unique_ptr<Config> config, OrtEnv& ort_env)
@@ -31,7 +33,7 @@ Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> s
 
   auto sequence_lengths = sequence_lengths_unk.GetCPU();
   for (int i = 0; i < decoder_input_ids_.GetShape()[0]; i++) {
-    sequence_lengths[i] = 0; // TODO(aciddelgado): what? static_cast<int32_t>(params_->sequence_length);
+    sequence_lengths[i] = 0;
   }
 
   input_names_.push_back("encoder_input_ids");

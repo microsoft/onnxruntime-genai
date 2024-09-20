@@ -29,9 +29,7 @@ TEST(SamplingTests, BatchedSamplingTopPCpu) {
   params->search.do_sample = true;
   params->search.top_p = 0.25f;
   params->batch_size = batch_size;
-  // params->sequence_length = 1;
   params->vocab_size = vocab_size;
-  // params->input_ids = input_ids;
   params->device_type = Generators::DeviceType::CUDA;
   auto generator = Generators::CreateGenerator(*model, *params);
   auto logits_span = Generators::cpu_span<float>(logits_cpu);
@@ -57,9 +55,7 @@ TEST(SamplingTests, BatchedSamplingTopKCpu) {
   params->search.do_sample = true;
   params->search.top_k = 2;
   params->batch_size = batch_size;
-  // params->sequence_length = 1;
   params->vocab_size = vocab_size;
-  // params->input_ids = input_ids;
   params->device_type = Generators::DeviceType::CPU;
   auto generator = Generators::CreateGenerator(*model, *params);
   auto logits_copy = logits_cpu;
@@ -91,9 +87,7 @@ TEST(SamplingTests, BatchedSamplingTopPAndKCpu) {
   params->search.top_k = 2;
   params->search.top_p = 0.25f;
   params->batch_size = batch_size;
-  // params->sequence_length = 1;
   params->vocab_size = vocab_size;
-  // params->input_ids = input_ids;
   params->device_type = Generators::DeviceType::CPU;
   auto generator = Generators::CreateGenerator(*model, *params);
   auto logits_copy = logits_cpu;
@@ -141,9 +135,7 @@ TEST(SamplingTests, RandomizedSamplingTopPCpu) {
   params->search.do_sample = true;
   params->search.top_p = 0.95f;
   params->batch_size = batch_size;
-  // params->sequence_length = 1;
   params->vocab_size = vocab_size;
-  // params->input_ids = input_ids;
   params->device_type = Generators::DeviceType::CPU;
   std::vector<float> logits_cpu(vocab_size * batch_size);
   std::random_device rd;
@@ -179,9 +171,7 @@ TEST(SamplingTests, RandomizedSamplingTopKCpu) {
   params->search.do_sample = true;
   params->search.top_k = k;
   params->batch_size = batch_size;
-  // params->sequence_length = 1;
   params->vocab_size = vocab_size;
-  // params->input_ids = input_ids;
   params->device_type = Generators::DeviceType::CPU;
   std::vector<float> logits_cpu(vocab_size * batch_size);
   std::random_device rd;
@@ -219,9 +209,7 @@ TEST(SamplingTests, RandomizedSamplingTopPAndKCpu) {
   params->search.top_k = k;
   params->search.top_p = p;
   params->batch_size = batch_size;
-  // params->sequence_length = 1;
   params->vocab_size = vocab_size;
-  // params->input_ids = input_ids;
   params->device_type = Generators::DeviceType::CPU;
   std::vector<float> logits_cpu(vocab_size * batch_size);
   std::random_device rd;
@@ -266,9 +254,7 @@ TEST(SamplingTests, BatchedSamplingTopPCuda) {
   params->search.do_sample = true;
   params->search.top_p = 0.25f;
   params->batch_size = batch_size;
-  // params->sequence_length = 1;
   params->vocab_size = vocab_size;
-  // params->input_ids = input_ids;
   params->device_type = Generators::DeviceType::CUDA;
   cudaMemcpyAsync(logits_gpu.get(), logits_cpu.data(), logits_cpu.size() * sizeof(float), cudaMemcpyHostToDevice, params->cuda_stream);
   cudaStreamSynchronize(params->cuda_stream);
@@ -296,9 +282,7 @@ TEST(SamplingTests, BatchedSamplingTopKCuda) {
   params->search.do_sample = true;
   params->search.top_k = 2;
   params->batch_size = batch_size;
-  // params->sequence_length = 1;
   params->vocab_size = vocab_size;
-  // params->input_ids = input_ids;
   params->device_type = Generators::DeviceType::CUDA;
   cudaMemcpyAsync(logits_gpu.get(), logits_cpu.data(), logits_cpu.size() * sizeof(float), cudaMemcpyHostToDevice, params->cuda_stream);
   cudaStreamSynchronize(params->cuda_stream);
@@ -331,9 +315,7 @@ TEST(SamplingTests, BatchedSamplingTopPAndKCuda) {
   params->search.top_k = 2;
   params->search.top_p = 0.25f;
   params->batch_size = batch_size;
-  // params->sequence_length = 1;
   params->vocab_size = vocab_size;
-  // params->input_ids = input_ids;
   params->device_type = Generators::DeviceType::CUDA;
   cudaMemcpyAsync(logits_gpu.get(), logits_cpu.data(), logits_cpu.size() * sizeof(float), cudaMemcpyHostToDevice, params->cuda_stream);
   cudaStreamSynchronize(params->cuda_stream);
@@ -360,9 +342,7 @@ TEST(SamplingTests, RandomizedSamplingTopPCuda) {
   params->search.do_sample = true;
   params->search.top_p = 0.95f;
   params->batch_size = batch_size;
-  // params->sequence_length = 1;
   params->vocab_size = vocab_size;
-  // params->input_ids = input_ids;
   params->device_type = Generators::DeviceType::CUDA;
   auto logits_gpu = Generators::CudaMallocArray<float>(vocab_size * batch_size);
   auto indices_buffer = Generators::CudaMallocHostArray<int>(vocab_size * batch_size);
@@ -402,9 +382,7 @@ TEST(SamplingTests, RandomizedSamplingTopKCuda) {
   params->search.do_sample = true;
   params->search.top_k = k;
   params->batch_size = batch_size;
-  // params->sequence_length = 1;
   params->vocab_size = vocab_size;
-  // params->input_ids = input_ids;
   params->device_type = Generators::DeviceType::CUDA;
   auto logits_gpu = Generators::CudaMallocArray<float>(vocab_size * batch_size);
   auto indices_buffer = Generators::CudaMallocHostArray<int>(vocab_size * batch_size);
@@ -446,9 +424,7 @@ TEST(SamplingTests, RandomizedSamplingTopPAndKCuda) {
   params->search.top_k = k;
   params->search.top_p = p;
   params->batch_size = batch_size;
-  // params->sequence_length = 1;
   params->vocab_size = vocab_size;
-  // params->input_ids = input_ids;
   params->device_type = Generators::DeviceType::CUDA;
   auto logits_gpu = Generators::CudaMallocArray<float>(vocab_size * batch_size);
   auto indices_buffer = Generators::CudaMallocHostArray<int>(vocab_size * batch_size);
@@ -485,9 +461,7 @@ TEST(SamplingTests, RandomizedSamplingSelectTopCuda) {
   auto params = Generators::CreateGeneratorParams();
   params->search.max_length = 10;
   params->batch_size = batch_size;
-  // params->sequence_length = 1;
   params->vocab_size = vocab_size;
-  // params->input_ids = input_ids;
   params->device_type = Generators::DeviceType::CUDA;
   auto logits_gpu = Generators::CudaMallocArray<float>(vocab_size * batch_size);
   auto indices_buffer = Generators::CudaMallocHostArray<int>(vocab_size * batch_size);

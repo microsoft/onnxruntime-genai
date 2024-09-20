@@ -7,7 +7,7 @@
 
 namespace Generators {
 
-// TODO(aciddelgado): get this right what is this
+// TODO(aciddelgado): initialize after addtokens is called
 Embeddings::Embeddings(const Model& model, State& state, Embeddings::Mode mode, const std::string& name)
     : model_{model},
       state_{state},

@@ -5,7 +5,6 @@
 
 namespace Generators {
 
-// NOW IS 0-INITIALIZED
 InputIDs::InputIDs(const Model& model, State& state)
     : model_{model},
       state_{state} {
@@ -13,25 +12,6 @@ InputIDs::InputIDs(const Model& model, State& state)
   shape_ = {state_.params_->search.num_beams * state_.params_->batch_size, 0};
   auto session_info = model_.session_info_.get();
   type_ = session_info->GetInputDataType(name_);
-  // type_ = model_.session_info_->GetInputDataType(name_);
-
-  // If 64-bit, convert from 32-bit to 64-bit
-  // if (type_ == Ort::TypeToTensorType<int64_t>) {
-  //   value_ = OrtValue::CreateTensor(model.allocator_cpu_, shape_, type_);
-  //   auto* p_data = value_->GetTensorMutableData<int64_t>();
-  //   for (auto v : state_.params_->input_ids) {
-  //     *p_data++ = v;
-  //   }
-  // } else {
-  //   if (type_ != Ort::TypeToTensorType<int32_t>)
-  //     throw std::runtime_error("InputIDs must be int64 or int32");
-  //   value_ = OrtValue::CreateTensor<int32_t>(model.allocator_cpu_.GetInfo(), std::span<int32_t>(const_cast<int32_t*>(state_.params_->input_ids.data()), shape_[0] * shape_[1]), shape_);
-  // }
-
-  // value_ = OrtValue::CreateTensor(model.allocator_cpu_, shape_, type_); // TODO(aciddelgado): 0 initializing tensors allowed?
-
-  // value_ = model_.ExpandInputs(value_, state_.params_->search.num_beams);
-  // shape_[0] *= state_.params_->search.num_beams;
 
   if (state_.GetCapturedGraphInfo()) {
     sb_input_ids_ = state_.GetCapturedGraphInfo()->sb_input_ids_.get();
@@ -52,13 +32,7 @@ void InputIDs::Add() {
 }
 
 void InputIDs::Update(RoamingArray<int32_t> new_tokens) {
-  // // Resize input_ids shape once if it doesn't match the decoder shape
-  // if (shape_[1] != 1) {
-  //   shape_[1] = 1;
-  //   if (!sb_input_ids_) {
-  //     value_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
-
-  // Resize input_ids shape to sequence_length of new_tokens
+  // Resize input_ids shape based on new_tokens
   size_t sequence_length = static_cast<size_t>(new_tokens.GetCPU().size()) / shape_[0];
   if (shape_[1] != sequence_length) {
     shape_[1] = sequence_length;
@@ -139,49 +113,5 @@ void InputIDs::Update(RoamingArray<int32_t> new_tokens) {
       memcpy(data, new_tokens.GetCPU().data(), shape_[0] * shape_[1] * sizeof(int32_t));
   }
 }
-
-// Add tokens to the end of input ids tensor
-// void InputIDs::AddInputTokens(RoamingArray<int32_t> tokens, bool is_first_tokens) {
-//   switch (model_.device_type_) {
-//     case DeviceType::CPU: {
-//       break;
-//     }
-//     default:
-//       throw std::runtime_error("Add Tokens not supported for device type " + to_string(model_.device_type_));
-//   }
-//   if (shape_[0] != 1) {
-//     throw std::runtime_error("Add Tokens only supported for batch size 1, got " + std::to_string(shape_[0]));
-//   }
-//   auto tokens_cpu = tokens.GetCPU();
-//   int start = is_first_tokens ? 0 : shape_[1];
-//   int token_count = tokens_cpu.size();
-//   shape_[1] = start + token_count;
-
-//   std::unique_ptr<OrtValue> temp_value;
-//   if (!sb_input_ids_) {
-//     temp_value = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
-//   } else {
-//     temp_value = sb_input_ids_->CreateTensorOnStaticBuffer(shape_, type_);
-//   }
-//   if (type_ == Ort::TypeToTensorType<int64_t>) {
-//     auto* data = temp_value->GetTensorMutableData<int64_t>();
-//     auto next_tokens_cpu = next_tokens.GetCPU();
-//     for (int i = 0; i < start; i++) {
-//       data[i] = value_->GetTensorData<int64_t>()[i];
-//     }
-//     for (int i = 0; i < token_count; i++) {
-//       data[start + i] = tokens_cpu[i];
-//     }
-//   } else {
-//     auto* data = temp_value->GetTensorMutableData<int32_t>();
-//     if (is_first_tokens) {
-//       memcpy(data, value_->GetTensorData<int32_t>(), start * sizeof(int32_t));
-//       data += start;
-//     }
-//     memcpy(data, tokens.GetCPU().data(), token_count * sizeof(int32_t));
-//   }
-//   value_ = std::move(temp_value);
-//   state_.inputs_[input_index_] = value_.get();
-// }
 
 }  // namespace Generators

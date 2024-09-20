@@ -58,7 +58,6 @@ def main(args):
 
         try:
             while not generator.is_done():
-                # generator.compute_logits()
                 generator.generate_next_token()
                 if args.timings:
                     if first:
@@ -66,18 +65,12 @@ def main(args):
                         first = False
 
                 new_token = generator.get_next_tokens()[0]
-                # print(new_token, end=' ')
                 print(tokenizer_stream.decode(new_token), end='', flush=True)
                 if args.timings: new_tokens.append(new_token)
         except KeyboardInterrupt:
             print("  --control+c pressed, aborting generation--")
         print()
         print()
-
-        # print(generator.get_sequence(0))
-
-        # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
-        # del generator
 
         if args.timings:
             prompt_time = first_token_timestamp - started_timestamp

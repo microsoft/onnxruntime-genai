@@ -12,11 +12,9 @@ struct InputIDs {
   // Register input_ids as ORT session input.
   // Called only once during initialization of state.
   void Add();
-  // Resize input_ids to [1], update value with next_tokens.
-  // next_tokens is assumed to have length 1.
+  // Resize input_ids based on size of next_tokens.
+  // Update value with next_tokens.
   void Update(RoamingArray<int32_t> next_tokens);
-  // Add tokens to the end of input ids tensor
-  // void InputIDs::AddInputTokens(RoamingArray<int32_t> tokens, bool is_first_tokens);
 
   auto& GetShape() const { return shape_; }
   const char* name_;

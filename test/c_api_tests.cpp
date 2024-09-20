@@ -4,7 +4,6 @@
 #include <models/model.h>
 #include <iostream>
 #include <ort_genai.h>
-#define MODEL_PATH "/home/aciddelgado/ort-genai-source/test/test_models/"
 #ifndef MODEL_PATH
 #define MODEL_PATH "../../test/test_models/"
 #endif
@@ -103,36 +102,6 @@ TEST(CAPITests, AppendTokensToSequence) {
 #endif
 }
 
-// TODO(aciddelgado): E2E API may be removed + we add tokens to generator directly now 
-// TEST(CAPITests, EndToEndPhiBatch) {
-// #if TEST_PHI2
-//   auto model = OgaModel::Create(MODEL_PATH "phi-2");
-//   auto tokenizer = OgaTokenizer::Create(*model);
-
-//   const char* input_strings[] = {
-//       "This is a test.",
-//       "Rats are awesome pets!",
-//       "The quick brown fox jumps over the lazy dog.",
-//   };
-
-//   auto input_sequences = OgaSequences::Create();
-//   for (auto& string : input_strings)
-//     tokenizer->Encode(string, *input_sequences);
-
-//   auto params = OgaGeneratorParams::Create(*model);
-//   params->SetSearchOption("max_length", 20);
-//   params->SetInputSequences(*input_sequences);
-
-//   auto output_sequences = model->Generate(*params);
-
-//   // Decode The Batch
-//   for (size_t i = 0; i < output_sequences->Count(); i++) {
-//     auto out_string = tokenizer->Decode(output_sequences->Get(i));
-//     std::cout << "Decoded string:" << out_string << std::endl;
-//   }
-// #endif
-// }
-
 TEST(CAPITests, Tensor_And_AddExtraInput) {
   // Create a [3 4] shaped tensor
   std::array<float, 12> data{0, 1, 2, 3,
@@ -177,21 +146,14 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
   // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
   // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
 
-  std::cout << "Loading model..." << std::endl;
-  std::cout << "Model path: " << MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32" << std::endl;
-  auto model = OgaModel::Create("/home/aciddelgado/ort-genai-source/test/test_models/hf-internal-testing/tiny-random-gpt2-fp32");
-
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   auto params = OgaGeneratorParams::Create(*model);
   params->SetSearchOption("max_length", max_length);
   params->SetSearchOption("batch_size", batch_size);
-  // params->SetInputIDs(input_ids.data(), input_ids.size(), input_sequence_length, batch_size);
 
   auto generator = OgaGenerator::Create(*model, *params);
-  std::cout << "Adding input tokens..." << std::endl;
   generator->AddInputTokens(input_ids.data(), input_ids.size());
-  std::cout << "Generating..." << std::endl;
   while (!generator->IsDone()) {
-    // generator->ComputeLogits();
     generator->GenerateNextToken();
   }
 
@@ -200,34 +162,11 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
     const auto sequence_length = generator->GetSequenceCount(i);
     const auto* sequence_data = generator->GetSequenceData(i);
 
-    std::cout << "Sequence length: " << sequence_length << std::endl;
-    std::cout << "Max length: " << max_length << std::endl;
-    std::cout << "Output sequence: ";
-    for (int j = 0; j < sequence_length; j++) {
-      std::cout << sequence_data[j] << " ";
-    }
-    std::cout << std::endl;
-
     ASSERT_LE(sequence_length, max_length);
 
     const auto* expected_output_start = &expected_output[i * max_length];
     EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
   }
-
-  // TODO(aciddelgado): E2E API may be removed + we add tokens to generator directly now
-  // // Test high level API
-  // auto sequences = model->Generate(*params);
-
-  // // Verify outputs match expected outputs
-  // for (int i = 0; i < batch_size; i++) {
-  //   const auto sequence_length = sequences->SequenceCount(i);
-  //   const auto* sequence_data = sequences->SequenceData(i);
-
-  //   ASSERT_LE(sequence_length, max_length);
-
-  //   const auto* expected_output_start = &expected_output[i * max_length];
-  //   EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
-  // }
 }
 #endif
 
@@ -247,7 +186,6 @@ TEST(CAPITests, GetOutputCAPI) {
 
   auto params = OgaGeneratorParams::Create(*model);
   params->SetSearchOption("max_length", max_length);
-  // params->SetInputIDs(input_ids.data(), input_ids.size(), input_sequence_length, batch_size);
 
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AddInputTokens(input_ids.data(), input_ids.size());
@@ -263,7 +201,6 @@ TEST(CAPITests, GetOutputCAPI) {
                                                     -0.04699047f,  0.17915794f,  0.20838135f, 0.10888482f, -0.00277808f,
                                                     0.2938929f,  -0.10538938f, -0.00226692f, 0.12050669f, -0.10622668f};
 
-  // generator->ComputeLogits();
   auto prompt_logits_ptr = generator->GetOutput("logits");
   auto prompt_logits = static_cast<float*>(prompt_logits_ptr->Data());
   int num_prompt_outputs_to_check = 40;
@@ -281,7 +218,6 @@ TEST(CAPITests, GetOutputCAPI) {
   std::vector<float> expected_sampled_logits_token_gen{0.03742531f, -0.05752287f,  0.14159015f, 0.04210977f, -0.1484456f,
                                                         0.3041716f,  -0.08701379f, -0.03778192f, 0.07471392f, -0.02049096f};
 
-  // generator->ComputeLogits();
   auto token_gen_logits_ptr = generator->GetOutput("logits");
   auto token_gen_logits = static_cast<float*>(token_gen_logits_ptr->Data());
   int num_token_gen_outputs_to_check = 10;
@@ -289,7 +225,6 @@ TEST(CAPITests, GetOutputCAPI) {
   for (int i = 0; i < num_token_gen_outputs_to_check; i++) {
     EXPECT_NEAR(expected_sampled_logits_token_gen[i], token_gen_logits[i*sample_size], tolerance);
   }
-  // generator->GenerateNextToken();
 }
 
 #if TEST_PHI2
@@ -311,7 +246,6 @@ struct Phi2Test {
       tokenizer_->Encode(string, *input_sequences_);
 
     params_ = OgaGeneratorParams::Create(*model_);
-    // params_->SetInputSequences(*input_sequences_);
     params_->SetSearchOption("max_length", 40);
   }
 
@@ -322,7 +256,6 @@ struct Phi2Test {
       generator->AddInputSequences(input_sequences_);
 
       while (!generator->IsDone()) {
-        // generator->ComputeLogits();
         generator->GenerateNextToken();
       }
 
@@ -332,18 +265,6 @@ struct Phi2Test {
         std::cout << "Decoded string:" << out_string << std::endl;
       }
     }
-
-    // TODO(aciddelgado): E2E API may be removed + we add tokens to generator directly now
-    // // High level
-    // {
-    //   auto output_sequences = model_->Generate(*params_);
-
-    //   // Decode The Batch
-    //   for (size_t i = 0; i < output_sequences->Count(); i++) {
-    //     auto out_string = tokenizer_->Decode(output_sequences->Get(i));
-    //     std::cout << "Decoded string:" << out_string << std::endl;
-    //   }
-    // }
   }
 
   std::unique_ptr<OgaModel> model_;

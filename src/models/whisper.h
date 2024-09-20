@@ -33,7 +33,6 @@ struct Whisper_State : State {
     Decoder,
   } run_state_{RunState::Encoder_Decoder_Init};
 
-  // TODO(aciddelgado): does decoder_input_ids behave differentely than input_ids_?
   InputIDs decoder_input_ids_{model_, *this};
   Logits logits_{model_, *this};
   KV_Cache kv_cache_{model_, *this};

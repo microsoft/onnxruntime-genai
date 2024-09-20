@@ -10,13 +10,13 @@ void Launch_ExpandInputSequences(std::span<const int32_t> input_sequences, std::
 void Launch_AppendNextTokenToSequences(std::span<const int32_t> next_tokens, std::span<int32_t> sequences, int batch_beam_size, int current_length, int max_length, cudaStream_t stream);
 }  // namespace cuda
 
-// TODO(aciddelgado): make cuda sequences functional
-Sequences_Cuda::Sequences_Cuda(/*std::span<const int32_t> input_sequences,*/ int batch_size, int beam_size, int max_length, cudaStream_t stream)
+// TODO(aciddelgado): update cuda sequences to new paradigm
+
+Sequences_Cuda::Sequences_Cuda(int batch_size, int beam_size, int max_length, cudaStream_t stream)
     : stream_{stream},
       batch_beam_size_{batch_size * beam_size},
       max_length_{max_length},
       current_length_{0} {
-  // assert(current_length_ * batch_size == input_sequences.size());  // Ensure size divided perfectly
   size_t sequences_size = batch_beam_size_ * max_length;
 
   if (beam_size == 1) {
@@ -31,10 +31,7 @@ Sequences_Cuda::Sequences_Cuda(/*std::span<const int32_t> input_sequences,*/ int
   // TODO: input_sequences will be in cuda memory in the future, for now make a temp copy
 
   gpu_span<int32_t> input_sequences_gpu;
-  // auto input_sequences_temp = CudaMallocArray<int32_t>(input_sequences.size(), &input_sequences_gpu);
-  // cudaMemcpyAsync(input_sequences_gpu.data(), input_sequences.data(), input_sequences.size_bytes(), cudaMemcpyHostToDevice, stream);
 
-  // cuda::Launch_ExpandInputSequences(input_sequences_gpu, sequences_, batch_size, beam_size, current_length_, max_length, stream_);
   cudaStreamSynchronize(stream);  // Until we remove the todo above, wait for this to complete as input_sequences_gpu is on the stack
 }
 

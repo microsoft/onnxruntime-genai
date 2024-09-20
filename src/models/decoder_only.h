@@ -1,6 +1,5 @@
 #pragma once
 #include "model.h"
-// #include "input_ids.h"
 #include "logits.h"
 #include "kv_cache.h"
 #include "position_inputs.h"
@@ -12,17 +11,13 @@ struct DecoderOnly_Model : Model {
   DecoderOnly_Model(std::unique_ptr<Config> config, OrtEnv& ort_env);
 
   std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths_unk, const GeneratorParams& params) const override;
-  // std::unique_ptr<State> CreateState(const GeneratorParams& params) const override;
 
   std::unique_ptr<OrtSession> session_decoder_;
 };
 
 struct DecoderOnly_State : State {
   DecoderOnly_State(const DecoderOnly_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const GeneratorParams& params);
-  // DecoderOnly_State(const DecoderOnly_Model& model, const GeneratorParams& params);
   RoamingArray<float> Run(int total_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) override;
-  // RoamingArray<float> Run(RoamingArray<int32_t> sequence, int next_token_length, int past_length, int return_last_logit_count) override;
-  // void AddInputTokens(const RoamingArray<int32_t>& tokens) override;
   const CapturedGraphInfo* GetCapturedGraphInfo() const override { return captured_graph_info_.get(); };
 
  protected:
@@ -32,7 +27,6 @@ struct DecoderOnly_State : State {
   const DecoderOnly_Model& model_;
   CapturedGraphInfoPtr captured_graph_info_;
 
-  // InputIDs input_ids_{model_, *this};
   Logits logits_{model_, *this};
   KV_Cache kv_cache_{model_, *this};
   PositionInputs position_inputs_;
