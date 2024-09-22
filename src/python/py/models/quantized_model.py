@@ -32,6 +32,16 @@ class QuantizedTensorModule:
         self.bits = bits
         self.group_size = group_size
 
+    def set_properties(self, quant_type: str):
+        if quant_type == "awq":
+            self.out_features = self.scales.shape[1]
+            self.in_features = self.qweight.shape[0]
+        elif quant_type == "gptq":
+            self.out_features = self.qweight.shape[1]
+            self.in_features = self.q_proj.g_idx.shape[0]
+        else:
+            raise NotImplementedError(f"The {quant_type} quantization method is not recognized.")
+
     def __str__(self):
         qweight = f"qweight = {self.qweight.shape}, {self.qweight}\n"
         scales = f"scales = {self.scales.shape}, {self.scales}\n"
@@ -60,6 +70,21 @@ class QuantizedAttention:
         self.o_proj = QuantizedTensorModule(bits, group_size)
         self.rotary_emb = TensorModule()
 
+    def set_properties(self, quant_type: str):
+        self.q_proj.set_properties(quant_type)
+        self.k_proj.set_properties(quant_type)
+        self.v_proj.set_properties(quant_type)
+        self.o_proj.set_properties(quant_type)
+
+class QuantizedChatglm3Attention:
+    def __init__(self, bits, group_size):
+        self.query_key_value = QuantizedTensorModule(bits, group_size)
+        self.dense = QuantizedTensorModule(bits, group_size)
+        self.rotary_emb = TensorModule()
+
+    def set_properties(self, quant_type: str):
+        self.query_key_value.set_properties(quant_type)
+        self.dense.set_properties(quant_type)
 
 class QuantizedMLP:
     def __init__(self, bits, group_size):
@@ -69,6 +94,21 @@ class QuantizedMLP:
         self.fc1 = QuantizedTensorModule(bits, group_size)
         self.fc2 = QuantizedTensorModule(bits, group_size)
 
+    def set_properties(self, quant_type: str):
+        self.gate_proj.set_properties(quant_type)
+        self.up_proj.set_properties(quant_type)
+        self.down_proj.set_properties(quant_type)
+        self.fc1.set_properties(quant_type)
+        self.fc2.set_properties(quant_type)
+
+class QuantizedChatglm3MLP:
+    def __init__(self, bits, group_size):
+        self.dense_4h_to_h = QuantizedTensorModule(bits, group_size)
+        self.dense_h_to_4h = QuantizedTensorModule(bits, group_size)
+
+    def set_properties(self, quant_type: str):
+        self.dense_4h_to_h.set_properties(quant_type)
+        self.dense_h_to_4h.set_properties(quant_type)
 
 class QuantizedDecoderLayer:
     def __init__(self, layer_id, bits, group_size):
@@ -81,9 +121,27 @@ class QuantizedDecoderLayer:
     def is_empty(self):
         return self.input_layernorm.weight is None
 
+    def set_properties(self, quant_type: str):
+        self.self_attn.set_properties(quant_type)
+        self.mlp.set_properties(quant_type)
+
+class QuantizedChatglm3EncoderLayer:
+    def __init__(self, layer_id, bits, group_size):
+        self.layer_id = layer_id
+        self.input_layernorm = TensorModule()
+        self.self_attention = QuantizedChatglm3Attention(bits, group_size)
+        self.post_attention_layernorm = TensorModule()
+        self.mlp = QuantizedChatglm3MLP(bits, group_size)
+
+    def is_empty(self):
+        return self.input_layernorm.weight is None
+
+    def set_properties(self, quant_type: str):
+        self.self_attention.set_properties(quant_type)
+        self.mlp.set_properties(quant_type)
 
 class QuantizedModel:
-    def __init__(self, quant_type, input_path, bits, group_size, q_size, kv_size, intermediate_size, num_layers):
+    def __init__(self, quant_type, input_path, bits, group_size, q_size, kv_size, intermediate_size, num_layers, model_type: str):
         self.quant_type = quant_type
         self.embedding = TensorModule()
         self.final_norm = TensorModule()
@@ -91,34 +149,48 @@ class QuantizedModel:
         self.layers = {}
         self.num_layers = num_layers
 
+        q_layer_cls = QuantizedDecoderLayer
+        # if model_type == "ChatGLMForConditionalGeneration":
+        #     q_layer_cls = QuantizedChatglm3EncoderLayer
+        # print(q_layer_cls)
+
         layer_id = 0
         for weight_file in os.listdir(input_path):
             if weight_file.endswith(".safetensors"):
-                module = self.layers.setdefault(layer_id, QuantizedDecoderLayer(layer_id, bits, group_size))
+                module = self.layers.setdefault(layer_id, q_layer_cls(layer_id, bits, group_size))
                 weights = load_file(os.path.join(input_path, weight_file))
+                for name, _ in weights.items():
+                    print(name)
 
                 # Map weights to modules
                 for name, tensor in weights.items():
+                    print(name)
                     if tensor.dtype == torch.bfloat16:
                         # Cast bfloat16 to float32 since NumPy does not support bfloat16
                         tensor = tensor.to(torch.float32)
-
-                    if name == "model.embed_tokens.weight":
+                    if name == "model.embed_tokens.weight" or name == "transformer.embedding.word_embeddings.weight":
                         self.embedding.weight = tensor
-                    elif name == "model.norm.weight":
+                    elif name == "model.norm.weight" or name == "transformer.encoder.final_layernorm.weight":
                         self.final_norm.weight = tensor
-                    elif name == "model.norm.bias":
+                    elif name == "model.norm.bias" or name == "transformer.encoder.final_layernorm.bias":
                         self.final_norm.bias = tensor
-                    elif name == "lm_head.weight":
+                    elif name == "lm_head.weight" or name == "transformer.output_layer.weight":
                         self.lm_head.weight = tensor
-                    elif name == "lm_head.bias":
+                    elif name == "lm_head.bias" or name == "transformer.output_layer.bias":
                         self.lm_head.bias = tensor
+                    elif name == "transformer.rotary_pos_emb.inv_freq":
+                        # transformer.rotary_pos_emb.inv_freq in ChatGLM3.
+                        # Skip rotary embedding weights since they can be re-calculated when looping through the model
+                        continue
                     else:
+                        if name.startswith("transformer.encoder"):
+                            # Chatglm3, e.g., transformer.encoder.layers.0.input_layernorm.weight
+                            name = name.replace("transformer.encoder", "model")
                         curr_layer_id = int(name.split(".")[2])
                         if curr_layer_id != layer_id:
                             # Switch layer module used
                             layer_id = curr_layer_id
-                            module = self.layers.setdefault(layer_id, QuantizedDecoderLayer(layer_id, bits, group_size))
+                            module = self.layers.setdefault(layer_id, q_layer_cls(layer_id, bits, group_size))
 
                         # Map weights and biases of norm, attention, and feed-forward network
                         # Graph order is input_layernorm --> q_proj/k_proj/v_proj --> o_proj --> post_attention_layernorm --> gate_proj/up_proj --> down_proj
@@ -177,27 +249,92 @@ class QuantizedModel:
                         elif bool(re.match(r"^model.layers\.\d+\.self_attn.v_proj\.bias$", name)):
                             # model.layers.layer_id.self_attn.v_proj.bias
                             module.self_attn.v_proj.bias = tensor
-                        elif bool(re.match(r"^model.layers\.\d+\.self_attn.o_proj\.qweight$", name)):
+                        # elif bool(re.match(r"^model.layers\.\d+\.self_attention.query_key_value\.qweight$", name)):
+                        #     # model.layers.layer_id.self_attention.query_key_value.qweight
+                        #     module.self_attention.query_key_value.qweight = tensor
+                        # elif bool(re.match(r"^model.layers\.\d+\.self_attention.query_key_value\.scales$", name)):
+                        #     # model.layers.layer_id.self_attention.query_key_value.scales
+                        #     module.self_attention.query_key_value.scales = tensor
+                        # elif bool(re.match(r"^model.layers\.\d+\.self_attention.query_key_value\.qzeros$", name)):
+                        #     # model.layers.layer_id.self_attention.query_key_value.qzeros
+                        #     module.self_attention.query_key_value.qzeros = tensor
+                        # elif bool(re.match(r"^model.layers\.\d+\.self_attention.query_key_value\.g_idx$", name)):
+                        #     # model.layers.layer_id.self_attention.query_key_value.g_idx
+                        #     module.self_attention.query_key_value.g_idx = tensor
+                        # elif bool(re.match(r"^model.layers\.\d+\.self_attention.query_key_value\.bias$", name)):
+                        #     # model.layers.layer_id.self_attention.query_key_value.bias
+                        #     module.self_attention.query_key_value.bias = tensor
+                        elif bool(re.match(r"^model.layers\.\d+\.(self_attn.o_proj|self_attention.dense)\.qweight$", name)):
                             # model.layers.layer_id.self_attn.o_proj.qweight
+                            # model.layers.layer_id.self_attention.dense.qweight
                             module.self_attn.o_proj.qweight = tensor
-                        elif bool(re.match(r"^model.layers\.\d+\.self_attn.o_proj\.scales$", name)):
+                        elif bool(re.match(r"^model.layers\.\d+\.(self_attn.o_proj|self_attention.dense)\.scales$", name)):
                             # model.layers.layer_id.self_attn.o_proj.scales
+                            # model.layers.layer_id.self_attention.dense.scales
                             module.self_attn.o_proj.scales = tensor
-                        elif bool(re.match(r"^model.layers\.\d+\.self_attn.o_proj\.qzeros$", name)):
+                        elif bool(re.match(r"^model.layers\.\d+\.(self_attn.o_proj|self_attention.dense)\.qzeros$", name)):
                             # model.layers.layer_id.self_attn.o_proj.qzeros
+                            # model.layers.layer_id.self_attention.dense.qzeros
                             module.self_attn.o_proj.qzeros = tensor
-                        elif bool(re.match(r"^model.layers\.\d+\.self_attn.o_proj\.g_idx$", name)):
+                        elif bool(re.match(r"^model.layers\.\d+\.(self_attn.o_proj|self_attention.dense)\.g_idx$", name)):
                             # model.layers.layer_id.self_attn.o_proj.g_idx
+                            # model.layers.layer_id.self_attention.dense.g_idx
                             module.self_attn.o_proj.g_idx = tensor
-                        elif bool(re.match(r"^model.layers\.\d+\.self_attn.o_proj\.bias$", name)):
+                        elif bool(re.match(r"^model.layers\.\d+\.(self_attn.o_proj|self_attention.dense)\.bias$", name)):
                             # model.layers.layer_id.self_attn.o_proj.bias
+                            # model.layers.layer_id.self_attention.dense.bias
                             module.self_attn.o_proj.bias = tensor
+                        # elif bool(re.match(r"^model.layers\.\d+\.self_attention\.dense\.qweight$", name)):
+                        #     # model.layers.layer_id.self_attention.dense.qweight
+                        #     module.self_attention.dense.qweight = tensor
+                        # elif bool(re.match(r"^model.layers\.\d+\.self_attention\.dense\.scales$", name)):
+                        #     # model.layers.layer_id.self_attention.dense.scales
+                        #     module.self_attention.dense.scales = tensor
+                        # elif bool(re.match(r"^model.layers\.\d+\.self_attention\.dense\.qzeros$", name)):
+                        #     # model.layers.layer_id.self_attention.dense.qzeros
+                        #     module.self_attention.dense.qzeros = tensor
+                        # elif bool(re.match(r"^model.layers\.\d+\.self_attention\.dense\.g_idx$", name)):
+                        #     # model.layers.layer_id.self_attention.dense.g_idx
+                        #     module.self_attention.dense.g_idx = tensor
+                        # elif bool(re.match(r"^model.layers\.\d+\.self_attention\.dense\.bias$", name)):
+                        #     # model.layers.layer_id.self_attention.dense.bias
+                        #     module.self_attention.dense.bias = tensor
                         elif bool(re.match(r"^model.layers\.\d+\.post_attention_layernorm\.weight$", name)):
                             # model.layers.layer_id.post_attention_layernorm.weight
                             module.post_attention_layernorm.weight = tensor
                         elif bool(re.match(r"^model.layers\.\d+\.post_attention_layernorm\.bias$", name)):
                             # model.layers.layer_id.post_attention_layernorm.bias
                             module.post_attention_layernorm.bias = tensor
+                        # elif bool(re.match(r"^model.layers\.\d+\.mlp\.dense_4h_to_h\.qweight$", name)):
+                        #     # model.layers.layer_id.mlp.dense_4h_to_h.qweight
+                        #     module.mlp.dense_4h_to_h.qweight = tensor
+                        # elif bool(re.match(r"^model.layers\.\d+\.mlp\.dense_4h_to_h\.scales$", name)):
+                        #     # model.layers.layer_id.mlp.dense_4h_to_h.scales
+                        #     module.mlp.dense_4h_to_h.scales = tensor
+                        # elif bool(re.match(r"^model.layers\.\d+\.mlp\.dense_4h_to_h\.qzeros$", name)):
+                        #     # model.layers.layer_id.mlp.dense_4h_to_h.qzeros
+                        #     module.mlp.dense_4h_to_h.qzeros = tensor
+                        # elif bool(re.match(r"^model.layers\.\d+\.mlp\.dense_4h_to_h\.g_idx$", name)):
+                        #     # model.layers.layer_id.mlp.dense_4h_to_h.g_idx
+                        #     module.mlp.dense_4h_to_h.g_idx = tensor
+                        # elif bool(re.match(r"^model.layers\.\d+\.mlp\.dense_4h_to_h\.bias$", name)):
+                        #     # model.layers.layer_id.mlp.dense_4h_to_h.bias
+                        #     module.mlp.dense_4h_to_h.bias = tensor
+                        # elif bool(re.match(r"^model.layers\.\d+\.mlp\.dense_h_to_4h\.qweight$", name)):
+                        #     # model.layers.layer_id.mlp.dense_h_to_4h.qweight
+                        #     module.mlp.dense_h_to_4h.qweight = tensor
+                        # elif bool(re.match(r"^model.layers\.\d+\.mlp\.dense_h_to_4h\.scales$", name)):
+                        #     # model.layers.layer_id.mlp.dense_h_to_4h.scales
+                        #     module.mlp.dense_h_to_4h.scales = tensor
+                        # elif bool(re.match(r"^model.layers\.\d+\.mlp\.dense_h_to_4h\.qzeros$", name)):
+                        #     # model.layers.layer_id.mlp.dense_h_to_4h.qzeros
+                        #     module.mlp.dense_h_to_4h.qzeros = tensor
+                        # elif bool(re.match(r"^model.layers\.\d+\.mlp\.dense_h_to_4h\.g_idx$", name)):
+                        #     # model.layers.layer_id.mlp.dense_h_to_4h.g_idx
+                        #     module.mlp.dense_h_to_4h.g_idx = tensor
+                        # elif bool(re.match(r"^model.layers\.\d+\.mlp\.dense_h_to_4h\.bias$", name)):
+                        #     # model.layers.layer_id.mlp.dense_h_to_4h.bias
+                        #     module.mlp.dense_h_to_4h.bias = tensor
                         elif bool(re.match(r"^model.layers\.\d+\.mlp.gate_proj\.qweight$", name)):
                             # model.layers.layer_id.mlp.gate_proj.qweight
                             module.mlp.gate_proj.qweight = tensor
@@ -228,62 +365,81 @@ class QuantizedModel:
                         elif bool(re.match(r"^model.layers\.\d+\.mlp.up_proj\.bias$", name)):
                             # model.layers.layer_id.mlp.up_proj.bias
                             module.mlp.up_proj.bias = tensor
-                        elif bool(re.match(r"^model.layers\.\d+\.mlp.down_proj\.qweight$", name)):
+                        elif bool(re.match(r"^model.layers\.\d+\.mlp.(down_proj|dense_4h_to_h)\.qweight$", name)):
                             # model.layers.layer_id.mlp.down_proj.qweight
+                            # model.layers.layer_id.mlp.dense_4h_to_h.qweight
                             module.mlp.down_proj.qweight = tensor
-                        elif bool(re.match(r"^model.layers\.\d+\.mlp.down_proj\.scales$", name)):
+                        elif bool(re.match(r"^model.layers\.\d+\.mlp.(down_proj|dense_4h_to_h)\.scales$", name)):
                             # model.layers.layer_id.mlp.down_proj.scales
+                            # model.layers.layer_id.mlp.dense_4h_to_h.scales
                             module.mlp.down_proj.scales = tensor
-                        elif bool(re.match(r"^model.layers\.\d+\.mlp.down_proj\.qzeros$", name)):
+                        elif bool(re.match(r"^model.layers\.\d+\.mlp.(down_proj|dense_4h_to_h)\.qzeros$", name)):
                             # model.layers.layer_id.mlp.down_proj.qzeros
+                            # model.layers.layer_id.mlp.dense_4h_to_h.qzeros
                             module.mlp.down_proj.qzeros = tensor
-                        elif bool(re.match(r"^model.layers\.\d+\.mlp.down_proj\.g_idx$", name)):
+                        elif bool(re.match(r"^model.layers\.\d+\.mlp.(down_proj|dense_4h_to_h)\.g_idx$", name)):
                             # model.layers.layer_id.mlp.down_proj.g_idx
+                            # model.layers.layer_id.mlp.dense_4h_to_h.g_idx
                             module.mlp.down_proj.g_idx = tensor
-                        elif bool(re.match(r"^model.layers\.\d+\.mlp.down_proj\.bias$", name)):
+                        elif bool(re.match(r"^model.layers\.\d+\.mlp.(down_proj|dense_4h_to_h)\.bias$", name)):
                             # model.layers.layer_id.mlp.down_proj.bias
+                            # model.layers.layer_id.mlp.dense_4h_to_h.bias
                             module.mlp.down_proj.bias = tensor
                         # Match against fused layers
-                        elif bool(re.match(r"^model.layers\.\d+\.self_attn.qkv_proj\.qweight$", name)):
+                        elif bool(re.match(r"^model.layers\.\d+\.(self_attn.qkv_proj|self_attention.query_key_value)\.qweight$", name)):
                             # model.layers.layer_id.self_attn.qkv_proj.qweight
+                            # model.layers.layer_id.self_attention.query_key_value.qweight
                             q_dim = q_size // (32 // bits) if quant_type == "awq" else q_size
                             kv_dim = kv_size // (32 // bits) if quant_type == "awq" else kv_size
                             module.self_attn.q_proj.qweight = tensor[:, : q_dim]
                             module.self_attn.k_proj.qweight = tensor[:, q_dim : q_dim + kv_dim]
                             module.self_attn.v_proj.qweight = tensor[:, q_dim + kv_dim :]
-                        elif bool(re.match(r"^model.layers\.\d+\.self_attn.qkv_proj\.scales$", name)):
+                        elif bool(re.match(r"^model.layers\.\d+\.(self_attn.qkv_proj|self_attention.query_key_value)\.scales$", name)):
                             # model.layers.layer_id.self_attn.qkv_proj.scales
+                            # model.layers.layer_id.self_attention.query_key_value.scales
                             module.self_attn.q_proj.scales = tensor[:, : q_size]
                             module.self_attn.k_proj.scales = tensor[:, q_size : q_size + kv_size]
                             module.self_attn.v_proj.scales = tensor[:, q_size + kv_size :]
-                        elif bool(re.match(r"^model.layers\.\d+\.self_attn.qkv_proj\.qzeros$", name)):
+                        elif bool(re.match(r"^model.layers\.\d+\.(self_attn.qkv_proj|self_attention.query_key_value)\.qzeros$", name)):
                             # model.layers.layer_id.self_attn.qkv_proj.qzeros
+                            # model.layers.layer_id.self_attention.query_key_value.qzeros
                             q_dim = q_size // (32 // bits) if quant_type in {"awq", "gptq"} else q_size
                             kv_dim = kv_size // (32 // bits) if quant_type in {"awq", "gptq"} else kv_size
                             module.self_attn.q_proj.qzeros = tensor[:, : q_dim]
                             module.self_attn.k_proj.qzeros = tensor[:, q_dim : q_dim + kv_dim]
                             module.self_attn.v_proj.qzeros = tensor[:, q_dim + kv_dim :]
-                        elif bool(re.match(r"^model.layers\.\d+\.self_attn.qkv_proj\.g_idx$", name)):
+                        elif bool(re.match(r"^model.layers\.\d+\.(self_attn.qkv_proj|self_attention.query_key_value)\.g_idx$", name)):
                             # model.layers.layer_id.self_attn.qkv_proj.g_ix
+                            # model.layers.layer_id.self_attention.query_key_value.g_idx
                             module.self_attn.q_proj.g_idx = tensor
                             module.self_attn.k_proj.g_idx = tensor
                             module.self_attn.v_proj.g_idx = tensor
-                        elif bool(re.match(r"^model.layers\.\d+\.mlp.gate_up_proj\.qweight$", name)):
+                        elif bool(re.match(r"^model.layers\.\d+\.(self_attn.qkv_proj|self_attention.query_key_value)\.bias$", name)):
+                            # model.layers.layer_id.self_attn.qkv_proj.bias
+                            # model.layers.layer_id.self_attention.query_key_value.bias
+                            module.self_attn.q_proj.bias = tensor[: q_size]
+                            module.self_attn.k_proj.bias = tensor[q_size : q_size + kv_size]
+                            module.self_attn.v_proj.bias = tensor[q_size + kv_size : ]
+                        elif bool(re.match(r"^model.layers\.\d+\.mlp.(gate_up_proj|dense_h_to_4h)\.qweight$", name)):
                             # model.layers.layer_id.mlp.gate_up_proj.qweight
+                            # model.layers.layer_id.mlp.dense_h_to_4h.qweight
                             intermediate_dim = intermediate_size // (32 // bits) if quant_type == "awq" else intermediate_size
                             module.mlp.gate_proj.qweight = tensor[:, : intermediate_dim]
                             module.mlp.up_proj.qweight = tensor[:, intermediate_dim :]
-                        elif bool(re.match(r"^model.layers\.\d+\.mlp.gate_up_proj\.scales$", name)):
+                        elif bool(re.match(r"^model.layers\.\d+\.mlp.(gate_up_proj|dense_h_to_4h)\.scales$", name)):
                             # model.layers.layer_id.mlp.gate_up_proj.scales
+                            # model.layers.layer_id.mlp.dense_h_to_4h.scales
                             module.mlp.gate_proj.scales = tensor[:, : intermediate_size]
                             module.mlp.up_proj.scales = tensor[:, intermediate_size :]
-                        elif bool(re.match(r"^model.layers\.\d+\.mlp.gate_up_proj\.qzeros$", name)):
+                        elif bool(re.match(r"^model.layers\.\d+\.mlp.(gate_up_proj|dense_h_to_4h)\.qzeros$", name)):
                             # model.layers.layer_id.mlp.gate_up_proj.qzeros
+                            # model.layers.layer_id.mlp.dense_h_to_4h.qzeros
                             intermediate_dim = intermediate_size // (32 // bits) if quant_type in {"awq", "gptq"} else intermediate_size
                             module.mlp.gate_proj.qzeros = tensor[:, : intermediate_dim]
                             module.mlp.up_proj.qzeros = tensor[:, intermediate_dim :]
-                        elif bool(re.match(r"^model.layers\.\d+\.mlp.gate_up_proj\.g_idx$", name)):
+                        elif bool(re.match(r"^model.layers\.\d+\.mlp.(gate_up_proj|dense_h_to_4h)\.g_idx$", name)):
                             # model.layers.layer_id.mlp.gate_up_proj.g_idx
+                            # model.layers.layer_id.mlp.dense_h_to_4h.g_idx
                             module.mlp.gate_proj.g_idx = tensor
                             module.mlp.up_proj.g_idx = tensor
                         else:
@@ -295,7 +451,7 @@ class QuantizedModel:
             self.lm_head.weight = self.embedding.weight
             if self.lm_head.bias is not None:
                 self.lm_head.bias = self.embedding.bias
-    
+
         # Sort list of layers by layer id
         self.layers = list(self.layers.values())
         self.layers.sort(key=lambda m: m.layer_id)
@@ -459,7 +615,7 @@ class QuantizedModel:
         scale_mat = scales[g_idx]
         scale_zeros_mat = scale_zeros[g_idx]
         qdq_weight_T = intweight * scale_mat - scale_zeros_mat.half()
-        
+
         # Store unpacked result in `qweight`
         module.qweight = qdq_weight_T.T
 
@@ -484,8 +640,8 @@ class QuantizedModel:
         Pack `scales`, `qzeros`, and `qweight` to ORT format
         """
         if module.bits != 4:
-            raise NotImplementedError(f"{modue.bits}-bit quantization in ORT is not currently supported by this tool.")
-        
+            raise NotImplementedError(f"{module.bits}-bit quantization in ORT is not currently supported by this tool.")
+
         intzeros_pt = module.qzeros.T if module.qzeros.dtype == module.scales.dtype else module.qzeros.T.byte()
         intweight_pt = intweight.byte()
         block_size = module.group_size
@@ -518,8 +674,8 @@ class QuantizedModel:
 
 
 class AWQModel(QuantizedModel):
-    def __init__(self, quant_type, input_path, bits, group_size, q_size, kv_size, intermediate_size, num_layers):
-        super().__init__(quant_type, input_path, bits, group_size, q_size, kv_size, intermediate_size, num_layers)
+    def __init__(self, quant_type, input_path, bits, group_size, q_size, kv_size, intermediate_size, num_layers, model_type: str):
+        super().__init__(quant_type, input_path, bits, group_size, q_size, kv_size, intermediate_size, num_layers, model_type)
 
         # Unpack and repack all `QuantizedTensorModule` classes in model
         for i, layer in enumerate(self.layers):
@@ -528,7 +684,9 @@ class AWQModel(QuantizedModel):
             print(f"Unpacking and repacking layer {i}")
 
             # Unpack and repack all `QuantizedTensorModule` classes in attention
-            for name, q_tensors in layer.self_attn.__dict__.items():
+            self_attn = getattr(layer, "self_attn", None) or getattr(layer, "self_attention", None)
+            for name, q_tensors in self_attn.__dict__.items():
+                print(name)
                 if isinstance(q_tensors, QuantizedTensorModule) and q_tensors.qweight is not None:
                     self.unpack(q_tensors)
                     self.repack(q_tensors)
@@ -585,8 +743,8 @@ class AWQModel(QuantizedModel):
 
 
 class GPTQModel(QuantizedModel):
-    def __init__(self, quant_type, input_path, bits, group_size, use_g_idx, q_size, kv_size, intermediate_size, num_layers):
-        super().__init__(quant_type, input_path, bits, group_size, q_size, kv_size, intermediate_size, num_layers)
+    def __init__(self, quant_type, input_path, bits, group_size, use_g_idx, q_size, kv_size, intermediate_size, num_layers, model_type: str):
+        super().__init__(quant_type, input_path, bits, group_size, q_size, kv_size, intermediate_size, num_layers, model_type)
 
         # Unpack and repack all `QuantizedTensorModule` classes in model
         for i, layer in enumerate(self.layers):
@@ -643,16 +801,16 @@ class GPTQModel(QuantizedModel):
 
 class QuantModel:
     @staticmethod
-    def from_pretrained(quant_type, input_path, bits, group_size, use_g_idx, q_size, kv_size, intermediate_size, num_layers):
+    def from_pretrained(quant_type, input_path, bits, group_size, use_g_idx, q_size, kv_size, intermediate_size, num_layers, model_type:str):
         """
         Unpack quantized weights in PyTorch models, store them in a standard format, and repack them
         into ONNX Runtime's format. Also performs any pre-processing and post-processing when unpacking
         the quantized weights.
         """
         if quant_type == "awq":
-            model = AWQModel(quant_type, input_path, bits, group_size, q_size, kv_size, intermediate_size, num_layers)
+            model = AWQModel(quant_type, input_path, bits, group_size, q_size, kv_size, intermediate_size, num_layers, model_type)
         elif quant_type == "gptq":
-            model = GPTQModel(quant_type, input_path, bits, group_size, use_g_idx, q_size, kv_size, intermediate_size, num_layers)
+            model = GPTQModel(quant_type, input_path, bits, group_size, use_g_idx, q_size, kv_size, intermediate_size, num_layers, model_type)
         else:
             raise NotImplementedError(f"The {quant_type} quantized model is not currently supported.")
 
