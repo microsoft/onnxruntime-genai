@@ -15,17 +15,19 @@
     "build_params": {
       "base": [
         "--parallel",
-        "--cmake_generator",
-        "Xcode",
         "--build_apple_framework",
         "--skip_tests"
       ],
         "iphoneos": [
             "--ios",
+            "--cmake_generator",
+            "Xcode",
             "--apple_deploy_target=13.0"
         ],
         "iphonesimulator": [
             "--ios",
+            "--cmake_generator",
+            "Xcode",
             "--apple_deploy_target=13.0"
         ],
         "macabi":[

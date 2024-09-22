@@ -535,6 +535,9 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         ]
 
     if args.macos == "Catalyst":
+        if args.cmake_generator == "Xcode":
+            raise Exception("Xcode CMake generator ('--cmake_generator Xcode') doesn't support Mac Catalyst build.")
+
         macabi_target = f"{args.osx_arch}-apple-ios{args.apple_deploy_target}-macabi"
         command += [
             "-DCMAKE_CXX_COMPILER_TARGET=" + macabi_target,
@@ -546,6 +549,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             f"-DCMAKE_C_FLAGS_RELEASE=-O3 -DNDEBUG --target={macabi_target}",
             f"-DCMAKE_CC_FLAGS=--target={macabi_target}",
             f"-DCMAKE_CC_FLAGS_RELEASE=-O3 -DNDEBUG --target={macabi_target}",
+            "-DMAC_CATALYST=1",
         ]
 
     if args.arm64:
