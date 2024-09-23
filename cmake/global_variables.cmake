@@ -45,7 +45,7 @@ elseif(APPLE)
       # The xcframework in cmake doesn't seem to support MacCatalyst.
       # Without manually setting the target framework, cmake will be confused and looking for wrong libraries.
       # The error looks like: 'Unable to find suitable library in: Info.plist for system name "Darwin"'
-      set_property(TARGET onnxruntime PROPERTY IMPORTED_LOCATION ${ORT_LIB_DIR}/ios-arm64_x86_64-maccatalyst/onnxruntime.framework)
+      set_property(TARGET onnxruntime PROPERTY IMPORTED_LOCATION ${ORT_LIB_DIR}/onnxruntime.xcframework/ios-arm64_x86_64-maccatalyst/onnxruntime.framework)
     else()
       set_property(TARGET onnxruntime PROPERTY IMPORTED_LOCATION ${ORT_LIB_DIR}/onnxruntime.xcframework)
     endif()

@@ -77,14 +77,6 @@ jobs:
     ${{ else }}:
       value: 'Microsoft.ML.OnnxRuntime'
 
-  - name: ort_native_package_path
-    ${{ if eq(parameters.os, 'ios') }}:
-      value: 'ios'
-    ${{ elseif eq(parameters.os, 'android') }}:
-      value: 'android'
-    ${{ else }}:
-      value: ${{ parameters.os }}-${{ parameters.arch }}
-
   - name: ortHome
     value: 'ort'
   - name: dml_dir

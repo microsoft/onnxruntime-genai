@@ -14,10 +14,6 @@ steps:
 
 - template: utils/set-nightly-build-option-variable.yml
 
-- template: utils/download-ort.yml
-  parameters:
-    archiveType: 'zip'
-
 - script: |
     set -e
     python3 tools/ci_build/github/apple/build_apple_framework.py \
