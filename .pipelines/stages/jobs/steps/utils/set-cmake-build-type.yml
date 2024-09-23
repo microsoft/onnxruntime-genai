@@ -8,7 +8,7 @@ steps:
     workingDirectory: $(Build.SourcesDirectory)
     targetType: inline
     script: |
-      $chosen_build_config = ${{ parameters.build_config }}
+      $chosen_build_config = "${{ parameters.build_config }}"
       $cmake_build_type = $chosen_build_config;
       if ($chosen_build_config -eq "release") {
         $cmake_build_type = "Release"
