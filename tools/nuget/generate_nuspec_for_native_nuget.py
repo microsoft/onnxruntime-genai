@@ -143,9 +143,12 @@ def generate_files(lines, args):
         lines.append(f'<file src="targets\\netstandard\Microsoft.ML.OnnxRuntimeGenAI.props" target="build\{dotnet}\{args.package_name}.props" />')
 
     # mobile targets
-    for dotnet in ["net8.0-android", "net8.0-maccatalyst", "net8.0-ios"]:
+    for dotnet in ["net8.0-android", "net8.0-ios"]:
         lines.append(f'<file src="targets\\{dotnet}\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\{dotnet}\{args.package_name}.targets" />')
         lines.append(f'<file src="targets\\{dotnet}\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="buildTransitive\{dotnet}\{args.package_name}.targets" />')
+
+    for dotnet in ["net8.0-maccatalyst"]:
+        lines.append(f'<file src="targets\\{dotnet}\\_._" target="build\{dotnet}\_._" />')
 
     # include
     lines.append(f'<file src="{args.sources_path}\src\ort_genai_c.h" target="build\\native\include" />')
