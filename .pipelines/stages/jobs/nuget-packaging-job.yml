@@ -38,7 +38,7 @@ parameters:
   default: false
 
 - name: enable_apple_framework
-  displayName: 'Whether Apple framework for iOS & macOS is built.'
+  displayName: 'Whether Apple framework for iOS & MacCatalyst is built.'
   type: boolean
   default: false
 
