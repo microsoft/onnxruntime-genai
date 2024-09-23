@@ -1684,49 +1684,7 @@ class Model:
 
         return gelu_name
 
-    def make_swiglu(self, layer_id, root_input, activation, domain):
-        # Make nodes for this activation subgraph
-        #
-        #       root_input (GateProjMatMul)
-        #            /      \
-        #   split/output_0  split/output_1
-        #         /  |      |
-        #   ActFunc  |      |
-        #          \ |      |
-        #           Mul     |
-        #             \     |
-        #              \    |
-        #                Mul
-        act_name = f"/model/layers.{layer_id}/mlp/act_fn"
-
-        # Split the input into two parts along the last dimension
-        # When using swiglu the MLP projects to 2 times the intermediate_size
-        split_act_name = f"{act_name}/split"
-        num_splits = 2
-        self.make_split(split_act_name, root_input, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size], axis = -1, num_splits=num_splits)
-        split_act_out_name_0 = f"{split_act_name}/output_0"        
-        split_act_out_name_1 = f"{split_act_name}/output_1"   
-
-        act_name = f"{split_act_name}/{activation}"
-        act_func_output = f"{act_name}/output_0"
-        self.make_node(activation, inputs=[split_act_out_name_0], outputs=[act_func_output], name=act_name, domain=domain)
-        self.make_value_info(act_func_output, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
-
-        mul_act_name_0 = f"{act_name}/Mul_0"
-        mul_act_inputs_0 = [split_act_out_name_0, act_func_output]
-        self.make_mul(mul_act_name_0, mul_act_inputs_0, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
-
-        mul_act_name_1 = f"{act_name}/Mul_1"
-        mul_0_output = f"{mul_act_name_0}/output_0"
-        mul_act_inputs_1 = [split_act_out_name_1, mul_0_output]
-        self.make_mul(mul_act_name_1, mul_act_inputs_1, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
-
-        return mul_act_name_1
-
     def make_activation(self, layer_id, root_input):
-
-        # if self.activation in {"swiglu"}:
-        #     output_name = self.make_swiglu(layer_id, root_input, activation="Sigmoid", domain=None)
         if self.activation in {"silu", "swish", "swiglu"}:
             output_name = self.make_activation_with_mul(layer_id, root_input, activation="Sigmoid", domain=None)
         elif self.activation in {"gelu_new", "gelu_fast", "gelu_pytorch_tanh"}:
@@ -1817,7 +1775,6 @@ class Model:
                 kv_size,
                 self.intermediate_size,
                 self.num_layers,
-                self.model_type,
             )
         else:
             # Load PyTorch model
@@ -2722,113 +2679,11 @@ class ChatGLMModel(Model):
             super().make_attention_unpacked(layer_id, attention, root_input, **kwargs)
         return super().make_attention(layer_id, attention, root_input, **kwargs)
 
-    # def make_attention(self, layer_id, attention, root_input, **kwargs):
-    #     #Designed from SelfAttention function of medeling_chatglm.py
-    #     hidden_size = self.hidden_size
-    #     num_attention_heads = self.num_attn_heads
-    #     kv_channels = self.kv_channels
-    #     projection_size = kv_channels * num_attention_heads
-    #     hidden_size_per_attention_head = projection_size // num_attention_heads
-    #     multi_query_attention = self.attention_attrs["op_type"] == "GroupQueryAttention"
-    #     multi_query_group_num = self.num_kv_heads if multi_query_attention else num_attention_heads
-
-    #     # Reshape the QKV weight
-    #     qkv_weight = attention.query_key_value.weight.T
-
-    #     if multi_query_attention:
-    #         q_weight, k_weight, v_weight = qkv_weight.split(
-    #             [
-    #                 num_attention_heads * hidden_size_per_attention_head,
-    #                 multi_query_group_num * hidden_size_per_attention_head,
-    #                 multi_query_group_num * hidden_size_per_attention_head,
-    #             ],
-    #             dim=-1
-    #         )
-    #     else:
-    #         q_weight, k_weight, v_weight = qkv_weight.chunk(3, dim=-1)
-
-    #     # Reshape the QKV bias if it exists
-    #     if attention.query_key_value.bias is not None:
-    #         qkv_bias = attention.query_key_value.bias
-    #         if multi_query_attention:
-    #             q_bias, k_bias, v_bias = qkv_bias.split(
-    #                 [
-    #                     num_attention_heads * hidden_size_per_attention_head,
-    #                     multi_query_group_num * hidden_size_per_attention_head,
-    #                     multi_query_group_num * hidden_size_per_attention_head,
-    #                 ]
-    #             )
-    #         else:
-    #             q_bias, k_bias, v_bias = qkv_bias.chunk(3)
-    #     else:
-    #         q_bias = k_bias = v_bias = None
-
-    #     # Create separate Q, K, V projections
-    #     attention.q_proj = torch.nn.Linear(hidden_size, num_attention_heads * hidden_size_per_attention_head, bias=q_bias is not None)
-    #     attention.q_proj.weight = torch.nn.Parameter(q_weight.T)
-    #     if q_bias is not None:
-    #         attention.q_proj.bias = torch.nn.Parameter(q_bias)
-
-    #     kv_size = multi_query_group_num * hidden_size_per_attention_head
-
-    #     attention.k_proj = torch.nn.Linear(hidden_size, kv_size, bias=k_bias is not None)
-    #     attention.k_proj.weight = torch.nn.Parameter(k_weight.T)
-    #     if k_bias is not None:
-    #         attention.k_proj.bias = torch.nn.Parameter(k_bias)
-
-    #     attention.v_proj = torch.nn.Linear(hidden_size, kv_size, bias=v_bias is not None)
-    #     attention.v_proj.weight = torch.nn.Parameter(v_weight.T)
-    #     if v_bias is not None:
-    #         attention.v_proj.bias = torch.nn.Parameter(v_bias)
-
-    #     # Remove the original combined QKV projection
-    #     del attention.query_key_value
-    #     del qkv_weight
-    #     del qkv_bias
-    #     # Add dummy rotary_emb attribute
-    #     attention.rotary_emb = type("RotaryEmbedding", (object,), {'content':{}})()
-
-    #     super().make_attention(layer_id, attention, root_input, **kwargs)
 
     def make_mlp_proj(self, layer_id, mlp, root_input):
         if self.quant_type is None:
             super().make_mlp_unpacked(layer_id, mlp, root_input)
         super().make_mlp_proj(layer_id, mlp, root_input)
-
-    # def make_mlp_proj(self, layer_id, mlp, root_input):
-    #     # Make nodes for the MLP subgraph
-    #     #
-    #     #           root_input
-    #     #              |
-    #     #         dense_h_to_4h    #Misnomer, it is increased to 2h instead of 4h, therefore in swiglu the intermediate size is same
-    #     #              |
-    #     #           Activation
-    #     #              |
-    #     #        dense_4h_to_h
-    #     #
-    #     # Make MatMul nodes
-
-    #     up_basename = f"/model/layers.{layer_id}/mlp/dense_h_to_4h/MatMul"
-    #     up_name = self.make_matmul(mlp.dense_h_to_4h, up_basename, root_input)
-    #     # Make activation node(s)
-    #     act_fn_name = self.make_activation(layer_id, root_input=f"{up_name}/output_0")
-
-    #     down_basename = f"/model/layers.{layer_id}/mlp/dense_4h_to_h/MatMul"
-    #     down_name = self.make_matmul(mlp.dense_4h_to_h, down_basename, f"{act_fn_name}/output_0")
-    #     # Assign output 0 of previous MatMul as skip input to next SkipLayerNorm
-    #     self.layernorm_attrs["skip_input"] = f"{down_name}/output_0"
-
-    # def make_layer(self, layer_id, layer):
-    #     # Each GLM encoder is defined as follows all LayerNorms are RMSNorms (Residual and Norm order same as LLama Model):
-    #     self.make_layernorm(layer_id, layer.input_layernorm, skip=not self.layernorm_attrs["first_layernorm"], simple=self.layernorm_attrs["simple"], location="input")
-    #     self.make_attention(layer_id, layer.self_attention, root_input=self.layernorm_attrs["output_0"])
-    #     self.make_layernorm(layer_id, layer.post_attention_layernorm, skip=True, simple=self.layernorm_attrs["simple"], location="post_attention")
-    #     self.make_mlp(layer_id, layer.mlp, root_input=self.layernorm_attrs["output_0"])
-
-    #     self.layernorm_attrs["first_layernorm"] = False
-    #     if layer_id == self.num_layers - 1:
-    #         # Norm after last decoder layer of model (last layer --> norm)
-    #         self.layernorm_attrs["last_layernorm"] = True
 
 
 def check_extra_options(kv_pairs):
