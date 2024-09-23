@@ -122,7 +122,7 @@ def generate_files(lines, args):
                 f'<file src="{p.absolute()}" target="runtimes\{runtime}\\native" />'
             )
 
-    runtimes = ["win-x64", "win-arm64", "linux-x64", "osx-x64", "osx-arm64"]
+    runtimes = ["win-x64", "win-arm64", "linux-x64", "osx-x64", "osx-arm64", "ios", "android"]
     for runtime in runtimes:
       if runtime.startswith("win"):
           add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai.lib")
@@ -143,12 +143,14 @@ def generate_files(lines, args):
         lines.append(f'<file src="targets\\netstandard\Microsoft.ML.OnnxRuntimeGenAI.props" target="build\{dotnet}\{args.package_name}.props" />')
 
     # mobile targets
-    for dotnet in ["net8.0-android", "net8.0-ios"]:
-        lines.append(f'<file src="targets\\{dotnet}\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\{dotnet}\{args.package_name}.targets" />')
-        lines.append(f'<file src="targets\\{dotnet}\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="buildTransitive\{dotnet}\{args.package_name}.targets" />')
+    lines.append(f'<file src="targets\\net8.0-android\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\\net8.0-android31.0\{args.package_name}.targets" />')
+    lines.append(f'<file src="targets\\net8.0-android\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="buildTransitiv\\net8.0-android31.0\{args.package_name}.targets" />')
 
-    for dotnet in ["net8.0-maccatalyst"]:
-        lines.append(f'<file src="targets\\{dotnet}\\_._" target="build\{dotnet}\_._" />')
+    lines.append(f'<file src="targets\\net8.0-ios\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\\net8.0-ios15.4\{args.package_name}.targets" />')
+    lines.append(f'<file src="targets\\net8.0-ios\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="buildTransitiv\\net8.0-ios15.4\{args.package_name}.targets" />')
+
+    lines.append(f'<file src="targets\\"net8.0-maccatalyst\\_._" target="build\\net8.0-maccatalyst14.0\_._" />')
+    lines.append(f'<file src="targets\\"net8.0-maccatalyst\\_._" target="buildTransitive\\net8.0-maccatalyst14.0\_._" />')
 
     # include
     lines.append(f'<file src="{args.sources_path}\src\ort_genai_c.h" target="build\\native\include" />')
