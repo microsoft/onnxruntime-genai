@@ -33,7 +33,7 @@ steps:
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - task: PublishBuildArtifacts@1
-  displayName: 'Publish Artifact: ONNXRuntime XCFramework'
+  displayName: 'Publish Artifact: ONNXRuntime GenAI XCFramework'
   inputs:
     ArtifactName: capi-onnxruntime-genai-ios-xcframework
-    PathtoPublish: '$(Build.ArtifactStagingDirectory)/artifacts'
+    PathtoPublish: '$(Build.BinariesDirectory)/artifacts'
