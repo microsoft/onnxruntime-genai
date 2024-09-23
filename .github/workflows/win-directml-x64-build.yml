@@ -14,16 +14,14 @@ concurrency:
 env:
   AZCOPY_AUTO_LOGIN_TYPE: MSI
   AZCOPY_MSI_CLIENT_ID: 63b63039-6328-442f-954b-5a64d124e5b4
-  ort_dir: "Microsoft.ML.OnnxRuntime.DirectML.1.17.3"
-  ort_zip: "Microsoft.ML.OnnxRuntime.DirectML.1.17.3.zip"
-  # TODO: Update with nightly ORT-DML build
-  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/Microsoft.ML.OnnxRuntime.DirectML.1.17.3.zip"
-  dml_dir: "Microsoft.AI.DirectML.1.15.1"
-  dml_zip: "Microsoft.AI.DirectML.1.15.1.zip"
-  dml_url: "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.15.1"
-  d3d12_dir: "Microsoft.Direct3D.D3D12.1.614.0"
-  d3d12_zip: "Microsoft.Direct3D.D3D12.1.614.0.zip"
-  d3d12_url: "https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.614.0"
+  ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
+  ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime.DirectML"
+  dml_dir: "Microsoft.AI.DirectML.1.15.2"
+  dml_zip: "Microsoft.AI.DirectML.1.15.2.zip"
+  dml_url: "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.15.2"
+  d3d12_dir: "Microsoft.Direct3D.D3D12.1.614.1"
+  d3d12_zip: "Microsoft.Direct3D.D3D12.1.614.1.zip"
+  d3d12_url: "https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.614.1"
   binaryDir: 'build/directml/win-x64'
 
 
@@ -41,9 +39,14 @@ jobs:
         python-version: '3.11.x'
         architecture: 'x64'
 
-    - name: Download OnnxRuntime
+    - name: Download OnnxRuntime Nightly
+      shell: pwsh
       run: |
-        Invoke-WebRequest -Uri $env:ort_url -OutFile $env:ort_zip
+        $resp = Invoke-RestMethod "${{ env.ORT_NIGHTLY_REST_API }}"
+        $ORT_NIGHTLY_VERSION = $resp.value[0].versions[0].normalizedVersion
+        Write-Host "$ORT_NIGHTLY_VERSION"
+        "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
+        nuget install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_NIGHTLY_VERSION -x -NonInteractive
 
     - name: Download DirectML
       run: |
@@ -53,10 +56,11 @@ jobs:
       run: |
         Invoke-WebRequest -Uri $env:d3d12_url -OutFile $env:d3d12_zip
 
-    - name: Unzip OnnxRuntime
+    - name: Extract OnnxRuntime library and header files
       run: |
-        Expand-Archive $env:ort_zip -DestinationPath $env:ort_dir
-        Remove-Item -Path $env:ort_zip
+        mkdir ort/lib
+        move ${{ env.ORT_PACKAGE_NAME }}/build/native/include ort/
+        move ${{ env.ORT_PACKAGE_NAME }}/runtimes/win-x64/native/* ort/lib/
 
     - name: Unzip DirectML
       run: |
@@ -70,14 +74,8 @@ jobs:
 
     - name: Move the files to the ort directory
       run: |
-        mkdir ort/lib
-        mkdir ort/include
-        mv $env:ort_dir\runtimes\win-x64\native\onnxruntime.dll ort\lib
-        mv $env:ort_dir\runtimes\win-x64\native\onnxruntime.lib ort\lib
         mv $env:dml_dir\bin\x64-win\DirectML.dll ort\lib
         mv $env:d3d12_dir\build\native\bin\x64\D3D12Core.dll ort\lib
-        mv $env:ort_dir\build\native\include\dml_provider_factory.h ort\include
-        mv $env:ort_dir\build\native\include\onnxruntime_c_api.h ort\include
         mv $env:dml_dir\include\DirectML.h ort\include
 
     - name: Configure CMake
@@ -102,4 +100,5 @@ jobs:
 
     - name: Run tests
       run: |
+        copy $env:GITHUB_WORKSPACE\ort\lib\* $env:GITHUB_WORKSPACE\$env:binaryDir\test\Release
         & .\$env:binaryDir\test\Release\unit_tests.exe

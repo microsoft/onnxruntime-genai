@@ -4,6 +4,21 @@
 
 namespace Generators {
 
+namespace {
+
+std::string ComposeKeyValueName(const std::string& template_string, int index) {
+  constexpr int32_t KeyValueNameLength = 64;
+  char key_value_name[KeyValueNameLength];
+  if (auto length = snprintf(key_value_name, std::size(key_value_name), template_string.c_str(), index);
+      length < 0 || length >= KeyValueNameLength) {
+    throw std::runtime_error("Unable to compose key value name from the provided template " + template_string +
+                             ". This could be either due to an encoding error or the name being too long.");
+  }
+  return std::string(key_value_name);
+}
+
+}  // namespace
+
 KV_Cache_Combined::KV_Cache_Combined(const Model& model, State& state)
     : model_{model},
       state_{state},
@@ -13,12 +28,8 @@ KV_Cache_Combined::KV_Cache_Combined(const Model& model, State& state)
   presents_.reserve(layer_count_);
 
   for (int i = 0; i < layer_count_; ++i) {
-    char string[64];
-    snprintf(string, std::size(string), model.config_->model.decoder.inputs.past_names.c_str(), i);
-    input_name_strings_.emplace_back(string);
-
-    snprintf(string, std::size(string), model.config_->model.decoder.outputs.present_names.c_str(), i);
-    output_name_strings_.emplace_back(string);
+    input_name_strings_.emplace_back(ComposeKeyValueName(model.config_->model.decoder.inputs.past_names, i));
+    output_name_strings_.emplace_back(ComposeKeyValueName(model.config_->model.decoder.outputs.present_names, i));
   }
 
   // Derive the KV data type from the KV input 0
@@ -113,11 +124,15 @@ void KV_Cache_Combined::PickPastState(std::span<const int32_t> beam_indices, int
   }
 }
 
+bool KV_Cache::IsCacheNeeded(const Model& model) {
+  return model.session_info_->HasInput(ComposeKeyValueName(model.config_->model.decoder.inputs.past_key_names, 0));
+}
+
 KV_Cache::KV_Cache(const Model& model, State& state)
     : model_{model},
       state_{state},
       layer_count_{model_.config_->model.decoder.num_hidden_layers},
-      past_present_share_buffer_{state_.params_->search.past_present_share_buffer && state_.params_->search.num_beams == 1},
+      past_present_share_buffer_{state_.params_->search.past_present_share_buffer && (state_.params_->search.num_beams == 1 || model_.config_->model.type == "whisper")},
       shape_{state_.params_->BatchBeamSize(), model.config_->model.decoder.num_key_value_heads, 0, model.config_->model.decoder.head_size} {
   if (g_log.enabled && g_log.warning && past_present_share_buffer_ != state_.params_->search.past_present_share_buffer)
     Log("warning", "past_present_share_buffer search option set to true, but has been disabled due to the current configuration. See https://aka.ms/generate_config for details");
@@ -126,16 +141,11 @@ KV_Cache::KV_Cache(const Model& model, State& state)
   presents_.reserve(layer_count_ * 2);
 
   for (int i = 0; i < layer_count_; ++i) {
-    char string[64];
-    snprintf(string, std::size(string), model.config_->model.decoder.inputs.past_key_names.c_str(), i);
-    input_name_strings_.emplace_back(string);
-    snprintf(string, std::size(string), model.config_->model.decoder.inputs.past_value_names.c_str(), i);
-    input_name_strings_.emplace_back(string);
+    input_name_strings_.emplace_back(ComposeKeyValueName(model.config_->model.decoder.inputs.past_key_names, i));
+    input_name_strings_.emplace_back(ComposeKeyValueName(model.config_->model.decoder.inputs.past_value_names, i));
 
-    snprintf(string, std::size(string), model.config_->model.decoder.outputs.present_key_names.c_str(), i);
-    output_name_strings_.emplace_back(string);
-    snprintf(string, std::size(string), model.config_->model.decoder.outputs.present_value_names.c_str(), i);
-    output_name_strings_.emplace_back(string);
+    output_name_strings_.emplace_back(ComposeKeyValueName(model.config_->model.decoder.outputs.present_key_names, i));
+    output_name_strings_.emplace_back(ComposeKeyValueName(model.config_->model.decoder.outputs.present_value_names, i));
   }
 
   // Derive the KV data type from the KV input 0
@@ -262,16 +272,11 @@ Cross_Cache::Cross_Cache(const Model& model, State& state)
   values_.reserve(layer_count_ * 2);
 
   for (int i = 0; i < layer_count_; ++i) {
-    char string[64];
-    snprintf(string, std::size(string), model.config_->model.decoder.inputs.cross_past_key_names.c_str(), i);
-    input_name_strings_.emplace_back(string);
-    snprintf(string, std::size(string), model.config_->model.decoder.inputs.cross_past_value_names.c_str(), i);
-    input_name_strings_.emplace_back(string);
+    input_name_strings_.emplace_back(ComposeKeyValueName(model.config_->model.decoder.inputs.cross_past_key_names, i));
+    input_name_strings_.emplace_back(ComposeKeyValueName(model.config_->model.decoder.inputs.cross_past_value_names, i));
 
-    snprintf(string, std::size(string), model.config_->model.decoder.outputs.cross_present_key_names.c_str(), i);
-    output_name_strings_.emplace_back(string);
-    snprintf(string, std::size(string), model.config_->model.decoder.outputs.cross_present_value_names.c_str(), i);
-    output_name_strings_.emplace_back(string);
+    output_name_strings_.emplace_back(ComposeKeyValueName(model.config_->model.decoder.outputs.cross_present_key_names, i));
+    output_name_strings_.emplace_back(ComposeKeyValueName(model.config_->model.decoder.outputs.cross_present_value_names, i));
   }
 
   // Derive the KV data type from the KV input 0

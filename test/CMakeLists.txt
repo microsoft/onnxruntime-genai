@@ -44,7 +44,6 @@ set(TEST_MODEL_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/test_models/")
 set(TEST_MODEL_DES_DIR "$<TARGET_FILE_DIR:unit_tests>/test_models/")
 add_custom_command(TARGET unit_tests POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_directory ${TEST_MODEL_SRC_DIR} ${TEST_MODEL_DES_DIR}
-  COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} $<TARGET_FILE_DIR:unit_tests>
 )
 
 add_compile_definitions(MODEL_PATH="${TEST_MODEL_DES_DIR}")
@@ -53,5 +52,3 @@ source_group(TREE ${PROJECT_SOURCE_DIR} FILES ${test_srcs})
 set_property(DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT unit_tests)
 
 include(GoogleTest)
-
-

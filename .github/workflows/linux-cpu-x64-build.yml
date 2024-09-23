@@ -78,10 +78,6 @@ jobs:
           echo "::add-mask::$HF_TOKEN"
           echo "HF_TOKEN=$HF_TOKEN" >> $GITHUB_ENV
 
-      - name: Remove the ort lib and header files
-        run: |
-          rm -rf ort
-
       - name: Verify Build Artifacts
         if: always()
         continue-on-error: true
@@ -99,11 +95,11 @@ jobs:
         run: |
           export ORTGENAI_LOG_ORT_LIB=1
           cd test/csharp
-          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="../../build/cpu/"
+          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="../../build/cpu/" /p:OrtLibDir="../../ort/lib/"
 
       - name: Run tests
         run: |
           set -e -x
           export ORTGENAI_LOG_ORT_LIB=1
-          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$GITHUB_WORKSPACE/build/cpu/
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$GITHUB_WORKSPACE/ort/lib
           ./build/cpu/test/unit_tests
