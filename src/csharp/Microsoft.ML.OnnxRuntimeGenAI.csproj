@@ -22,6 +22,16 @@
     <IsLinuxBuild Condition="'$([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform($([System.Runtime.InteropServices.OSPlatform]::Linux)))' == 'true'">true</IsLinuxBuild>
     <IsWindowsBuild Condition="'$([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform($([System.Runtime.InteropServices.OSPlatform]::Windows)))' == 'true'">true</IsWindowsBuild>
     <IsMacOSBuild Condition="'$([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform($([System.Runtime.InteropServices.OSPlatform]::OSX)))' == 'true'">true</IsMacOSBuild>
+
+    <!-- $([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) gives better results than
+         $(TargetPlatformIdentifier). See https://github.com/dotnet/msbuild/issues/7359
+         Note there are slight differences in casing (e.g. macos vs macOS), so if we ever
+         change to use $(TargetPlatformIdentifier) we need to adjust for that.
+    -->
+    <IsAndroidTarget Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'">true</IsAndroidTarget>
+    <IsIOSTarget Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios' OR
+                            $([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'maccatalyst'">true</IsIOSTarget>
+    <IsMacTarget Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'macos'">true</IsMacTarget>
   </PropertyGroup>
 
 
@@ -67,6 +77,22 @@
       Overwrite="true">
     </WriteLinesToFile>
   </Target>
+
+  <PropertyGroup Condition="'$(IsIOSTarget)'=='true' OR '$(IsAndroidTarget)'=='true'">
+    <OrtConstants>$(OrtConstants);__MOBILE__</OrtConstants>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(IsAndroidTarget)'=='true'">
+    <OrtConstants>$(OrtConstants);__ANDROID__</OrtConstants>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(IsIOSTarget)'=='true'">
+    <OrtConstants>$(OrtConstants);__IOS__</OrtConstants>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <DefineConstants>$(DefineConstants);$(OrtConstants)</DefineConstants>
+  </PropertyGroup>
 
   <ItemGroup>
     <None Include="$(NativeBuildOutputDir)\onnxruntime-genai.lib" Condition="Exists('$(NativeBuildOutputDir)\onnxruntime-genai.lib')" PackagePath="" Pack="false" CopyToOutputDirectory="Never" Visible="false" />

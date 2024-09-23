@@ -97,7 +97,7 @@ def generate_release_notes(line_list):
 
 def generate_dependencies(xml_text, package_version, ort_package_name, ort_package_version):
     xml_text.append("<dependencies>")
-    target_frameworks = ["NETSTANDARD" , "NETCOREAPP", "NETFRAMEWORK"]
+    target_frameworks = ["NETSTANDARD" , "NETCOREAPP", "NETFRAMEWORK", "net8.0-android31.0", "net8.0-ios15.4", "net8.0-maccatalyst14.0"]
     for framework in target_frameworks:
         xml_text.append(f'<group targetFramework="{framework}">')
         xml_text.append(f'<dependency id="Microsoft.ML.OnnxRuntimeGenAI.Managed" version="{package_version}" />')
@@ -135,10 +135,15 @@ def generate_files(lines, args):
 
     # targets
     for dotnet in ["netstandard2.0", "net8.0", "native"]:
-        lines.append(f'<file src="targets\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\{dotnet}\{args.package_name}.targets" />')
-        lines.append(f'<file src="targets\Microsoft.ML.OnnxRuntimeGenAI.props" target="build\{dotnet}\{args.package_name}.props" />')
-    # include
+        lines.append(f'<file src="targets\\netstandard\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\{dotnet}\{args.package_name}.targets" />')
+        lines.append(f'<file src="targets\\netstandard\Microsoft.ML.OnnxRuntimeGenAI.props" target="build\{dotnet}\{args.package_name}.props" />')
 
+    # mobile targets
+    for dotnet in ["net8.0-android", "net8.0-maccatalyst", "net8.0-ios"]:
+        lines.append(f'<file src="targets\\{dotnet}\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\{dotnet}\{args.package_name}.targets" />')
+        lines.append(f'<file src="targets\\{dotnet}\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="buildTransitive\{dotnet}\{args.package_name}.targets" />')
+
+    # include
     lines.append(f'<file src="{args.sources_path}\src\ort_genai_c.h" target="build\\native\include" />')
     lines.append('</files>')
 

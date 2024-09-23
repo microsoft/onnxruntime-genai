@@ -10,7 +10,15 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
     {
         internal class NativeLib
         {
+#if __ANDROID__
+            // define the library name required for android
+            internal const string DllName = "libonnxruntime-genai.so";
+#elif __IOS__
+            // define the library name required for iOS
+            internal const string DllName = "__Internal";
+#else
             internal const string DllName = "onnxruntime-genai";
+#endif
         }
 
         // The returned pointer is owned by the OgaResult object and will be freed when the OgaResult
@@ -73,7 +81,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsSetModelInput(IntPtr /* OgaGeneratorParams* */ generatorParams,
-                                                                                     byte[] /* const char* */ name,                                 
+                                                                                     byte[] /* const char* */ name,
                                                                                      IntPtr /* const OgaTensor* */ tensor);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
