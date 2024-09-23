@@ -128,10 +128,14 @@ def generate_files(lines, args):
           add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai.lib")
           add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai.dll")
           add_native_artifact_if_exists(lines, runtime, "d3d12core.dll")
-      if runtime.startswith("linux"):
+      elif runtime.startswith("linux"):
           add_native_artifact_if_exists(lines, runtime, "libonnxruntime-genai.so")
-      if runtime.startswith("osx"):
+      elif runtime.startswith("osx"):
           add_native_artifact_if_exists(lines, runtime, "libonnxruntime-genai.dylib")
+      elif runtime.startswith("ios"):
+          add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai.xcframework")
+      elif runtime.startswith("android"):
+          add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai.aar")
 
     # targets
     for dotnet in ["netstandard2.0", "net8.0", "native"]:

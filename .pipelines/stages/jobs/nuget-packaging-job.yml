@@ -180,7 +180,7 @@ jobs:
   - powershell: |
       $artifacts_dir = '$(Build.BinariesDirectory)/artifact-downloads'
       Write-Host "List downloaded artifacts"
-      $artifacts = Get-ChildItem -Path $artifacts_dir/* -Include *.zip,*.tar.gz
+      $artifacts = Get-ChildItem -Path $artifacts_dir/* -Include *.zip,*.tar.gz,*.aar
       Write-Host $artifacts
 
       $outputDir = '$(Build.Repository.LocalPath)/$(buildDir)'
@@ -210,6 +210,9 @@ jobs:
         }
         elseif ($a -like "*.tar.gz") {
           tar -xf $file -C $outputDir/$rid
+        }
+        elseif ($a -lie "*.aar") {
+          Move-Item $file $outputDir/android/onnxruntime-genai.aar
         }
 
         mkdir -Force $outputDir/$rid/$(buildConfig)
