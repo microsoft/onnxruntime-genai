@@ -28,22 +28,11 @@ jobs:
   - template: steps/utils/set-genai-version.yml
 
   - task: CmdLine@2
-    displayName: Download ORT AAR package
-    inputs:
-      script: |
-        set -e -x
-        ORT_VERSION=${{parameters.ort_version}}
-        wget https://repo1.maven.org/maven2/com/microsoft/onnxruntime/onnxruntime-android/$ORT_VERSION/onnxruntime-android-$ORT_VERSION.aar
-        unzip onnxruntime-android-$ORT_VERSION.aar -d ort
-        ls -lR ort
-      workingDirectory: $(Build.SourcesDirectory)
-
-  - task: CmdLine@2
     displayName: Build Android AAR Packages
     inputs:
       script: |
         set -e -x
-        
+
         BUILD_DIR=$(Build.BinariesDirectory)
         BUILD_CONFIG=${{parameters.build_config}}
         GENAI_VERSION=$(genai_version)
