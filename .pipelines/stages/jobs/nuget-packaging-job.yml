@@ -37,6 +37,11 @@ parameters:
   type: boolean
   default: false
 
+- name: enable_android
+  displayName: 'Whether Android AAR package is built.'
+  type: boolean
+  default: true
+
 - name: ort_version
   type: string
 
@@ -189,8 +194,14 @@ jobs:
           $rid = $Matches.1
         }
         else {
-          Write-Host "Invalid artifact name" $file
-          return
+          $rid_match = $a -match "onnxruntime-genai-(android|ios)-$(genai_version)-(.+?)?(\.zip|\.aar)"
+          if ($rid_match) {
+            $rid = $Matches.1
+          }
+          else {
+            Write-Host "Invalid artifact name" $file
+            return
+          }
         }
         mkdir -Force $outputDir/$rid
 
