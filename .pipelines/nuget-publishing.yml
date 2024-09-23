@@ -94,17 +94,12 @@ stages:
     enable_win_dml: ${{ parameters.enable_win_dml }}
     enable_win_arm64: ${{ parameters.enable_win_arm64 }}
     enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
+    enable_android: ${{ parameters.enable_android }}
     ort_version: ${{ parameters.ort_version }}
     ort_cuda_version: ${{ parameters.ort_cuda_version }}
     ort_dml_version: ${{ parameters.ort_dml_version }}
     cuda_version: ${{ parameters.cuda_version }}
     build_config: ${{ parameters.build_config }}
-
-- ${{ if eq(parameters.enable_android, true) }}:
-  - template: stages/android-packaging-stage.yml
-    parameters:
-      ort_version: ${{ parameters.ort_version }}
-      build_config: ${{ parameters.build_config }}
 
 - template: stages/nuget-packaging-stage.yml
   parameters:

@@ -152,6 +152,13 @@ jobs:
         ArtifactName: onnxruntime-genai-osx-cpu-arm64-capi
         TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
 
+  - ${{ if eq(parameters.enable_android, true) }}:
+    - template: steps/utils/flex-download-pipeline-artifact.yml
+      parameters:
+        StepName: 'Download Android AAR Artifacts'
+        ArtifactName: drop-android
+        TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
+
   - checkout: self
     path: onnxruntime-genai
     clean: true
