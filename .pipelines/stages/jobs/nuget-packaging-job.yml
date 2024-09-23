@@ -218,7 +218,7 @@ jobs:
         elseif ($a -like "*.tar.gz") {
           tar -xf $file -C $outputDir/$rid
         }
-        elseif ($a -lie "*.aar") {
+        elseif ($a -like "*.aar") {
           Move-Item $file $outputDir/android/onnxruntime-genai.aar
         }
 
