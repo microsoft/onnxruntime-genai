@@ -149,8 +149,8 @@ def generate_files(lines, args):
     lines.append(f'<file src="targets\\net8.0-ios\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\\net8.0-ios15.4\{args.package_name}.targets" />')
     lines.append(f'<file src="targets\\net8.0-ios\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="buildTransitiv\\net8.0-ios15.4\{args.package_name}.targets" />')
 
-    lines.append(f'<file src="targets\\"net8.0-maccatalyst\\_._" target="build\\net8.0-maccatalyst14.0\_._" />')
-    lines.append(f'<file src="targets\\"net8.0-maccatalyst\\_._" target="buildTransitive\\net8.0-maccatalyst14.0\_._" />')
+    lines.append(f'<file src="targets\\net8.0-maccatalyst\\_._" target="build\\net8.0-maccatalyst14.0\_._" />')
+    lines.append(f'<file src="targets\\net8.0-maccatalyst\\_._" target="buildTransitive\\net8.0-maccatalyst14.0\_._" />')
 
     # include
     lines.append(f'<file src="{args.sources_path}\src\ort_genai_c.h" target="build\\native\include" />')
