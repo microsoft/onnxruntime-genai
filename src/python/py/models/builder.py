@@ -2762,6 +2762,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
         elif config.architectures[0] == "Qwen2ForCausalLM":
             onnx_model = QwenModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "ChatGLMForConditionalGeneration" or config.architectures[0] == "ChatGLMModel":
+            # Quantized ChatGLM model has ChatGLMForConditionalGeneration as architecture whereas HF model as the latter
             config.hidden_act = "swiglu"
             onnx_model = ChatGLMModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         else:
