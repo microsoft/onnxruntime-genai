@@ -210,7 +210,9 @@ jobs:
             return
           }
         }
+
         mkdir -Force $outputDir/$rid
+        mkdir -Force $outputDir/$rid/$(buildConfig)
 
         if ($a -like "*.zip") {
           Expand-Archive -Path $file -DestinationPath $outputDir/$rid
@@ -219,18 +221,14 @@ jobs:
           tar -xf $file -C $outputDir/$rid
         }
         elseif ($a -like "*.aar") {
-          Move-Item $file $outputDir/android/onnxruntime-genai.aar
+          Move-Item $file $outputDir/$rid/$(buildConfig)/onnxruntime-genai.aar
         }
 
-        mkdir -Force $outputDir/$rid/$(buildConfig)
         $b = $file.Basename
         $b = $b -split '.tar'
         $b = $b[0]
         if (Test-Path $outputDir/$rid/$b/lib/) {
           Move-Item $outputDir/$rid/$b/lib/* $outputDir/$rid/$(buildConfig) -Force
-        }
-        else {
-          Move-Item $outputDir/$rid/* $outputDir/$rid/$(buildConfig) -Force
         }
       }
 
