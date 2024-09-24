@@ -15,9 +15,9 @@
     <dependencies>
       <group targetFramework="net8.0" />
       <group targetFramework="netstandard2.0" />
-      <group targetFramework="net8.0-android31.0">
-      <group targetFramework="net8.0-ios15.4">
-      <group targetFramework="net8.0-maccatalyst14.0">
+      <group targetFramework="net8.0-android31.0" />
+      <group targetFramework="net8.0-ios15.4" />
+      <group targetFramework="net8.0-maccatalyst14.0" />
     </dependencies>
   </metadata>
   <files>
