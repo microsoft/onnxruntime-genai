@@ -4,8 +4,15 @@
 if(ORT_HOME)
   # If ORT_HOME is specified at build time, use ORT_HOME to get the onnxruntime headers and libraries
   message(STATUS "Using ONNX Runtime from ${ORT_HOME}")
-  set(ORT_HEADER_DIR ${ORT_HOME}/include)
-  set(ORT_LIB_DIR ${ORT_HOME}/lib)
+
+  if (ANDROID)
+    # Paths are based on the directory structure of the ORT Android AAR.
+    set(ORT_HEADER_DIR ${ORT_HOME}/headers)
+    set(ORT_LIB_DIR ${ORT_HOME}/jni/${ANDROID_ABI})
+  else()
+    set(ORT_HEADER_DIR ${ORT_HOME}/include)
+    set(ORT_LIB_DIR ${ORT_HOME}/lib)
+  endif()
 else()
   # If ORT_HOME is not specified, download the onnxruntime headers and libraries from the nightly feed
   set(ORT_VERSION "1.19.2")
