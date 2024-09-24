@@ -1,5 +1,6 @@
 # -------------------------------------------------------------------------
 # Copyright (c) Microsoft Corporation.  All rights reserved.
+# Modifications Copyright(C) 2024 Advanced Micro Devices, Inc. All rights reserved
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
@@ -2677,6 +2678,8 @@ class ChatGLMModel(Model):
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         if self.quant_type is None:
             super().make_attention_unpacked(layer_id, attention, root_input, **kwargs)
+            # Add dummy rotary_emb attribute
+            attention.rotary_emb = type("RotaryEmbedding", (object,), {'content':{}})()
         return super().make_attention(layer_id, attention, root_input, **kwargs)
 
 
@@ -2685,6 +2688,9 @@ class ChatGLMModel(Model):
             super().make_mlp_unpacked(layer_id, mlp, root_input)
         super().make_mlp_proj(layer_id, mlp, root_input)
 
+    def make_layer(self, layer_id, layer):
+        layer.self_attn = layer.self_attn if hasattr(layer, 'self_attn') else layer.self_attention
+        super().make_layer(layer_id, layer)
 
 def check_extra_options(kv_pairs):
     if "use_8bits_moe" in kv_pairs:

@@ -1,5 +1,6 @@
 # -------------------------------------------------------------------------
 # Copyright (c) Microsoft Corporation.  All rights reserved.
+# Modifications Copyright(C) 2024 Advanced Micro Devices, Inc. All rights reserved
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
