@@ -1,0 +1,413 @@
+{
+  "add_bos_token": true,
+  "add_eos_token": false,
+  "add_prefix_space": null,
+  "added_tokens_decoder": {
+    "0": {
+      "content": "<unk>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "1": {
+      "content": "<s>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "2": {
+      "content": "</s>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": false
+    },
+    "32000": {
+      "content": "<|endoftext|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "32001": {
+      "content": "<|assistant|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32002": {
+      "content": "<|placeholder1|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32003": {
+      "content": "<|placeholder2|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32004": {
+      "content": "<|placeholder3|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32005": {
+      "content": "<|placeholder4|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32006": {
+      "content": "<|system|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "32007": {
+      "content": "<|end|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "32008": {
+      "content": "<|placeholder5|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32009": {
+      "content": "<|placeholder6|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32010": {
+      "content": "<|user|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": false,
+      "single_word": false,
+      "special": true
+    },
+    "32011": {
+      "content": "<|placeholder7|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32012": {
+      "content": "<|placeholder8|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32013": {
+      "content": "<|placeholder9|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32014": {
+      "content": "<|placeholder10|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32015": {
+      "content": "<|placeholder11|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32016": {
+      "content": "<|placeholder12|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32017": {
+      "content": "<|placeholder13|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32018": {
+      "content": "<|placeholder14|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32019": {
+      "content": "<|placeholder15|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32020": {
+      "content": "<|placeholder16|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32021": {
+      "content": "<|placeholder17|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32022": {
+      "content": "<|placeholder18|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32023": {
+      "content": "<|placeholder19|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32024": {
+      "content": "<|placeholder20|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32025": {
+      "content": "<|placeholder21|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32026": {
+      "content": "<|placeholder22|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32027": {
+      "content": "<|placeholder23|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32028": {
+      "content": "<|placeholder24|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32029": {
+      "content": "<|placeholder25|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32030": {
+      "content": "<|placeholder26|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32031": {
+      "content": "<|placeholder27|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32032": {
+      "content": "<|placeholder28|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32033": {
+      "content": "<|placeholder29|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32034": {
+      "content": "<|placeholder30|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32035": {
+      "content": "<|placeholder31|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32036": {
+      "content": "<|placeholder32|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32037": {
+      "content": "<|placeholder33|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32038": {
+      "content": "<|placeholder34|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32039": {
+      "content": "<|placeholder35|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32040": {
+      "content": "<|placeholder36|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32041": {
+      "content": "<|placeholder37|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32042": {
+      "content": "<|placeholder38|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32043": {
+      "content": "<|placeholder39|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    },
+    "32044": {
+      "content": "<|image|>",
+      "lstrip": false,
+      "normalized": false,
+      "rstrip": true,
+      "single_word": false,
+      "special": true
+    }
+  },
+  "additional_special_tokens": [
+    "<|system|>",
+    "<|end|>",
+    "<|user|>",
+    "<|end|>"
+  ],
+  "auto_map": {
+    "AutoProcessor": "processing_phi3_v.Phi3VProcessor"
+  },
+  "bos_token": "<s>",
+  "chat_template": "{% for message in messages %}{{'<|' + message['role'] + '|>' + '\n' + message['content'] + '<|end|>\n' }}{% endfor %}{% if add_generation_prompt and messages[-1]['role'] != 'assistant' %}{{- '<|assistant|>\n' -}}{% endif %}",
+  "clean_up_tokenization_spaces": false,
+  "eos_token": "<|endoftext|>",
+  "legacy": false,
+  "model_max_length": 131072,
+  "pad_token": "<|endoftext|>",
+  "padding_side": "right",
+  "processor_class": "Phi3VProcessor",
+  "sp_model_kwargs": {},
+  "tokenizer_class": "LlamaTokenizer",
+  "unk_token": "<unk>",
+  "use_default_system_prompt": false
+}

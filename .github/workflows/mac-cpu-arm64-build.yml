@@ -14,7 +14,7 @@ env:
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
 jobs:
   mac-cpu-arm64-build:
-    runs-on: macos-latest
+    runs-on: macos-latest # arm64
     steps:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v4
@@ -36,26 +36,50 @@ jobs:
           mv ${{ env.ORT_PACKAGE_NAME }}/build/native/include ort/
           mv ${{ env.ORT_PACKAGE_NAME }}/runtimes/osx-arm64/native/* ort/lib/
 
-
       - name: Configure CMake
         run: |
-          cmake --preset macos_cpu_release
+          cmake --preset macos_arm64_cpu_release
 
       - name: Build with CMake
         run: |
-          cmake --build --preset macos_cpu_release --parallel
+          cmake --build --preset macos_arm64_cpu_release --parallel
         continue-on-error: false
+
+      - name: Install the python wheel and test dependencies
+        run: |
+          python3 -m venv genai-macos-venv
+          source genai-macos-venv/bin/activate
+          python3 -m pip install -r test/python/requirements.txt
+          python3 -m pip install -r test/python/requirements-macos.txt
+          python3 -m pip install build/cpu/osx-arm64/wheel/onnxruntime_genai*.whl --no-deps
+
+      - name: Remove the ort lib and header files
+        run: |
+          rm -rf ort
 
       - name: Verify Build Artifacts
         if: always()
         continue-on-error: true
         run: |
-          ls -l ${{ github.workspace }}/build
+          ls -l ${{ github.workspace }}/build/cpu/osx-arm64
 
-      - name: Upload Build Artifacts
-        uses: actions/upload-artifact@v3
-        with:
-          name: onnxruntime-genai-mac-cpu-arm64
-          path: ${{ github.workspace }}/build/**/*.a
+      # This will also download all the test models to the test/test_models directory
+      # These models are used by the python tests as well as C#, C++ and others.
+      - name: Run the python tests
+        run: |
+          source genai-macos-venv/bin/activate
+          export ORTGENAI_LOG_ORT_LIB=1
+          python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models
 
+      - name: Build the C# API and Run the C# Tests
+        run: |
+          export ORTGENAI_LOG_ORT_LIB=1
+          cd test/csharp
+          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="../../build/cpu/osx-arm64"
 
+      - name: Run tests
+        run: |
+          set -e -x
+          export ORTGENAI_LOG_ORT_LIB=1
+          export DYLD_LIBRARY_PATH=$DYLD_LIBRARY_PATH:$GITHUB_WORKSPACE/build/cpu/osx-arm64
+          ./build/cpu/osx-arm64/test/unit_tests

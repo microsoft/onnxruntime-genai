@@ -75,10 +75,11 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #include "../logging.h"
 #include "env_utils.h"
 
-#if defined(__ANDROID__)
-#include <android/log.h>
+#if defined(__linux__)
 #include <dlfcn.h>
 
+#if defined(__ANDROID__)
+#include <android/log.h>
 #define TAG "GenAI"
 
 #define LOG_DEBUG(...) __android_log_print(ANDROID_LOG_DEBUG, TAG, __VA_ARGS__)
@@ -86,9 +87,15 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #define LOG_WARN(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
 #define LOG_ERROR(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 #define LOG_FATAL(...) __android_log_print(ANDROID_LOG_FATAL, TAG, __VA_ARGS__)
+#endif
 
-#elif defined(__linux__)
+#elif defined(__APPLE__)
+#include "TargetConditionals.h"
+#if TARGET_OS_OSX && _ORT_GENAI_USE_DLOPEN
+#define MACOS_USE_DLOPEN
 #include <dlfcn.h>
+#endif
+#endif
 
 #ifndef PATH_MAX
 #define PATH_MAX (4096)
@@ -103,8 +110,6 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #define LOG_ERROR(...) LOG_WHEN_ENABLED(Generators::Log("error", __VA_ARGS__))
 #define LOG_FATAL(...) LOG_WHEN_ENABLED(Generators::Log("fatal", __VA_ARGS__))
 
-#endif
-
 /** \brief Free functions and a few helpers are defined inside this namespace. Otherwise all types are the C API types
  *
  */
@@ -115,7 +120,7 @@ using OrtApiBaseFn = const OrtApiBase* (*)(void);
 /// Before using this C++ wrapper API, you MUST call Ort::InitApi to set the below 'api' variable
 inline const OrtApi* api{};
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(MACOS_USE_DLOPEN)
 inline std::string GetCurrentModuleDir() {
   Dl_info dl_info;
   dladdr((void*)GetCurrentModuleDir, &dl_info);
@@ -135,14 +140,16 @@ inline void* LoadDynamicLibraryIfExists(const std::string& path) {
   if (ort_lib_handle == nullptr) {
     char* err = dlerror();
     LOG_WARN("Error while dlopen: %s", (err != nullptr ? err : "Unknown"));
-    // Trying current dir
-    std::string current_module_dir = GetCurrentModuleDir();
-    std::string local_path{current_module_dir + "/" + path};
-    LOG_INFO("Attempting to dlopen %s", local_path.c_str());
-    ort_lib_handle = dlopen(local_path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (path.front() != '/') {
+      // If not absolute path, try search for current dir
+      std::string current_module_dir = GetCurrentModuleDir();
+      std::string local_path{current_module_dir + "/" + path};
+      LOG_INFO("Attempting to dlopen %s", local_path.c_str());
+      ort_lib_handle = dlopen(local_path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    }
   }
   if (ort_lib_handle) {
-#if !defined(__ANDROID__)  // RTLD_DI_ORIGIN not available on Android
+#if !defined(__ANDROID__) && !defined(__APPLE__)  // RTLD_DI_ORIGIN not available on Android & Darwin
     char pathname[PATH_MAX];
     dlinfo((void*)ort_lib_handle, RTLD_DI_ORIGIN, &pathname);
     LOG_INFO("Loaded native library at %s", pathname);
@@ -196,7 +203,7 @@ inline void InitApi() {
     Generators::SetLogBool("ort_lib", true);
   }
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(MACOS_USE_DLOPEN)
   // If the GenAI library links against the onnxruntime library, it will have a dependency on a specific
   // version of OrtGetApiBase.
   //
@@ -218,12 +225,28 @@ inline void InitApi() {
   //     any libonnxruntime.so that supports one of those versions.
   //
 
-  const std::string path = "libonnxruntime.so";  // "libonnxruntime4j_jni.so" is also an option if we have issues
-  void* ort_lib_handle = LoadDynamicLibraryIfExists(path);
+  void* ort_lib_handle = nullptr;
+  const char* ort_lib_path = std::getenv("ORT_LIB_PATH");
+  if (ort_lib_path) {
+    ort_lib_handle = LoadDynamicLibraryIfExists(ort_lib_path);
+  }
 
-#if !defined(__ANDROID__)
+#if defined(__linux__)
   if (ort_lib_handle == nullptr) {
+    // For Android and NuGet Linux package, the file name is libonnxruntime.so
+    // "libonnxruntime4j_jni.so" is also an option on Android if we have issues
+    ort_lib_handle = LoadDynamicLibraryIfExists("libonnxruntime.so");
+  }
+
+  if (ort_lib_handle == nullptr) {
+    // On Linux it can also be `libonnxruntime.so.1`. See: https://github.com/microsoft/onnxruntime/pull/21339
     ort_lib_handle = LoadDynamicLibraryIfExists("libonnxruntime.so.1");
+  }
+#endif
+
+#if defined(MACOS_USE_DLOPEN)
+  if (ort_lib_handle == nullptr) {
+    ort_lib_handle = LoadDynamicLibraryIfExists("libonnxruntime.dylib");
   }
 #endif
 
@@ -238,11 +261,11 @@ inline void InitApi() {
   }
 
   InitApiWithDynamicFn(ort_api_base_fn);
-#else   // defined(__linux__)
+#else   // defined(__linux__) || defined(MACOS_USE_DLOPEN)
   api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
   if (!api)
     throw std::runtime_error("Onnxruntime is installed but is too old, please install a newer version");
-#endif  // defined(__linux__)
+#endif  // defined(__linux__) || defined(MACOS_USE_DLOPEN)
 }
 
 /** \brief All C++ methods that can fail will throw an exception of this type
