@@ -222,11 +222,13 @@ jobs:
           Move-Item $file $outputDir/android/onnxruntime-genai.aar
         }
 
-        mkdir -Force $outputDir/$rid/$(buildConfig)
         $b = $file.Basename
         $b = $b -split '.tar'
         $b = $b[0]
-        Move-Item $outputDir/$rid/$b/lib/* $outputDir/$rid/$(buildConfig) -Force
+        if (Test-Path $outputDir/$rid/$b/lib/) {
+          mkdir -Force $outputDir/$rid/$(buildConfig)
+          Move-Item $outputDir/$rid/$b/lib/* $outputDir/$rid/$(buildConfig) -Force
+        }
       }
 
       Write-Host "List extracted artifacts"
