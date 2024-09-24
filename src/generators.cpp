@@ -13,7 +13,12 @@ namespace Generators {
 
 static bool _ = (Ort::InitApi(), false);
 
-OrtGlobals::OrtGlobals() : env_{OrtEnv::Create(OrtLoggingLevel::ORT_LOGGING_LEVEL_ERROR)} {}
+OrtGlobals::OrtGlobals()
+    : env_{OrtEnv::Create(OrtLoggingLevel::ORT_LOGGING_LEVEL_ERROR)} {
+  auto arena_config = OrtArenaCfg::Create(0, -1, -1, -1);
+  Ort::Allocator& allocator_cpu{Ort::Allocator::GetWithDefaultOptions()};
+  env_->CreateAndRegisterAllocator(allocator_cpu.GetInfo(), *arena_config);
+}
 
 // Ensure Shutdown() has been called before process exit
 struct ValidateShutdown {
