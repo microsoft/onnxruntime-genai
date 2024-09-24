@@ -201,7 +201,7 @@ jobs:
           $rid = $Matches.1
         }
         else {
-          $rid_match = $a -match "onnxruntime-genai-(android|ios)-$(genai_version)-(.+?)?(\.zip|\.aar)"
+          $rid_match = $a -match "onnxruntime-genai-(android|ios)-$(genai_version)(.+?)?(\.zip|\.aar)"
           if ($rid_match) {
             $rid = $Matches.1
           }
