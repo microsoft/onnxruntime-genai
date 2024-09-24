@@ -60,9 +60,8 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   GeneratorParams(const Config& config);  // This constructor is only used for internal generator benchmarks
   GeneratorParams(const Model& model);
 
-  const Config& config;  // The model outlives the GeneratorParams
+  const Config& config;                  // The model outlives the GeneratorParams
   Config::Search search{config.search};  // Copy of the search parameters from the config
-
 
   int batch_size{1};
   int max_batch_size{0};
@@ -72,7 +71,6 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
 
   DeviceType device_type{DeviceType::CPU};
   cudaStream_t cuda_stream{};
-
 
   // TODO: Move this to a separate GPT struct
   std::span<const int32_t> input_ids;  // Array of [batchsize][sequence_length]
