@@ -364,7 +364,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     session_options.SetEpContextFilePath(config_session_options.ep_context_file_path.value().c_str());
   }
 
-  if (config_session_options.provider_options.empty()) {
+  if (config_session_options.provider_options.empty() && config_session_options.use_env_allocators) {
     // Share env allocators across sessions that only use the CPU provider
     session_options.AddConfigEntry("session.use_env_allocators", "1");
   }
