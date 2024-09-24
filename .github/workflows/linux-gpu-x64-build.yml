@@ -21,7 +21,7 @@ jobs:
   linux-cuda-x64-build:
     env :
       PYTHON_EXECUTABLE: "/opt/python/cp38-cp38/bin/python3.8"
-    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2004-T4" ]
+    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-A10" ]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v4
