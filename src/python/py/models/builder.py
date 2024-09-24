@@ -1,9 +1,10 @@
 # -------------------------------------------------------------------------
 # Copyright (c) Microsoft Corporation.  All rights reserved.
-# Modifications Copyright(C) 2024 Advanced Micro Devices, Inc. All rights reserved
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
+# Modifications Copyright(C) 2024 Advanced Micro Devices, Inc. All rights reserved
+
 """
 Run this script to create the desired ONNX model.
 """
@@ -32,7 +33,6 @@ class Model:
         self.num_kv_heads = config.multi_query_group_num if hasattr(config, "multi_query_group_num") else self.num_kv_heads
         self.kv_channels = config.kv_channels if hasattr(config, "kv_channels") else self.num_kv_heads
         self.multi_query_attention = config.multi_query_attention if hasattr(config, "multi_query_attention") else False
-        # self.multi_query_group_num = config.multi_query_group_num if hasattr(config, "multi_query_group_num") else 1 # group_num as 1 is vanilla Multi-query attention https://arxiv.org/pdf/2305.13245
         self.num_attn_heads = config.num_attention_heads
         self.head_size = config.head_dim if hasattr(config, "head_dim") else config.hidden_size // config.num_attention_heads
         self.num_layers = int(extra_options["num_hidden_layers"]) if "num_hidden_layers" in extra_options else config.num_hidden_layers if hasattr(config, "num_hidden_layers") else config.num_layers
