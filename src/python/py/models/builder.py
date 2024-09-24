@@ -530,13 +530,6 @@ class Model:
         self.make_node("Gather", inputs=inputs, outputs=[output], name=name, axis=axis)
         self.make_value_info(output, TensorProto.INT64, shape=[])
 
-    def make_split(self, name, inputs, dtype, shape, axis, num_splits):
-        # Splits the input tensor into num_splits based on the axis and shape
-        outputs = [f"{name}/output_{i}" for i in range(num_splits)]
-        self.make_node("Split", inputs=[inputs], outputs=outputs, name=name, axis=axis)
-        for output in outputs:
-            self.make_value_info(output, dtype, shape=shape)
-
     def make_reshape(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Reshape", inputs=inputs, outputs=[output], name=name)
