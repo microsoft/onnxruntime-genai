@@ -222,12 +222,15 @@ jobs:
           Move-Item $file $outputDir/android/onnxruntime-genai.aar
         }
 
+        mkdir -Force $outputDir/$rid/$(buildConfig)
         $b = $file.Basename
         $b = $b -split '.tar'
         $b = $b[0]
         if (Test-Path $outputDir/$rid/$b/lib/) {
-          mkdir -Force $outputDir/$rid/$(buildConfig)
           Move-Item $outputDir/$rid/$b/lib/* $outputDir/$rid/$(buildConfig) -Force
+        }
+        else {
+          Move-Item $outputDir/$rid/* $outputDir/$rid/$(buildConfig) -Force
         }
       }
 
