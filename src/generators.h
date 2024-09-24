@@ -99,7 +99,8 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   std::span<const int32_t> input_ids;  // Array of [batchsize][sequence_length]
 
   struct Whisper {
-    std::shared_ptr<Tensor> input_features;  // float32 [batch_size, number_of_mels, something that is 3000]
+    std::shared_ptr<Tensor> input_features;   // float32 [batch_size, number_of_mels, number_of_frames]
+    std::shared_ptr<Tensor> alignment_heads;  // int32 [num_alignment_heads, 2]
   };
 
   std::variant<Whisper> inputs;

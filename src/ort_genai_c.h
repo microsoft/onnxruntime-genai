@@ -60,6 +60,7 @@ typedef struct OgaTensor OgaTensor;
 typedef struct OgaImages OgaImages;
 typedef struct OgaNamedTensors OgaNamedTensors;
 typedef struct OgaMultiModalProcessor OgaMultiModalProcessor;
+typedef struct OgaAudios OgaAudios;
 typedef struct OgaStringArray OgaStringArray;
 
 /* \brief Call this on process exit to cleanly shutdown the genai library & its onnxruntime usage
@@ -110,6 +111,17 @@ OGA_EXPORT size_t OGA_API_CALL OgaSequencesCount(const OgaSequences* sequences);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaAppendTokenSequence(const int32_t* token_ptr, size_t token_cnt, OgaSequences* sequence);
 
 /*
+ * \brief Appends the given token to the sequence at the given index.
+          If the sequence at the given index does not exist, a new sequence is
+          created at the given index if sequence_idx is equal to the current sequences count.
+ * \param[in] token token to append to the sequence
+ * \param[in] sequences OgaSequences object to append the token to
+ * \param[in] sequence_index index of the sequence to append the token to
+ * \return OgaResult containing the error message when tokens could not been added, else nullptr.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaAppendTokenToSequence(int32_t token, OgaSequences* sequence, size_t sequence_index);
+
+/*
  * \brief Returns the number of tokens in the sequence at the given index
  * \param[in] sequences
  * \return The number of tokens in the sequence at the given index
@@ -129,6 +141,12 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadImage(const char* image_path, OgaImage
 OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadImages(const OgaStringArray* image_paths, OgaImages** images);
 
 OGA_EXPORT void OGA_API_CALL OgaDestroyImages(OgaImages* images);
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadAudio(const char* audio_path, OgaAudios** audios);
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadAudios(const OgaStringArray* audio_paths, OgaAudios** audios);
+
+OGA_EXPORT void OGA_API_CALL OgaDestroyAudios(OgaAudios* audios);
 
 /*
  * \brief Creates a model from the given configuration directory and device type.
@@ -273,7 +291,18 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyMultiModalProcessor(OgaMultiModalProcesso
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer*, const char* str, OgaSequences* sequences);
 
+/*
+ * \brief Converts the given string to a single token id.
+ * \param[in] tokenizer The tokenizer to use to convert the string to a token id.
+ * \param[in] str The string to convert to a token id.
+ * \param[in] token_id The converted token id.
+ * \return OgaResult containing the error message if the conversion of the string to a token id failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerToTokenId(const OgaTokenizer* tokenizer, const char* str, int32_t* token_id);
+
 OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor*, const char* prompt, const OgaImages* images, OgaNamedTensors** input_tensors);
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessAudios(const OgaMultiModalProcessor*, const OgaAudios* audios, OgaNamedTensors** input_tensors);
 
 /* Decode a single token sequence and returns a null terminated utf8 string. out_string must be freed with OgaDestroyString
  */

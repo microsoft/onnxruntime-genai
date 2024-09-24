@@ -32,7 +32,6 @@ else()
   set(ONNXRUNTIME_GENAI_DEPENDENCY "*.so")
 endif()
 
-
 file(GLOB ort_genai_libs "${CMAKE_SOURCE_DIR}/lib/${ONNXRUNTIME_GENAI_DEPENDENCY}")
 
 function(prepare_executable executable)

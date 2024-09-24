@@ -147,6 +147,10 @@ struct Inputs_Element : JSON::Element {
       v_.cross_past_key_names = value;
     } else if (name == "cross_past_value_names") {
       v_.cross_past_value_names = value;
+    } else if (name == "current_sequence_length") {
+      v_.current_sequence_length = value;
+    } else if (name == "past_sequence_length") {
+      v_.past_sequence_length = value;
     } else
       throw JSON::unknown_value_error{};
   }
@@ -177,6 +181,101 @@ struct Outputs_Element : JSON::Element {
 
  private:
   Config::Model::Decoder::Outputs& v_;
+};
+
+struct StringArray_Element : JSON::Element {
+  explicit StringArray_Element(std::vector<std::string>& v) : v_{v} {}
+
+  void OnString(std::string_view name, std::string_view value) override {
+    v_.push_back(std::string(value));
+  }
+
+ private:
+  std::vector<std::string>& v_;
+};
+
+struct StringStringMap_Element : JSON::Element {
+  explicit StringStringMap_Element(std::unordered_map<std::string, std::string>& v) : v_{v} {}
+
+  void OnString(std::string_view name, std::string_view value) override {
+    v_[std::string(name)] = std::string(value);
+  }
+
+ private:
+  std::unordered_map<std::string, std::string>& v_;
+};
+
+struct PipelineModel_Element : JSON::Element {
+  explicit PipelineModel_Element(Config::Model::Decoder::PipelineModel& v) : v_{v} {}
+
+  void OnString(std::string_view name, std::string_view value) override {
+    if (name == "filename") {
+      v_.filename = value;
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
+  void OnBool(std::string_view name, bool value) override {
+    if (name == "run_on_prompt") {
+      v_.run_on_prompt = value;
+    } else if (name == "run_on_token_gen") {
+      v_.run_on_token_gen = value;
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
+  JSON::Element& OnObject(std::string_view name) override {
+    if (name == "session_options") {
+      v_.session_options = Config::SessionOptions{};
+      session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
+      return *session_options_;
+    } else if (name == "output_names_forwarder") {
+      return output_names_forwarder_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+  Element& OnArray(std::string_view name) override {
+    if (name == "inputs")
+      return inputs_;
+    else if (name == "outputs")
+      return outputs_;
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Decoder::PipelineModel& v_;
+  std::unique_ptr<SessionOptions_Element> session_options_;
+  StringArray_Element inputs_{v_.inputs};
+  StringArray_Element outputs_{v_.outputs};
+  StringStringMap_Element output_names_forwarder_{v_.output_names_forwarder};
+};
+
+struct PipelineModelObject_Element : JSON::Element {
+  explicit PipelineModelObject_Element(std::vector<Config::Model::Decoder::PipelineModel>& v) : v_{v} {}
+
+  Element& OnObject(std::string_view name) override {
+    auto& model = v_.emplace_back();
+    model.model_id = name;
+    pipeline_model_elements_.emplace_back(model);
+    return pipeline_model_elements_.back();
+  }
+
+ private:
+  std::vector<Config::Model::Decoder::PipelineModel>& v_;
+  std::vector<PipelineModel_Element> pipeline_model_elements_;
+};
+
+struct Pipeline_Element : JSON::Element {
+  explicit Pipeline_Element(std::vector<Config::Model::Decoder::PipelineModel>& v) : v_{v} {}
+
+  Element& OnObject(std::string_view name) override {
+    return object_;
+  }
+
+ private:
+  std::vector<Config::Model::Decoder::PipelineModel>& v_;
+  PipelineModelObject_Element object_{v_};
 };
 
 struct Decoder_Element : JSON::Element {
@@ -217,11 +316,18 @@ struct Decoder_Element : JSON::Element {
     throw JSON::unknown_value_error{};
   }
 
+  Element& OnArray(std::string_view name) override {
+    if (name == "pipeline")
+      return pipeline_;
+    throw JSON::unknown_value_error{};
+  }
+
  private:
   Config::Model::Decoder& v_;
   SessionOptions_Element session_options_{v_.session_options};
   Inputs_Element inputs_{v_.inputs};
   Outputs_Element outputs_{v_.outputs};
+  Pipeline_Element pipeline_{v_.pipeline};
 };
 
 struct VisionInputs_Element : JSON::Element {
