@@ -1,4 +1,5 @@
 using GennyMaui.Models;
+using GennyMaui.Services;
 using GennyMaui.ViewModels;
 
 namespace GennyMaui.Pages.Views;
@@ -8,7 +9,7 @@ public partial class ModelConfigView : ContentView
     public ModelConfigView()
     {
         InitializeComponent();
-
+        this.BindingContext = MauiProgram.GetService<IModelProvider>();
         var parentContext = (LoadableModel)this.BindingContext;
         parentContext.RefreshLocalModelStatus();
         parentContext.RefreshRemoteModelStatus();

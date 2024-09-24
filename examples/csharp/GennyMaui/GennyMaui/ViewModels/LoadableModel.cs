@@ -10,6 +10,7 @@ using System.Text;
 using Microsoft.ML.OnnxRuntime;
 using System.Collections.ObjectModel;
 using System.Linq;
+using GennyMaui.Services;
 
 
 namespace GennyMaui.ViewModels
@@ -24,7 +25,7 @@ namespace GennyMaui.ViewModels
         Downloadable
     }
 
-    public partial class LoadableModel : ObservableObject
+    public partial class LoadableModel : ObservableObject, IModelProvider
     {
         [ObservableProperty]
         private Model? _model;

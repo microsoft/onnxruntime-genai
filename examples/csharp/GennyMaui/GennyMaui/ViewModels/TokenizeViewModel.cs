@@ -2,13 +2,9 @@
 using CommunityToolkit.Mvvm.Messaging.Messages;
 using CommunityToolkit.Mvvm.Messaging;
 using Microsoft.ML.OnnxRuntimeGenAI;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.Input;
 using GennyMaui.Utils;
+using GennyMaui.Services;
 
 namespace GennyMaui.ViewModels
 {
@@ -24,6 +20,9 @@ namespace GennyMaui.ViewModels
 
         public TokenizeViewModel()
         {
+            var modelProvider = MauiProgram.GetService<IModelProvider>();
+            _tokenizer = modelProvider.Tokenizer;
+
             WeakReferenceMessenger.Default.Register<PropertyChangedMessage<Tokenizer>>(this, (r, m) =>
             {
                 _tokenizer = m.NewValue;

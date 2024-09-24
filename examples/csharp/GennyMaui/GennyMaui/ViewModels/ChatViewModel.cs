@@ -8,6 +8,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using CommunityToolkit.Mvvm.Messaging;
 using CommunityToolkit.Mvvm.Messaging.Messages;
+using GennyMaui.Services;
 
 namespace GennyMaui.ViewModels
 {
@@ -34,6 +35,12 @@ namespace GennyMaui.ViewModels
 
         public ChatViewModel()
         {
+            var modelProvider = MauiProgram.GetService<IModelProvider>();
+            _model = modelProvider.Model;
+            _tokenizer = modelProvider.Tokenizer;
+            _searchOptions = modelProvider.Configuration?.SearchOptions;
+            _modelOptions = modelProvider.Configuration?.ModelOptions;
+
             WeakReferenceMessenger.Default.Register<PropertyChangedMessage<Model>>(this, (r, m) =>
             {
                 _model = m.NewValue;
