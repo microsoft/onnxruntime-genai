@@ -13,7 +13,7 @@ namespace GennyMaui.ViewModels
 {
     public partial class ChatViewModel : ObservableRecipient
     {
-        private readonly List<int> _pastTokens = new List<int>();
+        private readonly List<int> _pastTokens = [];
 
         private CancellationTokenSource _cancellationTokenSource;
 
@@ -76,7 +76,7 @@ namespace GennyMaui.ViewModels
                 {
                     if (CurrentResult == null)
                     {
-                        if (string.IsNullOrWhiteSpace(sentencePiece.Content)) // Ingore preceding '\n'
+                        if (string.IsNullOrWhiteSpace(sentencePiece.Content)) // Ignore preceding '\n'
                             continue;
 
                         ResultHistory.Add(CurrentResult = new ResultModel());
