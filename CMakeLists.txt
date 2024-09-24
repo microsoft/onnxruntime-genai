@@ -26,8 +26,8 @@ if(MSVC)
   add_compile_definitions(_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
 endif()
 
-include(cmake/external/onnxruntime_external_deps.cmake)
 include(cmake/ortlib.cmake)
+include(cmake/external/onnxruntime_external_deps.cmake)
 # All Global variables, including GLOB, for the top level CMakeLists.txt should be defined here
 include(cmake/global_variables.cmake)
 # Checking if CUDA is supported
