@@ -76,8 +76,8 @@ RoamingArray<float> Logits::Get() {
 
       for (int beam_index = 0; beam_index < num_beams; beam_index++) {
         switch (model_.device_type_) {
-#if USE_DML
           case DeviceType::DML: {
+#if USE_DML
             ComPtr<ID3D12Resource> source_resource;
             Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, output_raw_->GetTensorMutableRawData(), &source_resource));
 
@@ -96,8 +96,8 @@ RoamingArray<float> Logits::Get() {
                 source_offset,
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                 size_in_bytes);
-          } break;
 #endif
+          } break;
 
           case DeviceType::CPU:
           case DeviceType::CUDA: {
