@@ -87,9 +87,6 @@ target_link_directories(onnxruntime-genai PRIVATE ${ORT_LIB_DIR})
 # the ORT version to match in both.
 if(CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR (CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND (NOT BUILD_APPLE_FRAMEWORK)))
   add_compile_definitions(_ORT_GENAI_USE_DLOPEN)
-  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    target_link_libraries(onnxruntime-genai PRIVATE dl)  # For dlopen & co
-  endif()
 else()
   target_link_libraries(onnxruntime-genai PRIVATE ${ONNXRUNTIME_LIB})
 endif()
@@ -115,6 +112,7 @@ endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set_target_properties(onnxruntime-genai-static PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_link_libraries(onnxruntime-genai-static PRIVATE dl)  # For dlopen & co
 endif()
 
 
