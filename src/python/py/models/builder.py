@@ -2879,7 +2879,7 @@ def get_args():
                     and the graph structure.
                 use_8bits_moe = 1 : Use 8-bit quantization for MoE layers. Default is using 4-bit quantization.
                 hf_token = false/token: Use this to disable authentication with Hugging Face or provide a custom authentication token that differs from the one stored in your environment. Default behavior is to use the authentication token stored by `huggingface-cli login`.
-                    If you have already authenticated via `huggingface-cli login`, you do not need to use this flag because Hugging Face has already stored your authentication token in `HF_TOKEN` for you.
+                    If you have already authenticated via `huggingface-cli login`, you do not need to use this flag because Hugging Face has already stored your authentication token for you.
             """),
     )
 
