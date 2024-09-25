@@ -96,7 +96,7 @@ def _build_aar(args):
     aar_dir = intermediates_dir / "aar" / build_config
     jnilibs_dir = intermediates_dir / "jnilibs" / build_config
     base_build_command = [sys.executable, str(BUILD_PY), f"--config={build_config}"]
-    if (args.ort_home):
+    if args.ort_home:
         base_build_command += [f"--ort_home={str(args.ort_home)}"]
     base_build_command += build_settings["build_params"]
 
