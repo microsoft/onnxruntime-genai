@@ -5,7 +5,7 @@
 namespace Generators {
 
 struct InputIDs {
-  InputIDs(const Model& model, State& state);
+  InputIDs(State& state);
   InputIDs(const InputIDs&) = delete;
   InputIDs& operator=(const InputIDs&) = delete;
 
@@ -18,8 +18,8 @@ struct InputIDs {
   OrtValue* Get() { return value_.get(); }
 
  private:
-  const Model& model_;
   State& state_;
+  const Model& model_{state_.model_};
   size_t input_index_{~0U};
 
   std::array<int64_t, 2> shape_{};

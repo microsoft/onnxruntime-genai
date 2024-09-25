@@ -5,16 +5,15 @@
 
 namespace Generators {
 
-InputIDs::InputIDs(const Model& model, State& state)
-    : model_{model},
-      state_{state} {
+InputIDs::InputIDs(State& state)
+    : state_{state} {
   name_ = model_.config_->model.decoder.inputs.input_ids.c_str();
   shape_ = {state_.params_->batch_size, state_.params_->sequence_length};
   type_ = model_.session_info_->GetInputDataType(name_);
 
   // If 64-bit, convert from 32-bit to 64-bit
   if (type_ == Ort::TypeToTensorType<int64_t>) {
-    value_ = OrtValue::CreateTensor(model.allocator_cpu_, shape_, type_);
+    value_ = OrtValue::CreateTensor(model_.allocator_cpu_, shape_, type_);
     auto* p_data = value_->GetTensorMutableData<int64_t>();
     for (auto v : state_.params_->input_ids) {
       *p_data++ = v;
@@ -22,7 +21,7 @@ InputIDs::InputIDs(const Model& model, State& state)
   } else {
     if (type_ != Ort::TypeToTensorType<int32_t>)
       throw std::runtime_error("InputIDs must be int64 or int32");
-    value_ = OrtValue::CreateTensor<int32_t>(model.allocator_cpu_.GetInfo(), std::span<int32_t>(const_cast<int32_t*>(state_.params_->input_ids.data()), shape_[0] * shape_[1]), shape_);
+    value_ = OrtValue::CreateTensor<int32_t>(model_.allocator_cpu_.GetInfo(), std::span<int32_t>(const_cast<int32_t*>(state_.params_->input_ids.data()), shape_[0] * shape_[1]), shape_);
   }
 
   value_ = model_.ExpandInputs(value_, state_.params_->search.num_beams);

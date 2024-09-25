@@ -7,9 +7,8 @@
 
 namespace Generators {
 
-Embeddings::Embeddings(const Model& model, State& state, Embeddings::Mode mode, const std::string& name)
-    : model_{model},
-      state_{state},
+Embeddings::Embeddings(State& state, Embeddings::Mode mode, const std::string& name)
+    : state_{state},
       shape_{static_cast<int64_t>(state_.params_->batch_size) * state_.params_->search.num_beams,
              state_.params_->sequence_length, state_.params_->hidden_size},
       type_{mode == Embeddings::Mode::Input

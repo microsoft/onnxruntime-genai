@@ -5,7 +5,7 @@
 namespace Generators {
 
 struct KV_Cache_Combined {
-  KV_Cache_Combined(const Model& model, State& state);
+  KV_Cache_Combined(State& state);
 
   void Add();  // Add to state inputs/outputs
   void Update(std::span<const int32_t> beam_indices, int current_length);
@@ -15,8 +15,8 @@ struct KV_Cache_Combined {
   void PickPastState(std::span<const int32_t> beam_indices, int index);
 
  private:
-  const Model& model_;
   State& state_;
+  const Model& model_{state_.model_};
   int layer_count_;
   size_t input_index_{~0U}, output_index_{~0U};
 
@@ -29,7 +29,7 @@ struct KV_Cache_Combined {
 };
 
 struct KV_Cache {
-  KV_Cache(const Model& model, State& state);
+  KV_Cache(State& state);
 
   static bool IsCacheNeeded(const Model& model);
 
@@ -41,8 +41,8 @@ struct KV_Cache {
   void PickPastState(std::span<const int32_t> beam_indices, int index);
 
  private:
-  const Model& model_;
   State& state_;
+  const Model& model_{state_.model_};
   int layer_count_;
   size_t input_index_{~0U}, output_index_{~0U};
   bool past_present_share_buffer_;  // True if model.decoder.past_present_share_buffer is set to true, and we're using cuda, and not beam search
@@ -58,14 +58,14 @@ struct KV_Cache {
 
 // Very similar to the KV_Cache, but is only created once at the encoder step, then used without modification for every decoder step
 struct Cross_Cache {
-  Cross_Cache(const Model& model, State& state);
+  Cross_Cache(State& state);
 
   void AddOutputs();
   void AddInputs();
 
  private:
-  const Model& model_;
   State& state_;
+  const Model& model_{state_.model_};
   int layer_count_;
 
   std::array<int64_t, 4> shape_;
