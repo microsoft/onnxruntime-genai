@@ -49,7 +49,7 @@ struct EmbeddingState : State {
   ImageFeatures image_features_{*this, ImageFeatures::Mode::Input,  // Optional model input
                                 model_.config_->model.embedding.inputs.image_features,
                                 num_image_tokens_};
-  Embeddings inputs_embeds_{*this, Embeddings::Mode::Output,        // Model output
+  Embeddings inputs_embeds_{*this, Embeddings::Mode::Output,  // Model output
                             model_.config_->model.embedding.outputs.embeddings};
 };
 
@@ -92,9 +92,9 @@ struct DecoderState : State {
   const CapturedGraphInfo* captured_graph_info_;
   Embeddings inputs_embeds_{*this, Embeddings::Mode::Input,  // Model input
                             model_.config_->model.decoder.inputs.embeddings};
-  PositionInputs position_inputs_;    // Model input
-  KV_Cache kv_cache_{*this};          // Model input
-  Logits logits_{*this};              // Model output
+  PositionInputs position_inputs_;  // Model input
+  KV_Cache kv_cache_{*this};        // Model input
+  Logits logits_{*this};            // Model output
 };
 
 struct MultiModalPipelineState : State {
