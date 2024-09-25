@@ -221,15 +221,14 @@ Change into the onnxruntime-genai directory.
 
 2. Build onnxruntime-genai from source and install
 
-   This example requires onnxruntime-genai to be built from source.
-
    ```bash
-   # This should be run from the root of the onnxruntime-genai folder
-   python build.py --config Release --ort_home examples\c
-   cp src/ort_genai.h examples/c/include
-   cp src/ort_genai_c.h examples/c/include
-   cp build/Linux/release/onnxruntime-genai.so examples/c/lib
-   cd examples/c
+   curl -L https://github.com/microsoft/onnxruntime-genai/releases/download/v0.4.0/onnxruntime-genai-linux-cpu-x64-capi.zip -o onnxruntime-genai-linux-cpu-x64-capi.zip
+   unzip onnxruntime-genai-linux-cpu-x64-capi.zip
+   cd onnxruntime-genai-linux-cpu-x64-capi
+   tar xvf onnxruntime-genai-0.4.0-linux-x64.tar.gz
+   cp onnxruntime-genai-0.4.0-linux-x64/include/* ../include
+   cp onnxruntime-genai-0.4.0-linux-x64/lib/* ../lib
+   cd ..
    ```
 
 #### Build this sample
@@ -237,16 +236,72 @@ Change into the onnxruntime-genai directory.
 Build with CUDA:
 
 ```bash
-mkdir build
+cmake . -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=80 -DUSE_CUDA=ON -DPHI3=ON
 cd build
-cmake ../ -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=80 -DUSE_CUDA=ON -DPHI3=ON
 cmake --build . --config Release
 ```
 
 Build for CPU:
 
 ```bash
-cmake . -DPHI3=ON
+cmake . -B build -DPHI3=ON
+cd build
+cmake --build . --config Release
+```
+
+#### Run the sample
+
+```bash
+./phi3 path_to_model
+```
+
+## Llama
+
+### Obtain model
+
+To access Llama models, you need to sign the license agreement on HuggingFace. Navigate to the model on HuggingFace e.g. https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct and sign the license agreement.
+
+Once you have been granted access, run the following steps to generate the ONNX model in the precision and for the target that you want to run on. Note: this operations requires 64GB of RAM to complete.
+
+```bash
+pip install torch transformers onnx onnxruntime onnxruntime-genai huggingface-hub[cli]
+huggingface-cli login
+python onnxruntime_genai.models.builder -m meta-llama/Llama-3.1-8B-Instruct -e cpu -p int4 -o llama-3.1-8b-instruct-onnx
+```
+
+The models and all of the necessary meta data will be available in a folder called `llama-3.1-8b-instruct-onnx`.
+
+### Windows x64 CPU
+
+#### Install the onnxruntime and onnxruntime-genai binaries
+
+Change into the `onnxruntime-genai\examples\c` folder.
+
+1. Install onnxruntime
+   
+   ```cmd
+   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-win-x64-1.19.2.zip -o onnxruntime-win-x64-1.19.2.zip
+   tar xvf onnxruntime-win-x64-1.19.2.zip
+   copy onnxruntime-win-x64-1.19.2\include\* include
+   copy onnxruntime-win-x64-1.19.2\lib\* lib
+   ```
+
+2. Install onnxruntime-genai
+
+   ```cmd
+   curl -L https://github.com/microsoft/onnxruntime-genai/releases/download/v0.4.0/onnxruntime-genai-win-cpu-x64-capi.zip -o onnxruntime-genai-win-cpu-x64-capi.zip
+   tar xvf onnxruntime-genai-win-cpu-x64-capi.zip
+   cd onnxruntime-genai-win-cpu-x64-capi
+   tar xvf onnxruntime-genai-0.4.0-win-x64.zip
+   copy onnxruntime-genai-0.4.0-win-x64\include\* ..\include
+   copy onnxruntime-genai-0.4.0-win-x64\lib\* ..\lib
+   cd ..
+   ```
+
+#### Build this sample
+
+```bash
+cmake -A x64 -S . -B build -DLLAMA=ON
 cd build
 cmake --build . --config Release
 ```
@@ -255,8 +310,62 @@ cmake --build . --config Release
 
 ```bash
 cd Release
-./phi3 path_to_model
+.\llama.exe llama-3.1-8b-instruct-onnx
 ```
+
+### Linux
+
+#### Install the onnxruntime and onnxruntime-genai binaries
+
+Change into the onnxruntime-genai directory.
+
+1. Install onnxruntime
+
+   ```bash
+   cd examples/c
+   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-linux-x64-1.19.2.tgz -o onnxruntime-linux-x64-1.19.2.tgz
+   tar xvzf onnxruntime-linux-x64-1.19.2.tgz
+   cp onnxruntime-linux-x64-1.19.2/include/* include
+   cp onnxruntime-linux-x64-1.19.2/lib/* lib
+   cd ../..
+   ```
+
+2. Build onnxruntime-genai from source and install
+
+   ```bash
+   curl -L https://github.com/microsoft/onnxruntime-genai/releases/download/v0.4.0/onnxruntime-genai-linux-cpu-x64-capi.zip -o onnxruntime-genai-linux-cpu-x64-capi.zip
+   unzip onnxruntime-genai-linux-cpu-x64-capi.zip
+   cd onnxruntime-genai-linux-cpu-x64-capi
+   tar xvf onnxruntime-genai-0.4.0-linux-x64.tar.gz
+   cp onnxruntime-genai-0.4.0-linux-x64/include/* ../include
+   cp onnxruntime-genai-0.4.0-linux-x64/lib/* ../lib
+   cd ..
+   ```
+
+#### Build this sample
+
+Build with CUDA:
+
+```bash
+cmake . -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=80 -DUSE_CUDA=ON -DPHI3=ON
+cd build
+cmake --build . --config Release
+```
+
+Build for CPU:
+
+```bash
+cmake . -B build -DPHI3=ON
+cd build
+cmake --build . --config Release
+```
+
+#### Run the sample
+
+```bash
+./llama path_to_model
+```
+
 
 ## Phi-3 vision
 
