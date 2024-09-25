@@ -6,9 +6,9 @@
 
 namespace Generators {
 
-ImageFeatures::ImageFeatures(State& state, ImageFeatures::Mode mode, const std::string& name, int64_t num_image_tokens)
+ImageFeatures::ImageFeatures(const Model& model, State& state, ImageFeatures::Mode mode, const std::string& name, int64_t num_image_tokens)
     : state_{state},
-      shape_{num_image_tokens, state_.params_->hidden_size},
+      shape_{num_image_tokens, model.config_->model.decoder.hidden_size},
       type_{mode == ImageFeatures::Mode::Input
                 ? model_.session_info_->GetInputDataType(name)
                 : model_.session_info_->GetOutputDataType(name)},
