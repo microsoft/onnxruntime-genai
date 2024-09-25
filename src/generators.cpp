@@ -13,7 +13,12 @@ namespace Generators {
 
 static bool _ = (Ort::InitApi(), false);
 
-OrtGlobals::OrtGlobals() : env_{OrtEnv::Create(OrtLoggingLevel::ORT_LOGGING_LEVEL_ERROR)} {}
+OrtGlobals::OrtGlobals()
+    : env_{OrtEnv::Create(OrtLoggingLevel::ORT_LOGGING_LEVEL_ERROR)} {
+  auto arena_config = OrtArenaCfg::Create(0, -1, -1, -1);
+  Ort::Allocator& allocator_cpu{Ort::Allocator::GetWithDefaultOptions()};
+  env_->CreateAndRegisterAllocator(allocator_cpu.GetInfo(), *arena_config);
+}
 
 // Ensure Shutdown() has been called before process exit
 struct ValidateShutdown {
@@ -172,7 +177,12 @@ bool Generator::IsDone() const {
   if (computed_logits_)
     throw std::runtime_error("IsDone() can't be called in the middle of processing logits");
 
-  return search_->IsDone();
+  bool is_done = search_->IsDone();
+  if (is_done) {
+    state_->Finalize();
+  }
+
+  return is_done;
 }
 
 void Generator::GenerateNextToken() {

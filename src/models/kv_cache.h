@@ -31,6 +31,8 @@ struct KV_Cache_Combined {
 struct KV_Cache {
   KV_Cache(const Model& model, State& state);
 
+  static bool IsCacheNeeded(const Model& model);
+
   void AddEncoder();  // If model has an initial encoder step, this is used
   void Add();
   void Update(std::span<const int32_t> beam_indices, int current_length);

@@ -12,7 +12,10 @@ struct Config {
     static constexpr std::string_view InputIdsName = "input_ids";
     static constexpr std::string_view PixelValuesName = "pixel_values";
     static constexpr std::string_view ImageSizesName = "image_sizes";
+    static constexpr std::string_view InputFeaturesName = "encoder_input_ids";
     static constexpr std::string_view ImageFeaturesName = "image_features";
+    static constexpr std::string_view CurrentSequenceLengthName = "current_sequence_length";
+    static constexpr std::string_view PastSequenceLengthName = "past_sequence_length";
   };
 
   fs::path config_path;  // Path of the config directory
@@ -37,6 +40,7 @@ struct Config {
     std::optional<std::string> log_id;
     std::optional<int> log_severity_level;
     std::optional<std::string> enable_profiling;
+    bool use_env_allocators{true};
 
     std::vector<ProviderOptions> provider_options;
   };
@@ -56,6 +60,10 @@ struct Config {
     // For models like whisper
     struct EncoderDecoderInit {
       std::string filename;
+
+      struct Inputs {
+        std::string input_features{Defaults::InputFeaturesName};
+      } inputs;
     } encoder_decoder_init;
 
     struct Embedding {
@@ -102,6 +110,8 @@ struct Config {
         std::string past_key_names{"past_key_values.%d.key"}, past_value_names{"past_key_values.%d.value"};
         std::string past_names;  // When key/value pairs are combined
         std::string cross_past_key_names, cross_past_value_names;
+        std::string current_sequence_length{Defaults::CurrentSequenceLengthName};
+        std::string past_sequence_length{Defaults::PastSequenceLengthName};
       } inputs;
 
       struct Outputs {
@@ -110,6 +120,20 @@ struct Config {
         std::string present_names;  // When key/value pairs are combined
         std::string cross_present_key_names, cross_present_value_names;
       } outputs;
+
+      struct PipelineModel {
+        std::string model_id;
+        std::string filename;
+        std::optional<SessionOptions> session_options;
+
+        std::vector<std::string> inputs;
+        std::vector<std::string> outputs;
+        std::unordered_map<std::string, std::string> output_names_forwarder;
+        bool run_on_prompt{true};
+        bool run_on_token_gen{true};
+      };
+
+      std::vector<PipelineModel> pipeline;
 
     } decoder;
   } model;

@@ -20,6 +20,7 @@ if(MSVC)
   add_compile_definitions(_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
 endif()
 
+include(cmake/ortlib.cmake)
 include(cmake/external/onnxruntime_external_deps.cmake)
 # All Global variables, including GLOB, for the top level CMakeLists.txt should be defined here
 include(cmake/global_variables.cmake)
@@ -115,15 +116,22 @@ endif()
 
 
 if(USE_DML)
-  list(APPEND onnxruntime_libs "${ORT_LIB_DIR}/DirectML.dll")
-  list(APPEND onnxruntime_libs "${ORT_LIB_DIR}/D3D12Core.dll")
-  list(APPEND ortgenai_embed_libs "${ORT_LIB_DIR}/D3D12Core.dll")
+  list(APPEND ortgenai_embed_libs "${D3D12_LIB_DIR}/D3D12Core.dll")
   target_include_directories(onnxruntime-genai PRIVATE $<TARGET_PROPERTY:${WIL_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
   target_include_directories(onnxruntime-genai PRIVATE $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>/directx)
   target_include_directories(onnxruntime-genai PRIVATE $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
   target_include_directories(onnxruntime-genai-static PUBLIC $<TARGET_PROPERTY:${WIL_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
   target_include_directories(onnxruntime-genai-static PUBLIC $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>/directx)
   target_include_directories(onnxruntime-genai-static PUBLIC $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
+  target_include_directories(onnxruntime-genai PRIVATE ${DML_HEADER_DIR})
+  target_include_directories(onnxruntime-genai-static PRIVATE ${DML_HEADER_DIR})
+  target_include_directories(onnxruntime-genai PRIVATE ${D3D12_HEADER_DIR})
+  target_include_directories(onnxruntime-genai-static PRIVATE ${D3D12_HEADER_DIR})
+  target_link_directories(onnxruntime-genai PRIVATE ${DML_LIB_DIR})
+  target_link_directories(onnxruntime-genai PRIVATE ${D3D12_LIB_DIR})
+  target_link_directories(onnxruntime-genai-static PUBLIC ${DML_LIB_DIR})
+  target_link_directories(onnxruntime-genai-static PUBLIC ${D3D12_LIB_DIR})
+  target_link_libraries(onnxruntime-genai PRIVATE d3d12.lib dxcore.lib dxguid.lib dxgi.lib)
   target_link_libraries(onnxruntime-genai PRIVATE d3d12.lib dxcore.lib dxguid.lib dxgi.lib)
   target_link_libraries(onnxruntime-genai-static PUBLIC d3d12.lib dxcore.lib dxguid.lib dxgi.lib)
 
@@ -179,14 +187,6 @@ if(ENABLE_MODEL_BENCHMARK)
   message("------------------Enabling model benchmark------------------")
   add_subdirectory("${REPO_ROOT}/benchmark/c")
 endif()
-
-# Copy the onnxruntime binaries into the build folder so it's found on launch
-foreach(DLL_FILE ${onnxruntime_libs})
-  add_custom_command(
-    TARGET onnxruntime-genai POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DLL_FILE} $<TARGET_FILE_DIR:onnxruntime-genai>
-  )
-endforeach()
 
 # Have visual studio put all files into one single folder vs the default split of header files into a separate folder
 source_group(TREE ${GENERATORS_ROOT} FILES ${generator_srcs})

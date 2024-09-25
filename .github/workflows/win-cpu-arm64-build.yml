@@ -64,7 +64,7 @@ jobs:
     - name: Build the C# API and Run the C# Tests
       run: |
         cd test\csharp
-        dotnet test /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release"
+        dotnet test /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release" /p:OrtLibDir="$env:GITHUB_WORKSPACE\ort\lib"
 
     - name: Install the Python Wheel and Test Dependencies
       run: |
@@ -85,4 +85,5 @@ jobs:
 
     - name: Run tests
       run: |
+        copy $env:GITHUB_WORKSPACE\ort\lib\* .\$env:binaryDir\test\Release
         & .\$env:binaryDir\test\Release\unit_tests.exe
