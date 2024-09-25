@@ -42,7 +42,7 @@ class Model:
 
         self.cache_dir = cache_dir
         self.filename = extra_options["filename"] if "filename" in extra_options else "model.onnx"
-        self.hf_token=parse_hf_token(extra_options["hf_token"])  if "hf_token" in extra_options else True
+        self.hf_token = parse_hf_token(extra_options.get("hf_token", "true"))
         self.extra_options = extra_options
 
         self.inputs = []
