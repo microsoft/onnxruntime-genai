@@ -2729,7 +2729,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
     # Load model config
     extra_kwargs = {} if os.path.isdir(input_path) else {"cache_dir": cache_dir}
     hf_name = input_path if os.path.isdir(input_path) else model_name
-    hf_token=parse_hf_token(extra_options["hf_token"]) if "hf_token" in extra_options else True
+    hf_token = parse_hf_token(extra_options.get("hf_token", "true"))
     config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=True, **extra_kwargs)
 
     # Set input/output precision of ONNX model
