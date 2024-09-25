@@ -42,7 +42,7 @@ class Model:
 
         self.cache_dir = cache_dir
         self.filename = extra_options["filename"] if "filename" in extra_options else "model.onnx"
-        self.hf_token=parse_hf_token(extra_options["hf_token"])  if "hf_token" in extra_options else True
+        self.hf_token = parse_hf_token(extra_options.get("hf_token", "true"))
         self.extra_options = extra_options
 
         self.inputs = []
@@ -2713,11 +2713,20 @@ def parse_extra_options(kv_items):
     return kv_pairs
 
 
-def parse_hf_token(hf_token : str):
-    if hf_token.lower() in ["true", "false"]:
-        # Convert string to boolean
-        return hf_token.lower() == "true"
-    # Return as string
+def parse_hf_token(hf_token):
+    """
+    Returns the authentication token needed for Hugging Face.
+    Token is obtained either from the user or the environment.
+    """
+    if hf_token.lower() in {"false", "0"}:
+        # Default is `None` for disabling authentication
+        return None
+
+    if hf_token.lower() in {"true", "1"}:
+        # Return token in environment
+        return os.environ["HF_TOKEN"]
+
+    # Return user-provided token as string
     return hf_token
 
 
@@ -2729,7 +2738,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
     # Load model config
     extra_kwargs = {} if os.path.isdir(input_path) else {"cache_dir": cache_dir}
     hf_name = input_path if os.path.isdir(input_path) else model_name
-    hf_token=parse_hf_token(extra_options["hf_token"]) if "hf_token" in extra_options else True
+    hf_token = parse_hf_token(extra_options.get("hf_token", "true"))
     config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=True, **extra_kwargs)
 
     # Set input/output precision of ONNX model
