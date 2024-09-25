@@ -96,6 +96,8 @@ struct SessionOptions_Element : JSON::Element {
       v_.enable_quant_qdq_cleanup = value;
     else if (name == "ep_context_enable")
       v_.ep_context_enable = value;
+    else if (name == "use_env_allocators")
+      v_.use_env_allocators = value;
     else
       throw JSON::unknown_value_error{};
   }
