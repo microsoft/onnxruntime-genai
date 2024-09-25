@@ -56,7 +56,7 @@ struct DecoderOnlyPipelineState : State {
   RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens,
                           RoamingArray<int32_t> next_indices) override;
 
-  OrtValue* GetOutput(const char* name);
+  OrtValue* GetOutput(const char* name) override;
 
  private:
   void UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> next_indices,
