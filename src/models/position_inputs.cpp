@@ -66,15 +66,15 @@ void PositionInputs::Add() {
   }
 }
 
-void PositionInputs::Update(int total_length, int new_length) {
+void PositionInputs::Update(RoamingArray<int32_t>& next_tokens_unk, int total_length, int new_length) {
   if (has_posid_input_) {
     // Initialize on first update
     if (is_first_update_) {
       position_ids_shape_[1] = new_length;
       if (type_ == Ort::TypeToTensorType<int32_t>)
-        CreateAndInitializePositionIDs<int32_t>(position_ids_shape_);
+        CreateAndInitializePositionIDs<int32_t>(next_tokens_unk, position_ids_shape_);
       else
-        CreateAndInitializePositionIDs<int64_t>(position_ids_shape_);
+        CreateAndInitializePositionIDs<int64_t>(next_tokens_unk, position_ids_shape_);
     } else {
       // Batch size > 1 case
       if (position_ids_shape_[0] > 1)
@@ -89,9 +89,9 @@ void PositionInputs::Update(int total_length, int new_length) {
     if (is_first_update_) {
       attention_mask_shape_[1] = new_length;
       if (type_ == Ort::TypeToTensorType<int32_t>)
-        CreateAndInitializeAttentionMask<int32_t>(attention_mask_shape_);
+        CreateAndInitializeAttentionMask<int32_t>(next_tokens_unk, attention_mask_shape_);
       else
-        CreateAndInitializeAttentionMask<int64_t>(attention_mask_shape_);
+        CreateAndInitializeAttentionMask<int64_t>(next_tokens_unk, attention_mask_shape_);
     } else {
       // Batch size > 1 case
       if (attention_mask_shape_[0] > 1)
@@ -458,14 +458,14 @@ void PositionInputs::UpdateAttentionMask(int total_length, int new_kv_length) {
 }
 
 template <typename T>
-void PositionInputs::CreateAndInitializePositionIDs(std::array<int64_t, 2> shape) {
+void PositionInputs::CreateAndInitializePositionIDs(RoamingArray<int32_t>& next_tokens_unk, std::array<int64_t, 2> shape) {
   // Set attention mask to be 0 for pad tokens, and 1 for all other tokens.
   // Set position id to be 0 for pad tokens, and accumulated sum of mask in a batch for other tokens
   position_ids_ = OrtValue::CreateTensor(model_.allocator_cpu_, shape, type_);
   position_ids_next_ = OrtValue::CreateTensor(model_.allocator_cpu_, std::array<int64_t, 2>{shape[0], 1}, type_);
   auto* position_data = position_ids_->GetTensorMutableData<T>();
   auto* position_data_next = position_ids_next_->GetTensorMutableData<T>();
-  const auto* word_id = state_.input_ids_.Get()->GetTensorData<int>();
+  const auto* word_id = next_tokens_unk.GetCPU().data();
   auto* position = position_data;
   for (int i = 0; i < shape[0]; i++) {
     T abs_position = 0;
@@ -488,12 +488,12 @@ void PositionInputs::CreateAndInitializePositionIDs(std::array<int64_t, 2> shape
 }
 
 template <typename T>
-void PositionInputs::CreateAndInitializeAttentionMask(std::array<int64_t, 2> shape) {
+void PositionInputs::CreateAndInitializeAttentionMask(RoamingArray<int32_t>& next_tokens_unk, std::array<int64_t, 2> shape) {
   // Set attention mask to be 0 for pad tokens, and 1 for all other tokens.
   // Set position id to be 0 for pad tokens, and accumulated sum of mask in a batch for other tokens
   attention_mask_ = OrtValue::CreateTensor(model_.allocator_cpu_, shape, type_);
   auto* mask_data = attention_mask_->GetTensorMutableData<T>();
-  const auto* word_id = state_.input_ids_.Get()->GetTensorData<int>();
+  const auto* word_id = next_tokens_unk.GetCPU().data();
   auto* mask = mask_data;
   for (int i = 0; i < shape[0]; i++) {
     T abs_position = 0;

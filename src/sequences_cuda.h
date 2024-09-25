@@ -11,6 +11,8 @@ struct Sequences_Cuda {
   gpu_span<int32_t> GetNextSequences() { return sequences_next_; }
 
   void AppendNextTokenToSequences(std::span<const int32_t> next_tokens);
+  void AppendUserTokensToSequences(gpu_span<int32_t> user_tokens);
+  void SetNextTokens(gpu_span<int32_t> next_tokens_span);
 
   // Returns current sequence length.
   int GetSequenceLength() const;

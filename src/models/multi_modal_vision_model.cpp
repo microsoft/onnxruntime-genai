@@ -224,11 +224,11 @@ RoamingArray<float> DecoderState::Run(int current_length, RoamingArray<int32_t> 
   return logits_.Get();
 }
 
-void DecoderState::UpdateInputsOutputs(int total_length, RoamingArray<int32_t> beam_indices) {
+void DecoderState::UpdateInputsOutputs(RoamingArray<int32_t> next_tokens, int total_length, RoamingArray<int32_t> beam_indices) {
   size_t new_length = input_ids_.GetShape()[1]; // TODO(aciddelgado): looks like this input_ids_ is not updated by add_tokens
-  position_inputs_.Update(total_length, new_length);
+  position_inputs_.Update(next_tokens, total_length, new_length);
   kv_cache_.Update(beam_indices.GetCPU(), total_length);
-  logits_.Update(new_length);
+  logits_.Update(next_tokens, new_length);
 }
 
 MultiModalPipelineState::MultiModalPipelineState(const MultiModalVisionModel& model,
@@ -276,7 +276,7 @@ RoamingArray<float> MultiModalPipelineState::Run(int current_length, RoamingArra
   }
 
   embedding_state_->UpdateInputsAndOutputs(next_tokens);
-  decoder_state_->UpdateInputsOutputs(current_length, next_indices);
+  decoder_state_->UpdateInputsOutputs(next_tokens, current_length, next_indices);
 
   embedding_state_->Run(current_length, next_tokens, next_indices);
   decoder_state_->inputs_embeds_.ReuseEmbeddingsBuffer(embedding_state_->inputs_embeds_);

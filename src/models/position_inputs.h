@@ -14,7 +14,7 @@ struct PositionInputs {
   PositionInputs(const Model& model, State& state);
 
   void Add();
-  void Update(int total_length, int new_length);
+  void Update(RoamingArray<int32_t>& next_tokens_unk, int total_length, int new_length);
 
  private:
   void AddAttentionMask();
@@ -30,9 +30,9 @@ struct PositionInputs {
   template <typename T>
   void InitializeSequenceLengths(std::array<int64_t, 2> shape, cpu_span<int32_t> sequence_lengths_unk);
   template <typename T>
-  void CreateAndInitializePositionIDs(std::array<int64_t, 2> shape);
+  void CreateAndInitializePositionIDs(RoamingArray<int32_t>& next_tokens_unk, std::array<int64_t, 2> shape);
   template <typename T>
-  void CreateAndInitializeAttentionMask(std::array<int64_t, 2> shape);
+  void CreateAndInitializeAttentionMask(RoamingArray<int32_t>& next_tokens_unk, std::array<int64_t, 2> shape);
 
   template <typename T>
   void UpdatePositionIDsImpl();

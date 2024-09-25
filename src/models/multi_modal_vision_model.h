@@ -77,7 +77,7 @@ struct DecoderState : State {
  private:
   friend struct MultiModalPipelineState;
 
-  void UpdateInputsOutputs(int current_length, RoamingArray<int32_t> beam_indices);
+  void UpdateInputsOutputs(RoamingArray<int32_t> next_tokens, int current_length, RoamingArray<int32_t> beam_indices);
 
   const MultiModalVisionModel& model_;
   const CapturedGraphInfo* captured_graph_info_;

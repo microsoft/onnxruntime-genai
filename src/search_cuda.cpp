@@ -178,7 +178,8 @@ void GreedySearch_Cuda::SampleTopKTopP(int k, float p, float temperature) {
 
 void GreedySearch_Cuda::CheckForEOS() {
   assert(next_tokens_.size() == eos_meet_.size());
-  cuda::Launch_CheckForEOS(next_tokens_.data(), static_cast<int>(next_tokens_.size()), eos_meet_.data(), params_->eos_token_id, params_->pad_token_id, done_cpu_.get(), params_->cuda_stream);
+  // Don't replace EOS with pad for batch_size == 1 for continuous decoding mode
+  cuda::Launch_CheckForEOSAndPad(next_tokens_.data(), static_cast<int>(next_tokens_.size()), eos_meet_.data(), params_->eos_token_id, params_->batch_size > 1 ? params_->pad_token_id : params_->eos_token_id, done_cpu_.get(), params_->cuda_stream);
 }
 
 void GreedySearch_Cuda::AppendNextTokensToSequences() {
@@ -251,6 +252,23 @@ std::span<float> Search_Cuda::GetScores(int batch_beam_index) {
 
 std::span<float> Search_Cuda::GetScores() {
   return next_token_scores_;
+}
+
+// Set user input tokens (batch_beam_size, sequence_length)
+void GreedySearch_Cuda::SetUserTokens(RoamingArray<int32_t> next_tokens) {
+  cudaMemsetAsync(eos_meet_.data(), 0, eos_meet_.size_bytes(), params_->cuda_stream);
+  *done_cpu_ = false;
+
+  auto next_tokens_gpu = next_tokens.GetGPU();
+  auto batch_size = params_->batch_size;
+  auto tokens_count_per_batch = next_tokens_gpu.size() / batch_size;
+  sequences_.AppendUserTokensToSequences(next_tokens_gpu);
+  
+  if (sequences_.GetSequenceLength() == params_->search.max_length) {
+    if (g_log.enabled && g_log.hit_max_length)
+      Log("hit_max_length", "greedy cuda hit");
+    *done_cpu_ = true;
+  }
 }
 
 void Search_Cuda::ApplyMinLength(int min_length) {

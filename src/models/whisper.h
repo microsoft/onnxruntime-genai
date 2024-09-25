@@ -24,7 +24,7 @@ struct Whisper_State : State {
   RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) override;
 
  private:
-  void UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> next_indices, int current_length);
+  void UpdateInputsOutputs(RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> next_indices, int current_length);
 
   const Whisper_Model& model_;
   enum struct RunState {

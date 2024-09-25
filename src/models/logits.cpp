@@ -32,6 +32,8 @@ Logits::Logits(const Model& model, State& state)
     cudaMemcpyAsync(cuda_eos_token_ids_.data(), cpu_ids.data(), cpu_ids.size() * sizeof(int32_t), ::cudaMemcpyHostToDevice, model_.cuda_stream_);
   }
 #endif
+
+  input_sequence_lengths.resize(state_.params_->batch_size);
 }
 
 #pragma warning(push)
@@ -63,15 +65,9 @@ RoamingArray<float> Logits::Get() {
     size_t element_size = type_ == Ort::TypeToTensorType<float> ? 4 : 2;
     size_t vocab_index = 0;  // Simpler math to have this index go up by vocab_size for every logit chunk we process
 
-    const auto* input_ids = state_.input_ids_.Get()->GetTensorData<int>();
     for (int batch_index = 0; batch_index < state_.params_->batch_size; batch_index++) {
       // Find the first non pad token from the end
-      size_t token_index = seq_length;
-      while (token_index-- > 0) {
-        if (input_ids[token_index] != state_.params_->pad_token_id)
-          break;
-      }
-
+      size_t token_index = input_sequence_lengths[batch_index] - 1;
       for (int beam_index = 0; beam_index < num_beams; beam_index++) {
         switch (model_.device_type_) {
 #if USE_DML
@@ -116,8 +112,6 @@ RoamingArray<float> Logits::Get() {
 
         vocab_index += vocab_size;
       }
-
-      input_ids += seq_length;
     }
 
     element_count = shape_[0] * shape_[2];  // shape_[1] is now 1, so the element count must be updated
@@ -198,9 +192,21 @@ RoamingArray<float> Logits::Get() {
 
 #pragma warning(pop)
 
-void Logits::Update(int new_kv_length) {
+void Logits::Update(RoamingArray<int32_t>& next_tokens, int new_kv_length) {
   if (output_raw_.get()->GetTensorTypeAndShapeInfo()->GetShape()[1] == new_kv_length) {
     return;
+  }
+
+  // Store length of input sequence for each batch for the get step
+  for (int b = 0; b < state_.params_->batch_size; b++) {
+    // Find the first non pad token from the end
+    size_t token_index = new_kv_length;
+    while (token_index-- > 0) {
+      auto next_token = next_tokens.GetCPU()[b * new_kv_length + token_index];
+      if (next_token != state_.params_->pad_token_id)
+        break;
+    }
+    input_sequence_lengths[b] = token_index + 1;
   }
 
   shape_[1] = new_kv_length;

@@ -15,7 +15,7 @@ struct Logits {
   RoamingArray<float> Get();
 
   // Resize logits to [bz, token_count, vocab_size] if necessary.
-  void Update(int new_kv_length);
+  void Update(RoamingArray<int32_t>& next_tokens_unk, int new_kv_length);
 
  private:
   void HandleEOSArray(cpu_span<float> logits);
@@ -33,6 +33,8 @@ struct Logits {
   std::unique_ptr<OrtValue> output_last_tokens_;
 
   std::unique_ptr<OrtValue> output_raw_;  // Raw logits output from model
+
+  std::vector<int> input_sequence_lengths;
 
   // Used for decoding runs with cuda graphs.
   StaticBuffer* sb_logits32_{};

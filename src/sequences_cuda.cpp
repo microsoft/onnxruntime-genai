@@ -8,6 +8,7 @@ namespace Generators {
 namespace cuda {
 void Launch_ExpandInputSequences(std::span<const int32_t> input_sequences, std::span<int32_t> sequences, int batch_size, int beam_size, int current_length, int max_length, cudaStream_t stream);
 void Launch_AppendNextTokenToSequences(std::span<const int32_t> next_tokens, std::span<int32_t> sequences, int batch_beam_size, int current_length, int max_length, cudaStream_t stream);
+void Launch_AppendUserTokensToSequences(std::span<const int32_t> next_tokens, std::span<int32_t> sequences, int batch_beam_size, int past_length, int new_length, int max_length, cudaStream_t stream);
 }  // namespace cuda
 
 // TODO(aciddelgado): update cuda sequences to new paradigm
@@ -53,6 +54,18 @@ void Sequences_Cuda::AppendNextTokenToSequences(std::span<const int32_t> next_to
 
   cuda::Launch_AppendNextTokenToSequences(next_tokens, sequences_, batch_beam_size_, current_length_, max_length_, stream_);
   ++current_length_;
+}
+
+void Sequences_Cuda::AppendUserTokensToSequences(gpu_span<int32_t> user_tokens) {
+  // if (g_log.enabled && g_log.set_next_tokens) {
+  //   auto& stream = Log("set_next_tokens");
+  //   DumpCudaSpan(stream, next_tokens_span);
+  //   stream << std::endl;
+  // }
+  size_t new_length = user_tokens.size() / batch_beam_size_;
+  size_t past_length = current_length_;
+  cuda::Launch_AppendUserTokensToSequences(user_tokens, sequences_, batch_beam_size_, past_length, new_length, max_length_, stream_);
+  current_length_ += new_length;
 }
 
 void Sequences_Cuda::AfterDeviceAppendedNextToken() {

@@ -252,7 +252,7 @@ void GreedySearch_Cpu::AppendNextTokensToSequences() {
   }
 }
 
-void GreedySearch_Cpu::SetNextTokens(RoamingArray<int32_t> next_tokens) {
+void GreedySearch_Cpu::SetUserTokens(RoamingArray<int32_t> next_tokens) {
   // Reset done count/state
   done_ = false;
   not_done_count_ = params_->batch_size;

@@ -145,16 +145,7 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
 
 void Generator::AddTokens(cpu_span<int32_t> input_ids) {
   // TODO(aciddelgado): batch_size > 1 requires full rewind
-  search_->SetNextTokens(input_ids);
-  
-  if (g_log.enabled && g_log.add_tokens) {
-    auto& stream = Log("add_tokens");
-    stream << "input_ids: ";
-    for (auto token : input_ids) {
-      stream << token << ' ';
-    }
-    stream << std::endl;
-  }
+  search_->SetUserTokens(input_ids);
 
   computed_logits_ = false;
   ComputeLogits(input_ids);

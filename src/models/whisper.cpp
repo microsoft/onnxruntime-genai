@@ -79,11 +79,11 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
   return logits_.Get();
 }
 
-void Whisper_State::UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> beam_indices, int current_length) {
+void Whisper_State::UpdateInputsOutputs(RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> beam_indices, int current_length) {
   decoder_input_ids_.Update(next_tokens);
   kv_cache_.Update(beam_indices.GetCPU(), current_length);
   size_t new_length = input_ids_.GetShape()[1];
-  logits_.Update(new_length);
+  logits_.Update(next_tokens, new_length);
 }
 
 }  // namespace Generators

@@ -35,12 +35,12 @@ RoamingArray<float> Gpt_State::Run(int current_length, RoamingArray<int32_t> nex
   return logits_.Get();
 }
 
-void Gpt_State::UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens_unk, RoamingArray<int32_t> beam_indices, int total_length) {
+void Gpt_State::UpdateInputsOutputs(RoamingArray<int32_t>& next_tokens_unk, RoamingArray<int32_t> beam_indices, int total_length) {
   input_ids_.Update(next_tokens_unk);
   size_t new_length = input_ids_.GetShape()[1];
-  position_inputs_.Update(total_length, new_length);
+  position_inputs_.Update(next_tokens_unk, total_length, new_length);
   kv_cache_.Update(beam_indices.GetCPU(), total_length);
-  logits_.Update(new_length);
+  logits_.Update(next_tokens_unk, new_length);
 }
 
 }  // namespace Generators
