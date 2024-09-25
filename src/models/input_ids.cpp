@@ -55,7 +55,7 @@ InputIDs::InputIDs(const Model& model, State& state)
     if (state_.params_->BatchBeamSize() != 1) {
       throw std::runtime_error("Batch size must be 1 for current_sequence_length and past_sequence_length inputs");
     }
-    const int32_t current_sequence_length = get_unpadded_sequence_length(state_.params_->input_ids, state_.params_->pad_token_id);
+    const int32_t current_sequence_length = get_unpadded_sequence_length(state_.params_->input_ids, model_.config_->model.pad_token_id);
     const std::array<int64_t, 1> current_sequence_length_shape{1};
     const std::array<int64_t, 2> past_sequence_length_shape{1, 1};
 

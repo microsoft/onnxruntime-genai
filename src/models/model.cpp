@@ -513,8 +513,8 @@ std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Model& model) {
 }
 
 // Used by benchmarking tests only, should not be used normally
-std::shared_ptr<GeneratorParams> CreateGeneratorParams() {
-  return std::make_shared<GeneratorParams>();
+std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Config& config) {
+  return std::make_shared<GeneratorParams>(config);
 }
 
 void ConvertFp16ToFp32(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<OrtValue>& p_out, DeviceType device_type, cudaStream_t stream) {
