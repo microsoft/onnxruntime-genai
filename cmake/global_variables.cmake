@@ -39,7 +39,7 @@ if(WIN32)
   set(ONNXRUNTIME_PROVIDERS_CUDA_LIB "onnxruntime_providers_cuda.dll")
   set(ONNXRUNTIME_PROVIDERS_ROCM_LIB "onnxruntime_providers_rocm.dll")
 elseif(APPLE)
-  if(BUILD_APPLE_FRAMEWORK)
+  if(IOS OR MAC_CATALYST)
     add_library(onnxruntime IMPORTED STATIC)
     if(PLATFORM_NAME STREQUAL "macabi")
       # The xcframework in cmake doesn't seem to support MacCatalyst.
@@ -70,7 +70,7 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
 
 set(ortgenai_embed_libs "") # shared libs that will be embedded inside the onnxruntime-genai package
 
-if (BUILD_APPLE_FRAMEWORK)
+if (IOS OR MAC_CATALYST)
   if (NOT EXISTS "${ORT_LIB_DIR}/onnxruntime.xcframework")
     message(FATAL_ERROR "Expected the ONNX Runtime XCFramework to be found at ${ORT_LIB_DIR}/onnxruntime.xcframework. Actual: Not found.")
   endif()
