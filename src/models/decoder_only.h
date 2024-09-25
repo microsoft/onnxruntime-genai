@@ -1,5 +1,6 @@
 #pragma once
 #include "model.h"
+#include "input_ids.h"
 #include "logits.h"
 #include "kv_cache.h"
 #include "position_inputs.h"
@@ -27,6 +28,7 @@ struct DecoderOnly_State : State {
   const DecoderOnly_Model& model_;
   CapturedGraphInfoPtr captured_graph_info_;
 
+  InputIDs input_ids_{model_, *this};
   Logits logits_{model_, *this};
   KV_Cache kv_cache_{model_, *this};
   PositionInputs position_inputs_;

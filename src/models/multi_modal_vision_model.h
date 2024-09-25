@@ -42,6 +42,7 @@ struct EmbeddingState : State {
 
   const MultiModalVisionModel& model_;
   const CapturedGraphInfo* captured_graph_info_;
+  InputIDs input_ids_{model_, *this};
   Embeddings inputs_embeds_{model_, *this, Embeddings::Mode::Output,  // Model output
                             model_.config_->model.embedding.outputs.embeddings};
 };

@@ -5,7 +5,6 @@
 #include "captured_graph_pool.h"
 #include "utils.h"
 #include "prompt_image_processor.h"
-#include "input_ids.h"
 
 #if USE_DML
 #include "dml_provider_factory.h"
@@ -38,8 +37,6 @@ struct State {
 
   std::vector<const char*> input_names_, output_names_;
   std::vector<OrtValue*> inputs_, outputs_;
-
-  InputIDs input_ids_;
 
  protected:
   void Run(OrtSession& session, OrtRunOptions& run_options, int new_batch_size);  // Uses the inputs below to run

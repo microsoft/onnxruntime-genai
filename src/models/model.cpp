@@ -38,8 +38,7 @@ namespace Generators {
 
 State::State(const GeneratorParams& params, const Model& model)
     : params_{params.shared_from_this()},
-      model_{model},
-      input_ids_{model, *this} {}
+      model_{model} {}
 
 void State::Run(OrtSession& session, OrtRunOptions& run_options, int new_batch_size) {
   if (first_run_) {
