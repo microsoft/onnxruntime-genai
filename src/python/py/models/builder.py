@@ -2724,7 +2724,7 @@ def parse_hf_token(hf_token):
 
     if hf_token.lower() in {"true", "1"}:
         # Return token in environment
-        return os.environ["HF_TOKEN"]
+        return True
 
     # Return user-provided token as string
     return hf_token
