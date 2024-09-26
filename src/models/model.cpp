@@ -57,13 +57,13 @@ void State::Run(OrtSession& session, OrtRunOptions& run_options, int new_batch_s
   if (g_log.enabled && g_log.model_input_values) {
     auto& stream = Log("model_input_values");
     stream << std::endl;
-    DumpTensors(stream, inputs_.data(), input_names_.data(), input_names_.size(), true);
+    DumpTensors(model_, stream, inputs_.data(), input_names_.data(), input_names_.size(), true);
   }
 
   if (g_log.enabled && g_log.model_output_shapes) {
     auto& stream = Log("model_output_shapes");
     stream << std::endl;
-    DumpTensors(stream, outputs_.data(), output_names_.data(), output_names_.size(), false);
+    DumpTensors(model_, stream, outputs_.data(), output_names_.data(), output_names_.size(), false);
   }
 
   session.Run(&run_options, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
@@ -71,7 +71,7 @@ void State::Run(OrtSession& session, OrtRunOptions& run_options, int new_batch_s
   if (g_log.enabled && g_log.model_output_values) {
     auto& stream = Log("model_output_values");
     stream << std::endl;
-    DumpTensors(stream, outputs_.data(), output_names_.data(), output_names_.size(), true);
+    DumpTensors(model_, stream, outputs_.data(), output_names_.data(), output_names_.size(), true);
   }
 }
 
