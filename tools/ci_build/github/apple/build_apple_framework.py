@@ -173,6 +173,9 @@ def _build_package(args):
             + ["--config=" + build_config]
         )
 
+        if args.ort_home:
+            base_build_command += ['--ort_home', args.ort_home]
+
         if args.include_ops_by_config is not None:
             base_build_command += ["--include_ops_by_config=" + str(args.include_ops_by_config.resolve())]
 
@@ -259,6 +262,7 @@ def parse_args():
     )
 
     parser.add_argument("--path_to_protoc_exe", type=pathlib.Path, help="Path to protoc exe.")
+    parser.add_argument("--ort_home", default=None, type=pathlib.Path, help="Root directory of onnxruntime.")
 
     args = parser.parse_args()
 
