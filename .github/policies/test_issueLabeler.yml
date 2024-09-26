@@ -7,18 +7,15 @@ where:
 configuration:
   resourceManagementConfiguration:
     eventResponderTasks:
-      - if:
+      - description: Add ep:CUDA label to new issues
+        if:
           - payloadType: Issues
           - isOpen
+          - titleContains:
+              pattern: /\bcuda\b/i
+              isRegex: True
         then:
-          - if:
-              - or:
-                  - titleContains:
-                      pattern: shark
-                  - bodyContains:
-                      pattern: strawberry
-            then:
-              - addLabel:
-                  label: wontfix 
+          - addLabel:
+              label: ep:CUDA 
 onFailure:
 onSuccess:

@@ -57,61 +57,40 @@ struct StringAllocator : OrtAllocator {
   std::string string_;
 };
 
-// This template converts a C++ type into it's ONNXTensorElementDataType
+template <typename... Types>
+struct TypeList {};
+
+using TensorTypes = TypeList<bool, int8_t, uint8_t, int16_t, uint16_t, int32_t, uint32_t, int64_t, uint64_t, float, double, Float16_t, BFloat16_t>;
+
+// Variable templates to convert a C++ type into it's ONNXTensorElementDataType
 template <typename T>
-struct TypeToTensorType;
+inline constexpr ONNXTensorElementDataType TypeToTensorType = T::Unsupported_Type;  // Force a compile error if hit, please add specialized version if type is valid
 template <>
-struct TypeToTensorType<float> {
-  static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
-};
+inline constexpr ONNXTensorElementDataType TypeToTensorType<bool> = ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL;
 template <>
-struct TypeToTensorType<Float16_t> {
-  static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
-};
+inline constexpr ONNXTensorElementDataType TypeToTensorType<int8_t> = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8;
 template <>
-struct TypeToTensorType<BFloat16_t> {
-  static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16;
-};
+inline constexpr ONNXTensorElementDataType TypeToTensorType<uint8_t> = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8;
 template <>
-struct TypeToTensorType<double> {
-  static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE;
-};
+inline constexpr ONNXTensorElementDataType TypeToTensorType<int16_t> = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16;
 template <>
-struct TypeToTensorType<int8_t> {
-  static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8;
-};
+inline constexpr ONNXTensorElementDataType TypeToTensorType<uint16_t> = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16;
 template <>
-struct TypeToTensorType<int16_t> {
-  static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16;
-};
+inline constexpr ONNXTensorElementDataType TypeToTensorType<int32_t> = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32;
 template <>
-struct TypeToTensorType<int32_t> {
-  static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32;
-};
+inline constexpr ONNXTensorElementDataType TypeToTensorType<uint32_t> = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32;
 template <>
-struct TypeToTensorType<int64_t> {
-  static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;
-};
+inline constexpr ONNXTensorElementDataType TypeToTensorType<int64_t> = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;
 template <>
-struct TypeToTensorType<uint8_t> {
-  static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8;
-};
+inline constexpr ONNXTensorElementDataType TypeToTensorType<uint64_t> = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64;
 template <>
-struct TypeToTensorType<uint16_t> {
-  static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16;
-};
+inline constexpr ONNXTensorElementDataType TypeToTensorType<float> = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
 template <>
-struct TypeToTensorType<uint32_t> {
-  static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32;
-};
+inline constexpr ONNXTensorElementDataType TypeToTensorType<double> = ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE;
 template <>
-struct TypeToTensorType<uint64_t> {
-  static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64;
-};
+inline constexpr ONNXTensorElementDataType TypeToTensorType<Float16_t> = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
 template <>
-struct TypeToTensorType<bool> {
-  static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL;
-};
+inline constexpr ONNXTensorElementDataType TypeToTensorType<BFloat16_t> = ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16;
 
 inline std::vector<std::string> GetAvailableProviders() {
   int len;
@@ -1168,7 +1147,7 @@ inline void OrtValue::FillSparseTensorBlockSparse(const OrtMemoryInfo& data_mem_
 
 template <typename T>
 inline std::unique_ptr<OrtValue> OrtValue::CreateTensor(const OrtMemoryInfo& info, std::span<T> p_data, std::span<const int64_t> shape) {
-  return CreateTensor(info, p_data.data(), p_data.size_bytes(), shape, Ort::TypeToTensorType<T>::type);
+  return CreateTensor(info, p_data.data(), p_data.size_bytes(), shape, Ort::TypeToTensorType<T>);
 }
 
 inline std::unique_ptr<OrtValue> OrtValue::CreateTensor(const OrtMemoryInfo& info, void* p_data, size_t p_data_byte_count, std::span<const int64_t> shape,
@@ -1180,7 +1159,7 @@ inline std::unique_ptr<OrtValue> OrtValue::CreateTensor(const OrtMemoryInfo& inf
 
 template <typename T>
 inline std::unique_ptr<OrtValue> OrtValue::CreateTensor(OrtAllocator& allocator, std::span<const int64_t> shape) {
-  return CreateTensor(allocator, shape, Ort::TypeToTensorType<T>::type);
+  return CreateTensor(allocator, shape, Ort::TypeToTensorType<T>);
 }
 
 inline std::unique_ptr<OrtValue> OrtValue::CreateTensor(OrtAllocator& allocator, std::span<const int64_t> shape, ONNXTensorElementDataType type) {
@@ -1194,7 +1173,7 @@ inline std::unique_ptr<OrtValue> OrtValue::CreateTensor(OrtAllocator& allocator,
 template <typename T>
 inline std::unique_ptr<OrtValue> OrtValue::CreateSparseTensor(const OrtMemoryInfo& info, T* p_data, const OrtShape& dense_shape,
                                                               const OrtShape& values_shape) {
-  return CreateSparseTensor(info, p_data, dense_shape, values_shape, Ort::TypeToTensorType<T>::type);
+  return CreateSparseTensor(info, p_data, dense_shape, values_shape, Ort::TypeToTensorType<T>);
 }
 
 inline std::unique_ptr<OrtValue> OrtValue::CreateSparseTensor(const OrtMemoryInfo& info, void* p_data, const OrtShape& dense_shape,
@@ -1207,7 +1186,7 @@ inline std::unique_ptr<OrtValue> OrtValue::CreateSparseTensor(const OrtMemoryInf
 
 template <typename T>
 inline std::unique_ptr<OrtValue> OrtValue::CreateSparseTensor(OrtAllocator* allocator, const OrtShape& dense_shape) {
-  return CreateSparseTensor(allocator, dense_shape, Ort::TypeToTensorType<T>::type);
+  return CreateSparseTensor(allocator, dense_shape, Ort::TypeToTensorType<T>);
 }
 
 inline std::unique_ptr<OrtValue> OrtValue::CreateSparseTensor(OrtAllocator* allocator, const OrtShape& dense_shape,

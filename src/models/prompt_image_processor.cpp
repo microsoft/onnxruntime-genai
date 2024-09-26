@@ -15,7 +15,7 @@ std::unique_ptr<OrtValue> ProcessImagePrompt(const Generators::Tokenizer& tokeni
   const size_t num_images = num_img_tokens ? num_img_tokens->NumberOfElement() : 0U;
   auto* num_img_tokens_data = num_img_tokens ? num_img_tokens->Data() : nullptr;
 
-  // Split the prompt string based on the occurrences of the pattern "<|image_<numder>|>"
+  // Split the prompt string based on the occurrences of the pattern "<|image_<number>|>"
   // Here the <number> represents the image id.
   const std::regex pattern("<\\|image_\\d+\\|>");
   const std::vector<std::string> prompt_chunks(
@@ -104,11 +104,14 @@ std::unique_ptr<OrtValue> ProcessImageSizes(ortc::Tensor<int64_t>* image_sizes, 
 
 }  // namespace
 
-std::unique_ptr<Images> LoadImageImpl(const char* image_path) {
-  if (!fs::path(image_path).exists()) {
-    throw std::runtime_error("Image path does not exist: " + std::string(image_path));
+std::unique_ptr<Images> LoadImages(const std::span<const char* const>& image_paths) {
+  for (const char* image_path : image_paths) {
+    if (!fs::path(image_path).exists()) {
+      throw std::runtime_error("Image path does not exist: " + std::string(image_path));
+    }
   }
-  auto [images, num_images] = ort_extensions::LoadRawImages({image_path});
+  auto [images, num_images] = ort_extensions::LoadRawData<const char* const*, ort_extensions::ImageRawData>(
+      image_paths.data(), image_paths.data() + image_paths.size());
   return std::make_unique<Images>(std::move(images), num_images);
 }
 
@@ -124,7 +127,7 @@ ImageProcessor::ImageProcessor(Config& config, const SessionInfo& session_info)
 }
 
 std::unique_ptr<NamedTensors> ImageProcessor::Process(const Tokenizer& tokenizer, const std::string& prompt,
-                                                      const Images* images) {
+                                                      const Images* images) const {
   Ort::Allocator& allocator{Ort::Allocator::GetWithDefaultOptions()};
   auto named_tensors = std::make_unique<NamedTensors>();
 

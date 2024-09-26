@@ -34,6 +34,9 @@ struct InputIDs {
   StaticBuffer* sb_input_ids_int32_{};
   DmlReusedCommandListState input_ids_cast_command_list_state_{};
 #endif
+
+  std::unique_ptr<OrtValue> current_sequence_length_;
+  std::unique_ptr<OrtValue> past_sequence_length_;
 };
 
 }  // namespace Generators

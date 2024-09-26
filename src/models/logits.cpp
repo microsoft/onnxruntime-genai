@@ -12,15 +12,15 @@ namespace Generators {
 Logits::Logits(const Model& model, State& state)
     : model_{model},
       state_{state},
-      shape_{static_cast<int64_t>(state_.params_->batch_size) * state_.params_->search.num_beams, state_.params_->sequence_length, state_.params_->vocab_size},
+      shape_{static_cast<int64_t>(state_.params_->batch_size) * state_.params_->search.num_beams, state_.params_->sequence_length, model_.config_->model.vocab_size},
       type_{model_.session_info_->GetOutputDataType(model_.config_->model.decoder.outputs.logits)} {
   output_raw_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
 
   if (state_.GetCapturedGraphInfo()) {
-    if (type_ == Ort::TypeToTensorType<float>::type) {
+    if (type_ == Ort::TypeToTensorType<float>) {
       sb_logits32_ = state_.GetCapturedGraphInfo()->sb_logits32_.get();
     }
-    if (type_ == Ort::TypeToTensorType<Ort::Float16_t>::type) {
+    if (type_ == Ort::TypeToTensorType<Ort::Float16_t>) {
       sb_logits16_ = state_.GetCapturedGraphInfo()->sb_logits16_.get();
     }
   }
@@ -55,14 +55,14 @@ RoamingArray<float> Logits::Get() {
     output_last_tokens_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
 
 #if USE_DML
-    if (type_ == Ort::TypeToTensorType<Ort::Float16_t>::type) {
+    if (type_ == Ort::TypeToTensorType<Ort::Float16_t>) {
       logits_of_last_token_fp32_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
     }
 #endif
 
     logits_of_last_token = output_last_tokens_.get();
 
-    size_t element_size = type_ == Ort::TypeToTensorType<float>::type ? 4 : 2;
+    size_t element_size = type_ == Ort::TypeToTensorType<float> ? 4 : 2;
     size_t vocab_index = 0;  // Simpler math to have this index go up by vocab_size for every logit chunk we process
 
     const auto* input_ids = state_.params_->input_ids.data();
@@ -70,14 +70,14 @@ RoamingArray<float> Logits::Get() {
       // Find the first non pad token from the end
       size_t token_index = seq_length;
       while (token_index-- > 0) {
-        if (input_ids[token_index] != state_.params_->pad_token_id)
+        if (input_ids[token_index] != model_.config_->model.pad_token_id)
           break;
       }
 
       for (int beam_index = 0; beam_index < num_beams; beam_index++) {
         switch (model_.device_type_) {
-#if USE_DML
           case DeviceType::DML: {
+#if USE_DML
             ComPtr<ID3D12Resource> source_resource;
             Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, output_raw_->GetTensorMutableRawData(), &source_resource));
 
@@ -96,8 +96,8 @@ RoamingArray<float> Logits::Get() {
                 source_offset,
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                 size_in_bytes);
-          } break;
 #endif
+          } break;
 
           case DeviceType::CPU:
           case DeviceType::CUDA: {
@@ -126,7 +126,7 @@ RoamingArray<float> Logits::Get() {
   }
 
   // Convert from float16 to float32 if necessary
-  if (type_ == Ort::TypeToTensorType<Ort::Float16_t>::type) {
+  if (type_ == Ort::TypeToTensorType<Ort::Float16_t>) {
 #if USE_DML
     if (model_.device_type_ == DeviceType::DML) {
       DmlHelpers::DmlCastInputToOutput(
@@ -205,7 +205,7 @@ void Logits::Update() {
     return;
   }
 
-  StaticBuffer* sb_logits = type_ == Ort::TypeToTensorType<Ort::Float16_t>::type ? sb_logits16_ : sb_logits32_;
+  StaticBuffer* sb_logits = type_ == Ort::TypeToTensorType<Ort::Float16_t> ? sb_logits16_ : sb_logits32_;
   output_raw_ = !sb_logits ? OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_)
                            : sb_logits->CreateTensorOnStaticBuffer(shape_, type_);
   state_.outputs_[output_index_] = output_raw_.get();

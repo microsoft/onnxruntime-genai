@@ -30,6 +30,13 @@ def parse_args():
         help="Folder to save AWQ-quantized ONNX model and associated files in",
     )
 
+    parser.add_argument(
+        "-e",
+        "--execution_provider",
+        default="cuda",
+        help="Target execution provider to apply quantization (e.g. dml, cuda)",
+    )
+
     args = parser.parse_args()
     return args
 
@@ -108,13 +115,14 @@ def main():
     input_folder = args.quant_path
     output_folder = args.output_path
     precision = "int4"
-    execution_provider = "cuda"
+    execution_provider = args.execution_provider
     cache_dir = os.path.join(".", "cache_dir")
 
     create_model(model_name, input_folder, output_folder, precision, execution_provider, cache_dir)
 
     # Run ONNX model
-    run_model(args)
+    if args.execution_provider != "dml":
+        run_model(args)
 
 if __name__ == "__main__":
     main()

@@ -44,7 +44,7 @@ def monitor_gpu_memory():
 
         memory_usage = result.stdout.splitlines()
 
-        if len(memory_usage) > 1:
+        if len(memory_usage) >= 1:
             gpu_memory = [float(line) for line in memory_usage]
             current_peak = round(max(gpu_memory) / 1024, 2)
             with peak_memory_lock:
@@ -59,18 +59,17 @@ def monitor_cpu_memory():
     global peak_cpu_memory
 
     while not stop_monitoring:
-        current_used_memory = psutil.virtual_memory().used
+        current_used_memory = round(psutil.virtual_memory().used / 1024**3, 2)
         with peak_memory_lock:
-            peak_cpu_memory = round(max(peak_cpu_memory, current_used_memory) / 1024**3, 2)
+            peak_cpu_memory = max(peak_cpu_memory, current_used_memory)
         time.sleep(0.1)
 
 # Use input model to generate prompt
 def generate_prompt(model, tokenizer, prompt_length, use_graph_capture) -> str:
-    temperature = 1.0
     prompt = "a"
     tokens = tokenizer.encode(prompt)
     params=og.GeneratorParams(model)
-    params.set_search_options(do_sample=True, top_k=5, temperature=temperature, max_length=prompt_length, min_length=prompt_length+1)
+    params.set_search_options(max_length=prompt_length, min_length=prompt_length)
     params.input_ids = tokens
 
     if use_graph_capture:
@@ -108,7 +107,8 @@ def get_model_info_from_genai_config(model_input_folder):
     genai_config = json.load(genai_config_file)
     model_info = {}  
     model_info["execution_provider"] = "cpu"
-    if len(genai_config["model"]["decoder"]["session_options"]["provider_options"]) > 0:
+    provider_options = genai_config["model"]["decoder"]["session_options"]["provider_options"]
+    if len(provider_options) > 0 and len(provider_options[0].keys()) > 0:
         model_info["execution_provider"] = list(genai_config["model"]["decoder"]["session_options"]["provider_options"][0].keys())[0]
     genai_config_file.close()
     return model_info
@@ -137,7 +137,7 @@ def save_results(args, results, filename, print_memory_usage=False):
         if IS_NVIDIA_SYSTEM:
             columns.append("peak_gpu_memory (GiB)")
         else:
-            columns.append("peak_cpu_memory(GiB)")
+            columns.append("peak_cpu_memory (GiB)")
 
     df = pd.DataFrame(
         results,
@@ -165,6 +165,12 @@ def save_results(args, results, filename, print_memory_usage=False):
         record.metrics.customized["sampling_latency_ms"] = row["Sampling Latency (ms)"]   
         record.metrics.customized["wall_clock_throughput_tps"] = row["Wall Clock Throughput (tps)"]
         record.metrics.customized["wall_clock_time_s"] = row["Wall Clock Time (s)"]
+
+        if print_memory_usage:
+            if IS_NVIDIA_SYSTEM:
+                record.metrics.customized["peak_gpu_memory_gb"] = row["peak_gpu_memory (GiB)"]
+            else:
+                record.metrics.customized["peak_cpu_memory_gb"] = row["peak_cpu_memory (GiB)"]
         
         records.append(record)
         
@@ -178,6 +184,13 @@ def run_benchmark_memory(args, batch_size, prompt_length, generation_length, max
     This function is to run benchmark and print the momory usage
     """
     global stop_monitoring
+    global peak_gpu_memory
+    global peak_cpu_memory
+
+    # Reset the peak memory variables and the monitoring flag
+    stop_monitoring = False
+    peak_gpu_memory = 0.0
+    peak_cpu_memory = 0.0
 
     if IS_NVIDIA_SYSTEM:
         monitor_thread = threading.Thread(target=monitor_gpu_memory)
@@ -241,9 +254,6 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     if args.verbose: print(f"Running benchmark for batch size = {batch_size}, prompt length = {prompt_length}")
     for _ in tqdm(range(num_repetitions)):
         wall_clock_start_time = time.time()
-
-        # Prepare run
-        generator = og.Generator(model, params)
 
         # Measure tokenization
         tokenize_start_time = time.perf_counter()
@@ -330,6 +340,12 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     print(f"Average Wall Clock Time: {avg_wall_clock_time} s")
     print(f"Average Wall Clock Throughput: {avg_wall_clock_thrpt} tps")
 
+    if args.print_memory_usage:
+        if IS_NVIDIA_SYSTEM:
+            print(f"Peak GPU Memory Usage: {peak_gpu_memory} GiB ")
+        else:
+            print(f"Peak CPU Memory Usage: {peak_cpu_memory} GiB ")
+
     metrics = [
         batch_size, 
         prompt_length,
@@ -357,10 +373,10 @@ def main(args):
             for g, gen_length in enumerate(args.generation_lengths):
                 if args.max_lengths:
                     m = l * len(args.generation_lengths) + g
-                    max_length = args.max_lengths[m]
+                    max_length = args.max_lengths[0] if len(args.max_lengths) == 1 else args.max_lengths[m]
                 else:
                     max_length = prompt_length + gen_length
-                print(f"Args: batch_size = {batch_size}, prompt_length = {prompt_length}, tokens = {gen_length}, max_length = {max_length}")
+                print(f"\nArgs: batch_size = {batch_size}, prompt_length = {prompt_length}, tokens = {gen_length}, max_length = {max_length}")
                 if args.print_memory_usage:
                     metrics = run_benchmark_memory(args, batch_size, prompt_length, gen_length, max_length)
                 else:
@@ -371,10 +387,6 @@ def main(args):
     filename = args.output
 
     if args.print_memory_usage:
-        if IS_NVIDIA_SYSTEM:
-            print(f"-------------------* Peak GPU Memory Usage: {peak_gpu_memory} GiB *-------------------")
-        else:
-            print(f"-------------------* Peak CPU Memory Usage: {peak_cpu_memory} GiB *-------------------")
         save_results(args, all_csv_metrics, filename, print_memory_usage=True)
     else:
         save_results(args, all_csv_metrics, filename)
@@ -391,7 +403,7 @@ if __name__ == "__main__":
     parser.add_argument('-b', '--batch_sizes', type=str2intlist, default=[1], help='Number of sequences to generate in parallel')
     parser.add_argument('-l', '--prompt_lengths', type=str2intlist, default=[16], help='Number of tokens for prompt')
     parser.add_argument('-g', '--generation_lengths', type=str2intlist, default=[256], help='Number of tokens to generate after prompt')
-    parser.add_argument('-m', '--max_lengths', type=str2intlist, default=[], help='Max length buffer sizes... User should supply one for every combination of Prompt and Generation length')
+    parser.add_argument('-m', '--max_lengths', type=str2intlist, default=[], help='Max length is either a combination of prompt and generation length or one value broadcasting for all.')
     parser.add_argument('-r', '--repetitions', type=int, default=10, help='Number of times to repeat the benchmark')
     parser.add_argument('-w', '--warmup', type=int, default=5, help='Number of warmup runs before benchmarking')
     parser.add_argument('-k', '--top_k', type=int, default=50, help='Top k tokens to sample from')
@@ -404,4 +416,8 @@ if __name__ == "__main__":
     parser.add_argument('-mn', '--model_name', type=str, default='model_name', help='Model name defined by users')
     parser.add_argument('-pr', '--precision', type=str, default='fp16', help='Model precision for metrics info')
     args = parser.parse_args()
+
+    # check max_lengths
+    is_max_lengths_valid = not args.max_lengths or len(args.max_lengths) == 1 or len(args.max_lengths) == len(args.prompt_lengths) * len(args.generation_lengths)
+    assert is_max_lengths_valid, "len(args.max_lengths) is either a combination of args.prompt_lengths and args.generation_lengths or 1 that broadcasts for all"
     main(args)
