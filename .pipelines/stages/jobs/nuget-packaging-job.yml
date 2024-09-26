@@ -32,6 +32,11 @@ parameters:
   type: boolean
   default: false
 
+- name: enable_macos_cpu
+  displayName: 'Whether MacOS CPU package is built.'
+  type: boolean
+  default: false
+
 - name: ort_version
   type: string
 
@@ -128,6 +133,18 @@ jobs:
       parameters:
         StepName: 'Download linux-cuda-x64 capi Artifacts'
         ArtifactName: onnxruntime-genai-linux-cuda-x64-capi
+        TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
+
+  - ${{ if eq(parameters.enable_macos_cpu, true) }}:
+    - template: steps/utils/flex-download-pipeline-artifact.yml
+      parameters:
+        StepName: 'Download osx-cpu-x64 capi Artifacts'
+        ArtifactName: onnxruntime-genai-osx-cpu-x64-capi
+        TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
+    - template: steps/utils/flex-download-pipeline-artifact.yml
+      parameters:
+        StepName: 'Download osx-cpu-arm64 capi Artifacts'
+        ArtifactName: onnxruntime-genai-osx-cpu-arm64-capi
         TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
 
   - checkout: self

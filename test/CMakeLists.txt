@@ -39,7 +39,7 @@ target_link_libraries(unit_tests PRIVATE
   GTest::gtest_main
 )
 
-if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux"))
+if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin"))
 target_link_libraries(unit_tests PRIVATE ${ONNXRUNTIME_LIB})
 endif()
 
@@ -108,5 +108,3 @@ if (IOS)
 endif()
 
 include(GoogleTest)
-
-

@@ -58,9 +58,8 @@ Are you on a Windows machine with GPU?
 
 2. Install the generate() API
 
-   ```
-   pip install numpy
-   pip install --pre onnxruntime-genai-directml
+   ```bash
+   pip install onnxruntime-genai-directml
    ```
 
    You should now see `onnxruntime-genai-directml` in your `pip list`.
@@ -69,7 +68,7 @@ Are you on a Windows machine with GPU?
 
    Run the model with [phi3-qa.py](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/phi3-qa.py).
 
-   ```cmd
+   ```bash
    curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examples/python/phi3-qa.py -o phi3-qa.py
    python phi3-qa.py -m directml\directml-int4-awq-block-128
    ```
@@ -79,7 +78,7 @@ Are you on a Windows machine with GPU?
    ```bash
    Input: Tell me a joke about GPUs
 
-   Certainly! Here\'s a light-hearted joke about GPUs:
+   Certainly! Here's a light-hearted joke about GPUs:
 
 
    Why did the GPU go to school? Because it wanted to improve its "processing power"!
@@ -100,9 +99,8 @@ Are you on a Windows machine with GPU?
 
 2. Install the generate() API
 
-   ```
-   pip install numpy
-   pip install --pre onnxruntime-genai-cuda --index-url=https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-genai/pypi/simple/
+   ```bash
+   pip install onnxruntime-genai-cuda
    ```
 
 3. Run the model
@@ -119,7 +117,7 @@ Are you on a Windows machine with GPU?
    ```bash
    Input: Tell me a joke about creative writing
  
-   Output:  Why don\'t writers ever get lost? Because they always follow the plot! 
+   Output:  Why don't writers ever get lost? Because they always follow the plot! 
    ```
 
 ## Run on CPU
@@ -134,9 +132,8 @@ Are you on a Windows machine with GPU?
 
 2. Install the generate() API for CPU
    
-   ```
-   pip install numpy
-   pip install --pre onnxruntime-genai
+   ```bash
+   pip install onnxruntime-genai
    ```
 
 3. Run the model
@@ -158,5 +155,5 @@ Are you on a Windows machine with GPU?
    To improve its "creativity" algorithm!
 
 
-   This joke plays on the double meaning of "creativity" in the context of AI. Generative AI is often associated with its ability to produce creative content, but in this joke, it\'s humorously suggested that the AI is going to school to enhance its creative skills, as if it were a human student. 
+   This joke plays on the double meaning of "creativity" in the context of AI. Generative AI is often associated with its ability to produce creative content, but in this joke, it's humorously suggested that the AI is going to school to enhance its creative skills, as if it were a human student. 
    ```

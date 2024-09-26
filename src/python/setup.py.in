@@ -25,8 +25,8 @@ package_name = '@TARGET_NAME@'
 
 def _onnxruntime_dependency() -> str:
     dependency = None
-    # Use dev version as default since CI tests use nightly version for testing
-    ort_version = os.environ.get("ONNXRUNTIME_VERSION", "1.19.0.dev20240805002")
+    # Use stable version as default
+    ort_version = os.environ.get("ONNXRUNTIME_VERSION", "1.19.0")
     is_nightly = True if "dev" in ort_version else False
 
     if package_name == "onnxruntime-genai":

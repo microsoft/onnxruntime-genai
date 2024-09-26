@@ -84,9 +84,9 @@ def _parse_args():
 
     parser.add_argument("--skip_tests", action="store_true", help="Skip all tests. Overrides --test.")
     parser.add_argument("--skip_wheel", action="store_true", help="Skip building the Python wheel.")
-    parser.add_argument("--skip_csharp", action="store_true", help="Skip building the C# API.")
 
-    # Default to not building the Java bindings
+    # Default to not building the language bindings
+    parser.add_argument("--build_csharp", action="store_true", help="Build the C# API.")
     parser.add_argument("--build_java", action="store_true", help="Build Java bindings.")
 
     parser.add_argument("--parallel", action="store_true", help="Enable parallel build.")
@@ -144,7 +144,6 @@ def _parse_args():
     )
     parser.add_argument("--android_api", type=int, default=27,
                         help="Android API Level. Default is 27 (Android 8.1, released in 2017).")
-    
     parser.add_argument(
         "--android_home", type=Path, default=_path_from_env_var("ANDROID_HOME"), help="Path to the Android SDK."
     )
@@ -175,6 +174,20 @@ def _parse_args():
         type=str,
         help="Specify the minimum version of the target platform "
         "This is only supported on MacOS host",
+    )
+
+    parser.add_argument(
+        "--arm64",
+        action="store_true",
+        help="[cross-compiling] Create ARM64 makefiles. Requires --update and no existing cache "
+        "CMake setup. Delete CMakeCache.txt if needed",
+    )
+
+    parser.add_argument(
+        "--arm64ec",
+        action="store_true",
+        help="[cross-compiling] Create ARM64EC makefiles. Requires --update and no existing cache "
+        "CMake setup. Delete CMakeCache.txt if needed",
     )
 
     return parser.parse_args()
@@ -265,15 +278,14 @@ def _validate_android_args(args: argparse.Namespace):
             log.info(f"Setting CMake generator to '{args.cmake_generator}' for cross-compiling for Android.")
 
         # no C# on Android so automatically skip
-        if not args.skip_csharp:
-            args.skip_csharp = True
+        args.build_csharp = False
 
 
 def _validate_ios_args(args: argparse.Namespace):
     if args.ios:
         if not util.is_mac():
             raise ValueError("A Mac host is required to build for iOS")
-    
+
         needed_args = [
             args.ios_sysroot,
             args.ios_arch,
@@ -337,18 +349,16 @@ def _create_env(args: argparse.Namespace):
     return env
 
 
-def _get_csharp_properties(args: argparse.Namespace):
+def _get_csharp_properties(args: argparse.Namespace, ort_lib_dir: Path):
     # Tests folder does not have a sln file. We use the csproj file to build and test.
     # The csproj file requires the platform to be AnyCPU (not "Any CPU")
     configuration = f"/p:Configuration={args.config}"
     platform = "/p:Platform=Any CPU"
     # need an extra config on windows as the actual build output is in the original build dir / config / config
-    native_lib_path = f"/p:NativeBuildOutputDir={str(args.build_dir / args.config)}"
+    native_lib_path = f"/p:NativeBuildOutputDir={str(args.build_dir / args.config) if util.is_windows() else str(args.build_dir)}"
+    ort_lib_path = f"/p:OrtLibDir={ort_lib_dir}"
 
-    props = [configuration, platform, native_lib_path]
-
-    if args.ort_home:
-        props.append(f"/p:OrtHome={args.ort_home}")
+    props = [configuration, platform, native_lib_path, ort_lib_path]
 
     return props
 
@@ -535,6 +545,19 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             f"-DCMAKE_TOOLCHAIN_FILE={_get_opencv_toolchain_file()}",
         ]
 
+    if args.arm64:
+        command += ["-A", "ARM64"]
+    elif args.arm64ec:
+        command += ["-A", "ARM64EC"]
+
+    if args.arm64 or args.arm64ec:
+        if args.test:
+            log.warning(
+                "Cannot test on host build machine for cross-compiled "
+                "ARM64 builds. Will skip test running after build."
+            )
+            args.test = False
+
     if args.cmake_extra_defines != []:
         command += args.cmake_extra_defines
 
@@ -553,12 +576,18 @@ def build(args: argparse.Namespace, env: dict[str, str]):
 
     util.run(make_command, env=env)
 
-    if util.is_windows() and not args.skip_csharp:
+    lib_dir = args.build_dir
+    if not args.ort_home:
+        _ = util.download_dependencies(args.use_cuda, args.use_rocm, args.use_dml, lib_dir)
+    else:
+        lib_dir = args.ort_home / "lib"
+
+    if args.build_csharp:
         dotnet = str(_resolve_executable_path("dotnet"))
 
         # Build the library
         csharp_build_command = [dotnet, "build", ".",]
-        csharp_build_command += _get_csharp_properties(args)
+        csharp_build_command += _get_csharp_properties(args, ort_lib_dir=lib_dir)
         util.run(csharp_build_command, cwd=REPO_ROOT / "src" / "csharp")
         util.run(csharp_build_command, cwd=REPO_ROOT / "test" / "csharp")
 
@@ -567,13 +596,19 @@ def test(args: argparse.Namespace, env: dict[str, str]):
     """
     Run the tests.
     """
-    #ctest_cmd = [str(args.ctest_path), "--build-config", args.config, "--verbose", "--timeout", "10800"]
-    #util.run(ctest_cmd, cwd=str(args.build_dir))
+    lib_dir = args.build_dir / "test"
+    if not args.ort_home:
+        _ = util.download_dependencies(args.use_cuda, args.use_rocm, args.use_dml, lib_dir)
+    else:
+        lib_dir = args.ort_home / "lib"
 
-    if util.is_windows() and not args.skip_csharp:
+    ctest_cmd = [str(args.ctest_path), "--build-config", args.config, "--verbose", "--timeout", "10800"]
+    util.run(ctest_cmd, cwd=str(args.build_dir / "test"))
+
+    if args.build_csharp:
         dotnet = str(_resolve_executable_path("dotnet"))
         csharp_test_command = [dotnet, "test"]
-        csharp_test_command += _get_csharp_properties(args)
+        csharp_test_command += _get_csharp_properties(args, ort_lib_dir=lib_dir)
         util.run(csharp_test_command, env=env, cwd=str(REPO_ROOT / "test" / "csharp"))
 
     if args.android:
