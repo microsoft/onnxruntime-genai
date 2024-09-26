@@ -9,19 +9,19 @@
 namespace AdapterSelection {
 HRESULT CreateDXCoreFactory(_Out_ ComPtrAndDll<IDXCoreAdapterFactory>& factory_and_dll) {
   // Failure is expected when running on older versions of Windows that don't have DXCore.dll.
-  wil::unique_hmodule dxcore_dll(LoadLibrary("DXCore.dll"));
-  RETURN_LAST_ERROR_IF_NULL_EXPECTED(dxcore_dll);
+  hmodule_handle dxcore_dll(LoadLibrary("DXCore.dll"));
+  winrt::check_pointer(dxcore_dll.get());
 
   // All versions of DXCore have this symbol (failure is unexpected).
   auto dxcore_create_adapter_factory = reinterpret_cast<HRESULT(WINAPI*)(REFIID, void**)>(
       GetProcAddress(dxcore_dll.get(), "DXCoreCreateAdapterFactory"));
-  RETURN_LAST_ERROR_IF_NULL(dxcore_create_adapter_factory);
+  winrt::check_pointer(dxcore_create_adapter_factory);
 
   // DXCore.dll exists in Windows 19H1/19H2, and it exports DXCoreCreateAdapterFactory, but it instantiates a different
   // version of IDXCoreAdapterFactory (same name, different IID) than the one we expect. In other words, it's possible
   // and expected to get E_NOINTERFACE here if running DirectML on Windows 19H1/19H2.
   winrt::com_ptr<IDXCoreAdapterFactory> factory;
-  RETURN_IF_FAILED_WITH_EXPECTED(dxcore_create_adapter_factory(IID_PPV_ARGS(&factory)), E_NOINTERFACE);
+  winrt::check_bool(dxcore_create_adapter_factory(IID_PPV_ARGS(&factory)) == E_NOINTERFACE);
 
   factory_and_dll.dll = std::move(dxcore_dll);
   factory_and_dll.ptr = std::move(factory);
@@ -36,15 +36,15 @@ ComPtrAndDll<IDXCoreAdapterFactory> TryCreateDXCoreFactory() {
 }
 
 HRESULT CreateDXGIFactory(_Out_ ComPtrAndDll<IDXGIFactory4>& factory_and_dll) {
-  wil::unique_hmodule dxgi_dll(LoadLibrary("dxgi.dll"));
-  RETURN_LAST_ERROR_IF_NULL(dxgi_dll);
+  hmodule_handle dxgi_dll(LoadLibrary("dxgi.dll"));
+  winrt::check_pointer(dxgi_dll.get());
 
   auto create_dxgi_factory = reinterpret_cast<decltype(&::CreateDXGIFactory)>(
       GetProcAddress(dxgi_dll.get(), "CreateDXGIFactory"));
-  RETURN_LAST_ERROR_IF(!create_dxgi_factory);
+  winrt::check_bool(!create_dxgi_factory);
 
   winrt::com_ptr<IDXGIFactory4> factory;
-  RETURN_IF_FAILED(create_dxgi_factory(IID_PPV_ARGS(&factory)));
+  winrt::check_hresult(create_dxgi_factory(IID_PPV_ARGS(&factory)));
 
   factory_and_dll = {std::move(dxgi_dll), std::move(factory)};
   return S_OK;

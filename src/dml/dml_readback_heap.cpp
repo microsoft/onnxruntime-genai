@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 #include <assert.h>
-#include <wil/result.h>
+#include <winrt/base.h>
 #include <stdexcept>
 #include "dml_readback_heap.h"
 #include "dml_execution_context.h"
@@ -12,7 +12,7 @@ static ComPtr<ID3D12Resource> CreateReadbackHeap(ID3D12Device* device, size_t si
   auto heap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_READBACK);
   auto buffer = CD3DX12_RESOURCE_DESC::Buffer(size);
 
-  THROW_IF_FAILED(device->CreateCommittedResource(
+  winrt::check_hresult(device->CreateCommittedResource(
       &heap,
       D3D12_HEAP_FLAG_NONE,
       &buffer,
@@ -34,7 +34,7 @@ static size_t ComputeNewCapacity(size_t existing_capacity, size_t desired_capaci
   while (new_capacity < desired_capacity) {
     if (new_capacity >= std::numeric_limits<size_t>::max() / 2) {
       // Overflow; there's no way we can satisfy this allocation request
-      THROW_HR(E_OUTOFMEMORY);
+      winrt::throw_hresult(E_OUTOFMEMORY);
     }
 
     new_capacity *= 2;  // geometric growth
@@ -86,7 +86,7 @@ void DmlReadbackHeap::ReadbackFromGpu(
 
   // Map the readback heap and copy it into the destination
   void* readback_heap_data = nullptr;
-  THROW_IF_FAILED(readback_heap_->Map(0, nullptr, &readback_heap_data));
+  winrt::check_hresult(readback_heap_->Map(0, nullptr, &readback_heap_data));
   memcpy(dst.data(), readback_heap_data, dst.size());
   readback_heap_->Unmap(0, nullptr);
 }
@@ -132,7 +132,7 @@ void DmlReadbackHeap::ReadbackFromGpu(
 
   // Map the readback heap and copy it into the destination
   void* readback_heap_data = nullptr;
-  THROW_IF_FAILED(readback_heap_->Map(0, nullptr, &readback_heap_data));
+  winrt::check_hresult(readback_heap_->Map(0, nullptr, &readback_heap_data));
 
   // Copy from the source resource into the readback heap
   offset = 0;

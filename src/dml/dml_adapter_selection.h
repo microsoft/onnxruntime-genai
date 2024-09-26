@@ -6,8 +6,21 @@
 #include <dxcore_interface.h>
 #include <dxgi1_4.h>
 #include <vector>
-#include <wil/wrl.h>
 #include <winrt/base.h>
+
+struct hmodule_traits {
+  using type = HMODULE;
+
+  static void close(type value) noexcept {
+    WINRT_VERIFY_(1, ::FreeLibrary(value));
+  }
+
+  static type invalid() noexcept {
+    return reinterpret_cast<type>(-1);
+  }
+};
+
+using hmodule_handle = winrt::handle_type<hmodule_traits>;
 
 // Retrieves information from a DXCore or DXGI adapter.
 namespace AdapterSelection {
@@ -15,7 +28,7 @@ namespace AdapterSelection {
 // keep a DLL loaded while we have a pointer to something in that DLL.
 template <typename T>
 struct ComPtrAndDll {
-  wil::unique_hmodule dll;
+  hmodule_handle dll;
   winrt::com_ptr<T> ptr;
 
   explicit operator bool() { return ptr != nullptr; }

@@ -1,33 +1,31 @@
 #pragma once
 
-#include <wrl/client.h>
-#include <wil/result.h>
+#include <winrt/base.h>
 #include <d3d12.h>
 #include <DirectML.h>
 #include "dml_execution_context.h"
 
-using Microsoft::WRL::ComPtr;
 
 struct DmlReusedCommandListState {
   // Re-usable command list, supporting descriptor heap, and DML binding table to update that heap.
-  Microsoft::WRL::ComPtr<IDMLCompiledOperator> compiled_operator;
-  Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> graphics_command_list;
-  Microsoft::WRL::ComPtr<ID3D12CommandAllocator> command_allocator;
-  Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> heap;
-  Microsoft::WRL::ComPtr<IDMLBindingTable> binding_table;
-  Microsoft::WRL::ComPtr<ID3D12Resource> persistent_resource;
-  Microsoft::WRL::ComPtr<ID3D12Resource> source_resource;
-  Microsoft::WRL::ComPtr<ID3D12Resource> target_resource;
+  winrt::com_ptr<IDMLCompiledOperator> compiled_operator;
+  winrt::com_ptr<ID3D12GraphicsCommandList> graphics_command_list;
+  winrt::com_ptr<ID3D12CommandAllocator> command_allocator;
+  winrt::com_ptr<ID3D12DescriptorHeap> heap;
+  winrt::com_ptr<IDMLBindingTable> binding_table;
+  winrt::com_ptr<ID3D12Resource> persistent_resource;
+  winrt::com_ptr<ID3D12Resource> source_resource;
+  winrt::com_ptr<ID3D12Resource> target_resource;
   OrtValue* previousInput = nullptr;
   OrtValue* previousOutput = nullptr;
 };
 
 struct DmlObjects {
-  ComPtr<ID3D12Device> d3d12_device;
-  ComPtr<ID3D12CommandQueue> command_queue;
-  ComPtr<ID3D12CommandAllocator> command_allocator;
-  ComPtr<ID3D12GraphicsCommandList> command_list;
-  ComPtr<ID3D12Resource> upload_buffer;
+  winrt::com_ptr<ID3D12Device> d3d12_device;
+  winrt::com_ptr<ID3D12CommandQueue> command_queue;
+  winrt::com_ptr<ID3D12CommandAllocator> command_allocator;
+  winrt::com_ptr<ID3D12GraphicsCommandList> command_list;
+  winrt::com_ptr<ID3D12Resource> upload_buffer;
 };
 
 namespace DmlHelpers {
@@ -50,7 +48,7 @@ void ExecuteReusableCommandList(
     std::span<const uint64_t> output_sizes,
     bool bindings_changed);
 
-ComPtr<IDMLCompiledOperator> CreateCastOperator(
+winrt::com_ptr<IDMLCompiledOperator> CreateCastOperator(
     IDMLDevice* dml_device,
     uint32_t num_elements,
     DML_TENSOR_DATA_TYPE source_data_type,

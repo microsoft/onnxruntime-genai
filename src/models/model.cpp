@@ -13,9 +13,9 @@
 #include "multi_modal_vision_model.h"
 #include "decoder_only_pipeline.h"
 #if USE_DML
-#include <wil/wrl.h>
 #include "dml_provider_factory.h"
 #include "../dml/dml_helpers.h"
+#include "../dml/dml_adapter_selection.h"
 
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
 
@@ -408,16 +408,16 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
         dml_objects_ = DmlHelpers::CreateDmlObjects(current_module_path);
 
         constexpr auto directml_dll = "DirectML.dll";
-        wil::unique_hmodule smart_directml_dll(LoadLibraryEx(directml_dll, nullptr, 0));
-        THROW_LAST_ERROR_IF(!smart_directml_dll);
+        hmodule_handle smart_directml_dll(LoadLibraryEx(directml_dll, nullptr, 0));
+        winrt::check_pointer(smart_directml_dll.get());
 
         if (LoadLibraryEx(directml_dll, nullptr, 0) == NULL) {
           throw std::runtime_error("DirectML.dll not found");
         }
 
         auto dml_create_device1_fn = reinterpret_cast<decltype(&DMLCreateDevice1)>(GetProcAddress(smart_directml_dll.get(), "DMLCreateDevice1"));
-        THROW_LAST_ERROR_IF(!dml_create_device1_fn);
-        THROW_IF_FAILED(dml_create_device1_fn(dml_objects_.d3d12_device.Get(), DML_CREATE_DEVICE_FLAG_NONE, DML_FEATURE_LEVEL_5_0, IID_PPV_ARGS(&dml_device_)));
+        winrt::check_pointer(dml_create_device1_fn);
+        winrt::check_hresult(dml_create_device1_fn(dml_objects_.d3d12_device.get(), DML_CREATE_DEVICE_FLAG_NONE, DML_FEATURE_LEVEL_5_0, IID_PPV_ARGS(&dml_device_)));
 
         Ort::ThrowOnError(Ort::api->GetExecutionProviderApi("DML", ORT_API_VERSION, reinterpret_cast<const void**>(&p_dml_api_)));
         if (!p_dml_api_) {
@@ -425,25 +425,25 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
         }
 
         dml_execution_context_ = std::make_unique<DmlExecutionContext>(
-            dml_objects_.d3d12_device.Get(),
+            dml_objects_.d3d12_device.get(),
             dml_device_.Get(),
-            dml_objects_.command_queue.Get(),
+            dml_objects_.command_queue.get(),
             *allocator_device_,
             p_dml_api_);
 
-        dml_pooled_upload_heap_ = std::make_unique<DmlPooledUploadHeap>(dml_objects_.d3d12_device.Get(), dml_execution_context_.get());
-        dml_readback_heap_ = std::make_unique<DmlReadbackHeap>(dml_objects_.d3d12_device.Get(), dml_execution_context_.get());
+        dml_pooled_upload_heap_ = std::make_unique<DmlPooledUploadHeap>(dml_objects_.d3d12_device.get(), dml_execution_context_.get());
+        dml_readback_heap_ = std::make_unique<DmlReadbackHeap>(dml_objects_.d3d12_device.get(), dml_execution_context_.get());
 
         // The vision model doesn't support graph capture because of dynamic shapes, so don't enable graph capture for it
         if (!vision_session_options_ && !config_->model.vision.filename.empty()) {
           vision_session_options_ = session_options.Clone();
-          p_dml_api_->SessionOptionsAppendExecutionProvider_DML1(vision_session_options_.get(), dml_device_.Get(), dml_objects_.command_queue.Get());
+          p_dml_api_->SessionOptionsAppendExecutionProvider_DML1(vision_session_options_.get(), dml_device_.Get(), dml_objects_.command_queue.get());
         }
       }
 
       session_options.AddConfigEntry("ep.dml.enable_graph_capture", "1");
       session_options.AddConfigEntry("ep.dml.disable_memory_arena", "1");
-      p_dml_api_->SessionOptionsAppendExecutionProvider_DML1(&session_options, dml_device_.Get(), dml_objects_.command_queue.Get());
+      p_dml_api_->SessionOptionsAppendExecutionProvider_DML1(&session_options, dml_device_.Get(), dml_objects_.command_queue.get());
 
       if (is_primary_session_options)
         device_type_ = DeviceType::DML;  // We use a DML allocator for input/output caches, but other tensors will use CPU tensors

@@ -12,7 +12,7 @@ namespace DmlHelpers {
 
 static bool IsSoftwareAdapter(IDXGIAdapter1* adapter) {
   DXGI_ADAPTER_DESC1 desc = {};
-  THROW_IF_FAILED(adapter->GetDesc1(&desc));
+  winrt::check_hresult(adapter->GetDesc1(&desc));
 
   // See here for documentation on filtering WARP adapter:
   // https://docs.microsoft.com/en-us/windows/desktop/direct3ddxgi/d3d10-graphics-programming-guide-dxgi#new-info-about-enumerating-adapters-for-windows-8
@@ -21,16 +21,16 @@ static bool IsSoftwareAdapter(IDXGIAdapter1* adapter) {
   return desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE || (is_basic_render_driver_vendor_id && is_basic_render_driver_device_id);
 };
 
-static std::vector<ComPtr<IDXGIAdapter1>> EnumerateAdapters() {
-  ComPtr<IDXGIFactory4> dxgi_factory;
-  THROW_IF_FAILED(CreateDXGIFactory(IID_PPV_ARGS(&dxgi_factory)));
+static std::vector<winrt::com_ptr<IDXGIAdapter1>> EnumerateAdapters() {
+  winrt::com_ptr<IDXGIFactory4> dxgi_factory;
+  winrt::check_hresult(CreateDXGIFactory(IID_PPV_ARGS(&dxgi_factory)));
 
-  std::vector<ComPtr<IDXGIAdapter1>> adapter_infos;
+  std::vector<winrt::com_ptr<IDXGIAdapter1>> adapter_infos;
 
-  ComPtr<IDXGIFactory6> dxgi_factory6;
-  if (SUCCEEDED(dxgi_factory.As(&dxgi_factory6))) {
+  IDXGIFactory6* dxgi_factory6 = nullptr;
+  if (SUCCEEDED(dxgi_factory.as(__uuidof(IDXGIFactory6), reinterpret_cast<void**>(dxgi_factory6)))) {
     // Enumerate adapters by performance. This only works in Windows 10 Version 1803 and later.
-    ComPtr<IDXGIAdapter1> adapter;
+    winrt::com_ptr<IDXGIAdapter1> adapter;
     for (uint32_t adapter_index = 0;
          dxgi_factory6->EnumAdapterByGpuPreference(
              adapter_index,
@@ -40,13 +40,13 @@ static std::vector<ComPtr<IDXGIAdapter1>> EnumerateAdapters() {
       // Since we enumerate by performance, we can ignore everything that comes after the first software adapter, which includes the IDD
       // adapters. This is necessary for now because IDD (e.g. remote desktop) adapters don't have the DXGI_ADAPTER_FLAG_SOFTWARE flag,
       // even though they run on software.
-      if (IsSoftwareAdapter(adapter.Get())) {
+      if (IsSoftwareAdapter(adapter.get())) {
         break;
       }
 
       // Make sure that we are able to create the device
-      ComPtr<ID3D12Device> d3d12_device;
-      THROW_IF_FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&d3d12_device)));
+      winrt::com_ptr<ID3D12Device> d3d12_device;
+      winrt::check_hresult(D3D12CreateDevice(adapter.get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&d3d12_device)));
 
       if (d3d12_device) {
         adapter_infos.emplace_back(std::move(adapter));
@@ -54,17 +54,17 @@ static std::vector<ComPtr<IDXGIAdapter1>> EnumerateAdapters() {
     }
   } else {
     // Enumerate adapters without ordering.
-    ComPtr<IDXGIAdapter1> adapter;
-    for (uint32_t adapter_index = 0; dxgi_factory->EnumAdapters1(adapter_index, &adapter) != DXGI_ERROR_NOT_FOUND; adapter_index++) {
+    winrt::com_ptr<IDXGIAdapter1> adapter;
+    for (uint32_t adapter_index = 0; dxgi_factory->EnumAdapters1(adapter_index, adapter.put()) != DXGI_ERROR_NOT_FOUND; adapter_index++) {
       // We can't assume the ordering of hardware and software adapters, so keep looping. This path should only execute on Windows 10
       // version 1709 or earlier; IDD (e.g. remote desktop) adapters do not exist when taking this code path.
-      if (IsSoftwareAdapter(adapter.Get())) {
+      if (IsSoftwareAdapter(adapter.get())) {
         continue;
       }
 
       // Make sure that we are able to create the device
-      ComPtr<ID3D12Device> d3d12_device;
-      THROW_IF_FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&d3d12_device)));
+      winrt::com_ptr<ID3D12Device> d3d12_device;
+      winrt::check_hresult(D3D12CreateDevice(adapter.get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&d3d12_device)));
 
       if (d3d12_device) {
         adapter_infos.emplace_back(std::move(adapter));
@@ -75,7 +75,7 @@ static std::vector<ComPtr<IDXGIAdapter1>> EnumerateAdapters() {
   return adapter_infos;
 }
 
-static ComPtr<IDXGIAdapter1> CreatePerformantAdapter() {
+static winrt::com_ptr<IDXGIAdapter1> CreatePerformantAdapter() {
   auto filtered_adapters = EnumerateAdapters();
   if (filtered_adapters.empty()) {
     throw std::runtime_error("No adapter is available for DML.");
@@ -95,24 +95,24 @@ DmlObjects CreateDmlObjects(const std::string& current_module_path) {
 
   auto adapter = CreatePerformantAdapter();
 
-  ComPtr<ID3D12SDKConfiguration1> d3d12_sdk_config;
-  ComPtr<ID3D12DeviceFactory> d3d12_factory;
+  winrt::com_ptr<ID3D12SDKConfiguration1> d3d12_sdk_config;
+  winrt::com_ptr<ID3D12DeviceFactory> d3d12_factory;
 
   // Get the version from https://devblogs.microsoft.com/directx/directx12agility/. We are currently using 1.614.0.
   constexpr uint32_t agility_sdk_version = 614;
 
   if (SUCCEEDED(D3D12GetInterface(CLSID_D3D12SDKConfiguration, IID_PPV_ARGS(&d3d12_sdk_config))) &&
       SUCCEEDED(d3d12_sdk_config->CreateDeviceFactory(agility_sdk_version, current_module_path.c_str(), IID_PPV_ARGS(&d3d12_factory)))) {
-    THROW_IF_FAILED(d3d12_factory->CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&dml_objects.d3d12_device)));
+    winrt::check_hresult(d3d12_factory->CreateDevice(adapter.get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&dml_objects.d3d12_device)));
   } else {
     printf("Warning: Unable to create a device from version 1.614.0 of the DirectX 12 Agility SDK. You can still use this library, but some scenarios may not work.\n");
     printf("The given module path: %s", current_module_path.c_str());
-    THROW_IF_FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&dml_objects.d3d12_device)));
+    winrt::check_hresult(D3D12CreateDevice(adapter.get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&dml_objects.d3d12_device)));
   }
 
-  THROW_IF_FAILED(dml_objects.d3d12_device->CreateCommandQueue(&command_queue_description, IID_PPV_ARGS(&dml_objects.command_queue)));
-  THROW_IF_FAILED(dml_objects.d3d12_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE, IID_PPV_ARGS(&dml_objects.command_allocator)));
-  THROW_IF_FAILED(dml_objects.d3d12_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COMPUTE, dml_objects.command_allocator.Get(), nullptr, IID_PPV_ARGS(&dml_objects.command_list)));
+  winrt::check_hresult(dml_objects.d3d12_device->CreateCommandQueue(&command_queue_description, IID_PPV_ARGS(&dml_objects.command_queue)));
+  winrt::check_hresult(dml_objects.d3d12_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE, IID_PPV_ARGS(&dml_objects.command_allocator)));
+  winrt::check_hresult(dml_objects.d3d12_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COMPUTE, dml_objects.command_allocator.get(), nullptr, IID_PPV_ARGS(&dml_objects.command_list)));
   return dml_objects;
 }
 
@@ -130,10 +130,10 @@ DmlReusedCommandListState BuildReusableCommandList(
   desc.NumDescriptors = exec_binding_props.RequiredDescriptorCount;
   desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 
-  ComPtr<ID3D12Device> d3d_device;
-  THROW_IF_FAILED(dml_device->GetParentDevice(IID_PPV_ARGS(&d3d_device)));
+  winrt::com_ptr<ID3D12Device> d3d_device;
+  winrt::check_hresult(dml_device->GetParentDevice(IID_PPV_ARGS(&d3d_device)));
 
-  THROW_IF_FAILED(d3d_device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(command_list_state.heap.ReleaseAndGetAddressOf())));
+  winrt::check_hresult(d3d_device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(command_list_state.heap.put())));
 
   // Create a binding table for execution.
   DML_BINDING_TABLE_DESC binding_table_desc = {};
@@ -142,35 +142,35 @@ DmlReusedCommandListState BuildReusableCommandList(
   binding_table_desc.GPUDescriptorHandle = command_list_state.heap->GetGPUDescriptorHandleForHeapStart();
   binding_table_desc.SizeInDescriptors = exec_binding_props.RequiredDescriptorCount;
 
-  THROW_IF_FAILED(dml_device->CreateBindingTable(&binding_table_desc, IID_PPV_ARGS(&command_list_state.binding_table)));
+  winrt::check_hresult(dml_device->CreateBindingTable(&binding_table_desc, IID_PPV_ARGS(&command_list_state.binding_table)));
 
-  THROW_IF_FAILED(d3d_device->CreateCommandAllocator(
+  winrt::check_hresult(d3d_device->CreateCommandAllocator(
       D3D12_COMMAND_LIST_TYPE_COMPUTE,
-      IID_PPV_ARGS(command_list_state.command_allocator.ReleaseAndGetAddressOf())));
+      IID_PPV_ARGS(command_list_state.command_allocator.put())));
 
-  THROW_IF_FAILED(d3d_device->CreateCommandList(
+  winrt::check_hresult(d3d_device->CreateCommandList(
       0,
       D3D12_COMMAND_LIST_TYPE_COMPUTE,
-      command_list_state.command_allocator.Get(),
+      command_list_state.command_allocator.get(),
       nullptr,
-      IID_PPV_ARGS(command_list_state.graphics_command_list.ReleaseAndGetAddressOf())));
+      IID_PPV_ARGS(command_list_state.graphics_command_list.put())));
 
   if (persistent_resource) {
     DML_BINDING_DESC persistent_resource_binding_desc = {DML_BINDING_TYPE_BUFFER, persistent_resource_binding ? &*persistent_resource_binding : nullptr};
     command_list_state.binding_table->BindPersistentResource(&persistent_resource_binding_desc);
-    command_list_state.persistent_resource = persistent_resource;
+    command_list_state.persistent_resource.attach(persistent_resource);
   }
 
-  ID3D12DescriptorHeap* descriptor_heaps[] = {command_list_state.heap.Get()};
+  ID3D12DescriptorHeap* descriptor_heaps[] = {command_list_state.heap.get()};
   command_list_state.graphics_command_list->SetDescriptorHeaps(ARRAYSIZE(descriptor_heaps), descriptor_heaps);
 
-  ComPtr<IDMLCommandRecorder> recorder;
-  THROW_IF_FAILED(dml_device->CreateCommandRecorder(IID_PPV_ARGS(recorder.GetAddressOf())));
+  winrt::com_ptr<IDMLCommandRecorder> recorder;
+  winrt::check_hresult(dml_device->CreateCommandRecorder(IID_PPV_ARGS(recorder.put())));
 
-  recorder->RecordDispatch(command_list_state.graphics_command_list.Get(), compiled_operator, command_list_state.binding_table.Get());
-  command_list_state.compiled_operator = compiled_operator;
+  recorder->RecordDispatch(command_list_state.graphics_command_list.get(), compiled_operator, command_list_state.binding_table.get());
+  command_list_state.compiled_operator.attach(compiled_operator);
 
-  THROW_IF_FAILED(command_list_state.graphics_command_list->Close());
+  winrt::check_hresult(command_list_state.graphics_command_list->Close());
 
   return command_list_state;
 }
@@ -217,18 +217,18 @@ void ExecuteReusableCommandList(
 
     // Create the temporary resource
     if (exec_binding_props.TemporaryResourceSize > 0) {
-      ComPtr<ID3D12Resource> temporary_resource;
+      winrt::com_ptr<ID3D12Resource> temporary_resource;
       std::array<int64_t, 1> persistent_resource_shape = {static_cast<int64_t>(exec_binding_props.TemporaryResourceSize)};
       auto persistent_tensor = OrtValue::CreateTensor(allocator, persistent_resource_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
-      Ort::ThrowOnError(ort_dml_api->GetD3D12ResourceFromAllocation(&allocator, persistent_tensor->GetTensorMutableRawData(), &temporary_resource));
+      Ort::ThrowOnError(ort_dml_api->GetD3D12ResourceFromAllocation(&allocator, persistent_tensor->GetTensorMutableRawData(), temporary_resource.put()));
     }
   }
 
   // Execute the command list and if it succeeds, update the fence value at which this command may be
   // re-used.
-  ComPtr<ID3D12Fence> fence;
+  winrt::com_ptr<ID3D12Fence> fence;
   uint64_t completion_value;
-  execution_context->ExecuteCommandList(command_list_state.graphics_command_list.Get(), fence.GetAddressOf(), &completion_value);
+  execution_context->ExecuteCommandList(command_list_state.graphics_command_list.get(), fence.put(), &completion_value);
 }
 
 // Copied from https://learn.microsoft.com/en-us/windows/ai/directml/dml-helper-functions#dmlcalcbuffertensorsize
@@ -288,7 +288,7 @@ static UINT64 DMLCalcBufferTensorSize(
   return minimumImpliedSizeInBytes;
 }
 
-ComPtr<IDMLCompiledOperator> CreateCastOperator(
+winrt::com_ptr<IDMLCompiledOperator> CreateCastOperator(
     IDMLDevice* dml_device,
     uint32_t num_elements,
     DML_TENSOR_DATA_TYPE source_data_type,
@@ -314,11 +314,11 @@ ComPtr<IDMLCompiledOperator> CreateCastOperator(
   cast_op_desc.OutputTensor = &output_tensor_desc;
   DML_OPERATOR_DESC cast_op_dml_desc = {DML_OPERATOR_CAST, &cast_op_desc};
 
-  ComPtr<IDMLOperator> cast_op;
-  THROW_IF_FAILED(dml_device->CreateOperator(&cast_op_dml_desc, IID_PPV_ARGS(&cast_op)));
+  winrt::com_ptr<IDMLOperator> cast_op;
+  winrt::check_hresult(dml_device->CreateOperator(&cast_op_dml_desc, IID_PPV_ARGS(&cast_op)));
 
-  ComPtr<IDMLCompiledOperator> compiled_cast_op;
-  THROW_IF_FAILED(dml_device->CompileOperator(cast_op.Get(), DML_EXECUTION_FLAG_DESCRIPTORS_VOLATILE, IID_PPV_ARGS(&compiled_cast_op)));
+  winrt::com_ptr<IDMLCompiledOperator> compiled_cast_op;
+  winrt::check_hresult(dml_device->CompileOperator(cast_op.get(), DML_EXECUTION_FLAG_DESCRIPTORS_VOLATILE, IID_PPV_ARGS(&compiled_cast_op)));
 
   return compiled_cast_op;
 }
@@ -378,7 +378,7 @@ DML_TENSOR_DATA_TYPE OrtToDmlDataType(ONNXTensorElementDataType ort_dtype) {
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:
       return DML_TENSOR_DATA_TYPE_UINT8;
     default:
-      THROW_HR(E_NOTIMPL);
+      winrt::throw_hresult(E_NOTIMPL);
   }
 }
 
@@ -415,7 +415,7 @@ void DmlCastInputToOutput(
   if (rebind) {
     auto compiled_cast_operator = DmlHelpers::CreateCastOperator(dml_device, element_count, dml_from_type, dml_to_type);
 
-    ComPtr<ID3D12Resource> persistent_resource;
+    winrt::com_ptr<ID3D12Resource> persistent_resource;
     uint64_t persistent_resource_size = compiled_cast_operator->GetBindingProperties().PersistentResourceSize;
 
     std::optional<DML_BUFFER_BINDING> persistent_resource_binding;
@@ -423,8 +423,8 @@ void DmlCastInputToOutput(
     if (persistent_resource_size > 0) {
       std::array<int64_t, 1> persistent_resource_shape = {static_cast<int64_t>(persistent_resource_size)};
       auto persistent_tensor = OrtValue::CreateTensor(allocator, persistent_resource_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
-      Ort::ThrowOnError(ort_dml_api->GetD3D12ResourceFromAllocation(&allocator, persistent_tensor->GetTensorMutableRawData(), &persistent_resource));
-      persistent_resource_binding = DML_BUFFER_BINDING{persistent_resource.Get(), 0, persistent_resource_size};
+      Ort::ThrowOnError(ort_dml_api->GetD3D12ResourceFromAllocation(&allocator, persistent_tensor->GetTensorMutableRawData(), persistent_resource.put()));
+      persistent_resource_binding = DML_BUFFER_BINDING{persistent_resource.get(), 0, persistent_resource_size};
     }
 
     DML_BINDING_DESC persistent_resource_bindingDesc = persistent_resource_binding
@@ -432,22 +432,22 @@ void DmlCastInputToOutput(
                                                            : DML_BINDING_DESC{DML_BINDING_TYPE_NONE, nullptr};
 
     DML_BINDING_DESC input_array_binding_desc = DML_BINDING_DESC{DML_BINDING_TYPE_NONE, nullptr};
-    execution_context->InitializeOperator(compiled_cast_operator.Get(), persistent_resource_bindingDesc, input_array_binding_desc);
-    command_list_state = DmlHelpers::BuildReusableCommandList(dml_device, compiled_cast_operator.Get(), persistent_resource.Get(), persistent_resource_binding);
+    execution_context->InitializeOperator(compiled_cast_operator.get(), persistent_resource_bindingDesc, input_array_binding_desc);
+    command_list_state = DmlHelpers::BuildReusableCommandList(dml_device, compiled_cast_operator.get(), persistent_resource.get(), persistent_resource_binding);
     command_list_state.previousInput = &in;
     command_list_state.previousOutput = p_out.get();
   }
 
-  ComPtr<ID3D12Resource> source_resource;
-  Ort::ThrowOnError(ort_dml_api->GetD3D12ResourceFromAllocation(&allocator, in.GetTensorMutableData<uint8_t>(), &source_resource));
+  winrt::com_ptr<ID3D12Resource> source_resource;
+  Ort::ThrowOnError(ort_dml_api->GetD3D12ResourceFromAllocation(&allocator, in.GetTensorMutableData<uint8_t>(), source_resource.put()));
 
-  ComPtr<ID3D12Resource> target_resource;
-  Ort::ThrowOnError(ort_dml_api->GetD3D12ResourceFromAllocation(&allocator, p_out->GetTensorMutableData<uint8_t>(), &target_resource));
+  winrt::com_ptr<ID3D12Resource> target_resource;
+  Ort::ThrowOnError(ort_dml_api->GetD3D12ResourceFromAllocation(&allocator, p_out->GetTensorMutableData<uint8_t>(), target_resource.put()));
 
-  std::array<ID3D12Resource*, 1> input_resources = {source_resource.Get()};
+  std::array<ID3D12Resource*, 1> input_resources = {source_resource.get()};
   std::array<uint64_t, 1> input_sizes = {DMLCalcBufferTensorSize(dml_from_type, 1, (uint32_t*)&element_count, NULL)};
 
-  std::array<ID3D12Resource*, 1> output_resources = {target_resource.Get()};
+  std::array<ID3D12Resource*, 1> output_resources = {target_resource.get()};
   std::array<uint64_t, 1> output_sizes = {DMLCalcBufferTensorSize(dml_to_type, 1, (uint32_t*)&element_count, NULL)};
 
   // Make sure the source and target allocations are kept alive until the operation is done

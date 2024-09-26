@@ -149,7 +149,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
   DmlPooledUploadHeap* GetDmlUploadHeap() const { return dml_pooled_upload_heap_.get(); }
   const OrtDmlApi* GetOrtDmlApi() const { return p_dml_api_; }
   IDMLDevice* GetDmlDevice() const { return dml_device_.Get(); }
-  ID3D12Device* GetD3D12Device() const { return dml_objects_.d3d12_device.Get(); }
+  ID3D12Device* GetD3D12Device() const { return dml_objects_.d3d12_device.get(); }
 #endif
 
  protected:

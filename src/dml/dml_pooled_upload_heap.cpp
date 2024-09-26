@@ -1,8 +1,8 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <winrt/base.h>
 #include <assert.h>
-#include <wil/result.h>
 #include <stdexcept>
 #include <algorithm>
 #include "dml_pooled_upload_heap.h"
@@ -84,7 +84,7 @@ std::optional<size_t> DmlPooledUploadHeap::FindOffsetForAllocation(const Chunk& 
   auto heap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
   auto buffer = CD3DX12_RESOURCE_DESC::Buffer(size_in_bytes);
 
-  THROW_IF_FAILED(device->CreateCommittedResource(
+  winrt::check_hresult(device->CreateCommittedResource(
       &heap,
       D3D12_HEAP_FLAG_NONE,
       &buffer,
@@ -151,7 +151,7 @@ DmlGpuEvent DmlPooledUploadHeap::BeginUploadToGpu(
 
   // Map the upload heap and copy the source data into it at the specified offset
   void* upload_heap_data = nullptr;
-  THROW_IF_FAILED(chunk->resource->Map(0, nullptr, &upload_heap_data));
+  winrt::check_hresult(chunk->resource->Map(0, nullptr, &upload_heap_data));
   memcpy(static_cast<byte*>(upload_heap_data) + offset_in_chunk, src.data(), src.size());
   chunk->resource->Unmap(0, nullptr);
 
