@@ -24,7 +24,7 @@ import textwrap
 class Model:
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options): 
         self.context_length = config.max_position_embeddings if hasattr(config, "max_position_embeddings") else config.seq_length
-        self.original_context_length = config.original_max_position_embeddings if hasattr(config, "original_max_position_embeddings") else config.rope_scaling["original_max_position_embeddings"] if hasattr(config, "rope_scaling") and hasattr(config.rope_scaling, "original_max_position_embeddings") else config.max_position_embeddings if hasattr(config, "max_position_embeddings") else config.seq_length
+        self.original_context_length = config.original_max_position_embeddings if hasattr(config, "original_max_position_embeddings") else config.rope_scaling["original_max_position_embeddings"] if hasattr(config, "rope_scaling") and hasattr(config.rope_scaling, "original_max_position_embeddings") else self.context_length
         self.window_size = config.sliding_window if hasattr(config, "sliding_window") else -1  # default is -1 in GroupQueryAttention kernel
         self.intermediate_size = config.intermediate_size if hasattr(config, "intermediate_size") else config.ffn_hidden_size
         self.hidden_size = config.hidden_size
