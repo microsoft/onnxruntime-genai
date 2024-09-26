@@ -40,6 +40,7 @@ struct Config {
     std::optional<std::string> log_id;
     std::optional<int> log_severity_level;
     std::optional<std::string> enable_profiling;
+    bool use_env_allocators{true};
 
     std::vector<ProviderOptions> provider_options;
   };

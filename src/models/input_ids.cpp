@@ -55,7 +55,7 @@ InputIDs::InputIDs(const Model& model, State& state)
     if (state_.params_->BatchBeamSize() != 1) {
       throw std::runtime_error("Batch size must be 1 for current_sequence_length and past_sequence_length inputs");
     }
-    const int32_t current_sequence_length = get_unpadded_sequence_length(state_.params_->input_ids, state_.params_->pad_token_id);
+    const int32_t current_sequence_length = get_unpadded_sequence_length(state_.params_->input_ids, model_.config_->model.pad_token_id);
     const std::array<int64_t, 1> current_sequence_length_shape{1};
     const std::array<int64_t, 2> past_sequence_length_shape{1, 1};
 
@@ -113,16 +113,16 @@ void InputIDs::Update(RoamingArray<int32_t> next_tokens_unk) {
   // Update input_ids with next tokens, converting from 32-bit to 64-bit
   if (type_ == Ort::TypeToTensorType<int64_t>) {
     switch (model_.device_type_) {
-#if USE_CUDA
       case DeviceType::CUDA: {
+#if USE_CUDA
         auto* data = value_->GetTensorMutableData<int64_t>();
         auto next_tokens = next_tokens_unk.GetGPU();
         cuda::LaunchInt32ToInt64(next_tokens.data(), data, static_cast<int>(next_tokens.size()), model_.cuda_stream_);
-      } break;
 #endif
+      } break;
 
-#if USE_DML
       case DeviceType::DML: {
+#if USE_DML
         ComPtr<ID3D12Resource> source_resource;
         Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, value_int32_->GetTensorMutableRawData(), &source_resource));
 
@@ -144,8 +144,8 @@ void InputIDs::Update(RoamingArray<int32_t> next_tokens_unk) {
             model_.GetDmlDevice(),
             model_.GetOrtDmlApi(),
             input_ids_cast_command_list_state_);
-      } break;
 #endif
+      } break;
       case DeviceType::CPU: {
         auto* data = value_->GetTensorMutableData<int64_t>();
         auto next_tokens = next_tokens_unk.GetCPU();
