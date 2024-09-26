@@ -56,7 +56,7 @@ struct DecoderOnlyPipelineState : State {
   RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens,
                           RoamingArray<int32_t> next_indices) override;
 
-  OrtValue* GetOutput(const char* name);
+  OrtValue* GetOutput(const char* name) override;
 
  private:
   void UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> next_indices,
@@ -66,13 +66,13 @@ struct DecoderOnlyPipelineState : State {
   std::vector<std::unique_ptr<IntermediatePipelineState>> pipeline_states_;
 
   // Stores all the outputs from the previous pipeline state(s)
-  std::unordered_map<std::string, OrtValue*> ortvalue_pool_;
+  std::unordered_map<std::string, std::unique_ptr<OrtValue>> ortvalue_store_;
 
-  InputIDs input_ids_{model_, *this};
-  Logits logits_{model_, *this};
+  InputIDs input_ids_{*this};
+  Logits logits_{*this};
   std::unique_ptr<KV_Cache> kv_cache_;
   PositionInputs position_inputs_;
-  ExtraInputs extra_inputs_{model_, *this};
+  ExtraInputs extra_inputs_{*this};
 };
 
 }  // namespace Generators

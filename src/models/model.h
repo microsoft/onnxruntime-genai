@@ -39,6 +39,7 @@ struct State {
 
   void ClearIO();  // Clear all inputs/outputs
 
+  const Model& model_;
   std::shared_ptr<const GeneratorParams> params_;
 
   std::vector<const char*> input_names_, output_names_;
@@ -49,7 +50,6 @@ struct State {
   bool first_run_{true};
 
  private:
-  const Model& model_;
   int current_batch_size_{0};
 };
 

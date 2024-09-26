@@ -38,8 +38,8 @@ static std::string CurrentModulePath() {
 namespace Generators {
 
 State::State(const GeneratorParams& params, const Model& model)
-    : params_{params.shared_from_this()},
-      model_{model} {}
+    : model_{model},
+      params_{params.shared_from_this()} {}
 
 void State::Run(OrtSession& session, OrtRunOptions& run_options, int new_batch_size) {
   auto captured_graph_info = GetCapturedGraphInfo();
@@ -365,6 +365,11 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     session_options.SetEpContextFilePath(config_session_options.ep_context_file_path.value().c_str());
   }
 
+  if (config_session_options.provider_options.empty() && config_session_options.use_env_allocators) {
+    // Share env allocators across sessions that only use the CPU provider
+    session_options.AddConfigEntry("session.use_env_allocators", "1");
+  }
+
   for (auto& provider_options : config_session_options.provider_options) {
     if (provider_options.name == "cuda") {
       auto ort_provider_options = OrtCUDAProviderOptionsV2::Create();
@@ -515,8 +520,8 @@ std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Model& model) {
 }
 
 // Used by benchmarking tests only, should not be used normally
-std::shared_ptr<GeneratorParams> CreateGeneratorParams() {
-  return std::make_shared<GeneratorParams>();
+std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Config& config) {
+  return std::make_shared<GeneratorParams>(config);
 }
 
 void ConvertFp16ToFp32(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<OrtValue>& p_out, DeviceType device_type, cudaStream_t stream) {
