@@ -9,13 +9,20 @@
   std::unique_ptr<OgaImages> _images;
 }
 
-- (nullable)initWithPath:(NSString*)path error:(NSError**)error {
+- (nullable)initWithPath:(NSArray<NSString *> *)paths error:(NSError**)error {
   if ((self = [super init]) == nil) {
     return nil;
   }
 
+  std::vector<const char *> cpp_paths;
+  cpp_paths.reserve([paths count]);
+
+  for (NSString* path in paths){
+    cpp_paths.push_back([path UTF8String]);
+  }
+
   try {
-    _images = OgaImages::Load(path.UTF8String);
+    _images = OgaImages::Load(cpp_paths);
     return self;
   }
   OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)

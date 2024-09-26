@@ -15,7 +15,7 @@
   }
 
   try {
-    _model = OgaModel::Create(path.UTF8String);
+    _model = OgaModel::Create([path UTF8String]);
     return self;
   }
   OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)

@@ -148,7 +148,7 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 @interface OGAImages : NSObject
 
 - (instancetype)init NS_UNAVAILABLE;
-- (nullable)initWithPath:(NSString*)path
+- (nullable)initWithPath:(NSArray<NSString *> *)paths
                    error:(NSError**)error NS_DESIGNATED_INITIALIZER;
 
 @end

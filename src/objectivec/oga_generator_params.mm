@@ -39,7 +39,7 @@
 
 - (BOOL)setModelInput:(NSString*)name tensor:(OGATensor*)tensor error:(NSError**)error {
   try {
-    _generatorParams->SetModelInput(name.UTF8String, [tensor CXXAPIOgaTensor]);
+    _generatorParams->SetModelInput([name UTF8String], [tensor CXXAPIOgaTensor]);
     return YES;
   }
   OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
