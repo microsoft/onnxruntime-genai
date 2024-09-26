@@ -56,12 +56,14 @@ int64_t GetNumImageTokens(const std::vector<GeneratorParams::Input>& extra_input
 
 MultiModalVisionModel::MultiModalVisionModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
-  embedding_session_ = OrtSession::Create(
-      ort_env, (config_->config_path / fs::path(config_->model.embedding.filename)).c_str(), session_options_.get());
+  // Use a custom embedding session if available; otherwise, fallback to the generic options
+  auto* embedding_session_options = embedding_session_options_ ? embedding_session_options_.get() : session_options_.get();
 
-  // User a custom vision session if available; otherwise, fallback to the generic options
+  // Use a custom vision session if available; otherwise, fallback to the generic options
   auto* vision_session_options = vision_session_options_ ? vision_session_options_.get() : session_options_.get();
 
+  embedding_session_ = OrtSession::Create(
+      ort_env, (config_->config_path / fs::path(config_->model.embedding.filename)).c_str(), embedding_session_options);
   vision_session_ = OrtSession::Create(
       ort_env, (config_->config_path / fs::path(config_->model.vision.filename)).c_str(), vision_session_options);
   decoder_session_ = OrtSession::Create(
@@ -144,7 +146,7 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalVisionModel& mo
       model_{model},
       num_image_tokens_{GetNumImageTokens(params_->extra_inputs, model_.config_->model.vision.inputs.pixel_values, model_.config_->model.vision.inputs.image_sizes)},
       captured_graph_info_{model.GetCapturedGraphPool()->ReserveCapturedGraph(model, params)} {
-  embedding_state_ = std::make_unique<EmbeddingState>(model, params, captured_graph_info_.get(), num_image_tokens_);
+  embedding_state_ = std::make_unique<EmbeddingState>(model, params, nullptr, num_image_tokens_);
   vision_state_ = std::make_unique<VisionState>(model_, params, num_image_tokens_);
   decoder_state_ = std::make_unique<DecoderState>(model_, sequence_lengths_unk, params, captured_graph_info_.get());
 }

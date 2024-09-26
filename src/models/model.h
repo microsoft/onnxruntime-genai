@@ -132,6 +132,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
   std::unique_ptr<OrtSessionOptions> vision_session_options_;
+  std::unique_ptr<OrtSessionOptions> embedding_session_options_;
   std::unique_ptr<OrtRunOptions> run_options_;
 
   cuda_stream_holder cuda_stream_;

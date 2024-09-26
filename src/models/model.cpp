@@ -42,15 +42,16 @@ State::State(const GeneratorParams& params, const Model& model)
       model_{model} {}
 
 void State::Run(OrtSession& session, OrtRunOptions& run_options, int new_batch_size) {
+  auto captured_graph_info = GetCapturedGraphInfo();
+
   if (first_run_) {
-    if (params_->use_cuda_graph) {
+    if (captured_graph_info) {
       model_.run_options_->AddConfigEntry("gpu_graph_id", "-1");
     }
     first_run_ = false;
-  } else if (params_->use_cuda_graph && new_batch_size != current_batch_size_) {
-    assert(GetCapturedGraphInfo() != nullptr);
+  } else if (captured_graph_info && new_batch_size != current_batch_size_) {
     current_batch_size_ = new_batch_size;
-    auto annotation_id = std::to_string(GetCapturedGraphInfo()->GenerateUniqueAnnotationID(new_batch_size));
+    auto annotation_id = std::to_string(captured_graph_info->GenerateUniqueAnnotationID(new_batch_size));
     model_.run_options_->AddConfigEntry("gpu_graph_id", annotation_id.c_str());
   }
 
@@ -428,6 +429,12 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 
         dml_pooled_upload_heap_ = std::make_unique<DmlPooledUploadHeap>(dml_objects_.d3d12_device.Get(), dml_execution_context_.get());
         dml_readback_heap_ = std::make_unique<DmlReadbackHeap>(dml_objects_.d3d12_device.Get(), dml_execution_context_.get());
+
+        // The embedding model doesn't support graph capture because of "if" nodes, so don't enable graph capture for it
+        if (!embedding_session_options_ && !config_->model.embedding.filename.empty()) {
+          embedding_session_options_ = session_options.Clone();
+          p_dml_api_->SessionOptionsAppendExecutionProvider_DML1(embedding_session_options_.get(), dml_device_.Get(), dml_objects_.command_queue.Get());
+        }
 
         // The vision model doesn't support graph capture because of dynamic shapes, so don't enable graph capture for it
         if (!vision_session_options_ && !config_->model.vision.filename.empty()) {
