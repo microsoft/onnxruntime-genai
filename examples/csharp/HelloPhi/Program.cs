@@ -1,11 +1,15 @@
-﻿// See https://aka.ms/new-console-template for more information
+﻿// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
 using Microsoft.ML.OnnxRuntimeGenAI;
 
 void PrintUsage()
 {
     Console.WriteLine("Usage:");
     Console.WriteLine("  -m model_path");
-    Console.WriteLine("  -i (optional): Interactive mode");
+    Console.WriteLine("\t\t\t\tPath to the model");
+    Console.WriteLine("  --interactive (optional)");
+    Console.WriteLine("\t\t\t\tInteractive mode");
 }
 
 using OgaHandle ogaHandle = new OgaHandle();
@@ -23,7 +27,7 @@ uint i = 0;
 while (i < args.Length)
 {
     var arg = args[i];
-    if (arg == "-i")
+    if (arg == "--interactive")
     {
         interactive = true;
     }

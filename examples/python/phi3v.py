@@ -5,8 +5,11 @@ import argparse
 import os
 import readline
 import glob
+from pathlib import Path
 
 import onnxruntime_genai as og
+
+REPO_ROOT = Path(__file__).parents[2]
 
 def _complete(text, state):
     return (glob.glob(text + "*") + [None])[state]
@@ -15,20 +18,30 @@ def _complete(text, state):
 def run(args: argparse.Namespace):
     print("Loading model...")
     model = og.Model(args.model_path)
+    print("Model loaded")
     processor = model.create_multimodal_processor()
     tokenizer_stream = processor.create_stream()
+
+    interactive = args.interactive
 
     while True:
         readline.set_completer_delims(" \t\n;")
         readline.parse_and_bind("tab: complete")
         readline.set_completer(_complete)
-        image_paths = [
-            image_path.strip()
-            for image_path in input(
-                "Image Path (comma separated; leave empty if no image): "
-            ).split(",")
-        ]
-        image_paths = [image_path for image_path in image_paths if len(image_path)]
+        if interactive:
+            image_paths = [
+                image_path.strip()
+                for image_path in input(
+                    "Image Path (comma separated; leave empty if no image): "
+                ).split(",")
+            ]
+        else:
+            if args.image_paths:
+                image_paths = args.image_paths
+            else:
+                image_paths = [str(REPO_ROOT / "test" / "test_models" / "images" / "australia.jpg")]
+
+        image_paths = [image_path for image_path in image_paths]
         print(image_paths)
 
         images = None
@@ -36,7 +49,7 @@ def run(args: argparse.Namespace):
         if len(image_paths) == 0:
             print("No image provided")
         else:
-            print("Loading images...")
+            print(f"Loading images: {image_paths}")
             for i, image_path in enumerate(image_paths):
                 if not os.path.exists(image_path):
                     raise FileNotFoundError(f"Image file not found: {image_path}")
@@ -44,7 +57,13 @@ def run(args: argparse.Namespace):
 
             images = og.Images.open(*image_paths)
 
-        text = input("Prompt: ")
+        if interactive:
+            text = input("Prompt: ")
+        else:
+            if args.prompt:
+                text = args.prompt
+            else:
+                text = "What is shown in this image?"
         prompt += f"{text}<|end|>\n<|assistant|>\n"
         print("Processing images and prompt...")
         inputs = processor(prompt, images=images)
@@ -69,11 +88,23 @@ def run(args: argparse.Namespace):
         # Delete the generator to free the captured graph before creating another one
         del generator
 
+        if not interactive:
+            break
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "-m", "--model_path", type=str, required=True, help="Path to the model"
+    )
+    parser.add_argument(
+        "--image_paths", nargs='*', type=str, required=False, help="Path to the images"
+    )
+    parser.add_argument(
+        '-pr', '--prompt', required=False, help='Input prompts to generate tokens from.'
+    )
+    parser.add_argument(
+        '--interactive', default=False, required=False, help='Interactive mode'
     )
     args = parser.parse_args()
     run(args)
