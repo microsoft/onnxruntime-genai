@@ -3,11 +3,11 @@
 
 #pragma once
 
-#include <wil/result.h>
 #include <dxcore_interface.h>
 #include <dxgi1_4.h>
 #include <vector>
 #include <wil/wrl.h>
+#include <winrt/base.h>
 
 // Retrieves information from a DXCore or DXGI adapter.
 namespace AdapterSelection {
@@ -16,7 +16,7 @@ namespace AdapterSelection {
 template <typename T>
 struct ComPtrAndDll {
   wil::unique_hmodule dll;
-  Microsoft::WRL::ComPtr<T> ptr;
+  winrt::com_ptr<T> ptr;
 
   explicit operator bool() { return ptr != nullptr; }
 

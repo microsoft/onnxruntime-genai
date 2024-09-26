@@ -6,7 +6,6 @@
 #include "dml_adapter_selection.h"
 
 using AdapterSelection::ComPtrAndDll;
-using Microsoft::WRL::ComPtr;
 
 AdapterInfo::AdapterInfo(ID3D12Device* device)
     : AdapterInfo(device->GetAdapterLuid()) {
@@ -18,11 +17,11 @@ AdapterInfo::AdapterInfo(LUID adapter_luid) {
 
   if (dxcore_factory) {
     // Try DXCore first; this is important because MCDM devices aren't enumerable through DXGI
-    ComPtr<IDXCoreAdapter> adapter;
+    winrt::com_ptr<IDXCoreAdapter> adapter;
     dxcore_result = dxcore_factory.ptr->GetAdapterByLuid(adapter_luid, IID_PPV_ARGS(&adapter));
 
     if (SUCCEEDED(dxcore_result)) {
-      Initialize(adapter.Get());
+      Initialize(adapter.get());
     } else if (dxcore_result != E_INVALIDARG) {
       // E_INVALIDARG can happen when the adapter LUID is not available through DXCore, so only fail for other
       // errors
@@ -33,10 +32,10 @@ AdapterInfo::AdapterInfo(LUID adapter_luid) {
   if (!dxcore_factory || dxcore_result == E_INVALIDARG) {
     // DXCore not available; fall back to DXGI
     if (ComPtrAndDll<IDXGIFactory4> dxgi_factory = AdapterSelection::TryCreateDXGIFactory()) {
-      ComPtr<IDXGIAdapter> adapter;
+      winrt::com_ptr<IDXGIAdapter> adapter;
       THROW_IF_FAILED(dxgi_factory.ptr->EnumAdapterByLuid(adapter_luid, IID_PPV_ARGS(&adapter)));
 
-      Initialize(adapter.Get());
+      Initialize(adapter.get());
     } else {
       THROW_HR(E_FAIL);  // Neither DXCore nor DXGI were available
     }

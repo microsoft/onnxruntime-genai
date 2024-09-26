@@ -5,7 +5,7 @@ if ("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION
 elseif (USE_CUDA AND CMAKE_CUDA_COMPILER)
     add_compile_definitions(USE_CXX17=1)
     set(CMAKE_CXX_STANDARD 17)
-elseif (ANDROID)
+elseif (ANDROID OR WIN32)
     add_compile_definitions(USE_CXX17=1)
     set(CMAKE_CXX_STANDARD 17)
 else ()
