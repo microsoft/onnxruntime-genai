@@ -762,13 +762,10 @@ class Model:
         # compute quantized matmul when the weights are transposed. In most implementations, the transpose should usually be converted to a "transposeB"
         # attribute on the MatMul itself. A more natural way to represent this would have been to use Gemm since it already supports a transB attribute,
         # but unfortunately Gemm doesn't support batches.
-        qweight_shape = matmul.scales.detach().numpy().shape
-        qweight_shape = [*qweight_shape[:-2], qweight_shape[-2] * qweight_shape[-1] * 2]
-        perms = list(range(0, len(qweight_shape)))
-        perms[-2], perms[-1] = perms[-1], perms[-2]
-        transposed_shape = [*qweight_shape[:-2], qweight_shape[-1] * matmul.group_size, qweight_shape[-2]]
+        qweight_shape = matmul.qweight.detach().numpy().shape
+        transposed_shape = [qweight_shape[1] * qweight_shape[2] * 2, qweight_shape[0]]
         transpose_name = f"{matmul_name}/Transpose"
-        self.make_transpose(transpose_name, dequantize_output, self.io_dtype, transposed_shape, perms)
+        self.make_transpose(transpose_name, dequantize_output, self.io_dtype, transposed_shape, [1, 0])
 
         matmul_output = "logits" if kwargs.get("logits", False) else f"{matmul_name}/output_0"
         self.make_node("MatMul", inputs=[root_input, f"{transpose_name}/output_0"], outputs=[matmul_output], name=matmul_name)
