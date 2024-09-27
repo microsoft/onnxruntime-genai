@@ -74,4 +74,4 @@ steps:
       dotnet run -r $(os)-$(arch) --configuration ${{ parameters.CsprojConfiguration }} --no-build --verbosity normal -- -m ./models/${{ parameters.ModelFolder }}
     displayName: 'Run $(CsprojName) With Artifact'
     workingDirectory: '$(Build.Repository.LocalPath)'
-    condition: and(or(eq(variables['os'], 'linux'), eq(variables['os'], 'osx'), eq(variables['ep'], 'cpu'))
+    condition: and(or(eq(variables['os'], 'linux'), eq(variables['os'], 'osx')), eq(variables['ep'], 'cpu'))
