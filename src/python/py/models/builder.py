@@ -744,7 +744,7 @@ class Model:
             dequantize_inputs.append(zeros)
 
         dequantize_output = f"{dequantize_name}/output_0"
-        self.make_node("DequantizeLinear", inputs=dequantize_inputs, outputs=[dequantize_output], name=dequantize_name, block_size=quantized_op.group_size)
+        self.make_node("DequantizeLinear", inputs=dequantize_inputs, outputs=[dequantize_output], name=dequantize_name, block_size=quantized_op.group_size, axis=-1)
         self.make_value_info(dequantize_output, self.io_dtype, shape=[*scales_npy.shape[:-1], scales_npy.shape[-1] * quantized_op.group_size])
 
         return dequantize_output
