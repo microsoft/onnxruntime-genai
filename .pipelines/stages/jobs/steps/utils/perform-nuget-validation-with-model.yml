@@ -32,6 +32,7 @@ steps:
     env:
       NUGET_PLUGIN_HANDSHAKE_TIMEOUT_IN_SECONDS: 180
       NUGET_PLUGIN_REQUEST_TIMEOUT_IN_SECONDS: 180
+
   - bash: |
       dotnet --info
       cp $(Build.BinariesDirectory)/nuget/* ${{ parameters.CsprojFolder }}
@@ -61,10 +62,10 @@ steps:
         bash -c " \
             export ORTGENAI_LOG_ORT_LIB=1 && \
             cd /ort_genai_src/${{ parameters.CsprojFolder }} && \
-            chmod +x ./bin/Release_Cuda/net6.0/linux-x64/$(CsprojName) && \
-            ./bin/Release_Cuda/net6.0/linux-x64/$(CsprojName) -m ./models/${{ parameters.ModelFolder }}"
+            chmod +x ./bin/Release_Cuda/net6.0/linux-x64/${{ parameters.CsprojName }} && \
+            ./bin/Release_Cuda/net6.0/linux-x64/${{ parameters.CsprojName }} -m ./models/${{ parameters.ModelFolder }}"
 
-    displayName: 'Run $(CsprojName) With Artifact'
+    displayName: 'Run ${{ parameters.CsprojName }} With Artifact'
     workingDirectory: '$(Build.Repository.LocalPath)'
     condition: and(eq(variables['os'], 'linux'), eq(variables['ep'], 'cuda'))
 
@@ -72,6 +73,6 @@ steps:
       export ORTGENAI_LOG_ORT_LIB=1
       cd ${{ parameters.CsprojFolder }}
       dotnet run -r $(os)-$(arch) --configuration ${{ parameters.CsprojConfiguration }} --no-build --verbosity normal -- -m ./models/${{ parameters.ModelFolder }}
-    displayName: 'Run $(CsprojName) With Artifact'
+    displayName: 'Run ${{ parameters.CsprojName }} With Artifact'
     workingDirectory: '$(Build.Repository.LocalPath)'
     condition: and(or(eq(variables['os'], 'linux'), eq(variables['os'], 'osx')), eq(variables['ep'], 'cpu'))
