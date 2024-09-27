@@ -142,7 +142,7 @@ jobs:
     parameters:
       CsprojFolder: "examples/csharp/HelloPhi"
       CsprojName: "HelloPhi"
-      CsprojConfiguration: $(csproj_config)
+      CsprojConfiguration: $(csproj_configuration)
       ModelFolder: $(prebuild_phi3_mini_model_folder)
 
   - template: steps/compliant-and-cleanup-step.yml
