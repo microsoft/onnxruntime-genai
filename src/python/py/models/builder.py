@@ -418,7 +418,7 @@ class Model:
             is_symmetric=True,
             accuracy_level=self.quant_attrs["int4"]["accuracy_level"],
             nodes_to_exclude=[],
-            op_types_to_quantize=self.quant_attrs["int4"]["op_types_to_quantize"]),
+            op_types_to_quantize=self.quant_attrs["int4"]["op_types_to_quantize"],
         )
         quant.process()
         return quant.model.model
