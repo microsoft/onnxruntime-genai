@@ -120,7 +120,7 @@ jobs:
     inputs:
       version: '8.x'
 
-  - template: steps/utils//flex-download-pipeline-artifact.yml
+  - template: steps/utils/flex-download-pipeline-artifact.yml
     parameters:
       StepName: 'Download NuGet Artifacts'
       ArtifactName: $(artifactName)-nuget
@@ -146,4 +146,3 @@ jobs:
       ModelFolder: $(prebuild_phi3_mini_model_folder)
 
   - template: steps/compliant-and-cleanup-step.yml
-

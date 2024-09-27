@@ -9,13 +9,12 @@ parameters:
   type: string
 
 steps:
-- ${{ if eq(variables['os'], 'win') }}:
-  - ${{ if eq(variables['ep'], 'cuda') }}:
-    - powershell: |
-        $env:AZCOPY_MSI_CLIENT_ID = "63b63039-6328-442f-954b-5a64d124e5b4";
-        azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" 'cuda_sdk'
-      displayName: 'Download CUDA $(cuda_version)'
-      workingDirectory: '$(Build.Repository.LocalPath)'
+  - powershell: |
+      $env:AZCOPY_MSI_CLIENT_ID = "63b63039-6328-442f-954b-5a64d124e5b4";
+      azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" 'cuda_sdk'
+    displayName: 'Download CUDA $(cuda_version)'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+    condition: and(eq(variables['os'], 'win'), eq(variables['ep'], 'cuda'))
   - powershell: |
       if ("$(ep)" -eq "cuda") {
         $env:CUDA_PATH = '$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)'
@@ -27,12 +26,12 @@ steps:
       cd ${{ parameters.CsprojFolder }}
       dotnet restore -r $(os)-$(arch) /property:Configuration=${{ parameters.CsprojConfiguration }} --source https://api.nuget.org/v3/index.json --source https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json --source $PWD --disable-parallel --verbosity detailed
       dotnet run -r $(os)-$(arch) --configuration ${{ parameters.CsprojConfiguration }} --no-restore --verbosity normal -- -m ./models/${{ parameters.ModelFolder }}
-      displayName: 'Run ${{ parameters.CsprojName }} With Artifact'
+    displayName: 'Run ${{ parameters.CsprojName }} With Artifact'
     workingDirectory: '$(Build.Repository.LocalPath)'
+    condition: eq(variables['os'], 'win'))
     env:
       NUGET_PLUGIN_HANDSHAKE_TIMEOUT_IN_SECONDS: 180
       NUGET_PLUGIN_REQUEST_TIMEOUT_IN_SECONDS: 180
-- ${{ elseif or(eq(variables['os'], 'linux'), eq(variables['os'], 'osx')) }}:
   - bash: |
       dotnet --info
       cp $(Build.BinariesDirectory)/nuget/* ${{ parameters.CsprojFolder }}
@@ -42,37 +41,37 @@ steps:
       ls -l ./bin/${{ parameters.CsprojConfiguration }}/net6.0/$(os)-$(arch)/
     displayName: 'Perform dotnet restore & build'
     workingDirectory: '$(Build.Repository.LocalPath)'
+    condition: or(eq(variables['os'], 'linux'), eq(variables['os'], 'osx'))
     env:
       NUGET_PLUGIN_HANDSHAKE_TIMEOUT_IN_SECONDS: 180
       NUGET_PLUGIN_REQUEST_TIMEOUT_IN_SECONDS: 180
+  - bash: |
+      set -e -x
+      az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
+      az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
+      docker pull $(cuda_docker_image)
 
-  - ${{ if eq(variables['ep'], 'cuda') }}:
-    - bash: |
-        set -e -x
-        az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
-        az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
-        docker pull $(cuda_docker_image)
+      docker run \
+        --gpus all \
+        --rm \
+        --volume $(Build.Repository.LocalPath):/ort_genai_src \
+        --volume $(Build.BinariesDirectory):/ort_genai_binary \
+        -e HF_TOKEN=$HF_TOKEN \
+        -w /ort_genai_src/ $(cuda_docker_image) \
+        bash -c " \
+            export ORTGENAI_LOG_ORT_LIB=1 && \
+            cd /ort_genai_src/${{ parameters.CsprojFolder }} && \
+            chmod +x ./bin/Release_Cuda/net6.0/linux-x64/$(CsprojName) && \
+            ./bin/Release_Cuda/net6.0/linux-x64/$(CsprojName) -m ./models/${{ parameters.ModelFolder }}"
 
-        docker run \
-          --gpus all \
-          --rm \
-          --volume $(Build.Repository.LocalPath):/ort_genai_src \
-          --volume $(Build.BinariesDirectory):/ort_genai_binary \
-          -e HF_TOKEN=$HF_TOKEN \
-          -w /ort_genai_src/ $(cuda_docker_image) \
-          bash -c " \
-              export ORTGENAI_LOG_ORT_LIB=1 && \
-              cd /ort_genai_src/${{ parameters.CsprojFolder }} && \
-              chmod +x ./bin/Release_Cuda/net6.0/linux-x64/$(CsprojName) && \
-              ./bin/Release_Cuda/net6.0/linux-x64/$(CsprojName) -m ./models/${{ parameters.ModelFolder }}"
+    displayName: 'Run $(CsprojName) With Artifact'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+    condition: and(eq(variables['os'], 'linux'), eq(variables['ep'], 'cuda'))
 
-      displayName: 'Run $(CsprojName) With Artifact'
-      workingDirectory: '$(Build.Repository.LocalPath)'
-
-  - ${{ elseif eq(variables['ep'], 'cpu') }}:
-    - bash: |
-        export ORTGENAI_LOG_ORT_LIB=1
-        cd ${{ parameters.CsprojFolder }}
-        dotnet run -r $(os)-$(arch) --configuration ${{ parameters.CsprojConfiguration }} --no-build --verbosity normal -- -m ./models/${{ parameters.ModelFolder }}
-      displayName: 'Run $(CsprojName) With Artifact'
-      workingDirectory: '$(Build.Repository.LocalPath)'
+  - bash: |
+      export ORTGENAI_LOG_ORT_LIB=1
+      cd ${{ parameters.CsprojFolder }}
+      dotnet run -r $(os)-$(arch) --configuration ${{ parameters.CsprojConfiguration }} --no-build --verbosity normal -- -m ./models/${{ parameters.ModelFolder }}
+    displayName: 'Run $(CsprojName) With Artifact'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+    condition: and(or(eq(variables['os'], 'linux'), eq(variables['os'], 'osx'), eq(variables['ep'], 'cpu'))
