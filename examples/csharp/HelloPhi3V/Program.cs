@@ -86,7 +86,7 @@ do
                 throw new Exception("Image file not found: " +  imagePath);
             }
         }
-        images = Images.Load(imagePaths[0]);
+        images = Images.Load(imagePaths);
     }
 
     string text = "What is shown in this image?";
