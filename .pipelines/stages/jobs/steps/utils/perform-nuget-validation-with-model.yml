@@ -1,3 +1,4 @@
+parameters:
 - name: CsprojFolder
   type: string
 - name: CsprojName
@@ -18,72 +19,72 @@
   type: string
 
 steps:
-  - ${{ if eq(parameters.os, 'win') }}:
-    - ${{ if eq(parameters.ep, 'cuda') }}:
-      - powershell: |
-          $env:AZCOPY_MSI_CLIENT_ID = "63b63039-6328-442f-954b-5a64d124e5b4";
-          azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(CudaVersion)" 'cuda_sdk'
-        displayName: 'Download CUDA $(CudaVersion)'
-        workingDirectory: '$(Build.Repository.LocalPath)'
+- ${{ if eq(parameters.os, 'win') }}:
+  - ${{ if eq(parameters.ep, 'cuda') }}:
     - powershell: |
-        if ("$(ep)" -eq "cuda") {
-          $env:CUDA_PATH = '$(Build.Repository.LocalPath)\cuda_sdk\v$(CudaVersion)'
-          $env:PATH = "$env:CUDA_PATH\bin;$env:CUDA_PATH\extras\CUPTI\lib64;$env:PATH"
-          Write-Host $env:PATH
-        }
-        dotnet --info
-        Copy-Item -Force -Recurse -Verbose $(Build.BinariesDirectory)/nuget/* -Destination $(CsprojFolder)
-        cd $(CsprojFolder)
-        Move-Item models\$(ModelFolder) models\targeted_model
-        dotnet restore -r $(os)-$(arch) /property:Configuration=$(CsprojConfiguration) --source https://api.nuget.org/v3/index.json --source https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json --source $PWD --disable-parallel --verbosity detailed
-        dotnet run -r $(os)-$(arch) --configuration $(CsprojConfiguration) --no-restore --verbosity normal -- -m ./models/targeted_model
+        $env:AZCOPY_MSI_CLIENT_ID = "63b63039-6328-442f-954b-5a64d124e5b4";
+        azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(CudaVersion)" 'cuda_sdk'
+      displayName: 'Download CUDA $(CudaVersion)'
+      workingDirectory: '$(Build.Repository.LocalPath)'
+  - powershell: |
+      if ("$(ep)" -eq "cuda") {
+        $env:CUDA_PATH = '$(Build.Repository.LocalPath)\cuda_sdk\v$(CudaVersion)'
+        $env:PATH = "$env:CUDA_PATH\bin;$env:CUDA_PATH\extras\CUPTI\lib64;$env:PATH"
+        Write-Host $env:PATH
+      }
+      dotnet --info
+      Copy-Item -Force -Recurse -Verbose $(Build.BinariesDirectory)/nuget/* -Destination $(CsprojFolder)
+      cd $(CsprojFolder)
+      Move-Item models\$(ModelFolder) models\targeted_model
+      dotnet restore -r $(os)-$(arch) /property:Configuration=$(CsprojConfiguration) --source https://api.nuget.org/v3/index.json --source https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json --source $PWD --disable-parallel --verbosity detailed
+      dotnet run -r $(os)-$(arch) --configuration $(CsprojConfiguration) --no-restore --verbosity normal -- -m ./models/targeted_model
+    displayName: 'Run $(CsprojName) With Artifact'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+    env:
+      NUGET_PLUGIN_HANDSHAKE_TIMEOUT_IN_SECONDS: 180
+      NUGET_PLUGIN_REQUEST_TIMEOUT_IN_SECONDS: 180
+- ${{ elseif or(eq(parameters.os, 'linux'), eq(parameters.os, 'osx')) }}:
+  - bash: |
+      dotnet --info
+      cp $(Build.BinariesDirectory)/nuget/* $(CsprojFolder)
+      cd $(CsprojFolder)
+      mv models/$(ModelFolder) models/targeted_model
+      dotnet restore -r $(os)-$(arch) /property:Configuration=$(CsprojConfiguration) --source https://api.nuget.org/v3/index.json --source https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json --source $PWD --disable-parallel --verbosity detailed
+      dotnet build ./$(CsprojName).csproj -r $(os)-$(arch) /property:Configuration=$(CsprojConfiguration) --no-restore --self-contained
+      ls -l ./bin/$(CsprojConfiguration)/net6.0/$(os)-$(arch)/
+    displayName: 'Perform dotnet restore & build'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+    env:
+      NUGET_PLUGIN_HANDSHAKE_TIMEOUT_IN_SECONDS: 180
+      NUGET_PLUGIN_REQUEST_TIMEOUT_IN_SECONDS: 180
+
+  - ${{ if eq(parameters.ep, 'cuda') }}:
+    - bash: |
+        set -e -x
+        az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
+        az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
+        docker pull $(CudaDockerImage)
+
+        docker run \
+          --gpus all \
+          --rm \
+          --volume $(Build.Repository.LocalPath):/ort_genai_src \
+          --volume $(Build.BinariesDirectory):/ort_genai_binary \
+          -e HF_TOKEN=$HF_TOKEN \
+          -w /ort_genai_src/ $(CudaDockerImage) \
+          bash -c " \
+              export ORTGENAI_LOG_ORT_LIB=1 && \
+              cd /ort_genai_src/$(CsprojFolder) && \
+              chmod +x ./bin/Release_Cuda/net6.0/linux-x64/$(CsprojName) && \
+              ./bin/Release_Cuda/net6.0/linux-x64/$(CsprojName) -m ./models/targeted_model"
+
       displayName: 'Run $(CsprojName) With Artifact'
       workingDirectory: '$(Build.Repository.LocalPath)'
-      env:
-        NUGET_PLUGIN_HANDSHAKE_TIMEOUT_IN_SECONDS: 180
-        NUGET_PLUGIN_REQUEST_TIMEOUT_IN_SECONDS: 180
-  - ${{ elseif or(eq(parameters.os, 'linux'), eq(parameters.os, 'osx')) }}:
+
+  - ${{ elseif eq(parameters.ep, 'cpu') }}:
     - bash: |
-        dotnet --info
-        cp $(Build.BinariesDirectory)/nuget/* $(CsprojFolder)
+        export ORTGENAI_LOG_ORT_LIB=1
         cd $(CsprojFolder)
-        mv models/$(ModelFolder) models/targeted_model
-        dotnet restore -r $(os)-$(arch) /property:Configuration=$(CsprojConfiguration) --source https://api.nuget.org/v3/index.json --source https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json --source $PWD --disable-parallel --verbosity detailed
-        dotnet build ./$(CsprojName).csproj -r $(os)-$(arch) /property:Configuration=$(CsprojConfiguration) --no-restore --self-contained
-        ls -l ./bin/$(CsprojConfiguration)/net6.0/$(os)-$(arch)/
-      displayName: 'Perform dotnet restore & build'
+        dotnet run -r $(os)-$(arch) --configuration $(CsprojConfiguration) --no-build --verbosity normal -- -m ./models/targeted_model
+      displayName: 'Run $(CsprojName) With Artifact'
       workingDirectory: '$(Build.Repository.LocalPath)'
-      env:
-        NUGET_PLUGIN_HANDSHAKE_TIMEOUT_IN_SECONDS: 180
-        NUGET_PLUGIN_REQUEST_TIMEOUT_IN_SECONDS: 180
-
-    - ${{ if eq(parameters.ep, 'cuda') }}:
-      - bash: |
-          set -e -x
-          az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
-          az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
-          docker pull $(CudaDockerImage)
-
-          docker run \
-            --gpus all \
-            --rm \
-            --volume $(Build.Repository.LocalPath):/ort_genai_src \
-            --volume $(Build.BinariesDirectory):/ort_genai_binary \
-            -e HF_TOKEN=$HF_TOKEN \
-            -w /ort_genai_src/ $(CudaDockerImage) \
-            bash -c " \
-                export ORTGENAI_LOG_ORT_LIB=1 && \
-                cd /ort_genai_src/$(CsprojFolder) && \
-                chmod +x ./bin/Release_Cuda/net6.0/linux-x64/$(CsprojName) && \
-                ./bin/Release_Cuda/net6.0/linux-x64/$(CsprojName) -m ./models/targeted_model"
-
-        displayName: 'Run $(CsprojName) With Artifact'
-        workingDirectory: '$(Build.Repository.LocalPath)'
-
-    - ${{ elseif eq(parameters.ep, 'cpu') }}:
-      - bash: |
-          export ORTGENAI_LOG_ORT_LIB=1
-          cd $(CsprojFolder)
-          dotnet run -r $(os)-$(arch) --configuration $(CsprojConfiguration) --no-build --verbosity normal -- -m ./models/targeted_model
-        displayName: 'Run $(CsprojName) With Artifact'
-        workingDirectory: '$(Build.Repository.LocalPath)'
