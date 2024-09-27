@@ -144,7 +144,6 @@ jobs:
       CsprojName: "HelloPhi"
       CsprojConfiguration: $(csproj_config)
       CudaVersion: $(cuda_version)
-      CudaDockerImage: $(cuda_docker_image)
       ModelFolder: $(prebuild_phi3_mini_model_folder)
 
   - template: steps/compliant-and-cleanup-step.yml
