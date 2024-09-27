@@ -131,7 +131,6 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
 
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
-  std::unique_ptr<OrtSessionOptions> vision_session_options_;
   std::unique_ptr<OrtRunOptions> run_options_;
 
   cuda_stream_holder cuda_stream_;
@@ -156,10 +155,10 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
   void InitDeviceAllocator(OrtSession& session);
   void CreateSessionOptions();
 
- private:
   void CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
                                       OrtSessionOptions& session_options,
-                                      bool is_primary_session_options);
+                                      bool is_primary_session_options,
+                                      bool disable_graph_capture);
 
 #if USE_DML
   mutable DmlObjects dml_objects_;
