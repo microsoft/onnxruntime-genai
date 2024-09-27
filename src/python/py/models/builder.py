@@ -275,8 +275,9 @@ class Model:
         # Quantization-specific variables (INT4, INT8, etc.)
         self.quant_attrs = {
             "int4": {
-                "block_size": int(extra_options["int4_block_size"]) if "int4_block_size" in extra_options else 32,
                 "accuracy_level": int(extra_options["int4_accuracy_level"]) if "int4_accuracy_level" in extra_options else 0,   # Default is 0 for non-QDQ formats, default is 4 for QDQ formats
+                "block_size": int(extra_options["int4_block_size"]) if "int4_block_size" in extra_options else 32,
+                "op_types_to_quantize": (extra_options["op_type_to_quantize"], ) if "int4_op_type_to_quantize" in extra_options else ("MatMul", "Gather", ),
             }
         }
         if self.quant_type is not None:
@@ -417,6 +418,7 @@ class Model:
             is_symmetric=True,
             accuracy_level=self.quant_attrs["int4"]["accuracy_level"],
             nodes_to_exclude=[],
+            op_types_to_quantize=self.quant_attrs["int4"]["op_types_to_quantize"]),
         )
         quant.process()
         return quant.model.model
@@ -2837,12 +2839,14 @@ def get_args():
         nargs='+',
         help=textwrap.dedent("""\
             Key value pairs for various options. Currently supports:
-                int4_block_size = 16/32/64/128/256: Specify the block_size for int4 quantization.
                 int4_accuracy_level = 1/2/3/4: Specify the minimum accuracy level for activation of MatMul in int4 quantization.
                     4 is int8, which means input A of int4 quantized MatMul is quantized to int8 and input B is upcasted to int8 for computation.
                     3 is bf16.
                     2 is fp16.
                     1 is fp32.
+                int4_block_size = 16/32/64/128/256: Specify the block_size for int4 quantization.
+                int4_op_type_to_quantize = MatMul/Gather: Specify one op type to target for int4 quantization.
+                    Use this option when you want to quantize just the MatMul ops or just the Gather ops.
                 num_hidden_layers = Manually specify the number of layers in your ONNX model (for unit testing purposes).
                 filename = Filename for ONNX model (default is 'model.onnx').
                     For models with multiple components, each component is exported to its own ONNX model.
@@ -2855,10 +2859,10 @@ def get_args():
                 exclude_lm_head = Remove language modeling head from your ONNX model.
                     Use this option when you want to remove the language modeling head from within your ONNX model.
                     Instead of `logits`, you will have `hidden_states` as the output to your ONNX model.
-                enable_cuda_graph = 1 : The model can use CUDA graph capture for CUDA execution provider. If enabled, all nodes being placed on the CUDA EP
+                enable_cuda_graph = 1: The model can use CUDA graph capture for CUDA execution provider. If enabled, all nodes being placed on the CUDA EP
                     is the prerequisite for the CUDA graph to be used correctly. It is not guaranteed that cuda graph be enabled as it depends on the model
                     and the graph structure.
-                use_8bits_moe = 1 : Use 8-bit quantization for MoE layers. Default is using 4-bit quantization.
+                use_8bits_moe = 1: Use 8-bit quantization for MoE layers. Default is using 4-bit quantization.
             """),
     )
 
