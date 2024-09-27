@@ -33,8 +33,13 @@ struct State {
   virtual const CapturedGraphInfo* GetCapturedGraphInfo() const { return nullptr; }
   virtual void Finalize() {}
 
+  OrtValue* GetInput(const char* name);
+
   virtual OrtValue* GetOutput(const char* name);
 
+  void ClearIO();  // Clear all inputs/outputs
+
+  const Model& model_;
   std::shared_ptr<const GeneratorParams> params_;
 
   std::vector<const char*> input_names_, output_names_;
@@ -42,11 +47,9 @@ struct State {
 
  protected:
   void Run(OrtSession& session, OrtRunOptions& run_options, int new_batch_size);  // Uses the inputs below to run
-  void ClearIO();                                                                 // Clear all inputs/outputs
   bool first_run_{true};
 
  private:
-  const Model& model_;
   int current_batch_size_{0};
 };
 
@@ -124,6 +127,8 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
 
   CapturedGraphPool* GetCapturedGraphPool() const { return captured_graph_pool_.get(); }
 
+  OrtSessionOptions* GetSessionOptions(const std::string& model_id) const;
+
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
   std::unique_ptr<OrtSessionOptions> vision_session_options_;
@@ -145,7 +150,6 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
   const OrtDmlApi* GetOrtDmlApi() const { return p_dml_api_; }
   IDMLDevice* GetDmlDevice() const { return dml_device_.Get(); }
   ID3D12Device* GetD3D12Device() const { return dml_objects_.d3d12_device.Get(); }
-  bool IsIntelDevice() const { return is_intel_device_; }
 #endif
 
  protected:
@@ -153,6 +157,10 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
   void CreateSessionOptions();
 
  private:
+  void CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
+                                      OrtSessionOptions& session_options,
+                                      bool is_primary_session_options);
+
 #if USE_DML
   mutable DmlObjects dml_objects_;
   const OrtDmlApi* p_dml_api_{};
@@ -160,12 +168,12 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
   std::unique_ptr<DmlExecutionContext> dml_execution_context_;
   std::unique_ptr<DmlReadbackHeap> dml_readback_heap_;
   ComPtr<IDMLDevice> dml_device_;
-  bool is_intel_device_{};
   std::unique_ptr<Ort::Allocator> dml_owned_allocator_;
   std::unique_ptr<OrtMemoryInfo> memory_info_device_;
 #endif
 
   std::shared_ptr<CapturedGraphPool> captured_graph_pool_;
+  std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;
 };
 
 }  // namespace Generators

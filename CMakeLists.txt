@@ -20,8 +20,8 @@ if(MSVC)
   add_compile_definitions(_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
 endif()
 
-include(cmake/external/onnxruntime_external_deps.cmake)
 include(cmake/ortlib.cmake)
+include(cmake/external/onnxruntime_external_deps.cmake)
 # All Global variables, including GLOB, for the top level CMakeLists.txt should be defined here
 include(cmake/global_variables.cmake)
 # Checking if CUDA is supported
@@ -112,6 +112,7 @@ endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set_target_properties(onnxruntime-genai-static PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_link_libraries(onnxruntime-genai-static PRIVATE dl)  # For dlopen & co
 endif()
 
 

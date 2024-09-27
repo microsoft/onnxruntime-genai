@@ -20,7 +20,7 @@ struct Whisper_Model : Model {
 struct Whisper_State : State {
   Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params);
   RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) override;
-  OrtValue* GetOutput(const char* name);
+  OrtValue* GetOutput(const char* name) override;
 
  private:
   void UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> next_indices, int current_length, bool search_buffers);
@@ -33,10 +33,10 @@ struct Whisper_State : State {
     Decoder,
   } run_state_{RunState::Encoder_Decoder_Init};
 
-  InputIDs decoder_input_ids_{model_, *this};
-  Logits logits_{model_, *this};
-  KV_Cache kv_cache_{model_, *this};
-  Cross_Cache cross_cache_{model_, *this};
+  InputIDs decoder_input_ids_{*this};
+  Logits logits_{*this};
+  KV_Cache kv_cache_{*this};
+  Cross_Cache cross_cache_{*this};
   std::unique_ptr<OrtValue> encoder_input_ids_;
   std::unique_ptr<OrtValue> encoder_hidden_states_;
 
