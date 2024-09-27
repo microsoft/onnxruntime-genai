@@ -9,9 +9,8 @@
 
 namespace Generators {
 
-Logits::Logits(const Model& model, State& state)
-    : model_{model},
-      state_{state},
+Logits::Logits(State& state)
+    : state_{state},
       shape_{static_cast<int64_t>(state_.params_->batch_size) * state_.params_->search.num_beams, state_.params_->sequence_length, model_.config_->model.vocab_size},
       type_{model_.session_info_->GetOutputDataType(model_.config_->model.decoder.outputs.logits)} {
   output_raw_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
