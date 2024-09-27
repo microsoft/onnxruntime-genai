@@ -28,7 +28,7 @@ steps:
       dotnet run -r $(os)-$(arch) --configuration ${{ parameters.CsprojConfiguration }} --no-restore --verbosity normal -- -m ./models/${{ parameters.ModelFolder }}
     displayName: 'Run ${{ parameters.CsprojName }} With Artifact'
     workingDirectory: '$(Build.Repository.LocalPath)'
-    condition: eq(variables['os'], 'win'))
+    condition: eq(variables['os'], 'win')
     env:
       NUGET_PLUGIN_HANDSHAKE_TIMEOUT_IN_SECONDS: 180
       NUGET_PLUGIN_REQUEST_TIMEOUT_IN_SECONDS: 180
