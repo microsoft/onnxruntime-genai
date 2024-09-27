@@ -4,6 +4,11 @@
 #include "utils.h"
 #include <cinttypes>
 
+#if USE_DML
+#include "../dml/dml_helpers.h"
+#include "model.h"
+#endif
+
 namespace Generators {
 static constexpr size_t c_value_count = 10;  // Dump this many values from the start of a tensor
 
@@ -71,7 +76,7 @@ void DumpValues(std::ostream& stream, ONNXTensorElementDataType type, const void
   stream << SGR::Fg_Green << "]" << SGR::Reset << std::endl;
 }
 
-void DumpTensor(std::ostream& stream, OrtValue* value, bool dump_value) {
+void DumpTensor(const Model& model, std::ostream& stream, OrtValue* value, bool dump_value) {
   auto type_info = value->GetTensorTypeAndShapeInfo();
   auto shape = type_info->GetShape();
   stream << SGR::Fg_Green << "Shape[ " << SGR::Reset;
@@ -101,8 +106,28 @@ void DumpTensor(std::ostream& stream, OrtValue* value, bool dump_value) {
       auto cpu_copy = std::make_unique<uint8_t[]>(element_size * element_count);
       CudaCheck() == cudaMemcpy(cpu_copy.get(), value->GetTensorRawData(), element_size * element_count, cudaMemcpyDeviceToHost);
       DumpValues(stream, type, cpu_copy.get(), element_count);
+#elif USE_DML
+      auto type = type_info->GetElementType();
+      size_t element_size = SizeOf(type);
+      auto cpu_copy = std::make_unique<uint8_t[]>(element_size * element_count);
+
+      if (value->GetTensorMutableRawData()) {
+        ComPtr<ID3D12Resource> gpu_resource;
+        Ort::ThrowOnError(model.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(
+            model.allocator_device_,
+            value->GetTensorMutableRawData(),
+            &gpu_resource));
+
+        model.GetDmlReadbackHeap()->ReadbackFromGpu(
+            std::span(cpu_copy.get(), element_size * element_count),
+            gpu_resource.Get(),
+            0,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+      }
+
+      DumpValues(stream, type, cpu_copy.get(), element_count);
 #else
-      stream << "Unexpected, using GPU memory but not compiled with CUDA?";
+      stream << "Unexpected, using GPU memory but not compiled with CUDA or DML?";
 #endif
       break;
     }
@@ -112,10 +137,10 @@ void DumpTensor(std::ostream& stream, OrtValue* value, bool dump_value) {
   }
 }
 
-void DumpTensors(std::ostream& stream, OrtValue** values, const char** names, size_t count, bool dump_values) {
+void DumpTensors(const Model& model, std::ostream& stream, OrtValue** values, const char** names, size_t count, bool dump_values) {
   for (size_t i = 0; i < count; i++) {
     stream << SGR::Fg_Green << "Name: " << SGR::Reset << names[i] << ' ';
-    DumpTensor(stream, values[i], dump_values);
+    DumpTensor(model, stream, values[i], dump_values);
   }
 }
 
