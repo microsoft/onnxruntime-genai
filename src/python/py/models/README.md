@@ -4,24 +4,27 @@ This folder contains the model builder for quickly creating optimized and quanti
 
 # Contents
 
-- [Current Support](#current-support)
-- [Usage](#usage)
-  - [Full Usage](#full-usage)
-  - [Original PyTorch Model from Hugging Face](#original-pytorch-model-from-hugging-face)
-  - [Original PyTorch Model from Disk](#original-pytorch-model-from-disk)
-  - [Customized or Finetuned PyTorch Model](#customized-or-finetuned-pytorch-model)
-  - [Quantized PyTorch Model](#quantized-pytorch-model)
-  - [GGUF Model](#gguf-model)
-  - [Extra Options](#extra-options)
-    - [Config Only](#config-only)
-    - [Exclude Embedding Layer](#exclude-embedding-layer)
-    - [Exclude Language Modeling Head](#exclude-language-modeling-head)
-    - [Enable Cuda Graph](#enable-cuda-graph)
-    - [Use 8 Bits Quantization in QMoE](#use-8-bits-quantization-in-qmoe)
-  - [Unit Testing Models](#unit-testing-models)
-    - [Option 1: Use the model builder directly](#option-1-use-the-model-builder-directly)
-    - [Option 2: Edit the config.json file](#option-2-edit-the-configjson-file-on-disk-and-then-run-the-model-builder)
-- [Design](#design)
+- [ONNX Runtime GenAI Model Builder](#onnx-runtime-genai-model-builder)
+- [Contents](#contents)
+  - [Current Support](#current-support)
+  - [Usage](#usage)
+    - [Full Usage](#full-usage)
+    - [Original PyTorch Model from Hugging Face](#original-pytorch-model-from-hugging-face)
+    - [Original PyTorch Model from Disk](#original-pytorch-model-from-disk)
+    - [Customized or Finetuned PyTorch Model](#customized-or-finetuned-pytorch-model)
+    - [Quantized PyTorch Model](#quantized-pytorch-model)
+    - [GGUF Model](#gguf-model)
+    - [Extra Options](#extra-options)
+      - [Config Only](#config-only)
+      - [Exclude Embedding Layer](#exclude-embedding-layer)
+      - [Exclude Language Modeling Head](#exclude-language-modeling-head)
+      - [Enable Cuda Graph](#enable-cuda-graph)
+      - [Use 8 Bits Quantization in QMoE](#use-8-bits-quantization-in-qmoe)
+      - [Hugging Face Authentication](#hugging-face-authentication)
+    - [Unit Testing Models](#unit-testing-models)
+      - [Option 1: Use the model builder directly](#option-1-use-the-model-builder-directly)
+      - [Option 2: Edit the config.json file on disk and then run the model builder](#option-2-edit-the-configjson-file-on-disk-and-then-run-the-model-builder)
+  - [Design](#design)
 
 ## Current Support
 
@@ -183,6 +186,24 @@ python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o p
 
 # From source:
 python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options use_8bits_moe=1
+```
+
+#### Hugging Face Authentication
+
+This scenario is for when you need control over the Hugging Face Authentication, to enable, disable or us a token.
+
+Possible values :
+
+- hf_token=True
+- hf_token=False
+- hf_token=<user_token>
+
+```
+# From wheel:
+python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options hf_token=False
+
+# From source:
+python3 builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options hf_token=False
 ```
 
 ### Unit Testing Models
