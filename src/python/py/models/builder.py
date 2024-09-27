@@ -26,12 +26,9 @@ class Model:
         self.context_length = config.seq_length if hasattr(config, "seq_length") else config.max_position_embeddings
         self.original_context_length = config.original_max_position_embeddings if hasattr(config, "original_max_position_embeddings") else config.rope_scaling["original_max_position_embeddings"] if hasattr(config, "rope_scaling") and hasattr(config.rope_scaling, "original_max_position_embeddings") else self.context_length
         self.window_size = config.sliding_window if hasattr(config, "sliding_window") else -1  # default is -1 in GroupQueryAttention kernel
-        self.intermediate_size = config.intermediate_size if hasattr(config, "intermediate_size") else config.ffn_hidden_size
+        self.intermediate_size = config.ffn_hidden_size if hasattr(config, "ffn_hidden_size") else config.intermediate_size
         self.hidden_size = config.hidden_size
-        self.num_kv_heads = config.num_key_value_heads if hasattr(config, "num_key_value_heads") else config.num_attention_heads
-        self.num_kv_heads = config.multi_query_group_num if hasattr(config, "multi_query_group_num") else self.num_kv_heads
-        self.kv_channels = config.kv_channels if hasattr(config, "kv_channels") else self.num_kv_heads
-        self.multi_query_attention = config.multi_query_attention if hasattr(config, "multi_query_attention") else False
+        self.num_kv_heads = config.num_key_value_heads if hasattr(config, "num_key_value_heads") else config.multi_query_group_num if hasattr(config, "multi_query_group_num") else config.num_attention_heads
         self.num_attn_heads = config.num_attention_heads
         self.head_size = config.head_dim if hasattr(config, "head_dim") else config.hidden_size // config.num_attention_heads
         self.num_layers = int(extra_options["num_hidden_layers"]) if "num_hidden_layers" in extra_options else config.num_hidden_layers if hasattr(config, "num_hidden_layers") else config.num_layers
@@ -1789,13 +1786,8 @@ class Model:
                     self.layernorm_attrs["root_input"] = "inputs_embeds"
                     self.layernorm_attrs["skip_input"] = "inputs_embeds"
 
-            elif module.__class__.__name__.endswith("DecoderLayer") and self.layer_id < self.num_layers:
+            elif module.__class__.__name__.endswith("DecoderLayer") or module.__class__.__name__.endswith("GLMBlock") and self.layer_id < self.num_layers:
                 # Each decoder layer of model
-                print(f"Reading decoder layer {self.layer_id}")
-                self.make_layer(self.layer_id, module)
-                self.layer_id += 1
-
-            elif module.__class__.__name__.endswith("GLMBlock") and self.layer_id < self.num_layers:
                 print(f"Reading decoder layer {self.layer_id}")
                 self.make_layer(self.layer_id, module)
                 self.layer_id += 1
@@ -1804,6 +1796,7 @@ class Model:
                 # SkipLayerNorm after last decoder layer (MatMul --> SkipLayerNorm)
                 print("Reading final norm")
                 self.make_layernorm(self.layer_id, module, skip=True, simple=self.layernorm_attrs["simple"], location="final_norm")
+            
             elif (isinstance(module, torch.nn.Linear) and module.out_features == self.vocab_size) or (hasattr(model, "lm_head") and module == model.lm_head):
                 # Checks (Hugging Face logic) or (GGUF logic)
                 if not self.exclude_lm_head:
@@ -1814,12 +1807,13 @@ class Model:
         del model
 
     def has_final_norm(self, module, model):
-        # Hugging Face names
-        hf_norm = hasattr(model, "model") and hasattr(model.model, "norm") and module == model.model.norm
-        hf_final_layernorm = hasattr(model, "model") and hasattr(model.model, "final_layernorm") and module == model.model.final_layernorm
-        # GGUF names
-        gguf_final_norm = hasattr(model, "final_norm") and module == model.final_norm
-        return hf_norm or hf_final_layernorm or gguf_final_norm
+       # Hugging Face names
+       hf_norm = hasattr(model, "model") and hasattr(model.model, "norm") and module == model.model.norm
+       hf_final_layernorm = hasattr(model, "model") and hasattr(model.model, "final_layernorm") and module == model.model.final_layernorm
+       hf_transformer_final_layernorm = hasattr(model, "transformer") and hasattr(model.transformer, "encoder") and hasattr(model.transformer.encoder, "final_layernorm") and module == model.transformer.encoder.final_layernorm
+       # GGUF names
+       gguf_final_norm = hasattr(model, "final_norm") and module == model.final_norm
+       return hf_norm or hf_final_layernorm or hf_transformer_final_layernorm or gguf_final_norm
 
     def make_preprocessing_nodes(self):
         self.make_attention_mask_reformatting()
@@ -2645,24 +2639,12 @@ class Phi3MoE128KModel(MistralModel):
 class ChatGLMModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        # self.input_shapes["position_ids"] = [1]  # Note: This is optional and only needed if you want position_ids to be an int instead of a 2D tensor
-        self.layernorm_attrs["simple"] = True # RMSNorm in ChatGLM
         self.rotemb_attrs["num_heads"] = self.num_attn_heads
         self.rotemb_attrs["partial_rotary_factor"] = 0.5 # Line 755 of modeling_chatglm.py check self.rotary_pos_emb declaration
         self.rotemb_attrs["rotary_embedding_dim"] = int(self.head_size * self.rotemb_attrs["partial_rotary_factor"])
         self.rotemb_attrs["interleaved"] = 1
-        self.mlp_attrs["use_proj"], self.mlp_attrs["use_fc"] = True, False
         self.attention_attrs["use_rotemb_in_attn"] = True
         self.attention_attrs["use_packed_matmul"] = True
-        self.attention_attrs["op_type"] = "GroupQueryAttention" if self.multi_query_attention else self.attention_attrs["op_type"]
-
-    def has_final_norm(self, module, model):
-        # Hugging Face names
-        hf_norm = hasattr(model, "model") and hasattr(model.model, "norm") and module == model.model.norm
-        hf_final_layernorm = hasattr(model, "transformer") and hasattr(model.transformer, "encoder") and hasattr(model.transformer.encoder, "final_layernorm") and module == model.transformer.encoder.final_layernorm
-        # GGUF names
-        gguf_final_norm = hasattr(model, "final_norm") and module == model.final_norm
-        return hf_norm or hf_final_layernorm or gguf_final_norm
 
     def make_rotary_embedding(self, rotemb, name, root_input, **kwargs):
         super().make_rotary_embedding(rotemb, name, root_input, num_heads=self.rotemb_attrs["num_heads"], rotary_embedding_dim=self.rotemb_attrs["rotary_embedding_dim"], **kwargs)
@@ -2758,9 +2740,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             config.hidden_act = "swiglu"
             onnx_model = ChatGLMModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         else:
-            raise NotImplementedError(
-                f"The {hf_name} model is not currently supported. Got {config}"
-            )
+            raise NotImplementedError(f"The {hf_name} model is not currently supported.")
 
         # Make ONNX model
         onnx_model.make_model(input_path)
