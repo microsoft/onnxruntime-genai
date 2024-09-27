@@ -110,7 +110,7 @@ void GeneratorParams::SetInputs(const NamedTensors& named_tensors) {
   }
 }
 
-std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params) {
+std::unique_ptr<Generator> CreateGenerator(const Model& model, GeneratorParams& params) {
   return std::make_unique<Generator>(model, params);
 }
 
@@ -129,11 +129,12 @@ std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
   return std::make_unique<GreedySearch_Cpu>(params);
 }
 
-Generator::Generator(const Model& model, const GeneratorParams& params) : model_{model.shared_from_this()} {
+Generator::Generator(const Model& model, GeneratorParams& params) : model_{model.shared_from_this()} {
   if (params.search.max_length == 0)
     throw std::runtime_error("search max_length is 0");
   if (params.search.max_length > model.config_->model.context_length)
     throw std::runtime_error("max_length (" + std::to_string(params.search.max_length) + ") cannot be greater than model context_length (" + std::to_string(model.config_->model.context_length) + ")");
+  params.batch_size = params.search.batch_size; // TEMP: bad overlap between search and generator params
   if (params.batch_size < 1)
     throw std::runtime_error("batch_size must be 1 or greater, is " + std::to_string(params.batch_size));
   if (params.vocab_size < 1)

@@ -190,7 +190,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperInputFeatures(Oga
  * \param[out] out The created generator.
  * \return OgaResult containing the error message if the generator creation failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateGenerator(const OgaModel* model, const OgaGeneratorParams* params, OgaGenerator** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateGenerator(const OgaModel* model, OgaGeneratorParams* params, OgaGenerator** out);
 
 /*
  * \brief Destroys the given generator.

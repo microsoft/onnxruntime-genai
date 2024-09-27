@@ -207,7 +207,7 @@ struct OgaGeneratorParams : OgaAbstract {
 };
 
 struct OgaGenerator : OgaAbstract {
-  static std::unique_ptr<OgaGenerator> Create(const OgaModel& model, const OgaGeneratorParams& params) {
+  static std::unique_ptr<OgaGenerator> Create(const OgaModel& model, OgaGeneratorParams& params) {
     OgaGenerator* p;
     OgaCheckResult(OgaCreateGenerator(&model, &params, &p));
     return std::unique_ptr<OgaGenerator>(p);

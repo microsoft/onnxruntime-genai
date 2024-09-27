@@ -273,7 +273,7 @@ struct PyNamedTensors {
 
 struct PyGenerator {
   PyGenerator(Model& model, PyGeneratorParams& params) {
-    generator_ = CreateGenerator(model, params);
+    generator_ = CreateGenerator(model, *params.params_);
   }
 
   pybind11::array_t<int32_t> GetNextTokens() {

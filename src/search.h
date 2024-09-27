@@ -78,7 +78,7 @@ struct GreedySearch_Cpu : Search_Cpu {
   void DropLastTokens(size_t num_tokens) override;
 
  protected:
-  void SetNextToken(size_t batch_id, int32_t token);
+  void SetNextToken(size_t batch_id, int32_t token, bool check_eos = true);
   void AppendNextTokensToSequences();
 
  private:

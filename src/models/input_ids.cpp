@@ -9,7 +9,7 @@ InputIDs::InputIDs(const Model& model, State& state)
     : model_{model},
       state_{state} {
   name_ = model_.config_->model.decoder.inputs.input_ids.c_str();
-  shape_ = {state_.params_->search.num_beams * state_.params_->batch_size, 0};
+  shape_ = {state_.params_->BatchBeamSize(), 0};
   auto session_info = model_.session_info_.get();
   type_ = session_info->GetInputDataType(name_);
 
