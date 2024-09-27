@@ -143,7 +143,6 @@ jobs:
       CsprojFolder: "examples/csharp/HelloPhi"
       CsprojName: "HelloPhi"
       CsprojConfiguration: $(csproj_config)
-      CudaVersion: $(cuda_version)
       ModelFolder: $(prebuild_phi3_mini_model_folder)
 
   - template: steps/compliant-and-cleanup-step.yml
