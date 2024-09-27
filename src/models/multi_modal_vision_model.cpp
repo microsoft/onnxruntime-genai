@@ -56,16 +56,18 @@ int64_t GetNumImageTokens(const std::vector<GeneratorParams::Input>& extra_input
 
 MultiModalVisionModel::MultiModalVisionModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
-  // Use a custom embedding session if available; otherwise, fallback to the generic options
-  auto* embedding_session_options = embedding_session_options_ ? embedding_session_options_.get() : session_options_.get();
 
-  // Use a custom vision session if available; otherwise, fallback to the generic options
-  auto* vision_session_options = vision_session_options_ ? vision_session_options_.get() : session_options_.get();
+  // The embedding and vision models don't support graph capture because of control flow nodes, so disable graph capture for them
+  auto vision_session_options = OrtSessionOptions::Create();
+  CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *vision_session_options, true, true);
+
+  auto embedding_session_options = OrtSessionOptions::Create();
+  CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *embedding_session_options, true, true);
 
   embedding_session_ = OrtSession::Create(
-      ort_env, (config_->config_path / fs::path(config_->model.embedding.filename)).c_str(), embedding_session_options);
+      ort_env, (config_->config_path / fs::path(config_->model.embedding.filename)).c_str(), embedding_session_options.get());
   vision_session_ = OrtSession::Create(
-      ort_env, (config_->config_path / fs::path(config_->model.vision.filename)).c_str(), vision_session_options);
+      ort_env, (config_->config_path / fs::path(config_->model.vision.filename)).c_str(), vision_session_options.get());
   decoder_session_ = OrtSession::Create(
       ort_env, (config_->config_path / fs::path(config_->model.decoder.filename)).c_str(), session_options_.get());
 

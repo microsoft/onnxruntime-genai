@@ -289,7 +289,8 @@ void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
 
 void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
                                            OrtSessionOptions& session_options,
-                                           bool is_primary_session_options) {
+                                           bool is_primary_session_options,
+                                           bool disable_graph_capture) {
   // Default to a limit of 16 threads to optimize performance
   constexpr int min_thread_nums = 1;
   constexpr int max_thread_nums = 16;
@@ -434,22 +435,13 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 
         dml_pooled_upload_heap_ = std::make_unique<DmlPooledUploadHeap>(dml_objects_.d3d12_device.Get(), dml_execution_context_.get());
         dml_readback_heap_ = std::make_unique<DmlReadbackHeap>(dml_objects_.d3d12_device.Get(), dml_execution_context_.get());
-
-        // The embedding model doesn't support graph capture because of "if" nodes, so don't enable graph capture for it
-        if (!embedding_session_options_ && !config_->model.embedding.filename.empty()) {
-          embedding_session_options_ = session_options.Clone();
-          p_dml_api_->SessionOptionsAppendExecutionProvider_DML1(embedding_session_options_.get(), dml_device_.Get(), dml_objects_.command_queue.Get());
-        }
-
-        // The vision model doesn't support graph capture because of dynamic shapes, so don't enable graph capture for it
-        if (!vision_session_options_ && !config_->model.vision.filename.empty()) {
-          vision_session_options_ = session_options.Clone();
-          p_dml_api_->SessionOptionsAppendExecutionProvider_DML1(vision_session_options_.get(), dml_device_.Get(), dml_objects_.command_queue.Get());
-        }
       }
 
-      session_options.AddConfigEntry("ep.dml.enable_graph_capture", "1");
-      session_options.AddConfigEntry("ep.dml.disable_memory_arena", "1");
+      if (!disable_graph_capture) {
+        session_options.AddConfigEntry("ep.dml.enable_graph_capture", "1");
+        session_options.AddConfigEntry("ep.dml.disable_memory_arena", "1");
+      }
+
       p_dml_api_->SessionOptionsAppendExecutionProvider_DML1(&session_options, dml_device_.Get(), dml_objects_.command_queue.Get());
 
       if (is_primary_session_options)
@@ -470,12 +462,12 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 
 void Model::CreateSessionOptions() {
   session_options_ = OrtSessionOptions::Create();
-  CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *session_options_, true);
+  CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *session_options_, true, false);
 
   for (auto& pipeline_model : config_->model.decoder.pipeline) {
     if (pipeline_model.session_options.has_value()) {
       auto emplaced = pipeline_session_options_.emplace(pipeline_model.model_id, OrtSessionOptions::Create());
-      CreateSessionOptionsFromConfig(*pipeline_model.session_options, *emplaced.first->second, false);
+      CreateSessionOptionsFromConfig(*pipeline_model.session_options, *emplaced.first->second, false, false);
     }
   }
 }
