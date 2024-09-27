@@ -387,7 +387,7 @@ class Model:
 
         # Quantize ONNX model to desired precision
         # TODO: Replace by quantizing the MatMuls as they are created
-        if self.onnx_dtype == "int4" and self.quant_type is None:
+        if self.onnx_dtype == "int4":
             model = self.to_int4(model)
 
         # Save ONNX model with only one external data file and delete any existing duplicate copies
