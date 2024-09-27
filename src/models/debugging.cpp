@@ -119,7 +119,7 @@ void DumpTensor(const Model& model, std::ostream& stream, OrtValue* value, bool 
             &gpu_resource));
 
         model.GetDmlReadbackHeap()->ReadbackFromGpu(
-            std::span(cpu_copy.get(), element_count),
+            std::span(cpu_copy.get(), element_size * element_count),
             gpu_resource.Get(),
             0,
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
