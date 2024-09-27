@@ -7,8 +7,8 @@ parameters:
   type: string
 
 steps:
-  - ${{ if or(eq(parameters.os, 'linux'), eq(parameters.os, 'osx')) }}:
-    - ${{ if eq(parameters.ep, 'cuda') }}:
+  - ${{ if or(eq(variables['os'], 'linux'), eq(variables['os'], 'osx')) }}:
+    - ${{ if eq(variables['ep'], 'cuda') }}:
       - bash: |
           set -e -x
           az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
@@ -33,7 +33,7 @@ steps:
 
         displayName: 'Run ${{ parameters.PythonScriptName }} With Artifact'
         workingDirectory: '$(Build.Repository.LocalPath)'
-    - ${{ elseif eq(parameters.ep, 'cpu') }}:
+    - ${{ elseif eq(variables['ep'], 'cpu') }}:
       - bash: |
           export ORTGENAI_LOG_ORT_LIB=1
           python -m pip install -r test/python/requirements.txt
@@ -49,8 +49,8 @@ steps:
         displayName: 'Run ${{ parameters.PythonScriptName }} With Artifact'
         workingDirectory: '$(Build.Repository.LocalPath)'
 
-  - ${{ if eq(parameters.os, 'win') }}:
-    - ${{ if eq(parameters.ep, 'cuda') }}:
+  - ${{ if eq(variables['os'], 'win') }}:
+    - ${{ if eq(variables['ep'], 'cuda') }}:
       - powershell: |
           $env:AZCOPY_MSI_CLIENT_ID = "63b63039-6328-442f-954b-5a64d124e5b4";
           azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" 'cuda_sdk'

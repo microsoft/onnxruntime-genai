@@ -9,8 +9,8 @@ parameters:
   type: string
 
 steps:
-- ${{ if eq(parameters.os, 'win') }}:
-  - ${{ if eq(parameters.ep, 'cuda') }}:
+- ${{ if eq(variables['os'], 'win') }}:
+  - ${{ if eq(variables['ep'], 'cuda') }}:
     - powershell: |
         $env:AZCOPY_MSI_CLIENT_ID = "63b63039-6328-442f-954b-5a64d124e5b4";
         azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" 'cuda_sdk'
@@ -32,7 +32,7 @@ steps:
     env:
       NUGET_PLUGIN_HANDSHAKE_TIMEOUT_IN_SECONDS: 180
       NUGET_PLUGIN_REQUEST_TIMEOUT_IN_SECONDS: 180
-- ${{ elseif or(eq(parameters.os, 'linux'), eq(parameters.os, 'osx')) }}:
+- ${{ elseif or(eq(variables['os'], 'linux'), eq(variables['os'], 'osx')) }}:
   - bash: |
       dotnet --info
       cp $(Build.BinariesDirectory)/nuget/* ${{ parameters.CsprojFolder }}
@@ -46,7 +46,7 @@ steps:
       NUGET_PLUGIN_HANDSHAKE_TIMEOUT_IN_SECONDS: 180
       NUGET_PLUGIN_REQUEST_TIMEOUT_IN_SECONDS: 180
 
-  - ${{ if eq(parameters.ep, 'cuda') }}:
+  - ${{ if eq(variables['ep'], 'cuda') }}:
     - bash: |
         set -e -x
         az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
@@ -69,7 +69,7 @@ steps:
       displayName: 'Run $(CsprojName) With Artifact'
       workingDirectory: '$(Build.Repository.LocalPath)'
 
-  - ${{ elseif eq(parameters.ep, 'cpu') }}:
+  - ${{ elseif eq(variables['ep'], 'cpu') }}:
     - bash: |
         export ORTGENAI_LOG_ORT_LIB=1
         cd ${{ parameters.CsprojFolder }}
