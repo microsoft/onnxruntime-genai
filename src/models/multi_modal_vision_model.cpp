@@ -56,7 +56,6 @@ int64_t GetNumImageTokens(const std::vector<GeneratorParams::Input>& extra_input
 
 MultiModalVisionModel::MultiModalVisionModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
-
   // The embedding and vision models don't support graph capture because of control flow nodes, so disable graph capture for them
   auto vision_session_options = OrtSessionOptions::Create();
   CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *vision_session_options, true, true);
