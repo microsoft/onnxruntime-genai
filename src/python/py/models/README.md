@@ -21,7 +21,7 @@ This folder contains the model builder for quickly creating optimized and quanti
     - [Hugging Face Authentication](#hugging-face-authentication)
   - [Unit Testing Models](#unit-testing-models)
     - [Option 1: Use the model builder directly](#option-1-use-the-model-builder-directly)
-    - [Option 2: Edit the config.json file on disk and then run the model builder](#option-2-edit-the-configjson-file-on-disk-and-then-run-the-model-builder)
+    - [Option 2: Edit the config.json file](#option-2-edit-the-configjson-file-on-disk-and-then-run-the-model-builder)
 - [Design](#design)
 
 ## Current Support
