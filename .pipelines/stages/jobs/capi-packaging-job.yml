@@ -14,6 +14,7 @@ parameters:
   - 'linux'
   - 'win'
   - 'osx'
+  - 'ios'
 - name: build_config
   type: string
   default: 'release'
@@ -34,7 +35,7 @@ jobs:
       pool: 'onnxruntime-genai-windows-vs-2022-arm64'
     ${{ else }}:
       pool: 'onnxruntime-Win-CPU-2022'
-  ${{ if eq(parameters.os, 'osx') }}:
+  ${{ if or(eq(parameters.os, 'osx'), eq(parameters.os, 'ios')) }}:
     pool:
       vmImage: 'macOS-latest'
 
@@ -141,6 +142,11 @@ jobs:
         target: 'onnxruntime-genai'
         arch: ${{ parameters.arch }}
         ep: ${{ parameters.ep }}
+        build_config: ${{ parameters.build_config }}
+
+  - ${{ if eq(parameters.os, 'ios') }}:
+    - template: steps/capi-appleframework-step.yml
+      parameters:
         build_config: ${{ parameters.build_config }}
 
   - template: steps/compliant-and-cleanup-step.yml

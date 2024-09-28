@@ -1,7 +1,7 @@
 ﻿# Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
-cmake_minimum_required(VERSION 3.26)
+cmake_minimum_required(VERSION 3.28)
 include(FetchContent)
 include(CMakeDependentOption)
 project(Generators LANGUAGES C CXX)
@@ -11,6 +11,12 @@ include(cmake/options.cmake)
 
 if("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_LESS 11)
   message(FATAL_ERROR  "GCC version must be greater than or equal to 11")
+endif()
+
+# Avoid warning of Calling FetchContent_Populate(Lib) is deprecated temporarily
+# TODO: find a better way to handle the header-only 3rd party deps
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.30.0")
+  cmake_policy(SET CMP0169 OLD)
 endif()
 
 if(MSVC)
@@ -44,6 +50,15 @@ if(MSVC)
       "$<$<COMPILE_LANGUAGE:C,CXX>:/W4>"
       "$<$<COMPILE_LANGUAGE:C,CXX>:/WX>"
   )
+endif()
+
+# Suggested by https://gitlab.kitware.com/cmake/cmake/-/issues/20132
+# MacCatalyst is not well supported in CMake
+# The error that can emerge without this flag can look like:
+# "clang : error : overriding '-mmacosx-version-min=11.0' option with '-target x86_64-apple-ios14.0-macabi' [-Werror,-Woverriding-t-option]"
+if (PLATFORM_NAME STREQUAL "macabi")
+  add_compile_options(-Wno-overriding-t-option)
+  add_link_options(-Wno-overriding-t-option)
 endif()
 
 if(ENABLE_TESTS)
@@ -85,10 +100,14 @@ target_link_directories(onnxruntime-genai PRIVATE ${ORT_LIB_DIR})
 
 # we keep the shared libraries disconnected on Android as they will come from separate AARs and we don't want to force
 # the ORT version to match in both.
-if(CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR (CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND (NOT BUILD_APPLE_FRAMEWORK)))
+if(CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR (CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND (NOT BUILD_APPLE_FRAMEWORK) AND (NOT MAC_CATALYST)))
   add_compile_definitions(_ORT_GENAI_USE_DLOPEN)
 else()
   target_link_libraries(onnxruntime-genai PRIVATE ${ONNXRUNTIME_LIB})
+endif()
+
+if(APPLE)
+target_link_libraries(onnxruntime-genai PRIVATE "-framework Foundation" "-framework CoreML")
 endif()
 
 set_target_properties(onnxruntime-genai PROPERTIES FOLDER "Sources")
