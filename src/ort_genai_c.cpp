@@ -196,7 +196,7 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputSequences(OgaGeneratorParams* 
     span_sequences.emplace_back(sequences[i]);
   }
 
-  params.input_ids_owner = Generators::PadInputs(span_sequences, params.pad_token_id);
+  params.input_ids_owner = Generators::PadInputs(span_sequences, params.config.model.pad_token_id);
   params.batch_size = static_cast<int>(sequences.size());
   params.sequence_length = static_cast<int>(params.input_ids_owner.size() / params.batch_size);
   params.input_ids = params.input_ids_owner;

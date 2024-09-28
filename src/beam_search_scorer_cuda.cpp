@@ -12,8 +12,8 @@ BeamSearchScorer_Cuda::BeamSearchScorer_Cuda(const GeneratorParams& parameters)
   state_cpu_->batch_size_ = static_cast<size_t>(parameters.batch_size);
   state_cpu_->num_beams_ = static_cast<size_t>(parameters.search.num_beams);
   state_cpu_->max_length_ = static_cast<size_t>(parameters.search.max_length);
-  state_cpu_->pad_token_id_ = parameters.pad_token_id;
-  state_cpu_->eos_token_id_ = parameters.eos_token_id;
+  state_cpu_->pad_token_id_ = parameters.config.model.pad_token_id;
+  state_cpu_->eos_token_id_ = parameters.config.model.eos_token_id;
   state_cpu_->early_stopping_ = parameters.search.early_stopping;
   state_cpu_->not_done_count_ = parameters.batch_size;
   state_cpu_->hypothesis_buffer_used_ = 0;

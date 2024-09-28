@@ -11,7 +11,7 @@ struct ImageFeatures {
     Output
   };
 
-  ImageFeatures(const Model& model, State& state, ImageFeatures::Mode mode, const std::string& name, int64_t num_image_tokens);
+  ImageFeatures(State& state, ImageFeatures::Mode mode, const std::string& name, int64_t num_image_tokens);
   ImageFeatures(const ImageFeatures&) = delete;
   ImageFeatures& operator=(const ImageFeatures&) = delete;
 
@@ -23,8 +23,8 @@ struct ImageFeatures {
   OrtValue* Get() { return image_features_.get(); }
 
  private:
-  const Model& model_;
   State& state_;
+  const Model& model_{state_.model_};
 
   std::array<int64_t, 2> shape_{};  // [num_image_tokens, hidden_size]
   ONNXTensorElementDataType type_;
