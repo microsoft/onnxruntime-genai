@@ -227,10 +227,11 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
 
  
     # Generate prompt
+    tokens, prompt = None, None
     if args.use_random_tokens:
         # use random tokens instead of generating a prompt using the model and then tokenizing it
         tokens = np.random.randint(100, size=(batch_size, prompt_length))
-        prompt = [tokenizer.decode(tokens[0])]*batch_size
+        prompt = [tokenizer.decode(tokens[0])] * batch_size
     else:
         prompt = [generate_prompt(model, tokenizer, prompt_length, args.use_graph_capture)] * batch_size
         tokens = tokenizer.encode_batch(prompt)
