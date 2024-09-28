@@ -4,27 +4,25 @@ This folder contains the model builder for quickly creating optimized and quanti
 
 # Contents
 
-- [ONNX Runtime GenAI Model Builder](#onnx-runtime-genai-model-builder)
-- [Contents](#contents)
-  - [Current Support](#current-support)
-  - [Usage](#usage)
-    - [Full Usage](#full-usage)
-    - [Original PyTorch Model from Hugging Face](#original-pytorch-model-from-hugging-face)
-    - [Original PyTorch Model from Disk](#original-pytorch-model-from-disk)
-    - [Customized or Finetuned PyTorch Model](#customized-or-finetuned-pytorch-model)
-    - [Quantized PyTorch Model](#quantized-pytorch-model)
-    - [GGUF Model](#gguf-model)
-    - [Extra Options](#extra-options)
-      - [Config Only](#config-only)
-      - [Exclude Embedding Layer](#exclude-embedding-layer)
-      - [Exclude Language Modeling Head](#exclude-language-modeling-head)
-      - [Enable Cuda Graph](#enable-cuda-graph)
-      - [Use 8 Bits Quantization in QMoE](#use-8-bits-quantization-in-qmoe)
-      - [Hugging Face Authentication](#hugging-face-authentication)
-    - [Unit Testing Models](#unit-testing-models)
-      - [Option 1: Use the model builder directly](#option-1-use-the-model-builder-directly)
-      - [Option 2: Edit the config.json file on disk and then run the model builder](#option-2-edit-the-configjson-file-on-disk-and-then-run-the-model-builder)
-  - [Design](#design)
+- [Current Support](#current-support)
+- [Usage](#usage)
+  - [Full Usage](#full-usage)
+  - [Original PyTorch Model from Hugging Face](#original-pytorch-model-from-hugging-face)
+  - [Original PyTorch Model from Disk](#original-pytorch-model-from-disk)
+  - [Customized or Finetuned PyTorch Model](#customized-or-finetuned-pytorch-model)
+  - [Quantized PyTorch Model](#quantized-pytorch-model)
+  - [GGUF Model](#gguf-model)
+  - [Extra Options](#extra-options)
+    - [Config Only](#config-only)
+    - [Exclude Embedding Layer](#exclude-embedding-layer)
+    - [Exclude Language Modeling Head](#exclude-language-modeling-head)
+    - [Enable Cuda Graph](#enable-cuda-graph)
+    - [Use 8 Bits Quantization in QMoE](#use-8-bits-quantization-in-qmoe)
+    - [Hugging Face Authentication](#hugging-face-authentication)
+  - [Unit Testing Models](#unit-testing-models)
+    - [Option 1: Use the model builder directly](#option-1-use-the-model-builder-directly)
+    - [Option 2: Edit the config.json file on disk and then run the model builder](#option-2-edit-the-configjson-file-on-disk-and-then-run-the-model-builder)
+- [Design](#design)
 
 ## Current Support
 
@@ -190,11 +188,10 @@ python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p p
 
 #### Hugging Face Authentication
 
-This scenario is for when you need control over the Hugging Face Authentication, to enable, disable or us a token.
+This scenario is for when you need to disable the Hugging Face authentication or use a different authentication token than the one stored in [huggingface-cli login](https://huggingface.co/docs/huggingface_hub/main/en/guides/cli#huggingface-cli-login).
 
 Possible values :
 
-- hf_token=True
 - hf_token=False
 - hf_token=<user_token>
 
