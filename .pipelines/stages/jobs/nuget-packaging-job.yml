@@ -181,7 +181,7 @@ jobs:
 
   - powershell: |
       dotnet --info
-      dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(buildConfig)" --verbosity normal
+      dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(buildConfig)" -p:IncludeMobileTargets=true --verbosity normal
     displayName: 'Build CSharp'
     workingDirectory: '$(Build.Repository.LocalPath)\src\csharp'
 
