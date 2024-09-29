@@ -133,7 +133,7 @@ def generate_files(lines, args):
       elif runtime.startswith("osx"):
           add_native_artifact_if_exists(lines, runtime, "libonnxruntime-genai.dylib")
       elif runtime.startswith("ios"):
-          add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai.xcframework")
+          add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai.xcframework.zip")
       elif runtime.startswith("android"):
           add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai.aar")
 
