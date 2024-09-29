@@ -228,15 +228,19 @@ jobs:
 
         mkdir -Force $outputDir/$rid
         mkdir -Force $outputDir/$rid/$(buildConfig)
-
-        if ($a -like "*.zip") {
-          Expand-Archive -Path $file -DestinationPath $outputDir/$rid
-        }
-        elseif ($a -like "*.tar.gz") {
-          tar -xf $file -C $outputDir/$rid
+        if ($rid -like "ios") {
+          Move-Item $file $outputDir/$rid/$(buildConfig)/onnxruntime-genai.xcframework.zip
         }
         elseif ($a -like "*.aar") {
           Move-Item $file $outputDir/$rid/$(buildConfig)/onnxruntime-genai.aar
+        }
+        else {
+          if ($a -like "*.zip") {
+            Expand-Archive -Path $file -DestinationPath $outputDir/$rid
+          }
+          elseif ($a -like "*.tar.gz") {
+            tar -xf $file -C $outputDir/$rid
+          }
         }
 
         $b = $file.Basename
