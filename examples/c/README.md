@@ -228,7 +228,7 @@ Change into the onnxruntime-genai directory.
    python build.py --config Release --ort_home examples/c
    cp src/ort_genai.h examples/c/include
    cp src/ort_genai_c.h examples/c/include
-   cp build/Linux/Release/onnxruntime-genai.so examples/c/lib
+   cp build/Linux/Release/libonnxruntime-genai.so examples/c/lib
    cd examples/c
    ```
 
@@ -340,7 +340,7 @@ Change into the onnxruntime-genai directory.
    python build.py --config Release --ort_home examples/c
    cp src/ort_genai.h examples/c/include
    cp src/ort_genai_c.h examples/c/include
-   cp build/Linux/Release/onnxruntime-genai.so examples/c/lib
+   cp build/Linux/Release/libonnxruntime-genai.so examples/c/lib
    cd examples/c
    ```
 
