@@ -103,7 +103,6 @@ def validate_model(config, model_directory):
 
     return generation_successful
 
-
 def folder_exists(folder_path):
     return os.path.isdir(folder_path)
 
@@ -133,12 +132,14 @@ if __name__ == "__main__":
     output = []
 
     for model in config["models"]:
-        # Wrap in a try catch 
-        create_model(model, '', model_output_dir+f'/{model}', 'int4', 'cpu', model_cache_dir+f'/{model}')
-        generation_successful = validate_model(config, model_output_dir)
-        #Table values
-        output.append([model, generation_successful, "no"])
-        #columns, model name, validation complete (y/n), third - exception / failure msgs
+        try:
+            create_model(model, '', model_output_dir+f'/{model}', 'int4', 'cpu', model_cache_dir+f'/{model}')
+            generation_successful = validate_model(config, model_output_dir)
+            exception_message = None
+        except Exception as e:
+            exception_message = str(e)
+        
+        output.append([model, generation_successful, exception_message])
     
     df = create_table(output)
     print(df)
