@@ -1,7 +1,6 @@
 {
     "models": [
-        "Qwen/Qwen2-0.5B",
-        "mistralai/Mistral-7B-Instruct-v0.2"
+        "Qwen/Qwen2-0.5B"
     ],
     "inputs": [
         "Provide a detailed analysis of the causes and consequences of the French Revolution, including key events, figures, and social changes.",
@@ -11,9 +10,9 @@
     "min_length": 0,
     "do_sample": false,
     "top_p": 0.0,
-    "top_k": 0,
+    "top_k": 1,
     "temperature": 1.0,
-    "reptition_penalty": 1.0,
+    "repetition_penalty": 1.0,
     "verbose": false,
     "timings": false
 }
