@@ -2,8 +2,8 @@
 // Licensed under the MIT License.
 #include "../generators.h"
 #include "whisper.h"
-#include <vector>
 #include "kernels.h"
+#include <vector>
 
 namespace Generators {
 
@@ -26,16 +26,16 @@ Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> s
   auto& inputs = const_cast<GeneratorParams::Whisper&>(std::get<GeneratorParams::Whisper>(params.inputs));
 
   for (const auto& [name, value] : params.extra_inputs) {
-    if (name == "encoder_input_ids") {
-      encoder_input_ids_ = model_.ExpandInputs(value->ort_tensor_, params_->search.num_beams);
+    if (name == "audio_features") {
+      audio_features_ = model_.ExpandInputs(value->ort_tensor_, params_->search.num_beams);
     }
   }
-  if (encoder_input_ids_ == nullptr) {
-    encoder_input_ids_ = model_.ExpandInputs(inputs.input_features->ort_tensor_, params_->search.num_beams);
+  if (audio_features_ == nullptr) {
+    audio_features_ = model_.ExpandInputs(inputs.audio_features->ort_tensor_, params_->search.num_beams);
   }
 
-  if (encoder_input_ids_ == nullptr) {
-    throw std::runtime_error("encoder_input_ids must be provided in the extra inputs");
+  if (audio_features_ == nullptr) {
+    throw std::runtime_error("audio_features must be provided in the extra inputs");
   }
 
   if (inputs.alignment_heads != nullptr) {
@@ -72,8 +72,8 @@ Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> s
     sequence_lengths[i] = static_cast<int32_t>(params_->sequence_length);
   }
 
-  input_names_.push_back("encoder_input_ids");
-  inputs_.push_back(encoder_input_ids_.get());
+  input_names_.push_back("audio_features");
+  inputs_.push_back(audio_features_.get());
   decoder_input_ids_.name_ = "decoder_input_ids";
   decoder_input_ids_.Add();
 

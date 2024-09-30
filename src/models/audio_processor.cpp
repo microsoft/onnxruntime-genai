@@ -11,7 +11,7 @@ namespace {
 std::unique_ptr<OrtValue> ProcessMel(ort_extensions::OrtxObjectPtr<OrtxTensor>& mel,
                                      ONNXTensorElementDataType expected_type, Ort::Allocator& allocator) {
   if (!(expected_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT || expected_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16)) {
-    throw std::runtime_error("Expected input_features to be of type float or float16. Actual: " + std::to_string(expected_type));
+    throw std::runtime_error("Expected audio_features to be of type float or float16. Actual: " + std::to_string(expected_type));
   }
 
   const float* mel_data{};
@@ -19,21 +19,21 @@ std::unique_ptr<OrtValue> ProcessMel(ort_extensions::OrtxObjectPtr<OrtxTensor>& 
   size_t num_dims;
   CheckResult(OrtxGetTensorData(mel.get(), reinterpret_cast<const void**>(&mel_data), &shape, &num_dims));
   std::span<const int64_t> shape_span(shape, num_dims);
-  auto input_features_value = expected_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT
+  auto audio_features_value = expected_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT
                                   ? OrtValue::CreateTensor<float>(allocator, shape_span)
                                   : OrtValue::CreateTensor<Ort::Float16_t>(allocator, shape_span);
   if (expected_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-    std::copy(mel_data, mel_data + input_features_value->GetTensorTypeAndShapeInfo()->GetElementCount(),
-              input_features_value->GetTensorMutableData<float>());
+    std::copy(mel_data, mel_data + audio_features_value->GetTensorTypeAndShapeInfo()->GetElementCount(),
+              audio_features_value->GetTensorMutableData<float>());
   } else {
-    auto input_features_fp32 = OrtValue::CreateTensor<float>(
+    auto audio_features_fp32 = OrtValue::CreateTensor<float>(
         allocator.GetInfo(),
-        std::span<float>(const_cast<float*>(mel_data), input_features_value->GetTensorTypeAndShapeInfo()->GetElementCount()),
+        std::span<float>(const_cast<float*>(mel_data), audio_features_value->GetTensorTypeAndShapeInfo()->GetElementCount()),
         shape_span);
-    ConvertFp32ToFp16(allocator, *input_features_fp32, input_features_value, DeviceType::CPU, nullptr);
+    ConvertFp32ToFp16(allocator, *audio_features_fp32, audio_features_value, DeviceType::CPU, nullptr);
   }
 
-  return input_features_value;
+  return audio_features_value;
 }
 
 }  // namespace
@@ -51,12 +51,12 @@ std::unique_ptr<Audios> LoadAudios(const std::span<const char* const>& audio_pat
 }
 
 AudioProcessor::AudioProcessor(Config& config, const SessionInfo& session_info)
-    : input_features_type_{session_info.GetInputDataType(config.model.encoder_decoder_init.inputs.input_features)} {
+    : audio_features_type_{session_info.GetInputDataType(config.model.encoder_decoder_init.inputs.audio_features)} {
   const std::string default_processor_file_name = "audio_processor_config.json";
   auto processor_config = (config.config_path / fs::path(default_processor_file_name)).string();
   processor_ = ort_extensions::OrtxObjectPtr<OrtxFeatureExtractor>(OrtxCreateSpeechFeatureExtractor, processor_config.c_str());
 
-  config.AddMapping(std::string(Config::Defaults::InputFeaturesName), config.model.encoder_decoder_init.inputs.input_features);
+  config.AddMapping(std::string(Config::Defaults::AudioFeaturesName), config.model.encoder_decoder_init.inputs.audio_features);
 }
 
 std::unique_ptr<NamedTensors> AudioProcessor::Process(const Audios* audios) const {
@@ -73,8 +73,8 @@ std::unique_ptr<NamedTensors> AudioProcessor::Process(const Audios* audios) cons
   ort_extensions::OrtxObjectPtr<OrtxTensor> mel;
   CheckResult(OrtxTensorResultGetAt(result.get(), 0, ort_extensions::ptr(mel)));
 
-  named_tensors->emplace(std::string(Config::Defaults::InputFeaturesName),
-                         std::make_shared<Tensor>(ProcessMel(mel, input_features_type_, allocator)));
+  named_tensors->emplace(std::string(Config::Defaults::AudioFeaturesName),
+                         std::make_shared<Tensor>(ProcessMel(mel, audio_features_type_, allocator)));
 
   return named_tensors;
 }

@@ -223,11 +223,11 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetModelInput(OgaGeneratorParams* oga_
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperInputFeatures(OgaGeneratorParams* oga_params, OgaTensor* tensor) {
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetAudioFeatures(OgaGeneratorParams* oga_params, OgaTensor* tensor) {
   OGA_TRY
   auto& params = *reinterpret_cast<Generators::GeneratorParams*>(oga_params);
   Generators::GeneratorParams::Whisper& whisper = params.inputs.emplace<Generators::GeneratorParams::Whisper>();
-  whisper.input_features = reinterpret_cast<Generators::Tensor*>(tensor)->shared_from_this();
+  whisper.audio_features = reinterpret_cast<Generators::Tensor*>(tensor)->shared_from_this();
   return nullptr;
   OGA_CATCH
 }

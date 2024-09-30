@@ -12,7 +12,7 @@ struct Config {
     static constexpr std::string_view InputIdsName = "input_ids";
     static constexpr std::string_view PixelValuesName = "pixel_values";
     static constexpr std::string_view ImageSizesName = "image_sizes";
-    static constexpr std::string_view InputFeaturesName = "encoder_input_ids";
+    static constexpr std::string_view AudioFeaturesName = "audio_features";
     static constexpr std::string_view ImageFeaturesName = "image_features";
     static constexpr std::string_view CurrentSequenceLengthName = "current_sequence_length";
     static constexpr std::string_view PastSequenceLengthName = "past_sequence_length";
@@ -62,7 +62,7 @@ struct Config {
       std::string filename;
 
       struct Inputs {
-        std::string input_features{Defaults::InputFeaturesName};
+        std::string audio_features{Defaults::AudioFeaturesName};
       } inputs;
     } encoder_decoder_init;
 

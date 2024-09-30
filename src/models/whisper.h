@@ -13,7 +13,7 @@ struct Whisper_Model : Model {
 
   std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params) const override;
 
-  std::unique_ptr<OrtSession> session_encoder_;  // encoder_decoder_init.onnx
+  std::unique_ptr<OrtSession> session_encoder_;  // encoder.onnx
   std::unique_ptr<OrtSession> session_decoder_;  // decoder.onnx
 };
 
@@ -27,17 +27,12 @@ struct Whisper_State : State {
   void Finalize() override;
 
   const Whisper_Model& model_;
-  enum struct RunState {
-    Encoder_Decoder_Init,
-    Decoder_First,
-    Decoder,
-  } run_state_{RunState::Encoder_Decoder_Init};
 
   InputIDs decoder_input_ids_{*this};
   Logits logits_{*this};
   KV_Cache kv_cache_{*this};
   Cross_Cache cross_cache_{*this};
-  std::unique_ptr<OrtValue> encoder_input_ids_;
+  std::unique_ptr<OrtValue> audio_features_;
   std::unique_ptr<OrtValue> encoder_hidden_states_;
 
   std::unique_ptr<OrtValue> past_sequence_length_;
