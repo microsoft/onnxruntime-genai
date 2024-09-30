@@ -37,6 +37,11 @@ parameters:
   type: boolean
   default: false
 
+- name: enable_apple_framework
+  displayName: 'Whether Apple framework for iOS & MacCatalyst is built.'
+  type: boolean
+  default: false
+
 - name: ort_version
   type: string
 
@@ -85,6 +90,7 @@ jobs:
       value: 'Microsoft.ML.OnnxRuntime.Gpu'
     ${{ if eq(parameters.ep, 'directml') }}:
       value: 'Microsoft.ML.OnnxRuntime.DirectML'
+
   steps:
   - ${{ if and(eq(parameters.enable_win_cpu, true), eq(parameters.ep, 'cpu')) }}:
     - template: steps/utils/flex-download-pipeline-artifact.yml
