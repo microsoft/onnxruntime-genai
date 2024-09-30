@@ -40,7 +40,9 @@ struct Config {
     std::optional<std::string> log_id;
     std::optional<int> log_severity_level;
     std::optional<std::string> enable_profiling;
-    bool use_env_allocators{true};
+    // TODO(baijumeswani): Sharing env allocators across sessions leads to crashes on windows and iOS.
+    //                     Identify the reason for the crash to enable allocator sharing by default.
+    bool use_env_allocators{false};
 
     std::vector<ProviderOptions> provider_options;
   };
