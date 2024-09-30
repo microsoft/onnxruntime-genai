@@ -101,7 +101,7 @@ def validate_model(config, model_directory):
             run_time = time.time() - first_token_timestamp
             print(f"Prompt length: {len(input_tokens)}, New tokens: {len(new_tokens)}, Time to first: {(prompt_time):.2f}s, Prompt tokens per second: {len(input_tokens)/prompt_time:.2f} tps, New tokens per second: {len(new_tokens)/run_time:.2f} tps")
 
-        return generation_successful
+    return generation_successful
 
 
 def folder_exists(folder_path):
