@@ -43,6 +43,7 @@ class Model:
 
         self.cache_dir = cache_dir
         self.filename = extra_options["filename"] if "filename" in extra_options else "model.onnx"
+        self.hf_token = parse_hf_token(extra_options.get("hf_token", "true"))
         self.extra_options = extra_options
 
         self.inputs = []
@@ -288,9 +289,9 @@ class Model:
 
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
         try:
-            config = GenerationConfig.from_pretrained(model_name_or_path, use_auth_token=True, trust_remote_code=True, **extra_kwargs)
+            config = GenerationConfig.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
         except:
-            config = AutoConfig.from_pretrained(model_name_or_path, use_auth_token=True, trust_remote_code=True, **extra_kwargs)
+            config = AutoConfig.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
         inputs = dict(zip(self.input_names, self.input_names))
         inputs.update({
             "past_key_names": "past_key_values.%d.key",
@@ -350,7 +351,7 @@ class Model:
             json.dump(genai_config, f, indent=4)
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
-        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, use_auth_token=True, trust_remote_code=True, **extra_kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
         print(f"Saving processing files in {out_dir} for GenAI")
         tokenizer.save_pretrained(out_dir)
 
@@ -1819,7 +1820,7 @@ class Model:
         else:
             # Load PyTorch model
             extra_kwargs = {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {}
-            model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, cache_dir=self.cache_dir, use_auth_token=True, trust_remote_code=True, **extra_kwargs)
+            model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, cache_dir=self.cache_dir, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
 
         # Loop through model and map each module to ONNX/ORT ops
         self.layer_id = 0
@@ -2772,6 +2773,23 @@ def parse_extra_options(kv_items):
     return kv_pairs
 
 
+def parse_hf_token(hf_token):
+    """
+    Returns the authentication token needed for Hugging Face.
+    Token is obtained either from the user or the environment.
+    """
+    if hf_token.lower() in {"false", "0"}:
+        # Default is `None` for disabling authentication
+        return None
+
+    if hf_token.lower() in {"true", "1"}:
+        # Return token in environment
+        return True
+
+    # Return user-provided token as string
+    return hf_token
+
+
 def create_model(model_name, input_path, output_dir, precision, execution_provider, cache_dir, **extra_options):
     # Create cache and output directories
     os.makedirs(output_dir, exist_ok=True)
@@ -2780,7 +2798,8 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
     # Load model config
     extra_kwargs = {} if os.path.isdir(input_path) else {"cache_dir": cache_dir}
     hf_name = input_path if os.path.isdir(input_path) else model_name
-    config = AutoConfig.from_pretrained(hf_name, use_auth_token=True, trust_remote_code=True, **extra_kwargs)
+    hf_token = parse_hf_token(extra_options.get("hf_token", "true"))
+    config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=True, **extra_kwargs)
 
     # Set input/output precision of ONNX model
     io_dtype = TensorProto.FLOAT if precision in {"int8", "fp32"} or (precision == "int4" and execution_provider == "cpu") else TensorProto.FLOAT16
@@ -2919,6 +2938,8 @@ def get_args():
                     is the prerequisite for the CUDA graph to be used correctly. It is not guaranteed that cuda graph be enabled as it depends on the model
                     and the graph structure.
                 use_8bits_moe = 1 : Use 8-bit quantization for MoE layers. Default is using 4-bit quantization.
+                hf_token = false/token: Use this to disable authentication with Hugging Face or provide a custom authentication token that differs from the one stored in your environment. Default behavior is to use the authentication token stored by `huggingface-cli login`.
+                    If you have already authenticated via `huggingface-cli login`, you do not need to use this flag because Hugging Face has already stored your authentication token for you.
                 use_qdq = 1 : Use the QDQ decomposition for quantized MatMul instead of the MatMulNBits operator.
             """),
     )
