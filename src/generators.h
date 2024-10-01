@@ -126,6 +126,7 @@ struct Generator : LeakChecked<Generator> {
   bool IsDone() const;
   virtual void AddTokens(cpu_span<int32_t> input_ids);
   virtual void GenerateNextToken();
+  virtual void RewindToLength(size_t new_length); // Rewind state to new_length
 
   RoamingArray<int32_t> GetSequence(size_t index) const;
 

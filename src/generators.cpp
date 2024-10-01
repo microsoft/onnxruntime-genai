@@ -220,6 +220,19 @@ void Generator::GenerateNextToken() {
   }
 }
 
+void Generator::RewindToLength(size_t new_length) {
+  if (new_length > search_->GetSequenceLength())
+    throw std::runtime_error("Cannot rewind to a length greater than the current sequence length");
+  if (new_length == search_->GetSequenceLength())
+    return;
+  size_t batch_size = search_->params_->search.batch_size;
+  if (batch_size > 1 && new_length != 0)
+    throw std::runtime_error("RewindToLength must be called with new_length=0 when batch_size > 1");
+  search_->RewindTo(new_length);
+  state_->RewindTo(new_length);
+  computed_logits_ = false;
+}
+
 RoamingArray<int32_t> Generator::GetSequence(size_t index) const {
   return search_->GetSequence(index);
 }

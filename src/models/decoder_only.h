@@ -21,6 +21,8 @@ struct DecoderOnly_State : State {
   RoamingArray<float> Run(int total_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) override;
   const CapturedGraphInfo* GetCapturedGraphInfo() const override { return captured_graph_info_.get(); };
 
+  void RewindTo(size_t index) override;
+
  protected:
   void UpdateInputsOutputs(RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> next_indices, int current_length);
   void UpdateInputsOutputsFromSequence(const RoamingArray<int32_t>& sequence, size_t next_token_length, int past_length); // what this does

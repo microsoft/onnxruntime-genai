@@ -33,6 +33,8 @@ struct State {
 
   OrtValue* GetOutput(const char* name);
 
+  virtual void RewindTo(size_t index);
+
   std::shared_ptr<const GeneratorParams> params_;
 
   std::vector<const char*> input_names_, output_names_;

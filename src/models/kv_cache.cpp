@@ -217,6 +217,44 @@ void KV_Cache::Update(std::span<const int32_t> beam_indices, int total_length) {
   is_first_update_ = false;
 }
 
+void KV_Cache::RewindTo(size_t index) {
+  if (past_present_share_buffer_) {
+    return;
+  }
+
+  is_first_update_ = true;
+  if (index == 0) {
+    for (int i = 0; i < layer_count_ * 2; i++) {
+      pasts_[i] = nullptr;
+    }
+  } else {
+    RewindPastTensorsTo(index);
+  }
+}
+
+void KV_Cache::RewindPastTensorsTo(size_t index) {
+  assert(index > 0 && !past_present_share_buffer_);
+  auto new_shape = shape_;
+  new_shape[2] = static_cast<int>(index);
+  auto batch_x_num_heads = new_shape[0] * new_shape[1];
+  auto length_x_head_size = new_shape[2] * new_shape[3];
+  for (int i = 0; i < layer_count_ * 2; i++) {
+    OrtValue& present_value = *presents_[i];
+    std::unique_ptr<OrtValue> past_value = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
+    for (int j = 0; j < batch_x_num_heads; j++) {
+#if USE_CUDA
+      if (model.device_type == DeviceType::CUDA) {
+        cudaMemcpyAsync(past_value->GetTensorMutableData() , present_value.GetTensorData(), length_x_head_size, cudaMemcpyDeviceToDevice, model.cuda_stream_);
+      } else
+#endif
+      {
+        copy(present_value, *past_value);
+      }
+    }
+    state_.inputs_[input_index_ + i] = pasts_[i].get();
+  }
+}
+
 // Copy present state to past state reordered by the beam_indices
 template <typename ScoreType>
 void KV_Cache::PickPastState(std::span<const int32_t> beam_indices, int index) {

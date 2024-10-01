@@ -270,6 +270,18 @@ void GreedySearch_Cpu::SetUserTokens(RoamingArray<int32_t> next_tokens) {
   }
 }
 
+void GreedySearch_Cpu::RewindTo(size_t index) {
+  sequences_.RewindTo(index);
+  done_ = false;
+  not_done_count_ = params_->batch_size;
+  memset(eos_seen_.data(), 0, eos_seen_.size_bytes());
+  // Set next tokens to the last tokens in the sequence
+  if (index > 0)
+    next_tokens_ = sequences_.GetLastTokens();
+  else
+    memset(next_tokens_.data(), 0, next_tokens_.size_bytes());
+}
+
 void GreedySearch_Cpu::DropLastTokens(size_t num_tokens) {
   auto sequences_cpu = sequences_.GetSequences();
   auto new_sequence_length = sequences_.GetSequenceLength() - num_tokens;

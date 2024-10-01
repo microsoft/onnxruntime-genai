@@ -16,6 +16,8 @@ struct PositionInputs {
   void Add();
   void Update(RoamingArray<int32_t>& next_tokens_unk, int total_length, int new_length);
 
+  void RewindTo(size_t index);
+
  private:
   void AddAttentionMask();
   void AddPositionIDs();
@@ -43,6 +45,10 @@ struct PositionInputs {
   void UpdatePositionIDsImpl(int total_length, int new_kv_length);
   template <typename T>
   void UpdateAttentionMaskImpl(T* data, int total_length);
+
+#if USE_CUDA
+  void RewindMask(size_t index);
+#endif
 
   const Model& model_;
   State& state_;

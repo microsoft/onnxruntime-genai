@@ -62,6 +62,19 @@ void Sequences::AppendNextTokenToSequences(std::span<const int32_t> next_tokens)
   ++current_length_;
 }
 
+cpu_span<int32_t> Sequences::GetLastTokens() {
+  std::vector<int32_t> last_tokens(batch_beam_size_);
+  for (int i = 0; i < batch_beam_size_; i++) {
+    last_tokens[i] = sequences_[i * max_length_ + current_length_ - 1];
+  }
+  return cpu_span<int32_t>{last_tokens.data(), last_tokens.size()};
+}
+
+void Sequences::RewindTo(size_t index) {
+  current_length_ = static_cast<int>(index);
+  assert(current_length_ >= 0);
+}
+
 void Sequences::DropLastTokens(size_t num_tokens) {
   current_length_ -= static_cast<int>(num_tokens);
   assert(current_length_ >= 0);

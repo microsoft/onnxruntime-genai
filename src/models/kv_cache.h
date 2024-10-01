@@ -37,11 +37,14 @@ struct KV_Cache {
   void Add();
   // Move present to past. Prepare present output for next generation iteration.
   void Update(std::span<const int32_t> beam_indices, int total_length);
+  void RewindTo(size_t index);
   template <typename ScoreType>
   void PickPastState(std::span<const int32_t> beam_indices, int index);
   void PickPastState(std::span<const int32_t> beam_indices, int index);
 
  private:
+  void RewindPastTensorsTo(size_t index);
+
   const Model& model_;
   State& state_;
   int layer_count_;

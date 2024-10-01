@@ -35,6 +35,12 @@ RoamingArray<float> DecoderOnly_State::Run(int total_length, RoamingArray<int32_
   return logits_.Get();
 }
 
+void DecoderOnly_State::RewindTo(size_t index) {
+  reset_input_ = true;
+  position_inputs_.RewindTo(index);
+  kv_cache_.RewindTo(index);
+}
+
 void DecoderOnly_State::UpdateInputsOutputs(RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> beam_indices, int total_length) {
   input_ids_.Update(next_tokens);
   size_t new_length = input_ids_.GetShape()[1];

@@ -104,6 +104,23 @@ void PositionInputs::Update(RoamingArray<int32_t>& next_tokens_unk, int total_le
   is_first_update_ = false;
 }
 
+void PositionInputs::RewindTo(size_t index) {
+  // Reset the state of the position inputs
+  if (index == 0) {
+    is_first_update_ = true;
+    is_first_posid_update_ = true;
+    is_first_mask_update_ = true;
+  // Rewind the mask input to a previous state
+  } else if (has_mask_input_) {
+    if (attention_mask_shape_[0] == 1)
+#if USE_CUDA
+      RewindMask(index);
+    else 
+#endif
+      throw std::runtime_error("PositionInputs::RewindTo - Unsupported batch size");
+  }
+}
+
 void PositionInputs::AddAttentionMask() {
   mask_input_index_ = state_.inputs_.size();
 
@@ -394,30 +411,28 @@ void PositionInputs::UpdateAttentionMask(int total_length, int new_kv_length) {
 #if USE_CUDA
     attention_mask_shape_[1] = state_.params_->search.max_length;
     attention_mask_ = sb_attention_mask_->CreateTensorOnStaticBuffer(attention_mask_shape_, type_);
-    if (is_first_mask_update_) {
-      int past_length = total_length - new_kv_length;
-      if (type_ == Ort::TypeToTensorType<int32_t>) {
-        cudaMemsetAsync(attention_mask_->GetTensorMutableRawData(),
-                        1,
-                        sizeof(int32_t) * past_length,
-                        model_.cuda_stream_);
-        cudaMemsetAsync(attention_mask_->GetTensorMutableRawData() + past_length,
-                        0,
-                        sizeof(int32_t) * (total_length - past_length),
-                        model_.cuda_stream_);
-      } else {
-        cudaMemsetAsync(attention_mask_->GetTensorMutableRawData(),
-                        1,
-                        sizeof(int64_t) * past_length,
-                        model_.cuda_stream_);
-        cudaMemsetAsync(attention_mask_->GetTensorMutableRawData() + past_length,
-                        0,
-                        sizeof(int64_t) * (total_length - past_length),
-                        model_.cuda_stream_);
-      }
+    int past_length = total_length - new_kv_length;
+    if (type_ == Ort::TypeToTensorType<int32_t>) {
+      cudaMemsetAsync(attention_mask_->GetTensorMutableRawData(),
+                      1,
+                      sizeof(int32_t) * past_length,
+                      model_.cuda_stream_);
+      cudaMemsetAsync(attention_mask_->GetTensorMutableRawData() + past_length,
+                      0,
+                      sizeof(int32_t) * (total_length - past_length),
+                      model_.cuda_stream_);
+    } else {
+      cudaMemsetAsync(attention_mask_->GetTensorMutableRawData(),
+                      1,
+                      sizeof(int64_t) * past_length,
+                      model_.cuda_stream_);
+      cudaMemsetAsync(attention_mask_->GetTensorMutableRawData() + past_length,
+                      0,
+                      sizeof(int64_t) * (total_length - past_length),
+                      model_.cuda_stream_);
     }
 #endif
-  } else {
+  } else if (!sb_attention_mask_) {
     attention_mask_shape_[1] = total_length;
     attention_mask_ = OrtValue::CreateTensor(*model_.allocator_device_, attention_mask_shape_, type_);
   }
@@ -551,5 +566,32 @@ void PositionInputs::UpdateAttentionMaskImpl(T* data, int total_length) {
     data[i] = 1;
   }
 };
+
+#if USE_CUDA
+void PositionInputs::RewindMask(size_t index) {
+  if (sb_attention_mask_ && !is_first_mask_update_) {
+    int past_length = static_cast<int>(index);
+    if (type_ == Ort::TypeToTensorType<int32_t>) {
+      cudaMemsetAsync(attention_mask_->GetTensorMutableRawData(),
+                      1,
+                      sizeof(int32_t) * past_length,
+                      model_.cuda_stream_);
+      cudaMemsetAsync(attention_mask_->GetTensorMutableRawData() + past_length,
+                      0,
+                      sizeof(int32_t) * (total_length - past_length),
+                      model_.cuda_stream_);
+    } else {
+      cudaMemsetAsync(attention_mask_->GetTensorMutableRawData(),
+                      1,
+                      sizeof(int64_t) * past_length,
+                      model_.cuda_stream_);
+      cudaMemsetAsync(attention_mask_->GetTensorMutableRawData() + past_length,
+                      0,
+                      sizeof(int64_t) * (total_length - past_length),
+                      model_.cuda_stream_);
+    }
+  }
+}
+#endif
 
 }  // namespace Generators

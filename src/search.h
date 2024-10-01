@@ -30,6 +30,8 @@ struct Search : LeakChecked<Search> {
   // Set user input tokens
   virtual void SetUserTokens(RoamingArray<int32_t> next_tokens) { assert(false); };
   // To be used for rewind
+  virtual void RewindTo(size_t index) { assert(false); };
+  // To be used for rewind
   virtual void DropLastTokens(size_t num_tokens) { assert(false); };
 
   std::shared_ptr<const GeneratorParams> params_;
@@ -75,6 +77,7 @@ struct GreedySearch_Cpu : Search_Cpu {
 
   // Used by continuous decoding search.
   void SetUserTokens(RoamingArray<int32_t> next_tokens) override;
+  void RewindTo(size_t index) override;
   void DropLastTokens(size_t num_tokens) override;
 
  protected:

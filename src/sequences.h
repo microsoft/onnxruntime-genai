@@ -19,6 +19,10 @@ struct Sequences {
   // Used by Greedy search:
   void AppendNextTokenToSequences(std::span<const int32_t> next_tokens);
 
+  // Return Token IDs of last token in each sequence
+  cpu_span<int32_t> GetLastTokens();
+  // Rewind sequences to ith token
+  void RewindTo(size_t index);
   // TODO(aciddelgado): To be used for rewind
   void DropLastTokens(size_t num_tokens);
 
