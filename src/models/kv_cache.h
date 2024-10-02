@@ -43,6 +43,7 @@ struct KV_Cache {
   void PickPastState(std::span<const int32_t> beam_indices, int index);
 
  private:
+  template <typename T>
   void RewindPastTensorsTo(size_t index);
 
   const Model& model_;

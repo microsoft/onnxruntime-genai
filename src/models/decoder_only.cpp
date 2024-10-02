@@ -30,13 +30,11 @@ RoamingArray<float> DecoderOnly_State::Run(int total_length, RoamingArray<int32_
 
   int batch_size = static_cast<int>(input_ids_.GetShape()[0]);
   State::Run(*model_.session_decoder_, *model_.run_options_, batch_size);
-  reset_input_ = true;
   
   return logits_.Get();
 }
 
 void DecoderOnly_State::RewindTo(size_t index) {
-  reset_input_ = true;
   position_inputs_.RewindTo(index);
   kv_cache_.RewindTo(index);
 }

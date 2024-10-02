@@ -225,12 +225,12 @@ struct OgaGenerator : OgaAbstract {
     OgaCheckResult(OgaGenerator_AddInputTokens(this, input_ids, input_ids_count));
   }
 
-  void ComputeLogits() {
-    OgaCheckResult(OgaGenerator_ComputeLogits(this));
-  }
-
   void GenerateNextToken() {
     OgaCheckResult(OgaGenerator_GenerateNextToken(this));
+  }
+
+  void RewindToLength(size_t length) {
+    OgaCheckResult(OgaGenerator_RewindToLength(this, length));
   }
 
   size_t GetSequenceCount(size_t index) const {

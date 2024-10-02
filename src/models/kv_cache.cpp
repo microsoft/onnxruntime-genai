@@ -220,6 +220,8 @@ void KV_Cache::Update(std::span<const int32_t> beam_indices, int total_length) {
 void KV_Cache::RewindTo(size_t index) {
   if (past_present_share_buffer_) {
     return;
+  } else if (shape_[2] <= static_cast<int>(index)) {
+    throw std::runtime_error("Requested length of rewind is greater than the current length.");
   }
 
   is_first_update_ = true;
@@ -227,30 +229,42 @@ void KV_Cache::RewindTo(size_t index) {
     for (int i = 0; i < layer_count_ * 2; i++) {
       pasts_[i] = nullptr;
     }
+  } else if (type_ == Ort::TypeToTensorType<float>) {
+    RewindPastTensorsTo<float>(index);
   } else {
-    RewindPastTensorsTo(index);
+    RewindPastTensorsTo<Ort::Float16_t>(index);
   }
 }
 
+// LEFT OFF:
+// check if we even have a present tensor
+// use spans and size bytes to ensure correct sizes of data
+// make sure we're copying the data correctly
+template <typename T>
 void KV_Cache::RewindPastTensorsTo(size_t index) {
-  assert(index > 0 && !past_present_share_buffer_);
-  auto new_shape = shape_;
+  assert(index > 0 && shape_[2] >= index && !past_present_share_buffer_);
+  std::array<int64_t, 4> new_shape = shape_;
   new_shape[2] = static_cast<int>(index);
   auto batch_x_num_heads = new_shape[0] * new_shape[1];
-  auto length_x_head_size = new_shape[2] * new_shape[3];
+  auto new_length_x_head_size = new_shape[2] * new_shape[3];
+  auto old_length_x_head_size = shape_[2] * new_shape[3];
+
   for (int i = 0; i < layer_count_ * 2; i++) {
-    OrtValue& present_value = *presents_[i];
-    std::unique_ptr<OrtValue> past_value = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
+    OrtValue& present = *presents_[i];
+    std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
     for (int j = 0; j < batch_x_num_heads; j++) {
+      auto present_data = present.GetTensorData<T>() + j * old_length_x_head_size;
+      auto past_data = past->GetTensorMutableData<T>() + j * new_length_x_head_size;
 #if USE_CUDA
-      if (model.device_type == DeviceType::CUDA) {
-        cudaMemcpyAsync(past_value->GetTensorMutableData() , present_value.GetTensorData(), length_x_head_size, cudaMemcpyDeviceToDevice, model.cuda_stream_);
+      if (model_.device_type_ == DeviceType::CUDA) {
+        cudaMemcpyAsync(past_data, present_data, new_length_x_head_size * sizeof(T), cudaMemcpyDeviceToDevice, model_.cuda_stream_);
       } else
 #endif
       {
-        copy(present_value, *past_value);
+        copy(std::span<const T>(present_data, new_length_x_head_size), std::span<T>(past_data, new_length_x_head_size));
       }
     }
+    pasts_[i] = std::move(past);
     state_.inputs_[input_index_ + i] = pasts_[i].get();
   }
 }

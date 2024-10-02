@@ -29,6 +29,12 @@ def main(args):
     params.set_search_options(**search_options)
     generator = og.Generator(model, params)
 
+    # Set system prompt
+    system_prompt = "You are a helpful assistant. You are friendly, courteous, and professional. All your responses must end with an exclamation point!"
+    system_tokens = tokenizer.encode(system_prompt)
+    generator.add_input_tokens(system_tokens)
+    system_prompt_length = len(system_tokens)
+
     # Keep asking for input prompts in a loop
     while True:
         text = input("Input: ")
@@ -76,7 +82,9 @@ def main(args):
             prompt_time = first_token_timestamp - started_timestamp
             run_time = time.time() - first_token_timestamp
             print(f"Prompt length: {len(input_tokens)}, New tokens: {len(new_tokens)}, Time to first: {(prompt_time):.2f}s, Prompt tokens per second: {len(input_tokens)/prompt_time:.2f} tps, New tokens per second: {len(new_tokens)/run_time:.2f} tps")
-
+        
+        # Rewind the generator to the system prompt
+        generator.rewind_to_length(system_prompt_length)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS, description="End-to-end AI Question/Answer example for gen-ai")

@@ -298,6 +298,10 @@ struct PyGenerator {
     generator_->GenerateNextToken();
   }
 
+  void RewindToLength(size_t new_length) {
+    generator_->RewindToLength(new_length);
+  }
+
   bool IsDone() const {
     return generator_->IsDone();
   }
@@ -406,6 +410,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("get_output", &PyGenerator::GetOutput)
       .def("add_input_tokens", &PyGenerator::AddTokens)
       .def("generate_next_token", &PyGenerator::GenerateNextToken)
+      .def("rewind_to_length", &PyGenerator::RewindToLength)
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
       .def("get_sequence", &PyGenerator::GetSequence);
 

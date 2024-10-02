@@ -35,8 +35,6 @@ struct DecoderOnly_State : State {
   KV_Cache kv_cache_{model_, *this};
   PositionInputs position_inputs_;
   ExtraInputs extra_inputs_{model_, *this};
-
-  bool reset_input_{true};
 };
 
 }  // namespace Generators

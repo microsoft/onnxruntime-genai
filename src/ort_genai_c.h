@@ -227,8 +227,16 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AddInputTokens(OgaGenerator* oga
  * \param[in] generator The generator to compute the logits for.
  * \return OgaResult containing the error message if the computation of the logits failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_ComputeLogits(OgaGenerator* generator);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator);
+
+/*
+ * \brief Rewinds the generator to the given length. This is useful when the user wants to rewind the generator to a specific length
+ *        and continue generating from that point.
+ * \param[in] generator The generator to rewind to the given length.
+ * \param[in] new_length The new length to rewind the generator to.
+ * \return OgaResult containing the error message if the rewinding failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_RewindToLength(OgaGenerator* generator, size_t new_length);
 
 /*
  * \brief Returns a copy of the model output identified by the given name as an OgaTensor on CPU. The buffer is owned by returned OgaTensor

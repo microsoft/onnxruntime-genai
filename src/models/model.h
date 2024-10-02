@@ -33,7 +33,7 @@ struct State {
 
   OrtValue* GetOutput(const char* name);
 
-  virtual void RewindTo(size_t index);
+  virtual void RewindTo(size_t index) { (void)index; };
 
   std::shared_ptr<const GeneratorParams> params_;
 

@@ -276,8 +276,12 @@ void GreedySearch_Cpu::RewindTo(size_t index) {
   not_done_count_ = params_->batch_size;
   memset(eos_seen_.data(), 0, eos_seen_.size_bytes());
   // Set next tokens to the last tokens in the sequence
-  if (index > 0)
-    next_tokens_ = sequences_.GetLastTokens();
+  if (index > 0) {
+    auto last_tokens = sequences_.GetLastTokens();
+    for (size_t i = 0; i < params_->batch_size; i++) {
+      SetNextToken(i, last_tokens[i]);
+    }
+  }
   else
     memset(next_tokens_.data(), 0, next_tokens_.size_bytes());
 }

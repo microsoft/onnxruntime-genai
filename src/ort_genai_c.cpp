@@ -209,6 +209,13 @@ OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator) 
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaGenerator_RewindToLength(OgaGenerator* generator, size_t new_length) {
+  OGA_TRY
+  reinterpret_cast<Generators::Generator*>(generator)->RewindToLength(new_length);
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* oga_generator, const char* name, OgaTensor** out) {
   OGA_TRY
   auto& generator = *reinterpret_cast<const Generators::Generator*>(oga_generator);
