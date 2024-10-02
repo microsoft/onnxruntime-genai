@@ -391,3 +391,29 @@ def test_vision_preprocessing_multiple_images(
 
     prompt += " What is shown in this two images?\n<|end|>\n<|assistant|>\n"
     _ = processor(prompt, images=images)
+
+
+@pytest.mark.parametrize("relative_model_path", [Path("adapters")])
+def test_adapters(test_data_path, relative_model_path):
+    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+    model = og.Model(model_path)
+    adapters = og.Adapters(model)
+    adapters.load(str(Path(test_data_path) / relative_model_path / "adapters.onnx_adapter"), "adapters_a_and_b")
+
+    tokenizer = og.Tokenizer(model)
+    prompts = [
+        "This is a test.",
+        "Rats are awesome pets!",
+        "The quick brown fox jumps over the lazy dog.",
+    ]
+
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=20)
+    params.input_ids = tokenizer.encode_batch(prompts)
+
+    generator = og.Generator(model, params)
+    generator.set_active_adapter(adapters, "adapters_a_and_b")
+
+    while not generator.is_done():
+        generator.compute_logits()
+        generator.generate_next_token()

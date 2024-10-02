@@ -134,7 +134,7 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
 
   switch (run_state_) {
     case RunState::Encoder_Decoder_Init:
-      State::Run(*model_.session_encoder_, *model_.run_options_, batch_size);
+      State::Run(*model_.session_encoder_, batch_size);
 
       run_state_ = RunState::Decoder_First;
       return logits_.Get();
@@ -308,7 +308,7 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
     }
   }
 
-  State::Run(*model_.session_decoder_, *model_.run_options_, batch_size);
+  State::Run(*model_.session_decoder_, batch_size);
   return logits_.Get();
 }
 

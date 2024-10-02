@@ -31,7 +31,7 @@ RoamingArray<float> Gpt_State::Run(int current_length, RoamingArray<int32_t> nex
     UpdateInputsOutputs(next_tokens, next_indices, current_length);
   }
 
-  State::Run(*model_.session_decoder_, *model_.run_options_, batch_size);
+  State::Run(*model_.session_decoder_, batch_size);
   return logits_.Get();
 }
 
