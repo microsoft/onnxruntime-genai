@@ -455,8 +455,15 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       }
 
       session_options.AppendExecutionProvider("QNN", opts);
-    } else
+    } else if (provider_options.name == "WebGPU") {
+      std::unordered_map<std::string, std::string> opts;
+      for (auto& option : provider_options.options) {
+        opts.emplace(option.first, option.second);
+      }
+      session_options.AppendExecutionProvider("WebGPU", opts);
+    } else {
       throw std::runtime_error("Unknown provider type: " + provider_options.name);
+    }
   }
 }
 
