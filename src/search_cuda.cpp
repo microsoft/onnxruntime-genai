@@ -271,6 +271,17 @@ void GreedySearch_Cuda::SetUserTokens(RoamingArray<int32_t> next_tokens) {
   }
 }
 
+void GreedySearch_Cuda::RewindTo(size_t index) {
+  sequences_.RewindTo(index);
+  cudaMemsetAsync(eos_meet_.data(), 0, eos_meet_.size_bytes(), params_->cuda_stream);
+  *done_cpu_ = false;
+  if (index > 0) {
+    sequences_.GetLastTokens(next_tokens_);
+  }
+  else
+    cudaMemsetAsync(next_tokens_.data(), 0, params_->batch_size * sizeof(int32_t), params_->cuda_stream);
+}
+
 void Search_Cuda::ApplyMinLength(int min_length) {
   if (sequences_.GetSequenceLength() >= min_length)
     return;

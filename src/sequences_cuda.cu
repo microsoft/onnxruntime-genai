@@ -46,5 +46,18 @@ void Launch_AppendUserTokensToSequences(std::span<const int32_t> user_tokens, st
   AppendUserTokensToSequences<<<1, 1, 0, stream>>>(user_tokens.data(), sequences.data(), batch_beam_size, past_length, new_length, max_length);
 }
 
+// TODO(aciddelgado): parallelize this kernel.
+__global__ void GetLastTokens(const int32_t* sequences, int32_t* last_tokens, int batch_beam_size, int current_length, int max_length) {
+  // Get the last token of each sequence.
+  for (int i = 0; i < batch_beam_size; i++) {
+    last_tokens[i] = sequences[i * max_length + current_length - 1];
+  }
+}
+
+void Launch_GetLastTokens(std::span<const int32_t> sequences, std::span<int32_t> last_tokens, int batch_beam_size, int current_length, int max_length, cudaStream_t stream) {
+  // Get the last token of each sequence.
+  GetLastTokens<<<1, 1, 0, stream>>>(sequences.data(), last_tokens.data(), batch_beam_size, current_length, max_length);
+}
+
 }  // namespace cuda
 }  // namespace Generators

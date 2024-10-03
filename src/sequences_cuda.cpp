@@ -9,6 +9,7 @@ namespace cuda {
 void Launch_ExpandInputSequences(std::span<const int32_t> input_sequences, std::span<int32_t> sequences, int batch_size, int beam_size, int current_length, int max_length, cudaStream_t stream);
 void Launch_AppendNextTokenToSequences(std::span<const int32_t> next_tokens, std::span<int32_t> sequences, int batch_beam_size, int current_length, int max_length, cudaStream_t stream);
 void Launch_AppendUserTokensToSequences(std::span<const int32_t> next_tokens, std::span<int32_t> sequences, int batch_beam_size, int past_length, int new_length, int max_length, cudaStream_t stream);
+void Launch_GetLastTokens(std::span<const int32_t> sequences, std::span<int32_t> last_tokens, int batch_beam_size, int current_length, int max_length, cudaStream_t stream);
 }  // namespace cuda
 
 // TODO(aciddelgado): update cuda sequences to new paradigm
@@ -66,6 +67,16 @@ void Sequences_Cuda::AppendUserTokensToSequences(gpu_span<int32_t> user_tokens) 
   size_t past_length = current_length_;
   cuda::Launch_AppendUserTokensToSequences(user_tokens, sequences_, batch_beam_size_, past_length, new_length, max_length_, stream_);
   current_length_ += new_length;
+}
+
+void Sequences_Cuda::RewindTo(size_t index) {
+  current_length_ = index;
+  assert(current_length_ >= 0);
+}
+
+void Sequences_Cuda::GetLastTokens(gpu_span<int32_t>& last_tokens) {
+  // TODO(aciddelgado): throw error when no last tokens
+  cuda::Launch_GetLastTokens(sequences_, last_tokens, batch_beam_size_, current_length_, max_length_, stream_);
 }
 
 void Sequences_Cuda::AfterDeviceAppendedNextToken() {

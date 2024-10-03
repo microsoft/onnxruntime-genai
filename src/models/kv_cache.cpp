@@ -217,6 +217,7 @@ void KV_Cache::Update(std::span<const int32_t> beam_indices, int total_length) {
   is_first_update_ = false;
 }
 
+// TODO(aciddelgado): test with past_present_share_buffer_ = false
 void KV_Cache::RewindTo(size_t index) {
   if (past_present_share_buffer_) {
     return;

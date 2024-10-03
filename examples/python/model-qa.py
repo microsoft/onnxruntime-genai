@@ -30,7 +30,7 @@ def main(args):
     generator = og.Generator(model, params)
 
     # Set system prompt
-    system_prompt = "You are a helpful assistant. You are friendly, courteous, and professional. All your responses must end with an exclamation point!"
+    system_prompt = args.system_prompt
     system_tokens = tokenizer.encode(system_prompt)
     generator.add_input_tokens(system_tokens)
     system_prompt_length = len(system_tokens)
@@ -84,7 +84,8 @@ def main(args):
             print(f"Prompt length: {len(input_tokens)}, New tokens: {len(new_tokens)}, Time to first: {(prompt_time):.2f}s, Prompt tokens per second: {len(input_tokens)/prompt_time:.2f} tps, New tokens per second: {len(new_tokens)/run_time:.2f} tps")
         
         # Rewind the generator to the system prompt
-        generator.rewind_to_length(system_prompt_length)
+        if args.rewind:
+            generator.rewind_to_length(system_prompt_length)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS, description="End-to-end AI Question/Answer example for gen-ai")
@@ -99,5 +100,7 @@ if __name__ == "__main__":
     parser.add_argument('-v', '--verbose', action='store_true', default=False, help='Print verbose output and timing information. Defaults to false')
     parser.add_argument('-g', '--timings', action='store_true', default=False, help='Print timing information for each generation step. Defaults to false')
     parser.add_argument('-c', '--chat_template', type=str, default='', help='Chat template to use for the prompt. User input will be injected into {input}')
+    parser.add_argument('-s', '--system_prompt', type=str, default='You are a helpful assistant. You are friendly, courteous, and professional. All your responses must end with an exclamation point!', help='System prompt to use for the prompt.')
+    parser.add_argument('-re', '--rewind', action='store_true', default=False, help='Rewind to the system prompt after each generation. Defaults to false')
     args = parser.parse_args()
     main(args)

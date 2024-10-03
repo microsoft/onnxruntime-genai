@@ -209,8 +209,6 @@ void Logits::Update(RoamingArray<int32_t>& next_tokens, int new_kv_length) {
     input_sequence_lengths[b] = token_index + 1;
   }
 
-  std::cout << "new_kv_length: " << new_kv_length << std::endl;
-
   shape_[1] = new_kv_length;
   StaticBuffer* sb_logits = type_ == Ort::TypeToTensorType<Ort::Float16_t> ? sb_logits16_ : sb_logits32_;
   output_raw_ = !sb_logits ? OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_)

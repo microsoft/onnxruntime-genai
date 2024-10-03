@@ -20,7 +20,7 @@ struct Sequences {
   void AppendNextTokenToSequences(std::span<const int32_t> next_tokens);
 
   // Return Token IDs of last token in each sequence
-  cpu_span<int32_t> GetLastTokens();
+  void GetLastTokens(cpu_span<int32_t>& last_tokens);
   // Rewind sequences to ith token
   void RewindTo(size_t index);
   // TODO(aciddelgado): To be used for rewind

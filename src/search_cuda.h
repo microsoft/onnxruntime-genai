@@ -53,7 +53,7 @@ struct GreedySearch_Cuda : Search_Cuda {
   void SampleTopP(float p, float t) override;
   void SampleTopKTopP(int k, float p, float t) override;
   void SetUserTokens(RoamingArray<int32_t> next_tokens) override; // shape (batch_size, sequence_length)
-
+  void RewindTo(size_t index) override;
 
  private:
   void CheckForEOS();
