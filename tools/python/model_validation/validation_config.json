@@ -12,5 +12,7 @@
     "repetition_penalty": 1.0,
     "verbose": false,
     "output_directory": "",
-    "cache_directory": ""
+    "cache_directory": "",
+    "precision": "",
+    "executive_provider": ""
 }
