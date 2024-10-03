@@ -12,8 +12,6 @@ void Launch_AppendUserTokensToSequences(std::span<const int32_t> next_tokens, st
 void Launch_GetLastTokens(std::span<const int32_t> sequences, std::span<int32_t> last_tokens, int batch_beam_size, int current_length, int max_length, cudaStream_t stream);
 }  // namespace cuda
 
-// TODO(aciddelgado): update cuda sequences to new paradigm
-
 Sequences_Cuda::Sequences_Cuda(int batch_size, int beam_size, int max_length, cudaStream_t stream)
     : stream_{stream},
       batch_beam_size_{batch_size * beam_size},
@@ -58,11 +56,6 @@ void Sequences_Cuda::AppendNextTokenToSequences(std::span<const int32_t> next_to
 }
 
 void Sequences_Cuda::AppendUserTokensToSequences(gpu_span<int32_t> user_tokens) {
-  // if (g_log.enabled && g_log.set_next_tokens) {
-  //   auto& stream = Log("set_next_tokens");
-  //   DumpCudaSpan(stream, next_tokens_span);
-  //   stream << std::endl;
-  // }
   size_t new_length = user_tokens.size() / batch_beam_size_;
   size_t past_length = current_length_;
   cuda::Launch_AppendUserTokensToSequences(user_tokens, sequences_, batch_beam_size_, past_length, new_length, max_length_, stream_);

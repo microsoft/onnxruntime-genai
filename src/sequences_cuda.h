@@ -12,7 +12,6 @@ struct Sequences_Cuda {
 
   void AppendNextTokenToSequences(std::span<const int32_t> next_tokens);
   void AppendUserTokensToSequences(gpu_span<int32_t> user_tokens);
-  // void SetNextTokens(gpu_span<int32_t> next_tokens_span);
 
   void GetLastTokens(gpu_span<int32_t>& last_tokens);
   void RewindTo(size_t index);

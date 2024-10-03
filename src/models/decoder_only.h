@@ -25,7 +25,6 @@ struct DecoderOnly_State : State {
 
  protected:
   void UpdateInputsOutputs(RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> next_indices, int current_length);
-  void UpdateInputsOutputsFromSequence(const RoamingArray<int32_t>& sequence, size_t next_token_length, int past_length); // what this does
 
   const DecoderOnly_Model& model_;
   CapturedGraphInfoPtr captured_graph_info_;

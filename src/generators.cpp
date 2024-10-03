@@ -145,7 +145,7 @@ Generator::Generator(const Model& model, GeneratorParams& params) : model_{model
 }
 
 void Generator::AddTokens(cpu_span<int32_t> input_ids) {
-  // TODO(aciddelgado): batch_size > 1 requires full rewind
+  // TODO(aciddelgado): check for batch_size > 1 requires full rewind
   search_->SetUserTokens(input_ids);
 
   computed_logits_ = false;

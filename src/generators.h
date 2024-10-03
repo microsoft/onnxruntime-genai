@@ -160,7 +160,6 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path);
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Model& model);
 std::shared_ptr<GeneratorParams> CreateGeneratorParams();  // For benchmarking purposes only
 std::unique_ptr<Generator> CreateGenerator(const Model& model, GeneratorParams& params);
-// std::vector<std::vector<int32_t>> Generate(const Model& model, const GeneratorParams& params);  // Uses CreateGenerator and a simple loop to return the entire sequence
 
 float Float16ToFloat32(uint16_t v);  // v is a IEEE 752-2008 binary16 format, 1 sign bit, 5 bit exponent, 10 bit fraction
 void top_k_indices(std::span<int32_t> top_k, std::span<const float> inputs);

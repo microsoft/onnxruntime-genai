@@ -158,14 +158,6 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperInputFeatures(OgaGeneratorPa
   OGA_CATCH
 }
 
-// OgaResult* OGA_API_CALL OgaGenerate(const OgaModel* model, const OgaGeneratorParams* generator_params, OgaSequences** out) {
-//   OGA_TRY
-//   auto result = Generators::Generate(*reinterpret_cast<const Generators::Model*>(model), *reinterpret_cast<const Generators::GeneratorParams*>(generator_params));
-//   *out = reinterpret_cast<OgaSequences*>(std::make_unique<Generators::TokenSequences>(std::move(result)).release());
-//   return nullptr;
-//   OGA_CATCH
-// }
-
 OgaResult* OgaCreateGenerator(const OgaModel* model, OgaGeneratorParams* generator_params, OgaGenerator** out) {
   OGA_TRY
   *out = reinterpret_cast<OgaGenerator*>(CreateGenerator(*reinterpret_cast<const Generators::Model*>(model), *reinterpret_cast<Generators::GeneratorParams*>(generator_params)).release());

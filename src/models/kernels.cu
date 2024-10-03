@@ -99,9 +99,7 @@ __global__ void UpdateAttentionMask(T* mask_data, int total_length) {
 }
 
 template <typename T>
-void Launch_UpdateAttentionMask(T* mask_data, int new_kv_length , int total_length, bool update_static, cudaStream_t stream) {
-  // LEFT OFF ABOUT THE UPDATE THING AND HOW SOMETIMES WE'LL JUST WANT TO UPDATE IN PLACE AND HAVE ACTUAL 0'S AND OTHER TIMES IT'S JUST 1'S ALL THE WAY THROUGH ON A NEW TENSOR SO WE DON'T NEEDT HE OLD ONE
-  
+void Launch_UpdateAttentionMask(T* mask_data, int new_kv_length , int total_length, bool update_static, cudaStream_t stream) {  
   if (update_static) {
     int threads = std::min(256, new_kv_length);
     int blocks = (new_kv_length + threads - 1) / threads;

@@ -237,10 +237,6 @@ void KV_Cache::RewindTo(size_t index) {
   }
 }
 
-// LEFT OFF:
-// check if we even have a present tensor
-// use spans and size bytes to ensure correct sizes of data
-// make sure we're copying the data correctly
 template <typename T>
 void KV_Cache::RewindPastTensorsTo(size_t index) {
   assert(index > 0 && shape_[2] >= index && !past_present_share_buffer_);
