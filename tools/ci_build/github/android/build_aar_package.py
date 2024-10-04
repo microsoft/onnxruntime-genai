@@ -181,7 +181,7 @@ def parse_args():
         help="Configuration to build.",
     )
 
-    parser.add_argument("--ort_home", type=Path, default=REPO_ROOT / "ort",
+    parser.add_argument("--ort_home", type=Path, default=None,
                         help="Path to an unzipped onnxruntime AAR.")
 
     parser.add_argument(
