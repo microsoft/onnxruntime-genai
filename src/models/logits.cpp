@@ -9,10 +9,9 @@
 
 namespace Generators {
 
-Logits::Logits(const Model& model, State& state)
-    : model_{model},
-      state_{state},
-      shape_{state_.params_->BatchBeamSize(), 0, state_.params_->vocab_size},
+Logits::Logits(State& state)
+    : state_{state},
+      shape_{static_cast<int64_t>(state_.params_->BatchBeamSize()), 0, model_.config_->model.vocab_size},
       type_{model_.session_info_->GetOutputDataType(model_.config_->model.decoder.outputs.logits)} {
   output_raw_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
 
@@ -33,7 +32,7 @@ Logits::Logits(const Model& model, State& state)
   }
 #endif
 
-  input_sequence_lengths.resize(state_.params_->batch_size);
+  input_sequence_lengths.resize(state_.params_->search.batch_size);
 }
 
 #pragma warning(push)
@@ -65,13 +64,13 @@ RoamingArray<float> Logits::Get() {
     size_t element_size = type_ == Ort::TypeToTensorType<float> ? 4 : 2;
     size_t vocab_index = 0;  // Simpler math to have this index go up by vocab_size for every logit chunk we process
 
-    for (int batch_index = 0; batch_index < state_.params_->batch_size; batch_index++) {
+    for (int batch_index = 0; batch_index < state_.params_->search.batch_size; batch_index++) {
       // Find the first non pad token from the end
       size_t token_index = input_sequence_lengths[batch_index] - 1;
       for (int beam_index = 0; beam_index < num_beams; beam_index++) {
         switch (model_.device_type_) {
-#if USE_DML
           case DeviceType::DML: {
+#if USE_DML
             ComPtr<ID3D12Resource> source_resource;
             Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, output_raw_->GetTensorMutableRawData(), &source_resource));
 
@@ -90,8 +89,8 @@ RoamingArray<float> Logits::Get() {
                 source_offset,
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                 size_in_bytes);
-          } break;
 #endif
+          } break;
 
           case DeviceType::CPU:
           case DeviceType::CUDA: {
@@ -192,18 +191,18 @@ RoamingArray<float> Logits::Get() {
 
 #pragma warning(pop)
 
-void Logits::Update(RoamingArray<int32_t>& next_tokens, int new_kv_length) {
+void Logits::Update(const RoamingArray<int32_t>& next_tokens, int new_kv_length) {
   if (output_raw_.get()->GetTensorTypeAndShapeInfo()->GetShape()[1] == new_kv_length) {
     return;
   }
 
   // Store length of input sequence for each batch for the get step
-  for (int b = 0; b < state_.params_->batch_size; b++) {
+  for (int b = 0; b < state_.params_->search.batch_size; b++) {
     // Find the first non pad token from the end
     size_t token_index = new_kv_length;
     while (token_index-- > 0) {
-      auto next_token = next_tokens.GetCPU()[b * new_kv_length + token_index];
-      if (next_token != state_.params_->pad_token_id)
+      auto next_token = const_cast<RoamingArray<int32_t>&>(next_tokens).GetCPU()[b * new_kv_length + token_index];
+      if (next_token != model_.config_->model.pad_token_id)
         break;
     }
     input_sequence_lengths[b] = token_index + 1;

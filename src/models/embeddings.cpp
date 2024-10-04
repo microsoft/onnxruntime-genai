@@ -7,12 +7,10 @@
 
 namespace Generators {
 
-// TODO(aciddelgado): initialize after addtokens is called
-Embeddings::Embeddings(const Model& model, State& state, Embeddings::Mode mode, const std::string& name)
-    : model_{model},
-      state_{state},
-      shape_{static_cast<int64_t>(state_.params_->batch_size) * state_.params_->search.num_beams,
-             0, state_.params_->hidden_size},
+Embeddings::Embeddings(State& state, Embeddings::Mode mode, const std::string& name)
+    : state_{state},
+      shape_{static_cast<int64_t>(state_.params_->search.batch_size) * state_.params_->search.num_beams,
+             0, model_.config_->model.decoder.hidden_size},
       type_{mode == Embeddings::Mode::Input
                 ? model_.session_info_->GetInputDataType(name)
                 : model_.session_info_->GetOutputDataType(name)},

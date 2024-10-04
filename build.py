@@ -82,9 +82,9 @@ def _parse_args():
 
     parser.add_argument("--skip_tests", action="store_true", help="Skip all tests. Overrides --test.")
     parser.add_argument("--skip_wheel", action="store_true", help="Skip building the Python wheel.")
-    parser.add_argument("--skip_csharp", action="store_true", help="Skip building the C# API.")
 
-    # Default to not building the Java bindings
+    # Default to not building the language bindings
+    parser.add_argument("--build_csharp", action="store_true", help="Build the C# API.")
     parser.add_argument("--build_java", action="store_true", help="Build Java bindings.")
 
     parser.add_argument("--parallel", action="store_true", help="Enable parallel build.")
@@ -131,7 +131,12 @@ def _parse_args():
     # The following options are mutually exclusive (cross compiling options such as android, ios, etc.)
     platform_group = parser.add_mutually_exclusive_group()
     platform_group.add_argument("--android", action="store_true", help="Build for Android")
-    platform_group.add_argument("--ios", action="store_true", help="Build for ios")
+    platform_group.add_argument("--ios", action="store_true", help="Build for iOS")
+    platform_group.add_argument(
+        "--macos",
+        choices=["MacOSX", "Catalyst"],
+        help="Specify the target platform for macOS build. Only specify this argument when --build_apple_framework is present.",
+    )
 
     # Android options
     parser.add_argument(
@@ -142,7 +147,6 @@ def _parse_args():
     )
     parser.add_argument("--android_api", type=int, default=27,
                         help="Android API Level. Default is 27 (Android 8.1, released in 2017).")
-    
     parser.add_argument(
         "--android_home", type=Path, default=_path_from_env_var("ANDROID_HOME"), help="Path to the Android SDK."
     )
@@ -158,21 +162,39 @@ def _parse_args():
 
     # iOS build options
     parser.add_argument(
-        "--ios_sysroot",
+        "--apple_sysroot",
         default="",
         help="Specify the location name of the macOS platform SDK to be used",
     )
     parser.add_argument(
-        "--ios_arch",
+        "--osx_arch",
         type=str,
         help="Specify the Target specific architectures for iOS "
         "This is only supported on MacOS host",
     )
     parser.add_argument(
-        "--ios_deployment_target",
+        "--apple_deploy_target",
         type=str,
         help="Specify the minimum version of the target platform "
         "This is only supported on MacOS host",
+    )
+
+    parser.add_argument(
+        "--build_apple_framework", action="store_true", help="Build a macOS/iOS framework for the ONNXRuntime."
+    )
+
+    parser.add_argument(
+        "--arm64",
+        action="store_true",
+        help="[cross-compiling] Create ARM64 makefiles. Requires --update and no existing cache "
+        "CMake setup. Delete CMakeCache.txt if needed",
+    )
+
+    parser.add_argument(
+        "--arm64ec",
+        action="store_true",
+        help="[cross-compiling] Create ARM64EC makefiles. Requires --update and no existing cache "
+        "CMake setup. Delete CMakeCache.txt if needed",
     )
 
     return parser.parse_args()
@@ -263,24 +285,23 @@ def _validate_android_args(args: argparse.Namespace):
             log.info(f"Setting CMake generator to '{args.cmake_generator}' for cross-compiling for Android.")
 
         # no C# on Android so automatically skip
-        if not args.skip_csharp:
-            args.skip_csharp = True
+        args.build_csharp = False
 
 
 def _validate_ios_args(args: argparse.Namespace):
     if args.ios:
         if not util.is_mac():
             raise ValueError("A Mac host is required to build for iOS")
-    
+
         needed_args = [
-            args.ios_sysroot,
-            args.ios_arch,
-            args.ios_deployment_target,
+            args.apple_sysroot,
+            args.osx_arch,
+            args.apple_deploy_target,
         ]
         arg_names = [
-            "--ios_sysroot           <the location or name of the macOS platform SDK>",
-            "--ios_arch              <the Target specific architectures for iOS>",
-            "--ios_deployment_target <the minimum version of the target platform>",
+            "--apple_sysroot          <the location or name of the macOS platform SDK>",
+            "--osx_arch              <the Target specific architectures for iOS>",
+            "--apple_deploy_target   <the minimum version of the target platform>",
         ]
         have_required_args = all(_ is not None for _ in needed_args)
         if not have_required_args:
@@ -335,18 +356,16 @@ def _create_env(args: argparse.Namespace):
     return env
 
 
-def _get_csharp_properties(args: argparse.Namespace):
+def _get_csharp_properties(args: argparse.Namespace, ort_lib_dir: Path):
     # Tests folder does not have a sln file. We use the csproj file to build and test.
     # The csproj file requires the platform to be AnyCPU (not "Any CPU")
     configuration = f"/p:Configuration={args.config}"
     platform = "/p:Platform=Any CPU"
     # need an extra config on windows as the actual build output is in the original build dir / config / config
     native_lib_path = f"/p:NativeBuildOutputDir={str(args.build_dir / args.config) if util.is_windows() else str(args.build_dir)}"
+    ort_lib_path = f"/p:OrtLibDir={ort_lib_dir}"
 
-    props = [configuration, platform, native_lib_path]
-
-    if args.ort_home:
-        props.append(f"/p:OrtHome={args.ort_home}")
+    props = [configuration, platform, native_lib_path, ort_lib_path]
 
     return props
 
@@ -475,9 +494,26 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             "-DENABLE_TESTS=OFF",
         ]
 
+    if args.ios or args.macos:
+        platform_name = "macabi" if args.macos == "Catalyst" else args.apple_sysroot
+        command += [
+            "-DENABLE_PYTHON=OFF",
+            "-DENABLE_TESTS=OFF",
+            "-DENABLE_MODEL_BENCHMARK=OFF",
+            f"-DBUILD_APPLE_FRAMEWORK={'ON' if args.build_apple_framework else 'OFF'}",
+            "-DPLATFORM_NAME=" + platform_name,
+        ]
+
+    if args.macos:
+        command += [
+            f"-DCMAKE_OSX_SYSROOT={args.apple_sysroot}",
+            f"-DCMAKE_OSX_ARCHITECTURES={args.osx_arch}",
+            f"-DCMAKE_OSX_DEPLOYMENT_TARGET={args.apple_deploy_target}",
+        ]
+
     if args.ios:
         def _get_opencv_toolchain_file():
-            if args.ios_sysroot == "iphoneos":
+            if args.apple_sysroot == "iphoneos":
                 return (
                     REPO_ROOT / "cmake" / "external" / "opencv" / "platforms" / "iOS" / "cmake" /
                         "Toolchains" / "Toolchain-iPhoneOS_Xcode.cmake"
@@ -488,18 +524,44 @@ def update(args: argparse.Namespace, env: dict[str, str]):
                         "Toolchains" / "Toolchain-iPhoneSimulator_Xcode.cmake"
                 )
 
-
         command += [
             "-DCMAKE_SYSTEM_NAME=iOS",
-            f"-DCMAKE_OSX_SYSROOT={args.ios_sysroot}",
-            f"-DCMAKE_OSX_ARCHITECTURES={args.ios_arch}",
-            f"-DCMAKE_OSX_DEPLOYMENT_TARGET={args.ios_deployment_target}",
-            "-DENABLE_PYTHON=OFF",
+            f"-DIOS_ARCH={args.osx_arch}",
+            f"-DIPHONEOS_DEPLOYMENT_TARGET={args.apple_deploy_target}",
             # The following arguments are specific to the OpenCV toolchain file
-            f"-DIOS_ARCH={args.ios_arch}",
-            f"-DIPHONEOS_DEPLOYMENT_TARGET={args.ios_deployment_target}",
             f"-DCMAKE_TOOLCHAIN_FILE={_get_opencv_toolchain_file()}",
         ]
+
+    if args.macos == "Catalyst":
+        if args.cmake_generator == "Xcode":
+            raise Exception("Xcode CMake generator ('--cmake_generator Xcode') doesn't support Mac Catalyst build.")
+
+        macabi_target = f"{args.osx_arch}-apple-ios{args.apple_deploy_target}-macabi"
+        command += [
+            "-DCMAKE_CXX_COMPILER_TARGET=" + macabi_target,
+            "-DCMAKE_C_COMPILER_TARGET=" + macabi_target,
+            "-DCMAKE_CC_COMPILER_TARGET=" + macabi_target,
+            f"-DCMAKE_CXX_FLAGS=--target={macabi_target}",
+            f"-DCMAKE_CXX_FLAGS_RELEASE=-O3 -DNDEBUG --target={macabi_target}",
+            f"-DCMAKE_C_FLAGS=--target={macabi_target}",
+            f"-DCMAKE_C_FLAGS_RELEASE=-O3 -DNDEBUG --target={macabi_target}",
+            f"-DCMAKE_CC_FLAGS=--target={macabi_target}",
+            f"-DCMAKE_CC_FLAGS_RELEASE=-O3 -DNDEBUG --target={macabi_target}",
+            "-DMAC_CATALYST=1",
+        ]
+
+    if args.arm64:
+        command += ["-A", "ARM64"]
+    elif args.arm64ec:
+        command += ["-A", "ARM64EC"]
+
+    if args.arm64 or args.arm64ec:
+        if args.test:
+            log.warning(
+                "Cannot test on host build machine for cross-compiled "
+                "ARM64 builds. Will skip test running after build."
+            )
+            args.test = False
 
     if args.cmake_extra_defines != []:
         command += args.cmake_extra_defines
@@ -519,12 +581,18 @@ def build(args: argparse.Namespace, env: dict[str, str]):
 
     util.run(make_command, env=env)
 
-    if not args.skip_csharp:
+    lib_dir = args.build_dir
+    if not args.ort_home:
+        _ = util.download_dependencies(args.use_cuda, args.use_rocm, args.use_dml, lib_dir)
+    else:
+        lib_dir = args.ort_home / "lib"
+
+    if args.build_csharp:
         dotnet = str(_resolve_executable_path("dotnet"))
 
         # Build the library
         csharp_build_command = [dotnet, "build", ".",]
-        csharp_build_command += _get_csharp_properties(args)
+        csharp_build_command += _get_csharp_properties(args, ort_lib_dir=lib_dir)
         util.run(csharp_build_command, cwd=REPO_ROOT / "src" / "csharp")
         util.run(csharp_build_command, cwd=REPO_ROOT / "test" / "csharp")
 
@@ -533,13 +601,19 @@ def test(args: argparse.Namespace, env: dict[str, str]):
     """
     Run the tests.
     """
-    ctest_cmd = [str(args.ctest_path), "--build-config", args.config, "--verbose", "--timeout", "10800"]
-    util.run(ctest_cmd, cwd=str(args.build_dir))
+    lib_dir = args.build_dir / "test"
+    if not args.ort_home:
+        _ = util.download_dependencies(args.use_cuda, args.use_rocm, args.use_dml, lib_dir)
+    else:
+        lib_dir = args.ort_home / "lib"
 
-    if not args.skip_csharp:
+    ctest_cmd = [str(args.ctest_path), "--build-config", args.config, "--verbose", "--timeout", "10800"]
+    util.run(ctest_cmd, cwd=str(args.build_dir / "test"))
+
+    if args.build_csharp:
         dotnet = str(_resolve_executable_path("dotnet"))
         csharp_test_command = [dotnet, "test"]
-        csharp_test_command += _get_csharp_properties(args)
+        csharp_test_command += _get_csharp_properties(args, ort_lib_dir=lib_dir)
         util.run(csharp_test_command, env=env, cwd=str(REPO_ROOT / "test" / "csharp"))
 
     if args.android:

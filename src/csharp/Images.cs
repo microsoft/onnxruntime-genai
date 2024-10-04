@@ -18,9 +18,15 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         internal IntPtr Handle { get { return _imagesHandle; } }
 
-        public static Images Load(string imagePath)
+        public static Images Load(string[] imagePaths)
         {
-            Result.VerifySuccess(NativeMethods.OgaLoadImage(StringUtils.ToUtf8(imagePath), out IntPtr imagesHandle));
+            Result.VerifySuccess(NativeMethods.OgaCreateStringArray(out IntPtr stringArray));
+            foreach (string imagePath in imagePaths)
+            {
+                Result.VerifySuccess(NativeMethods.OgaStringArrayAddString(stringArray, StringUtils.ToUtf8(imagePath)));
+            }
+            Result.VerifySuccess(NativeMethods.OgaLoadImages(stringArray, out IntPtr imagesHandle));
+            NativeMethods.OgaDestroyStringArray(stringArray);
             return new Images(imagesHandle);
         }
 

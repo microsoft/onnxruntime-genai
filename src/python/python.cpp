@@ -224,6 +224,9 @@ struct PyGeneratorParams {
     if (py_whisper_input_features_.size() != 0) {
       GeneratorParams::Whisper& whisper = params_->inputs.emplace<GeneratorParams::Whisper>();
       whisper.input_features = std::make_shared<Tensor>(ToOrtValue(py_whisper_input_features_));
+      if (py_alignment_heads_.size() != 0) {
+        whisper.alignment_heads = std::make_shared<Tensor>(ToOrtValue(py_alignment_heads_));
+      }
     }
   }
 
@@ -259,7 +262,8 @@ struct PyGeneratorParams {
     params_->TryGraphCapture(max_batch_size.cast<int>());
   }
 
-  pybind11::array_t<float> py_whisper_input_features_;
+  pybind11::array py_whisper_input_features_;
+  pybind11::array py_alignment_heads_;
 
   std::vector<pybind11::object> refs_;  // References to data we want to ensure doesn't get garbage collected
 };
@@ -358,10 +362,13 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   pybind11::class_<PyGeneratorParams>(m, "GeneratorParams")
       .def(pybind11::init<const Model&>())
-      .def_property_readonly("pad_token_id", [](const PyGeneratorParams& v) { return v.params_->pad_token_id; })
-      .def_property_readonly("eos_token_id", [](const PyGeneratorParams& v) { return v.params_->eos_token_id; })
-      .def_property_readonly("vocab_size", [](const PyGeneratorParams& v) { return v.params_->vocab_size; })
+      // TODO(ryanhill): Remove these entirely or replace with a single property that returns the entire config?
+      .def_property_readonly("pad_token_id", [](const PyGeneratorParams& v) { return v.params_->config.model.pad_token_id; })
+      .def_property_readonly("eos_token_id", [](const PyGeneratorParams& v) { return v.params_->config.model.eos_token_id; })
+      .def_property_readonly("vocab_size", [](const PyGeneratorParams& v) { return v.params_->config.model.vocab_size; })
+      // TODO(baijumeswani): Rename/redesign the whisper_input_features to be more generic
       .def_readwrite("whisper_input_features", &PyGeneratorParams::py_whisper_input_features_)
+      .def_readwrite("alignment_heads", &PyGeneratorParams::py_alignment_heads_)
       .def("set_inputs", [](PyGeneratorParams& generator_params, PyNamedTensors* named_tensors) {
         if (!named_tensors || !named_tensors->named_tensors_)
           throw std::runtime_error("No inputs provided.");
@@ -379,6 +386,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   pybind11::class_<Tokenizer, std::shared_ptr<Tokenizer>>(m, "Tokenizer")
       .def(pybind11::init([](Model& model) { return model.CreateTokenizer(); }))
       .def("encode", &Tokenizer::Encode)
+      .def("to_token_id", &Tokenizer::TokenToTokenId)
       .def("decode", [](const Tokenizer& t, pybind11::array_t<int32_t> tokens) { return t.Decode(ToSpan(tokens)); })
       .def("encode_batch", [](const Tokenizer& t, std::vector<std::string> strings) {
         auto result = t.EncodeBatch(strings);
@@ -419,27 +427,76 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         if (image_paths.empty())
           throw std::runtime_error("No images provided");
 
-        if (image_paths.size() > 1U)
-          throw std::runtime_error("Loading multiple images is not supported");
+        std::vector<std::string> image_paths_string;
+        std::vector<const char*> image_paths_vector;
+        for (auto image_path : image_paths) {
+          if (!pybind11::isinstance<pybind11::str>(image_path))
+            throw std::runtime_error("Image paths must be strings.");
+          image_paths_string.push_back(image_path.cast<std::string>());
+          image_paths_vector.push_back(image_paths_string.back().c_str());
+        }
 
-        auto image_path = image_paths[0].cast<std::string>();
-        return LoadImageImpl(image_path.c_str());
+        return LoadImages(image_paths_vector);
+      })
+      .def_static("open_bytes", [](pybind11::args image_datas) {
+        if (image_datas.empty())
+          throw std::runtime_error("No images provided");
+
+        std::unique_ptr<ort_extensions::ImageRawData[]> image_raw_data = std::make_unique<ort_extensions::ImageRawData[]>(image_datas.size());
+        for (size_t i = 0; i < image_datas.size(); ++i) {
+          if (!pybind11::isinstance<pybind11::bytes>(image_datas[i]))
+            throw std::runtime_error("Image data must be bytes.");
+          auto bytes = image_datas[i].cast<pybind11::bytes>();
+          pybind11::buffer_info info(pybind11::buffer(bytes).request());
+          uint8_t* data = reinterpret_cast<uint8_t*>(info.ptr);
+          image_raw_data[i] = ort_extensions::ImageRawData(data, data + info.size);
+        }
+
+        return std::make_unique<Images>(std::move(image_raw_data), image_datas.size());
+      });
+
+  pybind11::class_<Audios>(m, "Audios")
+      .def_static("open", [](pybind11::args audio_paths) {
+        if (audio_paths.empty())
+          throw std::runtime_error("No audios provided");
+
+        std::vector<std::string> audio_paths_string;
+        std::vector<const char*> audio_paths_vector;
+
+        for (const auto& audio_path : audio_paths) {
+          if (!pybind11::isinstance<pybind11::str>(audio_path))
+            throw std::runtime_error("Audio paths must be strings.");
+          audio_paths_string.push_back(audio_path.cast<std::string>());
+          audio_paths_vector.push_back(audio_paths_string.back().c_str());
+        }
+
+        return LoadAudios(audio_paths_vector);
       });
 
   pybind11::class_<PyNamedTensors>(m, "NamedTensors");
 
   pybind11::class_<MultiModalProcessor, std::shared_ptr<MultiModalProcessor>>(m, "MultiModalProcessor")
-      .def("__call__", [](MultiModalProcessor& processor, const std::string& prompt, const pybind11::kwargs& kwargs) -> std::unique_ptr<PyNamedTensors> {
-        if (kwargs.contains("images")) {
-          if (processor.image_processor_ == nullptr) {
-            throw std::runtime_error("Image processor is not available for this model.");
-          }
-          const Images* images = kwargs["images"].cast<const Images*>();
-          return std::make_unique<PyNamedTensors>(processor.image_processor_->Process(*processor.tokenizer_, prompt, images));
-        } else {
-          throw std::runtime_error("MultiModalProcessor cannot process this request. Nothing to process.");
-        }
-      })
+      .def(
+          "__call__", [](MultiModalProcessor& processor, const std::optional<std::string>& prompt, const pybind11::kwargs& kwargs) -> std::unique_ptr<PyNamedTensors> {
+            if (kwargs.contains("images")) {
+              if (processor.image_processor_ == nullptr) {
+                throw std::runtime_error("Image processor is not available for this model.");
+              }
+              const Images* images = kwargs["images"].cast<const Images*>();
+              if (!prompt.has_value()) {
+                throw std::runtime_error("Prompt is required for processing the image.");
+              }
+              return std::make_unique<PyNamedTensors>(
+                  processor.image_processor_->Process(*processor.tokenizer_, *prompt, images));
+            } else if (kwargs.contains("audios")) {
+              const Audios* audios = kwargs["audios"].cast<const Audios*>();
+              return std::make_unique<PyNamedTensors>(
+                  processor.audio_processor_->Process(audios));
+            } else {
+              throw std::runtime_error("Nothing to process.");
+            }
+          },
+          pybind11::arg("prompt") = pybind11::none())
       .def("create_stream", [](MultiModalProcessor& processor) { return processor.tokenizer_->CreateStream(); })
       .def("decode", [](MultiModalProcessor& processor, pybind11::array_t<int32_t> tokens) {
         return processor.tokenizer_->Decode(ToSpan(tokens));

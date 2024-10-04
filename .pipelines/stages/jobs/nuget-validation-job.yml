@@ -21,6 +21,7 @@ parameters:
   values:
   - 'linux'
   - 'win'
+  - 'osx'
 
 jobs:
 - job: nuget_${{ parameters.os }}_${{ parameters.ep }}_${{ parameters.arch }}_validation
@@ -43,6 +44,9 @@ jobs:
       pool: 'onnxruntime-genai-windows-vs-2022-arm64'
     ${{ else }}:
       pool: 'onnxruntime-Win-CPU-2022'
+  ${{ if eq(parameters.os, 'osx') }}:
+    pool:
+      vmImage: 'macOS-latest'
 
   timeoutInMinutes: 180
   #  set variables here to be used in the template and steps
@@ -158,7 +162,7 @@ jobs:
       env:
         NUGET_PLUGIN_HANDSHAKE_TIMEOUT_IN_SECONDS: 180
         NUGET_PLUGIN_REQUEST_TIMEOUT_IN_SECONDS: 180
-  - ${{ elseif eq(parameters.os, 'linux') }}:
+  - ${{ elseif or(eq(parameters.os, 'linux'), eq(parameters.os, 'osx')) }}:
     - bash: |
        dotnet --info
        cp $(Build.BinariesDirectory)/nuget/* examples/csharp/HelloPhi/
@@ -166,6 +170,7 @@ jobs:
        mv models/$(prebuild_phi3_mini_model_folder) models/phi-3
        dotnet restore -r $(os)-$(arch) /property:Configuration=$(csproj_configuration) --source https://api.nuget.org/v3/index.json --source https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json --source $PWD --disable-parallel --verbosity detailed
        dotnet build ./HelloPhi.csproj -r $(os)-$(arch) /property:Configuration=$(csproj_configuration) --no-restore --self-contained
+       ls -l ./bin/$(csproj_configuration)/net6.0/$(os)-$(arch)/
       displayName: 'Perform dotnet restore & build'
       workingDirectory: '$(Build.Repository.LocalPath)'
       env:

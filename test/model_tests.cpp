@@ -38,7 +38,7 @@ TEST(ModelTests, GreedySearchGptFp32) {
 
   auto params = Generators::CreateGeneratorParams(*model);
   params->search.max_length = 10;
-  params->batch_size = static_cast<int>(input_ids_shape[0]);
+  params->search.batch_size = static_cast<int>(input_ids_shape[0]);
 
   auto generator = Generators::CreateGenerator(*model, *params);
   generator->AddTokens(Generators::cpu_span<int>(input_ids.data(), input_ids.size()));
@@ -48,7 +48,7 @@ TEST(ModelTests, GreedySearchGptFp32) {
   }
 
   // Verify outputs match expected outputs
-  for (size_t i = 0; i < static_cast<size_t>(params->batch_size); i++) {
+  for (size_t i = 0; i < static_cast<size_t>(params->search.batch_size); i++) {
     auto sequence = generator->GetSequence(i).GetCPU();
     auto* expected_output_start = &expected_output[i * params->search.max_length];
     EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params->search.max_length * sizeof(int32_t)));
@@ -75,7 +75,7 @@ TEST(ModelTests, BeamSearchGptFp32) {
   auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
   auto params = Generators::CreateGeneratorParams(*model);
-  params->batch_size = static_cast<int>(input_ids_shape[0]);
+  params->search.batch_size = static_cast<int>(input_ids_shape[0]);
   params->search.max_length = 20;
   params->search.length_penalty = 1.0f;
   params->search.num_beams = 4;
@@ -88,7 +88,7 @@ TEST(ModelTests, BeamSearchGptFp32) {
 
 
   // Verify outputs match expected outputs
-  for (int i = 0; i < params->batch_size; i++) {
+  for (int i = 0; i < params->search.batch_size; i++) {
     auto sequence = generator->GetSequence(i).GetCPU();
     auto* expected_output_start = &expected_output[static_cast<size_t>(i) * params->search.max_length];
     EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params->search.max_length * sizeof(int32_t)));
@@ -109,7 +109,7 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
   auto model = Generators::CreateModel(Generators::GetOrtEnv(), model_path);
 
   auto params = Generators::CreateGeneratorParams(*model);
-  params->batch_size = static_cast<int>(input_ids_shape[0]);
+  params->search.batch_size = static_cast<int>(input_ids_shape[0]);
   params->search.max_length = 10;
 
   auto generator = Generators::CreateGenerator(*model, *params);
@@ -120,7 +120,7 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
   }
 
   // Verify outputs match expected outputs
-  for (int i = 0; i < params->batch_size; i++) {
+  for (int i = 0; i < params->search.batch_size; i++) {
     auto sequence_gpu = generator->GetSequence(i);
     auto sequence = sequence_gpu.GetCPU();
     auto* expected_output_start = &expected_output[i * params->search.max_length];
@@ -152,7 +152,7 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
   auto model = Generators::CreateModel(Generators::GetOrtEnv(), model_path);
 
   auto params = Generators::CreateGeneratorParams(*model);
-  params->batch_size = static_cast<int>(input_ids_shape[0]);
+  params->search.batch_size = static_cast<int>(input_ids_shape[0]);
   params->search.max_length = 20;
   params->search.num_beams = 4;
   params->search.length_penalty = 1.0f;
@@ -165,7 +165,7 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
 
 
   // Verify outputs match expected outputs
-  for (int i = 0; i < params->batch_size; i++) {
+  for (int i = 0; i < params->search.batch_size; i++) {
     auto sequence = generator->GetSequence(i).GetCPU();
     auto* expected_output_start = &expected_output[static_cast<size_t>(i) * params->search.max_length];
     EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params->search.max_length * sizeof(int32_t)));
@@ -194,7 +194,7 @@ Print all primes between 1 and n
   auto tokens = tokenizer->Encode(prompt);
 
   auto params = Generators::CreateGeneratorParams(*model);
-  params->batch_size = 1;
+  params->search.batch_size = 1;
   params->search.max_length = 128;
 
   // Generator version

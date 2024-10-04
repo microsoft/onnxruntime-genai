@@ -32,6 +32,16 @@ parameters:
   type: boolean
   default: false
 
+- name: enable_macos_cpu
+  displayName: 'Whether MacOS CPU package is built.'
+  type: boolean
+  default: false
+
+- name: enable_apple_framework
+  displayName: 'Whether Apple framework for iOS & MacCatalyst is built.'
+  type: boolean
+  default: false
+
 - name: ort_version
   type: string
 
@@ -80,6 +90,7 @@ jobs:
       value: 'Microsoft.ML.OnnxRuntime.Gpu'
     ${{ if eq(parameters.ep, 'directml') }}:
       value: 'Microsoft.ML.OnnxRuntime.DirectML'
+
   steps:
   - ${{ if and(eq(parameters.enable_win_cpu, true), eq(parameters.ep, 'cpu')) }}:
     - template: steps/utils/flex-download-pipeline-artifact.yml
@@ -128,6 +139,18 @@ jobs:
       parameters:
         StepName: 'Download linux-cuda-x64 capi Artifacts'
         ArtifactName: onnxruntime-genai-linux-cuda-x64-capi
+        TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
+
+  - ${{ if eq(parameters.enable_macos_cpu, true) }}:
+    - template: steps/utils/flex-download-pipeline-artifact.yml
+      parameters:
+        StepName: 'Download osx-cpu-x64 capi Artifacts'
+        ArtifactName: onnxruntime-genai-osx-cpu-x64-capi
+        TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
+    - template: steps/utils/flex-download-pipeline-artifact.yml
+      parameters:
+        StepName: 'Download osx-cpu-arm64 capi Artifacts'
+        ArtifactName: onnxruntime-genai-osx-cpu-arm64-capi
         TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
 
   - checkout: self

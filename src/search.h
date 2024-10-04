@@ -58,7 +58,7 @@ struct Search_Cpu : Search {
 
   cpu_span<int32_t> next_tokens_;  // shape (beam_size*batch_size)
 
-  std::span<float> next_token_scores_;  // shape (beam_size*batch_size, vocab_size)
+  cpu_span<float> next_token_scores_;  // shape (beam_size*batch_size, vocab_size)
 
   Sequences sequences_;
   bool done_{};
@@ -92,7 +92,7 @@ struct GreedySearch_Cpu : Search_Cpu {
 
   std::span<bool> eos_seen_;  // shape (batch_size)
   std::unique_ptr<bool[]> eos_seen_buffer_;
-  int not_done_count_{params_->batch_size};  // When zero, every batch entry is done (starts at batch_size_)
+  int not_done_count_{params_->search.batch_size};  // When zero, every batch entry is done (starts at batch_size_)
 
   std::mt19937 gen_;
 };

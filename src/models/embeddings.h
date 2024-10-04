@@ -11,7 +11,7 @@ struct Embeddings {
     Output
   };
 
-  Embeddings(const Model& model, State& state, Embeddings::Mode mode, const std::string& name);
+  Embeddings(State& state, Embeddings::Mode mode, const std::string& name);
   Embeddings(const Embeddings&) = delete;
   Embeddings& operator=(const Embeddings&) = delete;
 
@@ -26,8 +26,8 @@ struct Embeddings {
   auto& GetShape() const { return shape_; }
 
  private:
-  const Model& model_;
   State& state_;
+  const Model& model_{state_.model_};
   std::array<int64_t, 3> shape_{};  // [batch_size, sequence_length, hidden_size]
   ONNXTensorElementDataType type_;
   const Mode mode_{};

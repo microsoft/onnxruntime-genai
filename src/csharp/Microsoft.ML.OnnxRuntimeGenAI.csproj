@@ -28,6 +28,7 @@
   <PropertyGroup>
       <OnnxRuntimeGenAIBuildDirectory>$(CsharpSrcRoot)\..\..\build</OnnxRuntimeGenAIBuildDirectory>
       <NativeBuildOutputDir>$(OnnxRuntimeGenAIBuildDirectory)\$(Configuration)\</NativeBuildOutputDir>
+      <OrtLibDir></OrtLibDir>
       <VersionInfoFile>$(CsharpSrcRoot)\..\..\VERSION_INFO</VersionInfoFile>
   </PropertyGroup>
 
@@ -70,10 +71,10 @@
   <ItemGroup>
     <None Include="$(NativeBuildOutputDir)\onnxruntime-genai.lib" Condition="Exists('$(NativeBuildOutputDir)\onnxruntime-genai.lib')" PackagePath="" Pack="false" CopyToOutputDirectory="Never" Visible="false" />
     <None Include="$(NativeBuildOutputDir)\onnxruntime-genai.dll" Condition="Exists('$(NativeBuildOutputDir)\onnxruntime-genai.dll')" PackagePath="" Pack="false" CopyToOutputDirectory="PreserveNewest" Visible="false" />
-    <None Include="$(NativeBuildOutputDir)\onnxruntime.dll" Condition="Exists('$(NativeBuildOutputDir)\onnxruntime.dll')" PackagePath="" Pack="false" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+    <None Include="$(OrtLibDir)\onnxruntime.dll" Condition="Exists('$(OrtLibDir)\onnxruntime.dll')" PackagePath="" Pack="false" CopyToOutputDirectory="PreserveNewest" Visible="false" />
     <None Include="$(CsharpSrcRoot)\..\..\LICENSE" PackagePath="" Pack="true" Visible="false" CopyToOutputDirectory="PreserveNewest" />
-    <None Condition="Exists('$(NativeBuildOutputDir)\onnxruntime_providers_shared.dll')" Include="$(NativeBuildOutputDir)\onnxruntime_providers_shared.dll" CopyToOutputDirectory="Never" Visible="false" />
-    <None Condition="Exists('$(NativeBuildOutputDir)\onnxruntime_providers_cuda.dll')" Include="$(NativeBuildOutputDir)\onnxruntime_providers_cuda.dll" CopyToOutputDirectory="Never" Visible="false" />
+    <None Condition="Exists('$(OrtLibDir)\onnxruntime_providers_shared.dll')" Include="$(OrtLibDir)\onnxruntime_providers_shared.dll" CopyToOutputDirectory="Never" Visible="false" />
+    <None Condition="Exists('$(OrtLibDir)\onnxruntime_providers_cuda.dll')" Include="$(OrtLibDir)\onnxruntime_providers_cuda.dll" CopyToOutputDirectory="Never" Visible="false" />
   </ItemGroup>
 
   <ItemGroup>

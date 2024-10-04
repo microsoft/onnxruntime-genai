@@ -7,7 +7,7 @@
 namespace Generators {
 
 struct Logits {
-  Logits(const Model& model, State& state);
+  Logits(State& state);
 
   // Register input_ids as ORT session input.
   void Add();
@@ -15,13 +15,13 @@ struct Logits {
   RoamingArray<float> Get();
 
   // Resize logits to [bz, token_count, vocab_size] if necessary.
-  void Update(RoamingArray<int32_t>& next_tokens_unk, int new_kv_length);
+  void Update(const RoamingArray<int32_t>& next_tokens, int new_kv_length);
 
  private:
   void HandleEOSArray(cpu_span<float> logits);
 
-  const Model& model_;
   State& state_;
+  const Model& model_{state_.model_};
   size_t output_index_{~0U};
 
   std::array<int64_t, 3> shape_{};
