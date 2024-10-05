@@ -18,7 +18,9 @@ struct Search_Cuda : Search {
     cudaStreamSynchronize(params_->cuda_stream);
     return *done_cpu_;
   }  // TODO: Use an event
-  void SetLogits(RoamingArray<float> logits);
+
+  RoamingArray<float> GetLogits() const override;
+  void SetLogits(RoamingArray<float> logits) override;
 
   void ApplyMinLength(int min_length) override;
   void ApplyRepetitionPenalty(float penalty) override;
