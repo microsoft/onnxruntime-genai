@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentView xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             xmlns:toolkit="http://schemas.microsoft.com/dotnet/2022/maui/toolkit"
+             xmlns:views="clr-namespace:GennyMaui.Pages.Views"
+             xmlns:vm="clr-namespace:GennyMaui.ViewModels"
+             x:Class="GennyMaui.Pages.Views.ModelConfigView">
+    <ContentView.BindingContext>
+        <vm:LoadableModel/>
+    </ContentView.BindingContext>
+
+    <StackLayout>
+
+        <VerticalStackLayout>
+            <Label VerticalOptions="Center" Margin="4">Local Model:</Label>
+            <Grid Margin="4">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="8*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <CheckBox Grid.Column="0"
+                          HorizontalOptions="Center"
+                          VerticalOptions="Center"
+                          IsChecked="{Binding IsLocalModelSelected}"
+                          CheckedChanged="LocalModelCheckBox_CheckedChanged"/>
+                <Entry Grid.Column="1"
+                       VerticalOptions="Center"
+                       Text="{Binding ModelPath}"
+                       Placeholder="Select to choose local model path"
+                       ClearButtonVisibility="WhileEditing"
+                       TextChanged="LocalModelPathEntry_TextChanged" />
+                <Label Grid.Column="2"
+                       Text="{Binding LocalModelStatusString}"
+                        VerticalOptions="Center"
+                       HorizontalOptions="Center"/>
+            </Grid>
+        </VerticalStackLayout>
+
+        <VerticalStackLayout>
+            <Label VerticalOptions="Center" Margin="4">Remote Model:</Label>
+            <ListView ItemsSource="{Binding RemoteModels}"
+                      HasUnevenRows="True"
+                      SelectionMode="None">
+                <ListView.ItemTemplate>
+                    <DataTemplate>
+                        <ViewCell>
+                            <Grid Margin="4">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="8*" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <CheckBox Grid.Column="0"
+                                          IsChecked="{Binding IsChecked}"
+                                          CheckedChanged="RemoteModelCheckBox_CheckedChanged"
+                                          HorizontalOptions="Center"></CheckBox>
+                                <VerticalStackLayout VerticalOptions="Center" Grid.Column="1">
+                                    <Label
+                                       Text="{Binding RepoId}"
+                                       VerticalOptions="Center"
+                                       FontSize="12"
+                                       FontAttributes="Bold" />
+                                    <Label
+                                       Text="{Binding Subpath}"
+                                       VerticalOptions="Center"
+                                       FontSize="9" />
+                                </VerticalStackLayout>
+
+                                <Label Grid.Column="2"
+                                       IsVisible="{Binding IsDownloading, Converter={toolkit:InvertedBoolConverter}}"
+                                       VerticalOptions="Center"
+                                       HorizontalOptions="Center"
+                                       Margin="2"
+                                       FontSize="14"
+                                       Text="{Binding StatusString}">
+                                </Label>
+                                <ActivityIndicator
+                                    Grid.Column="2"
+                                    HorizontalOptions="Center"
+                                    VerticalOptions="Center"
+                                    IsVisible="{Binding IsDownloading}"
+                                    IsRunning="{Binding IsDownloading}" />
+                            </Grid>
+                        </ViewCell>
+                    </DataTemplate>
+                </ListView.ItemTemplate>
+            </ListView>
+        </VerticalStackLayout>
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <Button x:Name="LoadModelButton"
+                    Grid.Column="0"
+                    IsVisible="{Binding IsModelLoading, Converter={toolkit:InvertedBoolConverter}}"
+                    Text="⚡Load Model"
+                    Margin="4"
+                    Command="{Binding LoadModelCommand}" />
+            <Button Grid.Column="1"
+                    IsVisible="{Binding IsModelLoading, Converter={toolkit:InvertedBoolConverter}}"
+                    Text="ℹ️ORT Info"
+                    Margin="4"
+                    Command="{Binding ShowOrtInfoCommand}" />
+        </Grid>
+
+        <ActivityIndicator
+            VerticalOptions="Center"
+            WidthRequest="{Binding Source={x:Reference LoadModelButton}, Path=Height}"
+            HeightRequest="{Binding Source={x:Reference LoadModelButton}, Path=Height}"
+            Margin="4"
+            IsVisible="{Binding IsModelLoading}"
+            IsRunning="{Binding IsModelLoading}" />
+        <views:SearchOptionView BindingContext="{Binding Configuration.SearchOptions}">
+
+        </views:SearchOptionView>
+    </StackLayout>
+</ContentView>
