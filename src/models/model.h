@@ -170,6 +170,10 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
   std::unique_ptr<Ort::Allocator> dml_owned_allocator_;
   std::unique_ptr<OrtMemoryInfo> memory_info_device_;
 #endif
+  std::unique_ptr<OrtMemoryInfo> memory_info_device_;
+#if USE_WEBGPU
+  std::unique_ptr<Ort::Allocator> webgpu_owned_allocator_;
+#endif
 
   std::shared_ptr<CapturedGraphPool> captured_graph_pool_;
   std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;

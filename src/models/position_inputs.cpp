@@ -172,6 +172,7 @@ void PositionInputs::UpdatePositionIDs(int current_length) {
         model_.GetDmlExecutionContext()->ExecuteCommandList(dml_update_position_ids_kernel_->GetCommandList(), &fence, &completion_value);
       } break;
 #endif
+      case DeviceType::WEBGPU:
       case DeviceType::CPU: {
         if (type_ == Ort::TypeToTensorType<int32_t>)
           UpdatePositionIDsImpl<int32_t>();
@@ -269,6 +270,7 @@ void PositionInputs::UpdateAttentionMask(int current_length) {
       break;
     }
 #endif
+    case DeviceType::WEBGPU:
     case DeviceType::CPU: {
       if (type_ == Ort::TypeToTensorType<int32_t>)
         UpdateAttentionMaskImpl(attention_mask_next_->GetTensorMutableData<int32_t>(),
