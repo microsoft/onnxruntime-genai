@@ -1018,7 +1018,104 @@ class Model:
 
         return cos_cache_name, sin_cache_name
 
+
+    def make_rotary_embedding_partial(self, rotemb, name, root_input, **kwargs):
+        cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches(rotemb)
+
+        #         root_input
+        #             |
+        #          Reshape
+        #             |
+        #           Split
+        #           /   \
+        #       Reshape  |
+        #          |     |
+        #     RoteryEmb  |
+        #          |     |
+        #       Reshape  |
+        #           \   /
+        #           Concat
+        #             |
+        #           Reshape
+
+        num_heads = (self.num_kv_heads if "k_rotary" in name else self.num_attn_heads)
+        dim_size = self.head_size * num_heads
+        const_prefix =  ("k_" if "k_rotary" in name else "v_")
+
+        # Reshape 1
+        reshape_name = f"{name}/Reshape/"
+        reshape_output_0 = f"{name}/Reshape/output_0"
+        rotary_reshape_dim = [0, 0, num_heads, int(dim_size / num_heads)]
+        constant_name = f"{const_prefix}RotaryEmb/Reshape/Const_input_dim_2"
+        constant_value = numpy_helper.from_array(np.array(rotary_reshape_dim, dtype="int64"))
+        self.make_node("Constant", inputs=[], outputs=[f"{constant_name}\constant_0"], name=constant_name, value=constant_value)
+        self.make_node("Reshape", inputs=[root_input, f"{constant_name}\constant_0"], outputs=[reshape_output_0], name=reshape_name)
+        self.make_value_info(reshape_output_0, self.io_dtype, shape=['batch_size', 'sequence_length', num_heads, int(dim_size / num_heads)])
+
+        # Split
+        split_name = f"{name}/Split/"
+        split_output_0 = f"{name}/Split/output_0"
+        split_output_1 = f"{name}/Split/output_1"
+        split_size = int(self.rotemb_attrs["partial_rotary_factor"] * int(dim_size/num_heads))
+        split_dim = [split_size, int(dim_size/num_heads) - split_size]
+        constant_split_name = f"{const_prefix}RotaryEmb/Split/Const_input_shape"
+        constant_split_value = numpy_helper.from_array(np.array(split_dim, dtype="int64"))
+        self.make_node("Constant", inputs=[], outputs=[f"{constant_split_name}\constant_0"], name=constant_split_name, value=constant_split_value)
+        self.make_node("Split", inputs=[reshape_output_0, f"{constant_split_name}\constant_0"], outputs=[split_output_0, split_output_1], name=split_name, axis=3)
+        self.make_value_info(split_output_0, self.io_dtype, shape=['batch_size', 'sequence_length', num_heads, split_dim[0]])
+        self.make_value_info(split_output_1, self.io_dtype, shape=['batch_size', 'sequence_length', num_heads, split_dim[1]])
+
+        # Reshape 2
+        reshape2_name = f"{name}/Reshape2/"
+        reshape2_output_0 =f"{name}/Reshape2/output_0"
+        rotary_reshape2_dim = [0, 0, num_heads * split_dim[0]]
+        constant2_name = f"{const_prefix}RotaryEmb/Reshape/Const2_input_dim_2"
+        constant2_value = numpy_helper.from_array(np.array(rotary_reshape2_dim, dtype="int64"))
+        self.make_node("Constant", inputs=[], outputs=[f"{constant2_name}\constant_0"], name=constant2_name, value=constant2_value)
+        self.make_node("Reshape", inputs=[split_output_0, f"{constant2_name}\constant_0"], outputs=[reshape2_output_0], name=reshape2_name)
+        self.make_value_info(reshape2_output_0, self.io_dtype, shape=['batch_size', 'sequence_length', num_heads * split_dim[0]])
+
+        # Rotary Embedding
+        inputs = [reshape2_output_0, kwargs.pop("position_ids"), cos_cache_name, sin_cache_name]
+        rot_output = f"{name}/Rotary/output_0"
+        # Removing duplicate kwargs 
+        kwargs.pop("num_heads", "")
+        kwargs.pop("rotary_embedding_dim", "")
+        self.make_node("RotaryEmbedding", inputs=inputs, outputs=[rot_output], name=name, domain="com.microsoft", interleaved=self.rotemb_attrs["interleaved"], num_heads=num_heads, rotary_embedding_dim=split_dim[0], **kwargs)
+        self.make_value_info(rot_output, self.io_dtype, shape=['batch_size', 'sequence_length', num_heads * split_dim[0]])
+
+        # Reshape 3
+        reshape3_name = f"{name}/Reshape3/"
+        reshape3_output_0 =f"{name}/Reshape3/output_0"
+        rotary_reshape3_dim = [0, 0, num_heads, split_dim[0]]
+        constant3_name = f"{const_prefix}RotaryEmb/Reshape/Const3_input_dim_2"
+        constant3_value = numpy_helper.from_array(np.array(rotary_reshape3_dim, dtype="int64"))
+        self.make_node("Constant", inputs=[], outputs=[f"{constant3_name}\constant_0"], name=constant3_name, value=constant3_value)
+        self.make_node("Reshape", inputs=[rot_output, f"{constant3_name}\constant_0"], outputs=[reshape3_output_0], name=reshape3_name)
+        self.make_value_info(reshape3_output_0, self.io_dtype, shape=['batch_size', 'sequence_length', num_heads, split_dim[0]])
+
+        # Concat
+        concat_name = f"{name}/Concat"
+        concat_inputs = [reshape3_output_0, split_output_1]
+        concat_output = f"{name}/Concat/output_0"
+        self.make_node("Concat", inputs=concat_inputs, outputs=[concat_output], name=concat_name, axis=3)
+        self.make_value_info(concat_output, self.io_dtype, shape=['batch_size', 'sequence_length', num_heads, split_dim[0] + split_dim[1]])
+
+        # Reshape 4
+        reshape4_name = f"{name}/Reshape4/"
+        reshape4_output_0 =f"{name}/output_0"
+        rotary_reshape4_dim = [0, 0, dim_size]
+        constant4_name = f"{const_prefix}RotaryEmb/Reshape/Const4_input_dim_2"
+        constant4_value = numpy_helper.from_array(np.array(rotary_reshape4_dim, dtype="int64"))
+        self.make_node("Constant", inputs=[], outputs=[f"{constant4_name}\constant_0"], name=constant4_name, value=constant4_value)
+        self.make_node("Reshape", inputs=[concat_output, f"{constant4_name}\constant_0"], outputs=[reshape4_output_0], name=reshape4_name)
+        self.make_value_info(reshape4_output_0, self.io_dtype, shape=['batch_size', 'sequence_length', dim_size])
+
     def make_rotary_embedding(self, rotemb, name, root_input, **kwargs):
+        if self.rotemb_attrs["partial_rotary_factor"] > 0:
+            self.make_rotary_embedding_partial(rotemb, name, root_input, **kwargs)
+            return
+
         cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches(rotemb)
 
         inputs = [root_input, kwargs.pop("position_ids"), cos_cache_name, sin_cache_name]
@@ -1426,13 +1523,15 @@ class Model:
         # Make RotaryEmbedding nodes
         cos_cache_name, sin_cache_name = "", ""
         if self.attention_attrs["use_rotemb_in_attn"]:
-            cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches(attention.rotary_emb)
+            rotary_emb = attention.rotary_emb if hasattr(attention, "rotary_emb") else kwargs.get("model_rotary_emb", None)
+            cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches(rotary_emb)
         else:
+            rotary_emb = attention.rotary_emb if hasattr(attention, "rotary_emb") else kwargs.get("model_rotary_emb", None)
             q_rotary_name = f"/model/layers.{layer_id}/attn/q_rotary/RotaryEmbedding"
-            self.make_rotary_embedding(attention.rotary_emb, q_rotary_name, root_input=q_input_to_attention, position_ids=kwargs.get("position_ids", "position_ids"))
+            self.make_rotary_embedding(rotary_emb, q_rotary_name, root_input=q_input_to_attention, position_ids=kwargs.get("position_ids", "position_ids"))
             q_input_to_attention = f"{q_rotary_name}/output_0"
             k_rotary_name = f"/model/layers.{layer_id}/attn/k_rotary/RotaryEmbedding"
-            self.make_rotary_embedding(attention.rotary_emb, k_rotary_name, root_input=k_input_to_attention, position_ids=kwargs.get("position_ids", "position_ids"))
+            self.make_rotary_embedding(rotary_emb, k_rotary_name, root_input=k_input_to_attention, position_ids=kwargs.get("position_ids", "position_ids"))
             k_input_to_attention = f"{k_rotary_name}/output_0"
 
         # Make repeat KV nodes (Note: `repeat_kv` needs to be kept since GroupQueryAttention isn't supported for FP32 CUDA)
@@ -1735,6 +1834,25 @@ class Model:
 
         return gelu_name
 
+    def make_relu(self, layer_id, root_input, activation):
+        relu_name = f"/model/layers.{layer_id}/mlp/act_fn/{activation}"
+        output = f"{relu_name}/output_0"
+        self.make_node(activation, inputs=[root_input], outputs=[output], name=relu_name, domain="")
+        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.intermediate_size])
+        return relu_name
+
+    def make_relu_squared(self, layer_id, root_input, activation):
+        relu_name = self.make_relu(layer_id, root_input, "Relu")
+        basename = f"/model/layers.{layer_id}/mlp/square/{activation}"
+        pow_name = f"{basename}/pow"
+        output = f"{pow_name}/output_0"
+        constant_shape_name = "static_2"
+        const_value_2 = np.array([2])
+        self.make_external_tensor(const_value_2, constant_shape_name)
+        self.make_node("Pow", inputs=[f"{relu_name}/output_0", constant_shape_name], outputs=[output], name=pow_name, domain="")
+        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.intermediate_size])
+        return pow_name
+
     def make_activation(self, layer_id, root_input):
         if self.activation in {"silu", "swish"}:
             output_name = self.make_activation_with_mul(layer_id, root_input, activation="Sigmoid", domain=None)
@@ -1744,12 +1862,16 @@ class Model:
             output_name = self.make_gelu(layer_id, root_input, activation="Gelu")
         elif self.activation in {"gegelu", "geglu"}:
             output_name = self.make_gelu(layer_id, root_input, activation="QuickGelu")
+        elif self.activation in {"relu"}:
+            output_name = self.make_relu(layer_id, root_input, activation="Relu")
+        elif self.activation in {"relu2"}:
+            output_name = self.make_relu_squared(layer_id, root_input, activation="Relu2")
         else:
             raise NotImplementedError(f"The {self.activation} activation function is not currently supported.")
         return output_name
 
     def make_lm_head(self, lm_head):
-        bias_exists = lm_head.bias is not None
+        bias_exists = lm_head.bias is not None if hasattr(lm_head, 'bias') else False
         scale_exists = self.lm_head_attrs["scale"] != 1
         mask_exists = self.lm_head_attrs["mask"] is not None
 
@@ -1779,11 +1901,11 @@ class Model:
             self.make_node('Where', inputs=where_inputs, outputs=[where_output], name=where_name)
             self.make_value_info(where_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
 
-    def make_layer(self, layer_id, layer):
+    def make_layer(self, layer_id, layer, **kwargs):
         # Each LLM decoder layer is typically defined as:
         # input_layernorm --> attention --> MLP --> output_layernorm
         self.make_layernorm(layer_id, layer.input_layernorm, skip=not self.layernorm_attrs["first_layernorm"], simple=self.layernorm_attrs["simple"], location="input")
-        self.make_attention(layer_id, layer.self_attn, root_input=self.layernorm_attrs["output_0"])
+        self.make_attention(layer_id, layer.self_attn, root_input=self.layernorm_attrs["output_0"], **kwargs)
         self.make_layernorm(layer_id, layer.post_attention_layernorm, skip=True, simple=self.layernorm_attrs["simple"], location="post_attention")
         self.make_mlp(layer_id, layer.mlp, root_input=self.layernorm_attrs["output_0"])
 
@@ -1839,7 +1961,14 @@ class Model:
             elif module.__class__.__name__.endswith("DecoderLayer") and self.layer_id < self.num_layers:
                 # Each decoder layer of model
                 print(f"Reading decoder layer {self.layer_id}")
-                self.make_layer(self.layer_id, module)
+
+                # Some model stores rotary_emb at model class instead of decoder layer.
+                model_rotary_emb = None
+                if hasattr(model, "model"):
+                    if hasattr(model.model, "rotary_emb"):
+                        model_rotary_emb = model.model.rotary_emb
+
+                self.make_layer(self.layer_id, module, model_rotary_emb=model_rotary_emb)
                 self.layer_id += 1
 
             elif self.layer_id == self.num_layers and self.has_final_norm(module, model):
@@ -2336,7 +2465,7 @@ class PhiModel(Model):
     def make_rotary_embedding(self, rotemb, name, root_input, **kwargs):
         super().make_rotary_embedding(rotemb, name, root_input, num_heads=self.rotemb_attrs["num_heads"], rotary_embedding_dim=self.rotemb_attrs["rotary_embedding_dim"], **kwargs)
 
-    def make_layer(self, layer_id, layer):
+    def make_layer(self, layer_id, layer, **kwargs):
         # Each Phi decoder layer is defined as:
         # input_layernorm --> attention --> MLP --> residual_add
         self.make_layernorm(layer_id, layer.input_layernorm, skip=not self.layernorm_attrs["first_layernorm"], simple=self.layernorm_attrs["simple"], location="input")
@@ -2369,7 +2498,7 @@ class Gemma2Model(GemmaModel):
         self.attention_attrs["scale"] = config.query_pre_attn_scalar ** -0.5
         self.lm_head_attrs["scale"] = config.final_logit_softcapping
 
-    def make_layer(self, layer_id, layer):
+    def make_layer(self, layer_id, layer, **kwargs):
         # Gemma2 decoder layer is typically defined as:
         # input_layernorm --> attention --> post_attention_layernorm --> pre_ffn_layernorm --> MLP --> post_ffn_layernorm
         self.make_layernorm(layer_id, layer.input_layernorm, skip=not self.layernorm_attrs["first_layernorm"], simple=self.layernorm_attrs["simple"], location="input")
@@ -2439,6 +2568,36 @@ class Phi3Mini4KModel(MistralModel):
             super().make_mlp_unpacked(layer_id, mlp, root_input)
         super().make_mlp_proj(layer_id, mlp, root_input)
 
+class NemotronModel(LlamaModel):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.layernorm_attrs["simple"] = False
+        self.layernorm_attrs["add_offset"] = 1
+        self.rotemb_attrs["num_heads"] = self.num_attn_heads
+        self.rotemb_attrs["rotary_embedding_dim"] = int(self.head_size * self.rotemb_attrs["partial_rotary_factor"])
+
+    def make_mlp_proj(self, layer_id, mlp, root_input):
+        # Make nodes for the MLP subgraph
+        #
+        #          root_input
+        #              |
+        #         UpProjMatMul
+        #              |
+        #           ActFunc
+        #              |
+        #         DownProjMatMul
+
+        up_basename = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
+        up_name = self.make_matmul(mlp.up_proj, up_basename, root_input)
+
+        act_fn_name = self.make_activation(layer_id, root_input=f"{up_name}/output_0")
+
+        # Make output MatMul node
+        down_basename = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
+        down_name = self.make_matmul(mlp.down_proj, down_basename, f"{act_fn_name}/output_0")
+
+        # Assign output 0 of previous MatMul as skip input to next SkipLayerNorm
+        self.layernorm_attrs["skip_input"] = f"{down_name}/output_0"
 
 class Phi3Mini128KModel(Phi3Mini4KModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -2735,7 +2894,7 @@ class Phi3MoE128KModel(MistralModel):
 
         self.make_rotary_embedding_multi_cache()
 
-    def make_layer(self, layer_id, layer):
+    def make_layer(self, layer_id, layer, **kwargs):
         # Each LLM decoder layer is typically defined as:
         # input_layernorm --> attention --> MLP --> output_layernorm
         self.make_layernorm(layer_id, layer.input_layernorm, skip=not self.layernorm_attrs["first_layernorm"], simple=self.layernorm_attrs["simple"], location="input")
@@ -2836,6 +2995,8 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             onnx_model = Phi3VModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Qwen2ForCausalLM":
             onnx_model = QwenModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "NemotronForCausalLM":
+            onnx_model = NemotronModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         else:
             raise NotImplementedError(f"The {hf_name} model is not currently supported.")
 
