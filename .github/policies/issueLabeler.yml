@@ -131,23 +131,6 @@ configuration:
         then:
           - addLabel:
               label: platform:windows
-      - description: Add model:transformer label to new issues
-        if:
-          - payloadType: Issues
-          - isOpen
-          - not:
-              labelRemoved:
-                label: model:transformer
-          - or:
-              - titleContains:
-                  pattern: (?i)\btransformers(?!\.js)\b
-                  isRegex: True
-              - bodyContains:
-                  pattern: (?i)\btransformers(?!\.js)\b
-                  isRegex: True
-        then:
-          - addLabel:
-              label: model:transformer
       - description: Add quantization label to new issues
         if:
           - payloadType: Issues
