@@ -27,14 +27,12 @@ struct MultiModalVisionModel : Model {
 };
 
 struct EmbeddingState : State {
-  EmbeddingState(const MultiModalVisionModel& model, const GeneratorParams& params, const CapturedGraphInfo* captured_graph_info, const int64_t num_image_tokens);
+  EmbeddingState(const MultiModalVisionModel& model, const GeneratorParams& params, const int64_t num_image_tokens);
   EmbeddingState(const EmbeddingState&) = delete;
   EmbeddingState& operator=(const EmbeddingState&) = delete;
 
   RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens,
                           RoamingArray<int32_t> next_indices = {}) override;
-
-  const CapturedGraphInfo* GetCapturedGraphInfo() const override { return captured_graph_info_; };
 
  private:
   friend struct MultiModalPipelineState;
@@ -42,7 +40,6 @@ struct EmbeddingState : State {
   void UpdateInputsAndOutputs(RoamingArray<int32_t> next_tokens);
 
   const MultiModalVisionModel& model_;
-  const CapturedGraphInfo* captured_graph_info_;
   int64_t num_image_tokens_;
 
   InputIDs input_ids_{*this};                                       // Model input
@@ -86,7 +83,7 @@ struct DecoderState : State {
  private:
   friend struct MultiModalPipelineState;
 
-  void UpdateInputsOutputs(int current_length, RoamingArray<int32_t> beam_indices);
+  void UpdateInputsAndOutputs(int current_length, RoamingArray<int32_t> beam_indices);
 
   const MultiModalVisionModel& model_;
   const CapturedGraphInfo* captured_graph_info_;
