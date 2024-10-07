@@ -11,6 +11,9 @@ configuration:
         if:
           - payloadType: Issues
           - isOpen
+          - not:
+              labelRemoved:
+                label: api:java
           - or:
               - titleContains:
                   pattern: (?i)\bjava\b
@@ -25,6 +28,9 @@ configuration:
         if:
           - payloadType: Issues
           - isOpen
+          - not:
+              labelRemoved:
+                label: api:javascript
           - or:
               - titleContains:
                   pattern: (?i)\bjavascript\b
@@ -39,16 +45,22 @@ configuration:
         if:
           - payloadType: Issues
           - isOpen
+          - not:
+              labelRemoved:
+                label: ep:CUDA
           - titleContains:
               pattern: (?i)\bcuda\b
               isRegex: True
         then:
           - addLabel:
-              label: ep:CUDA 
+              label: ep:CUDA
       - description: Add ep:DML label to new issues
         if:
           - payloadType: Issues
           - isOpen
+          - not:
+              labelRemoved:
+                label: ep:DML
           - or:
               - titleContains:
                   pattern: (?i)(\bdirect\s*ml\b|\bdml\b)
@@ -63,6 +75,9 @@ configuration:
         if:
           - payloadType: Issues
           - isOpen
+          - not:
+              labelRemoved:
+                label: ep:TensorRT
           - titleContains:
                   pattern: (?i)(\btensor\s*rt\b|\btrt\b)
                   isRegex: True
@@ -73,6 +88,9 @@ configuration:
         if:
           - payloadType: Issues
           - isOpen
+          - not:
+              labelRemoved:
+                label: platform:jetson
           - or:
               - titleContains:
                   pattern: (?i)(\bjetson\b|\bjetpack\b)
@@ -87,6 +105,9 @@ configuration:
         if:
           - payloadType: Issues
           - isOpen
+          - not:
+              labelRemoved:
+                label: platform:mobile
           - or:
               - titleContains:
                   pattern: (?i)(\bobj(?:ective)?-?c\b|\bnnapi\b|\bmobile\b|\bandroid\b|\bios\b|\bxamarin\b|\bmaui\b)
@@ -101,30 +122,22 @@ configuration:
         if:
           - payloadType: Issues
           - isOpen
+          - not:
+              labelRemoved:
+                label: platform:windows
           - titleContains:
               pattern: (?i)(\bwindows\b|\bwinrt\b|\bwinml\b)
               isRegex: True
         then:
           - addLabel:
               label: platform:windows
-      - description: Add model:transformer label to new issues
-        if:
-          - payloadType: Issues
-          - isOpen
-          - or:
-              - titleContains:
-                  pattern: (?i)\btransformers(?!\.js)\b
-                  isRegex: True
-              - bodyContains:
-                  pattern: (?i)\btransformers(?!\.js)\b
-                  isRegex: True
-        then:
-          - addLabel:
-              label: model:transformer
       - description: Add quantization label to new issues
         if:
           - payloadType: Issues
           - isOpen
+          - not:
+              labelRemoved:
+                label: quantization
           - titleContains:
               pattern: (?i)(quant|\bqdq\b)
               isRegex: True
