@@ -71,6 +71,7 @@ struct DecoderOnlyPipelineState : State {
   InputIDs input_ids_{*this};
   Logits logits_{*this};
   std::unique_ptr<KV_Cache> kv_cache_;
+  std::unique_ptr<SlidingWindowKeyValueCache> sliding_window_key_value_cache_;
   PositionInputs position_inputs_;
   ExtraInputs extra_inputs_{*this};
 };

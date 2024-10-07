@@ -330,6 +330,13 @@ struct Decoder_Element : JSON::Element {
     throw JSON::unknown_value_error{};
   }
 
+  void OnBool(std::string_view name, bool value) override {
+    if (name == "sliding_window_key_value_cache") {
+      v_.sliding_window_key_value_cache = value;
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
  private:
   Config::Model::Decoder& v_;
   SessionOptions_Element session_options_{v_.session_options};

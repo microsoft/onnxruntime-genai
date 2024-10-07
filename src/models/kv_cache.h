@@ -89,4 +89,30 @@ struct Cross_Cache {
   std::vector<std::unique_ptr<OrtValue>> values_;
   std::vector<std::string> input_name_strings_, output_name_strings_;
 };
+
+struct SlidingWindowKeyValueCache {
+  SlidingWindowKeyValueCache(State& state);
+
+  void Add();
+  void Update(std::span<const int32_t> beam_indices, int current_length);
+
+ private:
+  void Slide();
+  void Shift();
+  void Concat();
+
+  State& state_;
+  const Model& model_{state_.model_};
+  int layer_count_;
+  int window_size_;
+  size_t input_index_{~0U}, output_index_{~0U};
+
+  std::array<int64_t, 4> key_cache_shape_in_, key_cache_shape_out_;
+  std::array<int64_t, 4> value_cache_shape_in_, value_cache_shape_out_;
+  ONNXTensorElementDataType type_;
+
+  std::vector<std::unique_ptr<OrtValue>> key_caches_in_, value_caches_in_;
+  std::vector<std::unique_ptr<OrtValue>> key_caches_out_, value_caches_out_;
+  std::vector<std::string> input_name_strings_, output_name_strings_;
+};
 }  // namespace Generators
