@@ -368,7 +368,7 @@ TEST(CAPITests, TopKTopPCAPI) {
 
 #endif  // TEST_PHI2
 
-TEST(CAPITests, AdaptersTest) {
+TEST(CAPITests, DISABLED_AdaptersTest) {
 #if TEST_PHI2
   auto model = OgaModel::Create(MODEL_PATH "adapters");
   auto adapters = OgaAdapters::Create(*model);

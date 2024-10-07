@@ -394,6 +394,7 @@ def test_vision_preprocessing_multiple_images(
 
 
 @pytest.mark.parametrize("relative_model_path", [Path("adapters")])
+@pytest.mark.skipif(True, reason="Model creation is not embedded yet in this test.")
 def test_adapters(test_data_path, relative_model_path):
     model_path = os.fspath(Path(test_data_path) / relative_model_path)
     model = og.Model(model_path)
