@@ -222,17 +222,17 @@ RoamingArray<float> DecoderOnlyPipelineState::Run(int current_length, RoamingArr
   }
 
   // Clear the outputs of the pipeline models that are only run on prompt since this cannot happen earlier.
-  if (!first_run_) {
-    for (auto& pipeline_state : pipeline_states_) {
-      if (!model_.config_->model.decoder.pipeline[pipeline_state->id_].run_on_token_gen) {
-        for (const auto& output_name : pipeline_state->output_names_) {
-          if (auto iter = ortvalue_store_.find(output_name); iter != ortvalue_store_.end()) {
-            ortvalue_store_.erase(iter);
-          }
-        }
-      }
-    }
-  }
+  // if (!first_run_) {
+  //   for (auto& pipeline_state : pipeline_states_) {
+  //     if (!model_.config_->model.decoder.pipeline[pipeline_state->id_].run_on_token_gen) {
+  //       for (const auto& output_name : pipeline_state->output_names_) {
+  //         if (auto iter = ortvalue_store_.find(output_name); iter != ortvalue_store_.end()) {
+  //           ortvalue_store_.erase(iter);
+  //         }
+  //       }
+  //     }
+  //   }
+  // }
 
   first_run_ = false;
 
