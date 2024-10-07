@@ -96,8 +96,13 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
   position_inputs_.Add();
   logits_.Add();
   if (KV_Cache::IsCacheNeeded(model)) {
-    kv_cache_ = std::make_unique<KV_Cache>(*this);
-    kv_cache_->Add();
+    if (model.config_->model.decoder.sliding_window_key_value_cache) {
+      sliding_window_key_value_cache_ = std::make_unique<SlidingWindowKeyValueCache>(*this);
+      sliding_window_key_value_cache_->Add();
+    } else {
+      kv_cache_ = std::make_unique<KV_Cache>(*this);
+      kv_cache_->Add();
+    }
   }
   extra_inputs_.Add();
 
@@ -244,6 +249,7 @@ void DecoderOnlyPipelineState::UpdateInputsOutputs(const DeviceSpan<int32_t>& ne
   input_ids_.Update(next_tokens_unk);
   position_inputs_.Update(current_length);
   if (kv_cache_) kv_cache_->Update(beam_indices, current_length);
+  if (sliding_window_key_value_cache_) sliding_window_key_value_cache_->Update(beam_indices, current_length);
   logits_.Update();
 }
 
