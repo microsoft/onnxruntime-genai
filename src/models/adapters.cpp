@@ -7,7 +7,7 @@
 namespace Generators {
 
 Adapter::Adapter(const char* adapter_file_path, Ort::Allocator* allocator)
-    : adapter_{OrtLoraAdapter::Create(adapter_file_path, *allocator)} {}
+    : adapter_{OrtLoraAdapter::Create(fs::path(adapter_file_path).c_str(), *allocator)} {}
 
 const OrtLoraAdapter* Adapter::AcquireRef() {
   ref_count_++;

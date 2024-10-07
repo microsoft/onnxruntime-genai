@@ -1313,7 +1313,7 @@ struct OrtOp {
  *
  */
 struct OrtLoraAdapter {
-  static std::unique_ptr<OrtLoraAdapter> Create(const char* adapter_file_path, OrtAllocator& allocator);  ///< Wraps OrtApi::CreateOrtLoraAdapter
+  static std::unique_ptr<OrtLoraAdapter> Create(const ORTCHAR_T* adapter_file_path, OrtAllocator& allocator);  ///< Wraps OrtApi::CreateOrtLoraAdapter
 
   static void operator delete(void* p) { Ort::api->ReleaseLoraAdapter(reinterpret_cast<OrtLoraAdapter*>(p)); }
   Ort::Abstract make_abstract;

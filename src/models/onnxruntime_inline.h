@@ -1342,7 +1342,7 @@ inline void OrtOp::Invoke(const OrtKernelContext* context,
                                        output_values, static_cast<int>(output_count)));
 }
 
-inline std::unique_ptr<OrtLoraAdapter> OrtLoraAdapter::Create(const char* adapter_file_path, OrtAllocator& allocator) {
+inline std::unique_ptr<OrtLoraAdapter> OrtLoraAdapter::Create(const ORTCHAR_T* adapter_file_path, OrtAllocator& allocator) {
   OrtLoraAdapter* p;
   Ort::ThrowOnError(Ort::api->CreateLoraAdapter(adapter_file_path, &allocator, &p));
   return std::unique_ptr<OrtLoraAdapter>{p};
