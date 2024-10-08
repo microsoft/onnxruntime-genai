@@ -32,7 +32,7 @@ struct Search : LeakChecked<Search> {
   // To be used for rewind
   virtual void RewindTo(size_t index) { assert(false); };
   // To be used for rewind
-  virtual void DropLastTokens(size_t num_tokens) { assert(false); };
+  // virtual void DropLastTokens(size_t num_tokens) { assert(false); };
 
   std::shared_ptr<const GeneratorParams> params_;
 };
@@ -78,7 +78,7 @@ struct GreedySearch_Cpu : Search_Cpu {
   // Used by continuous decoding search.
   void SetUserTokens(RoamingArray<int32_t> next_tokens) override;
   void RewindTo(size_t index) override;
-  void DropLastTokens(size_t num_tokens) override;
+  // void DropLastTokens(size_t num_tokens) override;
 
  protected:
   void SetNextToken(size_t batch_id, int32_t token, bool check_eos = true);
@@ -110,6 +110,8 @@ struct BeamSearch_Cpu : Search_Cpu {
   bool IsDone() const override;
 
   void SelectTop() override;
+
+  void SetUserTokens(RoamingArray<int32_t> next_tokens) override;
 
  private:
   void AppendNextTokensToSequences();

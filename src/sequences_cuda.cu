@@ -33,17 +33,17 @@ void Launch_AppendNextTokenToSequences(std::span<const int32_t> next_tokens, std
 }
 
 // TODO(aciddelgado): parallelize this kernel.
-__global__ void AppendUserTokensToSequences(const int32_t* user_tokens, int32_t* sequences, int batch_beam_size, int past_length, int new_length, int max_length) {
+__global__ void AppendUserTokensToSequences(const int32_t* user_tokens, int32_t* sequences, int batch_beam_size, int num_beams, int past_length, int new_length, int max_length) {
   // Append user tokens to each sequence.
   for (int i = 0; i < batch_beam_size; i++) {
     for (int j = 0; j < new_length; j++) {
-      sequences[i * max_length + past_length + j] = user_tokens[i * new_length + j];
+      sequences[i * max_length + past_length + j] = user_tokens[(i / num_beams) * new_length + j];
     }
   }
 }
 
-void Launch_AppendUserTokensToSequences(std::span<const int32_t> user_tokens, std::span<int32_t> sequences, int batch_beam_size, int past_length, int new_length, int max_length, cudaStream_t stream) {
-  AppendUserTokensToSequences<<<1, 1, 0, stream>>>(user_tokens.data(), sequences.data(), batch_beam_size, past_length, new_length, max_length);
+void Launch_AppendUserTokensToSequences(std::span<const int32_t> user_tokens, std::span<int32_t> sequences, int batch_beam_size, int num_beams, int past_length, int new_length, int max_length, cudaStream_t stream) {
+  AppendUserTokensToSequences<<<1, 1, 0, stream>>>(user_tokens.data(), sequences.data(), batch_beam_size, num_beams, past_length, new_length, max_length);
 }
 
 // TODO(aciddelgado): parallelize this kernel.

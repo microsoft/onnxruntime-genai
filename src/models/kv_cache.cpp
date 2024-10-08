@@ -161,12 +161,12 @@ KV_Cache::KV_Cache(State& state)
         sb_kv_caches_.push_back(state_.GetCapturedGraphInfo()->sb_kv_caches_[i].get());
       }
     }
+  }
 
-    for (int i = 0; i < layer_count_ * 2; ++i) {
-      presents_.push_back(
-          sb_kv_caches_.empty() ? OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_)
-                                : sb_kv_caches_[i]->CreateTensorOnStaticBuffer(shape_, type_));
-    }
+  for (int i = 0; i < layer_count_ * 2; ++i) {
+    presents_.push_back(
+        sb_kv_caches_.empty() ? OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_)
+                              : sb_kv_caches_[i]->CreateTensorOnStaticBuffer(shape_, type_));
   }
 }
 

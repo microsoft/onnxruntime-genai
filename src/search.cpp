@@ -37,6 +37,9 @@ BeamSearch_Cpu::BeamSearch_Cpu(const GeneratorParams& params)
     : Search_Cpu(params) {
   assert(params_->search.num_beams > 1);  // If 1, use GreedySearch
   beam_scorer_ = std::make_unique<BeamSearchScorer>(*params_);
+
+  auto next_tokens_buffer = AllocateArray<int32_t>(params.BatchBeamSize(), &next_tokens_);
+  memset(next_tokens_buffer.get(), 0, next_tokens_.size_bytes());
 }
 
 BeamSearch_Cpu::~BeamSearch_Cpu() = default;
@@ -63,8 +66,8 @@ int Search_Cpu::GetSequenceLength() const {
 
 void BeamSearch_Cpu::SelectTop() {
   // Normalize next token scores
-  for (int i = 0; i < params_->BatchBeamSize(); i++) {
-    std::span<float> const scores = next_token_scores_.subspan(static_cast<size_t>(i) * static_cast<size_t>(params_->config.model.vocab_size), params_->config.model.vocab_size);
+  for (size_t i = 0; i < params_->BatchBeamSize(); i++) {
+    std::span<float> const scores = next_token_scores_.subspan(i * static_cast<size_t>(params_->config.model.vocab_size), params_->config.model.vocab_size);
     LogSoftMax(scores, 1.0);
   }
 
@@ -283,24 +286,50 @@ void GreedySearch_Cpu::RewindTo(size_t index) {
     memset(next_tokens_.data(), 0, next_tokens_.size_bytes());
 }
 
-void GreedySearch_Cpu::DropLastTokens(size_t num_tokens) {
-  auto sequences_cpu = sequences_.GetSequences();
-  auto new_sequence_length = sequences_.GetSequenceLength() - num_tokens;
-  for (size_t i = 0; i < params_->search.batch_size; ++i) {
-    if (!eos_seen_[i])
-      continue;
-    auto sequence_cpu = sequences_cpu.subspan(i * params_->search.max_length + new_sequence_length, num_tokens);
-    for (size_t j = 0; j < num_tokens; ++j) {
-      if (sequence_cpu[j] == params_->config.model.eos_token_id) {
-        not_done_count_++;
-        done_ = false;
-        eos_seen_[i] = false;
-        if (g_log.enabled && g_log.hit_eos)
-          Log("hit_eos", "Reverted EOS seen on batch " + std::to_string(i));
-      }
+// void GreedySearch_Cpu::DropLastTokens(size_t num_tokens) {
+//   auto sequences_cpu = sequences_.GetSequences();
+//   auto new_sequence_length = sequences_.GetSequenceLength() - num_tokens;
+//   for (size_t i = 0; i < params_->search.batch_size; ++i) {
+//     if (!eos_seen_[i])
+//       continue;
+//     auto sequence_cpu = sequences_cpu.subspan(i * params_->search.max_length + new_sequence_length, num_tokens);
+//     for (size_t j = 0; j < num_tokens; ++j) {
+//       if (sequence_cpu[j] == params_->config.model.eos_token_id) {
+//         not_done_count_++;
+//         done_ = false;
+//         eos_seen_[i] = false;
+//         if (g_log.enabled && g_log.hit_eos)
+//           Log("hit_eos", "Reverted EOS seen on batch " + std::to_string(i));
+//       }
+//     }
+//   }
+//   sequences_.DropLastTokens({num_tokens});
+// }
+
+
+void BeamSearch_Cpu::SetUserTokens(RoamingArray<int32_t> next_tokens) {
+  // LEFT OFF HERE
+  // Reset done count/state
+  // done_ = false;
+  // not_done_count_ = params_->search.batch_size;
+  // memset(eos_seen_.data(), 0, eos_seen_.size_bytes());
+
+  // Set user-defined next tokens
+  auto next_tokens_cpu = next_tokens.GetCPU();
+  auto batch_beam_size = params_->BatchBeamSize();
+  auto tokens_count_per_batch = next_tokens_cpu.size() / batch_beam_size;
+  for (size_t j = 0; j < tokens_count_per_batch; j++) {
+    for (size_t i = 0; i < batch_beam_size; i++) {
+      next_tokens_[i] = next_tokens_cpu[(i / params_->search.num_beams) * tokens_count_per_batch + j];
+    }
+
+    sequences_.AppendNextTokenToSequences(next_tokens_);
+    if (sequences_.GetSequenceLength() == params_->search.max_length) {
+      if (g_log.enabled && g_log.hit_max_length)
+        Log("hit_max_length", "beam cpu hit");
+      done_ = true;
     }
   }
-  sequences_.DropLastTokens({num_tokens});
 }
 
 bool BeamSearch_Cpu::IsDone() const {

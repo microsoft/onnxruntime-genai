@@ -8,7 +8,7 @@ namespace Generators {
 namespace cuda {
 void Launch_ExpandInputSequences(std::span<const int32_t> input_sequences, std::span<int32_t> sequences, int batch_size, int beam_size, int current_length, int max_length, cudaStream_t stream);
 void Launch_AppendNextTokenToSequences(std::span<const int32_t> next_tokens, std::span<int32_t> sequences, int batch_beam_size, int current_length, int max_length, cudaStream_t stream);
-void Launch_AppendUserTokensToSequences(std::span<const int32_t> next_tokens, std::span<int32_t> sequences, int batch_beam_size, int past_length, int new_length, int max_length, cudaStream_t stream);
+void Launch_AppendUserTokensToSequences(std::span<const int32_t> next_tokens, std::span<int32_t> sequences, int batch_beam_size, int num_beams, int past_length, int new_length, int max_length, cudaStream_t stream);
 void Launch_GetLastTokens(std::span<const int32_t> sequences, std::span<int32_t> last_tokens, int batch_beam_size, int current_length, int max_length, cudaStream_t stream);
 }  // namespace cuda
 
@@ -55,10 +55,10 @@ void Sequences_Cuda::AppendNextTokenToSequences(std::span<const int32_t> next_to
   ++current_length_;
 }
 
-void Sequences_Cuda::AppendUserTokensToSequences(gpu_span<int32_t> user_tokens) {
+void Sequences_Cuda::AppendUserTokensToSequences(gpu_span<int32_t> user_tokens, int num_beams) {
   size_t new_length = user_tokens.size() / batch_beam_size_;
   size_t past_length = current_length_;
-  cuda::Launch_AppendUserTokensToSequences(user_tokens, sequences_, batch_beam_size_, past_length, new_length, max_length_, stream_);
+  cuda::Launch_AppendUserTokensToSequences(user_tokens, sequences_, batch_beam_size_, num_beams, past_length, new_length, max_length_, stream_);
   current_length_ += new_length;
 }
 

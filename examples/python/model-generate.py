@@ -29,6 +29,7 @@ def main(args):
 
     search_options = {name:getattr(args, name) for name in ['do_sample', 'max_length', 'min_length', 'top_p', 'top_k', 'temperature', 'repetition_penalty'] if name in args} 
     search_options['batch_size'] = 3
+    search_options['num_beams'] = 3
 
     if (args.verbose): print(f'Args: {args}')
     if (args.verbose): print(f'Search options: {search_options}')

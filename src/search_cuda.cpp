@@ -59,6 +59,9 @@ BeamSearch_Cuda::BeamSearch_Cuda(const GeneratorParams& params)
   static_assert(sizeof(float) == sizeof(int32_t));  // The topk_buffer assumes these match, fix for float16
 
   cudaMemsetAsync(topk_buffer_.get(), 0, topk_buffer_size * sizeof(float), params_->cuda_stream);
+
+  auto next_tokens_buffer = CudaMallocArray<int32_t>(params.BatchBeamSize(), &next_tokens_);
+  cudaMemsetAsync(next_tokens_.data(), 0, next_tokens_.size_bytes(), params_->cuda_stream);
 }
 
 BeamSearch_Cuda::~BeamSearch_Cuda() = default;
@@ -260,15 +263,18 @@ void GreedySearch_Cuda::SetUserTokens(RoamingArray<int32_t> next_tokens) {
   *done_cpu_ = false;
 
   auto next_tokens_gpu = next_tokens.GetGPU();
-  auto batch_size = params_->search.batch_size;
-  auto tokens_count_per_batch = next_tokens_gpu.size() / batch_size;
-  sequences_.AppendUserTokensToSequences(next_tokens_gpu);
+  sequences_.AppendUserTokensToSequences(next_tokens_gpu, 1);
   
   if (sequences_.GetSequenceLength() == params_->search.max_length) {
     if (g_log.enabled && g_log.hit_max_length)
       Log("hit_max_length", "greedy cuda hit");
     *done_cpu_ = true;
   }
+}
+
+void BeamSearch_Cuda::SetUserTokens(RoamingArray<int32_t> next_tokens) {
+  auto next_tokens_gpu = next_tokens.GetGPU();
+  sequences_.AppendUserTokensToSequences(next_tokens_gpu, params_->search.num_beams);
 }
 
 void GreedySearch_Cuda::RewindTo(size_t index) {
