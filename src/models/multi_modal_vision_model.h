@@ -27,14 +27,12 @@ struct MultiModalVisionModel : Model {
 };
 
 struct EmbeddingState : State {
-  EmbeddingState(const MultiModalVisionModel& model, const GeneratorParams& params, const CapturedGraphInfo* captured_graph_info, const int64_t num_image_tokens);
+  EmbeddingState(const MultiModalVisionModel& model, const GeneratorParams& params, const int64_t num_image_tokens);
   EmbeddingState(const EmbeddingState&) = delete;
   EmbeddingState& operator=(const EmbeddingState&) = delete;
 
   RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens,
                           RoamingArray<int32_t> next_indices = {}) override;
-
-  const CapturedGraphInfo* GetCapturedGraphInfo() const override { return captured_graph_info_; };
 
  private:
   friend struct MultiModalPipelineState;
@@ -42,14 +40,13 @@ struct EmbeddingState : State {
   void UpdateInputsAndOutputs(RoamingArray<int32_t> next_tokens);
 
   const MultiModalVisionModel& model_;
-  const CapturedGraphInfo* captured_graph_info_;
   int64_t num_image_tokens_;
 
-  InputIDs input_ids_{model_, *this};                                       // Model input
-  ImageFeatures image_features_{model_, *this, ImageFeatures::Mode::Input,  // Optional model input
+  InputIDs input_ids_{*this};                                       // Model input
+  ImageFeatures image_features_{*this, ImageFeatures::Mode::Input,  // Optional model input
                                 model_.config_->model.embedding.inputs.image_features,
                                 num_image_tokens_};
-  Embeddings inputs_embeds_{model_, *this, Embeddings::Mode::Output,  // Model output
+  Embeddings inputs_embeds_{*this, Embeddings::Mode::Output,  // Model output
                             model_.config_->model.embedding.outputs.embeddings};
 };
 
@@ -66,8 +63,8 @@ struct VisionState : State {
 
   const MultiModalVisionModel& model_;
   int64_t num_image_tokens_;
-  ExtraInputs extra_inputs_{model_, *this};                                  // Model inputs
-  ImageFeatures image_features_{model_, *this, ImageFeatures::Mode::Output,  // Model output
+  ExtraInputs extra_inputs_{*this};                                  // Model inputs
+  ImageFeatures image_features_{*this, ImageFeatures::Mode::Output,  // Model output
                                 model_.config_->model.vision.outputs.image_features,
                                 num_image_tokens_};
 };
@@ -86,15 +83,15 @@ struct DecoderState : State {
  private:
   friend struct MultiModalPipelineState;
 
-  void UpdateInputsOutputs(int current_length, RoamingArray<int32_t> beam_indices);
+  void UpdateInputsAndOutputs(int current_length, RoamingArray<int32_t> beam_indices);
 
   const MultiModalVisionModel& model_;
   const CapturedGraphInfo* captured_graph_info_;
-  Embeddings inputs_embeds_{model_, *this, Embeddings::Mode::Input,  // Model input
+  Embeddings inputs_embeds_{*this, Embeddings::Mode::Input,  // Model input
                             model_.config_->model.decoder.inputs.embeddings};
-  PositionInputs position_inputs_;    // Model input
-  KV_Cache kv_cache_{model_, *this};  // Model input
-  Logits logits_{model_, *this};      // Model output
+  PositionInputs position_inputs_;  // Model input
+  KV_Cache kv_cache_{*this};        // Model input
+  Logits logits_{*this};            // Model output
 };
 
 struct MultiModalPipelineState : State {

@@ -7,7 +7,7 @@
 namespace Generators {
 
 struct Logits {
-  Logits(const Model& model, State& state);
+  Logits(State& state);
 
   void Add();
   RoamingArray<float> Get();
@@ -17,8 +17,8 @@ struct Logits {
  private:
   void HandleEOSArray(cpu_span<float> logits);
 
-  const Model& model_;
   State& state_;
+  const Model& model_{state_.model_};
   size_t output_index_{~0U};
 
   std::array<int64_t, 3> shape_{};

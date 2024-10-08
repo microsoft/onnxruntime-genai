@@ -39,18 +39,22 @@ if(WIN32)
   set(ONNXRUNTIME_PROVIDERS_CUDA_LIB "onnxruntime_providers_cuda.dll")
   set(ONNXRUNTIME_PROVIDERS_ROCM_LIB "onnxruntime_providers_rocm.dll")
 elseif(APPLE)
-  if(IOS)
+  if(IOS OR MAC_CATALYST)
     add_library(onnxruntime IMPORTED STATIC)
-    set_property(TARGET onnxruntime PROPERTY IMPORTED_LOCATION ${ORT_LIB_DIR}/onnxruntime.xcframework)
+    if(PLATFORM_NAME STREQUAL "macabi")
+      # The xcframework in cmake doesn't seem to support MacCatalyst.
+      # Without manually setting the target framework, cmake will be confused and looking for wrong libraries.
+      # The error looks like: 'Unable to find suitable library in: Info.plist for system name "Darwin"'
+      set_property(TARGET onnxruntime PROPERTY IMPORTED_LOCATION ${ORT_LIB_DIR}/onnxruntime.xcframework/ios-arm64_x86_64-maccatalyst/onnxruntime.framework)
+    else()
+      set_property(TARGET onnxruntime PROPERTY IMPORTED_LOCATION ${ORT_LIB_DIR}/onnxruntime.xcframework)
+    endif()
     set(ONNXRUNTIME_LIB onnxruntime)
   else()
     set(ONNXRUNTIME_LIB "libonnxruntime.dylib")
     set(ONNXRUNTIME_PROVIDERS_CUDA_LIB "libonnxruntime_providers_cuda.dylib")
     set(ONNXRUNTIME_PROVIDERS_ROCM_LIB "libonnxruntime_providers_rocm.dylib")
-    set(ONNXRUNTIME_ALL_SHARED_LIBS "libonnxruntime*.dylib")
   endif()
-  set(ONNXRUNTIME_PROVIDERS_CUDA_LIB "libonnxruntime_providers_cuda.dylib")
-  set(ONNXRUNTIME_PROVIDERS_ROCM_LIB "libonnxruntime_providers_rocm.dylib")
 else()
   set(ONNXRUNTIME_LIB "libonnxruntime.so")
   set(ONNXRUNTIME_PROVIDERS_CUDA_LIB "libonnxruntime_providers_cuda.so")
@@ -66,7 +70,7 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
 
 set(ortgenai_embed_libs "") # shared libs that will be embedded inside the onnxruntime-genai package
 
-if (IOS)
+if (IOS OR MAC_CATALYST)
   if (NOT EXISTS "${ORT_LIB_DIR}/onnxruntime.xcframework")
     message(FATAL_ERROR "Expected the ONNX Runtime XCFramework to be found at ${ORT_LIB_DIR}/onnxruntime.xcframework. Actual: Not found.")
   endif()
@@ -74,6 +78,10 @@ else()
   if(NOT EXISTS "${ORT_LIB_DIR}/${ONNXRUNTIME_LIB}")
     message(FATAL_ERROR "Expected the ONNX Runtime library to be found at ${ORT_LIB_DIR}/${ONNXRUNTIME_LIB}. Actual: Not found.")
   endif()
+endif()
+
+if(NOT EXISTS "${ORT_HEADER_DIR}/onnxruntime_c_api.h")
+  message(FATAL_ERROR "Expected the ONNX Runtime C API header to be found at \"${ORT_HEADER_DIR}/onnxruntime_c_api.h\". Actual: Not found.")
 endif()
 
 
@@ -91,9 +99,9 @@ if (MSVC)
   elseif (genai_target_platform STREQUAL "ARM64" OR
           genai_target_platform STREQUAL "ARM64EC")
     set(genai_target_platform "arm64")
-  elseif (genai_target_platform STREQUAL "x64" OR 
-          genai_target_platform STREQUAL "x86_64" OR 
-          genai_target_platform STREQUAL "AMD64" OR 
+  elseif (genai_target_platform STREQUAL "x64" OR
+          genai_target_platform STREQUAL "x86_64" OR
+          genai_target_platform STREQUAL "AMD64" OR
           CMAKE_GENERATOR MATCHES "Win64")
     set(genai_target_platform "x64")
   else()
