@@ -82,8 +82,10 @@ def get_chat_template(model_name):
         return '<s>\n<|user|>\n{input} <|end|>\n<|assistant|>'
     elif 'mistral' in model_name: 
         return '<|im_start|> <|user|> \n {input} <|im_end>|\n'
-    # elif model_name.contains("llama"): return
-    # elif model_name.contains("gemma"): return
+    elif model_name.contains("llama"): 
+        return '<s>[INST]<<SYS>>\n{input}<</SYS>>[INST]'
+    elif model_name.contains("gemma"): 
+        return '<start_of_turn>' + 'user' '\n' + {input}  + '<end_of_turn>\n'
 
 
 if __name__ == "__main__":

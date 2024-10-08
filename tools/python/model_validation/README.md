@@ -9,6 +9,10 @@ git clone https://github.com/microsoft/onnxruntime-genai.git
 cd tools/python/model_validation
 ```
 
+### Requirements
+protobuf version must be atleast 5.28.2
+sentencepiece
+
 In the model_validation folder, you should find the validation_tool.py script, validation_config.json file, and this README.md.
 
 ### Current Support
