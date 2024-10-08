@@ -40,7 +40,11 @@ target_link_libraries(unit_tests PRIVATE
 )
 
 if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin"))
-target_link_libraries(unit_tests PRIVATE ${ONNXRUNTIME_LIB})
+  target_link_libraries(unit_tests PRIVATE ${ONNXRUNTIME_LIB})
+endif()
+
+if(APPLE)
+  target_link_libraries(unit_tests PRIVATE "-framework Foundation" "-framework CoreML" "-framework UIKit")
 endif()
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
@@ -95,7 +99,6 @@ if (IOS)
     MACOSX_BUNDLE_LONG_VERSION_STRING ${VERSION_STR}
     MACOSX_BUNDLE_BUNDLE_VERSION ${VERSION_STR}
     MACOSX_BUNDLE_SHORT_VERSION_STRING ${VERSION_STR}
-    XCODE_PRODUCT_TYPE com.apple.product-type.bundle.ui-testing
     XCODE_ATTRIBUTE_ENABLE_BITCODE "NO")
 
   xctest_add_test(xctest.unit_tests unit_tests_xc)

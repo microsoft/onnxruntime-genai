@@ -634,6 +634,11 @@ def test(args: argparse.Namespace, env: dict[str, str]):
     """
     Run the tests.
     """
+    if args.ios:
+        _run_ios_tests(args)
+        # CTest won't work on iOS
+        return
+
     lib_dir = args.build_dir / "test"
     if not args.ort_home:
         _ = util.download_dependencies(args.use_cuda, args.use_rocm, args.use_dml, lib_dir)
@@ -651,10 +656,6 @@ def test(args: argparse.Namespace, env: dict[str, str]):
 
     if args.android:
         _run_android_tests(args)
-
-    if args.ios:
-        _run_ios_tests(args)
-
 
 def clean(args: argparse.Namespace, env: dict[str, str]):
     """
