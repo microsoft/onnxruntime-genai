@@ -532,7 +532,6 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         platform_name = "macabi" if args.macos == "Catalyst" else args.apple_sysroot
         command += [
             "-DENABLE_PYTHON=OFF",
-            "-DENABLE_TESTS=OFF",
             "-DENABLE_MODEL_BENCHMARK=OFF",
             f"-DBUILD_APPLE_FRAMEWORK={'ON' if args.build_apple_framework else 'OFF'}",
             "-DPLATFORM_NAME=" + platform_name,

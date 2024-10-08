@@ -59,13 +59,6 @@ add_custom_command(TARGET unit_tests POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_directory ${TEST_MODEL_SRC_DIR} ${TEST_MODEL_DES_DIR}
 )
 
-if (NOT IOS)
-  # On iOS static xcframework is used
-  add_custom_command(TARGET unit_tests POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} $<TARGET_FILE_DIR:unit_tests>
-  )
-endif()
-
 add_compile_definitions(MODEL_PATH="${TEST_MODEL_DES_DIR}")
 set_target_properties(unit_tests PROPERTIES FOLDER "Tests")
 source_group(TREE ${PROJECT_SOURCE_DIR} FILES ${test_srcs})
@@ -73,19 +66,19 @@ set_property(DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT unit_test
 
 if (IOS)
   set_target_properties(unit_tests PROPERTIES FOLDER "ONNXRuntimeGenAITest"
-  MACOSX_BUNDLE_BUNDLE_NAME unit_tests
-  MACOSX_BUNDLE_GUI_IDENTIFIER com.onnxruntimegenai.utest
-  MACOSX_BUNDLE_LONG_VERSION_STRING ${VERSION_STR}
-  MACOSX_BUNDLE_BUNDLE_VERSION ${VERSION_STR}
-  MACOSX_BUNDLE_SHORT_VERSION_STRING ${VERSION_STR}
-  XCODE_ATTRIBUTE_CLANG_ENABLE_MODULES "YES"
-  XCODE_ATTRIBUTE_ENABLE_BITCODE "NO"
-  XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "NO")
+    MACOSX_BUNDLE_BUNDLE_NAME unit_tests
+    MACOSX_BUNDLE_GUI_IDENTIFIER com.onnxruntimegenai.utest.unit_tests
+    MACOSX_BUNDLE_LONG_VERSION_STRING ${VERSION_STR}
+    MACOSX_BUNDLE_BUNDLE_VERSION ${VERSION_STR}
+    MACOSX_BUNDLE_SHORT_VERSION_STRING ${VERSION_STR}
+    XCODE_ATTRIBUTE_CLANG_ENABLE_MODULES "YES"
+    XCODE_ATTRIBUTE_ENABLE_BITCODE "NO"
+    XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "NO")
 
   xctest_add_bundle(unit_tests_xc unit_tests
-  ${TEST_SRC_DIR}/xctest/ortgenaixctest.m
-  ${TEST_SRC_DIR}/xctest/xcgtest.mm
-  ${_UT_SOURCES})
+    ${TEST_SRC_DIR}/xctest/ortgenaixctest.m
+    ${TEST_SRC_DIR}/xctest/xcgtest.mm
+    ${_UT_SOURCES})
 
   get_target_property(srcs unit_tests_xc SOURCES)
   set(objective_c_cc_srcs ${srcs})
@@ -97,14 +90,20 @@ if (IOS)
   target_link_libraries(unit_tests_xc PRIVATE onnxruntime-genai-static GTest::gtest)
   target_link_libraries(unit_tests_xc PRIVATE ${ONNXRUNTIME_LIB})
   set_target_properties(unit_tests_xc PROPERTIES FOLDER "ONNXRuntimeGenAIXCTest"
-  MACOSX_BUNDLE_BUNDLE_NAME unit_tests_xc
-  MACOSX_BUNDLE_GUI_IDENTIFIER com.onnxruntime.utest.unit_tests_xc
-  MACOSX_BUNDLE_LONG_VERSION_STRING ${VERSION_STR}
-  MACOSX_BUNDLE_BUNDLE_VERSION ${VERSION_STR}
-  MACOSX_BUNDLE_SHORT_VERSION_STRING ${VERSION_STR}
-  XCODE_ATTRIBUTE_ENABLE_BITCODE "NO")
+    MACOSX_BUNDLE_BUNDLE_NAME unit_tests_xc
+    MACOSX_BUNDLE_GUI_IDENTIFIER com.onnxruntimegenai.utest.unit_tests
+    MACOSX_BUNDLE_LONG_VERSION_STRING ${VERSION_STR}
+    MACOSX_BUNDLE_BUNDLE_VERSION ${VERSION_STR}
+    MACOSX_BUNDLE_SHORT_VERSION_STRING ${VERSION_STR}
+    XCODE_PRODUCT_TYPE com.apple.product-type.bundle.ui-testing
+    XCODE_ATTRIBUTE_ENABLE_BITCODE "NO")
 
   xctest_add_test(xctest.unit_tests unit_tests_xc)
+else()
+  # On iOS static xcframework is used. No need to copy.
+  add_custom_command(TARGET unit_tests POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} $<TARGET_FILE_DIR:unit_tests>
+)
 endif()
 
 include(GoogleTest)
