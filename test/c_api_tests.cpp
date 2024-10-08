@@ -369,6 +369,7 @@ TEST(CAPITests, TopKTopPCAPI) {
 #endif  // TEST_PHI2
 
 TEST(CAPITests, AdaptersTest) {
+#if TEST_PHI2
   // The python unit tests create the adapter model.
   // In order to run this test, the python unit test must have been run first.
   auto model = OgaModel::Create(MODEL_PATH "adapters");
@@ -387,17 +388,24 @@ TEST(CAPITests, AdaptersTest) {
   for (auto& string : input_strings)
     tokenizer->Encode(string, *input_sequences);
 
-  auto params = OgaGeneratorParams::Create(*model);
-  params->SetSearchOption("max_length", 20);
-  params->SetInputSequences(*input_sequences);
+  {
+    auto params = OgaGeneratorParams::Create(*model);
+    params->SetSearchOption("max_length", 20);
+    params->SetInputSequences(*input_sequences);
 
-  auto generator = OgaGenerator::Create(*model, *params);
-  generator->SetActiveAdapter(*adapters, "adapters_a_and_b");
+    auto generator = OgaGenerator::Create(*model, *params);
+    generator->SetActiveAdapter(*adapters, "adapters_a_and_b");
 
-  while (!generator->IsDone()) {
-    generator->ComputeLogits();
-    generator->GenerateNextToken();
+    while (!generator->IsDone()) {
+      generator->ComputeLogits();
+      generator->GenerateNextToken();
+    }
   }
+
+  // Unload the adapter. Will error out if the adapter is still active.
+  // So, the generator must go out of scope before the adapter can be unloaded.
+  adapters->UnloadAdapter("adapters_a_and_b");
+#endif
 }
 
 void CheckResult(OgaResult* result) {
