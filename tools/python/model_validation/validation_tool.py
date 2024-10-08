@@ -1,6 +1,5 @@
 import onnxruntime_genai as og
 import argparse
-import time
 from onnxruntime_genai.models.builder import create_model
 import json
 import os
@@ -18,20 +17,24 @@ def validate_model(config, model_directory):
     if config["verbose"]: print("Model loaded")
     tokenizer = og.Tokenizer(model)
     tokenizer_stream = tokenizer.create_stream() 
+
     if config["verbose"]: print("Tokenizer created")
     if config["verbose"]: print()  
 
-    chat_template = get_chat_template(model_directory)
-    
-    for input in config["inputs"]:
+    chat_template = get_chat_template(model_directory.lower())
+
+    search_options = config["search_options"]
+
+    for text in config["inputs"]:
 
         complete_text = ''
         
-        prompt = f'{chat_template.format(input=input)}'
+        prompt = f'{chat_template.format(input=text)}'
 
         input_tokens = tokenizer.encode(prompt)
 
         params = og.GeneratorParams(model)
+        params.set_search_options(**search_options)
         params.input_ids = input_tokens
 
         generator = og.Generator(model, params)
@@ -55,7 +58,7 @@ def validate_model(config, model_directory):
 
                 complete_text += value_to_save
 
-                print(tokenizer_stream.decode(new_token), end='', flush=True)
+                # print(tokenizer_stream.decode(new_token), end='', flush=True)
                 
         except KeyboardInterrupt:
             print("  --control+c pressed, aborting generation--")
@@ -64,7 +67,7 @@ def validate_model(config, model_directory):
             print(f"An error occurred: {e}")
             generation_successful = False
 
-        with open(f'{model_directory}/output.txt', 'a') as file:
+        with open(f'{model_directory}/output.txt', 'a', encoding='utf-8') as file:
             file.write(complete_text)
 
         # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
@@ -72,11 +75,15 @@ def validate_model(config, model_directory):
 
     return generation_successful
 
-def get_chat_template(output_directory):
-    tokenizer_json = output_directory + '/tokenizer_config.json'
-    with open(tokenizer_json, 'r') as file:
-        config = json.load(file)
-    return config["chat_template"]
+def get_chat_template(model_name):
+    if 'phi' in model_name: 
+        return '<|user|>\n{input} <|end|>\n<|assistant|>'
+    elif 'qwen' in model_name: 
+        return '<s>\n<|user|>\n{input} <|end|>\n<|assistant|>'
+    elif 'mistral' in model_name: 
+        return '<|im_start|> <|user|> \n {input} <|im_end>|\n'
+    # elif model_name.contains("llama"): return
+    # elif model_name.contains("gemma"): return
 
 
 if __name__ == "__main__":
@@ -95,32 +102,32 @@ if __name__ == "__main__":
     output = []
 
     validation_complete = False
+    e = None
+    exception = False
 
     for model in config["models"]:
 
         print(f"We are validating {model}")
         adjusted_model = model.replace("/", "_")
         output_path = config["output_directory"] + f'/{adjusted_model}'
-        # From the output directory, there exist a file named tokenizer_config.json which contains the chat 
         cache_path = config["cache_directory"] + f'/{adjusted_model}'
-        
         try:
             create_model(model, '', output_path, config["precision"], config["executive_provider"], cache_path)
         except Exception as e:
             print(f'Failure after create model {e}')
             output.append([model, validation_complete, e])
+            exception = True
             continue
         try:          
             validation_complete = validate_model(config, output_path)
         except Exception as e:
             print(f'Failure after validation model {e}')
-            output.append([model, validation_complete, e])
+            exception = True
+            output.append([model, validation_complete, e]) 
         
+        if not exception:
+            output.append([model, validation_complete, e]) 
             
     df = create_table(output)
 
-    df.to_csv("models.csv")
-
-    print(df)
-
-    # From the folder name, get the chat template 
+    df.to_csv("validation_summary.csv")
