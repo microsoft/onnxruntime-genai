@@ -18,8 +18,6 @@ env:
   cuda_version: "12.2"
   CUDA_PATH: ${{ github.workspace }}\\cuda_sdk\\v12.2
   binaryDir: 'build/cuda/win-x64'
-  ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime.Gpu.Windows&api-version=6.0-preview.1"
-  ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime.Gpu.Windows"
 
 jobs:
   windows-cuda-x64-build:
@@ -42,24 +40,6 @@ jobs:
     - uses: actions/setup-dotnet@v4
       with:
         dotnet-version: '8.0.x'
-
-    - name: Download OnnxRuntime Nightly
-      shell: pwsh
-      run: |
-        $resp = Invoke-RestMethod "${{ env.ORT_NIGHTLY_REST_API }}"
-        $ORT_NIGHTLY_VERSION = $resp.value[0].versions[0].normalizedVersion
-        Write-Host "$ORT_NIGHTLY_VERSION"
-        "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
-        nuget install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_NIGHTLY_VERSION -ExcludeVersion -NonInteractive
-
-    - run: Get-ChildItem  ${{ env.ORT_PACKAGE_NAME }} -Recurse
-      continue-on-error: true
-
-    - name: Extract OnnxRuntime library and header files
-      run: |
-        mkdir ort/lib
-        move ${{ env.ORT_PACKAGE_NAME }}/buildTransitive/native/include ort/
-        move ${{ env.ORT_PACKAGE_NAME }}/runtimes/win-x64/native/* ort/lib/    
 
     - name: Configure CMake
       run: |

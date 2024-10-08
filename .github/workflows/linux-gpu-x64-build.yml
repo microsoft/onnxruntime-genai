@@ -12,9 +12,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime.Gpu.Linux&api-version=6.0-preview.1"
-  ORT_PACKAGE_NAME: Microsoft.ML.OnnxRuntime.Gpu.Linux
-  ORT_NIGHTLY_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
   DOTNET_INSTALL_DIR: "${{ github.workspace }}/dotnet"
 
 jobs:
@@ -40,37 +37,6 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
-
-      - name: Get the Latest OnnxRuntime Nightly Version
-        shell: pwsh
-        run: |
-          $resp = Invoke-RestMethod "${{ env.ORT_NIGHTLY_REST_API }}"
-          $ORT_NIGHTLY_VERSION = $resp.value[0].versions[0].normalizedVersion
-          Write-Host "$ORT_NIGHTLY_VERSION"
-          "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-      - name: Download OnnxRuntime Nightly
-        run: |
-          dotnet new console
-          dotnet add package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_NIGHTLY_VERSION }} --source ${{ env.ORT_NIGHTLY_SOURCE }} --package-directory .
-          dotnet build
-        continue-on-error: true
-
-      - name: list files
-        shell: bash
-        run: |
-          ls -l
-          ls -R ${{ env.ORT_PACKAGE_NAME }}
-        continue-on-error: true
-
-      - name: Extract OnnxRuntime library and header files
-        run: |
-          set -e -x
-          mkdir -p ort/lib
-          mv microsoft.ml.onnxruntime.gpu.linux/${{ env.ORT_NIGHTLY_VERSION }}/buildTransitive/native/include ort/
-          mv microsoft.ml.onnxruntime.gpu.linux/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/linux-x64/native/* ort/lib/
-          cp ort/lib/libonnxruntime.so ort/lib/libonnxruntime.so.1
-
 
       - name: Get Docker Image
         run: |
