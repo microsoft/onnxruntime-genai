@@ -368,8 +368,9 @@ TEST(CAPITests, TopKTopPCAPI) {
 
 #endif  // TEST_PHI2
 
-TEST(CAPITests, DISABLED_AdaptersTest) {
-#if TEST_PHI2
+TEST(CAPITests, AdaptersTest) {
+  // The python unit tests create the adapter model.
+  // In order to run this test, the python unit test must have been run first.
   auto model = OgaModel::Create(MODEL_PATH "adapters");
   auto adapters = OgaAdapters::Create(*model);
   adapters->LoadAdapter(MODEL_PATH "adapters/adapters.onnx_adapter", "adapters_a_and_b");
@@ -397,7 +398,6 @@ TEST(CAPITests, DISABLED_AdaptersTest) {
     generator->ComputeLogits();
     generator->GenerateNextToken();
   }
-#endif
 }
 
 void CheckResult(OgaResult* result) {
