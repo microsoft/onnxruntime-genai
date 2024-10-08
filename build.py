@@ -602,6 +602,8 @@ def test(args: argparse.Namespace, env: dict[str, str]):
     Run the tests.
     """
     lib_dir = args.build_dir / "test"
+    if util.is_windows():
+        lib_dir = lib_dir / args.config
     if not args.ort_home:
         _ = util.download_dependencies(args.use_cuda, args.use_rocm, args.use_dml, lib_dir)
     else:
