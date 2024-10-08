@@ -95,9 +95,7 @@ class QuantizedModel:
         layer_id = 0
         for weight_file in os.listdir(input_path):
             if weight_file.endswith(".safetensors"):
-                module = self.layers.setdefault(
-                    layer_id, QuantizedDecoderLayer(layer_id, bits, group_size)
-                )
+                module = self.layers.setdefault(layer_id, QuantizedDecoderLayer(layer_id, bits, group_size))
                 weights = load_file(os.path.join(input_path, weight_file))
 
                 # Map weights to modules
@@ -127,10 +125,7 @@ class QuantizedModel:
                         if curr_layer_id != layer_id:
                             # Switch layer module used
                             layer_id = curr_layer_id
-                            module = self.layers.setdefault(
-                                layer_id,
-                                QuantizedDecoderLayer(layer_id, bits, group_size),
-                            )
+                            module = self.layers.setdefault(layer_id, QuantizedDecoderLayer(layer_id, bits, group_size),)
 
                         # Map weights and biases of norm, attention, and feed-forward network
                         # Graph order is input_layernorm --> q_proj/k_proj/v_proj --> o_proj --> post_attention_layernorm --> gate_proj/up_proj --> down_proj
@@ -289,7 +284,7 @@ class QuantizedModel:
                             module.self_attn.k_proj.qzeros = tensor[:, q_dim : q_dim + kv_dim]
                             module.self_attn.v_proj.qzeros = tensor[:, q_dim + kv_dim :]
                         elif bool(re.match(r"^model.layers\.\d+\.(self_attn.qkv_proj|self_attention.query_key_value)\.g_idx$", name)):
-                            # model.layers.layer_id.self_attn.qkv_proj.g_ix
+                            # model.layers.layer_id.self_attn.qkv_proj.g_idx
                             # model.layers.layer_id.self_attention.query_key_value.g_idx
                             module.self_attn.q_proj.g_idx = tensor
                             module.self_attn.k_proj.g_idx = tensor

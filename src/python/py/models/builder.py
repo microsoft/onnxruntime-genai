@@ -1433,9 +1433,7 @@ class Model:
             raise NotImplementedError(f"The MLP layer type is not set.")
 
     def make_mlp_unpacked(self, layer_id, mlp, root_input):
-        packed_proj = getattr(mlp, "gate_up_proj", None) or getattr(
-            mlp, "dense_h_to_4h", None
-        )
+        packed_proj = getattr(mlp, "gate_up_proj", None) or getattr(mlp, "dense_h_to_4h", None)
         mlp.gate_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
         mlp.gate_proj.weight = torch.nn.Parameter(
             packed_proj.weight[: self.intermediate_size, :]
@@ -1477,9 +1475,7 @@ class Model:
         self.make_mul(mul_name, mul_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
 
         # Make output MatMul node
-        down_proj = getattr(mlp, "down_proj", None) or getattr(
-            mlp, "dense_4h_to_h", None
-        )
+        down_proj = getattr(mlp, "down_proj", None) or getattr(mlp, "dense_4h_to_h", None)
         down_basename = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
         down_name = self.make_matmul(down_proj, down_basename, f"{mul_name}/output_0")
 
@@ -2643,8 +2639,6 @@ class ChatGLMModel(Model):
         self.rotemb_attrs["partial_rotary_factor"] = 0.5 # Line 755 of modeling_chatglm.py check self.rotary_pos_emb declaration
         self.rotemb_attrs["rotary_embedding_dim"] = int(self.head_size * self.rotemb_attrs["partial_rotary_factor"])
         self.rotemb_attrs["interleaved"] = 1
-        self.attention_attrs["use_rotemb_in_attn"] = True
-        self.attention_attrs["use_packed_matmul"] = True
 
     def make_rotary_embedding(self, rotemb, name, root_input, **kwargs):
         super().make_rotary_embedding(rotemb, name, root_input, num_heads=self.rotemb_attrs["num_heads"], rotary_embedding_dim=self.rotemb_attrs["rotary_embedding_dim"], **kwargs)
