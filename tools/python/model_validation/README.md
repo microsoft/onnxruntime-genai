@@ -18,9 +18,7 @@ In the model_validation folder, you should find the validation_tool.py script, v
 * Phi
 * Qwen
 
-### Usage - Build the Model
-This step creates optimized and quantized ONNX models that run with ONNX Runtime GenAI.
-
+### Usage 
 1. In the validation_config.json file, enter the supported Hugging Face model name. Models can be found here.
 2. Include the path to the output folder, precision, and execution provider.
 
