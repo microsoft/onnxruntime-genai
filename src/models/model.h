@@ -140,10 +140,9 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
   IDMLDevice* GetDmlDevice() const { return dml_device_.Get(); }
   ID3D12Device* GetD3D12Device() const { return dml_objects_.d3d12_device.Get(); }
   bool IsIntelDevice() const { return is_intel_device_; }
-  DmlAllocator* allocator_device_{};
-#else
-  OrtAllocator* allocator_device_{};  // Can be CUDA or CPU based on the DeviceType in the model
 #endif
+
+  OrtAllocator* allocator_device_{};  // Can be CUDA, DML or CPU based on the DeviceType in the model
 
  protected:
   void InitDeviceAllocator(OrtSession& session);

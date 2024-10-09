@@ -17,29 +17,10 @@ DmlAllocator::DmlAllocator(const OrtDmlApi* p_dml_api, ID3D12Device* d3d12_devic
   OrtAllocator::Alloc = AllocImpl;
   OrtAllocator::Free = FreeImpl;
   OrtAllocator::Info = InfoImpl;
-}
-
-void DmlAllocator::SetState(DmlAllocatorState new_state) {
-  state_ = new_state;
-
-  if (new_state == DmlAllocatorState::AllocatingPromptActivations) {
-    prompt_resource_index_ = 0;
-    resources_.clear();
-  }
+  OrtAllocator::Reserve = ReserveImpl;
 }
 
 void* DmlAllocator::DmlAlloc(size_t size_in_bytes) {
-  if (state_ == DmlAllocatorState::ReusingPromptActivations) {
-    assert(resources_[prompt_resource_index_]->GetDesc().Width == size_in_bytes);
-
-    void* allocation;
-    Ort::ThrowOnError(p_dml_api_->CreateGPUAllocationFromD3DResource(resources_[prompt_resource_index_].Get(), &allocation));
-
-    prompt_resource_index_ = (prompt_resource_index_ + 1) % resources_.size();
-
-    return allocation;
-  }
-
   size_t rounded_size_in_bytes = (size_in_bytes + 3) & ~3;
 
   Microsoft::WRL::ComPtr<ID3D12Resource> resource;
@@ -53,17 +34,52 @@ void* DmlAllocator::DmlAlloc(size_t size_in_bytes) {
       nullptr,
       IID_PPV_ARGS(resource.GetAddressOf())));
 
-  if (state_ == DmlAllocatorState::AllocatingPromptActivations) {
-    resources_.push_back(resource);
-  }
+  void* allocation;
+  Ort::ThrowOnError(p_dml_api_->CreateGPUAllocationFromD3DResource(resource.Get(), &allocation));
+
+  return allocation;
+}
+
+constexpr GUID initializer_resource_guid = {0x86b04a2b, 0x14d1, 0x4a4b, {0xb9, 0xcf, 0xf0, 0x01, 0xa3, 0x9a, 0xa1, 0x6d}};
+
+void* DmlAllocator::DmlReserve(size_t size_in_bytes) {
+  size_t rounded_size_in_bytes = (size_in_bytes + 3) & ~3;
+
+  Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+  auto buffer = CD3DX12_RESOURCE_DESC::Buffer(rounded_size_in_bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+  auto heap_props = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+  THROW_IF_FAILED(d3d12_device_->CreateCommittedResource(
+      &heap_props,
+      D3D12_HEAP_FLAG_NONE,
+      &buffer,
+      D3D12_RESOURCE_STATE_COMMON,
+      nullptr,
+      IID_PPV_ARGS(resource.GetAddressOf())));
+
+  // Tag this resource as an initializer, which means that we don't need to pool it when freeing it
+  bool dummy = false;
+  resource->SetPrivateData(initializer_resource_guid, sizeof(&dummy), &dummy);
 
   void* allocation;
-  Ort::ThrowOnError(p_dml_api_->CreateGPUAllocationFromD3DResource(resource.Detach(), &allocation));
+  Ort::ThrowOnError(p_dml_api_->CreateGPUAllocationFromD3DResource(resource.Get(), &allocation));
 
   return allocation;
 }
 
 void DmlAllocator::DmlFree(void* allocation) {
+  if (!allocation) {
+    return;
+  }
+
+  Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+  Ort::ThrowOnError(p_dml_api_->GetD3D12ResourceFromAllocation(this, allocation, resource.GetAddressOf()));
+
+  bool dummy = false;
+  uint32_t data_size = sizeof(&dummy);
+  if (resource->GetPrivateData(initializer_resource_guid, &data_size, &dummy) == S_OK) {
+    Ort::ThrowOnError(p_dml_api_->FreeGPUAllocation(allocation));
+  }
+
   /*
   // if (allocation) {
   //  We free the allocation itself, even though the D3D12 resource may survive until the GPU is done executing
@@ -82,6 +98,10 @@ OrtMemoryInfo* DmlAllocator::DmlInfo() const {
 
 void* ORT_API_CALL DmlAllocator::AllocImpl(struct OrtAllocator* this_, size_t size) {
   return static_cast<DmlAllocator*>(this_)->DmlAlloc(size);
+}
+
+void* ORT_API_CALL DmlAllocator::ReserveImpl(struct OrtAllocator* this_, size_t size) {
+  return static_cast<DmlAllocator*>(this_)->DmlReserve(size);
 }
 
 void ORT_API_CALL DmlAllocator::FreeImpl(struct OrtAllocator* this_, void* p) {
