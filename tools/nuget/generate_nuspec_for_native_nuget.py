@@ -122,7 +122,7 @@ def generate_files(lines, args):
                 f'<file src="{p.absolute()}" target="runtimes\{runtime}\\native" />'
             )
 
-    runtimes = ["win-x64", "win-arm64", "linux-x64"]
+    runtimes = ["win-x64", "win-arm64", "linux-x64", "osx-x64", "osx-arm64"]
     for runtime in runtimes:
       if runtime.startswith("win"):
           add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai.lib")
@@ -130,6 +130,8 @@ def generate_files(lines, args):
           add_native_artifact_if_exists(lines, runtime, "d3d12core.dll")
       if runtime.startswith("linux"):
           add_native_artifact_if_exists(lines, runtime, "libonnxruntime-genai.so")
+      if runtime.startswith("osx"):
+          add_native_artifact_if_exists(lines, runtime, "libonnxruntime-genai.dylib")
 
     # targets
     for dotnet in ["netstandard2.0", "net8.0", "native"]:

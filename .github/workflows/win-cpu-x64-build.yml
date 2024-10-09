@@ -78,12 +78,9 @@ jobs:
         python3 -m pip install -r test\python\requirements-cpu.txt --user
         python3 -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
 
-    - name: Get HuggingFace Token
+    - name: Use Dummy HuggingFace Token
       run: |
-        az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
-        $HF_TOKEN = (az keyvault secret show --vault-name anubissvcsecret --name ANUBIS-HUGGINGFACE-TOKEN --query value)
-        Write-Output "::add-mask::$HF_TOKEN"
-        Add-Content -Path $env:GITHUB_ENV -Value "HF_TOKEN=$HF_TOKEN"
+        Add-Content -Path $env:GITHUB_ENV -Value "HF_TOKEN=12345"
 
     - name: Run the Python Tests
       run: |
@@ -92,7 +89,7 @@ jobs:
     - name: Build the C# API and Run the C# Tests
       run: |
         cd test\csharp
-        dotnet test /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release"
+        dotnet test /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release" /p:OrtLibDir="$env:GITHUB_WORKSPACE\ort\lib"
 
     - name: Verify Build Artifacts
       if: always()
@@ -103,6 +100,7 @@ jobs:
 
     - name: Run tests
       run: |
+        copy $env:GITHUB_WORKSPACE\ort\lib\* .\$env:binaryDir\test\Release
         & .\$env:binaryDir\test\Release\unit_tests.exe
 
     - name: Perform CodeQL Analysis

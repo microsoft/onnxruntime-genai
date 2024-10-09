@@ -21,7 +21,7 @@ jobs:
   linux-cuda-x64-build:
     env :
       PYTHON_EXECUTABLE: "/opt/python/cp38-cp38/bin/python3.8"
-    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2004-T4" ]
+    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-A10" ]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v4
@@ -109,16 +109,9 @@ jobs:
             bash -c " \
               /usr/bin/cmake --build --preset linux_gcc_cuda_release"
 
-      - name: Get HuggingFace Token
+      - name: Use Dummy HuggingFace Token
         run: |
-          az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
-          HF_TOKEN=$(az keyvault secret show --vault-name anubissvcsecret --name ANUBIS-HUGGINGFACE-TOKEN --query value)
-          echo "::add-mask::$HF_TOKEN"
-          echo "HF_TOKEN=$HF_TOKEN" >> $GITHUB_ENV
-
-      - name: Remove the ort lib and header files
-        run: |
-          rm -rf ort
+          echo "HF_TOKEN=12345" >> $GITHUB_ENV
 
       - name: Install the onnxruntime-genai Python wheel and run python test
         run: |
@@ -154,4 +147,4 @@ jobs:
             --rm \
             --volume /data/ortgenai_pytorch_models:/data/ortgenai_pytorch_models \
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
-            -w /ort_genai_src onnxruntimecudabuildx64 bash -c "LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/ort_genai_src/build/cuda/ /ort_genai_src/build/cuda/test/unit_tests"
+            -w /ort_genai_src onnxruntimecudabuildx64 bash -c "ORTGENAI_LOG_ORT_LIB=1 LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/ort_genai_src/build/cuda/ /ort_genai_src/build/cuda/test/unit_tests"

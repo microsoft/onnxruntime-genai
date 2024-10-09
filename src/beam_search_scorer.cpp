@@ -47,8 +47,8 @@ BeamSearchScorer::BeamSearchScorer(const GeneratorParams& parameters)
     : batch_size_{parameters.batch_size},
       num_beams_{parameters.search.num_beams},
       max_length_{parameters.search.max_length},
-      pad_token_id_{parameters.pad_token_id},
-      eos_token_id_{parameters.eos_token_id},
+      pad_token_id_{parameters.config.model.pad_token_id},
+      eos_token_id_{parameters.config.model.eos_token_id},
       early_stopping_{parameters.search.early_stopping},
       not_done_count_{parameters.batch_size} {
   size_t const batch_beam_size = static_cast<size_t>(batch_size_) * num_beams_;

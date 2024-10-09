@@ -1,86 +1,148 @@
 id:
 name: Issue Triage
-description: Assign label to issues 
+description: Assign label to issues
 owner:
 resource: repository
 where:
 configuration:
   resourceManagementConfiguration:
     eventResponderTasks:
-      - if:
+      - description: Add api:java label to new issues
+        if:
           - payloadType: Issues
-          - and:
-              - isOpen
-              - not:
-                  and:
-                    - isAssignedToSomeone
-                    - isLabeled
+          - isOpen
+          - not:
+              labelRemoved:
+                label: api:java
+          - or:
+              - titleContains:
+                  pattern: (?i)\bjava\b
+                  isRegex: True
+              - bodyContains:
+                  pattern: (?i)\bjava\b
+                  isRegex: True
         then:
-          - if:
-              - or:
-                  - titleContains:
-                      pattern: '/\bcuda\b/i'
-                      isRegex: True
-                  - bodyContains:
-                      pattern: '/\bcuda\b/i'
-                      isRegex: True
-            then:
-              - addLabel:
-                  label: ep:CUDA
-          - if:
-              - or:
-                  - titleContains:
-                      pattern: '/\bjava\b/i'
-                      isRegex: True
-                  - bodyContains:
-                      pattern: '/\bjava\b/i'
-                      isRegex: True
-            then:
-              - addLabel:
-                  label: api:Java
-          - if:
-              - or:
-                  - titleContains:
-                      pattern: '/(\bdirect\s*ml\b|\bdml\b)/i'
-                      isRegex: True
-                  - bodyContains:
-                      pattern: '/(\bdirect\s*ml\b|\bdml\b)/i'
-                      isRegex: True
-            then:
-              - addLabel:
-                  label: ep:DML
-          - if:
-              - or:
-                  - titleContains:
-                      pattern: '/(\bobj(?:ective)?-?c\b|\bnnapi\b|\bmobile\b|\bandroid\b|\bios\b|\bxamarin\b|\bmaui\b)/i'
-                      isRegex: True
-                  - bodyContains:
-                      pattern: '/(\bobj(?:ective)?-?c\b|\bnnapi\b|\bmobile\b|\bandroid\b|\bios\b|\bxamarin\b|\bmaui\b)/i'
-                      isRegex: True
-            then:
-              - addLabel:
-                  label: platform:mobile
-          - if:
-              - or:
-                  - titleContains:
-                      pattern: '/(\bwindows\b|\bwinrt\b|\bwinml\b)/i'
-                      isRegex: True
-                  - bodyContains:
-                      pattern: '/(\bwindows\b|\bwinrt\b|\bwinml\b)/i'
-                      isRegex: True
-            then:
-              - addLabel:
-                  label: platform:windows
-          - if:
-              - or:
-                  - titleContains:
-                      pattern: '/\btransformers(?!\.js)\b/i'
-                      isRegex: True
-                  - bodyContains:
-                      pattern: '/\btransformers(?!\.js)\b/i'
-                      isRegex: True
-            then:
-              - addLabel:
-                  label: model:transformer
+          - addLabel:
+              label: api:java
+      - description: Add api:javascript label to new issues
+        if:
+          - payloadType: Issues
+          - isOpen
+          - not:
+              labelRemoved:
+                label: api:javascript
+          - or:
+              - titleContains:
+                  pattern: (?i)\bjavascript\b
+                  isRegex: True
+              - bodyContains:
+                  pattern: (?i)\bjavascript\b
+                  isRegex: True
+        then:
+          - addLabel:
+              label: api:javascript
+      - description: Add ep:CUDA label to new issues
+        if:
+          - payloadType: Issues
+          - isOpen
+          - not:
+              labelRemoved:
+                label: ep:CUDA
+          - titleContains:
+              pattern: (?i)\bcuda\b
+              isRegex: True
+        then:
+          - addLabel:
+              label: ep:CUDA
+      - description: Add ep:DML label to new issues
+        if:
+          - payloadType: Issues
+          - isOpen
+          - not:
+              labelRemoved:
+                label: ep:DML
+          - or:
+              - titleContains:
+                  pattern: (?i)(\bdirect\s*ml\b|\bdml\b)
+                  isRegex: True
+              - bodyContains:
+                  pattern: (?i)(\bdirect\s*ml\b|\bdml\b)
+                  isRegex: True
+        then:
+          - addLabel:
+              label: ep:DML 
+      - description: Add ep:TensorRT label to new issues
+        if:
+          - payloadType: Issues
+          - isOpen
+          - not:
+              labelRemoved:
+                label: ep:TensorRT
+          - titleContains:
+                  pattern: (?i)(\btensor\s*rt\b|\btrt\b)
+                  isRegex: True
+        then:
+          - addLabel:
+              label: ep:TensorRT
+      - description: Add platform:jetson label to new issues
+        if:
+          - payloadType: Issues
+          - isOpen
+          - not:
+              labelRemoved:
+                label: platform:jetson
+          - or:
+              - titleContains:
+                  pattern: (?i)(\bjetson\b|\bjetpack\b)
+                  isRegex: True
+              - bodyContains:
+                  pattern: (?i)(\bjetson\b|\bjetpack\b)
+                  isRegex: True
+        then:
+          - addLabel:
+              label: platform:jetson
+      - description: Add platform:mobile label to new issues
+        if:
+          - payloadType: Issues
+          - isOpen
+          - not:
+              labelRemoved:
+                label: platform:mobile
+          - or:
+              - titleContains:
+                  pattern: (?i)(\bobj(?:ective)?-?c\b|\bnnapi\b|\bmobile\b|\bandroid\b|\bios\b|\bxamarin\b|\bmaui\b)
+                  isRegex: True
+              - bodyContains:
+                  pattern: (?i)(\bobj(?:ective)?-?c\b|\bnnapi\b|\bmobile\b|\bandroid\b|\bios\b|\bxamarin\b|\bmaui\b)
+                  isRegex: True
+        then:
+          - addLabel:
+              label: platform:mobile
+      - description: Add platform:windows label to new issues
+        if:
+          - payloadType: Issues
+          - isOpen
+          - not:
+              labelRemoved:
+                label: platform:windows
+          - titleContains:
+              pattern: (?i)(\bwindows\b|\bwinrt\b|\bwinml\b)
+              isRegex: True
+        then:
+          - addLabel:
+              label: platform:windows
+      - description: Add quantization label to new issues
+        if:
+          - payloadType: Issues
+          - isOpen
+          - not:
+              labelRemoved:
+                label: quantization
+          - titleContains:
+              pattern: (?i)(quant|\bqdq\b)
+              isRegex: True
+        then:
+          - addLabel:
+              label: quantization
 onFailure:
 onSuccess:

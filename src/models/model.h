@@ -5,6 +5,7 @@
 #include "captured_graph_pool.h"
 #include "utils.h"
 #include "prompt_image_processor.h"
+#include "audio_processor.h"
 
 #if USE_DML
 #include "dml_provider_factory.h"
@@ -30,9 +31,15 @@ struct State {
 
   virtual RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices = {}) = 0;
   virtual const CapturedGraphInfo* GetCapturedGraphInfo() const { return nullptr; }
+  virtual void Finalize() {}
 
-  OrtValue* GetOutput(const char* name);
+  OrtValue* GetInput(const char* name);
 
+  virtual OrtValue* GetOutput(const char* name);
+
+  void ClearIO();  // Clear all inputs/outputs
+
+  const Model& model_;
   std::shared_ptr<const GeneratorParams> params_;
 
   std::vector<const char*> input_names_, output_names_;
@@ -40,11 +47,9 @@ struct State {
 
  protected:
   void Run(OrtSession& session, OrtRunOptions& run_options, int new_batch_size);  // Uses the inputs below to run
-  void ClearIO();                                                                 // Clear all inputs/outputs
   bool first_run_{true};
 
  private:
-  const Model& model_;
   int current_batch_size_{0};
 };
 
@@ -74,6 +79,8 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
   std::vector<int32_t> EncodeBatch(std::span<const std::string> strings) const;
   std::vector<std::string> DecodeBatch(std::span<const int32_t> sequences, size_t count) const;
 
+  int32_t TokenToTokenId(const char* token) const;
+
   OrtxPtr<OrtxTokenizer> tokenizer_;
   std::shared_ptr<Tokenizer> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
 
@@ -86,6 +93,7 @@ struct MultiModalProcessor : std::enable_shared_from_this<MultiModalProcessor> {
 
   std::shared_ptr<Tokenizer> tokenizer_;
   std::shared_ptr<ImageProcessor> image_processor_;
+  std::shared_ptr<AudioProcessor> audio_processor_;
 
   std::shared_ptr<MultiModalProcessor> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
 };
@@ -119,9 +127,10 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
 
   CapturedGraphPool* GetCapturedGraphPool() const { return captured_graph_pool_.get(); }
 
+  OrtSessionOptions* GetSessionOptions(const std::string& model_id) const;
+
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
-  std::unique_ptr<OrtSessionOptions> vision_session_options_;
   std::unique_ptr<OrtRunOptions> run_options_;
 
   cuda_stream_holder cuda_stream_;
@@ -139,7 +148,6 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
   const OrtDmlApi* GetOrtDmlApi() const { return p_dml_api_; }
   IDMLDevice* GetDmlDevice() const { return dml_device_.Get(); }
   ID3D12Device* GetD3D12Device() const { return dml_objects_.d3d12_device.Get(); }
-  bool IsIntelDevice() const { return is_intel_device_; }
 #endif
 
   OrtAllocator* allocator_device_{};  // Can be CUDA, DML or CPU based on the DeviceType in the model
@@ -148,7 +156,11 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
   void InitDeviceAllocator(OrtSession& session);
   void CreateSessionOptions();
 
- private:
+  void CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
+                                      OrtSessionOptions& session_options,
+                                      bool is_primary_session_options,
+                                      bool disable_graph_capture);
+
 #if USE_DML
   mutable DmlObjects dml_objects_;
   const OrtDmlApi* p_dml_api_{};
@@ -156,10 +168,12 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
   std::unique_ptr<DmlExecutionContext> dml_execution_context_;
   std::unique_ptr<DmlReadbackHeap> dml_readback_heap_;
   ComPtr<IDMLDevice> dml_device_;
-  bool is_intel_device_{};
+  std::unique_ptr<Ort::Allocator> dml_owned_allocator_;
+  std::unique_ptr<OrtMemoryInfo> memory_info_device_;
 #endif
 
   std::shared_ptr<CapturedGraphPool> captured_graph_pool_;
+  std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;
 };
 
 }  // namespace Generators

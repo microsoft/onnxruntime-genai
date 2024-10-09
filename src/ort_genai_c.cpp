@@ -70,6 +70,22 @@ OgaResult* OGA_API_CALL OgaAppendTokenSequence(const int32_t* token_ptr, size_t 
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaAppendTokenToSequence(int32_t token, OgaSequences* sequences, size_t sequence_index) {
+  OGA_TRY
+  Generators::TokenSequences* toks = reinterpret_cast<Generators::TokenSequences*>(sequences);
+  if (sequence_index > toks->size()) {
+    throw std::runtime_error("sequence index out of bounds");
+  }
+  if (sequence_index == toks->size()) {
+    toks->emplace_back();
+  }
+
+  toks->at(sequence_index).push_back(token);
+
+  return nullptr;
+  OGA_CATCH
+}
+
 size_t OGA_API_CALL OgaSequencesCount(const OgaSequences* p) {
   return reinterpret_cast<const Generators::TokenSequences*>(p)->size();
 }
@@ -96,6 +112,24 @@ OgaResult* OGA_API_CALL OgaLoadImages(const OgaStringArray* image_paths, OgaImag
   std::vector<const char*> image_paths_vector_c;
   for (const auto& image_path : image_paths_vector) image_paths_vector_c.push_back(image_path.c_str());
   *images = reinterpret_cast<OgaImages*>(Generators::LoadImages(image_paths_vector_c).release());
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaLoadAudio(const char* audio_path, OgaAudios** audios) {
+  OGA_TRY
+  const std::vector<const char*> audio_paths_vector{audio_path};
+  *audios = reinterpret_cast<OgaAudios*>(Generators::LoadAudios(audio_paths_vector).release());
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaLoadAudios(const OgaStringArray* audio_paths, OgaAudios** audios) {
+  OGA_TRY
+  const auto& audio_paths_vector = *reinterpret_cast<const std::vector<std::string>*>(audio_paths);
+  std::vector<const char*> audio_paths_vector_c;
+  for (const auto& audio_path : audio_paths_vector) audio_paths_vector_c.push_back(audio_path.c_str());
+  *audios = reinterpret_cast<OgaAudios*>(Generators::LoadAudios(audio_paths_vector_c).release());
   return nullptr;
   OGA_CATCH
 }
@@ -162,7 +196,7 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputSequences(OgaGeneratorParams* 
     span_sequences.emplace_back(sequences[i]);
   }
 
-  params.input_ids_owner = Generators::PadInputs(span_sequences, params.pad_token_id);
+  params.input_ids_owner = Generators::PadInputs(span_sequences, params.config.model.pad_token_id);
   params.batch_size = static_cast<int>(sequences.size());
   params.sequence_length = static_cast<int>(params.input_ids_owner.size() / params.batch_size);
   params.input_ids = params.input_ids_owner;
@@ -299,6 +333,14 @@ OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer* p, const char* st
   auto& tokenizer = *reinterpret_cast<const Generators::Tokenizer*>(p);
   auto& token_sequences = *reinterpret_cast<Generators::TokenSequences*>(sequences);
   token_sequences.emplace_back(tokenizer.Encode(str));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerToTokenId(const OgaTokenizer* p, const char* str, int32_t* token_id) {
+  OGA_TRY
+  auto& tokenizer = *reinterpret_cast<const Generators::Tokenizer*>(p);
+  *token_id = tokenizer.TokenToTokenId(str);
   return nullptr;
   OGA_CATCH
 }
@@ -446,6 +488,21 @@ OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor* 
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaProcessorProcessAudios(const OgaMultiModalProcessor* p, const OgaAudios* audios_p, OgaNamedTensors** input_tensors) {
+  OGA_TRY
+  auto& processor = *reinterpret_cast<const Generators::MultiModalProcessor*>(p);
+  auto* audios = reinterpret_cast<const Generators::Audios*>(audios_p);
+
+  if (!processor.audio_processor_)
+    throw std::runtime_error("Audio processor not available for this model.");
+
+  auto named_tensors = processor.audio_processor_->Process(audios);
+  *input_tensors = reinterpret_cast<OgaNamedTensors*>(named_tensors.release());
+
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaCreateStringArray(OgaStringArray** out) {
   OGA_TRY
   *out = reinterpret_cast<OgaStringArray*>(std::make_unique<std::vector<std::string>>().release());
@@ -520,6 +577,10 @@ void OGA_API_CALL OgaDestroyMultiModalProcessor(OgaMultiModalProcessor* p) {
 
 void OGA_API_CALL OgaDestroyImages(OgaImages* p) {
   delete reinterpret_cast<Generators::Images*>(p);
+}
+
+void OGA_API_CALL OgaDestroyAudios(OgaAudios* p) {
+  delete reinterpret_cast<Generators::Audios*>(p);
 }
 
 void OGA_API_CALL OgaDestroyNamedTensors(OgaNamedTensors* p) {
