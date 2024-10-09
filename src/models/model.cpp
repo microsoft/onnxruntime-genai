@@ -217,15 +217,6 @@ Ort::Allocator* GetCudaAllocator(OrtSession& session) {
 #endif
 
 #if USE_DML
-ID3D12Device* GetGlobalD3D12Device() {
-  auto& globals = *GetOrtGlobals();
-  if (!globals.d3d12_device_) {
-    globals.d3d12_device_ = DmlHelpers::CreateD3d12Device(CurrentModulePath());
-  }
-
-  return globals.d3d12_device_.Get();
-}
-
 DmlAllocator* GetDmlAllocator() {
   auto& globals = *GetOrtGlobals();
   if (!globals.allocator_dml_) {
@@ -234,7 +225,7 @@ DmlAllocator* GetDmlAllocator() {
 
     globals.d3d12_device_ = DmlHelpers::CreateD3d12Device(CurrentModulePath());
     globals.memory_info_dml_ = OrtMemoryInfo::Create("DML", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-    globals.allocator_dml_ = std::make_unique<DmlAllocator>(p_dml_api, GetGlobalD3D12Device(), globals.memory_info_dml_.get());
+    globals.allocator_dml_ = std::make_unique<DmlAllocator>(p_dml_api, globals.d3d12_device_.Get(), globals.memory_info_dml_.get());
     Ort::ThrowOnError(Ort::api->RegisterAllocator(&GetOrtEnv(), globals.allocator_dml_.get()));
   }
   return globals.allocator_dml_.get();
@@ -432,7 +423,8 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 #if USE_DML
     } else if (provider_options.name == "dml") {
       if (!p_dml_api_) {
-        dml_objects_ = DmlHelpers::CreateDmlObjects(GetGlobalD3D12Device());
+        allocator_device_ = GetDmlAllocator();
+        dml_objects_ = DmlHelpers::CreateDmlObjects(GetOrtGlobals()->d3d12_device_.Get());
 
         constexpr auto directml_dll = "DirectML.dll";
         wil::unique_hmodule smart_directml_dll(LoadLibraryEx(directml_dll, nullptr, 0));
