@@ -44,7 +44,10 @@ if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linu
 endif()
 
 if(APPLE)
-  target_link_libraries(unit_tests PRIVATE "-framework Foundation" "-framework CoreML" "-framework UIKit")
+  target_link_libraries(unit_tests PRIVATE "-framework Foundation" "-framework CoreML")
+  if(IOS)
+    target_link_libraries(unit_tests PRIVATE "-framework UIKit")
+  endif()
 endif()
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
@@ -102,11 +105,6 @@ if (IOS)
     XCODE_ATTRIBUTE_ENABLE_BITCODE "NO")
 
   xctest_add_test(xctest.unit_tests unit_tests_xc)
-else()
-  # On iOS static xcframework is used. No need to copy.
-  add_custom_command(TARGET unit_tests POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E copy ${onnxruntime_libs} $<TARGET_FILE_DIR:unit_tests>
-)
 endif()
 
 include(GoogleTest)
