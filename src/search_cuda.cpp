@@ -258,11 +258,11 @@ std::span<float> Search_Cuda::GetScores() {
 }
 
 // Set user input tokens (batch_beam_size, sequence_length)
-void GreedySearch_Cuda::SetUserTokens(RoamingArray<int32_t> next_tokens) {
+void GreedySearch_Cuda::SetUserTokens(const RoamingArray<int32_t>& next_tokens) {
   cudaMemsetAsync(eos_meet_.data(), 0, eos_meet_.size_bytes(), params_->cuda_stream);
   *done_cpu_ = false;
 
-  auto next_tokens_gpu = next_tokens.GetGPU();
+  auto next_tokens_gpu = const_cast<RoamingArray<int32_t>&>(next_tokens).GetGPU();
   sequences_.AppendUserTokensToSequences(next_tokens_gpu, 1);
   
   if (sequences_.GetSequenceLength() == params_->search.max_length) {
@@ -272,8 +272,8 @@ void GreedySearch_Cuda::SetUserTokens(RoamingArray<int32_t> next_tokens) {
   }
 }
 
-void BeamSearch_Cuda::SetUserTokens(RoamingArray<int32_t> next_tokens) {
-  auto next_tokens_gpu = next_tokens.GetGPU();
+void BeamSearch_Cuda::SetUserTokens(const RoamingArray<int32_t>& next_tokens) {
+  auto next_tokens_gpu = const_cast<RoamingArray<int32_t>&>(next_tokens).GetGPU();
   sequences_.AppendUserTokensToSequences(next_tokens_gpu, params_->search.num_beams);
 }
 

@@ -255,14 +255,14 @@ void GreedySearch_Cpu::AppendNextTokensToSequences() {
   }
 }
 
-void GreedySearch_Cpu::SetUserTokens(RoamingArray<int32_t> next_tokens) {
+void GreedySearch_Cpu::SetUserTokens(const RoamingArray<int32_t>& next_tokens) {
   // Reset done count/state
   done_ = false;
   not_done_count_ = params_->search.batch_size;
   memset(eos_seen_.data(), 0, eos_seen_.size_bytes());
 
   // Set user-defined next tokens
-  auto next_tokens_cpu = next_tokens.GetCPU();
+  auto next_tokens_cpu = const_cast<RoamingArray<int32_t>&>(next_tokens).GetCPU();
   auto batch_size = params_->search.batch_size;
   auto tokens_count_per_batch = next_tokens_cpu.size() / batch_size;
   for (size_t j = 0; j < tokens_count_per_batch; j++) {
@@ -307,7 +307,7 @@ void GreedySearch_Cpu::RewindTo(size_t index) {
 // }
 
 
-void BeamSearch_Cpu::SetUserTokens(RoamingArray<int32_t> next_tokens) {
+void BeamSearch_Cpu::SetUserTokens(const RoamingArray<int32_t>& next_tokens) {
   // LEFT OFF HERE
   // Reset done count/state
   // done_ = false;
@@ -315,7 +315,7 @@ void BeamSearch_Cpu::SetUserTokens(RoamingArray<int32_t> next_tokens) {
   // memset(eos_seen_.data(), 0, eos_seen_.size_bytes());
 
   // Set user-defined next tokens
-  auto next_tokens_cpu = next_tokens.GetCPU();
+  auto next_tokens_cpu = const_cast<RoamingArray<int32_t>&>(next_tokens).GetCPU();
   auto batch_beam_size = params_->BatchBeamSize();
   auto tokens_count_per_batch = next_tokens_cpu.size() / batch_beam_size;
   for (size_t j = 0; j < tokens_count_per_batch; j++) {

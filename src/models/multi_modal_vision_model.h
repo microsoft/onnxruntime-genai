@@ -39,7 +39,7 @@ struct EmbeddingState : State {
  private:
   friend struct MultiModalPipelineState;
 
-  void UpdateInputsAndOutputs(RoamingArray<int32_t> next_tokens);
+  void UpdateInputsOutputs(RoamingArray<int32_t> next_tokens);
 
   const MultiModalVisionModel& model_;
   const CapturedGraphInfo* captured_graph_info_;

@@ -4,8 +4,6 @@
 #include "../generators.h"
 #include "multi_modal_vision_model.h"
 
-// TODO(aciddelgado): update to use new input logic
-
 namespace Generators {
 
 namespace {
@@ -91,10 +89,11 @@ EmbeddingState::EmbeddingState(const MultiModalVisionModel& model, const Generat
   inputs_embeds_.Add();
 }
 
-void EmbeddingState::UpdateInputsAndOutputs(RoamingArray<int32_t> next_tokens) {
+void EmbeddingState::UpdateInputsOutputs(RoamingArray<int32_t> next_tokens) {
+  int batch_size = static_cast<int>(inputs_embeds_.GetShape()[0]);
+  size_t new_length = next_tokens.GetCPU().size() / batch_size;
   input_ids_.Update(next_tokens);
   image_features_.Update();
-  inputs_embeds_.UpdateSequenceLength();
 }
 
 RoamingArray<float> EmbeddingState::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
@@ -142,6 +141,7 @@ void DecoderState::UpdateInputsOutputs(RoamingArray<int32_t> next_tokens, int to
   position_inputs_.Update(next_tokens, total_length, new_length);
   kv_cache_.Update(beam_indices.GetCPU(), total_length);
   logits_.Update(next_tokens, new_length);
+  inputs_embeds_.UpdateSequenceLength(new_length);
 }
 
 MultiModalPipelineState::MultiModalPipelineState(const MultiModalVisionModel& model,
@@ -166,6 +166,10 @@ RoamingArray<float> MultiModalPipelineState::Run(int current_length, RoamingArra
   // Generation stage:
   //   - input_ids, image_features -> |embeddings_model| -> inputs_embeds
   //   - inputs_embeds -> |decoder_model| -> logits
+  
+  embedding_state_->UpdateInputsOutputs(next_tokens);
+  decoder_state_->UpdateInputsOutputs(next_tokens, current_length, next_indices);
+
   if (is_prompt_) {
     if (num_image_tokens_ > 0) {
       vision_state_->Run(current_length, next_tokens, next_indices);
@@ -181,9 +185,6 @@ RoamingArray<float> MultiModalPipelineState::Run(int current_length, RoamingArra
 
     return logits;
   }
-
-  embedding_state_->UpdateInputsAndOutputs(next_tokens);
-  decoder_state_->UpdateInputsOutputs(next_tokens, current_length, next_indices);
 
   embedding_state_->Run(current_length, next_tokens, next_indices);
   decoder_state_->inputs_embeds_.ReuseEmbeddingsBuffer(embedding_state_->inputs_embeds_);

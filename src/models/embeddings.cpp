@@ -44,9 +44,9 @@ void Embeddings::Add() {
   }
 }
 
-void Embeddings::UpdateSequenceLength() {
-  if (shape_[1] != 1) {
-    shape_[1] = 1;
+void Embeddings::UpdateSequenceLength(size_t new_length) {
+  if (shape_[1] != new_length) {
+    shape_[1] = new_length;
 
     if (mode_ == Embeddings::Mode::Output) {
       if (!sb_embeddings_) {

@@ -52,7 +52,7 @@ struct GreedySearch_Cuda : Search_Cuda {
   void SampleTopK(int k, float t) override;
   void SampleTopP(float p, float t) override;
   void SampleTopKTopP(int k, float p, float t) override;
-  void SetUserTokens(RoamingArray<int32_t> next_tokens) override; // shape (batch_size, sequence_length)
+  void SetUserTokens(const RoamingArray<int32_t>& next_tokens) override; // shape (batch_size, sequence_length)
   void RewindTo(size_t index) override;
 
  private:
@@ -74,7 +74,7 @@ struct BeamSearch_Cuda : Search_Cuda {
   RoamingArray<int32_t> GetSequence(size_t index) override;
   RoamingArray<int32_t> GetSequence(size_t batch_id, size_t beam_id);
 
-  void SetUserTokens(RoamingArray<int32_t> next_tokens) override;
+  void SetUserTokens(const RoamingArray<int32_t>& next_tokens) override;
 
   void SelectTop() override;
 

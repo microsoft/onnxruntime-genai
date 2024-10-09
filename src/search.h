@@ -28,7 +28,7 @@ struct Search : LeakChecked<Search> {
   virtual void ApplyRepetitionPenalty(float penalty) = 0;
 
   // Set user input tokens
-  virtual void SetUserTokens(RoamingArray<int32_t> next_tokens) { assert(false); };
+  virtual void SetUserTokens(const RoamingArray<int32_t>& next_tokens) { assert(false); };
   // To be used for rewind
   virtual void RewindTo(size_t index) { assert(false); };
   // To be used for rewind
@@ -76,7 +76,7 @@ struct GreedySearch_Cpu : Search_Cpu {
   void SampleTopKTopP(int /*k*/, float /*p*/, float /*temperature*/) override;
 
   // Used by continuous decoding search.
-  void SetUserTokens(RoamingArray<int32_t> next_tokens) override;
+  void SetUserTokens(const RoamingArray<int32_t>& next_tokens) override;
   void RewindTo(size_t index) override;
   // void DropLastTokens(size_t num_tokens) override;
 
@@ -111,7 +111,7 @@ struct BeamSearch_Cpu : Search_Cpu {
 
   void SelectTop() override;
 
-  void SetUserTokens(RoamingArray<int32_t> next_tokens) override;
+  void SetUserTokens(const RoamingArray<int32_t>& next_tokens) override;
 
  private:
   void AppendNextTokensToSequences();

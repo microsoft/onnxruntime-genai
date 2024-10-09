@@ -70,6 +70,8 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   DeviceType device_type{DeviceType::CPU};
   cudaStream_t cuda_stream{};
 
+  cpu_span<int32_t> aux_input_ids{};  // Intermediate solution to be used with SetInputs function for multimodal and whisper models
+
   struct Whisper {
     std::shared_ptr<Tensor> input_features;   // float32 [batch_size, number_of_mels, number_of_frames]
     std::shared_ptr<Tensor> alignment_heads;  // int32 [num_alignment_heads, 2]
@@ -99,7 +101,7 @@ struct Generator : LeakChecked<Generator> {
   Generator(const Model& model, const GeneratorParams& params);
 
   bool IsDone() const;
-  virtual void AddTokens(cpu_span<int32_t> input_ids);
+  virtual void AddTokens(const cpu_span<int32_t>& input_ids);
   virtual void GenerateNextToken();
   virtual void RewindToLength(size_t new_length); // Rewind state to new_length
 

@@ -104,7 +104,12 @@ void GeneratorParams::TryGraphCapture(int max_bs) {
 // TODO(aciddelgado): Does this work?
 void GeneratorParams::SetInputs(const NamedTensors& named_tensors) {
   for (const auto& [name, tensor] : named_tensors) {
-    if (name != Config::Defaults::InputIdsName) {
+    std::cout << "name: " << name << std::endl;
+    std::cout << "tensor length: " << tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount() << std::endl;
+    if (name == Config::Defaults::InputIdsName) {
+      aux_input_ids = cpu_span<int32_t>(tensor->ort_tensor_->GetTensorMutableData<int32_t>(),
+                                               tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount());
+    } else {
       // If the nominal name is found in the map, use the graph name.
       // Else, use the nominal name as the graph name.
       [[maybe_unused]] const auto [graph_name, found] = config.GetGraphName(name);
@@ -144,9 +149,14 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
 
   search_ = CreateSearch(params);
   state_ = model.CreateState(search_->GetSequenceLengths(), params); // Search sequence lengths set when creating state
+
+  // Temporary solution for multimodal and whisper models
+  if (!params.aux_input_ids.empty() && params.aux_input_ids.data() != nullptr) {
+    AddTokens(params.aux_input_ids);
+  }
 }
 
-void Generator::AddTokens(cpu_span<int32_t> input_ids) {
+void Generator::AddTokens(const cpu_span<int32_t>& input_ids) {
   // TODO(aciddelgado): check for batch_size > 1 requires full rewind
   search_->SetUserTokens(input_ids);
 

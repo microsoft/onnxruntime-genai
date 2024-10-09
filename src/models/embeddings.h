@@ -17,7 +17,7 @@ struct Embeddings {
 
   void Add();
 
-  void UpdateSequenceLength();
+  void UpdateSequenceLength(size_t new_length);
 
   void ReuseEmbeddingsBuffer(const Embeddings& other);
 

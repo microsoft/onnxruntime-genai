@@ -5,8 +5,6 @@
 #include <vector>
 #include "kernels.h"
 
-// TODO(aciddelgado): update whisper to new paradigm
-
 namespace Generators {
 
 Whisper_Model::Whisper_Model(std::unique_ptr<Config> config, OrtEnv& ort_env)
@@ -278,7 +276,7 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
         inputs_.push_back(cache_indirection_.get());
 
         auto data = gpu_span<int32_t>{cache_indirection_->GetTensorMutableData<int32_t>(),
-                                      static_cast<size_t>(params_->search.batch_size) * params_->search.num_beams * params_->search.max_length};
+                                      static_cast<size_t>(params_->BatchBeamSize()) * params_->search.max_length};
         CudaCheck() == cudaMemsetAsync(data.data(), 0, data.size_bytes(), params_->cuda_stream);
 #endif
       }
