@@ -34,11 +34,4 @@ if(APPLE)
   target_link_libraries(model_benchmark PRIVATE "-framework Foundation" "-framework CoreML")
 endif()
 
-if(NOT IOS)
-  # On iOS static xcframework is used
-  add_custom_command(TARGET model_benchmark POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${onnxruntime_libs} $<TARGET_FILE_DIR:model_benchmark>
-  )
-endif()
-
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${model_benchmark_srcs})

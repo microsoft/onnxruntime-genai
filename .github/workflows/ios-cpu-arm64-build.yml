@@ -40,5 +40,7 @@ jobs:
 
       - name: Build and Run tests
         run: |
+          python3 -m venv genai-ios-venv
+          source genai-ios-venv/bin/activate
           python3 -m pip install requests
           python3 build.py --ios --parallel --apple_sysroot iphonesimulator --osx_arch arm64 --apple_deploy_target 15.4 --cmake_generator 'Xcode'
