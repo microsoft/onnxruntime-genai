@@ -1,15 +1,16 @@
 {
     "models": [
-        "Qwen/Qwen2-0.5B"
-    ],    
-    "inputs": [
-        "Provide a detailed analysis of the causes and consequences of the French Revolution, including key events, figures, and social changes.",
-        "Explain the process of photosynthesis in plants, detailing the chemical reactions involved, the role of chlorophyll, and the importance of sunlight"
+        {
+            "name": "",
+            "chat_template": ""
+        }
     ],
-    "output_directory": "../../../models_outputs/",
-    "cache_directory": "../../../cache_models",
-    "precision": "int4",
-    "executive_provider": "cpu",
+    "inputs": [
+    ],
+    "output_directory": "",
+    "cache_directory": "",
+    "precision": "",
+    "executive_provider": "",
     "verbose": false,
     "search_options": {
         "max_length": 512,

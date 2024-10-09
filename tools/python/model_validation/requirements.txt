@@ -10,3 +10,4 @@ transformers
 huggingface_hub[cli]
 onnxruntime-genai
 sentencepiece
+pandas

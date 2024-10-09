@@ -9,23 +9,23 @@ def create_table(output):
     df = pd.DataFrame(output, columns=['Model Name', 'Validation Completed', 'Exceptions / Failures'])
     return df
 
-def validate_model(config, model_directory):
-    if config["verbose"]: print("Loading model...")
+def validate_model(args, model_dict, model_dir):
+    if args["verbose"]: print("Loading model...")
 
-    model = og.Model(f'{model_directory}')
+    model = og.Model(f'{model_dir}')
 
-    if config["verbose"]: print("Model loaded")
+    if args["verbose"]: print("Model loaded")
     tokenizer = og.Tokenizer(model)
     tokenizer_stream = tokenizer.create_stream() 
 
-    if config["verbose"]: print("Tokenizer created")
-    if config["verbose"]: print()  
+    if args["verbose"]: print("Tokenizer created")
+    if args["verbose"]: print()  
 
-    chat_template = get_chat_template(model_directory.lower())
+    chat_template = model_dict["chat_template"]
 
-    search_options = config["search_options"]
+    search_options = args["search_options"]
 
-    for text in config["inputs"]:
+    for text in args["inputs"]:
 
         complete_text = ''
         
@@ -38,9 +38,9 @@ def validate_model(config, model_directory):
         params.input_ids = input_tokens
 
         generator = og.Generator(model, params)
-        if config["verbose"]: print("Generator created")
+        if args["verbose"]: print("Generator created")
 
-        if config["verbose"]: print("Running generation loop ...")
+        if args["verbose"]: print("Running generation loop ...")
 
         print()
         print("Output: ", end='', flush=True)
@@ -58,7 +58,7 @@ def validate_model(config, model_directory):
 
                 complete_text += value_to_save
 
-                # print(tokenizer_stream.decode(new_token), end='', flush=True)
+                print(tokenizer_stream.decode(new_token), end='', flush=True)
                 
         except KeyboardInterrupt:
             print("  --control+c pressed, aborting generation--")
@@ -67,7 +67,7 @@ def validate_model(config, model_directory):
             print(f"An error occurred: {e}")
             generation_successful = False
 
-        with open(f'{model_directory}/output.txt', 'a', encoding='utf-8') as file:
+        with open(f'{model_dir}/output.txt', 'a', encoding='utf-8') as file:
             file.write(complete_text)
 
         # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
@@ -75,31 +75,16 @@ def validate_model(config, model_directory):
 
     return generation_successful
 
-def get_chat_template(model_name):
-    if 'phi' in model_name: 
-        return '<|user|>\n{input} <|end|>\n<|assistant|>'
-    elif 'qwen' in model_name: 
-        return '<s>\n<|user|>\n{input} <|end|>\n<|assistant|>'
-    elif 'mistral' in model_name: 
-        return '<|im_start|> <|user|> \n {input} <|im_end>|\n'
-    elif model_name.contains("llama"): 
-        return '<s>[INST]<<SYS>>\n{input}<</SYS>>[INST]'
-    elif model_name.contains("gemma"): 
-        return '<start_of_turn>' + 'user' '\n' + {input}  + '<end_of_turn>\n'
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS, description="End-to-end AI Question/Answer example for gen-ai")
-
     parser.add_argument('-j', '--json', type=str, required=True, help='Path to the JSON file containing the arguments')
-
     args = parser.parse_args()
 
     with open(args.json, 'r') as file:
-        config = json.load(file)
+        args = json.load(file)
 
-    os.makedirs(config["output_directory"], exist_ok=True)
-    os.makedirs(config["cache_directory"], exist_ok=True)
+    os.makedirs(args["output_directory"], exist_ok=True)
+    os.makedirs(args["cache_directory"], exist_ok=True)
 
     output = []
 
@@ -107,28 +92,30 @@ if __name__ == "__main__":
     e = None
     exception = False
 
-    for model in config["models"]:
+    for model_dict in args["models"]:
 
-        print(f"We are validating {model}")
-        adjusted_model = model.replace("/", "_")
-        output_path = config["output_directory"] + f'/{adjusted_model}'
-        cache_path = config["cache_directory"] + f'/{adjusted_model}'
+        print(f"We are validating {model_dict['name']}")
+        adjusted_model = model_dict["name"].replace("/", "_")
+
+        output_path = args["output_directory"] + f'/{adjusted_model}'
+        cache_path = args["cache_directory"] + f'/{adjusted_model}'
+
         try:
-            create_model(model, '', output_path, config["precision"], config["executive_provider"], cache_path)
+            create_model(model_dict["name"], '', output_path, args["precision"], args["executive_provider"], cache_path)
         except Exception as e:
             print(f'Failure after create model {e}')
-            output.append([model, validation_complete, e])
+            output.append([model_dict["name"], validation_complete, e])
             exception = True
             continue
         try:          
-            validation_complete = validate_model(config, output_path)
+            validation_complete = validate_model(args, model_dict, output_path)
         except Exception as e:
             print(f'Failure after validation model {e}')
             exception = True
-            output.append([model, validation_complete, e]) 
+            output.append([model_dict["name"], validation_complete, e]) 
         
         if not exception:
-            output.append([model, validation_complete, e]) 
+            output.append([model_dict["name"], validation_complete, e]) 
             
     df = create_table(output)
 
