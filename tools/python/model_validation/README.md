@@ -1,35 +1,38 @@
-# ONNX Runtime GenAI Model Validation  Example
+# ONNX Runtime GenAI Model Validation Tutorial
 
-## Setup
+## Background
+Gen-AI serves as an API framework designed to operate generative models via ONNX Runtime. With the expansion in the variety of models, there's a growing need for a tool chain that can effectively assess the compatibility between Gen-AI and different model variants.
 
+## Setup and Requirements
 Clone this repository and navigate to the `tools/python/model_validation folder`.
 
 ```bash
 git clone https://github.com/microsoft/onnxruntime-genai.git
 cd tools/python/model_validation
+pip install -r requirements.txt
 ```
+Within the model_validation directory, you'll locate the script named validation_tool.py, alongside the validation_config.json configuration file and a README.md document.
 
-### Requirements
-protobuf version must be atleast 5.28.2
-sentencepiece
-
-In the model_validation folder, you should find the validation_tool.py script, validation_config.json file, and this README.md.
-
-### Current Support
+### Current Supported Model Architectures
 * Gemma
 * Llama 
 * Mistral
-* Phi
+* Phi (language + vision)
 * Qwen
 
 ### Usage 
-1. In the validation_config.json file, enter the supported Hugging Face model name. Models can be found here.
-2. Include the path to the output folder, precision, and execution provider.
+1. Input the name of the Hugging Face model you're using into the validation_config.json file. You can find a list of supported models via this link: (https://huggingface.co)
 
-Once the model is built, you can find it in path_to_output_folder/{model_name}. This should include the ONNX model data and tokenizer.
+    * Also, add the chat_template associated with your model. This is located in the tokenizer_config.json file on the Hugging Face website. Make sure to replace ``` message['content'] ``` with ``` {input} ```.
+
+2. Specify the path for the output folder you prefer, along with the precision and execution provider details.
+
+After the model has been created, it will be located in the path_to_output_folder/{model_name} directory. This directory will contain both the ONNX model data and the tokenizer.
 
 ### Run the Model Validation Script 
 ```bash
 python validation_tool.py -j validation_config.json
 ```
 
+### Output
+Once the tool has been executed successfully, it generates a file named model_validation.csv. This file contains the Model Name, the validation tool's completion status, and details of any exceptions or failures encountered by the model during the validation process.
