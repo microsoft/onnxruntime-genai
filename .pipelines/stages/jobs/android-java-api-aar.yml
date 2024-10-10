@@ -26,15 +26,18 @@ jobs:
 
   - template: steps/utils/use-android-ndk.yml
   - template: steps/utils/set-genai-version.yml
+  - template: steps/utils/set-cmake-build-type.yml
+    parameters:
+      build_config: ${{parameters.build_config}}
 
   - task: CmdLine@2
     displayName: Build Android AAR Packages
     inputs:
       script: |
         set -e -x
-        
+
         BUILD_DIR=$(Build.BinariesDirectory)
-        BUILD_CONFIG=${{parameters.build_config}}
+        BUILD_CONFIG=$(cmake_build_type)
         GENAI_VERSION=$(genai_version)
         PACKAGE_NAME=${{parameters.package_name}}
         ARTIFACTS_DIR=$(Build.ArtifactStagingDirectory)
