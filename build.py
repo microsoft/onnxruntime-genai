@@ -602,6 +602,11 @@ def test(args: argparse.Namespace, env: dict[str, str]):
     Run the tests.
     """
     lib_dir = args.build_dir / "test"
+    if util.is_windows():
+        # On Windows, the unit test executable is found inside a directory named after the configuration
+        # (e.g. Debug, Release, etc.) within the test directory.
+        # Whereas on as on platforms, the executable is directly under the test directory.
+        lib_dir = lib_dir / args.config
     if not args.ort_home:
         _ = util.download_dependencies(args.use_cuda, args.use_rocm, args.use_dml, lib_dir)
     else:
