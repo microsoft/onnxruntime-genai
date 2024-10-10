@@ -49,7 +49,6 @@ void Embeddings::Add() {
 }
 
 void Embeddings::UpdateSequenceLength(size_t new_length) {
-  std::cout << "new_length: " << new_length << std::endl;
   if (shape_[1] != new_length) {
     shape_[1] = new_length;
 

@@ -104,8 +104,6 @@ void GeneratorParams::TryGraphCapture(int max_bs) {
 // TODO(aciddelgado): Does this work?
 void GeneratorParams::SetInputs(const NamedTensors& named_tensors) {
   for (const auto& [name, tensor] : named_tensors) {
-    std::cout << "name: " << name << std::endl;
-    std::cout << "tensor length: " << tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount() << std::endl;
     if (name == Config::Defaults::InputIdsName) {
       aux_input_ids = cpu_span<int32_t>(tensor->ort_tensor_->GetTensorMutableData<int32_t>(),
                                                tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount());
