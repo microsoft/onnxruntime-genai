@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "generators.h"
+#include "interface.h"
 #include "sequences_cuda.h"
 
 namespace Generators {
@@ -47,7 +48,7 @@ int Sequences_Cuda::GetSequenceLength() const {
 }
 
 void Sequences_Cuda::AppendNextTokenToSequences(std::span<const int32_t> next_tokens) {
-  if (g_log.enabled && g_log.append_next_tokens) {
+  if (GetLogItems().enabled && GetLogItems().append_next_tokens) {
     auto& stream = Log("append_next_tokens");
     DumpCudaSpan(stream, next_tokens);
     stream << std::endl;

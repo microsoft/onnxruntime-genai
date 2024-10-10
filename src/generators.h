@@ -25,7 +25,7 @@
 #include <vector>
 #if USE_CUDA
 #include <cuda_runtime.h>
-#include "cuda_common.h"
+#include "cuda/cuda_common.h"
 #else
 // If we don't include cuda_runtime.h, we define this to avoid lots of extra #ifdefs
 using cudaStream_t = void*;

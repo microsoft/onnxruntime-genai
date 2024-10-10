@@ -27,8 +27,7 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   target_link_libraries(python PRIVATE cublas curand cudart)
 endif()
 
-set_target_properties(python PROPERTIES FOLDER "Sources")
-source_group(TREE ${PROJECT_SOURCE_DIR} FILES ${python_srcs})
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${python_srcs})
 
 if(BUILD_WHEEL)
   set(WHEEL_FILES_DIR "${CMAKE_BINARY_DIR}/wheel")

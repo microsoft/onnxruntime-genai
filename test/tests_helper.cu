@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 
 #include "tests_helper.cuh"
-#include "../src/cuda_sampling.cuh"
 #include <cuda_runtime.h>
 #include <curand.h>
 #include <curand_kernel.h>
@@ -61,6 +60,20 @@ __global__ void FisherYatesKernel(float* logits, int* indices, int vocab_size, c
   }
 }
 
+__global__ void PopulateIndices(int* indices, int size, int batch_size) {
+  int global_index = threadIdx.x + blockIdx.x * blockDim.x;
+  int index = global_index % size;
+  if (global_index < size * batch_size) {
+    indices[global_index] = index;
+  }
+}
+
+void LaunchPopulateIndices(int* indices, int size, int batch_size, cudaStream_t stream) {
+  dim3 grid((batch_size * size / 256) + 1, 1, 1);
+  dim3 block(256, 1, 1);
+  PopulateIndices<<<grid, block, 0, stream>>>(indices, size, batch_size);
+}
+
 void LaunchFisherYatesKernel(float* logits, int* indices_buffer, int vocab_size, int batch_size, cudaStream_t stream) {
   int num_threads = 256;
   int num_blocks = batch_size;
@@ -68,6 +81,6 @@ void LaunchFisherYatesKernel(float* logits, int* indices_buffer, int vocab_size,
   cudaMalloc((void **)&random_states, num_threads * sizeof(curandState));
   std::span<float> logits_span{logits, static_cast<size_t>(vocab_size * batch_size)};
   std::span<int32_t> indices{indices_buffer, static_cast<size_t>(vocab_size * batch_size)};
-  Generators::cuda::LaunchPopulateIndices(indices.data(), vocab_size, batch_size, stream);
+  LaunchPopulateIndices(indices.data(), vocab_size, batch_size, stream);
   FisherYatesKernel<<<num_blocks, num_threads, 0, stream>>>(logits_span.data(), indices.data(), vocab_size, random_states);
 }

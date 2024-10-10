@@ -1,4 +1,5 @@
 #include "generators.h"
+#include "interface.h"
 #include "search.h"
 #include "search_cuda.h"
 #include "beam_search_scorer_cuda.cuh"
@@ -185,7 +186,7 @@ void GreedySearch_Cuda::AppendNextTokensToSequences() {
   sequences_.AppendNextTokenToSequences(next_tokens_);
 
   if (sequences_.GetSequenceLength() == params_->search.max_length) {
-    if (g_log.enabled && g_log.hit_max_length)
+    if (GetLogItems().enabled && GetLogItems().hit_max_length)
       Log("hit_max_length", "greedy cuda hit");
     *done_cpu_ = true;
   }
@@ -196,7 +197,7 @@ bool BeamSearch_Cuda::IsDone() const {
     return true;
 
   if (sequences_.GetSequenceLength() == params_->search.max_length) {
-    if (g_log.enabled && g_log.hit_max_length)
+    if (GetLogItems().enabled && GetLogItems().hit_max_length)
       Log("hit_max_length", "beam cuda hit");
     return true;
   }

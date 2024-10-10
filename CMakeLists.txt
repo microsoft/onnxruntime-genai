@@ -110,18 +110,16 @@ if(APPLE)
 target_link_libraries(onnxruntime-genai PRIVATE "-framework Foundation" "-framework CoreML")
 endif()
 
-set_target_properties(onnxruntime-genai PROPERTIES FOLDER "Sources")
-set_target_properties(onnxruntime-genai-static PROPERTIES FOLDER "Sources")
-source_group(TREE ${PROJECT_SOURCE_DIR} FILES ${generator_srcs})
-
+# Build all source files using CUDA as a separate shared library we dynamically load at runtime
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
-  set_target_properties(onnxruntime-genai PROPERTIES LINKER_LANGUAGE CUDA)
-  target_link_libraries(onnxruntime-genai PRIVATE cublasLt cublas curand cufft cudart)
-  #  onnxruntime-genai-static is statically linked under Windows
-  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    set_target_properties(onnxruntime-genai-static PROPERTIES LINKER_LANGUAGE CUDA)
-    target_link_libraries(onnxruntime-genai-static PRIVATE cublasLt cublas curand cufft cudart)
-  endif()
+  add_library(onnxruntime-genai-cuda SHARED ${generator_cudalib_srcs})
+  target_include_directories(onnxruntime-genai-cuda PRIVATE ${ORT_HEADER_DIR})
+  target_include_directories(onnxruntime-genai-cuda PRIVATE ${GENERATORS_ROOT})
+  target_link_libraries(onnxruntime-genai-cuda PRIVATE cublasLt cublas curand cufft cudart)
+  set_target_properties(onnxruntime-genai-cuda PROPERTIES LINKER_LANGUAGE CUDA)
+  add_dependencies(onnxruntime-genai onnxruntime-genai-cuda)
+
+  source_group(TREE ${GENERATORS_ROOT}/cuda FILES ${generator_cudalib_srcs})
 endif()
 
 if(CMAKE_GENERATOR_TOOLSET MATCHES "Visual Studio")
@@ -201,7 +199,6 @@ if (ENABLE_JAVA)
   message("------------------Enabling Java Jar------------------")
   add_subdirectory("${SRC_ROOT}/java")
 endif()
-
 
 if(ENABLE_MODEL_BENCHMARK)
   message("------------------Enabling model benchmark------------------")

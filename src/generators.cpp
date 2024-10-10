@@ -6,10 +6,15 @@
 #include "models/model.h"
 #include "search.h"
 #if USE_CUDA
-#include "search_cuda.h"
+#include "cuda/search_cuda.h"
+#include "cuda/interface.h"
+#include "models/kernels.h"
 #endif
 
 namespace Generators {
+
+// TODO: Remove
+void OnCudaError(cudaError_t error) { assert(false); }
 
 static bool _ = (Ort::InitApi(), false);
 
@@ -56,6 +61,64 @@ void Shutdown() {
 OrtEnv& GetOrtEnv() {
   return *GetOrtGlobals()->env_;
 }
+
+struct GenaiInterfaceImpl : GenaiInterface {
+  Generators::LogItems& GetLogItems() override { return g_log; }
+  std::ostream& operator_leftshift(std::ostream& stream, Generators::SGR sgr_code) override { return stream << sgr_code; }
+  std::ostream& Log(std::string_view label, std::string_view text = {}) override { return Log(label, text); }
+
+  void DumpSpan(std::ostream& stream, std::span<const float> values) override { return DumpSpan(stream, values); }
+  virtual void DumpSpan(std::ostream& stream, std::span<const int> values) override { return DumpSpan(stream, values); }
+} g_genai;
+
+CudaInterface* GetCudaInterface() {
+  // Load the shared library onnxruntime-genai-cuda.dll
+  // This is a workaround to avoid linking the CUDA library to the generator library
+  // The CUDA library is only needed for the CUDA allocator
+  #ifdef _WIN32
+    static std::unique_ptr<void, void(*)(void *)> cuda_library{LoadLibrary("C:/code/onnxruntime-genai/build/Windows/Debug/Debug/onnxruntime-genai-cuda.dll"),
+      [](void *h) { FreeLibrary(reinterpret_cast<HMODULE>(h)); }};  
+  #else
+    static std::unique_ptr<void, void (*)(void*)> cuda_library {dlopen("libonnxruntime-genai-cuda.so", RTLD_LAZY), dlclose};
+  #endif
+
+  if (!cuda_library)
+    return nullptr;
+
+  CudaInterface* CreateCudaInterface(GenaiInterface* p);
+  static std::unique_ptr<CudaInterface> cuda_interface{[] {
+#ifdef _WIN32
+    auto create_cuda_fn = reinterpret_cast<decltype(&CreateCudaInterface)>(GetProcAddress(reinterpret_cast<HMODULE>(cuda_library.get()), "CreateCudaInterface"));
+#else
+    auto create_cuda_fn = reinterpret_cast<decltype(&CreateCudaInterface)>(dlsym(cuda_library.get(), "CreateCudaInterface"));
+#endif
+    return create_cuda_fn(&g_genai);
+    }()
+  };
+
+  return cuda_interface.get();
+}
+
+namespace cuda {
+void LaunchInt32ToInt64(const int32_t* input, int64_t* output, int count, cudaStream_t stream) { GetCudaInterface()->Int32ToInt64(input, output, count, stream); }
+void LaunchFp16ToFp32(const uint16_t* input, float* output, int count, cudaStream_t stream) { GetCudaInterface()->Fp16ToFp32(input, output, count, stream); }
+void LaunchFp32ToFp16(const float* input, uint16_t* output, int count, cudaStream_t stream) { GetCudaInterface()->Fp32ToFp16(input, output, count, stream); }
+template<>
+void Launch_UpdatePositionIds<int32_t>(int32_t* position_ids, int batch_beam_size, cudaStream_t stream) { GetCudaInterface()->Launch_UpdatePositionIds(position_ids, batch_beam_size, stream); }
+template<>
+void Launch_UpdatePositionIds<int64_t>(int64_t* position_ids, int batch_beam_size, cudaStream_t stream) { GetCudaInterface()->Launch_UpdatePositionIds(position_ids, batch_beam_size, stream); }
+template<>
+void Launch_UpdateAttentionMask<int32_t>(int32_t* mask_data, const int32_t* old_mask_data, int batch_beam_size, int current_length, int max_length, bool update_only, cudaStream_t stream) { GetCudaInterface()->Launch_UpdateAttentionMask(mask_data, old_mask_data, batch_beam_size, current_length, max_length, update_only, stream); }
+template <>
+void Launch_UpdateAttentionMask<int64_t>(int64_t* mask_data, const int64_t* old_mask_data, int batch_beam_size, int current_length, int max_length, bool update_only, cudaStream_t stream) { GetCudaInterface()->Launch_UpdateAttentionMask(mask_data, old_mask_data, batch_beam_size, current_length, max_length, update_only, stream); }
+void LaunchHandleEOSArray(float* batch_logits, int batch_beam_size, int vocab_size, const int32_t* eos_token_ids, int eos_token_ids_count, cudaStream_t stream) { GetCudaInterface()->LaunchHandleEOSArray(batch_logits, batch_beam_size, vocab_size, eos_token_ids, eos_token_ids_count, stream); }
+void UpdateCacheIndirectionKernelLauncher(int32_t* tgt_indir_cache, const int32_t* src_indir_cache, const int32_t* beam_ids, int batch_size, int beam_width, int input_seq_length, int max_seq_length, int current_length, cudaStream_t stream) { GetCudaInterface()->UpdateCacheIndirectionKernelLauncher(tgt_indir_cache, src_indir_cache, beam_ids, batch_size, beam_width, input_seq_length, max_seq_length, current_length, stream); }
+void ReorderPastStatesKernelLauncher(void* out_buffer, const void* in_buffer, int batch_size, int num_heads, int max_length, int head_size, int chunk_size, cudaStream_t stream) { GetCudaInterface()->ReorderPastStatesKernelLauncher(out_buffer, in_buffer, batch_size, num_heads, max_length, head_size, chunk_size, stream); }
+template<>
+void LaunchCopyCrossQKSingleDecodeStep<float>(cudaStream_t stream, float* cross_qk_buffer_data, float** qk_layer_pointers, int token_index, int batch_beam_size, int num_layers, int num_heads, int num_alignment_heads, const int* alignment_heads, int frames, int max_length) { GetCudaInterface()->LaunchCopyCrossQKSingleDecodeStep(stream, cross_qk_buffer_data, qk_layer_pointers, token_index, batch_beam_size, num_layers, num_heads, num_alignment_heads, alignment_heads, frames, max_length); }
+template<>
+void LaunchFinalizeCrossQK<float>(cudaStream_t stream, int iteration_number, int context_decoding_len, int batch_size, int num_beams, int max_length, int num_alignment_heads, int frames_of_k, const float* cross_qk_buffer_data, float* cross_qk_output, int num_return_sequences, const int* cache_indir_data) { GetCudaInterface()->LaunchFinalizeCrossQK(stream, iteration_number, context_decoding_len, batch_size, num_beams, max_length, num_alignment_heads, frames_of_k, cross_qk_buffer_data, cross_qk_output, num_return_sequences, cache_indir_data); }
+}  // namespace cuda
 
 std::string to_string(DeviceType device_type) {
   switch (device_type) {
@@ -124,8 +187,8 @@ std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
 #if USE_CUDA
   if (params.device_type == DeviceType::CUDA) {
     if (params.search.num_beams > 1)
-      return std::make_unique<BeamSearch_Cuda>(params);
-    return std::make_unique<GreedySearch_Cuda>(params);
+      return GetCudaInterface()->CreateBeam(params);
+    return GetCudaInterface()->CreateGreedy(params);
   }
 #endif
 
@@ -248,3 +311,14 @@ TokenSequences Generate(const Model& model, const GeneratorParams& params) {
 }
 
 }  // namespace Generators
+
+cudaError_t cudaStreamCreate(cudaStream_t* stream) { return Generators::GetCudaInterface()->cudaStreamCreate(stream); }
+cudaError_t cudaStreamDestroy(cudaStream_t stream) { return Generators::GetCudaInterface()->cudaStreamDestroy(stream); }
+cudaError_t cudaMemcpyAsync(void* dst, const void* src, size_t count, cudaMemcpyKind kind, cudaStream_t stream) { return Generators::GetCudaInterface()->cudaMemcpyAsync(dst, src, count, kind, stream); }
+cudaError_t cudaMemcpy(void* dst, const void* src, size_t count, cudaMemcpyKind kind) { return Generators::GetCudaInterface()->cudaMemcpy(dst, src, count, kind); }
+cudaError_t cudaMemsetAsync(void* ptr, int value, size_t count, cudaStream_t stream) { return Generators::GetCudaInterface()->cudaMemsetAsync(ptr, value, count, stream); }
+cudaError_t cudaMemset(void* ptr, int value, size_t count) { return Generators::GetCudaInterface()->cudaMemset(ptr, value, count); }
+cudaError_t cudaMalloc(void** ptr, size_t size) { return Generators::GetCudaInterface()->cudaMalloc(ptr, size); }
+cudaError_t cudaFree(void* ptr) { return Generators::GetCudaInterface()->cudaFree(ptr); }
+cudaError_t cudaHostAlloc(void** ptr, size_t size, unsigned int flags) { return Generators::GetCudaInterface()->cudaHostAlloc(ptr, size, flags); }
+cudaError_t cudaFreeHost(void* ptr) { return Generators::GetCudaInterface()->cudaFreeHost(ptr); }
