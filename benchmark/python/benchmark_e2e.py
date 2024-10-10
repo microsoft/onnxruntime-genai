@@ -21,6 +21,7 @@ import subprocess
 import threading
 import psutil
 import os
+import gc
 import json
 from metrics import BenchmarkRecord
 
@@ -253,6 +254,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         if args.print_model_output: print(tokenizer.decode(generator.get_sequence(0)))
         # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
         del generator
+        gc.collect()
 
     tokenize_times = []
     prompt_times = []
@@ -277,7 +279,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         if args.use_graph_capture:
             params.try_graph_capture_with_max_batch_size(batch_size)
 
-        generator = og.Generator(model, params)
+        generator = og.Generator(model, params) # TODO: Generator allocates memory. Should we measure this? Should we add functionality so we can reuse this memory?
 
         # Measure prompt processing
         prompt_start_time = time.perf_counter()
@@ -311,6 +313,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
 
         # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
         del generator
+        gc.collect()
 
     # Calculate tokenization metrics
     avg_tokenization_latency_s = sum(tokenize_times) / len(tokenize_times)
