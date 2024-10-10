@@ -10,6 +10,8 @@ import platform
 import shlex
 import shutil
 import sys
+import json
+import subprocess
 import textwrap
 
 from pathlib import Path
@@ -406,7 +408,6 @@ def _run_android_tests(args: argparse.Namespace):
         # the test app loads and runs a test model using the GenAI Java bindings
         gradle_executable = str(REPO_ROOT / "src" / "java" / ("gradlew.bat" if util.is_windows() else "gradlew"))
         android_test_path = args.build_dir / "src" / "java" / "androidtest"
-        import subprocess
         exception = None
         try:
             util.run([gradle_executable, "--no-daemon",
@@ -430,6 +431,39 @@ def _run_android_tests(args: argparse.Namespace):
             # util.run([adb, "logcat", "-d", "*:E"])
             raise exception
 
+
+def _run_ios_tests(args: argparse.Namespace):
+    simulator_device_info = subprocess.check_output(
+        [
+            sys.executable,
+            os.path.join(REPO_ROOT, "tools", "ci_build", "github", "apple", "get_simulator_device_info.py"),
+        ],
+        text=True,
+    ).strip()
+    log.debug(f"Simulator device info:\n{simulator_device_info}")
+
+    simulator_device_info = json.loads(simulator_device_info)
+
+    xc_test_schemes = [
+        "unit_tests_xc",
+    ]
+
+    for xc_test_scheme in xc_test_schemes:
+        util.run(
+            [
+                "xcodebuild",
+                "test-without-building",
+                "-project",
+                "./Generators.xcodeproj",
+                "-configuration",
+                args.config,
+                "-scheme",
+                xc_test_scheme,
+                "-destination",
+                f"platform=iOS Simulator,id={simulator_device_info['device_udid']}",
+            ],
+            cwd=args.build_dir,
+        )
 
 def update(args: argparse.Namespace, env: dict[str, str]):
     """
@@ -498,7 +532,6 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         platform_name = "macabi" if args.macos == "Catalyst" else args.apple_sysroot
         command += [
             "-DENABLE_PYTHON=OFF",
-            "-DENABLE_TESTS=OFF",
             "-DENABLE_MODEL_BENCHMARK=OFF",
             f"-DBUILD_APPLE_FRAMEWORK={'ON' if args.build_apple_framework else 'OFF'}",
             "-DPLATFORM_NAME=" + platform_name,
@@ -601,6 +634,11 @@ def test(args: argparse.Namespace, env: dict[str, str]):
     """
     Run the tests.
     """
+    if args.ios:
+        _run_ios_tests(args)
+        # CTest won't work on iOS
+        return
+
     lib_dir = args.build_dir / "test"
     if util.is_windows():
         # On Windows, the unit test executable is found inside a directory named after the configuration
@@ -623,7 +661,6 @@ def test(args: argparse.Namespace, env: dict[str, str]):
 
     if args.android:
         _run_android_tests(args)
-
 
 def clean(args: argparse.Namespace, env: dict[str, str]):
     """

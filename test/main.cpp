@@ -5,7 +5,17 @@
 #include <generators.h>
 #include <iostream>
 
-int main(int argc, char** argv) {
+#define TEST_MAIN main
+
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#if TARGET_OS_SIMULATOR || TARGET_OS_IOS
+#undef TEST_MAIN
+#define TEST_MAIN main_no_link_  // there is a UI test app for iOS.
+#endif
+#endif
+
+int TEST_MAIN(int argc, char** argv) {
   std::cout << "Generators Utility Library" << std::endl;
   std::cout << "Initializing OnnxRuntime... ";
   std::cout.flush();
