@@ -676,7 +676,6 @@ class Model:
         self.make_value_info(output, dtype, shape=shape)
 
     def make_matmul(self, matmul, basename, root_input, **kwargs):
-        print("Matmul attr = ", matmul)
         if hasattr(matmul, "base_layer"):
             # For LoRA `MatMul`
             print("Making lora matmul")
