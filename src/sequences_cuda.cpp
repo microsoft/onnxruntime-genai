@@ -8,14 +8,15 @@ namespace Generators {
 namespace cuda {
 void Launch_ExpandInputSequences(std::span<const int32_t> input_sequences, std::span<int32_t> sequences, int batch_size, int beam_size, int current_length, int max_length, cudaStream_t stream);
 void Launch_AppendNextTokenToSequences(std::span<const int32_t> next_tokens, std::span<int32_t> sequences, int batch_beam_size, int current_length, int max_length, cudaStream_t stream);
+void Launch_AppendUserTokensToSequences(std::span<const int32_t> next_tokens, std::span<int32_t> sequences, int batch_beam_size, int num_beams, int past_length, int new_length, int max_length, cudaStream_t stream);
+void Launch_GetLastTokens(std::span<const int32_t> sequences, std::span<int32_t> last_tokens, int batch_beam_size, int current_length, int max_length, cudaStream_t stream);
 }  // namespace cuda
 
-Sequences_Cuda::Sequences_Cuda(std::span<const int32_t> input_sequences, int batch_size, int beam_size, int max_length, cudaStream_t stream)
+Sequences_Cuda::Sequences_Cuda(int batch_size, int beam_size, int max_length, cudaStream_t stream)
     : stream_{stream},
       batch_beam_size_{batch_size * beam_size},
       max_length_{max_length},
-      current_length_{static_cast<int>(input_sequences.size()) / batch_size} {
-  assert(current_length_ * batch_size == input_sequences.size());  // Ensure size divided perfectly
+      current_length_{0} {
   size_t sequences_size = batch_beam_size_ * max_length;
 
   if (beam_size == 1) {
@@ -30,10 +31,7 @@ Sequences_Cuda::Sequences_Cuda(std::span<const int32_t> input_sequences, int bat
   // TODO: input_sequences will be in cuda memory in the future, for now make a temp copy
 
   gpu_span<int32_t> input_sequences_gpu;
-  auto input_sequences_temp = CudaMallocArray<int32_t>(input_sequences.size(), &input_sequences_gpu);
-  cudaMemcpyAsync(input_sequences_gpu.data(), input_sequences.data(), input_sequences.size_bytes(), cudaMemcpyHostToDevice, stream);
 
-  cuda::Launch_ExpandInputSequences(input_sequences_gpu, sequences_, batch_size, beam_size, current_length_, max_length, stream_);
   cudaStreamSynchronize(stream);  // Until we remove the todo above, wait for this to complete as input_sequences_gpu is on the stack
 }
 
@@ -55,6 +53,23 @@ void Sequences_Cuda::AppendNextTokenToSequences(std::span<const int32_t> next_to
 
   cuda::Launch_AppendNextTokenToSequences(next_tokens, sequences_, batch_beam_size_, current_length_, max_length_, stream_);
   ++current_length_;
+}
+
+void Sequences_Cuda::AppendUserTokensToSequences(gpu_span<int32_t> user_tokens, int num_beams) {
+  size_t new_length = user_tokens.size() / batch_beam_size_;
+  size_t past_length = current_length_;
+  cuda::Launch_AppendUserTokensToSequences(user_tokens, sequences_, batch_beam_size_, num_beams, past_length, new_length, max_length_, stream_);
+  current_length_ += new_length;
+}
+
+void Sequences_Cuda::RewindTo(size_t index) {
+  current_length_ = index;
+  assert(current_length_ >= 0);
+}
+
+void Sequences_Cuda::GetLastTokens(gpu_span<int32_t>& last_tokens) {
+  // TODO(aciddelgado): throw error when no last tokens
+  cuda::Launch_GetLastTokens(sequences_, last_tokens, batch_beam_size_, current_length_, max_length_, stream_);
 }
 
 void Sequences_Cuda::AfterDeviceAppendedNextToken() {

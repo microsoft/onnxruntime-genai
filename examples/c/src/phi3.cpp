@@ -93,12 +93,11 @@ void CXX_API(const char* model_path) {
     std::cout << "Generating response..." << std::endl;
     auto params = OgaGeneratorParams::Create(*model);
     params->SetSearchOption("max_length", 1024);
-    params->SetInputSequences(*sequences);
 
     auto generator = OgaGenerator::Create(*model, *params);
+    generator->AddInputSequences(*sequences);
 
     while (!generator->IsDone()) {
-      generator->ComputeLogits();
       generator->GenerateNextToken();
 
       if (is_first_token) {
@@ -179,13 +178,12 @@ void C_API(const char* model_path) {
     OgaGeneratorParams* params;
     CheckResult(OgaCreateGeneratorParams(model, &params));
     CheckResult(OgaGeneratorParamsSetSearchNumber(params, "max_length", 1024));
-    CheckResult(OgaGeneratorParamsSetInputSequences(params, sequences));
 
     OgaGenerator* generator;
     CheckResult(OgaCreateGenerator(model, params, &generator));
+    CheckResult(OgaGenerator_AddInputSequences(generator, sequences));
 
     while (!OgaGenerator_IsDone(generator)) {
-      CheckResult(OgaGenerator_ComputeLogits(generator));
       CheckResult(OgaGenerator_GenerateNextToken(generator));
 
       if (is_first_token) {

@@ -4,6 +4,7 @@
 #include "generators.h"
 #include "sequences.h"
 #include "models/model.h"
+#include "models/decoder_only.h"
 #include "search.h"
 #if USE_CUDA
 #include "search_cuda.h"
@@ -100,13 +101,12 @@ void GeneratorParams::TryGraphCapture(int max_bs) {
   }
 }
 
+// TODO(aciddelgado): Does this work?
 void GeneratorParams::SetInputs(const NamedTensors& named_tensors) {
   for (const auto& [name, tensor] : named_tensors) {
     if (name == Config::Defaults::InputIdsName) {
-      input_ids = std::span<const int32_t>(tensor->ort_tensor_->GetTensorMutableData<int32_t>(),
-                                           tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount());
-      batch_size = static_cast<int>(tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape()[0]);
-      sequence_length = static_cast<int>(input_ids.size()) / batch_size;
+      aux_input_ids = cpu_span<int32_t>(tensor->ort_tensor_->GetTensorMutableData<int32_t>(),
+                                               tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount());
     } else {
       // If the nominal name is found in the map, use the graph name.
       // Else, use the nominal name as the graph name.
@@ -140,24 +140,33 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
     throw std::runtime_error("search max_length is 0");
   if (params.search.max_length > model.config_->model.context_length)
     throw std::runtime_error("max_length (" + std::to_string(params.search.max_length) + ") cannot be greater than model context_length (" + std::to_string(model.config_->model.context_length) + ")");
-  if (params.batch_size < 1)
-    throw std::runtime_error("batch_size must be 1 or greater, is " + std::to_string(params.batch_size));
+  if (params.search.batch_size < 1)
+    throw std::runtime_error("batch_size must be 1 or greater, is " + std::to_string(params.search.batch_size));
   if (params.config.model.vocab_size < 1)
     throw std::runtime_error("vocab_size must be 1 or greater, is " + std::to_string(params.config.model.vocab_size));
-  if (params.sequence_length >= params.search.max_length)
-    throw std::runtime_error("input sequence_length (" + std::to_string(params.sequence_length) + ") is >= max_length (" + std::to_string(params.search.max_length) + ")");
-  if (params.input_ids.empty() || params.input_ids.data() == nullptr)
-    throw std::runtime_error("input_ids not set in GeneratorParams");
 
   search_ = CreateSearch(params);
-  state_ = model.CreateState(search_->GetSequenceLengths(), params);
+  state_ = model.CreateState(search_->GetSequenceLengths(), params); // Search sequence lengths set when creating state
+
+  // Temporary solution for multimodal and whisper models
+  if (!params.aux_input_ids.empty() && params.aux_input_ids.data() != nullptr) {
+    AddTokens(params.aux_input_ids);
+  }
 }
 
-void Generator::ComputeLogits() {
-  if (computed_logits_)
-    throw std::runtime_error("ComputeLogits called again without calling GenerateNextToken first");
+void Generator::AddTokens(const cpu_span<int32_t>& input_ids) {
+  // TODO(aciddelgado): check for batch_size > 1 requires full rewind
+  search_->SetUserTokens(input_ids);
 
-  auto logits = state_->Run(search_->GetSequenceLength(), search_->GetNextTokens(), search_->GetNextIndices());
+  computed_logits_ = false;
+  ComputeLogits(input_ids);
+}
+
+void Generator::ComputeLogits(const RoamingArray<int32_t>& next_tokens) {
+  if (computed_logits_)
+    throw std::runtime_error("ComputeLogits called again without calling AddTokens or GenerateNextToken first");
+
+  auto logits = state_->Run(search_->GetSequenceLength(), next_tokens, search_->GetNextIndices());
   if (g_log.enabled && g_log.model_logits) {
     auto& stream = Log("model_logits");
     DumpSpan(stream, logits.GetCPU());
@@ -165,15 +174,13 @@ void Generator::ComputeLogits() {
   }
   search_->SetLogits(logits);
   computed_logits_ = true;
-
-  auto& search = search_->params_->search;
-  search_->ApplyMinLength(search.min_length);
-  search_->ApplyRepetitionPenalty(search.repetition_penalty);
 }
 
 bool Generator::IsDone() const {
-  if (computed_logits_)
-    throw std::runtime_error("IsDone() can't be called in the middle of processing logits");
+  // TODO(aciddelgado): Is this the correct approach to handling computed_logits_ now?
+  if (computed_logits_) {
+    return false;
+  }
 
   bool is_done = search_->IsDone();
   if (is_done) {
@@ -184,10 +191,14 @@ bool Generator::IsDone() const {
 }
 
 void Generator::GenerateNextToken() {
-  if (!computed_logits_)
-    throw std::runtime_error("Must call ComputeLogits before GenerateNextToken");
+  // TODO(aciddelgado): check that AddTokens has been called at least once
+  if (!computed_logits_) {
+    ComputeLogits(search_->GetNextTokens());
+  }
   computed_logits_ = false;
   auto& search = search_->params_->search;
+  search_->ApplyMinLength(search.min_length);
+  search_->ApplyRepetitionPenalty(search.repetition_penalty);
 
   if (g_log.enabled && g_log.generate_next_token) {
     auto& stream = Log("generate_next_token");
@@ -224,27 +235,21 @@ void Generator::GenerateNextToken() {
   }
 }
 
-RoamingArray<int32_t> Generator::GetSequence(size_t index) const {
-  return search_->GetSequence(index);
+void Generator::RewindToLength(size_t new_length) {
+  if (new_length > search_->GetSequenceLength())
+    throw std::runtime_error("Cannot rewind to a length greater than the current sequence length");
+  if (new_length == search_->GetSequenceLength())
+    return;
+  size_t batch_size = search_->params_->search.batch_size;
+  if (batch_size > 1 && new_length != 0)
+    throw std::runtime_error("RewindToLength must be called with new_length=0 when batch_size > 1");
+  search_->RewindTo(new_length);
+  state_->RewindTo(new_length);
+  computed_logits_ = false;
 }
 
-TokenSequences Generate(const Model& model, const GeneratorParams& params) {
-  auto generator = CreateGenerator(model, params);
-
-  while (!generator->IsDone()) {
-    generator->ComputeLogits();
-    generator->GenerateNextToken();
-  }
-
-  TokenSequences result;
-  for (int i = 0; i < params.batch_size * params.search.num_return_sequences; i++) {
-    auto sequence = generator->search_->GetSequence(i);
-    auto sequence_cpu = sequence.GetCPU();
-
-    auto& v = result.emplace_back();
-    v.assign(sequence_cpu.begin(), sequence_cpu.end());
-  }
-  return result;
+RoamingArray<int32_t> Generator::GetSequence(size_t index) const {
+  return search_->GetSequence(index);
 }
 
 }  // namespace Generators

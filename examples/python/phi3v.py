@@ -48,6 +48,7 @@ def run(args: argparse.Namespace):
         prompt += f"{text}<|end|>\n<|assistant|>\n"
         print("Processing images and prompt...")
         inputs = processor(prompt, images=images)
+        print(inputs)
 
         print("Generating response...")
         params = og.GeneratorParams(model)
@@ -57,7 +58,6 @@ def run(args: argparse.Namespace):
         generator = og.Generator(model, params)
 
         while not generator.is_done():
-            generator.compute_logits()
             generator.generate_next_token()
 
             new_token = generator.get_next_tokens()[0]

@@ -200,15 +200,7 @@ struct OgaGeneratorParams : OgaAbstract {
 
   void SetSearchOptionBool(const char* name, bool value) {
     OgaCheckResult(OgaGeneratorParamsSetSearchBool(this, name, value));
-  }
-
-  void SetInputIDs(const int32_t* input_ids, size_t input_ids_count, size_t sequence_length, size_t batch_size) {
-    OgaCheckResult(OgaGeneratorParamsSetInputIDs(this, input_ids, input_ids_count, sequence_length, batch_size));
-  }
-
-  void SetInputSequences(const OgaSequences& sequences) {
-    OgaCheckResult(OgaGeneratorParamsSetInputSequences(this, &sequences));
-  }
+  }    
 
   void SetModelInput(const char* name, OgaTensor& tensor) {
     OgaCheckResult(OgaGeneratorParamsSetModelInput(this, name, &tensor));
@@ -226,7 +218,7 @@ struct OgaGeneratorParams : OgaAbstract {
 };
 
 struct OgaGenerator : OgaAbstract {
-  static std::unique_ptr<OgaGenerator> Create(const OgaModel& model, const OgaGeneratorParams& params) {
+  static std::unique_ptr<OgaGenerator> Create(const OgaModel& model, OgaGeneratorParams& params) {
     OgaGenerator* p;
     OgaCheckResult(OgaCreateGenerator(&model, &params, &p));
     return std::unique_ptr<OgaGenerator>(p);
@@ -236,12 +228,20 @@ struct OgaGenerator : OgaAbstract {
     return OgaGenerator_IsDone(this);
   }
 
-  void ComputeLogits() {
-    OgaCheckResult(OgaGenerator_ComputeLogits(this));
+  void AddInputSequences(const OgaSequences& sequences) {
+    OgaCheckResult(OgaGenerator_AddInputSequences(this, &sequences));
+  }
+
+  void AddInputTokens(int32_t* input_ids, size_t input_ids_count) {
+    OgaCheckResult(OgaGenerator_AddInputTokens(this, input_ids, input_ids_count));
   }
 
   void GenerateNextToken() {
     OgaCheckResult(OgaGenerator_GenerateNextToken(this));
+  }
+
+  void RewindToLength(size_t length) {
+    OgaCheckResult(OgaGenerator_RewindToLength(this, length));
   }
 
   size_t GetSequenceCount(size_t index) const {
