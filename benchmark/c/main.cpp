@@ -130,6 +130,11 @@ std::string GeneratePrompt(size_t num_prompt_tokens, const OgaModel& model, cons
 }
 
 void RunBenchmark(const benchmark::Options& opts) {
+  if (opts.debug) {
+    Oga::SetLogBool("enabled", true);
+    Oga::SetLogBool("model_input_values", true);
+    Oga::SetLogBool("model_output_values", true);
+  }
   auto model = OgaModel::Create(opts.model_path.c_str());
   auto tokenizer = OgaTokenizer::Create(*model);
 

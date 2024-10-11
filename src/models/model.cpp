@@ -283,14 +283,15 @@ void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
     allocator_device_ = dml_owned_allocator_.get();
   }
 #endif
+  allocator_kvcache_ = allocator_device_;
 #if USE_WEBGPU
   if (device_type_ == DeviceType::WEBGPU) {
+    // for webgpu we only use device memory for kv_cache
     memory_info_device_ = OrtMemoryInfo::Create("WebGPU_Buffer", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
     webgpu_owned_allocator_ = Ort::Allocator::Create(session, *memory_info_device_);
-    allocator_device_ = webgpu_owned_allocator_.get();
+    allocator_kvcache_ = webgpu_owned_allocator_.get();
   }
 #endif
-
   session_info_ = std::make_unique<SessionInfo>(session);
   captured_graph_pool_ = std::make_shared<CapturedGraphPool>(config_.get(), session_info_.get(), allocator_device_);
 }

@@ -15,6 +15,7 @@ struct Options {
   size_t num_iterations{5};
   size_t num_warmup_iterations{1};
   bool verbose{false};
+  bool debug{false};
 };
 
 Options ParseOptionsFromCommandLine(int argc, const char* const* argv);

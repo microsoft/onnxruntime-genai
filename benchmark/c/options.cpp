@@ -36,6 +36,8 @@ namespace {
     << "      Number of warmup runs before benchmarking. Default: " << defaults.num_warmup_iterations << "\n"
     << "    -v,--verbose\n"
     << "      Show more informational output.\n"
+    << "    -d,--debug\n"
+    << "      Show debug output.\n"
     << "    -h,--help\n"
     << "      Show this help message and exit.\n";
 
@@ -91,6 +93,8 @@ Options ParseOptionsFromCommandLine(int argc, const char* const* argv) {
         opts.num_warmup_iterations = ParseNumber<size_t>(next_arg(i));
       } else if (arg == "-v" || arg == "--verbose") {
         opts.verbose = true;
+      } else if (arg == "-d" || arg == "--debug") {
+        opts.debug = true;
       } else if (arg == "-h" || arg == "--help") {
         PrintHelpAndExit(program_name, 0);
       } else {
