@@ -1018,104 +1018,7 @@ class Model:
 
         return cos_cache_name, sin_cache_name
 
-
-    def make_rotary_embedding_partial(self, rotemb, name, root_input, **kwargs):
-        cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches(rotemb)
-
-        #         root_input
-        #             |
-        #          Reshape
-        #             |
-        #           Split
-        #           /   \
-        #       Reshape  |
-        #          |     |
-        #     RoteryEmb  |
-        #          |     |
-        #       Reshape  |
-        #           \   /
-        #           Concat
-        #             |
-        #           Reshape
-
-        num_heads = (self.num_kv_heads if "k_rotary" in name else self.num_attn_heads)
-        dim_size = self.head_size * num_heads
-        const_prefix =  ("k_" if "k_rotary" in name else "v_")
-
-        # Reshape 1
-        reshape_name = f"{name}/Reshape/"
-        reshape_output_0 = f"{name}/Reshape/output_0"
-        rotary_reshape_dim = [0, 0, num_heads, int(dim_size / num_heads)]
-        constant_name = f"{const_prefix}RotaryEmb/Reshape/Const_input_dim_2"
-        constant_value = numpy_helper.from_array(np.array(rotary_reshape_dim, dtype="int64"))
-        self.make_node("Constant", inputs=[], outputs=[f"{constant_name}\constant_0"], name=constant_name, value=constant_value)
-        self.make_node("Reshape", inputs=[root_input, f"{constant_name}\constant_0"], outputs=[reshape_output_0], name=reshape_name)
-        self.make_value_info(reshape_output_0, self.io_dtype, shape=['batch_size', 'sequence_length', num_heads, int(dim_size / num_heads)])
-
-        # Split
-        split_name = f"{name}/Split/"
-        split_output_0 = f"{name}/Split/output_0"
-        split_output_1 = f"{name}/Split/output_1"
-        split_size = int(self.rotemb_attrs["partial_rotary_factor"] * int(dim_size/num_heads))
-        split_dim = [split_size, int(dim_size/num_heads) - split_size]
-        constant_split_name = f"{const_prefix}RotaryEmb/Split/Const_input_shape"
-        constant_split_value = numpy_helper.from_array(np.array(split_dim, dtype="int64"))
-        self.make_node("Constant", inputs=[], outputs=[f"{constant_split_name}\constant_0"], name=constant_split_name, value=constant_split_value)
-        self.make_node("Split", inputs=[reshape_output_0, f"{constant_split_name}\constant_0"], outputs=[split_output_0, split_output_1], name=split_name, axis=3)
-        self.make_value_info(split_output_0, self.io_dtype, shape=['batch_size', 'sequence_length', num_heads, split_dim[0]])
-        self.make_value_info(split_output_1, self.io_dtype, shape=['batch_size', 'sequence_length', num_heads, split_dim[1]])
-
-        # Reshape 2
-        reshape2_name = f"{name}/Reshape2/"
-        reshape2_output_0 =f"{name}/Reshape2/output_0"
-        rotary_reshape2_dim = [0, 0, num_heads * split_dim[0]]
-        constant2_name = f"{const_prefix}RotaryEmb/Reshape/Const2_input_dim_2"
-        constant2_value = numpy_helper.from_array(np.array(rotary_reshape2_dim, dtype="int64"))
-        self.make_node("Constant", inputs=[], outputs=[f"{constant2_name}\constant_0"], name=constant2_name, value=constant2_value)
-        self.make_node("Reshape", inputs=[split_output_0, f"{constant2_name}\constant_0"], outputs=[reshape2_output_0], name=reshape2_name)
-        self.make_value_info(reshape2_output_0, self.io_dtype, shape=['batch_size', 'sequence_length', num_heads * split_dim[0]])
-
-        # Rotary Embedding
-        inputs = [reshape2_output_0, kwargs.pop("position_ids"), cos_cache_name, sin_cache_name]
-        rot_output = f"{name}/Rotary/output_0"
-        # Removing duplicate kwargs 
-        kwargs.pop("num_heads", "")
-        kwargs.pop("rotary_embedding_dim", "")
-        self.make_node("RotaryEmbedding", inputs=inputs, outputs=[rot_output], name=name, domain="com.microsoft", interleaved=self.rotemb_attrs["interleaved"], num_heads=num_heads, rotary_embedding_dim=split_dim[0], **kwargs)
-        self.make_value_info(rot_output, self.io_dtype, shape=['batch_size', 'sequence_length', num_heads * split_dim[0]])
-
-        # Reshape 3
-        reshape3_name = f"{name}/Reshape3/"
-        reshape3_output_0 =f"{name}/Reshape3/output_0"
-        rotary_reshape3_dim = [0, 0, num_heads, split_dim[0]]
-        constant3_name = f"{const_prefix}RotaryEmb/Reshape/Const3_input_dim_2"
-        constant3_value = numpy_helper.from_array(np.array(rotary_reshape3_dim, dtype="int64"))
-        self.make_node("Constant", inputs=[], outputs=[f"{constant3_name}\constant_0"], name=constant3_name, value=constant3_value)
-        self.make_node("Reshape", inputs=[rot_output, f"{constant3_name}\constant_0"], outputs=[reshape3_output_0], name=reshape3_name)
-        self.make_value_info(reshape3_output_0, self.io_dtype, shape=['batch_size', 'sequence_length', num_heads, split_dim[0]])
-
-        # Concat
-        concat_name = f"{name}/Concat"
-        concat_inputs = [reshape3_output_0, split_output_1]
-        concat_output = f"{name}/Concat/output_0"
-        self.make_node("Concat", inputs=concat_inputs, outputs=[concat_output], name=concat_name, axis=3)
-        self.make_value_info(concat_output, self.io_dtype, shape=['batch_size', 'sequence_length', num_heads, split_dim[0] + split_dim[1]])
-
-        # Reshape 4
-        reshape4_name = f"{name}/Reshape4/"
-        reshape4_output_0 =f"{name}/output_0"
-        rotary_reshape4_dim = [0, 0, dim_size]
-        constant4_name = f"{const_prefix}RotaryEmb/Reshape/Const4_input_dim_2"
-        constant4_value = numpy_helper.from_array(np.array(rotary_reshape4_dim, dtype="int64"))
-        self.make_node("Constant", inputs=[], outputs=[f"{constant4_name}\constant_0"], name=constant4_name, value=constant4_value)
-        self.make_node("Reshape", inputs=[concat_output, f"{constant4_name}\constant_0"], outputs=[reshape4_output_0], name=reshape4_name)
-        self.make_value_info(reshape4_output_0, self.io_dtype, shape=['batch_size', 'sequence_length', dim_size])
-
     def make_rotary_embedding(self, rotemb, name, root_input, **kwargs):
-        if self.rotemb_attrs["partial_rotary_factor"] > 0:
-            self.make_rotary_embedding_partial(rotemb, name, root_input, **kwargs)
-            return
-
         cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches(rotemb)
 
         inputs = [root_input, kwargs.pop("position_ids"), cos_cache_name, sin_cache_name]
@@ -1845,12 +1748,9 @@ class Model:
         relu_name = self.make_relu(layer_id, root_input, "Relu")
         basename = f"/model/layers.{layer_id}/mlp/square/{activation}"
         pow_name = f"{basename}/pow"
-        output = f"{pow_name}/output_0"
-        constant_shape_name = "static_2"
-        const_value_2 = np.array([2])
-        self.make_external_tensor(const_value_2, constant_shape_name)
-        self.make_node("Pow", inputs=[f"{relu_name}/output_0", constant_shape_name], outputs=[output], name=pow_name, domain="")
-        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.intermediate_size])
+        pow_inputs = [f"{relu_name}/output_0", "/model/constants/TensorProto.INT32/1D/2"]
+        self.make_node("Pow", inputs=pow_inputs, outputs=[f"{pow_name}/output_0"], name=pow_name, domain="")
+        self.make_value_info(f"{pow_name}/output_0", self.io_dtype, shape=['batch_size', 'sequence_length', self.intermediate_size])
         return pow_name
 
     def make_activation(self, layer_id, root_input):
@@ -2573,8 +2473,6 @@ class NemotronModel(LlamaModel):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.layernorm_attrs["simple"] = False
         self.layernorm_attrs["add_offset"] = 1
-        self.rotemb_attrs["num_heads"] = self.num_attn_heads
-        self.rotemb_attrs["rotary_embedding_dim"] = int(self.head_size * self.rotemb_attrs["partial_rotary_factor"])
 
     def make_mlp_proj(self, layer_id, mlp, root_input):
         # Make nodes for the MLP subgraph
@@ -2598,6 +2496,82 @@ class NemotronModel(LlamaModel):
 
         # Assign output 0 of previous MatMul as skip input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = f"{down_name}/output_0"
+
+    def make_rotary_embedding(self, rotemb, name, root_input, **kwargs):
+        cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches(rotemb)
+
+        # Make nodes for the Rotary subgraph with partial factor explicit spliting with ONNX ops
+        #         root_input
+        #             |
+        #          Reshape
+        #             |
+        #           Split
+        #           /   \
+        #       Reshape  |
+        #          |     |
+        #     RoteryEmb  |
+        #          |     |
+        #       Reshape  |
+        #           \   /
+        #           Concat
+        #             |
+        #          Reshape
+
+        if self.rotemb_attrs["partial_rotary_factor"] == 0:
+            super().make_rotary_embedding(rotemb, name, root_input, **kwargs)
+            return
+
+        num_heads = (self.num_kv_heads if "k_rotary" in name else self.num_attn_heads)
+        dim_size = self.head_size * num_heads
+        const_prefix =  ("k_" if "k_rotary" in name else "v_")
+
+        # Reshape 1
+        reshape_output_0 = f"{name}/Reshape/output_0"
+        reshape_inputs = [root_input, f"/model/constants/{const_prefix}RotaryEmb/Reshape1/TensorProto.INT64/1D/0, 0, {num_heads}, {int(dim_size / num_heads)}"]
+        self.make_node("Reshape", inputs=reshape_inputs, outputs=[reshape_output_0], name=f"{name}/Reshape1/")
+        self.make_value_info(reshape_output_0, self.io_dtype, shape=['batch_size', 'sequence_length', num_heads, int(dim_size / num_heads)])
+
+        # Split
+        split_output_0, split_output_1 = f"{name}/Split/output_0", f"{name}/Split/output_1"
+        split_size = int(self.rotemb_attrs["partial_rotary_factor"] * int(dim_size/num_heads))
+        split_dim = [split_size, int(dim_size/num_heads) - split_size]
+        split_inpus = [reshape_output_0, f"/model/constants/{const_prefix}RotaryEmb/Split/TensorProto.INT64/1D/{split_dim[0]}, {split_dim[1]}"]
+        self.make_node("Split", inputs=split_inpus, outputs=[split_output_0, split_output_1], name=f"{name}/Split/", axis=3)
+        self.make_value_info(split_output_0, self.io_dtype, shape=['batch_size', 'sequence_length', num_heads, split_dim[0]])
+        self.make_value_info(split_output_1, self.io_dtype, shape=['batch_size', 'sequence_length', num_heads, split_dim[1]])
+
+        # Reshape 2
+        reshape2_name = f"{name}/Reshape2/"
+        reshape2_output_0 =f"{name}/Reshape2/output_0"
+        reshape_inputs = [split_output_0, f"/model/constants/{const_prefix}RotaryEmb/Reshape2/TensorProto.INT64/1D/0, 0, {num_heads * split_dim[0]}"]
+        self.make_node("Reshape", inputs=reshape_inputs, outputs=[reshape2_output_0], name=reshape2_name)
+        self.make_value_info(reshape2_output_0, self.io_dtype, shape=['batch_size', 'sequence_length', num_heads * split_dim[0]])
+
+        # Rotary Embedding
+        inputs = [reshape2_output_0, kwargs.pop("position_ids"), cos_cache_name, sin_cache_name]
+        rot_output = f"{name}/Rotary/output_0"
+        # Removing duplicate kwargs 
+        kwargs.pop("num_heads", "")
+        kwargs.pop("rotary_embedding_dim", "")
+        self.make_node("RotaryEmbedding", inputs=inputs, outputs=[rot_output], name=name, domain="com.microsoft", interleaved=self.rotemb_attrs["interleaved"], num_heads=num_heads, rotary_embedding_dim=split_dim[0], **kwargs)
+        self.make_value_info(rot_output, self.io_dtype, shape=['batch_size', 'sequence_length', num_heads * split_dim[0]])
+
+        # Reshape 3
+        reshape3_output_0 =f"{name}/Reshape3/output_0"
+        reshape_inputs = [rot_output, f"/model/constants/{const_prefix}RotaryEmb/Reshape3/TensorProto.INT64/1D/0, 0, {num_heads}, {split_dim[0]}"]
+        self.make_node("Reshape", inputs=reshape_inputs, outputs=[reshape3_output_0], name=f"{name}/Reshape3/")
+        self.make_value_info(reshape3_output_0, self.io_dtype, shape=['batch_size', 'sequence_length', num_heads, split_dim[0]])
+
+        # Concat
+        concat_output = f"{name}/Concat/output_0"
+        self.make_node("Concat", inputs=[reshape3_output_0, split_output_1], outputs=[concat_output], name=f"{name}/Concat", axis=3)
+        self.make_value_info(concat_output, self.io_dtype, shape=['batch_size', 'sequence_length', num_heads, split_dim[0] + split_dim[1]])
+
+        # Reshape 4
+        reshape4_output_0 =f"{name}/output_0"
+        reshape_inputs = [concat_output, f"/model/constants/{const_prefix}RotaryEmb/Reshape4/TensorProto.INT64/1D/0, 0, {dim_size}"]
+        self.make_node("Reshape", inputs=reshape_inputs, outputs=[reshape4_output_0], name=f"{name}/Reshape4")
+        self.make_value_info(reshape4_output_0, self.io_dtype, shape=['batch_size', 'sequence_length', dim_size])
 
 class Phi3Mini128KModel(Phi3Mini4KModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
