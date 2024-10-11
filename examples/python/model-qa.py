@@ -32,7 +32,7 @@ def main(args):
     # Set system prompt
     system_prompt = args.system_prompt
     system_tokens = tokenizer.encode(system_prompt)
-    generator.add_input_tokens(system_tokens)
+    generator.append_tokens(system_tokens)
     system_prompt_length = len(system_tokens)
 
     # Keep asking for input prompts in a loop
@@ -51,7 +51,7 @@ def main(args):
 
         input_tokens = tokenizer.encode(prompt)
         
-        generator.add_input_tokens(input_tokens)
+        generator.append_tokens(input_tokens)
         if args.verbose: print("Generator created")
 
         if args.verbose: print("Running generation loop ...")
@@ -85,7 +85,7 @@ def main(args):
         
         # Rewind the generator to the system prompt
         if args.rewind:
-            generator.rewind_to_length(system_prompt_length)
+            generator.rewind_to(system_prompt_length)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS, description="End-to-end AI Question/Answer example for gen-ai")

@@ -192,7 +192,7 @@ RoamingArray<float> Logits::Get() {
 #pragma warning(pop)
 
 void Logits::Update(const RoamingArray<int32_t>& next_tokens, int new_kv_length) {
-  if (output_raw_.get()->GetTensorTypeAndShapeInfo()->GetShape()[1] == new_kv_length) {
+  if (output_raw_.get()->GetTensorTypeAndShapeInfo()->GetShape()[1] == new_kv_length && new_kv_length == 1) {
     return;
   }
 
@@ -206,6 +206,10 @@ void Logits::Update(const RoamingArray<int32_t>& next_tokens, int new_kv_length)
         break;
     }
     input_sequence_lengths[b] = token_index + 1;
+  }
+
+  if (output_raw_.get()->GetTensorTypeAndShapeInfo()->GetShape()[1] == new_kv_length) {
+    return;
   }
 
   shape_[1] = new_kv_length;

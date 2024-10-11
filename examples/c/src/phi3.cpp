@@ -181,7 +181,7 @@ void C_API(const char* model_path) {
 
     OgaGenerator* generator;
     CheckResult(OgaCreateGenerator(model, params, &generator));
-    CheckResult(OgaGenerator_AddInputSequences(generator, sequences));
+    CheckResult(OgaGenerator_AppendTokenSequences(generator, sequences));
 
     while (!OgaGenerator_IsDone(generator)) {
       CheckResult(OgaGenerator_GenerateNextToken(generator));

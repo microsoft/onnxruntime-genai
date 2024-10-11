@@ -54,23 +54,27 @@ void KV_Cache_Combined::Add() {
   }
 }
 
-void KV_Cache_Combined::Update(std::span<const int32_t> beam_indices, int current_length) {
+void KV_Cache_Combined::Update(std::span<const int32_t> beam_indices, int total_length) {
   assert(state_.params_->search.num_beams == 1 || !beam_indices.empty());  // We require beam_indices if we're a beam search
 
-  for (int i = 0; i < layer_count_; i++) {
-    if (beam_indices.empty()) {
-      pasts_[i] = std::move(presents_[i]);
-    } else {
-      PickPastState(beam_indices, i);
+  if (!is_first_update_) {
+    for (int i = 0; i < layer_count_; i++) {
+      if (beam_indices.empty()) {
+        pasts_[i] = std::move(presents_[i]);
+      } else {
+        PickPastState(beam_indices, i);
+      }
+      state_.inputs_[input_index_ + i] = pasts_[i].get();
     }
   }
 
-  shape_[3] = current_length;
+  shape_[3] = total_length;
   for (int i = 0; i < layer_count_; i++) {
     presents_[i] = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
-    state_.inputs_[input_index_ + i] = pasts_[i].get();
     state_.outputs_[output_index_ + i] = presents_[i].get();
   }
+
+  is_first_update_ = false;
 }
 
 // Copy present state to past state reordered by the beam_indices

@@ -232,7 +232,7 @@ OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsDone(const OgaGenerator* generator);
  * \param[in] p_sequences The input id sequences.
  * \return OgaResult containing the error message if the setting of the input ids failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AddInputSequences(OgaGenerator* oga_generator, const OgaSequences* p_sequences);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AppendTokenSequences(OgaGenerator* oga_generator, const OgaSequences* p_sequences);
 
 /*
  * \brief Adds the input ids to the generator. The input ids are used to seed the generation.
@@ -241,7 +241,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AddInputSequences(OgaGenerator* 
  * \param[in] input_ids_count The number of input ids to add (batch_size * sequence_length).
  * \return OgaResult containing the error message if the setting of the input ids failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AddInputTokens(OgaGenerator* oga_generator, int32_t* input_ids, size_t input_ids_count);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AppendTokens(OgaGenerator* oga_generator, int32_t* input_ids, size_t input_ids_count);
 
 /*
  * \brief Computes the logits from the model based on the input ids and the past state. The computed logits are stored in the generator.
@@ -257,7 +257,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* 
  * \param[in] new_length The new length to rewind the generator to.
  * \return OgaResult containing the error message if the rewinding failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_RewindToLength(OgaGenerator* generator, size_t new_length);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_RewindTo(OgaGenerator* generator, size_t new_length);
 
 /*
  * \brief Returns a copy of the model output identified by the given name as an OgaTensor on CPU. The buffer is owned by returned OgaTensor

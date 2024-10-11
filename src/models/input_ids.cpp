@@ -78,7 +78,11 @@ void InputIDs::Update(RoamingArray<int32_t> new_tokens) {
   }
 
   // Resize input_ids shape based on new_tokens
-  size_t sequence_length = static_cast<size_t>(new_tokens.GetCPU().size()) / shape_[0];
+  // Temporary solution for beam search
+  size_t sequence_length = static_cast<size_t>(new_tokens.GetCPU().size()) / state_.params_->BatchBeamSize();
+  if (is_prompt_ && state_.params_->search.num_beams > 1)
+    sequence_length = static_cast<size_t>(new_tokens.GetCPU().size()) / state_.params_->search.batch_size;
+  
   if (shape_[1] != sequence_length) {
     shape_[1] = sequence_length;
     if (!sb_input_ids_) {
@@ -109,10 +113,15 @@ void InputIDs::Update(RoamingArray<int32_t> new_tokens) {
 #if USE_CUDA
         auto* data = value_->GetTensorMutableData<int64_t>();
         auto next_tokens = new_tokens.GetGPU();
-        cuda::LaunchInt32ToInt64(next_tokens.data(), data, static_cast<int>(next_tokens.size()), model_.cuda_stream_);
+        // Temporary solution for beam search
+        if (is_prompt_ && state_.params_->search.num_beams > 1)
+          cuda::LaunchExpandAndInt32ToInt64(next_tokens.data(), data, state_.params_->search.num_beams, state_.params_->search.batch_size, sequence_length, model_.cuda_stream_);
+        else
+          cuda::LaunchInt32ToInt64(next_tokens.data(), data, static_cast<int>(next_tokens.size()), model_.cuda_stream_);
 #endif
       } break;
 
+      // TODO: DML case (beam search fix etc.)
       case DeviceType::DML: {
 #if USE_DML
         ComPtr<ID3D12Resource> source_resource;
@@ -143,7 +152,13 @@ void InputIDs::Update(RoamingArray<int32_t> new_tokens) {
         auto next_tokens = new_tokens.GetCPU();
         for (int b = 0; b < shape_[0]; b++) {
           for (int i = 0; i < shape_[1]; i++) {
-            data[b * shape_[1] + i] = next_tokens[b * shape_[1] + i];
+            // Temporary solution for beam search
+            int32_t next_token;
+            if (is_prompt_ && state_.params_->search.num_beams > 1)
+              next_token = next_tokens[(b / state_.params_->search.num_beams) * shape_[1] + i];
+            else
+              next_token = next_tokens[b * shape_[1] + i];
+            data[b * shape_[1] + i] = next_token;
           }
         }
       }
@@ -151,12 +166,30 @@ void InputIDs::Update(RoamingArray<int32_t> new_tokens) {
   } else {
     auto* data = value_->GetTensorMutableData<int32_t>();
 #if USE_CUDA
-    if (model_.device_type_ == DeviceType::CUDA)
-      cudaMemcpyAsync(data, new_tokens.GetGPU().data(), shape_[0] * shape_[1] * sizeof(int32_t), cudaMemcpyDeviceToDevice, model_.cuda_stream_);
-    else
+    if (model_.device_type_ == DeviceType::CUDA) {
+      if (is_prompt_ && state_.params_->search.num_beams > 1) {
+        auto next_tokens = new_tokens.GetGPU();
+        cuda::LaunchExpand(next_tokens.data(), data, state_.params_->search.num_beams, state_.params_->search.batch_size, sequence_length, model_.cuda_stream_);
+      } else {
+        cudaMemcpyAsync(data, new_tokens.GetGPU().data(), shape_[0] * shape_[1] * sizeof(int32_t), cudaMemcpyDeviceToDevice, model_.cuda_stream_);
+      }
+    } else
 #endif
-      memcpy(data, new_tokens.GetCPU().data(), shape_[0] * shape_[1] * sizeof(int32_t));
+    {
+      // Temporary solution for beam search
+      if (is_prompt_ && state_.params_->search.num_beams > 1) {
+        for (int b = 0; b < shape_[0]; b++) {
+          int in_offset = (b / state_.params_->search.num_beams) * shape_[1];
+          int out_offset = b * shape_[1];
+          memcpy(data + out_offset, new_tokens.GetCPU().data() + in_offset, shape_[1] * sizeof(int32_t));
+        }
+      } else {
+        memcpy(data, new_tokens.GetCPU().data(), shape_[0] * shape_[1] * sizeof(int32_t));
+      }
+    }
   }
+
+  is_prompt_ = false;
 }
 
 }  // namespace Generators

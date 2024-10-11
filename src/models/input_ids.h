@@ -26,6 +26,8 @@ struct InputIDs {
   const Model& model_{state_.model_};
   size_t input_index_{~0U};
 
+  bool is_prompt_{true};
+
   std::array<int64_t, 2> shape_{};
   ONNXTensorElementDataType type_;
   std::unique_ptr<OrtValue> value_;

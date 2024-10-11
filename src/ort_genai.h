@@ -229,11 +229,11 @@ struct OgaGenerator : OgaAbstract {
   }
 
   void AddInputSequences(const OgaSequences& sequences) {
-    OgaCheckResult(OgaGenerator_AddInputSequences(this, &sequences));
+    OgaCheckResult(OgaGenerator_AppendTokenSequences(this, &sequences));
   }
 
   void AddInputTokens(int32_t* input_ids, size_t input_ids_count) {
-    OgaCheckResult(OgaGenerator_AddInputTokens(this, input_ids, input_ids_count));
+    OgaCheckResult(OgaGenerator_AppendTokens(this, input_ids, input_ids_count));
   }
 
   void GenerateNextToken() {
@@ -241,7 +241,7 @@ struct OgaGenerator : OgaAbstract {
   }
 
   void RewindToLength(size_t length) {
-    OgaCheckResult(OgaGenerator_RewindToLength(this, length));
+    OgaCheckResult(OgaGenerator_RewindTo(this, length));
   }
 
   size_t GetSequenceCount(size_t index) const {

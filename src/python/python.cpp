@@ -416,9 +416,9 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def(pybind11::init<Model&, PyGeneratorParams&>())
       .def("is_done", &PyGenerator::IsDone)
       .def("get_output", &PyGenerator::GetOutput)
-      .def("add_input_tokens", &PyGenerator::AddTokens)
+      .def("append_tokens", &PyGenerator::AddTokens)
       .def("generate_next_token", &PyGenerator::GenerateNextToken)
-      .def("rewind_to_length", &PyGenerator::RewindToLength)
+      .def("rewind_to", &PyGenerator::RewindToLength)
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
       .def("get_sequence", &PyGenerator::GetSequence);
 

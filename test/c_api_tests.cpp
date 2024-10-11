@@ -186,6 +186,7 @@ TEST(CAPITests, GetOutputCAPI) {
 
   auto params = OgaGeneratorParams::Create(*model);
   params->SetSearchOption("max_length", max_length);
+  params->SetSearchOption("batch_size", batch_size);
 
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AddInputTokens(input_ids.data(), input_ids.size());

@@ -38,8 +38,8 @@ BeamSearch_Cpu::BeamSearch_Cpu(const GeneratorParams& params)
   assert(params_->search.num_beams > 1);  // If 1, use GreedySearch
   beam_scorer_ = std::make_unique<BeamSearchScorer>(*params_);
 
-  auto next_tokens_buffer = AllocateArray<int32_t>(params.BatchBeamSize(), &next_tokens_);
-  memset(next_tokens_buffer.get(), 0, next_tokens_.size_bytes());
+  next_tokens_buffer_ = AllocateArray<int32_t>(params.BatchBeamSize(), &next_tokens_);
+  memset(next_tokens_buffer_.get(), 0, next_tokens_.size_bytes());
 }
 
 BeamSearch_Cpu::~BeamSearch_Cpu() = default;
@@ -317,7 +317,7 @@ void BeamSearch_Cpu::SetUserTokens(const RoamingArray<int32_t>& next_tokens) {
   // Set user-defined next tokens
   auto next_tokens_cpu = const_cast<RoamingArray<int32_t>&>(next_tokens).GetCPU();
   auto batch_beam_size = params_->BatchBeamSize();
-  auto tokens_count_per_batch = next_tokens_cpu.size() / batch_beam_size;
+  auto tokens_count_per_batch = next_tokens_cpu.size() / params_->search.batch_size;
   for (size_t j = 0; j < tokens_count_per_batch; j++) {
     for (size_t i = 0; i < batch_beam_size; i++) {
       next_tokens_[i] = next_tokens_cpu[(i / params_->search.num_beams) * tokens_count_per_batch + j];

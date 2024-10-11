@@ -8,7 +8,7 @@ struct KV_Cache_Combined {
   KV_Cache_Combined(State& state);
 
   void Add();  // Add to state inputs/outputs
-  void Update(std::span<const int32_t> beam_indices, int current_length);
+  void Update(std::span<const int32_t> beam_indices, int total_length);
 
   template <typename ScoreType>
   void PickPastState(std::span<const int32_t> beam_indices, int index);
@@ -19,6 +19,8 @@ struct KV_Cache_Combined {
   const Model& model_{state_.model_};
   int layer_count_;
   size_t input_index_{~0U}, output_index_{~0U};
+
+  bool is_first_update_{true};
 
   std::array<int64_t, 5> shape_;
   ONNXTensorElementDataType type_;

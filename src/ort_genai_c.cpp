@@ -214,7 +214,7 @@ bool OGA_API_CALL OgaGenerator_IsDone(const OgaGenerator* generator) {
   return reinterpret_cast<const Generators::Generator*>(generator)->IsDone();
 }
 
-OgaResult* OGA_API_CALL OgaGenerator_AddInputSequences(OgaGenerator* oga_generator, const OgaSequences* p_sequences) {
+OgaResult* OGA_API_CALL OgaGenerator_AppendTokenSequences(OgaGenerator* oga_generator, const OgaSequences* p_sequences) {
   OGA_TRY
   auto& generator = *reinterpret_cast<Generators::Generator*>(oga_generator);
   auto& params = *generator.state_->params_;
@@ -231,7 +231,7 @@ OgaResult* OGA_API_CALL OgaGenerator_AddInputSequences(OgaGenerator* oga_generat
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGenerator_AddInputTokens(OgaGenerator* oga_generator, int32_t* input_ids, size_t input_ids_count) {
+OgaResult* OGA_API_CALL OgaGenerator_AppendTokens(OgaGenerator* oga_generator, int32_t* input_ids, size_t input_ids_count) {
   OGA_TRY
   auto& generator = *reinterpret_cast<Generators::Generator*>(oga_generator);
   generator.AddTokens(Generators::cpu_span<int32_t>(input_ids, input_ids_count));
@@ -246,7 +246,7 @@ OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator) 
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGenerator_RewindToLength(OgaGenerator* generator, size_t new_length) {
+OgaResult* OGA_API_CALL OgaGenerator_RewindTo(OgaGenerator* generator, size_t new_length) {
   OGA_TRY
   reinterpret_cast<Generators::Generator*>(generator)->RewindToLength(new_length);
   return nullptr;
