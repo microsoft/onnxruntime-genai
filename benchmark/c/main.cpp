@@ -16,6 +16,7 @@
 #include "options.h"
 #include "resource_utils.h"
 
+
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -129,6 +130,19 @@ std::string GeneratePrompt(size_t num_prompt_tokens, const OgaModel& model, cons
   return std::string{tokenizer.Decode(output_sequence_data, output_sequence_length)};
 }
 
+void TimedLoop(OgaGenerator *generator, std::vector<Duration> token_gen_times, std::vector<Duration> sampling_times) {
+  while (!generator->IsDone()) {
+    {
+      Timing token_gen_timing{token_gen_times};
+      generator->ComputeLogits();
+    }
+    {
+      Timing sampling_timing{sampling_times};
+      generator->GenerateNextToken();
+    }
+  }
+}
+
 void RunBenchmark(const benchmark::Options& opts) {
   if (opts.debug) {
     Oga::SetLogBool("enabled", true);
@@ -201,17 +215,7 @@ void RunBenchmark(const benchmark::Options& opts) {
         generator->GenerateNextToken();
       }
 
-      while (!generator->IsDone()) {
-        {
-          Timing token_gen_timing{token_gen_times};
-          generator->ComputeLogits();
-        }
-
-        {
-          Timing sampling_timing{sampling_times};
-          generator->GenerateNextToken();
-        }
-      }
+      TimedLoop(generator.get(), token_gen_times, sampling_times);
     }
   }
 
