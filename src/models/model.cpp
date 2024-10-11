@@ -456,7 +456,6 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 
       if (!disable_graph_capture) {
         session_options.AddConfigEntry("ep.dml.enable_graph_capture", "1");
-        session_options.AddConfigEntry("ep.dml.disable_memory_arena", "1");
       }
 
       session_options.AddConfigEntry("session.use_env_allocators", "1");
