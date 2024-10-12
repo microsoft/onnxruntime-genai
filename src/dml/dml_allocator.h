@@ -26,4 +26,10 @@ struct DmlAllocator : public OrtAllocator {
   const OrtDmlApi* p_dml_api_{};
   Microsoft::WRL::ComPtr<ID3D12Device> d3d12_device_;
   OrtMemoryInfo* memory_info_{};
+
+  struct Bucket {
+    std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> resources;
+  };
+
+  std::vector<Bucket> m_pool;
 };
