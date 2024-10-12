@@ -130,7 +130,7 @@ std::string GeneratePrompt(size_t num_prompt_tokens, const OgaModel& model, cons
   return std::string{tokenizer.Decode(output_sequence_data, output_sequence_length)};
 }
 
-void TimedLoop(OgaGenerator *generator, std::vector<Duration> token_gen_times, std::vector<Duration> sampling_times) {
+void TimedLoop(OgaGenerator *generator, std::vector<Duration>& token_gen_times, std::vector<Duration>& sampling_times) {
   while (!generator->IsDone()) {
     {
       Timing token_gen_timing{token_gen_times};
