@@ -5,16 +5,18 @@
 #include "sequences.h"
 #include "models/model.h"
 #include "search.h"
+#include "cuda/interface.h"
 #if USE_CUDA
 #include "cuda/search_cuda.h"
-#include "cuda/interface.h"
 #include "models/kernels.h"
 #endif
 
 namespace Generators {
 
+#if USE_CUDA
 // TODO: Remove once we remove all dependencies
 void OnCudaError(cudaError_t error) { assert(false); }
+#endif
 
 static bool _ = (Ort::InitApi(), false);
 
@@ -63,8 +65,10 @@ OrtEnv& GetOrtEnv() {
 }
 
 struct GenaiInterfaceImpl : GenaiInterface {
+#if _WIN32
   void* HeapAllocate(size_t size) override { return std::malloc(size); }
   void HeapFree(void* p) override { std::free(p); }
+#endif
 
   Generators::LogItems& GetLogItems() override { return g_log; }
   std::ostream& operator_leftshift(std::ostream& stream, Generators::SGR sgr_code) override { return stream << sgr_code; }
@@ -103,6 +107,7 @@ DeviceInterface& GetCpuDeviceInterface() {
   return g_cpu;
 }
 
+#if USE_CUDA
 CudaInterface* GetCudaInterface() {
 // Load the shared library onnxruntime-genai-cuda.dll
 // This is a workaround to avoid linking the CUDA library to the generator library
@@ -150,6 +155,7 @@ void LaunchCopyCrossQKSingleDecodeStep<float>(cudaStream_t stream, float* cross_
 template <>
 void LaunchFinalizeCrossQK<float>(cudaStream_t stream, int iteration_number, int context_decoding_len, int batch_size, int num_beams, int max_length, int num_alignment_heads, int frames_of_k, const float* cross_qk_buffer_data, float* cross_qk_output, int num_return_sequences, const int* cache_indir_data) { GetCudaInterface()->LaunchFinalizeCrossQK(stream, iteration_number, context_decoding_len, batch_size, num_beams, max_length, num_alignment_heads, frames_of_k, cross_qk_buffer_data, cross_qk_output, num_return_sequences, cache_indir_data); }
 }  // namespace cuda
+#endif
 
 std::string to_string(DeviceType device_type) {
   switch (device_type) {
@@ -344,6 +350,7 @@ TokenSequences Generate(const Model& model, const GeneratorParams& params) {
 
 }  // namespace Generators
 
+#if USE_CUDA
 cudaError_t cudaStreamCreate(cudaStream_t* stream) { return Generators::GetCudaInterface()->cudaStreamCreate(stream); }
 cudaError_t cudaStreamDestroy(cudaStream_t stream) { return Generators::GetCudaInterface()->cudaStreamDestroy(stream); }
 cudaError_t cudaMemcpyAsync(void* dst, const void* src, size_t count, cudaMemcpyKind kind, cudaStream_t stream) { return Generators::GetCudaInterface()->cudaMemcpyAsync(dst, src, count, kind, stream); }
@@ -354,3 +361,4 @@ cudaError_t cudaMalloc(void** ptr, size_t size) { return Generators::GetCudaInte
 cudaError_t cudaFree(void* ptr) { return Generators::GetCudaInterface()->cudaFree(ptr); }
 cudaError_t cudaHostAlloc(void** ptr, size_t size, unsigned int flags) { return Generators::GetCudaInterface()->cudaHostAlloc(ptr, size, flags); }
 cudaError_t cudaFreeHost(void* ptr) { return Generators::GetCudaInterface()->cudaFreeHost(ptr); }
+#endif

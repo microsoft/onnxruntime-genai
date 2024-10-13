@@ -1,6 +1,8 @@
 struct GenaiInterface {
+#if _WIN32
   virtual void* HeapAllocate(size_t size) = 0;
   virtual void HeapFree(void*) = 0;
+#endif
 
   virtual Generators::LogItems& GetLogItems() = 0;
   virtual std::ostream& operator_leftshift(std::ostream& stream, Generators::SGR sgr_code) = 0;
@@ -13,6 +15,7 @@ struct GenaiInterface {
 namespace Generators {
 LogItems& GetLogItems();
 
+#if USE_CUDA
 DeviceInterface& GetCudaDeviceInterface();
 
 struct CudaInterface : DeviceInterface {
@@ -41,5 +44,6 @@ struct CudaInterface : DeviceInterface {
   virtual cudaError_t cudaHostAlloc(void** ptr, size_t size, unsigned int flags) = 0;
   virtual cudaError_t cudaFreeHost(void* ptr) = 0;
 };
+#endif
 
 }  // namespace Generators

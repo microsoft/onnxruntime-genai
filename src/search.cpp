@@ -285,7 +285,7 @@ DeviceMemorySpan<int32_t> BeamSearch_Cpu::GetSequence(size_t index) {
   return beam_scorer_->GetBeamHypotheses(batch_id, beam_id);
 }
 
-// TODO(aciddelgado): my question is, should this return copy or reference?
+// TODO(aciddelgado): my question is, should this return copy or reference? A: A copy, as with DeviceMemorySpan it's like a span
 DeviceMemorySpan<int32_t> BeamSearch_Cpu::GetSequence(size_t batch_id, size_t beam_id) {
   Finalize(params_->search.num_return_sequences);
   return beam_scorer_->GetBeamHypotheses(batch_id, beam_id);
