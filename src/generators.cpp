@@ -111,7 +111,7 @@ CudaInterface* GetCudaInterface() {
     static std::unique_ptr<void, void(*)(void *)> cuda_library{LoadLibrary("onnxruntime-genai-cuda.dll"),
       [](void *h) { FreeLibrary(reinterpret_cast<HMODULE>(h)); }};  
   #else
-    static std::unique_ptr<void, void (*)(void*)> cuda_library {dlopen("libonnxruntime-genai-cuda.so", RTLD_LAZY), dlclose};
+    static std::unique_ptr<void, void (*)(void*)> cuda_library {dlopen("libonnxruntime-genai-cuda.so", RTLD_NOW), dlclose};
   #endif
 
   if (!cuda_library)
