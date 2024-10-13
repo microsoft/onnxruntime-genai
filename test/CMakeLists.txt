@@ -25,6 +25,9 @@ target_link_libraries(unit_tests PRIVATE
   onnxruntime-genai-static
   GTest::gtest_main
 )
+set_target_properties(unit_tests PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai-static>"
+)
 
 if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin"))
 target_link_libraries(unit_tests PRIVATE ${ONNXRUNTIME_LIB})

@@ -65,6 +65,7 @@ void LaunchBeamSearchScorer_Finalize(int batch_size,
                                      std::span<const int32_t> sequences,
                                      int sequence_length,
                                      std::span<BeamHypotheses> beam_hyps_,
+                                     std::span<int32_t> hypothesis_buffer,
                                      std::span<const float> final_beam_scores,
                                      cudaStream_t stream);
 

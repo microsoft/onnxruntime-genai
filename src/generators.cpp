@@ -13,7 +13,7 @@
 
 namespace Generators {
 
-// TODO: Remove
+// TODO: Remove once we remove all dependencies
 void OnCudaError(cudaError_t error) { assert(false); }
 
 static bool _ = (Ort::InitApi(), false);
@@ -63,6 +63,9 @@ OrtEnv& GetOrtEnv() {
 }
 
 struct GenaiInterfaceImpl : GenaiInterface {
+  void* HeapAllocate(size_t size) override { return std::malloc(size); }
+  void HeapFree(void* p) override { std::free(p); }
+
   Generators::LogItems& GetLogItems() override { return g_log; }
   std::ostream& operator_leftshift(std::ostream& stream, Generators::SGR sgr_code) override { return stream << sgr_code; }
   std::ostream& Log(std::string_view label, std::string_view text = {}) override { return Log(label, text); }
@@ -71,12 +74,41 @@ struct GenaiInterfaceImpl : GenaiInterface {
   virtual void DumpSpan(std::ostream& stream, std::span<const int> values) override { return DumpSpan(stream, values); }
 } g_genai;
 
+struct CpuMemory : DeviceMemoryBase {
+  CpuMemory(size_t size) {
+    size_in_bytes_ = size;
+    p_cpu_ = new uint8_t[size_in_bytes_];
+  }
+
+  ~CpuMemory() override {
+    delete[] p_cpu_;
+  }
+
+  const char* GetType() const override { return "cpu"; }
+  bool IsCpuAccessible() const override { return true; }
+  void GetOnCpu() override { assert(false); }  // Should never be called, as p_cpu_ is always valid
+};
+
+struct CpuInterface : DeviceInterface {
+  std::shared_ptr<DeviceMemoryBase> AllocateBase(size_t size, bool cpu_accessible) override {
+    assert(cpu_accessible==true);
+    return std::make_shared<CpuMemory>(size);
+  }
+
+  std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override { return nullptr; }
+  std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override { return nullptr; }
+} g_cpu;
+
+DeviceInterface& GetCpuDeviceInterface() {
+  return g_cpu;
+}
+
 CudaInterface* GetCudaInterface() {
   // Load the shared library onnxruntime-genai-cuda.dll
   // This is a workaround to avoid linking the CUDA library to the generator library
   // The CUDA library is only needed for the CUDA allocator
   #ifdef _WIN32
-    static std::unique_ptr<void, void(*)(void *)> cuda_library{LoadLibrary("C:/code/onnxruntime-genai/build/Windows/Debug/Debug/onnxruntime-genai-cuda.dll"),
+    static std::unique_ptr<void, void(*)(void *)> cuda_library{LoadLibrary("onnxruntime-genai-cuda.dll"),
       [](void *h) { FreeLibrary(reinterpret_cast<HMODULE>(h)); }};  
   #else
     static std::unique_ptr<void, void (*)(void*)> cuda_library {dlopen("libonnxruntime-genai-cuda.so", RTLD_LAZY), dlclose};
@@ -287,7 +319,7 @@ void Generator::GenerateNextToken() {
   }
 }
 
-RoamingArray<int32_t> Generator::GetSequence(size_t index) const {
+DeviceMemorySpan<int32_t> Generator::GetSequence(size_t index) const {
   return search_->GetSequence(index);
 }
 
@@ -300,9 +332,10 @@ TokenSequences Generate(const Model& model, const GeneratorParams& params) {
   }
 
   TokenSequences result;
+
   for (int i = 0; i < params.batch_size * params.search.num_return_sequences; i++) {
     auto sequence = generator->search_->GetSequence(i);
-    auto sequence_cpu = sequence.GetCPU();
+    auto sequence_cpu = sequence.CpuSpan();
 
     auto& v = result.emplace_back();
     v.assign(sequence_cpu.begin(), sequence_cpu.end());

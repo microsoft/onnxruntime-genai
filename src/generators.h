@@ -109,7 +109,7 @@ struct Generator : LeakChecked<Generator> {
   void ComputeLogits();
   void GenerateNextToken();
 
-  RoamingArray<int32_t> GetSequence(size_t index) const;
+  DeviceMemorySpan<int32_t> GetSequence(size_t index) const;
 
   std::shared_ptr<const Model> model_;
   std::unique_ptr<State> state_;

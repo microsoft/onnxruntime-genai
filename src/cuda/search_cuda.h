@@ -12,7 +12,7 @@ struct Search_Cuda : Search {
 
   int GetSequenceLength() const override;
   RoamingArray<int32_t> GetSequenceLengths() override { return sequence_lengths_; }
-  RoamingArray<int32_t> GetSequence(size_t index) override { return sequences_.GetSequence(index); }
+  DeviceMemorySpan<int32_t> GetSequence(size_t index) override { return sequences_.GetSequence(index); }
 
   bool IsDone() const {
     cudaStreamSynchronize(params_->cuda_stream);
@@ -69,8 +69,8 @@ struct BeamSearch_Cuda : Search_Cuda {
   RoamingArray<int32_t> GetNextTokens() override;
   RoamingArray<int32_t> GetNextIndices() override;
   // In Beam Search there are batch_size * num_beams sequences. Index is batch_id * num_beams + beam_id... Easier to use the other version.
-  RoamingArray<int32_t> GetSequence(size_t index) override;
-  RoamingArray<int32_t> GetSequence(size_t batch_id, size_t beam_id);
+  DeviceMemorySpan<int32_t> GetSequence(size_t index) override;
+  DeviceMemorySpan<int32_t> GetSequence(size_t batch_id, size_t beam_id);
 
   void SelectTop() override;
 

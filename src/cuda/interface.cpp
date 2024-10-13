@@ -1,4 +1,5 @@
 #include "generators.h"
+#include "ort_genai_c.h" // For OGA_EXPORT
 #include "interface.h"
 #include "..\search.h"
 #include "search_cuda.h"
@@ -6,40 +7,51 @@
 
 namespace Generators {
 
-struct HostMemory : DeviceMemory {
-  HostMemory(size_t size) : DeviceMemory{size} {
-    cudaMallocHost(&p_, size);
+struct HostMemory : DeviceMemoryBase {
+  HostMemory(size_t size) {
+    size_in_bytes_ = size;
+    ::cudaMallocHost(&p_device_, size);
+    p_cpu_ = p_device_; // CPU & GPU both access the same memory here
   }
 
-  ~HostMemory() {
-    cudaFreeHost(p_);
+  ~HostMemory() override {
+    ::cudaFreeHost(p_device_);
   }
 
   const char* GetType() const override { return "cuda_cpu"; }
   bool IsCpuAccessible() const override { return true; }
+  void GetOnCpu() override { assert(false); } // Should never be called, as p_cpu_ is always valid
 };
 
-struct GpuMemory : DeviceMemory {
-  GpuMemory(size_t size) : DeviceMemory{size} {
-    ::cudaMalloc(&p_, size);
+struct GpuMemory : DeviceMemoryBase {
+  GpuMemory(size_t size) {
+    size_in_bytes_ = size;
+    ::cudaMalloc(&p_device_, size);
   }
 
-  ~GpuMemory() {
-    ::cudaFree(p_);
+  ~GpuMemory() override {
+    ::cudaFree(p_device_);
+    if (p_cpu_)
+      ::cudaFreeHost(p_cpu_);
   }
 
   const char* GetType() const override { return "cuda"; }
   bool IsCpuAccessible() const override { return false; }
+  void GetOnCpu() override {
+    assert(!p_cpu_);
+    ::cudaMallocHost(&p_cpu_, size_in_bytes_);
+    ::cudaMemcpy(p_cpu_, p_device_, size_in_bytes_, ::cudaMemcpyDeviceToHost);
+  }
 };
 
 struct CudaInterfaceImpl : CudaInterface {
   ~CudaInterfaceImpl() {
   }
 
-  std::unique_ptr<DeviceMemory> Allocate(size_t size, bool cpu_accessible) override {
+  std::shared_ptr<DeviceMemoryBase> AllocateBase(size_t size, bool cpu_accessible) override {
     if (cpu_accessible)
-      return std::make_unique<HostMemory>(size);
-    return std::make_unique<DeviceMemory>(size);
+      return std::make_shared<HostMemory>(size);
+    return std::make_shared<GpuMemory>(size);
   }
 
   std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override {
@@ -137,9 +149,9 @@ struct CudaInterfaceImpl : CudaInterface {
   cudaError_t cudaFreeHost(void* ptr) override {
     return ::cudaFreeHost(ptr);
   }
-};
+} g_cuda_device;
 
-
+DeviceInterface& GetCudaDeviceInterface() { return g_cuda_device; }
 GenaiInterface* gp_genai{};
 
 LogItems& GetLogItems() { return gp_genai->GetLogItems(); }
@@ -153,8 +165,15 @@ void DumpSpan<int>(std::ostream& stream, std::span<const int> values) { return g
 
 }  // namespace Generators
 
+#ifdef _WIN32
+// Override default new/delete so that we match the host's allocator
+_Ret_notnull_ _Post_writable_byte_size_(n) void* operator new(size_t n) { return Generators::gp_genai->HeapAllocate(n); }
+void operator delete(void* p) noexcept { Generators::gp_genai->HeapFree(p); }
+void operator delete(void* p, size_t /*size*/) noexcept { Generators::gp_genai->HeapFree(p); }
+#endif
+
 extern "C" {
-__declspec(dllexport) Generators::CudaInterface* CreateCudaInterface(GenaiInterface* p_genai) {
+OGA_EXPORT Generators::CudaInterface* CreateCudaInterface(GenaiInterface* p_genai) {
   Generators::gp_genai=p_genai;
   return new Generators::CudaInterfaceImpl();
 }

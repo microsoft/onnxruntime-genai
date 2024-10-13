@@ -13,7 +13,7 @@ struct Search : LeakChecked<Search> {
   virtual RoamingArray<int32_t> GetNextIndices() = 0;
   virtual RoamingArray<int32_t> GetSequenceLengths() = 0;
   virtual int GetSequenceLength() const = 0;
-  virtual RoamingArray<int32_t> GetSequence(size_t index) = 0;
+  virtual DeviceMemorySpan<int32_t> GetSequence(size_t index) = 0;
 
   virtual void SetLogits(RoamingArray<float> logits) = 0;
   virtual bool IsDone() const = 0;
@@ -35,7 +35,7 @@ struct Search_Cpu : Search {
 
   int GetSequenceLength() const override;
   RoamingArray<int32_t> GetSequenceLengths() override { return sequence_lengths_; }
-  RoamingArray<int32_t> GetSequence(size_t index) override { return sequences_.GetSequence(index); }
+  DeviceMemorySpan<int32_t> GetSequence(size_t index) override { return sequences_.GetSequence(index); }
 
   bool IsDone() const override { return done_; }
   void SetLogits(RoamingArray<float> logits) override;
@@ -90,8 +90,8 @@ struct BeamSearch_Cpu : Search_Cpu {
   RoamingArray<int32_t> GetNextTokens() override;
   RoamingArray<int32_t> GetNextIndices() override;
   // In Beam Search there are batch_size * num_beams sequences. Index is batch_id * num_beams + beam_id... Easier to use the other version.
-  RoamingArray<int32_t> GetSequence(size_t index) override;
-  RoamingArray<int32_t> GetSequence(size_t batch_id, size_t beam_id);
+  DeviceMemorySpan<int32_t> GetSequence(size_t index) override;
+  DeviceMemorySpan<int32_t> GetSequence(size_t batch_id, size_t beam_id);
 
   bool IsDone() const override;
 

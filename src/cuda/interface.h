@@ -1,41 +1,21 @@
 struct GenaiInterface {
+  virtual void* HeapAllocate(size_t size) = 0;
+  virtual void HeapFree(void*) = 0;
+
   virtual Generators::LogItems& GetLogItems() = 0;
-  virtual std::ostream& operator_leftshift(std::ostream& stream, Generators::SGR sgr_code)=0;
+  virtual std::ostream& operator_leftshift(std::ostream& stream, Generators::SGR sgr_code) = 0;
   virtual std::ostream& Log(std::string_view label, std::string_view text = {}) = 0;
 
-  virtual void DumpSpan(std::ostream& stream, std::span<const float> values)=0;
+  virtual void DumpSpan(std::ostream& stream, std::span<const float> values) = 0;
   virtual void DumpSpan(std::ostream& stream, std::span<const int> values) = 0;
 };
 
 namespace Generators {
 LogItems& GetLogItems();
 
-struct DeviceMemory {
-  virtual ~DeviceMemory();
-  virtual const char* GetType() const = 0;  // Returns "cuda" "cuda_cpu" "directml" etc
-  virtual bool IsCpuAccessible() const = 0;
+DeviceInterface& GetCudaDeviceInterface();
 
-  void* p_ {};
-  size_t size_in_bytes_{};
-};
-
-template<typename T>
-struct TDeviceMemory : DeviceMemory {
-  size_t Size() { return size_in_bytes_ / sizeof(T); }
-  std::span<T> Span() { return std::span<T>(Get(), Size()); }
-};
-
-struct CudaInterface {
-  virtual ~CudaInterface() { }
-
-  virtual std::unique_ptr<DeviceMemory> Allocate(size_t size, bool cpu_accessible) = 0;
-  template <typename T>
-  std::unique_ptr<TDeviceMemory<T>> Allocate(size_t count, bool cpu_accessible, bool device_accessible) {
-    return std::unique_ptr<TDeviceMemory<T>>(static_cast<TDeviceMemory<T>*>(Allocate(sizeof(T) * count, cpu_accessible, device_accessible).release()));
-  }
-
-  virtual std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) = 0;
-  virtual std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) = 0;
+struct CudaInterface : DeviceInterface {
 
   virtual void Int32ToInt64(const int32_t* input, int64_t* output, int count, cudaStream_t stream) = 0;
   virtual void Fp16ToFp32(const uint16_t* input, float* output, int count, cudaStream_t stream) = 0;

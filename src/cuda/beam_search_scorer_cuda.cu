@@ -108,7 +108,8 @@ __global__ void BeamSearchScorer_Process(BeamScorerState& state_cpu,
           continue;
         }
 
-        // Clone the sequence and append to buffer. // TODO(aciddelgado): why do we need to clone the sequence here?
+        // Clone the sequence and append to buffer.
+        // TODO(aciddelgado): why do we need to clone the sequence here? A: Because we overwrite the sequences with other beams
         const int32_t* src = sequences_buffer + batch_beam_idx * state.max_length_;
         auto clone = hypothesis_buffer_ + atomicAdd(&state.hypothesis_buffer_used_, sequence_length);
 
@@ -244,6 +245,7 @@ __global__ void BeamSearchScorer_Finalize(BeamScorerState& state,
                                           const int32_t* sequences_buffer,
                                           int sequence_length,
                                           BeamHypotheses* beam_hyps_,
+                                          int32_t* hypothesis_buffer_,
                                           const float* final_beam_scores) {
   int batch_index = blockIdx.x * blockDim.x + threadIdx.x;
   if (batch_index >= state.batch_size_)
@@ -255,8 +257,14 @@ __global__ void BeamSearchScorer_Finalize(BeamScorerState& state,
     for (size_t beam_index = 0; beam_index < state.num_beams_; beam_index++) {
       size_t batch_beam_index = batch_index * state.num_beams_ + beam_index;
       float final_score = final_beam_scores[batch_beam_index];
-      auto final_tokens = sequences_buffer + batch_beam_index * state.max_length_;
-      beam_hyp.Add(final_tokens, sequence_length, final_score);
+
+      // Clone the sequence and append to buffer.
+      const int32_t* src = sequences_buffer + batch_beam_index * state.max_length_;
+      auto clone = hypothesis_buffer_ + atomicAdd(&state.hypothesis_buffer_used_, sequence_length);
+
+      for (unsigned i = 0; i < sequence_length; i++)
+        clone[i] = src[i];
+      beam_hyp.Add(clone, sequence_length, final_score);
     }
   }
 }
@@ -266,12 +274,14 @@ void LaunchBeamSearchScorer_Finalize(int batch_size,
                                      std::span<const int32_t> sequences,
                                      int sequence_length,
                                      std::span<BeamHypotheses> beam_hyps,
+                                     std::span<int32_t> hypothesis_buffer,
                                      std::span<const float> final_beam_scores,
                                      cudaStream_t stream) {
   BeamSearchScorer_Finalize<<<1, batch_size, 0, stream>>>(state,
                                                           sequences.data(),
                                                           sequence_length,
                                                           beam_hyps.data(),
+                                                          hypothesis_buffer.data(),
                                                           final_beam_scores.data());
 }
 
