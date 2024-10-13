@@ -51,7 +51,6 @@ BeamSearchScorer::BeamSearchScorer(const GeneratorParams& parameters)
       eos_token_id_{parameters.config.model.eos_token_id},
       early_stopping_{parameters.search.early_stopping},
       not_done_count_{parameters.batch_size} {
-
   auto& device = GetCpuDeviceInterface();
 
   size_t const batch_beam_size = static_cast<size_t>(batch_size_) * num_beams_;
@@ -197,6 +196,5 @@ DeviceMemorySpan<int32_t> BeamSearchScorer::GetBeamHypotheses(size_t batch_id, s
   auto hypothesis = beam_hyps_[batch_id].GetHypothesis(beam_id);
   return hypothesis_buffer_ptr_->subspan_cpu(hypothesis);
 }
-
 
 }  // namespace Generators

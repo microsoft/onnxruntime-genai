@@ -91,7 +91,7 @@ struct CpuMemory : DeviceMemoryBase {
 
 struct CpuInterface : DeviceInterface {
   std::shared_ptr<DeviceMemoryBase> AllocateBase(size_t size, bool cpu_accessible) override {
-    assert(cpu_accessible==true);
+    assert(cpu_accessible == true);
     return std::make_shared<CpuMemory>(size);
   }
 
@@ -104,20 +104,20 @@ DeviceInterface& GetCpuDeviceInterface() {
 }
 
 CudaInterface* GetCudaInterface() {
-  // Load the shared library onnxruntime-genai-cuda.dll
-  // This is a workaround to avoid linking the CUDA library to the generator library
-  // The CUDA library is only needed for the CUDA allocator
-  #ifdef _WIN32
-    static std::unique_ptr<void, void(*)(void *)> cuda_library{LoadLibrary("onnxruntime-genai-cuda.dll"),
-      [](void *h) { FreeLibrary(reinterpret_cast<HMODULE>(h)); }};  
-  #else
-    static std::unique_ptr<void, void (*)(void*)> cuda_library {dlopen("libonnxruntime-genai-cuda.so", RTLD_NOW), dlclose};
-  #endif
+// Load the shared library onnxruntime-genai-cuda.dll
+// This is a workaround to avoid linking the CUDA library to the generator library
+// The CUDA library is only needed for the CUDA allocator
+#ifdef _WIN32
+  static std::unique_ptr<void, void (*)(void*)> cuda_library{LoadLibrary("onnxruntime-genai-cuda.dll"),
+                                                             [](void* h) { FreeLibrary(reinterpret_cast<HMODULE>(h)); }};
+#else
+  static std::unique_ptr<void, void (*)(void*)> cuda_library{dlopen("libonnxruntime-genai-cuda.so", RTLD_NOW), dlclose};
+#endif
 
   if (!cuda_library)
     return nullptr;
 
-  CudaInterface* CreateCudaInterface(GenaiInterface* p);
+  CudaInterface* CreateCudaInterface(GenaiInterface * p);
   static std::unique_ptr<CudaInterface> cuda_interface{[] {
 #ifdef _WIN32
     auto create_cuda_fn = reinterpret_cast<decltype(&CreateCudaInterface)>(GetProcAddress(reinterpret_cast<HMODULE>(cuda_library.get()), "CreateCudaInterface"));
@@ -125,8 +125,7 @@ CudaInterface* GetCudaInterface() {
     auto create_cuda_fn = reinterpret_cast<decltype(&CreateCudaInterface)>(dlsym(cuda_library.get(), "CreateCudaInterface"));
 #endif
     return create_cuda_fn(&g_genai);
-    }()
-  };
+  }()};
 
   return cuda_interface.get();
 }
@@ -135,20 +134,20 @@ namespace cuda {
 void LaunchInt32ToInt64(const int32_t* input, int64_t* output, int count, cudaStream_t stream) { GetCudaInterface()->Int32ToInt64(input, output, count, stream); }
 void LaunchFp16ToFp32(const uint16_t* input, float* output, int count, cudaStream_t stream) { GetCudaInterface()->Fp16ToFp32(input, output, count, stream); }
 void LaunchFp32ToFp16(const float* input, uint16_t* output, int count, cudaStream_t stream) { GetCudaInterface()->Fp32ToFp16(input, output, count, stream); }
-template<>
+template <>
 void Launch_UpdatePositionIds<int32_t>(int32_t* position_ids, int batch_beam_size, cudaStream_t stream) { GetCudaInterface()->Launch_UpdatePositionIds(position_ids, batch_beam_size, stream); }
-template<>
+template <>
 void Launch_UpdatePositionIds<int64_t>(int64_t* position_ids, int batch_beam_size, cudaStream_t stream) { GetCudaInterface()->Launch_UpdatePositionIds(position_ids, batch_beam_size, stream); }
-template<>
+template <>
 void Launch_UpdateAttentionMask<int32_t>(int32_t* mask_data, const int32_t* old_mask_data, int batch_beam_size, int current_length, int max_length, bool update_only, cudaStream_t stream) { GetCudaInterface()->Launch_UpdateAttentionMask(mask_data, old_mask_data, batch_beam_size, current_length, max_length, update_only, stream); }
 template <>
 void Launch_UpdateAttentionMask<int64_t>(int64_t* mask_data, const int64_t* old_mask_data, int batch_beam_size, int current_length, int max_length, bool update_only, cudaStream_t stream) { GetCudaInterface()->Launch_UpdateAttentionMask(mask_data, old_mask_data, batch_beam_size, current_length, max_length, update_only, stream); }
 void LaunchHandleEOSArray(float* batch_logits, int batch_beam_size, int vocab_size, const int32_t* eos_token_ids, int eos_token_ids_count, cudaStream_t stream) { GetCudaInterface()->LaunchHandleEOSArray(batch_logits, batch_beam_size, vocab_size, eos_token_ids, eos_token_ids_count, stream); }
 void UpdateCacheIndirectionKernelLauncher(int32_t* tgt_indir_cache, const int32_t* src_indir_cache, const int32_t* beam_ids, int batch_size, int beam_width, int input_seq_length, int max_seq_length, int current_length, cudaStream_t stream) { GetCudaInterface()->UpdateCacheIndirectionKernelLauncher(tgt_indir_cache, src_indir_cache, beam_ids, batch_size, beam_width, input_seq_length, max_seq_length, current_length, stream); }
 void ReorderPastStatesKernelLauncher(void* out_buffer, const void* in_buffer, int batch_size, int num_heads, int max_length, int head_size, int chunk_size, cudaStream_t stream) { GetCudaInterface()->ReorderPastStatesKernelLauncher(out_buffer, in_buffer, batch_size, num_heads, max_length, head_size, chunk_size, stream); }
-template<>
+template <>
 void LaunchCopyCrossQKSingleDecodeStep<float>(cudaStream_t stream, float* cross_qk_buffer_data, float** qk_layer_pointers, int token_index, int batch_beam_size, int num_layers, int num_heads, int num_alignment_heads, const int* alignment_heads, int frames, int max_length) { GetCudaInterface()->LaunchCopyCrossQKSingleDecodeStep(stream, cross_qk_buffer_data, qk_layer_pointers, token_index, batch_beam_size, num_layers, num_heads, num_alignment_heads, alignment_heads, frames, max_length); }
-template<>
+template <>
 void LaunchFinalizeCrossQK<float>(cudaStream_t stream, int iteration_number, int context_decoding_len, int batch_size, int num_beams, int max_length, int num_alignment_heads, int frames_of_k, const float* cross_qk_buffer_data, float* cross_qk_output, int num_return_sequences, const int* cache_indir_data) { GetCudaInterface()->LaunchFinalizeCrossQK(stream, iteration_number, context_decoding_len, batch_size, num_beams, max_length, num_alignment_heads, frames_of_k, cross_qk_buffer_data, cross_qk_output, num_return_sequences, cache_indir_data); }
 }  // namespace cuda
 

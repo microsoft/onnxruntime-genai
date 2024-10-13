@@ -1,5 +1,5 @@
 #include "generators.h"
-#include "ort_genai_c.h" // For OGA_EXPORT
+#include "ort_genai_c.h"  // For OGA_EXPORT
 #include "interface.h"
 #include "..\search.h"
 #include "search_cuda.h"
@@ -11,7 +11,7 @@ struct HostMemory : DeviceMemoryBase {
   HostMemory(size_t size) {
     size_in_bytes_ = size;
     ::cudaMallocHost(&p_device_, size);
-    p_cpu_ = p_device_; // CPU & GPU both access the same memory here
+    p_cpu_ = p_device_;  // CPU & GPU both access the same memory here
   }
 
   ~HostMemory() override {
@@ -20,7 +20,7 @@ struct HostMemory : DeviceMemoryBase {
 
   const char* GetType() const override { return "cuda_cpu"; }
   bool IsCpuAccessible() const override { return true; }
-  void GetOnCpu() override { assert(false); } // Should never be called, as p_cpu_ is always valid
+  void GetOnCpu() override { assert(false); }  // Should never be called, as p_cpu_ is always valid
 };
 
 struct GpuMemory : DeviceMemoryBase {
@@ -156,9 +156,25 @@ GenaiInterface* gp_genai{};
 
 LogItems& GetLogItems() { return gp_genai->GetLogItems(); }
 std::ostream& operator<<(std::ostream& stream, SGR sgr_code) { return gp_genai->operator_leftshift(stream, sgr_code); }
-std::ostream& Log(std::string_view label, std::string_view text) { return gp_genai->Log(label, text);}
+std::ostream& Log(std::string_view label, std::string_view text) { return gp_genai->Log(label, text); }
 
-template<>
+// Duplicate of logging.cpp function
+std::ostream& Log(std::string_view label, const char* fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  va_list args_copy;
+  va_copy(args_copy, args);
+  size_t len = vsnprintf(0, 0, fmt, args_copy);
+  if (len <= 0) {
+    throw std::runtime_error("Invalid format");
+  }
+  std::unique_ptr<char[]> buf(new char[len + 1]);
+  vsnprintf(buf.get(), len + 1, fmt, args);
+  va_end(args);
+  return Log(label, std::string(buf.get(), buf.get() + len));
+}
+
+template <>
 void DumpSpan<float>(std::ostream& stream, std::span<const float> values) { return gp_genai->DumpSpan(stream, values); }
 template <>
 void DumpSpan<int>(std::ostream& stream, std::span<const int> values) { return gp_genai->DumpSpan(stream, values); }
@@ -174,7 +190,7 @@ void operator delete(void* p, size_t /*size*/) noexcept { Generators::gp_genai->
 
 extern "C" {
 OGA_EXPORT Generators::CudaInterface* CreateCudaInterface(GenaiInterface* p_genai) {
-  Generators::gp_genai=p_genai;
+  Generators::gp_genai = p_genai;
   return new Generators::CudaInterfaceImpl();
 }
 }

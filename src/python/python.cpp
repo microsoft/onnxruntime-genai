@@ -203,7 +203,7 @@ struct PyRoamingArray : RoamingArray<T> {
   pybind11::array_t<T> py_cpu_array_;
 };
 
-template<typename T>
+template <typename T>
 struct PyDeviceMemorySpan {
   void operator=(DeviceMemorySpan<T> span) {
     span_ = std::move(span);
@@ -215,7 +215,7 @@ struct PyDeviceMemorySpan {
     return py_cpu_array_;
   }
 
-private:
+ private:
   DeviceMemorySpan<T> span_;
   pybind11::array_t<T> py_cpu_array_;
 };
@@ -320,7 +320,7 @@ struct PyGenerator {
   }
 
   pybind11::array_t<int32_t> GetSequence(int index) {
-    py_sequence_=generator_->search_->GetSequence(index);
+    py_sequence_ = generator_->search_->GetSequence(index);
     return py_sequence_.GetNumpy();
   }
 

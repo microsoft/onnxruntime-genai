@@ -16,7 +16,6 @@ LogItems& GetLogItems();
 DeviceInterface& GetCudaDeviceInterface();
 
 struct CudaInterface : DeviceInterface {
-
   virtual void Int32ToInt64(const int32_t* input, int64_t* output, int count, cudaStream_t stream) = 0;
   virtual void Fp16ToFp32(const uint16_t* input, float* output, int count, cudaStream_t stream) = 0;
   virtual void Fp32ToFp16(const float* input, uint16_t* output, int count, cudaStream_t stream) = 0;
