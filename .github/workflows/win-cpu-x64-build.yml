@@ -100,8 +100,8 @@ jobs:
 
     - name: Run tests
       run: |
-        copy $env:GITHUB_WORKSPACE\ort\lib\* .\$env:binaryDir\test\Release
-        & .\$env:binaryDir\test\Release\unit_tests.exe
+        copy $env:GITHUB_WORKSPACE\ort\lib\* .\$env:binaryDir\Release
+        & .\$env:binaryDir\Release\unit_tests.exe
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v3
