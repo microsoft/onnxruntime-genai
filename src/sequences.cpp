@@ -45,7 +45,7 @@ void Sequences::AppendNextTokenToSequences(std::span<const int32_t> batch_beam_i
 
   for (ptrdiff_t i = 0; i < batch_beam_size_; i++) {
     int batch_beam_index = batch_beam_indices[i];
-    std::span<const int32_t> source = sequences_span.subspan(batch_beam_index * max_length_, current_length_);
+    std::span<const int32_t> source = sequences_span.subspan(static_cast<size_t>(batch_beam_index) * max_length_, current_length_);
     std::span<int32_t> target = sequences_next_span.subspan(i * max_length_, current_length_);
     copy(source, target);
 

@@ -100,5 +100,5 @@ jobs:
 
     - name: Run tests
       run: |
-        copy $env:GITHUB_WORKSPACE\ort\lib\* $env:GITHUB_WORKSPACE\$env:binaryDir\test\Release
-        & .\$env:binaryDir\test\Release\unit_tests.exe
+        copy $env:GITHUB_WORKSPACE\ort\lib\* $env:GITHUB_WORKSPACE\$env:binaryDir\Release
+        & .\$env:binaryDir\Release\unit_tests.exe
