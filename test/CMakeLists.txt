@@ -104,7 +104,25 @@ if (IOS)
     MACOSX_BUNDLE_SHORT_VERSION_STRING ${VERSION_STR}
     XCODE_ATTRIBUTE_ENABLE_BITCODE "NO")
 
-  xctest_add_test(xctest.unit_tests unit_tests_xc)
+  # This is a workaround for an Xcode 16 / CMake issue:
+  #   error: Multiple commands produce '<build>/Debug/Debug-iphonesimulator/onnxruntime_test_all.app/PlugIns'
+  #       note: CreateBuildDirectory <build>/Debug/Debug-iphonesimulator/onnxruntime_test_all.app/PlugIns
+  #       note: Target 'onnxruntime_test_all' (project 'onnxruntime') has create directory command with output
+  #             '<build>/Debug/Debug-iphonesimulator/onnxruntime_test_all.app/PlugIns'
+  #
+  # It seems related to the test target (e.g., unit_tests_xc) LIBRARY_OUTPUT_DIRECTORY property getting set
+  # to "$<TARGET_BUNDLE_CONTENT_DIR:${testee}>/PlugIns" in xctest_add_bundle():
+  # https://github.com/Kitware/CMake/blob/9c4a0a9ff09735b847bbbc38caf6da7f6c7238f2/Modules/FindXCTest.cmake#L159-L168
+  #
+  # This is the related CMake issue: https://gitlab.kitware.com/cmake/cmake/-/issues/26301
+  #
+  # Unsetting LIBRARY_OUTPUT_DIRECTORY avoids the build error.
+  set_property(TARGET unit_tests_xc PROPERTY LIBRARY_OUTPUT_DIRECTORY)
+
+  # Don't bother calling xctest_add_test() because we don't use CTest to run tests on iOS.
+  # Instead, we can call 'xcodebuild test-without-building' and specify a '-destination' referring to an iOS
+  # simulator or device.
+  # xctest_add_test(xctest.unit_tests unit_tests_xc)
 endif()
 
 include(GoogleTest)
