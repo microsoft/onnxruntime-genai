@@ -20,6 +20,8 @@ This folder contains the model builder for quickly creating optimized and quanti
     - [Use 8 Bits Quantization in QMoE](#use-8-bits-quantization-in-qmoe)
     - [Hugging Face Authentication](#hugging-face-authentication)
     - [Use QDQ Pattern for Quantization](#use-qdq-pattern-for-quantization)
+    - [Quant Provider](#quant-provider)
+    - [nvidia_awq calibration](#nvidia_awq calibration)
   - [Unit Testing Models](#unit-testing-models)
     - [Option 1: Use the model builder directly](#option-1-use-the-model-builder-directly)
     - [Option 2: Edit the config.json file](#option-2-edit-the-configjson-file-on-disk-and-then-run-the-model-builder)
@@ -214,6 +216,27 @@ python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o p
 
 # From source:
 python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options use_qdq=1
+```
+
+
+### Quant Provider
+This option is to select the specific INT4 quantization algo to use. Option avalable are nvidia_awq(Nvidia modelopt awq implimentation) and default
+
+```
+# From wheel:
+python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e execution_provider -c cache_dir_to_store_temp_files --extra_options quant_provider=nvidia_awq use_qdq=True
+# From source:
+python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options quant_provider=nvidia_awq use_qdq=True
+```
+
+### nvidia_awq calibration
+nvidia_awq support two options, awq implementation and weight clipping. choices {awq, awq_clip}
+
+```
+# From wheel:
+python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e execution_provider -c cache_dir_to_store_temp_files --extra_options quant_provider=nvidia_awq use_qdq=True nvidia_awq_calibration=awq
+# From source:
+python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options quant_provider=nvidia_awq use_qdq=True nvidia_awq_calibration=awq
 ```
 
 ### Unit Testing Models

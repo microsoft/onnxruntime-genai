@@ -8,7 +8,7 @@ Run this script to create the desired ONNX model.
 """
 
 from onnx import helper, numpy_helper, TensorProto, external_data_helper, save_model
-from onnxruntime.quantization.matmul_4bits_quantizer import MatMul4BitsQuantizer, QuantFormat
+from onnxruntime.quantization.matmul_4bits_quantizer import MatMul4BitsQuantizer, QuantFormat, NVAWQWeightOnlyQuantConfig
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 import numpy as np
 import torch
@@ -45,6 +45,8 @@ class Model:
         self.filename = extra_options["filename"] if "filename" in extra_options else "model.onnx"
         self.hf_token = parse_hf_token(extra_options.get("hf_token", "true"))
         self.extra_options = extra_options
+        self.quant_provider = extra_options["quant_provider"] if "quant_provider" in extra_options else "default"
+        self.nvidia_awq_calibration = extra_options["nvidia_awq_calibration"] if "nvidia_awq_calibration" in extra_options else "awq"
 
         self.inputs = []
         self.outputs = []
@@ -413,16 +415,74 @@ class Model:
         )
 
     def to_int4(self, model):
-        quant = MatMul4BitsQuantizer(
+        if (self.quant_provider == "nvidia_awq"):
+            import tempfile
+            assert self.use_qdq, "self.use_qdq should always be True for nvidia_awq. Set from cmd args"
+            temp_dir = tempfile.gettempdir()
+            out_dir = os.path.join(temp_dir, "temp")
+            os.makedirs(out_dir, exist_ok=True)
+
+            out_path = os.path.join(out_dir, self.filename)
+            data_path = os.path.join(out_dir, os.path.basename(out_path) + ".data")
+
+            if os.path.exists(out_path):
+                print(f"Overwriting {out_path}")
+                os.remove(out_path)
+            if os.path.exists(data_path):
+                print(f"Overwriting {data_path}")
+                os.remove(data_path)
+
+            try:
+                save_model(
+                    model,
+                    out_path,
+                    save_as_external_data=True,
+                    all_tensors_to_one_file=True,
+                    location=os.path.basename(data_path),
+                    size_threshold=0,
+                    convert_attribute=False,
+                )
+
+                if self.nvidia_awq_calibration == "awq":
+                    calibration_method = "awq_lite"
+                elif self.nvidia_awq_calibration == "awq_clip":
+                    calibration_method = "awq_clip"
+                else:
+                    assert False, f"Unexpected calibration method: {self.nvidia_awq_calibration}"
+
+                quant_config = NVAWQWeightOnlyQuantConfig(
+                    tokenizer_dir=self.model_name_or_path,
+                    calibration_method=calibration_method,
+                )
+
+                quant = MatMul4BitsQuantizer(
+                    model=out_path,
+                    block_size=self.quant_attrs["int4"]["block_size"],
+                    algo_config=quant_config,
+                )
+                quant.process()
+
+                return quant.model.model
+
+            finally:
+                if os.path.exists(out_path):
+                    print(f"Deleting temporary file {out_path}")
+                    os.remove(out_path)
+
+                if os.path.exists(data_path):
+                    print(f"Deleting temporary file {data_path}")
+                    os.remove(data_path)
+        else:
+            quant = MatMul4BitsQuantizer(
             model=model,
             block_size=self.quant_attrs["int4"]["block_size"],
             is_symmetric=True,
             accuracy_level=self.quant_attrs["int4"]["accuracy_level"],
             nodes_to_exclude=[],
             quant_format=QuantFormat.QDQ if self.use_qdq else QuantFormat.QOperator,
-        )
-        quant.process()
-        return quant.model.model
+            )
+            quant.process()
+            return quant.model.model
 
     def clear_field(self, proto, field):
         proto.ClearField(field)
@@ -2941,6 +3001,8 @@ def get_args():
                 hf_token = false/token: Use this to disable authentication with Hugging Face or provide a custom authentication token that differs from the one stored in your environment. Default behavior is to use the authentication token stored by `huggingface-cli login`.
                     If you have already authenticated via `huggingface-cli login`, you do not need to use this flag because Hugging Face has already stored your authentication token for you.
                 use_qdq = 1 : Use the QDQ decomposition for quantized MatMul instead of the MatMulNBits operator.
+                quant_provider = {nvidia_awq, .., ..} : Quantization provider- You can choose between NVIDIA's TensorRT Modelopt and other available option.
+                nvidia_awq_calibration: nvidia_awq Support two options, awq implementation and weight clipping. choices {awq, awq_clip}
             """),
     )
 
