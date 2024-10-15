@@ -8,7 +8,7 @@ Run this script to create the desired ONNX model.
 """
 
 from onnx import helper, numpy_helper, TensorProto, external_data_helper, save_model
-from onnxruntime.quantization.matmul_4bits_quantizer import MatMul4BitsQuantizer, QuantFormat, NVAWQWeightOnlyQuantConfig
+from onnxruntime.quantization.matmul_4bits_quantizer import MatMul4BitsQuantizer, QuantFormat
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 import numpy as np
 import torch
@@ -416,10 +416,11 @@ class Model:
 
     def to_int4(self, model):
         if (self.quant_provider == "nvidia_awq"):
+            # Nvidia ModelOpt only accepts an ONNX model path as input so process is
+            # hf --> fp16 model.onnx file (store at temp) --> pass fp16 model.onnx to modelopt
             import tempfile
-            assert self.use_qdq, "self.use_qdq should always be True for nvidia_awq. Set from cmd args"
-            temp_dir = tempfile.gettempdir()
-            out_dir = os.path.join(temp_dir, "temp")
+            from onnxruntime.quantization.matmul_4bits_quantizer import NVAWQWeightOnlyQuantConfig
+            out_dir = os.path.join(tempfile.gettempdir(), "temp")
             os.makedirs(out_dir, exist_ok=True)
 
             out_path = os.path.join(out_dir, self.filename)
@@ -457,7 +458,6 @@ class Model:
 
                 quant = MatMul4BitsQuantizer(
                     model=out_path,
-                    block_size=self.quant_attrs["int4"]["block_size"],
                     algo_config=quant_config,
                 )
                 quant.process()
