@@ -64,7 +64,7 @@ def gen_file_from_template(
         output.write(content)
 
 
-def filter_files(all_file_patterns: List[str], excluded_file_patterns: List[str]):
+def filter_files(subpath: str, all_file_patterns: List[str], excluded_file_patterns: List[str]):
     """
     Filters file paths based on inclusion and exclusion patterns
 
@@ -74,18 +74,23 @@ def filter_files(all_file_patterns: List[str], excluded_file_patterns: List[str]
     :return The filtered list of file paths
     """
     # get all files matching the patterns in all_file_patterns
-    all_files = [str(path.relative_to(repo_root)) for pattern in all_file_patterns for path in repo_root.glob(pattern)]
+    if subpath:
+        src_root = repo_root /  subpath
+    else:
+        src_root = repo_root
+
+    all_files = [str(path.relative_to(src_root)) for pattern in all_file_patterns for path in src_root.glob(pattern)]
 
     # get all files matching the patterns in excluded_file_patterns
     exclude_files = [
-        str(path.relative_to(repo_root)) for pattern in excluded_file_patterns for path in repo_root.glob(pattern)
+        str(path.relative_to(src_root)) for pattern in excluded_file_patterns for path in src_root.glob(pattern)
     ]
 
     # return the difference
     return list(set(all_files) - set(exclude_files))
 
 
-def copy_repo_relative_to_dir(patterns: List[str], dest_dir: pathlib.Path):
+def copy_repo_relative_to_dir(subpath: str, patterns: List[str], dest_dir: pathlib.Path):
     """
     Copies file paths relative to the repo root to a directory.
     The given paths or path patterns are relative to the repo root, and the
@@ -94,9 +99,13 @@ def copy_repo_relative_to_dir(patterns: List[str], dest_dir: pathlib.Path):
     :param patterns The paths or path patterns relative to the repo root.
     :param dest_dir The destination directory.
     """
-    paths = [path for pattern in patterns for path in repo_root.glob(pattern)]
+    if subpath:
+        src_root = repo_root /  subpath
+    else:
+        src_root = repo_root
+    paths = [path for pattern in patterns for path in src_root.glob(pattern)]
     for path in paths:
-        repo_relative_path = path.relative_to(repo_root)
+        repo_relative_path = path.relative_to(src_root)
         dst_path = dest_dir / repo_relative_path
         os.makedirs(dst_path.parent, exist_ok=True)
         shutil.copy(path, dst_path)

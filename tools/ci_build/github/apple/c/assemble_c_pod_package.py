@@ -11,6 +11,8 @@ import sys
 _script_dir = pathlib.Path(__file__).parent.resolve(strict=True)
 sys.path.append(str(_script_dir.parent))
 
+# the license file
+license_file = "LICENSE"
 
 from package_assembly_utils import (  # noqa: E402
     PackageVariant,
@@ -68,7 +70,7 @@ def assemble_c_pod_package(
     # copy the necessary files to the staging directory
     shutil.copytree(framework_dir, staging_dir / framework_dir.name, dirs_exist_ok=True, symlinks=True)
     shutil.copytree(public_headers_dir, staging_dir / public_headers_dir.name, dirs_exist_ok=True, symlinks=True)
-    copy_repo_relative_to_dir(["LICENSE"], staging_dir)
+    copy_repo_relative_to_dir(None, [license_file], staging_dir)
 
     (ios_deployment_target, macos_deployment_target, weak_framework) = get_podspec_values(framework_info)
 
@@ -78,7 +80,7 @@ def assemble_c_pod_package(
         # By default, we build both "iphoneos" and "iphonesimulator" architectures, and the deployment target should be the same between these two.
         "IOS_DEPLOYMENT_TARGET": ios_deployment_target,
         "MACOSX_DEPLOYMENT_TARGET": macos_deployment_target,
-        "LICENSE_FILE": "LICENSE",
+        "LICENSE_FILE": license_file,
         "NAME": pod_name,
         "ORTGENAI_C_FRAMEWORK": framework_dir.name,
         "ORTGENAI_C_HEADERS_DIR": public_headers_dir.name,

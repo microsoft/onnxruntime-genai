@@ -54,7 +54,7 @@ def get_pod_files(package_variant: PackageVariant):
     """
     filtered_pod_files = {}
     for key in all_objc_files:
-        filtered_pod_files[key] = filter_files(all_objc_files[key], [])
+        filtered_pod_files[key] = filter_files("src", all_objc_files[key], [])
     return filtered_pod_files
 
 
@@ -95,11 +95,13 @@ def assemble_objc_pod_package(
 
     pod_files = get_pod_files(package_variant)
 
+    copy_repo_relative_to_dir(None, [license_file], staging_dir)
+
     # copy the necessary files to the staging directory
-    need_copy = [license_file, *pod_files["source_files"], *pod_files["test_source_files"]]
+    need_copy = [*pod_files["source_files"], *pod_files["test_source_files"]]
     if "test_resource_files" in pod_files:
         need_copy.append(*pod_files["test_resource_files"])
-    copy_repo_relative_to_dir(need_copy, staging_dir,)
+    copy_repo_relative_to_dir("src", need_copy, staging_dir)
 
     # generate the podspec file from the template
 
