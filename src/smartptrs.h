@@ -60,10 +60,10 @@ struct DeviceMemorySpan {
   size_t begin_, length_;  // Subspan of p_device_memory_, relative to original memory block
 };
 
-template<typename T>
+template <typename T>
 void copy(DeviceMemorySpan<const T> source, DeviceMemorySpan<T> dest) {
   assert(source.size() == dest.size());
-  dest.p_device_memory_->CopyFromDevice(dest.begin, *source.p_device_memory_, source.begin, source.size*sizeof(T));
+  dest.p_device_memory_->CopyFromDevice(dest.begin, *source.p_device_memory_, source.begin, source.size * sizeof(T));
 }
 
 struct DeviceInterface {
