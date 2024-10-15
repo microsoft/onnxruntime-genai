@@ -7,9 +7,9 @@ parameters:
   default: 'Release'
 
 stages:
-- stage: Build_iOS_CocoaPods_Archive
+- stage: Build_MacOS_iOS_CocoaPods_Archive
   jobs:
-  - template: jobs/android-java-api-aar.yml
+  - template: jobs/macos-ios-cocoapods-packaging-job.yml
     parameters:
       ort_version: ${{ parameters.ort_version }}
       build_config: ${{ parameters.build_config }}
