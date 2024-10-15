@@ -52,10 +52,11 @@ def test_greedy_search(test_data_path, relative_model_path):
     search_params.set_search_options(do_sample=False, max_length=10)
     input_ids_shape = [2, 4]
     batch_size = input_ids_shape[0]
+    search_params.batch_size
 
     generator = og.Generator(model, search_params)
+    generator.append_tokens(np.array([[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32))
     while not generator.is_done():
-        generator.compute_logits()
         generator.generate_next_token()
 
     expected_sequence = np.array(
@@ -67,10 +68,6 @@ def test_greedy_search(test_data_path, relative_model_path):
     )
     for i in range(batch_size):
         assert np.array_equal(expected_sequence[i], generator.get_sequence(i))
-
-    sequences = model.generate(search_params)
-    for i in range(len(sequences)):
-        assert sequences[i] == expected_sequence[i].tolist()
 
 
 # TODO: CUDA pipelines use python3.6 and do not have a way to download models since downloading models
@@ -147,14 +144,16 @@ def test_batching(device, phi2_for):
     ]
 
     params = og.GeneratorParams(model)
-    params.set_search_options(max_length=20)  # To run faster
-    params.input_ids = tokenizer.encode_batch(prompts)
+    params.set_search_options(max_length=20, batch_size=len(prompts))  # To run faster
 
     if device == "dml":
         params.try_graph_capture_with_max_batch_size(len(prompts))
 
-    output_sequences = model.generate(params)
-    print(tokenizer.decode_batch(output_sequences))
+    generator = og.Generator(model, params)
+    while not generator.is_done():
+        generator.generate_next_token()
+    for i in range(len(prompts)):
+        print(tokenizer.decode(generator.get_sequence(0)))
 
 
 def test_logging():
@@ -201,12 +200,13 @@ def test_get_output(test_data_path, relative_model_path):
     model = og.Model(model_path)
 
     search_params = og.GeneratorParams(model)
-    search_params.input_ids = np.array(
+    input_ids = np.array(
         [[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32
     )
-    search_params.set_search_options(do_sample=False, max_length=10)
+    search_params.set_search_options(do_sample=False, max_length=10, batch_size=input_ids.shape[0])
 
     generator = og.Generator(model, search_params)
+    generator.append_tokens(input_ids)
 
     # check prompt
     # full logits has shape [2, 4, 1000]. Sample 1 for every 200 tokens and the expected sampled logits has shape [2, 4, 5]
@@ -319,16 +319,20 @@ def test_pipeline_model(test_data_path, phi2_for, relative_model_path):
     ]
 
     params = og.GeneratorParams(model)
-    params.set_search_options(max_length=20)
-    params.input_ids = tokenizer.encode_batch(prompts)
+    params.set_search_options(max_length=20, batch_size=len(prompts))
 
-    output_sequences = model.generate(params)
+    generator = og.Generator(model, params)
+    generator.append_tokens(tokenizer.encode_batch(prompts))
+    while not generator.is_done():
+        generator.generate_next_token()
+
     expected_output = [
         'This is a test.\n        # TOD import * doct proofingrad',
         'Rats are awesome pets!\n    """\n\n',
         'The quick brown fox jumps over the lazy dog.\n    """\n\n'
     ]
-    assert tokenizer.decode_batch(output_sequences) == expected_output
+    for i in range(len(prompts)):
+        assert np.array_equal(expected_output[i], tokenizer.decode(generator.get_sequence(i)))
 
 
 @pytest.mark.parametrize("relative_model_path", [Path("vision-preprocessing")])

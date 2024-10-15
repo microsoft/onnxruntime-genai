@@ -20,14 +20,24 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             return NativeMethods.OgaGenerator_IsDone(_generatorHandle);
         }
 
-        public void ComputeLogits()
+        public void AppendTokens(ReadOnlySpan<int> tokens)
         {
-            Result.VerifySuccess(NativeMethods.OgaGenerator_ComputeLogits(_generatorHandle));
+            Result.VerifySuccess(NativeMethods.OgaGenerator_AppendTokens(_generatorHandle, tokens.ToArray(), (UIntPtr)tokens.Length));
+        }
+
+        public void AppendTokenSequences(Sequences sequences)
+        {
+            Result.VerifySuccess(NativeMethods.OgaGenerator_AppendTokenSequences(_generatorHandle, sequences.Handle));
         }
 
         public void GenerateNextToken()
         {
             Result.VerifySuccess(NativeMethods.OgaGenerator_GenerateNextToken(_generatorHandle));
+        }
+
+        public void RewindTo(ulong index)
+        {
+            Result.VerifySuccess(NativeMethods.OgaGenerator_RewindTo(_generatorHandle, (UIntPtr)index));
         }
 
         public ReadOnlySpan<int> GetSequence(ulong index)

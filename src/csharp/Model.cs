@@ -18,13 +18,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         internal IntPtr Handle { get { return _modelHandle; } }
 
-        public Sequences Generate(GeneratorParams generatorParams)
-        {
-            IntPtr nativeSequences = IntPtr.Zero;
-            Result.VerifySuccess(NativeMethods.OgaGenerate(_modelHandle, generatorParams.Handle, out nativeSequences));
-            return new Sequences(nativeSequences);
-        }
-
         ~Model()
         {
             Dispose(false);
