@@ -95,10 +95,14 @@ def _build_aar(args):
     build_config = args.config
     aar_dir = intermediates_dir / "aar" / build_config
     jnilibs_dir = intermediates_dir / "jnilibs" / build_config
-    base_build_command = ([sys.executable, str(BUILD_PY),
-                           f"--config={build_config}",  f"--ort_home={str(args.ort_home)}"] +
-                          build_settings["build_params"])
 
+    base_build_command = [sys.executable, str(BUILD_PY),  f"--config={build_config}"]
+                          
+    if args.ort_home:
+        base_build_command.append(f"--ort_home={args.ort_home}")
+
+    base_build_command += build_settings["build_params"]
+        
     header_files_path = None
 
     # Build binary for each ABI, one by one
@@ -181,7 +185,7 @@ def parse_args():
         help="Configuration to build.",
     )
 
-    parser.add_argument("--ort_home", type=Path, default=REPO_ROOT / "ort",
+    parser.add_argument("--ort_home", type=Path, default=None,
                         help="Path to an unzipped onnxruntime AAR.")
 
     parser.add_argument(
