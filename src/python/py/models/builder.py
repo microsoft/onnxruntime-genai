@@ -1426,15 +1426,13 @@ class Model:
         # Make RotaryEmbedding nodes
         cos_cache_name, sin_cache_name = "", ""
         if self.attention_attrs["use_rotemb_in_attn"]:
-            rotary_emb = attention.rotary_emb if hasattr(attention, "rotary_emb") else kwargs.get("model_rotary_emb", None)
-            cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches(rotary_emb)
+            cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches(attention.rotary_emb)
         else:
-            rotary_emb = attention.rotary_emb if hasattr(attention, "rotary_emb") else kwargs.get("model_rotary_emb", None)
             q_rotary_name = f"/model/layers.{layer_id}/attn/q_rotary/RotaryEmbedding"
-            self.make_rotary_embedding(rotary_emb, q_rotary_name, root_input=q_input_to_attention, position_ids=kwargs.get("position_ids", "position_ids"))
+            self.make_rotary_embedding(attention.rotary_emb, q_rotary_name, root_input=q_input_to_attention, position_ids=kwargs.get("position_ids", "position_ids"))
             q_input_to_attention = f"{q_rotary_name}/output_0"
             k_rotary_name = f"/model/layers.{layer_id}/attn/k_rotary/RotaryEmbedding"
-            self.make_rotary_embedding(rotary_emb, k_rotary_name, root_input=k_input_to_attention, position_ids=kwargs.get("position_ids", "position_ids"))
+            self.make_rotary_embedding(attention.rotary_emb, k_rotary_name, root_input=k_input_to_attention, position_ids=kwargs.get("position_ids", "position_ids"))
             k_input_to_attention = f"{k_rotary_name}/output_0"
 
         # Make repeat KV nodes (Note: `repeat_kv` needs to be kept since GroupQueryAttention isn't supported for FP32 CUDA)
@@ -1801,11 +1799,11 @@ class Model:
             self.make_node('Where', inputs=where_inputs, outputs=[where_output], name=where_name)
             self.make_value_info(where_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
 
-    def make_layer(self, layer_id, layer, **kwargs):
+    def make_layer(self, layer_id, layer):
         # Each LLM decoder layer is typically defined as:
         # input_layernorm --> attention --> MLP --> output_layernorm
         self.make_layernorm(layer_id, layer.input_layernorm, skip=not self.layernorm_attrs["first_layernorm"], simple=self.layernorm_attrs["simple"], location="input")
-        self.make_attention(layer_id, layer.self_attn, root_input=self.layernorm_attrs["output_0"], **kwargs)
+        self.make_attention(layer_id, layer.self_attn, root_input=self.layernorm_attrs["output_0"])
         self.make_layernorm(layer_id, layer.post_attention_layernorm, skip=True, simple=self.layernorm_attrs["simple"], location="post_attention")
         self.make_mlp(layer_id, layer.mlp, root_input=self.layernorm_attrs["output_0"])
 
@@ -1862,13 +1860,12 @@ class Model:
                 # Each decoder layer of model
                 print(f"Reading decoder layer {self.layer_id}")
 
-                # Some model stores rotary_emb at model class instead of decoder layer.
-                model_rotary_emb = None
+                # Some model stores rotary_emb at model class instead of attention objects.
                 if hasattr(model, "model"):
                     if hasattr(model.model, "rotary_emb"):
-                        model_rotary_emb = model.model.rotary_emb
+                        self.attention_attrs["model_rotary_emb"] = model.model.rotary_emb
 
-                self.make_layer(self.layer_id, module, model_rotary_emb=model_rotary_emb)
+                self.make_layer(self.layer_id, module)
                 self.layer_id += 1
 
             elif self.layer_id == self.num_layers and self.has_final_norm(module, model):
@@ -2365,7 +2362,7 @@ class PhiModel(Model):
     def make_rotary_embedding(self, rotemb, name, root_input, **kwargs):
         super().make_rotary_embedding(rotemb, name, root_input, num_heads=self.rotemb_attrs["num_heads"], rotary_embedding_dim=self.rotemb_attrs["rotary_embedding_dim"], **kwargs)
 
-    def make_layer(self, layer_id, layer, **kwargs):
+    def make_layer(self, layer_id, layer):
         # Each Phi decoder layer is defined as:
         # input_layernorm --> attention --> MLP --> residual_add
         self.make_layernorm(layer_id, layer.input_layernorm, skip=not self.layernorm_attrs["first_layernorm"], simple=self.layernorm_attrs["simple"], location="input")
@@ -2398,7 +2395,7 @@ class Gemma2Model(GemmaModel):
         self.attention_attrs["scale"] = config.query_pre_attn_scalar ** -0.5
         self.lm_head_attrs["scale"] = config.final_logit_softcapping
 
-    def make_layer(self, layer_id, layer, **kwargs):
+    def make_layer(self, layer_id, layer):
         # Gemma2 decoder layer is typically defined as:
         # input_layernorm --> attention --> post_attention_layernorm --> pre_ffn_layernorm --> MLP --> post_ffn_layernorm
         self.make_layernorm(layer_id, layer.input_layernorm, skip=not self.layernorm_attrs["first_layernorm"], simple=self.layernorm_attrs["simple"], location="input")
@@ -2497,6 +2494,11 @@ class NemotronModel(LlamaModel):
 
         # Assign output 0 of previous MatMul as skip input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = f"{down_name}/output_0"
+
+    def make_attention(self, layer_id, attention, root_input, **kwargs):
+        # Pytorch has rotary_emb stored at model class and not at attention object
+        attention.rotary_emb = self.attention_attrs["model_rotary_emb"]
+        return super().make_attention(layer_id, attention, root_input, **kwargs)
 
     def make_rotary_embedding(self, rotemb, name, root_input, **kwargs):
         num_heads = self.num_kv_heads if "k_rotary" in name else self.num_attn_heads
@@ -2797,7 +2799,7 @@ class Phi3MoE128KModel(MistralModel):
 
         self.make_rotary_embedding_multi_cache()
 
-    def make_layer(self, layer_id, layer, **kwargs):
+    def make_layer(self, layer_id, layer):
         # Each LLM decoder layer is typically defined as:
         # input_layernorm --> attention --> MLP --> output_layernorm
         self.make_layernorm(layer_id, layer.input_layernorm, skip=not self.layernorm_attrs["first_layernorm"], simple=self.layernorm_attrs["simple"], location="input")
