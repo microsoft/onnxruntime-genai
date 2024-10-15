@@ -1,7 +1,9 @@
 Pod::Spec.new do |s|
-  s.name	            = "@NAME@"
+  s.name	              = "@NAME@"
   s.version	            = "@VERSION@"
-  s.summary             = "@SUMMARY@"
+  s.summary             = "@SUMMARY@
+  s.description         = "@DESCRIPTION@"
+
   s.homepage            = "https://github.com/microsoft/onnxruntime-genai"
   s.license	            = { :type => "MIT", :file => "@LICENSE_FILE@" }
   s.author              = {"ONNX Runtime" => "onnxruntime@microsoft.com"}
@@ -20,6 +22,12 @@ Pod::Spec.new do |s|
       "OTHER_CPLUSPLUSFLAGS" => "-fvisibility=hidden -fvisibility-inlines-hidden",
     }
 
+    include_dirs = [
+      @INCLUDE_DIR_LIST@
+    ].map { |relative_include_dir|
+      '"${PODS_TARGET_SRCROOT}/' + relative_include_dir + '"'
+    }
+
     core.public_header_files = [
       @PUBLIC_HEADER_FILE_LIST@
     ]
@@ -31,10 +39,6 @@ Pod::Spec.new do |s|
     core.test_spec "Tests" do |test|
       test.source_files = [
         @TEST_SOURCE_FILE_LIST@
-      ]
-
-      test.resources = [
-        @TEST_RESOURCE_FILE_LIST@
       ]
     end
   end

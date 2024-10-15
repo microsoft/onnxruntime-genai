@@ -38,6 +38,7 @@ def assemble_c_pod_package(
     public_headers_dir: pathlib.Path,
     framework_dir: pathlib.Path,
     package_variant: PackageVariant,
+    ort_version: str
 ):
     """
     Assembles the files for the C/C++ pod package in a staging directory.
@@ -79,10 +80,11 @@ def assemble_c_pod_package(
         "MACOSX_DEPLOYMENT_TARGET": macos_deployment_target,
         "LICENSE_FILE": "LICENSE",
         "NAME": pod_name,
-        "ORT_C_FRAMEWORK": framework_dir.name,
-        "ORT_C_HEADERS_DIR": public_headers_dir.name,
+        "ORTGENAI_C_FRAMEWORK": framework_dir.name,
+        "ORTGENAI_C_HEADERS_DIR": public_headers_dir.name,
         "SUMMARY": pod_config["summary"],
         "VERSION": pod_version,
+        "ORT_VERSION": ort_version,
         "WEAK_FRAMEWORK": weak_framework,
     }
 
@@ -132,6 +134,9 @@ def parse_args():
         "--variant", choices=PackageVariant.all_variant_names(), required=True, help="Pod package variant."
     )
 
+    parser.add_argument(
+        "--ort_version", required=True, help="The ORT version to depend on."
+    )
     return parser.parse_args()
 
 
@@ -145,6 +150,7 @@ def main():
         public_headers_dir=args.public_headers_dir,
         framework_dir=args.framework_dir,
         package_variant=PackageVariant[args.variant],
+        ort_version=args.ort_version
     )
 
     return 0

@@ -1,0 +1,5 @@
+{
+    "name": "onnxruntime-genai-objc",
+    "summary": "ONNX Runtime GenAI Objective-C Pod",
+    "description": "A pod for the ONNX Runtime GenAI Objective-C API."
+}

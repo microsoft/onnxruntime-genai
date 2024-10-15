@@ -54,7 +54,7 @@ def get_pod_files(package_variant: PackageVariant):
     """
     filtered_pod_files = {}
     for key in all_objc_files:
-        filtered_pod_files[key] = filter_files(all_objc_files[key])
+        filtered_pod_files[key] = filter_files(all_objc_files[key], [])
     return filtered_pod_files
 
 
@@ -63,13 +63,13 @@ def get_pod_config_file(package_variant: PackageVariant):
     Gets the pod configuration file path for the given package variant.
     """
     if package_variant == PackageVariant.Full:
-        return _script_dir / "onnxruntime-objc.config.json"
+        return _script_dir / "onnxruntime-genai-objc.config.json"
     else:
         raise ValueError(f"Unhandled package variant: {package_variant}")
 
 
 def assemble_objc_pod_package(
-    staging_dir: pathlib.Path, pod_version: str, framework_info_file: pathlib.Path, package_variant: PackageVariant
+    staging_dir: pathlib.Path, pod_version: str, framework_info_file: pathlib.Path, package_variant: PackageVariant, ort_version: str
 ):
     """
     Assembles the files for the Objective-C pod package in a staging directory.
@@ -96,10 +96,10 @@ def assemble_objc_pod_package(
     pod_files = get_pod_files(package_variant)
 
     # copy the necessary files to the staging directory
-    copy_repo_relative_to_dir(
-        [license_file, *pod_files["source_files"], *pod_files["test_source_files"], *pod_files["test_resource_files"]],
-        staging_dir,
-    )
+    need_copy = [license_file, *pod_files["source_files"], *pod_files["test_source_files"]]
+    if "test_resource_files" in pod_files:
+        need_copy.append(*pod_files["test_resource_files"])
+    copy_repo_relative_to_dir(need_copy, staging_dir,)
 
     # generate the podspec file from the template
 
@@ -119,9 +119,10 @@ def assemble_objc_pod_package(
         "PUBLIC_HEADER_FILE_LIST": path_patterns_as_variable_value(pod_files["public_header_files"]),
         "SOURCE_FILE_LIST": path_patterns_as_variable_value(pod_files["source_files"]),
         "SUMMARY": pod_config["summary"],
-        "TEST_RESOURCE_FILE_LIST": path_patterns_as_variable_value(pod_files["test_resource_files"]),
+        # "TEST_RESOURCE_FILE_LIST": path_patterns_as_variable_value(pod_files["test_resource_files"]),
         "TEST_SOURCE_FILE_LIST": path_patterns_as_variable_value(pod_files["test_source_files"]),
         "VERSION": pod_version,
+        "ORT_VERSION": ort_version
     }
 
     podspec_template = _script_dir / "objc.podspec.template"
@@ -157,7 +158,9 @@ def parse_args():
     parser.add_argument(
         "--variant", choices=PackageVariant.release_variant_names(), required=True, help="Pod package variant."
     )
-
+    parser.add_argument(
+        "--ort_version", required=True, help="The ORT version to depend on."
+    )
     return parser.parse_args()
 
 

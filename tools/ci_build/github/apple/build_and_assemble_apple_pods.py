@@ -81,6 +81,10 @@ def parse_args():
         help="Pass an argument through to build_apple_framework.py. This may be specified multiple times.",
     )
 
+    parser.add_argument(
+        "--ort_version", required=True, help="The ORT version to depend on."
+    )
+
     args = parser.parse_args()
 
     return args
@@ -149,9 +153,10 @@ def main():
             staging_dir=c_pod_staging_dir,
             pod_version=args.pod_version,
             framework_info_file=framework_info_file,
-            framework_dir=build_dir / "framework_out" / "onnxruntime.xcframework",
+            framework_dir=build_dir / "framework_out" / "onnxruntime-genai.xcframework",
             public_headers_dir=build_dir / "framework_out" / "Headers",
             package_variant=package_variant,
+            ort_version=args.ort_version
         )
 
         if args.test:
@@ -167,6 +172,7 @@ def main():
             pod_version=args.pod_version,
             framework_info_file=framework_info_file,
             package_variant=package_variant,
+            ort_version=args.ort_version
         )
 
         if args.test:
