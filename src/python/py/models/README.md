@@ -21,7 +21,7 @@ This folder contains the model builder for quickly creating optimized and quanti
     - [Hugging Face Authentication](#hugging-face-authentication)
     - [Use QDQ Pattern for Quantization](#use-qdq-pattern-for-quantization)
     - [Quant Provider](#quant-provider)
-    - [nvidia_awq calibration](#nvidia_awq calibration)
+    - [nvidia awq calibration](#nvidia_awq calibration)
   - [Unit Testing Models](#unit-testing-models)
     - [Option 1: Use the model builder directly](#option-1-use-the-model-builder-directly)
     - [Option 2: Edit the config.json file](#option-2-edit-the-configjson-file-on-disk-and-then-run-the-model-builder)
@@ -229,7 +229,7 @@ python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o p
 python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options quant_provider=nvidia_awq use_qdq=True
 ```
 
-### nvidia_awq calibration
+### nvidia awq calibration
 nvidia_awq support two options, awq implementation and weight clipping. choices {awq, awq_clip}
 
 ```
