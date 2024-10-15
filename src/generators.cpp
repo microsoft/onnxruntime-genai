@@ -10,6 +10,7 @@
 #include "cuda/search_cuda.h"
 #include "models/kernels.h"
 #endif
+#include <cstdarg>
 
 #if _WIN32
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
