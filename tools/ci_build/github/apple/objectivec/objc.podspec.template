@@ -1,7 +1,7 @@
 Pod::Spec.new do |s|
-  s.name	              = "@NAME@"
-  s.version	            = "@VERSION@"
-  s.summary             = "@SUMMARY@
+  s.name                = "@NAME@"
+  s.version             = "@VERSION@"
+  s.summary             = "@SUMMARY@"
   s.description         = "@DESCRIPTION@"
 
   s.homepage            = "https://github.com/microsoft/onnxruntime-genai"
@@ -17,10 +17,6 @@ Pod::Spec.new do |s|
     core.dependency "@C_POD_NAME@", "#{s.version}"
     core.requires_arc   = true
     core.compiler_flags = "-std=c++17", "-fobjc-arc-exceptions", "-Wall", "-Wextra", "-Werror"
-    core.pod_target_xcconfig = {
-      "HEADER_SEARCH_PATHS" => include_dirs.join(" "),
-      "OTHER_CPLUSPLUSFLAGS" => "-fvisibility=hidden -fvisibility-inlines-hidden",
-    }
 
     include_dirs = [
       @INCLUDE_DIR_LIST@
@@ -41,6 +37,11 @@ Pod::Spec.new do |s|
         @TEST_SOURCE_FILE_LIST@
       ]
     end
+
+    core.pod_target_xcconfig = {
+      "HEADER_SEARCH_PATHS" => include_dirs.join(" "),
+      "OTHER_CPLUSPLUSFLAGS" => "-fvisibility=hidden -fvisibility-inlines-hidden",
+    }
   end
   s.dependency 'onnxruntime-objc', '~> @ORT_VERSION@'
 end

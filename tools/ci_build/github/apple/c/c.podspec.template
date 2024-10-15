@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
-  s.name	            = "@NAME@"
-  s.version	            = "@VERSION@"
+  s.name                = "@NAME@"
+  s.version             = "@VERSION@"
   s.summary             = "@SUMMARY@"
   s.homepage            = "https://github.com/microsoft/onnxruntime-genai"
   s.license	            = { :type => "MIT", :file => "@LICENSE_FILE@" }
