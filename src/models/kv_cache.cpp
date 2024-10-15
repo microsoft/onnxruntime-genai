@@ -267,6 +267,27 @@ void KV_Cache::RewindPastTensorsTo(size_t index) {
       if (model_.device_type_ == DeviceType::CUDA) {
         cudaMemcpyAsync(past_data, present_data, new_length_x_head_size * sizeof(T), cudaMemcpyDeviceToDevice, model_.cuda_stream_);
       } else
+#elif USE_DML
+      if (model_.device_type_ == DeviceType::DML) {
+        ComPtr<ID3D12Resource> source_resource;
+        Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, present->GetTensorMutableRawData(), &source_resource));
+
+        ComPtr<ID3D12Resource> target_resource;
+        Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, past->GetTensorMutableRawData(), &target_resource));
+
+        uint64_t source_offset = j * old_length_x_head_size * sizeof(T);
+        uint64_t target_offset = j * new_length_x_head_size * sizeof(T);
+        uint64_t size_in_bytes = new_length_x_head_size * sizeof(T);
+
+        model_.GetDmlExecutionContext()->CopyBufferRegion(
+            target_resource.Get(),
+            target_offset,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            source_resource.Get(),
+            source_offset,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            size_in_bytes);
+      } else
 #endif
       {
         copy(std::span<const T>(present_data, new_length_x_head_size), std::span<T>(past_data, new_length_x_head_size));

@@ -113,9 +113,9 @@ void PositionInputs::RewindTo(size_t index) {
   // Rewind the mask input to a previous state
   } else if (has_mask_input_) {
     if (attention_mask_shape_[0] == 1)
-#if USE_CUDA
+#if USE_CUDA || USE_DML
       RewindMask(index);
-    else 
+    else
 #endif
       throw std::runtime_error("PositionInputs::RewindTo - Unsupported batch size");
   }
@@ -234,18 +234,18 @@ void PositionInputs::UpdatePositionIDs(int total_length, int new_kv_length) {
   // Support batch_size == 1 only with current length > 0 and new kv length > 1
   if (position_ids_shape_[0] != 1 && !(total_length == 0 || new_kv_length == 1))
     throw std::runtime_error("PositionInputs::UpdatePositionIDs - batch_size must be 1 for continuous decoding.");
-  // Doesn't support DML at the moment
-  if (model_.device_type_ == DeviceType::DML)
-    throw std::runtime_error("PositionInputs::UpdatePositionIDs - DML not supported for continuous decoding.");
   // Reallocate position_ids when new_kv_length changes
   if (position_ids_shape_[1] != new_kv_length) {
     position_ids_shape_[1] = new_kv_length;
     if (!sb_position_ids_) {
-      position_ids_ = OrtValue::CreateTensor(model_.allocator_cpu_, position_ids_shape_, type_);
+      position_ids_ = OrtValue::CreateTensor(model_.allocator_device_, position_ids_shape_, type_);
     } else {
 #if USE_CUDA
       position_ids_ = sb_position_ids_->CreateTensorOnStaticBuffer(position_ids_shape_, type_);
       assert(model_.device_type_ == DeviceType::CUDA);
+#elif USE_DML
+      position_ids_ = sb_position_ids_->CreateTensorOnStaticBuffer(position_ids_shape_, type_);
+      assert(model_.device_type_ == DeviceType::DML);
 #endif
     }
     state_.inputs_[posid_input_index_] = position_ids_.get();
@@ -261,12 +261,35 @@ void PositionInputs::UpdatePositionIDs(int total_length, int new_kv_length) {
       break;
     }
 #if USE_CUDA
-    case DeviceType::CUDA:
+    case DeviceType::CUDA: {
       if (type_ == Ort::TypeToTensorType<int32_t>)
         cuda::Launch_UpdatePositionIds(position_ids_->GetTensorMutableData<int32_t>(), total_length, new_kv_length, model_.cuda_stream_);
       else
         cuda::Launch_UpdatePositionIds(position_ids_->GetTensorMutableData<int64_t>(), total_length, new_kv_length, model_.cuda_stream_);
       break;
+    }
+#elif USE_DML
+    case DeviceType::DML: {
+      ComPtr<ID3D12Resource> target_resource;
+      Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, position_ids_->GetTensorMutableRawData(), &target_resource));
+
+      // Lazily create the kernel only the first time it's needed
+      if (!dml_update_position_ids_kernel_) {
+        dml_update_position_ids_kernel_ = DmlIncrementValuesKernel(
+            model_.GetD3D12Device(),
+            model_.GetDmlExecutionContext(),
+            static_cast<uint32_t>(total_length),
+            static_cast<uint32_t>(new_kv_length),
+            type_,
+            target_resource.Get());
+      }
+
+      // Execute the cached command list
+      ComPtr<ID3D12Fence> fence;
+      uint64_t completion_value;
+      model_.GetDmlExecutionContext()->ExecuteCommandList(dml_update_position_ids_kernel_->GetCommandList(), &fence, &completion_value);
+      break;
+    }
 #endif
     default:
       throw std::runtime_error("PositionIDs::Update - Unsupported device type");
@@ -403,9 +426,6 @@ void PositionInputs::UpdateAttentionMask(int total_length, int new_kv_length) {
   // Support batch_size == 1 only with current length > 0 and new kv length > 1
   if (position_ids_shape_[0] != 1 && !(total_length == 0 || new_kv_length == 1))
     throw std::runtime_error("PositionInputs::UpdatePositionIDs - batch_size must be 1 for continuous decoding.");
-  // Doesn't support DML at the moment
-  if (model_.device_type_ == DeviceType::DML)
-    throw std::runtime_error("PositionInputs::UpdatePositionIDs - DML not supported for continuous decoding.");
   // Update attention mask
   if (sb_attention_mask_ && is_first_mask_update_) {
 #if USE_CUDA
@@ -432,6 +452,9 @@ void PositionInputs::UpdateAttentionMask(int total_length, int new_kv_length) {
                       sizeof(int64_t) * (max_length - past_length),
                       model_.cuda_stream_);
     }
+#elif USE_DML
+    attention_mask_shape_[1] = state_.params_->search.max_length;
+    attention_mask_ = sb_attention_mask_->CreateTensorOnStaticBuffer(attention_mask_shape_, type_);
 #endif
   } else if (!sb_attention_mask_) {
     attention_mask_shape_[1] = total_length;
@@ -462,6 +485,29 @@ void PositionInputs::UpdateAttentionMask(int total_length, int new_kv_length) {
                                          update_static,
                                          model_.cuda_stream_);
       }
+      break;
+    }
+#elif USE_DML
+    case DeviceType::DML: {
+      ComPtr<ID3D12Resource> attention_mask_resource;
+      Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, attention_mask_->GetTensorMutableRawData(), &attention_mask_resource));
+
+      // Lazily create the kernel only the first time it's needed
+      if (!dml_update_mask_kernel_) {
+        dml_update_mask_kernel_ = DmlUpdateMaskKernel(
+            model_.GetD3D12Device(),
+            model_.GetDmlExecutionContext(),
+            1, // only support batch_size == 1
+            static_cast<uint32_t>(attention_mask_shape_[1]), // max_length
+            type_,
+            total_length,
+            attention_mask_resource.Get());
+      }
+
+      // Execute the cached command list
+      ComPtr<ID3D12Fence> fence;
+      uint64_t completion_value;
+      model_.GetDmlExecutionContext()->ExecuteCommandList(dml_update_mask_kernel_->GetCommandList(), &fence, &completion_value);
       break;
     }
 #endif
@@ -592,6 +638,28 @@ void PositionInputs::RewindMask(size_t index) {
                       sizeof(int64_t) * (max_length - past_length),
                       model_.cuda_stream_);
     }
+  }
+}
+#elif USE_DML
+void PositionInputs::RewindMask(size_t index) {
+  if (sb_attention_mask_ && !is_first_mask_update_) {
+    int past_length = static_cast<int>(index);
+    int max_length = static_cast<int>(state_.params_->search.max_length);
+    ComPtr<ID3D12Resource> attention_mask_resource;
+    Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, attention_mask_->GetTensorMutableRawData(), &attention_mask_resource));
+
+    dml_update_mask_kernel_ = DmlUpdateMaskKernel(
+        model_.GetD3D12Device(),
+        model_.GetDmlExecutionContext(),
+        static_cast<uint32_t>(attention_mask_shape_[0]),
+        static_cast<uint32_t>(attention_mask_shape_[1]),
+        type_,
+        past_length,
+        attention_mask_resource.Get());
+
+    ComPtr<ID3D12Fence> fence;
+    uint64_t completion_value;
+    model_.GetDmlExecutionContext()->ExecuteCommandList(dml_update_mask_kernel_->GetCommandList(), &fence, &completion_value);
   }
 }
 #endif
