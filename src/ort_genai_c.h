@@ -253,6 +253,8 @@ OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsDone(const OgaGenerator* generator);
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_ComputeLogits(OgaGenerator* generator);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetTerminate(OgaGenerator* generator);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_UnsetTerminate(OgaGenerator* generator);
 
 /*
  * \brief Returns a copy of the model output identified by the given name as an OgaTensor on CPU. The buffer is owned by returned OgaTensor

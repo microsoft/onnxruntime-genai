@@ -37,9 +37,9 @@ static std::string CurrentModulePath() {
 
 namespace Generators {
 
-State::State(const GeneratorParams& params, const Model& model)
+State::State(const GeneratorParams& params_, const Model& model)
     : model_{model},
-      params_{params.shared_from_this()} {}
+      params_{params_.shared_from_this()} {}
 
 void State::Run(OrtSession& session, OrtRunOptions& run_options, int new_batch_size) {
   auto captured_graph_info = GetCapturedGraphInfo();
@@ -76,7 +76,20 @@ void State::Run(OrtSession& session, OrtRunOptions& run_options, int new_batch_s
   }
 }
 
+void State::SetTerminate() {
+  params_->session_terminated = true;
+  model_.run_options_->SetTerminate();
+}
+
+void State::UnsetTerminate() {
+  params_->session_terminated = false;
+  model_.run_options_->UnsetTerminate();
+}
+
 OrtValue* State::GetInput(const char* name) {
+  if (params_->session_terminated) {
+    throw std::runtime_error("Session in Terminated state, exiting!");
+  }
   for (size_t i = 0; i < input_names_.size(); i++) {
     if (std::strcmp(input_names_[i], name) == 0) {
       return inputs_[i];
@@ -86,6 +99,9 @@ OrtValue* State::GetInput(const char* name) {
 }
 
 OrtValue* State::GetOutput(const char* name) {
+  if (params_->session_terminated) {
+    throw std::runtime_error("Session in Terminated state, exiting!");
+  }
   for (size_t i = 0; i < output_names_.size(); i++) {
     if (std::strcmp(output_names_[i], name) == 0) {
       return outputs_[i];

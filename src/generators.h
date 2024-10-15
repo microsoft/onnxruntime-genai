@@ -66,6 +66,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   int batch_size{1};
   int max_batch_size{0};
   bool use_cuda_graph{};
+  mutable bool session_terminated{false};
   int sequence_length{};
   int BatchBeamSize() const { return search.num_beams * batch_size; }
 

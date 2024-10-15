@@ -244,6 +244,14 @@ struct OgaGenerator : OgaAbstract {
     OgaCheckResult(OgaGenerator_GenerateNextToken(this));
   }
 
+  void SetTerminate() {
+    OgaCheckResult(OgaGenerator_SetTerminate(this));
+  }
+
+  void UnsetTerminate() {
+    OgaCheckResult(OgaGenerator_UnsetTerminate(this));
+  }
+
   size_t GetSequenceCount(size_t index) const {
     return OgaGenerator_GetSequenceCount(this, index);
   }
