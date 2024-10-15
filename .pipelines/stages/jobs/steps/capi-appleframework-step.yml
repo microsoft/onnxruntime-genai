@@ -12,7 +12,7 @@ steps:
   submodules: recursive
 
 - template: utils/set-genai-version.yml
-- template: steps/utils/set-cmake-build-type.yml
+- template: utils/set-cmake-build-type.yml
   parameters:
     build_config: ${{parameters.build_config}}
 
