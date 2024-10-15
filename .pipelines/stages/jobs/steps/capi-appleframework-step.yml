@@ -23,8 +23,8 @@ steps:
     python3 -m pip install requests
     python3 tools/ci_build/github/apple/build_apple_framework.py \
           --build_dir "$(Build.BinariesDirectory)/apple_framework" \
+          --config $(cmake_build_type) \
           ${{ parameters.build_settings_file }}
-          --config $(cmake_build_type)
 
     mkdir $(Build.BinariesDirectory)/artifacts
     mkdir -p $(Build.BinariesDirectory)/artifacts_staging/onnxruntime-genai.xcframework
