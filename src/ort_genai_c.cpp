@@ -532,7 +532,7 @@ void OGA_API_CALL OgaDestroyString(const char* p) {
 }
 
 void OGA_API_CALL OgaDestroySequences(OgaSequences* p) {
-  delete reinterpret_cast<Generators::Sequences*>(p);
+  delete reinterpret_cast<Generators::TokenSequences*>(p);
 }
 
 void OGA_API_CALL OgaDestroyModel(OgaModel* p) {

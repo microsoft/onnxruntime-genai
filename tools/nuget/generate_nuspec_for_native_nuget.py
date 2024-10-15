@@ -97,7 +97,7 @@ def generate_release_notes(line_list):
 
 def generate_dependencies(xml_text, package_version, ort_package_name, ort_package_version):
     xml_text.append("<dependencies>")
-    target_frameworks = ["NETSTANDARD" , "NETCOREAPP", "NETFRAMEWORK"]
+    target_frameworks = ["NETSTANDARD" , "NETCOREAPP", "NETFRAMEWORK", "net8.0-android31.0", "net8.0-ios15.4", "net8.0-maccatalyst14.0"]
     for framework in target_frameworks:
         xml_text.append(f'<group targetFramework="{framework}">')
         xml_text.append(f'<dependency id="Microsoft.ML.OnnxRuntimeGenAI.Managed" version="{package_version}" />')
@@ -122,23 +122,37 @@ def generate_files(lines, args):
                 f'<file src="{p.absolute()}" target="runtimes\{runtime}\\native" />'
             )
 
-    runtimes = ["win-x64", "win-arm64", "linux-x64", "osx-x64", "osx-arm64"]
+    runtimes = ["win-x64", "win-arm64", "linux-x64", "osx-x64", "osx-arm64", "ios", "android"]
     for runtime in runtimes:
       if runtime.startswith("win"):
           add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai.lib")
           add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai.dll")
           add_native_artifact_if_exists(lines, runtime, "d3d12core.dll")
-      if runtime.startswith("linux"):
+      elif runtime.startswith("linux"):
           add_native_artifact_if_exists(lines, runtime, "libonnxruntime-genai.so")
-      if runtime.startswith("osx"):
+      elif runtime.startswith("osx"):
           add_native_artifact_if_exists(lines, runtime, "libonnxruntime-genai.dylib")
+      elif runtime.startswith("ios"):
+          add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai.xcframework.zip")
+      elif runtime.startswith("android"):
+          add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai.aar")
 
     # targets
     for dotnet in ["netstandard2.0", "net8.0", "native"]:
-        lines.append(f'<file src="targets\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\{dotnet}\{args.package_name}.targets" />')
-        lines.append(f'<file src="targets\Microsoft.ML.OnnxRuntimeGenAI.props" target="build\{dotnet}\{args.package_name}.props" />')
-    # include
+        lines.append(f'<file src="targets\\netstandard\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\{dotnet}\{args.package_name}.targets" />')
+        lines.append(f'<file src="targets\\netstandard\Microsoft.ML.OnnxRuntimeGenAI.props" target="build\{dotnet}\{args.package_name}.props" />')
 
+    # mobile targets
+    lines.append(f'<file src="targets\\net8.0-android\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\\net8.0-android31.0\{args.package_name}.targets" />')
+    lines.append(f'<file src="targets\\net8.0-android\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="buildTransitive\\net8.0-android31.0\{args.package_name}.targets" />')
+
+    lines.append(f'<file src="targets\\net8.0-ios\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\\net8.0-ios15.4\{args.package_name}.targets" />')
+    lines.append(f'<file src="targets\\net8.0-ios\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="buildTransitive\\net8.0-ios15.4\{args.package_name}.targets" />')
+
+    lines.append(f'<file src="targets\\net8.0-maccatalyst\\_._" target="build\\net8.0-maccatalyst14.0\_._" />')
+    lines.append(f'<file src="targets\\net8.0-maccatalyst\\_._" target="buildTransitive\\net8.0-maccatalyst14.0\_._" />')
+
+    # include
     lines.append(f'<file src="{args.sources_path}\src\ort_genai_c.h" target="build\\native\include" />')
     lines.append('</files>')
 
