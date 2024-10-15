@@ -140,11 +140,12 @@ CudaInterface* GetCudaInterface() {
 // This is a workaround to avoid linking the CUDA library to the generator library
 // The CUDA library is only needed for the CUDA allocator
 #ifdef _WIN32
-  auto full_path = CurrentModulePath() + "\\onnxruntime-genai-cuda.dll";
+  auto full_path = CurrentModulePath() + "/onnxruntime-genai-cuda.dll";
   static std::unique_ptr<void, void (*)(void*)> cuda_library{LoadLibrary(full_path.c_str()),
                                                              [](void* h) { FreeLibrary(reinterpret_cast<HMODULE>(h)); }};
 #else
-  static std::unique_ptr<void, void (*)(void*)> cuda_library{dlopen("libonnxruntime-genai-cuda.so", RTLD_NOW),
+  auto full_path = Ort::GetCurrentModuleDir() + "/libonnxruntime-genai-cuda.so";
+  static std::unique_ptr<void, void (*)(void*)> cuda_library{dlopen(full_path.c_str(), RTLD_NOW),
                                                              [](void* h) { dlclose(h); }};
 #endif
 

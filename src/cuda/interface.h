@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
 struct GenaiInterface {
 #if _WIN32
   virtual void* HeapAllocate(size_t size) = 0;
