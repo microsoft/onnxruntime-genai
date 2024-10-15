@@ -1,9 +1,9 @@
 #include "generators.h"
 #include "ort_genai_c.h"  // For OGA_EXPORT
 #include "interface.h"
-#include "..\search.h"
+#include "../search.h"
 #include "search_cuda.h"
-#include "..\models\kernels.h"
+#include "../models/kernels.h"
 
 namespace Generators {
 
