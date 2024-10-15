@@ -4,6 +4,7 @@
 #include "../search.h"
 #include "search_cuda.h"
 #include "../models/kernels.h"
+#include <cstdarg>
 
 namespace Generators {
 
