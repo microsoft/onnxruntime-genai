@@ -450,7 +450,7 @@ class Model:
                     calibration_method = "awq_clip"
                 else:
                     assert False, f"Unexpected calibration method: {self.nvidia_awq_calibration}"
-
+                print("nvidia_awq quantization works with block_size 128")
                 quant_config = NVAWQWeightOnlyQuantConfig(
                     tokenizer_dir=self.model_name_or_path,
                     calibration_method=calibration_method,
