@@ -14,6 +14,7 @@ struct DeviceMemoryBase : std::enable_shared_from_this<DeviceMemoryBase> {
   virtual const char* GetType() const = 0;  // Returns "cuda" "cuda_cpu" "directml" etc
   virtual bool IsCpuAccessible() const = 0;
   virtual void GetOnCpu() = 0;  // Allocates p_cpu_ if necessary and copies p_device_ memory into it
+  virtual void CopyFromDevice(size_t begin_dest, DeviceMemoryBase& source, size_t begin_source, size_t size_in_bytes) = 0;
 
   void* p_device_{};
   void* p_cpu_{};
@@ -51,12 +52,19 @@ struct DeviceMemorySpan {
   DeviceMemorySpan(DeviceMemory<T>& memory, size_t begin, size_t length)
       : p_device_memory_{std::static_pointer_cast<DeviceMemory<T>>(memory.shared_from_this())}, begin_{begin}, length_{length} {}
 
+  size_t size() const { return length_; }
   std::span<T> CpuSpan() { return p_device_memory_->CpuSpan().subspan(begin_, length_); }
 
  private:
   std::shared_ptr<DeviceMemory<T>> p_device_memory_;
   size_t begin_, length_;  // Subspan of p_device_memory_, relative to original memory block
 };
+
+template<typename T>
+void copy(DeviceMemorySpan<const T> source, DeviceMemorySpan<T> dest) {
+  assert(source.size() == dest.size());
+  dest.p_device_memory_->CopyFromDevice(dest.begin, *source.p_device_memory_, source.begin, source.size*sizeof(T));
+}
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}

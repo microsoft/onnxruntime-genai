@@ -78,19 +78,27 @@ struct GenaiInterfaceImpl : GenaiInterface {
   virtual void DumpSpan(std::ostream& stream, std::span<const int> values) override { return DumpSpan(stream, values); }
 } g_genai;
 
+const char* label_cpu = "cpu";
+
 struct CpuMemory : DeviceMemoryBase {
   CpuMemory(size_t size) {
     size_in_bytes_ = size;
-    p_cpu_ = new uint8_t[size_in_bytes_];
+    p_cpu_ = p_device_ = new uint8_t[size_in_bytes_];
   }
 
   ~CpuMemory() override {
-    delete[] p_cpu_;
+    delete[] p_device_;
   }
 
-  const char* GetType() const override { return "cpu"; }
+  const char* GetType() const override { return label_cpu; }
   bool IsCpuAccessible() const override { return true; }
   void GetOnCpu() override { assert(false); }  // Should never be called, as p_cpu_ is always valid
+  void CopyFromDevice(size_t begin_dest, DeviceMemoryBase& source, size_t begin_source, size_t size_in_bytes) override {
+    if (GetType() == label_cpu)
+      memcpy(static_cast<uint8_t*>(p_device_) + begin_dest, static_cast<const uint8_t*>(source.p_device_) + begin_source, size_in_bytes);
+    else
+      throw std::runtime_error("CpuMemory::CopyFromDevice not implemented for " + std::string(source.GetType()));
+  }
 };
 
 struct CpuInterface : DeviceInterface {

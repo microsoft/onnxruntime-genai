@@ -118,8 +118,8 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   target_link_libraries(onnxruntime-genai-cuda PRIVATE cublasLt cublas curand cufft cudart)
   set_target_properties(onnxruntime-genai-cuda PROPERTIES LINKER_LANGUAGE CUDA)
   add_dependencies(onnxruntime-genai onnxruntime-genai-cuda)
-
   source_group(TREE ${GENERATORS_ROOT}/cuda FILES ${generator_cudalib_srcs})
+  list(APPEND ortgenai_embed_libs "$<TARGET_FILE:onnxruntime-genai-cuda>")
 endif()
 
 if(CMAKE_GENERATOR_TOOLSET MATCHES "Visual Studio")

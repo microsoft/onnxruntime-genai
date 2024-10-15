@@ -7,6 +7,9 @@
 
 namespace Generators {
 
+const char* label_cuda = "cuda";
+const char* label_cuda_cpu = "cuda_cpu";
+
 struct HostMemory : DeviceMemoryBase {
   HostMemory(size_t size) {
     size_in_bytes_ = size;
@@ -18,9 +21,17 @@ struct HostMemory : DeviceMemoryBase {
     ::cudaFreeHost(p_device_);
   }
 
-  const char* GetType() const override { return "cuda_cpu"; }
+  const char* GetType() const override { return label_cuda_cpu; }
   bool IsCpuAccessible() const override { return true; }
   void GetOnCpu() override { assert(false); }  // Should never be called, as p_cpu_ is always valid
+  void CopyFromDevice(size_t begin_dest, DeviceMemoryBase& source, size_t begin_source, size_t size_in_bytes) override {
+    if (source.GetType() == label_cuda_cpu)
+      ::memcpy(static_cast<uint8_t*>(p_cpu_)+begin_dest, static_cast<uint8_t*>(source.p_cpu_)+begin_source, size_in_bytes);
+    else if (source.GetType() == label_cuda)
+      ::cudaMemcpy(static_cast<uint8_t*>(p_device_)+begin_dest, static_cast<uint8_t*>(source.p_device_)+begin_source, size_in_bytes, ::cudaMemcpyDeviceToHost);
+    else
+      throw std::runtime_error("Cuda HostMemory::CopyFromDevice not implemented for " + std::string(source.GetType()));
+  }
 };
 
 struct GpuMemory : DeviceMemoryBase {
@@ -35,12 +46,21 @@ struct GpuMemory : DeviceMemoryBase {
       ::cudaFreeHost(p_cpu_);
   }
 
-  const char* GetType() const override { return "cuda"; }
+  const char* GetType() const override { return label_cuda; }
   bool IsCpuAccessible() const override { return false; }
   void GetOnCpu() override {
     assert(!p_cpu_);
     ::cudaMallocHost(&p_cpu_, size_in_bytes_);
     ::cudaMemcpy(p_cpu_, p_device_, size_in_bytes_, ::cudaMemcpyDeviceToHost);
+  }
+
+  void CopyFromDevice(size_t begin_source, DeviceMemoryBase& source, size_t begin_dest, size_t size_in_bytes) override {
+    if (source.GetType() == label_cuda_cpu)
+      ::cudaMemcpy(static_cast<uint8_t*>(p_device_)+begin_source, static_cast<uint8_t*>(source.p_device_)+begin_dest, size_in_bytes, ::cudaMemcpyHostToDevice);
+    else if (source.GetType() == label_cuda)
+      ::cudaMemcpy(static_cast<uint8_t*>(p_device_)+begin_source, static_cast<uint8_t*>(source.p_device_)+begin_dest, size_in_bytes, ::cudaMemcpyDeviceToDevice);
+    else
+      throw std::runtime_error("Cuda GpuMemory::CopyFromDevice not implemented for " + std::string(source.GetType()));
   }
 };
 

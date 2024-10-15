@@ -8,7 +8,7 @@
 #include "span.h"
 #include "beam_search_topk.h"
 #include "cuda_sampling.cuh"
-#include "smartptrs.h"
+#include "../smartptrs.h"
 #include <cuda_runtime.h>
 #include <cub/cub.cuh>
 #include <iostream>
