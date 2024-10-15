@@ -34,6 +34,16 @@ parameters:
   type: boolean
   default: true
 
+- name: enable_android
+  displayName: 'Whether Android AAR package is built.'
+  type: boolean
+  default: true
+
+- name: enable_apple_framework
+  displayName: 'Whether Apple framework for iOS & MacCatalyst is built.'
+  type: boolean
+  default: true
+
 - name: ort_version
   type: string
 - name: ort_cuda_version
@@ -57,6 +67,8 @@ stages:
           enable_win_cpu: ${{ parameters.enable_win_cpu }}
           enable_win_arm64: ${{ parameters.enable_win_arm64 }}
           enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
+          enable_android: ${{ parameters.enable_android }}
+          enable_apple_framework: ${{ parameters.enable_apple_framework }}
     - ${{ if or(eq(parameters.enable_linux_cuda, true), eq(parameters.enable_win_cuda, true)) }}:
       - template: jobs/nuget-packaging-job.yml
         parameters:
@@ -68,7 +80,7 @@ stages:
     - ${{ if eq(parameters.enable_win_dml, true) }}:
       - template: jobs/nuget-packaging-job.yml
         parameters:
-          ep: 'directml' 
+          ep: 'directml'
           ort_version: ${{ parameters.ort_dml_version }}
           build_config: ${{ parameters.build_config }}
           enable_win_dml: ${{ parameters.enable_win_dml }}
