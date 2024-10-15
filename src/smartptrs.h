@@ -16,8 +16,8 @@ struct DeviceMemoryBase : std::enable_shared_from_this<DeviceMemoryBase> {
   virtual void GetOnCpu() = 0;  // Allocates p_cpu_ if necessary and copies p_device_ memory into it
   virtual void CopyFromDevice(size_t begin_dest, DeviceMemoryBase& source, size_t begin_source, size_t size_in_bytes) = 0;
 
-  void* p_device_{};
-  void* p_cpu_{};
+  uint8_t* p_device_{};
+  uint8_t* p_cpu_{};
   size_t size_in_bytes_{};
 };
 

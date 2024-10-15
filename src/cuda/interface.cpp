@@ -26,9 +26,9 @@ struct HostMemory : DeviceMemoryBase {
   void GetOnCpu() override { assert(false); }  // Should never be called, as p_cpu_ is always valid
   void CopyFromDevice(size_t begin_dest, DeviceMemoryBase& source, size_t begin_source, size_t size_in_bytes) override {
     if (source.GetType() == label_cuda_cpu)
-      ::memcpy(static_cast<uint8_t*>(p_cpu_) + begin_dest, static_cast<uint8_t*>(source.p_cpu_) + begin_source, size_in_bytes);
+      ::memcpy(p_cpu_ + begin_dest, source.p_cpu_ + begin_source, size_in_bytes);
     else if (source.GetType() == label_cuda)
-      ::cudaMemcpy(static_cast<uint8_t*>(p_device_) + begin_dest, static_cast<uint8_t*>(source.p_device_) + begin_source, size_in_bytes, ::cudaMemcpyDeviceToHost);
+      ::cudaMemcpy(p_device_ + begin_dest, source.p_device_ + begin_source, size_in_bytes, ::cudaMemcpyDeviceToHost);
     else
       throw std::runtime_error("Cuda HostMemory::CopyFromDevice not implemented for " + std::string(source.GetType()));
   }
@@ -56,9 +56,9 @@ struct GpuMemory : DeviceMemoryBase {
 
   void CopyFromDevice(size_t begin_source, DeviceMemoryBase& source, size_t begin_dest, size_t size_in_bytes) override {
     if (source.GetType() == label_cuda_cpu)
-      ::cudaMemcpy(static_cast<uint8_t*>(p_device_) + begin_source, static_cast<uint8_t*>(source.p_device_) + begin_dest, size_in_bytes, ::cudaMemcpyHostToDevice);
+      ::cudaMemcpy(p_device_ + begin_source, source.p_device_ + begin_dest, size_in_bytes, ::cudaMemcpyHostToDevice);
     else if (source.GetType() == label_cuda)
-      ::cudaMemcpy(static_cast<uint8_t*>(p_device_) + begin_source, static_cast<uint8_t*>(source.p_device_) + begin_dest, size_in_bytes, ::cudaMemcpyDeviceToDevice);
+      ::cudaMemcpy(p_device_ + begin_source, source.p_device_ + begin_dest, size_in_bytes, ::cudaMemcpyDeviceToDevice);
     else
       throw std::runtime_error("Cuda GpuMemory::CopyFromDevice not implemented for " + std::string(source.GetType()));
   }

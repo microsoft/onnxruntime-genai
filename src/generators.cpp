@@ -11,6 +11,25 @@
 #include "models/kernels.h"
 #endif
 
+#if _WIN32
+EXTERN_C IMAGE_DOS_HEADER __ImageBase;
+
+std::string CurrentModulePath() {
+  char path[MAX_PATH];
+  GetModuleFileNameA((HINSTANCE)&__ImageBase, path, _countof(path));
+
+  char absolute_path[MAX_PATH];
+  char* name;
+  GetFullPathNameA(path, _countof(path), absolute_path, &name);
+
+  auto idx = std::distance(absolute_path, name);
+  auto out_path = std::string(absolute_path);
+  out_path.resize(idx);
+
+  return out_path;
+}
+#endif
+
 namespace Generators {
 
 #if USE_CUDA
@@ -95,7 +114,7 @@ struct CpuMemory : DeviceMemoryBase {
   void GetOnCpu() override { assert(false); }  // Should never be called, as p_cpu_ is always valid
   void CopyFromDevice(size_t begin_dest, DeviceMemoryBase& source, size_t begin_source, size_t size_in_bytes) override {
     if (GetType() == label_cpu)
-      memcpy(static_cast<uint8_t*>(p_device_) + begin_dest, static_cast<const uint8_t*>(source.p_device_) + begin_source, size_in_bytes);
+      memcpy(p_device_ + begin_dest, source.p_device_ + begin_source, size_in_bytes);
     else
       throw std::runtime_error("CpuMemory::CopyFromDevice not implemented for " + std::string(source.GetType()));
   }
@@ -121,14 +140,16 @@ CudaInterface* GetCudaInterface() {
 // This is a workaround to avoid linking the CUDA library to the generator library
 // The CUDA library is only needed for the CUDA allocator
 #ifdef _WIN32
-  static std::unique_ptr<void, void (*)(void*)> cuda_library{LoadLibrary("onnxruntime-genai-cuda.dll"),
+  auto full_path = CurrentModulePath() + "\\onnxruntime-genai-cuda.dll";
+  static std::unique_ptr<void, void (*)(void*)> cuda_library{LoadLibrary(full_path.c_str()),
                                                              [](void* h) { FreeLibrary(reinterpret_cast<HMODULE>(h)); }};
 #else
-  static std::unique_ptr<void, void (*)(void*)> cuda_library{dlopen("libonnxruntime-genai-cuda.so", RTLD_NOW), dlclose};
+  static std::unique_ptr<void, void (*)(void*)> cuda_library {dlopen("libonnxruntime-genai-cuda.so", RTLD_NOW),
+                                                             [](void* h) { dlclose(h); }};
 #endif
 
   if (!cuda_library)
-    return nullptr;
+    throw std::runtime_error("Cuda interface not available");
 
   CudaInterface* CreateCudaInterface(GenaiInterface * p);
   static std::unique_ptr<CudaInterface> cuda_interface{[] {
