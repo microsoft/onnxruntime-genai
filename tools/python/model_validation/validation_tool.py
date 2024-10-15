@@ -75,6 +75,7 @@ def validate_model(args, model_dict, model_dir):
 
     return generation_successful
 
+# Think of how to expand coverage to different variants (vision, etc)
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS, description="End-to-end AI Question/Answer example for gen-ai")
     parser.add_argument('-j', '--json', type=str, required=True, help='Path to the JSON file containing the arguments')
