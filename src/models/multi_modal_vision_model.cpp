@@ -95,7 +95,7 @@ void EmbeddingState::UpdateInputsAndOutputs(RoamingArray<int32_t> next_tokens) {
 
 RoamingArray<float> EmbeddingState::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
   int batch_size = static_cast<int>(input_ids_.GetShape()[0]);
-  State::Run(*model_.embedding_session_, *model_.run_options_, batch_size);
+  State::Run(*model_.embedding_session_, batch_size);
 
   return MakeDummy();
 }
@@ -110,7 +110,7 @@ VisionState::VisionState(const MultiModalVisionModel& model, const GeneratorPara
 
 RoamingArray<float> VisionState::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
   const int num_images = static_cast<int>(inputs_[0]->GetTensorTypeAndShapeInfo()->GetShape()[0]);
-  State::Run(*model_.vision_session_, *model_.run_options_, num_images);
+  State::Run(*model_.vision_session_, num_images);
 
   return MakeDummy();
 }
@@ -128,7 +128,7 @@ DecoderState::DecoderState(const MultiModalVisionModel& model, RoamingArray<int3
 
 RoamingArray<float> DecoderState::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
   int batch_size = static_cast<int>(inputs_embeds_.GetShape()[0]);
-  State::Run(*model_.decoder_session_, *model_.run_options_, batch_size);
+  State::Run(*model_.decoder_session_, batch_size);
   return logits_.Get();
 }
 
