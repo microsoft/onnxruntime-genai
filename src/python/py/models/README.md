@@ -21,7 +21,6 @@ This folder contains the model builder for quickly creating optimized and quanti
     - [Hugging Face Authentication](#hugging-face-authentication)
     - [Use QDQ Pattern for Quantization](#use-qdq-pattern-for-quantization)
     - [Quant Provider](#quant-provider)
-    - [nvidia-awq calibration](#nvidia-awq-calibration)
   - [Unit Testing Models](#unit-testing-models)
     - [Option 1: Use the model builder directly](#option-1-use-the-model-builder-directly)
     - [Option 2: Edit the config.json file](#option-2-edit-the-configjson-file-on-disk-and-then-run-the-model-builder)
