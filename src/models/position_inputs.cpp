@@ -497,7 +497,6 @@ void PositionInputs::UpdateAttentionMask(int total_length, int new_kv_length) {
         dml_update_mask_kernel_ = DmlUpdateMaskKernel(
             model_.GetD3D12Device(),
             model_.GetDmlExecutionContext(),
-            static_cast<uint32_t>(1), // only support batch_size == 1
             static_cast<uint32_t>(attention_mask_shape_[1]), // max_length
             type_,
             static_cast<uint32_t>(total_length),
@@ -650,7 +649,6 @@ void PositionInputs::RewindMask(size_t index) {
     dml_update_mask_kernel_ = DmlUpdateMaskKernel(
         model_.GetD3D12Device(),
         model_.GetDmlExecutionContext(),
-        static_cast<uint32_t>(attention_mask_shape_[0]),
         static_cast<uint32_t>(attention_mask_shape_[1]),
         type_,
         static_cast<uint32_t>(past_length),

@@ -30,6 +30,7 @@ DmlUpdateMaskKernel::DmlUpdateMaskKernel(
   constants_.element_count = batch_size * max_seq_len;
   constants_.max_seq_len = max_seq_len;
   constants_.seq_len = seq_len;
+  constants.set_all = false;
   total_element_count_ = batch_size * max_seq_len;
 
   // Compute root signature.
@@ -155,7 +156,6 @@ DmlUpdateMaskKernel::DmlUpdateMaskKernel(
 DmlUpdateMaskKernel::DmlUpdateMaskKernel(
     ID3D12Device* d3d12_device,
     DmlExecutionContext* execution_context,
-    uint32_t batch_size,
     uint32_t max_seq_len,
     ONNXTensorElementDataType dtype,
     uint32_t seq_len,
@@ -164,10 +164,11 @@ DmlUpdateMaskKernel::DmlUpdateMaskKernel(
       execution_context_(execution_context),
       dtype_(dtype),
       attention_mask_resource_(attention_mask_resource) {
-  constants_.element_count = batch_size * max_seq_len;
+  constants_.element_count = max_seq_len;
   constants_.max_seq_len = max_seq_len;
   constants_.seq_len = seq_len;
-  total_element_count_ = batch_size * max_seq_len;
+  constants_.set_all = true;
+  total_element_count_ = max_seq_len;
 
   // Compute root signature.
   std::vector<CD3DX12_ROOT_PARAMETER1> root_parameters;
@@ -232,7 +233,7 @@ DmlUpdateMaskKernel::DmlUpdateMaskKernel(
   // Set the root signature and pipeline state
   graphics_command_list_->SetComputeRootSignature(root_signature_.Get());
   graphics_command_list_->SetPipelineState(pipeline_state_.Get());
-  graphics_command_list_->SetComputeRootUnorderedAccessView(0, attention_mask_resource_->GetGPUVirtualAddress());
+  graphics_command_list_->SetComputeRootUnorderedAccessView(1, attention_mask_resource_->GetGPUVirtualAddress());
 
   auto pending_element_count = total_element_count_;
   auto constants = constants_;
