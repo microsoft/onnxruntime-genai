@@ -433,25 +433,14 @@ void PositionInputs::UpdateAttentionMask(int total_length, int new_kv_length) {
     int max_length = state_.params_->search.max_length;
     attention_mask_shape_[1] = max_length;
     attention_mask_ = sb_attention_mask_->CreateTensorOnStaticBuffer(attention_mask_shape_, type_);
-    if (type_ == Ort::TypeToTensorType<int32_t>) {
-      cudaMemsetAsync(attention_mask_->GetTensorMutableRawData(),
-                      1,
-                      sizeof(int32_t) * past_length,
-                      model_.cuda_stream_);
-      cudaMemsetAsync(attention_mask_->GetTensorMutableRawData() + past_length,
-                      0,
-                      sizeof(int32_t) * (max_length - past_length),
-                      model_.cuda_stream_);
-    } else {
-      cudaMemsetAsync(attention_mask_->GetTensorMutableRawData(),
-                      1,
-                      sizeof(int64_t) * past_length,
-                      model_.cuda_stream_);
-      cudaMemsetAsync(attention_mask_->GetTensorMutableRawData() + past_length,
-                      0,
-                      sizeof(int64_t) * (max_length - past_length),
-                      model_.cuda_stream_);
-    }
+    cudaMemsetAsync(attention_mask_->GetTensorMutableRawData(),
+                    0,
+                    (type_ == Ort::TypeToTensorType<int32_t> ? sizeof(int32_t) : sizeof(int64_t)) * max_length,
+                    model_.cuda_stream_);
+    cudaMemsetAsync(attention_mask_->GetTensorMutableRawData(),
+                    1,
+                    (type_ == Ort::TypeToTensorType<int32_t> ? sizeof(int32_t) : sizeof(int64_t)) * past_length,
+                    model_.cuda_stream_);
 #elif USE_DML
     attention_mask_shape_[1] = state_.params_->search.max_length;
     attention_mask_ = sb_attention_mask_->CreateTensorOnStaticBuffer(attention_mask_shape_, type_);
@@ -617,25 +606,14 @@ void PositionInputs::RewindMask(size_t index) {
   if (sb_attention_mask_ && !is_first_mask_update_) {
     int past_length = static_cast<int>(index);
     int max_length = static_cast<int>(state_.params_->search.max_length);
-    if (type_ == Ort::TypeToTensorType<int32_t>) {
-      cudaMemsetAsync(attention_mask_->GetTensorMutableRawData(),
-                      1,
-                      sizeof(int32_t) * past_length,
-                      model_.cuda_stream_);
-      cudaMemsetAsync(attention_mask_->GetTensorMutableRawData() + past_length,
-                      0,
-                      sizeof(int32_t) * (max_length - past_length),
-                      model_.cuda_stream_);
-    } else {
-      cudaMemsetAsync(attention_mask_->GetTensorMutableRawData(),
-                      1,
-                      sizeof(int64_t) * past_length,
-                      model_.cuda_stream_);
-      cudaMemsetAsync(attention_mask_->GetTensorMutableRawData() + past_length,
-                      0,
-                      sizeof(int64_t) * (max_length - past_length),
-                      model_.cuda_stream_);
-    }
+    cudaMemsetAsync(attention_mask_->GetTensorMutableRawData(),
+                    0,
+                    (type_ == Ort::TypeToTensorType<int32_t> ? sizeof(int32_t) : sizeof(int64_t)) * max_length,
+                    model_.cuda_stream_);
+    cudaMemsetAsync(attention_mask_->GetTensorMutableRawData(),
+                    1,
+                    (type_ == Ort::TypeToTensorType<int32_t> ? sizeof(int32_t) : sizeof(int64_t)) * past_length,
+                    model_.cuda_stream_);
   }
 }
 #elif USE_DML

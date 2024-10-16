@@ -56,14 +56,14 @@ void Sequences_Cuda::AppendNextTokenToSequences(std::span<const int32_t> next_to
 }
 
 void Sequences_Cuda::AppendUserTokensToSequences(gpu_span<int32_t> user_tokens, int num_beams) {
-  size_t new_length = user_tokens.size() * num_beams / batch_beam_size_;
-  size_t past_length = current_length_;
+  int new_length = static_cast<int>(user_tokens.size()) * num_beams / batch_beam_size_;
+  int past_length = current_length_;
   cuda::Launch_AppendUserTokensToSequences(user_tokens, sequences_, batch_beam_size_, num_beams, past_length, new_length, max_length_, stream_);
   current_length_ += new_length;
 }
 
 void Sequences_Cuda::RewindTo(size_t index) {
-  current_length_ = index;
+  current_length_ = static_cast<int>(index);
   assert(current_length_ >= 0);
 }
 

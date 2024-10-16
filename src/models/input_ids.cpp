@@ -115,7 +115,7 @@ void InputIDs::Update(RoamingArray<int32_t> new_tokens) {
         auto next_tokens = new_tokens.GetGPU();
         // Temporary solution for beam search
         if (is_prompt_ && state_.params_->search.num_beams > 1)
-          cuda::LaunchExpandAndInt32ToInt64(next_tokens.data(), data, state_.params_->search.num_beams, state_.params_->search.batch_size, sequence_length, model_.cuda_stream_);
+          cuda::LaunchExpandAndInt32ToInt64(next_tokens.data(), data, state_.params_->search.num_beams, state_.params_->search.batch_size, static_cast<int>(sequence_length), model_.cuda_stream_);
         else
           cuda::LaunchInt32ToInt64(next_tokens.data(), data, static_cast<int>(next_tokens.size()), model_.cuda_stream_);
 #endif
@@ -125,7 +125,7 @@ void InputIDs::Update(RoamingArray<int32_t> new_tokens) {
       case DeviceType::DML: {
 #if USE_DML
         ComPtr<ID3D12Resource> source_resource;
-        Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, value_int32_->GetTensorMutableRawData(), &source_resource));
+        Ort::\(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, value_int32_->GetTensorMutableRawData(), &source_resource));
 
         auto source = std::span<const uint8_t>(
             reinterpret_cast<const uint8_t*>(new_tokens.GetCPU().data()),
@@ -169,7 +169,7 @@ void InputIDs::Update(RoamingArray<int32_t> new_tokens) {
     if (model_.device_type_ == DeviceType::CUDA) {
       if (is_prompt_ && state_.params_->search.num_beams > 1) {
         auto next_tokens = new_tokens.GetGPU();
-        cuda::LaunchExpand(next_tokens.data(), data, state_.params_->search.num_beams, state_.params_->search.batch_size, sequence_length, model_.cuda_stream_);
+        cuda::LaunchExpand(next_tokens.data(), data, state_.params_->search.num_beams, state_.params_->search.batch_size, static_cast<int>(sequence_length), model_.cuda_stream_);
       } else {
         cudaMemcpyAsync(data, new_tokens.GetGPU().data(), shape_[0] * shape_[1] * sizeof(int32_t), cudaMemcpyDeviceToDevice, model_.cuda_stream_);
       }
