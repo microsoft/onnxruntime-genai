@@ -165,14 +165,14 @@ CudaInterface* GetCudaInterface() {
   if (!cuda_library)
     throw std::runtime_error("Cuda interface not available");
 
-  CudaInterface* CreateCudaInterface(GenaiInterface * p);
-  static std::unique_ptr<CudaInterface> cuda_interface{[] {
+  CudaInterface* GetCudaInterface(GenaiInterface * p);
+  static CudaInterface* cuda_interface{[] {
 #ifdef _WIN32
-    auto create_cuda_fn = reinterpret_cast<decltype(&CreateCudaInterface)>(GetProcAddress(reinterpret_cast<HMODULE>(cuda_library.get()), "CreateCudaInterface"));
+    auto get_cuda_fn = reinterpret_cast<decltype(&GetCudaInterface)>(GetProcAddress(reinterpret_cast<HMODULE>(cuda_library.get()), "CreateCudaInterface"));
 #else
-    auto create_cuda_fn = reinterpret_cast<decltype(&CreateCudaInterface)>(dlsym(cuda_library.get(), "CreateCudaInterface"));
+    auto get_cuda_fn = reinterpret_cast<decltype(&GetCudaInterface)>(dlsym(cuda_library.get(), "CreateCudaInterface"));
 #endif
-    return create_cuda_fn(&g_genai);
+    return get_cuda_fn(&g_genai);
   }()};
 
   static bool post_init = [&] {
@@ -181,7 +181,7 @@ CudaInterface* GetCudaInterface() {
     return true;
   }();
 
-  return cuda_interface.get();
+  return cuda_interface;
 }
 
 namespace cuda {
