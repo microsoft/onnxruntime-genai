@@ -44,15 +44,11 @@ def test_greedy_search(test_data_path, relative_model_path):
     model_path = os.fspath(Path(test_data_path) / relative_model_path)
 
     model = og.Model(model_path)
-
-    search_params = og.GeneratorParams(model)
-    search_params.input_ids = np.array(
-        [[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32
-    )
-    search_params.set_search_options(do_sample=False, max_length=10)
+    
     input_ids_shape = [2, 4]
     batch_size = input_ids_shape[0]
-    search_params.batch_size
+    search_params = og.GeneratorParams(model)
+    search_params.set_search_options(do_sample=False, max_length=10, batch_size=batch_size)
 
     generator = og.Generator(model, search_params)
     generator.append_tokens(np.array([[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32))
@@ -229,6 +225,7 @@ def test_get_output(test_data_path, relative_model_path):
     logits = generator.get_output("logits")
     assert np.allclose(logits[:, :, ::200], expected_sampled_logits_prompt, atol=1e-3)
     generator.generate_next_token()
+    generator.generate_next_token()
 
     # check for the 1st token generation
     # full logits has shape [2, 1, 1000]. Sample 1 for every 200 tokens and the expected sampled logits has shape [2, 1, 5]
@@ -242,8 +239,6 @@ def test_get_output(test_data_path, relative_model_path):
     assert np.allclose(
         logits[:, :, ::200], expected_sampled_logits_token_gen, atol=1e-3
     )
-    generator.generate_next_token()
-
 
 @pytest.mark.skipif(
     not og.is_cuda_available(), reason="Pipeline model uses a mix of CPU and CUDA EP."
