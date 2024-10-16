@@ -28,10 +28,13 @@ Within the model_validation directory, you'll locate the script named validation
 * Phi (language + vision)
 * Qwen
 
-### Usage 
+## Usage 
+### Steps to Configure
 1. Input the name of the Hugging Face model you're using into the validation_config.json file. You can find a list of supported models via this link: (https://huggingface.co)
 
     * Also, add the chat_template associated with your model. This is located in the tokenizer_config.json file on the Hugging Face website. Make sure to replace ``` message['content'] ``` with ``` {input} ```.
+    * Discover more about chat templates [here](https://huggingface.co/docs/transformers/main/chat_templating)
+
 
 2. Specify the path for the output folder you prefer, along with the precision and execution provider details.
 
