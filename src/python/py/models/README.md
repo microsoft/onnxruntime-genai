@@ -220,25 +220,24 @@ python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p p
 
 
 ### Quant Provider
-This option is to select the specific INT4 quantization algo to use. Option avalable are nvidia_awq(Nvidia modelopt awq implimentation) and default
+Provides different quantization techniques.
+
+ nvidia_awq: NVIDIA's TensorRT ModelOpt. It supports 2 calibration options:
+
+  nvidia_awq_calibration: AWQ implementation and weight clipping. Choices: {awq, awq_clip}. awq is a default option for nvidia_awq
 
 ```
 # From wheel:
 python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e execution_provider -c cache_dir_to_store_temp_files --extra_options quant_provider=nvidia_awq use_qdq=True
 # From source:
 python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options quant_provider=nvidia_awq use_qdq=True
-```
 
-### nvidia-awq calibration
-nvidia_awq support two options, awq implementation and weight clipping. choices {awq, awq_clip}
-
-```
+# nvidia_awq_calibration option
 # From wheel:
 python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e execution_provider -c cache_dir_to_store_temp_files --extra_options quant_provider=nvidia_awq use_qdq=True nvidia_awq_calibration=awq
 # From source:
 python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options quant_provider=nvidia_awq use_qdq=True nvidia_awq_calibration=awq
 ```
-
 ### Unit Testing Models
 
 This scenario is where your PyTorch model is already downloaded locally (either in the default Hugging Face cache directory or in a local folder on disk). If it is not already downloaded locally, here is an example of how you can download it.
