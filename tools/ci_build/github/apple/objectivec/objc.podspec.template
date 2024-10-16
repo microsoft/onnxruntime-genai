@@ -1,14 +1,15 @@
 Pod::Spec.new do |s|
-  s.name                = "@NAME@"
-  s.version             = "@VERSION@"
-  s.summary             = "@SUMMARY@"
-  s.description         = "@DESCRIPTION@"
+  s.name                  = "@NAME@"
+  s.version               = "@VERSION@"
+  s.summary               = "@SUMMARY@"
+  s.description           = "@DESCRIPTION@"
 
-  s.homepage            = "https://github.com/microsoft/onnxruntime-genai"
-  s.license	            = { :type => "MIT", :file => "@LICENSE_FILE@" }
-  s.author              = {"ONNX Runtime" => "onnxruntime@microsoft.com"}
-  s.source  = { :http => 'file:///Users/chester/Projects/onnxruntime-genai/src/archive.zip'}
-  s.platform            = :ios, "@IOS_DEPLOYMENT_TARGET@", :osx, "@MACOSX_DEPLOYMENT_TARGET@"
+  s.homepage              = "https://github.com/microsoft/onnxruntime-genai"
+  s.license	              = { :type => "MIT", :file => "@LICENSE_FILE@" }
+  s.author                = { "ONNX Runtime" => "onnxruntime@microsoft.com" }
+  s.source                = { :http => 'file:///http_source_placeholder' }
+  s.ios.deployment_target = "@IOS_DEPLOYMENT_TARGET@"
+  s.osx.deployment_target = "@MACOSX_DEPLOYMENT_TARGET@"
 
   s.default_subspec     = 'Core'
   s.static_framework    = true
@@ -45,4 +46,4 @@ Pod::Spec.new do |s|
   end
   s.dependency 'onnxruntime-objc', '~> @ORT_VERSION@'
 end
-  
+

@@ -133,12 +133,13 @@ def parse_args():
         help="Path to the onnxruntime framework directory to include in the pod.",
     )
     parser.add_argument(
-        "--variant", choices=PackageVariant.all_variant_names(), required=True, help="Pod package variant."
+        "--variant", choices=PackageVariant.release_variant_names(), required=True, help="Pod package variant."
     )
 
     parser.add_argument(
         "--ort_version", required=True, help="The ORT version to depend on."
     )
+
     return parser.parse_args()
 
 

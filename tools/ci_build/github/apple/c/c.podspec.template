@@ -4,11 +4,12 @@ Pod::Spec.new do |s|
   s.summary             = "@SUMMARY@"
   s.homepage            = "https://github.com/microsoft/onnxruntime-genai"
   s.license	            = { :type => "MIT", :file => "@LICENSE_FILE@" }
-  s.author              = {"ONNX Runtime" => "onnxruntime@microsoft.com"}
-  s.source              = { :http => 'file:///Users/chester/Projects/onnxruntime-genai/build/apple_framework/framework_out/archive.zip'}
-  
-  s.platform            = :ios, "@IOS_DEPLOYMENT_TARGET@", :osx, "@MACOSX_DEPLOYMENT_TARGET@"
-  
+  s.author              = {"ONNX Runtime" => "onnxruntime@microsoft.com" }
+  s.source              = { :http => 'file:///http_source_placeholder' }
+
+  s.ios.deployment_target = "@IOS_DEPLOYMENT_TARGET@"
+  s.osx.deployment_target = "@MACOSX_DEPLOYMENT_TARGET@"
+
   s.vendored_frameworks = "@ORTGENAI_C_FRAMEWORK@"
   s.static_framework    = true
   s.weak_framework      = [ @WEAK_FRAMEWORK@ ]
@@ -24,4 +25,4 @@ Pod::Spec.new do |s|
     "OTHER_CPLUSPLUSFLAGS" => "-fvisibility=hidden -fvisibility-inlines-hidden",
   }
 end
-  
+

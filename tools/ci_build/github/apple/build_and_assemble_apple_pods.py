@@ -137,6 +137,8 @@ def main():
             str(build_dir / "framework_out"),
             "--variant",
             package_variant.name,
+            '--ort_version',
+            args.ort_version
         ]
 
         run(test_apple_packages_args)
