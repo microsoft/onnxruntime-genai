@@ -48,7 +48,4 @@ struct CudaInterface : DeviceInterface {
   virtual cudaError_t cudaFreeHost(void* ptr) = 0;
 };
 #endif
-
-Generators::CudaInterface* GetInterface(GenaiInterface* p_genai);
-
 }  // namespace Generators

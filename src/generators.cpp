@@ -136,7 +136,6 @@ DeviceInterface& GetCpuDeviceInterface() {
 
 #if USE_CUDA
 CudaInterface* GetCudaInterface() {
-
 // Load the shared library onnxruntime-genai-cuda.dll
 // This is a workaround to avoid linking the CUDA library to the generator library
 // The CUDA library is only needed for the CUDA allocator
@@ -151,6 +150,7 @@ CudaInterface* GetCudaInterface() {
   if (!cuda_library)
     throw std::runtime_error("Cuda interface not available");
 
+  Generators::CudaInterface* GetInterface(GenaiInterface * p_genai);
   static CudaInterface* cuda_interface{[] {
 #ifdef _WIN32
     auto get_cuda_fn = reinterpret_cast<decltype(&GetInterface)>(GetProcAddress(reinterpret_cast<HMODULE>(cuda_library.get()), "GetInterface"));
