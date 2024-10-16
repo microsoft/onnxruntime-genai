@@ -234,7 +234,7 @@ struct OgaGenerator : OgaAbstract {
     OgaCheckResult(OgaGenerator_GenerateNextToken(this));
   }
 
-  void RewindToLength(size_t length) {
+  void RewindTo(size_t length) {
     OgaCheckResult(OgaGenerator_RewindTo(this, length));
   }
 

@@ -193,15 +193,13 @@ void PositionInputs::UpdatePositionIDs() {
         ComPtr<ID3D12Resource> target_resource;
         Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, position_ids_->GetTensorMutableRawData(), &target_resource));
 
-        // Lazily create the kernel only the first time it's needed
-        if (!dml_update_position_ids_kernel_) {
-          dml_update_position_ids_kernel_ = DmlIncrementValuesKernel(
-              model_.GetD3D12Device(),
-              model_.GetDmlExecutionContext(),
-              static_cast<uint32_t>(position_ids_shape_[0]),
-              type_,
-              target_resource.Get());
-        }
+        dml_update_position_ids_kernel_ = DmlIncrementValuesKernel(
+            model_.GetD3D12Device(),
+            model_.GetDmlExecutionContext(),
+            static_cast<uint32_t>(position_ids_shape_[0]),
+            type_,
+            target_resource.Get());
+        
 
         // Execute the cached command list
         ComPtr<ID3D12Fence> fence;
@@ -481,16 +479,13 @@ void PositionInputs::UpdateAttentionMask(int total_length, int new_kv_length) {
       ComPtr<ID3D12Resource> attention_mask_resource;
       Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, attention_mask_->GetTensorMutableRawData(), &attention_mask_resource));
 
-      // TODO(aciddelgado): THIS FUNCTIONALITY IS INCORRECT AND NEEDS TO BE FIXED
-      if (!dml_update_mask_kernel_) {
-        dml_update_mask_kernel_ = DmlUpdateMaskKernel(
-            model_.GetD3D12Device(),
-            model_.GetDmlExecutionContext(),
-            static_cast<uint32_t>(attention_mask_shape_[1]),  // max_length
-            type_,
-            static_cast<uint32_t>(total_length),
-            attention_mask_resource.Get());
-      }
+      dml_update_mask_kernel_ = DmlUpdateMaskKernel(
+          model_.GetD3D12Device(),
+          model_.GetDmlExecutionContext(),
+          static_cast<uint32_t>(attention_mask_shape_[1]),  // max_length
+          type_,
+          static_cast<uint32_t>(total_length),
+          attention_mask_resource.Get());
 
       // Execute the cached command list
       ComPtr<ID3D12Fence> fence;
@@ -623,7 +618,6 @@ void PositionInputs::RewindMask(size_t index) {
     ComPtr<ID3D12Resource> attention_mask_resource;
     Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, attention_mask_->GetTensorMutableRawData(), &attention_mask_resource));
 
-    // TODO(aciddelgado): THIS FUNCTIONALITY IS INCORRECT AND NEEDS TO BE FIXED
     dml_update_mask_kernel_ = DmlUpdateMaskKernel(
         model_.GetD3D12Device(),
         model_.GetDmlExecutionContext(),

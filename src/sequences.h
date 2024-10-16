@@ -23,8 +23,6 @@ struct Sequences {
   void GetLastTokens(cpu_span<int32_t>& last_tokens);
   // Rewind sequences to ith token
   void RewindTo(size_t index);
-  // TODO(aciddelgado): To be used for rewind
-  // void DropLastTokens(size_t num_tokens);
 
  private:
   std::unique_ptr<int32_t[]> sequences_buffer_;

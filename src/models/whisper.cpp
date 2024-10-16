@@ -376,7 +376,7 @@ void Whisper_State::UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens
     cuda::LaunchCopyCrossQKSingleDecodeStep(model_.cuda_stream_,
                                             cross_qk_search_buffer_->GetTensorMutableData<float>(),
                                             output_cross_qk_ptrs_gpu_.data(),
-                                            current_length - 0,
+                                            current_length,
                                             params_->BatchBeamSize(),
                                             model_.config_->model.decoder.num_hidden_layers,
                                             static_cast<int32_t>(output_cross_qk_dims[1]),
@@ -401,7 +401,7 @@ void Whisper_State::Finalize() {
     cross_qk_final_ = OrtValue::CreateTensor(*model_.allocator_device_, cross_qk_shape, cross_qk_type);
 
     cuda::LaunchFinalizeCrossQK(model_.cuda_stream_,
-                                decoded_length - 0,
+                                decoded_length,
                                 decoded_length,
                                 static_cast<int32_t>(output_cross_qk_dims[0]),
                                 params_->search.num_beams,

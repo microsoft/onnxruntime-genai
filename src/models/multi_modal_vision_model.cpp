@@ -90,7 +90,7 @@ EmbeddingState::EmbeddingState(const MultiModalVisionModel& model, const Generat
 
 void EmbeddingState::UpdateInputsOutputs(RoamingArray<int32_t> next_tokens, bool is_prompt) {
   input_ids_.Update(next_tokens);
-  image_features_.Update(is_prompt);  // THE ANSWER LIES HERE
+  image_features_.Update(is_prompt);
 }
 
 RoamingArray<float> EmbeddingState::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
@@ -153,7 +153,6 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalVisionModel& mo
   decoder_state_ = std::make_unique<DecoderState>(model_, sequence_lengths_unk, params, captured_graph_info_.get());
 }
 
-// LEFT OFF: SEOMTHING IS NOT UPDATING RIGHT
 RoamingArray<float> MultiModalPipelineState::Run(int current_length, RoamingArray<int32_t> next_tokens,
                                                  RoamingArray<int32_t> next_indices) {
   // Pipeline state defines the pipeline of the execution of the models

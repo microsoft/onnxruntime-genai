@@ -202,7 +202,6 @@ void KV_Cache::Add() {
   }
 }
 
-// TODO(aciddelgado): consider 0-initializing pasts somewhere
 void KV_Cache::Update(std::span<const int32_t> beam_indices, int total_length) {
   // If we're sharing past & present buffers there is nothing to do here, so early exit
   if (past_present_share_buffer_)

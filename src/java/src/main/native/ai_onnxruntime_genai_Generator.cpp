@@ -54,7 +54,7 @@ Java_ai_onnxruntime_genai_Generator_isDone(JNIEnv* env, jobject thiz, jlong nati
 }
 
 JNIEXPORT void JNICALL
-Java_ai_onnxruntime_genai_Generator_rewindToLength(JNIEnv* env, jobject thiz, jlong native_handle, jlong length) {
+Java_ai_onnxruntime_genai_Generator_rewindTo(JNIEnv* env, jobject thiz, jlong native_handle, jlong length) {
   ThrowIfError(env, OgaGenerator_RewindTo(reinterpret_cast<OgaGenerator*>(native_handle), length));
 }
 

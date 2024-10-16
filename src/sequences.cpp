@@ -73,9 +73,4 @@ void Sequences::RewindTo(size_t index) {
   assert(current_length_ >= 0);
 }
 
-// void Sequences::DropLastTokens(size_t num_tokens) {
-//   current_length_ -= static_cast<int>(num_tokens);
-//   assert(current_length_ >= 0);
-// }
-
 }  // namespace Generators

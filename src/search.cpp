@@ -285,33 +285,7 @@ void GreedySearch_Cpu::RewindTo(size_t index) {
     memset(next_tokens_.data(), 0, next_tokens_.size_bytes());
 }
 
-// void GreedySearch_Cpu::DropLastTokens(size_t num_tokens) {
-//   auto sequences_cpu = sequences_.GetSequences();
-//   auto new_sequence_length = sequences_.GetSequenceLength() - num_tokens;
-//   for (size_t i = 0; i < params_->search.batch_size; ++i) {
-//     if (!eos_seen_[i])
-//       continue;
-//     auto sequence_cpu = sequences_cpu.subspan(i * params_->search.max_length + new_sequence_length, num_tokens);
-//     for (size_t j = 0; j < num_tokens; ++j) {
-//       if (sequence_cpu[j] == params_->config.model.eos_token_id) {
-//         not_done_count_++;
-//         done_ = false;
-//         eos_seen_[i] = false;
-//         if (g_log.enabled && g_log.hit_eos)
-//           Log("hit_eos", "Reverted EOS seen on batch " + std::to_string(i));
-//       }
-//     }
-//   }
-//   sequences_.DropLastTokens({num_tokens});
-// }
-
 void BeamSearch_Cpu::SetUserTokens(const RoamingArray<int32_t>& next_tokens) {
-  // LEFT OFF HERE
-  // Reset done count/state
-  // done_ = false;
-  // not_done_count_ = params_->search.batch_size;
-  // memset(eos_seen_.data(), 0, eos_seen_.size_bytes());
-
   // Set user-defined next tokens
   auto next_tokens_cpu = const_cast<RoamingArray<int32_t>&>(next_tokens).GetCPU();
   auto batch_beam_size = params_->BatchBeamSize();

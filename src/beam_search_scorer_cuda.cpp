@@ -37,8 +37,6 @@ BeamSearchScorer_Cuda::BeamSearchScorer_Cuda(const GeneratorParams& parameters)
   cuda::LaunchInitScoresKernel(next_beam_scores_.data(), parameters.search.batch_size, parameters.search.num_beams, stream_);
 
   // Space to store intermediate sequence with length sequence_length, sequence_length + 1, ..., max_sequence_length.
-  // TODO(aciddelgado): Initialize in first update function type thing.
-  // size_t per_beam = (state_cpu_->max_length_ * (state_cpu_->max_length_ + 1) - (parameters.sequence_length - 1) * parameters.sequence_length) / 2;
   size_t per_beam = (state_cpu_->max_length_ * (state_cpu_->max_length_ + 1)) / 2;
   hypothesis_buffer_ptr_ = CudaMallocArray<int32_t>(batch_beam_size * per_beam, &hypothesis_buffer_);
 }

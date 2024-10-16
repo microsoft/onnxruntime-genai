@@ -101,7 +101,6 @@ void GeneratorParams::TryGraphCapture(int max_bs) {
   }
 }
 
-// TODO(aciddelgado): Does this work?
 void GeneratorParams::SetInputs(const NamedTensors& named_tensors) {
   for (const auto& [name, tensor] : named_tensors) {
     if (name == Config::Defaults::InputIdsName) {
@@ -164,7 +163,7 @@ void Generator::AddTokens(const cpu_span<int32_t>& input_ids) {
 
 void Generator::ComputeLogits(const RoamingArray<int32_t>& next_tokens) {
   if (computed_logits_)
-    throw std::runtime_error("ComputeLogits called again without calling AddTokens or GenerateNextToken first");
+    throw std::runtime_error("ComputeLogits called again without calling AppendTokens or GenerateNextToken first");
 
   auto logits = state_->Run(search_->GetSequenceLength(), next_tokens, search_->GetNextIndices());
   if (g_log.enabled && g_log.model_logits) {
@@ -177,7 +176,6 @@ void Generator::ComputeLogits(const RoamingArray<int32_t>& next_tokens) {
 }
 
 bool Generator::IsDone() const {
-  // TODO(aciddelgado): Is this the correct approach to handling computed_logits_ now?
   if (computed_logits_) {
     return false;
   }
