@@ -135,7 +135,10 @@ struct CudaInterfaceImpl : CudaInterface {
   }
 
   cudaError_t cudaStreamCreate(cudaStream_t* stream) override {
-    return ::cudaStreamCreate(stream);
+    std::cerr << "CudaInterfaceImpl::cudaStreamCreate" << std::endl;
+    auto out=::cudaStreamCreate(stream);
+    std::cerr << "CudaInterfaceImpl::cudaStreamCreate finished" << std::endl;
+    return out;
   }
 
   cudaError_t cudaStreamDestroy(cudaStream_t stream) override {
@@ -215,6 +218,6 @@ void operator delete(void* p, size_t /*size*/) noexcept { Generators::gp_genai->
 extern "C" {
 OGA_EXPORT Generators::CudaInterface* CreateCudaInterface(GenaiInterface* p_genai) {
   Generators::gp_genai = p_genai;
-  return new Generators::CudaInterfaceImpl();
+  return &Generators::g_cuda_device;
 }
 }

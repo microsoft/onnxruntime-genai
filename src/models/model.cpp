@@ -382,7 +382,6 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       if (is_primary_session_options)
         device_type_ = DeviceType::CUDA;  // Scoring will use CUDA
 
-      std::cerr << "Appended execution provider options" << std::endl;
     } else if (provider_options.name == "rocm") {
       OrtROCMProviderOptions ort_provider_options;
 
