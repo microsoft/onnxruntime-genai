@@ -262,7 +262,7 @@ void EnsureDeviceOrtInit(OrtSession& session, DeviceType type) {
   if (device)
     return;
 
-  static const char* device_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buffer", "QnnHtpShared"};
+  static const char* device_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buffer", "QnnHtpShared", "Cpu"};
   static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   auto name = device_type_names[static_cast<int>(type)];
@@ -474,7 +474,6 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       }
 
       session_options.AppendExecutionProvider_CUDA_V2(*ort_provider_options);
-
     } else if (provider_options.name == "rocm") {
       OrtROCMProviderOptions ort_provider_options;
 
@@ -531,6 +530,9 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 
       else if (provider_options.name == "WebGPU")
         p_device_ = GetDeviceInterface(DeviceType::WEBGPU);
+
+      else if (provider_options.name == "OpenVINO")
+        p_device_ = GetDeviceInterface(DeviceType::OPENVINO);
 
       std::vector<const char*> keys, values;
       for (auto& option : provider_options.options) {

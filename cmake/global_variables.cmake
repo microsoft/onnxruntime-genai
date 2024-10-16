@@ -38,6 +38,7 @@ if(WIN32)
   set(ONNXRUNTIME_LIB "onnxruntime.dll")
   set(ONNXRUNTIME_PROVIDERS_CUDA_LIB "onnxruntime_providers_cuda.dll")
   set(ONNXRUNTIME_PROVIDERS_ROCM_LIB "onnxruntime_providers_rocm.dll")
+  set(ONNXRUNTIME_PROVIDERS_OPENVINO_LIB "onnxruntime_providers_openvino.dll")
 elseif(APPLE)
   if(IOS OR MAC_CATALYST)
     add_library(onnxruntime IMPORTED STATIC)
@@ -54,6 +55,7 @@ elseif(APPLE)
     set(ONNXRUNTIME_LIB "libonnxruntime.dylib")
     set(ONNXRUNTIME_PROVIDERS_CUDA_LIB "libonnxruntime_providers_cuda.dylib")
     set(ONNXRUNTIME_PROVIDERS_ROCM_LIB "libonnxruntime_providers_rocm.dylib")
+    set(ONNXRUNTIME_PROVIDERS_OPENVINO_LIB "libonnxruntime_providers_openvino.dylib")
   endif()
 else()
   #In AIX, only CPU inferencing is supported, so no need to update ONNXRUNTIME_PROVIDERS_CUDA_LIB and ONNXRUNTIME_PROVIDERS_ROCM_LIB
@@ -64,6 +66,7 @@ else()
   endif()
   set(ONNXRUNTIME_PROVIDERS_CUDA_LIB "libonnxruntime_providers_cuda.so")
   set(ONNXRUNTIME_PROVIDERS_ROCM_LIB "libonnxruntime_providers_rocm.so")
+  set(ONNXRUNTIME_PROVIDERS_OPENVINO_LIB "libonnxruntime_providers_openvino.so")
 endif()
 
 file(GLOB generator_srcs CONFIGURE_DEPENDS
@@ -75,6 +78,8 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
   "${GENERATORS_ROOT}/qnn/*.cpp"
   "${GENERATORS_ROOT}/webgpu/*.h"
   "${GENERATORS_ROOT}/webgpu/*.cpp"
+  "${GENERATORS_ROOT}/openvino/*.h"
+  "${GENERATORS_ROOT}/openvino/*.cpp"
   "${MODELS_ROOT}/*.h"
   "${MODELS_ROOT}/*.cpp"
 )

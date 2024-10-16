@@ -18,7 +18,7 @@ _log = get_logger("util.dependency_resolver")
 
 
 def _download_ort(
-    use_cuda: bool, use_rocm: bool, use_dml: bool, destination_dir: PathLike
+    use_cuda: bool, use_rocm: bool, use_dml: bool, use_openvino: bool, destination_dir: PathLike
 ):
     def _lib_path():
         plat = "linux" if is_linux() else "win" if is_windows() else "osx"
@@ -46,6 +46,8 @@ def _download_ort(
         package_name = "Microsoft.ML.OnnxRuntime.Rocm"
     elif use_dml:
         package_name = "Microsoft.ML.OnnxRuntime.DirectML"
+    elif use_openvino:
+        package_name = "Intel.ML.OnnxRuntime.OpenVino"
     else:
         package_name = "Microsoft.ML.OnnxRuntime"
 
@@ -152,13 +154,13 @@ def _download_d3d12(destination_dir: PathLike):
 
 
 def download_dependencies(
-    use_cuda: bool, use_rocm: bool, use_dml: bool, destination_dir: PathLike
+    use_cuda: bool, use_rocm: bool, use_dml: bool, use_openvino: bool, destination_dir: PathLike
 ):
     dependencies_dir = destination_dir / "dependencies"
     if not dependencies_dir.exists():
         dependencies_dir.mkdir(parents=True)
 
-    ort_lib_dir = _download_ort(use_cuda, use_rocm, use_dml, dependencies_dir)
+    ort_lib_dir = _download_ort(use_cuda, use_rocm, use_dml, use_openvino, dependencies_dir)
     libs = listdir(ort_lib_dir)
     for file_name in libs:
         if isfile(Path(ort_lib_dir) / file_name):

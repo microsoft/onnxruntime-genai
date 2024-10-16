@@ -1,0 +1,10 @@
+file(TO_CMAKE_PATH "${ORT_LIB_DIR}/${ONNXRUNTIME_PROVIDERS_OPENVINO_LIB}" OPENVINO_EP_LIB_PATH)
+if(USE_OPENVINO AND NOT EXISTS "${OPENVINO_EP_LIB_PATH}")
+  message(FATAL_ERROR "Expected the ONNX Runtime providers OpenVINO library to be found at ${OPENVINO_EP_LIB_PATH}. Actual: Not found.")
+endif()
+
+if(USE_OPENVINO)
+  add_compile_definitions(USE_OPENVINO=1)
+else()
+  add_compile_definitions(USE_OPENVINO=0)
+endif()

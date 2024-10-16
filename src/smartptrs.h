@@ -90,6 +90,7 @@ enum struct DeviceType {
   DML,
   WEBGPU,
   QNN,
+  OPENVINO,
   MAX
 };
 
@@ -153,6 +154,7 @@ struct ExternalRefCounted {
 namespace Location {
 struct CPU {};
 struct GPU {};
+struct NPU {};
 }  // namespace Location
 
 template <typename T>
