@@ -9,7 +9,7 @@
   std::unique_ptr<OgaTokenizer> _tokenizer;
 }
 
-- (nullable)initWithModel:(OGAModel*)model error:(NSError**)error {
+- (nullable instancetype)initWithModel:(OGAModel*)model error:(NSError**)error {
   if ((self = [super init]) == nil) {
     return nil;
   }
@@ -51,7 +51,7 @@
   std::unique_ptr<OgaTokenizerStream> _stream;
 }
 
-- (nullable)initWithTokenizer:(OGATokenizer*)tokenizer error:(NSError**)error {
+- (nullable instancetype)initWithTokenizer:(OGATokenizer*)tokenizer error:(NSError**)error {
   if ((self = [super init]) == nil) {
     return nil;
   }
@@ -63,7 +63,7 @@
   OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }
 
-- (nullable)initWithMultiModalProcessor:(OGAMultiModalProcessor*)processor error:(NSError**)error {
+- (nullable instancetype)initWithMultiModalProcessor:(OGAMultiModalProcessor*)processor error:(NSError**)error {
   if ((self = [super init]) == nil) {
     return nil;
   }

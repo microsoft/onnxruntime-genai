@@ -21,7 +21,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface OGAInt32Span ()
 
-- (nullable)initWithRawPointer:(const int32_t*)pointer size:(size_t)size;
+- (nullable instancetype)initWithRawPointer:(const int32_t*)pointer size:(size_t)size;
 
 - (const int32_t*)pointer;
 - (size_t)size;
@@ -30,7 +30,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface OGAInt64Span ()
 
-- (nullable)initWithRawPointer:(const int64_t*)pointer size:(size_t)size;
+- (nullable instancetype)initWithRawPointer:(const int64_t*)pointer size:(size_t)size;
 
 - (const int64_t*)pointer;
 - (size_t)size;
@@ -39,7 +39,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface OGASequences ()
 
-- (nullable)initWithError:(NSError**)error;
+- (nullable instancetype)initWithError:(NSError**)error;
 - (instancetype)initWithNativePointer:(std::unique_ptr<OgaSequences>)ptr;
 
 - (OgaSequences&)CXXAPIOgaSequences;

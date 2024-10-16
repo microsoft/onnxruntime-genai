@@ -9,7 +9,7 @@
   std::unique_ptr<OgaModel> _model;
 }
 
-- (nullable)initWithPath:(NSString*)path error:(NSError**)error {
+- (nullable instancetype)initWithPath:(NSString*)path error:(NSError**)error {
   if ((self = [super init]) == nil) {
     return nil;
   }

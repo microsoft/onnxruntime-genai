@@ -9,7 +9,7 @@
   std::unique_ptr<OgaGeneratorParams> _generatorParams;
 }
 
-- (nullable)initWithModel:(OGAModel*)model error:(NSError**)error {
+- (nullable instancetype)initWithModel:(OGAModel*)model error:(NSError**)error {
   if ((self = [super init]) == nil) {
     return nil;
   }

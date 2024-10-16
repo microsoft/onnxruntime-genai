@@ -14,7 +14,7 @@
   return self;
 }
 
-- (nullable)initWithError:(NSError**)error {
+- (nullable instancetype)initWithError:(NSError**)error {
   if ((self = [super init]) == nil) {
     return nil;
   }

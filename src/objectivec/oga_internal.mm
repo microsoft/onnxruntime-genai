@@ -8,7 +8,7 @@
   size_t _size;
 }
 
-- (nullable)initWithRawPointer:(const int32_t*)pointer size:(size_t)size {
+- (nullable instancetype)initWithRawPointer:(const int32_t*)pointer size:(size_t)size {
   _ptr = pointer;
   _size = size;
   return [self init];
@@ -33,7 +33,7 @@
   size_t _size;
 }
 
-- (nullable)initWithRawPointer:(const int64_t*)pointer size:(size_t)size {
+- (nullable instancetype)initWithRawPointer:(const int64_t*)pointer size:(size_t)size {
   _ptr = pointer;
   _size = size;
   return [self init];

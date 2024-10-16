@@ -9,7 +9,7 @@
   std::unique_ptr<OgaTensor> _tensor;
 }
 
-- (nullable)initWithDataPointer:(void*)data
+- (nullable instancetype)initWithDataPointer:(void*)data
                           shape:(OGAInt64Span*)shape
                            type:(OGAElementType)elementType
                           error:(NSError**)error {

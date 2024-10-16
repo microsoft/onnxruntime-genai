@@ -9,7 +9,7 @@
   std::unique_ptr<OgaImages> _images;
 }
 
-- (nullable)initWithPath:(NSArray<NSString *> *)paths error:(NSError**)error {
+- (nullable instancetype)initWithPath:(NSArray<NSString *> *)paths error:(NSError**)error {
   if ((self = [super init]) == nil) {
     return nil;
   }
