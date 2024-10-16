@@ -26,6 +26,24 @@ template void Launch_UpdatePositionIds(int32_t* positions, int batch_beam_size, 
 template void Launch_UpdatePositionIds(int64_t* positions, int batch_beam_size, cudaStream_t stream);
 
 template <typename T>
+__global__ void UpdatePositionIds(T* positions, int total_length, int new_kv_length) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < new_kv_length) {
+    positions[i] = total_length + i;
+  }
+}
+
+template <typename T>
+void Launch_UpdatePositionIds(T* positions, int total_length, int new_kv_length, cudaStream_t stream) {
+  int threads = std::min(256, new_kv_length);
+  int blocks = (new_kv_length + threads - 1) / threads;
+  UpdatePositionIds<T><<<blocks, threads, 0, stream>>>(positions, total_length, new_kv_length);
+}
+
+template void Launch_UpdatePositionIds(int32_t* positions, int total_length, int new_kv_length, cudaStream_t stream);
+template void Launch_UpdatePositionIds(int64_t* positions, int total_length, int new_kv_length, cudaStream_t stream);
+
+template <typename T>
 __global__ void CopyAndUpdateAttentionMask(T* mask_data, const T* old_mask_data, int batch_beam_size,
                                            int current_length, int max_length) {
   int global_index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -64,6 +82,39 @@ template void Launch_UpdateAttentionMask(int32_t* mask_data, const int32_t* old_
                                          int current_length, int max_length, bool update_only, cudaStream_t stream);
 template void Launch_UpdateAttentionMask(int64_t* mask_data, const int64_t* old_mask_data, int batch_beam_size,
                                          int current_length, int max_length, bool update_only, cudaStream_t stream);
+
+template <typename T>
+__global__ void UpdateAttentionMaskStatic(T* mask_data, int new_kv_length, int total_length) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  int past_length = total_length - new_kv_length;
+  if (i < new_kv_length) {
+    mask_data[past_length + i] = 1;
+  }
+}
+
+template <typename T>
+__global__ void UpdateAttentionMask(T* mask_data, int total_length) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < total_length) {
+    mask_data[i] = 1;
+  }
+}
+
+template <typename T>
+void Launch_UpdateAttentionMask(T* mask_data, int new_kv_length , int total_length, bool update_static, cudaStream_t stream) {  
+  if (update_static) {
+    int threads = std::min(256, new_kv_length);
+    int blocks = (new_kv_length + threads - 1) / threads;
+    UpdateAttentionMaskStatic<T><<<blocks, threads, 0, stream>>>(mask_data, new_kv_length, total_length);
+  } else {
+    int threads = std::min(256, total_length);
+    int blocks = (total_length + threads - 1) / threads;
+    UpdateAttentionMask<T><<<blocks, threads, 0, stream>>>(mask_data, total_length);
+  }
+}
+
+template void Launch_UpdateAttentionMask(int32_t* mask_data, int new_kv_length , int total_length, bool update_static, cudaStream_t stream);
+template void Launch_UpdateAttentionMask(int64_t* mask_data, int new_kv_length , int total_length, bool update_static, cudaStream_t stream);
 
 __global__ void HandleEOSArray(float* batch_logits, int batch_beam_size, int vocab_size, const int32_t* eos_token_ids, int eos_token_ids_count) {
   int index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -119,6 +170,36 @@ void LaunchInt32ToInt64(const int32_t* src, int64_t* dst, int count, cudaStream_
   int block_size = 256;
   int num_blocks = (count + block_size - 1) / block_size;
   ConvertInt32ToInt64<<<num_blocks, block_size, 0, stream>>>(src, dst, count);
+}
+
+__global__ void ExpandAndConvertInt32ToInt64(const int32_t* src, int64_t* dst, int num_beams, int batch_size, int sequence_length) {
+  int idx = threadIdx.x + blockIdx.x * blockDim.x;
+  if (idx < num_beams * batch_size * sequence_length) {
+    int batch_id = idx / (num_beams * sequence_length);
+    int seq_id = idx % sequence_length;
+    dst[idx] = (int64_t)src[batch_id * sequence_length + seq_id];
+  }
+}
+
+void LaunchExpandAndInt32ToInt64(const int32_t* src, int64_t* dst, int num_beams, int batch_size, int sequence_length, cudaStream_t stream) {
+  int block_size = 256;
+  int num_blocks = (num_beams * batch_size * sequence_length + block_size - 1) / block_size;
+  ExpandAndConvertInt32ToInt64<<<num_blocks, block_size, 0, stream>>>(src, dst, num_beams, batch_size, sequence_length);
+}
+
+__global__ void Expand(const int32_t* src, int32_t* dst, int num_beams, int batch_size, int sequence_length) {
+  int idx = threadIdx.x + blockIdx.x * blockDim.x;
+  if (idx < num_beams * batch_size * sequence_length) {
+    int batch_id = idx / (num_beams * sequence_length);
+    int seq_id = idx % sequence_length;
+    dst[idx] = src[batch_id * sequence_length + seq_id];
+  }
+}
+
+void LaunchExpand(const int32_t* src, int32_t* dst, int num_beams, int batch_size, int sequence_length, cudaStream_t stream) {
+  int block_size = 256;
+  int num_blocks = (num_beams * batch_size * sequence_length + block_size - 1) / block_size;
+  Expand<<<num_blocks, block_size, 0, stream>>>(src, dst, num_beams, batch_size, sequence_length);
 }
 
 namespace {

@@ -3,7 +3,7 @@ namespace Generators {
 
 // This class keeps track of sequences generated.
 struct Sequences {
-  Sequences(std::span<const int32_t> input_sequence, int batch_size, int beam_size, int max_length);
+  Sequences(int batch_size, int beam_size, int max_length);
 
   // Returns a sequence of word IDs for a given beam index ( beam_index < batch_beam_size).
   cpu_span<int32_t> GetSequence(size_t batch_beam_index);
@@ -18,6 +18,11 @@ struct Sequences {
 
   // Used by Greedy search:
   void AppendNextTokenToSequences(std::span<const int32_t> next_tokens);
+
+  // Return Token IDs of last token in each sequence
+  void GetLastTokens(cpu_span<int32_t>& last_tokens);
+  // Rewind sequences to ith token
+  void RewindTo(size_t index);
 
  private:
   std::unique_ptr<int32_t[]> sequences_buffer_;

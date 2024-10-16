@@ -27,6 +27,11 @@ struct Search : LeakChecked<Search> {
   virtual void ApplyMinLength(int min_length) = 0;
   virtual void ApplyRepetitionPenalty(float penalty) = 0;
 
+  // Set user input tokens
+  virtual void SetUserTokens(const RoamingArray<int32_t>& next_tokens) { assert(false); };
+  // To be used for rewind
+  virtual void RewindTo(size_t index) { assert(false); };
+
   std::shared_ptr<const GeneratorParams> params_;
 };
 
@@ -68,17 +73,23 @@ struct GreedySearch_Cpu : Search_Cpu {
   void SampleTopP(float p, float temperature) override;
   void SampleTopKTopP(int /*k*/, float /*p*/, float /*temperature*/) override;
 
+  // Used by continuous decoding search.
+  void SetUserTokens(const RoamingArray<int32_t>& next_tokens) override;
+  void RewindTo(size_t index) override;
+
+ protected:
+  void SetNextToken(size_t batch_id, int32_t token, bool check_eos = true);
+  void AppendNextTokensToSequences();
+
  private:
   bool PadIfAlreadyEOS(size_t batch_id);
-  void SetNextToken(size_t batch_id, int32_t token);
-  void AppendNextTokensToSequences();
 
   std::unique_ptr<int32_t[]> next_tokens_buffer_;
   std::unique_ptr<int32_t[]> temp_topk_buffer_;
 
   std::span<bool> eos_seen_;  // shape (batch_size)
   std::unique_ptr<bool[]> eos_seen_buffer_;
-  int not_done_count_{params_->batch_size};  // When zero, every batch entry is done (starts at batch_size_)
+  int not_done_count_{params_->search.batch_size};  // When zero, every batch entry is done (starts at batch_size_)
 
   std::mt19937 gen_;
 };
@@ -97,11 +108,15 @@ struct BeamSearch_Cpu : Search_Cpu {
 
   void SelectTop() override;
 
+  void SetUserTokens(const RoamingArray<int32_t>& next_tokens) override;
+
  private:
   void AppendNextTokensToSequences();
   void Finalize(size_t num_return_sequences);
 
   bool finalized_{};  // To avoid calling Finalize multiple times
+
+  std::unique_ptr<int32_t[]> next_tokens_buffer_;  // prevents freeing of next_tokens buffer for setting user tokens
 
   std::unique_ptr<BeamSearchScorer> beam_scorer_;
 };

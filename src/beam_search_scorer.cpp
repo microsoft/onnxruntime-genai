@@ -44,13 +44,13 @@ bool BeamHypotheses::CanImprove(float best_sum_logprobs, int current_length) con
 }
 
 BeamSearchScorer::BeamSearchScorer(const GeneratorParams& parameters)
-    : batch_size_{parameters.batch_size},
+    : batch_size_{parameters.search.batch_size},
       num_beams_{parameters.search.num_beams},
       max_length_{parameters.search.max_length},
       pad_token_id_{parameters.config.model.pad_token_id},
       eos_token_id_{parameters.config.model.eos_token_id},
       early_stopping_{parameters.search.early_stopping},
-      not_done_count_{parameters.batch_size} {
+      not_done_count_{parameters.search.batch_size} {
   size_t const batch_beam_size = static_cast<size_t>(batch_size_) * num_beams_;
 
   std::span<HypothesisScore> beams;
@@ -65,7 +65,8 @@ BeamSearchScorer::BeamSearchScorer(const GeneratorParams& parameters)
   next_beam_indices_ptr_ = AllocateArray<int32_t>(batch_beam_size, &next_beam_indices_);
 
   // Space to store intermediate sequence with length sequence_length, sequence_length + 1, ..., max_sequence_length.
-  size_t const per_beam = (max_length_ * (max_length_ + 1) - (parameters.sequence_length - 1) * parameters.sequence_length) / 2;
+  size_t const per_beam = (max_length_ * (max_length_ + 1)) / 2;
+
   hypothesis_buffer_ptr_ = AllocateArray<int32_t>(batch_beam_size * per_beam, &hypothesis_buffer_);
 
   memset(next_beam_scores_.data(), 0, next_beam_scores_.size_bytes());
@@ -73,7 +74,7 @@ BeamSearchScorer::BeamSearchScorer(const GeneratorParams& parameters)
   // Initialize score of first beam of each group with 0 and the rest with -1e9.
   // This ensures that the beams in the same group don't produce same tokens every time.
   std::span<float> const beam_scores = next_beam_scores_;
-  for (int i = 0; i < parameters.batch_size; i++) {
+  for (int i = 0; i < parameters.search.batch_size; i++) {
     for (int j = 1; j < parameters.search.num_beams; j++) {
       beam_scores[i * parameters.search.num_beams + j] = -1e9;
     }

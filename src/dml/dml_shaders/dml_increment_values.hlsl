@@ -14,6 +14,7 @@ cbuffer Constants
 {
     uint element_count;
     uint start_index;
+    uint start_value;
 };
 
 [RootSignature(ROOT_SIG_DEF)]
@@ -26,3 +27,15 @@ void CSMain(uint3 dispatch_thread_id : SV_DispatchThreadID)
         ++values[global_index];
     }
 }
+
+[RootSignature(ROOT_SIG_DEF)]
+[numthreads(NUM_THREADS, 1, 1)]
+void CSMainContinuous(uint3 dispatch_thread_id : SV_DispatchThreadID)
+{
+    uint global_index = dispatch_thread_id.x + start_index;
+    if (global_index < element_count)
+    {
+        values[global_index] = start_value + global_index;
+    }
+}
+

@@ -52,6 +52,8 @@ struct GreedySearch_Cuda : Search_Cuda {
   void SampleTopK(int k, float t) override;
   void SampleTopP(float p, float t) override;
   void SampleTopKTopP(int k, float p, float t) override;
+  void SetUserTokens(const RoamingArray<int32_t>& next_tokens) override;  // shape (batch_size, sequence_length)
+  void RewindTo(size_t index) override;
 
  private:
   void CheckForEOS();
@@ -71,6 +73,8 @@ struct BeamSearch_Cuda : Search_Cuda {
   // In Beam Search there are batch_size * num_beams sequences. Index is batch_id * num_beams + beam_id... Easier to use the other version.
   RoamingArray<int32_t> GetSequence(size_t index) override;
   RoamingArray<int32_t> GetSequence(size_t batch_id, size_t beam_id);
+
+  void SetUserTokens(const RoamingArray<int32_t>& next_tokens) override;
 
   void SelectTop() override;
 
