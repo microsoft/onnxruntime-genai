@@ -17,11 +17,6 @@ import onnxruntime_genai as og
 import time
 import argparse
 from tqdm import tqdm
-import subprocess
-import threading
-import psutil
-import os
-import json
 
 def main(args):
     # Get user arguments
