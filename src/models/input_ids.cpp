@@ -121,11 +121,10 @@ void InputIDs::Update(RoamingArray<int32_t> new_tokens) {
 #endif
       } break;
 
-      // TODO: DML case (beam search fix etc.)
       case DeviceType::DML: {
 #if USE_DML
         ComPtr<ID3D12Resource> source_resource;
-        Ort::\(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, value_int32_->GetTensorMutableRawData(), &source_resource));
+        Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, value_int32_->GetTensorMutableRawData(), &source_resource));
 
         auto source = std::span<const uint8_t>(
             reinterpret_cast<const uint8_t*>(new_tokens.GetCPU().data()),
