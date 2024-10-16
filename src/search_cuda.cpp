@@ -264,7 +264,7 @@ void GreedySearch_Cuda::SetUserTokens(const RoamingArray<int32_t>& next_tokens) 
 
   auto next_tokens_gpu = const_cast<RoamingArray<int32_t>&>(next_tokens).GetGPU();
   sequences_.AppendUserTokensToSequences(next_tokens_gpu, 1);
-  
+
   if (sequences_.GetSequenceLength() == params_->search.max_length) {
     if (g_log.enabled && g_log.hit_max_length)
       Log("hit_max_length", "greedy cuda hit");
@@ -283,8 +283,7 @@ void GreedySearch_Cuda::RewindTo(size_t index) {
   *done_cpu_ = false;
   if (index > 0) {
     sequences_.GetLastTokens(next_tokens_);
-  }
-  else
+  } else
     cudaMemsetAsync(next_tokens_.data(), 0, params_->search.batch_size * sizeof(int32_t), params_->cuda_stream);
 }
 

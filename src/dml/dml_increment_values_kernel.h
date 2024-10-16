@@ -16,7 +16,7 @@ class DmlIncrementValuesKernel {
       uint32_t element_count,
       ONNXTensorElementDataType dtype,
       ID3D12Resource* values_resource);
-  
+
   DmlIncrementValuesKernel(
       ID3D12Device* d3d12_device,
       DmlExecutionContext* execution_context,

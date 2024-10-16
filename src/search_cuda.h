@@ -52,7 +52,7 @@ struct GreedySearch_Cuda : Search_Cuda {
   void SampleTopK(int k, float t) override;
   void SampleTopP(float p, float t) override;
   void SampleTopKTopP(int k, float p, float t) override;
-  void SetUserTokens(const RoamingArray<int32_t>& next_tokens) override; // shape (batch_size, sequence_length)
+  void SetUserTokens(const RoamingArray<int32_t>& next_tokens) override;  // shape (batch_size, sequence_length)
   void RewindTo(size_t index) override;
 
  private:

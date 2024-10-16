@@ -13,7 +13,7 @@ template <typename T>
 void Launch_UpdateAttentionMask(T* mask_data, const T* old_mask_data, int batch_beam_size, int current_length,
                                 int max_length, bool update_only, cudaStream_t stream);
 template <typename T>
-void Launch_UpdateAttentionMask(T* mask_data, int new_kv_length , int total_length, bool update_static, cudaStream_t stream);
+void Launch_UpdateAttentionMask(T* mask_data, int new_kv_length, int total_length, bool update_static, cudaStream_t stream);
 
 void LaunchHandleEOSArray(float* batch_logits, int batch_beam_size, int vocab_size, const int32_t* eos_token_ids, int eos_token_ids_count, cudaStream_t stream);
 

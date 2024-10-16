@@ -119,7 +119,7 @@ struct BeamSearch_Cpu : Search_Cpu {
 
   bool finalized_{};  // To avoid calling Finalize multiple times
 
-  std::unique_ptr<int32_t[]> next_tokens_buffer_; // prevents freeing of next_tokens buffer for setting user tokens
+  std::unique_ptr<int32_t[]> next_tokens_buffer_;  // prevents freeing of next_tokens buffer for setting user tokens
 
   std::unique_ptr<BeamSearchScorer> beam_scorer_;
 };

@@ -106,7 +106,7 @@ void GeneratorParams::SetInputs(const NamedTensors& named_tensors) {
   for (const auto& [name, tensor] : named_tensors) {
     if (name == Config::Defaults::InputIdsName) {
       aux_input_ids = cpu_span<int32_t>(tensor->ort_tensor_->GetTensorMutableData<int32_t>(),
-                                               tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount());
+                                        tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount());
     } else {
       // If the nominal name is found in the map, use the graph name.
       // Else, use the nominal name as the graph name.
@@ -146,7 +146,7 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
     throw std::runtime_error("vocab_size must be 1 or greater, is " + std::to_string(params.config.model.vocab_size));
 
   search_ = CreateSearch(params);
-  state_ = model.CreateState(search_->GetSequenceLengths(), params); // Search sequence lengths set when creating state
+  state_ = model.CreateState(search_->GetSequenceLengths(), params);  // Search sequence lengths set when creating state
 
   // Temporary solution for multimodal and whisper models
   if (!params.aux_input_ids.empty() && params.aux_input_ids.data() != nullptr) {

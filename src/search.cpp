@@ -281,8 +281,7 @@ void GreedySearch_Cpu::RewindTo(size_t index) {
   // Set next tokens to the last tokens in the sequence
   if (index > 0) {
     sequences_.GetLastTokens(next_tokens_);
-  }
-  else
+  } else
     memset(next_tokens_.data(), 0, next_tokens_.size_bytes());
 }
 
@@ -305,7 +304,6 @@ void GreedySearch_Cpu::RewindTo(size_t index) {
 //   }
 //   sequences_.DropLastTokens({num_tokens});
 // }
-
 
 void BeamSearch_Cpu::SetUserTokens(const RoamingArray<int32_t>& next_tokens) {
   // LEFT OFF HERE

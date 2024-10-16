@@ -90,7 +90,7 @@ EmbeddingState::EmbeddingState(const MultiModalVisionModel& model, const Generat
 
 void EmbeddingState::UpdateInputsOutputs(RoamingArray<int32_t> next_tokens, bool is_prompt) {
   input_ids_.Update(next_tokens);
-  image_features_.Update(is_prompt); // THE ANSWER LIES HERE
+  image_features_.Update(is_prompt);  // THE ANSWER LIES HERE
 }
 
 RoamingArray<float> EmbeddingState::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
@@ -164,7 +164,7 @@ RoamingArray<float> MultiModalPipelineState::Run(int current_length, RoamingArra
   // Generation stage:
   //   - input_ids, image_features -> |embeddings_model| -> inputs_embeds
   //   - inputs_embeds -> |decoder_model| -> logits
-  
+
   embedding_state_->UpdateInputsOutputs(next_tokens, is_prompt_);
   decoder_state_->UpdateInputsOutputs(next_tokens, current_length, next_indices);
 

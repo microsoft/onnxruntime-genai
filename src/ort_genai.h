@@ -200,7 +200,7 @@ struct OgaGeneratorParams : OgaAbstract {
 
   void SetSearchOptionBool(const char* name, bool value) {
     OgaCheckResult(OgaGeneratorParamsSetSearchBool(this, name, value));
-  }    
+  }
 
   void SetModelInput(const char* name, OgaTensor& tensor) {
     OgaCheckResult(OgaGeneratorParamsSetModelInput(this, name, &tensor));

@@ -82,7 +82,7 @@ void InputIDs::Update(RoamingArray<int32_t> new_tokens) {
   size_t sequence_length = static_cast<size_t>(new_tokens.GetCPU().size()) / state_.params_->BatchBeamSize();
   if (is_prompt_ && state_.params_->search.num_beams > 1)
     sequence_length = static_cast<size_t>(new_tokens.GetCPU().size()) / state_.params_->search.batch_size;
-  
+
   if (static_cast<size_t>(shape_[1]) != sequence_length) {
     shape_[1] = sequence_length;
     if (!sb_input_ids_) {

@@ -110,7 +110,7 @@ void PositionInputs::RewindTo(size_t index) {
     is_first_update_ = true;
     is_first_posid_update_ = true;
     is_first_mask_update_ = true;
-  // Rewind the mask input to a previous state
+    // Rewind the mask input to a previous state
   } else if (has_mask_input_) {
     if (attention_mask_shape_[0] == 1)
 #if USE_CUDA || USE_DML
@@ -497,7 +497,7 @@ void PositionInputs::UpdateAttentionMask(int total_length, int new_kv_length) {
         dml_update_mask_kernel_ = DmlUpdateMaskKernel(
             model_.GetD3D12Device(),
             model_.GetDmlExecutionContext(),
-            static_cast<uint32_t>(attention_mask_shape_[1]), // max_length
+            static_cast<uint32_t>(attention_mask_shape_[1]),  // max_length
             type_,
             static_cast<uint32_t>(total_length),
             attention_mask_resource.Get());
@@ -540,7 +540,7 @@ void PositionInputs::CreateAndInitializePositionIDs(const RoamingArray<int32_t>&
 
     position_data_next[i] = abs_position;
   }
-  
+
   // Move tensors to appropriate device and expand by num_beams
   position_ids_ = model_.ExpandInputs(position_ids_, state_.params_->search.num_beams);
   position_ids_next_ = model_.ExpandInputs(position_ids_next_, state_.params_->search.num_beams);

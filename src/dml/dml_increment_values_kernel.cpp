@@ -8,12 +8,12 @@
 namespace DmlIncrementValues_Int32 {
 #include "generated_dml_shaders/increment_values_int32.h"
 #include "generated_dml_shaders/increment_values_cont_int32.h"
-}
+}  // namespace DmlIncrementValues_Int32
 
 namespace DmlIncrementValues_Int64 {
 #include "generated_dml_shaders/increment_values_int64.h"
 #include "generated_dml_shaders/increment_values_cont_int64.h"
-}
+}  // namespace DmlIncrementValues_Int64
 
 DmlIncrementValuesKernel::DmlIncrementValuesKernel(
     ID3D12Device* d3d12_device,
