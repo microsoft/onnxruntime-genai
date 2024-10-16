@@ -152,7 +152,7 @@ CudaInterface* GetCudaInterface() {
                                                              [](void* h) { FreeLibrary(reinterpret_cast<HMODULE>(h)); }};
 #else
   auto full_path = Ort::GetCurrentModuleDir() + "/libonnxruntime-genai-cuda.so";
-  static std::unique_ptr<void, void (*)(void*)> cuda_library{dlopen(full_path.c_str(), RTLD_NOW),
+  static std::unique_ptr<void, void (*)(void*)> cuda_library{dlopen(full_path.c_str(), RTLD_NOW|RTLD_LOCAL),
                                                              [](void* h) { dlclose(h); }};
 #endif
 

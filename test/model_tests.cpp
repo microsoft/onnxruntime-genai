@@ -108,6 +108,8 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
 
   auto model = Generators::CreateModel(Generators::GetOrtEnv(), model_path);
 
+  std::cerr << "Test_GreedySearch_Gpt_Cuda: after CreateModel: " << model_label << std::endl;
+
   auto params = Generators::CreateGeneratorParams(*model);
   params->batch_size = static_cast<int>(input_ids_shape[0]);
   params->sequence_length = static_cast<int>(input_ids_shape[1]);
@@ -121,6 +123,8 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
     generator->GenerateNextToken();
   }
 
+  std::cerr << "Test_GreedySearch_Gpt_Cuda: Verifying outputs for " << model_label << std::endl;
+
   // Verify outputs match expected outputs
   for (int i = 0; i < params->batch_size; i++) {
     auto sequence_gpu = generator->GetSequence(i);
@@ -128,6 +132,7 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
     auto* expected_output_start = &expected_output[i * params->search.max_length];
     EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params->search.max_length * sizeof(int32_t)));
   }
+  std::cerr << "Test_GreedySearch_Gpt_Cuda: Finished " << model_label << std::endl;
 }
 
 TEST(ModelTests, GreedySearchGptCuda) {

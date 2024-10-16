@@ -33,6 +33,7 @@ struct DeviceMemory : DeviceMemoryBase {
     return std::span<T>(reinterpret_cast<T*>(p_cpu_), Size());
   }
 
+  DeviceMemorySpan<T> subspan() { return DeviceMemorySpan<T>(*this, 0, Size()); }
   DeviceMemorySpan<T> subspan(size_t begin, size_t length) { return DeviceMemorySpan<T>(*this, begin, length); }
   DeviceMemorySpan<T> subspan_cpu(std::span<T> span) { return DeviceMemorySpan<T>(*this, span.data() - CpuSpan().data(), span.size()); }
   DeviceMemorySpan<T> subspan_device(std::span<T> span) { return DeviceMemorySpan<T>(*this, span.data() - DeviceSpan().data(), span.size()); }
