@@ -66,12 +66,6 @@ struct OgaModel : OgaAbstract {
     return std::unique_ptr<OgaModel>(p);
   }
 
-  std::unique_ptr<OgaSequences> Generate(const OgaGeneratorParams& params) const {
-    OgaSequences* p;
-    OgaCheckResult(OgaGenerate(this, &params, &p));
-    return std::unique_ptr<OgaSequences>(p);
-  }
-
   static void operator delete(void* p) { OgaDestroyModel(reinterpret_cast<OgaModel*>(p)); }
 };
 

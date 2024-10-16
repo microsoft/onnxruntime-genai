@@ -203,9 +203,9 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperInputFeatures(OgaGeneratorPa
   OGA_CATCH
 }
 
-OgaResult* OgaCreateGenerator(const OgaModel* model, OgaGeneratorParams* generator_params, OgaGenerator** out) {
+OgaResult* OgaCreateGenerator(const OgaModel* model, const OgaGeneratorParams* generator_params, OgaGenerator** out) {
   OGA_TRY
-  *out = reinterpret_cast<OgaGenerator*>(CreateGenerator(*reinterpret_cast<const Generators::Model*>(model), *reinterpret_cast<Generators::GeneratorParams*>(generator_params)).release());
+  *out = reinterpret_cast<OgaGenerator*>(CreateGenerator(*reinterpret_cast<const Generators::Model*>(model), *reinterpret_cast<const Generators::GeneratorParams*>(generator_params)).release());
   return nullptr;
   OGA_CATCH
 }

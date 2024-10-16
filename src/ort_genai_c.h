@@ -165,16 +165,6 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaMo
 OGA_EXPORT void OGA_API_CALL OgaDestroyModel(OgaModel* model);
 
 /*
- * \brief Generates an array of token arrays from the model execution based on the given generator params.
- * \param[in] model The model to use for generation.
- * \param[in] generator_params The parameters to use for generation.
- * \param[out] out The generated sequences of tokens. The caller is responsible for freeing the sequences using OgaDestroySequences
- *             after it is done using the sequences.
- * \return OgaResult containing the error message if the generation failed.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerate(const OgaModel* model, const OgaGeneratorParams* generator_params, OgaSequences** out);
-
-/*
  * \brief Creates a OgaGeneratorParams from the given model.
  * \param[in] model The model to use for generation.
  * \param[out] out The created generator params.
@@ -212,7 +202,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperInputFeatures(Oga
  * \param[out] out The created generator.
  * \return OgaResult containing the error message if the generator creation failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateGenerator(const OgaModel* model, OgaGeneratorParams* params, OgaGenerator** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateGenerator(const OgaModel* model, const OgaGeneratorParams* params, OgaGenerator** out);
 
 /*
  * \brief Destroys the given generator.
