@@ -485,12 +485,11 @@ def test_adapters(test_data_path, device, relative_model_path, phi2_for):
     ]
 
     params = og.GeneratorParams(model)
-    params.set_search_options(max_length=20)
-    params.input_ids = tokenizer.encode_batch(prompts)
+    params.set_search_options(max_length=20, batch_size=len(prompts))
 
     generator = og.Generator(model, params)
     generator.set_active_adapter(adapters, "adapters_a_and_b")
+    generator.append_tokens(tokenizer.encode_batch(prompts))
 
     while not generator.is_done():
-        generator.compute_logits()
         generator.generate_next_token()

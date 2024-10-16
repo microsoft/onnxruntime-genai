@@ -175,8 +175,7 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
       0, 0, 0, 52, 204, 204, 204, 204, 204, 204,
       0, 0, 195, 731, 731, 114, 114, 114, 114, 114};
 
-  auto input_sequence_length = input_ids_shape[1];
-  auto batch_size = input_ids_shape[0];
+  auto batch_size = static_cast<int>(input_ids_shape[0]);
   int max_length = 10;
 
   // To generate this file:
