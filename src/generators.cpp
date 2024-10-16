@@ -168,9 +168,9 @@ CudaInterface* GetCudaInterface() {
   CudaInterface* GetCudaInterface(GenaiInterface * p);
   static CudaInterface* cuda_interface{[] {
 #ifdef _WIN32
-    auto get_cuda_fn = reinterpret_cast<decltype(&GetCudaInterface)>(GetProcAddress(reinterpret_cast<HMODULE>(cuda_library.get()), "CreateCudaInterface"));
+    auto get_cuda_fn = reinterpret_cast<decltype(&GetCudaInterface)>(GetProcAddress(reinterpret_cast<HMODULE>(cuda_library.get()), "GetCudaInterface"));
 #else
-    auto get_cuda_fn = reinterpret_cast<decltype(&GetCudaInterface)>(dlsym(cuda_library.get(), "CreateCudaInterface"));
+    auto get_cuda_fn = reinterpret_cast<decltype(&GetCudaInterface)>(dlsym(cuda_library.get(), "GetCudaInterface"));
 #endif
     return get_cuda_fn(&g_genai);
   }()};
