@@ -24,10 +24,10 @@
     "inputs": [
         "Provide a detailed analysis as to why the University of Southern California is better than the University of California, Los Angeles."
     ],
-    "output_directory": "../../output_directory",
-    "cache_directory": "../../cache_directory",
-    "precision": "int4",
-    "executive_provider": "cpu",
+    "output_directory": "",
+    "cache_directory": "",
+    "precision": "",
+    "executive_provider": "",
     "verbose": false,
     "search_options": {
         "max_length": 512,
