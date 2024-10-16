@@ -83,7 +83,7 @@ void InputIDs::Update(RoamingArray<int32_t> new_tokens) {
   if (is_prompt_ && state_.params_->search.num_beams > 1)
     sequence_length = static_cast<size_t>(new_tokens.GetCPU().size()) / state_.params_->search.batch_size;
   
-  if (shape_[1] != sequence_length) {
+  if (static_cast<size_t>(shape_[1]) != sequence_length) {
     shape_[1] = sequence_length;
     if (!sb_input_ids_) {
       value_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
@@ -179,8 +179,8 @@ void InputIDs::Update(RoamingArray<int32_t> new_tokens) {
       // Temporary solution for beam search
       if (is_prompt_ && state_.params_->search.num_beams > 1) {
         for (int b = 0; b < shape_[0]; b++) {
-          int in_offset = (b / state_.params_->search.num_beams) * shape_[1];
-          int out_offset = b * shape_[1];
+          int in_offset = (b / state_.params_->search.num_beams) * static_cast<int>(shape_[1]);
+          int out_offset = b * static_cast<int>(shape_[1]);
           memcpy(data + out_offset, new_tokens.GetCPU().data() + in_offset, shape_[1] * sizeof(int32_t));
         }
       } else {

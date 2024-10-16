@@ -238,7 +238,7 @@ void PositionInputs::UpdatePositionIDs(int total_length, int new_kv_length) {
   if (position_ids_shape_[1] != new_kv_length) {
     position_ids_shape_[1] = new_kv_length;
     if (!sb_position_ids_) {
-      position_ids_ = OrtValue::CreateTensor(model_.allocator_device_, position_ids_shape_, type_);
+      position_ids_ = OrtValue::CreateTensor(*model_.allocator_device_, position_ids_shape_, type_);
     } else {
 #if USE_CUDA
       position_ids_ = sb_position_ids_->CreateTensorOnStaticBuffer(position_ids_shape_, type_);
@@ -492,15 +492,15 @@ void PositionInputs::UpdateAttentionMask(int total_length, int new_kv_length) {
       ComPtr<ID3D12Resource> attention_mask_resource;
       Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, attention_mask_->GetTensorMutableRawData(), &attention_mask_resource));
 
-      // Lazily create the kernel only the first time it's needed
+      // TODO(aciddelgado): THIS FUNCTIONALITY IS INCORRECT AND NEEDS TO BE FIXED
       if (!dml_update_mask_kernel_) {
         dml_update_mask_kernel_ = DmlUpdateMaskKernel(
             model_.GetD3D12Device(),
             model_.GetDmlExecutionContext(),
-            1, // only support batch_size == 1
+            static_cast<uint32_t>(1), // only support batch_size == 1
             static_cast<uint32_t>(attention_mask_shape_[1]), // max_length
             type_,
-            total_length,
+            static_cast<uint32_t>(total_length),
             attention_mask_resource.Get());
       }
 
@@ -558,7 +558,6 @@ void PositionInputs::CreateAndInitializeAttentionMask(const RoamingArray<int32_t
   const auto* word_id = const_cast<RoamingArray<int32_t>&>(next_tokens).GetCPU().data();
   auto* mask = mask_data;
   for (int i = 0; i < shape[0]; i++) {
-    T abs_position = 0;
     for (int j = 0; j < shape[1]; j++, word_id++, mask++) {
       if (*word_id == model_.config_->model.pad_token_id) {
         *mask = 0;
@@ -644,17 +643,17 @@ void PositionInputs::RewindMask(size_t index) {
 void PositionInputs::RewindMask(size_t index) {
   if (sb_attention_mask_ && !is_first_mask_update_) {
     int past_length = static_cast<int>(index);
-    int max_length = static_cast<int>(state_.params_->search.max_length);
     ComPtr<ID3D12Resource> attention_mask_resource;
     Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, attention_mask_->GetTensorMutableRawData(), &attention_mask_resource));
 
+    // TODO(aciddelgado): THIS FUNCTIONALITY IS INCORRECT AND NEEDS TO BE FIXED
     dml_update_mask_kernel_ = DmlUpdateMaskKernel(
         model_.GetD3D12Device(),
         model_.GetDmlExecutionContext(),
         static_cast<uint32_t>(attention_mask_shape_[0]),
         static_cast<uint32_t>(attention_mask_shape_[1]),
         type_,
-        past_length,
+        static_cast<uint32_t>(past_length),
         attention_mask_resource.Get());
 
     ComPtr<ID3D12Fence> fence;

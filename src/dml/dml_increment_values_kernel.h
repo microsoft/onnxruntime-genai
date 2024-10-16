@@ -31,6 +31,7 @@ class DmlIncrementValuesKernel {
   struct Constants {
     uint32_t element_count;
     uint32_t start_index;
+    uint32_t start_value;
   };
 
   ComPtr<ID3D12Device> device_;

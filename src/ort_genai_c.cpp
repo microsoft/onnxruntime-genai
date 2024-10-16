@@ -217,7 +217,6 @@ bool OGA_API_CALL OgaGenerator_IsDone(const OgaGenerator* generator) {
 OgaResult* OGA_API_CALL OgaGenerator_AppendTokenSequences(OgaGenerator* oga_generator, const OgaSequences* p_sequences) {
   OGA_TRY
   auto& generator = *reinterpret_cast<Generators::Generator*>(oga_generator);
-  auto& params = *generator.state_->params_;
   auto& sequences = *reinterpret_cast<const Generators::TokenSequences*>(p_sequences);
 
   std::vector<std::span<const int32_t>> span_sequences;

@@ -135,7 +135,7 @@ RoamingArray<float> DecoderState::Run(int current_length, RoamingArray<int32_t> 
 void DecoderState::UpdateInputsOutputs(RoamingArray<int32_t> next_tokens, int total_length, RoamingArray<int32_t> beam_indices) {
   int batch_size = static_cast<int>(inputs_embeds_.GetShape()[0]);
   size_t new_length = next_tokens.GetCPU().size() / batch_size;
-  position_inputs_.Update(next_tokens, total_length, new_length);
+  position_inputs_.Update(next_tokens, total_length, static_cast<int>(new_length));
   kv_cache_.Update(beam_indices.GetCPU(), total_length);
   logits_.Update(next_tokens, new_length);
   inputs_embeds_.UpdateSequenceLength(new_length);

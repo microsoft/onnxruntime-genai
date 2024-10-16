@@ -270,7 +270,7 @@ void KV_Cache::RewindPastTensorsTo(size_t index) {
 #elif USE_DML
       if (model_.device_type_ == DeviceType::DML) {
         ComPtr<ID3D12Resource> source_resource;
-        Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, present->GetTensorMutableRawData(), &source_resource));
+        Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, present.GetTensorMutableRawData(), &source_resource));
 
         ComPtr<ID3D12Resource> target_resource;
         Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, past->GetTensorMutableRawData(), &target_resource));

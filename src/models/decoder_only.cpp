@@ -41,8 +41,8 @@ void DecoderOnly_State::RewindTo(size_t index) {
 
 void DecoderOnly_State::UpdateInputsOutputs(RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> beam_indices, int total_length) {
   input_ids_.Update(next_tokens);
-  size_t new_length = input_ids_.GetShape()[1];
-  position_inputs_.Update(next_tokens, total_length, new_length);
+  size_t new_length = static_cast<size_t>(input_ids_.GetShape()[1]);
+  position_inputs_.Update(next_tokens, total_length, static_cast<int>(new_length));
   kv_cache_.Update(beam_indices.GetCPU(), total_length);
   logits_.Update(next_tokens, new_length);
 }

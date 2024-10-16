@@ -49,7 +49,7 @@ void Embeddings::Add() {
 }
 
 void Embeddings::UpdateSequenceLength(size_t new_length) {
-  if (shape_[1] != new_length) {
+  if (static_cast<size_t>(shape_[1]) != new_length) {
     shape_[1] = new_length;
 
     if (mode_ == Embeddings::Mode::Input) {

@@ -174,8 +174,7 @@ TEST(CAPITests, GetOutputCAPI) {
   std::vector<int64_t> input_ids_shape{2, 4};
   std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
 
-  auto input_sequence_length = input_ids_shape[1];
-  auto batch_size = input_ids_shape[0];
+  int batch_size = static_cast<int>(input_ids_shape[0]);
   int max_length = 10;
 
   // To generate this file:

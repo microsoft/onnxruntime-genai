@@ -17,6 +17,7 @@ cbuffer Constants
     uint seq_len;
     uint element_count;
     uint start_index;
+    bool reinitialize;
 };
 
 [RootSignature(ROOT_SIG_DEF)]

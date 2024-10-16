@@ -15,7 +15,7 @@ struct Logits {
   RoamingArray<float> Get();
 
   // Resize logits to [bz, token_count, vocab_size] if necessary.
-  void Update(const RoamingArray<int32_t>& next_tokens, int new_kv_length);
+  void Update(const RoamingArray<int32_t>& next_tokens, size_t new_kv_length);
 
  private:
   void HandleEOSArray(cpu_span<float> logits);
