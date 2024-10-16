@@ -30,7 +30,7 @@ DmlUpdateMaskKernel::DmlUpdateMaskKernel(
   constants_.element_count = batch_size * max_seq_len;
   constants_.max_seq_len = max_seq_len;
   constants_.seq_len = seq_len;
-  constants.set_all = false;
+  constants_.set_all = false;
   total_element_count_ = batch_size * max_seq_len;
 
   // Compute root signature.
