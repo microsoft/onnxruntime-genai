@@ -108,9 +108,7 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
 
 RoamingArray<float> DecoderOnlyPipelineState::Run(int total_length, RoamingArray<int32_t> next_tokens,
                                                   RoamingArray<int32_t> next_indices) {
-  if (!first_run_) {
-    UpdateInputsOutputs(next_tokens, next_indices, total_length);
-  }
+  UpdateInputsOutputs(next_tokens, next_indices, total_length);
 
   for (auto& pipeline_state : pipeline_states_) {
     if (first_run_ && !model_.config_->model.decoder.pipeline[pipeline_state->id_].run_on_prompt) {
