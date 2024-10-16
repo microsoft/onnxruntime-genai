@@ -219,9 +219,9 @@ python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p p
 
 
 ### Quant Provider
-Provides different quantization techniques.
+Provides different quantization techniques using option quant_provider
 
- nvidia_awq: NVIDIA's TensorRT ModelOpt. It supports 2 calibration options:
+  nvidia_awq: NVIDIA's TensorRT ModelOpt. It supports 2 calibration modes:
 
   nvidia_awq_calibration: AWQ implementation and weight clipping. Choices: {awq, awq_clip}. awq is a default option for nvidia_awq
 
@@ -237,6 +237,7 @@ python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o p
 # From source:
 python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options quant_provider=nvidia_awq use_qdq=True nvidia_awq_calibration=awq
 ```
+Default quantization mode will run it we dont specify this option
 ### Unit Testing Models
 
 This scenario is where your PyTorch model is already downloaded locally (either in the default Hugging Face cache directory or in a local folder on disk). If it is not already downloaded locally, here is an example of how you can download it.
