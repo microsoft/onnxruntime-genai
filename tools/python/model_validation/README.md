@@ -11,6 +11,14 @@ git clone https://github.com/microsoft/onnxruntime-genai.git
 cd tools/python/model_validation
 pip install -r requirements.txt
 ```
+
+Ensure you log into HuggingFace. 
+
+More about the HuggingFace CLI [here](https://huggingface.co/docs/huggingface_hub/main/en/guides/cli) 
+```bash
+huggingface-cli login
+```
+
 Within the model_validation directory, you'll locate the script named validation_tool.py, alongside the validation_config.json configuration file and a README.md document.
 
 ### Current Supported Model Architectures
