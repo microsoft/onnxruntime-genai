@@ -6,6 +6,7 @@
 #include "utils.h"
 #include "prompt_image_processor.h"
 #include "audio_processor.h"
+#include "adapters.h"
 
 #if USE_DML
 #include "dml_provider_factory.h"
@@ -27,7 +28,7 @@ void CheckResult(extError_t error);
 
 struct State {
   State(const GeneratorParams& params, const Model& model_);
-  virtual ~State() = default;
+  virtual ~State();
 
   virtual RoamingArray<float> Run(int total_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices = {}) = 0;
   virtual const CapturedGraphInfo* GetCapturedGraphInfo() const { return nullptr; }
@@ -41,18 +42,25 @@ struct State {
 
   void ClearIO();  // Clear all inputs/outputs
 
+  void SetActiveAdapter(Adapters* adapters, const std::string& adapter_name);
+
   const Model& model_;
+
   std::shared_ptr<const GeneratorParams> params_;
 
   std::vector<const char*> input_names_, output_names_;
+  std::vector<std::string> adapter_names_;
   std::vector<OrtValue*> inputs_, outputs_;
 
  protected:
-  void Run(OrtSession& session, OrtRunOptions& run_options, int new_batch_size);  // Uses the inputs below to run
+  void Run(OrtSession& session, int new_batch_size);  // Uses the inputs below to run
   bool first_run_{true};
+
+  std::unique_ptr<OrtRunOptions> run_options_;
 
  private:
   int current_batch_size_{0};
+  std::shared_ptr<Adapters> adapters_;
 };
 
 struct TokenizerStream : LeakChecked<TokenizerStream> {
@@ -133,7 +141,6 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
 
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
-  std::unique_ptr<OrtRunOptions> run_options_;
 
   cuda_stream_holder cuda_stream_;
   DeviceType device_type_{DeviceType::CPU};

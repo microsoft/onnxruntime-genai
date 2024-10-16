@@ -310,6 +310,10 @@ struct PyGenerator {
     return generator_->IsDone();
   }
 
+  void SetActiveAdapter(Adapters* adapters, const std::string& adapter_name) {
+    generator_->state_->SetActiveAdapter(adapters, adapter_name);
+  }
+
  private:
   std::unique_ptr<Generator> generator_;
   PyRoamingArray<int32_t> py_tokens_;
@@ -420,7 +424,10 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("generate_next_token", &PyGenerator::GenerateNextToken)
       .def("rewind_to", &PyGenerator::RewindToLength)
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
-      .def("get_sequence", &PyGenerator::GetSequence);
+      .def("get_sequence", &PyGenerator::GetSequence)
+      .def("set_active_adapter", [](PyGenerator& generator, Adapters* adapters, const std::string& adapter_name) {
+        generator.SetActiveAdapter(adapters, adapter_name);
+      });
 
   pybind11::class_<Images>(m, "Images")
       .def_static("open", [](pybind11::args image_paths) {
@@ -501,6 +508,12 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("decode", [](MultiModalProcessor& processor, pybind11::array_t<int32_t> tokens) {
         return processor.tokenizer_->Decode(ToSpan(tokens));
       });
+
+  pybind11::class_<Adapters, std::shared_ptr<Adapters>>(m, "Adapters")
+      .def(pybind11::init([](Model& model) {
+        return std::make_shared<Adapters>(&model);
+      }))
+      .def("load", &Adapters::LoadAdapter);
 
   m.def("set_log_options", &SetLogOptions);
 

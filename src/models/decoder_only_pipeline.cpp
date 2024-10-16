@@ -81,7 +81,7 @@ bool IntermediatePipelineState::SupportsPrimaryDevice() const {
 
 RoamingArray<float> IntermediatePipelineState::Run(int total_length, RoamingArray<int32_t> next_tokens,
                                                    RoamingArray<int32_t> next_indices) {
-  State::Run(*model_.sessions_[id_], *model_.run_options_, params_->BatchBeamSize());
+  State::Run(*model_.sessions_[id_], params_->BatchBeamSize());
 
   return RoamingArray<float>();
 }
