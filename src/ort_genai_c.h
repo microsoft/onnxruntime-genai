@@ -391,7 +391,7 @@ OGA_EXPORT size_t OGA_API_CALL OgaStringArrayGetCount(const OgaStringArray* stri
           - The OgaAdapters object is used to load all the model adapters.
           - It is responsible for reference counting the loaded adapters.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateAdapters(const OgaModel* model, OgaAdapters** adapters);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateAdapters(const OgaModel* model, OgaAdapters** out);
 
 /*
  * \brief Destroys the OgaAdapters object.
