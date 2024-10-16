@@ -216,7 +216,7 @@ void operator delete(void* p, size_t /*size*/) noexcept { Generators::gp_genai->
 #endif
 
 extern "C" {
-OGA_EXPORT Generators::CudaInterface* GetCudaInterface(GenaiInterface* p_genai) {
+Generators::CudaInterface* GetInterface(GenaiInterface* p_genai) {
   Generators::gp_genai = p_genai;
   return &Generators::g_cuda_device;
 }

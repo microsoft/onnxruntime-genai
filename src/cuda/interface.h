@@ -49,4 +49,6 @@ struct CudaInterface : DeviceInterface {
 };
 #endif
 
+Generators::CudaInterface* GetInterface(GenaiInterface* p_genai);
+
 }  // namespace Generators

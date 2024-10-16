@@ -110,6 +110,7 @@ if(APPLE)
 target_link_libraries(onnxruntime-genai PRIVATE "-framework Foundation" "-framework CoreML")
 endif()
 
+
 # Build all source files using CUDA as a separate shared library we dynamically load at runtime
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   add_library(onnxruntime-genai-cuda SHARED ${generator_cudalib_srcs})
@@ -120,6 +121,15 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   add_dependencies(onnxruntime-genai onnxruntime-genai-cuda)
   source_group(TREE ${GENERATORS_ROOT}/cuda FILES ${generator_cudalib_srcs})
   list(APPEND ortgenai_embed_libs "$<TARGET_FILE:onnxruntime-genai-cuda>")
+  if(APPLE)
+    set_property(TARGET onnxruntime-genai-cuda APPEND_STRING PROPERTY LINK_FLAGS "-Xlinker -exported_symbols_list ${GENERATORS_ROOT}/cuda/exported_symbols.lst")
+  elseif(UNIX)
+    set_property(TARGET onnxruntime-genai-cuda APPEND_STRING PROPERTY LINK_FLAGS "-Xlinker --version-script=${GENERATORS_ROOT}/cuda/version_script.lds -Xlinker --gc-sections")
+  elseif(WIN32)
+    set_property(TARGET onnxruntime-genai-cuda APPEND_STRING PROPERTY LINK_FLAGS "-DEF:${GENERATORS_ROOT}/cuda/symbols.def")
+  else()
+    message(FATAL_ERROR "${target} unknown platform, need to specify shared library exports for it")
+  endif()
 endif()
 
 if(CMAKE_GENERATOR_TOOLSET MATCHES "Visual Studio")

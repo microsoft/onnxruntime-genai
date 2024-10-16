@@ -152,7 +152,7 @@ CudaInterface* GetCudaInterface() {
                                                              [](void* h) { FreeLibrary(reinterpret_cast<HMODULE>(h)); }};
 #else
   auto full_path = Ort::GetCurrentModuleDir() + "/libonnxruntime-genai-cuda.so";
-  static std::unique_ptr<void, void (*)(void*)> cuda_library{dlopen(full_path.c_str(), RTLD_NOW|RTLD_LOCAL),
+  static std::unique_ptr<void, void (*)(void*)> cuda_library{dlopen(full_path.c_str(), RTLD_NOW | RTLD_LOCAL | RTLD_DEEPBIND),
                                                              [](void* h) { dlclose(h); }};
 #endif
 
@@ -165,12 +165,11 @@ CudaInterface* GetCudaInterface() {
   if (!cuda_library)
     throw std::runtime_error("Cuda interface not available");
 
-  CudaInterface* GetCudaInterface(GenaiInterface * p);
   static CudaInterface* cuda_interface{[] {
 #ifdef _WIN32
-    auto get_cuda_fn = reinterpret_cast<decltype(&GetCudaInterface)>(GetProcAddress(reinterpret_cast<HMODULE>(cuda_library.get()), "GetCudaInterface"));
+    auto get_cuda_fn = reinterpret_cast<decltype(&GetInterface)>(GetProcAddress(reinterpret_cast<HMODULE>(cuda_library.get()), "GetInterface"));
 #else
-    auto get_cuda_fn = reinterpret_cast<decltype(&GetCudaInterface)>(dlsym(cuda_library.get(), "GetCudaInterface"));
+    auto get_cuda_fn = reinterpret_cast<decltype(&GetInterface)>(dlsym(cuda_library.get(), "GetInterface"));
 #endif
     return get_cuda_fn(&g_genai);
   }()};
