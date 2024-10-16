@@ -54,4 +54,9 @@ set_target_properties(unit_tests PROPERTIES FOLDER "Tests")
 source_group(TREE ${PROJECT_SOURCE_DIR} FILES ${test_srcs})
 set_property(DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT unit_tests)
 
+# Hide symbols by default, so that shared libraries don't link to our redirected symbols (leads to infinite loops)
+if (NOT MSVC)
+  target_compile_options(unit_tests PRIVATE "-fvisibility=hidden")
+endif()
+
 include(GoogleTest)
