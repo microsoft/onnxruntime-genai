@@ -135,10 +135,7 @@ struct CudaInterfaceImpl : CudaInterface {
   }
 
   cudaError_t cudaStreamCreate(cudaStream_t* stream) override {
-    std::cerr << "CudaInterfaceImpl::cudaStreamCreate" << std::endl;
-    auto out=::cudaStreamCreate(stream);
-    std::cerr << "CudaInterfaceImpl::cudaStreamCreate finished" << std::endl;
-    return out;
+    return ::cudaStreamCreate(stream);
   }
 
   cudaError_t cudaStreamDestroy(cudaStream_t stream) override {

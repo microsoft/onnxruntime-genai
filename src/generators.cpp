@@ -136,31 +136,17 @@ DeviceInterface& GetCpuDeviceInterface() {
 
 #if USE_CUDA
 CudaInterface* GetCudaInterface() {
-  g_log.enabled=true;
-  static bool pre_init = [&] {
-    if (g_log.enabled)
-      Log("cuda_interface", "Trying to load genai-cuda");
-    return true;
-  }();
 
 // Load the shared library onnxruntime-genai-cuda.dll
 // This is a workaround to avoid linking the CUDA library to the generator library
 // The CUDA library is only needed for the CUDA allocator
 #ifdef _WIN32
-  auto full_path = CurrentModulePath() + "onnxruntime-genai-cuda.dll";
-  static std::unique_ptr<void, void (*)(void*)> cuda_library{LoadLibrary(full_path.c_str()),
+  static std::unique_ptr<void, void (*)(void*)> cuda_library{LoadLibrary((CurrentModulePath() + "onnxruntime-genai-cuda.dll").c_str()),
                                                              [](void* h) { FreeLibrary(reinterpret_cast<HMODULE>(h)); }};
 #else
-  auto full_path = Ort::GetCurrentModuleDir() + "/libonnxruntime-genai-cuda.so";
-  static std::unique_ptr<void, void (*)(void*)> cuda_library{dlopen(full_path.c_str(), RTLD_NOW | RTLD_LOCAL | RTLD_DEEPBIND),
+  static std::unique_ptr<void, void (*)(void*)> cuda_library{dlopen((Ort::GetCurrentModuleDir() + "/libonnxruntime-genai-cuda.so").c_str(), RTLD_NOW | RTLD_LOCAL),
                                                              [](void* h) { dlclose(h); }};
 #endif
-
-  static bool init = [&] {
-    if (g_log.enabled)
-      Log("cuda_interface", "genai-cuda loaded: " + full_path);
-    return true;
-  }();
 
   if (!cuda_library)
     throw std::runtime_error("Cuda interface not available");
@@ -173,12 +159,6 @@ CudaInterface* GetCudaInterface() {
 #endif
     return get_cuda_fn(&g_genai);
   }()};
-
-  static bool post_init = [&] {
-    if (g_log.enabled)
-      Log("cuda_interface", "cuda_interface created");
-    return true;
-  }();
 
   return cuda_interface;
 }
