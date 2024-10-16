@@ -102,7 +102,7 @@ if __name__ == "__main__":
         cache_path = args["cache_directory"] + f'/{adjusted_model}'
 
         try:
-            create_model(model_dict["name"], '', output_path, args["precision"], args["executive_provider"], cache_path)
+            create_model(model_dict["name"], '', output_path, args["precision"], args["execution_provider"], cache_path)
         except Exception as e:
             print(f'Failure after create model {e}')
             output.append([model_dict["name"], validation_complete, e])

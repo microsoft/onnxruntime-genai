@@ -27,7 +27,7 @@
     "output_directory": "",
     "cache_directory": "",
     "precision": "",
-    "executive_provider": "",
+    "execution_provider": "",
     "verbose": false,
     "search_options": {
         "max_length": 512,
