@@ -366,9 +366,13 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       }
       ort_provider_options->Update(keys.data(), values.data(), keys.size());
 
+      std::cerr << "Creating cuda stream" << std::endl;
+
       // Create and set our cudaStream_t
       if (!cuda_stream_.get())
         cuda_stream_.Create();
+
+      std::cerr << "Cuda stream created" << std::endl;
 
       ort_provider_options->UpdateValue("user_compute_stream", cuda_stream_.get());
 
@@ -377,6 +381,8 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       // Only use the primary session options to determine the device type
       if (is_primary_session_options)
         device_type_ = DeviceType::CUDA;  // Scoring will use CUDA
+
+      std::cerr << "Appended execution provider options" << std::endl;
     } else if (provider_options.name == "rocm") {
       OrtROCMProviderOptions ort_provider_options;
 
