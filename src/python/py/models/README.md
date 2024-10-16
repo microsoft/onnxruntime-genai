@@ -219,11 +219,11 @@ python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p p
 
 
 ### Quant Provider
-Provides different quantization techniques using option quant_provider
+Set different quantization techniques using option quant_provider
 
-  nvidia_awq: NVIDIA's TensorRT ModelOpt. It supports 2 calibration modes:
-
-  nvidia_awq_calibration: AWQ implementation and weight clipping. Choices: {awq, awq_clip}. awq is a default option for nvidia_awq
+TensorRT-Model-Optimizer's AWQ INT4 
+  1. nvidia_awq: NVIDIA's TensorRT ModelOpt awq implementation. set quant_provider=nvidia_awq. It supports 2 calibration modes.
+  2. nvidia_awq_calibration: AWQ implementation and weight clipping. Choices: {awq, awq_clip}. awq is a default option for nvidia_awq
 
 ```
 # From wheel:
