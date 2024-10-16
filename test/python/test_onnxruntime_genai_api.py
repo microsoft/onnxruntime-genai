@@ -226,7 +226,6 @@ def test_get_output(test_data_path, relative_model_path):
             ],
         ]
     )
-    generator.compute_logits()
     logits = generator.get_output("logits")
     assert np.allclose(logits[:, :, ::200], expected_sampled_logits_prompt, atol=1e-3)
     generator.generate_next_token()
@@ -239,7 +238,6 @@ def test_get_output(test_data_path, relative_model_path):
             [[0.3041716, -0.08701379, -0.03778192, 0.07471392, -0.02049096]],
         ]
     )
-    generator.compute_logits()
     logits = generator.get_output("logits")
     assert np.allclose(
         logits[:, :, ::200], expected_sampled_logits_token_gen, atol=1e-3
