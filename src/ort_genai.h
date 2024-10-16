@@ -222,11 +222,11 @@ struct OgaGenerator : OgaAbstract {
     return OgaGenerator_IsDone(this);
   }
 
-  void AddInputSequences(const OgaSequences& sequences) {
+  void AppendTokenSequences(const OgaSequences& sequences) {
     OgaCheckResult(OgaGenerator_AppendTokenSequences(this, &sequences));
   }
 
-  void AddInputTokens(int32_t* input_ids, size_t input_ids_count) {
+  void AppendTokens(int32_t* input_ids, size_t input_ids_count) {
     OgaCheckResult(OgaGenerator_AppendTokens(this, input_ids, input_ids_count));
   }
 

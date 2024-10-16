@@ -125,7 +125,7 @@ TEST(CAPITests, EndToEndPhiBatch) {
   params->SetSearchOption("batch_size", 3);
 
   auto generator = OgaGenerator::Create(*model, *params);
-  generator->AddInputSequences(*input_sequences);
+  generator->AppendTokenSequences(*input_sequences);
 
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
@@ -188,7 +188,7 @@ TEST(CAPITests, GreedySearchGptFp32CAPI) {
   params->SetSearchOption("batch_size", batch_size);
 
   auto generator = OgaGenerator::Create(*model, *params);
-  generator->AddInputTokens(input_ids.data(), input_ids.size());
+  generator->AppendTokens(input_ids.data(), input_ids.size());
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
   }
@@ -224,7 +224,7 @@ TEST(CAPITests, GetOutputCAPI) {
   params->SetSearchOption("batch_size", batch_size);
 
   auto generator = OgaGenerator::Create(*model, *params);
-  generator->AddInputTokens(input_ids.data(), input_ids.size());
+  generator->AppendTokens(input_ids.data(), input_ids.size());
 
   // check prompt
   // full logits has shape [2, 4, 1000]. Sample 1 for every 200 tokens and the expected sampled logits has shape [2, 4, 5]
@@ -289,7 +289,7 @@ struct Phi2Test {
     // Low level loop
     {
       auto generator = OgaGenerator::Create(*model_, *params_);
-      generator->AddInputSequences(input_sequences_);
+      generator->AppendTokenSequences(input_sequences_);
 
       while (!generator->IsDone()) {
         generator->GenerateNextToken();

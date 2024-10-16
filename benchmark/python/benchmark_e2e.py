@@ -280,7 +280,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
 
         # Measure prompt processing
         prompt_start_time = time.perf_counter()
-        generator.add_input_ids(tokens)
+        generator.append_tokens(tokens)
         prompt_end_time = time.perf_counter()
         prompt_times.append(prompt_end_time - prompt_start_time)
 

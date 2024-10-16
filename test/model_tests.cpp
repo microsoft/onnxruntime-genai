@@ -199,7 +199,7 @@ Print all primes between 1 and n
 
   // Generator version
   auto generator = Generators::CreateGenerator(*model, *params);
-  generator->AddInputTokens(Generators::cpu_span<int>(tokens.data(), tokens.size()));
+  generator->AppendTokens(Generators::cpu_span<int>(tokens.data(), tokens.size()));
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
   }

@@ -28,7 +28,7 @@ Java_ai_onnxruntime_genai_Generator_destroyGenerator(JNIEnv* env, jobject thiz, 
 }
 
 JNIEXPORT void JNICALL
-Java_ai_onnxruntime_genai_Generator_addInputSequences(JNIEnv* env, jobject thiz, jlong native_handle,
+Java_ai_onnxruntime_genai_Generator_appendTokenSequences(JNIEnv* env, jobject thiz, jlong native_handle,
                                                       jlong sequences_handle) {
   OgaGenerator* generator = reinterpret_cast<OgaGenerator*>(native_handle);
   const OgaSequences* sequences = reinterpret_cast<const OgaSequences*>(sequences_handle);
@@ -37,7 +37,7 @@ Java_ai_onnxruntime_genai_Generator_addInputSequences(JNIEnv* env, jobject thiz,
 }
 
 JNIEXPORT void JNICALL
-Java_ai_onnxruntime_genai_Generator_addInputTokens(JNIEnv* env, jobject thiz, jlong native_handle, jintArray token_ids) {
+Java_ai_onnxruntime_genai_Generator_appendTokens(JNIEnv* env, jobject thiz, jlong native_handle, jintArray token_ids) {
   OgaGenerator* generator = reinterpret_cast<OgaGenerator*>(native_handle);
 
   jint* tokens = env->GetIntArrayElements(token_ids, nullptr);

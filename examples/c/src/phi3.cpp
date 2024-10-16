@@ -95,7 +95,7 @@ void CXX_API(const char* model_path) {
     params->SetSearchOption("max_length", 1024);
 
     auto generator = OgaGenerator::Create(*model, *params);
-    generator->AddInputSequences(*sequences);
+    generator->AppendTokenSequences(*sequences);
 
     while (!generator->IsDone()) {
       generator->GenerateNextToken();

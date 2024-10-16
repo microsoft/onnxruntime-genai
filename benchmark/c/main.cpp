@@ -123,7 +123,7 @@ std::string GeneratePrompt(size_t num_prompt_tokens, const OgaModel& model, cons
   params->SetSearchOption("min_length", static_cast<double>(num_prompt_tokens));
 
   auto generator = OgaGenerator::Create(model, *params);
-  generator->AddInputSequences(*base_prompt_sequences);
+  generator->AppendTokenSequences(*base_prompt_sequences);
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
   }
@@ -164,7 +164,7 @@ void RunBenchmark(const benchmark::Options& opts) {
   if (opts.verbose) std::cout << "Running warmup iterations (" << opts.num_warmup_iterations << ")...\n";
   for (size_t i = 0; i < opts.num_warmup_iterations; ++i) {
     auto generator = OgaGenerator::Create(*model, *generator_params);
-    generator->AddInputSequences(*prompt_sequences);
+    generator->AppendTokenSequences(*prompt_sequences);
     while (!generator->IsDone()) {
       generator->GenerateNextToken();
     }
@@ -195,7 +195,7 @@ void RunBenchmark(const benchmark::Options& opts) {
 
       {
         Timing prompt_processing_timing{prompt_processing_times};
-        generator->AddInputSequences(*prompt_sequences);
+        generator->AppendTokenSequences(*prompt_sequences);
       }
 
       {
