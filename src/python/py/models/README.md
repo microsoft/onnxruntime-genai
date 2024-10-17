@@ -34,6 +34,7 @@ The tool currently supports the following model architectures.
 - Mistral
 - Phi
 - Qwen
+- Nemotron
 
 It is intended for supporting the latest, popular state-of-the-art models.
 
