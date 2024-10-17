@@ -1860,11 +1860,6 @@ class Model:
                 # Each decoder layer of model
                 print(f"Reading decoder layer {self.layer_id}")
 
-                # Some model stores rotary_emb at model class instead of attention objects.
-                if hasattr(model, "model"):
-                    if hasattr(model.model, "rotary_emb"):
-                        self.attention_attrs["model_rotary_emb"] = model.model.rotary_emb
-
                 self.make_layer(self.layer_id, module)
                 self.layer_id += 1
 
@@ -2496,8 +2491,7 @@ class NemotronModel(LlamaModel):
         self.layernorm_attrs["skip_input"] = f"{down_name}/output_0"
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
-        # Pytorch has rotary_emb stored at model class and not at attention object
-        attention.rotary_emb = self.attention_attrs["model_rotary_emb"]
+        attention.rotary_emb = type("RotaryEmbedding", (object,), {'content':{}})()
         return super().make_attention(layer_id, attention, root_input, **kwargs)
 
     def make_rotary_embedding(self, rotemb, name, root_input, **kwargs):
