@@ -1769,7 +1769,7 @@ class Model:
         return output_name
 
     def make_lm_head(self, lm_head):
-        bias_exists = lm_head.bias
+        bias_exists = lm_head.bias is not None
         scale_exists = self.lm_head_attrs["scale"] != 1
         mask_exists = self.lm_head_attrs["mask"] is not None
 
@@ -1859,7 +1859,6 @@ class Model:
             elif module.__class__.__name__.endswith("DecoderLayer") and self.layer_id < self.num_layers:
                 # Each decoder layer of model
                 print(f"Reading decoder layer {self.layer_id}")
-
                 self.make_layer(self.layer_id, module)
                 self.layer_id += 1
 
