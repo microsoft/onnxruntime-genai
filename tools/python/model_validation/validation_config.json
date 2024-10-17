@@ -1,0 +1,41 @@
+{
+    "models": [
+        {
+            "name": "Qwen/Qwen2.5-7B-Instruct",
+            "chat_template": "<|im_start|>\n <|user|> \n {input} <|im_end>\n'<|im_start|>assistant\n"
+        },
+        {
+            "name": "meta-llama/Llama-2-7b-chat-hf",
+            "chat_template": "<s>[INST]<<SYS>>\n{input}<</SYS>>[INST]"
+        },
+        {
+            "name": "mistralai/Mistral-7B-Instruct-v0.3",
+            "chat_template": " \"[INST] \" + {input} + \"[/INST]\""
+        },
+        {
+            "name": "microsoft/Phi-3.5-mini-instruct",
+            "chat_template": "<|user|>\n{input} <|end|>\n<|assistant|>"
+        },
+        {
+            "name": "google/gemma-2-2b-it",
+            "chat_template": "'<start_of_turn>' + <|user|> '\n' + {input}  + '<end_of_turn>\n"
+        }
+    ],
+    "inputs": [
+        "Provide a detailed analysis as to why the University of Southern California is better than the University of California, Los Angeles."
+    ],
+    "output_directory": "",
+    "cache_directory": "",
+    "precision": "",
+    "execution_provider": "",
+    "verbose": false,
+    "search_options": {
+        "max_length": 512,
+        "min_length": 0,
+        "do_sample": false,
+        "top_p": 0.0,
+        "top_k": 1,
+        "temperature": 1.0,
+        "repetition_penalty": 1.0
+    }
+}

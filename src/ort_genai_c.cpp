@@ -311,12 +311,12 @@ OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* oga_generator
 
 size_t OGA_API_CALL OgaGenerator_GetSequenceCount(const OgaGenerator* oga_generator, size_t index) {
   auto& generator = *reinterpret_cast<const Generators::Generator*>(oga_generator);
-  return generator.GetSequence(static_cast<int>(index)).GetCPU().size();
+  return generator.GetSequence(static_cast<int>(index)).CpuSpan().size();
 }
 
 const int32_t* OGA_API_CALL OgaGenerator_GetSequenceData(const OgaGenerator* oga_generator, size_t index) {
   auto& generator = *reinterpret_cast<const Generators::Generator*>(oga_generator);
-  return generator.GetSequence(static_cast<int>(index)).GetCPU().data();
+  return generator.GetSequence(static_cast<int>(index)).CpuSpan().data();
 }
 
 OgaResult* OGA_API_CALL OgaCreateTokenizer(const OgaModel* model, OgaTokenizer** out) {
@@ -531,6 +531,39 @@ size_t OGA_API_CALL OgaStringArrayGetCount(const OgaStringArray* string_array) {
   return reinterpret_cast<const std::vector<std::string>*>(string_array)->size();
 }
 
+OgaResult* OgaCreateAdapters(const OgaModel* model, OgaAdapters** out) {
+  OGA_TRY
+  auto adapters = std::make_shared<Generators::Adapters>(reinterpret_cast<const Generators::Model*>(model));
+  *out = reinterpret_cast<OgaAdapters*>(adapters.get());
+  adapters->external_owner_ = adapters;
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaLoadAdapter(OgaAdapters* adapters, const char* adapter_file_path,
+                          const char* adapter_name) {
+  OGA_TRY
+  reinterpret_cast<Generators::Adapters*>(adapters)->LoadAdapter(adapter_file_path, adapter_name);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaUnloadAdapter(OgaAdapters* adapters, const char* adapter_name) {
+  OGA_TRY
+  reinterpret_cast<Generators::Adapters*>(adapters)->UnloadAdapter(adapter_name);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaSetActiveAdapter(OgaGenerator* generator, OgaAdapters* adapters,
+                               const char* adapter_name) {
+  OGA_TRY
+  reinterpret_cast<Generators::Generator*>(generator)->state_->SetActiveAdapter(
+      reinterpret_cast<Generators::Adapters*>(adapters), adapter_name);
+  return nullptr;
+  OGA_CATCH
+}
+
 void OGA_API_CALL OgaDestroyStringArray(OgaStringArray* string_array) {
   delete reinterpret_cast<std::vector<std::string>*>(string_array);
 }
@@ -544,7 +577,7 @@ void OGA_API_CALL OgaDestroyString(const char* p) {
 }
 
 void OGA_API_CALL OgaDestroySequences(OgaSequences* p) {
-  delete reinterpret_cast<Generators::Sequences*>(p);
+  delete reinterpret_cast<Generators::TokenSequences*>(p);
 }
 
 void OGA_API_CALL OgaDestroyModel(OgaModel* p) {
@@ -585,5 +618,9 @@ void OGA_API_CALL OgaDestroyAudios(OgaAudios* p) {
 
 void OGA_API_CALL OgaDestroyNamedTensors(OgaNamedTensors* p) {
   delete reinterpret_cast<Generators::NamedTensors*>(p);
+}
+
+void OGA_API_CALL OgaDestroyAdapters(OgaAdapters* p) {
+  reinterpret_cast<Generators::Adapters*>(p)->external_owner_ = nullptr;
 }
 }

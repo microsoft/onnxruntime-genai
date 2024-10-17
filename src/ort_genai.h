@@ -264,6 +264,10 @@ struct OgaGenerator : OgaAbstract {
   }
 #endif
 
+  void SetActiveAdapter(OgaAdapters& adapters, const char* adapter_name) {
+    OgaCheckResult(OgaSetActiveAdapter(this, &adapters, adapter_name));
+  }
+
   static void operator delete(void* p) { OgaDestroyGenerator(reinterpret_cast<OgaGenerator*>(p)); }
 };
 
@@ -390,6 +394,25 @@ struct OgaMultiModalProcessor : OgaAbstract {
 #endif
 
   static void operator delete(void* p) { OgaDestroyMultiModalProcessor(reinterpret_cast<OgaMultiModalProcessor*>(p)); }
+};
+
+struct OgaAdapters : OgaAbstract {
+  static std::unique_ptr<OgaAdapters> Create(const OgaModel& model) {
+    OgaAdapters* p;
+    OgaCheckResult(OgaCreateAdapters(&model, &p));
+    return std::unique_ptr<OgaAdapters>(p);
+  }
+
+  void LoadAdapter(const char* adapter_file_path,
+                   const char* adapter_name) {
+    OgaCheckResult(OgaLoadAdapter(this, adapter_file_path, adapter_name));
+  }
+
+  void UnloadAdapter(const char* adapter_name) {
+    OgaCheckResult(OgaUnloadAdapter(this, adapter_name));
+  }
+
+  static void operator delete(void* p) { OgaDestroyAdapters(reinterpret_cast<OgaAdapters*>(p)); }
 };
 
 struct OgaHandle {

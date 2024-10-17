@@ -17,42 +17,28 @@
 #include "dml_provider_factory.h"
 #include "../dml/dml_helpers.h"
 
-EXTERN_C IMAGE_DOS_HEADER __ImageBase;
-
-static std::string CurrentModulePath() {
-  char path[MAX_PATH];
-  GetModuleFileNameA((HINSTANCE)&__ImageBase, path, _countof(path));
-
-  char absolute_path[MAX_PATH];
-  char* name;
-  GetFullPathNameA(path, _countof(path), absolute_path, &name);
-
-  auto idx = std::distance(absolute_path, name);
-  auto out_path = std::string(absolute_path);
-  out_path.resize(idx);
-
-  return out_path;
-}
+std::string CurrentModulePath();
 #endif
 
 namespace Generators {
 
 State::State(const GeneratorParams& params, const Model& model)
     : model_{model},
-      params_{params.shared_from_this()} {}
+      params_{params.shared_from_this()},
+      run_options_{OrtRunOptions::Create()} {}
 
-void State::Run(OrtSession& session, OrtRunOptions& run_options, int new_batch_size) {
+void State::Run(OrtSession& session, int new_batch_size) {
   auto captured_graph_info = GetCapturedGraphInfo();
 
   if (first_run_) {
     if (captured_graph_info) {
-      model_.run_options_->AddConfigEntry("gpu_graph_id", "-1");
+      run_options_->AddConfigEntry("gpu_graph_id", "-1");
     }
     first_run_ = false;
   } else if (captured_graph_info && new_batch_size != current_batch_size_) {
     current_batch_size_ = new_batch_size;
     auto annotation_id = std::to_string(captured_graph_info->GenerateUniqueAnnotationID(new_batch_size));
-    model_.run_options_->AddConfigEntry("gpu_graph_id", annotation_id.c_str());
+    run_options_->AddConfigEntry("gpu_graph_id", annotation_id.c_str());
   }
 
   if (g_log.enabled && g_log.model_input_values) {
@@ -67,7 +53,8 @@ void State::Run(OrtSession& session, OrtRunOptions& run_options, int new_batch_s
     DumpTensors(model_, stream, outputs_.data(), output_names_.data(), output_names_.size(), false);
   }
 
-  session.Run(&run_options, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
+  session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
+              output_names_.data(), outputs_.data(), output_names_.size());
 
   if (g_log.enabled && g_log.model_output_values) {
     auto& stream = Log("model_output_values");
@@ -99,6 +86,27 @@ void State::ClearIO() {
   output_names_.clear();
   inputs_.clear();
   outputs_.clear();
+}
+
+void State::SetActiveAdapter(Adapters* adapters, const std::string& adapter_name) {
+  if (!adapters_) {
+    adapters_ = adapters->shared_from_this();
+  } else if (adapters_.get() != adapters) {
+    // Two different instances of Adapters are being used. The Generator state can only manage
+    // active adapters from a single Adapters container.
+    throw std::runtime_error("Generator state can only register a single Adapters container.");
+  }
+
+  run_options_->AddActiveLoraAdapter(*adapters_->AcquireAdapter(adapter_name));
+  adapter_names_.push_back(adapter_name);
+}
+
+State::~State() {
+  if (adapters_) {
+    for (const auto& adapter_name : adapter_names_) {
+      adapters_->ReleaseAdapter(adapter_name);
+    }
+  }
 }
 
 std::vector<int32_t> PadInputs(std::span<std::span<const int32_t>> sequences, int32_t pad_token_id) {
@@ -261,9 +269,6 @@ ONNXTensorElementDataType SessionInfo::GetOutputDataType(const std::string& name
 }
 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
-  // TODO: add function to create run options
-  run_options_ = OrtRunOptions::Create();
-
   CreateSessionOptions();
 }
 
@@ -381,9 +386,13 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       }
       ort_provider_options->Update(keys.data(), values.data(), keys.size());
 
+      std::cerr << "Creating cuda stream" << std::endl;
+
       // Create and set our cudaStream_t
       if (!cuda_stream_.get())
         cuda_stream_.Create();
+
+      std::cerr << "Cuda stream created" << std::endl;
 
       ort_provider_options->UpdateValue("user_compute_stream", cuda_stream_.get());
 
@@ -392,6 +401,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       // Only use the primary session options to determine the device type
       if (is_primary_session_options)
         device_type_ = DeviceType::CUDA;  // Scoring will use CUDA
+
     } else if (provider_options.name == "rocm") {
       OrtROCMProviderOptions ort_provider_options;
 

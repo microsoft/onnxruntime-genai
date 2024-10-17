@@ -99,4 +99,4 @@ jobs:
           set -e -x
           export ORTGENAI_LOG_ORT_LIB=1
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$GITHUB_WORKSPACE/ort/lib
-          ./build/cpu/test/unit_tests
+          ./build/cpu/unit_tests

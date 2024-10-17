@@ -7,6 +7,8 @@ import os
 import sys
 import sysconfig
 from pathlib import Path
+import shutil
+import onnxruntime
 
 import numpy as np
 import onnxruntime_genai as og
@@ -326,7 +328,7 @@ def test_pipeline_model(test_data_path, phi2_for, relative_model_path):
     expected_output = [
         'This is a test.\n        # TOD import * doct proofingrad',
         'Rats are awesome pets!\n    """\n\n',
-        'The quick brown fox jumps over the lazy dog.\n    """\n\n'
+        'The quick brown fox jumps over the lazy dog.\n    """\n\n',
     ]
     assert tokenizer.decode_batch(output_sequences) == expected_output
 
@@ -391,3 +393,124 @@ def test_vision_preprocessing_multiple_images(
 
     prompt += " What is shown in this two images?\n<|end|>\n<|assistant|>\n"
     _ = processor(prompt, images=images)
+
+
+@pytest.mark.parametrize("device", devices)
+@pytest.mark.skipif(
+    sysconfig.get_platform().endswith("arm64"),
+    reason="ONNX is not available on ARM64",
+)
+@pytest.mark.parametrize("multiple_adapters", [True, False])
+def test_adapters(test_data_path, device, multiple_adapters, phi2_for):
+    def _prepare_adapter_model(test_data_path):
+        phi2_model_path = phi2_for(device)
+        relative_model_path = "multiple_adapters" if multiple_adapters else "adapters"
+        adapter_model_path = os.fspath(Path(test_data_path) / relative_model_path)
+        if os.path.exists(adapter_model_path):
+            shutil.rmtree(adapter_model_path)
+
+        shutil.copytree(phi2_model_path, adapter_model_path)
+
+        # Create the model with adapters
+        model = onnx.load(Path(adapter_model_path) / "model.onnx")
+
+        for node in model.graph.node:
+            if node.name == "/lm_head/Add":
+                node.output[0] = "logits_0"
+                break
+
+        vocab_size = 51200
+        adapter_a = onnx.helper.make_tensor_value_info(
+            "adapter_a",
+            onnx.TensorProto.FLOAT if device == "cpu" else onnx.TensorProto.FLOAT16,
+            [vocab_size],
+        )
+        adapter_b = onnx.helper.make_tensor_value_info(
+            "adapter_b",
+            onnx.TensorProto.FLOAT if device == "cpu" else onnx.TensorProto.FLOAT16,
+            [vocab_size],
+        )
+
+        model.graph.input.extend([adapter_a, adapter_b])
+        add_node = onnx.helper.make_node(
+            "Add", ["adapter_a", "adapter_b"], ["adapter_output"], name="adapter_add"
+        )
+        add_to_logits_node = onnx.helper.make_node(
+            "Add", ["adapter_output", "logits_0"], ["logits"], name="add_to_logits"
+        )
+        model.graph.node.extend([add_node, add_to_logits_node])
+
+        onnx.save(
+            model,
+            Path(adapter_model_path) / "model.onnx",
+            save_as_external_data=True,
+            location="model.data",
+        )
+
+        # Create adapters for the model
+        a, b = None, None
+        if device == "cpu":
+            a = np.random.rand(vocab_size).astype(np.float32)
+            b = np.random.rand(vocab_size).astype(np.float32)
+        else:
+            a = np.random.rand(vocab_size).astype(np.float16)
+            b = np.random.rand(vocab_size).astype(np.float16)
+
+        onnx_dtype = 1 if device == "cpu" else 10
+        adapters = {
+            "adapter_a": onnxruntime.OrtValue.ortvalue_from_numpy_with_onnx_type(
+                a, onnx_dtype
+            ),
+            "adapter_b": onnxruntime.OrtValue.ortvalue_from_numpy_with_onnx_type(
+                b, onnx_dtype
+            ),
+        }
+        if multiple_adapters:
+            adapters = [{key: value} for key, value in adapters.items()]
+
+        def _export_adapter(adapter, adapter_file_name):
+            adapter_format = onnxruntime.AdapterFormat()
+            adapter_format.set_adapter_version(1)
+            adapter_format.set_model_version(1)
+            adapter_format.set_parameters(adapter)
+            adapter_format.export_adapter(adapter_file_name)
+
+        adapter_paths = []
+        if multiple_adapters:
+            for i, adapter in enumerate(adapters):
+                adapter_file_name = str(Path(adapter_model_path) / f"adapter_{i}.onnx_adapter")
+                _export_adapter(adapter, adapter_file_name)
+                adapter_paths.append(adapter_file_name)
+        else:
+            adapter_file_name = str(Path(adapter_model_path) / "adapters.onnx_adapter")
+            _export_adapter(adapters, adapter_file_name)
+            adapter_paths.append(adapter_file_name)
+
+        return adapter_model_path, adapter_paths
+
+    model_path, adapter_paths = _prepare_adapter_model(test_data_path)
+    model = og.Model(model_path)
+    adapters = og.Adapters(model)
+    for i, adapter_path in enumerate(adapter_paths):
+        adapters.load(adapter_path, f"adapter_{i}")
+
+    tokenizer = og.Tokenizer(model)
+    prompts = [
+        "This is a test.",
+        "Rats are awesome pets!",
+        "The quick brown fox jumps over the lazy dog.",
+    ]
+
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=20)
+    params.input_ids = tokenizer.encode_batch(prompts)
+
+    print(len(adapter_paths))
+
+    generator = og.Generator(model, params)
+    for i in range(len(adapter_paths)):
+        generator.set_active_adapter(adapters, f"adapter_{i}")
+
+    while not generator.is_done():
+        generator.compute_logits()
+        generator.generate_next_token()

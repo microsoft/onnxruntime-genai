@@ -62,6 +62,7 @@ typedef struct OgaNamedTensors OgaNamedTensors;
 typedef struct OgaMultiModalProcessor OgaMultiModalProcessor;
 typedef struct OgaAudios OgaAudios;
 typedef struct OgaStringArray OgaStringArray;
+typedef struct OgaAdapters OgaAdapters;
 
 /* \brief Call this on process exit to cleanly shutdown the genai library & its onnxruntime usage
  */
@@ -384,6 +385,45 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaStringArrayAddString(OgaStringArray* strin
  * \return The number of strings in the string_array.
  */
 OGA_EXPORT size_t OGA_API_CALL OgaStringArrayGetCount(const OgaStringArray* string_array);
+
+/*
+ * \brief Creates the OgaAdapters object that manages the adapters.
+          - The OgaAdapters object is used to load all the model adapters.
+          - It is responsible for reference counting the loaded adapters.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateAdapters(const OgaModel* model, OgaAdapters** out);
+
+/*
+ * \brief Destroys the OgaAdapters object.
+ */
+OGA_EXPORT void OGA_API_CALL OgaDestroyAdapters(OgaAdapters* adapters);
+
+/*
+ * \brief Loads the model adapter from the given adapter file path and adapter name.
+ * \param[in] adapters The OgaAdapters object to load the adapter.
+ * \param[in] adapter_file_path The file path of the adapter to load.
+ * \param[in] adapter_name A unique identifier for the adapter chosed by the function invoker.
+ *                         This name is used for querying the adapter.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadAdapter(OgaAdapters* adapters, const char* adapter_file_path,
+                                                  const char* adapter_name);
+
+/*
+ * \brief Unloads the adapter with the given identifier from the previosly loaded adapters.
+          If the adapter is not found, or if it cannot be unloaded (when it is in use), an error is returned.
+ * \param[in] adapters The OgaAdapters object to unload the adapter.
+ * \param[in] adapter_name The name of the adapter to unload.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaUnloadAdapter(OgaAdapters* adapters, const char* adapter_name);
+
+/*
+ * \brief Sets the adapter with the given adapter name as active for the given OgaGenerator object.
+ * \param[in] generator The OgaGenerator object to set the active adapter.
+ * \param[in] adapters The OgaAdapters object that manages the model adapters.
+ * \param[in] adapter_name The name of the adapter to set as active.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaSetActiveAdapter(OgaGenerator* generator, OgaAdapters* adapters,
+                                                       const char* adapter_name);
 
 #ifdef __cplusplus
 }
