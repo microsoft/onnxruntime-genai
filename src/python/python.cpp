@@ -338,8 +338,8 @@ struct PyGenerator {
   }
 
   void SetLogits(pybind11::array_t<float> logits) {
-    auto logits_span = ToSpan(logits);
-    generator_->search_->SetLogits(cpu_span<float>{logits_span.data(), logits_span.size()});
+    logits_ = logits;
+    generator_->search_->SetLogits(cpu_span<float>{ToSpan(logits_)});
   }
 
   void GenerateNextToken() {
@@ -361,6 +361,7 @@ struct PyGenerator {
   PyDeviceMemorySpan<int32_t> py_sequence_;
   PyRoamingArray<int32_t> py_sequencelengths_;
   PyRoamingArray<float> py_logits_;
+  pybind11::array_t<float> logits_;  // Logits passed in from python, to keep the memory alive
 };
 
 void SetLogOptions(const pybind11::kwargs& dict) {
