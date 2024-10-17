@@ -278,19 +278,17 @@ void BeamSearch_Cpu::Finalize(size_t num_return_sequences) {
   finalized_ = true;
 }
 
-RoamingArray<int32_t> BeamSearch_Cpu::GetSequence(size_t index) {
+DeviceMemorySpan<int32_t> BeamSearch_Cpu::GetSequence(size_t index) {
   size_t batch_id = index / params_->search.num_return_sequences;
   size_t beam_id = index % params_->search.num_return_sequences;
   Finalize(params_->search.num_return_sequences);
-  BeamHypotheses beam_hyp = beam_scorer_->GetBeamHypotheses(batch_id);
-  return beam_hyp.GetHypothesis(beam_id);
+  return beam_scorer_->GetBeamHypotheses(batch_id, beam_id);
 }
 
-// TODO(aciddelgado): my question is, should this return copy or reference?
-RoamingArray<int32_t> BeamSearch_Cpu::GetSequence(size_t batch_id, size_t beam_id) {
+// TODO(aciddelgado): my question is, should this return copy or reference? A: A copy, as with DeviceMemorySpan it's like a span
+DeviceMemorySpan<int32_t> BeamSearch_Cpu::GetSequence(size_t batch_id, size_t beam_id) {
   Finalize(params_->search.num_return_sequences);
-  BeamHypotheses beam_hyp = beam_scorer_->GetBeamHypotheses(batch_id);
-  return beam_hyp.GetHypothesis(beam_id);
+  return beam_scorer_->GetBeamHypotheses(batch_id, beam_id);
 }
 
 std::span<float> Search_Cpu::GetScores(int batch_beam_index) const {
@@ -317,7 +315,7 @@ void Search_Cpu::ApplyRepetitionPenalty(float penalty) {
   const int batch_beam_size = params_->BatchBeamSize();
   for (int i = 0; i < batch_beam_size; i++) {
     std::span<float> const beam_token_scores = GetScores(i);
-    std::span<const int32_t> const sequence = sequences_.GetSequence(i);
+    std::span<const int32_t> const sequence = sequences_.GetSequence(i).CpuSpan();
 
     // Find unique word IDs in sequence.
     std::unordered_set<int32_t> unique_word_ids;

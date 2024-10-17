@@ -1,4 +1,5 @@
 #include "generators.h"
+#include "interface.h"
 #include "search.h"
 #include "search_cuda.h"
 #include "beam_search_scorer_cuda.cuh"
@@ -185,7 +186,7 @@ void GreedySearch_Cuda::AppendNextTokensToSequences() {
   sequences_.AppendNextTokenToSequences(next_tokens_);
 
   if (sequences_.GetSequenceLength() == params_->search.max_length) {
-    if (g_log.enabled && g_log.hit_max_length)
+    if (GetLogItems().enabled && GetLogItems().hit_max_length)
       Log("hit_max_length", "greedy cuda hit");
     *done_cpu_ = true;
   }
@@ -196,7 +197,7 @@ bool BeamSearch_Cuda::IsDone() const {
     return true;
 
   if (sequences_.GetSequenceLength() == params_->search.max_length) {
-    if (g_log.enabled && g_log.hit_max_length)
+    if (GetLogItems().enabled && GetLogItems().hit_max_length)
       Log("hit_max_length", "beam cuda hit");
     return true;
   }
@@ -214,14 +215,14 @@ void BeamSearch_Cuda::Finalize(size_t num_return_sequences) {
   finalized_ = true;
 }
 
-RoamingArray<int32_t> BeamSearch_Cuda::GetSequence(size_t index) {
+DeviceMemorySpan<int32_t> BeamSearch_Cuda::GetSequence(size_t index) {
   Finalize(params_->search.num_return_sequences);
   const size_t batch_id = index / params_->search.num_return_sequences;
   const size_t beam_id = index % params_->search.num_return_sequences;
   return beam_scorer_->GetBeamHypothesis(batch_id, beam_id);
 }
 
-RoamingArray<int32_t> BeamSearch_Cuda::GetSequence(size_t batch_id, size_t beam_id) {
+DeviceMemorySpan<int32_t> BeamSearch_Cuda::GetSequence(size_t batch_id, size_t beam_id) {
   Finalize(params_->search.num_return_sequences);
   return beam_scorer_->GetBeamHypothesis(batch_id, beam_id);
 }
@@ -264,7 +265,7 @@ void Search_Cuda::ApplyRepetitionPenalty(float penalty) {
   if (penalty == 1.0f)
     return;
 
-  cuda::LaunchRepetitionPenaltyProcessor(sequences_.GetSequences().data(),
+  cuda::LaunchRepetitionPenaltyProcessor(sequences_.GetSequences().DeviceSpan().data(),
                                          GetScores().data(), params_->batch_size, params_->search.num_beams, params_->config.model.vocab_size,
                                          params_->search.max_length, GetSequenceLength(), penalty, params_->cuda_stream);
 }

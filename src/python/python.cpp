@@ -204,6 +204,23 @@ struct PyRoamingArray : RoamingArray<T> {
 };
 
 template <typename T>
+struct PyDeviceMemorySpan {
+  void operator=(DeviceMemorySpan<T> span) {
+    span_ = std::move(span);
+  }
+
+  pybind11::array_t<T> GetNumpy() {
+    auto v = span_.CpuSpan();
+    py_cpu_array_ = pybind11::array_t<T>({v.size()}, {sizeof(T)}, v.data(), pybind11::capsule(v.data(), [](void*) {}));
+    return py_cpu_array_;
+  }
+
+ private:
+  DeviceMemorySpan<T> span_;
+  pybind11::array_t<T> py_cpu_array_;
+};
+
+template <typename T>
 void Declare_DeviceArray(pybind11::module& m, const char* name) {
   using Type = PyRoamingArray<T>;
   pybind11::class_<Type>(m, name)
@@ -303,8 +320,8 @@ struct PyGenerator {
   }
 
   pybind11::array_t<int32_t> GetSequence(int index) {
-    py_sequence_.Assign(generator_->search_->GetSequence(index));
-    return ToPython(py_sequence_.GetCPU());
+    py_sequence_ = generator_->search_->GetSequence(index);
+    return py_sequence_.GetNumpy();
   }
 
   void ComputeLogits() {
@@ -331,7 +348,7 @@ struct PyGenerator {
   std::unique_ptr<Generator> generator_;
   PyRoamingArray<int32_t> py_tokens_;
   PyRoamingArray<int32_t> py_indices_;
-  PyRoamingArray<int32_t> py_sequence_;
+  PyDeviceMemorySpan<int32_t> py_sequence_;
   PyRoamingArray<int32_t> py_sequencelengths_;
 };
 
