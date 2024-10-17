@@ -15,6 +15,7 @@ struct Search : LeakChecked<Search> {
   virtual int GetSequenceLength() const = 0;
   virtual DeviceMemorySpan<int32_t> GetSequence(size_t index) = 0;
 
+  virtual RoamingArray<float> GetLogits() const = 0;
   virtual void SetLogits(RoamingArray<float> logits) = 0;
   virtual bool IsDone() const = 0;
 
@@ -38,6 +39,7 @@ struct Search_Cpu : Search {
   DeviceMemorySpan<int32_t> GetSequence(size_t index) override { return sequences_.GetSequence(index); }
 
   bool IsDone() const override { return done_; }
+  RoamingArray<float> GetLogits() const override;
   void SetLogits(RoamingArray<float> logits) override;
 
   void ApplyMinLength(int min_length) override;

@@ -64,6 +64,10 @@ BeamSearch_Cuda::BeamSearch_Cuda(const GeneratorParams& params)
 
 BeamSearch_Cuda::~BeamSearch_Cuda() = default;
 
+RoamingArray<float> Search_Cuda::GetLogits() const {
+  return next_token_scores_;
+}
+
 void Search_Cuda::SetLogits(RoamingArray<float> logits_unk) {
   next_token_scores_ = logits_unk.GetGPU();
 }
