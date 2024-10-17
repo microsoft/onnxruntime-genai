@@ -294,7 +294,8 @@ void PositionInputs::UpdateAttentionMask(int current_length) {
       break;
     }
 #endif
-    default: {
+    case DeviceType::WEBGPU:
+    case DeviceType::CPU: {
       if (type_ == Ort::TypeToTensorType<int32_t>)
         UpdateAttentionMaskImpl(attention_mask_next_->GetTensorMutableData<int32_t>(),
                                 attention_mask_->GetTensorData<int32_t>(),
@@ -305,6 +306,8 @@ void PositionInputs::UpdateAttentionMask(int current_length) {
                                 current_length);
       break;
     }
+    default:
+      throw std::runtime_error("PositionIDs::Update - Unsupported device type");
   }
 
 #if USE_DML
