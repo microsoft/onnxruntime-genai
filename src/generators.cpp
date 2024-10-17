@@ -30,6 +30,11 @@ std::string CurrentModulePath() {
 }
 #endif
 
+void ThrowErrorIfSessionTerminated(bool is_session_terminated) {
+  if (is_session_terminated)
+    throw std::runtime_error("Session in Terminated state, exiting!");
+}
+
 namespace Generators {
 
 #if USE_CUDA
@@ -282,6 +287,7 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
 }
 
 void Generator::ComputeLogits() {
+  ThrowErrorIfSessionTerminated(state_->params_->session_terminated);
   if (computed_logits_)
     throw std::runtime_error("ComputeLogits called again without calling GenerateNextToken first");
 
@@ -300,6 +306,7 @@ void Generator::ComputeLogits() {
 }
 
 bool Generator::IsDone() const {
+  ThrowErrorIfSessionTerminated(state_->params_->session_terminated);
   if (computed_logits_)
     throw std::runtime_error("IsDone() can't be called in the middle of processing logits");
 
@@ -312,6 +319,7 @@ bool Generator::IsDone() const {
 }
 
 void Generator::GenerateNextToken() {
+  ThrowErrorIfSessionTerminated(state_->params_->session_terminated);
   if (!computed_logits_)
     throw std::runtime_error("Must call ComputeLogits before GenerateNextToken");
   computed_logits_ = false;
