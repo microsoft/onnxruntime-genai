@@ -40,6 +40,19 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             }
         }
 
+        /// <summary>
+        /// Activates one of the loaded adapters.
+        /// Throws on error.
+        /// </summary>
+        /// <param name="adapters">Adapters container</param>
+        /// <param name="adapterName">adapter name that was previously loaded</param>
+        public void SetActiveAdapter(Adapters adapters, string adapterName)
+        {
+            Result.VerifySuccess(NativeMethods.OgaSetActiveAdapter(_generatorHandle,
+                                                                   adapters.Handle,
+                                                                   StringUtils.ToUtf8(adapterName)));
+        }
+
         ~Generator()
         {
             Dispose(false);
