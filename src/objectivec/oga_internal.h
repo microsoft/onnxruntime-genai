@@ -56,6 +56,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface OGATensor ()
 
+- (instancetype)initWithNativePointer:(std::unique_ptr<OgaTensor>)ptr;
+
 - (OgaTensor&)CXXAPIOgaTensor;
 
 @end

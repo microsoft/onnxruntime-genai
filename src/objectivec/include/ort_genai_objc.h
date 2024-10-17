@@ -32,7 +32,7 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 
 - (instancetype)init NS_UNAVAILABLE;
 - (nullable instancetype)initWithPath:(NSString*)path
-                   error:(NSError**)error NS_DESIGNATED_INITIALIZER;
+                                error:(NSError**)error NS_DESIGNATED_INITIALIZER;
 
 - (nullable OGASequences*)generate:(OGAGeneratorParams*)params
                              error:(NSError**)error;
@@ -42,7 +42,7 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 @interface OGATokenizer : NSObject
 - (instancetype)init NS_UNAVAILABLE;
 - (nullable instancetype)initWithModel:(OGAModel*)model
-                    error:(NSError**)error NS_DESIGNATED_INITIALIZER;
+                                 error:(NSError**)error NS_DESIGNATED_INITIALIZER;
 
 - (nullable OGASequences*)encode:(NSString*)str
                            error:(NSError**)error;
@@ -55,10 +55,10 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 @interface OGATokenizerStream : NSObject
 - (instancetype)init NS_UNAVAILABLE;
 - (nullable instancetype)initWithTokenizer:(OGATokenizer*)tokenizer
-                        error:(NSError**)error NS_DESIGNATED_INITIALIZER;
+                                     error:(NSError**)error NS_DESIGNATED_INITIALIZER;
 
 - (nullable instancetype)initWithMultiModalProcessor:(OGAMultiModalProcessor*)processor
-                                  error:(NSError**)error NS_DESIGNATED_INITIALIZER;
+                                               error:(NSError**)error NS_DESIGNATED_INITIALIZER;
 
 - (nullable NSString*)decode:(int32_t)token
                        error:(NSError**)error;
@@ -94,10 +94,16 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 @interface OGAGeneratorParams : NSObject
 - (instancetype)init NS_UNAVAILABLE;
 - (nullable instancetype)initWithModel:(OGAModel*)model
-                    error:(NSError**)error NS_DESIGNATED_INITIALIZER;
+                                 error:(NSError**)error NS_DESIGNATED_INITIALIZER;
 
 - (BOOL)setInputs:(OGANamedTensors*)namedTensors
             error:(NSError**)error;
+
+- (BOOL)setInputIds:(const int32_t*)rawPointer
+      inputIdsCount:(size_t)inputIdsCount
+     sequenceLength:(size_t)sequenceLength
+          batchSize:(size_t)batchSize
+              error:(NSError**)error;
 
 - (BOOL)setInputSequences:(OGASequences*)sequences
                     error:(NSError**)error;
@@ -119,12 +125,14 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 
 - (instancetype)init NS_UNAVAILABLE;
 - (nullable instancetype)initWithModel:(OGAModel*)model
-                   params:(OGAGeneratorParams*)params
-                    error:(NSError**)error NS_DESIGNATED_INITIALIZER;
+                                params:(OGAGeneratorParams*)params
+                                 error:(NSError**)error NS_DESIGNATED_INITIALIZER;
 
 - (BOOL)isDone;
 - (void)computeLogits;
 - (void)generateNextToken;
+- (OGATensor*)getOutput:(NSString*)name;
+
 
 - (nullable OGAInt32Span*)sequenceAtIndex:(size_t)index;
 
@@ -134,9 +142,9 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 
 - (instancetype)init NS_UNAVAILABLE;
 - (nullable instancetype)initWithDataPointer:(void*)data
-                          shape:(OGAInt64Span*)shape
-                           type:(OGAElementType)elementType
-                          error:(NSError**)error;
+                                       shape:(OGAInt64Span*)shape
+                                       type:(OGAElementType)elementType
+                                       error:(NSError**)error;
 - (OGAElementType)type;
 
 @end
@@ -151,7 +159,7 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 
 - (instancetype)init NS_UNAVAILABLE;
 - (nullable instancetype)initWithPath:(NSArray<NSString *> *)paths
-                   error:(NSError**)error NS_DESIGNATED_INITIALIZER;
+                                error:(NSError**)error NS_DESIGNATED_INITIALIZER;
 
 @end
 
@@ -159,7 +167,7 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 
 - (instancetype)init NS_UNAVAILABLE;
 - (nullable instancetype)initWithModel:(OGAModel*)model
-                    error:(NSError**)error NS_DESIGNATED_INITIALIZER;
+                                 error:(NSError**)error NS_DESIGNATED_INITIALIZER;
 
 - (nullable OGANamedTensors*)processImages:(NSString*)prompt
                                     images:(OGAImages*)images

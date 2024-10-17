@@ -9,6 +9,11 @@
   std::unique_ptr<OgaTensor> _tensor;
 }
 
+- (instancetype)initWithNativePointer:(std::unique_ptr<OgaTensor>)ptr {
+  _tensor = std::move(ptr);
+  return self;
+}
+
 - (nullable instancetype)initWithDataPointer:(void*)data
                           shape:(OGAInt64Span*)shape
                            type:(OGAElementType)elementType

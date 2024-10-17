@@ -35,6 +35,11 @@
   _generator->GenerateNextToken();
 }
 
+- (OGATensor*)getOutput:(NSString*)name {
+  std::unique_ptr<OgaTensor> output = _generator->GetOutput([name UTF8String]);
+  return [[OGATensor alloc] initWithNativePointer:std::move(output)];
+}
+
 - (nullable OGAInt32Span*)sequenceAtIndex:(size_t)index {
   try {
     size_t sequenceLength = _generator->GetSequenceCount(index);
