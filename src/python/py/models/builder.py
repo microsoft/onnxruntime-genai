@@ -1769,7 +1769,7 @@ class Model:
         return output_name
 
     def make_lm_head(self, lm_head):
-        bias_exists = lm_head.bias is not None if hasattr(lm_head, 'bias') else False
+        bias_exists = lm_head.bias
         scale_exists = self.lm_head_attrs["scale"] != 1
         mask_exists = self.lm_head_attrs["mask"] is not None
 
