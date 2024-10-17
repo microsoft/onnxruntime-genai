@@ -387,17 +387,94 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 
             // Pin the array to get its pointer
             GCHandle handle = GCHandle.Alloc(data, GCHandleType.Pinned);
-            IntPtr data_pointer = handle.AddrOfPinnedObject();
+            try
+            {
+                IntPtr data_pointer = handle.AddrOfPinnedObject();
 
-            using var tensor = new Tensor(data_pointer, shape, ElementType.float32);
-            Assert.NotNull(tensor);
+                using var tensor = new Tensor(data_pointer, shape, ElementType.float32);
+                Assert.NotNull(tensor);
 
-            Assert.Equal(shape, tensor.Shape());
-            Assert.Equal(ElementType.float32, tensor.Type());
+                Assert.Equal(shape, tensor.Shape());
+                Assert.Equal(ElementType.float32, tensor.Type());
 
-            generatorParams.SetModelInput("test_input", tensor);
-
-            handle.Free();
+                generatorParams.SetModelInput("test_input", tensor);
+            }
+            finally
+            {
+                handle.Free();
+            }
         }
+
+        // This model is dependent on the presense of Phi2 model
+        // get this model generated and copied to the output
+        // by running test_onnxruntime_genai.py
+        [Fact(DisplayName = "TestAdapters")]
+        public void TestAdapters()
+        {
+            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "adapters");
+            string adapterPath = Path.Combine(modelPath, "adapters", "adapters.onnx_adapter");
+
+            using var model = new Model(modelPath);
+            Assert.NotNull(model);
+
+            using var adapters = Adapters.Create(model);
+            adapters.LoadAdapter(adapterPath, "adapters_a_and_b");
+
+            adapters.UnloadAdapter("adapters_a_and_b");
+
+            var inputStrings = new string[]
+            {
+                "This is a test.",
+                "Rats are awesome pets!",
+                "The quick brown fox jumps over the lazy dog.",
+            };
+
+            using var tokenizer = new Tokenizer(model);
+            using var sequences = tokenizer.EncodeBatch(inputStrings);
+
+            Int64 outputSize = 0;
+            Int64[] output_shape;
+            float[] base_output;
+
+            // Run base scenario
+            {
+                using var genParams = new GeneratorParams(model);
+                genParams.SetSearchOption("max_length", 20);
+                genParams.SetInputSequences(sequences);
+
+                using var generator = new Generator(model, genParams);
+                while(!generator.IsDone())
+                {
+                    generator.ComputeLogits();
+                    generator.GenerateNextToken();
+                }
+
+                using var logits = generator.GetOutput("logits");
+                output_shape = logits.Shape();
+                outputSize = logits.NumElements();
+                base_output = logits.GetData<float>().ToArray();
+            }
+            // Adapter scenario. The output must be affected
+            {
+                using var genParams = new GeneratorParams(model);
+                genParams.SetSearchOption("max_length", 20);
+                genParams.SetInputSequences(sequences);
+
+                using var generator = new Generator(model, genParams);
+                generator.SetActiveAdapter(adapters, "adapters_a_and_b");
+                generator.ComputeLogits();
+                generator.GenerateNextToken();
+
+                using var logits = generator.GetOutput("logits");
+                Assert.Equal(outputSize, logits.NumElements());
+                Assert.Equal(output_shape, logits.Shape());
+
+                var adapter_output = logits.GetData<float>().ToArray();
+                Assert.NotEqual(base_output, adapter_output);
+            }
+            adapters.UnloadAdapter("adapters_a_and_b");
+        }
+
     }
+
 }

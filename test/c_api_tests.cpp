@@ -447,7 +447,7 @@ TEST(CAPITests, AdaptersTest) {
 
   // Unload the adapter. Will error out if the adapter is still active.
   // So, the generator must go out of scope before the adapter can be unloaded.
-  // adapters->UnloadAdapter("adapters_a_and_b");
+  adapters->UnloadAdapter("adapters_a_and_b");
 }
 #endif
 

@@ -41,6 +41,20 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         }
 
         /// <summary>
+        /// Fetches and returns the output tensor with the given name.
+        /// Throw on error
+        /// </summary>
+        /// <param name="outputName"></param>
+        /// <returns>a disposable instance of Tensor</returns>
+        public Tensor GetOutput(string outputName)
+        {
+            Result.VerifySuccess(NativeMethods.OgaGenerator_GetOutput(_generatorHandle,
+                                                                      StringUtils.ToUtf8(outputName),
+                                                                      out IntPtr outputTensor));
+            return new Tensor(outputTensor);
+        }
+
+        /// <summary>
         /// Activates one of the loaded adapters.
         /// Throws on error.
         /// </summary>
