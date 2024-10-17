@@ -386,13 +386,9 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       }
       ort_provider_options->Update(keys.data(), values.data(), keys.size());
 
-      std::cerr << "Creating cuda stream" << std::endl;
-
       // Create and set our cudaStream_t
       if (!cuda_stream_.get())
         cuda_stream_.Create();
-
-      std::cerr << "Cuda stream created" << std::endl;
 
       ort_provider_options->UpdateValue("user_compute_stream", cuda_stream_.get());
 
