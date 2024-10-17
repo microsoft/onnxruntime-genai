@@ -432,6 +432,20 @@ def test_adapters(test_data_path, device, multiple_adapters, phi2_for):
         )
 
         model.graph.input.extend([adapter_a, adapter_b])
+
+       # tensor proto for default lora parameter A
+        adapter_weight_a = np.zeros([vocab_size], dtype=np.float32)
+        adapter_weight_a_tensor = onnx.helper.make_tensor(
+            "adapter_a", onnx.TensorProto.FLOAT, [vocab_size], adapter_weight_a.flatten()
+        )
+
+        adapter_weight_b = np.zeros([vocab_size], dtype=np.float32)
+        adapter_weight_b_tensor = onnx.helper.make_tensor(
+            "adapter_b", onnx.TensorProto.FLOAT, [vocab_size], adapter_weight_b.flatten()
+        )
+
+        model.graph.initializer.extend([adapter_weight_a_tensor, adapter_weight_b_tensor])
+
         add_node = onnx.helper.make_node(
             "Add", ["adapter_a", "adapter_b"], ["adapter_output"], name="adapter_add"
         )
