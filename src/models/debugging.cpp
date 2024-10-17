@@ -47,18 +47,6 @@ void DumpSpan(std::ostream& stream, std::span<const T> values) {
   }
 }
 
-#if USE_CUDA
-template <typename T>
-void DumpCudaSpan(std::ostream& stream, std::span<const T> data) {
-  auto cpu_copy = std::make_unique<T[]>(data.size());
-  CudaCheck() == cudaMemcpy(cpu_copy.get(), data.data(), data.size_bytes(), cudaMemcpyDeviceToHost);
-
-  DumpSpan(stream, std::span<const T>{cpu_copy.get(), data.size()});
-}
-template void DumpCudaSpan(std::ostream&, std::span<const float>);
-template void DumpCudaSpan(std::ostream&, std::span<const int32_t>);
-#endif
-
 template <typename... Types>
 bool DumpSpan(std::ostream& stream, ONNXTensorElementDataType type, const void* p_values_raw, size_t count, Ort::TypeList<Types...>) {
   return ((type == Ort::TypeToTensorType<Types> && (DumpSpan(stream, std::span<const Types>{reinterpret_cast<const Types*>(p_values_raw), count}), true)) || ...);

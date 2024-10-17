@@ -10,6 +10,13 @@
 #ifndef MODEL_PATH
 #define MODEL_PATH "../../test/test_models/"
 #endif
+#ifndef PHI2_PATH
+#if USE_CUDA
+#define PHI2_PATH MODEL_PATH "phi-2/int4/cuda"
+#else
+#define PHI2_PATH MODEL_PATH "phi-2/int4/cpu"
+#endif
+#endif
 
 // To generate this file:
 // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
@@ -50,7 +57,7 @@ TEST(ModelTests, GreedySearchGptFp32) {
 
   // Verify outputs match expected outputs
   for (size_t i = 0; i < static_cast<size_t>(params->batch_size); i++) {
-    auto sequence = generator->GetSequence(i).GetCPU();
+    auto sequence = generator->GetSequence(i).CpuSpan();
     auto* expected_output_start = &expected_output[i * params->search.max_length];
     EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params->search.max_length * sizeof(int32_t)));
   }
@@ -85,7 +92,6 @@ TEST(ModelTests, BeamSearchGptFp32) {
 
   auto generator = Generators::CreateGenerator(*model, *params);
   auto result = Generators::Generate(*model, *params);
-
 
   // Verify outputs match expected outputs
   for (int i = 0; i < params->batch_size; i++) {
@@ -124,7 +130,7 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
   // Verify outputs match expected outputs
   for (int i = 0; i < params->batch_size; i++) {
     auto sequence_gpu = generator->GetSequence(i);
-    auto sequence = sequence_gpu.GetCPU();
+    auto sequence = sequence_gpu.CpuSpan();
     auto* expected_output_start = &expected_output[i * params->search.max_length];
     EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params->search.max_length * sizeof(int32_t)));
   }
@@ -164,7 +170,6 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
   auto generator = Generators::CreateGenerator(*model, *params);
   auto result = Generators::Generate(*model, *params);
 
-
   // Verify outputs match expected outputs
   for (int i = 0; i < params->batch_size; i++) {
     auto sequence = std::span<int32_t>(result[i].data(), params->search.max_length);
@@ -190,7 +195,7 @@ Print all primes between 1 and n
 
   std::cout << "With prompt:" << prompt << "\r\n";
 
-  auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "phi-2");
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), PHI2_PATH);
   auto tokenizer = model->CreateTokenizer();
   auto tokens = tokenizer->Encode(prompt);
 
@@ -224,7 +229,7 @@ Print all primes between 1 and n
 
   std::cout << "With prompt:" << prompt << "\r\n";
 
-  auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "phi-2");
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), PHI2_PATH);
   auto tokenizer = model->CreateTokenizer();
   auto tokens = tokenizer->Encode(prompt);
 

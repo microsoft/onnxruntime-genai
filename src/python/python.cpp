@@ -204,6 +204,23 @@ struct PyRoamingArray : RoamingArray<T> {
 };
 
 template <typename T>
+struct PyDeviceMemorySpan {
+  void operator=(DeviceMemorySpan<T> span) {
+    span_ = std::move(span);
+  }
+
+  pybind11::array_t<T> GetNumpy() {
+    auto v = span_.CpuSpan();
+    py_cpu_array_ = pybind11::array_t<T>({v.size()}, {sizeof(T)}, v.data(), pybind11::capsule(v.data(), [](void*) {}));
+    return py_cpu_array_;
+  }
+
+ private:
+  DeviceMemorySpan<T> span_;
+  pybind11::array_t<T> py_cpu_array_;
+};
+
+template <typename T>
 void Declare_DeviceArray(pybind11::module& m, const char* name) {
   using Type = PyRoamingArray<T>;
   pybind11::class_<Type>(m, name)
@@ -303,8 +320,8 @@ struct PyGenerator {
   }
 
   pybind11::array_t<int32_t> GetSequence(int index) {
-    py_sequence_.Assign(generator_->search_->GetSequence(index));
-    return ToPython(py_sequence_.GetCPU());
+    py_sequence_ = generator_->search_->GetSequence(index);
+    return py_sequence_.GetNumpy();
   }
 
   void ComputeLogits() {
@@ -323,11 +340,15 @@ struct PyGenerator {
     return generator_->IsDone();
   }
 
+  void SetActiveAdapter(Adapters* adapters, const std::string& adapter_name) {
+    generator_->state_->SetActiveAdapter(adapters, adapter_name);
+  }
+
  private:
   std::unique_ptr<Generator> generator_;
   PyRoamingArray<int32_t> py_tokens_;
   PyRoamingArray<int32_t> py_indices_;
-  PyRoamingArray<int32_t> py_sequence_;
+  PyDeviceMemorySpan<int32_t> py_sequence_;
   PyRoamingArray<int32_t> py_sequencelengths_;
 };
 
@@ -434,7 +455,10 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("get_output", &PyGenerator::GetOutput)
       .def("generate_next_token", &PyGenerator::GenerateNextToken)
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
-      .def("get_sequence", &PyGenerator::GetSequence);
+      .def("get_sequence", &PyGenerator::GetSequence)
+      .def("set_active_adapter", [](PyGenerator& generator, Adapters* adapters, const std::string& adapter_name) {
+        generator.SetActiveAdapter(adapters, adapter_name);
+      });
 
   pybind11::class_<Images>(m, "Images")
       .def_static("open", [](pybind11::args image_paths) {
@@ -515,6 +539,12 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("decode", [](MultiModalProcessor& processor, pybind11::array_t<int32_t> tokens) {
         return processor.tokenizer_->Decode(ToSpan(tokens));
       });
+
+  pybind11::class_<Adapters, std::shared_ptr<Adapters>>(m, "Adapters")
+      .def(pybind11::init([](Model& model) {
+        return std::make_shared<Adapters>(&model);
+      }))
+      .def("load", &Adapters::LoadAdapter);
 
   m.def("set_log_options", &SetLogOptions);
 

@@ -2,6 +2,7 @@
 #include <cub/cub.cuh>
 #include <algorithm>
 #include "generators.h"
+#include "interface.h"
 #include "search_cuda.cuh"
 
 namespace Generators {
