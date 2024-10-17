@@ -65,7 +65,7 @@ if(ENABLE_TESTS)
   # call enable_testing so we can add tests from subdirectories (e.g. test and src/java)
   # it applies recursively to all subdirectories
   enable_testing()
-  if (TEST_PHI2)
+  if (USE_CUDA OR TEST_PHI2)
     add_compile_definitions(TEST_PHI2=1)
   else()
     add_compile_definitions(TEST_PHI2=0)
