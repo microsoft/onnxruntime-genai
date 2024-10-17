@@ -180,13 +180,16 @@ void PositionInputs::UpdatePositionIDs(int current_length) {
           cuda::Launch_UpdatePositionIds(position_ids_->GetTensorMutableData<int64_t>(), static_cast<int>(position_ids_shape_[0]), model_.cuda_stream_);
         break;
 #endif
-      default: {
+      case DeviceType::CPU:
+      case DeviceType::WEBGPU: {
         if (type_ == Ort::TypeToTensorType<int32_t>)
           UpdatePositionIDsImpl<int32_t>();
         else
           UpdatePositionIDsImpl<int64_t>();
         break;
       }
+      default:
+        throw std::runtime_error("PositionIDs::Update - Unsupported device type");
     }
   }
 }
