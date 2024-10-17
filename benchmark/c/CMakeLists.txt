@@ -30,4 +30,8 @@ target_link_libraries(model_benchmark PRIVATE onnxruntime-genai-static ${ONNXRUN
 
 target_link_directories(model_benchmark PRIVATE ${ORT_LIB_DIR})
 
+if(APPLE)
+  target_link_libraries(model_benchmark PRIVATE "-framework Foundation" "-framework CoreML")
+endif()
+
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${model_benchmark_srcs})
