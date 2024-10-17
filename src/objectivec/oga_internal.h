@@ -21,16 +21,12 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface OGAInt32Span ()
 
-- (nullable instancetype)initWithRawPointer:(const int32_t*)pointer size:(size_t)size;
-
 - (const int32_t*)pointer;
 - (size_t)size;
 
 @end
 
 @interface OGAInt64Span ()
-
-- (nullable instancetype)initWithRawPointer:(const int64_t*)pointer size:(size_t)size;
 
 - (const int64_t*)pointer;
 - (size_t)size;

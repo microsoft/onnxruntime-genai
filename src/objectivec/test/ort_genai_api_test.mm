@@ -31,7 +31,8 @@ NS_ASSUME_NONNULL_BEGIN
     OGAModel* model = [[OGAModel alloc] initWithPath:path error:&error];
     OGAGeneratorParams *param = [[OGAGeneratorParams alloc] initWithModel:model error:&error];
 
-    OGATensor* tensor = [[OGATensor alloc] initWithDataPointer:data.data() shape:shape.data() type:OGAElementTypeFloat32 error:&error];
+    OGAInt64Span* shapeData = [[OGAInt64Span alloc] initWithRawPointer:shape.data() size:2];
+    OGATensor* tensor = [[OGATensor alloc] initWithDataPointer:data.data() shape:shapeData type:OGAElementTypeFloat32 error:&error];
 
     [param setModelInput:@"test_input" tensor:tensor error:&error];
 }
