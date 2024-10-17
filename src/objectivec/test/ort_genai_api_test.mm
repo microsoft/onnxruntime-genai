@@ -61,7 +61,27 @@ NS_ASSUME_NONNULL_BEGIN
     OGAGenerator* generator = [[OGAGenerator alloc] initWithModel:model
                                                            params:params
                                                             error:&error];
+    // check prompt
+     // full logits has shape [2, 4, 1000]. Sample 1 for every 200 tokens and the expected sampled logits has shape [2, 4, 5]
+    std::vector<float> expected_sampled_logits_prompt{0.29694548f, 0.00955007f, 0.0430819f, 0.10063869f, 0.0437237f,
+                                                    0.27329233f, 0.00841076f, -0.1060291f, 0.11328877f, 0.13369876f,
+                                                    0.30323744f, 0.0545997f, 0.03894716f, 0.11702324f, 0.0410665f,
+                                                    -0.12675379f, -0.04443946f, 0.14492269f, 0.03021223f, -0.03212897f,
+                                                    0.29694548f, 0.00955007f, 0.0430819f, 0.10063869f, 0.0437237f,
+                                                    0.27329233f, 0.00841076f, -0.1060291f, 0.11328877f, 0.13369876f,
+                                                    -0.04699047f, 0.17915794f, 0.20838135f, 0.10888482f, -0.00277808f,
+                                                    0.2938929f, -0.10538938f, -0.00226692f, 0.12050669f, -0.10622668f};
 
+    [generator computeLogits];
+    OGATensor* prompt_logits_ptr = [generator getOutput:@"logits"];
+    auto prompt_logits = static_cast<float*>([prompt_logits_ptr data]);
+    int num_prompt_outputs_to_check = 40;
+    int sample_size = 200;
+    float tolerance = 0.001f;
+    // Verify outputs match expected outputs
+    for (int i = 0; i < num_prompt_outputs_to_check; i++) {
+        XCTAssertEqualWithAccuracy(expected_sampled_logits_prompt[i], prompt_logits[i * sample_size], tolerance);
+    }
 }
 
 @end

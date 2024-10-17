@@ -133,7 +133,6 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 - (void)generateNextToken;
 - (OGATensor*)getOutput:(NSString*)name;
 
-
 - (nullable OGAInt32Span*)sequenceAtIndex:(size_t)index;
 
 @end
@@ -143,9 +142,10 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 - (instancetype)init NS_UNAVAILABLE;
 - (nullable instancetype)initWithDataPointer:(void*)data
                                        shape:(OGAInt64Span*)shape
-                                       type:(OGAElementType)elementType
+                                        type:(OGAElementType)elementType
                                        error:(NSError**)error;
 - (OGAElementType)type;
+- (void*)data;
 
 @end
 
@@ -158,7 +158,7 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 @interface OGAImages : NSObject
 
 - (instancetype)init NS_UNAVAILABLE;
-- (nullable instancetype)initWithPath:(NSArray<NSString *> *)paths
+- (nullable instancetype)initWithPath:(NSArray<NSString*>*)paths
                                 error:(NSError**)error NS_DESIGNATED_INITIALIZER;
 
 @end
