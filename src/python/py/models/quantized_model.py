@@ -125,7 +125,7 @@ class QuantizedModel:
                         if curr_layer_id != layer_id:
                             # Switch layer module used
                             layer_id = curr_layer_id
-                            module = self.layers.setdefault(layer_id, QuantizedDecoderLayer(layer_id, bits, group_size),)
+                            module = self.layers.setdefault(layer_id, QuantizedDecoderLayer(layer_id, bits, group_size))
 
                         # Map weights and biases of norm, attention, and feed-forward network
                         # Graph order is input_layernorm --> q_proj/k_proj/v_proj --> o_proj --> post_attention_layernorm --> gate_proj/up_proj --> down_proj

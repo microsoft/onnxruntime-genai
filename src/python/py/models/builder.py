@@ -1435,14 +1435,10 @@ class Model:
     def make_mlp_unpacked(self, layer_id, mlp, root_input):
         packed_proj = getattr(mlp, "gate_up_proj", None) or getattr(mlp, "dense_h_to_4h", None)
         mlp.gate_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
-        mlp.gate_proj.weight = torch.nn.Parameter(
-            packed_proj.weight[: self.intermediate_size, :]
-        )
+        mlp.gate_proj.weight = torch.nn.Parameter(packed_proj.weight[: self.intermediate_size, :])
 
         mlp.up_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
-        mlp.up_proj.weight = torch.nn.Parameter(
-            packed_proj.weight[self.intermediate_size :, :]
-        )
+        mlp.up_proj.weight = torch.nn.Parameter(packed_proj.weight[self.intermediate_size :, :])
 
         # Delete original packed weights
         del packed_proj
