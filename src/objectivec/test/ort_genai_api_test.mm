@@ -82,6 +82,23 @@ NS_ASSUME_NONNULL_BEGIN
     for (int i = 0; i < num_prompt_outputs_to_check; i++) {
         XCTAssertEqualWithAccuracy(expected_sampled_logits_prompt[i], prompt_logits[i * sample_size], tolerance);
     }
+
+    [generator generateNextToken];
+
+    // check for the 1st token generation
+    // full logits has shape [2, 1, 1000]. Sample 1 for every 200 tokens and the expected sampled logits has shape [2, 1, 5]
+    std::vector<float> expected_sampled_logits_token_gen{0.03742531f, -0.05752287f, 0.14159015f, 0.04210977f, -0.1484456f,
+                                                       0.3041716f, -0.08701379f, -0.03778192f, 0.07471392f, -0.02049096f};
+
+    [generator computeLogits];
+    OGATensor* token_gen_logits_ptr = [generator getOutput:@"logits"];
+    auto token_gen_logits = static_cast<float*>([token_gen_logits_ptr data]);
+    int num_token_gen_outputs_to_check = 10;
+
+    for (int i = 0; i < num_token_gen_outputs_to_check; i++) {
+        XCTAssertEqualWithAccuracy(expected_sampled_logits_token_gen[i], token_gen_logits[i * sample_size], tolerance);
+    }
+    [generator generateNextToken];
 }
 
 @end
