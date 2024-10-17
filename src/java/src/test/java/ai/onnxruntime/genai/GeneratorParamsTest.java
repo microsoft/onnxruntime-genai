@@ -14,7 +14,7 @@ public class GeneratorParamsTest {
   public void testValidSearchOption() throws GenAIException {
     // test setting an invalid search option throws a GenAIException
     SimpleGenAI generator = new SimpleGenAI(TestUtils.testModelPath());
-    GeneratorParams params = generator.createGeneratorParams("Ignoed");
+    GeneratorParams params = generator.createGeneratorParams();
     params.setSearchOption("early_stopping", true); // boolean
     params.setSearchOption("max_length", 20); // number
   }
@@ -23,7 +23,7 @@ public class GeneratorParamsTest {
   public void testInvalidSearchOption() throws GenAIException {
     // test setting an invalid search option throws a GenAIException
     SimpleGenAI generator = new SimpleGenAI(TestUtils.testModelPath());
-    GeneratorParams params = generator.createGeneratorParams("This is a testing prompt");
+    GeneratorParams params = generator.createGeneratorParams();
     assertThrows(GenAIException.class, () -> params.setSearchOption("invalid", true));
   }
 }

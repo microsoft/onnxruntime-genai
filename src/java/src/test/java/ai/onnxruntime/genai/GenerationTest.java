@@ -47,9 +47,9 @@ public class GenerationTest {
   @EnabledIf("havePhi2")
   public void testUsageNoListener() throws GenAIException {
     SimpleGenAI generator = new SimpleGenAI(phi2ModelPath());
-    GeneratorParams params = generator.createGeneratorParams("What's 6 times 7?");
+    GeneratorParams params = generator.createGeneratorParams();
 
-    String result = generator.generate(params, null);
+    String result = generator.generate(params, "What's 6 times 7?", null);
     logger.info("Result: " + result);
     assertTrue(result.indexOf("Answer: 42") != -1);
   }
@@ -58,9 +58,9 @@ public class GenerationTest {
   @EnabledIf("havePhi2")
   public void testUsageWithListener() throws GenAIException {
     SimpleGenAI generator = new SimpleGenAI(phi2ModelPath());
-    GeneratorParams params = generator.createGeneratorParams("What's 6 times 7?");
+    GeneratorParams params = generator.createGeneratorParams();
     Consumer<String> listener = token -> logger.info("onTokenGenerate: " + token);
-    String result = generator.generate(params, listener);
+    String result = generator.generate(params, "What's 6 times 7?", listener);
 
     logger.info("Result: " + result);
     assertTrue(result.indexOf("Answer: 42") != -1);
@@ -81,8 +81,8 @@ public class GenerationTest {
           0, 0, 195, 731
         };
 
-    params.setInput(inputIDs, sequenceLength, batchSize);
     params.setSearchOption("max_length", maxLength);
+    params.setSearchOption("batch_size", batchSize);
 
     int[] expectedOutput =
         new int[] {
@@ -90,11 +90,14 @@ public class GenerationTest {
           0, 0, 195, 731, 731, 114, 114, 114, 114, 114
         };
 
-    Sequences output = model.generate(params);
-    assertEquals(output.numSequences(), batchSize);
-
+    Generator generator = new Generator(model, params);
+    generator.appendTokens(inputIDs);
+    while (!generator.isDone()) {
+      generator.generateNextToken();
+    }
+    
     for (int i = 0; i < batchSize; i++) {
-      int[] outputIds = output.getSequence(i);
+      int[] outputIds = generator.getSequence(i);
       for (int j = 0; j < maxLength; j++) {
         assertEquals(outputIds[j], expectedOutput[i * maxLength + j]);
       }
