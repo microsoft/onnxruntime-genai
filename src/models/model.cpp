@@ -65,12 +65,12 @@ void State::Run(OrtSession& session, int new_batch_size) {
 
 void State::SetTerminate() {
   params_->session_terminated = true;
-  model_.run_options_->SetTerminate();
+  run_options_->SetTerminate();
 }
 
 void State::UnsetTerminate() {
   params_->session_terminated = false;
-  model_.run_options_->UnsetTerminate();
+  run_options_->UnsetTerminate();
 }
 
 OrtValue* State::GetInput(const char* name) {
