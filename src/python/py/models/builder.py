@@ -1850,7 +1850,7 @@ class Model:
                     self.layernorm_attrs["root_input"] = "inputs_embeds"
                     self.layernorm_attrs["skip_input"] = "inputs_embeds"
 
-            elif module.__class__.__name__.endswith("DecoderLayer") or module.__class__.__name__.endswith("GLMBlock") and self.layer_id < self.num_layers:
+            elif (module.__class__.__name__.endswith("DecoderLayer") or module.__class__.__name__.endswith("GLMBlock")) and self.layer_id < self.num_layers:
                 # Each decoder layer of model
                 print(f"Reading decoder layer {self.layer_id}")
                 self.make_layer(self.layer_id, module)
