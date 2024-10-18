@@ -9,8 +9,8 @@ namespace Generators {
 
 Embeddings::Embeddings(State& state, Embeddings::Mode mode, const std::string& name)
     : state_{state},
-      shape_{static_cast<int64_t>(state_.params_->batch_size) * state_.params_->search.num_beams,
-             state_.params_->sequence_length, model_.config_->model.decoder.hidden_size},
+      shape_{static_cast<int64_t>(state_.params_->search.batch_size) * state_.params_->search.num_beams,
+             0, model_.config_->model.decoder.hidden_size},
       type_{mode == Embeddings::Mode::Input
                 ? model_.session_info_->GetInputDataType(name)
                 : model_.session_info_->GetOutputDataType(name)},
@@ -48,9 +48,9 @@ void Embeddings::Add() {
   }
 }
 
-void Embeddings::UpdateSequenceLength() {
-  if (shape_[1] != 1) {
-    shape_[1] = 1;
+void Embeddings::UpdateSequenceLength(size_t new_length) {
+  if (static_cast<size_t>(shape_[1]) != new_length) {
+    shape_[1] = new_length;
 
     if (mode_ == Embeddings::Mode::Input) {
       if (!sb_embeddings_) {

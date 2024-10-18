@@ -25,7 +25,6 @@ public class MultiModalProcessorTest {
 
             String fullAnswer = new String();
             while (!generator.isDone()) {
-                generator.computeLogits();
                 generator.generateNextToken();
                  
                 int token = generator.getLastTokenInSequence(0);

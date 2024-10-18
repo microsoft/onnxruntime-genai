@@ -9,7 +9,11 @@ struct InputIDs {
   InputIDs(const InputIDs&) = delete;
   InputIDs& operator=(const InputIDs&) = delete;
 
+  // Register input_ids as ORT session input.
+  // Called only once during initialization of state.
   void Add();
+  // Resize input_ids based on size of next_tokens.
+  // Update value with next_tokens.
   void Update(RoamingArray<int32_t> next_tokens);
 
   auto& GetShape() const { return shape_; }
@@ -21,6 +25,8 @@ struct InputIDs {
   State& state_;
   const Model& model_{state_.model_};
   size_t input_index_{~0U};
+
+  bool is_prompt_{true};
 
   std::array<int64_t, 2> shape_{};
   ONNXTensorElementDataType type_;

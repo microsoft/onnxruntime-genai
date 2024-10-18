@@ -42,41 +42,8 @@ public class SimpleGenAI {
    * @return The generator parameters.
    * @throws GenAIException on failure
    */
-  public GeneratorParams createGeneratorParams(String prompt) throws GenAIException {
-    GeneratorParams generatorParams = model.createGeneratorParams();
-
-    try (Sequences encodedPrompt = tokenizer.encode(prompt)) {
-      generatorParams.setInput(encodedPrompt);
-    } catch (GenAIException e) {
-      generatorParams.close();
-      throw e;
-    }
-
-    return generatorParams;
-  }
-
-  /**
-   * Create the generator parameters and add the prompt text. The user can set other search options
-   * via the GeneratorParams object prior to running `generate`.
-   *
-   * @param tokenIds The encoded token ids for the prompt/s.
-   * @param sequenceLength The length of each sequence in tokenIds. All sequences must have the same
-   *     length.
-   * @param batchSize The number of batches in tokenIds.
-   * @return The generator parameters.
-   * @throws GenAIException on failure
-   */
-  public GeneratorParams createGeneratorParams(int[] tokenIds, int sequenceLength, int batchSize)
-      throws GenAIException {
-    GeneratorParams generatorParams = model.createGeneratorParams();
-    try {
-      generatorParams.setInput(tokenIds, sequenceLength, batchSize);
-    } catch (GenAIException e) {
-      generatorParams.close();
-      throw e;
-    }
-
-    return generatorParams;
+  public GeneratorParams createGeneratorParams() throws GenAIException {
+    return model.createGeneratorParams();
   }
 
   /**
@@ -86,12 +53,13 @@ public class SimpleGenAI {
    * batch size of 1)
    *
    * @param generatorParams The prompt and settings to run the model with.
+   * @param prompt The prompt text to encode.
    * @param listener Optional callback for tokens to be provided as they are generated. NOTE: Token
    *     generation will be blocked until the listener's `accept` method returns.
    * @return The generated text.
    * @throws GenAIException on failure
    */
-  public String generate(GeneratorParams generatorParams, Consumer<String> listener)
+  public String generate(GeneratorParams generatorParams, String prompt, Consumer<String> listener)
       throws GenAIException {
     String result;
     try {
@@ -102,6 +70,7 @@ public class SimpleGenAI {
             Generator generator = new Generator(model, generatorParams)) {
           // iterate (which calls computeLogits, generateNextToken, getLastTokenInSequence and
           // isDone)
+          generator.appendTokenSequences(tokenizer.encode(prompt));
           for (int token_id : generator) {
             // decode and call listener
             String token = stream.decode(token_id);

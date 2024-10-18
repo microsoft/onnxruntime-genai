@@ -63,17 +63,14 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   const Config& config;                  // The model outlives the GeneratorParams
   Config::Search search{config.search};  // Copy of the search parameters from the config
 
-  int batch_size{1};
   int max_batch_size{0};
   bool use_cuda_graph{};
-  int sequence_length{};
-  int BatchBeamSize() const { return search.num_beams * batch_size; }
+  int BatchBeamSize() const { return search.num_beams * search.batch_size; }
 
   DeviceType device_type{DeviceType::CPU};
   cudaStream_t cuda_stream{};
 
-  // TODO: Move this to a separate GPT struct
-  std::span<const int32_t> input_ids;  // Array of [batchsize][sequence_length]
+  cpu_span<int32_t> aux_input_ids{};  // Intermediate solution to be used with SetInputs function for multimodal and whisper models
 
   struct Whisper {
     std::shared_ptr<Tensor> input_features;   // float32 [batch_size, number_of_mels, number_of_frames]
@@ -81,8 +78,6 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   };
 
   std::variant<Whisper> inputs;
-
-  std::vector<int32_t> input_ids_owner;  // Backing memory of input_ids in some cases
 
   std::shared_ptr<GeneratorParams> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
 
@@ -106,8 +101,10 @@ struct Generator : LeakChecked<Generator> {
   Generator(const Model& model, const GeneratorParams& params);
 
   bool IsDone() const;
-  void ComputeLogits();
-  void GenerateNextToken();
+  virtual void AddTokens(const cpu_span<int32_t>& input_ids);
+  virtual void GenerateNextToken();
+  virtual void RewindToLength(size_t new_length);  // Rewind state to new_length
+  RoamingArray<float> GetLogits();
 
   DeviceMemorySpan<int32_t> GetSequence(size_t index) const;
 
@@ -115,6 +112,9 @@ struct Generator : LeakChecked<Generator> {
   std::unique_ptr<State> state_;
   std::unique_ptr<Search> search_;
   bool computed_logits_{};  // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
+
+ private:
+  void ComputeLogits(const RoamingArray<int32_t>& next_tokens);
 };
 
 struct OrtGlobals {
@@ -138,7 +138,6 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path);
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Model& model);
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Config& config);  // For benchmarking purposes only
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params);
-std::vector<std::vector<int32_t>> Generate(const Model& model, const GeneratorParams& params);  // Uses CreateGenerator and a simple loop to return the entire sequence
 
 float Float16ToFloat32(uint16_t v);  // v is a IEEE 752-2008 binary16 format, 1 sign bit, 5 bit exponent, 10 bit fraction
 void top_k_indices(std::span<int32_t> top_k, std::span<const float> inputs);

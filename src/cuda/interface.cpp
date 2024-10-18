@@ -98,6 +98,14 @@ struct CudaInterfaceImpl : CudaInterface {
     cuda::LaunchFp32ToFp16(input, output, count, stream);
   }
 
+  void LaunchExpandAndInt32ToInt64(const int32_t* src, int64_t* dst, int num_beams, int batch_size, int sequence_length, cudaStream_t stream) override {
+    cuda::LaunchExpandAndInt32ToInt64(src, dst, num_beams, batch_size, sequence_length, stream);
+  }
+
+  void LaunchExpand(const int32_t* src, int32_t* dst, int num_beams, int batch_size, int sequence_length, cudaStream_t stream) override {
+    cuda::LaunchExpand(src, dst, num_beams, batch_size, sequence_length, stream);
+  }
+
   void Launch_UpdatePositionIds(int32_t* position_ids, int batch_beam_size, cudaStream_t stream) override {
     cuda::Launch_UpdatePositionIds(position_ids, batch_beam_size, stream);
   }
@@ -106,12 +114,28 @@ struct CudaInterfaceImpl : CudaInterface {
     cuda::Launch_UpdatePositionIds(position_ids, batch_beam_size, stream);
   }
 
+  void Launch_UpdatePositionIds(int32_t* position_ids, int total_length, int new_kv_length, cudaStream_t stream) override {
+    cuda::Launch_UpdatePositionIds(position_ids, total_length, new_kv_length, stream);
+  }
+
+  void Launch_UpdatePositionIds(int64_t* position_ids, int total_length, int new_kv_length, cudaStream_t stream) override {
+    cuda::Launch_UpdatePositionIds(position_ids, total_length, new_kv_length, stream);
+  }
+
   void Launch_UpdateAttentionMask(int32_t* mask_data, const int32_t* old_mask_data, int batch_beam_size, int current_length, int max_length, bool update_only, cudaStream_t stream) override {
     cuda::Launch_UpdateAttentionMask(mask_data, old_mask_data, batch_beam_size, current_length, max_length, update_only, stream);
   }
 
   void Launch_UpdateAttentionMask(int64_t* mask_data, const int64_t* old_mask_data, int batch_beam_size, int current_length, int max_length, bool update_only, cudaStream_t stream) override {
     cuda::Launch_UpdateAttentionMask(mask_data, old_mask_data, batch_beam_size, current_length, max_length, update_only, stream);
+  }
+
+  void Launch_UpdateAttentionMask(int32_t* mask_data, int new_kv_length, int total_length, bool update_static, cudaStream_t stream) override {
+    cuda::Launch_UpdateAttentionMask(mask_data, new_kv_length, total_length, update_static, stream);
+  }
+
+  void Launch_UpdateAttentionMask(int64_t* mask_data, int new_kv_length, int total_length, bool update_static, cudaStream_t stream) override {
+    cuda::Launch_UpdateAttentionMask(mask_data, new_kv_length, total_length, update_static, stream);
   }
 
   void LaunchHandleEOSArray(float* batch_logits, int batch_beam_size, int vocab_size, const int32_t* eos_token_ids, int eos_token_ids_count, cudaStream_t stream) override {

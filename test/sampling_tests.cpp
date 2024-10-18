@@ -29,9 +29,7 @@ TEST(SamplingTests, BatchedSamplingTopPCpu) {
   params->search.max_length = 10;
   params->search.do_sample = true;
   params->search.top_p = 0.25f;
-  params->batch_size = 4;
-  params->sequence_length = 1;
-  params->input_ids = input_ids;
+  params->search.batch_size = 4;
   params->device_type = Generators::DeviceType::CUDA;
   auto generator = Generators::CreateGenerator(*model, *params);
   auto logits_span = Generators::cpu_span<float>(logits_cpu);
@@ -58,9 +56,7 @@ TEST(SamplingTests, BatchedSamplingTopKCpu) {
   params->search.max_length = 10;
   params->search.do_sample = true;
   params->search.top_k = 2;
-  params->batch_size = batch_size;
-  params->sequence_length = 1;
-  params->input_ids = input_ids;
+  params->search.batch_size = batch_size;
   params->device_type = Generators::DeviceType::CPU;
   auto generator = Generators::CreateGenerator(*model, *params);
   auto logits_copy = logits_cpu;
@@ -94,9 +90,7 @@ TEST(SamplingTests, BatchedSamplingTopPAndKCpu) {
   params->search.do_sample = true;
   params->search.top_k = 2;
   params->search.top_p = 0.25f;
-  params->batch_size = batch_size;
-  params->sequence_length = 1;
-  params->input_ids = input_ids;
+  params->search.batch_size = batch_size;
   params->device_type = Generators::DeviceType::CPU;
   auto generator = Generators::CreateGenerator(*model, *params);
   auto logits_copy = logits_cpu;
@@ -146,9 +140,7 @@ TEST(SamplingTests, RandomizedSamplingTopPCpu) {
   params->search.max_length = 10;
   params->search.do_sample = true;
   params->search.top_p = 0.95f;
-  params->batch_size = batch_size;
-  params->sequence_length = 1;
-  params->input_ids = input_ids;
+  params->search.batch_size = batch_size;
   params->device_type = Generators::DeviceType::CPU;
   std::vector<float> logits_cpu(config.model.vocab_size * batch_size);
   std::random_device rd;
@@ -186,9 +178,7 @@ TEST(SamplingTests, RandomizedSamplingTopKCpu) {
   params->search.max_length = 10;
   params->search.do_sample = true;
   params->search.top_k = k;
-  params->batch_size = batch_size;
-  params->sequence_length = 1;
-  params->input_ids = input_ids;
+  params->search.batch_size = batch_size;
   params->device_type = Generators::DeviceType::CPU;
   std::vector<float> logits_cpu(config.model.vocab_size * batch_size);
   std::random_device rd;
@@ -228,9 +218,7 @@ TEST(SamplingTests, RandomizedSamplingTopPAndKCpu) {
   params->search.do_sample = true;
   params->search.top_k = k;
   params->search.top_p = p;
-  params->batch_size = batch_size;
-  params->sequence_length = 1;
-  params->input_ids = input_ids;
+  params->search.batch_size = batch_size;
   params->device_type = Generators::DeviceType::CPU;
   std::vector<float> logits_cpu(config.model.vocab_size * batch_size);
   std::random_device rd;
@@ -277,9 +265,7 @@ TEST(SamplingTests, BatchedSamplingTopPCuda) {
   params->search.max_length = 10;
   params->search.do_sample = true;
   params->search.top_p = 0.25f;
-  params->batch_size = batch_size;
-  params->sequence_length = 1;
-  params->input_ids = input_ids;
+  params->search.batch_size = batch_size;
   params->device_type = Generators::DeviceType::CUDA;
   cudaMemcpyAsync(logits_gpu.get(), logits_cpu.data(), logits_cpu.size() * sizeof(float), cudaMemcpyHostToDevice, params->cuda_stream);
   cudaStreamSynchronize(params->cuda_stream);
@@ -309,9 +295,7 @@ TEST(SamplingTests, BatchedSamplingTopKCuda) {
   params->search.max_length = 10;
   params->search.do_sample = true;
   params->search.top_k = 2;
-  params->batch_size = batch_size;
-  params->sequence_length = 1;
-  params->input_ids = input_ids;
+  params->search.batch_size = batch_size;
   params->device_type = Generators::DeviceType::CUDA;
   cudaMemcpyAsync(logits_gpu.get(), logits_cpu.data(), logits_cpu.size() * sizeof(float), cudaMemcpyHostToDevice, params->cuda_stream);
   cudaStreamSynchronize(params->cuda_stream);
@@ -346,9 +330,7 @@ TEST(SamplingTests, BatchedSamplingTopPAndKCuda) {
   params->search.do_sample = true;
   params->search.top_k = 2;
   params->search.top_p = 0.25f;
-  params->batch_size = batch_size;
-  params->sequence_length = 1;
-  params->input_ids = input_ids;
+  params->search.batch_size = batch_size;
   params->device_type = Generators::DeviceType::CUDA;
   cudaMemcpyAsync(logits_gpu.get(), logits_cpu.data(), logits_cpu.size() * sizeof(float), cudaMemcpyHostToDevice, params->cuda_stream);
   cudaStreamSynchronize(params->cuda_stream);
@@ -377,9 +359,7 @@ TEST(SamplingTests, RandomizedSamplingTopPCuda) {
   params->search.max_length = 10;
   params->search.do_sample = true;
   params->search.top_p = 0.95f;
-  params->batch_size = batch_size;
-  params->sequence_length = 1;
-  params->input_ids = input_ids;
+  params->search.batch_size = batch_size;
   params->device_type = Generators::DeviceType::CUDA;
   auto logits_gpu = Generators::CudaMallocArray<float>(config.model.vocab_size * batch_size);
   auto indices_buffer = Generators::CudaMallocHostArray<int>(config.model.vocab_size * batch_size);
@@ -422,9 +402,7 @@ TEST(SamplingTests, RandomizedSamplingTopKCuda) {
   params->search.max_length = 10;
   params->search.do_sample = true;
   params->search.top_k = k;
-  params->batch_size = batch_size;
-  params->sequence_length = 1;
-  params->input_ids = input_ids;
+  params->search.batch_size = batch_size;
   params->device_type = Generators::DeviceType::CUDA;
   auto logits_gpu = Generators::CudaMallocArray<float>(config.model.vocab_size * batch_size);
   auto indices_buffer = Generators::CudaMallocHostArray<int>(config.model.vocab_size * batch_size);
@@ -468,9 +446,7 @@ TEST(SamplingTests, RandomizedSamplingTopPAndKCuda) {
   params->search.do_sample = true;
   params->search.top_k = k;
   params->search.top_p = p;
-  params->batch_size = batch_size;
-  params->sequence_length = 1;
-  params->input_ids = input_ids;
+  params->search.batch_size = batch_size;
   params->device_type = Generators::DeviceType::CUDA;
   auto logits_gpu = Generators::CudaMallocArray<float>(config.model.vocab_size * batch_size);
   auto indices_buffer = Generators::CudaMallocHostArray<int>(config.model.vocab_size * batch_size);
@@ -509,9 +485,7 @@ TEST(SamplingTests, RandomizedSamplingSelectTopCuda) {
 
   auto params = Generators::CreateGeneratorParams(config);
   params->search.max_length = 10;
-  params->batch_size = batch_size;
-  params->sequence_length = 1;
-  params->input_ids = input_ids;
+  params->search.batch_size = batch_size;
   params->device_type = Generators::DeviceType::CUDA;
   auto logits_gpu = Generators::CudaMallocArray<float>(config.model.vocab_size * batch_size);
   auto indices_buffer = Generators::CudaMallocHostArray<int>(config.model.vocab_size * batch_size);

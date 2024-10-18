@@ -53,14 +53,14 @@ struct DecoderOnlyPipelineState : State {
   DecoderOnlyPipelineState(const DecoderOnlyPipelineState&) = delete;
   DecoderOnlyPipelineState& operator=(const DecoderOnlyPipelineState&) = delete;
 
-  RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens,
+  RoamingArray<float> Run(int total_length, RoamingArray<int32_t> next_tokens,
                           RoamingArray<int32_t> next_indices) override;
 
   OrtValue* GetOutput(const char* name) override;
 
  private:
   void UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> next_indices,
-                           int current_length);
+                           int total_length);
 
   const DecoderOnlyPipelineModel& model_;
   std::vector<std::unique_ptr<IntermediatePipelineState>> pipeline_states_;
