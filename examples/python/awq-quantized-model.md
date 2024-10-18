@@ -1,10 +1,16 @@
 # Create AWQ-quantized and optimized ONNX models from PyTorch models with AutoAWQ + ONNX Runtime generate() API
 
 ## Steps
-1. [Download your PyTorch model](#1-download-your-pytorch-model)
-2. [Install AutoAWQ](#2-install-autoawq)
-3. [Install the generate() API](#3-install-the-generate-api)
-4. [Run example script](#4-run-example-script)
+- [Create AWQ-quantized and optimized ONNX models from PyTorch models with AutoAWQ + ONNX Runtime generate() API](#create-awq-quantized-and-optimized-onnx-models-from-pytorch-models-with-autoawq--onnx-runtime-generate-api)
+  - [Steps](#steps)
+  - [Introduction](#introduction)
+  - [1. Download your PyTorch model](#1-download-your-pytorch-model)
+  - [2. Install AutoAWQ](#2-install-autoawq)
+  - [3. Install the generate() API](#3-install-the-generate-api)
+    - [CPU](#cpu)
+    - [CUDA](#cuda)
+    - [DirectML](#directml)
+  - [4. Run example script](#4-run-example-script)
 
 ## Introduction
 
@@ -74,10 +80,10 @@ Run your PyTorch model with [awq-quantized-model.py](https://github.com/microsof
 $ curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examples/python/awq-quantized-model.py -o awq-quantized-model.py
 
 # Run example script
-$ python awq-quantized-model.py --model_path /path/to/folder/containing/your/pytorch/model/ --quant_path /path/to/new/folder/to/save/quantized/pytorch/model/in/ --output_path /path/to/new/folder/to/save/quantized/and/optimized/onnx/model/in/
+$ python awq-quantized-model.py --model_path /path/to/folder/containing/your/pytorch/model/ --quant_path /path/to/new/folder/to/save/quantized/pytorch/model/in/ --output_path /path/to/new/folder/to/save/quantized/and/optimized/onnx/model/in/ --execution_provider [dml|cuda]
 
 # Example:
-# $ python awq-quantized-model.py --model_path ./phi3-mini-4k-instruct/ --quant_path ./phi3-mini-4k-instruct-awq/ --output_path ./phi3-mini-4k-instruct-awq-onnx/
+# $ python awq-quantized-model.py --model_path microsoft/Phi-3-mini-4k-instruct --quant_path ./phi3-mini-4k-instruct-awq/ --output_path ./phi3-mini-4k-instruct-awq-onnx/ --execution_provider dml
 ```
 
 Once the ONNX model has been created and the script has loaded the model, it will ask you for input in a loop, streaming the output as it is produced the model. For example:
