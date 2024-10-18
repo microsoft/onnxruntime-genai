@@ -14,19 +14,14 @@ Please ensure you have the following Python packages installed to create the ONN
 - `huggingface_hub[cli]`
 - `numpy`
 - `onnx`
-- `ort-nightly>=1.19.0.dev20240601002` or `ort-nightly-gpu>=1.19.0.dev20240601002`
-    - [ORT nightly package](https://onnxruntime.ai/docs/install/#inference-install-table-for-all-languages) is needed until the latest changes are in the newest ORT stable package
-    - For CPU: 
+- `onnxruntime-genai`
+    - For CUDA:
     ```bash
-    pip install ort-nightly --index-url=https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/
+    pip install onnxruntime-genai-cuda
     ```
-    - For CUDA 11.X:
+    - For DirectML: 
     ```bash
-    pip install ort-nightly-gpu --index-url=https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/
-    ```
-    - For CUDA 12.X: 
-    ```bash
-    pip install ort-nightly-gpu --index-url=https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ort-cuda-12-nightly/pypi/simple/
+    pip install onnxruntime-genai-directml
     ```
 - `pillow`
 - `requests`
@@ -87,13 +82,18 @@ If you have your own fine-tuned version of Phi-3 vision, you can now replace the
 Here are some examples of how you can build the components as INT4 ONNX models.
 
 ```bash
-# Build INT4 components with FP32 inputs/outputs
+# Build INT4 components with FP32 inputs/outputs for CPU
 $ python3 builder.py --input ./pytorch --output ./cpu --precision fp32 --execution_provider cpu
 ```
 
 ```bash
-# Build INT4 components with FP16 inputs/outputs
+# Build INT4 components with FP16 inputs/outputs for CUDA
 $ python3 builder.py --input ./pytorch --output ./cuda --precision fp16 --execution_provider cuda
+```
+
+```bash
+# Build INT4 components with FP16 inputs/outputs for DirectML
+$ python3 builder.py --input ./pytorch --output ./dml --precision fp16 --execution_provider dml
 ```
 
 ## 3. Build `genai_config.json` and `processor_config.json`

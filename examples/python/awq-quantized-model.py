@@ -130,9 +130,11 @@ def main():
 
     create_model(model_name, input_folder, output_folder, precision, execution_provider, cache_dir, **extra_options)
 
+    if args.execution_provider == "dml":
+        if og.__id__ != "onnxruntime-genai-directml":
+            raise ValueError(f"onnxruntime-genai-directml is required to be installed.")
     # Run ONNX model
-    if args.execution_provider != "dml":
-        run_model(args)
+    run_model(args)
 
 if __name__ == "__main__":
     main()
