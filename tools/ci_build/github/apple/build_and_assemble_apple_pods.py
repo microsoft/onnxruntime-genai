@@ -82,7 +82,11 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--ort_version", required=True, help="The ORT version to depend on."
+        "--ort-version", required=True, help="The ORT version to depend on."
+    )
+
+    parser.add_argument(
+        "--ort-home", required=False, help="The ORT home for building dependency."
     )
 
     args = parser.parse_args()
@@ -117,6 +121,10 @@ def main():
         str(SCRIPT_DIR / "build_apple_framework.py"),
         *args.build_apple_framework_extra_args,
     ]
+
+    if args.ort_home:
+        build_apple_framework_args.append('--ort_home')
+        build_apple_framework_args.append(args.ort_home)
 
     if args.include_ops_by_config is not None:
         build_apple_framework_args += ["--include_ops_by_config", args.include_ops_by_config]

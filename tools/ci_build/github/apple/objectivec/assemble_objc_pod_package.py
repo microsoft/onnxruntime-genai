@@ -161,7 +161,7 @@ def parse_args():
         "--variant", choices=PackageVariant.release_variant_names(), required=True, help="Pod package variant."
     )
     parser.add_argument(
-        "--ort_version", required=True, help="The ORT version to depend on."
+        "--ort-version", required=True, help="The ORT version to depend on."
     )
     return parser.parse_args()
 
@@ -174,6 +174,7 @@ def main():
         pod_version=args.pod_version,
         framework_info_file=args.framework_info_file,
         package_variant=PackageVariant[args.variant],
+        ort_version=args.ort_versoin
     )
 
     return 0

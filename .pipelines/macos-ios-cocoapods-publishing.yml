@@ -16,7 +16,7 @@ parameters:
 
 trigger: none
 stages:
-- template: stages/ios-cocoapods-packaging-stage.yml
+- template: stages/macos-ios-cocoapods-packaging-stage.yml
   parameters:
     ort_version: ${{ parameters.ort_version }}
     build_config: ${{ parameters.build_config }}

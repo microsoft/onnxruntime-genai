@@ -137,7 +137,7 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--ort_version", required=True, help="The ORT version to depend on."
+        "--ort-version", required=True, help="The ORT version to depend on."
     )
 
     return parser.parse_args()
