@@ -55,14 +55,14 @@ public final class Tensor implements AutoCloseable {
           "Tensor data must be direct. Allocate with ByteBuffer.allocateDirect");
     }
 
-    // for now, require native byte order as the bytes will used directly.
+    // for now, require native byte order as the bytes will be used directly.
     if (data.order() != ByteOrder.nativeOrder()) {
       throw new GenAIException("Tensor data must have native byte order.")
     }
 
     this.elementType = elementType;
     this.shape = shape;
-    this.dataBuffer = data;  // save a reference so the owning buffer will stay around
+    this.dataBuffer = data;  // save a reference so the owning buffer will stay around.
 
     nativeHandle = createTensor(data, shape, elementType.ordinal());
   }
