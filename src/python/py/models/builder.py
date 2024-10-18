@@ -298,9 +298,15 @@ class Model:
             "past_key_names": "past_key_values.%d.key",
             "past_value_names": "past_key_values.%d.value",
         })
+        if self.model_type.find("ChatGLM") != -1:
+            # config.bos_token_id not present in ChatGLM model configs.
+            bos_token_id = 1
+        else:
+            bos_token_id = config.bos_token_id
+
         genai_config = {
             "model": {
-                "bos_token_id": config.bos_token_id,
+                "bos_token_id": bos_token_id,
                 "context_length": self.context_length,
                 "decoder": {
                     "session_options" : {
