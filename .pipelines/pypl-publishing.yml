@@ -39,6 +39,11 @@ parameters:
   type: boolean
   default: true
 
+- name: enable_macos_cpu
+  displayName: 'Whether MacOS CPU package is built.'
+  type: boolean
+  default: true
+
 - name: ort_version
   displayName: 'OnnxRuntime version'
   type: string
@@ -97,6 +102,7 @@ stages:
     enable_win_cuda: ${{ parameters.enable_win_cuda }}
     enable_win_dml: ${{ parameters.enable_win_dml }}
     enable_win_arm64_cpu: ${{ parameters.enable_win_arm64_cpu }}
+    enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
     ort_version: ${{ parameters.ort_version }}
     ort_cuda_118_version: ${{ parameters.ort_cuda_118_version }}
     ort_cuda_122_version: ${{ parameters.ort_cuda_122_version }}
@@ -113,6 +119,7 @@ stages:
       enable_win_cuda: ${{ parameters.enable_win_cuda }}
       enable_win_dml: ${{ parameters.enable_win_dml }}
       enable_win_arm64_cpu: ${{ parameters.enable_win_arm64_cpu }}
+      enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
       ort_version: ${{ parameters.ort_version }}
       ort_cuda_118_version: ${{ parameters.ort_cuda_118_version }}
       ort_cuda_122_version: ${{ parameters.ort_cuda_122_version }}

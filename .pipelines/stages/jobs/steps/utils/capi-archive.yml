@@ -8,15 +8,9 @@ steps:
   displayName: 'Check if variables artifactName and buildDir are set'
   condition: or( eq (variables['artifactName'], ''), eq (variables['buildDir'], ''))
 
-- task: CopyFiles@2
-  displayName: 'Copy Onnxruntime C API library files to ArtifactStagingDirectory'
-  inputs:
-    SourceFolder: '$(Build.Repository.LocalPath)/ort/lib'
-    TargetFolder: '$(Build.ArtifactStagingDirectory)\$(artifactName)\lib'
-
 - ${{ if eq(parameters.archiveType, 'tar') }}:
   - task: CopyFiles@2
-    displayName: 'Copy Onnxruntime C API dll files to ArtifactStagingDirectory'
+    displayName: 'Copy Onnxruntime GenAI C API dll files to ArtifactStagingDirectory'
     inputs:
       SourceFolder: '$(Build.Repository.LocalPath)/$(buildDir)'
       Contents: |
@@ -24,7 +18,7 @@ steps:
       TargetFolder: '$(Build.ArtifactStagingDirectory)\$(artifactName)\lib'
 - ${{ else }}:
   - task: CopyFiles@2
-    displayName: 'Copy Onnxruntime C API dll files to ArtifactStagingDirectory'
+    displayName: 'Copy Onnxruntime GenAI C API dll files to ArtifactStagingDirectory'
     inputs:
       SourceFolder: '$(Build.Repository.LocalPath)\$(buildDir)\$(buildConfig)'
       Contents: |

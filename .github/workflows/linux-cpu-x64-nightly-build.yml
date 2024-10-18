@@ -54,12 +54,9 @@ jobs:
           python3 -m pip install -r test/python/requirements-cpu.txt --user
           python3 -m pip install build/cpu/wheel/onnxruntime_genai*.whl --no-deps
 
-      - name: Get HuggingFace Token
+      - name: Use Dummy HuggingFace Token
         run: |
-          az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
-          HF_TOKEN=$(az keyvault secret show --vault-name anubissvcsecret --name ANUBIS-HUGGINGFACE-TOKEN --query value)
-          echo "::add-mask::$HF_TOKEN"
-          echo "HF_TOKEN=$HF_TOKEN" >> $GITHUB_ENV
+          echo "HF_TOKEN=12345" >> $GITHUB_ENV
 
       - name: Run the python tests
         run: |

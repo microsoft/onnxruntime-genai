@@ -9,7 +9,7 @@ target_include_directories(python PRIVATE ${ORT_HEADER_DIR})
 target_link_directories(python PRIVATE ${ORT_LIB_DIR})
 target_link_libraries(python PRIVATE onnxruntime-genai-static)
 
-if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux"))
+if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin"))
 target_link_libraries(python PRIVATE ${ONNXRUNTIME_LIB})
 endif()
 
@@ -27,14 +27,7 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   target_link_libraries(python PRIVATE cublas curand cudart)
 endif()
 
-# Avoid warning of Calling FetchContent_Populate(Lib) is deprecated temporarily
-# TODO: find a better way to handle the header-only 3rd party deps
-if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.30.0")
-  cmake_policy(SET CMP0169 OLD)
-endif()
-
-set_target_properties(python PROPERTIES FOLDER "Sources")
-source_group(TREE ${PROJECT_SOURCE_DIR} FILES ${python_srcs})
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${python_srcs})
 
 if(BUILD_WHEEL)
   set(WHEEL_FILES_DIR "${CMAKE_BINARY_DIR}/wheel")

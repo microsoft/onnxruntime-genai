@@ -5,8 +5,12 @@
   ],
   "buildPresets": [
     {
-      "name": "macos_cpu_release",
-      "configurePreset": "macos_cpu_release"
+      "name": "macos_x64_cpu_release",
+      "configurePreset": "macos_x64_cpu_release"
+    },
+    {
+      "name": "macos_arm64_cpu_release",
+      "configurePreset": "macos_arm64_cpu_release"
     },
     {
       "name": "macos_cpu_debug",

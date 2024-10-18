@@ -41,12 +41,6 @@ steps:
     echo "build_config=${{ parameters.build_config }}"
   displayName: 'Print Parameters'
 
-
-- template: utils/download-ort.yml
-  parameters:
-    archiveType: 'zip'
-    ep: ${{ parameters.ep }}
-
 - ${{ if eq(parameters.ep, 'directml') }}:
   - powershell: |
       Invoke-WebRequest -Uri $(dml_url) -OutFile $(dml_zip)

@@ -4,6 +4,7 @@ steps:
   inputs:
     debugMode: false
   continueOnError: true
+  condition: and(ne(variables['os'], 'osx'), ne(variables['os'], 'ios'))  # Not available on macOS. See https://eng.ms/docs/products/credential-risk-exposure-defense/solutions/credscan_client/overview
 
 - task: TSAUpload@2
   displayName: 'TSA upload'

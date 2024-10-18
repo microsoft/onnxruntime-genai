@@ -11,67 +11,65 @@
 #include "whisper.h"
 #include "kernels.h"
 #include "multi_modal_vision_model.h"
+#include "decoder_only_pipeline.h"
 #if USE_DML
 #include <wil/wrl.h>
 #include "dml_provider_factory.h"
 #include "../dml/dml_helpers.h"
 
-EXTERN_C IMAGE_DOS_HEADER __ImageBase;
-
-static std::string CurrentModulePath() {
-  char path[MAX_PATH];
-  GetModuleFileNameA((HINSTANCE)&__ImageBase, path, _countof(path));
-
-  char absolute_path[MAX_PATH];
-  char* name;
-  GetFullPathNameA(path, _countof(path), absolute_path, &name);
-
-  auto idx = std::distance(absolute_path, name);
-  auto out_path = std::string(absolute_path);
-  out_path.resize(idx);
-
-  return out_path;
-}
+std::string CurrentModulePath();
 #endif
 
 namespace Generators {
 
 State::State(const GeneratorParams& params, const Model& model)
-    : params_{params.shared_from_this()},
-      model_{model} {}
+    : model_{model},
+      params_{params.shared_from_this()},
+      run_options_{OrtRunOptions::Create()} {}
 
-void State::Run(OrtSession& session, OrtRunOptions& run_options, int new_batch_size) {
+void State::Run(OrtSession& session, int new_batch_size) {
+  auto captured_graph_info = GetCapturedGraphInfo();
+
   if (first_run_) {
-    if (params_->use_cuda_graph) {
-      model_.run_options_->AddConfigEntry("gpu_graph_id", "-1");
+    if (captured_graph_info) {
+      run_options_->AddConfigEntry("gpu_graph_id", "-1");
     }
     first_run_ = false;
-  } else if (params_->use_cuda_graph && new_batch_size != current_batch_size_) {
-    assert(GetCapturedGraphInfo() != nullptr);
+  } else if (captured_graph_info && new_batch_size != current_batch_size_) {
     current_batch_size_ = new_batch_size;
-    auto annotation_id = std::to_string(GetCapturedGraphInfo()->GenerateUniqueAnnotationID(new_batch_size));
-    model_.run_options_->AddConfigEntry("gpu_graph_id", annotation_id.c_str());
+    auto annotation_id = std::to_string(captured_graph_info->GenerateUniqueAnnotationID(new_batch_size));
+    run_options_->AddConfigEntry("gpu_graph_id", annotation_id.c_str());
   }
 
   if (g_log.enabled && g_log.model_input_values) {
     auto& stream = Log("model_input_values");
     stream << std::endl;
-    DumpTensors(stream, inputs_.data(), input_names_.data(), input_names_.size(), true);
+    DumpTensors(model_, stream, inputs_.data(), input_names_.data(), input_names_.size(), true);
   }
 
   if (g_log.enabled && g_log.model_output_shapes) {
     auto& stream = Log("model_output_shapes");
     stream << std::endl;
-    DumpTensors(stream, outputs_.data(), output_names_.data(), output_names_.size(), false);
+    DumpTensors(model_, stream, outputs_.data(), output_names_.data(), output_names_.size(), false);
   }
 
-  session.Run(&run_options, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
+  session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
+              output_names_.data(), outputs_.data(), output_names_.size());
 
   if (g_log.enabled && g_log.model_output_values) {
     auto& stream = Log("model_output_values");
     stream << std::endl;
-    DumpTensors(stream, outputs_.data(), output_names_.data(), output_names_.size(), true);
+    DumpTensors(model_, stream, outputs_.data(), output_names_.data(), output_names_.size(), true);
   }
+}
+
+OrtValue* State::GetInput(const char* name) {
+  for (size_t i = 0; i < input_names_.size(); i++) {
+    if (std::strcmp(input_names_[i], name) == 0) {
+      return inputs_[i];
+    }
+  }
+  return nullptr;
 }
 
 OrtValue* State::GetOutput(const char* name) {
@@ -88,6 +86,27 @@ void State::ClearIO() {
   output_names_.clear();
   inputs_.clear();
   outputs_.clear();
+}
+
+void State::SetActiveAdapter(Adapters* adapters, const std::string& adapter_name) {
+  if (!adapters_) {
+    adapters_ = adapters->shared_from_this();
+  } else if (adapters_.get() != adapters) {
+    // Two different instances of Adapters are being used. The Generator state can only manage
+    // active adapters from a single Adapters container.
+    throw std::runtime_error("Generator state can only register a single Adapters container.");
+  }
+
+  run_options_->AddActiveLoraAdapter(*adapters_->AcquireAdapter(adapter_name));
+  adapter_names_.push_back(adapter_name);
+}
+
+State::~State() {
+  if (adapters_) {
+    for (const auto& adapter_name : adapter_names_) {
+      adapters_->ReleaseAdapter(adapter_name);
+    }
+  }
 }
 
 std::vector<int32_t> PadInputs(std::span<std::span<const int32_t>> sequences, int32_t pad_token_id) {
@@ -183,6 +202,12 @@ std::vector<std::string> Tokenizer::DecodeBatch(std::span<const int32_t> sequenc
   return strings;
 }
 
+int32_t Tokenizer::TokenToTokenId(const char* token) const {
+  extTokenId_t token_id;
+  CheckResult(OrtxConvertTokenToId(tokenizer_, token, &token_id));
+  return token_id;
+}
+
 #if USE_CUDA
 // Since Python/Others can and will hold onto a generator object past the model object's lifetime we need to ensure
 // the allocator used is not destroyed until last. This keeps the allocator around until exit, after all other memory
@@ -244,9 +269,6 @@ ONNXTensorElementDataType SessionInfo::GetOutputDataType(const std::string& name
 }
 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
-  // TODO: add function to create run options
-  run_options_ = OrtRunOptions::Create();
-
   CreateSessionOptions();
 }
 
@@ -270,87 +292,91 @@ void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
   captured_graph_pool_ = std::make_shared<CapturedGraphPool>(config_.get(), session_info_.get(), allocator_device_);
 }
 
-void Model::CreateSessionOptions() {
-  session_options_ = OrtSessionOptions::Create();
-  auto& ort_options = *session_options_;
-  auto& options = config_->model.decoder.session_options;
-
+void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
+                                           OrtSessionOptions& session_options,
+                                           bool is_primary_session_options,
+                                           bool disable_graph_capture) {
   // Default to a limit of 16 threads to optimize performance
   constexpr int min_thread_nums = 1;
   constexpr int max_thread_nums = 16;
   int num_of_cores = std::max(min_thread_nums, static_cast<int>(std::thread::hardware_concurrency() / 2));
-  ort_options.SetIntraOpNumThreads(std::min(num_of_cores, max_thread_nums));
+  session_options.SetIntraOpNumThreads(std::min(num_of_cores, max_thread_nums));
 
-  if (options.intra_op_num_threads.has_value()) {
-    ort_options.SetIntraOpNumThreads(options.intra_op_num_threads.value());
+  if (config_session_options.intra_op_num_threads.has_value()) {
+    session_options.SetIntraOpNumThreads(config_session_options.intra_op_num_threads.value());
   }
 
-  if (options.inter_op_num_threads.has_value()) {
-    ort_options.SetInterOpNumThreads(options.inter_op_num_threads.value());
+  if (config_session_options.inter_op_num_threads.has_value()) {
+    session_options.SetInterOpNumThreads(config_session_options.inter_op_num_threads.value());
   }
 
-  if (options.enable_cpu_mem_arena.has_value()) {
-    if (options.enable_cpu_mem_arena.value())
-      ort_options.EnableCpuMemArena();
+  if (config_session_options.enable_cpu_mem_arena.has_value()) {
+    if (config_session_options.enable_cpu_mem_arena.value())
+      session_options.EnableCpuMemArena();
     else
-      ort_options.DisableCpuMemArena();
+      session_options.DisableCpuMemArena();
   }
 
-  if (options.enable_mem_pattern.has_value()) {
-    if (options.enable_cpu_mem_arena.value())
-      ort_options.EnableMemPattern();
+  if (config_session_options.enable_mem_pattern.has_value()) {
+    if (config_session_options.enable_cpu_mem_arena.value())
+      session_options.EnableMemPattern();
     else
-      ort_options.DisableMemPattern();
+      session_options.DisableMemPattern();
   }
 
-  if (options.log_id.has_value()) {
-    ort_options.SetLogId(options.log_id.value().c_str());
+  if (config_session_options.log_id.has_value()) {
+    session_options.SetLogId(config_session_options.log_id.value().c_str());
   }
 
-  if (options.log_severity_level.has_value()) {
-    ort_options.SetLogSeverityLevel(options.log_severity_level.value());
+  if (config_session_options.log_severity_level.has_value()) {
+    session_options.SetLogSeverityLevel(config_session_options.log_severity_level.value());
   }
 
-  if (options.enable_profiling.has_value()) {
-    fs::path profile_file_prefix{options.enable_profiling.value()};
-    ort_options.EnableProfiling(profile_file_prefix.c_str());
+  if (config_session_options.enable_profiling.has_value()) {
+    fs::path profile_file_prefix{config_session_options.enable_profiling.value()};
+    session_options.EnableProfiling(profile_file_prefix.c_str());
   }
 
-  if (options.disable_cpu_ep_fallback.has_value()) {
-    if (options.disable_cpu_ep_fallback.value())
-      ort_options.DisableCpuEpFallback();
+  if (config_session_options.disable_cpu_ep_fallback.has_value()) {
+    if (config_session_options.disable_cpu_ep_fallback.value())
+      session_options.DisableCpuEpFallback();
     else
-      ort_options.EnableCpuEpFallback();
+      session_options.EnableCpuEpFallback();
   }
 
-  if (options.disable_quant_qdq.has_value()) {
-    if (options.disable_quant_qdq.value())
-      ort_options.DisableQuantQdq();
+  if (config_session_options.disable_quant_qdq.has_value()) {
+    if (config_session_options.disable_quant_qdq.value())
+      session_options.DisableQuantQdq();
     else
-      ort_options.EnableQuantQdq();
+      session_options.EnableQuantQdq();
   }
 
-  if (options.enable_quant_qdq_cleanup.has_value()) {
-    if (options.enable_quant_qdq_cleanup.value())
-      ort_options.EnableQuantQdqCleanup();
+  if (config_session_options.enable_quant_qdq_cleanup.has_value()) {
+    if (config_session_options.enable_quant_qdq_cleanup.value())
+      session_options.EnableQuantQdqCleanup();
     else
-      ort_options.DisableQuantQdqCleanup();
+      session_options.DisableQuantQdqCleanup();
   }
 
-  if (options.ep_context_enable.has_value()) {
-    if (options.ep_context_enable.value())
-      ort_options.SetEpContextEnable();
+  if (config_session_options.ep_context_enable.has_value()) {
+    if (config_session_options.ep_context_enable.value())
+      session_options.SetEpContextEnable();
   }
 
-  if (options.ep_context_embed_mode.has_value()) {
-    ort_options.SetEpContextEmbedMode(options.ep_context_embed_mode.value().c_str());
+  if (config_session_options.ep_context_embed_mode.has_value()) {
+    session_options.SetEpContextEmbedMode(config_session_options.ep_context_embed_mode.value().c_str());
   }
 
-  if (options.ep_context_file_path.has_value()) {
-    ort_options.SetEpContextFilePath(options.ep_context_file_path.value().c_str());
+  if (config_session_options.ep_context_file_path.has_value()) {
+    session_options.SetEpContextFilePath(config_session_options.ep_context_file_path.value().c_str());
   }
 
-  for (auto& provider_options : options.provider_options) {
+  if (config_session_options.provider_options.empty() && config_session_options.use_env_allocators) {
+    // Share env allocators across sessions that only use the CPU provider
+    session_options.AddConfigEntry("session.use_env_allocators", "1");
+  }
+
+  for (auto& provider_options : config_session_options.provider_options) {
     if (provider_options.name == "cuda") {
       auto ort_provider_options = OrtCUDAProviderOptionsV2::Create();
       std::vector<const char*> keys, values;
@@ -361,11 +387,17 @@ void Model::CreateSessionOptions() {
       ort_provider_options->Update(keys.data(), values.data(), keys.size());
 
       // Create and set our cudaStream_t
-      cuda_stream_.Create();
+      if (!cuda_stream_.get())
+        cuda_stream_.Create();
+
       ort_provider_options->UpdateValue("user_compute_stream", cuda_stream_.get());
 
-      ort_options.AppendExecutionProvider_CUDA_V2(*ort_provider_options);
-      device_type_ = DeviceType::CUDA;  // Scoring will use CUDA
+      session_options.AppendExecutionProvider_CUDA_V2(*ort_provider_options);
+      // Device type determines the scoring device.
+      // Only use the primary session options to determine the device type
+      if (is_primary_session_options)
+        device_type_ = DeviceType::CUDA;  // Scoring will use CUDA
+
     } else if (provider_options.name == "rocm") {
       OrtROCMProviderOptions ort_provider_options;
 
@@ -376,62 +408,84 @@ void Model::CreateSessionOptions() {
       }
 
       Ort::ThrowOnError(Ort::api->UpdateROCMProviderOptions(&ort_provider_options, keys.data(), values.data(), keys.size()));
-      ort_options.AppendExecutionProvider_ROCM(ort_provider_options);
+      session_options.AppendExecutionProvider_ROCM(ort_provider_options);
 #if USE_DML
     } else if (provider_options.name == "dml") {
-      auto current_module_path = CurrentModulePath();
-      dml_objects_ = DmlHelpers::CreateDmlObjects(current_module_path);
-
-      constexpr auto directml_dll = "DirectML.dll";
-      wil::unique_hmodule smart_directml_dll(LoadLibraryEx(directml_dll, nullptr, 0));
-      THROW_LAST_ERROR_IF(!smart_directml_dll);
-
-      if (LoadLibraryEx(directml_dll, nullptr, 0) == NULL) {
-        throw std::runtime_error("DirectML.dll not found");
-      }
-
-      auto dml_create_device1_fn = reinterpret_cast<decltype(&DMLCreateDevice1)>(GetProcAddress(smart_directml_dll.get(), "DMLCreateDevice1"));
-      THROW_LAST_ERROR_IF(!dml_create_device1_fn);
-      THROW_IF_FAILED(dml_create_device1_fn(dml_objects_.d3d12_device.Get(), DML_CREATE_DEVICE_FLAG_NONE, DML_FEATURE_LEVEL_5_0, IID_PPV_ARGS(&dml_device_)));
-
-      Ort::ThrowOnError(Ort::api->GetExecutionProviderApi("DML", ORT_API_VERSION, reinterpret_cast<const void**>(&p_dml_api_)));
       if (!p_dml_api_) {
-        throw std::runtime_error("Unexpected nullptr getting OrtDmlApi");
+        auto current_module_path = CurrentModulePath();
+        dml_objects_ = DmlHelpers::CreateDmlObjects(current_module_path);
+
+        constexpr auto directml_dll = "DirectML.dll";
+        wil::unique_hmodule smart_directml_dll(LoadLibraryEx(directml_dll, nullptr, 0));
+        THROW_LAST_ERROR_IF(!smart_directml_dll);
+
+        if (LoadLibraryEx(directml_dll, nullptr, 0) == NULL) {
+          throw std::runtime_error("DirectML.dll not found");
+        }
+
+        auto dml_create_device1_fn = reinterpret_cast<decltype(&DMLCreateDevice1)>(GetProcAddress(smart_directml_dll.get(), "DMLCreateDevice1"));
+        THROW_LAST_ERROR_IF(!dml_create_device1_fn);
+        THROW_IF_FAILED(dml_create_device1_fn(dml_objects_.d3d12_device.Get(), DML_CREATE_DEVICE_FLAG_NONE, DML_FEATURE_LEVEL_5_0, IID_PPV_ARGS(&dml_device_)));
+
+        Ort::ThrowOnError(Ort::api->GetExecutionProviderApi("DML", ORT_API_VERSION, reinterpret_cast<const void**>(&p_dml_api_)));
+        if (!p_dml_api_) {
+          throw std::runtime_error("Unexpected nullptr getting OrtDmlApi");
+        }
+
+        dml_execution_context_ = std::make_unique<DmlExecutionContext>(
+            dml_objects_.d3d12_device.Get(),
+            dml_device_.Get(),
+            dml_objects_.command_queue.Get(),
+            *allocator_device_,
+            p_dml_api_);
+
+        dml_pooled_upload_heap_ = std::make_unique<DmlPooledUploadHeap>(dml_objects_.d3d12_device.Get(), dml_execution_context_.get());
+        dml_readback_heap_ = std::make_unique<DmlReadbackHeap>(dml_objects_.d3d12_device.Get(), dml_execution_context_.get());
       }
 
-      dml_execution_context_ = std::make_unique<DmlExecutionContext>(
-          dml_objects_.d3d12_device.Get(),
-          dml_device_.Get(),
-          dml_objects_.command_queue.Get(),
-          *allocator_device_,
-          p_dml_api_);
-
-      dml_pooled_upload_heap_ = std::make_unique<DmlPooledUploadHeap>(dml_objects_.d3d12_device.Get(), dml_execution_context_.get());
-      dml_readback_heap_ = std::make_unique<DmlReadbackHeap>(dml_objects_.d3d12_device.Get(), dml_execution_context_.get());
-
-      // The vision model doesn't support graph capture because of dynamic shapes, so don't enable graph capture for it
-      if (!config_->model.vision.filename.empty()) {
-        vision_session_options_ = ort_options.Clone();
-        p_dml_api_->SessionOptionsAppendExecutionProvider_DML1(vision_session_options_.get(), dml_device_.Get(), dml_objects_.command_queue.Get());
+      if (!disable_graph_capture) {
+        session_options.AddConfigEntry("ep.dml.enable_graph_capture", "1");
+        session_options.AddConfigEntry("ep.dml.disable_memory_arena", "1");
       }
 
-      ort_options.AddConfigEntry("ep.dml.enable_graph_capture", "1");
-      ort_options.AddConfigEntry("ep.dml.disable_memory_arena", "1");
-      p_dml_api_->SessionOptionsAppendExecutionProvider_DML1(&ort_options, dml_device_.Get(), dml_objects_.command_queue.Get());
-      is_intel_device_ = DmlHelpers::IsIntelDevice(dml_objects_.d3d12_device.Get());
+      p_dml_api_->SessionOptionsAppendExecutionProvider_DML1(&session_options, dml_device_.Get(), dml_objects_.command_queue.Get());
 
-      device_type_ = DeviceType::DML;  // We use a DML allocator for input/output caches, but other tensors will use CPU tensors
+      if (is_primary_session_options)
+        device_type_ = DeviceType::DML;  // We use a DML allocator for input/output caches, but other tensors will use CPU tensors
 #endif
     } else if (provider_options.name == "qnn") {
+      session_options.AddConfigEntry("ep.share_ep_contexts", "1");
       std::unordered_map<std::string, std::string> opts;
       for (auto& option : provider_options.options) {
         opts.emplace(option.first, option.second);
       }
 
-      ort_options.AppendExecutionProvider("QNN", opts);
+      session_options.AppendExecutionProvider("QNN", opts);
     } else
       throw std::runtime_error("Unknown provider type: " + provider_options.name);
   }
+}
+
+void Model::CreateSessionOptions() {
+  session_options_ = OrtSessionOptions::Create();
+  CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *session_options_, true, false);
+
+  for (auto& pipeline_model : config_->model.decoder.pipeline) {
+    if (pipeline_model.session_options.has_value()) {
+      auto emplaced = pipeline_session_options_.emplace(pipeline_model.model_id, OrtSessionOptions::Create());
+      CreateSessionOptionsFromConfig(*pipeline_model.session_options, *emplaced.first->second, false, false);
+    }
+  }
+}
+
+OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {
+  auto session_options = pipeline_session_options_.find(model_id);
+  // Use the pipeline model session options id config defined it.
+  if (session_options != pipeline_session_options_.end())
+    return session_options->second.get();
+
+  // Else fallback to the main session options.
+  return session_options_.get();
 }
 
 std::shared_ptr<Tokenizer> Model::CreateTokenizer() const {
@@ -453,6 +507,8 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path) {
     return std::make_shared<Whisper_Model>(std::move(config), ort_env);
   if (config->model.type == "phi3v")
     return std::make_shared<MultiModalVisionModel>(std::move(config), ort_env);
+  if (config->model.type == "decoder-pipeline")
+    return std::make_shared<DecoderOnlyPipelineModel>(std::move(config), ort_env);
 
   throw std::runtime_error("Unsupported model_type in config.json: " + config->model.type);
 }
@@ -462,8 +518,8 @@ std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Model& model) {
 }
 
 // Used by benchmarking tests only, should not be used normally
-std::shared_ptr<GeneratorParams> CreateGeneratorParams() {
-  return std::make_shared<GeneratorParams>();
+std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Config& config) {
+  return std::make_shared<GeneratorParams>(config);
 }
 
 void ConvertFp16ToFp32(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<OrtValue>& p_out, DeviceType device_type, cudaStream_t stream) {
@@ -533,7 +589,7 @@ void ConvertFp32ToFp16(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<Or
 
 #if USE_CUDA
     case DeviceType::CUDA:
-      // TODO: Implement for CUDA. For now, fallthrough and report an error.
+      cuda::LaunchFp32ToFp16(fp32, fp16, count, stream);
 #endif
 
     default:
@@ -598,6 +654,8 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
     : tokenizer_{std::make_shared<Tokenizer>(config)} {
   if (config.model.type == "phi3v") {
     image_processor_ = std::make_shared<ImageProcessor>(config, session_info);
+  } else if (config.model.type == "whisper") {
+    audio_processor_ = std::make_shared<AudioProcessor>(config, session_info);
   } else {
     throw std::runtime_error("MultiModalProcessor cannot be created. Expected a multimodal model. Actual: " + config.model.type);
   }

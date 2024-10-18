@@ -30,8 +30,4 @@ target_link_libraries(model_benchmark PRIVATE onnxruntime-genai-static ${ONNXRUN
 
 target_link_directories(model_benchmark PRIVATE ${ORT_LIB_DIR})
 
-add_custom_command(TARGET model_benchmark POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different ${onnxruntime_libs} $<TARGET_FILE_DIR:model_benchmark>
-)
-
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${model_benchmark_srcs})

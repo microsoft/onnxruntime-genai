@@ -25,7 +25,7 @@
           "domain": "com.microsoft.extensions",
           "type": "Phi3ImageTransform",
           "attrs": {
-            "num_crops": 16,
+            "num_crops": 4,
             "num_img_tokens": 144
           }
         }

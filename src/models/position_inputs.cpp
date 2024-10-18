@@ -334,7 +334,7 @@ void PositionInputs::InitializeTensors(std::array<int64_t, 2> shape, cpu_span<in
   for (int i = 0; i < shape[0]; i++) {
     T abs_position = 0;
     for (int j = 0; j < shape[1]; j++, word_id++, mask++, position++) {
-      if (*word_id == state_.params_->pad_token_id) {
+      if (*word_id == model_.config_->model.pad_token_id) {
         *mask = 0;
         *position = 0;
       } else {

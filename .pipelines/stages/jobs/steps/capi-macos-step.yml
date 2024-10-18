@@ -1,0 +1,95 @@
+parameters:
+- name: target
+  type: string
+- name: ep
+  type: string
+  default: 'cpu'
+- name: arch
+  type: string
+  default: 'x64'
+- name: build_config
+  type: string
+  default: 'release'
+
+steps:
+
+- checkout: self
+  clean: true
+  path: onnxruntime-genai
+  submodules: recursive
+
+- template: utils/set-nightly-build-option-variable.yml
+
+- bash: |
+    echo "arch=$(arch)"
+    echo "ort_filename=$(ort_filename)"
+    echo "ort_version=$(ort_version)"
+    echo "ep=$(ep)"
+    echo "cuda_version=$(cuda_version)"
+    echo "target=${{ parameters.target }}"
+    echo "build_config=${{ parameters.build_config }}"
+  displayName: 'Print Parameters'
+
+- powershell: |
+    $env:MACOSX_DEPLOYMENT_TARGET = "12.0" # Monterey
+    cmake --preset macos_$(arch)_$(ep)_$(build_config)
+  displayName: 'Configure CMake C API'
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
+- powershell: |
+    cmake --build --preset macos_$(arch)_$(ep)_$(build_config) --parallel --target ${{ parameters.target }}
+  displayName: 'Build C API'
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
+- ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
+  - powershell: |
+      python -m pip install wheel
+    displayName: 'Install wheel'
+
+  - powershell: |
+      cmake --build --preset macos_$(arch)_$(ep)_$(build_config) --target package
+    displayName: 'Package C/C++ API'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Artifact: ONNXRuntime Genai capi'
+    inputs:
+      ArtifactName: $(artifactName)-capi
+      PathtoPublish: '$(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package'
+
+- ${{ if eq(parameters.target, 'python') }}:
+  - powershell: |
+      python -m pip install wheel
+    displayName: 'Install wheel'
+
+  - powershell: |
+      # From: https://github.com/pypa/cibuildwheel/blob/93542c397cfe940bcbb8f1eff5c37d345ea16653/cibuildwheel/macos.py#L247-L260
+      if ("$(arch)" -eq "arm64") {
+          $env:_PYTHON_HOST_PLATFORM = "macosx-12.0-arm64"
+          $env:ARCHFLAGS = "-arch arm64"
+      }
+      else {
+          $env:_PYTHON_HOST_PLATFORM = "macosx-12.0-x86_64"
+          $env:ARCHFLAGS = "-arch x86_64"
+      }
+      cmake --build --preset macos_$(arch)_$(ep)_$(build_config) --parallel --PyPackageBuild
+    displayName: 'Build Python Wheel'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+
+  - powershell: |
+      Get-ChildItem -Path $(Build.Repository.LocalPath) -Recurse
+    displayName: 'List all files in the repo for debugging'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+
+  - task: CopyFiles@2
+    displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
+    inputs:
+      SourceFolder: '$(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/wheel'
+      Contents: '*.whl'
+      TargetFolder: '$(Build.ArtifactStagingDirectory)/wheel'
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Artifact: ONNXRuntime python wheel'
+    inputs:
+      ArtifactName: $(artifactName)-wheel
+      PathtoPublish: '$(Build.ArtifactStagingDirectory)/wheel'

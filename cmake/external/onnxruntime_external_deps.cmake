@@ -87,3 +87,9 @@ FetchContent_Declare(
 )
 set(OCOS_BUILD_PRESET ort_genai)
 onnxruntime_fetchcontent_makeavailable(onnxruntime_extensions)
+
+list(APPEND EXTERNAL_LIBRARIES
+  onnxruntime_extensions
+  ocos_operators
+  noexcep_operators
+)

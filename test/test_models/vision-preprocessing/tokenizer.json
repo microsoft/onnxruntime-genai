@@ -131,7 +131,7 @@
     },
     {
       "id": 32011,
-      "content": "<|step|>",
+      "content": "<|placeholder7|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": true,
@@ -140,7 +140,7 @@
     },
     {
       "id": 32012,
-      "content": "<|function_output|>",
+      "content": "<|placeholder8|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": true,
@@ -149,7 +149,7 @@
     },
     {
       "id": 32013,
-      "content": "<|tag|>",
+      "content": "<|placeholder9|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": true,
@@ -158,7 +158,7 @@
     },
     {
       "id": 32014,
-      "content": "<|function_call|>",
+      "content": "<|placeholder10|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": true,
@@ -167,7 +167,7 @@
     },
     {
       "id": 32015,
-      "content": "<|raw|>",
+      "content": "<|placeholder11|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": true,
@@ -176,7 +176,7 @@
     },
     {
       "id": 32016,
-      "content": "<|continue|>",
+      "content": "<|placeholder12|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": true,
@@ -185,7 +185,7 @@
     },
     {
       "id": 32017,
-      "content": "<|function_list|>",
+      "content": "<|placeholder13|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": true,
@@ -194,7 +194,7 @@
     },
     {
       "id": 32018,
-      "content": "<|calc|>",
+      "content": "<|placeholder14|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": true,
@@ -203,7 +203,7 @@
     },
     {
       "id": 32019,
-      "content": "<|code|>",
+      "content": "<|placeholder15|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": true,
@@ -212,7 +212,7 @@
     },
     {
       "id": 32020,
-      "content": "<|/code|>",
+      "content": "<|placeholder16|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": true,
@@ -221,7 +221,7 @@
     },
     {
       "id": 32021,
-      "content": "<|summary|>",
+      "content": "<|placeholder17|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": true,
@@ -230,7 +230,7 @@
     },
     {
       "id": 32022,
-      "content": "<|resource|>",
+      "content": "<|placeholder18|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": true,
@@ -239,7 +239,7 @@
     },
     {
       "id": 32023,
-      "content": "<|assistant_mask|>",
+      "content": "<|placeholder19|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": true,
@@ -248,7 +248,7 @@
     },
     {
       "id": 32024,
-      "content": "<|start|>",
+      "content": "<|placeholder20|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": true,
@@ -257,7 +257,7 @@
     },
     {
       "id": 32025,
-      "content": "<|message|>",
+      "content": "<|placeholder21|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": true,
@@ -266,7 +266,7 @@
     },
     {
       "id": 32026,
-      "content": "<|fim_prefix|>",
+      "content": "<|placeholder22|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": true,
@@ -275,7 +275,7 @@
     },
     {
       "id": 32027,
-      "content": "<|fim_middle|>",
+      "content": "<|placeholder23|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": true,
@@ -284,7 +284,7 @@
     },
     {
       "id": 32028,
-      "content": "<|fim_suffix|>",
+      "content": "<|placeholder24|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": true,
@@ -293,7 +293,7 @@
     },
     {
       "id": 32029,
-      "content": "<|meta_start|>",
+      "content": "<|placeholder25|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": true,
@@ -302,7 +302,7 @@
     },
     {
       "id": 32030,
-      "content": "<|ipynb_marker|>",
+      "content": "<|placeholder26|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": true,
@@ -311,7 +311,7 @@
     },
     {
       "id": 32031,
-      "content": "<|diff_marker|>",
+      "content": "<|placeholder27|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": true,
@@ -320,7 +320,7 @@
     },
     {
       "id": 32032,
-      "content": "<|ghissue|>",
+      "content": "<|placeholder28|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": true,
@@ -329,7 +329,7 @@
     },
     {
       "id": 32033,
-      "content": "<|ghreview|>",
+      "content": "<|placeholder29|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": true,
@@ -338,7 +338,7 @@
     },
     {
       "id": 32034,
-      "content": "<|disc_start|>",
+      "content": "<|placeholder30|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": true,
@@ -347,7 +347,7 @@
     },
     {
       "id": 32035,
-      "content": "<|disc_sep|>",
+      "content": "<|placeholder31|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": true,
@@ -356,7 +356,7 @@
     },
     {
       "id": 32036,
-      "content": "<|disc_thread|><|query|>",
+      "content": "<|placeholder32|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": true,
@@ -365,7 +365,7 @@
     },
     {
       "id": 32037,
-      "content": "<|/query|>",
+      "content": "<|placeholder33|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": true,
@@ -374,7 +374,7 @@
     },
     {
       "id": 32038,
-      "content": "<|data|>",
+      "content": "<|placeholder34|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": true,
@@ -383,7 +383,7 @@
     },
     {
       "id": 32039,
-      "content": "<|/data|>",
+      "content": "<|placeholder35|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": true,
@@ -392,7 +392,7 @@
     },
     {
       "id": 32040,
-      "content": "<|sys|>",
+      "content": "<|placeholder36|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": true,
@@ -401,7 +401,7 @@
     },
     {
       "id": 32041,
-      "content": "<|/sys|>",
+      "content": "<|placeholder37|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": true,
@@ -410,7 +410,7 @@
     },
     {
       "id": 32042,
-      "content": "<|inst|>",
+      "content": "<|placeholder38|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": true,
@@ -419,7 +419,7 @@
     },
     {
       "id": 32043,
-      "content": "<|/inst|>",
+      "content": "<|placeholder39|>",
       "single_word": false,
       "lstrip": false,
       "rstrip": true,
