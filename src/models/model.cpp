@@ -64,17 +64,17 @@ void State::Run(OrtSession& session, int new_batch_size) {
 }
 
 void State::SetTerminate() {
-  params_->session_terminated = true;
+  session_terminated = true;
   run_options_->SetTerminate();
 }
 
 void State::UnsetTerminate() {
-  params_->session_terminated = false;
+  session_terminated = false;
   run_options_->UnsetTerminate();
 }
 
 OrtValue* State::GetInput(const char* name) {
-  ThrowErrorIfSessionTerminated(params_->session_terminated);
+  ThrowErrorIfSessionTerminated(session_terminated);
   for (size_t i = 0; i < input_names_.size(); i++) {
     if (std::strcmp(input_names_[i], name) == 0) {
       return inputs_[i];
@@ -84,7 +84,7 @@ OrtValue* State::GetInput(const char* name) {
 }
 
 OrtValue* State::GetOutput(const char* name) {
-  ThrowErrorIfSessionTerminated(params_->session_terminated);
+  ThrowErrorIfSessionTerminated(session_terminated);
   for (size_t i = 0; i < output_names_.size(); i++) {
     if (std::strcmp(output_names_[i], name) == 0) {
       return outputs_[i];
