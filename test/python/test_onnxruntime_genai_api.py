@@ -393,14 +393,15 @@ def test_vision_preprocessing_multiple_images(
 
 
 @pytest.mark.parametrize("device", devices)
-@pytest.mark.parametrize("relative_model_path", [Path("adapters")])
 @pytest.mark.skipif(
     sysconfig.get_platform().endswith("arm64"),
     reason="ONNX is not available on ARM64",
 )
-def test_adapters(test_data_path, device, relative_model_path, phi2_for):
-    def _prepare_adapter_model(test_data_path, relative_model_path):
+@pytest.mark.parametrize("multiple_adapters", [True, False])
+def test_adapters(test_data_path, device, multiple_adapters, phi2_for):
+    def _prepare_adapter_model(test_data_path):
         phi2_model_path = phi2_for(device)
+        relative_model_path = "multiple_adapters" if multiple_adapters else "adapters"
         adapter_model_path = os.fspath(Path(test_data_path) / relative_model_path)
         if os.path.exists(adapter_model_path):
             shutil.rmtree(adapter_model_path)
@@ -461,21 +462,34 @@ def test_adapters(test_data_path, device, relative_model_path, phi2_for):
                 b, onnx_dtype
             ),
         }
+        if multiple_adapters:
+            adapters = [{key: value} for key, value in adapters.items()]
 
-        adapter_format = onnxruntime.AdapterFormat()
-        adapter_format.set_adapter_version(1)
-        adapter_format.set_model_version(1)
-        adapter_format.set_parameters(adapters)
-        adapter_format.export_adapter(
-            str(Path(adapter_model_path) / "adapters.onnx_adapter")
-        )
+        def _export_adapter(adapter, adapter_file_name):
+            adapter_format = onnxruntime.AdapterFormat()
+            adapter_format.set_adapter_version(1)
+            adapter_format.set_model_version(1)
+            adapter_format.set_parameters(adapter)
+            adapter_format.export_adapter(adapter_file_name)
 
-        return adapter_model_path
+        adapter_paths = []
+        if multiple_adapters:
+            for i, adapter in enumerate(adapters):
+                adapter_file_name = str(Path(adapter_model_path) / f"adapter_{i}.onnx_adapter")
+                _export_adapter(adapter, adapter_file_name)
+                adapter_paths.append(adapter_file_name)
+        else:
+            adapter_file_name = str(Path(adapter_model_path) / "adapters.onnx_adapter")
+            _export_adapter(adapters, adapter_file_name)
+            adapter_paths.append(adapter_file_name)
 
-    model_path = _prepare_adapter_model(test_data_path, relative_model_path)
+        return adapter_model_path, adapter_paths
+
+    model_path, adapter_paths = _prepare_adapter_model(test_data_path)
     model = og.Model(model_path)
     adapters = og.Adapters(model)
-    adapters.load(str(Path(model_path) / "adapters.onnx_adapter"), "adapters_a_and_b")
+    for i, adapter_path in enumerate(adapter_paths):
+        adapters.load(adapter_path, f"adapter_{i}")
 
     tokenizer = og.Tokenizer(model)
     prompts = [
@@ -487,9 +501,12 @@ def test_adapters(test_data_path, device, relative_model_path, phi2_for):
     params = og.GeneratorParams(model)
     params.set_search_options(max_length=20, batch_size=len(prompts))
 
-    generator = og.Generator(model, params)
-    generator.set_active_adapter(adapters, "adapters_a_and_b")
-    generator.append_tokens(tokenizer.encode_batch(prompts))
+    print(len(adapter_paths))
 
+    generator = og.Generator(model, params)
+    for i in range(len(adapter_paths)):
+        generator.set_active_adapter(adapters, f"adapter_{i}")
+        
+    generator.append_tokens(tokenizer.encode_batch(prompts))
     while not generator.is_done():
         generator.generate_next_token()

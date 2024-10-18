@@ -298,12 +298,12 @@ OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* oga_generator
 
 size_t OGA_API_CALL OgaGenerator_GetSequenceCount(const OgaGenerator* oga_generator, size_t index) {
   auto& generator = *reinterpret_cast<const Generators::Generator*>(oga_generator);
-  return generator.GetSequence(static_cast<int>(index)).GetCPU().size();
+  return generator.GetSequence(static_cast<int>(index)).CpuSpan().size();
 }
 
 const int32_t* OGA_API_CALL OgaGenerator_GetSequenceData(const OgaGenerator* oga_generator, size_t index) {
   auto& generator = *reinterpret_cast<const Generators::Generator*>(oga_generator);
-  return generator.GetSequence(static_cast<int>(index)).GetCPU().data();
+  return generator.GetSequence(static_cast<int>(index)).CpuSpan().data();
 }
 
 OgaResult* OGA_API_CALL OgaCreateTokenizer(const OgaModel* model, OgaTokenizer** out) {
@@ -518,10 +518,10 @@ size_t OGA_API_CALL OgaStringArrayGetCount(const OgaStringArray* string_array) {
   return reinterpret_cast<const std::vector<std::string>*>(string_array)->size();
 }
 
-OgaResult* OgaCreateAdapters(const OgaModel* model, OgaAdapters** adapters_p) {
+OgaResult* OgaCreateAdapters(const OgaModel* model, OgaAdapters** out) {
   OGA_TRY
   auto adapters = std::make_shared<Generators::Adapters>(reinterpret_cast<const Generators::Model*>(model));
-  *adapters_p = reinterpret_cast<OgaAdapters*>(adapters.get());
+  *out = reinterpret_cast<OgaAdapters*>(adapters.get());
   adapters->external_owner_ = adapters;
   return nullptr;
   OGA_CATCH

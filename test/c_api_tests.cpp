@@ -8,7 +8,11 @@
 #define MODEL_PATH "../../test/test_models/"
 #endif
 #ifndef PHI2_PATH
+#if USE_CUDA
+#define PHI2_PATH MODEL_PATH "phi-2/int4/cuda"
+#else
 #define PHI2_PATH MODEL_PATH "phi-2/int4/cpu"
+#endif
 #endif
 TEST(CAPITests, TokenizerCAPI) {
 #if TEST_PHI2
@@ -21,7 +25,7 @@ TEST(CAPITests, TokenizerCAPI) {
     auto input_sequences = OgaSequences::Create();
     tokenizer->Encode(input_string, *input_sequences);
 
-    auto out_string = tokenizer->Decode(input_sequences->Get(0));
+    auto out_string = tokenizer->Decode(input_sequences->SequenceData(0), input_sequences->SequenceCount(0));
     ASSERT_STREQ(input_string, out_string);
   }
 
@@ -41,7 +45,7 @@ TEST(CAPITests, TokenizerCAPI) {
 
   // Decode one at a time
   for (size_t i = 0; i < sequences->Count(); i++) {
-    auto out_string = tokenizer->Decode(sequences->Get(i));
+    auto out_string = tokenizer->Decode(sequences->SequenceData(i), sequences->SequenceCount(i));
     std::cout << "Decoded string:" << out_string << std::endl;
     if (strcmp(input_strings[i], out_string) != 0)
       throw std::runtime_error("Token decoding mismatch");
@@ -51,10 +55,10 @@ TEST(CAPITests, TokenizerCAPI) {
   for (size_t i = 0; i < sequences->Count(); i++) {
     auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
 
-    std::span<const int32_t> sequence = sequences->Get(i);
+    auto* sequence = sequences->SequenceData(i);
     std::string stream_result;
-    for (auto& token : sequence) {
-      stream_result += tokenizer_stream->Decode(token);
+    for (size_t j = 0; j < sequences->SequenceCount(i); j++) {
+      stream_result += tokenizer_stream->Decode(sequence[j]);
     }
     std::cout << "Stream decoded string:" << stream_result << std::endl;
     if (strcmp(input_strings[i], stream_result.c_str()) != 0)
@@ -86,19 +90,19 @@ TEST(CAPITests, AppendTokensToSequence) {
   // Append token sequence to another sequence
   // Basically create a copy
   for (size_t i = 0; i < sequences->Count(); i++) {
-    std::span<const int32_t> sequence = sequences->Get(i);
-    appended_sequences->Append(sequence.data(), sequence.size());
+    auto* sequence = sequences->SequenceData(i);
+    appended_sequences->Append(sequence, sequences->SequenceCount(i));
   }
   // All sequences should be copied
   EXPECT_EQ(appended_sequences->Count(), sequences->Count());
 
   // Compare each token in each sequence
   for (int i = 0; i < sequences->Count(); i++) {
-    std::span<const int32_t> sequence = sequences->Get(i);
-    std::span<const int32_t> appended_sequence = appended_sequences->Get(i);
-    EXPECT_EQ(sequence.size(), appended_sequence.size());
+    auto* sequence = sequences->SequenceData(i);
+    auto* appended_sequence = appended_sequences->SequenceData(i);
+    EXPECT_EQ(sequences->SequenceCount(i), appended_sequences->SequenceCount(i));
 
-    for (int j = 0; j < sequence.size(); j++) {
+    for (size_t j = 0; j < sequences->SequenceCount(i); j++) {
       EXPECT_EQ(sequence[j], appended_sequence[j]);
     }
   }
@@ -132,8 +136,8 @@ TEST(CAPITests, EndToEndPhiBatch) {
   }
 
   // Decode The Batch
-  for (size_t i = 0; i < output_sequences->Count(); i++) {
-    auto out_string = tokenizer->Decode(output_sequences->Get(i));
+  for (size_t i = 0; i < 3; i++) {
+    auto out_string = tokenizer->Decode(generator->GetSequenceData(i), generator->GetSequenceCount(i));
     std::cout << "Decoded string:" << out_string << std::endl;
   }
 #endif
@@ -289,7 +293,7 @@ struct Phi2Test {
     // Low level loop
     {
       auto generator = OgaGenerator::Create(*model_, *params_);
-      generator->AppendTokenSequences(input_sequences_);
+      generator->AppendTokenSequences(*input_sequences_);
 
       while (!generator->IsDone()) {
         generator->GenerateNextToken();
@@ -297,7 +301,7 @@ struct Phi2Test {
 
       // Decode One at a time
       for (size_t i = 0; i < 3; i++) {
-        auto out_string = tokenizer_->Decode(generator->GetSequence(i));
+        auto out_string = tokenizer_->Decode(generator->GetSequenceData(i), generator->GetSequenceCount(i));
         std::cout << "Decoded string:" << out_string << std::endl;
       }
     }
@@ -365,13 +369,12 @@ TEST(CAPITests, AdaptersTest) {
   {
     auto params = OgaGeneratorParams::Create(*model);
     params->SetSearchOption("max_length", 20);
-    params->SetInputSequences(*input_sequences);
 
     auto generator = OgaGenerator::Create(*model, *params);
     generator->SetActiveAdapter(*adapters, "adapters_a_and_b");
+    generator->AppendTokenSequences(*input_sequences);
 
     while (!generator->IsDone()) {
-      generator->ComputeLogits();
       generator->GenerateNextToken();
     }
   }
@@ -379,6 +382,48 @@ TEST(CAPITests, AdaptersTest) {
   // Unload the adapter. Will error out if the adapter is still active.
   // So, the generator must go out of scope before the adapter can be unloaded.
   adapters->UnloadAdapter("adapters_a_and_b");
+#endif
+}
+
+TEST(CAPITests, AdaptersTestMultipleAdapters) {
+#if TEST_PHI2
+  // The python unit tests create the adapter model.
+  // In order to run this test, the python unit test must have been run first.
+  auto model = OgaModel::Create(MODEL_PATH "multiple_adapters");
+  auto adapters = OgaAdapters::Create(*model);
+  adapters->LoadAdapter(MODEL_PATH "multiple_adapters/adapter_0.onnx_adapter", "adapter_a");
+  adapters->LoadAdapter(MODEL_PATH "multiple_adapters/adapter_1.onnx_adapter", "adapter_b");
+
+  auto tokenizer = OgaTokenizer::Create(*model);
+
+  const char* input_strings[] = {
+      "This is a test.",
+      "Rats are awesome pets!",
+      "The quick brown fox jumps over the lazy dog.",
+  };
+
+  auto input_sequences = OgaSequences::Create();
+  for (auto& string : input_strings)
+    tokenizer->Encode(string, *input_sequences);
+
+  {
+    auto params = OgaGeneratorParams::Create(*model);
+    params->SetSearchOption("max_length", 20);
+
+    auto generator = OgaGenerator::Create(*model, *params);
+    generator->SetActiveAdapter(*adapters, "adapter_a");
+    generator->SetActiveAdapter(*adapters, "adapter_b");
+    generator->AppendTokenSequences(*input_sequences);
+
+    while (!generator->IsDone()) {
+      generator->GenerateNextToken();
+    }
+  }
+
+  // Unload the adapter. Will error out if the adapter is still active.
+  // So, the generator must go out of scope before the adapter can be unloaded.
+  adapters->UnloadAdapter("adapter_a");
+  adapters->UnloadAdapter("adapter_b");
 #endif
 }
 

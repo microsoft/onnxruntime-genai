@@ -41,7 +41,7 @@ Generators::cpu_span<T> ToSpan(pybind11::array_t<T> v) {
 
 template <typename T>
 pybind11::array_t<T> ToPython(std::span<T> v) {
-  return pybind11::array_t<T>(v.size(), v.data());
+  return pybind11::array_t<T>{{v.size()}, {sizeof(T)}, v.data()};
 }
 
 ONNXTensorElementDataType ToTensorType(const pybind11::dtype& type) {
@@ -205,6 +205,23 @@ struct PyRoamingArray : RoamingArray<T> {
 };
 
 template <typename T>
+struct PyDeviceMemorySpan {
+  void operator=(DeviceMemorySpan<T> span) {
+    span_ = std::move(span);
+  }
+
+  pybind11::array_t<T> GetNumpy() {
+    auto v = span_.CpuSpan();
+    py_cpu_array_ = pybind11::array_t<T>({v.size()}, {sizeof(T)}, v.data(), pybind11::capsule(v.data(), [](void*) {}));
+    return py_cpu_array_;
+  }
+
+ private:
+  DeviceMemorySpan<T> span_;
+  pybind11::array_t<T> py_cpu_array_;
+};
+
+template <typename T>
 void Declare_DeviceArray(pybind11::module& m, const char* name) {
   using Type = PyRoamingArray<T>;
   pybind11::class_<Type>(m, name)
@@ -286,8 +303,8 @@ struct PyGenerator {
   }
 
   pybind11::array_t<int32_t> GetSequence(int index) {
-    py_sequence_.Assign(generator_->search_->GetSequence(index));
-    return ToPython(py_sequence_.GetCPU());
+    py_sequence_ = generator_->search_->GetSequence(index);
+    return py_sequence_.GetNumpy();
   }
 
   pybind11::array GetOutput(const std::string& name) {
@@ -296,6 +313,16 @@ struct PyGenerator {
 
   void AddTokens(pybind11::array_t<int32_t> tokens) {
     generator_->AddTokens(ToSpan(tokens));
+  }
+
+  pybind11::array_t<float> GetLogits() {
+    py_logits_.Assign(generator_->GetLogits());
+    return ToPython(py_logits_.GetCPU());
+  }
+
+  void SetLogits(pybind11::array_t<float> logits) {
+    logits_ = logits;
+    generator_->search_->SetLogits(cpu_span<float>{ToSpan(logits_)});
   }
 
   void GenerateNextToken() {
@@ -318,8 +345,10 @@ struct PyGenerator {
   std::unique_ptr<Generator> generator_;
   PyRoamingArray<int32_t> py_tokens_;
   PyRoamingArray<int32_t> py_indices_;
-  PyRoamingArray<int32_t> py_sequence_;
+  PyDeviceMemorySpan<int32_t> py_sequence_;
   PyRoamingArray<int32_t> py_sequencelengths_;
+  PyRoamingArray<float> py_logits_;
+  pybind11::array_t<float> logits_;  // Logits passed in from python, to keep the memory alive
 };
 
 void SetLogOptions(const pybind11::kwargs& dict) {
@@ -421,6 +450,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("is_done", &PyGenerator::IsDone)
       .def("get_output", &PyGenerator::GetOutput)
       .def("append_tokens", &PyGenerator::AddTokens)
+      .def("get_logits", &PyGenerator::GetLogits)
+      .def("set_logits", &PyGenerator::SetLogits)
       .def("generate_next_token", &PyGenerator::GenerateNextToken)
       .def("rewind_to", &PyGenerator::RewindToLength)
       .def("get_next_tokens", &PyGenerator::GetNextTokens)

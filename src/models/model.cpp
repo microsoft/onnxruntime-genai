@@ -17,22 +17,7 @@
 #include "dml_provider_factory.h"
 #include "../dml/dml_helpers.h"
 
-EXTERN_C IMAGE_DOS_HEADER __ImageBase;
-
-static std::string CurrentModulePath() {
-  char path[MAX_PATH];
-  GetModuleFileNameA((HINSTANCE)&__ImageBase, path, _countof(path));
-
-  char absolute_path[MAX_PATH];
-  char* name;
-  GetFullPathNameA(path, _countof(path), absolute_path, &name);
-
-  auto idx = std::distance(absolute_path, name);
-  auto out_path = std::string(absolute_path);
-  out_path.resize(idx);
-
-  return out_path;
-}
+std::string CurrentModulePath();
 #endif
 
 namespace Generators {
@@ -412,6 +397,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       // Only use the primary session options to determine the device type
       if (is_primary_session_options)
         device_type_ = DeviceType::CUDA;  // Scoring will use CUDA
+
     } else if (provider_options.name == "rocm") {
       OrtROCMProviderOptions ort_provider_options;
 

@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "generators.h"
+#include "interface.h"
 #include "sequences_cuda.h"
 
 namespace Generators {
@@ -19,25 +20,15 @@ Sequences_Cuda::Sequences_Cuda(int batch_size, int beam_size, int max_length, cu
       current_length_{0} {
   size_t sequences_size = batch_beam_size_ * max_length;
 
-  if (beam_size == 1) {
-    sequences_buffer_ = CudaMallocArray<int32_t>(sequences_size);
-    sequences_ = gpu_span<int32_t>(sequences_buffer_.get(), sequences_size);
-  } else {
-    sequences_buffer_ = CudaMallocArray<int32_t>(2 * sequences_size);
-    sequences_ = gpu_span<int32_t>(sequences_buffer_.get(), sequences_size);
-    sequences_next_ = gpu_span<int32_t>(sequences_buffer_.get() + sequences_size, sequences_size);
-  }
+  auto& device = GetCudaDeviceInterface();
 
-  // TODO: input_sequences will be in cuda memory in the future, for now make a temp copy
-
-  gpu_span<int32_t> input_sequences_gpu;
-
-  cudaStreamSynchronize(stream);  // Until we remove the todo above, wait for this to complete as input_sequences_gpu is on the stack
+  sequences_ = device.Allocate<int32_t>(sequences_size, false /*cpu_accessible*/);
+  if (beam_size > 1)
+    sequences_next_ = device.Allocate<int32_t>(sequences_size, false /*cpu_accessible*/);
 }
 
-RoamingArray<int32_t> Sequences_Cuda::GetSequence(size_t batch_beam_index) {
-  auto span = sequences_.subspan(batch_beam_index * max_length_, current_length_);
-  return gpu_span<int32_t>{span.data(), span.size()};
+DeviceMemorySpan<int32_t> Sequences_Cuda::GetSequence(size_t batch_beam_index) {
+  return sequences_->subspan(batch_beam_index * max_length_, current_length_);
 }
 
 int Sequences_Cuda::GetSequenceLength() const {
@@ -45,20 +36,20 @@ int Sequences_Cuda::GetSequenceLength() const {
 }
 
 void Sequences_Cuda::AppendNextTokenToSequences(std::span<const int32_t> next_tokens) {
-  if (g_log.enabled && g_log.append_next_tokens) {
+  if (GetLogItems().enabled && GetLogItems().append_next_tokens) {
     auto& stream = Log("append_next_tokens");
     DumpCudaSpan(stream, next_tokens);
     stream << std::endl;
   }
 
-  cuda::Launch_AppendNextTokenToSequences(next_tokens, sequences_, batch_beam_size_, current_length_, max_length_, stream_);
+  cuda::Launch_AppendNextTokenToSequences(next_tokens, sequences_->DeviceSpan(), batch_beam_size_, current_length_, max_length_, stream_);
   ++current_length_;
 }
 
 void Sequences_Cuda::AppendUserTokensToSequences(gpu_span<int32_t> user_tokens, int num_beams) {
   int new_length = static_cast<int>(user_tokens.size()) * num_beams / batch_beam_size_;
   int past_length = current_length_;
-  cuda::Launch_AppendUserTokensToSequences(user_tokens, sequences_, batch_beam_size_, num_beams, past_length, new_length, max_length_, stream_);
+  cuda::Launch_AppendUserTokensToSequences(user_tokens, sequences_->DeviceSpan(), batch_beam_size_, num_beams, past_length, new_length, max_length_, stream_);
   current_length_ += new_length;
 }
 
@@ -69,7 +60,7 @@ void Sequences_Cuda::RewindTo(size_t index) {
 
 void Sequences_Cuda::GetLastTokens(gpu_span<int32_t>& last_tokens) {
   // TODO(aciddelgado): throw error when no last tokens
-  cuda::Launch_GetLastTokens(sequences_, last_tokens, batch_beam_size_, current_length_, max_length_, stream_);
+  cuda::Launch_GetLastTokens(sequences_->DeviceSpan(), last_tokens, batch_beam_size_, current_length_, max_length_, stream_);
 }
 
 void Sequences_Cuda::AfterDeviceAppendedNextToken() {

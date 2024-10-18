@@ -79,6 +79,7 @@ void InputIDs::Update(RoamingArray<int32_t> new_tokens) {
 
   // Resize input_ids shape based on new_tokens
   // Temporary solution for beam search
+  // TODO(aciddelgado): for beam search lets call cuda::Launch_ExpandInputSequences
   size_t sequence_length = static_cast<size_t>(new_tokens.GetCPU().size()) / state_.params_->BatchBeamSize();
   if (is_prompt_ && state_.params_->search.num_beams > 1)
     sequence_length = static_cast<size_t>(new_tokens.GetCPU().size()) / state_.params_->search.batch_size;

@@ -25,7 +25,7 @@
 #include <vector>
 #if USE_CUDA
 #include <cuda_runtime.h>
-#include "cuda_common.h"
+#include "cuda/cuda_common.h"
 #else
 // If we don't include cuda_runtime.h, we define this to avoid lots of extra #ifdefs
 using cudaStream_t = void*;
@@ -104,8 +104,9 @@ struct Generator : LeakChecked<Generator> {
   virtual void AddTokens(const cpu_span<int32_t>& input_ids);
   virtual void GenerateNextToken();
   virtual void RewindToLength(size_t new_length);  // Rewind state to new_length
+  RoamingArray<float> GetLogits();
 
-  RoamingArray<int32_t> GetSequence(size_t index) const;
+  DeviceMemorySpan<int32_t> GetSequence(size_t index) const;
 
   std::shared_ptr<const Model> model_;
   std::unique_ptr<State> state_;
