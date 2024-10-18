@@ -57,7 +57,7 @@ public final class Tensor implements AutoCloseable {
 
     // for now, require native byte order as the bytes will be used directly.
     if (data.order() != ByteOrder.nativeOrder()) {
-      throw new GenAIException("Tensor data must have native byte order.")
+      throw new GenAIException("Tensor data must have native byte order.");
     }
 
     this.elementType = elementType;
