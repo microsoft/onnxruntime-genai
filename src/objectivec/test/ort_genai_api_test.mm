@@ -39,8 +39,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)GetOutput {
     std::vector<int64_t> input_ids_shape{2, 4};
     std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
-    auto input_sequence_length = input_ids_shape[1];
-    auto batch_size = input_ids_shape[0];
+    const auto batch_size = input_ids_shape[0];
+    const auto input_sequence_length = input_ids_shape[1];
     int max_length = 10;
 
     NSBundle* bundle = [NSBundle mainBundle];
@@ -75,9 +75,9 @@ NS_ASSUME_NONNULL_BEGIN
     [generator computeLogits];
     OGATensor* prompt_logits_ptr = [generator getOutput:@"logits"];
     auto prompt_logits = static_cast<float*>([prompt_logits_ptr data]);
-    int num_prompt_outputs_to_check = 40;
-    int sample_size = 200;
-    float tolerance = 0.001f;
+    const int num_prompt_outputs_to_check = 40;
+    const int sample_size = 200;
+    const float tolerance = 0.001f;
     // Verify outputs match expected outputs
     for (int i = 0; i < num_prompt_outputs_to_check; i++) {
         XCTAssertEqualWithAccuracy(expected_sampled_logits_prompt[i], prompt_logits[i * sample_size], tolerance);
