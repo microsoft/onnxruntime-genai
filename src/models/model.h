@@ -34,6 +34,9 @@ struct State {
   virtual const CapturedGraphInfo* GetCapturedGraphInfo() const { return nullptr; }
   virtual void Finalize() {}
 
+  void SetTerminate();
+  void UnsetTerminate();
+  mutable bool session_terminated{};
   OrtValue* GetInput(const char* name);
 
   virtual OrtValue* GetOutput(const char* name);
