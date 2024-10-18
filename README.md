@@ -14,7 +14,7 @@ See documentation at https://onnxruntime.ai/docs/genai.
 
 |Support matrix|Supported now|Under development|On the roadmap|
 |-|-|-|-|
-|Model architectures|  Gemma <br/> Llama * <br/> Mistral + <br/>Phi (language + vision)<br/>Qwen <br/>|Whisper|Stable diffusion|
+|Model architectures|  Gemma <br/> Llama * <br/> Mistral + <br/>Phi (language + vision)<br/>Qwen <br/>Nemotron <br/>|Whisper|Stable diffusion|
 |API| Python <br/>C# <br/>C/C++ <br/> Java ^ |Objective-C||
 |Platform| Linux <br/> Windows <br/>Mac ^ <br/>Android ^  ||iOS |||
 |Architecture|x86 <br/> x64 <br/> Arm64 ~ ||||
