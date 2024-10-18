@@ -214,7 +214,7 @@ Print all primes between 1 and n
 
   auto result = generator->GetSequence(0);
 
-  std::cout << tokenizer->Decode(result.GetCPU()) << "\r\n";
+  std::cout << tokenizer->Decode(result.CpuSpan()) << "\r\n";
 #endif
 }
 
