@@ -100,6 +100,20 @@ python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o p
 python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e execution_provider -c cache_dir_to_store_temp_files
 ```
 
+### LoRA Models
+
+This scenario is where you have a finetuned model which supports LoRA and want to get optimized model. To use adapter model you have to pass the path of the model as input
+
+path_to_local_folder_on_disk --> location where adapter_config.json and adapter weights are present
+
+```
+# From wheel:
+python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e execution_provider -c cache_dir_to_store_temp_files
+
+# From source:
+python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e execution_provider -c cache_dir_to_store_temp_files
+```
+
 ### GGUF Model
 
 This scenario is where your float16/float32 GGUF model is already on disk.
