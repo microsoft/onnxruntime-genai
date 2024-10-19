@@ -20,6 +20,7 @@ This folder contains the model builder for quickly creating optimized and quanti
     - [Use 8 Bits Quantization in QMoE](#use-8-bits-quantization-in-qmoe)
     - [Hugging Face Authentication](#hugging-face-authentication)
     - [Use QDQ Pattern for Quantization](#use-qdq-pattern-for-quantization)
+    - [Quant Provider](#quant-provider)
   - [Unit Testing Models](#unit-testing-models)
     - [Option 1: Use the model builder directly](#option-1-use-the-model-builder-directly)
     - [Option 2: Edit the config.json file](#option-2-edit-the-configjson-file-on-disk-and-then-run-the-model-builder)
@@ -217,6 +218,27 @@ python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o p
 python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options use_qdq=1
 ```
 
+
+### Quant Provider
+Set different quantization techniques using option quant_provider
+
+TensorRT-Model-Optimizer's AWQ INT4 
+  1. nvidia_awq: NVIDIA's TensorRT ModelOpt awq implementation. set quant_provider=nvidia_awq. It supports 2 calibration modes.
+  2. nvidia_awq_calibration: AWQ implementation and weight clipping. Choices: {awq, awq_clip}. awq is a default option for nvidia_awq
+
+```
+# From wheel:
+python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e execution_provider -c cache_dir_to_store_temp_files --extra_options quant_provider=nvidia_awq use_qdq=True
+# From source:
+python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options quant_provider=nvidia_awq use_qdq=True
+
+# nvidia_awq_calibration option
+# From wheel:
+python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e execution_provider -c cache_dir_to_store_temp_files --extra_options quant_provider=nvidia_awq use_qdq=True nvidia_awq_calibration=awq
+# From source:
+python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options quant_provider=nvidia_awq use_qdq=True nvidia_awq_calibration=awq
+```
+Default quantization mode will run it we dont specify this option
 ### Unit Testing Models
 
 This scenario is where your PyTorch model is already downloaded locally (either in the default Hugging Face cache directory or in a local folder on disk). If it is not already downloaded locally, here is an example of how you can download it.
