@@ -188,7 +188,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaMo
  * \param[out] out The created model.
  * \return OgaResult containing the error message if the model creation failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModelWithRuntimeSettings(const char* config_path, OgaRuntimeSettings* settings, OgaModel** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModelWithRuntimeSettings(const char* config_path, const OgaRuntimeSettings* settings, OgaModel** out);
 
 /*
  * \brief Destroys the given model.

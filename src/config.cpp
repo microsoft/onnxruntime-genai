@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #include "generators.h"
+#include "runtime_settings.h"
 #include "json.h"
 #include <fstream>
 #include <sstream>
@@ -659,7 +660,7 @@ void ParseConfig(const fs::path& filename, Config& config) {
   }
 }
 
-Config::Config(const fs::path& path) : config_path{path} {
+Config::Config(const fs::path& path, const RuntimeSettings* settings) : config_path{path} {
   ParseConfig(path / "genai_config.json", *this);
 
   if (model.context_length == 0)
@@ -667,6 +668,27 @@ Config::Config(const fs::path& path) : config_path{path} {
 
   if (search.max_length == 0)
     search.max_length = model.context_length;
+
+  if (settings) {
+    // Enable the following code after #992 is merged
+    // https://github.com/microsoft/onnxruntime-genai/pull/992
+
+    // #if USE_WEBGPU
+    auto& provider_options = model.decoder.session_options.provider_options;
+    auto maybe_webgpu_options = std::find_if(provider_options.begin(),
+                                             provider_options.end(),
+                                             [](Generators::Config::ProviderOptions& po) {
+                                               return po.name == "webgpu";
+                                             });
+    if (maybe_webgpu_options != provider_options.end()) {
+      auto it = settings->handles_.find("dawnProcTable");
+      if (it != settings->handles_.end()) {
+        void* dawn_proc_table_handle = it->second;
+        maybe_webgpu_options->options.emplace_back("dawnProcTable", std::to_string((size_t)(dawn_proc_table_handle)));
+      }
+    }
+    // #endif
+  }
 }
 
 void Config::AddMapping(const std::string& nominal_name, const std::string& graph_name) {
