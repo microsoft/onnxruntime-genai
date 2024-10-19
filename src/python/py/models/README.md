@@ -108,10 +108,10 @@ path_to_local_folder_on_disk --> location where adapter_config.json and adapter 
 
 ```
 # From wheel:
-python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e execution_provider -c cache_dir_to_store_temp_files
+python3 -m onnxruntime_genai.models.builder -o path_to_output_folder -p fp16 -e execution_provider -c cache_dir_to_store_temp_files --extra_options adapter_path=path_to_adapter_files
 
 # From source:
-python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e execution_provider -c cache_dir_to_store_temp_files
+python3 builder.py -o path_to_output_folder -p fp16 -e execution_provider -c cache_dir_to_store_temp_files --extra_options adapter_path=path_to_adapter_files
 ```
 
 ### GGUF Model

@@ -39,8 +39,8 @@ class Model:
         self.model_type = config.architectures[0]
         self.io_dtype = io_dtype      # {'fp16', 'fp32'}
         self.onnx_dtype = onnx_dtype  # {"int4", "fp16", "fp32"}
-        self.use_qdq = extra_options.get("use_qdq", False)
         self.quant_type = config.quantization_config["quant_method"] if hasattr(config, "quantization_config") else None
+        self.adapter_path = extra_options["adapter_path"] if "adapter_path" in extra_options else None
 
         self.cache_dir = cache_dir
         self.filename = extra_options["filename"] if "filename" in extra_options else "model.onnx"
@@ -162,7 +162,6 @@ class Model:
         is_lora = hasattr(config, "peft_type") and config.peft_type == "LORA"
         self.matmul_attrs = {
             "use_lora": is_lora,        # Use LoRA/QLoRA format
-            "use_qdq": False,           # Use QDQ format
         }
 
         # RotaryEmbedding-specific variables
@@ -291,7 +290,8 @@ class Model:
             "int4": {
                 "block_size": int(extra_options["int4_block_size"]) if "int4_block_size" in extra_options else 32,
                 "accuracy_level": int(extra_options["int4_accuracy_level"]) if "int4_accuracy_level" in extra_options else 0,   # Default is 0 for non-QDQ formats, default is 4 for QDQ formats
-            }
+            },
+            "use_qdq": False,           # Use QDQ format
         }
         if self.quant_type is not None:
             # Create quantized attributes from quantization config
@@ -373,7 +373,7 @@ class Model:
 
         # Create ONNX model
         model = helper.make_model(
-            opset_imports=[self.clear_field(helper.make_operatorsetid('', 21 if self.use_qdq else 14), 'domain'), helper.make_operatorsetid('com.microsoft', 1)],
+            opset_imports=[self.clear_field(helper.make_operatorsetid('', 21 if self.quant_attrs["use_qdq"] else 14), 'domain'), helper.make_operatorsetid('com.microsoft', 1)],
             ir_version=7,
             producer_name="onnxruntime-genai",
             producer_version="0.0.0",
@@ -431,7 +431,7 @@ class Model:
             is_symmetric=True,
             accuracy_level=self.quant_attrs["int4"]["accuracy_level"],
             nodes_to_exclude=[],
-            quant_format=QuantFormat.QDQ if self.use_qdq else QuantFormat.QOperator,
+            quant_format=QuantFormat.QDQ if self.quant_attrs["use_qdq"] else QuantFormat.QOperator,
         )
         quant.process()
         return quant.model.model
@@ -688,7 +688,7 @@ class Model:
         if self.onnx_dtype in {"fp16", "fp32"}:
             return self.make_matmul_fp16_or_fp32(matmul, basename, root_input, **kwargs)
         elif self.onnx_dtype == "int4":
-            if self.use_qdq:
+            if self.quant_attrs["use_qdq"]:
                 return self.make_matmul_int4_qdq(matmul, basename, root_input, **kwargs)
             else:
                 return self.make_matmul_int4(matmul, basename, root_input, **kwargs)
@@ -1664,43 +1664,6 @@ class Model:
         # Delete original packed weights
         del packed_proj
 
-    def make_mlp_unpacked_lora(self, layer_id, mlp, root_input):
-        from peft.tuners.lora.layer import LoraLayer
-
-        # Create GateProj/UpProj base layers
-        gate_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
-        gate_proj.weight = torch.nn.Parameter(mlp.gate_up_proj.weight[ : self.intermediate_size, :], requires_grad=False)
-
-        up_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
-        up_proj.weight = torch.nn.Parameter(mlp.gate_up_proj.weight[self.intermediate_size :, :], requires_grad=False)
-
-        # Create GateProj/UpProj lora_B layers
-        lora_B = mlp.lora_B.default
-
-        gate_proj_lora_B = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
-        gate_proj_lora_B.weight = torch.nn.Parameter(lora_B.weight[ : self.intermediate_size, :], requires_grad=False)
-
-        up_proj_lora_B = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
-        up_proj_lora_B.weight = torch.nn.Parameter(lora_B.weight[self.intermediate_size :, :], requires_grad=False)
-
-        # Create GateProj/UpProj LoRA layers
-        mlp.gate_proj = LoraLayer(q_proj)
-        mlp.gate_proj.lora_A = mlp.gate_up_proj.lora_A
-        mlp.gate_proj.lora_B.default = gate_proj_lora_B
-        mlp.gate_proj.scaling = mlp.gate_up_proj.scaling
-
-        mlp.up_proj = LoraLayer(k_proj)
-        mlp.up_proj.lora_A = mlp.gate_up_proj.lora_A
-        mlp.up_proj.lora_B.default = up_proj_lora_B
-        mlp.up_proj.scaling = mlp.gate_up_proj.scaling
-
-    def make_mlp_unpacked_regular(self, layer_id, mlp, root_input):
-        mlp.gate_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
-        mlp.gate_proj.weight = torch.nn.Parameter(mlp.gate_up_proj.weight[ : self.intermediate_size, :], requires_grad=False)
-
-        mlp.up_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
-        mlp.up_proj.weight = torch.nn.Parameter(mlp.gate_up_proj.weight[self.intermediate_size :, :], requires_grad=False)
-
     def make_mlp_proj(self, layer_id, mlp, root_input):
         # Make nodes for the MLP subgraph
         #
@@ -2041,11 +2004,9 @@ class Model:
             extra_kwargs = {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {}
             model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, cache_dir=self.cache_dir, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
 
-        # Load adapter weights
-        if os.path.isdir(input_path) and "adapter_config.json" in os.listdir(input_path):
+        if "adapter_path" in self.extra_options:
             from peft import PeftModel
-            extra_kwargs = {} if os.path.exists(input_path) else {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {"cache_dir": self.cache_dir}
-            model = PeftModel.from_pretrained(model, input_path)
+            model = PeftModel.from_pretrained(model, self.extra_options["adapter_path"])
 
         # Loop through model and map each module to ONNX/ORT ops
         self.layer_id = 0
