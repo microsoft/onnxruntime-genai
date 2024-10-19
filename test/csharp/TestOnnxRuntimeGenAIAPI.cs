@@ -3,17 +3,28 @@
 
 using System;
 using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices;
 using Xunit;
 using Xunit.Abstractions;
-using Microsoft.ML.OnnxRuntimeGenAI;
-using System.Collections.Generic;
-using System.Linq;
-using System.Reflection.Emit;
-using System.Runtime.InteropServices;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 {
-    public partial class OnnxRuntimeGenAITests
+    public class TestsFixture : IDisposable
+    {
+        private OgaHandle _handle;
+        public TestsFixture()
+        {
+            _handle = new OgaHandle();
+        }
+
+        public void Dispose()
+        {
+            _handle.Dispose();
+        }
+    }
+
+    public class OnnxRuntimeGenAITests : IClassFixture<TestsFixture>
     {
         private readonly ITestOutputHelper output;
 
@@ -22,9 +33,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             this.output = o;
         }
 
-        private class IgnoreOnModelAbsebceFact : FactAttribute
+        private class IgnoreOnModelAbsenceFact : FactAttribute
         {
-            public IgnoreOnModelAbsebceFact()
+            public IgnoreOnModelAbsenceFact()
             {
                 string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
                 bool exists = System.IO.Directory.Exists(modelPath);
@@ -88,7 +99,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
-        [IgnoreOnModelAbsebceFact(DisplayName = "TestTopKSearch")]
+        [IgnoreOnModelAbsenceFact(DisplayName = "TestTopKSearch")]
         public void TestTopKSearch()
         {
             int topK = 100;
@@ -130,7 +141,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
-        [IgnoreOnModelAbsebceFact(DisplayName = "TestTopPSearch")]
+        [IgnoreOnModelAbsenceFact(DisplayName = "TestTopPSearch")]
         public void TestTopPSearch()
         {
             float topP = 0.6f;
@@ -172,7 +183,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
-        [IgnoreOnModelAbsebceFact(DisplayName = "TestTopKTopPSearch")]
+        [IgnoreOnModelAbsenceFact(DisplayName = "TestTopKTopPSearch")]
         public void TestTopKTopPSearch()
         {
             int topK = 100;
@@ -216,7 +227,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
-        [IgnoreOnModelAbsebceFact(DisplayName = "TestTokenizerBatchEncodeDecode")]
+        [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerBatchEncodeDecode")]
         public void TestTokenizerBatchEncodeDecode()
         {
             string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
@@ -245,7 +256,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
-        [IgnoreOnModelAbsebceFact(DisplayName = "TestTokenizerBatchEncodeSingleDecode")]
+        [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerBatchEncodeSingleDecode")]
         public void TestTokenizerBatchEncodeSingleDecode()
         {
             string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
@@ -276,7 +287,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
-        [IgnoreOnModelAbsebceFact(DisplayName = "TestTokenizerBatchEncodeStreamDecode")]
+        [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerBatchEncodeStreamDecode")]
         public void TestTokenizerBatchEncodeStreamDecode()
         {
             string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
@@ -312,7 +323,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
-        [IgnoreOnModelAbsebceFact(DisplayName = "TestTokenizerSingleEncodeDecode")]
+        [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerSingleEncodeDecode")]
         public void TestTokenizerSingleEncodeDecode()
         {
             string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
@@ -336,7 +347,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
-        [IgnoreOnModelAbsebceFact(DisplayName = "TestPhi2")]
+        [IgnoreOnModelAbsenceFact(DisplayName = "TestPhi2")]
         public void TestPhi2()
         {
             string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
@@ -405,22 +416,34 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
+        private class IgnoreOnAdaptersAbsentFact : FactAttribute
+        {
+            public IgnoreOnAdaptersAbsentFact()
+            {
+                string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "adapters");
+                bool exists = System.IO.Directory.Exists(modelPath);
+                if (!System.IO.Directory.Exists(modelPath))
+                {
+                    // Skip this test on some machines since the model cannot be downloaded on those machines at runtime.
+                    Skip = "Skipping this test since the model does not exist.";
+                }
+            }
+        }
+
         // This model is dependent on the presense of Phi2 model
         // get this model generated and copied to the output
         // by running test_onnxruntime_genai.py
-        [Fact(DisplayName = "TestAdapters")]
+        [IgnoreOnAdaptersAbsentFact(DisplayName = "TestAdapters")]
         public void TestAdapters()
         {
             string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "adapters");
-            string adapterPath = Path.Combine(modelPath, "adapters", "adapters.onnx_adapter");
+            string adapterPath = Path.Combine(modelPath, "adapters.onnx_adapter");
 
             using var model = new Model(modelPath);
             Assert.NotNull(model);
 
             using var adapters = Adapters.Create(model);
             adapters.LoadAdapter(adapterPath, "adapters_a_and_b");
-
-            adapters.UnloadAdapter("adapters_a_and_b");
 
             var inputStrings = new string[]
             {
@@ -450,6 +473,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                 }
 
                 using var logits = generator.GetOutput("logits");
+                Assert.Equal(ElementType.float32, logits.Type());
                 output_shape = logits.Shape();
                 outputSize = logits.NumElements();
                 base_output = logits.GetData<float>().ToArray();
@@ -462,19 +486,19 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 
                 using var generator = new Generator(model, genParams);
                 generator.SetActiveAdapter(adapters, "adapters_a_and_b");
-                generator.ComputeLogits();
-                generator.GenerateNextToken();
-
+                while (!generator.IsDone())
+                {
+                    generator.ComputeLogits();
+                    generator.GenerateNextToken();
+                }
                 using var logits = generator.GetOutput("logits");
+                Assert.Equal(ElementType.float32, logits.Type());
                 Assert.Equal(outputSize, logits.NumElements());
                 Assert.Equal(output_shape, logits.Shape());
 
                 var adapter_output = logits.GetData<float>().ToArray();
                 Assert.NotEqual(base_output, adapter_output);
             }
-            adapters.UnloadAdapter("adapters_a_and_b");
         }
-
     }
-
 }
