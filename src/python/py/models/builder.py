@@ -793,6 +793,7 @@ class Model:
         self.make_value_info(matmul_output, self.io_dtype, shape=['batch_size', 'sequence_length', matmul.out_features])
 
         return matmul_name
+
     def make_matmul_lora(self, matmul, basename, root_input, **kwargs):
         # Make nodes for the MatMul-LoRA subgraph
         #
@@ -2006,7 +2007,7 @@ class Model:
 
         if "adapter_path" in self.extra_options:
             from peft import PeftModel
-            model = PeftModel.from_pretrained(model, self.extra_options["adapter_path"])
+            model = PeftModel.from_pretrained(model, self.extra_options["adapter_path"], cache_dir=self.cache_dir, token=self.hf_token)
 
         # Loop through model and map each module to ONNX/ORT ops
         self.layer_id = 0
@@ -3050,18 +3051,13 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
 
     # Load model config
     extra_kwargs = {} if os.path.isdir(input_path) else {"cache_dir": cache_dir}
-    hf_name = input_path if os.path.isdir(input_path) and "config.json" in os.listdir(input_path) else model_name
+    hf_name = input_path if os.path.isdir(input_path) else model_name
     hf_token = parse_hf_token(extra_options.get("hf_token", "true"))
 
-    is_peft = os.path.isdir(input_path) and "adapter_config.json" in os.listdir(input_path)
-    peft_model_name = input_path if is_peft else None
-    peft_config = None
-    if is_peft:
-        from peft import PeftConfig
-        peft_config = PeftConfig.from_pretrained(peft_model_name, token=hf_token, trust_remote_code=True, **extra_kwargs)
-
     config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=True, **extra_kwargs)
-    if is_peft:
+    if "adapter_path" in extra_options:
+        from peft import PeftConfig
+        peft_config = PeftConfig.from_pretrained(extra_options["adapter_path"], token=hf_token, trust_remote_code=True, **extra_kwargs)
         config.update(peft_config.__dict__)
 
     # Set input/output precision of ONNX model
@@ -3210,6 +3206,7 @@ def get_args():
                 hf_token = false/token: Use this to disable authentication with Hugging Face or provide a custom authentication token that differs from the one stored in your environment. Default behavior is to use the authentication token stored by `huggingface-cli login`.
                     If you have already authenticated via `huggingface-cli login`, you do not need to use this flag because Hugging Face has already stored your authentication token for you.
                 use_qdq = 1 : Use the QDQ decomposition for quantized MatMul instead of the MatMulNBits operator.
+                adapter_path = Path to folder on disk containing the adapter files (adapter_config.json and adapter model weights).
             """),
     )
 
