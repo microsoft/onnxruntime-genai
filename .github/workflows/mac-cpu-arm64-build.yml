@@ -21,6 +21,10 @@ jobs:
         with:
           submodules: true
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.x'
+
       - name: Get the Latest OnnxRuntime Nightly Version
         run: |
           ORT_NIGHTLY_VERSION=$(curl -s "${{ env.ORT_NIGHTLY_REST_API }}" | jq -r '.value[0].versions[0].normalizedVersion')
