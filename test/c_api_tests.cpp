@@ -316,7 +316,7 @@ TEST(CAPITests, SetTerminate) {
   params->SetSearchOption("max_length", 40);
 
   auto generator = OgaGenerator::Create(*model, *params);
-  EXPECT_EQ(generator.get()->IsSessionTerminated(), false);
+  EXPECT_EQ(generator->IsSessionTerminated(), false)
   std::vector<std::thread> threads;
   threads.push_back(std::thread(Generate_Output, generator.get(), std::move(tokenizer_stream)));
   threads.push_back(std::thread(Generator_SetTerminate_Call, generator.get()));
@@ -325,9 +325,9 @@ TEST(CAPITests, SetTerminate) {
     std::cout << "Waiting for threads completion" << std::endl;
     th.join();  // Wait for each thread to finish
   }
-  EXPECT_EQ(generator.get()->IsSessionTerminated(), true);
+  EXPECT_EQ(generator->IsSessionTerminated(), true);
   generator->UnsetTerminate();
-  EXPECT_EQ(generator.get()->IsSessionTerminated(), false);
+  EXPECT_EQ(generator->IsSessionTerminated(), false);
 #endif
 }
 

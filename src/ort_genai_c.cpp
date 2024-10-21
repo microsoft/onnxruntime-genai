@@ -251,6 +251,10 @@ bool OGA_API_CALL OgaGenerator_IsDone(const OgaGenerator* generator) {
   return reinterpret_cast<const Generators::Generator*>(generator)->IsDone();
 }
 
+bool OGA_API_CALL OgaGenerator_IsSessionTerminated(const OgaGenerator* generator) {
+  return reinterpret_cast<const Generators::Generator*>(generator)->IsSessionTerminated();
+}
+
 OgaResult* OGA_API_CALL OgaGenerator_ComputeLogits(OgaGenerator* generator) {
   OGA_TRY
   reinterpret_cast<Generators::Generator*>(generator)->ComputeLogits();
