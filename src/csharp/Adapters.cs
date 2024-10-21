@@ -1,4 +1,7 @@
-﻿using Microsoft.ML.OnnxRuntimeGenAI;
+﻿// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
+using Microsoft.ML.OnnxRuntimeGenAI;
 using System;
 using System.Runtime.InteropServices;
 
