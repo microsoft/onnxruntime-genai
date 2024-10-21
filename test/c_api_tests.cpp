@@ -289,12 +289,16 @@ void Generator_SetTerminate_Call(OgaGenerator* generator) {
 }
 
 void Generate_Output(OgaGenerator* generator, std::unique_ptr<OgaTokenizerStream> tokenizer_stream) {
-  while (!generator->IsDone()) {
-    generator->ComputeLogits();
-    generator->GenerateNextToken();
+  try{
+    while (!generator->IsDone()) {
+      generator->ComputeLogits();
+      generator->GenerateNextToken();
+    }
+  }
+  catch (const std::exception& e) {
+    std::cout << "Session Terminated" << std::endl;
   }
 }
-
 #endif
 
 TEST(CAPITests, SetTerminate) {
@@ -312,6 +316,7 @@ TEST(CAPITests, SetTerminate) {
   params->SetSearchOption("max_length", 40);
 
   auto generator = OgaGenerator::Create(*model, *params);
+  EXPECT_EQ(generator->IsSessionTerminated(), false);
   std::vector<std::thread> threads;
   threads.push_back(std::thread(Generate_Output, generator.get(), std::move(tokenizer_stream)));
   threads.push_back(std::thread(Generator_SetTerminate_Call, generator.get()));
@@ -320,6 +325,9 @@ TEST(CAPITests, SetTerminate) {
     std::cout << "Waiting for threads completion" << std::endl;
     th.join();  // Wait for each thread to finish
   }
+  EXPECT_EQ(generator->IsSessionTerminated(), true);
+  generator->UnsetTerminate();
+  EXPECT_EQ(generator->IsSessionTerminated(), false);
 #endif
 }
 

@@ -75,6 +75,10 @@ void State::UnsetTerminate() {
   run_options_->UnsetTerminate();
 }
 
+bool State::IsSessionTerminated() {
+  return session_terminated;
+}
+
 OrtValue* State::GetInput(const char* name) {
   ThrowErrorIfSessionTerminated(session_terminated);
   for (size_t i = 0; i < input_names_.size(); i++) {
