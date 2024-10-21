@@ -26,7 +26,6 @@ steps:
 - task: onebranch.pipeline.tsaoptions@1
   displayName: 'OneBranch TSAOptions'
   inputs:
-    tsaConfigFilePath: '$(Build.Repository.LocalPath)\.config\tsaoptions.json'
     appendSourceBranchName: false
 
 - template: utils/set-nightly-build-option-variable.yml
