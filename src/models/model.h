@@ -36,7 +36,6 @@ struct State {
 
   void SetTerminate();
   void UnsetTerminate();
-  bool IsSessionTerminated();
   mutable bool session_terminated{};
   OrtValue* GetInput(const char* name);
 

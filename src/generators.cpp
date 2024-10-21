@@ -318,6 +318,10 @@ bool Generator::IsDone() const {
   return is_done;
 }
 
+bool Generator::IsSessionTerminated() const {
+  return state_->session_terminated;
+}
+
 void Generator::GenerateNextToken() {
   ThrowErrorIfSessionTerminated(state_->session_terminated);
   if (!computed_logits_)

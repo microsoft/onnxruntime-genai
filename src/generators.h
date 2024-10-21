@@ -108,6 +108,7 @@ struct Generator : LeakChecked<Generator> {
   Generator(const Model& model, const GeneratorParams& params);
 
   bool IsDone() const;
+  bool IsSessionTerminated() const;
   void ComputeLogits();
   void GenerateNextToken();
 
