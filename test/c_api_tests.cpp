@@ -316,8 +316,6 @@ TEST(CAPITests, SetTerminate) {
   threads.push_back(std::thread(Generate_Output, generator.get(), std::move(tokenizer_stream)));
   threads.push_back(std::thread(Generator_SetTerminate_Call, generator.get()));
 
-  std::vector<std::thread> threads;
-
   for (auto& th : threads) {
     std::cout << "Waiting for threads completion" << std::endl;
     th.join();  // Wait for each thread to finish
