@@ -11,8 +11,8 @@ steps:
   condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
   inputs:
     GdnPublishTsaOnboard: false
-    GdnPublishTsaConfigFile: '$(Build.Repository.LocalPath)\.config\tsaoptions.json'
   continueOnError: true
+  condition: and(ne(variables['os'], 'osx'), ne(variables['os'], 'ios'))  # Not available on macOS.
 
 - template: compliant/component-governance-component-detection-step.yml
   parameters:
