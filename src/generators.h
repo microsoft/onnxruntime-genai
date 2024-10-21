@@ -39,6 +39,8 @@ using cudaStream_t = void*;
 #include "logging.h"
 #include "tensor.h"
 
+void ThrowErrorIfSessionTerminated(bool is_session_terminated);
+
 namespace Generators {
 struct Model;
 struct State;
@@ -107,6 +109,7 @@ struct Generator : LeakChecked<Generator> {
   Generator(const Model& model, const GeneratorParams& params);
 
   bool IsDone() const;
+  bool IsSessionTerminated() const;
   void ComputeLogits();
   void GenerateNextToken();
 
