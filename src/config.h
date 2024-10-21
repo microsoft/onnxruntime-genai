@@ -4,9 +4,11 @@
 
 namespace Generators {
 
+struct RuntimeSettings;
+
 struct Config {
   Config() = default;
-  Config(const fs::path& path);
+  Config(const fs::path& path, const RuntimeSettings* settings);
 
   struct Defaults {
     static constexpr std::string_view InputIdsName = "input_ids";

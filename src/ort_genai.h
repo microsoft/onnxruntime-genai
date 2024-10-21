@@ -59,10 +59,32 @@ inline void OgaCheckResult(OgaResult* result) {
   }
 }
 
+struct OgaRuntimeSettings : OgaAbstract {
+  static std::unique_ptr<OgaRuntimeSettings> Create() {
+    OgaRuntimeSettings* p;
+    OgaCheckResult(OgaCreateRuntimeSettings(&p));
+    return std::unique_ptr<OgaRuntimeSettings>(p);
+  }
+
+  void SetHandle(const char* name, void* handle) {
+    OgaCheckResult(OgaRuntimeSettingsSetHandle(this, name, handle));
+  }
+  void SetHandle(const std::string& name, void* handle) {
+    SetHandle(name.c_str(), handle);
+  }
+
+  static void operator delete(void* p) { OgaDestroyRuntimeSettings(reinterpret_cast<OgaRuntimeSettings*>(p)); }
+};
+
 struct OgaModel : OgaAbstract {
   static std::unique_ptr<OgaModel> Create(const char* config_path) {
     OgaModel* p;
     OgaCheckResult(OgaCreateModel(config_path, &p));
+    return std::unique_ptr<OgaModel>(p);
+  }
+  static std::unique_ptr<OgaModel> Create(const char* config_path, const OgaRuntimeSettings& settings) {
+    OgaModel* p;
+    OgaCheckResult(OgaCreateModelWithRuntimeSettings(config_path, &settings, &p));
     return std::unique_ptr<OgaModel>(p);
   }
 
