@@ -4,6 +4,8 @@
 #include <models/model.h>
 #include <iostream>
 #include <ort_genai.h>
+#include <thread>
+#include <vector>
 #ifndef MODEL_PATH
 #define MODEL_PATH "../../test/test_models/"
 #endif
@@ -279,6 +281,43 @@ TEST(CAPITests, GetOutputCAPI) {
     EXPECT_NEAR(expected_sampled_logits_token_gen[i], token_gen_logits[i * sample_size], tolerance);
   }
   generator->GenerateNextToken();
+}
+
+TEST(CAPITests, SetTerminate) {
+#if TEST_PHI2
+  void Generator_SetTerminate_Call(OgaGenerator* generator) {
+    generator->SetTerminate();
+  }
+
+  void Generate_Output(OgaGenerator* generator, std::unique_ptr<OgaTokenizerStream> tokenizer_stream) {
+    while (!generator->IsDone()) {
+      generator->ComputeLogits();
+      generator->GenerateNextToken();
+    }
+  }
+
+  auto model = OgaModel::Create(PHI2_PATH);
+  auto tokenizer = OgaTokenizer::Create(*model);
+  auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
+
+  const char* input_string = "She sells sea shells by the sea shore.";
+  auto input_sequences = OgaSequences::Create();
+  tokenizer->Encode(input_string, *input_sequences);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetInputSequences(*input_sequences);
+  params->SetSearchOption("max_length", 40);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  threads.push_back(std::thread(Generate_Output, generator.get(), std::move(tokenizer_stream)));
+  threads.push_back(std::thread(Generator_SetTerminate_Call, generator.get()));
+
+  std::vector<std::thread> threads;
+
+  for (auto& th : threads) {
+    std::cout << "Waiting for threads completion" << std::endl;
+    th.join();  // Wait for each thread to finish
+  }
+#endif
 }
 
 #if TEST_PHI2
