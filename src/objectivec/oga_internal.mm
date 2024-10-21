@@ -23,6 +23,12 @@
 }
 
 - (int32_t)last {
+  if (_size - 1 <= 0) {
+    NSException* exception = [NSException exceptionWithName:@"onnxruntime-genai"
+                                                     reason:@"The size of this span is invalid"
+                                                   userInfo:nil];
+    @throw exception;
+  }
   return *(_ptr + (_size - 1));
 }
 
@@ -48,6 +54,12 @@
 }
 
 - (int64_t)last {
+  if (_size - 1 <= 0) {
+    NSException* exception = [NSException exceptionWithName:@"onnxruntime-genai"
+                                                     reason:@"The size of this span is invalid"
+                                                   userInfo:nil];
+    @throw exception;
+  }
   return *(_ptr + (_size - 1));
 }
 

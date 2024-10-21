@@ -1,6 +1,26 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+// GenAI Objective-C API
+//
+// This is a wrapper around the C++ API, and provides for a set of Objective-C classes with automatic resource management
+
+/* A simple end to end example of how to generate an answer from a prompt:
+ *
+ * OGAModel* model = [[OGAModel alloc] initWithPath:path error:&error];
+ * OGATokenizer* tokenizer = [[OGATokenizer alloc] initWithModel:model error:&error];
+ *
+ * OGASequences* sequences = [tokenizer encode:@"A great recipe for Kung Pao chicken is " error:&error];
+ *
+ * OGAGeneratorParams* params = [[OGAGeneratorParams alloc] initWithModel:model error:&error];
+ * [params setInputSequences:sequences];
+ * [params setSearchOption:@"max_length" doubleValue:200 error:&error];
+ *
+ * OGASequences* output_sequences = [model generate:params error:&error];
+ * NSString* out_string = [tokenizer decode:[output_sequences sequenceAtIndex:0]];
+ *
+ */
+
 NS_ASSUME_NONNULL_BEGIN
 
 @class OGAInt32Span;
@@ -28,25 +48,69 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
   OGAElementTypeUint64,   // maps to c type uint64_t
 };
 
+
+/**
+ * An ORT GenAI model.
+ */
 @interface OGAModel : NSObject
 
 - (instancetype)init NS_UNAVAILABLE;
+
+/**
+ * Creates a model.
+ *
+ * @param path The path to the ONNX GenAI model folder.
+ * @return The instance, or nil if an error occurs.
+ */
 - (nullable instancetype)initWithPath:(NSString*)path
                                 error:(NSError**)error NS_DESIGNATED_INITIALIZER;
 
+/**
+ * Generate sequences with the model.
+ * The inputs and outputs are pre-allocated.
+ *
+ * @param params The generation params to use.
+ * @param error Optional error information set if an error occurs.
+ * @return The generated sequences.
+ */
 - (nullable OGASequences*)generate:(OGAGeneratorParams*)params
                              error:(NSError**)error;
 
 @end
 
+/**
+ * An ORT GenAI tokenizer.
+ */
 @interface OGATokenizer : NSObject
 - (instancetype)init NS_UNAVAILABLE;
+
+/**
+ * Creates a tokenizer.
+ *
+ * @param model The model to use.
+ * @param error Optional error information set if an error occurs.
+ * @return The instance, or nil if an error occurs.
+ */
 - (nullable instancetype)initWithModel:(OGAModel*)model
                                  error:(NSError**)error NS_DESIGNATED_INITIALIZER;
 
+/**
+ * Encode text to sequences
+ *
+ * @param str The text to be encoded.
+ * @param error Optional error information set if an error occurs.
+ * @return The encoding result, or nil if an error occurs.
+ */
 - (nullable OGASequences*)encode:(NSString*)str
                            error:(NSError**)error;
 
+/**
+ * Decode sequences to text
+ *
+ * @param data The sequences data to be encoded.
+ * @param error Optional error information set if an error occurs.
+ * @return The decoding result, or nil if an error occurs.
+ */
 - (nullable NSString*)decode:(OGAInt32Span*)data
                        error:(NSError**)error;
 
@@ -81,6 +145,7 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 - (nullable instancetype)initWithRawPointer:(const int64_t*)pointer size:(size_t)size;
 
 - (const int64_t*)pointer;
+- (size_t)size;
 - (int64_t)last;
 
 @end
