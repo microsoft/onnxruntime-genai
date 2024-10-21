@@ -283,18 +283,22 @@ TEST(CAPITests, GetOutputCAPI) {
   generator->GenerateNextToken();
 }
 
+#if TEST_PHI2
+void Generator_SetTerminate_Call(OgaGenerator* generator) {
+  generator->SetTerminate();
+}
+
+void Generate_Output(OgaGenerator* generator, std::unique_ptr<OgaTokenizerStream> tokenizer_stream) {
+  while (!generator->IsDone()) {
+    generator->ComputeLogits();
+    generator->GenerateNextToken();
+  }
+}
+
+#endif
+
 TEST(CAPITests, SetTerminate) {
 #if TEST_PHI2
-  void Generator_SetTerminate_Call(OgaGenerator* generator) {
-    generator->SetTerminate();
-  }
-
-  void Generate_Output(OgaGenerator* generator, std::unique_ptr<OgaTokenizerStream> tokenizer_stream) {
-    while (!generator->IsDone()) {
-      generator->ComputeLogits();
-      generator->GenerateNextToken();
-    }
-  }
 
   auto model = OgaModel::Create(PHI2_PATH);
   auto tokenizer = OgaTokenizer::Create(*model);
