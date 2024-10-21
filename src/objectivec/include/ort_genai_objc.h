@@ -69,6 +69,8 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 - (instancetype)init NS_UNAVAILABLE;
 - (nullable instancetype)initWithRawPointer:(const int32_t*)pointer size:(size_t)size;
 
+- (const int32_t*)pointer;
+- (size_t)size;
 - (int32_t)last;
 
 @end
@@ -78,6 +80,7 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 - (instancetype)init NS_UNAVAILABLE;
 - (nullable instancetype)initWithRawPointer:(const int64_t*)pointer size:(size_t)size;
 
+- (const int64_t*)pointer;
 - (int64_t)last;
 
 @end

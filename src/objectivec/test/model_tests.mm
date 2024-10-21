@@ -36,9 +36,9 @@ NS_ASSUME_NONNULL_BEGIN
     OGAModel* model = [[OGAModel alloc] initWithPath:path error:&error];
 
     OGAGeneratorParams *params = [[OGAGeneratorParams alloc] initWithModel:model error:&error];
-    [params setSearchOption:@"max_length", max_length];
-    [params setSearchOption:@"do_sample", YES];
-    [params setSearchOption:@"top_p", 0.25];
+    [params setSearchOption:@"max_length" doubleValue:max_length error:&error];
+    [params setSearchOption:@"do_sample" boolValue:YES error:&error];
+    [params setSearchOption:@"top_p" doubleValue:0.25 error:&error];
 
     [params setInputIds:input_ids.data()
           inputIdsCount:input_ids.size()
@@ -55,9 +55,9 @@ NS_ASSUME_NONNULL_BEGIN
     }
 
     for (int i = 0; i < batch_size; i++) {
-        OGASequence *sequence = [generator sequenceAtIndex: i];
+        OGAInt32Span *sequence = [generator sequenceAtIndex: i];
         auto* expected_output_start = &expected_output[i * max_length];
-        XCTAssertTrue(0 == std::memcmp(expected_output_start, [sequence data], max_length * sizeof(int32_t)));
+        XCTAssertTrue(0 == std::memcmp(expected_output_start, [sequence pointer], max_length * sizeof(int32_t)));
     }
 }
 
@@ -85,9 +85,9 @@ NS_ASSUME_NONNULL_BEGIN
     OGAModel* model = [[OGAModel alloc] initWithPath:path error:&error];
 
     OGAGeneratorParams *params = [[OGAGeneratorParams alloc] initWithModel:model error:&error];
-    [params setSearchOption:@"max_length", max_length];
-    [params setSearchOption:@"length_penalty", 1.0f];
-    [params setSearchOption:@"num_beams", 4];
+    [params setSearchOption:@"max_length" doubleValue:max_length error:&error];
+    [params setSearchOption:@"length_penalty" doubleValue:1.0f error:&error];
+    [params setSearchOption:@"num_beams" doubleValue:4 error:&error];
 
     [params setInputIds:input_ids.data()
           inputIdsCount:input_ids.size()
@@ -95,10 +95,20 @@ NS_ASSUME_NONNULL_BEGIN
               batchSize:batch_size
                    error:&error];
 
+    OGAGenerator* generator = [[OGAGenerator alloc] initWithModel:model
+                                                           params:params
+                                                            error:&error];
+    while (![generator isDone]) {
+        [generator computeLogits];
+        [generator generateNextToken];
+    }
+
     for (int i = 0; i < batch_size; i++) {
-        OGASequence *sequence = [generator sequenceAtIndex: i];
+        OGAInt32Span *sequence = [generator sequenceAtIndex: i];
         auto* expected_output_start = &expected_output[i * max_length];
-        XCTAssertTrue(0 == std::memcmp(expected_output_start, [sequence data], max_length * sizeof(int32_t)));
+        XCTAssertTrue(0 == std::memcmp(expected_output_start, [sequence pointer], max_length * sizeof(int32_t)));
     }
 }
 @end
+
+NS_ASSUME_NONNULL_END

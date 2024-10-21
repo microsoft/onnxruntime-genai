@@ -19,20 +19,6 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
-@interface OGAInt32Span ()
-
-- (const int32_t*)pointer;
-- (size_t)size;
-
-@end
-
-@interface OGAInt64Span ()
-
-- (const int64_t*)pointer;
-- (size_t)size;
-
-@end
-
 @interface OGASequences ()
 
 - (nullable instancetype)initWithError:(NSError**)error;
