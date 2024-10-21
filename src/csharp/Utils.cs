@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 
 using System;
-using System.Runtime.InteropServices;
 using System.Text;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI

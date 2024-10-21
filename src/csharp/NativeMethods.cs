@@ -121,6 +121,15 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                                      UIntPtr /* size_t */ index);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaGenerator_GetOutput(IntPtr /* cosnt OgaGenerator* */ generator,
+                                                     byte[] outputName, out IntPtr tensor);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaSetActiveAdapter(IntPtr /* OgaGenerator* */ generator,
+                                                                         IntPtr /* OgaAdapters* */ adapters,
+                                                                         byte[] /*const char**/ adapterName);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaCreateSequences(out IntPtr /* OgaSequences** */ sequences);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
@@ -262,5 +271,21 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern void OgaDestroyStringArray(IntPtr /* OgaStringArray* */ stringArray);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaCreateAdapters(IntPtr /* const OgaModel* */ model,
+                                                                       out IntPtr /* OgaAdapters** */ adapters);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern void OgaDestroyAdapters(IntPtr /* OgaAdapters* */ adapters);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaLoadAdapter(IntPtr /* OgaAdapters* */ adapters,
+                                                                    byte[] /* const char* */ adapterFilePath,
+                                                                    byte[] /* const char* */ adapterName);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaUnloadAdapter(IntPtr /* OgaAdapters* */ adapters,
+                                                                      byte[] /* const char* */ adapterName);
     }
 }
