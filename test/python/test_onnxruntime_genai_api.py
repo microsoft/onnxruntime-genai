@@ -433,24 +433,15 @@ def test_adapters(test_data_path, device, multiple_adapters, phi2_for):
 
         model.graph.input.extend([adapter_a, adapter_b])
 
-       # tensor proto for default lora parameter A
-        adapter_weight_a = np.zeros([vocab_size], dtype=(np.float32 if device == "cpu" else np.float16))
-        adapter_weight_a_tensor = onnx.helper.make_tensor(
-            "adapter_a", 
-            onnx.TensorProto.FLOAT if device == "cpu" else onnx.TensorProto.FLOAT16,
-            [vocab_size],
-            adapter_weight_a.flatten()
-        )
-
-        adapter_weight_b = np.zeros([vocab_size], dtype=(np.float32 if device == "cpu" else np.float16))
-        adapter_weight_b_tensor = onnx.helper.make_tensor(
-            "adapter_b",
-            onnx.TensorProto.FLOAT if device == "cpu" else onnx.TensorProto.FLOAT16,
-            [vocab_size],
-            adapter_weight_b.flatten()
-        )
-
-        model.graph.initializer.extend([adapter_weight_a_tensor, adapter_weight_b_tensor])
+        for adapter_name in ["adapter_a", "adapter_b"]:
+            adapter_weight = np.zeros([vocab_size], dtype=(np.float32 if device == "cpu" else np.float16))
+            adapter_weight_tensor = onnx.helper.make_tensor(
+                adapter_name,
+                onnx.TensorProto.FLOAT if device == "cpu" else onnx.TensorProto.FLOAT16,
+                [vocab_size],
+                adapter_weight.flatten()
+            )
+            model.graph.initializer.append(adapter_weight_tensor)
 
         add_node = onnx.helper.make_node(
             "Add", ["adapter_a", "adapter_b"], ["adapter_output"], name="adapter_add"
