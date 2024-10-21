@@ -143,7 +143,8 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
   cuda_stream_holder cuda_stream_;
   DeviceType device_type_{DeviceType::CPU};
   Ort::Allocator& allocator_cpu_{Ort::Allocator::GetWithDefaultOptions()};
-  Ort::Allocator* allocator_device_{};  // Can be CUDA or CPU based on the DeviceType in the model
+  Ort::Allocator* allocator_device_{};   // Can be CUDA or CPU based on the DeviceType in the model
+  Ort::Allocator* allocator_kvcache_{};  // keep allocator for kv_cache seperate to allow that only kv_cache is on device
 
   std::unique_ptr<SessionInfo> session_info_;
 
@@ -175,9 +176,14 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
   std::unique_ptr<DmlReadbackHeap> dml_readback_heap_;
   ComPtr<IDMLDevice> dml_device_;
   std::unique_ptr<Ort::Allocator> dml_owned_allocator_;
+#endif
+#if USE_WEBGPU
+  std::unique_ptr<Ort::Allocator> webgpu_owned_allocator_;
+  std::unique_ptr<OrtIoBinding> webgpu_io_binding_;
+#endif
+#if USE_DML || USE_WEBGPU
   std::unique_ptr<OrtMemoryInfo> memory_info_device_;
 #endif
-
   std::shared_ptr<CapturedGraphPool> captured_graph_pool_;
   std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;
 };
