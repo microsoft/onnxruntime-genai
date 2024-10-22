@@ -34,8 +34,13 @@ struct ProviderOptionsObject_Element : JSON::Element {
   explicit ProviderOptionsObject_Element(std::vector<Config::ProviderOptions>& v) : v_{v} {}
 
   JSON::Element& OnObject(std::string_view name) override {
-    if (options_element_)
-      throw std::runtime_error("Each object in the provider_options array can only have one member (named value)");
+    for (auto& v : v_) {
+      if (v.name == name) {
+        options_element_ = std::make_unique<ProviderOptions_Element>(v);
+        return *options_element_;
+      }
+    }
+
     auto& options = v_.emplace_back();
     options.name = name;
     options_element_ = std::make_unique<ProviderOptions_Element>(options);
