@@ -242,6 +242,9 @@ void GeneratorParams::TryGraphCapture(int max_bs) {
 }
 
 void GeneratorParams::SetInputs(const NamedTensors& named_tensors) {
+  if (config.model.type == "gpt2" || config.model.type == "llama" || config.model.type == "gemma" || config.model.type == "gemma2" || config.model.type == "mistral" || config.model.type == "phi" || config.model.type == "phi3" || config.model.type == "phi3small" || config.model.type == "phimoe" || config.model.type == "qwen2" || config.model.type == "decoder-pipeline")
+    throw std::runtime_error("Please use generator.AppendTokens for " + config.model.type + ". SetInputs is not supported for this model type.");
+  
   for (const auto& [name, tensor] : named_tensors) {
     if (name == Config::Defaults::InputIdsName) {
       aux_input_ids = cpu_span<int32_t>(tensor->ort_tensor_->GetTensorMutableData<int32_t>(),
@@ -294,7 +297,12 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
 }
 
 void Generator::AddTokens(const cpu_span<int32_t>& input_ids) {
-  // TODO(aciddelgado): check for batch_size > 1 requires full rewind
+  if (input_ids.size() == 0)
+    throw std::runtime_error("input_ids is empty");
+  if (model_->config_->model.type == "whisper" || model_->config_->model.type == "phi3v")
+    throw std::runtime_error("Please use params.SetInputs for " + model_->config_->model.type + ". AppendTokens is not supported for this model type.");
+  if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
+    throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
   search_->SetUserTokens(input_ids);
 
   computed_logits_ = false;
@@ -329,7 +337,8 @@ bool Generator::IsDone() const {
 }
 
 void Generator::GenerateNextToken() {
-  // TODO(aciddelgado): check that AddTokens has been called at least once
+  if (search_->GetSequenceLength() == 0)
+    throw std::runtime_error("GenerateNextToken called with no initial user input. Please call AppendTokens or SetInputs first, depending on model type.");
   if (!computed_logits_) {
     ComputeLogits(search_->GetNextTokens());
   }
@@ -374,6 +383,8 @@ void Generator::GenerateNextToken() {
 }
 
 void Generator::RewindToLength(size_t new_length) {
+  if (model_->config_->model.type == "whisper" || model_->config_->model.type == "phi3v" || model_->config_->model.type == "decoder-pipeline")
+    throw std::runtime_error("RewindTo is currently not supported for " + model_->config_->model.type + ".");
   if (new_length > search_->GetSequenceLength())
     throw std::runtime_error("Cannot rewind to a length greater than the current sequence length");
   if (new_length == search_->GetSequenceLength())
