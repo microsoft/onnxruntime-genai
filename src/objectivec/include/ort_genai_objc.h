@@ -48,7 +48,6 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
   OGAElementTypeUint64,   // maps to c type uint64_t
 };
 
-
 /**
  * An ORT GenAI model.
  */
@@ -167,7 +166,6 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  */
 - (nullable instancetype)initWithDataPointer:(const int32_t*)pointer size:(size_t)size;
 
-
 /**
  * The underlying data pointer
  */
@@ -215,7 +213,7 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  * @param error Optional error information set if an error occurs.
  * @return The last element, or nil if an error occurs.
  */
-- (int64_t)lastElementWithError:(NSError**)error NS_SWIFT_NAME(lastElement());;
+- (int64_t)lastElementWithError:(NSError**)error NS_SWIFT_NAME(lastElement());
 
 @end
 
@@ -242,49 +240,115 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 
 @end
 
+/**
+ * The parameters for generation.
+ */
 @interface OGAGeneratorParams : NSObject
 - (instancetype)init NS_UNAVAILABLE;
+
+/**
+ * Creates a GeneratorParams from the given model.
+ * @param model The model to use for generation.
+ * @param error Optional error information set if an error occurs.
+ * @return The instance, or nil if an error occurs.
+ */
 - (nullable instancetype)initWithModel:(OGAModel*)model
                                  error:(NSError**)error NS_DESIGNATED_INITIALIZER;
 
+/**
+ * Set input with NamedTensors type.
+ * @param namedTensors The named tensors.
+ * @param error Optional error information set if an error occurs.
+ */
 - (BOOL)setInputs:(OGANamedTensors*)namedTensors
             error:(NSError**)error;
 
+/**
+ * Set input with raw input ids.
+ * @param rawPointer The pointer of the input ids data.
+ * @param inputIdsCount The count of input ids.
+ * @param sequenceLength The sequence length.
+ * @param batchSize The batch size.
+ * @param error Optional error information set if an error occurs.
+ */
 - (BOOL)setInputIds:(const int32_t*)rawPointer
       inputIdsCount:(size_t)inputIdsCount
      sequenceLength:(size_t)sequenceLength
           batchSize:(size_t)batchSize
               error:(NSError**)error;
-
+/**
+ * Set input with sequences type.
+ * @param sequences The sequences.
+ * @param error Optional error information set if an error occurs.
+ */
 - (BOOL)setInputSequences:(OGASequences*)sequences
                     error:(NSError**)error;
 
+/**
+ * Set input with name and corresponding tensor.
+ * @param name The input name.
+ * @param tensor The tensor.
+ * @param error Optional error information set if an error occurs.
+ */
 - (BOOL)setModelInput:(NSString*)name
                tensor:(OGATensor*)tensor
                 error:(NSError**)error;
 
+/**
+ * Set double option value.
+ * @param key The option key.
+ * @param value The option value.
+ * @param error Optional error information set if an error occurs.
+ */
 - (BOOL)setSearchOption:(NSString*)key
             doubleValue:(double)value
                   error:(NSError**)error;
-
+/**
+ * Set boolean option value.
+ * @param key The option key.
+ * @param value The option value.
+ * @param error Optional error information set if an error occurs.
+ */
 - (BOOL)setSearchOption:(NSString*)key
               boolValue:(BOOL)value
                   error:(NSError**)error;
 @end
 
+/**
+ * The main generator interface that can be used for generation loop.
+ */
 @interface OGAGenerator : NSObject
 
 - (instancetype)init NS_UNAVAILABLE;
+/**
+ * Creates a generator.
+ *
+ * @param model The model to use.
+ * @param params The generation params to use.
+ * @param error Optional error information set if an error occurs.
+ * @return The instance, or nil if an error occurs.
+ */
 - (nullable instancetype)initWithModel:(OGAModel*)model
                                 params:(OGAGeneratorParams*)params
                                  error:(NSError**)error NS_DESIGNATED_INITIALIZER;
-
+/**
+ * Whether generation is done
+ * @param error Optional error information set if an error occurs.
+ * @return The result, or nil if an error occurs.
+ */
 - (nullable NSNumber*)isDoneWithError:(NSError**)error NS_SWIFT_NAME(isDone());
 - (BOOL)computeLogitsWithError:(NSError**)error NS_SWIFT_NAME(computeLogits());
 - (BOOL)generateNextTokenWithError:(NSError**)error NS_SWIFT_NAME(generateNextToken());
 - (OGATensor*)getOutput:(NSString*)name;
 
-- (nullable OGAInt32Span*)sequenceAtIndex:(size_t)index;
+/**
+ * Retrieve the sequence at the given index
+ * @param index The index needed.
+ * @param error Optional error information set if an error occurs.
+ * @return The last element, or nil if an error occurs.
+ */
+- (nullable OGAInt32Span*)sequenceAtIndex:(size_t)index
+                                    error:(NSError**)error;
 
 @end
 

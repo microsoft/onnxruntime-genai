@@ -60,7 +60,8 @@ NS_ASSUME_NONNULL_BEGIN
     }
 
     for (int i = 0; i < batch_size; i++) {
-        OGAInt32Span *sequence = [generator sequenceAtIndex: i];
+        OGAInt32Span *sequence = [generator sequenceAtIndex:i error:&error];
+        ORTAssertNullableResultSuccessful(sequence, error);
         auto* expected_output_start = &expected_output[i * max_length];
         XCTAssertTrue(0 == std::memcmp(expected_output_start, [sequence pointer], max_length * sizeof(int32_t)));
     }
@@ -81,7 +82,6 @@ NS_ASSUME_NONNULL_BEGIN
     const auto max_length = 20;
     const auto batch_size = input_ids_shape[0];
     const auto input_sequence_length = input_ids_shape[1];
-
 
     NSBundle* bundle = [NSBundle mainBundle];
     NSString* path = [[bundle resourcePath] stringByAppendingString:@"hf-internal-testing/tiny-random-gpt2-fp32"];
@@ -114,7 +114,8 @@ NS_ASSUME_NONNULL_BEGIN
     }
 
     for (int i = 0; i < batch_size; i++) {
-        OGAInt32Span *sequence = [generator sequenceAtIndex: i];
+        OGAInt32Span *sequence = [generator sequenceAtIndex:i error:&error];
+        ORTAssertNullableResultSuccessful(sequence, error);
         auto* expected_output_start = &expected_output[i * max_length];
         XCTAssertTrue(0 == std::memcmp(expected_output_start, [sequence pointer], max_length * sizeof(int32_t)));
     }
