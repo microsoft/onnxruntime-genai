@@ -17,7 +17,7 @@
  * [params setSearchOption:@"max_length" doubleValue:200 error:&error];
  *
  * OGASequences* output_sequences = [model generate:params error:&error];
- * NSString* out_string = [tokenizer decode:[output_sequences sequenceAtIndex:0]];
+ * NSString* out_string = [tokenizer decode:[output_sequences sequenceAtIndex:0] error:&error];
  *
  */
 
@@ -116,46 +116,129 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 
 @end
 
+/**
+ * A tokenizer stream is to decoded token strings incrementally, one token at a time.
+ */
 @interface OGATokenizerStream : NSObject
 - (instancetype)init NS_UNAVAILABLE;
+
+/**
+ * Creates a tokenizer stream with an underlying tokenizer.
+ *
+ * @param tokenizer The underlying tokenizer to use.
+ * @param error Optional error information set if an error occurs.
+ * @return The instance, or nil if an error occurs.
+ */
 - (nullable instancetype)initWithTokenizer:(OGATokenizer*)tokenizer
                                      error:(NSError**)error NS_DESIGNATED_INITIALIZER;
 
+/**
+ * Creates a tokenizer stream with a multi modal processor
+ *
+ * @param processor The underlying processor to use.
+ * @param error Optional error information set if an error occurs.
+ * @return The instance, or nil if an error occurs.
+ */
 - (nullable instancetype)initWithMultiModalProcessor:(OGAMultiModalProcessor*)processor
                                                error:(NSError**)error NS_DESIGNATED_INITIALIZER;
-
+/**
+ * Decode one token.
+ *
+ * @param token The token to be decoded.
+ * @param error Optional error information set if an error occurs.
+ * @return The decoding result, or nil if an error occurs.
+ */
 - (nullable NSString*)decode:(int32_t)token
                        error:(NSError**)error;
 @end
 
+/**
+ * Wraps a raw int32_t pointer and its size. Represents a data sequence.
+ */
 @interface OGAInt32Span : NSObject
 
 - (instancetype)init NS_UNAVAILABLE;
-- (nullable instancetype)initWithRawPointer:(const int32_t*)pointer size:(size_t)size;
+/**
+ * Creates a span with underlying data.
+ *
+ * @param pointer The underlying data pointer to use.
+ * @param size The underlying data size.
+ * @return The instance, or nil if an error occurs.
+ */
+- (nullable instancetype)initWithDataPointer:(const int32_t*)pointer size:(size_t)size;
 
+
+/**
+ * The underlying data pointer
+ */
 - (const int32_t*)pointer;
+/**
+ * The underlying data size
+ */
 - (size_t)size;
-- (int32_t)last;
+/**
+ * The last element in this data sequence
+ * @param error Optional error information set if an error occurs.
+ * @return The last element, or nil if an error occurs.
+ */
+- (int32_t)lastElementWithError:(NSError**)error NS_SWIFT_NAME(lastElement());
 
 @end
 
+/**
+ * Wraps a raw int64_t pointer and its size. Represents a data sequence.
+ */
 @interface OGAInt64Span : NSObject
 
 - (instancetype)init NS_UNAVAILABLE;
-- (nullable instancetype)initWithRawPointer:(const int64_t*)pointer size:(size_t)size;
+/**
+ * Creates a span with underlying data.
+ *
+ * @param pointer The underlying data pointer to use.
+ * @param size The underlying data size.
+ * @return The instance, or nil if an error occurs.
+ */
+- (nullable instancetype)initWithDataPointer:(const int64_t*)pointer size:(size_t)size;
 
+/**
+ * The underlying data pointer
+ */
 - (const int64_t*)pointer;
+
+/**
+ * The underlying data size
+ */
 - (size_t)size;
-- (int64_t)last;
+
+/**
+ * The last element in this data sequence
+ * @param error Optional error information set if an error occurs.
+ * @return The last element, or nil if an error occurs.
+ */
+- (int64_t)lastElementWithError:(NSError**)error NS_SWIFT_NAME(lastElement());;
 
 @end
 
+/**
+ * A series of generated sequences
+ */
 @interface OGASequences : NSObject
 
 - (instancetype)init NS_UNAVAILABLE;
 
+/**
+ * The count of generated sequences
+ */
 - (size_t)count;
-- (nullable OGAInt32Span*)sequenceAtIndex:(size_t)index;
+
+/**
+ * Retrieve the sequence at the given index
+ * @param index The index needed.
+ * @param error Optional error information set if an error occurs.
+ * @return The last element, or nil if an error occurs.
+ */
+- (nullable OGAInt32Span*)sequenceAtIndex:(size_t)index
+                                    error:(NSError**)error;
 
 @end
 
@@ -196,9 +279,9 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
                                 params:(OGAGeneratorParams*)params
                                  error:(NSError**)error NS_DESIGNATED_INITIALIZER;
 
-- (BOOL)isDone;
-- (void)computeLogits;
-- (void)generateNextToken;
+- (nullable NSNumber*)isDoneWithError:(NSError**)error NS_SWIFT_NAME(isDone());
+- (BOOL)computeLogitsWithError:(NSError**)error NS_SWIFT_NAME(computeLogits());
+- (BOOL)generateNextTokenWithError:(NSError**)error NS_SWIFT_NAME(generateNextToken());
 - (OGATensor*)getOutput:(NSString*)name;
 
 - (nullable OGAInt32Span*)sequenceAtIndex:(size_t)index;
@@ -209,7 +292,7 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 
 - (instancetype)init NS_UNAVAILABLE;
 - (nullable instancetype)initWithDataPointer:(void*)data
-                                       shape:(OGAInt64Span*)shape
+                                       shape:(NSArray<NSNumber*>*)shape
                                         type:(OGAElementType)elementType
                                        error:(NSError**)error;
 - (OGAElementType)type;

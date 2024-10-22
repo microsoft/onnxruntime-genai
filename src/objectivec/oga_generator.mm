@@ -23,28 +23,39 @@
   OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }
 
-- (BOOL)isDone {
-  return _generator->IsDone();
+- (NSNumber*)isDoneWithError:(NSError**)error {
+  try {
+    return [NSNumber numberWithBool:_generator->IsDone()];
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }
 
-- (void)computeLogits {
-  _generator->ComputeLogits();
+- (BOOL)computeLogitsWithError:(NSError**)error {
+  try {
+    _generator->ComputeLogits();
+    return YES;
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
 }
 
-- (void)generateNextToken {
-  _generator->GenerateNextToken();
+- (BOOL)generateNextTokenWithError:(NSError**)error {
+  try {
+    _generator->GenerateNextToken();
+    return YES;
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
 }
 
 - (OGATensor*)getOutput:(NSString*)name {
   std::unique_ptr<OgaTensor> output = _generator->GetOutput([name UTF8String]);
-  return [[OGATensor alloc] initWithNativePointer:std::move(output)];
+  return [[OGATensor alloc] initWithCXXPointer:std::move(output)];
 }
 
 - (nullable OGAInt32Span*)sequenceAtIndex:(size_t)index {
   try {
     size_t sequenceLength = _generator->GetSequenceCount(index);
     const int32_t* data = _generator->GetSequenceData(index);
-    return [[OGAInt32Span alloc] initWithRawPointer:data size:sequenceLength];
+    return [[OGAInt32Span alloc] initWithDataPointer:data size:sequenceLength];
   } catch (std::exception) {
     return nil;
   }

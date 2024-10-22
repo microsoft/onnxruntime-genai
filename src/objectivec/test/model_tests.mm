@@ -5,6 +5,7 @@
 #import <XCTest/XCTest.h>
 
 #import "ort_genai_objc.h"
+#import "assertion_utils.h"
 #import <vector>
 #import <array>
 
@@ -34,8 +35,11 @@ NS_ASSUME_NONNULL_BEGIN
 
     NSError *error = nil;
     OGAModel* model = [[OGAModel alloc] initWithPath:path error:&error];
+    ORTAssertNullableResultSuccessful(model, error);
 
     OGAGeneratorParams *params = [[OGAGeneratorParams alloc] initWithModel:model error:&error];
+    ORTAssertNullableResultSuccessful(params, error);
+
     [params setSearchOption:@"max_length" doubleValue:max_length error:&error];
     [params setSearchOption:@"do_sample" boolValue:YES error:&error];
     [params setSearchOption:@"top_p" doubleValue:0.25 error:&error];
@@ -48,10 +52,11 @@ NS_ASSUME_NONNULL_BEGIN
     OGAGenerator* generator = [[OGAGenerator alloc] initWithModel:model
                                                            params:params
                                                             error:&error];
+    ORTAssertNullableResultSuccessful(generator, error);
 
-    while (![generator isDone]) {
-        [generator computeLogits];
-        [generator generateNextToken];
+    while (![[generator isDoneWithError:&error] boolValue]) {
+        [generator computeLogitsWithError:&error];
+        [generator generateNextTokenWithError:&error];
     }
 
     for (int i = 0; i < batch_size; i++) {
@@ -83,8 +88,11 @@ NS_ASSUME_NONNULL_BEGIN
 
     NSError *error = nil;
     OGAModel* model = [[OGAModel alloc] initWithPath:path error:&error];
+    ORTAssertNullableResultSuccessful(model, error);
 
     OGAGeneratorParams *params = [[OGAGeneratorParams alloc] initWithModel:model error:&error];
+    ORTAssertNullableResultSuccessful(params, error);
+
     [params setSearchOption:@"max_length" doubleValue:max_length error:&error];
     [params setSearchOption:@"length_penalty" doubleValue:1.0f error:&error];
     [params setSearchOption:@"num_beams" doubleValue:4 error:&error];
@@ -98,9 +106,11 @@ NS_ASSUME_NONNULL_BEGIN
     OGAGenerator* generator = [[OGAGenerator alloc] initWithModel:model
                                                            params:params
                                                             error:&error];
-    while (![generator isDone]) {
-        [generator computeLogits];
-        [generator generateNextToken];
+
+    ORTAssertNullableResultSuccessful(generator, error);
+    while (![[generator isDoneWithError:&error] boolValue]) {
+        [generator computeLogitsWithError:&error];
+        [generator generateNextTokenWithError:&error];
     }
 
     for (int i = 0; i < batch_size; i++) {

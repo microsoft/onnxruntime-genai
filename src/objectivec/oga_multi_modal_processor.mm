@@ -26,7 +26,7 @@
                                      error:(NSError**)error {
   try {
     OGANamedTensors* result = [[OGANamedTensors alloc]
-        initWithNativePointer:_processor->ProcessImages([prompt UTF8String],
+        initWithCXXPointer:_processor->ProcessImages([prompt UTF8String],
                                                         [images CXXAPIOgaImages])];
     return result;
   }

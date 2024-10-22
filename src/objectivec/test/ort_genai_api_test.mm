@@ -4,6 +4,7 @@
 #import <XCTest/XCTest.h>
 
 #import "ort_genai_objc.h"
+#import "assertion_utils.h"
 #import <vector>
 #import <array>
 
@@ -21,19 +22,23 @@ NS_ASSUME_NONNULL_BEGIN
     std::array<float, 12> data{0, 1, 2, 3,
                              10, 11, 12, 13,
                              20, 21, 22, 23};
-    std::vector<int64_t> shape{3, 4};  // Use vector so we can easily compare for equality later
+    NSArray<NSNumber*>* shape = @[@3, @4];
 
     NSBundle* bundle = [NSBundle mainBundle];
     NSString* path = [[bundle resourcePath] stringByAppendingString:@"hf-internal-testing/tiny-random-gpt2-fp32"];
 
     NSError *error = nil;
+    BOOL ret = NO;
     OGAModel* model = [[OGAModel alloc] initWithPath:path error:&error];
-    OGAGeneratorParams *param = [[OGAGeneratorParams alloc] initWithModel:model error:&error];
+    ORTAssertNullableResultSuccessful(model, error);
 
-    OGAInt64Span* shapeData = [[OGAInt64Span alloc] initWithRawPointer:shape.data() size:2];
-    OGATensor* tensor = [[OGATensor alloc] initWithDataPointer:data.data() shape:shapeData type:OGAElementTypeFloat32 error:&error];
+    OGAGeneratorParams *params = [[OGAGeneratorParams alloc] initWithModel:model error:&error];
+    ORTAssertNullableResultSuccessful(params, error);
 
-    [param setModelInput:@"test_input" tensor:tensor error:&error];
+    OGATensor* tensor = [[OGATensor alloc] initWithDataPointer:data.data() shape:shape type:OGAElementTypeFloat32 error:&error];
+
+    ret = [params setModelInput:@"test_input" tensor:tensor error:&error];
+    ORTAssertBoolResultSuccessful(ret, error);
 }
 
 - (void)GetOutput {
@@ -47,8 +52,12 @@ NS_ASSUME_NONNULL_BEGIN
     NSString* path = [[bundle resourcePath] stringByAppendingString:@"hf-internal-testing/tiny-random-gpt2-fp32"];
 
     NSError *error = nil;
+    BOOL ret = NO;
     OGAModel* model = [[OGAModel alloc] initWithPath:path error:&error];
+    ORTAssertNullableResultSuccessful(model, error);
+
     OGAGeneratorParams *params = [[OGAGeneratorParams alloc] initWithModel:model error:&error];
+    ORTAssertNullableResultSuccessful(params, error);
 
     [params setInputIds:input_ids.data()
           inputIdsCount:input_ids.size()
@@ -72,7 +81,8 @@ NS_ASSUME_NONNULL_BEGIN
                                                     -0.04699047f, 0.17915794f, 0.20838135f, 0.10888482f, -0.00277808f,
                                                     0.2938929f, -0.10538938f, -0.00226692f, 0.12050669f, -0.10622668f};
 
-    [generator computeLogits];
+    ret = [generator computeLogitsWithError:&error];
+    ORTAssertBoolResultSuccessful(ret, error);
     OGATensor* prompt_logits_ptr = [generator getOutput:@"logits"];
     auto prompt_logits = static_cast<float*>([prompt_logits_ptr data]);
     const int num_prompt_outputs_to_check = 40;
@@ -83,14 +93,16 @@ NS_ASSUME_NONNULL_BEGIN
         XCTAssertEqualWithAccuracy(expected_sampled_logits_prompt[i], prompt_logits[i * sample_size], tolerance);
     }
 
-    [generator generateNextToken];
-
+    ret = [generator generateNextTokenWithError:&error];
+    ORTAssertBoolResultSuccessful(ret, error);
     // check for the 1st token generation
     // full logits has shape [2, 1, 1000]. Sample 1 for every 200 tokens and the expected sampled logits has shape [2, 1, 5]
     std::vector<float> expected_sampled_logits_token_gen{0.03742531f, -0.05752287f, 0.14159015f, 0.04210977f, -0.1484456f,
                                                        0.3041716f, -0.08701379f, -0.03778192f, 0.07471392f, -0.02049096f};
 
-    [generator computeLogits];
+    ret = [generator computeLogitsWithError:&error];
+    ORTAssertBoolResultSuccessful(ret, error);
+
     OGATensor* token_gen_logits_ptr = [generator getOutput:@"logits"];
     auto token_gen_logits = static_cast<float*>([token_gen_logits_ptr data]);
     int num_token_gen_outputs_to_check = 10;
@@ -98,7 +110,8 @@ NS_ASSUME_NONNULL_BEGIN
     for (int i = 0; i < num_token_gen_outputs_to_check; i++) {
         XCTAssertEqualWithAccuracy(expected_sampled_logits_token_gen[i], token_gen_logits[i * sample_size], tolerance);
     }
-    [generator generateNextToken];
+    [generator generateNextTokenWithError:&error];
+    ORTAssertBoolResultSuccessful(ret, error);
 }
 
 @end

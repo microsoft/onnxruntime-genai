@@ -14,14 +14,14 @@
     return nil;
   }
 
-  std::vector<const char *> cpp_paths;
-  cpp_paths.reserve([paths count]);
-
-  for (NSString* path in paths){
-    cpp_paths.push_back([path UTF8String]);
-  }
-
   try {
+    std::vector<const char *> cpp_paths;
+    cpp_paths.reserve([paths count]);
+
+    for (NSString* path in paths){
+      cpp_paths.push_back([path UTF8String]);
+    }
+
     _images = OgaImages::Load(cpp_paths);
     return self;
   }

@@ -8,7 +8,7 @@
   size_t _size;
 }
 
-- (nullable instancetype)initWithRawPointer:(const int32_t*)pointer size:(size_t)size {
+- (nullable instancetype)initWithDataPointer:(const int32_t*)pointer size:(size_t)size {
   _ptr = pointer;
   _size = size;
   return [self init];
@@ -22,12 +22,11 @@
   return _size;
 }
 
-- (int32_t)last {
-  if (_size - 1 <= 0) {
-    NSException* exception = [NSException exceptionWithName:@"onnxruntime-genai"
-                                                     reason:@"The size of this span is invalid"
-                                                   userInfo:nil];
-    @throw exception;
+- (int32_t)lastElementWithError:(NSError**)error {
+  if (_size == 0) {
+    NSDictionary *errorDictionary = @{NSLocalizedDescriptionKey : @"The size of this span is invalid"};
+    *error = [[NSError alloc] initWithDomain:kOgaErrorDomain code:-1 userInfo:errorDictionary];
+    return -1;
   }
   return *(_ptr + (_size - 1));
 }
@@ -39,7 +38,7 @@
   size_t _size;
 }
 
-- (nullable instancetype)initWithRawPointer:(const int64_t*)pointer size:(size_t)size {
+- (nullable instancetype)initWithDataPointer:(const int64_t*)pointer size:(size_t)size {
   _ptr = pointer;
   _size = size;
   return [self init];
@@ -53,12 +52,11 @@
   return _size;
 }
 
-- (int64_t)last {
-  if (_size - 1 <= 0) {
-    NSException* exception = [NSException exceptionWithName:@"onnxruntime-genai"
-                                                     reason:@"The size of this span is invalid"
-                                                   userInfo:nil];
-    @throw exception;
+- (int64_t)lastElementWithError:(NSError**)error {
+  if (_size == 0) {
+    NSDictionary *errorDictionary = @{NSLocalizedDescriptionKey : @"The size of this span is invalid"};
+    *error = [[NSError alloc] initWithDomain:kOgaErrorDomain code:-1 userInfo:errorDictionary];
+    return -1;
   }
   return *(_ptr + (_size - 1));
 }

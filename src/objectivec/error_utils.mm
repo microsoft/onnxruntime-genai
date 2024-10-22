@@ -5,7 +5,7 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-static NSString* const kOgaErrorDomain = @"onnxruntime-genai";
+NSString* const kOgaErrorDomain = @"onnxruntime-genai";
 
 void OGASaveCodeAndDescriptionToError(int code, const char* descriptionCstr, NSError** error) {
   if (!error) return;

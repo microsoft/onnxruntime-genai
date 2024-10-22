@@ -9,13 +9,13 @@
   std::unique_ptr<OgaTensor> _tensor;
 }
 
-- (instancetype)initWithNativePointer:(std::unique_ptr<OgaTensor>)ptr {
+- (instancetype)initWithCXXPointer:(std::unique_ptr<OgaTensor>)ptr {
   _tensor = std::move(ptr);
   return self;
 }
 
 - (nullable instancetype)initWithDataPointer:(void*)data
-                          shape:(OGAInt64Span*)shape
+                          shape:(NSArray<NSNumber*>*)shape
                            type:(OGAElementType)elementType
                           error:(NSError**)error {
   if ((self = [super init]) == nil) {
@@ -23,7 +23,11 @@
   }
 
   try {
-    _tensor = OgaTensor::Create(data, shape.pointer, shape.size,
+    std::vector<int64_t> cxxShape;
+    for (NSNumber* object in shape) {
+      cxxShape.push_back([object intValue]);
+    }
+    _tensor = OgaTensor::Create(data, cxxShape.data(), cxxShape.size(),
                                 static_cast<OgaElementType>(elementType));
     return self;
   }

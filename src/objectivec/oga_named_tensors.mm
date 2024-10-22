@@ -9,7 +9,7 @@
   std::unique_ptr<OgaNamedTensors> _tensor;
 }
 
-- (instancetype)initWithNativePointer:(std::unique_ptr<OgaNamedTensors>)ptr
+- (instancetype)initWithCXXPointer:(std::unique_ptr<OgaNamedTensors>)ptr
 {
   _tensor = std::move(ptr);
   return self;

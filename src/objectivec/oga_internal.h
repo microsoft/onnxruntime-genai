@@ -22,7 +22,7 @@ NS_ASSUME_NONNULL_BEGIN
 @interface OGASequences ()
 
 - (nullable instancetype)initWithError:(NSError**)error;
-- (instancetype)initWithNativePointer:(std::unique_ptr<OgaSequences>)ptr;
+- (instancetype)initWithCXXPointer:(std::unique_ptr<OgaSequences>)ptr;
 
 - (OgaSequences&)CXXAPIOgaSequences;
 
@@ -42,7 +42,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface OGATensor ()
 
-- (instancetype)initWithNativePointer:(std::unique_ptr<OgaTensor>)ptr;
+- (instancetype)initWithCXXPointer:(std::unique_ptr<OgaTensor>)ptr;
 
 - (OgaTensor&)CXXAPIOgaTensor;
 
@@ -50,7 +50,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface OGANamedTensors ()
 
-- (instancetype)initWithNativePointer:(std::unique_ptr<OgaNamedTensors>)ptr
+- (instancetype)initWithCXXPointer:(std::unique_ptr<OgaNamedTensors>)ptr
     NS_DESIGNATED_INITIALIZER;
 - (OgaNamedTensors&)CXXAPIOgaNamedTensors;
 

@@ -9,6 +9,8 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+extern NSString* const kOgaErrorDomain;
+
 void OGASaveCodeAndDescriptionToError(int code, const char* description, NSError** error);
 void OGASaveCodeAndDescriptionToError(int code, NSString* description, NSError** error);
 void OGASaveExceptionToError(const std::exception& e, NSError** error);
