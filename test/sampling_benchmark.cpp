@@ -30,6 +30,7 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopPCpu) {
   params->batch_size = batch_size;
   params->sequence_length = 1;
   params->input_ids = input_ids;
+  params->p_device = Generators::GetDeviceInterface(Generators::DeviceType::CPU);
   params->device_type = Generators::DeviceType::CPU;
   std::vector<float> logits_cpu(config.model.vocab_size * batch_size);
   std::random_device rd;
@@ -67,6 +68,7 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopKCpu) {
   params->batch_size = batch_size;
   params->sequence_length = 1;
   params->input_ids = input_ids;
+  params->p_device = Generators::GetDeviceInterface(Generators::DeviceType::CPU);
   params->device_type = Generators::DeviceType::CPU;
   std::vector<float> logits_cpu(config.model.vocab_size * batch_size);
   std::random_device rd;
@@ -107,6 +109,7 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopPAndKCpu) {
   params->batch_size = batch_size;
   params->sequence_length = 1;
   params->input_ids = input_ids;
+  params->p_device = Generators::GetDeviceInterface(Generators::DeviceType::CPU);
   params->device_type = Generators::DeviceType::CPU;
   std::vector<float> logits_cpu(config.model.vocab_size * batch_size);
   std::random_device rd;
@@ -148,6 +151,7 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopPCuda) {
   params->batch_size = batch_size;
   params->sequence_length = 1;
   params->input_ids = input_ids;
+  params->p_device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
   params->device_type = Generators::DeviceType::CUDA;
   std::vector<float> cpu_logits(config.model.vocab_size * batch_size);
   std::random_device rd;
@@ -194,6 +198,7 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopKCuda) {
   params->batch_size = batch_size;
   params->sequence_length = 1;
   params->input_ids = input_ids;
+  params->p_device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
   params->device_type = Generators::DeviceType::CUDA;
   auto logits_gpu = Generators::CudaMallocArray<float>(config.model.vocab_size * batch_size);
   auto indices_buffer = Generators::CudaMallocArray<int>(config.model.vocab_size * batch_size);
@@ -237,6 +242,7 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopPAndKCuda) {
   params->batch_size = batch_size;
   params->sequence_length = 1;
   params->input_ids = input_ids;
+  params->p_device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
   params->device_type = Generators::DeviceType::CUDA;
   auto logits_gpu = Generators::CudaMallocArray<float>(config.model.vocab_size * batch_size);
   auto indices_buffer = Generators::CudaMallocArray<int>(config.model.vocab_size * batch_size);
@@ -272,7 +278,7 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopPAndKCuda) {
 TEST(Benchmarks, BenchmarkRandomizedSelectTopCuda) {
   auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   int batch_size = 12;
-  std::vector<int32_t> input_ids{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}; // Needs to match batch_size
+  std::vector<int32_t> input_ids{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};  // Needs to match batch_size
 
   Generators::Config config;
   config.model.vocab_size = 32000;  // vocab size of llama
@@ -282,6 +288,7 @@ TEST(Benchmarks, BenchmarkRandomizedSelectTopCuda) {
   params->batch_size = batch_size;
   params->sequence_length = 1;
   params->input_ids = input_ids;
+  params->p_device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
   params->device_type = Generators::DeviceType::CUDA;
   auto logits_gpu = Generators::CudaMallocArray<float>(config.model.vocab_size * batch_size);
   auto indices_buffer = Generators::CudaMallocArray<int>(config.model.vocab_size * batch_size);
