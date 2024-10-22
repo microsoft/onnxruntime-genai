@@ -4,16 +4,19 @@
 #include "generators.h"
 #include "sequences.h"
 
+
+
+
+
+
 namespace Generators {
 
-Sequences::Sequences(std::span<const int32_t> input_sequences, int batch_size, int beam_size, int max_length)
+Sequences::Sequences(DeviceInterface& device, std::span<const int32_t> input_sequences, int batch_size, int beam_size, int max_length)
     : batch_beam_size_{batch_size * beam_size},
       max_length_{max_length},
       current_length_{static_cast<int>(input_sequences.size()) / batch_size} {
   assert(current_length_ * batch_size == input_sequences.size());  // Ensure size divided perfectly
   const size_t sequences_size = static_cast<size_t>(batch_beam_size_) * max_length;
-
-  auto& device = GetCpuDeviceInterface();
 
   sequences_ = device.Allocate<int32_t>(sequences_size, true);
   if (beam_size > 1)

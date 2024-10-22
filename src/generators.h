@@ -55,6 +55,7 @@ enum struct DeviceType {
 };
 
 std::string to_string(DeviceType device_type);
+DeviceInterface* GetDeviceInterface(DeviceType type);
 
 struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChecked<GeneratorParams> {
   GeneratorParams(const Config& config);  // This constructor is only used for internal generator benchmarks
@@ -69,6 +70,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   int sequence_length{};
   int BatchBeamSize() const { return search.num_beams * batch_size; }
 
+  DeviceInterface* p_device{};
   DeviceType device_type{DeviceType::CPU};
   cudaStream_t cuda_stream{};
 

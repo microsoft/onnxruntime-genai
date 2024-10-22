@@ -51,7 +51,7 @@ BeamSearchScorer::BeamSearchScorer(const GeneratorParams& parameters)
       eos_token_id_{parameters.config.model.eos_token_id},
       early_stopping_{parameters.search.early_stopping},
       not_done_count_{parameters.batch_size} {
-  auto& device = GetCpuDeviceInterface();
+  auto& device = *parameters.p_device;
 
   size_t const batch_beam_size = static_cast<size_t>(batch_size_) * num_beams_;
 

@@ -3,17 +3,23 @@ namespace Generators {
 
 // This class keeps track of sequences generated.
 struct Sequences_Cuda {
-  Sequences_Cuda(std::span<const int32_t> input_sequences, int batch_size, int beam_size, int max_length, cudaStream_t stream);
+  Sequences_Cuda(DeviceInterface& device, std::span<const int32_t> input_sequences, int batch_size, int beam_size, int max_length, cudaStream_t stream);
 
   // Returns a sequence of word IDs for a given beam index ( beam_index < batch_beam_size).
   DeviceMemorySpan<int32_t> GetSequence(size_t batch_beam_index);
   DeviceMemory<int32_t>& GetSequences() { return *sequences_; }
   DeviceMemory<int32_t>& GetNextSequences() { return *sequences_next_; }
 
-  void AppendNextTokenToSequences(std::span<const int32_t> next_tokens);
-
   // Returns current sequence length.
   int GetSequenceLength() const;
+
+  // Used by Beam search:
+  // Shuffles sequences around based on batch_beam_indices, then append next token to selected sequences.
+  // void AppendNextTokenToSequences(std::span<const int32_t> batch_beam_indices, std::span<const int32_t> batch_beam_next_tokens);
+
+  // Used by Greedy search:
+  void AppendNextTokenToSequences(std::span<const int32_t> next_tokens);
+
   void AfterDeviceAppendedNextToken();
 
  private:

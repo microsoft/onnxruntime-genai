@@ -80,8 +80,6 @@ struct DeviceInterface {
   virtual std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) = 0;
 };
 
-DeviceInterface& GetCpuDeviceInterface();
-
 namespace Location {
 struct CPU {};
 struct GPU {};

@@ -3,11 +3,12 @@ namespace Generators {
 
 // This class keeps track of sequences generated.
 struct Sequences {
-  Sequences(std::span<const int32_t> input_sequence, int batch_size, int beam_size, int max_length);
+  Sequences(DeviceInterface& device, std::span<const int32_t> input_sequence, int batch_size, int beam_size, int max_length);
 
   // Returns a sequence of word IDs for a given beam index ( beam_index < batch_beam_size).
   DeviceMemorySpan<int32_t> GetSequence(size_t batch_beam_index);
   DeviceMemory<int32_t>& GetSequences() { return *sequences_; }
+  DeviceMemory<int32_t>& GetNextSequences() { return *sequences_next_; }
 
   // Returns current sequence length.
   int GetSequenceLength() const;

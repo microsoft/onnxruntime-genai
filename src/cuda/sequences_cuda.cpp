@@ -11,24 +11,20 @@ void Launch_ExpandInputSequences(std::span<const int32_t> input_sequences, std::
 void Launch_AppendNextTokenToSequences(std::span<const int32_t> next_tokens, std::span<int32_t> sequences, int batch_beam_size, int current_length, int max_length, cudaStream_t stream);
 }  // namespace cuda
 
-Sequences_Cuda::Sequences_Cuda(std::span<const int32_t> input_sequences, int batch_size, int beam_size, int max_length, cudaStream_t stream)
+Sequences_Cuda::Sequences_Cuda(DeviceInterface& device, std::span<const int32_t> input_sequences, int batch_size, int beam_size, int max_length, cudaStream_t stream)
     : stream_{stream},
       batch_beam_size_{batch_size * beam_size},
       max_length_{max_length},
       current_length_{static_cast<int>(input_sequences.size()) / batch_size} {
   assert(current_length_ * batch_size == input_sequences.size());  // Ensure size divided perfectly
-  size_t sequences_size = batch_beam_size_ * max_length;
-
-  auto& device = GetCudaDeviceInterface();
+  const size_t sequences_size = static_cast<size_t>(batch_beam_size_) * max_length;
 
   sequences_ = device.Allocate<int32_t>(sequences_size, false /*cpu_accessible*/);
   if (beam_size > 1)
     sequences_next_ = device.Allocate<int32_t>(sequences_size, false /*cpu_accessible*/);
 
-  // TODO: input_sequences will be in cuda memory in the future, for now make a temp copy
-
-  gpu_span<int32_t> input_sequences_gpu;
-  auto input_sequences_temp = CudaMallocArray<int32_t>(input_sequences.size(), &input_sequences_gpu);
+  auto input_sequences_temp = device.Allocate<int32_t>(input_sequences.size(), false /*cpu_accessible*/);
+  auto input_sequences_gpu = input_sequences_temp->DeviceSpan();
   cudaMemcpyAsync(input_sequences_gpu.data(), input_sequences.data(), input_sequences.size_bytes(), cudaMemcpyHostToDevice, stream);
 
   cuda::Launch_ExpandInputSequences(input_sequences_gpu, sequences_->DeviceSpan(), batch_size, beam_size, current_length_, max_length, stream_);

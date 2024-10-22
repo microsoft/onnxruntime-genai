@@ -126,13 +126,9 @@ struct CpuInterface : DeviceInterface {
     return std::make_shared<CpuMemory>(size);
   }
 
-  std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override { return nullptr; }
-  std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override { return nullptr; }
+  std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override { return std::make_unique<GreedySearch_Cpu>(params); }
+  std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override { return std::make_unique<BeamSearch_Cpu>(params); }
 } g_cpu;
-
-DeviceInterface& GetCpuDeviceInterface() {
-  return g_cpu;
-}
 
 #if USE_CUDA
 CudaInterface* GetCudaInterface() {
@@ -197,11 +193,26 @@ std::string to_string(DeviceType device_type) {
   throw std::runtime_error("Unknown device type");
 }
 
-GeneratorParams::GeneratorParams(const Config& config) : config{config} {
+DeviceInterface* GetDeviceInterface(DeviceType type) {
+  switch (type) {
+    default:
+    case DeviceType::CPU:
+      return &g_cpu;
+#if USE_CUDA
+    case DeviceType::CUDA:
+      return GetCudaInterface();
+#endif
+  }
+}
+
+GeneratorParams::GeneratorParams(const Config& config)
+    : config{config},
+      p_device{GetDeviceInterface(DeviceType::CPU)} {
 }
 
 GeneratorParams::GeneratorParams(const Model& model)
     : config{*model.config_.get()},
+      p_device{GetDeviceInterface(model.device_type_)},
       device_type{model.device_type_},
       cuda_stream{model.cuda_stream_},
       is_cuda_graph_enabled_{IsCudaGraphEnabled(model.config_->model.decoder.session_options)} {
@@ -249,18 +260,9 @@ std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorPa
 }
 
 std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
-#if USE_CUDA
-  if (params.device_type == DeviceType::CUDA) {
-    if (params.search.num_beams > 1)
-      return GetCudaInterface()->CreateBeam(params);
-    return GetCudaInterface()->CreateGreedy(params);
-  }
-#endif
-
-  if (params.search.num_beams > 1) {
-    return std::make_unique<BeamSearch_Cpu>(params);
-  }
-  return std::make_unique<GreedySearch_Cpu>(params);
+  if (params.search.num_beams > 1)
+    return params.p_device->CreateBeam(params);
+  return params.p_device->CreateGreedy(params);
 }
 
 Generator::Generator(const Model& model, const GeneratorParams& params) : model_{model.shared_from_this()} {
