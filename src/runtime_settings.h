@@ -10,6 +10,8 @@ namespace Generators {
 struct RuntimeSettings {
   RuntimeSettings() = default;
 
+  std::string GenerateConfigOverlay() const;
+
   std::unordered_map<std::string, void*> handles_;
 };
 

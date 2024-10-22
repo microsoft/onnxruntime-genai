@@ -660,35 +660,29 @@ void ParseConfig(const fs::path& filename, Config& config) {
   }
 }
 
-Config::Config(const fs::path& path, const RuntimeSettings* settings) : config_path{path} {
+void ParseConfig(std::string_view json, Config& config) {
+  Root_Element root{config};
+  RootObject_Element root_object{root};
+  try {
+    JSON::Parse(root_object, json);
+  } catch (const std::exception& message) {
+    std::ostringstream oss;
+    oss << "Error encountered while parsing JSON " << message.what();
+    throw std::runtime_error(oss.str());
+  }
+}
+
+Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path} {
   ParseConfig(path / "genai_config.json", *this);
+  if (!json_overlay.empty()) {
+    ParseConfig(json_overlay, *this);
+  }
 
   if (model.context_length == 0)
     throw std::runtime_error("model context_length is 0 or was not set. It must be greater than 0");
 
   if (search.max_length == 0)
     search.max_length = model.context_length;
-
-  if (settings) {
-    // Enable the following code after #992 is merged
-    // https://github.com/microsoft/onnxruntime-genai/pull/992
-
-    // #if USE_WEBGPU
-    auto& provider_options = model.decoder.session_options.provider_options;
-    auto maybe_webgpu_options = std::find_if(provider_options.begin(),
-                                             provider_options.end(),
-                                             [](Generators::Config::ProviderOptions& po) {
-                                               return po.name == "webgpu";
-                                             });
-    if (maybe_webgpu_options != provider_options.end()) {
-      auto it = settings->handles_.find("dawnProcTable");
-      if (it != settings->handles_.end()) {
-        void* dawn_proc_table_handle = it->second;
-        maybe_webgpu_options->options.emplace_back("dawnProcTable", std::to_string((size_t)(dawn_proc_table_handle)));
-      }
-    }
-    // #endif
-  }
 }
 
 void Config::AddMapping(const std::string& nominal_name, const std::string& graph_name) {
