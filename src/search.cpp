@@ -41,6 +41,10 @@ BeamSearch_Cpu::BeamSearch_Cpu(const GeneratorParams& params)
 
 BeamSearch_Cpu::~BeamSearch_Cpu() = default;
 
+RoamingArray<float> Search_Cpu::GetLogits() const {
+  return next_token_scores_;
+}
+
 void Search_Cpu::SetLogits(RoamingArray<float> logits_unk) {
   next_token_scores_ = logits_unk.GetCPU();
 }
