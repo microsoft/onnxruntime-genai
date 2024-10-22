@@ -82,8 +82,15 @@ public class SimpleGenAI {
           throw new GenAIException("Token generation loop failed.", e);
         }
       } else {
-        Sequences output_sequences = model.generate(generatorParams);
-        output_ids = output_sequences.getSequence(0);
+        try (Generator generator = new Generator(model, generatorParams)) {
+          generator.appendTokenSequences(tokenizer.encode(prompt));
+          for (int token_id : generator) {
+            // do nothing
+          }
+          output_ids = generator.getSequence(0);
+        } catch (GenAIException e) {
+          throw new GenAIException("Token generation loop failed.", e);
+        }
       }
 
       result = tokenizer.decode(output_ids);

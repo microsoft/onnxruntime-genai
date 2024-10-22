@@ -149,8 +149,7 @@ CudaInterface* GetCudaInterface() {
 #endif
 
   if (!cuda_library) {
-    std::cerr << "Cuda interface not available: " << dlerror() << std::endl;
-    throw std::runtime_error("Cuda interface not available");
+\    throw std::runtime_error("Cuda interface not available");
   }
 
   Generators::CudaInterface* GetInterface(GenaiInterface * p_genai);

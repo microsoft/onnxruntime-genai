@@ -148,6 +148,7 @@ def test_batching(device, phi2_for):
         params.try_graph_capture_with_max_batch_size(len(prompts))
 
     generator = og.Generator(model, params)
+    generator.append_tokens(tokenizer.encode_batch(prompts))
     while not generator.is_done():
         generator.generate_next_token()
     for i in range(len(prompts)):
