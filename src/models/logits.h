@@ -11,6 +11,7 @@ struct Logits {
 
   void Add();
   RoamingArray<float> Get();
+  OrtValue* GetRaw() { return std::move(output_raw_).get(); }
 
   void Update();
 

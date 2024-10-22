@@ -39,6 +39,8 @@ struct State {
 
   void ClearIO();  // Clear all inputs/outputs
 
+  RoamingArray<float> MakeDummy() { return RoamingArray<float>(); }
+
   const Model& model_;
   std::shared_ptr<const GeneratorParams> params_;
 

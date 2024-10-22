@@ -51,12 +51,12 @@ std::unique_ptr<Audios> LoadAudios(const std::span<const char* const>& audio_pat
 }
 
 AudioProcessor::AudioProcessor(Config& config, const SessionInfo& session_info)
-    : audio_features_type_{session_info.GetInputDataType(config.model.encoder_decoder_init.inputs.audio_features)} {
+    : audio_features_type_{session_info.GetInputDataType(config.model.encoder.inputs.audio_features)} {
   const std::string default_processor_file_name = "audio_processor_config.json";
   auto processor_config = (config.config_path / fs::path(default_processor_file_name)).string();
   processor_ = ort_extensions::OrtxObjectPtr<OrtxFeatureExtractor>(OrtxCreateSpeechFeatureExtractor, processor_config.c_str());
 
-  config.AddMapping(std::string(Config::Defaults::AudioFeaturesName), config.model.encoder_decoder_init.inputs.audio_features);
+  config.AddMapping(std::string(Config::Defaults::AudioFeaturesName), config.model.encoder.inputs.audio_features);
 }
 
 std::unique_ptr<NamedTensors> AudioProcessor::Process(const Audios* audios) const {

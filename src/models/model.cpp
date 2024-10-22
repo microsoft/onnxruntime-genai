@@ -498,7 +498,7 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path) {
   if (config->model.type == "llama" || config->model.type == "gemma" || config->model.type == "gemma2" || config->model.type == "mistral" || config->model.type == "phi" || config->model.type == "phi3" || config->model.type == "phi3small" || config->model.type == "phimoe" || config->model.type == "qwen2")
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
   if (config->model.type == "whisper")
-    return std::make_shared<Whisper_Model>(std::move(config), ort_env);
+    return std::make_shared<WhisperModel>(std::move(config), ort_env);
   if (config->model.type == "phi3v")
     return std::make_shared<MultiModalVisionModel>(std::move(config), ort_env);
   if (config->model.type == "decoder-pipeline")

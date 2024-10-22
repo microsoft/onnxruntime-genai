@@ -1,8 +1,13 @@
 #pragma once
 
+#if USE_CUDA
+#include "kernels.h"
+#endif
 #include "static_buffer.h"
 
 namespace Generators {
+
+std::string ComposeKeyValueName(const std::string& template_string, int index);
 
 struct KV_Cache_Combined {
   KV_Cache_Combined(State& state);
@@ -33,8 +38,13 @@ struct KV_Cache {
 
   static bool IsCacheNeeded(const Model& model);
 
-  void AddEncoder();  // If model has an initial encoder step, this is used
+  // void AddInputs();
+  // void AddOutputs();
   void Add();
+  auto& GetShape() const { return shape_; }
+  auto& GetType() const { return type_; }
+  auto& GetPresents() { return presents_; }
+
   void Update(std::span<const int32_t> beam_indices, int current_length);
   template <typename ScoreType>
   void PickPastState(std::span<const int32_t> beam_indices, int index);
@@ -56,16 +66,18 @@ struct KV_Cache {
   std::vector<StaticBuffer*> sb_kv_caches_;
 };
 
-// Very similar to the KV_Cache, but is only created once at the encoder step, then used without modification for every decoder step
 struct Cross_Cache {
-  Cross_Cache(State& state);
+  Cross_Cache(State& state, int sequence_length = 0);
+  // Cross_Cache(const Cross_Cache&) = delete;
+  // Cross_Cache& operator=(const Cross_Cache&) = delete;
 
-  void AddOutputs();
-  void AddInputs();
+  void AddOutputs(State& state);
+  void AddInputs(State& state);
+  auto& GetShape() const { return shape_; }
+  auto& GetType() const { return type_; }
+  auto& GetValues() { return values_; }
 
  private:
-  State& state_;
-  const Model& model_{state_.model_};
   int layer_count_;
 
   std::array<int64_t, 4> shape_;

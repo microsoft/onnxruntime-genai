@@ -8,10 +8,6 @@ namespace Generators {
 
 namespace {
 
-RoamingArray<float> MakeDummy() {
-  return RoamingArray<float>();
-}
-
 int64_t GetNumImageTokens(const std::vector<GeneratorParams::Input>& extra_inputs,
                           const std::string& pixel_values_name,
                           const std::string& image_sizes_name) {
@@ -102,7 +98,7 @@ RoamingArray<float> EmbeddingState::Run(int current_length, RoamingArray<int32_t
   return MakeDummy();
 }
 
-VisionState::VisionState(const MultiModalVisionModel& model, const GeneratorParams& params, const int64_t num_image_tokens)
+VisionEncoderState::VisionEncoderState(const MultiModalVisionModel& model, const GeneratorParams& params, const int64_t num_image_tokens)
     : State{params, model},
       model_{model},
       num_image_tokens_{num_image_tokens} {
@@ -110,7 +106,7 @@ VisionState::VisionState(const MultiModalVisionModel& model, const GeneratorPara
   image_features_.Add();
 }
 
-RoamingArray<float> VisionState::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
+RoamingArray<float> VisionEncoderState::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
   const int num_images = static_cast<int>(inputs_[0]->GetTensorTypeAndShapeInfo()->GetShape()[0]);
   State::Run(*model_.vision_session_, *model_.run_options_, num_images);
 
@@ -148,8 +144,8 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalVisionModel& mo
       num_image_tokens_{GetNumImageTokens(params_->extra_inputs, model_.config_->model.vision.inputs.pixel_values, model_.config_->model.vision.inputs.image_sizes)},
       captured_graph_info_{model.GetCapturedGraphPool()->ReserveCapturedGraph(model, params)} {
   embedding_state_ = std::make_unique<EmbeddingState>(model, params, nullptr, num_image_tokens_);
-  vision_state_ = std::make_unique<VisionState>(model_, params, num_image_tokens_);
-  decoder_state_ = std::make_unique<DecoderState>(model_, sequence_lengths_unk, params, captured_graph_info_.get());
+  vision_state_ = std::make_unique<VisionEncoderState>(model, params, num_image_tokens_);
+  decoder_state_ = std::make_unique<DecoderState>(model, sequence_lengths_unk, params, captured_graph_info_.get());
 }
 
 RoamingArray<float> MultiModalPipelineState::Run(int current_length, RoamingArray<int32_t> next_tokens,
