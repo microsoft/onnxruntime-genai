@@ -15,6 +15,10 @@ Please ensure you have the following Python packages installed to create the ONN
 - `numpy`
 - `onnx`
 - `onnxruntime-genai`
+    - For CPU:
+    ```bash
+    pip install onnxruntime-genai
+    ```
     - For CUDA:
     ```bash
     pip install onnxruntime-genai-cuda
