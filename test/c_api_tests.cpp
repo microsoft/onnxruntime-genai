@@ -376,6 +376,14 @@ TEST(CAPITests, TopKTopPCAPI) {
 
 #if TEST_PHI2
 TEST(CAPITests, AdaptersTest) {
+
+#ifdef USE_CUDA
+using OutputType = Ort::Float16_t;
+#else
+using OutputType = float;
+#endif
+
+
   // The python unit tests create the adapter model.
   // In order to run this test, the python unit test must have been run first.
   auto model = OgaModel::Create(MODEL_PATH "adapters");
@@ -397,7 +405,7 @@ TEST(CAPITests, AdaptersTest) {
   // Run base scenario
   size_t output_size = 0;
   std::vector<int64_t> output_shape;
-  std::vector<float> base_output;
+  std::vector<OutputType> base_output;
   {
     auto params = OgaGeneratorParams::Create(*model);
     params->SetSearchOption("max_length", 20);
@@ -415,7 +423,7 @@ TEST(CAPITests, AdaptersTest) {
     output_size = static_cast<size_t>(std::accumulate(output_shape.begin(), output_shape.end(), 1LL,
                                                       std::multiplies<int64_t>()));
     base_output.reserve(output_size);
-    std::span<const float> src(reinterpret_cast<const float*>(logits->Data()), output_size);
+    std::span<const OutputType> src(reinterpret_cast<const OutputType*>(logits->Data()), output_size);
     std::copy(src.begin(), src.end(), std::back_inserter(base_output));
   }
   // Run scenario with an adapter
@@ -441,7 +449,7 @@ TEST(CAPITests, AdaptersTest) {
     const auto size = static_cast<size_t>(std::accumulate(shape.begin(), shape.end(), 1LL,
                                                     std::multiplies<int64_t>()));
     ASSERT_EQ(output_size, size);
-    std::span<const float> src(reinterpret_cast<const float*>(logits->Data()), size);
+    std::span<const OutputType> src(reinterpret_cast<const OutputType*>(logits->Data()), size);
     ASSERT_FALSE(std::equal(base_output.begin(), base_output.end(), src.begin(), src.end()));
   }
 
