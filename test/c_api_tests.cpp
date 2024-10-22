@@ -307,18 +307,12 @@ struct Phi2Test {
   void Run() {
     // Low level loop
     {
-      std::cout << "Creating generator..." << std::endl;
-
       auto generator = OgaGenerator::Create(*model_, *params_);
-
-      std::cout << "Generation loop..." << std::endl;
 
       while (!generator->IsDone()) {
         generator->ComputeLogits();
         generator->GenerateNextToken();
       }
-
-      std::cout << "Decode one at a time" << std::endl;
 
       // Decode One at a time
       for (size_t i = 0; i < 3; i++) {
@@ -329,11 +323,7 @@ struct Phi2Test {
 
     // High level
     {
-      std::cout << "High level generate" << std::endl;
-
       auto output_sequences = model_->Generate(*params_);
-
-      std::cout << "Decode the batch" << std::endl;
 
       // Decode The Batch
       for (size_t i = 0; i < output_sequences->Count(); i++) {
