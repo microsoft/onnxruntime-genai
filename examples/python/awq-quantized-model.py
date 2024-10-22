@@ -132,7 +132,7 @@ def main():
 
     if args.execution_provider == "dml":
         if og.__id__ != "onnxruntime-genai-directml":
-            raise ValueError(f"onnxruntime-genai-directml is required to be installed.")
+            raise ValueError(f"onnxruntime-genai-directml is required to be installed. Please uninstall all ORT GenAI packages with `pip uninstall -y onnxruntime-genai onnxruntime-genai-cuda onnxruntime-genai-directml` and only install the DML version with `pip install onnxruntime-genai-directml`.")
     # Run ONNX model
     run_model(args)
 
