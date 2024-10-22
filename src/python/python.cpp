@@ -322,7 +322,7 @@ struct PyGenerator {
 
   void SetLogits(pybind11::array_t<float> logits) {
     logits_ = logits;
-    generator_->search_->SetLogits(cpu_span<float>{ToSpan(logits_)});
+    generator_->SetLogits(cpu_span<float>{ToSpan(logits_)});
   }
 
   void GenerateNextToken() {

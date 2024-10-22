@@ -219,6 +219,11 @@ OgaResult* OGA_API_CALL OgaGenerator_AppendTokenSequences(OgaGenerator* oga_gene
   auto& generator = *reinterpret_cast<Generators::Generator*>(oga_generator);
   auto& sequences = *reinterpret_cast<const Generators::TokenSequences*>(p_sequences);
 
+  if (sequences.empty()) {
+    throw std::runtime_error("input sequences are empty");
+  } else if (sequences.size() != generator.model_->config_->search.batch_size) {
+    throw std::runtime_error("input sequences count does not match batch size");
+  }
   std::vector<std::span<const int32_t>> span_sequences;
   for (size_t i = 0; i < sequences.size(); i++) {
     span_sequences.emplace_back(sequences[i]);

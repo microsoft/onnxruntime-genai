@@ -287,6 +287,7 @@ struct Phi2Test {
 
     params_ = OgaGeneratorParams::Create(*model_);
     params_->SetSearchOption("max_length", 40);
+    params_->SetSearchOption("batch_size", 3);
   }
 
   void Run() {
@@ -301,6 +302,7 @@ struct Phi2Test {
 
       // Decode One at a time
       for (size_t i = 0; i < 3; i++) {
+        std::cout << "sequence count:" << generator->GetSequenceCount(i) << std::endl;
         auto out_string = tokenizer_->Decode(generator->GetSequenceData(i), generator->GetSequenceCount(i));
         std::cout << "Decoded string:" << out_string << std::endl;
       }

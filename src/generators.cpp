@@ -319,8 +319,7 @@ void Generator::ComputeLogits(const RoamingArray<int32_t>& next_tokens) {
     DumpSpan(stream, logits.GetCPU());
     stream << std::endl;
   }
-  search_->SetLogits(logits);
-  computed_logits_ = true;
+  SetLogits(logits);
 }
 
 bool Generator::IsDone() const {
@@ -336,9 +335,14 @@ bool Generator::IsDone() const {
   return is_done;
 }
 
+void Generator::SetLogits(RoamingArray<float> logits) {
+  search_->SetLogits(logits);
+  computed_logits_ = true;
+}
+
 void Generator::GenerateNextToken() {
-  if (search_->GetSequenceLength() == 0)
-    throw std::runtime_error("GenerateNextToken called with no initial user input. Please call AppendTokens or SetInputs first, depending on model type.");
+  if (search_->GetSequenceLength() == 0 && !computed_logits_)
+    throw std::runtime_error("GenerateNextToken called with no prior state. Please call AppendTokens, SetLogits, or params.SetInputs before calling GenerateNextToken.");
   if (!computed_logits_) {
     ComputeLogits(search_->GetNextTokens());
   }

@@ -105,6 +105,7 @@ struct Generator : LeakChecked<Generator> {
   virtual void GenerateNextToken();
   virtual void RewindToLength(size_t new_length);  // Rewind state to new_length
   RoamingArray<float> GetLogits();
+  void SetLogits(RoamingArray<float> logits);
 
   DeviceMemorySpan<int32_t> GetSequence(size_t index) const;
 
