@@ -38,7 +38,6 @@ public class SimpleGenAI {
    * Create the generator parameters and add the prompt text. The user can set other search options
    * via the GeneratorParams object prior to running `generate`.
    *
-   * @param prompt The prompt text to encode.
    * @return The generator parameters.
    * @throws GenAIException on failure
    */
