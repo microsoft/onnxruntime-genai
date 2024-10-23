@@ -63,15 +63,16 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                         Assert.NotNull(generator);
 
                         generator.AppendTokens(inputIDs);
+                        Assert.False(generator.IsDone());
 
-                        // while (!generator.IsDone())
-                        // {
-                        //     generator.GenerateNextToken();
-                        // }
-                        for (int i = 0; i < 6; i++)
+                        while (!generator.IsDone())
                         {
                             generator.GenerateNextToken();
                         }
+                        // for (int i = 0; i < 6; i++)
+                        // {
+                        //     generator.GenerateNextToken();
+                        // }
 
                         for (ulong i = 0; i < batchSize; i++)
                         {

@@ -274,7 +274,11 @@ void GreedySearch_Cuda::SetUserTokens(const RoamingArray<int32_t>& next_tokens) 
     if (GetLogItems().enabled && GetLogItems().hit_max_length)
       Log("hit_max_length", "greedy cuda hit");
     *done_cpu_ = true;
+    return;
   }
+
+  cudaMemsetAsync(eos_meet_.data(), 0, eos_meet_.size_bytes(), params_->cuda_stream);
+  *done_cpu_ = false;
 }
 
 void BeamSearch_Cuda::SetUserTokens(const RoamingArray<int32_t>& next_tokens) {
