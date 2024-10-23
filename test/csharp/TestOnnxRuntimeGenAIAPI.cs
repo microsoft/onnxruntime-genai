@@ -62,6 +62,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                     {
                         Assert.NotNull(generator);
 
+                        Assert.False(generator.IsDone());
                         generator.AppendTokens(inputIDs);
                         Assert.False(generator.IsDone());
 
