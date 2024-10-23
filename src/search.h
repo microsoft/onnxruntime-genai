@@ -80,7 +80,7 @@ struct GreedySearch_Cpu : Search_Cpu {
   void RewindTo(size_t index) override;
 
  protected:
-  void SetNextToken(size_t batch_id, int32_t token, bool check_eos = true);
+  void SetNextToken(size_t batch_id, int32_t token);
   void AppendNextTokensToSequences();
 
  private:

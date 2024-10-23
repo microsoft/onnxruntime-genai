@@ -237,9 +237,9 @@ bool GreedySearch_Cpu::PadIfAlreadyEOS(size_t batch_id) {
   return true;
 }
 
-void GreedySearch_Cpu::SetNextToken(size_t batch_id, int32_t token, bool check_eos) {
+void GreedySearch_Cpu::SetNextToken(size_t batch_id, int32_t token) {
   next_tokens_[batch_id] = token;
-  if (check_eos && token == params_->config.model.eos_token_id) {
+  if (token == params_->config.model.eos_token_id) {
     eos_seen_[batch_id] = true;
     if (g_log.enabled && g_log.hit_eos)
       Log("hit_eos", "EOS seen on batch " + std::to_string(batch_id));
@@ -260,22 +260,16 @@ void GreedySearch_Cpu::AppendNextTokensToSequences() {
 }
 
 void GreedySearch_Cpu::SetUserTokens(const RoamingArray<int32_t>& next_tokens) {
-  // Reset done count/state
-  done_ = false;
-  not_done_count_ = params_->search.batch_size;
-  memset(eos_seen_.data(), 0, eos_seen_.size_bytes());
-
   // Set user-defined next tokens
   auto next_tokens_cpu = const_cast<RoamingArray<int32_t>&>(next_tokens).GetCPU();
   auto batch_size = params_->search.batch_size;
   auto tokens_count_per_batch = next_tokens_cpu.size() / batch_size;
   for (size_t j = 0; j < tokens_count_per_batch; j++) {
     for (size_t i = 0; i < batch_size; i++) {
-      SetNextToken(i, next_tokens_cpu[i * tokens_count_per_batch + j], false);
+      SetNextToken(i, next_tokens_cpu[i * tokens_count_per_batch + j]);
     }
     AppendNextTokensToSequences();
   }
-
   // Reset done count/state
   done_ = false;
   not_done_count_ = params_->search.batch_size;
@@ -311,6 +305,7 @@ void BeamSearch_Cpu::SetUserTokens(const RoamingArray<int32_t>& next_tokens) {
       done_ = true;
     }
   }
+  done_ = false;
 }
 
 bool BeamSearch_Cpu::IsDone() const {
