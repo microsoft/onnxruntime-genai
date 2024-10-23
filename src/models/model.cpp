@@ -471,7 +471,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
         opts.emplace(option.first, option.second);
       }
       session_options.AppendExecutionProvider("QNN", opts);
-    } else if (provider_options.name == "web") {
+    } else if (provider_options.name == "webgpu") {
       device_type_ = DeviceType::WEBGPU;
       std::unordered_map<std::string, std::string> opts;
       for (auto& option : provider_options.options) {
