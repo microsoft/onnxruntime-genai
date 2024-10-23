@@ -284,9 +284,6 @@ TEST(CAPITests, GetOutputCAPI) {
 }
 
 #if TEST_PHI2
-void Generator_SetTerminate_Call(OgaGenerator* generator) {
-  generator->SetTerminate();
-}
 
 void Generate_Output(OgaGenerator* generator, std::unique_ptr<OgaTokenizerStream> tokenizer_stream) {
   try{
@@ -303,6 +300,10 @@ void Generate_Output(OgaGenerator* generator, std::unique_ptr<OgaTokenizerStream
 
 TEST(CAPITests, SetTerminate) {
 #if TEST_PHI2
+
+  auto Generator_SetTerminate_Call = [](OgaGenerator* generator) {
+    generator->SetTerminate();
+  };
 
   auto model = OgaModel::Create(PHI2_PATH);
   auto tokenizer = OgaTokenizer::Create(*model);
