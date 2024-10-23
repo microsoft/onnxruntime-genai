@@ -29,7 +29,7 @@ Java_ai_onnxruntime_genai_Generator_destroyGenerator(JNIEnv* env, jobject thiz, 
 
 JNIEXPORT void JNICALL
 Java_ai_onnxruntime_genai_Generator_appendTokenSequences(JNIEnv* env, jobject thiz, jlong native_handle,
-                                                      jlong sequences_handle) {
+                                                         jlong sequences_handle) {
   OgaGenerator* generator = reinterpret_cast<OgaGenerator*>(native_handle);
   const OgaSequences* sequences = reinterpret_cast<const OgaSequences*>(sequences_handle);
 
