@@ -11,11 +11,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
     /// </summary>
     public class Adapters : SafeHandle
     {
-        private Adapters(IntPtr handle) :
-            base(handle, true)
-        {
-        }
-
         /// <summary>
         /// Creates a container for adapters
         /// used to load, unload and hold them.
@@ -23,10 +18,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         /// </summary>
         /// <param name="model">Reference to a loaded model</param>
         /// <returns>new Adapters object</returns>
-        public static Adapters Create(Model model)
+        public Adapters(Model model) : base(IntPtr.Zero, true)
         {
-            Result.VerifySuccess(NativeMethods.OgaCreateAdapters(model.Handle, out IntPtr handle));
-            return new Adapters(handle);
+            Result.VerifySuccess(NativeMethods.OgaCreateAdapters(model.Handle, out handle));
         }
 
         /// <summary>

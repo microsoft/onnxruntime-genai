@@ -442,7 +442,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             using var model = new Model(modelPath);
             Assert.NotNull(model);
 
-            using var adapters = Adapters.Create(model);
+            using var adapters = new Adapters(model);
             adapters.LoadAdapter(adapterPath, "adapters_a_and_b");
 
             var inputStrings = new string[]
