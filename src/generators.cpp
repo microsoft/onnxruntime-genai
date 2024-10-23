@@ -149,7 +149,7 @@ CudaInterface* GetCudaInterface() {
 #endif
 
   if (!cuda_library) {
-\    throw std::runtime_error("Cuda interface not available");
+    throw std::runtime_error("Cuda interface not available");
   }
 
   Generators::CudaInterface* GetInterface(GenaiInterface * p_genai);
@@ -245,7 +245,7 @@ void GeneratorParams::TryGraphCapture(int max_bs) {
 void GeneratorParams::SetInputs(const NamedTensors& named_tensors) {
   if (config.model.type == "gpt2" || config.model.type == "llama" || config.model.type == "gemma" || config.model.type == "gemma2" || config.model.type == "mistral" || config.model.type == "phi" || config.model.type == "phi3" || config.model.type == "phi3small" || config.model.type == "phimoe" || config.model.type == "qwen2" || config.model.type == "decoder-pipeline")
     throw std::runtime_error("Please use generator.AppendTokens for " + config.model.type + ". SetInputs is not supported for this model type.");
-  
+
   for (const auto& [name, tensor] : named_tensors) {
     if (name == Config::Defaults::InputIdsName) {
       aux_input_ids = cpu_span<int32_t>(tensor->ort_tensor_->GetTensorMutableData<int32_t>(),

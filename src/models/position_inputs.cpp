@@ -199,7 +199,6 @@ void PositionInputs::UpdatePositionIDs() {
             static_cast<uint32_t>(position_ids_shape_[0]),
             type_,
             target_resource.Get());
-        
 
         // Execute the cached command list
         ComPtr<ID3D12Fence> fence;
