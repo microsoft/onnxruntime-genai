@@ -66,7 +66,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                         generator.AppendTokens(inputIDs);
                         for (ulong i = 0; i < batchSize; i++) 
                         {
-                            Assert.False(generator.GetSequence(i).Length >= maxLength);
+                            Assert.False((ulong)generator.GetSequence(i).Length >= maxLength);
                         }
                         Assert.False(generator.IsDone());
 
