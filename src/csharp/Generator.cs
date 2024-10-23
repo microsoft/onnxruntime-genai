@@ -20,9 +20,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             return NativeMethods.OgaGenerator_IsDone(_generatorHandle);
         }
 
-        public void AppendTokens(ReadOnlySpan<int> tokens, ulong count)
+        public void AppendTokens(ReadOnlySpan<int> tokens)
         {
-            Result.VerifySuccess(NativeMethods.OgaGenerator_AppendTokens(_generatorHandle, tokens.ToArray(), (UIntPtr)count));
+            Result.VerifySuccess(NativeMethods.OgaGenerator_AppendTokens(_generatorHandle, tokens.ToArray(), (UIntPtr)tokens.Length));
         }
 
         public void AppendTokenSequences(Sequences sequences)
