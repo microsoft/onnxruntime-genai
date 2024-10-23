@@ -54,6 +54,7 @@ enum struct DeviceType {
   CPU,
   CUDA,
   DML,
+  WEBGPU,
 };
 
 std::string to_string(DeviceType device_type);

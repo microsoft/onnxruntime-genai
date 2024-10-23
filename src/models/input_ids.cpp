@@ -145,7 +145,8 @@ void InputIDs::Update(RoamingArray<int32_t> next_tokens_unk) {
             input_ids_cast_command_list_state_);
 #endif
       } break;
-      case DeviceType::CPU: {
+      default: {
+        // CPU, WEBGPU
         auto* data = value_->GetTensorMutableData<int64_t>();
         auto next_tokens = next_tokens_unk.GetCPU();
         for (int i = 0; i < shape_[0]; i++) {
