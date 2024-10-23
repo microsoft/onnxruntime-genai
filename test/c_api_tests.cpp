@@ -371,6 +371,7 @@ TEST(CAPITests, AdaptersTest) {
   {
     auto params = OgaGeneratorParams::Create(*model);
     params->SetSearchOption("max_length", 20);
+    params->SetSearchOption("batch_size", 3);
 
     auto generator = OgaGenerator::Create(*model, *params);
     generator->SetActiveAdapter(*adapters, "adapters_a_and_b");
@@ -411,6 +412,7 @@ TEST(CAPITests, AdaptersTestMultipleAdapters) {
   {
     auto params = OgaGeneratorParams::Create(*model);
     params->SetSearchOption("max_length", 20);
+    params->SetSearchOption("batch_size", 3);
 
     auto generator = OgaGenerator::Create(*model, *params);
     generator->SetActiveAdapter(*adapters, "adapter_a");
