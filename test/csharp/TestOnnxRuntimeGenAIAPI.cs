@@ -62,7 +62,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                     {
                         Assert.NotNull(generator);
 
-                        generator.AppendTokens(inputIDs, sequenceLength);
+                        generator.AppendTokens(inputIDs, sequenceLength * batchSize);
 
                         while (!generator.IsDone())
                         {
