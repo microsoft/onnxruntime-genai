@@ -332,17 +332,31 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
                                 params:(OGAGeneratorParams*)params
                                  error:(NSError**)error NS_DESIGNATED_INITIALIZER;
 /**
- * Whether generation is done
+ * Whether generation is done.
  * @param error Optional error information set if an error occurs.
  * @return The result, or nil if an error occurs.
  */
 - (nullable NSNumber*)isDoneWithError:(NSError**)error NS_SWIFT_NAME(isDone());
+/**
+ * Compute logits based on the input.
+ * @param error Optional error information set if an error occurs.
+ */
 - (BOOL)computeLogitsWithError:(NSError**)error NS_SWIFT_NAME(computeLogits());
+/**
+ * Generate next token
+ * @param error Optional error information set if an error occurs.
+ */
 - (BOOL)generateNextTokenWithError:(NSError**)error NS_SWIFT_NAME(generateNextToken());
-- (OGATensor*)getOutput:(NSString*)name;
+/**
+ * Get the output tensor.
+ * @param name The output name.
+ * @param error Optional error information set if an error occurs.
+ * @return The result, or nil if an error occurs.
+ */
+- (nullable OGATensor*)getOutput:(NSString*)name error:(NSError**)error;
 
 /**
- * Retrieve the sequence at the given index
+ * Retrieve the sequence at the given index.
  * @param index The index needed.
  * @param error Optional error information set if an error occurs.
  * @return The last element, or nil if an error occurs.

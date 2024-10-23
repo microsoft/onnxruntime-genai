@@ -46,9 +46,13 @@
   OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
 }
 
-- (OGATensor*)getOutput:(NSString*)name {
-  std::unique_ptr<OgaTensor> output = _generator->GetOutput([name UTF8String]);
-  return [[OGATensor alloc] initWithCXXPointer:std::move(output)];
+- (nullable OGATensor*)getOutput:(NSString*)name
+                           error:(NSError**)error {
+  try {
+    std::unique_ptr<OgaTensor> output = _generator->GetOutput([name UTF8String]);
+    return [[OGATensor alloc] initWithCXXPointer:std::move(output)];
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }
 
 - (nullable OGAInt32Span*)sequenceAtIndex:(size_t)index
