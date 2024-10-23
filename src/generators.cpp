@@ -324,6 +324,7 @@ void Generator::ComputeLogits(const RoamingArray<int32_t>& next_tokens) {
 }
 
 bool Generator::IsDone() const {
+  // TODO(aciddelgado): but what about max length?
   if (computed_logits_) {
     return false;
   }
