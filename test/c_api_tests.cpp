@@ -4,6 +4,8 @@
 #include <models/model.h>
 #include <iostream>
 #include <ort_genai.h>
+#include <thread>
+#include <vector>
 #ifndef MODEL_PATH
 #define MODEL_PATH "../../test/test_models/"
 #endif
@@ -279,6 +281,67 @@ TEST(CAPITests, GetOutputCAPI) {
     EXPECT_NEAR(expected_sampled_logits_token_gen[i], token_gen_logits[i * sample_size], tolerance);
   }
   generator->GenerateNextToken();
+}
+
+#if TEST_PHI2
+
+void Generate_Output(OgaGenerator* generator, std::unique_ptr<OgaTokenizerStream> tokenizer_stream) {
+  try{
+    while (!generator->IsDone()) {
+      generator->ComputeLogits();
+      generator->GenerateNextToken();
+    }
+  }
+  catch (const std::exception& e) {
+    std::cout << "Session Terminated: " << e.what() << std::endl;
+  }
+}
+#endif
+
+TEST(CAPITests, SetTerminate) {
+#if TEST_PHI2
+
+  auto GeneratorSetTerminateCall = [](OgaGenerator* generator) {
+    generator->SetTerminate();
+  };
+
+  auto GenerateOutput = [](OgaGenerator* generator, std::unique_ptr<OgaTokenizerStream> tokenizer_stream) {
+    try {
+      while (!generator->IsDone()) {
+        generator->ComputeLogits();
+        generator->GenerateNextToken();
+      }
+    }
+    catch (const std::exception& e) {
+      std::cout << "Session Terminated: " << e.what() << std::endl;
+    }
+  };
+
+  auto model = OgaModel::Create(PHI2_PATH);
+  auto tokenizer = OgaTokenizer::Create(*model);
+  auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
+
+  const char* input_string = "She sells sea shells by the sea shore.";
+  auto input_sequences = OgaSequences::Create();
+  tokenizer->Encode(input_string, *input_sequences);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetInputSequences(*input_sequences);
+  params->SetSearchOption("max_length", 40);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  EXPECT_EQ(generator->IsSessionTerminated(), false);
+  std::vector<std::thread> threads;
+  threads.push_back(std::thread(GenerateOutput, generator.get(), std::move(tokenizer_stream)));
+  threads.push_back(std::thread(GeneratorSetTerminateCall, generator.get()));
+
+  for (auto& th : threads) {
+    std::cout << "Waiting for threads completion" << std::endl;
+    th.join();  // Wait for each thread to finish
+  }
+  EXPECT_EQ(generator->IsSessionTerminated(), true);
+  generator->UnsetTerminate();
+  EXPECT_EQ(generator->IsSessionTerminated(), false);
+#endif
 }
 
 #if TEST_PHI2
