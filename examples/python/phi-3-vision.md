@@ -29,7 +29,8 @@ Please ensure you have the following Python packages installed to create the ONN
     ```
 - `pillow`
 - `requests`
-- `torch-cuda`
+- `torch`
+    - Install torch with CUDA by following the [instructions](https://pytorch.org/get-started/locally/)
 - `torchvision`
 - `transformers`
 

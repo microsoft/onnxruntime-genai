@@ -1,13 +1,13 @@
 # Create AWQ-quantized and optimized ONNX models from PyTorch models with AutoAWQ + ONNX Runtime generate() API
 
 ## Steps
-  - [1. Download your PyTorch model](#1-download-your-pytorch-model)
-  - [2. Install AutoAWQ](#2-install-autoawq)
-  - [3. Install the generate() API](#3-install-the-generate-api)
+1. [Download your PyTorch model](#1-download-your-pytorch-model)
+2. [Install AutoAWQ](#2-install-autoawq)
+3. [Install the generate() API](#3-install-the-generate-api)
     - [CPU](#cpu)
     - [CUDA](#cuda)
     - [DirectML](#directml)
-  - [4. Run example script](#4-run-example-script)
+4. [Run example script](#4-run-example-script)
 
 ## Introduction
 
