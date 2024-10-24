@@ -68,7 +68,7 @@ jobs:
         Python312:
           PyDotVer: '3.12'
           PyNoDotVer: '312'
-    
+
   timeoutInMinutes: 240
   workspace:
     clean: all
@@ -116,23 +116,9 @@ jobs:
     ${{ else }}:
       value: 'Microsoft.ML.OnnxRuntime'
 
-  - name: dml_dir
-    value: 'Microsoft.AI.DirectML.1.15.1'
-  - name: dml_zip
-    value: 'Microsoft.AI.DirectML.1.15.1.zip'
-  - name: dml_url
-    value: "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.15.1"
-
-  - name: d3d12_dir
-    value: 'Microsoft.Direct3D.D3D12.1.614.0'
-  - name: d3d12_zip
-    value: 'Microsoft.Direct3D.D3D12.1.614.0.zip'
-  - name: d3d12_url
-    value: "https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.614.0"
-
   steps:
   - script: |
-      MKDIR $(Agent.ToolsDirectory)\Python\3.12.3\arm64 
+      MKDIR $(Agent.ToolsDirectory)\Python\3.12.3\arm64
       XCOPY /s /y /h /e /c /q "C:\Python\Python312\*.*" $(Agent.ToolsDirectory)\Python\3.12.3\arm64\
       COPY NUL $(Agent.ToolsDirectory)\Python\3.12.3\arm64.complete
       DIR $(Agent.ToolsDirectory)\Python
