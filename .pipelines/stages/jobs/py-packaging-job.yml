@@ -51,14 +51,11 @@ jobs:
         Python312:
           PyDotVer: '3.12'
           PyNoDotVer: '312'
+        Python313:
+          PyDotVer: '3.13'
+          PyNoDotVer: '313'
     ${{ else }}:
       matrix:
-        Python38:
-          PyDotVer: '3.8'
-          PyNoDotVer: '38'
-        Python39:
-          PyDotVer: '3.9'
-          PyNoDotVer: '39'
         Python310:
           PyDotVer: '3.10'
           PyNoDotVer: '310'
@@ -68,6 +65,9 @@ jobs:
         Python312:
           PyDotVer: '3.12'
           PyNoDotVer: '312'
+        Python313:
+          PyDotVer: '3.13'
+          PyNoDotVer: '313'
 
   timeoutInMinutes: 240
   workspace:
@@ -100,21 +100,6 @@ jobs:
 
   - name: feed_name
     value: '7982ae20-ed19-4a35-a362-a96ac99897b7'
-
-  - name: ort_filename
-    ${{ if eq(parameters.ep, 'cpu') }}:
-      value: 'Microsoft.ML.OnnxRuntime'
-    ${{ elseif eq(parameters.ep, 'cuda') }}:
-      ${{if eq(parameters.os, 'win') }}:
-        value: 'Microsoft.ML.OnnxRuntime.Gpu.Windows'
-      ${{ else }}:
-        value: 'Microsoft.ML.OnnxRuntime.Gpu.Linux'
-    ${{ elseif eq(parameters.ep, 'directml')}}:
-      value: 'Microsoft.ML.OnnxRuntime.DirectML'
-    ${{ elseif eq(parameters.ep, 'rocm')}}:
-      value: 'Microsoft.ML.OnnxRuntime.ROCm'
-    ${{ else }}:
-      value: 'Microsoft.ML.OnnxRuntime'
 
   steps:
   - script: |
