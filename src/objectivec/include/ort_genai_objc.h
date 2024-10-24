@@ -177,43 +177,9 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 /**
  * The last element in this data sequence
  * @param error Optional error information set if an error occurs.
- * @return The last element, or nil if an error occurs.
+ * @return The last element, or -1 if an error occurs.
  */
 - (int32_t)lastElementWithError:(NSError**)error NS_SWIFT_NAME(lastElement());
-
-@end
-
-/**
- * Wraps a raw int64_t pointer and its size. Represents a data sequence.
- */
-@interface OGAInt64Span : NSObject
-
-- (instancetype)init NS_UNAVAILABLE;
-/**
- * Creates a span with underlying data.
- *
- * @param pointer The underlying data pointer to use.
- * @param size The underlying data size.
- * @return The instance, or nil if an error occurs.
- */
-- (nullable instancetype)initWithDataPointer:(const int64_t*)pointer size:(size_t)size;
-
-/**
- * The underlying data pointer
- */
-- (const int64_t*)pointer;
-
-/**
- * The underlying data size
- */
-- (size_t)size;
-
-/**
- * The last element in this data sequence
- * @param error Optional error information set if an error occurs.
- * @return The last element, or nil if an error occurs.
- */
-- (int64_t)lastElementWithError:(NSError**)error NS_SWIFT_NAME(lastElement());
 
 @end
 
@@ -226,8 +192,10 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 
 /**
  * The count of generated sequences
+ * @param error Optional error information set if an error occurs.
+ * @return The count of sequences, or -1 if an error occurs.
  */
-- (size_t)count;
+- (size_t)getCountWithError:(NSError**)error NS_SWIFT_NAME(getCount());
 
 /**
  * Retrieve the sequence at the given index
@@ -363,6 +331,11 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  */
 - (nullable OGAInt32Span*)sequenceAtIndex:(size_t)index
                                     error:(NSError**)error;
+
+/**
+ * Clean up the resource before process exits.
+ */
++ (void)shutdown;
 
 @end
 

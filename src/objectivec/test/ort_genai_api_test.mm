@@ -16,20 +16,31 @@ NS_ASSUME_NONNULL_BEGIN
 
 @implementation ORTGenAIAPITest
 
+- (void)setUp {
+    [super setUp];
+    self.continueAfterFailure = NO;
+}
 
-- (void)Tensor_And_AddExtraInput {
++ (void)tearDown {
+    [OGAGenerator shutdown];
+}
+
++ (NSString*)getModelPath {
+    NSBundle* bundle = [NSBundle bundleForClass:[ORTGenAIAPITest class]];
+    NSString* path = [[bundle resourcePath] stringByAppendingString:@"/tiny-random-gpt2-fp32"];
+    return path;
+}
+
+- (void)testTensor_And_AddExtraInput {
     // Create a [3 4] shaped tensor
     std::array<float, 12> data{0, 1, 2, 3,
                              10, 11, 12, 13,
                              20, 21, 22, 23};
     NSArray<NSNumber*>* shape = @[@3, @4];
 
-    NSBundle* bundle = [NSBundle mainBundle];
-    NSString* path = [[bundle resourcePath] stringByAppendingString:@"hf-internal-testing/tiny-random-gpt2-fp32"];
-
     NSError *error = nil;
     BOOL ret = NO;
-    OGAModel* model = [[OGAModel alloc] initWithPath:path error:&error];
+    OGAModel* model = [[OGAModel alloc] initWithPath:[ORTGenAIAPITest getModelPath] error:&error];
     ORTAssertNullableResultSuccessful(model, error);
 
     OGAGeneratorParams *params = [[OGAGeneratorParams alloc] initWithModel:model error:&error];
@@ -41,19 +52,16 @@ NS_ASSUME_NONNULL_BEGIN
     ORTAssertBoolResultSuccessful(ret, error);
 }
 
-- (void)GetOutput {
+- (void)testGetOutput {
     std::vector<int64_t> input_ids_shape{2, 4};
     std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
     const auto batch_size = input_ids_shape[0];
     const auto input_sequence_length = input_ids_shape[1];
     int max_length = 10;
 
-    NSBundle* bundle = [NSBundle mainBundle];
-    NSString* path = [[bundle resourcePath] stringByAppendingString:@"hf-internal-testing/tiny-random-gpt2-fp32"];
-
     NSError *error = nil;
     BOOL ret = NO;
-    OGAModel* model = [[OGAModel alloc] initWithPath:path error:&error];
+    OGAModel* model = [[OGAModel alloc] initWithPath:[ORTGenAIAPITest getModelPath] error:&error];
     ORTAssertNullableResultSuccessful(model, error);
 
     OGAGeneratorParams *params = [[OGAGeneratorParams alloc] initWithModel:model error:&error];

@@ -6,6 +6,7 @@
 NS_ASSUME_NONNULL_BEGIN
 
 NSString* const kOgaErrorDomain = @"onnxruntime-genai";
+const int kOgaErrorCode = 0x0A;
 
 void OGASaveCodeAndDescriptionToError(int code, const char* descriptionCstr, NSError** error) {
   if (!error) return;
@@ -27,7 +28,7 @@ void OGASaveCodeAndDescriptionToError(int code, NSString* description, NSError**
 }
 
 void OGASaveExceptionToError(const std::exception& e, NSError** error) {
-  OGASaveCodeAndDescriptionToError(0x0A, e.what(), error);
+  OGASaveCodeAndDescriptionToError(kOgaErrorCode, e.what(), error);
 }
 
 NS_ASSUME_NONNULL_END

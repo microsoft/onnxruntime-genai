@@ -108,7 +108,10 @@ def copy_repo_relative_to_dir(subpath: str, patterns: List[str], dest_dir: pathl
         repo_relative_path = path.relative_to(src_root)
         dst_path = dest_dir / repo_relative_path
         os.makedirs(dst_path.parent, exist_ok=True)
-        shutil.copy(path, dst_path)
+        if os.path.isdir(path):
+            shutil.copytree(path, dst_path)
+        else:
+            shutil.copy(path, dst_path)
 
 
 def load_json_config(json_config_file: pathlib.Path):

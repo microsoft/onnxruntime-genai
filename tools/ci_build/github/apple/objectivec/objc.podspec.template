@@ -37,12 +37,17 @@ Pod::Spec.new do |s|
       test.source_files = [
         @TEST_SOURCE_FILE_LIST@
       ]
+
+      test.resources = [
+        @TEST_RESOURCE_FILE_LIST@
+      ]
     end
 
     core.pod_target_xcconfig = {
       "HEADER_SEARCH_PATHS" => include_dirs.join(" "),
       "OTHER_CPLUSPLUSFLAGS" => "-fvisibility=hidden -fvisibility-inlines-hidden",
     }
+
   end
   s.dependency 'onnxruntime-objc', '~> @ORT_VERSION@'
 end

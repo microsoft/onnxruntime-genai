@@ -9,9 +9,13 @@
 }
 
 - (nullable instancetype)initWithDataPointer:(const int32_t*)pointer size:(size_t)size {
+  if ((self = [super init]) == nil) {
+    return nil;
+  }
+
   _ptr = pointer;
   _size = size;
-  return [self init];
+  return self;
 }
 
 - (const int32_t*)pointer {
@@ -24,8 +28,10 @@
 
 - (int32_t)lastElementWithError:(NSError**)error {
   if (_size == 0) {
-    NSDictionary *errorDictionary = @{NSLocalizedDescriptionKey : @"The size of this span is invalid"};
-    *error = [[NSError alloc] initWithDomain:kOgaErrorDomain code:-1 userInfo:errorDictionary];
+    if (error != nil) {
+      NSDictionary *errorDictionary = @{NSLocalizedDescriptionKey : @"The size of this span is invalid"};
+      *error = [[NSError alloc] initWithDomain:kOgaErrorDomain code:-1 userInfo:errorDictionary];
+    }
     return -1;
   }
   return *(_ptr + (_size - 1));
@@ -39,9 +45,13 @@
 }
 
 - (nullable instancetype)initWithDataPointer:(const int64_t*)pointer size:(size_t)size {
+  if ((self = [super init]) == nil) {
+    return nil;
+  }
+
   _ptr = pointer;
   _size = size;
-  return [self init];
+  return self;
 }
 
 - (const int64_t*)pointer {
@@ -54,8 +64,10 @@
 
 - (int64_t)lastElementWithError:(NSError**)error {
   if (_size == 0) {
-    NSDictionary *errorDictionary = @{NSLocalizedDescriptionKey : @"The size of this span is invalid"};
-    *error = [[NSError alloc] initWithDomain:kOgaErrorDomain code:-1 userInfo:errorDictionary];
+    if (error != nil) {
+      NSDictionary *errorDictionary = @{NSLocalizedDescriptionKey : @"The size of this span is invalid"};
+      *error = [[NSError alloc] initWithDomain:kOgaErrorDomain code:-1 userInfo:errorDictionary];
+    }
     return -1;
   }
   return *(_ptr + (_size - 1));

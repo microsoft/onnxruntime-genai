@@ -26,17 +26,15 @@
   OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }
 
-- (size_t)count {
-  return _sequences->Count();
+- (size_t)getCountWithError:(NSError**)error {
+  try {
+      return _sequences->Count();
+  }
+  OGA_OBJC_API_IMPL_CATCH(error, -1)
 }
 
 - (nullable OGAInt32Span*)sequenceAtIndex:(size_t)index
                                     error:(NSError**)error {
-  if (index >= [self count]) {
-    NSDictionary *errorDictionary = @{NSLocalizedDescriptionKey : @"The index is out of bounds"};
-    *error = [[NSError alloc] initWithDomain:kOgaErrorDomain code:-1 userInfo:errorDictionary];
-    return nil;
-  }
   try {
     size_t sequenceLength = _sequences->SequenceCount(index);
     const int32_t* data = _sequences->SequenceData(index);

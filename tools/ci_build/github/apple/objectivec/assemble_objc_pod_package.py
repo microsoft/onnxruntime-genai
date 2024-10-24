@@ -45,7 +45,10 @@ all_objc_files = {
         "objectivec/test/*.h",
         "objectivec/test/*.m",
         "objectivec/test/*.mm",
-    ]
+    ],
+    "test_resource_files": [
+        "test/test_models/hf-internal-testing/tiny-random-gpt2-fp32",
+    ],
 }
 
 def get_pod_files(package_variant: PackageVariant):
@@ -55,6 +58,7 @@ def get_pod_files(package_variant: PackageVariant):
     filtered_pod_files = {}
     for key in all_objc_files:
         filtered_pod_files[key] = filter_files("src", all_objc_files[key], [])
+        filtered_pod_files[key].extend(filter_files(None, all_objc_files[key], []))
     return filtered_pod_files
 
 
@@ -99,9 +103,11 @@ def assemble_objc_pod_package(
 
     # copy the necessary files to the staging directory
     need_copy = [*pod_files["source_files"], *pod_files["test_source_files"]]
-    if "test_resource_files" in pod_files:
-        need_copy.append(*pod_files["test_resource_files"])
     copy_repo_relative_to_dir("src", need_copy, staging_dir)
+
+    if "test_resource_files" in pod_files:
+        need_copy = [*pod_files["test_resource_files"]]
+        copy_repo_relative_to_dir(None, need_copy, staging_dir)
 
     # generate the podspec file from the template
 
@@ -121,7 +127,7 @@ def assemble_objc_pod_package(
         "PUBLIC_HEADER_FILE_LIST": path_patterns_as_variable_value(pod_files["public_header_files"]),
         "SOURCE_FILE_LIST": path_patterns_as_variable_value(pod_files["source_files"]),
         "SUMMARY": pod_config["summary"],
-        # "TEST_RESOURCE_FILE_LIST": path_patterns_as_variable_value(pod_files["test_resource_files"]),
+        "TEST_RESOURCE_FILE_LIST": path_patterns_as_variable_value(pod_files["test_resource_files"]),
         "TEST_SOURCE_FILE_LIST": path_patterns_as_variable_value(pod_files["test_source_files"]),
         "VERSION": pod_version,
         "ORT_VERSION": ort_version
