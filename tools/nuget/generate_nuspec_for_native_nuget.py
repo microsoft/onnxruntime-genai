@@ -127,9 +127,12 @@ def generate_files(lines, args):
       if runtime.startswith("win"):
           add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai.lib")
           add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai.dll")
+          add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai-cuda.lib")
+          add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai-cuda.dll")
           add_native_artifact_if_exists(lines, runtime, "d3d12core.dll")
       elif runtime.startswith("linux"):
           add_native_artifact_if_exists(lines, runtime, "libonnxruntime-genai.so")
+          add_native_artifact_if_exists(lines, runtime, "libonnxruntime-genai-cuda.so")
       elif runtime.startswith("osx"):
           add_native_artifact_if_exists(lines, runtime, "libonnxruntime-genai.dylib")
       elif runtime.startswith("ios"):
