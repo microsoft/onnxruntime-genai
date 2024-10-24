@@ -641,7 +641,7 @@ struct RootObject_Element : JSON::Element {
   JSON::Element& t_;
 };
 
-void ParseConfig(const fs::path& filename, Config& config) {
+void ParseConfig(const fs::path& filename, std::string_view json_overlay, Config& config) {
   std::ifstream file = filename.open(std::ios::binary | std::ios::ate);
   if (!file.is_open()) {
     throw std::runtime_error("Error opening " + filename.string());
@@ -663,25 +663,20 @@ void ParseConfig(const fs::path& filename, Config& config) {
     oss << "Error encountered while parsing '" << filename.string() << "' " << message.what();
     throw std::runtime_error(oss.str());
   }
-}
 
-void ParseConfig(std::string_view json, Config& config) {
-  Root_Element root{config};
-  RootObject_Element root_object{root};
-  try {
-    JSON::Parse(root_object, json);
-  } catch (const std::exception& message) {
-    std::ostringstream oss;
-    oss << "Error encountered while parsing JSON " << message.what();
-    throw std::runtime_error(oss.str());
+  if (!json_overlay.empty()) {
+    try {
+      JSON::Parse(root_object, json_overlay);
+    } catch (const std::exception& message) {
+      std::ostringstream oss;
+      oss << "Error encountered while parsing config overlay: " << message.what();
+      throw std::runtime_error(oss.str());
+    }
   }
 }
 
 Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path} {
-  ParseConfig(path / "genai_config.json", *this);
-  if (!json_overlay.empty()) {
-    ParseConfig(json_overlay, *this);
-  }
+  ParseConfig(path / "genai_config.json", json_overlay, *this);
 
   if (model.context_length == 0)
     throw std::runtime_error("model context_length is 0 or was not set. It must be greater than 0");
