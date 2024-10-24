@@ -471,9 +471,12 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
         opts.emplace(option.first, option.second);
       }
       session_options.AppendExecutionProvider("QNN", opts);
-    } else if (provider_options.name == "web") {
+    } else if (provider_options.name == "webgpu") {
       device_type_ = DeviceType::WEBGPU;
       std::unordered_map<std::string, std::string> opts;
+      for (auto& option : provider_options.options) {
+        opts.emplace(option.first, option.second);
+      }
       session_options.AppendExecutionProvider("WebGPU", opts);
     } else
       throw std::runtime_error("Unknown provider type: " + provider_options.name);
@@ -510,8 +513,12 @@ std::shared_ptr<MultiModalProcessor> Model::CreateMultiModalProcessor() const {
   return std::make_shared<MultiModalProcessor>(*config_, *session_info_);
 }
 
-std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path) {
-  auto config = std::make_unique<Config>(fs::path(config_path));
+std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings /*= nullptr*/) {
+  std::string config_overlay;
+  if (settings) {
+    config_overlay = settings->GenerateConfigOverlay();
+  }
+  auto config = std::make_unique<Config>(fs::path(config_path), config_overlay);
 
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
