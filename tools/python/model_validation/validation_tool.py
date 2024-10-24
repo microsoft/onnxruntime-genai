@@ -4,6 +4,7 @@ from onnxruntime_genai.models.builder import create_model
 import json
 import os
 import pandas as pd
+from perplexity_metrics import perplexity_eval
 
 def create_table(output):
     df = pd.DataFrame(output, columns=['Model Name', 'Validation Completed', 'Exceptions / Failures'])
@@ -113,6 +114,9 @@ if __name__ == "__main__":
             print(f'Failure after validation model {e}')
             exception = True
             output.append([model_dict["name"], validation_complete, e]) 
+
+        # function call out here?
+        perplexity_eval(output_path)
         
         if not exception:
             output.append([model_dict["name"], validation_complete, e]) 
