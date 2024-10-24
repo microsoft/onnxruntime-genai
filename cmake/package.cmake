@@ -14,6 +14,14 @@ install(TARGETS
   PUBLIC_HEADER DESTINATION include
   FRAMEWORK DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
+if(USE_CUDA)
+  install(TARGETS
+    onnxruntime-genai-cuda
+    LIBRARY DESTINATION lib
+    RUNTIME DESTINATION lib
+    ARCHIVE DESTINATION lib
+  )
+endif()
 
 if (WIN32)
   install(FILES $<TARGET_PDB_FILE:onnxruntime-genai> DESTINATION lib CONFIGURATIONS RelWithDebInfo Debug)
