@@ -2,7 +2,7 @@ This is an end-to-end benchmarking script for any GenAI-supported ONNX model.
 
 
 Prerequisites: 
-0) Install pandas, onnxruntime-genai and onnxruntime
+0) Install onnxruntime-genai, pandas, tqdm and psutil
 
 1) Use builder.py to build the desired ONNX model
 
