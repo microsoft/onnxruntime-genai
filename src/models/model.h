@@ -30,11 +30,13 @@ struct State {
   State(const GeneratorParams& params, const Model& model_);
   virtual ~State();
 
-  virtual RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices = {}) = 0;
+  virtual RoamingArray<float> Run(int total_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices = {}) = 0;
   virtual const CapturedGraphInfo* GetCapturedGraphInfo() const { return nullptr; }
   virtual void Finalize() {}
 
   OrtValue* GetInput(const char* name);
+
+  virtual void RewindTo(size_t index) { (void)index; };
 
   virtual OrtValue* GetOutput(const char* name);
 

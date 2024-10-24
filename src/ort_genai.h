@@ -88,12 +88,6 @@ struct OgaModel : OgaAbstract {
     return std::unique_ptr<OgaModel>(p);
   }
 
-  std::unique_ptr<OgaSequences> Generate(const OgaGeneratorParams& params) const {
-    OgaSequences* p;
-    OgaCheckResult(OgaGenerate(this, &params, &p));
-    return std::unique_ptr<OgaSequences>(p);
-  }
-
   static void operator delete(void* p) { OgaDestroyModel(reinterpret_cast<OgaModel*>(p)); }
 };
 
@@ -224,14 +218,6 @@ struct OgaGeneratorParams : OgaAbstract {
     OgaCheckResult(OgaGeneratorParamsSetSearchBool(this, name, value));
   }
 
-  void SetInputIDs(const int32_t* input_ids, size_t input_ids_count, size_t sequence_length, size_t batch_size) {
-    OgaCheckResult(OgaGeneratorParamsSetInputIDs(this, input_ids, input_ids_count, sequence_length, batch_size));
-  }
-
-  void SetInputSequences(const OgaSequences& sequences) {
-    OgaCheckResult(OgaGeneratorParamsSetInputSequences(this, &sequences));
-  }
-
   void SetModelInput(const char* name, OgaTensor& tensor) {
     OgaCheckResult(OgaGeneratorParamsSetModelInput(this, name, &tensor));
   }
@@ -248,7 +234,7 @@ struct OgaGeneratorParams : OgaAbstract {
 };
 
 struct OgaGenerator : OgaAbstract {
-  static std::unique_ptr<OgaGenerator> Create(const OgaModel& model, const OgaGeneratorParams& params) {
+  static std::unique_ptr<OgaGenerator> Create(const OgaModel& model, OgaGeneratorParams& params) {
     OgaGenerator* p;
     OgaCheckResult(OgaCreateGenerator(&model, &params, &p));
     return std::unique_ptr<OgaGenerator>(p);
@@ -258,12 +244,20 @@ struct OgaGenerator : OgaAbstract {
     return OgaGenerator_IsDone(this);
   }
 
-  void ComputeLogits() {
-    OgaCheckResult(OgaGenerator_ComputeLogits(this));
+  void AppendTokenSequences(const OgaSequences& sequences) {
+    OgaCheckResult(OgaGenerator_AppendTokenSequences(this, &sequences));
+  }
+
+  void AppendTokens(int32_t* input_ids, size_t input_ids_count) {
+    OgaCheckResult(OgaGenerator_AppendTokens(this, input_ids, input_ids_count));
   }
 
   void GenerateNextToken() {
     OgaCheckResult(OgaGenerator_GenerateNextToken(this));
+  }
+
+  void RewindTo(size_t length) {
+    OgaCheckResult(OgaGenerator_RewindTo(this, length));
   }
 
   size_t GetSequenceCount(size_t index) const {

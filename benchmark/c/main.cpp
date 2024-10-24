@@ -121,11 +121,15 @@ std::string GeneratePrompt(size_t num_prompt_tokens, const OgaModel& model, cons
   auto params = OgaGeneratorParams::Create(model);
   params->SetSearchOption("max_length", static_cast<double>(num_prompt_tokens));
   params->SetSearchOption("min_length", static_cast<double>(num_prompt_tokens));
-  params->SetInputSequences(*base_prompt_sequences);
 
-  auto output_sequences = model.Generate(*params);
-  const auto output_sequence_length = output_sequences->SequenceCount(0);
-  const auto* output_sequence_data = output_sequences->SequenceData(0);
+  auto generator = OgaGenerator::Create(model, *params);
+  generator->AppendTokenSequences(*base_prompt_sequences);
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  const auto output_sequence_length = generator->GetSequenceCount(0);
+  const auto* output_sequence_data = generator->GetSequenceData(0);
   return std::string{tokenizer.Decode(output_sequence_data, output_sequence_length)};
 }
 
@@ -151,7 +155,6 @@ void RunBenchmark(const benchmark::Options& opts) {
     auto params = OgaGeneratorParams::Create(*model);
     params->SetSearchOption("max_length", static_cast<double>(num_tokens));
     params->SetSearchOption("min_length", static_cast<double>(num_tokens));
-    params->SetInputSequences(*prompt_sequences);
     return params;
   };
 
@@ -160,13 +163,17 @@ void RunBenchmark(const benchmark::Options& opts) {
   // warmup
   if (opts.verbose) std::cout << "Running warmup iterations (" << opts.num_warmup_iterations << ")...\n";
   for (size_t i = 0; i < opts.num_warmup_iterations; ++i) {
-    auto output_sequences = model->Generate(*generator_params);
+    auto generator = OgaGenerator::Create(*model, *generator_params);
+    generator->AppendTokenSequences(*prompt_sequences);
+    while (!generator->IsDone()) {
+      generator->GenerateNextToken();
+    }
 
     if (opts.verbose && i == 0) {
       // show prompt and output on first iteration
       std::cout << "Prompt:\n\t" << prompt << "\n";
-      const auto output_sequence_length = output_sequences->SequenceCount(0);
-      const auto* output_sequence_data = output_sequences->SequenceData(0);
+      const auto output_sequence_length = generator->GetSequenceCount(0);
+      const auto* output_sequence_data = generator->GetSequenceData(0);
       const auto output = tokenizer->Decode(output_sequence_data, output_sequence_length);
       std::cout << "Output:\n\t" << output << "\n";
     }
@@ -188,7 +195,7 @@ void RunBenchmark(const benchmark::Options& opts) {
 
       {
         Timing prompt_processing_timing{prompt_processing_times};
-        generator->ComputeLogits();
+        generator->AppendTokenSequences(*prompt_sequences);
       }
 
       {
@@ -199,11 +206,6 @@ void RunBenchmark(const benchmark::Options& opts) {
       while (!generator->IsDone()) {
         {
           Timing token_gen_timing{token_gen_times};
-          generator->ComputeLogits();
-        }
-
-        {
-          Timing sampling_timing{sampling_times};
           generator->GenerateNextToken();
         }
       }

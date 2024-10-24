@@ -98,10 +98,14 @@ class SimpleTest {
                                             0, 0, 195, 731)
 
         val maxLength = 10
-        params.setInput(tokenIds, sequenceLength, batchSize)
         params.setSearchOption("max_length", maxLength.toDouble())
+        params.setSearchOption("batch_size", batchSize.toDouble())
 
-        val outputSequences = model.generate(params)
+        val generator = Generator(model, params)
+        generator.appendTokens(tokenIds)
+        while(!generator.isDone()) {
+            generator.generateNextToken()
+        }
 
         val expectedOutput =
             intArrayOf(
@@ -110,7 +114,7 @@ class SimpleTest {
             )
 
         for (i in 0 until batchSize) {
-            val outputIds: IntArray = outputSequences.getSequence(i.toLong())
+            val outputIds: IntArray = generator.getSequence(i.toLong())
             for (j in 0 until maxLength) {
                 Assert.assertEquals(outputIds[j], expectedOutput[i * maxLength + j])
             }

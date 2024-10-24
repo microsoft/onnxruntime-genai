@@ -271,7 +271,6 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
 
         # Prepare run
         params = og.GeneratorParams(model)
-        params.input_ids = tokens
         params.set_search_options(do_sample=do_sample, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length)
 
         if args.use_graph_capture:
@@ -281,7 +280,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
 
         # Measure prompt processing
         prompt_start_time = time.perf_counter()
-        generator.compute_logits()
+        generator.append_tokens(tokens)
         prompt_end_time = time.perf_counter()
         prompt_times.append(prompt_end_time - prompt_start_time)
 
@@ -295,16 +294,11 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         while not generator.is_done() and i < generation_length:
             # Run inference
             token_gen_start_time = time.perf_counter()
-            generator.compute_logits()
-            token_gen_end_time = time.perf_counter()
-
-            sampling_start_time = time.perf_counter()
             generator.generate_next_token()
-            sampling_end_time = time.perf_counter()
-            
+            token_gen_end_time = time.perf_counter()
             token_gen_times.append(token_gen_end_time - token_gen_start_time)
-            sampling_times.append(sampling_end_time - sampling_start_time)
             i += 1
+        
         wall_clock_end_time = time.time()
         wall_clock_times.append(wall_clock_end_time - wall_clock_start_time)
         if args.print_model_output: print(tokenizer.decode(generator.get_sequence(0)))

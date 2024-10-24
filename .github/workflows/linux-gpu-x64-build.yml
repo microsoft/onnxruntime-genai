@@ -87,6 +87,7 @@ jobs:
 
       - name: Config with Cmake in Docker
         run: |
+          nvidia-smi
           set -e -x
           docker run \
             --gpus all \

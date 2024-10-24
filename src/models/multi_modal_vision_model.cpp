@@ -88,9 +88,9 @@ EmbeddingState::EmbeddingState(const MultiModalVisionModel& model, const Generat
   inputs_embeds_.Add();
 }
 
-void EmbeddingState::UpdateInputsAndOutputs(RoamingArray<int32_t> next_tokens) {
+void EmbeddingState::UpdateInputsOutputs(RoamingArray<int32_t> next_tokens, bool is_prompt) {
   input_ids_.Update(next_tokens);
-  image_features_.Update();
+  image_features_.Update(is_prompt);
 }
 
 RoamingArray<float> EmbeddingState::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
@@ -132,11 +132,13 @@ RoamingArray<float> DecoderState::Run(int current_length, RoamingArray<int32_t> 
   return logits_.Get();
 }
 
-void DecoderState::UpdateInputsAndOutputs(int current_length, RoamingArray<int32_t> beam_indices) {
-  position_inputs_.Update(current_length);
-  kv_cache_.Update(beam_indices.GetCPU(), current_length);
-  logits_.Update();
-  inputs_embeds_.UpdateSequenceLength();
+void DecoderState::UpdateInputsOutputs(RoamingArray<int32_t> next_tokens, int total_length, RoamingArray<int32_t> beam_indices) {
+  int batch_size = static_cast<int>(inputs_embeds_.GetShape()[0]);
+  size_t new_length = next_tokens.GetCPU().size() / batch_size;
+  position_inputs_.Update(next_tokens, total_length, static_cast<int>(new_length));
+  kv_cache_.Update(beam_indices.GetCPU(), total_length);
+  logits_.Update(next_tokens, new_length);
+  inputs_embeds_.UpdateSequenceLength(new_length);
 }
 
 MultiModalPipelineState::MultiModalPipelineState(const MultiModalVisionModel& model,
@@ -161,6 +163,10 @@ RoamingArray<float> MultiModalPipelineState::Run(int current_length, RoamingArra
   // Generation stage:
   //   - input_ids, image_features -> |embeddings_model| -> inputs_embeds
   //   - inputs_embeds -> |decoder_model| -> logits
+
+  embedding_state_->UpdateInputsOutputs(next_tokens, is_prompt_);
+  decoder_state_->UpdateInputsOutputs(next_tokens, current_length, next_indices);
+
   if (is_prompt_) {
     if (num_image_tokens_ > 0) {
       vision_state_->Run(current_length, next_tokens, next_indices);
@@ -177,12 +183,8 @@ RoamingArray<float> MultiModalPipelineState::Run(int current_length, RoamingArra
     return logits;
   }
 
-  embedding_state_->UpdateInputsAndOutputs(next_tokens);
-  decoder_state_->UpdateInputsAndOutputs(current_length, next_indices);
-
   embedding_state_->inputs_embeds_.ReuseEmbeddingsBuffer(decoder_state_->inputs_embeds_);
   embedding_state_->Run(current_length, next_tokens, next_indices);
-
   return decoder_state_->Run(current_length, next_tokens, next_indices);
 }
 

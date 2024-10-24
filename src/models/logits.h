@@ -9,10 +9,13 @@ namespace Generators {
 struct Logits {
   Logits(State& state);
 
+  // Register input_ids as ORT session input.
   void Add();
+  // For first iteration, find last token of each beam and store it in output_last_tokens_.
   RoamingArray<float> Get();
 
-  void Update();
+  // Resize logits to [bz, token_count, vocab_size] if necessary.
+  void Update(const RoamingArray<int32_t>& next_tokens, size_t new_kv_length);
 
  private:
   void HandleEOSArray(cpu_span<float> logits);
@@ -30,6 +33,8 @@ struct Logits {
   std::unique_ptr<OrtValue> output_last_tokens_;
 
   std::unique_ptr<OrtValue> output_raw_;  // Raw logits output from model
+
+  std::vector<int> input_sequence_lengths;
 
   // Used for decoding runs with cuda graphs.
   StaticBuffer* sb_logits32_{};
