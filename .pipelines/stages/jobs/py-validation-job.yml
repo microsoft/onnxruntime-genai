@@ -205,8 +205,8 @@ jobs:
             python -m pip install -r test/python/cpu/ort/requirements.txt
           fi
           if [[ "$(os)" == "osx" ]]; then
-            python -m pip install -r test/python/requirements-torch-macos.txt
-            python -m pip install -r test/python/requirements-ort-macos.txt
+            python -m pip install -r test/python/macos/torch/requirements.txt
+            python -m pip install -r test/python/macos/ort/requirements.txt
           fi
           cd examples/python
           python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)
