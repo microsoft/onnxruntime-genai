@@ -285,11 +285,11 @@ TEST(CAPITests, GetOutputCAPI) {
   generator->GenerateNextToken();
 }
 
-TEST(CAPITests, SetUnsetTerminate) {
+TEST(CAPITests, SetTerminate) {
 #if TEST_PHI2
 
   auto GeneratorSetTerminateCall = [](OgaGenerator* generator) {
-    generator->SetUnsetTerminate(true);
+    generator->SetTerminate();
   };
 
   auto GenerateOutput = [](OgaGenerator* generator, std::unique_ptr<OgaTokenizerStream> tokenizer_stream) {
@@ -326,7 +326,7 @@ TEST(CAPITests, SetUnsetTerminate) {
     th.join();  // Wait for each thread to finish
   }
   EXPECT_EQ(generator->IsSessionTerminated(), true);
-  generator->SetUnsetTerminate(false);
+  generator->UnsetTerminate();
   EXPECT_EQ(generator->IsSessionTerminated(), false);
 #endif
 }
