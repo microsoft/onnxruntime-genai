@@ -47,7 +47,7 @@ parameters:
 - name: ort_version
   displayName: 'OnnxRuntime version'
   type: string
-  default: '1.20.0-dev-20241022-2122-2d00351d'
+  default: '1.20.0-dev-20241007-1101-407c1ab2e2'
 
 - name: ort_cuda_118_version
   displayName: 'OnnxRuntime GPU version for CUDA 11.8'
@@ -57,17 +57,17 @@ parameters:
 - name: ort_cuda_122_version
   displayName: 'OnnxRuntime GPU version for CUDA 12.2'
   type: string
-  default: '1.20.0-dev-20241022-2122-2d00351d'
+  default: '1.20.0-dev-20241007-1101-407c1ab2e2'
 
 - name: ort_dml_version
   displayName: 'OnnxRuntime DML version'
   type: string
-  default: '1.20.0-dev-20241022-2122-2d00351d'
+  default: '1.20.0-dev-20241007-1101-407c1ab2e2'
 
 - name: ort_rocm_version
   displayName: 'OnnxRuntime ROCm version'
   type: string
-  default: '1.20.0-dev-20241022-2122-2d00351d'
+  default: '1.20.0-dev-20241007-1101-407c1ab2e2'
 
 - name: cuda_versions
   displayName: 'CUDA versions'
