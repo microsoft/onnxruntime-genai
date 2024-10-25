@@ -54,7 +54,8 @@ jobs:
           python3 -m venv genai-macos-venv
           source genai-macos-venv/bin/activate
           python3 -m pip install -r test/python/requirements.txt
-          python3 -m pip install -r test/python/requirements-macos.txt
+          python3 -m pip install -r test/python/requirements-torch-macos.txt
+          python3 -m pip install -r test/python/requirements-ort-macos.txt
           python3 -m pip install build/cpu/osx-arm64/wheel/onnxruntime_genai*.whl --no-deps
 
       - name: Remove the ort lib and header files

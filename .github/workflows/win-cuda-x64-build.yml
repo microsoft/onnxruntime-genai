@@ -81,8 +81,8 @@ jobs:
     - name: Install the Python Wheel and Test Dependencies
       run: |
         python -m pip install -r test\python\requirements.txt
-        # python -m pip install --pre -r test\python\requirements-cuda.txt
-        python -m pip install -r test\python\requirements-cuda.txt
+        python -m pip install -r test\python\requirements-torch-cuda.txt
+        python -m pip install -r test\python\requirements-ort-cuda.txt
         # python -m pip install -f https://download.pytorch.org/whl/torch_stable.html torch==2.2.1+cu121
         # python -m pip install --pre -i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ ort-nightly-gpu==1.20.0.dev20241007001
         python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps

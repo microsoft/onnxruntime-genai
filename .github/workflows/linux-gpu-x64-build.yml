@@ -124,7 +124,8 @@ jobs:
             -e HF_TOKEN=$HF_TOKEN \
             -w /ort_genai_src onnxruntimecudabuildx64 bash -c " \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/requirements.txt --user && \
-              ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/requirements-cuda.txt --user && \
+              ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/requirements-torch-cuda.txt --user && \
+              ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/requirements-ort-cuda.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install /ort_genai_src/build/cuda/wheel/onnxruntime_genai*manylinux*.whl --no-deps --user && \
               ${{ env.PYTHON_EXECUTABLE }} test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models --e2e"
 

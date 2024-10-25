@@ -68,7 +68,8 @@ jobs:
       - name: Install the python wheel and test dependencies
         run: |
           python3 -m pip install -r test/python/requirements.txt --user
-          python3 -m pip install -r test/python/requirements-cpu.txt --user
+          python3 -m pip install -r test/python/requirements-torch-cpu.txt --user
+          python3 -m pip install -r test/python/requirements-ort-cpu.txt --user
           python3 -m pip install build/cpu/wheel/onnxruntime_genai*.whl --user --no-deps
 
       - name: Use Dummy HuggingFace Token
