@@ -301,6 +301,20 @@ void Generator::ComputeLogits() {
   search_->ApplyRepetitionPenalty(search.repetition_penalty);
 }
 
+void Generator::SetRuntimeOptionsConfig(const char* key, const char* value) {
+  if (strcmp(key, "terminate_session") == 0) {
+    if (strcmp(value, "0") == 0 || strcmp(value, "1") == 0) {
+      // Set value of terminate
+      state_->SetUnsetTerminate(std::atoi(value));
+    } else {
+      // Value not expected
+      throw std::runtime_error("terminate_session key value unexpected:" + value);
+    }
+  } else {
+    throw std::runtime_error("SetRuntimeOptions key is not expected:" + key);
+  }
+}
+
 bool Generator::IsDone() const {
   if (computed_logits_)
     throw std::runtime_error("IsDone() can't be called in the middle of processing logits");

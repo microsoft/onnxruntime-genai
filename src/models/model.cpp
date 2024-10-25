@@ -65,6 +65,16 @@ void State::Run(OrtSession& session, int new_batch_size) {
   }
 }
 
+void State::SetUnsetTerminate(int value) {
+  if (value != session_terminated) {
+    session_terminated = value;
+    if (session_terminated)
+      run_options_->SetTerminate();
+    else
+      run_options_->UnsetTerminate();
+  }
+}
+
 OrtValue* State::GetInput(const char* name) {
   for (size_t i = 0; i < input_names_.size(); i++) {
     if (std::strcmp(input_names_[i], name) == 0) {
