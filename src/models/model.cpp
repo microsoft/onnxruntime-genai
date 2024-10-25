@@ -67,7 +67,7 @@ void State::Run(OrtSession& session, int new_batch_size) {
 
 void State::SetUnsetTerminate(bool terminate_curr_session) {
   if (terminate_curr_session != session_terminated) {
-    session_terminated = value;
+    session_terminated = terminate_curr_session;
     if (session_terminated)
       run_options_->SetTerminate();
     else
