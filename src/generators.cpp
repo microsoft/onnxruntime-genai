@@ -30,6 +30,11 @@ std::string CurrentModulePath() {
 }
 #endif
 
+void ThrowErrorIfSessionTerminated(bool is_session_terminated) {
+  if (is_session_terminated)
+    throw std::runtime_error("Session in Terminated state, exiting!");
+}
+
 namespace Generators {
 
 #if USE_CUDA
@@ -284,6 +289,7 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
 }
 
 void Generator::ComputeLogits() {
+  ThrowErrorIfSessionTerminated(state_->session_terminated);
   if (computed_logits_)
     throw std::runtime_error("ComputeLogits called again without calling GenerateNextToken first");
 
@@ -304,8 +310,9 @@ void Generator::ComputeLogits() {
 void Generator::SetRuntimeOptionsConfig(const char* key, const char* value) {
   if (strcmp(key, "terminate_session") == 0) {
     if (strcmp(value, "0") == 0 || strcmp(value, "1") == 0) {
+      bool terminate_curr_session = (value == "1");
       // Set value of terminate
-      state_->SetUnsetTerminate(std::atoi(value));
+      state_->SetUnsetTerminate(terminate_curr_session);
     } else {
       // Value not expected
       throw std::runtime_error(std::string("terminate_session key value unexpected: ") + value);
@@ -316,6 +323,7 @@ void Generator::SetRuntimeOptionsConfig(const char* key, const char* value) {
 }
 
 bool Generator::IsDone() const {
+  ThrowErrorIfSessionTerminated(state_->session_terminated);
   if (computed_logits_)
     throw std::runtime_error("IsDone() can't be called in the middle of processing logits");
 
@@ -328,6 +336,7 @@ bool Generator::IsDone() const {
 }
 
 void Generator::GenerateNextToken() {
+  ThrowErrorIfSessionTerminated(state_->session_terminated);
   if (!computed_logits_)
     throw std::runtime_error("Must call ComputeLogits before GenerateNextToken");
   computed_logits_ = false;

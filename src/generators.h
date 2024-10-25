@@ -40,6 +40,8 @@ using cudaStream_t = void*;
 #include "runtime_settings.h"
 #include "tensor.h"
 
+void ThrowErrorIfSessionTerminated(bool is_session_terminated);
+
 namespace Generators {
 struct Model;
 struct State;
