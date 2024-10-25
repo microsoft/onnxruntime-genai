@@ -308,10 +308,10 @@ void Generator::SetRuntimeOptionsConfig(const char* key, const char* value) {
       state_->SetUnsetTerminate(std::atoi(value));
     } else {
       // Value not expected
-      throw std::runtime_error("terminate_session key value unexpected:" + value);
+      throw std::runtime_error(std::string("terminate_session key value unexpected: ") + value);
     }
   } else {
-    throw std::runtime_error("SetRuntimeOptions key is not expected:" + key);
+    throw std::runtime_error(std::string("SetRuntimeOptions key is not expected: ") + key);
   }
 }
 
