@@ -258,6 +258,10 @@ struct OgaGenerator : OgaAbstract {
     return OgaGenerator_IsDone(this);
   }
 
+  bool IsSessionTerminated() const {
+    return OgaGenerator_IsSessionTerminated(this);
+  }
+
   void ComputeLogits() {
     OgaCheckResult(OgaGenerator_ComputeLogits(this));
   }

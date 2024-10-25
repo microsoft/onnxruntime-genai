@@ -112,6 +112,7 @@ struct Generator : LeakChecked<Generator> {
   bool IsDone() const;
   void SetRuntimeOptionsConfig(const char* key, const char* value);
   void ComputeLogits();
+  bool IsSessionTerminated() const;
   void GenerateNextToken();
 
   DeviceMemorySpan<int32_t> GetSequence(size_t index) const;
