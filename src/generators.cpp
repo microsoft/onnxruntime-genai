@@ -310,7 +310,7 @@ void Generator::ComputeLogits() {
 void Generator::SetRuntimeOptionsConfig(const char* key, const char* value) {
   if (strcmp(key, "terminate_session") == 0) {
     if (strcmp(value, "0") == 0 || strcmp(value, "1") == 0) {
-      bool terminate_curr_session = (value == "1");
+      bool terminate_curr_session = (std::string(value) == "1");
       // Set value of terminate
       state_->SetUnsetTerminate(terminate_curr_session);
     } else {
