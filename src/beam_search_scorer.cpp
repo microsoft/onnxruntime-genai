@@ -62,20 +62,23 @@ BeamSearchScorer::BeamSearchScorer(const GeneratorParams& parameters)
     beam_hyps_[i].Init(parameters.search.length_penalty, beams.subspan(i * num_beams_, num_beams_));
   }
 
-  next_beam_scores_ptr_ = AllocateArray<float>(batch_beam_size, &next_beam_scores_);
-  next_beam_tokens_ptr_ = AllocateArray<int32_t>(batch_beam_size, &next_beam_tokens_);
-  next_beam_indices_ptr_ = AllocateArray<int32_t>(batch_beam_size, &next_beam_indices_);
+  next_beam_scores_ptr_ = parameters.p_device->Allocate<float>(batch_beam_size, false /*cpu_accessible*/);
+  next_beam_scores_ = *next_beam_scores_ptr_;
+  next_beam_tokens_ptr_ = parameters.p_device->Allocate<int32_t>(batch_beam_size, false /* cpu_accessible */);
+  next_beam_tokens_ = *next_beam_tokens_ptr_;
+  next_beam_indices_ptr_ = parameters.p_device->Allocate<int32_t>(batch_beam_size, false /* cpu_accessible */);
+  next_beam_indices_ = *next_beam_indices_ptr_;
 
   // Space to store intermediate sequence with length sequence_length, sequence_length + 1, ..., max_sequence_length.
   size_t const per_beam = (max_length_ * (max_length_ + 1) - (parameters.sequence_length - 1) * parameters.sequence_length) / 2;
   hypothesis_buffer_ptr_ = device.Allocate<int32_t>(batch_beam_size * per_beam, true);
-  hypothesis_buffer_ = hypothesis_buffer_ptr_->CpuSpan();
+  hypothesis_buffer_ = hypothesis_buffer_ptr_->DeviceSpan();
 
-  memset(next_beam_scores_.data(), 0, next_beam_scores_.size_bytes());
+  memset(next_beam_scores_.DeviceSpan().data(), 0, next_beam_scores_.DeviceSpan().size_bytes());
 
   // Initialize score of first beam of each group with 0 and the rest with -1e9.
   // This ensures that the beams in the same group don't produce same tokens every time.
-  std::span<float> const beam_scores = next_beam_scores_;
+  std::span<float> const beam_scores = next_beam_scores_.DeviceSpan();
   for (int i = 0; i < parameters.batch_size; i++) {
     for (int j = 1; j < parameters.search.num_beams; j++) {
       beam_scores[i * parameters.search.num_beams + j] = -1e9;
@@ -91,6 +94,10 @@ void BeamSearchScorer::Process(Sequences& sequences,
   // It contains word ID of whole sequence generated so far.
   // It is different from subgraph input_ids, which only need one word when past state is not empty.
 
+  auto next_beam_scores = next_beam_scores_.DeviceSpan();
+  auto next_beam_tokens = next_beam_tokens_.DeviceSpan();
+  auto next_beam_indices = next_beam_indices_.DeviceSpan();
+
   size_t sequence_length = static_cast<size_t>(sequences.GetSequenceLength());
 
   assert(next_scores.size() == next_tokens.size());
@@ -103,9 +110,9 @@ void BeamSearchScorer::Process(Sequences& sequences,
 
       // Pad the batch.
       for (size_t j = 0; j < num_beams_; j++) {
-        next_beam_scores_[batch * num_beams_ + j] = 0.0f;
-        next_beam_tokens_[batch * num_beams_ + j] = pad_token_id_;
-        next_beam_indices_[batch * num_beams_ + j] = 0;
+        next_beam_scores[batch * num_beams_ + j] = 0.0f;
+        next_beam_tokens[batch * num_beams_ + j] = pad_token_id_;
+        next_beam_indices[batch * num_beams_ + j] = 0;
       }
       continue;
     }
@@ -127,7 +134,7 @@ void BeamSearchScorer::Process(Sequences& sequences,
         }
 
         // Clone the sequence and append to buffer.
-        std::span<const int32_t> src = sequences.GetSequence(batch_beam_idx).CpuSpan();
+        std::span<const int32_t> src = sequences.GetSequence(batch_beam_idx).DeviceSpan();
         auto clone = hypothesis_buffer_.subspan(hypothesis_buffer_used_, src.size());
         hypothesis_buffer_used_ += clone.size();
 
@@ -135,9 +142,9 @@ void BeamSearchScorer::Process(Sequences& sequences,
         beam_hyp.Add(clone, next_score);
       } else {
         // Add next predicted token since it is not eos_token.
-        next_beam_scores_[batch * num_beams_ + beam_idx] = next_score;
-        next_beam_tokens_[batch * num_beams_ + beam_idx] = next_token;
-        next_beam_indices_[batch * num_beams_ + beam_idx] = batch_beam_idx;
+        next_beam_scores[batch * num_beams_ + beam_idx] = next_score;
+        next_beam_tokens[batch * num_beams_ + beam_idx] = next_token;
+        next_beam_indices[batch * num_beams_ + beam_idx] = batch_beam_idx;
         ++beam_idx;
       }
 
@@ -170,6 +177,8 @@ void BeamSearchScorer::Process(Sequences& sequences,
 
 void BeamSearchScorer::Finalize(Sequences& sequences,
                                 size_t num_return_sequences) {
+  auto next_beam_scores = next_beam_scores_.DeviceSpan();
+
   // Finalize all open beam hypotheses and add to generated hypotheses.
   for (size_t batch_index = 0; batch_index < batch_size_; batch_index++) {
     BeamHypotheses& beam_hyp = beam_hyps_[batch_index];
@@ -179,10 +188,10 @@ void BeamSearchScorer::Finalize(Sequences& sequences,
 
     for (size_t beam_index = 0; beam_index < num_beams_; beam_index++) {
       size_t const batch_beam_index = batch_index * num_beams_ + beam_index;
-      float const final_score = next_beam_scores_[batch_beam_index];
+      float const final_score = next_beam_scores[batch_beam_index];
 
       // Clone the sequence and append to buffer.
-      std::span<const int32_t> src = sequences.GetSequence(batch_beam_index).CpuSpan();
+      std::span<const int32_t> src = sequences.GetSequence(batch_beam_index).DeviceSpan();
       auto clone = hypothesis_buffer_.subspan(hypothesis_buffer_used_, src.size());
       hypothesis_buffer_used_ += clone.size();
 

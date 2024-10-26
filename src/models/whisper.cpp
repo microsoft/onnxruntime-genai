@@ -16,11 +16,11 @@ Whisper_Model::Whisper_Model(std::unique_ptr<Config> config, OrtEnv& ort_env)
   session_info_->Add(*session_encoder_);
 }
 
-std::unique_ptr<State> Whisper_Model::CreateState(RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params) const {
+std::unique_ptr<State> Whisper_Model::CreateState(DeviceMemorySpan<int32_t> sequence_lengths, const GeneratorParams& params) const {
   return std::make_unique<Whisper_State>(*this, sequence_lengths, params);
 }
 
-Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> sequence_lengths_unk, const GeneratorParams& params)
+Whisper_State::Whisper_State(const Whisper_Model& model, DeviceMemorySpan<int32_t> sequence_lengths_unk, const GeneratorParams& params)
     : State{params, model},
       model_{model} {
   auto& inputs = const_cast<GeneratorParams::Whisper&>(std::get<GeneratorParams::Whisper>(params.inputs));
@@ -67,10 +67,11 @@ Whisper_State::Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> s
   auto encoder_hidden_states_shape = std::array<int64_t, 3>{decoder_input_ids_.GetShape()[0], 1500, static_cast<int64_t>(model_.config_->model.decoder.num_attention_heads) * model_.config_->model.decoder.head_size};
   encoder_hidden_states_ = OrtValue::CreateTensor(*model_.allocator_device_, encoder_hidden_states_shape, hidden_states_type);
 
-  auto sequence_lengths = sequence_lengths_unk.GetCPU();
+  auto sequence_lengths = sequence_lengths_unk.CopyDeviceToCpu();
   for (int i = 0; i < decoder_input_ids_.GetShape()[0]; i++) {
     sequence_lengths[i] = static_cast<int32_t>(params_->sequence_length);
   }
+  sequence_lengths_unk.CopyCpuToDevice();
 
   input_names_.push_back("encoder_input_ids");
   inputs_.push_back(encoder_input_ids_.get());
@@ -129,7 +130,7 @@ void TransposeKCacheForDMMHA(T* dest_data,
 }
 #endif
 
-RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
+DeviceMemorySpan<float> Whisper_State::Run(int current_length, DeviceMemorySpan<int32_t> next_tokens, DeviceMemorySpan<int32_t> next_indices) {
   int batch_size = static_cast<int>(decoder_input_ids_.GetShape()[0]);
 
   switch (run_state_) {
@@ -312,9 +313,9 @@ RoamingArray<float> Whisper_State::Run(int current_length, RoamingArray<int32_t>
   return logits_.Get();
 }
 
-void Whisper_State::UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> beam_indices, int current_length, bool search_buffers) {
+void Whisper_State::UpdateInputsOutputs(const DeviceMemorySpan<int32_t>& next_tokens, DeviceMemorySpan<int32_t> beam_indices, int current_length, bool search_buffers) {
   decoder_input_ids_.Update(next_tokens);
-  kv_cache_.Update(beam_indices.GetCPU(), current_length);
+  kv_cache_.Update(beam_indices, current_length);
   logits_.Update();
 
   if (past_sequence_length_) {
@@ -332,7 +333,7 @@ void Whisper_State::UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens
 
   if (cache_indirection_) {
 #if USE_CUDA
-    gpu_span<int32_t> beam_indices_gpu = beam_indices.GetGPU();
+    auto beam_indices_gpu = gpu_span<int32_t>{beam_indices.DeviceSpan()};
     cuda_unique_ptr<int32_t> beam_indices_ptr;
     if (beam_indices_gpu.empty()) {
       beam_indices_ptr = CudaMallocArray<int32_t>(params_->batch_size, &beam_indices_gpu);

@@ -45,6 +45,11 @@ struct State;
 struct Search;
 struct Tokenizer;
 
+template <typename T>
+std::shared_ptr<DeviceMemory<T>> WrapTensor(DeviceInterface& device, OrtValue& value) {
+  return device.WrapMemory(std::span<T>{value.GetTensorMutableData<T>(), value.GetTensorTypeAndShapeInfo()->GetElementCount()});
+}
+
 // OgaSequences are a vector of int32 vectors
 using TokenSequences = std::vector<std::vector<int32_t>>;
 

@@ -42,7 +42,8 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopPCpu) {
     auto generator = Generators::CreateGenerator(*model, *params);
     int num_large = dist(engine);
     CreateRandomLogits(logits_cpu.data(), num_large, config.model.vocab_size, batch_size, engine);
-    generator->search_->SetLogits(Generators::cpu_span<float>(logits_cpu.data(), config.model.vocab_size * batch_size));
+    auto logits = params->p_device->WrapMemory<float>(logits_cpu);
+    generator->search_->SetLogits(*logits);
     auto start = std::chrono::high_resolution_clock::now();
     generator->search_->SampleTopP(0.95f, 1.0f);
     auto stop = std::chrono::high_resolution_clock::now();
@@ -80,7 +81,8 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopKCpu) {
     int num_large = dist(engine);
     auto generator = Generators::CreateGenerator(*model, *params);
     CreateRandomLogits(logits_cpu.data(), num_large, config.model.vocab_size, batch_size, engine);
-    generator->search_->SetLogits(Generators::cpu_span<float>(logits_cpu.data(), config.model.vocab_size * batch_size));
+    auto logits = params->p_device->WrapMemory<float>(logits_cpu);
+    generator->search_->SetLogits(*logits);
 
     auto start = std::chrono::high_resolution_clock::now();
     generator->search_->SampleTopK(k, 1.0f);
@@ -121,7 +123,8 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopPAndKCpu) {
     int num_large = dist(engine);
     auto generator = Generators::CreateGenerator(*model, *params);
     CreateRandomLogits(logits_cpu.data(), num_large, config.model.vocab_size, batch_size, engine);
-    generator->search_->SetLogits(Generators::cpu_span<float>(logits_cpu.data(), config.model.vocab_size * batch_size));
+    auto logits = params->p_device->WrapMemory<float>(logits_cpu);
+    generator->search_->SetLogits(*logits);
 
     auto start = std::chrono::high_resolution_clock::now();
     generator->search_->SampleTopKTopP(k, p, 1.0f);
@@ -167,7 +170,8 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopPCuda) {
     LaunchGeometricDecayKernel(logits_gpu.get(), config.model.vocab_size, batch_size, num_large, 20.0f, params->cuda_stream);
     LaunchFisherYatesKernel(logits_gpu.get(), indices_buffer.get(), config.model.vocab_size, batch_size, params->cuda_stream);
     cudaMemcpy(cpu_logits.data(), logits_gpu.get(), config.model.vocab_size * batch_size * sizeof(float), cudaMemcpyDeviceToHost);
-    generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), config.model.vocab_size * batch_size));
+    auto logits = params->p_device->WrapMemory(std::span<float>(logits_gpu.get(), config.model.vocab_size * batch_size));
+    generator->search_->SetLogits(*logits);
 
     cudaStreamSynchronize(params->cuda_stream);
     auto start = std::chrono::high_resolution_clock::now();
@@ -176,7 +180,7 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopPCuda) {
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
     total_time += duration.count();
 
-    auto next_tokens = generator->search_->GetNextTokens().GetCPU();
+    auto next_tokens = generator->search_->GetNextTokens();
     cudaStreamSynchronize(params->cuda_stream);
   }
   double average_time = total_time / double(num_iter);
@@ -214,7 +218,8 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopKCuda) {
     LaunchGeometricDecayKernel(logits_gpu.get(), config.model.vocab_size, batch_size, num_large, 20.0f, params->cuda_stream);
     LaunchFisherYatesKernel(logits_gpu.get(), indices_buffer.get(), config.model.vocab_size, batch_size, params->cuda_stream);
     cudaMemcpy(cpu_logits.data(), logits_gpu.get(), config.model.vocab_size * batch_size * sizeof(float), cudaMemcpyDeviceToHost);
-    generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), config.model.vocab_size * batch_size));
+    auto logits = params->p_device->WrapMemory(std::span<float>(logits_gpu.get(), config.model.vocab_size * batch_size));
+    generator->search_->SetLogits(*logits);
     cudaStreamSynchronize(params->cuda_stream);
     auto start = std::chrono::high_resolution_clock::now();
     generator->search_->SampleTopK(k, 1.0f);
@@ -258,7 +263,8 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopPAndKCuda) {
     LaunchGeometricDecayKernel(logits_gpu.get(), config.model.vocab_size, batch_size, num_large, 20.0f, params->cuda_stream);
     LaunchFisherYatesKernel(logits_gpu.get(), indices_buffer.get(), config.model.vocab_size, batch_size, params->cuda_stream);
     cudaMemcpy(cpu_logits.data(), logits_gpu.get(), config.model.vocab_size * batch_size * sizeof(float), cudaMemcpyDeviceToHost);
-    generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), config.model.vocab_size * batch_size));
+    auto logits = params->p_device->WrapMemory(std::span<float>(logits_gpu.get(), config.model.vocab_size * batch_size));
+    generator->search_->SetLogits(*logits);
 
     cudaStreamSynchronize(params->cuda_stream);
     auto start = std::chrono::high_resolution_clock::now();
@@ -267,7 +273,7 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopPAndKCuda) {
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
     total_time += duration.count();
 
-    auto next_tokens = generator->search_->GetNextTokens().GetCPU();
+    auto next_tokens = generator->search_->GetNextTokens();
     cudaStreamSynchronize(params->cuda_stream);
   }
   double average_time = total_time / double(num_iter);
@@ -304,7 +310,8 @@ TEST(Benchmarks, BenchmarkRandomizedSelectTopCuda) {
     LaunchGeometricDecayKernel(logits_gpu.get(), config.model.vocab_size, batch_size, num_large, 20.0f, params->cuda_stream);
     LaunchFisherYatesKernel(logits_gpu.get(), indices_buffer.get(), config.model.vocab_size, batch_size, params->cuda_stream);
     cudaMemcpy(cpu_logits.data(), logits_gpu.get(), config.model.vocab_size * batch_size * sizeof(float), cudaMemcpyDeviceToHost);
-    generator->search_->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), config.model.vocab_size * batch_size));
+    auto logits = params->p_device->WrapMemory(std::span<float>(logits_gpu.get(), config.model.vocab_size * batch_size));
+    generator->search_->SetLogits(*logits);
     cudaStreamSynchronize(params->cuda_stream);
     auto start = std::chrono::high_resolution_clock::now();
     generator->search_->SelectTop();

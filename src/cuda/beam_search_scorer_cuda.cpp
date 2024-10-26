@@ -31,13 +31,14 @@ BeamSearchScorer_Cuda::BeamSearchScorer_Cuda(const GeneratorParams& parameters)
 
   cuda::LaunchInitializeBeamHypotheses(beam_hyps_, parameters.search.length_penalty, beams, parameters.search.num_beams, stream_);
 
-  next_beam_scores_ptr_ = CudaMallocArray<float>(batch_beam_size, &next_beam_scores_);
-  next_beam_tokens_ptr_ = CudaMallocArray<int32_t>(batch_beam_size, &next_beam_tokens_);
-  next_beam_indices_ptr_ = CudaMallocArray<int32_t>(batch_beam_size, &next_beam_indices_);
-  next_beam_indices_cpu_ptr_ = std::make_unique<int32_t[]>(batch_beam_size);
-  next_beam_indices_cpu_ = cpu_span<int32_t>(next_beam_indices_cpu_ptr_.get(), batch_beam_size);
+  next_beam_scores_ptr_ = parameters.p_device->Allocate<float>(batch_beam_size, false /*cpu_accessible*/);
+  next_beam_scores_ = *next_beam_scores_ptr_;
+  next_beam_tokens_ptr_ = parameters.p_device->Allocate<int32_t>(batch_beam_size, false /* cpu_accessible */);
+  next_beam_tokens_ = *next_beam_tokens_ptr_;
+  next_beam_indices_ptr_ = parameters.p_device->Allocate<int32_t>(batch_beam_size, false /* cpu_accessible */);
+  next_beam_indices_ = *next_beam_indices_ptr_;
 
-  cuda::LaunchInitScoresKernel(next_beam_scores_.data(), parameters.batch_size, parameters.search.num_beams, stream_);
+  cuda::LaunchInitScoresKernel(next_beam_scores_.DeviceSpan().data(), parameters.batch_size, parameters.search.num_beams, stream_);
 
   // Space to store intermediate sequence with length sequence_length, sequence_length + 1, ..., max_sequence_length.
   size_t per_beam = (state_cpu_->max_length_ * (state_cpu_->max_length_ + 1) - (parameters.sequence_length - 1) * parameters.sequence_length) / 2;
@@ -45,7 +46,7 @@ BeamSearchScorer_Cuda::BeamSearchScorer_Cuda(const GeneratorParams& parameters)
   hypothesis_buffer_ = hypothesis_buffer_ptr_->DeviceSpan();
 }
 
-void BeamSearchScorer_Cuda::Process(Sequences_Cuda& sequences,
+void BeamSearchScorer_Cuda::Process(Sequences& sequences,
                                     std::span<const float> next_scores,
                                     std::span<const int32_t> next_tokens,
                                     std::span<const int32_t> next_indices) {
@@ -54,9 +55,9 @@ void BeamSearchScorer_Cuda::Process(Sequences_Cuda& sequences,
                                        sequences.GetSequences().DeviceSpan(),
                                        sequences.GetSequenceLength(),
                                        beam_hyps_,
-                                       next_beam_scores_,
-                                       next_beam_tokens_,
-                                       next_beam_indices_,
+                                       next_beam_scores_.DeviceSpan(),
+                                       next_beam_tokens_.DeviceSpan(),
+                                       next_beam_indices_.DeviceSpan(),
                                        hypothesis_buffer_,
                                        next_scores,
                                        next_tokens,
@@ -69,8 +70,8 @@ void BeamSearchScorer_Cuda::Process(Sequences_Cuda& sequences,
                                                           sequences.GetSequences().DeviceSpan(),
                                                           sequences.GetNextSequences().DeviceSpan(),
                                                           sequences.GetSequenceLength(),
-                                                          next_beam_tokens_,
-                                                          next_beam_indices_,
+                                                          next_beam_tokens_.DeviceSpan(),
+                                                          next_beam_indices_.DeviceSpan(),
                                                           stream_);
 }
 
@@ -79,9 +80,9 @@ bool BeamSearchScorer_Cuda::IsDoneLater() const {
   return state_cpu_->not_done_count_ == 0;
 }
 
-void BeamSearchScorer_Cuda::Finalize(Sequences_Cuda& sequences,
+void BeamSearchScorer_Cuda::Finalize(Sequences& sequences,
                                      size_t num_return_sequences) {
-  cuda::LaunchBeamSearchScorer_Finalize(state_cpu_->batch_size_, *state_gpu_, sequences.GetSequences().DeviceSpan(), sequences.GetSequenceLength(), beam_hyps_, hypothesis_buffer_, next_beam_scores_, stream_);
+  cuda::LaunchBeamSearchScorer_Finalize(state_cpu_->batch_size_, *state_gpu_, sequences.GetSequences().DeviceSpan(), sequences.GetSequenceLength(), beam_hyps_, hypothesis_buffer_, next_beam_scores_.DeviceSpan(), stream_);
 }
 
 DeviceMemorySpan<int32_t> BeamSearchScorer_Cuda::GetBeamHypothesis(size_t batch_id, size_t beam_id) const {

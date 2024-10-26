@@ -169,7 +169,8 @@ void JSON::Parse_Value(Element& element, std::string_view name) {
         if (c >= '0' && c <= '9' || c == '-') {
           --current_;
           element.OnNumber(name, Parse_Number());
-        }
+        } else
+          throw unknown_value_error{};
         break;
     }
   } catch (const unknown_value_error&) {

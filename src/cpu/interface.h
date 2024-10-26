@@ -1,0 +1,5 @@
+namespace Generators {
+
+DeviceInterface* GetCpuInterface();
+
+}

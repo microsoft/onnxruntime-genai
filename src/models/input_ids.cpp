@@ -84,7 +84,7 @@ void InputIDs::Add() {
   }
 }
 
-void InputIDs::Update(RoamingArray<int32_t> next_tokens_unk) {
+void InputIDs::Update(DeviceMemorySpan<int32_t> next_tokens_unk) {
   // Resize input_ids shape once if it doesn't match the decoder shape
   if (shape_[1] != 1) {
     shape_[1] = 1;
@@ -115,7 +115,7 @@ void InputIDs::Update(RoamingArray<int32_t> next_tokens_unk) {
       case DeviceType::CUDA: {
 #if USE_CUDA
         auto* data = value_->GetTensorMutableData<int64_t>();
-        auto next_tokens = next_tokens_unk.GetGPU();
+        auto next_tokens = next_tokens_unk.DeviceSpan();
         cuda::LaunchInt32ToInt64(next_tokens.data(), data, static_cast<int>(next_tokens.size()), model_.cuda_stream_);
 #endif
       } break;
@@ -147,7 +147,7 @@ void InputIDs::Update(RoamingArray<int32_t> next_tokens_unk) {
       } break;
       case DeviceType::CPU: {
         auto* data = value_->GetTensorMutableData<int64_t>();
-        auto next_tokens = next_tokens_unk.GetCPU();
+        auto next_tokens = next_tokens_unk.DeviceSpan();
         for (int i = 0; i < shape_[0]; i++) {
           data[i] = next_tokens[i];
         }
@@ -157,10 +157,10 @@ void InputIDs::Update(RoamingArray<int32_t> next_tokens_unk) {
     auto* data = value_->GetTensorMutableData<int32_t>();
 #if USE_CUDA
     if (model_.device_type_ == DeviceType::CUDA)
-      cudaMemcpyAsync(data, next_tokens_unk.GetGPU().data(), shape_[0] * sizeof(int32_t), cudaMemcpyDeviceToDevice, model_.cuda_stream_);
+      cudaMemcpyAsync(data, next_tokens_unk.DeviceSpan().data(), shape_[0] * sizeof(int32_t), cudaMemcpyDeviceToDevice, model_.cuda_stream_);
     else
 #endif
-      memcpy(data, next_tokens_unk.GetCPU().data(), shape_[0] * sizeof(int32_t));
+      memcpy(data, next_tokens_unk.DeviceSpan().data(), shape_[0] * sizeof(int32_t));
   }
 
   if (current_sequence_length_ && past_sequence_length_) {

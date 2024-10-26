@@ -378,6 +378,13 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 
   for (auto& provider_options : config_session_options.provider_options) {
     if (provider_options.name == "cuda") {
+      // Device type determines the scoring device.
+      // Only use the primary session options to determine the device type
+      if (is_primary_session_options) {
+        device_type_ = DeviceType::CUDA;  // Scoring will use CUDA
+        p_device_ = GetDeviceInterface(device_type_);
+      }
+
       auto ort_provider_options = OrtCUDAProviderOptionsV2::Create();
       std::vector<const char*> keys, values;
       for (auto& option : provider_options.options) {
@@ -387,16 +394,10 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       ort_provider_options->Update(keys.data(), values.data(), keys.size());
 
       // Create and set our cudaStream_t
-      if (!cuda_stream_.get())
-        cuda_stream_.Create();
-
-      ort_provider_options->UpdateValue("user_compute_stream", cuda_stream_.get());
+      cuda_stream_ = p_device_->GetCudaStream();
+      ort_provider_options->UpdateValue("user_compute_stream", cuda_stream_);
 
       session_options.AppendExecutionProvider_CUDA_V2(*ort_provider_options);
-      // Device type determines the scoring device.
-      // Only use the primary session options to determine the device type
-      if (is_primary_session_options)
-        device_type_ = DeviceType::CUDA;  // Scoring will use CUDA
 
     } else if (provider_options.name == "rocm") {
       OrtROCMProviderOptions ort_provider_options;
@@ -463,6 +464,12 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       session_options.AppendExecutionProvider("QNN", opts);
     } else
       throw std::runtime_error("Unknown provider type: " + provider_options.name);
+  }
+
+  // If no device gets set, default to CPU
+  if (!p_device_) {
+    assert(device_type_ == DeviceType::CPU);
+    p_device_ = GetDeviceInterface(device_type_);
   }
 }
 

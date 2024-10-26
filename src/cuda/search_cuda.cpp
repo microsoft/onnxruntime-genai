@@ -17,11 +17,24 @@ void OnCudaError(cudaError_t error) {
 }
 
 Search_Cuda::Search_Cuda(const GeneratorParams& params)
-    : Search{params},
-      sequences_{*params.p_device, params.input_ids, params.batch_size, params.search.num_beams, params_->search.max_length, params_->cuda_stream} {
+    : Search{params} {
+
+  // The original inputs are not expanded, this expands them in place into the sequences
+  {
+    auto input_sequences = params.input_ids;
+    auto current_length = sequences_.GetSequenceLength();
+
+    auto input_sequences_temp = params.p_device->Allocate<int32_t>(input_sequences.size(), false /*cpu_accessible*/);
+    auto input_sequences_gpu = input_sequences_temp->DeviceSpan();
+    cudaMemcpyAsync(input_sequences_gpu.data(), input_sequences.data(), input_sequences.size_bytes(), cudaMemcpyHostToDevice, GetStream());
+
+    cuda::Launch_ExpandInputSequences(input_sequences_gpu, sequences_.GetSequences().DeviceSpan(), params.batch_size, params.search.num_beams, current_length, sequences_.max_length_, GetStream());
+    cudaStreamSynchronize(GetStream());  // Until we remove the todo above, wait for this to complete as input_sequences_gpu is on the stack
+  }
+
   auto batch_beam_size = params.BatchBeamSize();
-  sequence_lengths_buffer_ = std::make_unique<int32_t[]>(batch_beam_size);
-  sequence_lengths_ = cpu_span<int32_t>(sequence_lengths_buffer_.get(), batch_beam_size);
+  sequence_lengths_ptr_ = params.p_device->Allocate<int32_t>(batch_beam_size, false /*cpu_accessible*/);
+  sequence_lengths_ = *sequence_lengths_ptr_;
 
   eos_meet_buffer_ = CudaMallocArray<bool>(batch_beam_size, &eos_meet_);
   cudaMemsetAsync(eos_meet_.data(), 0, eos_meet_.size_bytes(), params_->cuda_stream);
@@ -32,7 +45,8 @@ Search_Cuda::Search_Cuda(const GeneratorParams& params)
 
 GreedySearch_Cuda::GreedySearch_Cuda(const GeneratorParams& params)
     : Search_Cuda{params} {
-  next_tokens_buffer_ = CudaMallocArray<int32_t>(params.batch_size, &next_tokens_);
+  next_tokens_buffer_ = params.p_device->Allocate<int32_t>(params.batch_size, false /*cpu_accessible*/);
+  next_tokens_ = gpu_span<int32_t>(next_tokens_buffer_->DeviceSpan());
   cudaMemsetAsync(next_tokens_.data(), 0, next_tokens_.size_bytes(), params_->cuda_stream);
 
   unsigned long long random_seed;
@@ -64,32 +78,28 @@ BeamSearch_Cuda::BeamSearch_Cuda(const GeneratorParams& params)
 
 BeamSearch_Cuda::~BeamSearch_Cuda() = default;
 
-RoamingArray<float> Search_Cuda::GetLogits() const {
+DeviceMemorySpan<float> Search_Cuda::GetLogits() const {
   return next_token_scores_;
 }
 
-void Search_Cuda::SetLogits(RoamingArray<float> logits_unk) {
-  next_token_scores_ = logits_unk.GetGPU();
+void Search_Cuda::SetLogits(DeviceMemorySpan<float> logits) {
+  next_token_scores_ = logits;
 }
 
-RoamingArray<int32_t> GreedySearch_Cuda::GetNextTokens() {
-  return next_tokens_;
+DeviceMemorySpan<int32_t> GreedySearch_Cuda::GetNextTokens() {
+  return *next_tokens_buffer_;
 }
 
-RoamingArray<int32_t> BeamSearch_Cuda::GetNextTokens() {
+DeviceMemorySpan<int32_t> BeamSearch_Cuda::GetNextTokens() {
   return beam_scorer_->GetNextTokens();
 }
 
-RoamingArray<int32_t> BeamSearch_Cuda::GetNextIndices() {
-  return beam_scorer_->GetNextIndicesCPU();
-}
-
-int Search_Cuda::GetSequenceLength() const {
-  return sequences_.GetSequenceLength();
+DeviceMemorySpan<int32_t> BeamSearch_Cuda::GetNextIndices() {
+  return beam_scorer_->GetNextIndices();
 }
 
 void BeamSearch_Cuda::SelectTop() {
-  cuda::DispatchBlockwiseSoftmaxForward<true>(const_cast<cudaStream_t*>(&params_->cuda_stream), softmax_buffer_.get(), next_token_scores_.data(), params_->config.model.vocab_size,
+  cuda::DispatchBlockwiseSoftmaxForward<true>(const_cast<cudaStream_t*>(&params_->cuda_stream), softmax_buffer_.get(), next_token_scores_.DeviceSpan().data(), params_->config.model.vocab_size,
                                               params_->config.model.vocab_size, params_->config.model.vocab_size, params_->BatchBeamSize());
 
   // Copy next_token_scores to CPU
@@ -101,7 +111,7 @@ void BeamSearch_Cuda::SelectTop() {
 
   // Add beam score to next token scores. Corresponding python code is like:
   //    next_token_scores = next_token_scores + beam_scores[:, None].expand_as(next_token_scores)
-  cuda::LaunchAddProbsKernel(softmax_buffer_.get(), beam_scores.data(),
+  cuda::LaunchAddProbsKernel(softmax_buffer_.get(), beam_scores.DeviceSpan().data(),
                              params_->batch_size, params_->search.num_beams, params_->config.model.vocab_size, params_->cuda_stream);
 
   if (params_->search.num_beams <= 32) {
@@ -143,51 +153,23 @@ void BeamSearch_Cuda::SelectTop() {
 #endif
 
   beam_scorer_->Process(sequences_, next_scores, next_tokens, next_indices);
-  next_tokens_ = beam_scorer_->GetNextTokens();
-
-  // TODO(aciddelgado): do we need to keep track of sequences both here and in beam hypotheses?
-  AppendNextTokensToSequences();
-}
-
-void GreedySearch_Cuda::SelectTop() {
-  std::span<float> scores = next_token_scores_.subspan(0, params_->batch_size * params_->config.model.vocab_size);
-  cuda::GetSample(samplingdata_.get(), params_->cuda_stream, next_tokens_.data(), scores.data(), int(scores.size() / params_->batch_size),
-                  params_->batch_size, 1, 0.0, 1.0);
-  CheckForEOS();
-  AppendNextTokensToSequences();
-}
-
-void GreedySearch_Cuda::SampleTopP(float p, float temperature) {
-  std::span<float> scores = next_token_scores_.subspan(0, params_->batch_size * params_->config.model.vocab_size);
-  cuda::GetSample(samplingdata_.get(), params_->cuda_stream, next_tokens_.data(), scores.data(), int(scores.size() / params_->batch_size),
-                  params_->batch_size, -1, p, temperature);
-  CheckForEOS();
-  AppendNextTokensToSequences();
-}
-
-void GreedySearch_Cuda::SampleTopK(int k, float temperature) {
-  std::span<float> scores = next_token_scores_.subspan(0, params_->batch_size * params_->config.model.vocab_size);
-  cuda::GetSample(samplingdata_.get(), params_->cuda_stream, next_tokens_.data(), scores.data(), int(scores.size() / params_->batch_size),
-                  params_->batch_size, k, 0.0, temperature);
-  CheckForEOS();
-  AppendNextTokensToSequences();
+  next_tokens_ = gpu_span<int32_t>(beam_scorer_->GetNextTokens().DeviceSpan());
+  sequences_.AfterAppendNextTokens(beam_scorer_->GetNextTokens());
 }
 
 void GreedySearch_Cuda::SampleTopKTopP(int k, float p, float temperature) {
-  std::span<float> scores = next_token_scores_.subspan(0, params_->batch_size * params_->config.model.vocab_size);
+  std::span<float> scores = next_token_scores_.DeviceSpan();
+  assert(scores.size() == params_->batch_size * params_->config.model.vocab_size);
   cuda::GetSample(samplingdata_.get(), params_->cuda_stream, next_tokens_.data(), scores.data(), int(scores.size() / params_->batch_size),
                   params_->batch_size, k, p, temperature);
-  CheckForEOS();
-  AppendNextTokensToSequences();
-}
 
-void GreedySearch_Cuda::CheckForEOS() {
+  // Check for EOS
   assert(next_tokens_.size() == eos_meet_.size());
   cuda::Launch_CheckForEOS(next_tokens_.data(), static_cast<int>(next_tokens_.size()), eos_meet_.data(), params_->config.model.eos_token_id, params_->config.model.pad_token_id, done_cpu_.get(), params_->cuda_stream);
-}
 
-void GreedySearch_Cuda::AppendNextTokensToSequences() {
-  sequences_.AppendNextTokenToSequences(next_tokens_);
+  // Append tokens
+  cuda::Launch_AppendNextTokenToSequences(next_tokens_buffer_->DeviceSpan(), sequences_.GetSequences().DeviceSpan(), params_->BatchBeamSize(), sequences_.GetSequenceLength(), sequences_.max_length_, GetStream());
+  sequences_.AfterAppendNextTokens(*next_tokens_buffer_);
 
   if (sequences_.GetSequenceLength() == params_->search.max_length) {
     if (GetLogItems().enabled && GetLogItems().hit_max_length)
@@ -206,10 +188,6 @@ bool BeamSearch_Cuda::IsDone() const {
     return true;
   }
   return false;
-}
-
-void BeamSearch_Cuda::AppendNextTokensToSequences() {
-  sequences_.AfterDeviceAppendedNextToken();
 }
 
 void BeamSearch_Cuda::Finalize(size_t num_return_sequences) {
@@ -251,11 +229,11 @@ void GreedySearch::Finalize(size_t num_return_sequences, std::span<int32_t> outp
 
 std::span<float> Search_Cuda::GetScores(int batch_beam_index) {
   assert(batch_beam_index >= 0 && batch_beam_index < params_->BatchBeamSize());
-  return next_token_scores_.subspan(batch_beam_index * params_->config.model.vocab_size, params_->config.model.vocab_size);
+  return next_token_scores_.subspan(batch_beam_index * params_->config.model.vocab_size, params_->config.model.vocab_size).DeviceSpan();
 }
 
 std::span<float> Search_Cuda::GetScores() {
-  return next_token_scores_;
+  return next_token_scores_.DeviceSpan();
 }
 
 void Search_Cuda::ApplyMinLength(int min_length) {

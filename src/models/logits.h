@@ -10,12 +10,12 @@ struct Logits {
   Logits(State& state);
 
   void Add();
-  RoamingArray<float> Get();
+  DeviceMemorySpan<float> Get();
 
   void Update();
 
  private:
-  void HandleEOSArray(cpu_span<float> logits);
+  void HandleEOSArray(std::span<float> logits);
 
   State& state_;
   const Model& model_{state_.model_};
@@ -28,8 +28,12 @@ struct Logits {
   // 1. prompt: store the last tokens logits from output_raw_
   // 2. token gen: store the converted fp32 logits if output_raw_ is fp16.
   std::unique_ptr<OrtValue> output_last_tokens_;
+  std::unique_ptr<OrtValue> logits_of_last_token_fp32_;
 
   std::unique_ptr<OrtValue> output_raw_;  // Raw logits output from model
+
+  // OrtValue wrapped in a DeviceMemory object to make it universal
+  std::shared_ptr<DeviceMemory<float>> logits_;
 
   // Used for decoding runs with cuda graphs.
   StaticBuffer* sb_logits32_{};
@@ -42,7 +46,6 @@ struct Logits {
 
 #if USE_DML
   DmlReusedCommandListState logits_cast_command_list_state_{};
-  std::unique_ptr<OrtValue> logits_of_last_token_fp32_;
   std::unique_ptr<OrtValue> value32_cpu_;
 #endif
 };

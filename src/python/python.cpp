@@ -210,7 +210,7 @@ struct PyDeviceMemorySpan {
   }
 
   pybind11::array_t<T> GetNumpy() {
-    auto v = span_.CpuSpan();
+    auto v = span_.CopyDeviceToCpu();
     py_cpu_array_ = pybind11::array_t<T>({v.size()}, {sizeof(T)}, v.data(), pybind11::capsule(v.data(), [](void*) {}));
     return py_cpu_array_;
   }
@@ -315,8 +315,8 @@ struct PyGenerator {
   }
 
   pybind11::array_t<int32_t> GetNextTokens() {
-    py_tokens_.Assign(generator_->search_->GetNextTokens());
-    return ToPython(py_tokens_.GetCPU());
+    py_tokens_ = generator_->search_->GetNextTokens();
+    return py_tokens_.GetNumpy();
   }
 
   pybind11::array_t<int32_t> GetSequence(int index) {
@@ -333,13 +333,14 @@ struct PyGenerator {
   }
 
   pybind11::array_t<float> GetLogits() {
-    py_logits_.Assign(generator_->search_->GetLogits());
-    return ToPython(py_logits_.GetCPU());
+    py_logits_ = generator_->search_->GetLogits();
+    return py_logits_.GetNumpy();
   }
 
   void SetLogits(pybind11::array_t<float> logits) {
     logits_ = logits;
-    generator_->search_->SetLogits(cpu_span<float>{ToSpan(logits_)});
+    logits_memory_ = generator_->search_->params_->p_device->WrapMemory<float>(ToSpan(logits_));
+    generator_->search_->SetLogits(*logits_memory_);
   }
 
   void GenerateNextToken() {
@@ -356,12 +357,11 @@ struct PyGenerator {
 
  private:
   std::unique_ptr<Generator> generator_;
-  PyRoamingArray<int32_t> py_tokens_;
-  PyRoamingArray<int32_t> py_indices_;
+  PyDeviceMemorySpan<int32_t> py_tokens_;
   PyDeviceMemorySpan<int32_t> py_sequence_;
-  PyRoamingArray<int32_t> py_sequencelengths_;
-  PyRoamingArray<float> py_logits_;
+  PyDeviceMemorySpan<float> py_logits_;
   pybind11::array_t<float> logits_;  // Logits passed in from python, to keep the memory alive
+  std::shared_ptr<DeviceMemory<float>> logits_memory_;
 };
 
 void SetLogOptions(const pybind11::kwargs& dict) {

@@ -3,22 +3,32 @@ namespace Generators {
 
 // This class keeps track of sequences generated.
 struct Sequences {
-  Sequences(DeviceInterface& device, std::span<const int32_t> input_sequence, int batch_size, int beam_size, int max_length);
+  Sequences(const GeneratorParams& params)
+      : max_length_{params.search.max_length},
+        current_length_{static_cast<int>(params.input_ids.size()) / params.batch_size} {
+    assert(current_length_ * params.batch_size == params.input_ids.size());  // Ensure size divided perfectly
+
+    const size_t sequences_size = static_cast<size_t>(params.BatchBeamSize()) * max_length_;
+    sequences_ = params.p_device->Allocate<int32_t>(sequences_size, false /*cpu_accessible*/);
+    if (params.search.num_beams > 1)
+      sequences_next_ = params.p_device->Allocate<int32_t>(sequences_size, false /*cpu_accessible*/);
+  }
 
   // Returns a sequence of word IDs for a given beam index ( beam_index < batch_beam_size).
-  DeviceMemorySpan<int32_t> GetSequence(size_t batch_beam_index);
+  DeviceMemorySpan<int32_t> GetSequence(size_t batch_beam_index) {
+    return sequences_->subspan(batch_beam_index * max_length_, current_length_);
+  }
+
   DeviceMemory<int32_t>& GetSequences() { return *sequences_; }
   DeviceMemory<int32_t>& GetNextSequences() { return *sequences_next_; }
 
   // Returns current sequence length.
-  int GetSequenceLength() const;
+  int GetSequenceLength() const { return current_length_; }
 
-  // Used by Beam search:
-  // Shuffles sequences around based on batch_beam_indices, then append next token to selected sequences.
-  void AppendNextTokenToSequences(std::span<const int32_t> batch_beam_indices, std::span<const int32_t> batch_beam_next_tokens);
+  // After tokens are appended, this function must be called to update the state & log the tokens
+  void AfterAppendNextTokens(DeviceMemorySpan<int32_t> next_tokens);
 
-  // Used by Greedy search:
-  void AppendNextTokenToSequences(std::span<const int32_t> next_tokens);
+  const int max_length_;
 
  private:
   // Two buffers of shape (batch_size, num_beams, max_seq_length) to store sequences.
@@ -27,8 +37,6 @@ struct Sequences {
   std::shared_ptr<DeviceMemory<int32_t>> sequences_;
   std::shared_ptr<DeviceMemory<int32_t>> sequences_next_;  // This only exists for beam search, to allow for the easy reordering of sequences
 
-  int batch_beam_size_;
-  int max_length_;
   int current_length_;
 };
 

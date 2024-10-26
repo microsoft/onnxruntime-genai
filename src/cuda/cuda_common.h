@@ -1,5 +1,7 @@
 namespace Generators {
 
+cudaStream_t GetStream();
+
 void OnCudaError(cudaError_t error);
 
 struct CudaCheck {
@@ -27,6 +29,24 @@ struct cuda_event_holder {
 
  private:
   cudaEvent_t v_{};
+};
+
+struct cuda_stream_holder {
+  void Create() {
+    assert(!v_);
+    cudaStreamCreate(&v_);
+  }
+
+  ~cuda_stream_holder() {
+    if (v_)
+      (void)cudaStreamDestroy(v_);
+  }
+
+  operator cudaStream_t() const { return v_; }
+  cudaStream_t get() const { return v_; }
+
+ private:
+  cudaStream_t v_{};
 };
 
 }  // namespace Generators

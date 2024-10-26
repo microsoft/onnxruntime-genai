@@ -8,10 +8,24 @@
 namespace Generators {
 
 Search_Cpu::Search_Cpu(const GeneratorParams& params)
-    : Search{params},
-      sequences_{*params.p_device, params.input_ids, params.batch_size, params.search.num_beams, params_->search.max_length} {
+    : Search{params} {
   auto batch_beam_size = params.BatchBeamSize();
-  sequence_lengths_buffer_ = AllocateArray<int32_t>(batch_beam_size, &sequence_lengths_);
+
+  sequence_lengths_ptr_ = params.p_device->Allocate<int32_t>(batch_beam_size, false /*cpu_accessible*/);
+  sequence_lengths_ = *sequence_lengths_ptr_;
+
+  // The original inputs are not expanded, this expands them in place into the sequences
+  auto input_sequences = params.input_ids;
+  auto current_length = sequences_.GetSequenceLength();
+  auto span = sequences_.GetSequences().DeviceSpan();
+  for (size_t batch = 0; batch < params.batch_size; batch++) {
+    for (size_t beam = 0; beam < params.search.num_beams; beam++) {
+      for (int j = 0; j < current_length; j++) {
+        span[(batch * params.search.num_beams + beam) * sequences_.max_length_ + j] =
+            static_cast<int32_t>(input_sequences[batch * current_length + j]);
+      }
+    }
+  }
 }
 
 GreedySearch_Cpu::GreedySearch_Cpu(const GeneratorParams& params)
@@ -26,7 +40,8 @@ GreedySearch_Cpu::GreedySearch_Cpu(const GeneratorParams& params)
     gen_.seed(seq);
   }
 
-  next_tokens_buffer_ = AllocateArray<int32_t>(params.batch_size, &next_tokens_);
+  next_tokens_ptr_ = params.p_device->Allocate<int32_t>(params.batch_size, false /*cpu_accessible*/);
+  next_tokens_ = cpu_span<int32_t>(next_tokens_ptr_->DeviceSpan());
   memset(next_tokens_.data(), 0, next_tokens_.size_bytes());
 
   eos_seen_buffer_ = AllocateArray<bool>(params.batch_size, &eos_seen_);
@@ -41,38 +56,36 @@ BeamSearch_Cpu::BeamSearch_Cpu(const GeneratorParams& params)
 
 BeamSearch_Cpu::~BeamSearch_Cpu() = default;
 
-RoamingArray<float> Search_Cpu::GetLogits() const {
+DeviceMemorySpan<float> Search_Cpu::GetLogits() const {
   return next_token_scores_;
 }
 
-void Search_Cpu::SetLogits(RoamingArray<float> logits_unk) {
-  next_token_scores_ = logits_unk.GetCPU();
+void Search_Cpu::SetLogits(DeviceMemorySpan<float> logits) {
+  next_token_scores_ = logits;
 }
 
-RoamingArray<int32_t> GreedySearch_Cpu::GetNextTokens() {
-  return next_tokens_;
+DeviceMemorySpan<int32_t> GreedySearch_Cpu::GetNextTokens() {
+  return *next_tokens_ptr_;
 }
 
-RoamingArray<int32_t> BeamSearch_Cpu::GetNextTokens() {
+DeviceMemorySpan<int32_t> BeamSearch_Cpu::GetNextTokens() {
   return beam_scorer_->GetNextTokens();
 }
 
-RoamingArray<int32_t> BeamSearch_Cpu::GetNextIndices() {
-  return beam_scorer_->GetNextIndicesCPU();
-}
-
-int Search_Cpu::GetSequenceLength() const {
-  return sequences_.GetSequenceLength();
+DeviceMemorySpan<int32_t> BeamSearch_Cpu::GetNextIndices() {
+  return beam_scorer_->GetNextIndices();
 }
 
 void BeamSearch_Cpu::SelectTop() {
+  auto next_token_scores = next_token_scores_.DeviceSpan();
+
   // Normalize next token scores
   for (int i = 0; i < params_->BatchBeamSize(); i++) {
-    std::span<float> const scores = next_token_scores_.subspan(static_cast<size_t>(i) * static_cast<size_t>(params_->config.model.vocab_size), params_->config.model.vocab_size);
+    std::span<float> const scores = next_token_scores.subspan(static_cast<size_t>(i) * static_cast<size_t>(params_->config.model.vocab_size), params_->config.model.vocab_size);
     LogSoftMax(scores, 1.0);
   }
 
-  auto beam_scores = beam_scorer_->GetNextScores();
+  auto beam_scores = beam_scorer_->GetNextScores().DeviceSpan();
 
   // Add beam score to next token scores. Corresponding python code is like:
   //    next_token_scores = next_token_scores + beam_scores[:, None].expand_as(next_token_scores)
@@ -82,7 +95,7 @@ void BeamSearch_Cpu::SelectTop() {
   for (int i = 0; i < params_->batch_size; i++) {
     for (int j = 0; j < params_->search.num_beams; j++, batch_beam_index++) {
       for (int k = 0; k < params_->config.model.vocab_size; k++, offset++) {
-        next_token_scores_[offset] += beam_scores[batch_beam_index];
+        next_token_scores[offset] += beam_scores[batch_beam_index];
       }
     }
   }
@@ -107,7 +120,7 @@ void BeamSearch_Cpu::SelectTop() {
   // TODO(aciddelgado): Optimize this top k with partial sort
   for (size_t batch_index = 0; batch_index < static_cast<size_t>(params_->batch_size); batch_index++) {
     std::priority_queue<ScoreIndex, std::vector<ScoreIndex>> queue;
-    auto token_scores_sub = next_token_scores_.subspan(batch_index * params_->search.num_beams * params_->config.model.vocab_size, static_cast<size_t>(params_->search.num_beams) * params_->config.model.vocab_size);
+    auto token_scores_sub = next_token_scores.subspan(batch_index * params_->search.num_beams * params_->config.model.vocab_size, static_cast<size_t>(params_->search.num_beams) * params_->config.model.vocab_size);
     for (int i = 0; i < token_scores_sub.size(); i++) {
       queue.push({token_scores_sub[i], i});
     }
@@ -131,7 +144,7 @@ void BeamSearch_Cpu::SelectTop() {
 #endif
 
   beam_scorer_->Process(sequences_, next_scores, next_tokens, next_indices);
-  next_tokens_ = beam_scorer_->GetNextTokens();
+  next_tokens_ = cpu_span<int32_t>(beam_scorer_->GetNextTokens().DeviceSpan());
 
   AppendNextTokensToSequences();
 }
@@ -143,7 +156,7 @@ void GreedySearch_Cpu::SelectTop() {
       continue;
     }
 
-    std::span<float> const scores = next_token_scores_.subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
+    std::span<float> const scores = next_token_scores_.DeviceSpan().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
     auto const token = static_cast<int32_t>(std::distance(scores.begin(), std::max_element(scores.begin(), scores.end())));
     SetNextToken(batch_id, token);
   }
@@ -153,7 +166,7 @@ void GreedySearch_Cpu::SelectTop() {
 
 void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
   for (size_t batch_id = 0; batch_id < params_->batch_size; batch_id++) {
-    std::span<float> const scores = next_token_scores_.subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
+    std::span<float> const scores = next_token_scores_.DeviceSpan().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
     SoftMax(scores, temperature);
     // Find the top K scores
     std::vector<int> indices(scores.size());
@@ -172,7 +185,7 @@ void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
     if (PadIfAlreadyEOS(batch_id)) {
       continue;
     }
-    std::span<float> const scores = next_token_scores_.subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
+    std::span<float> const scores = next_token_scores_.DeviceSpan().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
     SoftMax(scores, temperature);
     // Sort an array of indices into the scores
     std::vector<int32_t> indices(scores.size());
@@ -201,7 +214,7 @@ void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature) {
     if (PadIfAlreadyEOS(batch_id)) {
       continue;
     }
-    std::span<float> const scores = next_token_scores_.subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
+    std::span<float> const scores = next_token_scores_.DeviceSpan().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
     SoftMax(scores, temperature);
     // Find the top K scores
     std::vector<int> indices(scores.size());
@@ -247,7 +260,16 @@ void GreedySearch_Cpu::SetNextToken(size_t batch_id, int32_t token) {
 }
 
 void GreedySearch_Cpu::AppendNextTokensToSequences() {
-  sequences_.AppendNextTokenToSequences(next_tokens_);
+  // Append next token to each sequence.
+  auto sequences_span = sequences_.GetSequences().DeviceSpan();
+  auto current_length = sequences_.GetSequenceLength();
+  auto next_tokens = next_tokens_ptr_->DeviceSpan();
+  auto batch_beam_size = params_->BatchBeamSize();
+  for (int i = 0; i < batch_beam_size; i++) {
+    sequences_span[i * sequences_.max_length_ + current_length] = next_tokens[i];
+  }
+
+  sequences_.AfterAppendNextTokens(*next_tokens_ptr_);
 
   if (sequences_.GetSequenceLength() == params_->search.max_length) {
     if (g_log.enabled && g_log.hit_max_length)
@@ -266,7 +288,24 @@ bool BeamSearch_Cpu::IsDone() const {
 }
 
 void BeamSearch_Cpu::AppendNextTokensToSequences() {
-  sequences_.AppendNextTokenToSequences(beam_scorer_->GetNextIndicesCPU(), beam_scorer_->GetNextTokens());
+  auto sequences_span = sequences_.GetSequences().DeviceSpan();
+  auto sequences_next_span = sequences_.GetNextSequences().DeviceSpan();
+  auto max_length = sequences_.max_length_;
+  auto current_length = sequences_.GetSequenceLength();
+  auto batch_beam_next_tokens = beam_scorer_->GetNextTokens().DeviceSpan();
+  auto batch_beam_indices = beam_scorer_->GetNextIndices().DeviceSpan();
+  auto batch_beam_size = params_->BatchBeamSize();
+
+  for (ptrdiff_t i = 0; i < batch_beam_size; i++) {
+    int batch_beam_index = batch_beam_indices[i];
+    std::span<const int32_t> source = sequences_span.subspan(static_cast<size_t>(batch_beam_index) * max_length, current_length);
+    std::span<int32_t> target = sequences_next_span.subspan(i * max_length, current_length);
+    copy(source, target);
+
+    // Append next token to each beam.
+    sequences_next_span[i * max_length + current_length] = batch_beam_next_tokens[i];
+  }
+  sequences_.AfterAppendNextTokens(beam_scorer_->GetNextTokens());
 
   if (sequences_.GetSequenceLength() == params_->search.max_length) {
     if (g_log.enabled && g_log.hit_max_length)
@@ -295,9 +334,9 @@ DeviceMemorySpan<int32_t> BeamSearch_Cpu::GetSequence(size_t batch_id, size_t be
   return beam_scorer_->GetBeamHypotheses(batch_id, beam_id);
 }
 
-std::span<float> Search_Cpu::GetScores(int batch_beam_index) const {
+std::span<float> Search_Cpu::GetScores(int batch_beam_index) {
   assert(batch_beam_index >= 0 && batch_beam_index < params_->BatchBeamSize());
-  return next_token_scores_.subspan(static_cast<size_t>(batch_beam_index) * params_->config.model.vocab_size, params_->config.model.vocab_size);
+  return next_token_scores_.DeviceSpan().subspan(static_cast<size_t>(batch_beam_index) * params_->config.model.vocab_size, params_->config.model.vocab_size);
 }
 
 void Search_Cpu::ApplyMinLength(int min_length) {
@@ -319,7 +358,7 @@ void Search_Cpu::ApplyRepetitionPenalty(float penalty) {
   const int batch_beam_size = params_->BatchBeamSize();
   for (int i = 0; i < batch_beam_size; i++) {
     std::span<float> const beam_token_scores = GetScores(i);
-    std::span<const int32_t> const sequence = sequences_.GetSequence(i).CpuSpan();
+    std::span<const int32_t> const sequence = sequences_.GetSequence(i).CopyDeviceToCpu();
 
     // Find unique word IDs in sequence.
     std::unordered_set<int32_t> unique_word_ids;

@@ -7,14 +7,16 @@
 
 namespace Generators {
 struct Search;
+struct Sequences;
 struct GeneratorParams;
 
 struct DeviceMemoryBase : std::enable_shared_from_this<DeviceMemoryBase> {
   virtual ~DeviceMemoryBase() {}
-  virtual const char* GetType() const = 0;  // Returns "cuda" "cuda_cpu" "directml" etc
-  virtual bool IsCpuAccessible() const = 0;
-  virtual void GetOnCpu() = 0;  // Allocates p_cpu_ if necessary and copies p_device_ memory into it
-  virtual void CopyFromDevice(size_t begin_dest, DeviceMemoryBase& source, size_t begin_source, size_t size_in_bytes) = 0;
+  virtual const char* GetType() const = 0;                      // Returns "cuda" "cuda_cpu" "directml" etc
+  bool IsCpuAccessible() const { return p_device_ == p_cpu_; }  // Device memory is CPU accessible if it's the same memory
+  virtual void CopyDeviceToCpu() = 0;                           // Allocates p_cpu_ if necessary and copies p_device_ memory into it
+  virtual void CopyCpuToDevice() = 0;
+  virtual void CopyFrom(size_t begin_dest, DeviceMemoryBase& source, size_t begin_source, size_t size_in_bytes) = 0;
 
   uint8_t* p_device_{};
   uint8_t* p_cpu_{};
@@ -28,15 +30,16 @@ template <typename T>
 struct DeviceMemory : DeviceMemoryBase {
   size_t Size() const { return size_in_bytes_ / sizeof(T); }
   std::span<T> DeviceSpan() { return std::span<T>(reinterpret_cast<T*>(p_device_), Size()); }
-  std::span<T> CpuSpan() {
-    if (!p_cpu_) GetOnCpu();
+  std::span<T> CopyToCpu() {
+    CopyDeviceToCpu();
     return std::span<T>(reinterpret_cast<T*>(p_cpu_), Size());
   }
 
-  DeviceMemorySpan<T> subspan() { return DeviceMemorySpan<T>(*this, 0, Size()); }
+  operator DeviceMemorySpan<T>() { return DeviceMemorySpan<T>(*this, 0, Size()); }
+
   DeviceMemorySpan<T> subspan(size_t begin, size_t length) { return DeviceMemorySpan<T>(*this, begin, length); }
-  DeviceMemorySpan<T> subspan_cpu(std::span<T> span) { return DeviceMemorySpan<T>(*this, span.data() - CpuSpan().data(), span.size()); }
-  DeviceMemorySpan<T> subspan_device(std::span<T> span) { return DeviceMemorySpan<T>(*this, span.data() - DeviceSpan().data(), span.size()); }
+  DeviceMemorySpan<T> subspan_cpu(std::span<T> span) { return DeviceMemorySpan<T>(*this, span.data() - reinterpret_cast<T*>(p_cpu_), span.size()); }
+  DeviceMemorySpan<T> subspan_device(std::span<T> span) { return DeviceMemorySpan<T>(*this, span.data() - reinterpret_cast<T*>(p_device_), span.size()); }
 
  private:
   static void CheckSize() {
@@ -53,12 +56,19 @@ struct DeviceMemorySpan {
   DeviceMemorySpan(DeviceMemory<T>& memory, size_t begin, size_t length)
       : p_device_memory_{std::static_pointer_cast<DeviceMemory<T>>(memory.shared_from_this())}, begin_{begin}, length_{length} {}
 
+  DeviceMemory<T>& GetDeviceMemory() { return *p_device_memory_; }
+
+  bool empty() const { return length_ == 0; }
   size_t size() const { return length_; }
-  std::span<T> CpuSpan() { return p_device_memory_->CpuSpan().subspan(begin_, length_); }
+  std::span<T> DeviceSpan() { return p_device_memory_->DeviceSpan().subspan(begin_, length_); }
+  std::span<T> CopyDeviceToCpu() { return p_device_memory_->CopyToCpu().subspan(begin_, length_); }
+  void CopyCpuToDevice() { p_device_memory_->CopyCpuToDevice(); }
+
+  DeviceMemorySpan<T> subspan(size_t begin, size_t length) { return DeviceMemorySpan<T>(*p_device_memory_, begin_ + begin, length); }
 
  private:
   std::shared_ptr<DeviceMemory<T>> p_device_memory_;
-  size_t begin_, length_;  // Subspan of p_device_memory_, relative to original memory block
+  size_t begin_{}, length_{};  // Subspan of p_device_memory_, relative to original memory block
 };
 
 template <typename T>
@@ -76,8 +86,20 @@ struct DeviceInterface {
     return std::static_pointer_cast<DeviceMemory<T>>(AllocateBase(sizeof(T) * count, cpu_accessible));
   }
 
+  // Wraps an existing memory block, useful for tensors. Use WrapTensor for OrtValue vs calling this directly
+  virtual std::shared_ptr<DeviceMemoryBase> WrapMemoryBase(void* memory, size_t size) = 0;
+  template <typename T>
+  std::shared_ptr<DeviceMemory<T>> WrapMemory(std::span<T> memory) {
+    return std::static_pointer_cast<DeviceMemory<T>>(WrapMemoryBase(memory.data(), memory.size_bytes()));
+  }
+
   virtual std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) = 0;
   virtual std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) = 0;
+
+  virtual cudaStream_t GetCudaStream() {
+    assert(false);
+    return nullptr;
+  }  // Temporary until we fully factor out providers
 };
 
 namespace Location {
@@ -93,6 +115,7 @@ struct cpu_span : std::span<T> {
 template <typename T>
 struct gpu_span : std::span<T> {
   using std::span<T>::span;
+  explicit gpu_span(std::span<T> v) : std::span<T>(v) {}
 };
 
 template <typename T>
@@ -152,35 +175,6 @@ cuda_host_unique_ptr<T> CudaMallocHostArray(size_t count, cpu_span<T>* p_span = 
   return cuda_host_unique_ptr<T>{p};
 }
 
-struct cuda_stream_holder {
-  void Create() {
-    assert(!v_);
-    cudaStreamCreate(&v_);
-  }
-
-  ~cuda_stream_holder() {
-    if (v_)
-      (void)cudaStreamDestroy(v_);
-  }
-
-  operator cudaStream_t() const { return v_; }
-  cudaStream_t get() const { return v_; }
-
- private:
-  cudaStream_t v_{};
-};
-#else
-struct cuda_stream_holder {
-  void Create() {
-    throw std::runtime_error("Trying to create a cuda stream in a non cuda build");
-  }
-
-  operator cudaStream_t() const { return v_; }
-  cudaStream_t get() const { return v_; }
-
- private:
-  cudaStream_t v_{};
-};
 #endif
 
 #if USE_CUDA
