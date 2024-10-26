@@ -60,7 +60,7 @@ struct GpuMemory final : DeviceBuffer {
   const char* GetType() const override { return label_cuda; }
 
   void AllocateCpu() override {
-    if(!p_cpu_)
+    if (!p_cpu_)
       ::cudaHostAlloc(&p_cpu_, size_in_bytes_, 0);
   }
 

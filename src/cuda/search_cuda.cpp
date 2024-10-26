@@ -18,7 +18,6 @@ void OnCudaError(cudaError_t error) {
 
 Search_Cuda::Search_Cuda(const GeneratorParams& params)
     : Search{params} {
-
   // The original inputs are not expanded, this expands them in place into the sequences
   {
     auto input_sequences = params.input_ids;

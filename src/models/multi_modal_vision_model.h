@@ -32,7 +32,7 @@ struct EmbeddingState : State {
   EmbeddingState& operator=(const EmbeddingState&) = delete;
 
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t> next_tokens,
-                          DeviceSpan<int32_t> next_indices = {}) override;
+                        DeviceSpan<int32_t> next_indices = {}) override;
 
  private:
   friend struct MultiModalPipelineState;
@@ -56,7 +56,7 @@ struct VisionState : State {
   VisionState& operator=(const VisionState&) = delete;
 
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t> next_tokens,
-                          DeviceSpan<int32_t> next_indices = {}) override;
+                        DeviceSpan<int32_t> next_indices = {}) override;
 
  private:
   friend struct MultiModalPipelineState;
@@ -76,7 +76,7 @@ struct DecoderState : State {
   DecoderState& operator=(const DecoderState&) = delete;
 
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t> next_tokens,
-                          DeviceSpan<int32_t> next_indices) override;
+                        DeviceSpan<int32_t> next_indices) override;
 
   const CapturedGraphInfo* GetCapturedGraphInfo() const override { return captured_graph_info_; };
 
@@ -101,7 +101,7 @@ struct MultiModalPipelineState : State {
   MultiModalPipelineState& operator=(const MultiModalPipelineState&) = delete;
 
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t> next_tokens,
-                          DeviceSpan<int32_t> next_indices) override;
+                        DeviceSpan<int32_t> next_indices) override;
 
  private:
   void UpdateInputsOutputs(const DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices,

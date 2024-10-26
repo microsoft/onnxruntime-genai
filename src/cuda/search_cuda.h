@@ -30,7 +30,7 @@ struct Search_Cuda : Search {
   gpu_span<bool> eos_meet_;  // shape (beam_size*batch_size)
   cuda_unique_ptr<bool> eos_meet_buffer_;
 
-  gpu_span<int32_t> next_tokens_;  // shape (beam_size*batch_size)
+  gpu_span<int32_t> next_tokens_;        // shape (beam_size*batch_size)
   DeviceSpan<float> next_token_scores_;  // shape (beam_size*batch_size, vocab_size)
 
   cuda_host_unique_ptr<bool> done_cpu_;
@@ -48,7 +48,6 @@ struct GreedySearch_Cuda : Search_Cuda {
   void SampleTopKTopP(int k, float p, float t) override;
 
  private:
-
   DeviceSpan<int32_t> next_tokens_buffer_;
   std::unique_ptr<cuda::ArgMaxData> argmaxdata_;
   std::unique_ptr<cuda::SamplingData> samplingdata_;
