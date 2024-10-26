@@ -96,7 +96,7 @@ struct GenaiInterfaceImpl : GenaiInterface {
   void DumpSpan(std::ostream& stream, std::span<const float> values) override { return DumpSpan(stream, values); }
   void DumpSpan(std::ostream& stream, std::span<const int> values) override { return DumpSpan(stream, values); }
 
-  void Sequences_AfterAppendNextTokens(Sequences* p_this, DeviceMemorySpan<int32_t> next_tokens) override { return p_this->AfterAppendNextTokens(next_tokens); }
+  void Sequences_AfterAppendNextTokens(Sequences* p_this, DeviceSpan<int32_t> next_tokens) override { return p_this->AfterAppendNextTokens(next_tokens); }
 } g_genai;
 
 #if USE_CUDA
@@ -325,7 +325,7 @@ void Generator::GenerateNextToken() {
   }
 }
 
-DeviceMemorySpan<int32_t> Generator::GetSequence(size_t index) const {
+DeviceSpan<int32_t> Generator::GetSequence(size_t index) const {
   return search_->GetSequence(index);
 }
 
@@ -356,8 +356,4 @@ cudaError_t cudaMemcpyAsync(void* dst, const void* src, size_t count, cudaMemcpy
 cudaError_t cudaMemcpy(void* dst, const void* src, size_t count, cudaMemcpyKind kind) { return Generators::GetCudaInterface()->cudaMemcpy(dst, src, count, kind); }
 cudaError_t cudaMemsetAsync(void* ptr, int value, size_t count, cudaStream_t stream) { return Generators::GetCudaInterface()->cudaMemsetAsync(ptr, value, count, stream); }
 cudaError_t cudaMemset(void* ptr, int value, size_t count) { return Generators::GetCudaInterface()->cudaMemset(ptr, value, count); }
-cudaError_t cudaMalloc(void** ptr, size_t size) { return Generators::GetCudaInterface()->cudaMalloc(ptr, size); }
-cudaError_t cudaFree(void* ptr) { return Generators::GetCudaInterface()->cudaFree(ptr); }
-cudaError_t cudaHostAlloc(void** ptr, size_t size, unsigned int flags) { return Generators::GetCudaInterface()->cudaHostAlloc(ptr, size, flags); }
-cudaError_t cudaFreeHost(void* ptr) { return Generators::GetCudaInterface()->cudaFreeHost(ptr); }
 #endif

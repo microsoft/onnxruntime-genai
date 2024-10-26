@@ -14,7 +14,7 @@ struct GenaiInterface {
   virtual void DumpSpan(std::ostream& stream, std::span<const float> values) = 0;
   virtual void DumpSpan(std::ostream& stream, std::span<const int> values) = 0;
 
-  virtual void Sequences_AfterAppendNextTokens(Generators::Sequences* p_this, Generators::DeviceMemorySpan<int32_t> next_tokens) = 0;
+  virtual void Sequences_AfterAppendNextTokens(Generators::Sequences* p_this, Generators::DeviceSpan<int32_t> next_tokens) = 0;
 };
 
 namespace Generators {
@@ -42,10 +42,6 @@ struct CudaInterface : DeviceInterface {
   virtual cudaError_t cudaMemcpy(void* dst, const void* src, size_t count, cudaMemcpyKind kind) = 0;
   virtual cudaError_t cudaMemsetAsync(void* ptr, int value, size_t count, cudaStream_t stream) = 0;
   virtual cudaError_t cudaMemset(void* ptr, int value, size_t count) = 0;
-  virtual cudaError_t cudaMalloc(void** ptr, size_t size) = 0;
-  virtual cudaError_t cudaFree(void* ptr) = 0;
-  virtual cudaError_t cudaHostAlloc(void** ptr, size_t size, unsigned int flags) = 0;
-  virtual cudaError_t cudaFreeHost(void* ptr) = 0;
 };
 #endif
 }  // namespace Generators

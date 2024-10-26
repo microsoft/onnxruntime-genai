@@ -9,11 +9,11 @@ Gpt_Model::Gpt_Model(std::unique_ptr<Config> config, OrtEnv& ort_env)
   InitDeviceAllocator(*session_decoder_);
 }
 
-std::unique_ptr<State> Gpt_Model::CreateState(DeviceMemorySpan<int32_t> sequence_lengths, const GeneratorParams& params) const {
+std::unique_ptr<State> Gpt_Model::CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const {
   return std::make_unique<Gpt_State>(*this, sequence_lengths, params);
 }
 
-Gpt_State::Gpt_State(const Gpt_Model& model, DeviceMemorySpan<int32_t> sequence_lengths_unk, const GeneratorParams& params)
+Gpt_State::Gpt_State(const Gpt_Model& model, DeviceSpan<int32_t> sequence_lengths_unk, const GeneratorParams& params)
     : State{params, model},
       model_{model},
       position_inputs_{model, *this, sequence_lengths_unk} {
@@ -24,7 +24,7 @@ Gpt_State::Gpt_State(const Gpt_Model& model, DeviceMemorySpan<int32_t> sequence_
   extra_inputs_.Add();
 }
 
-DeviceMemorySpan<float> Gpt_State::Run(int current_length, DeviceMemorySpan<int32_t> next_tokens, DeviceMemorySpan<int32_t> next_indices) {
+DeviceSpan<float> Gpt_State::Run(int current_length, DeviceSpan<int32_t> next_tokens, DeviceSpan<int32_t> next_indices) {
   int batch_size = static_cast<int>(input_ids_.GetShape()[0]);
 
   if (!first_run_) {
@@ -35,7 +35,7 @@ DeviceMemorySpan<float> Gpt_State::Run(int current_length, DeviceMemorySpan<int3
   return logits_.Get();
 }
 
-void Gpt_State::UpdateInputsOutputs(DeviceMemorySpan<int32_t>& next_tokens, DeviceMemorySpan<int32_t> beam_indices, int current_length) {
+void Gpt_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int current_length) {
   input_ids_.Update(next_tokens);
   position_inputs_.Update(current_length);
   kv_cache_.Update(beam_indices, current_length);

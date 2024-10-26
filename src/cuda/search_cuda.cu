@@ -1,7 +1,8 @@
 #include <cuda_runtime.h>
 #include <cub/cub.cuh>
 #include <algorithm>
-#include "generators.h"
+#include "../generators.h"
+#include "cuda_common.h"
 #include "interface.h"
 #include "search_cuda.cuh"
 

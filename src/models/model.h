@@ -30,7 +30,7 @@ struct State {
   State(const GeneratorParams& params, const Model& model_);
   virtual ~State();
 
-  virtual DeviceMemorySpan<float> Run(int current_length, DeviceMemorySpan<int32_t> next_tokens, DeviceMemorySpan<int32_t> next_indices = {}) = 0;
+  virtual DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t> next_tokens, DeviceSpan<int32_t> next_indices = {}) = 0;
   virtual const CapturedGraphInfo* GetCapturedGraphInfo() const { return nullptr; }
   virtual void Finalize() {}
 
@@ -129,7 +129,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
 
   std::shared_ptr<MultiModalProcessor> CreateMultiModalProcessor() const;
 
-  virtual std::unique_ptr<State> CreateState(DeviceMemorySpan<int32_t> sequence_lengths, const GeneratorParams& params) const = 0;
+  virtual std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const = 0;
 
   std::unique_ptr<OrtValue> ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams) const;
 

@@ -9,6 +9,9 @@
 #include "../search.h"
 #include "../models/model.h"
 #include "../logging.h"
+#if USE_CUDA
+#include "../cuda/cuda_common.h"
+#endif
 
 using namespace pybind11::literals;
 
@@ -191,21 +194,9 @@ pybind11::array ToNumpy(OrtValue* v, const Generators::Model& model) {
 }
 namespace Generators {
 
-// A roaming array is one that can be in CPU or GPU memory, and will copy the memory as needed to be used from anywhere
-template <typename T>
-struct PyRoamingArray : RoamingArray<T> {
-  pybind11::array_t<T> GetNumpy() {
-    auto v = this->GetCPU();
-    py_cpu_array_ = pybind11::array_t<T>({v.size()}, {sizeof(T)}, v.data(), pybind11::capsule(v.data(), [](void*) {}));
-    return py_cpu_array_;
-  }
-
-  pybind11::array_t<T> py_cpu_array_;
-};
-
 template <typename T>
 struct PyDeviceMemorySpan {
-  void operator=(DeviceMemorySpan<T> span) {
+  void operator=(DeviceSpan<T> span) {
     span_ = std::move(span);
   }
 
@@ -216,17 +207,9 @@ struct PyDeviceMemorySpan {
   }
 
  private:
-  DeviceMemorySpan<T> span_;
+  DeviceSpan<T> span_;
   pybind11::array_t<T> py_cpu_array_;
 };
-
-template <typename T>
-void Declare_DeviceArray(pybind11::module& m, const char* name) {
-  using Type = PyRoamingArray<T>;
-  pybind11::class_<Type>(m, name)
-      .def(
-          "get_array", [](Type& t) -> pybind11::array_t<T> { return t.GetNumpy(); }, pybind11::return_value_policy::reference_internal);
-}
 
 struct PyGeneratorParams {
   PyGeneratorParams(const Model& model) : params_{std::make_shared<GeneratorParams>(model)} {
@@ -340,7 +323,7 @@ struct PyGenerator {
   void SetLogits(pybind11::array_t<float> logits) {
     logits_ = logits;
     logits_memory_ = generator_->search_->params_->p_device->WrapMemory<float>(ToSpan(logits_));
-    generator_->search_->SetLogits(*logits_memory_);
+    generator_->search_->SetLogits(logits_memory_);
   }
 
   void GenerateNextToken() {
@@ -361,7 +344,7 @@ struct PyGenerator {
   PyDeviceMemorySpan<int32_t> py_sequence_;
   PyDeviceMemorySpan<float> py_logits_;
   pybind11::array_t<float> logits_;  // Logits passed in from python, to keep the memory alive
-  std::shared_ptr<DeviceMemory<float>> logits_memory_;
+  DeviceSpan<float> logits_memory_;
 };
 
 void SetLogOptions(const pybind11::kwargs& dict) {
@@ -402,9 +385,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   // So that python users can catch OrtExceptions specifically
   pybind11::register_exception<Ort::Exception>(m, "OrtException");
-
-  Declare_DeviceArray<float>(m, "DeviceArray_float");
-  Declare_DeviceArray<int32_t>(m, "DeviceArray_int32");
 
   pybind11::class_<PyGeneratorParams>(m, "GeneratorParams")
       .def(pybind11::init<const Model&>())

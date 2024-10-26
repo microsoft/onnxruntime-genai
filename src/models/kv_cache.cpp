@@ -54,7 +54,7 @@ void KV_Cache_Combined::Add() {
   }
 }
 
-void KV_Cache_Combined::Update(DeviceMemorySpan<int32_t> beam_indices, int current_length) {
+void KV_Cache_Combined::Update(DeviceSpan<int32_t> beam_indices, int current_length) {
   assert(state_.params_->search.num_beams == 1 || !beam_indices.empty());  // We require beam_indices if we're a beam search
 
   for (int i = 0; i < layer_count_; i++) {
@@ -75,7 +75,7 @@ void KV_Cache_Combined::Update(DeviceMemorySpan<int32_t> beam_indices, int curre
 
 // Copy present state to past state reordered by the beam_indices
 template <typename ScoreType>
-void KV_Cache_Combined::PickPastState(DeviceMemorySpan<int32_t> beam_indices_device, int index) {
+void KV_Cache_Combined::PickPastState(DeviceSpan<int32_t> beam_indices_device, int index) {
   std::span<const int32_t> beam_indices=beam_indices_device.CopyDeviceToCpu();
   auto block_size_per_beam = shape_[2] * shape_[3] * shape_[4];
   auto past_key_size = shape_[1] * block_size_per_beam;
@@ -116,7 +116,7 @@ void KV_Cache_Combined::PickPastState(DeviceMemorySpan<int32_t> beam_indices_dev
   pasts_[index] = std::move(past);
 }
 
-void KV_Cache_Combined::PickPastState(DeviceMemorySpan<int32_t> beam_indices, int index) {
+void KV_Cache_Combined::PickPastState(DeviceSpan<int32_t> beam_indices, int index) {
   if (type_ == Ort::TypeToTensorType<float>) {
     PickPastState<float>(beam_indices, index);
   } else {
@@ -201,7 +201,7 @@ void KV_Cache::Add() {
   }
 }
 
-void KV_Cache::Update(DeviceMemorySpan<int32_t> beam_indices, int current_length) {
+void KV_Cache::Update(DeviceSpan<int32_t> beam_indices, int current_length) {
   // If we're sharing past & present buffers there is nothing to do here, so early exit
   if (past_present_share_buffer_)
     return;
@@ -224,8 +224,8 @@ void KV_Cache::Update(DeviceMemorySpan<int32_t> beam_indices, int current_length
 
 // Copy present state to past state reordered by the beam_indices
 template <typename ScoreType>
-void KV_Cache::PickPastState(DeviceMemorySpan<int32_t> beam_indices_device, int index) {
-  std::span<int32_t> beam_indices = beam_indices_device.DeviceSpan();
+void KV_Cache::PickPastState(DeviceSpan<int32_t> beam_indices_device, int index) {
+  std::span<int32_t> beam_indices = beam_indices_device.Span();
   auto block_size_per_beam = shape_[1] * shape_[2] * shape_[3];
   auto element_count = shape_[0] * block_size_per_beam;
 
@@ -256,7 +256,7 @@ void KV_Cache::PickPastState(DeviceMemorySpan<int32_t> beam_indices_device, int 
   pasts_[index] = std::move(past_value);
 }
 
-void KV_Cache::PickPastState(DeviceMemorySpan<int32_t> beam_indices, int index) {
+void KV_Cache::PickPastState(DeviceSpan<int32_t> beam_indices, int index) {
   if (type_ == Ort::TypeToTensorType<float>) {
     PickPastState<float>(beam_indices, index);
   } else {

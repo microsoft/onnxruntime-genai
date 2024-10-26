@@ -9,7 +9,7 @@ namespace Generators {
 
 const char* label_cpu = "cpu";
 
-struct CpuMemory : DeviceMemoryBase {
+struct CpuMemory final : DeviceBuffer {
   CpuMemory(size_t size) : owned_{true} {
     size_in_bytes_ = size;
     p_cpu_ = p_device_ = new uint8_t[size_in_bytes_];
@@ -26,9 +26,10 @@ struct CpuMemory : DeviceMemoryBase {
   }
 
   const char* GetType() const override { return label_cpu; }
+  void AllocateCpu() override {}      // Nothing to do, device is also CPU
   void CopyDeviceToCpu() override {}  // Nothing to do, device is also CPU
   void CopyCpuToDevice() override {}  // Nothing to do, device is also CPU
-  void CopyFrom(size_t begin_dest, DeviceMemoryBase& source, size_t begin_source, size_t size_in_bytes) override {
+  void CopyFrom(size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) override {
     if (GetType() == label_cpu)
       memcpy(p_device_ + begin_dest, source.p_device_ + begin_source, size_in_bytes);
     else
@@ -38,30 +39,13 @@ struct CpuMemory : DeviceMemoryBase {
   bool owned_;
 };
 
-struct CpuTensorMemory : DeviceMemoryBase {
-  CpuTensorMemory(uint8_t* p, size_t size) {
-    size_in_bytes_ = size;
-    p_cpu_ = p_device_ = p;
-  }
-
-  const char* GetType() const override { return label_cpu; }
-  void CopyDeviceToCpu() override {}  // Nothing to do, device is also CPU
-  void CopyCpuToDevice() override {}  // Nothing to do, device is also CPU
-  void CopyFrom(size_t begin_dest, DeviceMemoryBase& source, size_t begin_source, size_t size_in_bytes) override {
-    if (GetType() == label_cpu)
-      memcpy(p_device_ + begin_dest, source.p_device_ + begin_source, size_in_bytes);
-    else
-      throw std::runtime_error("CpuTensorMemory::CopyFromDevice not implemented for " + std::string(source.GetType()));
-  }
-};
-
 struct CpuInterface : DeviceInterface {
-  std::shared_ptr<DeviceMemoryBase> AllocateBase(size_t size, bool cpu_accessible) override {
+  std::shared_ptr<DeviceBuffer> AllocateBase(size_t size, bool cpu_accessible) override {
     // cpu_accessible is ignored, as with the cpu, the device is also the cpu
     return std::make_shared<CpuMemory>(size);
   }
 
-  std::shared_ptr<DeviceMemoryBase> WrapMemoryBase(void* p, size_t size) override {
+  std::shared_ptr<DeviceBuffer> WrapMemoryBase(void* p, size_t size) override {
     return std::make_shared<CpuMemory>(p, size);
   }
 

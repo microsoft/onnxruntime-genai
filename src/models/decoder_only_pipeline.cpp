@@ -34,7 +34,7 @@ DecoderOnlyPipelineModel::DecoderOnlyPipelineModel(std::unique_ptr<Config> confi
   }
 }
 
-std::unique_ptr<State> DecoderOnlyPipelineModel::CreateState(DeviceMemorySpan<int32_t> sequence_lengths,
+std::unique_ptr<State> DecoderOnlyPipelineModel::CreateState(DeviceSpan<int32_t> sequence_lengths,
                                                              const GeneratorParams& params) const {
   return std::make_unique<DecoderOnlyPipelineState>(*this, sequence_lengths, params);
 }
@@ -79,15 +79,15 @@ bool IntermediatePipelineState::SupportsPrimaryDevice() const {
   return false;
 }
 
-DeviceMemorySpan<float> IntermediatePipelineState::Run(int current_length, DeviceMemorySpan<int32_t> next_tokens,
-                                                   DeviceMemorySpan<int32_t> next_indices) {
+DeviceSpan<float> IntermediatePipelineState::Run(int current_length, DeviceSpan<int32_t> next_tokens,
+                                                   DeviceSpan<int32_t> next_indices) {
   State::Run(*model_.sessions_[id_], params_->BatchBeamSize());
 
   return {};
 }
 
 DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineModel& model,
-                                                   DeviceMemorySpan<int32_t> sequence_lengths,
+                                                   DeviceSpan<int32_t> sequence_lengths,
                                                    const GeneratorParams& params)
     : State{params, model},
       model_{model},
@@ -106,8 +106,8 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
   }
 }
 
-DeviceMemorySpan<float> DecoderOnlyPipelineState::Run(int current_length, DeviceMemorySpan<int32_t> next_tokens,
-                                                  DeviceMemorySpan<int32_t> next_indices) {
+DeviceSpan<float> DecoderOnlyPipelineState::Run(int current_length, DeviceSpan<int32_t> next_tokens,
+                                                  DeviceSpan<int32_t> next_indices) {
   if (!first_run_) {
     UpdateInputsOutputs(next_tokens, next_indices, current_length);
   }
@@ -239,8 +239,8 @@ DeviceMemorySpan<float> DecoderOnlyPipelineState::Run(int current_length, Device
   return logits_.Get();
 }
 
-void DecoderOnlyPipelineState::UpdateInputsOutputs(const DeviceMemorySpan<int32_t>& next_tokens_unk,
-                                                   DeviceMemorySpan<int32_t> beam_indices, int current_length) {
+void DecoderOnlyPipelineState::UpdateInputsOutputs(const DeviceSpan<int32_t>& next_tokens_unk,
+                                                   DeviceSpan<int32_t> beam_indices, int current_length) {
   input_ids_.Update(next_tokens_unk);
   position_inputs_.Update(current_length);
   if (kv_cache_) kv_cache_->Update(beam_indices, current_length);

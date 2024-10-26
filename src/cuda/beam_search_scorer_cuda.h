@@ -14,10 +14,10 @@ struct BeamSearchScorer_Cuda {
   bool IsDone() const { return false; }  // For CUDA we speculatively run the next step while we wait for the GPU to report status. We use 'IsDoneLater()' for this
   bool IsDoneLater() const;
 
-  DeviceMemorySpan<float> GetNextScores() { return next_beam_scores_; }
-  DeviceMemorySpan<int32_t> GetNextTokens() { return next_beam_tokens_; }
-  DeviceMemorySpan<int32_t> GetNextIndices() { return next_beam_indices_; }
-  DeviceMemorySpan<int32_t> GetBeamHypothesis(size_t batch_id, size_t beam_id) const;
+  DeviceSpan<float> GetNextScores() { return next_beam_scores_; }
+  DeviceSpan<int32_t> GetNextTokens() { return next_beam_tokens_; }
+  DeviceSpan<int32_t> GetNextIndices() { return next_beam_indices_; }
+  DeviceSpan<int32_t> GetBeamHypothesis(size_t batch_id, size_t beam_id);
 
  private:
   mutable cuda_event_holder event_process_complete_;
@@ -25,18 +25,12 @@ struct BeamSearchScorer_Cuda {
   cuda_unique_ptr<cuda::BeamScorerState> state_gpu_;
   cudaStream_t stream_;
 
-  std::shared_ptr<DeviceMemory<float>> next_beam_scores_ptr_;
-  DeviceMemorySpan<float> next_beam_scores_;
+  DeviceSpan<float> next_beam_scores_;
+  DeviceSpan<int32_t> next_beam_tokens_;
+  DeviceSpan<int32_t> next_beam_indices_;
 
-  std::shared_ptr<DeviceMemory<int32_t>> next_beam_tokens_ptr_;
-  DeviceMemorySpan<int32_t> next_beam_tokens_;
-
-  std::shared_ptr<DeviceMemory<int32_t>> next_beam_indices_ptr_;
-  DeviceMemorySpan<int32_t> next_beam_indices_;
-
-  std::shared_ptr<DeviceMemory<int32_t>> hypothesis_buffer_ptr_;  // Allocated buffer to hold all hypotheses
-  std::span<int32_t> hypothesis_buffer_;                          // Span of the allocated buffer
-  size_t hypothesis_buffer_used_{};                               // Offset of available buffer, or length of used buffer.
+  DeviceSpan<int32_t> hypothesis_buffer_;  // Allocated buffer to hold all hypotheses
+  size_t hypothesis_buffer_used_{};              // Offset of available buffer, or length of used buffer.
 
   cuda_unique_ptr<cuda::HypothesisScore> hypothesis_scores_ptr_;  // num_beams_ * batch_size_, divided into num_beams_ chunks per BeamHypothesis in beam_hyps_
   cuda_unique_ptr<cuda::BeamHypotheses> beam_hyps_ptr_;

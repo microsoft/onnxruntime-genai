@@ -4,6 +4,7 @@
 #include "model.h"
 #include "logits.h"
 #if USE_CUDA
+#include "../cuda/cuda_common.h"
 #include "kernels.h"
 #endif
 
@@ -27,8 +28,9 @@ Logits::Logits(State& state)
 #if USE_CUDA
   if (model_.device_type_ == DeviceType::CUDA && !model_.config_->model.eos_token_ids.empty()) {
     auto& cpu_ids = model_.config_->model.eos_token_ids;
-    cuda_eos_token_ids_ptr_ = CudaMallocArray<int32_t>(cpu_ids.size(), &cuda_eos_token_ids_);
-    cudaMemcpyAsync(cuda_eos_token_ids_.data(), cpu_ids.data(), cpu_ids.size() * sizeof(int32_t), ::cudaMemcpyHostToDevice, model_.cuda_stream_);
+    cuda_eos_token_ids_ = state_.params_->p_device->Allocate<int32_t>(cpu_ids.size(), false /*cpu_accessible*/);
+    copy(std::span<const int32_t>{cpu_ids}, cuda_eos_token_ids_.CpuSpan());
+    cuda_eos_token_ids_.CopyCpuToDevice();
   }
 #endif
 }
@@ -36,7 +38,7 @@ Logits::Logits(State& state)
 #pragma warning(push)
 #pragma warning(disable : 4189)  // local variable is initialized but not referenced
 
-DeviceMemorySpan<float> Logits::Get() {
+DeviceSpan<float> Logits::Get() {
   size_t element_count = shape_[0] * shape_[1] * shape_[2];
 
   // First iteration? Then copy the logits over to a {batch_beams, 1, vocab_size} tensor
@@ -152,20 +154,20 @@ DeviceMemorySpan<float> Logits::Get() {
 
   assert(shape_[1] == 1);
 
-  if (!logits_ || logits_of_last_token->GetTensorMutableRawData() != logits_->p_device_)
+  if (logits_.empty() || logits_of_last_token->GetTensorMutableRawData() != logits_.Span().data())
     logits_ = WrapTensor<float>(*state_.params_->p_device, *logits_of_last_token);
 
 #if USE_CUDA
   if (model_.device_type_ == DeviceType::CUDA) {
-    if (cuda_eos_token_ids_ptr_)
+    if (!cuda_eos_token_ids_.empty())
       cuda::LaunchHandleEOSArray(
-          logits_->DeviceSpan().data(),
+          logits_.Span().data(),
           static_cast<int>(shape_[0]) /* batch_beam_size*/,
           static_cast<int>(shape_[2]) /* vocab_size */,
-          cuda_eos_token_ids_.data(),
+          cuda_eos_token_ids_.Span().data(),
           static_cast<int>(cuda_eos_token_ids_.size()),
           model_.cuda_stream_);
-    return *logits_;
+    return logits_;
   }
 #elif USE_DML
   if (model_.device_type_ == DeviceType::DML) {
@@ -189,9 +191,8 @@ DeviceMemorySpan<float> Logits::Get() {
   }
 #endif
 
-  assert(logits_->IsCpuAccessible());
-  HandleEOSArray(logits_->DeviceSpan());
-  return *logits_;
+  HandleEOSArray(logits_.Span());
+  return logits_;
 }
 
 #pragma warning(pop)

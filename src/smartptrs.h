@@ -10,88 +10,73 @@ struct Search;
 struct Sequences;
 struct GeneratorParams;
 
-struct DeviceMemoryBase : std::enable_shared_from_this<DeviceMemoryBase> {
-  virtual ~DeviceMemoryBase() {}
-  virtual const char* GetType() const = 0;                      // Returns "cuda" "cuda_cpu" "directml" etc
+struct DeviceBuffer : std::enable_shared_from_this<DeviceBuffer> {
+  virtual ~DeviceBuffer() {}
+  virtual const char* GetType() const = 0;  // Returns "cuda" "cuda_cpu" "directml" etc
+
   bool IsCpuAccessible() const { return p_device_ == p_cpu_; }  // Device memory is CPU accessible if it's the same memory
+  virtual void AllocateCpu() = 0;                               // Allocates p_cpu_ if necessary (using appropriate memory type for interop)
   virtual void CopyDeviceToCpu() = 0;                           // Allocates p_cpu_ if necessary and copies p_device_ memory into it
   virtual void CopyCpuToDevice() = 0;
-  virtual void CopyFrom(size_t begin_dest, DeviceMemoryBase& source, size_t begin_source, size_t size_in_bytes) = 0;
+  virtual void CopyFrom(size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) = 0;
 
   uint8_t* p_device_{};
   uint8_t* p_cpu_{};
   size_t size_in_bytes_{};
 };
 
-template <typename T>
-struct DeviceMemorySpan;
-
-template <typename T>
-struct DeviceMemory : DeviceMemoryBase {
-  size_t Size() const { return size_in_bytes_ / sizeof(T); }
-  std::span<T> DeviceSpan() { return std::span<T>(reinterpret_cast<T*>(p_device_), Size()); }
-  std::span<T> CopyToCpu() {
-    CopyDeviceToCpu();
-    return std::span<T>(reinterpret_cast<T*>(p_cpu_), Size());
-  }
-
-  operator DeviceMemorySpan<T>() { return DeviceMemorySpan<T>(*this, 0, Size()); }
-
-  DeviceMemorySpan<T> subspan(size_t begin, size_t length) { return DeviceMemorySpan<T>(*this, begin, length); }
-  DeviceMemorySpan<T> subspan_cpu(std::span<T> span) { return DeviceMemorySpan<T>(*this, span.data() - reinterpret_cast<T*>(p_cpu_), span.size()); }
-  DeviceMemorySpan<T> subspan_device(std::span<T> span) { return DeviceMemorySpan<T>(*this, span.data() - reinterpret_cast<T*>(p_device_), span.size()); }
-
- private:
-  static void CheckSize() {
-    // Ensure we're the same size as DeviceMemory so we can be cast to it
-    // Has to be in a method because sizeof(TDeviceMemory) is not known outside of methods
-    static_assert(sizeof(DeviceMemory) == sizeof(DeviceMemoryBase));
-  }
-};
-
 // Many times we want to pass a subspan of device memory, this handles the memory differences
 template <typename T>
-struct DeviceMemorySpan {
-  DeviceMemorySpan() = default;
-  DeviceMemorySpan(DeviceMemory<T>& memory, size_t begin, size_t length)
-      : p_device_memory_{std::static_pointer_cast<DeviceMemory<T>>(memory.shared_from_this())}, begin_{begin}, length_{length} {}
-
-  DeviceMemory<T>& GetDeviceMemory() { return *p_device_memory_; }
+struct DeviceSpan {
+  DeviceSpan() = default;
+  DeviceSpan(std::shared_ptr<DeviceBuffer>&& memory)
+      : p_device_memory_{std::move(memory)}, begin_{}, length_{p_device_memory_->size_in_bytes_ / sizeof(T)} {}
+  DeviceSpan(DeviceBuffer& memory, size_t begin, size_t length)
+      : p_device_memory_{memory.shared_from_this()}, begin_{begin}, length_{length} {}
 
   bool empty() const { return length_ == 0; }
   size_t size() const { return length_; }
-  std::span<T> DeviceSpan() { return p_device_memory_->DeviceSpan().subspan(begin_, length_); }
-  std::span<T> CopyDeviceToCpu() { return p_device_memory_->CopyToCpu().subspan(begin_, length_); }
+
+  std::span<T> Span() { return std::span<T>{reinterpret_cast<T*>(p_device_memory_->p_device_) + begin_, length_}; }
+  std::span<T> CpuSpan() {
+    p_device_memory_->AllocateCpu();
+    return std::span<T>{reinterpret_cast<T*>(p_device_memory_->p_cpu_) + begin_, length_};
+  }
+  std::span<T> CopyDeviceToCpu() {
+    p_device_memory_->CopyDeviceToCpu();
+    return std::span<T>{reinterpret_cast<T*>(p_device_memory_->p_cpu_) + begin_, length_};
+  }
   void CopyCpuToDevice() { p_device_memory_->CopyCpuToDevice(); }
 
-  DeviceMemorySpan<T> subspan(size_t begin, size_t length) { return DeviceMemorySpan<T>(*p_device_memory_, begin_ + begin, length); }
+  DeviceSpan<T> subspan(size_t begin, size_t length) { return DeviceSpan<T>(*p_device_memory_, begin_ + begin, length); }
+  DeviceSpan<T> subspan_device(std::span<T> span) { return DeviceSpan<T>(*p_device_memory_, span.data() - reinterpret_cast<T*>(p_device_memory_->p_device_), span.size()); }
+
+  DeviceBuffer& GetDeviceMemory() { return *p_device_memory_; }
 
  private:
-  std::shared_ptr<DeviceMemory<T>> p_device_memory_;
+  std::shared_ptr<DeviceBuffer> p_device_memory_;
   size_t begin_{}, length_{};  // Subspan of p_device_memory_, relative to original memory block
 };
 
+#if 0
 template <typename T>
-void copy(DeviceMemorySpan<const T> source, DeviceMemorySpan<T> dest) {
+void copy(DeviceSpan<const T> source, DeviceSpan<T> dest) {
   assert(source.size() == dest.size());
   dest.p_device_memory_->CopyFromDevice(dest.begin, *source.p_device_memory_, source.begin, source.size * sizeof(T));
 }
+#endif
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
 
-  virtual std::shared_ptr<DeviceMemoryBase> AllocateBase(size_t size, bool cpu_accessible) = 0;
   template <typename T>
-  std::shared_ptr<DeviceMemory<T>> Allocate(size_t count, bool cpu_accessible) {
-    return std::static_pointer_cast<DeviceMemory<T>>(AllocateBase(sizeof(T) * count, cpu_accessible));
-  }
+  DeviceSpan<T> Allocate(size_t count, bool cpu_accessible) { return DeviceSpan<T>(AllocateBase(sizeof(T) * count, cpu_accessible)); }
+  virtual std::shared_ptr<DeviceBuffer> AllocateBase(size_t size, bool cpu_accessible) = 0;
 
   // Wraps an existing memory block, useful for tensors. Use WrapTensor for OrtValue vs calling this directly
-  virtual std::shared_ptr<DeviceMemoryBase> WrapMemoryBase(void* memory, size_t size) = 0;
   template <typename T>
-  std::shared_ptr<DeviceMemory<T>> WrapMemory(std::span<T> memory) {
-    return std::static_pointer_cast<DeviceMemory<T>>(WrapMemoryBase(memory.data(), memory.size_bytes()));
-  }
+  DeviceSpan<T> WrapMemory(std::span<T> memory) { return DeviceSpan<T>(WrapMemoryBase(memory.data(), memory.size_bytes())); }
+  virtual std::shared_ptr<DeviceBuffer> WrapMemoryBase(void* memory, size_t size) = 0;
 
   virtual std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) = 0;
   virtual std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) = 0;
@@ -125,145 +110,11 @@ void copy(std::span<const T> source, std::span<T> dest) {
 }
 
 template <typename T>
-void copy(cpu_span<const T> source, cpu_span<T> dest) {
-  assert(source.size() == dest.size());
-  std::copy(source.begin(), source.end(), dest.begin());
-}
-
-template <typename T>
 std::unique_ptr<T[]> AllocateArray(size_t count, std::span<T>* p_span = nullptr) {
   T* p = new T[count];
   if (p_span)
     *p_span = std::span<T>(p, count);
   return std::unique_ptr<T[]>{p};
 }
-
-#if USE_CUDA
-struct CudaDeleter {
-  void operator()(void* p) {
-    cudaFree(p);
-  }
-};
-
-template <typename T>
-using cuda_unique_ptr = std::unique_ptr<T, CudaDeleter>;
-
-template <typename T>
-cuda_unique_ptr<T> CudaMallocArray(size_t count, gpu_span<T>* p_span = nullptr) {
-  T* p;
-  ::cudaMalloc(&p, sizeof(T) * count);
-  if (p_span)
-    *p_span = gpu_span<T>(p, count);
-  return cuda_unique_ptr<T>{p};
-}
-
-struct CudaHostDeleter {
-  void operator()(void* p) {
-    ::cudaFreeHost(p);
-  }
-};
-
-template <typename T>
-using cuda_host_unique_ptr = std::unique_ptr<T, CudaHostDeleter>;
-
-template <typename T>
-cuda_host_unique_ptr<T> CudaMallocHostArray(size_t count, cpu_span<T>* p_span = nullptr) {
-  T* p;
-  ::cudaMallocHost(&p, sizeof(T) * count);
-  if (p_span)
-    *p_span = cpu_span<T>(p, count);
-  return cuda_host_unique_ptr<T>{p};
-}
-
-#endif
-
-#if USE_CUDA
-// A roaming array is one that can be in CPU or GPU memory, and will copy the memory as needed to be used from anywhere
-// It does not own the original memory, only the on-demand copy memory.
-template <typename T>
-struct RoamingArray {
-  RoamingArray() = default;
-  RoamingArray(const RoamingArray& v) { Assign(v); }
-
-  bool empty() const { return cpu_.empty() && device_.empty(); }
-
-  RoamingArray(cpu_span<T> v) {
-    SetCPU(v);
-  }
-
-  RoamingArray(gpu_span<T> v) {
-    SetGPU(v);
-  }
-
-  operator cpu_span<T>() { return GetCPU(); }
-  operator gpu_span<T>() { return GetGPU(); }
-
-  void SetCPU(cpu_span<T> cpu) {
-    cpu_ = cpu;
-    device_ = {};
-  }
-
-  void SetGPU(gpu_span<T> device) {
-    device_ = device;
-    cpu_ = {};
-  }
-
-  cpu_span<T> GetCPU() {
-    if (cpu_.empty() && !device_.empty()) {
-      cpu_owner_ = CudaMallocHostArray<T>(device_.size(), &cpu_);
-      cudaMemcpy(cpu_.data(), device_.data(), cpu_.size_bytes(), cudaMemcpyDeviceToHost);
-    }
-
-    return cpu_;
-  }
-
-  gpu_span<T> GetGPU() {
-    if (device_.empty() && !cpu_.empty()) {
-      device_owner_ = CudaMallocArray<T>(cpu_.size(), &device_);
-      cudaMemcpy(device_.data(), cpu_.data(), cpu_.size_bytes(), cudaMemcpyHostToDevice);
-    }
-    return device_;
-  }
-
-  void Assign(const RoamingArray<T>& v) {
-    cpu_ = v.cpu_;
-    device_ = v.device_;
-  }
-
-  cpu_span<T> cpu_;
-  cuda_host_unique_ptr<T> cpu_owner_;
-  gpu_span<T> device_;
-  cuda_unique_ptr<T> device_owner_;
-};
-#else
-// A roaming array is one that can be in CPU or GPU memory, and will copy the memory as needed to be used from anywhere
-template <typename T>
-struct RoamingArray {
-  RoamingArray() = default;
-  RoamingArray(const RoamingArray& v) { Assign(v); }
-
-  RoamingArray(cpu_span<T> v) {
-    SetCPU(v);
-  }
-
-  bool empty() const { return cpu_.empty(); }
-
-  operator cpu_span<T>() { return GetCPU(); }
-
-  void SetCPU(cpu_span<T> cpu) {
-    cpu_ = cpu;
-  }
-
-  cpu_span<T> GetCPU() {
-    return cpu_;
-  }
-
-  void Assign(const RoamingArray<T>& v) {
-    cpu_ = v.cpu_;
-  }
-
-  cpu_span<T> cpu_;
-};
-#endif
 
 }  // namespace Generators

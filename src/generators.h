@@ -25,7 +25,6 @@
 #include <vector>
 #if USE_CUDA
 #include <cuda_runtime.h>
-#include "cuda/cuda_common.h"
 #else
 // If we don't include cuda_runtime.h, we define this to avoid lots of extra #ifdefs
 using cudaStream_t = void*;
@@ -47,7 +46,7 @@ struct Search;
 struct Tokenizer;
 
 template <typename T>
-std::shared_ptr<DeviceMemory<T>> WrapTensor(DeviceInterface& device, OrtValue& value) {
+DeviceSpan<T> WrapTensor(DeviceInterface& device, OrtValue& value) {
   return device.WrapMemory(std::span<T>{value.GetTensorMutableData<T>(), value.GetTensorTypeAndShapeInfo()->GetElementCount()});
 }
 
@@ -118,7 +117,7 @@ struct Generator : LeakChecked<Generator> {
   void ComputeLogits();
   void GenerateNextToken();
 
-  DeviceMemorySpan<int32_t> GetSequence(size_t index) const;
+  DeviceSpan<int32_t> GetSequence(size_t index) const;
 
   std::shared_ptr<const Model> model_;
   std::unique_ptr<State> state_;

@@ -15,18 +15,18 @@ struct Sequences {
   }
 
   // Returns a sequence of word IDs for a given beam index ( beam_index < batch_beam_size).
-  DeviceMemorySpan<int32_t> GetSequence(size_t batch_beam_index) {
-    return sequences_->subspan(batch_beam_index * max_length_, current_length_);
+  DeviceSpan<int32_t> GetSequence(size_t batch_beam_index) {
+    return sequences_.subspan(batch_beam_index * max_length_, current_length_);
   }
 
-  DeviceMemory<int32_t>& GetSequences() { return *sequences_; }
-  DeviceMemory<int32_t>& GetNextSequences() { return *sequences_next_; }
+  DeviceSpan<int32_t> GetSequences() { return sequences_; }
+  DeviceSpan<int32_t> GetNextSequences() { return sequences_next_; }
 
   // Returns current sequence length.
   int GetSequenceLength() const { return current_length_; }
 
   // After tokens are appended, this function must be called to update the state & log the tokens
-  void AfterAppendNextTokens(DeviceMemorySpan<int32_t> next_tokens);
+  void AfterAppendNextTokens(DeviceSpan<int32_t> next_tokens);
 
   const int max_length_;
 
@@ -34,8 +34,8 @@ struct Sequences {
   // Two buffers of shape (batch_size, num_beams, max_seq_length) to store sequences.
   // At each time, there is only one buffer is active. The other one will be active in next token.
   // Each AppendNextTokenToSequences call will trigger a rotation of active buffer.
-  std::shared_ptr<DeviceMemory<int32_t>> sequences_;
-  std::shared_ptr<DeviceMemory<int32_t>> sequences_next_;  // This only exists for beam search, to allow for the easy reordering of sequences
+  DeviceSpan<int32_t> sequences_;
+  DeviceSpan<int32_t> sequences_next_;  // This only exists for beam search, to allow for the easy reordering of sequences
 
   int current_length_;
 };

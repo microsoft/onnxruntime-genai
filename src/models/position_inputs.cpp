@@ -9,7 +9,7 @@
 
 namespace Generators {
 
-PositionInputs::PositionInputs(const Model& model, State& state, DeviceMemorySpan<int32_t> sequence_lengths_unk)
+PositionInputs::PositionInputs(const Model& model, State& state, DeviceSpan<int32_t> sequence_lengths_unk)
     : model_{model},
       state_{state} {
   has_mask_input_ = model_.session_info_->HasInput(model_.config_->model.decoder.inputs.attention_mask);
@@ -38,7 +38,7 @@ PositionInputs::PositionInputs(const Model& model, State& state, DeviceMemorySpa
 
   initial_sequence_lengths_.resize(state_.params_->BatchBeamSize());
 
-  auto sequence_lengths = cpu_span<int32_t>{sequence_lengths_unk.CopyDeviceToCpu()};
+  auto sequence_lengths = cpu_span<int32_t>{sequence_lengths_unk.CpuSpan()};
   if (type_ == Ort::TypeToTensorType<int32_t>)
     InitializeTensors<int32_t>(shape, sequence_lengths);
   else
