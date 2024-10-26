@@ -158,6 +158,8 @@ std::string to_string(DeviceType device_type) {
       return "CUDA";
     case DeviceType::DML:
       return "DirectML";
+    case DeviceType::WEBGPU:
+      return "WebGpu";
   }
   throw std::runtime_error("Unknown device type");
 }

@@ -37,6 +37,7 @@ using cudaStream_t = void*;
 #include "models/debugging.h"
 #include "config.h"
 #include "logging.h"
+#include "runtime_settings.h"
 #include "tensor.h"
 
 namespace Generators {
@@ -57,6 +58,7 @@ enum struct DeviceType {
   CPU,
   CUDA,
   DML,
+  WEBGPU,
 };
 
 std::string to_string(DeviceType device_type);
@@ -141,7 +143,7 @@ std::unique_ptr<OrtGlobals>& GetOrtGlobals();
 void Shutdown();  // Do this once at exit, Ort code will fail after this call
 OrtEnv& GetOrtEnv();
 
-std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path);
+std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings = nullptr);
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Model& model);
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Config& config);  // For benchmarking purposes only
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params);
