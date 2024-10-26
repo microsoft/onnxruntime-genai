@@ -80,7 +80,7 @@ bool IntermediatePipelineState::SupportsPrimaryDevice() const {
 }
 
 DeviceSpan<float> IntermediatePipelineState::Run(int current_length, DeviceSpan<int32_t> next_tokens,
-                                                   DeviceSpan<int32_t> next_indices) {
+                                                 DeviceSpan<int32_t> next_indices) {
   State::Run(*model_.sessions_[id_], params_->BatchBeamSize());
 
   return {};
@@ -107,7 +107,7 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
 }
 
 DeviceSpan<float> DecoderOnlyPipelineState::Run(int current_length, DeviceSpan<int32_t> next_tokens,
-                                                  DeviceSpan<int32_t> next_indices) {
+                                                DeviceSpan<int32_t> next_indices) {
   if (!first_run_) {
     UpdateInputsOutputs(next_tokens, next_indices, current_length);
   }

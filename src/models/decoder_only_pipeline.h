@@ -32,7 +32,7 @@ struct IntermediatePipelineState : State {
   IntermediatePipelineState& operator=(const IntermediatePipelineState&) = delete;
 
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t> next_tokens,
-                          DeviceSpan<int32_t> next_indices) override;
+                        DeviceSpan<int32_t> next_indices) override;
 
   bool HasInput(std::string_view name) const;
 
@@ -54,7 +54,7 @@ struct DecoderOnlyPipelineState : State {
   DecoderOnlyPipelineState& operator=(const DecoderOnlyPipelineState&) = delete;
 
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t> next_tokens,
-                          DeviceSpan<int32_t> next_indices) override;
+                        DeviceSpan<int32_t> next_indices) override;
 
   OrtValue* GetOutput(const char* name) override;
 

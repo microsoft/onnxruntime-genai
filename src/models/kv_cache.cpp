@@ -76,7 +76,7 @@ void KV_Cache_Combined::Update(DeviceSpan<int32_t> beam_indices, int current_len
 // Copy present state to past state reordered by the beam_indices
 template <typename ScoreType>
 void KV_Cache_Combined::PickPastState(DeviceSpan<int32_t> beam_indices_device, int index) {
-  std::span<const int32_t> beam_indices=beam_indices_device.CopyDeviceToCpu();
+  std::span<const int32_t> beam_indices = beam_indices_device.CopyDeviceToCpu();
   auto block_size_per_beam = shape_[2] * shape_[3] * shape_[4];
   auto past_key_size = shape_[1] * block_size_per_beam;
   auto element_count = shape_[0] * past_key_size;

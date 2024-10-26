@@ -389,7 +389,6 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 
   for (auto& provider_options : config_session_options.provider_options) {
     if (provider_options.name == "cuda") {
-
       auto ort_provider_options = OrtCUDAProviderOptionsV2::Create();
       std::vector<const char*> keys, values;
       for (auto& option : provider_options.options) {

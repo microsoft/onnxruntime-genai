@@ -62,7 +62,7 @@ struct BeamSearchScorer {
   DeviceSpan<int32_t> next_beam_indices_;
 
   DeviceSpan<int32_t> hypothesis_buffer_;  // Allocated buffer to hold all hypotheses
-  size_t hypothesis_buffer_used_{};              // Offset of available buffer, or length of used buffer.
+  size_t hypothesis_buffer_used_{};        // Offset of available buffer, or length of used buffer.
 
   std::unique_ptr<HypothesisScore[]> hypothesis_scores_ptr_;  // num_beams_ * batch_size_, divided into num_beams_ chunks per BeamHypothesis in beam_hyps_
   std::unique_ptr<BeamHypotheses[]> beam_hyps_ptr_;
