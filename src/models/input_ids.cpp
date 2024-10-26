@@ -126,8 +126,8 @@ void InputIDs::Update(DeviceSpan<int32_t> next_tokens_unk) {
         Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, value_int32_->GetTensorMutableRawData(), &source_resource));
 
         auto source = std::span<const uint8_t>(
-            reinterpret_cast<const uint8_t*>(next_tokens_unk.GetCPU().data()),
-            next_tokens_unk.GetCPU().size_bytes());
+            reinterpret_cast<const uint8_t*>(next_tokens_unk.CpuSpan().data()),
+            next_tokens_unk.CpuSpan().size_bytes());
 
         model_.GetDmlUploadHeap()->BeginUploadToGpu(
             source_resource.Get(),

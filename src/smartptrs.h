@@ -49,7 +49,6 @@ struct DeviceSpan {
   void CopyCpuToDevice() { p_device_memory_->CopyCpuToDevice(); }
 
   DeviceSpan<T> subspan(size_t begin, size_t length) { return DeviceSpan<T>(*p_device_memory_, begin_ + begin, length); }
-  DeviceSpan<T> subspan_device(std::span<T> span) { return DeviceSpan<T>(*p_device_memory_, span.data() - reinterpret_cast<T*>(p_device_memory_->p_device_), span.size()); }
 
   DeviceBuffer& GetDeviceMemory() { return *p_device_memory_; }
 

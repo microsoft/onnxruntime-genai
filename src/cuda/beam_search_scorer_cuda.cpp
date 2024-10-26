@@ -88,7 +88,8 @@ DeviceSpan<int32_t> BeamSearchScorer_Cuda::GetBeamHypothesis(size_t batch_id, si
   cuda::LaunchBeamSearchScorer_GetHypothesisPtr(batch_id, beam_id, beam_hyps_, hypothesis_ptr.get(), hypothesis_length.get(), hypothesis_score.get(), stream_);
   CudaCheck() == cudaStreamSynchronize(stream_);
   std::span<int32_t> hypothesis(*hypothesis_ptr.get(), *hypothesis_length.get());
-  return hypothesis_buffer_.subspan_device(hypothesis);
+  // Translate the hypothesis span back to the original device buffer span
+  return hypothesis_buffer_.subspan(hypothesis.data() - hypothesis_buffer_.Span().data(), hypothesis.size());
 }
 
 }  // namespace Generators

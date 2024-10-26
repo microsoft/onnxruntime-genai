@@ -199,7 +199,8 @@ void BeamSearchScorer::Finalize(Sequences& sequences,
 
 DeviceSpan<int32_t> BeamSearchScorer::GetBeamHypotheses(size_t batch_id, size_t beam_id) {
   auto hypothesis = beam_hyps_[batch_id].GetHypothesis(beam_id);
-  return hypothesis_buffer_.subspan_device(hypothesis);
+  // Translate the hypothesis span back to the original device buffer span
+  return hypothesis_buffer_.subspan(hypothesis.data() - hypothesis_buffer_.Span().data(), hypothesis.size());
 }
 
 }  // namespace Generators
