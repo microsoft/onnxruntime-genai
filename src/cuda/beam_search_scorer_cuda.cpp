@@ -31,15 +31,15 @@ BeamSearchScorer_Cuda::BeamSearchScorer_Cuda(const GeneratorParams& parameters)
 
   cuda::LaunchInitializeBeamHypotheses(beam_hyps_, parameters.search.length_penalty, beams, parameters.search.num_beams, stream_);
 
-  next_beam_scores_ = parameters.p_device->Allocate<float>(batch_beam_size, false /*cpu_accessible*/);
-  next_beam_tokens_ = parameters.p_device->Allocate<int32_t>(batch_beam_size, false /* cpu_accessible */);
-  next_beam_indices_ = parameters.p_device->Allocate<int32_t>(batch_beam_size, false /* cpu_accessible */);
+  next_beam_scores_ = parameters.p_device->Allocate<float>(batch_beam_size);
+  next_beam_tokens_ = parameters.p_device->Allocate<int32_t>(batch_beam_size);
+  next_beam_indices_ = parameters.p_device->Allocate<int32_t>(batch_beam_size);
 
   cuda::LaunchInitScoresKernel(next_beam_scores_.Span().data(), parameters.batch_size, parameters.search.num_beams, stream_);
 
   // Space to store intermediate sequence with length sequence_length, sequence_length + 1, ..., max_sequence_length.
   size_t per_beam = (state_cpu_->max_length_ * (state_cpu_->max_length_ + 1) - (parameters.sequence_length - 1) * parameters.sequence_length) / 2;
-  hypothesis_buffer_ = device.Allocate<int32_t>(batch_beam_size * per_beam, false /*cpu_accessible*/);
+  hypothesis_buffer_ = device.Allocate<int32_t>(batch_beam_size * per_beam);
 }
 
 void BeamSearchScorer_Cuda::Process(Sequences& sequences,

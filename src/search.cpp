@@ -11,7 +11,7 @@ Search_Cpu::Search_Cpu(const GeneratorParams& params)
     : Search{params} {
   auto batch_beam_size = params.BatchBeamSize();
 
-  sequence_lengths_ = params.p_device->Allocate<int32_t>(batch_beam_size, false /*cpu_accessible*/);
+  sequence_lengths_ = params.p_device->Allocate<int32_t>(batch_beam_size);
 
   // The original inputs are not expanded, this expands them in place into the sequences
   auto input_sequences = params.input_ids;
@@ -39,7 +39,7 @@ GreedySearch_Cpu::GreedySearch_Cpu(const GeneratorParams& params)
     gen_.seed(seq);
   }
 
-  next_tokens_ptr_ = params.p_device->Allocate<int32_t>(params.batch_size, false /*cpu_accessible*/);
+  next_tokens_ptr_ = params.p_device->Allocate<int32_t>(params.batch_size);
   next_tokens_ = cpu_span<int32_t>(next_tokens_ptr_.Span());
   memset(next_tokens_.data(), 0, next_tokens_.size_bytes());
 

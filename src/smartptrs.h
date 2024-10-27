@@ -57,19 +57,11 @@ struct DeviceSpan {
   size_t begin_{}, length_{};  // Subspan of p_device_memory_, relative to original memory block
 };
 
-#if 0
-template <typename T>
-void copy(DeviceSpan<const T> source, DeviceSpan<T> dest) {
-  assert(source.size() == dest.size());
-  dest.p_device_memory_->CopyFromDevice(dest.begin, *source.p_device_memory_, source.begin, source.size * sizeof(T));
-}
-#endif
-
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
 
   template <typename T>
-  DeviceSpan<T> Allocate(size_t count, bool cpu_accessible) { return DeviceSpan<T>(AllocateBase(sizeof(T) * count, cpu_accessible)); }
+  DeviceSpan<T> Allocate(size_t count, bool cpu_accessible = false) { return DeviceSpan<T>(AllocateBase(sizeof(T) * count, cpu_accessible)); }
   virtual std::shared_ptr<DeviceBuffer> AllocateBase(size_t size, bool cpu_accessible) = 0;
 
   // Wraps an existing memory block, useful for tensors. Use WrapTensor for OrtValue vs calling this directly

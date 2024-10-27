@@ -28,7 +28,7 @@ Logits::Logits(State& state)
 #if USE_CUDA
   if (model_.device_type_ == DeviceType::CUDA && !model_.config_->model.eos_token_ids.empty()) {
     auto& cpu_ids = model_.config_->model.eos_token_ids;
-    cuda_eos_token_ids_ = state_.params_->p_device->Allocate<int32_t>(cpu_ids.size(), false /*cpu_accessible*/);
+    cuda_eos_token_ids_ = state_.params_->p_device->Allocate<int32_t>(cpu_ids.size());
     copy(std::span<const int32_t>{cpu_ids}, cuda_eos_token_ids_.CpuSpan());
     cuda_eos_token_ids_.CopyCpuToDevice();
   }
@@ -169,7 +169,8 @@ DeviceSpan<float> Logits::Get() {
           model_.cuda_stream_);
     return logits_;
   }
-#elif USE_DML
+#endif
+#if USE_DML
   if (model_.device_type_ == DeviceType::DML) {
     // DML doesn't support on-device scoring yet, so we transfer the data to the CPU
     ComPtr<ID3D12Resource> gpu_resource;

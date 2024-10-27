@@ -59,7 +59,7 @@ Whisper_State::Whisper_State(const Whisper_Model& model, DeviceSpan<int32_t> seq
     cross_qk_search_buffer_ = OrtValue::CreateTensor(*model_.allocator_device_, cross_qk_shape, cross_qk_type);
 
     // Allocate GPU buffer for storing output_cross_qk_{i} pointers
-    cross_qk_ptrs_gpu_ = model_.p_device_->Allocate<float*>(model_.config_->model.decoder.num_hidden_layers, false /*cpu_accessible*/);
+    cross_qk_ptrs_gpu_ = model_.p_device_->Allocate<float*>(model_.config_->model.decoder.num_hidden_layers);
 #else
     alignment_heads_ = std::move(inputs.alignment_heads->ort_tensor_);
 #endif

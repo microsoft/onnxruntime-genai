@@ -62,9 +62,9 @@ BeamSearchScorer::BeamSearchScorer(const GeneratorParams& parameters)
     beam_hyps_[i].Init(parameters.search.length_penalty, beams.subspan(i * num_beams_, num_beams_));
   }
 
-  next_beam_scores_ = parameters.p_device->Allocate<float>(batch_beam_size, false /*cpu_accessible*/);
-  next_beam_tokens_ = parameters.p_device->Allocate<int32_t>(batch_beam_size, false /* cpu_accessible */);
-  next_beam_indices_ = parameters.p_device->Allocate<int32_t>(batch_beam_size, false /* cpu_accessible */);
+  next_beam_scores_ = parameters.p_device->Allocate<float>(batch_beam_size);
+  next_beam_tokens_ = parameters.p_device->Allocate<int32_t>(batch_beam_size);
+  next_beam_indices_ = parameters.p_device->Allocate<int32_t>(batch_beam_size);
 
   // Space to store intermediate sequence with length sequence_length, sequence_length + 1, ..., max_sequence_length.
   size_t const per_beam = (max_length_ * (max_length_ + 1) - (parameters.sequence_length - 1) * parameters.sequence_length) / 2;

@@ -9,9 +9,9 @@ struct Sequences {
     assert(current_length_ * params.batch_size == params.input_ids.size());  // Ensure size divided perfectly
 
     const size_t sequences_size = static_cast<size_t>(params.BatchBeamSize()) * max_length_;
-    sequences_ = params.p_device->Allocate<int32_t>(sequences_size, false /*cpu_accessible*/);
+    sequences_ = params.p_device->Allocate<int32_t>(sequences_size);
     if (params.search.num_beams > 1)
-      sequences_next_ = params.p_device->Allocate<int32_t>(sequences_size, false /*cpu_accessible*/);
+      sequences_next_ = params.p_device->Allocate<int32_t>(sequences_size);
   }
 
   // Returns a sequence of word IDs for a given beam index ( beam_index < batch_beam_size).

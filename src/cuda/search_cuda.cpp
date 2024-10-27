@@ -23,7 +23,7 @@ Search_Cuda::Search_Cuda(const GeneratorParams& params)
     auto input_sequences = params.input_ids;
     auto current_length = sequences_.GetSequenceLength();
 
-    auto input_sequences_temp = params.p_device->Allocate<int32_t>(input_sequences.size(), false /*cpu_accessible*/);
+    auto input_sequences_temp = params.p_device->Allocate<int32_t>(input_sequences.size());
     auto input_sequences_gpu = input_sequences_temp.Span();
     cudaMemcpyAsync(input_sequences_gpu.data(), input_sequences.data(), input_sequences.size_bytes(), cudaMemcpyHostToDevice, GetStream());
 
@@ -32,7 +32,7 @@ Search_Cuda::Search_Cuda(const GeneratorParams& params)
   }
 
   auto batch_beam_size = params.BatchBeamSize();
-  sequence_lengths_ = params.p_device->Allocate<int32_t>(batch_beam_size, false /*cpu_accessible*/);
+  sequence_lengths_ = params.p_device->Allocate<int32_t>(batch_beam_size);
 
   eos_meet_buffer_ = CudaMallocArray<bool>(batch_beam_size, &eos_meet_);
   cudaMemsetAsync(eos_meet_.data(), 0, eos_meet_.size_bytes(), params_->cuda_stream);
@@ -43,7 +43,7 @@ Search_Cuda::Search_Cuda(const GeneratorParams& params)
 
 GreedySearch_Cuda::GreedySearch_Cuda(const GeneratorParams& params)
     : Search_Cuda{params} {
-  next_tokens_buffer_ = params.p_device->Allocate<int32_t>(params.batch_size, false /*cpu_accessible*/);
+  next_tokens_buffer_ = params.p_device->Allocate<int32_t>(params.batch_size);
   next_tokens_ = gpu_span<int32_t>(next_tokens_buffer_.Span());
   cudaMemsetAsync(next_tokens_.data(), 0, next_tokens_.size_bytes(), params_->cuda_stream);
 

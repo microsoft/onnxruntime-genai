@@ -156,8 +156,8 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopPCuda) {
   params->input_ids = input_ids;
   params->p_device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
   params->device_type = Generators::DeviceType::CUDA;
-  auto logits_gpu = params->p_device->Allocate<float>(config.model.vocab_size * batch_size, false /*cpu_accessible*/);
-  auto indices_buffer = params->p_device->Allocate<int>(config.model.vocab_size * batch_size, false /*cpu_accessible*/);
+  auto logits_gpu = params->p_device->Allocate<float>(config.model.vocab_size * batch_size);
+  auto indices_buffer = params->p_device->Allocate<int>(config.model.vocab_size * batch_size);
 
   std::random_device rd;
   std::mt19937 engine(rd());
@@ -202,8 +202,8 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopKCuda) {
   params->input_ids = input_ids;
   params->p_device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
   params->device_type = Generators::DeviceType::CUDA;
-  auto logits_gpu = params->p_device->Allocate<float>(config.model.vocab_size * batch_size, false /*cpu_accessible*/);
-  auto indices_buffer = params->p_device->Allocate<int>(config.model.vocab_size * batch_size, false /*cpu_accessible*/);
+  auto logits_gpu = params->p_device->Allocate<float>(config.model.vocab_size * batch_size);
+  auto indices_buffer = params->p_device->Allocate<int>(config.model.vocab_size * batch_size);
   std::random_device rd;
   std::mt19937 engine(rd());
   std::uniform_int_distribution<> dist(1, 25);
@@ -244,8 +244,8 @@ TEST(Benchmarks, BenchmarkRandomizedSamplingTopPAndKCuda) {
   params->input_ids = input_ids;
   params->p_device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
   params->device_type = Generators::DeviceType::CUDA;
-  auto logits_gpu = params->p_device->Allocate<float>(config.model.vocab_size * batch_size, false /*cpu_accessible*/);
-  auto indices_buffer = params->p_device->Allocate<int>(config.model.vocab_size * batch_size, false /*cpu_accessible*/);
+  auto logits_gpu = params->p_device->Allocate<float>(config.model.vocab_size * batch_size);
+  auto indices_buffer = params->p_device->Allocate<int>(config.model.vocab_size * batch_size);
   std::random_device rd;
   std::mt19937 engine(rd());
   std::uniform_int_distribution<> dist(1, 25);
@@ -289,8 +289,8 @@ TEST(Benchmarks, BenchmarkRandomizedSelectTopCuda) {
   params->input_ids = input_ids;
   params->p_device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
   params->device_type = Generators::DeviceType::CUDA;
-  auto logits_gpu = params->p_device->Allocate<float>(config.model.vocab_size * batch_size, false /*cpu_accessible*/);
-  auto indices_buffer = params->p_device->Allocate<int>(config.model.vocab_size * batch_size, false /*cpu_accessible*/);
+  auto logits_gpu = params->p_device->Allocate<float>(config.model.vocab_size * batch_size);
+  auto indices_buffer = params->p_device->Allocate<int>(config.model.vocab_size * batch_size);
   std::random_device rd;
   std::mt19937 engine(rd());
   std::uniform_int_distribution<> dist(1, 25);
