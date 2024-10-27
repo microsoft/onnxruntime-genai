@@ -144,7 +144,7 @@ void BeamSearch_Cuda::SelectTop() {
   std::span<int32_t> next_tokens{topk_next_tokens_.get(), size};
   std::span<int32_t> next_indices{topk_next_indices_.get(), size};
 
-#if 0
+#if 0  // TODO(ryanhill): Use logging option
   DumpCudaSpan(std::cout, next_scores);
   DumpCudaSpan(std::cout, next_tokens);
   DumpCudaSpan(std::cout, next_indices);
@@ -206,24 +206,6 @@ DeviceSpan<int32_t> BeamSearch_Cuda::GetSequence(size_t batch_id, size_t beam_id
   Finalize(params_->search.num_return_sequences);
   return beam_scorer_->GetBeamHypothesis(batch_id, beam_id);
 }
-
-#if 0
-// Not needed, for greedy can just grab the output sequence directly?
-void GreedySearch::Finalize(size_t num_return_sequences, std::span<int32_t> output, std::span<float> sequence_scores) {
-  auto shape=output_sequences_->GetTensorTypeAndShapeInfo()->GetShape();
-  size_t shape_count = std::accumulate(shape.begin(), shape.end(), 1LL, std::multiplies<int64_t>());
-
-  // Copy the sequences to output
-  std::span<int32_t> output{ output_sequences_->GetTensorMutableData<int32_t>(), shape_count};
-  for (int batch_id = 0; batch_id < params_->batch_size; ++batch_id) {
-    auto batch_output = output.subspan(
-        static_cast<size_t>(batch_id) * params_->max_length,
-        params_->max_length);
-    std::span<const int32_t> sequence_source = sequences_.GetSequence(batch_id);
-    std::copy(sequence_source, batch_output);
-  }
-}
-#endif
 
 std::span<float> Search_Cuda::GetScores(int batch_beam_index) {
   assert(batch_beam_index >= 0 && batch_beam_index < params_->BatchBeamSize());

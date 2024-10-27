@@ -136,7 +136,7 @@ void BeamSearch_Cpu::SelectTop() {
     }
   }
 
-#if 0
+#if 0  // TODO(ryanhill): Use logging option
   DumpSpan(std::cout, next_tokens);
   DumpSpan(std::cout, next_indices_);
   DumpSpan(std::cout, next_scores_);
