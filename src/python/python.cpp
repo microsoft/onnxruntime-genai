@@ -163,7 +163,8 @@ pybind11::array ToNumpy(OrtValue* v, const Generators::Model& model) {
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     data = cpu_copy.get();
   }
-#elif USE_CUDA
+#endif
+#if USE_CUDA
   if (v->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU && model.device_type_ == Generators::DeviceType::CUDA) {
     auto data_size = type_info->GetElementCount() * element_size;
     cpu_copy = std::make_unique<uint8_t[]>(data_size);
@@ -320,10 +321,13 @@ struct PyGenerator {
     return py_logits_.GetNumpy();
   }
 
-  void SetLogits(pybind11::array_t<float> logits) {
-    logits_ = logits;
-    logits_memory_ = generator_->search_->params_->p_device->WrapMemory<float>(ToSpan(logits_));
-    generator_->search_->SetLogits(logits_memory_);
+  void SetLogits(pybind11::array_t<float> new_logits) {
+    auto logits = generator_->search_->GetLogits();
+    if (static_cast<size_t>(new_logits.size()) != logits.size())
+      throw std::runtime_error("Generator::SetLogits passed an array of size " + std::to_string(new_logits.size()) + " but should be size " + std::to_string(logits.size()));
+
+    copy(std::span<const float>{ToSpan(new_logits)}, logits.CpuSpan());
+    logits.CopyCpuToDevice();
   }
 
   void GenerateNextToken() {
@@ -343,8 +347,6 @@ struct PyGenerator {
   PyDeviceMemorySpan<int32_t> py_tokens_;
   PyDeviceMemorySpan<int32_t> py_sequence_;
   PyDeviceMemorySpan<float> py_logits_;
-  pybind11::array_t<float> logits_;  // Logits passed in from python, to keep the memory alive
-  DeviceSpan<float> logits_memory_;
 };
 
 void SetLogOptions(const pybind11::kwargs& dict) {

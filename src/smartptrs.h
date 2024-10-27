@@ -14,7 +14,6 @@ struct DeviceBuffer : std::enable_shared_from_this<DeviceBuffer> {
   virtual ~DeviceBuffer() {}
   virtual const char* GetType() const = 0;  // Returns "cuda" "cuda_cpu" "directml" etc
 
-  bool IsCpuAccessible() const { return p_device_ == p_cpu_; }  // Device memory is CPU accessible if it's the same memory
   virtual void AllocateCpu() = 0;                               // Allocates p_cpu_ if necessary (using appropriate memory type for interop)
   virtual void CopyDeviceToCpu() = 0;                           // Allocates p_cpu_ if necessary and copies p_device_ memory into it
   virtual void CopyCpuToDevice() = 0;
