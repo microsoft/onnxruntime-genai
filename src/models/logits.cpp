@@ -145,14 +145,14 @@ DeviceSpan<float> Logits::Get() {
     }
   }
 
+  assert(shape_[1] == 1);
+
 #if USE_DML
   // DML doesn't support on-device scoring yet, so we need to download some data to the CPU
   if (model_.device_type_ == DeviceType::DML) {
     value32_cpu_ = OrtValue::CreateTensor<float>(model_.allocator_cpu_, shape_);
   }
 #endif
-
-  assert(shape_[1] == 1);
 
   if (logits_.empty() || logits_of_last_token->GetTensorMutableRawData() != logits_.Span().data())
     logits_ = WrapTensor<float>(*state_.params_->p_device, *logits_of_last_token);
@@ -187,7 +187,9 @@ DeviceSpan<float> Logits::Get() {
 
     auto batched_logits_cpu = cpu_span<float>{cpu_tensor, element_count};
     HandleEOSArray(batched_logits_cpu);
-    return batched_logits_cpu;
+
+    logits_ = WrapTensor<float>(*state_.params_->p_device, value32_cpu_);
+    return logits_;
   }
 #endif
 
