@@ -221,8 +221,8 @@ jobs:
           python -m pip install -r test/python/cuda/ort/requirements.txt
         }
         elseif ("$(ep)" -eq "directml") {
-          python -m pip install -r test/python/requirements-torch-directml.txt
-          python -m pip install -r test/python/requirements-torch-directml.txt
+          python -m pip install -r test/python/directml/torch/requirements.txt
+          python -m pip install -r test/python/directml/ort/requirements.txt
         }
         else {
           python -m pip install -r test/python/cpu/torch/requirements.txt
