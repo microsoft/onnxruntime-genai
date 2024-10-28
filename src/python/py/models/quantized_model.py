@@ -317,6 +317,11 @@ class QuantizedModel:
                             # model.layers.layer_id.mlp.dense_h_to_4h.g_idx
                             module.mlp.gate_proj.g_idx = tensor
                             module.mlp.up_proj.g_idx = tensor
+                        elif bool(re.match(r"^model.layers\.\d+\.mlp.(gate_up_proj|dense_h_to_4h)\.bias$", name)):
+                            # model.layers.layer_id.mlp.gate_up_proj.bias
+                            # model.layers.layer_id.mlp.dense_h_to_4h.bias
+                            module.mlp.gate_proj.bias = tensor[: intermediate_size]
+                            module.mlp.down_proj.bias = tensor[intermediate_size: ]
                         else:
                             raise NotImplementedError(f"{name} in your quantized model is not recognized.")
 
