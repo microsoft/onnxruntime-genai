@@ -347,7 +347,7 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
                                         type:(OGAElementType)elementType
                                        error:(NSError**)error;
 - (OGAElementType)getTypeWithError:(NSError**)error NS_SWIFT_NAME(type());
-- (nullable void*)getDataPointerWithError:(NSError**)error NS_SWIFT_NAME(dataPointer());;
+- (nullable void*)getDataPointerWithError:(NSError**)error NS_SWIFT_NAME(dataPointer());
 
 @end
 
