@@ -23,7 +23,7 @@
 
 - (nullable OGASequences*)encode:(NSString*)str error:(NSError**)error {
   OGASequences* sequences = [[OGASequences alloc] initWithError:error];
-  if (*error) {
+  if (!sequences) {
     return nil;
   }
   try {

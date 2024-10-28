@@ -40,20 +40,6 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
-@interface OGAInt64Span : NSObject
-
-- (instancetype)init NS_UNAVAILABLE;
-
-- (nullable instancetype)initWithDataPointer:(const int64_t*)pointer size:(size_t)size NS_DESIGNATED_INITIALIZER;
-
-- (const int64_t*)pointer;
-
-- (size_t)size;
-
-- (int64_t)lastElementWithError:(NSError**)error NS_SWIFT_NAME(lastElement());
-
-@end
-
 @interface OGATensor ()
 
 - (instancetype)initWithCXXPointer:(std::unique_ptr<OgaTensor>)ptr NS_DESIGNATED_INITIALIZER;

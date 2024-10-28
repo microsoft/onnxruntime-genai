@@ -93,7 +93,7 @@ NS_ASSUME_NONNULL_BEGIN
     ORTAssertBoolResultSuccessful(ret, error);
     OGATensor* prompt_logits_ptr = [generator getOutput:@"logits" error:&error];
     ORTAssertNullableResultSuccessful(prompt_logits_ptr, error);
-    auto prompt_logits = static_cast<float*>([prompt_logits_ptr data]);
+    auto prompt_logits = static_cast<float*>([prompt_logits_ptr getDataPointerWithError:&error]);
     const int num_prompt_outputs_to_check = 40;
     const int sample_size = 200;
     const float tolerance = 0.001f;
@@ -115,7 +115,7 @@ NS_ASSUME_NONNULL_BEGIN
     OGATensor* token_gen_logits_ptr = [generator getOutput:@"logits" error:&error];
     ORTAssertNullableResultSuccessful(token_gen_logits_ptr, error);
 
-    auto token_gen_logits = static_cast<float*>([token_gen_logits_ptr data]);
+    auto token_gen_logits = static_cast<float*>([token_gen_logits_ptr getDataPointerWithError:&error]);
     int num_token_gen_outputs_to_check = 10;
 
     for (int i = 0; i < num_token_gen_outputs_to_check; i++) {

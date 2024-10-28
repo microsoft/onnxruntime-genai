@@ -25,7 +25,7 @@
   try {
     std::vector<int64_t> cxxShape;
     for (NSNumber* object in shape) {
-      cxxShape.push_back([object intValue]);
+      cxxShape.push_back([object longLongValue]);
     }
     self = [self initWithCXXPointer:OgaTensor::Create(data, cxxShape.data(), cxxShape.size(),
                                     static_cast<OgaElementType>(elementType))];
@@ -34,12 +34,18 @@
   OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }
 
-- (OGAElementType)type {
-  return OGAElementType(_tensor->Type());
+- (OGAElementType)getTypeWithError:(NSError**)error {
+  try {
+    return OGAElementType(_tensor->Type());
+  }
+  OGA_OBJC_API_IMPL_CATCH(error, OGAElementTypeUndefined)
 }
 
-- (void*)data {
-  return _tensor->Data();
+- (nullable void*)getDataPointerWithError:(NSError**)error {
+  try {
+    return _tensor->Data();
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }
 
 - (OgaTensor&)CXXAPIOgaTensor {

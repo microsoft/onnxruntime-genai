@@ -12,6 +12,8 @@ import subprocess
 import sys
 import tempfile
 
+from huggingface_hub import snapshot_download
+
 from c.assemble_c_pod_package import assemble_c_pod_package
 from package_assembly_utils import PackageVariant, gen_file_from_template, get_ort_version
 
@@ -118,6 +120,16 @@ def _test_apple_packages(args):
         env = os.environ.copy()
         env["SKIP_MACOS_TEST"] = "true" if args.skip_macos_test else "false"
         subprocess.run(["pod", "install"], shell=False, check=True, cwd=target_proj_path, env=env)
+
+        # Download phi3 model
+        model_dir = target_proj_path / "models" / "Phi-3-mini-4k-instruct-onnx"
+
+        print(f"Downloading models:\n{model_dir}")
+        snapshot_download(
+            repo_id="microsoft/Phi-3-mini-4k-instruct-onnx",
+            allow_patterns="cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/*",
+            local_dir=model_dir
+        )
 
         # run the tests
         if not args.prepare_test_project_only:

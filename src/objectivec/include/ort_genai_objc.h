@@ -13,7 +13,7 @@
  * OGASequences* sequences = [tokenizer encode:@"A great recipe for Kung Pao chicken is " error:&error];
  *
  * OGAGeneratorParams* params = [[OGAGeneratorParams alloc] initWithModel:model error:&error];
- * [params setInputSequences:sequences];
+ * [params setInputSequences:sequences error:&error];
  * [params setSearchOption:@"max_length" doubleValue:200 error:&error];
  *
  * OGASequences* output_sequences = [model generate:params error:&error];
@@ -116,7 +116,7 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 @end
 
 /**
- * A tokenizer stream is to decoded token strings incrementally, one token at a time.
+ * A tokenizer stream is used to decode token strings incrementally, one token at a time.
  */
 @interface OGATokenizerStream : NSObject
 - (instancetype)init NS_UNAVAILABLE;
@@ -195,13 +195,13 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  * @param error Optional error information set if an error occurs.
  * @return The count of sequences, or -1 if an error occurs.
  */
-- (size_t)getCountWithError:(NSError**)error NS_SWIFT_NAME(getCount());
+- (size_t)getCountWithError:(NSError**)error NS_SWIFT_NAME(count());
 
 /**
  * Retrieve the sequence at the given index
  * @param index The index needed.
  * @param error Optional error information set if an error occurs.
- * @return The last element, or nil if an error occurs.
+ * @return The sequence at the given index, or nil if an error occurs.
  */
 - (nullable OGAInt32Span*)sequenceAtIndex:(size_t)index
                                     error:(NSError**)error;
@@ -327,7 +327,7 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  * Retrieve the sequence at the given index.
  * @param index The index needed.
  * @param error Optional error information set if an error occurs.
- * @return The last element, or nil if an error occurs.
+ * @return The sequence at the given index, or nil if an error occurs.
  */
 - (nullable OGAInt32Span*)sequenceAtIndex:(size_t)index
                                     error:(NSError**)error;
@@ -346,8 +346,8 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
                                        shape:(NSArray<NSNumber*>*)shape
                                         type:(OGAElementType)elementType
                                        error:(NSError**)error;
-- (OGAElementType)type;
-- (void*)data;
+- (OGAElementType)getTypeWithError:(NSError**)error NS_SWIFT_NAME(type());
+- (nullable void*)getDataPointerWithError:(NSError**)error NS_SWIFT_NAME(dataPointer());;
 
 @end
 

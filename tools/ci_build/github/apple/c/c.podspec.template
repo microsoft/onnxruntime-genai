@@ -12,6 +12,7 @@ Pod::Spec.new do |s|
 
   s.vendored_frameworks = "@ORTGENAI_C_FRAMEWORK@"
   s.static_framework    = true
+  s.framework           = ['ImageIO', 'CoreGraphics']
   s.weak_framework      = [ @WEAK_FRAMEWORK@ ]
 
   s.source_files        = "@ORTGENAI_C_HEADERS_DIR@/*.h"

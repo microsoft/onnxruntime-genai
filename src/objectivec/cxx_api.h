@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-// wrapper for ORT C/C++ API headers
+// wrapper for ORT GenAI C/C++ API headers
 
 #if defined(__clang__)
 #pragma clang diagnostic push
