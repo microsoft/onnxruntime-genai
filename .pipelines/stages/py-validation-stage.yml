@@ -21,16 +21,6 @@ parameters:
   type: boolean
 - name: enable_macos_cpu
   type: boolean
-- name: ort_version
-  type: string
-- name: ort_cuda_118_version
-  type: string
-- name: ort_cuda_122_version
-  type: string
-- name: ort_rocm_version
-  type: string
-- name: ort_dml_version
-  type: string
 - name: cuda_versions
   type: string
   default: '11.8,12.2'
@@ -76,7 +66,6 @@ stages:
         cuda_version: '11.8'
         cuda_display_version: '118'
         ep: 'cuda'
-        ort_version: ${{ parameters.ort_cuda_118_version }}
         os: 'win'
         SpecificArtifact: ${{ parameters.SpecificArtifact }}
         BuildId: ${{ parameters.BuildId }}
@@ -88,7 +77,6 @@ stages:
         cuda_version: '12.2'
         cuda_display_version: '122'
         ep: 'cuda'
-        ort_version: ${{ parameters.ort_cuda_122_version }}
         os: 'win'
         SpecificArtifact: ${{ parameters.SpecificArtifact }}
         BuildId: ${{ parameters.BuildId }}

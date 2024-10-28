@@ -11,8 +11,6 @@ parameters:
   type: string
 - name: ep
   type: string
-- name: ort_version
-  type: string
 - name: cuda_version
   type: string
   default: ''
@@ -73,8 +71,6 @@ jobs:
     value: ${{ parameters.cuda_version }}
   - name: ep
     value: ${{ parameters.ep }}
-  - name: ort_version
-    value: ${{ parameters.ort_version }}
   - name: os
     value: ${{ parameters.os }}
 
