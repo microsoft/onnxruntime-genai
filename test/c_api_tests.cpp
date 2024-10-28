@@ -301,6 +301,7 @@ TEST(CAPITests, SetTerminate) {
       }
     }
     catch (const std::exception& e) {
+      EXPECT_EQ(generator->IsSessionTerminated(), true);
       std::cout << "Session Terminated: " << e.what() << std::endl;
     }
   };
