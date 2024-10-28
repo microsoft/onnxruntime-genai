@@ -63,7 +63,7 @@ jobs:
 
     - name: Configure CMake
       run: |
-        cmake --preset windows_x64_cuda_release -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} -DTEST_PHI2=False
+        cmake --preset windows_x64_cuda_release -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }}
 
     - name: Build with CMake
       run: |
@@ -81,7 +81,8 @@ jobs:
     - name: Install the Python Wheel and Test Dependencies
       run: |
         python -m pip install -r test\python\requirements.txt
-        python -m pip install -r test\python\requirements-cuda.txt
+        python -m pip install -r test\python\cuda\torch\requirements.txt
+        python -m pip install -r test\python\cuda\ort\requirements.txt
         python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
 
     - name: Use Dummy HuggingFace Token
@@ -103,5 +104,5 @@ jobs:
       run: |
         $env:PATH = "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin;" + $env:PATH 
         echo "Current PATH variable is: $env:PATH" 
-        copy $env:GITHUB_WORKSPACE\ort\lib\* .\$env:binaryDir\test\Release
-        & .\$env:binaryDir\test\Release\unit_tests.exe
+        copy $env:GITHUB_WORKSPACE\ort\lib\* .\$env:binaryDir\Release
+        & .\$env:binaryDir\Release\unit_tests.exe

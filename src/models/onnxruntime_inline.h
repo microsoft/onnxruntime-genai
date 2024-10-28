@@ -432,6 +432,11 @@ inline OrtRunOptions& OrtRunOptions::UnsetTerminate() {
   return *this;
 }
 
+inline OrtRunOptions& OrtRunOptions::AddActiveLoraAdapter(const OrtLoraAdapter& adapter) {
+  Ort::ThrowOnError(Ort::api->RunOptionsAddActiveLoraAdapter(this, &adapter));
+  return *this;
+}
+
 inline std::unique_ptr<OrtCUDAProviderOptionsV2> OrtCUDAProviderOptionsV2::Create() {
   OrtCUDAProviderOptionsV2* p;
   Ort::ThrowOnError(Ort::api->CreateCUDAProviderOptions(&p));
@@ -1335,4 +1340,10 @@ inline void OrtOp::Invoke(const OrtKernelContext* context,
                           size_t output_count) {
   Ort::ThrowOnError(Ort::api->InvokeOp(context, this, input_values, static_cast<int>(input_count),
                                        output_values, static_cast<int>(output_count)));
+}
+
+inline std::unique_ptr<OrtLoraAdapter> OrtLoraAdapter::Create(const ORTCHAR_T* adapter_file_path, OrtAllocator& allocator) {
+  OrtLoraAdapter* p;
+  Ort::ThrowOnError(Ort::api->CreateLoraAdapter(adapter_file_path, &allocator, &p));
+  return std::unique_ptr<OrtLoraAdapter>{p};
 }

@@ -25,7 +25,7 @@
 #include <vector>
 #if USE_CUDA
 #include <cuda_runtime.h>
-#include "cuda_common.h"
+#include "cuda/cuda_common.h"
 #else
 // If we don't include cuda_runtime.h, we define this to avoid lots of extra #ifdefs
 using cudaStream_t = void*;
@@ -37,6 +37,7 @@ using cudaStream_t = void*;
 #include "models/debugging.h"
 #include "config.h"
 #include "logging.h"
+#include "runtime_settings.h"
 #include "tensor.h"
 
 namespace Generators {
@@ -52,6 +53,7 @@ enum struct DeviceType {
   CPU,
   CUDA,
   DML,
+  WEBGPU,
 };
 
 std::string to_string(DeviceType device_type);
@@ -109,7 +111,7 @@ struct Generator : LeakChecked<Generator> {
   void ComputeLogits();
   void GenerateNextToken();
 
-  RoamingArray<int32_t> GetSequence(size_t index) const;
+  DeviceMemorySpan<int32_t> GetSequence(size_t index) const;
 
   std::shared_ptr<const Model> model_;
   std::unique_ptr<State> state_;
@@ -134,7 +136,7 @@ std::unique_ptr<OrtGlobals>& GetOrtGlobals();
 void Shutdown();  // Do this once at exit, Ort code will fail after this call
 OrtEnv& GetOrtEnv();
 
-std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path);
+std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings = nullptr);
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Model& model);
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Config& config);  // For benchmarking purposes only
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params);

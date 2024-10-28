@@ -6,9 +6,81 @@
 #include "span.h"
 
 namespace Generators {
+struct Search;
+struct GeneratorParams;
 
-template <typename... T>
-void Unreferenced(const T&...) {}
+struct DeviceMemoryBase : std::enable_shared_from_this<DeviceMemoryBase> {
+  virtual ~DeviceMemoryBase() {}
+  virtual const char* GetType() const = 0;  // Returns "cuda" "cuda_cpu" "directml" etc
+  virtual bool IsCpuAccessible() const = 0;
+  virtual void GetOnCpu() = 0;  // Allocates p_cpu_ if necessary and copies p_device_ memory into it
+  virtual void CopyFromDevice(size_t begin_dest, DeviceMemoryBase& source, size_t begin_source, size_t size_in_bytes) = 0;
+
+  uint8_t* p_device_{};
+  uint8_t* p_cpu_{};
+  size_t size_in_bytes_{};
+};
+
+template <typename T>
+struct DeviceMemorySpan;
+
+template <typename T>
+struct DeviceMemory : DeviceMemoryBase {
+  size_t Size() const { return size_in_bytes_ / sizeof(T); }
+  std::span<T> DeviceSpan() { return std::span<T>(reinterpret_cast<T*>(p_device_), Size()); }
+  std::span<T> CpuSpan() {
+    if (!p_cpu_) GetOnCpu();
+    return std::span<T>(reinterpret_cast<T*>(p_cpu_), Size());
+  }
+
+  DeviceMemorySpan<T> subspan() { return DeviceMemorySpan<T>(*this, 0, Size()); }
+  DeviceMemorySpan<T> subspan(size_t begin, size_t length) { return DeviceMemorySpan<T>(*this, begin, length); }
+  DeviceMemorySpan<T> subspan_cpu(std::span<T> span) { return DeviceMemorySpan<T>(*this, span.data() - CpuSpan().data(), span.size()); }
+  DeviceMemorySpan<T> subspan_device(std::span<T> span) { return DeviceMemorySpan<T>(*this, span.data() - DeviceSpan().data(), span.size()); }
+
+ private:
+  static void CheckSize() {
+    // Ensure we're the same size as DeviceMemory so we can be cast to it
+    // Has to be in a method because sizeof(TDeviceMemory) is not known outside of methods
+    static_assert(sizeof(DeviceMemory) == sizeof(DeviceMemoryBase));
+  }
+};
+
+// Many times we want to pass a subspan of device memory, this handles the memory differences
+template <typename T>
+struct DeviceMemorySpan {
+  DeviceMemorySpan() = default;
+  DeviceMemorySpan(DeviceMemory<T>& memory, size_t begin, size_t length)
+      : p_device_memory_{std::static_pointer_cast<DeviceMemory<T>>(memory.shared_from_this())}, begin_{begin}, length_{length} {}
+
+  size_t size() const { return length_; }
+  std::span<T> CpuSpan() { return p_device_memory_->CpuSpan().subspan(begin_, length_); }
+
+ private:
+  std::shared_ptr<DeviceMemory<T>> p_device_memory_;
+  size_t begin_, length_;  // Subspan of p_device_memory_, relative to original memory block
+};
+
+template <typename T>
+void copy(DeviceMemorySpan<const T> source, DeviceMemorySpan<T> dest) {
+  assert(source.size() == dest.size());
+  dest.p_device_memory_->CopyFromDevice(dest.begin, *source.p_device_memory_, source.begin, source.size * sizeof(T));
+}
+
+struct DeviceInterface {
+  virtual ~DeviceInterface() {}
+
+  virtual std::shared_ptr<DeviceMemoryBase> AllocateBase(size_t size, bool cpu_accessible) = 0;
+  template <typename T>
+  std::shared_ptr<DeviceMemory<T>> Allocate(size_t count, bool cpu_accessible) {
+    return std::static_pointer_cast<DeviceMemory<T>>(AllocateBase(sizeof(T) * count, cpu_accessible));
+  }
+
+  virtual std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) = 0;
+  virtual std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) = 0;
+};
+
+DeviceInterface& GetCpuDeviceInterface();
 
 namespace Location {
 struct CPU {};
@@ -18,6 +90,7 @@ struct GPU {};
 template <typename T>
 struct cpu_span : std::span<T> {
   using std::span<T>::span;
+  explicit cpu_span(std::span<T> v) : std::span<T>(v) {}
 };
 template <typename T>
 struct gpu_span : std::span<T> {
@@ -80,26 +153,6 @@ cuda_host_unique_ptr<T> CudaMallocHostArray(size_t count, cpu_span<T>* p_span = 
     *p_span = cpu_span<T>(p, count);
   return cuda_host_unique_ptr<T>{p};
 }
-
-struct cuda_event_holder {
-  cuda_event_holder() {
-    cudaEventCreate(&v_);
-  }
-
-  cuda_event_holder(unsigned flags) {
-    cudaEventCreateWithFlags(&v_, flags);
-  }
-
-  ~cuda_event_holder() {
-    if (v_)
-      (void)cudaEventDestroy(v_);
-  }
-
-  operator cudaEvent_t() { return v_; }
-
- private:
-  cudaEvent_t v_{};
-};
 
 struct cuda_stream_holder {
   void Create() {
@@ -178,16 +231,6 @@ struct RoamingArray {
       cudaMemcpy(device_.data(), cpu_.data(), cpu_.size_bytes(), cudaMemcpyHostToDevice);
     }
     return device_;
-  }
-
-  void FlushCPUChanges() {
-    if (!device_.empty())
-      cudaMemcpy(device_.data(), cpu_.data(), cpu_.size_bytes(), cudaMemcpyHostToDevice);
-  }
-
-  void FlushGPUChanges() {
-    if (!cpu_.empty())
-      cudaMemcpy(cpu_.data(), device_.data(), cpu_.size_bytes(), cudaMemcpyDeviceToHost);
   }
 
   void Assign(const RoamingArray<T>& v) {

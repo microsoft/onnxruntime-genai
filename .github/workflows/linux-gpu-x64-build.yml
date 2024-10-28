@@ -124,7 +124,8 @@ jobs:
             -e HF_TOKEN=$HF_TOKEN \
             -w /ort_genai_src onnxruntimecudabuildx64 bash -c " \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/requirements.txt --user && \
-              ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/requirements-cuda.txt --user && \
+              ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/torch/requirements.txt --user && \
+              ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/ort/requirements.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install /ort_genai_src/build/cuda/wheel/onnxruntime_genai*manylinux*.whl --no-deps --user && \
               ${{ env.PYTHON_EXECUTABLE }} test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models --e2e"
 
@@ -147,4 +148,4 @@ jobs:
             --rm \
             --volume /data/ortgenai_pytorch_models:/data/ortgenai_pytorch_models \
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
-            -w /ort_genai_src onnxruntimecudabuildx64 bash -c "ORTGENAI_LOG_ORT_LIB=1 LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/ort_genai_src/build/cuda/ /ort_genai_src/build/cuda/test/unit_tests"
+            -w /ort_genai_src onnxruntimecudabuildx64 bash -c "ORTGENAI_LOG_ORT_LIB=1 LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/ort_genai_src/build/cuda/ /ort_genai_src/build/cuda/unit_tests"
