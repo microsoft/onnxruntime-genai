@@ -10,6 +10,9 @@ struct Search;
 struct Sequences;
 struct GeneratorParams;
 
+// A DeviceBuffer is an abstract interface to a block of device memory (can be cuda/dml/cpu memory)
+// Note: For a CPU DeviceBuffer, there's only one block of memory on CPU, the copy methods are no-ops
+// Do not use DeviceBuffer directly, use a DeviceSpan (the Allocate/WrapMemory methods return DeviceSpans)
 struct DeviceBuffer : std::enable_shared_from_this<DeviceBuffer> {
   virtual ~DeviceBuffer() {}
   virtual const char* GetType() const = 0;  // Returns "cuda" "cuda_cpu" "directml" etc
@@ -18,40 +21,47 @@ struct DeviceBuffer : std::enable_shared_from_this<DeviceBuffer> {
   virtual void CopyDeviceToCpu() = 0;  // Allocates p_cpu_ if necessary and copies p_device_ memory into it
   virtual void CopyCpuToDevice() = 0;
   virtual void CopyFrom(size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) = 0;
-
+  
   uint8_t* p_device_{};
   uint8_t* p_cpu_{};
   size_t size_in_bytes_{};
 };
 
-// Many times we want to pass a subspan of device memory, this handles the memory differences
+// A DeviceSpan is how a DeviceBuffer is used. It can be thought of as a std::span for device memory with
+// utilities to interop with CPU memory. It is what Allocate<T> returns and what should be passed around by value.
 template <typename T>
 struct DeviceSpan {
   DeviceSpan() = default;
   DeviceSpan(std::shared_ptr<DeviceBuffer>&& memory)
       : p_device_memory_{std::move(memory)}, begin_{}, length_{p_device_memory_->size_in_bytes_ / sizeof(T)} {}
-  DeviceSpan(DeviceBuffer& memory, size_t begin, size_t length)
-      : p_device_memory_{memory.shared_from_this()}, begin_{begin}, length_{length} {}
 
   bool empty() const { return length_ == 0; }
   size_t size() const { return length_; }
 
+  DeviceSpan<T> subspan(size_t begin, size_t length) { return DeviceSpan<T>(*p_device_memory_, begin_ + begin, length); }
+
+  // Return the device accessible memory. Should only be done in device specific code, as it's not CPU accessible
   std::span<T> Span() { return std::span<T>{reinterpret_cast<T*>(p_device_memory_->p_device_) + begin_, length_}; }
+
+  // Return the CPU accessible memory, allocating if necessary (note, to get the current device memory on CPU, use 'CopyDeviceToCpu' instead)
   std::span<T> CpuSpan() {
     p_device_memory_->AllocateCpu();
     return std::span<T>{reinterpret_cast<T*>(p_device_memory_->p_cpu_) + begin_, length_};
   }
+
+  // Copy device memory to CPU memory and return the CPU accessible memory
   std::span<T> CopyDeviceToCpu() {
     p_device_memory_->CopyDeviceToCpu();
     return std::span<T>{reinterpret_cast<T*>(p_device_memory_->p_cpu_) + begin_, length_};
   }
+
+  // Copy CPU memory to device memory, typically used after calling CpuSpan or CopyDeviceToCpu to update the device memory with the modifications made
   void CopyCpuToDevice() { p_device_memory_->CopyCpuToDevice(); }
 
-  DeviceSpan<T> subspan(size_t begin, size_t length) { return DeviceSpan<T>(*p_device_memory_, begin_ + begin, length); }
-
-  DeviceBuffer& GetDeviceMemory() { return *p_device_memory_; }
-
  private:
+  DeviceSpan(DeviceBuffer& memory, size_t begin, size_t length)
+      : p_device_memory_{memory.shared_from_this()}, begin_{begin}, length_{length} {}
+
   std::shared_ptr<DeviceBuffer> p_device_memory_;
   size_t begin_{}, length_{};  // Subspan of p_device_memory_, relative to original memory block
 };
