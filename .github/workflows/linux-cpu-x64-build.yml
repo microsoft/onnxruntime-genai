@@ -70,7 +70,7 @@ jobs:
           python3 -m pip install -r test/python/requirements.txt --user
           python3 -m pip install -r test/python/cpu/torch/requirements.txt --user
           python3 -m pip install -r test/python/cpu/ort/requirements.txt --user
-          python3 -m pip install --user --no-index --find-links build/cpu/wheel onnxruntime_genai
+          python3 -m pip install build/cpu/wheel/onnxruntime_genai*manylinux*.whl --no-deps --user
 
       - name: Use Dummy HuggingFace Token
         run: |
