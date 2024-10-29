@@ -73,7 +73,7 @@ def get_pod_config_file(package_variant: PackageVariant):
 
 
 def assemble_objc_pod_package(
-    staging_dir: pathlib.Path, pod_version: str, framework_info_file: pathlib.Path, package_variant: PackageVariant, ort_version: str
+    staging_dir: pathlib.Path, pod_version: str, framework_info_file: pathlib.Path, package_variant: PackageVariant
 ):
     """
     Assembles the files for the Objective-C pod package in a staging directory.
@@ -130,7 +130,6 @@ def assemble_objc_pod_package(
         "TEST_RESOURCE_FILE_LIST": path_patterns_as_variable_value(pod_files["test_resource_files"]),
         "TEST_SOURCE_FILE_LIST": path_patterns_as_variable_value(pod_files["test_source_files"]),
         "VERSION": pod_version,
-        "ORT_VERSION": ort_version
     }
 
     podspec_template = _script_dir / "objc.podspec.template"
@@ -166,9 +165,6 @@ def parse_args():
     parser.add_argument(
         "--variant", choices=PackageVariant.release_variant_names(), required=True, help="Pod package variant."
     )
-    parser.add_argument(
-        "--ort-version", required=True, help="The ORT version to depend on."
-    )
     return parser.parse_args()
 
 
@@ -180,7 +176,6 @@ def main():
         pod_version=args.pod_version,
         framework_info_file=args.framework_info_file,
         package_variant=PackageVariant[args.variant],
-        ort_version=args.ort_versoin
     )
 
     return 0

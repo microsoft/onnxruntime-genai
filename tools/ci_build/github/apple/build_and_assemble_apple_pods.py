@@ -12,7 +12,7 @@ import tempfile
 
 from c.assemble_c_pod_package import assemble_c_pod_package
 from objectivec.assemble_objc_pod_package import assemble_objc_pod_package
-from package_assembly_utils import PackageVariant, get_ort_version
+from package_assembly_utils import PackageVariant, get_ort_genai_version
 
 SCRIPT_PATH = pathlib.Path(__file__).resolve()
 SCRIPT_DIR = SCRIPT_PATH.parent
@@ -45,7 +45,7 @@ def parse_args():
 
     parser.add_argument(
         "--pod-version",
-        default=f"{get_ort_version()}-local",
+        default=f"{get_ort_genai_version()}-local",
         help="The version string of the pod. The same version is used for all pods.",
     )
 
@@ -181,8 +181,7 @@ def main():
             staging_dir=objc_pod_staging_dir,
             pod_version=args.pod_version,
             framework_info_file=framework_info_file,
-            package_variant=package_variant,
-            ort_version=args.ort_version
+            package_variant=package_variant
         )
 
         if args.test:

@@ -30,7 +30,7 @@
   try {
       return _sequences->Count();
   }
-  OGA_OBJC_API_IMPL_CATCH(error, -1)
+  OGA_OBJC_API_IMPL_CATCH(error, size_t(-1))
 }
 
 - (nullable OGAInt32Span*)sequenceAtIndex:(size_t)index

@@ -23,11 +23,11 @@
   OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }
 
-- (NSNumber*)isDoneWithError:(NSError**)error {
+- (BOOL)isDoneWithError:(NSError**)error {
   try {
-    return [NSNumber numberWithBool:_generator->IsDone()];
+    return _generator->IsDone();
   }
-  OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
 }
 
 - (BOOL)computeLogitsWithError:(NSError**)error {

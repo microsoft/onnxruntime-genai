@@ -163,7 +163,7 @@ def get_podspec_values(framework_info):
     return (ios_deployment_target, macos_deployment_target, weak_framework)
 
 
-def get_ort_version():
+def get_ort_genai_version():
     """
     Gets the version string from the repo.
 

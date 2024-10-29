@@ -193,7 +193,7 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 /**
  * The count of generated sequences
  * @param error Optional error information set if an error occurs.
- * @return The count of sequences, or -1 if an error occurs.
+ * @return The count of sequences, or size_t(-1) if an error occurs.
  */
 - (size_t)getCountWithError:(NSError**)error NS_SWIFT_NAME(count());
 
@@ -302,9 +302,9 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 /**
  * Whether generation is done.
  * @param error Optional error information set if an error occurs.
- * @return The result, or nil if an error occurs.
+ * @return The result, or false if an error occurs.
  */
-- (nullable NSNumber*)isDoneWithError:(NSError**)error NS_SWIFT_NAME(isDone());
+- (BOOL)isDoneWithError:(NSError**)error NS_SWIFT_NAME(isDone()) __attribute__((swift_error(nonnull_error)));
 /**
  * Compute logits based on the input.
  * @param error Optional error information set if an error occurs.

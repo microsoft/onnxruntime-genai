@@ -15,7 +15,7 @@ import tempfile
 from huggingface_hub import snapshot_download
 
 from c.assemble_c_pod_package import assemble_c_pod_package
-from package_assembly_utils import PackageVariant, gen_file_from_template, get_ort_version
+from package_assembly_utils import PackageVariant, gen_file_from_template, get_ort_genai_version
 
 SCRIPT_PATH = pathlib.Path(__file__).resolve(strict=True)
 REPO_DIR = SCRIPT_PATH.parents[4]
@@ -79,7 +79,7 @@ def _test_apple_packages(args):
 
         pod_name, podspec = assemble_c_pod_package(
             staging_dir=local_pods_dir,
-            pod_version=get_ort_version(),
+            pod_version=get_ort_genai_version(),
             framework_info_file=args.framework_info_file,
             public_headers_dir=public_headers_dir,
             framework_dir=framework_dir,

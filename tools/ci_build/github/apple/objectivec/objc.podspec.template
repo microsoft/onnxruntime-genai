@@ -49,6 +49,5 @@ Pod::Spec.new do |s|
     }
 
   end
-  s.dependency 'onnxruntime-objc', '~> @ORT_VERSION@'
 end
 
