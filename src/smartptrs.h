@@ -21,7 +21,7 @@ struct DeviceBuffer : std::enable_shared_from_this<DeviceBuffer> {
   virtual void CopyDeviceToCpu() = 0;  // Allocates p_cpu_ if necessary and copies p_device_ memory into it
   virtual void CopyCpuToDevice() = 0;
   virtual void CopyFrom(size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) = 0;
-  
+
   uint8_t* p_device_{};
   uint8_t* p_cpu_{};
   size_t size_in_bytes_{};
