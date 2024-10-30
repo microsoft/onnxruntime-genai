@@ -75,7 +75,8 @@ jobs:
     - name: Install the python wheel and test dependencies
       run: |
         python3 -m pip install -r test\python\requirements.txt --user
-        python3 -m pip install -r test\python\requirements-cpu.txt --user
+        python3 -m pip install -r test\python\cpu\torch\requirements.txt --user
+        python3 -m pip install -r test\python\cpu\ort\requirements.txt --user
         python3 -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
 
     - name: Use Dummy HuggingFace Token
@@ -100,8 +101,8 @@ jobs:
 
     - name: Run tests
       run: |
-        copy $env:GITHUB_WORKSPACE\ort\lib\* .\$env:binaryDir\test\Release
-        & .\$env:binaryDir\test\Release\unit_tests.exe
+        copy $env:GITHUB_WORKSPACE\ort\lib\* .\$env:binaryDir\Release
+        & .\$env:binaryDir\Release\unit_tests.exe
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v3

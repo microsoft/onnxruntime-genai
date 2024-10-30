@@ -22,7 +22,7 @@ struct BeamSearchScorer_Cuda {
     return next_beam_indices_cpu_;
   }
   gpu_span<int32_t> GetNextIndicesGPU() { return next_beam_indices_; }
-  RoamingArray<int32_t> GetBeamHypothesis(size_t batch_id, size_t beam_id) const;
+  DeviceMemorySpan<int32_t> GetBeamHypothesis(size_t batch_id, size_t beam_id) const;
 
  private:
   mutable cuda_event_holder event_process_complete_;
@@ -42,9 +42,9 @@ struct BeamSearchScorer_Cuda {
   std::unique_ptr<int32_t[]> next_beam_indices_cpu_ptr_;
   cpu_span<int32_t> next_beam_indices_cpu_;
 
-  cuda_unique_ptr<int32_t> hypothesis_buffer_ptr_;  // Allocated buffer to hold all hypotheses
-  gpu_span<int32_t> hypothesis_buffer_;             // Span of the allocated buffer
-  size_t hypothesis_buffer_used_{};                 // Offset of available buffer, or length of used buffer.
+  std::shared_ptr<DeviceMemory<int32_t>> hypothesis_buffer_ptr_;  // Allocated buffer to hold all hypotheses
+  std::span<int32_t> hypothesis_buffer_;                          // Span of the allocated buffer
+  size_t hypothesis_buffer_used_{};                               // Offset of available buffer, or length of used buffer.
 
   cuda_unique_ptr<cuda::HypothesisScore> hypothesis_scores_ptr_;  // num_beams_ * batch_size_, divided into num_beams_ chunks per BeamHypothesis in beam_hyps_
   cuda_unique_ptr<cuda::BeamHypotheses> beam_hyps_ptr_;

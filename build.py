@@ -126,12 +126,19 @@ def _parse_args():
 
     parser.add_argument("--use_rocm", action="store_true", help="Whether to use ROCm. Default is to not use rocm.")
 
+    parser.add_argument("--use_webgpu", action="store_true", help="Whether to use WebGpu. Default is to not use WebGpu.")
+
     parser.add_argument("--use_dml", action="store_true", help="Whether to use DML. Default is to not use DML.")
 
     # The following options are mutually exclusive (cross compiling options such as android, ios, etc.)
     platform_group = parser.add_mutually_exclusive_group()
     platform_group.add_argument("--android", action="store_true", help="Build for Android")
-    platform_group.add_argument("--ios", action="store_true", help="Build for ios")
+    platform_group.add_argument("--ios", action="store_true", help="Build for iOS")
+    platform_group.add_argument(
+        "--macos",
+        choices=["MacOSX", "Catalyst"],
+        help="Specify the target platform for macOS build. Only specify this argument when --build_apple_framework is present.",
+    )
 
     # Android options
     parser.add_argument(
@@ -157,21 +164,25 @@ def _parse_args():
 
     # iOS build options
     parser.add_argument(
-        "--ios_sysroot",
+        "--apple_sysroot",
         default="",
         help="Specify the location name of the macOS platform SDK to be used",
     )
     parser.add_argument(
-        "--ios_arch",
+        "--osx_arch",
         type=str,
         help="Specify the Target specific architectures for iOS "
         "This is only supported on MacOS host",
     )
     parser.add_argument(
-        "--ios_deployment_target",
+        "--apple_deploy_target",
         type=str,
         help="Specify the minimum version of the target platform "
         "This is only supported on MacOS host",
+    )
+
+    parser.add_argument(
+        "--build_apple_framework", action="store_true", help="Build a macOS/iOS framework for the ONNXRuntime."
     )
 
     parser.add_argument(
@@ -285,14 +296,14 @@ def _validate_ios_args(args: argparse.Namespace):
             raise ValueError("A Mac host is required to build for iOS")
 
         needed_args = [
-            args.ios_sysroot,
-            args.ios_arch,
-            args.ios_deployment_target,
+            args.apple_sysroot,
+            args.osx_arch,
+            args.apple_deploy_target,
         ]
         arg_names = [
-            "--ios_sysroot           <the location or name of the macOS platform SDK>",
-            "--ios_arch              <the Target specific architectures for iOS>",
-            "--ios_deployment_target <the minimum version of the target platform>",
+            "--apple_sysroot          <the location or name of the macOS platform SDK>",
+            "--osx_arch              <the Target specific architectures for iOS>",
+            "--apple_deploy_target   <the minimum version of the target platform>",
         ]
         have_required_args = all(_ is not None for _ in needed_args)
         if not have_required_args:
@@ -462,6 +473,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
         f"-DUSE_CUDA={'ON' if args.use_cuda else 'OFF'}",
         f"-DUSE_ROCM={'ON' if args.use_rocm else 'OFF'}",
+        f"-DUSE_WEBGPU={'ON' if args.use_webgpu else 'OFF'}",
         f"-DUSE_DML={'ON' if args.use_dml else 'OFF'}",
         f"-DENABLE_JAVA={'ON' if args.build_java else 'OFF'}",
         f"-DBUILD_WHEEL={build_wheel}",
@@ -485,9 +497,26 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             "-DENABLE_TESTS=OFF",
         ]
 
+    if args.ios or args.macos:
+        platform_name = "macabi" if args.macos == "Catalyst" else args.apple_sysroot
+        command += [
+            "-DENABLE_PYTHON=OFF",
+            "-DENABLE_TESTS=OFF",
+            "-DENABLE_MODEL_BENCHMARK=OFF",
+            f"-DBUILD_APPLE_FRAMEWORK={'ON' if args.build_apple_framework else 'OFF'}",
+            "-DPLATFORM_NAME=" + platform_name,
+        ]
+
+    if args.macos:
+        command += [
+            f"-DCMAKE_OSX_SYSROOT={args.apple_sysroot}",
+            f"-DCMAKE_OSX_ARCHITECTURES={args.osx_arch}",
+            f"-DCMAKE_OSX_DEPLOYMENT_TARGET={args.apple_deploy_target}",
+        ]
+
     if args.ios:
         def _get_opencv_toolchain_file():
-            if args.ios_sysroot == "iphoneos":
+            if args.apple_sysroot == "iphoneos":
                 return (
                     REPO_ROOT / "cmake" / "external" / "opencv" / "platforms" / "iOS" / "cmake" /
                         "Toolchains" / "Toolchain-iPhoneOS_Xcode.cmake"
@@ -498,17 +527,30 @@ def update(args: argparse.Namespace, env: dict[str, str]):
                         "Toolchains" / "Toolchain-iPhoneSimulator_Xcode.cmake"
                 )
 
-
         command += [
             "-DCMAKE_SYSTEM_NAME=iOS",
-            f"-DCMAKE_OSX_SYSROOT={args.ios_sysroot}",
-            f"-DCMAKE_OSX_ARCHITECTURES={args.ios_arch}",
-            f"-DCMAKE_OSX_DEPLOYMENT_TARGET={args.ios_deployment_target}",
-            "-DENABLE_PYTHON=OFF",
+            f"-DIOS_ARCH={args.osx_arch}",
+            f"-DIPHONEOS_DEPLOYMENT_TARGET={args.apple_deploy_target}",
             # The following arguments are specific to the OpenCV toolchain file
-            f"-DIOS_ARCH={args.ios_arch}",
-            f"-DIPHONEOS_DEPLOYMENT_TARGET={args.ios_deployment_target}",
             f"-DCMAKE_TOOLCHAIN_FILE={_get_opencv_toolchain_file()}",
+        ]
+
+    if args.macos == "Catalyst":
+        if args.cmake_generator == "Xcode":
+            raise Exception("Xcode CMake generator ('--cmake_generator Xcode') doesn't support Mac Catalyst build.")
+
+        macabi_target = f"{args.osx_arch}-apple-ios{args.apple_deploy_target}-macabi"
+        command += [
+            "-DCMAKE_CXX_COMPILER_TARGET=" + macabi_target,
+            "-DCMAKE_C_COMPILER_TARGET=" + macabi_target,
+            "-DCMAKE_CC_COMPILER_TARGET=" + macabi_target,
+            f"-DCMAKE_CXX_FLAGS=--target={macabi_target}",
+            f"-DCMAKE_CXX_FLAGS_RELEASE=-O3 -DNDEBUG --target={macabi_target}",
+            f"-DCMAKE_C_FLAGS=--target={macabi_target}",
+            f"-DCMAKE_C_FLAGS_RELEASE=-O3 -DNDEBUG --target={macabi_target}",
+            f"-DCMAKE_CC_FLAGS=--target={macabi_target}",
+            f"-DCMAKE_CC_FLAGS_RELEASE=-O3 -DNDEBUG --target={macabi_target}",
+            "-DMAC_CATALYST=1",
         ]
 
     if args.arm64:
@@ -563,6 +605,11 @@ def test(args: argparse.Namespace, env: dict[str, str]):
     Run the tests.
     """
     lib_dir = args.build_dir / "test"
+    if util.is_windows():
+        # On Windows, the unit test executable is found inside a directory named after the configuration
+        # (e.g. Debug, Release, etc.) within the test directory.
+        # Whereas on as on platforms, the executable is directly under the test directory.
+        lib_dir = lib_dir / args.config
     if not args.ort_home:
         _ = util.download_dependencies(args.use_cuda, args.use_rocm, args.use_dml, lib_dir)
     else:

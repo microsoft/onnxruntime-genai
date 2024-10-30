@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 using System;
-using System.Runtime.InteropServices;
+using System.Diagnostics;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
@@ -34,6 +34,14 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         {
             Result.VerifySuccess(NativeMethods.OgaCreateTensorFromBuffer(data, shape, (UIntPtr)shape.Length, type, out _tensorHandle));
         }
+
+        internal Tensor(IntPtr tensorHandle)
+        {
+            Debug.Assert(tensorHandle != IntPtr.Zero);
+            _tensorHandle = tensorHandle;
+            _disposed = false;
+        }
+
         internal IntPtr Handle { get { return _tensorHandle; } }
 
         ~Tensor()
@@ -52,6 +60,47 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Int64[] shape = new Int64[size.ToUInt64()];
             Result.VerifySuccess(NativeMethods.OgaTensorGetShape(_tensorHandle, shape, size));
             return shape;
+        }
+
+        /// <summary>
+        /// Computes number of elements in the tensor
+        /// given the shape
+        /// </summary>
+        /// <param name="shape">shape</param>
+        /// <returns>product of dimensions</returns>
+        public static Int64 ElementsFromShape(Int64[] shape)
+        {
+            Int64 size = 1;
+            foreach (Int64 dim in shape)
+            {
+                size *= dim;
+            }
+            return size;
+        }
+
+        /// <summary>
+        /// Computes and returns number of elements in the tensor
+        /// </summary>
+        /// <returns></returns>
+        public Int64 NumElements()
+        {
+            return ElementsFromShape(Shape());
+        }
+
+        /// <summary>
+        /// Return a ReadOnlySpan to tensor data
+        /// no type checks are made
+        /// </summary>
+        /// <typeparam name="T"></typeparam>
+        /// <returns>read only span</returns>
+        public ReadOnlySpan<T> GetData<T>()
+        {
+            var elements = NumElements();
+            Result.VerifySuccess(NativeMethods.OgaTensorGetData(Handle, out IntPtr data));
+            unsafe
+            {
+                return new ReadOnlySpan<T>(data.ToPointer(), (int)elements);
+            }
         }
 
         public void Dispose()

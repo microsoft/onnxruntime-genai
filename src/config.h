@@ -4,9 +4,11 @@
 
 namespace Generators {
 
+struct RuntimeSettings;
+
 struct Config {
   Config() = default;
-  Config(const fs::path& path);
+  Config(const fs::path& path, std::string_view json_overlay);
 
   struct Defaults {
     static constexpr std::string_view InputIdsName = "input_ids";
@@ -40,7 +42,9 @@ struct Config {
     std::optional<std::string> log_id;
     std::optional<int> log_severity_level;
     std::optional<std::string> enable_profiling;
-    bool use_env_allocators{true};
+    // TODO(baijumeswani): Sharing env allocators across sessions leads to crashes on windows and iOS.
+    //                     Identify the reason for the crash to enable allocator sharing by default.
+    bool use_env_allocators{false};
 
     std::vector<ProviderOptions> provider_options;
   };

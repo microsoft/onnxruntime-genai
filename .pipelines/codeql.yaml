@@ -41,7 +41,7 @@ stages:
     - task: onebranch.pipeline.tsaoptions@1
       displayName: 'OneBranch TSAOptions'
       inputs:
-        tsaConfigFilePath: '$(Build.Repository.LocalPath)\.config\tsaoptions.json'
+        tsaConfigFilePath: '$(Build.Repository.LocalPath)/.config/tsaoptions.json'
         appendSourceBranchName: false
     - task: CredScan@3
       displayName: 🔍 Run CredScan
@@ -64,5 +64,5 @@ stages:
       condition: and (succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
       continueOnError: true
       inputs:
+        tsaConfigFilePath: '$(Build.Repository.LocalPath)/.config/tsaoptions.json'
         GdnPublishTsaOnboard: true
-        GdnPublishTsaConfigFile: '$(Build.Repository.LocalPath)\.config\tsaoptions.json'

@@ -1,5 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+//
+// Modifications Copyright(C) 2024 Advanced Micro Devices, Inc. All rights reserved
 #include <algorithm>
 #include <thread>
 
@@ -17,62 +19,49 @@
 #include "dml_provider_factory.h"
 #include "../dml/dml_helpers.h"
 
-EXTERN_C IMAGE_DOS_HEADER __ImageBase;
-
-static std::string CurrentModulePath() {
-  char path[MAX_PATH];
-  GetModuleFileNameA((HINSTANCE)&__ImageBase, path, _countof(path));
-
-  char absolute_path[MAX_PATH];
-  char* name;
-  GetFullPathNameA(path, _countof(path), absolute_path, &name);
-
-  auto idx = std::distance(absolute_path, name);
-  auto out_path = std::string(absolute_path);
-  out_path.resize(idx);
-
-  return out_path;
-}
+std::string CurrentModulePath();
 #endif
 
 namespace Generators {
 
 State::State(const GeneratorParams& params, const Model& model)
     : model_{model},
-      params_{params.shared_from_this()} {}
+      params_{params.shared_from_this()},
+      run_options_{OrtRunOptions::Create()} {}
 
-void State::Run(OrtSession& session, OrtRunOptions& run_options, int new_batch_size) {
+void State::Run(OrtSession& session, int new_batch_size) {
   auto captured_graph_info = GetCapturedGraphInfo();
 
   if (first_run_) {
     if (captured_graph_info) {
-      model_.run_options_->AddConfigEntry("gpu_graph_id", "-1");
+      run_options_->AddConfigEntry("gpu_graph_id", "-1");
     }
     first_run_ = false;
   } else if (captured_graph_info && new_batch_size != current_batch_size_) {
     current_batch_size_ = new_batch_size;
     auto annotation_id = std::to_string(captured_graph_info->GenerateUniqueAnnotationID(new_batch_size));
-    model_.run_options_->AddConfigEntry("gpu_graph_id", annotation_id.c_str());
+    run_options_->AddConfigEntry("gpu_graph_id", annotation_id.c_str());
   }
 
   if (g_log.enabled && g_log.model_input_values) {
     auto& stream = Log("model_input_values");
     stream << std::endl;
-    DumpTensors(stream, inputs_.data(), input_names_.data(), input_names_.size(), true);
+    DumpTensors(model_, stream, inputs_.data(), input_names_.data(), input_names_.size(), true);
   }
 
   if (g_log.enabled && g_log.model_output_shapes) {
     auto& stream = Log("model_output_shapes");
     stream << std::endl;
-    DumpTensors(stream, outputs_.data(), output_names_.data(), output_names_.size(), false);
+    DumpTensors(model_, stream, outputs_.data(), output_names_.data(), output_names_.size(), false);
   }
 
-  session.Run(&run_options, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
+  session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
+              output_names_.data(), outputs_.data(), output_names_.size());
 
   if (g_log.enabled && g_log.model_output_values) {
     auto& stream = Log("model_output_values");
     stream << std::endl;
-    DumpTensors(stream, outputs_.data(), output_names_.data(), output_names_.size(), true);
+    DumpTensors(model_, stream, outputs_.data(), output_names_.data(), output_names_.size(), true);
   }
 }
 
@@ -99,6 +88,27 @@ void State::ClearIO() {
   output_names_.clear();
   inputs_.clear();
   outputs_.clear();
+}
+
+void State::SetActiveAdapter(Adapters* adapters, const std::string& adapter_name) {
+  if (!adapters_) {
+    adapters_ = adapters->shared_from_this();
+  } else if (adapters_.get() != adapters) {
+    // Two different instances of Adapters are being used. The Generator state can only manage
+    // active adapters from a single Adapters container.
+    throw std::runtime_error("Generator state can only register a single Adapters container.");
+  }
+
+  run_options_->AddActiveLoraAdapter(*adapters_->AcquireAdapter(adapter_name));
+  adapter_names_.push_back(adapter_name);
+}
+
+State::~State() {
+  if (adapters_) {
+    for (const auto& adapter_name : adapter_names_) {
+      adapters_->ReleaseAdapter(adapter_name);
+    }
+  }
 }
 
 std::vector<int32_t> PadInputs(std::span<std::span<const int32_t>> sequences, int32_t pad_token_id) {
@@ -261,9 +271,6 @@ ONNXTensorElementDataType SessionInfo::GetOutputDataType(const std::string& name
 }
 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
-  // TODO: add function to create run options
-  run_options_ = OrtRunOptions::Create();
-
   CreateSessionOptions();
 }
 
@@ -275,14 +282,23 @@ void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
   if (device_type_ == DeviceType::CUDA) {
     allocator_device_ = GetCudaAllocator(session);
   }
-#elif USE_DML
+#endif
+#if USE_DML
   if (device_type_ == DeviceType::DML) {
     memory_info_device_ = OrtMemoryInfo::Create("DML", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
     dml_owned_allocator_ = Ort::Allocator::Create(session, *memory_info_device_);
     allocator_device_ = dml_owned_allocator_.get();
   }
 #endif
-
+  allocator_kvcache_ = allocator_device_;
+#if USE_WEBGPU
+  if (device_type_ == DeviceType::WEBGPU) {
+    // for webgpu we only use device memory for kv_cache
+    memory_info_device_ = OrtMemoryInfo::Create("WebGPU_Buffer", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+    webgpu_owned_allocator_ = Ort::Allocator::Create(session, *memory_info_device_);
+    allocator_kvcache_ = webgpu_owned_allocator_.get();
+  }
+#endif
   session_info_ = std::make_unique<SessionInfo>(session);
   captured_graph_pool_ = std::make_shared<CapturedGraphPool>(config_.get(), session_info_.get(), allocator_device_);
 }
@@ -392,6 +408,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       // Only use the primary session options to determine the device type
       if (is_primary_session_options)
         device_type_ = DeviceType::CUDA;  // Scoring will use CUDA
+
     } else if (provider_options.name == "rocm") {
       OrtROCMProviderOptions ort_provider_options;
 
@@ -453,8 +470,14 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       for (auto& option : provider_options.options) {
         opts.emplace(option.first, option.second);
       }
-
       session_options.AppendExecutionProvider("QNN", opts);
+    } else if (provider_options.name == "webgpu") {
+      device_type_ = DeviceType::WEBGPU;
+      std::unordered_map<std::string, std::string> opts;
+      for (auto& option : provider_options.options) {
+        opts.emplace(option.first, option.second);
+      }
+      session_options.AppendExecutionProvider("WebGPU", opts);
     } else
       throw std::runtime_error("Unknown provider type: " + provider_options.name);
   }
@@ -490,12 +513,16 @@ std::shared_ptr<MultiModalProcessor> Model::CreateMultiModalProcessor() const {
   return std::make_shared<MultiModalProcessor>(*config_, *session_info_);
 }
 
-std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path) {
-  auto config = std::make_unique<Config>(fs::path(config_path));
+std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings /*= nullptr*/) {
+  std::string config_overlay;
+  if (settings) {
+    config_overlay = settings->GenerateConfigOverlay();
+  }
+  auto config = std::make_unique<Config>(fs::path(config_path), config_overlay);
 
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
-  if (config->model.type == "llama" || config->model.type == "gemma" || config->model.type == "gemma2" || config->model.type == "mistral" || config->model.type == "phi" || config->model.type == "phi3" || config->model.type == "phi3small" || config->model.type == "phimoe" || config->model.type == "qwen2")
+  if (config->model.type == "llama" || config->model.type == "gemma" || config->model.type == "gemma2" || config->model.type == "mistral" || config->model.type == "phi" || config->model.type == "phi3" || config->model.type == "phi3small" || config->model.type == "phimoe" || config->model.type == "qwen2" || config->model.type == "nemotron" || config->model.type == "chatglm")
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
   if (config->model.type == "whisper")
     return std::make_shared<Whisper_Model>(std::move(config), ort_env);
@@ -536,8 +563,9 @@ void ConvertFp16ToFp32(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<Or
   auto* fp32 = p_out->GetTensorMutableData<float>();
 
   switch (device_type) {
+    case DeviceType::WEBGPU:
     case DeviceType::DML:
-      // DML doesn't currently support on-device scoring, so we fall back to the CPU
+      // DML, WebGpu doesn't currently support on-device scoring, so we fall back to the CPU
     case DeviceType::CPU:
       for (int i = 0; i < count; i++)
         fp32[i] = FastFloat16ToFloat32(fp16[i]);
@@ -597,7 +625,7 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
 
   // If we're on CUDA, we still want to do the copy to move the data over to CUDA memory where we will read from it later.
   // DML doesn't currently support on-device scoring, so we go the same route as the CPU
-  if (num_beams == 1 && (device_type_ == DeviceType::CPU || device_type_ == DeviceType::DML)) {
+  if (num_beams == 1 && (device_type_ == DeviceType::CPU || device_type_ == DeviceType::DML || device_type_ == DeviceType::WEBGPU)) {
     return std::move(input);
   }
 
@@ -617,8 +645,9 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
   auto* target = expanded_data;
 
   switch (device_type_) {
+    case DeviceType::WEBGPU:
     case DeviceType::DML:
-      // DML doesn't currently support on-device scoring, so we use the CPU for non-cache inputs/outputs
+      // DML and WebGpu doesn't currently support on-device scoring, so we use the CPU for non-cache inputs/outputs
     case DeviceType::CPU:
       for (int i = 0; i < batch_size; i++) {
         for (int j = 0; j < num_beams; j++) {

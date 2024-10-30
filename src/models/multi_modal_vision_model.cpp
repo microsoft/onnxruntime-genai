@@ -79,10 +79,9 @@ std::unique_ptr<State> MultiModalVisionModel::CreateState(RoamingArray<int32_t> 
   return std::make_unique<MultiModalPipelineState>(*this, sequence_lengths, params);
 }
 
-EmbeddingState::EmbeddingState(const MultiModalVisionModel& model, const GeneratorParams& params, const CapturedGraphInfo* captured_graph_info, const int64_t num_image_tokens)
+EmbeddingState::EmbeddingState(const MultiModalVisionModel& model, const GeneratorParams& params, const int64_t num_image_tokens)
     : State{params, model},
       model_{model},
-      captured_graph_info_{captured_graph_info},
       num_image_tokens_{num_image_tokens} {
   input_ids_.Add();
   image_features_.Add();
@@ -92,12 +91,11 @@ EmbeddingState::EmbeddingState(const MultiModalVisionModel& model, const Generat
 void EmbeddingState::UpdateInputsAndOutputs(RoamingArray<int32_t> next_tokens) {
   input_ids_.Update(next_tokens);
   image_features_.Update();
-  inputs_embeds_.UpdateSequenceLength();
 }
 
 RoamingArray<float> EmbeddingState::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
   int batch_size = static_cast<int>(input_ids_.GetShape()[0]);
-  State::Run(*model_.embedding_session_, *model_.run_options_, batch_size);
+  State::Run(*model_.embedding_session_, batch_size);
 
   return MakeDummy();
 }
@@ -112,7 +110,7 @@ VisionState::VisionState(const MultiModalVisionModel& model, const GeneratorPara
 
 RoamingArray<float> VisionState::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
   const int num_images = static_cast<int>(inputs_[0]->GetTensorTypeAndShapeInfo()->GetShape()[0]);
-  State::Run(*model_.vision_session_, *model_.run_options_, num_images);
+  State::Run(*model_.vision_session_, num_images);
 
   return MakeDummy();
 }
@@ -130,14 +128,15 @@ DecoderState::DecoderState(const MultiModalVisionModel& model, RoamingArray<int3
 
 RoamingArray<float> DecoderState::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
   int batch_size = static_cast<int>(inputs_embeds_.GetShape()[0]);
-  State::Run(*model_.decoder_session_, *model_.run_options_, batch_size);
+  State::Run(*model_.decoder_session_, batch_size);
   return logits_.Get();
 }
 
-void DecoderState::UpdateInputsOutputs(int current_length, RoamingArray<int32_t> beam_indices) {
+void DecoderState::UpdateInputsAndOutputs(int current_length, RoamingArray<int32_t> beam_indices) {
   position_inputs_.Update(current_length);
   kv_cache_.Update(beam_indices.GetCPU(), current_length);
   logits_.Update();
+  inputs_embeds_.UpdateSequenceLength();
 }
 
 MultiModalPipelineState::MultiModalPipelineState(const MultiModalVisionModel& model,
@@ -147,7 +146,7 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalVisionModel& mo
       model_{model},
       num_image_tokens_{GetNumImageTokens(params_->extra_inputs, model_.config_->model.vision.inputs.pixel_values, model_.config_->model.vision.inputs.image_sizes)},
       captured_graph_info_{model.GetCapturedGraphPool()->ReserveCapturedGraph(model, params)} {
-  embedding_state_ = std::make_unique<EmbeddingState>(model, params, nullptr, num_image_tokens_);
+  embedding_state_ = std::make_unique<EmbeddingState>(model, params, num_image_tokens_);
   vision_state_ = std::make_unique<VisionState>(model_, params, num_image_tokens_);
   decoder_state_ = std::make_unique<DecoderState>(model_, sequence_lengths_unk, params, captured_graph_info_.get());
 }
@@ -167,9 +166,9 @@ RoamingArray<float> MultiModalPipelineState::Run(int current_length, RoamingArra
       vision_state_->Run(current_length, next_tokens, next_indices);
     }
     embedding_state_->image_features_.ReuseImageFeaturesBuffer(vision_state_->image_features_);
+    embedding_state_->inputs_embeds_.ReuseEmbeddingsBuffer(decoder_state_->inputs_embeds_);
     embedding_state_->Run(current_length, next_tokens, next_indices);
 
-    decoder_state_->inputs_embeds_.ReuseEmbeddingsBuffer(embedding_state_->inputs_embeds_);
     auto logits = decoder_state_->Run(current_length, next_tokens, next_indices);
 
     is_prompt_ = false;
@@ -179,10 +178,11 @@ RoamingArray<float> MultiModalPipelineState::Run(int current_length, RoamingArra
   }
 
   embedding_state_->UpdateInputsAndOutputs(next_tokens);
-  decoder_state_->UpdateInputsOutputs(current_length, next_indices);
+  decoder_state_->UpdateInputsAndOutputs(current_length, next_indices);
 
+  embedding_state_->inputs_embeds_.ReuseEmbeddingsBuffer(decoder_state_->inputs_embeds_);
   embedding_state_->Run(current_length, next_tokens, next_indices);
-  decoder_state_->inputs_embeds_.ReuseEmbeddingsBuffer(embedding_state_->inputs_embeds_);
+
   return decoder_state_->Run(current_length, next_tokens, next_indices);
 }
 

@@ -24,6 +24,8 @@ import os
 import json
 from metrics import BenchmarkRecord
 
+import numpy as np
+
 peak_cpu_memory = 0.0
 peak_gpu_memory = 0.0
 peak_memory_lock = threading.Lock()
@@ -225,8 +227,14 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
 
  
     # Generate prompt
-    prompt = [generate_prompt(model, tokenizer, prompt_length, args.use_graph_capture)] * batch_size
-    tokens = tokenizer.encode_batch(prompt)
+    tokens, prompt = None, None
+    if args.use_random_tokens:
+        # use random tokens instead of generating a prompt using the model and then tokenizing it
+        tokens = np.random.randint(100, size=(batch_size, prompt_length))
+        prompt = [tokenizer.decode(tokens[0])] * batch_size
+    else:
+        prompt = [generate_prompt(model, tokenizer, prompt_length, args.use_graph_capture)] * batch_size
+        tokens = tokenizer.encode_batch(prompt)
 
     params = og.GeneratorParams(model)
     params.input_ids = tokens
@@ -415,6 +423,7 @@ if __name__ == "__main__":
     parser.add_argument('-gc', '--use_graph_capture', action='store_true', help='Use the graph capture feature for CUDA or DML')
     parser.add_argument('-mn', '--model_name', type=str, default='model_name', help='Model name defined by users')
     parser.add_argument('-pr', '--precision', type=str, default='fp16', help='Model precision for metrics info')
+    parser.add_argument('--use_random_tokens', action='store_true', help='Use random tokens instead of generating a prompt')
     args = parser.parse_args()
 
     # check max_lengths
