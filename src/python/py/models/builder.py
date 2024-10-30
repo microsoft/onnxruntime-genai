@@ -144,7 +144,7 @@ class Model:
         }
 
         # LayerNorm-specific variables
-        epsilon = config.rms_norm_eps if hasattr(config, "rms_norm_eps") else 9.999999747378752e-06
+        epsilon = config.rms_norm_eps if hasattr(config, "rms_norm_eps") else 1e-06
         self.layernorm_attrs = {
             "simple": True,             # Use SimplifiedLayerNorm/SkipSimplifiedLayerNorm vs. LayerNorm/SkipLayerNorm
             "first_layernorm": True,    # 1st LayerNorm = LayerNorm, then SkipLayerNorm for all subsequent LayerNorms
