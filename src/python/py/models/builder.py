@@ -40,10 +40,10 @@ class Model:
         self.io_dtype = io_dtype      # {'fp16', 'fp32'}
         self.onnx_dtype = onnx_dtype  # {"int4", "fp16", "fp32"}
         self.quant_type = config.quantization_config["quant_method"] if hasattr(config, "quantization_config") else None
-        self.adapter_path = extra_options["adapter_path"] if "adapter_path" in extra_options else None
+        self.adapter_path = extra_options.get("adapter_path", None)
 
         self.cache_dir = cache_dir
-        self.filename = extra_options["filename"] if "filename" in extra_options else "model.onnx"
+        self.filename = extra_options.get("filename", "model.onnx")
         self.hf_token = parse_hf_token(extra_options.get("hf_token", "true"))
         self.extra_options = extra_options
 
@@ -54,7 +54,7 @@ class Model:
         self.nodes = []
 
         # EP-specific variables
-        enable_cuda_graph = "1" if "enable_cuda_graph" in extra_options else "0"
+        enable_cuda_graph = extra_options.get("enable_cuda_graph", "0")
         self.ep = ep
         self.ep_attrs = {
             "cpu": {},
@@ -288,9 +288,9 @@ class Model:
         # Quantization-specific variables (INT4, INT8, etc.)
         self.quant_attrs = {
             "int4": {
-                "accuracy_level": int(extra_options["int4_accuracy_level"]) if "int4_accuracy_level" in extra_options else 0,   # Default is 0 for non-QDQ formats, default is 4 for QDQ formats
-                "block_size": int(extra_options["int4_block_size"]) if "int4_block_size" in extra_options else 32,
-                "op_types_to_quantize": (extra_options["op_type_to_quantize"], ) if "int4_op_type_to_quantize" in extra_options else ("MatMul", "Gather", ),
+                "accuracy_level": int(extra_options.get("int4_accuracy_level", 0)),   # Default is 0 for non-QDQ formats, default is 4 for QDQ formats
+                "block_size": int(extra_options.get("int4_block_size", 32)),
+                "op_types_to_quantize": extra_options.get("int4_op_types_to_quantize", ("MatMul", )),
             },
             "use_qdq": False,           # Use QDQ format
         }
@@ -3006,6 +3006,12 @@ class ChatGLMModel(Model):
         super().make_layer(layer_id, layer)
 
 def check_extra_options(kv_pairs):
+    if "int4_op_types_to_quantize" in kv_pairs:
+        op_types_to_quantize = ()
+        for op_type in kv_pairs["int4_op_types_to_quantize"].split("/"):
+            op_types_to_quantize += (op_type, )
+        kv_pairs["int4_op_types_to_quantize"] = op_types_to_quantize
+
     if "use_8bits_moe" in kv_pairs:
         assert(kv_pairs["use_8bits_moe"] == "1" or kv_pairs["use_8bits_moe"] == "0"), "use_8bits_moe must be 0 or 1."
 
@@ -3189,8 +3195,9 @@ def get_args():
                     2 is fp16.
                     1 is fp32.
                 int4_block_size = 16/32/64/128/256: Specify the block_size for int4 quantization.
-                int4_op_type_to_quantize = MatMul/Gather: Specify one op type to target for int4 quantization.
+                int4_op_types_to_quantize = MatMul/Gather: Specify op types to target for int4 quantization.
                     Use this option when you want to quantize just the MatMul ops or just the Gather ops.
+                    Separate the op types with a '/' when passing them here (e.g. int4_op_types_to_quantize=MatMul/Gather)
                 num_hidden_layers = Manually specify the number of layers in your ONNX model (for unit testing purposes).
                 filename = Filename for ONNX model (default is 'model.onnx').
                     For models with multiple components, each component is exported to its own ONNX model.
@@ -3206,10 +3213,10 @@ def get_args():
                 enable_cuda_graph = 1: The model can use CUDA graph capture for CUDA execution provider. If enabled, all nodes being placed on the CUDA EP
                     is the prerequisite for the CUDA graph to be used correctly. It is not guaranteed that cuda graph be enabled as it depends on the model
                     and the graph structure.
-                use_8bits_moe = 1 : Use 8-bit quantization for MoE layers. Default is using 4-bit quantization.
+                use_8bits_moe = 1: Use 8-bit quantization for MoE layers. Default is using 4-bit quantization.
                 hf_token = false/token: Use this to disable authentication with Hugging Face or provide a custom authentication token that differs from the one stored in your environment. Default behavior is to use the authentication token stored by `huggingface-cli login`.
                     If you have already authenticated via `huggingface-cli login`, you do not need to use this flag because Hugging Face has already stored your authentication token for you.
-                use_qdq = 1 : Use the QDQ decomposition for quantized MatMul instead of the MatMulNBits operator.
+                use_qdq = 1: Use the QDQ decomposition for quantized MatMul instead of the MatMulNBits operator.
                 adapter_path = Path to folder on disk containing the adapter files (adapter_config.json and adapter model weights).
             """),
     )
