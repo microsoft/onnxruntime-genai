@@ -1,0 +1,23 @@
+parameters:
+- name: build_config
+  type: string
+steps:
+- task: PowerShell@2
+  displayName: 'Set CMake Build Type'
+  inputs:
+    workingDirectory: $(Build.SourcesDirectory)
+    targetType: inline
+    script: |
+      $chosen_build_config = "${{ parameters.build_config }}"
+      $cmake_build_type = $chosen_build_config;
+      if ($chosen_build_config -eq "release") {
+        $cmake_build_type = "Release"
+      }
+      elseif ($chosen_build_config -eq "relwithdebinfo") {
+        $cmake_build_type = "RelWithDebInfo"
+      }
+      elseif ($chosen_build_config -eq "debug") {
+        $cmake_build_type = "Debug"
+      }
+      Write-Host "Current build type: $cmake_build_type"
+      Write-Host "##vso[task.setvariable variable=cmake_build_type]$cmake_build_type"

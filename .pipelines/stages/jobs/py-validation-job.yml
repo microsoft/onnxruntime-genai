@@ -11,8 +11,6 @@ parameters:
   type: string
 - name: ep
   type: string
-- name: ort_version
-  type: string
 - name: cuda_version
   type: string
   default: ''
@@ -24,6 +22,7 @@ parameters:
   values:
   - 'linux'
   - 'win'
+  - 'osx'
 
 jobs:
 - job: python_${{ parameters.os }}_${{ parameters.ep }}${{ parameters.cuda_display_version }}_${{ parameters.arch }}_validation
@@ -46,6 +45,9 @@ jobs:
       pool: 'onnxruntime-genai-windows-vs-2022-arm64'
     ${{ else }}:
       pool: 'onnxruntime-Win-CPU-2022'
+  ${{ if eq(parameters.os, 'osx') }}:
+    pool:
+      vmImage: 'macOS-latest'
 
   timeoutInMinutes: 240
   workspace:
@@ -69,23 +71,11 @@ jobs:
     value: ${{ parameters.cuda_version }}
   - name: ep
     value: ${{ parameters.ep }}
-  - name: ort_version
-    value: ${{ parameters.ort_version }}
   - name: os
     value: ${{ parameters.os }}
 
   - name: py_dot_ver
-    ${{ if eq(parameters.ep, 'cpu') }}:
-      ${{ if eq(parameters.arch, 'arm64') }}:
-        value: '3.12'
-      ${{ else }}:
-        value: '3.9'
-    ${{ elseif eq(parameters.ep, 'cuda') }}:
-      value: '3.10'
-    ${{ elseif eq(parameters.ep, 'directml')}}:
-      value: '3.11'
-    ${{ else }}:
-      value: '3.9'
+    value: '3.12'
 
   - name: pip_package_name
     ${{ if eq(parameters.ep, 'cpu') }}:
@@ -147,22 +137,13 @@ jobs:
       addToPath: true
       architecture: $(arch)
 
-  - ${{ if eq(parameters.os, 'linux') }}:
-    - template: steps/utils/flex-download-pipeline-artifact.yml
-      parameters:
-        StepName: 'Download Python Wheel Artifacts'
-        ArtifactName: $(ArtifactName)
-        TargetPath: '$(Build.BinariesDirectory)/wheel'
-        SpecificArtifact: ${{ parameters.specificArtifact }}
-        BuildId: ${{ parameters.BuildId }}
-  - ${{ if eq(parameters.os, 'win') }}:
-    - template: steps/utils/flex-download-pipeline-artifact.yml
-      parameters:
-        StepName: 'Download Python Wheel Artifacts'
-        ArtifactName: $(ArtifactName)-wheel
-        TargetPath: '$(Build.BinariesDirectory)/wheel'
-        SpecificArtifact: ${{ parameters.specificArtifact }}
-        BuildId: ${{ parameters.BuildId }}
+  - template: steps/utils/flex-download-pipeline-artifact.yml
+    parameters:
+      StepName: 'Download Python Wheel Artifacts'
+      ArtifactName: $(ArtifactName)-wheel
+      TargetPath: '$(Build.BinariesDirectory)/wheel'
+      SpecificArtifact: ${{ parameters.specificArtifact }}
+      BuildId: ${{ parameters.BuildId }}
 
   - template: steps/utils/download-huggingface-model.yml
     parameters:
@@ -174,7 +155,7 @@ jobs:
       HuggingFaceToken: $(HF_TOKEN)
       os: ${{ parameters.os }}
 
-  - ${{ if eq(parameters.os, 'linux') }}:
+  - ${{ if or(eq(parameters.os, 'linux'), eq(parameters.os, 'osx')) }}:
     - ${{ if eq(parameters.ep, 'cuda') }}:
       - bash: |
           set -e -x
@@ -193,7 +174,8 @@ jobs:
             bash -c " \
                 export ORTGENAI_LOG_ORT_LIB=1 && \
                 $python_exe -m pip install -r /ort_genai_src/test/python/requirements.txt && \
-                $python_exe -m pip install -r /ort_genai_src/test/python/requirements-cuda.txt && \
+                $python_exe -m pip install -r /ort_genai_src/test/python/cuda/torch/requirements.txt && \
+                $python_exe -m pip install -r /ort_genai_src/test/python/cuda/ort/requirements.txt && \
                 cd /ort_genai_src/examples/python && \
                 $python_exe -m pip install --no-index --find-links=/ort_genai_binary/wheel $(pip_package_name) && \
                 $python_exe model-generate.py -m ./models/$(prebuild_phi3_mini_model_folder) --min_length 25 --max_length 50 --verbose"
@@ -204,7 +186,14 @@ jobs:
       - bash: |
           export ORTGENAI_LOG_ORT_LIB=1
           python -m pip install -r test/python/requirements.txt
-          python -m pip install -r test/python/requirements-cpu.txt
+          if [[ "$(os)" == "linux" ]]; then
+            python -m pip install -r test/python/cpu/torch/requirements.txt
+            python -m pip install -r test/python/cpu/ort/requirements.txt
+          fi
+          if [[ "$(os)" == "osx" ]]; then
+            python -m pip install -r test/python/macos/torch/requirements.txt
+            python -m pip install -r test/python/macos/ort/requirements.txt
+          fi
           cd examples/python
           python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)
           python model-generate.py -m ./models/$(prebuild_phi3_mini_model_folder) --min_length 25 --max_length 50 --verbose
@@ -224,13 +213,16 @@ jobs:
           $env:CUDA_PATH = '$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)'
           $env:PATH = "$env:CUDA_PATH\bin;$env:CUDA_PATH\extras\CUPTI\lib64;$env:PATH"
           Write-Host $env:PATH
-          python -m pip install -r test/python/requirements-cuda.txt
+          python -m pip install -r test/python/cuda/torch/requirements.txt
+          python -m pip install -r test/python/cuda/ort/requirements.txt
         }
         elseif ("$(ep)" -eq "directml") {
-          python -m pip install -r test/python/requirements-directml.txt
+          python -m pip install -r test/python/directml/torch/requirements.txt
+          python -m pip install -r test/python/directml/ort/requirements.txt
         }
         else {
-          python -m pip install -r test/python/requirements-cpu.txt
+          python -m pip install -r test/python/cpu/torch/requirements.txt
+          python -m pip install -r test/python/cpu/ort/requirements.txt
         }
         cd examples\python
         python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)

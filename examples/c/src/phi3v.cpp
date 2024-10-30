@@ -135,6 +135,7 @@ void C_API(const char* model_path) {
       OgaStringArray* image_paths_string_array;
       CheckResult(OgaCreateStringArrayFromStrings(image_paths_c.data(), image_paths_c.size(), &image_paths_string_array));
       CheckResult(OgaLoadImages(image_paths_string_array, &images));
+      OgaDestroyStringArray(image_paths_string_array);
     }
 
     std::string text;

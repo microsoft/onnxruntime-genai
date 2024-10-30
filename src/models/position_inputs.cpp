@@ -172,13 +172,6 @@ void PositionInputs::UpdatePositionIDs(int current_length) {
         model_.GetDmlExecutionContext()->ExecuteCommandList(dml_update_position_ids_kernel_->GetCommandList(), &fence, &completion_value);
       } break;
 #endif
-      case DeviceType::CPU: {
-        if (type_ == Ort::TypeToTensorType<int32_t>)
-          UpdatePositionIDsImpl<int32_t>();
-        else
-          UpdatePositionIDsImpl<int64_t>();
-        break;
-      }
 #if USE_CUDA
       case DeviceType::CUDA:
         if (type_ == Ort::TypeToTensorType<int32_t>)
@@ -187,6 +180,14 @@ void PositionInputs::UpdatePositionIDs(int current_length) {
           cuda::Launch_UpdatePositionIds(position_ids_->GetTensorMutableData<int64_t>(), static_cast<int>(position_ids_shape_[0]), model_.cuda_stream_);
         break;
 #endif
+      case DeviceType::CPU:
+      case DeviceType::WEBGPU: {
+        if (type_ == Ort::TypeToTensorType<int32_t>)
+          UpdatePositionIDsImpl<int32_t>();
+        else
+          UpdatePositionIDsImpl<int64_t>();
+        break;
+      }
       default:
         throw std::runtime_error("PositionIDs::Update - Unsupported device type");
     }
@@ -269,17 +270,6 @@ void PositionInputs::UpdateAttentionMask(int current_length) {
       break;
     }
 #endif
-    case DeviceType::CPU: {
-      if (type_ == Ort::TypeToTensorType<int32_t>)
-        UpdateAttentionMaskImpl(attention_mask_next_->GetTensorMutableData<int32_t>(),
-                                attention_mask_->GetTensorData<int32_t>(),
-                                current_length);
-      else
-        UpdateAttentionMaskImpl(attention_mask_next_->GetTensorMutableData<int64_t>(),
-                                attention_mask_->GetTensorData<int64_t>(),
-                                current_length);
-      break;
-    }
 #if USE_CUDA
     case DeviceType::CUDA: {
       int max_seq_len = sb_attention_mask_ ? state_.params_->search.max_length : current_length;
@@ -304,6 +294,18 @@ void PositionInputs::UpdateAttentionMask(int current_length) {
       break;
     }
 #endif
+    case DeviceType::WEBGPU:
+    case DeviceType::CPU: {
+      if (type_ == Ort::TypeToTensorType<int32_t>)
+        UpdateAttentionMaskImpl(attention_mask_next_->GetTensorMutableData<int32_t>(),
+                                attention_mask_->GetTensorData<int32_t>(),
+                                current_length);
+      else
+        UpdateAttentionMaskImpl(attention_mask_next_->GetTensorMutableData<int64_t>(),
+                                attention_mask_->GetTensorData<int64_t>(),
+                                current_length);
+      break;
+    }
     default:
       throw std::runtime_error("PositionIDs::Update - Unsupported device type");
   }
@@ -334,7 +336,7 @@ void PositionInputs::InitializeTensors(std::array<int64_t, 2> shape, cpu_span<in
   for (int i = 0; i < shape[0]; i++) {
     T abs_position = 0;
     for (int j = 0; j < shape[1]; j++, word_id++, mask++, position++) {
-      if (*word_id == state_.params_->pad_token_id) {
+      if (*word_id == model_.config_->model.pad_token_id) {
         *mask = 0;
         *position = 0;
       } else {

@@ -41,6 +41,10 @@ BeamSearch_Cpu::BeamSearch_Cpu(const GeneratorParams& params)
 
 BeamSearch_Cpu::~BeamSearch_Cpu() = default;
 
+RoamingArray<float> Search_Cpu::GetLogits() const {
+  return next_token_scores_;
+}
+
 void Search_Cpu::SetLogits(RoamingArray<float> logits_unk) {
   next_token_scores_ = logits_unk.GetCPU();
 }
@@ -64,7 +68,7 @@ int Search_Cpu::GetSequenceLength() const {
 void BeamSearch_Cpu::SelectTop() {
   // Normalize next token scores
   for (int i = 0; i < params_->BatchBeamSize(); i++) {
-    std::span<float> const scores = next_token_scores_.subspan(static_cast<size_t>(i) * static_cast<size_t>(params_->vocab_size), params_->vocab_size);
+    std::span<float> const scores = next_token_scores_.subspan(static_cast<size_t>(i) * static_cast<size_t>(params_->config.model.vocab_size), params_->config.model.vocab_size);
     LogSoftMax(scores, 1.0);
   }
 
@@ -77,7 +81,7 @@ void BeamSearch_Cpu::SelectTop() {
   int batch_beam_index = 0;
   for (int i = 0; i < params_->batch_size; i++) {
     for (int j = 0; j < params_->search.num_beams; j++, batch_beam_index++) {
-      for (int k = 0; k < params_->vocab_size; k++, offset++) {
+      for (int k = 0; k < params_->config.model.vocab_size; k++, offset++) {
         next_token_scores_[offset] += beam_scores[batch_beam_index];
       }
     }
@@ -103,7 +107,7 @@ void BeamSearch_Cpu::SelectTop() {
   // TODO(aciddelgado): Optimize this top k with partial sort
   for (size_t batch_index = 0; batch_index < static_cast<size_t>(params_->batch_size); batch_index++) {
     std::priority_queue<ScoreIndex, std::vector<ScoreIndex>> queue;
-    auto token_scores_sub = next_token_scores_.subspan(batch_index * params_->search.num_beams * params_->vocab_size, static_cast<size_t>(params_->search.num_beams) * params_->vocab_size);
+    auto token_scores_sub = next_token_scores_.subspan(batch_index * params_->search.num_beams * params_->config.model.vocab_size, static_cast<size_t>(params_->search.num_beams) * params_->config.model.vocab_size);
     for (int i = 0; i < token_scores_sub.size(); i++) {
       queue.push({token_scores_sub[i], i});
     }
@@ -113,8 +117,8 @@ void BeamSearch_Cpu::SelectTop() {
     auto next_scores_sub = next_scores.subspan(top_k * batch_index, top_k);
     for (unsigned i = 0; i < top_k; i++) {
       auto v = queue.top();
-      next_indices_sub[i] = v.index / params_->vocab_size;
-      next_tokens_sub[i] = v.index % params_->vocab_size;
+      next_indices_sub[i] = v.index / params_->config.model.vocab_size;
+      next_tokens_sub[i] = v.index % params_->config.model.vocab_size;
       next_scores_sub[i] = v.score;
       queue.pop();
     }
@@ -139,7 +143,7 @@ void GreedySearch_Cpu::SelectTop() {
       continue;
     }
 
-    std::span<float> const scores = next_token_scores_.subspan(batch_id * params_->vocab_size, params_->vocab_size);
+    std::span<float> const scores = next_token_scores_.subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
     auto const token = static_cast<int32_t>(std::distance(scores.begin(), std::max_element(scores.begin(), scores.end())));
     SetNextToken(batch_id, token);
   }
@@ -149,7 +153,7 @@ void GreedySearch_Cpu::SelectTop() {
 
 void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
   for (size_t batch_id = 0; batch_id < params_->batch_size; batch_id++) {
-    std::span<float> const scores = next_token_scores_.subspan(batch_id * params_->vocab_size, params_->vocab_size);
+    std::span<float> const scores = next_token_scores_.subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
     SoftMax(scores, temperature);
     // Find the top K scores
     std::vector<int> indices(scores.size());
@@ -168,7 +172,7 @@ void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
     if (PadIfAlreadyEOS(batch_id)) {
       continue;
     }
-    std::span<float> const scores = next_token_scores_.subspan(batch_id * params_->vocab_size, params_->vocab_size);
+    std::span<float> const scores = next_token_scores_.subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
     SoftMax(scores, temperature);
     // Sort an array of indices into the scores
     std::vector<int32_t> indices(scores.size());
@@ -197,7 +201,7 @@ void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature) {
     if (PadIfAlreadyEOS(batch_id)) {
       continue;
     }
-    std::span<float> const scores = next_token_scores_.subspan(batch_id * params_->vocab_size, params_->vocab_size);
+    std::span<float> const scores = next_token_scores_.subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
     SoftMax(scores, temperature);
     // Find the top K scores
     std::vector<int> indices(scores.size());
@@ -226,13 +230,13 @@ bool GreedySearch_Cpu::PadIfAlreadyEOS(size_t batch_id) {
     return false;
   }
 
-  next_tokens_[batch_id] = params_->pad_token_id;
+  next_tokens_[batch_id] = params_->config.model.pad_token_id;
   return true;
 }
 
 void GreedySearch_Cpu::SetNextToken(size_t batch_id, int32_t token) {
   next_tokens_[batch_id] = token;
-  if (token == params_->eos_token_id) {
+  if (token == params_->config.model.eos_token_id) {
     eos_seen_[batch_id] = true;
     if (g_log.enabled && g_log.hit_eos)
       Log("hit_eos", "EOS seen on batch " + std::to_string(batch_id));
@@ -278,24 +282,22 @@ void BeamSearch_Cpu::Finalize(size_t num_return_sequences) {
   finalized_ = true;
 }
 
-RoamingArray<int32_t> BeamSearch_Cpu::GetSequence(size_t index) {
+DeviceMemorySpan<int32_t> BeamSearch_Cpu::GetSequence(size_t index) {
   size_t batch_id = index / params_->search.num_return_sequences;
   size_t beam_id = index % params_->search.num_return_sequences;
   Finalize(params_->search.num_return_sequences);
-  BeamHypotheses beam_hyp = beam_scorer_->GetBeamHypotheses(batch_id);
-  return beam_hyp.GetHypothesis(beam_id);
+  return beam_scorer_->GetBeamHypotheses(batch_id, beam_id);
 }
 
-// TODO(aciddelgado): my question is, should this return copy or reference?
-RoamingArray<int32_t> BeamSearch_Cpu::GetSequence(size_t batch_id, size_t beam_id) {
+// TODO(aciddelgado): my question is, should this return copy or reference? A: A copy, as with DeviceMemorySpan it's like a span
+DeviceMemorySpan<int32_t> BeamSearch_Cpu::GetSequence(size_t batch_id, size_t beam_id) {
   Finalize(params_->search.num_return_sequences);
-  BeamHypotheses beam_hyp = beam_scorer_->GetBeamHypotheses(batch_id);
-  return beam_hyp.GetHypothesis(beam_id);
+  return beam_scorer_->GetBeamHypotheses(batch_id, beam_id);
 }
 
 std::span<float> Search_Cpu::GetScores(int batch_beam_index) const {
   assert(batch_beam_index >= 0 && batch_beam_index < params_->BatchBeamSize());
-  return next_token_scores_.subspan(static_cast<size_t>(batch_beam_index) * params_->vocab_size, params_->vocab_size);
+  return next_token_scores_.subspan(static_cast<size_t>(batch_beam_index) * params_->config.model.vocab_size, params_->config.model.vocab_size);
 }
 
 void Search_Cpu::ApplyMinLength(int min_length) {
@@ -306,7 +308,7 @@ void Search_Cpu::ApplyMinLength(int min_length) {
   const int batch_beam_size = params_->BatchBeamSize();
   for (int i = 0; i < batch_beam_size; i++) {
     std::span<float> const beam_token_scores = GetScores(i);
-    beam_token_scores[params_->eos_token_id] = std::numeric_limits<float>::lowest();
+    beam_token_scores[params_->config.model.eos_token_id] = std::numeric_limits<float>::lowest();
   }
 }
 
@@ -317,7 +319,7 @@ void Search_Cpu::ApplyRepetitionPenalty(float penalty) {
   const int batch_beam_size = params_->BatchBeamSize();
   for (int i = 0; i < batch_beam_size; i++) {
     std::span<float> const beam_token_scores = GetScores(i);
-    std::span<const int32_t> const sequence = sequences_.GetSequence(i);
+    std::span<const int32_t> const sequence = sequences_.GetSequence(i).CpuSpan();
 
     // Find unique word IDs in sequence.
     std::unordered_set<int32_t> unique_word_ids;

@@ -1,0 +1,96 @@
+{
+    "model": {
+        "bos_token_id": 50256,
+        "context_length": 2048,
+        "decoder": {
+            "session_options": {
+                "log_id": "onnxruntime-genai",
+                "provider_options": [
+                    {}
+                ]
+            },
+            "head_size": 80,
+            "hidden_size": 2560,
+            "inputs": {
+                "input_ids": "input_ids",
+                "attention_mask": "attention_mask",
+                "past_key_names": "past_key_values.%d.key",
+                "past_value_names": "past_key_values.%d.value"
+            },
+            "outputs": {
+                "logits": "logits",
+                "present_key_names": "present.%d.key",
+                "present_value_names": "present.%d.value"
+            },
+            "num_attention_heads": 32,
+            "num_hidden_layers": 1,
+            "num_key_value_heads": 32,
+            "pipeline": [
+                {
+                    "embeddings": {
+                        "filename": "embeds.onnx",
+                        "inputs": [
+                            "input_ids"
+                        ],
+                        "outputs": [
+                            "/model/embed_tokens/Gather/output_0"
+                        ]
+                    },
+                    "transformer": {
+                        "filename": "transformer.onnx",
+                        "inputs": [
+                            "/model/embed_tokens/Gather/output_0",
+                            "attention_mask",
+                            "past_key_values.0.key",
+                            "past_key_values.0.value"
+                        ],
+                        "outputs": [
+                            "/model/layers.1/final_norm_layernorm/output_0",
+                            "present.0.key",
+                            "present.0.value"
+                        ],
+                        "session_options": {
+                            "log_id": "onnxruntime-genai",
+                            "provider_options": [
+                                {
+                                    "cuda": {
+                                        "enable_cuda_graph": "0"
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "language_model_head": {
+                        "filename": "lm_head.onnx",
+                        "inputs": [
+                            "/model/layers.1/final_norm_layernorm/output_0"
+                        ],
+                        "outputs": [
+                            "logits"
+                        ]
+                    }
+                }
+            ]
+        },
+        "eos_token_id": 50256,
+        "pad_token_id": 50256,
+        "type": "decoder-pipeline",
+        "vocab_size": 51200
+    },
+    "search": {
+        "diversity_penalty": 0.0,
+        "do_sample": false,
+        "early_stopping": true,
+        "length_penalty": 1.0,
+        "max_length": 2048,
+        "min_length": 0,
+        "no_repeat_ngram_size": 0,
+        "num_beams": 1,
+        "num_return_sequences": 1,
+        "past_present_share_buffer": true,
+        "repetition_penalty": 1.0,
+        "temperature": 1.0,
+        "top_k": 1,
+        "top_p": 1.0
+    }
+}

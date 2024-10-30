@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #include "generators.h"
+#include "runtime_settings.h"
 #include "json.h"
 #include <fstream>
 #include <sstream>
@@ -33,8 +34,13 @@ struct ProviderOptionsObject_Element : JSON::Element {
   explicit ProviderOptionsObject_Element(std::vector<Config::ProviderOptions>& v) : v_{v} {}
 
   JSON::Element& OnObject(std::string_view name) override {
-    if (options_element_)
-      throw std::runtime_error("Each object in the provider_options array can only have one member (named value)");
+    for (auto& v : v_) {
+      if (v.name == name) {
+        options_element_ = std::make_unique<ProviderOptions_Element>(v);
+        return *options_element_;
+      }
+    }
+
     auto& options = v_.emplace_back();
     options.name = name;
     options_element_ = std::make_unique<ProviderOptions_Element>(options);
@@ -96,6 +102,8 @@ struct SessionOptions_Element : JSON::Element {
       v_.enable_quant_qdq_cleanup = value;
     else if (name == "ep_context_enable")
       v_.ep_context_enable = value;
+    else if (name == "use_env_allocators")
+      v_.use_env_allocators = value;
     else
       throw JSON::unknown_value_error{};
   }
@@ -137,10 +145,6 @@ struct Inputs_Element : JSON::Element {
       v_.position_ids = value;
     } else if (name == "attention_mask") {
       v_.attention_mask = value;
-    } else if (name == "seqlens_k") {
-      v_.seqlens_k = value;
-    } else if (name == "total_seq_len") {
-      v_.total_sequence_length = value;
     } else if (name == "past_key_names") {
       v_.past_key_names = value;
     } else if (name == "past_value_names") {
@@ -151,6 +155,10 @@ struct Inputs_Element : JSON::Element {
       v_.cross_past_key_names = value;
     } else if (name == "cross_past_value_names") {
       v_.cross_past_value_names = value;
+    } else if (name == "current_sequence_length") {
+      v_.current_sequence_length = value;
+    } else if (name == "past_sequence_length") {
+      v_.past_sequence_length = value;
     } else
       throw JSON::unknown_value_error{};
   }
@@ -181,6 +189,101 @@ struct Outputs_Element : JSON::Element {
 
  private:
   Config::Model::Decoder::Outputs& v_;
+};
+
+struct StringArray_Element : JSON::Element {
+  explicit StringArray_Element(std::vector<std::string>& v) : v_{v} {}
+
+  void OnString(std::string_view name, std::string_view value) override {
+    v_.push_back(std::string(value));
+  }
+
+ private:
+  std::vector<std::string>& v_;
+};
+
+struct StringStringMap_Element : JSON::Element {
+  explicit StringStringMap_Element(std::unordered_map<std::string, std::string>& v) : v_{v} {}
+
+  void OnString(std::string_view name, std::string_view value) override {
+    v_[std::string(name)] = std::string(value);
+  }
+
+ private:
+  std::unordered_map<std::string, std::string>& v_;
+};
+
+struct PipelineModel_Element : JSON::Element {
+  explicit PipelineModel_Element(Config::Model::Decoder::PipelineModel& v) : v_{v} {}
+
+  void OnString(std::string_view name, std::string_view value) override {
+    if (name == "filename") {
+      v_.filename = value;
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
+  void OnBool(std::string_view name, bool value) override {
+    if (name == "run_on_prompt") {
+      v_.run_on_prompt = value;
+    } else if (name == "run_on_token_gen") {
+      v_.run_on_token_gen = value;
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
+  JSON::Element& OnObject(std::string_view name) override {
+    if (name == "session_options") {
+      v_.session_options = Config::SessionOptions{};
+      session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
+      return *session_options_;
+    } else if (name == "output_names_forwarder") {
+      return output_names_forwarder_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+  Element& OnArray(std::string_view name) override {
+    if (name == "inputs")
+      return inputs_;
+    else if (name == "outputs")
+      return outputs_;
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Decoder::PipelineModel& v_;
+  std::unique_ptr<SessionOptions_Element> session_options_;
+  StringArray_Element inputs_{v_.inputs};
+  StringArray_Element outputs_{v_.outputs};
+  StringStringMap_Element output_names_forwarder_{v_.output_names_forwarder};
+};
+
+struct PipelineModelObject_Element : JSON::Element {
+  explicit PipelineModelObject_Element(std::vector<Config::Model::Decoder::PipelineModel>& v) : v_{v} {}
+
+  Element& OnObject(std::string_view name) override {
+    auto& model = v_.emplace_back();
+    model.model_id = name;
+    pipeline_model_elements_.emplace_back(model);
+    return pipeline_model_elements_.back();
+  }
+
+ private:
+  std::vector<Config::Model::Decoder::PipelineModel>& v_;
+  std::vector<PipelineModel_Element> pipeline_model_elements_;
+};
+
+struct Pipeline_Element : JSON::Element {
+  explicit Pipeline_Element(std::vector<Config::Model::Decoder::PipelineModel>& v) : v_{v} {}
+
+  Element& OnObject(std::string_view name) override {
+    return object_;
+  }
+
+ private:
+  std::vector<Config::Model::Decoder::PipelineModel>& v_;
+  PipelineModelObject_Element object_{v_};
 };
 
 struct Decoder_Element : JSON::Element {
@@ -221,11 +324,18 @@ struct Decoder_Element : JSON::Element {
     throw JSON::unknown_value_error{};
   }
 
+  Element& OnArray(std::string_view name) override {
+    if (name == "pipeline")
+      return pipeline_;
+    throw JSON::unknown_value_error{};
+  }
+
  private:
   Config::Model::Decoder& v_;
   SessionOptions_Element session_options_{v_.session_options};
   Inputs_Element inputs_{v_.inputs};
   Outputs_Element outputs_{v_.outputs};
+  Pipeline_Element pipeline_{v_.pipeline};
 };
 
 struct VisionInputs_Element : JSON::Element {
@@ -248,8 +358,8 @@ struct VisionOutputs_Element : JSON::Element {
   explicit VisionOutputs_Element(Config::Model::Vision::Outputs& v) : v_{v} {}
 
   void OnString(std::string_view name, std::string_view value) override {
-    if (name == "visual_features") {
-      v_.visual_features = value;
+    if (name == "image_features") {
+      v_.image_features = value;
     } else
       throw JSON::unknown_value_error{};
   }
@@ -312,6 +422,8 @@ struct EmbeddingInputs_Element : JSON::Element {
   void OnString(std::string_view name, std::string_view value) override {
     if (name == "input_ids") {
       v_.input_ids = value;
+    } else if (name == "image_features") {
+      v_.image_features = value;
     } else
       throw JSON::unknown_value_error{};
   }
@@ -529,7 +641,7 @@ struct RootObject_Element : JSON::Element {
   JSON::Element& t_;
 };
 
-void ParseConfig(const fs::path& filename, Config& config) {
+void ParseConfig(const fs::path& filename, std::string_view json_overlay, Config& config) {
   std::ifstream file = filename.open(std::ios::binary | std::ios::ate);
   if (!file.is_open()) {
     throw std::runtime_error("Error opening " + filename.string());
@@ -551,10 +663,20 @@ void ParseConfig(const fs::path& filename, Config& config) {
     oss << "Error encountered while parsing '" << filename.string() << "' " << message.what();
     throw std::runtime_error(oss.str());
   }
+
+  if (!json_overlay.empty()) {
+    try {
+      JSON::Parse(root_object, json_overlay);
+    } catch (const std::exception& message) {
+      std::ostringstream oss;
+      oss << "Error encountered while parsing config overlay: " << message.what();
+      throw std::runtime_error(oss.str());
+    }
+  }
 }
 
-Config::Config(const fs::path& path) : config_path{path} {
-  ParseConfig(path / "genai_config.json", *this);
+Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path} {
+  ParseConfig(path / "genai_config.json", json_overlay, *this);
 
   if (model.context_length == 0)
     throw std::runtime_error("model context_length is 0 or was not set. It must be greater than 0");

@@ -4,13 +4,12 @@
     "CMakeLinuxDefaultConfigPresets.json"
   ],
   "configurePresets": [
-        {
+    {
       "name": "macos_default",
       "generator": "Unix Makefiles",
       "binaryDir": "${sourceDir}/build/cpu",
       "cacheVariables": {
         "CMAKE_POSITION_INDEPENDENT_CODE": "ON",
-        "CMAKE_OSX_ARCHITECTURES": "arm64",
         "USE_CUDA": "OFF",
         "USE_ROCM": "OFF"
       },
@@ -87,6 +86,28 @@
         "macos_default",
         "macos_minsizerel_default"
       ]
+    },
+    {
+      "name": "macos_x64_cpu_release",
+      "inherits": [
+        "macos_cpu_release"
+      ],
+      "cacheVariables": {
+        "CMAKE_OSX_ARCHITECTURES": "x86_64"
+      },
+      "displayName": "macos x64 cpu release",
+      "binaryDir": "${sourceDir}/build/cpu/osx-x64"
+    },
+    {
+      "name": "macos_arm64_cpu_release",
+      "inherits": [
+        "macos_cpu_release"
+      ],
+      "cacheVariables": {
+        "CMAKE_OSX_ARCHITECTURES": "arm64"
+      },
+      "displayName": "macos arm64 cpu release",
+      "binaryDir": "${sourceDir}/build/cpu/osx-arm64"
     }
   ]
 }

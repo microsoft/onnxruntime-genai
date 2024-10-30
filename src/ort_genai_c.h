@@ -50,6 +50,7 @@ typedef enum OgaElementType {
 typedef struct OgaResult OgaResult;
 typedef struct OgaGeneratorParams OgaGeneratorParams;
 typedef struct OgaGenerator OgaGenerator;
+typedef struct OgaRuntimeSettings OgaRuntimeSettings;
 typedef struct OgaModel OgaModel;
 // OgaSequences is an array of token arrays where the number of token arrays can be obtained using
 // OgaSequencesCount and the number of tokens in each token array can be obtained using OgaSequencesGetSequenceCount.
@@ -60,7 +61,9 @@ typedef struct OgaTensor OgaTensor;
 typedef struct OgaImages OgaImages;
 typedef struct OgaNamedTensors OgaNamedTensors;
 typedef struct OgaMultiModalProcessor OgaMultiModalProcessor;
+typedef struct OgaAudios OgaAudios;
 typedef struct OgaStringArray OgaStringArray;
+typedef struct OgaAdapters OgaAdapters;
 
 /* \brief Call this on process exit to cleanly shutdown the genai library & its onnxruntime usage
  */
@@ -110,6 +113,17 @@ OGA_EXPORT size_t OGA_API_CALL OgaSequencesCount(const OgaSequences* sequences);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaAppendTokenSequence(const int32_t* token_ptr, size_t token_cnt, OgaSequences* sequence);
 
 /*
+ * \brief Appends the given token to the sequence at the given index.
+          If the sequence at the given index does not exist, a new sequence is
+          created at the given index if sequence_idx is equal to the current sequences count.
+ * \param[in] token token to append to the sequence
+ * \param[in] sequences OgaSequences object to append the token to
+ * \param[in] sequence_index index of the sequence to append the token to
+ * \return OgaResult containing the error message when tokens could not been added, else nullptr.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaAppendTokenToSequence(int32_t token, OgaSequences* sequence, size_t sequence_index);
+
+/*
  * \brief Returns the number of tokens in the sequence at the given index
  * \param[in] sequences
  * \return The number of tokens in the sequence at the given index
@@ -130,6 +144,33 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadImages(const OgaStringArray* image_pat
 
 OGA_EXPORT void OGA_API_CALL OgaDestroyImages(OgaImages* images);
 
+OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadAudio(const char* audio_path, OgaAudios** audios);
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadAudios(const OgaStringArray* audio_paths, OgaAudios** audios);
+
+OGA_EXPORT void OGA_API_CALL OgaDestroyAudios(OgaAudios* audios);
+
+/*
+ * \brief Creates a runtime settings instance to be used to create a model.
+ * \param[out] out The created runtime settings.
+ * \return OgaResult containing the error message if the creation of the runtime settings failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateRuntimeSettings(OgaRuntimeSettings** out);
+/*
+ * \brief Destroys the given runtime settings.
+ * \param[in] settings The runtime settings to be destroyed.
+ */
+OGA_EXPORT void OGA_API_CALL OgaDestroyRuntimeSettings(OgaRuntimeSettings* settings);
+
+/*
+ * \brief Sets a specific runtime handle for the runtime settings.
+ * \param[in] settings The runtime settings to set the device type.
+ * \param[in] handle_name The name of the handle to set for the runtime settings.
+ * \param[in] handle The value of handle to set for the runtime settings.
+ * \return OgaResult containing the error message if the setting of the device type failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRuntimeSettingsSetHandle(OgaRuntimeSettings* settings, const char* handle_name, void* handle);
+
 /*
  * \brief Creates a model from the given configuration directory and device type.
  * \param[in] config_path The path to the model configuration directory. The path is expected to be encoded in UTF-8.
@@ -138,6 +179,16 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyImages(OgaImages* images);
  * \return OgaResult containing the error message if the model creation failed.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaModel** out);
+
+/*
+ * \brief Creates a model from the given configuration directory, runtime settings and device type.
+ * \param[in] config_path The path to the model configuration directory. The path is expected to be encoded in UTF-8.
+ * \param[in] settings The runtime settings to use for the model.
+ * \param[in] device_type The device type to use for the model.
+ * \param[out] out The created model.
+ * \return OgaResult containing the error message if the model creation failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModelWithRuntimeSettings(const char* config_path, const OgaRuntimeSettings* settings, OgaModel** out);
 
 /*
  * \brief Destroys the given model.
@@ -273,7 +324,18 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyMultiModalProcessor(OgaMultiModalProcesso
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer*, const char* str, OgaSequences* sequences);
 
+/*
+ * \brief Converts the given string to a single token id.
+ * \param[in] tokenizer The tokenizer to use to convert the string to a token id.
+ * \param[in] str The string to convert to a token id.
+ * \param[in] token_id The converted token id.
+ * \return OgaResult containing the error message if the conversion of the string to a token id failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerToTokenId(const OgaTokenizer* tokenizer, const char* str, int32_t* token_id);
+
 OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor*, const char* prompt, const OgaImages* images, OgaNamedTensors** input_tensors);
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessAudios(const OgaMultiModalProcessor*, const OgaAudios* audios, OgaNamedTensors** input_tensors);
 
 /* Decode a single token sequence and returns a null terminated utf8 string. out_string must be freed with OgaDestroyString
  */
@@ -355,6 +417,45 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaStringArrayAddString(OgaStringArray* strin
  * \return The number of strings in the string_array.
  */
 OGA_EXPORT size_t OGA_API_CALL OgaStringArrayGetCount(const OgaStringArray* string_array);
+
+/*
+ * \brief Creates the OgaAdapters object that manages the adapters.
+          - The OgaAdapters object is used to load all the model adapters.
+          - It is responsible for reference counting the loaded adapters.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateAdapters(const OgaModel* model, OgaAdapters** out);
+
+/*
+ * \brief Destroys the OgaAdapters object.
+ */
+OGA_EXPORT void OGA_API_CALL OgaDestroyAdapters(OgaAdapters* adapters);
+
+/*
+ * \brief Loads the model adapter from the given adapter file path and adapter name.
+ * \param[in] adapters The OgaAdapters object to load the adapter.
+ * \param[in] adapter_file_path The file path of the adapter to load.
+ * \param[in] adapter_name A unique identifier for the adapter chosed by the function invoker.
+ *                         This name is used for querying the adapter.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadAdapter(OgaAdapters* adapters, const char* adapter_file_path,
+                                                  const char* adapter_name);
+
+/*
+ * \brief Unloads the adapter with the given identifier from the previosly loaded adapters.
+          If the adapter is not found, or if it cannot be unloaded (when it is in use), an error is returned.
+ * \param[in] adapters The OgaAdapters object to unload the adapter.
+ * \param[in] adapter_name The name of the adapter to unload.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaUnloadAdapter(OgaAdapters* adapters, const char* adapter_name);
+
+/*
+ * \brief Sets the adapter with the given adapter name as active for the given OgaGenerator object.
+ * \param[in] generator The OgaGenerator object to set the active adapter.
+ * \param[in] adapters The OgaAdapters object that manages the model adapters.
+ * \param[in] adapter_name The name of the adapter to set as active.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaSetActiveAdapter(OgaGenerator* generator, OgaAdapters* adapters,
+                                                       const char* adapter_name);
 
 #ifdef __cplusplus
 }

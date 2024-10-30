@@ -15,7 +15,7 @@ parameters:
     type: string
 
 steps:
-  - ${{ if eq(parameters.os, 'linux') }}:
+  - ${{ if or(eq(parameters.os, 'linux'), eq(parameters.os, 'osx')) }}:
     - bash: |
         python -m pip install "huggingface_hub[cli]"
         huggingface-cli login --token $HF_TOKEN
