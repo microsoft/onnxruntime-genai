@@ -290,7 +290,7 @@ TEST(CAPITests, SetTerminate) {
 
   auto GeneratorSetTerminateCall = [](OgaGenerator* generator) {
     // Set Terminate
-    generator->SetRuntimeOptionsConfig("terminate_session", "1");
+    generator->SetRuntimeOption("terminate_session", "1");
   };
 
   auto GenerateOutput = [](OgaGenerator* generator, std::unique_ptr<OgaTokenizerStream> tokenizer_stream) {
@@ -329,7 +329,7 @@ TEST(CAPITests, SetTerminate) {
   }
   EXPECT_EQ(generator->IsSessionTerminated(), true);
   // Unset terminate
-  generator->SetRuntimeOptionsConfig("terminate_session", "0");
+  generator->SetRuntimeOption("terminate_session", "0");
   EXPECT_EQ(generator->IsSessionTerminated(), false);
 #endif
 }

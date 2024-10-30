@@ -289,9 +289,9 @@ OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator) 
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGenerator_SetRuntimeOptionsConfig(OgaGenerator* generator, const char* key, const char* value) {
+OgaResult* OGA_API_CALL OgaGenerator_SetRuntimeOption(OgaGenerator* generator, const char* key, const char* value) {
   OGA_TRY
-  reinterpret_cast<Generators::Generator*>(generator)->SetRuntimeOptionsConfig(key, value);
+  reinterpret_cast<Generators::Generator*>(generator)->SetRuntimeOption(key, value);
   return nullptr;
   OGA_CATCH
 }

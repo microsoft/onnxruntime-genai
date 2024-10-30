@@ -307,7 +307,7 @@ void Generator::ComputeLogits() {
   search_->ApplyRepetitionPenalty(search.repetition_penalty);
 }
 
-void Generator::SetRuntimeOptionsConfig(const char* key, const char* value) {
+void Generator::SetRuntimeOption(const char* key, const char* value) {
   // TODO: Need a better way to handle different keys
   // We can create a config manager to host all configurations and do comparison at that point
   if (strcmp(key, "terminate_session") == 0) {

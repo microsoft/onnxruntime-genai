@@ -270,8 +270,8 @@ struct OgaGenerator : OgaAbstract {
     OgaCheckResult(OgaGenerator_GenerateNextToken(this));
   }
 
-  void SetRuntimeOptionsConfig(const char* key, const char* value) {
-    OgaCheckResult(OgaGenerator_SetRuntimeOptionsConfig(this, key, value));
+  void SetRuntimeOption(const char* key, const char* value) {
+    OgaCheckResult(OgaGenerator_SetRuntimeOption(this, key, value));
   }
 
   size_t GetSequenceCount(size_t index) const {
