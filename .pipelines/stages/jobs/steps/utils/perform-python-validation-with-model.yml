@@ -34,7 +34,7 @@ steps:
       python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)
 
       python ${{ parameters.PythonScriptName }} -m .\models\${{ parameters.ModelFolder }} --min_length 25 --max_length 50 --verbose
-    displayName: 'Run ${{ parameters.PythonScriptName }} With Artifact'
+    displayName: 'Run ${{ parameters.PythonScriptName }} With Artifact on Windows'
     workingDirectory: '$(Build.Repository.LocalPath)'
     condition: eq(variables['os'], 'win')
 
@@ -57,11 +57,11 @@ steps:
             $python_exe -m pip install -r /ort_genai_src/test/python/requirements.txt && \
             $python_exe -m pip install -r /ort_genai_src/test/python/cuda/torch/requirements.txt && \
             $python_exe -m pip install -r /ort_genai_src/test/python/cuda/ort/requirements.txt && \
-            cd /ort_genai_src/$PythonScriptFolder) && \
+            cd /ort_genai_src/${{ parameters.PythonScriptFolder }} && \
             $python_exe -m pip install --no-index --find-links=/ort_genai_binary/wheel $(pip_package_name) && \
             $python_exe ${{ parameters.PythonScriptName }} -m ./models/${{ parameters.ModelFolder }}  --min_length 25 --max_length 50 --verbose"
 
-    displayName: 'Run ${{ parameters.PythonScriptName }} With Artifact'
+    displayName: 'Run ${{ parameters.PythonScriptName }} With Artifact on Linux CUDA'
     workingDirectory: '$(Build.Repository.LocalPath)'
     condition: and(eq(variables['os'], 'linux'), eq(variables['ep'], 'cuda'))
 
@@ -69,14 +69,16 @@ steps:
       export ORTGENAI_LOG_ORT_LIB=1
       python -m pip install -r test/python/requirements.txt
       if [[ "$(os)" == "linux" ]]; then
-        python -m pip install -r test/python/requirements-cpu.txt
+        python -m pip install -r test/python/cpu/torch/requirements.txt
+        python -m pip install -r test/python/cpu/ort/requirements.txt
       fi
       if [[ "$(os)" == "osx" ]]; then
-        python -m pip install -r test/python/requirements-macos.txt
+        python -m pip install -r test/python/macos/torch/requirements.txt
+        python -m pip install -r test/python/macos/ort/requirements.txt
       fi
       cd ${{ parameters.PythonScriptFolder }}
       python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)
       python ${{ parameters.PythonScriptName }} -m ./models/${{ parameters.ModelFolder }} --min_length 25 --max_length 50 --verbose
-    displayName: 'Run ${{ parameters.PythonScriptName }} With Artifact'
+    displayName: 'Run ${{ parameters.PythonScriptName }} With Artifact on Linux/macOS CPU'
     workingDirectory: '$(Build.Repository.LocalPath)'
     condition: and(or(eq(variables['os'], 'linux'), eq(variables['os'], 'osx')), eq(variables['ep'], 'cpu'))

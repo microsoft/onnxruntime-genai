@@ -26,7 +26,7 @@ steps:
       cd ${{ parameters.CsprojFolder }}
       dotnet restore -r $(os)-$(arch) /property:Configuration=${{ parameters.CsprojConfiguration }} --source https://api.nuget.org/v3/index.json --source https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json --source $PWD --disable-parallel --verbosity detailed
       dotnet run -r $(os)-$(arch) --configuration ${{ parameters.CsprojConfiguration }} --no-restore --verbosity normal -- -m ./models/${{ parameters.ModelFolder }}
-    displayName: 'Run ${{ parameters.CsprojName }} With Artifact'
+    displayName: 'Run ${{ parameters.CsprojName }} With Artifact on Windows'
     workingDirectory: '$(Build.Repository.LocalPath)'
     condition: eq(variables['os'], 'win')
     env:
@@ -65,7 +65,7 @@ steps:
             chmod +x ./bin/Release_Cuda/net6.0/linux-x64/${{ parameters.CsprojName }} && \
             ./bin/Release_Cuda/net6.0/linux-x64/${{ parameters.CsprojName }} -m ./models/${{ parameters.ModelFolder }}"
 
-    displayName: 'Run ${{ parameters.CsprojName }} With Artifact'
+    displayName: 'Run ${{ parameters.CsprojName }} With Artifact on Linux CUDA'
     workingDirectory: '$(Build.Repository.LocalPath)'
     condition: and(eq(variables['os'], 'linux'), eq(variables['ep'], 'cuda'))
 
@@ -73,6 +73,6 @@ steps:
       export ORTGENAI_LOG_ORT_LIB=1
       cd ${{ parameters.CsprojFolder }}
       dotnet run -r $(os)-$(arch) --configuration ${{ parameters.CsprojConfiguration }} --no-build --verbosity normal -- -m ./models/${{ parameters.ModelFolder }}
-    displayName: 'Run ${{ parameters.CsprojName }} With Artifact'
+    displayName: 'Run ${{ parameters.CsprojName }} With Artifact on Linux/macOS CPU'
     workingDirectory: '$(Build.Repository.LocalPath)'
     condition: and(or(eq(variables['os'], 'linux'), eq(variables['os'], 'osx')), eq(variables['ep'], 'cpu'))
