@@ -68,8 +68,9 @@ jobs:
       - name: Install the python wheel and test dependencies
         run: |
           python3 -m pip install -r test/python/requirements.txt --user
-          python3 -m pip install -r test/python/requirements-cpu.txt --user
-          python3 -m pip install build/cpu/wheel/onnxruntime_genai*.whl --user --no-deps
+          python3 -m pip install -r test/python/cpu/torch/requirements.txt --user
+          python3 -m pip install -r test/python/cpu/ort/requirements.txt --user
+          python3 -m pip install --user --no-index --no-deps --find-links build/cpu/wheel onnxruntime_genai
 
       - name: Use Dummy HuggingFace Token
         run: |
@@ -80,6 +81,7 @@ jobs:
         continue-on-error: true
         run: |
           ls -l ${{ github.workspace }}/build/cpu
+          ls -l ${{ github.workspace }}/build/cpu/wheel
 
       # This will also download all the test models to the test/test_models directory
       # These models are used by the python tests as well as C#, C++ and others.

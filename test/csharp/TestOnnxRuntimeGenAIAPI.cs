@@ -3,17 +3,28 @@
 
 using System;
 using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices;
 using Xunit;
 using Xunit.Abstractions;
-using Microsoft.ML.OnnxRuntimeGenAI;
-using System.Collections.Generic;
-using System.Linq;
-using System.Reflection.Emit;
-using System.Runtime.InteropServices;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 {
-    public partial class OnnxRuntimeGenAITests
+    public class TestsFixture : IDisposable
+    {
+        private OgaHandle _handle;
+        public TestsFixture()
+        {
+            _handle = new OgaHandle();
+        }
+
+        public void Dispose()
+        {
+            _handle.Dispose();
+        }
+    }
+
+    public class OnnxRuntimeGenAITests : IClassFixture<TestsFixture>
     {
         private readonly ITestOutputHelper output;
 
@@ -22,9 +33,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             this.output = o;
         }
 
-        private class IgnoreOnModelAbsebceFact : FactAttribute
+        private class IgnoreOnModelAbsenceFact : FactAttribute
         {
-            public IgnoreOnModelAbsebceFact()
+            public IgnoreOnModelAbsenceFact()
             {
                 string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
                 bool exists = System.IO.Directory.Exists(modelPath);
@@ -90,7 +101,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
-        [IgnoreOnModelAbsebceFact(DisplayName = "TestTopKSearch")]
+        [IgnoreOnModelAbsenceFact(DisplayName = "TestTopKSearch")]
         public void TestTopKSearch()
         {
             int topK = 100;
@@ -149,7 +160,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
-        [IgnoreOnModelAbsebceFact(DisplayName = "TestTopPSearch")]
+        [IgnoreOnModelAbsenceFact(DisplayName = "TestTopPSearch")]
         public void TestTopPSearch()
         {
             float topP = 0.6f;
@@ -208,7 +219,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
-        [IgnoreOnModelAbsebceFact(DisplayName = "TestTopKTopPSearch")]
+        [IgnoreOnModelAbsenceFact(DisplayName = "TestTopKTopPSearch")]
         public void TestTopKTopPSearch()
         {
             int topK = 100;
@@ -269,7 +280,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
-        [IgnoreOnModelAbsebceFact(DisplayName = "TestTokenizerBatchEncodeDecode")]
+        [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerBatchEncodeDecode")]
         public void TestTokenizerBatchEncodeDecode()
         {
             string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
@@ -298,7 +309,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
-        [IgnoreOnModelAbsebceFact(DisplayName = "TestTokenizerBatchEncodeSingleDecode")]
+        [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerBatchEncodeSingleDecode")]
         public void TestTokenizerBatchEncodeSingleDecode()
         {
             string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
@@ -329,7 +340,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
-        [IgnoreOnModelAbsebceFact(DisplayName = "TestTokenizerBatchEncodeStreamDecode")]
+        [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerBatchEncodeStreamDecode")]
         public void TestTokenizerBatchEncodeStreamDecode()
         {
             string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
@@ -365,7 +376,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
-        [IgnoreOnModelAbsebceFact(DisplayName = "TestTokenizerSingleEncodeDecode")]
+        [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerSingleEncodeDecode")]
         public void TestTokenizerSingleEncodeDecode()
         {
             string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
@@ -389,7 +400,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
-        [IgnoreOnModelAbsebceFact(DisplayName = "TestPhi2")]
+        [IgnoreOnModelAbsenceFact(DisplayName = "TestPhi2")]
         public void TestPhi2()
         {
             string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
@@ -456,17 +467,107 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 
             // Pin the array to get its pointer
             GCHandle handle = GCHandle.Alloc(data, GCHandleType.Pinned);
-            IntPtr data_pointer = handle.AddrOfPinnedObject();
+            try
+            {
+                IntPtr data_pointer = handle.AddrOfPinnedObject();
 
-            using var tensor = new Tensor(data_pointer, shape, ElementType.float32);
-            Assert.NotNull(tensor);
+                using var tensor = new Tensor(data_pointer, shape, ElementType.float32);
+                Assert.NotNull(tensor);
 
-            Assert.Equal(shape, tensor.Shape());
-            Assert.Equal(ElementType.float32, tensor.Type());
+                Assert.Equal(shape, tensor.Shape());
+                Assert.Equal(ElementType.float32, tensor.Type());
 
-            generatorParams.SetModelInput("test_input", tensor);
+                generatorParams.SetModelInput("test_input", tensor);
+            }
+            finally
+            {
+                handle.Free();
+            }
+        }
 
-            handle.Free();
+        private class IgnoreOnAdaptersAbsentFact : FactAttribute
+        {
+            public IgnoreOnAdaptersAbsentFact()
+            {
+                string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "adapters");
+                bool exists = System.IO.Directory.Exists(modelPath);
+                if (!System.IO.Directory.Exists(modelPath))
+                {
+                    // Skip this test on some machines since the model cannot be downloaded on those machines at runtime.
+                    Skip = "Skipping this test since the model does not exist.";
+                }
+            }
+        }
+
+        // This model is dependent on the presense of Phi2 model
+        // get this model generated and copied to the output
+        // by running test_onnxruntime_genai.py
+        [IgnoreOnAdaptersAbsentFact(DisplayName = "TestAdapters")]
+        public void TestAdapters()
+        {
+            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "adapters");
+            string adapterPath = Path.Combine(modelPath, "adapters.onnx_adapter");
+
+            using var model = new Model(modelPath);
+            Assert.NotNull(model);
+
+            using var adapters = new Adapters(model);
+            adapters.LoadAdapter(adapterPath, "adapters_a_and_b");
+
+            var inputStrings = new string[]
+            {
+                "This is a test.",
+                "Rats are awesome pets!",
+                "The quick brown fox jumps over the lazy dog.",
+            };
+
+            using var tokenizer = new Tokenizer(model);
+            using var sequences = tokenizer.EncodeBatch(inputStrings);
+
+            Int64 outputSize = 0;
+            Int64[] output_shape;
+            float[] base_output;
+
+            // Run base scenario
+            {
+                using var genParams = new GeneratorParams(model);
+                genParams.SetSearchOption("max_length", 20);
+                genParams.SetInputSequences(sequences);
+
+                using var generator = new Generator(model, genParams);
+                while(!generator.IsDone())
+                {
+                    generator.ComputeLogits();
+                    generator.GenerateNextToken();
+                }
+
+                using var logits = generator.GetOutput("logits");
+                Assert.Equal(ElementType.float32, logits.Type());
+                output_shape = logits.Shape();
+                outputSize = logits.NumElements();
+                base_output = logits.GetData<float>().ToArray();
+            }
+            // Adapter scenario. The output must be affected
+            {
+                using var genParams = new GeneratorParams(model);
+                genParams.SetSearchOption("max_length", 20);
+                genParams.SetInputSequences(sequences);
+
+                using var generator = new Generator(model, genParams);
+                generator.SetActiveAdapter(adapters, "adapters_a_and_b");
+                while (!generator.IsDone())
+                {
+                    generator.ComputeLogits();
+                    generator.GenerateNextToken();
+                }
+                using var logits = generator.GetOutput("logits");
+                Assert.Equal(ElementType.float32, logits.Type());
+                Assert.Equal(outputSize, logits.NumElements());
+                Assert.Equal(output_shape, logits.Shape());
+
+                var adapter_output = logits.GetData<float>().ToArray();
+                Assert.NotEqual(base_output, adapter_output);
+            }
         }
     }
 }

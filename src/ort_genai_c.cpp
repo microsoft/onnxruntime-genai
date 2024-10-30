@@ -8,6 +8,7 @@
 #include "ort_genai_c.h"
 #include "generators.h"
 #include "models/model.h"
+#include "runtime_settings.h"
 #include "search.h"
 #include "smartptrs.h"
 
@@ -135,13 +136,24 @@ OgaResult* OGA_API_CALL OgaLoadAudios(const OgaStringArray* audio_paths, OgaAudi
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaModel** out) {
+OgaResult* OGA_API_CALL OgaCreateRuntimeSettings(OgaRuntimeSettings** out) {
   OGA_TRY
-  auto model = Generators::CreateModel(Generators::GetOrtEnv(), config_path);
+  *out = reinterpret_cast<OgaRuntimeSettings*>(Generators::CreateRuntimeSettings().release());
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaCreateModelWithRuntimeSettings(const char* config_path, const OgaRuntimeSettings* settings, OgaModel** out) {
+  OGA_TRY
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), config_path, reinterpret_cast<const Generators::RuntimeSettings*>(settings));
   model->external_owner_ = model;
   *out = reinterpret_cast<OgaModel*>(model.get());
   return nullptr;
   OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaModel** out) {
+  return OgaCreateModelWithRuntimeSettings(config_path, nullptr, out);
 }
 
 OgaResult* OGA_API_CALL OgaCreateGeneratorParams(const OgaModel* model, OgaGeneratorParams** out) {
@@ -149,6 +161,14 @@ OgaResult* OGA_API_CALL OgaCreateGeneratorParams(const OgaModel* model, OgaGener
   auto params = std::make_shared<Generators::GeneratorParams>(*reinterpret_cast<const Generators::Model*>(model));
   params->external_owner_ = params;
   *out = reinterpret_cast<OgaGeneratorParams*>(params.get());
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaRuntimeSettingsSetHandle(OgaRuntimeSettings* settings, const char* handle_name, void* handle) {
+  OGA_TRY
+  Generators::RuntimeSettings* settings_ = reinterpret_cast<Generators::RuntimeSettings*>(settings);
+  settings_->handles_[handle_name] = handle;
   return nullptr;
   OGA_CATCH
 }
@@ -344,12 +364,7 @@ OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer* p, const int32_t*
   auto string = tokenizer.Decode({tokens, token_count});
   auto length = string.length() + 1;
   auto cstr_buffer = std::make_unique<char[]>(length);
-#if _MSC_VER
-  strcpy_s(cstr_buffer.get(), length, string.c_str());
-#else
-  strncpy(cstr_buffer.get(), string.c_str(), length);
-  cstr_buffer[length] = 0;
-#endif
+  memcpy(cstr_buffer.get(), string.c_str(), length);
   *out_string = cstr_buffer.release();
   return nullptr;
   OGA_CATCH
@@ -362,12 +377,7 @@ OgaResult* OGA_API_CALL OgaProcessorDecode(const OgaMultiModalProcessor* p, cons
   auto string = processor.tokenizer_->Decode({tokens, token_count});
   auto length = string.length() + 1;
   auto cstr_buffer = std::make_unique<char[]>(length);
-#if _MSC_VER
-  strcpy_s(cstr_buffer.get(), length, string.c_str());
-#else
-  strncpy(cstr_buffer.get(), string.c_str(), length);
-  cstr_buffer[length] = 0;
-#endif
+  memcpy(cstr_buffer.get(), string.c_str(), length);
   *out_string = cstr_buffer.release();
   return nullptr;
   OGA_CATCH
@@ -614,5 +624,9 @@ void OGA_API_CALL OgaDestroyNamedTensors(OgaNamedTensors* p) {
 
 void OGA_API_CALL OgaDestroyAdapters(OgaAdapters* p) {
   reinterpret_cast<Generators::Adapters*>(p)->external_owner_ = nullptr;
+}
+
+void OGA_API_CALL OgaDestroyRuntimeSettings(OgaRuntimeSettings* p) {
+  delete reinterpret_cast<Generators::RuntimeSettings*>(p);
 }
 }
