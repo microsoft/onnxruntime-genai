@@ -367,6 +367,37 @@ class Model:
         print(f"Saving processing files in {out_dir} for GenAI")
         tokenizer.save_pretrained(out_dir)
 
+    def save_inference_model(self, hf_name, output_dir, extra_kwargs):
+        try:
+            # disable end of sentence padding with eos_token=None
+            tokenizer = AutoTokenizer.from_pretrained(hf_name, token=self.hf_token, trust_remote_code=True, eos_token=None, **extra_kwargs)
+            system_template = tokenizer.apply_chat_template([{'role': 'system', 'content': '{Content}'}], tokenize=False)
+            system_user_template = tokenizer.apply_chat_template([{'role': 'system', 'content': '{Content}'}, {'role': 'user', 'content': '{Content}'}], tokenize=False)
+            system_user_assistant_template = tokenizer.apply_chat_template([{'role': 'system', 'content': '{Content}'}, {'role': 'user', 'content': '{Content}'}, {'role': 'assistant', 'content': '{Content}'}], tokenize=False)
+            assert system_user_template.startswith(system_template), "chat templates may contain padding tokens, leading to incorrect inference_model.json"
+            assert system_user_assistant_template.startswith(system_user_template), "chat templates may contain padding tokens, leading to incorrect inference_model.json"
+            user_template = system_user_template[len(system_template):]
+            assistant_template = system_user_assistant_template[len(system_user_template):]
+            prompt_template = system_user_assistant_template[len(system_template):]
+            prompt_template = prompt_template[:prompt_template.rfind('{Content}')]
+            templates = {
+                "system": system_template,
+                "user": user_template,
+                "assistant": assistant_template,
+                "prompt": prompt_template
+            }    
+            inference_model = {
+                "Name": hf_name,
+                "ProviderType": "",
+                "Uri": hf_name,
+                "Path": "",
+                "PromptTemplate": templates
+            }
+            with open(os.path.join(output_dir, "inference_model.json"), "w") as f:
+                json.dump(inference_model, f, indent=4)
+        except Exception as e:
+            print(f"Failed to save inference_model.json. Error: {e}")
+        
     def save_model(self, out_dir):
         print(f"Saving ONNX model in {out_dir}")
         gc.collect()
@@ -3117,6 +3148,9 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
 
     # Copy Hugging Face processing files to output folder
     onnx_model.save_processing(hf_name, extra_kwargs, output_dir)
+
+    # Generate inference_model.json as it's required by neutron-server
+    onnx_model.save_inference_model(hf_name, output_dir, extra_kwargs)
 
 
 def get_args():
