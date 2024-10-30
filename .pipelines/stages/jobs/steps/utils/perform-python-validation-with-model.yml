@@ -19,13 +19,16 @@ steps:
         $env:CUDA_PATH = '$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)'
         $env:PATH = "$env:CUDA_PATH\bin;$env:CUDA_PATH\extras\CUPTI\lib64;$env:PATH"
         Write-Host $env:PATH
-        python -m pip install -r test/python/requirements-cuda.txt
+        python -m pip install -r test/python/cuda/torch/requirements.txt
+        python -m pip install -r test/python/cuda/ort/requirements.txt
       }
       elseif ("$(ep)" -eq "directml") {
-        python -m pip install -r test/python/requirements-directml.txt
+        python -m pip install -r test/python/directml/torch/requirements.txt
+        python -m pip install -r test/python/directml/ort/requirements.txt
       }
       else {
-        python -m pip install -r test/python/requirements-cpu.txt
+        python -m pip install -r test/python/cpu/torch/requirements.txt
+        python -m pip install -r test/python/cpu/ort/requirements.txt
       }
       cd ${{ parameters.PythonScriptFolder }}
       python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)
@@ -52,10 +55,11 @@ steps:
         bash -c " \
             export ORTGENAI_LOG_ORT_LIB=1 && \
             $python_exe -m pip install -r /ort_genai_src/test/python/requirements.txt && \
-            $python_exe -m pip install -r /ort_genai_src/test/python/requirements-cuda.txt && \
+            $python_exe -m pip install -r /ort_genai_src/test/python/cuda/torch/requirements.txt && \
+            $python_exe -m pip install -r /ort_genai_src/test/python/cuda/ort/requirements.txt && \
             cd /ort_genai_src/$PythonScriptFolder) && \
             $python_exe -m pip install --no-index --find-links=/ort_genai_binary/wheel $(pip_package_name) && \
-            $python_exe model-generate.py -m ./models/${{ parameters.ModelFolder }} --min_length 25 --max_length 50 --verbose"
+            $python_exe ${{ parameters.PythonScriptName }} -m ./models/${{ parameters.ModelFolder }}  --min_length 25 --max_length 50 --verbose"
 
     displayName: 'Run ${{ parameters.PythonScriptName }} With Artifact'
     workingDirectory: '$(Build.Repository.LocalPath)'
