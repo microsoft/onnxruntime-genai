@@ -106,10 +106,12 @@ $ python3 builder.py --input ./pytorch --output ./dml --precision fp16 --executi
 Currently, both JSON files needed to run with ONNX Runtime GenAI are created by hand. Because the fields have been hand-crafted, it is recommended that you copy the already-uploaded JSON files and modify the fields as needed for your fine-tuned Phi-3 vision model. [Here](https://huggingface.co/microsoft/Phi-3-vision-128k-instruct-onnx-cpu/blob/main/cpu-int4-rtn-block-32-acc-level-4/genai_config.json) is an example for `genai_config.json` and [here](https://huggingface.co/microsoft/Phi-3-vision-128k-instruct-onnx-cpu/blob/main/cpu-int4-rtn-block-32-acc-level-4/processor_config.json) is an example for `processor_config.json`.
 
 ### For DirectML
-```json
 Replace
-"provider_options": [] 
-in genai_config.json With
+```json
+"provider_options": []
+```
+in `genai_config.json` With
+```json
 "provider_options": [
     {
         "dml" : {}
@@ -118,10 +120,12 @@ in genai_config.json With
 ```
 
 ### For CUDA
-```json
 Replace
-"provider_options": [] 
-in genai_config.json With
+```json
+"provider_options": []
+```
+in `genai_config.json` With
+```
 "provider_options": [
     {
         "cuda" : {}
@@ -135,13 +139,11 @@ in genai_config.json With
 
 ### CUDA
 ```bash
-cd ..
 $ python .\phi3v.py -m .\phi3-vision-128k-instruct\cuda
 ```
 
 ### DirectML
 
 ```bash
-cd ..
 $ python .\phi3v.py -m .\phi3-vision-128k-instruct\dml
 ```
