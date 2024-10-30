@@ -1,2 +1,2 @@
 -i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/
-ort-nightly-directml==1.20.0.dev20241006001
+onnxruntime-directml==1.20.0.dev20241016004

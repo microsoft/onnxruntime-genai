@@ -62,36 +62,6 @@ jobs:
     value: ${{ parameters.os }}
   - name: feed_name
     value: '7982ae20-ed19-4a35-a362-a96ac99897b7'
-  - name: ort_filename
-    ${{ if eq(parameters.ep, 'cpu') }}:
-      value: 'Microsoft.ML.OnnxRuntime'
-    ${{ elseif eq(parameters.ep, 'cuda') }}:
-      ${{if eq(parameters.os, 'win') }}:
-        value: 'Microsoft.ML.OnnxRuntime.Gpu.Windows'
-      ${{ else }}:
-        value: 'Microsoft.ML.OnnxRuntime.Gpu.Linux'
-    ${{ elseif eq(parameters.ep, 'directml')}}:
-      value: 'Microsoft.ML.OnnxRuntime.DirectML'
-    ${{ elseif eq(parameters.ep, 'rocm')}}:
-      value: 'Microsoft.ML.OnnxRuntime.ROCm'
-    ${{ else }}:
-      value: 'Microsoft.ML.OnnxRuntime'
-
-  - name: ortHome
-    value: 'ort'
-  - name: dml_dir
-    value: 'Microsoft.AI.DirectML.1.15.1'
-  - name: dml_zip
-    value: 'Microsoft.AI.DirectML.1.15.1.zip'
-  - name: dml_url
-    value: "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.15.1"
-
-  - name: d3d12_dir
-    value: 'Microsoft.Direct3D.D3D12.1.614.0'
-  - name: d3d12_zip
-    value: 'Microsoft.Direct3D.D3D12.1.614.0.zip'
-  - name: d3d12_url
-    value: "https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.614.0"
 
   workspace:
     clean: all
@@ -107,18 +77,11 @@ jobs:
     displayName: Copy python 3.11.0 version to agent tools directory
     condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'))
 
-  - ${{ if eq(parameters.arch, 'arm64') }}:
-    - task: UsePythonVersion@0
-      inputs:
-        versionSpec: 3.11
-        addToPath: true
-        architecture: $(arch)
-  - ${{ else }}:
-    - task: UsePythonVersion@0
-      inputs:
-        versionSpec: 3.10
-        addToPath: true
-        architecture: $(arch)
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: 3.11
+      addToPath: true
+      architecture: $(arch)
 
   - ${{ if eq(parameters.os, 'linux') }}:
     - template: steps/capi-linux-step.yml
