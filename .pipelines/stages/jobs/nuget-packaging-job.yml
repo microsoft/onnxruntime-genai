@@ -37,6 +37,16 @@ parameters:
   type: boolean
   default: false
 
+- name: enable_android
+  displayName: 'Whether Android AAR package is built.'
+  type: boolean
+  default: false
+
+- name: enable_apple_framework
+  displayName: 'Whether Apple framework for iOS & MacCatalyst is built.'
+  type: boolean
+  default: false
+
 - name: ort_version
   type: string
 
@@ -85,6 +95,7 @@ jobs:
       value: 'Microsoft.ML.OnnxRuntime.Gpu'
     ${{ if eq(parameters.ep, 'directml') }}:
       value: 'Microsoft.ML.OnnxRuntime.DirectML'
+
   steps:
   - ${{ if and(eq(parameters.enable_win_cpu, true), eq(parameters.ep, 'cpu')) }}:
     - template: steps/utils/flex-download-pipeline-artifact.yml
@@ -147,6 +158,20 @@ jobs:
         ArtifactName: onnxruntime-genai-osx-cpu-arm64-capi
         TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
 
+  - ${{ if eq(parameters.enable_apple_framework, true) }}:
+    - template: steps/utils/flex-download-pipeline-artifact.yml
+      parameters:
+        StepName: 'Download iOS XCFramework Artifacts'
+        ArtifactName: onnxruntime-genai-ios-xcframework
+        TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
+
+  - ${{ if eq(parameters.enable_android, true) }}:
+    - template: steps/utils/flex-download-pipeline-artifact.yml
+      parameters:
+        StepName: 'Download Android AAR Artifacts'
+        ArtifactName: drop-android
+        TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
+
   - checkout: self
     path: onnxruntime-genai
     clean: true
@@ -156,7 +181,7 @@ jobs:
 
   - powershell: |
       dotnet --info
-      dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(buildConfig)" --verbosity normal
+      dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(buildConfig)" -p:IncludeMobileTargets=true --verbosity normal
     displayName: 'Build CSharp'
     workingDirectory: '$(Build.Repository.LocalPath)\src\csharp'
 
@@ -175,10 +200,12 @@ jobs:
   - powershell: |
       $artifacts_dir = '$(Build.BinariesDirectory)/artifact-downloads'
       Write-Host "List downloaded artifacts"
-      $artifacts = Get-ChildItem -Path $artifacts_dir/* -Include *.zip,*.tar.gz
+      $artifacts = Get-ChildItem -Path $artifacts_dir/* -Include *.zip,*.tar.gz,*.aar
       Write-Host $artifacts
 
       $outputDir = '$(Build.Repository.LocalPath)/$(buildDir)'
+      Write-Host "List extracted artifacts"
+      Get-ChildItem -Path $nativeBuildOutputDir -Recurse
 
       mkdir -Force $outputDir
       foreach ($file in $artifacts) {
@@ -189,27 +216,41 @@ jobs:
           $rid = $Matches.1
         }
         else {
-          Write-Host "Invalid artifact name" $file
-          return
+          $rid_match = $a -match "onnxruntime-genai-(android|ios)-$(genai_version)(.+?)?(\.zip|\.aar)"
+          if ($rid_match) {
+            $rid = $Matches.1
+          }
+          else {
+            Write-Host "Invalid artifact name" $file
+            return
+          }
         }
+
         mkdir -Force $outputDir/$rid
-
-        if ($a -like "*.zip") {
-          Expand-Archive -Path $file -DestinationPath $outputDir/$rid
-        }
-        elseif ($a -like "*.tar.gz") {
-          tar -xf $file -C $outputDir/$rid
-        }
-
         mkdir -Force $outputDir/$rid/$(buildConfig)
+        if ($rid -like "ios") {
+          Move-Item $file $outputDir/$rid/$(buildConfig)/onnxruntime-genai.xcframework.zip
+        }
+        elseif ($a -like "*.aar") {
+          Move-Item $file $outputDir/$rid/$(buildConfig)/onnxruntime-genai.aar
+        }
+        else {
+          if ($a -like "*.zip") {
+            Expand-Archive -Path $file -DestinationPath $outputDir/$rid
+          }
+          elseif ($a -like "*.tar.gz") {
+            tar -xf $file -C $outputDir/$rid
+          }
+        }
+
         $b = $file.Basename
         $b = $b -split '.tar'
         $b = $b[0]
-        Move-Item $outputDir/$rid/$b/lib/* $outputDir/$rid/$(buildConfig) -Force
+        if (Test-Path $outputDir/$rid/$b/lib/) {
+          Move-Item $outputDir/$rid/$b/lib/* $outputDir/$rid/$(buildConfig) -Force
+        }
+        Get-ChildItem -Path $outputDir/$rid -Recurse
       }
-
-      Write-Host "List extracted artifacts"
-      Get-ChildItem -Path $nativeBuildOutputDir -Recurse
 
     displayName: 'Extract Artifacts & Prepare Native Libraries'
     workingDirectory: '$(Build.BinariesDirectory)/artifact-downloads'

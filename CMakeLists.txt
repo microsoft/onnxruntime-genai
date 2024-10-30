@@ -1,7 +1,12 @@
 ﻿# Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
-cmake_minimum_required(VERSION 3.26)
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+  # For xcframework support
+  cmake_minimum_required(VERSION 3.28)
+else()
+  cmake_minimum_required(VERSION 3.26)
+endif()
 include(FetchContent)
 include(CMakeDependentOption)
 project(Generators LANGUAGES C CXX)
@@ -11,6 +16,12 @@ include(cmake/options.cmake)
 
 if("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_LESS 11)
   message(FATAL_ERROR  "GCC version must be greater than or equal to 11")
+endif()
+
+# Avoid warning of Calling FetchContent_Populate(Lib) is deprecated temporarily
+# TODO: find a better way to handle the header-only 3rd party deps
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.30.0")
+  cmake_policy(SET CMP0169 OLD)
 endif()
 
 if(MSVC)
@@ -30,6 +41,8 @@ include(cmake/check_cuda.cmake)
 include(cmake/check_rocm.cmake)
 # Checking if DML is supported
 include(cmake/check_dml.cmake)
+# Checking if WebGpu is supported
+include(cmake/check_webgpu.cmake)
 
 include(cmake/cxx_standard.cmake)
 
@@ -46,11 +59,20 @@ if(MSVC)
   )
 endif()
 
+# Suggested by https://gitlab.kitware.com/cmake/cmake/-/issues/20132
+# MacCatalyst is not well supported in CMake
+# The error that can emerge without this flag can look like:
+# "clang : error : overriding '-mmacosx-version-min=11.0' option with '-target x86_64-apple-ios14.0-macabi' [-Werror,-Woverriding-t-option]"
+if (PLATFORM_NAME STREQUAL "macabi")
+  add_compile_options(-Wno-overriding-t-option)
+  add_link_options(-Wno-overriding-t-option)
+endif()
+
 if(ENABLE_TESTS)
   # call enable_testing so we can add tests from subdirectories (e.g. test and src/java)
   # it applies recursively to all subdirectories
   enable_testing()
-  if (TEST_PHI2)
+  if (USE_CUDA OR TEST_PHI2)
     add_compile_definitions(TEST_PHI2=1)
   else()
     add_compile_definitions(TEST_PHI2=0)
@@ -85,23 +107,35 @@ target_link_directories(onnxruntime-genai PRIVATE ${ORT_LIB_DIR})
 
 # we keep the shared libraries disconnected on Android as they will come from separate AARs and we don't want to force
 # the ORT version to match in both.
-if(CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR (CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND (NOT BUILD_APPLE_FRAMEWORK)))
+if(CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR (CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND (NOT BUILD_APPLE_FRAMEWORK) AND (NOT MAC_CATALYST)))
   add_compile_definitions(_ORT_GENAI_USE_DLOPEN)
 else()
   target_link_libraries(onnxruntime-genai PRIVATE ${ONNXRUNTIME_LIB})
 endif()
 
-set_target_properties(onnxruntime-genai PROPERTIES FOLDER "Sources")
-set_target_properties(onnxruntime-genai-static PROPERTIES FOLDER "Sources")
-source_group(TREE ${PROJECT_SOURCE_DIR} FILES ${generator_srcs})
+if(APPLE)
+target_link_libraries(onnxruntime-genai PRIVATE "-framework Foundation" "-framework CoreML")
+endif()
 
+
+# Build all source files using CUDA as a separate shared library we dynamically load at runtime
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
-  set_target_properties(onnxruntime-genai PROPERTIES LINKER_LANGUAGE CUDA)
-  target_link_libraries(onnxruntime-genai PRIVATE cublasLt cublas curand cufft cudart)
-  #  onnxruntime-genai-static is statically linked under Windows
-  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    set_target_properties(onnxruntime-genai-static PROPERTIES LINKER_LANGUAGE CUDA)
-    target_link_libraries(onnxruntime-genai-static PRIVATE cublasLt cublas curand cufft cudart)
+  add_library(onnxruntime-genai-cuda SHARED ${generator_cudalib_srcs})
+  target_include_directories(onnxruntime-genai-cuda PRIVATE ${ORT_HEADER_DIR})
+  target_include_directories(onnxruntime-genai-cuda PRIVATE ${GENERATORS_ROOT})
+  target_link_libraries(onnxruntime-genai-cuda PRIVATE cublasLt cublas curand cufft cudart)
+  set_target_properties(onnxruntime-genai-cuda PROPERTIES LINKER_LANGUAGE CUDA)
+  add_dependencies(onnxruntime-genai onnxruntime-genai-cuda)
+  source_group(TREE ${GENERATORS_ROOT}/cuda FILES ${generator_cudalib_srcs})
+  list(APPEND ortgenai_embed_libs "$<TARGET_FILE:onnxruntime-genai-cuda>")
+  if(APPLE)
+    set_property(TARGET onnxruntime-genai-cuda APPEND_STRING PROPERTY LINK_FLAGS "-Xlinker -exported_symbols_list ${GENERATORS_ROOT}/cuda/exported_symbols.lst")
+  elseif(UNIX)
+    set_property(TARGET onnxruntime-genai-cuda APPEND_STRING PROPERTY LINK_FLAGS "-Xlinker --version-script=${GENERATORS_ROOT}/cuda/version_script.lds -Xlinker --gc-sections")
+  elseif(WIN32)
+    set_property(TARGET onnxruntime-genai-cuda APPEND_STRING PROPERTY LINK_FLAGS "-DEF:${GENERATORS_ROOT}/cuda/symbols.def")
+  else()
+    message(FATAL_ERROR "${target} unknown platform, need to specify shared library exports for it")
   endif()
 endif()
 
@@ -182,7 +216,6 @@ if (ENABLE_JAVA)
   message("------------------Enabling Java Jar------------------")
   add_subdirectory("${SRC_ROOT}/java")
 endif()
-
 
 if(ENABLE_MODEL_BENCHMARK)
   message("------------------Enabling model benchmark------------------")

@@ -81,7 +81,7 @@ bool IntermediatePipelineState::SupportsPrimaryDevice() const {
 
 RoamingArray<float> IntermediatePipelineState::Run(int current_length, RoamingArray<int32_t> next_tokens,
                                                    RoamingArray<int32_t> next_indices) {
-  State::Run(*model_.sessions_[id_], *model_.run_options_, params_->BatchBeamSize());
+  State::Run(*model_.sessions_[id_], params_->BatchBeamSize());
 
   return RoamingArray<float>();
 }
@@ -96,7 +96,7 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
   position_inputs_.Add();
   logits_.Add();
   if (KV_Cache::IsCacheNeeded(model)) {
-    kv_cache_ = std::make_unique<KV_Cache>(model, *this);
+    kv_cache_ = std::make_unique<KV_Cache>(*this);
     kv_cache_->Add();
   }
   extra_inputs_.Add();

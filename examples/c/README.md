@@ -225,10 +225,10 @@ Change into the onnxruntime-genai directory.
 
    ```bash
    # This should be run from the root of the onnxruntime-genai folder
-   python build.py --config Release --ort_home examples\c
+   python build.py --config Release --ort_home examples/c
    cp src/ort_genai.h examples/c/include
    cp src/ort_genai_c.h examples/c/include
-   cp build/Linux/release/onnxruntime-genai.so examples/c/lib
+   cp build/Linux/Release/libonnxruntime-genai.so examples/c/lib
    cd examples/c
    ```
 
@@ -246,15 +246,15 @@ cmake --build . --config Release
 Build for CPU:
 
 ```bash
-cmake . -DPHI3=ON
+mkdir build
 cd build
+cmake .. -DPHI3=ON
 cmake --build . --config Release
 ```
 
 #### Run the sample
 
 ```bash
-cd Release
 ./phi3 path_to_model
 ```
 
@@ -337,10 +337,10 @@ Change into the onnxruntime-genai directory.
 
    ```bash
    # This should be run from the root of the onnxruntime-genai folder
-   python build.py --config Release --ort_home examples\c
+   python build.py --config Release --ort_home examples/c
    cp src/ort_genai.h examples/c/include
    cp src/ort_genai_c.h examples/c/include
-   cp build/Linux/release/onnxruntime-genai.so examples/c/lib
+   cp build/Linux/Release/libonnxruntime-genai.so examples/c/lib
    cd examples/c
    ```
 

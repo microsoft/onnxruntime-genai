@@ -37,6 +37,12 @@ def parse_args():
         help="Target execution provider to apply quantization (e.g. dml, cuda)",
     )
 
+    parser.add_argument(
+        "--use_qdq",
+        action="store_true",
+        help="Use the QDQ decomposition for quantized MatMul instead of the MatMulNBits operator",
+    )
+
     args = parser.parse_args()
     return args
 
@@ -118,7 +124,11 @@ def main():
     execution_provider = args.execution_provider
     cache_dir = os.path.join(".", "cache_dir")
 
-    create_model(model_name, input_folder, output_folder, precision, execution_provider, cache_dir)
+    extra_options = {
+        "use_qdq": args.use_qdq,
+    }
+
+    create_model(model_name, input_folder, output_folder, precision, execution_provider, cache_dir, **extra_options)
 
     # Run ONNX model
     if args.execution_provider != "dml":

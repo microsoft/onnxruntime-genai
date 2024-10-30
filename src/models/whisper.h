@@ -33,10 +33,10 @@ struct Whisper_State : State {
     Decoder,
   } run_state_{RunState::Encoder_Decoder_Init};
 
-  InputIDs decoder_input_ids_{model_, *this};
-  Logits logits_{model_, *this};
-  KV_Cache kv_cache_{model_, *this};
-  Cross_Cache cross_cache_{model_, *this};
+  InputIDs decoder_input_ids_{*this};
+  Logits logits_{*this};
+  KV_Cache kv_cache_{*this};
+  Cross_Cache cross_cache_{*this};
   std::unique_ptr<OrtValue> encoder_input_ids_;
   std::unique_ptr<OrtValue> encoder_hidden_states_;
 

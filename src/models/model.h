@@ -6,6 +6,7 @@
 #include "utils.h"
 #include "prompt_image_processor.h"
 #include "audio_processor.h"
+#include "adapters.h"
 
 #if USE_DML
 #include "dml_provider_factory.h"
@@ -27,7 +28,7 @@ void CheckResult(extError_t error);
 
 struct State {
   State(const GeneratorParams& params, const Model& model_);
-  virtual ~State() = default;
+  virtual ~State();
 
   virtual RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices = {}) = 0;
   virtual const CapturedGraphInfo* GetCapturedGraphInfo() const { return nullptr; }
@@ -39,18 +40,25 @@ struct State {
 
   void ClearIO();  // Clear all inputs/outputs
 
+  void SetActiveAdapter(Adapters* adapters, const std::string& adapter_name);
+
+  const Model& model_;
+
   std::shared_ptr<const GeneratorParams> params_;
 
   std::vector<const char*> input_names_, output_names_;
+  std::vector<std::string> adapter_names_;
   std::vector<OrtValue*> inputs_, outputs_;
 
  protected:
-  void Run(OrtSession& session, OrtRunOptions& run_options, int new_batch_size);  // Uses the inputs below to run
+  void Run(OrtSession& session, int new_batch_size);  // Uses the inputs below to run
   bool first_run_{true};
 
+  std::unique_ptr<OrtRunOptions> run_options_;
+
  private:
-  const Model& model_;
   int current_batch_size_{0};
+  std::shared_ptr<Adapters> adapters_;
 };
 
 struct TokenizerStream : LeakChecked<TokenizerStream> {
@@ -131,13 +139,12 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
 
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
-  std::unique_ptr<OrtSessionOptions> vision_session_options_;
-  std::unique_ptr<OrtRunOptions> run_options_;
 
   cuda_stream_holder cuda_stream_;
   DeviceType device_type_{DeviceType::CPU};
   Ort::Allocator& allocator_cpu_{Ort::Allocator::GetWithDefaultOptions()};
-  Ort::Allocator* allocator_device_{};  // Can be CUDA or CPU based on the DeviceType in the model
+  Ort::Allocator* allocator_device_{};   // Can be CUDA or CPU based on the DeviceType in the model
+  Ort::Allocator* allocator_kvcache_{};  // keep allocator for kv_cache seperate to allow that only kv_cache is on device
 
   std::unique_ptr<SessionInfo> session_info_;
 
@@ -156,10 +163,10 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
   void InitDeviceAllocator(OrtSession& session);
   void CreateSessionOptions();
 
- private:
   void CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
                                       OrtSessionOptions& session_options,
-                                      bool is_primary_session_options);
+                                      bool is_primary_session_options,
+                                      bool disable_graph_capture);
 
 #if USE_DML
   mutable DmlObjects dml_objects_;
@@ -169,9 +176,14 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
   std::unique_ptr<DmlReadbackHeap> dml_readback_heap_;
   ComPtr<IDMLDevice> dml_device_;
   std::unique_ptr<Ort::Allocator> dml_owned_allocator_;
+#endif
+#if USE_WEBGPU
+  std::unique_ptr<Ort::Allocator> webgpu_owned_allocator_;
+  std::unique_ptr<OrtIoBinding> webgpu_io_binding_;
+#endif
+#if USE_DML || USE_WEBGPU
   std::unique_ptr<OrtMemoryInfo> memory_info_device_;
 #endif
-
   std::shared_ptr<CapturedGraphPool> captured_graph_pool_;
   std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;
 };

@@ -38,20 +38,30 @@ parameters:
   type: boolean
   default: true
 
+- name: enable_android
+  displayName: 'Whether Android AAR package is built.'
+  type: boolean
+  default: true
+
+- name: enable_apple_framework
+  displayName: 'Whether Apple framework for iOS & MacCatalyst is built.'
+  type: boolean
+  default: false
+
 - name: ort_version
   displayName: 'OnnxRuntime version'
   type: string
-  default: '1.19.0-dev-20240805-1630-ee2fe87e2d'
+  default: '1.20.0-dev-20241023-1635-2d00351d7b'
 
 - name: ort_cuda_version
   displayName: 'OnnxRuntime GPU version'
   type: string
-  default: '1.19.0-dev-20240805-0337-88c811b638'
+  default: '1.20.0-dev-20241022-1606-2d00351d7b'
 
 - name: ort_dml_version
   displayName: 'OnnxRuntime DML version'
   type: string
-  default: '1.19.0-dev-20240805-1630-ee2fe87e2d'
+  default: '1.20.0-dev-20241023-1635-2d00351d7b'
 
 - name: cuda_version
   displayName: 'CUDA version'
@@ -89,6 +99,8 @@ stages:
     enable_win_dml: ${{ parameters.enable_win_dml }}
     enable_win_arm64: ${{ parameters.enable_win_arm64 }}
     enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
+    enable_android: ${{ parameters.enable_android }}
+    enable_apple_framework: ${{ parameters.enable_apple_framework }}
     ort_version: ${{ parameters.ort_version }}
     ort_cuda_version: ${{ parameters.ort_cuda_version }}
     ort_dml_version: ${{ parameters.ort_dml_version }}
@@ -104,6 +116,8 @@ stages:
     enable_win_dml: ${{ parameters.enable_win_dml }}
     enable_win_arm64: ${{ parameters.enable_win_arm64 }}
     enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
+    enable_android: ${{ parameters.enable_android }}
+    enable_apple_framework: ${{ parameters.enable_apple_framework }}
     ort_version: ${{ parameters.ort_version }}
     ort_cuda_version: ${{ parameters.ort_cuda_version }}
     ort_dml_version: ${{ parameters.ort_dml_version }}

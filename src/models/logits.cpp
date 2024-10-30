@@ -9,9 +9,8 @@
 
 namespace Generators {
 
-Logits::Logits(const Model& model, State& state)
-    : model_{model},
-      state_{state},
+Logits::Logits(State& state)
+    : state_{state},
       shape_{static_cast<int64_t>(state_.params_->batch_size) * state_.params_->search.num_beams, state_.params_->sequence_length, model_.config_->model.vocab_size},
       type_{model_.session_info_->GetOutputDataType(model_.config_->model.decoder.outputs.logits)} {
   output_raw_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
@@ -99,8 +98,8 @@ RoamingArray<float> Logits::Get() {
 #endif
           } break;
 
-          case DeviceType::CPU:
-          case DeviceType::CUDA: {
+          default: {
+            // CPU, CUDA, WEBGPU
             auto logits_raw = std::span<const uint8_t>{output_raw_->GetTensorMutableData<uint8_t>(), element_count * element_size};
             auto logits_last_tokens = std::span<uint8_t>{logits_of_last_token->GetTensorMutableData<uint8_t>(), element_count_last_token * element_size};
             auto target = logits_last_tokens.subspan(vocab_index * element_size, vocab_size * element_size);

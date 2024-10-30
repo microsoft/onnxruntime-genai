@@ -10,9 +10,17 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.ML.OnnxRuntimeGenAI" Version="0.5.0-dev" Condition=" '$(Configuration)' == 'Debug' OR '$(Configuration)' == 'Release' " />
-    <PackageReference Include="Microsoft.ML.OnnxRuntimeGenAI.Cuda" Version="0.5.0-dev" Condition=" '$(Configuration)' == 'Debug_Cuda' OR '$(Configuration)' == 'Release_Cuda' " />
+    <PackageReference Include="Microsoft.ML.OnnxRuntimeGenAI" Version="[0.5.0-dev]" Condition=" '$(Configuration)' == 'Debug' OR '$(Configuration)' == 'Release' " />
+    <PackageReference Include="Microsoft.ML.OnnxRuntimeGenAI.Cuda" Version="[0.5.0-dev]" Condition=" '$(Configuration)' == 'Debug_Cuda' OR '$(Configuration)' == 'Release_Cuda' " />
     <PackageReference Include="Microsoft.ML.OnnxRuntimeGenAI.DirectML" Version="0.5.0-dev" Condition=" '$(Configuration)' == 'Debug_DirectML' OR '$(Configuration)' == 'Release_DirectML' " />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="$(ProjectDir)\models\**">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+      <LinkBase>"phi-2\"</LinkBase>
+    </None>
   </ItemGroup>
 
 </Project>

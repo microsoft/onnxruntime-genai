@@ -40,7 +40,7 @@ std::span<T> ToSpan(pybind11::array_t<T> v) {
 
 template <typename T>
 pybind11::array_t<T> ToPython(std::span<T> v) {
-  return pybind11::array_t<T>(v.size(), v.data());
+  return pybind11::array_t<T>{{v.size()}, {sizeof(T)}, v.data()};
 }
 
 ONNXTensorElementDataType ToTensorType(const pybind11::dtype& type) {
@@ -204,6 +204,23 @@ struct PyRoamingArray : RoamingArray<T> {
 };
 
 template <typename T>
+struct PyDeviceMemorySpan {
+  void operator=(DeviceMemorySpan<T> span) {
+    span_ = std::move(span);
+  }
+
+  pybind11::array_t<T> GetNumpy() {
+    auto v = span_.CpuSpan();
+    py_cpu_array_ = pybind11::array_t<T>({v.size()}, {sizeof(T)}, v.data(), pybind11::capsule(v.data(), [](void*) {}));
+    return py_cpu_array_;
+  }
+
+ private:
+  DeviceMemorySpan<T> span_;
+  pybind11::array_t<T> py_cpu_array_;
+};
+
+template <typename T>
 void Declare_DeviceArray(pybind11::module& m, const char* name) {
   using Type = PyRoamingArray<T>;
   pybind11::class_<Type>(m, name)
@@ -303,8 +320,8 @@ struct PyGenerator {
   }
 
   pybind11::array_t<int32_t> GetSequence(int index) {
-    py_sequence_.Assign(generator_->search_->GetSequence(index));
-    return ToPython(py_sequence_.GetCPU());
+    py_sequence_ = generator_->search_->GetSequence(index);
+    return py_sequence_.GetNumpy();
   }
 
   void ComputeLogits() {
@@ -315,6 +332,16 @@ struct PyGenerator {
     return ToNumpy(generator_->state_->GetOutput(name.c_str()), *(generator_->model_));
   }
 
+  pybind11::array_t<float> GetLogits() {
+    py_logits_.Assign(generator_->search_->GetLogits());
+    return ToPython(py_logits_.GetCPU());
+  }
+
+  void SetLogits(pybind11::array_t<float> logits) {
+    logits_ = logits;
+    generator_->search_->SetLogits(cpu_span<float>{ToSpan(logits_)});
+  }
+
   void GenerateNextToken() {
     generator_->GenerateNextToken();
   }
@@ -323,12 +350,18 @@ struct PyGenerator {
     return generator_->IsDone();
   }
 
+  void SetActiveAdapter(Adapters* adapters, const std::string& adapter_name) {
+    generator_->state_->SetActiveAdapter(adapters, adapter_name);
+  }
+
  private:
   std::unique_ptr<Generator> generator_;
   PyRoamingArray<int32_t> py_tokens_;
   PyRoamingArray<int32_t> py_indices_;
-  PyRoamingArray<int32_t> py_sequence_;
+  PyDeviceMemorySpan<int32_t> py_sequence_;
   PyRoamingArray<int32_t> py_sequencelengths_;
+  PyRoamingArray<float> py_logits_;
+  pybind11::array_t<float> logits_;  // Logits passed in from python, to keep the memory alive
 };
 
 void SetLogOptions(const pybind11::kwargs& dict) {
@@ -432,9 +465,14 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("is_done", &PyGenerator::IsDone)
       .def("compute_logits", &PyGenerator::ComputeLogits)
       .def("get_output", &PyGenerator::GetOutput)
+      .def("get_logits", &PyGenerator::GetLogits)
+      .def("set_logits", &PyGenerator::SetLogits)
       .def("generate_next_token", &PyGenerator::GenerateNextToken)
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
-      .def("get_sequence", &PyGenerator::GetSequence);
+      .def("get_sequence", &PyGenerator::GetSequence)
+      .def("set_active_adapter", [](PyGenerator& generator, Adapters* adapters, const std::string& adapter_name) {
+        generator.SetActiveAdapter(adapters, adapter_name);
+      });
 
   pybind11::class_<Images>(m, "Images")
       .def_static("open", [](pybind11::args image_paths) {
@@ -516,11 +554,18 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         return processor.tokenizer_->Decode(ToSpan(tokens));
       });
 
+  pybind11::class_<Adapters, std::shared_ptr<Adapters>>(m, "Adapters")
+      .def(pybind11::init([](Model& model) {
+        return std::make_shared<Adapters>(&model);
+      }))
+      .def("load", &Adapters::LoadAdapter);
+
   m.def("set_log_options", &SetLogOptions);
 
   m.def("is_cuda_available", []() { return USE_CUDA != 0; });
   m.def("is_dml_available", []() { return USE_DML != 0; });
   m.def("is_rocm_available", []() { return USE_ROCM != 0; });
+  m.def("is_webgpu_available", []() { return USE_WEBGPU != 0; });
 
   m.def("set_current_gpu_device_id", [](int device_id) { Ort::SetCurrentGpuDeviceId(device_id); });
   m.def("get_current_gpu_device_id", []() { return Ort::GetCurrentGpuDeviceId(); });

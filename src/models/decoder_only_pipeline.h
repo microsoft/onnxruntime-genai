@@ -68,11 +68,11 @@ struct DecoderOnlyPipelineState : State {
   // Stores all the outputs from the previous pipeline state(s)
   std::unordered_map<std::string, std::unique_ptr<OrtValue>> ortvalue_store_;
 
-  InputIDs input_ids_{model_, *this};
-  Logits logits_{model_, *this};
+  InputIDs input_ids_{*this};
+  Logits logits_{*this};
   std::unique_ptr<KV_Cache> kv_cache_;
   PositionInputs position_inputs_;
-  ExtraInputs extra_inputs_{model_, *this};
+  ExtraInputs extra_inputs_{*this};
 };
 
 }  // namespace Generators

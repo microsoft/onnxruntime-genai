@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #include "generators.h"
+#include "runtime_settings.h"
 #include "json.h"
 #include <fstream>
 #include <sstream>
@@ -33,8 +34,13 @@ struct ProviderOptionsObject_Element : JSON::Element {
   explicit ProviderOptionsObject_Element(std::vector<Config::ProviderOptions>& v) : v_{v} {}
 
   JSON::Element& OnObject(std::string_view name) override {
-    if (options_element_)
-      throw std::runtime_error("Each object in the provider_options array can only have one member (named value)");
+    for (auto& v : v_) {
+      if (v.name == name) {
+        options_element_ = std::make_unique<ProviderOptions_Element>(v);
+        return *options_element_;
+      }
+    }
+
     auto& options = v_.emplace_back();
     options.name = name;
     options_element_ = std::make_unique<ProviderOptions_Element>(options);
@@ -635,7 +641,7 @@ struct RootObject_Element : JSON::Element {
   JSON::Element& t_;
 };
 
-void ParseConfig(const fs::path& filename, Config& config) {
+void ParseConfig(const fs::path& filename, std::string_view json_overlay, Config& config) {
   std::ifstream file = filename.open(std::ios::binary | std::ios::ate);
   if (!file.is_open()) {
     throw std::runtime_error("Error opening " + filename.string());
@@ -657,10 +663,20 @@ void ParseConfig(const fs::path& filename, Config& config) {
     oss << "Error encountered while parsing '" << filename.string() << "' " << message.what();
     throw std::runtime_error(oss.str());
   }
+
+  if (!json_overlay.empty()) {
+    try {
+      JSON::Parse(root_object, json_overlay);
+    } catch (const std::exception& message) {
+      std::ostringstream oss;
+      oss << "Error encountered while parsing config overlay: " << message.what();
+      throw std::runtime_error(oss.str());
+    }
+  }
 }
 
-Config::Config(const fs::path& path) : config_path{path} {
-  ParseConfig(path / "genai_config.json", *this);
+Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path} {
+  ParseConfig(path / "genai_config.json", json_overlay, *this);
 
   if (model.context_length == 0)
     throw std::runtime_error("model context_length is 0 or was not set. It must be greater than 0");

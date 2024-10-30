@@ -26,22 +26,21 @@ package_name = '@TARGET_NAME@'
 def _onnxruntime_dependency() -> str:
     dependency = None
     # Use stable version as default
-    ort_version = os.environ.get("ONNXRUNTIME_VERSION", "1.19.0")
-    is_nightly = True if "dev" in ort_version else False
+    ort_version = os.environ.get("ONNXRUNTIME_VERSION", "1.20.0")
 
     if package_name == "onnxruntime-genai":
-        dependency = "onnxruntime" if not is_nightly else "ort-nightly"
+        dependency = "onnxruntime"
 
         import platform
         # win arm64 whls are only available in onnxruntime-qnn
         if platform.machine() == "ARM64" and sys.platform.startswith("win"):
-            dependency = "onnxruntime-qnn" if not is_nightly else "ort-nightly-qnn"
+            dependency = "onnxruntime-qnn"
     elif package_name == "onnxruntime-genai-cuda":
-        dependency = "onnxruntime-gpu" if not is_nightly else "ort-nightly-gpu"
+        dependency = "onnxruntime-gpu"
     elif package_name == "onnxruntime-genai-directml":
-        dependency = "onnxruntime-directml" if not is_nightly else "ort-nightly-directml"
+        dependency = "onnxruntime-directml"
     elif package_name == "onnxruntime-genai-rocm":
-        dependency = "onnxruntime-rocm" if not is_nightly else "ort-nightly-rocm"
+        dependency = "onnxruntime-rocm"
     else:
         raise ValueError(f'Unable to determine the onnxruntime dependency for {package_name}.')
 

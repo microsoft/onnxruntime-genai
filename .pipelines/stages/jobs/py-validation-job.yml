@@ -11,8 +11,6 @@ parameters:
   type: string
 - name: ep
   type: string
-- name: ort_version
-  type: string
 - name: cuda_version
   type: string
   default: ''
@@ -73,23 +71,11 @@ jobs:
     value: ${{ parameters.cuda_version }}
   - name: ep
     value: ${{ parameters.ep }}
-  - name: ort_version
-    value: ${{ parameters.ort_version }}
   - name: os
     value: ${{ parameters.os }}
 
   - name: py_dot_ver
-    ${{ if eq(parameters.ep, 'cpu') }}:
-      ${{ if eq(parameters.arch, 'arm64') }}:
-        value: '3.12'
-      ${{ else }}:
-        value: '3.9'
-    ${{ elseif eq(parameters.ep, 'cuda') }}:
-      value: '3.10'
-    ${{ elseif eq(parameters.ep, 'directml')}}:
-      value: '3.11'
-    ${{ else }}:
-      value: '3.9'
+    value: '3.12'
 
   - name: pip_package_name
     ${{ if eq(parameters.ep, 'cpu') }}:
