@@ -30,7 +30,7 @@ Please ensure you have the following Python packages installed to create the ONN
 - `pillow`
 - `requests`
 - `torch`
-    - Install torch with CUDA by following the [instructions](https://pytorch.org/get-started/locally/)
+    - Please install torch by following the [instructions](https://pytorch.org/get-started/locally/). For getting ONNX models that can run on CUDA or DirectML, please install torch with CUDA and ensure the CUDA version you choose in the instructions is the one you have installed.
 - `torchvision`
 - `transformers`
 
