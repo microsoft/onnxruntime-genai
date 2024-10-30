@@ -3,8 +3,6 @@ parameters:
   type: string
 - name: ep
   type: string
-- name: ort_version
-  type: string
 - name: cuda_version
   type: string
   default: ''
@@ -53,12 +51,6 @@ jobs:
           PyNoDotVer: '312'
     ${{ else }}:
       matrix:
-        Python38:
-          PyDotVer: '3.8'
-          PyNoDotVer: '38'
-        Python39:
-          PyDotVer: '3.9'
-          PyNoDotVer: '39'
         Python310:
           PyDotVer: '3.10'
           PyNoDotVer: '310'
@@ -68,7 +60,10 @@ jobs:
         Python312:
           PyDotVer: '3.12'
           PyNoDotVer: '312'
-    
+        Python313:
+          PyDotVer: '3.13'
+          PyNoDotVer: '313'
+
   timeoutInMinutes: 240
   workspace:
     clean: all
@@ -93,46 +88,15 @@ jobs:
     value: ${{ parameters.cuda_version }}
   - name: ep
     value: ${{ parameters.ep }}
-  - name: ort_version
-    value: ${{ parameters.ort_version }}
   - name: os
     value: ${{ parameters.os }}
 
   - name: feed_name
     value: '7982ae20-ed19-4a35-a362-a96ac99897b7'
 
-  - name: ort_filename
-    ${{ if eq(parameters.ep, 'cpu') }}:
-      value: 'Microsoft.ML.OnnxRuntime'
-    ${{ elseif eq(parameters.ep, 'cuda') }}:
-      ${{if eq(parameters.os, 'win') }}:
-        value: 'Microsoft.ML.OnnxRuntime.Gpu.Windows'
-      ${{ else }}:
-        value: 'Microsoft.ML.OnnxRuntime.Gpu.Linux'
-    ${{ elseif eq(parameters.ep, 'directml')}}:
-      value: 'Microsoft.ML.OnnxRuntime.DirectML'
-    ${{ elseif eq(parameters.ep, 'rocm')}}:
-      value: 'Microsoft.ML.OnnxRuntime.ROCm'
-    ${{ else }}:
-      value: 'Microsoft.ML.OnnxRuntime'
-
-  - name: dml_dir
-    value: 'Microsoft.AI.DirectML.1.15.1'
-  - name: dml_zip
-    value: 'Microsoft.AI.DirectML.1.15.1.zip'
-  - name: dml_url
-    value: "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.15.1"
-
-  - name: d3d12_dir
-    value: 'Microsoft.Direct3D.D3D12.1.614.0'
-  - name: d3d12_zip
-    value: 'Microsoft.Direct3D.D3D12.1.614.0.zip'
-  - name: d3d12_url
-    value: "https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.614.0"
-
   steps:
   - script: |
-      MKDIR $(Agent.ToolsDirectory)\Python\3.12.3\arm64 
+      MKDIR $(Agent.ToolsDirectory)\Python\3.12.3\arm64
       XCOPY /s /y /h /e /c /q "C:\Python\Python312\*.*" $(Agent.ToolsDirectory)\Python\3.12.3\arm64\
       COPY NUL $(Agent.ToolsDirectory)\Python\3.12.3\arm64.complete
       DIR $(Agent.ToolsDirectory)\Python

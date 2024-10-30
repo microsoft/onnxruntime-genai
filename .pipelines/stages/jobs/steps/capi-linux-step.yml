@@ -34,7 +34,6 @@ steps:
 
 - bash: |
     echo "arch=$(arch)"
-    echo "ort_filename=$(ort_filename)"
     echo "ort_version=$(ort_version)"
     echo "ep=$(ep)"
     echo "cuda_version=$(cuda_version)"
