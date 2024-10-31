@@ -30,6 +30,11 @@ std::string CurrentModulePath() {
 }
 #endif
 
+void ThrowErrorIfSessionTerminated(bool is_session_terminated) {
+  if (is_session_terminated)
+    throw std::runtime_error("Session in Terminated state, exiting!");
+}
+
 namespace Generators {
 
 #if USE_CUDA
@@ -255,6 +260,7 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
 }
 
 void Generator::ComputeLogits() {
+  ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (computed_logits_)
     throw std::runtime_error("ComputeLogits called again without calling GenerateNextToken first");
 
@@ -272,7 +278,25 @@ void Generator::ComputeLogits() {
   search_->ApplyRepetitionPenalty(search.repetition_penalty);
 }
 
+void Generator::SetRuntimeOption(const char* key, const char* value) {
+  // TODO: Need a better way to handle different keys
+  // We can create a config manager to host all configurations and do comparison at that point
+  if (strcmp(key, "terminate_session") == 0) {
+    if (strcmp(value, "0") == 0) {
+      state_->UnsetTerminate();
+    } else if (strcmp(value, "1") == 0) {
+      state_->SetTerminate();
+    } else {
+      // Value not expected
+      throw std::runtime_error(std::string("terminate_session key value unexpected: ") + value);
+    }
+  } else {
+    throw std::runtime_error(std::string("SetRuntimeOption key is not expected: ") + key);
+  }
+}
+
 bool Generator::IsDone() const {
+  ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (computed_logits_)
     throw std::runtime_error("IsDone() can't be called in the middle of processing logits");
 
@@ -284,7 +308,12 @@ bool Generator::IsDone() const {
   return is_done;
 }
 
+bool Generator::IsSessionTerminated() const {
+  return state_->session_terminated_;
+}
+
 void Generator::GenerateNextToken() {
+  ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (!computed_logits_)
     throw std::runtime_error("Must call ComputeLogits before GenerateNextToken");
   computed_logits_ = false;

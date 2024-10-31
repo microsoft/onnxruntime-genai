@@ -258,12 +258,20 @@ struct OgaGenerator : OgaAbstract {
     return OgaGenerator_IsDone(this);
   }
 
+  bool IsSessionTerminated() const {
+    return OgaGenerator_IsSessionTerminated(this);
+  }
+
   void ComputeLogits() {
     OgaCheckResult(OgaGenerator_ComputeLogits(this));
   }
 
   void GenerateNextToken() {
     OgaCheckResult(OgaGenerator_GenerateNextToken(this));
+  }
+
+  void SetRuntimeOption(const char* key, const char* value) {
+    OgaCheckResult(OgaGenerator_SetRuntimeOption(this, key, value));
   }
 
   size_t GetSequenceCount(size_t index) const {
