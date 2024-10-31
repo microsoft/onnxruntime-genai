@@ -147,6 +147,7 @@ class Model:
         }
 
         # LayerNorm-specific variables
+        epsilon = config.rms_norm_eps if hasattr(config, "rms_norm_eps") else 1e-06
         self.layernorm_attrs = {
             "simple": True,             # Use SimplifiedLayerNorm/SkipSimplifiedLayerNorm vs. LayerNorm/SkipLayerNorm
             "first_layernorm": True,    # 1st LayerNorm = LayerNorm, then SkipLayerNorm for all subsequent LayerNorms
@@ -156,6 +157,7 @@ class Model:
             "output_0": "",             # Output 0 for LayerNorm and SkipLayerNorm
             "output_3": "",             # Output 3 for SkipLayerNorm
             "add_offset": 0,            # Offset value for LayerNorm weight
+            "epsilon": epsilon,         # Epsilon value to avoid `sqrt(0)` in LayerNorm
         }
 
         # MatMul-specific variables
@@ -212,6 +214,8 @@ class Model:
                 }
 
         # Attention-specific variables (MHA, GQA, GQA + Rot.Emb., etc.)
+        softcap = config.attn_logit_softcapping if hasattr(config, "attn_logit_softcapping") else 0.0  # default is 0.0 in GroupQueryAttention kernel
+
         # Block-sparse attention-specific variables
         sparse_block_size = config.blocksparse_block_size if hasattr(config, "blocksparse_block_size") else 0
         kernel_block_size = config.blocksparse_triton_kernel_block_size if hasattr(config, "blocksparse_triton_kernel_block_size") else 0
@@ -224,6 +228,7 @@ class Model:
             "v_path": "",                                    # V path to attention
             "op_type": "MultiHeadAttention",                 # Attention op to use
             "scale": 1 / np.sqrt(self.head_size),            # Scale value after calculating Q x K' in attention
+            "softcap": softcap,                              # Softcap value to prevent values from exploding in attention
             "use_rotemb_in_attn": False,                     # Use rotary embeddings within attention (instead of a separate RotaryEmbedding op)
             "use_packed_matmul": False,                      # Use packed MatMul (instead of 3 separate MatMuls for Q/K/V)
             "block_sparse": {                                # Block-sparse attention-specific variables
@@ -1000,7 +1005,7 @@ class Model:
 
         name = f"/model/layers.{layer_id}/{location}_layernorm/{'Skip' if skip else ''}LayerNorm"
         op_type = f"{'Skip' if skip else ''}{'Simplified' if simple else ''}LayerNormalization"
-        kwargs = {"epsilon": 9.999999747378752e-06}
+        kwargs = {"epsilon": self.layernorm_attrs["epsilon"]}
         if not skip:
             kwargs.update({"axis": -1, "stash_type": 1})
 
@@ -1412,7 +1417,7 @@ class Model:
         self.make_node(
             "GroupQueryAttention", inputs=inputs, outputs=outputs, name=name, domain="com.microsoft",
             num_heads=self.num_attn_heads, kv_num_heads=self.num_kv_heads, scale=self.attention_attrs["scale"], # local_window_size=self.window_size,  # Disable sliding window attribute temporarily
-            do_rotary=self.attention_attrs["use_rotemb_in_attn"], rotary_interleaved=self.rotemb_attrs["interleaved"],
+            softcap=self.attention_attrs["softcap"], do_rotary=self.attention_attrs["use_rotemb_in_attn"], rotary_interleaved=self.rotemb_attrs["interleaved"],
         )
         self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * self.num_attn_heads])
 
