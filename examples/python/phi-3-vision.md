@@ -125,7 +125,7 @@ Replace
 "provider_options": []
 ```
 in `genai_config.json` With
-```
+```json
 "provider_options": [
     {
         "cuda" : {}
