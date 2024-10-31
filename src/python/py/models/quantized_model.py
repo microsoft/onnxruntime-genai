@@ -88,7 +88,7 @@ class QuantizedModel:
         self.quant_type = quant_type
         self.embedding = TensorModule()
         self.final_norm = TensorModule()
-        self.lm_head: TensorModule | QuantizedTensorModule = TensorModule()
+        self.lm_head = TensorModule()
         self.layers = {}
         self.num_layers = num_layers
 
@@ -437,7 +437,7 @@ class QuantizedModel:
         """
         return [self.embedding] + self.layers + [self.final_norm, self.lm_head]
 
-    def unpack(self, module: QuantizedTensorModule):
+    def unpack(self, module):
         """
         Unpack `qzeros` and `qweight` to standard format
         """
