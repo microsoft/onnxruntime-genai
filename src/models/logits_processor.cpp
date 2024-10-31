@@ -11,6 +11,19 @@
 
 namespace Generators {
 
+std::vector<int32_t> tokenize_partial(const Tokenizer* tokenizer, const uint8_t* bytes,
+                                      size_t bytes_len) {
+  std::string input_string = "\x02";
+  input_string.reserve(bytes_len + 2);
+  for (size_t i = 0; i < bytes_len; i++) {
+    input_string.push_back(bytes[i]);
+  }
+  std::vector<int32_t> output_ids = tokenizer->Encode(input_string.c_str());
+  std::vector<int32_t> prefix_ids = tokenizer->Encode("\x02");
+  auto prefix_len = prefix_ids.size();  // TODO cache this somewhere?
+  return std::vector<int32_t>(output_ids.begin() + prefix_len, output_ids.end());
+}
+
 ConstrainedLogitsProcessor::ConstrainedLogitsProcessor(int vocab_size, uint32_t eos_token,
                                                        const std::string& guidance_type, const std::string& guidance_data,
                                                        std::shared_ptr<Tokenizer> tokenizer)
@@ -23,37 +36,42 @@ ConstrainedLogitsProcessor::ConstrainedLogitsProcessor(int vocab_size, uint32_t 
     throw std::runtime_error("Unsupported guidance type: " + guidance_type);
   }
 
+  std::unordered_map<int32_t, uint8_t> token_id_to_byte;
+  for (int i = 0x00; i <= 0xFF; ++i) {
+    char byte_str[10];
+    snprintf(byte_str, sizeof(byte_str), "<0x%02X>", i);
+    auto token = tokenizer_->TokenToTokenId(byte_str);
+    if (token > 0)
+      token_id_to_byte[token] = static_cast<uint8_t>(i);
+  }
+
   std::vector<uint8_t> tokens;
   std::vector<uint32_t> token_lens;
   for (int i = 0; i < vocab_size; i++) {
     std::vector<int32_t> ids = {i};
-    std::string token = tokenizer_->Decode(ids);
-    token_lens.push_back(token.size());
-    for (char c : token) {
-      tokens.push_back(c);
+    if (token_id_to_byte.find(i) != token_id_to_byte.end()) {
+      tokens.push_back(token_id_to_byte[i]);
+      token_lens.push_back(1);
+    } else {
+      std::string token = tokenizer_->Decode(ids);
+      token_lens.push_back(token.size());
+      for (char c : token) {
+        tokens.push_back(c);
+      }
     }
   }
 
   LlgTokenizeFn tokenizer_fn = [](const void* user_data, const uint8_t* bytes,
                                   size_t bytes_len, uint32_t* output_tokens, size_t output_tokens_len) -> unsigned long {
-    std::string input_string = "\x02";
-    input_string.reserve(bytes_len);
-    for (size_t i = 0; i < bytes_len; i++) {
-      input_string.push_back(bytes[i]);
-    }
-    const Tokenizer* tokenizer = reinterpret_cast<const Tokenizer*>(user_data);
-    std::vector<int32_t> output_ids = tokenizer->Encode(input_string.c_str());
-    std::string prefix = "\x02";
-    std::vector<int32_t> prefix_ids = tokenizer->Encode(prefix.c_str());
-    auto prefix_len = prefix_ids.size();
-
-    size_t output_size = std::min(output_tokens_len, output_ids.size() - prefix_len);
+    auto output_ids = tokenize_partial(reinterpret_cast<const Tokenizer*>(user_data), bytes, bytes_len);
+    size_t output_size = std::min(output_tokens_len, output_ids.size());
     for (size_t i = 0; i < output_size; i++) {
-      output_tokens[i] = output_ids[prefix_len + i];
+      output_tokens[i] = output_ids[i];
     }
     return output_ids.size();
   };
 
+  // TODO reuse the tokenizer between constraints
   LlgTokenizerInit tokenizer_init = {
       .vocab_size = static_cast<uint32_t>(vocab_size),
       .tok_eos = eos_token,
@@ -68,6 +86,7 @@ ConstrainedLogitsProcessor::ConstrainedLogitsProcessor(int vocab_size, uint32_t 
 
   LlgConstraintInit constraint_init;
   llg_constraint_init_set_defaults(&constraint_init, llg_tokenizer_.get());
+  // constraint_init.log_stderr_level = 2;
   LlgConstraint* constraint_ptr;
   if (guidance_type == "json_schema") {
     constraint_ptr = llg_new_constraint_json(&constraint_init, guidance_data.c_str());
@@ -78,8 +97,9 @@ ConstrainedLogitsProcessor::ConstrainedLogitsProcessor(int vocab_size, uint32_t 
   }
   if (llg_get_error(constraint_ptr) != nullptr) {
     std::string error_message = llg_get_error(constraint_ptr);
-    llg_free_constraint(constraint_ptr);
-    throw std::runtime_error("Error creating grammar: " + error_message);
+    auto error = std::runtime_error("Error creating grammar: " + error_message);
+    llg_free_constraint(constraint_ptr); // only free constraint, after we have saved the error message
+    throw error;
   }
   llg_constraint_ = std::unique_ptr<LlgConstraint, LlgConstraintDeleter>(constraint_ptr);
 }
