@@ -3196,7 +3196,7 @@ def get_args():
                     1 is fp32.
                 int4_block_size = 16/32/64/128/256: Specify the block_size for int4 quantization.
                 int4_op_types_to_quantize = MatMul/Gather: Specify op types to target for int4 quantization.
-                    Use this option when you want to quantize just the MatMul ops or just the Gather ops.
+                    Use this option when you want to quantize specific ops.
                     Separate the op types with a '/' when passing them here (e.g. int4_op_types_to_quantize=MatMul/Gather)
                 num_hidden_layers = Manually specify the number of layers in your ONNX model (for unit testing purposes).
                 filename = Filename for ONNX model (default is 'model.onnx').
