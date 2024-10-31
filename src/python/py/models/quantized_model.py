@@ -622,13 +622,12 @@ class AWQModel(QuantizedModel):
 
                     # Set `g_idx` to None since it's not used in `MatMulNBits`
                     q_tensors.g_idx = None
-        if isinstance(self.lm_head, QuantizedTensorModule):
-            if self.lm_head.qweight is not None:
-                self.unpack(self.lm_head)
-                self.repack(self.lm_head)
+        if isinstance(self.lm_head, QuantizedTensorModule) and self.lm_head.qweight is not None:
+            self.unpack(self.lm_head)
+            self.repack(self.lm_head)
 
-                # Set `g_idx` to None since it's not used in `MatMulNBits`
-                self.lm_head.g_idx = None
+            # Set `g_idx` to None since it's not used in `MatMulNBits`
+            self.lm_head.g_idx = None
 
     def unpack_qweight(self, module):
         """
