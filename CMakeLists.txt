@@ -1,7 +1,12 @@
 ﻿# Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
-cmake_minimum_required(VERSION 3.28)
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+  # For xcframework support
+  cmake_minimum_required(VERSION 3.28)
+else()
+  cmake_minimum_required(VERSION 3.26)
+endif()
 include(FetchContent)
 include(CMakeDependentOption)
 project(Generators LANGUAGES C CXX)
