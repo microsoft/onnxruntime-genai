@@ -98,6 +98,10 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
 
   void SetInputs(const NamedTensors& inputs);
 
+  std::string guidance_type;
+  std::string guidance_data;
+  void SetGuidance(std::string_view type, std::string_view data);
+
  private:
   bool is_cuda_graph_enabled_{};
 };

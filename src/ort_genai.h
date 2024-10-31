@@ -222,6 +222,10 @@ struct OgaGeneratorParams : OgaAbstract {
     OgaCheckResult(OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(this, max_batch_size));
   }
 
+  void SetGuidance(const char* type, const char* data) {
+    OgaCheckResult(OgaGeneratorParamsSetGuidance(this, type, data));
+  }
+
   static void operator delete(void* p) { OgaDestroyGeneratorParams(reinterpret_cast<OgaGeneratorParams*>(p)); }
 };
 

@@ -225,6 +225,9 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetModelInput(OgaGeneratorP
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperInputFeatures(OgaGeneratorParams*, OgaTensor* tensor);
 
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams*, const char* type, const char* data);
+
+
 /*
  * \brief Creates a generator from the given model and generator params.
  * \param[in] model The model to use for generation.

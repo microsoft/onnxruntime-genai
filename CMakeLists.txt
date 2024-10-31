@@ -96,6 +96,12 @@ target_include_directories(onnxruntime-genai-static PRIVATE ${onnxruntime_extens
 target_include_directories(onnxruntime-genai-static PUBLIC ${onnxruntime_extensions_SOURCE_DIR}/shared/api/)
 target_link_libraries(onnxruntime-genai PRIVATE onnxruntime_extensions)
 target_link_libraries(onnxruntime-genai-static PUBLIC onnxruntime_extensions)
+target_include_directories(onnxruntime-genai PUBLIC "/home/yingxiong/projects/llguidance/parser")
+target_include_directories(onnxruntime-genai-static PUBLIC "/home/yingxiong/projects/llguidance/parser")
+target_link_directories(onnxruntime-genai PRIVATE "/home/yingxiong/projects/llguidance/parser/target/release")
+target_link_directories(onnxruntime-genai-static PUBLIC "/home/yingxiong/projects/llguidance/parser/target/release")
+target_link_libraries(onnxruntime-genai PRIVATE llguidance_parser)
+target_link_libraries(onnxruntime-genai-static PUBLIC llguidance_parser)
 target_link_directories(onnxruntime-genai PRIVATE ${ORT_LIB_DIR})
 
 # we keep the shared libraries disconnected on Android as they will come from separate AARs and we don't want to force

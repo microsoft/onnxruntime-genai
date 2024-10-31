@@ -48,6 +48,8 @@ struct State {
 
   std::vector<const char*> input_names_, output_names_;
   std::vector<std::string> adapter_names_;
+  std::string guided_data_;
+  std::string guided_type_; 
   std::vector<OrtValue*> inputs_, outputs_;
 
  protected:

@@ -2,7 +2,10 @@
 // Licensed under the MIT License.
 #pragma once
 
+#include <memory>
+#include "model.h"
 #include "static_buffer.h"
+#include "logits_processor.h"
 
 namespace Generators {
 
@@ -12,10 +15,12 @@ struct Logits {
   void Add();
   RoamingArray<float> Get();
 
-  void Update();
+  void Update(RoamingArray<int32_t> next_tokens_unk=RoamingArray<int32_t>{});
 
  private:
   void HandleEOSArray(cpu_span<float> logits);
+
+  void AddMask(cpu_span<float> logits, std::vector<uint32_t> mask);
 
   State& state_;
   const Model& model_{state_.model_};
@@ -34,6 +39,8 @@ struct Logits {
   // Used for decoding runs with cuda graphs.
   StaticBuffer* sb_logits32_{};
   StaticBuffer* sb_logits16_{};
+
+  std::unique_ptr<ConstrainedLogitsProcessor> constrained_logits_processor_;
 
 #if USE_CUDA
   cuda_unique_ptr<int32_t> cuda_eos_token_ids_ptr_;  // eos_token_ids from params, but in cuda accessible memory

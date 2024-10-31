@@ -244,6 +244,11 @@ void GeneratorParams::SetInputs(const NamedTensors& named_tensors) {
   }
 }
 
+void GeneratorParams::SetGuidance(std::string_view type, std::string_view data) {
+  guidance_type = type;
+  guidance_data = data;
+}
+
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params) {
   return std::make_unique<Generator>(model, params);
 }

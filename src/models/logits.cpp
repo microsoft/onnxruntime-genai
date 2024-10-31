@@ -31,6 +31,11 @@ Logits::Logits(State& state)
     cudaMemcpyAsync(cuda_eos_token_ids_.data(), cpu_ids.data(), cpu_ids.size() * sizeof(int32_t), ::cudaMemcpyHostToDevice, model_.cuda_stream_);
   }
 #endif
+  if (!state_.params_->guidance_type.empty() && !state_.params_->guidance_data.empty()) {
+    auto tokenizer = model_.CreateTokenizer();
+    constrained_logits_processor_ = std::make_unique<ConstrainedLogitsProcessor>(model_.config_->model.vocab_size, model_.config_->model.eos_token_id,
+                                                                                 state_.params_->guidance_type, state_.params_->guidance_data, tokenizer);
+  }
 }
 
 #pragma warning(push)
@@ -157,6 +162,11 @@ RoamingArray<float> Logits::Get() {
 
   assert(shape_[1] == 1);
 
+  std::vector<uint32_t> logits_mask;
+  if (constrained_logits_processor_) {
+    logits_mask = constrained_logits_processor_->ComputeMask();
+  }
+
 #if USE_CUDA
   if (model_.device_type_ == DeviceType::CUDA) {
     auto batched_logits_gpu = gpu_span<float>{logits_of_last_token->GetTensorMutableData<float>(), element_count};
@@ -194,12 +204,20 @@ RoamingArray<float> Logits::Get() {
 
   auto batched_logits_cpu = cpu_span<float>{logits_of_last_token->GetTensorMutableData<float>(), element_count};
   HandleEOSArray(batched_logits_cpu);
+  if (!logits_mask.empty()) {
+    AddMask(batched_logits_cpu, logits_mask);
+  }
   return batched_logits_cpu;
 }
 
 #pragma warning(pop)
 
-void Logits::Update() {
+void Logits::Update(RoamingArray<int32_t> next_tokens_unk) {
+  if (constrained_logits_processor_) {
+    auto next_tokens = next_tokens_unk.GetCPU();
+    constrained_logits_processor_->CommitTokens(static_cast<uint32_t>(next_tokens[0]));
+  }
+
   if (output_raw_.get()->GetTensorTypeAndShapeInfo()->GetShape()[1] == 1) {
     return;
   }
@@ -226,6 +244,22 @@ void Logits::HandleEOSArray(cpu_span<float> batched_logits) {
     }
 
     logits[model_.config_->model.eos_token_id] = max;  // Set the score of the primary EOS token to the highest of any of the EOS tokens
+    vocab_index += vocab_size;
+  }
+}
+
+void Logits::AddMask(cpu_span<float> logits, std::vector<uint32_t> mask) {
+  size_t vocab_size = shape_[2];
+  size_t vocab_index = 0;
+
+  for (int index = 0; index < shape_[0]; index++) {
+    auto logits_span = logits.subspan(vocab_index, vocab_size);
+    for (size_t i = 0; i < vocab_size; i++) {
+      // if (mask[i / 32] & (1 << (i % 32))){
+      //   printf("TEST: allowed token %d \n", i);
+      // }
+      logits_span[i] = mask[i / 32] & (1 << (i % 32)) ? logits_span[i] : std::numeric_limits<float>::lowest();
+    }
     vocab_index += vocab_size;
   }
 }
