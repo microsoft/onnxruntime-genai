@@ -320,7 +320,7 @@ void Generator::SetRuntimeOption(const char* key, const char* value) {
       throw std::runtime_error(std::string("terminate_session key value unexpected: ") + value);
     }
   } else {
-    throw std::runtime_error(std::string("SetRuntimeOptions key is not expected: ") + key);
+    throw std::runtime_error(std::string("SetRuntimeOption key is not expected: ") + key);
   }
 }
 
