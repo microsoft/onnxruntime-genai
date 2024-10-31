@@ -40,6 +40,8 @@ using cudaStream_t = void*;
 #include "runtime_settings.h"
 #include "tensor.h"
 
+void ThrowErrorIfSessionTerminated(bool is_session_terminated);
+
 namespace Generators {
 struct Model;
 struct State;
@@ -108,7 +110,9 @@ struct Generator : LeakChecked<Generator> {
   Generator(const Model& model, const GeneratorParams& params);
 
   bool IsDone() const;
+  void SetRuntimeOption(const char* key, const char* value);
   void ComputeLogits();
+  bool IsSessionTerminated() const;
   void GenerateNextToken();
 
   DeviceMemorySpan<int32_t> GetSequence(size_t index) const;

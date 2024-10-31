@@ -271,6 +271,10 @@ bool OGA_API_CALL OgaGenerator_IsDone(const OgaGenerator* generator) {
   return reinterpret_cast<const Generators::Generator*>(generator)->IsDone();
 }
 
+bool OGA_API_CALL OgaGenerator_IsSessionTerminated(const OgaGenerator* generator) {
+  return reinterpret_cast<const Generators::Generator*>(generator)->IsSessionTerminated();
+}
+
 OgaResult* OGA_API_CALL OgaGenerator_ComputeLogits(OgaGenerator* generator) {
   OGA_TRY
   reinterpret_cast<Generators::Generator*>(generator)->ComputeLogits();
@@ -281,6 +285,13 @@ OgaResult* OGA_API_CALL OgaGenerator_ComputeLogits(OgaGenerator* generator) {
 OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator) {
   OGA_TRY
   reinterpret_cast<Generators::Generator*>(generator)->GenerateNextToken();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaGenerator_SetRuntimeOption(OgaGenerator* generator, const char* key, const char* value) {
+  OGA_TRY
+  reinterpret_cast<Generators::Generator*>(generator)->SetRuntimeOption(key, value);
   return nullptr;
   OGA_CATCH
 }
