@@ -4,6 +4,10 @@
 #include "utils.h"
 #include <cinttypes>
 
+#if USE_CUDA
+#include "../cuda/cuda_common.h"
+#endif
+
 #if USE_DML
 #include "../dml/dml_helpers.h"
 #include "model.h"
