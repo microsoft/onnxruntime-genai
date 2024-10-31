@@ -24,13 +24,18 @@ Gpt_State::Gpt_State(const Gpt_Model& model, RoamingArray<int32_t> sequence_leng
   extra_inputs_.Add();
 }
 
-RoamingArray<float> Gpt_State::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
-  UpdateInputsOutputs(next_tokens, next_indices, current_length);
+RoamingArray<float> Gpt_State::Run(int total_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
+  UpdateInputsOutputs(next_tokens, next_indices, total_length);
 
   int batch_size = static_cast<int>(input_ids_.GetShape()[0]);
   State::Run(*model_.session_decoder_, batch_size);
 
   return logits_.Get();
+}
+
+void Gpt_State::RewindTo(size_t index) {
+  position_inputs_.RewindTo(index);
+  kv_cache_.RewindTo(index);
 }
 
 void Gpt_State::UpdateInputsOutputs(RoamingArray<int32_t>& next_tokens_unk, RoamingArray<int32_t> beam_indices, int total_length) {

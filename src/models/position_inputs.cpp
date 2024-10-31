@@ -249,7 +249,7 @@ void PositionInputs::UpdatePositionIDs(int total_length, int new_kv_length) {
     state_.inputs_[posid_input_index_] = position_ids_.get();
   }
   is_first_posid_update_ = false;
-  // Just incrementing existing position IDs
+
   switch (model_.device_type_) {
     case DeviceType::CPU: {
       if (type_ == Ort::TypeToTensorType<int32_t>)
@@ -498,7 +498,6 @@ void PositionInputs::UpdateAttentionMask(int total_length, int new_kv_length) {
     default:
       throw std::runtime_error("PositionInputs::Update - Unsupported device type");
   }
-
   state_.inputs_[mask_input_index_] = attention_mask_.get();
   is_first_mask_update_ = false;
 }
@@ -574,19 +573,19 @@ void PositionInputs::UpdatePositionIDsImpl() {
 };
 
 template <typename T>
-void PositionInputs::UpdatePositionIDsImpl(int current_length, int new_kv_length) {
+void PositionInputs::UpdatePositionIDsImpl(int total_length, int new_kv_length) {
   auto* data = position_ids_->GetTensorMutableData<T>();
   for (int i = 0; i < new_kv_length; i++)
-    data[i] = i + current_length + new_kv_length;
+    data[i] = i + total_length - new_kv_length;
 };
 
 template <typename T>
-void PositionInputs::UpdateAttentionMaskImpl(T* data, const T* old_data, int current_length) {
+void PositionInputs::UpdateAttentionMaskImpl(T* data, const T* old_data, int total_length) {
   for (int i = 0; i < attention_mask_shape_[0]; i++) {
-    for (int j = 0; j < current_length - 1; j++) {
-      data[i * current_length + j] = old_data[i * (current_length - 1) + j];
+    for (int j = 0; j < total_length - 1; j++) {
+      data[i * total_length + j] = old_data[i * (total_length - 1) + j];
     }
-    data[i * current_length + current_length - 1] = 1;
+    data[i * total_length + total_length - 1] = 1;
   }
 };
 

@@ -277,7 +277,7 @@ void GreedySearch_Cpu::SetUserTokens(const RoamingArray<int32_t>& next_tokens) {
 }
 
 void GreedySearch_Cpu::RewindTo(size_t index) {
-  sequences_.RewindTo(index);
+  sequences_.RewindTo(index+1);
   done_ = false;
   not_done_count_ = params_->search.batch_size;
   memset(eos_seen_.data(), 0, eos_seen_.size_bytes());
@@ -286,6 +286,7 @@ void GreedySearch_Cpu::RewindTo(size_t index) {
     sequences_.GetLastTokens(next_tokens_);
   } else
     memset(next_tokens_.data(), 0, next_tokens_.size_bytes());
+  sequences_.RewindTo(index);
 }
 
 void BeamSearch_Cpu::SetUserTokens(const RoamingArray<int32_t>& next_tokens) {

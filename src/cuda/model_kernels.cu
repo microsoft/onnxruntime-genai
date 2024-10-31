@@ -29,7 +29,7 @@ template <typename T>
 __global__ void UpdatePositionIds(T* positions, int total_length, int new_kv_length) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < new_kv_length) {
-    positions[i] = total_length + i;
+    positions[i] = i + total_length - new_kv_length;
   }
 }
 

@@ -16,6 +16,7 @@
 #define PHI2_PATH MODEL_PATH "phi-2/int4/cpu"
 #endif
 #endif
+
 TEST(CAPITests, TokenizerCAPI) {
 #if TEST_PHI2
   auto model = OgaModel::Create(PHI2_PATH);
@@ -385,12 +386,12 @@ using OutputType = float;
   {
     auto params = OgaGeneratorParams::Create(*model);
     params->SetSearchOption("max_length", 20);
-    params->SetInputSequences(*input_sequences);
+    params->SetSearchOption("batch_size", 3);
 
     auto generator = OgaGenerator::Create(*model, *params);
+    generator->AppendTokenSequences(*input_sequences);
 
     while (!generator->IsDone()) {
-      generator->ComputeLogits();
       generator->GenerateNextToken();
     }
 
@@ -485,3 +486,131 @@ void CheckResult(OgaResult* result) {
     throw std::runtime_error(string);
   }
 }
+
+TEST(CAPITests, BatchedRewindGptFp32CAPI) {
+  std::vector<int64_t> input_ids_shape{2, 4};
+  std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
+
+  std::vector<int32_t> expected_output{
+      0, 0, 0, 52, 204, 204, 204, 204, 204, 204,
+      0, 0, 195, 731, 731, 114, 114, 114, 114, 114};
+
+  auto batch_size = static_cast<int>(input_ids_shape[0]);
+  int max_length = 10;
+
+  // To generate this file:
+  // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
+  // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
+
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+  params->SetSearchOption("batch_size", batch_size);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  // Verify outputs match expected outputs
+  for (int i = 0; i < batch_size; i++) {
+    const auto sequence_length = generator->GetSequenceCount(i);
+    const auto* sequence_data = generator->GetSequenceData(i);
+
+    ASSERT_LE(sequence_length, max_length);
+
+    const auto* expected_output_start = &expected_output[i * max_length];
+    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
+  }
+
+  // Rewind to length 0 and verify same output
+  generator->RewindTo(0);
+
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  // Verify outputs match expected outputs
+  for (int i = 0; i < batch_size; i++) {
+    const auto sequence_length = generator->GetSequenceCount(i);
+    const auto* sequence_data = generator->GetSequenceData(i);
+
+    ASSERT_LE(sequence_length, max_length);
+
+    const auto* expected_output_start = &expected_output[i * max_length];
+    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
+  }
+}
+
+TEST(CAPITests, RewindGptFp32CAPI) {
+  // Oga::SetLogBool("enabled", true);
+  // Oga::SetLogBool("model_input_values", true);
+  std::vector<int64_t> input_ids_shape{1, 4};
+  std::vector<int32_t> input_ids{0, 0, 195, 731};
+
+  std::vector<int32_t> expected_output{
+      0, 0, 195, 731, 731, 114, 114, 114, 114, 114};
+
+  int max_length = 10;
+
+  // To generate this file:
+  // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
+  // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
+
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  // Verify outputs match expected outputs
+  auto sequence_length = generator->GetSequenceCount(0);
+  auto* sequence_data = generator->GetSequenceData(0);
+  // std::cout << "sequence: " << sequence_length << std::endl;
+  // for (int i = 0; i < sequence_length; i++) {
+  //   std::cout << sequence_data[i] << " ";
+  // }
+  // std::cout << std::endl;
+  ASSERT_LE(sequence_length, max_length);
+  auto* expected_output_start = &expected_output[0];
+  EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
+
+  // Rewind to length 5 and verify same output
+  generator->RewindTo(5);
+
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  // Verify outputs match expected outputs
+  sequence_length = generator->GetSequenceCount(0);
+  sequence_data = generator->GetSequenceData(0);
+  ASSERT_LE(sequence_length, max_length);
+  expected_output_start = &expected_output[0];
+  EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
+
+  // Rewind to length 3 and add tokens and verify same output
+  generator->RewindTo(3);
+
+  std::vector<int32_t> next_ids{731, 731};
+  generator->AppendTokens(next_ids.data(), next_ids.size());
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  // Verify outputs match expected outputs
+  sequence_length = generator->GetSequenceCount(0);
+  sequence_data = generator->GetSequenceData(0);
+  ASSERT_LE(sequence_length, max_length);
+  expected_output_start = &expected_output[0];
+  EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
+  // Oga::SetLogBool("enabled", false);
+}
+
+

@@ -19,6 +19,8 @@ struct Gpt_Model : Model {
 struct Gpt_State : State {
   Gpt_State(const Gpt_Model& model, RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params);
   RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) override;
+  
+  void RewindTo(size_t index) override;
 
  private:
   void UpdateInputsOutputs(RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> beam_indices, int current_length);

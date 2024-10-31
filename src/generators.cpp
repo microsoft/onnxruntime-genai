@@ -321,6 +321,7 @@ void Generator::ComputeLogits(const RoamingArray<int32_t>& next_tokens) {
     stream << std::endl;
   }
   SetLogits(logits);
+  just_rewinded_ = false;
 }
 
 bool Generator::IsDone() const {
@@ -346,6 +347,9 @@ void Generator::GenerateNextToken() {
   if (search_->GetSequenceLength() == 0 && !computed_logits_)
     throw std::runtime_error("GenerateNextToken called with no prior state. Please call AppendTokens, SetLogits, or params.SetInputs before calling GenerateNextToken.");
   if (!computed_logits_) {
+    if (just_rewinded_)
+      search_->SetUserTokens(search_->GetNextTokens());
+      // AddTokens(search_->GetNextTokens());
     ComputeLogits(search_->GetNextTokens());
   }
   computed_logits_ = false;
@@ -401,6 +405,7 @@ void Generator::RewindToLength(size_t new_length) {
   search_->RewindTo(new_length);
   state_->RewindTo(new_length);
   computed_logits_ = false;
+  just_rewinded_ = true;
 }
 
 RoamingArray<float> Generator::GetLogits() {

@@ -9,12 +9,16 @@ struct KV_Cache_Combined {
 
   void Add();  // Add to state inputs/outputs
   void Update(std::span<const int32_t> beam_indices, int total_length);
+  void RewindTo(size_t index);
 
   template <typename ScoreType>
   void PickPastState(std::span<const int32_t> beam_indices, int index);
   void PickPastState(std::span<const int32_t> beam_indices, int index);
 
  private:
+  template <typename T>
+  void RewindPastTensorsTo(size_t index);
+
   State& state_;
   const Model& model_{state_.model_};
   int layer_count_;

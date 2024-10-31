@@ -118,6 +118,7 @@ struct Generator : LeakChecked<Generator> {
 
  private:
   void ComputeLogits(const RoamingArray<int32_t>& next_tokens);
+  bool just_rewinded_{false};
 };
 
 struct OrtGlobals {

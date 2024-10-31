@@ -77,6 +77,75 @@ void KV_Cache_Combined::Update(std::span<const int32_t> beam_indices, int total_
   is_first_update_ = false;
 }
 
+void KV_Cache_Combined::RewindTo(size_t index) {
+  if (shape_[3] <= static_cast<int>(index)) {
+    throw std::runtime_error("Requested length of rewind is greater than the current length.");
+  }
+
+  is_first_update_ = true;
+  if (index == 0) {
+    for (int i = 0; i < layer_count_; i++) {
+      pasts_[i] = nullptr;
+      state_.inputs_[input_index_ + i] = empty_past_.get();
+    }
+  } else if (type_ == Ort::TypeToTensorType<float>) {
+    RewindPastTensorsTo<float>(index);
+  } else {
+    RewindPastTensorsTo<Ort::Float16_t>(index);
+  }
+}
+
+template <typename T>
+void KV_Cache_Combined::RewindPastTensorsTo(size_t index) {
+  assert(index > 0 && shape_[3] >= index);
+  std::array<int64_t, 5> new_shape = shape_;
+  new_shape[3] = static_cast<int>(index);
+  auto batch_x_num_heads = new_shape[1] * new_shape[2];
+  auto new_length_x_head_size = new_shape[3] * new_shape[4];
+  auto old_length_x_head_size = shape_[3] * new_shape[4];
+  shape_[3] = new_shape[3];
+
+  for (int i = 0; i < layer_count_; i++) {
+    OrtValue& present = *presents_[i];
+    std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(*model_.allocator_kvcache_, shape_, type_);
+    for (int j = 0; j < 2 * batch_x_num_heads; j++) {
+      auto present_data = present.GetTensorData<T>() + j * old_length_x_head_size;
+      auto past_data = past->GetTensorMutableData<T>() + j * new_length_x_head_size;
+#if USE_CUDA
+      if (model_.device_type_ == DeviceType::CUDA) {
+        cudaMemcpyAsync(past_data, present_data, new_length_x_head_size * sizeof(T), cudaMemcpyDeviceToDevice, model_.cuda_stream_);
+      } else
+#elif USE_DML
+      if (model_.device_type_ == DeviceType::DML) {
+        ComPtr<ID3D12Resource> source_resource;
+        Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_kvcache_, present.GetTensorMutableRawData(), &source_resource));
+
+        ComPtr<ID3D12Resource> target_resource;
+        Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_kvcache_, past->GetTensorMutableRawData(), &target_resource));
+
+        uint64_t source_offset = j * old_length_x_head_size * sizeof(T);
+        uint64_t target_offset = j * new_length_x_head_size * sizeof(T);
+        uint64_t size_in_bytes = new_length_x_head_size * sizeof(T);
+
+        model_.GetDmlExecutionContext()->CopyBufferRegion(
+            target_resource.Get(),
+            target_offset,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            source_resource.Get(),
+            source_offset,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            size_in_bytes);
+      } else
+#endif
+      {
+        copy(std::span<const T>(present_data, new_length_x_head_size), std::span<T>(past_data, new_length_x_head_size));
+      }
+    }
+    pasts_[i] = std::move(past);
+    state_.inputs_[input_index_ + i] = pasts_[i].get();
+  }
+}
+
 // Copy present state to past state reordered by the beam_indices
 template <typename ScoreType>
 void KV_Cache_Combined::PickPastState(std::span<const int32_t> beam_indices, int index) {
@@ -227,7 +296,6 @@ void KV_Cache::Update(std::span<const int32_t> beam_indices, int total_length) {
   is_first_update_ = false;
 }
 
-// TODO(aciddelgado): test with past_present_share_buffer_ = false
 void KV_Cache::RewindTo(size_t index) {
   if (past_present_share_buffer_) {
     return;
@@ -239,6 +307,7 @@ void KV_Cache::RewindTo(size_t index) {
   if (index == 0) {
     for (int i = 0; i < layer_count_ * 2; i++) {
       pasts_[i] = nullptr;
+      state_.inputs_[input_index_ + i] = empty_past_.get();
     }
   } else if (type_ == Ort::TypeToTensorType<float>) {
     RewindPastTensorsTo<float>(index);
@@ -255,6 +324,7 @@ void KV_Cache::RewindPastTensorsTo(size_t index) {
   auto batch_x_num_heads = new_shape[0] * new_shape[1];
   auto new_length_x_head_size = new_shape[2] * new_shape[3];
   auto old_length_x_head_size = shape_[2] * new_shape[3];
+  shape_[2] = new_shape[2];
 
   for (int i = 0; i < layer_count_ * 2; i++) {
     OrtValue& present = *presents_[i];
