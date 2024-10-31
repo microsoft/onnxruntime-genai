@@ -402,7 +402,8 @@ class Model:
 
         # Quantize ONNX model to desired precision
         # TODO: Replace by quantizing the MatMuls as they are created
-        if self.onnx_dtype == "int4":
+        already_quantized_in_qdq_format = self.quant_type is not None and self.matmul_attrs["use_qdq"]  # Skip quantizing `MatMul` in `DequantizeLinear --> Transpose --> MatMul` path
+        if self.onnx_dtype == "int4" and not already_quantized_in_qdq_format:
             model = self.to_int4(model)
 
         # Save ONNX model with only one external data file and delete any existing duplicate copies
