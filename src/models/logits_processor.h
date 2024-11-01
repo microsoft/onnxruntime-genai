@@ -10,6 +10,9 @@
 
 namespace Generators {
 
+std::vector<int32_t> tokenize_partial(const Tokenizer* tokenizer, const uint8_t* bytes,
+                                      size_t bytes_len);
+
 struct LogitsProcessor {
   virtual std::vector<uint32_t> ComputeMask() = 0;
   virtual void CommitTokens(uint32_t token) = 0;
