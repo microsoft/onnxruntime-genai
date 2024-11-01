@@ -117,6 +117,15 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
     return getSequenceLastToken(nativeHandle, sequenceIndex);
   }
 
+  public void setActiveAdapter(Adapters adapters, String adapterName) throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    setActiveAdapterNative(nativeHandle, adapters.nativeHandle(), adapterName);
+  }
+
+
   /** Closes the Generator and releases any associated resources. */
   @Override
   public void close() {
@@ -168,5 +177,8 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
       throws GenAIException;
 
   private native int getSequenceLastToken(long nativeHandle, long sequenceIndex)
+      throws GenAIException;
+
+  private native void setActiveAdapterNative(long nativeHandle, long adaptersNativeHandle, String adapterName)
       throws GenAIException;
 }

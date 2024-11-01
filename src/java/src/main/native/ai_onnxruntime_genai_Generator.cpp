@@ -78,3 +78,12 @@ Java_ai_onnxruntime_genai_Generator_getSequenceLastToken(JNIEnv* env, jobject th
 
   return jint(tokens[num_tokens - 1]);
 }
+
+JNIEXPORT void JNICALL
+Java_ai_onnxruntime_genai_Generator_setActiveAdapter(JNIEnv* env, jobject thiz, jlong native_handle,
+                                                     jlong adapters_native_handle, jstring adapter_name) {
+  CString name{env, adapter_name};
+  ThrowIfError(env, OgaSetActiveAdapter(reinterpret_cast<OgaGenerator*>(native_handle),
+                                        reinterpret_cast<OgaAdapters*>(adapters_native_handle),
+                                        name));
+}
