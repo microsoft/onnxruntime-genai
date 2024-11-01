@@ -363,16 +363,20 @@ class Model:
             ep_options = { self.ep : self.ep_attrs[self.ep] }
             genai_config["model"]["decoder"]["session_options"]["provider_options"].append(ep_options)
 
+        prompt_templates = self._get_prompt_templates(model_name_or_path, extra_kwargs)
+        if prompt_templates is not None:
+            genai_config["model"]["prompt_templates"] = prompt_templates
+
         print(f"Saving GenAI config in {out_dir}")
         with open(os.path.join(out_dir,"genai_config.json"), "w") as f:
-            json.dump(genai_config, f, indent=4)
+            json.dump(genai_config, f, sort_keys=True, indent=4)
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
         tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
         print(f"Saving processing files in {out_dir} for GenAI")
         tokenizer.save_pretrained(out_dir)
 
-    def save_inference_model(self, hf_name, output_dir, extra_kwargs):
+    def _get_prompt_templates(self, hf_name, extra_kwargs):
         try:
             # disable end of sentence padding with eos_token=None
             tokenizer = AutoTokenizer.from_pretrained(hf_name, token=self.hf_token, trust_remote_code=True, eos_token=None, **extra_kwargs)
@@ -390,18 +394,11 @@ class Model:
                 "user": user_template,
                 "assistant": assistant_template,
                 "prompt": prompt_template
-            }    
-            inference_model = {
-                "Name": hf_name,
-                "ProviderType": "",
-                "Uri": hf_name,
-                "Path": "",
-                "PromptTemplate": templates
             }
-            with open(os.path.join(output_dir, "inference_model.json"), "w") as f:
-                json.dump(inference_model, f, indent=4)
+            return templates 
         except Exception as e:
             print(f"Failed to save inference_model.json. Error: {e}")
+            return None
         
     def save_model(self, out_dir):
         print(f"Saving ONNX model in {out_dir}")
@@ -3153,9 +3150,6 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
 
     # Copy Hugging Face processing files to output folder
     onnx_model.save_processing(hf_name, extra_kwargs, output_dir)
-
-    # Generate inference_model.json as it's required by neutron-server
-    onnx_model.save_inference_model(hf_name, output_dir, extra_kwargs)
 
 
 def get_args():
