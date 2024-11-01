@@ -6,6 +6,7 @@
 #include <vector>
 
 #include <llguidance.h>
+
 #include "model.h"
 
 namespace Generators {
@@ -39,6 +40,5 @@ struct ConstrainedLogitsProcessor : public LogitsProcessor {
   std::unique_ptr<LlgConstraint, LlgConstraintDeleter> llg_constraint_;
   std::unique_ptr<LlgTokenizer, LlgTokenizerDeleter> llg_tokenizer_;
   std::shared_ptr<Tokenizer> tokenizer_;
-  LlgMaskResult mask_result_;
 };
 }  // namespace Generators

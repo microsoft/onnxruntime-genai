@@ -82,11 +82,14 @@ ConstrainedLogitsProcessor::ConstrainedLogitsProcessor(int vocab_size, uint32_t 
       .tokenize_user_data = tokenizer_.get(),
   };
 
-  llg_tokenizer_ = std::unique_ptr<LlgTokenizer, LlgTokenizerDeleter>(llg_new_tokenizer(&tokenizer_init));
+  char error_buf[128];
+  llg_tokenizer_ = std::unique_ptr<LlgTokenizer, LlgTokenizerDeleter>(llg_new_tokenizer(&tokenizer_init, error_buf, sizeof(error_buf)));
+  if (!llg_tokenizer_) {
+    throw std::runtime_error("Error creating tokenizer: " + std::string(error_buf));
+  }
 
   LlgConstraintInit constraint_init;
   llg_constraint_init_set_defaults(&constraint_init, llg_tokenizer_.get());
-  // constraint_init.log_stderr_level = 2;
   LlgConstraint* constraint_ptr;
   if (guidance_type == "json_schema") {
     constraint_ptr = llg_new_constraint_json(&constraint_init, guidance_data.c_str());
@@ -98,15 +101,15 @@ ConstrainedLogitsProcessor::ConstrainedLogitsProcessor(int vocab_size, uint32_t 
   if (llg_get_error(constraint_ptr) != nullptr) {
     std::string error_message = llg_get_error(constraint_ptr);
     auto error = std::runtime_error("Error creating grammar: " + error_message);
-    llg_free_constraint(constraint_ptr); // only free constraint, after we have saved the error message
+    llg_free_constraint(constraint_ptr);  // only free constraint, after we have saved the error message
     throw error;
   }
   llg_constraint_ = std::unique_ptr<LlgConstraint, LlgConstraintDeleter>(constraint_ptr);
 }
 
 std::vector<uint32_t> ConstrainedLogitsProcessor::ComputeMask() {
-  // LlgMaskResult mask_result;
-  auto error = llg_compute_mask(llg_constraint_.get(), &mask_result_);
+  LlgMaskResult mask_result;
+  auto error = llg_compute_mask(llg_constraint_.get(), &mask_result);
   if (error != 0) {
     std::string error_message = llg_get_error(llg_constraint_.get());
     throw std::runtime_error("Error computing mask: " + error_message);
@@ -115,7 +118,7 @@ std::vector<uint32_t> ConstrainedLogitsProcessor::ComputeMask() {
   std::vector<uint32_t> mask;
   mask.reserve((vocab_size_ - 1) / 32 + 1);
   for (int i = 0; i < (vocab_size_ - 1) / 32 + 1; i++) {
-    mask.push_back(mask_result_.sample_mask[i]);
+    mask.push_back(mask_result.sample_mask[i]);
   }
   return mask;
 }

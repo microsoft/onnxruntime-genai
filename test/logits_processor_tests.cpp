@@ -61,7 +61,6 @@ TEST(LogitsProcessorTests, TestJsonSchema) {
                                                                             json_schema, tokenizer);
   auto target_ids = tokenize_partial(tokenizer.get(), reinterpret_cast<const uint8_t*>(text.c_str()), text.size());
   for (auto id : target_ids) {
-    std::cout << id << std::endl;
     auto mask = processor->ComputeMask();
     processor->CommitTokens(id);
   }

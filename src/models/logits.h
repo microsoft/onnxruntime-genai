@@ -20,7 +20,7 @@ struct Logits {
  private:
   void HandleEOSArray(cpu_span<float> logits);
 
-  void AddMask(cpu_span<float> logits, std::vector<uint32_t> mask);
+  void AddMask(cpu_span<float> logits, std::vector<uint32_t>& mask);
 
   State& state_;
   const Model& model_{state_.model_};
@@ -41,10 +41,14 @@ struct Logits {
   StaticBuffer* sb_logits16_{};
 
   std::unique_ptr<ConstrainedLogitsProcessor> constrained_logits_processor_;
+  std::vector<uint32_t> logits_mask_;
 
 #if USE_CUDA
   cuda_unique_ptr<int32_t> cuda_eos_token_ids_ptr_;  // eos_token_ids from params, but in cuda accessible memory
   gpu_span<int32_t> cuda_eos_token_ids_;
+  cuda_unique_ptr<uint32_t> cuda_logits_mask_ptr_;
+  void AddMask(gpu_span<float> logits, const uint32_t* mask);
+
 #endif
 
 #if USE_DML
