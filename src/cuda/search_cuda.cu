@@ -1,30 +1,40 @@
 #include <cuda_runtime.h>
 #include <cub/cub.cuh>
 #include <algorithm>
-#include "generators.h"
+#include "../generators.h"
+#include "cuda_common.h"
 #include "interface.h"
 #include "search_cuda.cuh"
 
 namespace Generators {
 namespace cuda {
 
-#if 0
-__global__ void SetInputSequence(int32_t* sequences, const int32_t* input_sequences, int batch_size, int num_beams) {
+__global__ void ExpandInputSequences(const int32_t* input_sequences, int32_t* sequences, int batch_size, int beam_size, int current_length, int max_length) {
   // The original inputs are not expanded, this expands them in place into the sequences
-std::span<int32_t> sequences_0 = sequences_space_;
-for (size_t batch = 0; batch < params_.batch_size; batch++) {
-  for (size_t beam = 0; beam < params_.num_beams; beam++) {
-    for (int j = 0; j < params_.sequence_length; j++) {
-      sequences_0[(batch * params_.num_beams + beam) * params_.max_length + j] =
-          static_cast<int32_t>(params_.input_ids[batch * params_.sequence_length + j]);
+  for (size_t batch = 0; batch < batch_size; batch++) {
+    for (size_t beam = 0; beam < beam_size; beam++) {
+      for (int j = 0; j < current_length; j++) {
+        sequences[(batch * beam_size + beam) * max_length + j] =
+            static_cast<int32_t>(input_sequences[batch * current_length + j]);
+      }
     }
   }
 }
 
-void LaunchSetInputSequence(std::span<int32_t> sequences) {
-
+void Launch_ExpandInputSequences(std::span<const int32_t> input_sequences, std::span<int32_t> sequences, int batch_size, int beam_size, int current_length, int max_length, cudaStream_t stream) {
+  ExpandInputSequences<<<1, 1, 0, stream>>>(input_sequences.data(), sequences.data(), batch_size, beam_size, current_length, max_length);
 }
-#endif
+
+__global__ void AppendNextTokenToSequences(const int32_t* next_tokens, int32_t* sequences, int batch_beam_size, int current_length, int max_length) {
+  // Append next token to each sequence.
+  for (int i = 0; i < batch_beam_size; i++) {
+    sequences[i * max_length + current_length] = next_tokens[i];
+  }
+}
+
+void Launch_AppendNextTokenToSequences(std::span<const int32_t> next_tokens, std::span<int32_t> sequences, int batch_beam_size, int current_length, int max_length, cudaStream_t stream) {
+  AppendNextTokenToSequences<<<1, 1, 0, stream>>>(next_tokens.data(), sequences.data(), batch_beam_size, current_length, max_length);
+}
 
 __global__ void ArgMax(cub::KeyValuePair<int, float>* argmaxen, int32_t* next_tokens, int batch_size) {
   int batch_index = threadIdx.x;

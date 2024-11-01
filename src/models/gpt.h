@@ -11,17 +11,17 @@ namespace Generators {
 struct Gpt_Model : Model {
   Gpt_Model(std::unique_ptr<Config> config, OrtEnv& ort_env);
 
-  std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params) const override;
+  std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const override;
 
   std::unique_ptr<OrtSession> session_decoder_;
 };
 
 struct Gpt_State : State {
-  Gpt_State(const Gpt_Model& model, RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params);
-  RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) override;
+  Gpt_State(const Gpt_Model& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params);
+  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t> next_tokens, DeviceSpan<int32_t> next_indices) override;
 
  private:
-  void UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> beam_indices, int current_length);
+  void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int current_length);
 
   const Gpt_Model& model_;
 

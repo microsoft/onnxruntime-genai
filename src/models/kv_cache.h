@@ -8,11 +8,11 @@ struct KV_Cache_Combined {
   KV_Cache_Combined(State& state);
 
   void Add();  // Add to state inputs/outputs
-  void Update(std::span<const int32_t> beam_indices, int current_length);
+  void Update(DeviceSpan<int32_t> beam_indices, int current_length);
 
   template <typename ScoreType>
-  void PickPastState(std::span<const int32_t> beam_indices, int index);
-  void PickPastState(std::span<const int32_t> beam_indices, int index);
+  void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
+  void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
 
  private:
   State& state_;
@@ -35,10 +35,10 @@ struct KV_Cache {
 
   void AddEncoder();  // If model has an initial encoder step, this is used
   void Add();
-  void Update(std::span<const int32_t> beam_indices, int current_length);
+  void Update(DeviceSpan<int32_t> beam_indices, int current_length);
   template <typename ScoreType>
-  void PickPastState(std::span<const int32_t> beam_indices, int index);
-  void PickPastState(std::span<const int32_t> beam_indices, int index);
+  void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
+  void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
 
  private:
   State& state_;
