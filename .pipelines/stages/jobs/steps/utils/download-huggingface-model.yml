@@ -28,7 +28,7 @@ steps:
     - powershell: |
         python -m pip install "huggingface_hub[cli]"
         huggingface-cli login --token $env:HF_TOKEN
-        huggingface-cli download ${{ parameters.HuggingFaceRepo }} --include ${{ parameters.RepoFolder }}/* --local-dir ${{ parameters.LocalFolder }} --local-dir-use-symlinks False
+        huggingface-cli download ${{ parameters.HuggingFaceRepo }} --include ${{ parameters.RepoFolder }}/* --local-dir "\\?\${{ parameters.LocalFolder }}"" --local-dir-use-symlinks False
       displayName: ${{ parameters.StepName }}
       workingDirectory: ${{ parameters.WorkingDirectory }}
       env:
