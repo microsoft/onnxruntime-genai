@@ -1,2 +1,2 @@
 -i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/
-onnxruntime==1.20.0.dev20241022004
+onnxruntime==1.20.0
