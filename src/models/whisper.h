@@ -47,7 +47,7 @@ struct WhisperDecoderState : State {
  private:
   friend struct WhisperState;
 
-  void UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> next_indices, int current_length);
+  void UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> next_indices, int current_length, bool first_update);
 
   const WhisperModel& model_;
 

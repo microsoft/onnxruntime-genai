@@ -169,7 +169,7 @@ RoamingArray<float> MultiModalPipelineState::Run(int current_length, RoamingArra
     auto logits = decoder_state_->Run(current_length, next_tokens, next_indices);
 
     is_prompt_ = false;
-    vision_state_.reset();  // The vision state is no longer needed in generation stage
+    // vision_state_.reset();  // The vision state is no longer needed in generation stage
 
     return logits;
   }
@@ -181,5 +181,30 @@ RoamingArray<float> MultiModalPipelineState::Run(int current_length, RoamingArra
   decoder_state_->inputs_embeds_.ReuseEmbeddingsBuffer(embedding_state_->inputs_embeds_);
   return decoder_state_->Run(current_length, next_tokens, next_indices);
 }
+
+// OrtValue* MultiModalPipelineState::GetOutput(const char* name) {
+//   // Check if output name is in vision state's outputs
+//   for (size_t i = 0; i < vision_state_->output_names_.size(); i++) {
+//     if (std::strcmp(vision_state_->output_names_[i], name) == 0) {
+//       return vision_state_->outputs_[i];
+//     }
+//   }
+
+//   // Check if output name is in embedding state's outputs
+//   for (size_t i = 0; i < embedding_state_->output_names_.size(); i++) {
+//     if (std::strcmp(embedding_state_->output_names_[i], name) == 0) {
+//       return embedding_state_->outputs_[i];
+//     }
+//   }
+
+//   // Check if output name is in decoder state's outputs
+//   for (size_t i = 0; i < decoder_state_->output_names_.size(); i++) {
+//     if (std::strcmp(decoder_state_->output_names_[i], name) == 0) {
+//       return decoder_state_->outputs_[i];
+//     }
+//   }
+
+//   return State::GetOutput(name);
+// };
 
 }  // namespace Generators

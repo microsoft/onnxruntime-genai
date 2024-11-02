@@ -142,7 +142,7 @@ RoamingArray<float> WhisperDecoderState::Run(int current_length, RoamingArray<in
   // return MakeDummy();
 }
 
-void WhisperDecoderState::UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens_unk, RoamingArray<int32_t> beam_indices, int current_length) {
+void WhisperDecoderState::UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens_unk, RoamingArray<int32_t> beam_indices, int current_length, bool first_update) {
   input_ids_.Update(next_tokens_unk);
   kv_cache_.Update(beam_indices.GetCPU(), current_length);
   logits_.Update();
@@ -152,7 +152,7 @@ void WhisperDecoderState::UpdateInputsOutputs(const RoamingArray<int32_t>& next_
     *data = current_length - 1;
   }
 
-  if (cache_indirection_) {
+  if (cache_indirection_ && params_->search.num_beams > 1 && !first_update) {
 #if USE_CUDA
     gpu_span<int32_t> beam_indices_gpu = beam_indices.GetGPU();
     cuda_unique_ptr<int32_t> beam_indices_ptr;
@@ -379,23 +379,29 @@ RoamingArray<float> WhisperState::Run(int current_length, RoamingArray<int32_t> 
     // Run encoder
     std::cout << "Running encoder" << std::endl;
     encoder_state_->Run(current_length, next_tokens, next_indices);
-    TransposeKCaches(cross_cache_->GetValues());
-    
+    // TransposeKCaches(cross_cache_->GetValues());
+
     // Run decoder-init
     std::cout << "Running decoder-init" << std::endl;
     auto logits = decoder_state_->Run(current_length, next_tokens, next_indices);
     // decoded_length_ = current_length;
+
+    // TODO: Transpose the K caches only when the else branch is run for the first time.
+    // Otherwise the GetOutput(output_cross_qk_{i}) method returns transposed K caches.
+    TransposeKCaches(cross_cache_->GetValues());
     TransposeKCaches(decoder_state_->kv_cache_.GetPresents());
+    UpdateCrossQKSearchBuffer(current_length);
     return logits;
     // return decoder_state_->logits_.Get();
   } else {
     // Run decoder-with-past
     // Update inputs and outputs for decoder
     std::cout << "Running decoder-with-past" << std::endl;
-    decoder_state_->UpdateInputsOutputs(next_tokens, next_indices, current_length);
+    decoder_state_->UpdateInputsOutputs(next_tokens, next_indices, current_length, first_run_);
     auto logits = decoder_state_->Run(current_length, next_tokens, next_indices);
     // decoded_length_ += 1;
     UpdateCrossQKSearchBuffer(current_length);
+    first_run_ = false;
     return logits;
     // return decoder_state_->logits_.Get();
   }
@@ -699,14 +705,41 @@ void WhisperState::Finalize() {
 }
 
 OrtValue* WhisperState::GetOutput(const char* name) {
+  // Check if output name is in encoder state's outputs
+  for (size_t i = 0; i < encoder_state_->output_names_.size(); i++) {
+    if (std::strcmp(encoder_state_->output_names_[i], name) == 0) {
+      return encoder_state_->outputs_[i];
+    }
+  }
+
+  // Check if output name is in decoder state's outputs
+  for (size_t i = 0; i < decoder_state_->output_names_.size(); i++) {
+    if (std::strcmp(decoder_state_->output_names_[i], name) == 0) {
+      // Note: K caches will be transposed when returned
+      return decoder_state_->outputs_[i];
+    }
+  }
+
+  // if (std::strcmp("encoder_hidden_states", name) == 0) {
+  //   return encoder_state_->hidden_states_.get();
+  // }
+  // for (int i = 0; i < model_.config_->model.decoder.num_hidden_layers; i++) {
+  //   // output_cross_qk_{i}
+  //   std::string output_cross_qk_name = ComposeKeyValueName(model_.config_->model.decoder.outputs.output_cross_qk_names, i);
+  //   if (std::strcmp(output_cross_qk_name.c_str(), name) == 0) {
+  //     return cross_cache_->GetValues()[i].get();
+  //   }
+  // }
+
   // cross_qk_final_ is an onnxruntime-genai maintained buffer that
   // is not part of the model's outputs, so we need to check for it here.
   if (std::strcmp("cross_qk", name) == 0) {
     return cross_qk_final_.get();
   }
-  if (std::strcmp("logits", name) == 0) {
-    return decoder_state_->logits_.GetRaw();
-  }
+  // if (std::strcmp("logits", name) == 0) {
+  //   return decoder_state_->logits_.GetRaw();
+  // }
+
   return State::GetOutput(name);
 };
 
