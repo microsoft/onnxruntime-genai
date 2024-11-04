@@ -17,21 +17,12 @@ class DmlIncrementValuesKernel {
       ONNXTensorElementDataType dtype,
       ID3D12Resource* values_resource);
 
-  DmlIncrementValuesKernel(
-      ID3D12Device* d3d12_device,
-      DmlExecutionContext* execution_context,
-      uint32_t total_length,
-      uint32_t new_kv_length,
-      ONNXTensorElementDataType dtype,
-      ID3D12Resource* values_resource);
-
   ID3D12GraphicsCommandList* GetCommandList() { return graphics_command_list_.Get(); }
 
  private:
   struct Constants {
     uint32_t element_count;
     uint32_t start_index;
-    uint32_t start_value;
   };
 
   ComPtr<ID3D12Device> device_;

@@ -17,7 +17,6 @@ cbuffer Constants
     uint seq_len;
     uint element_count;
     uint start_index;
-    bool set_all;
 };
 
 [RootSignature(ROOT_SIG_DEF)]
@@ -29,7 +28,7 @@ void CSMain(uint3 dispatch_thread_id : SV_DispatchThreadID)
     {
         uint sequence_index = global_index % max_seq_len;
 
-        if (seq_len > 1 || set_all)
+        if (seq_len > 1)
         {
             const T value = sequence_index < seq_len ? 1 : 0;
             output_mask[global_index] = value;

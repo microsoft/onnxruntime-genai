@@ -20,14 +20,6 @@ class DmlUpdateMaskKernel {
       ID3D12Resource* attention_mask_resource,
       ID3D12Resource* attention_mask_next_resource);
 
-  DmlUpdateMaskKernel(
-      ID3D12Device* d3d12_device,
-      DmlExecutionContext* execution_context,
-      uint32_t max_seq_len,
-      ONNXTensorElementDataType dtype,
-      uint32_t seq_len,
-      ID3D12Resource* attention_mask_resource);
-
   ID3D12GraphicsCommandList* GetCommandList() { return graphics_command_list_.Get(); }
 
  private:
@@ -36,7 +28,6 @@ class DmlUpdateMaskKernel {
     uint32_t seq_len;
     uint32_t element_count;
     uint32_t start_index;
-    bool set_all;
   };
 
   ComPtr<ID3D12Device> device_;
