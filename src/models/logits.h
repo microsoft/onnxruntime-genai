@@ -15,7 +15,7 @@ struct Logits {
   void Add();
   RoamingArray<float> Get();
 
-  void Update(RoamingArray<int32_t> next_tokens_unk=RoamingArray<int32_t>{});
+  void Update(RoamingArray<int32_t> next_tokens_unk = RoamingArray<int32_t>{});
 
  private:
   void HandleEOSArray(cpu_span<float> logits);
@@ -48,7 +48,6 @@ struct Logits {
   gpu_span<int32_t> cuda_eos_token_ids_;
   cuda_unique_ptr<uint32_t> cuda_logits_mask_ptr_;
   void AddMask(gpu_span<float> logits, const uint32_t* mask);
-
 #endif
 
 #if USE_DML

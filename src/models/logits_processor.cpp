@@ -1,9 +1,10 @@
 #include <cstdint>
 #include <cstdio>
+#include <fstream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <sys/types.h>
-#include <regex>
 
 #include "llguidance.h"
 
@@ -11,22 +12,9 @@
 
 namespace Generators {
 
-std::vector<int32_t> tokenize_partial(const Tokenizer* tokenizer, const uint8_t* bytes,
-                                      size_t bytes_len) {
-  std::string input_string = "\x02";
-  input_string.reserve(bytes_len + 2);
-  for (size_t i = 0; i < bytes_len; i++) {
-    input_string.push_back(bytes[i]);
-  }
-  std::vector<int32_t> output_ids = tokenizer->Encode(input_string.c_str());
-  std::vector<int32_t> prefix_ids = tokenizer->Encode("\x02");
-  auto prefix_len = prefix_ids.size();  // TODO cache this somewhere?
-  return std::vector<int32_t>(output_ids.begin() + prefix_len, output_ids.end());
-}
-
 ConstrainedLogitsProcessor::ConstrainedLogitsProcessor(int vocab_size, uint32_t eos_token,
                                                        const std::string& guidance_type, const std::string& guidance_data,
-                                                       std::shared_ptr<Tokenizer> tokenizer)
+                                                       std::shared_ptr<Tokenizer> tokenizer, const std::string& tokenizer_path)
     : tokenizer_(std::move(tokenizer)), vocab_size_(vocab_size) {
   if (guidance_type.empty() || guidance_data.empty()) {
     throw std::runtime_error("Guidance type and data must be provided");
@@ -36,34 +24,10 @@ ConstrainedLogitsProcessor::ConstrainedLogitsProcessor(int vocab_size, uint32_t 
     throw std::runtime_error("Unsupported guidance type: " + guidance_type);
   }
 
-  std::unordered_map<int32_t, uint8_t> token_id_to_byte;
-  for (int i = 0x00; i <= 0xFF; ++i) {
-    char byte_str[10];
-    snprintf(byte_str, sizeof(byte_str), "<0x%02X>", i);
-    auto token = tokenizer_->TokenToTokenId(byte_str);
-    if (token > 0)
-      token_id_to_byte[token] = static_cast<uint8_t>(i);
-  }
-
-  std::vector<uint8_t> tokens;
-  std::vector<uint32_t> token_lens;
-  for (int i = 0; i < vocab_size; i++) {
-    std::vector<int32_t> ids = {i};
-    if (token_id_to_byte.find(i) != token_id_to_byte.end()) {
-      tokens.push_back(token_id_to_byte[i]);
-      token_lens.push_back(1);
-    } else {
-      std::string token = tokenizer_->Decode(ids);
-      token_lens.push_back(token.size());
-      for (char c : token) {
-        tokens.push_back(c);
-      }
-    }
-  }
-
-  LlgTokenizeFn tokenizer_fn = [](const void* user_data, const uint8_t* bytes,
-                                  size_t bytes_len, uint32_t* output_tokens, size_t output_tokens_len) -> unsigned long {
-    auto output_ids = tokenize_partial(reinterpret_cast<const Tokenizer*>(user_data), bytes, bytes_len);
+  LlgTokenizeFn tokenize_fn = [](const void* user_data, const uint8_t* bytes,
+                                 size_t bytes_len, uint32_t* output_tokens, size_t output_tokens_len) -> unsigned long {
+    const TokenizeData* tokenize_data = reinterpret_cast<const TokenizeData*>(user_data);
+    auto output_ids = tokenize_partial(reinterpret_cast<const Tokenizer*>(tokenize_data->tokenizer), tokenize_data->prefix_len, bytes, bytes_len);
     size_t output_size = std::min(output_tokens_len, output_ids.size());
     for (size_t i = 0; i < output_size; i++) {
       output_tokens[i] = output_ids[i];
@@ -72,20 +36,25 @@ ConstrainedLogitsProcessor::ConstrainedLogitsProcessor(int vocab_size, uint32_t 
   };
 
   // TODO reuse the tokenizer between constraints
+  fs::path tokenizer_path_fs(tokenizer_path);
+  fs::path json_path(tokenizer_path_fs / kDefaultVocabFile);
+  std::ifstream json_file(json_path.string());
+  std::stringstream json_buffer;
+  json_buffer << json_file.rdbuf();
+  std::string json_data = json_buffer.str();
+  auto prefix_len = tokenizer_->Encode(kTokenizePrefixStr).size();
+  tokenize_data_ = {tokenizer_.get(), prefix_len};
   LlgTokenizerInit tokenizer_init = {
-      .vocab_size = static_cast<uint32_t>(vocab_size),
       .tok_eos = eos_token,
-      .token_lens = token_lens.data(),
-      .token_bytes = tokens.data(),
-      .tokenize_assumes_string = true,
-      .tokenize_fn = tokenizer_fn,
-      .tokenize_user_data = tokenizer_.get(),
+      .tokenizer_json = json_data.c_str(),
+      .tokenize_fn = tokenize_fn,
+      .tokenize_user_data = &tokenize_data_,
   };
 
   char error_buf[128];
   llg_tokenizer_ = std::unique_ptr<LlgTokenizer, LlgTokenizerDeleter>(llg_new_tokenizer(&tokenizer_init, error_buf, sizeof(error_buf)));
   if (!llg_tokenizer_) {
-    throw std::runtime_error("Error creating tokenizer: " + std::string(error_buf));
+    throw std::runtime_error("Error creating llg_tokenizer: " + std::string(error_buf));
   }
 
   LlgConstraintInit constraint_init;
@@ -101,7 +70,7 @@ ConstrainedLogitsProcessor::ConstrainedLogitsProcessor(int vocab_size, uint32_t 
   if (llg_get_error(constraint_ptr) != nullptr) {
     std::string error_message = llg_get_error(constraint_ptr);
     auto error = std::runtime_error("Error creating grammar: " + error_message);
-    llg_free_constraint(constraint_ptr);  // only free constraint, after we have saved the error message
+    llg_free_constraint(constraint_ptr);
     throw error;
   }
   llg_constraint_ = std::unique_ptr<LlgConstraint, LlgConstraintDeleter>(constraint_ptr);
@@ -130,6 +99,17 @@ void ConstrainedLogitsProcessor::CommitTokens(uint32_t token) {
     std::string error_message = llg_get_error(llg_constraint_.get());
     throw std::runtime_error("Error committing tokens: " + error_message);
   }
+}
+
+std::vector<int32_t> ConstrainedLogitsProcessor::tokenize_partial(const Tokenizer* tokenizer, const size_t prefix_len,
+                                                                  const uint8_t* bytes, size_t bytes_len) {
+  std::string input_string = kTokenizePrefixStr;
+  input_string.reserve(bytes_len + 2);
+  for (size_t i = 0; i < bytes_len; i++) {
+    input_string.push_back(bytes[i]);
+  }
+  std::vector<int32_t> output_ids = tokenizer->Encode(input_string.c_str());
+  return std::vector<int32_t>(output_ids.begin() + prefix_len, output_ids.end());
 }
 
 }  // namespace Generators

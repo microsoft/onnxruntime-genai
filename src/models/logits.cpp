@@ -35,7 +35,8 @@ Logits::Logits(State& state)
   if (!state_.params_->guidance_type.empty() && !state_.params_->guidance_data.empty()) {
     auto tokenizer = model_.CreateTokenizer();
     constrained_logits_processor_ = std::make_unique<ConstrainedLogitsProcessor>(model_.config_->model.vocab_size, model_.config_->model.eos_token_id,
-                                                                                 state_.params_->guidance_type, state_.params_->guidance_data, tokenizer);
+                                                                                 state_.params_->guidance_type, state_.params_->guidance_data, tokenizer,
+                                                                                 model_.config_->config_path.string().c_str());
 #if USE_CUDA
     if (model_.device_type_ == DeviceType::CUDA) {
       cuda_logits_mask_ptr_ = CudaMallocArray<uint32_t>(shape_[0] * shape_[2]);
