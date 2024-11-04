@@ -46,7 +46,7 @@ struct PositionInputs {
   template <typename T>
   void UpdateAttentionMaskImpl(T* data, int total_length);
 
-#if USE_CUDA || USE_DML
+#if USE_CUDA
   void RewindMask(size_t index);
 #endif
 
