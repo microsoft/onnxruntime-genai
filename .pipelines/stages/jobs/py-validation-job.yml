@@ -223,13 +223,7 @@ jobs:
           python -m pip install -r test/python/directml/ort/requirements.txt
         }
         elseif ("$(arch)" -eq "arm64") {
-          git clone https://github.com/numpy/numpy.git
-          cd numpy
-          git checkout v1.26.3
-          git submodule update --init
-          python -m pip install cython meson-python
-          python -m pip install . --no-build-isolation --no-binary numpy
-          cd ..
+          python -m pip install numpy<2
           python -m pip install onnxruntime-qnn==1.20.0
         }
         else {
