@@ -208,7 +208,9 @@ jobs:
         displayName: 'Download CUDA $(cuda_version)'
         workingDirectory: '$(Build.Repository.LocalPath)'
     - powershell: |
-        python -m pip install -r test/python/requirements.txt
+        if ("$(arch)" -ne "arm64") {
+          python -m pip install -r test/python/requirements.txt
+        }
         if ("$(ep)" -eq "cuda") {
           $env:CUDA_PATH = '$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)'
           $env:PATH = "$env:CUDA_PATH\bin;$env:CUDA_PATH\extras\CUPTI\lib64;$env:PATH"
@@ -220,6 +222,16 @@ jobs:
           python -m pip install -r test/python/directml/torch/requirements.txt
           python -m pip install -r test/python/directml/ort/requirements.txt
         }
+        elseif ("$(arch)" -eq "arm64") {
+          git clone https://github.com/numpy/numpy.git
+          cd numpy
+          git checkout v1.26.3
+          git submodule update --init
+          python -m pip install cython meson-python
+          python -m pip install . --no-build-isolation --no-binary numpy
+          cd ..
+          python -m pip install onnxruntime-qnn==1.20.0
+        }
         else {
           python -m pip install -r test/python/cpu/torch/requirements.txt
           python -m pip install -r test/python/cpu/ort/requirements.txt
@@ -227,7 +239,7 @@ jobs:
         cd examples\python
         python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)
 
-        python model-generate.py -m .\models\$(prebuild_phi3_mini_model_folder) --min_length 25 --max_length 50 --verbose
+        python model-generate.py -m .\models\$(prebuild_phi3_mini_model_folder) --min_length 25 --max_length 50 --batch_size_for_cuda_graph 3 --verbose
       displayName: 'Run Example With Artifact'
       workingDirectory: '$(Build.Repository.LocalPath)'
 
