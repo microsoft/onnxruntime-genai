@@ -102,6 +102,10 @@ target_link_directories(onnxruntime-genai PRIVATE "/home/yingxiong/projects/llgu
 target_link_directories(onnxruntime-genai-static PUBLIC "/home/yingxiong/projects/llguidance/parser/target/release")
 target_link_libraries(onnxruntime-genai PRIVATE llguidance_parser)
 target_link_libraries(onnxruntime-genai-static PUBLIC llguidance_parser)
+if (WIN32)
+  target_link_libraries(onnxruntime-genai PRIVATE ws2_32 ntdll bcrypt userenv)
+  target_link_libraries(onnxruntime-genai-static PRIVATE ws2_32 ntdll bcrypt userenv)
+endif()
 target_link_directories(onnxruntime-genai PRIVATE ${ORT_LIB_DIR})
 
 # we keep the shared libraries disconnected on Android as they will come from separate AARs and we don't want to force

@@ -90,11 +90,11 @@ __global__ void AddLogitsMask(float* batch_logits, int batch_beam_size, int voca
     return;
   int batch_index = index / vocab_size;
   int vocab_index = index % vocab_size;
-  if (!(logits_mask[vocab_index / 32] & (1 << (vocab_index % 32))))
+  if (!(logits_mask[(batch_index * vocab_size + vocab_index) / 32] & (1 << (vocab_index % 32))))
     batch_logits[index] = std::numeric_limits<float>::lowest();
 }
 
-void LaunchAddLogitsMask(float* batch_logits, int batch_beam_size, int vocab_size, const uint32_t* logits_mask, cudaStream_t stream){
+void LaunchAddLogitsMask(float* batch_logits, int batch_beam_size, int vocab_size, const uint32_t* logits_mask, cudaStream_t stream) {
   int block_size = 256;
   int num_blocks = (batch_beam_size * vocab_size + block_size - 1) / block_size;
   AddLogitsMask<<<num_blocks, block_size, 0, stream>>>(batch_logits, batch_beam_size, vocab_size, logits_mask);

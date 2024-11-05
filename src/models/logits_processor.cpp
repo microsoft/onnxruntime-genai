@@ -15,7 +15,7 @@ namespace Generators {
 ConstrainedLogitsProcessor::ConstrainedLogitsProcessor(int vocab_size, uint32_t eos_token,
                                                        const std::string& guidance_type, const std::string& guidance_data,
                                                        std::shared_ptr<Tokenizer> tokenizer, const std::string& tokenizer_path)
-    : tokenizer_(std::move(tokenizer)), vocab_size_(vocab_size) {
+    : vocab_size_(vocab_size), tokenizer_(std::move(tokenizer)) {
   if (guidance_type.empty() || guidance_data.empty()) {
     throw std::runtime_error("Guidance type and data must be provided");
   }
@@ -24,15 +24,15 @@ ConstrainedLogitsProcessor::ConstrainedLogitsProcessor(int vocab_size, uint32_t 
     throw std::runtime_error("Unsupported guidance type: " + guidance_type);
   }
 
-  LlgTokenizeFn tokenize_fn = [](const void* user_data, const uint8_t* bytes,
-                                 size_t bytes_len, uint32_t* output_tokens, size_t output_tokens_len) -> unsigned long {
+  auto tokenize_fn = (LlgTokenizeFn) + [](const void* user_data, const uint8_t* bytes,
+                                          size_t bytes_len, uint32_t* output_tokens, size_t output_tokens_len) -> unsigned long {
     const TokenizeData* tokenize_data = reinterpret_cast<const TokenizeData*>(user_data);
     auto output_ids = tokenize_partial(reinterpret_cast<const Tokenizer*>(tokenize_data->tokenizer), tokenize_data->prefix_len, bytes, bytes_len);
     size_t output_size = std::min(output_tokens_len, output_ids.size());
     for (size_t i = 0; i < output_size; i++) {
       output_tokens[i] = output_ids[i];
     }
-    return output_ids.size();
+    return static_cast<unsigned long>(output_ids.size());
   };
 
   // TODO reuse the tokenizer between constraints
@@ -45,10 +45,15 @@ ConstrainedLogitsProcessor::ConstrainedLogitsProcessor(int vocab_size, uint32_t 
   auto prefix_len = tokenizer_->Encode(kTokenizePrefixStr).size();
   tokenize_data_ = {tokenizer_.get(), prefix_len};
   LlgTokenizerInit tokenizer_init = {
-      .tok_eos = eos_token,
-      .tokenizer_json = json_data.c_str(),
-      .tokenize_fn = tokenize_fn,
-      .tokenize_user_data = &tokenize_data_,
+      static_cast<uint32_t>(vocab_size_),
+      eos_token,
+      nullptr,
+      nullptr,
+      json_data.c_str(),
+      false,
+      tokenize_fn,
+      false,
+      &tokenize_data_,
   };
 
   char error_buf[128];
