@@ -117,6 +117,18 @@ class QuantizedModel:
                         # transformer.rotary_pos_emb.inv_freq in ChatGLM3.
                         # Skip rotary embedding weights since they can be re-calculated when looping through the model
                         continue
+                    elif name == "lm_head.qweight" or name == "transformer.output_layer.qweight":
+                        self._initialize_quantized_lm_head(bits, group_size)
+                        self.lm_head.qweight = tensor
+                    elif name == "lm_head.qzeros" or name == "transformer.output_layer.qzeros":
+                        self._initialize_quantized_lm_head(bits, group_size)
+                        self.lm_head.qzeros = tensor
+                    elif name == "lm_head.scales" or name == "transformer.output_layer.scales":
+                        self._initialize_quantized_lm_head(bits, group_size)
+                        self.lm_head.scales = tensor
+                    elif name == "lm_head.g_idx" or name == "transformer.output_layer.g_idx":
+                        self._initialize_quantized_lm_head(bits, group_size)
+                        self.lm_head.g_idx = tensor
                     else:
                         if name.startswith("transformer.encoder"):
                             # Chatglm3, e.g., transformer.encoder.layers.0.input_layernorm.weight
@@ -326,7 +338,7 @@ class QuantizedModel:
                             raise NotImplementedError(f"{name} in your quantized model is not recognized.")
 
         # Set LM head weights + biases if not already set
-        if self.lm_head.weight is None:
+        if isinstance(self.lm_head, TensorModule) and self.lm_head.weight is None:
             # Embedding and LM head share same weights + biases (lm_head.weight == embedding.weight and lm_head.bias == embedding.bias)
             self.lm_head.weight = self.embedding.weight
             if self.lm_head.bias is not None:
@@ -339,10 +351,31 @@ class QuantizedModel:
         # Set properties of each layer based on quantization type
         self.set_properties()
 
+    def _initialize_quantized_lm_head(self, bits, group_size):
+        """
+        Initialize `QuantizedTensorModule` for LM head if not already set
+        """
+        if isinstance(self.lm_head, TensorModule):
+            assert self.lm_head.weight is None
+            assert self.lm_head.bias is None
+        if not isinstance(self.lm_head, QuantizedTensorModule):
+            self.lm_head = QuantizedTensorModule(bits, group_size)
+
     def set_properties(self):
         """
         Set in_features, out_features, and g_idx based on quantization type
         """
+        if isinstance(self.lm_head, QuantizedTensorModule):
+            if self.quant_type == "awq":
+                self.lm_head.out_features = self.lm_head.scales.shape[1]
+                self.lm_head.in_features = self.lm_head.qweight.shape[0]
+                # Set g_idx if not already set
+                self.lm_head.g_idx = self.lm_head.g_idx if self.lm_head.g_idx is not None else torch.tensor([i // self.lm_head.group_size for i in range(self.lm_head.in_features)], dtype=torch.int32)
+            elif self.quant_type == "gptq":
+                self.lm_head.out_features = self.lm_head.qweight.shape[1]
+                self.lm_head.in_features = self.lm_head.g_idx.shape[0]
+            else:
+                raise NotImplementedError(f"The {self.quant_type} quantization method is not recognized.")
         for module in self.layers:
             if self.quant_type == "awq":
                 # Set in_features and out_features
@@ -582,6 +615,13 @@ class AWQModel(QuantizedModel):
                     # Set `g_idx` to None since it's not used in `MatMulNBits`
                     q_tensors.g_idx = None
 
+        if isinstance(self.lm_head, QuantizedTensorModule) and self.lm_head.qweight is not None:
+            self.unpack(self.lm_head)
+            self.repack(self.lm_head)
+
+            # Set `g_idx` to None since it's not used in `MatMulNBits`
+            self.lm_head.g_idx = None
+
     def unpack_qweight(self, module):
         """
         Unpack `qweight` to standard format
@@ -604,12 +644,12 @@ class AWQModel(QuantizedModel):
         """
         compress_ratio = 32 // bits
         assert tensor.shape[-1] % compress_ratio == 0
-        
+
         if bits == 4:
             order_map = [0, 2, 4, 6, 1, 3, 5, 7]
         else:
             raise NotImplementedError(f"Unpacking for {bits}-bit quantization is not currently supported.")
-        
+
         order_tensor = torch.tensor(order_map, dtype=torch.int32).reshape(1, -1)
         order_tensor = order_tensor.repeat(tensor.shape[1] // compress_ratio, 1)
         order_tensor = order_tensor + torch.arange(0, tensor.shape[1], compress_ratio, dtype=torch.int32).reshape(-1, 1)
@@ -652,7 +692,16 @@ class GPTQModel(QuantizedModel):
                     if not use_g_idx:
                         # Set `g_idx` to None since it's not used in `MatMulNBits`
                         q_tensors.g_idx = None
-    
+
+        if isinstance(self.lm_head, QuantizedTensorModule) and self.lm_head.qweight is not None:
+            self.handle_qzeros(self.lm_head)
+            self.unpack(self.lm_head)
+            self.repack(self.lm_head)
+
+            if not use_g_idx:
+                # Set `g_idx` to None since it's not used in `MatMulNBits`
+                self.lm_head.g_idx = None
+
     def handle_qzeros(self, module):
         """
         Re-pack `qzeros` to handle extra `-1`s
