@@ -208,7 +208,7 @@ WhisperState::WhisperState(const WhisperModel& model, const GeneratorParams& par
   transpose_k_cache_buffer_ = OrtValue::CreateTensor(*model_.allocator_device_, cross_cache_->GetShape(), cross_cache_->GetType());
 
   auto& inputs = const_cast<GeneratorParams::Whisper&>(std::get<GeneratorParams::Whisper>(params.inputs));
-  if (inputs.alignment_heads) {
+  if (decoder_state_->output_cross_qk_.size() && inputs.alignment_heads) {
 #if USE_CUDA
     auto alignment_heads_type_and_shape_info = inputs.alignment_heads->ort_tensor_->GetTensorTypeAndShapeInfo();
     auto alignment_heads_type = alignment_heads_type_and_shape_info->GetElementType();  // ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32
