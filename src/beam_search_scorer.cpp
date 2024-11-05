@@ -51,7 +51,7 @@ BeamSearchScorer::BeamSearchScorer(const GeneratorParams& parameters)
       eos_token_id_{parameters.config.model.eos_token_id},
       early_stopping_{parameters.search.early_stopping},
       not_done_count_{parameters.batch_size} {
-  auto& device = GetCpuDeviceInterface();
+  auto& device = *parameters.p_device;
 
   size_t const batch_beam_size = static_cast<size_t>(batch_size_) * num_beams_;
 
@@ -62,20 +62,19 @@ BeamSearchScorer::BeamSearchScorer(const GeneratorParams& parameters)
     beam_hyps_[i].Init(parameters.search.length_penalty, beams.subspan(i * num_beams_, num_beams_));
   }
 
-  next_beam_scores_ptr_ = AllocateArray<float>(batch_beam_size, &next_beam_scores_);
-  next_beam_tokens_ptr_ = AllocateArray<int32_t>(batch_beam_size, &next_beam_tokens_);
-  next_beam_indices_ptr_ = AllocateArray<int32_t>(batch_beam_size, &next_beam_indices_);
+  next_beam_scores_ = parameters.p_device->Allocate<float>(batch_beam_size);
+  next_beam_tokens_ = parameters.p_device->Allocate<int32_t>(batch_beam_size);
+  next_beam_indices_ = parameters.p_device->Allocate<int32_t>(batch_beam_size);
 
   // Space to store intermediate sequence with length sequence_length, sequence_length + 1, ..., max_sequence_length.
   size_t const per_beam = (max_length_ * (max_length_ + 1) - (parameters.sequence_length - 1) * parameters.sequence_length) / 2;
-  hypothesis_buffer_ptr_ = device.Allocate<int32_t>(batch_beam_size * per_beam, true);
-  hypothesis_buffer_ = hypothesis_buffer_ptr_->CpuSpan();
+  hypothesis_buffer_ = device.Allocate<int32_t>(batch_beam_size * per_beam, true);
 
-  memset(next_beam_scores_.data(), 0, next_beam_scores_.size_bytes());
+  memset(next_beam_scores_.Span().data(), 0, next_beam_scores_.Span().size_bytes());
 
   // Initialize score of first beam of each group with 0 and the rest with -1e9.
   // This ensures that the beams in the same group don't produce same tokens every time.
-  std::span<float> const beam_scores = next_beam_scores_;
+  std::span<float> const beam_scores = next_beam_scores_.Span();
   for (int i = 0; i < parameters.batch_size; i++) {
     for (int j = 1; j < parameters.search.num_beams; j++) {
       beam_scores[i * parameters.search.num_beams + j] = -1e9;
@@ -91,6 +90,10 @@ void BeamSearchScorer::Process(Sequences& sequences,
   // It contains word ID of whole sequence generated so far.
   // It is different from subgraph input_ids, which only need one word when past state is not empty.
 
+  auto next_beam_scores = next_beam_scores_.Span();
+  auto next_beam_tokens = next_beam_tokens_.Span();
+  auto next_beam_indices = next_beam_indices_.Span();
+
   size_t sequence_length = static_cast<size_t>(sequences.GetSequenceLength());
 
   assert(next_scores.size() == next_tokens.size());
@@ -103,9 +106,9 @@ void BeamSearchScorer::Process(Sequences& sequences,
 
       // Pad the batch.
       for (size_t j = 0; j < num_beams_; j++) {
-        next_beam_scores_[batch * num_beams_ + j] = 0.0f;
-        next_beam_tokens_[batch * num_beams_ + j] = pad_token_id_;
-        next_beam_indices_[batch * num_beams_ + j] = 0;
+        next_beam_scores[batch * num_beams_ + j] = 0.0f;
+        next_beam_tokens[batch * num_beams_ + j] = pad_token_id_;
+        next_beam_indices[batch * num_beams_ + j] = 0;
       }
       continue;
     }
@@ -127,17 +130,17 @@ void BeamSearchScorer::Process(Sequences& sequences,
         }
 
         // Clone the sequence and append to buffer.
-        std::span<const int32_t> src = sequences.GetSequence(batch_beam_idx).CpuSpan();
-        auto clone = hypothesis_buffer_.subspan(hypothesis_buffer_used_, src.size());
+        std::span<const int32_t> src = sequences.GetSequence(batch_beam_idx).Span();
+        auto clone = hypothesis_buffer_.Span().subspan(hypothesis_buffer_used_, src.size());
         hypothesis_buffer_used_ += clone.size();
 
         copy(cpu_span{src}, cpu_span{clone});
         beam_hyp.Add(clone, next_score);
       } else {
         // Add next predicted token since it is not eos_token.
-        next_beam_scores_[batch * num_beams_ + beam_idx] = next_score;
-        next_beam_tokens_[batch * num_beams_ + beam_idx] = next_token;
-        next_beam_indices_[batch * num_beams_ + beam_idx] = batch_beam_idx;
+        next_beam_scores[batch * num_beams_ + beam_idx] = next_score;
+        next_beam_tokens[batch * num_beams_ + beam_idx] = next_token;
+        next_beam_indices[batch * num_beams_ + beam_idx] = batch_beam_idx;
         ++beam_idx;
       }
 
@@ -170,6 +173,8 @@ void BeamSearchScorer::Process(Sequences& sequences,
 
 void BeamSearchScorer::Finalize(Sequences& sequences,
                                 size_t num_return_sequences) {
+  auto next_beam_scores = next_beam_scores_.Span();
+
   // Finalize all open beam hypotheses and add to generated hypotheses.
   for (size_t batch_index = 0; batch_index < batch_size_; batch_index++) {
     BeamHypotheses& beam_hyp = beam_hyps_[batch_index];
@@ -179,11 +184,11 @@ void BeamSearchScorer::Finalize(Sequences& sequences,
 
     for (size_t beam_index = 0; beam_index < num_beams_; beam_index++) {
       size_t const batch_beam_index = batch_index * num_beams_ + beam_index;
-      float const final_score = next_beam_scores_[batch_beam_index];
+      float const final_score = next_beam_scores[batch_beam_index];
 
       // Clone the sequence and append to buffer.
-      std::span<const int32_t> src = sequences.GetSequence(batch_beam_index).CpuSpan();
-      auto clone = hypothesis_buffer_.subspan(hypothesis_buffer_used_, src.size());
+      std::span<const int32_t> src = sequences.GetSequence(batch_beam_index).Span();
+      auto clone = hypothesis_buffer_.Span().subspan(hypothesis_buffer_used_, src.size());
       hypothesis_buffer_used_ += clone.size();
 
       copy(cpu_span{src}, cpu_span{clone});
@@ -192,9 +197,10 @@ void BeamSearchScorer::Finalize(Sequences& sequences,
   }
 }
 
-DeviceMemorySpan<int32_t> BeamSearchScorer::GetBeamHypotheses(size_t batch_id, size_t beam_id) {
+DeviceSpan<int32_t> BeamSearchScorer::GetBeamHypotheses(size_t batch_id, size_t beam_id) {
   auto hypothesis = beam_hyps_[batch_id].GetHypothesis(beam_id);
-  return hypothesis_buffer_ptr_->subspan_cpu(hypothesis);
+  // Translate the hypothesis span back to the original device buffer span
+  return hypothesis_buffer_.subspan(hypothesis.data() - hypothesis_buffer_.Span().data(), hypothesis.size());
 }
 
 }  // namespace Generators

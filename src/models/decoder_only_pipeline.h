@@ -18,7 +18,7 @@ struct DecoderOnlyPipelineModel : Model {
   DecoderOnlyPipelineModel(const DecoderOnlyPipelineModel&) = delete;
   DecoderOnlyPipelineModel& operator=(const DecoderOnlyPipelineModel&) = delete;
 
-  std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths,
+  std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths,
                                      const GeneratorParams& params) const override;
 
   std::vector<std::unique_ptr<OrtSession>> sessions_;
@@ -31,8 +31,8 @@ struct IntermediatePipelineState : State {
   IntermediatePipelineState(const IntermediatePipelineState&) = delete;
   IntermediatePipelineState& operator=(const IntermediatePipelineState&) = delete;
 
-  RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens,
-                          RoamingArray<int32_t> next_indices) override;
+  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t> next_tokens,
+                        DeviceSpan<int32_t> next_indices) override;
 
   bool HasInput(std::string_view name) const;
 
@@ -47,19 +47,19 @@ struct IntermediatePipelineState : State {
 };
 
 struct DecoderOnlyPipelineState : State {
-  DecoderOnlyPipelineState(const DecoderOnlyPipelineModel& model, RoamingArray<int32_t> sequence_lengths,
+  DecoderOnlyPipelineState(const DecoderOnlyPipelineModel& model, DeviceSpan<int32_t> sequence_lengths,
                            const GeneratorParams& params);
 
   DecoderOnlyPipelineState(const DecoderOnlyPipelineState&) = delete;
   DecoderOnlyPipelineState& operator=(const DecoderOnlyPipelineState&) = delete;
 
-  RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens,
-                          RoamingArray<int32_t> next_indices) override;
+  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t> next_tokens,
+                        DeviceSpan<int32_t> next_indices) override;
 
   OrtValue* GetOutput(const char* name) override;
 
  private:
-  void UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> next_indices,
+  void UpdateInputsOutputs(const DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices,
                            int current_length);
 
   const DecoderOnlyPipelineModel& model_;

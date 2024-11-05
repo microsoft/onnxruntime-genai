@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-#include "../smartptrs.h"
+#include <assert.h>
+#include "cuda_common.h"
 #include <curand_kernel.h>
 
 namespace Generators {

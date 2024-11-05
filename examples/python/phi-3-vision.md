@@ -14,23 +14,23 @@ Please ensure you have the following Python packages installed to create the ONN
 - `huggingface_hub[cli]`
 - `numpy`
 - `onnx`
-- `ort-nightly>=1.19.0.dev20240601002` or `ort-nightly-gpu>=1.19.0.dev20240601002`
-    - [ORT nightly package](https://onnxruntime.ai/docs/install/#inference-install-table-for-all-languages) is needed until the latest changes are in the newest ORT stable package
-    - For CPU: 
+- `onnxruntime-genai`
+    - For CPU:
     ```bash
-    pip install ort-nightly --index-url=https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/
+    pip install onnxruntime-genai
     ```
-    - For CUDA 11.X:
+    - For CUDA:
     ```bash
-    pip install ort-nightly-gpu --index-url=https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/
+    pip install onnxruntime-genai-cuda
     ```
-    - For CUDA 12.X: 
+    - For DirectML: 
     ```bash
-    pip install ort-nightly-gpu --index-url=https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ort-cuda-12-nightly/pypi/simple/
+    pip install onnxruntime-genai-directml
     ```
 - `pillow`
 - `requests`
 - `torch`
+    - Please install torch by following the [instructions](https://pytorch.org/get-started/locally/). For getting ONNX models that can run on CUDA or DirectML, please install torch with CUDA and ensure the CUDA version you choose in the instructions is the one you have installed.
 - `torchvision`
 - `transformers`
 
@@ -87,19 +87,63 @@ If you have your own fine-tuned version of Phi-3 vision, you can now replace the
 Here are some examples of how you can build the components as INT4 ONNX models.
 
 ```bash
-# Build INT4 components with FP32 inputs/outputs
+# Build INT4 components with FP32 inputs/outputs for CPU
 $ python3 builder.py --input ./pytorch --output ./cpu --precision fp32 --execution_provider cpu
 ```
 
 ```bash
-# Build INT4 components with FP16 inputs/outputs
+# Build INT4 components with FP16 inputs/outputs for CUDA
 $ python3 builder.py --input ./pytorch --output ./cuda --precision fp16 --execution_provider cuda
+```
+
+```bash
+# Build INT4 components with FP16 inputs/outputs for DirectML
+$ python3 builder.py --input ./pytorch --output ./dml --precision fp16 --execution_provider dml
 ```
 
 ## 3. Build `genai_config.json` and `processor_config.json`
 
 Currently, both JSON files needed to run with ONNX Runtime GenAI are created by hand. Because the fields have been hand-crafted, it is recommended that you copy the already-uploaded JSON files and modify the fields as needed for your fine-tuned Phi-3 vision model. [Here](https://huggingface.co/microsoft/Phi-3-vision-128k-instruct-onnx-cpu/blob/main/cpu-int4-rtn-block-32-acc-level-4/genai_config.json) is an example for `genai_config.json` and [here](https://huggingface.co/microsoft/Phi-3-vision-128k-instruct-onnx-cpu/blob/main/cpu-int4-rtn-block-32-acc-level-4/processor_config.json) is an example for `processor_config.json`.
 
+### For DirectML
+Replace
+```json
+"provider_options": []
+```
+in `genai_config.json` With
+```json
+"provider_options": [
+    {
+        "dml" : {}
+    }
+]
+```
+
+### For CUDA
+Replace
+```json
+"provider_options": []
+```
+in `genai_config.json` With
+```json
+"provider_options": [
+    {
+        "cuda" : {}
+    }
+]
+```
+
 ## 4. Run Phi-3 vision ONNX models
 
 [Here](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/phi3v.py) is an example of how you can run your Phi-3 vision model with the ONNX Runtime generate() API.
+
+### CUDA
+```bash
+$ python .\phi3v.py -m .\phi3-vision-128k-instruct\cuda
+```
+
+### DirectML
+
+```bash
+$ python .\phi3v.py -m .\phi3-vision-128k-instruct\dml
+```

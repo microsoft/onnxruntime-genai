@@ -18,7 +18,7 @@ struct MultiModalVisionModel : Model {
   MultiModalVisionModel(const MultiModalVisionModel&) = delete;
   MultiModalVisionModel& operator=(const MultiModalVisionModel&) = delete;
 
-  std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths,
+  std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths,
                                      const GeneratorParams& params) const override;
 
   std::unique_ptr<OrtSession> vision_session_;     // pixel_values, image_sizes -> image_features
@@ -31,13 +31,13 @@ struct EmbeddingState : State {
   EmbeddingState(const EmbeddingState&) = delete;
   EmbeddingState& operator=(const EmbeddingState&) = delete;
 
-  RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens,
-                          RoamingArray<int32_t> next_indices = {}) override;
+  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t> next_tokens,
+                        DeviceSpan<int32_t> next_indices = {}) override;
 
  private:
   friend struct MultiModalPipelineState;
 
-  void UpdateInputsAndOutputs(RoamingArray<int32_t> next_tokens);
+  void UpdateInputsAndOutputs(DeviceSpan<int32_t> next_tokens);
 
   const MultiModalVisionModel& model_;
   int64_t num_image_tokens_;
@@ -55,8 +55,8 @@ struct VisionState : State {
   VisionState(const VisionState&) = delete;
   VisionState& operator=(const VisionState&) = delete;
 
-  RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens,
-                          RoamingArray<int32_t> next_indices = {}) override;
+  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t> next_tokens,
+                        DeviceSpan<int32_t> next_indices = {}) override;
 
  private:
   friend struct MultiModalPipelineState;
@@ -70,20 +70,20 @@ struct VisionState : State {
 };
 
 struct DecoderState : State {
-  DecoderState(const MultiModalVisionModel& model, RoamingArray<int32_t> sequence_lengths,
+  DecoderState(const MultiModalVisionModel& model, DeviceSpan<int32_t> sequence_lengths,
                const GeneratorParams& params, const CapturedGraphInfo* captured_graph_info);
   DecoderState(const DecoderState&) = delete;
   DecoderState& operator=(const DecoderState&) = delete;
 
-  RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens,
-                          RoamingArray<int32_t> next_indices) override;
+  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t> next_tokens,
+                        DeviceSpan<int32_t> next_indices) override;
 
   const CapturedGraphInfo* GetCapturedGraphInfo() const override { return captured_graph_info_; };
 
  private:
   friend struct MultiModalPipelineState;
 
-  void UpdateInputsAndOutputs(int current_length, RoamingArray<int32_t> beam_indices);
+  void UpdateInputsAndOutputs(int current_length, DeviceSpan<int32_t> beam_indices);
 
   const MultiModalVisionModel& model_;
   const CapturedGraphInfo* captured_graph_info_;
@@ -95,20 +95,20 @@ struct DecoderState : State {
 };
 
 struct MultiModalPipelineState : State {
-  MultiModalPipelineState(const MultiModalVisionModel& model, RoamingArray<int32_t> sequence_lengths,
+  MultiModalPipelineState(const MultiModalVisionModel& model, DeviceSpan<int32_t> sequence_lengths,
                           const GeneratorParams& params);
   MultiModalPipelineState(const MultiModalPipelineState&) = delete;
   MultiModalPipelineState& operator=(const MultiModalPipelineState&) = delete;
 
-  RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens,
-                          RoamingArray<int32_t> next_indices) override;
+  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t> next_tokens,
+                        DeviceSpan<int32_t> next_indices) override;
 
  private:
-  void UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> next_indices,
+  void UpdateInputsOutputs(const DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices,
                            int current_length);
 
   const MultiModalVisionModel& model_;
-  int64_t num_image_tokens_{0};
+  int64_t num_image_tokens_{};
   const CapturedGraphInfoPtr captured_graph_info_;
   std::unique_ptr<EmbeddingState> embedding_state_;
   std::unique_ptr<VisionState> vision_state_;
