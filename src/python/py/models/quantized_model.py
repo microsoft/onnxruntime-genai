@@ -373,17 +373,7 @@ class QuantizedModel:
             self.lm_head.out_features = self.lm_head.scales.shape[1]
             self.lm_head.in_features = self.lm_head.qweight.shape[0]
             # Set g_idx if not already set
-            self.lm_head.g_idx = (
-                self.lm_head.g_idx
-                if self.lm_head.g_idx is not None
-                else torch.tensor(
-                    [
-                        i // self.lm_head.group_size
-                        for i in range(self.lm_head.in_features)
-                    ],
-                    dtype=torch.int32,
-                )
-            )
+            self.lm_head.g_idx = self.lm_head.g_idx if self.lm_head.g_idx is not None else torch.tensor([i // self.lm_head.group_size for i in range(self.lm_head.in_features)], dtype=torch.int32)
         for module in self.layers:
             if self.quant_type == "awq":
                 # Set in_features and out_features
@@ -622,6 +612,7 @@ class AWQModel(QuantizedModel):
 
                     # Set `g_idx` to None since it's not used in `MatMulNBits`
                     q_tensors.g_idx = None
+
         if isinstance(self.lm_head, QuantizedTensorModule) and self.lm_head.qweight is not None:
             self.unpack(self.lm_head)
             self.repack(self.lm_head)
