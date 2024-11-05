@@ -366,14 +366,16 @@ class QuantizedModel:
         Set in_features, out_features, and g_idx based on quantization type
         """
         if isinstance(self.lm_head, QuantizedTensorModule):
-            if self.quant_type != "awq":
-                raise NotImplementedError(
-                    "lm_head quantization is only supported for awq."
-                )
-            self.lm_head.out_features = self.lm_head.scales.shape[1]
-            self.lm_head.in_features = self.lm_head.qweight.shape[0]
-            # Set g_idx if not already set
-            self.lm_head.g_idx = self.lm_head.g_idx if self.lm_head.g_idx is not None else torch.tensor([i // self.lm_head.group_size for i in range(self.lm_head.in_features)], dtype=torch.int32)
+            if self.quant_type == "awq":
+                self.lm_head.out_features = self.lm_head.scales.shape[1]
+                self.lm_head.in_features = self.lm_head.qweight.shape[0]
+                # Set g_idx if not already set
+                self.lm_head.g_idx = self.lm_head.g_idx if self.lm_head.g_idx is not None else torch.tensor([i // self.lm_head.group_size for i in range(self.lm_head.in_features)], dtype=torch.int32)
+            elif self.quant_type == "gptq":
+                self.lm_head.out_features = self.lm_head.qweight.shape[1]
+                self.lm_head.in_features = self.lm_head.g_idx.shape[0]
+            else:
+                raise NotImplementedError(f"The {self.quant_type} quantization method is not recognized.")
         for module in self.layers:
             if self.quant_type == "awq":
                 # Set in_features and out_features
@@ -690,6 +692,15 @@ class GPTQModel(QuantizedModel):
                     if not use_g_idx:
                         # Set `g_idx` to None since it's not used in `MatMulNBits`
                         q_tensors.g_idx = None
+
+        if isinstance(self.lm_head, QuantizedTensorModule) and self.lm_head.qweight is not None:
+            self.handle_qzeros(self.lm_head)
+            self.unpack(self.lm_head)
+            self.repack(self.lm_head)
+
+            if not use_g_idx:
+                # Set `g_idx` to None since it's not used in `MatMulNBits`
+                self.lm_head.g_idx = None
 
     def handle_qzeros(self, module):
         """
