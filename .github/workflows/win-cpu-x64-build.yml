@@ -41,6 +41,9 @@ jobs:
       with:
         dotnet-version: '8.0.x'
 
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
     - name: Download OnnxRuntime Nightly
       shell: pwsh
       run: |
