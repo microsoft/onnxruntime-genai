@@ -45,11 +45,8 @@ jobs:
       run: |
         $exePath = "$env:TEMP\rustup-init.exe"
         (New-Object Net.WebClient).DownloadFile('https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe', $exePath)
-        cmd /c start /wait $exePath -y
+        & $exePath -y
         Remove-Item $exePath
-        cargo --version
-        rustup --version
-        rustc --version
 
     - name: Download OnnxRuntime Nightly
       shell: pwsh
