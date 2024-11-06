@@ -121,11 +121,11 @@ This implementation checks if a number is prime by iterating only up to the squa
 ## Source code repository
 
 ONNX Runtime is an open source project. See:
-* (https://github.com/microsoft/onnxruntime)[https://github.com/microsoft/onnxruntime]
-* (https://github.com/microsoft/onnxruntime-genai)[https://github.com/microsoft/onnxruntime-genai]
+* (ONNX Runtime)[https://github.com/microsoft/onnxruntime]
+* (ONNX Runtime GenAI)[https://github.com/microsoft/onnxruntime-genai]
 
 ## Documentation
 
-See (https://onxxruntime.ai/docs/genai)[https://onxxruntime.ai/docs/genai]
+See (ONNX Runtime GenAI Documentation)[https://onxxruntime.ai/docs/genai]
 
 
