@@ -385,8 +385,8 @@ class Model:
             system_template = tokenizer.apply_chat_template([{'role': 'system', 'content': '{Content}'}], tokenize=False)
             system_user_template = tokenizer.apply_chat_template([{'role': 'system', 'content': '{Content}'}, {'role': 'user', 'content': '{Content}'}], tokenize=False)
             system_user_assistant_template = tokenizer.apply_chat_template([{'role': 'system', 'content': '{Content}'}, {'role': 'user', 'content': '{Content}'}, {'role': 'assistant', 'content': '{Content}'}], tokenize=False)
-            assert system_user_template.startswith(system_template), "chat templates may contain padding tokens, leading to incorrect inference_model.json"
-            assert system_user_assistant_template.startswith(system_user_template), "chat templates may contain padding tokens, leading to incorrect inference_model.json"
+            assert system_user_template.startswith(system_template), "Chat templates may contain padding tokens, leading to incorrect prompt templates"
+            assert system_user_assistant_template.startswith(system_user_template), "Chat templates may contain padding tokens, leading to incorrect prompt templates"
             user_template = system_user_template[len(system_template):]
             assistant_template = system_user_assistant_template[len(system_user_template):]
             prompt_template = system_user_assistant_template[len(system_template):]
