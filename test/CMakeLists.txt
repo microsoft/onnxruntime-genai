@@ -22,7 +22,7 @@ target_include_directories(unit_tests PRIVATE
 )
 
 target_link_directories(unit_tests PRIVATE ${ORT_LIB_DIR})
-target_link_directories(unit_tests PRIVATE "/home/yingxiong/projects/llguidance/parser/target/release")
+target_link_libraries(unit_tests PRIVATE llguidance_parser)
 target_link_libraries(unit_tests PRIVATE
   onnxruntime-genai-static
   GTest::gtest_main
