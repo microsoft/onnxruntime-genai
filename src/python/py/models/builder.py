@@ -364,9 +364,10 @@ class Model:
             ep_options = { self.ep : self.ep_attrs[self.ep] }
             genai_config["model"]["decoder"]["session_options"]["provider_options"].append(ep_options)
 
-        prompt_templates = self._get_prompt_templates(model_name_or_path, extra_kwargs)
-        if prompt_templates is not None:
-            genai_config["model"]["prompt_templates"] = prompt_templates
+        if self.extra_options.get("prompt_templates", "0") == "1":
+            prompt_templates = self._get_prompt_templates(model_name_or_path, extra_kwargs)
+            if prompt_templates is not None:
+                genai_config["model"]["prompt_templates"] = prompt_templates
 
         print(f"Saving GenAI config in {out_dir}")
         with open(os.path.join(out_dir,"genai_config.json"), "w") as f:
@@ -3252,6 +3253,7 @@ def get_args():
                     If you have already authenticated via `huggingface-cli login`, you do not need to use this flag because Hugging Face has already stored your authentication token for you.
                 use_qdq = 1: Use the QDQ decomposition for quantized MatMul instead of the MatMulNBits operator.
                 adapter_path = Path to folder on disk containing the adapter files (adapter_config.json and adapter model weights).
+                prompt_templates = 1: Include per-role prompt templates in the GenAI config file. Default is 0 (not to include).
             """),
     )
 
