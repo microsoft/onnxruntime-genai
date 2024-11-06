@@ -172,21 +172,13 @@ void LaunchFp32ToFp16(const float* input, uint16_t* output, int count, cudaStrea
 void LaunchExpandAndInt32ToInt64(const int32_t* src, int64_t* dst, int num_beams, int batch_size, int sequence_length, cudaStream_t stream) { GetCudaInterface()->LaunchExpandAndInt32ToInt64(src, dst, num_beams, batch_size, sequence_length, stream); }
 void LaunchExpand(const int32_t* src, int32_t* dst, int num_beams, int batch_size, int sequence_length, cudaStream_t stream) { GetCudaInterface()->LaunchExpand(src, dst, num_beams, batch_size, sequence_length, stream); }
 template <>
-void Launch_UpdatePositionIds<int32_t>(int32_t* position_ids, int batch_beam_size, cudaStream_t stream) { GetCudaInterface()->Launch_UpdatePositionIds(position_ids, batch_beam_size, stream); }
+void Launch_UpdatePositionIds<int32_t>(int32_t* position_ids, int batch_beam_size, int total_length, int new_kv_length, cudaStream_t stream) { GetCudaInterface()->Launch_UpdatePositionIds(position_ids, batch_beam_size, total_length, new_kv_length, stream); }
 template <>
-void Launch_UpdatePositionIds<int64_t>(int64_t* position_ids, int batch_beam_size, cudaStream_t stream) { GetCudaInterface()->Launch_UpdatePositionIds(position_ids, batch_beam_size, stream); }
+void Launch_UpdatePositionIds<int64_t>(int64_t* position_ids, int batch_beam_size, int total_length, int new_kv_length, cudaStream_t stream) { GetCudaInterface()->Launch_UpdatePositionIds(position_ids, batch_beam_size, total_length, new_kv_length, stream); }
 template <>
-void Launch_UpdatePositionIds<int32_t>(int32_t* positions, int total_length, int new_kv_length, cudaStream_t stream) { GetCudaInterface()->Launch_UpdatePositionIds(positions, total_length, new_kv_length, stream); }
+void Launch_UpdateAttentionMask<int32_t>(int32_t* mask_data, const int32_t* old_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, cudaStream_t stream) { GetCudaInterface()->Launch_UpdateAttentionMask(mask_data, old_data, batch_beam_size, new_kv_length, total_length, max_length, update_only, stream); }
 template <>
-void Launch_UpdatePositionIds<int64_t>(int64_t* positions, int total_length, int new_kv_length, cudaStream_t stream) { GetCudaInterface()->Launch_UpdatePositionIds(positions, total_length, new_kv_length, stream); }
-template <>
-void Launch_UpdateAttentionMask<int32_t>(int32_t* mask_data, const int32_t* old_mask_data, int batch_beam_size, int current_length, int max_length, bool update_only, cudaStream_t stream) { GetCudaInterface()->Launch_UpdateAttentionMask(mask_data, old_mask_data, batch_beam_size, current_length, max_length, update_only, stream); }
-template <>
-void Launch_UpdateAttentionMask<int64_t>(int64_t* mask_data, const int64_t* old_mask_data, int batch_beam_size, int current_length, int max_length, bool update_only, cudaStream_t stream) { GetCudaInterface()->Launch_UpdateAttentionMask(mask_data, old_mask_data, batch_beam_size, current_length, max_length, update_only, stream); }
-template <>
-void Launch_UpdateAttentionMask<int32_t>(int32_t* mask_data, int new_kv_length, int total_length, bool update_static, cudaStream_t stream) { GetCudaInterface()->Launch_UpdateAttentionMask(mask_data, new_kv_length, total_length, update_static, stream); }
-template <>
-void Launch_UpdateAttentionMask<int64_t>(int64_t* mask_data, int new_kv_length, int total_length, bool update_static, cudaStream_t stream) { GetCudaInterface()->Launch_UpdateAttentionMask(mask_data, new_kv_length, total_length, update_static, stream); }
+void Launch_UpdateAttentionMask<int64_t>(int64_t* mask_data, const int64_t* old_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, cudaStream_t stream) { GetCudaInterface()->Launch_UpdateAttentionMask(mask_data, old_data, batch_beam_size, new_kv_length, total_length, max_length, update_only, stream); }
 void LaunchHandleEOSArray(float* batch_logits, int batch_beam_size, int vocab_size, const int32_t* eos_token_ids, int eos_token_ids_count, cudaStream_t stream) { GetCudaInterface()->LaunchHandleEOSArray(batch_logits, batch_beam_size, vocab_size, eos_token_ids, eos_token_ids_count, stream); }
 void UpdateCacheIndirectionKernelLauncher(int32_t* tgt_indir_cache, const int32_t* src_indir_cache, const int32_t* beam_ids, int batch_size, int beam_width, int input_seq_length, int max_seq_length, int current_length, cudaStream_t stream) { GetCudaInterface()->UpdateCacheIndirectionKernelLauncher(tgt_indir_cache, src_indir_cache, beam_ids, batch_size, beam_width, input_seq_length, max_seq_length, current_length, stream); }
 void ReorderPastStatesKernelLauncher(void* out_buffer, const void* in_buffer, int batch_size, int num_heads, int max_length, int head_size, int chunk_size, cudaStream_t stream) { GetCudaInterface()->ReorderPastStatesKernelLauncher(out_buffer, in_buffer, batch_size, num_heads, max_length, head_size, chunk_size, stream); }

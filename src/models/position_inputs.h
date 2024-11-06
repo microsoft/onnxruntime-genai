@@ -23,9 +23,12 @@ struct PositionInputs {
   void AddPositionIDs();
 
   // Batch size > 1 case
-  void UpdatePositionIDs();
-  void UpdateAttentionMask(int total_length);
-  // Batch size == 1 case.
+  // void UpdatePositionIDs();
+  // void UpdateAttentionMask(int total_length);
+
+  void CreateNextPositionIDsTensor();
+  void CreateNextAttentionMaskTensor(int total_length);
+
   void UpdatePositionIDs(int total_length, int new_length);
   void UpdateAttentionMask(int total_length, int new_length);
 
@@ -36,15 +39,24 @@ struct PositionInputs {
   template <typename T>
   void CreateAndInitializeAttentionMask(const RoamingArray<int32_t>& next_tokens, std::array<int64_t, 2> shape);
 
-  template <typename T>
-  void UpdatePositionIDsImpl();
-  template <typename T>
-  void UpdateAttentionMaskImpl(T* data, const T* old_data, int current_length);
+  // template <typename T>
+  // void UpdatePositionIDsImpl();
+  // template <typename T>
+  // void UpdateAttentionMaskImpl(T* data, const T* old_data, int current_length);
 
   template <typename T>
   void UpdatePositionIDsImpl(int total_length, int new_kv_length);
   template <typename T>
-  void UpdateAttentionMaskImpl(T* data, int total_length);
+  void UpdateAttentionMaskImpl(int total_length);
+
+#if USE_CUDA || USE_DML
+  void CopyNextPositionIDsToCurrent();
+#endif
+
+#if USE_DML
+  void UpdatePositionIDsImplDML();
+  void UpdateAttentionMaskImplDML(int total_length);
+#endif
 
 #if USE_CUDA
   void RewindMask(size_t index);
@@ -73,7 +85,7 @@ struct PositionInputs {
   StaticBuffer* sb_position_ids_{};
   StaticBuffer* sb_attention_mask_{};
 
-  bool is_first_posid_update_{true};
+  // bool is_first_posid_update_{true};
   bool is_first_mask_update_{true};
   bool is_first_update_{true};
 

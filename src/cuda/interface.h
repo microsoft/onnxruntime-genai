@@ -30,14 +30,10 @@ struct CudaInterface : DeviceInterface {
   virtual void LaunchExpand(const int32_t* src, int32_t* dst, int num_beams, int batch_size, int sequence_length, cudaStream_t stream) = 0;
 
   // TODO(aciddelgado): Update pos ids and attention mask can be collapsed into single functions
-  virtual void Launch_UpdatePositionIds(int32_t* position_ids, int batch_beam_size, cudaStream_t stream) = 0;
-  virtual void Launch_UpdatePositionIds(int64_t* position_ids, int batch_beam_size, cudaStream_t stream) = 0;
-  virtual void Launch_UpdatePositionIds(int32_t* position_ids, int total_length, int new_kv_length, cudaStream_t stream) = 0;
-  virtual void Launch_UpdatePositionIds(int64_t* position_ids, int total_length, int new_kv_length, cudaStream_t stream) = 0;
-  virtual void Launch_UpdateAttentionMask(int32_t* mask_data, const int32_t* old_mask_data, int batch_beam_size, int current_length, int max_length, bool update_only, cudaStream_t stream) = 0;
-  virtual void Launch_UpdateAttentionMask(int64_t* mask_data, const int64_t* old_mask_data, int batch_beam_size, int current_length, int max_length, bool update_only, cudaStream_t stream) = 0;
-  virtual void Launch_UpdateAttentionMask(int32_t* mask_data, int new_kv_length, int total_length, bool update_static, cudaStream_t stream) = 0;
-  virtual void Launch_UpdateAttentionMask(int64_t* mask_data, int new_kv_length, int total_length, bool update_static, cudaStream_t stream) = 0;
+  virtual void Launch_UpdatePositionIds(int32_t* position_ids, int batch_beam_size, int total_length, int new_kv_length, cudaStream_t stream) = 0;
+  virtual void Launch_UpdatePositionIds(int64_t* position_ids, int batch_beam_size, int total_length, int new_kv_length, cudaStream_t stream) = 0;
+  virtual void Launch_UpdateAttentionMask(int32_t* mask_data, const int32_t* old_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, cudaStream_t stream) = 0;
+  virtual void Launch_UpdateAttentionMask(int64_t* mask_data, const int64_t* old_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, cudaStream_t stream) = 0;
   virtual void LaunchHandleEOSArray(float* batch_logits, int batch_beam_size, int vocab_size, const int32_t* eos_token_ids, int eos_token_ids_count, cudaStream_t stream) = 0;
   virtual void UpdateCacheIndirectionKernelLauncher(int32_t* tgt_indir_cache, const int32_t* src_indir_cache, const int32_t* beam_ids, int batch_size, int beam_width, int input_seq_length, int max_seq_length, int current_length, cudaStream_t stream) = 0;
   virtual void ReorderPastStatesKernelLauncher(void* out_buffer, const void* in_buffer, int batch_size, int num_heads, int max_length, int head_size, int chunk_size, cudaStream_t stream) = 0;
