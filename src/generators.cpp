@@ -3,6 +3,7 @@
 
 #include "generators.h"
 #include "sequences.h"
+#include "models/env_utils.h"
 #include "models/model.h"
 #include "search.h"
 #include "cpu/interface.h"
@@ -44,8 +45,14 @@ void OnCudaError(cudaError_t error) { assert(false); }
 
 static bool _ = (Ort::InitApi(), false);
 
+static OrtLoggingLevel GetDefaultOrtLoggingLevel() {
+  bool ort_verbose_logging = false;
+  GetEnvironmentVariable("ORTGENAI_ORT_VERBOSE_LOGGING", ort_verbose_logging);
+  return ort_verbose_logging ? OrtLoggingLevel::ORT_LOGGING_LEVEL_VERBOSE : OrtLoggingLevel::ORT_LOGGING_LEVEL_ERROR;
+}
+
 OrtGlobals::OrtGlobals()
-    : env_{OrtEnv::Create(OrtLoggingLevel::ORT_LOGGING_LEVEL_ERROR)} {
+    : env_{OrtEnv::Create(GetDefaultOrtLoggingLevel())} {
   auto arena_config = OrtArenaCfg::Create(0, -1, -1, -1);
   Ort::Allocator& allocator_cpu{Ort::Allocator::GetWithDefaultOptions()};
   env_->CreateAndRegisterAllocator(allocator_cpu.GetInfo(), *arena_config);
