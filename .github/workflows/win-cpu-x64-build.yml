@@ -47,7 +47,7 @@ jobs:
         (New-Object Net.WebClient).DownloadFile('https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe', $exePath)
         & $exePath -y
         Remove-Item $exePath
-        Add-Content $env:GITHUB_PATH $env:USERPROFILE + "\.cargo\bin;"
+        Add-Content $env:GITHUB_PATH "$env:USERPROFILE\.cargo\bin"
 
     - name: Download OnnxRuntime Nightly
       shell: pwsh
