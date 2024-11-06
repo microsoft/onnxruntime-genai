@@ -107,8 +107,8 @@ target_include_directories(onnxruntime-genai-static PUBLIC ${llguidance_SOURCE_D
 target_link_libraries(onnxruntime-genai PRIVATE llguidance_parser)
 target_link_libraries(onnxruntime-genai-static PUBLIC llguidance_parser)
 if (WIN32)
-  target_link_libraries(onnxruntime-genai PRIVATE ws2_32 ntdll bcrypt userenv)
-  target_link_libraries(onnxruntime-genai-static PRIVATE ws2_32 ntdll bcrypt userenv)
+  target_link_libraries(onnxruntime-genai PRIVATE bcrypt)
+  target_link_libraries(onnxruntime-genai-static PRIVATE bcrypt)
 endif()
 target_link_directories(onnxruntime-genai PRIVATE ${ORT_LIB_DIR})
 
