@@ -399,7 +399,7 @@ class Model:
             }
             return templates 
         except Exception as e:
-            print(f"Failed to save inference_model.json. Error: {e}")
+            print(f"Failed to get prompt templates. Error: {e}")
             return None
         
     def save_model(self, out_dir):
