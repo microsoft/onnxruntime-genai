@@ -138,6 +138,13 @@ jobs:
       SpecificArtifact: ${{ parameters.specificArtifact }}
       BuildId: ${{ parameters.BuildId }}
 
+  - task: Docker@2
+    inputs:
+      containerRegistry: onnxruntimebuildcache
+      command: "login"
+      addPipelineData: false
+    displayName: "Log in to container registry"
+
   - ${{ if eq(parameters.os, 'win') }}:
     - ${{ if eq(parameters.ep, 'cuda') }}:
       - powershell: |
@@ -180,8 +187,8 @@ jobs:
     - ${{ if eq(parameters.ep, 'cuda') }}:
       - bash: |
           set -e -x
-          az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
-          az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
+          # az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
+          # az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
           docker pull $(cuda_docker_image)
 
           docker run \
