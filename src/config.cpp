@@ -493,7 +493,7 @@ struct PromptTemplates_Element : JSON::Element {
     }
   }
 
-private:
+ private:
   std::optional<Config::Model::PromptTemplates>& v_;
 
   void EnsureAvailable() {
