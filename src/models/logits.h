@@ -3,6 +3,7 @@
 #pragma once
 
 #include <memory>
+#include <future>
 #include "model.h"
 #include "static_buffer.h"
 #include "logits_processor.h"
@@ -41,6 +42,7 @@ struct Logits {
   StaticBuffer* sb_logits16_{};
 
   std::unique_ptr<ConstrainedLogitsProcessor> constrained_logits_processor_;
+  std::future<std::vector<uint32_t>> mask_future_;
   std::vector<uint32_t> logits_mask_;
 
 #if USE_CUDA

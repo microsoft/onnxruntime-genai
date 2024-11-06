@@ -37,6 +37,7 @@ Logits::Logits(State& state)
     constrained_logits_processor_ = std::make_unique<ConstrainedLogitsProcessor>(model_.config_->model.vocab_size, model_.config_->model.eos_token_id,
                                                                                  state_.params_->guidance_type, state_.params_->guidance_data, tokenizer,
                                                                                  model_.config_->config_path.string().c_str());
+    mask_future_ = std::async(std::launch::async, [&]() { return constrained_logits_processor_->ComputeMask(); });
 #if USE_CUDA
     if (model_.device_type_ == DeviceType::CUDA) {
       cuda_logits_mask_ptr_ = CudaMallocArray<uint32_t>(shape_[0] * shape_[2]);
@@ -170,7 +171,7 @@ RoamingArray<float> Logits::Get() {
   assert(shape_[1] == 1);
 
   if (constrained_logits_processor_) {
-    logits_mask_ = constrained_logits_processor_->ComputeMask();
+    logits_mask_ = mask_future_.get();
   }
 
 #if USE_CUDA
@@ -230,6 +231,7 @@ void Logits::Update(RoamingArray<int32_t> next_tokens_unk) {
   if (constrained_logits_processor_) {
     auto next_tokens = next_tokens_unk.GetCPU();
     constrained_logits_processor_->CommitTokens(static_cast<uint32_t>(next_tokens[0]));
+    mask_future_ = std::async(std::launch::async, [&]() { return constrained_logits_processor_->ComputeMask(); });
   }
 
   if (output_raw_.get()->GetTensorTypeAndShapeInfo()->GetShape()[1] == 1) {
