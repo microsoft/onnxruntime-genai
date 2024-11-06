@@ -120,16 +120,16 @@ def launch_chat_app(expose_locally: bool = False, model_name: str = "", model_pa
                 max_length_tokens = gr.Slider(
                     minimum=0,
                     maximum=131072,
-                    value=65536,
-                    step=512,
+                    value=8192,
+                    step=128,
                     interactive=True,
                     label="Max Token Length",
                 )
                 max_context_length_tokens = gr.Slider(
                     minimum=0,
                     maximum=131072,
-                    value=65536,
-                    step=512,
+                    value=8192,
+                    step=128,
                     interactive=True,
                     label="Max History Token Length",
                 )
