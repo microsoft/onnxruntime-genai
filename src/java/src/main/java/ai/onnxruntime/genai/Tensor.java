@@ -62,7 +62,7 @@ public final class Tensor implements AutoCloseable {
 
     this.elementType = elementType;
     this.shape = shape;
-    this.dataBuffer = data;  // save a reference so the owning buffer will stay around.
+    this.dataBuffer = data; // save a reference so the owning buffer will stay around.
 
     nativeHandle = createTensor(data, shape, elementType.ordinal());
   }

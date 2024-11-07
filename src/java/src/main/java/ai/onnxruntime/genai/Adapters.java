@@ -25,7 +25,7 @@ public final class Adapters implements AutoCloseable {
    * Load an adapter from the specified path.
    *
    * @param adapterFilePath The path of the adapter.
-   * @param adapterName     A unique user supplied adapter identifier.
+   * @param adapterName A unique user supplied adapter identifier.
    * @throws GenAIException If the call to the GenAI native API fails.
    */
   public void loadAdapters(String adapterFilePath, String adapterName) throws GenAIException {
@@ -62,14 +62,12 @@ public final class Adapters implements AutoCloseable {
     return nativeHandle;
   }
 
-  private native long createAdapters(long modelHandle)
-      throws GenAIException;
+  private native long createAdapters(long modelHandle) throws GenAIException;
 
   private native void destroyAdapters(long nativeHandle);
 
   private native void loadAdapter(long nativeHandle, String adapterFilePath, String adapterName)
       throws GenAIException;
 
-  private native void unloadAdapter(long nativeHandle, String adapterName)
-      throws GenAIException;
+  private native void unloadAdapter(long nativeHandle, String adapterName) throws GenAIException;
 }

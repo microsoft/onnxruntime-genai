@@ -74,12 +74,11 @@ public class GenerationTest {
   @Test
   @EnabledIf("haveAdapters")
   public void testUsageWithListenerAndAdapters() throws GenAIException {
-    SimpleGenAI generator = new SimpleGenAI(TestUtils.testAdapterTestModelPath(),
-            TestUtils.testAdapterTestAdaptersPath());
+    SimpleGenAI generator =
+        new SimpleGenAI(
+            TestUtils.testAdapterTestModelPath(), TestUtils.testAdapterTestAdaptersPath());
     String[] prompts = {
-            "This is a test.",
-            "Rats are awesome pets!",
-            "The quick brown fox jumps over the lazy dog."
+      "This is a test.", "Rats are awesome pets!", "The quick brown fox jumps over the lazy dog."
     };
     GeneratorParams params = generator.createGeneratorParams(prompts);
     Consumer<String> listener = token -> logger.info("onTokenGenerate: " + token);

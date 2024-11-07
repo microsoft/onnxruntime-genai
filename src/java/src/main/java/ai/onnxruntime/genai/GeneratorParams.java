@@ -159,9 +159,8 @@ public final class GeneratorParams implements AutoCloseable {
 
   private native void setModelInput(long nativeHandle, String inputName, long tensorHandle)
       throws GenAIException;
-  
-  private native void setInputs(long nativeHandle, long namedTensorsHandle)
-      throws GenAIException;
+
+  private native void setInputs(long nativeHandle, long namedTensorsHandle) throws GenAIException;
 
   private native void setInputIDs(
       long nativeHandle, ByteBuffer tokenIds, int sequenceLength, int batchSize)

@@ -66,8 +66,8 @@ public class SimpleGenAI {
   }
 
   /**
-   * Create the generator parameters and add a batch of prompt texts. The user can set other search options
-   * via the GeneratorParams object prior to running `generate`.
+   * Create the generator parameters and add a batch of prompt texts. The user can set other search
+   * options via the GeneratorParams object prior to running `generate`.
    *
    * @param prompts The batch of prompt texts to encode.
    * @return The generator parameters.
@@ -112,6 +112,7 @@ public class SimpleGenAI {
 
   /**
    * Set the adapter name that will be used in the generation process
+   *
    * @param selectedAdapterName The adapter name that will be used.
    */
   public void setActiveAdapter(String selectedAdapterName) {
@@ -142,7 +143,7 @@ public class SimpleGenAI {
           // iterate (which calls computeLogits, generateNextToken, getLastTokenInSequence and
           // isDone)
 
-          if (adapters != null && adapterPath != null &&adapterName != null) {
+          if (adapters != null && adapterPath != null && adapterName != null) {
             adapters.loadAdapters(adapterPath, adapterName);
             generator.setActiveAdapter(adapters, adapterName);
           }

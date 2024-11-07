@@ -119,6 +119,7 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
 
   /**
    * Activates one of the loaded adapters.
+   *
    * @param adapters The Adapters container.
    * @param adapterName The adapter name that was previously loaded.
    * @throws GenAIException If the call to the GenAI native API fails.
@@ -130,7 +131,6 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
 
     setActiveAdapter(nativeHandle, adapters.nativeHandle(), adapterName);
   }
-
 
   /** Closes the Generator and releases any associated resources. */
   @Override
@@ -185,6 +185,6 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
   private native int getSequenceLastToken(long nativeHandle, long sequenceIndex)
       throws GenAIException;
 
-  private native void setActiveAdapter(long nativeHandle, long adaptersNativeHandle, String adapterName)
-      throws GenAIException;
+  private native void setActiveAdapter(
+      long nativeHandle, long adaptersNativeHandle, String adapterName) throws GenAIException;
 }
