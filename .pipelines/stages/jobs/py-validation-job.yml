@@ -155,12 +155,17 @@ jobs:
       HuggingFaceToken: $(HF_TOKEN)
       os: ${{ parameters.os }}
 
+  - task: Docker@2
+    inputs:
+      containerRegistry: onnxruntimebuildcache
+      command: "login"
+      addPipelineData: false
+    displayName: "Log in to container registry"
+
   - ${{ if or(eq(parameters.os, 'linux'), eq(parameters.os, 'osx')) }}:
     - ${{ if eq(parameters.ep, 'cuda') }}:
       - bash: |
           set -e -x
-          az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
-          az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
           docker pull $(cuda_docker_image)
           python_exe=/opt/python/cp310-cp310/bin/python3.10
 
