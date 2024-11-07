@@ -81,12 +81,13 @@ public class GenerationTest {
       "This is a test.", "Rats are awesome pets!", "The quick brown fox jumps over the lazy dog."
     };
     GeneratorParams params = generator.createGeneratorParams(prompts);
-    Consumer<String> listener = token -> logger.info("onTokenGenerate: " + token);
-    String baseOutput = generator.generate(params, listener);
+    String baseOutput = generator.generate(params, null);
+    logger.info("Base Output: " + baseOutput);
 
     generator.setActiveAdapter("adapters_a_and_b");
+    String adapter_output = generator.generate(params, null);
+    logger.info("Adapter Output: " + adapter_output);
 
-    String adapter_output = generator.generate(params, listener);
     assertNotEquals(baseOutput, adapter_output);
   }
 

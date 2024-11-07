@@ -106,8 +106,7 @@ jobs:
 
     - name: Build the Java API and Run the Java Tests
       run: |
-        set -e -x
-        python3 build.py --config=Release --build_dir build/cpu --build_java --parallel --cmake_generator "Ninja"
+        python3 build.py --config=Release --build_dir build/cpu --build_java --parallel
 
     - name: Verify Build Artifacts
       if: always()
