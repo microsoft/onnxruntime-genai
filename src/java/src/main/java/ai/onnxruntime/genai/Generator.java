@@ -117,6 +117,12 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
     return getSequenceLastToken(nativeHandle, sequenceIndex);
   }
 
+  /**
+   * Activates one of the loaded adapters.
+   * @param adapters The Adapters container.
+   * @param adapterName The adapter name that was previously loaded.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
   public void setActiveAdapter(Adapters adapters, String adapterName) throws GenAIException {
     if (nativeHandle == 0) {
       throw new IllegalStateException("Instance has been freed and is invalid");

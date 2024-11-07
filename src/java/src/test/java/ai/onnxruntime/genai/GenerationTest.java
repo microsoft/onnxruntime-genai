@@ -5,6 +5,7 @@
 package ai.onnxruntime.genai;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.File;
@@ -43,6 +44,10 @@ public class GenerationTest {
     return phi2ModelPath() != null;
   }
 
+  private static boolean haveAdapters() {
+    return TestUtils.testAdapterTestModelPath() != null;
+  }
+
   @Test
   @EnabledIf("havePhi2")
   public void testUsageNoListener() throws GenAIException {
@@ -64,6 +69,26 @@ public class GenerationTest {
 
     logger.info("Result: " + result);
     assertTrue(result.indexOf("Answer: 42") != -1);
+  }
+
+  @Test
+  @EnabledIf("haveAdapters")
+  public void testUsageWithListenerAndAdapters() throws GenAIException {
+    SimpleGenAI generator = new SimpleGenAI(TestUtils.testAdapterTestModelPath(),
+            TestUtils.testAdapterTestAdaptersPath());
+    String[] prompts = {
+            "This is a test.",
+            "Rats are awesome pets!",
+            "The quick brown fox jumps over the lazy dog."
+    };
+    GeneratorParams params = generator.createGeneratorParams(prompts);
+    Consumer<String> listener = token -> logger.info("onTokenGenerate: " + token);
+    String baseOutput = generator.generate(params, listener);
+
+    generator.setActiveAdapter("adapters_a_and_b");
+
+    String adapter_output = generator.generate(params, listener);
+    assertNotEquals(baseOutput, adapter_output);
   }
 
   @Test

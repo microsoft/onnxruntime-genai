@@ -4,7 +4,6 @@
  */
 package ai.onnxruntime.genai;
 
-
 public final class Adapters implements AutoCloseable {
   private long nativeHandle = 0;
 
@@ -26,7 +25,7 @@ public final class Adapters implements AutoCloseable {
    * Load an adapter from the specified path.
    *
    * @param adapterFilePath The path of the adapter.
-   * @param adapterName A unique user supplied adapter identifier.
+   * @param adapterName     A unique user supplied adapter identifier.
    * @throws GenAIException If the call to the GenAI native API fails.
    */
   public void loadAdapters(String adapterFilePath, String adapterName) throws GenAIException {

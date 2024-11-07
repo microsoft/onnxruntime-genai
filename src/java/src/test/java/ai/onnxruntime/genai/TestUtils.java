@@ -11,6 +11,30 @@ import java.util.logging.Logger;
 public class TestUtils {
   private static final Logger logger = Logger.getLogger(TestUtils.class.getName());
 
+  public static final String testAdapterTestModelPath() {
+    // get the resources directory from one of the classes
+    URL url = TestUtils.class.getResource("/adapters");
+    if (url == null) {
+      logger.warning("Model not found at /adapters");
+      return null;
+    }
+
+    File f = new File(url.getFile());
+    return f.getPath();
+  }
+
+  public static final String testAdapterTestAdaptersPath() {
+    // get the resources directory from one of the classes
+    URL url = TestUtils.class.getResource("/adapters/adapters.onnx_adapter");
+    if (url == null) {
+      logger.warning("Model not found at /adapters/adapters.onnx_adapter");
+      return null;
+    }
+
+    File f = new File(url.getFile());
+    return f.getPath();
+  }
+
   public static final String testModelPath() {
     // get the resources directory from one of the classes
     URL url = TestUtils.class.getResource("/hf-internal-testing/tiny-random-gpt2-fp32");
