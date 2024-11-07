@@ -29,6 +29,9 @@ public class TensorTest {
     // assuming there's an error on execution if an invalid input has been provided so the user is
     // aware of the issue
     params.setInput("unknown_value", tensor);
+
+    params.close();
+    generator.close();
   }
 
   @Test

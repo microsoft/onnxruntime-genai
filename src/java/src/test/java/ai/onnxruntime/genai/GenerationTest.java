@@ -57,6 +57,9 @@ public class GenerationTest {
     String result = generator.generate(params, null);
     logger.info("Result: " + result);
     assertTrue(result.indexOf("Answer: 42") != -1);
+
+    params.close();
+    generator.close();
   }
 
   @Test
@@ -69,6 +72,9 @@ public class GenerationTest {
 
     logger.info("Result: " + result);
     assertTrue(result.indexOf("Answer: 42") != -1);
+
+    params.close();
+    generator.close();
   }
 
   @Test
@@ -89,6 +95,9 @@ public class GenerationTest {
     logger.info("Adapter Output: " + adapter_output);
 
     assertNotEquals(baseOutput, adapter_output);
+
+    params.close();
+    generator.close();
   }
 
   @Test

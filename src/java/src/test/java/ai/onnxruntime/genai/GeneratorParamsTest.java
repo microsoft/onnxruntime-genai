@@ -17,6 +17,9 @@ public class GeneratorParamsTest {
     GeneratorParams params = generator.createGeneratorParams("Ignoed");
     params.setSearchOption("early_stopping", true); // boolean
     params.setSearchOption("max_length", 20); // number
+
+    params.close();
+    generator.close();
   }
 
   @Test
@@ -25,5 +28,8 @@ public class GeneratorParamsTest {
     SimpleGenAI generator = new SimpleGenAI(TestUtils.testModelPath());
     GeneratorParams params = generator.createGeneratorParams("This is a testing prompt");
     assertThrows(GenAIException.class, () -> params.setSearchOption("invalid", true));
+
+    params.close();
+    generator.close();
   }
 }

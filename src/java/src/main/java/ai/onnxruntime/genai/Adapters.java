@@ -62,6 +62,14 @@ public final class Adapters implements AutoCloseable {
     return nativeHandle;
   }
 
+  static {
+    try {
+      GenAI.init();
+    } catch (Exception e) {
+      throw new RuntimeException("Failed to load onnxruntime-genai native libraries", e);
+    }
+  }
+
   private native long createAdapters(long modelHandle) throws GenAIException;
 
   private native void destroyAdapters(long nativeHandle);
