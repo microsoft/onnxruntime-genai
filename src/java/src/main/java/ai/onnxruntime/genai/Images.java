@@ -3,34 +3,34 @@
  */
 package ai.onnxruntime.genai;
 
-public class Images implements AutoCloseable {
-  private long nativeHandle;
+public class Images implements AutoCloseable{
+    private long nativeHandle;
 
-  public Images(String imagePath) throws GenAIException {
-    nativeHandle = loadImages(imagePath);
-  }
-
-  @Override
-  public void close() {
-    if (nativeHandle != 0) {
-      destroyImages(nativeHandle);
-      nativeHandle = 0;
+    public Images(String imagePath) throws GenAIException {
+        nativeHandle = loadImages(imagePath);
     }
-  }
 
-  long nativeHandle() {
-    return nativeHandle;
-  }
-
-  static {
-    try {
-      GenAI.init();
-    } catch (Exception e) {
-      throw new RuntimeException("Failed to load onnxruntime-genai native libraries", e);
+    @Override
+    public void close() {
+        if (nativeHandle != 0) {
+            destroyImages(nativeHandle);
+            nativeHandle = 0;
+        }
     }
-  }
 
-  private native long loadImages(String imagePath) throws GenAIException;
+    long nativeHandle() {
+        return nativeHandle;
+    }
 
-  private native void destroyImages(long imageshandle);
+    static {
+        try {
+          GenAI.init();
+        } catch (Exception e) {
+          throw new RuntimeException("Failed to load onnxruntime-genai native libraries", e);
+        }
+    }
+
+    private native long loadImages(String imagePath) throws GenAIException;
+
+    private native void destroyImages(long imageshandle);
 }

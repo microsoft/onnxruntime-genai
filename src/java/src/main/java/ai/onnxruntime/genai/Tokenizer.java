@@ -3,9 +3,7 @@
  */
 package ai.onnxruntime.genai;
 
-/**
- * The Tokenizer class is responsible for converting between text and token ids.
- */
+/** The Tokenizer class is responsible for converting between text and token ids. */
 public class Tokenizer implements AutoCloseable {
   private long nativeHandle;
 
@@ -23,7 +21,7 @@ public class Tokenizer implements AutoCloseable {
    * @throws GenAIException If the call to the GenAI native API fails.
    */
   public Sequences encode(String string) throws GenAIException {
-    return encodeBatch(new String[]{string});
+    return encodeBatch(new String[] {string});
   }
 
   /**

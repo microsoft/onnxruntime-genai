@@ -37,8 +37,8 @@ public final class Tensor implements AutoCloseable {
   /**
    * Constructs a Tensor with the given data, shape and element type.
    *
-   * @param data        The data for the Tensor. Must be a direct ByteBuffer with native byte order.
-   * @param shape       The shape of the Tensor.
+   * @param data The data for the Tensor. Must be a direct ByteBuffer with native byte order.
+   * @param shape The shape of the Tensor.
    * @param elementType The type of elements in the Tensor.
    * @throws GenAIException
    */
