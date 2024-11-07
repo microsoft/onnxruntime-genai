@@ -4,12 +4,14 @@ This file will provide details on the usage of SetRuntimeOption API. It will lis
 
 ## Set Terminate
 
-Set Terminate is a runtime option to terminate the current session or continue/restart an already terminated session. There are two valid ways to call Set Terminate.
+Set Terminate is a runtime option to terminate the current session or continue/restart an already terminated session. The current session will crash when the terminate option is enabled and the user will need to handle that scenario, examples/c/src/phi3_terminate.cpp contains an example for this.
 
-To enable terminate, the valid pair is: ("set_terminate", "1")
+There are two valid ways to call Set Terminate.
 
-To disable terminate, the valid pair is: ("set_terminate", "0")
+To enable terminate, the valid pair is: ("terminate_session", "1")
 
-Key: "set_terminate"
+To disable terminate, the valid pair is: ("terminate_session", "0")
+
+Key: "terminate_session"
 
 Accepted values: ("0", "1")
