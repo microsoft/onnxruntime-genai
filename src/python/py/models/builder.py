@@ -163,7 +163,11 @@ class Model:
         # MatMul-specific variables
         is_lora = hasattr(config, "peft_type") and config.peft_type == "LORA"
         self.matmul_attrs = {
-            "use_lora": is_lora,        # Use LoRA/QLoRA format
+            "use_lora": is_lora,                                    # Use LoRA/QLoRA format
+            "lora": {                                               # used to calculate scaling factors for LoRA/QLoRA
+                "alpha": config.lora_alpha if is_lora else 0,
+                "r": config.r if is_lora else 0
+            }
         }
 
         # RotaryEmbedding-specific variables
@@ -853,10 +857,7 @@ class Model:
         matmul_A_name = self.make_matmul_op(matmul.lora_A.default, matmul_A_basename, root_input=root_input)
         lora_A = f"{matmul_A_name}/output_0"
 
-        from peft import PeftConfig
-        peft_config = PeftConfig.from_pretrained(extra_options["adapter_path"], trust_remote_code=True)
-
-        matmul.lora_B.default.weight *= (peft_config.lora_alpha/peft_config.r)
+        matmul.lora_B.default.weight *= (self.matmul_attrs["lora"]["alpha"] / self.matmul_attrs["lora"]["r"])
         matmul_B_basename = "/".join(basename_parts[:-1] + ["lora_B"] + basename_parts[-1:])
         matmul_B_name = self.make_matmul_op(matmul.lora_B.default, matmul_B_basename, root_input=lora_A)
         lora_B = f"{matmul_B_name}/output_0"
@@ -2038,23 +2039,13 @@ class Model:
                 from onnxruntime_genai.models.quantized_model import QuantModel
             q_size = self.num_attn_heads * self.head_size
             kv_size = self.num_kv_heads * self.head_size
-            model = QuantModel.from_pretrained(
-                self.quant_type,
-                input_path,
-                self.quant_attrs["bits"],
-                self.quant_attrs["group_size"],
-                self.quant_attrs["use_g_idx"],
-                q_size,
-                kv_size,
-                self.intermediate_size,
-                self.num_layers,
-                self.extra_options["adapter_path"] if "adapter_path" in self.extra_options else None,
-            )
+            model = QuantModel.from_pretrained(self.quant_type, input_path, self.quant_attrs["bits"], self.quant_attrs["group_size"], self.quant_attrs["use_g_idx"], q_size, kv_size, self.intermediate_size, self.num_layers, self.extra_options.get("adapter_path", None))
         else:
             # Load PyTorch model
             extra_kwargs = {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {}
             model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, cache_dir=self.cache_dir, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
 
+        # Checking for adapter path in extra_options when the base_model is not quantized
         if "adapter_path" in self.extra_options and self.quant_type is None:
             from peft import PeftModel
             model = PeftModel.from_pretrained(model, self.extra_options["adapter_path"], cache_dir=self.cache_dir, token=self.hf_token)
