@@ -46,6 +46,11 @@ class QuantizedTensorModule:
 
         return qweight + qzeros + scales + g_idx + in_feats + out_feats + bits + group_size
 
+class QuantizedLoraModule(QuantizedTensorModule):
+    def __init__(self, bits, group_size):
+        super().__init__(bits, group_size)
+        self.lora_A = TensorModule()
+        self.lora_B = TensorModule()
 
 class TensorModule:
     def __init__(self):
@@ -54,37 +59,37 @@ class TensorModule:
 
 
 class QuantizedAttention:
-    def __init__(self, bits, group_size):
-        self.q_proj = QuantizedTensorModule(bits, group_size)
-        self.k_proj = QuantizedTensorModule(bits, group_size)
-        self.v_proj = QuantizedTensorModule(bits, group_size)
-        self.o_proj = QuantizedTensorModule(bits, group_size)
+    def __init__(self, bits, group_size, is_lora):
+        self.q_proj = QuantizedTensorModule(bits, group_size) if not is_lora else QuantizedLoraModule(bits, group_size)
+        self.k_proj = QuantizedTensorModule(bits, group_size) if not is_lora else QuantizedLoraModule(bits, group_size)
+        self.v_proj = QuantizedTensorModule(bits, group_size) if not is_lora else QuantizedLoraModule(bits, group_size)
+        self.o_proj = QuantizedTensorModule(bits, group_size) if not is_lora else QuantizedLoraModule(bits, group_size)
         self.rotary_emb = TensorModule()
 
 
 class QuantizedMLP:
-    def __init__(self, bits, group_size):
-        self.gate_proj = QuantizedTensorModule(bits, group_size)
-        self.up_proj = QuantizedTensorModule(bits, group_size)
-        self.down_proj = QuantizedTensorModule(bits, group_size)
-        self.fc1 = QuantizedTensorModule(bits, group_size)
-        self.fc2 = QuantizedTensorModule(bits, group_size)
+    def __init__(self, bits, group_size, is_lora):
+        self.gate_proj = QuantizedTensorModule(bits, group_size) if not is_lora else QuantizedLoraModule(bits, group_size)
+        self.up_proj = QuantizedTensorModule(bits, group_size) if not is_lora else QuantizedLoraModule(bits, group_size)
+        self.down_proj = QuantizedTensorModule(bits, group_size) if not is_lora else QuantizedLoraModule(bits, group_size)
+        self.fc1 = QuantizedTensorModule(bits, group_size) if not is_lora else QuantizedLoraModule(bits, group_size)
+        self.fc2 = QuantizedTensorModule(bits, group_size) if not is_lora else QuantizedLoraModule(bits, group_size)
 
 
 class QuantizedDecoderLayer:
-    def __init__(self, layer_id, bits, group_size):
+    def __init__(self, layer_id, bits, group_size, is_lora):
         self.layer_id = layer_id
         self.input_layernorm = TensorModule()
-        self.self_attn = QuantizedAttention(bits, group_size)
+        self.self_attn = QuantizedAttention(bits, group_size, is_lora)
         self.post_attention_layernorm = TensorModule()
-        self.mlp = QuantizedMLP(bits, group_size)
+        self.mlp = QuantizedMLP(bits, group_size, is_lora)
 
     def is_empty(self):
         return self.input_layernorm.weight is None
 
 
 class QuantizedModel:
-    def __init__(self, quant_type, input_path, bits, group_size, q_size, kv_size, intermediate_size, num_layers):
+    def __init__(self, quant_type, input_path, bits, group_size, q_size, kv_size, intermediate_size, num_layers, adapter_path):
         self.quant_type = quant_type
         self.embedding = TensorModule()
         self.final_norm = TensorModule()
@@ -92,11 +97,32 @@ class QuantizedModel:
         self.layers = {}
         self.num_layers = num_layers
 
+        self.map_to_modules(quant_type, input_path, bits, group_size, q_size, kv_size, intermediate_size, adapter_path)
+
+        if adapter_path is not None:
+            self.map_to_modules(quant_type, adapter_path, bits, group_size, q_size, kv_size, intermediate_size, adapter_path)
+
+        # Set LM head weights + biases if not already set
+        if isinstance(self.lm_head, TensorModule) and self.lm_head.weight is None:
+            # Embedding and LM head share same weights + biases (lm_head.weight == embedding.weight and lm_head.bias == embedding.bias)
+            self.lm_head.weight = self.embedding.weight
+            if self.lm_head.bias is not None:
+                self.lm_head.bias = self.embedding.bias
+
+        # Sort list of layers by layer id
+        self.layers = list(self.layers.values())
+        self.layers.sort(key=lambda m: m.layer_id)
+
+        # Set properties of each layer based on quantization type
+        self.set_properties()
+
+    def map_to_modules(self, quant_type, file_path, bits, group_size, q_size, kv_size, intermediate_size, adapter_path):
         layer_id = 0
-        for weight_file in os.listdir(input_path):
+        is_lora = adapter_path is not None
+        for weight_file in os.listdir(file_path):
             if weight_file.endswith(".safetensors"):
-                module = self.layers.setdefault(layer_id, QuantizedDecoderLayer(layer_id, bits, group_size))
-                weights = load_file(os.path.join(input_path, weight_file))
+                module = self.layers.setdefault(layer_id, QuantizedDecoderLayer(layer_id, bits, group_size, is_lora))
+                weights = load_file(os.path.join(file_path, weight_file))
 
                 # Map weights to modules
                 for name, tensor in weights.items():
@@ -133,11 +159,13 @@ class QuantizedModel:
                         if name.startswith("transformer.encoder"):
                             # Chatglm3, e.g., transformer.encoder.layers.0.input_layernorm.weight
                             name = name.replace("transformer.encoder", "model")
+                        if name.startswith("base_model.model.model"):
+                            name = name.replace("base_model.model.model", "model")
                         curr_layer_id = int(name.split(".")[2])
                         if curr_layer_id != layer_id:
                             # Switch layer module used
                             layer_id = curr_layer_id
-                            module = self.layers.setdefault(layer_id, QuantizedDecoderLayer(layer_id, bits, group_size))
+                            module = self.layers.setdefault(layer_id, QuantizedDecoderLayer(layer_id, bits, group_size, is_lora))
 
                         # Map weights and biases of norm, attention, and feed-forward network
                         # Graph order is input_layernorm --> q_proj/k_proj/v_proj --> o_proj --> post_attention_layernorm --> gate_proj/up_proj --> down_proj
@@ -334,22 +362,36 @@ class QuantizedModel:
                             # model.layers.layer_id.mlp.dense_h_to_4h.bias
                             module.mlp.gate_proj.bias = tensor[: intermediate_size]
                             module.mlp.down_proj.bias = tensor[intermediate_size: ]
+                        elif bool(re.match(r"^model.layers\.\d+\.mlp.down_proj.lora_A\.weight$", name)):
+                            module.mlp.down_proj.lora_A.weight = tensor
+                        elif bool(re.match(r"^model.layers\.\d+\.mlp.down_proj.lora_B\.weight$", name)):
+                            module.mlp.down_proj.lora_B.weight = tensor
+                        elif bool(re.match(r"^model.layers\.\d+\.mlp.up_proj.lora_A\.weight$", name)):
+                            module.mlp.up_proj.lora_A.weight = tensor
+                        elif bool(re.match(r"^model.layers\.\d+\.mlp.up_proj.lora_B\.weight$", name)):
+                            module.mlp.up_proj.lora_B.weight = tensor
+                        elif bool(re.match(r"^model.layers\.\d+\.mlp.gate_proj.lora_A\.weight$", name)):
+                            module.mlp.gate_proj.lora_A.weight = tensor
+                        elif bool(re.match(r"^model.layers\.\d+\.mlp.gate_proj.lora_B\.weight$", name)):
+                            module.mlp.gate_proj.lora_B.weight = tensor
+                        elif bool(re.match(r"^model.layers\.\d+\.self_attn.k_proj.lora_A\.weight$", name)):
+                            module.self_attn.k_proj.lora_A.weight = tensor
+                        elif bool(re.match(r"^model.layers\.\d+\.self_attn.k_proj.lora_B\.weight$", name)):
+                            module.self_attn.k_proj.lora_B.weight = tensor
+                        elif bool(re.match(r"^model.layers\.\d+\.self_attn.o_proj.lora_A\.weight$", name)):
+                            module.self_attn.o_proj.lora_A.weight = tensor
+                        elif bool(re.match(r"^model.layers\.\d+\.self_attn.o_proj.lora_B\.weight$", name)):
+                            module.self_attn.o_proj.lora_B.weight = tensor
+                        elif bool(re.match(r"^model.layers\.\d+\.self_attn.q_proj.lora_A\.weight$", name)):
+                            module.self_attn.q_proj.lora_A.weight = tensor
+                        elif bool(re.match(r"^model.layers\.\d+\.self_attn.q_proj.lora_B\.weight$", name)):
+                            module.self_attn.q_proj.lora_B.weight = tensor
+                        elif bool(re.match(r"^model.layers\.\d+\.self_attn.v_proj.lora_A\.weight$", name)):
+                            module.self_attn.v_proj.lora_A.weight = tensor
+                        elif bool(re.match(r"^model.layers\.\d+\.self_attn.v_proj.lora_B\.weight$", name)):
+                            module.self_attn.v_proj.lora_B.weight = tensor
                         else:
                             raise NotImplementedError(f"{name} in your quantized model is not recognized.")
-
-        # Set LM head weights + biases if not already set
-        if isinstance(self.lm_head, TensorModule) and self.lm_head.weight is None:
-            # Embedding and LM head share same weights + biases (lm_head.weight == embedding.weight and lm_head.bias == embedding.bias)
-            self.lm_head.weight = self.embedding.weight
-            if self.lm_head.bias is not None:
-                self.lm_head.bias = self.embedding.bias
-
-        # Sort list of layers by layer id
-        self.layers = list(self.layers.values())
-        self.layers.sort(key=lambda m: m.layer_id)
-
-        # Set properties of each layer based on quantization type
-        self.set_properties()
 
     def _initialize_quantized_lm_head(self, bits, group_size):
         """
@@ -381,18 +423,46 @@ class QuantizedModel:
                 # Set in_features and out_features
                 module.self_attn.q_proj.out_features = module.self_attn.q_proj.scales.shape[1]
                 module.self_attn.q_proj.in_features = module.self_attn.q_proj.qweight.shape[0]
+                module.self_attn.q_proj.lora_A.out_features = module.self_attn.q_proj.lora_A.weight.shape[1]
+                module.self_attn.q_proj.lora_A.in_features = module.self_attn.q_proj.lora_A.weight.shape[0]
+                module.self_attn.q_proj.lora_B.out_features = module.self_attn.q_proj.lora_B.weight.shape[1]
+                module.self_attn.q_proj.lora_B.in_features = module.self_attn.q_proj.lora_B.weight.shape[0]
                 module.self_attn.k_proj.out_features = module.self_attn.k_proj.scales.shape[1]
                 module.self_attn.k_proj.in_features = module.self_attn.k_proj.qweight.shape[0]
+                module.self_attn.k_proj.lora_A.out_features = module.self_attn.k_proj.lora_A.weight.shape[1]
+                module.self_attn.k_proj.lora_A.in_features = module.self_attn.k_proj.lora_A.weight.shape[0]
+                module.self_attn.k_proj.lora_B.out_features = module.self_attn.k_proj.lora_B.weight.shape[1]
+                module.self_attn.k_proj.lora_B.in_features = module.self_attn.k_proj.lora_B.weight.shape[0]
                 module.self_attn.v_proj.out_features = module.self_attn.v_proj.scales.shape[1]
                 module.self_attn.v_proj.in_features = module.self_attn.v_proj.qweight.shape[0]
+                module.self_attn.v_proj.lora_A.out_features = module.self_attn.v_proj.lora_A.weight.shape[1]
+                module.self_attn.v_proj.lora_A.in_features = module.self_attn.v_proj.lora_A.weight.shape[0]
+                module.self_attn.v_proj.lora_B.out_features = module.self_attn.v_proj.lora_B.weight.shape[1]
+                module.self_attn.v_proj.lora_B.in_features = module.self_attn.v_proj.lora_B.weight.shape[0]
                 module.self_attn.o_proj.out_features = module.self_attn.o_proj.scales.shape[1]
                 module.self_attn.o_proj.in_features = module.self_attn.o_proj.qweight.shape[0]
+                module.self_attn.o_proj.lora_A.out_features = module.self_attn.o_proj.lora_A.weight.shape[1]
+                module.self_attn.o_proj.lora_A.in_features = module.self_attn.o_proj.lora_A.weight.shape[0]
+                module.self_attn.o_proj.lora_B.out_features = module.self_attn.o_proj.lora_B.weight.shape[1]
+                module.self_attn.o_proj.lora_B.in_features = module.self_attn.o_proj.lora_B.weight.shape[0]
                 module.mlp.gate_proj.out_features = module.mlp.gate_proj.scales.shape[1]
                 module.mlp.gate_proj.in_features = module.mlp.gate_proj.qweight.shape[0]
+                module.mlp.gate_proj.lora_A.out_features = module.mlp.gate_proj.lora_A.weight.shape[1]
+                module.mlp.gate_proj.lora_A.in_features = module.mlp.gate_proj.lora_A.weight.shape[0]
+                module.mlp.gate_proj.lora_B.out_features = module.mlp.gate_proj.lora_B.weight.shape[1]
+                module.mlp.gate_proj.lora_B.in_features = module.mlp.gate_proj.lora_B.weight.shape[0]
                 module.mlp.up_proj.out_features = module.mlp.up_proj.scales.shape[1]
                 module.mlp.up_proj.in_features = module.mlp.up_proj.qweight.shape[0]
+                module.mlp.up_proj.lora_A.out_features = module.mlp.up_proj.lora_A.weight.shape[1]
+                module.mlp.up_proj.lora_A.in_features = module.mlp.up_proj.lora_A.weight.shape[0]
+                module.mlp.up_proj.lora_B.out_features = module.mlp.up_proj.lora_B.weight.shape[1]
+                module.mlp.up_proj.lora_B.in_features = module.mlp.up_proj.lora_B.weight.shape[0]
                 module.mlp.down_proj.out_features = module.mlp.down_proj.scales.shape[1]
                 module.mlp.down_proj.in_features = module.mlp.down_proj.qweight.shape[0]
+                module.mlp.down_proj.lora_A.out_features = module.mlp.down_proj.lora_A.weight.shape[1]
+                module.mlp.down_proj.lora_A.in_features = module.mlp.down_proj.lora_A.weight.shape[0]
+                module.mlp.down_proj.lora_B.out_features = module.mlp.down_proj.lora_B.weight.shape[1]
+                module.mlp.down_proj.lora_B.in_features = module.mlp.down_proj.lora_B.weight.shape[0]
 
                 # Set g_idx if not already set
                 module.self_attn.q_proj.g_idx = module.self_attn.q_proj.g_idx if module.self_attn.q_proj.g_idx is not None else torch.tensor([i // module.self_attn.q_proj.group_size for i in range(module.self_attn.q_proj.in_features)], dtype=torch.int32)
@@ -407,18 +477,46 @@ class QuantizedModel:
                 # Set in_features and out_features
                 module.self_attn.q_proj.out_features = module.self_attn.q_proj.qweight.shape[1]
                 module.self_attn.q_proj.in_features = module.self_attn.q_proj.g_idx.shape[0]
+                module.self_attn.q_proj.lora_A.out_features = module.self_attn.q_proj.lora_A.weight.shape[1]
+                module.self_attn.q_proj.lora_A.in_features = module.self_attn.q_proj.lora_A.weight.shape[0]
+                module.self_attn.q_proj.lora_B.out_features = module.self_attn.q_proj.lora_B.weight.shape[1]
+                module.self_attn.q_proj.lora_B.in_features = module.self_attn.q_proj.lora_B.weight.shape[0]
                 module.self_attn.k_proj.out_features = module.self_attn.k_proj.qweight.shape[1]
                 module.self_attn.k_proj.in_features = module.self_attn.k_proj.g_idx.shape[0]
+                module.self_attn.k_proj.lora_A.out_features = module.self_attn.k_proj.lora_A.weight.shape[1]
+                module.self_attn.k_proj.lora_A.in_features = module.self_attn.k_proj.lora_A.weight.shape[0]
+                module.self_attn.k_proj.lora_B.out_features = module.self_attn.k_proj.lora_B.weight.shape[1]
+                module.self_attn.k_proj.lora_B.in_features = module.self_attn.k_proj.lora_B.weight.shape[0]
                 module.self_attn.v_proj.out_features = module.self_attn.v_proj.qweight.shape[1]
                 module.self_attn.v_proj.in_features = module.self_attn.v_proj.g_idx.shape[0]
+                module.self_attn.v_proj.lora_A.out_features = module.self_attn.v_proj.lora_A.weight.shape[1]
+                module.self_attn.v_proj.lora_A.in_features = module.self_attn.v_proj.lora_A.weight.shape[0]
+                module.self_attn.v_proj.lora_B.out_features = module.self_attn.v_proj.lora_B.weight.shape[1]
+                module.self_attn.v_proj.lora_B.in_features = module.self_attn.v_proj.lora_B.weight.shape[0]
                 module.self_attn.o_proj.out_features = module.self_attn.o_proj.qweight.shape[1]
                 module.self_attn.o_proj.in_features = module.self_attn.o_proj.g_idx.shape[0]
+                module.self_attn.o_proj.lora_A.out_features = module.self_attn.o_proj.lora_A.weight.shape[1]
+                module.self_attn.o_proj.lora_A.in_features = module.self_attn.o_proj.lora_A.weight.shape[0]
+                module.self_attn.o_proj.lora_B.out_features = module.self_attn.o_proj.lora_B.weight.shape[1]
+                module.self_attn.o_proj.lora_B.in_features = module.self_attn.o_proj.lora_B.weight.shape[0]
                 module.mlp.gate_proj.out_features = module.mlp.gate_proj.qweight.shape[1]
                 module.mlp.gate_proj.in_features = module.mlp.gate_proj.g_idx.shape[0]
+                module.mlp.gate_proj.lora_A.out_features = module.mlp.gate_proj.lora_A.weight.shape[1]
+                module.mlp.gate_proj.lora_A.in_features = module.mlp.gate_proj.lora_A.weight.shape[0]
+                module.mlp.gate_proj.lora_B.out_features = module.mlp.gate_proj.lora_B.weight.shape[1]
+                module.mlp.gate_proj.lora_B.in_features = module.mlp.gate_proj.lora_B.weight.shape[0]
                 module.mlp.up_proj.out_features = module.mlp.up_proj.qweight.shape[1]
                 module.mlp.up_proj.in_features = module.mlp.up_proj.g_idx.shape[0]
+                module.mlp.up_proj.lora_A.out_features = module.mlp.up_proj.lora_A.weight.shape[1]
+                module.mlp.up_proj.lora_A.in_features = module.mlp.up_proj.lora_A.weight.shape[0]
+                module.mlp.up_proj.lora_B.out_features = module.mlp.up_proj.lora_B.weight.shape[1]
+                module.mlp.up_proj.lora_B.in_features = module.mlp.up_proj.lora_B.weight.shape[0]
                 module.mlp.down_proj.out_features = module.mlp.down_proj.qweight.shape[1]
                 module.mlp.down_proj.in_features = module.mlp.down_proj.g_idx.shape[0]
+                module.mlp.down_proj.lora_A.out_features = module.mlp.down_proj.lora_A.weight.shape[1]
+                module.mlp.down_proj.lora_A.in_features = module.mlp.down_proj.lora_A.weight.shape[0]
+                module.mlp.down_proj.lora_B.out_features = module.mlp.down_proj.lora_B.weight.shape[1]
+                module.mlp.down_proj.lora_B.in_features = module.mlp.down_proj.lora_B.weight.shape[0]
 
             else:
                 raise NotImplementedError(f"The {self.quant_type} quantization method is not recognized.")
@@ -587,8 +685,8 @@ class QuantizedModel:
 
 
 class AWQModel(QuantizedModel):
-    def __init__(self, quant_type, input_path, bits, group_size, q_size, kv_size, intermediate_size, num_layers):
-        super().__init__(quant_type, input_path, bits, group_size, q_size, kv_size, intermediate_size, num_layers)
+    def __init__(self, quant_type, input_path, bits, group_size, q_size, kv_size, intermediate_size, num_layers, adapter_path):
+        super().__init__(quant_type, input_path, bits, group_size, q_size, kv_size, intermediate_size, num_layers, adapter_path)
 
         # Unpack and repack all `QuantizedTensorModule` classes in model
         for i, layer in enumerate(self.layers):
@@ -729,16 +827,16 @@ class GPTQModel(QuantizedModel):
 
 class QuantModel:
     @staticmethod
-    def from_pretrained(quant_type, input_path, bits, group_size, use_g_idx, q_size, kv_size, intermediate_size, num_layers):
+    def from_pretrained(quant_type, input_path, bits, group_size, use_g_idx, q_size, kv_size, intermediate_size, num_layers, adapter_path=None):
         """
         Unpack quantized weights in PyTorch models, store them in a standard format, and repack them
         into ONNX Runtime's format. Also performs any pre-processing and post-processing when unpacking
         the quantized weights.
         """
         if quant_type == "awq":
-            model = AWQModel(quant_type, input_path, bits, group_size, q_size, kv_size, intermediate_size, num_layers)
+            model = AWQModel(quant_type, input_path, bits, group_size, q_size, kv_size, intermediate_size, num_layers, adapter_path)
         elif quant_type == "gptq":
-            model = GPTQModel(quant_type, input_path, bits, group_size, use_g_idx, q_size, kv_size, intermediate_size, num_layers)
+            model = GPTQModel(quant_type, input_path, bits, group_size, use_g_idx, q_size, kv_size, intermediate_size, num_layers, adapter_path)
         else:
             raise NotImplementedError(f"The {quant_type} quantized model is not currently supported.")
 
