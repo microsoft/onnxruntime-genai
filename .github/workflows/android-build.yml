@@ -82,6 +82,9 @@ jobs:
           unzip microsoft.ml.onnxruntime/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/android/native/onnxruntime.aar -d ort
           ls -lR ort
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Create Android build
         run: |
           set -e -x

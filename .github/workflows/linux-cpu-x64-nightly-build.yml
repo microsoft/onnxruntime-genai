@@ -22,7 +22,8 @@ jobs:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v2
 
-
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Download OnnxRuntime
         run: |
