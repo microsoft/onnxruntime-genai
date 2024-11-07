@@ -59,7 +59,7 @@ Java_ai_onnxruntime_genai_Generator_getSequenceNative(JNIEnv* env, jobject thiz,
   // or attempt to access the memory after the OgaGenerator is destroyed.
   jintArray java_int_array = env->NewIntArray(static_cast<jsize>(num_tokens));
   // jint is `long` on Windows and `int` on linux. 32-bit but requires reinterpret_cast.
-  env->SetIntArrayRegion(java_int_array, 0, num_tokens, reinterpret_cast<const jint*>(tokens));
+  env->SetIntArrayRegion(java_int_array, 0, static_cast<jsize>(num_tokens), reinterpret_cast<const jint*>(tokens));
 
   return java_int_array;
 }
