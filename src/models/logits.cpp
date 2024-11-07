@@ -34,13 +34,24 @@ Logits::Logits(State& state)
 #endif
   if (!state_.params_->guidance_type.empty() && !state_.params_->guidance_data.empty()) {
     auto tokenizer = model_.CreateTokenizer();
-    constrained_logits_processor_ = std::make_unique<ConstrainedLogitsProcessor>(model_.config_->model.vocab_size, model_.config_->model.eos_token_id,
-                                                                                 state_.params_->guidance_type, state_.params_->guidance_data, tokenizer,
-                                                                                 model_.config_->config_path.string().c_str());
-    mask_future_ = std::async(std::launch::async, [&]() { return constrained_logits_processor_->ComputeMask(); });
+    constrained_logits_processors_.resize(shape_[0]);
+    for (int i = 0; i < shape_[0]; i++) {
+      constrained_logits_processors_[i] = std::make_unique<ConstrainedLogitsProcessor>(model_.config_->model.vocab_size, model_.config_->model.eos_token_id,
+                                                                                       state_.params_->guidance_type, state_.params_->guidance_data, tokenizer,
+                                                                                       model_.config_->config_path.string().c_str());
+    }
+    mask_future_ = std::async(std::launch::async, [&]() {
+      std::vector<std::vector<uint32_t>> result;
+      for (int i = 0; i < shape_[0]; i++) {
+        auto processor = constrained_logits_processors_.at(i).get();
+        auto mask = processor->ComputeMask();
+        result.push_back(std::move(mask));
+      }
+      return result;
+    });
 #if USE_CUDA
     if (model_.device_type_ == DeviceType::CUDA) {
-      cuda_logits_mask_ptr_ = CudaMallocArray<uint32_t>(shape_[0] * shape_[2]);
+      cuda_logits_mask_ptr_ = CudaMallocArray<uint32_t>(shape_[0] * shape_[2] / 32);
     }
 #endif
   }
@@ -170,8 +181,8 @@ RoamingArray<float> Logits::Get() {
 
   assert(shape_[1] == 1);
 
-  if (constrained_logits_processor_) {
-    logits_mask_ = mask_future_.get();
+  if (!constrained_logits_processors_.empty()) {
+    logits_masks_ = mask_future_.get();
   }
 
 #if USE_CUDA
@@ -186,8 +197,11 @@ RoamingArray<float> Logits::Get() {
           static_cast<int>(cuda_eos_token_ids_.size()),
           model_.cuda_stream_);
 
-    if (!logits_mask_.empty()) {
-      cudaMemcpyAsync(cuda_logits_mask_ptr_.get(), logits_mask_.data(), logits_mask_.size() * sizeof(uint32_t), ::cudaMemcpyHostToDevice, model_.cuda_stream_);
+    if (!logits_masks_.empty()) {
+      for (int i = 0; i < logits_masks_.size(); i++) {
+        cudaMemcpyAsync(cuda_logits_mask_ptr_.get() + (i * shape_[2] / 32), logits_masks_.at(i).data(),
+                        logits_masks_.at(i).size() * sizeof(uint32_t), ::cudaMemcpyHostToDevice, model_.cuda_stream_);
+      }
       AddMask(batched_logits_gpu, cuda_logits_mask_ptr_.get());
     }
     return batched_logits_gpu;
@@ -211,7 +225,7 @@ RoamingArray<float> Logits::Get() {
     auto batched_logits_cpu = cpu_span<float>{cpu_tensor, element_count};
     HandleEOSArray(batched_logits_cpu);
     if (!logits_mask_.empty()) {
-      AddMask(batched_logits_cpu, logits_mask_);
+      AddMask(batched_logits_cpu, logits_masks_);
     }
     return batched_logits_cpu;
   }
@@ -219,8 +233,8 @@ RoamingArray<float> Logits::Get() {
 
   auto batched_logits_cpu = cpu_span<float>{logits_of_last_token->GetTensorMutableData<float>(), element_count};
   HandleEOSArray(batched_logits_cpu);
-  if (!logits_mask_.empty()) {
-    AddMask(batched_logits_cpu, logits_mask_);
+  if (!logits_masks_.empty()) {
+    AddMask(batched_logits_cpu, logits_masks_);
   }
   return batched_logits_cpu;
 }
@@ -228,10 +242,20 @@ RoamingArray<float> Logits::Get() {
 #pragma warning(pop)
 
 void Logits::Update(RoamingArray<int32_t> next_tokens_unk) {
-  if (constrained_logits_processor_) {
+  if (!constrained_logits_processors_.empty()) {
     auto next_tokens = next_tokens_unk.GetCPU();
-    constrained_logits_processor_->CommitTokens(static_cast<uint32_t>(next_tokens[0]));
-    mask_future_ = std::async(std::launch::async, [&]() { return constrained_logits_processor_->ComputeMask(); });
+    for (int i = 0; i < next_tokens.size(); i++) {
+      constrained_logits_processors_[i]->CommitTokens(static_cast<uint32_t>(next_tokens[i]));
+    }
+    mask_future_ = std::async(std::launch::async, [&]() {
+      std::vector<std::vector<uint32_t>> result;
+      for (int i = 0; i < shape_[0]; i++) {
+        auto processor = constrained_logits_processors_.at(i).get();
+        auto mask = processor->ComputeMask();
+        result.push_back(mask);
+      }
+      return result;
+    });
   }
 
   if (output_raw_.get()->GetTensorTypeAndShapeInfo()->GetShape()[1] == 1) {
@@ -264,12 +288,13 @@ void Logits::HandleEOSArray(cpu_span<float> batched_logits) {
   }
 }
 
-void Logits::AddMask(cpu_span<float> logits, std::vector<uint32_t>& mask) {
+void Logits::AddMask(cpu_span<float> logits, std::vector<std::vector<uint32_t>>& masks) {
   size_t vocab_size = shape_[2];
   size_t vocab_index = 0;
 
   for (int index = 0; index < shape_[0]; index++) {
     auto logits_span = logits.subspan(vocab_index, vocab_size);
+    auto& mask = masks[index];
     for (size_t i = 0; i < vocab_size; i++) {
       logits_span[i] = mask[i / 32] & (1 << (i % 32)) ? logits_span[i] : std::numeric_limits<float>::lowest();
     }
