@@ -133,5 +133,9 @@ public class GenerationTest {
         assertEquals(outputIds[j], expectedOutput[i * maxLength + j]);
       }
     }
+
+    output.close();
+    params.close();
+    model.close();
   }
 }

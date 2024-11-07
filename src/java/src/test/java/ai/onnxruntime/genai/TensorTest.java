@@ -7,6 +7,7 @@ package ai.onnxruntime.genai;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
 import org.junit.jupiter.api.Test;
 
@@ -19,7 +20,7 @@ public class TensorTest {
     GeneratorParams params = generator.createGeneratorParams("Whatever");
     long[] shape = {2, 2};
     Tensor.ElementType elementType = Tensor.ElementType.float32;
-    ByteBuffer data = ByteBuffer.allocateDirect(4 * Float.BYTES);
+    ByteBuffer data = ByteBuffer.allocateDirect(4 * Float.BYTES).order(ByteOrder.nativeOrder());
 
     FloatBuffer floatBuffer = data.asFloatBuffer();
     floatBuffer.put(new float[] {1.0f, 2.0f, 3.0f, 4.0f});
@@ -45,7 +46,7 @@ public class TensorTest {
     // missing data
     assertThrows(GenAIException.class, () -> new Tensor(null, shape, elementType));
 
-    ByteBuffer data = ByteBuffer.allocateDirect(4 * Float.BYTES);
+    ByteBuffer data = ByteBuffer.allocateDirect(4 * Float.BYTES).order(ByteOrder.nativeOrder());
 
     // missing shape
     assertThrows(GenAIException.class, () -> new Tensor(data, null, elementType));

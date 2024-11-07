@@ -2,7 +2,7 @@
  * Copyright (c) Microsoft Corporation. All rights reserved.
  * Licensed under the MIT License.
  */
-#include "ai_onnxruntime_genai_Adapters.h"
+#include "ai_onnxruntime_genai_GenAI.h"
 
 #include "ort_genai_c.h"
 #include "utils.h"
