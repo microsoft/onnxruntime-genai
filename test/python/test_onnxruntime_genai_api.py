@@ -68,6 +68,105 @@ def test_greedy_search(test_data_path, relative_model_path):
         assert np.array_equal(expected_sequence[i], generator.get_sequence(i))
 
 
+@pytest.mark.parametrize(
+    "relative_model_path",
+    (
+        [
+            Path("hf-internal-testing") / "tiny-random-gpt2-fp32",
+            Path("hf-internal-testing") / "tiny-random-gpt2-fp32-cuda",
+            Path("hf-internal-testing") / "tiny-random-gpt2-fp16-cuda",
+        ]
+        if og.is_cuda_available()
+        else [Path("hf-internal-testing") / "tiny-random-gpt2-fp32"]
+    ),
+)
+def test_rewind_cuda(test_data_path, relative_model_path):
+    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+
+    model = og.Model(model_path)
+
+    # Batch size 1 (continuous decoding) case
+    input_ids_shape = [1, 4]
+    batch_size = input_ids_shape[0]
+    search_params = og.GeneratorParams(model)
+    search_params.set_search_options(do_sample=False, max_length=10, batch_size=batch_size)
+
+    generator = og.Generator(model, search_params)
+    generator.append_tokens(np.array([[0, 0, 195, 731]], dtype=np.int32))
+    while not generator.is_done():
+        generator.generate_next_token()
+
+    assert generator.get_sequence(0) is not None
+
+    generator.rewind_to(3)
+
+    generator.append_tokens(np.array([[731, 731]], dtype=np.int32))
+    while not generator.is_done():
+        generator.generate_next_token()
+    
+    assert generator.get_sequence(0) is not None
+
+    # Batch size > 1 case
+    input_ids_shape = [3, 4]
+    batch_size = input_ids_shape[0]
+    search_params = og.GeneratorParams(model)
+    search_params.set_search_options(do_sample=False, max_length=10, batch_size=batch_size)
+
+    generator = og.Generator(model, search_params)
+    generator.append_tokens(np.array([[0, 0, 0, 52], [0, 0, 195, 731], [64, 65, 66, 67]], dtype=np.int32))
+    while not generator.is_done():
+        generator.generate_next_token()
+    
+    for i in range(batch_size):
+        assert generator.get_sequence(i) is not None
+    
+    generator.rewind_to(0)
+
+    generator.append_tokens(np.array([[52, 204, 204, 204], [731, 731, 114, 114], [67, 68, 69, 70]], dtype=np.int32))
+    while not generator.is_done():
+        generator.generate_next_token()
+
+    for i in range(batch_size):
+        assert generator.get_sequence(i) is not None
+
+
+@pytest.mark.parametrize(
+    "relative_model_path",
+    (
+        [Path("hf-internal-testing") / "tiny-random-gpt2-fp32"]
+    ),
+)
+def test_rewind(test_data_path, relative_model_path):
+    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+
+    model = og.Model(model_path)
+
+    expected_sequence = np.array(
+        [0, 0, 195, 731, 731, 114, 114, 114, 114, 114],
+        dtype=np.int32,
+    )
+    
+    input_ids_shape = [1, 4]
+    batch_size = input_ids_shape[0]
+    search_params = og.GeneratorParams(model)
+    search_params.set_search_options(do_sample=False, max_length=10, batch_size=batch_size)
+
+    generator = og.Generator(model, search_params)
+    generator.append_tokens(np.array([[0, 0, 195, 731]], dtype=np.int32))
+    while not generator.is_done():
+        generator.generate_next_token()
+
+    assert np.array_equal(expected_sequence, generator.get_sequence(0))
+
+    generator.rewind_to(3)
+
+    generator.append_tokens(np.array([[731, 731]], dtype=np.int32))
+    while not generator.is_done():
+        generator.generate_next_token()
+    
+    assert np.array_equal(expected_sequence, generator.get_sequence(0))
+    
+
 # TODO: CUDA pipelines use python3.6 and do not have a way to download models since downloading models
 # requires pytorch and hf transformers. This test should be re-enabled once the pipeline is updated.
 @pytest.mark.skipif(

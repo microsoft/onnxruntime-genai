@@ -305,7 +305,6 @@ struct Phi2Test {
 
       // Decode One at a time
       for (size_t i = 0; i < 3; i++) {
-        std::cout << "sequence count:" << generator->GetSequenceCount(i) << std::endl;
         auto out_string = tokenizer_->Decode(generator->GetSequenceData(i), generator->GetSequenceCount(i));
         std::cout << "Decoded string:" << out_string << std::endl;
       }
@@ -545,8 +544,6 @@ TEST(CAPITests, BatchedRewindGptFp32CAPI) {
 }
 
 TEST(CAPITests, RewindGptFp32CAPI) {
-  // Oga::SetLogBool("enabled", true);
-  // Oga::SetLogBool("model_input_values", true);
   std::vector<int64_t> input_ids_shape{1, 4};
   std::vector<int32_t> input_ids{0, 0, 195, 731};
 
@@ -572,11 +569,7 @@ TEST(CAPITests, RewindGptFp32CAPI) {
   // Verify outputs match expected outputs
   auto sequence_length = generator->GetSequenceCount(0);
   auto* sequence_data = generator->GetSequenceData(0);
-  // std::cout << "sequence: " << sequence_length << std::endl;
-  // for (int i = 0; i < sequence_length; i++) {
-  //   std::cout << sequence_data[i] << " ";
-  // }
-  // std::cout << std::endl;
+
   ASSERT_LE(sequence_length, max_length);
   auto* expected_output_start = &expected_output[0];
   EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
@@ -610,7 +603,6 @@ TEST(CAPITests, RewindGptFp32CAPI) {
   ASSERT_LE(sequence_length, max_length);
   expected_output_start = &expected_output[0];
   EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
-  // Oga::SetLogBool("enabled", false);
 }
 
 
