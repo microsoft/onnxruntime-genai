@@ -624,6 +624,10 @@ def test(args: argparse.Namespace, env: dict[str, str]):
         csharp_test_command += _get_csharp_properties(args, ort_lib_dir=lib_dir)
         util.run(csharp_test_command, env=env, cwd=str(REPO_ROOT / "test" / "csharp"))
 
+    if args.build_java:
+        ctest_cmd = [str(args.ctest_path), "--build-config", args.config, "--verbose", "--timeout", "10800"]
+        util.run(ctest_cmd, cwd=str(args.build_dir / "src" / "java"))
+
     if args.android:
         _run_android_tests(args)
 

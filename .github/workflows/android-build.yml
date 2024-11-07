@@ -93,6 +93,11 @@ jobs:
           set -e -x
           ./build.sh --android --android_api=27 --android_ndk_path=${ANDROID_NDK_LATEST_HOME} --config=RelWithDebInfo --android_abi=${{ env.ANDROID_ABI }} --parallel --build_java --build
 
+      - name: Run Java test
+        run: |
+          set -e -x
+          ./build.sh --config=RelWithDebInfo --parallel --build_java --test
+
       - name: Enable KVM group perms so Android emulator can run
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
