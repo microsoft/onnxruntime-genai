@@ -3,7 +3,9 @@
  */
 package ai.onnxruntime.genai;
 
-/** The MultiModalProcessor class is responsible for converting text/images into a NamedTensors list that can be fed into a Generator class instance. */
+/**
+ * The MultiModalProcessor class is responsible for converting text/images into a NamedTensors list that can be fed into a Generator class instance.
+ */
 public class MultiModalProcessor implements AutoCloseable {
   private long nativeHandle;
 

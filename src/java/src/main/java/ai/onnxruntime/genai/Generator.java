@@ -21,7 +21,7 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
   /**
    * Constructs a Generator object with the given model and generator parameters.
    *
-   * @param model The model.
+   * @param model           The model.
    * @param generatorParams The generator parameters.
    * @throws GenAIException If the call to the GenAI native API fails.
    */
@@ -119,7 +119,8 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
 
   /**
    * Activates one of the loaded adapters.
-   * @param adapters The Adapters container.
+   *
+   * @param adapters    The Adapters container.
    * @param adapterName The adapter name that was previously loaded.
    * @throws GenAIException If the call to the GenAI native API fails.
    */
@@ -132,7 +133,9 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
   }
 
 
-  /** Closes the Generator and releases any associated resources. */
+  /**
+   * Closes the Generator and releases any associated resources.
+   */
   @Override
   public void close() {
     if (nativeHandle != 0) {
@@ -141,7 +144,9 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
     }
   }
 
-  /** The Iterator class for the Generator to simplify usage when streaming tokens. */
+  /**
+   * The Iterator class for the Generator to simplify usage when streaming tokens.
+   */
   private class Iterator implements java.util.Iterator<Integer> {
     @Override
     public boolean hasNext() {
