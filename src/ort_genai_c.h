@@ -51,6 +51,7 @@ typedef struct OgaResult OgaResult;
 typedef struct OgaGeneratorParams OgaGeneratorParams;
 typedef struct OgaGenerator OgaGenerator;
 typedef struct OgaRuntimeSettings OgaRuntimeSettings;
+typedef struct OgaConfig OgaConfig;
 typedef struct OgaModel OgaModel;
 // OgaSequences is an array of token arrays where the number of token arrays can be obtained using
 // OgaSequencesCount and the number of tokens in each token array can be obtained using OgaSequencesGetSequenceCount.
@@ -171,6 +172,12 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyRuntimeSettings(OgaRuntimeSettings* setti
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRuntimeSettingsSetHandle(OgaRuntimeSettings* settings, const char* handle_name, void* handle);
 
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateConfig(const char* config_path, OgaConfig** out);
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigClearProviders(OgaConfig* config);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetProvider(OgaConfig* config, const char* provider);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetProviderOption(OgaConfig* config, const char* provider, const char* key, const char* value);
+
 /*
  * \brief Creates a model from the given configuration directory and device type.
  * \param[in] config_path The path to the model configuration directory. The path is expected to be encoded in UTF-8.
@@ -181,6 +188,15 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRuntimeSettingsSetHandle(OgaRuntimeSetting
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaModel** out);
 
 /*
+ * \brief Creates a model from the given configuration directory and device type.
+ * \param[in] config_path The path to the model configuration directory. The path is expected to be encoded in UTF-8.
+ * \param[in] device_type The device type to use for the model.
+ * \param[out] out The created model.
+ * \return OgaResult containing the error message if the model creation failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModelFromConfig(OgaConfig* config, OgaModel** out);
+
+/*
  * \brief Creates a model from the given configuration directory, runtime settings and device type.
  * \param[in] config_path The path to the model configuration directory. The path is expected to be encoded in UTF-8.
  * \param[in] settings The runtime settings to use for the model.
@@ -189,6 +205,13 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaMo
  * \return OgaResult containing the error message if the model creation failed.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModelWithRuntimeSettings(const char* config_path, const OgaRuntimeSettings* settings, OgaModel** out);
+
+
+/*
+ * \brief Destroys the given config
+ * \param[in] config The config to be destroyed.
+ */
+OGA_EXPORT void OGA_API_CALL OgaDestroyConfig(OgaConfig* config);
 
 /*
  * \brief Destroys the given model.
