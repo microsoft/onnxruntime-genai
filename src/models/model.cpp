@@ -65,7 +65,18 @@ void State::Run(OrtSession& session, int new_batch_size) {
   }
 }
 
+void State::SetTerminate() {
+  session_terminated_ = true;
+  run_options_->SetTerminate();
+}
+
+void State::UnsetTerminate() {
+  session_terminated_ = false;
+  run_options_->UnsetTerminate();
+}
+
 OrtValue* State::GetInput(const char* name) {
+  ThrowErrorIfSessionTerminated(session_terminated_);
   for (size_t i = 0; i < input_names_.size(); i++) {
     if (std::strcmp(input_names_[i], name) == 0) {
       return inputs_[i];
@@ -75,6 +86,7 @@ OrtValue* State::GetInput(const char* name) {
 }
 
 OrtValue* State::GetOutput(const char* name) {
+  ThrowErrorIfSessionTerminated(session_terminated_);
   for (size_t i = 0; i < output_names_.size(); i++) {
     if (std::strcmp(output_names_[i], name) == 0) {
       return outputs_[i];
@@ -397,17 +409,18 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       }
       ort_provider_options->Update(keys.data(), values.data(), keys.size());
 
-      // Create and set our cudaStream_t
-      if (!cuda_stream_.get())
-        cuda_stream_.Create();
-
-      ort_provider_options->UpdateValue("user_compute_stream", cuda_stream_.get());
-
-      session_options.AppendExecutionProvider_CUDA_V2(*ort_provider_options);
       // Device type determines the scoring device.
       // Only use the primary session options to determine the device type
-      if (is_primary_session_options)
+      if (is_primary_session_options) {
         device_type_ = DeviceType::CUDA;  // Scoring will use CUDA
+        p_device_ = GetDeviceInterface(device_type_);
+
+        // Create and set our cudaStream_t
+        cuda_stream_ = p_device_->GetCudaStream();
+        ort_provider_options->UpdateValue("user_compute_stream", cuda_stream_);
+      }
+
+      session_options.AppendExecutionProvider_CUDA_V2(*ort_provider_options);
 
     } else if (provider_options.name == "rocm") {
       OrtROCMProviderOptions ort_provider_options;
@@ -480,6 +493,12 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       session_options.AppendExecutionProvider("WebGPU", opts);
     } else
       throw std::runtime_error("Unknown provider type: " + provider_options.name);
+  }
+
+  // If no device gets set, default to CPU
+  if (!p_device_) {
+    assert(device_type_ == DeviceType::CPU);
+    p_device_ = GetDeviceInterface(device_type_);
   }
 }
 

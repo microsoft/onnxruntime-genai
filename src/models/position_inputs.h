@@ -10,8 +10,7 @@
 namespace Generators {
 
 struct PositionInputs {
-  PositionInputs(const Model& model, State& state, RoamingArray<int32_t>& sequence_lengths);
-  PositionInputs(const Model& model, State& state);
+  PositionInputs(const Model& model, State& state, DeviceSpan<int32_t> sequence_lengths_unk);
 
   void Add();
   void Update(const RoamingArray<int32_t>& next_tokens_unk, int total_length, int new_length);

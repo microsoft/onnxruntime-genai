@@ -9,7 +9,7 @@
 
 namespace Generators {
 
-PositionInputs::PositionInputs(const Model& model, State& state, RoamingArray<int32_t>& sequence_lengths_unk)
+PositionInputs::PositionInputs(const Model& model, State& state, DeviceSpan<int32_t> sequence_lengths_unk)
     : model_{model},
       state_{state} {
   has_mask_input_ = model_.session_info_->HasInput(model_.config_->model.decoder.inputs.attention_mask);
@@ -33,10 +33,12 @@ PositionInputs::PositionInputs(const Model& model, State& state, RoamingArray<in
 
   std::array<int64_t, 2> shape{state_.params_->search.batch_size, 0};  // Only batch_size initially, as we haven't expanded over the beams yet
 
+  auto sequence_lengths = cpu_span<int32_t>{sequence_lengths_unk.CpuSpan()};
   if (type_ == Ort::TypeToTensorType<int32_t>)
-    InitializeSequenceLengths<int32_t>(shape, sequence_lengths_unk);
+    InitializeTensors<int32_t>(shape, sequence_lengths);
   else
-    InitializeSequenceLengths<int64_t>(shape, sequence_lengths_unk);
+    InitializeTensors<int64_t>(shape, sequence_lengths);
+  sequence_lengths_unk.CopyCpuToDevice();
 
   position_ids_shape_ = shape;
   attention_mask_shape_ = shape;

@@ -8,12 +8,12 @@ struct KV_Cache_Combined {
   KV_Cache_Combined(State& state);
 
   void Add();  // Add to state inputs/outputs
-  void Update(std::span<const int32_t> beam_indices, int total_length);
+  void Update(DeviceSpan<int32_t> beam_indices, int total_length);
   void RewindTo(size_t index);
 
   template <typename ScoreType>
-  void PickPastState(std::span<const int32_t> beam_indices, int index);
-  void PickPastState(std::span<const int32_t> beam_indices, int index);
+  void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
+  void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
 
  private:
   template <typename T>
@@ -44,11 +44,11 @@ struct KV_Cache {
   // Called only once during initialization of state.
   void Add();
   // Move present to past. Prepare present output for next generation iteration.
-  void Update(std::span<const int32_t> beam_indices, int total_length);
+  void Update(DeviceSpan<int32_t> beam_indices, int total_length);
   void RewindTo(size_t index);
   template <typename ScoreType>
-  void PickPastState(std::span<const int32_t> beam_indices, int index);
-  void PickPastState(std::span<const int32_t> beam_indices, int index);
+  void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
+  void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
 
  private:
   template <typename T>

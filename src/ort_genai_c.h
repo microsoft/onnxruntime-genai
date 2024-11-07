@@ -248,6 +248,7 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyGenerator(OgaGenerator* generator);
  * \return True if the generator has finished generating all the sequences, false otherwise.
  */
 OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsDone(const OgaGenerator* generator);
+OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsSessionTerminated(const OgaGenerator* generator);
 
 /*
  * \brief Adds the input ids to the generator. The input ids are used to seed the generation.
@@ -272,6 +273,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AppendTokens(OgaGenerator* oga_g
  * \return OgaResult containing the error message if the computation of the logits failed.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator);
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetRuntimeOption(OgaGenerator* generator, const char* key, const char* value);
 
 /*
  * \brief Rewinds the generator to the given length. This is useful when the user wants to rewind the generator to a specific length

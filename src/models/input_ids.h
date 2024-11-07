@@ -14,7 +14,7 @@ struct InputIDs {
   void Add();
   // Resize input_ids based on size of next_tokens.
   // Update value with next_tokens.
-  void Update(RoamingArray<int32_t> next_tokens);
+  void Update(DeviceSpan<int32_t> next_tokens);
 
   auto& GetShape() const { return shape_; }
   const char* name_;

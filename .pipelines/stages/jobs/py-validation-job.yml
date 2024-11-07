@@ -155,12 +155,17 @@ jobs:
       HuggingFaceToken: $(HF_TOKEN)
       os: ${{ parameters.os }}
 
+  - task: Docker@2
+    inputs:
+      containerRegistry: onnxruntimebuildcache
+      command: "login"
+      addPipelineData: false
+    displayName: "Log in to container registry"
+
   - ${{ if or(eq(parameters.os, 'linux'), eq(parameters.os, 'osx')) }}:
     - ${{ if eq(parameters.ep, 'cuda') }}:
       - bash: |
           set -e -x
-          az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
-          az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
           docker pull $(cuda_docker_image)
           python_exe=/opt/python/cp310-cp310/bin/python3.10
 
@@ -208,7 +213,9 @@ jobs:
         displayName: 'Download CUDA $(cuda_version)'
         workingDirectory: '$(Build.Repository.LocalPath)'
     - powershell: |
-        python -m pip install -r test/python/requirements.txt
+        if ("$(arch)" -ne "arm64") {
+          python -m pip install -r test/python/requirements.txt
+        }
         if ("$(ep)" -eq "cuda") {
           $env:CUDA_PATH = '$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)'
           $env:PATH = "$env:CUDA_PATH\bin;$env:CUDA_PATH\extras\CUPTI\lib64;$env:PATH"
@@ -220,6 +227,10 @@ jobs:
           python -m pip install -r test/python/directml/torch/requirements.txt
           python -m pip install -r test/python/directml/ort/requirements.txt
         }
+        elseif ("$(arch)" -eq "arm64") {
+          python -m pip install numpy<2
+          python -m pip install onnxruntime-qnn==1.20.0
+        }
         else {
           python -m pip install -r test/python/cpu/torch/requirements.txt
           python -m pip install -r test/python/cpu/ort/requirements.txt
@@ -227,7 +238,7 @@ jobs:
         cd examples\python
         python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)
 
-        python model-generate.py -m .\models\$(prebuild_phi3_mini_model_folder) --min_length 25 --max_length 50 --verbose
+        python model-generate.py -m .\models\$(prebuild_phi3_mini_model_folder) --min_length 25 --max_length 50 --batch_size_for_cuda_graph 3 --verbose
       displayName: 'Run Example With Artifact'
       workingDirectory: '$(Build.Repository.LocalPath)'
 

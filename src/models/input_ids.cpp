@@ -55,7 +55,8 @@ void InputIDs::Add() {
   }
 }
 
-void InputIDs::Update(RoamingArray<int32_t> new_tokens) {
+// TODO(aciddelgado): I believe new_tokens should be a cpu_span instead of DeviceSpan
+void InputIDs::Update(DeviceSpan<int32_t> new_tokens) {
   const auto get_unpadded_sequence_length = [](std::span<const int32_t> input_ids,
                                                int32_t pad_token_id) {
     int32_t seq_length = 0;
@@ -72,7 +73,7 @@ void InputIDs::Update(RoamingArray<int32_t> new_tokens) {
     if (state_.params_->BatchBeamSize() != 1) {
       throw std::runtime_error("Batch size must be 1 for current_sequence_length and past_sequence_length inputs");
     }
-    auto new_sequence_length = get_unpadded_sequence_length(new_tokens.GetCPU(), model_.config_->model.pad_token_id);
+    auto new_sequence_length = get_unpadded_sequence_length(new_tokens.CpuSpan(), model_.config_->model.pad_token_id);
     *current_sequence_length_->GetTensorMutableData<int32_t>() += new_sequence_length;
     *past_sequence_length_->GetTensorMutableData<int32_t>() += new_sequence_length;
   }
@@ -80,9 +81,9 @@ void InputIDs::Update(RoamingArray<int32_t> new_tokens) {
   // Resize input_ids shape based on new_tokens
   // Temporary solution for beam search
   // TODO(aciddelgado): for beam search lets call cuda::Launch_ExpandInputSequences
-  size_t sequence_length = static_cast<size_t>(new_tokens.GetCPU().size()) / state_.params_->BatchBeamSize();
+  size_t sequence_length = static_cast<size_t>(new_tokens.CpuSpan().size()) / state_.params_->BatchBeamSize();
   if (is_prompt_ && state_.params_->search.num_beams > 1)
-    sequence_length = static_cast<size_t>(new_tokens.GetCPU().size()) / state_.params_->search.batch_size;
+    sequence_length = static_cast<size_t>(new_tokens.CpuSpan().size()) / state_.params_->search.batch_size;
 
   if (static_cast<size_t>(shape_[1]) != sequence_length) {
     shape_[1] = sequence_length;
@@ -113,7 +114,7 @@ void InputIDs::Update(RoamingArray<int32_t> new_tokens) {
       case DeviceType::CUDA: {
 #if USE_CUDA
         auto* data = value_->GetTensorMutableData<int64_t>();
-        auto next_tokens = new_tokens.GetGPU();
+        auto next_tokens = new_tokens.Span();
         // Temporary solution for beam search
         if (is_prompt_ && state_.params_->search.num_beams > 1)
           cuda::LaunchExpandAndInt32ToInt64(next_tokens.data(), data, state_.params_->search.num_beams, state_.params_->search.batch_size, static_cast<int>(sequence_length), model_.cuda_stream_);
@@ -128,8 +129,8 @@ void InputIDs::Update(RoamingArray<int32_t> new_tokens) {
         Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, value_int32_->GetTensorMutableRawData(), &source_resource));
 
         auto source = std::span<const uint8_t>(
-            reinterpret_cast<const uint8_t*>(new_tokens.GetCPU().data()),
-            new_tokens.GetCPU().size_bytes());
+            reinterpret_cast<const uint8_t*>(new_tokens.CpuSpan().data()),
+            new_tokens.CpuSpan().size_bytes());
 
         model_.GetDmlUploadHeap()->BeginUploadToGpu(
             source_resource.Get(),
@@ -150,7 +151,7 @@ void InputIDs::Update(RoamingArray<int32_t> new_tokens) {
       default: {
         // CPU, WEBGPU
         auto* data = value_->GetTensorMutableData<int64_t>();
-        auto next_tokens = new_tokens.GetCPU();
+        auto next_tokens = new_tokens.Span();
         for (int b = 0; b < shape_[0]; b++) {
           for (int i = 0; i < shape_[1]; i++) {
             // Temporary solution for beam search
@@ -169,10 +170,9 @@ void InputIDs::Update(RoamingArray<int32_t> new_tokens) {
 #if USE_CUDA
     if (model_.device_type_ == DeviceType::CUDA) {
       if (is_prompt_ && state_.params_->search.num_beams > 1) {
-        auto next_tokens = new_tokens.GetGPU();
-        cuda::LaunchExpand(next_tokens.data(), data, state_.params_->search.num_beams, state_.params_->search.batch_size, static_cast<int>(sequence_length), model_.cuda_stream_);
+        cuda::LaunchExpand(new_tokens.Span().data(), data, state_.params_->search.num_beams, state_.params_->search.batch_size, static_cast<int>(sequence_length), model_.cuda_stream_);
       } else {
-        cudaMemcpyAsync(data, new_tokens.GetGPU().data(), shape_[0] * shape_[1] * sizeof(int32_t), cudaMemcpyDeviceToDevice, model_.cuda_stream_);
+        cudaMemcpyAsync(data, new_tokens.Span().data(), shape_[0] * shape_[1] * sizeof(int32_t), cudaMemcpyDeviceToDevice, model_.cuda_stream_);
       }
     } else
 #endif
@@ -182,10 +182,10 @@ void InputIDs::Update(RoamingArray<int32_t> new_tokens) {
         for (int b = 0; b < shape_[0]; b++) {
           int in_offset = (b / state_.params_->search.num_beams) * static_cast<int>(shape_[1]);
           int out_offset = b * static_cast<int>(shape_[1]);
-          memcpy(data + out_offset, new_tokens.GetCPU().data() + in_offset, shape_[1] * sizeof(int32_t));
+          memcpy(data + out_offset, new_tokens.CpuSpan().data() + in_offset, shape_[1] * sizeof(int32_t));
         }
       } else {
-        memcpy(data, new_tokens.GetCPU().data(), shape_[0] * shape_[1] * sizeof(int32_t));
+        memcpy(data, new_tokens.CpuSpan().data(), shape_[0] * shape_[1] * sizeof(int32_t));
       }
     }
   }

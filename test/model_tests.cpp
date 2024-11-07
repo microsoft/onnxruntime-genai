@@ -56,7 +56,7 @@ TEST(ModelTests, GreedySearchGptFp32) {
 
   // Verify outputs match expected outputs
   for (size_t i = 0; i < static_cast<size_t>(params->search.batch_size); i++) {
-    auto sequence = generator->GetSequence(i).CpuSpan();
+    auto sequence = generator->GetSequence(i).CopyDeviceToCpu();
     auto* expected_output_start = &expected_output[i * params->search.max_length];
     EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params->search.max_length * sizeof(int32_t)));
   }
@@ -128,7 +128,7 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
   // Verify outputs match expected outputs
   for (int i = 0; i < params->search.batch_size; i++) {
     auto sequence_gpu = generator->GetSequence(i);
-    auto sequence = sequence_gpu.CpuSpan();
+    auto sequence = sequence_gpu.CopyDeviceToCpu();
     auto* expected_output_start = &expected_output[i * params->search.max_length];
     EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params->search.max_length * sizeof(int32_t)));
   }
@@ -211,7 +211,7 @@ Print all primes between 1 and n
 
   auto result = generator->GetSequence(0);
 
-  std::cout << tokenizer->Decode(result.CpuSpan()) << "\r\n";
+  std::cout << tokenizer->Decode(result.CopyDeviceToCpu()) << "\r\n";
 #endif
 }
 

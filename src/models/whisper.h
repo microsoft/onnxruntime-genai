@@ -11,19 +11,19 @@ namespace Generators {
 struct Whisper_Model : Model {
   Whisper_Model(std::unique_ptr<Config> config, OrtEnv& ort_env);
 
-  std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params) const override;
+  std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const override;
 
   std::unique_ptr<OrtSession> session_encoder_;  // encoder_decoder_init.onnx
   std::unique_ptr<OrtSession> session_decoder_;  // decoder.onnx
 };
 
 struct Whisper_State : State {
-  Whisper_State(const Whisper_Model& model, RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params);
-  RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) override;
+  Whisper_State(const Whisper_Model& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params);
+  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t> next_tokens, DeviceSpan<int32_t> next_indices) override;
   OrtValue* GetOutput(const char* name) override;
 
  private:
-  void UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> next_indices, int current_length, bool search_buffers);
+  void UpdateInputsOutputs(const DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices, int current_length, bool search_buffers);
   void Finalize() override;
 
   const Whisper_Model& model_;
@@ -53,8 +53,7 @@ struct Whisper_State : State {
 
 #if USE_CUDA
   // Buffers for calculating word-level timestamps
-  cuda_unique_ptr<float*> cross_qk_ptrs_buffer_;  // To create and hold a reference to the GPU memory so it isn't freed
-  gpu_span<float*> output_cross_qk_ptrs_gpu_;     // To use for copying the CPU vector of float* pointers into
+  DeviceSpan<float*> cross_qk_ptrs_gpu_;  // To create and hold a reference to the GPU memory so it isn't freed
 #endif
   std::unique_ptr<OrtValue> alignment_heads_;         // { num_alignment_heads, 2 }
   std::unique_ptr<OrtValue> cross_qk_search_buffer_;  // { batch_beam_size, num_alignment_heads, max_length, 1500 }

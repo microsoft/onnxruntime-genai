@@ -119,16 +119,16 @@ def launch_chat_app(expose_locally: bool = False, model_name: str = "", model_pa
                 )
                 max_length_tokens = gr.Slider(
                     minimum=0,
-                    maximum=4096,
-                    value=2048,
-                    step=8,
+                    maximum=131072,
+                    value=8192,
+                    step=128,
                     interactive=True,
                     label="Max Token Length",
                 )
                 max_context_length_tokens = gr.Slider(
                     minimum=0,
-                    maximum=4096,
-                    value=2048,
+                    maximum=131072,
+                    value=8192,
                     step=128,
                     interactive=True,
                     label="Max History Token Length",
@@ -142,18 +142,18 @@ def launch_chat_app(expose_locally: bool = False, model_name: str = "", model_pa
                     label="Token Printing Step",
                     visible=False
                 )
-                image = gr.Image(type="filepath", visible=False)
-                image.change(
+                images = gr.File(file_count="multiple", file_types=["image"], label="Upload image(s)", visible=False)
+                images.change(
                     reset_state,
                     outputs=[chatbot, history, status_display],
                     show_progress=True,
                 )
-                image.change(**reset_args)
+                images.change(**reset_args)
 
                 model_name.change(
                     change_model_listener,
                     inputs=[model_name],
-                    outputs=[model_name, image, chatbot, history, user_input, status_display],
+                    outputs=[model_name, images, chatbot, history, user_input, status_display],
                 )
         gr.Markdown(description)
 
@@ -166,7 +166,7 @@ def launch_chat_app(expose_locally: bool = False, model_name: str = "", model_pa
                 max_length_tokens,
                 max_context_length_tokens,
                 token_printing_step,
-                image,
+                images,
             ],
             "outputs": [chatbot, history, status_display],
             "show_progress": True,
@@ -179,7 +179,7 @@ def launch_chat_app(expose_locally: bool = False, model_name: str = "", model_pa
                 max_length_tokens,
                 max_context_length_tokens,
                 token_printing_step,
-                image
+                images
             ],
             "outputs": [chatbot, history, status_display],
             "show_progress": True,
@@ -219,7 +219,7 @@ def launch_chat_app(expose_locally: bool = False, model_name: str = "", model_pa
             cancels=[predict_event1, predict_event2, predict_event3],
         )
 
-        demo.load(change_model_listener, inputs=[model_name], outputs=[model_name, image], concurrency_limit=1)
+        demo.load(change_model_listener, inputs=[model_name], outputs=[model_name, images], concurrency_limit=1)
 
     demo.title = "Local Model UI"
 
