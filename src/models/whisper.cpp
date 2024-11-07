@@ -138,7 +138,11 @@ WhisperDecoderState::WhisperDecoderState(const WhisperModel& model, const Genera
 RoamingArray<float> WhisperDecoderState::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
   int batch_size = static_cast<int>(input_ids_.GetShape()[0]);
   State::Run(*model_.session_decoder_, *model_.run_options_, batch_size);
-  return logits_.Get();
+  auto output = logits_.Get();
+  auto& stream = Log("After WhisperDecoderState ran in WhisperDecoderState::Run");
+  stream << std::endl;
+  DumpCudaSpan(stream, std::span<const float>(output.GetGPU()));
+  return output;
   // return MakeDummy();
 }
 
@@ -402,6 +406,10 @@ RoamingArray<float> WhisperState::Run(int current_length, RoamingArray<int32_t> 
     // decoded_length_ += 1;
     UpdateCrossQKSearchBuffer(current_length);
     first_run_ = false;
+
+    auto& stream = Log("After decoder-with-past ran inside WhisperState::Run");
+    stream << std::endl;
+    DumpCudaSpan(stream, std::span<const float>(logits.GetGPU()));
     return logits;
     // return decoder_state_->logits_.Get();
   }

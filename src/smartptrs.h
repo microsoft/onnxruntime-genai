@@ -18,10 +18,12 @@ struct GPU {};
 template <typename T>
 struct cpu_span : std::span<T> {
   using std::span<T>::span;
+  explicit cpu_span(std::span<T> v) : std::span<T>(v) {}
 };
 template <typename T>
 struct gpu_span : std::span<T> {
   using std::span<T>::span;
+  explicit gpu_span(std::span<T> v) : std::span<T>(v) {}
 };
 
 template <typename T>

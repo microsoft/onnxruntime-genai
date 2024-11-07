@@ -40,7 +40,7 @@ std::span<T> ToSpan(pybind11::array_t<T> v) {
 
 template <typename T>
 pybind11::array_t<T> ToPython(std::span<T> v) {
-  return pybind11::array_t<T>(v.size(), v.data());
+  return pybind11::array_t<T>{{v.size()}, {sizeof(T)}, v.data()};
 }
 
 ONNXTensorElementDataType ToTensorType(const pybind11::dtype& type) {
@@ -315,6 +315,16 @@ struct PyGenerator {
     return ToNumpy(generator_->state_->GetOutput(name.c_str()), *(generator_->model_));
   }
 
+  pybind11::array_t<float> GetLogits() {
+    py_logits_.Assign(generator_->search_->GetLogits());
+    return ToPython(py_logits_.GetCPU());
+  }
+
+  void SetLogits(pybind11::array_t<float> logits) {
+    logits_ = logits;
+    generator_->search_->SetLogits(cpu_span<float>{ToSpan(logits_)});
+  }
+
   void GenerateNextToken() {
     generator_->GenerateNextToken();
   }
@@ -329,6 +339,8 @@ struct PyGenerator {
   PyRoamingArray<int32_t> py_indices_;
   PyRoamingArray<int32_t> py_sequence_;
   PyRoamingArray<int32_t> py_sequencelengths_;
+  PyRoamingArray<float> py_logits_;
+  pybind11::array_t<float> logits_;  // Logits passed in from python, to keep the memory alive
 };
 
 void SetLogOptions(const pybind11::kwargs& dict) {
@@ -431,6 +443,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("is_done", &PyGenerator::IsDone)
       .def("compute_logits", &PyGenerator::ComputeLogits)
       .def("get_output", &PyGenerator::GetOutput)
+      .def("get_logits", &PyGenerator::GetLogits)
+      .def("set_logits", &PyGenerator::SetLogits)
       .def("generate_next_token", &PyGenerator::GenerateNextToken)
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
       .def("get_sequence", &PyGenerator::GetSequence);

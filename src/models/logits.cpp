@@ -74,6 +74,8 @@ RoamingArray<float> Logits::Get() {
       }
 
       for (int beam_index = 0; beam_index < num_beams; beam_index++) {
+        std::cout << "Token index = " << token_index << std::endl;
+        std::cout << "Vocab index = " << vocab_index << std::endl;
         switch (model_.device_type_) {
           case DeviceType::DML: {
 #if USE_DML
@@ -104,14 +106,18 @@ RoamingArray<float> Logits::Get() {
             auto logits_last_tokens = std::span<uint8_t>{logits_of_last_token->GetTensorMutableData<uint8_t>(), element_count_last_token * element_size};
             auto target = logits_last_tokens.subspan(vocab_index * element_size, vocab_size * element_size);
             auto source = logits_raw.subspan((vocab_index * seq_length + token_index * vocab_size) * element_size, vocab_size * element_size);
-            if (model_.device_type_ == DeviceType::CUDA)
+            if (model_.device_type_ == DeviceType::CUDA) {
 #if USE_CUDA
               CudaCheck() == cudaMemcpyAsync(target.data(), source.data(), source.size_bytes(), cudaMemcpyDeviceToDevice, state_.params_->cuda_stream);
+              auto& stream = Log("After cudaMemcpyAsync inside logits");
+              stream << std::endl;
+              DumpTensor(model_, stream, logits_of_last_token, true);
 #else
               throw std::runtime_error("Unexpected CUDA device usage");
 #endif
-            else
+            } else {
               copy(source, target);
+            }
           } break;
         }
 
@@ -145,6 +151,10 @@ RoamingArray<float> Logits::Get() {
       ConvertFp16ToFp32(*model_.allocator_device_, *logits_of_last_token, logits_of_last_token_fp32, model_.device_type_, model_.cuda_stream_);
       output_last_tokens_ = std::move(logits_of_last_token_fp32);  // use output_last_tokens_ to hold the fp32 logits
       logits_of_last_token = output_last_tokens_.get();
+
+      auto& stream = Log("After ConvertFp16ToFp32 inside logits");
+      stream << std::endl;
+      DumpTensor(model_, stream, logits_of_last_token, true);
     }
   }
 
@@ -168,6 +178,10 @@ RoamingArray<float> Logits::Get() {
           cuda_eos_token_ids_.data(),
           static_cast<int>(cuda_eos_token_ids_.size()),
           model_.cuda_stream_);
+
+    auto& stream = Log("After LaunchHandleEOSArray inside logits");
+    stream << std::endl;
+    DumpCudaSpan(stream, std::span<const float>(batched_logits_gpu));
     return batched_logits_gpu;
   }
 #elif USE_DML
