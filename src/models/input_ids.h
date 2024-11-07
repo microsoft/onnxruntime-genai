@@ -10,7 +10,7 @@ struct InputIDs {
   InputIDs& operator=(const InputIDs&) = delete;
 
   void Add();
-  void Update(RoamingArray<int32_t> next_tokens);
+  void Update(DeviceSpan<int32_t> next_tokens);
 
   auto& GetShape() const { return shape_; }
   const char* name_;

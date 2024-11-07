@@ -30,7 +30,7 @@ struct State {
   State(const GeneratorParams& params, const Model& model_);
   virtual ~State();
 
-  virtual RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices = {}) = 0;
+  virtual DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t> next_tokens, DeviceSpan<int32_t> next_indices = {}) = 0;
   virtual const CapturedGraphInfo* GetCapturedGraphInfo() const { return nullptr; }
   virtual void Finalize() {}
 
@@ -132,7 +132,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
 
   std::shared_ptr<MultiModalProcessor> CreateMultiModalProcessor() const;
 
-  virtual std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params) const = 0;
+  virtual std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const = 0;
 
   std::unique_ptr<OrtValue> ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams) const;
 
@@ -143,7 +143,8 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
 
-  cuda_stream_holder cuda_stream_;
+  cudaStream_t cuda_stream_{};
+  DeviceInterface* p_device_{};
   DeviceType device_type_{DeviceType::CPU};
   Ort::Allocator& allocator_cpu_{Ort::Allocator::GetWithDefaultOptions()};
   Ort::Allocator* allocator_device_{};   // Can be CUDA or CPU based on the DeviceType in the model

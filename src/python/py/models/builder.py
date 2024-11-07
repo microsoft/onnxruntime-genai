@@ -364,6 +364,11 @@ class Model:
             ep_options = { self.ep : self.ep_attrs[self.ep] }
             genai_config["model"]["decoder"]["session_options"]["provider_options"].append(ep_options)
 
+        if self.extra_options.get("prompt_templates", "0") == "1":
+            prompt_templates = self._get_prompt_templates(model_name_or_path, extra_kwargs)
+            if prompt_templates is not None:
+                genai_config["model"]["prompt_templates"] = prompt_templates
+
         print(f"Saving GenAI config in {out_dir}")
         with open(os.path.join(out_dir,"genai_config.json"), "w") as f:
             json.dump(genai_config, f, indent=4)
@@ -373,6 +378,30 @@ class Model:
         print(f"Saving processing files in {out_dir} for GenAI")
         tokenizer.save_pretrained(out_dir)
 
+    def _get_prompt_templates(self, hf_name, extra_kwargs):
+        try:
+            # disable end of sentence padding with eos_token=None
+            tokenizer = AutoTokenizer.from_pretrained(hf_name, token=self.hf_token, trust_remote_code=True, eos_token=None, **extra_kwargs)
+            system_template = tokenizer.apply_chat_template([{'role': 'system', 'content': '{Content}'}], tokenize=False)
+            system_user_template = tokenizer.apply_chat_template([{'role': 'system', 'content': '{Content}'}, {'role': 'user', 'content': '{Content}'}], tokenize=False)
+            system_user_assistant_template = tokenizer.apply_chat_template([{'role': 'system', 'content': '{Content}'}, {'role': 'user', 'content': '{Content}'}, {'role': 'assistant', 'content': '{Content}'}], tokenize=False)
+            assert system_user_template.startswith(system_template), "Chat templates may contain padding tokens, leading to incorrect prompt templates"
+            assert system_user_assistant_template.startswith(system_user_template), "Chat templates may contain padding tokens, leading to incorrect prompt templates"
+            user_template = system_user_template[len(system_template):]
+            assistant_template = system_user_assistant_template[len(system_user_template):]
+            prompt_template = system_user_assistant_template[len(system_template):]
+            prompt_template = prompt_template[:prompt_template.rfind('{Content}')]
+            templates = {
+                "system": system_template,
+                "user": user_template,
+                "assistant": assistant_template,
+                "prompt": prompt_template
+            }
+            return templates 
+        except Exception as e:
+            print(f"Failed to get prompt templates. Error: {e}")
+            return None
+        
     def save_model(self, out_dir):
         print(f"Saving ONNX model in {out_dir}")
         gc.collect()
@@ -3224,6 +3253,7 @@ def get_args():
                     If you have already authenticated via `huggingface-cli login`, you do not need to use this flag because Hugging Face has already stored your authentication token for you.
                 use_qdq = 1: Use the QDQ decomposition for quantized MatMul instead of the MatMulNBits operator.
                 adapter_path = Path to folder on disk containing the adapter files (adapter_config.json and adapter model weights).
+                prompt_templates = 1: Include per-role prompt templates in the GenAI config file. Default is 0 (not to include).
             """),
     )
 

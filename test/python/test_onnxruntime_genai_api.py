@@ -58,6 +58,12 @@ def test_greedy_search(test_data_path, relative_model_path):
     generator = og.Generator(model, search_params)
     while not generator.is_done():
         generator.compute_logits()
+
+        # Test getting/setting logits
+        logits = generator.get_logits()
+        generator.set_logits(logits)
+        generator.set_logits(logits) # twice just to be sure buffer is still valid
+
         generator.generate_next_token()
 
     expected_sequence = np.array(

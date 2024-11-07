@@ -13,6 +13,8 @@ struct GenaiInterface {
 
   virtual void DumpSpan(std::ostream& stream, std::span<const float> values) = 0;
   virtual void DumpSpan(std::ostream& stream, std::span<const int> values) = 0;
+
+  virtual void Sequences_AfterAppendNextTokens(Generators::Sequences* p_this, Generators::DeviceSpan<int32_t> next_tokens) = 0;
 };
 
 namespace Generators {
@@ -36,16 +38,10 @@ struct CudaInterface : DeviceInterface {
   virtual void LaunchCopyCrossQKSingleDecodeStep(cudaStream_t stream, float* cross_qk_buffer_data, float** qk_layer_pointers, int token_index, int batch_beam_size, int num_layers, int num_heads, int num_alignment_heads, const int* alignment_heads, int frames, int max_length) = 0;
   virtual void LaunchFinalizeCrossQK(cudaStream_t stream, int iteration_number, int context_decoding_len, int batch_size, int num_beams, int max_length, int num_alignment_heads, int frames_of_k, const float* cross_qk_buffer_data, float* cross_qk_output, int num_return_sequences, const int* cache_indir_data) = 0;
 
-  virtual cudaError_t cudaStreamCreate(cudaStream_t* stream) = 0;
-  virtual cudaError_t cudaStreamDestroy(cudaStream_t stream) = 0;
   virtual cudaError_t cudaMemcpyAsync(void* dst, const void* src, size_t count, cudaMemcpyKind kind, cudaStream_t stream) = 0;
   virtual cudaError_t cudaMemcpy(void* dst, const void* src, size_t count, cudaMemcpyKind kind) = 0;
   virtual cudaError_t cudaMemsetAsync(void* ptr, int value, size_t count, cudaStream_t stream) = 0;
   virtual cudaError_t cudaMemset(void* ptr, int value, size_t count) = 0;
-  virtual cudaError_t cudaMalloc(void** ptr, size_t size) = 0;
-  virtual cudaError_t cudaFree(void* ptr) = 0;
-  virtual cudaError_t cudaHostAlloc(void** ptr, size_t size, unsigned int flags) = 0;
-  virtual cudaError_t cudaFreeHost(void* ptr) = 0;
 };
 #endif
 }  // namespace Generators
