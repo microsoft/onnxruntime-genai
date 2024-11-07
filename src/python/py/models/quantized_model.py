@@ -104,6 +104,8 @@ class QuantizedModel:
         self.layers = {}
         self.num_layers = num_layers
 
+        is_lora = adapter_path is not None
+
         self.map_to_modules(quant_type, input_path, bits, group_size, q_size, kv_size, intermediate_size, adapter_path)
 
         if adapter_path is not None:
@@ -121,7 +123,7 @@ class QuantizedModel:
         self.layers.sort(key=lambda m: m.layer_id)
 
         # Set properties of each layer based on quantization type
-        self.set_properties()
+        self.set_properties(is_lora)
 
     def map_to_modules(self, quant_type, file_path, bits, group_size, q_size, kv_size, intermediate_size, adapter_path):
         layer_id = 0
@@ -410,7 +412,7 @@ class QuantizedModel:
         if not isinstance(self.lm_head, QuantizedTensorModule):
             self.lm_head = QuantizedTensorModule(bits, group_size)
 
-    def set_properties(self):
+    def set_properties(self, is_lora):
         """
         Set in_features, out_features, and g_idx based on quantization type
         """
@@ -431,46 +433,49 @@ class QuantizedModel:
                 # Set in_features and out_features
                 module.self_attn.q_proj.out_features = module.self_attn.q_proj.scales.shape[1]
                 module.self_attn.q_proj.in_features = module.self_attn.q_proj.qweight.shape[0]
-                module.self_attn.q_proj.lora_A.out_features = module.self_attn.q_proj.lora_A.weight.shape[1]
-                module.self_attn.q_proj.lora_A.in_features = module.self_attn.q_proj.lora_A.weight.shape[0]
-                module.self_attn.q_proj.lora_B.out_features = module.self_attn.q_proj.lora_B.weight.shape[1]
-                module.self_attn.q_proj.lora_B.in_features = module.self_attn.q_proj.lora_B.weight.shape[0]
                 module.self_attn.k_proj.out_features = module.self_attn.k_proj.scales.shape[1]
                 module.self_attn.k_proj.in_features = module.self_attn.k_proj.qweight.shape[0]
-                module.self_attn.k_proj.lora_A.out_features = module.self_attn.k_proj.lora_A.weight.shape[1]
-                module.self_attn.k_proj.lora_A.in_features = module.self_attn.k_proj.lora_A.weight.shape[0]
-                module.self_attn.k_proj.lora_B.out_features = module.self_attn.k_proj.lora_B.weight.shape[1]
-                module.self_attn.k_proj.lora_B.in_features = module.self_attn.k_proj.lora_B.weight.shape[0]
                 module.self_attn.v_proj.out_features = module.self_attn.v_proj.scales.shape[1]
                 module.self_attn.v_proj.in_features = module.self_attn.v_proj.qweight.shape[0]
-                module.self_attn.v_proj.lora_A.out_features = module.self_attn.v_proj.lora_A.weight.shape[1]
-                module.self_attn.v_proj.lora_A.in_features = module.self_attn.v_proj.lora_A.weight.shape[0]
-                module.self_attn.v_proj.lora_B.out_features = module.self_attn.v_proj.lora_B.weight.shape[1]
-                module.self_attn.v_proj.lora_B.in_features = module.self_attn.v_proj.lora_B.weight.shape[0]
                 module.self_attn.o_proj.out_features = module.self_attn.o_proj.scales.shape[1]
                 module.self_attn.o_proj.in_features = module.self_attn.o_proj.qweight.shape[0]
-                module.self_attn.o_proj.lora_A.out_features = module.self_attn.o_proj.lora_A.weight.shape[1]
-                module.self_attn.o_proj.lora_A.in_features = module.self_attn.o_proj.lora_A.weight.shape[0]
-                module.self_attn.o_proj.lora_B.out_features = module.self_attn.o_proj.lora_B.weight.shape[1]
-                module.self_attn.o_proj.lora_B.in_features = module.self_attn.o_proj.lora_B.weight.shape[0]
                 module.mlp.gate_proj.out_features = module.mlp.gate_proj.scales.shape[1]
                 module.mlp.gate_proj.in_features = module.mlp.gate_proj.qweight.shape[0]
-                module.mlp.gate_proj.lora_A.out_features = module.mlp.gate_proj.lora_A.weight.shape[1]
-                module.mlp.gate_proj.lora_A.in_features = module.mlp.gate_proj.lora_A.weight.shape[0]
-                module.mlp.gate_proj.lora_B.out_features = module.mlp.gate_proj.lora_B.weight.shape[1]
-                module.mlp.gate_proj.lora_B.in_features = module.mlp.gate_proj.lora_B.weight.shape[0]
                 module.mlp.up_proj.out_features = module.mlp.up_proj.scales.shape[1]
                 module.mlp.up_proj.in_features = module.mlp.up_proj.qweight.shape[0]
-                module.mlp.up_proj.lora_A.out_features = module.mlp.up_proj.lora_A.weight.shape[1]
-                module.mlp.up_proj.lora_A.in_features = module.mlp.up_proj.lora_A.weight.shape[0]
-                module.mlp.up_proj.lora_B.out_features = module.mlp.up_proj.lora_B.weight.shape[1]
-                module.mlp.up_proj.lora_B.in_features = module.mlp.up_proj.lora_B.weight.shape[0]
                 module.mlp.down_proj.out_features = module.mlp.down_proj.scales.shape[1]
                 module.mlp.down_proj.in_features = module.mlp.down_proj.qweight.shape[0]
-                module.mlp.down_proj.lora_A.out_features = module.mlp.down_proj.lora_A.weight.shape[1]
-                module.mlp.down_proj.lora_A.in_features = module.mlp.down_proj.lora_A.weight.shape[0]
-                module.mlp.down_proj.lora_B.out_features = module.mlp.down_proj.lora_B.weight.shape[1]
-                module.mlp.down_proj.lora_B.in_features = module.mlp.down_proj.lora_B.weight.shape[0]
+
+                if is_lora:
+                    module.self_attn.q_proj.lora_A.out_features = module.self_attn.q_proj.lora_A.weight.shape[1]
+                    module.self_attn.q_proj.lora_A.in_features = module.self_attn.q_proj.lora_A.weight.shape[0]
+                    module.self_attn.q_proj.lora_B.out_features = module.self_attn.q_proj.lora_B.weight.shape[1]
+                    module.self_attn.q_proj.lora_B.in_features = module.self_attn.q_proj.lora_B.weight.shape[0]
+                    module.self_attn.k_proj.lora_A.out_features = module.self_attn.k_proj.lora_A.weight.shape[1]
+                    module.self_attn.k_proj.lora_A.in_features = module.self_attn.k_proj.lora_A.weight.shape[0]
+                    module.self_attn.k_proj.lora_B.out_features = module.self_attn.k_proj.lora_B.weight.shape[1]
+                    module.self_attn.k_proj.lora_B.in_features = module.self_attn.k_proj.lora_B.weight.shape[0]
+                    module.self_attn.v_proj.lora_A.out_features = module.self_attn.v_proj.lora_A.weight.shape[1]
+                    module.self_attn.v_proj.lora_A.in_features = module.self_attn.v_proj.lora_A.weight.shape[0]
+                    module.self_attn.v_proj.lora_B.out_features = module.self_attn.v_proj.lora_B.weight.shape[1]
+                    module.self_attn.v_proj.lora_B.in_features = module.self_attn.v_proj.lora_B.weight.shape[0]
+                    module.self_attn.o_proj.lora_A.out_features = module.self_attn.o_proj.lora_A.weight.shape[1]
+                    module.self_attn.o_proj.lora_A.in_features = module.self_attn.o_proj.lora_A.weight.shape[0]
+                    module.self_attn.o_proj.lora_B.out_features = module.self_attn.o_proj.lora_B.weight.shape[1]
+                    module.self_attn.o_proj.lora_B.in_features = module.self_attn.o_proj.lora_B.weight.shape[0]
+                    module.mlp.gate_proj.lora_A.out_features = module.mlp.gate_proj.lora_A.weight.shape[1]
+                    module.mlp.gate_proj.lora_A.in_features = module.mlp.gate_proj.lora_A.weight.shape[0]
+                    module.mlp.gate_proj.lora_B.out_features = module.mlp.gate_proj.lora_B.weight.shape[1]
+                    module.mlp.gate_proj.lora_B.in_features = module.mlp.gate_proj.lora_B.weight.shape[0]
+                    module.mlp.up_proj.lora_A.out_features = module.mlp.up_proj.lora_A.weight.shape[1]
+                    module.mlp.up_proj.lora_A.in_features = module.mlp.up_proj.lora_A.weight.shape[0]
+                    module.mlp.up_proj.lora_B.out_features = module.mlp.up_proj.lora_B.weight.shape[1]
+                    module.mlp.up_proj.lora_B.in_features = module.mlp.up_proj.lora_B.weight.shape[0]
+                    module.mlp.down_proj.lora_A.out_features = module.mlp.down_proj.lora_A.weight.shape[1]
+                    module.mlp.down_proj.lora_A.in_features = module.mlp.down_proj.lora_A.weight.shape[0]
+                    module.mlp.down_proj.lora_B.out_features = module.mlp.down_proj.lora_B.weight.shape[1]
+                    module.mlp.down_proj.lora_B.in_features = module.mlp.down_proj.lora_B.weight.shape[0]
+
 
                 # Set g_idx if not already set
                 module.self_attn.q_proj.g_idx = module.self_attn.q_proj.g_idx if module.self_attn.q_proj.g_idx is not None else torch.tensor([i // module.self_attn.q_proj.group_size for i in range(module.self_attn.q_proj.in_features)], dtype=torch.int32)
@@ -485,46 +490,47 @@ class QuantizedModel:
                 # Set in_features and out_features
                 module.self_attn.q_proj.out_features = module.self_attn.q_proj.qweight.shape[1]
                 module.self_attn.q_proj.in_features = module.self_attn.q_proj.g_idx.shape[0]
-                module.self_attn.q_proj.lora_A.out_features = module.self_attn.q_proj.lora_A.weight.shape[1]
-                module.self_attn.q_proj.lora_A.in_features = module.self_attn.q_proj.lora_A.weight.shape[0]
-                module.self_attn.q_proj.lora_B.out_features = module.self_attn.q_proj.lora_B.weight.shape[1]
-                module.self_attn.q_proj.lora_B.in_features = module.self_attn.q_proj.lora_B.weight.shape[0]
                 module.self_attn.k_proj.out_features = module.self_attn.k_proj.qweight.shape[1]
                 module.self_attn.k_proj.in_features = module.self_attn.k_proj.g_idx.shape[0]
-                module.self_attn.k_proj.lora_A.out_features = module.self_attn.k_proj.lora_A.weight.shape[1]
-                module.self_attn.k_proj.lora_A.in_features = module.self_attn.k_proj.lora_A.weight.shape[0]
-                module.self_attn.k_proj.lora_B.out_features = module.self_attn.k_proj.lora_B.weight.shape[1]
-                module.self_attn.k_proj.lora_B.in_features = module.self_attn.k_proj.lora_B.weight.shape[0]
                 module.self_attn.v_proj.out_features = module.self_attn.v_proj.qweight.shape[1]
                 module.self_attn.v_proj.in_features = module.self_attn.v_proj.g_idx.shape[0]
-                module.self_attn.v_proj.lora_A.out_features = module.self_attn.v_proj.lora_A.weight.shape[1]
-                module.self_attn.v_proj.lora_A.in_features = module.self_attn.v_proj.lora_A.weight.shape[0]
-                module.self_attn.v_proj.lora_B.out_features = module.self_attn.v_proj.lora_B.weight.shape[1]
-                module.self_attn.v_proj.lora_B.in_features = module.self_attn.v_proj.lora_B.weight.shape[0]
                 module.self_attn.o_proj.out_features = module.self_attn.o_proj.qweight.shape[1]
                 module.self_attn.o_proj.in_features = module.self_attn.o_proj.g_idx.shape[0]
-                module.self_attn.o_proj.lora_A.out_features = module.self_attn.o_proj.lora_A.weight.shape[1]
-                module.self_attn.o_proj.lora_A.in_features = module.self_attn.o_proj.lora_A.weight.shape[0]
-                module.self_attn.o_proj.lora_B.out_features = module.self_attn.o_proj.lora_B.weight.shape[1]
-                module.self_attn.o_proj.lora_B.in_features = module.self_attn.o_proj.lora_B.weight.shape[0]
                 module.mlp.gate_proj.out_features = module.mlp.gate_proj.qweight.shape[1]
                 module.mlp.gate_proj.in_features = module.mlp.gate_proj.g_idx.shape[0]
-                module.mlp.gate_proj.lora_A.out_features = module.mlp.gate_proj.lora_A.weight.shape[1]
-                module.mlp.gate_proj.lora_A.in_features = module.mlp.gate_proj.lora_A.weight.shape[0]
-                module.mlp.gate_proj.lora_B.out_features = module.mlp.gate_proj.lora_B.weight.shape[1]
-                module.mlp.gate_proj.lora_B.in_features = module.mlp.gate_proj.lora_B.weight.shape[0]
                 module.mlp.up_proj.out_features = module.mlp.up_proj.qweight.shape[1]
                 module.mlp.up_proj.in_features = module.mlp.up_proj.g_idx.shape[0]
-                module.mlp.up_proj.lora_A.out_features = module.mlp.up_proj.lora_A.weight.shape[1]
-                module.mlp.up_proj.lora_A.in_features = module.mlp.up_proj.lora_A.weight.shape[0]
-                module.mlp.up_proj.lora_B.out_features = module.mlp.up_proj.lora_B.weight.shape[1]
-                module.mlp.up_proj.lora_B.in_features = module.mlp.up_proj.lora_B.weight.shape[0]
                 module.mlp.down_proj.out_features = module.mlp.down_proj.qweight.shape[1]
                 module.mlp.down_proj.in_features = module.mlp.down_proj.g_idx.shape[0]
-                module.mlp.down_proj.lora_A.out_features = module.mlp.down_proj.lora_A.weight.shape[1]
-                module.mlp.down_proj.lora_A.in_features = module.mlp.down_proj.lora_A.weight.shape[0]
-                module.mlp.down_proj.lora_B.out_features = module.mlp.down_proj.lora_B.weight.shape[1]
-                module.mlp.down_proj.lora_B.in_features = module.mlp.down_proj.lora_B.weight.shape[0]
+                if is_lora:
+                    module.self_attn.q_proj.lora_A.out_features = module.self_attn.q_proj.lora_A.weight.shape[1]
+                    module.self_attn.q_proj.lora_A.in_features = module.self_attn.q_proj.lora_A.weight.shape[0]
+                    module.self_attn.q_proj.lora_B.out_features = module.self_attn.q_proj.lora_B.weight.shape[1]
+                    module.self_attn.q_proj.lora_B.in_features = module.self_attn.q_proj.lora_B.weight.shape[0]
+                    module.self_attn.k_proj.lora_A.out_features = module.self_attn.k_proj.lora_A.weight.shape[1]
+                    module.self_attn.k_proj.lora_A.in_features = module.self_attn.k_proj.lora_A.weight.shape[0]
+                    module.self_attn.k_proj.lora_B.out_features = module.self_attn.k_proj.lora_B.weight.shape[1]
+                    module.self_attn.k_proj.lora_B.in_features = module.self_attn.k_proj.lora_B.weight.shape[0]
+                    module.self_attn.v_proj.lora_A.out_features = module.self_attn.v_proj.lora_A.weight.shape[1]
+                    module.self_attn.v_proj.lora_A.in_features = module.self_attn.v_proj.lora_A.weight.shape[0]
+                    module.self_attn.v_proj.lora_B.out_features = module.self_attn.v_proj.lora_B.weight.shape[1]
+                    module.self_attn.v_proj.lora_B.in_features = module.self_attn.v_proj.lora_B.weight.shape[0]
+                    module.self_attn.o_proj.lora_A.out_features = module.self_attn.o_proj.lora_A.weight.shape[1]
+                    module.self_attn.o_proj.lora_A.in_features = module.self_attn.o_proj.lora_A.weight.shape[0]
+                    module.self_attn.o_proj.lora_B.out_features = module.self_attn.o_proj.lora_B.weight.shape[1]
+                    module.self_attn.o_proj.lora_B.in_features = module.self_attn.o_proj.lora_B.weight.shape[0]
+                    module.mlp.gate_proj.lora_A.out_features = module.mlp.gate_proj.lora_A.weight.shape[1]
+                    module.mlp.gate_proj.lora_A.in_features = module.mlp.gate_proj.lora_A.weight.shape[0]
+                    module.mlp.gate_proj.lora_B.out_features = module.mlp.gate_proj.lora_B.weight.shape[1]
+                    module.mlp.gate_proj.lora_B.in_features = module.mlp.gate_proj.lora_B.weight.shape[0]
+                    module.mlp.up_proj.lora_A.out_features = module.mlp.up_proj.lora_A.weight.shape[1]
+                    module.mlp.up_proj.lora_A.in_features = module.mlp.up_proj.lora_A.weight.shape[0]
+                    module.mlp.up_proj.lora_B.out_features = module.mlp.up_proj.lora_B.weight.shape[1]
+                    module.mlp.up_proj.lora_B.in_features = module.mlp.up_proj.lora_B.weight.shape[0]
+                    module.mlp.down_proj.lora_A.out_features = module.mlp.down_proj.lora_A.weight.shape[1]
+                    module.mlp.down_proj.lora_A.in_features = module.mlp.down_proj.lora_A.weight.shape[0]
+                    module.mlp.down_proj.lora_B.out_features = module.mlp.down_proj.lora_B.weight.shape[1]
+                    module.mlp.down_proj.lora_B.in_features = module.mlp.down_proj.lora_B.weight.shape[0]
 
             else:
                 raise NotImplementedError(f"The {self.quant_type} quantization method is not recognized.")
