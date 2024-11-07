@@ -46,34 +46,41 @@ class QuantizedTensorModule:
 
         return qweight + qzeros + scales + g_idx + in_feats + out_feats + bits + group_size
 
-class QuantizedLoraModule(QuantizedTensorModule):
-    def __init__(self, bits, group_size):
-        super().__init__(bits, group_size)
-        self.lora_A = TensorModule()
-        self.lora_B = TensorModule()
 
 class TensorModule:
     def __init__(self):
         self.weight = None
         self.bias = None
 
+    @property
+    def default(self):
+        return self
+
+
+class QuantizedLoRAModule(QuantizedTensorModule):
+    def __init__(self, bits, group_size):
+        super().__init__(bits, group_size)
+        self.lora_A = TensorModule()
+        self.lora_B = TensorModule()
+        self.scaling = {"default": 1}
+
 
 class QuantizedAttention:
     def __init__(self, bits, group_size, is_lora):
-        self.q_proj = QuantizedTensorModule(bits, group_size) if not is_lora else QuantizedLoraModule(bits, group_size)
-        self.k_proj = QuantizedTensorModule(bits, group_size) if not is_lora else QuantizedLoraModule(bits, group_size)
-        self.v_proj = QuantizedTensorModule(bits, group_size) if not is_lora else QuantizedLoraModule(bits, group_size)
-        self.o_proj = QuantizedTensorModule(bits, group_size) if not is_lora else QuantizedLoraModule(bits, group_size)
+        self.q_proj = QuantizedTensorModule(bits, group_size) if not is_lora else QuantizedLoRAModule(bits, group_size)
+        self.k_proj = QuantizedTensorModule(bits, group_size) if not is_lora else QuantizedLoRAModule(bits, group_size)
+        self.v_proj = QuantizedTensorModule(bits, group_size) if not is_lora else QuantizedLoRAModule(bits, group_size)
+        self.o_proj = QuantizedTensorModule(bits, group_size) if not is_lora else QuantizedLoRAModule(bits, group_size)
         self.rotary_emb = TensorModule()
 
 
 class QuantizedMLP:
     def __init__(self, bits, group_size, is_lora):
-        self.gate_proj = QuantizedTensorModule(bits, group_size) if not is_lora else QuantizedLoraModule(bits, group_size)
-        self.up_proj = QuantizedTensorModule(bits, group_size) if not is_lora else QuantizedLoraModule(bits, group_size)
-        self.down_proj = QuantizedTensorModule(bits, group_size) if not is_lora else QuantizedLoraModule(bits, group_size)
-        self.fc1 = QuantizedTensorModule(bits, group_size) if not is_lora else QuantizedLoraModule(bits, group_size)
-        self.fc2 = QuantizedTensorModule(bits, group_size) if not is_lora else QuantizedLoraModule(bits, group_size)
+        self.gate_proj = QuantizedTensorModule(bits, group_size) if not is_lora else QuantizedLoRAModule(bits, group_size)
+        self.up_proj = QuantizedTensorModule(bits, group_size) if not is_lora else QuantizedLoRAModule(bits, group_size)
+        self.down_proj = QuantizedTensorModule(bits, group_size) if not is_lora else QuantizedLoRAModule(bits, group_size)
+        self.fc1 = QuantizedTensorModule(bits, group_size) if not is_lora else QuantizedLoRAModule(bits, group_size)
+        self.fc2 = QuantizedTensorModule(bits, group_size) if not is_lora else QuantizedLoRAModule(bits, group_size)
 
 
 class QuantizedDecoderLayer:
@@ -418,6 +425,7 @@ class QuantizedModel:
                 self.lm_head.in_features = self.lm_head.g_idx.shape[0]
             else:
                 raise NotImplementedError(f"The {self.quant_type} quantization method is not recognized.")
+        
         for module in self.layers:
             if self.quant_type == "awq":
                 # Set in_features and out_features
