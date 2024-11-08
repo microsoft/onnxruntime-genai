@@ -40,7 +40,7 @@ public final class Tensor implements AutoCloseable {
    * @param data The data for the Tensor. Must be a direct ByteBuffer with native byte order.
    * @param shape The shape of the Tensor.
    * @param elementType The type of elements in the Tensor.
-   * @throws GenAIException
+   * @throws GenAIException If the call to the GenAI native API fails.
    */
   public Tensor(ByteBuffer data, long[] shape, ElementType elementType) throws GenAIException {
     if (data == null || shape == null || elementType == ElementType.undefined) {

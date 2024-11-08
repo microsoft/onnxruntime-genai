@@ -221,11 +221,24 @@ if (ENABLE_TESTS)
              WORKING_DIRECTORY ${JAVA_SRC_ROOT})
   endif()
 
-  add_custom_command(
-        TARGET onnxruntime-genai-jni POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy
-                ${ORT_LIB_DIR}/*.so
-                ${JAVA_PACKAGE_LIB_DIR}/)
+  if(WIN32)
+    set(ONNXRUNTIME_GENAI_DEPENDENCY "*.dll")
+  elseif(APPLE)
+    set(ONNXRUNTIME_GENAI_DEPENDENCY "*.dylib")
+  else()
+    set(ONNXRUNTIME_GENAI_DEPENDENCY "*.so")
+  endif()
+
+  file(GLOB ort_native_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_GENAI_DEPENDENCY}")
+
+  # Copy ORT native libs for Java tests
+  foreach(LIB_FILE ${ort_native_libs})
+    add_custom_command(
+            TARGET onnxruntime-genai-jni POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy
+                    ${LIB_FILE}
+                    ${JAVA_PACKAGE_LIB_DIR}/)
+  endforeach()
 
   set_property(TEST onnxruntime-genai4j_test APPEND PROPERTY DEPENDS onnxruntime-genai-jni)
 endif()

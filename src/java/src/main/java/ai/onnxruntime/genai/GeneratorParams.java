@@ -92,7 +92,7 @@ public final class GeneratorParams implements AutoCloseable {
    *
    * @param name Name of the model input the tensor will provide.
    * @param tensor Tensor to add.
-   * @throws GenAIException
+   * @throws GenAIException If the call to the GenAI native API fails.
    */
   public void setInput(String name, Tensor tensor) throws GenAIException {
     if (nativeHandle == 0) {
@@ -110,7 +110,7 @@ public final class GeneratorParams implements AutoCloseable {
    * Add a NamedTensors as a model input.
    *
    * @param namedTensors NamedTensors to add.
-   * @throws GenAIException
+   * @throws GenAIException If the call to the GenAI native API fails.
    */
   public void setInputs(NamedTensors namedTensors) throws GenAIException {
     if (nativeHandle == 0) {
