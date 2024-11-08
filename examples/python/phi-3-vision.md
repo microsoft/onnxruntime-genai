@@ -66,8 +66,7 @@ $ huggingface-cli download microsoft/Phi-3-vision-128k-instruct-onnx --include o
 $ rm pytorch/config.json
 $ mv onnx/config.json pytorch/
 
-# In our `modeling_phi3_v.py`, we replaced `from .image_embedding_phi3_v import Phi3ImageEmbedding`
-# with `from .image_embedding_phi3_v_for_onnx import Phi3ImageEmbedding`
+# In our `modeling_phi3_v.py`, we modified some classes for exporting to ONNX
 $ rm pytorch/modeling_phi3_v.py
 $ mv onnx/modeling_phi3_v.py pytorch/
 
