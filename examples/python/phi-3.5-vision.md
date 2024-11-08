@@ -49,9 +49,10 @@ $ cd phi3.5-vision-instruct/pytorch
 $ huggingface-cli download microsoft/Phi-3.5-vision-instruct --local-dir .
 ```
 
+### Download the modified PyTorch modeling files
+
 Now, let's download the modified PyTorch modeling files that have been uploaded to the Phi-3.5 vision ONNX repository on Hugging Face.
 
-### Download the modified PyTorch modeling files
 ```bash
 # Download modified files
 $ cd ..
