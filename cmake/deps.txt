@@ -16,3 +16,4 @@ microsoft_wil;https://github.com/microsoft/wil/archive/refs/tags/v1.0.230629.1.z
 directx_headers;https://github.com/microsoft/DirectX-Headers/archive/refs/tags/v1.613.1.zip;47653509a3371eabb156360f42faf582f314bf2e
 onnxruntime_extensions;https://github.com/microsoft/onnxruntime-extensions.git;2c3e936cfc3401ba7ebb79d02b9e52a50439ffc3
 llguidance;https://github.com/microsoft/llguidance.git;b298c148b5cd79407d5b17484ae87b77264b379a
+corrosion;https://github.com/corrosion-rs/corrosion.git;64289b1d79d6d19cd2e241db515381a086bb8407

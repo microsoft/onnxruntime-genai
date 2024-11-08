@@ -96,8 +96,8 @@ list(APPEND EXTERNAL_LIBRARIES
 
 FetchContent_Declare(
   Corrosion
-  GIT_REPOSITORY https://github.com/corrosion-rs/corrosion.git
-  GIT_TAG v0.5 
+  GIT_REPOSITORY ${DEP_URL_corrosion}
+  GIT_TAG ${DEP_SHA1_corrosion}
   )
 # Set any global configuration variables such as `Rust_TOOLCHAIN` before this line!
 onnxruntime_fetchcontent_makeavailable(Corrosion)
