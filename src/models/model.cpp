@@ -341,7 +341,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
   }
 
   if (config_session_options.enable_mem_pattern.has_value()) {
-    if (config_session_options.enable_cpu_mem_arena.value())
+    if (config_session_options.enable_mem_pattern.value())
       session_options.EnableMemPattern();
     else
       session_options.DisableMemPattern();
