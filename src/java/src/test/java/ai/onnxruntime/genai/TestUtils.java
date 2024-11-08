@@ -36,15 +36,11 @@ public class TestUtils {
   }
 
   public static final String testModelPath() {
-    // get the resources directory from one of the classes
-    URL url = TestUtils.class.getResource("/hf-internal-testing/tiny-random-gpt2-fp32");
-    if (url == null) {
-      logger.warning("Model not found at /hf-internal-testing/tiny-random-gpt2-fp32");
-      return null;
-    }
+    return getFilePathFromResource("/hf-internal-testing/tiny-random-gpt2-fp32");
+  }
 
-    File f = new File(url.getFile());
-    return f.getPath();
+  public static final String testVisioniModelPath() {
+    return getFilePathFromResource("/vision-preprocessing");
   }
 
   public static final String getRepoRoot() {
@@ -66,5 +62,17 @@ public class TestUtils {
 
     System.setProperty("onnxruntime-genai.native.path", fullPath.getPath());
     return true;
+  }
+
+  static final String getFilePathFromResource(String path) {
+    // get the resources directory from one of the classes
+    URL url = TestUtils.class.getResource(path);
+    if (url == null) {
+      logger.warning("Model not found at " + path);
+      return null;
+    }
+
+    File f = new File(url.getFile());
+    return f.getPath();
   }
 }

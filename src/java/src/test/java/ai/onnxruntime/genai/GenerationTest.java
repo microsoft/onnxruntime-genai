@@ -44,6 +44,7 @@ public class GenerationTest {
     return phi2ModelPath() != null;
   }
 
+  @SuppressWarnings("unused") // Used in EnabledIf
   private static boolean haveAdapters() {
     return TestUtils.testAdapterTestModelPath() != null;
   }

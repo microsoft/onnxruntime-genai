@@ -31,6 +31,7 @@ public class TensorTest {
     // aware of the issue
     params.setInput("unknown_value", tensor);
 
+    tensor.close();
     params.close();
     generator.close();
   }
