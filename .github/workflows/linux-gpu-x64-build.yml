@@ -40,9 +40,6 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
         
       - name: Get the Latest OnnxRuntime Nightly Version
         shell: pwsh
@@ -114,8 +111,7 @@ jobs:
             -w /ort_genai_src onnxruntimecudabuildx64 \
             bash -c " \
               export CARGO_HOME=/ort_genai_src/.cargo RUSTUP_HOME=/ort_genai_src/.rustup && \
-              /usr/bin/cmake --build --preset linux_gcc_cuda_release \
-                -DRust_COMPILER=/ort_genai_src/.cargo/bin/rustc "
+              /usr/bin/cmake --build --preset linux_gcc_cuda_release"
 
       - name: Use Dummy HuggingFace Token
         run: |

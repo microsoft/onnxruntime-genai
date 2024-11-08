@@ -29,9 +29,6 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Get the Latest OnnxRuntime Nightly Version
         shell: pwsh
         run: |
@@ -77,13 +74,19 @@ jobs:
         run: |
           docker run --rm \
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "/usr/bin/cmake --preset linux_gcc_cpu_release"
+          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c " \
+            export CARGO_HOME=/onnxruntime_src/.cargo RUSTUP_HOME=/onnxruntime_src/.rustup && \
+            curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf | sh -s -- -y && \
+            /usr/bin/cmake --preset linux_gcc_cpu_release \
+              -DRust_COMPILER=/onnxruntime_src/.cargo/bin/rustc "
 
       - name: Docker -- Build with CMake and GCC
         run: |
           docker run --rm \
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "/usr/bin/cmake --build --preset linux_gcc_cpu_release"
+          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c " \
+            export CARGO_HOME=/onnxruntime_src/.cargo RUSTUP_HOME=/onnxruntime_src/.rustup && \
+            /usr/bin/cmake --build --preset linux_gcc_cpu_release"
 
       - name: Docker -- Check test directory
         run: |
