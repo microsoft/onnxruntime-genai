@@ -179,9 +179,9 @@ OgaResult* OGA_API_CALL OgaConfigSetProviderOption(OgaConfig* config, const char
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaCreateModelFromConfig(OgaConfig* config, OgaModel** out) {
+OgaResult* OGA_API_CALL OgaCreateModelFromConfig(const OgaConfig* config, OgaModel** out) {
   OGA_TRY
-  auto config_copy = std::make_unique<Generators::Config>(*reinterpret_cast<Generators::Config*>(config));
+  auto config_copy = std::make_unique<Generators::Config>(*reinterpret_cast<const Generators::Config*>(config));
   auto model = Generators::CreateModel(Generators::GetOrtEnv(), std::move(config_copy));
   model->external_owner_ = model;
   *out = reinterpret_cast<OgaModel*>(model.get());

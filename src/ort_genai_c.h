@@ -172,14 +172,41 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyRuntimeSettings(OgaRuntimeSettings* setti
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRuntimeSettingsSetHandle(OgaRuntimeSettings* settings, const char* handle_name, void* handle);
 
+/*
+ * \brief Creates an OgaConfig from the given configuration directory.
+ * \param[in] config_path The path to the configuration directory. The path is expected to be encoded in UTF-8.
+ * \param[out] out The created config.
+ * \return OgaResult containing the error message if the creation of the config failed.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateConfig(const char* config_path, OgaConfig** out);
 
+/*
+ * \brief Clear the list of providers in the given config
+ * \param[in] config The config to clear the providers from.
+ * \return OgaResult containing the error message if the clearing of the providers failed.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigClearProviders(OgaConfig* config);
+
+/*
+ * \brief Add the provider at the end of the list of providers in the given config if it doesn't already exist
+ * \param[in] config The config to set the provider on.
+ * \param[in] provider The provider to set on the config.
+ * \return OgaResult containing the error message if the setting of the provider failed.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetProvider(OgaConfig* config, const char* provider);
+
+/*
+ * \brief Set a provider option
+ * \param[in] config The config to set the provider option on.
+ * \param[in] provider The provider to set the option on.
+ * \param[in] key The key of the option to set.
+ * \param[in] value The value of the option to set.
+ * \return OgaResult containing the error message if the setting of the provider option failed.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetProviderOption(OgaConfig* config, const char* provider, const char* key, const char* value);
 
 /*
- * \brief Creates a model from the given configuration directory and device type.
+ * \brief Creates a model from the given configuration directory.
  * \param[in] config_path The path to the model configuration directory. The path is expected to be encoded in UTF-8.
  * \param[in] device_type The device type to use for the model.
  * \param[out] out The created model.
@@ -194,7 +221,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaMo
  * \param[out] out The created model.
  * \return OgaResult containing the error message if the model creation failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModelFromConfig(OgaConfig* config, OgaModel** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModelFromConfig(const OgaConfig* config, OgaModel** out);
 
 /*
  * \brief Creates a model from the given configuration directory, runtime settings and device type.
@@ -205,7 +232,6 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModelFromConfig(OgaConfig* config, O
  * \return OgaResult containing the error message if the model creation failed.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModelWithRuntimeSettings(const char* config_path, const OgaRuntimeSettings* settings, OgaModel** out);
-
 
 /*
  * \brief Destroys the given config
