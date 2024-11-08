@@ -136,11 +136,11 @@ in `genai_config.json` With
 
 ### CUDA
 ```bash
-$ python .\phi3v.py -m .\phi3-vision-128k-instruct\cuda
+$ python .\phi3v.py -m .\phi3.5-vision-instruct\cuda
 ```
 
 ### DirectML
 
 ```bash
-$ python .\phi3v.py -m .\phi3-vision-128k-instruct\dml
+$ python .\phi3v.py -m .\phi3.5-vision-instruct\dml
 ```
