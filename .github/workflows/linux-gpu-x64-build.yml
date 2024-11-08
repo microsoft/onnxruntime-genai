@@ -95,10 +95,11 @@ jobs:
             --gpus all \
             --rm \
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
-            --volume $CARGO_HOME:/root/.cargo \
+            --volume $CARGO_HOME:/.cargo \
             -w /ort_genai_src onnxruntimecudabuildx64 \
             bash -c " \
-              export PATH=/root/.cargo/bin:$PATH && \
+              export CARGO_HOME=/.cargo && \
+              curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf | sh -s -- -y && \
               /usr/bin/cmake --preset linux_gcc_cuda_release \
                 -DMANYLINUX=ON \
                 -DPYTHON_EXECUTABLE=${{ env.PYTHON_EXECUTABLE }} "
