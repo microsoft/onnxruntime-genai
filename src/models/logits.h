@@ -16,12 +16,12 @@ struct Logits {
   void Add();
   DeviceSpan<float> Get();
 
-  void Update(RoamingArray<int32_t> next_tokens_unk = RoamingArray<int32_t>{});
+  void Update(DeviceSpan<int32_t> next_tokens_unk = DeviceSpan<int32_t>{});
 
  private:
   void HandleEOSArray(std::span<float> logits);
 
-  void AddMask(cpu_span<float> logits, std::vector<std::vector<uint32_t>>& mask);
+  void AddMask(std::span<float> logits, std::vector<std::vector<uint32_t>>& mask);
 
   State& state_;
   const Model& model_{state_.model_};
@@ -51,8 +51,8 @@ struct Logits {
 
 #if USE_CUDA
   DeviceSpan<int32_t> cuda_eos_token_ids_;  // eos_token_ids from params, but in cuda accessible memory
-  cuda_unique_ptr<uint32_t> cuda_logits_mask_ptr_;
-  void AddMask(gpu_span<float> logits, const uint32_t* mask);
+  DeviceSpan<uint32_t> cuda_logits_mask_ptr_;
+  void AddMask(DeviceSpan<float> logits, DeviceSpan<uint32_t> mask);
 #endif
 
 #if USE_DML

@@ -53,7 +53,7 @@ Logits::Logits(State& state)
     });
 #if USE_CUDA
     if (model_.device_type_ == DeviceType::CUDA) {
-      cuda_logits_mask_ptr_ = CudaMallocArray<uint32_t>(shape_[0] * shape_[2] / 32);
+      cuda_logits_mask_ptr_ = state_.params_->p_device->Allocate<uint32_t>(shape_[0] * shape_[2] / 32);
     }
 #endif
   }
@@ -198,10 +198,10 @@ DeviceSpan<float> Logits::Get() {
 
     if (!logits_masks_.empty()) {
       for (int i = 0; i < logits_masks_.size(); i++) {
-        cudaMemcpyAsync(cuda_logits_mask_ptr_.get() + (i * shape_[2] / 32), logits_masks_.at(i).data(),
+        cudaMemcpyAsync(cuda_logits_mask_ptr_.Span().data() + (i * shape_[2] / 32), logits_masks_.at(i).data(),
                         logits_masks_.at(i).size() * sizeof(uint32_t), ::cudaMemcpyHostToDevice, model_.cuda_stream_);
       }
-      AddMask(logits_.Span().data(), cuda_logits_mask_ptr_.get());
+      AddMask(logits_, cuda_logits_mask_ptr_);
     }
     return logits_;
   }
@@ -242,9 +242,9 @@ DeviceSpan<float> Logits::Get() {
 
 #pragma warning(pop)
 
-void Logits::Update(RoamingArray<int32_t> next_tokens_unk) {
+void Logits::Update(DeviceSpan<int32_t> next_tokens_unk) {
   if (!constrained_logits_processors_.empty()) {
-    auto next_tokens = next_tokens_unk.GetCPU();
+    auto next_tokens = next_tokens_unk.Span();
     for (int i = 0; i < next_tokens.size(); i++) {
       constrained_logits_processors_[i]->CommitTokens(static_cast<uint32_t>(next_tokens[i]));
     }
@@ -289,7 +289,7 @@ void Logits::HandleEOSArray(std::span<float> batched_logits) {
   }
 }
 
-void Logits::AddMask(cpu_span<float> logits, std::vector<std::vector<uint32_t>>& masks) {
+void Logits::AddMask(std::span<float> logits, std::vector<std::vector<uint32_t>>& masks) {
   size_t vocab_size = shape_[2];
   size_t vocab_index = 0;
 
@@ -304,9 +304,9 @@ void Logits::AddMask(cpu_span<float> logits, std::vector<std::vector<uint32_t>>&
 }
 
 #if USE_CUDA
-void Logits::AddMask(gpu_span<float> logits, const uint32_t* mask) {
-  cuda::LaunchAddLogitsMask(logits.data(), static_cast<int>(shape_[0]),
-                            static_cast<int>(shape_[2]), mask, model_.cuda_stream_);
+void Logits::AddMask(DeviceSpan<float> logits, DeviceSpan<uint32_t> mask) {
+  cuda::LaunchAddLogitsMask(logits.Span().data(), static_cast<int>(shape_[0]),
+                            static_cast<int>(shape_[2]), mask.Span().data(), model_.cuda_stream_);
 }
 #endif
 
