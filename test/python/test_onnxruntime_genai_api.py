@@ -30,7 +30,7 @@ if og.is_rocm_available():
     devices.append("rocm")
 
 def config_test(test_data_path):
-    model_path = os.fspath(Path(test_data_path) / "hf-internal-testing" / "tiny-random-gpt2-fp32";
+    model_path = os.fspath(Path(test_data_path) / "hf-internal-testing" / "tiny-random-gpt2-fp32")
     config = og.Config(model_path)
     config.clear_providers()
     config.set_provider("cuda")
