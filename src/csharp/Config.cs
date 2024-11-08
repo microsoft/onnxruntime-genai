@@ -9,8 +9,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
     {
         private IntPtr _configHandle;
         private bool _disposed = false;
-
-        internal Config(string modelPath)
+        public Config(string modelPath)
         {
             Result.VerifySuccess(NativeMethods.OgaCreateConfig(StringUtils.ToUtf8(modelPath), out _configHandle));
         }

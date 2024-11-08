@@ -89,6 +89,7 @@ public final class Model implements AutoCloseable {
   }
 
   private native long createModel(String modelPath) throws GenAIException;
+  private native long createModelFromConfig(long configHandle) throws GenAIException;
 
   private native void destroyModel(long modelHandle);
 
