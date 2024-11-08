@@ -165,7 +165,7 @@ OgaResult* OGA_API_CALL OgaConfigClearProviders(OgaConfig* config) {
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaConfigSetProvider(OgaConfig* config, const char* provider) {
+OgaResult* OGA_API_CALL OgaConfigAppendProvider(OgaConfig* config, const char* provider) {
   OGA_TRY
   Generators::SetProviderOption(*reinterpret_cast<Generators::Config*>(config), provider, {}, {});
   return nullptr;

@@ -33,11 +33,11 @@ def test_config(test_data_path):
     model_path = os.fspath(Path(test_data_path) / "hf-internal-testing" / "tiny-random-gpt2-fp32")
     config = og.Config(model_path)
     config.clear_providers()
-    config.set_provider("cuda")
+    config.append_provider("cuda")
     config.clear_providers()
     config.set_provider_option("cuda", "infinite_clock", "1")
     config.set_provider_option("quantum", "break_universe", "true")
-    config.set_provider("slide rule")
+    config.append_provider("slide rule")
 
 @pytest.mark.parametrize(
     "relative_model_path",

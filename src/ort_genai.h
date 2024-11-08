@@ -87,8 +87,8 @@ struct OgaConfig : OgaAbstract {
     OgaCheckResult(OgaConfigClearProviders(this));
   }
 
-  void SetProvider(const char* provider) {
-    OgaCheckResult(OgaConfigSetProvider(this, provider));
+  void AppendProvider(const char* provider) {
+    OgaCheckResult(OgaConfigAppendProvider(this, provider));
   }
 
   void SetProviderOption(const char* provider, const char* name, const char* value) {

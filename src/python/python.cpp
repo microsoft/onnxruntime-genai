@@ -437,7 +437,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   // Pybind class using the C API for OgaConfig
   pybind11::class_<OgaConfig>(m, "Config")
       .def(pybind11::init([](const std::string& config_path) { return OgaConfig::Create(config_path.c_str()); }))
-      .def("set_provider", &OgaConfig::SetProvider)
+      .def("append_provider", &OgaConfig::AppendProvider)
       .def("set_provider_option", &OgaConfig::SetProviderOption)
       .def("clear_providers", &OgaConfig::ClearProviders);
 

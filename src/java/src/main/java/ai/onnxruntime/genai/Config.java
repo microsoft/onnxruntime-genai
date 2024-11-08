@@ -17,11 +17,11 @@ public final class Config implements AutoCloseable {
 	clearProviders(nativeHandle);
   }
 
-  public void setProvider(String provider_name) {
+  public void appendProvider(String provider_name) {
     if (nativeHandle == 0) {
 	  throw new IllegalStateException("Instance has been freed and is invalid");
     }
-	setProvider(nativeHandle, provider_name);
+	appendProvider(nativeHandle, provider_name);
   }
 
   public void setProviderOption(String provider_name, String option_name, String option_value) {
@@ -54,6 +54,6 @@ public final class Config implements AutoCloseable {
   private native long createConfig(String modelPath) throws GenAIException;
   private native void destroyConfig(long configHandle);
   private native void clearProviders(long configHandle);
-  private native void setProvider(long configHandle, String provider_name);
+  private native void appendProvider(long configHandle, String provider_name);
   private native void setProviderOption(long configHandle, String provider_name, String option_name, String option_value);
 }

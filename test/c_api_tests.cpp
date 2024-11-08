@@ -22,13 +22,13 @@ TEST(CAPITests, Config) {
 #if TEST_PHI2
   // Test modifying config settings
   auto config = OgaConfig::Create(PHI2_PATH);
-  config->SetProvider("brainium");
+  config->AppendProvider("brainium");
   config->SetProviderOption("super_ai", "custom_field", "hello");
-  config->SetProvider("human");
+  config->AppendProvider("human");
   config->SetProviderOption("brainium", "custom_field1", "hello1");
   config->SetProviderOption("brainium", "custom_field2", "hello2");
   config->ClearProviders();
-  config->SetProvider("cuda");
+  config->AppendProvider("cuda");
 #endif
 }
 

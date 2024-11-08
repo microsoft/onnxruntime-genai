@@ -20,9 +20,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaConfigClearProviders(_configHandle));
         }
 
-        public void SetProvider(string provider)
+        public void AppendProvider(string provider)
         {
-            Result.VerifySuccess(NativeMethods.OgaConfigSetProvider(_configHandle, StringUtils.ToUtf8(provider)));
+            Result.VerifySuccess(NativeMethods.OgaConfigAppendProvider(_configHandle, StringUtils.ToUtf8(provider)));
         }
 
         public void SetProviderOption(string provider, string option, string value)
