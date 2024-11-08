@@ -47,8 +47,8 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
-        [Fact(DisplayName = "TestGreedySearch")]
-        public void TestGreedySearch()
+        [Fact(DisplayName = "TestConfig")]
+        public void TestConfig()
         {
             string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "hf-internal-testing", "tiny-random-gpt2-fp32");
             using (var config = new Config(modelPath))
