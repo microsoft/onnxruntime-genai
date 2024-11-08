@@ -49,7 +49,7 @@ $ cd phi3-vision-128k-instruct/pytorch
 $ huggingface-cli download microsoft/Phi-3-vision-128k-instruct --local-dir .
 ```
 
-Now, let's download the modified PyTorch modeling files that have been uploaded to the Phi-3 vision ONNX repositories on Hugging Face. Here, let's use `microsoft/Phi-3-vision-128k-instruct-onnx` as the example ONNX repo.
+Now, let's download the modified PyTorch modeling files that have been uploaded to the Phi-3 vision ONNX repository on Hugging Face.
 
 ### Download the modified PyTorch modeling files
 ```bash
