@@ -29,14 +29,14 @@ Java_ai_onnxruntime_genai_Config_destroyConfig(JNIEnv* env, jobject thiz, jlong 
 
 JNIEXPORT void JNICALL
 Java_ai_onnxruntime_genai_Config_clearProviders(JNIEnv* env, jobject thiz, jlong native_handle) {
-  OgaConfig* config = reinterpret_cast<OgaConfig*>(config_handle);
+  OgaConfig* config = reinterpret_cast<OgaConfig*>(native_handle);
   ThrowIfError(env, OgaConfigClearProviders(config));
 }
 
 JNIEXPORT void JNICALL
 Java_ai_onnxruntime_genai_Config_setProvider(JNIEnv* env, jobject thiz, jlong native_handle, jstring provider_name) {
   CString c_provider_name{env, provider_name};
-  OgaConfig* config = reinterpret_cast<OgaConfig*>(config_handle);
+  OgaConfig* config = reinterpret_cast<OgaConfig*>(native_handle);
 
   ThrowIfError(env, OgaConfigSetProvider(config, c_provider_name));
 }
@@ -46,7 +46,7 @@ Java_ai_onnxruntime_genai_Config_setProvider(JNIEnv* env, jobject thiz, jlong na
   CString c_provider_name{env, provider_name};
   CString c_option_name{env, option_name};
   CString c_option_value{env, option_value};
-  OgaConfig* config = reinterpret_cast<OgaConfig*>(config_handle);
+  OgaConfig* config = reinterpret_cast<OgaConfig*>(native_handle);
 
   ThrowIfError(env, OgaConfigSetProviderOption(config, c_provider_name, c_option_name, c_option_value));
 }
