@@ -56,7 +56,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                 config.ClearProviders();
                 config.SetProviderOption("cuda", "device_id", "0");
                 config.SetProviderOption("cuda", "catch_fire", "false");
-                config.SetProvider("pigeon");
+                config.AppendProvider("pigeon");
                 // At this point the providers is 'cuda' first and 'pigeon' as secondary.
                 // Given some provider options are made up and there is no pigeon provider, the model won't load.
                 // This tests the API
