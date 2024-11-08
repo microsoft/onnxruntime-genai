@@ -11,21 +11,7 @@ using Xunit.Abstractions;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 {
-    public class TestsFixture : IDisposable
-    {
-        private OgaHandle _handle;
-        public TestsFixture()
-        {
-            _handle = new OgaHandle();
-        }
-
-        public void Dispose()
-        {
-            _handle.Dispose();
-        }
-    }
-
-    public class OnnxRuntimeGenAITests : IClassFixture<TestsFixture>
+    public class OnnxRuntimeGenAITests
     {
         private readonly ITestOutputHelper output;
 
