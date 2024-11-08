@@ -26,17 +26,7 @@ public class GenerationTest {
   // phi-2 can be used in full end-to-end testing but needs to be manually downloaded.
   // it's also used this way in the C# unit tests.
   private static final String phi2ModelPath() {
-    String repoRoot = TestUtils.getRepoRoot();
-    File f = new File(repoRoot + "examples/python/example-models/phi2-int4-cpu");
-
-    if (!f.exists()) {
-      logger.warning("phi2 model not found at: " + f.getPath());
-      logger.warning(
-          "Please install as per https://github.com/microsoft/onnxruntime-genai/tree/rel-0.2.0/examples/csharp/HelloPhi2");
-      return null;
-    }
-
-    return f.getPath();
+    return TestUtils.getFilePathFromResource("/phi-2/int4/cpu")
   }
 
   @SuppressWarnings("unused") // Used in EnabledIf
@@ -88,10 +78,13 @@ public class GenerationTest {
       "This is a test.", "Rats are awesome pets!", "The quick brown fox jumps over the lazy dog."
     };
     GeneratorParams params = generator.createGeneratorParams(prompts);
+    params.setSearchOption("max_length", 20);
+
     String baseOutput = generator.generate(params, null);
     logger.info("Base Output: " + baseOutput);
 
     generator.setActiveAdapter("adapters_a_and_b");
+
     String adapter_output = generator.generate(params, null);
     logger.info("Adapter Output: " + adapter_output);
 
