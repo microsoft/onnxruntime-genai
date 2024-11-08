@@ -7,6 +7,9 @@
 #include <iostream>
 #include <string>
 #include "ort_genai.h"
+#include <thread>
+#include <csignal>
+#include <atomic>
 
 using Clock = std::chrono::high_resolution_clock;
 using TimePoint = std::chrono::time_point<Clock>;
@@ -65,38 +68,8 @@ class Timing {
 
 // C++ API Example
 
-void CXX_API(const char* model_path) {
-  std::cout << "Creating model..." << std::endl;
-  auto model = OgaModel::Create(model_path);
-  std::cout << "Creating tokenizer..." << std::endl;
-  auto tokenizer = OgaTokenizer::Create(*model);
-  auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
-
-  while (true) {
-    std::string text;
-    std::cout << "Prompt: (Use quit() to exit)" << std::endl;
-    std::getline(std::cin, text);
-
-    if (text == "quit()") {
-      break;  // Exit the loop
-    }
-
-    const std::string prompt = "<|user|>\n" + text + "<|end|>\n<|assistant|>";
-
-    bool is_first_token = true;
-    Timing timing;
-    timing.RecordStartTimestamp();
-
-    auto sequences = OgaSequences::Create();
-    tokenizer->Encode(prompt.c_str(), *sequences);
-
-    std::cout << "Generating response..." << std::endl;
-    auto params = OgaGeneratorParams::Create(*model);
-    params->SetSearchOption("max_length", 1024);
-    params->SetInputSequences(*sequences);
-
-    auto generator = OgaGenerator::Create(*model, *params);
-
+void Generate_Output_CXX(OgaGenerator* generator, std::unique_ptr<OgaTokenizerStream> tokenizer_stream, bool is_first_token, Timing& timing) {
+  try {
     while (!generator->IsDone()) {
       generator->ComputeLogits();
       generator->GenerateNextToken();
@@ -122,6 +95,69 @@ void CXX_API(const char* model_path) {
       const auto num_tokens = generator->GetSequenceCount(0);
       const auto new_token = generator->GetSequenceData(0)[num_tokens - 1];
       std::cout << tokenizer_stream->Decode(new_token) << std::flush;
+    }
+  }
+  catch (const std::exception& e) {
+    std::cout << "Session Terminated: " << e.what() << std::endl;
+  }
+}
+
+std::atomic<bool> stopFlag(false);
+
+void signalHandler(int signum) {
+    std::cout << "Interrupt signal received. Terminating current session...\n";
+    stopFlag = true;
+}
+
+void CXX_API(const char* model_path) {
+  std::cout << "Creating model..." << std::endl;
+  auto model = OgaModel::Create(model_path);
+  std::cout << "Creating tokenizer..." << std::endl;
+  auto tokenizer = OgaTokenizer::Create(*model);
+
+  while (true) {
+    signal(SIGINT, signalHandler);
+    auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
+    std::string text;
+    std::cout << "Prompt: (Use quit() to exit) Or (To terminate current output, press Ctrl+C)" << std::endl;
+    std::getline(std::cin, text);
+
+    if (text == "quit()") {
+      break;  // Exit the loop
+    }
+
+    const std::string prompt = "<|user|>\n" + text + "<|end|>\n<|assistant|>";
+
+    bool is_first_token = true;
+    Timing timing;
+    timing.RecordStartTimestamp();
+
+    auto sequences = OgaSequences::Create();
+    tokenizer->Encode(prompt.c_str(), *sequences);
+
+    std::cout << "Generating response..." << std::endl;
+    auto params = OgaGeneratorParams::Create(*model);
+    params->SetSearchOption("max_length", 1024);
+    params->SetInputSequences(*sequences);
+
+    auto generator = OgaGenerator::Create(*model, *params);
+
+    std::thread th(Generate_Output_CXX, generator.get(), std::move(tokenizer_stream), is_first_token, std::ref(timing));
+
+    // Check for stopFlag in a loop
+    while (th.joinable()) {
+      if (stopFlag) {
+          generator->SetRuntimeOption("terminate_session", "1");
+          stopFlag = false;
+          break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Check every 100 ms
+      if (generator->IsDone())
+        break;
+    }
+
+    if (th.joinable()) {
+      th.join();  // Join the thread if it's still running
     }
 
     timing.RecordEndTimestamp();
