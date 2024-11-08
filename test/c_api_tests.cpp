@@ -4,6 +4,10 @@
 #include <models/model.h>
 #include <iostream>
 #include <ort_genai.h>
+#include "../src/span.h"
+#include <thread>
+#include <vector>
+
 #ifndef MODEL_PATH
 #define MODEL_PATH "../../test/test_models/"
 #endif
@@ -281,6 +285,55 @@ TEST(CAPITests, GetOutputCAPI) {
   generator->GenerateNextToken();
 }
 
+TEST(CAPITests, SetTerminate) {
+#if TEST_PHI2
+
+  auto GeneratorSetTerminateCall = [](OgaGenerator* generator) {
+    // Set Terminate
+    generator->SetRuntimeOption("terminate_session", "1");
+  };
+
+  auto GenerateOutput = [](OgaGenerator* generator, std::unique_ptr<OgaTokenizerStream> tokenizer_stream) {
+    try {
+      while (!generator->IsDone()) {
+        generator->ComputeLogits();
+        generator->GenerateNextToken();
+      }
+    }
+    catch (const std::exception& e) {
+      EXPECT_EQ(generator->IsSessionTerminated(), true);
+      std::cout << "Session Terminated: " << e.what() << std::endl;
+    }
+  };
+
+  auto model = OgaModel::Create(PHI2_PATH);
+  auto tokenizer = OgaTokenizer::Create(*model);
+  auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
+
+  const char* input_string = "She sells sea shells by the sea shore.";
+  auto input_sequences = OgaSequences::Create();
+  tokenizer->Encode(input_string, *input_sequences);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetInputSequences(*input_sequences);
+  params->SetSearchOption("max_length", 40);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  EXPECT_EQ(generator->IsSessionTerminated(), false);
+  std::vector<std::thread> threads;
+  threads.push_back(std::thread(GenerateOutput, generator.get(), std::move(tokenizer_stream)));
+  threads.push_back(std::thread(GeneratorSetTerminateCall, generator.get()));
+
+  for (auto& th : threads) {
+    std::cout << "Waiting for threads completion" << std::endl;
+    th.join();  // Wait for each thread to finish
+  }
+  EXPECT_EQ(generator->IsSessionTerminated(), true);
+  // Unset terminate
+  generator->SetRuntimeOption("terminate_session", "0");
+  EXPECT_EQ(generator->IsSessionTerminated(), false);
+#endif
+}
+
 #if TEST_PHI2
 
 struct Phi2Test {
@@ -372,8 +425,16 @@ TEST(CAPITests, TopKTopPCAPI) {
 
 #endif  // TEST_PHI2
 
-TEST(CAPITests, AdaptersTest) {
 #if TEST_PHI2
+TEST(CAPITests, AdaptersTest) {
+
+#ifdef USE_CUDA
+using OutputType = Ort::Float16_t;
+#else
+using OutputType = float;
+#endif
+
+
   // The python unit tests create the adapter model.
   // In order to run this test, the python unit test must have been run first.
   auto model = OgaModel::Create(MODEL_PATH "adapters");
@@ -392,6 +453,32 @@ TEST(CAPITests, AdaptersTest) {
   for (auto& string : input_strings)
     tokenizer->Encode(string, *input_sequences);
 
+  // Run base scenario
+  size_t output_size = 0;
+  std::vector<int64_t> output_shape;
+  std::vector<OutputType> base_output;
+  {
+    auto params = OgaGeneratorParams::Create(*model);
+    params->SetSearchOption("max_length", 20);
+    params->SetInputSequences(*input_sequences);
+
+    auto generator = OgaGenerator::Create(*model, *params);
+
+    while (!generator->IsDone()) {
+      generator->ComputeLogits();
+      generator->GenerateNextToken();
+    }
+
+    auto logits = generator->GetOutput("logits");
+    output_shape = logits->Shape();
+    output_size = static_cast<size_t>(std::accumulate(output_shape.begin(), output_shape.end(), 1LL,
+                                                      std::multiplies<int64_t>()));
+    base_output.reserve(output_size);
+    std::span<const OutputType> src(reinterpret_cast<const OutputType*>(logits->Data()), output_size);
+    std::copy(src.begin(), src.end(), std::back_inserter(base_output));
+  }
+  // Run scenario with an adapter
+  // We are expecting a difference in output
   {
     auto params = OgaGeneratorParams::Create(*model);
     params->SetSearchOption("max_length", 20);
@@ -404,13 +491,24 @@ TEST(CAPITests, AdaptersTest) {
       generator->ComputeLogits();
       generator->GenerateNextToken();
     }
+
+    auto logits = generator->GetOutput("logits");
+    const auto shape = logits->Shape();
+    // Expecting the same shape
+    ASSERT_TRUE(std::equal(output_shape.begin(), output_shape.end(), shape.begin(), shape.end()));
+
+    const auto size = static_cast<size_t>(std::accumulate(shape.begin(), shape.end(), 1LL,
+                                                    std::multiplies<int64_t>()));
+    ASSERT_EQ(output_size, size);
+    std::span<const OutputType> src(reinterpret_cast<const OutputType*>(logits->Data()), size);
+    ASSERT_FALSE(std::equal(base_output.begin(), base_output.end(), src.begin(), src.end()));
   }
 
   // Unload the adapter. Will error out if the adapter is still active.
   // So, the generator must go out of scope before the adapter can be unloaded.
   adapters->UnloadAdapter("adapters_a_and_b");
-#endif
 }
+#endif
 
 TEST(CAPITests, AdaptersTestMultipleAdapters) {
 #if TEST_PHI2

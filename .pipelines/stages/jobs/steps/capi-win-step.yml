@@ -33,31 +33,12 @@ steps:
 
 - script: |
     echo "arch=$(arch)"
-    echo "ort_filename=$(ort_filename)"
     echo "ort_version=$(ort_version)"
     echo "ep=$(ep)"
     echo "cuda_version=$(cuda_version)"
     echo "target=${{ parameters.target }}"
     echo "build_config=${{ parameters.build_config }}"
   displayName: 'Print Parameters'
-
-- ${{ if eq(parameters.ep, 'directml') }}:
-  - powershell: |
-      Invoke-WebRequest -Uri $(dml_url) -OutFile $(dml_zip)
-      Expand-Archive $(dml_zip) -DestinationPath $(dml_dir)
-      Remove-Item -Path $(dml_zip)
-      Get-ChildItem -Recurse $(dml_dir)
-      mv $(dml_dir)\bin\$(arch)-win\DirectML.dll ort\lib
-      mv $(dml_dir)\include\DirectML.h ort\include
-
-      Invoke-WebRequest -Uri $(d3d12_url) -OutFile $(d3d12_zip)
-      Expand-Archive $(d3d12_zip) -DestinationPath $(d3d12_dir)
-      Remove-Item -Path $(d3d12_zip)
-      Get-ChildItem -Recurse $(d3d12_dir)
-      mv $(d3d12_dir)\build\native\bin\$(arch)\D3D12Core.dll ort\lib
-    workingDirectory: '$(Build.Repository.LocalPath)'
-    displayName: 'Download DirectML & Direct3D DLLs'
-    continueOnError: true
 
 - powershell: |
     azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" 'cuda_sdk'

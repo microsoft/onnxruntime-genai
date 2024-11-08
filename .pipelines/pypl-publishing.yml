@@ -37,37 +37,12 @@ parameters:
 - name: enable_linux_rocm
   displayName: 'Whether Linux ROCm package is built.'
   type: boolean
-  default: true
+  default: false
 
 - name: enable_macos_cpu
   displayName: 'Whether MacOS CPU package is built.'
   type: boolean
   default: true
-
-- name: ort_version
-  displayName: 'OnnxRuntime version'
-  type: string
-  default: '1.19.0-dev-20240805-1630-ee2fe87e2d'
-
-- name: ort_cuda_118_version
-  displayName: 'OnnxRuntime GPU version for CUDA 11.8'
-  type: string
-  default: '1.18.0-dev-20240426-0614-b842effa29'
-
-- name: ort_cuda_122_version
-  displayName: 'OnnxRuntime GPU version for CUDA 12.2'
-  type: string
-  default: '1.19.0-dev-20240805-0337-88c811b638'
-
-- name: ort_dml_version
-  displayName: 'OnnxRuntime DML version'
-  type: string
-  default: '1.19.0-dev-20240805-1630-ee2fe87e2d'
-
-- name: ort_rocm_version
-  displayName: 'OnnxRuntime ROCm version'
-  type: string
-  default: '1.19.0-dev-20240805-0337-88c811b638'
 
 - name: cuda_versions
   displayName: 'CUDA versions'
@@ -103,11 +78,6 @@ stages:
     enable_win_dml: ${{ parameters.enable_win_dml }}
     enable_win_arm64_cpu: ${{ parameters.enable_win_arm64_cpu }}
     enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
-    ort_version: ${{ parameters.ort_version }}
-    ort_cuda_118_version: ${{ parameters.ort_cuda_118_version }}
-    ort_cuda_122_version: ${{ parameters.ort_cuda_122_version }}
-    ort_rocm_version: ${{ parameters.ort_rocm_version }}
-    ort_dml_version: ${{ parameters.ort_dml_version }}
     cuda_versions: ${{ parameters.cuda_versions }}
     build_config: ${{ parameters.build_config }}
 - ${{ if eq(parameters.enable_post_packaging_validation, true) }}:
@@ -120,10 +90,5 @@ stages:
       enable_win_dml: ${{ parameters.enable_win_dml }}
       enable_win_arm64_cpu: ${{ parameters.enable_win_arm64_cpu }}
       enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
-      ort_version: ${{ parameters.ort_version }}
-      ort_cuda_118_version: ${{ parameters.ort_cuda_118_version }}
-      ort_cuda_122_version: ${{ parameters.ort_cuda_122_version }}
-      ort_rocm_version: ${{ parameters.ort_rocm_version }}
-      ort_dml_version: ${{ parameters.ort_dml_version }}
       cuda_versions: ${{ parameters.cuda_versions }}
       SpecificArtifact: false

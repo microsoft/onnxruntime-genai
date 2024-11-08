@@ -4,9 +4,11 @@
 
 namespace Generators {
 
+struct RuntimeSettings;
+
 struct Config {
   Config() = default;
-  Config(const fs::path& path);
+  Config(const fs::path& path, std::string_view json_overlay);
 
   struct Defaults {
     static constexpr std::string_view InputIdsName = "input_ids";
@@ -16,6 +18,7 @@ struct Config {
     static constexpr std::string_view ImageFeaturesName = "image_features";
     static constexpr std::string_view CurrentSequenceLengthName = "current_sequence_length";
     static constexpr std::string_view PastSequenceLengthName = "past_sequence_length";
+    static constexpr std::string_view promptTemplate = "{Content}";
   };
 
   fs::path config_path;  // Path of the config directory
@@ -138,6 +141,14 @@ struct Config {
       std::vector<PipelineModel> pipeline;
 
     } decoder;
+
+    struct PromptTemplates {
+      std::string assistant{Defaults::promptTemplate};
+      std::string prompt{Defaults::promptTemplate};
+      std::string system{Defaults::promptTemplate};
+      std::string user{Defaults::promptTemplate};
+    };
+    std::optional<PromptTemplates> prompt_templates;
   } model;
 
   struct Search {

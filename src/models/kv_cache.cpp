@@ -34,11 +34,11 @@ KV_Cache_Combined::KV_Cache_Combined(State& state)
   // Derive the KV data type from the KV input 0
   type_ = model_.session_info_->GetInputDataType(input_name_strings_[0]);
 
-  empty_past_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
+  empty_past_ = OrtValue::CreateTensor(*model_.allocator_kvcache_, shape_, type_);
   shape_[3] = state_.params_->sequence_length;
 
   for (int i = 0; i < layer_count_; ++i) {
-    presents_.push_back(OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_));
+    presents_.push_back(OrtValue::CreateTensor(*model_.allocator_kvcache_, shape_, type_));
   }
 }
 
@@ -54,7 +54,7 @@ void KV_Cache_Combined::Add() {
   }
 }
 
-void KV_Cache_Combined::Update(std::span<const int32_t> beam_indices, int current_length) {
+void KV_Cache_Combined::Update(DeviceSpan<int32_t> beam_indices, int current_length) {
   assert(state_.params_->search.num_beams == 1 || !beam_indices.empty());  // We require beam_indices if we're a beam search
 
   for (int i = 0; i < layer_count_; i++) {
@@ -67,7 +67,7 @@ void KV_Cache_Combined::Update(std::span<const int32_t> beam_indices, int curren
 
   shape_[3] = current_length;
   for (int i = 0; i < layer_count_; i++) {
-    presents_[i] = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
+    presents_[i] = OrtValue::CreateTensor(*model_.allocator_kvcache_, shape_, type_);
     state_.inputs_[input_index_ + i] = pasts_[i].get();
     state_.outputs_[output_index_ + i] = presents_[i].get();
   }
@@ -75,13 +75,14 @@ void KV_Cache_Combined::Update(std::span<const int32_t> beam_indices, int curren
 
 // Copy present state to past state reordered by the beam_indices
 template <typename ScoreType>
-void KV_Cache_Combined::PickPastState(std::span<const int32_t> beam_indices, int index) {
+void KV_Cache_Combined::PickPastState(DeviceSpan<int32_t> beam_indices_device, int index) {
+  std::span<const int32_t> beam_indices = beam_indices_device.CopyDeviceToCpu();
   auto block_size_per_beam = shape_[2] * shape_[3] * shape_[4];
   auto past_key_size = shape_[1] * block_size_per_beam;
   auto element_count = shape_[0] * past_key_size;
 
   const OrtValue& present = *presents_[index];
-  std::unique_ptr<OrtValue> past = OrtValue::CreateTensor<ScoreType>(*model_.allocator_device_, shape_);
+  std::unique_ptr<OrtValue> past = OrtValue::CreateTensor<ScoreType>(*model_.allocator_kvcache_, shape_);
   auto past_span = std::span<ScoreType>(past->GetTensorMutableData<ScoreType>(), element_count);
   auto present_span = std::span<const ScoreType>(present.GetTensorData<ScoreType>(), element_count);
 
@@ -115,7 +116,7 @@ void KV_Cache_Combined::PickPastState(std::span<const int32_t> beam_indices, int
   pasts_[index] = std::move(past);
 }
 
-void KV_Cache_Combined::PickPastState(std::span<const int32_t> beam_indices, int index) {
+void KV_Cache_Combined::PickPastState(DeviceSpan<int32_t> beam_indices, int index) {
   if (type_ == Ort::TypeToTensorType<float>) {
     PickPastState<float>(beam_indices, index);
   } else {
@@ -149,7 +150,7 @@ KV_Cache::KV_Cache(State& state)
   // Derive the KV data type from the KV input 0
   type_ = model_.session_info_->GetInputDataType(input_name_strings_[0]);
 
-  empty_past_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
+  empty_past_ = OrtValue::CreateTensor(*model_.allocator_kvcache_, shape_, type_);
 
   // Set the size after empty_past_ has been created with 0 for this field
   if (past_present_share_buffer_)
@@ -167,7 +168,7 @@ KV_Cache::KV_Cache(State& state)
 
   for (int i = 0; i < layer_count_ * 2; ++i) {
     presents_.push_back(
-        sb_kv_caches_.empty() ? OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_)
+        sb_kv_caches_.empty() ? OrtValue::CreateTensor(*model_.allocator_kvcache_, shape_, type_)
                               : sb_kv_caches_[i]->CreateTensorOnStaticBuffer(shape_, type_));
   }
 }
@@ -200,7 +201,7 @@ void KV_Cache::Add() {
   }
 }
 
-void KV_Cache::Update(std::span<const int32_t> beam_indices, int current_length) {
+void KV_Cache::Update(DeviceSpan<int32_t> beam_indices, int current_length) {
   // If we're sharing past & present buffers there is nothing to do here, so early exit
   if (past_present_share_buffer_)
     return;
@@ -216,19 +217,20 @@ void KV_Cache::Update(std::span<const int32_t> beam_indices, int current_length)
 
   shape_[2] = current_length;
   for (int i = 0; i < layer_count_ * 2; i++) {
-    presents_[i] = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
+    presents_[i] = OrtValue::CreateTensor(*model_.allocator_kvcache_, shape_, type_);
     state_.outputs_[output_index_ + i] = presents_[i].get();
   }
 }
 
 // Copy present state to past state reordered by the beam_indices
 template <typename ScoreType>
-void KV_Cache::PickPastState(std::span<const int32_t> beam_indices, int index) {
+void KV_Cache::PickPastState(DeviceSpan<int32_t> beam_indices_device, int index) {
+  std::span<int32_t> beam_indices = beam_indices_device.Span();
   auto block_size_per_beam = shape_[1] * shape_[2] * shape_[3];
   auto element_count = shape_[0] * block_size_per_beam;
 
   const OrtValue& present_value = *presents_[index];
-  std::unique_ptr<OrtValue> past_value = OrtValue::CreateTensor<ScoreType>(*model_.allocator_device_, shape_);
+  std::unique_ptr<OrtValue> past_value = OrtValue::CreateTensor<ScoreType>(*model_.allocator_kvcache_, shape_);
   auto past_span = std::span<ScoreType>(past_value->GetTensorMutableData<ScoreType>(), element_count);
   auto present_span = std::span<const ScoreType>(present_value.GetTensorData<ScoreType>(), element_count);
 
@@ -254,7 +256,7 @@ void KV_Cache::PickPastState(std::span<const int32_t> beam_indices, int index) {
   pasts_[index] = std::move(past_value);
 }
 
-void KV_Cache::PickPastState(std::span<const int32_t> beam_indices, int index) {
+void KV_Cache::PickPastState(DeviceSpan<int32_t> beam_indices, int index) {
   if (type_ == Ort::TypeToTensorType<float>) {
     PickPastState<float>(beam_indices, index);
   } else {
@@ -280,8 +282,8 @@ Cross_Cache::Cross_Cache(State& state)
   type_ = model_.session_info_->GetInputDataType(input_name_strings_[0]);
 
   for (int i = 0; i < layer_count_; ++i) {
-    values_.push_back(OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_));
-    values_.push_back(OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_));
+    values_.push_back(OrtValue::CreateTensor(*model_.allocator_kvcache_, shape_, type_));
+    values_.push_back(OrtValue::CreateTensor(*model_.allocator_kvcache_, shape_, type_));
   }
 }
 

@@ -25,7 +25,6 @@
 #include <vector>
 #if USE_CUDA
 #include <cuda_runtime.h>
-#include "cuda/cuda_common.h"
 #else
 // If we don't include cuda_runtime.h, we define this to avoid lots of extra #ifdefs
 using cudaStream_t = void*;
@@ -37,13 +36,21 @@ using cudaStream_t = void*;
 #include "models/debugging.h"
 #include "config.h"
 #include "logging.h"
+#include "runtime_settings.h"
 #include "tensor.h"
+
+void ThrowErrorIfSessionTerminated(bool is_session_terminated);
 
 namespace Generators {
 struct Model;
 struct State;
 struct Search;
 struct Tokenizer;
+
+template <typename T>
+DeviceSpan<T> WrapTensor(DeviceInterface& device, OrtValue& value) {
+  return device.WrapMemory(std::span<T>{value.GetTensorMutableData<T>(), value.GetTensorTypeAndShapeInfo()->GetElementCount()});
+}
 
 // OgaSequences are a vector of int32 vectors
 using TokenSequences = std::vector<std::vector<int32_t>>;
@@ -52,9 +59,11 @@ enum struct DeviceType {
   CPU,
   CUDA,
   DML,
+  WEBGPU,
 };
 
 std::string to_string(DeviceType device_type);
+DeviceInterface* GetDeviceInterface(DeviceType type);
 
 struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChecked<GeneratorParams> {
   GeneratorParams(const Config& config);  // This constructor is only used for internal generator benchmarks
@@ -69,6 +78,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   int sequence_length{};
   int BatchBeamSize() const { return search.num_beams * batch_size; }
 
+  DeviceInterface* p_device{};
   DeviceType device_type{DeviceType::CPU};
   cudaStream_t cuda_stream{};
 
@@ -110,10 +120,12 @@ struct Generator : LeakChecked<Generator> {
   Generator(const Model& model, const GeneratorParams& params);
 
   bool IsDone() const;
+  void SetRuntimeOption(const char* key, const char* value);
   void ComputeLogits();
+  bool IsSessionTerminated() const;
   void GenerateNextToken();
 
-  DeviceMemorySpan<int32_t> GetSequence(size_t index) const;
+  DeviceSpan<int32_t> GetSequence(size_t index) const;
 
   std::shared_ptr<const Model> model_;
   std::unique_ptr<State> state_;
@@ -138,7 +150,7 @@ std::unique_ptr<OrtGlobals>& GetOrtGlobals();
 void Shutdown();  // Do this once at exit, Ort code will fail after this call
 OrtEnv& GetOrtEnv();
 
-std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path);
+std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings = nullptr);
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Model& model);
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Config& config);  // For benchmarking purposes only
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params);

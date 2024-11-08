@@ -5,9 +5,9 @@
 #include "sequences.h"
 #include "models/model.h"
 #include "search.h"
+#include "cpu/interface.h"
 #include "cuda/interface.h"
 #if USE_CUDA
-#include "cuda/search_cuda.h"
 #include "models/kernels.h"
 #endif
 
@@ -29,6 +29,11 @@ std::string CurrentModulePath() {
   return out_path;
 }
 #endif
+
+void ThrowErrorIfSessionTerminated(bool is_session_terminated) {
+  if (is_session_terminated)
+    throw std::runtime_error("Session in Terminated state, exiting!");
+}
 
 namespace Generators {
 
@@ -94,45 +99,10 @@ struct GenaiInterfaceImpl : GenaiInterface {
   std::ostream& Log(std::string_view label, std::string_view text = {}) override { return Log(label, text); }
 
   void DumpSpan(std::ostream& stream, std::span<const float> values) override { return DumpSpan(stream, values); }
-  virtual void DumpSpan(std::ostream& stream, std::span<const int> values) override { return DumpSpan(stream, values); }
+  void DumpSpan(std::ostream& stream, std::span<const int> values) override { return DumpSpan(stream, values); }
+
+  void Sequences_AfterAppendNextTokens(Sequences* p_this, DeviceSpan<int32_t> next_tokens) override { return p_this->AfterAppendNextTokens(next_tokens); }
 } g_genai;
-
-const char* label_cpu = "cpu";
-
-struct CpuMemory : DeviceMemoryBase {
-  CpuMemory(size_t size) {
-    size_in_bytes_ = size;
-    p_cpu_ = p_device_ = new uint8_t[size_in_bytes_];
-  }
-
-  ~CpuMemory() override {
-    delete[] p_device_;
-  }
-
-  const char* GetType() const override { return label_cpu; }
-  bool IsCpuAccessible() const override { return true; }
-  void GetOnCpu() override { assert(false); }  // Should never be called, as p_cpu_ is always valid
-  void CopyFromDevice(size_t begin_dest, DeviceMemoryBase& source, size_t begin_source, size_t size_in_bytes) override {
-    if (GetType() == label_cpu)
-      memcpy(p_device_ + begin_dest, source.p_device_ + begin_source, size_in_bytes);
-    else
-      throw std::runtime_error("CpuMemory::CopyFromDevice not implemented for " + std::string(source.GetType()));
-  }
-};
-
-struct CpuInterface : DeviceInterface {
-  std::shared_ptr<DeviceMemoryBase> AllocateBase(size_t size, bool cpu_accessible) override {
-    assert(cpu_accessible == true);
-    return std::make_shared<CpuMemory>(size);
-  }
-
-  std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override { return nullptr; }
-  std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override { return nullptr; }
-} g_cpu;
-
-DeviceInterface& GetCpuDeviceInterface() {
-  return g_cpu;
-}
 
 #if USE_CUDA
 CudaInterface* GetCudaInterface() {
@@ -194,15 +164,32 @@ std::string to_string(DeviceType device_type) {
       return "CUDA";
     case DeviceType::DML:
       return "DirectML";
+    case DeviceType::WEBGPU:
+      return "WebGpu";
   }
   throw std::runtime_error("Unknown device type");
 }
 
-GeneratorParams::GeneratorParams(const Config& config) : config{config} {
+DeviceInterface* GetDeviceInterface(DeviceType type) {
+  switch (type) {
+    default:
+    case DeviceType::CPU:
+      return GetCpuInterface();
+#if USE_CUDA
+    case DeviceType::CUDA:
+      return GetCudaInterface();
+#endif
+  }
+}
+
+GeneratorParams::GeneratorParams(const Config& config)
+    : config{config},
+      p_device{GetDeviceInterface(DeviceType::CPU)} {
 }
 
 GeneratorParams::GeneratorParams(const Model& model)
     : config{*model.config_.get()},
+      p_device{model.p_device_},
       device_type{model.device_type_},
       cuda_stream{model.cuda_stream_},
       is_cuda_graph_enabled_{IsCudaGraphEnabled(model.config_->model.decoder.session_options)} {
@@ -255,18 +242,9 @@ std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorPa
 }
 
 std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
-#if USE_CUDA
-  if (params.device_type == DeviceType::CUDA) {
-    if (params.search.num_beams > 1)
-      return GetCudaInterface()->CreateBeam(params);
-    return GetCudaInterface()->CreateGreedy(params);
-  }
-#endif
-
-  if (params.search.num_beams > 1) {
-    return std::make_unique<BeamSearch_Cpu>(params);
-  }
-  return std::make_unique<GreedySearch_Cpu>(params);
+  if (params.search.num_beams > 1)
+    return params.p_device->CreateBeam(params);
+  return params.p_device->CreateGreedy(params);
 }
 
 Generator::Generator(const Model& model, const GeneratorParams& params) : model_{model.shared_from_this()} {
@@ -288,13 +266,14 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
 }
 
 void Generator::ComputeLogits() {
+  ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (computed_logits_)
     throw std::runtime_error("ComputeLogits called again without calling GenerateNextToken first");
 
   auto logits = state_->Run(search_->GetSequenceLength(), search_->GetNextTokens(), search_->GetNextIndices());
   if (g_log.enabled && g_log.model_logits) {
     auto& stream = Log("model_logits");
-    DumpSpan(stream, logits.GetCPU());
+    DumpSpan(stream, logits.CopyDeviceToCpu());
     stream << std::endl;
   }
   search_->SetLogits(logits);
@@ -305,7 +284,25 @@ void Generator::ComputeLogits() {
   search_->ApplyRepetitionPenalty(search.repetition_penalty);
 }
 
+void Generator::SetRuntimeOption(const char* key, const char* value) {
+  // TODO: Need a better way to handle different keys
+  // We can create a config manager to host all configurations and do comparison at that point
+  if (strcmp(key, "terminate_session") == 0) {
+    if (strcmp(value, "0") == 0) {
+      state_->UnsetTerminate();
+    } else if (strcmp(value, "1") == 0) {
+      state_->SetTerminate();
+    } else {
+      // Value not expected
+      throw std::runtime_error(std::string("terminate_session key value unexpected: ") + value);
+    }
+  } else {
+    throw std::runtime_error(std::string("SetRuntimeOption key is not expected: ") + key);
+  }
+}
+
 bool Generator::IsDone() const {
+  ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (computed_logits_)
     throw std::runtime_error("IsDone() can't be called in the middle of processing logits");
 
@@ -317,7 +314,12 @@ bool Generator::IsDone() const {
   return is_done;
 }
 
+bool Generator::IsSessionTerminated() const {
+  return state_->session_terminated_;
+}
+
 void Generator::GenerateNextToken() {
+  ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (!computed_logits_)
     throw std::runtime_error("Must call ComputeLogits before GenerateNextToken");
   computed_logits_ = false;
@@ -358,7 +360,7 @@ void Generator::GenerateNextToken() {
   }
 }
 
-DeviceMemorySpan<int32_t> Generator::GetSequence(size_t index) const {
+DeviceSpan<int32_t> Generator::GetSequence(size_t index) const {
   return search_->GetSequence(index);
 }
 
@@ -374,7 +376,7 @@ TokenSequences Generate(const Model& model, const GeneratorParams& params) {
 
   for (int i = 0; i < params.batch_size * params.search.num_return_sequences; i++) {
     auto sequence = generator->search_->GetSequence(i);
-    auto sequence_cpu = sequence.CpuSpan();
+    auto sequence_cpu = sequence.CopyDeviceToCpu();
 
     auto& v = result.emplace_back();
     v.assign(sequence_cpu.begin(), sequence_cpu.end());
@@ -385,14 +387,8 @@ TokenSequences Generate(const Model& model, const GeneratorParams& params) {
 }  // namespace Generators
 
 #if USE_CUDA
-cudaError_t cudaStreamCreate(cudaStream_t* stream) { return Generators::GetCudaInterface()->cudaStreamCreate(stream); }
-cudaError_t cudaStreamDestroy(cudaStream_t stream) { return Generators::GetCudaInterface()->cudaStreamDestroy(stream); }
 cudaError_t cudaMemcpyAsync(void* dst, const void* src, size_t count, cudaMemcpyKind kind, cudaStream_t stream) { return Generators::GetCudaInterface()->cudaMemcpyAsync(dst, src, count, kind, stream); }
 cudaError_t cudaMemcpy(void* dst, const void* src, size_t count, cudaMemcpyKind kind) { return Generators::GetCudaInterface()->cudaMemcpy(dst, src, count, kind); }
 cudaError_t cudaMemsetAsync(void* ptr, int value, size_t count, cudaStream_t stream) { return Generators::GetCudaInterface()->cudaMemsetAsync(ptr, value, count, stream); }
 cudaError_t cudaMemset(void* ptr, int value, size_t count) { return Generators::GetCudaInterface()->cudaMemset(ptr, value, count); }
-cudaError_t cudaMalloc(void** ptr, size_t size) { return Generators::GetCudaInterface()->cudaMalloc(ptr, size); }
-cudaError_t cudaFree(void* ptr) { return Generators::GetCudaInterface()->cudaFree(ptr); }
-cudaError_t cudaHostAlloc(void** ptr, size_t size, unsigned int flags) { return Generators::GetCudaInterface()->cudaHostAlloc(ptr, size, flags); }
-cudaError_t cudaFreeHost(void* ptr) { return Generators::GetCudaInterface()->cudaFreeHost(ptr); }
 #endif

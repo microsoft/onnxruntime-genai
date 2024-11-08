@@ -64,6 +64,8 @@ endif()
 file(GLOB generator_srcs CONFIGURE_DEPENDS
   "${GENERATORS_ROOT}/*.h"
   "${GENERATORS_ROOT}/*.cpp"
+  "${GENERATORS_ROOT}/cpu/*.h"
+  "${GENERATORS_ROOT}/cpu/*.cpp"
   "${MODELS_ROOT}/*.h"
   "${MODELS_ROOT}/*.cpp"
 )

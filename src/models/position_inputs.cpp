@@ -9,7 +9,7 @@
 
 namespace Generators {
 
-PositionInputs::PositionInputs(const Model& model, State& state, RoamingArray<int32_t>& sequence_lengths_unk)
+PositionInputs::PositionInputs(const Model& model, State& state, DeviceSpan<int32_t> sequence_lengths_unk)
     : model_{model},
       state_{state} {
   has_mask_input_ = model_.session_info_->HasInput(model_.config_->model.decoder.inputs.attention_mask);
@@ -38,10 +38,12 @@ PositionInputs::PositionInputs(const Model& model, State& state, RoamingArray<in
 
   initial_sequence_lengths_.resize(state_.params_->BatchBeamSize());
 
+  auto sequence_lengths = cpu_span<int32_t>{sequence_lengths_unk.CpuSpan()};
   if (type_ == Ort::TypeToTensorType<int32_t>)
-    InitializeTensors<int32_t>(shape, sequence_lengths_unk);
+    InitializeTensors<int32_t>(shape, sequence_lengths);
   else
-    InitializeTensors<int64_t>(shape, sequence_lengths_unk);
+    InitializeTensors<int64_t>(shape, sequence_lengths);
+  sequence_lengths_unk.CopyCpuToDevice();
 
   position_ids_ = model_.ExpandInputs(position_ids_, state_.params_->search.num_beams);
   position_ids_next_ = model_.ExpandInputs(position_ids_next_, state_.params_->search.num_beams);
@@ -172,13 +174,6 @@ void PositionInputs::UpdatePositionIDs(int current_length) {
         model_.GetDmlExecutionContext()->ExecuteCommandList(dml_update_position_ids_kernel_->GetCommandList(), &fence, &completion_value);
       } break;
 #endif
-      case DeviceType::CPU: {
-        if (type_ == Ort::TypeToTensorType<int32_t>)
-          UpdatePositionIDsImpl<int32_t>();
-        else
-          UpdatePositionIDsImpl<int64_t>();
-        break;
-      }
 #if USE_CUDA
       case DeviceType::CUDA:
         if (type_ == Ort::TypeToTensorType<int32_t>)
@@ -187,6 +182,14 @@ void PositionInputs::UpdatePositionIDs(int current_length) {
           cuda::Launch_UpdatePositionIds(position_ids_->GetTensorMutableData<int64_t>(), static_cast<int>(position_ids_shape_[0]), model_.cuda_stream_);
         break;
 #endif
+      case DeviceType::CPU:
+      case DeviceType::WEBGPU: {
+        if (type_ == Ort::TypeToTensorType<int32_t>)
+          UpdatePositionIDsImpl<int32_t>();
+        else
+          UpdatePositionIDsImpl<int64_t>();
+        break;
+      }
       default:
         throw std::runtime_error("PositionIDs::Update - Unsupported device type");
     }
@@ -269,17 +272,6 @@ void PositionInputs::UpdateAttentionMask(int current_length) {
       break;
     }
 #endif
-    case DeviceType::CPU: {
-      if (type_ == Ort::TypeToTensorType<int32_t>)
-        UpdateAttentionMaskImpl(attention_mask_next_->GetTensorMutableData<int32_t>(),
-                                attention_mask_->GetTensorData<int32_t>(),
-                                current_length);
-      else
-        UpdateAttentionMaskImpl(attention_mask_next_->GetTensorMutableData<int64_t>(),
-                                attention_mask_->GetTensorData<int64_t>(),
-                                current_length);
-      break;
-    }
 #if USE_CUDA
     case DeviceType::CUDA: {
       int max_seq_len = sb_attention_mask_ ? state_.params_->search.max_length : current_length;
@@ -304,6 +296,18 @@ void PositionInputs::UpdateAttentionMask(int current_length) {
       break;
     }
 #endif
+    case DeviceType::WEBGPU:
+    case DeviceType::CPU: {
+      if (type_ == Ort::TypeToTensorType<int32_t>)
+        UpdateAttentionMaskImpl(attention_mask_next_->GetTensorMutableData<int32_t>(),
+                                attention_mask_->GetTensorData<int32_t>(),
+                                current_length);
+      else
+        UpdateAttentionMaskImpl(attention_mask_next_->GetTensorMutableData<int64_t>(),
+                                attention_mask_->GetTensorData<int64_t>(),
+                                current_length);
+      break;
+    }
     default:
       throw std::runtime_error("PositionIDs::Update - Unsupported device type");
   }
