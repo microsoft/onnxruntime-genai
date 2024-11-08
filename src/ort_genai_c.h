@@ -208,16 +208,14 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetProviderOption(OgaConfig* config,
 /*
  * \brief Creates a model from the given configuration directory.
  * \param[in] config_path The path to the model configuration directory. The path is expected to be encoded in UTF-8.
- * \param[in] device_type The device type to use for the model.
  * \param[out] out The created model.
  * \return OgaResult containing the error message if the model creation failed.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaModel** out);
 
 /*
- * \brief Creates a model from the given configuration directory and device type.
- * \param[in] config_path The path to the model configuration directory. The path is expected to be encoded in UTF-8.
- * \param[in] device_type The device type to use for the model.
+ * \brief Creates a model from the given configuration.
+ * \param[in] config The configuration to use for the model.
  * \param[out] out The created model.
  * \return OgaResult containing the error message if the model creation failed.
  */
