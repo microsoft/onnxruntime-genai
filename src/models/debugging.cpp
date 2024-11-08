@@ -19,7 +19,7 @@ static constexpr size_t c_value_count = 10;  // Dump this many values from the s
 template <typename... Types>
 const char* TypeToString(ONNXTensorElementDataType type, Ort::TypeList<Types...>) {
   const char* name = "(please add type to list)";
-  ((type == Ort::TypeToTensorType<Types> ? name = typeid(Types).name(), true : false) || ...);
+  (void)((type == Ort::TypeToTensorType<Types> ? name = typeid(Types).name(), true : false) || ...);
   return name;
 }
 
