@@ -85,6 +85,10 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Rust Toolchain
+        run: |
+          rustup target add --toolchain stable-x86_64-unknown-linux-gnu x86_64-linux-android
+
       - name: Create Android build
         run: |
           set -e -x

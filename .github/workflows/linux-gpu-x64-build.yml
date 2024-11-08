@@ -95,8 +95,10 @@ jobs:
             --gpus all \
             --rm \
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
+            --volume $$CARGO_HOME:/root/.cargo \
             -w /ort_genai_src onnxruntimecudabuildx64 \
             bash -c " \
+              export PATH=/root/.cargo/bin:$PATH && \
               /usr/bin/cmake --preset linux_gcc_cuda_release \
                 -DMANYLINUX=ON \
                 -DPYTHON_EXECUTABLE=${{ env.PYTHON_EXECUTABLE }} "
@@ -108,8 +110,10 @@ jobs:
             --gpus all \
             --rm \
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
+            --volume $$CARGO_HOME:/root/.cargo \
             -w /ort_genai_src onnxruntimecudabuildx64 \
             bash -c " \
+              export PATH=/root/.cargo/bin:$PATH && \
               /usr/bin/cmake --build --preset linux_gcc_cuda_release"
 
       - name: Use Dummy HuggingFace Token

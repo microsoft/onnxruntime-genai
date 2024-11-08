@@ -224,7 +224,7 @@ DeviceSpan<float> Logits::Get() {
 
     auto batched_logits_cpu = cpu_span<float>{cpu_tensor, element_count};
     HandleEOSArray(batched_logits_cpu);
-    if (!logits_mask_.empty()) {
+    if (!logits_masks_.empty()) {
       AddMask(batched_logits_cpu, logits_masks_);
     }
 
