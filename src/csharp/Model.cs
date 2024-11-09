@@ -16,6 +16,11 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaCreateModel(StringUtils.ToUtf8(modelPath), out _modelHandle));
         }
 
+        public Model(Config config)
+        {
+            Result.VerifySuccess(NativeMethods.OgaCreateModelFromConfig(config.Handle, out _modelHandle));
+        }
+
         internal IntPtr Handle { get { return _modelHandle; } }
 
         public Sequences Generate(GeneratorParams generatorParams)

@@ -70,7 +70,8 @@ public class GenerationTest {
   public void testWithInputIds() throws GenAIException {
     // test using the HF model. input id values must be < 1000 so we use manually created input.
     // Input/expected output copied from the C# unit tests
-    Model model = new Model(TestUtils.testModelPath());
+    Config config = new Config(TestUtils.testModelPath());
+    Model model = new Model(config);
     GeneratorParams params = new GeneratorParams(model);
     int batchSize = 2;
     int sequenceLength = 4;
