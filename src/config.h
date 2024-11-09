@@ -44,7 +44,7 @@ struct Config {
     std::optional<std::string> enable_profiling;
     // TODO(baijumeswani): Sharing env allocators across sessions leads to crashes on windows and iOS.
     //                     Identify the reason for the crash to enable allocator sharing by default.
-    bool use_env_allocators{false};
+    bool use_env_allocators{};
 
     std::vector<ProviderOptions> provider_options;
   };
@@ -170,6 +170,8 @@ struct Config {
 
 void SetSearchNumber(Config::Search& search, std::string_view name, double value);
 void SetSearchBool(Config::Search& search, std::string_view name, bool value);
+void ClearProviders(Config& config);
+void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 bool IsCudaGraphEnabled(Config::SessionOptions& session_options);
 
 }  // namespace Generators
