@@ -112,7 +112,6 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #define LOG_FATAL(...) LOG_WHEN_ENABLED(Generators::Log("fatal", __VA_ARGS__))
 #endif
 
-
 /** \brief Free functions and a few helpers are defined inside this namespace. Otherwise all types are the C API types
  *
  */

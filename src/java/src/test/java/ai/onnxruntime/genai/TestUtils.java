@@ -19,7 +19,7 @@ public class TestUtils {
     return getFilePathFromResource("/adapters/adapters.onnx_adapter");
   }
 
-  public static final String testModelPath() {
+  public static final String tinyGpt2ModelPath() {
     return getFilePathFromResource("/hf-internal-testing/tiny-random-gpt2-fp32");
   }
 

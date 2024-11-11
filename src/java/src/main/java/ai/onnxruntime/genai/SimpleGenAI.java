@@ -28,16 +28,6 @@ import java.util.function.Consumer;
 public class SimpleGenAI implements AutoCloseable {
   private Model model;
   private Tokenizer tokenizer;
-  private Adapters adapters;
-  private String adapterPath;
-  private String adapterName;
-
-  public SimpleGenAI(String modelPath, String theAdapterPath) throws GenAIException {
-    model = new Model(modelPath);
-    tokenizer = model.createTokenizer();
-    adapters = new Adapters(model);
-    adapterPath = theAdapterPath;
-  }
 
   public SimpleGenAI(String modelPath) throws GenAIException {
     model = new Model(modelPath);
@@ -111,15 +101,6 @@ public class SimpleGenAI implements AutoCloseable {
   }
 
   /**
-   * Set the adapter name that will be used in the generation process
-   *
-   * @param selectedAdapterName The adapter name that will be used.
-   */
-  public void setActiveAdapter(String selectedAdapterName) {
-    adapterName = selectedAdapterName;
-  }
-
-  /**
    * Generate text based on the prompt and settings in GeneratorParams.
    *
    * <p>NOTE: This only handles a single sequence of input (i.e. a single prompt which equates to
@@ -142,11 +123,6 @@ public class SimpleGenAI implements AutoCloseable {
             Generator generator = new Generator(model, generatorParams)) {
           // iterate (which calls computeLogits, generateNextToken, getLastTokenInSequence and
           // isDone)
-
-          if (adapters != null && adapterPath != null && adapterName != null) {
-            adapters.loadAdapters(adapterPath, adapterName);
-            generator.setActiveAdapter(adapters, adapterName);
-          }
 
           for (int token_id : generator) {
             // decode and call listener
@@ -173,9 +149,6 @@ public class SimpleGenAI implements AutoCloseable {
 
   @Override
   public void close() {
-    if (adapters != null) {
-      adapters.close();
-    }
     if (tokenizer != null) {
       tokenizer.close();
     }

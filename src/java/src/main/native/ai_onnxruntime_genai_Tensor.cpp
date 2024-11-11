@@ -62,7 +62,7 @@ Java_ai_onnxruntime_genai_Tensor_getTensorShape(JNIEnv* env, jobject thiz, jlong
 
   jlong fill[size];
   for (int i = 0; i < size; i++) {
-     fill[i] = shape.at(i);
+    fill[i] = shape.at(i);
   }
   env->SetLongArrayRegion(result, 0, size, fill);
   return result;

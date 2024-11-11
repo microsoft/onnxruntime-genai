@@ -91,7 +91,6 @@ Java_ai_onnxruntime_genai_Generator_setActiveAdapter(JNIEnv* env, jobject thiz, 
 JNIEXPORT jlong JNICALL
 Java_ai_onnxruntime_genai_Generator_getOutputNative(JNIEnv* env, jobject thiz, jlong native_handle,
                                                     jstring output_name) {
-
   OgaTensor* tensor = nullptr;
   CString name{env, output_name};
   ThrowIfError(env, OgaGenerator_GetOutput(reinterpret_cast<OgaGenerator*>(native_handle), name, &tensor));
