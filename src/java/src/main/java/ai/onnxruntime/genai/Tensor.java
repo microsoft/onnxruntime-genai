@@ -67,6 +67,35 @@ public final class Tensor implements AutoCloseable {
     nativeHandle = createTensor(data, shape, elementType.ordinal());
   }
 
+  /**
+   * Construct a Tensor from native handle.
+   *
+   * @param handle The native tensor handle.
+   */
+  public Tensor(long handle) {
+    nativeHandle = handle;
+    elementType = ElementType.values()[getTensorType(handle)];
+    shape = getTensorShape(handle);
+  }
+
+  /**
+   * Get the element type.
+   *
+   * @return The element type.
+   */
+  public ElementType getType() {
+    return this.elementType;
+  }
+
+  /**
+   * Get the tensor shape.
+   *
+   * @return The tensor type.
+   */
+  public long[] getShape() {
+    return this.shape;
+  }
+
   @Override
   public void close() {
     if (nativeHandle != 0) {
@@ -91,4 +120,8 @@ public final class Tensor implements AutoCloseable {
       throws GenAIException;
 
   private native void destroyTensor(long tensorHandle);
+
+  private native int getTensorType(long tensorHandle);
+
+  private native long[] getTensorShape(long tensorHandle);
 }

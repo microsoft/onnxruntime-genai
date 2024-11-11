@@ -16,24 +16,22 @@ public class TensorTest {
   @Test
   public void testAddTensorInput() throws GenAIException {
     // test setting an invalid search option throws a GenAIException
-    SimpleGenAI generator = new SimpleGenAI(TestUtils.testModelPath());
-    GeneratorParams params = generator.createGeneratorParams("Whatever");
-    long[] shape = {2, 2};
-    Tensor.ElementType elementType = Tensor.ElementType.float32;
-    ByteBuffer data = ByteBuffer.allocateDirect(4 * Float.BYTES).order(ByteOrder.nativeOrder());
+    try (SimpleGenAI generator = new SimpleGenAI(TestUtils.testModelPath());
+        GeneratorParams params = generator.createGeneratorParams("Whatever"); ) {
+      long[] shape = {2, 2};
+      Tensor.ElementType elementType = Tensor.ElementType.float32;
+      ByteBuffer data = ByteBuffer.allocateDirect(4 * Float.BYTES).order(ByteOrder.nativeOrder());
 
-    FloatBuffer floatBuffer = data.asFloatBuffer();
-    floatBuffer.put(new float[] {1.0f, 2.0f, 3.0f, 4.0f});
-    Tensor tensor = new Tensor(data, shape, elementType);
-
-    // no error on setting.
-    // assuming there's an error on execution if an invalid input has been provided so the user is
-    // aware of the issue
-    params.setInput("unknown_value", tensor);
-
-    tensor.close();
-    params.close();
-    generator.close();
+      FloatBuffer floatBuffer = data.asFloatBuffer();
+      floatBuffer.put(new float[] {1.0f, 2.0f, 3.0f, 4.0f});
+      try (Tensor tensor = new Tensor(data, shape, elementType)) {
+        // no error on setting.
+        // assuming there's an error on execution if an invalid input has been provided so the user
+        // is
+        // aware of the issue
+        params.setInput("unknown_value", tensor);
+      }
+    }
   }
 
   @Test

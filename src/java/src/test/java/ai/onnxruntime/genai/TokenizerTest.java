@@ -15,12 +15,13 @@ public class TokenizerTest {
     try (Model model = new Model(TestUtils.testModelPath());
         Tokenizer tokenizer = new Tokenizer(model)) {
       String[] inputs = new String[] {"This is a test", "This is another test"};
-      Sequences encoded = tokenizer.encodeBatch(inputs);
-      String[] decoded = tokenizer.decodeBatch(encoded);
+      try (Sequences encoded = tokenizer.encodeBatch(inputs)) {
+        String[] decoded = tokenizer.decodeBatch(encoded);
 
-      assertEquals(inputs.length, decoded.length);
-      for (int i = 0; i < inputs.length; i++) {
-        assert inputs[i].equals(decoded[i]);
+        assertEquals(inputs.length, decoded.length);
+        for (int i = 0; i < inputs.length; i++) {
+          assert inputs[i].equals(decoded[i]);
+        }
       }
     }
   }

@@ -4,6 +4,8 @@
  */
 package ai.onnxruntime.genai;
 
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+
 import java.util.logging.Logger;
 import org.junit.jupiter.api.Test;
 
@@ -14,19 +16,16 @@ public class MultiModalProcessorTest {
   @Test
   public void testBatchEncodeDecode() throws GenAIException {
     try (Model model = new Model(TestUtils.testVisioniModelPath());
-        MultiModalProcessor multiModalProcessor = new MultiModalProcessor(model)) {
-      TokenizerStream stream = multiModalProcessor.createStream();
-      GeneratorParams generatorParams = model.createGeneratorParams();
+        MultiModalProcessor multiModalProcessor = new MultiModalProcessor(model);
+        TokenizerStream stream = multiModalProcessor.createStream();
+        GeneratorParams generatorParams = model.createGeneratorParams()) {
       String inputs =
           new String(
               "<|user|>\n<|image_1|>\n Can you convert the table to markdown format?\n<|end|>\n<|assistant|>\n");
-      Images image = new Images(TestUtils.getFilePathFromResource("/images/sheet.png"));
-      NamedTensors processed = multiModalProcessor.processImages(inputs, image);
-
-      processed.close();
-      image.close();
-      generatorParams.close();
-      stream.close();
+      try (Images image = new Images(TestUtils.getFilePathFromResource("/images/sheet.png"));
+          NamedTensors processed = multiModalProcessor.processImages(inputs, image); ) {
+        assertNotNull(processed);
+      }
     }
   }
 }

@@ -7,6 +7,8 @@
 #include "ort_genai_c.h"
 #include "utils.h"
 
+#include <vector>
+
 using namespace Helpers;
 
 /*
@@ -38,4 +40,30 @@ Java_ai_onnxruntime_genai_Tensor_createTensor(JNIEnv* env, jobject thiz, jobject
 JNIEXPORT void JNICALL
 Java_ai_onnxruntime_genai_Tensor_destroyTensor(JNIEnv* env, jobject thiz, jlong native_handle) {
   OgaDestroyTensor(reinterpret_cast<OgaTensor*>(native_handle));
+}
+
+JNIEXPORT int JNICALL
+Java_ai_onnxruntime_genai_Tensor_getTensorType(JNIEnv* env, jobject thiz, jlong native_handle) {
+  OgaElementType type;
+  ThrowIfError(env, OgaTensorGetType(reinterpret_cast<OgaTensor*>(native_handle), &type));
+  return static_cast<int>(type);
+}
+
+JNIEXPORT jlongArray JNICALL
+Java_ai_onnxruntime_genai_Tensor_getTensorShape(JNIEnv* env, jobject thiz, jlong native_handle) {
+  OgaTensor* tensor = reinterpret_cast<OgaTensor*>(native_handle);
+  size_t size;
+  ThrowIfError(env, OgaTensorGetShapeRank(tensor, &size));
+  std::vector<int64_t> shape(size);
+  ThrowIfError(env, OgaTensorGetShape(tensor, shape.data(), shape.size()));
+
+  jlongArray result;
+  result = env->NewLongArray(size);
+
+  jlong fill[size];
+  for (int i = 0; i < size; i++) {
+     fill[i] = shape.at(i);
+  }
+  env->SetLongArrayRegion(result, 0, size, fill);
+  return result;
 }

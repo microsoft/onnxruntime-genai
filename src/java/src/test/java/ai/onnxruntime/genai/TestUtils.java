@@ -12,27 +12,11 @@ public class TestUtils {
   private static final Logger logger = Logger.getLogger(TestUtils.class.getName());
 
   public static final String testAdapterTestModelPath() {
-    // get the resources directory from one of the classes
-    URL url = TestUtils.class.getResource("/adapters");
-    if (url == null) {
-      logger.warning("Model not found at /adapters");
-      return null;
-    }
-
-    File f = new File(url.getFile());
-    return f.getPath();
+    return getFilePathFromResource("/adapters");
   }
 
   public static final String testAdapterTestAdaptersPath() {
-    // get the resources directory from one of the classes
-    URL url = TestUtils.class.getResource("/adapters/adapters.onnx_adapter");
-    if (url == null) {
-      logger.warning("Model not found at /adapters/adapters.onnx_adapter");
-      return null;
-    }
-
-    File f = new File(url.getFile());
-    return f.getPath();
+    return getFilePathFromResource("/adapters/adapters.onnx_adapter");
   }
 
   public static final String testModelPath() {
@@ -64,7 +48,7 @@ public class TestUtils {
     return true;
   }
 
-  static final String getFilePathFromResource(String path) {
+  public static final String getFilePathFromResource(String path) {
     // get the resources directory from one of the classes
     URL url = TestUtils.class.getResource(path);
     if (url == null) {
@@ -74,5 +58,13 @@ public class TestUtils {
 
     File f = new File(url.getFile());
     return f.getPath();
+  }
+
+  public static final String applyPhi2ChatTemplate(String question) {
+    return "User: " + question + "Assistant:";
+  }
+
+  public static final String applyPhi3ChatTemplate(String question) {
+    return "<|user|>" + question + "<|end|><|assistant|>";
   }
 }
