@@ -101,7 +101,7 @@ jobs:
         run: |
           set -e -x
           source genai-macos-venv/bin/activate
-          python3 build.py --config=Release --build_dir build/cpu --build_java --parallel --cmake_generator "Ninja"
+          python3 build.py --config=Release --build_dir build/cpu/osx-arm64 --build_java --parallel --cmake_generator "Ninja"
 
       - name: Run tests
         run: |
