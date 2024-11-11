@@ -306,8 +306,13 @@ struct PyGenerator {
   }
 
   void SetLogits(pybind11::array_t<float> new_logits) {
-    logits_ = logits;
-    generator_->SetLogits(cpu_span<float>{ToSpan(new_logits)});
+    auto logits = generator_->search_->GetLogits();
+    if (static_cast<size_t>(new_logits.size()) != logits.size())
+      throw std::runtime_error("Generator::SetLogits passed an array of size " + std::to_string(new_logits.size()) + " but should be size " + std::to_string(logits.size()));
+
+    copy(std::span<const float>{ToSpan(new_logits)}, logits.CpuSpan());
+    logits.CopyCpuToDevice();
+    generator_->computed_logits_ = true;
   }
 
   void GenerateNextToken() {

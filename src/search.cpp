@@ -12,19 +12,6 @@ Search_Cpu::Search_Cpu(const GeneratorParams& params)
   auto batch_beam_size = params.BatchBeamSize();
 
   sequence_lengths_ = params.p_device->Allocate<int32_t>(batch_beam_size);
-
-  // The original inputs are not expanded, this expands them in place into the sequences
-  auto input_sequences = params.input_ids;
-  auto current_length = sequences_.GetSequenceLength();
-  auto span = sequences_.GetSequences().Span();
-  for (size_t batch = 0; batch < params.batch_size; batch++) {
-    for (size_t beam = 0; beam < params.search.num_beams; beam++) {
-      for (int j = 0; j < current_length; j++) {
-        span[(batch * params.search.num_beams + beam) * sequences_.max_length_ + j] =
-            static_cast<int32_t>(input_sequences[batch * current_length + j]);
-      }
-    }
-  }
 }
 
 GreedySearch_Cpu::GreedySearch_Cpu(const GeneratorParams& params)
@@ -83,7 +70,7 @@ void BeamSearch_Cpu::SelectTop() {
 
   // Normalize next token scores
   for (size_t i = 0; i < params_->BatchBeamSize(); i++) {
-    std::span<float> const scores = next_token_scores_.subspan(i * static_cast<size_t>(params_->config.model.vocab_size), params_->config.model.vocab_size);
+    std::span<float> const scores = next_token_scores.subspan(i * static_cast<size_t>(params_->config.model.vocab_size), params_->config.model.vocab_size);
     LogSoftMax(scores, 1.0);
   }
 
@@ -271,7 +258,7 @@ void GreedySearch_Cpu::AppendNextTokensToSequences() {
     sequences_span[i * sequences_.max_length_ + current_length] = next_tokens[i];
   }
 
-  sequences_.AfterAppendNextTokens(next_tokens_ptr_);
+  sequences_.AfterAppendNextTokens(next_tokens_ptr_, batch_beam_size);
 
   if (sequences_.GetSequenceLength() == params_->search.max_length) {
     if (g_log.enabled && g_log.hit_max_length)
@@ -280,9 +267,9 @@ void GreedySearch_Cpu::AppendNextTokensToSequences() {
   }
 }
 
-void GreedySearch_Cpu::SetUserTokens(const DeviceSpan<int32_t>& next_tokens) {
+void GreedySearch_Cpu::SetUserTokens(DeviceSpan<int32_t>& next_tokens) {
   // Set user-defined next tokens
-  auto next_tokens_cpu = const_cast<DeviceSpan<int32_t>&>(next_tokens).GetCPU();
+  auto next_tokens_cpu = const_cast<DeviceSpan<int32_t>&>(next_tokens).Span();
   auto batch_size = params_->search.batch_size;
   auto tokens_count_per_batch = next_tokens_cpu.size() / batch_size;
   for (size_t j = 0; j < tokens_count_per_batch; j++) {
@@ -304,30 +291,38 @@ void GreedySearch_Cpu::RewindTo(size_t index) {
   memset(eos_seen_.data(), 0, eos_seen_.size_bytes());
   // Set next tokens to the last tokens in the sequence
   if (index > 0) {
-    sequences_.GetLastTokens(next_tokens_);
+    for (int i = 0; i < params_->BatchBeamSize(); i++) {
+      next_tokens_[i] = sequences_.GetSequences().Span()[(i * sequences_.max_length_) + index - 1];
+    }
   } else
     memset(next_tokens_.data(), 0, next_tokens_.size_bytes());
   sequences_.RewindTo(index);
 }
 
-void BeamSearch_Cpu::SetUserTokens(const DeviceSpan<int32_t>& next_tokens) {
+void BeamSearch_Cpu::SetUserTokens(DeviceSpan<int32_t>& next_tokens) {
   // Set user-defined next tokens
-  auto next_tokens_cpu = const_cast<DeviceSpan<int32_t>&>(next_tokens).GetCPU();
+  auto next_tokens_cpu = const_cast<DeviceSpan<int32_t>&>(next_tokens).Span();
   auto batch_beam_size = params_->BatchBeamSize();
   auto tokens_count_per_batch = next_tokens_cpu.size() / params_->search.batch_size;
+
+  auto sequences_span = sequences_.GetSequences().Span();
   for (size_t j = 0; j < tokens_count_per_batch; j++) {
+    auto current_length = sequences_.GetSequenceLength() + j;
     for (size_t i = 0; i < batch_beam_size; i++) {
       next_tokens_[i] = next_tokens_cpu[(i / params_->search.num_beams) * tokens_count_per_batch + j];
+      sequences_span[i * sequences_.max_length_ + current_length] = next_tokens_[i];
     }
 
-    sequences_.AppendNextTokenToSequences(next_tokens_);
-    if (sequences_.GetSequenceLength() == params_->search.max_length) {
+    if (current_length == params_->search.max_length) {
       if (g_log.enabled && g_log.hit_max_length)
         Log("hit_max_length", "beam cpu hit");
       done_ = true;
+      break;
+    } else {
+      done_ = false;
     }
   }
-  done_ = false;
+  sequences_.AfterAppendNextTokens(next_tokens, params_->search.batch_size); // next_tokens is not expanded
 }
 
 bool BeamSearch_Cpu::IsDone() const {
@@ -357,7 +352,8 @@ void BeamSearch_Cpu::AppendNextTokensToSequences() {
     // Append next token to each beam.
     sequences_next_span[i * max_length + current_length] = batch_beam_next_tokens[i];
   }
-  sequences_.AfterAppendNextTokens(beam_scorer_->GetNextTokens());
+  auto next_tokens_device = beam_scorer_->GetNextTokens();
+  sequences_.AfterAppendNextTokens(next_tokens_device, params_->BatchBeamSize());
 
   if (sequences_.GetSequenceLength() == params_->search.max_length) {
     if (g_log.enabled && g_log.hit_max_length)

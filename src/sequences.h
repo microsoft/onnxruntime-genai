@@ -25,12 +25,10 @@ struct Sequences {
   int GetSequenceLength() const { return current_length_; }
 
   // After tokens are appended, this function must be called to update the state & log the tokens
-  void AfterAppendNextTokens(DeviceSpan<int32_t> next_tokens);
+  void AfterAppendNextTokens(DeviceSpan<int32_t>& next_tokens, size_t batch_beam_size);
 
   const int max_length_;
 
-  // Return Token IDs of last token in each sequence
-  void GetLastTokens(cpu_span<int32_t>& last_tokens);
   // Rewind sequences to ith token
   void RewindTo(size_t index);
 

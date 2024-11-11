@@ -24,7 +24,7 @@ Gpt_State::Gpt_State(const Gpt_Model& model, DeviceSpan<int32_t> sequence_length
   extra_inputs_.Add();
 }
 
-DeviceSpan<float> Gpt_State::Run(int total_length, DeviceSpan<int32_t> next_tokens, DeviceSpan<int32_t> next_indices) {
+DeviceSpan<float> Gpt_State::Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
   UpdateInputsOutputs(next_tokens, next_indices, total_length);
 
   int batch_size = static_cast<int>(input_ids_.GetShape()[0]);
@@ -42,7 +42,7 @@ void Gpt_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan
   input_ids_.Update(next_tokens);
   size_t new_length = static_cast<size_t>(input_ids_.GetShape()[1]);
   position_inputs_.Update(next_tokens, total_length, static_cast<int>(new_length));
-  kv_cache_.Update(beam_indices.GetCPU(), total_length);
+  kv_cache_.Update(beam_indices, total_length);
   logits_.Update(next_tokens, new_length);
 }
 

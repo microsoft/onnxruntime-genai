@@ -192,7 +192,7 @@ DeviceSpan<float> Logits::Get() {
 
 #pragma warning(pop)
 
-void Logits::Update(const RoamingArray<int32_t>& next_tokens, size_t new_kv_length) {
+void Logits::Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length) {
   if (static_cast<size_t>(output_raw_.get()->GetTensorTypeAndShapeInfo()->GetShape()[1]) == new_kv_length && new_kv_length == 1) {
     return;
   }
@@ -202,7 +202,7 @@ void Logits::Update(const RoamingArray<int32_t>& next_tokens, size_t new_kv_leng
     // Find the first non pad token from the end
     size_t token_index = new_kv_length;
     while (token_index-- > 0) {
-      auto next_token = const_cast<RoamingArray<int32_t>&>(next_tokens).GetCPU()[b * new_kv_length + token_index];
+      auto next_token = const_cast<DeviceSpan<int32_t>&>(next_tokens).CpuSpan()[b * new_kv_length + token_index];
       if (next_token != model_.config_->model.pad_token_id)
         break;
     }

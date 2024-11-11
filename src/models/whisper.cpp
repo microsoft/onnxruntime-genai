@@ -132,7 +132,7 @@ void TransposeKCacheForDMMHA(T* dest_data,
 }
 #endif
 
-DeviceSpan<float> Whisper_State::Run(int current_length, DeviceSpan<int32_t> next_tokens, DeviceSpan<int32_t> next_indices) {
+DeviceSpan<float> Whisper_State::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
   int batch_size = static_cast<int>(decoder_input_ids_.GetShape()[0]);
 
   switch (run_state_) {
@@ -315,9 +315,9 @@ DeviceSpan<float> Whisper_State::Run(int current_length, DeviceSpan<int32_t> nex
   return logits_.Get();
 }
 
-void Whisper_State::UpdateInputsOutputs(const DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int current_length, bool search_buffers) {
+void Whisper_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int current_length, bool search_buffers) {
   decoder_input_ids_.Update(next_tokens);
-  kv_cache_.Update(beam_indices.GetCPU(), current_length);
+  kv_cache_.Update(beam_indices, current_length);
   size_t new_length = decoder_input_ids_.GetShape()[1];
   logits_.Update(next_tokens, new_length);
 

@@ -14,7 +14,7 @@ struct GenaiInterface {
   virtual void DumpSpan(std::ostream& stream, std::span<const float> values) = 0;
   virtual void DumpSpan(std::ostream& stream, std::span<const int> values) = 0;
 
-  virtual void Sequences_AfterAppendNextTokens(Generators::Sequences* p_this, Generators::DeviceSpan<int32_t> next_tokens) = 0;
+  virtual void Sequences_AfterAppendNextTokens(Generators::Sequences* p_this, Generators::DeviceSpan<int32_t> next_tokens, size_t batch_beam_size) = 0;
 };
 
 namespace Generators {

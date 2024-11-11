@@ -56,7 +56,7 @@ void InputIDs::Add() {
 }
 
 // TODO(aciddelgado): I believe new_tokens should be a cpu_span instead of DeviceSpan
-void InputIDs::Update(DeviceSpan<int32_t> new_tokens) {
+void InputIDs::Update(DeviceSpan<int32_t>& new_tokens) {
   const auto get_unpadded_sequence_length = [](std::span<const int32_t> input_ids,
                                                int32_t pad_token_id) {
     int32_t seq_length = 0;
@@ -81,9 +81,9 @@ void InputIDs::Update(DeviceSpan<int32_t> new_tokens) {
   // Resize input_ids shape based on new_tokens
   // Temporary solution for beam search
   // TODO(aciddelgado): for beam search lets call cuda::Launch_ExpandInputSequences
-  size_t sequence_length = static_cast<size_t>(new_tokens.CpuSpan().size()) / state_.params_->BatchBeamSize();
+  size_t sequence_length = static_cast<size_t>(new_tokens.size()) / state_.params_->BatchBeamSize();
   if (is_prompt_ && state_.params_->search.num_beams > 1)
-    sequence_length = static_cast<size_t>(new_tokens.CpuSpan().size()) / state_.params_->search.batch_size;
+    sequence_length = static_cast<size_t>(new_tokens.size()) / state_.params_->search.batch_size;
 
   if (static_cast<size_t>(shape_[1]) != sequence_length) {
     shape_[1] = sequence_length;
@@ -182,10 +182,10 @@ void InputIDs::Update(DeviceSpan<int32_t> new_tokens) {
         for (int b = 0; b < shape_[0]; b++) {
           int in_offset = (b / state_.params_->search.num_beams) * static_cast<int>(shape_[1]);
           int out_offset = b * static_cast<int>(shape_[1]);
-          memcpy(data + out_offset, new_tokens.CpuSpan().data() + in_offset, shape_[1] * sizeof(int32_t));
+          memcpy(data + out_offset, new_tokens.Span().data() + in_offset, shape_[1] * sizeof(int32_t));
         }
       } else {
-        memcpy(data, new_tokens.CpuSpan().data(), shape_[0] * shape_[1] * sizeof(int32_t));
+        memcpy(data, new_tokens.Span().data(), shape_[0] * shape_[1] * sizeof(int32_t));
       }
     }
   }

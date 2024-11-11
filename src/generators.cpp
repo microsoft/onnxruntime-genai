@@ -102,7 +102,7 @@ struct GenaiInterfaceImpl : GenaiInterface {
   void DumpSpan(std::ostream& stream, std::span<const float> values) override { return DumpSpan(stream, values); }
   void DumpSpan(std::ostream& stream, std::span<const int> values) override { return DumpSpan(stream, values); }
 
-  void Sequences_AfterAppendNextTokens(Sequences* p_this, DeviceSpan<int32_t> next_tokens) override { return p_this->AfterAppendNextTokens(next_tokens); }
+  void Sequences_AfterAppendNextTokens(Sequences* p_this, DeviceSpan<int32_t> next_tokens, size_t batch_beam_size) override { return p_this->AfterAppendNextTokens(next_tokens, batch_beam_size); }
 } g_genai;
 
 #if USE_CUDA
@@ -119,7 +119,7 @@ CudaInterface* GetCudaInterface() {
 #endif
 
   if (!cuda_library) {
-    throw std::runtime_error("Cuda interface not available");
+    throw std::runtime_error("Cuda interface not available.");
   }
 
   Generators::CudaInterface* GetInterface(GenaiInterface * p_genai);
@@ -265,6 +265,14 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
   }
 }
 
+DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(const cpu_span<int32_t>& input_ids) {
+  auto input_ids_device = state_->params_->p_device->Allocate<int32_t>(input_ids.size());
+  auto cpu_span = input_ids_device.CpuSpan();
+  std::copy(input_ids.begin(), input_ids.end(), cpu_span.begin());
+  input_ids_device.CopyCpuToDevice();
+  return input_ids_device;
+}
+
 void Generator::AddTokens(const cpu_span<int32_t>& input_ids) {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (input_ids.size() == 0)
@@ -273,14 +281,14 @@ void Generator::AddTokens(const cpu_span<int32_t>& input_ids) {
     throw std::runtime_error("Please use params.SetInputs for " + model_->config_->model.type + ". AppendTokens is not supported for this model type.");
   if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
     throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
-  search_->SetUserTokens(input_ids);
-
+  
+  auto input_ids_device = AllocateInputIdsOnDevice(input_ids);
+  search_->SetUserTokens(input_ids_device);
   computed_logits_ = false;
-  auto input_ids_span = DeviceSpan<int32_t>{input_ids}; // TODO(aciddelgado): at some point input_ids need to go on device i think
-  ComputeLogits(input_ids);
+  ComputeLogits(input_ids_device);
 }
 
-void Generator::ComputeLogits(const DeviceSpan<int32_t>& next_tokens) {
+void Generator::ComputeLogits(DeviceSpan<int32_t>& next_tokens) {
   if (computed_logits_)
     throw std::runtime_error("ComputeLogits called again without calling AppendTokens or GenerateNextToken first");
 
@@ -340,10 +348,10 @@ void Generator::GenerateNextToken() {
   if (search_->GetSequenceLength() == 0 && !computed_logits_)
     throw std::runtime_error("GenerateNextToken called with no prior state. Please call AppendTokens, SetLogits, or params.SetInputs before calling GenerateNextToken.");
   if (!computed_logits_) {
+    auto next_tokens = search_->GetNextTokens();
     if (just_rewinded_)
-      search_->SetUserTokens(search_->GetNextTokens());
-      // AddTokens(search_->GetNextTokens());
-    ComputeLogits(search_->GetNextTokens());
+      search_->SetUserTokens(next_tokens);
+    ComputeLogits(next_tokens);
   }
   computed_logits_ = false;
   auto& search = search_->params_->search;
@@ -402,8 +410,10 @@ void Generator::RewindToLength(size_t new_length) {
 }
 
 DeviceSpan<float> Generator::GetLogits() {
-  if (!computed_logits_)
-    ComputeLogits(search_->GetNextTokens());
+  if (!computed_logits_) {
+    auto next_tokens = search_->GetNextTokens();
+    ComputeLogits(next_tokens);
+  }
   return search_->GetLogits();
 }
 

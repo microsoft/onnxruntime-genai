@@ -283,7 +283,6 @@ TEST(CAPITests, SetTerminate) {
   auto GenerateOutput = [](OgaGenerator* generator, std::unique_ptr<OgaTokenizerStream> tokenizer_stream) {
     try {
       while (!generator->IsDone()) {
-        generator->ComputeLogits();
         generator->GenerateNextToken();
       }
     }
@@ -301,10 +300,10 @@ TEST(CAPITests, SetTerminate) {
   auto input_sequences = OgaSequences::Create();
   tokenizer->Encode(input_string, *input_sequences);
   auto params = OgaGeneratorParams::Create(*model);
-  params->SetInputSequences(*input_sequences);
   params->SetSearchOption("max_length", 40);
 
   auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokenSequences(*input_sequences);
   EXPECT_EQ(generator->IsSessionTerminated(), false);
   std::vector<std::thread> threads;
   threads.push_back(std::thread(GenerateOutput, generator.get(), std::move(tokenizer_stream)));

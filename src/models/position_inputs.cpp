@@ -35,9 +35,9 @@ PositionInputs::PositionInputs(const Model& model, State& state, DeviceSpan<int3
 
   auto sequence_lengths = cpu_span<int32_t>{sequence_lengths_unk.CpuSpan()};
   if (type_ == Ort::TypeToTensorType<int32_t>)
-    InitializeTensors<int32_t>(shape, sequence_lengths);
+    InitializeSequenceLengths<int32_t>(shape, sequence_lengths);
   else
-    InitializeTensors<int64_t>(shape, sequence_lengths);
+    InitializeSequenceLengths<int64_t>(shape, sequence_lengths);
   sequence_lengths_unk.CopyCpuToDevice();
 
   position_ids_shape_ = shape;
@@ -68,7 +68,7 @@ void PositionInputs::Add() {
   }
 }
 
-void PositionInputs::Update(const RoamingArray<int32_t>& next_tokens, int total_length, int new_length) {
+void PositionInputs::Update(const DeviceSpan<int32_t>& next_tokens, int total_length, int new_length) {
   if (has_posid_input_) {
     // Initialize on first update
     if (is_first_update_) {
@@ -293,14 +293,14 @@ void PositionInputs::UpdateAttentionMask(int total_length, int new_kv_length) {
 }
 
 template <typename T>
-void PositionInputs::CreateAndInitializePositionIDs(const RoamingArray<int32_t>& next_tokens, std::array<int64_t, 2> shape) {
+void PositionInputs::CreateAndInitializePositionIDs(const DeviceSpan<int32_t>& next_tokens, std::array<int64_t, 2> shape) {
   // Set attention mask to be 0 for pad tokens, and 1 for all other tokens.
   // Set position id to be 0 for pad tokens, and accumulated sum of mask in a batch for other tokens
   position_ids_ = OrtValue::CreateTensor(model_.allocator_cpu_, shape, type_);
   position_ids_next_ = OrtValue::CreateTensor(model_.allocator_cpu_, std::array<int64_t, 2>{shape[0], 1}, type_);
   auto* position_data = position_ids_->GetTensorMutableData<T>();
   auto* position_data_next = position_ids_next_->GetTensorMutableData<T>();
-  const auto* word_id = const_cast<RoamingArray<int32_t>&>(next_tokens).GetCPU().data();
+  const auto* word_id = const_cast<DeviceSpan<int32_t>&>(next_tokens).CpuSpan().data();
   auto* position = position_data;
   for (int i = 0; i < shape[0]; i++) {
     T abs_position = 0;
@@ -323,12 +323,12 @@ void PositionInputs::CreateAndInitializePositionIDs(const RoamingArray<int32_t>&
 }
 
 template <typename T>
-void PositionInputs::CreateAndInitializeAttentionMask(const RoamingArray<int32_t>& next_tokens, std::array<int64_t, 2> shape) {
+void PositionInputs::CreateAndInitializeAttentionMask(const DeviceSpan<int32_t>& next_tokens, std::array<int64_t, 2> shape) {
   // Set attention mask to be 0 for pad tokens, and 1 for all other tokens.
   // Set position id to be 0 for pad tokens, and accumulated sum of mask in a batch for other tokens
   attention_mask_ = OrtValue::CreateTensor(model_.allocator_cpu_, shape, type_);
   auto* mask_data = attention_mask_->GetTensorMutableData<T>();
-  const auto* word_id = const_cast<RoamingArray<int32_t>&>(next_tokens).GetCPU().data();
+  const auto* word_id = const_cast<DeviceSpan<int32_t>&>(next_tokens).CpuSpan().data();
   auto* mask = mask_data;
   for (int i = 0; i < shape[0]; i++) {
     for (int j = 0; j < shape[1]; j++, word_id++, mask++) {

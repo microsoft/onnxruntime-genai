@@ -30,7 +30,7 @@ struct State {
   State(const GeneratorParams& params, const Model& model_);
   virtual ~State();
 
-  virtual DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t> next_tokens, DeviceSpan<int32_t> next_indices = {}) = 0;
+  virtual DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) = 0;
   virtual const CapturedGraphInfo* GetCapturedGraphInfo() const { return nullptr; }
   virtual void Finalize() {}
 

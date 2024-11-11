@@ -84,12 +84,12 @@ EmbeddingState::EmbeddingState(const MultiModalVisionModel& model, const Generat
   inputs_embeds_.Add();
 }
 
-void EmbeddingState::UpdateInputsOutputs(DeviceSpan<int32_t> next_tokens, bool is_prompt) {
+void EmbeddingState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, bool is_prompt) {
   input_ids_.Update(next_tokens);
   image_features_.Update(is_prompt);
 }
 
-DeviceSpan<float> EmbeddingState::Run(int current_length, DeviceSpan<int32_t> next_tokens, DeviceSpan<int32_t> next_indices) {
+DeviceSpan<float> EmbeddingState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
   int batch_size = static_cast<int>(input_ids_.GetShape()[0]);
   State::Run(*model_.embedding_session_, batch_size);
 
@@ -104,7 +104,7 @@ VisionState::VisionState(const MultiModalVisionModel& model, const GeneratorPara
   image_features_.Add();
 }
 
-DeviceSpan<float> VisionState::Run(int current_length, DeviceSpan<int32_t> next_tokens, DeviceSpan<int32_t> next_indices) {
+DeviceSpan<float> VisionState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
   const int num_images = static_cast<int>(inputs_[0]->GetTensorTypeAndShapeInfo()->GetShape()[0]);
   State::Run(*model_.vision_session_, num_images);
 
@@ -122,17 +122,17 @@ DecoderState::DecoderState(const MultiModalVisionModel& model, DeviceSpan<int32_
   kv_cache_.Add();
 }
 
-DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t> next_tokens, DeviceSpan<int32_t> next_indices) {
+DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
   int batch_size = static_cast<int>(inputs_embeds_.GetShape()[0]);
   State::Run(*model_.decoder_session_, batch_size);
   return logits_.Get();
 }
 
-void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t> next_tokens, int total_length, DeviceSpan<int32_t> beam_indices) {
+void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int total_length, DeviceSpan<int32_t> beam_indices) {
   int batch_size = static_cast<int>(inputs_embeds_.GetShape()[0]);
-  size_t new_length = next_tokens.GetCPU().size() / batch_size;
+  size_t new_length = next_tokens.size() / batch_size;
   position_inputs_.Update(next_tokens, total_length, static_cast<int>(new_length));
-  kv_cache_.Update(beam_indices.GetCPU(), total_length);
+  kv_cache_.Update(beam_indices, total_length);
   logits_.Update(next_tokens, new_length);
   inputs_embeds_.UpdateSequenceLength(new_length);
 }
@@ -149,7 +149,7 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalVisionModel& mo
   decoder_state_ = std::make_unique<DecoderState>(model_, sequence_lengths_unk, params, captured_graph_info_.get());
 }
 
-DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<int32_t> next_tokens,
+DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<int32_t>& next_tokens,
                                                DeviceSpan<int32_t> next_indices) {
   // Pipeline state defines the pipeline of the execution of the models
   // Prompt stage:

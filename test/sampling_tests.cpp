@@ -282,7 +282,6 @@ TEST(SamplingTests, BatchedSamplingTopPCuda) {
   params->device_type = Generators::DeviceType::CUDA;
   auto logits = AllocateFromCpuMem<float>(*params->p_device, logits_cpu);
   auto generator = Generators::CreateGenerator(*model, *params);
-  generator->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), logits_cpu.size()));
   generator->SetLogits(logits);
   // Verify outputs match expected outputs
   generator->GenerateNextToken();
@@ -311,7 +310,6 @@ TEST(SamplingTests, BatchedSamplingTopKCuda) {
   params->device_type = Generators::DeviceType::CUDA;
   auto logits = AllocateFromCpuMem<float>(*params->p_device, logits_cpu);
   auto generator = Generators::CreateGenerator(*model, *params);
-  generator->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), logits_cpu.size()));
   generator->SetLogits(logits);
   // Verify outputs match expected outputs
   generator->GenerateNextToken();
@@ -345,7 +343,6 @@ TEST(SamplingTests, BatchedSamplingTopPAndKCuda) {
   params->device_type = Generators::DeviceType::CUDA;
   auto logits = AllocateFromCpuMem<float>(*params->p_device, logits_cpu);
   auto generator = Generators::CreateGenerator(*model, *params);
-  generator->SetLogits(Generators::gpu_span<float>(logits_gpu.get(), logits_cpu.size()));
   generator->SetLogits(logits);
   // Verify outputs match expected outputs
   generator->GenerateNextToken();

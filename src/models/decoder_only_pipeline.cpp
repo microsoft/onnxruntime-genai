@@ -79,7 +79,7 @@ bool IntermediatePipelineState::SupportsPrimaryDevice() const {
   return false;
 }
 
-DeviceSpan<float> IntermediatePipelineState::Run(int total_length, DeviceSpan<int32_t> next_tokens,
+DeviceSpan<float> IntermediatePipelineState::Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                                                  DeviceSpan<int32_t> next_indices) {
   State::Run(*model_.sessions_[id_], params_->BatchBeamSize());
 
@@ -106,7 +106,7 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
   }
 }
 
-DeviceSpan<float> DecoderOnlyPipelineState::Run(int total_length, DeviceSpan<int32_t> next_tokens,
+DeviceSpan<float> DecoderOnlyPipelineState::Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                                                 DeviceSpan<int32_t> next_indices) {
   UpdateInputsOutputs(next_tokens, next_indices, total_length);
 
@@ -237,12 +237,12 @@ DeviceSpan<float> DecoderOnlyPipelineState::Run(int total_length, DeviceSpan<int
   return logits_.Get();
 }
 
-void DecoderOnlyPipelineState::UpdateInputsOutputs(const DeviceSpan<int32_t>& next_tokens,
+void DecoderOnlyPipelineState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens,
                                                    DeviceSpan<int32_t> beam_indices, int total_length) {
   input_ids_.Update(next_tokens);
   size_t new_length = input_ids_.GetShape()[1];
   position_inputs_.Update(next_tokens, total_length, static_cast<int>(new_length));
-  if (kv_cache_) kv_cache_->Update(beam_indices.GetCPU(), total_length);
+  if (kv_cache_) kv_cache_->Update(beam_indices, total_length);
   logits_.Update(next_tokens, new_length);
 }
 

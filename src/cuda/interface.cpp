@@ -223,7 +223,7 @@ void DumpSpan<float>(std::ostream& stream, std::span<const float> values) { retu
 template <>
 void DumpSpan<int>(std::ostream& stream, std::span<const int> values) { return gp_genai->DumpSpan(stream, values); }
 
-void Sequences::AfterAppendNextTokens(DeviceSpan<int32_t> next_tokens) { return gp_genai->Sequences_AfterAppendNextTokens(this, next_tokens); }
+void Sequences::AfterAppendNextTokens(DeviceSpan<int32_t>& next_tokens, size_t batch_beam_size) { return gp_genai->Sequences_AfterAppendNextTokens(this, next_tokens, batch_beam_size); }
 
 }  // namespace Generators
 

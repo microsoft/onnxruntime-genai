@@ -127,7 +127,8 @@ struct Generator : LeakChecked<Generator> {
   bool computed_logits_{};  // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
 
  private:
-  void ComputeLogits(const DeviceSpan<int32_t>& next_tokens);
+  DeviceSpan<int32_t> AllocateInputIdsOnDevice(const cpu_span<int32_t>& input_ids);
+  void ComputeLogits(DeviceSpan<int32_t>& next_tokens);
   bool just_rewinded_{false};
 };
 
