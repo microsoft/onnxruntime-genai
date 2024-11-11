@@ -18,10 +18,24 @@
 #define PHI2_PATH MODEL_PATH "phi-2/int4/cpu"
 #endif
 #endif
+TEST(CAPITests, Config) {
+#if TEST_PHI2
+  // Test modifying config settings
+  auto config = OgaConfig::Create(PHI2_PATH);
+  config->AppendProvider("brainium");
+  config->SetProviderOption("super_ai", "custom_field", "hello");
+  config->AppendProvider("human");
+  config->SetProviderOption("brainium", "custom_field1", "hello1");
+  config->SetProviderOption("brainium", "custom_field2", "hello2");
+  config->ClearProviders();
+  config->AppendProvider("cuda");
+#endif
+}
 
 TEST(CAPITests, TokenizerCAPI) {
 #if TEST_PHI2
-  auto model = OgaModel::Create(PHI2_PATH);
+  auto config = OgaConfig::Create(PHI2_PATH);
+  auto model = OgaModel::Create(*config);
   auto tokenizer = OgaTokenizer::Create(*model);
 
   // Encode single decode single
@@ -285,8 +299,7 @@ TEST(CAPITests, SetTerminate) {
       while (!generator->IsDone()) {
         generator->GenerateNextToken();
       }
-    }
-    catch (const std::exception& e) {
+    } catch (const std::exception& e) {
       EXPECT_EQ(generator->IsSessionTerminated(), true);
       std::cout << "Session Terminated: " << e.what() << std::endl;
     }
@@ -402,13 +415,11 @@ TEST(CAPITests, TopKTopPCAPI) {
 
 #if TEST_PHI2
 TEST(CAPITests, AdaptersTest) {
-
 #ifdef USE_CUDA
-using OutputType = Ort::Float16_t;
+  using OutputType = Ort::Float16_t;
 #else
-using OutputType = float;
+  using OutputType = float;
 #endif
-
 
   // The python unit tests create the adapter model.
   // In order to run this test, the python unit test must have been run first.
@@ -473,7 +484,7 @@ using OutputType = float;
     ASSERT_TRUE(std::equal(output_shape.begin(), output_shape.end(), shape.begin(), shape.end()));
 
     const auto size = static_cast<size_t>(std::accumulate(shape.begin(), shape.end(), 1LL,
-                                                    std::multiplies<int64_t>()));
+                                                          std::multiplies<int64_t>()));
     ASSERT_EQ(output_size, size);
     std::span<const OutputType> src(reinterpret_cast<const OutputType*>(logits->Data()), size);
     ASSERT_FALSE(std::equal(base_output.begin(), base_output.end(), src.begin(), src.end()));

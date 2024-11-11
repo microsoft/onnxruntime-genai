@@ -5,6 +5,7 @@
 #include <pybind11/numpy.h>
 #include <iostream>
 #include "../generators.h"
+#include "../ort_genai.h"
 #include "../json.h"
 #include "../search.h"
 #include "../models/model.h"
@@ -421,7 +422,18 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       })
       .def("create_stream", [](const Tokenizer& t) { return t.CreateStream(); });
 
+  // Pybind class using the C API for OgaConfig
+  pybind11::class_<OgaConfig>(m, "Config")
+      .def(pybind11::init([](const std::string& config_path) { return OgaConfig::Create(config_path.c_str()); }))
+      .def("append_provider", &OgaConfig::AppendProvider)
+      .def("set_provider_option", &OgaConfig::SetProviderOption)
+      .def("clear_providers", &OgaConfig::ClearProviders);
+
   pybind11::class_<Model, std::shared_ptr<Model>>(m, "Model")
+      .def(pybind11::init([](const OgaConfig& config) {
+        auto config_copy = std::make_unique<Config>(*reinterpret_cast<const Config*>(&config));
+        return CreateModel(GetOrtEnv(), std::move(config_copy));
+      }))
       .def(pybind11::init([](const std::string& config_path) {
         return CreateModel(GetOrtEnv(), config_path.c_str());
       }))

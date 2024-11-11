@@ -76,6 +76,28 @@ struct OgaRuntimeSettings : OgaAbstract {
   static void operator delete(void* p) { OgaDestroyRuntimeSettings(reinterpret_cast<OgaRuntimeSettings*>(p)); }
 };
 
+struct OgaConfig : OgaAbstract {
+  static std::unique_ptr<OgaConfig> Create(const char* config_path) {
+    OgaConfig* p;
+    OgaCheckResult(OgaCreateConfig(config_path, &p));
+    return std::unique_ptr<OgaConfig>(p);
+  }
+
+  void ClearProviders() {
+    OgaCheckResult(OgaConfigClearProviders(this));
+  }
+
+  void AppendProvider(const char* provider) {
+    OgaCheckResult(OgaConfigAppendProvider(this, provider));
+  }
+
+  void SetProviderOption(const char* provider, const char* name, const char* value) {
+    OgaCheckResult(OgaConfigSetProviderOption(this, provider, name, value));
+  }
+
+  static void operator delete(void* p) { OgaDestroyConfig(reinterpret_cast<OgaConfig*>(p)); }
+};
+
 struct OgaModel : OgaAbstract {
   static std::unique_ptr<OgaModel> Create(const char* config_path) {
     OgaModel* p;
@@ -85,6 +107,11 @@ struct OgaModel : OgaAbstract {
   static std::unique_ptr<OgaModel> Create(const char* config_path, const OgaRuntimeSettings& settings) {
     OgaModel* p;
     OgaCheckResult(OgaCreateModelWithRuntimeSettings(config_path, &settings, &p));
+    return std::unique_ptr<OgaModel>(p);
+  }
+  static std::unique_ptr<OgaModel> Create(OgaConfig& config) {
+    OgaModel* p;
+    OgaCheckResult(OgaCreateModelFromConfig(&config, &p));
     return std::unique_ptr<OgaModel>(p);
   }
 

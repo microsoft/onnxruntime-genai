@@ -249,11 +249,10 @@ void BeamSearch_Cuda::SetUserTokens(DeviceSpan<int32_t>& next_tokens) {
 }
 
 void GreedySearch_Cuda::RewindTo(size_t index) {
-  sequences_.RewindTo(index+1);
   cudaMemsetAsync(eos_meet_.data(), 0, eos_meet_.size_bytes(), params_->cuda_stream);
   *done_cpu_ = false;
   if (index > 0)
-    cuda::Launch_GetLastTokens(next_tokens_.data(), sequences_.GetSequences().Span().data(), params_->BatchBeamSize(), sequences_.GetSequenceLength(), sequences_.max_length_, GetStream());
+    cuda::Launch_GetLastTokens(next_tokens_.data(), sequences_.GetSequences().Span().data(), params_->BatchBeamSize(), index, sequences_.max_length_, GetStream());
   else
     cudaMemsetAsync(next_tokens_.data(), 0, params_->search.batch_size * sizeof(int32_t), params_->cuda_stream);
   sequences_.RewindTo(index);

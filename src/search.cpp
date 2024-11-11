@@ -285,14 +285,13 @@ void GreedySearch_Cpu::SetUserTokens(DeviceSpan<int32_t>& next_tokens) {
 }
 
 void GreedySearch_Cpu::RewindTo(size_t index) {
-  sequences_.RewindTo(index+1);
   done_ = false;
   not_done_count_ = params_->search.batch_size;
   memset(eos_seen_.data(), 0, eos_seen_.size_bytes());
   // Set next tokens to the last tokens in the sequence
   if (index > 0) {
     for (int i = 0; i < params_->BatchBeamSize(); i++) {
-      next_tokens_[i] = sequences_.GetSequences().Span()[(i * sequences_.max_length_) + index - 1];
+      next_tokens_[i] = sequences_.GetSequences().Span()[(i * sequences_.max_length_) + index];
     }
   } else
     memset(next_tokens_.data(), 0, next_tokens_.size_bytes());
@@ -304,23 +303,16 @@ void BeamSearch_Cpu::SetUserTokens(DeviceSpan<int32_t>& next_tokens) {
   auto next_tokens_cpu = const_cast<DeviceSpan<int32_t>&>(next_tokens).Span();
   auto batch_beam_size = params_->BatchBeamSize();
   auto tokens_count_per_batch = next_tokens_cpu.size() / params_->search.batch_size;
+  if (tokens_count_per_batch > sequences_.max_length_) {
+    throw std::runtime_error("User-defined tokens exceed max_length.");
+  }
 
-  auto sequences_span = sequences_.GetSequences().Span();
-  for (size_t j = 0; j < tokens_count_per_batch; j++) {
-    auto current_length = sequences_.GetSequenceLength() + j;
-    for (size_t i = 0; i < batch_beam_size; i++) {
-      next_tokens_[i] = next_tokens_cpu[(i / params_->search.num_beams) * tokens_count_per_batch + j];
-      sequences_span[i * sequences_.max_length_ + current_length] = next_tokens_[i];
-    }
-
-    if (current_length == params_->search.max_length) {
-      if (g_log.enabled && g_log.hit_max_length)
-        Log("hit_max_length", "beam cpu hit");
-      done_ = true;
-      break;
-    } else {
-      done_ = false;
-    }
+  auto next_sequences_span = sequences_.GetNextSequences().Span();
+  // Copy the user-defined tokens to the sequences
+  for (ptrdiff_t i = 0; i < batch_beam_size; i++) {
+    std::span<int32_t> target = next_sequences_span.subspan(i * sequences_.max_length_, tokens_count_per_batch);
+    std::span<const int32_t> source = next_tokens_cpu.subspan((i / params_->search.num_beams) * tokens_count_per_batch, tokens_count_per_batch);
+    copy(source, target);
   }
   sequences_.AfterAppendNextTokens(next_tokens, params_->search.batch_size); // next_tokens is not expanded
 }

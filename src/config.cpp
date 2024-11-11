@@ -630,6 +630,21 @@ void SetSearchBool(Config::Search& search, std::string_view name, bool value) {
   Search_Element(search).OnBool(name, value);
 }
 
+void ClearProviders(Config& config) {
+  config.model.decoder.session_options.provider_options.clear();
+}
+
+void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value) {
+  std::ostringstream json;
+  json << R"({")" << provider_name << R"(":{)";
+  if (!option_name.empty()) {
+    json << R"(")" << option_name << R"(":")" << option_value << R"(")";
+  }
+  json << R"(}})";
+  ProviderOptionsArray_Element element{config.model.decoder.session_options.provider_options};
+  JSON::Parse(element, json.str());
+}
+
 bool IsCudaGraphEnabled(Config::SessionOptions& session_options) {
   for (const auto& provider_options : session_options.provider_options) {
     if (provider_options.name == "cuda") {

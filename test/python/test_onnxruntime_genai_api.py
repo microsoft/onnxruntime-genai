@@ -29,6 +29,15 @@ if og.is_dml_available():
 if og.is_rocm_available():
     devices.append("rocm")
 
+def test_config(test_data_path):
+    model_path = os.fspath(Path(test_data_path) / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    config = og.Config(model_path)
+    config.clear_providers()
+    config.append_provider("cuda")
+    config.clear_providers()
+    config.set_provider_option("cuda", "infinite_clock", "1")
+    config.set_provider_option("quantum", "break_universe", "true")
+    config.append_provider("slide rule")
 
 @pytest.mark.parametrize(
     "relative_model_path",
@@ -45,8 +54,10 @@ if og.is_rocm_available():
 def test_greedy_search(test_data_path, relative_model_path):
     model_path = os.fspath(Path(test_data_path) / relative_model_path)
 
-    model = og.Model(model_path)
-    
+    config = og.Config(model_path) # Test using config vs path directly
+    model = og.Model(config)
+
+    search_params = og.GeneratorParams(model)
     input_ids_shape = [2, 4]
     batch_size = input_ids_shape[0]
     search_params = og.GeneratorParams(model)

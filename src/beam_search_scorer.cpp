@@ -189,7 +189,6 @@ void BeamSearchScorer::Finalize(Sequences& sequences,
       std::span<const int32_t> src = sequences.GetSequence(batch_beam_index).Span();
       auto clone = hypothesis_buffer_.Span().subspan(hypothesis_buffer_used_, src.size());
       hypothesis_buffer_used_ += clone.size();
-
       copy(cpu_span{src}, cpu_span{clone});
       beam_hyp.Add(clone, final_score);
     }

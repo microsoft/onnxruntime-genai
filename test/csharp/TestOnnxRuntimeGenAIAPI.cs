@@ -47,6 +47,22 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
+        [Fact(DisplayName = "TestConfig")]
+        public void TestConfig()
+        {
+            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "hf-internal-testing", "tiny-random-gpt2-fp32");
+            using (var config = new Config(modelPath))
+            {
+                config.ClearProviders();
+                config.SetProviderOption("cuda", "device_id", "0");
+                config.SetProviderOption("cuda", "catch_fire", "false");
+                config.AppendProvider("pigeon");
+                // At this point the providers is 'cuda' first and 'pigeon' as secondary.
+                // Given some provider options are made up and there is no pigeon provider, the model won't load.
+                // This tests the API
+            }
+        }
+
         [Fact(DisplayName = "TestGreedySearch")]
         public void TestGreedySearch()
         {
@@ -54,47 +70,39 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             int[] inputIDs = new int[] { 0, 0, 0, 52, 0, 0, 195, 731 };
             var inputIDsShape = new ulong[] { 2, 4 };
             ulong batchSize = inputIDsShape[0];
-            ulong sequenceLength = inputIDsShape[1];
             var expectedOutput = new int[] { 0, 0, 0, 52, 204, 204, 204, 204, 204, 204,
                                              0, 0, 195, 731, 731, 114, 114, 114, 114, 114 };
 
             string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "hf-internal-testing", "tiny-random-gpt2-fp32");
-            using (var model = new Model(modelPath))
+            using (var config = new Config(modelPath))
             {
-                Assert.NotNull(model);
-                using (var generatorParams = new GeneratorParams(model))
+                Assert.NotNull(config);
+                using (var model = new Model(config))
                 {
-                    Assert.NotNull(generatorParams);
-
-                    generatorParams.SetSearchOption("max_length", maxLength);
-                    generatorParams.SetSearchOption("batch_size", batchSize);
-
-                    using (var generator = new Generator(model, generatorParams))
+                    Assert.NotNull(model);
+                    using(var generatorParams = new GeneratorParams(model))
                     {
-                        Assert.NotNull(generator);
+                        Assert.NotNull(generatorParams);
 
-                        Assert.False(generator.IsDone());
-                        generator.AppendTokens(inputIDs);
-                        for (ulong i = 0; i < batchSize; i++) 
-                        {
-                            Assert.False((ulong)generator.GetSequence(i).Length == sequenceLength);
-                        }
-                        Assert.False(generator.IsDone());
+                        generatorParams.SetSearchOption("max_length", maxLength);
+                        generatorParams.SetSearchOption("batch_size", batchSize);
 
-                        while (!generator.IsDone())
+                        using (var generator = new Generator(model, generatorParams))
                         {
-                            generator.GenerateNextToken();
-                        }
-                        // for (int i = 0; i < 6; i++)
-                        // {
-                        //     generator.GenerateNextToken();
-                        // }
+                            Assert.NotNull(generatorParams);
 
-                        for (ulong i = 0; i < batchSize; i++)
-                        {
-                            var sequence = generator.GetSequence(i).ToArray();
-                            var expectedSequence = expectedOutput.Skip((int)i * (int)maxLength).Take((int)maxLength);
-                            Assert.Equal(expectedSequence, sequence);
+                            generator.AppendTokens(inputIDs);
+                            while (!generator.IsDone())
+                            {
+                                generator.GenerateNextToken();
+                            }
+
+                            for (ulong i = 0; i < batchSize; i++)
+                            {
+                                var sequence = generator.GetSequence(i).ToArray();
+                                var expectedSequence = expectedOutput.Skip((int)i * (int)maxLength).Take((int)maxLength);
+                                Assert.Equal(expectedSequence, sequence);
+                            }
                         }
                     }
                 }
