@@ -123,17 +123,16 @@ public class GenerationTest {
     // test using the HF model. input id values must be < 1000 so we use manually created input.
     // Input/expected output copied from the C# unit tests
     try (Config config = new Config(TestUtils.testModelPath());
-    Model model = new Model(config);
-    GeneratorParams params = new GeneratorParams(model);
-    ) {
-    int batchSize = 2;
-    int sequenceLength = 4;
-    int maxLength = 10;
-    int[] inputIDs =
-        new int[] {
-          0, 0, 0, 52,
-          0, 0, 195, 731
-        };
+        Model model = new Model(config);
+        GeneratorParams params = new GeneratorParams(model); ) {
+      int batchSize = 2;
+      int sequenceLength = 4;
+      int maxLength = 10;
+      int[] inputIDs =
+          new int[] {
+            0, 0, 0, 52,
+            0, 0, 195, 731
+          };
 
       params.setInput(inputIDs, sequenceLength, batchSize);
       params.setSearchOption("max_length", maxLength);
