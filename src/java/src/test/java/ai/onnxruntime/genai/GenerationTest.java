@@ -4,11 +4,10 @@
  */
 package ai.onnxruntime.genai;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.util.Arrays;
 import java.util.function.Consumer;
 import java.util.logging.Logger;
 import org.junit.jupiter.api.Test;
@@ -111,7 +110,7 @@ public class GenerationTest {
           }
           try (Tensor logits = generator.getOutput("logits")) {
             assertEquals(logits.getType(), Tensor.ElementType.float32);
-            assertTrue(Arrays.equals(outputShape, logits.getShape()));
+            assertArrayEquals(outputShape, logits.getShape());
           }
         }
       }

@@ -60,6 +60,6 @@ Java_ai_onnxruntime_genai_Tensor_getTensorShape(JNIEnv* env, jobject thiz, jlong
   jlongArray result;
   result = env->NewLongArray(static_cast<jsize>(size));
   static_assert(sizeof(jlong) == sizeof(int64_t));
-  env->SetLongArrayRegion(result, 0, static_cast<jsize>(size), reinterpret_cast<jlong*>(shape.data()));
+  env->SetLongArrayRegion(result, 0, static_cast<jsize>(size), reinterpret_cast<const jlong*>(shape.data()));
   return result;
 }

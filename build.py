@@ -453,7 +453,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
 
             is_x64_host = platform.machine() == "AMD64"
             if is_x64_host:
-                toolset_options += ["host=x64"]
+                pass
 
             if args.use_cuda:
                 toolset_options += ["cuda=" + str(args.cuda_home)]
