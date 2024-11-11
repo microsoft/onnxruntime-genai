@@ -66,7 +66,8 @@ jobs:
 
     - name: Configure CMake
       run: |
-        python -m pip install wheel
+        python -m pip install wheel requests
+
         cmake --preset windows_arm64_cpu_release
 
     - name: Build with CMake

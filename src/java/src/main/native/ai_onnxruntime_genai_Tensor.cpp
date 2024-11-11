@@ -20,7 +20,7 @@ JNIEXPORT jlong JNICALL
 Java_ai_onnxruntime_genai_Tensor_createTensor(JNIEnv* env, jobject thiz, jobject tensor_data,
                                               jlongArray shape_dims_in, jint element_type_in) {
   void* data = env->GetDirectBufferAddress(tensor_data);
-  const int64_t* shape_dims = env->GetLongArrayElements(shape_dims_in, /*isCopy*/ 0);
+  const int64_t* shape_dims = reinterpret_cast<int64_t*>(env->GetLongArrayElements(shape_dims_in, /*isCopy*/ 0));
   size_t shape_dims_count = env->GetArrayLength(shape_dims_in);
   OgaElementType element_type = static_cast<OgaElementType>(element_type_in);
   OgaTensor* tensor = nullptr;
