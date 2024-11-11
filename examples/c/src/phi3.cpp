@@ -68,45 +68,23 @@ class Timing {
 
 // C++ API Example
 
-void Generate_Output_CXX(OgaGenerator* generator, std::unique_ptr<OgaTokenizerStream> tokenizer_stream, bool is_first_token, Timing& timing) {
-  try {
-    while (!generator->IsDone()) {
-      generator->ComputeLogits();
-      generator->GenerateNextToken();
-
-      if (is_first_token) {
-        timing.RecordFirstTokenTimestamp();
-        is_first_token = false;
-      }
-
-      // Show usage of GetOutput
-      std::unique_ptr<OgaTensor> output_logits = generator->GetOutput("logits");
-
-      // Assuming output_logits.Type() is float as it's logits
-      // Assuming shape is 1 dimensional with shape[0] being the size
-      auto logits = reinterpret_cast<float*>(output_logits->Data());
-
-      // Print out the logits using the following snippet, if needed
-      //auto shape = output_logits->Shape();
-      //for (size_t i=0; i < shape[0]; i++)
-      //   std::cout << logits[i] << " ";
-      //std::cout << std::endl;
-
-      const auto num_tokens = generator->GetSequenceCount(0);
-      const auto new_token = generator->GetSequenceData(0)[num_tokens - 1];
-      std::cout << tokenizer_stream->Decode(new_token) << std::flush;
-    }
-  }
-  catch (const std::exception& e) {
-    std::cout << "Session Terminated: " << e.what() << std::endl;
-  }
-}
-
 std::atomic<bool> stopFlag(false);
 
 void signalHandler(int signum) {
     std::cout << "Interrupt signal received. Terminating current session...\n";
     stopFlag = true;
+}
+
+void Generator_SetTerminate_Call(OgaGenerator* generator) {
+  std::cout << "Inside setTerminate **************$$$$$$$$$$$$$$$$$$$$$" << std::endl;
+  while (!generator->IsDone()) {
+    if (stopFlag) {
+      generator->SetRuntimeOption("terminate_session", "1");
+      stopFlag = false;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Check every 100 ms  
+  }
 }
 
 void CXX_API(const char* model_path) {
@@ -122,7 +100,7 @@ void CXX_API(const char* model_path) {
     std::cout << "Prompt: (Use quit() to exit) Or (To terminate current output generation, press Ctrl+C)" << std::endl;
     std::getline(std::cin, text);
 
-    if (text == "quit()") {
+    if (text == "quit()" || stopFlag) {
       break;  // Exit the loop
     }
 
@@ -141,29 +119,48 @@ void CXX_API(const char* model_path) {
     params->SetInputSequences(*sequences);
 
     auto generator = OgaGenerator::Create(*model, *params);
+    std::thread th(Generator_SetTerminate_Call, generator.get());
 
-    std::thread th(Generate_Output_CXX, generator.get(), std::move(tokenizer_stream), is_first_token, std::ref(timing));
+    try {
+      while (!generator->IsDone()) {
+        generator->ComputeLogits();
+        generator->GenerateNextToken();
 
-    // Check for stopFlag in a loop
-    while (th.joinable()) {
-      if (stopFlag) {
-          generator->SetRuntimeOption("terminate_session", "1");
-          stopFlag = false;
-          break;
+        if (is_first_token) {
+          timing.RecordFirstTokenTimestamp();
+          is_first_token = false;
+        }
+
+        // Show usage of GetOutput
+        std::unique_ptr<OgaTensor> output_logits = generator->GetOutput("logits");
+
+        // Assuming output_logits.Type() is float as it's logits
+        // Assuming shape is 1 dimensional with shape[0] being the size
+        auto logits = reinterpret_cast<float*>(output_logits->Data());
+
+        // Print out the logits using the following snippet, if needed
+        //auto shape = output_logits->Shape();
+        //for (size_t i=0; i < shape[0]; i++)
+        //   std::cout << logits[i] << " ";
+        //std::cout << std::endl;
+
+        const auto num_tokens = generator->GetSequenceCount(0);
+        const auto new_token = generator->GetSequenceData(0)[num_tokens - 1];
+        std::cout << tokenizer_stream->Decode(new_token) << std::flush;
       }
-      std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Check every 100 ms
-      if (generator->IsDone())
-        break;
     }
-
-    if (th.joinable()) {
-      th.join();  // Join the thread if it's still running
+    catch (const std::exception& e) {
+      std::cout << "Session Terminated: " << e.what() << std::endl;
     }
 
     timing.RecordEndTimestamp();
     const int prompt_tokens_length = sequences->SequenceCount(0);
     const int new_tokens_length = generator->GetSequenceCount(0) - prompt_tokens_length;
     timing.Log(prompt_tokens_length, new_tokens_length);
+
+    if (th.joinable()) {
+      th.join();  // Join the thread if it's still running
+    }
 
     for (int i = 0; i < 3; ++i)
       std::cout << std::endl;
