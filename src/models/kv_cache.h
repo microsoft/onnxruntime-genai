@@ -79,7 +79,7 @@ struct SlidingWindowKeyValueCache {
   SlidingWindowKeyValueCache(State& state);
 
   void Add();
-  void Update(std::span<const int32_t> beam_indices, int current_length);
+  void Update(DeviceSpan<int32_t> beam_indices, int current_length);
 
  private:
   void Slide();

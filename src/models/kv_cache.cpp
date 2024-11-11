@@ -420,7 +420,7 @@ void SlidingWindowKeyValueCache::Slide() {
   }
 }
 
-void SlidingWindowKeyValueCache::Update(std::span<const int32_t> beam_indices, int current_length) {
+void SlidingWindowKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int current_length) {
   if (window_size_ == 1) {
     Slide();
     return;
