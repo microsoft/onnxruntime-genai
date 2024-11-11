@@ -76,7 +76,6 @@ void signalHandler(int signum) {
 }
 
 void Generator_SetTerminate_Call(OgaGenerator* generator) {
-  std::cout << "Inside setTerminate **************$$$$$$$$$$$$$$$$$$$$$" << std::endl;
   while (!generator->IsDone()) {
     if (stopFlag) {
       generator->SetRuntimeOption("terminate_session", "1");
@@ -98,9 +97,10 @@ void CXX_API(const char* model_path) {
     auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
     std::string text;
     std::cout << "Prompt: (Use quit() to exit) Or (To terminate current output generation, press Ctrl+C)" << std::endl;
+    std::cin.clear();
     std::getline(std::cin, text);
 
-    if (text == "quit()" || stopFlag) {
+    if (text == "quit()") {
       break;  // Exit the loop
     }
 
