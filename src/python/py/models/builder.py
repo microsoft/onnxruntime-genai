@@ -40,10 +40,10 @@ class Model:
         self.io_dtype = io_dtype      # {'fp16', 'fp32'}
         self.onnx_dtype = onnx_dtype  # {"int4", "fp16", "fp32"}
         self.quant_type = config.quantization_config["quant_method"] if hasattr(config, "quantization_config") else None
-        self.adapter_path = extra_options["adapter_path"] if "adapter_path" in extra_options else None
+        self.adapter_path = extra_options.get("adapter_path", None)
 
         self.cache_dir = cache_dir
-        self.filename = extra_options["filename"] if "filename" in extra_options else "model.onnx"
+        self.filename = extra_options.get("filename", "model.onnx")
         self.hf_token = parse_hf_token(extra_options.get("hf_token", "true"))
         self.extra_options = extra_options
 
@@ -54,7 +54,7 @@ class Model:
         self.nodes = []
 
         # EP-specific variables
-        enable_cuda_graph = "1" if "enable_cuda_graph" in extra_options else "0"
+        enable_cuda_graph = extra_options.get("enable_cuda_graph", "0")
         self.ep = ep
         self.ep_attrs = {
             "cpu": {},
@@ -293,8 +293,9 @@ class Model:
         # Quantization-specific variables (INT4, INT8, etc.)
         self.quant_attrs = {
             "int4": {
-                "block_size": int(extra_options["int4_block_size"]) if "int4_block_size" in extra_options else 32,
-                "accuracy_level": int(extra_options["int4_accuracy_level"]) if "int4_accuracy_level" in extra_options else 0,   # Default is 0 for non-QDQ formats, default is 4 for QDQ formats
+                "accuracy_level": int(extra_options.get("int4_accuracy_level", 0)),   # Default is 0 for non-QDQ formats, default is 4 for QDQ formats
+                "block_size": int(extra_options.get("int4_block_size", 32)),
+                "op_types_to_quantize": extra_options.get("int4_op_types_to_quantize", ("MatMul", )),
             },
             "use_qdq": False,           # Use QDQ format
         }
@@ -351,7 +352,7 @@ class Model:
                 "no_repeat_ngram_size": config.no_repeat_ngram_size if hasattr(config, "no_repeat_ngram_size") else 0,
                 "num_beams": config.num_beams if hasattr(config, "num_beams") else 1,
                 "num_return_sequences": config.num_return_sequences if hasattr(config, "num_return_sequences") else 1,
-                "past_present_share_buffer": self.past_present_share_buffer,
+                "past_present_share_buffer": False if "config_only" in self.extra_options else self.past_present_share_buffer,
                 "repetition_penalty": config.repetition_penalty if hasattr(config, "repetition_penalty") else 1.0,
                 "temperature": config.temperature if hasattr(config, "temperature") else 1.0,
                 "top_k": 1,
@@ -363,6 +364,11 @@ class Model:
             ep_options = { self.ep : self.ep_attrs[self.ep] }
             genai_config["model"]["decoder"]["session_options"]["provider_options"].append(ep_options)
 
+        if self.extra_options.get("prompt_templates", "0") == "1":
+            prompt_templates = self._get_prompt_templates(model_name_or_path, extra_kwargs)
+            if prompt_templates is not None:
+                genai_config["model"]["prompt_templates"] = prompt_templates
+
         print(f"Saving GenAI config in {out_dir}")
         with open(os.path.join(out_dir,"genai_config.json"), "w") as f:
             json.dump(genai_config, f, indent=4)
@@ -372,6 +378,30 @@ class Model:
         print(f"Saving processing files in {out_dir} for GenAI")
         tokenizer.save_pretrained(out_dir)
 
+    def _get_prompt_templates(self, hf_name, extra_kwargs):
+        try:
+            # disable end of sentence padding with eos_token=None
+            tokenizer = AutoTokenizer.from_pretrained(hf_name, token=self.hf_token, trust_remote_code=True, eos_token=None, **extra_kwargs)
+            system_template = tokenizer.apply_chat_template([{'role': 'system', 'content': '{Content}'}], tokenize=False)
+            system_user_template = tokenizer.apply_chat_template([{'role': 'system', 'content': '{Content}'}, {'role': 'user', 'content': '{Content}'}], tokenize=False)
+            system_user_assistant_template = tokenizer.apply_chat_template([{'role': 'system', 'content': '{Content}'}, {'role': 'user', 'content': '{Content}'}, {'role': 'assistant', 'content': '{Content}'}], tokenize=False)
+            assert system_user_template.startswith(system_template), "Chat templates may contain padding tokens, leading to incorrect prompt templates"
+            assert system_user_assistant_template.startswith(system_user_template), "Chat templates may contain padding tokens, leading to incorrect prompt templates"
+            user_template = system_user_template[len(system_template):]
+            assistant_template = system_user_assistant_template[len(system_user_template):]
+            prompt_template = system_user_assistant_template[len(system_template):]
+            prompt_template = prompt_template[:prompt_template.rfind('{Content}')]
+            templates = {
+                "system": system_template,
+                "user": user_template,
+                "assistant": assistant_template,
+                "prompt": prompt_template
+            }
+            return templates 
+        except Exception as e:
+            print(f"Failed to get prompt templates. Error: {e}")
+            return None
+        
     def save_model(self, out_dir):
         print(f"Saving ONNX model in {out_dir}")
         gc.collect()
@@ -406,7 +436,8 @@ class Model:
 
         # Quantize ONNX model to desired precision
         # TODO: Replace by quantizing the MatMuls as they are created
-        if self.onnx_dtype == "int4" and self.quant_type is None:
+        already_quantized_in_qdq_format = self.quant_type is not None and self.quant_attrs["use_qdq"]  # Skip quantizing `MatMul` in `DequantizeLinear --> Transpose --> MatMul` path
+        if self.onnx_dtype == "int4" and not already_quantized_in_qdq_format:
             model = self.to_int4(model)
 
         # Save ONNX model with only one external data file and delete any existing duplicate copies
@@ -437,6 +468,7 @@ class Model:
             accuracy_level=self.quant_attrs["int4"]["accuracy_level"],
             nodes_to_exclude=[],
             quant_format=QuantFormat.QDQ if self.quant_attrs["use_qdq"] else QuantFormat.QOperator,
+            op_types_to_quantize=self.quant_attrs["int4"]["op_types_to_quantize"],
         )
         quant.process()
         return quant.model.model
@@ -3009,6 +3041,12 @@ class ChatGLMModel(Model):
         super().make_layer(layer_id, layer)
 
 def check_extra_options(kv_pairs):
+    if "int4_op_types_to_quantize" in kv_pairs:
+        op_types_to_quantize = ()
+        for op_type in kv_pairs["int4_op_types_to_quantize"].split("/"):
+            op_types_to_quantize += (op_type, )
+        kv_pairs["int4_op_types_to_quantize"] = op_types_to_quantize
+
     if "use_8bits_moe" in kv_pairs:
         assert(kv_pairs["use_8bits_moe"] == "1" or kv_pairs["use_8bits_moe"] == "0"), "use_8bits_moe must be 0 or 1."
 
@@ -3186,12 +3224,15 @@ def get_args():
         nargs='+',
         help=textwrap.dedent("""\
             Key value pairs for various options. Currently supports:
-                int4_block_size = 16/32/64/128/256: Specify the block_size for int4 quantization.
                 int4_accuracy_level = 1/2/3/4: Specify the minimum accuracy level for activation of MatMul in int4 quantization.
                     4 is int8, which means input A of int4 quantized MatMul is quantized to int8 and input B is upcasted to int8 for computation.
                     3 is bf16.
                     2 is fp16.
                     1 is fp32.
+                int4_block_size = 16/32/64/128/256: Specify the block_size for int4 quantization.
+                int4_op_types_to_quantize = MatMul/Gather: Specify op types to target for int4 quantization.
+                    Use this option when you want to quantize specific ops.
+                    Separate the op types with a '/' when passing them here (e.g. int4_op_types_to_quantize=MatMul/Gather)
                 num_hidden_layers = Manually specify the number of layers in your ONNX model (for unit testing purposes).
                 filename = Filename for ONNX model (default is 'model.onnx').
                     For models with multiple components, each component is exported to its own ONNX model.
@@ -3204,14 +3245,15 @@ def get_args():
                 exclude_lm_head = Remove language modeling head from your ONNX model.
                     Use this option when you want to remove the language modeling head from within your ONNX model.
                     Instead of `logits`, you will have `hidden_states` as the output to your ONNX model.
-                enable_cuda_graph = 1 : The model can use CUDA graph capture for CUDA execution provider. If enabled, all nodes being placed on the CUDA EP
+                enable_cuda_graph = 1: The model can use CUDA graph capture for CUDA execution provider. If enabled, all nodes being placed on the CUDA EP
                     is the prerequisite for the CUDA graph to be used correctly. It is not guaranteed that cuda graph be enabled as it depends on the model
                     and the graph structure.
-                use_8bits_moe = 1 : Use 8-bit quantization for MoE layers. Default is using 4-bit quantization.
+                use_8bits_moe = 1: Use 8-bit quantization for MoE layers. Default is using 4-bit quantization.
                 hf_token = false/token: Use this to disable authentication with Hugging Face or provide a custom authentication token that differs from the one stored in your environment. Default behavior is to use the authentication token stored by `huggingface-cli login`.
                     If you have already authenticated via `huggingface-cli login`, you do not need to use this flag because Hugging Face has already stored your authentication token for you.
-                use_qdq = 1 : Use the QDQ decomposition for quantized MatMul instead of the MatMulNBits operator.
+                use_qdq = 1: Use the QDQ decomposition for quantized MatMul instead of the MatMulNBits operator.
                 adapter_path = Path to folder on disk containing the adapter files (adapter_config.json and adapter model weights).
+                prompt_templates = 1: Include per-role prompt templates in the GenAI config file. Default is 0 (not to include).
             """),
     )
 

@@ -60,9 +60,6 @@ jobs:
         Python312:
           PyDotVer: '3.12'
           PyNoDotVer: '312'
-        Python313:
-          PyDotVer: '3.13'
-          PyNoDotVer: '313'
 
   timeoutInMinutes: 240
   workspace:
