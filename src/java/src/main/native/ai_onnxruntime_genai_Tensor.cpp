@@ -42,7 +42,7 @@ Java_ai_onnxruntime_genai_Tensor_destroyTensor(JNIEnv* env, jobject thiz, jlong 
   OgaDestroyTensor(reinterpret_cast<OgaTensor*>(native_handle));
 }
 
-JNIEXPORT int JNICALL
+JNIEXPORT jint JNICALL
 Java_ai_onnxruntime_genai_Tensor_getTensorType(JNIEnv* env, jobject thiz, jlong native_handle) {
   OgaElementType type;
   ThrowIfError(env, OgaTensorGetType(reinterpret_cast<OgaTensor*>(native_handle), &type));
@@ -58,12 +58,8 @@ Java_ai_onnxruntime_genai_Tensor_getTensorShape(JNIEnv* env, jobject thiz, jlong
   ThrowIfError(env, OgaTensorGetShape(tensor, shape.data(), shape.size()));
 
   jlongArray result;
-  result = env->NewLongArray(size);
-
-  jlong fill[size];
-  for (int i = 0; i < size; i++) {
-    fill[i] = shape.at(i);
-  }
-  env->SetLongArrayRegion(result, 0, size, fill);
+  result = env->NewLongArray(static_cast<jsize>(size));
+  static_assert(sizeof(jlong) == sizeof(int64_t));
+  env->SetLongArrayRegion(result, 0, static_cast<jsize>(size), reinterpret_cast<jlong*>(shape.data()));
   return result;
 }
