@@ -113,7 +113,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         // This function is used to append tokens to the sequence.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaGenerator_AppendTokens(IntPtr /* OgaGenerator* */ generator,
+        public static extern unsafe IntPtr /* OgaResult* */ OgaGenerator_AppendTokens(IntPtr /* OgaGenerator* */ generator,
                                                                                int* /* const int32_t* */ tokens,
                                                                                UIntPtr /* size_t */ tokenCount);
 
