@@ -14,7 +14,12 @@ def _complete(text, state):
 
 def run(args: argparse.Namespace):
     print("Loading model...")
-    model = og.Model(args.model_path)
+    config = og.Config(args.model_path)
+    config.clear_providers()
+    if args.provider != "cpu":
+        print(f"Setting model to {args.provider}...")
+        config.append_provider(args.provider)
+    model = og.Model(config)
     processor = model.create_multimodal_processor()
     tokenizer_stream = processor.create_stream()
 
@@ -74,6 +79,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "-m", "--model_path", type=str, required=True, help="Path to the model"
+    )
+    parser.add_argument(
+        "-p", "--provider", type=str, required=True, help="Provider to run model"
     )
     args = parser.parse_args()
     run(args)
