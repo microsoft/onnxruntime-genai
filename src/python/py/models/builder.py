@@ -1004,13 +1004,7 @@ class Model:
         skip_input = self.layernorm_attrs["skip_input"]
 
         weight = f"model.layers.{layer_id}.{location}_layernorm.weight"
-        #ShaneTim
-        #if layernorm.weight is None:
-        #    layernorm.weight = torch.ones(2048)
         self.make_external_tensor(layernorm.weight.detach().numpy().astype(self.to_numpy_dtype[self.io_dtype]) + self.layernorm_attrs["add_offset"], weight)
-        #ShaneTim
-        #if layernorm.bias is None:
-        #    layernorm.bias = torch.ones(2048)
         bias = f"model.layers.{layer_id}.{location}_layernorm.bias"
         if not simple:
             self.make_external_tensor(layernorm.bias.detach().numpy().astype(self.to_numpy_dtype[self.io_dtype]), bias)
@@ -3078,10 +3072,11 @@ class OLMoModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-    def make_layer(self, layer_id, layer):
+    def make_layernorm(self, layer_id, layernorm, skip, simple, location):
         # Each LLM decoder layer is typically defined as:
-        self.make_attention(layer_id, layer.self_attn, root_input=self.layernorm_attrs["output_0"])
-        self.make_mlp(layer_id, layer.mlp, root_input=self.layernorm_attrs["output_0"])
+        layernorm.weight = torch.ones(2048)
+        layernorm.bias = torch.ones(2048)
+        super().make_layernorm(layer_id, layernorm, skip, simple, location)
 
 class GraniteModel(MistralModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
