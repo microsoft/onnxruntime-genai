@@ -72,9 +72,6 @@ BeamSearch_Cuda::BeamSearch_Cuda(const GeneratorParams& params)
   static_assert(sizeof(float) == sizeof(int32_t));  // The topk_buffer assumes these match, fix for float16
 
   cudaMemsetAsync(topk_buffer_.get(), 0, topk_buffer_size * sizeof(float), params_->cuda_stream);
-
-  auto next_tokens_buffer = CudaMallocArray<int32_t>(params.BatchBeamSize(), &next_tokens_);
-  cudaMemsetAsync(next_tokens_.data(), 0, next_tokens_.size_bytes(), params_->cuda_stream);
 }
 
 BeamSearch_Cuda::~BeamSearch_Cuda() = default;
@@ -242,10 +239,11 @@ void GreedySearch_Cuda::SetUserTokens(DeviceSpan<int32_t>& next_tokens) {
 }
 
 void BeamSearch_Cuda::SetUserTokens(DeviceSpan<int32_t>& next_tokens) {
-  int sequence_length = next_tokens.size() / params_->search.batch_size;
-  auto next_tokens_gpu = const_cast<DeviceSpan<int32_t>&>(next_tokens).Span();
-  cuda::Launch_ExpandInputSequences(next_tokens_gpu, sequences_.GetSequences().Span(), params_->search.batch_size, params_->search.num_beams, sequence_length, sequences_.max_length_, GetStream());
+  auto next_tokens_gpu = next_tokens.Span();
+  cuda::Launch_ExpandInputSequences(next_tokens_gpu, sequences_.GetNextSequences().Span(), params_->search.batch_size, params_->search.num_beams, sequences_.max_length_, GetStream());
+  cuda::Launch_ExpandInputSequences(next_tokens_gpu, sequences_.GetSequences().Span(), params_->search.batch_size, params_->search.num_beams, sequences_.max_length_, GetStream());
   sequences_.AfterAppendNextTokens(next_tokens, params_->search.batch_size); // next_tokens is batch_size
+  cudaStreamSynchronize(GetStream());
 }
 
 void GreedySearch_Cuda::RewindTo(size_t index) {

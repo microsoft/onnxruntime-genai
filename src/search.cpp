@@ -300,7 +300,7 @@ void GreedySearch_Cpu::RewindTo(size_t index) {
 
 void BeamSearch_Cpu::SetUserTokens(DeviceSpan<int32_t>& next_tokens) {
   // Set user-defined next tokens
-  auto next_tokens_cpu = const_cast<DeviceSpan<int32_t>&>(next_tokens).Span();
+  auto next_tokens_cpu = next_tokens.Span();
   auto batch_beam_size = params_->BatchBeamSize();
   auto tokens_count_per_batch = next_tokens_cpu.size() / params_->search.batch_size;
   if (tokens_count_per_batch > sequences_.max_length_) {

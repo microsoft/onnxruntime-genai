@@ -103,6 +103,7 @@ struct GenaiInterfaceImpl : GenaiInterface {
   void DumpSpan(std::ostream& stream, std::span<const int> values) override { return DumpSpan(stream, values); }
 
   void Sequences_AfterAppendNextTokens(Sequences* p_this, DeviceSpan<int32_t> next_tokens, size_t batch_beam_size) override { return p_this->AfterAppendNextTokens(next_tokens, batch_beam_size); }
+  void Sequences_RewindTo(Sequences* p_this, size_t new_length) override { return p_this->RewindTo(new_length); }
 } g_genai;
 
 #if USE_CUDA
@@ -284,6 +285,7 @@ void Generator::AddTokens(const cpu_span<int32_t>& input_ids) {
   
   auto input_ids_device = AllocateInputIdsOnDevice(input_ids);
   search_->SetUserTokens(input_ids_device);
+  
   computed_logits_ = false;
   ComputeLogits(input_ids_device);
 }

@@ -37,7 +37,7 @@ BeamSearchScorer_Cuda::BeamSearchScorer_Cuda(const GeneratorParams& parameters)
 
   cuda::LaunchInitScoresKernel(next_beam_scores_.Span().data(), parameters.search.batch_size, parameters.search.num_beams, stream_);
 
-  // Space to store intermediate sequence with length sequence_length, sequence_length + 1, ..., max_sequence_length.
+  // Space to store intermediate sequence.
   size_t per_beam = (state_cpu_->max_length_ * (state_cpu_->max_length_ + 1)) / 2;
   hypothesis_buffer_ = device.Allocate<int32_t>(batch_beam_size * per_beam);
 }
