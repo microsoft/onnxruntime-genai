@@ -163,7 +163,11 @@ class Model:
         # MatMul-specific variables
         is_lora = hasattr(config, "peft_type") and config.peft_type == "LORA"
         self.matmul_attrs = {
-            "use_lora": is_lora,        # Use LoRA/QLoRA format
+            "use_lora": is_lora,                                    # Use LoRA/QLoRA format
+            "lora": {                                               # used to calculate scaling factors for LoRA/QLoRA
+                "alpha": config.lora_alpha if is_lora else 0,
+                "r": config.r if is_lora else 0
+            }
         }
 
         # RotaryEmbedding-specific variables
@@ -437,7 +441,7 @@ class Model:
         # Quantize ONNX model to desired precision
         # TODO: Replace by quantizing the MatMuls as they are created
         already_quantized_in_qdq_format = self.quant_type is not None and self.quant_attrs["use_qdq"]  # Skip quantizing `MatMul` in `DequantizeLinear --> Transpose --> MatMul` path
-        if self.onnx_dtype == "int4" and not already_quantized_in_qdq_format:
+        if self.onnx_dtype == "int4" and not already_quantized_in_qdq_format and not self.matmul_attrs["use_lora"]:
             model = self.to_int4(model)
 
         # Save ONNX model with only one external data file and delete any existing duplicate copies
@@ -714,7 +718,7 @@ class Model:
         self.make_value_info(output, dtype, shape=shape)
 
     def make_matmul(self, matmul, basename, root_input, **kwargs):
-        if hasattr(matmul, "base_layer"):
+        if hasattr(matmul, "lora_A"):
             # For LoRA `MatMul`
             return self.make_matmul_lora(matmul, basename, root_input, **kwargs)
         else:
@@ -853,14 +857,23 @@ class Model:
         matmul_A_name = self.make_matmul_op(matmul.lora_A.default, matmul_A_basename, root_input=root_input)
         lora_A = f"{matmul_A_name}/output_0"
 
-        matmul.lora_B.default.weight *= matmul.scaling["default"]
+        matmul.lora_B.default.weight *= (self.matmul_attrs["lora"]["alpha"] / self.matmul_attrs["lora"]["r"])
         matmul_B_basename = "/".join(basename_parts[:-1] + ["lora_B"] + basename_parts[-1:])
         matmul_B_name = self.make_matmul_op(matmul.lora_B.default, matmul_B_basename, root_input=lora_A)
         lora_B = f"{matmul_B_name}/output_0"
 
-        # Make regular MatMul path
-        last_dim = matmul.base_layer.weight.shape[0]
-        matmul_name = self.make_matmul_op(matmul.base_layer, basename, root_input, **kwargs)
+        if hasattr(matmul, "base_layer"):
+            # Make MatMul with base_layer
+            last_dim = matmul.base_layer.weight.shape[0]
+            matmul_name = self.make_matmul_op(matmul.base_layer, basename, root_input, **kwargs)
+        elif hasattr(matmul, "qweight"):
+            # Make quantized MatMul path
+            last_dim = matmul.qweight.shape[0]
+            matmul_name = self.make_matmul_op(matmul, basename, root_input, **kwargs)
+        else:
+            # Make regular MatMul path
+            last_dim = matmul.weight.shape[0]
+            matmul_name = self.make_matmul_op(matmul, basename, root_input, **kwargs)
 
         # Make LoRA Add node
         add_name = "/".join(basename_parts[:-1] + ["lora", "Add"])
@@ -2026,23 +2039,14 @@ class Model:
                 from onnxruntime_genai.models.quantized_model import QuantModel
             q_size = self.num_attn_heads * self.head_size
             kv_size = self.num_kv_heads * self.head_size
-            model = QuantModel.from_pretrained(
-                self.quant_type,
-                input_path,
-                self.quant_attrs["bits"],
-                self.quant_attrs["group_size"],
-                self.quant_attrs["use_g_idx"],
-                q_size,
-                kv_size,
-                self.intermediate_size,
-                self.num_layers,
-            )
+            model = QuantModel.from_pretrained(self.quant_type, input_path, self.quant_attrs["bits"], self.quant_attrs["group_size"], self.quant_attrs["use_g_idx"], q_size, kv_size, self.intermediate_size, self.num_layers, self.extra_options.get("adapter_path", None))
         else:
             # Load PyTorch model
             extra_kwargs = {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {}
             model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, cache_dir=self.cache_dir, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
 
-        if "adapter_path" in self.extra_options:
+        # Checking for adapter path in extra_options when the base_model is not quantized
+        if "adapter_path" in self.extra_options and self.quant_type is None:
             from peft import PeftModel
             model = PeftModel.from_pretrained(model, self.extra_options["adapter_path"], cache_dir=self.cache_dir, token=self.hf_token)
 
