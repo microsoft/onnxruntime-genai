@@ -441,12 +441,12 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
         bool contains_device_luid = false;
         LUID device_luid{};
         for (const auto& [name, value] : provider_options.options) {
-          if (name == "luid_high_part") {
-            device_luid.HighPart = std::stol(value);
-            contains_device_luid = true;
-          } else if (name == "luid_low_part") {
-            device_luid.LowPart = std::stol(value);
-            contains_device_luid = true;
+          if (name == "luid") {
+            if (auto separator_position = value.find(":"); separator_position != std::string::npos) {
+              device_luid.HighPart = std::stol(value.substr(0, separator_position));
+              device_luid.LowPart = std::stol(value.substr(separator_position + 1));
+              contains_device_luid = true;
+            }
           }
         }
 

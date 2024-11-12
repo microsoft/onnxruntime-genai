@@ -75,8 +75,7 @@ static std::vector<ComPtr<IDXGIAdapter1>> EnumerateAdapters(PLUID device_luid = 
           adapter_infos.emplace_back(std::move(adapter));
           break;
         }
-      }
-      else if (d3d12_device) {
+      } else if (d3d12_device) {
         adapter_infos.emplace_back(std::move(adapter));
       }
     }
