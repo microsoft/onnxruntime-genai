@@ -111,7 +111,7 @@ Currently, both JSON files needed to run with ONNX Runtime GenAI are created by 
 
 ### CUDA
 ```bash
-$ python3 .\phi3v.py -m .\phi3-vision-128k-instruct\cuda -p cuda
+$ python .\phi3v.py -m .\phi3-vision-128k-instruct\cuda -p cuda
 ```
 
 ### DirectML
