@@ -172,10 +172,13 @@ KV_Cache::KV_Cache(State& state)
         sb_kv_caches_.empty() ? OrtValue::CreateTensor(*model_.allocator_kvcache_, shape_, type_)
                               : sb_kv_caches_[i]->CreateTensorOnStaticBuffer(shape_, type_));
 #if USE_CUDA
-    cudaMemsetAsync(presents_.back()->GetTensorMutableRawData(), 0, kv_cache_size_bytes, model_.cuda_stream_);
-#else
-    memset(presents_.back()->GetTensorMutableRawData(), 0, kv_cache_size_bytes);
+    if (model_.device_type_ == DeviceType::CUDA) {
+      cudaMemsetAsync(presents_.back()->GetTensorMutableRawData(), 0, kv_cache_size_bytes, model_.cuda_stream_);
+    } else
 #endif
+    {
+      memset(presents_.back()->GetTensorMutableRawData(), 0, kv_cache_size_bytes);      
+    }
   }
 }
 
