@@ -26,7 +26,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             {
                 fixed (int* tokenIDsPtr = tokens)
                 {
-                    Result.VerifySuccess(NativeMethods.OgaGenerator_AppendTokens(_generatorHandle, tokenIDsPtr, (UIntPtr)tokens.Length, (UIntPtr)sequenceLength));
+                    Result.VerifySuccess(NativeMethods.OgaGenerator_AppendTokens(_generatorHandle, tokenIDsPtr, (UIntPtr)tokens.Length));
                 }
             }
         }
