@@ -540,12 +540,12 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             {
                 using var genParams = new GeneratorParams(model);
                 genParams.SetSearchOption("max_length", 20);
-                genParams.SetInputSequences(sequences);
+                genParams.SetSearchOption("batch_size", 3);
 
                 using var generator = new Generator(model, genParams);
+                generator.AppendTokenSequences(sequences);
                 while(!generator.IsDone())
                 {
-                    generator.ComputeLogits();
                     generator.GenerateNextToken();
                 }
 
@@ -559,13 +559,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             {
                 using var genParams = new GeneratorParams(model);
                 genParams.SetSearchOption("max_length", 20);
-                genParams.SetInputSequences(sequences);
+                genParams.SetSearchOption("batch_size", 3);
 
                 using var generator = new Generator(model, genParams);
                 generator.SetActiveAdapter(adapters, "adapters_a_and_b");
+                generator.AppendTokenSequences(sequences);
                 while (!generator.IsDone())
                 {
-                    generator.ComputeLogits();
                     generator.GenerateNextToken();
                 }
                 using var logits = generator.GetOutput("logits");
