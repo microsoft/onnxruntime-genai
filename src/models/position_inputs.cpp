@@ -254,7 +254,7 @@ void PositionInputs::UpdateAttentionMask(int total_length, int new_kv_length) {
       if (type_ == Ort::TypeToTensorType<int32_t>) {
         cuda::Launch_UpdateAttentionMask(attention_mask_next_->GetTensorMutableData<int32_t>(),
                                          attention_mask_->GetTensorData<int32_t>(),
-                                         attention_mask_shape_[0],
+                                         static_cast<int>(attention_mask_shape_[0]),
                                          new_kv_length,
                                          total_length,
                                          max_length,
@@ -263,7 +263,7 @@ void PositionInputs::UpdateAttentionMask(int total_length, int new_kv_length) {
       } else {
         cuda::Launch_UpdateAttentionMask(attention_mask_next_->GetTensorMutableData<int64_t>(),
                                          attention_mask_->GetTensorData<int64_t>(),
-                                         attention_mask_shape_[0],
+                                         static_cast<int>(attention_mask_shape_[0]),
                                          new_kv_length,
                                          total_length,
                                          max_length,
