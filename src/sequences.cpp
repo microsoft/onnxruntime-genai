@@ -13,7 +13,7 @@ void Sequences::AfterAppendNextTokens(DeviceSpan<int32_t>& next_tokens, size_t b
     stream << std::endl;
   }
 
-  current_length_ += next_tokens.size() / batch_beam_size;
+  current_length_ += static_cast<int>(next_tokens.size() / batch_beam_size);
 
   // With beam search, we rotate the buffers each iteration
   if (!sequences_next_.empty())

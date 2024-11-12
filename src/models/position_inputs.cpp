@@ -103,11 +103,11 @@ void PositionInputs::RewindTo(size_t index) {
     is_first_mask_update_ = true;
     // Rewind the mask input to a previous state
   } else if (has_mask_input_) {
-    if (attention_mask_shape_[0] == 1)
+    if (attention_mask_shape_[0] == 1) {
 #if USE_CUDA
       RewindMask(index);
-    else
 #endif
+    } else
       throw std::runtime_error("PositionInputs::RewindTo - Unsupported batch size");
   }
 }
@@ -139,7 +139,7 @@ void PositionInputs::CopyNextPositionIDsToCurrent() {
       assert(model_.device_type_ == DeviceType::DML);
       ComPtr<ID3D12Resource> target_resource;
       Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, position_ids_->GetTensorMutableRawData(), &target_resource));
-      auto source = std::span(position_ids_next_->GetTensorData<const uint8_t>(), sizeof(type_ == Ort::TypeToTensorType<int32_t> ? int32_t : int64_t) * position_ids_shape_[0]);
+      auto source = std::span(position_ids_next_->GetTensorData<const uint8_t>(), (type_ == Ort::TypeToTensorType<int32_t> ? sizeof(int32_t) : sizeof(int64_t)) * position_ids_shape_[0]);
       model_.GetDmlUploadHeap()->BeginUploadToGpu(
           target_resource.Get(),
           0,
