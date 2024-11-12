@@ -22,7 +22,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         public void AppendTokens(ReadOnlySpan<int> tokens)
         {
-            Result.VerifySuccess(NativeMethods.OgaGenerator_AppendTokens(_generatorHandle, tokens.ToArray(), (UIntPtr)tokens.Length));
+            unsafe
+            {
+                fixed (int* tokenIDsPtr = tokens)
+                {
+                    Result.VerifySuccess(NativeMethods.OgaGenerator_AppendTokens(_generatorHandle, tokenIDsPtr, (UIntPtr)tokens.Length, (UIntPtr)sequenceLength));
+                }
+            }
         }
 
         public void AppendTokenSequences(Sequences sequences)
