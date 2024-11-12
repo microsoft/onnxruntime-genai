@@ -177,7 +177,7 @@ KV_Cache::KV_Cache(State& state)
     } else
 #endif
     {
-      memset(presents_.back()->GetTensorMutableRawData(), 0, kv_cache_size_bytes);      
+      memset(presents_.back()->GetTensorMutableRawData(), 0, kv_cache_size_bytes);
     }
   }
 }
