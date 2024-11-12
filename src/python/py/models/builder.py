@@ -3073,9 +3073,8 @@ class OLMoModel(Model):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
     def make_layernorm(self, layer_id, layernorm, skip, simple, location):
-        # Each LLM decoder layer is typically defined as:
-        layernorm.weight = torch.ones(2048)
-        layernorm.bias = torch.ones(2048)
+        layernorm.weight = torch.ones(self.hidden_size)
+        layernorm.bias = torch.zeros(self.hidden_size)
         super().make_layernorm(layer_id, layernorm, skip, simple, location)
 
 class GraniteModel(MistralModel):
