@@ -11,6 +11,8 @@
 #include <csignal>
 #include <atomic>
 #include <setjmp.h>
+#include <condition_variable>
+#include <mutex>
 
 using Clock = std::chrono::high_resolution_clock;
 using TimePoint = std::chrono::time_point<Clock>;
@@ -69,21 +71,28 @@ class Timing {
 
 // C++ API Example
 
-std::atomic<bool> stopFlag(false);
+std::condition_variable cv;
+std::mutex mtx;
+bool stopFlag = false;
 
 void signalHandler(int signum) {
     std::cout << "Interrupt signal received. Terminating current session...\n";
     stopFlag = true;
+    std::unique_lock<std::mutex> lock(mtx);
+    cv.notify_one();
 }
 
 void Generator_SetTerminate_Call(OgaGenerator* generator) {
+  std::unique_lock<std::mutex> lock(mtx);
   while (!generator->IsDone()) {
     if (stopFlag) {
       generator->SetRuntimeOption("terminate_session", "1");
       stopFlag = false;
       break;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Check every 100 ms  
+    // Wait for stopflag to become true or it will timeout after 1000 ms
+    auto timeout = std::chrono::milliseconds(1000);
+    cv.wait_for(lock, timeout, [] { return stopFlag; });
   }
 }
 
@@ -172,13 +181,16 @@ void CXX_API(const char* model_path) {
 // C API Example
 
 void Generator_SetTerminate_Call_C(OgaGenerator* generator) {
+  std::unique_lock<std::mutex> lock(mtx);
   while (!OgaGenerator_IsDone(generator)) {
     if (stopFlag) {
       OgaGenerator_SetRuntimeOption(generator, "terminate_session", "1");
       stopFlag = false;
       break;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Check every 100 ms
+    // Wait for stopflag to become true or it will timeout after 1000 ms
+    auto timeout = std::chrono::milliseconds(1000);
+    cv.wait_for(lock, timeout, [] { return stopFlag; });
   }
 }
 
