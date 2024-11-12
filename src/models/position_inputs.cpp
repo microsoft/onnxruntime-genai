@@ -136,15 +136,15 @@ void PositionInputs::CopyNextPositionIDsToCurrent() {
                   cudaMemcpyDeviceToDevice,
                   model_.cuda_stream_);
 #elif USE_DML
-      assert(model_.device_type_ == DeviceType::DML);
-      ComPtr<ID3D12Resource> target_resource;
-      Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, position_ids_->GetTensorMutableRawData(), &target_resource));
-      auto source = std::span(position_ids_next_->GetTensorData<const uint8_t>(), (type_ == Ort::TypeToTensorType<int32_t> ? sizeof(int32_t) : sizeof(int64_t)) * position_ids_shape_[0]);
-      model_.GetDmlUploadHeap()->BeginUploadToGpu(
-          target_resource.Get(),
-          0,
-          D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-          source);
+  assert(model_.device_type_ == DeviceType::DML);
+  ComPtr<ID3D12Resource> target_resource;
+  Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, position_ids_->GetTensorMutableRawData(), &target_resource));
+  auto source = std::span(position_ids_next_->GetTensorData<const uint8_t>(), (type_ == Ort::TypeToTensorType<int32_t> ? sizeof(int32_t) : sizeof(int64_t)) * position_ids_shape_[0]);
+  model_.GetDmlUploadHeap()->BeginUploadToGpu(
+      target_resource.Get(),
+      0,
+      D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+      source);
 #endif
 }
 #endif
@@ -182,7 +182,7 @@ void PositionInputs::UpdatePositionIDs(int total_length, int new_kv_length) {
 
   switch (model_.device_type_) {
     case DeviceType::CPU: {
-      type_ == Ort::TypeToTensorType<int32_t> ? UpdatePositionIDsImpl<int32_t>(total_length, new_kv_length) 
+      type_ == Ort::TypeToTensorType<int32_t> ? UpdatePositionIDsImpl<int32_t>(total_length, new_kv_length)
                                               : UpdatePositionIDsImpl<int64_t>(total_length, new_kv_length);
       break;
     }
@@ -218,10 +218,10 @@ void PositionInputs::CreateNextAttentionMaskTensor(int total_length) {
     attention_mask_shape_[1] = state_.params_->search.max_length;
     attention_mask_next_ = sb_attention_mask_->CreateTensorOnStaticBuffer(attention_mask_shape_, type_);
     if (is_first_mask_update_) {
-        cudaMemsetAsync(attention_mask_next_->GetTensorMutableRawData(),
-                        0,
-                        (type_ == Ort::TypeToTensorType<int32_t> ? sizeof(int32_t) : sizeof(int64_t)) * attention_mask_shape_[0] * attention_mask_shape_[1],
-                        model_.cuda_stream_);
+      cudaMemsetAsync(attention_mask_next_->GetTensorMutableRawData(),
+                      0,
+                      (type_ == Ort::TypeToTensorType<int32_t> ? sizeof(int32_t) : sizeof(int64_t)) * attention_mask_shape_[0] * attention_mask_shape_[1],
+                      model_.cuda_stream_);
     }
 #elif USE_DML
     attention_mask_shape_[1] = state_.params_->search.max_length;
@@ -236,7 +236,7 @@ void PositionInputs::UpdateAttentionMask(int total_length, int new_kv_length) {
     throw std::runtime_error("PositionInputs::UpdatePositionIDs - batch_size must be 1 for continuous decoding.");
   if (DeviceType::DML == model_.device_type_ && !(total_length == 0 || new_kv_length == 1))
     throw std::runtime_error("PositionInputs::UpdatePositionIDs - DML does not support continuous decoding.");
-  
+
   CreateNextAttentionMaskTensor(total_length);
   state_.inputs_[mask_input_index_] = attention_mask_.get();
 
@@ -439,7 +439,6 @@ void PositionInputs::UpdateAttentionMaskImplDML(int total_length) {
   model_.GetDmlExecutionContext()->ExecuteCommandList(dml_update_mask_kernel_->GetCommandList(), &fence, &completion_value);
 }
 #endif
-
 
 #if USE_CUDA
 void PositionInputs::RewindMask(size_t index) {
