@@ -17,7 +17,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         public bool IsDone()
         {
-            return NativeMethods.OgaGenerator_IsDone(_generatorHandle);
+            return NativeMethods.OgaGenerator_IsDone(_generatorHandle) != 0;
         }
 
         public void AppendTokens(ReadOnlySpan<int> tokens)

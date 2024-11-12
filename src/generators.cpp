@@ -302,6 +302,7 @@ void Generator::ComputeLogits(DeviceSpan<int32_t>& next_tokens) {
   }
   SetLogits(logits);
   just_rewinded_ = false;
+  computed_logits_ = true;
 }
 
 void Generator::SetRuntimeOption(const char* key, const char* value) {

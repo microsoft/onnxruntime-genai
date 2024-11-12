@@ -58,7 +58,7 @@ struct Search_Cpu : Search {
 
   DeviceSpan<float> next_token_scores_;  // shape (beam_size*batch_size, vocab_size)
 
-  bool done_{};
+  bool done_{false};
 };
 
 struct GreedySearch_Cpu : Search_Cpu {
