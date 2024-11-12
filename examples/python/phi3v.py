@@ -78,7 +78,7 @@ def run(args: argparse.Namespace):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "-m", "--model_path", type=str, required=True, help="Path to the model"
+        "-m", "--model_path", type=str, required=True, help="Path to the folder containing the model"
     )
     parser.add_argument(
         "-p", "--provider", type=str, required=True, help="Provider to run model"
