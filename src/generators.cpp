@@ -282,10 +282,10 @@ void Generator::AddTokens(const cpu_span<int32_t>& input_ids) {
     throw std::runtime_error("Please use params.SetInputs for " + model_->config_->model.type + ". AppendTokens is not supported for this model type.");
   if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
     throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
-  
+
   auto input_ids_device = AllocateInputIdsOnDevice(input_ids);
   search_->SetUserTokens(input_ids_device);
-  
+
   computed_logits_ = false;
   ComputeLogits(input_ids_device);
 }

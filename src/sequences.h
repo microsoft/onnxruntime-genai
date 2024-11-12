@@ -6,7 +6,6 @@ struct Sequences {
   Sequences(const GeneratorParams& params)
       : max_length_{params.search.max_length},
         current_length_{0} {
-
     const size_t sequences_size = static_cast<size_t>(params.BatchBeamSize()) * max_length_;
     sequences_ = params.p_device->Allocate<int32_t>(sequences_size);
     if (params.search.num_beams > 1)

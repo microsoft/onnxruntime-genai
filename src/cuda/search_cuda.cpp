@@ -242,7 +242,7 @@ void BeamSearch_Cuda::SetUserTokens(DeviceSpan<int32_t>& next_tokens) {
   auto next_tokens_gpu = next_tokens.Span();
   cuda::Launch_ExpandInputSequences(next_tokens_gpu, sequences_.GetNextSequences().Span(), params_->search.batch_size, params_->search.num_beams, sequences_.max_length_, GetStream());
   cuda::Launch_ExpandInputSequences(next_tokens_gpu, sequences_.GetSequences().Span(), params_->search.batch_size, params_->search.num_beams, sequences_.max_length_, GetStream());
-  sequences_.AfterAppendNextTokens(next_tokens, params_->search.batch_size); // next_tokens is batch_size
+  sequences_.AfterAppendNextTokens(next_tokens, params_->search.batch_size);  // next_tokens is batch_size
   cudaStreamSynchronize(GetStream());
 }
 

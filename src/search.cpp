@@ -314,7 +314,7 @@ void BeamSearch_Cpu::SetUserTokens(DeviceSpan<int32_t>& next_tokens) {
     std::span<const int32_t> source = next_tokens_cpu.subspan((i / params_->search.num_beams) * tokens_count_per_batch, tokens_count_per_batch);
     copy(source, target);
   }
-  sequences_.AfterAppendNextTokens(next_tokens, params_->search.batch_size); // next_tokens is not expanded
+  sequences_.AfterAppendNextTokens(next_tokens, params_->search.batch_size);  // next_tokens is not expanded
 }
 
 bool BeamSearch_Cpu::IsDone() const {

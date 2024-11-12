@@ -65,8 +65,8 @@ __global__ void CopyAndUpdateAttentionMask(T* mask_data, const T* old_data, int 
 }
 
 template <typename T>
-void Launch_UpdateAttentionMask(T* mask_data, const T* old_data, int batch_beam_size, int new_kv_length, 
-                                int total_length, int max_length, bool update_only, cudaStream_t stream) {  
+void Launch_UpdateAttentionMask(T* mask_data, const T* old_data, int batch_beam_size, int new_kv_length,
+                                int total_length, int max_length, bool update_only, cudaStream_t stream) {
   if (update_only) {
     int threads = std::min(256, batch_beam_size * new_kv_length);
     int blocks = (batch_beam_size * new_kv_length + threads - 1) / threads;
