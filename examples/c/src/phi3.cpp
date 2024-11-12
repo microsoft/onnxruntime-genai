@@ -10,6 +10,7 @@
 #include <thread>
 #include <csignal>
 #include <atomic>
+#include <setjmp.h>
 
 using Clock = std::chrono::high_resolution_clock;
 using TimePoint = std::chrono::time_point<Clock>;
@@ -97,6 +98,7 @@ void CXX_API(const char* model_path) {
     auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
     std::string text;
     std::cout << "Prompt: (Use quit() to exit) Or (To terminate current output generation, press Ctrl+C)" << std::endl;
+    // Clear Any cin error flags because of SIGINT
     std::cin.clear();
     std::getline(std::cin, text);
 
@@ -169,8 +171,32 @@ void CXX_API(const char* model_path) {
 
 // C API Example
 
+void Generator_SetTerminate_Call_C(OgaGenerator* generator) {
+  while (!OgaGenerator_IsDone(generator)) {
+    if (stopFlag) {
+      OgaGenerator_SetRuntimeOption(generator, "terminate_session", "1");
+      stopFlag = false;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Check every 100 ms
+  }
+}
+
+jmp_buf is_session_terminated;
+
 void CheckResult(OgaResult* result) {
   if (result) {
+    std::string string = OgaResultGetError(result);
+    OgaDestroyResult(result);
+    throw std::runtime_error(string);
+  }
+}
+
+void CheckResultWithGenerator(OgaResult* result, OgaGenerator* generator) {
+  if (result) {
+    if (OgaGenerator_IsSessionTerminated(generator)){
+      longjmp(is_session_terminated, 1);
+    }
     std::string string = OgaResultGetError(result);
     OgaDestroyResult(result);
     throw std::runtime_error(string);
@@ -190,8 +216,10 @@ void C_API(const char* model_path) {
   CheckResult(OgaCreateTokenizerStream(tokenizer, &tokenizer_stream));
 
   while (true) {
+    signal(SIGINT, signalHandler);
     std::string text;
-    std::cout << "Prompt: (Use quit() to exit)" << std::endl;
+    std::cout << "Prompt: (Use quit() to exit) Or (To terminate current output generation, press Ctrl+C)" << std::endl;
+    std::cin.clear();
     std::getline(std::cin, text);
 
     if (text == "quit()") {
@@ -217,26 +245,34 @@ void C_API(const char* model_path) {
     OgaGenerator* generator;
     CheckResult(OgaCreateGenerator(model, params, &generator));
 
-    while (!OgaGenerator_IsDone(generator)) {
-      CheckResult(OgaGenerator_ComputeLogits(generator));
-      CheckResult(OgaGenerator_GenerateNextToken(generator));
+    std::thread th(Generator_SetTerminate_Call_C, generator);
 
-      if (is_first_token) {
-        timing.RecordFirstTokenTimestamp();
-        is_first_token = false;
+    if (setjmp(is_session_terminated) == 0) {
+      while (!OgaGenerator_IsDone(generator)) {
+        CheckResultWithGenerator(OgaGenerator_ComputeLogits(generator), generator);
+        CheckResultWithGenerator(OgaGenerator_GenerateNextToken(generator), generator);
+
+        if (is_first_token) {
+          timing.RecordFirstTokenTimestamp();
+          is_first_token = false;
+        }
+
+        const int32_t num_tokens = OgaGenerator_GetSequenceCount(generator, 0);
+        int32_t new_token = OgaGenerator_GetSequenceData(generator, 0)[num_tokens - 1];
+        const char* new_token_string;
+        CheckResultWithGenerator(OgaTokenizerStreamDecode(tokenizer_stream, new_token, &new_token_string), generator);
+        std::cout << new_token_string << std::flush;
       }
-
-      const int32_t num_tokens = OgaGenerator_GetSequenceCount(generator, 0);
-      int32_t new_token = OgaGenerator_GetSequenceData(generator, 0)[num_tokens - 1];
-      const char* new_token_string;
-      CheckResult(OgaTokenizerStreamDecode(tokenizer_stream, new_token, &new_token_string));
-      std::cout << new_token_string << std::flush;
+    } else {
+      std::cout << "Session in terminated state, stopping current generation" << std::endl;
     }
 
     timing.RecordEndTimestamp();
     const int prompt_tokens_length = OgaSequencesGetSequenceCount(sequences, 0);
     const int new_tokens_length = OgaGenerator_GetSequenceCount(generator, 0) - prompt_tokens_length;
     timing.Log(prompt_tokens_length, new_tokens_length);
+
+    th.join();
 
     for (int i = 0; i < 3; ++i)
       std::cout << std::endl;
