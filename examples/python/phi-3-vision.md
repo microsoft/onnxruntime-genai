@@ -105,45 +105,17 @@ $ python3 builder.py --input ./pytorch --output ./dml --precision fp16 --executi
 
 Currently, both JSON files needed to run with ONNX Runtime GenAI are created by hand. Because the fields have been hand-crafted, it is recommended that you copy the already-uploaded JSON files and modify the fields as needed for your fine-tuned Phi-3 vision model. [Here](https://huggingface.co/microsoft/Phi-3-vision-128k-instruct-onnx/blob/main/cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/genai_config.json) is an example for `genai_config.json` and [here](https://huggingface.co/microsoft/Phi-3-vision-128k-instruct-onnx/blob/main/cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/processor_config.json) is an example for `processor_config.json`.
 
-### For DirectML
-Replace
-```json
-"provider_options": []
-```
-in `genai_config.json` With
-```json
-"provider_options": [
-    {
-        "dml" : {}
-    }
-]
-```
-
-### For CUDA
-Replace
-```json
-"provider_options": []
-```
-in `genai_config.json` With
-```json
-"provider_options": [
-    {
-        "cuda" : {}
-    }
-]
-```
-
 ## 4. Run Phi-3 vision ONNX models
 
 [Here](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/phi3v.py) is an example of how you can run your Phi-3 vision model with the ONNX Runtime generate() API.
 
 ### CUDA
 ```bash
-$ python .\phi3v.py -m .\phi3-vision-128k-instruct\cuda
+$ python3 .\phi3v.py -m .\phi3-vision-128k-instruct\cuda -p cuda
 ```
 
 ### DirectML
 
 ```bash
-$ python .\phi3v.py -m .\phi3-vision-128k-instruct\dml
+$ python .\phi3v.py -m .\phi3-vision-128k-instruct\dml -p dml
 ```
