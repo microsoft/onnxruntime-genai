@@ -442,7 +442,7 @@ void Cross_Cache::AddInputs() {
 SlidingWindowKeyValueCache::SlidingWindowKeyValueCache(State& state)
     : state_{state},
       layer_count_{model_.config_->model.decoder.num_hidden_layers},
-      window_size_{128},
+      window_size_{model_.config_->model.decoder.sliding_window_key_value_cache->window_size},
       key_cache_shape_in_{model_.config_->model.decoder.num_key_value_heads, 1,
                           model_.config_->model.decoder.head_size, model_.config_->model.context_length - window_size_},
       key_cache_shape_out_{model_.config_->model.decoder.num_key_value_heads, 1,
@@ -460,17 +460,23 @@ SlidingWindowKeyValueCache::SlidingWindowKeyValueCache(State& state)
   }
 
   type_ = model_.session_info_->GetInputDataType(input_name_strings_[0]);
+  if (type_ != ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8) {
+    throw std::runtime_error("Expected input data type to be uint8_t for SlidingWindowKeyValueCache. Actual: " +
+                             std::to_string(type_));
+  }
 
   for (int i = 0; i < layer_count_; ++i) {
     key_caches_in_.push_back(
         OrtValue::CreateTensor(*model_.allocator_device_, key_cache_shape_in_, type_));
     std::fill_n(key_caches_in_[i]->GetTensorMutableData<uint8_t>(),
-                ElementCountFromShape(key_cache_shape_in_), static_cast<uint8_t>(0));
+                ElementCountFromShape(key_cache_shape_in_),
+                static_cast<uint8_t>(model_.config_->model.decoder.sliding_window_key_value_cache->pad_value));
 
     value_caches_in_.push_back(
         OrtValue::CreateTensor(*model_.allocator_device_, value_cache_shape_in_, type_));
     std::fill_n(value_caches_in_[i]->GetTensorMutableData<uint8_t>(),
-                ElementCountFromShape(value_cache_shape_in_), static_cast<uint8_t>(0));
+                ElementCountFromShape(value_cache_shape_in_),
+                static_cast<uint8_t>(model_.config_->model.decoder.sliding_window_key_value_cache->pad_value));
 
     key_caches_out_.push_back(
         OrtValue::CreateTensor(*model_.allocator_device_, key_cache_shape_out_, type_));
@@ -483,25 +489,25 @@ void SlidingWindowKeyValueCache::Add() {
   input_index_ = state_.inputs_.size();
   output_index_ = state_.outputs_.size();
 
-  for (size_t i = 0; i < layer_count_; ++i) {
-    state_.inputs_.push_back(key_caches_in_[i].get());
-    state_.input_names_.push_back(input_name_strings_[2 * i].c_str());
+  for (size_t layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
+    state_.inputs_.push_back(key_caches_in_[layer_idx].get());
+    state_.input_names_.push_back(input_name_strings_[2 * layer_idx].c_str());
 
-    state_.inputs_.push_back(value_caches_in_[i].get());
-    state_.input_names_.push_back(input_name_strings_[2 * i + 1].c_str());
+    state_.inputs_.push_back(value_caches_in_[layer_idx].get());
+    state_.input_names_.push_back(input_name_strings_[2 * layer_idx + 1].c_str());
 
-    state_.outputs_.push_back(key_caches_out_[i].get());
-    state_.output_names_.push_back(output_name_strings_[2 * i].c_str());
+    state_.outputs_.push_back(key_caches_out_[layer_idx].get());
+    state_.output_names_.push_back(output_name_strings_[2 * layer_idx].c_str());
 
-    state_.outputs_.push_back(value_caches_out_[i].get());
-    state_.output_names_.push_back(output_name_strings_[2 * i + 1].c_str());
+    state_.outputs_.push_back(value_caches_out_[layer_idx].get());
+    state_.output_names_.push_back(output_name_strings_[2 * layer_idx + 1].c_str());
   }
 }
 
 void SlidingWindowKeyValueCache::Slide() {
-  for (size_t i = 0; i < layer_count_; ++i) {
-    uint8_t* key_cache_in_data = key_caches_in_[i]->GetTensorMutableData<uint8_t>();
-    uint8_t* key_cache_out_data = key_caches_out_[i]->GetTensorMutableData<uint8_t>();
+  for (size_t layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
+    uint8_t* key_cache_in_data = key_caches_in_[layer_idx]->GetTensorMutableData<uint8_t>();
+    uint8_t* key_cache_out_data = key_caches_out_[layer_idx]->GetTensorMutableData<uint8_t>();
 
     int64_t num_key_cache_chunks = key_cache_shape_in_[0] * key_cache_shape_in_[2];
     for (int64_t j = 0; j < num_key_cache_chunks; ++j) {
@@ -521,8 +527,8 @@ void SlidingWindowKeyValueCache::Slide() {
       }
     }
 
-    uint8_t* value_cache_in_data = value_caches_in_[i]->GetTensorMutableData<uint8_t>();
-    uint8_t* value_cache_out_data = value_caches_out_[i]->GetTensorMutableData<uint8_t>();
+    uint8_t* value_cache_in_data = value_caches_in_[layer_idx]->GetTensorMutableData<uint8_t>();
+    uint8_t* value_cache_out_data = value_caches_out_[layer_idx]->GetTensorMutableData<uint8_t>();
 
     for (int64_t j = 0; j < value_cache_shape_in_[0]; ++j) {
       {
@@ -577,12 +583,12 @@ void SlidingWindowKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int cu
                                                               updated_window_size,
                                                               model_.config_->model.decoder.head_size};
 
-  for (size_t i = 0; i < layer_count_; ++i) {
+  for (size_t layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
     std::unique_ptr<OrtValue> key_cache = OrtValue::CreateTensor(*model_.allocator_device_, updated_key_cache_shape_in, type_);
 
     uint8_t* key_cache_data = key_cache->GetTensorMutableData<uint8_t>();
-    uint8_t* key_cache_in_data = key_caches_in_[i]->GetTensorMutableData<uint8_t>();
-    uint8_t* key_cache_out_data = key_caches_out_[i]->GetTensorMutableData<uint8_t>();
+    uint8_t* key_cache_in_data = key_caches_in_[layer_idx]->GetTensorMutableData<uint8_t>();
+    uint8_t* key_cache_out_data = key_caches_out_[layer_idx]->GetTensorMutableData<uint8_t>();
 
     int64_t num_key_cache_chunks = updated_key_cache_shape_in[0] * updated_key_cache_shape_in[2];
     for (int64_t j = 0; j < num_key_cache_chunks; ++j) {
@@ -603,14 +609,14 @@ void SlidingWindowKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int cu
       }
     }
 
-    key_caches_in_[i] = std::move(key_cache);
-    key_caches_out_[i] = OrtValue::CreateTensor(*model_.allocator_device_, updated_key_cache_shape_out, type_);
+    key_caches_in_[layer_idx] = std::move(key_cache);
+    key_caches_out_[layer_idx] = OrtValue::CreateTensor(*model_.allocator_device_, updated_key_cache_shape_out, type_);
 
     std::unique_ptr<OrtValue> value_cache = OrtValue::CreateTensor(*model_.allocator_device_, updated_value_cache_shape_in, type_);
 
     uint8_t* value_cache_data = value_cache->GetTensorMutableData<uint8_t>();
-    uint8_t* value_cache_in_data = value_caches_in_[i]->GetTensorMutableData<uint8_t>();
-    uint8_t* value_cache_out_data = value_caches_out_[i]->GetTensorMutableData<uint8_t>();
+    uint8_t* value_cache_in_data = value_caches_in_[layer_idx]->GetTensorMutableData<uint8_t>();
+    uint8_t* value_cache_out_data = value_caches_out_[layer_idx]->GetTensorMutableData<uint8_t>();
 
     for (int64_t j = 0; j < updated_value_cache_shape_in[0]; ++j) {
       {
@@ -631,8 +637,8 @@ void SlidingWindowKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int cu
       }
     }
 
-    value_caches_in_[i] = std::move(value_cache);
-    value_caches_out_[i] = OrtValue::CreateTensor(*model_.allocator_device_, updated_value_cache_shape_out, type_);
+    value_caches_in_[layer_idx] = std::move(value_cache);
+    value_caches_out_[layer_idx] = OrtValue::CreateTensor(*model_.allocator_device_, updated_value_cache_shape_out, type_);
   }
 
   window_size_ = 1;
@@ -641,11 +647,11 @@ void SlidingWindowKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int cu
   key_cache_shape_out_ = updated_key_cache_shape_out;
   value_cache_shape_out_ = updated_value_cache_shape_out;
 
-  for (size_t i = 0; i < layer_count_; ++i) {
-    state_.inputs_[input_index_ + 2 * i] = key_caches_in_[i].get();
-    state_.inputs_[input_index_ + 2 * i + 1] = value_caches_in_[i].get();
-    state_.outputs_[output_index_ + 2 * i] = key_caches_out_[i].get();
-    state_.outputs_[output_index_ + 2 * i + 1] = value_caches_out_[i].get();
+  for (size_t layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
+    state_.inputs_[input_index_ + 2 * layer_idx] = key_caches_in_[layer_idx].get();
+    state_.inputs_[input_index_ + 2 * layer_idx + 1] = value_caches_in_[layer_idx].get();
+    state_.outputs_[output_index_ + 2 * layer_idx] = key_caches_out_[layer_idx].get();
+    state_.outputs_[output_index_ + 2 * layer_idx + 1] = value_caches_out_[layer_idx].get();
   }
 }
 

@@ -98,8 +98,6 @@ struct SlidingWindowKeyValueCache {
 
  private:
   void Slide();
-  void Shift();
-  void Concat();
 
   State& state_;
   const Model& model_{state_.model_};
