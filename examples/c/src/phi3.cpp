@@ -10,7 +10,6 @@
 #include <thread>
 #include <csignal>
 #include <atomic>
-#include <setjmp.h>
 #include <condition_variable>
 #include <mutex>
 #include <functional>
