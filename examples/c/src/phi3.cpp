@@ -125,10 +125,10 @@ void CXX_API(const char* model_path) {
   auto model = OgaModel::Create(model_path);
   std::cout << "Creating tokenizer..." << std::endl;
   auto tokenizer = OgaTokenizer::Create(*model);
+  auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
 
   while (true) {
     signal(SIGINT, signalHandlerWrapper);
-    auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
     std::string text;
     std::cout << "Prompt: (Use quit() to exit) Or (To terminate current output generation, press Ctrl+C)" << std::endl;
     // Clear Any cin error flags because of SIGINT
@@ -240,6 +240,7 @@ void C_API(const char* model_path) {
     signal(SIGINT, signalHandlerWrapper);
     std::string text;
     std::cout << "Prompt: (Use quit() to exit) Or (To terminate current output generation, press Ctrl+C)" << std::endl;
+    // Clear Any cin error flags because of SIGINT
     std::cin.clear();
     std::getline(std::cin, text);
 
@@ -292,7 +293,9 @@ void C_API(const char* model_path) {
     const int new_tokens_length = OgaGenerator_GetSequenceCount(generator, 0) - prompt_tokens_length;
     timing.Log(prompt_tokens_length, new_tokens_length);
 
-    th.join();
+    if (th.joinable()) {
+      th.join();  // Join the thread if it's still running
+    }
 
     for (int i = 0; i < 3; ++i)
       std::cout << std::endl;
