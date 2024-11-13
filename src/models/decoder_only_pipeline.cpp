@@ -96,7 +96,7 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
   position_inputs_.Add();
   logits_.Add();
   if (KV_Cache::IsCacheNeeded(model)) {
-    if (model.config_->model.decoder.sliding_window_key_value_cache) {
+    if (model.config_->model.decoder.sliding_window_key_value_cache.has_value()) {
       sliding_window_key_value_cache_ = std::make_unique<SlidingWindowKeyValueCache>(*this);
       sliding_window_key_value_cache_->Add();
     } else {

@@ -106,7 +106,12 @@ struct Config {
       int num_key_value_heads{};
       int num_hidden_layers{};
       int head_size{};
-      bool sliding_window_key_value_cache{false};
+
+      struct SlidingWindowKeyValueCache {
+        int window_size{128};
+        int pad_value{};
+      };
+      std::optional<SlidingWindowKeyValueCache> sliding_window_key_value_cache;
 
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};
