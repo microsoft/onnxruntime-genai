@@ -13,6 +13,7 @@
 #include <setjmp.h>
 #include <condition_variable>
 #include <mutex>
+#include <functional>
 
 using Clock = std::chrono::high_resolution_clock;
 using TimePoint = std::chrono::time_point<Clock>;
@@ -71,29 +72,52 @@ class Timing {
 
 // C++ API Example
 
-std::condition_variable cv;
-std::mutex mtx;
-bool stopFlag = false;
+class TerminateSession {
+ public:
+  std::condition_variable cv;
+  std::mutex mtx;
+  bool stopFlag = false;
 
-void signalHandler(int signum) {
+  void signalHandler(int signum) {
     std::cout << "Interrupt signal received. Terminating current session...\n";
-    stopFlag = true;
     std::unique_lock<std::mutex> lock(mtx);
+    stopFlag = true;
     cv.notify_one();
-}
-
-void Generator_SetTerminate_Call(OgaGenerator* generator) {
-  std::unique_lock<std::mutex> lock(mtx);
-  while (!generator->IsDone()) {
-    if (stopFlag) {
-      generator->SetRuntimeOption("terminate_session", "1");
-      stopFlag = false;
-      break;
-    }
-    // Wait for stopflag to become true or it will timeout after 1000 ms
-    auto timeout = std::chrono::milliseconds(1000);
-    cv.wait_for(lock, timeout, [] { return stopFlag; });
   }
+
+  void Generator_SetTerminate_Call(OgaGenerator* generator) {
+    std::unique_lock<std::mutex> lock(mtx);
+    while (!generator->IsDone()) {
+      if (stopFlag) {
+        generator->SetRuntimeOption("terminate_session", "1");
+        stopFlag = false;
+        break;
+      }
+      // Wait for stopflag to become true or it will timeout after 1000 ms
+      auto timeout = std::chrono::milliseconds(1000);
+      cv.wait_for(lock, timeout, [this] { return stopFlag; });
+    }
+  }
+
+  void Generator_SetTerminate_Call_C(OgaGenerator* generator) {
+    std::unique_lock<std::mutex> lock(mtx);
+    while (!OgaGenerator_IsDone(generator)) {
+      if (stopFlag) {
+        OgaGenerator_SetRuntimeOption(generator, "terminate_session", "1");
+        stopFlag = false;
+        break;
+      }
+      // Wait for stopflag to become true or it will timeout after 1000 ms
+      auto timeout = std::chrono::milliseconds(1000);
+      cv.wait_for(lock, timeout, [this] { return stopFlag; });
+    }
+  }
+};
+
+static TerminateSession catch_terminate;
+
+void signalHandlerWrapper(int signum) {
+  catch_terminate.signalHandler(signum);
 }
 
 void CXX_API(const char* model_path) {
@@ -103,7 +127,7 @@ void CXX_API(const char* model_path) {
   auto tokenizer = OgaTokenizer::Create(*model);
 
   while (true) {
-    signal(SIGINT, signalHandler);
+    signal(SIGINT, signalHandlerWrapper);
     auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
     std::string text;
     std::cout << "Prompt: (Use quit() to exit) Or (To terminate current output generation, press Ctrl+C)" << std::endl;
@@ -130,7 +154,7 @@ void CXX_API(const char* model_path) {
     params->SetInputSequences(*sequences);
 
     auto generator = OgaGenerator::Create(*model, *params);
-    std::thread th(Generator_SetTerminate_Call, generator.get());
+    std::thread th(std::bind(&TerminateSession::Generator_SetTerminate_Call, &catch_terminate, generator.get()));
 
     try {
       while (!generator->IsDone()) {
@@ -180,22 +204,6 @@ void CXX_API(const char* model_path) {
 
 // C API Example
 
-void Generator_SetTerminate_Call_C(OgaGenerator* generator) {
-  std::unique_lock<std::mutex> lock(mtx);
-  while (!OgaGenerator_IsDone(generator)) {
-    if (stopFlag) {
-      OgaGenerator_SetRuntimeOption(generator, "terminate_session", "1");
-      stopFlag = false;
-      break;
-    }
-    // Wait for stopflag to become true or it will timeout after 1000 ms
-    auto timeout = std::chrono::milliseconds(1000);
-    cv.wait_for(lock, timeout, [] { return stopFlag; });
-  }
-}
-
-jmp_buf is_session_terminated;
-
 void CheckResult(OgaResult* result) {
   if (result) {
     std::string string = OgaResultGetError(result);
@@ -204,15 +212,16 @@ void CheckResult(OgaResult* result) {
   }
 }
 
-void CheckResultWithGenerator(OgaResult* result, OgaGenerator* generator) {
+bool CheckIfSessionTerminated(OgaResult* result, OgaGenerator* generator) {
   if (result) {
     if (OgaGenerator_IsSessionTerminated(generator)){
-      longjmp(is_session_terminated, 1);
+      return true;
     }
     std::string string = OgaResultGetError(result);
     OgaDestroyResult(result);
     throw std::runtime_error(string);
   }
+  return false;
 }
 
 void C_API(const char* model_path) {
@@ -228,7 +237,7 @@ void C_API(const char* model_path) {
   CheckResult(OgaCreateTokenizerStream(tokenizer, &tokenizer_stream));
 
   while (true) {
-    signal(SIGINT, signalHandler);
+    signal(SIGINT, signalHandlerWrapper);
     std::string text;
     std::cout << "Prompt: (Use quit() to exit) Or (To terminate current output generation, press Ctrl+C)" << std::endl;
     std::cin.clear();
@@ -257,26 +266,25 @@ void C_API(const char* model_path) {
     OgaGenerator* generator;
     CheckResult(OgaCreateGenerator(model, params, &generator));
 
-    std::thread th(Generator_SetTerminate_Call_C, generator);
+    std::thread th(std::bind(&TerminateSession::Generator_SetTerminate_Call_C, &catch_terminate, generator));
 
-    if (setjmp(is_session_terminated) == 0) {
-      while (!OgaGenerator_IsDone(generator)) {
-        CheckResultWithGenerator(OgaGenerator_ComputeLogits(generator), generator);
-        CheckResultWithGenerator(OgaGenerator_GenerateNextToken(generator), generator);
+    while (!OgaGenerator_IsDone(generator)) {
+      if (CheckIfSessionTerminated(OgaGenerator_ComputeLogits(generator), generator))
+        break;
+      if (CheckIfSessionTerminated(OgaGenerator_GenerateNextToken(generator), generator))
+        break;
 
-        if (is_first_token) {
-          timing.RecordFirstTokenTimestamp();
-          is_first_token = false;
-        }
-
-        const int32_t num_tokens = OgaGenerator_GetSequenceCount(generator, 0);
-        int32_t new_token = OgaGenerator_GetSequenceData(generator, 0)[num_tokens - 1];
-        const char* new_token_string;
-        CheckResultWithGenerator(OgaTokenizerStreamDecode(tokenizer_stream, new_token, &new_token_string), generator);
-        std::cout << new_token_string << std::flush;
+      if (is_first_token) {
+        timing.RecordFirstTokenTimestamp();
+        is_first_token = false;
       }
-    } else {
-      std::cout << "Session in terminated state, stopping current generation" << std::endl;
+
+      const int32_t num_tokens = OgaGenerator_GetSequenceCount(generator, 0);
+      int32_t new_token = OgaGenerator_GetSequenceData(generator, 0)[num_tokens - 1];
+      const char* new_token_string;
+      if (CheckIfSessionTerminated(OgaTokenizerStreamDecode(tokenizer_stream, new_token, &new_token_string), generator))
+        break;
+      std::cout << new_token_string << std::flush;
     }
 
     timing.RecordEndTimestamp();
