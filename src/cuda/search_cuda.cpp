@@ -18,19 +18,6 @@ void OnCudaError(cudaError_t error) {
 
 Search_Cuda::Search_Cuda(const GeneratorParams& params)
     : Search{params} {
-  // The original inputs are not expanded, this expands them in place into the sequences
-  // {
-  //   auto input_sequences = params.input_ids;
-  //   auto current_length = sequences_.GetSequenceLength();
-
-  //   auto input_sequences_temp = params.p_device->Allocate<int32_t>(input_sequences.size());
-  //   auto input_sequences_gpu = input_sequences_temp.Span();
-  //   cudaMemcpyAsync(input_sequences_gpu.data(), input_sequences.data(), input_sequences.size_bytes(), cudaMemcpyHostToDevice, GetStream());
-
-  //   cuda::Launch_ExpandInputSequences(input_sequences_gpu, sequences_.GetSequences().Span(), params.batch_size, params.search.num_beams, current_length, sequences_.max_length_, GetStream());
-  //   cudaStreamSynchronize(GetStream());  // Until we remove the todo above, wait for this to complete as input_sequences_gpu is on the stack
-  // }
-
   auto batch_beam_size = params.BatchBeamSize();
   sequence_lengths_ = params.p_device->Allocate<int32_t>(batch_beam_size);
 

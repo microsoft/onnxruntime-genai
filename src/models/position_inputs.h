@@ -21,10 +21,6 @@ struct PositionInputs {
   void AddAttentionMask();
   void AddPositionIDs();
 
-  // Batch size > 1 case
-  // void UpdatePositionIDs();
-  // void UpdateAttentionMask(int total_length);
-
   void CreateNextPositionIDsTensor();
   void CreateNextAttentionMaskTensor(int total_length);
 
@@ -37,11 +33,6 @@ struct PositionInputs {
   void CreateAndInitializePositionIDs(const DeviceSpan<int32_t>& next_tokens, std::array<int64_t, 2> shape);
   template <typename T>
   void CreateAndInitializeAttentionMask(const DeviceSpan<int32_t>& next_tokens, std::array<int64_t, 2> shape);
-
-  // template <typename T>
-  // void UpdatePositionIDsImpl();
-  // template <typename T>
-  // void UpdateAttentionMaskImpl(T* data, const T* old_data, int current_length);
 
   template <typename T>
   void UpdatePositionIDsImpl(int total_length, int new_kv_length);
@@ -84,7 +75,6 @@ struct PositionInputs {
   StaticBuffer* sb_position_ids_{};
   StaticBuffer* sb_attention_mask_{};
 
-  // bool is_first_posid_update_{true};
   bool is_first_mask_update_{true};
   bool is_first_update_{true};
 

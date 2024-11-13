@@ -297,8 +297,8 @@ struct PyGenerator {
     return ToNumpy(generator_->state_->GetOutput(name.c_str()), *(generator_->model_));
   }
 
-  void AddTokens(pybind11::array_t<int32_t> tokens) {
-    generator_->AddTokens(ToSpan(tokens));
+  void AppendTokens(pybind11::array_t<int32_t> tokens) {
+    generator_->AppendTokens(ToSpan(tokens));
   }
 
   pybind11::array_t<float> GetLogits() {
@@ -445,7 +445,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def(pybind11::init<Model&, PyGeneratorParams&>())
       .def("is_done", &PyGenerator::IsDone)
       .def("get_output", &PyGenerator::GetOutput)
-      .def("append_tokens", &PyGenerator::AddTokens)
+      .def("append_tokens", &PyGenerator::AppendTokens)
       .def("get_logits", &PyGenerator::GetLogits)
       .def("set_logits", &PyGenerator::SetLogits)
       .def("generate_next_token", &PyGenerator::GenerateNextToken)

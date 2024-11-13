@@ -292,7 +292,7 @@ OgaResult* OGA_API_CALL OgaGenerator_AppendTokenSequences(OgaGenerator* oga_gene
   }
 
   auto input_ids = Generators::PadInputs(span_sequences, generator.model_->config_->model.pad_token_id);
-  generator.AddTokens(input_ids);
+  generator.AppendTokens(input_ids);
   return nullptr;
   OGA_CATCH
 }
@@ -300,7 +300,7 @@ OgaResult* OGA_API_CALL OgaGenerator_AppendTokenSequences(OgaGenerator* oga_gene
 OgaResult* OGA_API_CALL OgaGenerator_AppendTokens(OgaGenerator* oga_generator, int32_t* input_ids, size_t input_ids_count) {
   OGA_TRY
   auto& generator = *reinterpret_cast<Generators::Generator*>(oga_generator);
-  generator.AddTokens(Generators::cpu_span<int32_t>(input_ids, input_ids_count));
+  generator.AppendTokens(Generators::cpu_span<int32_t>(input_ids, input_ids_count));
   return nullptr;
   OGA_CATCH
 }

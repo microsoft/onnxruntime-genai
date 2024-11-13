@@ -28,11 +28,9 @@ struct CudaInterface : DeviceInterface {
   virtual void Int32ToInt64(const int32_t* input, int64_t* output, int count, cudaStream_t stream) = 0;
   virtual void Fp16ToFp32(const uint16_t* input, float* output, int count, cudaStream_t stream) = 0;
   virtual void Fp32ToFp16(const float* input, uint16_t* output, int count, cudaStream_t stream) = 0;
-  // TODO(aciddelgado): This can be collapsed into a single function with a template parameter
+  // TODO: This can be collapsed into a single function with a template parameter
   virtual void LaunchExpandAndInt32ToInt64(const int32_t* src, int64_t* dst, int num_beams, int batch_size, int sequence_length, cudaStream_t stream) = 0;
   virtual void LaunchExpand(const int32_t* src, int32_t* dst, int num_beams, int batch_size, int sequence_length, cudaStream_t stream) = 0;
-
-  // TODO(aciddelgado): Update pos ids and attention mask can be collapsed into single functions
   virtual void Launch_UpdatePositionIds(int32_t* position_ids, int batch_beam_size, int total_length, int new_kv_length, cudaStream_t stream) = 0;
   virtual void Launch_UpdatePositionIds(int64_t* position_ids, int batch_beam_size, int total_length, int new_kv_length, cudaStream_t stream) = 0;
   virtual void Launch_UpdateAttentionMask(int32_t* mask_data, const int32_t* old_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, cudaStream_t stream) = 0;

@@ -55,7 +55,6 @@ void InputIDs::Add() {
   }
 }
 
-// TODO(aciddelgado): I believe new_tokens should be a cpu_span instead of DeviceSpan
 void InputIDs::Update(DeviceSpan<int32_t>& new_tokens) {
   const auto get_unpadded_sequence_length = [](std::span<const int32_t> input_ids,
                                                int32_t pad_token_id) {
@@ -79,8 +78,7 @@ void InputIDs::Update(DeviceSpan<int32_t>& new_tokens) {
   }
 
   // Resize input_ids shape based on new_tokens
-  // Temporary solution for beam search
-  // TODO(aciddelgado): for beam search lets call cuda::Launch_ExpandInputSequences
+  // For beam search
   size_t sequence_length = static_cast<size_t>(new_tokens.size()) / state_.params_->BatchBeamSize();
   if (is_prompt_ && state_.params_->search.num_beams > 1)
     sequence_length = static_cast<size_t>(new_tokens.size()) / state_.params_->search.batch_size;
@@ -115,7 +113,7 @@ void InputIDs::Update(DeviceSpan<int32_t>& new_tokens) {
 #if USE_CUDA
         auto* data = value_->GetTensorMutableData<int64_t>();
         auto next_tokens = new_tokens.Span();
-        // Temporary solution for beam search
+        // For beam search
         if (is_prompt_ && state_.params_->search.num_beams > 1)
           cuda::LaunchExpandAndInt32ToInt64(next_tokens.data(), data, state_.params_->search.num_beams, state_.params_->search.batch_size, static_cast<int>(sequence_length), model_.cuda_stream_);
         else
@@ -154,7 +152,7 @@ void InputIDs::Update(DeviceSpan<int32_t>& new_tokens) {
         auto next_tokens = new_tokens.Span();
         for (int b = 0; b < shape_[0]; b++) {
           for (int i = 0; i < shape_[1]; i++) {
-            // Temporary solution for beam search
+            // For beam search
             int32_t next_token;
             if (is_prompt_ && state_.params_->search.num_beams > 1)
               next_token = next_tokens[(b / state_.params_->search.num_beams) * shape_[1] + i];
@@ -177,7 +175,7 @@ void InputIDs::Update(DeviceSpan<int32_t>& new_tokens) {
     } else
 #endif
     {
-      // Temporary solution for beam search
+      // For beam search
       if (is_prompt_ && state_.params_->search.num_beams > 1) {
         for (int b = 0; b < shape_[0]; b++) {
           int in_offset = (b / state_.params_->search.num_beams) * static_cast<int>(shape_[1]);

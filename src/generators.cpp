@@ -262,7 +262,7 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
 
   // Temporary solution for multimodal and whisper models
   if (!params.aux_input_ids.empty() && params.aux_input_ids.data() != nullptr) {
-    AddTokens(params.aux_input_ids);
+    AppendTokens(params.aux_input_ids);
   }
 }
 
@@ -274,7 +274,7 @@ DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(const cpu_span<int32_t>&
   return input_ids_device;
 }
 
-void Generator::AddTokens(const cpu_span<int32_t>& input_ids) {
+void Generator::AppendTokens(const cpu_span<int32_t>& input_ids) {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (input_ids.size() == 0)
     throw std::runtime_error("input_ids is empty");
@@ -324,7 +324,6 @@ void Generator::SetRuntimeOption(const char* key, const char* value) {
 
 bool Generator::IsDone() const {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
-  // TODO(aciddelgado): but what about max length?
   if (computed_logits_) {
     return false;
   }

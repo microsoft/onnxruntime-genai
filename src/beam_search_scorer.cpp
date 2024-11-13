@@ -65,7 +65,7 @@ BeamSearchScorer::BeamSearchScorer(const GeneratorParams& parameters)
   next_beam_tokens_ = parameters.p_device->Allocate<int32_t>(batch_beam_size);
   next_beam_indices_ = parameters.p_device->Allocate<int32_t>(batch_beam_size);
 
-  // Space to store intermediate sequence with length sequence_length, sequence_length + 1, ..., max_sequence_length.
+  // Space to store intermediate sequence
   size_t const per_beam = (max_length_ * (max_length_ + 1)) / 2;
   hypothesis_buffer_ = device.Allocate<int32_t>(batch_beam_size * per_beam, true);
 

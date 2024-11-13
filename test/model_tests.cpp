@@ -48,7 +48,7 @@ TEST(ModelTests, GreedySearchGptFp32) {
   params->search.batch_size = static_cast<int>(input_ids_shape[0]);
 
   auto generator = Generators::CreateGenerator(*model, *params);
-  generator->AddTokens(Generators::cpu_span<int>(input_ids.data(), input_ids.size()));
+  generator->AppendTokens(Generators::cpu_span<int>(input_ids.data(), input_ids.size()));
 
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
@@ -88,7 +88,7 @@ TEST(ModelTests, BeamSearchGptFp32) {
   params->search.num_beams = 4;
 
   auto generator = Generators::CreateGenerator(*model, *params);
-  generator->AddTokens(Generators::cpu_span<int>(input_ids.data(), input_ids.size()));
+  generator->AppendTokens(Generators::cpu_span<int>(input_ids.data(), input_ids.size()));
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
   }
@@ -119,7 +119,7 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
   params->search.max_length = 10;
 
   auto generator = Generators::CreateGenerator(*model, *params);
-  generator->AddTokens(Generators::cpu_span<int>(input_ids.data(), input_ids.size()));
+  generator->AppendTokens(Generators::cpu_span<int>(input_ids.data(), input_ids.size()));
 
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
@@ -132,6 +132,37 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
     auto* expected_output_start = &expected_output[i * params->search.max_length];
     EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params->search.max_length * sizeof(int32_t)));
   }
+
+  // Test batch size 1 continuous case
+  input_ids_shape = {1, 4};
+  input_ids = {0, 0, 195, 731};
+  std::vector<int32_t> expected_output_continuous{0, 0, 195, 731, 731, 114, 114, 114, 114, 114};
+
+  params->search.batch_size = static_cast<int>(input_ids_shape[0]);
+  generator = Generators::CreateGenerator(*model, *params);
+  generator->AppendTokens(Generators::cpu_span<int>(input_ids.data(), input_ids.size()));
+
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+  
+  // Verify outputs match expected outputs
+  auto sequence_gpu = generator->GetSequence(0);
+  auto sequence = sequence_gpu.CopyDeviceToCpu();
+  auto* expected_output_start = &expected_output_continuous[0];
+  EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params->search.max_length * sizeof(int32_t)));
+
+  generator->RewindToLength(3);
+  std::vector<int32_t> next_ids{731, 731};
+  generator->AppendTokens(Generators::cpu_span<int>(next_ids.data(), next_ids.size()));
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  // Verify outputs match expected outputs
+  sequence_gpu = generator->GetSequence(0);
+  sequence = sequence_gpu.CopyDeviceToCpu();
+  EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params->search.max_length * sizeof(int32_t)));
 }
 
 TEST(ModelTests, GreedySearchGptCuda) {
@@ -164,7 +195,7 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
   params->search.length_penalty = 1.0f;
 
   auto generator = Generators::CreateGenerator(*model, *params);
-  generator->AddTokens(Generators::cpu_span<int>(input_ids.data(), input_ids.size()));
+  generator->AppendTokens(Generators::cpu_span<int>(input_ids.data(), input_ids.size()));
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
   }
@@ -204,7 +235,7 @@ Print all primes between 1 and n
 
   // Generator version
   auto generator = Generators::CreateGenerator(*model, *params);
-  generator->AddTokens(Generators::cpu_span<int>(tokens.data(), tokens.size()));
+  generator->AppendTokens(Generators::cpu_span<int>(tokens.data(), tokens.size()));
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
   }
