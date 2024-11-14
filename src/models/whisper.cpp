@@ -5,6 +5,10 @@
 #include "kernels.h"
 #include <vector>
 
+#if USE_CUDA
+#include <cuda_fp16.h>
+#endif
+
 namespace Generators {
 
 WhisperModel::WhisperModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
@@ -112,6 +116,7 @@ WhisperDecoderState::WhisperDecoderState(const WhisperModel& model, const Genera
     output_cross_qk_type_ = model_.session_info_->GetOutputDataType(output_cross_qk_name);
     output_cross_qk_shape_ = std::array<int64_t, 4>{params_->BatchBeamSize(), model_.config_->model.decoder.num_attention_heads, params_->sequence_length, num_frames / 2};
     output_cross_qk_index_ = outputs_.size();
+    std::cout << "Output cross QK index = " << output_cross_qk_index_ << std::endl;
     
     for (int i = 0; i < model_.config_->model.decoder.num_hidden_layers; i++) {
       output_cross_qk_.emplace_back(OrtValue::CreateTensor(*model_.allocator_device_, output_cross_qk_shape_, output_cross_qk_type_));
@@ -139,9 +144,10 @@ RoamingArray<float> WhisperDecoderState::Run(int current_length, RoamingArray<in
   int batch_size = static_cast<int>(input_ids_.GetShape()[0]);
   State::Run(*model_.session_decoder_, *model_.run_options_, batch_size);
   auto output = logits_.Get();
-  auto& stream = Log("After WhisperDecoderState ran in WhisperDecoderState::Run");
+  auto& stream = Log("\nAfter WhisperDecoderState ran in WhisperDecoderState::Run");
   stream << std::endl;
   DumpCudaSpan(stream, std::span<const float>(output.GetGPU()));
+  stream << std::endl;
   return output;
   // return MakeDummy();
 }
@@ -225,12 +231,12 @@ WhisperState::WhisperState(const WhisperModel& model, const GeneratorParams& par
     auto alignment_heads_data_size = alignment_heads_elements * alignment_heads_element_size;
     cudaMemcpyAsync(alignment_heads_->GetTensorMutableRawData(), inputs.alignment_heads->ort_tensor_->GetTensorRawData(), alignment_heads_data_size, cudaMemcpyHostToDevice, model_.cuda_stream_);
 
-    auto cross_qk_search_buffer_shape = std::array<int64_t, 4>{params_->BatchBeamSize(), alignment_heads_shape[0], params_->search.max_length, 1500};
+    auto cross_qk_search_buffer_shape = std::array<int64_t, 4>{params_->BatchBeamSize(), alignment_heads_shape[0], params_->search.max_length, encoder_state_->GetNumFrames() / 2};
     cross_qk_search_buffer_ = OrtValue::CreateTensor(*model_.allocator_device_, cross_qk_search_buffer_shape, decoder_state_->output_cross_qk_type_);
 
     // Allocate GPU buffer for storing output_cross_qk_{i} pointers
-    cross_qk_ptrs_buffer_ = CudaMallocArray<float*>(model_.config_->model.decoder.num_hidden_layers);
-    output_cross_qk_ptrs_gpu_ = gpu_span<float*>(cross_qk_ptrs_buffer_.get(), model_.config_->model.decoder.num_hidden_layers);
+    cross_qk_ptrs_buffer_ = CudaMallocArray<void*>(model_.config_->model.decoder.num_hidden_layers);
+    output_cross_qk_ptrs_gpu_ = gpu_span<void*>(cross_qk_ptrs_buffer_.get(), model_.config_->model.decoder.num_hidden_layers);
 #else
     alignment_heads_ = std::move(inputs.alignment_heads->ort_tensor_);
 #endif
@@ -329,19 +335,25 @@ void WhisperState::TransposeKCaches(std::vector<std::unique_ptr<OrtValue>>& kv_c
 #endif
 }
 
+template <typename T>
 void WhisperState::UpdateCrossQKSearchBuffer(int current_length) {
   auto output_cross_qk_size = decoder_state_->output_cross_qk_.size();
   if (output_cross_qk_size && alignment_heads_) {
 #if USE_CUDA
-    // Collect a GPU array of float* pointers from the vector of OrtValues to pass to the kernel
-    std::vector<float*> output_cross_qk_ptrs{output_cross_qk_size, nullptr};
+    // Collect a GPU array of T* pointers from the vector of OrtValues to pass to the kernel
+    std::vector<void*> output_cross_qk_ptrs{output_cross_qk_size, nullptr};
     for (int i = 0; i < output_cross_qk_size; i++) {
-      output_cross_qk_ptrs[i] = decoder_state_->output_cross_qk_[i]->GetTensorMutableData<float>();
+      output_cross_qk_ptrs[i] = decoder_state_->output_cross_qk_[i]->GetTensorMutableData<T>();
+      // std::cout << "Can reinterpret_cast<T*> work?" << std::endl;
+      // output_cross_qk_ptrs_gpu_[i] = reinterpret_cast<T*>(output_cross_qk_ptrs_gpu_[i]);
+      // std::cout << "Yes reinterpret_cast<T*> can work" << std::endl;
     }
-    cudaMemcpyAsync(output_cross_qk_ptrs_gpu_.data(), output_cross_qk_ptrs.data(), output_cross_qk_size * sizeof(output_cross_qk_ptrs[0]), cudaMemcpyHostToDevice, model_.cuda_stream_);
+    std::cout << "Can cudaMemcpyAsync work?" << std::endl;
+    cudaMemcpyAsync(output_cross_qk_ptrs_gpu_.data(), output_cross_qk_ptrs.data(), output_cross_qk_size * sizeof(void*), cudaMemcpyHostToDevice, model_.cuda_stream_);
+    std::cout << "Yes cudaMemcpyAsync can work" << std::endl;
 
     cuda::LaunchCopyCrossQKSingleDecodeStep(model_.cuda_stream_,
-                                            cross_qk_search_buffer_->GetTensorMutableData<float>(),
+                                            cross_qk_search_buffer_->GetTensorMutableData<T>(),
                                             output_cross_qk_ptrs_gpu_.data(),
                                             current_length - params_->sequence_length,
                                             params_->BatchBeamSize(),
@@ -354,6 +366,45 @@ void WhisperState::UpdateCrossQKSearchBuffer(int current_length) {
 #endif
   }
 }
+#if USE_CUDA
+template void WhisperState::UpdateCrossQKSearchBuffer<half>(int current_length);
+#endif
+template void WhisperState::UpdateCrossQKSearchBuffer<float>(int current_length);
+
+template <typename T>
+void WhisperState::FinalizeCrossQK() {
+  if (decoder_state_->output_cross_qk_.size() && alignment_heads_) {
+#if USE_CUDA
+    // Instantiate final output for cross QKs
+    auto num_alignment_heads = alignment_heads_->GetTensorTypeAndShapeInfo()->GetShape()[0];
+    auto decoded_length = *(decoder_state_->past_sequence_length_->GetTensorMutableData<int32_t>()) + 1;
+    auto cross_qk_shape = std::array<int64_t, 5>{params_->batch_size, params_->search.num_return_sequences, num_alignment_heads, decoded_length, encoder_state_->GetNumFrames() / 2};
+    cross_qk_final_ = OrtValue::CreateTensor(*model_.allocator_device_, cross_qk_shape, decoder_state_->output_cross_qk_type_);
+
+    std::cout << "Finalizing cross QK" << std::endl;
+    std::cout << "Initial sequence length = " << params_->sequence_length << std::endl;
+    std::cout << "Decoded length = " << decoded_length << std::endl;
+    std::cout << "Iteration counter = " << (decoded_length - params_->sequence_length) << std::endl;
+    cuda::LaunchFinalizeCrossQK(model_.cuda_stream_,
+                                decoded_length - params_->sequence_length,
+                                decoded_length,
+                                static_cast<int32_t>(decoder_state_->output_cross_qk_shape_[0]),
+                                params_->search.num_beams,
+                                params_->search.max_length,
+                                static_cast<int32_t>(alignment_heads_->GetTensorTypeAndShapeInfo()->GetShape()[0]),
+                                static_cast<int32_t>(decoder_state_->output_cross_qk_shape_[3]),
+                                cross_qk_search_buffer_->GetTensorData<T>(),
+                                cross_qk_final_->GetTensorMutableData<T>(),
+                                params_->search.num_return_sequences,
+                                decoder_state_->cache_indirection_->GetTensorData<int32_t>());
+    std::cout << "Finalized cross QK" << std::endl;
+#endif
+  }
+}
+#if USE_CUDA
+template void WhisperState::FinalizeCrossQK<half>();
+#endif
+template void WhisperState::FinalizeCrossQK<float>();
 
 // RoamingArray<float> WhisperState::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
 //   if (encoder_state_->first_run_) {
@@ -394,7 +445,15 @@ RoamingArray<float> WhisperState::Run(int current_length, RoamingArray<int32_t> 
     // Otherwise the GetOutput(output_cross_qk_{i}) method returns transposed K caches.
     TransposeKCaches(cross_cache_->GetValues());
     TransposeKCaches(decoder_state_->kv_cache_.GetPresents());
-    UpdateCrossQKSearchBuffer(current_length);
+
+    if (decoder_state_->output_cross_qk_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+#if USE_CUDA
+      UpdateCrossQKSearchBuffer<half>(current_length);
+#endif
+    } else {
+      UpdateCrossQKSearchBuffer<float>(current_length);
+    }
+    
     return logits;
     // return decoder_state_->logits_.Get();
   } else {
@@ -404,12 +463,24 @@ RoamingArray<float> WhisperState::Run(int current_length, RoamingArray<int32_t> 
     decoder_state_->UpdateInputsOutputs(next_tokens, next_indices, current_length, first_run_);
     auto logits = decoder_state_->Run(current_length, next_tokens, next_indices);
     // decoded_length_ += 1;
-    UpdateCrossQKSearchBuffer(current_length);
+    auto& stream1 = Log("\nAfter decoder-with-past ran inside WhisperState::Run and before cross QK search updating");
+    stream1 << std::endl;
+    DumpCudaSpan(stream1, std::span<const float>(logits.GetGPU()));
+    stream1 << std::endl;
+
+    if (decoder_state_->output_cross_qk_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+#if USE_CUDA
+      UpdateCrossQKSearchBuffer<half>(current_length);
+#endif
+    } else {
+      UpdateCrossQKSearchBuffer<float>(current_length);
+    }
     first_run_ = false;
 
-    auto& stream = Log("After decoder-with-past ran inside WhisperState::Run");
-    stream << std::endl;
-    DumpCudaSpan(stream, std::span<const float>(logits.GetGPU()));
+    auto& stream2 = Log("\nAfter decoder-with-past ran inside WhisperState::Run and after cross QK search updating");
+    stream2 << std::endl;
+    DumpCudaSpan(stream2, std::span<const float>(logits.GetGPU()));
+    stream2 << std::endl;
     return logits;
     // return decoder_state_->logits_.Get();
   }
@@ -689,26 +760,13 @@ RoamingArray<float> WhisperState::Run(int current_length, RoamingArray<int32_t> 
 
 void WhisperState::Finalize() {
   if (decoder_state_->output_cross_qk_.size() && alignment_heads_) {
+    if (decoder_state_->output_cross_qk_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
 #if USE_CUDA
-    // Instantiate final output for cross QKs
-    auto num_alignment_heads = alignment_heads_->GetTensorTypeAndShapeInfo()->GetShape()[0];
-    auto decoded_length = *(decoder_state_->past_sequence_length_->GetTensorMutableData<int32_t>()) + 1;
-    auto cross_qk_shape = std::array<int64_t, 5>{params_->batch_size, params_->search.num_return_sequences, num_alignment_heads, decoded_length, encoder_state_->GetNumFrames() / 2};
-    cross_qk_final_ = OrtValue::CreateTensor(*model_.allocator_device_, cross_qk_shape, decoder_state_->output_cross_qk_type_);
-
-    cuda::LaunchFinalizeCrossQK(model_.cuda_stream_,
-                                decoded_length - params_->sequence_length,
-                                decoded_length,
-                                static_cast<int32_t>(decoder_state_->output_cross_qk_shape_[0]),
-                                params_->search.num_beams,
-                                params_->search.max_length,
-                                static_cast<int32_t>(alignment_heads_->GetTensorTypeAndShapeInfo()->GetShape()[0]),
-                                static_cast<int32_t>(decoder_state_->output_cross_qk_shape_[3]),
-                                cross_qk_search_buffer_->GetTensorData<float>(),
-                                cross_qk_final_->GetTensorMutableData<float>(),
-                                params_->search.num_return_sequences,
-                                decoder_state_->cache_indirection_->GetTensorData<int32_t>());
+      FinalizeCrossQK<half>();
 #endif
+    } else {
+      FinalizeCrossQK<float>();
+    }
   }
 }
 
@@ -744,6 +802,11 @@ OrtValue* WhisperState::GetOutput(const char* name) {
   if (std::strcmp("cross_qk", name) == 0) {
     return cross_qk_final_.get();
   }
+
+  if (std::strcmp("cross_qk_search", name) == 0) {
+    return cross_qk_search_buffer_.get();
+  }
+
   // if (std::strcmp("logits", name) == 0) {
   //   return decoder_state_->logits_.GetRaw();
   // }

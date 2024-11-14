@@ -80,7 +80,8 @@ struct WhisperState : State {
 
 private:
   void TransposeKCaches(std::vector<std::unique_ptr<OrtValue>>& kv_caches);
-  void UpdateCrossQKSearchBuffer(int current_length);
+  template <typename T> void UpdateCrossQKSearchBuffer(int current_length);
+  template <typename T> void FinalizeCrossQK();
   void UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> next_indices, int current_length);
   void Finalize() override;
 
@@ -95,8 +96,8 @@ private:
 
 #if USE_CUDA
   // Buffers for calculating word-level timestamps
-  cuda_unique_ptr<float*> cross_qk_ptrs_buffer_;        // To create and hold a reference to the GPU memory so it isn't freed
-  gpu_span<float*> output_cross_qk_ptrs_gpu_;           // To use for copying the CPU vector of float* pointers into
+  cuda_unique_ptr<void*> cross_qk_ptrs_buffer_;        // To create and hold a reference to the GPU memory so it isn't freed
+  gpu_span<void*> output_cross_qk_ptrs_gpu_;           // To use for copying the CPU vector of float* pointers into
 #endif
 
   std::unique_ptr<OrtValue> alignment_heads_;           // { num_alignment_heads, 2 }

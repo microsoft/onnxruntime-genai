@@ -36,7 +36,7 @@ void UpdateCacheIndirectionKernelLauncher(int32_t* tgt_indir_cache,
 template <typename T>
 void LaunchCopyCrossQKSingleDecodeStep(cudaStream_t stream,
                                        T* cross_qk_buffer_data,
-                                       T** qk_layer_pointers,
+                                       void** qk_layer_pointers,
                                        int token_index,
                                        int batch_beam_size,
                                        int num_layers,
