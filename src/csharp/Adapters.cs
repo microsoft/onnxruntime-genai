@@ -17,7 +17,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         /// Throws on error.
         /// </summary>
         /// <param name="model">Reference to a loaded model</param>
-        /// <returns>new Adapters object</returns>
         public Adapters(Model model) : base(IntPtr.Zero, true)
         {
             Result.VerifySuccess(NativeMethods.OgaCreateAdapters(model.Handle, out handle));
@@ -52,7 +51,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         /// </summary>
         public override bool IsInvalid => handle == IntPtr.Zero;
 
-        protected override bool ReleaseHandle()
+        private override bool ReleaseHandle()
         {
             NativeMethods.OgaDestroyAdapters(handle);
             handle = IntPtr.Zero;

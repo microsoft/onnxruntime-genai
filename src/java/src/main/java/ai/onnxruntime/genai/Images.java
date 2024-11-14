@@ -3,6 +3,9 @@
  */
 package ai.onnxruntime.genai;
 
+/**
+ * This class can load images from the given path and prepare them for processing.
+ */
 public class Images implements AutoCloseable{
     private long nativeHandle;
 

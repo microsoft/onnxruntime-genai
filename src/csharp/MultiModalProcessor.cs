@@ -5,6 +5,9 @@ using System;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
+    /// <summary>
+    /// This class is responsible for converting text/images into a NamedTensors list that can be fed into a generator instance.
+    /// </summary>
     public class MultiModalProcessor : IDisposable
     {
         private IntPtr _processorHandle;

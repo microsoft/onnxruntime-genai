@@ -6,7 +6,10 @@ using System.Diagnostics;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
-    // The values in this enum must match ONNX Runtime's type values 
+    /// <summary>
+    /// ORT native element types.
+    /// </summary>
+    /// The values in this enum must match ONNX Runtime's type values
     public enum ElementType : long
     {
         undefined,
@@ -25,6 +28,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         uint64,
     }
 
+    ///<summary>
+    /// Wraps ORT native tensor.
+    ///</summary>
     public class Tensor : IDisposable
     {
         private IntPtr _tensorHandle;
@@ -120,6 +126,10 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         }
     }
 
+    ///<summary>
+    /// An intermediate storage class that bridges the output of preprocessing and
+    /// the input of the ONNX model.
+    ///</summary>
     public class NamedTensors : IDisposable
     {
         private IntPtr _namedTensorsHandle;

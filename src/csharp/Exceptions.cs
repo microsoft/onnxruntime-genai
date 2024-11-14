@@ -5,6 +5,9 @@ using System;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
+    ///<summary>
+    /// OnnxRuntime GenAI exception.
+    ///</summary>
     public class OnnxRuntimeGenAIException: Exception
     {
         internal OnnxRuntimeGenAIException(string message)
@@ -12,6 +15,4 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         {
         }
     }
-
-
 }

@@ -6,6 +6,9 @@ using System.Runtime.InteropServices;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
+    ///<summary>
+    /// This class can load images from the given path and prepare them for processing.
+    ///</summary>
     public class Images : IDisposable
     {
         private IntPtr _imagesHandle;

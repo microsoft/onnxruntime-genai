@@ -5,6 +5,9 @@ using System;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
+    ///<summary>
+    /// The Generator class generates output using a model and generator parameters.
+    ///</summary>
     public class Generator : IDisposable
     {
         private IntPtr _generatorHandle;

@@ -8,6 +8,9 @@ using System.Runtime.InteropServices;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
+    ///<summary>
+    /// Represents the parameters used for generating sequences with a model.
+    ///</summary>
     public class GeneratorParams : IDisposable
     {
         private IntPtr _generatorParamsHandle;

@@ -5,6 +5,9 @@ using System;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
+    /// <summary>
+    /// Use this to decode token strings incrementally, one token at a time.
+    /// </summary>
     public class TokenizerStream : IDisposable
     {
         private IntPtr _tokenizerStreamHandle;

@@ -6,6 +6,9 @@ using System.Runtime.InteropServices;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
+    /// <summary>
+    /// An ORT GenAI model.
+    /// </summary>
     public class Model : IDisposable
     {
         private IntPtr _modelHandle;

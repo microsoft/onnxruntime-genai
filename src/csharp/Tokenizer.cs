@@ -5,6 +5,9 @@ using System;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
+    /// <summary>
+    /// Responsible for converting between text and token ids.
+    /// <summary>
     public class Tokenizer : IDisposable
     {
         private IntPtr _tokenizerHandle;

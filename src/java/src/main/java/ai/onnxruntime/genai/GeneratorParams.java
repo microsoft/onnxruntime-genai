@@ -8,7 +8,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
 /**
- * The `GeneratorParams` class represents the parameters used for generating sequences with a model.
+ * Represents the parameters used for generating sequences with a model.
  * Set the prompt using setInput, and any other search options using setSearchOption.
  */
 public final class GeneratorParams implements AutoCloseable {
@@ -23,6 +23,12 @@ public final class GeneratorParams implements AutoCloseable {
     nativeHandle = createGeneratorParams(model.nativeHandle());
   }
 
+  /**
+   * Set seach option with double value.
+   * @param optionName The option name.
+   * @param value The option value.
+   * @throws GenAIException
+   */
   public void setSearchOption(String optionName, double value) throws GenAIException {
     if (nativeHandle == 0) {
       throw new IllegalStateException("Instance has been freed and is invalid");
@@ -31,6 +37,12 @@ public final class GeneratorParams implements AutoCloseable {
     setSearchOptionNumber(nativeHandle, optionName, value);
   }
 
+  /**
+   * Set search option with boolean value.
+   * @param optionName The option name.
+   * @param value The option value.
+   * @throws GenAIException
+   */
   public void setSearchOption(String optionName, boolean value) throws GenAIException {
     if (nativeHandle == 0) {
       throw new IllegalStateException("Instance has been freed and is invalid");
@@ -159,7 +171,7 @@ public final class GeneratorParams implements AutoCloseable {
 
   private native void setModelInput(long nativeHandle, String inputName, long tensorHandle)
       throws GenAIException;
-  
+
   private native void setInputs(long nativeHandle, long namedTensorsHandle)
       throws GenAIException;
 

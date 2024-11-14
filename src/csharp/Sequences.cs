@@ -5,6 +5,9 @@ using System;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
+    /// <summary>
+    /// Represents a collection of encoded prompts/responses.
+    /// </summary>
     public class Sequences : IDisposable
     {
         private IntPtr _sequencesHandle;
