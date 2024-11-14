@@ -58,7 +58,7 @@ struct SamplingBenchmark {
       auto stop = std::chrono::high_resolution_clock::now();
       auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
       total_time += duration.count();
-      if (std::chrono::duration_cast<std::chrono::minutes>(std::chrono::high_resolution_clock::now() - test_start) > std::chrono::minutes(1)) {
+      if (std::chrono::high_resolution_clock::now() - test_start > std::chrono::minutes(1)) {
         std::cout << Generators::SGR::Bg_Red << " ABORTING " << Generators::SGR::Reset << " loop due to slow performance(took more than 1 minute) on iteration " << i << std::endl;
         break;
       }
