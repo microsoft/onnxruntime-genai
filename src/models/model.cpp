@@ -497,7 +497,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 
   // If no device gets set, default to CPU
   if (!p_device_) {
-    assert(device_type_ == DeviceType::CPU);
+    assert(device_type_ != DeviceType::CUDA);
     p_device_ = GetDeviceInterface(device_type_);
   }
 }
