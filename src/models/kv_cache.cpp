@@ -177,7 +177,12 @@ KV_Cache::KV_Cache(State& state)
     } else
 #endif
     {
-      memset(presents_.back()->GetTensorMutableRawData(), 0, kv_cache_size_bytes);
+      if (model_.device_type_ != DeviceType::WEBGPU) {
+        // FIXME: GetTensorMutableRawData might (depending on device) return device memory.
+        // In that case one can not memset on it. 
+        // For now remove this for WebGPU but it should be fixed for other devices as well.
+        memset(presents_.back()->GetTensorMutableRawData(), 0, kv_cache_size_bytes);
+      }
     }
   }
 }
