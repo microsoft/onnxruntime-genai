@@ -63,7 +63,7 @@ struct SamplingBenchmark {
   }
 
   std::function<void(Generators::Generator&)> benchmark_function_;
-  int batch_size_ {1};
+  int batch_size_{1};
   Generators::DeviceType device_type_{Generators::DeviceType::CPU};
 };
 
@@ -122,10 +122,11 @@ std::function<void(Generators::Generator&)> GetBenchmarkFunction(BenchmarkFuncti
 
 struct BenchmarkParams {
   Generators::DeviceType device_type;
+  int batch_size;
   BenchmarkFunction benchmark_function;
 
   std::string Name() const {
-    return std::string() + DeviceTypeToString(device_type) + "_" + BenchmarkFunctionToString(benchmark_function);
+    return std::string() + DeviceTypeToString(device_type) + "_BatchSize_" + std::to_string(batch_size) + "_" + BenchmarkFunctionToString(benchmark_function);
   }
 };
 
@@ -136,20 +137,23 @@ TEST_P(SamplingBenchmarkTest, RunBenchmark) {
   auto params = GetParam();
   benchmark.device_type_ = params.device_type;
   benchmark.benchmark_function_ = GetBenchmarkFunction(params.benchmark_function);
+  benchmark.batch_size_ = params.batch_size;
   benchmark.Run();
 }
 
-auto benchmark_values=::testing::Values(
-    BenchmarkParams{Generators::DeviceType::CPU, BenchmarkFunction::TopP},
-    BenchmarkParams{Generators::DeviceType::CPU, BenchmarkFunction::TopK},
-    BenchmarkParams{Generators::DeviceType::CPU, BenchmarkFunction::TopKTopP},
+auto benchmark_values = ::testing::Values(
+    BenchmarkParams{Generators::DeviceType::CPU, 1, BenchmarkFunction::TopP},
+    BenchmarkParams{Generators::DeviceType::CPU, 1, BenchmarkFunction::TopK},
+    BenchmarkParams{Generators::DeviceType::CPU, 1, BenchmarkFunction::TopKTopP},
 #if USE_CUDA
-    BenchmarkParams{Generators::DeviceType::CUDA, BenchmarkFunction::TopP},
-    BenchmarkParams{Generators::DeviceType::CUDA, BenchmarkFunction::TopK},
-    BenchmarkParams{Generators::DeviceType::CUDA, BenchmarkFunction::TopKTopP},
-    BenchmarkParams{Generators::DeviceType::CUDA, BenchmarkFunction::SelectTop}
+    BenchmarkParams{Generators::DeviceType::CUDA, 1, BenchmarkFunction::TopP},
+    BenchmarkParams{Generators::DeviceType::CUDA, 1, BenchmarkFunction::TopK},
+    BenchmarkParams{Generators::DeviceType::CUDA, 1, BenchmarkFunction::TopKTopP},
+    BenchmarkParams{Generators::DeviceType::CUDA, 1, BenchmarkFunction::SelectTop},
+    BenchmarkParams{Generators::DeviceType::CUDA, 6, BenchmarkFunction::SelectTop},
+    BenchmarkParams{Generators::DeviceType::CUDA, 12, BenchmarkFunction::SelectTop}
 #endif
 );
 
 INSTANTIATE_TEST_SUITE_P(Benchmarks, SamplingBenchmarkTest, benchmark_values,
-  [](const ::testing::TestParamInfo<BenchmarkParams>& info) { return info.param.Name(); });
+                         [](const ::testing::TestParamInfo<BenchmarkParams>& info) { return info.param.Name(); });
