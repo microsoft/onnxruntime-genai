@@ -1,6 +1,10 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
 #include "../generators.h"
 #include "model.h"
 #include "kv_cache.h"
+#include "threadpool.h"
 
 namespace Generators {
 
@@ -380,7 +384,8 @@ void SlidingWindowKeyValueCache::Add() {
 }
 
 void SlidingWindowKeyValueCache::Slide() {
-  for (size_t layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
+  ThreadPool thread_pool{static_cast<size_t>(layer_count_)};
+  thread_pool.Compute([&](size_t layer_idx) {
     uint8_t* key_cache_in_data = key_caches_in_[layer_idx]->GetTensorMutableData<uint8_t>();
     uint8_t* key_cache_out_data = key_caches_out_[layer_idx]->GetTensorMutableData<uint8_t>();
 
@@ -423,7 +428,7 @@ void SlidingWindowKeyValueCache::Slide() {
         std::copy(value_cache_src.begin(), value_cache_src.end(), value_cache_dst.begin());
       }
     }
-  }
+  });
 }
 
 void SlidingWindowKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int current_length) {
@@ -458,7 +463,8 @@ void SlidingWindowKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int cu
                                                               updated_window_size,
                                                               model_.config_->model.decoder.head_size};
 
-  for (size_t layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
+  ThreadPool thread_pool{static_cast<size_t>(layer_count_)};
+  thread_pool.Compute([&](size_t layer_idx) {
     std::unique_ptr<OrtValue> key_cache = OrtValue::CreateTensor(*model_.allocator_device_, updated_key_cache_shape_in, type_);
 
     uint8_t* key_cache_data = key_cache->GetTensorMutableData<uint8_t>();
@@ -514,7 +520,7 @@ void SlidingWindowKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int cu
 
     value_caches_in_[layer_idx] = std::move(value_cache);
     value_caches_out_[layer_idx] = OrtValue::CreateTensor(*model_.allocator_device_, updated_value_cache_shape_out, type_);
-  }
+  });
 
   window_size_ = 1;
   key_cache_shape_in_ = updated_key_cache_shape_in;
